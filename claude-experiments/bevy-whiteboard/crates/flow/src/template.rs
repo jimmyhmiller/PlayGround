@@ -40,6 +40,10 @@ pub struct Template {
     pub rules: Vec<Rule>,
     /// Edges created alongside each instance.
     pub edges: Vec<EdgeSpec>,
+    /// Packets delivered into the new instance's inbox at
+    /// instantiation time. Seeds the class's self-driven loops
+    /// (e.g. a `tick(nil)` that a `rule tick` rearms each step).
+    pub initial_packets: Vec<Value>,
 }
 
 impl Template {
@@ -51,7 +55,12 @@ impl Template {
             slots: BTreeMap::new(),
             rules: Vec::new(),
             edges: Vec::new(),
+            initial_packets: Vec::new(),
         }
+    }
+    pub fn initial_packet(mut self, v: Value) -> Self {
+        self.initial_packets.push(v);
+        self
     }
     pub fn with_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.node_name_prefix = prefix.into();

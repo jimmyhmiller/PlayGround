@@ -85,16 +85,74 @@ impl Parser {
         self.expect(Tok::LBrace)?;
         let mut slots = Vec::new();
         let mut rules = Vec::new();
+        let mut on_spawn = Vec::new();
         loop {
             match self.peek() {
                 Tok::Slots => { slots = self.parse_slots()?; }
                 Tok::Rule => { rules.push(self.parse_rule()?); }
+                Tok::OnSpawn => { on_spawn = self.parse_on_spawn()?; }
                 Tok::RBrace => break,
-                other => return Err(format!("{}: expected slots/rule, got {:?}", self.here(), other)),
+                other => return Err(format!("{}: expected slots/rule/on_spawn, got {:?}", self.here(), other)),
             }
         }
         self.expect(Tok::RBrace)?;
-        Ok(Item::Node(NodeDecl { name, slots, rules }))
+        Ok(Item::Node(NodeDecl { name, slots, rules, on_spawn }))
+    }
+
+    /// Parse `on_spawn { … }` — per-instance bootstrap wiring.
+    ///
+    /// Two statement shapes:
+    ///   `self -> self : LATENCY_EXPR`    — create a self-edge
+    ///   `inject TAG` or `inject TAG(PAYLOAD)` — seed inbox packet
+    ///
+    /// Trailing `;` / `,` is optional between statements.
+    fn parse_on_spawn(&mut self) -> Result<Vec<OnSpawnStmt>, String> {
+        self.expect(Tok::OnSpawn)?;
+        self.expect(Tok::LBrace)?;
+        let mut out = Vec::new();
+        while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+            match self.peek().clone() {
+                Tok::Self_ => {
+                    self.bump();
+                    self.expect(Tok::Arrow)?;
+                    // Only self -> self supported. Cross-instance wiring
+                    // belongs at the top-level `edges` block or on the
+                    // canvas file format.
+                    if !matches!(self.peek(), Tok::Self_) {
+                        return Err(format!(
+                            "{}: on_spawn edges must be `self -> self`",
+                            self.here()
+                        ));
+                    }
+                    self.bump();
+                    self.expect(Tok::Colon)?;
+                    let latency = self.parse_expr()?;
+                    let _ = self.eat(&Tok::Semi) || self.eat(&Tok::Comma);
+                    out.push(OnSpawnStmt::SelfEdge { latency });
+                }
+                Tok::Inject => {
+                    self.bump();
+                    let tag = self.ident()?;
+                    let payload = if self.eat(&Tok::LParen) {
+                        let e = if matches!(self.peek(), Tok::RParen) {
+                            None
+                        } else {
+                            Some(self.parse_expr()?)
+                        };
+                        self.expect(Tok::RParen)?;
+                        e
+                    } else { None };
+                    let _ = self.eat(&Tok::Semi) || self.eat(&Tok::Comma);
+                    out.push(OnSpawnStmt::Inject { tag, payload });
+                }
+                other => return Err(format!(
+                    "{}: expected `self -> self : …` or `inject …`, got {:?}",
+                    self.here(), other
+                )),
+            }
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(out)
     }
 
     fn parse_slots(&mut self) -> Result<Vec<SlotDecl>, String> {

@@ -5,12 +5,13 @@ namespace headless_test
 
 use ray as r
 use vec as v
+use rendering as render
 use beagle_zelda as game
 
 fn main() {
     r/init_window(1280, 720, "beagle-zelda (headless test)")
     r/set_target_fps(60)
-    let shader_ctx = game/load_cone_light_shader()
+    let shader_ctx = render/load_cone_light_shader()
     let initial = game/initial_world()
     let ui_bufs = game/alloc_ui_buffers(initial.tuning)
     let final = game/game_loop(initial, shader_ctx, ui_bufs, 60)

@@ -26,6 +26,7 @@ use crate::{
     },
     samples::Samples,
     sim::{NodeId, Sim},
+    template::{EdgeEnd, EdgeSpec, Template},
     value::{Pattern as Ipat, Value},
 };
 
@@ -54,8 +55,13 @@ pub fn lower(file: &ast::File, seed: u64) -> Result<Sim, String> {
                 }
             }
             ast::Item::Node(n) => {
-                let (slots, rules) = build_leaf(n)?;
-                let id = sim.add_node(n.name.clone(), slots, rules);
+                // Every `node` block is both a class (reusable
+                // template) and — for back-compat with DSL files that
+                // describe a running sim — also instantiated once
+                // under its own name at load time.
+                let tpl = build_class_template(n)?;
+                sim.register_template(tpl);
+                let id = sim.instantiate(&n.name, &n.name)?;
                 name_to_id.insert(n.name.clone(), id);
             }
             ast::Item::Compound(c) => pending_compounds.push(c),
@@ -105,19 +111,50 @@ pub fn lower(file: &ast::File, seed: u64) -> Result<Sim, String> {
     Ok(sim)
 }
 
-fn build_leaf(n: &ast::NodeDecl) -> Result<(BTreeMap<String, Value>, Vec<Irule>), String> {
-    // Slots
+/// Build the [`Template`] for a DSL node declaration — slots + rules +
+/// on_spawn wiring. The returned template is what gets registered in
+/// `sim.templates` and is what [`Sim::instantiate`] clones from.
+pub(crate) fn build_class_template(n: &ast::NodeDecl) -> Result<Template, String> {
     let mut slots = BTreeMap::new();
     for s in &n.slots {
         let v = lower_slot_init(s)?;
         slots.insert(s.name.clone(), v);
     }
-    // Rules
     let mut rules = Vec::new();
     for r in &n.rules {
         rules.push(lower_rule(r, &slots)?);
     }
-    Ok((slots, rules))
+
+    let mut edges = Vec::new();
+    let mut initial_packets = Vec::new();
+    for stmt in &n.on_spawn {
+        match stmt {
+            ast::OnSpawnStmt::SelfEdge { latency } => {
+                let lat = lower_expr(latency, &HashSet::new())?;
+                edges.push(EdgeSpec {
+                    from: EdgeEnd::ThisInstance,
+                    to: EdgeEnd::ThisInstance,
+                    latency: lat,
+                });
+            }
+            ast::OnSpawnStmt::Inject { tag, payload } => {
+                let inner = match payload {
+                    None => Value::Nil,
+                    Some(e) => lower_literal(e)?,
+                };
+                initial_packets.push(Value::variant(tag.clone(), inner));
+            }
+        }
+    }
+
+    Ok(Template {
+        name: n.name.clone(),
+        node_name_prefix: n.name.clone(),
+        slots,
+        rules,
+        edges,
+        initial_packets,
+    })
 }
 
 fn lower_slot_init(s: &ast::SlotDecl) -> Result<Value, String> {

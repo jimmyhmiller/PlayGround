@@ -26,6 +26,28 @@ pub struct NodeDecl {
     pub name: String,
     pub slots: Vec<SlotDecl>,
     pub rules: Vec<RuleDecl>,
+    /// Bootstrap wiring run every time an instance of this class is
+    /// created — self-edges the instance needs to tick, and initial
+    /// packets that seed its inbox. Empty for classes that are pure
+    /// behaviour (no self-driven activity).
+    pub on_spawn: Vec<OnSpawnStmt>,
+}
+
+/// One statement inside a `node`'s `on_spawn { ... }` block.
+///
+/// These run per-instance at instantiation time, giving each instance a
+/// working self-loop / bootstrap without requiring the caller to wire
+/// them up externally.
+#[derive(Debug, Clone)]
+pub enum OnSpawnStmt {
+    /// `self -> self : LATENCY_EXPR` — create a self-edge on the new
+    /// instance with the given latency expression (re-evaluated per
+    /// emission, so live slot writes propagate).
+    SelfEdge { latency: Expr },
+    /// `inject TAG(PAYLOAD?)` — deliver a `Variant(tag, payload)`
+    /// packet to the new instance's inbox at sim-now. Payload defaults
+    /// to `Nil` when omitted.
+    Inject { tag: String, payload: Option<Expr> },
 }
 
 #[derive(Debug, Clone)]

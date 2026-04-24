@@ -35,13 +35,14 @@ the engine for 60 frames and serialize/deserialize a level round-trip.
 ```
 beagle-zelda/
 ├── src/
-│   ├── beagle_zelda.bg       # main game (player, AI, editor, render)
+│   ├── beagle_zelda.bg       # orchestration: World, modes, editor, save/load, main
+│   ├── gameplay.bg           # Player/Wall/Tuning types, physics, camera, coord transforms
+│   ├── enemies.bg            # Monster + Sentinel types and AI (LOS, sweep, RNG)
+│   ├── rendering.bg          # shader, shadow mesh, Y-sort, play-mode render
 │   ├── ray.bg                # raylib + raygui FFI bindings
 │   ├── vec.bg                # 2D vector helpers
 │   ├── headless_test.bg      # 60-frame smoke test (play mode)
-│   ├── editor_test.bg        # 60-frame smoke test (editor mode + save/load)
-│   ├── import_test.bg        # FFI module sanity check
-│   └── smoke_test.bg         # raygui smoke test
+│   └── editor_test.bg        # 60-frame smoke test (editor mode + save/load)
 ├── vendor/
 │   ├── raygui.h              # upstream raygui 5.0 single-header
 │   ├── build_raygui.sh       # one-shot build script

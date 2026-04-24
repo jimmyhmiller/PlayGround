@@ -595,6 +595,67 @@ impl Sim {
             self.add_edge(from, to, spec.latency.clone());
         }
 
+        // Deliver bootstrap packets. These seed any self-driven loops
+        // the class relies on to stay alive (e.g. a `tick(nil)` packet
+        // a `rule tick` rearms each step). Done after edge creation so
+        // the first packet an initial rule emits routes over its own
+        // fresh self-edge.
+        for payload in t.initial_packets.iter().cloned() {
+            self.inject(new_id, payload);
+        }
+
+        Ok(new_id)
+    }
+
+    /// Instantiate a class with an explicit instance name. Distinct
+    /// from [`try_spawn_from_template`] which auto-generates a name —
+    /// the class/instance API this feeds wants user-supplied names so
+    /// canvas files can address specific instances.
+    pub fn instantiate(
+        &mut self,
+        class_name: &str,
+        instance_name: &str,
+    ) -> Result<NodeId, String> {
+        let t = self.templates.get(class_name).cloned()
+            .ok_or_else(|| format!("no class named `{}`", class_name))?;
+        let new_id = NodeId(self.next_node_id);
+        self.next_node_id += 1;
+        let node = Node {
+            id: new_id,
+            name: instance_name.to_string(),
+            slots: t.slots.clone(),
+            rules: t.rules.clone(),
+            inbox: VecDeque::new(),
+            parent: None,
+            compound: None,
+        };
+        self.nodes.insert(new_id, node);
+        self.log.push(Event::NodeSpawned {
+            node: new_id,
+            template: t.name.clone(),
+            parent: None,
+            at_ns: self.now_ns,
+        });
+        for spec in &t.edges {
+            // Only ThisInstance endpoints are meaningful here — Parent
+            // has no referent in the named-instance path.
+            let resolve = |end: EdgeEnd| -> Result<NodeId, String> {
+                match end {
+                    EdgeEnd::ThisInstance => Ok(new_id),
+                    EdgeEnd::Parent => Err(format!(
+                        "class `{}` has an edge with EdgeEnd::Parent; \
+                         instantiate() does not supply a parent",
+                        class_name
+                    )),
+                }
+            };
+            let from = resolve(spec.from)?;
+            let to = resolve(spec.to)?;
+            self.add_edge(from, to, spec.latency.clone());
+        }
+        for payload in t.initial_packets.iter().cloned() {
+            self.inject(new_id, payload);
+        }
         Ok(new_id)
     }
 

@@ -1,0 +1,309 @@
+namespace gameplay
+
+// Player/Wall/Tuning types, input reading, physics, camera, coord
+// transforms, and the geometry primitives shared by enemies (LOS) and
+// rendering (shadow casts).
+
+use ray as r
+use vec as v
+
+// ============================================================
+// Tick timing
+// ============================================================
+
+let FIXED_DT = 1.0 / 60.0          // fallback / test dt; gameplay uses real frame time
+let MAX_DT = 1.0 / 30.0            // clamp so lag spikes don't teleport entities
+
+// Real seconds since the last frame, clamped to MAX_DT to keep physics stable.
+// On frame 0 raylib returns 0, which we replace with FIXED_DT so the first
+// tick doesn't advance nothing.
+fn current_dt() {
+    let raw = r/frame_time()
+    if raw <= 0.0 { FIXED_DT }
+    else if raw > MAX_DT { MAX_DT }
+    else { raw }
+}
+
+// ============================================================
+// Tuning — mirrors the Bevy `Tuning` resource.
+// ============================================================
+
+struct Tuning {
+    max_speed
+    accel
+    friction
+    light_range
+    light_half_angle_deg
+    light_intensity
+    ambient
+    camera_smoothing
+    run_multiplier
+    sneak_multiplier
+}
+
+fn default_tuning() {
+    Tuning {
+        max_speed: 280.0,
+        accel: 3200.0,
+        friction: 3600.0,
+        light_range: 520.0,
+        light_half_angle_deg: 83.0,
+        light_intensity: 1.3,
+        // 0.15 baseline keeps the scene (and especially the player) visible
+        // outside the cone — pure-black ambient makes it look like the
+        // character has disappeared whenever the aim points away from their body.
+        ambient: 0.15,
+        camera_smoothing: 8.0,
+        run_multiplier: 1.75,
+        sneak_multiplier: 0.4
+    }
+}
+
+// ============================================================
+// Entities
+// ============================================================
+
+struct Player {
+    pos           // current physical translation (Vec2)
+    prev          // previous physical translation (for interpolation)
+    vel           // Vec2
+    half          // half-extents (Vec2)
+    aim           // Vec2 unit vector
+    speed_mult    // 1.0 normal, run_multiplier, sneak_multiplier
+    hp            // hit points — attacks subtract, respawn on 0
+    iframes       // invulnerability timer (seconds) after being hit
+}
+
+struct Wall {
+    center        // Vec2
+    half          // Vec2
+}
+
+fn default_walls() {
+    [
+        Wall { center: v/make(0.0 - 300.0, 150.0), half: v/make(120.0, 20.0) },
+        Wall { center: v/make(250.0, 0.0 - 50.0), half: v/make(30.0, 110.0) },
+        Wall { center: v/make(0.0 - 150.0, 0.0 - 220.0), half: v/make(160.0, 20.0) },
+        Wall { center: v/make(420.0, 220.0), half: v/make(60.0, 60.0) },
+        Wall { center: v/make(0.0 - 450.0, 0.0 - 40.0), half: v/make(20.0, 130.0) }
+    ]
+}
+
+// ============================================================
+// Input → desired direction
+// ============================================================
+
+fn read_desired_dir() {
+    let mut dx = 0.0
+    let mut dy = 0.0
+    if r/is_key_down(r/KEY_W) || r/is_key_down(r/KEY_UP) { dy = dy + 1.0 }
+    if r/is_key_down(r/KEY_S) || r/is_key_down(r/KEY_DOWN) { dy = dy - 1.0 }
+    if r/is_key_down(r/KEY_A) || r/is_key_down(r/KEY_LEFT) { dx = dx - 1.0 }
+    if r/is_key_down(r/KEY_D) || r/is_key_down(r/KEY_RIGHT) { dx = dx + 1.0 }
+    v/normalize_or_zero(v/make(dx, dy))
+}
+
+fn read_speed_mult(tuning) {
+    let sneak = r/is_key_down(r/KEY_LEFT_CONTROL) || r/is_key_down(r/KEY_RIGHT_CONTROL)
+    let run = r/is_key_down(r/KEY_LEFT_SHIFT) || r/is_key_down(r/KEY_RIGHT_SHIFT)
+    if sneak { tuning.sneak_multiplier }
+    else if run { tuning.run_multiplier }
+    else { 1.0 }
+}
+
+// ============================================================
+// Physics
+// ============================================================
+
+// Move one step toward target velocity, clamped by the allowed accel/friction.
+fn approach_velocity(cur, target, rate, dt) {
+    let delta = v/sub(target, cur)
+    let max_step = rate * dt
+    let len = v/length(delta)
+    if len <= max_step { target }
+    else { v/add(cur, v/scale(v/normalize_or_zero(delta), max_step)) }
+}
+
+// Resolve AABB collision by axis — returns new position and zeroed velocity
+// components via a {pos, vel} struct.
+struct Resolve {
+    pos
+    vel
+}
+
+fn resolve_collision(pos, half, delta, walls, vel) {
+    let eps = 0.001
+    let mut px = pos.x + delta.x
+    let mut vx = vel.x
+    let mut i = 0
+    while i < length(walls) {
+        let w = walls[i]
+        if v/aabb_overlap(v/make(px, pos.y), half, w.center, w.half) {
+            if delta.x > 0.0 {
+                px = w.center.x - w.half.x - half.x - eps
+            } else if delta.x < 0.0 {
+                px = w.center.x + w.half.x + half.x + eps
+            }
+            vx = 0.0
+        }
+        i = i + 1
+    }
+    let mut py = pos.y + delta.y
+    let mut vy = vel.y
+    let mut j = 0
+    while j < length(walls) {
+        let w = walls[j]
+        if v/aabb_overlap(v/make(px, py), half, w.center, w.half) {
+            if delta.y > 0.0 {
+                py = w.center.y - w.half.y - half.y - eps
+            } else if delta.y < 0.0 {
+                py = w.center.y + w.half.y + half.y + eps
+            }
+            vy = 0.0
+        }
+        j = j + 1
+    }
+    Resolve { pos: v/make(px, py), vel: v/make(vx, vy) }
+}
+
+fn advance_player(player, tuning, walls, desired, speed_mult, dt) {
+    let target = v/scale(desired, tuning.max_speed * speed_mult)
+    let rate = if v/length_sq(desired) < 0.0001 { tuning.friction } else { tuning.accel }
+    let new_vel = approach_velocity(player.vel, target, rate, dt)
+    let move_delta = v/scale(new_vel, dt)
+    let res = resolve_collision(player.pos, player.half, move_delta, walls, new_vel)
+    Player {
+        ...player,
+        pos: res.pos,
+        prev: player.pos,
+        vel: res.vel,
+        speed_mult: speed_mult,
+        iframes: if player.iframes > 0.0 { player.iframes - dt } else { 0.0 }
+    }
+}
+
+// ============================================================
+// Camera
+// ============================================================
+
+fn update_camera(camera, player_pos, smoothing, dt) {
+    // alpha = 1 - exp(-k*dt) — exponential approach
+    if smoothing <= 0.0 {
+        player_pos
+    } else {
+        let alpha = 1.0 - exp(0.0 - smoothing * dt)
+        v/lerp(camera, player_pos, alpha)
+    }
+}
+
+// Convert world coordinates to screen coordinates given the camera.
+fn world_to_screen(p, camera) {
+    v/make(p.x - camera.x + 0.5 * to-float(r/screen_width()),
+           0.5 * to-float(r/screen_height()) - (p.y - camera.y))
+}
+
+fn screen_to_world(sx, sy, camera) {
+    v/make(to-float(sx) - 0.5 * to-float(r/screen_width()) + camera.x,
+           camera.y + 0.5 * to-float(r/screen_height()) - to-float(sy))
+}
+
+fn update_aim(player, camera) {
+    let mouse = screen_to_world(r/mouse_x(), r/mouse_y(), camera)
+    let delta = v/sub(mouse, player.pos)
+    if v/length_sq(delta) > 1.0 {
+        Player { ...player, aim: v/normalize_or_zero(delta) }
+    } else {
+        player
+    }
+}
+
+// ============================================================
+// Geometry primitive — used by both enemy LOS (segment_blocked)
+// and the shadow mesh (cast_ray).
+// ============================================================
+
+// Ray r(t) = origin + t*dir  vs.  segment a..b. Returns t or -1.0 if no hit.
+fn ray_segment_hit(origin, dir, a, b) {
+    let sx = b.x - a.x
+    let sy = b.y - a.y
+    let denom = dir.x * sy - dir.y * sx
+    if v/abs_f(denom) < 0.000001 {
+        0.0 - 1.0
+    } else {
+        let diffx = a.x - origin.x
+        let diffy = a.y - origin.y
+        let t = (diffx * sy - diffy * sx) / denom
+        let u = (diffx * dir.y - diffy * dir.x) / denom
+        if t >= 0.0 && u >= 0.0 && u <= 1.0 { t } else { 0.0 - 1.0 }
+    }
+}
+
+// ============================================================
+// Monster damage / respawn — lives here (not in enemies.bg) because
+// it mutates the Player, not the monsters.
+// ============================================================
+
+// Spiral outward from origin until we find a respawn point clear of every
+// monster's reach and every wall's AABB. Falls back to (0, 0) if nothing
+// better is found (shouldn't happen with the default level).
+fn pick_respawn(player, monsters, walls) {
+    let candidates = [
+        v/make(0.0, 0.0),
+        v/make(40.0, 0.0),  v/make(0.0 - 40.0, 0.0),
+        v/make(0.0, 40.0),  v/make(0.0, 0.0 - 40.0),
+        v/make(80.0, 0.0),  v/make(0.0 - 80.0, 0.0),
+        v/make(0.0, 80.0),  v/make(0.0, 0.0 - 80.0),
+        v/make(160.0, 0.0), v/make(0.0 - 160.0, 0.0)
+    ]
+    let mut chosen = v/ZERO
+    let mut found = false
+    let mut i = 0
+    while i < length(candidates) && !found {
+        let c = candidates[i]
+        let mut clear = true
+        let mut j = 0
+        while j < length(monsters) && clear {
+            if v/length(v/sub(c, monsters[j].pos)) < monsters[j].attack_reach + player.half.x + 8.0 {
+                clear = false
+            }
+            j = j + 1
+        }
+        let mut k = 0
+        while k < length(walls) && clear {
+            if v/aabb_overlap(c, player.half, walls[k].center, walls[k].half) {
+                clear = false
+            }
+            k = k + 1
+        }
+        if clear { chosen = c; found = true }
+        i = i + 1
+    }
+    chosen
+}
+
+fn apply_monster_attacks(player, monsters, walls) {
+    if player.iframes > 0.0 {
+        player
+    } else {
+        let mut hp = player.hp
+        let mut hit = false
+        let mut i = 0
+        while i < length(monsters) {
+            let m = monsters[i]
+            let d = v/length(v/sub(player.pos, m.pos))
+            if d < m.attack_reach + player.half.x {
+                hp = hp - m.strength
+                hit = true
+            }
+            i = i + 1
+        }
+        if !hit {
+            player
+        } else if hp <= 0.0 {
+            let spawn = pick_respawn(player, monsters, walls)
+            Player { ...player, pos: spawn, prev: spawn, vel: v/ZERO, hp: 5.0, iframes: 2.0 }
+        } else {
+            Player { ...player, hp: hp, iframes: 0.75 }
+        }
+    }
+}

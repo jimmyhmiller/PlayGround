@@ -1,0 +1,297 @@
+namespace enemies
+
+// Monster (LOS + wander AI) and Sentinel (searchlight sweep AI) —
+// their types, defaults, advance* simulation functions, plus the
+// xorshift RNG and the segment_blocked LOS helper.
+
+use ray as r
+use vec as v
+use gameplay as g
+
+// ============================================================
+// Monster
+// ============================================================
+
+struct Monster {
+    pos
+    prev
+    vel
+    half
+    speed
+    detection_range
+    attack_reach
+    strength
+    has_seen
+    time_since_los
+    notice_acc
+    notice_threshold
+    wander_dir
+    wander_timer
+}
+
+fn default_monster(pos) {
+    Monster {
+        pos: pos,
+        prev: pos,
+        vel: v/ZERO,
+        half: v/make(12.0, 12.0),
+        speed: 120.0,
+        detection_range: 300.0,
+        attack_reach: 28.0,
+        strength: 1.0,
+        has_seen: false,
+        time_since_los: 0.0,
+        notice_acc: 0.0,
+        notice_threshold: 0.8,
+        wander_dir: v/ZERO,
+        wander_timer: 2.0
+    }
+}
+
+// ============================================================
+// Sentinel
+// ============================================================
+
+struct Sentinel {
+    pos
+    prev
+    vel
+    half
+    light_range
+    light_half_angle_deg
+    light_intensity
+    speed
+    attack_reach
+    sweep_speed
+    aim_angle
+    sweep_dir
+    alerted
+}
+
+fn default_sentinel(pos) {
+    Sentinel {
+        pos: pos,
+        prev: pos,
+        vel: v/ZERO,
+        half: v/make(14.0, 14.0),
+        light_range: 350.0,
+        light_half_angle_deg: 18.0,
+        light_intensity: 1.5,
+        speed: 60.0,
+        attack_reach: 28.0,
+        sweep_speed: 40.0,
+        aim_angle: 0.0,
+        sweep_dir: 1.0,
+        alerted: false
+    }
+}
+
+// ============================================================
+// RNG — xorshift32 kept in an atom (module-level mutable globals
+// aren't allowed in Beagle).
+// ============================================================
+
+let rng_state = atom(2463534242)
+
+fn next_rand() {
+    swap!(rng_state, fn(x) {
+        let mut v = x
+        v = v ^ (v << 13)
+        v = v ^ (v >> 17)
+        v = v ^ (v << 5)
+        v & 4294967295
+    })
+    deref(rng_state)
+}
+
+fn rand_float_01() {
+    to-float(next_rand()) / 4294967296.0
+}
+
+fn rand_range(lo, hi) {
+    lo + rand_float_01() * (hi - lo)
+}
+
+// ============================================================
+// LOS — is there any wall between `from` and `to`?
+// ============================================================
+
+fn segment_blocked(from, to, walls) {
+    let dx = to.x - from.x
+    let dy = to.y - from.y
+    let len = sqrt(dx * dx + dy * dy)
+    if len < 0.0001 {
+        false
+    } else {
+        let dir = v/make(dx / len, dy / len)
+        let mut i = 0
+        let mut blocked = false
+        while i < length(walls) && !blocked {
+            let w = walls[i]
+            let tl = v/make(w.center.x - w.half.x, w.center.y + w.half.y)
+            let tr = v/make(w.center.x + w.half.x, w.center.y + w.half.y)
+            let br = v/make(w.center.x + w.half.x, w.center.y - w.half.y)
+            let bl = v/make(w.center.x - w.half.x, w.center.y - w.half.y)
+            let t1 = g/ray_segment_hit(from, dir, tl, tr)
+            let t2 = g/ray_segment_hit(from, dir, tr, br)
+            let t3 = g/ray_segment_hit(from, dir, br, bl)
+            let t4 = g/ray_segment_hit(from, dir, bl, tl)
+            if (t1 > 0.0 && t1 < len) || (t2 > 0.0 && t2 < len) ||
+               (t3 > 0.0 && t3 < len) || (t4 > 0.0 && t4 < len) {
+                blocked = true
+            }
+            i = i + 1
+        }
+        blocked
+    }
+}
+
+// ============================================================
+// Monster AI
+// ============================================================
+
+let MONSTER_ALERT_TIMEOUT = 2.5
+
+fn advance_monster(m, player_pos, walls, dt) {
+    let to_player = v/sub(player_pos, m.pos)
+    let dist = v/length(to_player)
+    let in_range = dist < m.detection_range && dist > 0.1
+    let has_los = in_range && !segment_blocked(m.pos, player_pos, walls)
+
+    let mut has_seen = m.has_seen
+    let mut time_since_los = m.time_since_los
+    let mut notice_acc = m.notice_acc
+    let mut notice_threshold = m.notice_threshold
+    if has_los {
+        if has_seen {
+            time_since_los = 0.0
+        } else {
+            notice_acc = notice_acc + dt
+            if notice_acc >= notice_threshold {
+                has_seen = true
+                time_since_los = 0.0
+            }
+        }
+    } else {
+        notice_acc = 0.0
+        if has_seen {
+            time_since_los = time_since_los + dt
+            if (!in_range) || time_since_los > MONSTER_ALERT_TIMEOUT {
+                has_seen = false
+                notice_threshold = rand_range(0.3, 1.5)
+            }
+        }
+    }
+
+    let mut vx = 0.0
+    let mut vy = 0.0
+    let mut wander_dir = m.wander_dir
+    let mut wander_timer = m.wander_timer
+    if has_los && has_seen {
+        let dir = v/normalize_or_zero(to_player)
+        vx = dir.x * m.speed
+        vy = dir.y * m.speed
+    } else {
+        wander_timer = wander_timer - dt
+        if wander_timer <= 0.0 {
+            if rand_float_01() < 0.3 {
+                wander_dir = v/ZERO
+                wander_timer = rand_range(1.0, 3.0)
+            } else {
+                let angle = rand_float_01() * 2.0 * 3.14159265
+                wander_dir = v/from_angle(angle)
+                wander_timer = rand_range(1.5, 4.0)
+            }
+        }
+        vx = wander_dir.x * m.speed * 0.3
+        vy = wander_dir.y * m.speed * 0.3
+    }
+
+    let vel = v/make(vx, vy)
+    let delta = v/scale(vel, dt)
+    let res = g/resolve_collision(m.pos, m.half, delta, walls, vel)
+
+    Monster {
+        ...m,
+        pos: res.pos,
+        prev: m.pos,
+        vel: res.vel,
+        has_seen: has_seen,
+        time_since_los: time_since_los,
+        notice_acc: notice_acc,
+        notice_threshold: notice_threshold,
+        wander_dir: wander_dir,
+        wander_timer: wander_timer
+    }
+}
+
+fn advance_all_monsters(monsters, player_pos, walls, dt) {
+    let mut result = []
+    let mut i = 0
+    while i < length(monsters) {
+        result = push(result, advance_monster(monsters[i], player_pos, walls, dt))
+        i = i + 1
+    }
+    result
+}
+
+// ============================================================
+// Sentinel AI
+// ============================================================
+
+fn advance_sentinel(s, player_pos, walls, dt) {
+    let deg2rad = 3.14159265 / 180.0
+    let to_player = v/sub(player_pos, s.pos)
+    let dist = v/length(to_player)
+    let aim_dir = v/from_angle(s.aim_angle)
+
+    let in_cone =
+        dist < s.light_range &&
+        dist > 0.1 &&
+        (v/dot(v/scale(to_player, 1.0 / dist), aim_dir) > cos(s.light_half_angle_deg * deg2rad)) &&
+        !segment_blocked(s.pos, player_pos, walls)
+
+    let mut vx = 0.0
+    let mut vy = 0.0
+    let mut new_angle = s.aim_angle
+    let mut new_sweep = s.sweep_dir
+    let mut new_alerted = s.alerted
+    if in_cone {
+        new_alerted = true
+        new_angle = atan2(to_player.y, to_player.x)
+        let dir = v/normalize_or_zero(to_player)
+        vx = dir.x * s.speed
+        vy = dir.y * s.speed
+    } else if s.alerted {
+        new_alerted = false
+    } else {
+        new_angle = s.aim_angle + s.sweep_speed * deg2rad * s.sweep_dir * dt
+        if v/abs_f(sin(new_angle)) < 0.01 || rand_float_01() < 0.002 {
+            new_sweep = 0.0 - s.sweep_dir
+        }
+    }
+
+    let vel = v/make(vx, vy)
+    let delta = v/scale(vel, dt)
+    let res = g/resolve_collision(s.pos, s.half, delta, walls, vel)
+
+    Sentinel {
+        ...s,
+        pos: res.pos,
+        prev: s.pos,
+        vel: res.vel,
+        aim_angle: new_angle,
+        sweep_dir: new_sweep,
+        alerted: new_alerted
+    }
+}
+
+fn advance_all_sentinels(sentinels, player_pos, walls, dt) {
+    let mut result = []
+    let mut i = 0
+    while i < length(sentinels) {
+        result = push(result, advance_sentinel(sentinels[i], player_pos, walls, dt))
+        i = i + 1
+    }
+    result
+}

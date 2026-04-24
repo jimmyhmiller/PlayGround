@@ -1,41 +1,44 @@
 namespace beagle_zelda
 
 // beagle-zelda — a port of the Bevy Zelda-like prototype to raylib + raygui.
-// Features are being added feature-by-feature; see README.md for status.
+//
+// This file holds game orchestration: the World/Editor/Tool state types,
+// the play-mode and editor-mode tick functions, the editor's own
+// rendering (grid + selection outlines + raygui panel), save/load, and
+// the main loop. Enemy simulation lives in enemies.bg, core physics
+// in gameplay.bg, and world rendering in rendering.bg.
 
 use beagle.ffi as ffi
 use beagle.async as async
 use ray as r
 use vec as v
+use gameplay as g
+use enemies as e
+use rendering as render
 
 // ============================================================
 // Constants
 // ============================================================
 
-let MAX_EXTRA_LIGHTS = 8
-
 // Initial window dimensions only — the window is resizable at runtime, so
-// never read these constants in render/input paths. Query r/screen_width()
-// and r/screen_height() live instead.
+// never read these in render/input paths. Query r/screen_width() live.
 let INITIAL_W = 1280
 let INITIAL_H = 720
-let FIXED_HZ = 60.0
-let FIXED_DT = 1.0 / 60.0          // fallback / test dt; gameplay uses real frame time
-let MAX_DT = 1.0 / 30.0            // clamp so lag spikes don't teleport entities
-
-// Real seconds since the last frame, clamped to MAX_DT to keep physics stable.
-// On frame 0 raylib returns 0, which we replace with FIXED_DT so the first
-// tick doesn't advance nothing.
-fn current_dt() {
-    let raw = r/frame_time()
-    if raw <= 0.0 { FIXED_DT }
-    else if raw > MAX_DT { MAX_DT }
-    else { raw }
-}
-let WALL_HEIGHT = 48.0             // pseudo-3D front-face height
 
 let MODE_PLAYING = 0
 let MODE_EDITING = 1
+
+let LEVEL_PATH = "/Users/jimmyhmiller/Documents/Code/PlayGround/beagle-zelda/levels/level.txt"
+let EDITOR_CAMERA_SPEED = 600.0
+let EDITOR_SELECT_RADIUS = 22.0
+
+// Current FPS cap. 60 at startup; F2 toggles between 60 and uncapped (0).
+// Held in an atom so we don't have to thread it through the World.
+let fps_cap = atom(60)
+
+// ============================================================
+// Editor state types
+// ============================================================
 
 enum Tool { Select, Wall, Monster, Sentinel }
 
@@ -57,130 +60,12 @@ fn tool_to_int(t) {
     }
 }
 
-// Selection in the editor — replaces the old (selected_kind, selected_index) pair.
 enum Selection {
     None,
     Wall { index },
     Monster { index },
     Sentinel { index }
 }
-
-// Tuning — mirrors the Bevy `Tuning` resource.
-struct Tuning {
-    max_speed
-    accel
-    friction
-    light_range
-    light_half_angle_deg
-    light_intensity
-    ambient
-    camera_smoothing
-    run_multiplier
-    sneak_multiplier
-}
-
-fn default_tuning() {
-    Tuning {
-        max_speed: 280.0,
-        accel: 3200.0,
-        friction: 3600.0,
-        light_range: 520.0,
-        light_half_angle_deg: 83.0,
-        light_intensity: 1.3,
-        // 0.15 baseline keeps the scene (and especially the player) visible
-        // outside the cone — pure-black ambient makes it look like the
-        // character has disappeared whenever the aim points away from their body.
-        ambient: 0.15,
-        camera_smoothing: 8.0,
-        run_multiplier: 1.75,
-        sneak_multiplier: 0.4
-    }
-}
-
-// ============================================================
-// Cone-light fragment shader (GLSL 330). Drawn as a full-screen
-// darkness overlay — alpha is (1 - lightness), so unlit pixels are black.
-// ============================================================
-
-let CONE_LIGHT_FRAGMENT_SHADER = "
-#version 330
-
-#define MAX_EXTRA_LIGHTS 8
-
-in vec2 fragTexCoord;
-in vec4 fragColor;
-out vec4 finalColor;
-
-uniform vec2 player_pos;
-uniform vec2 aim_dir;
-uniform float cos_half_angle;
-uniform float range;
-uniform float ambient;
-uniform float intensity;
-uniform vec2 resolution;
-
-uniform int extra_count;
-uniform vec2  extras_pos[MAX_EXTRA_LIGHTS];
-uniform vec2  extras_dir[MAX_EXTRA_LIGHTS];
-uniform float extras_cos[MAX_EXTRA_LIGHTS];
-uniform float extras_range[MAX_EXTRA_LIGHTS];
-uniform float extras_intensity[MAX_EXTRA_LIGHTS];
-
-float cone_contribution(vec2 world_pos, vec2 light_pos, vec2 light_dir,
-                        float cos_half, float r, float i_intensity) {
-    vec2 to_pixel = world_pos - light_pos;
-    float dist = length(to_pixel);
-    if (dist >= r) { return 0.0; }
-    vec2 dir = to_pixel / max(dist, 0.0001);
-    vec2 aim = normalize(light_dir);
-    float edge = cos_half;
-    float angular = smoothstep(edge - 0.004, edge + 0.004, dot(dir, aim));
-    float radial = 1.0 - smoothstep(r * 0.15, r, dist);
-    return angular * radial * i_intensity;
-}
-
-void main() {
-    vec2 screen_pos = vec2(gl_FragCoord.x, resolution.y - gl_FragCoord.y);
-
-    float total = cone_contribution(screen_pos, player_pos, aim_dir,
-                                    cos_half_angle, range, intensity);
-
-    for (int i = 0; i < extra_count && i < MAX_EXTRA_LIGHTS; i++) {
-        total += cone_contribution(screen_pos, extras_pos[i], extras_dir[i],
-                                   extras_cos[i], extras_range[i], extras_intensity[i]);
-    }
-
-    float light = clamp(ambient + total, 0.0, 1.0);
-    float darkness_alpha = 1.0 - light;
-    finalColor = vec4(0.0, 0.0, 0.0, darkness_alpha);
-}
-"
-
-// ============================================================
-// Entities
-// ============================================================
-
-struct Player {
-    pos           // current physical translation (Vec2)
-    prev          // previous physical translation (for interpolation)
-    vel           // Vec2
-    half          // half-extents (Vec2)
-    aim           // Vec2 unit vector
-    speed_mult    // 1.0 normal, run_multiplier, sneak_multiplier
-    hp            // hit points — attacks subtract, respawn on 0
-    iframes       // invulnerability timer (seconds) after being hit
-}
-
-struct Wall {
-    center        // Vec2
-    half          // Vec2
-}
-
-// Monster + Sentinel are below (ported from the original Rust).
-
-// ============================================================
-// Editor state — tool selection, drag target, selected entity
-// ============================================================
 
 struct Editor {
     tool              // Tool enum
@@ -197,8 +82,6 @@ fn default_editor() {
         drag_start: null,
         selection: Selection.None,
         status_text: "ready",
-        // Typed I32 cell — raygui ToggleGroup reads/writes through the
-        // auto-unwrapped ptr field. GC-freed when the Editor drops.
         tool_slot: ffi/cell(ffi/Type.I32, tool_to_int(Tool.Select)),
         lighting_enabled: true
     }
@@ -220,821 +103,8 @@ struct World {
     editor        // Editor (only relevant in MODE_EDITING)
 }
 
-// ============================================================
-// Input → desired direction
-// ============================================================
-
-fn read_desired_dir() {
-    let mut dx = 0.0
-    let mut dy = 0.0
-    if r/is_key_down(r/KEY_W) || r/is_key_down(r/KEY_UP) { dy = dy + 1.0 }
-    if r/is_key_down(r/KEY_S) || r/is_key_down(r/KEY_DOWN) { dy = dy - 1.0 }
-    if r/is_key_down(r/KEY_A) || r/is_key_down(r/KEY_LEFT) { dx = dx - 1.0 }
-    if r/is_key_down(r/KEY_D) || r/is_key_down(r/KEY_RIGHT) { dx = dx + 1.0 }
-    v/normalize_or_zero(v/make(dx, dy))
-}
-
-fn read_speed_mult(tuning) {
-    let sneak = r/is_key_down(r/KEY_LEFT_CONTROL) || r/is_key_down(r/KEY_RIGHT_CONTROL)
-    let run = r/is_key_down(r/KEY_LEFT_SHIFT) || r/is_key_down(r/KEY_RIGHT_SHIFT)
-    if sneak { tuning.sneak_multiplier }
-    else if run { tuning.run_multiplier }
-    else { 1.0 }
-}
-
-// ============================================================
-// Physics
-// ============================================================
-
-// Move one step toward target velocity, clamped by the allowed accel/friction.
-fn approach_velocity(cur, target, rate, dt) {
-    let delta = v/sub(target, cur)
-    let max_step = rate * dt
-    let len = v/length(delta)
-    if len <= max_step { target }
-    else { v/add(cur, v/scale(v/normalize_or_zero(delta), max_step)) }
-}
-
-// Resolve AABB collision by axis — returns new position and zeroed velocity components
-// via a {pos, vel} struct.
-struct Resolve {
-    pos
-    vel
-}
-
-fn resolve_collision(pos, half, delta, walls, vel) {
-    let eps = 0.001
-    let mut px = pos.x + delta.x
-    let mut vx = vel.x
-    let mut i = 0
-    while i < length(walls) {
-        let w = walls[i]
-        if v/aabb_overlap(v/make(px, pos.y), half, w.center, w.half) {
-            if delta.x > 0.0 {
-                px = w.center.x - w.half.x - half.x - eps
-            } else if delta.x < 0.0 {
-                px = w.center.x + w.half.x + half.x + eps
-            }
-            vx = 0.0
-        }
-        i = i + 1
-    }
-    let mut py = pos.y + delta.y
-    let mut vy = vel.y
-    let mut j = 0
-    while j < length(walls) {
-        let w = walls[j]
-        if v/aabb_overlap(v/make(px, py), half, w.center, w.half) {
-            if delta.y > 0.0 {
-                py = w.center.y - w.half.y - half.y - eps
-            } else if delta.y < 0.0 {
-                py = w.center.y + w.half.y + half.y + eps
-            }
-            vy = 0.0
-        }
-        j = j + 1
-    }
-    Resolve { pos: v/make(px, py), vel: v/make(vx, vy) }
-}
-
-fn advance_player(player, tuning, walls, desired, speed_mult, dt) {
-    let target = v/scale(desired, tuning.max_speed * speed_mult)
-    let rate = if v/length_sq(desired) < 0.0001 { tuning.friction } else { tuning.accel }
-    let new_vel = approach_velocity(player.vel, target, rate, dt)
-    let move_delta = v/scale(new_vel, dt)
-    let res = resolve_collision(player.pos, player.half, move_delta, walls, new_vel)
-    Player {
-        ...player,
-        pos: res.pos,
-        prev: player.pos,
-        vel: res.vel,
-        speed_mult: speed_mult,
-        iframes: if player.iframes > 0.0 { player.iframes - dt } else { 0.0 }
-    }
-}
-
-// ============================================================
-// Camera
-// ============================================================
-
-fn update_camera(camera, player_pos, smoothing, dt) {
-    // alpha = 1 - exp(-k*dt) — exponential approach
-    if smoothing <= 0.0 {
-        player_pos
-    } else {
-        let alpha = 1.0 - exp(0.0 - smoothing * dt)
-        v/lerp(camera, player_pos, alpha)
-    }
-}
-
-// Convert world coordinates to screen coordinates given the camera.
-fn world_to_screen(p, camera) {
-    v/make(p.x - camera.x + 0.5 * to-float(r/screen_width()),
-           0.5 * to-float(r/screen_height()) - (p.y - camera.y))
-}
-
-fn screen_to_world(sx, sy, camera) {
-    v/make(to-float(sx) - 0.5 * to-float(r/screen_width()) + camera.x,
-           camera.y + 0.5 * to-float(r/screen_height()) - to-float(sy))
-}
-
-// ============================================================
-// Rendering helpers (all take world-space then apply camera)
-// ============================================================
-
-fn draw_world_rect(center, half, color, camera) {
-    let s = world_to_screen(center, camera)
-    let x = to-int(s.x - half.x)
-    let y = to-int(s.y - half.y)
-    let w = to-int(2.0 * half.x)
-    let h = to-int(2.0 * half.y)
-    r/draw_rectangle(x, y, w, h, color)
-}
-
-fn draw_world_rect_lines(center, half, color, camera) {
-    let s = world_to_screen(center, camera)
-    let x = to-int(s.x - half.x)
-    let y = to-int(s.y - half.y)
-    let w = to-int(2.0 * half.x)
-    let h = to-int(2.0 * half.y)
-    r/draw_rectangle_lines(x, y, w, h, color)
-}
-
-fn draw_wall(wall, camera) {
-    // Top face (light-gray) and front face (darker) for fake 2.5D depth.
-    let top_color = r/rgb(148, 140, 128)
-    let front_color = r/rgb(72, 66, 62)
-    // Front face sits below the wall top in world coords.
-    let front_center = v/make(wall.center.x, wall.center.y - wall.half.y - WALL_HEIGHT * 0.5)
-    let front_half = v/make(wall.half.x, WALL_HEIGHT * 0.5)
-    draw_world_rect(front_center, front_half, front_color, camera)
-    draw_world_rect_lines(front_center, front_half, r/rgb(25, 22, 20), camera)
-    draw_world_rect(wall.center, wall.half, top_color, camera)
-    draw_world_rect_lines(wall.center, wall.half, r/rgb(25, 22, 20), camera)
-}
-
-fn draw_player(player, camera) {
-    let body = r/rgb(115, 235, 140)
-    draw_world_rect(player.pos, player.half, body, camera)
-    draw_world_rect_lines(player.pos, player.half, r/WHITE, camera)
-}
-
-// ============================================================
-// Monster (LOS + wander AI)
-// ============================================================
-
-struct Monster {
-    pos
-    prev
-    vel
-    half
-    speed
-    detection_range
-    attack_reach
-    strength
-    has_seen
-    time_since_los
-    notice_acc
-    notice_threshold
-    wander_dir
-    wander_timer
-}
-
-fn default_monster(pos) {
-    Monster {
-        pos: pos,
-        prev: pos,
-        vel: v/ZERO,
-        half: v/make(12.0, 12.0),
-        speed: 120.0,
-        detection_range: 300.0,
-        attack_reach: 28.0,
-        strength: 1.0,
-        has_seen: false,
-        time_since_los: 0.0,
-        notice_acc: 0.0,
-        notice_threshold: 0.8,
-        wander_dir: v/ZERO,
-        wander_timer: 2.0
-    }
-}
-
-// ============================================================
-// Sentinel (searchlight sweep AI)
-// ============================================================
-
-struct Sentinel {
-    pos
-    prev
-    vel
-    half
-    light_range
-    light_half_angle_deg
-    light_intensity
-    speed
-    attack_reach
-    sweep_speed
-    aim_angle
-    sweep_dir
-    alerted
-}
-
-fn default_sentinel(pos) {
-    Sentinel {
-        pos: pos,
-        prev: pos,
-        vel: v/ZERO,
-        half: v/make(14.0, 14.0),
-        light_range: 350.0,
-        light_half_angle_deg: 18.0,
-        light_intensity: 1.5,
-        speed: 60.0,
-        attack_reach: 28.0,
-        sweep_speed: 40.0,
-        aim_angle: 0.0,
-        sweep_dir: 1.0,
-        alerted: false
-    }
-}
-
-// ============================================================
-// Default level (used until levels/level.txt is saved)
-// ============================================================
-
-fn default_walls() {
-    [
-        Wall { center: v/make(0.0 - 300.0, 150.0), half: v/make(120.0, 20.0) },
-        Wall { center: v/make(250.0, 0.0 - 50.0), half: v/make(30.0, 110.0) },
-        Wall { center: v/make(0.0 - 150.0, 0.0 - 220.0), half: v/make(160.0, 20.0) },
-        Wall { center: v/make(420.0, 220.0), half: v/make(60.0, 60.0) },
-        Wall { center: v/make(0.0 - 450.0, 0.0 - 40.0), half: v/make(20.0, 130.0) }
-    ]
-}
-
-// ============================================================
-// Enemy AI helpers (LOS, random)
-// ============================================================
-
-// xorshift32 PRNG kept in an atom — module-level mutable globals aren't allowed.
-let rng_state = atom(2463534242)
-
-// Current FPS cap. 60 at startup; F2 toggles between 60 and uncapped (0).
-// Held in an atom so we don't have to thread it through the World.
-let fps_cap = atom(60)
-
-fn next_rand() {
-    swap!(rng_state, fn(x) {
-        let mut v = x
-        v = v ^ (v << 13)
-        v = v ^ (v >> 17)
-        v = v ^ (v << 5)
-        v & 4294967295
-    })
-    deref(rng_state)
-}
-
-fn rand_float_01() {
-    to-float(next_rand()) / 4294967296.0
-}
-
-fn rand_range(lo, hi) {
-    lo + rand_float_01() * (hi - lo)
-}
-
-// Segment-blocked test: is there any wall between `from` and `to`?
-fn segment_blocked(from, to, walls) {
-    let dx = to.x - from.x
-    let dy = to.y - from.y
-    let len = sqrt(dx * dx + dy * dy)
-    if len < 0.0001 {
-        false
-    } else {
-        let dir = v/make(dx / len, dy / len)
-        let mut i = 0
-        let mut blocked = false
-        while i < length(walls) && !blocked {
-            let w = walls[i]
-            // Build 4 segments for the wall
-            let tl = v/make(w.center.x - w.half.x, w.center.y + w.half.y)
-            let tr = v/make(w.center.x + w.half.x, w.center.y + w.half.y)
-            let br = v/make(w.center.x + w.half.x, w.center.y - w.half.y)
-            let bl = v/make(w.center.x - w.half.x, w.center.y - w.half.y)
-            let t1 = ray_segment_hit(from, dir, tl, tr)
-            let t2 = ray_segment_hit(from, dir, tr, br)
-            let t3 = ray_segment_hit(from, dir, br, bl)
-            let t4 = ray_segment_hit(from, dir, bl, tl)
-            if (t1 > 0.0 && t1 < len) || (t2 > 0.0 && t2 < len) ||
-               (t3 > 0.0 && t3 < len) || (t4 > 0.0 && t4 < len) {
-                blocked = true
-            }
-            i = i + 1
-        }
-        blocked
-    }
-}
-
-// ============================================================
-// Monster AI
-// ============================================================
-
-let MONSTER_ALERT_TIMEOUT = 2.5
-
-fn advance_monster(m, player_pos, walls, dt) {
-    let to_player = v/sub(player_pos, m.pos)
-    let dist = v/length(to_player)
-    let in_range = dist < m.detection_range && dist > 0.1
-    let has_los = in_range && !segment_blocked(m.pos, player_pos, walls)
-
-    // Update notice accumulator / alert state.
-    let mut has_seen = m.has_seen
-    let mut time_since_los = m.time_since_los
-    let mut notice_acc = m.notice_acc
-    let mut notice_threshold = m.notice_threshold
-    if has_los {
-        if has_seen {
-            time_since_los = 0.0
-        } else {
-            notice_acc = notice_acc + dt
-            if notice_acc >= notice_threshold {
-                has_seen = true
-                time_since_los = 0.0
-            }
-        }
-    } else {
-        notice_acc = 0.0
-        if has_seen {
-            time_since_los = time_since_los + dt
-            if (!in_range) || time_since_los > MONSTER_ALERT_TIMEOUT {
-                has_seen = false
-                notice_threshold = rand_range(0.3, 1.5)
-            }
-        }
-    }
-
-    // Compute desired velocity.
-    let mut vx = 0.0
-    let mut vy = 0.0
-    let mut wander_dir = m.wander_dir
-    let mut wander_timer = m.wander_timer
-    if has_los && has_seen {
-        let dir = v/normalize_or_zero(to_player)
-        vx = dir.x * m.speed
-        vy = dir.y * m.speed
-    } else {
-        // Wander when calm.
-        wander_timer = wander_timer - dt
-        if wander_timer <= 0.0 {
-            if rand_float_01() < 0.3 {
-                wander_dir = v/ZERO
-                wander_timer = rand_range(1.0, 3.0)
-            } else {
-                let angle = rand_float_01() * 2.0 * 3.14159265
-                wander_dir = v/from_angle(angle)
-                wander_timer = rand_range(1.5, 4.0)
-            }
-        }
-        vx = wander_dir.x * m.speed * 0.3
-        vy = wander_dir.y * m.speed * 0.3
-    }
-
-    let vel = v/make(vx, vy)
-    let delta = v/scale(vel, dt)
-    let res = resolve_collision(m.pos, m.half, delta, walls, vel)
-
-    Monster {
-        ...m,
-        pos: res.pos,
-        prev: m.pos,
-        vel: res.vel,
-        has_seen: has_seen,
-        time_since_los: time_since_los,
-        notice_acc: notice_acc,
-        notice_threshold: notice_threshold,
-        wander_dir: wander_dir,
-        wander_timer: wander_timer
-    }
-}
-
-fn advance_all_monsters(monsters, player_pos, walls, dt) {
-    let mut result = []
-    let mut i = 0
-    while i < length(monsters) {
-        result = push(result, advance_monster(monsters[i], player_pos, walls, dt))
-        i = i + 1
-    }
-    result
-}
-
-fn draw_monster(m, camera) {
-    let body = if m.has_seen { r/rgb(255, 70, 70) } else { r/rgb(180, 60, 60) }
-    draw_world_rect(m.pos, m.half, body, camera)
-    draw_world_rect_lines(m.pos, m.half, r/rgb(40, 15, 15), camera)
-}
-
-// ============================================================
-// Sentinel AI
-// ============================================================
-
-fn advance_sentinel(s, player_pos, walls, dt) {
-    let deg2rad = 3.14159265 / 180.0
-    let to_player = v/sub(player_pos, s.pos)
-    let dist = v/length(to_player)
-    let aim_dir = v/from_angle(s.aim_angle)
-
-    let in_cone =
-        dist < s.light_range &&
-        dist > 0.1 &&
-        (v/dot(v/scale(to_player, 1.0 / dist), aim_dir) > cos(s.light_half_angle_deg * deg2rad)) &&
-        !segment_blocked(s.pos, player_pos, walls)
-
-    let mut vx = 0.0
-    let mut vy = 0.0
-    let mut new_angle = s.aim_angle
-    let mut new_sweep = s.sweep_dir
-    let mut new_alerted = s.alerted
-    if in_cone {
-        new_alerted = true
-        new_angle = atan2(to_player.y, to_player.x)
-        let dir = v/normalize_or_zero(to_player)
-        vx = dir.x * s.speed
-        vy = dir.y * s.speed
-    } else if s.alerted {
-        new_alerted = false
-    } else {
-        new_angle = s.aim_angle + s.sweep_speed * deg2rad * s.sweep_dir * dt
-        if v/abs_f(sin(new_angle)) < 0.01 || rand_float_01() < 0.002 {
-            new_sweep = 0.0 - s.sweep_dir
-        }
-    }
-
-    let vel = v/make(vx, vy)
-    let delta = v/scale(vel, dt)
-    let res = resolve_collision(s.pos, s.half, delta, walls, vel)
-
-    Sentinel {
-        ...s,
-        pos: res.pos,
-        prev: s.pos,
-        vel: res.vel,
-        aim_angle: new_angle,
-        sweep_dir: new_sweep,
-        alerted: new_alerted
-    }
-}
-
-fn advance_all_sentinels(sentinels, player_pos, walls, dt) {
-    let mut result = []
-    let mut i = 0
-    while i < length(sentinels) {
-        result = push(result, advance_sentinel(sentinels[i], player_pos, walls, dt))
-        i = i + 1
-    }
-    result
-}
-
-fn draw_sentinel(s, camera) {
-    let body = if s.alerted { r/rgb(255, 210, 80) } else { r/rgb(210, 170, 50) }
-    draw_world_rect(s.pos, s.half, body, camera)
-    draw_world_rect_lines(s.pos, s.half, r/rgb(30, 25, 10), camera)
-}
-
-// ============================================================
-// Shadow geometry — cast rays from light source to wall corners
-// (+/- EPS) and 16 filler angles, sort hits by angle, emit black
-// quads from each hit outward to `far_dist` pixels away. Those
-// quads cover the parts of the light overlay that should remain
-// dark even when inside the cone.
-// ============================================================
-
-let SHADOW_FAR_DIST = 5000.0
-let SHADOW_EPS = 0.0001
-let SHADOW_FILLER_RAYS = 16
-let SHADOW_TOP_REVEAL = 20.0       // wall-top fudge so shadow starts past corner
-
-struct RaySegHit {
-    hit
-    t
-}
-
-// Ray r(t) = origin + t*dir  vs.  segment a..b. Returns t or -1.0 if no hit.
-fn ray_segment_hit(origin, dir, a, b) {
-    let sx = b.x - a.x
-    let sy = b.y - a.y
-    let denom = dir.x * sy - dir.y * sx
-    if v/abs_f(denom) < 0.000001 {
-        0.0 - 1.0
-    } else {
-        let diffx = a.x - origin.x
-        let diffy = a.y - origin.y
-        let t = (diffx * sy - diffy * sx) / denom
-        let u = (diffx * dir.y - diffy * dir.x) / denom
-        if t >= 0.0 && u >= 0.0 && u <= 1.0 { t } else { 0.0 - 1.0 }
-    }
-}
-
-// Given a list of wall segments (each is {a: Vec2, b: Vec2}), cast a ray and
-// return the nearest positive t, or SHADOW_FAR_DIST if no hit.
-struct Segment {
-    a
-    b
-}
-
-fn cast_ray(origin, dir, segments) {
-    let mut best = SHADOW_FAR_DIST
-    let mut i = 0
-    while i < length(segments) {
-        let s = segments[i]
-        let t = ray_segment_hit(origin, dir, s.a, s.b)
-        if t > 0.0 && t < best { best = t }
-        i = i + 1
-    }
-    best
-}
-
-struct AngleHit {
-    angle
-    hit
-}
-
-// Insertion-sort a list of AngleHit by .angle (~80 items, trivial cost).
-fn sort_angle_hits(hits) {
-    let mut result = []
-    let mut i = 0
-    while i < length(hits) {
-        let cur = hits[i]
-        let mut j = 0
-        let mut inserted = false
-        let mut next = []
-        while j < length(result) {
-            let existing = result[j]
-            if (!inserted) && cur.angle < existing.angle {
-                next = push(next, cur)
-                inserted = true
-            }
-            next = push(next, existing)
-            j = j + 1
-        }
-        if !inserted { next = push(next, cur) }
-        result = next
-        i = i + 1
-    }
-    result
-}
-
-// Build segments (4 per wall) and corner points (4 per wall) in screen space.
-struct ShadowInput {
-    segments
-    corners
-}
-
-fn build_shadow_input(world) {
-    let mut segs = []
-    let mut corners = []
-    let mut i = 0
-    while i < length(world.walls) {
-        let w = world.walls[i]
-        // Convert the 4 world corners to screen space. World y is up, screen y is down,
-        // so top-left/bottom-right in screen space comes from different world corners.
-        let cw = world_to_screen(v/make(w.center.x, w.center.y), world.camera)
-        let hx = w.half.x
-        let hy = w.half.y
-        let tl = v/make(cw.x - hx, cw.y - hy)
-        let tr = v/make(cw.x + hx, cw.y - hy)
-        let br = v/make(cw.x + hx, cw.y + hy)
-        let bl = v/make(cw.x - hx, cw.y + hy)
-        segs = push(segs, Segment { a: tl, b: tr })
-        segs = push(segs, Segment { a: tr, b: br })
-        segs = push(segs, Segment { a: br, b: bl })
-        segs = push(segs, Segment { a: bl, b: tl })
-        corners = push(corners, tl)
-        corners = push(corners, tr)
-        corners = push(corners, br)
-        corners = push(corners, bl)
-        i = i + 1
-    }
-    ShadowInput { segments: segs, corners: corners }
-}
-
-fn draw_shadow_geometry(world) {
-    if length(world.walls) == 0 {
-        0
-    } else {
-        let input = build_shadow_input(world)
-        let segments = input.segments
-        let corners = input.corners
-        let light = world_to_screen(world.player.pos, world.camera)
-
-        // Collect all the angles: 3 per corner (a-EPS, a, a+EPS) plus filler rays.
-        let mut angles = []
-        let mut i = 0
-        while i < length(corners) {
-            let c = corners[i]
-            let a = atan2(c.y - light.y, c.x - light.x)
-            angles = push(angles, a - SHADOW_EPS)
-            angles = push(angles, a)
-            angles = push(angles, a + SHADOW_EPS)
-            i = i + 1
-        }
-        let pi = 3.14159265
-        let two_pi = 2.0 * pi
-        let mut k = 0
-        while k < SHADOW_FILLER_RAYS {
-            let a = 0.0 - pi + to-float(k) / to-float(SHADOW_FILLER_RAYS) * two_pi
-            angles = push(angles, a)
-            k = k + 1
-        }
-
-        // Cast each ray, collect (angle, hit_point).
-        let mut hits = []
-        let mut j = 0
-        while j < length(angles) {
-            let a = angles[j]
-            let dir = v/from_angle(a)
-            let t = cast_ray(light, dir, segments)
-            let hp = v/make(light.x + dir.x * t, light.y + dir.y * t)
-            hits = push(hits, AngleHit { angle: a, hit: hp })
-            j = j + 1
-        }
-
-        let sorted = sort_angle_hits(hits)
-
-        // Emit quads between each adjacent pair of hits.
-        let n = length(sorted)
-        r/gl_begin(r/RL_TRIANGLES)
-        r/gl_color_4ub(0, 0, 0, 255)
-        let mut m = 0
-        while m < n {
-            let ii = sorted[m]
-            let next_idx = if m + 1 >= n { 0 } else { m + 1 }
-            let jj = sorted[next_idx]
-            let di = v/from_angle(ii.angle)
-            let dj = v/from_angle(jj.angle)
-            // Pull the near edge a little outward so the wall top isn't fully masked.
-            let pi_pt = v/make(ii.hit.x + di.x * SHADOW_TOP_REVEAL,
-                               ii.hit.y + di.y * SHADOW_TOP_REVEAL)
-            let pj_pt = v/make(jj.hit.x + dj.x * SHADOW_TOP_REVEAL,
-                               jj.hit.y + dj.y * SHADOW_TOP_REVEAL)
-            let fi = v/make(light.x + di.x * SHADOW_FAR_DIST,
-                            light.y + di.y * SHADOW_FAR_DIST)
-            let fj = v/make(light.x + dj.x * SHADOW_FAR_DIST,
-                            light.y + dj.y * SHADOW_FAR_DIST)
-            // Two triangles form the quad (pi_pt, pj_pt, fj, fi).
-            r/gl_vertex_2f(pi_pt.x, pi_pt.y)
-            r/gl_vertex_2f(pj_pt.x, pj_pt.y)
-            r/gl_vertex_2f(fj.x, fj.y)
-
-            r/gl_vertex_2f(pi_pt.x, pi_pt.y)
-            r/gl_vertex_2f(fj.x, fj.y)
-            r/gl_vertex_2f(fi.x, fi.y)
-            m = m + 1
-        }
-        r/gl_end()
-        1
-    }
-}
-
-// ============================================================
-// Shader context — owns the shader and pre-allocated uniform buffers
-// ============================================================
-
-struct ScreenLight {
-    pos_x
-    pos_y
-    dir_x
-    dir_y
-    cos_half
-    range
-    intensity
-}
-
-struct ShaderCtx {
-    shader
-    loc_player_pos
-    loc_aim_dir
-    loc_cos_half
-    loc_range
-    loc_ambient
-    loc_intensity
-    loc_resolution
-    loc_extra_count
-    loc_extras_pos
-    loc_extras_dir
-    loc_extras_cos
-    loc_extras_range
-    loc_extras_intensity
-    buf_vec2
-    buf_float
-    buf_int
-    buf_extras_pos
-    buf_extras_dir
-    buf_extras_cos
-    buf_extras_range
-    buf_extras_intensity
-}
-
-fn load_cone_light_shader() {
-    let s = r/load_shader(null, CONE_LIGHT_FRAGMENT_SHADER)
-    ShaderCtx {
-        shader: s,
-        loc_player_pos: r/shader_location(s, "player_pos"),
-        loc_aim_dir: r/shader_location(s, "aim_dir"),
-        loc_cos_half: r/shader_location(s, "cos_half_angle"),
-        loc_range: r/shader_location(s, "range"),
-        loc_ambient: r/shader_location(s, "ambient"),
-        loc_intensity: r/shader_location(s, "intensity"),
-        loc_resolution: r/shader_location(s, "resolution"),
-        loc_extra_count: r/shader_location(s, "extra_count"),
-        loc_extras_pos: r/shader_location(s, "extras_pos"),
-        loc_extras_dir: r/shader_location(s, "extras_dir"),
-        loc_extras_cos: r/shader_location(s, "extras_cos"),
-        loc_extras_range: r/shader_location(s, "extras_range"),
-        loc_extras_intensity: r/shader_location(s, "extras_intensity"),
-        // Staging cells for single-value uniforms. Shader writes flow through
-        // raylib which reads raw bytes — Cell/TypedArray auto-unwrap the ptr.
-        buf_vec2: ffi/array(ffi/Type.F32, 2),
-        buf_float: ffi/cell(ffi/Type.F32, 0),
-        buf_int: ffi/cell(ffi/Type.I32, 0),
-        // Typed arrays: element index is a slot, not a byte offset.
-        buf_extras_pos: ffi/array(ffi/Type.F32, 2 * MAX_EXTRA_LIGHTS),
-        buf_extras_dir: ffi/array(ffi/Type.F32, 2 * MAX_EXTRA_LIGHTS),
-        buf_extras_cos: ffi/array(ffi/Type.F32, MAX_EXTRA_LIGHTS),
-        buf_extras_range: ffi/array(ffi/Type.F32, MAX_EXTRA_LIGHTS),
-        buf_extras_intensity: ffi/array(ffi/Type.F32, MAX_EXTRA_LIGHTS)
-    }
-}
-
-fn set_uniform_vec2(ctx, loc, x, y) {
-    ffi/array-set(ctx.buf_vec2, 0, x)
-    ffi/array-set(ctx.buf_vec2, 1, y)
-    r/set_shader_value(ctx.shader, loc, ctx.buf_vec2, r/SHADER_UNIFORM_VEC2)
-}
-fn set_uniform_float(ctx, loc, x) {
-    ffi/cell-set(ctx.buf_float, x)
-    r/set_shader_value(ctx.shader, loc, ctx.buf_float, r/SHADER_UNIFORM_FLOAT)
-}
-fn set_uniform_int(ctx, loc, x) {
-    ffi/cell-set(ctx.buf_int, x)
-    r/set_shader_value(ctx.shader, loc, ctx.buf_int, r/SHADER_UNIFORM_INT)
-}
-
-fn upload_cone_uniforms(ctx, world, sentinel_screen_lights) {
-    let tuning = world.tuning
-    // macOS Retina: the shader's gl_FragCoord is in PHYSICAL framebuffer
-    // pixels (e.g. 2560x1440) while our world_to_screen returns LOGICAL
-    // window pixels (e.g. 1280x720). Scale everything the shader sees by the
-    // render/window ratio so the light origin actually lands on the sprite.
-    let rw = to-float(r/render_width())
-    let rh = to-float(r/render_height())
-    // Ratio between physical (render) and logical (window) pixels.
-    let sx = rw / to-float(r/screen_width())
-    let sy = rh / to-float(r/screen_height())
-    let player_screen = world_to_screen(world.player.pos, world.camera)
-    set_uniform_vec2(ctx, ctx.loc_player_pos, player_screen.x * sx, player_screen.y * sy)
-    set_uniform_vec2(ctx, ctx.loc_aim_dir,
-                     world.player.aim.x, 0.0 - world.player.aim.y)
-    let deg2rad = 3.14159265 / 180.0
-    set_uniform_float(ctx, ctx.loc_cos_half, cos(tuning.light_half_angle_deg * deg2rad))
-    // Ranges are in pixels — scale to physical too.
-    set_uniform_float(ctx, ctx.loc_range, tuning.light_range * sx)
-    set_uniform_float(ctx, ctx.loc_ambient, tuning.ambient)
-    set_uniform_float(ctx, ctx.loc_intensity, tuning.light_intensity)
-    set_uniform_vec2(ctx, ctx.loc_resolution, rw, rh)
-
-    let count = length(sentinel_screen_lights)
-    let capped = if count > MAX_EXTRA_LIGHTS { MAX_EXTRA_LIGHTS } else { count }
-    set_uniform_int(ctx, ctx.loc_extra_count, capped)
-    let mut i = 0
-    while i < capped {
-        let e = sentinel_screen_lights[i]
-        // pos/dir are F32 pairs: two slots per light. cos/range/intensity
-        // are one slot per light. Index is an element number, not bytes.
-        ffi/array-set(ctx.buf_extras_pos, i * 2,     e.pos_x * sx)
-        ffi/array-set(ctx.buf_extras_pos, i * 2 + 1, e.pos_y * sy)
-        ffi/array-set(ctx.buf_extras_dir, i * 2,     e.dir_x)
-        ffi/array-set(ctx.buf_extras_dir, i * 2 + 1, e.dir_y)
-        ffi/array-set(ctx.buf_extras_cos, i, e.cos_half)
-        ffi/array-set(ctx.buf_extras_range, i, e.range * sx)
-        ffi/array-set(ctx.buf_extras_intensity, i, e.intensity)
-        i = i + 1
-    }
-    r/set_shader_value_v(ctx.shader, ctx.loc_extras_pos, ctx.buf_extras_pos,
-                         r/SHADER_UNIFORM_VEC2, MAX_EXTRA_LIGHTS)
-    r/set_shader_value_v(ctx.shader, ctx.loc_extras_dir, ctx.buf_extras_dir,
-                         r/SHADER_UNIFORM_VEC2, MAX_EXTRA_LIGHTS)
-    r/set_shader_value_v(ctx.shader, ctx.loc_extras_cos, ctx.buf_extras_cos,
-                         r/SHADER_UNIFORM_FLOAT, MAX_EXTRA_LIGHTS)
-    r/set_shader_value_v(ctx.shader, ctx.loc_extras_range, ctx.buf_extras_range,
-                         r/SHADER_UNIFORM_FLOAT, MAX_EXTRA_LIGHTS)
-    r/set_shader_value_v(ctx.shader, ctx.loc_extras_intensity, ctx.buf_extras_intensity,
-                         r/SHADER_UNIFORM_FLOAT, MAX_EXTRA_LIGHTS)
-}
-
-// ============================================================
-// Game loop — recursive tail call, no mutable globals
-// ============================================================
-
 fn initial_world() {
-    let p = Player {
+    let p = g/Player {
         pos: v/ZERO, prev: v/ZERO, vel: v/ZERO,
         half: v/make(14.0, 14.0),
         aim: v/UNIT_X,
@@ -1044,109 +114,35 @@ fn initial_world() {
     }
     World {
         player: p,
-        walls: default_walls(),
-        monsters: [default_monster(v/make(400.0, 120.0)),
-                   default_monster(v/make(0.0 - 380.0, 0.0 - 120.0))],
-        sentinels: [default_sentinel(v/make(200.0, 0.0 - 340.0)),
-                    default_sentinel(v/make(0.0 - 500.0, 240.0))],
+        walls: g/default_walls(),
+        monsters: [e/default_monster(v/make(400.0, 120.0)),
+                   e/default_monster(v/make(0.0 - 380.0, 0.0 - 120.0))],
+        sentinels: [e/default_sentinel(v/make(200.0, 0.0 - 340.0)),
+                    e/default_sentinel(v/make(0.0 - 500.0, 240.0))],
         camera: v/ZERO,
-        tuning: default_tuning(),
+        tuning: g/default_tuning(),
         mode: MODE_PLAYING,
         frame: 0,
         editor: default_editor()
     }
 }
 
-fn update_aim(player, camera) {
-    let mouse = screen_to_world(r/mouse_x(), r/mouse_y(), camera)
-    let delta = v/sub(mouse, player.pos)
-    if v/length_sq(delta) > 1.0 {
-        Player { ...player, aim: v/normalize_or_zero(delta) }
-    } else {
-        player
-    }
-}
-
-// Monster attack system: any monster within its attack_reach of the player
-// applies damage (if not in iframes). Damaged players respawn at origin.
-// Pick a respawn point that is clear of every monster's reach and every
-// wall's AABB. Falls back to (0, 0) if nothing better is found (shouldn't
-// happen with the default level).
-fn pick_respawn(player, monsters, walls) {
-    // Spiral outward from origin in 40-px rings until we find a clear spot.
-    let candidates = [
-        v/make(0.0, 0.0),
-        v/make(40.0, 0.0),  v/make(0.0 - 40.0, 0.0),
-        v/make(0.0, 40.0),  v/make(0.0, 0.0 - 40.0),
-        v/make(80.0, 0.0),  v/make(0.0 - 80.0, 0.0),
-        v/make(0.0, 80.0),  v/make(0.0, 0.0 - 80.0),
-        v/make(160.0, 0.0), v/make(0.0 - 160.0, 0.0)
-    ]
-    let mut chosen = v/ZERO
-    let mut found = false
-    let mut i = 0
-    while i < length(candidates) && !found {
-        let c = candidates[i]
-        let mut clear = true
-        let mut j = 0
-        while j < length(monsters) && clear {
-            if v/length(v/sub(c, monsters[j].pos)) < monsters[j].attack_reach + player.half.x + 8.0 {
-                clear = false
-            }
-            j = j + 1
-        }
-        let mut k = 0
-        while k < length(walls) && clear {
-            if v/aabb_overlap(c, player.half, walls[k].center, walls[k].half) {
-                clear = false
-            }
-            k = k + 1
-        }
-        if clear { chosen = c; found = true }
-        i = i + 1
-    }
-    chosen
-}
-
-fn apply_monster_attacks(player, monsters, walls) {
-    if player.iframes > 0.0 {
-        player
-    } else {
-        let mut hp = player.hp
-        let mut hit = false
-        let mut i = 0
-        while i < length(monsters) {
-            let m = monsters[i]
-            let d = v/length(v/sub(player.pos, m.pos))
-            if d < m.attack_reach + player.half.x {
-                hp = hp - m.strength
-                hit = true
-            }
-            i = i + 1
-        }
-        if !hit {
-            player
-        } else if hp <= 0.0 {
-            let spawn = pick_respawn(player, monsters, walls)
-            Player { ...player, pos: spawn, prev: spawn, vel: v/ZERO, hp: 5.0, iframes: 2.0 }
-        } else {
-            Player { ...player, hp: hp, iframes: 0.75 }
-        }
-    }
-}
+// ============================================================
+// Play-mode tick
+// ============================================================
 
 fn playing_tick(world) {
     let tuning = world.tuning
-    let dt = current_dt()
-    let desired = read_desired_dir()
-    let speed_mult = read_speed_mult(tuning)
-    let player_a = advance_player(world.player, tuning, world.walls, desired, speed_mult, dt)
+    let dt = g/current_dt()
+    let desired = g/read_desired_dir()
+    let speed_mult = g/read_speed_mult(tuning)
+    let player_a = g/advance_player(world.player, tuning, world.walls, desired, speed_mult, dt)
     // Update camera first so aim uses the same camera the renderer will use.
-    let camera = update_camera(world.camera, player_a.pos, tuning.camera_smoothing, dt)
-    let player_b = update_aim(player_a, camera)
-    let monsters = advance_all_monsters(world.monsters, player_b.pos, world.walls, dt)
-    let sentinels = advance_all_sentinels(world.sentinels, player_b.pos, world.walls, dt)
-    let player_c = apply_monster_attacks(player_b, monsters, world.walls)
+    let camera = g/update_camera(world.camera, player_a.pos, tuning.camera_smoothing, dt)
+    let player_b = g/update_aim(player_a, camera)
+    let monsters = e/advance_all_monsters(world.monsters, player_b.pos, world.walls, dt)
+    let sentinels = e/advance_all_sentinels(world.sentinels, player_b.pos, world.walls, dt)
+    let player_c = g/apply_monster_attacks(player_b, monsters, world.walls)
     World {
         ...world,
         frame: world.frame + 1,
@@ -1158,362 +154,7 @@ fn playing_tick(world) {
 }
 
 // ============================================================
-// Y-sort — draw entities in order of their "ground y" so things in
-// front properly overlap things behind (fake 2.5D depth).
-// ============================================================
-//
-// Each drawable carries a ground_y key + enough payload to render itself.
-// We insertion-sort by ground_y descending (highest world-y drawn first =
-// furthest back) then match to dispatch.
-
-enum Drawable {
-    Wall { index, ground_y },
-    Monster { index, ground_y },
-    Sentinel { index, ground_y },
-    Player { ground_y }
-}
-
-fn drawable_ground_y(d) {
-    match d {
-        Drawable.Wall { index, ground_y } => ground_y,
-        Drawable.Monster { index, ground_y } => ground_y,
-        Drawable.Sentinel { index, ground_y } => ground_y,
-        Drawable.Player { ground_y } => ground_y
-    }
-}
-
-fn ysort_drawables(world) {
-    let mut items = []
-    let mut i = 0
-    while i < length(world.walls) {
-        let w = world.walls[i]
-        // Sort the whole wall (top + front face) by the top face's south edge.
-        // Using the front face's south edge instead makes walls sort *in front*
-        // of any player standing south of them, so the wall is drawn on top of
-        // the player and it looks like collision isn't working.
-        let gy = w.center.y - w.half.y
-        items = push(items, Drawable.Wall { index: i, ground_y: gy })
-        i = i + 1
-    }
-    let mut m = 0
-    while m < length(world.monsters) {
-        let mm = world.monsters[m]
-        items = push(items, Drawable.Monster { index: m, ground_y: mm.pos.y - mm.half.y })
-        m = m + 1
-    }
-    let mut s = 0
-    while s < length(world.sentinels) {
-        let ss = world.sentinels[s]
-        items = push(items, Drawable.Sentinel { index: s, ground_y: ss.pos.y - ss.half.y })
-        s = s + 1
-    }
-    let p = world.player
-    items = push(items, Drawable.Player { ground_y: p.pos.y - p.half.y })
-
-    // Insertion sort descending by ground_y (small N, fine).
-    let mut sorted = []
-    let mut j = 0
-    while j < length(items) {
-        let cur = items[j]
-        let cur_y = drawable_ground_y(cur)
-        let mut k = 0
-        let mut inserted = false
-        let mut next = []
-        while k < length(sorted) {
-            let ex = sorted[k]
-            if (!inserted) && cur_y > drawable_ground_y(ex) {
-                next = push(next, cur)
-                inserted = true
-            }
-            next = push(next, ex)
-            k = k + 1
-        }
-        if !inserted { next = push(next, cur) }
-        sorted = next
-        j = j + 1
-    }
-    sorted
-}
-
-fn draw_scene_ysorted(world) {
-    let items = ysort_drawables(world)
-    let mut i = 0
-    while i < length(items) {
-        match items[i] {
-            Drawable.Wall     { index, ground_y } => draw_wall(world.walls[index], world.camera),
-            Drawable.Monster  { index, ground_y } => draw_monster(world.monsters[index], world.camera),
-            Drawable.Sentinel { index, ground_y } => draw_sentinel(world.sentinels[index], world.camera),
-            Drawable.Player   { ground_y }        => draw_player(world.player, world.camera)
-        }
-        i = i + 1
-    }
-}
-
-// Build the per-frame list of sentinel extra lights in screen space.
-fn sentinel_screen_lights(world) {
-    let deg2rad = 3.14159265 / 180.0
-    let mut result = []
-    let mut i = 0
-    while i < length(world.sentinels) {
-        let s = world.sentinels[i]
-        let screen = world_to_screen(s.pos, world.camera)
-        result = push(result, ScreenLight {
-            pos_x: screen.x,
-            pos_y: screen.y,
-            dir_x: cos(s.aim_angle),
-            dir_y: 0.0 - sin(s.aim_angle),  // y-flip for screen coords
-            cos_half: cos(s.light_half_angle_deg * deg2rad),
-            range: s.light_range,
-            intensity: s.light_intensity
-        })
-        i = i + 1
-    }
-    result
-}
-
-// ============================================================
-// Editor rendering — scene view without lighting + raygui sidebar panel.
-// ============================================================
-
-fn draw_editor_selection(world) {
-    match world.editor.selection {
-        Selection.None => 0,
-        Selection.Wall { index } => {
-            if index < length(world.walls) {
-                let w = world.walls[index]
-                draw_world_rect_lines(w.center,
-                                      v/make(w.half.x + 3.0, w.half.y + 3.0),
-                                      r/YELLOW, world.camera)
-            } else { 0 }
-        },
-        Selection.Monster { index } => {
-            if index < length(world.monsters) {
-                let m = world.monsters[index]
-                draw_world_rect_lines(m.pos,
-                                      v/make(m.half.x + 4.0, m.half.y + 4.0),
-                                      r/YELLOW, world.camera)
-            } else { 0 }
-        },
-        Selection.Sentinel { index } => {
-            if index < length(world.sentinels) {
-                let s = world.sentinels[index]
-                draw_world_rect_lines(s.pos,
-                                      v/make(s.half.x + 4.0, s.half.y + 4.0),
-                                      r/YELLOW, world.camera)
-            } else { 0 }
-        }
-    }
-}
-
-fn draw_editor_drag_preview(world) {
-    let ed = world.editor
-    if ed.drag_start != null {
-        match ed.tool {
-            Tool.Wall => {
-                let mouse = screen_to_world(r/mouse_x(), r/mouse_y(), world.camera)
-                let cx = (ed.drag_start.x + mouse.x) * 0.5
-                let cy = (ed.drag_start.y + mouse.y) * 0.5
-                let hx = v/abs_f(ed.drag_start.x - mouse.x) * 0.5
-                let hy = v/abs_f(ed.drag_start.y - mouse.y) * 0.5
-                draw_world_rect_lines(v/make(cx, cy), v/make(hx, hy),
-                                      r/rgb(120, 200, 255), world.camera)
-            },
-            _ => 0
-        }
-    } else { 0 }
-}
-
-fn draw_editor_grid(world) {
-    // A 64-pixel grid drawn as faint lines, anchored by the camera.
-    let step = 64.0
-    let cam = world.camera
-    let half_w = 0.5 * to-float(r/screen_width())
-    let half_h = 0.5 * to-float(r/screen_height())
-    let left = cam.x - half_w
-    let right = cam.x + half_w
-    let bottom = cam.y - half_h
-    let top = cam.y + half_h
-    let faint = r/color(255, 255, 255, 20)
-    let mut x = floor(left / step) * step
-    while x < right {
-        let s1 = world_to_screen(v/make(x, bottom), cam)
-        let s2 = world_to_screen(v/make(x, top), cam)
-        r/draw_line(to-int(s1.x), to-int(s1.y), to-int(s2.x), to-int(s2.y), faint)
-        x = x + step
-    }
-    let mut y = floor(bottom / step) * step
-    while y < top {
-        let s1 = world_to_screen(v/make(left, y), cam)
-        let s2 = world_to_screen(v/make(right, y), cam)
-        r/draw_line(to-int(s1.x), to-int(s1.y), to-int(s2.x), to-int(s2.y), faint)
-        y = y + step
-    }
-}
-
-// The right-hand raygui panel. Returns the (possibly updated) Tuning.
-fn draw_editor_panel(world, ui_bufs) {
-    let panel_x = to-float(r/screen_width()) - 260.0
-    r/panel(panel_x, 0.0, 260.0, to-float(r/screen_height()), "Editor")
-
-    // Status.
-    r/label(panel_x + 10.0, 30.0, 240.0, 20.0,
-            "tool + tune, Tab plays, Del removes")
-    r/label(panel_x + 10.0, 52.0, 240.0, 20.0, world.editor.status_text)
-
-    // Tool toggle group — slot is an i32 buffer we persist in the Editor struct.
-    // Per-toggle width: 4 toggles must fit in (panel_w - 20) = 240 px, so each
-    // toggle is 55 px wide (4*55 = 220 < 240). The label at y=78 cues users.
-    r/label(panel_x + 10.0, 78.0, 80.0, 20.0, "Tool:")
-    r/toggle_group(panel_x + 10.0, 98.0, 55.0, 26.0,
-                   "Select;Wall;Monster;Sentinel", world.editor.tool_slot)
-
-    // Slider helper closures are awkward — do them inline.
-    let sx = panel_x + 80.0
-    let sw = 150.0
-    let mut y = 140.0
-    r/slider(sx, y, sw, 18.0, "speed",   "", ui_bufs.max_speed, 0.0, 1000.0); y = y + 24.0
-    r/slider(sx, y, sw, 18.0, "accel",   "", ui_bufs.accel, 0.0, 10000.0); y = y + 24.0
-    r/slider(sx, y, sw, 18.0, "frict",   "", ui_bufs.friction, 0.0, 10000.0); y = y + 24.0
-    r/slider(sx, y, sw, 18.0, "light r", "", ui_bufs.light_range, 50.0, 2000.0); y = y + 24.0
-    r/slider(sx, y, sw, 18.0, "cone °",  "", ui_bufs.light_half_angle_deg, 1.0, 180.0); y = y + 24.0
-    r/slider(sx, y, sw, 18.0, "lightI",  "", ui_bufs.light_intensity, 0.0, 4.0); y = y + 24.0
-    r/slider(sx, y, sw, 18.0, "ambient", "", ui_bufs.ambient, 0.0, 1.0); y = y + 24.0
-    r/slider(sx, y, sw, 18.0, "cam smth","", ui_bufs.camera_smoothing, 0.0, 30.0); y = y + 24.0
-    r/slider(sx, y, sw, 18.0, "run x",   "", ui_bufs.run_mult, 1.0, 4.0); y = y + 24.0
-    r/slider(sx, y, sw, 18.0, "sneak x", "", ui_bufs.sneak_mult, 0.1, 1.0); y = y + 30.0
-
-    // Save / Load.
-    let save_pressed = r/button(panel_x + 10.0, y, 110.0, 28.0, "Save") != 0
-    let load_pressed = r/button(panel_x + 130.0, y, 110.0, 28.0, "Load") != 0
-
-    SaveLoadResult {
-        save: save_pressed,
-        load: load_pressed,
-        new_tuning: read_tuning_from_ui(ui_bufs)
-    }
-}
-
-struct SaveLoadResult {
-    save
-    load
-    new_tuning
-}
-
-fn render_editor(world, shader_ctx, ui_bufs) {
-    r/begin_drawing()
-    r/clear_background(r/rgb(25, 30, 38))
-
-    draw_editor_grid(world)
-
-    let mut i = 0
-    while i < length(world.walls) {
-        draw_wall(world.walls[i], world.camera)
-        i = i + 1
-    }
-    let mut mi = 0
-    while mi < length(world.monsters) {
-        draw_monster(world.monsters[mi], world.camera)
-        mi = mi + 1
-    }
-    let mut si = 0
-    while si < length(world.sentinels) {
-        draw_sentinel(world.sentinels[si], world.camera)
-        si = si + 1
-    }
-    draw_player(world.player, world.camera)
-
-    draw_editor_selection(world)
-    draw_editor_drag_preview(world)
-
-    r/draw_text("EDITING — Tab=play  WASD=pan  LMB=place  RMB=select  Del=delete",
-                10, 10, 18, r/rgb(230, 215, 140))
-
-    let ui = draw_editor_panel(world, ui_bufs)
-
-    r/end_drawing()
-    ui
-}
-
-fn render_world(world, shader_ctx) {
-    r/begin_drawing()
-    r/clear_background(r/rgb(18, 20, 28))
-
-    // Scene — all drawables Y-sorted so things in front overlap things behind.
-    draw_scene_ysorted(world)
-
-    // Cone-light darkness overlay + shadow mesh. Toggleable via F1 for debugging.
-    if world.editor.lighting_enabled {
-        let lights = sentinel_screen_lights(world)
-        upload_cone_uniforms(shader_ctx, world, lights)
-        r/begin_shader_mode(shader_ctx.shader)
-        r/draw_rectangle(0, 0, r/screen_width(), r/screen_height(), r/WHITE)
-        r/end_shader_mode()
-        draw_shadow_geometry(world)
-    }
-
-    // Debug overlays — outline boxes + aim lines for player and each sentinel.
-    // Only shown when lighting is toggled off via F1; the cone itself is the
-    // gameplay cue in normal play.
-    if !world.editor.lighting_enabled {
-        draw_player_indicator(world)
-        draw_sentinel_indicators(world)
-    }
-
-    // HUD on top of lighting.
-    r/draw_text("WASD/arrows move  Shift=run  Ctrl=sneak  Tab=edit  ESC=quit",
-                10, 10, 18, r/LIGHTGRAY)
-    r/draw_fps(10, 35)
-
-    // HP bar.
-    let hp_w = to-int(world.player.hp * 20.0)
-    let hp_y = r/screen_height() - 30
-    r/draw_rectangle(10, hp_y, 100, 16, r/rgb(60, 20, 20))
-    if hp_w > 0 { r/draw_rectangle(10, hp_y, hp_w, 16, r/rgb(220, 60, 60)) }
-    r/draw_rectangle_lines(10, hp_y, 100, 16, r/WHITE)
-    r/draw_text("HP", 115, hp_y - 2, 18, r/WHITE)
-
-    r/end_drawing()
-}
-
-// Contrast outline + aim-direction line rendered after the shadow overlay
-// so the player is always findable regardless of lighting state.
-fn draw_player_indicator(world) {
-    let p = world.player
-    let ps = world_to_screen(p.pos, world.camera)
-    let hx = p.half.x
-    let hy = p.half.y
-    let outline = if p.iframes > 0.0 { r/rgb(255, 220, 120) } else { r/WHITE }
-    r/draw_rectangle_lines(to-int(ps.x - hx), to-int(ps.y - hy),
-                           to-int(2.0 * hx), to-int(2.0 * hy), outline)
-    r/draw_circle(to-int(ps.x), to-int(ps.y), 2.0, outline)
-    // Aim direction — world y is up, screen y is down, so negate y.
-    let tip_x = ps.x + p.aim.x * 28.0
-    let tip_y = ps.y - p.aim.y * 28.0
-    r/draw_line(to-int(ps.x), to-int(ps.y), to-int(tip_x), to-int(tip_y), outline)
-}
-
-// Aim line + position dot for each sentinel, drawn on top of the overlay.
-// Makes it unambiguous where a sentinel is looking and confirms the uploaded
-// cone-light origin matches the sprite.
-fn draw_sentinel_indicators(world) {
-    let mut i = 0
-    while i < length(world.sentinels) {
-        let s = world.sentinels[i]
-        let sp = world_to_screen(s.pos, world.camera)
-        let outline = if s.alerted { r/rgb(255, 120, 60) } else { r/rgb(230, 200, 120) }
-        r/draw_rectangle_lines(to-int(sp.x - s.half.x), to-int(sp.y - s.half.y),
-                               to-int(2.0 * s.half.x), to-int(2.0 * s.half.y), outline)
-        // Aim direction. aim_angle is in world coords — flip y for screen.
-        let tip_x = sp.x + cos(s.aim_angle) * 40.0
-        let tip_y = sp.y - sin(s.aim_angle) * 40.0
-        r/draw_line(to-int(sp.x), to-int(sp.y), to-int(tip_x), to-int(tip_y), outline)
-        i = i + 1
-    }
-}
-
-// ============================================================
 // Editor UI state — persistent buffers the raygui widgets read/write.
-// Created once at startup; mutated in-place each frame.
 // ============================================================
 
 struct UiBuffers {
@@ -1544,9 +185,8 @@ fn alloc_ui_buffers(t) {
     }
 }
 
-// Read the buffers back into a fresh Tuning.
 fn read_tuning_from_ui(bufs) {
-    Tuning {
+    g/Tuning {
         max_speed:            ffi/cell-get(bufs.max_speed),
         accel:                ffi/cell-get(bufs.accel),
         friction:             ffi/cell-get(bufs.friction),
@@ -1561,19 +201,170 @@ fn read_tuning_from_ui(bufs) {
 }
 
 // ============================================================
-// Editor logic
+// Editor rendering — grid, selection outlines, drag preview, side panel
 // ============================================================
 
-let LEVEL_PATH = "/Users/jimmyhmiller/Documents/Code/PlayGround/beagle-zelda/levels/level.txt"
-let EDITOR_CAMERA_SPEED = 600.0
-let EDITOR_SELECT_RADIUS = 22.0
-
-// Convert screen mouse → world, respecting editor's free camera.
-fn editor_world_mouse(world) {
-    screen_to_world(r/mouse_x(), r/mouse_y(), world.camera)
+fn draw_editor_selection(world) {
+    match world.editor.selection {
+        Selection.None => 0,
+        Selection.Wall { index } => {
+            if index < length(world.walls) {
+                let w = world.walls[index]
+                render/draw_world_rect_lines(w.center,
+                                             v/make(w.half.x + 3.0, w.half.y + 3.0),
+                                             r/YELLOW, world.camera)
+            } else { 0 }
+        },
+        Selection.Monster { index } => {
+            if index < length(world.monsters) {
+                let m = world.monsters[index]
+                render/draw_world_rect_lines(m.pos,
+                                             v/make(m.half.x + 4.0, m.half.y + 4.0),
+                                             r/YELLOW, world.camera)
+            } else { 0 }
+        },
+        Selection.Sentinel { index } => {
+            if index < length(world.sentinels) {
+                let s = world.sentinels[index]
+                render/draw_world_rect_lines(s.pos,
+                                             v/make(s.half.x + 4.0, s.half.y + 4.0),
+                                             r/YELLOW, world.camera)
+            } else { 0 }
+        }
+    }
 }
 
-// Find an entity under `p` within EDITOR_SELECT_RADIUS. Returns a Selection.
+fn draw_editor_drag_preview(world) {
+    let ed = world.editor
+    if ed.drag_start != null {
+        match ed.tool {
+            Tool.Wall => {
+                let mouse = g/screen_to_world(r/mouse_x(), r/mouse_y(), world.camera)
+                let cx = (ed.drag_start.x + mouse.x) * 0.5
+                let cy = (ed.drag_start.y + mouse.y) * 0.5
+                let hx = v/abs_f(ed.drag_start.x - mouse.x) * 0.5
+                let hy = v/abs_f(ed.drag_start.y - mouse.y) * 0.5
+                render/draw_world_rect_lines(v/make(cx, cy), v/make(hx, hy),
+                                             r/rgb(120, 200, 255), world.camera)
+            },
+            _ => 0
+        }
+    } else { 0 }
+}
+
+fn draw_editor_grid(world) {
+    // A 64-pixel grid drawn as faint lines, anchored by the camera.
+    let step = 64.0
+    let cam = world.camera
+    let half_w = 0.5 * to-float(r/screen_width())
+    let half_h = 0.5 * to-float(r/screen_height())
+    let left = cam.x - half_w
+    let right = cam.x + half_w
+    let bottom = cam.y - half_h
+    let top = cam.y + half_h
+    let faint = r/color(255, 255, 255, 20)
+    let mut x = floor(left / step) * step
+    while x < right {
+        let s1 = g/world_to_screen(v/make(x, bottom), cam)
+        let s2 = g/world_to_screen(v/make(x, top), cam)
+        r/draw_line(to-int(s1.x), to-int(s1.y), to-int(s2.x), to-int(s2.y), faint)
+        x = x + step
+    }
+    let mut y = floor(bottom / step) * step
+    while y < top {
+        let s1 = g/world_to_screen(v/make(left, y), cam)
+        let s2 = g/world_to_screen(v/make(right, y), cam)
+        r/draw_line(to-int(s1.x), to-int(s1.y), to-int(s2.x), to-int(s2.y), faint)
+        y = y + step
+    }
+}
+
+struct SaveLoadResult {
+    save
+    load
+    new_tuning
+}
+
+// The right-hand raygui panel. Returns pressed-flags + the (possibly
+// updated) Tuning read back from the sliders.
+fn draw_editor_panel(world, ui_bufs) {
+    let panel_x = to-float(r/screen_width()) - 260.0
+    r/panel(panel_x, 0.0, 260.0, to-float(r/screen_height()), "Editor")
+
+    r/label(panel_x + 10.0, 30.0, 240.0, 20.0,
+            "tool + tune, Tab plays, Del removes")
+    r/label(panel_x + 10.0, 52.0, 240.0, 20.0, world.editor.status_text)
+
+    // Tool toggle group — slot is an i32 buffer we persist in the Editor struct.
+    // Per-toggle width: 4 toggles must fit in (panel_w - 20) = 240 px, so each
+    // toggle is 55 px wide (4*55 = 220 < 240). The label at y=78 cues users.
+    r/label(panel_x + 10.0, 78.0, 80.0, 20.0, "Tool:")
+    r/toggle_group(panel_x + 10.0, 98.0, 55.0, 26.0,
+                   "Select;Wall;Monster;Sentinel", world.editor.tool_slot)
+
+    let sx = panel_x + 80.0
+    let sw = 150.0
+    let mut y = 140.0
+    r/slider(sx, y, sw, 18.0, "speed",   "", ui_bufs.max_speed, 0.0, 1000.0); y = y + 24.0
+    r/slider(sx, y, sw, 18.0, "accel",   "", ui_bufs.accel, 0.0, 10000.0); y = y + 24.0
+    r/slider(sx, y, sw, 18.0, "frict",   "", ui_bufs.friction, 0.0, 10000.0); y = y + 24.0
+    r/slider(sx, y, sw, 18.0, "light r", "", ui_bufs.light_range, 50.0, 2000.0); y = y + 24.0
+    r/slider(sx, y, sw, 18.0, "cone °",  "", ui_bufs.light_half_angle_deg, 1.0, 180.0); y = y + 24.0
+    r/slider(sx, y, sw, 18.0, "lightI",  "", ui_bufs.light_intensity, 0.0, 4.0); y = y + 24.0
+    r/slider(sx, y, sw, 18.0, "ambient", "", ui_bufs.ambient, 0.0, 1.0); y = y + 24.0
+    r/slider(sx, y, sw, 18.0, "cam smth","", ui_bufs.camera_smoothing, 0.0, 30.0); y = y + 24.0
+    r/slider(sx, y, sw, 18.0, "run x",   "", ui_bufs.run_mult, 1.0, 4.0); y = y + 24.0
+    r/slider(sx, y, sw, 18.0, "sneak x", "", ui_bufs.sneak_mult, 0.1, 1.0); y = y + 30.0
+
+    let save_pressed = r/button(panel_x + 10.0, y, 110.0, 28.0, "Save") != 0
+    let load_pressed = r/button(panel_x + 130.0, y, 110.0, 28.0, "Load") != 0
+
+    SaveLoadResult {
+        save: save_pressed,
+        load: load_pressed,
+        new_tuning: read_tuning_from_ui(ui_bufs)
+    }
+}
+
+fn render_editor(world, shader_ctx, ui_bufs) {
+    r/begin_drawing()
+    r/clear_background(r/rgb(25, 30, 38))
+
+    draw_editor_grid(world)
+
+    let mut i = 0
+    while i < length(world.walls) {
+        render/draw_wall(world.walls[i], world.camera)
+        i = i + 1
+    }
+    let mut mi = 0
+    while mi < length(world.monsters) {
+        render/draw_monster(world.monsters[mi], world.camera)
+        mi = mi + 1
+    }
+    let mut si = 0
+    while si < length(world.sentinels) {
+        render/draw_sentinel(world.sentinels[si], world.camera)
+        si = si + 1
+    }
+    render/draw_player(world.player, world.camera)
+
+    draw_editor_selection(world)
+    draw_editor_drag_preview(world)
+
+    r/draw_text("EDITING — Tab=play  WASD=pan  LMB=place  RMB=select  Del=delete",
+                10, 10, 18, r/rgb(230, 215, 140))
+
+    let ui = draw_editor_panel(world, ui_bufs)
+
+    r/end_drawing()
+    ui
+}
+
+// ============================================================
+// Editor logic — picking, placement, deletion
+// ============================================================
+
 fn pick_at(world, p) {
     // Scan walls, then monsters, then sentinels — first hit wins.
     let mut result = Selection.None
@@ -1619,7 +410,6 @@ fn pick_at(world, p) {
     result
 }
 
-// Remove element at index i from a list; returns a new list.
 fn list_remove_at(xs, i) {
     let mut result = []
     let mut k = 0
@@ -1629,6 +419,131 @@ fn list_remove_at(xs, i) {
     }
     result
 }
+
+fn editor_place(world, tool, p, drag_start) {
+    match tool {
+        Tool.Wall => {
+            let cx = (drag_start.x + p.x) * 0.5
+            let cy = (drag_start.y + p.y) * 0.5
+            let hx = v/abs_f(drag_start.x - p.x) * 0.5
+            let hy = v/abs_f(drag_start.y - p.y) * 0.5
+            if hx < 5.0 || hy < 5.0 { world }
+            else {
+                let walls = push(world.walls, g/Wall {
+                    center: v/make(cx, cy),
+                    half: v/make(hx, hy)
+                })
+                World { ...world, frame: world.frame + 1, walls: walls }
+            }
+        },
+        Tool.Monster => {
+            let monsters = push(world.monsters, e/default_monster(p))
+            World { ...world, frame: world.frame + 1, monsters: monsters }
+        },
+        Tool.Sentinel => {
+            let sentinels = push(world.sentinels, e/default_sentinel(p))
+            World { ...world, frame: world.frame + 1, sentinels: sentinels }
+        },
+        Tool.Select => world
+    }
+}
+
+fn editor_delete_selected(world) {
+    let ed = world.editor
+    match ed.selection {
+        Selection.Wall { index } => {
+            let walls = list_remove_at(world.walls, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted wall" }
+            World { ...world, frame: world.frame + 1, walls: walls, editor: new_ed }
+        },
+        Selection.Monster { index } => {
+            let monsters = list_remove_at(world.monsters, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted monster" }
+            World { ...world, frame: world.frame + 1, monsters: monsters, editor: new_ed }
+        },
+        Selection.Sentinel { index } => {
+            let sentinels = list_remove_at(world.sentinels, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted sentinel" }
+            World { ...world, frame: world.frame + 1, sentinels: sentinels, editor: new_ed }
+        },
+        Selection.None => world
+    }
+}
+
+fn editor_tick(world) {
+    let dt = g/current_dt()
+    let ed = world.editor
+    let tool = int_to_tool(ffi/cell-get(ed.tool_slot))
+    let is_select = match tool { Tool.Select => true, _ => false }
+    let is_wall = match tool { Tool.Wall => true, _ => false }
+    let is_placement_enemy = match tool {
+        Tool.Monster => true,
+        Tool.Sentinel => true,
+        _ => false
+    }
+
+    // Free-camera panning with WASD / arrows.
+    let mut cx = world.camera.x
+    let mut cy = world.camera.y
+    if r/is_key_down(r/KEY_W) || r/is_key_down(r/KEY_UP) { cy = cy + EDITOR_CAMERA_SPEED * dt }
+    if r/is_key_down(r/KEY_S) || r/is_key_down(r/KEY_DOWN) { cy = cy - EDITOR_CAMERA_SPEED * dt }
+    if r/is_key_down(r/KEY_A) || r/is_key_down(r/KEY_LEFT) { cx = cx - EDITOR_CAMERA_SPEED * dt }
+    if r/is_key_down(r/KEY_D) || r/is_key_down(r/KEY_RIGHT) { cx = cx + EDITOR_CAMERA_SPEED * dt }
+    let camera = v/make(cx, cy)
+
+    let mouse_world = g/screen_to_world(r/mouse_x(), r/mouse_y(), camera)
+
+    let mut world1 = World { ...world, frame: world.frame + 1, camera: camera }
+    world1 = if r/is_key_pressed(r/KEY_DELETE) || r/is_key_pressed(r/KEY_BACKSPACE) {
+        editor_delete_selected(world1)
+    } else { world1 }
+
+    // Mouse interactions — skip if mouse is on the UI panel (right 260 px).
+    let on_ui = r/mouse_x() > r/screen_width() - 260
+    let left_pressed = r/is_mouse_button_pressed(r/MOUSE_LEFT) && !on_ui
+    let left_released = r/is_mouse_button_released(r/MOUSE_LEFT) && !on_ui
+    let right_pressed = r/is_mouse_button_pressed(r/MOUSE_RIGHT) && !on_ui
+
+    // Select-tool left-click OR right-click-anywhere picks an entity.
+    let select_click = (left_pressed && is_select) || right_pressed
+    let mut ed2 = world1.editor
+    if select_click {
+        let pick = pick_at(world1, mouse_world)
+        ed2 = Editor {
+            ...ed2,
+            tool: tool,
+            selection: pick,
+            status_text: match pick {
+                Selection.None => "no selection",
+                Selection.Wall { index } => "wall selected",
+                Selection.Monster { index } => "monster selected",
+                Selection.Sentinel { index } => "sentinel selected"
+            }
+        }
+    }
+
+    // Left-click with a placement tool starts placement (wall drags, enemies click).
+    let mut world2 = World { ...world1, frame: world1.frame + 1, editor: ed2 }
+    if left_pressed && !is_select {
+        let mut new_ed = Editor { ...ed2, tool: tool, drag_start: mouse_world }
+        if is_placement_enemy {
+            world2 = editor_place(world2, tool, mouse_world, mouse_world)
+            new_ed = Editor { ...new_ed, drag_start: null, status_text: "placed" }
+        }
+        world2 = World { ...world2, frame: world2.frame + 1, editor: new_ed }
+    }
+    if left_released && world2.editor.drag_start != null && is_wall {
+        world2 = editor_place(world2, Tool.Wall, mouse_world, world2.editor.drag_start)
+        let new_ed = Editor { ...world2.editor, tool: tool, drag_start: null, status_text: "placed wall" }
+        world2 = World { ...world2, frame: world2.frame + 1, editor: new_ed }
+    }
+
+    world2
+}
+
+// ============================================================
+// Level save/load (plain text)
+// ============================================================
 
 fn serialize_level(world) {
     let mut s = "walls\n"
@@ -1663,8 +578,6 @@ fn save_level(world) {
     }
 }
 
-// Skip empty strings in a list (split leaves them when the input has
-// trailing newlines or double spaces).
 fn strip_blanks(items) {
     let mut result = []
     let mut i = 0
@@ -1700,13 +613,13 @@ fn deserialize_level(text) {
         else if length(line) > 0 {
             let parts = strip_blanks(split(line, " "))
             if section == "walls" && length(parts) >= 4 {
-                walls = push(walls, Wall {
+                walls = push(walls, g/Wall {
                     center: v/make(to-float(parts[0]), to-float(parts[1])),
                     half: v/make(to-float(parts[2]), to-float(parts[3]))
                 })
             } else if section == "monsters" && length(parts) >= 6 {
-                let m = default_monster(v/make(to-float(parts[0]), to-float(parts[1])))
-                monsters = push(monsters, Monster {
+                let m = e/default_monster(v/make(to-float(parts[0]), to-float(parts[1])))
+                monsters = push(monsters, e/Monster {
                     ...m,
                     speed: to-float(parts[2]),
                     detection_range: to-float(parts[3]),
@@ -1714,8 +627,8 @@ fn deserialize_level(text) {
                     strength: to-float(parts[5])
                 })
             } else if section == "sentinels" && length(parts) >= 8 {
-                let s = default_sentinel(v/make(to-float(parts[0]), to-float(parts[1])))
-                sentinels = push(sentinels, Sentinel {
+                let s = e/default_sentinel(v/make(to-float(parts[0]), to-float(parts[1])))
+                sentinels = push(sentinels, e/Sentinel {
                     ...s,
                     light_range: to-float(parts[2]),
                     light_half_angle_deg: to-float(parts[3]),
@@ -1756,133 +669,10 @@ fn load_level(world) {
     }
 }
 
-// Place a new entity at `p` in the world using the current tool.
-fn editor_place(world, tool, p, drag_start) {
-    match tool {
-        Tool.Wall => {
-            // Wall defined by rect between drag_start and p.
-            let cx = (drag_start.x + p.x) * 0.5
-            let cy = (drag_start.y + p.y) * 0.5
-            let hx = v/abs_f(drag_start.x - p.x) * 0.5
-            let hy = v/abs_f(drag_start.y - p.y) * 0.5
-            if hx < 5.0 || hy < 5.0 { world }
-            else {
-                let walls = push(world.walls, Wall {
-                    center: v/make(cx, cy),
-                    half: v/make(hx, hy)
-                })
-                World { ...world, frame: world.frame + 1, walls: walls }
-            }
-        },
-        Tool.Monster => {
-            let monsters = push(world.monsters, default_monster(p))
-            World { ...world, frame: world.frame + 1, monsters: monsters }
-        },
-        Tool.Sentinel => {
-            let sentinels = push(world.sentinels, default_sentinel(p))
-            World { ...world, frame: world.frame + 1, sentinels: sentinels }
-        },
-        Tool.Select => world
-    }
-}
+// ============================================================
+// Mode toggling (Tab) + debug toggles (F1, F2)
+// ============================================================
 
-fn editor_delete_selected(world) {
-    let ed = world.editor
-    match ed.selection {
-        Selection.Wall { index } => {
-            let walls = list_remove_at(world.walls, index)
-            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted wall" }
-            World { ...world, frame: world.frame + 1, walls: walls, editor: new_ed }
-        },
-        Selection.Monster { index } => {
-            let monsters = list_remove_at(world.monsters, index)
-            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted monster" }
-            World { ...world, frame: world.frame + 1, monsters: monsters, editor: new_ed }
-        },
-        Selection.Sentinel { index } => {
-            let sentinels = list_remove_at(world.sentinels, index)
-            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted sentinel" }
-            World { ...world, frame: world.frame + 1, sentinels: sentinels, editor: new_ed }
-        },
-        Selection.None => world
-    }
-}
-
-fn editor_tick(world) {
-    let dt = current_dt()
-    let ed = world.editor
-    // Read current tool from the raygui toggle slot — FFI boundary returns an int.
-    let tool = int_to_tool(ffi/cell-get(ed.tool_slot))
-    let is_select = match tool { Tool.Select => true, _ => false }
-    let is_wall = match tool { Tool.Wall => true, _ => false }
-    let is_placement_enemy = match tool {
-        Tool.Monster => true,
-        Tool.Sentinel => true,
-        _ => false
-    }
-
-    // Free-camera panning with WASD / arrows.
-    let mut cx = world.camera.x
-    let mut cy = world.camera.y
-    if r/is_key_down(r/KEY_W) || r/is_key_down(r/KEY_UP) { cy = cy + EDITOR_CAMERA_SPEED * dt }
-    if r/is_key_down(r/KEY_S) || r/is_key_down(r/KEY_DOWN) { cy = cy - EDITOR_CAMERA_SPEED * dt }
-    if r/is_key_down(r/KEY_A) || r/is_key_down(r/KEY_LEFT) { cx = cx - EDITOR_CAMERA_SPEED * dt }
-    if r/is_key_down(r/KEY_D) || r/is_key_down(r/KEY_RIGHT) { cx = cx + EDITOR_CAMERA_SPEED * dt }
-    let camera = v/make(cx, cy)
-
-    let mouse_world = screen_to_world(r/mouse_x(), r/mouse_y(), camera)
-
-    // Deletion.
-    let mut world1 = World { ...world, frame: world.frame + 1, camera: camera }
-    world1 = if r/is_key_pressed(r/KEY_DELETE) || r/is_key_pressed(r/KEY_BACKSPACE) {
-        editor_delete_selected(world1)
-    } else { world1 }
-
-    // Mouse interactions — skip if mouse is on the UI panel (right 260 px).
-    let on_ui = r/mouse_x() > r/screen_width() - 260
-    let left_pressed = r/is_mouse_button_pressed(r/MOUSE_LEFT) && !on_ui
-    let left_released = r/is_mouse_button_released(r/MOUSE_LEFT) && !on_ui
-    let right_pressed = r/is_mouse_button_pressed(r/MOUSE_RIGHT) && !on_ui
-
-    // Select-tool left-click OR right-click-anywhere picks an entity.
-    let select_click = (left_pressed && is_select) || right_pressed
-    let mut ed2 = world1.editor
-    if select_click {
-        let pick = pick_at(world1, mouse_world)
-        ed2 = Editor {
-            ...ed2,
-            tool: tool,
-            selection: pick,
-            status_text: match pick {
-                Selection.None => "no selection",
-                Selection.Wall { index } => "wall selected",
-                Selection.Monster { index } => "monster selected",
-                Selection.Sentinel { index } => "sentinel selected"
-            }
-        }
-    }
-
-    // Left-click with a placement tool starts placement (wall drags, enemies click).
-    let mut world2 = World { ...world1, frame: world1.frame + 1, editor: ed2 }
-    if left_pressed && !is_select {
-        let mut new_ed = Editor { ...ed2, tool: tool, drag_start: mouse_world }
-        if is_placement_enemy {
-            world2 = editor_place(world2, tool, mouse_world, mouse_world)
-            new_ed = Editor { ...new_ed, drag_start: null, status_text: "placed" }
-        }
-        world2 = World { ...world2, frame: world2.frame + 1, editor: new_ed }
-    }
-    // Wall tool: drag-release finalises the rect.
-    if left_released && world2.editor.drag_start != null && is_wall {
-        world2 = editor_place(world2, Tool.Wall, mouse_world, world2.editor.drag_start)
-        let new_ed = Editor { ...world2.editor, tool: tool, drag_start: null, status_text: "placed wall" }
-        world2 = World { ...world2, frame: world2.frame + 1, editor: new_ed }
-    }
-
-    world2
-}
-
-// Toggle between playing and editing modes when Tab is pressed this frame.
 fn maybe_toggle_mode(world) {
     let mut w = world
     if r/is_key_pressed(r/KEY_TAB) {
@@ -1911,6 +701,10 @@ fn maybe_toggle_mode(world) {
     w
 }
 
+// ============================================================
+// Main loop
+// ============================================================
+
 fn game_loop(world, shader_ctx, ui_bufs, max_frames) {
     if max_frames >= 0 && world.frame >= max_frames {
         world
@@ -1934,7 +728,7 @@ fn game_loop(world, shader_ctx, ui_bufs, max_frames) {
             } else { w1 }
             if ui.load { load_level(w2) } else { w2 }
         } else {
-            render_world(next, shader_ctx)
+            render/render_world(next, shader_ctx)
             next
         }
         game_loop(world_after, shader_ctx, ui_bufs, max_frames)
@@ -1978,7 +772,7 @@ fn main() {
     r/init_window(INITIAL_W, INITIAL_H, "beagle-zelda")
     r/set_target_fps(60)
 
-    let shader_ctx = load_cone_light_shader()
+    let shader_ctx = render/load_cone_light_shader()
     let initial = startup_world()
     let ui_bufs = alloc_ui_buffers(initial.tuning)
     let final_world = game_loop(initial, shader_ctx, ui_bufs, 0 - 1)
