@@ -1,11 +1,13 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::expr::Expr;
 use crate::rule::Rule;
 use crate::value::Value;
 
 /// One end of an edge in a template. Resolved at spawn time.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum EdgeEnd {
     /// The newly-created node.
     ThisInstance,
@@ -15,11 +17,25 @@ pub enum EdgeEnd {
 
 /// An edge declared inside a template. Created alongside the new
 /// instance at spawn time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EdgeSpec {
     pub from: EdgeEnd,
     pub to: EdgeEnd,
     pub latency: Expr,
+}
+
+/// A declared probe on a class. At read time, each part is evaluated
+/// against the node's slots and concatenated into the displayed string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Probe {
+    pub label: String,
+    pub parts: Vec<ProbePart>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ProbePart {
+    Literal(String),
+    Hole(Expr),
 }
 
 /// A reusable node shape: slots + rules + associated edges.
@@ -29,7 +45,7 @@ pub struct EdgeSpec {
 /// (for forwarding work) and `ThisInstance → Parent` (for replies).
 /// Anything that requires edges to *other* nodes than the parent has
 /// to wire them manually after spawn.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Template {
     pub name: String,
     /// Prefix for instance naming. Instances get names like `Worker_7`.
@@ -44,6 +60,8 @@ pub struct Template {
     /// instantiation time. Seeds the class's self-driven loops
     /// (e.g. a `tick(nil)` that a `rule tick` rearms each step).
     pub initial_packets: Vec<Value>,
+    /// Probes declared on the class. Copied into every instance.
+    pub probes: Vec<Probe>,
 }
 
 impl Template {
@@ -56,6 +74,7 @@ impl Template {
             rules: Vec::new(),
             edges: Vec::new(),
             initial_packets: Vec::new(),
+            probes: Vec::new(),
         }
     }
     pub fn initial_packet(mut self, v: Value) -> Self {

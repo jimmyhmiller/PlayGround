@@ -9,6 +9,62 @@ pub fn parse(src: &str) -> Result<File, String> {
     p.parse_file()
 }
 
+/// Split a probe format string into literal + hole parts.
+///
+/// Holes are `{expr}`; the expression inside is re-lexed and re-parsed
+/// using the full DSL expression grammar. `\{` escapes a literal `{`
+/// (handled by the outer string lexer, which passes unknown escapes
+/// through as their trailing character — so by the time we see the
+/// string here, `\{` has already become `{` and the backslash is gone).
+/// A literal `}` just writes itself; only `{` begins a hole.
+pub(crate) fn parse_probe_format(s: &str) -> Result<Vec<ProbePart>, String> {
+    let mut parts = Vec::new();
+    let mut cur = String::new();
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '{' {
+            if !cur.is_empty() {
+                parts.push(ProbePart::Literal(std::mem::take(&mut cur)));
+            }
+            let mut expr_src = String::new();
+            let mut depth = 1;
+            let mut closed = false;
+            while let Some(ec) = chars.next() {
+                if ec == '{' { depth += 1; expr_src.push(ec); }
+                else if ec == '}' {
+                    depth -= 1;
+                    if depth == 0 { closed = true; break; }
+                    expr_src.push(ec);
+                }
+                else { expr_src.push(ec); }
+            }
+            if !closed {
+                return Err("unterminated `{` in format string".into());
+            }
+            let expr = parse_expr_from_str(&expr_src)
+                .map_err(|e| format!("inside `{{{}}}`: {}", expr_src, e))?;
+            parts.push(ProbePart::Hole(expr));
+        } else {
+            cur.push(c);
+        }
+    }
+    if !cur.is_empty() {
+        parts.push(ProbePart::Literal(cur));
+    }
+    Ok(parts)
+}
+
+/// Parse a standalone expression (used by probe format interpolation).
+fn parse_expr_from_str(src: &str) -> Result<Expr, String> {
+    let tokens = super::lex::lex(src)?;
+    let mut p = Parser { toks: tokens, pos: 0 };
+    let e = p.parse_expr()?;
+    if !matches!(p.peek(), Tok::Eof) {
+        return Err(format!("{}: unexpected trailing tokens in expression", p.here()));
+    }
+    Ok(e)
+}
+
 struct Parser {
     toks: Vec<Token>,
     pos: usize,
@@ -86,17 +142,47 @@ impl Parser {
         let mut slots = Vec::new();
         let mut rules = Vec::new();
         let mut on_spawn = Vec::new();
+        let mut probes = Vec::new();
         loop {
             match self.peek() {
                 Tok::Slots => { slots = self.parse_slots()?; }
                 Tok::Rule => { rules.push(self.parse_rule()?); }
                 Tok::OnSpawn => { on_spawn = self.parse_on_spawn()?; }
+                Tok::Probes => { probes = self.parse_probes()?; }
                 Tok::RBrace => break,
-                other => return Err(format!("{}: expected slots/rule/on_spawn, got {:?}", self.here(), other)),
+                other => return Err(format!("{}: expected slots/rule/on_spawn/probes, got {:?}", self.here(), other)),
             }
         }
         self.expect(Tok::RBrace)?;
-        Ok(Item::Node(NodeDecl { name, slots, rules, on_spawn }))
+        Ok(Item::Node(NodeDecl { name, slots, rules, on_spawn, probes }))
+    }
+
+    /// Parse `probes { LABEL: "FMT" ... }` where FMT is a string that may
+    /// contain `{expr}` interpolation holes. The expression inside each
+    /// hole is re-lexed + re-parsed using the same DSL expression
+    /// grammar. Trailing `,` / `;` between entries is optional.
+    fn parse_probes(&mut self) -> Result<Vec<ProbeDecl>, String> {
+        self.expect(Tok::Probes)?;
+        self.expect(Tok::LBrace)?;
+        let mut out = Vec::new();
+        while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+            let label = self.ident()?;
+            self.expect(Tok::Colon)?;
+            let fmt_line = self.here();
+            let fmt = match self.bump() {
+                Tok::Str(s) => s,
+                other => return Err(format!(
+                    "{}: probe `{}`: expected \"format string\", got {:?}",
+                    fmt_line, label, other
+                )),
+            };
+            let parts = parse_probe_format(&fmt)
+                .map_err(|e| format!("{}: probe `{}`: {}", fmt_line, label, e))?;
+            let _ = self.eat(&Tok::Comma) || self.eat(&Tok::Semi);
+            out.push(ProbeDecl { label, parts });
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(out)
     }
 
     /// Parse `on_spawn { … }` — per-instance bootstrap wiring.
@@ -496,6 +582,14 @@ impl Parser {
 
     fn parse_scenario(&mut self) -> Result<Item, String> {
         self.expect(Tok::Scenario)?;
+        // Optional name: `scenario foo { … }` — named scenarios live in
+        // the sim's library without auto-scheduling; `scenario { … }`
+        // stays back-compatible and auto-schedules as "main".
+        let name = if matches!(self.peek(), Tok::Ident(_)) {
+            Some(self.ident()?)
+        } else {
+            None
+        };
         self.expect(Tok::LBrace)?;
         let mut stmts = Vec::new();
         while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
@@ -511,7 +605,7 @@ impl Parser {
             stmts.push(SceneStmt { at_ns, action });
         }
         self.expect(Tok::RBrace)?;
-        Ok(Item::Scenario(stmts))
+        Ok(Item::Scenario(ScenarioDecl { name, stmts }))
     }
 
     fn parse_scene_action(&mut self) -> Result<SceneAction, String> {

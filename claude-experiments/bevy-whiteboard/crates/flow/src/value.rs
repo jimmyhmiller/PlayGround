@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::samples::Samples;
 use crate::sim::NodeId;
 
@@ -11,7 +13,7 @@ use crate::sim::NodeId;
 /// representative draws are taken. Collections like `Map<K,V>` are
 /// deliberately absent; you're expected to model via counts +
 /// distributions, not implement the underlying data structure.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
     Nil,
     Int(i64),
@@ -102,7 +104,7 @@ impl PartialEq for Value {
 // ---------------------------------------------------------------------------
 
 /// Patterns used to match against packets and slot values.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Pattern {
     /// Matches anything, binds nothing.
     Wild,

@@ -4,6 +4,7 @@
 
 pub mod bridge;
 pub mod camera;
+pub mod canvas;
 pub mod edges;
 pub mod errors;
 pub mod examples;
@@ -18,11 +19,19 @@ pub mod theme;
 pub mod tool;
 pub mod visual;
 
+use std::path::PathBuf;
+
 use bevy::prelude::*;
 
 /// Construct the Bevy app with every plugin wired up. Does *not* call
 /// `.run()` — the binary does that, tests call `.update()` themselves.
-pub fn build_app() -> App {
+///
+/// If `canvas` is supplied, the app boots from that `.whiteboard`
+/// directory instead of the built-in demo example. When the path is
+/// invalid or the canvas fails to load, the error is logged and the
+/// app falls back to the empty canvas (no demo) so the user can see
+/// the error surface and recover from the UI.
+pub fn build_app(canvas: Option<PathBuf>) -> App {
     let mut app = App::new();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
@@ -35,8 +44,11 @@ pub fn build_app() -> App {
         }),
         ..default()
     }))
-    .add_plugins(FlowBevyPlugins)
-    .add_plugins(DemoSeedPlugin);
+    .add_plugins(FlowBevyPlugins);
+    match canvas {
+        Some(path) => app.add_plugins(CanvasSeedPlugin(path)),
+        None => app.add_plugins(DemoSeedPlugin),
+    };
     app
 }
 
@@ -55,6 +67,21 @@ impl Plugin for DemoSeedPlugin {
 fn seed_default(mut writer: bevy::ecs::message::MessageWriter<examples::LoadExample>) {
     writer.write(examples::LoadExample(examples::Example::ThreeLaneFanout));
 }
+
+/// Seed the canvas from a `.whiteboard` directory. The path is
+/// resolved + loaded at startup; a loader failure logs an error and
+/// leaves the canvas empty (the user can then use the palette to
+/// load a built-in example or retry via the file menu).
+pub struct CanvasSeedPlugin(pub PathBuf);
+impl Plugin for CanvasSeedPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(PendingCanvas(Some(self.0.clone())))
+            .add_systems(Startup, canvas::seed_from_path);
+    }
+}
+
+#[derive(Resource)]
+pub(crate) struct PendingCanvas(pub Option<PathBuf>);
 
 /// Plugin variant of [`build_app`] for integration tests that want to start
 /// from a [`poster_ui::testing::test_app_headless`] and layer the flow-bevy

@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::expr::Expr;
 use crate::value::Pattern;
 
@@ -6,7 +8,7 @@ use crate::value::Pattern;
 /// A rule may have at most one `Input` pattern in v1 (single packet
 /// consumption per firing). `SlotMatch` patterns are non-consuming:
 /// they only read slot values and bind variables.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum When {
     /// Matches an inbound packet's payload against `pattern`.
     /// Binds via the pattern. Optionally restricts to packets that
@@ -35,7 +37,7 @@ impl When {
 
 /// Where an `Emit` should go. Keep this small; routing strategies can
 /// be added later.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum EmitTo {
     /// Emit on the first outbound edge. Panics if the node has none.
     DefaultOut,
@@ -57,7 +59,7 @@ pub enum EmitTo {
 
 /// Modification to a packet's `metadata` map during an emit. Applied
 /// in order after the consumed packet's metadata has been inherited.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum MetaOp {
     /// Insert or overwrite `key` with the evaluated `value`.
     Set { key: String, value: Expr },
@@ -70,7 +72,7 @@ pub enum MetaOp {
 /// Rules opt in explicitly; the default is `Inherit`, which just
 /// copies the consumed packet's return_path (or empty for source
 /// emits). At most one of Push/Pop/Replace applies per emit.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ReturnPathOp {
     /// Default: new packet's return_path = consumed packet's (or empty).
     Inherit,
@@ -93,7 +95,7 @@ impl Default for ReturnPathOp {
 
 /// What a rule does when it fires. Effects run in order, atomically —
 /// no simulation time passes between them.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Effect {
     /// Write a value to a slot.
     SetSlot { slot: String, value: Expr },
@@ -178,7 +180,7 @@ impl Effect {
 }
 
 /// A rule = pattern + guard + effects. Fires atomically.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Rule {
     pub name: String,
     pub when: Vec<When>,

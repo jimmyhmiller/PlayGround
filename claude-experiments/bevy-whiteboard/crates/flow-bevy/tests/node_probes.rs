@@ -1,20 +1,20 @@
-//! Node probes — compositional. Each kind declares its own `ProbeSpec`
-//! list; the Probe tool stacks one probe entity per spec above the clicked
-//! node. This test proves:
+//! Node probes — compositional. Each class declares its own `probes { }`
+//! block in DSL; the Probe tool stacks one probe entity per declared probe
+//! above the clicked node. This test proves:
 //!
 //!  * Clicking a node with the Probe tool spawns the exact number of
-//!    probes declared by that kind.
-//!  * Each probe reads its value through the spec's `read` function, not
-//!    through a hard-coded match on kind inside the probe module.
+//!    probes declared by that class.
+//!  * Each probe reads its value through the sim's `probe_reading` API
+//!    (DSL-lowered, not a hardcoded match on kind).
 //!  * Probes on different kinds don't collide — each gets its own stack.
-//!  * Routers (no specs) get no probes.
+//!  * Routers (no declared probes) get no probes.
 
 mod common;
 
 use bevy::prelude::*;
 use common::{advance_sim_ns, make_app};
 use flow_bevy::bridge::FlowSim;
-use flow_bevy::gadgets::{Kind, probes_for_kind};
+use flow_bevy::gadgets::Kind;
 use flow_bevy::palette::ToolBtn;
 use flow_bevy::probes::{Probe, ProbeTarget};
 use flow_bevy::tool::Tool;
@@ -24,7 +24,7 @@ fn count_node_probes_for(app: &mut App, nid: flow::NodeId) -> usize {
     let world = app.world_mut();
     let mut q = world.query::<&Probe>();
     q.iter(world)
-        .filter(|p| matches!(p.target, ProbeTarget::Node { node, .. } if node == nid))
+        .filter(|p| matches!(&p.target, ProbeTarget::Node { node, .. } if *node == nid))
         .count()
 }
 
@@ -47,12 +47,15 @@ fn latest_of_kind(app: &App, kind: Kind) -> flow::NodeId {
 #[test]
 fn clicking_a_generator_spawns_its_declared_probes() {
     let mut app = make_app();
-    let expected = probes_for_kind(Kind::Generator).len();
-    assert!(expected > 0, "Generator should declare at least one probe spec");
-
     click_by_marker::<ToolBtn, _>(&mut app, |m| m.0 == Tool::Drop(Kind::Generator));
     simulate_canvas_click(&mut app, Vec2::new(-300.0, -200.0));
     let nid = latest_of_kind(&app, Kind::Generator);
+
+    let expected = {
+        let sim = &app.world().resource::<FlowSim>().sim;
+        sim.probe_labels(nid).len()
+    };
+    assert!(expected > 0, "Generator should declare at least one probe");
 
     click_by_marker::<ToolBtn, _>(&mut app, |m| m.0 == Tool::Probe);
     simulate_canvas_click(&mut app, Vec2::new(-300.0, -200.0));
@@ -60,7 +63,7 @@ fn clicking_a_generator_spawns_its_declared_probes() {
     let spawned = count_node_probes_for(&mut app, nid);
     assert_eq!(
         spawned, expected,
-        "expected {} probes for Generator (one per spec), got {}",
+        "expected {} probes for Generator (one per DSL declaration), got {}",
         expected, spawned
     );
 }
@@ -68,11 +71,14 @@ fn clicking_a_generator_spawns_its_declared_probes() {
 #[test]
 fn clicking_a_queue_spawns_queue_specific_probes() {
     let mut app = make_app();
-    let expected = probes_for_kind(Kind::Queue).len();
     click_by_marker::<ToolBtn, _>(&mut app, |m| m.0 == Tool::Drop(Kind::Queue));
     simulate_canvas_click(&mut app, Vec2::new(-300.0, -200.0));
     let nid = latest_of_kind(&app, Kind::Queue);
 
+    let expected = {
+        let sim = &app.world().resource::<FlowSim>().sim;
+        sim.probe_labels(nid).len()
+    };
     click_by_marker::<ToolBtn, _>(&mut app, |m| m.0 == Tool::Probe);
     simulate_canvas_click(&mut app, Vec2::new(-300.0, -200.0));
 
@@ -81,7 +87,7 @@ fn clicking_a_queue_spawns_queue_specific_probes() {
 
 #[test]
 fn clicking_a_router_spawns_no_probes() {
-    // Router declares no specs — the Probe tool silently does nothing.
+    // Router declares no probes — the Probe tool silently does nothing.
     let mut app = make_app();
     click_by_marker::<ToolBtn, _>(&mut app, |m| m.0 == Tool::Drop(Kind::Router));
     simulate_canvas_click(&mut app, Vec2::new(-300.0, -200.0));
@@ -91,15 +97,16 @@ fn clicking_a_router_spawns_no_probes() {
     simulate_canvas_click(&mut app, Vec2::new(-300.0, -200.0));
 
     assert_eq!(
-        count_node_probes_for(&mut app, nid), 0,
-        "Router declares no ProbeSpecs; clicking it should spawn nothing"
+        count_node_probes_for(&mut app, nid),
+        0,
+        "Router declares no probes; clicking it should spawn nothing"
     );
 }
 
 #[test]
 fn probe_reader_reflects_live_sim_state() {
-    // Drop a worker. Spec 0 is "served", spec 1 is "service". Tick the
-    // sim and verify the probe readers return the expected string.
+    // Drop a worker. DSL declares "served" and "service" probes. Check the
+    // sim's probe_reading returns the expected strings.
     let mut app = make_app();
     click_by_marker::<ToolBtn, _>(&mut app, |m| m.0 == Tool::Drop(Kind::Worker));
     simulate_canvas_click(&mut app, Vec2::new(-300.0, -200.0));
@@ -108,25 +115,20 @@ fn probe_reader_reflects_live_sim_state() {
     click_by_marker::<ToolBtn, _>(&mut app, |m| m.0 == Tool::Probe);
     simulate_canvas_click(&mut app, Vec2::new(-300.0, -200.0));
 
-    // Advance so the worker has some state (though without a wired
-    // upstream queue, its served count stays 0). Just check the spec's
-    // readers against the sim directly.
     advance_sim_ns(&mut app, 500_000_000);
 
-    let specs = probes_for_kind(Kind::Worker);
-    let served_spec = specs.iter().find(|s| s.label == "served").expect("no served spec");
-    let service_spec = specs.iter().find(|s| s.label == "service").expect("no service spec");
-
     let sim = &app.world().resource::<FlowSim>().sim;
-    let node = &sim.nodes[&worker];
-    assert_eq!((served_spec.read)(node), "0");
-    assert_eq!((service_spec.read)(node), "50ms"); // default
+    assert_eq!(sim.probe_reading(worker, "served").as_deref(), Some("0"));
+    assert_eq!(
+        sim.probe_reading(worker, "service").as_deref(),
+        Some("50ms")
+    );
 }
 
 #[test]
-fn node_probe_carries_its_own_reader_fn() {
-    // Proves the probe module doesn't need to know about the kind — a
-    // fn pointer travels with each probe entity.
+fn node_probe_uses_sim_probe_reading() {
+    // Proves the probe module doesn't hardcode per-kind readers — it looks
+    // up the probe by label on the sim node.
     let mut app = make_app();
     click_by_marker::<ToolBtn, _>(&mut app, |m| m.0 == Tool::Drop(Kind::Sink));
     simulate_canvas_click(&mut app, Vec2::new(-300.0, -200.0));
@@ -137,18 +139,16 @@ fn node_probe_carries_its_own_reader_fn() {
 
     let world = app.world_mut();
     let mut q = world.query::<&Probe>();
-    let probe = q
+    let probe_label: String = q
         .iter(world)
-        .find(|p| matches!(p.target, ProbeTarget::Node { node, .. } if node == sink))
+        .find_map(|p| match &p.target {
+            ProbeTarget::Node { node, label, .. } if *node == sink => Some(label.clone()),
+            _ => None,
+        })
         .expect("no node probe for sink");
 
-    match probe.target {
-        ProbeTarget::Node { label, reader, .. } => {
-            // Sink's first spec is "total" → reads `count` slot.
-            assert_eq!(label, "total");
-            let node = &app.world().resource::<FlowSim>().sim.nodes[&sink];
-            assert_eq!(reader(node), "0");
-        }
-        ProbeTarget::Edge(_) => panic!("expected Node target"),
-    }
+    // Sink's first (only) probe is "total" → reads `count` slot.
+    assert_eq!(probe_label, "total");
+    let sim = &app.world().resource::<FlowSim>().sim;
+    assert_eq!(sim.probe_reading(sink, &probe_label).as_deref(), Some("0"));
 }

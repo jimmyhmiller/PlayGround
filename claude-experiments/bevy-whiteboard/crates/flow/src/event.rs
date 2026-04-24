@@ -1,12 +1,14 @@
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
+
 use crate::sim::{NodeId, PacketId, Time};
 use crate::value::Value;
 
 /// Everything observable that happens in the simulation. The log is
 /// the source of truth for scrubbing, plotting, and — eventually —
 /// rewind.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Event {
     /// Simulation clock advanced (monotonic).
     ClockAdvanced { from_ns: Time, to_ns: Time },
@@ -65,7 +67,7 @@ pub enum Event {
 }
 
 /// Ring-bounded event log. Always on; the bound caps memory.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventLog {
     pub cap: usize,
     pub events: VecDeque<Event>,

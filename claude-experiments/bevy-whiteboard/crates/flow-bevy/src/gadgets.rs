@@ -33,121 +33,6 @@ pub enum Kind {
     Sink,
 }
 
-/// What a kind exposes to external observers (probes, the inspector,
-/// anything that wants to read node state without hard-coding slot names).
-/// The reader closure is `fn(&flow::Node) -> String` — simple fn pointer so
-/// it's `Copy + 'static` and can live directly inside a component.
-///
-/// A new kind declares a slice of specs; the probe UI iterates the slice
-/// and spawns one readout per entry. Adding a new readable without
-/// touching probes.rs is the whole point of this separation.
-#[derive(Clone, Copy)]
-pub struct ProbeSpec {
-    /// Short uppercase-able label shown beside the value (e.g. "RATE",
-    /// "FILL"). Kept to 1-2 words so it fits the canvas annotation.
-    pub label: &'static str,
-    /// Read the current value off a sim node and format it. Called every
-    /// frame while a probe for this spec is mounted — keep it cheap.
-    pub read: fn(&flow::Node) -> String,
-}
-
-/// Every kind's probe-readable stats. Ordered by "how often you want to
-/// see this" — the Probe tool stacks them top-down above the node in
-/// this order, so the first spec ends up closest to the node body.
-pub fn probes_for_kind(kind: Kind) -> &'static [ProbeSpec] {
-    match kind {
-        Kind::Generator | Kind::Client => &[
-            ProbeSpec { label: "rate",    read: read_rate },
-            ProbeSpec { label: "emitted", read: read_emitted },
-        ],
-        Kind::BackoffClient => &[
-            ProbeSpec { label: "rate",    read: read_rate },
-            ProbeSpec { label: "emitted", read: read_emitted },
-            ProbeSpec { label: "backoff", read: read_backoff_ms },
-        ],
-        Kind::Worker => &[
-            ProbeSpec { label: "served",  read: read_served },
-            ProbeSpec { label: "service", read: read_service_ms },
-        ],
-        Kind::Queue => &[
-            ProbeSpec { label: "fill",    read: read_queue_len },
-            ProbeSpec { label: "waiting", read: read_queue_waiter },
-        ],
-        Kind::Sink => &[
-            ProbeSpec { label: "total", read: read_sink_count },
-        ],
-        Kind::Router => &[
-            // Router has no state of its own, so no default specs. The
-            // empty slice means the Probe tool silently skips routers.
-        ],
-    }
-}
-
-// ---- stock readers. New kinds add their own or reuse these. ------------
-
-fn read_rate(node: &flow::Node) -> String {
-    match node.slots.get("period_ns") {
-        Some(Value::Int(p)) if *p > 0 => {
-            let r = 1_000_000_000.0 / *p as f64;
-            if r >= 10.0 { format!("{:.0}/s", r) } else { format!("{:.1}/s", r) }
-        }
-        _ => "—".into(),
-    }
-}
-
-fn read_emitted(node: &flow::Node) -> String {
-    match node.slots.get("emitted") {
-        Some(Value::Int(i)) => format!("{}", i),
-        _ => "—".into(),
-    }
-}
-
-fn read_served(node: &flow::Node) -> String {
-    match node.slots.get("served") {
-        Some(Value::Int(i)) => format!("{}", i),
-        _ => "—".into(),
-    }
-}
-
-fn read_service_ms(node: &flow::Node) -> String {
-    match node.slots.get("service_ns") {
-        Some(Value::Int(ns)) => format!("{}ms", ns / 1_000_000),
-        _ => "—".into(),
-    }
-}
-
-fn read_queue_len(node: &flow::Node) -> String {
-    match node.slots.get("len") {
-        Some(Value::Int(i)) => format!("{}", i),
-        _ => "—".into(),
-    }
-}
-
-fn read_queue_waiter(node: &flow::Node) -> String {
-    match node.slots.get("waiting") {
-        Some(Value::Samples(s)) => format!("{}", s.len()),
-        _ => "0".into(),
-    }
-}
-
-fn read_sink_count(node: &flow::Node) -> String {
-    match node.slots.get("count") {
-        Some(Value::Int(i)) => format!("{}", i),
-        _ => "—".into(),
-    }
-}
-
-fn read_backoff_ms(node: &flow::Node) -> String {
-    match node.slots.get("backoff_ns") {
-        Some(Value::Int(ns)) => {
-            if *ns == 0 { "—".into() }
-            else if *ns >= 1_000_000_000 { format!("{:.1}s", *ns as f64 / 1e9) }
-            else { format!("{}ms", ns / 1_000_000) }
-        }
-        _ => "—".into(),
-    }
-}
-
 impl Kind {
     pub fn label(self) -> &'static str {
         match self {
@@ -274,7 +159,7 @@ pub fn validate_gadget_dsl() {
 // `include_str!` and concatenated at compile time into a single DSL source
 // that `register_classes` consumes.
 
-const GADGETS_DSL: &str = concat!(
+pub const GADGETS_DSL: &str = concat!(
     include_str!("gadgets/generator.flow"),      "\n",
     include_str!("gadgets/client.flow"),         "\n",
     include_str!("gadgets/backoff_client.flow"), "\n",

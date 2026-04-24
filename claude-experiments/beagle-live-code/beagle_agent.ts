@@ -349,147 +349,94 @@ function formatReplResponse(messages: ReplResponse[]): string {
 }
 
 // ---------------------------------------------------------------------------
-// Source file write-back
+// Session → namespace tracking
 // ---------------------------------------------------------------------------
+// Remembers the last-seen namespace per session so beagle_persist can infer
+// the target namespace when the caller omits it.
 
-// Maps namespace name → absolute file path
-const namespaceFiles = new Map<string, string>();
-// Maps session name → current namespace
 const sessionNamespaces = new Map<string, string>();
 
-function trackFileNamespace(filePath: string, content?: string) {
-  const text = content ?? fs.readFileSync(filePath, "utf-8");
+function extractNamespaceFromText(text: string): string | undefined {
   const match = text.match(/^\s*namespace\s+(\S+)/m);
-  if (match) {
-    namespaceFiles.set(match[1], path.resolve(filePath));
-  }
+  return match ? match[1] : undefined;
 }
 
-function trackSessionNamespace(session: string, code: string) {
-  // Check if the eval code sets a namespace
-  const match = code.match(/^\s*namespace\s+(\S+)/m);
-  if (match) {
-    sessionNamespaces.set(session, match[1]);
-  }
+function trackSessionNamespace(session: string, ns: string | undefined) {
+  if (ns) sessionNamespaces.set(session, ns);
 }
 
-interface Definition {
-  kind: string;   // "fn", "struct", "enum", "let"
-  name: string;
-  text: string;   // Full definition text
+// ---------------------------------------------------------------------------
+// Beagle string literal escape (for embedding arbitrary text in a Beagle call)
+// ---------------------------------------------------------------------------
+
+function beagleStringEscape(s: string): string {
+  return s
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, "\\n")
+    .replace(/\r/g, "\\r")
+    .replace(/\t/g, "\\t");
 }
 
-/** Extract top-level definitions from Beagle code */
-function extractDefinitions(code: string): Definition[] {
-  const defs: Definition[] = [];
-  const lines = code.split("\n");
-  let i = 0;
-
-  while (i < lines.length) {
-    const line = lines[i];
-    const match = line.match(/^(fn|struct|enum|let)\s+(\w+)/);
-    if (!match) {
-      i++;
-      continue;
-    }
-
-    const kind = match[1];
-    const name = match[2];
-    const startLine = i;
-
-    // Find the end of this definition by brace counting
-    let depth = 0;
-    let foundOpen = false;
-    let endLine = i;
-
-    for (let j = i; j < lines.length; j++) {
-      for (const ch of lines[j]) {
-        if (ch === "{") { depth++; foundOpen = true; }
-        else if (ch === "}") { depth--; }
-      }
-      endLine = j;
-      if (foundOpen && depth <= 0) break;
-      // For simple `let x = value` with no braces, end at this line
-      if (!foundOpen && j === i && kind === "let") break;
-    }
-
-    const text = lines.slice(startLine, endLine + 1).join("\n");
-    defs.push({ kind, name, text });
-    i = endLine + 1;
-  }
-
-  return defs;
+function isErrorResponse(result: string): boolean {
+  return result.includes("[error]") || result.includes("[stderr]");
 }
 
-/** Find the line range of an existing definition in a file.
- *  Returns [startLine, endLine] (0-indexed) or null if not found. */
-function findDefinitionRange(fileLines: string[], kind: string, name: string): [number, number] | null {
-  for (let i = 0; i < fileLines.length; i++) {
-    const re = new RegExp(`^${kind}\\s+${name}\\b`);
-    if (!re.test(fileLines[i])) continue;
-
-    // Found the start — now find the end via brace counting
-    let depth = 0;
-    let foundOpen = false;
-    let endLine = i;
-
-    for (let j = i; j < fileLines.length; j++) {
-      for (const ch of fileLines[j]) {
-        if (ch === "{") { depth++; foundOpen = true; }
-        else if (ch === "}") { depth--; }
-      }
-      endLine = j;
-      if (foundOpen && depth <= 0) break;
-      if (!foundOpen && j === i && kind === "let") break;
-    }
-
-    return [i, endLine];
-  }
+function extractErrorText(result: string): string | null {
+  const errMatch = result.match(/\[error\]\s*(.+)/);
+  if (errMatch) return errMatch[1].trim();
+  const stderrMatch = result.match(/\[stderr\]\s*(.+)/);
+  if (stderrMatch) return stderrMatch[1].trim();
   return null;
 }
 
-/** After a successful eval, persist any definitions back to the source file */
-function persistDefinitions(code: string, session: string) {
-  const ns = sessionNamespaces.get(session);
-  if (!ns) return;
-  const filePath = namespaceFiles.get(ns);
-  if (!filePath) return;
+// ---------------------------------------------------------------------------
+// Eval history log (append-only JSONL)
+// ---------------------------------------------------------------------------
 
-  const defs = extractDefinitions(code);
-  if (defs.length === 0) return;
+const EVAL_HISTORY_FILE = path.join(
+  path.dirname(new URL(import.meta.url).pathname),
+  "eval_history.jsonl"
+);
 
-  let fileContent: string;
-  try {
-    fileContent = fs.readFileSync(filePath, "utf-8");
-  } catch {
-    return;
-  }
-
-  let fileLines = fileContent.split("\n");
-
-  for (const def of defs) {
-    const range = findDefinitionRange(fileLines, def.kind, def.name);
-    const defLines = def.text.split("\n");
-
-    if (range) {
-      // Replace existing definition
-      fileLines.splice(range[0], range[1] - range[0] + 1, ...defLines);
-    } else {
-      // Append new definition at end of file
-      // Add a blank line separator if file doesn't end with one
-      if (fileLines.length > 0 && fileLines[fileLines.length - 1].trim() !== "") {
-        fileLines.push("");
-      }
-      fileLines.push(...defLines);
-    }
-  }
-
-  fs.writeFileSync(filePath, fileLines.join("\n"));
+interface PersistedEntry { name: string; action: string; }
+interface HistoryRecord {
+  ts: string;
+  session: string;
+  tool: "beagle_eval" | "beagle_persist";
+  code: string;
+  namespace?: string;
+  result: string;
+  persisted: PersistedEntry[];
+  error: string | null;
 }
 
-/** Check if the REPL response indicates an error */
-function isErrorResponse(result: string): boolean {
-  return result.includes("[error]") || result.includes("[stderr]");
+function logEvalHistory(rec: HistoryRecord) {
+  try {
+    fs.appendFileSync(EVAL_HISTORY_FILE, JSON.stringify(rec) + "\n");
+  } catch (e: any) {
+    log("WARN", "Failed to append eval history", { message: e.message });
+  }
+}
+
+// Lax parser for the `[{:name "…" :action "…"} …]` return shape from
+// reflect/persist — used only for the history log, so we don't need to
+// understand all of Beagle's printer, just grab name/action pairs.
+function parsePersistedList(result: string): PersistedEntry[] {
+  const entries: PersistedEntry[] = [];
+  const nameFirst = /:name\s+"([^"]*)"[^{}]*:action\s+"([^"]*)"/g;
+  const actionFirst = /:action\s+"([^"]*)"[^{}]*:name\s+"([^"]*)"/g;
+  let m: RegExpExecArray | null;
+  while ((m = nameFirst.exec(result)) !== null) {
+    entries.push({ name: m[1], action: m[2] });
+  }
+  while ((m = actionFirst.exec(result)) !== null) {
+    // Avoid duplicating entries captured by the name-first pass
+    if (!entries.some((e) => e.name === m![2] && e.action === m![1])) {
+      entries.push({ name: m[2], action: m[1] });
+    }
+  }
+  return entries;
 }
 
 // ---------------------------------------------------------------------------
@@ -544,19 +491,16 @@ const beagleStatus = tool(
 
 const beagleEval = tool(
   "beagle_eval",
-  "Evaluate Beagle code in a REPL session. Use this for everything: defining functions, " +
-  "testing expressions, introspecting namespaces, running reflection queries. " +
-  "The code is evaluated in the live running Beagle program. " +
-  "If you define a function, it updates in the running program AND the source file automatically.",
+  "Evaluate Beagle code in a REPL session. Use this for expressions, probing state, " +
+  "and throwaway experiments — NOT for definitions you want to keep. " +
+  "For persisting fn/struct/enum definitions to disk, use beagle_persist. " +
+  "beagle_eval does no file I/O.",
   { code: z.string().describe("Beagle code to evaluate"), session: z.string().optional().describe("Session name (default: agent)") },
   async (args) => {
     const session = args.session ?? "agent";
-    trackSessionNamespace(session, args.code);
+    // Remember any namespace directive for later beagle_persist calls.
+    trackSessionNamespace(session, extractNamespaceFromText(args.code));
     const result = await replRequest("eval", { code: args.code, session });
-    // Auto-persist definitions back to source file on success
-    if (!isErrorResponse(result)) {
-      persistDefinitions(args.code, session);
-    }
     // After every eval, check main-thread health. The game loop may have called
     // a freshly-redefined function that throws, suspending the main thread —
     // the agent has no other signal that this happened.
@@ -569,6 +513,15 @@ const beagleEval = tool(
     } catch {
       // Best-effort; don't fail the eval if the status check fails.
     }
+    logEvalHistory({
+      ts: new Date().toISOString(),
+      session,
+      tool: "beagle_eval",
+      code: args.code,
+      result: text,
+      persisted: [],
+      error: isErrorResponse(text) ? extractErrorText(text) : null,
+    });
     return { content: [{ type: "text" as const, text }] };
   }
 );
@@ -708,8 +661,9 @@ const beagleRun = tool(
         return { content: [{ type: "text" as const, text: `Error: Could not find a namespace declaration in ${args.file}. The file must have a \`namespace <name>\` at the top.` }] };
       }
 
-      // Track namespace → file for write-back
-      trackFileNamespace(args.file, fileContent);
+      // Seed the default session's namespace so beagle_persist can infer
+      // the target namespace without an explicit argument on first use.
+      if (targetNs) sessionNamespaces.set("agent", targetNs);
 
       // Generate wrapper that imports repl-main and the target namespace
       const wrapperCode = `namespace __repl_runner
@@ -771,10 +725,8 @@ const beagleLoad = tool(
     } catch (e: any) {
       return { content: [{ type: "text" as const, text: `Error reading file: ${e.message}` }] };
     }
-    // Track namespace → file mapping for write-back
-    trackFileNamespace(args.file, code);
     const session = args.session ?? "agent";
-    trackSessionNamespace(session, code);
+    trackSessionNamespace(session, extractNamespaceFromText(code));
     const result = await replRequest("eval", { code, session });
     return { content: [{ type: "text" as const, text: `Loaded ${args.file}\n\n${result}` }] };
   }
@@ -925,6 +877,116 @@ result
   }
 );
 
+const beagleSource = tool(
+  "beagle_source",
+  "Get the source text of a function, struct, or enum. Pass a bare name (resolved via the " +
+  "introspect session's imports — you may need to use `use foo.bar as bar` first in that " +
+  "session) or a fully-qualified reference. Returns the exact source as stored by the " +
+  "compiler, including any leading `///` doc comments. Returns null for REPL/eval defs, " +
+  "builtins, and FFI. This is how you READ a definition before editing it — no file I/O needed.",
+  { name: z.string().describe("Reference to a function, struct, or enum") },
+  async (args) => {
+    const code = `reflect/source(${args.name})`;
+    const result = await introspectEval(code);
+    return { content: [{ type: "text" as const, text: result }] };
+  }
+);
+
+const beagleNamespaceSource = tool(
+  "beagle_namespace_source",
+  "Get the concatenated source of every definition in a namespace (structs, then enums, " +
+  "then functions). Definitions without stored source (builtins, FFI, anonymous closures) are " +
+  "skipped. Use this when you want to understand or refactor a whole file.",
+  { namespace: z.string().describe("Namespace name, e.g. 'my.module'") },
+  async (args) => {
+    const code = `reflect/namespace-source("${beagleStringEscape(args.namespace)}")`;
+    const result = await introspectEval(code);
+    return { content: [{ type: "text" as const, text: result }] };
+  }
+);
+
+const beagleLocation = tool(
+  "beagle_location",
+  "Get the source location of a function, struct, or enum as {:file, :byte-start, :byte-end, " +
+  ":line-start, :line-end}, or null for REPL/builtin/FFI definitions. Useful for inspection; " +
+  "you do NOT need to call this to decide update-vs-append — beagle_persist handles that " +
+  "dispatch internally.",
+  { name: z.string().describe("Reference to a function, struct, or enum") },
+  async (args) => {
+    const code = `reflect/location(${args.name})`;
+    const result = await introspectEval(code);
+    return { content: [{ type: "text" as const, text: result }] };
+  }
+);
+
+const beaglePersist = tool(
+  "beagle_persist",
+  "Persist one or more top-level definitions (fn, struct, enum) to disk AND into the running " +
+  "program. For each def: if it already exists with an on-disk location, the file is updated " +
+  "in place with a drift check; if not, the def is appended to the namespace's file. The text " +
+  "is compiled with file context so source locations are tracked for later edits.\n\n" +
+  "This is the canonical path for definitions you want to keep. For expressions or throwaway " +
+  "experiments use beagle_eval instead. Calling beagle_eval and then beagle_persist with the " +
+  "same text compiles the def twice — skip straight to beagle_persist.\n\n" +
+  "Namespace: if omitted, inferred from a leading `namespace X` in text, or from the session's " +
+  "last-seen namespace (set by beagle_run, beagle_load, or a prior call that had a namespace " +
+  "directive). If no namespace can be inferred, the call errors and you should retry with an " +
+  "explicit namespace.\n\n" +
+  "Drift errors: if the file changed since the def was loaded, persist refuses and surfaces the " +
+  "message. DO NOT retry blindly — re-fetch the fresh source with beagle_source (or " +
+  "beagle_namespace_source), because whatever else changed may affect your edit.\n\n" +
+  "Returns a list of {:name, :action} records, one per persisted def, where :action is " +
+  "\"updated\" or \"appended\".",
+  {
+    text: z.string().describe("One or more top-level definitions (fn/struct/enum)"),
+    namespace: z.string().optional().describe("Target namespace (e.g. 'my.module'). Inferred if omitted."),
+    session: z.string().optional().describe("Session name (default: agent)"),
+  },
+  async (args) => {
+    const session = args.session ?? "agent";
+    const ns =
+      args.namespace ??
+      extractNamespaceFromText(args.text) ??
+      sessionNamespaces.get(session);
+
+    if (!ns) {
+      const msg =
+        "Error: could not infer target namespace. Pass `namespace` explicitly, or call " +
+        "beagle_load first, or include a `namespace X` directive in `text`.";
+      logEvalHistory({
+        ts: new Date().toISOString(),
+        session,
+        tool: "beagle_persist",
+        code: args.text,
+        result: msg,
+        persisted: [],
+        error: msg,
+      });
+      return { content: [{ type: "text" as const, text: msg }] };
+    }
+    trackSessionNamespace(session, ns);
+
+    const code = `reflect/persist("${beagleStringEscape(ns)}", "${beagleStringEscape(args.text)}")`;
+    const result = await introspectEval(code);
+
+    const persisted = parsePersistedList(result);
+    const err = isErrorResponse(result) ? extractErrorText(result) : null;
+
+    logEvalHistory({
+      ts: new Date().toISOString(),
+      session,
+      tool: "beagle_persist",
+      code: args.text,
+      namespace: ns,
+      result,
+      persisted,
+      error: err,
+    });
+
+    return { content: [{ type: "text" as const, text: result }] };
+  }
+);
+
 const server = createSdkMcpServer({
   name: "beagle-repl",
   tools: [
@@ -932,6 +994,7 @@ const server = createSdkMcpServer({
     beagleResume, beagleAbort, beagleStatus,
     beagleMainStatus, beagleMainResume, beagleMainAbort,
     beagleListNamespaces, beagleNamespaceInfo, beagleSearch, beagleDoc,
+    beagleSource, beagleNamespaceSource, beagleLocation, beaglePersist,
   ],
 });
 
@@ -941,65 +1004,89 @@ const server = createSdkMcpServer({
 
 const SYSTEM_PROMPT = `\
 You are a Beagle live coding agent. You interact with a running Beagle program \
-primarily through a REPL socket connection. You also have read-only file system \
-access (Read, Glob, Grep) for inspecting source — use it when you need to see \
-the code of the file you're editing or look up Beagle stdlib sources. You cannot \
-write or edit files; all code changes happen through beagle_eval, which auto-persists \
-definitions back to source.
+through a REPL socket connection. You have NO file system tools — no Read, Glob, \
+Grep, Write, Edit. Everything — reading source, writing source, exploring the \
+running program, testing — goes through the MCP tools below. Source reading happens \
+via beagle_source / beagle_namespace_source, source writing via beagle_persist.
+
+## Edit loop (the thing you do most)
+
+1. \`beagle_source(foo)\` → returns the current source of \`foo\` from the running program.
+2. Compose the new version in your reply.
+3. \`beagle_persist(namespace, new_text)\` → compiles it, installs it in the running \
+   program, and writes it to disk in one step. For updates, Beagle drift-checks against \
+   its stored copy of the file; for new defs, Beagle appends to the namespace's file.
+
+For expressions, probes, and throwaway experiments use **beagle_eval**. beagle_eval \
+does NOT touch disk. If you're going to keep a def, skip straight to beagle_persist — \
+going eval → persist with the same text compiles it twice.
 
 ## Your tools
 
 ### Lifecycle
 - **beagle_run**: Start (or restart) a Beagle program with an embedded REPL server. \
-  If given a .bg file, runs that file's main() with the REPL server embedded inside it — \
-  so you can eval code in the context of the running program. If no file is given, \
-  starts a standalone REPL server. **You must call this before using any other tool.**
-- **beagle_load**: Load a .bg file into the running REPL. Reads the file from disk \
-  and evaluates its entire contents in the REPL session. All definitions from the \
-  file become live immediately. Use this when the user asks you to load additional files.
+  If given a .bg file, runs that file's main() with the REPL server embedded inside it. \
+  If no file is given, starts a standalone REPL server. Call this before anything else.
+- **beagle_load**: Load a .bg file into the running REPL by reading it from disk and \
+  evaluating its contents. Use when the user points you at a file.
 
-### Core
-- **beagle_eval**: Evaluate Beagle code in a session. This is your primary tool. \
-  Use it to define functions, test expressions, and run code. \
-  The code is evaluated in the live running Beagle program.
+### Source (reading / writing)
+- **beagle_source(name)**: Source text of a fn/struct/enum from the running program, \
+  exactly as compiled (including \`///\` doc comments). Returns null for REPL/eval \
+  defs, builtins, and FFI. This replaces "read the file".
+- **beagle_namespace_source(ns)**: Concatenated source for every def in a namespace — \
+  structs, enums, functions. Use for understanding or refactoring a whole file.
+- **beagle_location(name)**: File + byte/line range for a def, or null. For inspection; \
+  you do NOT need it to choose between update and append — persist handles that.
+- **beagle_persist(text, namespace?)**: The ONLY way to write source. Accepts one or \
+  more top-level fn/struct/enum defs. Per def: updates in place (with drift check) if \
+  it exists, appends to the namespace's file otherwise. Recompiles with file context. \
+  Namespace is inferred from a leading \`namespace X\` in text, or the session's \
+  last-seen namespace, if you don't pass it.
+
+### Eval / control flow
+- **beagle_eval(code)**: Evaluate an expression in a session. Use for probes and \
+  experiments — NOT for definitions you want to keep.
 - **beagle_interrupt**: Stop a long-running evaluation.
-- **beagle_resume**: Resume a suspended resumable exception by providing a value. \
-  The code you pass is evaluated, and the result replaces the throw expression — \
-  the program continues from where it threw.
-- **beagle_abort**: Abandon a suspended resumable exception. The suspended evaluation terminates.
-- **beagle_status**: Check if the Beagle process is running. If it crashed, shows \
-  the exit code, signal, stdout, stderr, and timing. Use this to diagnose crashes.
-- **beagle_main_status**: Check if the main thread (game loop / GUI) is running or \
-  suspended due to a crash. If suspended, shows the error message.
-- **beagle_main_resume**: Resume the main thread after it crashed. First fix the \
-  broken function with beagle_eval, then call this. Optionally pass code whose \
-  result becomes the return value at the crash site.
-- **beagle_main_abort**: Abort the suspended main thread. The program will likely exit. \
-  Use beagle_run to restart afterward.
-- **beagle_describe**: Discover what operations the REPL server supports.
+- **beagle_resume / beagle_abort**: Resume or abandon a suspended resumable exception.
+- **beagle_status**: Is the Beagle process running? If it crashed, exit code + stdout/stderr.
+- **beagle_main_status / beagle_main_resume / beagle_main_abort**: Inspect and recover \
+  from main-thread (game loop / GUI) crashes.
+- **beagle_describe**: What ops the REPL server supports.
 - **beagle_sessions**: List active REPL sessions.
 
 ### Introspection
-- **beagle_list_namespaces**: List all loaded namespaces. Use this first to orient yourself.
-- **beagle_namespace_info**: Get detailed info about a namespace — all its functions \
-  (with signatures and docs), structs (with fields), and enums (with variants). \
-  This is the best way to understand what's available.
-- **beagle_search**: Search for functions by name or docstring substring (like apropos). \
-  Returns fully-qualified names.
-- **beagle_doc**: Get full documentation for a specific function or value — its args, \
-  doc string, type kind, fields/variants.
+- **beagle_list_namespaces**: All loaded namespaces.
+- **beagle_namespace_info(ns)**: Functions (signatures + docs), structs (fields), enums \
+  (variants) in a namespace.
+- **beagle_search(query)**: Apropos — match function name/docstring substring.
+- **beagle_doc(name)**: Args, doc, kind, fields/variants for one value.
 
 ## How you work
 
-1. **Explore first**: When asked to work on something, use beagle_list_namespaces \
-   and beagle_namespace_info to understand the running program. Use beagle_search \
-   to find relevant functions. Use beagle_doc to read documentation.
-2. **Develop incrementally**: Define or redefine functions one at a time, testing \
-   each with beagle_eval before moving on.
-3. **Use scratch sessions**: Use session "scratch" for throwaway experiments. \
-   Use session "dev" for definitions that should persist.
-4. **Think in terms of a live program**: You're not editing dead text in files. \
-   You're modifying a running system. Every eval changes the live program.
+1. **Explore first**: beagle_list_namespaces + beagle_namespace_info to orient. \
+   beagle_search / beagle_doc for specifics.
+2. **Read before you write**: beagle_source is always cheaper than guessing. Do it \
+   before proposing an edit to an existing definition.
+3. **Develop incrementally**: beagle_persist one def at a time, test with beagle_eval \
+   between changes.
+4. **Sessions**: "agent" is the default. "scratch" for throwaway experiments. Use \
+   different sessions if you want to isolate state.
+5. **Think in terms of a live program**: every persist changes both disk and memory \
+   atomically. You're editing a running system, not a dead tree of files.
+
+## Drift errors
+
+If beagle_persist returns something like \
+\`reflect/write-source: file contents have changed since this definition was loaded\`, \
+the file was modified outside the runtime (another editor, git checkout, etc.) since \
+Beagle loaded that def. Do NOT retry with the same text. Instead:
+
+1. Call **beagle_source** (or **beagle_namespace_source**) to get the current state.
+2. Re-derive your edit against the fresh source — whatever else changed might affect it.
+3. Call beagle_persist again with the updated text.
+
+Tell the user what drifted if it looks surprising.
 
 ## Resumable exceptions
 
@@ -1056,16 +1143,16 @@ instead of killing the process, it suspends and waits for REPL recovery.
 
 ### Workflow
 
-1. You redefine a function via beagle_eval — it has a bug.
+1. You redefine a function via beagle_persist — it has a bug.
 2. The game loop calls the broken function and throws an error.
 3. The main thread suspends. Use **beagle_main_status** to see the error.
-4. Fix the function with **beagle_eval**.
+4. Fix the function with **beagle_persist** (same def, corrected body).
 5. Use **beagle_main_resume** to continue the game loop from where it crashed.
 6. Or use **beagle_main_abort** if you want to give up and restart with beagle_run.
 
 **Important**: The REPL server stays alive during a main-thread crash. You can still \
-eval code, redefine functions, and inspect state. The main thread is just paused \
-waiting for your signal to continue.
+eval code, persist fixes, and inspect state. The main thread is just paused waiting \
+for your signal to continue.
 
 ## Beagle language basics
 
@@ -1081,9 +1168,9 @@ Beagle is a functional language with:
 - Keywords: \`:name\`, \`:kind\` (like Clojure keywords)
 - Persistent data structures: vectors \`[1, 2, 3]\`, maps \`{:a 1, :b 2}\`
 
-When you define or redefine a function via eval, it updates in the running program \
-immediately — no restart needed. The source file on disk is also updated automatically \
-— you do not need to write changes to files yourself.
+When you persist a definition, it updates in the running program AND on disk atomically \
+— no restart needed, no separate file-write step. beagle_eval, by contrast, updates the \
+running program only and does not touch disk — use it for experiments.
 
 ## Reflection API (beagle.reflect)
 
@@ -1179,9 +1266,10 @@ async function main() {
             "mcp__beagle-repl__beagle_namespace_info",
             "mcp__beagle-repl__beagle_search",
             "mcp__beagle-repl__beagle_doc",
-            "Read",
-            "Glob",
-            "Grep",
+            "mcp__beagle-repl__beagle_source",
+            "mcp__beagle-repl__beagle_namespace_source",
+            "mcp__beagle-repl__beagle_location",
+            "mcp__beagle-repl__beagle_persist",
           ],
           model: "claude-sonnet-4-6",
         };

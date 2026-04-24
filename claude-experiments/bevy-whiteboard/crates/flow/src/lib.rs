@@ -19,6 +19,7 @@ pub mod scenario;
 pub mod history;
 pub mod render;
 pub mod repl;
+pub mod snapshot;
 pub mod dsl;
 
 pub use value::{Pattern, Value, Bindings, match_pattern};
@@ -27,6 +28,7 @@ pub use samples::Samples;
 pub use rule::{Rule, When, Effect, EmitTo, MetaOp, ReturnPathOp};
 pub use sim::{Sim, Node, Edge, NodeId, EdgeId, Packet, PacketId, Time};
 pub use event::{Event, EventLog};
-pub use template::{Template, EdgeSpec, EdgeEnd};
+pub use template::{Template, EdgeSpec, EdgeEnd, Probe, ProbePart};
 pub use scenario::{Scenario, Action};
 pub use history::{Snapshot, SnapshotRing};
+pub use snapshot::SimSnapshot;

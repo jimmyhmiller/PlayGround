@@ -13,12 +13,14 @@
 
 use std::collections::BTreeMap;
 
+use serde::{Deserialize, Serialize};
+
 use crate::expr::Expr;
 use crate::sim::{EdgeId, NodeId, Time};
 use crate::value::Value;
 
 /// One scheduled intervention.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Action {
     /// Deliver a packet directly into a node's inbox (bypassing edges).
     /// `metadata` and `return_path` default to empty when absent; pass
@@ -52,7 +54,7 @@ pub enum Action {
 }
 
 /// A builder for a list of timed actions.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Scenario {
     pub(crate) entries: Vec<(Time, Action)>,
 }

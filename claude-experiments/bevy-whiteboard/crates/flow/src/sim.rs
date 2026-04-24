@@ -2,24 +2,31 @@ use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
 use std::cmp::Reverse;
 
 use rand::SeedableRng;
-use rand::rngs::StdRng;
+use serde::{Deserialize, Serialize};
+
+/// The RNG type used throughout the sim. A thin alias for
+/// `rand_chacha::ChaCha12Rng` — the same RNG `rand::rngs::StdRng`
+/// wraps, but named directly so it picks up `rand_chacha`'s `serde1`
+/// feature (the wrapper type doesn't expose it). Snapshot fidelity
+/// requires the RNG state to round-trip, so we use the concrete type.
+pub type SimRng = rand_chacha::ChaCha12Rng;
 
 use crate::event::{Event, EventLog};
 use crate::expr::Expr;
 use crate::rule::Rule;
 use crate::scenario::{Action, Scenario};
-use crate::template::Template;
+use crate::template::{Probe, ProbePart, Template};
 use crate::value::Value;
 
 pub type Time = u64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct NodeId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct EdgeId(pub u64);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PacketId(pub u64);
 
 /// A packet flowing between nodes.
@@ -33,7 +40,7 @@ pub struct PacketId(pub u64);
 /// — there is no engine-level overwriting. Empty `Vec` and empty
 /// `BTreeMap` are zero-heap defaults, so packets that don't use either
 /// mechanism pay no allocation cost.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Packet {
     pub id: PacketId,
     pub payload: Value,
@@ -56,11 +63,19 @@ pub struct Packet {
 /// drive behavior) or **compounds** (containers whose behavior is
 /// given by inner nodes wired via ports). A compound has empty
 /// `slots`/`rules`/`inbox` and populates `compound` instead.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Node {
     pub id: NodeId,
     pub name: String,
     pub parent: Option<NodeId>,
+    /// Name of the class (template) this node was instantiated from,
+    /// or `None` for nodes built via the pre-DSL imperative API or for
+    /// compounds (which aren't instantiated from templates). Loaders
+    /// use this to map sim nodes back to their visual kind — the
+    /// instance name alone is unreliable once a class can be spawned
+    /// multiple times (suffix `_N`).
+    #[serde(default)]
+    pub class: Option<String>,
 
     // --- Leaf state (unused / empty for compounds) ---
     pub slots: BTreeMap<String, Value>,
@@ -69,6 +84,10 @@ pub struct Node {
     /// In-order FIFO. Unbounded in principle; if this grows without
     /// bound, you have modeled the system correctly and it is overloaded.
     pub inbox: VecDeque<Packet>,
+    /// Probes declared on this node's class. Copied from the template
+    /// at spawn time. Empty for compounds and for nodes built by the
+    /// pre-DSL imperative API.
+    pub probes: Vec<Probe>,
 
     // --- Compound state (Some only for compounds) ---
     pub compound: Option<CompoundBody>,
@@ -83,7 +102,7 @@ impl Node {
 /// inner nodes. Ports are the only interface between a compound's
 /// internals and the outside world: external edges attach to ports,
 /// inner leaves emit through ports using `EmitTo::ToOutPort`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CompoundBody {
     /// Port name → which inner node receives packets arriving on this port.
     pub in_ports: BTreeMap<String, NodeId>,
@@ -94,7 +113,7 @@ pub struct CompoundBody {
 }
 
 /// A directed edge with a latency expression evaluated at emit time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Edge {
     pub id: EdgeId,
     pub from: NodeId,
@@ -121,7 +140,7 @@ pub struct Edge {
     pub last_sent_seq: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct Scheduled {
     pub arrives_at_ns: Time,
     pub packet: Packet,
@@ -148,13 +167,14 @@ impl Ord for Scheduled {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Sim {
     pub nodes: BTreeMap<NodeId, Node>,
     pub edges: BTreeMap<EdgeId, Edge>,
     pub now_ns: Time,
-    pub rng: StdRng,
+    pub rng: SimRng,
     pub log: EventLog,
+    #[serde(with = "reverse_heap_serde")]
     pub(crate) in_flight: BinaryHeap<Reverse<Scheduled>>,
     pub(crate) next_node_id: u64,
     pub(crate) next_edge_id: u64,
@@ -168,12 +188,18 @@ pub struct Sim {
     pub(crate) next_instance_seq: u64,
     pub(crate) next_scenario_seq: u64,
     pub templates: HashMap<String, Template>,
+    /// Named scenario library. Populated by the DSL lowerer so callers
+    /// can pick which scenario to run (via [`Sim::run_scenario`])
+    /// instead of all scenarios firing at load. The DSL's single
+    /// unnamed `scenario { … }` block is stored under the key "main".
+    pub scenarios: HashMap<String, crate::scenario::Scenario>,
     /// Live, re-evaluated parameter namespace. Expressions can
     /// reference these via `Expr::Param(name)`; changing the binding
     /// here updates every reference on next evaluation.
     pub params: HashMap<String, Expr>,
     /// Pending scenario actions keyed by (time, insertion-seq).
     /// Min-heap: earliest time pops first; ties break by insertion order.
+    #[serde(with = "reverse_heap_serde")]
     pub(crate) pending_actions: BinaryHeap<Reverse<PendingAction>>,
     /// Safety cap to prevent infinite-loop rule firings at a single
     /// instant. A well-written model won't hit this; if it does, we
@@ -186,7 +212,43 @@ pub struct Sim {
     pub error_counts: BTreeMap<String, u64>,
 }
 
-#[derive(Debug, Clone)]
+/// Serde adapter for `BinaryHeap<Reverse<T>>` — serializes as a flat
+/// `Vec<T>` (losing the Reverse-wrap and the heap order, both of which
+/// are reconstructed on deserialize). The engine's heap invariant (min
+/// by `T::cmp`) is reestablished on load because `BinaryHeap::from(Vec)`
+/// heapifies. We drop the heap order on purpose — it's redundant with
+/// `T::cmp` and storing it would be inviting skew.
+mod reverse_heap_serde {
+    use std::cmp::Reverse;
+    use std::collections::BinaryHeap;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S, T>(
+        heap: &BinaryHeap<Reverse<T>>,
+        ser: S,
+    ) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        T: Serialize + Ord,
+    {
+        let v: Vec<&T> = heap.iter().map(|r| &r.0).collect();
+        v.serialize(ser)
+    }
+
+    pub fn deserialize<'de, D, T>(
+        de: D,
+    ) -> Result<BinaryHeap<Reverse<T>>, D::Error>
+    where
+        D: Deserializer<'de>,
+        T: Deserialize<'de> + Ord,
+    {
+        let v: Vec<T> = Vec::deserialize(de)?;
+        Ok(v.into_iter().map(Reverse).collect())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct PendingAction {
     pub at_ns: Time,
     pub seq: u64,
@@ -211,7 +273,7 @@ impl Sim {
             nodes: BTreeMap::new(),
             edges: BTreeMap::new(),
             now_ns: 0,
-            rng: StdRng::seed_from_u64(seed),
+            rng: SimRng::seed_from_u64(seed),
             log: EventLog::new(100_000),
             in_flight: BinaryHeap::new(),
             next_node_id: 1,
@@ -221,6 +283,7 @@ impl Sim {
             next_instance_seq: 1,
             next_scenario_seq: 1,
             templates: HashMap::new(),
+            scenarios: HashMap::new(),
             params: HashMap::new(),
             pending_actions: BinaryHeap::new(),
             max_steps_per_instant: 10_000,
@@ -271,6 +334,17 @@ impl Sim {
         }
     }
 
+    /// Schedule every action from a named scenario in the sim's
+    /// scenario library. Returns `Err` if no such scenario is registered.
+    /// Use this when loading a canvas to start from a specific scenario
+    /// instead of the default auto-scheduled one.
+    pub fn run_scenario(&mut self, name: &str) -> Result<(), String> {
+        let sc = self.scenarios.get(name).cloned()
+            .ok_or_else(|| format!("no scenario named `{}`", name))?;
+        self.load_scenario(sc);
+        Ok(())
+    }
+
     pub fn register_template(&mut self, t: Template) {
         let key = t.name.clone();
         self.templates.insert(key, t);
@@ -285,6 +359,8 @@ impl Sim {
             slots,
             rules,
             inbox: VecDeque::new(),
+            probes: Vec::new(),
+            class: None,
             parent: None,
             compound: None,
         };
@@ -309,6 +385,8 @@ impl Sim {
             slots: BTreeMap::new(),
             rules: Vec::new(),
             inbox: VecDeque::new(),
+            probes: Vec::new(),
+            class: None,
             parent: None,
             compound: Some(CompoundBody { in_ports: in_ports.clone(), out_ports: out_ports.clone() }),
         };
@@ -450,5 +528,82 @@ impl Sim {
             (None, Some(y)) => Some(y),
             (None, None) => None,
         }
+    }
+
+    /// Probe labels declared on a node's class, in declaration order.
+    /// Empty for compounds and for nodes without declared probes.
+    pub fn probe_labels(&self, nid: NodeId) -> Vec<String> {
+        self.nodes.get(&nid)
+            .map(|n| n.probes.iter().map(|p| p.label.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    /// Evaluate a single probe on a node and return its formatted string.
+    /// Returns `None` if the node or probe label doesn't exist.
+    ///
+    /// Evaluation reads slots, params, and other nodes' state but never
+    /// mutates sim state — a private RNG clone absorbs any distribution
+    /// samples so probe reads don't perturb the sim's seeded sequence.
+    pub fn probe_reading(&self, nid: NodeId, label: &str) -> Option<String> {
+        let node = self.nodes.get(&nid)?;
+        let probe = node.probes.iter().find(|p| p.label == label)?;
+        Some(self.eval_probe_parts(nid, &probe.parts))
+    }
+
+    /// Evaluate every probe on a node. Stable order matches declaration.
+    pub fn probe_readings(&self, nid: NodeId) -> Vec<(String, String)> {
+        let Some(node) = self.nodes.get(&nid) else { return Vec::new(); };
+        node.probes.iter()
+            .map(|p| (p.label.clone(), self.eval_probe_parts(nid, &p.parts)))
+            .collect()
+    }
+
+    fn eval_probe_parts(&self, nid: NodeId, parts: &[ProbePart]) -> String {
+        let slots = self.nodes[&nid].slots.clone();
+        let bindings = crate::value::Bindings::new();
+        let mut pstack: Vec<String> = Vec::new();
+        let mut rng = self.rng.clone();
+        let mut out = String::new();
+        for part in parts {
+            match part {
+                ProbePart::Literal(s) => out.push_str(s),
+                ProbePart::Hole(e) => {
+                    let mut ctx = crate::expr::EvalCtx {
+                        bindings: &bindings,
+                        slots: &slots,
+                        now_ns: self.now_ns,
+                        rng: &mut rng,
+                        current_node: Some(nid),
+                        params: &self.params,
+                        param_stack: &mut pstack,
+                        nodes: &self.nodes,
+                        edges: &self.edges,
+                        packet: None,
+                    };
+                    let v = e.eval(&mut ctx);
+                    out.push_str(&format_probe_value(&v));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Default formatting for a probe hole value. Keeps output compact and
+/// human-readable without needing per-probe format hints. Rule of thumb:
+/// ints print as-is; floats drop trailing zeros; strings print raw;
+/// Nil becomes an em-dash placeholder.
+fn format_probe_value(v: &Value) -> String {
+    match v {
+        Value::Int(n) => n.to_string(),
+        Value::Float(f) => {
+            if !f.is_finite() { return "—".into(); }
+            if f.abs() >= 10.0 { format!("{:.0}", f) }
+            else { format!("{:.1}", f) }
+        }
+        Value::Bool(b) => b.to_string(),
+        Value::Str(s) => s.clone(),
+        Value::Nil => "—".into(),
+        other => format!("{:?}", other),
     }
 }

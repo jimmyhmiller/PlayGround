@@ -15,7 +15,16 @@ pub enum Item {
     Node(NodeDecl),
     Compound(CompoundDecl),
     Edges(Vec<EdgeDecl>),
-    Scenario(Vec<SceneStmt>),
+    Scenario(ScenarioDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct ScenarioDecl {
+    /// `None` for an unnamed `scenario { … }` block, which is treated as
+    /// the default scenario (stored under the name "main" in the lowered
+    /// sim's scenario library).
+    pub name: Option<String>,
+    pub stmts: Vec<SceneStmt>,
 }
 
 #[derive(Debug, Clone)]
@@ -31,6 +40,26 @@ pub struct NodeDecl {
     /// packets that seed its inbox. Empty for classes that are pure
     /// behaviour (no self-driven activity).
     pub on_spawn: Vec<OnSpawnStmt>,
+    /// Per-class probe declarations. Each probe is a labeled format
+    /// string with `{expr}` interpolation holes evaluated against the
+    /// node's slots at read time.
+    pub probes: Vec<ProbeDecl>,
+}
+
+/// A probe is a short named readout the UI can display next to a node.
+/// Format is a sequence of literal text and expression holes that
+/// evaluate at read time; concatenating their string forms yields the
+/// displayed value.
+#[derive(Debug, Clone)]
+pub struct ProbeDecl {
+    pub label: String,
+    pub parts: Vec<ProbePart>,
+}
+
+#[derive(Debug, Clone)]
+pub enum ProbePart {
+    Literal(String),
+    Hole(Expr),
 }
 
 /// One statement inside a `node`'s `on_spawn { ... }` block.

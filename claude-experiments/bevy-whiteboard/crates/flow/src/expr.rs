@@ -1,6 +1,8 @@
 use rand::Rng;
-use rand::rngs::StdRng;
 use rand_distr::{Bernoulli, Distribution, Exp};
+use serde::{Deserialize, Serialize};
+
+use crate::sim::SimRng;
 
 use std::collections::BTreeMap;
 
@@ -9,7 +11,7 @@ use crate::sim::{Edge, EdgeId, Node, NodeId, Packet};
 use crate::value::{Bindings, Value};
 
 /// Binary operator over two evaluated expressions.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum BinOp {
     Add, Sub, Mul, Div, Mod, Pow,
     Lt, Gt, Le, Ge, Eq, Neq,
@@ -23,7 +25,7 @@ pub enum BinOp {
 ///
 /// Keep this small. Below `Expr` we don't decompose further into
 /// "nodes and wires" — it's the textual leaf of the substrate.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Expr {
     /// Constant value.
     Lit(Value),
@@ -224,7 +226,7 @@ pub struct EvalCtx<'a> {
     pub bindings: &'a Bindings,
     pub slots: &'a BTreeMap<String, Value>,
     pub now_ns: u64,
-    pub rng: &'a mut StdRng,
+    pub rng: &'a mut SimRng,
     /// The node on which the firing rule lives. `Expr::SelfRef` reads
     /// this. `None` is only valid if the expression doesn't reference
     /// `SelfRef` — in practice, all engine evaluations supply it.
@@ -695,7 +697,7 @@ mod tests {
     fn ctx<'a>(
         bindings: &'a Bindings,
         slots: &'a std::collections::BTreeMap<String, Value>,
-        rng: &'a mut StdRng,
+        rng: &'a mut SimRng,
         params: &'a std::collections::HashMap<String, Expr>,
         param_stack: &'a mut Vec<String>,
     ) -> EvalCtx<'a> {
@@ -713,7 +715,7 @@ mod tests {
         let s = std::collections::BTreeMap::new();
         let p = std::collections::HashMap::new();
         let mut ps = Vec::new();
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = SimRng::seed_from_u64(0);
         let mut c = ctx(&b, &s, &mut rng, &p, &mut ps);
         let e = Expr::mul(Expr::int(100), Expr::pow(Expr::int(2), Expr::int(3)));
         assert_eq!(e.eval(&mut c), Value::Int(800));
@@ -727,8 +729,8 @@ mod tests {
         let mut ps1 = Vec::new();
         let mut ps2 = Vec::new();
 
-        let mut rng1 = StdRng::seed_from_u64(42);
-        let mut rng2 = StdRng::seed_from_u64(42);
+        let mut rng1 = SimRng::seed_from_u64(42);
+        let mut rng2 = SimRng::seed_from_u64(42);
         let e = Expr::exp_dist(Expr::float(10_000_000.0));
 
         let mut c1 = ctx(&b, &s, &mut rng1, &p, &mut ps1);
@@ -746,7 +748,7 @@ mod tests {
         p.insert("base".to_string(), Expr::int(100));
         p.insert("x".to_string(), Expr::add(Expr::param("base"), Expr::int(1)));
         let mut ps = Vec::new();
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = SimRng::seed_from_u64(0);
         let e = Expr::param("x");
 
         {
@@ -771,7 +773,7 @@ mod tests {
         p.insert("a".to_string(), Expr::param("b"));
         p.insert("b".to_string(), Expr::param("a"));
         let mut ps = Vec::new();
-        let mut rng = StdRng::seed_from_u64(0);
+        let mut rng = SimRng::seed_from_u64(0);
         let mut c = ctx(&b, &s, &mut rng, &p, &mut ps);
         let _ = Expr::param("a").eval(&mut c);
     }

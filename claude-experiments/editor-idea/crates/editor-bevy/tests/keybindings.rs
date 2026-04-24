@@ -3,15 +3,19 @@
 //! Bevy key events and editor-core commands — a layer that isn't
 //! covered by editor-core's own tests.
 //!
-//! The test App uses `MinimalPlugins + InputPlugin + HeadlessEditorPlugin`.
-//! No window, no rendering, no fonts. Events are written directly to the
-//! `KeyboardInput` message queue, then `app.update()` steps the schedule.
+//! The test App uses `MinimalPlugins + InputPlugin + HeadlessEditorPlugin`
+//! and spawns a single editor entity wired up as the focused target.
+//! No window, no rendering, no fonts.
 
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::ButtonState;
 use bevy::input::InputPlugin;
 use bevy::prelude::*;
-use editor_bevy::{EditorRes, HeadlessEditorPlugin};
+use editor_bevy::{
+    Editor, EditorHighlighter, EditorRect, EditorScroll, EditorStateComp, FocusedEditor,
+    HeadlessEditorPlugin, LineRows, MonoMetrics, TextDragAnchor,
+};
+use editor_bevy::highlight::Highlighter;
 use editor_core::selection::Selection;
 use editor_core::state::EditorState;
 use ropey::Rope;
@@ -20,19 +24,37 @@ fn make_app(initial: &str) -> App {
     let mut app = App::new();
     app.add_plugins(MinimalPlugins);
     app.add_plugins(InputPlugin);
-    app.insert_resource(EditorRes(
-        EditorState::new(Rope::from_str(initial), Selection::cursor(0))
-            .with_indent_unit("    "),
-    ));
     app.add_plugins(HeadlessEditorPlugin);
+    // handle_input consults MonoMetrics for the caret-visible nudge;
+    // tests never render, so a dummy cell width is fine.
+    app.insert_resource(MonoMetrics { cell_width: 9.6 });
+    let initial = initial.to_string();
+    app.add_systems(Startup, move |mut commands: Commands| {
+        let e = commands
+            .spawn((
+                Editor,
+                EditorStateComp(
+                    EditorState::new(Rope::from_str(&initial), Selection::cursor(0))
+                        .with_indent_unit("    "),
+                ),
+                EditorHighlighter(Highlighter::new()),
+                LineRows::default(),
+                EditorScroll::default(),
+                TextDragAnchor::default(),
+                EditorRect {
+                    pos: Vec2::ZERO,
+                    size: Vec2::new(800.0, 600.0),
+                    z: 0.0,
+                },
+            ))
+            .id();
+        commands.insert_resource(FocusedEditor(Some(e)));
+    });
+    // Run startup once so the entity exists before tests drive events.
+    app.update();
     app
 }
 
-/// Push a key press event as if winit produced it. For the modifier
-/// state used by `handle_input`, we also have to press the matching
-/// `ButtonInput<KeyCode>` entries — `InputPlugin`'s keyboard system
-/// populates those from `KeyboardInput` events in `PreUpdate`, so we
-/// drive the same path.
 fn press(app: &mut App, key_code: KeyCode, logical: Key) {
     app.world_mut().write_message(KeyboardInput {
         key_code,
@@ -49,13 +71,14 @@ fn press_char(app: &mut App, c: char) {
     let s = c.encode_utf8(&mut buf);
     press(
         app,
-        KeyCode::KeyA, // key_code isn't used for character fallback; any value works
+        KeyCode::KeyA,
         Key::Character(s.into()),
     );
 }
 
-fn state(app: &App) -> &EditorState {
-    &app.world().resource::<EditorRes>().0
+fn read_state(app: &mut App) -> EditorState {
+    let mut q = app.world_mut().query::<&EditorStateComp>();
+    q.single(app.world()).expect("one editor entity").0.clone()
 }
 
 #[test]
@@ -65,8 +88,9 @@ fn typing_a_char_inserts_at_caret() {
     app.update();
     press_char(&mut app, 'i');
     app.update();
-    assert_eq!(state(&app).doc.to_string(), "hi");
-    assert_eq!(state(&app).selection.primary_range().head, 2);
+    let s = read_state(&mut app);
+    assert_eq!(s.doc.to_string(), "hi");
+    assert_eq!(s.selection.primary_range().head, 2);
 }
 
 #[test]
@@ -74,7 +98,7 @@ fn arrow_right_moves_caret() {
     let mut app = make_app("abc");
     press(&mut app, KeyCode::ArrowRight, Key::ArrowRight);
     app.update();
-    assert_eq!(state(&app).selection.primary_range().head, 1);
+    assert_eq!(read_state(&mut app).selection.primary_range().head, 1);
 }
 
 #[test]
@@ -82,51 +106,43 @@ fn end_key_jumps_to_line_end() {
     let mut app = make_app("hello\nworld");
     press(&mut app, KeyCode::End, Key::End);
     app.update();
-    assert_eq!(state(&app).selection.primary_range().head, 5);
+    assert_eq!(read_state(&mut app).selection.primary_range().head, 5);
 }
 
 #[test]
 fn backspace_at_caret_deletes_prior_char() {
     let mut app = make_app("abc");
-    // Move to end first
     press(&mut app, KeyCode::End, Key::End);
     app.update();
     press(&mut app, KeyCode::Backspace, Key::Backspace);
     app.update();
-    assert_eq!(state(&app).doc.to_string(), "ab");
-    assert_eq!(state(&app).selection.primary_range().head, 2);
+    let s = read_state(&mut app);
+    assert_eq!(s.doc.to_string(), "ab");
+    assert_eq!(s.selection.primary_range().head, 2);
 }
 
 #[test]
 fn enter_inserts_newline_and_indents() {
-    // "    fn foo {" - after Enter past the `{`, should insert newline
-    // and one more indent level (the indent-aware enter).
     let mut app = make_app("    fn foo {");
     press(&mut app, KeyCode::End, Key::End);
     app.update();
     press(&mut app, KeyCode::Enter, Key::Enter);
     app.update();
-    let s = state(&app).doc.to_string();
-    // Just assert the newline got inserted and caret advanced; exact
-    // indent amount is editor-core's concern (we're testing the glue).
-    assert!(s.contains('\n'));
-    assert!(state(&app).selection.primary_range().head > 12);
+    let s = read_state(&mut app);
+    assert!(s.doc.to_string().contains('\n'));
+    assert!(s.selection.primary_range().head > 12);
 }
 
 #[test]
 fn arrow_keys_do_not_insert_text() {
-    // A regression-guard for an easy bug: if the fall-through to
-    // character insertion doesn't filter out non-Character logical
-    // keys, pressing ArrowRight on empty doc would insert text.
     let mut app = make_app("");
     press(&mut app, KeyCode::ArrowRight, Key::ArrowRight);
     app.update();
-    assert_eq!(state(&app).doc.to_string(), "");
+    assert_eq!(read_state(&mut app).doc.to_string(), "");
 }
 
 #[test]
 fn key_release_does_not_trigger_command() {
-    // handle_input ignores !ev.state.is_pressed() events.
     let mut app = make_app("abc");
     app.world_mut().write_message(KeyboardInput {
         key_code: KeyCode::ArrowRight,
@@ -137,5 +153,5 @@ fn key_release_does_not_trigger_command() {
         window: Entity::PLACEHOLDER,
     });
     app.update();
-    assert_eq!(state(&app).selection.primary_range().head, 0);
+    assert_eq!(read_state(&mut app).selection.primary_range().head, 0);
 }

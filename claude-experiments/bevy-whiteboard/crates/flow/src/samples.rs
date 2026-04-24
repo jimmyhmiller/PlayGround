@@ -1,5 +1,7 @@
 use std::collections::VecDeque;
 
+use serde::{Deserialize, Serialize};
+
 use crate::value::Value;
 
 /// A bounded ring of recent samples. Push appends; when full, the
@@ -10,7 +12,7 @@ use crate::value::Value;
 /// *bounded*, so modeling "10M outstanding requests" is still a number
 /// (count slot) — the ring only keeps enough recent arrival-times to
 /// estimate age distributions faithfully.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Samples {
     pub cap: usize,
     pub items: VecDeque<Value>,

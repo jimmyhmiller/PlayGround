@@ -26,23 +26,58 @@ use crate::{
     },
     samples::Samples,
     sim::{NodeId, Sim},
-    template::{EdgeEnd, EdgeSpec, Template},
+    template::{EdgeEnd, EdgeSpec, Probe as IProbe, ProbePart as IProbePart, Template},
     value::{Pattern as Ipat, Value},
 };
 
 /// Lower a parsed DSL file into a new `Sim` seeded from `seed`.
+///
+/// Auto-runs the "main" scenario if the file declares one (either
+/// unnamed or explicitly named `main`) — preserves back-compat with
+/// single-file sims that predate named scenarios. Callers that want to
+/// pick a scenario explicitly should use [`lower_into`] on a sim they
+/// manage themselves and then [`Sim::run_scenario`].
 pub fn lower(file: &ast::File, seed: u64) -> Result<Sim, String> {
     let mut sim = Sim::new(seed);
+    let loaded = lower_into(&mut sim, file)?;
+    if loaded.auto_run_main {
+        sim.run_scenario("main").unwrap();
+    }
+    Ok(sim)
+}
 
+/// Result of lowering a file into an existing sim. The caller decides
+/// whether to auto-run the main scenario or pick a named one.
+pub struct Lowered {
+    /// `true` if the file contained a scenario under the name "main"
+    /// (including an unnamed `scenario { }` block, which is stored as
+    /// "main" in the sim's library). Callers that want back-compat
+    /// behaviour should call `sim.run_scenario("main")` when this is
+    /// true.
+    pub auto_run_main: bool,
+}
+
+/// Lower a parsed DSL file **into an existing sim**, merging its
+/// declarations with whatever is already registered. Does NOT auto-run
+/// any scenario — caller decides. Use this when composing multiple
+/// DSL files (e.g. a canvas loading stock gadgets + custom components
+/// + a wiring file).
+pub fn lower_into(sim: &mut Sim, file: &ast::File) -> Result<Lowered, String> {
     // Phase 1: params + leaf/compound node shells (by name).
     //
     // We must create leaves before compounds that reference them, and
     // params before edges that reference them. Parse order in the file
     // is preserved for reproducibility.
     let mut name_to_id: std::collections::HashMap<String, NodeId> = std::collections::HashMap::new();
+    // Seed with any pre-existing instances so edges can reference them
+    // (e.g. a component file registers a class, then main.flow's edges
+    // point at auto-instantiated nodes from earlier-loaded files).
+    for (id, n) in &sim.nodes {
+        name_to_id.insert(n.name.clone(), *id);
+    }
     let mut pending_compounds: Vec<&ast::CompoundDecl> = Vec::new();
     let mut pending_edges: Vec<&ast::EdgeDecl> = Vec::new();
-    let mut pending_scenarios: Vec<&Vec<ast::SceneStmt>> = Vec::new();
+    let mut pending_scenarios: Vec<&ast::ScenarioDecl> = Vec::new();
 
     for item in &file.items {
         match item {
@@ -101,14 +136,29 @@ pub fn lower(file: &ast::File, seed: u64) -> Result<Sim, String> {
     }
 
     // Phase 4: scenarios.
-    for stmts in pending_scenarios {
-        for s in stmts {
+    //
+    // Every parsed scenario (named or unnamed) is registered on the sim's
+    // library under its name — unnamed blocks become "main". Duplicate
+    // names are rejected rather than silently merged so authors can't
+    // accidentally split one scenario across two blocks.
+    let mut had_main = false;
+    for sc in pending_scenarios {
+        let name = sc.name.clone().unwrap_or_else(|| "main".to_string());
+        if sim.scenarios.contains_key(&name) {
+            return Err(format!("duplicate scenario name `{}`", name));
+        }
+        let mut built = crate::scenario::Scenario::new();
+        for s in &sc.stmts {
             let action = lower_scene_action(&s.action, &name_to_id)?;
-            sim.schedule_action(s.at_ns, action);
+            built = built.at(s.at_ns, action);
+        }
+        sim.scenarios.insert(name.clone(), built);
+        if name == "main" {
+            had_main = true;
         }
     }
 
-    Ok(sim)
+    Ok(Lowered { auto_run_main: had_main })
 }
 
 /// Build the [`Template`] for a DSL node declaration — slots + rules +
@@ -147,6 +197,18 @@ pub(crate) fn build_class_template(n: &ast::NodeDecl) -> Result<Template, String
         }
     }
 
+    let mut probes = Vec::with_capacity(n.probes.len());
+    for p in &n.probes {
+        let mut parts = Vec::with_capacity(p.parts.len());
+        for part in &p.parts {
+            parts.push(match part {
+                ast::ProbePart::Literal(s) => IProbePart::Literal(s.clone()),
+                ast::ProbePart::Hole(e) => IProbePart::Hole(lower_expr(e, &HashSet::new())?),
+            });
+        }
+        probes.push(IProbe { label: p.label.clone(), parts });
+    }
+
     Ok(Template {
         name: n.name.clone(),
         node_name_prefix: n.name.clone(),
@@ -154,6 +216,7 @@ pub(crate) fn build_class_template(n: &ast::NodeDecl) -> Result<Template, String
         rules,
         edges,
         initial_packets,
+        probes,
     })
 }
 

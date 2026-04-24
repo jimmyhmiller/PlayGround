@@ -45,25 +45,24 @@ pub struct ProbeSamples {
 const WINDOW_NS: u64 = 2_000_000_000;
 
 /// Marker on a probe entity. Observes either an edge (showing packet
-/// rate) or a named reading on a single node. Node probes are domain-
-/// agnostic: the reader `fn` is supplied by the gadget module and the
-/// probe system just runs it every frame.
-#[derive(Component, Clone, Copy)]
+/// rate) or a named reading on a single node. Node probes read a
+/// DSL-declared probe by label off the sim node's probe list.
+#[derive(Component, Clone)]
 pub struct Probe {
     pub target: ProbeTarget,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub enum ProbeTarget {
     Edge(EdgeId),
     Node {
         node: flow::NodeId,
-        label: &'static str,
-        /// Reads the formatted value off a sim node. Fn pointers are
-        /// `Copy + 'static`, so they sit directly inside the component.
-        reader: fn(&flow::Node) -> String,
+        /// Probe label as declared in the class's `probes { }` block.
+        /// Looked up on the sim at display time — authoritative source
+        /// is the node's probe list, not any Bevy-side cache.
+        label: String,
         /// Stacking index — probes for the same node stack vertically
-        /// above it, in the order the gadget declared them.
+        /// above it, in declaration order.
         slot_index: usize,
     },
 }
@@ -72,14 +71,9 @@ impl Probe {
     pub fn edge(id: EdgeId) -> Self {
         Self { target: ProbeTarget::Edge(id) }
     }
-    pub fn node(node: flow::NodeId, spec: crate::gadgets::ProbeSpec, slot_index: usize) -> Self {
+    pub fn node(node: flow::NodeId, label: String, slot_index: usize) -> Self {
         Self {
-            target: ProbeTarget::Node {
-                node,
-                label: spec.label,
-                reader: spec.read,
-                slot_index,
-            },
+            target: ProbeTarget::Node { node, label, slot_index },
         }
     }
 }
@@ -151,16 +145,16 @@ fn handle_probe_click(
     });
     if let Some((entity, tf, kind)) = node_hit {
         let Some(&nid) = maps.entity_to_node.get(&entity) else { return; };
-        let specs = crate::gadgets::probes_for_kind(kind.0);
-        if specs.is_empty() {
-            // Routers (or any kind with no declared probes) silently do
+        let labels = flow.sim.probe_labels(nid);
+        if labels.is_empty() {
+            // Routers (or any class with no declared probes) silently do
             // nothing. Keep the tool active so the click lands elsewhere.
             return;
         }
-        for (i, spec) in specs.iter().enumerate() {
+        for (i, label) in labels.into_iter().enumerate() {
             let pos = tf.translation.truncate()
                 + Vec2::new(0.0, node_probe_offset_y(kind.0, i));
-            spawn_probe_entity(&mut commands, &theme, pos, Probe::node(nid, *spec, i));
+            spawn_probe_entity(&mut commands, &theme, pos, Probe::node(nid, label, i));
         }
         active.0 = Tool::Select;
         return;
@@ -283,14 +277,14 @@ fn update_probe_labels(
     mut labels: Query<&mut Text2d, With<ProbeLabel>>,
 ) {
     for (probe, kids) in probes.iter() {
-        let label = match probe.target {
+        let label = match &probe.target {
             ProbeTarget::Edge(eid) => {
-                let rate = rate_for_edge(&samples, eid);
+                let rate = rate_for_edge(&samples, *eid);
                 format_rate(rate)
             }
-            ProbeTarget::Node { node, label, reader, .. } => {
-                match flow.sim.nodes.get(&node) {
-                    Some(n) => format!("{} {}", label, reader(n)),
+            ProbeTarget::Node { node, label, .. } => {
+                match flow.sim.probe_reading(*node, label) {
+                    Some(value) => format!("{} {}", label, value),
                     None => "—".into(),
                 }
             }

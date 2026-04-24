@@ -2386,7 +2386,10 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "rand 0.8.6",
+ "rand_chacha 0.3.1",
  "rand_distr 0.4.3",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2397,6 +2400,8 @@ dependencies = [
  "flow",
  "poster-ui",
  "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -4087,6 +4092,7 @@ dependencies = [
  "libc",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+ "serde",
 ]
 
 [[package]]
@@ -4107,6 +4113,7 @@ checksum = "e6c10a63a0fa32252be49d21e7709d4d4baf8d231c2dbce1eaa8141b9b127d88"
 dependencies = [
  "ppv-lite86",
  "rand_core 0.6.4",
+ "serde",
 ]
 
 [[package]]
@@ -4126,6 +4133,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ec0be4795e2f6a28069bec0b5ff3e2ac9bafc99e6a9a7dc3547996c5c816922c"
 dependencies = [
  "getrandom 0.2.17",
+ "serde",
 ]
 
 [[package]]

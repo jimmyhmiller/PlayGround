@@ -19,6 +19,13 @@ use beagle.ffi as ffi
 
 let raylib = ffi/load-library("/opt/homebrew/lib/libraylib.dylib")
 let raygui = ffi/load-library("/Users/jimmyhmiller/Documents/Code/PlayGround/beagle-zelda/vendor/libraygui.dylib")
+// libc for getenv — used so the caller can launch the window without stealing
+// focus from whatever app is frontmost (BEAGLE_ZELDA_NOFOCUS=1).
+let libc = ffi/load-library("/usr/lib/libSystem.B.dylib")
+let c_getenv = ffi/get-function(libc, "getenv",
+                                [ffi/Type.String], ffi/Type.String)
+
+fn getenv(name) { c_getenv(name) }
 
 // ------------------------------------------------------------
 // Window / time
@@ -234,6 +241,10 @@ let RL_QUADS = 7
 let FLAG_WINDOW_RESIZABLE = 4
 let FLAG_MSAA_4X_HINT = 32
 let FLAG_VSYNC_HINT = 64
+// raylib 0x00000800 — creates the window in the background without stealing
+// focus from whatever app is frontmost. Useful while iterating so the editor
+// doesn't hijack your terminal / IDE every run.
+let FLAG_WINDOW_UNFOCUSED = 2048
 
 // Blend modes
 let BLEND_ALPHA = 0

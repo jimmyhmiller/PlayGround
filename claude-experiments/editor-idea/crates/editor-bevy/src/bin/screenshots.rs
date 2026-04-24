@@ -5,17 +5,16 @@
 //! workspace root.
 //!
 //! Run with: `cargo run -p editor_bevy --bin screenshots`
-//!
-//! The app flashes a window briefly — this is not a headless run
-//! because the GPU pipeline + window surface must be live for the
-//! screenshot API to read pixels back.
 
 use std::path::PathBuf;
 
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PrimaryWindow;
-use editor_bevy::{EditorPlugin, EditorRes, Scroll};
+use editor_bevy::{
+    build_app, setup_camera_and_font, spawn_editor, EditorRect, EditorScroll, EditorStateComp,
+    FocusedEditor, MonoFont,
+};
 use editor_core::selection::{Range, Selection};
 use editor_core::state::EditorState;
 use editor_core::transaction::Transaction;
@@ -29,7 +28,7 @@ struct Scenario {
     name: &'static str,
     initial: &'static str,
     /// Mutates state + scroll after the initial doc is installed.
-    prepare: fn(&mut EditorState, &mut Scroll),
+    prepare: fn(&mut EditorState, &mut EditorScroll),
 }
 
 const SCENARIOS: &[Scenario] = &[
@@ -42,7 +41,6 @@ const SCENARIOS: &[Scenario] = &[
         name: "02_caret_mid_line",
         initial: "fn main() {\n    println!(\"hello, editor\");\n}\n",
         prepare: |s, _| {
-            // Caret in the middle of line 2 ("println!..."), after "    print"
             *s = s.apply(&Transaction::new().select(Selection::cursor(21)));
         },
     },
@@ -58,9 +56,6 @@ const SCENARIOS: &[Scenario] = &[
         name: "04_selection_single_line",
         initial: "fn main() {\n    println!(\"hello, editor\");\n}\n",
         prepare: |s, _| {
-            // Select `hello, editor` inside the string on line 2.
-            // Line 2 starts at char 12; the string starts at offset 13 ("println!(\""
-            // length 10 = chars 12..22), so 22..35 is "hello, editor".
             *s = s.apply(&Transaction::new().select(Selection::single(Range::new(22, 35))));
         },
     },
@@ -68,8 +63,6 @@ const SCENARIOS: &[Scenario] = &[
         name: "05_selection_multi_line",
         initial: "alpha\nbravo\ncharlie\ndelta\n",
         prepare: |s, _| {
-            // Select from the 'r' in "bravo" (char 8) through the 'l' in
-            // "delta" (past "charlie\nd", which is char 21).
             *s = s.apply(&Transaction::new().select(Selection::single(Range::new(8, 21))));
         },
     },
@@ -82,8 +75,6 @@ const SCENARIOS: &[Scenario] = &[
         name: "07_utf8_and_cjk",
         initial: "hello, 世界 🦀\ncafé résumé\nαβγδε\n",
         prepare: |s, _| {
-            // Caret past the rust crab — exercises multi-byte glyph
-            // placement.
             *s = s.apply(&Transaction::new().select(Selection::cursor(11)));
         },
     },
@@ -91,40 +82,49 @@ const SCENARIOS: &[Scenario] = &[
         name: "08_scrolled_long_doc",
         initial: "",
         prepare: |s, scroll| {
-            // Override the doc: 80 numbered lines. Simpler here than
-            // spelling out an 80-line literal above.
             let mut text = String::new();
             for i in 0..80 {
-                text.push_str(&format!("line {:>3}  the quick brown fox jumps over the lazy dog\n", i));
+                text.push_str(&format!(
+                    "line {:>3}  the quick brown fox jumps over the lazy dog\n",
+                    i
+                ));
             }
             *s = EditorState::new(Rope::from_str(&text), Selection::cursor(0))
                 .with_indent_unit("    ");
-            // Scroll to roughly line 30 (30 * LINE_HEIGHT).
-            scroll.0 = 30.0 * editor_bevy::LINE_HEIGHT;
+            scroll.y = 30.0 * editor_bevy::LINE_HEIGHT;
         },
     },
     Scenario {
         name: "09_indented_block_with_tabs",
         initial: "if condition {\n\tfoo();\n\tbar();\n}\n",
         prepare: |s, _| {
-            // Caret at start of tabbed line — visually asserts the tab's
-            // advance width matches the selection / caret math.
             *s = s.apply(&Transaction::new().select(Selection::cursor(16)));
         },
     },
     Scenario {
-        // Regression probe: text, then 10 empty lines, then more text.
-        // Caret is placed at the START of the second text block (char 17,
-        // i.e. immediately before "AFTER"). If empty lines contribute the
-        // correct LINE_HEIGHT, the caret will sit directly to the left of
-        // the "A" in "AFTER". If empty lines don't add height, the caret
-        // will appear above "AFTER" — visibly misaligned.
+        name: "11_caret_after_indent_empty_line",
+        initial: "fn main() {\n    println!(\"hello, editor\");\n    \n}\n",
+        prepare: |s, _| {
+            *s = s.apply(&Transaction::new().select(Selection::cursor(47)));
+        },
+    },
+    Scenario {
         name: "10_empty_lines_between_text",
         initial: "BEFORE\n\n\n\n\n\n\n\n\n\nAFTER\n",
         prepare: |s, _| {
-            // "BEFORE" = 6 chars + "\n" = 7, + 10 newlines = char 17.
             *s = s.apply(&Transaction::new().select(Selection::cursor(17)));
         },
+    },
+    Scenario {
+        // Visual check only — verifies two overlapping editors render
+        // and the topmost one draws on top via z-order. The second
+        // editor is spawned lazily in a Startup-after system, so for
+        // this scenario the first editor still gets the `prepare`
+        // applied (it's the one this suite mutates). The second editor
+        // renders its own hardcoded demo doc.
+        name: "12_two_editors",
+        initial: "fn main() {\n    println!(\"hello, editor\");\n}\n",
+        prepare: |_, _| {},
     },
 ];
 
@@ -142,21 +142,25 @@ fn main() {
     std::fs::create_dir_all(&output_dir).expect("mkdir target/screenshots");
     eprintln!("writing screenshots to {}", output_dir.display());
 
-    let mut app = App::new();
-    app.insert_resource(EditorRes(
-        EditorState::new(Rope::from_str(SCENARIOS[0].initial), Selection::cursor(0))
-            .with_indent_unit("    "),
-    ));
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "editor screenshots".into(),
-            // Pin resolution for reproducibility.
-            resolution: (900u32, 600u32).into(),
-            ..default()
-        }),
-        ..default()
-    }));
-    app.add_plugins(EditorPlugin);
+    let mut app = build_app(SCENARIOS[0].initial);
+    // Spawn a second editor so the last scenario can visually check
+    // that two editors render with correct z-ordering.
+    app.add_systems(
+        Startup,
+        (|mut commands: Commands, font: Res<MonoFont>| {
+            spawn_editor(
+                &mut commands,
+                &font,
+                "// second editor\nfn fib(n: u32) -> u32 {\n    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n}\n",
+                EditorRect {
+                    pos: Vec2::new(160.0, 180.0),
+                    size: Vec2::new(520.0, 320.0),
+                    z: 2.0,
+                },
+            );
+        })
+            .after(setup_camera_and_font),
+    );
     app.insert_resource(Runner {
         index: 0,
         frame_in_scenario: 0,
@@ -170,10 +174,10 @@ fn main() {
 
 fn drive_scenarios(
     mut runner: ResMut<Runner>,
-    mut state: ResMut<EditorRes>,
-    mut scroll: ResMut<Scroll>,
     mut commands: Commands,
     primary: Query<Entity, With<PrimaryWindow>>,
+    focused: Res<FocusedEditor>,
+    mut editors: Query<(&mut EditorStateComp, &mut EditorScroll)>,
     mut exit: MessageWriter<AppExit>,
 ) {
     if runner.warmup_remaining > 0 {
@@ -188,11 +192,16 @@ fn drive_scenarios(
 
     let scenario = &SCENARIOS[runner.index];
 
-    // Frame 0 of the scenario: install its initial doc + prepare transform.
     if !runner.applied_this_scenario {
+        let Some(target) = focused.0 else {
+            return;
+        };
+        let Ok((mut state, mut scroll)) = editors.get_mut(target) else {
+            return;
+        };
         state.0 = EditorState::new(Rope::from_str(scenario.initial), Selection::cursor(0))
             .with_indent_unit("    ");
-        scroll.0 = 0.0;
+        *scroll = EditorScroll::default();
         (scenario.prepare)(&mut state.0, &mut scroll);
         runner.applied_this_scenario = true;
         runner.frame_in_scenario = 0;
@@ -202,7 +211,6 @@ fn drive_scenarios(
     runner.frame_in_scenario += 1;
 
     if runner.frame_in_scenario == SCREENSHOT_FRAME {
-        // Layout has had a few frames to settle. Capture.
         if primary.single().is_ok() {
             let path = runner.output_dir.join(format!("{}.png", scenario.name));
             eprintln!("  → {}", path.display());
@@ -212,7 +220,6 @@ fn drive_scenarios(
         }
     }
 
-
     if runner.frame_in_scenario >= FRAMES_PER_SCENARIO {
         runner.index += 1;
         runner.applied_this_scenario = false;
@@ -220,7 +227,6 @@ fn drive_scenarios(
 }
 
 fn workspace_root() -> PathBuf {
-    // CARGO_MANIFEST_DIR is `crates/editor-bevy`; workspace root is two up.
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")

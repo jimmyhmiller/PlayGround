@@ -1,0 +1,79 @@
+node Client {
+    slots {
+        emitted:   Int = 0
+        in_flight: Int = 0
+        failed:    Int = 0
+        sent_at:   Samples(1024)
+        completed: Int = 0
+        color:     Int = 0
+        period_ns: Int = 200000000
+        up:        Int = 1
+    }
+    probes {
+        rate:    "{1s / period_ns}/s"
+        emitted: "{emitted}"
+    }
+    on_spawn {
+        self -> self : period_ns
+        inject tick(nil)
+    }
+    rule fire {
+        on tick(_)
+        when up == 1
+        do {
+            emitted   := emitted + 1
+            in_flight := in_flight + 1
+            push sent_at <- now
+            emit req(color) pushing self to default
+            emit tick(nil)  to self
+        }
+    }
+    rule on_resp {
+        on resp(_)
+        do {
+            in_flight := in_flight - 1
+            completed := completed + 1
+            pop sent_at -> t
+            record rtt_ns now - t
+        }
+    }
+}
+
+node Worker {
+    slots {
+        served:     Int = 0
+        color:      Int = 0
+        service_ns: Int = 40000000
+        busy:       Int = 0
+        backlog:    Samples(16)
+        backlog_cap: Int = 5
+        up:         Int = 1
+    }
+    probes {
+        served:  "{served}"
+        service: "{service_ns / 1ms}ms"
+    }
+    on_spawn {
+        self -> self : service_ns
+    }
+    rule serve {
+        on req(c)
+        when c == color && up == 1 && busy == 0 && len(backlog) == 0
+        do {
+            busy := 1
+            emit done_req(nil) to self
+        }
+    }
+    rule finish {
+        on done_req(_)
+        do {
+            busy := 0
+            served := served + 1
+            emit resp(nil) popping to (head(return_path))
+        }
+    }
+}
+
+edges {
+    Client -> Worker : 1ms
+}

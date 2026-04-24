@@ -559,6 +559,8 @@ impl Sim {
             slots: t.slots.clone(),
             rules: t.rules.clone(),
             inbox: VecDeque::new(),
+            probes: t.probes.clone(),
+            class: Some(t.name.clone()),
             parent,
             compound: None,
         };
@@ -626,6 +628,8 @@ impl Sim {
             slots: t.slots.clone(),
             rules: t.rules.clone(),
             inbox: VecDeque::new(),
+            probes: t.probes.clone(),
+            class: Some(t.name.clone()),
             parent: None,
             compound: None,
         };

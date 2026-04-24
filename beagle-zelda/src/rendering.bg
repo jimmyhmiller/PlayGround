@@ -129,6 +129,30 @@ fn draw_sentinel(s, camera) {
     draw_world_rect_lines(s.pos, s.half, r/rgb(30, 25, 10), camera)
 }
 
+// A Door is drawn as a flat walkable threshold — soft green tile with a bright
+// outline — intentionally visually distinct from Wall. Floors have no pseudo-3D
+// front face since you walk onto them.
+fn draw_door(d, camera) {
+    let floor = r/color(90, 180, 100, 180)
+    let ring = r/rgb(140, 230, 150)
+    draw_world_rect(d.center, d.half, floor, camera)
+    draw_world_rect_lines(d.center, d.half, ring, camera)
+}
+
+// Editor-only marker: a cyan crosshair at the spawn position with a label.
+// Not drawn in play mode — spawns are authoring metadata, not world objects.
+fn draw_spawn(sp, camera) {
+    let pos = g/world_to_screen(sp.pos, camera)
+    let c = r/rgb(120, 220, 255)
+    let r_px = 14
+    r/draw_circle_lines(to-int(pos.x), to-int(pos.y), to-float(r_px), c)
+    r/draw_line(to-int(pos.x - to-float(r_px)), to-int(pos.y),
+                to-int(pos.x + to-float(r_px)), to-int(pos.y), c)
+    r/draw_line(to-int(pos.x), to-int(pos.y - to-float(r_px)),
+                to-int(pos.x), to-int(pos.y + to-float(r_px)), c)
+    r/draw_text(sp.name, to-int(pos.x) + 18, to-int(pos.y) - 8, 14, c)
+}
+
 // ============================================================
 // Shadow geometry — cast rays from light source to wall corners
 // (+/- EPS) and 16 filler angles, sort hits by angle, emit black
@@ -166,60 +190,58 @@ struct AngleHit {
     hit
 }
 
-// Insertion-sort a list of AngleHit by .angle (~80 items, trivial cost).
-fn sort_angle_hits(hits) {
-    let mut result = []
-    let mut i = 0
-    while i < length(hits) {
-        let cur = hits[i]
-        let mut j = 0
-        let mut inserted = false
-        let mut next = []
-        while j < length(result) {
-            let existing = result[j]
-            if (!inserted) && cur.angle < existing.angle {
-                next = push(next, cur)
-                inserted = true
-            }
-            next = push(next, existing)
-            j = j + 1
-        }
-        if !inserted { next = push(next, cur) }
-        result = next
-        i = i + 1
-    }
-    result
-}
-
 // Build segments (4 per wall) and corner points (4 per wall) in screen space.
 struct ShadowInput {
     segments
     corners
 }
 
+// Nearest distance (world units) from point `p` to the wall's AABB.
+// Returns 0 if `p` is inside the AABB.
+fn wall_nearest_dist_sq(p, wall) {
+    let dx = v/abs_f(p.x - wall.center.x) - wall.half.x
+    let dy = v/abs_f(p.y - wall.center.y) - wall.half.y
+    let cdx = if dx < 0.0 { 0.0 } else { dx }
+    let cdy = if dy < 0.0 { 0.0 } else { dy }
+    cdx * cdx + cdy * cdy
+}
+
 fn build_shadow_input(world) {
+    // Only include walls that can actually occlude the player's light. A wall
+    // whose AABB is farther than `light_range` from the player can't block any
+    // lit pixel, so we drop it entirely — fewer segments AND fewer corner-rays
+    // is the whole perf story here. With 45 walls in dungeon_1 and a 520-unit
+    // light range, typically 4-8 walls survive this cull.
+    let range = world.tuning.light_range
+    let margin = 20.0  // match SHADOW_TOP_REVEAL so edge cases don't flicker
+    let cull_r = range + margin
+    let cull_r_sq = cull_r * cull_r
+    let player = world.player.pos
+
     let mut segs = []
     let mut corners = []
     let mut i = 0
     while i < length(world.walls) {
         let w = world.walls[i]
-        // World y is up, screen y is down, so top-left/bottom-right in screen
-        // space comes from different world corners.
-        let cw = g/world_to_screen(v/make(w.center.x, w.center.y), world.camera)
-        let hx = w.half.x
-        let hy = w.half.y
-        let tl = v/make(cw.x - hx, cw.y - hy)
-        let tr = v/make(cw.x + hx, cw.y - hy)
-        let br = v/make(cw.x + hx, cw.y + hy)
-        let bl = v/make(cw.x - hx, cw.y + hy)
-        segs = push(segs, Segment { a: tl, b: tr })
-        segs = push(segs, Segment { a: tr, b: br })
-        segs = push(segs, Segment { a: br, b: bl })
-        segs = push(segs, Segment { a: bl, b: tl })
-        corners = push(corners, tl)
-        corners = push(corners, tr)
-        corners = push(corners, br)
-        corners = push(corners, bl)
+        if wall_nearest_dist_sq(player, w) <= cull_r_sq {
+            // World y is up, screen y is down, so top-left/bottom-right in
+            // screen space comes from different world corners.
+            let cw = g/world_to_screen(v/make(w.center.x, w.center.y), world.camera)
+            let hx = w.half.x
+            let hy = w.half.y
+            let tl = v/make(cw.x - hx, cw.y - hy)
+            let tr = v/make(cw.x + hx, cw.y - hy)
+            let br = v/make(cw.x + hx, cw.y + hy)
+            let bl = v/make(cw.x - hx, cw.y + hy)
+            segs = push(segs, Segment { a: tl, b: tr })
+            segs = push(segs, Segment { a: tr, b: br })
+            segs = push(segs, Segment { a: br, b: bl })
+            segs = push(segs, Segment { a: bl, b: tl })
+            corners = push(corners, tl)
+            corners = push(corners, tr)
+            corners = push(corners, br)
+            corners = push(corners, bl)
+        }
         i = i + 1
     }
     ShadowInput { segments: segs, corners: corners }
@@ -266,7 +288,7 @@ fn draw_shadow_geometry(world) {
             j = j + 1
         }
 
-        let sorted = sort_angle_hits(hits)
+        let sorted = sort-by(hits, fn(h) { h.angle })
 
         // Emit quads between each adjacent pair of hits.
         let n = length(sorted)
@@ -504,29 +526,9 @@ fn ysort_drawables(world) {
     let p = world.player
     items = push(items, Drawable.Player { ground_y: p.pos.y - p.half.y })
 
-    // Insertion sort descending by ground_y (small N, fine).
-    let mut sorted = []
-    let mut j = 0
-    while j < length(items) {
-        let cur = items[j]
-        let cur_y = drawable_ground_y(cur)
-        let mut k = 0
-        let mut inserted = false
-        let mut next = []
-        while k < length(sorted) {
-            let ex = sorted[k]
-            if (!inserted) && cur_y > drawable_ground_y(ex) {
-                next = push(next, cur)
-                inserted = true
-            }
-            next = push(next, ex)
-            k = k + 1
-        }
-        if !inserted { next = push(next, cur) }
-        sorted = next
-        j = j + 1
-    }
-    sorted
+    // Descending by ground_y — things farther south draw after things north of
+    // them. Stable Timsort from the stdlib; O(n log n) on n≈500 walls+entities.
+    sort-with(items, fn(a, b) { drawable_ground_y(a) > drawable_ground_y(b) })
 }
 
 fn draw_scene_ysorted(world) {
@@ -582,9 +584,17 @@ fn draw_sentinel_indicators(world) {
 // Play-mode frame
 // ============================================================
 
-fn render_world(world, shader_ctx) {
+fn render_world(world, shader_ctx, fade_alpha) {
     r/begin_drawing()
     r/clear_background(r/rgb(18, 20, 28))
+
+    // Doors are flat floor tiles — draw them before the Y-sorted entities so
+    // walls and actors appear on top when they overlap the threshold.
+    let mut di = 0
+    while di < length(world.doors) {
+        draw_door(world.doors[di], world.camera)
+        di = di + 1
+    }
 
     draw_scene_ysorted(world)
 
@@ -615,6 +625,14 @@ fn render_world(world, shader_ctx) {
     if hp_w > 0 { r/draw_rectangle(10, hp_y, hp_w, 16, r/rgb(220, 60, 60)) }
     r/draw_rectangle_lines(10, hp_y, 100, 16, r/WHITE)
     r/draw_text("HP", 115, hp_y - 2, 18, r/WHITE)
+
+    // Fade overlay for door transitions — drawn last so it's on top of the
+    // HUD too. 0 = transparent (no transition), 1 = fully black (mid-teleport).
+    if fade_alpha > 0.0 {
+        let a = if fade_alpha > 1.0 { 255 } else { to-int(fade_alpha * 255.0) }
+        r/draw_rectangle(0, 0, r/screen_width(), r/screen_height(),
+                         r/color(0, 0, 0, a))
+    }
 
     r/end_drawing()
 }

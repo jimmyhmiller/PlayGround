@@ -9,6 +9,10 @@ use rendering as render
 use beagle_zelda as game
 
 fn main() {
+    // Honor BEAGLE_ZELDA_NOFOCUS=1 so the test window doesn't steal focus.
+    if r/getenv("BEAGLE_ZELDA_NOFOCUS") != null {
+        r/set_config_flags(r/FLAG_WINDOW_UNFOCUSED)
+    }
     r/init_window(1280, 720, "beagle-zelda (editor test)")
     r/set_target_fps(60)
     let shader_ctx = render/load_cone_light_shader()

@@ -16,7 +16,7 @@ pub mod parse;
 pub mod lower;
 
 pub use parse::parse;
-pub use lower::lower;
+pub use lower::{lower, lower_into, Lowered};
 
 /// Parse and lower a DSL source string in one step.
 pub fn load(src: &str, seed: u64) -> Result<crate::sim::Sim, String> {

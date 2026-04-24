@@ -79,6 +79,24 @@ struct Wall {
     half          // Vec2
 }
 
+// A Door is an AABB trigger zone that, when the player overlaps it in play
+// mode, initiates a fade-transition to `target_map` and positions the player
+// at the Spawn named `target_spawn` on that map. Doors do NOT block movement.
+struct Door {
+    center        // Vec2
+    half          // Vec2
+    target_map    // string — name of destination map file (no extension)
+    target_spawn  // string — name of Spawn on destination map to arrive at
+}
+
+// A named point on a map. Doors reference Spawns by name, and every map has
+// a Spawn named "default" that the player arrives at when the map is loaded
+// without a specific target (e.g. on first boot).
+struct Spawn {
+    name          // string
+    pos           // Vec2
+}
+
 fn default_walls() {
     [
         Wall { center: v/make(0.0 - 300.0, 150.0), half: v/make(120.0, 20.0) },
