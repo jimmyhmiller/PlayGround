@@ -1,0 +1,39 @@
+# Circuit breaker demo.
+#
+# Topology: Client → CircuitBreaker → Worker
+# Reverse edges so resp/resp_error walk back.
+#
+# Drive transitions via the Timeline panel: select Worker, click the
+# `+5s` button next to its `up` slot to schedule a flip. While Worker
+# is down, the breaker accumulates failures and trips to "open"; while
+# up, it eventually re-closes via a half_open probe. The breaker's own
+# `state`, `trips`, `rejected`, `probes_passed` slots show the action.
+
+node Client : Client {
+    period_ns: 200000000   # 200ms = 5 reqs/sec — fast enough to trip
+}
+
+node CircuitBreaker : CircuitBreaker {
+    threshold:   3
+    window_ns:   1000000000      # 1s
+    recovery_ns: 1500000000      # 1.5s — short enough to see recovery
+}
+
+node Worker : Worker {
+    service_ns: 20000000   # 20ms when up
+}
+
+edges {
+    Client         -> CircuitBreaker : 1ms
+    CircuitBreaker -> Client         : 1ms
+    CircuitBreaker -> Worker         : 1ms
+    Worker         -> CircuitBreaker : 1ms
+}
+
+# Timeline events. SetSlot actions in scenarios are routed onto
+# `sim.timeline` (compound by at_ns), so each `at` group below
+# becomes one marker on the UI's timeline strip.
+scenario {
+    at 2s: set_slot Worker.up := 0
+    at 6s: set_slot Worker.up := 1
+}

@@ -1,0 +1,28 @@
+# Read-through cache demo.
+#
+# Topology: Client → Cache → BackingStore (Worker)
+# Reverse edges let resp/resp_error walk back to the client.
+#
+# `hit_rate = 0.5` produces a visible mix on the wire — half the
+# reqs resolve at the cache (fast, no second hop); half forward to
+# the backing Worker.
+
+node Client : Client {
+    period_ns: 400000000   # 400ms — slow enough to see individual hops
+}
+
+node Cache : Cache {
+    hit_rate:       0.5
+    hit_latency_ns: 5000000      # 5ms hit window
+}
+
+node BackingStore : Worker {
+    service_ns: 30000000   # 30ms backing-store service time
+}
+
+edges {
+    Client       -> Cache        : 1ms
+    Cache        -> Client       : 1ms
+    Cache        -> BackingStore : 1ms
+    BackingStore -> Cache        : 1ms
+}

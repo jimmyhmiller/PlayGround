@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "canvas": {
+    "name": "Saga (return_path as transaction log)",
+    "description": "Three-step saga: Client → Saga → Step1 → Step2 → Step3. Each step pushes itself on req; on a step failure, `compensate` walks back along the same return_path, bumping each prior step's compensated counter. Select any step and drag its fail_prob slider toward 1.0 (or schedule via the Timeline) to watch transactions start failing and rolling back."
+  }
+}

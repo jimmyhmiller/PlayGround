@@ -1,0 +1,37 @@
+# Two-phase commit. Coordinator runs a synchronous prepare round,
+# tallies votes, then broadcasts commit or abort and replies to the
+# original client. The client's return_path is stashed in pending_rp
+# (Samples(1)) across the vote window — that's the "suspended reply"
+# pattern.
+#
+# Drive abort scenarios via the Timeline panel: select any participant
+# and drag its `vote_yes_prob` slider down toward 0, or click `+5s` to
+# schedule a flip. Coordinator.committed / aborted reflect the round
+# outcome each tx.
+
+node Client : Client {
+    period_ns: 1000000000   # 1s — gives the prepare/commit fanouts
+                            # time to complete before the next req
+}
+
+node Coordinator : TPCCoordinator { }
+
+node P0 : TPCParticipant { }
+node P1 : TPCParticipant { }
+node P2 : TPCParticipant { }
+
+edges {
+    Client      -> Coordinator : 1ms
+    Coordinator -> Client      : 1ms
+
+    Coordinator -> P0 : 1ms
+    P0          -> Coordinator : 1ms
+    Coordinator -> P1 : 1ms
+    P1          -> Coordinator : 1ms
+    Coordinator -> P2 : 1ms
+    P2          -> Coordinator : 1ms
+}
+
+scenario {
+    at 4s: set_slot P1.vote_yes_prob := 0.0
+}

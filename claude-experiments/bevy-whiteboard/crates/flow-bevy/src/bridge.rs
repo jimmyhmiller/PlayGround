@@ -19,7 +19,7 @@ impl Plugin for FlowBridgePlugin {
             .init_resource::<EntityMaps>()
             .init_resource::<NewEvents>()
             .init_resource::<SimClock>()
-            .add_systems(Update, (advance_sim, collect_new_events).chain());
+            .add_systems(Update, (advance_visual_clock, advance_sim, collect_new_events).chain());
     }
 }
 
@@ -72,16 +72,42 @@ pub struct SimClock {
     pub multiplier: f64,
     pub paused: bool,
     pub step_once_ns: Option<u64>,
+    /// Pause-aware wall clock used by every visual system that needs
+    /// "now" in real seconds. Advanced by `time.delta_secs_f64()`
+    /// each frame, EXCEPT while `paused == true` — so packet
+    /// animations freeze in place when the user pauses, and resume
+    /// from where they left off when the user unpauses.
+    /// Bevy's `time.elapsed_secs_f64()` keeps ticking through pause;
+    /// using it directly was the bug that let visuals keep
+    /// animating while the sim sat still.
+    pub visual_now: f64,
 }
 impl Default for SimClock {
     fn default() -> Self {
-        Self { multiplier: 1.0, paused: false, step_once_ns: None }
+        Self { multiplier: 1.0, paused: false, step_once_ns: None, visual_now: 0.0 }
     }
 }
 
 /// Events from the most recent advance, for downstream systems.
 #[derive(Resource, Default)]
 pub struct NewEvents(pub Vec<Event>);
+
+/// Advance the pause-aware visual clock. Runs first in the update
+/// chain so every visual system that reads `clock.visual_now` sees
+/// today's value, not yesterday's. Stepping (`step_once_ns`)
+/// advances visual time by the same delta the sim takes, so a
+/// single-step is visible: packets that emit/arrive within the step
+/// flash in their lane.
+fn advance_visual_clock(
+    time: Res<Time>,
+    mut clock: ResMut<SimClock>,
+) {
+    let dt_real = time.delta_secs_f64();
+    if clock.paused && clock.step_once_ns.is_none() {
+        return;
+    }
+    clock.visual_now += dt_real * clock.multiplier;
+}
 
 fn advance_sim(
     time: Res<Time>,

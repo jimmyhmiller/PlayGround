@@ -38,13 +38,12 @@ impl Sim {
             //    (c) the deadline.
             let next_delivery = self.in_flight.peek().map(|r| r.0.arrives_at_ns);
             let next_action = self.pending_actions.peek().map(|r| r.0.at_ns);
+            let next_timeline = self.timeline.next_pending_at_ns();
 
-            let next_event = match (next_delivery, next_action) {
-                (Some(d), Some(a)) => Some(d.min(a)),
-                (Some(d), None) => Some(d),
-                (None, Some(a)) => Some(a),
-                (None, None) => None,
-            };
+            let next_event = [next_delivery, next_action, next_timeline]
+                .into_iter()
+                .flatten()
+                .min();
 
             let Some(t) = next_event else {
                 if self.now_ns < deadline_ns {
@@ -82,6 +81,12 @@ impl Sim {
                 let p = self.pending_actions.pop().unwrap().0;
                 self.apply_action(p.action);
             }
+
+            // 3a'. Fire due timeline events (user-editable scenario).
+            // Type-mismatched writes are silently no-op'd but still
+            // mark the event fired so the queue makes progress —
+            // see timeline.rs for the rationale.
+            self.fire_due_timeline_events();
 
             // 3b. Deliver all packets scheduled for this instant.
             while let Some(head) = self.in_flight.peek() {
@@ -495,6 +500,43 @@ impl Sim {
                     cur = inner;
                 }
             }
+        }
+    }
+
+    /// Apply every timeline event whose `at_ns <= now_ns` and that
+    /// hasn't fired yet. Each event is a moment with a list of slot
+    /// writes that fire atomically. Type-mismatched writes inside an
+    /// event are silently skipped (per action); the event still
+    /// completes and is marked `fired` so the queue makes progress.
+    /// Events stay in the vec post-fire for UI history.
+    pub(crate) fn fire_due_timeline_events(&mut self) {
+        let now = self.now_ns;
+        for i in 0..self.timeline.events.len() {
+            if self.timeline.events[i].fired { continue; }
+            if self.timeline.events[i].at_ns > now { break; }
+            // Clone the actions list out so we can borrow `self.nodes`
+            // mutably without aliasing the event itself.
+            let actions = self.timeline.events[i].actions.clone();
+            for act in actions {
+                if let Some(n) = self.nodes.get_mut(&act.node) {
+                    let ok = match (n.slots.get(&act.slot), &act.value) {
+                        (Some(Value::Float(_)), Value::Float(_)) => true,
+                        (Some(Value::Int(_)),   Value::Int(_))   => true,
+                        (Some(Value::Bool(_)),  Value::Bool(_))  => true,
+                        (Some(Value::Str(_)),   Value::Str(_))   => true,
+                        (Some(Value::Nil),      _)               => true,
+                        _ => false,
+                    };
+                    if ok {
+                        n.slots.insert(act.slot.clone(), act.value.clone());
+                        self.log.push(Event::SlotWritten {
+                            node: act.node, slot: act.slot, value: act.value,
+                            at_ns: now,
+                        });
+                    }
+                }
+            }
+            self.timeline.events[i].fired = true;
         }
     }
 

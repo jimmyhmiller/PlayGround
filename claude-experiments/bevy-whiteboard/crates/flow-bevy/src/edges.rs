@@ -348,7 +348,7 @@ fn draw_arrow(gizmos: &mut Gizmos, a: Vec2, b: Vec2, color: Color) {
 fn ingest_new_events(
     mut commands: Commands,
     evs: Res<NewEvents>,
-    time: Res<Time>,
+    clock: Res<crate::bridge::SimClock>,
     maps: Res<EntityMaps>,
     theme: Res<Theme>,
     node_colors: Res<crate::tool::NodeColors>,
@@ -357,7 +357,7 @@ fn ingest_new_events(
     mut materials: ResMut<Assets<ColorMaterial>>,
     node_transforms: Query<&Transform, With<crate::bridge::FlowNodeRef>>,
 ) {
-    let real_now = time.elapsed_secs_f64();
+    let real_now = clock.visual_now;
     for ev in &evs.0 {
         let Some(idx) = timeline.ingest(ev, real_now) else { continue; };
         let vp = timeline.packets[idx].clone();
@@ -431,12 +431,12 @@ fn spawn_packet_entity(
 /// not-yet-alive or already-arrived; `despawn_arrived_packets`
 /// deletes the latter).
 fn sync_packet_transforms(
-    time: Res<Time>,
+    clock: Res<crate::bridge::SimClock>,
     maps: Res<EntityMaps>,
     nodes: Query<&Transform, (With<crate::bridge::FlowNodeRef>, Without<TravelingPacket>)>,
     mut pkts: Query<(&mut Transform, &TravelingPacket, &mut Visibility)>,
 ) {
-    let now = time.elapsed_secs_f64();
+    let now = clock.visual_now;
     for (mut tf, pkt, mut vis) in pkts.iter_mut() {
         if now < pkt.emit_real || now >= pkt.arrive_real {
             *vis = Visibility::Hidden;
@@ -469,10 +469,10 @@ fn sync_packet_id_labels(
 /// Despawn entities whose packets have arrived.
 fn despawn_arrived_packets(
     mut commands: Commands,
-    time: Res<Time>,
+    clock: Res<crate::bridge::SimClock>,
     q: Query<(Entity, &TravelingPacket)>,
 ) {
-    let now = time.elapsed_secs_f64();
+    let now = clock.visual_now;
     for (e, pkt) in q.iter() {
         if now >= pkt.arrive_real {
             commands.entity(e).despawn();
@@ -488,10 +488,10 @@ fn despawn_arrived_packets(
 /// so already-despawned entities get pruned without affecting any
 /// live `TravelingPacket` (live ones have `arrive_real >= now`).
 fn gc_timeline(
-    time: Res<Time>,
+    clock: Res<crate::bridge::SimClock>,
     mut timeline: ResMut<VisualTimelineRes>,
 ) {
-    let now = time.elapsed_secs_f64();
+    let now = clock.visual_now;
     timeline.gc_before(now, 2.0);
 }
 

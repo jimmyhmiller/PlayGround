@@ -1,0 +1,178 @@
+node CircuitBreaker {
+    slots {
+        # FSM phase. "closed" = pass through to downstream normally.
+        # "open" = short-circuit all reqs with resp_error, no
+        # downstream contact. "half_open" = admit exactly one probe
+        # req through to downstream to learn if it recovered; subsequent
+        # reqs rejected until the probe settles.
+        state:         String = "closed"
+        # Ring of recent failure timestamps (sim-ns). We DO NOT store
+        # errors or causes — we are counting timestamps in a sliding
+        # window, not implementing a log. Cap (64) is generous relative
+        # to a realistic threshold (~5 in 1s) so pushes don't silently
+        # evict in-window samples before the rule that inspects them fires.
+        failures:      Samples(64)
+        window_ns:     Int = 1000000000
+        threshold:     Int = 5
+        recovery_ns:   Int = 2000000000
+        opened_at_ns:  Int = 0
+        # `probe_in_flight` gates half_open admission: set 1 on admit,
+        # cleared on resp/resp_error. Rules on `req` check it to
+        # reject a second probe while one is already out.
+        probe_in_flight: Int = 0
+        trips:          Int = 0
+        probes_passed:  Int = 0
+        probes_failed:  Int = 0
+        rejected:       Int = 0
+        color:          Int = 0
+        up:             Int = 1
+        # Self-loop period for the recovery timer tick. Kept short
+        # enough that half_open transition is within a fraction of
+        # recovery_ns. Irrelevant outside open.
+        tick_ns:        Int = 100000000
+    }
+    probes {
+        state:    "{state}"
+        trips:    "{trips}"
+        rejected: "{rejected}"
+    }
+    on_spawn {
+        # Self-tick carries the recovery-timer period. We always
+        # reemit the tick regardless of state so the loop stays live
+        # and we can catch the open->half_open transition the moment
+        # the window elapses, without needing a separate bootstrap
+        # when the breaker first trips.
+        self -> self : tick_ns
+        inject tick(nil)
+    }
+
+    # ---- Recovery tick. Always re-emit to keep the loop alive. ----
+    # Ordered first so that on the same instant where we might also
+    # see a stray response, the state transition lands before any
+    # req is evaluated in the new state.
+    rule tick_recover {
+        on tick(_)
+        when state == "open" && now - opened_at_ns >= recovery_ns
+        do {
+            state := "half_open"
+            emit tick(nil) to self
+        }
+    }
+    rule tick_noop {
+        on tick(_)
+        do {
+            emit tick(nil) to self
+        }
+    }
+
+    # ---- CLOSED state: pass req to downstream, pass resp back. ----
+
+    # Forward request to downstream, pushing self on return_path so
+    # the downstream's resp/resp_error pops back to us. `to default`
+    # would be fragile here — if the reverse edge to the client is
+    # added before the forward edge to the service, default picks
+    # the reverse path. Filter forward direction by excluding
+    # head(return_path) — the caller we just received from.
+    rule forward_req_closed {
+        on req(c)
+        when state == "closed" && c == color && up == 1
+        do {
+            emit req(c) pushing self to (head(filter(out_neighbors(), "n", n != head(return_path))))
+        }
+    }
+
+    # ---- OPEN state: reject all reqs with resp_error, no downstream hop. ----
+
+    # Take precedence over closed/half_open forwarding because the
+    # state guard narrows it. We DO NOT contact downstream — that's
+    # the entire point of the breaker.
+    rule reject_open {
+        on req(_)
+        when state == "open"
+        do {
+            rejected := rejected + 1
+            emit resp_error(nil) popping to (head(return_path))
+        }
+    }
+
+    # ---- HALF_OPEN state: admit one probe, reject rest. ----
+
+    rule probe_req {
+        on req(c)
+        when state == "half_open" && c == color && probe_in_flight == 0
+        do {
+            probe_in_flight := 1
+            emit req(c) pushing self to (head(filter(out_neighbors(), "n", n != head(return_path))))
+        }
+    }
+    rule reject_half_open {
+        on req(_)
+        when state == "half_open"
+        do {
+            rejected := rejected + 1
+            emit resp_error(nil) popping to (head(return_path))
+        }
+    }
+
+    # ---- Responses. Dispatch on state at arrival, not at send. ----
+
+    # Probe succeeded: close the breaker and clear the failure window.
+    # We clear via `drop failures len(failures)`. The `drop` effect
+    # evaluates `n` once, up-front, so using `len(failures)` at this
+    # point drops exactly the current contents. There is no
+    # single-op "clear samples" primitive today.
+    rule resp_half_open {
+        on resp(x)
+        when state == "half_open"
+        do {
+            probe_in_flight := 0
+            probes_passed := probes_passed + 1
+            state := "closed"
+            drop failures len(failures)
+            emit resp(x) popping to (head(return_path))
+        }
+    }
+    # Probe failed: reopen. opened_at_ns resets so recovery_ns runs
+    # fresh — a failed probe is as bad as the original tripping event.
+    rule resp_error_half_open {
+        on resp_error(x)
+        when state == "half_open"
+        do {
+            probe_in_flight := 0
+            probes_failed := probes_failed + 1
+            state := "open"
+            opened_at_ns := now
+            trips := trips + 1
+            emit resp_error(x) popping to (head(return_path))
+        }
+    }
+
+    # Closed-state resp: pure relay. Resp arriving while open should
+    # not normally happen (a probe is the only way a req reaches
+    # downstream in open/half_open), but relay it anyway so
+    # late-arriving responses don't strand their callers.
+    rule relay_resp {
+        on resp(x)
+        do {
+            emit resp(x) popping to (head(return_path))
+        }
+    }
+    # Closed-state resp_error: record in the failure window and trip
+    # if we cross threshold. Order matters here — we push the new
+    # failure timestamp first, THEN count in-window, so the current
+    # error is included in the check.
+    rule relay_resp_error {
+        on resp_error(x)
+        do {
+            push failures <- now
+            # Re-read `failures` via SamplesCountWhere, filtering to
+            # samples within the sliding window. Binds each sample to
+            # `ts` and keeps it if (now - ts) < window_ns.
+            failed_in_window := count_where(failures, "ts", now - ts < window_ns)
+            state := if failed_in_window >= threshold then "open" else state
+            opened_at_ns := if failed_in_window >= threshold then now else opened_at_ns
+            trips := if failed_in_window >= threshold then trips + 1 else trips
+            emit resp_error(x) popping to (head(return_path))
+        }
+    }
+}

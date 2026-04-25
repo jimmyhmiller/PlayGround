@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "canvas": {
+    "name": "Two-Phase Commit",
+    "description": "Coordinator fans `prepare` to three Participants, gathers votes, then fans the commit-or-abort decision and replies to the client. The coordinator stashes the client's return_path in pending_rp across the async vote round. Select any participant and drag its vote_yes_prob slider down (or schedule via the Timeline) to make transactions abort."
+  }
+}

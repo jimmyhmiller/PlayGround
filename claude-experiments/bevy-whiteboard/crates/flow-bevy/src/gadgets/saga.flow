@@ -1,0 +1,166 @@
+# Saga — multi-step transaction with per-step compensation on failure.
+#
+# The formalism bet being validated here: `return_path` IS the
+# transaction log. Each forward hop pushes itself; on failure,
+# `compensate` walks back along the same path, triggering per-step
+# undo counters. Nothing stores "what was done" — each step just
+# bumps a counter on the way forward and bumps a different counter
+# on the way back.
+#
+# Topology: Client → Saga → Step1 → Step2 → Step3
+# Every forward edge is paired with a reverse edge so responses and
+# compensations can travel. The "next step" at each SagaStep is the
+# first outbound neighbour that isn't head(return_path) — i.e. the
+# step we just came from.
+#
+# Modeling discipline: `done` is a count, not a log. `compensated`
+# is a count, not an undo of real work. `fail_prob` is restricted
+# to {0.0, 1.0} in v1 (stochastic failure would require stashing a
+# coin flip between rules, which the current rule engine doesn't
+# cleanly support without rule-ordering tricks).
+
+node Saga {
+    slots {
+        succeeded: Int = 0
+        failed:    Int = 0
+        in_flight: Int = 0
+        color:     Int = 0
+        up:        Int = 1
+    }
+    probes {
+        succeeded: "{succeeded}"
+        failed:    "{failed}"
+        flight:    "{in_flight}"
+    }
+
+    # Entry: forward the client's req onto Step 1, pushing self so
+    # the response (or compensation) knows where to land.
+    rule entry {
+        on req(c)
+        when c == color && up == 1
+        do {
+            in_flight := in_flight + 1
+            emit req(c) pushing self to default
+        }
+    }
+    rule entry_down {
+        on req(_)
+        when up == 0
+        do {
+            error "node_down" "saga: entry to down coordinator"
+            emit resp_error(nil) popping to (head(return_path))
+        }
+    }
+    rule entry_reject {
+        on req(_)
+        do { error "color_mismatch" "saga: wrong-colour req rejected" }
+    }
+
+    # Happy path: terminal step replied resp; it unwound the step
+    # chain back to us. Bump counter and relay one more hop to client.
+    rule on_ok {
+        on resp(_)
+        do {
+            succeeded := succeeded + 1
+            in_flight := in_flight - 1
+            emit resp(nil) popping to (head(return_path))
+        }
+    }
+
+    # Abort path: a step failed and compensate walked back through
+    # every prior step. When it reaches us, the transaction is fully
+    # rolled back — ack the client with resp_error.
+    rule on_compensate {
+        on compensate(_)
+        do {
+            failed    := failed + 1
+            in_flight := in_flight - 1
+            emit resp_error(nil) popping to (head(return_path))
+        }
+    }
+}
+
+node SagaStep {
+    slots {
+        done:        Int   = 0
+        compensated: Int   = 0
+        # Restricted to {0.0, 1.0} in v1. See file header.
+        fail_prob:   Float = 0.0
+        color:       Int   = 0
+        up:          Int   = 1
+    }
+    probes {
+        done:    "{done}"
+        comp:    "{compensated}"
+        fail:    "{fail_prob}"
+    }
+
+    # Forward, non-terminal. "Non-terminal" = there exists at least
+    # one outbound neighbour that isn't where we just came from
+    # (head(return_path)). Picks the first such neighbour as "next."
+    rule step_forward {
+        on req(c)
+        when c == color && up == 1 && fail_prob == 0.0
+            && length(filter(out_neighbors(), "n", n != head(return_path))) > 0
+        do {
+            done := done + 1
+            emit req(c) pushing self to (head(filter(out_neighbors(), "n", n != head(return_path))))
+        }
+    }
+
+    # Forward, terminal. No forward neighbour → we're the last step.
+    # Succeed and reply up the chain via pop.
+    rule step_terminal {
+        on req(c)
+        when c == color && up == 1 && fail_prob == 0.0
+            && length(filter(out_neighbors(), "n", n != head(return_path))) == 0
+        do {
+            done := done + 1
+            emit resp(nil) popping to (head(return_path))
+        }
+    }
+
+    # Local failure: DON'T count this step as done (the whole point
+    # of compensate is that this step had no forward effect worth
+    # rolling back). Emit compensate popping so the previous step
+    # gets the signal.
+    rule step_fail {
+        on req(c)
+        when c == color && up == 1 && fail_prob == 1.0
+        do {
+            emit compensate(nil) popping to (head(return_path))
+        }
+    }
+
+    rule step_down {
+        on req(_)
+        when up == 0
+        do {
+            error "node_down" "saga_step: req to down step"
+            emit compensate(nil) popping to (head(return_path))
+        }
+    }
+    rule step_reject {
+        on req(_)
+        do { error "color_mismatch" "saga_step: wrong-colour req rejected" }
+    }
+
+    # Compensation arrived from a downstream step. Bump undo counter
+    # and propagate one more hop back toward Saga. The final pop
+    # lands at Saga (head of RP at that point), which treats it as
+    # abort. No branching needed here — same rule fires at every
+    # intermediate step.
+    rule step_compensate {
+        on compensate(_)
+        do {
+            compensated := compensated + 1
+            emit compensate(nil) popping to (head(return_path))
+        }
+    }
+
+    # Relay success back toward Saga.
+    rule step_resp {
+        on resp(x)
+        do { emit resp(x) popping to (head(return_path)) }
+    }
+}

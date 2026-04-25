@@ -1,0 +1,36 @@
+# Saga with compensation. The point being demonstrated:
+# `return_path` is the transaction log. Each step pushes itself on
+# the way forward, so when a later step fails, `compensate` pops
+# back along the same path — every prior step bumps `compensated`.
+#
+# Drive failures via the Timeline panel: select Step2 (or Step3),
+# drag its `fail_prob` slider up to 1.0, then click `+5s` to schedule
+# the failure for later. Or just drag the slider live and watch
+# Saga.failed climb while Step1.compensated keeps pace.
+
+node Client : Client {
+    period_ns: 800000000   # 800ms — slow enough to see the full chain
+}
+
+node Saga : Saga { }
+
+node Step1 : SagaStep { }
+node Step2 : SagaStep { }
+node Step3 : SagaStep { }
+
+edges {
+    # Forward chain
+    Client -> Saga  : 1ms
+    Saga   -> Step1 : 1ms
+    Step1  -> Step2 : 1ms
+    Step2  -> Step3 : 1ms
+    # Reverse chain (resp / compensate walks back along these)
+    Saga   -> Client : 1ms
+    Step1  -> Saga   : 1ms
+    Step2  -> Step1  : 1ms
+    Step3  -> Step2  : 1ms
+}
+
+scenario {
+    at 3s: set_slot Step2.fail_prob := 1.0
+}

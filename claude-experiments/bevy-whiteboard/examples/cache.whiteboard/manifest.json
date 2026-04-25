@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "canvas": {
+    "name": "Read-Through Cache",
+    "description": "A Cache gadget sits between a Client and a backing Worker. Hits resolve at the cache's hit_latency_ns; misses forward to the backing store. hit_rate=0.5 by default — watch the mix of fast hits and slower misses on the wire."
+  }
+}

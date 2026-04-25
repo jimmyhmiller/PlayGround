@@ -139,22 +139,6 @@ fn spawn_palette(mut commands: Commands, theme: Res<Theme>) {
                 crate::inspector::InspectorMount,
             ));
 
-            // Timeline mount: the timeline module rebuilds its list
-            // here whenever events are added / removed / fire. Empty
-            // timeline → no contents.
-            body.spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(2.0),
-                    margin: UiRect::top(Val::Px(12.0)),
-                    padding: UiRect::all(Val::Px(6.0)),
-                    border: UiRect::top(Val::Px(1.0)),
-                    ..default()
-                },
-                BorderColor::all(theme.rule),
-                crate::timeline::TimelineMount,
-            ));
         });
 
         panel_footer(p, &theme, |f| {

@@ -1,0 +1,27 @@
+[package]
+name = "terminal_bevy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+libghostty-vt = "0.1.1"
+nix = { version = "0.31", features = ["term", "fs", "signal", "process", "user", "ioctl"] }
+skrifa = "0.39"
+bevy = { version = "0.18", default-features = false, features = [
+    "2d",
+    "x11",
+    "wayland",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = "0.2"
+objc2-foundation = "0.2"
+
+[lib]
+name = "terminal_bevy"
+path = "src/lib.rs"
+
+[[bin]]
+name = "terminal"
+path = "src/main.rs"

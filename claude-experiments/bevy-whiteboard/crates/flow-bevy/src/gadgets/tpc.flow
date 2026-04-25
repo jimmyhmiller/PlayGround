@@ -1,0 +1,171 @@
+# Two-phase commit. Coordinator fans out a prepare to every neighbour,
+# collects votes, then fans out a commit or abort and replies to the
+# original client. Participants vote probabilistically via
+# `Bernoulli(vote_yes_prob)`.
+#
+# The coordinator stashes the client's return_path in a Samples(1) slot
+# (`pending_rp`) across the async vote window. `emit_each prepare
+# pushing self` puts the coordinator at the head of each participant's
+# return_path; the participant pops back to us on vote.
+
+node TPCCoordinator {
+    slots {
+        phase: String = "idle"
+        votes_yes: Int = 0
+        votes_seen: Int = 0
+        participants: Int = 0
+        pending_rp: Samples(1)
+        committed: Int = 0
+        aborted: Int = 0
+        color: Int = 0
+        up: Int = 1
+    }
+    probes {
+        phase:     "{phase}"
+        committed: "{committed}"
+        aborted:   "{aborted}"
+    }
+
+    # Start a transaction: snapshot participants, reset vote counters,
+    # stash the client's return_path, fan out prepare with `pushing
+    # self` so participants reply to us.
+    #
+    # Participant set = out_neighbors \ {client}. We can identify the
+    # client as head(return_path) because that's the caller we just
+    # received the req from. Without this filter the coordinator would
+    # try to send `prepare` to the client too (there's a reverse edge
+    # for the final resp), which would corrupt the vote count.
+    rule begin_tx {
+        on req(c)
+        when up == 1 && c == color && phase == "idle"
+        do {
+            participants := length(filter(out_neighbors(), "n", n != head(return_path)))
+            votes_yes := 0
+            votes_seen := 0
+            phase := "preparing"
+            push pending_rp <- return_path
+            emit_each prepare(nil) pushing self to filter(out_neighbors(), "n", n != head(return_path))
+        }
+    }
+
+    # Another req arrived mid-transaction. Reject; the client gets a
+    # resp_error back along its own return_path.
+    rule reject_busy {
+        on req(_)
+        when phase != "idle"
+        do {
+            error "tpc_busy" "coordinator: busy with another transaction"
+            emit resp_error(nil) popping to (head(return_path))
+        }
+    }
+
+    # Coordinator is down.
+    rule reject_down {
+        on req(_)
+        when up == 0
+        do {
+            error "node_down" "coordinator: request to down coordinator"
+            emit resp_error(nil) popping to (head(return_path))
+        }
+    }
+
+    # Rule ordering for vote tallying:
+    #  1. `vote_final_commit`  — fires only if the incoming vote is the
+    #     last one AND all votes (including this one) were YES.
+    #  2. `vote_final_abort`   — fires if the incoming vote is the last
+    #     one but the round does NOT unanimously commit. This handles
+    #     both "last vote is NO" and "last vote is YES but an earlier
+    #     one was NO". Uses `if…then…else` in an expr to conditionally
+    #     bump `votes_yes`; we don't have conditional stmts.
+    #  3. `vote_partial`       — any non-final vote. Tallies and waits.
+    #
+    # Pop pending_rp BEFORE fan-out so head(rp) = client; filter the
+    # client out of the decision broadcast so it doesn't get a stray
+    # commit/abort.
+    rule vote_final_commit {
+        on vote(v)
+        when phase == "preparing" && v == 1 && votes_seen + 1 == participants && votes_yes + 1 == participants
+        do {
+            votes_seen := votes_seen + 1
+            votes_yes  := votes_yes + 1
+            committed  := committed + 1
+            pop pending_rp -> rp
+            emit_each commit(nil) to filter(out_neighbors(), "n", n != head(rp))
+            emit resp(nil) return_path tail(rp) to (head(rp))
+            phase := "idle"
+        }
+    }
+    rule vote_final_abort {
+        on vote(v)
+        when phase == "preparing" && votes_seen + 1 == participants
+        do {
+            votes_seen := votes_seen + 1
+            votes_yes  := if v == 1 then votes_yes + 1 else votes_yes
+            aborted    := aborted + 1
+            pop pending_rp -> rp
+            emit_each abort(nil) to filter(out_neighbors(), "n", n != head(rp))
+            emit resp_error(nil) return_path tail(rp) to (head(rp))
+            phase := "idle"
+        }
+    }
+    rule vote_partial {
+        on vote(v)
+        when phase == "preparing"
+        do {
+            votes_seen := votes_seen + 1
+            votes_yes  := if v == 1 then votes_yes + 1 else votes_yes
+        }
+    }
+}
+
+node TPCParticipant {
+    slots {
+        vote_yes_prob: Float = 1.0
+        committed: Int = 0
+        aborted: Int = 0
+        prepared: Int = 0
+        phase: String = "idle"
+        color: Int = 0
+        up: Int = 1
+    }
+    probes {
+        phase:     "{phase}"
+        committed: "{committed}"
+        aborted:   "{aborted}"
+    }
+
+    rule on_prepare_yes {
+        on prepare(_)
+        when up == 1 && Bernoulli(vote_yes_prob)
+        do {
+            prepared := prepared + 1
+            phase := "prepared"
+            emit vote(1) popping to (head(return_path))
+        }
+    }
+
+    rule on_prepare_no {
+        on prepare(_)
+        when up == 1
+        do {
+            prepared := prepared + 1
+            emit vote(0) popping to (head(return_path))
+        }
+    }
+
+    rule on_commit {
+        on commit(_)
+        do {
+            committed := committed + 1
+            phase := "idle"
+        }
+    }
+
+    rule on_abort {
+        on abort(_)
+        do {
+            aborted := aborted + 1
+            phase := "idle"
+        }
+    }
+}

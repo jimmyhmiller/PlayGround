@@ -210,6 +210,13 @@ pub struct Sim {
     /// UI / tests surface aggregate error rates without scraping the
     /// event log.
     pub error_counts: BTreeMap<String, u64>,
+    /// User-editable scenario timeline. Plays the same role as a
+    /// pre-loaded `Scenario`, but lives editable on the sim so a UI
+    /// can add / remove events at run time. The engine's `run_until`
+    /// fires due timeline events as part of normal time advancement;
+    /// nothing about the timeline mechanism involves the host UI.
+    #[serde(default)]
+    pub timeline: crate::timeline::Timeline,
 }
 
 /// Serde adapter for `BinaryHeap<Reverse<T>>` — serializes as a flat
@@ -288,6 +295,7 @@ impl Sim {
             pending_actions: BinaryHeap::new(),
             max_steps_per_instant: 10_000,
             error_counts: BTreeMap::new(),
+            timeline: crate::timeline::Timeline::new(),
         }
     }
 
@@ -327,10 +335,27 @@ impl Sim {
         self.pending_actions.push(Reverse(PendingAction { at_ns, seq, action }));
     }
 
-    /// Load all actions from a scenario onto the pending-actions heap.
+    /// Load all actions from a scenario. `SetSlot` actions are routed
+    /// into `self.timeline` so they appear as user-visible events on
+    /// the UI strip; everything else goes onto the pending-actions
+    /// heap. Multiple `SetSlot`s sharing an `at_ns` are grouped into a
+    /// single compound timeline event — that's what the user sees as
+    /// "at t=2s, change A.x AND B.y."
     pub fn load_scenario(&mut self, s: Scenario) {
+        use std::collections::BTreeMap;
+        let mut grouped: BTreeMap<Time, Vec<crate::timeline::TimelineAction>> = BTreeMap::new();
         for (t, a) in s.entries {
-            self.schedule_action(t, a);
+            match a {
+                Action::SetSlot { node, slot, value } => {
+                    grouped.entry(t).or_default().push(
+                        crate::timeline::TimelineAction { node, slot, value }
+                    );
+                }
+                other => self.schedule_action(t, other),
+            }
+        }
+        for (at_ns, actions) in grouped {
+            self.timeline.schedule_compound(at_ns, actions);
         }
     }
 

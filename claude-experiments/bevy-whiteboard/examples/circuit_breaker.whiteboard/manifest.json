@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "canvas": {
+    "name": "Circuit Breaker",
+    "description": "Three-state FSM (closed → open → half_open → closed) protecting a flaky downstream Worker. Drive the Worker up/down via the Timeline panel: select Worker, click `+5s` next to its up slot to schedule a flip. While Worker is down the breaker trips; while up it eventually re-closes via a half_open probe."
+  }
+}

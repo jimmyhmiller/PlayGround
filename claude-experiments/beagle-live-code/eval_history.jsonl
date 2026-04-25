@@ -1,0 +1,4 @@
+{"ts":"2026-04-24T16:45:54.753Z","session":"agent","tool":"beagle_persist","code":"namespace math\n\n/// Double a number (now multiplies by 4).\nfn double(x) {\n    x * 4\n}","namespace":"math","result":"=> [{:action \"updated\", :name \"math/double\"}]","persisted":[{"name":"math/double","action":"updated"}],"error":null}
+{"ts":"2026-04-24T16:45:56.775Z","session":"agent","tool":"beagle_persist","code":"namespace math\n\n/// Triple a number by multiplying its argument by 3.\nfn triple(x) {\n    x * 3\n}","namespace":"math","result":"=> [{:action \"appended\", :name \"math/triple\"}]","persisted":[{"name":"math/triple","action":"appended"}],"error":null}
+{"ts":"2026-04-24T16:45:59.557Z","session":"agent","tool":"beagle_eval","code":"math/triple(7)","result":"=> 21","persisted":[],"error":null}
+{"ts":"2026-04-24T16:45:59.617Z","session":"agent","tool":"beagle_eval","code":"math/double(5)","result":"=> 20","persisted":[],"error":null}

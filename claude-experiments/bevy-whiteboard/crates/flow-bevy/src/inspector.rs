@@ -56,7 +56,6 @@ impl Plugin for InspectorPlugin {
                 sync_generic_readout,
                 handle_generic_bool_toggle_clicks,
                 sync_generic_bool_toggle_visual,
-                handle_schedule_button_clicks,
             ),
         );
     }
@@ -703,11 +702,7 @@ fn sync_sink_count(
 
 /// Slots already handled by curated widgets. Skipped in the generic
 /// section to avoid double-rendering.
-const HIDDEN_GENERIC_SLOTS: &[&str] = &["period_ns", "service_ns", "mode"];
-// Note: `up` IS rendered generically (Int 0/1 readout) so the
-// "+5s" schedule button can attach to it. The bespoke up toggle
-// still appears in the kind-specific section above; both share
-// the same slot.
+const HIDDEN_GENERIC_SLOTS: &[&str] = &["period_ns", "service_ns", "mode", "up"];
 
 /// Slider that writes to a Float slot. The slider's value is f32 in
 /// `[0, 1]` — mapped 1:1 to `Value::Float`. Picking a [0, 1] range
@@ -787,144 +782,32 @@ fn spawn_generic_slot_row(
     name: &str,
     value: &Value,
 ) {
-    // Compute the value a "+5s" press should schedule. None disables
-    // the schedule button on this row (e.g. opaque strings).
-    let schedule_value: Option<Value> = match value {
-        Value::Float(f) => Some(Value::Float(*f)),
-        Value::Bool(b) => Some(Value::Bool(!b)),
-        Value::Int(i) if *i == 0 || *i == 1 => Some(Value::Int(1 - i)),
-        _ => None,
-    };
-
-    parent
-        .spawn(Node {
-            width: Val::Percent(100.0),
-            flex_direction: FlexDirection::Row,
-            column_gap: Val::Px(6.0),
-            align_items: AlignItems::Center,
-            ..default()
-        })
-        .with_children(|row| {
-            // Left: the widget itself, growing to fill.
-            row.spawn(Node {
-                flex_grow: 1.0,
-                flex_direction: FlexDirection::Column,
-                ..default()
-            })
-            .with_children(|inner| {
-                match value {
-                    Value::Float(f) => {
-                        poster_ui::spawn_slider(
-                            inner, theme,
-                            name,
-                            /*min*/ 0.0, /*max*/ 1.0,
-                            (*f as f32).clamp(0.0, 1.0),
-                            "",
-                            GenericFloatSlider { node: nid, slot: name.to_string() },
-                        );
-                    }
-                    Value::Bool(b) => {
-                        spawn_generic_bool_toggle_row(inner, theme, nid, name, *b);
-                    }
-                    Value::Int(i) => {
-                        let label = if name.ends_with("_ns") {
-                            format!("{} ms", *i / 1_000_000)
-                        } else {
-                            format!("{}", i)
-                        };
-                        simple_readout(inner, theme, name, &label, GenericReadout { node: nid, slot: name.to_string() });
-                    }
-                    Value::Str(s) => {
-                        simple_readout(inner, theme, name, s, GenericReadout { node: nid, slot: name.to_string() });
-                    }
-                    _ => {}
-                }
-            });
-
-            // Right: schedule button. Disabled (no marker) when the
-            // value type doesn't support a sensible flip.
-            if let Some(target) = schedule_value {
-                spawn_schedule_button(row, theme, nid, name.to_string(), target);
-            }
-        });
-}
-
-/// Marker on the per-row "+5s" schedule button. Carries everything
-/// needed to write a `ScheduleEvent` on click.
-#[derive(Component, Debug, Clone)]
-struct ScheduleSlotBtn {
-    node: NodeId,
-    slot: String,
-    /// Snapshot of the value to schedule. Captured at button-spawn
-    /// time, so for Float sliders the user adjusts the slider FIRST
-    /// (live-updating the row) then the next rebuild captures the new
-    /// value. Bool/Int target the *opposite* of current.
-    target: Value,
-}
-
-fn spawn_schedule_button(
-    parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
-    theme: &Theme,
-    nid: NodeId,
-    slot: String,
-    target: Value,
-) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                width: Val::Px(44.0),
-                padding: UiRect::vertical(Val::Px(4.0)),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(4.0)),
-                ..default()
-            },
-            BackgroundColor(Color::NONE),
-            BorderColor::all(theme.ink_soft),
-            ScheduleSlotBtn { node: nid, slot, target },
-        ))
-        .with_children(|b| {
-            b.spawn((
-                Text::new("+5s"),
-                TextFont { font_size: 9.0, ..default() },
-                TextColor(theme.ink_soft),
-                poster_ui::Bold,
-            ));
-        });
-}
-
-/// Click → emit a `ScheduleEvent`. The timeline's apply system picks
-/// it up and adds an entry. We capture the live slot value at click
-/// time so Float schedules use whatever the slider is showing
-/// *right now* (rather than the rebuild-time snapshot), letting the
-/// user dial in a value then schedule it without a second drag.
-fn handle_schedule_button_clicks(
-    q: Query<(&Interaction, &ScheduleSlotBtn), (Changed<Interaction>, With<Button>)>,
-    sim: Res<FlowSim>,
-    offset: Res<crate::timeline::ScheduleOffset>,
-    mut writer: bevy::ecs::message::MessageWriter<crate::timeline::ScheduleEvent>,
-) {
-    for (interaction, btn) in q.iter() {
-        if *interaction != Interaction::Pressed { continue; }
-        // For Float, refresh the captured value from the live slot —
-        // the user may have moved the slider since this row was built.
-        // For Bool/Int we keep the spawn-time snapshot (the "opposite"
-        // semantics). The match below is on the snapshot's variant.
-        let value = match btn.target {
-            Value::Float(_) => match sim.sim.nodes.get(&btn.node).and_then(|n| n.slots.get(&btn.slot)) {
-                Some(Value::Float(f)) => Value::Float(*f),
-                _ => btn.target.clone(),
-            },
-            _ => btn.target.clone(),
-        };
-        writer.write(crate::timeline::ScheduleEvent {
-            at_ns: sim.sim.now_ns + offset.0,
-            node: btn.node,
-            slot: btn.slot.clone(),
-            value,
-        });
+    match value {
+        Value::Float(f) => {
+            poster_ui::spawn_slider(
+                parent, theme,
+                name,
+                /*min*/ 0.0, /*max*/ 1.0,
+                (*f as f32).clamp(0.0, 1.0),
+                "",
+                GenericFloatSlider { node: nid, slot: name.to_string() },
+            );
+        }
+        Value::Bool(b) => {
+            spawn_generic_bool_toggle_row(parent, theme, nid, name, *b);
+        }
+        Value::Int(i) => {
+            let label = if name.ends_with("_ns") {
+                format!("{} ms", *i / 1_000_000)
+            } else {
+                format!("{}", i)
+            };
+            simple_readout(parent, theme, name, &label, GenericReadout { node: nid, slot: name.to_string() });
+        }
+        Value::Str(s) => {
+            simple_readout(parent, theme, name, s, GenericReadout { node: nid, slot: name.to_string() });
+        }
+        _ => {}
     }
 }
 
