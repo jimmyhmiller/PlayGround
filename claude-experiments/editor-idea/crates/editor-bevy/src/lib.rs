@@ -765,21 +765,40 @@ fn position_root(
 
 fn sync_caret(
     metrics: Res<MonoMetrics>,
-    editors: Query<(&EditorStateComp, &EditorScroll, &EditorChrome)>,
+    editors: Query<(&EditorStateComp, &EditorRect, &EditorScroll, &EditorChrome)>,
     mut t_q: Query<&mut Transform>,
+    mut vis_q: Query<&mut Visibility>,
 ) {
-    for (state, scroll, chrome) in &editors {
+    for (state, rect, scroll, chrome) in &editors {
         let head = state.0.selection.primary_range().head;
         let (line, col) = char_to_line_col(&state.0.doc, head);
-        // Caret's content-area-local X is the doc-col X minus any
-        // horizontal scroll. Y is grid-aligned so the line's scroll.y
-        // offset applied to content_root already shifts the caret.
-        let x = caret_x_in_line(col, metrics.cell_width) - scroll.x;
+        let caret_x = caret_x_in_line(col, metrics.cell_width);
+        let (_, content) = content_area(rect);
+
+        // Content-area-local position; Y is grid-aligned so the scroll
+        // applied to `content_root` already shifts the caret.
+        let x = caret_x - scroll.x;
         let y = line as f32 * LINE_HEIGHT;
+
+        // Hide the caret when it would draw outside the content area —
+        // otherwise it renders over the title bar / past the resize
+        // handle / into neighbouring editors.
+        let visible = x >= 0.0
+            && x <= content.x
+            && (line as f32 + 1.0) * LINE_HEIGHT > scroll.y
+            && (line as f32) * LINE_HEIGHT < scroll.y + content.y;
+
         if let Ok(mut t) = t_q.get_mut(chrome.caret) {
             t.translation.x = x;
             t.translation.y = -y;
             t.translation.z = 1.0;
+        }
+        if let Ok(mut v) = vis_q.get_mut(chrome.caret) {
+            *v = if visible {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
         }
     }
 }

@@ -44,6 +44,19 @@ impl Plugin for InspectorPlugin {
                 sync_queue_fill,
                 sync_sink_count,
                 sync_error_breakdown,
+                // Order matters: push (slider→slot) must run before
+                // sync (slot→slider) within a frame. If sync runs
+                // first, it sees the stale slot value and overwrites
+                // the user's in-progress drag back to that stale value
+                // before push gets a chance to fire.
+                (
+                    push_generic_float_slider_to_sim,
+                    sync_generic_float_slider_from_slot,
+                ).chain(),
+                sync_generic_readout,
+                handle_generic_bool_toggle_clicks,
+                sync_generic_bool_toggle_visual,
+                handle_schedule_button_clicks,
             ),
         );
     }
@@ -182,6 +195,12 @@ fn rebuild_inspector_on_selection_change(
             let up = read_int_slot(node, "up") != 0;
             spawn_up_toggle(body, &theme, nid, up);
         }
+
+        // Generic per-slot state section. Anything not already covered
+        // by a bespoke widget above shows up here as a slider / toggle /
+        // readout depending on type. Hidden if the node has no
+        // generic-eligible slots.
+        spawn_generic_state_section(body, &theme, node);
 
         // Per-node error breakdown. Always spawned (even when the
         // node has no errors yet) so `sync_error_breakdown` can fill
@@ -664,6 +683,395 @@ fn sync_sink_count(
             .unwrap_or(0);
         let label = format!("{}", count);
         if text.0 != label { text.0 = label; }
+    }
+}
+
+// ──────────────────────────────────────────────────────────────
+// Generic per-slot state section
+// ──────────────────────────────────────────────────────────────
+//
+// Iterates every slot on the selected node and surfaces it as the
+// best-fit widget for its type. Bespoke widgets above (Rate slider,
+// Service slider, Up/Down toggle, Router mode) cover the curated
+// cases — this fallback exposes everything else: gadget knobs like
+// `hit_rate`, `fail_prob`, `vote_yes_prob`, `threshold`, etc.
+//
+// Layout discipline matches the bespoke rows: section heading first,
+// then one row per slot. Hidden entirely when the node has nothing
+// generic-eligible to show, so plain Generators / Sinks aren't
+// cluttered with empty sections.
+
+/// Slots already handled by curated widgets. Skipped in the generic
+/// section to avoid double-rendering.
+const HIDDEN_GENERIC_SLOTS: &[&str] = &["period_ns", "service_ns", "mode"];
+// Note: `up` IS rendered generically (Int 0/1 readout) so the
+// "+5s" schedule button can attach to it. The bespoke up toggle
+// still appears in the kind-specific section above; both share
+// the same slot.
+
+/// Slider that writes to a Float slot. The slider's value is f32 in
+/// `[0, 1]` — mapped 1:1 to `Value::Float`. Picking a [0, 1] range
+/// matches the dominant Float-slot use case (probabilities); raw Float
+/// slots outside that range get clamped on edit, which is fine for
+/// gadgets where `hit_rate` etc. are already bounded by their meaning.
+#[derive(Component, Debug, Clone)]
+pub struct GenericFloatSlider {
+    pub node: NodeId,
+    pub slot: String,
+}
+
+/// Live readout showing a slot's current scalar value. Used for Int /
+/// String slots that aren't yet edit-capable.
+#[derive(Component, Debug, Clone)]
+struct GenericReadout {
+    node: NodeId,
+    slot: String,
+}
+
+/// Toggle for a Bool slot (or an Int slot used as 0/1). Click flips the
+/// value; sync system paints to match the live state.
+#[derive(Component, Debug, Clone)]
+struct GenericBoolToggle {
+    node: NodeId,
+    slot: String,
+}
+
+fn spawn_generic_state_section(
+    parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
+    theme: &Theme,
+    node: &flow::Node,
+) {
+    // Collect the eligible slots up front so we can decide whether to
+    // emit a section header at all. BTreeMap iteration is already
+    // alphabetical, which gives stable visual order across rebuilds.
+    let mut rows: Vec<(&String, &Value)> = Vec::new();
+    for (name, value) in node.slots.iter() {
+        if HIDDEN_GENERIC_SLOTS.contains(&name.as_str()) { continue; }
+        if matches!(value, Value::Samples(_) | Value::Nil | Value::List(_) | Value::Variant { .. } | Value::Record(_) | Value::NodeRef(_)) {
+            continue;
+        }
+        rows.push((name, value));
+    }
+    if rows.is_empty() { return; }
+
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                margin: UiRect::top(Val::Px(10.0)),
+                padding: UiRect::all(Val::Px(6.0)),
+                row_gap: Val::Px(2.0),
+                ..default()
+            },
+            BackgroundColor(theme.paper_alt),
+            InspectorChild,
+        ))
+        .with_children(|section| {
+            section.spawn((
+                Text::new(caps_spaced("State")),
+                TextFont { font_size: 9.0, ..default() },
+                TextColor(theme.ink_soft),
+                poster_ui::Bold,
+            ));
+            for (name, value) in rows {
+                spawn_generic_slot_row(section, theme, node.id, name, value);
+            }
+        });
+}
+
+fn spawn_generic_slot_row(
+    parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
+    theme: &Theme,
+    nid: NodeId,
+    name: &str,
+    value: &Value,
+) {
+    // Compute the value a "+5s" press should schedule. None disables
+    // the schedule button on this row (e.g. opaque strings).
+    let schedule_value: Option<Value> = match value {
+        Value::Float(f) => Some(Value::Float(*f)),
+        Value::Bool(b) => Some(Value::Bool(!b)),
+        Value::Int(i) if *i == 0 || *i == 1 => Some(Value::Int(1 - i)),
+        _ => None,
+    };
+
+    parent
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            flex_direction: FlexDirection::Row,
+            column_gap: Val::Px(6.0),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|row| {
+            // Left: the widget itself, growing to fill.
+            row.spawn(Node {
+                flex_grow: 1.0,
+                flex_direction: FlexDirection::Column,
+                ..default()
+            })
+            .with_children(|inner| {
+                match value {
+                    Value::Float(f) => {
+                        poster_ui::spawn_slider(
+                            inner, theme,
+                            name,
+                            /*min*/ 0.0, /*max*/ 1.0,
+                            (*f as f32).clamp(0.0, 1.0),
+                            "",
+                            GenericFloatSlider { node: nid, slot: name.to_string() },
+                        );
+                    }
+                    Value::Bool(b) => {
+                        spawn_generic_bool_toggle_row(inner, theme, nid, name, *b);
+                    }
+                    Value::Int(i) => {
+                        let label = if name.ends_with("_ns") {
+                            format!("{} ms", *i / 1_000_000)
+                        } else {
+                            format!("{}", i)
+                        };
+                        simple_readout(inner, theme, name, &label, GenericReadout { node: nid, slot: name.to_string() });
+                    }
+                    Value::Str(s) => {
+                        simple_readout(inner, theme, name, s, GenericReadout { node: nid, slot: name.to_string() });
+                    }
+                    _ => {}
+                }
+            });
+
+            // Right: schedule button. Disabled (no marker) when the
+            // value type doesn't support a sensible flip.
+            if let Some(target) = schedule_value {
+                spawn_schedule_button(row, theme, nid, name.to_string(), target);
+            }
+        });
+}
+
+/// Marker on the per-row "+5s" schedule button. Carries everything
+/// needed to write a `ScheduleEvent` on click.
+#[derive(Component, Debug, Clone)]
+struct ScheduleSlotBtn {
+    node: NodeId,
+    slot: String,
+    /// Snapshot of the value to schedule. Captured at button-spawn
+    /// time, so for Float sliders the user adjusts the slider FIRST
+    /// (live-updating the row) then the next rebuild captures the new
+    /// value. Bool/Int target the *opposite* of current.
+    target: Value,
+}
+
+fn spawn_schedule_button(
+    parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
+    theme: &Theme,
+    nid: NodeId,
+    slot: String,
+    target: Value,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                width: Val::Px(44.0),
+                padding: UiRect::vertical(Val::Px(4.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            BorderColor::all(theme.ink_soft),
+            ScheduleSlotBtn { node: nid, slot, target },
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new("+5s"),
+                TextFont { font_size: 9.0, ..default() },
+                TextColor(theme.ink_soft),
+                poster_ui::Bold,
+            ));
+        });
+}
+
+/// Click → emit a `ScheduleEvent`. The timeline's apply system picks
+/// it up and adds an entry. We capture the live slot value at click
+/// time so Float schedules use whatever the slider is showing
+/// *right now* (rather than the rebuild-time snapshot), letting the
+/// user dial in a value then schedule it without a second drag.
+fn handle_schedule_button_clicks(
+    q: Query<(&Interaction, &ScheduleSlotBtn), (Changed<Interaction>, With<Button>)>,
+    sim: Res<FlowSim>,
+    offset: Res<crate::timeline::ScheduleOffset>,
+    mut writer: bevy::ecs::message::MessageWriter<crate::timeline::ScheduleEvent>,
+) {
+    for (interaction, btn) in q.iter() {
+        if *interaction != Interaction::Pressed { continue; }
+        // For Float, refresh the captured value from the live slot —
+        // the user may have moved the slider since this row was built.
+        // For Bool/Int we keep the spawn-time snapshot (the "opposite"
+        // semantics). The match below is on the snapshot's variant.
+        let value = match btn.target {
+            Value::Float(_) => match sim.sim.nodes.get(&btn.node).and_then(|n| n.slots.get(&btn.slot)) {
+                Some(Value::Float(f)) => Value::Float(*f),
+                _ => btn.target.clone(),
+            },
+            _ => btn.target.clone(),
+        };
+        writer.write(crate::timeline::ScheduleEvent {
+            at_ns: sim.sim.now_ns + offset.0,
+            node: btn.node,
+            slot: btn.slot.clone(),
+            value,
+        });
+    }
+}
+
+fn spawn_generic_bool_toggle_row(
+    parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
+    theme: &Theme,
+    nid: NodeId,
+    slot: &str,
+    on: bool,
+) {
+    parent
+        .spawn(Node {
+            width: Val::Percent(100.0),
+            padding: UiRect::vertical(Val::Px(5.0)),
+            column_gap: Val::Px(8.0),
+            align_items: AlignItems::Center,
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                Text::new(caps_spaced(slot)),
+                TextFont { font_size: 9.0, ..default() },
+                TextColor(theme.ink_soft),
+                poster_ui::Bold,
+            ));
+            let (border, label) = bool_toggle_visuals(theme, on);
+            row.spawn((
+                Button,
+                Node {
+                    flex_grow: 1.0,
+                    padding: UiRect::vertical(Val::Px(5.0)),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(6.0)),
+                    ..default()
+                },
+                BackgroundColor(Color::NONE),
+                BorderColor::all(border),
+                GenericBoolToggle { node: nid, slot: slot.to_string() },
+            ))
+            .with_children(|b| {
+                b.spawn((
+                    Text::new(caps_spaced(label)),
+                    TextFont { font_size: 11.0, ..default() },
+                    TextColor(border),
+                    poster_ui::Bold,
+                ));
+            });
+        });
+}
+
+fn bool_toggle_visuals(theme: &Theme, on: bool) -> (Color, &'static str) {
+    if on { (theme.accent, "On") } else { (theme.muted, "Off") }
+}
+
+/// Slider drag → slot write. Mirrors `push_rate_slider_to_sim` but
+/// generic over slot name. Writes Float to whatever slot is named.
+fn push_generic_float_slider_to_sim(
+    q: Query<(&Slider, &GenericFloatSlider), Changed<Slider>>,
+    mut sim: ResMut<FlowSim>,
+) {
+    for (slider, marker) in q.iter() {
+        let Some(node) = sim.sim.nodes.get_mut(&marker.node) else { continue };
+        if !matches!(node.slots.get(&marker.slot), Some(Value::Float(_))) { continue; }
+        node.slots.insert(marker.slot.clone(), Value::Float(slider.value as f64));
+    }
+}
+
+/// Slot write → slider value. Catches scenario / timeline / external
+/// writes so the slider tracks the real state. Without this, an
+/// external slot change wouldn't be reflected on the slider until the
+/// inspector rebuilds (next selection change).
+///
+/// Skips when the slider's already at the right value to avoid
+/// retriggering the `Changed<Slider>` filter and looping with the
+/// push system above.
+fn sync_generic_float_slider_from_slot(
+    sim: Res<FlowSim>,
+    mut q: Query<(&mut Slider, &GenericFloatSlider)>,
+) {
+    for (mut slider, marker) in q.iter_mut() {
+        let Some(node) = sim.sim.nodes.get(&marker.node) else { continue };
+        let Some(Value::Float(f)) = node.slots.get(&marker.slot) else { continue };
+        let want = (*f as f32).clamp(slider.min, slider.max);
+        if (slider.value - want).abs() > 1e-6 {
+            slider.value = want;
+        }
+    }
+}
+
+/// Live-tick readout text for Int/String slots.
+fn sync_generic_readout(
+    sim: Res<FlowSim>,
+    mut q: Query<(&GenericReadout, &mut Text)>,
+) {
+    for (r, mut text) in q.iter_mut() {
+        let Some(node) = sim.sim.nodes.get(&r.node) else { continue };
+        let Some(value) = node.slots.get(&r.slot) else { continue };
+        let label = match value {
+            Value::Int(i) => {
+                if r.slot.ends_with("_ns") { format!("{} ms", *i / 1_000_000) }
+                else { format!("{}", i) }
+            }
+            Value::Str(s) => s.clone(),
+            _ => continue,
+        };
+        if text.0 != label { text.0 = label; }
+    }
+}
+
+fn handle_generic_bool_toggle_clicks(
+    q: Query<(&Interaction, &GenericBoolToggle), (Changed<Interaction>, With<Button>)>,
+    mut sim: ResMut<FlowSim>,
+) {
+    for (interaction, toggle) in q.iter() {
+        if *interaction != Interaction::Pressed { continue; }
+        let Some(node) = sim.sim.nodes.get_mut(&toggle.node) else { continue };
+        let cur = match node.slots.get(&toggle.slot) {
+            Some(Value::Bool(b)) => *b,
+            _ => continue,
+        };
+        node.slots.insert(toggle.slot.clone(), Value::Bool(!cur));
+    }
+}
+
+fn sync_generic_bool_toggle_visual(
+    theme: Res<Theme>,
+    sim: Res<FlowSim>,
+    mut buttons: Query<(&GenericBoolToggle, &mut BorderColor, &Children)>,
+    mut texts: Query<(&mut Text, &mut TextColor)>,
+) {
+    for (toggle, mut border, children) in buttons.iter_mut() {
+        let Some(node) = sim.sim.nodes.get(&toggle.node) else { continue };
+        let on = match node.slots.get(&toggle.slot) {
+            Some(Value::Bool(b)) => *b,
+            _ => continue,
+        };
+        let (color, label) = bool_toggle_visuals(&theme, on);
+        *border = BorderColor::all(color);
+        for child in children.iter() {
+            if let Ok((mut text, mut tc)) = texts.get_mut(child) {
+                let spaced = caps_spaced(label);
+                if text.0 != spaced { text.0 = spaced; }
+                *tc = TextColor(color);
+            }
+        }
     }
 }
 

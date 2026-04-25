@@ -99,6 +99,26 @@ pub fn lower_into(sim: &mut Sim, file: &ast::File) -> Result<Lowered, String> {
                 let id = sim.instantiate(&n.name, &n.name)?;
                 name_to_id.insert(n.name.clone(), id);
             }
+            ast::Item::Instance(inst) => {
+                // `node NAME : CLASS { ... }` — clone the class into a
+                // new instance. The class must already be registered
+                // (stock gadget, prior `node` block, or component file).
+                let id = sim.instantiate(&inst.class, &inst.name)?;
+                let node = sim.nodes.get_mut(&id).ok_or_else(|| {
+                    format!("instantiate `{}` of `{}`: just-spawned node missing", inst.name, inst.class)
+                })?;
+                for (slot, expr) in &inst.overrides {
+                    if !node.slots.contains_key(slot) {
+                        return Err(format!(
+                            "instance `{}` of `{}`: override targets unknown slot `{}`",
+                            inst.name, inst.class, slot
+                        ));
+                    }
+                    let v = lower_literal(expr)?;
+                    node.slots.insert(slot.clone(), v);
+                }
+                name_to_id.insert(inst.name.clone(), id);
+            }
             ast::Item::Compound(c) => pending_compounds.push(c),
             ast::Item::Edges(es) => {
                 for e in es { pending_edges.push(e); }
@@ -501,6 +521,20 @@ fn lower_fn_call(name: &str, args: &[ast::Expr], bound: &HashSet<String>) -> Res
             inner.insert(bind.clone());
             let body = lower_expr(&args[2], &inner)?;
             return Ok(Ie::argmin(list, bind, body));
+        }
+        ("count_where", 3) => {
+            // count_where(slot_name, "bind", pred_expr) — counts samples
+            // in `slot_name` for which `pred_expr` is true with the
+            // per-sample value bound to `bind`.
+            let slot = match &args[0] {
+                ast::Expr::Name(s) => s.clone(),
+                other => return Err(format!("count_where: first arg must be a slot name, got {:?}", other)),
+            };
+            let bind = expect_str_lit(&args[1], "count_where")?;
+            let mut inner = bound.clone();
+            inner.insert(bind.clone());
+            let pred = lower_expr(&args[2], &inner)?;
+            return Ok(Ie::samples_count_where(slot, bind, pred));
         }
         _ => {}
     }

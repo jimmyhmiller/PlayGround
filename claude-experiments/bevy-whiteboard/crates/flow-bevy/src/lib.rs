@@ -16,6 +16,7 @@ pub mod nodes;
 pub mod palette;
 pub mod probes;
 pub mod theme;
+pub mod timeline;
 pub mod tool;
 pub mod visual;
 
@@ -102,6 +103,7 @@ impl Plugin for FlowBevyPlugins {
             palette::PalettePlugin,
             hud::HudPlugin,
             inspector::InspectorPlugin,
+            timeline::TimelinePlugin,
             probes::ProbesPlugin,
             errors::ErrorsPlugin,
             examples::ExamplesPlugin,

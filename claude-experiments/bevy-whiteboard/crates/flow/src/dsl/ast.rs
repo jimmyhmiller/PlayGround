@@ -13,9 +13,24 @@ pub struct File {
 pub enum Item {
     Params(Vec<ParamDecl>),
     Node(NodeDecl),
+    /// `node NAME : CLASS { slot: expr; ... }` — instantiate an
+    /// already-registered class with optional slot overrides. Useful
+    /// for whiteboard files that want multiple instances of one
+    /// gadget (e.g. three `SagaStep`s) without redeclaring the class.
+    Instance(InstanceDecl),
     Compound(CompoundDecl),
     Edges(Vec<EdgeDecl>),
     Scenario(ScenarioDecl),
+}
+
+#[derive(Debug, Clone)]
+pub struct InstanceDecl {
+    pub name: String,
+    pub class: String,
+    /// Slot value overrides applied after the class's defaults clone.
+    /// Each override expression must lower to a literal — same shape
+    /// as a slot's `init` expression.
+    pub overrides: Vec<(String, Expr)>,
 }
 
 #[derive(Debug, Clone)]

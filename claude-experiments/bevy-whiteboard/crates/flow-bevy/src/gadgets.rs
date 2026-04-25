@@ -167,4 +167,11 @@ pub const GADGETS_DSL: &str = concat!(
     include_str!("gadgets/router.flow"),         "\n",
     include_str!("gadgets/queue.flow"),          "\n",
     include_str!("gadgets/sink.flow"),           "\n",
+    // Experimental gadgets — registered as classes so whiteboard files
+    // can `node Foo : Cache { ... }` them. Not yet in the Kind enum;
+    // unknown classes default to a Worker-shaped node visually.
+    include_str!("gadgets/cache.flow"),           "\n",
+    include_str!("gadgets/circuit_breaker.flow"), "\n",
+    include_str!("gadgets/saga.flow"),            "\n",
+    include_str!("gadgets/tpc.flow"),             "\n",
 );

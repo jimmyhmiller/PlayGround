@@ -138,6 +138,24 @@ impl Parser {
     fn parse_node(&mut self) -> Result<Item, String> {
         self.expect(Tok::Node)?;
         let name = self.ident()?;
+
+        // Instance form: `node NAME : CLASS { slot: expr; ... }`.
+        // No rules / probes / on_spawn — those come from the class.
+        if self.eat(&Tok::Colon) {
+            let class = self.ident()?;
+            self.expect(Tok::LBrace)?;
+            let mut overrides = Vec::new();
+            while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+                let slot = self.ident()?;
+                self.expect(Tok::Colon)?;
+                let value = self.parse_expr()?;
+                let _ = self.eat(&Tok::Semi) || self.eat(&Tok::Comma);
+                overrides.push((slot, value));
+            }
+            self.expect(Tok::RBrace)?;
+            return Ok(Item::Instance(crate::dsl::ast::InstanceDecl { name, class, overrides }));
+        }
+
         self.expect(Tok::LBrace)?;
         let mut slots = Vec::new();
         let mut rules = Vec::new();
@@ -801,7 +819,7 @@ impl Parser {
                     let is_builtin = matches!(
                         name.as_str(),
                         "Exp" | "Uniform" | "Bernoulli"
-                        | "len" | "mean"
+                        | "len" | "mean" | "count_where"
                         | "out_neighbors" | "slot_of"
                         | "length" | "index" | "filter" | "map" | "reduce" | "argmin"
                         | "head" | "tail"

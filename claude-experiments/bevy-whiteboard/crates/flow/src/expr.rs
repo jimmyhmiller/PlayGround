@@ -184,6 +184,9 @@ impl Expr {
     pub fn bernoulli(p: Expr) -> Self { Expr::Bernoulli { p: Box::new(p) } }
     pub fn samples_len(slot: impl Into<String>) -> Self { Expr::SamplesLen(slot.into()) }
     pub fn samples_mean(slot: impl Into<String>) -> Self { Expr::SamplesMean(slot.into()) }
+    pub fn samples_count_where(slot: impl Into<String>, bind: impl Into<String>, pred: Expr) -> Self {
+        Expr::SamplesCountWhere { slot: slot.into(), bind: bind.into(), pred: Box::new(pred) }
+    }
 
     pub fn out_neighbors() -> Self { Expr::OutNeighbors }
     pub fn slot_of(node: Expr, slot: impl Into<String>) -> Self {
