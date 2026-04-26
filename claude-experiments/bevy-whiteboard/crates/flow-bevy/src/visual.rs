@@ -113,6 +113,22 @@ impl NodeArrivals {
             self.arrives_real.drain(..keep_from);
         }
     }
+
+    /// Drop entries with `arrive_real > t`. Counterpart to `gc` —
+    /// used when canceling future-clamped arrivals after a state
+    /// change. We pair-iterate both vecs since arrival_real isn't
+    /// strictly sorted.
+    fn gc_after(&mut self, t: f64) {
+        let mut i = 0;
+        while i < self.arrives_real.len() {
+            if self.arrives_real[i] > t {
+                self.arrives_ns.swap_remove(i);
+                self.arrives_real.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -249,6 +265,37 @@ impl VisualTimeline {
             n.gc(cutoff);
         }
         self.node_arrivals.retain(|_, n| n.len() > 0);
+    }
+
+    /// Drop packets that haven't started animating yet at wall-clock
+    /// time `t` — the future-queued backlog. Currently-animating
+    /// packets (`emit_real <= t < arrive_real`) and already-arrived
+    /// packets (`arrive_real <= t`) are kept untouched. Returns the
+    /// set of packet ids that were dropped, so callers can despawn
+    /// the matching Bevy entities.
+    ///
+    /// Used by the host UI's "drop the queued backlog when a user
+    /// state change fires" pass. We don't want to murder packets
+    /// the user is currently watching — those are recent past, not
+    /// stale future.
+    pub fn drop_pending_after(&mut self, t: f64) -> std::collections::HashSet<flow::PacketId> {
+        let mut dropped: std::collections::HashSet<flow::PacketId> =
+            std::collections::HashSet::new();
+        self.packets.retain(|p| {
+            if p.emit_real > t {
+                dropped.insert(p.packet_id);
+                false
+            } else {
+                true
+            }
+        });
+        // Also trim future-arrival entries from node_arrivals so the
+        // causal clamp doesn't keep waiting for them.
+        for n in self.node_arrivals.values_mut() {
+            n.gc_after(t);
+        }
+        self.node_arrivals.retain(|_, n| n.len() > 0);
+        dropped
     }
 }
 

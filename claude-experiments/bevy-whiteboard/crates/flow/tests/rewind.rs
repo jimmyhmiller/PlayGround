@@ -27,6 +27,8 @@ fn event_digest(e: &Event) -> String {
         Event::NodeDespawned { node, at_ns } =>
             format!("despawn {:?} @{}", node, at_ns),
         Event::RuntimeError { .. } => String::new(),
+        Event::TimelineEventFired { .. } => String::new(),
+        Event::UserSlotEdit { .. } => String::new(),
     }
 }
 

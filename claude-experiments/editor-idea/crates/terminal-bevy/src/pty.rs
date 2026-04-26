@@ -1,8 +1,9 @@
 //! Minimal pseudo-terminal wrapper.
 //!
 //! Ported from ghostling_rs/src/main.rs (libghostty-rs example). Spawns
-//! the user's shell on a pty pair, sets the master fd non-blocking so
-//! Bevy systems can drain it once per frame without stalling.
+//! the user's shell on a pty pair. Reads + parsing happen on the
+//! per-terminal worker thread (see `worker.rs`); this struct is just
+//! the fd handle + spawn / write / resize plumbing.
 
 #![allow(unsafe_code)]
 
@@ -15,7 +16,6 @@ use std::{
     process::Command,
 };
 
-use libghostty_vt::Terminal;
 use nix::{
     errno::Errno,
     fcntl::{self, OFlag},
@@ -24,7 +24,6 @@ use nix::{
     unistd::{self, Pid},
 };
 
-/// Pixel-aware grid dimensions used to size the pty winsize struct.
 #[derive(Clone, Copy, Debug)]
 pub struct PtySize {
     pub cols: u16,
@@ -46,11 +45,10 @@ impl PtySize {
 
 /// Owns the pty master file descriptor.
 #[derive(Debug)]
-pub struct Pty(OwnedFd);
+pub struct Pty(pub OwnedFd);
 
 impl Pty {
-    /// `forkpty()` + exec the user's shell; returns the parent's master
-    /// fd and the child's pid. `$SHELL` → passwd entry → `/bin/sh`.
+    /// `forkpty()` + exec the user's shell. `$SHELL` → passwd entry → `/bin/sh`.
     pub fn spawn(size: PtySize) -> std::io::Result<(Self, Child)> {
         match unsafe { nix::pty::forkpty(&size.to_winsize(), None)? } {
             ForkptyResult::Child => {
@@ -69,37 +67,24 @@ impl Pty {
                 std::process::exit(127);
             }
             ForkptyResult::Parent { child, master: fd } => {
-                let raw_flags = fcntl::fcntl(&fd, fcntl::F_GETFL)?;
-                let flags = OFlag::from_bits_retain(raw_flags) | OFlag::O_NONBLOCK;
-                let _ = fcntl::fcntl(&fd, fcntl::F_SETFL(flags))?;
                 Ok((Self(fd), Child::Active(child)))
             }
         }
     }
 
-    /// Drain available bytes from the master fd into the terminal's VT
-    /// parser. Returns `EndOfStream` on EOF / EIO so callers can transition
-    /// the child state.
-    ///
-    /// Buffer sized to 64 KiB — bigger than the default macOS pty buffer,
-    /// so `cat`-ing a large file typically drains in one or two syscalls
-    /// per frame instead of dozens.
-    pub fn read_into(&self, term: &mut Terminal) -> Result<(), PtyError> {
-        let mut buf = [0u8; 65536];
-        loop {
-            match nix::unistd::read(&self.0, &mut buf) {
-                Ok(0) => return Err(PtyError::EndOfStream),
-                Ok(len) => term.vt_write(&buf[..len]),
-                Err(Errno::EAGAIN) => return Ok(()),
-                Err(Errno::EINTR) => continue,
-                Err(Errno::EIO) => return Err(PtyError::EndOfStream),
-                Err(err) => return Err(PtyError::Other(err)),
-            }
-        }
+    /// Set the master fd to non-blocking. The worker thread polls it
+    /// in a tight loop and uses `EAGAIN` to detect "no more data right
+    /// now"; keystroke writes from the worker remain non-blocking but
+    /// almost never produce `EAGAIN` because we write tiny payloads.
+    pub fn set_nonblock(&self) -> std::io::Result<()> {
+        let raw_flags = fcntl::fcntl(&self.0, fcntl::F_GETFL)?;
+        let flags = OFlag::from_bits_retain(raw_flags) | OFlag::O_NONBLOCK;
+        fcntl::fcntl(&self.0, fcntl::F_SETFL(flags))?;
+        Ok(())
     }
 
-    /// Best-effort write. Drops remaining bytes on `EAGAIN` / fatal errors —
-    /// matches ghostling's policy under back-pressure.
+    /// Best-effort write. Drops remaining bytes on `EAGAIN` / fatal
+    /// errors — matches ghostling's policy under back-pressure.
     pub fn write(&self, data: &[u8]) {
         let mut remaining = data;
         while !remaining.is_empty() {

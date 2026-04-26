@@ -20,6 +20,15 @@ node P0 : TPCParticipant { }
 node P1 : TPCParticipant { }
 node P2 : TPCParticipant { }
 
+# Each participant has its OWN local "DB" sink — i.e. each replica
+# writes to its own backing store once the coordinator has confirmed
+# everyone voted yes. On a committed round you see three sinks light
+# up in parallel ("every replica applied"). On an aborted round all
+# three sinks stay silent — the whole point of TPC.
+node DB0 : Sink { }
+node DB1 : Sink { }
+node DB2 : Sink { }
+
 edges {
     Client      -> Coordinator : 1ms
     Coordinator -> Client      : 1ms
@@ -30,8 +39,25 @@ edges {
     P1          -> Coordinator : 1ms
     Coordinator -> P2 : 1ms
     P2          -> Coordinator : 1ms
+
+    P0 -> DB0 : 1ms
+    P1 -> DB1 : 1ms
+    P2 -> DB2 : 1ms
 }
 
 scenario {
-    at 4s: set_slot P1.vote_yes_prob := 0.0
+    # Phase 1 (0–3s): healthy. Coordinator.committed climbs each tx.
+    # Phase 2 (3–6s): P1 always votes no. aborted climbs instead.
+    at 3s:  set_slot P1.vote_yes_prob := 0.0
+    # Phase 3 (6–9s): P1 recovers, P2 takes over as the no-voter.
+    # Still aborting, different participant blocking the round.
+    at 6s:  set_slot P1.vote_yes_prob := 1.0
+    at 6s:  set_slot P2.vote_yes_prob := 0.0
+    # Phase 4 (9–12s): all participants healthy. Commits resume.
+    at 9s:  set_slot P2.vote_yes_prob := 1.0
+    # Phase 5 (12–15s): coordinator down. Reqs hit a down coordinator
+    # (no prepare round at all) — distinct from a participant-driven abort.
+    at 12s: set_slot Coordinator.up := 0
+    # Phase 6 (15s+): coordinator back. Healthy again.
+    at 15s: set_slot Coordinator.up := 1
 }

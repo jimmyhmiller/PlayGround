@@ -124,6 +124,14 @@ fn event_to_json(ev: &Event) -> String {
             rule.as_ref().map(|r| esc(r)).unwrap_or_else(|| "null".into()),
             esc(detail),
         ),
+        Event::TimelineEventFired { event_id, at_ns } => format!(
+            r#"{{"k":"tline","at":{},"event_id":{}}}"#,
+            at_ns, event_id
+        ),
+        Event::UserSlotEdit { node, slot, value, at_ns } => format!(
+            r#"{{"k":"useredit","at":{},"node":{},"slot":{},"value":{}}}"#,
+            at_ns, node.0, esc(slot), esc(&format!("{:?}", value)),
+        ),
     }
 }
 

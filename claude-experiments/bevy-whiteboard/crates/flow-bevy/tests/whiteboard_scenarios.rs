@@ -91,32 +91,69 @@ fn circuit_breaker_whiteboard_trips_via_scenario_timeline() {
 #[test]
 fn saga_whiteboard_succeeds_then_fails_via_scenario_timeline() {
     let mut canvas = load_canvas(example("saga"), 11).expect("load");
-    assert_eq!(canvas.sim.timeline.events.len(), 1);
+    // Five distinct at_ns: 2s, 5s, 8s, 11s (compound), 14s.
+    assert_eq!(canvas.sim.timeline.events.len(), 5);
 
-    canvas.sim.run_until(canvas.sim.now_ns + 2_500_000_000);
-    let succeeded_before = slot_i(&canvas.sim, "Saga", "succeeded");
-    assert!(succeeded_before >= 1);
+    // Phase 1 (healthy): run up to just before the 2s Step2 failure.
+    canvas.sim.run_until(canvas.sim.now_ns + 1_500_000_000);
+    assert!(slot_i(&canvas.sim, "Saga", "succeeded") >= 1);
     assert_eq!(slot_i(&canvas.sim, "Saga", "failed"), 0);
     assert_eq!(slot_i(&canvas.sim, "Step1", "compensated"), 0);
 
-    canvas.sim.run_until(canvas.sim.now_ns + 5_500_000_000);
+    // Phase 2 (Step2 fails 2–5s): only Step1 gets compensated;
+    // Step2 itself doesn't count its own failure as "done".
+    canvas.sim.run_until(canvas.sim.now_ns + 3_000_000_000);
     assert!(slot_i(&canvas.sim, "Saga", "failed") >= 1);
     assert!(slot_i(&canvas.sim, "Step1", "compensated") >= 1);
+    assert_eq!(slot_i(&canvas.sim, "Step2", "compensated"), 0);
+
+    // Phase 4 (Step3 fails 8–11s): now Step2 also gets compensated
+    // because the rollback prefix is longer.
+    canvas.sim.run_until(canvas.sim.now_ns + 5_500_000_000);
+    assert!(slot_i(&canvas.sim, "Step2", "compensated") >= 1);
+
+    // Phase 6 recovery: run past the 14s Saga.up := 1.
+    canvas.sim.run_until(canvas.sim.now_ns + 4_000_000_000);
+    assert!(canvas.sim.timeline.events.iter().all(|e| e.fired));
+    // Phase 5 deliberately took Saga down, so node_down is expected.
     no_unexpected_runtime_errors(&canvas.sim, &["request_failed", "node_down"]);
 }
 
 #[test]
 fn tpc_whiteboard_commits_then_aborts_via_scenario_timeline() {
     let mut canvas = load_canvas(example("tpc"), 13).expect("load");
-    assert_eq!(canvas.sim.timeline.events.len(), 1);
+    // Five distinct at_ns: 3s, 6s (compound), 9s, 12s, 15s.
+    assert_eq!(canvas.sim.timeline.events.len(), 5);
 
-    canvas.sim.run_until(canvas.sim.now_ns + 3_500_000_000);
-    assert!(slot_i(&canvas.sim, "Coordinator", "committed") >= 1);
+    // Phase 1 (healthy 0–3s): committed climbs and every replica's
+    // local DB sink fires once per committed tx.
+    canvas.sim.run_until(canvas.sim.now_ns + 2_500_000_000);
+    let committed_p1 = slot_i(&canvas.sim, "Coordinator", "committed");
+    assert!(committed_p1 >= 1);
     assert_eq!(slot_i(&canvas.sim, "Coordinator", "aborted"), 0);
+    // Every committed round → exactly one packet at each per-replica DB.
+    assert_eq!(slot_i(&canvas.sim, "DB0", "count"), committed_p1);
+    assert_eq!(slot_i(&canvas.sim, "DB1", "count"), committed_p1);
+    assert_eq!(slot_i(&canvas.sim, "DB2", "count"), committed_p1);
 
-    canvas.sim.run_until(canvas.sim.now_ns + 5_500_000_000);
+    // Phase 2 (P1 votes no 3–6s): aborts climb. Critically — DB
+    // counts MUST NOT climb in this window (the whole point of TPC).
+    canvas.sim.run_until(canvas.sim.now_ns + 3_000_000_000);
     assert!(slot_i(&canvas.sim, "Coordinator", "aborted") >= 1);
     assert!(slot_i(&canvas.sim, "P1", "aborted") >= 1);
-    assert!(slot_i(&canvas.sim, "P0", "aborted") >= 1);
+    let committed_p2 = slot_i(&canvas.sim, "Coordinator", "committed");
+    assert_eq!(slot_i(&canvas.sim, "DB0", "count"), committed_p2);
+    assert_eq!(slot_i(&canvas.sim, "DB1", "count"), committed_p2);
+    assert_eq!(slot_i(&canvas.sim, "DB2", "count"), committed_p2);
+    let p2_aborted_before_phase3 = slot_i(&canvas.sim, "P2", "aborted");
+
+    // Phase 3 (P1 recovers, P2 votes no 6–9s): P2.aborted now climbs.
+    canvas.sim.run_until(canvas.sim.now_ns + 3_000_000_000);
+    assert!(slot_i(&canvas.sim, "P2", "aborted") > p2_aborted_before_phase3);
+
+    // Phases 4–6: recover, take Coordinator down, recover again.
+    canvas.sim.run_until(canvas.sim.now_ns + 7_000_000_000);
+    assert!(canvas.sim.timeline.events.iter().all(|e| e.fired));
+    // Phase 5 takes the coordinator down.
     no_unexpected_runtime_errors(&canvas.sim, &["request_failed", "node_down"]);
 }

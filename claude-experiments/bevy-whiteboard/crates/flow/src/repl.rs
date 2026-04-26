@@ -414,6 +414,10 @@ fn format_event(e: &Event, sim: &Sim) -> String {
             };
             format!("{} ERR   [{}] {} — {}", t(*at_ns), kind, where_, detail)
         }
+        Event::TimelineEventFired { event_id, at_ns } =>
+            format!("{} tline event #{}", t(*at_ns), event_id),
+        Event::UserSlotEdit { node, slot, value, at_ns } =>
+            format!("{} edit  {}.{} = {}", t(*at_ns), name(node), slot, format_value(value)),
     }
 }
 

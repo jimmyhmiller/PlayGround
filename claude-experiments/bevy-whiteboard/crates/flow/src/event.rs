@@ -64,6 +64,23 @@ pub enum Event {
         detail: String,
         at_ns: Time,
     },
+
+    /// A user-scheduled timeline event fired. Distinct from the
+    /// per-action `SlotWritten` events the engine also records for
+    /// each write inside the event — UIs use this as a "state-change
+    /// boundary" signal. The flow-bevy visual layer drops the
+    /// future-queued visual backlog when it sees this, so the canvas
+    /// reflects the new sim state instead of replaying stale traffic
+    /// from before the change.
+    TimelineEventFired { event_id: u64, at_ns: Time },
+
+    /// A direct user edit to a slot from outside the rule engine —
+    /// the inspector toggling `up`, dragging a slider, etc. Same
+    /// "state-change boundary" role as `TimelineEventFired` for the
+    /// visual layer, but doesn't carry a scheduled-event id (none
+    /// exists). Logged separately so post-hoc analysis can tell
+    /// scheduled changes apart from in-the-moment human ones.
+    UserSlotEdit { node: NodeId, slot: String, value: Value, at_ns: Time },
 }
 
 /// Ring-bounded event log. Always on; the bound caps memory.

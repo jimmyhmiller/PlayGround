@@ -514,6 +514,11 @@ impl Sim {
         for i in 0..self.timeline.events.len() {
             if self.timeline.events[i].fired { continue; }
             if self.timeline.events[i].at_ns > now { break; }
+            // Boundary marker — UIs use this to drop stale in-flight
+            // visuals, so the canvas reflects the new sim state
+            // rather than replaying pre-change traffic.
+            let event_id = self.timeline.events[i].id;
+            self.log.push(Event::TimelineEventFired { event_id, at_ns: now });
             // Clone the actions list out so we can borrow `self.nodes`
             // mutably without aliasing the event itself.
             let actions = self.timeline.events[i].actions.clone();

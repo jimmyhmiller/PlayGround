@@ -356,9 +356,34 @@ fn ingest_new_events(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     node_transforms: Query<&Transform, With<crate::bridge::FlowNodeRef>>,
+    existing_packets: Query<(Entity, &TravelingPacket)>,
 ) {
     let real_now = clock.visual_now;
     for ev in &evs.0 {
+        // State-change boundary: either a scheduled timeline event
+        // fired, or the user manually edited a slot from the
+        // inspector. Drop only the FUTURE-QUEUED backlog (packets
+        // whose emit_real hasn't happened yet at `real_now`) — the
+        // visual layer's causal clamp had been pushing each new
+        // packet farther into the future, and we want that queue
+        // zapped so the canvas reflects post-change sim state.
+        //
+        // Currently-animating packets (`emit_real <= real_now`) are
+        // kept untouched: they're real recent past, the user is
+        // watching them mid-flight, killing them mid-animation
+        // looks like glitches.
+        if matches!(ev,
+            flow::Event::TimelineEventFired { .. } |
+            flow::Event::UserSlotEdit { .. }
+        ) {
+            let dropped_ids = timeline.0.drop_pending_after(real_now);
+            for (e, pkt) in existing_packets.iter() {
+                if dropped_ids.contains(&pkt.packet_id) {
+                    commands.entity(e).despawn();
+                }
+            }
+            continue;
+        }
         let Some(idx) = timeline.ingest(ev, real_now) else { continue; };
         let vp = timeline.packets[idx].clone();
         spawn_packet_entity(

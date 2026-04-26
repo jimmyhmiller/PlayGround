@@ -7,6 +7,10 @@ edition = "2024"
 libghostty-vt = "0.1.1"
 nix = { version = "0.31", features = ["term", "fs", "signal", "process", "user", "ioctl"] }
 skrifa = "0.39"
+# Glyph rasterization for our own atlas — bypasses cosmic-text/Text2d
+# entirely. Already a transitive dep via Bevy's cosmic-text, declared
+# here so we can import it directly.
+swash = "0.2"
 bevy = { version = "0.18", default-features = false, features = [
     "2d",
     "x11",

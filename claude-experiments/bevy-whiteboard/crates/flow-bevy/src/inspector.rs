@@ -541,18 +541,16 @@ fn push_rate_slider_to_sim(
     mut sim: ResMut<FlowSim>,
 ) {
     for (slider, rs) in q.iter() {
-        let Some(node) = sim.sim.nodes.get_mut(&rs.node) else { continue };
+        if !sim.sim.nodes.contains_key(&rs.node) { continue; }
         match rs.kind {
             RateSliderKind::EmitPerSecond => {
-                // rate ≤ 0 would divide by zero; clamp to a minimum so the
-                // generator still ticks at something sensible.
                 let rate = slider.value.max(0.01) as f64;
                 let period_ns = (1_000_000_000.0 / rate) as i64;
-                node.slots.insert("period_ns".into(), Value::Int(period_ns));
+                sim.sim.user_edit_slot(rs.node, "period_ns", Value::Int(period_ns));
             }
             RateSliderKind::ServiceMs => {
                 let ms = slider.value.max(0.5) as i64;
-                node.slots.insert("service_ns".into(), Value::Int(ms * 1_000_000));
+                sim.sim.user_edit_slot(rs.node, "service_ns", Value::Int(ms * 1_000_000));
             }
         }
     }
@@ -573,12 +571,12 @@ fn handle_up_toggle_clicks(
 ) {
     for (interaction, toggle) in q.iter() {
         if *interaction != Interaction::Pressed { continue; }
-        let Some(node) = sim.sim.nodes.get_mut(&toggle.node) else { continue };
+        let Some(node) = sim.sim.nodes.get(&toggle.node) else { continue };
         let cur = node.slots.get("up")
             .and_then(|v| match v { Value::Int(i) => Some(*i), _ => None })
             .unwrap_or(1);
         let next = if cur == 0 { 1 } else { 0 };
-        node.slots.insert("up".into(), Value::Int(next));
+        sim.sim.user_edit_slot(toggle.node, "up", Value::Int(next));
         if cur == 0 && next == 1 {
             sim.sim.inject(toggle.node, Value::variant("resume", Value::Nil));
         }
@@ -591,12 +589,12 @@ fn handle_router_mode_clicks(
 ) {
     for (interaction, toggle) in q.iter() {
         if *interaction != Interaction::Pressed { continue; }
-        let Some(node) = sim.sim.nodes.get_mut(&toggle.node) else { continue };
+        let Some(node) = sim.sim.nodes.get(&toggle.node) else { continue };
         let cur = node.slots.get("mode")
             .and_then(|v| match v { Value::Int(i) => Some(*i), _ => None })
             .unwrap_or(0);
         let next = if cur == 0 { 1 } else { 0 };
-        node.slots.insert("mode".into(), Value::Int(next));
+        sim.sim.user_edit_slot(toggle.node, "mode", Value::Int(next));
     }
 }
 
@@ -871,9 +869,9 @@ fn push_generic_float_slider_to_sim(
     mut sim: ResMut<FlowSim>,
 ) {
     for (slider, marker) in q.iter() {
-        let Some(node) = sim.sim.nodes.get_mut(&marker.node) else { continue };
+        let Some(node) = sim.sim.nodes.get(&marker.node) else { continue };
         if !matches!(node.slots.get(&marker.slot), Some(Value::Float(_))) { continue; }
-        node.slots.insert(marker.slot.clone(), Value::Float(slider.value as f64));
+        sim.sim.user_edit_slot(marker.node, marker.slot.clone(), Value::Float(slider.value as f64));
     }
 }
 
@@ -925,12 +923,12 @@ fn handle_generic_bool_toggle_clicks(
 ) {
     for (interaction, toggle) in q.iter() {
         if *interaction != Interaction::Pressed { continue; }
-        let Some(node) = sim.sim.nodes.get_mut(&toggle.node) else { continue };
+        let Some(node) = sim.sim.nodes.get(&toggle.node) else { continue };
         let cur = match node.slots.get(&toggle.slot) {
             Some(Value::Bool(b)) => *b,
             _ => continue,
         };
-        node.slots.insert(toggle.slot.clone(), Value::Bool(!cur));
+        sim.sim.user_edit_slot(toggle.node, toggle.slot.clone(), Value::Bool(!cur));
     }
 }
 

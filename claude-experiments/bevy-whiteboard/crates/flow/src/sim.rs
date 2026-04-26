@@ -327,6 +327,27 @@ impl Sim {
         self.params.insert(name.into(), value);
     }
 
+    /// User-side slot edit. Writes the slot AND emits a
+    /// `UserSlotEdit` boundary event so visual layers can drop their
+    /// future-queued backlog (same effect as a fired timeline event).
+    /// UI code should prefer this over `nodes[id].slots.insert(...)`
+    /// for human-driven changes — toggles, slider drags, etc.
+    /// Tests that just want to seed initial state can still poke
+    /// `slots` directly to avoid logging spurious boundaries.
+    pub fn user_edit_slot(&mut self, node: NodeId, slot: impl Into<String>, value: Value) {
+        let slot_name = slot.into();
+        let at_ns = self.now_ns;
+        if let Some(n) = self.nodes.get_mut(&node) {
+            n.slots.insert(slot_name.clone(), value.clone());
+        }
+        self.log.push(crate::event::Event::SlotWritten {
+            node, slot: slot_name.clone(), value: value.clone(), at_ns,
+        });
+        self.log.push(crate::event::Event::UserSlotEdit {
+            node, slot: slot_name, value, at_ns,
+        });
+    }
+
     /// Schedule one action at the given sim time. Actions with the same
     /// time fire in insertion order.
     pub fn schedule_action(&mut self, at_ns: Time, action: Action) {

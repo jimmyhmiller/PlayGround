@@ -90,7 +90,11 @@ node TPCCoordinator {
             votes_yes  := votes_yes + 1
             committed  := committed + 1
             pop pending_rp -> rp
-            emit_each commit(nil) to filter(out_neighbors(), "n", n != head(rp))
+            # `pushing self` so each participant sees us at head(return_path)
+            # when commit arrives — that lets the participant's on_commit
+            # rule fan packets out to its OWN sink (every out_neighbor that
+            # isn't the coordinator).
+            emit_each commit(nil) pushing self to filter(out_neighbors(), "n", n != head(rp))
             emit resp(nil) return_path tail(rp) to (head(rp))
             phase := "idle"
         }
@@ -103,7 +107,9 @@ node TPCCoordinator {
             votes_yes  := if v == 1 then votes_yes + 1 else votes_yes
             aborted    := aborted + 1
             pop pending_rp -> rp
-            emit_each abort(nil) to filter(out_neighbors(), "n", n != head(rp))
+            # Symmetric with commit (keeps participant rules' return_path
+            # assumptions consistent), even though on_abort doesn't read it.
+            emit_each abort(nil) pushing self to filter(out_neighbors(), "n", n != head(rp))
             emit resp_error(nil) return_path tail(rp) to (head(rp))
             phase := "idle"
         }
@@ -153,11 +159,21 @@ node TPCParticipant {
         }
     }
 
+    # On commit, also emit a `packet(color)` to every out_neighbor
+    # that isn't the coordinator (which is at head(return_path) thanks
+    # to `pushing self` on the coordinator's commit fan-out). This is
+    # the "apply to local DB" half of TPC: only after the coordinator
+    # has confirmed every participant voted yes does this emit fire.
+    # Aborted rounds produce zero packets at any sink, so sinks
+    # visually distinguish successful consensus rounds from aborts.
+    # If the participant has no extra out_neighbors, emit_each is a
+    # silent no-op — sinks are optional wiring.
     rule on_commit {
         on commit(_)
         do {
             committed := committed + 1
             phase := "idle"
+            emit_each packet(color) to filter(out_neighbors(), "n", n != head(return_path))
         }
     }
 

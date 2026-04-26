@@ -32,5 +32,19 @@ edges {
 }
 
 scenario {
-    at 3s: set_slot Step2.fail_prob := 1.0
+    # Phase 1 (0–2s): healthy. Saga.succeeded climbs; in_flight pulses.
+    # Phase 2 (2–5s): Step2 fails. compensate walks back through Step1;
+    # Saga.failed and Step1.compensated climb together.
+    at 2s:  set_slot Step2.fail_prob := 1.0
+    # Phase 3 (5–8s): Step2 recovers. Successes resume.
+    at 5s:  set_slot Step2.fail_prob := 0.0
+    # Phase 4 (8–11s): Step3 fails. Longer rollback prefix — both
+    # Step1.compensated and Step2.compensated climb per failure.
+    at 8s:  set_slot Step3.fail_prob := 1.0
+    # Phase 5 (11–14s): Step3 recovers, but Saga itself goes down.
+    # entry_down fires: req gets resp_error immediately, no chain.
+    at 11s: set_slot Step3.fail_prob := 0.0
+    at 11s: set_slot Saga.up := 0
+    # Phase 6 (14s+): Saga back up. Healthy again.
+    at 14s: set_slot Saga.up := 1
 }

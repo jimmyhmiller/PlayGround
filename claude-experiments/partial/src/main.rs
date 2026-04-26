@@ -555,8 +555,11 @@ struct Stats {
     functions_specialized: usize,
     iifes_encountered: usize,     // immediately invoked function expressions
     unknown_calls: usize,         // calls we couldn't resolve
+<<<<<<< Updated upstream
     unknown_call_counts: HashMap<String, usize>,
     unknown_call_details: HashMap<String, Vec<String>>,
+=======
+>>>>>>> Stashed changes
     vars_collapsed: usize,        // static vars that don't need residual
     vars_dynamic: usize,          // dynamic vars that remain in residual
     loops_fully_unrolled: usize,
@@ -567,10 +570,14 @@ struct Stats {
     decoded_strings: HashSet<String>,  // unique strings decoded
 }
 
+<<<<<<< Updated upstream
 
 impl<'a> PartialEvaluator<'a> {
     const UNKNOWN_CALL_TRACK_LIMIT: usize = 200;
 
+=======
+impl<'a> PartialEvaluator<'a> {
+>>>>>>> Stashed changes
     fn new(allocator: &'a Allocator, gas: usize) -> Self {
         Self {
             allocator,
@@ -620,6 +627,7 @@ impl<'a> PartialEvaluator<'a> {
         }
         if self.stats.unknown_calls > 0 {
             println!("  {} unknown/dynamic calls", self.stats.unknown_calls);
+<<<<<<< Updated upstream
             if !self.stats.unknown_call_counts.is_empty() {
                 let mut counts: Vec<(&String, &usize)> = self.stats.unknown_call_counts.iter().collect();
                 counts.sort_by(|a, b| b.1.cmp(a.1).then_with(|| a.0.cmp(b.0)));
@@ -633,6 +641,8 @@ impl<'a> PartialEvaluator<'a> {
                     }
                 }
             }
+=======
+>>>>>>> Stashed changes
         }
         println!("Variables: {} collapsed, {} remain dynamic",
             self.stats.vars_collapsed, self.stats.vars_dynamic);
@@ -649,6 +659,7 @@ impl<'a> PartialEvaluator<'a> {
         }
     }
 
+<<<<<<< Updated upstream
     fn record_unknown_call(&mut self, expr: &Expression<'a>) {
         let label = self.expr_to_string(expr);
         if self.stats.unknown_call_counts.len() < Self::UNKNOWN_CALL_TRACK_LIMIT
@@ -743,6 +754,8 @@ impl<'a> PartialEvaluator<'a> {
         idx as usize
     }
 
+=======
+>>>>>>> Stashed changes
     /// Dump final state of interesting globals (myGlobal, document listeners, etc.)
     fn dump_globals(&self) {
         // Check for myGlobal.listeners
@@ -2449,6 +2462,7 @@ impl<'a> PartialEvaluator<'a> {
                         }
                     }
                     _ => {
+<<<<<<< Updated upstream
                         // If object is static but property access is dynamic, keep primitives
                         // as-is to avoid baking literal receivers into residual calls.
                         if let Value::Static(js) = &obj {
@@ -2463,6 +2477,12 @@ impl<'a> PartialEvaluator<'a> {
                                 Expression::Identifier(_) => mem.object.clone_in(self.allocator),
                                 _ => self.value_to_expr(&obj),
                             };
+=======
+                        // If object is static but property access is dynamic, build new AST
+                        // If object is dynamic, we can just clone the original expression
+                        if obj.is_static() {
+                            let obj_expr = self.value_to_expr(&obj);
+>>>>>>> Stashed changes
                             Ok(Value::Dynamic(self.make_static_member(obj_expr, prop)))
                         } else {
                             // Clone the original expression
@@ -2535,6 +2555,7 @@ impl<'a> PartialEvaluator<'a> {
                         Ok(Value::Static(JsValue::Date))
                     }
                     _ => {
+<<<<<<< Updated upstream
                         if let Value::Static(js) = &obj {
                             if js.is_primitive() {
                                 return Ok(Value::Dynamic(expr.clone_in(self.allocator)));
@@ -2544,6 +2565,9 @@ impl<'a> PartialEvaluator<'a> {
                             Expression::Identifier(_) => mem.object.clone_in(self.allocator),
                             _ => self.value_to_expr(&obj),
                         };
+=======
+                        let obj_expr = self.value_to_expr(&obj);
+>>>>>>> Stashed changes
                         let idx_expr = self.value_to_expr(&index);
                         Ok(Value::Dynamic(self.make_computed_member(obj_expr, idx_expr)))
                     }
@@ -2551,6 +2575,7 @@ impl<'a> PartialEvaluator<'a> {
             }
 
             Expression::CallExpression(call) => {
+<<<<<<< Updated upstream
                 // Avoid baking primitive values into member calls like v6.push(...)
                 // where v6 is currently static but may change within residual control flow.
                 if let Expression::StaticMemberExpression(mem) = &call.callee {
@@ -2573,6 +2598,8 @@ impl<'a> PartialEvaluator<'a> {
                     }
                 }
 
+=======
+>>>>>>> Stashed changes
                 // Check for method calls (e.g., stack.push, decoder.decode)
                 if let Expression::StaticMemberExpression(mem) = &call.callee {
                     let method = mem.property.name.to_string();
@@ -2631,12 +2658,16 @@ impl<'a> PartialEvaluator<'a> {
                                 // Try to get the method name from a string literal in the expression
                                 let method_name: Option<String> = match &mem.expression {
                                     Expression::StringLiteral(s) => Some(s.value.to_string()),
+<<<<<<< Updated upstream
                                     Expression::Identifier(id) => {
                                         match self.env.lookup(id.name.as_str(), self.allocator) {
                                             Some(Value::Static(JsValue::String(s))) => Some(s),
                                             _ => None,
                                         }
                                     }
+=======
+                                    // Handle identifier case (like "charCodeAt" being a variable)
+>>>>>>> Stashed changes
                                     _ => None
                                 };
 
@@ -2889,6 +2920,7 @@ impl<'a> PartialEvaluator<'a> {
                         if let Some(Value::Static(JsValue::Array { elements: arr, source: _ })) = self.env.lookup(&var_name, self.allocator) {
                             match method.as_str() {
                                 "push" => {
+<<<<<<< Updated upstream
                                     let mut new_arr: Vec<Value<'a>> = arr.iter()
                                         .map(|v| v.clone_in(self.allocator))
                                         .collect();
@@ -2917,6 +2949,36 @@ impl<'a> PartialEvaluator<'a> {
                                     self.env.set(&var_name, Value::Static(JsValue::Array { elements: new_arr, source: None }));
                                     self.trace_decision(&format!("{}.unshift()", var_name), "STATIC array mutation");
                                     return Ok(Value::Static(JsValue::Number(new_len as f64)));
+=======
+                                    if let Some(arg) = call.arguments.first() {
+                                        if let Some(arg_expr) = arg.as_expression() {
+                                            let val = self.eval_expr(arg_expr)?;
+                                            // Create new array with pushed value
+                                            let mut new_arr: Vec<Value<'a>> = arr.iter().map(|v| v.clone_in(self.allocator)).collect();
+                                            new_arr.push(val);
+                                            let new_len = new_arr.len();
+                                            // Update the binding
+                                            self.env.set(&var_name, Value::Static(JsValue::Array { elements: new_arr, source: None }));
+                                            self.trace_decision(&format!("{}.push()", var_name), "STATIC array mutation");
+                                            return Ok(Value::Static(JsValue::Number(new_len as f64)));
+                                        }
+                                    }
+                                }
+                                "unshift" => {
+                                    if let Some(arg) = call.arguments.first() {
+                                        if let Some(arg_expr) = arg.as_expression() {
+                                            let val = self.eval_expr(arg_expr)?;
+                                            // Create new array with unshifted value
+                                            let mut new_arr: Vec<Value<'a>> = vec![val];
+                                            new_arr.extend(arr.iter().map(|v| v.clone_in(self.allocator)));
+                                            let new_len = new_arr.len();
+                                            // Update the binding
+                                            self.env.set(&var_name, Value::Static(JsValue::Array { elements: new_arr, source: None }));
+                                            self.trace_decision(&format!("{}.unshift()", var_name), "STATIC array mutation");
+                                            return Ok(Value::Static(JsValue::Number(new_len as f64)));
+                                        }
+                                    }
+>>>>>>> Stashed changes
                                 }
                                 "pop" => {
                                     let mut new_arr: Vec<Value<'a>> = arr.iter().map(|v| v.clone_in(self.allocator)).collect();
@@ -2925,6 +2987,7 @@ impl<'a> PartialEvaluator<'a> {
                                     self.trace_decision(&format!("{}.pop()", var_name), "STATIC array mutation");
                                     return Ok(popped);
                                 }
+<<<<<<< Updated upstream
                                 "slice" => {
                                     let start_val = match call.arguments.get(0)
                                         .and_then(|arg| arg.as_expression())
@@ -2963,6 +3026,8 @@ impl<'a> PartialEvaluator<'a> {
                                     self.trace_decision(&format!("{}.slice()", var_name), "STATIC array slice");
                                     return Ok(Value::Static(JsValue::Array { elements: new_arr, source: None }));
                                 }
+=======
+>>>>>>> Stashed changes
                                 _ => {}
                             }
                         }
@@ -2981,6 +3046,7 @@ impl<'a> PartialEvaluator<'a> {
                                 if let Some(Value::Static(JsValue::Array { elements: arr, source: _ })) = props.get(&prop_name) {
                                     match method.as_str() {
                                         "push" => {
+<<<<<<< Updated upstream
                                             let mut new_arr: Vec<Value<'a>> = arr.iter()
                                                 .map(|v| v.clone_in(self.allocator))
                                                 .collect();
@@ -3055,6 +3121,44 @@ impl<'a> PartialEvaluator<'a> {
                                                 .collect();
                                             self.trace_decision(&format!("{}.{}.slice()", obj_name, prop_name), "STATIC nested array slice");
                                             return Ok(Value::Static(JsValue::Array { elements: new_arr, source: None }));
+=======
+                                            if let Some(arg) = call.arguments.first() {
+                                                if let Some(arg_expr) = arg.as_expression() {
+                                                    let val = self.eval_expr(arg_expr)?;
+                                                    // Create new array with pushed value
+                                                    let mut new_arr: Vec<Value<'a>> = arr.iter().map(|v| v.clone_in(self.allocator)).collect();
+                                                    new_arr.push(val);
+                                                    let new_len = new_arr.len();
+                                                    // Update the object's property
+                                                    let mut new_props: HashMap<String, Value<'a>> = props.iter()
+                                                        .map(|(k, v)| (k.clone(), v.clone_in(self.allocator)))
+                                                        .collect();
+                                                    new_props.insert(prop_name.clone(), Value::Static(JsValue::Array { elements: new_arr, source: None }));
+                                                    self.env.set(&obj_name, Value::Static(JsValue::Object(new_props)));
+                                                    self.trace_decision(&format!("{}.{}.push()", obj_name, prop_name), "STATIC nested array mutation");
+                                                    return Ok(Value::Static(JsValue::Number(new_len as f64)));
+                                                }
+                                            }
+                                        }
+                                        "unshift" => {
+                                            if let Some(arg) = call.arguments.first() {
+                                                if let Some(arg_expr) = arg.as_expression() {
+                                                    let val = self.eval_expr(arg_expr)?;
+                                                    // Create new array with unshifted value
+                                                    let mut new_arr: Vec<Value<'a>> = vec![val];
+                                                    new_arr.extend(arr.iter().map(|v| v.clone_in(self.allocator)));
+                                                    let new_len = new_arr.len();
+                                                    // Update the object's property
+                                                    let mut new_props: HashMap<String, Value<'a>> = props.iter()
+                                                        .map(|(k, v)| (k.clone(), v.clone_in(self.allocator)))
+                                                        .collect();
+                                                    new_props.insert(prop_name.clone(), Value::Static(JsValue::Array { elements: new_arr, source: None }));
+                                                    self.env.set(&obj_name, Value::Static(JsValue::Object(new_props)));
+                                                    self.trace_decision(&format!("{}.{}.unshift()", obj_name, prop_name), "STATIC nested array mutation");
+                                                    return Ok(Value::Static(JsValue::Number(new_len as f64)));
+                                                }
+                                            }
+>>>>>>> Stashed changes
                                         }
                                         _ => {}
                                     }
@@ -3074,6 +3178,7 @@ impl<'a> PartialEvaluator<'a> {
                         if let Value::Static(JsValue::Array { elements: arr, source: Some((ref source_var, source_idx)) }) = receiver_val {
                             match method.as_str() {
                                 "push" => {
+<<<<<<< Updated upstream
                                     let mut new_arr: Vec<Value<'a>> = arr.iter()
                                         .map(|v| v.clone_in(self.allocator))
                                         .collect();
@@ -3099,6 +3204,31 @@ impl<'a> PartialEvaluator<'a> {
                                             }));
                                             self.trace_decision(&format!("{}[{}].push()", source_var, source_idx), "STATIC tracked array mutation");
                                             return Ok(Value::Static(JsValue::Number(new_len as f64)));
+=======
+                                    if let Some(arg) = call.arguments.first() {
+                                        if let Some(arg_expr) = arg.as_expression() {
+                                            let val = self.eval_expr(arg_expr)?;
+                                            let mut new_arr: Vec<Value<'a>> = arr.iter().map(|v| v.clone_in(self.allocator)).collect();
+                                            new_arr.push(val);
+                                            let new_len = new_arr.len();
+
+                                            // Update the source array element
+                                            if let Some(Value::Static(JsValue::Array { elements: parent_arr, source: parent_source })) = self.env.lookup(source_var, self.allocator) {
+                                                let mut new_parent_arr: Vec<Value<'a>> = parent_arr.iter().map(|v| v.clone_in(self.allocator)).collect();
+                                                if source_idx < new_parent_arr.len() {
+                                                    new_parent_arr[source_idx] = Value::Static(JsValue::Array {
+                                                        elements: new_arr,
+                                                        source: None
+                                                    });
+                                                    self.env.set(source_var, Value::Static(JsValue::Array {
+                                                        elements: new_parent_arr,
+                                                        source: parent_source
+                                                    }));
+                                                    self.trace_decision(&format!("{}[{}].push()", source_var, source_idx), "STATIC tracked array mutation");
+                                                    return Ok(Value::Static(JsValue::Number(new_len as f64)));
+                                                }
+                                            }
+>>>>>>> Stashed changes
                                         }
                                     }
                                 }
@@ -3124,6 +3254,7 @@ impl<'a> PartialEvaluator<'a> {
                                     }
                                 }
                                 "unshift" => {
+<<<<<<< Updated upstream
                                     let mut prefix: Vec<Value<'a>> = Vec::new();
                                     for arg in &call.arguments {
                                         if let Some(arg_expr) = arg.as_expression() {
@@ -3189,6 +3320,33 @@ impl<'a> PartialEvaluator<'a> {
                                         .collect();
                                     self.trace_decision(&format!("{}[{}].slice()", source_var, source_idx), "STATIC tracked array slice");
                                     return Ok(Value::Static(JsValue::Array { elements: new_arr, source: None }));
+=======
+                                    if let Some(arg) = call.arguments.first() {
+                                        if let Some(arg_expr) = arg.as_expression() {
+                                            let val = self.eval_expr(arg_expr)?;
+                                            let mut new_arr: Vec<Value<'a>> = vec![val];
+                                            new_arr.extend(arr.iter().map(|v| v.clone_in(self.allocator)));
+                                            let new_len = new_arr.len();
+
+                                            // Update the source array element
+                                            if let Some(Value::Static(JsValue::Array { elements: parent_arr, source: parent_source })) = self.env.lookup(source_var, self.allocator) {
+                                                let mut new_parent_arr: Vec<Value<'a>> = parent_arr.iter().map(|v| v.clone_in(self.allocator)).collect();
+                                                if source_idx < new_parent_arr.len() {
+                                                    new_parent_arr[source_idx] = Value::Static(JsValue::Array {
+                                                        elements: new_arr,
+                                                        source: None
+                                                    });
+                                                    self.env.set(source_var, Value::Static(JsValue::Array {
+                                                        elements: new_parent_arr,
+                                                        source: parent_source
+                                                    }));
+                                                    self.trace_decision(&format!("{}[{}].unshift()", source_var, source_idx), "STATIC tracked array mutation");
+                                                    return Ok(Value::Static(JsValue::Number(new_len as f64)));
+                                                }
+                                            }
+                                        }
+                                    }
+>>>>>>> Stashed changes
                                 }
                                 _ => {}
                             }
@@ -3260,7 +3418,10 @@ impl<'a> PartialEvaluator<'a> {
 
                 self.trace_decision("unknown call", "DYNAMIC -> pass through");
                 self.stats.unknown_calls += 1;
+<<<<<<< Updated upstream
                 self.record_unknown_call(expr);
+=======
+>>>>>>> Stashed changes
                 // Build a new call expression with specialized arguments
                 // This ensures static arguments (like array values) are inlined
                 let callee_expr = self.value_to_expr(&callee_val);
@@ -3770,7 +3931,10 @@ impl<'a> PartialEvaluator<'a> {
         self.collect_hoisted_vars(stmts_slice, &mut hoisted_vars);
         self.collect_hoisted_functions(stmts_slice, &mut hoisted_functions);
 
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
         // Pre-bind hoisted vars to undefined (but don't overwrite params)
         for var_name in &hoisted_vars {
             if !params.contains(var_name) {
@@ -3864,6 +4028,7 @@ impl<'a> PartialEvaluator<'a> {
                 free_vars.remove(param);
             }
 
+<<<<<<< Updated upstream
             let mut only_local_side_effects = true;
             for name in &free_vars {
                 if func_env.bindings.borrow().contains_key(name) {
@@ -3883,6 +4048,8 @@ impl<'a> PartialEvaluator<'a> {
                 return Ok(Value::Static(JsValue::Undefined));
             }
 
+=======
+>>>>>>> Stashed changes
             // Collect variable declarations that need to be residualized
             // We need to look in BOTH the local func_env AND the closure_env chain
             // because free variables may reference values from parent scopes
@@ -4443,17 +4610,26 @@ impl<'a> PartialEvaluator<'a> {
                             }
                         })
                         .collect();
+<<<<<<< Updated upstream
                     let mut local_vars: HashSet<String> = HashSet::new();
+=======
+>>>>>>> Stashed changes
                     let mut inner_free_vars: HashSet<String> = HashSet::new();
                     for stmt in &body.statements {
                         self.collect_free_vars_stmt(stmt, &mut inner_free_vars);
                     }
+<<<<<<< Updated upstream
                     for stmt in &body.statements {
                         self.collect_hoisted_vars_stmt(stmt, &mut local_vars);
                     }
                     // Remove parameters from inner free vars, then add to outer
                     for name in inner_free_vars {
                         if !params.contains(&name) && !local_vars.contains(&name) {
+=======
+                    // Remove parameters from inner free vars, then add to outer
+                    for name in inner_free_vars {
+                        if !params.contains(&name) {
+>>>>>>> Stashed changes
                             free_vars.insert(name);
                         }
                     }
@@ -4470,6 +4646,7 @@ impl<'a> PartialEvaluator<'a> {
                     })
                     .collect();
                 let mut inner_free_vars: HashSet<String> = HashSet::new();
+<<<<<<< Updated upstream
                 let mut local_vars: HashSet<String> = HashSet::new();
                 for stmt in &func.body.statements {
                     self.collect_free_vars_stmt(stmt, &mut inner_free_vars);
@@ -4480,6 +4657,14 @@ impl<'a> PartialEvaluator<'a> {
                 // Remove parameters from inner free vars, then add to outer
                 for name in inner_free_vars {
                     if !params.contains(&name) && !local_vars.contains(&name) {
+=======
+                for stmt in &func.body.statements {
+                    self.collect_free_vars_stmt(stmt, &mut inner_free_vars);
+                }
+                // Remove parameters from inner free vars, then add to outer
+                for name in inner_free_vars {
+                    if !params.contains(&name) {
+>>>>>>> Stashed changes
                         free_vars.insert(name);
                     }
                 }
@@ -4555,6 +4740,7 @@ impl<'a> PartialEvaluator<'a> {
 
                 // For each free variable, look it up in the closure env and emit if found
                 for var_name in free_vars {
+<<<<<<< Updated upstream
                     if matches!(
                         var_name.as_str(),
                         "Date"
@@ -4572,6 +4758,8 @@ impl<'a> PartialEvaluator<'a> {
                     ) {
                         continue;
                     }
+=======
+>>>>>>> Stashed changes
                     if self.emitted_top_level_vars.contains(&var_name) {
                         continue;
                     }
@@ -4611,6 +4799,7 @@ impl<'a> PartialEvaluator<'a> {
                     self.emit_captured_vars_depth(&elem, depth + 1);
                 }
             }
+<<<<<<< Updated upstream
             Value::Dynamic(expr) => {
                 let mut free_vars: HashSet<String> = HashSet::new();
                 self.collect_free_vars_expr(expr, &mut free_vars);
@@ -5004,6 +5193,8 @@ impl<'a> PartialEvaluator<'a> {
                     self.collect_usage_hints_expr(e, array_hints, number_hints);
                 }
             }
+=======
+>>>>>>> Stashed changes
             _ => {}
         }
     }
@@ -5138,7 +5329,10 @@ impl<'a> PartialEvaluator<'a> {
     fn residual_code(&mut self) -> String {
         // Collect all residual statements
         let mut all_stmts: Vec<Statement<'a>> = Vec::new();
+<<<<<<< Updated upstream
         let mut captured_stmts: Vec<Statement<'a>> = Vec::new();
+=======
+>>>>>>> Stashed changes
 
         // Add the original residual statements
         for s in &self.residual {
@@ -5156,6 +5350,7 @@ impl<'a> PartialEvaluator<'a> {
                     for elem in elements {
                         if let Value::Static(JsValue::Object(listener)) = elem {
                             if let (Some(event_type), Some(handler)) = (listener.get("type"), listener.get("f")) {
+<<<<<<< Updated upstream
                                 let before = self.residual.len();
                                 self.emit_captured_vars(handler);
                                 if self.residual.len() > before {
@@ -5163,6 +5358,8 @@ impl<'a> PartialEvaluator<'a> {
                                         captured_stmts.push(stmt.clone_in(self.allocator));
                                     }
                                 }
+=======
+>>>>>>> Stashed changes
                                 // Build: document.addEventListener(type, handler)
                                 let doc_ident = self.ast.expression_identifier(SPAN, "document");
                                 let add_listener = IdentifierName { span: SPAN, name: Atom::from("addEventListener") };
@@ -5200,6 +5397,7 @@ impl<'a> PartialEvaluator<'a> {
                         Value::Static(JsValue::Object(listener)) => {
                             // Object with type/f structure (from document.addEventListener mock)
                             if let (Some(event_type), Some(handler)) = (listener.get("type"), listener.get("f")) {
+<<<<<<< Updated upstream
                                 let before = self.residual.len();
                                 self.emit_captured_vars(handler);
                                 if self.residual.len() > before {
@@ -5207,6 +5405,8 @@ impl<'a> PartialEvaluator<'a> {
                                         captured_stmts.push(stmt.clone_in(self.allocator));
                                     }
                                 }
+=======
+>>>>>>> Stashed changes
                                 let doc_ident = self.ast.expression_identifier(SPAN, "document");
                                 let add_listener = IdentifierName { span: SPAN, name: Atom::from("addEventListener") };
                                 let callee = Expression::StaticMemberExpression(
@@ -5236,6 +5436,7 @@ impl<'a> PartialEvaluator<'a> {
                                 self.ast.alloc_static_member_expression(SPAN, listeners_ident, push_name, false)
                             );
 
+<<<<<<< Updated upstream
                             let before = self.residual.len();
                             self.emit_captured_vars(&elem);
                             if self.residual.len() > before {
@@ -5243,6 +5444,8 @@ impl<'a> PartialEvaluator<'a> {
                                     captured_stmts.push(stmt.clone_in(self.allocator));
                                 }
                             }
+=======
+>>>>>>> Stashed changes
                             let handler_expr = self.value_to_expr(&elem);
                             let args = self.ast.vec_from_iter([
                                 Argument::from(handler_expr),
@@ -5260,6 +5463,7 @@ impl<'a> PartialEvaluator<'a> {
             }
         }
 
+<<<<<<< Updated upstream
         let mut frozen_vars: HashSet<String> = HashSet::new();
         for stmt in &captured_stmts {
             self.collect_hoisted_vars_stmt(stmt, &mut frozen_vars);
@@ -5374,6 +5578,8 @@ impl<'a> PartialEvaluator<'a> {
             all_stmts = with_prefix;
         }
 
+=======
+>>>>>>> Stashed changes
         if all_stmts.is_empty() {
             "// No residual code - fully evaluated!".to_string()
         } else {
