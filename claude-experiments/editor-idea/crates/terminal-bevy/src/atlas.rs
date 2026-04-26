@@ -1,0 +1,371 @@
+//! Glyph atlas: rasterize each character on demand via `swash`, blit
+//! its alpha bitmap into a fixed-size RGBA atlas texture, and hand back
+//! a `TextureAtlasLayout` slot index. The renderer treats every cell
+//! as a textured sprite that samples its glyph from the atlas — no
+//! cosmic-text / Text2d / per-frame shaping in the hot path.
+//!
+//! Sized for a 1024×1024 atlas (4 MiB) — fits ~1700 glyph slots at our
+//! cell dimensions, several orders of magnitude more than any real
+//! terminal session reaches. We pre-populate printable ASCII at startup
+//! so `cat` of an English file never faults a glyph; non-ASCII chars
+//! get rasterized lazily on first sight (one full image re-upload per
+//! novel char, which is fine since they arrive slowly).
+//!
+//! When the font is missing a glyph or the atlas is full, we fall back
+//! to slot 0 — a hollow "tofu" box drawn at startup.
+
+use std::collections::HashMap;
+
+use bevy::asset::RenderAssetUsages;
+use bevy::image::{Image, TextureAtlasLayout};
+use bevy::math::URect;
+use bevy::prelude::*;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+
+use swash::scale::{Render, ScaleContext, Source};
+use swash::zeno::Format;
+use swash::FontRef;
+
+/// Atlas texture is 1024×1024. Fits ~1700 glyphs at our cell size.
+/// Picked smaller than the obvious 2048² choice because every novel-glyph
+/// insertion re-uploads the whole image to the GPU; smaller = cheaper
+/// fault.
+const ATLAS_DIM: u32 = 1024;
+
+/// Multiplier between logical pixels (sprite quad size) and atlas
+/// pixels (rasterized glyph size). 2× keeps glyphs crisp on retina
+/// displays without burning much memory.
+pub const DPI_SCALE: f32 = 2.0;
+
+#[derive(Resource)]
+pub struct GlyphAtlas {
+    pub image: Handle<Image>,
+    pub layout: Handle<TextureAtlasLayout>,
+    /// Char → atlas slot index. Built up over the session.
+    slots: HashMap<char, u32>,
+    slot_w: u32,
+    slot_h: u32,
+    cols_per_row: u32,
+    max_slots: u32,
+    next_slot: u32,
+    baseline_atlas_y: u32,
+    /// Slot 0 — drawn as a hollow box for chars we couldn't rasterize.
+    tofu_slot: u32,
+    /// `'static` font bytes. `swash::FontRef` borrows from this.
+    font_data: &'static [u8],
+    /// Runtime-loaded fallback fonts, tried in order when the primary
+    /// font has no glyph for a char. Owned `Vec<u8>` so swash can
+    /// borrow from them per call.
+    fallback_fonts: Vec<Vec<u8>>,
+    font_size_logical: f32,
+    scale_context: ScaleContext,
+}
+
+#[cfg(target_os = "macos")]
+const SYSTEM_FALLBACK_PATHS: &[&str] = &[
+    // Order = priority. Apple Symbols / Arial Unicode cover most BMP
+    // symbols; STIX Two Math fills in Misc-Technical / arrows that the
+    // Apple ones miss (e.g. U+23F5 ⏵, common in powerlevel10k prompts).
+    // LastResort is Apple's catch-all that ships a category-indicator
+    // glyph for every Unicode codepoint — better than tofu when nothing
+    // else matches.
+    "/System/Library/Fonts/Apple Symbols.ttf",
+    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+    "/System/Library/Fonts/Supplemental/STIXTwoMath.otf",
+    "/System/Library/Fonts/Symbol.ttf",
+    "/System/Library/Fonts/LastResort.otf",
+];
+
+#[cfg(not(target_os = "macos"))]
+const SYSTEM_FALLBACK_PATHS: &[&str] = &[];
+
+fn load_fallback_fonts() -> Vec<Vec<u8>> {
+    SYSTEM_FALLBACK_PATHS
+        .iter()
+        .filter_map(|p| std::fs::read(p).ok())
+        .collect()
+}
+
+impl GlyphAtlas {
+    /// Allocate the atlas image, lay out the tofu fallback in slot 0,
+    /// and pre-rasterize printable ASCII (32..=126).
+    pub fn new(
+        font_data: &'static [u8],
+        font_size_logical: f32,
+        cell_w_logical: f32,
+        cell_h_logical: f32,
+        images: &mut Assets<Image>,
+        layouts: &mut Assets<TextureAtlasLayout>,
+    ) -> Self {
+        let slot_w = (cell_w_logical * DPI_SCALE).ceil() as u32;
+        let slot_h = (cell_h_logical * DPI_SCALE).ceil() as u32;
+        let cols_per_row = (ATLAS_DIM / slot_w).max(1);
+        let rows_in_atlas = (ATLAS_DIM / slot_h).max(1);
+        let max_slots = cols_per_row * rows_in_atlas;
+
+        // Atlas image starts fully transparent; we mutate the bytes
+        // directly during glyph insertion. Holding RenderAssetUsages so
+        // both the main world and render world keep a copy — Bevy's
+        // sprite pipeline will re-upload on data mutation.
+        let pixel_count = (ATLAS_DIM * ATLAS_DIM) as usize;
+        let mut data = vec![0u8; pixel_count * 4];
+
+        // Compute baseline within an atlas cell from font metrics. swash
+        // gives us ascent positive (above baseline) and descent negative.
+        // The y-position within a cell where the glyph baseline sits is
+        // approximately `ascent` atlas pixels from the cell top.
+        let font = FontRef::from_index(font_data, 0).expect("font must parse");
+        let metrics = font.metrics(&[]).scale(font_size_logical * DPI_SCALE);
+        let baseline_atlas_y = metrics.ascent.round().max(0.0) as u32;
+
+        // Tofu: hollow box at slot 0. Written into `data` before the
+        // image is even uploaded to avoid an extra round-trip.
+        write_tofu_into(
+            &mut data,
+            ATLAS_DIM,
+            slot_rect_for(0, slot_w, slot_h, cols_per_row),
+        );
+
+        let image = Image::new(
+            Extent3d {
+                width: ATLAS_DIM,
+                height: ATLAS_DIM,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            data,
+            // sRGB so Bevy's sprite shader (which expects sRGB texture
+            // input) auto-converts on sample. Glyph pixels are pure
+            // white-with-alpha so srgb↔linear is a no-op for the RGB
+            // channel; using the right format keeps the alpha blending
+            // path correct.
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+        );
+        let image_handle = images.add(image);
+
+        let mut layout = TextureAtlasLayout::new_empty(UVec2::splat(ATLAS_DIM));
+        // Slot 0 — tofu — gets registered now so its index is 0.
+        layout.add_texture(slot_rect_for(0, slot_w, slot_h, cols_per_row));
+        let layout_handle = layouts.add(layout);
+
+        let mut atlas = Self {
+            image: image_handle,
+            layout: layout_handle,
+            slots: HashMap::new(),
+            slot_w,
+            slot_h,
+            cols_per_row,
+            max_slots,
+            next_slot: 1, // 0 is tofu
+            baseline_atlas_y,
+            tofu_slot: 0,
+            font_data,
+            fallback_fonts: load_fallback_fonts(),
+            font_size_logical,
+            scale_context: ScaleContext::new(),
+        };
+
+        // Pre-rasterize printable ASCII so the first frame of `cat` of
+        // any English file finds every glyph already cached. We mutate
+        // the image bytes directly here so the GPU upload happens once,
+        // not 95 times.
+        for byte in b' '..=b'~' {
+            atlas.lookup_or_insert(byte as char, images, layouts);
+        }
+        atlas
+    }
+
+    pub fn tofu_slot(&self) -> u32 {
+        self.tofu_slot
+    }
+
+    pub fn lookup_or_insert(
+        &mut self,
+        ch: char,
+        images: &mut Assets<Image>,
+        layouts: &mut Assets<TextureAtlasLayout>,
+    ) -> u32 {
+        if let Some(&idx) = self.slots.get(&ch) {
+            return idx;
+        }
+        if self.next_slot >= self.max_slots {
+            self.slots.insert(ch, self.tofu_slot);
+            return self.tofu_slot;
+        }
+
+        // Try primary font first, then each fallback in order. We collect
+        // the raster bytes + placement here so the borrow on the font
+        // bytes is released before we mutate `self` further.
+        let raster = rasterize_in_font(
+            &mut self.scale_context,
+            self.font_data,
+            self.font_size_logical,
+            ch,
+        )
+        .or_else(|| {
+            // Borrow fallback bytes one at a time; can't iterate &self
+            // while mutably borrowing scale_context, so index manually.
+            for i in 0..self.fallback_fonts.len() {
+                if let Some(r) = rasterize_in_font(
+                    &mut self.scale_context,
+                    &self.fallback_fonts[i],
+                    self.font_size_logical,
+                    ch,
+                ) {
+                    return Some(r);
+                }
+            }
+            None
+        });
+
+        let Some((raster_data, placement)) = raster else {
+            // No font has this glyph — cache the miss so we don't retry.
+            self.slots.insert(ch, self.tofu_slot);
+            return self.tofu_slot;
+        };
+
+        let slot = self.next_slot;
+        let rect = slot_rect_for(slot, self.slot_w, self.slot_h, self.cols_per_row);
+
+        let image = images.get_mut(&self.image).expect("atlas image asset");
+        blit_glyph(
+            image.data.as_mut().expect("atlas image data"),
+            ATLAS_DIM,
+            rect,
+            self.baseline_atlas_y,
+            &raster_data,
+            placement.0,
+            placement.1,
+            placement.2,
+            placement.3,
+        );
+
+        let layout = layouts.get_mut(&self.layout).expect("atlas layout asset");
+        layout.add_texture(rect);
+
+        self.slots.insert(ch, slot);
+        self.next_slot += 1;
+        slot
+    }
+}
+
+/// Try to rasterize `ch` from `font_data`. Returns `(alpha_bytes,
+/// (width, height, left, top))` matching swash's `Placement`. Returns
+/// `None` if the font has no glyph for `ch` or scaling failed.
+fn rasterize_in_font(
+    scale_context: &mut ScaleContext,
+    font_data: &[u8],
+    font_size_logical: f32,
+    ch: char,
+) -> Option<(Vec<u8>, (i32, i32, i32, i32))> {
+    let font = FontRef::from_index(font_data, 0)?;
+    let glyph_id = font.charmap().map(ch);
+    if glyph_id == 0 {
+        return None;
+    }
+    let mut scaler = scale_context
+        .builder(font)
+        .size(font_size_logical * DPI_SCALE)
+        .hint(true)
+        .build();
+    let img = Render::new(&[Source::Outline])
+        .format(Format::Alpha)
+        .render(&mut scaler, glyph_id)?;
+    Some((
+        img.data,
+        (
+            img.placement.width as i32,
+            img.placement.height as i32,
+            img.placement.left,
+            img.placement.top,
+        ),
+    ))
+}
+
+fn slot_rect_for(slot: u32, slot_w: u32, slot_h: u32, cols_per_row: u32) -> URect {
+    let col = slot % cols_per_row;
+    let row = slot / cols_per_row;
+    let x = col * slot_w;
+    let y = row * slot_h;
+    URect {
+        min: UVec2::new(x, y),
+        max: UVec2::new(x + slot_w, y + slot_h),
+    }
+}
+
+/// Blit `raster` (alpha bitmap from swash) into `data` at the slot
+/// `rect`, baseline-aligned. White RGB with `alpha` from raster — the
+/// sprite tint multiplies to give the final fg color.
+fn blit_glyph(
+    data: &mut [u8],
+    atlas_dim: u32,
+    rect: URect,
+    baseline_y_in_slot: u32,
+    raster: &[u8],
+    bitmap_w: i32,
+    bitmap_h: i32,
+    bitmap_left: i32,
+    bitmap_top: i32,
+) {
+    if bitmap_w <= 0 || bitmap_h <= 0 {
+        return;
+    }
+    let dst_x_origin = rect.min.x as i32 + bitmap_left;
+    let dst_y_origin = rect.min.y as i32 + baseline_y_in_slot as i32 - bitmap_top;
+    let stride = atlas_dim as usize * 4;
+    let x_min = rect.min.x as i32;
+    let x_max = rect.max.x as i32;
+    let y_min = rect.min.y as i32;
+    let y_max = rect.max.y as i32;
+
+    for sy in 0..bitmap_h {
+        let dy = dst_y_origin + sy;
+        if dy < y_min || dy >= y_max {
+            continue;
+        }
+        let row_start = (sy * bitmap_w) as usize;
+        let dy_stride = dy as usize * stride;
+        for sx in 0..bitmap_w {
+            let dx = dst_x_origin + sx;
+            if dx < x_min || dx >= x_max {
+                continue;
+            }
+            let alpha = raster[row_start + sx as usize];
+            if alpha == 0 {
+                continue;
+            }
+            let p = dy_stride + dx as usize * 4;
+            data[p] = 255;
+            data[p + 1] = 255;
+            data[p + 2] = 255;
+            data[p + 3] = alpha;
+        }
+    }
+}
+
+fn write_tofu_into(data: &mut [u8], atlas_dim: u32, rect: URect) {
+    let stride = atlas_dim as usize * 4;
+    let inset = 1usize;
+    let w = (rect.max.x - rect.min.x) as usize;
+    let h = (rect.max.y - rect.min.y) as usize;
+    if w < 2 * inset + 1 || h < 2 * inset + 1 {
+        return;
+    }
+    let x0 = rect.min.x as usize;
+    let y0 = rect.min.y as usize;
+    for dy in inset..h - inset {
+        let edge_y = dy == inset || dy == h - inset - 1;
+        for dx in inset..w - inset {
+            let edge_x = dx == inset || dx == w - inset - 1;
+            if !(edge_x || edge_y) {
+                continue;
+            }
+            let p = (y0 + dy) * stride + (x0 + dx) * 4;
+            data[p] = 255;
+            data[p + 1] = 255;
+            data[p + 2] = 255;
+            data[p + 3] = 200;
+        }
+    }
+}
