@@ -290,8 +290,10 @@ fn draw_edges(
     connect: Res<ConnectState>,
     hidden: Res<HiddenEdges>,
     hide_all: Res<HideAll>,
+    mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
     if hide_all.0 { return; }
+    crate::time_phase!(perf, "edges.draw_edges", {
     for (eid, edge) in flow.sim.edges.iter() {
         if hidden.set.contains(eid) { continue; }
         let Some(&ent_from) = maps.node_to_entity.get(&edge.from) else { continue; };
@@ -321,6 +323,7 @@ fn draw_edges(
             gizmos.circle_2d(tf.translation.truncate(), 40.0, theme.accent);
         }
     }
+    });
 }
 
 /// Ray-into-box exit distance.

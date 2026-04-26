@@ -15,7 +15,7 @@ use flow::{NodeId, Value};
 use crate::bridge::{EntityMaps, FlowEdgeRef, FlowNodeRef, FlowSim};
 use crate::edges::{HiddenEdges, TravelingPacket};
 use crate::gadgets::{self, Kind, spawn as spawn_gadget};
-use crate::nodes::{NodeCounter, spawn_node_entity};
+use crate::nodes::{NodeAssetCache, NodeCounter, spawn_node_entity};
 use crate::probes::Probe;
 use crate::theme::Theme;
 use crate::tool::NodeColors;
@@ -121,6 +121,7 @@ impl Example {
 fn handle_load_example(
     mut events: MessageReader<LoadExample>,
     mut commands: Commands,
+    mut cache: ResMut<NodeAssetCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut flow: ResMut<FlowSim>,
@@ -129,7 +130,6 @@ fn handle_load_example(
     mut node_colors: ResMut<NodeColors>,
     mut hidden: ResMut<HiddenEdges>,
     mut timeline: ResMut<crate::edges::VisualTimelineRes>,
-    time: Res<Time>,
     theme: Res<Theme>,
     nodes_q: Query<Entity, With<FlowNodeRef>>,
     edges_q: Query<Entity, With<FlowEdgeRef>>,
@@ -159,7 +159,6 @@ fn handle_load_example(
     // at each ingestion so no anchor update is needed here — the
     // next event after load will emit near the current wall clock.
     timeline.0.reset();
-    let _ = time;
 
     maps.node_to_entity.clear();
     maps.entity_to_node.clear();
@@ -172,6 +171,7 @@ fn handle_load_example(
     // ── build ─────────────────────────────────────────────
     let mut ctx = BuildCtx {
         commands: &mut commands,
+        cache: &mut cache,
         meshes: &mut meshes,
         materials: &mut materials,
         flow: &mut flow,
@@ -197,6 +197,7 @@ fn handle_load_example(
 
 struct BuildCtx<'a, 'w, 's> {
     commands: &'a mut Commands<'w, 's>,
+    cache: &'a mut NodeAssetCache,
     meshes: &'a mut Assets<Mesh>,
     materials: &'a mut Assets<ColorMaterial>,
     flow: &'a mut FlowSim,
@@ -217,6 +218,7 @@ impl BuildCtx<'_, '_, '_> {
         let fid = spawn_gadget(&mut self.flow.sim, kind, &name, slot);
         spawn_node_entity(
             self.commands,
+            self.cache,
             self.meshes,
             self.materials,
             self.maps,

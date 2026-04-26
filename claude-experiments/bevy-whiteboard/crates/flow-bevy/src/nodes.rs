@@ -5,6 +5,8 @@
 //! layering via local-z offsets. Dragging moves the parent and all children
 //! follow for free.
 
+use std::collections::HashMap;
+
 use bevy::prelude::*;
 use flow::NodeId;
 use poster_ui::{Bold, caps_spaced};
@@ -21,6 +23,7 @@ impl Plugin for NodesPlugin {
         app.init_resource::<DragState>()
             .init_resource::<Selection>()
             .init_resource::<NodeCounter>()
+            .init_resource::<NodeAssetCache>()
             .add_systems(Update, (
                 handle_drop,
                 begin_drag,
@@ -87,10 +90,75 @@ pub fn body_shape(kind: Kind) -> BodyShape {
     }
 }
 
-fn body_mesh(shape: &BodyShape, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+/// Cache of `Handle<Mesh>` and `Handle<ColorMaterial>` deduplicated by
+/// shape and color. Without this, every spawned node creates 3+ unique
+/// meshes and 4+ unique materials — for the Life canvases with ~900
+/// cells, that's thousands of redundant assets feeding the renderer
+/// every frame. With it, every same-shape body shares one vertex
+/// buffer and every same-color material is one handle.
+#[derive(Resource, Default)]
+pub struct NodeAssetCache {
+    bodies: HashMap<BodyShapeKey, Handle<Mesh>>,
+    materials: HashMap<u32, Handle<ColorMaterial>>,
+    dot_mesh: Option<Handle<Mesh>>,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+enum BodyShapeKey {
+    Circle(u32),
+    Rect(u32, u32),
+}
+
+impl BodyShapeKey {
+    fn from_shape(s: &BodyShape) -> Self {
+        match s {
+            BodyShape::Circle(r) => BodyShapeKey::Circle(r.to_bits()),
+            BodyShape::Rect(s) => BodyShapeKey::Rect(s.x.to_bits(), s.y.to_bits()),
+        }
+    }
+}
+
+fn color_key(c: Color) -> u32 {
+    let s = c.to_srgba();
+    let q = |f: f32| (f.clamp(0.0, 1.0) * 255.0) as u8;
+    u32::from_le_bytes([q(s.red), q(s.green), q(s.blue), q(s.alpha)])
+}
+
+impl NodeAssetCache {
+    pub fn body_mesh(&mut self, shape: &BodyShape, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        let key = BodyShapeKey::from_shape(shape);
+        self.bodies
+            .entry(key)
+            .or_insert_with(|| match shape {
+                BodyShape::Circle(r) => meshes.add(Circle::new(*r)),
+                BodyShape::Rect(s) => meshes.add(Rectangle::new(s.x, s.y)),
+            })
+            .clone()
+    }
+
+    pub fn material(
+        &mut self,
+        color: Color,
+        materials: &mut Assets<ColorMaterial>,
+    ) -> Handle<ColorMaterial> {
+        let key = color_key(color);
+        self.materials
+            .entry(key)
+            .or_insert_with(|| materials.add(ColorMaterial::from(color)))
+            .clone()
+    }
+
+    pub fn dot_mesh(&mut self, meshes: &mut Assets<Mesh>) -> Handle<Mesh> {
+        self.dot_mesh
+            .get_or_insert_with(|| meshes.add(Circle::new(5.0)))
+            .clone()
+    }
+}
+
+fn padded_shape(shape: &BodyShape, pad: f32) -> BodyShape {
     match shape {
-        BodyShape::Circle(r) => meshes.add(Circle::new(*r)),
-        BodyShape::Rect(size) => meshes.add(Rectangle::new(size.x, size.y)),
+        BodyShape::Circle(r) => BodyShape::Circle(r + pad),
+        BodyShape::Rect(s) => BodyShape::Rect(Vec2::new(s.x + pad * 2.0, s.y + pad * 2.0)),
     }
 }
 
@@ -125,6 +193,7 @@ fn glyph_size_for(kind: Kind) -> f32 {
 /// read it directly without re-deriving from `Kind`.
 pub fn spawn_node_entity(
     commands: &mut Commands,
+    cache: &mut NodeAssetCache,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ColorMaterial>,
     maps: &mut EntityMaps,
@@ -138,13 +207,21 @@ pub fn spawn_node_entity(
     let shape = shape_override.unwrap_or_else(|| body_shape(kind));
     let hsize = hit_size(&shape);
 
+    let body_handle = cache.body_mesh(&shape, meshes);
+    let border_shape = padded_shape(&shape, 3.0);
+    let border_handle = cache.body_mesh(&border_shape, meshes);
+    let dot_handle = cache.dot_mesh(meshes);
+    let paper_mat = cache.material(theme.paper, materials);
+    let ink_mat = cache.material(theme.ink, materials);
+    let ink_soft_mat = cache.material(theme.ink_soft, materials);
+
     // Body — parent. Filled with paper so the interior reads as "empty",
     // not a coloured swatch. Kind is conveyed by shape + glyph + label, not
     // fill colour (colour-coded bodies turned out to confuse, since the
     // same hues appear on edge packets and data-palette swatches).
     let entity = commands.spawn((
-        Mesh2d(body_mesh(&shape, meshes)),
-        MeshMaterial2d(materials.add(ColorMaterial::from(theme.paper))),
+        Mesh2d(body_handle),
+        MeshMaterial2d(paper_mat),
         Transform::from_translation(pos.extend(1.0)),
         FlowNodeRef(flow_id),
         NodeKind(kind),
@@ -155,19 +232,17 @@ pub fn spawn_node_entity(
         // Ink outline — a slightly-larger companion mesh rendered just
         // behind the body. Bevy 0.18 Mesh2d doesn't stroke natively; a
         // darker silhouette underneath reads as a clean outline.
-        let (border_mesh, _) = scaled_mesh(&shape, 3.0, meshes);
         parent.spawn((
-            Mesh2d(border_mesh),
-            MeshMaterial2d(materials.add(ColorMaterial::from(theme.ink))),
+            Mesh2d(border_handle.clone()),
+            MeshMaterial2d(ink_mat.clone()),
             Transform::from_xyz(0.0, 0.0, -0.1),
         ));
 
         // Offset "print misregistration" shadow — a further-behind, offset
         // copy in the soft-ink colour. Reads as an iso50 screenprint detail.
-        let (shadow_mesh, _) = scaled_mesh(&shape, 3.0, meshes);
         parent.spawn((
-            Mesh2d(shadow_mesh),
-            MeshMaterial2d(materials.add(ColorMaterial::from(theme.ink_soft))),
+            Mesh2d(border_handle),
+            MeshMaterial2d(ink_soft_mat),
             Transform::from_xyz(6.0, -6.0, -0.2),
         ));
 
@@ -188,8 +263,8 @@ pub fn spawn_node_entity(
         if !matches!(kind, Kind::Router) {
             let (dx, dy) = data_dot_offset(&shape);
             parent.spawn((
-                Mesh2d(meshes.add(Circle::new(5.0))),
-                MeshMaterial2d(materials.add(ColorMaterial::from(theme.ink))),
+                Mesh2d(dot_handle),
+                MeshMaterial2d(ink_mat),
                 Transform::from_xyz(dx, dy, 0.2),
                 NodeColorDot(flow_id),
             ));
@@ -222,27 +297,6 @@ pub fn spawn_node_entity(
     maps.node_to_entity.insert(flow_id, entity);
     maps.entity_to_node.insert(entity, flow_id);
     entity
-}
-
-/// Build a larger copy of the node's body shape for use as a border / shadow
-/// layer. `pad` is the extra size in world units on each side.
-fn scaled_mesh(
-    shape: &BodyShape,
-    pad: f32,
-    meshes: &mut Assets<Mesh>,
-) -> (Handle<Mesh>, BodyShape) {
-    match shape {
-        BodyShape::Circle(r) => {
-            let new = BodyShape::Circle(r + pad);
-            let handle = body_mesh(&new, meshes);
-            (handle, new)
-        }
-        BodyShape::Rect(size) => {
-            let new = BodyShape::Rect(Vec2::new(size.x + pad * 2.0, size.y + pad * 2.0));
-            let handle = body_mesh(&new, meshes);
-            (handle, new)
-        }
-    }
 }
 
 /// Marker on the `Text2d` child that carries the node's name — the label
@@ -296,6 +350,7 @@ fn data_dot_offset(shape: &BodyShape) -> (f32, f32) {
 
 fn handle_drop(
     mut commands: Commands,
+    mut cache: ResMut<NodeAssetCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut flow: ResMut<FlowSim>,
@@ -326,7 +381,7 @@ fn handle_drop(
     // in its sim slots so the router's `slot_of(n, "color")` filter can
     // pick the matching downstream branch.
     let id = spawn_gadget(&mut flow.sim, kind, &name, slot);
-    spawn_node_entity(&mut commands, &mut meshes, &mut materials, &mut maps, &theme, id, kind, None, name, pos);
+    spawn_node_entity(&mut commands, &mut cache, &mut meshes, &mut materials, &mut maps, &theme, id, kind, None, name, pos);
     // Snapshot the active data-slot colour onto this node so its emitted
     // packets render in that hue. Theme swaps after drop won't recolour
     // it. Routers are untyped — they forward whatever arrives, so they
@@ -483,33 +538,48 @@ fn format_node_state(kind: Kind, node: &flow::Node) -> String {
 }
 
 /// Keep each node's data-colour dot painted with whatever colour
-/// `NodeColors` currently holds for that node. Cheap: only touches
-/// materials whose colour disagrees with the expected value.
+/// `NodeColors` currently holds for that node.
+///
+/// Implementation note: rather than mutating the dot's `ColorMaterial`
+/// asset (which forces every dot to own a unique material), we look up
+/// or insert a shared cached material for the desired colour and swap
+/// the entity's `MeshMaterial2d` handle to it. With ~900 cells in the
+/// Life canvas, this collapses ~900 unique dot materials into one per
+/// distinct colour in the data palette.
 fn sync_data_dot_colors(
     node_colors: Res<NodeColors>,
     theme: Res<Theme>,
-    dots: Query<(&NodeColorDot, &MeshMaterial2d<ColorMaterial>)>,
+    mut cache: ResMut<NodeAssetCache>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut dots: Query<(&NodeColorDot, &mut MeshMaterial2d<ColorMaterial>)>,
+    mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
-    for (dot, mat_handle) in dots.iter() {
+    crate::time_phase!(perf, "nodes.sync_data_dot_colors", {
+    for (dot, mut mat_handle) in dots.iter_mut() {
         let want = node_colors.0.get(&dot.0).copied().unwrap_or(theme.accent);
-        if let Some(mat) = materials.get_mut(&mat_handle.0) {
-            if mat.color != want {
-                mat.color = want;
-            }
+        let want_handle = cache.material(want, &mut materials);
+        if mat_handle.0.id() != want_handle.id() {
+            mat_handle.0 = want_handle;
         }
     }
+    });
 }
 
 /// Repaint each `BinarySlotPaint`-tagged body each frame from the sim
-/// slot. Cheap: only writes when the new colour disagrees with the
-/// current material.
+/// slot, swapping between two cached material handles (`on` and `off`)
+/// instead of mutating per-entity materials. With ~900 BinarySlotPaint
+/// cells flipping each tick, this is the difference between 900
+/// material-asset writes per frame and 900 component-handle writes,
+/// while also collapsing all 900 unique materials into two shared ones.
 fn sync_binary_slot_paint(
     flow: Res<FlowSim>,
-    paints: Query<(&BinarySlotPaint, &MeshMaterial2d<ColorMaterial>)>,
+    mut cache: ResMut<NodeAssetCache>,
     mut materials: ResMut<Assets<ColorMaterial>>,
+    mut paints: Query<(&BinarySlotPaint, &mut MeshMaterial2d<ColorMaterial>)>,
+    mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
-    for (paint, mat_handle) in paints.iter() {
+    crate::time_phase!(perf, "nodes.sync_binary_slot_paint", {
+    for (paint, mut mat_handle) in paints.iter_mut() {
         let Some(node) = flow.sim.nodes.get(&paint.node) else { continue };
         let on = match node.slots.get(&paint.slot) {
             Some(flow::Value::Int(i)) => *i != 0,
@@ -517,12 +587,12 @@ fn sync_binary_slot_paint(
             _ => false,
         };
         let want = if on { paint.on } else { paint.off };
-        if let Some(mat) = materials.get_mut(&mat_handle.0) {
-            if mat.color != want {
-                mat.color = want;
-            }
+        let want_handle = cache.material(want, &mut materials);
+        if mat_handle.0.id() != want_handle.id() {
+            mat_handle.0 = want_handle;
         }
     }
+    });
 }
 
 fn sync_node_labels(

@@ -21,18 +21,24 @@
 //! holds the snapshot mutex without releasing, so the renderer never
 //! waits more than a few KiB worth of parsing for the lock.
 
-use std::os::fd::OwnedFd;
+use std::fs::{File, OpenOptions};
+use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
+use std::os::fd::{AsFd, OwnedFd};
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
+use bevy::winit::{EventLoopProxy, WinitUserEvent};
 use libghostty_vt::{
     render::{CellIterator, Dirty, RenderState, RowIterator},
     style::RgbColor,
     terminal::ScrollViewport,
 };
 use nix::errno::Errno;
+use nix::fcntl::{self, OFlag};
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
 use crate::pty::{Child, Pty, PtySize};
 use crate::vt::{self, CellPx};
@@ -110,16 +116,45 @@ pub enum WorkerMsg {
 /// Handle the main thread keeps for each terminal.
 pub struct WorkerHandle {
     pub snapshot: Arc<Mutex<GridSnapshot>>,
-    pub tx: Sender<WorkerMsg>,
+    tx: Sender<WorkerMsg>,
+    /// Write end of the worker's wake pipe. Every channel send pokes
+    /// one byte here so the worker's blocking `poll(2)` returns even
+    /// if no pty data is pending.
+    wake_w: OwnedFd,
     /// Held to keep the thread joinable; we never actually `join` from
     /// the main thread — workers exit on `Shutdown` or PTY EOF.
     _join: JoinHandle<()>,
 }
 
 impl WorkerHandle {
+    /// Send a message to the worker and wake it from `poll(2)`.
+    ///
+    /// Returns silently on send error (worker exited) — every existing
+    /// caller already used `let _ = ...` semantics.
+    pub fn send(&self, msg: WorkerMsg) {
+        let _ = self.tx.send(msg);
+        // Best-effort poke. Pipe is non-blocking; if the kernel buffer
+        // is full there's already a pending wake — no need to add more.
+        let _ = nix::unistd::write(self.wake_w.as_fd(), b"x");
+    }
+}
+
+impl WorkerHandle {
     /// Spawn the worker. Forks the pty + child shell, then hands fd +
     /// ownership of `Terminal` to a fresh thread.
-    pub fn spawn(size: PtySize, scrollback: usize) -> std::io::Result<Self> {
+    ///
+    /// `scrollback_log` is the path to append raw pty bytes to. When
+    /// `Some`, every chunk read from the pty is mirrored to disk so the
+    /// next launch can replay it. `replay_bytes` is the previous run's
+    /// log — fed straight into `vt_write` before the pty drain loop
+    /// starts, so the visible scrollback comes back across restarts.
+    pub fn spawn(
+        size: PtySize,
+        scrollback: usize,
+        scrollback_log: Option<PathBuf>,
+        replay_bytes: Option<Vec<u8>>,
+        wakeup: Option<EventLoopProxy<WinitUserEvent>>,
+    ) -> std::io::Result<Self> {
         let (pty, child) = Pty::spawn(size)?;
         pty.set_nonblock()?;
 
@@ -146,17 +181,45 @@ impl WorkerHandle {
 
         let (tx, rx) = channel::<WorkerMsg>();
 
+        // Self-pipe used to wake the worker out of poll(2) when a
+        // message lands on the channel. Non-blocking on both ends so
+        // neither side ever stalls on it.
+        let (wake_r, wake_w) = nix::unistd::pipe()?;
+        set_nonblock(&wake_r)?;
+        set_nonblock(&wake_w)?;
+
         let join = thread::Builder::new()
             .name("terminal-worker".into())
-            .spawn(move || worker_loop(pty, child, size, scrollback, snapshot_w, rx))
+            .spawn(move || {
+                worker_loop(
+                    pty,
+                    child,
+                    size,
+                    scrollback,
+                    scrollback_log,
+                    replay_bytes,
+                    snapshot_w,
+                    rx,
+                    wakeup,
+                    wake_r,
+                )
+            })
             .expect("spawn worker");
 
         Ok(Self {
             snapshot,
             tx,
+            wake_w,
             _join: join,
         })
     }
+}
+
+fn set_nonblock(fd: &OwnedFd) -> std::io::Result<()> {
+    let raw = fcntl::fcntl(fd, fcntl::F_GETFL)?;
+    let flags = OFlag::from_bits_retain(raw) | OFlag::O_NONBLOCK;
+    fcntl::fcntl(fd, fcntl::F_SETFL(flags))?;
+    Ok(())
 }
 
 /// Cap how many bytes the worker feeds to `vt_write` between snapshot
@@ -164,14 +227,37 @@ impl WorkerHandle {
 /// snapshot lock-hold time so the renderer never waits much.
 const MAX_READ_PER_TICK: usize = 65536;
 
+/// Hard ceiling on a per-terminal scrollback log file. When the log
+/// exceeds this, the worker keeps the trailing `SCROLLBACK_LOG_KEEP`
+/// bytes and rewrites in place. Sized so a busy terminal can keep
+/// roughly the libghostty 100k-line scrollback worth of styled output
+/// without growing without bound.
+const SCROLLBACK_LOG_MAX: u64 = 16 * 1024 * 1024;
+const SCROLLBACK_LOG_KEEP: u64 = 12 * 1024 * 1024;
+/// Check the log size every N bytes appended (cheap counter test in
+/// the hot path; the actual fs metadata call only runs at boundaries).
+const SCROLLBACK_ROTATE_CHECK_EVERY: u64 = 256 * 1024;
+
 fn worker_loop(
     pty: Pty,
     mut child: Child,
     initial_size: PtySize,
     scrollback: usize,
+    scrollback_log: Option<PathBuf>,
+    replay_bytes: Option<Vec<u8>>,
     snapshot: Arc<Mutex<GridSnapshot>>,
     rx: Receiver<WorkerMsg>,
+    wakeup: Option<EventLoopProxy<WinitUserEvent>>,
+    wake_r: OwnedFd,
 ) {
+    let wake_winit = || {
+        if let Some(proxy) = wakeup.as_ref() {
+            // Best-effort: if the event loop has already exited the
+            // proxy returns Err — nothing meaningful to do, we're
+            // shutting down anyway.
+            let _ = proxy.send_event(WinitUserEvent::WakeUp);
+        }
+    };
     let cell_px = CellPx {
         width: initial_size.cell_width_px as u32,
         height: initial_size.cell_height_px as u32,
@@ -182,6 +268,25 @@ fn worker_loop(
         scrollback,
         cell_px,
     );
+
+    // Replay previous-session bytes (if any) into the fresh Terminal so
+    // its scrollback matches what was on screen before. We must clear
+    // pty_response afterwards: replaying old content would otherwise
+    // re-trigger every DA / size query the original session answered,
+    // and we'd ship those replies back to the brand-new shell as if it
+    // had asked.
+    if let Some(bytes) = replay_bytes
+        && !bytes.is_empty()
+    {
+        terminal.vt_write(&bytes);
+        pty_response.borrow_mut().clear();
+    }
+
+    // Append-only log of every byte we feed to `vt_write`. This is what
+    // gets replayed on the next launch.
+    let mut log_writer: Option<ScrollbackLogWriter> = scrollback_log
+        .as_ref()
+        .and_then(|p| ScrollbackLogWriter::open(p.clone()));
 
     let mut render_state = RenderState::new().expect("RenderState");
     let mut row_it = RowIterator::new().expect("RowIterator");
@@ -226,6 +331,9 @@ fn worker_loop(
                     let t = Instant::now();
                     terminal.vt_write(&read_buf[..n]);
                     vt_write_ns_since_log += t.elapsed().as_nanos();
+                    if let Some(w) = log_writer.as_mut() {
+                        w.append(&read_buf[..n]);
+                    }
                     bytes_processed_this_tick += n;
                     bytes_since_log += n as u64;
                     did_anything = true;
@@ -299,7 +407,7 @@ fn worker_loop(
                 child = Child::Exited(pid);
             }
             // Publish one last snapshot so the renderer sees `child_alive=false`.
-            let (pc, pr) = publish_snapshot(
+            let (pc, pr, published) = publish_snapshot(
                 &mut terminal,
                 &mut render_state,
                 &mut row_it,
@@ -312,6 +420,9 @@ fn worker_loop(
             );
             last_cols = pc;
             last_rows = pr;
+            if published {
+                wake_winit();
+            }
             // Don't exit; let the channel-disconnect or Shutdown end us.
             // Until then, just sleep — child is gone, no work to do.
             thread::sleep(Duration::from_millis(50));
@@ -321,7 +432,7 @@ fn worker_loop(
         // 4. Publish snapshot if anything changed.
         if did_anything {
             let t = Instant::now();
-            let (pc, pr) = publish_snapshot(
+            let (pc, pr, published) = publish_snapshot(
                 &mut terminal,
                 &mut render_state,
                 &mut row_it,
@@ -336,6 +447,12 @@ fn worker_loop(
             last_rows = pr;
             publish_ns_since_log += t.elapsed().as_nanos();
             publishes_since_log += 1;
+            // Wake the winit event loop so the Bevy renderer schedules
+            // a frame. Without this, the loop sits idle in `Reactive`
+            // mode and pty output never makes it to the screen.
+            if published {
+                wake_winit();
+            }
         }
 
         if profile && tick_count % PROFILE_INTERVAL == 0 && bytes_since_log > 0 {
@@ -359,11 +476,43 @@ fn worker_loop(
             log_window_start = Instant::now();
         }
 
-        // 5. If we did nothing, take a tiny nap. Otherwise loop right
-        // back to drain more bytes — under heavy `cat` we want to keep
-        // chewing through the kernel pty buffer as fast as possible.
+        // 5. If we did work, loop right back to drain more bytes — under
+        // heavy `cat` we want to keep chewing through the kernel pty
+        // buffer as fast as possible. If we did nothing, block in
+        // poll(2) until either the pty has data or the main thread
+        // pokes our wake pipe. This is the difference between ~zero
+        // idle CPU and a 2 kHz spin loop.
         if !did_anything {
-            thread::sleep(Duration::from_micros(500));
+            // Drain any wake bytes that accumulated while we were busy
+            // — otherwise poll() would return immediately on stale data.
+            let mut drain_buf = [0u8; 64];
+            loop {
+                match nix::unistd::read(&wake_r, &mut drain_buf) {
+                    Ok(n) if n > 0 => continue,
+                    _ => break,
+                }
+            }
+
+            let pty_fd = pty.0.as_fd();
+            let wake_fd = wake_r.as_fd();
+            let mut fds = [
+                PollFd::new(pty_fd, PollFlags::POLLIN),
+                PollFd::new(wake_fd, PollFlags::POLLIN),
+            ];
+            // Cap the wait at a few seconds as a safety net — if a
+            // wake somehow gets lost we still recover within a few
+            // seconds instead of hanging. In practice every state
+            // change pokes the pipe.
+            let timeout = PollTimeout::try_from(5_000i32).unwrap();
+            match poll(&mut fds, timeout) {
+                Ok(_) => {}
+                Err(Errno::EINTR) => {}
+                Err(_) => {
+                    // Unexpected — back off briefly so we don't spin if
+                    // poll returns the same error every iteration.
+                    thread::sleep(Duration::from_millis(10));
+                }
+            }
         }
     }
 }
@@ -378,10 +527,10 @@ fn publish_snapshot(
     force_full: bool,
     prev_cols: u16,
     prev_rows: u16,
-) -> (u16, u16) {
+) -> (u16, u16, bool) {
     let snap = match render_state.update(terminal) {
         Ok(s) => s,
-        Err(_) => return (prev_cols, prev_rows),
+        Err(_) => return (prev_cols, prev_rows, false),
     };
     let dirty = snap.dirty().unwrap_or(Dirty::Full);
     let cols = snap.cols().unwrap_or(0);
@@ -390,11 +539,13 @@ fn publish_snapshot(
     if matches!(dirty, Dirty::Clean) && !force_full && !dims_changed {
         // Still update child_alive flag without touching cells.
         let mut g = snapshot_arc.lock().expect("snapshot lock");
+        let mut published = false;
         if g.child_alive != child_alive {
             g.child_alive = child_alive;
             g.generation = g.generation.wrapping_add(1);
+            published = true;
         }
-        return (cols, rows);
+        return (cols, rows, published);
     }
     let cursor_visible = snap.cursor_visible().unwrap_or(false);
     let cursor_pos = snap.cursor_viewport().ok().flatten();
@@ -430,7 +581,7 @@ fn publish_snapshot(
     {
         let mut iter = match row_it.update(&snap) {
             Ok(it) => it,
-            Err(_) => return (cols, rows),
+            Err(_) => return (cols, rows, false),
         };
         let mut r = 0usize;
         while let Some(row) = iter.next() {
@@ -531,9 +682,108 @@ fn publish_snapshot(
     };
     g.child_alive = child_alive;
     g.generation = g.generation.wrapping_add(1);
-    (cols, rows)
+    (cols, rows, true)
 }
 
 /// Marker type for OwnedFd round-trip if needed elsewhere.
 #[allow(dead_code)]
 pub struct WorkerFd(pub OwnedFd);
+
+/// Append-only writer for a per-terminal scrollback log. Bytes written
+/// here are exactly what was fed to `vt_write`, so the next launch can
+/// `vt_write` them straight into a fresh Terminal to recover scrollback.
+///
+/// Self-trims when the file exceeds `SCROLLBACK_LOG_MAX` by reading the
+/// trailing `SCROLLBACK_LOG_KEEP` bytes and rewriting via tmp+rename.
+/// Trim points may land mid-escape; libghostty's parser is robust to
+/// the resulting garbage prefix and the next prompt will overwrite it.
+struct ScrollbackLogWriter {
+    path: PathBuf,
+    file: File,
+    bytes_since_check: u64,
+}
+
+impl ScrollbackLogWriter {
+    fn open(path: PathBuf) -> Option<Self> {
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            eprintln!("[worker] mkdir {}: {}", parent.display(), e);
+            return None;
+        }
+        let file = match OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("[worker] open {}: {}", path.display(), e);
+                return None;
+            }
+        };
+        Some(Self {
+            path,
+            file,
+            bytes_since_check: 0,
+        })
+    }
+
+    fn append(&mut self, bytes: &[u8]) {
+        if let Err(e) = self.file.write_all(bytes) {
+            eprintln!("[worker] log write {}: {}", self.path.display(), e);
+            return;
+        }
+        self.bytes_since_check = self.bytes_since_check.saturating_add(bytes.len() as u64);
+        if self.bytes_since_check >= SCROLLBACK_ROTATE_CHECK_EVERY {
+            self.bytes_since_check = 0;
+            if let Ok(meta) = self.file.metadata()
+                && meta.len() > SCROLLBACK_LOG_MAX
+            {
+                self.rotate();
+            }
+        }
+    }
+
+    fn rotate(&mut self) {
+        // Read tail, rewrite atomically. The append-mode handle stays
+        // open the whole time, but we reopen after rename so subsequent
+        // appends go to the new file.
+        let path = &self.path;
+        let read_path = path.clone();
+        let tmp_path = path.with_extension("bytes.tmp");
+
+        let trimmed = match (|| -> std::io::Result<Vec<u8>> {
+            let mut f = File::open(&read_path)?;
+            let len = f.metadata()?.len();
+            let keep = SCROLLBACK_LOG_KEEP.min(len);
+            let start = len - keep;
+            f.seek(SeekFrom::Start(start))?;
+            let mut buf = Vec::with_capacity(keep as usize);
+            f.read_to_end(&mut buf)?;
+            Ok(buf)
+        })() {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[worker] log read-tail {}: {}", path.display(), e);
+                return;
+            }
+        };
+
+        let write_result = (|| -> std::io::Result<()> {
+            let mut f = File::create(&tmp_path)?;
+            f.write_all(&trimmed)?;
+            f.sync_all()?;
+            std::fs::rename(&tmp_path, path)
+        })();
+        if let Err(e) = write_result {
+            eprintln!("[worker] log rotate {}: {}", path.display(), e);
+            return;
+        }
+
+        match OpenOptions::new().create(true).append(true).open(path) {
+            Ok(f) => self.file = f,
+            Err(e) => eprintln!("[worker] log reopen {}: {}", path.display(), e),
+        }
+    }
+}

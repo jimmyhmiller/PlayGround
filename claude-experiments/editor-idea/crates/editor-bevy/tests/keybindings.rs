@@ -12,8 +12,8 @@ use bevy::input::ButtonState;
 use bevy::input::InputPlugin;
 use bevy::prelude::*;
 use editor_bevy::{
-    Editor, EditorHighlighter, EditorRect, EditorScroll, EditorStateComp, FocusedEditor,
-    HeadlessEditorPlugin, LineRows, MonoMetrics, TextDragAnchor,
+    Editor, EditorHighlighter, EditorMetrics, EditorRect, EditorScroll, EditorStateComp,
+    FocusedEditor, HeadlessEditorPlugin, LineRows, TextDragAnchor,
 };
 use editor_bevy::highlight::Highlighter;
 use editor_core::selection::Selection;
@@ -25,9 +25,9 @@ fn make_app(initial: &str) -> App {
     app.add_plugins(MinimalPlugins);
     app.add_plugins(InputPlugin);
     app.add_plugins(HeadlessEditorPlugin);
-    // handle_input consults MonoMetrics for the caret-visible nudge;
+    // handle_input consults EditorMetrics for the caret-visible nudge;
     // tests never render, so a dummy cell width is fine.
-    app.insert_resource(MonoMetrics { cell_width: 9.6 });
+    app.insert_resource(EditorMetrics { cell_width: 9.6 });
     let initial = initial.to_string();
     app.add_systems(Startup, move |mut commands: Commands| {
         let e = commands

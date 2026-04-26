@@ -35,6 +35,7 @@
 //! - no mouse reporting to the child, no selection / scrollback panning
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use bevy::image::{Image, TextureAtlasLayout};
 use bevy::input::keyboard::{Key, KeyboardInput};
@@ -46,6 +47,7 @@ use bevy::text::LineHeight;
 use libghostty_vt::style::RgbColor;
 
 pub mod atlas;
+pub mod ipc;
 pub mod projects;
 pub mod pty;
 pub mod radial;
@@ -53,7 +55,10 @@ pub mod selection;
 pub mod vt;
 pub mod worker;
 use atlas::GlyphAtlas;
-use projects::{InputConsumed, ProjectMembership, Projects, Renaming, Sidebar};
+use projects::{
+    InputConsumed, OpenFileRequest, OpenProjectTarget, PendingActions, ProjectMembership,
+    Projects, Renaming, Sidebar,
+};
 use pty::PtySize;
 use worker::{SnapCell, WorkerHandle, WorkerMsg};
 
@@ -80,6 +85,24 @@ fn load_primary_font() -> &'static [u8] {
     Box::leak(bytes.into_boxed_slice())
 }
 
+/// Root for all on-disk persistence (projects + per-terminal scrollback).
+/// `~/.terminal-bevy/` on every supported platform.
+pub fn data_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    let mut p = PathBuf::from(home);
+    p.push(".terminal-bevy");
+    Some(p)
+}
+
+/// Per-terminal scrollback log. Raw pty bytes are appended here as they
+/// flow from the child; on restore the bytes are replayed into the new
+/// libghostty Terminal so the visible scrollback persists across runs.
+pub fn scrollback_path(session_id: u64) -> Option<PathBuf> {
+    let mut p = data_dir()?;
+    p.push("scrollback");
+    Some(p.join(format!("{}.bytes", session_id)))
+}
+
 // ---------- Per-entity runtime ----------
 
 /// Per-entity handle to the worker thread. Plain `Send` data — the
@@ -98,6 +121,13 @@ pub struct TerminalStore {
 
 #[derive(Component)]
 pub struct TerminalTag;
+
+/// Stable id used to key per-terminal on-disk state (scrollback log,
+/// layout snapshot in `projects.json`). Allocated by `Projects` and
+/// preserved across restarts so a restored terminal finds its old
+/// scrollback file.
+#[derive(Component, Copy, Clone, Debug)]
+pub struct TerminalSession(pub u64);
 
 /// Position + size + z in window space, top-left origin, y-down. Same
 /// layout as `editor-bevy::EditorRect`.
@@ -218,15 +248,47 @@ impl Plugin for TerminalPlugin {
         app.insert_resource(ClearColor(Color::srgb(0.072, 0.075, 0.085)))
             .insert_resource(FocusedTerminal::default())
             .insert_resource(MouseMode::default())
+            // Reactive: only run the schedule + render in response to
+            // events. Input from winit fires this directly; pty output
+            // fires it via `EventLoopProxy::send_event(WakeUp)` from
+            // each terminal worker (see `WorkerHandle::spawn`). The
+            // `wait` is just a safety-net fallback — under steady state
+            // every redraw is event-driven and an idle terminal sits
+            // at literally zero CPU between events.
             .insert_resource(bevy::winit::WinitSettings {
-                focused_mode: bevy::winit::UpdateMode::Continuous,
-                unfocused_mode: bevy::winit::UpdateMode::Continuous,
+                focused_mode: bevy::winit::UpdateMode::reactive(
+                    std::time::Duration::from_secs(5),
+                ),
+                unfocused_mode: bevy::winit::UpdateMode::reactive_low_power(
+                    std::time::Duration::from_secs(60),
+                ),
             })
             .add_plugins(projects::ProjectsPlugin)
             .add_plugins(radial::RadialPlugin)
             .add_plugins(selection::SelectionPlugin)
-            .add_systems(Startup, setup_camera_and_font)
+            // Editor panes live alongside terminal panes in the same
+            // window. The embed plugin brings in the editor's input,
+            // rendering, and the shared `InputConsumed` resource — but
+            // leaves camera, ClearColor, WinitSettings, and font setup
+            // to us (we're the host).
+            .add_plugins(editor_bevy::EditorEmbedPlugin)
+            .add_systems(
+                Startup,
+                (
+                    setup_camera_and_font,
+                    editor_bevy::setup_editor_font,
+                    setup_ipc_listener,
+                ),
+            )
             .add_systems(PostStartup, release_os_focus)
+            .add_systems(
+                Update,
+                (
+                    arbitrate_pane_focus,
+                    handle_open_file_shortcut,
+                    drain_ipc_open_requests,
+                ),
+            )
             .add_systems(
                 Update,
                 (
@@ -254,6 +316,91 @@ fn release_os_focus() {
 
 #[cfg(not(target_os = "macos"))]
 fn release_os_focus() {}
+
+/// Holds the receiver half of the IPC channel. `mpsc::Receiver` is
+/// `Send` but `!Sync`, so we install it as a `NonSend` resource and
+/// drain it from a system that always runs on the main thread.
+pub struct IpcInbox(pub std::sync::mpsc::Receiver<ipc::OpenRequest>);
+
+fn setup_ipc_listener(world: &mut World) {
+    if let Some(rx) = ipc::spawn_listener() {
+        world.insert_non_send_resource(IpcInbox(rx));
+    }
+}
+
+/// Drain any IPC open requests received this frame and queue them as
+/// `PendingActions::open_files`. The actual file-read + editor spawn
+/// happens in `apply_pending_actions` on the next frame, so the IPC
+/// thread doesn't touch the World.
+fn drain_ipc_open_requests(
+    inbox: Option<NonSend<IpcInbox>>,
+    mut pending: ResMut<PendingActions>,
+) {
+    let Some(inbox) = inbox else { return };
+    while let Ok(req) = inbox.0.try_recv() {
+        let project = match req.project {
+            Some(name) => OpenProjectTarget::ByName(name),
+            None => OpenProjectTarget::Active,
+        };
+        pending.open_files.push(OpenFileRequest {
+            path: req.path,
+            project,
+            origin: None,
+        });
+    }
+}
+
+/// Cmd+O opens a native file picker and queues the chosen file as a
+/// new editor pane in the active project. The picker is synchronous —
+/// it blocks the main thread until the user picks or cancels, which
+/// matches how every other macOS app handles file dialogs.
+///
+/// We swallow Cmd+O ourselves so the focused pane (terminal or editor)
+/// never sees a stray "o" insert. Both pane keyboard handlers already
+/// skip Cmd-modified keys, but we still bail explicitly here in case
+/// that contract loosens.
+fn handle_open_file_shortcut(
+    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mods: Res<ButtonInput<KeyCode>>,
+    mut pending: ResMut<PendingActions>,
+) {
+    let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
+    let mut triggered = false;
+    for ev in events.read() {
+        if ev.state.is_pressed() && cmd && matches!(ev.key_code, KeyCode::KeyO) {
+            triggered = true;
+        }
+    }
+    if !triggered {
+        return;
+    }
+    let dialog = rfd::FileDialog::new()
+        .set_directory(std::env::current_dir().unwrap_or_else(|_| ".".into()))
+        .set_title("Open file");
+    let Some(path) = dialog.pick_file() else {
+        return;
+    };
+    pending.open_files.push(OpenFileRequest {
+        path,
+        project: OpenProjectTarget::Active,
+        origin: None,
+    });
+}
+
+/// Keep terminal-pane focus and editor-pane focus mutually exclusive:
+/// at most one pane should receive keyboard input at any time. Each
+/// crate's mouse handler claims clicks through `InputConsumed`, so in
+/// practice only one of `FocusedTerminal`/`FocusedEditor` flips to
+/// `Some` per click — this system clears the *other* when it sees the
+/// change so subsequent keyboard handlers don't both receive events.
+fn arbitrate_pane_focus(
+    focused_editor: Res<editor_bevy::FocusedEditor>,
+    mut focused_terminal: ResMut<FocusedTerminal>,
+) {
+    if focused_editor.is_changed() && focused_editor.0.is_some() && focused_terminal.0.is_some() {
+        focused_terminal.0 = None;
+    }
+}
 
 fn measure_cell_width(font_bytes: &[u8], font_size: f32) -> f32 {
     use skrifa::instance::{LocationRef, Size};
@@ -314,10 +461,16 @@ pub fn setup_camera_and_font(world: &mut World) {
 ///
 /// `project_id` tags the terminal with `ProjectMembership` so the sidebar
 /// can group + show/hide it. Pass `None` only in tests / standalone demos.
+///
+/// `session_id` is the persistence key — the worker logs raw pty bytes
+/// to `scrollback_path(session_id)` and on restart loads the same file
+/// back into a fresh Terminal via `replay_bytes`.
 pub fn spawn_terminal(
     world: &mut World,
     rect: TerminalRect,
     project_id: Option<u64>,
+    session_id: u64,
+    replay_bytes: Option<Vec<u8>>,
 ) -> Entity {
     let cell_width = world.resource::<MonoMetrics>().cell_width;
     let font_handle = world.resource::<MonoFont>().0.clone();
@@ -328,6 +481,14 @@ pub fn spawn_terminal(
     // Pty + render iterators all live on the worker side. The main
     // thread holds only the WorkerHandle (snapshot Arc + message
     // channel), keeping the renderer fully decoupled from the parser.
+    //
+    // Hand the worker a clone of winit's EventLoopProxy so it can
+    // wake the renderer when a new snapshot is published. Without
+    // this, `WinitSettings::reactive` would never refresh on pty
+    // output — the only events that wake the loop are user input.
+    let wakeup = world
+        .get_resource::<bevy::winit::EventLoopProxyWrapper>()
+        .map(|w| bevy::winit::EventLoopProxy::clone(w));
     let worker = WorkerHandle::spawn(
         PtySize {
             cols,
@@ -336,6 +497,9 @@ pub fn spawn_terminal(
             cell_height_px: LINE_HEIGHT as u16,
         },
         SCROLLBACK_LINES,
+        scrollback_path(session_id),
+        replay_bytes,
+        wakeup,
     )
     .expect("WorkerHandle::spawn");
     let data = TerminalData { worker };
@@ -452,6 +616,9 @@ pub fn spawn_terminal(
         resize_handle,
         close_button,
     });
+    world
+        .entity_mut(terminal_entity)
+        .insert(TerminalSession(session_id));
     if let Some(pid) = project_id {
         world
             .entity_mut(terminal_entity)
@@ -498,7 +665,7 @@ fn handle_resize(
         if cols == snap_cols && rows == snap_rows {
             continue;
         }
-        let _ = data.worker.tx.send(WorkerMsg::Resize {
+        data.worker.send(WorkerMsg::Resize {
             cols,
             rows,
             cell_w_px: metrics.cell_width as u32,
@@ -638,12 +805,12 @@ fn handle_keyboard(
     }
 
     if !out.is_empty() {
-        let _ = data.worker.tx.send(WorkerMsg::Input(out));
+        data.worker.send(WorkerMsg::Input(out));
         // Real terminals snap the viewport back to the active region
         // the moment you type — otherwise hitting Enter while scrolled
         // up leaves you staring at history while your shell scrolls
         // past below. Match that behavior.
-        let _ = data.worker.tx.send(WorkerMsg::ScrollToBottom);
+        data.worker.send(WorkerMsg::ScrollToBottom);
     }
 }
 
@@ -805,11 +972,12 @@ fn topmost_terminal_at(pt: Vec2, rects: &[(Entity, TerminalRect)]) -> Option<Ent
 fn handle_mouse(
     windows: Query<&Window>,
     buttons: Res<ButtonInput<MouseButton>>,
-    consumed: Res<InputConsumed>,
+    mut consumed: ResMut<InputConsumed>,
     metrics: Res<MonoMetrics>,
     sidebar: Res<Sidebar>,
     mut mode: ResMut<MouseMode>,
     mut focused: ResMut<FocusedTerminal>,
+    mut focused_editor: ResMut<editor_bevy::FocusedEditor>,
     projects: Res<Projects>,
     mut close_requests: ResMut<projects::PendingActions>,
     mut terminals: Query<
@@ -868,6 +1036,13 @@ fn handle_mouse(
         }
 
         focused.0 = Some(target);
+        // Focusing a terminal yields editor focus so keyboard input
+        // doesn't get delivered to both panes at once.
+        if focused_editor.0.is_some() {
+            focused_editor.0 = None;
+        }
+        // Tell other handlers (radial, editor) we own this click.
+        consumed.0 = true;
         bring_to_front(target, &mut terminals);
 
         // Any new click clears every other terminal's selection so only
@@ -1015,7 +1190,7 @@ fn handle_scroll(
     // libghostty: ScrollViewport::Delta is positive toward the active
     // area, negative back into history. So mirror the sign.
     let scroll_delta = -whole_lines;
-    let _ = data.worker.tx.send(WorkerMsg::ScrollDelta(scroll_delta));
+    data.worker.send(WorkerMsg::ScrollDelta(scroll_delta));
 }
 
 fn bring_to_front(

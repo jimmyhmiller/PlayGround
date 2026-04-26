@@ -15,6 +15,7 @@ pub mod inspector;
 pub mod nodes;
 pub mod packet_cloud;
 pub mod palette;
+pub mod perf;
 pub mod probes;
 pub mod theme;
 pub mod timeline;
@@ -96,6 +97,7 @@ impl Plugin for FlowBevyPlugins {
             app.insert_resource(ClearColor(Color::srgb(0.91, 0.87, 0.77)));
         }
         app.add_plugins(poster_ui::PosterUiPlugin).add_plugins((
+            perf::PerfPlugin,
             tool::ToolPlugin,
             camera::CameraPlugin,
             bridge::FlowBridgePlugin,

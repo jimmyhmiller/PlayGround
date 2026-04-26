@@ -199,10 +199,12 @@ fn update_packet_cloud(
     mut mats: ResMut<Assets<PacketCloudMaterial>>,
     mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
     hide_all: Res<crate::edges::HideAll>,
+    mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
     let Ok(handle) = cloud.single() else { return };
     let Some(mat) = mats.get_mut(&handle.0) else { return };
 
+    crate::time_phase!(perf, "packet_cloud.update", {
     let now = clock.visual_now;
     let mut packed: Vec<PacketInstance> =
         Vec::with_capacity(timeline.packets.len().min(MAX_PACKETS));
@@ -253,6 +255,7 @@ fn update_packet_cloud(
         quad_radius: PACKET_RADIUS,
         _pad: 0.0,
     };
+    });
 }
 
 #[cfg(test)]

@@ -12,8 +12,8 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PrimaryWindow;
 use editor_bevy::{
-    build_app, setup_camera_and_font, spawn_editor, EditorRect, EditorScroll, EditorStateComp,
-    FocusedEditor, MonoFont,
+    build_app, setup_editor_font, spawn_editor, EditorFont, EditorRect, EditorScroll,
+    EditorStateComp, FocusedEditor,
 };
 use editor_core::selection::{Range, Selection};
 use editor_core::state::EditorState;
@@ -147,7 +147,7 @@ fn main() {
     // that two editors render with correct z-ordering.
     app.add_systems(
         Startup,
-        (|mut commands: Commands, font: Res<MonoFont>| {
+        (|mut commands: Commands, font: Res<EditorFont>| {
             spawn_editor(
                 &mut commands,
                 &font,
@@ -159,7 +159,7 @@ fn main() {
                 },
             );
         })
-            .after(setup_camera_and_font),
+            .after(setup_editor_font),
     );
     app.insert_resource(Runner {
         index: 0,

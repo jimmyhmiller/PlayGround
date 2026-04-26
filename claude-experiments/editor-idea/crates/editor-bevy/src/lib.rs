@@ -11,12 +11,23 @@
 //!
 //! Editors are draggable via their title bar and resizable via the
 //! bottom-right handle. Focus is tracked with a `FocusedEditor` resource
-//! so keyboard input routes to a single editor, and a `MouseMode` state
-//! machine keeps drag / resize / text-selection distinct.
+//! so keyboard input routes to a single editor, and an `EditorEditorMouseMode`
+//! state machine keeps drag / resize / text-selection distinct.
 //!
 //! Horizontal overflow is not clipped: `sync_text` truncates each line's
 //! rendered text to the editor's content-area column count, so
 //! characters past the edge simply don't get spawned.
+//!
+//! # Embedding
+//!
+//! Use `EditorPlugin` for a standalone editor app — it sets up camera,
+//! fonts, clear color, and winit settings. To embed in another app, use
+//! `EditorEmbedPlugin` instead: it adds only the editor-related systems
+//! and resources, expecting the host to have already set up `Camera2d`,
+//! `EditorFont`, `EditorMetrics` (via `setup_editor_font`), and any
+//! `WinitSettings` / `ClearColor` it cares about. Both crates can share
+//! the `InputConsumed` resource to coordinate which handler claims a
+//! click in a given frame.
 
 use std::collections::HashMap;
 
@@ -128,13 +139,13 @@ pub struct SelRect {
 
 /// Handle to the editor font, shared by all editors.
 #[derive(Resource)]
-pub struct MonoFont(pub Handle<Font>);
+pub struct EditorFont(pub Handle<Font>);
 
 /// Advance width of a single character cell in logical pixels, measured
 /// once from the embedded font file. Caret, selection, mouse hit-test,
 /// and horizontal truncation all do plain arithmetic against this.
 #[derive(Resource, Copy, Clone)]
-pub struct MonoMetrics {
+pub struct EditorMetrics {
     pub cell_width: f32,
 }
 
@@ -147,7 +158,7 @@ pub struct FocusedEditor(pub Option<Entity>);
 /// while dragged, cleared on release. Keeps drag / resize / text
 /// selection from interfering with each other.
 #[derive(Resource, Default)]
-pub enum MouseMode {
+pub enum EditorMouseMode {
     #[default]
     Idle,
     TextSelect {
@@ -165,27 +176,35 @@ pub enum MouseMode {
 
 // ---------- Plugin ----------
 
-pub struct EditorPlugin;
+/// Set by an input system that wants to claim the current frame's mouse
+/// click, so other input systems (handle_mouse, host-side hit-testers)
+/// skip it. The host is responsible for resetting it (typically in
+/// PostUpdate) so it goes back to false next frame. `EditorEmbedPlugin`
+/// will `init_resource` it if missing, but won't reset it — that lets
+/// the host (e.g. `terminal-bevy`) own the lifecycle.
+#[derive(Resource, Default)]
+pub struct InputConsumed(pub bool);
 
-impl Plugin for EditorPlugin {
+/// Embeddable editor plugin: just the editor systems and the resources
+/// they own. The host must already provide:
+///
+/// - `Camera2d` (spawned somewhere)
+/// - `EditorFont` and `EditorMetrics` — call `setup_editor_font` from a
+///   Startup system, or insert your own
+/// - `WinitSettings` and `ClearColor` (whatever the host wants)
+/// - optional `InputConsumed` — if the host doesn't insert it, this
+///   plugin will, and reset is a no-op
+///
+/// Does NOT spawn a camera, set ClearColor, configure WinitSettings, or
+/// load fonts. Use `EditorPlugin` for the standalone editor app that
+/// bundles all of those.
+pub struct EditorEmbedPlugin;
+
+impl Plugin for EditorEmbedPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(FocusedEditor::default())
-            .insert_resource(MouseMode::default())
-            // Keep the scheduler in Continuous mode always — the
-            // default `reactive_low_power` mode can drop or coalesce
-            // wheel events on macOS when the window is briefly
-            // unfocused, which made scroll feel like it "didn't work".
-            .insert_resource(bevy::winit::WinitSettings {
-                focused_mode: bevy::winit::UpdateMode::Continuous,
-                unfocused_mode: bevy::winit::UpdateMode::Continuous,
-            })
-            .insert_resource(ClearColor(Color::srgb(0.10, 0.11, 0.13)))
-            .add_systems(Startup, (setup_camera_and_font, load_fallback_fonts))
-            // Run once, after the window exists, so we can immediately
-            // give focus back to whatever app the user was in. The
-            // PostStartup schedule is after Startup and after the
-            // winit window has been created.
-            .add_systems(PostStartup, release_os_focus)
+        app.init_resource::<FocusedEditor>()
+            .init_resource::<EditorMouseMode>()
+            .init_resource::<InputConsumed>()
             .add_systems(
                 Update,
                 (
@@ -199,7 +218,42 @@ impl Plugin for EditorPlugin {
                     sync_selection,
                 )
                     .chain(),
-            );
+            )
+            .add_systems(PostUpdate, reset_input_consumed);
+    }
+}
+
+fn reset_input_consumed(mut consumed: ResMut<InputConsumed>) {
+    consumed.0 = false;
+}
+
+/// Standalone editor plugin: embed plugin + camera + font + clear color
+/// + winit settings + macOS focus release. For the `editor` binary; not
+/// what you want when embedding into another Bevy app.
+pub struct EditorPlugin;
+
+impl Plugin for EditorPlugin {
+    fn build(&self, app: &mut App) {
+        app
+            // Keep the scheduler in Continuous mode always — the
+            // default `reactive_low_power` mode can drop or coalesce
+            // wheel events on macOS when the window is briefly
+            // unfocused, which made scroll feel like it "didn't work".
+            .insert_resource(bevy::winit::WinitSettings {
+                focused_mode: bevy::winit::UpdateMode::Continuous,
+                unfocused_mode: bevy::winit::UpdateMode::Continuous,
+            })
+            .insert_resource(ClearColor(Color::srgb(0.10, 0.11, 0.13)))
+            .add_systems(
+                Startup,
+                (setup_editor_camera, setup_editor_font, load_fallback_fonts),
+            )
+            // Run once, after the window exists, so we can immediately
+            // give focus back to whatever app the user was in. The
+            // PostStartup schedule is after Startup and after the
+            // winit window has been created.
+            .add_systems(PostStartup, release_os_focus)
+            .add_plugins(EditorEmbedPlugin);
     }
 }
 
@@ -228,7 +282,7 @@ pub struct HeadlessEditorPlugin;
 impl Plugin for HeadlessEditorPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(FocusedEditor::default())
-            .insert_resource(MouseMode::default())
+            .insert_resource(EditorMouseMode::default())
             .add_systems(Update, handle_input);
     }
 }
@@ -262,17 +316,24 @@ fn measure_cell_width(font_bytes: &[u8], font_size: f32) -> f32 {
         .expect("'M' must have an advance width")
 }
 
-/// Spawns the shared camera and loads the embedded font. Exposed so
-/// external startup systems that call `spawn_editor` can order
-/// themselves via `.after(setup_camera_and_font)`.
-pub fn setup_camera_and_font(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
+/// Spawn the 2D camera. Standalone-only — when embedded, the host
+/// already has a camera.
+pub fn setup_editor_camera(mut commands: Commands) {
     commands.spawn(Camera2d);
+}
+
+/// Load the embedded JetBrains Mono font and insert `EditorFont` +
+/// `EditorMetrics`. Call this from a Startup system before any system
+/// that calls `spawn_editor`. The standalone `EditorPlugin` adds it
+/// automatically; embedders must call it themselves (or insert their
+/// own `EditorFont`/`EditorMetrics`).
+pub fn setup_editor_font(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
     let font = fonts.add(
         Font::try_from_bytes(EMBEDDED_FONT.to_vec())
             .expect("embedded JetBrainsMono-Regular.ttf must parse"),
     );
-    commands.insert_resource(MonoFont(font));
-    commands.insert_resource(MonoMetrics {
+    commands.insert_resource(EditorFont(font));
+    commands.insert_resource(EditorMetrics {
         cell_width: measure_cell_width(EMBEDDED_FONT, FONT_SIZE),
     });
 }
@@ -282,7 +343,7 @@ pub fn setup_camera_and_font(mut commands: Commands, mut fonts: ResMut<Assets<Fo
 /// components, etc.
 pub fn spawn_editor(
     commands: &mut Commands,
-    font: &MonoFont,
+    font: &EditorFont,
     initial_text: &str,
     rect: EditorRect,
 ) -> Entity {
@@ -386,6 +447,99 @@ pub fn spawn_editor(
     editor
 }
 
+/// World-API variant of `spawn_editor` for callers running in an
+/// exclusive system (`fn(&mut World)`). Same shape as `spawn_editor`
+/// but uses `world.spawn` / `world.entity_mut` so the entity ids and
+/// chrome are wired up immediately, not deferred to a command flush.
+pub fn spawn_editor_world(world: &mut World, initial_text: &str, rect: EditorRect) -> Entity {
+    let editor = world
+        .spawn((
+            Editor,
+            EditorStateComp(
+                EditorState::new(
+                    ropey::Rope::from_str(initial_text),
+                    Selection::cursor(0),
+                )
+                .with_indent_unit("    "),
+            ),
+            EditorHighlighter(Highlighter::new()),
+            LineRows::default(),
+            EditorScroll::default(),
+            TextDragAnchor::default(),
+            rect,
+            Transform::default(),
+            Visibility::default(),
+        ))
+        .id();
+    let bg = world
+        .spawn((
+            ChildOf(editor),
+            Sprite {
+                color: Color::srgb(0.14, 0.16, 0.19),
+                custom_size: Some(rect.size),
+                ..default()
+            },
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(0.0, 0.0, 0.0),
+        ))
+        .id();
+    let title_bar = world
+        .spawn((
+            ChildOf(editor),
+            Sprite {
+                color: Color::srgb(0.22, 0.24, 0.28),
+                custom_size: Some(Vec2::new(rect.size.x, TITLE_H)),
+                ..default()
+            },
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(0.0, 0.0, 0.1),
+        ))
+        .id();
+    let content_root = world
+        .spawn((
+            ChildOf(editor),
+            Transform::from_xyz(MARGIN, -TITLE_H, 0.2),
+            Visibility::default(),
+        ))
+        .id();
+    let caret = world
+        .spawn((
+            ChildOf(content_root),
+            Sprite {
+                color: Color::srgb(0.55, 0.85, 1.0),
+                custom_size: Some(Vec2::new(2.0, LINE_HEIGHT)),
+                ..default()
+            },
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(0.0, 0.0, 1.0),
+        ))
+        .id();
+    let resize_handle = world
+        .spawn((
+            ChildOf(editor),
+            Sprite {
+                color: Color::srgb(0.40, 0.44, 0.50),
+                custom_size: Some(Vec2::splat(HANDLE_SIZE)),
+                ..default()
+            },
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(
+                rect.size.x - HANDLE_SIZE,
+                -(rect.size.y - HANDLE_SIZE),
+                0.3,
+            ),
+        ))
+        .id();
+    world.entity_mut(editor).insert(EditorChrome {
+        bg,
+        title_bar,
+        content_root,
+        caret,
+        resize_handle,
+    });
+    editor
+}
+
 /// Build a ready-to-run App with a single editor loaded from `initial`.
 pub fn build_app(initial: &str) -> App {
     let mut app = App::new();
@@ -402,7 +556,7 @@ pub fn build_app(initial: &str) -> App {
     let initial = initial.to_string();
     app.add_systems(
         Startup,
-        (move |mut commands: Commands, font: Res<MonoFont>| {
+        (move |mut commands: Commands, font: Res<EditorFont>| {
             let e = spawn_editor(
                 &mut commands,
                 &font,
@@ -415,7 +569,7 @@ pub fn build_app(initial: &str) -> App {
             );
             commands.insert_resource(FocusedEditor(Some(e)));
         })
-            .after(setup_camera_and_font),
+            .after(setup_editor_font),
     );
     app
 }
@@ -515,8 +669,8 @@ fn ensure_caret_visible(
 }
 
 fn sync_text(
-    font: Res<MonoFont>,
-    metrics: Res<MonoMetrics>,
+    font: Res<EditorFont>,
+    metrics: Res<EditorMetrics>,
     mut editors: Query<(
         &EditorStateComp,
         &EditorRect,
@@ -553,8 +707,8 @@ fn sync_editor_lines(
     scroll: EditorScroll,
     hl: &Highlighter,
     pool: &mut LineRows,
-    font: &MonoFont,
-    metrics: &MonoMetrics,
+    font: &EditorFont,
+    metrics: &EditorMetrics,
     line_q: &mut Query<&mut LineRender>,
     children_q: &Query<&Children>,
     commands: &mut Commands,
@@ -660,7 +814,7 @@ fn rebuild_line_spans(
     line_idx: usize,
     byte_offset: usize,
     line_text: &str,
-    font: &MonoFont,
+    font: &EditorFont,
 ) {
     if let Ok(children) = children_q.get(parent) {
         for child in children.iter() {
@@ -764,7 +918,7 @@ fn position_root(
 }
 
 fn sync_caret(
-    metrics: Res<MonoMetrics>,
+    metrics: Res<EditorMetrics>,
     editors: Query<(&EditorStateComp, &EditorRect, &EditorScroll, &EditorChrome)>,
     mut t_q: Query<&mut Transform>,
     mut vis_q: Query<&mut Visibility>,
@@ -816,7 +970,7 @@ pub fn char_to_line_col(doc: &ropey::Rope, char_idx: usize) -> (usize, usize) {
 }
 
 fn sync_selection(
-    metrics: Res<MonoMetrics>,
+    metrics: Res<EditorMetrics>,
     editors: Query<(Entity, &EditorStateComp, &EditorRect, &EditorScroll, &EditorChrome)>,
     existing: Query<(Entity, &SelRect)>,
     mut commands: Commands,
@@ -902,7 +1056,7 @@ fn line_char_len(rope: &ropey::Rope, line: usize) -> usize {
 /// event is dropped.
 fn handle_scroll(
     mut wheel: MessageReader<MouseWheel>,
-    metrics: Res<MonoMetrics>,
+    metrics: Res<EditorMetrics>,
     windows: Query<&Window>,
     mut editors: Query<(Entity, &EditorRect, &EditorStateComp, &mut EditorScroll)>,
 ) {
@@ -966,7 +1120,7 @@ fn handle_input(
     mut keys: MessageReader<KeyboardInput>,
     mods: Res<ButtonInput<KeyCode>>,
     focused: Res<FocusedEditor>,
-    metrics: Res<MonoMetrics>,
+    metrics: Res<EditorMetrics>,
     mut editors: Query<(&mut EditorStateComp, &EditorRect, &mut EditorScroll)>,
 ) {
     let Some(target) = focused.0 else {
@@ -1187,9 +1341,10 @@ fn handle_mouse(
     windows: Query<&Window>,
     buttons: Res<ButtonInput<MouseButton>>,
     mods: Res<ButtonInput<KeyCode>>,
-    mut mode: ResMut<MouseMode>,
+    mut consumed: ResMut<InputConsumed>,
+    mut mode: ResMut<EditorMouseMode>,
     mut focused: ResMut<FocusedEditor>,
-    metrics: Res<MonoMetrics>,
+    metrics: Res<EditorMetrics>,
     mut editors: Query<(
         Entity,
         &mut EditorRect,
@@ -1205,15 +1360,15 @@ fn handle_mouse(
     // Release always clears the mode, regardless of which button type
     // started it.
     if buttons.just_released(MouseButton::Left) {
-        if let MouseMode::TextSelect { editor } = *mode {
+        if let EditorMouseMode::TextSelect { editor } = *mode {
             if let Ok((_, _, _, _, mut drag)) = editors.get_mut(editor) {
                 drag.0 = None;
             }
         }
-        *mode = MouseMode::Idle;
+        *mode = EditorMouseMode::Idle;
     }
 
-    if buttons.just_pressed(MouseButton::Left) {
+    if buttons.just_pressed(MouseButton::Left) && !consumed.0 {
         // Hit-test from top-most editor.
         let editor_rects: Vec<(Entity, EditorRect)> =
             editors.iter().map(|(e, r, _, _, _)| (e, *r)).collect();
@@ -1221,18 +1376,21 @@ fn handle_mouse(
             return;
         };
         focused.0 = Some(editor);
+        // Tell other input handlers (radial menu, host hit-testers) that
+        // this click is ours so they don't double-handle it.
+        consumed.0 = true;
         bring_to_front(editor, &mut editors);
 
         let rect = *editors.get(editor).unwrap().1;
         match region_at(pt, &rect) {
             Some(Region::TitleBar) => {
-                *mode = MouseMode::WindowDrag {
+                *mode = EditorMouseMode::WindowDrag {
                     editor,
                     grab_offset: pt - rect.pos,
                 };
             }
             Some(Region::ResizeHandle) => {
-                *mode = MouseMode::WindowResize {
+                *mode = EditorMouseMode::WindowResize {
                     editor,
                     anchor_pos: rect.pos,
                 };
@@ -1252,7 +1410,7 @@ fn handle_mouse(
                         drag.0 = Some(pos);
                         *state = apply_selection(state, pos, pos);
                     }
-                    *mode = MouseMode::TextSelect { editor };
+                    *mode = EditorMouseMode::TextSelect { editor };
                 }
             }
             None => {}
@@ -1265,18 +1423,18 @@ fn handle_mouse(
     }
 
     match *mode {
-        MouseMode::WindowDrag { editor, grab_offset } => {
+        EditorMouseMode::WindowDrag { editor, grab_offset } => {
             if let Ok((_, mut rect, _, _, _)) = editors.get_mut(editor) {
                 rect.pos = pt - grab_offset;
             }
         }
-        MouseMode::WindowResize { editor, anchor_pos } => {
+        EditorMouseMode::WindowResize { editor, anchor_pos } => {
             if let Ok((_, mut rect, _, _, _)) = editors.get_mut(editor) {
                 let raw = pt - anchor_pos;
                 rect.size = Vec2::new(raw.x.max(MIN_EDITOR_SIZE.x), raw.y.max(MIN_EDITOR_SIZE.y));
             }
         }
-        MouseMode::TextSelect { editor } => {
+        EditorMouseMode::TextSelect { editor } => {
             if let Ok((_, rect, mut state_comp, scroll, drag)) = editors.get_mut(editor) {
                 let Some(anchor) = drag.0 else { return };
                 let state = &mut state_comp.0;
@@ -1290,7 +1448,7 @@ fn handle_mouse(
                 }
             }
         }
-        MouseMode::Idle => {}
+        EditorMouseMode::Idle => {}
     }
 }
 

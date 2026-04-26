@@ -30,7 +30,7 @@ use flow::{Sim, SimSnapshot, Value};
 
 use crate::bridge::{EntityMaps, FlowEdgeRef, FlowSim};
 use crate::gadgets::{self, Kind};
-use crate::nodes::{BinarySlotPaint, BodyShape, NodeCounter, spawn_node_entity};
+use crate::nodes::{BinarySlotPaint, BodyShape, NodeAssetCache, NodeCounter, spawn_node_entity};
 use crate::theme::Theme;
 use crate::tool::NodeColors;
 
@@ -283,6 +283,7 @@ pub fn load_canvas(path: impl AsRef<Path>, seed: u64) -> Result<LoadedCanvas, St
 /// the user can still load a built-in example from the palette.
 pub(crate) fn seed_from_path(
     mut commands: Commands,
+    mut cache: ResMut<NodeAssetCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     mut flow: ResMut<FlowSim>,
@@ -345,6 +346,7 @@ pub(crate) fn seed_from_path(
             .unwrap_or_else(|| default_grid_position(i));
         let entity = spawn_node_entity(
             &mut commands,
+            &mut cache,
             &mut meshes,
             &mut materials,
             &mut maps,

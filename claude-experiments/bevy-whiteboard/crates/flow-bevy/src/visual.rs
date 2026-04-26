@@ -72,6 +72,23 @@ pub struct VisualPacket {
     pub arrive_real: f64,
 }
 
+impl VisualPacket {
+    /// True when `now` falls inside this packet's animation window
+    /// (`emit_real <= now < arrive_real`). Used by tests and the
+    /// packet-cloud renderer to decide what's currently on-screen.
+    pub fn is_visible_at(&self, now: f64) -> bool {
+        self.emit_real <= now && now < self.arrive_real
+    }
+
+    /// Progress along the packet's edge in `[0, 1]` at `now`. Outside
+    /// the animation window the value is clamped (0 if not yet emitted,
+    /// 1 if already arrived). Same formula the GPU vertex shader uses.
+    pub fn progress_at(&self, now: f64) -> f32 {
+        let denom = (self.arrive_real - self.emit_real).max(1e-9);
+        ((now - self.emit_real) / denom).clamp(0.0, 1.0) as f32
+    }
+}
+
 /// Sorted-by-sim-time record of a visual arrival at some node.
 /// Used to find a causal trigger when later packets emit from that
 /// same node. Kept as parallel `Vec`s rather than `Vec<(u64,f64)>`

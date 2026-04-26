@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
-use editor_bevy::{build_app, setup_camera_and_font, spawn_editor, EditorRect, MonoFont};
+use editor_bevy::{build_app, setup_editor_font, spawn_editor, EditorFont, EditorRect};
 
 const DEFAULT_DOC: &str = "fn main() {\n    println!(\"hello, editor\");\n}\n";
 
@@ -35,7 +35,7 @@ fn main() {
         "// second editor\nfn fib(n: u32) -> u32 {\n    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n}\n";
     app.add_systems(
         Startup,
-        (|mut commands: Commands, font: Res<MonoFont>| {
+        (|mut commands: Commands, font: Res<EditorFont>| {
             spawn_editor(
                 &mut commands,
                 &font,
@@ -47,7 +47,7 @@ fn main() {
                 },
             );
         })
-            .after(setup_camera_and_font),
+            .after(setup_editor_font),
     );
     if args.log_frames {
         app.add_plugins(FrameTimeDiagnosticsPlugin::default())

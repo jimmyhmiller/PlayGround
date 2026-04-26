@@ -5,8 +5,13 @@ edition = "2024"
 
 [dependencies]
 arboard = "3.4"
+editor_bevy = { path = "../editor-bevy" }
+editor_core = { path = "../editor-core" }
 libghostty-vt = "0.1.1"
-nix = { version = "0.31", features = ["term", "fs", "signal", "process", "user", "ioctl"] }
+# Native file dialog for Cmd+O. Synchronous on macOS — opens the
+# system NSOpenPanel on the calling (main) thread.
+rfd = "0.15"
+nix = { version = "0.31", features = ["term", "fs", "signal", "process", "user", "ioctl", "poll"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 skrifa = "0.39"
@@ -38,3 +43,7 @@ path = "src/lib.rs"
 [[bin]]
 name = "terminal"
 path = "src/main.rs"
+
+[[bin]]
+name = "tbopen"
+path = "src/bin/tbopen.rs"
