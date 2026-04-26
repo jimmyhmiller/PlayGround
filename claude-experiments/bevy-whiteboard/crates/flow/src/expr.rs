@@ -393,10 +393,17 @@ impl Expr {
                 let nid = ctx.current_node
                     .expect("OutNeighbors: needs current_node");
                 // Edge-id-ordered, self-loops excluded — same convention
-                // as `EmitTo::DefaultOut`'s preference. BTreeMap iteration
-                // is already by key, so we get deterministic ordering.
-                let items: Vec<Value> = ctx.edges.values()
-                    .filter(|e| e.from == nid && e.to != nid)
+                // as `EmitTo::DefaultOut`'s preference. Reads the
+                // node's owned outbound list (already in `EdgeId`
+                // order) instead of scanning the global edge map.
+                let items: Vec<Value> = ctx
+                    .nodes
+                    .get(&nid)
+                    .map(|n| n.outbound.as_slice())
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|eid| ctx.edges.get(eid))
+                    .filter(|e| e.to != nid)
                     .map(|e| Value::NodeRef(e.to))
                     .collect();
                 Value::List(items)

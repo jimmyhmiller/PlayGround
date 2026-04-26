@@ -319,17 +319,20 @@ pub(crate) fn seed_from_path(
     let visual = &canvas.visual;
     let node_ids: Vec<flow::NodeId> = flow.sim.nodes.keys().copied().collect();
     for (i, nid) in node_ids.iter().copied().enumerate() {
-        let (name, class, kind, color_slot) = {
+        let (name, class_name, kind, color_slot) = {
             let node = &flow.sim.nodes[&nid];
-            let class = node.class.clone();
-            let kind = class.as_deref().map(class_to_kind).unwrap_or(Kind::Worker);
+            let class_name = flow.sim.class_name(nid).map(|s| s.to_owned());
+            let kind = class_name
+                .as_deref()
+                .map(class_to_kind)
+                .unwrap_or(Kind::Worker);
             let color_slot = match node.slots.get("color") {
                 Some(Value::Int(n)) => (*n as usize) % theme.data.len(),
                 _ => 0,
             };
-            (node.name.clone(), class, kind, color_slot)
+            (node.name.clone(), class_name, kind, color_slot)
         };
-        let class_visual = class
+        let class_visual = class_name
             .as_deref()
             .and_then(|c| visual.classes.get(c));
         let shape_override = class_visual
@@ -599,9 +602,9 @@ scenario { at 0ns: inject Counter <- ping(nil) }
         let canvas = load_canvas(&dir, 0).unwrap();
         assert_eq!(canvas.manifest.canvas.name, "Test");
         // Stock gadgets registered.
-        assert!(canvas.sim.templates.contains_key("Generator"));
+        assert!(canvas.sim.has_class("Generator"));
         // User-declared class registered + instantiated.
-        assert!(canvas.sim.templates.contains_key("Counter"));
+        assert!(canvas.sim.has_class("Counter"));
         assert!(canvas.sim.node_by_name("Counter").is_some());
 
         let _ = fs::remove_dir_all(&dir);
@@ -653,7 +656,7 @@ scenario { at 0ns: inject Special <- ping(nil) }
         );
 
         let mut canvas = load_canvas(&dir, 0).unwrap();
-        assert!(canvas.sim.templates.contains_key("Special"));
+        assert!(canvas.sim.has_class("Special"));
         canvas.sim.run_until(1);
         let id = canvas.sim.node_by_name("Special").unwrap();
         assert_eq!(canvas.sim.nodes[&id].slots["hits"], flow::Value::Int(1));

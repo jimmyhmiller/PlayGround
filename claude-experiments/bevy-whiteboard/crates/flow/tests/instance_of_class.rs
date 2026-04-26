@@ -31,13 +31,17 @@ fn instance_clones_class_with_overrides() {
     let file = flow::dsl::parse(main).unwrap();
     flow::dsl::lower_into(&mut sim, &file).unwrap();
 
+    let s1 = sim.nodes.values().find(|n| n.name == "S1").unwrap().id;
+    let s2 = sim.nodes.values().find(|n| n.name == "S2").unwrap().id;
+    let s3 = sim.nodes.values().find(|n| n.name == "S3").unwrap().id;
+
+    assert_eq!(sim.class_name(s1), Some("Step"));
+    assert_eq!(sim.class_name(s2), Some("Step"));
+    assert_eq!(sim.class_name(s3), Some("Step"));
+
     let s1 = sim.nodes.values().find(|n| n.name == "S1").unwrap();
     let s2 = sim.nodes.values().find(|n| n.name == "S2").unwrap();
     let s3 = sim.nodes.values().find(|n| n.name == "S3").unwrap();
-
-    assert_eq!(s1.class.as_deref(), Some("Step"));
-    assert_eq!(s2.class.as_deref(), Some("Step"));
-    assert_eq!(s3.class.as_deref(), Some("Step"));
 
     assert_eq!(s1.slots.get("fail_prob"), Some(&Value::Float(0.0)));
     assert_eq!(s2.slots.get("fail_prob"), Some(&Value::Float(1.0)));

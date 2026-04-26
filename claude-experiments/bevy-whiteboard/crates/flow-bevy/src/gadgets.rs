@@ -132,7 +132,7 @@ fn gadget_class_name(kind: Kind) -> &'static str {
 fn ensure_gadget_classes_registered(sim: &mut Sim) {
     // Any one class name is enough as a presence check — they're
     // registered as a batch.
-    if sim.templates.contains_key("Generator") {
+    if sim.has_class("Generator") {
         return;
     }
     flow::dsl::register_classes(sim, GADGETS_DSL)

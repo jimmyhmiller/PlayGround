@@ -44,8 +44,11 @@ fn load_cache_canvas(app: &mut App) -> flow::NodeId {
     let mut cache_nid = None;
     for (nid, name) in node_ids {
         let kind = flow_bevy::canvas::class_to_kind(
-            app.world().resource::<FlowSim>().sim.nodes[&nid]
-                .class.as_deref().unwrap_or("Worker")
+            app.world()
+                .resource::<FlowSim>()
+                .sim
+                .class_name(nid)
+                .unwrap_or("Worker"),
         );
         let ent = app.world_mut().spawn((
             flow_bevy::nodes::NodeKind(kind),

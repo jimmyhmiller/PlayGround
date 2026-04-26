@@ -13,6 +13,7 @@ pub mod gadgets;
 pub mod hud;
 pub mod inspector;
 pub mod nodes;
+pub mod packet_cloud;
 pub mod palette;
 pub mod probes;
 pub mod theme;
@@ -100,6 +101,7 @@ impl Plugin for FlowBevyPlugins {
             bridge::FlowBridgePlugin,
             nodes::NodesPlugin,
             edges::EdgesPlugin,
+            packet_cloud::PacketCloudPlugin,
             palette::PalettePlugin,
             hud::HudPlugin,
             inspector::InspectorPlugin,

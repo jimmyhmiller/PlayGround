@@ -8,39 +8,24 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use flow::{Expr, Sim, Value, dsl};
 
 const LIFE_FLOW: &str = r#"
-node LifeClock {
+node LifeCell {
     slots {
+        alive: Int = 0
         period_ns: Int = 200000000
-        gen: Int = 0
+        reports_seen: Int = 0
+        live_neighbors: Int = 0
     }
     on_spawn {
         self -> self : period_ns
         inject tick(nil)
     }
-    rule fire {
+    rule on_tick {
         on tick(_)
         do {
-            gen := gen + 1
-            emit_each pulse(gen) to filter(out_neighbors(), "n", n != self)
-            emit tick(nil) to self
-        }
-    }
-}
-
-node LifeCell {
-    slots {
-        alive: Int = 0
-        gen: Int = 0
-        reports_seen: Int = 0
-        live_neighbors: Int = 0
-    }
-    rule on_pulse {
-        on pulse(g)
-        do {
-            gen := g
             reports_seen := 0
             live_neighbors := 0
             emit_each report(alive) to out_neighbors()
+            emit tick(nil) to self
         }
     }
     rule on_report_partial {
@@ -70,8 +55,6 @@ fn build_life_grid(w: usize, h: usize) -> Sim {
     sim.max_steps_per_instant = 10_000_000;
     dsl::register_classes(&mut sim, LIFE_FLOW).unwrap();
 
-    let clock = sim.instantiate("LifeClock", "Clock").unwrap();
-
     let mut cells = vec![vec![flow::NodeId(0); w]; h];
     for y in 0..h {
         for x in 0..w {
@@ -88,11 +71,6 @@ fn build_life_grid(w: usize, h: usize) -> Sim {
     }
 
     let one_ms = Expr::int(1_000_000);
-    for y in 0..h {
-        for x in 0..w {
-            sim.add_edge(clock, cells[y][x], one_ms.clone());
-        }
-    }
 
     let neighbors: [(isize, isize); 8] = [
         (-1, -1), (0, -1), (1, -1),
@@ -112,11 +90,11 @@ fn build_life_grid(w: usize, h: usize) -> Sim {
     sim
 }
 
-/// Run a Sim through one full Life generation. The clock pulses at
-/// T=0, pulses arrive at T=1ms, reports arrive at T=2ms — by T=10ms
-/// every cell has applied the B3/S23 rule.
+/// Run a Sim through one full Life generation. Cells self-tick at T=0,
+/// reports arrive at T=1ms, B3/S23 update happens immediately after.
+/// 5ms is comfortably past the report-delivery window.
 fn run_one_generation(sim: &mut Sim) {
-    sim.run_until(sim.now_ns + 10_000_000);
+    sim.run_until(sim.now_ns + 5_000_000);
 }
 
 fn bench_one_generation(c: &mut Criterion) {

@@ -29,6 +29,11 @@ pub struct EdgeId(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PacketId(pub u64);
 
+/// Index into `Sim.templates`. Keys nodes to their class without a
+/// per-fire string lookup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct TemplateId(pub u32);
+
 /// A packet flowing between nodes.
 ///
 /// `from_edge` records which edge delivered this packet to the current
@@ -68,17 +73,22 @@ pub struct Node {
     pub id: NodeId,
     pub name: String,
     pub parent: Option<NodeId>,
-    /// Name of the class (template) this node was instantiated from,
-    /// or `None` for nodes built via the pre-DSL imperative API or for
-    /// compounds (which aren't instantiated from templates). Loaders
-    /// use this to map sim nodes back to their visual kind — the
-    /// instance name alone is unreliable once a class can be spawned
-    /// multiple times (suffix `_N`).
+    /// Index of the class (template) this node was instantiated from,
+    /// or `None` for compounds and rules-less leaves. The string name
+    /// is reachable via [`Sim::class_name`] when needed (logs, UI,
+    /// snapshot serialization); the hot path uses the integer.
     #[serde(default)]
-    pub class: Option<String>,
+    pub class: Option<TemplateId>,
 
     // --- Leaf state (unused / empty for compounds) ---
     pub slots: BTreeMap<String, Value>,
+    /// Edges where this node is the source, in `EdgeId` order. Owned
+    /// here so routing primitives (`out_neighbors()`, `EmitTo::*`)
+    /// don't have to scan the entire `Sim.edges` map. Maintained by
+    /// `add_edge_ports` (push) and `despawn_node` (drain + scrub
+    /// references in other nodes' lists).
+    #[serde(default)]
+    pub outbound: Vec<EdgeId>,
     /// Packets delivered to this node, waiting to be matched by a rule.
     /// In-order FIFO. Unbounded in principle; if this grows without
     /// bound, you have modeled the system correctly and it is overloaded.
@@ -186,7 +196,18 @@ pub struct Sim {
     pub(crate) next_emit_seq: u64,
     pub(crate) next_instance_seq: u64,
     pub(crate) next_scenario_seq: u64,
-    pub templates: HashMap<String, Template>,
+    /// Templates indexed by [`TemplateId`]. `Node.class` carries the
+    /// id; runtime template lookups go straight through this Vec
+    /// (one bounds check) instead of the previous string-hashed
+    /// HashMap.
+    pub templates: Vec<Template>,
+    /// Name → id index, populated alongside `templates` by
+    /// [`Sim::register_template`]. Only used at canvas-load time
+    /// (`instantiate(class_name, ...)`) and for the few external
+    /// "does this canvas have class X" checks. Hot path doesn't
+    /// touch this map.
+    #[serde(default)]
+    pub template_by_name: HashMap<String, TemplateId>,
     /// Named scenario library. Populated by the DSL lowerer so callers
     /// can pick which scenario to run (via [`Sim::run_scenario`])
     /// instead of all scenarios firing at load. The DSL's single
@@ -302,7 +323,8 @@ impl Sim {
             next_emit_seq: 1,
             next_instance_seq: 1,
             next_scenario_seq: 1,
-            templates: HashMap::new(),
+            templates: Vec::new(),
+            template_by_name: HashMap::new(),
             scenarios: HashMap::new(),
             params: HashMap::new(),
             pending_actions: BinaryHeap::new(),
@@ -331,8 +353,7 @@ impl Sim {
                 let has_inbox = !node.inbox.is_empty();
                 let has_source = node
                     .class
-                    .as_deref()
-                    .and_then(|c| self.templates.get(c))
+                    .and_then(|tid| self.templates.get(tid.0 as usize))
                     .map(|t| t.has_source_rule)
                     .unwrap_or(false);
                 has_inbox || has_source
@@ -344,6 +365,25 @@ impl Sim {
         } else {
             self.fireable.remove(&nid);
         }
+    }
+
+    /// Resolve a node's class name (the human-readable label registered
+    /// in the DSL). Slow path; use [`Node.class`] directly when you
+    /// have a `TemplateId` already.
+    pub fn class_name(&self, nid: NodeId) -> Option<&str> {
+        let tid = self.nodes.get(&nid)?.class?;
+        Some(self.templates.get(tid.0 as usize)?.name.as_str())
+    }
+
+    /// Look up a class by its DSL name. Returns the template id, or
+    /// `None` if no such class is registered.
+    pub fn template_id_by_name(&self, name: &str) -> Option<TemplateId> {
+        self.template_by_name.get(name).copied()
+    }
+
+    /// Convenience: did we register a template with this DSL name?
+    pub fn has_class(&self, name: &str) -> bool {
+        self.template_by_name.contains_key(name)
     }
 
     /// Record a runtime error: increments `error_counts[kind]` and
@@ -438,13 +478,24 @@ impl Sim {
         Ok(())
     }
 
-    pub fn register_template(&mut self, mut t: Template) {
+    pub fn register_template(&mut self, mut t: Template) -> TemplateId {
         // Templates from outside (DSL lowering, hand-built builders)
         // may not have run the cached-flag computation. Recompute
         // here so the fire loop's fast-skip is always correct.
         t.refresh_has_source_rule();
-        let key = t.name.clone();
-        self.templates.insert(key, t);
+        let name = t.name.clone();
+        // Re-registering a class with the same name overwrites the
+        // existing entry in place — same id, fresh body. Matches the
+        // previous HashMap semantics where `insert(key, t)` replaced
+        // the value.
+        if let Some(&existing) = self.template_by_name.get(&name) {
+            self.templates[existing.0 as usize] = t;
+            return existing;
+        }
+        let id = TemplateId(self.templates.len() as u32);
+        self.templates.push(t);
+        self.template_by_name.insert(name, id);
+        id
     }
 
     /// Append a rule to the class that backs this node. If the node has
@@ -453,15 +504,15 @@ impl Sim {
     /// modifying a real class would behave. Returns `Err` if the node
     /// has no class (compound or rules-less leaf).
     pub fn add_rule_to_node(&mut self, nid: NodeId, rule: Rule) -> Result<(), String> {
-        let class = self
+        let tid = self
             .nodes
             .get(&nid)
-            .and_then(|n| n.class.clone())
+            .and_then(|n| n.class)
             .ok_or_else(|| format!("node {:?} has no class to attach a rule to", nid))?;
         let template = self
             .templates
-            .get_mut(&class)
-            .ok_or_else(|| format!("template `{}` for node {:?} is missing", class, nid))?;
+            .get_mut(tid.0 as usize)
+            .ok_or_else(|| format!("template id {:?} for node {:?} is missing", tid, nid))?;
         if !crate::template::rule_has_input(&rule) {
             template.has_source_rule = true;
         }
@@ -492,14 +543,13 @@ impl Sim {
                 has_source_rule: false,
             };
             tpl.refresh_has_source_rule();
-            self.templates.insert(class_name.clone(), tpl);
-            Some(class_name)
+            Some(self.register_template(tpl))
         };
-        let class_for_source_check = class.clone();
         let node = Node {
             id,
             name: name.into(),
             slots,
+            outbound: Vec::new(),
             inbox: VecDeque::new(),
             probes: Vec::new(),
             class,
@@ -509,9 +559,8 @@ impl Sim {
         self.nodes.insert(id, node);
         // Source-rule templates need to be in the worklist from spawn —
         // they fire even with an empty inbox.
-        let has_source = class_for_source_check
-            .as_deref()
-            .and_then(|c| self.templates.get(c))
+        let has_source = class
+            .and_then(|tid| self.templates.get(tid.0 as usize))
             .map(|t| t.has_source_rule)
             .unwrap_or(false);
         if has_source {
@@ -535,6 +584,7 @@ impl Sim {
             id,
             name: name.into(),
             slots: BTreeMap::new(),
+            outbound: Vec::new(),
             inbox: VecDeque::new(),
             probes: Vec::new(),
             class: None,
@@ -584,7 +634,22 @@ impl Sim {
     pub fn despawn_node(&mut self, nid: NodeId) {
         let Some(_) = self.nodes.remove(&nid) else { return; };
         self.fireable.remove(&nid);
-        self.edges.retain(|_, e| e.from != nid && e.to != nid);
+        // Drop edges incident to the despawned node and remember which
+        // ones we removed so we can scrub them from other nodes'
+        // outbound lists in one pass.
+        let mut removed_edges: Vec<EdgeId> = Vec::new();
+        self.edges.retain(|eid, e| {
+            let keep = e.from != nid && e.to != nid;
+            if !keep {
+                removed_edges.push(*eid);
+            }
+            keep
+        });
+        if !removed_edges.is_empty() {
+            for node in self.nodes.values_mut() {
+                node.outbound.retain(|eid| !removed_edges.contains(eid));
+            }
+        }
         for node in self.nodes.values_mut() {
             for (_, v) in node.slots.iter_mut() {
                 if matches!(v, Value::NodeRef(r) if *r == nid) {
@@ -617,6 +682,12 @@ impl Sim {
             id, from, from_port, to, to_port, latency_ns,
             last_sent_seq: None,
         });
+        // Maintain the from-node's outbound list. Edge ids are
+        // monotonically increasing, so push preserves ascending
+        // order — `outbound()` doesn't need to sort.
+        if let Some(n) = self.nodes.get_mut(&from) {
+            n.outbound.push(id);
+        }
         id
     }
 
@@ -662,11 +733,16 @@ impl Sim {
         id
     }
 
-    /// Outbound edges from a node, in the order they were added.
-    pub fn outbound(&self, n: NodeId) -> Vec<EdgeId> {
-        let mut v: Vec<EdgeId> = self.edges.values().filter(|e| e.from == n).map(|e| e.id).collect();
-        v.sort_by_key(|e| e.0);
-        v
+    /// Outbound edges from a node, in the order they were added (which
+    /// is `EdgeId` order, since ids are assigned monotonically).
+    /// Now reads `Node.outbound` directly — O(1) instead of an O(E)
+    /// scan over the whole edge map. Returns an empty slice for
+    /// missing nodes.
+    pub fn outbound(&self, n: NodeId) -> &[EdgeId] {
+        match self.nodes.get(&n) {
+            Some(node) => &node.outbound,
+            None => &[],
+        }
     }
 
     /// The earliest scheduled event time across in-flight deliveries

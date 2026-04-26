@@ -133,17 +133,18 @@ impl Sim {
         for i in 0..len {
             let nid = self.fire_iter_buf[i];
             // Re-look-up the class each iteration: the previous fire
-            // may have despawned this node or invalidated the entry.
-            let class_owned = match self.nodes.get(&nid).and_then(|n| n.class.as_deref()) {
-                Some(c) => c.to_owned(),
+            // may have despawned this node. The id is `Copy`, no
+            // alloc per iteration.
+            let tid = match self.nodes.get(&nid).and_then(|n| n.class) {
+                Some(t) => t,
                 None => continue,
             };
-            let rule_count = match self.templates.get(&class_owned) {
+            let rule_count = match self.templates.get(tid.0 as usize) {
                 Some(t) => t.rules.len(),
                 None => continue,
             };
             for ri in 0..rule_count {
-                if self.try_fire(nid, &class_owned, ri) {
+                if self.try_fire(nid, tid, ri) {
                     return true;
                 }
             }
@@ -151,11 +152,12 @@ impl Sim {
         false
     }
 
-    fn try_fire(&mut self, nid: NodeId, class: &str, rule_idx: usize) -> bool {
+    fn try_fire(&mut self, nid: NodeId, tid: crate::sim::TemplateId, rule_idx: usize) -> bool {
         // Pull the rule vec out, hand a `&Rule` to the matcher/firer,
         // put it back. `mem::take` is two pointer swaps — no deep
         // clone of the `Expr`/`Effect` trees, no Arc, no allocation.
-        let rules = match self.templates.get_mut(class) {
+        let idx = tid.0 as usize;
+        let rules = match self.templates.get_mut(idx) {
             Some(t) => std::mem::take(&mut t.rules),
             None => return false,
         };
@@ -169,11 +171,7 @@ impl Sim {
         } else {
             false
         };
-        // Restore — must succeed because the template was just looked
-        // up. If a fire effect (`Spawn`/`Despawn`) mutated
-        // `self.templates`, our class key is stable so the slot is
-        // still valid.
-        if let Some(t) = self.templates.get_mut(class) {
+        if let Some(t) = self.templates.get_mut(idx) {
             t.rules = rules;
         }
         fired
@@ -654,8 +652,12 @@ impl Sim {
         template_name: &str,
         parent: Option<NodeId>,
     ) -> Result<NodeId, String> {
-        let t = self.templates.get(template_name).cloned()
+        let tid = self
+            .template_by_name
+            .get(template_name)
+            .copied()
             .ok_or_else(|| format!("no template named `{}`", template_name))?;
+        let t = self.templates[tid.0 as usize].clone();
 
         self.next_instance_seq += 1;
         let seq = self.next_instance_seq;
@@ -667,9 +669,10 @@ impl Sim {
             id: new_id,
             name: instance_name.clone(),
             slots: t.slots.clone(),
+            outbound: Vec::new(),
             inbox: VecDeque::new(),
             probes: t.probes.clone(),
-            class: Some(t.name.clone()),
+            class: Some(tid),
             parent,
             compound: None,
         };
@@ -731,17 +734,22 @@ impl Sim {
         class_name: &str,
         instance_name: &str,
     ) -> Result<NodeId, String> {
-        let t = self.templates.get(class_name).cloned()
+        let tid = self
+            .template_by_name
+            .get(class_name)
+            .copied()
             .ok_or_else(|| format!("no class named `{}`", class_name))?;
+        let t = self.templates[tid.0 as usize].clone();
         let new_id = NodeId(self.next_node_id);
         self.next_node_id += 1;
         let node = Node {
             id: new_id,
             name: instance_name.to_string(),
             slots: t.slots.clone(),
+            outbound: Vec::new(),
             inbox: VecDeque::new(),
             probes: t.probes.clone(),
-            class: Some(t.name.clone()),
+            class: Some(tid),
             parent: None,
             compound: None,
         };
@@ -901,7 +909,9 @@ impl Sim {
         // deliver_to == edge.to, but reverse-routing (see ToTargetExpr
         // below) lets a reply travel along an existing INBOUND edge in
         // the opposite direction, in which case deliver_to = edge.from.
-        let outs = self.outbound(from_nid);
+        //
+        // Each branch borrows the `outbound` slice locally and avoids
+        // holding it across `&mut self` calls.
         let (target_edge_id, deliver_to) = match to {
             EmitTo::DefaultOut => {
                 // Prefer the first NON-self outbound. A node's self-loop is
@@ -910,16 +920,20 @@ impl Sim {
                 // the node has NO outbound at all, silently drop (matches
                 // "unwired output" semantics; common during interactive
                 // authoring).
-                let pick = outs.iter().find(|&&eid| self.edges[&eid].to != from_nid)
+                let outs = self.outbound(from_nid);
+                let pick = outs
+                    .iter()
+                    .find(|&&eid| self.edges[&eid].to != from_nid)
                     .or_else(|| outs.first())
                     .copied();
                 match pick {
                     Some(eid) => (eid, self.edges[&eid].to),
                     None => return,
                 }
-            },
+            }
             EmitTo::ToTarget(name) => {
-                match outs.into_iter().find(|eid| {
+                let outs = self.outbound(from_nid);
+                match outs.iter().copied().find(|eid| {
                     let to_id = self.edges[eid].to;
                     self.nodes.get(&to_id).map(|n| n.name == name).unwrap_or(false)
                 }) {
@@ -936,23 +950,23 @@ impl Sim {
                 }
             }
             EmitTo::ToTargetExpr(e) => {
+                // Eval first (mutates rng), then borrow outbound. The
+                // borrow can't live across the eval call.
                 let v = self.eval_at_node(from_nid, bindings, &e, consumed_pkt);
                 let target_id = match v {
                     Value::NodeRef(id) => id,
-                    Value::Str(name) => {
-                        match self.node_by_name(&name) {
-                            Some(id) => id,
-                            None => {
-                                self.record_error(
-                                    "emit_unknown_target",
-                                    Some(from_nid),
-                                    Some(rule_name),
-                                    format!("EmitTo::ToTargetExpr: no node named `{}`", name),
-                                );
-                                return;
-                            }
+                    Value::Str(name) => match self.node_by_name(&name) {
+                        Some(id) => id,
+                        None => {
+                            self.record_error(
+                                "emit_unknown_target",
+                                Some(from_nid),
+                                Some(rule_name),
+                                format!("EmitTo::ToTargetExpr: no node named `{}`", name),
+                            );
+                            return;
                         }
-                    }
+                    },
                     // Nil is the "no match" signal from expressions like
                     // `OutNeighborWithSlot` that may resolve to nothing.
                     // Silently drop — not an error, expected flow.
@@ -968,11 +982,18 @@ impl Sim {
                     }
                 };
                 // Look for an outbound edge first.
-                if let Some(eid) = outs.into_iter().find(|eid| self.edges[eid].to == target_id) {
+                let outs = self.outbound(from_nid);
+                if let Some(eid) = outs
+                    .iter()
+                    .copied()
+                    .find(|eid| self.edges[eid].to == target_id)
+                {
                     (eid, self.edges[&eid].to)
-                } else if let Some(eid) = self.edges.values()
-                    .find(|e| e.from == target_id && e.to == from_nid)
-                    .map(|e| e.id)
+                } else if let Some(eid) = self
+                    .outbound(target_id)
+                    .iter()
+                    .copied()
+                    .find(|eid| self.edges[eid].to == from_nid)
                 {
                     // Reverse-route: NO outbound edge exists to the target,
                     // but an INBOUND edge from the target does. A reply
@@ -1004,9 +1025,13 @@ impl Sim {
                     );
                     return;
                 };
-                let edge_ids: Vec<EdgeId> = self.edges.values()
-                    .filter(|e| e.from == compound_nid && e.from_port.as_deref() == Some(port_name.as_str()))
-                    .map(|e| e.id)
+                let edge_ids: Vec<EdgeId> = self
+                    .outbound(compound_nid)
+                    .iter()
+                    .copied()
+                    .filter(|eid| {
+                        self.edges[eid].from_port.as_deref() == Some(port_name.as_str())
+                    })
                     .collect();
                 if edge_ids.is_empty() {
                     // Port is mapped but nothing is wired to it — silently drop

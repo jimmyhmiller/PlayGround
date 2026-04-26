@@ -371,11 +371,7 @@ fn ingest_new_events(
     evs: Res<NewEvents>,
     clock: Res<crate::bridge::SimClock>,
     maps: Res<EntityMaps>,
-    theme: Res<Theme>,
-    node_colors: Res<crate::tool::NodeColors>,
     mut timeline: ResMut<VisualTimelineRes>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<ColorMaterial>>,
     node_transforms: Query<&Transform, With<crate::bridge::FlowNodeRef>>,
     existing_packets: Query<(Entity, &TravelingPacket)>,
     hide_all: Res<HideAll>,
@@ -411,47 +407,30 @@ fn ingest_new_events(
         // when the user has toggled the visual layer off.
         if hide_all.0 { continue; }
         let vp = timeline.packets[idx].clone();
-        spawn_packet_entity(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            &maps,
-            &theme,
-            &node_colors,
-            &node_transforms,
-            &vp,
-        );
+        spawn_packet_entity(&mut commands, &maps, &node_transforms, &vp);
     }
 }
 
+/// Spawn a lightweight per-packet marker entity. Rendering is handled
+/// by [`crate::packet_cloud`]; this entity carries only the data
+/// existing tests query (TravelingPacket + Transform + Visibility).
+/// No `Mesh2d`/`MeshMaterial2d`/child label — those costs scaled
+/// linearly with packet count and have moved into the single
+/// instanced draw call.
 fn spawn_packet_entity(
     commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<ColorMaterial>,
     maps: &EntityMaps,
-    theme: &Theme,
-    node_colors: &crate::tool::NodeColors,
     node_transforms: &Query<&Transform, With<crate::bridge::FlowNodeRef>>,
     vp: &VisualPacket,
 ) {
-    let pkt_color = packet_color(
-        &vp.payload,
-        node_colors.0.get(&vp.from).copied(),
-        &theme.data,
-        theme.accent,
-    );
-
-    // Initial position = source node's world pos. If Visibility has a
-    // one-frame render glitch, the dot flashes AT its source — which
-    // reads as "about to leave" — not at world origin.
-    let initial_pos = maps.node_to_entity.get(&vp.from)
+    let initial_pos = maps
+        .node_to_entity
+        .get(&vp.from)
         .and_then(|e| node_transforms.get(*e).ok())
         .map(|t| t.translation.truncate())
         .unwrap_or(Vec2::ZERO);
 
-    let packet_entity = commands.spawn((
-        Mesh2d(meshes.add(Circle::new(6.0))),
-        MeshMaterial2d(materials.add(ColorMaterial::from(pkt_color))),
+    commands.spawn((
         Transform::from_xyz(initial_pos.x, initial_pos.y, 3.0),
         Visibility::Hidden,
         TravelingPacket {
@@ -461,18 +440,7 @@ fn spawn_packet_entity(
             emit_real: vp.emit_real,
             arrive_real: vp.arrive_real,
         },
-    )).id();
-
-    commands.entity(packet_entity).with_children(|p| {
-        p.spawn((
-            Text2d::new(format!("{}", vp.packet_id.0)),
-            TextFont { font_size: 10.0, ..default() },
-            TextColor(theme.ink),
-            Transform::from_xyz(0.0, 12.0, 0.1),
-            Visibility::Hidden,
-            PacketIdLabel,
-        ));
-    });
+    ));
 }
 
 /// Per frame: snap each packet's transform + visibility to the pure
