@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
 use std::cmp::Reverse;
+use std::sync::Arc;
 
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -79,7 +80,13 @@ pub struct Node {
 
     // --- Leaf state (unused / empty for compounds) ---
     pub slots: BTreeMap<String, Value>,
-    pub rules: Vec<Rule>,
+    /// Rules wrapped in `Arc` so cloning during the hot fire-attempt
+    /// loop is a refcount bump and so the same rule body is shared
+    /// across every instance of a class (the engine's `try_fire`
+    /// snapshots the rule via `Arc::clone`, which is cheap; deep-clone
+    /// of the `Expr`/`Effect` trees was the bulk of the runtime cost
+    /// at large grid sizes).
+    pub rules: Vec<Arc<Rule>>,
     /// Packets delivered to this node, waiting to be matched by a rule.
     /// In-order FIFO. Unbounded in principle; if this grows without
     /// bound, you have modeled the system correctly and it is overloaded.

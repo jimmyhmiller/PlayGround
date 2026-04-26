@@ -18,7 +18,6 @@ pub mod template;
 pub mod scenario;
 pub mod timeline;
 pub mod history;
-pub mod render;
 pub mod repl;
 pub mod snapshot;
 pub mod dsl;

@@ -30,6 +30,7 @@ impl Plugin for NodesPlugin {
                 sync_node_labels,
                 sync_data_dot_colors,
                 sync_node_state_labels,
+                sync_binary_slot_paint,
                 delete_selected,
             ).chain());
     }
@@ -60,14 +61,24 @@ pub struct Selection {
 
 // ---------------- spawn ----------------
 
-/// Which 2d primitive to use for a given kind. Circular bodies for emitters /
+/// Which 2d primitive to use for a node body. Circular bodies for emitters /
 /// sinks (they read as "portals" at the ends of a flow), rectangles for
 /// processors (they read as "boxes" doing work on a packet).
+///
+/// Stored as a `Component` on each node entity so the canvas-driven shape
+/// (from `visual.json`'s `classes` block) and the palette-driven shape
+/// (from `Kind`) feed through the same render path. Callers query
+/// `&BodyShape` from their node query rather than re-deriving from `Kind`.
+#[derive(Component, Clone, Copy, Debug)]
 pub enum BodyShape {
     Circle(f32),
     Rect(Vec2),
 }
 
+/// Default shape for a built-in palette `Kind`. Used when no per-entity
+/// override is supplied (i.e. nodes dropped from the palette, or nodes
+/// loaded from a canvas whose `visual.json` doesn't declare a shape for
+/// the class).
 pub fn body_shape(kind: Kind) -> BodyShape {
     match kind {
         Kind::Generator | Kind::Client | Kind::BackoffClient | Kind::Sink => BodyShape::Circle(34.0),
@@ -105,6 +116,13 @@ fn glyph_size_for(kind: Kind) -> f32 {
 /// Materialize a Bevy entity for a freshly-created Flow node. The parent
 /// entity owns the body mesh; children stack shadow / border behind and
 /// glyph / label on top via local-z offsets.
+///
+/// `shape_override` lets the canvas pipeline supply a class-driven shape
+/// from `visual.json`. When `None`, falls back to the built-in
+/// [`body_shape`] mapping for the supplied `Kind`. The resulting
+/// [`BodyShape`] is attached as a component on the parent so all
+/// downstream queries (hit-testing, arrow rendering, selection outline)
+/// read it directly without re-deriving from `Kind`.
 pub fn spawn_node_entity(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -113,10 +131,11 @@ pub fn spawn_node_entity(
     theme: &Theme,
     flow_id: NodeId,
     kind: Kind,
+    shape_override: Option<BodyShape>,
     name: String,
     pos: Vec2,
 ) -> Entity {
-    let shape = body_shape(kind);
+    let shape = shape_override.unwrap_or_else(|| body_shape(kind));
     let hsize = hit_size(&shape);
 
     // Body — parent. Filled with paper so the interior reads as "empty",
@@ -129,6 +148,7 @@ pub fn spawn_node_entity(
         Transform::from_translation(pos.extend(1.0)),
         FlowNodeRef(flow_id),
         NodeKind(kind),
+        shape,
     )).id();
 
     commands.entity(entity).with_children(|parent| {
@@ -245,6 +265,18 @@ pub struct NodeColorDot(pub NodeId);
 #[derive(Component)]
 pub struct NodeStateLabel(pub NodeId);
 
+/// Marks a node body whose fill color tracks a binary slot value (0 or
+/// 1) in the sim. Driven by the `paint` field on a class entry in
+/// `visual.json` — flow-bevy itself has no notion of which classes
+/// receive this treatment.
+#[derive(Component)]
+pub struct BinarySlotPaint {
+    pub node: NodeId,
+    pub slot: String,
+    pub on: Color,
+    pub off: Color,
+}
+
 /// Where the data-colour dot sits relative to the body's centre. Top-right
 /// corner with a small inset so it doesn't hug the border.
 fn data_dot_offset(shape: &BodyShape) -> (f32, f32) {
@@ -294,7 +326,7 @@ fn handle_drop(
     // in its sim slots so the router's `slot_of(n, "color")` filter can
     // pick the matching downstream branch.
     let id = spawn_gadget(&mut flow.sim, kind, &name, slot);
-    spawn_node_entity(&mut commands, &mut meshes, &mut materials, &mut maps, &theme, id, kind, name, pos);
+    spawn_node_entity(&mut commands, &mut meshes, &mut materials, &mut maps, &theme, id, kind, None, name, pos);
     // Snapshot the active data-slot colour onto this node so its emitted
     // packets render in that hue. Theme swaps after drop won't recolour
     // it. Routers are untyped — they forward whatever arrives, so they
@@ -461,6 +493,30 @@ fn sync_data_dot_colors(
 ) {
     for (dot, mat_handle) in dots.iter() {
         let want = node_colors.0.get(&dot.0).copied().unwrap_or(theme.accent);
+        if let Some(mat) = materials.get_mut(&mat_handle.0) {
+            if mat.color != want {
+                mat.color = want;
+            }
+        }
+    }
+}
+
+/// Repaint each `BinarySlotPaint`-tagged body each frame from the sim
+/// slot. Cheap: only writes when the new colour disagrees with the
+/// current material.
+fn sync_binary_slot_paint(
+    flow: Res<FlowSim>,
+    paints: Query<(&BinarySlotPaint, &MeshMaterial2d<ColorMaterial>)>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+) {
+    for (paint, mat_handle) in paints.iter() {
+        let Some(node) = flow.sim.nodes.get(&paint.node) else { continue };
+        let on = match node.slots.get(&paint.slot) {
+            Some(flow::Value::Int(i)) => *i != 0,
+            Some(flow::Value::Bool(b)) => *b,
+            _ => false,
+        };
+        let want = if on { paint.on } else { paint.off };
         if let Some(mat) = materials.get_mut(&mat_handle.0) {
             if mat.color != want {
                 mat.color = want;

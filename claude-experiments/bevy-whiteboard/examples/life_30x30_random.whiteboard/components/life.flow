@@ -1,0 +1,73 @@
+# Conway's Game of Life — single-cell template + global clock.
+#
+# Synchronicity is engineered: the LifeClock fans out a `pulse` to every
+# cell at a fixed period. Each cell reacts by broadcasting `report(alive)`
+# to its 8 toroidal neighbors with the SAME latency on every edge, so all
+# 8 reports arrive at any given cell in the same sim instant. The cell
+# accumulates 8 reports; on the 8th, it applies the B3/S23 rule and
+# updates its own `alive` slot. The next pulse is gated by `period_ns`
+# being > clock_latency + cell_latency, so generations don't overlap.
+#
+# The rule split (`partial` vs `final`) is a guard-based dispatch on the
+# accumulator counter — the engine fires whichever rule matches first,
+# and only `final` is reached when this is the 8th report.
+
+node LifeClock {
+    slots {
+        period_ns: Int = 200000000
+        gen: Int = 0
+    }
+    on_spawn {
+        self -> self : period_ns
+        inject tick(nil)
+    }
+    rule fire {
+        on tick(_)
+        do {
+            gen := gen + 1
+            emit_each pulse(gen) to filter(out_neighbors(), "n", n != self)
+            emit tick(nil) to self
+        }
+    }
+}
+
+node LifeCell {
+    slots {
+        alive: Int = 0
+        gen: Int = 0
+        reports_seen: Int = 0
+        live_neighbors: Int = 0
+    }
+    probes {
+        s: "{alive}"
+    }
+
+    rule on_pulse {
+        on pulse(g)
+        do {
+            gen := g
+            reports_seen := 0
+            live_neighbors := 0
+            emit_each report(alive) to out_neighbors()
+        }
+    }
+
+    rule on_report_partial {
+        on report(v)
+        when reports_seen + 1 < 8
+        do {
+            reports_seen := reports_seen + 1
+            live_neighbors := live_neighbors + v
+        }
+    }
+
+    rule on_report_final {
+        on report(v)
+        when reports_seen + 1 == 8
+        do {
+            reports_seen := reports_seen + 1
+            live_neighbors := live_neighbors + v
+            alive := if (alive == 1 && (live_neighbors == 2 || live_neighbors == 3)) || (alive == 0 && live_neighbors == 3) then 1 else 0
+        }
+    }
+}

@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/flow",
     "crates/flow-bevy",
+    "crates/flow-life-gen",
     "crates/poster-ui",
 ]
 
@@ -13,3 +14,11 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# Release-optimized binary that still carries full debug info — for
+# profiling, perf flamegraphs, lldb on a release build, etc. Build with
+# `cargo run --profile release-debug -p flow-bevy -- ...`.
+[profile.release-debug]
+inherits = "release"
+debug = true
+strip = "none"

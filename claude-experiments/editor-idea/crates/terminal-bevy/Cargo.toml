@@ -4,8 +4,11 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arboard = "3.4"
 libghostty-vt = "0.1.1"
 nix = { version = "0.31", features = ["term", "fs", "signal", "process", "user", "ioctl"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 skrifa = "0.39"
 # Glyph rasterization for our own atlas — bypasses cosmic-text/Text2d
 # entirely. Already a transitive dep via Bevy's cosmic-text, declared
@@ -21,6 +24,12 @@ bevy = { version = "0.18", default-features = false, features = [
 objc2 = "0.5"
 objc2-app-kit = "0.2"
 objc2-foundation = "0.2"
+# CoreText for system-cascade glyph fallback — instead of a hardcoded
+# list of font paths, ask the OS "which font has this codepoint?" and
+# load its bytes. Same model real terminals (Terminal.app, Alacritty,
+# kitty) use, just less surprising as the user installs/removes fonts.
+core-text = "21"
+core-foundation = "0.10"
 
 [lib]
 name = "terminal_bevy"

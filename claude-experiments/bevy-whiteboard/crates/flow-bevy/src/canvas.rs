@@ -30,7 +30,7 @@ use flow::{Sim, SimSnapshot, Value};
 
 use crate::bridge::{EntityMaps, FlowEdgeRef, FlowSim};
 use crate::gadgets::{self, Kind};
-use crate::nodes::{NodeCounter, spawn_node_entity};
+use crate::nodes::{BinarySlotPaint, BodyShape, NodeCounter, spawn_node_entity};
 use crate::theme::Theme;
 use crate::tool::NodeColors;
 
@@ -93,12 +93,26 @@ pub struct DefaultBoot {
 pub struct Visual {
     #[serde(default = "default_visual_version")]
     pub format_version: u32,
+    /// Per-class appearance overrides. The map is keyed by class name
+    /// (as declared in the DSL) and lets a canvas describe shape/size
+    /// and dynamic paint behavior for custom classes that flow-bevy's
+    /// built-in `Kind` enum doesn't know about. Built-in palette
+    /// classes (Worker, Client, Queue, etc.) ignore the entry — their
+    /// shape comes from `Kind`.
+    #[serde(default)]
+    pub classes: BTreeMap<String, ClassVisual>,
     /// Keyed by node name (as declared in DSL). Missing nodes fall back
     /// to default layout from the UI layer.
     #[serde(default)]
     pub nodes: BTreeMap<String, VisualNode>,
     #[serde(default)]
     pub viewport: Viewport,
+    /// Boot the canvas with all edges and packets hidden. Useful for
+    /// stress-test canvases (Game of Life, large grids) where the raw
+    /// visual layer is unreadable at startup. The user can toggle the
+    /// state at runtime with the `H` key either way.
+    #[serde(default)]
+    pub hide_all: bool,
 }
 
 fn default_visual_version() -> u32 { 1 }
@@ -112,6 +126,40 @@ pub struct VisualNode {
     /// based on node kind / data-palette slot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+}
+
+/// Per-class appearance for canvas-defined node classes. All fields are
+/// optional — a class spec can declare just a shape, just a paint
+/// behavior, or both. Missing fields fall back to flow-bevy's built-in
+/// defaults for the nearest matching `Kind` (`Worker` for unknown
+/// classes).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClassVisual {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<ShapeSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paint: Option<PaintSpec>,
+}
+
+/// Body geometry. `square` and `circle` carry a `size` in world units —
+/// a square's edge length, a circle's diameter.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ShapeSpec {
+    Square { size: f32 },
+    Circle { size: f32 },
+}
+
+/// Dynamic body fill driven by sim state.
+///
+/// `binary_slot` flips between two colors based on whether the named
+/// slot is non-zero (`Int != 0` or `Bool == true`). Colors are CSS-style
+/// hex strings (`"#000000"`); invalid strings fall back to theme
+/// `ink`/`paper`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaintSpec {
+    BinarySlot { slot: String, on: String, off: String },
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -241,6 +289,7 @@ pub(crate) fn seed_from_path(
     mut maps: ResMut<EntityMaps>,
     mut counter: ResMut<NodeCounter>,
     mut node_colors: ResMut<NodeColors>,
+    mut hide_all: ResMut<crate::edges::HideAll>,
     theme: Res<Theme>,
     mut pending: ResMut<crate::PendingCanvas>,
 ) {
@@ -252,6 +301,7 @@ pub(crate) fn seed_from_path(
             return;
         }
     };
+    hide_all.0 = canvas.visual.hide_all;
     bevy::log::info!(
         "loaded canvas `{}` ({} nodes, {} edges)",
         canvas.manifest.canvas.name,
@@ -269,21 +319,28 @@ pub(crate) fn seed_from_path(
     let visual = &canvas.visual;
     let node_ids: Vec<flow::NodeId> = flow.sim.nodes.keys().copied().collect();
     for (i, nid) in node_ids.iter().copied().enumerate() {
-        let (name, kind, color_slot) = {
+        let (name, class, kind, color_slot) = {
             let node = &flow.sim.nodes[&nid];
-            let kind = node.class.as_deref().map(class_to_kind).unwrap_or(Kind::Worker);
+            let class = node.class.clone();
+            let kind = class.as_deref().map(class_to_kind).unwrap_or(Kind::Worker);
             let color_slot = match node.slots.get("color") {
                 Some(Value::Int(n)) => (*n as usize) % theme.data.len(),
                 _ => 0,
             };
-            (node.name.clone(), kind, color_slot)
+            (node.name.clone(), class, kind, color_slot)
         };
+        let class_visual = class
+            .as_deref()
+            .and_then(|c| visual.classes.get(c));
+        let shape_override = class_visual
+            .and_then(|cv| cv.shape.as_ref())
+            .map(shape_spec_to_body_shape);
         let pos = visual
             .nodes
             .get(&name)
             .map(|v| Vec2::new(v.pos[0], v.pos[1]))
             .unwrap_or_else(|| default_grid_position(i));
-        spawn_node_entity(
+        let entity = spawn_node_entity(
             &mut commands,
             &mut meshes,
             &mut materials,
@@ -291,11 +348,17 @@ pub(crate) fn seed_from_path(
             &theme,
             nid,
             kind,
+            shape_override,
             name,
             pos,
         );
         if !matches!(kind, Kind::Router) {
             node_colors.0.insert(nid, theme.data[color_slot]);
+        }
+        if let Some(paint) = class_visual.and_then(|cv| cv.paint.as_ref()) {
+            commands
+                .entity(entity)
+                .insert(paint_spec_to_component(paint, nid, &theme));
         }
     }
 
@@ -329,12 +392,47 @@ fn default_grid_position(index: usize) -> Vec2 {
     )
 }
 
+/// Convert a `visual.json` shape declaration into the runtime
+/// [`BodyShape`] component used by the rendering systems.
+fn shape_spec_to_body_shape(spec: &ShapeSpec) -> BodyShape {
+    match spec {
+        // Square `size` is edge length; circle `size` is diameter, so
+        // halve to a radius for `BodyShape::Circle`.
+        ShapeSpec::Square { size } => BodyShape::Rect(Vec2::splat(*size)),
+        ShapeSpec::Circle { size } => BodyShape::Circle(*size * 0.5),
+    }
+}
+
+/// Convert a `visual.json` paint declaration into a runtime component
+/// to attach to a node. Hex colors that fail to parse fall back to
+/// theme `ink` (on) / `paper` (off) so a typo can't make a node go
+/// invisible.
+fn paint_spec_to_component(spec: &PaintSpec, node: flow::NodeId, theme: &Theme) -> BinarySlotPaint {
+    match spec {
+        PaintSpec::BinarySlot { slot, on, off } => BinarySlotPaint {
+            node,
+            slot: slot.clone(),
+            on: parse_hex_color(on).unwrap_or(theme.ink),
+            off: parse_hex_color(off).unwrap_or(theme.paper),
+        },
+    }
+}
+
+/// Parse a `"#rrggbb"` (or `"rrggbb"`) hex string into a Bevy [`Color`].
+/// Returns `None` if the string isn't a valid 6- or 8-digit hex.
+fn parse_hex_color(s: &str) -> Option<Color> {
+    let h = s.strip_prefix('#').unwrap_or(s);
+    bevy::color::Srgba::hex(h).ok().map(Into::into)
+}
+
 /// Map a DSL class name to a visual [`Kind`]. The seven stock gadget
 /// class names match directly; anything else (custom components) falls
 /// back to `Kind::Worker`, which has a neutral rectangular shape that
 /// reads as "generic node" without implying any specific semantics.
-/// A future richer UI could let custom classes declare their own
-/// shape/color in DSL attributes.
+///
+/// Custom classes that want a different look should declare a
+/// [`ClassVisual`] entry in `visual.json` rather than being hard-coded
+/// here — flow-bevy's `Kind` enum is reserved for the built-in palette.
 pub fn class_to_kind(class: &str) -> Kind {
     match class {
         "Generator" => Kind::Generator,

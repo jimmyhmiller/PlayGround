@@ -40,14 +40,19 @@ use bevy::image::{Image, TextureAtlasLayout};
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
+use bevy::text::LineHeight;
 
 use libghostty_vt::style::RgbColor;
 
 pub mod atlas;
+pub mod projects;
 pub mod pty;
+pub mod radial;
+pub mod selection;
 pub mod vt;
 pub mod worker;
 use atlas::GlyphAtlas;
+use projects::{InputConsumed, ProjectMembership, Projects, Renaming, SIDEBAR_WIDTH};
 use pty::PtySize;
 use worker::{SnapCell, WorkerHandle, WorkerMsg};
 
@@ -56,11 +61,23 @@ pub const LINE_HEIGHT: f32 = 18.0;
 pub const MARGIN: f32 = 8.0;
 pub const TITLE_H: f32 = 22.0;
 pub const HANDLE_SIZE: f32 = 14.0;
+pub const CLOSE_BTN_SIZE: f32 = 14.0;
+pub const CLOSE_BTN_INSET: f32 = 4.0;
 pub const MIN_TERMINAL_SIZE: Vec2 = Vec2::new(240.0, 160.0);
 pub const SCROLLBACK_LINES: usize = 1000;
 
-const EMBEDDED_FONT: &[u8] =
-    include_bytes!("../../editor-bevy/assets/fonts/JetBrainsMono-Regular.ttf");
+/// Path to SF Mono — Apple ships it with Terminal.app, so any Mac that
+/// has launched Terminal.app once has this file. Loaded at startup and
+/// leaked into a `'static` slice so the atlas (which holds a borrow of
+/// the font bytes for `swash`) sees a stable address for the program's
+/// lifetime.
+const PRIMARY_FONT_PATH: &str = "/Library/Fonts/SF-Mono-Regular.otf";
+
+fn load_primary_font() -> &'static [u8] {
+    let bytes = std::fs::read(PRIMARY_FONT_PATH)
+        .unwrap_or_else(|e| panic!("read {}: {}", PRIMARY_FONT_PATH, e));
+    Box::leak(bytes.into_boxed_slice())
+}
 
 // ---------- Per-entity runtime ----------
 
@@ -98,6 +115,7 @@ pub struct TerminalChrome {
     pub content_root: Entity,
     pub cursor: Entity,
     pub resize_handle: Entity,
+    pub close_button: Entity,
 }
 
 /// Per-terminal sprite pools — one solid-color quad per cell for the
@@ -147,6 +165,47 @@ pub enum MouseMode {
         terminal: Entity,
         anchor_pos: Vec2,
     },
+    /// User is click-dragging inside a terminal's content area to select
+    /// text. The selection's anchor + head live on `TerminalSelection`.
+    TerminalSelectionDrag {
+        terminal: Entity,
+    },
+}
+
+/// Per-terminal text selection. `anchor` and `head` are cell coords
+/// (col, row) in the terminal's grid — kept as `i32` so we can stash
+/// out-of-bounds drag positions without losing direction information.
+#[derive(Component, Default, Debug)]
+pub struct TerminalSelection {
+    pub anchor: Option<(i32, i32)>,
+    pub head: Option<(i32, i32)>,
+    /// Pool of overlay sprite entities visualising the selection
+    /// (children of the terminal's `content_root`). Rebuilt by the
+    /// selection-render system as the selection changes.
+    pub overlays: Vec<Entity>,
+}
+
+impl TerminalSelection {
+    pub fn clear(&mut self) {
+        self.anchor = None;
+        self.head = None;
+    }
+    pub fn is_active(&self) -> bool {
+        match (self.anchor, self.head) {
+            (Some(a), Some(h)) => a != h,
+            _ => false,
+        }
+    }
+    /// Return (start, end) normalised so start ≤ end in line-flow order.
+    pub fn normalised(&self) -> Option<((i32, i32), (i32, i32))> {
+        let (a, h) = (self.anchor?, self.head?);
+        let order = (a.1, a.0) <= (h.1, h.0);
+        if order {
+            Some((a, h))
+        } else {
+            Some((h, a))
+        }
+    }
 }
 
 // ---------- Plugin ----------
@@ -155,13 +214,16 @@ pub struct TerminalPlugin;
 
 impl Plugin for TerminalPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(ClearColor(Color::srgb(0.05, 0.06, 0.08)))
+        app.insert_resource(ClearColor(Color::srgb(0.072, 0.075, 0.085)))
             .insert_resource(FocusedTerminal::default())
             .insert_resource(MouseMode::default())
             .insert_resource(bevy::winit::WinitSettings {
                 focused_mode: bevy::winit::UpdateMode::Continuous,
                 unfocused_mode: bevy::winit::UpdateMode::Continuous,
             })
+            .add_plugins(projects::ProjectsPlugin)
+            .add_plugins(radial::RadialPlugin)
+            .add_plugins(selection::SelectionPlugin)
             .add_systems(Startup, setup_camera_and_font)
             .add_systems(PostStartup, release_os_focus)
             .add_systems(
@@ -212,12 +274,14 @@ fn measure_cell_width(font_bytes: &[u8], font_size: f32) -> f32 {
 pub fn setup_camera_and_font(world: &mut World) {
     world.spawn(Camera2d);
 
+    let font_bytes: &'static [u8] = load_primary_font();
+
     let font_handle = world
         .resource_mut::<Assets<Font>>()
-        .add(Font::try_from_bytes(EMBEDDED_FONT.to_vec()).expect("JetBrainsMono must parse"));
+        .add(Font::try_from_bytes(font_bytes.to_vec()).expect("SFMono must parse"));
     world.insert_resource(MonoFont(font_handle));
 
-    let cell_width = measure_cell_width(EMBEDDED_FONT, FONT_SIZE);
+    let cell_width = measure_cell_width(font_bytes, FONT_SIZE);
     world.insert_resource(MonoMetrics { cell_width });
 
     // Build the glyph atlas now — pre-rasterizes printable ASCII so
@@ -227,7 +291,7 @@ pub fn setup_camera_and_font(world: &mut World) {
     let atlas = world.resource_scope::<Assets<Image>, _>(|world, mut images| {
         let mut layouts = world.resource_mut::<Assets<TextureAtlasLayout>>();
         GlyphAtlas::new(
-            EMBEDDED_FONT,
+            font_bytes,
             FONT_SIZE,
             cell_width,
             LINE_HEIGHT,
@@ -246,10 +310,15 @@ pub fn setup_camera_and_font(world: &mut World) {
 /// Create one terminal entity with its chrome + spawn a shell on its pty.
 /// Returns the entity so the caller can set focus, tweak z, etc.
 ///
-/// Must be called from an exclusive system (`&mut World`) because the
-/// Terminal + closures are `!Send`.
-pub fn spawn_terminal(world: &mut World, rect: TerminalRect) -> Entity {
+/// `project_id` tags the terminal with `ProjectMembership` so the sidebar
+/// can group + show/hide it. Pass `None` only in tests / standalone demos.
+pub fn spawn_terminal(
+    world: &mut World,
+    rect: TerminalRect,
+    project_id: Option<u64>,
+) -> Entity {
     let cell_width = world.resource::<MonoMetrics>().cell_width;
+    let font_handle = world.resource::<MonoFont>().0.clone();
 
     let (cols, rows) = grid_size_for_rect(rect.size, cell_width);
 
@@ -276,16 +345,20 @@ pub fn spawn_terminal(world: &mut World, rect: TerminalRect) -> Entity {
             rect,
             TerminalRev::default(),
             CellSprites::default(),
+            TerminalSelection::default(),
             Transform::default(),
             Visibility::default(),
         ))
         .id();
 
+    // Panel background — single muted color, no separate title-bar
+    // band. The "title bar" is just the top TITLE_H pixels of the same
+    // panel; it's distinguished from content by a 1-pixel divider line.
     let bg = world
         .spawn((
             ChildOf(terminal_entity),
             Sprite {
-                color: Color::srgb(0.08, 0.10, 0.13),
+                color: Color::srgb(0.105, 0.110, 0.122),
                 custom_size: Some(rect.size),
                 ..default()
             },
@@ -293,16 +366,17 @@ pub fn spawn_terminal(world: &mut World, rect: TerminalRect) -> Entity {
             Transform::from_xyz(0.0, 0.0, 0.0),
         ))
         .id();
+    // Title-bar divider (1 px hairline at the bottom of the title region).
     let title_bar = world
         .spawn((
             ChildOf(terminal_entity),
             Sprite {
-                color: Color::srgb(0.18, 0.20, 0.24),
-                custom_size: Some(Vec2::new(rect.size.x, TITLE_H)),
+                color: Color::srgb(0.165, 0.170, 0.188),
+                custom_size: Some(Vec2::new(rect.size.x, 1.0)),
                 ..default()
             },
             Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, 0.0, 0.1),
+            Transform::from_xyz(0.0, -(TITLE_H - 1.0), 0.1),
         ))
         .id();
     let content_root = world
@@ -317,7 +391,7 @@ pub fn spawn_terminal(world: &mut World, rect: TerminalRect) -> Entity {
         .spawn((
             ChildOf(content_root),
             Sprite {
-                color: Color::srgba(0.6, 0.85, 1.0, 0.7),
+                color: Color::srgba(0.55, 0.75, 0.95, 0.50),
                 custom_size: Some(Vec2::new(cell_width, LINE_HEIGHT)),
                 ..default()
             },
@@ -325,11 +399,14 @@ pub fn spawn_terminal(world: &mut World, rect: TerminalRect) -> Entity {
             Transform::from_xyz(0.0, 0.0, 1.0),
         ))
         .id();
+    // Resize handle — a small muted square in the bottom-right corner.
+    // Same value as the divider so it reads as a UI affordance, not a
+    // bright corner sticker.
     let resize_handle = world
         .spawn((
             ChildOf(terminal_entity),
             Sprite {
-                color: Color::srgb(0.35, 0.40, 0.48),
+                color: Color::srgb(0.22, 0.23, 0.26),
                 custom_size: Some(Vec2::splat(HANDLE_SIZE)),
                 ..default()
             },
@@ -342,13 +419,42 @@ pub fn spawn_terminal(world: &mut World, rect: TerminalRect) -> Entity {
         ))
         .id();
 
+    // Close button — a dim × glyph in the title region. The hit area is
+    // computed from CLOSE_BTN_SIZE/INSET in `region_at`, so we don't
+    // need a backing sprite for click detection.
+    let close_button = world
+        .spawn((
+            ChildOf(terminal_entity),
+            Text2d::new("\u{00D7}"),
+            TextFont {
+                font: font_handle.clone(),
+                font_size: 16.0,
+                ..default()
+            },
+            LineHeight::Px(CLOSE_BTN_SIZE),
+            TextColor(Color::srgb(0.50, 0.52, 0.56)),
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(
+                rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET,
+                -CLOSE_BTN_INSET,
+                0.4,
+            ),
+        ))
+        .id();
+
     world.entity_mut(terminal_entity).insert(TerminalChrome {
         bg,
         title_bar,
         content_root,
         cursor,
         resize_handle,
+        close_button,
     });
+    if let Some(pid) = project_id {
+        world
+            .entity_mut(terminal_entity)
+            .insert(ProjectMembership(pid));
+    }
 
     world
         .get_resource_mut::<TerminalStore>()
@@ -412,7 +518,15 @@ fn handle_keyboard(
     mods: Res<ButtonInput<KeyCode>>,
     focused: Res<FocusedTerminal>,
     store: Res<TerminalStore>,
+    renaming: Res<Renaming>,
 ) {
+    // While the user is renaming a project the sidebar's keyboard handler
+    // owns input. Drain the events so they don't get re-read next frame
+    // — we explicitly don't want them landing in the focused terminal.
+    if renaming.id.is_some() {
+        events.read().for_each(|_| {});
+        return;
+    }
     let Some(target) = focused.0 else {
         events.read().for_each(|_| {});
         return;
@@ -433,6 +547,15 @@ fn handle_keyboard(
     let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
     let ctrl = mods.pressed(KeyCode::ControlLeft) || mods.pressed(KeyCode::ControlRight);
     let alt = mods.pressed(KeyCode::AltLeft) || mods.pressed(KeyCode::AltRight);
+    let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
+
+    // Cmd-modified keys are owned by app-level handlers (copy/paste,
+    // future shortcuts). Skip routing them to the pty so Cmd+C doesn't
+    // also send "c" to the shell.
+    if cmd {
+        events.read().for_each(|_| {});
+        return;
+    }
 
     // For v0 we always emit xterm-style cursor-key escapes (CSI A/B/C/D);
     // we don't have main-thread visibility into the worker's DECCKM mode.
@@ -611,6 +734,7 @@ fn named_key_bytes(code: &KeyCode, app_cursor: bool) -> Option<&'static [u8]> {
 
 #[derive(Copy, Clone)]
 enum Region {
+    CloseButton,
     TitleBar,
     ResizeHandle,
     Content,
@@ -623,6 +747,13 @@ fn region_at(pt: Vec2, rect: &TerminalRect) -> Option<Region> {
     if pt.y < rect.pos.y || pt.y > rect.pos.y + rect.size.y {
         return None;
     }
+    let close_x0 = rect.pos.x + rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET;
+    let close_x1 = close_x0 + CLOSE_BTN_SIZE;
+    let close_y0 = rect.pos.y + CLOSE_BTN_INSET;
+    let close_y1 = close_y0 + CLOSE_BTN_SIZE;
+    if pt.x >= close_x0 && pt.x <= close_x1 && pt.y >= close_y0 && pt.y <= close_y1 {
+        return Some(Region::CloseButton);
+    }
     let handle_x0 = rect.pos.x + rect.size.x - HANDLE_SIZE;
     let handle_y0 = rect.pos.y + rect.size.y - HANDLE_SIZE;
     if pt.x >= handle_x0 && pt.y >= handle_y0 {
@@ -632,6 +763,20 @@ fn region_at(pt: Vec2, rect: &TerminalRect) -> Option<Region> {
         return Some(Region::TitleBar);
     }
     Some(Region::Content)
+}
+
+/// Convert a window-space cursor position to a cell coord (col, row)
+/// inside the terminal at `rect`. The result is intentionally not
+/// clamped — the caller owns clipping to the actual grid bounds, and
+/// keeping out-of-grid drags signed lets the selection extend off-edge
+/// without losing direction.
+pub fn pt_to_cell(pt: Vec2, rect: &TerminalRect, cell_width: f32) -> (i32, i32) {
+    let local = pt - rect.pos;
+    let content_x = local.x - MARGIN;
+    let content_y = local.y - (TITLE_H + MARGIN);
+    let col = (content_x / cell_width).floor() as i32;
+    let row = (content_y / LINE_HEIGHT).floor() as i32;
+    (col, row)
 }
 
 fn topmost_terminal_at(pt: Vec2, rects: &[(Entity, TerminalRect)]) -> Option<Entity> {
@@ -653,9 +798,21 @@ fn topmost_terminal_at(pt: Vec2, rects: &[(Entity, TerminalRect)]) -> Option<Ent
 fn handle_mouse(
     windows: Query<&Window>,
     buttons: Res<ButtonInput<MouseButton>>,
+    consumed: Res<InputConsumed>,
+    metrics: Res<MonoMetrics>,
     mut mode: ResMut<MouseMode>,
     mut focused: ResMut<FocusedTerminal>,
-    mut terminals: Query<(Entity, &mut TerminalRect), With<TerminalTag>>,
+    projects: Res<Projects>,
+    mut close_requests: ResMut<projects::PendingActions>,
+    mut terminals: Query<
+        (
+            Entity,
+            &mut TerminalRect,
+            Option<&ProjectMembership>,
+            Option<&mut TerminalSelection>,
+        ),
+        With<TerminalTag>,
+    >,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -668,16 +825,53 @@ fn handle_mouse(
         *mode = MouseMode::Idle;
     }
 
-    if buttons.just_pressed(MouseButton::Left) {
-        let rects: Vec<(Entity, TerminalRect)> =
-            terminals.iter().map(|(e, r)| (e, *r)).collect();
+    // Sidebar owns the left edge of the window. Don't let drags
+    // initiated there start a window-drag, and don't pull focus to a
+    // terminal underneath. Sidebar's own click handler runs separately.
+    let in_sidebar = pt.x < SIDEBAR_WIDTH;
+
+    // Radial menu / other input system already swallowed this click.
+    let click_eaten = consumed.0;
+
+    if buttons.just_pressed(MouseButton::Left) && !in_sidebar && !click_eaten {
+        let rects: Vec<(Entity, TerminalRect)> = terminals
+            .iter()
+            .filter(|(_, _, m, _)| match (projects.active, m) {
+                (Some(a), Some(ProjectMembership(p))) => a == *p,
+                _ => false,
+            })
+            .map(|(e, r, _, _)| (e, *r))
+            .collect();
         let Some(target) = topmost_terminal_at(pt, &rects) else {
+            // Click missed every terminal — clear any existing selection.
+            for (_, _, _, sel) in &mut terminals {
+                if let Some(mut sel) = sel {
+                    sel.clear();
+                }
+            }
             return;
         };
+
+        let rect = *terminals.get(target).unwrap().1;
+        if matches!(region_at(pt, &rect), Some(Region::CloseButton)) {
+            // Defer the actual teardown so we don't despawn while iterating.
+            close_requests.close_terminals.push(target);
+            return;
+        }
+
         focused.0 = Some(target);
         bring_to_front(target, &mut terminals);
 
-        let rect = *terminals.get(target).unwrap().1;
+        // Any new click clears every other terminal's selection so only
+        // one terminal at a time has a visible highlight.
+        for (e, _, _, sel) in &mut terminals {
+            if e != target
+                && let Some(mut s) = sel
+            {
+                s.clear();
+            }
+        }
+
         match region_at(pt, &rect) {
             Some(Region::TitleBar) => {
                 *mode = MouseMode::WindowDrag {
@@ -691,7 +885,15 @@ fn handle_mouse(
                     anchor_pos: rect.pos,
                 };
             }
-            Some(Region::Content) | None => {}
+            Some(Region::Content) => {
+                let cell = pt_to_cell(pt, &rect, metrics.cell_width);
+                if let Ok((_, _, _, Some(mut sel))) = terminals.get_mut(target) {
+                    sel.anchor = Some(cell);
+                    sel.head = Some(cell);
+                }
+                *mode = MouseMode::TerminalSelectionDrag { terminal: target };
+            }
+            Some(Region::CloseButton) | None => {}
         }
         return;
     }
@@ -705,20 +907,33 @@ fn handle_mouse(
             terminal,
             grab_offset,
         } => {
-            if let Ok((_, mut rect)) = terminals.get_mut(terminal) {
-                rect.pos = pt - grab_offset;
+            if let Ok((_, mut rect, _, _)) = terminals.get_mut(terminal) {
+                let mut new_pos = pt - grab_offset;
+                // Don't let the title bar slide under the sidebar — once
+                // it does, you can't grab the terminal back without
+                // resizing the window.
+                if new_pos.x < SIDEBAR_WIDTH {
+                    new_pos.x = SIDEBAR_WIDTH;
+                }
+                rect.pos = new_pos;
             }
         }
         MouseMode::WindowResize {
             terminal,
             anchor_pos,
         } => {
-            if let Ok((_, mut rect)) = terminals.get_mut(terminal) {
+            if let Ok((_, mut rect, _, _)) = terminals.get_mut(terminal) {
                 let raw = pt - anchor_pos;
                 rect.size = Vec2::new(
                     raw.x.max(MIN_TERMINAL_SIZE.x),
                     raw.y.max(MIN_TERMINAL_SIZE.y),
                 );
+            }
+        }
+        MouseMode::TerminalSelectionDrag { terminal } => {
+            if let Ok((_, rect, _, Some(mut sel))) = terminals.get_mut(terminal) {
+                let cell = pt_to_cell(pt, &rect, metrics.cell_width);
+                sel.head = Some(cell);
             }
         }
         MouseMode::Idle => {}
@@ -727,10 +942,21 @@ fn handle_mouse(
 
 fn bring_to_front(
     target: Entity,
-    terminals: &mut Query<(Entity, &mut TerminalRect), With<TerminalTag>>,
+    terminals: &mut Query<
+        (
+            Entity,
+            &mut TerminalRect,
+            Option<&ProjectMembership>,
+            Option<&mut TerminalSelection>,
+        ),
+        With<TerminalTag>,
+    >,
 ) {
-    let max_z = terminals.iter().map(|(_, r)| r.z).fold(0.0_f32, f32::max);
-    if let Ok((_, mut rect)) = terminals.get_mut(target) {
+    let max_z = terminals
+        .iter()
+        .map(|(_, r, _, _)| r.z)
+        .fold(0.0_f32, f32::max);
+    if let Ok((_, mut rect, _, _)) = terminals.get_mut(target) {
         if rect.z < max_z {
             rect.z = max_z + 1.0;
         }
@@ -762,11 +988,15 @@ fn position_root(
             s.custom_size = Some(rect.size);
         }
         if let Ok(mut s) = sprite_q.get_mut(chrome.title_bar) {
-            s.custom_size = Some(Vec2::new(rect.size.x, TITLE_H));
+            s.custom_size = Some(Vec2::new(rect.size.x, 1.0));
         }
         if let Ok(mut t) = t_q.get_mut(chrome.resize_handle) {
             t.translation.x = rect.size.x - HANDLE_SIZE;
             t.translation.y = -(rect.size.y - HANDLE_SIZE);
+        }
+        if let Ok(mut t) = t_q.get_mut(chrome.close_button) {
+            t.translation.x = rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET;
+            t.translation.y = -CLOSE_BTN_INSET;
         }
     }
 }

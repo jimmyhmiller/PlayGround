@@ -53,38 +53,123 @@ pub struct GlyphAtlas {
     tofu_slot: u32,
     /// `'static` font bytes. `swash::FontRef` borrows from this.
     font_data: &'static [u8],
-    /// Runtime-loaded fallback fonts, tried in order when the primary
-    /// font has no glyph for a char. Owned `Vec<u8>` so swash can
-    /// borrow from them per call.
-    fallback_fonts: Vec<Vec<u8>>,
+    /// CoreText-backed per-codepoint cascade. Asks the OS which font
+    /// owns each missing char; loads + leaks the bytes once per font.
+    system_fallback: SystemFallback,
     font_size_logical: f32,
     scale_context: ScaleContext,
 }
 
-#[cfg(target_os = "macos")]
-const SYSTEM_FALLBACK_PATHS: &[&str] = &[
-    // Order = priority. Apple Symbols / Arial Unicode cover most BMP
-    // symbols; STIX Two Math fills in Misc-Technical / arrows that the
-    // Apple ones miss (e.g. U+23F5 ⏵, common in powerlevel10k prompts).
-    // LastResort is Apple's catch-all that ships a category-indicator
-    // glyph for every Unicode codepoint — better than tofu when nothing
-    // else matches.
-    "/System/Library/Fonts/Apple Symbols.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    "/System/Library/Fonts/Supplemental/STIXTwoMath.otf",
-    "/System/Library/Fonts/Symbol.ttf",
-    "/System/Library/Fonts/LastResort.otf",
-];
+/// System-cascade glyph fallback. Replaces a hardcoded list of font
+/// paths with the same per-codepoint lookup real terminals (Terminal.app,
+/// Alacritty, kitty) use: ask the OS "which font has this codepoint?"
+/// and load its bytes. Means we don't have to keep growing a list every
+/// time some prompt theme uses a new symbol — the OS already indexes
+/// every installed font's coverage.
+///
+/// On non-macOS this is a stub returning `None`; we'd add fontconfig /
+/// DirectWrite paths analogously when those platforms ship.
+mod system_fallback {
+    use std::collections::HashMap;
+    use std::path::PathBuf;
 
-#[cfg(not(target_os = "macos"))]
-const SYSTEM_FALLBACK_PATHS: &[&str] = &[];
+    pub struct SystemFallback {
+        /// Cached per-char result so we make one OS query per unique
+        /// codepoint, not one per render call.
+        char_cache: HashMap<char, Option<&'static [u8]>>,
+        /// Cached per-font-path bytes. A single font (e.g. Menlo) often
+        /// covers many fallback chars; we load + leak once and reuse.
+        path_cache: HashMap<PathBuf, &'static [u8]>,
+        #[cfg(target_os = "macos")]
+        cascade_base: Option<core_text::font::CTFont>,
+    }
 
-fn load_fallback_fonts() -> Vec<Vec<u8>> {
-    SYSTEM_FALLBACK_PATHS
-        .iter()
-        .filter_map(|p| std::fs::read(p).ok())
-        .collect()
+    impl SystemFallback {
+        pub fn new() -> Self {
+            #[cfg(target_os = "macos")]
+            let cascade_base = {
+                // Menlo is the canonical macOS terminal font, guaranteed
+                // installed, and CT's cascade list off any mono font is
+                // effectively the same — this is just the "current font"
+                // CTFontCreateForString needs to anchor its query.
+                core_text::font::new_from_name("Menlo", 14.0).ok()
+            };
+            Self {
+                char_cache: HashMap::new(),
+                path_cache: HashMap::new(),
+                #[cfg(target_os = "macos")]
+                cascade_base,
+            }
+        }
+
+        pub fn font_bytes_for(&mut self, ch: char) -> Option<&'static [u8]> {
+            if let Some(&cached) = self.char_cache.get(&ch) {
+                return cached;
+            }
+            let result = self.lookup(ch);
+            self.char_cache.insert(ch, result);
+            result
+        }
+
+        #[cfg(target_os = "macos")]
+        fn lookup(&mut self, ch: char) -> Option<&'static [u8]> {
+            use core_foundation::base::{CFRange, TCFType};
+            use core_foundation::string::{CFString, CFStringRef};
+            use core_text::font::{CTFont, CTFontRef};
+
+            // CTFontCreateForString isn't bound by the core-text crate
+            // (its FFI declaration is commented out); declare it here.
+            unsafe extern "C" {
+                fn CTFontCreateForString(
+                    currentFont: CTFontRef,
+                    string: CFStringRef,
+                    range: CFRange,
+                ) -> CTFontRef;
+            }
+
+            let base = self.cascade_base.as_ref()?;
+            let s_buf = ch.to_string();
+            let cfs = CFString::new(&s_buf);
+            // CFRange is over UTF-16 code units, which is what
+            // CFString stores internally.
+            let utf16_len = s_buf.encode_utf16().count() as isize;
+            let range = CFRange {
+                location: 0,
+                length: utf16_len,
+            };
+
+            let fallback = unsafe {
+                let r = CTFontCreateForString(
+                    base.as_concrete_TypeRef(),
+                    cfs.as_concrete_TypeRef(),
+                    range,
+                );
+                if r.is_null() {
+                    return None;
+                }
+                CTFont::wrap_under_create_rule(r)
+            };
+
+            let url = fallback.url()?;
+            let path = url.to_path()?;
+
+            if let Some(&bytes) = self.path_cache.get(&path) {
+                return Some(bytes);
+            }
+            let bytes = std::fs::read(&path).ok()?;
+            let leaked: &'static [u8] = Box::leak(bytes.into_boxed_slice());
+            self.path_cache.insert(path, leaked);
+            Some(leaked)
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        fn lookup(&mut self, _ch: char) -> Option<&'static [u8]> {
+            None
+        }
+    }
 }
+
+use system_fallback::SystemFallback;
 
 impl GlyphAtlas {
     /// Allocate the atlas image, lay out the tofu fallback in slot 0,
@@ -161,7 +246,7 @@ impl GlyphAtlas {
             baseline_atlas_y,
             tofu_slot: 0,
             font_data,
-            fallback_fonts: load_fallback_fonts(),
+            system_fallback: SystemFallback::new(),
             font_size_logical,
             scale_context: ScaleContext::new(),
         };
@@ -194,9 +279,8 @@ impl GlyphAtlas {
             return self.tofu_slot;
         }
 
-        // Try primary font first, then each fallback in order. We collect
-        // the raster bytes + placement here so the borrow on the font
-        // bytes is released before we mutate `self` further.
+        // Try primary font first; on miss, ask the OS via CoreText
+        // which font owns this codepoint and rasterize from those bytes.
         let raster = rasterize_in_font(
             &mut self.scale_context,
             self.font_data,
@@ -204,19 +288,13 @@ impl GlyphAtlas {
             ch,
         )
         .or_else(|| {
-            // Borrow fallback bytes one at a time; can't iterate &self
-            // while mutably borrowing scale_context, so index manually.
-            for i in 0..self.fallback_fonts.len() {
-                if let Some(r) = rasterize_in_font(
-                    &mut self.scale_context,
-                    &self.fallback_fonts[i],
-                    self.font_size_logical,
-                    ch,
-                ) {
-                    return Some(r);
-                }
-            }
-            None
+            let bytes = self.system_fallback.font_bytes_for(ch)?;
+            rasterize_in_font(
+                &mut self.scale_context,
+                bytes,
+                self.font_size_logical,
+                ch,
+            )
         });
 
         let Some((raster_data, placement)) = raster else {

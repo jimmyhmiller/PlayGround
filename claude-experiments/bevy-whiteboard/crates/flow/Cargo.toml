@@ -7,7 +7,7 @@ edition = "2024"
 rand = { version = "0.8", features = ["serde1"] }
 rand_chacha = { version = "0.3", features = ["serde1"] }
 rand_distr = "0.4"
-serde = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive", "rc"] }
 
 [dev-dependencies]
 proptest = "1"

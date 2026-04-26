@@ -35,10 +35,12 @@ impl Plugin for EdgesPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ConnectState>()
             .init_resource::<HiddenEdges>()
+            .init_resource::<HideAll>()
             .init_resource::<DebugMode>()
             .insert_resource(VisualTimelineRes(VisualTimeline::default()))
             .add_systems(Update, (
                 handle_connect_click,
+                toggle_hide_all,
                 draw_edges,
                 ingest_new_events,
                 sync_packet_transforms,
@@ -46,6 +48,23 @@ impl Plugin for EdgesPlugin {
                 despawn_arrived_packets,
                 gc_timeline,
             ).chain());
+    }
+}
+
+/// Global "hide everything visual" toggle. When on:
+///   - `draw_edges` skips all edge arrows.
+///   - `ingest_new_events` still feeds the timeline (causal accounting
+///     stays intact) but doesn't spawn `TravelingPacket` entities.
+///
+/// Toggled by the `H` keyboard hotkey. Designed for stress-test canvases
+/// (Game of Life and similar) where thousands of arrows or hundreds of
+/// in-flight packets per period drown out the actual state.
+#[derive(Resource, Default)]
+pub struct HideAll(pub bool);
+
+fn toggle_hide_all(keys: Res<ButtonInput<KeyCode>>, mut hide: ResMut<HideAll>) {
+    if keys.just_pressed(KeyCode::KeyH) {
+        hide.0 = !hide.0;
     }
 }
 
@@ -270,7 +289,9 @@ fn draw_edges(
     theme: Res<Theme>,
     connect: Res<ConnectState>,
     hidden: Res<HiddenEdges>,
+    hide_all: Res<HideAll>,
 ) {
+    if hide_all.0 { return; }
     for (eid, edge) in flow.sim.edges.iter() {
         if hidden.set.contains(eid) { continue; }
         let Some(&ent_from) = maps.node_to_entity.get(&edge.from) else { continue; };
@@ -357,6 +378,7 @@ fn ingest_new_events(
     mut materials: ResMut<Assets<ColorMaterial>>,
     node_transforms: Query<&Transform, With<crate::bridge::FlowNodeRef>>,
     existing_packets: Query<(Entity, &TravelingPacket)>,
+    hide_all: Res<HideAll>,
 ) {
     let real_now = clock.visual_now;
     for ev in &evs.0 {
@@ -385,6 +407,9 @@ fn ingest_new_events(
             continue;
         }
         let Some(idx) = timeline.ingest(ev, real_now) else { continue; };
+        // Causal bookkeeping is in (ingest above); skip the entity spawn
+        // when the user has toggled the visual layer off.
+        if hide_all.0 { continue; }
         let vp = timeline.packets[idx].clone();
         spawn_packet_entity(
             &mut commands,
