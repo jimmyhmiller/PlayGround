@@ -25,6 +25,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -116,6 +117,12 @@ pub enum WorkerMsg {
 /// Handle the main thread keeps for each terminal.
 pub struct WorkerHandle {
     pub snapshot: Arc<Mutex<GridSnapshot>>,
+    /// Monotonic count of BEL characters processed by the VT parser.
+    /// The renderer compares it against its own per-terminal `last_seen`
+    /// to fire a one-shot visual flash. Atomic so the worker thread
+    /// can bump it from inside libghostty's bell callback without the
+    /// snapshot mutex.
+    pub bell_count: Arc<AtomicU64>,
     tx: Sender<WorkerMsg>,
     /// Write end of the worker's wake pipe. Every channel send pokes
     /// one byte here so the worker's blocking `poll(2)` returns even
@@ -178,6 +185,8 @@ impl WorkerHandle {
             child_alive: true,
         }));
         let snapshot_w = snapshot.clone();
+        let bell_count = Arc::new(AtomicU64::new(0));
+        let bell_count_w = bell_count.clone();
 
         let (tx, rx) = channel::<WorkerMsg>();
 
@@ -199,6 +208,7 @@ impl WorkerHandle {
                     scrollback_log,
                     replay_bytes,
                     snapshot_w,
+                    bell_count_w,
                     rx,
                     wakeup,
                     wake_r,
@@ -208,6 +218,7 @@ impl WorkerHandle {
 
         Ok(Self {
             snapshot,
+            bell_count,
             tx,
             wake_w,
             _join: join,
@@ -246,6 +257,7 @@ fn worker_loop(
     scrollback_log: Option<PathBuf>,
     replay_bytes: Option<Vec<u8>>,
     snapshot: Arc<Mutex<GridSnapshot>>,
+    bell_count: Arc<AtomicU64>,
     rx: Receiver<WorkerMsg>,
     wakeup: Option<EventLoopProxy<WinitUserEvent>>,
     wake_r: OwnedFd,
@@ -268,6 +280,23 @@ fn worker_loop(
         scrollback,
         cell_px,
     );
+
+    // Bell handler. vt.rs deliberately doesn't register one — we own it
+    // here so the closure can poke the per-terminal counter and wake
+    // winit (an idle terminal in reactive mode would otherwise sit on
+    // the bell for up to 5s before flashing).
+    {
+        let bell_count = bell_count.clone();
+        let bell_wakeup = wakeup.clone();
+        terminal
+            .on_bell(move |_term| {
+                bell_count.fetch_add(1, Ordering::Relaxed);
+                if let Some(p) = &bell_wakeup {
+                    let _ = p.send_event(WinitUserEvent::WakeUp);
+                }
+            })
+            .expect("on_bell");
+    }
 
     // Replay previous-session bytes (if any) into the fresh Terminal so
     // its scrollback matches what was on screen before. We must clear

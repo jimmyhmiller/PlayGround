@@ -8,12 +8,14 @@ use bevy::prelude::*;
 use common::make_app;
 use flow::Value;
 use flow_bevy::bridge::{FlowSim, SimClock};
-use flow_bevy::edges::{TravelingPacket, VisualTimelineRes};
+use flow_bevy::edges::VisualTimelineRes;
 
+/// Number of packets currently in the visual timeline. Used to be a
+/// `Query<&TravelingPacket>::iter().count()` over per-packet entities;
+/// the entities are gone now, so we count records on the timeline
+/// resource directly. Same data, no entity churn.
 fn count_packets(app: &mut App) -> usize {
-    let world = app.world_mut();
-    let mut q = world.query::<&TravelingPacket>();
-    q.iter(world).count()
+    app.world().resource::<VisualTimelineRes>().0.packets.len()
 }
 
 /// Pin visual_now to sim_now after each chunk (in headless tests

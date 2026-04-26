@@ -173,6 +173,22 @@ pub struct CellSprites {
 #[derive(Component, Default)]
 pub struct TerminalRev(pub u64);
 
+/// Per-terminal visual-bell state. `last_seen` mirrors the worker's
+/// `bell_count` so we only flash once per BEL — not every frame the
+/// counter is non-zero. `last_bell_at` is the wall-clock instant of
+/// the most recent bell; `apply_bell_pulse` fades the chrome from
+/// flash colour back to the panel bg over `BELL_FLASH_DURATION` and
+/// then leaves the colour at rest.
+#[derive(Component, Default)]
+pub struct BellPulse {
+    pub last_seen: u64,
+    pub last_bell_at: Option<std::time::Instant>,
+}
+
+pub const BELL_FLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(180);
+const PANEL_BG: Color = Color::srgb(0.105, 0.110, 0.122);
+const BELL_FLASH: Color = Color::srgb(0.78, 0.82, 0.92);
+
 #[derive(Resource)]
 pub struct MonoFont(pub Handle<Font>);
 
@@ -298,6 +314,9 @@ impl Plugin for TerminalPlugin {
                     handle_keyboard,
                     sync_grid,
                     position_root,
+                    apply_bell_pulse,
+                    clear_active_unread,
+                    sync_dock_badge,
                 )
                     .chain(),
             );
@@ -323,7 +342,10 @@ fn release_os_focus() {}
 pub struct IpcInbox(pub std::sync::mpsc::Receiver<ipc::OpenRequest>);
 
 fn setup_ipc_listener(world: &mut World) {
-    if let Some(rx) = ipc::spawn_listener() {
+    let wakeup = world
+        .get_resource::<bevy::winit::EventLoopProxyWrapper>()
+        .map(|w| bevy::winit::EventLoopProxy::clone(w));
+    if let Some(rx) = ipc::spawn_listener(wakeup) {
         world.insert_non_send_resource(IpcInbox(rx));
     }
 }
@@ -512,6 +534,7 @@ pub fn spawn_terminal(
             TerminalRev::default(),
             CellSprites::default(),
             TerminalSelection::default(),
+            BellPulse::default(),
             Transform::default(),
             Visibility::default(),
         ))
@@ -524,7 +547,7 @@ pub fn spawn_terminal(
         .spawn((
             ChildOf(terminal_entity),
             Sprite {
-                color: Color::srgb(0.105, 0.110, 0.122),
+                color: PANEL_BG,
                 custom_size: Some(rect.size),
                 ..default()
             },
@@ -778,6 +801,14 @@ fn handle_keyboard(
         // Named keys we know the VT encoding for. Arrows / Home / End
         // honor DECCKM.
         if let Some(bytes) = named_key_bytes(&ev.key_code, app_cursor) {
+            // Option+Enter sends ESC+CR (the iTerm2-compatible "meta
+            // newline" convention). Shells / readline bind \e\r to
+            // self-insert-newline, so the user gets a literal LF in
+            // their command line instead of submitting it. Same trick
+            // Terminal.app's "Option-Enter inserts newline" uses.
+            if alt && matches!(ev.key_code, KeyCode::Enter | KeyCode::NumpadEnter) {
+                out.push(0x1b);
+            }
             out.extend_from_slice(bytes);
             continue;
         }
@@ -1264,6 +1295,134 @@ fn position_root(
 /// on grid resize — every other frame just mutates `Sprite.color` and
 /// `TextureAtlas.index` on the dirty rows. No cosmic-text, no Text2d,
 /// no spawn/despawn churn.
+/// Visual bell. Polls each terminal's worker `bell_count` and, on a
+/// fresh BEL, kicks off a one-shot fade on the panel background AND
+/// bumps the per-project unread counter when the user can't currently
+/// see that terminal (window unfocused, or its project not active).
+/// The chrome's bg sprite lerps from `BELL_FLASH` back to `PANEL_BG`
+/// over `BELL_FLASH_DURATION`. Once elapsed > duration we leave the
+/// colour at rest and skip the sprite write — frames with no active
+/// flash do no work.
+fn apply_bell_pulse(
+    store: Res<TerminalStore>,
+    windows: Query<&Window>,
+    mut projects: ResMut<Projects>,
+    mut terms: Query<(
+        Entity,
+        &TerminalChrome,
+        Option<&ProjectMembership>,
+        &mut BellPulse,
+    )>,
+    mut sprite_q: Query<&mut Sprite>,
+) {
+    let now = std::time::Instant::now();
+    let window_focused = windows.iter().any(|w| w.focused);
+    let active_project = projects.active;
+    for (entity, chrome, membership, mut pulse) in &mut terms {
+        let Some(data) = store.map.get(&entity) else {
+            continue;
+        };
+        let cur = data
+            .worker
+            .bell_count
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if cur > pulse.last_seen {
+            let new_bells = cur - pulse.last_seen;
+            pulse.last_seen = cur;
+            pulse.last_bell_at = Some(now);
+            // Only count bells the user couldn't see. A bell on the
+            // visible pane is its own visual feedback (the flash); the
+            // dock badge / sidebar badge are for "you missed something
+            // over here" notifications.
+            if let Some(ProjectMembership(pid)) = membership {
+                let visible = window_focused && active_project == Some(*pid);
+                if !visible {
+                    for _ in 0..new_bells {
+                        projects.bump_unread(*pid);
+                    }
+                }
+            }
+        }
+        let Some(t0) = pulse.last_bell_at else {
+            continue;
+        };
+        let elapsed = now.duration_since(t0);
+        if elapsed >= BELL_FLASH_DURATION {
+            // Fade complete — restore rest colour exactly once and
+            // clear the timer so this branch doesn't re-fire.
+            if let Ok(mut s) = sprite_q.get_mut(chrome.bg) {
+                s.color = PANEL_BG;
+            }
+            pulse.last_bell_at = None;
+            continue;
+        }
+        let t = elapsed.as_secs_f32() / BELL_FLASH_DURATION.as_secs_f32();
+        let mix = 1.0 - t; // 1 at t=0 → 0 at t=duration
+        let color = lerp_srgb(PANEL_BG, BELL_FLASH, mix);
+        if let Ok(mut s) = sprite_q.get_mut(chrome.bg) {
+            s.color = color;
+        }
+    }
+}
+
+/// Clears the active project's unread count whenever the OS window is
+/// focused — that's the moment "the user is looking at it" becomes
+/// true. Runs every frame; the no-op fast path inside `clear_unread`
+/// (returns false when count was already zero) keeps the cost free.
+fn clear_active_unread(
+    windows: Query<&Window>,
+    mut projects: ResMut<Projects>,
+) {
+    let focused = windows.iter().any(|w| w.focused);
+    if !focused {
+        return;
+    }
+    let Some(active) = projects.active else {
+        return;
+    };
+    projects.clear_unread(active);
+}
+
+/// Push the sum of unread bell counts to the macOS Dock icon as a
+/// badge label. Tracked via a `Local<u64>` so we only hit the FFI when
+/// the value actually changes — `setBadgeLabel` is cheap but it's not
+/// free, and most frames have no change.
+#[cfg(target_os = "macos")]
+fn sync_dock_badge(projects: Res<Projects>, mut last: Local<u64>) {
+    let total = projects.unread_total();
+    if total == *last {
+        return;
+    }
+    *last = total;
+    use objc2_app_kit::NSApplication;
+    use objc2_foundation::{MainThreadMarker, NSString};
+    let Some(mtm) = MainThreadMarker::new() else {
+        return;
+    };
+    let app = NSApplication::sharedApplication(mtm);
+    let tile = unsafe { app.dockTile() };
+    let label = if total == 0 {
+        None
+    } else {
+        Some(NSString::from_str(&total.to_string()))
+    };
+    unsafe { tile.setBadgeLabel(label.as_deref()) };
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sync_dock_badge(_projects: Res<Projects>, _last: Local<u64>) {}
+
+fn lerp_srgb(a: Color, b: Color, t: f32) -> Color {
+    let a = a.to_srgba();
+    let b = b.to_srgba();
+    Color::srgba(
+        a.red + (b.red - a.red) * t,
+        a.green + (b.green - a.green) * t,
+        a.blue + (b.blue - a.blue) * t,
+        a.alpha + (b.alpha - a.alpha) * t,
+    )
+}
+
 fn sync_grid(
     metrics: Res<MonoMetrics>,
     mut atlas: ResMut<GlyphAtlas>,

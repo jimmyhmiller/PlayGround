@@ -251,6 +251,14 @@ pub struct Sim {
     /// nothing about the timeline mechanism involves the host UI.
     #[serde(default)]
     pub timeline: crate::timeline::Timeline,
+    /// Per-phase wall-clock samples accumulated during `run_until`.
+    /// Each entry is `(phase_name, microseconds)`. The host drains
+    /// this after each `run_until` call (see `drain_perf_samples`)
+    /// to feed its own perf-tracking layer; the sim itself only
+    /// pushes — never reads or trims. Drained vec stays at its
+    /// cap allocation so steady-state runs don't reallocate.
+    #[serde(skip)]
+    pub perf_samples: Vec<(&'static str, f64)>,
 }
 
 /// Serde adapter for `BinaryHeap<Reverse<T>>` — serializes as a flat
@@ -333,7 +341,27 @@ impl Sim {
             fireable: BTreeSet::new(),
             error_counts: BTreeMap::new(),
             timeline: crate::timeline::Timeline::new(),
+            perf_samples: Vec::new(),
         }
+    }
+
+    /// Drain the per-phase timing samples accumulated during the most
+    /// recent `run_until` call. Each entry is `(phase_name, micros)`.
+    /// Called by the host once per frame so it can roll the samples
+    /// into its own diagnostics layer; clears the buffer in place so
+    /// the next `run_until` starts fresh.
+    pub fn drain_perf_samples(&mut self) -> std::vec::Drain<'_, (&'static str, f64)> {
+        self.perf_samples.drain(..)
+    }
+
+    /// Record one phase sample. Inline so non-debug builds don't pay
+    /// for an indirect call. `Instant::elapsed` is a couple of
+    /// `clock_gettime` syscalls — fine at the granularity we're
+    /// timing (whole phases of `run_until`, not per-rule firings).
+    #[inline]
+    pub(crate) fn record_phase_us(&mut self, name: &'static str, start: std::time::Instant) {
+        let us = start.elapsed().as_secs_f64() * 1_000_000.0;
+        self.perf_samples.push((name, us));
     }
 
     /// Mark `nid` as needing a fire-scan. Idempotent. Called whenever

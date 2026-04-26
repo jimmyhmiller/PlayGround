@@ -15,10 +15,31 @@ impl Sim {
     /// Run the simulation forward until either `deadline_ns` is reached
     /// or the world becomes quiescent (no fireable rules, no in-flight
     /// packets). Returns the number of rule firings that occurred.
+    ///
+    /// Records per-phase wall-clock samples into `Sim::perf_samples`
+    /// (drained by the host each frame). Phases:
+    ///   - `sim.run_until.total` — total wall time inside this call
+    ///   - `sim.fire_rules` — inner loop firing all instant-due rules
+    ///   - `sim.dispatch_actions` — scenario-action queue at this instant
+    ///   - `sim.fire_timeline` — user-editable timeline events at this instant
+    ///   - `sim.deliver_packets` — drains the in-flight heap at this instant
+    ///
+    /// Phase samples are accumulated across the whole `run_until` call
+    /// (multiple instants), then pushed once per phase. That keeps the
+    /// sample-vec small under heavy bursts (one entry per phase per call,
+    /// not one per inner iteration).
     pub fn run_until(&mut self, deadline_ns: Time) -> usize {
+        use std::time::Instant;
+        let total_start = Instant::now();
+        let mut fire_us: f64 = 0.0;
+        let mut action_us: f64 = 0.0;
+        let mut timeline_us: f64 = 0.0;
+        let mut deliver_us: f64 = 0.0;
+
         let mut firings = 0usize;
         loop {
             // 1. Fire every rule that can fire at the current instant.
+            let phase_start = Instant::now();
             let mut instant_steps = 0usize;
             while self.try_fire_one() {
                 firings += 1;
@@ -31,6 +52,7 @@ impl Sim {
                     );
                 }
             }
+            fire_us += phase_start.elapsed().as_secs_f64() * 1_000_000.0;
 
             // 2. Nothing more to fire. Next event is the earliest of:
             //    (a) a scheduled scenario action
@@ -53,6 +75,11 @@ impl Sim {
                     });
                     self.now_ns = deadline_ns;
                 }
+                self.perf_samples.push(("sim.fire_rules", fire_us));
+                self.perf_samples.push(("sim.dispatch_actions", action_us));
+                self.perf_samples.push(("sim.fire_timeline", timeline_us));
+                self.perf_samples.push(("sim.deliver_packets", deliver_us));
+                self.record_phase_us("sim.run_until.total", total_start);
                 return firings;
             };
 
@@ -64,6 +91,11 @@ impl Sim {
                     });
                     self.now_ns = deadline_ns;
                 }
+                self.perf_samples.push(("sim.fire_rules", fire_us));
+                self.perf_samples.push(("sim.dispatch_actions", action_us));
+                self.perf_samples.push(("sim.fire_timeline", timeline_us));
+                self.perf_samples.push(("sim.deliver_packets", deliver_us));
+                self.record_phase_us("sim.run_until.total", total_start);
                 return firings;
             }
 
@@ -76,19 +108,24 @@ impl Sim {
             }
 
             // 3a. Apply scheduled scenario actions for this instant, in order.
+            let phase_start = Instant::now();
             while let Some(head) = self.pending_actions.peek() {
                 if head.0.at_ns != self.now_ns { break; }
                 let p = self.pending_actions.pop().unwrap().0;
                 self.apply_action(p.action);
             }
+            action_us += phase_start.elapsed().as_secs_f64() * 1_000_000.0;
 
             // 3a'. Fire due timeline events (user-editable scenario).
             // Type-mismatched writes are silently no-op'd but still
             // mark the event fired so the queue makes progress —
             // see timeline.rs for the rationale.
+            let phase_start = Instant::now();
             self.fire_due_timeline_events();
+            timeline_us += phase_start.elapsed().as_secs_f64() * 1_000_000.0;
 
             // 3b. Deliver all packets scheduled for this instant.
+            let phase_start = Instant::now();
             while let Some(head) = self.in_flight.peek() {
                 if head.0.arrives_at_ns != self.now_ns { break; }
                 let sched = self.in_flight.pop().unwrap().0;
@@ -111,6 +148,7 @@ impl Sim {
                     self.fireable.insert(leaf);
                 }
             }
+            deliver_us += phase_start.elapsed().as_secs_f64() * 1_000_000.0;
         }
     }
 

@@ -161,7 +161,6 @@ fn handle_hotkeys(
     mut flow: ResMut<FlowSim>,
     mut timeline: ResMut<crate::edges::VisualTimelineRes>,
     mut load: bevy::ecs::message::MessageWriter<LoadExample>,
-    mut debug: ResMut<crate::edges::DebugMode>,
 ) {
     // Digit keys map to Example::ALL in order. Matches the glyph shown
     // on each Examples-section button, so the palette doubles as a
@@ -193,10 +192,6 @@ fn handle_hotkeys(
     }
     if keys.just_pressed(KeyCode::Escape) { active.0 = Tool::Select; }
     if keys.just_pressed(KeyCode::Space) { clock.paused = !clock.paused; }
-    if keys.just_pressed(KeyCode::KeyD) {
-        // Toggle packet-id labels on every TravelingPacket.
-        debug.on = !debug.on;
-    }
     if keys.just_pressed(KeyCode::BracketLeft)  { clock.multiplier *= 0.5; }
     if keys.just_pressed(KeyCode::BracketRight) { clock.multiplier *= 2.0; }
     // Visual scale — decoupled from sim speed. `-` halves (packets

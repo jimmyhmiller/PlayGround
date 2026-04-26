@@ -1,21 +1,26 @@
 //! Regression test for the visual reply pipeline. Under F1 there
 //! is no per-edge throttle — the visual timeline creates one
 //! `VisualPacket` per `PacketEmitted`, so as long as the sim logs
-//! a reply, there is a corresponding reverse-direction
-//! `TravelingPacket`.
+//! a reply, there is a corresponding reverse-direction visual.
 //!
 //! "Reverse direction" here means the packet's `(from, to)` is the
-//! opposite of some declared sim edge. The test classifies live
-//! packets against the edge map instead of reading a flag off the
-//! component.
+//! opposite of some declared sim edge. The test classifies packets
+//! against the edge map.
+//!
+//! Reads the visual state directly from `VisualTimelineRes` and
+//! `SimClock.visual_now` — there are no per-packet Bevy entities
+//! anymore (the rendering moved to the instanced `packet_cloud`
+//! material), and the timeline resource is the single source of
+//! truth for what's animating.
 
 mod common;
 
 use bevy::prelude::*;
 use common::make_app;
 use flow_bevy::bridge::{FlowSim, SimClock};
-use flow_bevy::edges::TravelingPacket;
+use flow_bevy::edges::VisualTimelineRes;
 use flow_bevy::examples::{Example, LoadExample};
+use flow_bevy::visual::VisualPacket;
 
 fn load(app: &mut App, ex: Example) {
     app.world_mut()
@@ -27,9 +32,8 @@ fn load(app: &mut App, ex: Example) {
 
 /// Advance the sim by `step_ns` using a one-shot sim tick (sets
 /// `SimClock::step_once_ns` and runs `app.update()`). This routes
-/// through the real `advance_sim` system and `collect_new_events`
-/// and `spawn_traveling_packets`, unlike `sim.run_until` which
-/// bypasses Bevy entirely.
+/// through the real `advance_sim` system and `collect_new_events`,
+/// unlike `sim.run_until` which bypasses Bevy entirely.
 fn step_frame(app: &mut App, step_ns: u64) {
     app.world_mut()
         .resource_mut::<SimClock>()
@@ -41,25 +45,29 @@ fn step_frame(app: &mut App, step_ns: u64) {
 /// edges. Returns `(is_forward, is_reverse)`. Both false means the
 /// packet has no edge relationship either way (shouldn't happen in
 /// practice — the sim only emits between connected nodes).
-fn classify(pkt: &TravelingPacket, edges: &[(flow::NodeId, flow::NodeId)]) -> (bool, bool) {
+fn classify(pkt: &VisualPacket, edges: &[(flow::NodeId, flow::NodeId)]) -> (bool, bool) {
     let forward = edges.iter().any(|(f, t)| *f == pkt.from && *t == pkt.to);
     let reverse = edges.iter().any(|(f, t)| *f == pkt.to && *t == pkt.from);
     (forward, reverse)
 }
 
-fn edges_snapshot(app: &mut App) -> Vec<(flow::NodeId, flow::NodeId)> {
+fn edges_snapshot(app: &App) -> Vec<(flow::NodeId, flow::NodeId)> {
     app.world().resource::<FlowSim>().sim.edges.values()
         .map(|e| (e.from, e.to))
         .collect()
 }
 
-fn count_packets_by_direction(app: &mut App) -> (usize, usize) {
+fn count_packets_by_direction(app: &App) -> (usize, usize) {
+    // Counts every packet currently held in the visual timeline,
+    // not just the visibility-window subset. Matches the old
+    // `Query<&TravelingPacket>::iter().count()` semantics: the test
+    // is checking that the visual layer received the emit, not
+    // that the renderer has it visible at this exact `visual_now`.
     let edges = edges_snapshot(app);
-    let world = app.world_mut();
-    let mut q = world.query::<&TravelingPacket>();
+    let timeline = &app.world().resource::<VisualTimelineRes>().0;
     let mut forward = 0;
     let mut reverse = 0;
-    for pkt in q.iter(world) {
+    for pkt in timeline.packets.iter() {
         let (fw, rv) = classify(pkt, &edges);
         if fw { forward += 1; }
         else if rv { reverse += 1; }
@@ -68,20 +76,17 @@ fn count_packets_by_direction(app: &mut App) -> (usize, usize) {
 }
 
 /// Snapshot tuple: (is_reverse, visible, progress, emit_real).
-/// Progress is derived from the real time clock and the packet's
-/// emit/arrive, matching the runtime's formula.
-fn snapshot_packets(app: &mut App) -> Vec<(bool, bool, f32, f32)> {
+/// Iterates every packet in the timeline (not just visible ones),
+/// labelling each with its current visibility — matches what the
+/// old per-entity `(TravelingPacket, Visibility)` query returned.
+fn snapshot_packets(app: &App) -> Vec<(bool, bool, f32, f32)> {
     let edges = edges_snapshot(app);
-    let real_t = app.world().resource::<Time>().elapsed_secs_f64();
-    let world = app.world_mut();
-    let mut q = world.query::<(&TravelingPacket, &Visibility)>();
-    q.iter(world)
-        .map(|(pkt, vis)| {
+    let now = app.world().resource::<SimClock>().visual_now;
+    let timeline = &app.world().resource::<VisualTimelineRes>().0;
+    timeline.packets.iter()
+        .map(|pkt| {
             let (_fw, rv) = classify(pkt, &edges);
-            let denom = (pkt.arrive_real - pkt.emit_real).max(1e-9);
-            let progress = ((real_t - pkt.emit_real) / denom).clamp(0.0, 1.0) as f32;
-            let visible = matches!(vis, Visibility::Visible | Visibility::Inherited);
-            (rv, visible, progress, pkt.emit_real as f32)
+            (rv, pkt.is_visible_at(now), pkt.progress_at(now), pkt.emit_real as f32)
         })
         .collect()
 }
@@ -102,7 +107,7 @@ fn two_clients_one_worker_visual_replies_spawn() {
     let mut saw_reverse_ever = false;
     for _ in 0..20 {
         step_frame(&mut app, 50_000_000); // 50 ms sim per frame
-        let (f, r) = count_packets_by_direction(&mut app);
+        let (f, r) = count_packets_by_direction(&app);
         if f > 0 { saw_forward_ever = true; }
         if r > 0 { saw_reverse_ever = true; }
     }
@@ -138,7 +143,7 @@ fn client_worker_visual_reply_spawns() {
     let mut saw_reverse = false;
     for _ in 0..20 {
         step_frame(&mut app, 50_000_000);
-        let (_, r) = count_packets_by_direction(&mut app);
+        let (_, r) = count_packets_by_direction(&app);
         if r > 0 { saw_reverse = true; }
     }
     assert!(saw_reverse, "ClientWorker: never spawned a reverse reply visual");
@@ -154,7 +159,7 @@ fn client_queue_worker_visual_ack_spawns() {
     let mut saw_reverse = false;
     for _ in 0..20 {
         step_frame(&mut app, 50_000_000);
-        let (_, r) = count_packets_by_direction(&mut app);
+        let (_, r) = count_packets_by_direction(&app);
         if r > 0 { saw_reverse = true; }
     }
     assert!(saw_reverse, "ClientQueueWorker: never spawned a reverse ack visual");
@@ -197,7 +202,7 @@ fn v3_first_frame_only_source_emit_is_visible() {
     // complete.
     step_frame(&mut app, 50_000_000);
 
-    let snap = snapshot_packets(&mut app);
+    let snap = snapshot_packets(&app);
     // Many packets may have been spawned (generators × 3, each
     // with several hops). But at this moment, the only ones
     // VISIBLE should be those on the "first hop" of each chain —
@@ -233,7 +238,7 @@ fn v3_reverse_never_visible_during_forward_through_router() {
 
     for _ in 0..30 {
         step_frame(&mut app, 30_000_000);
-        let snap = snapshot_packets(&mut app);
+        let snap = snapshot_packets(&app);
         // For each visible reverse packet, check that no forward
         // on any edge is still animating. (We can't easily check
         // "same edge" without exposing edge IDs; the weaker check

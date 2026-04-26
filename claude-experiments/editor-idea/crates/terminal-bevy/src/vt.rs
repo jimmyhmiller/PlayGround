@@ -107,7 +107,10 @@ pub fn register_all_handlers(
             .expect("on_pty_write");
     }
 
-    terminal.on_bell(|_term| {}).expect("on_bell");
+    // `on_bell` is registered by the caller (worker.rs) so it can wire
+    // the closure to its own per-terminal counter + winit wakeup. Don't
+    // double-register here — the binding's setter would error on the
+    // second call, and we'd lose the worker's handler anyway.
     terminal
         .on_enquiry(|_term| Some(APP_NAME))
         .expect("on_enquiry");

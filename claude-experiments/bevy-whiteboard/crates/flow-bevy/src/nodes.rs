@@ -489,13 +489,16 @@ fn sync_node_state_labels(
     flow: Res<FlowSim>,
     mut labels: Query<(&NodeStateLabel, &ChildOf, &mut Text2d)>,
     parent_kind_q: Query<&NodeKind>,
+    mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
+    crate::time_phase!(perf, "nodes.sync_node_state_labels", {
     for (label, child_of, mut text) in labels.iter_mut() {
         let Ok(kind) = parent_kind_q.get(child_of.parent()) else { continue };
         let Some(node) = flow.sim.nodes.get(&label.0) else { continue };
         let formatted = format_node_state(kind.0, node);
         if text.0 != formatted { text.0 = formatted; }
     }
+    });
 }
 
 fn format_node_state(kind: Kind, node: &flow::Node) -> String {

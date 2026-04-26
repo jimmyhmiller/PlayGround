@@ -21,14 +21,14 @@
 //! we just scale sim time to real time).
 
 use bevy::prelude::*;
-use flow::{EdgeId, NodeId, PacketId};
+use flow::EdgeId;
 
 use crate::bridge::{EntityMaps, FlowEdgeRef, FlowSim, NewEvents};
 use crate::camera::{MainCamera, cursor_to_world};
 use crate::nodes::NodeKind;
 use crate::theme::Theme;
 use crate::tool::{ActiveTool, Tool};
-use crate::visual::{VisualPacket, VisualTimeline};
+use crate::visual::VisualTimeline;
 
 pub struct EdgesPlugin;
 impl Plugin for EdgesPlugin {
@@ -36,29 +36,24 @@ impl Plugin for EdgesPlugin {
         app.init_resource::<ConnectState>()
             .init_resource::<HiddenEdges>()
             .init_resource::<HideAll>()
-            .init_resource::<DebugMode>()
             .insert_resource(VisualTimelineRes(VisualTimeline::default()))
             .add_systems(Update, (
                 handle_connect_click,
                 toggle_hide_all,
                 draw_edges,
                 ingest_new_events,
-                sync_packet_transforms,
-                sync_packet_id_labels,
-                despawn_arrived_packets,
                 gc_timeline,
             ).chain());
     }
 }
 
-/// Global "hide everything visual" toggle. When on:
-///   - `draw_edges` skips all edge arrows.
-///   - `ingest_new_events` still feeds the timeline (causal accounting
-///     stays intact) but doesn't spawn `TravelingPacket` entities.
+/// Global "hide everything visual" toggle. When on, `draw_edges`
+/// skips all edge arrows and the packet-cloud renderer zeroes its
+/// active count.
 ///
-/// Toggled by the `H` keyboard hotkey. Designed for stress-test canvases
-/// (Game of Life and similar) where thousands of arrows or hundreds of
-/// in-flight packets per period drown out the actual state.
+/// Toggled by the `H` keyboard hotkey. Designed for stress-test
+/// canvases (Game of Life and similar) where thousands of arrows
+/// drown out the actual state.
 #[derive(Resource, Default)]
 pub struct HideAll(pub bool);
 
@@ -101,33 +96,6 @@ pub struct HiddenEdges {
 #[derive(Resource, Default)]
 pub struct ConnectState {
     pub source: Option<Entity>,
-}
-
-/// A live visual packet. Fields are a read-only copy of the matching
-/// `VisualPacket` in the timeline resource — both are set at spawn
-/// and never mutated. Keeping the values here avoids a timeline
-/// lookup in the per-frame sync system and makes tests trivial
-/// (`app.world().query::<&TravelingPacket>()`).
-#[derive(Component, Clone, Debug)]
-pub struct TravelingPacket {
-    pub packet_id: PacketId,
-    pub from: NodeId,
-    pub to: NodeId,
-    pub emit_real: f64,
-    pub arrive_real: f64,
-}
-
-/// Marker component on the text child entity that shows a packet's
-/// id in debug mode. Updated to match visibility state of the parent
-/// packet each frame.
-#[derive(Component)]
-pub struct PacketIdLabel;
-
-/// When on, each `TravelingPacket` renders its `packet_id` as a
-/// small label on the dot. Toggled by hotkey `d` (see palette).
-#[derive(Resource, Default)]
-pub struct DebugMode {
-    pub on: bool,
 }
 
 /// If the payload is `packet(Int(slot))` or `req(Int(slot))`, extract
@@ -370,16 +338,13 @@ fn draw_arrow(gizmos: &mut Gizmos, a: Vec2, b: Vec2, color: Color) {
 /// ingested through a fixed sim↔real mapping, so visuals play at a
 /// rate that's independent of sim speed.
 fn ingest_new_events(
-    mut commands: Commands,
     evs: Res<NewEvents>,
     clock: Res<crate::bridge::SimClock>,
-    maps: Res<EntityMaps>,
     mut timeline: ResMut<VisualTimelineRes>,
-    node_transforms: Query<&Transform, With<crate::bridge::FlowNodeRef>>,
-    existing_packets: Query<(Entity, &TravelingPacket)>,
-    hide_all: Res<HideAll>,
+    mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
     let real_now = clock.visual_now;
+    crate::time_phase!(perf, "edges.ingest_new_events", {
     for ev in &evs.0 {
         // State-change boundary: either a scheduled timeline event
         // fired, or the user manually edited a slot from the
@@ -397,123 +362,26 @@ fn ingest_new_events(
             flow::Event::TimelineEventFired { .. } |
             flow::Event::UserSlotEdit { .. }
         ) {
-            let dropped_ids = timeline.0.drop_pending_after(real_now);
-            for (e, pkt) in existing_packets.iter() {
-                if dropped_ids.contains(&pkt.packet_id) {
-                    commands.entity(e).despawn();
-                }
-            }
+            let _ = timeline.0.drop_pending_after(real_now);
             continue;
         }
-        let Some(idx) = timeline.ingest(ev, real_now) else { continue; };
-        // Causal bookkeeping is in (ingest above); skip the entity spawn
-        // when the user has toggled the visual layer off.
-        if hide_all.0 { continue; }
-        let vp = timeline.packets[idx].clone();
-        spawn_packet_entity(&mut commands, &maps, &node_transforms, &vp);
+        let _ = timeline.ingest(ev, real_now);
     }
-}
-
-/// Spawn a lightweight per-packet marker entity. Rendering is handled
-/// by [`crate::packet_cloud`]; this entity carries only the data
-/// existing tests query (TravelingPacket + Transform + Visibility).
-/// No `Mesh2d`/`MeshMaterial2d`/child label — those costs scaled
-/// linearly with packet count and have moved into the single
-/// instanced draw call.
-fn spawn_packet_entity(
-    commands: &mut Commands,
-    maps: &EntityMaps,
-    node_transforms: &Query<&Transform, With<crate::bridge::FlowNodeRef>>,
-    vp: &VisualPacket,
-) {
-    let initial_pos = maps
-        .node_to_entity
-        .get(&vp.from)
-        .and_then(|e| node_transforms.get(*e).ok())
-        .map(|t| t.translation.truncate())
-        .unwrap_or(Vec2::ZERO);
-
-    commands.spawn((
-        Transform::from_xyz(initial_pos.x, initial_pos.y, 3.0),
-        Visibility::Hidden,
-        TravelingPacket {
-            packet_id: vp.packet_id,
-            from: vp.from,
-            to: vp.to,
-            emit_real: vp.emit_real,
-            arrive_real: vp.arrive_real,
-        },
-    ));
-}
-
-/// Per frame: snap each packet's transform + visibility to the pure
-/// formalism. `emit_real <= now < arrive_real` ⇒ visible, position
-/// interpolated `from → to`. Outside that window ⇒ hidden (either
-/// not-yet-alive or already-arrived; `despawn_arrived_packets`
-/// deletes the latter).
-fn sync_packet_transforms(
-    clock: Res<crate::bridge::SimClock>,
-    maps: Res<EntityMaps>,
-    nodes: Query<&Transform, (With<crate::bridge::FlowNodeRef>, Without<TravelingPacket>)>,
-    mut pkts: Query<(&mut Transform, &TravelingPacket, &mut Visibility)>,
-) {
-    let now = clock.visual_now;
-    for (mut tf, pkt, mut vis) in pkts.iter_mut() {
-        if now < pkt.emit_real || now >= pkt.arrive_real {
-            *vis = Visibility::Hidden;
-            continue;
-        }
-        *vis = Visibility::Visible;
-        let denom = pkt.arrive_real - pkt.emit_real;
-        let prog = ((now - pkt.emit_real) / denom).clamp(0.0, 1.0) as f32;
-        let Some(&ent_from) = maps.node_to_entity.get(&pkt.from) else { continue; };
-        let Some(&ent_to)   = maps.node_to_entity.get(&pkt.to)   else { continue; };
-        let Ok(a) = nodes.get(ent_from) else { continue; };
-        let Ok(b) = nodes.get(ent_to) else { continue; };
-        let p = a.translation.truncate().lerp(b.translation.truncate(), prog);
-        tf.translation.x = p.x;
-        tf.translation.y = p.y;
-    }
-}
-
-/// Flip each `PacketIdLabel`'s visibility to match `DebugMode.on`.
-fn sync_packet_id_labels(
-    debug: Res<DebugMode>,
-    mut labels: Query<&mut Visibility, With<PacketIdLabel>>,
-) {
-    let want = if debug.on { Visibility::Inherited } else { Visibility::Hidden };
-    for mut v in labels.iter_mut() {
-        if *v != want { *v = want; }
-    }
-}
-
-/// Despawn entities whose packets have arrived.
-fn despawn_arrived_packets(
-    mut commands: Commands,
-    clock: Res<crate::bridge::SimClock>,
-    q: Query<(Entity, &TravelingPacket)>,
-) {
-    let now = clock.visual_now;
-    for (e, pkt) in q.iter() {
-        if now >= pkt.arrive_real {
-            commands.entity(e).despawn();
-        }
-    }
+    });
 }
 
 /// Trim the timeline's arrived-history so long sessions don't grow
 /// unbounded. Keeps a ~2s window past arrival for debugging and
 /// test introspection.
-///
-/// `gc_before` retains packets whose `arrive_real >= now - keep`,
-/// so already-despawned entities get pruned without affecting any
-/// live `TravelingPacket` (live ones have `arrive_real >= now`).
 fn gc_timeline(
     clock: Res<crate::bridge::SimClock>,
     mut timeline: ResMut<VisualTimelineRes>,
+    mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
     let now = clock.visual_now;
-    timeline.gc_before(now, 2.0);
+    crate::time_phase!(perf, "edges.gc_timeline", {
+        timeline.gc_before(now, 2.0);
+    });
 }
 
 #[cfg(test)]

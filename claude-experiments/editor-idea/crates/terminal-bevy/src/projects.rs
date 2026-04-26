@@ -184,6 +184,11 @@ pub struct Projects {
     /// because we want to debounce drag/resize bursts to mouse-up; the
     /// project-state save is fine to fire immediately.
     pub terminals_dirty: bool,
+    /// Per-project unread BEL counter. Bumped when a terminal in a
+    /// hidden context (window unfocused, or project not active) rings
+    /// the bell; cleared when the user is actually looking at that
+    /// project. Session-only — not persisted to projects.json.
+    pub unread_bells: std::collections::HashMap<u64, u64>,
 }
 
 impl Projects {
@@ -200,6 +205,7 @@ impl Projects {
             dirty: false,
             layout_dirty: true,
             terminals_dirty: false,
+            unread_bells: std::collections::HashMap::new(),
         }
     }
     pub fn allocate_terminal_id(&mut self) -> u64 {
@@ -258,6 +264,27 @@ impl Projects {
             .iter()
             .find(|p| p.id == id)
             .map(|p| p.name.as_str())
+    }
+    /// Bump the unread bell counter for one project. Marks layout
+    /// dirty so the sidebar redraws with the new badge.
+    pub fn bump_unread(&mut self, project_id: u64) {
+        *self.unread_bells.entry(project_id).or_insert(0) += 1;
+        self.layout_dirty = true;
+    }
+    /// Clear a project's unread count. No-op if it's already zero.
+    /// Returns true if anything actually changed (so the caller can
+    /// decide whether to mark layout dirty).
+    pub fn clear_unread(&mut self, project_id: u64) -> bool {
+        match self.unread_bells.remove(&project_id) {
+            Some(n) if n > 0 => {
+                self.layout_dirty = true;
+                true
+            }
+            _ => false,
+        }
+    }
+    pub fn unread_total(&self) -> u64 {
+        self.unread_bells.values().copied().sum()
     }
 }
 
@@ -662,6 +689,34 @@ fn sidebar_layout(
                 SIDEBAR_Z + 0.2,
             ),
         ));
+
+        // Unread bell badge — right-aligned just before the delete X
+        // when the project has any unseen bells. Uses the active-stripe
+        // colour so it reads as a "this needs attention" cue regardless
+        // of which project is currently selected.
+        if let Some(&n) = projects.unread_bells.get(&proj.id)
+            && n > 0
+        {
+            let badge_text = if n > 99 {
+                "99+".to_string()
+            } else {
+                n.to_string()
+            };
+            let badge_anchor_x_world = world_left_edge + width - DELETE_W - 4.0;
+            commands.spawn((
+                SidebarEntity,
+                Text2d::new(badge_text),
+                TextFont {
+                    font: font.0.clone(),
+                    font_size: TEXT_FONT_SIZE,
+                    ..default()
+                },
+                LineHeight::Px(ROW_H),
+                TextColor(COLOR_ACTIVE_STRIPE),
+                Anchor::TOP_RIGHT,
+                Transform::from_xyz(badge_anchor_x_world, row_top_world - 5.0, SIDEBAR_Z + 0.2),
+            ));
+        }
 
         // Delete glyph — just a dim × at the right edge of the row.
         // No filled background; the bounds are still a tappable rect.
@@ -1094,12 +1149,6 @@ fn apply_pending_actions(world: &mut World) {
                 continue;
             }
         };
-        // If the requested project isn't active, switching to it
-        // matches user intent ("open this file" implies "show me the
-        // pane that holds it").
-        if world.resource::<Projects>().active != Some(project_id) {
-            world.resource_mut::<Projects>().set_active(project_id);
-        }
         let pos = req.origin.unwrap_or_else(|| {
             let count_in_project = {
                 let mut q =
@@ -1131,8 +1180,13 @@ fn apply_pending_actions(world: &mut World) {
             ProjectMembership(project_id),
             EditorFilePath(req.path),
         ));
-        world.resource_mut::<editor_bevy::FocusedEditor>().0 = Some(entity);
-        world.resource_mut::<FocusedTerminal>().0 = None;
+        // Only steal focus when the new pane is actually visible —
+        // i.e. its project is the active one. Otherwise it'd swallow
+        // keystrokes from offscreen.
+        if world.resource::<Projects>().active == Some(project_id) {
+            world.resource_mut::<editor_bevy::FocusedEditor>().0 = Some(entity);
+            world.resource_mut::<FocusedTerminal>().0 = None;
+        }
         world.resource_mut::<Projects>().layout_dirty = true;
     }
 }

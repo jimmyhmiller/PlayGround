@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use flow::{NodeId, Value};
 
 use crate::bridge::{EntityMaps, FlowEdgeRef, FlowNodeRef, FlowSim};
-use crate::edges::{HiddenEdges, TravelingPacket};
+use crate::edges::HiddenEdges;
 use crate::gadgets::{self, Kind, spawn as spawn_gadget};
 use crate::nodes::{NodeAssetCache, NodeCounter, spawn_node_entity};
 use crate::probes::Probe;
@@ -134,7 +134,6 @@ fn handle_load_example(
     nodes_q: Query<Entity, With<FlowNodeRef>>,
     edges_q: Query<Entity, With<FlowEdgeRef>>,
     probes_q: Query<Entity, With<Probe>>,
-    packets_q: Query<Entity, With<TravelingPacket>>,
 ) {
     let Some(LoadExample(example)) = events.read().last().copied() else { return; };
 
@@ -142,7 +141,6 @@ fn handle_load_example(
     for e in nodes_q.iter() { commands.entity(e).despawn(); }
     for e in edges_q.iter() { commands.entity(e).despawn(); }
     for e in probes_q.iter() { commands.entity(e).despawn(); }
-    for e in packets_q.iter() { commands.entity(e).despawn(); }
 
     // Fresh sim — keeps the formalism honest. Param defaults are
     // re-installed because tests and examples rely on them (emit_period,

@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 
+use bevy::winit::{EventLoopProxy, WinitUserEvent};
 use serde::{Deserialize, Serialize};
 
 use crate::data_dir;
@@ -40,7 +41,14 @@ pub fn socket_path() -> Option<PathBuf> {
 /// Spawn the listener thread. Returns the receiver half of an mpsc
 /// channel that fires once per accepted connection. Returns `None` if
 /// we can't open the socket — the app keeps running, just without IPC.
-pub fn spawn_listener() -> Option<Receiver<OpenRequest>> {
+///
+/// The optional `wakeup` is winit's event-loop proxy; without it, IPC
+/// requests sit in the channel until the next reactive-mode tick (up
+/// to 5s), which feels broken. With it, each accepted connection
+/// immediately wakes the main loop so the drain system runs that frame.
+pub fn spawn_listener(
+    wakeup: Option<EventLoopProxy<WinitUserEvent>>,
+) -> Option<Receiver<OpenRequest>> {
     let path = socket_path()?;
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -63,12 +71,16 @@ pub fn spawn_listener() -> Option<Receiver<OpenRequest>> {
     let (tx, rx) = channel::<OpenRequest>();
     thread::Builder::new()
         .name("tb-ipc".into())
-        .spawn(move || listener_loop(listener, tx))
+        .spawn(move || listener_loop(listener, tx, wakeup))
         .ok()?;
     Some(rx)
 }
 
-fn listener_loop(listener: UnixListener, tx: Sender<OpenRequest>) {
+fn listener_loop(
+    listener: UnixListener,
+    tx: Sender<OpenRequest>,
+    wakeup: Option<EventLoopProxy<WinitUserEvent>>,
+) {
     for conn in listener.incoming() {
         let mut stream = match conn {
             Ok(s) => s,
@@ -87,6 +99,9 @@ fn listener_loop(listener: UnixListener, tx: Sender<OpenRequest>) {
                 if tx.send(req).is_err() {
                     // Receiver dropped — app is shutting down.
                     return;
+                }
+                if let Some(p) = &wakeup {
+                    let _ = p.send_event(WinitUserEvent::WakeUp);
                 }
             }
             Err(e) => eprintln!("[ipc] parse: {} (raw: {:?})", e, buf),

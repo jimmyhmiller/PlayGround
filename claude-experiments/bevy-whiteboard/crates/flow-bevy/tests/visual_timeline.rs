@@ -1,20 +1,13 @@
 //! Visual timeline tests.
 //!
-//! Previous tests have checked the `Visibility` component on
-//! `TravelingPacket` entities at a moment in time — but that's
-//! too narrow. Bugs the user reported (*"packets spawn out of
-//! Router/Queue at frame 0"*, *"extra green appearing from thin
-//! air"*) live in the intersection of component state and
-//! rendered position: a packet hidden at world-origin still
-//! renders a dot at screen-center if the visibility propagation
-//! misbehaves, and a visible packet at (0,0) would look like it
-//! "materialized in the middle of the canvas."
-//!
-//! The tests here sample frame-by-frame:
-//!   - how many `TravelingPacket` entities exist,
-//!   - which are currently Visible,
-//!   - their world-space position,
-//!   - what position they *should* be at given edge geometry.
+//! Per-packet Bevy entities are gone (they were a 200k-entity tax
+//! at sim load — the actual rendering is the instanced
+//! `packet_cloud` material). The data they carried lives entirely
+//! on the `VisualTimelineRes` resource: `(packet_id, from, to,
+//! emit_real, arrive_real)` per packet, with visibility derived
+//! from `SimClock.visual_now`. These tests sample that resource
+//! frame-by-frame and reconstruct the same per-packet snapshots
+//! the old per-entity queries produced.
 //!
 //! Property assertions over the captured timeline:
 //!   P1 — No visible packet ever has position == world origin
@@ -30,8 +23,8 @@ mod common;
 
 use bevy::prelude::*;
 use common::make_app;
-use flow_bevy::bridge::{EntityMaps, FlowSim, SimClock};
-use flow_bevy::edges::TravelingPacket;
+use flow_bevy::bridge::{EntityMaps, FlowSim, FlowNodeRef, SimClock};
+use flow_bevy::edges::VisualTimelineRes;
 use flow_bevy::examples::{Example, LoadExample};
 
 // ─────────────────────────────────────────────────────────────
@@ -42,7 +35,12 @@ use flow_bevy::examples::{Example, LoadExample};
 #[allow(dead_code)]
 struct PacketFrame {
     real_t: f32,
-    entity: Entity,
+    /// Stable packet identifier from the sim's `PacketEmitted` event;
+    /// replaces the old per-frame Bevy `Entity` id, with the same
+    /// "uniquely identifies one logical packet" semantics. The visual
+    /// timeline guarantees one record per `PacketEmitted`, so packet_id
+    /// is also the right key for double-spawn / phantom-spawn checks.
+    packet_id: flow::PacketId,
     visible: bool,
     from: flow::NodeId,
     to:   flow::NodeId,
@@ -64,16 +62,16 @@ struct Timeline {
 }
 
 impl Timeline {
-    /// All times at which the entity first appears with
-    /// `visible = true`, in the order they become visible.
+    /// All times at which a packet first appears with `visible = true`,
+    /// in the order they become visible. Keyed by `packet_id`.
     #[allow(dead_code)]
-    fn first_visible_times(&self) -> std::collections::HashMap<Entity, f32> {
+    fn first_visible_times(&self) -> std::collections::HashMap<flow::PacketId, f32> {
         use std::collections::HashMap;
-        let mut out: HashMap<Entity, f32> = HashMap::new();
+        let mut out: HashMap<flow::PacketId, f32> = HashMap::new();
         for frame in &self.frames {
             for p in frame {
-                if p.visible && !out.contains_key(&p.entity) {
-                    out.insert(p.entity, p.real_t);
+                if p.visible && !out.contains_key(&p.packet_id) {
+                    out.insert(p.packet_id, p.real_t);
                 }
             }
         }
@@ -112,45 +110,61 @@ fn step_frame(app: &mut App, step_ns: u64) {
 }
 
 fn sample_frame(app: &mut App) -> Vec<PacketFrame> {
+    // Visual time is what the renderer animates against; SimClock
+    // owns it (it's wall-clock with pause / multiplier applied) and
+    // it's the single input that determines packet visibility +
+    // position via the `is_visible_at` / `progress_at` formulas.
+    let visual_now = app.world().resource::<SimClock>().visual_now;
     let real_t = app.world().resource::<Time>().elapsed_secs_f64();
 
+    // Build the NodeId → world-position map by joining EntityMaps
+    // with the node Transform query. Used to resolve each packet's
+    // (from, to) endpoints, and to derive the per-packet position
+    // by linearly interpolating start → end at `progress`.
     let world = app.world_mut();
     let maps = world.resource::<EntityMaps>().node_to_entity.clone();
+    let mut q_nodes = world.query_filtered::<(Entity, &Transform), With<FlowNodeRef>>();
     let node_pos: std::collections::HashMap<flow::NodeId, Vec2> = {
         let mut out = std::collections::HashMap::new();
-        let mut q = world.query::<(Entity, &Transform)>();
-        for (e, tf) in q.iter(world) {
-            for (nid, ent) in maps.iter() {
-                if *ent == e {
-                    out.insert(*nid, tf.translation.truncate());
-                }
+        let entity_to_node: std::collections::HashMap<Entity, flow::NodeId> =
+            maps.iter().map(|(nid, e)| (*e, *nid)).collect();
+        for (e, tf) in q_nodes.iter(world) {
+            if let Some(&nid) = entity_to_node.get(&e) {
+                out.insert(nid, tf.translation.truncate());
             }
         }
         out
     };
 
-    let mut out = Vec::new();
-    let mut q = world.query::<(Entity, &TravelingPacket, &Transform, &Visibility)>();
-    for (e, pkt, tf, vis) in q.iter(world) {
-        let src_pos = node_pos.get(&pkt.from).copied().unwrap_or(Vec2::ZERO);
-        let dst_pos = node_pos.get(&pkt.to).copied().unwrap_or(Vec2::ZERO);
-        let denom = (pkt.arrive_real - pkt.emit_real).max(1e-9);
-        let progress = ((real_t - pkt.emit_real) / denom).clamp(0.0, 1.0) as f32;
-        out.push(PacketFrame {
-            real_t: real_t as f32,
-            entity: e,
-            visible: matches!(vis, Visibility::Visible | Visibility::Inherited),
-            from: pkt.from,
-            to: pkt.to,
-            pos: tf.translation.truncate(),
-            edge_from_pos: src_pos,
-            edge_to_pos:   dst_pos,
-            progress,
-            emit_real: pkt.emit_real as f32,
-            arrive_real: pkt.arrive_real as f32,
-        });
-    }
-    out
+    let timeline = world.resource::<VisualTimelineRes>();
+    timeline
+        .0
+        .packets
+        .iter()
+        .map(|pkt| {
+            let src_pos = node_pos.get(&pkt.from).copied().unwrap_or(Vec2::ZERO);
+            let dst_pos = node_pos.get(&pkt.to).copied().unwrap_or(Vec2::ZERO);
+            let progress = pkt.progress_at(visual_now);
+            // Interpolated world position — what the GPU vertex
+            // shader computes for visible packets. For
+            // hidden-but-not-yet-emitted packets this is just the
+            // source position (clamped progress = 0).
+            let pos = src_pos.lerp(dst_pos, progress);
+            PacketFrame {
+                real_t: real_t as f32,
+                packet_id: pkt.packet_id,
+                visible: pkt.is_visible_at(visual_now),
+                from: pkt.from,
+                to: pkt.to,
+                pos,
+                edge_from_pos: src_pos,
+                edge_to_pos: dst_pos,
+                progress,
+                emit_real: pkt.emit_real as f32,
+                arrive_real: pkt.arrive_real as f32,
+            }
+        })
+        .collect()
 }
 
 fn capture_timeline(app: &mut App, step_ns: u64, n_frames: usize) -> Timeline {
@@ -449,17 +463,18 @@ fn p6_visuals_keep_flowing_while_sim_emits() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// P4s — STRICT: exactly ONE TravelingPacket per PacketEmitted
-//       (correlated by packet_id). Catches double-spawn bugs
-//       that the loose count-based test below misses.
+// P4s — STRICT: exactly ONE VisualPacket per PacketEmitted,
+//       correlated by `packet_id`. Catches double-ingest bugs
+//       and phantom packets.
 //
-// Why the weaker test passes while this can fail: `p4` allows
-// `live_count <= emit_count + 5`. If *one* extra packet spawns
-// per emit on a particular edge, `live` roughly doubles —
-// still well within slop when traffic is light. And `live`
-// is a snapshot: despawned packets aren't counted. This test
-// catches ANY extra spawn by tracking `packet_id` across the
-// whole timeline.
+// Used to check this through `Query<&TravelingPacket>` — one
+// entity per packet — and assert no packet_id appeared on two
+// entities ever. Now reads `VisualTimelineRes` directly:
+// `timeline.packets` is the source of truth (was the source of
+// truth all along; the entities were a stale mirror), so the
+// invariant becomes "no packet_id appears twice in
+// `timeline.packets`, and every packet_id corresponds to a
+// real sim emit."
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -470,56 +485,50 @@ fn p4s_one_visual_per_emit_packet_id() {
     let mut app = make_app();
     load(&mut app, Example::ThreeLaneFanout);
 
-    // Per-frame: at any single instant, each packet_id must map
-    // to at most ONE live TravelingPacket entity. Also track the
-    // CUMULATIVE set of (packet_id, entity) pairs ever observed
-    // — any packet_id seen on two distinct entities EVER is a
-    // double-spawn, even if one has already despawned before the
-    // test's end state snapshot would reveal it.
-    let mut ever_seen_entities_per_id: HashMap<flow::PacketId, HashSet<Entity>> =
-        HashMap::new();
+    // Per-frame: each packet_id must appear at most ONCE in
+    // `timeline.packets`. Also accumulate across frames — even if
+    // a packet_id only appears once per frame, it must NEVER be
+    // re-introduced after being GC'd (the spawn-despawn-respawn
+    // double-ingest bug).
+    let mut ever_seen_packet_ids: HashSet<flow::PacketId> = HashSet::new();
+    let mut prev_seen_packet_ids: HashSet<flow::PacketId> = HashSet::new();
 
     for _frame in 0..60 {
         step_frame(&mut app, 30_000_000);
 
-        // Current live set.
-        let live_per_id: HashMap<flow::PacketId, Vec<Entity>> = {
-            let world = app.world_mut();
-            let mut q = world.query::<(Entity, &TravelingPacket)>();
-            let mut m: HashMap<flow::PacketId, Vec<Entity>> = HashMap::new();
-            for (e, p) in q.iter(world) {
-                m.entry(p.packet_id).or_default().push(e);
-            }
-            m
-        };
-
-        for (id, ents) in &live_per_id {
-            assert!(
-                ents.len() <= 1,
-                "at this frame, packet_id {:?} is held by {} simultaneous \
-                 live TravelingPacket entities — a duplicate was spawned",
-                id, ents.len(),
-            );
-            // Accumulate across frames.
-            let seen = ever_seen_entities_per_id.entry(*id).or_default();
-            for e in ents { seen.insert(*e); }
+        // Per-frame count by packet_id.
+        let timeline = &app.world().resource::<VisualTimelineRes>().0;
+        let mut per_id: HashMap<flow::PacketId, usize> = HashMap::new();
+        for p in &timeline.packets {
+            *per_id.entry(p.packet_id).or_insert(0) += 1;
         }
+        for (id, n) in &per_id {
+            assert!(
+                *n <= 1,
+                "at this frame, packet_id {:?} appears {} times in \
+                 the visual timeline — a duplicate was ingested",
+                id,
+                n,
+            );
+        }
+        let this_frame: HashSet<flow::PacketId> = per_id.keys().copied().collect();
+        // Detect re-ingest: a packet_id present this frame, absent the
+        // previous frame, AND already seen in some earlier frame.
+        for id in this_frame.difference(&prev_seen_packet_ids) {
+            assert!(
+                !ever_seen_packet_ids.contains(id),
+                "packet_id {:?} was re-ingested into the visual timeline \
+                 after having been previously GC'd — each sim emit should \
+                 produce at most one visual ever",
+                id,
+            );
+            ever_seen_packet_ids.insert(*id);
+        }
+        prev_seen_packet_ids = this_frame;
     }
 
-    // Over the entire run, each packet_id should only EVER have
-    // been held by one entity. Catches the spawn-then-despawn-
-    // then-respawn-with-same-id double-spawn scenario.
-    for (id, ents) in &ever_seen_entities_per_id {
-        assert_eq!(
-            ents.len(), 1,
-            "over the run, packet_id {:?} was held by {} distinct \
-             entities (times it was visually spawned). Each sim emit \
-             should produce at most one visual.",
-            id, ents.len(),
-        );
-    }
-
-    // Every live packet_id corresponds to a real sim emit.
+    // Every packet_id we ever saw corresponds to a real, non-filtered
+    // sim emit. Catches phantom ingests.
     let sim = &app.world().resource::<FlowSim>().sim;
     let emit_ids: HashSet<flow::PacketId> = sim.log.iter()
         .filter_map(|ev| if let Event::PacketEmitted { packet, from, to, payload, .. } = ev {
@@ -530,12 +539,11 @@ fn p4s_one_visual_per_emit_packet_id() {
             Some(*packet)
         } else { None })
         .collect();
-    for id in ever_seen_entities_per_id.keys() {
+    for id in &ever_seen_packet_ids {
         assert!(
             emit_ids.contains(id),
-            "TravelingPacket was spawned with packet_id {:?} but no \
-             non-filtered sim PacketEmitted event has that id — \
-             phantom packet",
+            "visual timeline ingested packet_id {:?} but no non-filtered \
+             sim PacketEmitted event has that id — phantom packet",
             id
         );
     }
@@ -599,7 +607,7 @@ fn p5_at_most_one_incoming_per_node_per_instant() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// P4 — (loose) live TravelingPacket count reasonable vs emits
+// P4 — (loose) visual-timeline packet count reasonable vs emits
 // ─────────────────────────────────────────────────────────────
 
 #[test]
@@ -628,19 +636,16 @@ fn p4_packet_entity_count_tracks_emissions() {
         }
     }
 
-    // Count total TravelingPacket entities ever spawned. Since
-    // some may have been despawned already (t>=1), we rely on
-    // the throttle: spawns are coalesced when MIN_SPAWN_INTERVAL
-    // < gap. So entities-ever-spawned ≤ emit_count. We assert the
-    // weaker "no spurious ghost spawns" — live packets count is
-    // reasonable (not wildly > emit count).
-    let world = app.world_mut();
-    let mut q = world.query::<&TravelingPacket>();
-    let live = q.iter(world).count();
+    // Live = records currently in the visual timeline. The timeline
+    // GC trims arrived packets older than its retention window
+    // (`gc_before`), so this snapshot is bounded by emit_count + a
+    // small slop for in-flight + just-arrived. We assert no spurious
+    // extra ingests.
+    let live = app.world().resource::<VisualTimelineRes>().0.packets.len();
     assert!(
         live <= emit_count + 5,
-        "live TravelingPacket count ({}) wildly exceeds emitted data-packet count ({}) \
-         — something is spawning extras",
+        "visual timeline holds {} packets but the sim emitted only {} \
+         data packets — something is ingesting extras",
         live, emit_count,
     );
 }

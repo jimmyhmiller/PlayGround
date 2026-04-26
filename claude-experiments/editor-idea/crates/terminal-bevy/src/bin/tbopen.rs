@@ -11,13 +11,30 @@
 //! running app. `--project NAME` does a case-insensitive match against
 //! the project list; if no project matches the request is silently
 //! dropped (the app logs to stderr).
+//!
+//! The wire format is duplicated here on purpose: the parent
+//! `terminal_bevy` lib depends on libghostty-vt (a dylib), and a bin
+//! in the same package links against the lib by default. Keeping this
+//! bin lib-free means no @rpath dance to ship `tbopen` alongside the
+//! main app.
 
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use terminal_bevy::ipc::{socket_path, OpenRequest};
+use serde::Serialize;
+
+#[derive(Serialize)]
+struct OpenRequest {
+    path: PathBuf,
+    project: Option<String>,
+}
+
+fn socket_path() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME")?;
+    Some(Path::new(&home).join(".terminal-bevy").join("socket"))
+}
 
 fn main() -> ExitCode {
     let args = match Args::parse() {
@@ -69,7 +86,7 @@ fn main() -> ExitCode {
         eprintln!("tbopen: write: {}", e);
         return ExitCode::from(1);
     }
-    // Half-close write side so the app sees EOF and parses our message.
+    // Half-close so the app sees EOF and parses our message.
     let _ = stream.shutdown(std::net::Shutdown::Write);
     ExitCode::SUCCESS
 }

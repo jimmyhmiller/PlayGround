@@ -113,6 +113,7 @@ fn advance_sim(
     time: Res<Time>,
     mut flow: ResMut<FlowSim>,
     mut clock: ResMut<SimClock>,
+    mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
     let dt_real = time.delta_secs_f64();
     let dt_sim_ns: u64 = if let Some(step) = clock.step_once_ns.take() {
@@ -123,8 +124,17 @@ fn advance_sim(
         (dt_real * 1_000_000_000.0 * clock.multiplier).max(0.0) as u64
     };
     if dt_sim_ns == 0 { return; }
-    let target = flow.sim.now_ns.saturating_add(dt_sim_ns);
-    flow.sim.run_until(target);
+    crate::time_phase!(perf, "bridge.advance_sim", {
+        let target = flow.sim.now_ns.saturating_add(dt_sim_ns);
+        flow.sim.run_until(target);
+    });
+    // Drain the sub-phase samples the sim recorded during run_until
+    // and roll them into our own PhaseTimings so the bench's printout
+    // shows where inside the sim the time went. Stays a single drain
+    // per frame; per-phase aggregation is what `record_us` does.
+    for (phase, us) in flow.sim.drain_perf_samples() {
+        perf.record_us(phase, us);
+    }
 }
 
 /// Grab events recorded since last frame into the `NewEvents` bucket.
