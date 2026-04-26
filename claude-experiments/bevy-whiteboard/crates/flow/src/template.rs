@@ -3,8 +3,16 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::expr::Expr;
-use crate::rule::Rule;
+use crate::rule::{Rule, When};
 use crate::value::Value;
+
+/// True if the rule has at least one `When::Input` pattern. A rule
+/// without one is "source-style" — it fires off slot/guard state
+/// alone and must be re-tested every fire scan even when the inbox
+/// is empty.
+pub fn rule_has_input(r: &Rule) -> bool {
+    r.when.iter().any(|w| matches!(w, When::Input { .. }))
+}
 
 /// One end of an edge in a template. Resolved at spawn time.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -62,6 +70,13 @@ pub struct Template {
     pub initial_packets: Vec<Value>,
     /// Probes declared on the class. Copied into every instance.
     pub probes: Vec<Probe>,
+    /// Cached: does any rule fire without consuming an inbox packet?
+    /// (i.e. a rule with no `When::Input` pattern, driven only by
+    /// slot matches and guards.) The fire loop uses this to skip
+    /// nodes with empty inboxes — a huge win on dense graphs where
+    /// most nodes are quiescent at any given instant.
+    #[serde(default, skip_serializing)]
+    pub has_source_rule: bool,
 }
 
 impl Template {
@@ -75,6 +90,7 @@ impl Template {
             edges: Vec::new(),
             initial_packets: Vec::new(),
             probes: Vec::new(),
+            has_source_rule: false,
         }
     }
     pub fn initial_packet(mut self, v: Value) -> Self {
@@ -90,8 +106,20 @@ impl Template {
         self
     }
     pub fn rule(mut self, r: Rule) -> Self {
+        if !rule_has_input(&r) {
+            self.has_source_rule = true;
+        }
         self.rules.push(r);
         self
+    }
+
+    /// Recompute `has_source_rule` from the current rule set. Called
+    /// after a direct mutation to `rules` (the field is `pub` so
+    /// callers can append; if they do, they must invalidate the
+    /// cache by calling this — `Sim::add_rule_to_node` does it
+    /// automatically).
+    pub fn refresh_has_source_rule(&mut self) {
+        self.has_source_rule = self.rules.iter().any(|r| !rule_has_input(r));
     }
     pub fn edge(mut self, from: EdgeEnd, to: EdgeEnd, latency: Expr) -> Self {
         self.edges.push(EdgeSpec { from, to, latency });

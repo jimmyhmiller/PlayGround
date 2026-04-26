@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use libghostty_vt::{
     render::{CellIterator, Dirty, RenderState, RowIterator},
     style::RgbColor,
+    terminal::ScrollViewport,
 };
 use nix::errno::Errno;
 
@@ -98,6 +99,11 @@ pub enum WorkerMsg {
         cell_w_px: u32,
         cell_h_px: u32,
     },
+    /// Scroll the viewport by `delta` lines. Negative = back into
+    /// scrollback history; positive = forward toward the active area.
+    /// `None` is interpreted as "snap to the bottom (active area)".
+    ScrollDelta(isize),
+    ScrollToBottom,
     Shutdown,
 }
 
@@ -203,6 +209,7 @@ fn worker_loop(
 
     loop {
         let mut did_anything = false;
+        let mut force_full_publish = false;
         let mut bytes_processed_this_tick = 0usize;
         let mut hit_eof = false;
         tick_count += 1;
@@ -267,6 +274,20 @@ fn worker_loop(
                     });
                     did_anything = true;
                 }
+                Ok(WorkerMsg::ScrollDelta(delta)) => {
+                    terminal.scroll_viewport(ScrollViewport::Delta(delta));
+                    did_anything = true;
+                    // Scrolling rotates which scrollback rows the
+                    // viewport refers to; libghostty's per-row dirty
+                    // bits don't always cover that, so force a full
+                    // repaint to guarantee the new content shows up.
+                    force_full_publish = true;
+                }
+                Ok(WorkerMsg::ScrollToBottom) => {
+                    terminal.scroll_viewport(ScrollViewport::Bottom);
+                    did_anything = true;
+                    force_full_publish = true;
+                }
                 Ok(WorkerMsg::Shutdown) => return,
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
@@ -307,7 +328,7 @@ fn worker_loop(
                 &mut cell_it,
                 &snapshot,
                 matches!(child, Child::Active(_)),
-                false,
+                force_full_publish,
                 last_cols,
                 last_rows,
             );

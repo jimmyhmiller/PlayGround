@@ -108,6 +108,7 @@ impl Sim {
                 });
                 if let Some(node) = self.nodes.get_mut(&leaf) {
                     node.inbox.push_back(pkt);
+                    self.fireable.insert(leaf);
                 }
             }
         }
@@ -115,14 +116,34 @@ impl Sim {
 
     /// Attempt to fire exactly one rule. Returns true if one fired.
     ///
-    /// Deterministic firing order: iterate nodes by id, rules by
-    /// definition order, first fireable wins.
+    /// Deterministic firing order: iterate `self.fireable` by `NodeId`
+    /// (BTreeSet is sorted), rules by definition order, first fireable
+    /// wins. The worklist is maintained incrementally — packet
+    /// delivery / inject mark a node fireable; consuming the last
+    /// packet from a non-source-rule node refreshes it back out.
     fn try_fire_one(&mut self) -> bool {
-        let node_ids: Vec<NodeId> = self.nodes.keys().copied().collect();
-        for nid in node_ids {
-            let rule_count = self.nodes.get(&nid).map(|n| n.rules.len()).unwrap_or(0);
+        // Snapshot the fireable set into a scratch buffer. The inner
+        // loop calls `&mut self` (which mutates `fireable` itself when
+        // the rule consumes a packet), so we can't iterate the set
+        // directly. Vec extension is O(n) but `fireable.len()` is
+        // typically far smaller than `nodes.len()` on dense graphs.
+        self.fire_iter_buf.clear();
+        self.fire_iter_buf.extend(self.fireable.iter().copied());
+        let len = self.fire_iter_buf.len();
+        for i in 0..len {
+            let nid = self.fire_iter_buf[i];
+            // Re-look-up the class each iteration: the previous fire
+            // may have despawned this node or invalidated the entry.
+            let class_owned = match self.nodes.get(&nid).and_then(|n| n.class.as_deref()) {
+                Some(c) => c.to_owned(),
+                None => continue,
+            };
+            let rule_count = match self.templates.get(&class_owned) {
+                Some(t) => t.rules.len(),
+                None => continue,
+            };
             for ri in 0..rule_count {
-                if self.try_fire(nid, ri) {
+                if self.try_fire(nid, &class_owned, ri) {
                     return true;
                 }
             }
@@ -130,55 +151,88 @@ impl Sim {
         false
     }
 
-    fn try_fire(&mut self, nid: NodeId, rule_idx: usize) -> bool {
-        let rule = {
-            let node = self.nodes.get(&nid).expect("try_fire: node gone");
-            node.rules.get(rule_idx).cloned()
+    fn try_fire(&mut self, nid: NodeId, class: &str, rule_idx: usize) -> bool {
+        // Pull the rule vec out, hand a `&Rule` to the matcher/firer,
+        // put it back. `mem::take` is two pointer swaps — no deep
+        // clone of the `Expr`/`Effect` trees, no Arc, no allocation.
+        let rules = match self.templates.get_mut(class) {
+            Some(t) => std::mem::take(&mut t.rules),
+            None => return false,
         };
-        let Some(rule) = rule else { return false; };
-        let Some(fire) = self.match_rule(nid, &rule) else { return false; };
-        self.execute_fire(nid, &rule, fire);
-        true
+        let fired = if let Some(rule) = rules.get(rule_idx) {
+            if let Some(fire) = self.match_rule(nid, rule) {
+                self.execute_fire(nid, rule, fire);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        // Restore — must succeed because the template was just looked
+        // up. If a fire effect (`Spawn`/`Despawn`) mutated
+        // `self.templates`, our class key is stable so the slot is
+        // still valid.
+        if let Some(t) = self.templates.get_mut(class) {
+            t.rules = rules;
+        }
+        fired
     }
 
+
     fn match_rule(&mut self, nid: NodeId, rule: &Rule) -> Option<MatchResult> {
-        let (inbox_len, slot_snapshot) = {
-            let node = self.nodes.get(&nid)?;
-            (node.inbox.len(), node.slots.clone())
-        };
+        // Index of the (at most one) Input pattern. Stored as a position
+        // rather than a cloned `When` so we just borrow `&rule.when[idx]`
+        // when we need its contents — avoids cloning the entire pattern
+        // tree on every fire attempt.
+        let input_when_idx = rule
+            .when
+            .iter()
+            .position(|w| matches!(w, When::Input { .. }));
 
-        // Find the (at most one) Input pattern.
-        let input_when: Option<When> = rule.when.iter()
-            .find(|w| matches!(w, When::Input { .. }))
-            .cloned();
+        let inbox_len = self.nodes.get(&nid)?.inbox.len();
 
-        // If there's an Input pattern, try each inbox entry until one matches.
-        // Otherwise try just once with no packet consumed.
-        let candidates: Vec<Option<usize>> = if input_when.is_some() {
-            (0..inbox_len).map(Some).collect()
+        // Iteration count: one attempt per inbox packet for input rules,
+        // a single attempt for source rules.
+        let max_pkt_idx = if input_when_idx.is_some() {
+            inbox_len
         } else {
-            vec![None]
+            1
         };
 
-        for pkt_idx in candidates {
+        for try_idx in 0..max_pkt_idx {
+            let pkt_idx: Option<usize> = input_when_idx.map(|_| try_idx);
+
+            // Re-take field-disjoint borrows each iteration so rng can be
+            // reborrowed for guard eval at the bottom. `slots`/`inbox`
+            // here are borrows into `self.nodes` — no clone.
+            let nodes = &self.nodes;
+            let edges = &self.edges;
+            let params = &self.params;
+            let now_ns = self.now_ns;
+            let node = nodes.get(&nid)?;
+            let slots = &node.slots;
+
             let mut bindings = Bindings::new();
 
             // Match the Input pattern if present.
-            if let (Some(w), Some(idx)) = (input_when.as_ref(), pkt_idx) {
-                let (pattern, from) = match w {
-                    When::Input { pattern, from } => (pattern.clone(), from.clone()),
-                    _ => unreachable!(),
+            if let (Some(w_idx), Some(idx)) = (input_when_idx, pkt_idx) {
+                let When::Input { pattern, from } = &rule.when[w_idx] else {
+                    unreachable!()
                 };
-                let pkt = &self.nodes[&nid].inbox[idx];
+                let pkt = &node.inbox[idx];
                 if let Some(from_name) = from {
-                    let ok = pkt.from_edge
-                        .and_then(|eid| self.edges.get(&eid))
-                        .and_then(|e| self.nodes.get(&e.from))
-                        .map(|n| n.name == from_name)
+                    let ok = pkt
+                        .from_edge
+                        .and_then(|eid| edges.get(&eid))
+                        .and_then(|e| nodes.get(&e.from))
+                        .map(|n| n.name == *from_name)
                         .unwrap_or(false);
-                    if !ok { continue; }
+                    if !ok {
+                        continue;
+                    }
                 }
-                if !match_pattern(&pkt.payload, &pattern, &mut bindings) {
+                if !match_pattern(&pkt.payload, pattern, &mut bindings) {
                     continue;
                 }
             }
@@ -187,35 +241,35 @@ impl Sim {
             let mut slot_ok = true;
             for w in &rule.when {
                 if let When::SlotMatch { slot, pattern } = w {
-                    let Some(sv) = slot_snapshot.get(slot) else { slot_ok = false; break; };
+                    let Some(sv) = slots.get(slot) else {
+                        slot_ok = false;
+                        break;
+                    };
                     if !match_pattern(sv, pattern, &mut bindings) {
                         slot_ok = false;
                         break;
                     }
                 }
             }
-            if !slot_ok { continue; }
+            if !slot_ok {
+                continue;
+            }
 
-            // Evaluate guard, if present. IMPORTANT: guard evaluation can consume
-            // RNG (e.g. Bernoulli). To preserve determinism and avoid "phantom"
-            // RNG draws from rules that fail to match, we only evaluate the
-            // guard on rules where when-patterns already matched (this branch).
+            // Evaluate guard, if present. IMPORTANT: guard evaluation
+            // can consume RNG (e.g. Bernoulli). To preserve determinism
+            // and avoid "phantom" RNG draws from rules that fail to
+            // match, we only evaluate the guard on rules where
+            // when-patterns already matched (this branch).
             if let Some(ref g) = rule.guard {
                 let mut pstack: Vec<String> = Vec::new();
-                // Field-disjoint borrows: rng is &mut, everything else is &.
-                let nodes = &self.nodes;
-                let edges = &self.edges;
-                let params = &self.params;
-                let now_ns = self.now_ns;
+                let pkt_ref: Option<&Packet> = pkt_idx.map(|i| &node.inbox[i]);
+                // Field-disjoint borrow of the RNG; coexists with the
+                // `&self.nodes`/`&self.edges`/`&self.params` borrows
+                // above because they're separate struct fields.
                 let rng = &mut self.rng;
-                // If the rule consumes a packet, the guard sees it via
-                // `meta(...)` / `return_path`. The packet itself still
-                // lives in the node's inbox at this point (we haven't
-                // consumed yet), so grab a reference for the guard eval.
-                let pkt_ref: Option<&Packet> = pkt_idx.map(|i| &self.nodes[&nid].inbox[i]);
                 let mut ctx = EvalCtx {
                     bindings: &bindings,
-                    slots: &slot_snapshot,
+                    slots,
                     now_ns,
                     rng,
                     current_node: Some(nid),
@@ -231,7 +285,10 @@ impl Sim {
                 }
             }
 
-            return Some(MatchResult { bindings, consumed_pkt_idx: pkt_idx });
+            return Some(MatchResult {
+                bindings,
+                consumed_pkt_idx: pkt_idx,
+            });
         }
 
         None
@@ -256,6 +313,12 @@ impl Sim {
                 rule: rule.name.clone(),
                 at_ns: now,
             });
+            // Worklist maintenance: if this consume drained the inbox
+            // and the class has no source-style rule, the node has no
+            // pending work and can drop out of `fireable`. Effects
+            // that follow may re-mark it (e.g. self-emit goes through
+            // `inject` and re-inserts).
+            self.refresh_fireable(nid);
             Some(pkt)
         } else {
             None
@@ -604,7 +667,6 @@ impl Sim {
             id: new_id,
             name: instance_name.clone(),
             slots: t.slots.clone(),
-            rules: t.rules.clone(),
             inbox: VecDeque::new(),
             probes: t.probes.clone(),
             class: Some(t.name.clone()),
@@ -612,6 +674,10 @@ impl Sim {
             compound: None,
         };
         self.nodes.insert(new_id, node);
+        // Source-rule classes need to be in the fireable set even with
+        // an empty inbox; non-source classes will get added when their
+        // first packet arrives.
+        self.refresh_fireable(new_id);
         self.log.push(Event::NodeSpawned {
             node: new_id,
             template: t.name.clone(),
@@ -673,7 +739,6 @@ impl Sim {
             id: new_id,
             name: instance_name.to_string(),
             slots: t.slots.clone(),
-            rules: t.rules.clone(),
             inbox: VecDeque::new(),
             probes: t.probes.clone(),
             class: Some(t.name.clone()),
@@ -681,6 +746,7 @@ impl Sim {
             compound: None,
         };
         self.nodes.insert(new_id, node);
+        self.refresh_fireable(new_id);
         self.log.push(Event::NodeSpawned {
             node: new_id,
             template: t.name.clone(),
@@ -1029,16 +1095,20 @@ impl Sim {
         e: &Expr,
         packet: Option<&Packet>,
     ) -> Value {
-        let slots = self.nodes.get(&nid).unwrap().slots.clone();
+        // Field-disjoint borrows: nodes/edges/params via shared refs,
+        // rng via mut. `slots` is a borrow into `self.nodes` rather
+        // than a fresh clone — the BTreeMap clone here was the bulk
+        // of per-firing allocation cost on dense grids.
         let mut pstack: Vec<String> = Vec::new();
         let nodes = &self.nodes;
         let edges = &self.edges;
         let params = &self.params;
         let now_ns = self.now_ns;
         let rng = &mut self.rng;
+        let slots = &nodes.get(&nid).unwrap().slots;
         let mut ctx = EvalCtx {
             bindings,
-            slots: &slots,
+            slots,
             now_ns,
             rng,
             current_node: Some(nid),
@@ -1060,19 +1130,20 @@ impl Sim {
     ) -> Time {
         // Edge latency is evaluated with: source node's slots + `packet` = payload.
         // No consumed-packet is available here — latency exprs don't
-        // reference meta/return_path.
+        // reference meta/return_path. Bindings still get cloned because
+        // we mutate them with `packet`, but slots are a borrow.
         let mut b = bindings.clone();
         b.insert("packet".to_string(), packet_payload.clone());
-        let slots = self.nodes.get(&src_nid).unwrap().slots.clone();
         let mut pstack: Vec<String> = Vec::new();
         let nodes = &self.nodes;
         let edges = &self.edges;
         let params = &self.params;
         let now_ns = self.now_ns;
         let rng = &mut self.rng;
+        let slots = &nodes.get(&src_nid).unwrap().slots;
         let mut ctx = EvalCtx {
             bindings: &b,
-            slots: &slots,
+            slots,
             now_ns,
             rng,
             current_node: Some(src_nid),

@@ -120,7 +120,7 @@ fn main() {
             slot: "ready".into(),
             value: Expr::var("w"),
         });
-    sim.nodes.get_mut(&pool).unwrap().rules.push(spawn_rule);
+    sim.add_rule_to_node(pool, spawn_rule).unwrap();
 
     for _ in 0..NUM_WORKERS {
         sim.inject(pool, Value::variant("kick", Value::Nil));

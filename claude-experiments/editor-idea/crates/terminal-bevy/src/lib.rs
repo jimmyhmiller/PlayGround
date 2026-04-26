@@ -38,6 +38,7 @@ use std::collections::HashMap;
 
 use bevy::image::{Image, TextureAtlasLayout};
 use bevy::input::keyboard::{Key, KeyboardInput};
+use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 use bevy::text::LineHeight;
@@ -52,7 +53,7 @@ pub mod selection;
 pub mod vt;
 pub mod worker;
 use atlas::GlyphAtlas;
-use projects::{InputConsumed, ProjectMembership, Projects, Renaming, SIDEBAR_WIDTH};
+use projects::{InputConsumed, ProjectMembership, Projects, Renaming, Sidebar};
 use pty::PtySize;
 use worker::{SnapCell, WorkerHandle, WorkerMsg};
 
@@ -64,7 +65,7 @@ pub const HANDLE_SIZE: f32 = 14.0;
 pub const CLOSE_BTN_SIZE: f32 = 14.0;
 pub const CLOSE_BTN_INSET: f32 = 4.0;
 pub const MIN_TERMINAL_SIZE: Vec2 = Vec2::new(240.0, 160.0);
-pub const SCROLLBACK_LINES: usize = 1000;
+pub const SCROLLBACK_LINES: usize = 100_000;
 
 /// Path to SF Mono — Apple ships it with Terminal.app, so any Mac that
 /// has launched Terminal.app once has this file. Loaded at startup and
@@ -230,6 +231,7 @@ impl Plugin for TerminalPlugin {
                 Update,
                 (
                     handle_mouse,
+                    handle_scroll,
                     handle_resize,
                     handle_keyboard,
                     sync_grid,
@@ -637,6 +639,11 @@ fn handle_keyboard(
 
     if !out.is_empty() {
         let _ = data.worker.tx.send(WorkerMsg::Input(out));
+        // Real terminals snap the viewport back to the active region
+        // the moment you type — otherwise hitting Enter while scrolled
+        // up leaves you staring at history while your shell scrolls
+        // past below. Match that behavior.
+        let _ = data.worker.tx.send(WorkerMsg::ScrollToBottom);
     }
 }
 
@@ -800,6 +807,7 @@ fn handle_mouse(
     buttons: Res<ButtonInput<MouseButton>>,
     consumed: Res<InputConsumed>,
     metrics: Res<MonoMetrics>,
+    sidebar: Res<Sidebar>,
     mut mode: ResMut<MouseMode>,
     mut focused: ResMut<FocusedTerminal>,
     projects: Res<Projects>,
@@ -828,7 +836,7 @@ fn handle_mouse(
     // Sidebar owns the left edge of the window. Don't let drags
     // initiated there start a window-drag, and don't pull focus to a
     // terminal underneath. Sidebar's own click handler runs separately.
-    let in_sidebar = pt.x < SIDEBAR_WIDTH;
+    let in_sidebar = pt.x < sidebar.width;
 
     // Radial menu / other input system already swallowed this click.
     let click_eaten = consumed.0;
@@ -912,8 +920,8 @@ fn handle_mouse(
                 // Don't let the title bar slide under the sidebar — once
                 // it does, you can't grab the terminal back without
                 // resizing the window.
-                if new_pos.x < SIDEBAR_WIDTH {
-                    new_pos.x = SIDEBAR_WIDTH;
+                if new_pos.x < sidebar.width {
+                    new_pos.x = sidebar.width;
                 }
                 rect.pos = new_pos;
             }
@@ -938,6 +946,76 @@ fn handle_mouse(
         }
         MouseMode::Idle => {}
     }
+}
+
+/// Mouse-wheel scrolls the terminal under the cursor (in the active
+/// project). Pixel-mode events (trackpads) accumulate a fractional line
+/// counter so small swipes still register; line-mode events go through
+/// at face value.
+fn handle_scroll(
+    mut wheel: MessageReader<MouseWheel>,
+    mut accum: Local<f32>,
+    windows: Query<&Window>,
+    sidebar: Res<Sidebar>,
+    projects: Res<Projects>,
+    store: Res<TerminalStore>,
+    terminals: Query<
+        (Entity, &TerminalRect, Option<&ProjectMembership>),
+        With<TerminalTag>,
+    >,
+) {
+    // Sum the frame's wheel events into our accumulator regardless of
+    // whether we end up dispatching, so a slow scroll across multiple
+    // ticks doesn't lose precision.
+    let mut delta_lines: f32 = 0.0;
+    for ev in wheel.read() {
+        let lines = match ev.unit {
+            MouseScrollUnit::Line => ev.y,
+            MouseScrollUnit::Pixel => ev.y / LINE_HEIGHT,
+        };
+        delta_lines += lines;
+    }
+    if delta_lines == 0.0 {
+        return;
+    }
+    *accum += delta_lines;
+    let whole_lines = accum.trunc() as isize;
+    if whole_lines == 0 {
+        return;
+    }
+    *accum -= whole_lines as f32;
+
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(pt) = window.cursor_position() else {
+        return;
+    };
+    if pt.x < sidebar.width {
+        return;
+    }
+
+    // Pick the topmost terminal under the cursor (active project only).
+    let rects: Vec<(Entity, TerminalRect)> = terminals
+        .iter()
+        .filter(|(_, _, m)| match (projects.active, m) {
+            (Some(a), Some(ProjectMembership(p))) => a == *p,
+            _ => false,
+        })
+        .map(|(e, r, _)| (e, *r))
+        .collect();
+    let Some(target) = topmost_terminal_at(pt, &rects) else {
+        return;
+    };
+    let Some(data) = store.map.get(&target) else {
+        return;
+    };
+
+    // Bevy: wheel.y > 0 = scroll-up gesture = reveal older content.
+    // libghostty: ScrollViewport::Delta is positive toward the active
+    // area, negative back into history. So mirror the sign.
+    let scroll_delta = -whole_lines;
+    let _ = data.worker.tx.send(WorkerMsg::ScrollDelta(scroll_delta));
 }
 
 fn bring_to_front(

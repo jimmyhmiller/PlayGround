@@ -229,7 +229,7 @@ pub(crate) fn build_class_template(n: &ast::NodeDecl) -> Result<Template, String
         probes.push(IProbe { label: p.label.clone(), parts });
     }
 
-    Ok(Template {
+    let mut tpl = Template {
         name: n.name.clone(),
         node_name_prefix: n.name.clone(),
         slots,
@@ -237,7 +237,10 @@ pub(crate) fn build_class_template(n: &ast::NodeDecl) -> Result<Template, String
         edges,
         initial_packets,
         probes,
-    })
+        has_source_rule: false,
+    };
+    tpl.refresh_has_source_rule();
+    Ok(tpl)
 }
 
 fn lower_slot_init(s: &ast::SlotDecl) -> Result<Value, String> {

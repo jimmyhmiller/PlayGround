@@ -1,6 +1,5 @@
-use std::collections::{BTreeMap, BinaryHeap, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap, VecDeque};
 use std::cmp::Reverse;
-use std::sync::Arc;
 
 use rand::SeedableRng;
 use serde::{Deserialize, Serialize};
@@ -80,13 +79,6 @@ pub struct Node {
 
     // --- Leaf state (unused / empty for compounds) ---
     pub slots: BTreeMap<String, Value>,
-    /// Rules wrapped in `Arc` so cloning during the hot fire-attempt
-    /// loop is a refcount bump and so the same rule body is shared
-    /// across every instance of a class (the engine's `try_fire`
-    /// snapshots the rule via `Arc::clone`, which is cheap; deep-clone
-    /// of the `Expr`/`Effect` trees was the bulk of the runtime cost
-    /// at large grid sizes).
-    pub rules: Vec<Arc<Rule>>,
     /// Packets delivered to this node, waiting to be matched by a rule.
     /// In-order FIFO. Unbounded in principle; if this grows without
     /// bound, you have modeled the system correctly and it is overloaded.
@@ -212,6 +204,20 @@ pub struct Sim {
     /// instant. A well-written model won't hit this; if it does, we
     /// want a loud error, not a hang.
     pub max_steps_per_instant: usize,
+    /// Scratch buffer used by the fire loop to snapshot node ids each
+    /// time it scans the world. Reusing the allocation avoids a fresh
+    /// `Vec` per `try_fire_one` call (8000+ calls per generation on a
+    /// 30×30 grid).
+    #[serde(skip)]
+    pub(crate) fire_iter_buf: Vec<NodeId>,
+    /// Worklist of nodes that currently have packets in their inbox or
+    /// whose templates have a source-style rule (must always be
+    /// rechecked). The fire loop iterates this set instead of the
+    /// full `nodes` map — turns the per-firing scan from O(N) to
+    /// O(active). Sorted by `NodeId` so the firing order is identical
+    /// to the previous "iterate all by id" behavior.
+    #[serde(skip)]
+    pub(crate) fireable: BTreeSet<NodeId>,
     /// Running counts of runtime errors, keyed by `kind` string.
     /// Incremented alongside `Event::RuntimeError` emission. Lets the
     /// UI / tests surface aggregate error rates without scraping the
@@ -301,8 +307,42 @@ impl Sim {
             params: HashMap::new(),
             pending_actions: BinaryHeap::new(),
             max_steps_per_instant: 10_000,
+            fire_iter_buf: Vec::new(),
+            fireable: BTreeSet::new(),
             error_counts: BTreeMap::new(),
             timeline: crate::timeline::Timeline::new(),
+        }
+    }
+
+    /// Mark `nid` as needing a fire-scan. Idempotent. Called whenever
+    /// a packet is injected or delivered, and at node-spawn time for
+    /// templates with a source-style rule.
+    pub(crate) fn mark_fireable(&mut self, nid: NodeId) {
+        self.fireable.insert(nid);
+    }
+
+    /// Recompute whether `nid` should still be in `fireable`: keep it
+    /// if its inbox has a packet OR its template carries a source
+    /// rule. Otherwise drop it. Called after a fire consumes a packet
+    /// and we need to know if more work remains.
+    pub(crate) fn refresh_fireable(&mut self, nid: NodeId) {
+        let keep = match self.nodes.get(&nid) {
+            Some(node) => {
+                let has_inbox = !node.inbox.is_empty();
+                let has_source = node
+                    .class
+                    .as_deref()
+                    .and_then(|c| self.templates.get(c))
+                    .map(|t| t.has_source_rule)
+                    .unwrap_or(false);
+                has_inbox || has_source
+            }
+            None => false,
+        };
+        if keep {
+            self.fireable.insert(nid);
+        } else {
+            self.fireable.remove(&nid);
         }
     }
 
@@ -398,26 +438,85 @@ impl Sim {
         Ok(())
     }
 
-    pub fn register_template(&mut self, t: Template) {
+    pub fn register_template(&mut self, mut t: Template) {
+        // Templates from outside (DSL lowering, hand-built builders)
+        // may not have run the cached-flag computation. Recompute
+        // here so the fire loop's fast-skip is always correct.
+        t.refresh_has_source_rule();
         let key = t.name.clone();
         self.templates.insert(key, t);
+    }
+
+    /// Append a rule to the class that backs this node. If the node has
+    /// a shared class, every instance picks up the new rule — that's
+    /// the cost of rules-on-templates and matches how a builder
+    /// modifying a real class would behave. Returns `Err` if the node
+    /// has no class (compound or rules-less leaf).
+    pub fn add_rule_to_node(&mut self, nid: NodeId, rule: Rule) -> Result<(), String> {
+        let class = self
+            .nodes
+            .get(&nid)
+            .and_then(|n| n.class.clone())
+            .ok_or_else(|| format!("node {:?} has no class to attach a rule to", nid))?;
+        let template = self
+            .templates
+            .get_mut(&class)
+            .ok_or_else(|| format!("template `{}` for node {:?} is missing", class, nid))?;
+        if !crate::template::rule_has_input(&rule) {
+            template.has_source_rule = true;
+        }
+        template.rules.push(rule);
+        Ok(())
     }
 
     pub fn add_node(&mut self, name: impl Into<String>, slots: BTreeMap<String, Value>, rules: Vec<Rule>) -> NodeId {
         let id = NodeId(self.next_node_id);
         self.next_node_id += 1;
+        // Rules now live on templates, not on instances. Inline rules
+        // get a private synthetic template named `__inline_<id>` so
+        // there's still a single place to look them up at fire time.
+        // Compound nodes and any node passing an empty rules vec end
+        // up with `class: None` and never enter the rule-fire path.
+        let class = if rules.is_empty() {
+            None
+        } else {
+            let class_name = format!("__inline_{}", id.0);
+            let mut tpl = Template {
+                name: class_name.clone(),
+                node_name_prefix: class_name.clone(),
+                slots: BTreeMap::new(),
+                rules,
+                edges: Vec::new(),
+                initial_packets: Vec::new(),
+                probes: Vec::new(),
+                has_source_rule: false,
+            };
+            tpl.refresh_has_source_rule();
+            self.templates.insert(class_name.clone(), tpl);
+            Some(class_name)
+        };
+        let class_for_source_check = class.clone();
         let node = Node {
             id,
             name: name.into(),
             slots,
-            rules,
             inbox: VecDeque::new(),
             probes: Vec::new(),
-            class: None,
+            class,
             parent: None,
             compound: None,
         };
         self.nodes.insert(id, node);
+        // Source-rule templates need to be in the worklist from spawn —
+        // they fire even with an empty inbox.
+        let has_source = class_for_source_check
+            .as_deref()
+            .and_then(|c| self.templates.get(c))
+            .map(|t| t.has_source_rule)
+            .unwrap_or(false);
+        if has_source {
+            self.fireable.insert(id);
+        }
         id
     }
 
@@ -436,7 +535,6 @@ impl Sim {
             id,
             name: name.into(),
             slots: BTreeMap::new(),
-            rules: Vec::new(),
             inbox: VecDeque::new(),
             probes: Vec::new(),
             class: None,
@@ -485,6 +583,7 @@ impl Sim {
     /// path instead of chasing a ghost.
     pub fn despawn_node(&mut self, nid: NodeId) {
         let Some(_) = self.nodes.remove(&nid) else { return; };
+        self.fireable.remove(&nid);
         self.edges.retain(|_, e| e.from != nid && e.to != nid);
         for node in self.nodes.values_mut() {
             for (_, v) in node.slots.iter_mut() {
@@ -559,6 +658,7 @@ impl Sim {
         };
         self.log.push(Event::PacketDelivered { packet: id, to, at_ns: self.now_ns });
         self.nodes.get_mut(&to).expect("inject: node not found").inbox.push_back(pkt);
+        self.mark_fireable(to);
         id
     }
 
