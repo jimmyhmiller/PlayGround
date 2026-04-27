@@ -12,10 +12,11 @@ use bevy::input::ButtonState;
 use bevy::input::InputPlugin;
 use bevy::prelude::*;
 use editor_bevy::{
-    Editor, EditorHighlighter, EditorMetrics, EditorRect, EditorScroll, EditorStateComp,
-    FocusedEditor, HeadlessEditorPlugin, LineRows, TextDragAnchor,
+    EditorHighlighter, EditorMetrics, EditorScroll, EditorStateComp, HeadlessEditorPlugin,
+    LineRows, TextDragAnchor, PANE_KIND,
 };
 use editor_bevy::highlight::Highlighter;
+use pane_bevy::{FocusedPane, PaneKindMarker, PaneRect, PaneTag};
 use editor_core::selection::Selection;
 use editor_core::state::EditorState;
 use ropey::Rope;
@@ -32,7 +33,8 @@ fn make_app(initial: &str) -> App {
     app.add_systems(Startup, move |mut commands: Commands| {
         let e = commands
             .spawn((
-                Editor,
+                PaneTag,
+                PaneKindMarker(PANE_KIND),
                 EditorStateComp(
                     EditorState::new(Rope::from_str(&initial), Selection::cursor(0))
                         .with_indent_unit("    "),
@@ -41,14 +43,14 @@ fn make_app(initial: &str) -> App {
                 LineRows::default(),
                 EditorScroll::default(),
                 TextDragAnchor::default(),
-                EditorRect {
+                PaneRect {
                     pos: Vec2::ZERO,
                     size: Vec2::new(800.0, 600.0),
                     z: 0.0,
                 },
             ))
             .id();
-        commands.insert_resource(FocusedEditor(Some(e)));
+        commands.insert_resource(FocusedPane(Some(e)));
     });
     // Run startup once so the entity exists before tests drive events.
     app.update();

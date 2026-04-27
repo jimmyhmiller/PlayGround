@@ -32,12 +32,12 @@ fn strip_visible_when_timeline_has_events() {
     let mut app = make_app();
     {
         let mut flow = app.world_mut().resource_mut::<FlowSim>();
-        let nid = flow.sim.add_node(
+        let nid = flow.add_node(
             "test",
             std::collections::BTreeMap::from([("x".to_string(), Value::Int(0))]),
             Vec::new(),
         );
-        flow.sim.timeline.schedule(1_000_000_000, nid, "x".into(), Value::Int(1));
+        flow.timeline.schedule(1_000_000_000, nid, "x".into(), Value::Int(1));
     }
     app.update();
     app.update();

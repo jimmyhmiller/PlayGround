@@ -20,10 +20,14 @@
 //! after an incoming packet's delivery, the visuals will too (because
 //! we just scale sim time to real time).
 
+use bevy::asset::RenderAssetUsages;
+use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
+use bevy::camera::visibility::NoFrustumCulling;
 use flow::EdgeId;
 
-use crate::bridge::{EntityMaps, FlowEdgeRef, FlowSim, NewEvents};
+use crate::bridge::{EntityMaps, FlowEdgeRef, NewEvents};
+use crate::sim_driver::{SimDriverRes, SimSnapshotRes};
 use crate::camera::{MainCamera, cursor_to_world};
 use crate::nodes::NodeKind;
 use crate::theme::Theme;
@@ -37,6 +41,7 @@ impl Plugin for EdgesPlugin {
             .init_resource::<HiddenEdges>()
             .init_resource::<HideAll>()
             .insert_resource(VisualTimelineRes(VisualTimeline::default()))
+            .add_systems(Startup, spawn_edge_mesh)
             .add_systems(Update, (
                 handle_connect_click,
                 toggle_hide_all,
@@ -149,9 +154,9 @@ fn handle_connect_click(
     mut connect: ResMut<ConnectState>,
     windows: Query<&Window>,
     cams: Query<(&Camera, &GlobalTransform), With<MainCamera>>,
-    nodes: Query<(Entity, &Transform, &NodeKind), With<crate::bridge::FlowNodeRef>>,
+    nodes: Query<(Entity, &Transform, &NodeKind, &crate::nodes::BodyShape), With<crate::bridge::FlowNodeRef>>,
     mut maps: ResMut<EntityMaps>,
-    mut flow: ResMut<FlowSim>,
+    mut driver: ResMut<SimDriverRes>,
     mut hidden: ResMut<HiddenEdges>,
     mut commands: Commands,
     ui: Query<&Interaction>,
@@ -161,21 +166,21 @@ fn handle_connect_click(
     if poster_ui::pointer_over_ui(&ui) { return; }
     let Some(world) = cursor_to_world(&windows, &cams) else { return; };
 
-    use crate::nodes::{body_shape, hit_size};
-    let hit = nodes.iter().find(|(_, tf, kind)| {
-        let half = hit_size(&body_shape(kind.0)) * 0.5;
+    use crate::nodes::hit_size;
+    let hit = nodes.iter().find(|(_, tf, _, shape)| {
+        let half = hit_size(shape) * 0.5;
         let p = tf.translation.truncate();
         (world - p).abs().cmple(half).all()
-    }).map(|(e, _, _)| e);
+    }).map(|(e, _, _, _)| e);
     let Some(entity) = hit else { return; };
 
     if let Some(src) = connect.source.take() {
         let Some(&from_nid) = maps.entity_to_node.get(&src) else { return; };
         let Some(&to_nid) = maps.entity_to_node.get(&entity) else { return; };
-        let from_kind = nodes.get(src).map(|(_, _, k)| k.0).ok();
-        let to_kind = nodes.get(entity).map(|(_, _, k)| k.0).ok();
+        let from_kind = nodes.get(src).map(|(_, _, k, _)| k.0).ok();
+        let to_kind = nodes.get(entity).map(|(_, _, k, _)| k.0).ok();
         wire_flow_edge(
-            &mut flow.sim,
+            &mut driver,
             &mut maps,
             &mut hidden,
             &mut commands,
@@ -197,8 +202,13 @@ fn handle_connect_click(
 ///  * Visible edge: Worker → Queue (what the user drew).
 ///  * Hidden edge:  Queue → Worker — the data return path.
 ///  * Kickoff pull injected into the queue.
+///
+/// The sim work runs through `driver.with_sim_mut` so we get back the
+/// freshly-allocated EdgeIds and can register their entities here in
+/// the same call. In Worker mode this blocks for at most one tick
+/// (rare on a click).
 pub fn wire_flow_edge(
-    sim: &mut flow::Sim,
+    driver: &mut SimDriverRes,
     maps: &mut EntityMaps,
     hidden: &mut HiddenEdges,
     commands: &mut Commands,
@@ -213,8 +223,18 @@ pub fn wire_flow_edge(
         let worker_id = from_nid;
         let queue_id  = to_nid;
 
-        let signal_eid = sim.add_edge(worker_id, queue_id,  flow::Expr::int(1_000_000));
-        let data_eid   = sim.add_edge(queue_id,  worker_id, flow::Expr::int(1_000_000));
+        let (signal_eid, data_eid) = driver.0.with_sim_mut(move |sim| {
+            let signal_eid = sim.add_edge(worker_id, queue_id, flow::Expr::int(1_000_000));
+            let data_eid   = sim.add_edge(queue_id,  worker_id, flow::Expr::int(1_000_000));
+            if let Some(n) = sim.nodes.get_mut(&worker_id) {
+                n.slots.insert("upstream".into(), flow::Value::NodeRef(queue_id));
+            }
+            sim.inject(
+                queue_id,
+                flow::Value::variant("pull", flow::Value::NodeRef(worker_id)),
+            );
+            (signal_eid, data_eid)
+        });
 
         let sig_ent = commands.spawn((FlowEdgeRef(signal_eid),)).id();
         let dat_ent = commands.spawn((FlowEdgeRef(data_eid),)).id();
@@ -223,69 +243,117 @@ pub fn wire_flow_edge(
         maps.edge_to_entity.insert(data_eid, dat_ent);
         maps.entity_to_edge.insert(dat_ent, data_eid);
         hidden.set.insert(data_eid);
-
-        if let Some(n) = sim.nodes.get_mut(&worker_id) {
-            n.slots.insert("upstream".into(), flow::Value::NodeRef(queue_id));
-        }
-
-        sim.inject(
-            queue_id,
-            flow::Value::variant("pull", flow::Value::NodeRef(worker_id)),
-        );
         return;
     }
 
-    let eid = sim.add_edge(from_nid, to_nid, flow::Expr::int(1_000_000));
+    let from_kind_local = from_kind;
+    let eid = driver.0.with_sim_mut(move |sim| {
+        let eid = sim.add_edge(from_nid, to_nid, flow::Expr::int(1_000_000));
+        if matches!(from_kind_local, Some(Kind::Worker)) {
+            if let Some(n) = sim.nodes.get_mut(&from_nid) {
+                n.slots.insert("downstream".into(), flow::Value::NodeRef(to_nid));
+            }
+        }
+        eid
+    });
     let ent = commands.spawn((FlowEdgeRef(eid),)).id();
     maps.edge_to_entity.insert(eid, ent);
     maps.entity_to_edge.insert(ent, eid);
-
-    if matches!(from_kind, Some(Kind::Worker)) {
-        if let Some(n) = sim.nodes.get_mut(&from_nid) {
-            n.slots.insert("downstream".into(), flow::Value::NodeRef(to_nid));
-        }
-    }
 }
 
 // ---------------- arrow rendering ----------------
+//
+// Arrows are rendered as a single `Mesh2d` LineList rebuilt every frame
+// rather than via `Gizmos`. Reason: Bevy 2D gizmos render in a pass
+// after the 2D opaque/transparent passes, ignoring world z — so they
+// always paint on top of mesh-rendered content like the packet cloud.
+// A real Mesh2d at z=2.0 sits cleanly between nodes (z=1.0) and
+// packets (z=3.0) the way the visual order is supposed to read:
+// nodes < arrows < packets.
+
+#[derive(Component)]
+struct EdgeMesh;
+
+fn spawn_edge_mesh(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    theme: Res<Theme>,
+) {
+    let mesh = Mesh::new(PrimitiveTopology::LineList, RenderAssetUsages::default());
+    let material = materials.add(ColorMaterial::from(theme.ink_soft));
+    commands.spawn((
+        Mesh2d(meshes.add(mesh)),
+        MeshMaterial2d(material),
+        Transform::from_xyz(0.0, 0.0, 2.0),
+        Visibility::Visible,
+        // Vertex positions change every frame; the static AABB Bevy
+        // computes once would frustum-cull us as soon as the camera
+        // moves off origin.
+        NoFrustumCulling,
+        EdgeMesh,
+    ));
+}
 
 fn draw_edges(
-    mut gizmos: Gizmos,
-    flow: Res<FlowSim>,
-    nodes: Query<(&Transform, &crate::nodes::NodeKind), With<crate::bridge::FlowNodeRef>>,
+    snapshot: Res<SimSnapshotRes>,
+    nodes: Query<(&Transform, &crate::nodes::BodyShape), With<crate::bridge::FlowNodeRef>>,
     maps: Res<EntityMaps>,
     theme: Res<Theme>,
     connect: Res<ConnectState>,
     hidden: Res<HiddenEdges>,
     hide_all: Res<HideAll>,
+    edge_mesh: Query<&Mesh2d, With<EdgeMesh>>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    edge_mat: Query<&MeshMaterial2d<ColorMaterial>, With<EdgeMesh>>,
+    mut gizmos: Gizmos,
     mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
-    if hide_all.0 { return; }
     crate::time_phase!(perf, "edges.draw_edges", {
-    for (eid, edge) in flow.sim.edges.iter() {
-        if hidden.set.contains(eid) { continue; }
-        let Some(&ent_from) = maps.node_to_entity.get(&edge.from) else { continue; };
-        let Some(&ent_to)   = maps.node_to_entity.get(&edge.to)   else { continue; };
-        let Ok((tf_from, kind_from)) = nodes.get(ent_from) else { continue; };
-        let Ok((tf_to,   kind_to))   = nodes.get(ent_to)   else { continue; };
+    let Ok(handle) = edge_mesh.single() else { return; };
+    let Some(mesh) = meshes.get_mut(&handle.0) else { return; };
 
-        // Self-loops are sim plumbing (tick / done / period), not user edges.
-        if edge.from == edge.to { continue; }
-
-        let from_center = tf_from.translation.truncate();
-        let to_center = tf_to.translation.truncate();
-        let dir = (to_center - from_center).normalize_or_zero();
-        if dir.length_squared() == 0.0 { continue; }
-
-        use crate::nodes::{body_shape, hit_size};
-        let from_half = hit_size(&body_shape(kind_from.0)) * 0.5;
-        let to_half = hit_size(&body_shape(kind_to.0)) * 0.5;
-        let from_exit = from_center + dir * border_exit(from_half, dir);
-        let to_entry = to_center - dir * (border_exit(to_half, -dir) + 4.0);
-
-        draw_arrow(&mut gizmos, from_exit, to_entry, theme.ink_soft);
+    // Keep the colour in sync with theme swaps.
+    if let Ok(mat_handle) = edge_mat.single() {
+        if let Some(mat) = materials.get_mut(&mat_handle.0) {
+            mat.color = theme.ink_soft;
+        }
     }
 
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+
+    if !hide_all.0 {
+        for (eid, edge) in snapshot.0.edges.iter() {
+            if hidden.set.contains(eid) { continue; }
+            let Some(&ent_from) = maps.node_to_entity.get(&edge.from) else { continue; };
+            let Some(&ent_to)   = maps.node_to_entity.get(&edge.to)   else { continue; };
+            let Ok((tf_from, shape_from)) = nodes.get(ent_from) else { continue; };
+            let Ok((tf_to,   shape_to))   = nodes.get(ent_to)   else { continue; };
+
+            // Self-loops are sim plumbing (tick / done / period), not user edges.
+            if edge.from == edge.to { continue; }
+
+            let from_center = tf_from.translation.truncate();
+            let to_center = tf_to.translation.truncate();
+            let dir = (to_center - from_center).normalize_or_zero();
+            if dir.length_squared() == 0.0 { continue; }
+
+            use crate::nodes::hit_size;
+            let from_half = hit_size(shape_from) * 0.5;
+            let to_half = hit_size(shape_to) * 0.5;
+            let from_exit = from_center + dir * border_exit(from_half, dir);
+            let to_entry = to_center - dir * (border_exit(to_half, -dir) + 4.0);
+
+            push_arrow_segments(&mut positions, from_exit, to_entry);
+        }
+    }
+
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+
+    // Connect-source preview circle stays a gizmo — it's transient
+    // (only visible while actively wiring) and doesn't fight packets
+    // for layering.
     if let Some(src) = connect.source {
         if let Ok((tf, _)) = nodes.get(src) {
             gizmos.circle_2d(tf.translation.truncate(), 40.0, theme.accent);
@@ -301,12 +369,18 @@ fn border_exit(half: Vec2, dir: Vec2) -> f32 {
     tx.min(ty)
 }
 
-fn draw_arrow(gizmos: &mut Gizmos, a: Vec2, b: Vec2, color: Color) {
+/// Append the line segments for one arrow (shaft + filled triangular
+/// head) to a flat positions buffer for a `LineList` mesh. Matches the
+/// shape of the previous gizmo `draw_arrow` exactly.
+fn push_arrow_segments(positions: &mut Vec<[f32; 3]>, a: Vec2, b: Vec2) {
     let delta = b - a;
     let dist = delta.length();
     if dist < 1.0 { return; }
     let dir = delta / dist;
-    gizmos.line_2d(a, b, color);
+
+    // Shaft.
+    positions.push([a.x, a.y, 0.0]);
+    positions.push([b.x, b.y, 0.0]);
 
     let tip = b;
     let head_perp = Vec2::new(-dir.y, dir.x);
@@ -320,11 +394,15 @@ fn draw_arrow(gizmos: &mut Gizmos, a: Vec2, b: Vec2, color: Color) {
     for i in 0..=FILL_STEPS {
         let t = i as f32 / FILL_STEPS as f32;
         let base_pt = left.lerp(right, t);
-        gizmos.line_2d(tip, base_pt, color);
+        positions.push([tip.x, tip.y, 0.0]);
+        positions.push([base_pt.x, base_pt.y, 0.0]);
     }
-    gizmos.line_2d(tip, left, color);
-    gizmos.line_2d(tip, right, color);
-    gizmos.line_2d(left, right, color);
+    positions.push([tip.x, tip.y, 0.0]);
+    positions.push([left.x, left.y, 0.0]);
+    positions.push([tip.x, tip.y, 0.0]);
+    positions.push([right.x, right.y, 0.0]);
+    positions.push([left.x, left.y, 0.0]);
+    positions.push([right.x, right.y, 0.0]);
 }
 
 // ---------------- packet pipeline (F1) ----------------

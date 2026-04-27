@@ -12,9 +12,9 @@ use bevy::prelude::*;
 use bevy::render::view::screenshot::{save_to_disk, Screenshot};
 use bevy::window::PrimaryWindow;
 use editor_bevy::{
-    build_app, setup_editor_font, spawn_editor, EditorFont, EditorRect, EditorScroll,
-    EditorStateComp, FocusedEditor,
+    build_app, setup_editor_font, spawn_editor_pane, EditorScroll, EditorStateComp,
 };
+use pane_bevy::{FocusedPane, PaneRect};
 use editor_core::selection::{Range, Selection};
 use editor_core::state::EditorState;
 use editor_core::transaction::Transaction;
@@ -147,16 +147,16 @@ fn main() {
     // that two editors render with correct z-ordering.
     app.add_systems(
         Startup,
-        (|mut commands: Commands, font: Res<EditorFont>| {
-            spawn_editor(
-                &mut commands,
-                &font,
+        (|world: &mut World| {
+            spawn_editor_pane(
+                world,
                 "// second editor\nfn fib(n: u32) -> u32 {\n    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n}\n",
-                EditorRect {
+                PaneRect {
                     pos: Vec2::new(160.0, 180.0),
                     size: Vec2::new(520.0, 320.0),
                     z: 2.0,
                 },
+                None,
             );
         })
             .after(setup_editor_font),
@@ -176,7 +176,7 @@ fn drive_scenarios(
     mut runner: ResMut<Runner>,
     mut commands: Commands,
     primary: Query<Entity, With<PrimaryWindow>>,
-    focused: Res<FocusedEditor>,
+    focused: Res<FocusedPane>,
     mut editors: Query<(&mut EditorStateComp, &mut EditorScroll)>,
     mut exit: MessageWriter<AppExit>,
 ) {

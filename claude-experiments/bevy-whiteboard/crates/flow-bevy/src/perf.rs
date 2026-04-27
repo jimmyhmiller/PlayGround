@@ -51,6 +51,28 @@ impl PhaseTimings {
         self.samples.entry(phase).or_default().push(us);
     }
 
+    /// For each phase, sum any samples recorded since the previous
+    /// call (tracked per-phase in `cursors`). Returns one entry per
+    /// phase that produced new samples this slice.
+    ///
+    /// Used by the bench to slice `PhaseTimings` per frame: call
+    /// once at end-of-frame, get exactly that frame's contribution.
+    pub fn delta_since(
+        &self,
+        cursors: &mut HashMap<&'static str, usize>,
+    ) -> Vec<(&'static str, f64)> {
+        let mut out = Vec::new();
+        for (name, vec) in self.samples.iter() {
+            let cursor = cursors.entry(*name).or_insert(0);
+            if vec.len() > *cursor {
+                let sum: f64 = vec[*cursor..].iter().sum();
+                out.push((*name, sum));
+                *cursor = vec.len();
+            }
+        }
+        out
+    }
+
     /// Compute summary stats for every phase. Returns one row per
     /// phase, sorted by name for stable reporting.
     pub fn report(&self) -> Vec<PhaseReport> {
@@ -105,13 +127,109 @@ macro_rules! time_phase {
     }};
 }
 
-/// Plugin that just registers the [`PhaseTimings`] resource. Systems
-/// that want to record into it pull it as `ResMut<PhaseTimings>` and
-/// invoke [`time_phase!`].
+/// Companion bucket for samples that originate on the **sim worker
+/// thread**, not the main thread. The worker drops perf samples
+/// (sim.run_until.total, sim.fire_rules, sim.deliver_packets, etc.)
+/// into the snapshot it publishes; the bridge drains them here.
+///
+/// Crucially these samples are *not* on the main-thread frame's
+/// critical path under worker mode — keeping them out of
+/// `PhaseTimings` avoids the misleading impression that they
+/// contribute to frame time.
+#[derive(Resource, Default)]
+pub struct WorkerPerf(pub PhaseTimings);
+
+/// Plugin that registers [`PhaseTimings`] and [`WorkerPerf`]. Systems
+/// that want to record into the main-thread bucket pull it as
+/// `ResMut<PhaseTimings>` and invoke [`time_phase!`].
+///
+/// Also installs:
+///  * `sched.main_world_total` — start of `First` to end of `Last`.
+///    Reliable because `First` and `Last` are ordered by Bevy's
+///    `MainScheduleOrder`. The complement (`frame_ms − main_world_total`)
+///    is "render-world + wgpu submit + present + OS".
+///  * `sched.transform_propagate` — wraps Bevy's
+///    `TransformSystem::TransformPropagate` set. With many entities
+///    + a deep hierarchy this often dominates `PostUpdate`.
+///  * `sched.visibility_propagate` — wraps Bevy's
+///    `VisibilitySystems::VisibilityPropagate` set.
+///
+/// Per-schedule (sched.update/sched.post_update/etc.) wrappers were
+/// removed because they couldn't be ordered against arbitrary
+/// foreign systems in the same schedule, so the recorded duration
+/// was effectively "marker-to-marker with parallel systems missed",
+/// not the schedule's wall time.
 pub struct PerfPlugin;
 impl Plugin for PerfPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<PhaseTimings>();
+        use bevy::app::{First, Last, PostUpdate};
+        use bevy::transform::TransformSystems;
+        use bevy::camera::visibility::VisibilitySystems;
+        app.init_resource::<PhaseTimings>()
+            .init_resource::<WorkerPerf>()
+            .init_resource::<ScheduleClock>()
+            // Frame-wide bookend.
+            .add_systems(First, mark_first_start)
+            .add_systems(Last, finish_main_world)
+            // Transform propagation bookend.
+            .add_systems(
+                PostUpdate,
+                mark_transform_start.before(TransformSystems::Propagate),
+            )
+            .add_systems(
+                PostUpdate,
+                mark_transform_end.after(TransformSystems::Propagate),
+            )
+            // Visibility propagation bookend.
+            .add_systems(
+                PostUpdate,
+                mark_visibility_start.before(VisibilitySystems::VisibilityPropagate),
+            )
+            .add_systems(
+                PostUpdate,
+                mark_visibility_end.after(VisibilitySystems::VisibilityPropagate),
+            );
+    }
+}
+
+/// Cached start `Instant`s for the named bookend pairs.
+#[derive(Resource, Default)]
+pub struct ScheduleClock {
+    first_start: Option<std::time::Instant>,
+    transform_start: Option<std::time::Instant>,
+    visibility_start: Option<std::time::Instant>,
+}
+
+fn mark_first_start(mut clock: ResMut<ScheduleClock>) {
+    clock.first_start = Some(std::time::Instant::now());
+}
+
+/// Records `sched.main_world_total`. Public so callers (the bench)
+/// can `.after(finish_main_world)` to ensure their per-frame capture
+/// runs after this writes the over-arching span.
+pub fn finish_main_world(mut clock: ResMut<ScheduleClock>, mut perf: ResMut<PhaseTimings>) {
+    if let Some(start) = clock.first_start.take() {
+        let us = start.elapsed().as_secs_f64() * 1_000_000.0;
+        perf.record_us("sched.main_world_total", us);
+    }
+}
+
+fn mark_transform_start(mut clock: ResMut<ScheduleClock>) {
+    clock.transform_start = Some(std::time::Instant::now());
+}
+fn mark_transform_end(mut clock: ResMut<ScheduleClock>, mut perf: ResMut<PhaseTimings>) {
+    if let Some(start) = clock.transform_start.take() {
+        let us = start.elapsed().as_secs_f64() * 1_000_000.0;
+        perf.record_us("sched.transform_propagate", us);
+    }
+}
+fn mark_visibility_start(mut clock: ResMut<ScheduleClock>) {
+    clock.visibility_start = Some(std::time::Instant::now());
+}
+fn mark_visibility_end(mut clock: ResMut<ScheduleClock>, mut perf: ResMut<PhaseTimings>) {
+    if let Some(start) = clock.visibility_start.take() {
+        let us = start.elapsed().as_secs_f64() * 1_000_000.0;
+        perf.record_us("sched.visibility_propagate", us);
     }
 }
 

@@ -20,7 +20,7 @@ use poster_ui::Theme;
 use poster_ui::testing::{click_by_marker, simulate_canvas_click};
 
 fn latest_of_kind(app: &App, kind: Kind) -> Option<flow::NodeId> {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let prefix = format!("{}_", kind.label());
     sim.nodes
         .iter()
@@ -72,7 +72,7 @@ fn dot_color_for(app: &mut App, nid: flow::NodeId) -> Color {
 #[test]
 fn every_non_router_node_has_a_color_dot_child() {
     let app = make_app();
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let maps = app.world().resource::<EntityMaps>();
     for (nid, node) in sim.nodes.iter() {
         let entity = *maps

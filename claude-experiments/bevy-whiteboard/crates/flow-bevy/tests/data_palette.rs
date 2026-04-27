@@ -19,7 +19,7 @@ use poster_ui::{DATA_SLOT_COUNT, Theme};
 use poster_ui::testing::{click_by_marker, simulate_canvas_click};
 
 fn latest_of_kind(app: &App, kind: Kind) -> Option<flow::NodeId> {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let prefix = format!("{}_", kind.label());
     sim.nodes
         .iter()

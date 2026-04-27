@@ -17,10 +17,11 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 
+use pane_bevy::{FocusedPane, PaneChrome, PaneKindMarker, PaneTag};
+
 use crate::worker::{SnapCell, WorkerMsg};
 use crate::{
-    CellSprites, FocusedTerminal, MonoMetrics, TerminalChrome, TerminalSelection,
-    TerminalStore, TerminalTag, LINE_HEIGHT,
+    CellSprites, MonoMetrics, TerminalSelection, TerminalStore, LINE_HEIGHT, PANE_KIND,
 };
 
 const COLOR_SELECTION: Color = Color::srgba(0.42, 0.62, 0.92, 0.28);
@@ -56,11 +57,14 @@ fn render_selection_overlays(
     mut commands: Commands,
     metrics: Res<MonoMetrics>,
     mut q: Query<
-        (&TerminalChrome, &CellSprites, &mut TerminalSelection),
-        With<TerminalTag>,
+        (&PaneChrome, &CellSprites, &mut TerminalSelection, &PaneKindMarker),
+        With<PaneTag>,
     >,
 ) {
-    for (chrome, cells, mut sel) in &mut q {
+    for (chrome, cells, mut sel, kind) in &mut q {
+        if kind.0 != PANE_KIND {
+            continue;
+        }
         let active = sel.is_active();
         let cols = cells.cols as i32;
         let rows = cells.rows as i32;
@@ -134,11 +138,21 @@ fn render_selection_overlays(
 fn copy_paste_keys(
     mut events: MessageReader<KeyboardInput>,
     mods: Res<ButtonInput<KeyCode>>,
-    focused: Res<FocusedTerminal>,
+    focused: Res<FocusedPane>,
     store: Res<TerminalStore>,
     sels: Query<&TerminalSelection>,
+    kinds: Query<&PaneKindMarker>,
     clip: Res<ClipboardState>,
 ) {
+    // Skip unless the focused pane is a terminal.
+    let target_is_terminal = focused
+        .0
+        .and_then(|e| kinds.get(e).ok())
+        .is_some_and(|k| k.0 == PANE_KIND);
+    if !target_is_terminal {
+        events.read().for_each(|_| {});
+        return;
+    }
     let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
     if !cmd {
         // Drain so we don't carry the events into a future Cmd-down frame.
@@ -178,7 +192,7 @@ fn copy_paste_keys(
                 if let Some(text) = text
                     && !text.is_empty()
                 {
-                    data.worker.send(WorkerMsg::Input(text.into_bytes()));
+                    data.worker.send(WorkerMsg::Paste(text));
                 }
             }
             _ => {}

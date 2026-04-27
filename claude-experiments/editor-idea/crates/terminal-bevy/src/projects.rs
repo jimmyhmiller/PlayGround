@@ -35,11 +35,14 @@ use bevy::sprite::Anchor;
 use bevy::text::LineHeight;
 use serde::{Deserialize, Serialize};
 
-use crate::worker::WorkerMsg;
-use crate::{
-    scrollback_path, spawn_terminal, FocusedTerminal, MonoFont, TerminalRect, TerminalSession,
-    TerminalStore, TerminalTag, MIN_TERMINAL_SIZE,
+use pane_bevy::{
+    spawn_pane_from_registry, FocusedPane, PaneKindMarker, PaneProject, PaneRect, PaneRegistry,
+    PaneSnapshot, PaneTag, MIN_PANE_SIZE,
 };
+
+use editor_bevy::EditorFilePath;
+
+use crate::MonoFont;
 
 pub const SIDEBAR_DEFAULT_WIDTH: f32 = 220.0;
 pub const SIDEBAR_MIN_WIDTH: f32 = 160.0;
@@ -76,7 +79,6 @@ const TEXT_FONT_SIZE: f32 = 13.0;
 const HEADER_FONT_SIZE: f32 = 12.0;
 
 const NEW_TERMINAL_OFFSET: f32 = 28.0;
-const DEFAULT_TERMINAL_SIZE: Vec2 = Vec2::new(640.0, 400.0);
 
 // ---------- Persistence ----------
 
@@ -86,6 +88,9 @@ pub struct ProjectData {
     pub name: String,
 }
 
+/// Legacy terminal-only snapshot from before the pane unification.
+/// Kept for `serde(default)` deserialization so old projects.json files
+/// still load; on save we always write the new `panes` field instead.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TerminalSnapshot {
     pub session_id: u64,
@@ -105,8 +110,12 @@ struct PersistedState {
     next_id: u64,
     #[serde(default)]
     sidebar_width: Option<f32>,
-    #[serde(default)]
+    /// Legacy field — populated when reading old saves; never written.
+    #[serde(default, skip_serializing)]
     terminals: Vec<TerminalSnapshot>,
+    /// All panes (any kind) with their kind-specific config blob.
+    #[serde(default)]
+    panes: Vec<PaneSnapshot>,
     #[serde(default)]
     next_terminal_id: u64,
 }
@@ -194,9 +203,24 @@ pub struct Projects {
 impl Projects {
     fn from_persisted(p: PersistedState) -> Self {
         let next_id = p.next_id.max(p.projects.iter().map(|p| p.id + 1).max().unwrap_or(1));
+        let legacy_max_session = p
+            .terminals
+            .iter()
+            .map(|t| t.session_id + 1)
+            .max()
+            .unwrap_or(0);
+        let panes_max_session = p
+            .panes
+            .iter()
+            .filter(|p| p.kind == "terminal")
+            .filter_map(|p| p.config.get("session_id").and_then(|v| v.as_u64()))
+            .map(|id| id + 1)
+            .max()
+            .unwrap_or(0);
         let next_terminal_id = p
             .next_terminal_id
-            .max(p.terminals.iter().map(|t| t.session_id + 1).max().unwrap_or(1));
+            .max(legacy_max_session.max(panes_max_session))
+            .max(1);
         Self {
             list: p.projects,
             active: p.active,
@@ -294,26 +318,31 @@ pub struct Renaming {
     pub buffer: String,
 }
 
-/// Side-channel for actions the regular (non-exclusive) input systems
-/// can't perform themselves — spawning terminals needs `&mut World` for
-/// the `!Send` worker setup, despawning is done in the same exclusive
-/// system to keep ordering simple.
+/// Side-channel for spawn / restore / open-file actions that need
+/// exclusive World access (worker setup is `!Send`, spawn registration
+/// goes through `PaneRegistry`). Pane closes are owned by pane-bevy's
+/// own `PendingPaneActions`.
 #[derive(Resource, Default)]
 pub struct PendingActions {
-    /// Each entry: (project id to attach to, optional window-space
-    /// top-left for the new terminal; `None` means cascade from the
-    /// default canvas position).
-    pub new_terminals: Vec<(u64, Option<Vec2>)>,
-    pub close_terminals: Vec<Entity>,
-    /// Terminals to restore at startup from the persisted snapshot.
-    /// Each carries the rect + session id so the worker reopens the
-    /// matching scrollback file and replays it on spawn.
-    pub restore_terminals: Vec<TerminalSnapshot>,
-    /// Editor panes to spawn. Same shape as `new_terminals`.
-    pub new_editors: Vec<(u64, Option<Vec2>)>,
+    /// Spawn a new pane of any registered kind.
+    pub new_panes: Vec<NewPaneRequest>,
+    /// Restore persisted panes at startup. Each is dispatched to the
+    /// registered kind's `spawn` callback with its saved config blob.
+    pub restore_panes: Vec<PaneSnapshot>,
     /// Files to open into a new editor pane (Cmd+O picker, `tbopen`
     /// CLI, etc.).
     pub open_files: Vec<OpenFileRequest>,
+}
+
+/// Request to spawn one new pane of a given kind.
+#[derive(Debug, Clone)]
+pub struct NewPaneRequest {
+    pub kind: &'static str,
+    pub project_id: u64,
+    /// Optional window-space top-left for the new pane. `None` cascades
+    /// from a default position based on how many panes the project has.
+    pub origin: Option<Vec2>,
+    pub config: serde_json::Value,
 }
 
 /// Request to load a file into a new editor pane. Project is resolved
@@ -338,17 +367,9 @@ pub enum OpenProjectTarget {
     ByName(String),
 }
 
-/// File path the editor pane was loaded from. Tagged at spawn so future
-/// save / "reopen at the same path" features can find it without a
-/// separate side-table. No path = a scratch buffer (radial-menu spawn).
-#[derive(Component, Debug, Clone)]
-pub struct EditorFilePath(pub PathBuf);
-
-/// Re-exported from `editor_bevy` so terminal-bevy and editor-bevy can
-/// coordinate which handler claims a click in a given frame. Both
-/// crates' mouse handlers check it on press and set it on a successful
-/// hit; the editor embed plugin owns the PostUpdate reset.
-pub use editor_bevy::InputConsumed;
+/// Re-exported from `pane_bevy` so call sites in this crate keep their
+/// existing import paths.
+pub use pane_bevy::InputConsumed;
 
 /// Sidebar geometry. Only the width is mutable; height + position are
 /// driven by the window. Persisted as part of the projects file.
@@ -379,8 +400,9 @@ struct SidebarResize {
 
 // ---------- Components ----------
 
-#[derive(Component, Copy, Clone)]
-pub struct ProjectMembership(pub u64);
+/// Project membership component. Aliased to `pane_bevy::PaneProject` so
+/// pane-bevy's visibility/persistence systems can read it directly.
+pub type ProjectMembership = PaneProject;
 
 #[derive(Component)]
 pub struct SidebarEntity;
@@ -452,15 +474,33 @@ fn load_or_seed_projects(
         projects.active = projects.list.first().map(|p| p.id);
     }
 
-    // Queue restore for any terminal whose project still exists. The
-    // exclusive `apply_pending_actions` system will spawn them on the
-    // first Update tick.
+    // Queue restore for any pane whose project still exists. The
+    // exclusive `apply_pending_actions` system spawns them on the
+    // first Update tick. Old saves only had `terminals`; convert them
+    // into PaneSnapshot form so the unified restore path handles them.
     let known_projects: std::collections::HashSet<u64> =
         projects.list.iter().map(|p| p.id).collect();
-    for snap in persisted.terminals {
-        if known_projects.contains(&snap.project_id) {
-            pending.restore_terminals.push(snap);
+    for snap in persisted.panes {
+        let belongs = snap
+            .project_id
+            .map(|p| known_projects.contains(&p))
+            .unwrap_or(true);
+        if belongs {
+            pending.restore_panes.push(snap);
         }
+    }
+    for legacy in persisted.terminals {
+        if !known_projects.contains(&legacy.project_id) {
+            continue;
+        }
+        pending.restore_panes.push(PaneSnapshot {
+            kind: "terminal".into(),
+            project_id: Some(legacy.project_id),
+            pos: legacy.pos,
+            size: legacy.size,
+            z: legacy.z,
+            config: serde_json::json!({ "session_id": legacy.session_id }),
+        });
     }
 
     commands.insert_resource(projects);
@@ -965,167 +1005,76 @@ fn rename_keyboard(
 
 // ---------- Apply pending actions ----------
 
-/// Exclusive — needs `&mut World` to call `spawn_terminal` (worker setup
-/// touches `!Send` resources) and to despawn entities + flush their
-/// worker shutdown.
+/// Exclusive system — pane spawning and registry callbacks both need
+/// `&mut World`. Restores first, then handles project-deletion sweeps,
+/// then new-pane requests, then open-file requests.
 fn apply_pending_actions(world: &mut World) {
     let actions = std::mem::take(&mut *world.resource_mut::<PendingActions>());
+    let sidebar_width = world.resource::<Sidebar>().width;
 
-    // Restore persisted terminals first so they appear before any new
-    // ones the user might have queued during the same frame.
-    for snap in actions.restore_terminals {
-        // Reserve the saved id in the allocator so a future create
-        // never collides with it.
-        {
-            let mut projects = world.resource_mut::<Projects>();
-            if projects.next_terminal_id <= snap.session_id {
-                projects.next_terminal_id = snap.session_id + 1;
-            }
-        }
-        let replay = scrollback_path(snap.session_id)
-            .and_then(|p| std::fs::read(&p).ok());
-        let rect = TerminalRect {
-            pos: Vec2::new(snap.pos[0], snap.pos[1]),
-            size: Vec2::new(snap.size[0], snap.size[1]),
-            z: snap.z,
-        };
-        spawn_terminal(world, rect, Some(snap.project_id), snap.session_id, replay);
+    // Restore persisted panes first so they appear before any new ones
+    // queued in the same frame.
+    for snap in actions.restore_panes {
+        restore_pane(world, snap);
         world.resource_mut::<Projects>().layout_dirty = true;
     }
 
-    // Close requested terminals (from the close button on each window).
-    for entity in &actions.close_terminals {
-        close_terminal_entity(world, *entity);
-    }
-
-    // When a project was just deleted, close all of its panes too —
-    // sidebar_input only knows the project id, not which entities belong
-    // to it, so we sweep both terminal and editor panes here.
+    // Project deletion sweep: any pane whose project no longer exists
+    // is queued for close (pane-bevy's apply_pending_pane_actions runs
+    // the kind's on_close + despawns).
     let active_ids: std::collections::HashSet<u64> = world
         .resource::<Projects>()
         .list
         .iter()
         .map(|p| p.id)
         .collect();
-    let term_orphans: Vec<Entity> = {
-        let mut q = world.query::<(Entity, &ProjectMembership, &TerminalTag)>();
+    let orphans: Vec<Entity> = {
+        let mut q = world.query::<(Entity, &PaneProject, &PaneTag)>();
         q.iter(world)
             .filter_map(|(e, m, _)| (!active_ids.contains(&m.0)).then_some(e))
             .collect()
     };
-    for entity in term_orphans {
-        close_terminal_entity(world, entity);
-    }
-    let editor_orphans: Vec<Entity> = {
-        let mut q = world
-            .query::<(Entity, &ProjectMembership, &editor_bevy::Editor)>();
-        q.iter(world)
-            .filter_map(|(e, m, _)| (!active_ids.contains(&m.0)).then_some(e))
-            .collect()
-    };
-    for entity in editor_orphans {
-        if world.get_entity(entity).is_ok() {
-            world.entity_mut(entity).despawn();
-        }
-        let mut focused = world.resource_mut::<editor_bevy::FocusedEditor>();
-        if focused.0 == Some(entity) {
-            focused.0 = None;
+    if !orphans.is_empty() {
+        let mut close_q = world.resource_mut::<pane_bevy::PendingPaneActions>();
+        for e in orphans {
+            close_q.close.push(e);
         }
     }
 
-    // Spawn requested terminals.
-    let sidebar_width = world.resource::<Sidebar>().width;
-    for (project_id, origin_opt) in actions.new_terminals {
-        let pos = match origin_opt {
-            Some(p) => p,
-            None => {
-                // Cascade from a starting point inside the canvas area
-                // (right of the sidebar) based on how many terminals
-                // already belong to the project.
-                let count_in_project = {
-                    let mut q = world.query::<(&ProjectMembership, &TerminalTag)>();
-                    q.iter(world).filter(|(m, _)| m.0 == project_id).count()
-                };
-                Vec2::new(
-                    sidebar_width + 40.0 + (count_in_project as f32) * NEW_TERMINAL_OFFSET,
-                    40.0 + (count_in_project as f32) * NEW_TERMINAL_OFFSET,
-                )
-            }
+    // Spawn requested panes (radial menu, RunButton creation, etc.).
+    for req in actions.new_panes {
+        let pos = req.origin.unwrap_or_else(|| {
+            let count_in_project = pane_count_in_project(world, &req.kind, req.project_id);
+            cascade_pos(sidebar_width, count_in_project)
+        });
+        let default_size = world
+            .resource::<PaneRegistry>()
+            .get(req.kind)
+            .map(|s| s.default_size)
+            .unwrap_or(Vec2::new(560.0, 360.0))
+            .max(MIN_PANE_SIZE);
+        let next_z = pane_bevy::next_pane_z(world);
+        let rect = PaneRect {
+            pos,
+            size: default_size,
+            z: next_z,
         };
-        let size = DEFAULT_TERMINAL_SIZE.max(MIN_TERMINAL_SIZE);
-        let next_z = {
-            let mut q = world.query::<(&TerminalRect, &TerminalTag)>();
-            q.iter(world)
-                .map(|(r, _)| r.z)
-                .fold(0.0_f32, f32::max)
-                + 1.0
-        };
-        let session_id = world.resource_mut::<Projects>().allocate_terminal_id();
-        let entity = spawn_terminal(
+        if let Some(entity) = spawn_pane_from_registry(
             world,
-            TerminalRect { pos, size, z: next_z },
-            Some(project_id),
-            session_id,
-            None,
-        );
-        world.resource_mut::<FocusedTerminal>().0 = Some(entity);
-        // Stealing focus from any editor pane so keyboard goes to the
-        // freshly-spawned terminal.
-        world.resource_mut::<editor_bevy::FocusedEditor>().0 = None;
-        {
+            kind_to_static(req.kind),
+            kind_display_name(world, req.kind),
+            rect,
+            Some(req.project_id),
+            &req.config,
+        ) {
+            world.resource_mut::<FocusedPane>().0 = Some(entity);
             let mut projects = world.resource_mut::<Projects>();
             projects.layout_dirty = true;
             projects.terminals_dirty = true;
         }
     }
 
-    // Spawn requested editor panes. Same canvas placement model as
-    // terminals — explicit origin from the radial menu, otherwise a
-    // cascade from a default position based on how many panes the
-    // project already has.
-    for (project_id, origin_opt) in actions.new_editors {
-        let pos = match origin_opt {
-            Some(p) => p,
-            None => {
-                let count_in_project = {
-                    let mut q =
-                        world.query::<(&ProjectMembership, &editor_bevy::Editor)>();
-                    q.iter(world).filter(|(m, _)| m.0 == project_id).count()
-                };
-                Vec2::new(
-                    sidebar_width + 60.0 + (count_in_project as f32) * NEW_TERMINAL_OFFSET,
-                    60.0 + (count_in_project as f32) * NEW_TERMINAL_OFFSET,
-                )
-            }
-        };
-        let size = Vec2::new(640.0, 420.0);
-        let next_z = {
-            // Reuse terminal z-axis so editors and terminals stack in a
-            // single global front-to-back order.
-            let mut tq = world.query::<&TerminalRect>();
-            let mut eq = world.query::<&editor_bevy::EditorRect>();
-            let term_max = tq.iter(world).map(|r| r.z).fold(0.0_f32, f32::max);
-            let edit_max = eq.iter(world).map(|r| r.z).fold(0.0_f32, f32::max);
-            term_max.max(edit_max) + 1.0
-        };
-        let entity = editor_bevy::spawn_editor_world(
-            world,
-            "",
-            editor_bevy::EditorRect {
-                pos,
-                size,
-                z: next_z,
-            },
-        );
-        world.entity_mut(entity).insert(ProjectMembership(project_id));
-        world.resource_mut::<editor_bevy::FocusedEditor>().0 = Some(entity);
-        // Stealing focus from any terminal so keyboard goes to the new
-        // editor.
-        world.resource_mut::<FocusedTerminal>().0 = None;
-        world.resource_mut::<Projects>().layout_dirty = true;
-    }
-
-    // Open files into editor panes (from Cmd+O dialog or `tbopen` CLI).
+    // Open files into editor panes.
     for req in actions.open_files {
         let project_id = match resolve_project(&req.project, world.resource::<Projects>()) {
             Some(id) => id,
@@ -1150,45 +1099,91 @@ fn apply_pending_actions(world: &mut World) {
             }
         };
         let pos = req.origin.unwrap_or_else(|| {
-            let count_in_project = {
-                let mut q =
-                    world.query::<(&ProjectMembership, &editor_bevy::Editor)>();
-                q.iter(world).filter(|(m, _)| m.0 == project_id).count()
-            };
-            Vec2::new(
-                sidebar_width + 60.0 + (count_in_project as f32) * NEW_TERMINAL_OFFSET,
-                60.0 + (count_in_project as f32) * NEW_TERMINAL_OFFSET,
-            )
+            let count_in_project = pane_count_in_project(world, "editor", project_id);
+            cascade_pos(sidebar_width, count_in_project)
         });
-        let next_z = {
-            let mut tq = world.query::<&TerminalRect>();
-            let mut eq = world.query::<&editor_bevy::EditorRect>();
-            let term_max = tq.iter(world).map(|r| r.z).fold(0.0_f32, f32::max);
-            let edit_max = eq.iter(world).map(|r| r.z).fold(0.0_f32, f32::max);
-            term_max.max(edit_max) + 1.0
+        let next_z = pane_bevy::next_pane_z(world);
+        let rect = PaneRect {
+            pos,
+            size: Vec2::new(720.0, 480.0),
+            z: next_z,
         };
-        let entity = editor_bevy::spawn_editor_world(
-            world,
-            &text,
-            editor_bevy::EditorRect {
-                pos,
-                size: Vec2::new(720.0, 480.0),
-                z: next_z,
-            },
-        );
-        world.entity_mut(entity).insert((
-            ProjectMembership(project_id),
-            EditorFilePath(req.path),
-        ));
-        // Only steal focus when the new pane is actually visible —
-        // i.e. its project is the active one. Otherwise it'd swallow
-        // keystrokes from offscreen.
-        if world.resource::<Projects>().active == Some(project_id) {
-            world.resource_mut::<editor_bevy::FocusedEditor>().0 = Some(entity);
-            world.resource_mut::<FocusedTerminal>().0 = None;
+        let config = serde_json::json!({
+            "text": text,
+            "path": req.path.to_string_lossy(),
+        });
+        if let Some(entity) =
+            spawn_pane_from_registry(world, "editor", "Editor", rect, Some(project_id), &config)
+        {
+            // EditorFilePath is also added by the editor's spawn callback
+            // when the config carries `path`; we add it here too in case
+            // future kinds want a different file-tagging convention.
+            world
+                .entity_mut(entity)
+                .insert(EditorFilePath(req.path.clone()));
+            if world.resource::<Projects>().active == Some(project_id) {
+                world.resource_mut::<FocusedPane>().0 = Some(entity);
+            }
+            world.resource_mut::<Projects>().layout_dirty = true;
         }
-        world.resource_mut::<Projects>().layout_dirty = true;
     }
+}
+
+/// Restore one persisted pane via the registry. Reserves any embedded
+/// session id in the allocator so subsequent spawns don't collide.
+fn restore_pane(world: &mut World, snap: PaneSnapshot) {
+    if snap.kind == "terminal" {
+        if let Some(id) = snap.config.get("session_id").and_then(|v| v.as_u64()) {
+            let mut projects = world.resource_mut::<Projects>();
+            if projects.next_terminal_id <= id {
+                projects.next_terminal_id = id + 1;
+            }
+        }
+    }
+    let kind_static = kind_to_static(&snap.kind);
+    let display = kind_display_name(world, &snap.kind);
+    let rect = PaneRect {
+        pos: Vec2::new(snap.pos[0], snap.pos[1]),
+        size: Vec2::new(snap.size[0], snap.size[1]),
+        z: snap.z,
+    };
+    spawn_pane_from_registry(world, kind_static, display, rect, snap.project_id, &snap.config);
+}
+
+/// Look the kind up in the registry to get its registered `kind`
+/// `&'static str` (so callers can pass owned `String` and we still hand
+/// pane-bevy a static slice). Falls back to leaking the input if the
+/// kind isn't registered, so the spawn-from-registry call still finds
+/// it stored on the entity for diagnostics.
+fn kind_to_static(kind: &str) -> &'static str {
+    match kind {
+        "terminal" => "terminal",
+        "editor" => "editor",
+        "run-button" => "run-button",
+        other => Box::leak(other.to_string().into_boxed_str()),
+    }
+}
+
+fn kind_display_name(world: &World, kind: &str) -> String {
+    world
+        .resource::<PaneRegistry>()
+        .get(kind)
+        .map(|s| s.display_name.to_string())
+        .unwrap_or_else(|| kind.to_string())
+}
+
+fn pane_count_in_project(world: &mut World, kind: &str, project_id: u64) -> usize {
+    let mut q = world.query::<(&PaneProject, &PaneKindMarker)>();
+    q.iter(world)
+        .filter(|(m, k)| k.0 == kind && m.0 == project_id)
+        .count()
+}
+
+fn cascade_pos(sidebar_width: f32, n: usize) -> Vec2 {
+    Vec2::new(
+        sidebar_width + 60.0 + (n as f32) * NEW_TERMINAL_OFFSET,
+        60.0 + (n as f32) * NEW_TERMINAL_OFFSET,
+    )
 }
 
 fn resolve_project(target: &OpenProjectTarget, projects: &Projects) -> Option<u64> {
@@ -1205,58 +1200,15 @@ fn resolve_project(target: &OpenProjectTarget, projects: &Projects) -> Option<u6
     }
 }
 
-fn close_terminal_entity(world: &mut World, entity: Entity) {
-    // Tell the worker to exit; the channel send is best-effort because
-    // the worker might already be gone (child EOF + thread exit).
-    if let Some(store) = world.get_resource::<TerminalStore>()
-        && let Some(data) = store.map.get(&entity)
-    {
-        data.worker.send(WorkerMsg::Shutdown);
-    }
-    if let Some(mut store) = world.get_resource_mut::<TerminalStore>() {
-        store.map.remove(&entity);
-    }
-    // Drop the terminal's persisted scrollback file so closed terminals
-    // don't accumulate on disk forever.
-    let session_id = world
-        .get_entity(entity)
-        .ok()
-        .and_then(|e| e.get::<TerminalSession>())
-        .map(|s| s.0);
-    if let Some(id) = session_id
-        && let Some(p) = scrollback_path(id)
-    {
-        let _ = std::fs::remove_file(&p);
-    }
-    if world.get_entity(entity).is_ok() {
-        world.entity_mut(entity).despawn();
-    }
-    let mut focused = world.resource_mut::<FocusedTerminal>();
-    if focused.0 == Some(entity) {
-        focused.0 = None;
-    }
-    world.resource_mut::<Projects>().terminals_dirty = true;
-}
-
 // ---------- Visibility sync ----------
 
-/// Hide panes whose project is not the active one. Their workers /
-/// background state keep running — we only flip the parent entity's
-/// `Visibility`, which cascades to the chrome + sprite pools.
-/// Covers both terminal panes and editor panes.
+/// Hide panes whose project is not the active one.
 fn sync_visibility(
     projects: Res<Projects>,
-    mut terms: Query<
-        (&ProjectMembership, &mut Visibility),
-        (With<TerminalTag>, Without<editor_bevy::Editor>),
-    >,
-    mut editors: Query<
-        (&ProjectMembership, &mut Visibility),
-        (With<editor_bevy::Editor>, Without<TerminalTag>),
-    >,
+    mut panes: Query<(&PaneProject, &mut Visibility), With<PaneTag>>,
 ) {
     let active = projects.active;
-    let apply = |m: &ProjectMembership, vis: &mut Visibility| {
+    for (m, mut vis) in &mut panes {
         let want = if Some(m.0) == active {
             Visibility::Inherited
         } else {
@@ -1265,65 +1217,80 @@ fn sync_visibility(
         if *vis != want {
             *vis = want;
         }
-    };
-    for (m, mut vis) in &mut terms {
-        apply(m, &mut vis);
-    }
-    for (m, mut vis) in &mut editors {
-        apply(m, &mut vis);
     }
 }
 
 // ---------- Persistence flush ----------
 
 fn save_if_dirty(
-    buttons: Res<ButtonInput<MouseButton>>,
-    mut projects: ResMut<Projects>,
-    sidebar: Res<Sidebar>,
-    terminals: Query<(&TerminalRect, &TerminalSession, &ProjectMembership), With<TerminalTag>>,
+    world: &mut World,
 ) {
-    // Defer writes while a drag is in progress: we'd otherwise flush a
-    // file per frame for the duration of the drag. Project-state changes
-    // (rename, create, delete) don't go through mouse drag, so they
-    // still flush promptly on next idle frame.
-    let mouse_down = buttons.pressed(MouseButton::Left);
+    let mouse_down = world
+        .resource::<ButtonInput<MouseButton>>()
+        .pressed(MouseButton::Left);
     if mouse_down {
         return;
     }
-    if !projects.dirty && !projects.terminals_dirty {
-        return;
+    {
+        let projects = world.resource::<Projects>();
+        if !projects.dirty && !projects.terminals_dirty {
+            return;
+        }
     }
+    let panes = collect_pane_snapshots(world);
+    let projects = world.resource::<Projects>();
+    let sidebar_width = world.resource::<Sidebar>().width;
     let snapshot = PersistedState {
         projects: projects.list.clone(),
         active: projects.active,
         next_id: projects.next_id,
-        sidebar_width: Some(sidebar.width),
-        terminals: terminals
-            .iter()
-            .map(|(rect, sess, mem)| TerminalSnapshot {
-                session_id: sess.0,
-                project_id: mem.0,
-                pos: [rect.pos.x, rect.pos.y],
-                size: [rect.size.x, rect.size.y],
-                z: rect.z,
-            })
-            .collect(),
+        sidebar_width: Some(sidebar_width),
+        terminals: Vec::new(),
+        panes,
         next_terminal_id: projects.next_terminal_id,
     };
     save_persisted(&snapshot);
+    let mut projects = world.resource_mut::<Projects>();
     projects.dirty = false;
     projects.terminals_dirty = false;
 }
 
-/// Mark the persisted layout dirty whenever any terminal's rect or
-/// project membership changes (drag, resize, bring-to-front, project
-/// reassignment). Save itself is debounced to mouse-up by `save_if_dirty`.
+/// Walk every PaneTag entity, ask the registered kind for a snapshot,
+/// and bundle them into a Vec<PaneSnapshot>.
+fn collect_pane_snapshots(world: &mut World) -> Vec<PaneSnapshot> {
+    let entries: Vec<(Entity, String, Option<u64>, PaneRect)> = {
+        let mut q = world.query::<(Entity, &PaneKindMarker, Option<&PaneProject>, &PaneRect)>();
+        q.iter(world)
+            .map(|(e, k, p, r)| (e, k.0.to_string(), p.map(|p| p.0), *r))
+            .collect()
+    };
+    let snapshots: Vec<PaneSnapshot> = entries
+        .into_iter()
+        .filter_map(|(entity, kind, project_id, rect)| {
+            let snap_fn = world.resource::<PaneRegistry>().get(&kind).map(|s| s.snapshot)?;
+            let config = (snap_fn)(world, entity);
+            Some(PaneSnapshot {
+                kind,
+                project_id,
+                pos: [rect.pos.x, rect.pos.y],
+                size: [rect.size.x, rect.size.y],
+                z: rect.z,
+                config,
+            })
+        })
+        .collect();
+    snapshots
+}
+
+/// Mark the persisted layout dirty whenever any pane's rect or
+/// project membership changes. Save itself is debounced to mouse-up by
+/// `save_if_dirty`.
 fn mark_terminals_dirty_on_change(
     rect_changed: Query<
         (),
         (
-            With<TerminalTag>,
-            Or<(Changed<TerminalRect>, Changed<ProjectMembership>)>,
+            With<PaneTag>,
+            Or<(Changed<PaneRect>, Changed<PaneProject>)>,
         ),
     >,
     mut projects: ResMut<Projects>,

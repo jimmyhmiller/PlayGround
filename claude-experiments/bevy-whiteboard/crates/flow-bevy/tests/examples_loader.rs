@@ -26,21 +26,21 @@ fn load(app: &mut App, ex: Example) {
 }
 
 fn count_of_kind(app: &App, kind: Kind) -> usize {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     sim.nodes.values()
         .filter(|n| n.name.starts_with(&format!("{}_", kind.label())))
         .count()
 }
 
 fn slot_int(app: &App, nid: flow::NodeId, slot: &str) -> i64 {
-    match &app.world().resource::<FlowSim>().sim.nodes[&nid].slots[slot] {
+    match &app.world().resource::<FlowSim>().nodes[&nid].slots[slot] {
         flow::Value::Int(i) => *i,
         other => panic!("slot `{}` not Int: {:?}", slot, other),
     }
 }
 
 fn first_of_kind(app: &App, kind: Kind) -> flow::NodeId {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let prefix = format!("{}_", kind.label());
     sim.nodes
         .iter()
@@ -50,7 +50,7 @@ fn first_of_kind(app: &App, kind: Kind) -> flow::NodeId {
 }
 
 fn all_of_kind(app: &App, kind: Kind) -> Vec<flow::NodeId> {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let prefix = format!("{}_", kind.label());
     sim.nodes
         .iter()
@@ -63,7 +63,7 @@ fn all_of_kind(app: &App, kind: Kind) -> Vec<flow::NodeId> {
 /// must run clean. This catches the class of "rule author typo" /
 /// "unmatched variant" problems that count-tests miss.
 fn assert_no_runtime_errors(app: &App, ctx: &str) {
-    let errors = &app.world().resource::<FlowSim>().sim.error_counts;
+    let errors = &app.world().resource::<FlowSim>().error_counts;
     assert!(
         errors.is_empty(),
         "{}: expected zero runtime errors, got {:?}",
@@ -227,12 +227,12 @@ fn two_clients_one_worker_no_cross_talk() {
     // from end-of-sim in-flight packets.
     {
         let mut flow = app.world_mut().resource_mut::<FlowSim>();
-        let clients_q: Vec<flow::NodeId> = flow.sim.nodes.iter()
+        let clients_q: Vec<flow::NodeId> = flow.nodes.iter()
             .filter(|(_, n)| n.name.starts_with("Client_"))
             .map(|(id, _)| *id)
             .collect();
         for c in clients_q {
-            flow.sim.nodes.get_mut(&c).unwrap().slots
+            flow.nodes.get_mut(&c).unwrap().slots
                 .insert("period_ns".into(), flow::Value::Int(i64::MAX / 4));
         }
     }
@@ -243,7 +243,7 @@ fn two_clients_one_worker_no_cross_talk() {
     // aren't errors in the load-bearing sense. Assert no OTHER
     // error kinds show up.
     {
-        let errors = &app.world().resource::<FlowSim>().sim.error_counts;
+        let errors = &app.world().resource::<FlowSim>().error_counts;
         let unexpected: std::collections::BTreeMap<_, _> = errors.iter()
             .filter(|(k, _)| k.as_str() != "worker_full" && k.as_str() != "request_failed")
             .collect();
@@ -260,7 +260,7 @@ fn two_clients_one_worker_no_cross_talk() {
     // Count the worker's resp / resp_error emits per target client,
     // straight from the event log. This is the ground truth for
     // cross-talk detection.
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let mut resp_ok_to: std::collections::HashMap<flow::NodeId, i64> =
         std::collections::HashMap::new();
     let mut resp_err_to: std::collections::HashMap<flow::NodeId, i64> =

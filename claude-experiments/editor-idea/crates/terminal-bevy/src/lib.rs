@@ -42,35 +42,38 @@ use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
-use bevy::text::LineHeight;
 
 use libghostty_vt::style::RgbColor;
+use pane_bevy::{
+    spawn_pane, FocusedPane, PaneChrome, PaneContentPressed, PaneFont, PaneKindMarker,
+    PanePlugin, PaneRect, PaneRegistry, PaneTag, SpawnedPane, MARGIN, TITLE_H,
+};
+use serde_json::Value;
 
 pub mod atlas;
 pub mod ipc;
 pub mod projects;
 pub mod pty;
 pub mod radial;
+pub mod run_button;
 pub mod selection;
 pub mod vt;
 pub mod worker;
 use atlas::GlyphAtlas;
 use projects::{
-    InputConsumed, OpenFileRequest, OpenProjectTarget, PendingActions, ProjectMembership,
-    Projects, Renaming, Sidebar,
+    OpenFileRequest, OpenProjectTarget, PendingActions, ProjectMembership, Projects, Renaming,
+    Sidebar,
 };
 use pty::PtySize;
 use worker::{SnapCell, WorkerHandle, WorkerMsg};
 
 pub const FONT_SIZE: f32 = 14.0;
 pub const LINE_HEIGHT: f32 = 18.0;
-pub const MARGIN: f32 = 8.0;
-pub const TITLE_H: f32 = 22.0;
-pub const HANDLE_SIZE: f32 = 14.0;
-pub const CLOSE_BTN_SIZE: f32 = 14.0;
-pub const CLOSE_BTN_INSET: f32 = 4.0;
-pub const MIN_TERMINAL_SIZE: Vec2 = Vec2::new(240.0, 160.0);
 pub const SCROLLBACK_LINES: usize = 100_000;
+
+/// Stable identifier for terminal panes. Stored on every terminal pane
+/// in `PaneKindMarker` and referenced by the registry.
+pub const PANE_KIND: &str = "terminal";
 
 /// Path to SF Mono — Apple ships it with Terminal.app, so any Mac that
 /// has launched Terminal.app once has this file. Loaded at startup and
@@ -119,9 +122,6 @@ pub struct TerminalStore {
 
 // ---------- Components (Send) ----------
 
-#[derive(Component)]
-pub struct TerminalTag;
-
 /// Stable id used to key per-terminal on-disk state (scrollback log,
 /// layout snapshot in `projects.json`). Allocated by `Projects` and
 /// preserved across restarts so a restored terminal finds its old
@@ -129,25 +129,11 @@ pub struct TerminalTag;
 #[derive(Component, Copy, Clone, Debug)]
 pub struct TerminalSession(pub u64);
 
-/// Position + size + z in window space, top-left origin, y-down. Same
-/// layout as `editor-bevy::EditorRect`.
-#[derive(Component, Copy, Clone, Debug)]
-pub struct TerminalRect {
-    pub pos: Vec2,
-    pub size: Vec2,
-    pub z: f32,
-}
-
-/// Child entities making up the visible chrome for one terminal.
-#[derive(Component)]
-pub struct TerminalChrome {
-    pub bg: Entity,
-    pub title_bar: Entity,
-    pub content_root: Entity,
-    pub cursor: Entity,
-    pub resize_handle: Entity,
-    pub close_button: Entity,
-}
+/// Cursor sprite child of a terminal pane's content_root. Held on the
+/// pane entity so `sync_grid` can position/show-hide the cursor without
+/// looking it up by traversal.
+#[derive(Component, Copy, Clone)]
+pub struct TerminalCursor(pub Entity);
 
 /// Per-terminal sprite pools — one solid-color quad per cell for the
 /// background, one atlas-sampled quad per cell for the glyph. Both
@@ -173,21 +159,13 @@ pub struct CellSprites {
 #[derive(Component, Default)]
 pub struct TerminalRev(pub u64);
 
-/// Per-terminal visual-bell state. `last_seen` mirrors the worker's
-/// `bell_count` so we only flash once per BEL — not every frame the
-/// counter is non-zero. `last_bell_at` is the wall-clock instant of
-/// the most recent bell; `apply_bell_pulse` fades the chrome from
-/// flash colour back to the panel bg over `BELL_FLASH_DURATION` and
-/// then leaves the colour at rest.
+/// Per-terminal bell-tracking state. `last_seen` mirrors the worker's
+/// `bell_count` so we only react to *new* bells — incrementing the
+/// project counter once each, never every frame the counter is non-zero.
 #[derive(Component, Default)]
 pub struct BellPulse {
     pub last_seen: u64,
-    pub last_bell_at: Option<std::time::Instant>,
 }
-
-pub const BELL_FLASH_DURATION: std::time::Duration = std::time::Duration::from_millis(180);
-const PANEL_BG: Color = Color::srgb(0.105, 0.110, 0.122);
-const BELL_FLASH: Color = Color::srgb(0.78, 0.82, 0.92);
 
 #[derive(Resource)]
 pub struct MonoFont(pub Handle<Font>);
@@ -197,26 +175,21 @@ pub struct MonoMetrics {
     pub cell_width: f32,
 }
 
-#[derive(Resource, Default)]
-pub struct FocusedTerminal(pub Option<Entity>);
+/// Whether our OS window currently has keyboard focus. Mirrors the
+/// `WindowFocused` events winit dispatches; we maintain it ourselves
+/// rather than polling `Window::focused` because (at least on
+/// macOS / Bevy 0.18) the field doesn't always reflect app-level
+/// activation changes when the user Cmd+Tabs to another app.
+///
+/// Defaults to true — first frame the user is presumably looking at
+/// us; a `WindowFocused(false)` will arrive if not.
+#[derive(Resource)]
+pub struct AppFocused(pub bool);
 
-#[derive(Resource, Default)]
-pub enum MouseMode {
-    #[default]
-    Idle,
-    WindowDrag {
-        terminal: Entity,
-        grab_offset: Vec2,
-    },
-    WindowResize {
-        terminal: Entity,
-        anchor_pos: Vec2,
-    },
-    /// User is click-dragging inside a terminal's content area to select
-    /// text. The selection's anchor + head live on `TerminalSelection`.
-    TerminalSelectionDrag {
-        terminal: Entity,
-    },
+impl Default for AppFocused {
+    fn default() -> Self {
+        Self(true)
+    }
 }
 
 /// Per-terminal text selection. `anchor` and `head` are cell coords
@@ -226,6 +199,10 @@ pub enum MouseMode {
 pub struct TerminalSelection {
     pub anchor: Option<(i32, i32)>,
     pub head: Option<(i32, i32)>,
+    /// True while the user is mid-drag selecting. Cleared on mouse-up.
+    /// Per-frame drag-update checks this instead of consulting a global
+    /// mouse-mode enum.
+    pub dragging: bool,
     /// Pool of overlay sprite entities visualising the selection
     /// (children of the terminal's `content_root`). Rebuilt by the
     /// selection-render system as the selection changes.
@@ -236,6 +213,7 @@ impl TerminalSelection {
     pub fn clear(&mut self) {
         self.anchor = None;
         self.head = None;
+        self.dragging = false;
     }
     pub fn is_active(&self) -> bool {
         match (self.anchor, self.head) {
@@ -262,15 +240,7 @@ pub struct TerminalPlugin;
 impl Plugin for TerminalPlugin {
     fn build(&self, app: &mut App) {
         app.insert_resource(ClearColor(Color::srgb(0.072, 0.075, 0.085)))
-            .insert_resource(FocusedTerminal::default())
-            .insert_resource(MouseMode::default())
-            // Reactive: only run the schedule + render in response to
-            // events. Input from winit fires this directly; pty output
-            // fires it via `EventLoopProxy::send_event(WakeUp)` from
-            // each terminal worker (see `WorkerHandle::spawn`). The
-            // `wait` is just a safety-net fallback — under steady state
-            // every redraw is event-driven and an idle terminal sits
-            // at literally zero CPU between events.
+            .insert_resource(AppFocused::default())
             .insert_resource(bevy::winit::WinitSettings {
                 focused_mode: bevy::winit::UpdateMode::reactive(
                     std::time::Duration::from_secs(5),
@@ -279,19 +249,21 @@ impl Plugin for TerminalPlugin {
                     std::time::Duration::from_secs(60),
                 ),
             })
+            // Pane-bevy owns chrome (drag, resize, close, focus,
+            // hit-test). Terminal-specific systems below register the
+            // "terminal" kind, render the grid, and handle keyboard +
+            // mouse-driven selection inside the content area.
+            .add_plugins(PanePlugin)
             .add_plugins(projects::ProjectsPlugin)
             .add_plugins(radial::RadialPlugin)
             .add_plugins(selection::SelectionPlugin)
-            // Editor panes live alongside terminal panes in the same
-            // window. The embed plugin brings in the editor's input,
-            // rendering, and the shared `InputConsumed` resource — but
-            // leaves camera, ClearColor, WinitSettings, and font setup
-            // to us (we're the host).
+            .add_plugins(run_button::RunButtonPlugin)
             .add_plugins(editor_bevy::EditorEmbedPlugin)
             .add_systems(
                 Startup,
                 (
                     setup_camera_and_font,
+                    register_terminal_kind,
                     editor_bevy::setup_editor_font,
                     setup_ipc_listener,
                 ),
@@ -300,7 +272,6 @@ impl Plugin for TerminalPlugin {
             .add_systems(
                 Update,
                 (
-                    arbitrate_pane_focus,
                     handle_open_file_shortcut,
                     drain_ipc_open_requests,
                 ),
@@ -308,12 +279,13 @@ impl Plugin for TerminalPlugin {
             .add_systems(
                 Update,
                 (
-                    handle_mouse,
+                    handle_terminal_content_press,
+                    handle_terminal_selection_drag,
                     handle_scroll,
                     handle_resize,
                     handle_keyboard,
                     sync_grid,
-                    position_root,
+                    track_app_focus,
                     apply_bell_pulse,
                     clear_active_unread,
                     sync_dock_badge,
@@ -321,6 +293,61 @@ impl Plugin for TerminalPlugin {
                     .chain(),
             );
     }
+}
+
+fn register_terminal_kind(mut registry: ResMut<PaneRegistry>) {
+    registry.register(pane_bevy::PaneKindSpec {
+        kind: PANE_KIND,
+        display_name: "Terminal",
+        radial_icon: Some(">_"),
+        default_size: Vec2::new(640.0, 400.0),
+        spawn: terminal_spawn_from_config,
+        snapshot: terminal_snapshot,
+        on_close: Some(terminal_on_close),
+    });
+}
+
+fn terminal_spawn_from_config(
+    world: &mut World,
+    entity: Entity,
+    content_root: Entity,
+    config: &Value,
+) {
+    let session_id = config
+        .get("session_id")
+        .and_then(|v| v.as_u64())
+        .unwrap_or_else(|| {
+            let mut p = world.resource_mut::<Projects>();
+            p.allocate_terminal_id()
+        });
+    let replay_bytes = scrollback_path(session_id).and_then(|p| std::fs::read(&p).ok());
+    populate_terminal_pane(world, entity, content_root, session_id, replay_bytes);
+}
+
+fn terminal_snapshot(world: &World, entity: Entity) -> Value {
+    let session_id = world
+        .get::<TerminalSession>(entity)
+        .map(|s| s.0)
+        .unwrap_or(0);
+    serde_json::json!({ "session_id": session_id })
+}
+
+fn terminal_on_close(world: &mut World, entity: Entity) {
+    if let Some(store) = world.get_resource::<TerminalStore>()
+        && let Some(data) = store.map.get(&entity)
+    {
+        data.worker.send(WorkerMsg::Shutdown);
+    }
+    if let Some(mut store) = world.get_resource_mut::<TerminalStore>() {
+        store.map.remove(&entity);
+    }
+    let session_id = world.get::<TerminalSession>(entity).map(|s| s.0);
+    if let Some(id) = session_id
+        && let Some(p) = scrollback_path(id)
+    {
+        let _ = std::fs::remove_file(&p);
+    }
+    world.resource_mut::<Projects>().terminals_dirty = true;
 }
 
 #[cfg(target_os = "macos")]
@@ -409,21 +436,6 @@ fn handle_open_file_shortcut(
     });
 }
 
-/// Keep terminal-pane focus and editor-pane focus mutually exclusive:
-/// at most one pane should receive keyboard input at any time. Each
-/// crate's mouse handler claims clicks through `InputConsumed`, so in
-/// practice only one of `FocusedTerminal`/`FocusedEditor` flips to
-/// `Some` per click — this system clears the *other* when it sees the
-/// change so subsequent keyboard handlers don't both receive events.
-fn arbitrate_pane_focus(
-    focused_editor: Res<editor_bevy::FocusedEditor>,
-    mut focused_terminal: ResMut<FocusedTerminal>,
-) {
-    if focused_editor.is_changed() && focused_editor.0.is_some() && focused_terminal.0.is_some() {
-        focused_terminal.0 = None;
-    }
-}
-
 fn measure_cell_width(font_bytes: &[u8], font_size: f32) -> f32 {
     use skrifa::instance::{LocationRef, Size};
     use skrifa::{FontRef, MetadataProvider};
@@ -450,7 +462,9 @@ pub fn setup_camera_and_font(world: &mut World) {
     let font_handle = world
         .resource_mut::<Assets<Font>>()
         .add(Font::try_from_bytes(font_bytes.to_vec()).expect("SFMono must parse"));
-    world.insert_resource(MonoFont(font_handle));
+    world.insert_resource(MonoFont(font_handle.clone()));
+    // pane-bevy uses this for chrome glyphs (close button, title text).
+    world.insert_resource(PaneFont(font_handle));
 
     let cell_width = measure_cell_width(font_bytes, FONT_SIZE);
     world.insert_resource(MonoMetrics { cell_width });
@@ -489,25 +503,37 @@ pub fn setup_camera_and_font(world: &mut World) {
 /// back into a fresh Terminal via `replay_bytes`.
 pub fn spawn_terminal(
     world: &mut World,
-    rect: TerminalRect,
+    rect: PaneRect,
     project_id: Option<u64>,
     session_id: u64,
     replay_bytes: Option<Vec<u8>>,
 ) -> Entity {
-    let cell_width = world.resource::<MonoMetrics>().cell_width;
-    let font_handle = world.resource::<MonoFont>().0.clone();
+    let SpawnedPane {
+        entity: terminal_entity,
+        content_root,
+    } = spawn_pane(world, PANE_KIND, "Terminal", rect, project_id);
+    populate_terminal_pane(world, terminal_entity, content_root, session_id, replay_bytes);
+    terminal_entity
+}
 
+/// Insert terminal-specific components on an already-spawned pane, spawn
+/// its worker, and add the cursor child under `content_root`. Shared
+/// between `spawn_terminal` and the registry restore path.
+fn populate_terminal_pane(
+    world: &mut World,
+    terminal_entity: Entity,
+    content_root: Entity,
+    session_id: u64,
+    replay_bytes: Option<Vec<u8>>,
+) {
+    let cell_width = world.resource::<MonoMetrics>().cell_width;
+    let rect = *world
+        .get::<PaneRect>(terminal_entity)
+        .expect("pane entity must already have PaneRect");
     let (cols, rows) = grid_size_for_rect(rect.size, cell_width);
 
     // Spawn the worker thread up front so the libghostty Terminal +
-    // Pty + render iterators all live on the worker side. The main
-    // thread holds only the WorkerHandle (snapshot Arc + message
-    // channel), keeping the renderer fully decoupled from the parser.
-    //
-    // Hand the worker a clone of winit's EventLoopProxy so it can
-    // wake the renderer when a new snapshot is published. Without
-    // this, `WinitSettings::reactive` would never refresh on pty
-    // output — the only events that wake the loop are user input.
+    // Pty + render iterators all live on the worker side.
     let wakeup = world
         .get_resource::<bevy::winit::EventLoopProxyWrapper>()
         .map(|w| bevy::winit::EventLoopProxy::clone(w));
@@ -526,56 +552,6 @@ pub fn spawn_terminal(
     .expect("WorkerHandle::spawn");
     let data = TerminalData { worker };
 
-    // Parent entity + chrome children.
-    let terminal_entity = world
-        .spawn((
-            TerminalTag,
-            rect,
-            TerminalRev::default(),
-            CellSprites::default(),
-            TerminalSelection::default(),
-            BellPulse::default(),
-            Transform::default(),
-            Visibility::default(),
-        ))
-        .id();
-
-    // Panel background — single muted color, no separate title-bar
-    // band. The "title bar" is just the top TITLE_H pixels of the same
-    // panel; it's distinguished from content by a 1-pixel divider line.
-    let bg = world
-        .spawn((
-            ChildOf(terminal_entity),
-            Sprite {
-                color: PANEL_BG,
-                custom_size: Some(rect.size),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, 0.0, 0.0),
-        ))
-        .id();
-    // Title-bar divider (1 px hairline at the bottom of the title region).
-    let title_bar = world
-        .spawn((
-            ChildOf(terminal_entity),
-            Sprite {
-                color: Color::srgb(0.165, 0.170, 0.188),
-                custom_size: Some(Vec2::new(rect.size.x, 1.0)),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, -(TITLE_H - 1.0), 0.1),
-        ))
-        .id();
-    let content_root = world
-        .spawn((
-            ChildOf(terminal_entity),
-            Transform::from_xyz(MARGIN, -(TITLE_H + MARGIN), 0.2),
-            Visibility::default(),
-        ))
-        .id();
-
     let cursor = world
         .spawn((
             ChildOf(content_root),
@@ -588,73 +564,21 @@ pub fn spawn_terminal(
             Transform::from_xyz(0.0, 0.0, 1.0),
         ))
         .id();
-    // Resize handle — a small muted square in the bottom-right corner.
-    // Same value as the divider so it reads as a UI affordance, not a
-    // bright corner sticker.
-    let resize_handle = world
-        .spawn((
-            ChildOf(terminal_entity),
-            Sprite {
-                color: Color::srgb(0.22, 0.23, 0.26),
-                custom_size: Some(Vec2::splat(HANDLE_SIZE)),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(
-                rect.size.x - HANDLE_SIZE,
-                -(rect.size.y - HANDLE_SIZE),
-                0.3,
-            ),
-        ))
-        .id();
 
-    // Close button — a dim × glyph in the title region. The hit area is
-    // computed from CLOSE_BTN_SIZE/INSET in `region_at`, so we don't
-    // need a backing sprite for click detection.
-    let close_button = world
-        .spawn((
-            ChildOf(terminal_entity),
-            Text2d::new("\u{00D7}"),
-            TextFont {
-                font: font_handle.clone(),
-                font_size: 16.0,
-                ..default()
-            },
-            LineHeight::Px(CLOSE_BTN_SIZE),
-            TextColor(Color::srgb(0.50, 0.52, 0.56)),
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(
-                rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET,
-                -CLOSE_BTN_INSET,
-                0.4,
-            ),
-        ))
-        .id();
-
-    world.entity_mut(terminal_entity).insert(TerminalChrome {
-        bg,
-        title_bar,
-        content_root,
-        cursor,
-        resize_handle,
-        close_button,
-    });
-    world
-        .entity_mut(terminal_entity)
-        .insert(TerminalSession(session_id));
-    if let Some(pid) = project_id {
-        world
-            .entity_mut(terminal_entity)
-            .insert(ProjectMembership(pid));
-    }
+    world.entity_mut(terminal_entity).insert((
+        TerminalRev::default(),
+        CellSprites::default(),
+        TerminalSelection::default(),
+        BellPulse::default(),
+        TerminalSession(session_id),
+        TerminalCursor(cursor),
+    ));
 
     world
         .get_resource_mut::<TerminalStore>()
         .expect("TerminalStore resource (did setup_camera_and_font run?)")
         .map
         .insert(terminal_entity, data);
-
-    terminal_entity
 }
 
 fn grid_size_for_rect(size: Vec2, cell_width: f32) -> (u16, u16) {
@@ -674,9 +598,12 @@ fn grid_size_for_rect(size: Vec2, cell_width: f32) -> (u16, u16) {
 fn handle_resize(
     metrics: Res<MonoMetrics>,
     store: Res<TerminalStore>,
-    rect_q: Query<(Entity, &TerminalRect)>,
+    rect_q: Query<(Entity, &PaneRect, &PaneKindMarker)>,
 ) {
-    for (entity, rect) in &rect_q {
+    for (entity, rect, kind) in &rect_q {
+        if kind.0 != PANE_KIND {
+            continue;
+        }
         let Some(data) = store.map.get(&entity) else {
             continue;
         };
@@ -708,23 +635,47 @@ fn handle_resize(
 fn handle_keyboard(
     mut events: MessageReader<KeyboardInput>,
     mods: Res<ButtonInput<KeyCode>>,
-    focused: Res<FocusedTerminal>,
+    focused: Res<FocusedPane>,
     store: Res<TerminalStore>,
     renaming: Res<Renaming>,
+    kinds: Query<&PaneKindMarker>,
+    mut last_drop_reason: Local<Option<&'static str>>,
 ) {
+    // Diagnostic: log on the *transition* into a drop reason whenever
+    // a real press event is being dropped. Logs once per reason-change
+    // (not per event) so a stuck-Cmd or dead-shell scenario surfaces
+    // exactly one stderr line, not a flood.
+    let buffered: Vec<KeyboardInput> = events.read().cloned().collect();
+    let any_press = buffered.iter().any(|e| e.state.is_pressed());
+    let mut report = |reason: &'static str| {
+        if any_press && last_drop_reason.as_deref() != Some(reason) {
+            eprintln!("[handle_keyboard] dropping key press: {reason}");
+            *last_drop_reason = Some(reason);
+        }
+    };
+    // Re-emit so the rest of the function can iterate buffered events
+    // without re-reading the channel.
+    let mut events_iter = buffered.iter();
+
+    // Skip unless the focused pane is a terminal.
+    let target_kind = focused.0.and_then(|e| kinds.get(e).ok());
+    if !matches!(target_kind, Some(k) if k.0 == PANE_KIND) {
+        report("focused pane is not a terminal");
+        return;
+    }
     // While the user is renaming a project the sidebar's keyboard handler
     // owns input. Drain the events so they don't get re-read next frame
     // — we explicitly don't want them landing in the focused terminal.
     if renaming.id.is_some() {
-        events.read().for_each(|_| {});
+        report("project is being renamed (sidebar owns input)");
         return;
     }
     let Some(target) = focused.0 else {
-        events.read().for_each(|_| {});
+        report("no focused pane");
         return;
     };
     let Some(data) = store.map.get(&target) else {
-        events.read().for_each(|_| {});
+        report("focused pane has no terminal data");
         return;
     };
     let child_alive = {
@@ -732,7 +683,7 @@ fn handle_keyboard(
         g.child_alive
     };
     if !child_alive {
-        events.read().for_each(|_| {});
+        report("shell process has exited (child_alive=false)");
         return;
     }
 
@@ -745,9 +696,12 @@ fn handle_keyboard(
     // future shortcuts). Skip routing them to the pty so Cmd+C doesn't
     // also send "c" to the shell.
     if cmd {
-        events.read().for_each(|_| {});
+        report("Cmd modifier held — see stuck-modifier note");
         return;
     }
+    // We made it past every gate. Clear any stale drop reason so the
+    // next drop transition logs again.
+    *last_drop_reason = None;
 
     // For v0 we always emit xterm-style cursor-key escapes (CSI A/B/C/D);
     // we don't have main-thread visibility into the worker's DECCKM mode.
@@ -758,7 +712,7 @@ fn handle_keyboard(
 
     let mut out: Vec<u8> = Vec::with_capacity(16);
 
-    for ev in events.read() {
+    for ev in events_iter.by_ref() {
         if !ev.state.is_pressed() {
             continue;
         }
@@ -937,227 +891,80 @@ fn named_key_bytes(code: &KeyCode, app_cursor: bool) -> Option<&'static [u8]> {
 
 // ---------- Mouse / chrome ----------
 
-#[derive(Copy, Clone)]
-enum Region {
-    CloseButton,
-    TitleBar,
-    ResizeHandle,
-    Content,
-}
-
-fn region_at(pt: Vec2, rect: &TerminalRect) -> Option<Region> {
-    if pt.x < rect.pos.x || pt.x > rect.pos.x + rect.size.x {
-        return None;
-    }
-    if pt.y < rect.pos.y || pt.y > rect.pos.y + rect.size.y {
-        return None;
-    }
-    let close_x0 = rect.pos.x + rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET;
-    let close_x1 = close_x0 + CLOSE_BTN_SIZE;
-    let close_y0 = rect.pos.y + CLOSE_BTN_INSET;
-    let close_y1 = close_y0 + CLOSE_BTN_SIZE;
-    if pt.x >= close_x0 && pt.x <= close_x1 && pt.y >= close_y0 && pt.y <= close_y1 {
-        return Some(Region::CloseButton);
-    }
-    let handle_x0 = rect.pos.x + rect.size.x - HANDLE_SIZE;
-    let handle_y0 = rect.pos.y + rect.size.y - HANDLE_SIZE;
-    if pt.x >= handle_x0 && pt.y >= handle_y0 {
-        return Some(Region::ResizeHandle);
-    }
-    if pt.y < rect.pos.y + TITLE_H {
-        return Some(Region::TitleBar);
-    }
-    Some(Region::Content)
-}
-
 /// Convert a window-space cursor position to a cell coord (col, row)
 /// inside the terminal at `rect`. The result is intentionally not
-/// clamped — the caller owns clipping to the actual grid bounds, and
-/// keeping out-of-grid drags signed lets the selection extend off-edge
-/// without losing direction.
-pub fn pt_to_cell(pt: Vec2, rect: &TerminalRect, cell_width: f32) -> (i32, i32) {
-    let local = pt - rect.pos;
-    let content_x = local.x - MARGIN;
-    let content_y = local.y - (TITLE_H + MARGIN);
-    let col = (content_x / cell_width).floor() as i32;
-    let row = (content_y / LINE_HEIGHT).floor() as i32;
+/// clamped — the caller owns clipping to the actual grid bounds.
+pub fn pt_to_cell(pt: Vec2, rect: &PaneRect, cell_width: f32) -> (i32, i32) {
+    let local = pane_bevy::pt_to_content_local(pt, rect);
+    let col = (local.x / cell_width).floor() as i32;
+    let row = (local.y / LINE_HEIGHT).floor() as i32;
     (col, row)
 }
 
-fn topmost_terminal_at(pt: Vec2, rects: &[(Entity, TerminalRect)]) -> Option<Entity> {
-    let mut best: Option<(Entity, f32)> = None;
-    for &(e, r) in rects {
-        if pt.x >= r.pos.x
-            && pt.x <= r.pos.x + r.size.x
-            && pt.y >= r.pos.y
-            && pt.y <= r.pos.y + r.size.y
-        {
-            if best.map_or(true, |(_, z)| r.z > z) {
-                best = Some((e, r.z));
-            }
+/// Start a selection drag inside a terminal pane in response to a
+/// pane-bevy content press event.
+fn handle_terminal_content_press(
+    mut presses: MessageReader<PaneContentPressed>,
+    metrics: Res<MonoMetrics>,
+    rects: Query<&PaneRect>,
+    kinds: Query<&PaneKindMarker>,
+    mut selections: Query<&mut TerminalSelection>,
+) {
+    for ev in presses.read() {
+        let Ok(kind) = kinds.get(ev.pane) else {
+            continue;
+        };
+        if kind.0 != PANE_KIND {
+            continue;
+        }
+        // Clear any other terminal's selection.
+        for mut sel in &mut selections {
+            sel.clear();
+        }
+        let Ok(rect) = rects.get(ev.pane) else { continue };
+        let cell = pt_to_cell(ev.window_pt, rect, metrics.cell_width);
+        if let Ok(mut sel) = selections.get_mut(ev.pane) {
+            sel.anchor = Some(cell);
+            sel.head = Some(cell);
+            sel.dragging = true;
         }
     }
-    best.map(|(e, _)| e)
 }
 
-fn handle_mouse(
+/// Update the selection head while LMB is held; clear `dragging` on
+/// release. Mirrors editor-bevy's `handle_text_select_drag` shape.
+fn handle_terminal_selection_drag(
     windows: Query<&Window>,
     buttons: Res<ButtonInput<MouseButton>>,
-    mut consumed: ResMut<InputConsumed>,
     metrics: Res<MonoMetrics>,
-    sidebar: Res<Sidebar>,
-    mut mode: ResMut<MouseMode>,
-    mut focused: ResMut<FocusedTerminal>,
-    mut focused_editor: ResMut<editor_bevy::FocusedEditor>,
-    projects: Res<Projects>,
-    mut close_requests: ResMut<projects::PendingActions>,
-    mut terminals: Query<
-        (
-            Entity,
-            &mut TerminalRect,
-            Option<&ProjectMembership>,
-            Option<&mut TerminalSelection>,
-        ),
-        With<TerminalTag>,
-    >,
+    mut selections: Query<(&PaneRect, &PaneKindMarker, &mut TerminalSelection)>,
 ) {
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let Some(pt) = window.cursor_position() else {
-        return;
-    };
-
     if buttons.just_released(MouseButton::Left) {
-        *mode = MouseMode::Idle;
-    }
-
-    // Sidebar owns the left edge of the window. Don't let drags
-    // initiated there start a window-drag, and don't pull focus to a
-    // terminal underneath. Sidebar's own click handler runs separately.
-    let in_sidebar = pt.x < sidebar.width;
-
-    // Radial menu / other input system already swallowed this click.
-    let click_eaten = consumed.0;
-
-    if buttons.just_pressed(MouseButton::Left) && !in_sidebar && !click_eaten {
-        let rects: Vec<(Entity, TerminalRect)> = terminals
-            .iter()
-            .filter(|(_, _, m, _)| match (projects.active, m) {
-                (Some(a), Some(ProjectMembership(p))) => a == *p,
-                _ => false,
-            })
-            .map(|(e, r, _, _)| (e, *r))
-            .collect();
-        let Some(target) = topmost_terminal_at(pt, &rects) else {
-            // Click missed every terminal — clear any existing selection.
-            for (_, _, _, sel) in &mut terminals {
-                if let Some(mut sel) = sel {
-                    sel.clear();
-                }
+        for (_, kind, mut sel) in &mut selections {
+            if kind.0 == PANE_KIND {
+                sel.dragging = false;
             }
-            return;
-        };
-
-        let rect = *terminals.get(target).unwrap().1;
-        if matches!(region_at(pt, &rect), Some(Region::CloseButton)) {
-            // Defer the actual teardown so we don't despawn while iterating.
-            close_requests.close_terminals.push(target);
-            return;
-        }
-
-        focused.0 = Some(target);
-        // Focusing a terminal yields editor focus so keyboard input
-        // doesn't get delivered to both panes at once.
-        if focused_editor.0.is_some() {
-            focused_editor.0 = None;
-        }
-        // Tell other handlers (radial, editor) we own this click.
-        consumed.0 = true;
-        bring_to_front(target, &mut terminals);
-
-        // Any new click clears every other terminal's selection so only
-        // one terminal at a time has a visible highlight.
-        for (e, _, _, sel) in &mut terminals {
-            if e != target
-                && let Some(mut s) = sel
-            {
-                s.clear();
-            }
-        }
-
-        match region_at(pt, &rect) {
-            Some(Region::TitleBar) => {
-                *mode = MouseMode::WindowDrag {
-                    terminal: target,
-                    grab_offset: pt - rect.pos,
-                };
-            }
-            Some(Region::ResizeHandle) => {
-                *mode = MouseMode::WindowResize {
-                    terminal: target,
-                    anchor_pos: rect.pos,
-                };
-            }
-            Some(Region::Content) => {
-                let cell = pt_to_cell(pt, &rect, metrics.cell_width);
-                if let Ok((_, _, _, Some(mut sel))) = terminals.get_mut(target) {
-                    sel.anchor = Some(cell);
-                    sel.head = Some(cell);
-                }
-                *mode = MouseMode::TerminalSelectionDrag { terminal: target };
-            }
-            Some(Region::CloseButton) | None => {}
         }
         return;
     }
-
     if !buttons.pressed(MouseButton::Left) {
         return;
     }
+    let Ok(window) = windows.single() else { return };
+    let Some(pt) = window.cursor_position() else { return };
 
-    match *mode {
-        MouseMode::WindowDrag {
-            terminal,
-            grab_offset,
-        } => {
-            if let Ok((_, mut rect, _, _)) = terminals.get_mut(terminal) {
-                let mut new_pos = pt - grab_offset;
-                // Don't let the title bar slide under the sidebar — once
-                // it does, you can't grab the terminal back without
-                // resizing the window.
-                if new_pos.x < sidebar.width {
-                    new_pos.x = sidebar.width;
-                }
-                rect.pos = new_pos;
-            }
+    for (rect, kind, mut sel) in &mut selections {
+        if kind.0 != PANE_KIND || !sel.dragging {
+            continue;
         }
-        MouseMode::WindowResize {
-            terminal,
-            anchor_pos,
-        } => {
-            if let Ok((_, mut rect, _, _)) = terminals.get_mut(terminal) {
-                let raw = pt - anchor_pos;
-                rect.size = Vec2::new(
-                    raw.x.max(MIN_TERMINAL_SIZE.x),
-                    raw.y.max(MIN_TERMINAL_SIZE.y),
-                );
-            }
-        }
-        MouseMode::TerminalSelectionDrag { terminal } => {
-            if let Ok((_, rect, _, Some(mut sel))) = terminals.get_mut(terminal) {
-                let cell = pt_to_cell(pt, &rect, metrics.cell_width);
-                sel.head = Some(cell);
-            }
-        }
-        MouseMode::Idle => {}
+        let cell = pt_to_cell(pt, rect, metrics.cell_width);
+        sel.head = Some(cell);
     }
 }
 
 /// Mouse-wheel scrolls the terminal under the cursor (in the active
 /// project). Pixel-mode events (trackpads) accumulate a fractional line
-/// counter so small swipes still register; line-mode events go through
-/// at face value.
+/// counter so small swipes still register.
 fn handle_scroll(
     mut wheel: MessageReader<MouseWheel>,
     mut accum: Local<f32>,
@@ -1166,13 +973,10 @@ fn handle_scroll(
     projects: Res<Projects>,
     store: Res<TerminalStore>,
     terminals: Query<
-        (Entity, &TerminalRect, Option<&ProjectMembership>),
-        With<TerminalTag>,
+        (Entity, &PaneRect, Option<&ProjectMembership>, &PaneKindMarker),
+        With<PaneTag>,
     >,
 ) {
-    // Sum the frame's wheel events into our accumulator regardless of
-    // whether we end up dispatching, so a slow scroll across multiple
-    // ticks doesn't lose precision.
     let mut delta_lines: f32 = 0.0;
     for ev in wheel.read() {
         let lines = match ev.unit {
@@ -1201,16 +1005,18 @@ fn handle_scroll(
         return;
     }
 
-    // Pick the topmost terminal under the cursor (active project only).
-    let rects: Vec<(Entity, TerminalRect)> = terminals
+    let rects: Vec<(Entity, PaneRect)> = terminals
         .iter()
-        .filter(|(_, _, m)| match (projects.active, m) {
-            (Some(a), Some(ProjectMembership(p))) => a == *p,
-            _ => false,
+        .filter(|(_, _, m, kind)| {
+            kind.0 == PANE_KIND
+                && match (projects.active, m) {
+                    (Some(a), Some(p)) => a == p.0,
+                    _ => false,
+                }
         })
-        .map(|(e, r, _)| (e, *r))
+        .map(|(e, r, _, _)| (e, *r))
         .collect();
-    let Some(target) = topmost_terminal_at(pt, &rects) else {
+    let Some(target) = pane_bevy::topmost_pane_at(pt, &rects) else {
         return;
     };
     let Some(data) = store.map.get(&target) else {
@@ -1224,67 +1030,6 @@ fn handle_scroll(
     data.worker.send(WorkerMsg::ScrollDelta(scroll_delta));
 }
 
-fn bring_to_front(
-    target: Entity,
-    terminals: &mut Query<
-        (
-            Entity,
-            &mut TerminalRect,
-            Option<&ProjectMembership>,
-            Option<&mut TerminalSelection>,
-        ),
-        With<TerminalTag>,
-    >,
-) {
-    let max_z = terminals
-        .iter()
-        .map(|(_, r, _, _)| r.z)
-        .fold(0.0_f32, f32::max);
-    if let Ok((_, mut rect, _, _)) = terminals.get_mut(target) {
-        if rect.z < max_z {
-            rect.z = max_z + 1.0;
-        }
-    }
-}
-
-fn position_root(
-    windows: Query<&Window>,
-    terminals: Query<(&TerminalRect, &TerminalChrome), With<TerminalTag>>,
-    parents: Query<Entity, With<TerminalTag>>,
-    mut t_q: Query<&mut Transform>,
-    mut sprite_q: Query<&mut Sprite>,
-) {
-    let Ok(win) = windows.single() else {
-        return;
-    };
-    let win_size = Vec2::new(win.width(), win.height());
-
-    for entity in &parents {
-        let Ok((rect, chrome)) = terminals.get(entity) else {
-            continue;
-        };
-        if let Ok(mut t) = t_q.get_mut(entity) {
-            t.translation.x = rect.pos.x - win_size.x * 0.5;
-            t.translation.y = win_size.y * 0.5 - rect.pos.y;
-            t.translation.z = rect.z;
-        }
-        if let Ok(mut s) = sprite_q.get_mut(chrome.bg) {
-            s.custom_size = Some(rect.size);
-        }
-        if let Ok(mut s) = sprite_q.get_mut(chrome.title_bar) {
-            s.custom_size = Some(Vec2::new(rect.size.x, 1.0));
-        }
-        if let Ok(mut t) = t_q.get_mut(chrome.resize_handle) {
-            t.translation.x = rect.size.x - HANDLE_SIZE;
-            t.translation.y = -(rect.size.y - HANDLE_SIZE);
-        }
-        if let Ok(mut t) = t_q.get_mut(chrome.close_button) {
-            t.translation.x = rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET;
-            t.translation.y = -CLOSE_BTN_INSET;
-        }
-    }
-}
-
 // ---------- Rendering ----------
 
 /// Render the visible grid into per-cell sprites that sample glyphs
@@ -1295,30 +1040,55 @@ fn position_root(
 /// on grid resize — every other frame just mutates `Sprite.color` and
 /// `TextureAtlas.index` on the dirty rows. No cosmic-text, no Text2d,
 /// no spawn/despawn churn.
-/// Visual bell. Polls each terminal's worker `bell_count` and, on a
-/// fresh BEL, kicks off a one-shot fade on the panel background AND
-/// bumps the per-project unread counter when the user can't currently
-/// see that terminal (window unfocused, or its project not active).
-/// The chrome's bg sprite lerps from `BELL_FLASH` back to `PANEL_BG`
-/// over `BELL_FLASH_DURATION`. Once elapsed > duration we leave the
-/// colour at rest and skip the sprite write — frames with no active
-/// flash do no work.
+/// Maintain `AppFocused` from app-level activation state, NOT winit's
+/// `WindowFocused` events: on macOS those fire on per-window key focus
+/// transitions and have been observed flipping back to `true`
+/// spuriously even while the app is backgrounded. Polling
+/// `NSApplication.isActive` each frame matches what the user actually
+/// perceives as "looking at us". Logs every transition while diagnosing.
+fn track_app_focus(mut focused: ResMut<AppFocused>) {
+    let now = current_app_active();
+    if focused.0 != now {
+        eprintln!("[focus] {} → {}", focused.0, now);
+        focused.0 = now;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn current_app_active() -> bool {
+    // `NSApplication.isActive` doesn't reliably flip for our app under
+    // winit / Bevy on macOS — we've observed it staying `true` even
+    // when the user has Cmd+Tab'd to another app. The authoritative
+    // signal is "are we the frontmost app, system-wide": ask
+    // NSWorkspace and compare its `frontmostApplication.pid` to ours.
+    use objc2_app_kit::NSWorkspace;
+    let workspace = unsafe { NSWorkspace::sharedWorkspace() };
+    let Some(front) = (unsafe { workspace.frontmostApplication() }) else {
+        return true;
+    };
+    let front_pid = unsafe { front.processIdentifier() };
+    let our_pid = unsafe { nix::libc::getpid() };
+    front_pid == our_pid
+}
+
+#[cfg(not(target_os = "macos"))]
+fn current_app_active() -> bool {
+    true
+}
+
+/// Bell counter. Polls each terminal's worker `bell_count` and bumps
+/// the per-project unread counter for every fresh BEL the user can't
+/// currently see (window unfocused, or its project not active). No
+/// in-pane visual — only the sidebar badge + dock-tile badge react.
 fn apply_bell_pulse(
     store: Res<TerminalStore>,
-    windows: Query<&Window>,
+    app_focused: Res<AppFocused>,
     mut projects: ResMut<Projects>,
-    mut terms: Query<(
-        Entity,
-        &TerminalChrome,
-        Option<&ProjectMembership>,
-        &mut BellPulse,
-    )>,
-    mut sprite_q: Query<&mut Sprite>,
+    mut terms: Query<(Entity, Option<&ProjectMembership>, &mut BellPulse)>,
 ) {
-    let now = std::time::Instant::now();
-    let window_focused = windows.iter().any(|w| w.focused);
+    let window_focused = app_focused.0;
     let active_project = projects.active;
-    for (entity, chrome, membership, mut pulse) in &mut terms {
+    for (entity, membership, mut pulse) in &mut terms {
         let Some(data) = store.map.get(&entity) else {
             continue;
         };
@@ -1326,42 +1096,36 @@ fn apply_bell_pulse(
             .worker
             .bell_count
             .load(std::sync::atomic::Ordering::Relaxed);
-        if cur > pulse.last_seen {
-            let new_bells = cur - pulse.last_seen;
-            pulse.last_seen = cur;
-            pulse.last_bell_at = Some(now);
-            // Only count bells the user couldn't see. A bell on the
-            // visible pane is its own visual feedback (the flash); the
-            // dock badge / sidebar badge are for "you missed something
-            // over here" notifications.
-            if let Some(ProjectMembership(pid)) = membership {
-                let visible = window_focused && active_project == Some(*pid);
-                if !visible {
-                    for _ in 0..new_bells {
-                        projects.bump_unread(*pid);
-                    }
-                }
-            }
+        if cur <= pulse.last_seen {
+            continue;
         }
-        let Some(t0) = pulse.last_bell_at else {
+        let new_bells = cur - pulse.last_seen;
+        pulse.last_seen = cur;
+        let Some(membership) = membership else {
+            eprintln!(
+                "[bell] new={} on terminal {:?} but no ProjectMembership — skipping",
+                new_bells, entity
+            );
             continue;
         };
-        let elapsed = now.duration_since(t0);
-        if elapsed >= BELL_FLASH_DURATION {
-            // Fade complete — restore rest colour exactly once and
-            // clear the timer so this branch doesn't re-fire.
-            if let Ok(mut s) = sprite_q.get_mut(chrome.bg) {
-                s.color = PANEL_BG;
-            }
-            pulse.last_bell_at = None;
+        let pid = membership.0;
+        let visible = window_focused && active_project == Some(pid);
+        eprintln!(
+            "[bell] new={} pid={} window_focused={} active={:?} visible={}",
+            new_bells, pid, window_focused, active_project, visible
+        );
+        if visible {
             continue;
         }
-        let t = elapsed.as_secs_f32() / BELL_FLASH_DURATION.as_secs_f32();
-        let mix = 1.0 - t; // 1 at t=0 → 0 at t=duration
-        let color = lerp_srgb(PANEL_BG, BELL_FLASH, mix);
-        if let Ok(mut s) = sprite_q.get_mut(chrome.bg) {
-            s.color = color;
+        for _ in 0..new_bells {
+            projects.bump_unread(pid);
         }
+        eprintln!(
+            "[bell] bumped pid={} → {} (total {})",
+            pid,
+            projects.unread_bells.get(&pid).copied().unwrap_or(0),
+            projects.unread_total()
+        );
     }
 }
 
@@ -1370,11 +1134,10 @@ fn apply_bell_pulse(
 /// true. Runs every frame; the no-op fast path inside `clear_unread`
 /// (returns false when count was already zero) keeps the cost free.
 fn clear_active_unread(
-    windows: Query<&Window>,
+    app_focused: Res<AppFocused>,
     mut projects: ResMut<Projects>,
 ) {
-    let focused = windows.iter().any(|w| w.focused);
-    if !focused {
+    if !app_focused.0 {
         return;
     }
     let Some(active) = projects.active else {
@@ -1388,15 +1151,25 @@ fn clear_active_unread(
 /// the value actually changes — `setBadgeLabel` is cheap but it's not
 /// free, and most frames have no change.
 #[cfg(target_os = "macos")]
-fn sync_dock_badge(projects: Res<Projects>, mut last: Local<u64>) {
+fn sync_dock_badge(
+    // NonSendMarker forces this system onto the main thread, which is
+    // mandatory for NSDockTile / NSApplication AppKit calls. Without
+    // it Bevy may schedule us on a worker thread and `MainThreadMarker`
+    // refuses to construct → the badge never updates.
+    _main: bevy::ecs::system::NonSendMarker,
+    projects: Res<Projects>,
+    mut last: Local<u64>,
+) {
     let total = projects.unread_total();
     if total == *last {
         return;
     }
+    eprintln!("[dock] total {} → {}", *last, total);
     *last = total;
     use objc2_app_kit::NSApplication;
     use objc2_foundation::{MainThreadMarker, NSString};
     let Some(mtm) = MainThreadMarker::new() else {
+        eprintln!("[dock] MainThreadMarker::new() returned None — not main thread?");
         return;
     };
     let app = NSApplication::sharedApplication(mtm);
@@ -1407,21 +1180,11 @@ fn sync_dock_badge(projects: Res<Projects>, mut last: Local<u64>) {
         Some(NSString::from_str(&total.to_string()))
     };
     unsafe { tile.setBadgeLabel(label.as_deref()) };
+    eprintln!("[dock] setBadgeLabel({:?})", total);
 }
 
 #[cfg(not(target_os = "macos"))]
 fn sync_dock_badge(_projects: Res<Projects>, _last: Local<u64>) {}
-
-fn lerp_srgb(a: Color, b: Color, t: f32) -> Color {
-    let a = a.to_srgba();
-    let b = b.to_srgba();
-    Color::srgba(
-        a.red + (b.red - a.red) * t,
-        a.green + (b.green - a.green) * t,
-        a.blue + (b.blue - a.blue) * t,
-        a.alpha + (b.alpha - a.alpha) * t,
-    )
-}
 
 fn sync_grid(
     metrics: Res<MonoMetrics>,
@@ -1429,7 +1192,7 @@ fn sync_grid(
     mut images: ResMut<Assets<Image>>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
     store: Res<TerminalStore>,
-    mut terminals: Query<(Entity, &TerminalChrome, &mut CellSprites)>,
+    mut terminals: Query<(Entity, &PaneChrome, &TerminalCursor, &mut CellSprites, &PaneKindMarker), With<PaneTag>>,
     mut sprite_q: Query<&mut Sprite>,
     mut transform_q: Query<&mut Transform>,
     mut vis_q: Query<&mut Visibility>,
@@ -1449,14 +1212,17 @@ fn sync_grid(
     let mut mutate_ns: u128 = 0;
     let mut cells_touched = 0u64;
 
-    for (entity, chrome, mut pools) in &mut terminals {
+    for (entity, chrome, cursor_marker, mut pools, kind) in &mut terminals {
+        if kind.0 != PANE_KIND {
+            continue;
+        }
         let Some(data) = store.map.get(&entity) else {
             continue;
         };
 
         // Lock briefly, copy snapshot fields into locals, drop lock.
         let lock_t = Instant::now();
-        let (cols, rows, default_fg, default_bg, cursor, generation) = {
+        let (cols, rows, _default_fg, _default_bg, cursor, generation) = {
             let g = data.worker.snapshot.lock().expect("snapshot lock");
             local_cells.clear();
             local_cells.extend_from_slice(&g.cells);
@@ -1473,8 +1239,10 @@ fn sync_grid(
         };
         lock_ns += lock_t.elapsed().as_nanos();
 
+        let cursor_entity = cursor_marker.0;
+        let _ = chrome; // keep for content_root lookup below
         // Cursor (always update — cursor moves don't always set row-dirty).
-        if let Ok(mut v) = vis_q.get_mut(chrome.cursor) {
+        if let Ok(mut v) = vis_q.get_mut(cursor_entity) {
             *v = if cursor.is_some() {
                 Visibility::Inherited
             } else {
@@ -1482,7 +1250,7 @@ fn sync_grid(
             };
         }
         if let Some((cx, cy)) = cursor {
-            if let Ok(mut t) = transform_q.get_mut(chrome.cursor) {
+            if let Ok(mut t) = transform_q.get_mut(cursor_entity) {
                 t.translation.x = cx as f32 * metrics.cell_width;
                 t.translation.y = -(cy as f32) * LINE_HEIGHT;
                 t.translation.z = 1.0;

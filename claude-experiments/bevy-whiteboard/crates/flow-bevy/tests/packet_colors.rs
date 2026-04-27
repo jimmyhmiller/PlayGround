@@ -39,7 +39,7 @@ fn theme_slot(app: &App, slot: usize) -> Color {
 }
 
 fn latest_of_kind(app: &App, kind: Kind) -> flow::NodeId {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let prefix = format!("{}_", kind.label());
     sim.nodes
         .iter()
@@ -88,7 +88,7 @@ fn single_stream_data_packets_resolve_to_stream_color() {
 
     let red = theme_slot(&app, 0);
     let mut data_events = 0usize;
-    let events = app.world().resource::<FlowSim>().sim.log.events.clone();
+    let events = app.world().resource::<FlowSim>().log.events.clone();
     for ev in events.iter() {
         let Event::PacketEmitted { from, payload, .. } = ev else { continue; };
         if payload_slot(payload).is_none() { continue; }
@@ -114,7 +114,7 @@ fn single_stream_control_packets_fall_back_to_emitter_color() {
 
     let red = theme_slot(&app, 0);
     let mut control_events = 0usize;
-    let events = app.world().resource::<FlowSim>().sim.log.events.clone();
+    let events = app.world().resource::<FlowSim>().log.events.clone();
     for ev in events.iter() {
         let Event::PacketEmitted { from, payload, .. } = ev else { continue; };
         if payload_slot(payload).is_some() { continue; }
@@ -151,7 +151,7 @@ fn router_preserves_per_stream_colors_end_to_end() {
 
     let mut red_seen = 0;
     let mut yel_seen = 0;
-    let events = app.world().resource::<FlowSim>().sim.log.events.clone();
+    let events = app.world().resource::<FlowSim>().log.events.clone();
     for ev in events.iter() {
         let Event::PacketEmitted { from, to, payload, .. } = ev else { continue; };
         let Some(slot) = payload_slot(payload) else { continue; };

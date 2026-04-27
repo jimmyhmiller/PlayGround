@@ -28,7 +28,7 @@ use flow_bevy::gadgets::Kind;
 /// each given worker. This is the per-edge delivery count out of the
 /// router, which is exactly what round-robin controls.
 fn router_emits_by_worker(app: &bevy::prelude::App, router: flow::NodeId, workers: &[flow::NodeId]) -> Vec<usize> {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     workers.iter().map(|w| {
         sim.log.iter().filter(|ev| matches!(ev,
             Event::PacketEmitted { from, to, .. } if *from == router && *to == *w
@@ -38,7 +38,7 @@ fn router_emits_by_worker(app: &bevy::prelude::App, router: flow::NodeId, worker
 
 fn set_slot_int(app: &mut bevy::prelude::App, nid: flow::NodeId, slot: &str, v: i64) {
     let mut flow_res = app.world_mut().resource_mut::<FlowSim>();
-    flow_res.sim.nodes.get_mut(&nid).expect("node").slots.insert(slot.into(), Value::Int(v));
+    flow_res.nodes.get_mut(&nid).expect("node").slots.insert(slot.into(), Value::Int(v));
 }
 
 #[test]
@@ -64,7 +64,7 @@ fn round_robin_distributes_evenly_across_same_color_workers() {
     {
         let mut flow_res = app.world_mut().resource_mut::<FlowSim>();
         for _ in 0..9 {
-            flow_res.sim.inject(router, Value::variant("packet", Value::Int(0)));
+            flow_res.inject(router, Value::variant("packet", Value::Int(0)));
         }
     }
     advance_sim_ns(&mut app, 10_000_000); // 10 ms — plenty for latency + rule fires.
@@ -106,8 +106,8 @@ fn round_robin_per_color_lanes_dont_interfere() {
     {
         let mut flow_res = app.world_mut().resource_mut::<FlowSim>();
         for _ in 0..6 {
-            flow_res.sim.inject(router, Value::variant("packet", Value::Int(0)));
-            flow_res.sim.inject(router, Value::variant("packet", Value::Int(1)));
+            flow_res.inject(router, Value::variant("packet", Value::Int(0)));
+            flow_res.inject(router, Value::variant("packet", Value::Int(1)));
         }
     }
     advance_sim_ns(&mut app, 10_000_000);
@@ -138,7 +138,7 @@ fn fanout_mode_still_broadcasts_to_all_color_matches() {
     {
         let mut flow_res = app.world_mut().resource_mut::<FlowSim>();
         for _ in 0..4 {
-            flow_res.sim.inject(router, Value::variant("packet", Value::Int(0)));
+            flow_res.inject(router, Value::variant("packet", Value::Int(0)));
         }
     }
     advance_sim_ns(&mut app, 10_000_000);

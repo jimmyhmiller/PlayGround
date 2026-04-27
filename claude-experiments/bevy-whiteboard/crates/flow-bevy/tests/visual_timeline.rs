@@ -323,7 +323,7 @@ fn p3_chain_hops_not_simultaneously_visible() {
 
     // Classify (from, to) pairs into hop layers.
     let hop_layers = {
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
         let mut gens = Vec::new();
         let mut router = None;
         let mut queues = Vec::new();
@@ -428,7 +428,7 @@ fn p6_visuals_keep_flowing_while_sim_emits() {
     // timeline receive at least as many packets as we expect
     // from the sim's data-emit stream in the last 2s window"
     // (the GC retention window).
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let now_ns = sim.now_ns;
     let window_ns: u64 = 2_000_000_000; // 2s
     let window_start_ns = now_ns.saturating_sub(window_ns);
@@ -529,7 +529,7 @@ fn p4s_one_visual_per_emit_packet_id() {
 
     // Every packet_id we ever saw corresponds to a real, non-filtered
     // sim emit. Catches phantom ingests.
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let emit_ids: HashSet<flow::PacketId> = sim.log.iter()
         .filter_map(|ev| if let Event::PacketEmitted { packet, from, to, payload, .. } = ev {
             if from == to { return None; }
@@ -623,7 +623,7 @@ fn p4_packet_entity_count_tracks_emissions() {
     }
 
     // Count emitted data packets (exclude pull/wake tick/wake).
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let mut emit_count = 0usize;
     for ev in sim.log.iter() {
         if let Event::PacketEmitted { from, to, payload, .. } = ev {

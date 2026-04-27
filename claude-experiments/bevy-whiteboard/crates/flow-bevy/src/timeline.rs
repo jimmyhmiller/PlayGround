@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use flow::{TimelineEvent, Value};
 use poster_ui::{Bold, Mono, Theme};
 
-use crate::bridge::FlowSim;
+use crate::sim_driver::{RenderSnapshot, SimSnapshotRes};
 
 pub struct TimelinePlugin;
 impl Plugin for TimelinePlugin {
@@ -137,9 +137,9 @@ fn spawn_strip(mut commands: Commands, theme: Res<Theme>) {
 /// Compute the strip's visible time range:
 ///   start = 0
 ///   end   = max(sim.now_ns, last_event_at_ns, MIN_RANGE_NS) + buffer
-fn visible_range(sim: &FlowSim) -> (u64, u64) {
-    let last = sim.sim.timeline.last_at_ns().unwrap_or(0);
-    let high_water = sim.sim.now_ns.max(last).max(MIN_RANGE_NS);
+fn visible_range(snap: &RenderSnapshot) -> (u64, u64) {
+    let last = snap.timeline.last_at_ns().unwrap_or(0);
+    let high_water = snap.now_ns.max(last).max(MIN_RANGE_NS);
     (0, high_water + RANGE_BUFFER_NS)
 }
 
@@ -159,7 +159,7 @@ struct StripSignature {
 }
 
 fn rebuild_strip_contents(
-    sim: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     theme: Res<Theme>,
     track_q: Query<Entity, With<TimelineTrack>>,
     root_q: Query<Entity, With<TimelineStripRoot>>,
@@ -170,7 +170,7 @@ fn rebuild_strip_contents(
 ) {
     // Toggle whole-strip visibility based on whether anything's
     // scheduled. Plain whiteboards stay clean.
-    let want_visible = !sim.sim.timeline.events.is_empty();
+    let want_visible = !snapshot.0.timeline.events.is_empty();
     if let Ok(root) = root_q.single() {
         commands.entity(root).insert(if want_visible {
             Visibility::Inherited
@@ -180,8 +180,8 @@ fn rebuild_strip_contents(
     }
     if !want_visible { return; }
 
-    let range = visible_range(&sim);
-    let cur_event_sig: Vec<(u64, (u64, usize, bool))> = sim.sim.timeline.events
+    let range = visible_range(&snapshot.0);
+    let cur_event_sig: Vec<(u64, (u64, usize, bool))> = snapshot.0.timeline.events
         .iter()
         .map(|e| (e.id, (e.at_ns, e.actions.len(), e.fired)))
         .collect();
@@ -204,8 +204,8 @@ fn rebuild_strip_contents(
 
     commands.entity(track).with_children(|t| {
         spawn_tick_marks(t, &theme, start, end);
-        for ev in &sim.sim.timeline.events {
-            spawn_event_marker(t, &theme, &sim, ev, start, end);
+        for ev in &snapshot.0.timeline.events {
+            spawn_event_marker(t, &theme, &snapshot.0, ev, start, end);
         }
     });
 }
@@ -269,7 +269,7 @@ fn spawn_tick_marks(
 fn spawn_event_marker(
     parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
     theme: &Theme,
-    sim: &FlowSim,
+    snap: &RenderSnapshot,
     ev: &TimelineEvent,
     range_start: u64,
     range_end: u64,
@@ -300,7 +300,7 @@ fn spawn_event_marker(
                 ..default()
             },
             children![(
-                Text::new(format_event_label(sim, ev)),
+                Text::new(format_event_label(snap, ev)),
                 TextFont { font_size: 10.0, ..default() },
                 TextColor(theme.ink),
                 Mono,
@@ -312,11 +312,11 @@ fn spawn_event_marker(
 /// "2.0s Worker.up := 0" for single-action events; for compound
 /// events, summarize as "2.0s × 3" (count) and let a future tooltip
 /// expand them.
-fn format_event_label(sim: &FlowSim, ev: &TimelineEvent) -> String {
+fn format_event_label(snap: &RenderSnapshot, ev: &TimelineEvent) -> String {
     let sec = ev.at_ns as f64 / 1e9;
     if ev.actions.len() == 1 {
         let a = &ev.actions[0];
-        let node_name = sim.sim.nodes.get(&a.node)
+        let node_name = snap.nodes.get(&a.node)
             .map(|n| n.name.as_str())
             .unwrap_or("?");
         format!("{:.1}s  {}.{} := {}", sec, node_name, a.slot, format_value(&a.value))
@@ -339,16 +339,16 @@ fn format_value(v: &Value) -> String {
 /// Slide the now-cursor to its current sim-time position. Runs every
 /// frame so the cursor advances smoothly.
 fn sync_now_cursor(
-    sim: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     mut q: Query<(&mut Node, &mut Visibility), With<TimelineNowCursor>>,
 ) {
     let Ok((mut node, mut vis)) = q.single_mut() else { return };
-    if sim.sim.timeline.events.is_empty() {
+    if snapshot.0.timeline.events.is_empty() {
         *vis = Visibility::Hidden;
         return;
     }
-    let (start, end) = visible_range(&sim);
-    let frac = time_to_fraction(sim.sim.now_ns, start, end);
+    let (start, end) = visible_range(&snapshot.0);
+    let frac = time_to_fraction(snapshot.0.now_ns, start, end);
     node.left = Val::Percent(frac * 100.0);
     *vis = Visibility::Inherited;
 }

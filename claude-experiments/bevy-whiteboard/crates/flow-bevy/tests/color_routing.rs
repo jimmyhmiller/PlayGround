@@ -41,7 +41,7 @@ use flow_bevy::tool::Tool;
 use poster_ui::testing::{click_by_marker, simulate_canvas_click};
 
 fn latest_of_kind(app: &App, kind: Kind) -> flow::NodeId {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let prefix = format!("{}_", kind.label());
     sim.nodes
         .iter()
@@ -103,7 +103,7 @@ fn yellow_packets_route_to_yellow_queue() {
     advance_sim_ns(&mut app, 3_000_000_000);
 
     // Count packets the router forwarded to each downstream queue.
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let mut to_red = 0usize;
     let mut to_yel = 0usize;
     for ev in sim.log.events.iter() {
@@ -120,7 +120,7 @@ fn yellow_packets_route_to_yellow_queue() {
 
     // Diagnostic: full edge list around router + queues.
     {
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
         eprintln!("router id: {:?}, queue_red: {:?}, queue_yel: {:?}",
             router, queue_red, queue_yel);
         eprintln!("router name: {:?}", sim.nodes.get(&router).map(|n| &n.name));

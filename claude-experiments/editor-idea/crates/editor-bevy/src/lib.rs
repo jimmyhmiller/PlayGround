@@ -1,35 +1,22 @@
 //! Editor view layer built on Bevy's 2D/text pipeline.
 //!
-//! # Multi-editor architecture
-//!
-//! Each editor instance is a Bevy entity that carries its own state
-//! components (`EditorStateComp`, `LineRows`, `EditorScroll`,
-//! `EditorHighlighter`, `EditorRect`, `EditorChrome`, `TextDragAnchor`).
-//! Systems iterate these entities in a `Query` instead of reading
-//! singleton resources. This makes N editors in one window trivial —
-//! they just all exist as entities.
-//!
-//! Editors are draggable via their title bar and resizable via the
-//! bottom-right handle. Focus is tracked with a `FocusedEditor` resource
-//! so keyboard input routes to a single editor, and an `EditorEditorMouseMode`
-//! state machine keeps drag / resize / text-selection distinct.
-//!
-//! Horizontal overflow is not clipped: `sync_text` truncates each line's
-//! rendered text to the editor's content-area column count, so
-//! characters past the edge simply don't get spawned.
+//! Pane chrome (drag, resize, close, focus, z-order) is owned by
+//! `pane-bevy`. This crate only owns editor-specific concerns:
+//! rendering text spans into the pane's content_root, caret/selection
+//! visuals, scroll, keyboard input, and the highlighter.
 //!
 //! # Embedding
 //!
-//! Use `EditorPlugin` for a standalone editor app — it sets up camera,
-//! fonts, clear color, and winit settings. To embed in another app, use
-//! `EditorEmbedPlugin` instead: it adds only the editor-related systems
-//! and resources, expecting the host to have already set up `Camera2d`,
-//! `EditorFont`, `EditorMetrics` (via `setup_editor_font`), and any
-//! `WinitSettings` / `ClearColor` it cares about. Both crates can share
-//! the `InputConsumed` resource to coordinate which handler claims a
-//! click in a given frame.
+//! - `EditorPlugin` — standalone editor app: camera, font, clear color,
+//!   winit settings, plus `PanePlugin` and `EditorEmbedPlugin`.
+//! - `EditorEmbedPlugin` — for hosts (like `terminal-bevy`) that already
+//!   own the camera, clear color, etc. Registers the "editor" pane kind
+//!   in `PaneRegistry` and adds editor-specific systems. Hosts must
+//!   also add `PanePlugin` and provide `EditorFont` + `EditorMetrics`
+//!   via `setup_editor_font`.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
@@ -47,89 +34,53 @@ use editor_core::history::{redo, undo};
 use editor_core::selection::{Range, Selection};
 use editor_core::state::EditorState;
 use editor_core::transaction::{Change, Transaction};
+use pane_bevy::{
+    spawn_pane, FocusedPane, PaneChrome, PaneContentPressed, PaneFont, PaneKindMarker,
+    PanePlugin, PaneRect, PaneRegistry, PaneTag, SpawnedPane, MARGIN, TITLE_H,
+};
+use serde_json::Value;
 
 pub mod highlight;
 use highlight::{color_for, Highlighter};
 
 pub const FONT_SIZE: f32 = 16.0;
 pub const LINE_HEIGHT: f32 = 20.0;
-pub const MARGIN: f32 = 16.0;
-/// Height of the draggable title bar on each editor.
-pub const TITLE_H: f32 = 22.0;
-/// Side length of the square resize handle in the bottom-right corner.
-pub const HANDLE_SIZE: f32 = 14.0;
-pub const MIN_EDITOR_SIZE: Vec2 = Vec2::new(160.0, 120.0);
 
+pub const PANE_KIND: &str = "editor";
 
-// ---------- Components: one editor = one entity with these ----------
+// ---------- Components: editor-specific ----------
 
-#[derive(Component)]
-pub struct Editor;
+/// Filename a pane was opened from. Hosts (terminal-bevy) attach this on
+/// open-file requests; the editor crate doesn't read it itself, but
+/// pane-bevy persistence routes through `editor_snapshot` which inspects it.
+#[derive(Component, Clone, Debug)]
+pub struct EditorFilePath(pub PathBuf);
 
-/// The editor's document + selection + history. Own component so
-/// multiple editors can diverge independently.
 #[derive(Component)]
 pub struct EditorStateComp(pub EditorState);
 
-/// Per-editor pool of line-row entities, keyed by doc line number.
-/// Only lines currently in (or near) the editor's content viewport
-/// have entries.
 #[derive(Component, Default)]
 pub struct LineRows(pub HashMap<usize, Entity>);
 
-/// Scroll offset in pixels from the top-left of the doc's logical
-/// coordinate space. `x` tracks horizontal column offset (multiples of
-/// cell_width when snapped to cell boundaries); `y` tracks vertical
-/// line offset.
 #[derive(Component, Copy, Clone, Default)]
 pub struct EditorScroll {
     pub x: f32,
     pub y: f32,
 }
 
-/// Anchor char offset of an in-progress text-selection drag inside
-/// this editor, or `None` if no drag is active.
+/// Anchor char offset of an in-progress text-selection drag.
 #[derive(Component, Default)]
 pub struct TextDragAnchor(pub Option<usize>);
 
-/// Per-editor tree-sitter parser + highlight spans.
 #[derive(Component)]
 pub struct EditorHighlighter(pub Highlighter);
 
-/// Position, size, and Z-order of the editor in window-space coords
-/// (top-left origin, y-down). `position_root` converts this to the
-/// editor entity's world-space `Transform`.
-#[derive(Component, Copy, Clone, Debug)]
-pub struct EditorRect {
-    pub pos: Vec2,
-    pub size: Vec2,
-    pub z: f32,
-}
-
-/// References to the child entities that make up an editor's visible
-/// chrome. Held on the editor entity so systems can grab them without
-/// re-querying the scene graph.
-#[derive(Component)]
-pub struct EditorChrome {
-    pub bg: Entity,
-    pub title_bar: Entity,
-    pub content_root: Entity,
-    pub caret: Entity,
-    pub resize_handle: Entity,
-}
-
-/// Per-line marker: the text + highlighter revision last rendered into
-/// this line entity. Rebuild spans only when either changes so Bevy's
-/// text layout stays cached.
 #[derive(Component)]
 struct LineRender {
     text: String,
     rev: u64,
 }
 
-/// Marks a sprite spawned for one line of a selection highlight.
-/// Carries the owning editor so we despawn only that editor's rects
-/// when its selection changes.
 #[derive(Component)]
 pub struct SelRect {
     pub editor: Entity,
@@ -137,130 +88,74 @@ pub struct SelRect {
 
 // ---------- Shared resources ----------
 
-/// Handle to the editor font, shared by all editors.
 #[derive(Resource)]
 pub struct EditorFont(pub Handle<Font>);
 
-/// Advance width of a single character cell in logical pixels, measured
-/// once from the embedded font file. Caret, selection, mouse hit-test,
-/// and horizontal truncation all do plain arithmetic against this.
 #[derive(Resource, Copy, Clone)]
 pub struct EditorMetrics {
     pub cell_width: f32,
 }
 
-/// Currently keyboard-focused editor. `None` if no editor has been
-/// clicked yet or the last focused editor was despawned.
-#[derive(Resource, Default)]
-pub struct FocusedEditor(pub Option<Entity>);
+// ---------- Plugins ----------
 
-/// What the left mouse button is doing right now. Set on press, held
-/// while dragged, cleared on release. Keeps drag / resize / text
-/// selection from interfering with each other.
-#[derive(Resource, Default)]
-pub enum EditorMouseMode {
-    #[default]
-    Idle,
-    TextSelect {
-        editor: Entity,
-    },
-    WindowDrag {
-        editor: Entity,
-        grab_offset: Vec2,
-    },
-    WindowResize {
-        editor: Entity,
-        anchor_pos: Vec2,
-    },
-}
-
-// ---------- Plugin ----------
-
-/// Set by an input system that wants to claim the current frame's mouse
-/// click, so other input systems (handle_mouse, host-side hit-testers)
-/// skip it. The host is responsible for resetting it (typically in
-/// PostUpdate) so it goes back to false next frame. `EditorEmbedPlugin`
-/// will `init_resource` it if missing, but won't reset it — that lets
-/// the host (e.g. `terminal-bevy`) own the lifecycle.
-#[derive(Resource, Default)]
-pub struct InputConsumed(pub bool);
-
-/// Embeddable editor plugin: just the editor systems and the resources
-/// they own. The host must already provide:
-///
-/// - `Camera2d` (spawned somewhere)
-/// - `EditorFont` and `EditorMetrics` — call `setup_editor_font` from a
-///   Startup system, or insert your own
-/// - `WinitSettings` and `ClearColor` (whatever the host wants)
-/// - optional `InputConsumed` — if the host doesn't insert it, this
-///   plugin will, and reset is a no-op
-///
-/// Does NOT spawn a camera, set ClearColor, configure WinitSettings, or
-/// load fonts. Use `EditorPlugin` for the standalone editor app that
-/// bundles all of those.
 pub struct EditorEmbedPlugin;
 
 impl Plugin for EditorEmbedPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<FocusedEditor>()
-            .init_resource::<EditorMouseMode>()
-            .init_resource::<InputConsumed>()
+        app.add_systems(Startup, register_editor_kind)
             .add_systems(
                 Update,
                 (
-                    handle_mouse,
+                    handle_pane_content_press,
+                    handle_text_select_drag,
                     handle_scroll,
                     handle_input,
                     update_highlight,
                     sync_text,
-                    position_root,
+                    sync_content_root,
                     sync_caret,
                     sync_selection,
                 )
                     .chain(),
-            )
-            .add_systems(PostUpdate, reset_input_consumed);
+            );
     }
 }
 
-fn reset_input_consumed(mut consumed: ResMut<InputConsumed>) {
-    consumed.0 = false;
+fn register_editor_kind(mut registry: ResMut<PaneRegistry>) {
+    registry.register(pane_bevy::PaneKindSpec {
+        kind: PANE_KIND,
+        display_name: "Editor",
+        radial_icon: Some("{}"),
+        default_size: Vec2::new(640.0, 420.0),
+        spawn: editor_spawn_from_config,
+        snapshot: editor_snapshot,
+        on_close: None,
+    });
 }
 
-/// Standalone editor plugin: embed plugin + camera + font + clear color
-/// + winit settings + macOS focus release. For the `editor` binary; not
-/// what you want when embedding into another Bevy app.
 pub struct EditorPlugin;
 
 impl Plugin for EditorPlugin {
     fn build(&self, app: &mut App) {
-        app
-            // Keep the scheduler in Continuous mode always — the
-            // default `reactive_low_power` mode can drop or coalesce
-            // wheel events on macOS when the window is briefly
-            // unfocused, which made scroll feel like it "didn't work".
-            .insert_resource(bevy::winit::WinitSettings {
-                focused_mode: bevy::winit::UpdateMode::Continuous,
-                unfocused_mode: bevy::winit::UpdateMode::Continuous,
-            })
-            .insert_resource(ClearColor(Color::srgb(0.10, 0.11, 0.13)))
-            .add_systems(
-                Startup,
-                (setup_editor_camera, setup_editor_font, load_fallback_fonts),
-            )
-            // Run once, after the window exists, so we can immediately
-            // give focus back to whatever app the user was in. The
-            // PostStartup schedule is after Startup and after the
-            // winit window has been created.
-            .add_systems(PostStartup, release_os_focus)
-            .add_plugins(EditorEmbedPlugin);
+        app.insert_resource(bevy::winit::WinitSettings {
+            focused_mode: bevy::winit::UpdateMode::Continuous,
+            unfocused_mode: bevy::winit::UpdateMode::Continuous,
+        })
+        .insert_resource(ClearColor(Color::srgb(0.10, 0.11, 0.13)))
+        .add_systems(
+            Startup,
+            (
+                setup_editor_camera,
+                setup_editor_font,
+                load_fallback_fonts,
+            ),
+        )
+        .add_systems(PostStartup, release_os_focus)
+        .add_plugins(PanePlugin)
+        .add_plugins(EditorEmbedPlugin);
     }
 }
 
-/// Tell the OS to deactivate our app so the user's previous app keeps
-/// keyboard focus. Without this, macOS's `NSApplication.activate` call
-/// (which winit issues on first window) pulls the user away from
-/// whatever they were doing.
 #[cfg(target_os = "macos")]
 fn release_os_focus() {
     use objc2_app_kit::NSApplication;
@@ -274,33 +169,23 @@ fn release_os_focus() {
 #[cfg(not(target_os = "macos"))]
 fn release_os_focus() {}
 
-/// Minimal plugin for headless state-transition tests: just `handle_input`.
-/// No rendering, no window, no asset loading. Tests spawn editor entities
-/// directly; input routes via `FocusedEditor`.
+/// Headless plugin for keybinding tests. No PanePlugin dependency —
+/// tests spawn a bare editor entity and drive `handle_input` directly.
 pub struct HeadlessEditorPlugin;
 
 impl Plugin for HeadlessEditorPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_resource(FocusedEditor::default())
-            .insert_resource(EditorMouseMode::default())
+        app.init_resource::<FocusedPane>()
             .add_systems(Update, handle_input);
     }
 }
 
-/// Bevy initializes `CosmicFontSystem` with an empty `fontdb`, so any
-/// glyph not present in the primary editor font renders as tofu.
-/// Populating the db with system fonts enables CJK/emoji fallback.
 fn load_fallback_fonts(mut fonts: ResMut<CosmicFontSystem>) {
     fonts.0.db_mut().load_system_fonts();
 }
 
-/// JetBrains Mono bundled into the binary so release builds run from
-/// any cwd without asset-path lookups.
 const EMBEDDED_FONT: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
 
-/// Read the horizontal advance of `'M'` at `font_size` from the font
-/// bytes. JetBrains Mono reports the same advance for every glyph so
-/// `'M'` is an arbitrary choice.
 fn measure_cell_width(font_bytes: &[u8], font_size: f32) -> f32 {
     use skrifa::instance::{LocationRef, Size};
     use skrifa::{FontRef, MetadataProvider};
@@ -316,195 +201,70 @@ fn measure_cell_width(font_bytes: &[u8], font_size: f32) -> f32 {
         .expect("'M' must have an advance width")
 }
 
-/// Spawn the 2D camera. Standalone-only — when embedded, the host
-/// already has a camera.
 pub fn setup_editor_camera(mut commands: Commands) {
     commands.spawn(Camera2d);
 }
 
-/// Load the embedded JetBrains Mono font and insert `EditorFont` +
-/// `EditorMetrics`. Call this from a Startup system before any system
-/// that calls `spawn_editor`. The standalone `EditorPlugin` adds it
-/// automatically; embedders must call it themselves (or insert their
-/// own `EditorFont`/`EditorMetrics`).
+/// Load the editor font and insert both `EditorFont` and `PaneFont`
+/// (the latter is what pane-bevy uses for chrome). Standalone hosts
+/// can call this; embedders that already have a font may skip it and
+/// insert their own.
 pub fn setup_editor_font(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
     let font = fonts.add(
         Font::try_from_bytes(EMBEDDED_FONT.to_vec())
             .expect("embedded JetBrainsMono-Regular.ttf must parse"),
     );
-    commands.insert_resource(EditorFont(font));
+    commands.insert_resource(EditorFont(font.clone()));
     commands.insert_resource(EditorMetrics {
         cell_width: measure_cell_width(EMBEDDED_FONT, FONT_SIZE),
     });
+    commands.insert_resource(PaneFont(font));
 }
 
-/// Spawn a new editor entity with initial doc text at the given rect.
-/// Returns the editor entity so callers can set focus, add debug
-/// components, etc.
-pub fn spawn_editor(
-    commands: &mut Commands,
-    font: &EditorFont,
+// ---------- Spawn ----------
+
+/// Spawn an editor pane with the given initial text. Returns the pane
+/// entity. Uses pane-bevy chrome under the hood.
+pub fn spawn_editor_pane(
+    world: &mut World,
     initial_text: &str,
-    rect: EditorRect,
+    rect: PaneRect,
+    project_id: Option<u64>,
 ) -> Entity {
-    // Parent entity owns state + Transform; children form the visible
-    // chrome. Positioning happens in `position_root` from `EditorRect`.
-    let editor = commands
-        .spawn((
-            Editor,
-            EditorStateComp(
-                EditorState::new(
-                    ropey::Rope::from_str(initial_text),
-                    Selection::cursor(0),
-                )
-                .with_indent_unit("    "),
-            ),
-            EditorHighlighter(Highlighter::new()),
-            LineRows::default(),
-            EditorScroll::default(),
-            TextDragAnchor::default(),
-            rect,
-            Transform::default(),
-            Visibility::default(),
-        ))
-        .id();
-
-    let bg = commands
-        .spawn((
-            ChildOf(editor),
-            Sprite {
-                color: Color::srgb(0.14, 0.16, 0.19),
-                custom_size: Some(rect.size),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, 0.0, 0.0),
-        ))
-        .id();
-
-    let title_bar = commands
-        .spawn((
-            ChildOf(editor),
-            Sprite {
-                color: Color::srgb(0.22, 0.24, 0.28),
-                custom_size: Some(Vec2::new(rect.size.x, TITLE_H)),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, 0.0, 0.1),
-        ))
-        .id();
-
-    // Content root holds line text, caret, selection. Its local
-    // transform carries the scroll offset so the chrome stays fixed
-    // while the doc pans underneath it.
-    let content_root = commands
-        .spawn((
-            ChildOf(editor),
-            Transform::from_xyz(MARGIN, -(TITLE_H + MARGIN) * 0.0 - TITLE_H, 0.2),
-            Visibility::default(),
-        ))
-        .id();
-
-    let caret = commands
-        .spawn((
-            ChildOf(content_root),
-            Sprite {
-                color: Color::srgb(0.55, 0.85, 1.0),
-                custom_size: Some(Vec2::new(2.0, LINE_HEIGHT)),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, 0.0, 1.0),
-        ))
-        .id();
-
-    let resize_handle = commands
-        .spawn((
-            ChildOf(editor),
-            Sprite {
-                color: Color::srgb(0.40, 0.44, 0.50),
-                custom_size: Some(Vec2::splat(HANDLE_SIZE)),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(
-                rect.size.x - HANDLE_SIZE,
-                -(rect.size.y - HANDLE_SIZE),
-                0.3,
-            ),
-        ))
-        .id();
-
-    commands.entity(editor).insert(EditorChrome {
-        bg,
-        title_bar,
+    let SpawnedPane {
+        entity,
         content_root,
-        caret,
-        resize_handle,
-    });
-    let _ = font; // held by callers; kept in signature so future spawns can set a custom font
-    editor
+    } = spawn_pane(world, PANE_KIND, "Editor", rect, project_id);
+    populate_editor_pane(world, entity, content_root, initial_text);
+    entity
 }
 
-/// World-API variant of `spawn_editor` for callers running in an
-/// exclusive system (`fn(&mut World)`). Same shape as `spawn_editor`
-/// but uses `world.spawn` / `world.entity_mut` so the entity ids and
-/// chrome are wired up immediately, not deferred to a command flush.
-pub fn spawn_editor_world(world: &mut World, initial_text: &str, rect: EditorRect) -> Entity {
-    let editor = world
-        .spawn((
-            Editor,
-            EditorStateComp(
-                EditorState::new(
-                    ropey::Rope::from_str(initial_text),
-                    Selection::cursor(0),
-                )
-                .with_indent_unit("    "),
-            ),
-            EditorHighlighter(Highlighter::new()),
-            LineRows::default(),
-            EditorScroll::default(),
-            TextDragAnchor::default(),
-            rect,
-            Transform::default(),
-            Visibility::default(),
-        ))
-        .id();
-    let bg = world
-        .spawn((
-            ChildOf(editor),
-            Sprite {
-                color: Color::srgb(0.14, 0.16, 0.19),
-                custom_size: Some(rect.size),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, 0.0, 0.0),
-        ))
-        .id();
-    let title_bar = world
-        .spawn((
-            ChildOf(editor),
-            Sprite {
-                color: Color::srgb(0.22, 0.24, 0.28),
-                custom_size: Some(Vec2::new(rect.size.x, TITLE_H)),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, 0.0, 0.1),
-        ))
-        .id();
-    let content_root = world
-        .spawn((
-            ChildOf(editor),
-            Transform::from_xyz(MARGIN, -TITLE_H, 0.2),
-            Visibility::default(),
-        ))
-        .id();
-    let caret = world
+/// Insert editor-specific components on an already-spawned pane and
+/// add the caret child under `content_root`. Shared between
+/// `spawn_editor_pane` and the registry restore path.
+fn populate_editor_pane(
+    world: &mut World,
+    entity: Entity,
+    content_root: Entity,
+    initial_text: &str,
+) {
+    world.entity_mut(entity).insert((
+        EditorStateComp(
+            EditorState::new(
+                ropey::Rope::from_str(initial_text),
+                Selection::cursor(0),
+            )
+            .with_indent_unit("    "),
+        ),
+        EditorHighlighter(Highlighter::new()),
+        LineRows::default(),
+        EditorScroll::default(),
+        TextDragAnchor::default(),
+    ));
+    let _caret = world
         .spawn((
             ChildOf(content_root),
+            EditorCaret(entity),
             Sprite {
                 color: Color::srgb(0.55, 0.85, 1.0),
                 custom_size: Some(Vec2::new(2.0, LINE_HEIGHT)),
@@ -514,30 +274,46 @@ pub fn spawn_editor_world(world: &mut World, initial_text: &str, rect: EditorRec
             Transform::from_xyz(0.0, 0.0, 1.0),
         ))
         .id();
-    let resize_handle = world
-        .spawn((
-            ChildOf(editor),
-            Sprite {
-                color: Color::srgb(0.40, 0.44, 0.50),
-                custom_size: Some(Vec2::splat(HANDLE_SIZE)),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(
-                rect.size.x - HANDLE_SIZE,
-                -(rect.size.y - HANDLE_SIZE),
-                0.3,
-            ),
-        ))
-        .id();
-    world.entity_mut(editor).insert(EditorChrome {
-        bg,
-        title_bar,
-        content_root,
-        caret,
-        resize_handle,
-    });
-    editor
+}
+
+/// Marker for the caret child of an editor pane. Holds the parent
+/// pane entity so the caret-sync system can join its position back to
+/// the pane's editor state without needing the pane chrome to track
+/// caret separately.
+#[derive(Component)]
+struct EditorCaret(Entity);
+
+/// Registry callback — invoked by pane-bevy on restore. The config
+/// blob is whatever `editor_snapshot` produced (currently `{ text,
+/// path }`).
+fn editor_spawn_from_config(world: &mut World, entity: Entity, content_root: Entity, config: &Value) {
+    let text = config
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    populate_editor_pane(world, entity, content_root, &text);
+    if let Some(path) = config.get("path").and_then(|v| v.as_str()) {
+        world
+            .entity_mut(entity)
+            .insert(EditorFilePath(PathBuf::from(path)));
+    }
+}
+
+fn editor_snapshot(world: &World, entity: Entity) -> Value {
+    let text = world
+        .get::<EditorStateComp>(entity)
+        .map(|s| s.0.doc.to_string())
+        .unwrap_or_default();
+    let mut obj = serde_json::Map::new();
+    obj.insert("text".into(), Value::String(text));
+    if let Some(path) = world.get::<EditorFilePath>(entity) {
+        obj.insert(
+            "path".into(),
+            Value::String(path.0.to_string_lossy().into()),
+        );
+    }
+    Value::Object(obj)
 }
 
 /// Build a ready-to-run App with a single editor loaded from `initial`.
@@ -556,41 +332,34 @@ pub fn build_app(initial: &str) -> App {
     let initial = initial.to_string();
     app.add_systems(
         Startup,
-        (move |mut commands: Commands, font: Res<EditorFont>| {
-            let e = spawn_editor(
-                &mut commands,
-                &font,
+        (move |world: &mut World| {
+            let initial = initial.clone();
+            let e = spawn_editor_pane(
+                world,
                 &initial,
-                EditorRect {
+                PaneRect {
                     pos: Vec2::new(40.0, 40.0),
                     size: Vec2::new(820.0, 500.0),
                     z: 1.0,
                 },
+                None,
             );
-            commands.insert_resource(FocusedEditor(Some(e)));
+            world.resource_mut::<FocusedPane>().0 = Some(e);
         })
             .after(setup_editor_font),
     );
     app
 }
 
-// ---------- Content-area geometry helpers ----------
+// ---------- Content-area geometry ----------
 
-/// Top-left / size of the editable content area relative to the editor
-/// entity's own origin (editor's origin = rect top-left). Scroll is
-/// applied separately to the content root's transform.
-fn content_area(rect: &EditorRect) -> (Vec2, Vec2) {
-    let origin = Vec2::new(MARGIN, -(TITLE_H + MARGIN));
-    let size = Vec2::new(
+fn content_area_size(rect: &PaneRect) -> Vec2 {
+    Vec2::new(
         (rect.size.x - 2.0 * MARGIN).max(0.0),
         (rect.size.y - TITLE_H - 2.0 * MARGIN).max(0.0),
-    );
-    (origin, size)
+    )
 }
 
-/// Maximum visible character columns on a single line given the
-/// editor's content width. `max(1)` so truncation never emits zero
-/// length (which would hide the caret too).
 fn max_cols(content_width: f32, cell_width: f32) -> usize {
     if cell_width <= 0.0 {
         return 0;
@@ -598,18 +367,10 @@ fn max_cols(content_width: f32, cell_width: f32) -> usize {
     ((content_width / cell_width).floor() as usize).max(1)
 }
 
-/// Return the byte offset of the `n`-th character in `s`, or `s.len()`
-/// if the string has fewer than `n` characters.
 fn byte_offset_for_col(s: &str, col: usize) -> usize {
     s.char_indices().nth(col).map(|(b, _)| b).unwrap_or(s.len())
 }
 
-/// Slice `line_text` to the visible character window `[start_col,
-/// start_col + max_cols)`. Returns `(byte_offset_in_line,
-/// rendered_text)` — the offset lets the highlighter paint the right
-/// spans for a horizontally-scrolled view. Characters outside the
-/// window never become TextSpans, so nothing spills past the editor's
-/// left or right edge.
 fn slice_visible_cols(line_text: &str, start_col: usize, max_cols: usize) -> (usize, &str) {
     if max_cols == 0 {
         return (line_text.len(), "");
@@ -632,19 +393,15 @@ fn update_highlight(mut editors: Query<(&EditorStateComp, &mut EditorHighlighter
     }
 }
 
-/// Nudge `scroll` so the caret at `(line, col)` sits inside the
-/// editor's content area. Called from the input path after edits or
-/// caret movement — NOT run as a Changed-filtered system, because
-/// that fires on mouse clicks too, which would clobber manual scrolls.
 fn ensure_caret_visible(
     state: &EditorState,
-    rect: &EditorRect,
+    rect: &PaneRect,
     scroll: &mut EditorScroll,
     cell_width: f32,
 ) {
     let head = state.selection.primary_range().head;
     let (line, col) = char_to_line_col(&state.doc, head);
-    let (_, content) = content_area(rect);
+    let content = content_area_size(rect);
     if content.x <= 0.0 || content.y <= 0.0 {
         return;
     }
@@ -671,19 +428,26 @@ fn ensure_caret_visible(
 fn sync_text(
     font: Res<EditorFont>,
     metrics: Res<EditorMetrics>,
-    mut editors: Query<(
-        &EditorStateComp,
-        &EditorRect,
-        &EditorChrome,
-        &EditorScroll,
-        &EditorHighlighter,
-        &mut LineRows,
-    )>,
+    mut editors: Query<
+        (
+            &EditorStateComp,
+            &PaneRect,
+            &PaneChrome,
+            &EditorScroll,
+            &EditorHighlighter,
+            &mut LineRows,
+            &PaneKindMarker,
+        ),
+        With<PaneTag>,
+    >,
     mut line_q: Query<&mut LineRender>,
     children_q: Query<&Children>,
     mut commands: Commands,
 ) {
-    for (state, rect, chrome, scroll, hl, mut pool) in &mut editors {
+    for (state, rect, chrome, scroll, hl, mut pool, kind) in &mut editors {
+        if kind.0 != PANE_KIND {
+            continue;
+        }
         sync_editor_lines(
             &state.0,
             rect,
@@ -702,8 +466,8 @@ fn sync_text(
 
 fn sync_editor_lines(
     state: &EditorState,
-    rect: &EditorRect,
-    chrome: &EditorChrome,
+    rect: &PaneRect,
+    chrome: &PaneChrome,
     scroll: EditorScroll,
     hl: &Highlighter,
     pool: &mut LineRows,
@@ -715,12 +479,11 @@ fn sync_editor_lines(
 ) {
     let rope = &state.doc;
     let effective = effective_line_count(rope);
-    let (_, content_size) = content_area(rect);
+    let content_size = content_area_size(rect);
     let (first, last) = viewport_line_range(content_size.y, scroll.y, effective);
     let cols = max_cols(content_size.x, metrics.cell_width);
     let scroll_cols = (scroll.x / metrics.cell_width).max(0.0) as usize;
 
-    // Despawn entities out of the doc or out of the viewport window.
     pool.0.retain(|&idx, entity| {
         let keep = idx < effective && idx >= first && idx <= last;
         if !keep {
@@ -858,96 +621,63 @@ fn viewport_line_range(
     let top = scroll.max(0.0);
     let bottom = (scroll + content_height).max(0.0);
     let first = (top / LINE_HEIGHT).floor().max(0.0) as usize;
-    // Line `i` occupies y ∈ [i*LH, (i+1)*LH). It's visible iff it
-    // starts strictly before `bottom`. `ceil(bottom/LH)` is the first
-    // line past the viewport; subtract one to get the last visible.
     let last_excl = (bottom / LINE_HEIGHT).ceil().max(0.0) as usize;
     let last = last_excl.saturating_sub(1).min(effective_lines - 1);
     (first, last)
 }
 
-/// Place each editor's root transform + resize/chrome sprites based on
-/// its `EditorRect`. Also syncs the content_root scroll offset and
-/// resize-handle position, which change when the editor is dragged or
-/// resized. Runs after state mutations so position is always current.
-fn position_root(
-    windows: Query<&Window>,
-    editors: Query<(&EditorRect, &EditorScroll, &EditorChrome), With<Editor>>,
+/// Apply scroll Y to the content_root transform. (X scroll is handled
+/// by per-line slicing inside sync_editor_lines.)
+fn sync_content_root(
+    editors: Query<(&EditorScroll, &PaneChrome, &PaneKindMarker), With<PaneTag>>,
     mut t_q: Query<&mut Transform>,
-    mut sprite_q: Query<&mut Sprite>,
-    parents: Query<Entity, With<Editor>>,
 ) {
-    let Ok(win) = windows.single() else { return };
-    let win_size = Vec2::new(win.width(), win.height());
-
-    for editor in &parents {
-        let Ok((rect, scroll, chrome)) = editors.get(editor) else {
+    for (scroll, chrome, kind) in &editors {
+        if kind.0 != PANE_KIND {
             continue;
-        };
-
-        if let Ok(mut t) = t_q.get_mut(editor) {
-            t.translation.x = rect.pos.x - win_size.x * 0.5;
-            t.translation.y = win_size.y * 0.5 - rect.pos.y;
-            t.translation.z = rect.z;
         }
-
-        // Background resizes with the editor.
-        if let Ok(mut s) = sprite_q.get_mut(chrome.bg) {
-            s.custom_size = Some(rect.size);
-        }
-        if let Ok(mut s) = sprite_q.get_mut(chrome.title_bar) {
-            s.custom_size = Some(Vec2::new(rect.size.x, TITLE_H));
-        }
-
-        // Content root sits below the title bar and pans with vertical
-        // scroll. Horizontal scroll is *not* applied here — we instead
-        // slice each rendered line to the visible column range, so
-        // lines always draw starting at `x = MARGIN` (no content ever
-        // extends past the editor's left edge).
         if let Ok(mut t) = t_q.get_mut(chrome.content_root) {
             t.translation.x = MARGIN;
             t.translation.y = -(TITLE_H + MARGIN) + scroll.y;
-        }
-
-        // Handle in the bottom-right, anchored to the chrome rect.
-        if let Ok(mut t) = t_q.get_mut(chrome.resize_handle) {
-            t.translation.x = rect.size.x - HANDLE_SIZE;
-            t.translation.y = -(rect.size.y - HANDLE_SIZE);
         }
     }
 }
 
 fn sync_caret(
     metrics: Res<EditorMetrics>,
-    editors: Query<(&EditorStateComp, &EditorRect, &EditorScroll, &EditorChrome)>,
+    editors: Query<
+        (&EditorStateComp, &PaneRect, &EditorScroll, &PaneKindMarker),
+        With<PaneTag>,
+    >,
+    carets: Query<(Entity, &EditorCaret)>,
     mut t_q: Query<&mut Transform>,
     mut vis_q: Query<&mut Visibility>,
 ) {
-    for (state, rect, scroll, chrome) in &editors {
+    for (caret_entity, parent) in &carets {
+        let Ok((state, rect, scroll, kind)) = editors.get(parent.0) else {
+            continue;
+        };
+        if kind.0 != PANE_KIND {
+            continue;
+        }
         let head = state.0.selection.primary_range().head;
         let (line, col) = char_to_line_col(&state.0.doc, head);
         let caret_x = caret_x_in_line(col, metrics.cell_width);
-        let (_, content) = content_area(rect);
+        let content = content_area_size(rect);
 
-        // Content-area-local position; Y is grid-aligned so the scroll
-        // applied to `content_root` already shifts the caret.
         let x = caret_x - scroll.x;
         let y = line as f32 * LINE_HEIGHT;
-
-        // Hide the caret when it would draw outside the content area —
-        // otherwise it renders over the title bar / past the resize
-        // handle / into neighbouring editors.
         let visible = x >= 0.0
             && x <= content.x
             && (line as f32 + 1.0) * LINE_HEIGHT > scroll.y
             && (line as f32) * LINE_HEIGHT < scroll.y + content.y;
 
-        if let Ok(mut t) = t_q.get_mut(chrome.caret) {
+        if let Ok(mut t) = t_q.get_mut(caret_entity) {
             t.translation.x = x;
             t.translation.y = -y;
             t.translation.z = 1.0;
         }
-        if let Ok(mut v) = vis_q.get_mut(chrome.caret) {
+        if let Ok(mut v) = vis_q.get_mut(caret_entity) {
             *v = if visible {
                 Visibility::Inherited
             } else {
@@ -957,12 +687,10 @@ fn sync_caret(
     }
 }
 
-/// Doc-local caret X for a character column on a monospace line.
 pub fn caret_x_in_line(col: usize, cell_width: f32) -> f32 {
     col as f32 * cell_width
 }
 
-/// Convert a rope char offset to (line_index, column_in_chars).
 pub fn char_to_line_col(doc: &ropey::Rope, char_idx: usize) -> (usize, usize) {
     let line = doc.char_to_line(char_idx);
     let line_start = doc.line_to_char(line);
@@ -971,16 +699,28 @@ pub fn char_to_line_col(doc: &ropey::Rope, char_idx: usize) -> (usize, usize) {
 
 fn sync_selection(
     metrics: Res<EditorMetrics>,
-    editors: Query<(Entity, &EditorStateComp, &EditorRect, &EditorScroll, &EditorChrome)>,
+    editors: Query<
+        (
+            Entity,
+            &EditorStateComp,
+            &PaneRect,
+            &EditorScroll,
+            &PaneChrome,
+            &PaneKindMarker,
+        ),
+        With<PaneTag>,
+    >,
     existing: Query<(Entity, &SelRect)>,
     mut commands: Commands,
 ) {
-    // Despawn all selection rects; we'll respawn the live ones below.
     for (entity, _) in &existing {
         commands.entity(entity).despawn();
     }
 
-    for (editor_entity, state, rect, scroll, chrome) in &editors {
+    for (editor_entity, state, rect, scroll, chrome, kind) in &editors {
+        if kind.0 != PANE_KIND {
+            continue;
+        }
         let range = state.0.selection.primary_range();
         let (from, to) = (range.from(), range.to());
         if from == to {
@@ -990,7 +730,7 @@ fn sync_selection(
         let (start_line, start_col) = char_to_line_col(&state.0.doc, from);
         let (end_line, end_col) = char_to_line_col(&state.0.doc, to);
 
-        let (_, content) = content_area(rect);
+        let content = content_area_size(rect);
         let rope = &state.0.doc;
         for line in start_line..=end_line {
             let line_chars = line_char_len(rope, line);
@@ -1000,7 +740,6 @@ fn sync_selection(
 
             let (x0_raw, x1_raw) = line_selection_span(lo, hi, metrics.cell_width);
             let extra = if ends_mid_doc { LINE_HEIGHT * 0.3 } else { 0.0 };
-            // Clip to the horizontally visible window.
             let x0 = (x0_raw - scroll.x).max(0.0);
             let x1 = (x1_raw + extra - scroll.x).min(content.x);
             if x1 <= x0 {
@@ -1025,13 +764,10 @@ fn sync_selection(
     }
 }
 
-/// X-range `[lo_col, hi_col]` in logical pixels on a monospace line.
 pub fn line_selection_span(lo_col: usize, hi_col: usize, cell_width: f32) -> (f32, f32) {
     (lo_col as f32 * cell_width, hi_col as f32 * cell_width)
 }
 
-/// Character length of a line excluding its trailing newline, or 0 for
-/// a past-EOF index.
 fn line_char_len(rope: &ropey::Rope, line: usize) -> usize {
     if line >= rope.len_lines() {
         return 0;
@@ -1050,18 +786,15 @@ fn line_char_len(rope: &ropey::Rope, line: usize) -> usize {
     }
 }
 
-/// Scroll the editor whose rect the pointer is over, in both axes. The
-/// Y max clamp prevents scrolling past EOF; the X max grows with the
-/// longest visible line. If the pointer is outside all editors, the
-/// event is dropped.
 fn handle_scroll(
     mut wheel: MessageReader<MouseWheel>,
     metrics: Res<EditorMetrics>,
     windows: Query<&Window>,
-    mut editors: Query<(Entity, &EditorRect, &EditorStateComp, &mut EditorScroll)>,
+    mut editors: Query<
+        (Entity, &PaneRect, &EditorStateComp, &mut EditorScroll, &PaneKindMarker),
+        With<PaneTag>,
+    >,
 ) {
-    // Accumulate X + Y deltas in pixels, converting notch-based mouse
-    // wheel events the same way for both axes.
     let mut dx_px = 0.0;
     let mut dy_px = 0.0;
     for ev in wheel.read() {
@@ -1078,21 +811,20 @@ fn handle_scroll(
     let Ok(win) = windows.single() else { return };
     let Some(pt) = win.cursor_position() else { return };
 
-    let target = topmost_editor_at(
-        pt,
-        &editors.iter().map(|(e, r, _, _)| (e, *r)).collect::<Vec<_>>(),
-    );
+    let candidates: Vec<(Entity, PaneRect)> = editors
+        .iter()
+        .filter(|(_, _, _, _, kind)| kind.0 == PANE_KIND)
+        .map(|(e, r, _, _, _)| (e, *r))
+        .collect();
+    let target = pane_bevy::topmost_pane_at(pt, &candidates);
     let Some(editor) = target else { return };
 
-    if let Ok((_, rect, state, mut scroll)) = editors.get_mut(editor) {
-        let (_, content_size) = content_area(rect);
+    if let Ok((_, rect, state, mut scroll, _)) = editors.get_mut(editor) {
+        let content_size = content_area_size(rect);
         let doc_height = state.0.doc.len_lines() as f32 * LINE_HEIGHT;
         let y_max = (doc_height - content_size.y).max(0.0);
-        // Natural-scroll convention: dragging content up (positive
-        // wheel Y) scrolls the viewport down. Same for X.
         scroll.y = (scroll.y - dy_px).clamp(0.0, y_max);
 
-        // Horizontal max = the widest line minus the visible width.
         let widest_cols = widest_line_cols(&state.0.doc);
         let doc_width = widest_cols as f32 * metrics.cell_width;
         let x_max = (doc_width - content_size.x).max(0.0);
@@ -1100,9 +832,6 @@ fn handle_scroll(
     }
 }
 
-/// Scan the rope for the longest line (character count, not bytes).
-/// Used only to clamp horizontal scroll — called on wheel events, not
-/// every frame.
 fn widest_line_cols(rope: &ropey::Rope) -> usize {
     let n = rope.len_lines();
     let mut widest = 0;
@@ -1115,22 +844,28 @@ fn widest_line_cols(rope: &ropey::Rope) -> usize {
     widest
 }
 
-/// Routes keyboard input to the `FocusedEditor`.
 fn handle_input(
     mut keys: MessageReader<KeyboardInput>,
     mods: Res<ButtonInput<KeyCode>>,
-    focused: Res<FocusedEditor>,
-    metrics: Res<EditorMetrics>,
-    mut editors: Query<(&mut EditorStateComp, &EditorRect, &mut EditorScroll)>,
+    focused: Res<FocusedPane>,
+    metrics: Option<Res<EditorMetrics>>,
+    mut editors: Query<
+        (&mut EditorStateComp, &PaneRect, &mut EditorScroll, &PaneKindMarker),
+        With<PaneTag>,
+    >,
 ) {
     let Some(target) = focused.0 else {
         keys.read().for_each(|_| {});
         return;
     };
-    let Ok((mut state_comp, rect, mut scroll)) = editors.get_mut(target) else {
+    let Ok((mut state_comp, rect, mut scroll, kind)) = editors.get_mut(target) else {
         keys.read().for_each(|_| {});
         return;
     };
+    if kind.0 != PANE_KIND {
+        keys.read().for_each(|_| {});
+        return;
+    }
     let state = &mut state_comp.0;
     let mut state_mutated = false;
 
@@ -1258,11 +993,12 @@ fn handle_input(
     }
 
     if state_mutated {
-        ensure_caret_visible(state, rect, &mut scroll, metrics.cell_width);
+        if let Some(metrics) = metrics {
+            ensure_caret_visible(state, rect, &mut scroll, metrics.cell_width);
+        }
     }
 }
 
-/// Pure hit-test: logical x (content-area-local) → character column.
 pub fn mouse_col_at_x(local_x: f32, cell_width: f32) -> usize {
     if cell_width <= 0.0 {
         return 0;
@@ -1271,8 +1007,6 @@ pub fn mouse_col_at_x(local_x: f32, cell_width: f32) -> usize {
     if col <= 0.0 { 0 } else { col as usize }
 }
 
-/// Resolve a line + column (in chars) to a rope char offset, clamped
-/// to the line's end-of-line char.
 pub fn char_from_line_col(state: &EditorState, line: usize, col: usize) -> usize {
     let n_lines = state.doc.len_lines().max(1);
     let last_line = n_lines - 1;
@@ -1282,195 +1016,96 @@ pub fn char_from_line_col(state: &EditorState, line: usize, col: usize) -> usize
     line_start + col.min(line_chars)
 }
 
-/// Which editor's chrome contains `pt`, ordered by `z` descending.
-/// Returns the topmost hit or `None`. Shared between scroll and mouse
-/// handling.
-fn topmost_editor_at(pt: Vec2, editors: &[(Entity, EditorRect)]) -> Option<Entity> {
-    let mut best: Option<(Entity, f32)> = None;
-    for &(e, r) in editors {
-        if pt.x >= r.pos.x
-            && pt.x <= r.pos.x + r.size.x
-            && pt.y >= r.pos.y
-            && pt.y <= r.pos.y + r.size.y
-        {
-            if best.map_or(true, |(_, z)| r.z > z) {
-                best = Some((e, r.z));
-            }
+// ---------- Content-area input (pane-bevy events) ----------
+
+/// React to `PaneContentPressed` for editor panes: place caret or
+/// extend selection from the previous anchor (shift held).
+fn handle_pane_content_press(
+    mut presses: MessageReader<PaneContentPressed>,
+    metrics: Option<Res<EditorMetrics>>,
+    mut editors: Query<
+        (
+            &mut EditorStateComp,
+            &EditorScroll,
+            &mut TextDragAnchor,
+            &PaneKindMarker,
+        ),
+        With<PaneTag>,
+    >,
+) {
+    let Some(metrics) = metrics else {
+        presses.read().for_each(|_| {});
+        return;
+    };
+    for ev in presses.read() {
+        let Ok((mut state_comp, scroll, mut drag, kind)) = editors.get_mut(ev.pane) else {
+            continue;
+        };
+        if kind.0 != PANE_KIND {
+            continue;
+        }
+        let state = &mut state_comp.0;
+        let local_with_scroll = ev.local_pt + Vec2::new(scroll.x, scroll.y);
+        let line = (local_with_scroll.y / LINE_HEIGHT).floor().max(0.0) as usize;
+        let col = mouse_col_at_x(local_with_scroll.x, metrics.cell_width);
+        let pos = char_from_line_col(state, line, col);
+        if ev.shift {
+            let anchor = state.selection.primary_range().anchor;
+            drag.0 = Some(anchor);
+            *state = apply_selection(state, anchor, pos);
+        } else {
+            drag.0 = Some(pos);
+            *state = apply_selection(state, pos, pos);
         }
     }
-    best.map(|(e, _)| e)
 }
 
-/// What part of an editor the pointer hit (pre-computed in window
-/// space). Used by `handle_mouse` to pick between drag / resize /
-/// text-select on click.
-#[derive(Copy, Clone)]
-enum Region {
-    TitleBar,
-    ResizeHandle,
-    Content,
-}
-
-fn region_at(pt: Vec2, rect: &EditorRect) -> Option<Region> {
-    if pt.x < rect.pos.x || pt.x > rect.pos.x + rect.size.x {
-        return None;
-    }
-    if pt.y < rect.pos.y || pt.y > rect.pos.y + rect.size.y {
-        return None;
-    }
-    // Resize handle wins at the bottom-right corner.
-    let handle_x0 = rect.pos.x + rect.size.x - HANDLE_SIZE;
-    let handle_y0 = rect.pos.y + rect.size.y - HANDLE_SIZE;
-    if pt.x >= handle_x0 && pt.y >= handle_y0 {
-        return Some(Region::ResizeHandle);
-    }
-    if pt.y < rect.pos.y + TITLE_H {
-        return Some(Region::TitleBar);
-    }
-    Some(Region::Content)
-}
-
-/// Convert a window-space point to content-area-local coords for the
-/// given editor, including both-axis scroll offsets.
-fn pt_to_content_local(pt: Vec2, rect: &EditorRect, scroll: EditorScroll) -> Vec2 {
-    let origin = rect.pos + Vec2::new(MARGIN, TITLE_H + MARGIN);
-    Vec2::new(pt.x - origin.x + scroll.x, pt.y - origin.y + scroll.y)
-}
-
-fn handle_mouse(
+/// Each frame while LMB is held, drag the head of any in-progress
+/// text selection. Cleared on release.
+fn handle_text_select_drag(
     windows: Query<&Window>,
     buttons: Res<ButtonInput<MouseButton>>,
-    mods: Res<ButtonInput<KeyCode>>,
-    mut consumed: ResMut<InputConsumed>,
-    mut mode: ResMut<EditorMouseMode>,
-    mut focused: ResMut<FocusedEditor>,
-    metrics: Res<EditorMetrics>,
-    mut editors: Query<(
-        Entity,
-        &mut EditorRect,
-        &mut EditorStateComp,
-        &EditorScroll,
-        &mut TextDragAnchor,
-    )>,
+    metrics: Option<Res<EditorMetrics>>,
+    mut editors: Query<
+        (
+            &mut EditorStateComp,
+            &PaneRect,
+            &EditorScroll,
+            &mut TextDragAnchor,
+            &PaneKindMarker,
+        ),
+        With<PaneTag>,
+    >,
 ) {
-    let Ok(window) = windows.single() else { return };
-    let Some(pt) = window.cursor_position() else { return };
-    let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
-
-    // Release always clears the mode, regardless of which button type
-    // started it.
+    let Some(metrics) = metrics else {
+        return;
+    };
     if buttons.just_released(MouseButton::Left) {
-        if let EditorMouseMode::TextSelect { editor } = *mode {
-            if let Ok((_, _, _, _, mut drag)) = editors.get_mut(editor) {
+        for (_, _, _, mut drag, kind) in &mut editors {
+            if kind.0 == PANE_KIND {
                 drag.0 = None;
             }
         }
-        *mode = EditorMouseMode::Idle;
-    }
-
-    if buttons.just_pressed(MouseButton::Left) && !consumed.0 {
-        // Hit-test from top-most editor.
-        let editor_rects: Vec<(Entity, EditorRect)> =
-            editors.iter().map(|(e, r, _, _, _)| (e, *r)).collect();
-        let Some(editor) = topmost_editor_at(pt, &editor_rects) else {
-            return;
-        };
-        focused.0 = Some(editor);
-        // Tell other input handlers (radial menu, host hit-testers) that
-        // this click is ours so they don't double-handle it.
-        consumed.0 = true;
-        bring_to_front(editor, &mut editors);
-
-        let rect = *editors.get(editor).unwrap().1;
-        match region_at(pt, &rect) {
-            Some(Region::TitleBar) => {
-                *mode = EditorMouseMode::WindowDrag {
-                    editor,
-                    grab_offset: pt - rect.pos,
-                };
-            }
-            Some(Region::ResizeHandle) => {
-                *mode = EditorMouseMode::WindowResize {
-                    editor,
-                    anchor_pos: rect.pos,
-                };
-            }
-            Some(Region::Content) => {
-                if let Ok((_, _, mut state_comp, scroll, mut drag)) = editors.get_mut(editor) {
-                    let state = &mut state_comp.0;
-                    let local = pt_to_content_local(pt, &rect, *scroll);
-                    let line = (local.y / LINE_HEIGHT).floor().max(0.0) as usize;
-                    let col = mouse_col_at_x(local.x, metrics.cell_width);
-                    let pos = char_from_line_col(state, line, col);
-                    if shift {
-                        let anchor = state.selection.primary_range().anchor;
-                        drag.0 = Some(anchor);
-                        *state = apply_selection(state, anchor, pos);
-                    } else {
-                        drag.0 = Some(pos);
-                        *state = apply_selection(state, pos, pos);
-                    }
-                    *mode = EditorMouseMode::TextSelect { editor };
-                }
-            }
-            None => {}
-        }
         return;
     }
-
     if !buttons.pressed(MouseButton::Left) {
         return;
     }
+    let Ok(window) = windows.single() else { return };
+    let Some(pt) = window.cursor_position() else { return };
 
-    match *mode {
-        EditorMouseMode::WindowDrag { editor, grab_offset } => {
-            if let Ok((_, mut rect, _, _, _)) = editors.get_mut(editor) {
-                rect.pos = pt - grab_offset;
-            }
+    for (mut state_comp, rect, scroll, drag, kind) in &mut editors {
+        if kind.0 != PANE_KIND {
+            continue;
         }
-        EditorMouseMode::WindowResize { editor, anchor_pos } => {
-            if let Ok((_, mut rect, _, _, _)) = editors.get_mut(editor) {
-                let raw = pt - anchor_pos;
-                rect.size = Vec2::new(raw.x.max(MIN_EDITOR_SIZE.x), raw.y.max(MIN_EDITOR_SIZE.y));
-            }
-        }
-        EditorMouseMode::TextSelect { editor } => {
-            if let Ok((_, rect, mut state_comp, scroll, drag)) = editors.get_mut(editor) {
-                let Some(anchor) = drag.0 else { return };
-                let state = &mut state_comp.0;
-                let local = pt_to_content_local(pt, &rect, *scroll);
-                let line = (local.y / LINE_HEIGHT).floor().max(0.0) as usize;
-                let col = mouse_col_at_x(local.x, metrics.cell_width);
-                let head = char_from_line_col(state, line, col);
-                let cur = state.selection.primary_range();
-                if cur.anchor != anchor || cur.head != head {
-                    *state = apply_selection(state, anchor, head);
-                }
-            }
-        }
-        EditorMouseMode::Idle => {}
-    }
-}
-
-/// Bump the editor's z above all other editors so subsequent z-sorts
-/// draw it on top. Called on focus.
-fn bring_to_front(
-    editor: Entity,
-    editors: &mut Query<(
-        Entity,
-        &mut EditorRect,
-        &mut EditorStateComp,
-        &EditorScroll,
-        &mut TextDragAnchor,
-    )>,
-) {
-    let max_z = editors
-        .iter()
-        .map(|(_, r, _, _, _)| r.z)
-        .fold(0.0_f32, f32::max);
-    if let Ok((_, mut rect, _, _, _)) = editors.get_mut(editor) {
-        if rect.z < max_z {
-            rect.z = max_z + 1.0;
+        let Some(anchor) = drag.0 else { continue };
+        let local = pane_bevy::pt_to_content_local(pt, rect) + Vec2::new(scroll.x, scroll.y);
+        let line = (local.y / LINE_HEIGHT).floor().max(0.0) as usize;
+        let col = mouse_col_at_x(local.x, metrics.cell_width);
+        let head = char_from_line_col(&state_comp.0, line, col);
+        let cur = state_comp.0.selection.primary_range();
+        if cur.anchor != anchor || cur.head != head {
+            state_comp.0 = apply_selection(&state_comp.0, anchor, head);
         }
     }
 }

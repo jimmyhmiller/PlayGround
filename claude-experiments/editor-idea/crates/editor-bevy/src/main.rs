@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use bevy::diagnostic::{DiagnosticsStore, FrameTimeDiagnosticsPlugin};
 use bevy::prelude::*;
-use editor_bevy::{build_app, setup_editor_font, spawn_editor, EditorFont, EditorRect};
+use editor_bevy::{build_app, setup_editor_font, spawn_editor_pane};
+use pane_bevy::PaneRect;
 
 const DEFAULT_DOC: &str = "fn main() {\n    println!(\"hello, editor\");\n}\n";
 
@@ -35,16 +36,16 @@ fn main() {
         "// second editor\nfn fib(n: u32) -> u32 {\n    if n < 2 { n } else { fib(n - 1) + fib(n - 2) }\n}\n";
     app.add_systems(
         Startup,
-        (|mut commands: Commands, font: Res<EditorFont>| {
-            spawn_editor(
-                &mut commands,
-                &font,
+        (|world: &mut World| {
+            spawn_editor_pane(
+                world,
                 SECOND_DOC,
-                EditorRect {
+                PaneRect {
                     pos: Vec2::new(120.0, 160.0),
                     size: Vec2::new(480.0, 320.0),
                     z: 2.0,
                 },
+                None,
             );
         })
             .after(setup_editor_font),

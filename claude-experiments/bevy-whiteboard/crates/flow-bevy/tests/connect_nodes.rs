@@ -14,7 +14,7 @@ use poster_ui::testing::{click_by_marker, simulate_canvas_click};
 fn world_pos_of_node(app: &App, node_name: &str) -> Vec2 {
     // Find the sim node by name, then the Bevy entity it maps to, then its Transform.
     let world = app.world();
-    let sim = &world.resource::<FlowSim>().sim;
+    let sim = &world.resource::<FlowSim>();
     let (nid, _) = sim
         .nodes
         .iter()
@@ -50,7 +50,7 @@ fn connect_two_newly_dropped_nodes() {
     // Both are in the sim now. Grab their latest names (suffixed by the
     // NodeCounter) and their world positions.
     let (gen_nm, sink_name) = {
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
         let gen_n = sim.nodes.values().filter(|n| n.name.starts_with("Gen_")).last().unwrap().name.clone();
         let sink_n = sim.nodes.values().filter(|n| n.name.starts_with("Sink_")).last().unwrap().name.clone();
         (gen_n, sink_n)
@@ -76,15 +76,15 @@ fn connect_two_newly_dropped_nodes() {
     // Verify the edge actually runs from generator to sink.
     let gen_id = {
         let world = app.world();
-        let sim = &world.resource::<FlowSim>().sim;
+        let sim = &world.resource::<FlowSim>();
         *sim.nodes.iter().find(|(_, n)| n.name == gen_nm).unwrap().0
     };
     let sink_id = {
         let world = app.world();
-        let sim = &world.resource::<FlowSim>().sim;
+        let sim = &world.resource::<FlowSim>();
         *sim.nodes.iter().find(|(_, n)| n.name == sink_name).unwrap().0
     };
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let matched = sim
         .edges
         .values()

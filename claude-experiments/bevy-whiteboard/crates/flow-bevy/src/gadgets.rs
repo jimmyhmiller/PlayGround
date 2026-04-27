@@ -21,6 +21,17 @@ use std::sync::Once;
 use bevy::prelude::*;
 use flow::{Expr, NodeId, Sim, Value};
 
+/// True if this node's class declares a `color` slot. Drives whether a
+/// node participates in data-palette tagging: gadgets that opt in (by
+/// declaring `color: Int = 0` in their DSL) get a slot value written
+/// here and a `NodeColors` entry; gadgets that don't (Router, LifeCell,
+/// etc.) stay untagged and let their own visual control the look.
+pub fn has_color_slot(sim: &Sim, id: NodeId) -> bool {
+    sim.nodes
+        .get(&id)
+        .map_or(false, |n| n.slots.contains_key("color"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Kind {
     #[default]
@@ -77,6 +88,20 @@ impl Kind {
         }
     }
 
+    /// ASCII fallback glyph for the bitmap-label atlas (which only
+    /// pre-rasterises printable ASCII). One uppercase initial.
+    pub fn glyph_ascii(self) -> char {
+        match self {
+            Kind::Generator => 'G',
+            Kind::Client => 'C',
+            Kind::BackoffClient => 'B',
+            Kind::Worker => 'W',
+            Kind::Router => 'R',
+            Kind::Queue => 'Q',
+            Kind::Sink => 'S',
+        }
+    }
+
     pub fn size(self) -> Vec2 {
         match self {
             Kind::Generator | Kind::Client | Kind::BackoffClient | Kind::Sink => Vec2::new(60.0, 60.0),
@@ -95,19 +120,20 @@ pub fn install_default_params(sim: &mut Sim) {
     sim.set_param("queue_cap",    Expr::int(64));
 }
 
-/// Spawn a gadget of the given kind tagged with a data-palette slot index.
-/// Every kind except [`Kind::Router`] stores `color = Int(slot)` in its sim
-/// slots so the router can filter by it. Routers are left untagged because
-/// they're the thing *doing* the matching — pinning them to a colour would
-/// just make them filter on it.
+/// Spawn a gadget of the given kind, writing the user-chosen palette
+/// slot index into its `color` slot iff the class's DSL declares one.
+/// Gadgets without a `color` slot (Router, LifeCell, etc.) stay
+/// untagged — they're either matchers (Router filters *by* colour, so
+/// pinning one to a colour would just narrow what it routes) or they
+/// own their own visual (LifeCell paints itself from `alive`).
 pub fn spawn(sim: &mut Sim, kind: Kind, name: &str, slot: usize) -> NodeId {
     ensure_gadget_classes_registered(sim);
     let class = gadget_class_name(kind);
     let id = sim
         .instantiate(class, name)
         .unwrap_or_else(|e| panic!("instantiate gadget `{}`: {}", class, e));
-    if !matches!(kind, Kind::Router) {
-        if let Some(node) = sim.nodes.get_mut(&id) {
+    if let Some(node) = sim.nodes.get_mut(&id) {
+        if node.slots.contains_key("color") {
             node.slots.insert("color".into(), Value::Int(slot as i64));
         }
     }

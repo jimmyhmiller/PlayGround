@@ -24,7 +24,9 @@ use bevy::sprite::Anchor;
 use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 use bevy::text::LineHeight;
 
-use crate::projects::{InputConsumed, PendingActions, Projects, Sidebar};
+use pane_bevy::{InputConsumed, PaneRegistry};
+
+use crate::projects::{NewPaneRequest, PendingActions, Projects, Sidebar};
 use crate::MonoFont;
 
 const RADIAL_Z: f32 = 600.0;
@@ -49,31 +51,31 @@ const COLOR_LABEL: Color = Color::srgb(0.84, 0.86, 0.90);
 const COLOR_LABEL_HOVER: Color = Color::srgb(0.97, 0.98, 1.0);
 const COLOR_ICON: Color = Color::srgb(0.94, 0.95, 0.97);
 
-#[derive(Copy, Clone, Debug)]
-pub enum RadialAction {
-    NewTerminal,
-    NewEditor,
-}
-
-#[derive(Copy, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct RadialItem {
     pub icon: &'static str,
     pub label: &'static str,
-    pub action: RadialAction,
+    /// Pane kind to spawn when this item is picked.
+    pub kind: &'static str,
 }
 
-const RADIAL_ITEMS: &[RadialItem] = &[
-    RadialItem {
-        icon: ">_",
-        label: "Terminal",
-        action: RadialAction::NewTerminal,
-    },
-    RadialItem {
-        icon: "{}",
-        label: "Editor",
-        action: RadialAction::NewEditor,
-    },
-];
+/// Snapshot the registry's radial-eligible kinds in a stable order
+/// (alphabetical by kind id) so item indices stay consistent for the
+/// duration of one open menu.
+fn collect_radial_items(registry: &PaneRegistry) -> Vec<RadialItem> {
+    let mut items: Vec<RadialItem> = registry
+        .iter()
+        .filter_map(|spec| {
+            spec.radial_icon.map(|icon| RadialItem {
+                icon,
+                label: spec.display_name,
+                kind: spec.kind,
+            })
+        })
+        .collect();
+    items.sort_by_key(|i| i.kind);
+    items
+}
 
 #[derive(Resource, Default)]
 pub struct RadialMenu {
@@ -81,8 +83,16 @@ pub struct RadialMenu {
     pub center: Option<Vec2>,
     /// Currently-hovered wedge index (None = in dead-zone or off-menu).
     pub hovered: Option<usize>,
-    /// Item count baked at open time — also drives wedge angular layout.
-    pub item_count: usize,
+    /// Items snapshotted at open time. Their indices stay consistent
+    /// for the lifetime of one open menu, even if the registry changes
+    /// (e.g. a new pane plugin is added).
+    pub items: Vec<RadialItem>,
+}
+
+impl RadialMenu {
+    fn item_count(&self) -> usize {
+        self.items.len()
+    }
 }
 
 #[derive(Component)]
@@ -152,13 +162,13 @@ fn radial_open_close(
     mut menu: ResMut<RadialMenu>,
     mut consumed: ResMut<InputConsumed>,
     projects: Res<Projects>,
+    registry: Res<PaneRegistry>,
     mut pending: ResMut<PendingActions>,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
 
-    // Esc closes (don't dispatch).
     let mut esc = false;
     for ev in keys.read() {
         if ev.state.is_pressed() && matches!(ev.key_code, KeyCode::Escape) {
@@ -168,30 +178,30 @@ fn radial_open_close(
     if esc && menu.center.is_some() {
         menu.center = None;
         menu.hovered = None;
+        menu.items.clear();
         return;
     }
 
-    // Right-click opens / repositions on the canvas side.
     if buttons.just_pressed(MouseButton::Right) {
         if let Some(pt) = window.cursor_position()
             && pt.x >= sidebar.width
         {
             menu.center = Some(pt);
-            menu.item_count = RADIAL_ITEMS.len();
+            menu.items = collect_radial_items(&registry);
             menu.hovered = None;
         }
         return;
     }
 
-    // Left-click on hovered wedge dispatches; otherwise just closes.
     if menu.center.is_some() && buttons.just_pressed(MouseButton::Left) {
-        if let Some(idx) = menu.hovered
-            && let Some(item) = RADIAL_ITEMS.get(idx)
-        {
-            dispatch_action(item.action, menu.center.unwrap(), &projects, &mut pending);
+        if let Some(idx) = menu.hovered {
+            if let Some(item) = menu.items.get(idx).cloned() {
+                dispatch_pick(&item, menu.center.unwrap(), &projects, &mut pending);
+            }
         }
         menu.center = None;
         menu.hovered = None;
+        menu.items.clear();
         consumed.0 = true;
     }
 }
@@ -200,15 +210,16 @@ fn radial_hover(windows: Query<&Window>, mut menu: ResMut<RadialMenu>) {
     let Some(center) = menu.center else { return };
     let Ok(window) = windows.single() else { return };
     let Some(pt) = window.cursor_position() else { return };
-    let local = pt - center; // window y-down — matches hit_test convention
-    let new_hover = hit_test(local, menu.item_count);
+    let local = pt - center;
+    let n = menu.item_count();
+    let new_hover = hit_test(local, n);
     if menu.hovered != new_hover {
         menu.hovered = new_hover;
     }
 }
 
-fn dispatch_action(
-    action: RadialAction,
+fn dispatch_pick(
+    item: &RadialItem,
     center: Vec2,
     projects: &Projects,
     pending: &mut PendingActions,
@@ -216,16 +227,13 @@ fn dispatch_action(
     let Some(active) = projects.active else {
         return;
     };
-    match action {
-        RadialAction::NewTerminal => {
-            let origin = Vec2::new(center.x - 24.0, center.y - 10.0);
-            pending.new_terminals.push((active, Some(origin)));
-        }
-        RadialAction::NewEditor => {
-            let origin = Vec2::new(center.x - 24.0, center.y - 10.0);
-            pending.new_editors.push((active, Some(origin)));
-        }
-    }
+    let origin = Vec2::new(center.x - 24.0, center.y - 10.0);
+    pending.new_panes.push(NewPaneRequest {
+        kind: item.kind,
+        project_id: active,
+        origin: Some(origin),
+        config: serde_json::Value::Null,
+    });
 }
 
 // ---------- Render ----------
@@ -259,7 +267,7 @@ fn radial_render(
     let signature_changed = last.open != want_open
         || last.hovered != menu.hovered
         || last.center != menu.center
-        || last.item_count != menu.item_count;
+        || last.item_count != menu.item_count();
     if !signature_changed && !(want_open && !already_open) {
         return;
     }
@@ -270,7 +278,7 @@ fn radial_render(
     last.open = want_open;
     last.hovered = menu.hovered;
     last.center = menu.center;
-    last.item_count = menu.item_count;
+    last.item_count = menu.item_count();
 
     let Some(center) = menu.center else {
         return;
@@ -289,11 +297,11 @@ fn radial_render(
         Transform::from_xyz(-win_w * 0.5, win_h * 0.5, RADIAL_Z - 0.5),
     ));
 
-    let n = menu.item_count.max(1);
+    let n = menu.item_count().max(1);
     let half_width = wedge_half_width(n);
 
     // Wedges + their labels.
-    for (i, item) in RADIAL_ITEMS.iter().take(n).enumerate() {
+    for (i, item) in menu.items.iter().take(n).enumerate() {
         let center_angle = wedge_center_angle(i, n);
         // World rotation: window-y-down angle → world-y-up angle is just
         // its negation. We rotate the unit-aligned wedge mesh by this.

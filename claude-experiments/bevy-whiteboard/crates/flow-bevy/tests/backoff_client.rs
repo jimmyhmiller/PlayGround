@@ -15,7 +15,7 @@ use flow_bevy::bridge::FlowSim;
 use flow_bevy::gadgets::Kind;
 
 fn slot_int(app: &bevy::prelude::App, nid: flow::NodeId, key: &str) -> i64 {
-    match app.world().resource::<FlowSim>().sim.nodes[&nid].slots.get(key) {
+    match app.world().resource::<FlowSim>().nodes[&nid].slots.get(key) {
         Some(Value::Int(i)) => *i,
         _ => 0,
     }
@@ -24,7 +24,6 @@ fn slot_int(app: &bevy::prelude::App, nid: flow::NodeId, key: &str) -> i64 {
 fn set_slot_int(app: &mut bevy::prelude::App, nid: flow::NodeId, key: &str, v: i64) {
     app.world_mut()
         .resource_mut::<FlowSim>()
-        .sim
         .nodes
         .get_mut(&nid)
         .unwrap()
@@ -99,7 +98,7 @@ fn backoff_client_rtt_honours_worker_service_ns() {
     for t_ns in [100_000_000u64, 250_000_000, 490_000_000] {
         // Each iteration advances to an absolute sim time. Compute the
         // delta from now so `advance_sim_ns` stays monotonic.
-        let now = app.world().resource::<FlowSim>().sim.now_ns;
+        let now = app.world().resource::<FlowSim>().now_ns;
         if t_ns > now {
             advance_sim_ns(&mut app, t_ns - now);
         }

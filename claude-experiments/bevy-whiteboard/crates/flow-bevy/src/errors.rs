@@ -25,7 +25,6 @@ use poster_ui::{Bold, Mono, Theme};
 
 use crate::bridge::{FlowNodeRef, NewEvents};
 use crate::examples::LoadExample;
-use crate::nodes::NodeKind;
 
 pub struct ErrorsPlugin;
 impl Plugin for ErrorsPlugin {
@@ -204,11 +203,11 @@ struct NodeErrorBadge {
 fn spawn_node_badges(
     mut commands: Commands,
     theme: Res<Theme>,
-    newly_added: Query<(Entity, &FlowNodeRef, &NodeKind), Added<FlowNodeRef>>,
+    newly_added: Query<(Entity, &FlowNodeRef, &crate::nodes::BodyShape), Added<FlowNodeRef>>,
 ) {
-    use crate::nodes::{body_shape, hit_size};
-    for (entity, fid, kind) in &newly_added {
-        let hsize = hit_size(&body_shape(kind.0));
+    use crate::nodes::hit_size;
+    for (entity, fid, shape) in &newly_added {
+        let hsize = hit_size(shape);
         // Slightly above & outside the top-right corner so the text
         // reads clearly against the canvas rather than the node fill.
         let x = hsize.x * 0.5 + 4.0;

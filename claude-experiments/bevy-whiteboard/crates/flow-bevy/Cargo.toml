@@ -5,12 +5,40 @@ edition = "2024"
 default-run = "flow-bevy"
 
 [dependencies]
-bevy = { version = "0.18", features = ["default_font"] }
+arc-swap = "1"
+bevy = { version = "0.18", features = ["default_font", "bevy_dev_tools"] }
+bevy_image_font = "0.11"
 flow = { path = "../flow" }
 poster-ui = { path = "../poster-ui" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Glyph rasterization for the in-tree `glyph_atlas` module. Already a
+# transitive dep via `bevy_text` / `cosmic-text`; declared explicitly
+# so we can call it directly from the atlas + the text-rendering
+# bench. Vendored from editor-idea's terminal atlas.
+swash = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# CoreText for the system glyph cascade — when the primary font is
+# missing a codepoint (geometric / box-drawing / pictograph chars
+# common in node glyphs), ask the OS which font owns it and load
+# those bytes. Real terminals (Terminal.app, kitty) use the same
+# pattern. Vendored alongside `glyph_atlas`.
+core-text = "21"
+core-foundation = "0.10"
 
 [dev-dependencies]
 poster-ui = { path = "../poster-ui", features = ["testing"] }
 proptest = "1"
+
+# Build with `--features trace` to enable Bevy's tracing spans + a
+# Chrome-trace JSON dump (loadable in https://ui.perfetto.dev). Off
+# by default because tracing adds per-system overhead we don't want
+# to pay in normal release runs.
+#
+# `bevy/debug` is required so the trace spans carry real system /
+# entity names; without it everything reads
+# "<Enable the debug feature to see the name>".
+[features]
+default = []
+trace = ["bevy/trace", "bevy/trace_chrome", "bevy/debug"]

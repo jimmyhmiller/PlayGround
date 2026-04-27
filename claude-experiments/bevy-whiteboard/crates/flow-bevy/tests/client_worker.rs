@@ -17,7 +17,7 @@ use flow_bevy::tool::Tool;
 use poster_ui::testing::{click_by_marker, simulate_canvas_click};
 
 fn latest_of_kind(app: &App, kind: Kind) -> flow::NodeId {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let prefix = format!("{}_", kind.label());
     sim.nodes
         .iter()
@@ -60,7 +60,7 @@ fn client_to_worker_does_not_panic() {
 
     // Client tracks `completed` responses. With auto-wired return path
     // it should be > 0.
-    let completed = match &app.world().resource::<FlowSim>().sim.nodes[&client].slots["completed"] {
+    let completed = match &app.world().resource::<FlowSim>().nodes[&client].slots["completed"] {
         Value::Int(i) => *i,
         _ => 0,
     };
@@ -92,16 +92,16 @@ fn worker_waits_service_ns_before_responding() {
     {
         let world = app.world_mut();
         let mut flow = world.resource_mut::<FlowSim>();
-        flow.sim.nodes.get_mut(&worker).unwrap().slots
+        flow.nodes.get_mut(&worker).unwrap().slots
             .insert("service_ns".into(), flow::Value::Int(200_000_000));
-        flow.sim.nodes.get_mut(&client).unwrap().slots
+        flow.nodes.get_mut(&client).unwrap().slots
             .insert("period_ns".into(), flow::Value::Int(10_000_000));
     }
 
     // t = 50ms: well before service_ns, so nothing should have
     // completed yet.
     advance_sim_ns(&mut app, 50_000_000);
-    let completed_early = match &app.world().resource::<FlowSim>().sim.nodes[&client].slots["completed"] {
+    let completed_early = match &app.world().resource::<FlowSim>().nodes[&client].slots["completed"] {
         flow::Value::Int(i) => *i,
         _ => -1,
     };
@@ -114,7 +114,7 @@ fn worker_waits_service_ns_before_responding() {
     // t = 500ms: comfortably past service_ns, at least one resp should
     // have made it back.
     advance_sim_ns(&mut app, 450_000_000);
-    let completed_late = match &app.world().resource::<FlowSim>().sim.nodes[&client].slots["completed"] {
+    let completed_late = match &app.world().resource::<FlowSim>().nodes[&client].slots["completed"] {
         flow::Value::Int(i) => *i,
         _ => -1,
     };

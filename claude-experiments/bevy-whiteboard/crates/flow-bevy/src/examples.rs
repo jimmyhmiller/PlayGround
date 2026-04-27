@@ -12,11 +12,13 @@
 use bevy::prelude::*;
 use flow::{NodeId, Value};
 
-use crate::bridge::{EntityMaps, FlowEdgeRef, FlowNodeRef, FlowSim};
+use crate::bitmap_label::AtlasMetrics;
+use crate::bridge::{EntityMaps, FlowEdgeRef, FlowNodeRef};
 use crate::edges::HiddenEdges;
 use crate::gadgets::{self, Kind, spawn as spawn_gadget};
 use crate::nodes::{NodeAssetCache, NodeCounter, spawn_node_entity};
 use crate::probes::Probe;
+use crate::sim_driver::{SimCommand, SimDriverRes};
 use crate::theme::Theme;
 use crate::tool::NodeColors;
 
@@ -124,13 +126,14 @@ fn handle_load_example(
     mut cache: ResMut<NodeAssetCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    mut flow: ResMut<FlowSim>,
+    mut driver: ResMut<SimDriverRes>,
     mut maps: ResMut<EntityMaps>,
     mut counter: ResMut<NodeCounter>,
     mut node_colors: ResMut<NodeColors>,
     mut hidden: ResMut<HiddenEdges>,
     mut timeline: ResMut<crate::edges::VisualTimelineRes>,
     theme: Res<Theme>,
+    metrics: Res<AtlasMetrics>,
     nodes_q: Query<Entity, With<FlowNodeRef>>,
     edges_q: Query<Entity, With<FlowEdgeRef>>,
     probes_q: Query<Entity, With<Probe>>,
@@ -146,10 +149,11 @@ fn handle_load_example(
     // re-installed because tests and examples rely on them (emit_period,
     // service_mean, …).
     let seed = 1;
-    let mut new_sim = flow::Sim::new(seed);
-    gadgets::install_default_params(&mut new_sim);
-    flow.sim = new_sim;
-    flow.consumed_log_index = 0;
+    driver.0.with_sim_mut(move |sim| {
+        let mut new_sim = flow::Sim::new(seed);
+        gadgets::install_default_params(&mut new_sim);
+        *sim = new_sim;
+    });
 
     // Reset the visual timeline: drop any in-flight visual packets
     // (their entities were just despawned above) and clear the
@@ -172,12 +176,13 @@ fn handle_load_example(
         cache: &mut cache,
         meshes: &mut meshes,
         materials: &mut materials,
-        flow: &mut flow,
+        driver: &mut driver,
         maps: &mut maps,
         counter: &mut counter,
         node_colors: &mut node_colors,
         hidden: &mut hidden,
         theme: &theme,
+        metrics: &metrics,
     };
     match example {
         Example::ThreeLaneFanout    => build_three_lane(&mut ctx),
@@ -198,12 +203,13 @@ struct BuildCtx<'a, 'w, 's> {
     cache: &'a mut NodeAssetCache,
     meshes: &'a mut Assets<Mesh>,
     materials: &'a mut Assets<ColorMaterial>,
-    flow: &'a mut FlowSim,
+    driver: &'a mut SimDriverRes,
     maps: &'a mut EntityMaps,
     counter: &'a mut NodeCounter,
     node_colors: &'a mut NodeColors,
     hidden: &'a mut HiddenEdges,
     theme: &'a Theme,
+    metrics: &'a AtlasMetrics,
 }
 
 impl BuildCtx<'_, '_, '_> {
@@ -213,7 +219,14 @@ impl BuildCtx<'_, '_, '_> {
     fn place(&mut self, kind: Kind, slot: usize, pos: Vec2) -> NodeId {
         self.counter.0 += 1;
         let name = format!("{}_{}", kind.label(), self.counter.0);
-        let fid = spawn_gadget(&mut self.flow.sim, kind, &name, slot);
+        let name_for_sim = name.clone();
+        // `with_sim_mut` returns the freshly-allocated NodeId so we
+        // can map it to the entity below in this same call.
+        let (fid, has_color) = self.driver.0.with_sim_mut(move |sim| {
+            let fid = spawn_gadget(sim, kind, &name_for_sim, slot);
+            let has_color = crate::gadgets::has_color_slot(sim, fid);
+            (fid, has_color)
+        });
         spawn_node_entity(
             self.commands,
             self.cache,
@@ -221,13 +234,16 @@ impl BuildCtx<'_, '_, '_> {
             self.materials,
             self.maps,
             self.theme,
+            self.metrics,
             fid,
             kind,
             None,
+            false,
+            has_color,
             name,
             pos,
         );
-        if !matches!(kind, Kind::Router) {
+        if has_color {
             self.node_colors.0.insert(fid, self.theme.data[slot]);
         }
         fid
@@ -239,7 +255,7 @@ impl BuildCtx<'_, '_, '_> {
     /// uniformly with manual drawing.
     fn wire(&mut self, from: NodeId, fk: Kind, to: NodeId, tk: Kind) {
         crate::edges::wire_flow_edge(
-            &mut self.flow.sim,
+            self.driver,
             self.maps,
             self.hidden,
             self.commands,
@@ -251,9 +267,12 @@ impl BuildCtx<'_, '_, '_> {
     /// Overwrite a slot on a sim node. Used to tune rates / service
     /// times from their gadget defaults.
     fn set_slot(&mut self, nid: NodeId, slot: &str, value: Value) {
-        if let Some(n) = self.flow.sim.nodes.get_mut(&nid) {
-            n.slots.insert(slot.into(), value);
-        }
+        let slot_owned = slot.to_string();
+        self.driver.0.send_command(SimCommand::new(move |sim| {
+            if let Some(n) = sim.nodes.get_mut(&nid) {
+                n.slots.insert(slot_owned, value);
+            }
+        }));
     }
 }
 

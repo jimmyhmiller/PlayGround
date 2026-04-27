@@ -21,7 +21,7 @@ fn chain_has_pull_wiring() {
     let mut app = make_app();
     let chain = build_pull_chain(&mut app);
 
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let worker_node = &sim.nodes[&chain.worker];
     assert_eq!(
         worker_node.slots["upstream"],
@@ -46,15 +46,15 @@ fn queue_holds_packets_when_worker_is_busy() {
     let chain = build_pull_chain(&mut app);
 
     let mut flow = app.world_mut().resource_mut::<FlowSim>();
-    flow.sim.nodes.get_mut(&chain.generator).unwrap()
+    flow.nodes.get_mut(&chain.generator).unwrap()
         .slots.insert("period_ns".into(), Value::Int(100_000_000));    // 10/s
-    flow.sim.nodes.get_mut(&chain.worker).unwrap()
+    flow.nodes.get_mut(&chain.worker).unwrap()
         .slots.insert("service_ns".into(), Value::Int(2_000_000_000)); // 0.5/s
     drop(flow);
 
     advance_sim_ns(&mut app, 3_000_000_000);
 
-    let fill = match &app.world().resource::<FlowSim>().sim.nodes[&chain.queue].slots["len"] {
+    let fill = match &app.world().resource::<FlowSim>().nodes[&chain.queue].slots["len"] {
         Value::Int(i) => *i as usize,
         _ => 0,
     };
@@ -73,15 +73,15 @@ fn sink_absorbs_at_worker_rate_not_generator_rate() {
     let chain = build_pull_chain(&mut app);
 
     let mut flow = app.world_mut().resource_mut::<FlowSim>();
-    flow.sim.nodes.get_mut(&chain.generator).unwrap()
+    flow.nodes.get_mut(&chain.generator).unwrap()
         .slots.insert("period_ns".into(), Value::Int(100_000_000));  // 10/s
-    flow.sim.nodes.get_mut(&chain.worker).unwrap()
+    flow.nodes.get_mut(&chain.worker).unwrap()
         .slots.insert("service_ns".into(), Value::Int(250_000_000)); // 4/s
     drop(flow);
 
     advance_sim_ns(&mut app, 3_000_000_000);
 
-    let absorbed = match &app.world().resource::<FlowSim>().sim.nodes[&chain.sink].slots["count"] {
+    let absorbed = match &app.world().resource::<FlowSim>().nodes[&chain.sink].slots["count"] {
         Value::Int(i) => *i,
         _ => 0,
     };
@@ -101,15 +101,15 @@ fn pull_survives_queue_emptying() {
     let chain = build_pull_chain(&mut app);
 
     let mut flow = app.world_mut().resource_mut::<FlowSim>();
-    flow.sim.nodes.get_mut(&chain.generator).unwrap()
+    flow.nodes.get_mut(&chain.generator).unwrap()
         .slots.insert("period_ns".into(), Value::Int(2_000_000_000));
-    flow.sim.nodes.get_mut(&chain.worker).unwrap()
+    flow.nodes.get_mut(&chain.worker).unwrap()
         .slots.insert("service_ns".into(), Value::Int(10_000_000));
     drop(flow);
 
     advance_sim_ns(&mut app, 6_000_000_000);
 
-    let absorbed = match &app.world().resource::<FlowSim>().sim.nodes[&chain.sink].slots["count"] {
+    let absorbed = match &app.world().resource::<FlowSim>().nodes[&chain.sink].slots["count"] {
         Value::Int(i) => *i,
         _ => 0,
     };

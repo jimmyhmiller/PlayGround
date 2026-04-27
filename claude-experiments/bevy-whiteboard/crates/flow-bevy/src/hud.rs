@@ -9,8 +9,9 @@ use poster_ui::{
     hud_speed_chip, hud_step_cell, hud_text_cell, spawn_hud_bar,
 };
 
-use crate::bridge::{FlowSim, SimClock};
+use crate::bridge::SimClock;
 use crate::edges::VisualTimelineRes;
+use crate::sim_driver::{SimCommand, SimDriverRes, SimSnapshotRes};
 
 pub struct HudPlugin;
 impl Plugin for HudPlugin {
@@ -108,11 +109,11 @@ fn spawn_hud(mut commands: Commands, theme: Res<Theme>, clock: Res<SimClock>) {
 // ────────────────────────────────────────────────────────────
 
 fn update_time_readout(
-    flow: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     mut q: Query<&mut Text, With<HudTimeText>>,
 ) {
     let Ok(mut text) = q.single_mut() else { return };
-    let t_ms = flow.sim.now_ns as f64 / 1_000_000.0;
+    let t_ms = snapshot.0.now_ns as f64 / 1_000_000.0;
     let new = format!("{:.3} ms", t_ms);
     if text.0 != new { text.0 = new; }
 }
@@ -135,17 +136,17 @@ fn update_vis_readout(
 }
 
 fn update_counts(
-    flow: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     mut nodes: Query<&mut Text, (With<HudNodeCount>, Without<HudEdgeCount>, Without<HudErrorCount>)>,
     mut edges: Query<&mut Text, (With<HudEdgeCount>, Without<HudNodeCount>, Without<HudErrorCount>)>,
     mut errors: Query<&mut Text, (With<HudErrorCount>, Without<HudNodeCount>, Without<HudEdgeCount>)>,
 ) {
-    let n = format!("{} nodes", flow.sim.nodes.len());
-    let e = format!("{} edges", flow.sim.edges.len());
+    let n = format!("{} nodes", snapshot.0.nodes.len());
+    let e = format!("{} edges", snapshot.0.edges.len());
     // Total error count — sum across all kinds. Lets the user notice
     // a new error happened at a glance; clicking through to the
     // event log (future) would show which kinds and where.
-    let err_total: u64 = flow.sim.error_counts.values().sum();
+    let err_total: u64 = snapshot.0.error_counts.values().sum();
     let err = format!("{} errors", err_total);
     for mut t in nodes.iter_mut() { if t.0 != n { t.0 = n.clone(); } }
     for mut t in edges.iter_mut() { if t.0 != e { t.0 = e.clone(); } }
@@ -165,11 +166,11 @@ fn handle_play_button(
 
 fn handle_step_button(
     q: Query<&Interaction, (Changed<Interaction>, With<HudStepBtn>)>,
-    mut flow: ResMut<FlowSim>,
+    mut driver: ResMut<SimDriverRes>,
 ) {
     for i in q.iter() {
         if *i == Interaction::Pressed {
-            crate::palette::step_to_visible(&mut flow.sim);
+            driver.0.send_command(SimCommand::new(|sim| crate::palette::step_to_visible(sim)));
         }
     }
 }

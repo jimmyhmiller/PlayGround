@@ -41,7 +41,7 @@ fn drop_gadget(app: &mut App, kind: Kind, slot: usize, name: &str) -> NodeId {
     let world = app.world_mut();
     let data_color = world.resource::<Theme>().data[slot];
     let mut flow = world.resource_mut::<FlowSim>();
-    let id = spawn_gadget(&mut flow.sim, kind, name, slot);
+    let id = spawn_gadget(&mut *flow, kind, name, slot);
     drop(flow);
     world.resource_mut::<NodeCounter>().0 += 1;
     if !matches!(kind, Kind::Router) {
@@ -61,7 +61,7 @@ fn wire(app: &mut App, from: NodeId, fk: Kind, to: NodeId, tk: Kind) {
     {
         let (mut commands, mut flow, mut maps, mut hidden) = sys_state.get_mut(world);
         wire_flow_edge(
-            &mut flow.sim,
+            &mut *flow,
             &mut maps,
             &mut hidden,
             &mut commands,
@@ -75,8 +75,8 @@ fn wire(app: &mut App, from: NodeId, fk: Kind, to: NodeId, tk: Kind) {
 fn advance_sim_ns(app: &mut App, duration_ns: u64) {
     let world = app.world_mut();
     let mut flow = world.resource_mut::<FlowSim>();
-    let target = flow.sim.now_ns + duration_ns;
-    flow.sim.run_until(target);
+    let target = flow.now_ns + duration_ns;
+    flow.run_until(target);
 }
 
 /// Quiesce all clients (by name prefix) and iteratively drain the
@@ -85,18 +85,18 @@ fn advance_sim_ns(app: &mut App, duration_ns: u64) {
 fn quiesce_and_drain(app: &mut App) {
     let world = app.world_mut();
     let mut flow = world.resource_mut::<FlowSim>();
-    let client_ids: Vec<NodeId> = flow.sim.nodes.iter()
+    let client_ids: Vec<NodeId> = flow.nodes.iter()
         .filter(|(_, n)| n.name.starts_with("Client_"))
         .map(|(id, _)| *id)
         .collect();
     for c in client_ids {
-        flow.sim.nodes.get_mut(&c).unwrap().slots
+        flow.nodes.get_mut(&c).unwrap().slots
             .insert("period_ns".into(), Value::Int(i64::MAX / 4));
     }
     for _ in 0..1000 {
-        let Some(next) = flow.sim.next_event_time_ns() else { break; };
-        if next > flow.sim.now_ns.saturating_add(1_000_000_000) { break; }
-        flow.sim.run_until(next.saturating_add(1_000_000));
+        let Some(next) = flow.next_event_time_ns() else { break; };
+        if next > flow.now_ns.saturating_add(1_000_000_000) { break; }
+        flow.run_until(next.saturating_add(1_000_000));
     }
 }
 
@@ -118,7 +118,7 @@ fn build_client_worker(client_slot: usize, worker_slot: usize) -> (App, NodeId, 
     let client = drop_gadget(&mut app, Kind::Client, client_slot, "Client_1");
     let worker = drop_gadget(&mut app, Kind::Worker, worker_slot, "Worker_1");
     // Slow the client down so the test runs cheaply.
-    app.world_mut().resource_mut::<FlowSim>().sim.nodes.get_mut(&client)
+    app.world_mut().resource_mut::<FlowSim>().nodes.get_mut(&client)
         .unwrap().slots.insert("period_ns".into(), Value::Int(200_000_000));
     wire(&mut app, client, Kind::Client, worker, Kind::Worker);
     (app, client, worker)
@@ -140,7 +140,7 @@ proptest! {
         advance_sim_ns(&mut app, duration_ms * 1_000_000);
         quiesce_and_drain(&mut app);
 
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
         let emitted   = slot_int(sim, client, "emitted");
         let completed = slot_int(sim, client, "completed");
         let served    = slot_int(sim, worker, "served");
@@ -190,14 +190,14 @@ proptest! {
         let mut app = make_app();
         let client = drop_gadget(&mut app, Kind::Client, client_slot, "Client_1");
         let queue = drop_gadget(&mut app, Kind::Queue, queue_slot, "Queue_1");
-        app.world_mut().resource_mut::<FlowSim>().sim.nodes.get_mut(&client)
+        app.world_mut().resource_mut::<FlowSim>().nodes.get_mut(&client)
             .unwrap().slots.insert("period_ns".into(), Value::Int(200_000_000));
         wire(&mut app, client, Kind::Client, queue, Kind::Queue);
 
         advance_sim_ns(&mut app, duration_ms * 1_000_000);
         quiesce_and_drain(&mut app);
 
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
         let emitted   = slot_int(sim, client, "emitted");
         let completed = slot_int(sim, client, "completed");
         let len       = slot_int(sim, queue, "len");
@@ -239,12 +239,12 @@ proptest! {
         duration_ms in 500u64..2500,
     ) {
         let (mut app, client, worker) = build_client_worker(slot, slot);
-        app.world_mut().resource_mut::<FlowSim>().sim.nodes.get_mut(&client)
+        app.world_mut().resource_mut::<FlowSim>().nodes.get_mut(&client)
             .unwrap().slots.insert("period_ns".into(), Value::Int((period_ms * 1_000_000) as i64));
         advance_sim_ns(&mut app, duration_ms * 1_000_000);
         quiesce_and_drain(&mut app);
 
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
         let emitted   = slot_int(sim, client, "emitted");
         let completed = slot_int(sim, client, "completed");
         let in_flight = slot_int(sim, client, "in_flight");
@@ -275,7 +275,7 @@ fn build_n_clients_one_worker(
     for i in 0..n {
         let name = format!("Client_{}", i + 1);
         let c = drop_gadget(app, Kind::Client, slot, &name);
-        app.world_mut().resource_mut::<FlowSim>().sim.nodes.get_mut(&c)
+        app.world_mut().resource_mut::<FlowSim>().nodes.get_mut(&c)
             .unwrap().slots.insert("period_ns".into(),
                 Value::Int((period_ms_each[i] * 1_000_000) as i64));
         wire(app, c, Kind::Client, worker, Kind::Worker);
@@ -310,7 +310,7 @@ proptest! {
         advance_sim_ns(&mut app, duration_ms * 1_000_000);
         quiesce_and_drain(&mut app);
 
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
 
         // Every resp / resp_error emitted by the worker targeted
         // someone; count per client, split by tag.
@@ -383,12 +383,12 @@ proptest! {
         duration_ms in 500u64..2500,
     ) {
         let (mut app, _client, worker) = build_client_worker(slot, slot);
-        app.world_mut().resource_mut::<FlowSim>().sim.nodes.get_mut(&_client)
+        app.world_mut().resource_mut::<FlowSim>().nodes.get_mut(&_client)
             .unwrap().slots.insert("period_ns".into(), Value::Int((period_ms * 1_000_000) as i64));
         advance_sim_ns(&mut app, duration_ms * 1_000_000);
         quiesce_and_drain(&mut app);
 
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
         let mut consumed: u64 = 0;
         let mut emitted:  u64 = 0;
         for ev in sim.log.iter() {
@@ -425,12 +425,12 @@ fn s3_load_example_resets_error_counts() {
     // Pre-dirty: inject a color mismatch.
     let client = drop_gadget(&mut app, Kind::Client, 0, "Client_1");
     let worker = drop_gadget(&mut app, Kind::Worker, 1, "Worker_1");
-    app.world_mut().resource_mut::<FlowSim>().sim.nodes.get_mut(&client)
+    app.world_mut().resource_mut::<FlowSim>().nodes.get_mut(&client)
         .unwrap().slots.insert("period_ns".into(), Value::Int(100_000_000));
     wire(&mut app, client, Kind::Client, worker, Kind::Worker);
     advance_sim_ns(&mut app, 500_000_000);
 
-    assert!(!app.world().resource::<FlowSim>().sim.error_counts.is_empty(),
+    assert!(!app.world().resource::<FlowSim>().error_counts.is_empty(),
         "pre-condition: we expected mismatch errors to be recorded");
 
     // Load an example; error_counts should be cleared.
@@ -440,7 +440,7 @@ fn s3_load_example_resets_error_counts() {
     app.update();
     app.update();
 
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     assert!(
         sim.error_counts.is_empty(),
         "LoadExample should reset error_counts, got {:?}",
@@ -472,7 +472,7 @@ proptest! {
         let client = drop_gadget(&mut app, Kind::Client, slot, "Client_1");
         let router = drop_gadget(&mut app, Kind::Router, slot, "Router_1");
         let worker = drop_gadget(&mut app, Kind::Worker, slot, "Worker_1");
-        app.world_mut().resource_mut::<FlowSim>().sim.nodes.get_mut(&client)
+        app.world_mut().resource_mut::<FlowSim>().nodes.get_mut(&client)
             .unwrap().slots.insert("period_ns".into(),
                 Value::Int((period_ms * 1_000_000) as i64));
 
@@ -482,7 +482,7 @@ proptest! {
         advance_sim_ns(&mut app, duration_ms * 1_000_000);
         quiesce_and_drain(&mut app);
 
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
         let emitted   = slot_int(sim, client, "emitted");
         let completed = slot_int(sim, client, "completed");
         let served    = slot_int(sim, worker, "served");
@@ -536,7 +536,7 @@ proptest! {
         for i in 0..n {
             let name = format!("Client_{}", i + 1);
             let c = drop_gadget(&mut app, Kind::Client, 0, &name);
-            app.world_mut().resource_mut::<FlowSim>().sim.nodes.get_mut(&c)
+            app.world_mut().resource_mut::<FlowSim>().nodes.get_mut(&c)
                 .unwrap().slots.insert("period_ns".into(),
                     Value::Int((periods[i] * 1_000_000) as i64));
             wire(&mut app, c, Kind::Client, router, Kind::Router);
@@ -546,7 +546,7 @@ proptest! {
         advance_sim_ns(&mut app, duration_ms * 1_000_000);
         quiesce_and_drain(&mut app);
 
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
         // Worker's bounded accept queue can legitimately fire
         // `worker_full` + `request_failed` under saturation —
         // those aren't cross-talk. Assert no OTHER error kinds
@@ -623,7 +623,7 @@ fn q_queue_packet_conservation_three_lane() {
     advance_sim_ns(&mut app, 3_000_000_000);
     quiesce_and_drain(&mut app);
 
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let queue_ids: Vec<NodeId> = sim.nodes.iter()
         .filter(|(_, n)| n.name.starts_with("Queue_"))
         .map(|(id, _)| *id)

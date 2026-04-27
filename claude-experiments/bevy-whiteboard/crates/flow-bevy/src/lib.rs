@@ -9,7 +9,9 @@ pub mod edges;
 pub mod errors;
 pub mod examples;
 pub mod examples_menu;
+pub mod bitmap_label;
 pub mod gadgets;
+pub mod glyph_atlas;
 pub mod hud;
 pub mod inspector;
 pub mod nodes;
@@ -17,6 +19,7 @@ pub mod packet_cloud;
 pub mod palette;
 pub mod perf;
 pub mod probes;
+pub mod sim_driver;
 pub mod theme;
 pub mod timeline;
 pub mod tool;
@@ -48,6 +51,20 @@ pub fn build_app(canvas: Option<PathBuf>) -> App {
         ..default()
     }))
     .add_plugins(FlowBevyPlugins);
+    // Set `FLOW_BEVY_FPS=1` to get Bevy's stock FPS overlay in the
+    // top-left of the window. Off by default so the canvas isn't
+    // cluttered for screenshots / demos.
+    if std::env::var("FLOW_BEVY_FPS").ok().filter(|s| !s.is_empty()).is_some() {
+        use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin};
+        use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
+        app.add_plugins(FrameTimeDiagnosticsPlugin::default());
+        app.add_plugins(FpsOverlayPlugin {
+            config: FpsOverlayConfig {
+                text_config: TextFont { font_size: 14.0, ..default() },
+                ..default()
+            },
+        });
+    }
     match canvas {
         Some(path) => app.add_plugins(CanvasSeedPlugin(path)),
         None => app.add_plugins(DemoSeedPlugin),
@@ -96,22 +113,24 @@ impl Plugin for FlowBevyPlugins {
         if !app.world().contains_resource::<ClearColor>() {
             app.insert_resource(ClearColor(Color::srgb(0.91, 0.87, 0.77)));
         }
-        app.add_plugins(poster_ui::PosterUiPlugin).add_plugins((
-            perf::PerfPlugin,
-            tool::ToolPlugin,
-            camera::CameraPlugin,
-            bridge::FlowBridgePlugin,
-            nodes::NodesPlugin,
-            edges::EdgesPlugin,
-            packet_cloud::PacketCloudPlugin,
-            palette::PalettePlugin,
-            hud::HudPlugin,
-            inspector::InspectorPlugin,
-            timeline::TimelinePlugin,
-            probes::ProbesPlugin,
-            errors::ErrorsPlugin,
-            examples::ExamplesPlugin,
-            examples_menu::ExamplesMenuPlugin,
-        ));
+        app.add_plugins(poster_ui::PosterUiPlugin)
+            .add_plugins((
+                perf::PerfPlugin,
+                tool::ToolPlugin,
+                camera::CameraPlugin,
+                bridge::FlowBridgePlugin,
+                bitmap_label::BitmapLabelPlugin,
+                nodes::NodesPlugin,
+                edges::EdgesPlugin,
+                packet_cloud::PacketCloudPlugin,
+                palette::PalettePlugin,
+                hud::HudPlugin,
+                inspector::InspectorPlugin,
+                timeline::TimelinePlugin,
+                probes::ProbesPlugin,
+                errors::ErrorsPlugin,
+                examples::ExamplesPlugin,
+            ))
+            .add_plugins(examples_menu::ExamplesMenuPlugin);
     }
 }

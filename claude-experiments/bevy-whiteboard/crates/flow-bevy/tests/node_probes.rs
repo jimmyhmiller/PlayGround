@@ -16,7 +16,7 @@ use common::{advance_sim_ns, make_app};
 use flow_bevy::bridge::FlowSim;
 use flow_bevy::gadgets::Kind;
 use flow_bevy::palette::ToolBtn;
-use flow_bevy::probes::{Probe, ProbeTarget};
+use flow_bevy::probes::Probe;
 use flow_bevy::tool::Tool;
 use poster_ui::testing::{click_by_marker, simulate_canvas_click};
 
@@ -24,12 +24,12 @@ fn count_node_probes_for(app: &mut App, nid: flow::NodeId) -> usize {
     let world = app.world_mut();
     let mut q = world.query::<&Probe>();
     q.iter(world)
-        .filter(|p| matches!(&p.target, ProbeTarget::Node { node, .. } if *node == nid))
+        .filter(|p| p.node == nid)
         .count()
 }
 
 fn latest_of_kind(app: &App, kind: Kind) -> flow::NodeId {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let prefix = format!("{}_", kind.label());
     sim.nodes
         .iter()
@@ -52,7 +52,7 @@ fn clicking_a_generator_spawns_its_declared_probes() {
     let nid = latest_of_kind(&app, Kind::Generator);
 
     let expected = {
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
         sim.probe_labels(nid).len()
     };
     assert!(expected > 0, "Generator should declare at least one probe");
@@ -76,7 +76,7 @@ fn clicking_a_queue_spawns_queue_specific_probes() {
     let nid = latest_of_kind(&app, Kind::Queue);
 
     let expected = {
-        let sim = &app.world().resource::<FlowSim>().sim;
+        let sim = &app.world().resource::<FlowSim>();
         sim.probe_labels(nid).len()
     };
     click_by_marker::<ToolBtn, _>(&mut app, |m| m.0 == Tool::Probe);
@@ -117,7 +117,7 @@ fn probe_reader_reflects_live_sim_state() {
 
     advance_sim_ns(&mut app, 500_000_000);
 
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     assert_eq!(sim.probe_reading(worker, "served").as_deref(), Some("0"));
     assert_eq!(
         sim.probe_reading(worker, "service").as_deref(),
@@ -141,14 +141,11 @@ fn node_probe_uses_sim_probe_reading() {
     let mut q = world.query::<&Probe>();
     let probe_label: String = q
         .iter(world)
-        .find_map(|p| match &p.target {
-            ProbeTarget::Node { node, label, .. } if *node == sink => Some(label.clone()),
-            _ => None,
-        })
+        .find_map(|p| if p.node == sink { Some(p.label.clone()) } else { None })
         .expect("no node probe for sink");
 
     // Sink's first (only) probe is "total" → reads `count` slot.
     assert_eq!(probe_label, "total");
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     assert_eq!(sim.probe_reading(sink, &probe_label).as_deref(), Some("0"));
 }

@@ -32,9 +32,10 @@ use poster_ui::{
     DATA_SLOT_COUNT,
 };
 
-use crate::bridge::{FlowSim, SimClock};
+use crate::bridge::SimClock;
 use crate::examples::{Example, LoadExample};
 use crate::gadgets::Kind;
+use crate::sim_driver::{SimCommand, SimDriverRes};
 use crate::tool::{ActiveSlot, ActiveTool, Tool};
 
 pub struct PalettePlugin;
@@ -158,7 +159,7 @@ fn handle_hotkeys(
     time: Res<Time>,
     mut active: ResMut<ActiveTool>,
     mut clock: ResMut<SimClock>,
-    mut flow: ResMut<FlowSim>,
+    mut driver: ResMut<SimDriverRes>,
     mut timeline: ResMut<crate::edges::VisualTimelineRes>,
     mut load: bevy::ecs::message::MessageWriter<LoadExample>,
 ) {
@@ -207,9 +208,9 @@ fn handle_hotkeys(
         timeline.0.set_k(k);
     }
     // Silence unused-param warnings when neither key was pressed.
-    let _ = (&time, &flow);
+    let _ = (&time, &driver);
     if keys.just_pressed(KeyCode::Period) {
-        step_to_visible(&mut flow.sim);
+        driver.0.send_command(SimCommand::new(|sim| step_to_visible(sim)));
     }
     let _ = &mut clock;
 }

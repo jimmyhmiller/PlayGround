@@ -18,10 +18,10 @@ use bevy::prelude::*;
 use flow::{NodeId, Value};
 use poster_ui::{Bold, Mono, Slider, Theme, caps_spaced, spawn_slider};
 
-use crate::bridge::FlowSim;
 use crate::errors::NodeErrorStats;
 use crate::gadgets::Kind;
 use crate::nodes::{NodeKind, Selection};
+use crate::sim_driver::{NodeView, SimCommand, SimDriverRes, SimSnapshotRes};
 
 /// Text labels on the up/down toggle. Small constants so the spawn
 /// path, the click handler, and the live-sync system all agree.
@@ -129,7 +129,7 @@ struct RouterModeToggle {
 fn rebuild_inspector_on_selection_change(
     selection: Res<Selection>,
     theme: Res<Theme>,
-    sim: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     mount_q: Query<Entity, With<InspectorMount>>,
     kind_q: Query<(&NodeKind, &crate::bridge::FlowNodeRef)>,
     mut commands: Commands,
@@ -148,7 +148,7 @@ fn rebuild_inspector_on_selection_change(
     let Some(entity) = selection.entity else { return };
     let Ok((kind, node_ref)) = kind_q.get(entity) else { return };
     let nid = node_ref.0;
-    let Some(node) = sim.sim.nodes.get(&nid) else { return };
+    let Some(node) = snapshot.0.nodes.get(&nid) else { return };
 
     commands.entity(mount).with_children(|body| {
         // Section heading with the node name.
@@ -199,7 +199,7 @@ fn rebuild_inspector_on_selection_change(
         // by a bespoke widget above shows up here as a slider / toggle /
         // readout depending on type. Hidden if the node has no
         // generic-eligible slots.
-        spawn_generic_state_section(body, &theme, node);
+        spawn_generic_state_section(body, &theme, nid, node);
 
         // Per-node error breakdown. Always spawned (even when the
         // node has no errors yet) so `sync_error_breakdown` can fill
@@ -454,7 +454,7 @@ fn inspector_heading(parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands, th
 
 /// Read an integer sim slot, returning 0 on missing/wrong-type (sliders
 /// then sit at their min and the user can still drag them).
-fn read_int_slot(node: &flow::Node, slot: &str) -> i64 {
+fn read_int_slot(node: &NodeView, slot: &str) -> i64 {
     node.slots
         .get(slot)
         .and_then(|v| match v { Value::Int(i) => Some(*i), _ => None })
@@ -538,19 +538,25 @@ fn simple_readout(
 /// value — when it changes, the sim follows.
 fn push_rate_slider_to_sim(
     q: Query<(&Slider, &RateSlider), Changed<Slider>>,
-    mut sim: ResMut<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
+    mut driver: ResMut<SimDriverRes>,
 ) {
     for (slider, rs) in q.iter() {
-        if !sim.sim.nodes.contains_key(&rs.node) { continue; }
+        if !snapshot.0.nodes.contains_key(&rs.node) { continue; }
+        let nid = rs.node;
         match rs.kind {
             RateSliderKind::EmitPerSecond => {
                 let rate = slider.value.max(0.01) as f64;
                 let period_ns = (1_000_000_000.0 / rate) as i64;
-                sim.sim.user_edit_slot(rs.node, "period_ns", Value::Int(period_ns));
+                driver.0.send_command(SimCommand::new(move |sim| {
+                    sim.user_edit_slot(nid, "period_ns", Value::Int(period_ns));
+                }));
             }
             RateSliderKind::ServiceMs => {
                 let ms = slider.value.max(0.5) as i64;
-                sim.sim.user_edit_slot(rs.node, "service_ns", Value::Int(ms * 1_000_000));
+                driver.0.send_command(SimCommand::new(move |sim| {
+                    sim.user_edit_slot(nid, "service_ns", Value::Int(ms * 1_000_000));
+                }));
             }
         }
     }
@@ -567,45 +573,53 @@ fn push_rate_slider_to_sim(
 /// kick the worker sits idle forever even though `up == 1`.
 fn handle_up_toggle_clicks(
     q: Query<(&Interaction, &UpToggle), (Changed<Interaction>, With<Button>)>,
-    mut sim: ResMut<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
+    mut driver: ResMut<SimDriverRes>,
 ) {
     for (interaction, toggle) in q.iter() {
         if *interaction != Interaction::Pressed { continue; }
-        let Some(node) = sim.sim.nodes.get(&toggle.node) else { continue };
+        let Some(node) = snapshot.0.nodes.get(&toggle.node) else { continue };
         let cur = node.slots.get("up")
             .and_then(|v| match v { Value::Int(i) => Some(*i), _ => None })
             .unwrap_or(1);
         let next = if cur == 0 { 1 } else { 0 };
-        sim.sim.user_edit_slot(toggle.node, "up", Value::Int(next));
-        if cur == 0 && next == 1 {
-            sim.sim.inject(toggle.node, Value::variant("resume", Value::Nil));
-        }
+        let nid = toggle.node;
+        driver.0.send_command(SimCommand::new(move |sim| {
+            sim.user_edit_slot(nid, "up", Value::Int(next));
+            if cur == 0 && next == 1 {
+                sim.inject(nid, Value::variant("resume", Value::Nil));
+            }
+        }));
     }
 }
 
 fn handle_router_mode_clicks(
     q: Query<(&Interaction, &RouterModeToggle), (Changed<Interaction>, With<Button>)>,
-    mut sim: ResMut<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
+    mut driver: ResMut<SimDriverRes>,
 ) {
     for (interaction, toggle) in q.iter() {
         if *interaction != Interaction::Pressed { continue; }
-        let Some(node) = sim.sim.nodes.get(&toggle.node) else { continue };
+        let Some(node) = snapshot.0.nodes.get(&toggle.node) else { continue };
         let cur = node.slots.get("mode")
             .and_then(|v| match v { Value::Int(i) => Some(*i), _ => None })
             .unwrap_or(0);
         let next = if cur == 0 { 1 } else { 0 };
-        sim.sim.user_edit_slot(toggle.node, "mode", Value::Int(next));
+        let nid = toggle.node;
+        driver.0.send_command(SimCommand::new(move |sim| {
+            sim.user_edit_slot(nid, "mode", Value::Int(next));
+        }));
     }
 }
 
 fn sync_router_mode_visual(
     theme: Res<Theme>,
-    sim: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     mut buttons: Query<(&RouterModeToggle, &mut BorderColor, &Children)>,
     mut texts: Query<(&mut Text, &mut TextColor)>,
 ) {
     for (toggle, mut border, children) in buttons.iter_mut() {
-        let mode = sim.sim.nodes.get(&toggle.node)
+        let mode = snapshot.0.nodes.get(&toggle.node)
             .and_then(|n| n.slots.get("mode"))
             .and_then(|v| match v { Value::Int(i) => Some(*i), _ => None })
             .unwrap_or(0);
@@ -627,12 +641,12 @@ fn sync_router_mode_visual(
 /// (scripts, tests, future DSL hooks).
 fn sync_up_toggle_visual(
     theme: Res<Theme>,
-    sim: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     mut buttons: Query<(&UpToggle, &mut BorderColor, &Children)>,
     mut texts: Query<(&mut Text, &mut TextColor)>,
 ) {
     for (toggle, mut border, children) in buttons.iter_mut() {
-        let up = sim.sim.nodes.get(&toggle.node)
+        let up = snapshot.0.nodes.get(&toggle.node)
             .and_then(|n| n.slots.get("up"))
             .and_then(|v| match v { Value::Int(i) => Some(*i != 0), _ => None })
             .unwrap_or(true);
@@ -650,12 +664,11 @@ fn sync_up_toggle_visual(
 }
 
 fn sync_queue_fill(
-    sim: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     mut q: Query<(&QueueFillReadout, &mut Text)>,
 ) {
     for (r, mut text) in q.iter_mut() {
-        let len = sim
-            .sim
+        let len = snapshot.0
             .nodes
             .get(&r.node)
             .and_then(|n| n.slots.get("len"))
@@ -667,12 +680,11 @@ fn sync_queue_fill(
 }
 
 fn sync_sink_count(
-    sim: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     mut q: Query<(&SinkCountReadout, &mut Text)>,
 ) {
     for (r, mut text) in q.iter_mut() {
-        let count = sim
-            .sim
+        let count = snapshot.0
             .nodes
             .get(&r.node)
             .and_then(|n| n.slots.get("count"))
@@ -732,7 +744,8 @@ struct GenericBoolToggle {
 fn spawn_generic_state_section(
     parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
     theme: &Theme,
-    node: &flow::Node,
+    nid: NodeId,
+    node: &NodeView,
 ) {
     // Collect the eligible slots up front so we can decide whether to
     // emit a section header at all. BTreeMap iteration is already
@@ -768,7 +781,7 @@ fn spawn_generic_state_section(
                 poster_ui::Bold,
             ));
             for (name, value) in rows {
-                spawn_generic_slot_row(section, theme, node.id, name, value);
+                spawn_generic_slot_row(section, theme, nid, name, value);
             }
         });
 }
@@ -866,12 +879,18 @@ fn bool_toggle_visuals(theme: &Theme, on: bool) -> (Color, &'static str) {
 /// generic over slot name. Writes Float to whatever slot is named.
 fn push_generic_float_slider_to_sim(
     q: Query<(&Slider, &GenericFloatSlider), Changed<Slider>>,
-    mut sim: ResMut<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
+    mut driver: ResMut<SimDriverRes>,
 ) {
     for (slider, marker) in q.iter() {
-        let Some(node) = sim.sim.nodes.get(&marker.node) else { continue };
+        let Some(node) = snapshot.0.nodes.get(&marker.node) else { continue };
         if !matches!(node.slots.get(&marker.slot), Some(Value::Float(_))) { continue; }
-        sim.sim.user_edit_slot(marker.node, marker.slot.clone(), Value::Float(slider.value as f64));
+        let nid = marker.node;
+        let slot = marker.slot.clone();
+        let value = slider.value as f64;
+        driver.0.send_command(SimCommand::new(move |sim| {
+            sim.user_edit_slot(nid, slot, Value::Float(value));
+        }));
     }
 }
 
@@ -884,11 +903,11 @@ fn push_generic_float_slider_to_sim(
 /// retriggering the `Changed<Slider>` filter and looping with the
 /// push system above.
 fn sync_generic_float_slider_from_slot(
-    sim: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     mut q: Query<(&mut Slider, &GenericFloatSlider)>,
 ) {
     for (mut slider, marker) in q.iter_mut() {
-        let Some(node) = sim.sim.nodes.get(&marker.node) else { continue };
+        let Some(node) = snapshot.0.nodes.get(&marker.node) else { continue };
         let Some(Value::Float(f)) = node.slots.get(&marker.slot) else { continue };
         let want = (*f as f32).clamp(slider.min, slider.max);
         if (slider.value - want).abs() > 1e-6 {
@@ -899,11 +918,11 @@ fn sync_generic_float_slider_from_slot(
 
 /// Live-tick readout text for Int/String slots.
 fn sync_generic_readout(
-    sim: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     mut q: Query<(&GenericReadout, &mut Text)>,
 ) {
     for (r, mut text) in q.iter_mut() {
-        let Some(node) = sim.sim.nodes.get(&r.node) else { continue };
+        let Some(node) = snapshot.0.nodes.get(&r.node) else { continue };
         let Some(value) = node.slots.get(&r.slot) else { continue };
         let label = match value {
             Value::Int(i) => {
@@ -919,27 +938,32 @@ fn sync_generic_readout(
 
 fn handle_generic_bool_toggle_clicks(
     q: Query<(&Interaction, &GenericBoolToggle), (Changed<Interaction>, With<Button>)>,
-    mut sim: ResMut<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
+    mut driver: ResMut<SimDriverRes>,
 ) {
     for (interaction, toggle) in q.iter() {
         if *interaction != Interaction::Pressed { continue; }
-        let Some(node) = sim.sim.nodes.get(&toggle.node) else { continue };
+        let Some(node) = snapshot.0.nodes.get(&toggle.node) else { continue };
         let cur = match node.slots.get(&toggle.slot) {
             Some(Value::Bool(b)) => *b,
             _ => continue,
         };
-        sim.sim.user_edit_slot(toggle.node, toggle.slot.clone(), Value::Bool(!cur));
+        let nid = toggle.node;
+        let slot = toggle.slot.clone();
+        driver.0.send_command(SimCommand::new(move |sim| {
+            sim.user_edit_slot(nid, slot, Value::Bool(!cur));
+        }));
     }
 }
 
 fn sync_generic_bool_toggle_visual(
     theme: Res<Theme>,
-    sim: Res<FlowSim>,
+    snapshot: Res<SimSnapshotRes>,
     mut buttons: Query<(&GenericBoolToggle, &mut BorderColor, &Children)>,
     mut texts: Query<(&mut Text, &mut TextColor)>,
 ) {
     for (toggle, mut border, children) in buttons.iter_mut() {
-        let Some(node) = sim.sim.nodes.get(&toggle.node) else { continue };
+        let Some(node) = snapshot.0.nodes.get(&toggle.node) else { continue };
         let on = match node.slots.get(&toggle.slot) {
             Some(Value::Bool(b)) => *b,
             _ => continue,

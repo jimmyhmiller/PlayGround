@@ -22,7 +22,7 @@ use flow_bevy::tool::Tool;
 use poster_ui::testing::{click_by_marker, simulate_canvas_click};
 
 fn latest_of_kind(app: &App, kind: Kind) -> flow::NodeId {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let prefix = format!("{}_", kind.label());
     sim.nodes
         .iter()
@@ -65,7 +65,7 @@ fn drawing_worker_to_queue_creates_pull() {
     connect(&mut app, worker_xy, queue_xy);
     let _ = world_pos_of(&app, queue); // keep helper referenced
 
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     assert_eq!(
         sim.nodes[&worker].slots["upstream"],
         Value::NodeRef(queue),
@@ -108,7 +108,7 @@ fn drawing_queue_to_worker_does_not_establish_pull() {
     // Wrong direction: Queue → Worker. Shouldn't establish pull.
     connect(&mut app, queue_xy, worker_xy);
 
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     assert_eq!(
         sim.nodes[&worker].slots["upstream"],
         Value::Nil,

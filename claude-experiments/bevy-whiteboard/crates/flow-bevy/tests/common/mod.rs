@@ -13,6 +13,7 @@ use flow_bevy::bridge::{EntityMaps, FlowSim};
 use flow_bevy::edges::{HiddenEdges, wire_flow_edge};
 use flow_bevy::gadgets::{Kind, spawn as spawn_gadget};
 use flow_bevy::nodes::NodeCounter;
+use flow_bevy::sim_driver::{SimDriver, SimDriverRes, SimEventRx};
 use flow_bevy::tool::NodeColors;
 use flow_bevy::theme::Theme;
 
@@ -20,6 +21,12 @@ use flow_bevy::theme::Theme;
 /// The canvas is empty — no demo seed. Each test is responsible for
 /// spawning whatever nodes it needs via [`spawn_node`] + [`wire`] or
 /// through the palette click helpers.
+///
+/// Switches the sim driver to **Direct** mode so tests get
+/// deterministic, single-threaded sim execution. The default driver
+/// installed by `FlowBridgePlugin` is `Worker` (good for the live
+/// app, bad for tests because ticks happen on a background thread
+/// out of test control).
 pub fn make_app() -> App {
     let mut app = poster_ui::testing::test_app_headless();
     app.add_plugins(FlowBevyPlugins);
@@ -33,6 +40,17 @@ pub fn make_app() -> App {
     {
         let mut tl = app.world_mut().resource_mut::<flow_bevy::edges::VisualTimelineRes>();
         tl.0.k = 1.0;
+    }
+    // Replace the worker-mode driver the bridge installs with a
+    // Direct one. Default-fresh `Sim` carries the gadget params the
+    // bridge installed.
+    {
+        let world = app.world_mut();
+        let mut sim = flow::Sim::new(1);
+        flow_bevy::gadgets::install_default_params(&mut sim);
+        let (driver, events_rx) = SimDriver::direct(sim, 1.0);
+        world.insert_resource(SimDriverRes(driver));
+        world.insert_resource(SimEventRx(std::sync::Mutex::new(events_rx)));
     }
     app.update();
     app.update();
@@ -50,9 +68,10 @@ pub fn make_app() -> App {
 pub fn spawn_node(app: &mut App, kind: Kind, slot: usize, name: &str) -> flow::NodeId {
     let world = app.world_mut();
     let data_color = world.resource::<Theme>().data[slot];
-    let mut flow_res = world.resource_mut::<FlowSim>();
-    let id = spawn_gadget(&mut flow_res.sim, kind, name, slot);
-    drop(flow_res);
+    let name_owned = name.to_string();
+    let id = world.resource_mut::<FlowSim>().0.with_sim_mut(move |sim| {
+        spawn_gadget(sim, kind, &name_owned, slot)
+    });
     world.resource_mut::<NodeCounter>().0 += 1;
     if !matches!(kind, Kind::Router) {
         world.resource_mut::<NodeColors>().0.insert(id, data_color);
@@ -74,9 +93,9 @@ pub fn wire(app: &mut App, from: flow::NodeId, from_kind: Kind, to: flow::NodeId
         ResMut<HiddenEdges>,
     )> = bevy::ecs::system::SystemState::new(world);
     {
-        let (mut commands, mut flow_res, mut maps, mut hidden) = sys_state.get_mut(world);
+        let (mut commands, mut driver, mut maps, mut hidden) = sys_state.get_mut(world);
         wire_flow_edge(
-            &mut flow_res.sim,
+            &mut driver,
             &mut maps,
             &mut hidden,
             &mut commands,
@@ -88,13 +107,12 @@ pub fn wire(app: &mut App, from: flow::NodeId, from_kind: Kind, to: flow::NodeId
 }
 
 /// Advance the sim deterministically by `duration_ns` without relying on
-/// `Time::delta_secs` (which is 0 in a headless test). Directly calls
-/// `run_until` on the sim so scheduled events fire.
+/// `Time::delta_secs` (which is 0 in a headless test). Directly drives
+/// the Direct-mode driver, which republishes a snapshot afterward so
+/// downstream reads see the new state.
 pub fn advance_sim_ns(app: &mut App, duration_ns: u64) {
     let world = app.world_mut();
-    let mut flow = world.resource_mut::<FlowSim>();
-    let target = flow.sim.now_ns + duration_ns;
-    flow.sim.run_until(target);
+    world.resource_mut::<FlowSim>().0.advance_direct(duration_ns);
 }
 
 /// Convenience builder for the canonical pull chain:
@@ -121,9 +139,9 @@ pub struct PullChain {
 /// Count of sim nodes / edges currently in the app. Tests use this as
 /// a before/after baseline when asserting relative drop/connect deltas.
 pub fn node_count(app: &App) -> usize {
-    app.world().resource::<FlowSim>().sim.nodes.len()
+    app.world().resource::<FlowSim>().nodes.len()
 }
 
 pub fn edge_count(app: &App) -> usize {
-    app.world().resource::<FlowSim>().sim.edges.len()
+    app.world().resource::<FlowSim>().edges.len()
 }

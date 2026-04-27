@@ -28,10 +28,10 @@ fn step_locked(app: &mut App, total_ns: u64) {
         let step = remaining.min(chunk_ns);
         {
             let mut flow = app.world_mut().resource_mut::<FlowSim>();
-            let target = flow.sim.now_ns + step;
-            flow.sim.run_until(target);
+            let target = flow.now_ns + step;
+            flow.run_until(target);
         }
-        let now_ns = app.world().resource::<FlowSim>().sim.now_ns;
+        let now_ns = app.world().resource::<FlowSim>().now_ns;
         app.world_mut().resource_mut::<SimClock>().visual_now = now_ns as f64 / 1e9;
         app.update();
         remaining -= step;
@@ -59,13 +59,13 @@ fn timeline_event_clears_pending_visuals() {
         let mut sim = app.world_mut().resource_mut::<FlowSim>();
 
         // Sink: just a node with a flag we can flip via timeline.
-        let sink = sim.sim.add_node(
+        let sink = sim.add_node(
             "sink",
             BTreeMap::from([("flag".to_string(), Value::Int(0))]),
             Vec::new(),
         );
         // Source: emits a packet to sink every 50ms.
-        let source = sim.sim.add_node(
+        let source = sim.add_node(
             "source",
             BTreeMap::new(),
             vec![Rule::new("tick")
@@ -79,12 +79,12 @@ fn timeline_event_clears_pending_visuals() {
                     EmitTo::ToTargetExpr(Expr::self_ref()),
                 ))],
         );
-        sim.sim.add_edge(source, sink, Expr::int(1_000_000)); // 1ms
-        sim.sim.add_edge(source, source, Expr::int(50_000_000)); // 50ms self-tick
-        sim.sim.inject(source, Value::variant("tick", Value::Nil));
+        sim.add_edge(source, sink, Expr::int(1_000_000)); // 1ms
+        sim.add_edge(source, source, Expr::int(50_000_000)); // 50ms self-tick
+        sim.inject(source, Value::variant("tick", Value::Nil));
 
         // Schedule a timeline event 1.5s out.
-        sim.sim.timeline.schedule(1_500_000_000, sink, "flag".into(), Value::Int(1));
+        sim.timeline.schedule(1_500_000_000, sink, "flag".into(), Value::Int(1));
         (source, sink)
     };
     let _ = (source, sink);
@@ -100,9 +100,9 @@ fn timeline_event_clears_pending_visuals() {
     {
         let mut flow = app.world_mut().resource_mut::<FlowSim>();
         let target = 1_510_000_000u64; // 10ms past the event at 1.5s
-        flow.sim.run_until(target);
+        flow.run_until(target);
     }
-    let now_ns = app.world().resource::<FlowSim>().sim.now_ns;
+    let now_ns = app.world().resource::<FlowSim>().now_ns;
     app.world_mut().resource_mut::<SimClock>().visual_now = now_ns as f64 / 1e9;
     app.update();
 
@@ -155,12 +155,12 @@ fn manual_user_edit_also_drops_pending_visuals() {
         use std::collections::BTreeMap;
 
         let mut sim = app.world_mut().resource_mut::<FlowSim>();
-        let sink = sim.sim.add_node(
+        let sink = sim.add_node(
             "sink",
             BTreeMap::from([("flag".to_string(), Value::Bool(false))]),
             Vec::new(),
         );
-        let source = sim.sim.add_node(
+        let source = sim.add_node(
             "source",
             BTreeMap::new(),
             vec![Rule::new("tick")
@@ -174,9 +174,9 @@ fn manual_user_edit_also_drops_pending_visuals() {
                     EmitTo::ToTargetExpr(Expr::self_ref()),
                 ))],
         );
-        sim.sim.add_edge(source, sink, Expr::int(1_000_000));
-        sim.sim.add_edge(source, source, Expr::int(50_000_000));
-        sim.sim.inject(source, Value::variant("tick", Value::Nil));
+        sim.add_edge(source, sink, Expr::int(1_000_000));
+        sim.add_edge(source, source, Expr::int(50_000_000));
+        sim.inject(source, Value::variant("tick", Value::Nil));
         (source, sink)
     };
     let _ = source;
@@ -191,9 +191,9 @@ fn manual_user_edit_also_drops_pending_visuals() {
     // visual layer treats identically to TimelineEventFired.
     {
         let mut sim = app.world_mut().resource_mut::<FlowSim>();
-        sim.sim.user_edit_slot(sink, "flag", Value::Bool(true));
+        sim.user_edit_slot(sink, "flag", Value::Bool(true));
     }
-    let now_ns = app.world().resource::<FlowSim>().sim.now_ns;
+    let now_ns = app.world().resource::<FlowSim>().now_ns;
     app.world_mut().resource_mut::<SimClock>().visual_now = now_ns as f64 / 1e9;
     app.update();
 

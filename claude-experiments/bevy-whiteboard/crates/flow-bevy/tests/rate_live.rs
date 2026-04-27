@@ -21,7 +21,7 @@ use poster_ui::Slider;
 use poster_ui::testing::{click_by_marker, simulate_canvas_click};
 
 fn latest_of_kind(app: &App, kind: Kind) -> flow::NodeId {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let prefix = format!("{}_", kind.label());
     sim.nodes
         .iter()
@@ -54,7 +54,7 @@ fn set_rate_via_slider(app: &mut App, nid: flow::NodeId, value: f32) {
 /// isn't itself (so self-loop ticks don't inflate the count). Reads the
 /// sim's event log in place.
 fn count_emissions_from(app: &App, nid: flow::NodeId) -> usize {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     sim.log
         .events
         .iter()
@@ -151,7 +151,7 @@ fn slider_change_slows_down_live_emissions() {
     {
         let world = app.world_mut();
         let mut flow = world.resource_mut::<FlowSim>();
-        flow.sim.nodes.get_mut(&gen_nid).unwrap()
+        flow.nodes.get_mut(&gen_nid).unwrap()
             .slots.insert("period_ns".into(), flow::Value::Int(100_000_000));
     }
     // Warm-up: let the previously-scheduled 500ms tick land, then a

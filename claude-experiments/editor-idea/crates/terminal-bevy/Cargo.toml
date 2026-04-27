@@ -7,6 +7,7 @@ edition = "2024"
 arboard = "3.4"
 editor_bevy = { path = "../editor-bevy" }
 editor_core = { path = "../editor-core" }
+pane_bevy = { path = "../pane-bevy" }
 libghostty-vt = "0.1.1"
 # Native file dialog for Cmd+O. Synchronous on macOS — opens the
 # system NSOpenPanel on the calling (main) thread.
@@ -27,7 +28,7 @@ bevy = { version = "0.18", default-features = false, features = [
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
-objc2-app-kit = { version = "0.2", features = ["NSDockTile"] }
+objc2-app-kit = { version = "0.2", features = ["NSDockTile", "NSWorkspace", "NSRunningApplication", "libc"] }
 objc2-foundation = "0.2"
 # CoreText for system-cascade glyph fallback — instead of a hardcoded
 # list of font paths, ask the OS "which font has this codepoint?" and

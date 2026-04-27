@@ -22,7 +22,7 @@ struct Args {
     #[arg(long)]
     height: usize,
 
-    /// Initial pattern: blinker | glider | single | all-on | random:DENSITY
+    /// Initial pattern: blinker | glider | pentadecathlon | single | all-on | random:DENSITY
     #[arg(long, default_value = "blinker")]
     pattern: String,
 
@@ -184,6 +184,20 @@ fn build_pattern(name: &str, w: usize, h: usize, seed: u64) -> Result<Vec<bool>,
             alive[idx(0, 2)] = true;
             alive[idx(1, 2)] = true;
             alive[idx(2, 2)] = true;
+        }
+        "pentadecathlon" => {
+            // Period-15 oscillator. The canonical seed is a horizontal row
+            // of 10 live cells; after a few generations it settles into the
+            // recognizable "I-bar" pentadecathlon shape and then cycles.
+            // It needs vertical breathing room because the oscillation
+            // bulges out to ~9 rows tall at its widest phase.
+            if w < 10 || h < 9 {
+                return Err("pentadecathlon needs width >= 10 and height >= 9".into());
+            }
+            let x0 = cx - 5;
+            for i in 0..10 {
+                alive[idx(x0 + i, cy)] = true;
+            }
         }
         "all-on" => {
             for cell in alive.iter_mut() {

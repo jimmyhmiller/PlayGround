@@ -28,9 +28,11 @@ use serde::{Deserialize, Serialize};
 
 use flow::{Sim, SimSnapshot, Value};
 
-use crate::bridge::{EntityMaps, FlowEdgeRef, FlowSim};
+use crate::bitmap_label::AtlasMetrics;
+use crate::bridge::{EntityMaps, FlowEdgeRef};
 use crate::gadgets::{self, Kind};
 use crate::nodes::{BinarySlotPaint, BodyShape, NodeAssetCache, NodeCounter, spawn_node_entity};
+use crate::sim_driver::SimDriverRes;
 use crate::theme::Theme;
 use crate::tool::NodeColors;
 
@@ -222,20 +224,19 @@ pub fn load_canvas(path: impl AsRef<Path>, seed: u64) -> Result<LoadedCanvas, St
         .map_err(|e| format!("registering stock gadgets: {}", e))?;
 
     // User-supplied component classes (custom node types this canvas
-    // adds). Each component file is lowered into the shared sim so its
-    // `node X { }` block both registers the class and creates the
-    // singleton instance `X` — same behaviour as the rest of the DSL.
-    // Multiple instances of one class require either separate files or
-    // top-level `node` blocks in main.flow referencing the shared class
-    // by name.
+    // adds). Each component file declares one or more `node X { }`
+    // blocks that get *registered as classes only* — no instances are
+    // created. main.flow then names instances explicitly via
+    // `node Cell_0_0 : LifeCell { ... }`. Using `register_classes`
+    // (rather than the full `lower_into`) avoids spawning a stray
+    // singleton `LifeCell` instance that has no position in
+    // visual.json and lands at a default fallback.
     let comp_order = resolve_component_order(&path, &manifest.load.components)?;
     for stem in &comp_order {
         let src = fs::read_to_string(path.join("components").join(format!("{}.flow", stem)))
             .map_err(|e| format!("reading component `{}`: {}", stem, e))?;
-        let comp_file = flow::dsl::parse(&src)
-            .map_err(|e| format!("parsing component `{}`: {}", stem, e))?;
-        flow::dsl::lower_into(&mut sim, &comp_file)
-            .map_err(|e| format!("lowering component `{}`: {}", stem, e))?;
+        flow::dsl::register_classes(&mut sim, &src)
+            .map_err(|e| format!("registering component `{}`: {}", stem, e))?;
     }
 
     // main.flow: the actual wiring. Parsed, then lowered *into* the
@@ -286,12 +287,13 @@ pub(crate) fn seed_from_path(
     mut cache: ResMut<NodeAssetCache>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
-    mut flow: ResMut<FlowSim>,
+    mut driver: ResMut<SimDriverRes>,
     mut maps: ResMut<EntityMaps>,
     mut counter: ResMut<NodeCounter>,
     mut node_colors: ResMut<NodeColors>,
     mut hide_all: ResMut<crate::edges::HideAll>,
     theme: Res<Theme>,
+    metrics: Res<AtlasMetrics>,
     mut pending: ResMut<crate::PendingCanvas>,
 ) {
     let Some(path) = pending.0.take() else { return; };
@@ -310,35 +312,47 @@ pub(crate) fn seed_from_path(
         canvas.sim.edges.len()
     );
 
-    flow.sim = canvas.sim;
-    flow.consumed_log_index = flow.sim.log.total_recorded;
-    counter.0 = flow.sim.nodes.len() as u32;
+    // Swap the whole sim onto the worker / direct driver and pull
+    // back the data we need to spawn entities. One round-trip
+    // through `with_sim_mut`; in worker mode the cost is one tick of
+    // latency, which is invisible to the user.
+    let new_sim = canvas.sim;
+    let load_data = driver.0.with_sim_mut(move |sim| {
+        *sim = new_sim;
+        let mut nodes: Vec<(flow::NodeId, String, Option<String>, Option<usize>)> = Vec::new();
+        for (nid, node) in sim.nodes.iter() {
+            let class_name = sim.class_name(*nid).map(|s| s.to_owned());
+            let color_slot = match node.slots.get("color") {
+                Some(Value::Int(n)) => Some(*n as usize),
+                _ => None,
+            };
+            nodes.push((*nid, node.name.clone(), class_name, color_slot));
+        }
+        let edges: Vec<(flow::EdgeId, flow::NodeId, flow::NodeId)> = sim.edges.iter()
+            .map(|(eid, e)| (*eid, e.from, e.to))
+            .collect();
+        let node_count = sim.nodes.len() as u32;
+        (nodes, edges, node_count)
+    });
+    let (node_data, edge_data, node_count) = load_data;
+    counter.0 = node_count;
 
     // Spawn an entity for each node. Deterministic iteration order
-    // (BTreeMap by NodeId) so fall-back grid positions stay stable
-    // across loads of the same canvas.
+    // (sim returns BTreeMap order via `nodes.iter()`) so fall-back
+    // grid positions stay stable across loads of the same canvas.
     let visual = &canvas.visual;
-    let node_ids: Vec<flow::NodeId> = flow.sim.nodes.keys().copied().collect();
-    for (i, nid) in node_ids.iter().copied().enumerate() {
-        let (name, class_name, kind, color_slot) = {
-            let node = &flow.sim.nodes[&nid];
-            let class_name = flow.sim.class_name(nid).map(|s| s.to_owned());
-            let kind = class_name
-                .as_deref()
-                .map(class_to_kind)
-                .unwrap_or(Kind::Worker);
-            let color_slot = match node.slots.get("color") {
-                Some(Value::Int(n)) => (*n as usize) % theme.data.len(),
-                _ => 0,
-            };
-            (node.name.clone(), class_name, kind, color_slot)
-        };
+    for (i, (nid, name, class_name, color_slot_raw)) in node_data.into_iter().enumerate() {
+        let kind = class_name
+            .as_deref()
+            .map(class_to_kind)
+            .unwrap_or(Kind::Worker);
         let class_visual = class_name
             .as_deref()
             .and_then(|c| visual.classes.get(c));
         let shape_override = class_visual
             .and_then(|cv| cv.shape.as_ref())
             .map(shape_spec_to_body_shape);
+        let self_painted = class_visual.and_then(|cv| cv.paint.as_ref()).is_some();
         let pos = visual
             .nodes
             .get(&name)
@@ -351,13 +365,17 @@ pub(crate) fn seed_from_path(
             &mut materials,
             &mut maps,
             &theme,
+            &metrics,
             nid,
             kind,
             shape_override,
+            self_painted,
+            color_slot_raw.is_some(),
             name,
             pos,
         );
-        if !matches!(kind, Kind::Router) {
+        if let Some(slot_raw) = color_slot_raw {
+            let color_slot = slot_raw % theme.data.len();
             node_colors.0.insert(nid, theme.data[color_slot]);
         }
         if let Some(paint) = class_visual.and_then(|cv| cv.paint.as_ref()) {
@@ -369,9 +387,8 @@ pub(crate) fn seed_from_path(
 
     // Spawn entities for every existing sim edge. No topology changes
     // here — the DSL already populated them.
-    for eid in flow.sim.edges.keys().copied().collect::<Vec<_>>() {
-        let edge = &flow.sim.edges[&eid];
-        if edge.from == edge.to {
+    for (eid, from, to) in edge_data {
+        if from == to {
             // Self-loops are sim plumbing (tick / done); the UI draws
             // nothing for them and no entity is needed for routing.
             continue;
@@ -647,20 +664,18 @@ node Special {
         write(
             &dir.join("main.flow"),
             r#"
-# main.flow wires a Special instance and pings it.
-node Wrapper {
-    slots { x: Int = 0 }
-}
-# Special auto-instantiates under its own name when the component file
-# is loaded, so main.flow can reference "Special" in its scenario.
-scenario { at 0ns: inject Special <- ping(nil) }
+# main.flow names an explicit instance of the Special class declared
+# in components/. components/ files only register classes — instances
+# must be named in main.flow.
+node sp : Special { hits: 0 }
+scenario { at 0ns: inject sp <- ping(nil) }
 "#,
         );
 
         let mut canvas = load_canvas(&dir, 0).unwrap();
         assert!(canvas.sim.has_class("Special"));
         canvas.sim.run_until(1);
-        let id = canvas.sim.node_by_name("Special").unwrap();
+        let id = canvas.sim.node_by_name("sp").unwrap();
         assert_eq!(canvas.sim.nodes[&id].slots["hits"], flow::Value::Int(1));
 
         let _ = fs::remove_dir_all(&dir);

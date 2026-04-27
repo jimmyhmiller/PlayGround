@@ -33,7 +33,7 @@ fn set_worker_service_ms(app: &mut App, nid: flow::NodeId, ms: f32) {
 }
 
 fn latest_of_kind(app: &App, kind: Kind) -> flow::NodeId {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let prefix = format!("{}_", kind.label());
     sim.nodes
         .iter()
@@ -49,7 +49,7 @@ fn latest_of_kind(app: &App, kind: Kind) -> flow::NodeId {
 }
 
 fn int_slot(app: &App, nid: flow::NodeId, slot: &str) -> i64 {
-    match app.world().resource::<FlowSim>().sim.nodes[&nid].slots[slot] {
+    match app.world().resource::<FlowSim>().nodes[&nid].slots[slot] {
         Value::Int(i) => i,
         _ => panic!("{} isn't Int", slot),
     }
@@ -120,11 +120,11 @@ fn slow_worker_caps_throughput() {
     // Run 3 sim-seconds.
     advance_sim_ns(&mut app, 3_000_000_000);
 
-    let gen_emitted = match &app.world().resource::<FlowSim>().sim.nodes[&gen_nid].slots["emitted"] {
+    let gen_emitted = match &app.world().resource::<FlowSim>().nodes[&gen_nid].slots["emitted"] {
         Value::Int(i) => *i,
         _ => 0,
     };
-    let sink_count = match &app.world().resource::<FlowSim>().sim.nodes[&sink].slots["count"] {
+    let sink_count = match &app.world().resource::<FlowSim>().nodes[&sink].slots["count"] {
         Value::Int(i) => *i,
         _ => 0,
     };

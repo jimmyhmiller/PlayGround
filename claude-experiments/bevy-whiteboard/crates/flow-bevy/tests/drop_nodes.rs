@@ -20,7 +20,6 @@ use poster_ui::testing::{click_by_marker, simulate_canvas_click};
 fn count_by_label_prefix(app: &App, prefix: &str) -> usize {
     app.world()
         .resource::<FlowSim>()
-        .sim
         .nodes
         .values()
         .filter(|n| n.name.starts_with(prefix))

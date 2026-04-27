@@ -21,7 +21,7 @@ fn drop_and_latest(app: &mut App, kind: Kind, pos: Vec2) -> flow::NodeId {
     click_by_marker::<ToolBtn, _>(app, |m| m.0 == Tool::Drop(kind));
     simulate_canvas_click(app, pos);
 
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     // Match against the kind's `label()` which is the prefix gadget-spawning
     // uses. Highest numeric suffix = most recent drop.
     let prefix = format!("{}_", kind.label());
@@ -47,7 +47,7 @@ fn connect_in_ui(app: &mut App, source_pos: Vec2, target_pos: Vec2) {
 }
 
 fn assert_edge(app: &App, from: flow::NodeId, to: flow::NodeId) {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let found = sim.edges.values().any(|e| e.from == from && e.to == to);
     assert!(
         found,

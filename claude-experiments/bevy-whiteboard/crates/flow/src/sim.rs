@@ -222,8 +222,10 @@ pub struct Sim {
     #[serde(with = "reverse_heap_serde")]
     pub(crate) pending_actions: BinaryHeap<Reverse<PendingAction>>,
     /// Safety cap to prevent infinite-loop rule firings at a single
-    /// instant. A well-written model won't hit this; if it does, we
-    /// want a loud error, not a hang.
+    /// instant. Set high enough that a legitimately large board
+    /// (Life 100×100 = 10k cells, each firing once per tick) never
+    /// trips it; only a genuine zero-latency cycle should. `usize::MAX`
+    /// effectively disables the check.
     pub max_steps_per_instant: usize,
     /// Scratch buffer used by the fire loop to snapshot node ids each
     /// time it scans the world. Reusing the allocation avoids a fresh
@@ -336,7 +338,7 @@ impl Sim {
             scenarios: HashMap::new(),
             params: HashMap::new(),
             pending_actions: BinaryHeap::new(),
-            max_steps_per_instant: 10_000,
+            max_steps_per_instant: usize::MAX,
             fire_iter_buf: Vec::new(),
             fireable: BTreeSet::new(),
             error_counts: BTreeMap::new(),

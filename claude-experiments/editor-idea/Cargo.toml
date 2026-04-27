@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/editor-core", "crates/editor-bevy", "crates/terminal-bevy"]
+members = ["crates/editor-core", "crates/editor-bevy", "crates/pane-bevy", "crates/terminal-bevy"]
 
 # Use a locally-patched libghostty-rs whose build.rs invokes
 # `zig build -Doptimize=ReleaseFast`. Upstream defaults to Debug,

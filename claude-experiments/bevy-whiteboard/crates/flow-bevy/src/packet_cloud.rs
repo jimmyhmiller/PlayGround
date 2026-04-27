@@ -365,6 +365,18 @@ mod flow_bevy_internal_test_helpers {
                 .resource_mut::<crate::edges::VisualTimelineRes>();
             tl.0.k = 1.0;
         }
+        // Tests must drive the sim deterministically — swap the
+        // worker-mode driver the bridge installs for a Direct one.
+        {
+            let world = app.world_mut();
+            let mut sim = flow::Sim::new(1);
+            crate::gadgets::install_default_params(&mut sim);
+            let (driver, events_rx) = crate::sim_driver::SimDriver::direct(sim, 1.0);
+            world.insert_resource(crate::sim_driver::SimDriverRes(driver));
+            world.insert_resource(crate::sim_driver::SimEventRx(
+                std::sync::Mutex::new(events_rx),
+            ));
+        }
         app.update();
         app.update();
         app
@@ -372,8 +384,7 @@ mod flow_bevy_internal_test_helpers {
 
     pub fn advance_sim_ns(app: &mut App, duration_ns: u64) {
         let world = app.world_mut();
-        let mut flow = world.resource_mut::<crate::bridge::FlowSim>();
-        let target = flow.sim.now_ns + duration_ns;
-        flow.sim.run_until(target);
+        let mut driver = world.resource_mut::<crate::sim_driver::SimDriverRes>();
+        driver.0.advance_direct(duration_ns);
     }
 }

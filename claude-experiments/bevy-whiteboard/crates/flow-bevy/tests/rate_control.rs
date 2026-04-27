@@ -18,7 +18,7 @@ use poster_ui::Slider;
 use poster_ui::testing::{click_by_marker, simulate_canvas_click};
 
 fn latest_generator(app: &App) -> flow::NodeId {
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     sim.nodes
         .iter()
         .filter_map(|(id, n)| {
@@ -33,7 +33,7 @@ fn latest_generator(app: &App) -> flow::NodeId {
 }
 
 fn period_ns(app: &App, nid: flow::NodeId) -> i64 {
-    match app.world().resource::<FlowSim>().sim.nodes[&nid].slots["period_ns"] {
+    match app.world().resource::<FlowSim>().nodes[&nid].slots["period_ns"] {
         Value::Int(i) => i,
         _ => panic!("period_ns isn't Int"),
     }
@@ -148,7 +148,7 @@ fn faster_rate_produces_more_emissions() {
 
     advance_sim_ns(&mut app, 2_000_000_000);
 
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let mut base_count = 0;
     let mut fast_count = 0;
     for ev in sim.log.events.iter() {

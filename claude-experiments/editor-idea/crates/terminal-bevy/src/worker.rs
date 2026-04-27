@@ -21,6 +21,7 @@
 //! holds the snapshot mutex without releasing, so the renderer never
 //! waits more than a few KiB worth of parsing for the lock.
 
+use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::fd::{AsFd, OwnedFd};
@@ -33,9 +34,10 @@ use std::time::{Duration, Instant};
 
 use bevy::winit::{EventLoopProxy, WinitUserEvent};
 use libghostty_vt::{
+    paste,
     render::{CellIterator, Dirty, RenderState, RowIterator},
     style::RgbColor,
-    terminal::ScrollViewport,
+    terminal::{Mode, ScrollViewport},
 };
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
@@ -96,8 +98,15 @@ pub struct GridSnapshot {
 
 /// Messages the main (Bevy) thread sends to a worker.
 pub enum WorkerMsg {
-    /// Bytes to write to the pty (keystrokes, paste).
+    /// Bytes to write to the pty (keystrokes).
     Input(Vec<u8>),
+    /// Clipboard text to paste. The worker queries the VT's bracketed
+    /// paste mode (DEC 2004) and wraps with `\x1b[200~`/`\x1b[201~` when
+    /// enabled, so the shell sees one paste blob instead of executing
+    /// each newline as Enter. When disabled, libghostty's encoder
+    /// rewrites `\n` to `\r` (still one Enter per line) — that's the
+    /// best we can do without bracketed paste support on the other end.
+    Paste(String),
     /// New grid dimensions (in cells) and per-cell pixel size. Worker
     /// resizes both the libghostty `Terminal` and the pty winsize.
     Resize {
@@ -290,7 +299,8 @@ fn worker_loop(
         let bell_wakeup = wakeup.clone();
         terminal
             .on_bell(move |_term| {
-                bell_count.fetch_add(1, Ordering::Relaxed);
+                let n = bell_count.fetch_add(1, Ordering::Relaxed) + 1;
+                eprintln!("[bell] fired, count={}", n);
                 if let Some(p) = &bell_wakeup {
                     let _ = p.send_event(WinitUserEvent::WakeUp);
                 }
@@ -328,6 +338,13 @@ fn worker_loop(
     let mut last_rows: u16 = initial_size.rows;
 
     let mut read_buf = [0u8; 65536];
+
+    // Bytes queued to write back to the pty (VT responses, keystrokes,
+    // paste blobs). Single ordered queue so a paste followed by a
+    // keystroke reaches the shell in the right order, and so the bytes
+    // we couldn't squeeze into the kernel pty input buffer this tick
+    // simply wait until POLLOUT instead of being silently dropped.
+    let mut pending_out: VecDeque<u8> = VecDeque::new();
 
     // Lightweight throughput instrumentation, gated on TERMINAL_PROFILE
     // env var so it doesn't spam stderr in normal runs. Set
@@ -380,12 +397,11 @@ fn worker_loop(
             }
         }
 
-        // 2. Flush VT-effect responses (DA replies, etc.) back to the pty.
+        // 2. Queue VT-effect responses (DA replies, etc.) for the pty.
         {
             let mut response = pty_response.borrow_mut();
             if !response.is_empty() {
-                pty.write(&response);
-                response.clear();
+                pending_out.extend(response.drain(..));
                 did_anything = true;
             }
         }
@@ -394,7 +410,29 @@ fn worker_loop(
         loop {
             match rx.try_recv() {
                 Ok(WorkerMsg::Input(bytes)) => {
-                    pty.write(&bytes);
+                    pending_out.extend(bytes);
+                    did_anything = true;
+                }
+                Ok(WorkerMsg::Paste(text)) => {
+                    let bracketed = terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
+                    let mut data = text.into_bytes();
+                    // Encoder may rewrite bytes in place (control-byte
+                    // scrub, `\n` → `\r` when not bracketed). Output
+                    // adds at most the 6-byte prefix + 6-byte suffix
+                    // when bracketed; +16 is a safe slack.
+                    let mut buf = vec![0u8; data.len() + 16];
+                    match paste::encode(&mut data, bracketed, &mut buf) {
+                        Ok(len) => {
+                            pending_out.extend(&buf[..len]);
+                            did_anything = true;
+                        }
+                        Err(_) => {
+                            // OutOfSpace shouldn't happen with the
+                            // sizing above; bail loudly so a future
+                            // change to the encoder surfaces here.
+                            panic!("paste::encode failed for {} bytes", data.len());
+                        }
+                    }
                 }
                 Ok(WorkerMsg::Resize {
                     cols,
@@ -429,6 +467,21 @@ fn worker_loop(
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
             }
+        }
+
+        // 3b. Flush as much of the pending pty-output queue as the
+        // kernel input buffer will take right now. If `try_write`
+        // returns 0 the kernel is full — leave the rest queued; the
+        // POLLOUT branch in step 5 will wake us when it drains.
+        while !pending_out.is_empty() {
+            let (a, b) = pending_out.as_slices();
+            let slice = if !a.is_empty() { a } else { b };
+            let n = pty.try_write(slice);
+            if n == 0 {
+                break;
+            }
+            pending_out.drain(..n);
+            did_anything = true;
         }
 
         if hit_eof {
@@ -524,8 +577,16 @@ fn worker_loop(
 
             let pty_fd = pty.0.as_fd();
             let wake_fd = wake_r.as_fd();
+            // If there are still bytes queued for the pty (a paste blob
+            // that didn't fit in one kernel buffer), wait for POLLOUT
+            // too so we wake the moment the shell drains some input.
+            let pty_flags = if pending_out.is_empty() {
+                PollFlags::POLLIN
+            } else {
+                PollFlags::POLLIN | PollFlags::POLLOUT
+            };
             let mut fds = [
-                PollFd::new(pty_fd, PollFlags::POLLIN),
+                PollFd::new(pty_fd, pty_flags),
                 PollFd::new(wake_fd, PollFlags::POLLIN),
             ];
             // Cap the wait at a few seconds as a safety net — if a

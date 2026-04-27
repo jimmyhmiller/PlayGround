@@ -52,7 +52,7 @@ fn classify(pkt: &VisualPacket, edges: &[(flow::NodeId, flow::NodeId)]) -> (bool
 }
 
 fn edges_snapshot(app: &App) -> Vec<(flow::NodeId, flow::NodeId)> {
-    app.world().resource::<FlowSim>().sim.edges.values()
+    app.world().resource::<FlowSim>().edges.values()
         .map(|e| (e.from, e.to))
         .collect()
 }
@@ -122,7 +122,7 @@ fn two_clients_one_worker_visual_replies_spawn() {
     // Sanity: the sim itself did actually serve requests. Catches
     // the case where the test misconfigured the scenario and
     // nothing ever happened.
-    let sim = &app.world().resource::<FlowSim>().sim;
+    let sim = &app.world().resource::<FlowSim>();
     let worker = sim.nodes.values()
         .find(|n| n.name.starts_with("Worker_"))
         .expect("no worker");

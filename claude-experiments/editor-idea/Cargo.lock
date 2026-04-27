@@ -2366,7 +2366,10 @@ dependencies = [
  "objc2 0.5.2",
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
+ "pane_bevy",
  "ropey",
+ "serde",
+ "serde_json",
  "skrifa 0.39.0",
  "tree-sitter",
  "tree-sitter-rust",
@@ -4126,6 +4129,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pane_bevy"
+version = "0.1.0"
+dependencies = [
+ "arboard",
+ "bevy",
+ "editor_core",
+ "ropey",
+ "serde",
+ "serde_json",
+ "skrifa 0.39.0",
+]
+
+[[package]]
 name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5109,6 +5125,7 @@ dependencies = [
  "objc2 0.5.2",
  "objc2-app-kit 0.2.2",
  "objc2-foundation 0.2.2",
+ "pane_bevy",
  "rfd",
  "serde",
  "serde_json",

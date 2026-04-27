@@ -74,8 +74,7 @@ impl Pty {
 
     /// Set the master fd to non-blocking. The worker thread polls it
     /// in a tight loop and uses `EAGAIN` to detect "no more data right
-    /// now"; keystroke writes from the worker remain non-blocking but
-    /// almost never produce `EAGAIN` because we write tiny payloads.
+    /// now"; writes use `try_write` and queue any unwritten remainder.
     pub fn set_nonblock(&self) -> std::io::Result<()> {
         let raw_flags = fcntl::fcntl(&self.0, fcntl::F_GETFL)?;
         let flags = OFlag::from_bits_retain(raw_flags) | OFlag::O_NONBLOCK;
@@ -83,17 +82,22 @@ impl Pty {
         Ok(())
     }
 
-    /// Best-effort write. Drops remaining bytes on `EAGAIN` / fatal
-    /// errors — matches ghostling's policy under back-pressure.
-    pub fn write(&self, data: &[u8]) {
-        let mut remaining = data;
-        while !remaining.is_empty() {
-            match nix::unistd::write(&self.0, remaining) {
-                Ok(len) => remaining = &remaining[len..],
+    /// Non-blocking write. Returns how many bytes the kernel accepted
+    /// (0 on `EAGAIN` or fatal error). The caller is responsible for
+    /// queuing the remainder and retrying — silently dropping past the
+    /// pty input buffer is what caused multi-KiB pastes to hang the
+    /// shell mid-bracketed-paste before this was fixed.
+    pub fn try_write(&self, data: &[u8]) -> usize {
+        let mut written = 0;
+        while written < data.len() {
+            match nix::unistd::write(&self.0, &data[written..]) {
+                Ok(0) => break,
+                Ok(n) => written += n,
                 Err(Errno::EINTR) => continue,
                 Err(_) => break,
             }
         }
+        written
     }
 
     pub fn resize(&self, size: PtySize) {
@@ -128,4 +132,28 @@ impl Drop for Child {
 pub enum PtyError {
     EndOfStream,
     Other(Errno),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_write_reports_bytes_accepted() {
+        // Plain happy path: write into a freshly-opened pty pair and
+        // confirm `try_write` returns the byte count the kernel took.
+        // The interesting failure mode of `try_write` is "fewer bytes
+        // than asked, no error" — but on darwin the pty input buffer
+        // is large enough that we can't reliably trigger EAGAIN in a
+        // unit test. The structural property (caller can resume from
+        // the returned offset) is what the worker depends on.
+        let pair = nix::pty::openpty(None, None).expect("openpty");
+        let pty = Pty(pair.master);
+        pty.set_nonblock().expect("set_nonblock");
+        let _slave_keepalive = pair.slave;
+
+        let payload = b"hello pty";
+        let n = pty.try_write(payload);
+        assert_eq!(n, payload.len());
+    }
 }
