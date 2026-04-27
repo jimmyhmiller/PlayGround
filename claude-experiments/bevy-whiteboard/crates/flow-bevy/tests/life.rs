@@ -31,11 +31,21 @@ fn alive(sim: &Sim, name: &str) -> i64 {
 }
 
 fn assert_grid(sim: &Sim, w: usize, h: usize, expected: &[(usize, usize)]) {
+    assert_grid_named(sim, w, h, expected, "Cell_");
+}
+
+fn assert_grid_named(
+    sim: &Sim,
+    w: usize,
+    h: usize,
+    expected: &[(usize, usize)],
+    prefix: &str,
+) {
     let mut wrong = Vec::new();
     for y in 0..h {
         for x in 0..w {
             let want = expected.contains(&(x, y));
-            let got = alive(sim, &format!("Cell_{}_{}", x, y)) == 1;
+            let got = alive(sim, &format!("{}{}_{}", prefix, x, y)) == 1;
             if want != got {
                 wrong.push((x, y, want, got));
             }
@@ -52,7 +62,7 @@ fn assert_grid(sim: &Sim, w: usize, h: usize, expected: &[(usize, usize)]) {
         msg.push_str("\nactual grid:\n");
         for y in 0..h {
             for x in 0..w {
-                msg.push(if alive(sim, &format!("Cell_{}_{}", x, y)) == 1 {
+                msg.push(if alive(sim, &format!("{}{}_{}", prefix, x, y)) == 1 {
                     '#'
                 } else {
                     '.'
@@ -105,6 +115,38 @@ fn blinker_5x5_oscillates() {
     assert_grid(&canvas.sim, 5, 5, &[(2, 1), (2, 2), (2, 3)]);
 
     // No runtime errors.
+    let errs: Vec<_> = canvas
+        .sim
+        .error_counts
+        .iter()
+        .filter(|(_, c)| **c > 0)
+        .collect();
+    assert!(errs.is_empty(), "unexpected runtime errors: {:?}", errs);
+}
+
+/// Parallel test of `life_5x5_dsl.whiteboard`, which expresses the same
+/// 5×5 blinker entirely as a single `compound Life(...)` block in the
+/// DSL — replacing the static node + edge list that flow-life-gen
+/// produces. Cell names are prefixed with `Life::` (the compound's
+/// qualified-name prefix); otherwise the dynamics are identical to
+/// `blinker_5x5_oscillates` above.
+#[test]
+fn blinker_5x5_dsl_compound_oscillates() {
+    let path = project_root().join("examples/life_5x5_dsl.whiteboard");
+    let mut canvas = load_canvas(&path, 1).expect("load life_5x5_dsl.whiteboard");
+
+    // Initial: horizontal row centered at y=2.
+    assert_grid_named(&canvas.sim, 5, 5, &[(1, 2), (2, 2), (3, 2)], "Life::Cell_");
+
+    canvas.sim.run_until(canvas.sim.now_ns + 100_000_000);
+    assert_grid_named(&canvas.sim, 5, 5, &[(2, 1), (2, 2), (2, 3)], "Life::Cell_");
+
+    canvas.sim.run_until(canvas.sim.now_ns + 200_000_000);
+    assert_grid_named(&canvas.sim, 5, 5, &[(1, 2), (2, 2), (3, 2)], "Life::Cell_");
+
+    canvas.sim.run_until(canvas.sim.now_ns + 200_000_000);
+    assert_grid_named(&canvas.sim, 5, 5, &[(2, 1), (2, 2), (2, 3)], "Life::Cell_");
+
     let errs: Vec<_> = canvas
         .sim
         .error_counts

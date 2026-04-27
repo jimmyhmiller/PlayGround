@@ -16,12 +16,14 @@ pub enum Tok {
     Plus, Minus, Star, Slash, Percent, Caret,
     AndAnd, OrOr, Bang,
     Dot,
+    DotDot,       // ..  (range bound separator inside `for IDENT in LO..HI`)
 
     // Keywords
     Params, Node, Compound, In, Out, Edges, Scenario, Template,
     Slots, Rule, On, OnSpawn, When, Do, Probes,
     Push, Pop, Drop, Emit, EmitEach, Record, Spawn, Error,
     To, As, At, Inject, SetParam, SetSlot, Kill,
+    For,
     True, False, Nil, Self_,
     // Packet metadata / return_path modifiers for Emit/EmitEach.
     // `Meta` doubles as the `meta(key)` expression function; the
@@ -36,8 +38,21 @@ pub enum Tok {
 
     // Identifiers
     Ident(String),
+    /// Name template — emitted whenever an identifier is immediately
+    /// followed (no whitespace) by `{...}` interpolation holes, e.g.
+    /// `Cell_{x}_{y}`. Each `RawNamePart::Hole` keeps the raw bracketed
+    /// expression source; the parser re-lexes + re-parses it via
+    /// `parse_expr_from_str` when constructing a `NameTpl`.
+    IdentTpl(Vec<RawNamePart>),
 
     Eof,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RawNamePart {
+    Lit(String),
+    /// Raw expression source between `{` and the matching `}`.
+    Hole(String),
 }
 
 #[derive(Debug, Clone)]
@@ -78,6 +93,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
         // Multi-char punctuation
         let peek = |ofs: usize| -> Option<u8> { bytes.get(i + ofs).copied() };
         match (c, peek(1)) {
+            (b'.', Some(b'.')) => { push(&mut out, Tok::DotDot, start_line, start_col); i += 2; col += 2; continue; }
             (b'-', Some(b'>')) => { push(&mut out, Tok::Arrow, start_line, start_col); i += 2; col += 2; continue; }
             (b'<', Some(b'-')) => { push(&mut out, Tok::LArrow, start_line, start_col); i += 2; col += 2; continue; }
             (b':', Some(b'=')) => { push(&mut out, Tok::Assign, start_line, start_col); i += 2; col += 2; continue; }
@@ -146,11 +162,21 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
             continue;
         }
 
-        // Number, possibly with time suffix
+        // Number, possibly with time suffix.
+        // `.` is consumed as part of a float, but a `..` (range op) is
+        // explicitly NOT eaten — `0..5` lexes as Int(0) DotDot Int(5),
+        // not as a malformed float.
         if c.is_ascii_digit() {
             let start_i = i;
-            while i < bytes.len() && (bytes[i].is_ascii_digit() || bytes[i] == b'.' || bytes[i] == b'_') {
-                i += 1; col += 1;
+            while i < bytes.len() {
+                let b = bytes[i];
+                if b.is_ascii_digit() || b == b'_' {
+                    i += 1; col += 1;
+                } else if b == b'.' && bytes.get(i + 1) != Some(&b'.') {
+                    i += 1; col += 1;
+                } else {
+                    break;
+                }
             }
             let num_str: String = bytes[start_i..i].iter().filter(|&&b| b != b'_').map(|&b| b as char).collect();
             // Time suffix?
@@ -225,12 +251,65 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 "set_param" => Some(Tok::SetParam),
                 "set_slot" => Some(Tok::SetSlot),
                 "kill" => Some(Tok::Kill),
+                "for" => Some(Tok::For),
                 "true" => Some(Tok::True),
                 "false" => Some(Tok::False),
                 "nil" => Some(Tok::Nil),
                 "self" => Some(Tok::Self_),
                 _ => None,
             };
+            // Adjacent `{` (no whitespace) after an identifier triggers
+            // name-template mode. We collect alternating literal /
+            // hole parts greedily until we hit a non-identifier,
+            // non-`{` byte. The hole bodies are preserved as raw
+            // source — the parser re-lexes + re-parses each one as a
+            // CtExpr when constructing a NameTpl.
+            //
+            // Keywords are deliberately *not* allowed to enter
+            // template mode: `node{x}` is not a thing. We only do this
+            // for non-keyword identifiers.
+            if kw.is_none() && i < bytes.len() && bytes[i] == b'{' {
+                let mut parts: Vec<RawNamePart> = Vec::new();
+                if !ident.is_empty() {
+                    parts.push(RawNamePart::Lit(ident));
+                }
+                loop {
+                    if i < bytes.len() && bytes[i] == b'{' {
+                        // Consume `{`.
+                        i += 1; col += 1;
+                        let mut depth = 1usize;
+                        let body_start = i;
+                        while i < bytes.len() && depth > 0 {
+                            let b = bytes[i];
+                            if b == b'{' { depth += 1; }
+                            else if b == b'}' { depth -= 1; if depth == 0 { break; } }
+                            update_pos(b, &mut line, &mut col);
+                            i += 1;
+                        }
+                        if i >= bytes.len() {
+                            return Err(format!(
+                                "{}:{}: unterminated `{{` in name template",
+                                start_line, start_col
+                            ));
+                        }
+                        let body: String = bytes[body_start..i].iter().map(|&b| b as char).collect();
+                        parts.push(RawNamePart::Hole(body));
+                        // Consume `}`.
+                        i += 1; col += 1;
+                    } else if i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                        let lit_start = i;
+                        while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                            i += 1; col += 1;
+                        }
+                        let lit: String = bytes[lit_start..i].iter().map(|&b| b as char).collect();
+                        parts.push(RawNamePart::Lit(lit));
+                    } else {
+                        break;
+                    }
+                }
+                push(&mut out, Tok::IdentTpl(parts), start_line, start_col);
+                continue;
+            }
             let k = kw.unwrap_or(Tok::Ident(ident));
             push(&mut out, k, start_line, start_col);
             continue;

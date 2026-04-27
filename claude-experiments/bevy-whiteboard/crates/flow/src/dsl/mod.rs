@@ -13,15 +13,23 @@
 pub mod ast;
 pub mod lex;
 pub mod parse;
+pub mod expand;
 pub mod lower;
 
 pub use parse::parse;
 pub use lower::{lower, lower_into, Lowered};
 
-/// Parse and lower a DSL source string in one step.
+/// Parse, expand, and lower a DSL source string in one step.
+///
+/// The expansion pass (between parse and lower) is the **single
+/// construction phase** that resolves `for` loops, name templates
+/// (`Cell_{x}_{y}`), and parametric compounds. Lowering only ever sees
+/// a fully residual AST; if you want to inspect the residual, call
+/// `parse + expand` separately.
 pub fn load(src: &str, seed: u64) -> Result<crate::sim::Sim, String> {
     let file = parse(src)?;
-    lower(&file, seed)
+    let residual = expand::expand(&file)?;
+    lower(&residual, seed)
 }
 
 /// Register every `node` block in the DSL source as a named class on
@@ -33,12 +41,16 @@ pub fn load(src: &str, seed: u64) -> Result<crate::sim::Sim, String> {
 /// programs. Use [`load`] for that.
 pub fn register_classes(sim: &mut crate::sim::Sim, src: &str) -> Result<Vec<String>, String> {
     let file = parse(src)?;
+    let file = expand::expand(&file)?;
     let mut names = Vec::new();
     for item in &file.items {
         match item {
             ast::Item::Node(n) => {
+                let name = n.name.as_plain().ok_or_else(||
+                    "register_classes: node name still contains unresolved `{...}` interpolations".to_string()
+                )?.to_string();
                 let tpl = lower::build_class_template(n)?;
-                names.push(n.name.clone());
+                names.push(name);
                 sim.register_template(tpl);
             }
             other => {

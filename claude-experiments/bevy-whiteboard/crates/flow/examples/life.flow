@@ -1,0 +1,103 @@
+# Conway's Game of Life expressed entirely in the Flow DSL.
+#
+# Replaces the dedicated `flow-life-gen` binary for the simple cases:
+# a single compound block parameterised by grid size declares the
+# cell template, instantiates the W×H grid via `for`, and wires
+# 8-neighbor toroidal edges.
+#
+# Topology is always 8-neighbor toroidal — the cell rule design
+# requires every cell to receive exactly 8 reports per tick or it
+# would deadlock at the edges.
+#
+# Initial pattern is a single live cell at (cx, cy). For richer
+# patterns (blinker, glider, pentadecathlon), add an `alive` override
+# to the relevant cells via additional `node Cell_{x}_{y} : LifeCell`
+# instance forms or by parameterising the `alive` expression.
+
+compound Life(
+    width:           Int = 5,
+    height:          Int = 5,
+    period_ns:       Int = 200000000,
+    cell_latency_ns: Int = 1000000,
+) {
+    # Self-ticking Life cell. The template is reusable — declared
+    # once and instantiated W×H times below.
+    node LifeCell {
+        slots {
+            alive:          Int = 0
+            reports_seen:   Int = 0
+            live_neighbors: Int = 0
+            tick_period:    Int = 200000000
+        }
+        on_spawn {
+            self -> self : tick_period
+            inject tick
+        }
+
+        rule on_tick {
+            on tick(_)
+            do {
+                reports_seen   := 0
+                live_neighbors := 0
+                emit_each report(alive) to out_neighbors()
+                emit tick(nil) to self
+            }
+        }
+        rule on_report_partial {
+            on report(v)
+            when reports_seen + 1 < 8
+            do {
+                reports_seen   := reports_seen + 1
+                live_neighbors := live_neighbors + v
+            }
+        }
+        rule on_report_final {
+            on report(v)
+            when reports_seen + 1 == 8
+            do {
+                reports_seen   := reports_seen + 1
+                live_neighbors := live_neighbors + v
+                alive := if (alive == 1 && (live_neighbors == 2 || live_neighbors == 3))
+                            || (alive == 0 && live_neighbors == 3)
+                         then 1 else 0
+            }
+        }
+    }
+
+    # Instantiate the W×H grid. `Cell_{x}_{y}` is a name template:
+    # the expansion pass evaluates `{x}` / `{y}` against the for
+    # binding, producing concrete names like `Cell_2_3`. Those then
+    # get prefixed with `Life::` so they don't collide if multiple
+    # `compound Life` instances were ever placed on one canvas.
+    #
+    # The `alive` override sets a single live cell at the centre of
+    # the grid as a starting pattern. The compound's `tick_period`
+    # CT param flows into each instance's `tick_period` slot via the
+    # override, so the singleton can be re-parameterised at the call
+    # site (parametric instantiation is a documented follow-up).
+    for x in 0..width, y in 0..height {
+        node Cell_{x}_{y} : LifeCell {
+            alive:       if x == width / 2 && y == height / 2 then 1 else 0
+            tick_period: period_ns
+        }
+    }
+
+    # 8-neighbor toroidal wiring. Each cell emits to all 8 neighbors;
+    # we don't re-declare the inbound edges (those come from the
+    # other cells' outbound declarations). The 8 offsets are spelled
+    # explicitly so we never emit a self-edge — the compile-time
+    # `for` would otherwise need a guard, and the cell already has a
+    # period self-edge from `on_spawn` that we mustn't duplicate.
+    edges {
+        for y in 0..height, x in 0..width {
+            Cell_{x}_{y} -> Cell_{(x + width  - 1) % width}_{(y + height - 1) % height} : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{x}_{(y + height - 1) % height}                        : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{(x + 1) % width}_{(y + height - 1) % height}          : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{(x + width  - 1) % width}_{y}                          : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{(x + 1) % width}_{y}                                   : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{(x + width  - 1) % width}_{(y + 1) % height}           : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{x}_{(y + 1) % height}                                  : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{(x + 1) % width}_{(y + 1) % height}                    : cell_latency_ns
+        }
+    }
+}

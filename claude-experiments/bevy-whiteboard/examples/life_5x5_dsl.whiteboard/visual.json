@@ -1,0 +1,199 @@
+{
+  "format_version": 1,
+  "classes": {
+    "LifeCell": {
+      "shape": {
+        "kind": "square",
+        "size": 24.0
+      },
+      "paint": {
+        "kind": "binary_slot",
+        "slot": "alive",
+        "on": "#111111",
+        "off": "#f5f5f0"
+      }
+    }
+  },
+  "nodes": {
+    "Life::Cell_0_0": {
+      "pos": [
+        -80.0,
+        80.0
+      ]
+    },
+    "Life::Cell_1_0": {
+      "pos": [
+        -40.0,
+        80.0
+      ]
+    },
+    "Life::Cell_2_0": {
+      "pos": [
+        0.0,
+        80.0
+      ]
+    },
+    "Life::Cell_3_0": {
+      "pos": [
+        40.0,
+        80.0
+      ]
+    },
+    "Life::Cell_4_0": {
+      "pos": [
+        80.0,
+        80.0
+      ]
+    },
+    "Life::Cell_0_1": {
+      "pos": [
+        -80.0,
+        40.0
+      ]
+    },
+    "Life::Cell_1_1": {
+      "pos": [
+        -40.0,
+        40.0
+      ]
+    },
+    "Life::Cell_2_1": {
+      "pos": [
+        0.0,
+        40.0
+      ]
+    },
+    "Life::Cell_3_1": {
+      "pos": [
+        40.0,
+        40.0
+      ]
+    },
+    "Life::Cell_4_1": {
+      "pos": [
+        80.0,
+        40.0
+      ]
+    },
+    "Life::Cell_0_2": {
+      "pos": [
+        -80.0,
+        -0.0
+      ]
+    },
+    "Life::Cell_1_2": {
+      "pos": [
+        -40.0,
+        -0.0
+      ]
+    },
+    "Life::Cell_2_2": {
+      "pos": [
+        0.0,
+        -0.0
+      ]
+    },
+    "Life::Cell_3_2": {
+      "pos": [
+        40.0,
+        -0.0
+      ]
+    },
+    "Life::Cell_4_2": {
+      "pos": [
+        80.0,
+        -0.0
+      ]
+    },
+    "Life::Cell_0_3": {
+      "pos": [
+        -80.0,
+        -40.0
+      ]
+    },
+    "Life::Cell_1_3": {
+      "pos": [
+        -40.0,
+        -40.0
+      ]
+    },
+    "Life::Cell_2_3": {
+      "pos": [
+        0.0,
+        -40.0
+      ]
+    },
+    "Life::Cell_3_3": {
+      "pos": [
+        40.0,
+        -40.0
+      ]
+    },
+    "Life::Cell_4_3": {
+      "pos": [
+        80.0,
+        -40.0
+      ]
+    },
+    "Life::Cell_0_4": {
+      "pos": [
+        -80.0,
+        -80.0
+      ]
+    },
+    "Life::Cell_1_4": {
+      "pos": [
+        -40.0,
+        -80.0
+      ]
+    },
+    "Life::Cell_2_4": {
+      "pos": [
+        0.0,
+        -80.0
+      ]
+    },
+    "Life::Cell_3_4": {
+      "pos": [
+        40.0,
+        -80.0
+      ]
+    },
+    "Life::Cell_4_4": {
+      "pos": [
+        80.0,
+        -80.0
+      ]
+    },
+    "Life": {
+      "pos": [
+        0.0,
+        0.0
+      ]
+    }
+  },
+  "viewport": {
+    "pos": [
+      0.0,
+      0.0
+    ],
+    "zoom": 1.0
+  },
+  "hide_all": true,
+  "compounds": {
+    "Life": {
+      "kind": "grid",
+      "columns": 5,
+      "rows": 5,
+      "cell_size": 18.0,
+      "gap": 1.0,
+      "member_pattern": "Life::Cell_{x}_{y}",
+      "paint": {
+        "kind": "binary_slot",
+        "slot": "alive",
+        "on": "#111111",
+        "off": "#f5f5f0"
+      }
+    }
+  }
+}

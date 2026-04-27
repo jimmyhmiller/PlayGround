@@ -103,6 +103,11 @@ pub struct Visual {
     /// shape comes from `Kind`.
     #[serde(default)]
     pub classes: BTreeMap<String, ClassVisual>,
+    /// Per-compound visual descriptors. Keyed by the compound's
+    /// fully-qualified name (e.g. `"Life"` or `"Outer::Inner"`).
+    /// Missing entries get a [`crate::compound::CompoundVisual::LabeledBox`] fallback.
+    #[serde(default)]
+    pub compounds: BTreeMap<String, CompoundVisualSpec>,
     /// Keyed by node name (as declared in DSL). Missing nodes fall back
     /// to default layout from the UI layer.
     #[serde(default)]
@@ -164,6 +169,56 @@ pub enum PaintSpec {
     BinarySlot { slot: String, on: String, off: String },
 }
 
+/// How a compound renders its outward face. Mirrors
+/// [`crate::compound::CompoundVisual`] but lives in the on-disk visual
+/// schema; the loader converts one into the other.
+///
+/// **Why a separate enum**: `CompoundVisual` is a runtime-side type
+/// (carries `bevy::Vec2`, etc.) while `CompoundVisualSpec` is the
+/// JSON-serializable authoring shape. Keeping them separate avoids
+/// forcing serde derives onto every Bevy primitive the renderer might
+/// later need.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum CompoundVisualSpec {
+    /// A simple rectangular body with the compound name centered.
+    /// (Same as the no-spec fallback, but lets a canvas pin a specific
+    /// size / label override.)
+    LabeledBox {
+        #[serde(default = "default_compound_box_w")]
+        width: f32,
+        #[serde(default = "default_compound_box_h")]
+        height: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
+    /// Render the compound as an explicit grid of small bodies, one
+    /// per inner member. The author supplies a `member_pattern`
+    /// containing `{x}` / `{y}` placeholders that are filled in for
+    /// each `(col, row)` and looked up in the sim's node index. Each
+    /// cell is painted by reading a slot from its source node — the
+    /// same `binary_slot` semantics as the existing class paint.
+    ///
+    /// This is the minimum useful "compound visual driven by its
+    /// parts" — enough to make Game of Life look like Game of Life on
+    /// the canvas without exposing the inner cells as separate bodies.
+    /// Future variants will let visuals do richer things (per-slot
+    /// gradients, vector glyphs, scripted layouts); this one was the
+    /// concrete need on the table today.
+    Grid {
+        columns: u32,
+        rows: u32,
+        cell_size: f32,
+        #[serde(default)]
+        gap: f32,
+        member_pattern: String,
+        paint: PaintSpec,
+    },
+}
+
+fn default_compound_box_w() -> f32 { 220.0 }
+fn default_compound_box_h() -> f32 { 140.0 }
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Viewport {
     #[serde(default)]
@@ -188,6 +243,12 @@ pub struct LoadedCanvas {
     /// Absolute path the canvas was loaded from — kept so callers can
     /// save back to the same location without the user re-picking a path.
     pub path: PathBuf,
+    /// Authoring-time compound metadata (param names + evaluated
+    /// defaults) extracted from `main.flow` before expansion. Surfaced
+    /// to the inspector so the user can see the construction params
+    /// of any compound on the canvas. Read-only at the moment;
+    /// editing + rebuild is the next step.
+    pub compound_params: Vec<flow::dsl::expand::CompoundParamSummary>,
 }
 
 /// Read a `foo.whiteboard/` directory and hydrate it into a running sim.
@@ -244,8 +305,16 @@ pub fn load_canvas(path: impl AsRef<Path>, seed: u64) -> Result<LoadedCanvas, St
     let main_path = path.join("main.flow");
     let main_src = fs::read_to_string(&main_path)
         .map_err(|e| format!("reading {}: {}", main_path.display(), e))?;
-    let file = flow::dsl::parse(&main_src)
+    let raw = flow::dsl::parse(&main_src)
         .map_err(|e| format!("parsing main.flow: {}", e))?;
+    // Capture compound param metadata BEFORE expansion consumes it —
+    // expansion folds defaults into the residual AST and the inspector
+    // would otherwise have nowhere to learn `width: 5, height: 5`
+    // from. Same `&raw` reused for expansion below so we don't pay
+    // for a re-parse.
+    let compound_params = flow::dsl::expand::collect_compound_params(&raw);
+    let file = flow::dsl::expand::expand(&raw)
+        .map_err(|e| format!("expanding main.flow: {}", e))?;
     let lowered = flow::dsl::lower_into(&mut sim, &file)
         .map_err(|e| format!("lowering main.flow: {}", e))?;
 
@@ -270,6 +339,7 @@ pub fn load_canvas(path: impl AsRef<Path>, seed: u64) -> Result<LoadedCanvas, St
         sim,
         visual,
         path,
+        compound_params,
     })
 }
 
@@ -319,29 +389,83 @@ pub(crate) fn seed_from_path(
     let new_sim = canvas.sim;
     let load_data = driver.0.with_sim_mut(move |sim| {
         *sim = new_sim;
-        let mut nodes: Vec<(flow::NodeId, String, Option<String>, Option<usize>)> = Vec::new();
+        let membership = crate::compound::compute_membership(sim);
+        let mut nodes: Vec<(flow::NodeId, String, Option<String>, Option<usize>, bool)> = Vec::new();
         for (nid, node) in sim.nodes.iter() {
             let class_name = sim.class_name(*nid).map(|s| s.to_owned());
             let color_slot = match node.slots.get("color") {
                 Some(Value::Int(n)) => Some(*n as usize),
                 _ => None,
             };
-            nodes.push((*nid, node.name.clone(), class_name, color_slot));
+            nodes.push((*nid, node.name.clone(), class_name, color_slot, node.is_compound()));
         }
         let edges: Vec<(flow::EdgeId, flow::NodeId, flow::NodeId)> = sim.edges.iter()
             .map(|(eid, e)| (*eid, e.from, e.to))
             .collect();
         let node_count = sim.nodes.len() as u32;
-        (nodes, edges, node_count)
+        (nodes, edges, node_count, membership)
     });
-    let (node_data, edge_data, node_count) = load_data;
+    let (node_data, edge_data, node_count, membership) = load_data;
     counter.0 = node_count;
+    commands.insert_resource(membership.clone());
+    // Surface compound authoring params so the inspector can show
+    // them when a compound is selected.
+    let mut by_name = std::collections::BTreeMap::new();
+    for summary in canvas.compound_params.iter() {
+        by_name.insert(summary.name.clone(), summary.params.clone());
+    }
+    commands.insert_resource(crate::compound::CompoundParamRegistry { by_name });
+
+    // Flat name → NodeId lookup so compound visuals can resolve member
+    // patterns (`Life::Cell_{x}_{y}` → real NodeIds) at spawn time.
+    let node_data_by_name: std::collections::BTreeMap<String, flow::NodeId> =
+        node_data.iter().map(|(nid, name, _, _, _)| (name.clone(), *nid)).collect();
 
     // Spawn an entity for each node. Deterministic iteration order
     // (sim returns BTreeMap order via `nodes.iter()`) so fall-back
     // grid positions stay stable across loads of the same canvas.
+    //
+    // Compound nodes get a separate spawn path that produces a
+    // labeled-box body instead of routing through the leaf gadget
+    // logic — see `crate::compound::spawn_compound_body_entity`. Inner
+    // nodes (anything `membership` reports as inside a compound) still
+    // spawn here, but they're tagged with [`Inside`] so the visibility
+    // system can hide them at the top level and reveal them when the
+    // user drills into the compound.
     let visual = &canvas.visual;
-    for (i, (nid, name, class_name, color_slot_raw)) in node_data.into_iter().enumerate() {
+    for (i, (nid, name, class_name, color_slot_raw, is_compound)) in node_data.into_iter().enumerate() {
+        let pos = visual
+            .nodes
+            .get(&name)
+            .map(|v| Vec2::new(v.pos[0], v.pos[1]))
+            .unwrap_or_else(|| default_grid_position(i));
+
+        if is_compound {
+            let visual = build_compound_visual(&name, visual.compounds.get(&name), &node_data_by_name, &theme);
+            let entity = crate::compound::spawn_compound_body_entity(
+                &mut commands,
+                &mut cache,
+                &mut meshes,
+                &mut materials,
+                &mut maps,
+                &theme,
+                &metrics,
+                nid,
+                visual,
+                name.clone(),
+                pos,
+            );
+            // A compound that's nested inside another compound is
+            // itself an "inside" entity — same visibility rules.
+            if let Some(parent) = membership.parent_of(nid) {
+                commands
+                    .entity(entity)
+                    .insert(crate::compound::Inside(parent))
+                    .insert(Visibility::Hidden);
+            }
+            continue;
+        }
+
         let kind = class_name
             .as_deref()
             .map(class_to_kind)
@@ -353,11 +477,6 @@ pub(crate) fn seed_from_path(
             .and_then(|cv| cv.shape.as_ref())
             .map(shape_spec_to_body_shape);
         let self_painted = class_visual.and_then(|cv| cv.paint.as_ref()).is_some();
-        let pos = visual
-            .nodes
-            .get(&name)
-            .map(|v| Vec2::new(v.pos[0], v.pos[1]))
-            .unwrap_or_else(|| default_grid_position(i));
         let entity = spawn_node_entity(
             &mut commands,
             &mut cache,
@@ -371,7 +490,7 @@ pub(crate) fn seed_from_path(
             shape_override,
             self_painted,
             color_slot_raw.is_some(),
-            name,
+            name.clone(),
             pos,
         );
         if let Some(slot_raw) = color_slot_raw {
@@ -383,10 +502,25 @@ pub(crate) fn seed_from_path(
                 .entity(entity)
                 .insert(paint_spec_to_component(paint, nid, &theme));
         }
+        // Tag for compound-scope visibility. Hidden by default at top
+        // level (CurrentScope = None); the visibility system flips it
+        // visible when the user drills in.
+        if let Some(parent) = membership.parent_of(nid) {
+            commands
+                .entity(entity)
+                .insert(crate::compound::Inside(parent))
+                .insert(Visibility::Hidden);
+        }
     }
 
     // Spawn entities for every existing sim edge. No topology changes
     // here — the DSL already populated them.
+    //
+    // Edges whose endpoints are *both* inside the same compound are
+    // tagged with [`EdgeInside`] so the visibility system hides them
+    // at the top level. Boundary edges (one endpoint inside, one
+    // outside) stay visible — visually rerouting them to attach to
+    // the compound's body is a follow-up.
     for (eid, from, to) in edge_data {
         if from == to {
             // Self-loops are sim plumbing (tick / done); the UI draws
@@ -396,6 +530,16 @@ pub(crate) fn seed_from_path(
         let ent = commands.spawn(FlowEdgeRef(eid)).id();
         maps.edge_to_entity.insert(eid, ent);
         maps.entity_to_edge.insert(ent, eid);
+        let from_parent = membership.parent_of(from);
+        let to_parent = membership.parent_of(to);
+        if let (Some(fp), Some(tp)) = (from_parent, to_parent) {
+            if fp == tp {
+                commands
+                    .entity(ent)
+                    .insert(crate::compound::EdgeInside(fp))
+                    .insert(Visibility::Hidden);
+            }
+        }
     }
 }
 
@@ -445,6 +589,61 @@ fn paint_spec_to_component(spec: &PaintSpec, node: flow::NodeId, theme: &Theme) 
 fn parse_hex_color(s: &str) -> Option<Color> {
     let h = s.strip_prefix('#').unwrap_or(s);
     bevy::color::Srgba::hex(h).ok().map(Into::into)
+}
+
+/// Translate a `visual.json` compound spec into the runtime
+/// [`crate::compound::CompoundVisual`] used by the renderer. Resolves
+/// `member_pattern` against `node_index` so the spawn path doesn't
+/// have to redo string substitution.
+///
+/// Missing entries fall back to a neutral [`crate::compound::CompoundVisual::default_for`]
+/// box; bad hex colors fall back to theme `ink` / `paper` (matches
+/// `paint_spec_to_component`'s policy — typos shouldn't make the
+/// visual disappear).
+fn build_compound_visual(
+    name: &str,
+    spec: Option<&CompoundVisualSpec>,
+    node_index: &std::collections::BTreeMap<String, flow::NodeId>,
+    theme: &Theme,
+) -> crate::compound::CompoundVisual {
+    let Some(spec) = spec else {
+        return crate::compound::CompoundVisual::default_for(name);
+    };
+    match spec {
+        CompoundVisualSpec::LabeledBox { width, height, label } => {
+            let label = label.clone().unwrap_or_else(||
+                name.rsplit("::").next().unwrap_or(name).to_string()
+            );
+            crate::compound::CompoundVisual::LabeledBox {
+                size: Vec2::new(*width, *height),
+                label,
+            }
+        }
+        CompoundVisualSpec::Grid { columns, rows, cell_size, gap, member_pattern, paint } => {
+            let mut members = Vec::with_capacity((columns * rows) as usize);
+            for row in 0..*rows {
+                for col in 0..*columns {
+                    let resolved = crate::compound::resolve_member_pattern(member_pattern, col, row);
+                    members.push(node_index.get(&resolved).copied());
+                }
+            }
+            let (slot, on, off) = match paint {
+                PaintSpec::BinarySlot { slot, on, off } => (
+                    slot.clone(),
+                    parse_hex_color(on).unwrap_or(theme.ink),
+                    parse_hex_color(off).unwrap_or(theme.paper),
+                ),
+            };
+            crate::compound::CompoundVisual::Grid {
+                columns: *columns,
+                rows: *rows,
+                cell_size: *cell_size,
+                gap: *gap,
+                members,
+                paint: crate::compound::GridCellPaint { slot, on, off },
+            }
+        }
+    }
 }
 
 /// Map a DSL class name to a visual [`Kind`]. The seven stock gadget

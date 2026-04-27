@@ -19,13 +19,52 @@ pub enum Item {
     /// gadget (e.g. three `SagaStep`s) without redeclaring the class.
     Instance(InstanceDecl),
     Compound(CompoundDecl),
-    Edges(Vec<EdgeDecl>),
+    Edges(Vec<EdgeBodyItem>),
     Scenario(ScenarioDecl),
+    /// Compile-time loop. Body is any list of items. Lowering only ever
+    /// sees the residual produced by the expansion pass — `For` is
+    /// rejected by `lower::lower_into`.
+    For(ItemFor),
+}
+
+/// One compile-time `for` over arbitrary items. The body is recursively
+/// expanded with each binding tuple in scope, then the residual items
+/// are spliced into the surrounding container.
+#[derive(Debug, Clone)]
+pub struct ItemFor {
+    pub bindings: Vec<ForBinding>,
+    pub body: Vec<Item>,
+}
+
+/// One iteration variable: `name in lo..hi` (half-open). Both bounds
+/// must evaluate (at expansion time) to integers; `Slot(_)` / `Param(_)`
+/// references are rejected — only template params and outer `for`
+/// bindings are in scope.
+#[derive(Debug, Clone)]
+pub struct ForBinding {
+    pub name: String,
+    pub lo: Expr,
+    pub hi: Expr,
+}
+
+/// Either an edge declaration or a compile-time `for` whose body is more
+/// edge-or-fors. Lets `edges { ... }` blocks generate edges loop-style
+/// without needing a separate top-level `for` wrapper.
+#[derive(Debug, Clone)]
+pub enum EdgeBodyItem {
+    Edge(EdgeDecl),
+    For(EdgeFor),
+}
+
+#[derive(Debug, Clone)]
+pub struct EdgeFor {
+    pub bindings: Vec<ForBinding>,
+    pub body: Vec<EdgeBodyItem>,
 }
 
 #[derive(Debug, Clone)]
 pub struct InstanceDecl {
-    pub name: String,
+    pub name: NameTpl,
     pub class: String,
     /// Slot value overrides applied after the class's defaults clone.
     /// Each override expression must lower to a literal — same shape
@@ -47,7 +86,7 @@ pub struct ParamDecl { pub name: String, pub value: Expr }
 
 #[derive(Debug, Clone)]
 pub struct NodeDecl {
-    pub name: String,
+    pub name: NameTpl,
     pub slots: Vec<SlotDecl>,
     pub rules: Vec<RuleDecl>,
     /// Bootstrap wiring run every time an instance of this class is
@@ -97,12 +136,33 @@ pub enum OnSpawnStmt {
 #[derive(Debug, Clone)]
 pub struct CompoundDecl {
     pub name: String,
+    /// Compile-time params, e.g. `compound Life(width: Int, height: Int)`.
+    /// Empty for the singleton form. Lowering never sees these — they're
+    /// consumed entirely by the expansion pass.
+    pub params: Vec<TplParam>,
+    /// Items declared inside the compound body (nodes, edges, scenarios,
+    /// nested compounds, `for` loops). Empty preserves the legacy
+    /// "compound is a port-rename shim over already-declared siblings"
+    /// behaviour. After expansion, the items are spliced into the
+    /// surrounding container with their names prefixed by the compound's
+    /// name (using `::` as the separator).
+    pub items: Vec<Item>,
     pub in_ports: Vec<PortDecl>,
     pub out_ports: Vec<PortDecl>,
 }
 
 #[derive(Debug, Clone)]
-pub struct PortDecl { pub port: String, pub inner: String }
+pub struct TplParam {
+    pub name: String,
+    pub ty: CtType,
+    pub default: Option<Expr>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CtType { Int, Bool, Str }
+
+#[derive(Debug, Clone)]
+pub struct PortDecl { pub port: String, pub inner: NameTpl }
 
 #[derive(Debug, Clone)]
 pub struct SlotDecl {
@@ -181,7 +241,7 @@ pub enum EmitTarget {
     Default,
     Self_,
     OutPort(String),
-    Target(String),              // static node name
+    Target(NameTpl),             // static node name (template-aware)
     Dynamic(Expr),               // evaluates to Str or NodeRef
 }
 
@@ -194,8 +254,52 @@ pub struct EdgeDecl {
 
 #[derive(Debug, Clone)]
 pub struct EdgeEndpoint {
-    pub node: String,
+    pub node: NameTpl,
     pub port: Option<String>,
+}
+
+/// A node-name template: a sequence of literal text and `{expr}` holes
+/// that the expansion pass collapses to a plain string by evaluating
+/// each hole's `Expr` against the surrounding compile-time environment.
+///
+/// `parts.len() == 1 && Literal(_)` is the common case (no holes); the
+/// `plain()` constructor and `as_plain()` accessor make that case
+/// ergonomic. Lowering only ever sees `as_plain().unwrap()` shapes — the
+/// expander rejects unresolved holes before lowering runs.
+#[derive(Debug, Clone)]
+pub struct NameTpl {
+    pub parts: Vec<NamePart>,
+}
+
+#[derive(Debug, Clone)]
+pub enum NamePart {
+    Literal(String),
+    Hole(Expr),
+}
+
+impl NameTpl {
+    pub fn plain<S: Into<String>>(s: S) -> Self {
+        Self { parts: vec![NamePart::Literal(s.into())] }
+    }
+    /// Returns the underlying string when this template has no holes.
+    /// Used by lowering, which is only called on residual ASTs.
+    pub fn as_plain(&self) -> Option<&str> {
+        if self.parts.len() == 1 {
+            if let NamePart::Literal(s) = &self.parts[0] {
+                return Some(s.as_str());
+            }
+        }
+        None
+    }
+    pub fn into_plain(self) -> Option<String> {
+        if self.parts.len() == 1 {
+            if let NamePart::Literal(s) = self.parts.into_iter().next().unwrap() {
+                return Some(s);
+            }
+        }
+        None
+    }
+    pub fn is_plain(&self) -> bool { self.as_plain().is_some() }
 }
 
 #[derive(Debug, Clone)]

@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "canvas": {
+    "name": "Game of Life 5x5 (DSL compound)",
+    "description": "Conway's Game of Life expressed as a single `compound Life(...)` block in main.flow. Replaces the flow-life-gen output: one parametric compound + a `for x in 0..width, y in 0..height` loop instantiates the grid and wires 8-neighbor toroidal edges. The LifeCell class lives in components/life.flow as a normal class; the compound simply instantiates it. Initial pattern is a horizontal 3-cell blinker centered on the grid."
+  }
+}

@@ -1,0 +1,47 @@
+# Game of Life 5x5 — generated entirely by the DSL's expansion pass.
+#
+# Compare with examples/life_5x5_blinker.whiteboard/main.flow which is
+# 75 lines of hand-listed nodes + 200 hand-listed edges produced by
+# `flow-life-gen`. This file is one compound block: the expansion pass
+# evaluates `for x in 0..width, y in 0..height` and the
+# `Cell_{x}_{y}` name templates, prefixes the resulting names with
+# `Life::`, and produces the same residual the generator did.
+#
+# The `LifeCell` class lives in components/life.flow as a regular
+# class (registered before main.flow is loaded), so the compound
+# only needs to instantiate it and wire the toroidal grid.
+#
+# Initial pattern: horizontal 3-cell blinker on the centre row. The
+# alive override uses a compile-time `if` over the for-binding `x` /
+# `y` and the compound's CT params `width` / `height`; the expander
+# folds it to a literal `0` or `1` per cell.
+
+compound Life(
+    width:           Int = 5,
+    height:          Int = 5,
+    period_ns:       Int = 200000000,
+    cell_latency_ns: Int = 1000000,
+) {
+    for x in 0..width, y in 0..height {
+        node Cell_{x}_{y} : LifeCell {
+            alive:     if y == (height / 2)
+                          && x >= ((width / 2) - 1)
+                          && x <= ((width / 2) + 1)
+                       then 1 else 0
+            period_ns: period_ns
+        }
+    }
+
+    edges {
+        for y in 0..height, x in 0..width {
+            Cell_{x}_{y} -> Cell_{(x + width  - 1) % width}_{(y + height - 1) % height} : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{x}_{(y + height - 1) % height}                        : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{(x + 1) % width}_{(y + height - 1) % height}          : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{(x + width  - 1) % width}_{y}                          : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{(x + 1) % width}_{y}                                   : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{(x + width  - 1) % width}_{(y + 1) % height}           : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{x}_{(y + 1) % height}                                  : cell_latency_ns
+            Cell_{x}_{y} -> Cell_{(x + 1) % width}_{(y + 1) % height}                    : cell_latency_ns
+        }
+    }
+}

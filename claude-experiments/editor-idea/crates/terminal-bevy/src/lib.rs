@@ -284,6 +284,7 @@ impl Plugin for TerminalPlugin {
                     handle_scroll,
                     handle_resize,
                     handle_keyboard,
+                    handle_file_drop,
                     sync_grid,
                     track_app_focus,
                     apply_bell_pulse,
@@ -799,6 +800,90 @@ fn handle_keyboard(
     }
 }
 
+/// Route Finder/Files-app drag-drops onto a terminal pane: insert the
+/// dropped file's absolute path (POSIX single-quoted) into the pty,
+/// followed by a trailing space. Mirrors what Terminal.app and iTerm2
+/// do when you drag a file onto their window — Claude Code's prompt
+/// then sees the path as plain text and can read the image from disk.
+///
+/// Bevy fires one `DroppedFile` event per file, so multi-file drops
+/// land as space-separated tokens for free.
+fn handle_file_drop(
+    mut drops: MessageReader<bevy::window::FileDragAndDrop>,
+    windows: Query<&Window>,
+    store: Res<TerminalStore>,
+    panes: Query<(Entity, &PaneRect, &PaneKindMarker, Option<&Visibility>), With<PaneTag>>,
+    mut focused: ResMut<FocusedPane>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let cursor = window.cursor_position();
+
+    for ev in drops.read() {
+        let bevy::window::FileDragAndDrop::DroppedFile { path_buf, .. } = ev else {
+            continue;
+        };
+        let Some(pt) = cursor else {
+            // Drop arrived without a cursor sample (window not focused
+            // yet, or pointer left between drop start + finish). Without
+            // a cursor we can't pick a pane — skip rather than guess.
+            eprintln!(
+                "[file-drop] no cursor position — ignoring drop of {}",
+                path_buf.display()
+            );
+            continue;
+        };
+        let visible: Vec<(Entity, PaneRect)> = panes
+            .iter()
+            .filter(|(_, _, kind, vis)| {
+                kind.0 == PANE_KIND && !matches!(vis, Some(Visibility::Hidden))
+            })
+            .map(|(e, r, _, _)| (e, *r))
+            .collect();
+        let Some(target) = pane_bevy::topmost_pane_at(pt, &visible) else {
+            eprintln!(
+                "[file-drop] no terminal under cursor — ignoring drop of {}",
+                path_buf.display()
+            );
+            continue;
+        };
+        let Some(data) = store.map.get(&target) else {
+            continue;
+        };
+
+        // Canonicalize to an absolute path so the receiving shell /
+        // Claude Code resolves the file regardless of its cwd. Fall
+        // back to the raw path if canonicalize fails (e.g., the source
+        // is a symlink the user wants preserved as-typed).
+        let abs = std::fs::canonicalize(path_buf).unwrap_or_else(|_| path_buf.clone());
+        let quoted = posix_single_quote(&abs.to_string_lossy());
+        let mut bytes = quoted.into_bytes();
+        bytes.push(b' ');
+        data.worker.send(WorkerMsg::Input(bytes));
+        data.worker.send(WorkerMsg::ScrollToBottom);
+        focused.0 = Some(target);
+    }
+}
+
+/// POSIX-safe shell quoting: wrap in single quotes; embed any literal
+/// `'` as `'\''` (close-quote, escaped quote, reopen-quote). Always
+/// safe regardless of the path's contents — spaces, $, *, !, newlines
+/// are all preserved literally by the shell.
+fn posix_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 fn keycode_to_ctrl_byte(code: KeyCode) -> u8 {
     // Ctrl+A = 0x01 ... Ctrl+Z = 0x1a.
     let base = match code {
@@ -1046,11 +1131,20 @@ fn handle_scroll(
 /// spuriously even while the app is backgrounded. Polling
 /// `NSApplication.isActive` each frame matches what the user actually
 /// perceives as "looking at us". Logs every transition while diagnosing.
-fn track_app_focus(mut focused: ResMut<AppFocused>) {
+fn track_app_focus(
+    mut focused: ResMut<AppFocused>,
+    mut keys: ResMut<ButtonInput<KeyCode>>,
+) {
     let now = current_app_active();
     if focused.0 != now {
         eprintln!("[focus] {} → {}", focused.0, now);
         focused.0 = now;
+        // Cmd+Tab (and any other modal app switch) eats the key-release
+        // events for whatever was held — most commonly Cmd itself. Without
+        // this reset, ButtonInput<KeyCode> stays "pressed" on Super* and
+        // every subsequent keystroke gets dropped by handle_keyboard's
+        // `if cmd { return; }` gate.
+        keys.release_all();
     }
 }
 

@@ -32,6 +32,7 @@ impl Plugin for NodesPlugin {
                 begin_drag,
                 drag_selected,
                 end_drag,
+                clear_stale_selection,
                 draw_selection_outline,
                 sync_node_labels,
                 sync_data_dot_colors,
@@ -511,6 +512,25 @@ fn end_drag(buttons: Res<ButtonInput<MouseButton>>, mut drag: ResMut<DragState>)
 }
 
 // ---------------- selection outline ----------------
+
+/// Drop the current selection whenever the user changes tool or the
+/// scope (drill-in / drill-out) changes. Without this, the previous
+/// selection's gizmo outline lingers on an entity that's now hidden
+/// (compound drill-in) or in a context where selection has no meaning
+/// (any non-Select tool). Runs after `begin_drag` in the chain so that
+/// when a double-click both selects the compound and changes scope, the
+/// scope-change clear wins.
+fn clear_stale_selection(
+    active: Res<ActiveTool>,
+    scope: Res<crate::compound::CurrentScope>,
+    mut selection: ResMut<Selection>,
+) {
+    if active.is_changed() || scope.is_changed() {
+        if selection.entity.is_some() {
+            selection.entity = None;
+        }
+    }
+}
 
 #[derive(Component)]
 struct SelectionOutline;

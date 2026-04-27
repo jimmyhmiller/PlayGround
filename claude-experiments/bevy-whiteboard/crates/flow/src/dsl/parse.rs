@@ -1,7 +1,7 @@
 //! Recursive-descent parser for the Flow DSL.
 
 use super::ast::*;
-use super::lex::{Tok, Token};
+use super::lex::{RawNamePart, Tok, Token};
 
 pub fn parse(src: &str) -> Result<File, String> {
     let tokens = super::lex::lex(src)?;
@@ -98,6 +98,32 @@ impl Parser {
         }
     }
 
+    /// Parse a name in any name-bearing position (node decls, edge
+    /// endpoints, emit targets, port `inner` mappings). Accepts plain
+    /// `Tok::Ident` and `Tok::IdentTpl(...)` (`Cell_{x}_{y}` shape) and
+    /// returns a `NameTpl`. Hole bodies are re-parsed as expressions
+    /// using the full DSL grammar.
+    fn name_tpl(&mut self) -> Result<NameTpl, String> {
+        let here = self.here();
+        match self.bump() {
+            Tok::Ident(s) => Ok(NameTpl::plain(s)),
+            Tok::IdentTpl(parts) => {
+                let mut out = Vec::with_capacity(parts.len());
+                for p in parts {
+                    out.push(match p {
+                        RawNamePart::Lit(s) => NamePart::Literal(s),
+                        RawNamePart::Hole(src) => NamePart::Hole(
+                            parse_expr_from_str(&src)
+                                .map_err(|e| format!("{}: inside `{{{}}}`: {}", here, src, e))?
+                        ),
+                    });
+                }
+                Ok(NameTpl { parts: out })
+            }
+            other => Err(format!("{}: expected name, got {:?}", here, other)),
+        }
+    }
+
     // -------- top-level --------
 
     fn parse_file(&mut self) -> Result<File, String> {
@@ -115,6 +141,7 @@ impl Parser {
             Tok::Compound => self.parse_compound(),
             Tok::Edges => self.parse_edges(),
             Tok::Scenario => self.parse_scenario(),
+            Tok::For => self.parse_for(),
             other => Err(format!("{}: expected top-level item, got {:?}", self.here(), other)),
         }
     }
@@ -137,10 +164,13 @@ impl Parser {
 
     fn parse_node(&mut self) -> Result<Item, String> {
         self.expect(Tok::Node)?;
-        let name = self.ident()?;
+        let name_tpl = self.name_tpl()?;
 
         // Instance form: `node NAME : CLASS { slot: expr; ... }`.
         // No rules / probes / on_spawn — those come from the class.
+        // Instance names support `{...}` templates so they can be the
+        // target of a surrounding `for` loop (the common case for
+        // grids — see examples/life.flow).
         if self.eat(&Tok::Colon) {
             let class = self.ident()?;
             self.expect(Tok::LBrace)?;
@@ -153,7 +183,7 @@ impl Parser {
                 overrides.push((slot, value));
             }
             self.expect(Tok::RBrace)?;
-            return Ok(Item::Instance(crate::dsl::ast::InstanceDecl { name, class, overrides }));
+            return Ok(Item::Instance(crate::dsl::ast::InstanceDecl { name: name_tpl, class, overrides }));
         }
 
         self.expect(Tok::LBrace)?;
@@ -172,7 +202,7 @@ impl Parser {
             }
         }
         self.expect(Tok::RBrace)?;
-        Ok(Item::Node(NodeDecl { name, slots, rules, on_spawn, probes }))
+        Ok(Item::Node(NodeDecl { name: name_tpl, slots, rules, on_spawn, probes }))
     }
 
     /// Parse `probes { LABEL: "FMT" ... }` where FMT is a string that may
@@ -530,8 +560,8 @@ impl Parser {
                 Ok(EmitTarget::OutPort(p))
             }
             Tok::Ident(s) if s == "default" => { self.bump(); Ok(EmitTarget::Default) }
-            Tok::Ident(_) => {
-                let n = self.ident()?;
+            Tok::Ident(_) | Tok::IdentTpl(_) => {
+                let n = self.name_tpl()?;
                 Ok(EmitTarget::Target(n))
             }
             Tok::LParen => {
@@ -547,7 +577,21 @@ impl Parser {
     fn parse_compound(&mut self) -> Result<Item, String> {
         self.expect(Tok::Compound)?;
         let name = self.ident()?;
+        // Optional compile-time params: `compound NAME (p: Int = 5, q: Bool) { ... }`.
+        let params = if self.eat(&Tok::LParen) {
+            let mut ps = Vec::new();
+            while !matches!(self.peek(), Tok::RParen | Tok::Eof) {
+                ps.push(self.parse_tpl_param()?);
+                // Trailing comma is fine.
+                if !self.eat(&Tok::Comma) { break; }
+            }
+            self.expect(Tok::RParen)?;
+            ps
+        } else {
+            Vec::new()
+        };
         self.expect(Tok::LBrace)?;
+        let mut items = Vec::new();
         let mut in_ports = Vec::new();
         let mut out_ports = Vec::new();
         loop {
@@ -555,11 +599,42 @@ impl Parser {
                 Tok::In => { self.bump(); self.parse_port_map(&mut in_ports)?; }
                 Tok::Out => { self.bump(); self.parse_port_map(&mut out_ports)?; }
                 Tok::RBrace => break,
-                other => return Err(format!("{}: expected in/out, got {:?}", self.here(), other)),
+                // Inside a compound body, anything that's a top-level
+                // item is also valid: nested nodes, edges, sub-compounds,
+                // `for` loops, scenarios, params.
+                Tok::Params | Tok::Node | Tok::Compound | Tok::Edges
+                | Tok::Scenario | Tok::For => {
+                    items.push(self.parse_item()?);
+                }
+                other => return Err(format!(
+                    "{}: expected in/out or item inside compound, got {:?}",
+                    self.here(), other
+                )),
             }
         }
         self.expect(Tok::RBrace)?;
-        Ok(Item::Compound(CompoundDecl { name, in_ports, out_ports }))
+        Ok(Item::Compound(CompoundDecl { name, params, items, in_ports, out_ports }))
+    }
+
+    fn parse_tpl_param(&mut self) -> Result<TplParam, String> {
+        let name = self.ident()?;
+        self.expect(Tok::Colon)?;
+        let ty_name = self.ident()?;
+        let ty = match ty_name.as_str() {
+            "Int" => CtType::Int,
+            "Bool" => CtType::Bool,
+            "String" => CtType::Str,
+            other => return Err(format!(
+                "{}: compound param `{}`: type must be Int|Bool|String, got `{}`",
+                self.here(), name, other
+            )),
+        };
+        let default = if self.eat(&Tok::Equals) || self.eat(&Tok::Assign) {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
+        Ok(TplParam { name, ty, default })
     }
 
     fn parse_port_map(&mut self, out: &mut Vec<PortDecl>) -> Result<(), String> {
@@ -567,7 +642,7 @@ impl Parser {
         while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
             let port = self.ident()?;
             self.expect(Tok::Colon)?;
-            let inner = self.ident()?;
+            let inner = self.name_tpl()?;
             let _ = self.eat(&Tok::Semi) || self.eat(&Tok::Comma);
             out.push(PortDecl { port, inner });
         }
@@ -580,22 +655,75 @@ impl Parser {
         self.expect(Tok::LBrace)?;
         let mut out = Vec::new();
         while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+            out.push(self.parse_edge_body_item()?);
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(Item::Edges(out))
+    }
+
+    /// Parse one item inside an `edges { }` block — either an edge
+    /// declaration or a `for` loop whose body produces more such items.
+    fn parse_edge_body_item(&mut self) -> Result<EdgeBodyItem, String> {
+        if matches!(self.peek(), Tok::For) {
+            let bindings = self.parse_for_bindings()?;
+            self.expect(Tok::LBrace)?;
+            let mut body = Vec::new();
+            while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+                body.push(self.parse_edge_body_item()?);
+            }
+            self.expect(Tok::RBrace)?;
+            Ok(EdgeBodyItem::For(EdgeFor { bindings, body }))
+        } else {
             let from = self.parse_endpoint()?;
             self.expect(Tok::Arrow)?;
             let to = self.parse_endpoint()?;
             self.expect(Tok::Colon)?;
             let latency = self.parse_expr()?;
             let _ = self.eat(&Tok::Semi);
-            out.push(EdgeDecl { from, to, latency });
+            Ok(EdgeBodyItem::Edge(EdgeDecl { from, to, latency }))
         }
-        self.expect(Tok::RBrace)?;
-        Ok(Item::Edges(out))
     }
 
     fn parse_endpoint(&mut self) -> Result<EdgeEndpoint, String> {
-        let node = self.ident()?;
+        let node = self.name_tpl()?;
         let port = if self.eat(&Tok::Dot) { Some(self.ident()?) } else { None };
         Ok(EdgeEndpoint { node, port })
+    }
+
+    /// Parse `for IDENT in LO..HI [, IDENT in LO..HI ...]` — bindings only,
+    /// caller handles the body brace block. Used by both `parse_for` (top
+    /// level / compound body) and `parse_edge_body_item` (inside `edges`).
+    fn parse_for_bindings(&mut self) -> Result<Vec<ForBinding>, String> {
+        self.expect(Tok::For)?;
+        let mut bs = Vec::new();
+        bs.push(self.parse_one_for_binding()?);
+        while self.eat(&Tok::Comma) {
+            bs.push(self.parse_one_for_binding()?);
+        }
+        Ok(bs)
+    }
+
+    fn parse_one_for_binding(&mut self) -> Result<ForBinding, String> {
+        let name = self.ident()?;
+        // `in` is a keyword (reused from compound port maps).
+        if !self.eat(&Tok::In) {
+            return Err(format!("{}: expected `in` after `for {}`", self.here(), name));
+        }
+        let lo = self.parse_expr()?;
+        self.expect(Tok::DotDot)?;
+        let hi = self.parse_expr()?;
+        Ok(ForBinding { name, lo, hi })
+    }
+
+    fn parse_for(&mut self) -> Result<Item, String> {
+        let bindings = self.parse_for_bindings()?;
+        self.expect(Tok::LBrace)?;
+        let mut body = Vec::new();
+        while !matches!(self.peek(), Tok::RBrace | Tok::Eof) {
+            body.push(self.parse_item()?);
+        }
+        self.expect(Tok::RBrace)?;
+        Ok(Item::For(ItemFor { bindings, body }))
     }
 
     fn parse_scenario(&mut self) -> Result<Item, String> {

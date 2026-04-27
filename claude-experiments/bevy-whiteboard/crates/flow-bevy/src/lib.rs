@@ -5,6 +5,7 @@
 pub mod bridge;
 pub mod camera;
 pub mod canvas;
+pub mod compound;
 pub mod edges;
 pub mod errors;
 pub mod examples;
@@ -131,6 +132,9 @@ impl Plugin for FlowBevyPlugins {
                 errors::ErrorsPlugin,
                 examples::ExamplesPlugin,
             ))
-            .add_plugins(examples_menu::ExamplesMenuPlugin);
+            .add_plugins((
+                compound::CompoundPlugin,
+                examples_menu::ExamplesMenuPlugin,
+            ));
     }
 }

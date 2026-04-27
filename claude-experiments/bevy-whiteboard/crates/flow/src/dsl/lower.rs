@@ -94,36 +94,71 @@ pub fn lower_into(sim: &mut Sim, file: &ast::File) -> Result<Lowered, String> {
                 // template) and — for back-compat with DSL files that
                 // describe a running sim — also instantiated once
                 // under its own name at load time.
+                let name = n.name.as_plain().ok_or_else(||
+                    "lower: node name still contains unresolved `{...}` interpolations \
+                     (run expand pass first)".to_string()
+                )?;
                 let tpl = build_class_template(n)?;
                 sim.register_template(tpl);
-                let id = sim.instantiate(&n.name, &n.name)?;
-                name_to_id.insert(n.name.clone(), id);
+                let id = sim.instantiate(name, name)?;
+                name_to_id.insert(name.to_string(), id);
             }
             ast::Item::Instance(inst) => {
                 // `node NAME : CLASS { ... }` — clone the class into a
                 // new instance. The class must already be registered
                 // (stock gadget, prior `node` block, or component file).
-                let id = sim.instantiate(&inst.class, &inst.name)?;
+                let inst_name = inst.name.as_plain().ok_or_else(||
+                    "lower: instance name still contains unresolved `{...}` interpolations \
+                     (run expand pass first)".to_string()
+                )?;
+                let id = sim.instantiate(&inst.class, inst_name)?;
                 let node = sim.nodes.get_mut(&id).ok_or_else(|| {
-                    format!("instantiate `{}` of `{}`: just-spawned node missing", inst.name, inst.class)
+                    format!("instantiate `{}` of `{}`: just-spawned node missing", inst_name, inst.class)
                 })?;
                 for (slot, expr) in &inst.overrides {
                     if !node.slots.contains_key(slot) {
                         return Err(format!(
                             "instance `{}` of `{}`: override targets unknown slot `{}`",
-                            inst.name, inst.class, slot
+                            inst_name, inst.class, slot
                         ));
                     }
                     let v = lower_literal(expr)?;
                     node.slots.insert(slot.clone(), v);
                 }
-                name_to_id.insert(inst.name.clone(), id);
+                name_to_id.insert(inst_name.to_string(), id);
             }
-            ast::Item::Compound(c) => pending_compounds.push(c),
+            ast::Item::Compound(c) => {
+                if !c.params.is_empty() {
+                    return Err(format!(
+                        "lower: compound `{}` still has compile-time params \
+                         (run expand pass first)", c.name));
+                }
+                if !c.items.is_empty() {
+                    return Err(format!(
+                        "lower: compound `{}` still has nested items \
+                         (run expand pass first)", c.name));
+                }
+                pending_compounds.push(c);
+            }
             ast::Item::Edges(es) => {
-                for e in es { pending_edges.push(e); }
+                for e in es {
+                    match e {
+                        ast::EdgeBodyItem::Edge(d) => pending_edges.push(d),
+                        ast::EdgeBodyItem::For(_) => {
+                            return Err(
+                                "lower: `for` inside `edges` block is unresolved \
+                                 (run expand pass first)".to_string()
+                            );
+                        }
+                    }
+                }
             }
             ast::Item::Scenario(s) => pending_scenarios.push(s),
+            ast::Item::For(_) => {
+                return Err(
+                    "lower: top-level `for` is unresolved (run expand pass first)".to_string()
+                );
+            }
         }
     }
 
@@ -131,14 +166,20 @@ pub fn lower_into(sim: &mut Sim, file: &ast::File) -> Result<Lowered, String> {
     for c in pending_compounds {
         let mut in_ports = BTreeMap::new();
         for p in &c.in_ports {
-            let inner = name_to_id.get(&p.inner)
-                .ok_or_else(|| format!("compound `{}`: unknown inner node `{}`", c.name, p.inner))?;
+            let inner_name = p.inner.as_plain().ok_or_else(||
+                format!("compound `{}`: unresolved `{{...}}` in port `{}`'s inner name", c.name, p.port)
+            )?;
+            let inner = name_to_id.get(inner_name)
+                .ok_or_else(|| format!("compound `{}`: unknown inner node `{}`", c.name, inner_name))?;
             in_ports.insert(p.port.clone(), *inner);
         }
         let mut out_ports = BTreeMap::new();
         for p in &c.out_ports {
-            let inner = name_to_id.get(&p.inner)
-                .ok_or_else(|| format!("compound `{}`: unknown inner node `{}`", c.name, p.inner))?;
+            let inner_name = p.inner.as_plain().ok_or_else(||
+                format!("compound `{}`: unresolved `{{...}}` in port `{}`'s inner name", c.name, p.port)
+            )?;
+            let inner = name_to_id.get(inner_name)
+                .ok_or_else(|| format!("compound `{}`: unknown inner node `{}`", c.name, inner_name))?;
             out_ports.insert(p.port.clone(), *inner);
         }
         let id = sim.add_compound(c.name.clone(), in_ports, out_ports);
@@ -147,10 +188,16 @@ pub fn lower_into(sim: &mut Sim, file: &ast::File) -> Result<Lowered, String> {
 
     // Phase 3: edges.
     for e in pending_edges {
-        let from = name_to_id.get(&e.from.node)
-            .ok_or_else(|| format!("edge from unknown node `{}`", e.from.node))?;
-        let to = name_to_id.get(&e.to.node)
-            .ok_or_else(|| format!("edge to unknown node `{}`", e.to.node))?;
+        let from_name = e.from.node.as_plain().ok_or_else(||
+            "edge `from`: unresolved `{...}` (run expand pass first)".to_string()
+        )?;
+        let to_name = e.to.node.as_plain().ok_or_else(||
+            "edge `to`: unresolved `{...}` (run expand pass first)".to_string()
+        )?;
+        let from = name_to_id.get(from_name)
+            .ok_or_else(|| format!("edge from unknown node `{}`", from_name))?;
+        let to = name_to_id.get(to_name)
+            .ok_or_else(|| format!("edge to unknown node `{}`", to_name))?;
         let latency = lower_expr(&e.latency, &HashSet::new())?;
         sim.add_edge_ports(*from, e.from.port.clone(), *to, e.to.port.clone(), latency);
     }
@@ -185,6 +232,9 @@ pub fn lower_into(sim: &mut Sim, file: &ast::File) -> Result<Lowered, String> {
 /// on_spawn wiring. The returned template is what gets registered in
 /// `sim.templates` and is what [`Sim::instantiate`] clones from.
 pub(crate) fn build_class_template(n: &ast::NodeDecl) -> Result<Template, String> {
+    let name = n.name.as_plain().ok_or_else(||
+        "build_class_template: node name still contains unresolved `{...}` interpolations".to_string()
+    )?.to_string();
     let mut slots = BTreeMap::new();
     for s in &n.slots {
         let v = lower_slot_init(s)?;
@@ -230,8 +280,8 @@ pub(crate) fn build_class_template(n: &ast::NodeDecl) -> Result<Template, String
     }
 
     let mut tpl = Template {
-        name: n.name.clone(),
-        node_name_prefix: n.name.clone(),
+        name: name.clone(),
+        node_name_prefix: name,
         slots,
         rules,
         edges,
@@ -352,7 +402,12 @@ fn lower_stmt(s: &ast::Stmt, bound: &mut HashSet<String>) -> Result<Ieff, String
                 ast::EmitTarget::Default => Iem::DefaultOut,
                 ast::EmitTarget::Self_ => Iem::ToTargetExpr(Ie::self_ref()),
                 ast::EmitTarget::OutPort(name) => Iem::ToOutPort(name.clone()),
-                ast::EmitTarget::Target(name) => Iem::ToTarget(name.clone()),
+                ast::EmitTarget::Target(name) => {
+                    let plain = name.as_plain().ok_or_else(||
+                        "emit target: unresolved `{...}` (run expand pass first)".to_string()
+                    )?;
+                    Iem::ToTarget(plain.to_string())
+                }
                 ast::EmitTarget::Dynamic(e) => Iem::ToTargetExpr(lower_expr(e, bound)?),
             };
             Ieff::Emit {

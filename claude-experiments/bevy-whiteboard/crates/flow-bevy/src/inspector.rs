@@ -18,6 +18,7 @@ use bevy::prelude::*;
 use flow::{NodeId, Value};
 use poster_ui::{Bold, Mono, Slider, Theme, caps_spaced, spawn_slider};
 
+use crate::compound::{CompoundBodyMarker, CompoundParamRegistry};
 use crate::errors::NodeErrorStats;
 use crate::gadgets::Kind;
 use crate::nodes::{NodeKind, Selection};
@@ -130,8 +131,10 @@ fn rebuild_inspector_on_selection_change(
     selection: Res<Selection>,
     theme: Res<Theme>,
     snapshot: Res<SimSnapshotRes>,
+    compound_params: Res<CompoundParamRegistry>,
     mount_q: Query<Entity, With<InspectorMount>>,
     kind_q: Query<(&NodeKind, &crate::bridge::FlowNodeRef)>,
+    compound_q: Query<&CompoundBodyMarker>,
     mut commands: Commands,
 ) {
     // Only rebuild when the selected entity actually changes. We still
@@ -146,6 +149,23 @@ fn rebuild_inspector_on_selection_change(
     commands.entity(mount).despawn_related::<Children>();
 
     let Some(entity) = selection.entity else { return };
+
+    // Compound bodies don't carry NodeKind — they get their own
+    // inspector layout (display name + read-only construction params).
+    // Editing + rebuild is the natural follow-up; for now seeing the
+    // params at all is the progress we wanted.
+    if let Ok(marker) = compound_q.get(entity) {
+        let nid = marker.0;
+        let Some(node) = snapshot.0.nodes.get(&nid) else { return };
+        let params = compound_params.by_name.get(&node.name).cloned().unwrap_or_default();
+        commands.entity(mount).with_children(|body| {
+            inspector_heading(body, &theme, &node.name);
+            spawn_compound_param_section(body, &theme, &params);
+            spawn_error_breakdown(body, &theme, nid);
+        });
+        return;
+    }
+
     let Ok((kind, node_ref)) = kind_q.get(entity) else { return };
     let nid = node_ref.0;
     let Some(node) = snapshot.0.nodes.get(&nid) else { return };
@@ -493,6 +513,117 @@ fn sink_row(parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands, theme: &The
         .with_children(|col| {
             simple_readout(col, theme, "Absorbed", "0", SinkCountReadout { node: nid });
         });
+}
+
+/// Compound construction-param read-only section. Surfaces every
+/// param the canvas authored (with its evaluated default) so the user
+/// can see what knobs the compound exposes. **Read-only** today —
+/// editing + rebuilding the canvas is the next iteration.
+fn spawn_compound_param_section(
+    parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
+    theme: &Theme,
+    params: &[flow::dsl::expand::CompoundParamEntry],
+) {
+    use flow::dsl::expand::CtValue;
+    if params.is_empty() {
+        // Still useful to say "no params authored on this compound"
+        // — it's quieter than the inspector going blank.
+        parent
+            .spawn(Node {
+                width: Val::Percent(100.0),
+                padding: UiRect::vertical(Val::Px(8.0)),
+                ..default()
+            })
+            .with_children(|row| {
+                row.spawn((
+                    Text::new("(no construction params)"),
+                    TextFont { font_size: 10.0, ..default() },
+                    TextColor(theme.ink_soft),
+                    Mono,
+                ));
+            });
+        return;
+    }
+    parent
+        .spawn((
+            Node {
+                width: Val::Percent(100.0),
+                flex_direction: FlexDirection::Column,
+                margin: UiRect::top(Val::Px(10.0)),
+                padding: UiRect::all(Val::Px(6.0)),
+                row_gap: Val::Px(2.0),
+                ..default()
+            },
+            BackgroundColor(theme.paper_alt),
+            InspectorChild,
+        ))
+        .with_children(|section| {
+            section.spawn((
+                Text::new(caps_spaced("Construction")),
+                TextFont { font_size: 9.0, ..default() },
+                TextColor(theme.ink_soft),
+                Bold,
+            ));
+            for p in params {
+                let value_str = match &p.default {
+                    None => "—".to_string(),
+                    Some(CtValue::Int(n)) => {
+                        // Period-style ints render as ms for ergonomics —
+                        // matches the heuristic the regular state
+                        // section uses for `_ns` slots.
+                        if p.name.ends_with("_ns") {
+                            format!("{} ms", *n / 1_000_000)
+                        } else {
+                            n.to_string()
+                        }
+                    }
+                    Some(CtValue::Bool(b)) => b.to_string(),
+                    Some(CtValue::Str(s)) => s.clone(),
+                };
+                let ty_str = match p.ty {
+                    flow::dsl::ast::CtType::Int => "Int",
+                    flow::dsl::ast::CtType::Bool => "Bool",
+                    flow::dsl::ast::CtType::Str => "String",
+                };
+                let label = format!("{}: {}", p.name, ty_str);
+                section
+                    .spawn(Node {
+                        width: Val::Percent(100.0),
+                        padding: UiRect::vertical(Val::Px(3.0)),
+                        column_gap: Val::Px(6.0),
+                        justify_content: JustifyContent::SpaceBetween,
+                        align_items: AlignItems::Center,
+                        ..default()
+                    })
+                    .with_children(|row| {
+                        row.spawn((
+                            Text::new(label),
+                            TextFont { font_size: 10.0, ..default() },
+                            TextColor(theme.ink_soft),
+                            Mono,
+                        ));
+                        row.spawn((
+                            Text::new(value_str),
+                            TextFont { font_size: 11.0, ..default() },
+                            TextColor(theme.ink),
+                            Bold,
+                            Mono,
+                            CompoundParamReadout {
+                                param: p.name.clone(),
+                            },
+                        ));
+                    });
+            }
+        });
+}
+
+/// Marker on the readout text so a future "edit + rebuild" pass can
+/// find the right cell to repaint after a slider drag without
+/// rebuilding the whole inspector.
+#[derive(Component)]
+struct CompoundParamReadout {
+    #[allow(dead_code)]
+    param: String,
 }
 
 fn simple_readout(
