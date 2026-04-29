@@ -1,0 +1,11 @@
+[workspace]
+authors = ["Jimmy Miller <jimmyhmiller@gmail.com>"]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+name = "hello-world"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+mojo = ">=1.0.0b1.dev2026042817,<2"
