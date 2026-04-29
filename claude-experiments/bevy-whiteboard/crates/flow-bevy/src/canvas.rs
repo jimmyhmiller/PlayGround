@@ -22,6 +22,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -86,6 +87,16 @@ pub struct DefaultBoot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot: Option<String>,
 }
+
+/// Live `Visual` snapshot stored as a Bevy resource at canvas-load
+/// time. The surgical-rebuild path reads from this to know per-node
+/// positions, compound visual specs, and class paint rules without
+/// keeping a reference to the original `LoadedCanvas` around.
+///
+/// `Arc` so handlers can clone cheaply when they need to take a
+/// borrow that outlives the resource's lock.
+#[derive(Resource, Default, Clone)]
+pub struct CurrentCanvasVisual(pub Arc<Visual>);
 
 // ────────────────────────────────────────────────────────────────────
 // Visual state
@@ -206,8 +217,21 @@ pub enum CompoundVisualSpec {
     /// gradients, vector glyphs, scripted layouts); this one was the
     /// concrete need on the table today.
     Grid {
+        /// Static fallback column count. Used when `columns_param` is
+        /// not set, or when the compound doesn't have a param by
+        /// that name.
+        #[serde(default)]
         columns: u32,
+        #[serde(default)]
         rows: u32,
+        /// Compound-param name driving column count (e.g. `"width"`).
+        /// Lets the grid track the compound's actual dimensions —
+        /// editing the param re-sizes the visual on the same rebuild
+        /// pass. If unset, `columns` is authoritative.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        columns_param: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rows_param: Option<String>,
         cell_size: f32,
         #[serde(default)]
         gap: f32,
@@ -246,9 +270,13 @@ pub struct LoadedCanvas {
     /// Authoring-time compound metadata (param names + evaluated
     /// defaults) extracted from `main.flow` before expansion. Surfaced
     /// to the inspector so the user can see the construction params
-    /// of any compound on the canvas. Read-only at the moment;
-    /// editing + rebuild is the next step.
+    /// of any compound on the canvas.
     pub compound_params: Vec<flow::dsl::expand::CompoundParamSummary>,
+    /// Parsed (un-expanded) main.flow AST. Cached so the live-edit
+    /// path can re-expand any compound with new overrides without
+    /// touching the disk. `None` for canvases without a main.flow
+    /// (the demo seed path).
+    pub parsed_main: std::sync::Arc<flow::dsl::ast::File>,
 }
 
 /// Read a `foo.whiteboard/` directory and hydrate it into a running sim.
@@ -310,9 +338,11 @@ pub fn load_canvas(path: impl AsRef<Path>, seed: u64) -> Result<LoadedCanvas, St
     // Capture compound param metadata BEFORE expansion consumes it —
     // expansion folds defaults into the residual AST and the inspector
     // would otherwise have nowhere to learn `width: 5, height: 5`
-    // from. Same `&raw` reused for expansion below so we don't pay
-    // for a re-parse.
+    // from. The full `raw` AST is also cached on the LoadedCanvas so
+    // the live-edit / surgical-rebuild path can re-expand any compound
+    // with overrides without re-parsing.
     let compound_params = flow::dsl::expand::collect_compound_params(&raw);
+    let parsed_main = std::sync::Arc::new(raw.clone());
     let file = flow::dsl::expand::expand(&raw)
         .map_err(|e| format!("expanding main.flow: {}", e))?;
     let lowered = flow::dsl::lower_into(&mut sim, &file)
@@ -340,6 +370,7 @@ pub fn load_canvas(path: impl AsRef<Path>, seed: u64) -> Result<LoadedCanvas, St
         visual,
         path,
         compound_params,
+        parsed_main,
     })
 }
 
@@ -352,7 +383,7 @@ pub fn load_canvas(path: impl AsRef<Path>, seed: u64) -> Result<LoadedCanvas, St
 ///
 /// Errors are logged at `error!` level and leave the canvas empty —
 /// the user can still load a built-in example from the palette.
-pub(crate) fn seed_from_path(
+pub fn seed_from_path(
     mut commands: Commands,
     mut cache: ResMut<NodeAssetCache>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -414,7 +445,13 @@ pub(crate) fn seed_from_path(
     for summary in canvas.compound_params.iter() {
         by_name.insert(summary.name.clone(), summary.params.clone());
     }
-    commands.insert_resource(crate::compound::CompoundParamRegistry { by_name });
+    commands.insert_resource(crate::compound::CompoundParamRegistry { by_name: by_name.clone() });
+    // Cache the parsed AST so live-edit can re-expand any compound
+    // with overrides without re-parsing main.flow off disk. Same for
+    // visual state — the rebuild handler needs `visual.compounds`,
+    // `visual.classes`, and per-node positions.
+    commands.insert_resource(crate::compound::CachedCanvasAst(canvas.parsed_main.clone()));
+    commands.insert_resource(CurrentCanvasVisual(Arc::new(canvas.visual.clone())));
 
     // Flat name → NodeId lookup so compound visuals can resolve member
     // patterns (`Life::Cell_{x}_{y}` → real NodeIds) at spawn time.
@@ -427,120 +464,188 @@ pub(crate) fn seed_from_path(
     //
     // Compound nodes get a separate spawn path that produces a
     // labeled-box body instead of routing through the leaf gadget
-    // logic — see `crate::compound::spawn_compound_body_entity`. Inner
-    // nodes (anything `membership` reports as inside a compound) still
-    // spawn here, but they're tagged with [`Inside`] so the visibility
-    // system can hide them at the top level and reveal them when the
-    // user drills into the compound.
+    // logic — see `crate::compound::spawn_compound_body_entity`.
+    //
+    // Every spawned entity gets a [`crate::compound::Scoped`] marker
+    // so the unified visibility system can hide / show it based on
+    // [`CurrentScope`]. The marker carries the node's own id (since a
+    // node's "owner" is itself); membership lookup at sync time
+    // resolves to the enclosing compound (or top-level if there isn't
+    // one).
     let visual = &canvas.visual;
-    for (i, (nid, name, class_name, color_slot_raw, is_compound)) in node_data.into_iter().enumerate() {
-        let pos = visual
-            .nodes
-            .get(&name)
-            .map(|v| Vec2::new(v.pos[0], v.pos[1]))
-            .unwrap_or_else(|| default_grid_position(i));
+    // Compute current param values for every compound on the canvas
+    // so `Grid` visuals can size themselves from authoring defaults
+    // (overrides will be empty at first load, but the same machinery
+    // is reused by the rebuild handler).
+    let registry_for_spawn = crate::compound::CompoundParamRegistry {
+        by_name: by_name.clone(),
+    };
+    let empty_overrides = crate::compound::CompoundOverrides::default();
+    let compound_param_values = merged_compound_params(&registry_for_spawn, &empty_overrides);
 
-        if is_compound {
-            let visual = build_compound_visual(&name, visual.compounds.get(&name), &node_data_by_name, &theme);
-            let entity = crate::compound::spawn_compound_body_entity(
-                &mut commands,
-                &mut cache,
-                &mut meshes,
-                &mut materials,
-                &mut maps,
-                &theme,
-                &metrics,
-                nid,
-                visual,
-                name.clone(),
-                pos,
-            );
-            // A compound that's nested inside another compound is
-            // itself an "inside" entity — same visibility rules.
-            if let Some(parent) = membership.parent_of(nid) {
-                commands
-                    .entity(entity)
-                    .insert(crate::compound::Inside(parent))
-                    .insert(Visibility::Hidden);
-            }
-            continue;
-        }
-
-        let kind = class_name
-            .as_deref()
-            .map(class_to_kind)
-            .unwrap_or(Kind::Worker);
-        let class_visual = class_name
-            .as_deref()
-            .and_then(|c| visual.classes.get(c));
-        let shape_override = class_visual
-            .and_then(|cv| cv.shape.as_ref())
-            .map(shape_spec_to_body_shape);
-        let self_painted = class_visual.and_then(|cv| cv.paint.as_ref()).is_some();
-        let entity = spawn_node_entity(
+    // Spawn ONLY top-scope entities here — top-level nodes (no
+    // enclosing compound) and compound bodies. Inner-of-compound
+    // entities are intentionally not spawned at canvas load: they'll
+    // appear if and only if the user drills into their compound,
+    // courtesy of `sync_canvas_population`. So the canvas's Bevy
+    // entity set always matches what the user can see.
+    for (i, (nid, name, class_name, color_slot_raw, is_compound)) in node_data.iter().enumerate() {
+        let parent = membership.parent_of(*nid);
+        // Top scope = membership.parent_of(nid) is None.
+        if parent.is_some() { continue; }
+        spawn_one_canvas_node(
             &mut commands,
             &mut cache,
             &mut meshes,
             &mut materials,
             &mut maps,
+            &mut node_colors,
             &theme,
             &metrics,
-            nid,
-            kind,
-            shape_override,
-            self_painted,
-            color_slot_raw.is_some(),
-            name.clone(),
-            pos,
+            visual,
+            &node_data_by_name,
+            &compound_param_values,
+            *nid,
+            name,
+            class_name.as_deref(),
+            *color_slot_raw,
+            *is_compound,
+            i,
         );
-        if let Some(slot_raw) = color_slot_raw {
-            let color_slot = slot_raw % theme.data.len();
-            node_colors.0.insert(nid, theme.data[color_slot]);
-        }
-        if let Some(paint) = class_visual.and_then(|cv| cv.paint.as_ref()) {
-            commands
-                .entity(entity)
-                .insert(paint_spec_to_component(paint, nid, &theme));
-        }
-        // Tag for compound-scope visibility. Hidden by default at top
-        // level (CurrentScope = None); the visibility system flips it
-        // visible when the user drills in.
-        if let Some(parent) = membership.parent_of(nid) {
-            commands
-                .entity(entity)
-                .insert(crate::compound::Inside(parent))
-                .insert(Visibility::Hidden);
-        }
     }
 
-    // Spawn entities for every existing sim edge. No topology changes
-    // here — the DSL already populated them.
-    //
-    // Edges whose endpoints are *both* inside the same compound are
-    // tagged with [`EdgeInside`] so the visibility system hides them
-    // at the top level. Boundary edges (one endpoint inside, one
-    // outside) stay visible — visually rerouting them to attach to
-    // the compound's body is a follow-up.
-    for (eid, from, to) in edge_data {
-        if from == to {
-            // Self-loops are sim plumbing (tick / done); the UI draws
-            // nothing for them and no entity is needed for routing.
+    for (eid, from, to) in &edge_data {
+        // Top scope edge: both endpoints top-level.
+        if membership.parent_of(*from).is_some() || membership.parent_of(*to).is_some() {
             continue;
         }
-        let ent = commands.spawn(FlowEdgeRef(eid)).id();
-        maps.edge_to_entity.insert(eid, ent);
-        maps.entity_to_edge.insert(ent, eid);
-        let from_parent = membership.parent_of(from);
-        let to_parent = membership.parent_of(to);
-        if let (Some(fp), Some(tp)) = (from_parent, to_parent) {
-            if fp == tp {
-                commands
-                    .entity(ent)
-                    .insert(crate::compound::EdgeInside(fp))
-                    .insert(Visibility::Hidden);
+        spawn_one_canvas_edge(&mut commands, &mut maps, &membership, *eid, *from, *to);
+    }
+}
+
+/// Spawn the Bevy entity for a single sim node. Shared between the
+/// initial canvas load and the surgical-rebuild path. The caller is
+/// responsible for picking `fallback_index` (used only when the node
+/// has no `visual.json` position) and for having `node_data_by_name`
+/// populated with at least the same node entries it's about to spawn.
+pub(crate) fn spawn_one_canvas_node(
+    commands: &mut Commands,
+    cache: &mut NodeAssetCache,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+    maps: &mut EntityMaps,
+    node_colors: &mut NodeColors,
+    theme: &Theme,
+    metrics: &AtlasMetrics,
+    visual: &Visual,
+    node_data_by_name: &std::collections::BTreeMap<String, flow::NodeId>,
+    // Per-compound `param → current value` map. Used by Grid-shaped
+    // compounds to read `width` / `height` from the live param state
+    // (defaults overlaid with overrides) instead of hardcoding
+    // dimensions in visual.json.
+    compound_param_values: &std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, flow::dsl::expand::CtValue>,
+    >,
+    nid: flow::NodeId,
+    name: &str,
+    class_name: Option<&str>,
+    color_slot_raw: Option<usize>,
+    is_compound: bool,
+    fallback_index: usize,
+) {
+    let pos = visual
+        .nodes
+        .get(name)
+        .map(|v| Vec2::new(v.pos[0], v.pos[1]))
+        .unwrap_or_else(|| default_grid_position(fallback_index));
+
+    if is_compound {
+        let empty = std::collections::BTreeMap::new();
+        let params = compound_param_values.get(name).unwrap_or(&empty);
+        let cv = build_compound_visual(name, visual.compounds.get(name), node_data_by_name, theme, params);
+        let entity = crate::compound::spawn_compound_body_entity(
+            commands, cache, meshes, materials, maps, theme, metrics, nid, cv, name.to_string(), pos,
+        );
+        // Scoped is the bookkeeping marker so `sync_canvas_population`
+        // can find this entity again later when scope changes. No
+        // Visibility::Hidden — entities only exist when their scope
+        // is current, so they're always meant to be visible.
+        commands.entity(entity).insert(crate::compound::Scoped(nid));
+        return;
+    }
+
+    let kind = class_name.map(class_to_kind).unwrap_or(Kind::Worker);
+    let class_visual = class_name.and_then(|c| visual.classes.get(c));
+    let shape_override = class_visual.and_then(|cv| cv.shape.as_ref()).map(shape_spec_to_body_shape);
+    let self_painted = class_visual.and_then(|cv| cv.paint.as_ref()).is_some();
+    let entity = spawn_node_entity(
+        commands, cache, meshes, materials, maps, theme, metrics,
+        nid, kind, shape_override, self_painted, color_slot_raw.is_some(),
+        name.to_string(), pos,
+    );
+    if let Some(slot_raw) = color_slot_raw {
+        let color_slot = slot_raw % theme.data.len();
+        node_colors.0.insert(nid, theme.data[color_slot]);
+    }
+    if let Some(paint) = class_visual.and_then(|cv| cv.paint.as_ref()) {
+        commands
+            .entity(entity)
+            .insert(paint_spec_to_component(paint, nid, theme));
+    }
+    commands.entity(entity).insert(crate::compound::Scoped(nid));
+}
+
+/// Build a `compound_name → { param → current value }` map from the
+/// authoring metadata + user overrides. The current value of a param
+/// is `override.unwrap_or(default)`; params without an evaluated
+/// default and no override are simply absent from the map.
+///
+/// Single source of truth for "what does each compound's param look
+/// like *right now*" — used by the spawn paths to drive grid
+/// dimensions and (later) by inspector readouts after a slider drag.
+pub(crate) fn merged_compound_params(
+    registry: &crate::compound::CompoundParamRegistry,
+    overrides: &crate::compound::CompoundOverrides,
+) -> std::collections::BTreeMap<String, std::collections::BTreeMap<String, flow::dsl::expand::CtValue>> {
+    let mut out: std::collections::BTreeMap<String, std::collections::BTreeMap<String, flow::dsl::expand::CtValue>> =
+        std::collections::BTreeMap::new();
+    for (compound_name, params) in &registry.by_name {
+        let entry = out.entry(compound_name.clone()).or_default();
+        for p in params {
+            if let Some(v) = &p.default {
+                entry.insert(p.name.clone(), v.clone());
             }
         }
     }
+    for (compound_name, overrides_for) in &overrides.by_compound {
+        let entry = out.entry(compound_name.clone()).or_default();
+        for (k, v) in overrides_for {
+            entry.insert(k.clone(), v.clone());
+        }
+    }
+    out
+}
+
+/// Spawn the Bevy entity for a single sim edge. Self-loops produce
+/// no entity (they're sim plumbing). The edge entity carries
+/// [`crate::compound::Scoped`] keyed on the canonical owner so the
+/// unified visibility system handles it the same way it handles
+/// nodes / packets / probes.
+pub(crate) fn spawn_one_canvas_edge(
+    commands: &mut Commands,
+    maps: &mut EntityMaps,
+    membership: &crate::compound::CompoundMembership,
+    eid: flow::EdgeId,
+    from: flow::NodeId,
+    to: flow::NodeId,
+) {
+    if from == to { return; }
+    let ent = commands.spawn(FlowEdgeRef(eid)).id();
+    maps.edge_to_entity.insert(eid, ent);
+    maps.entity_to_edge.insert(ent, eid);
+    let owner = crate::compound::canonical_edge_owner(from, to, membership);
+    commands.entity(ent).insert(crate::compound::Scoped(owner));
 }
 
 /// Fall-back layout for a canvas that has no `visual.json`. A simple
@@ -600,11 +705,12 @@ fn parse_hex_color(s: &str) -> Option<Color> {
 /// box; bad hex colors fall back to theme `ink` / `paper` (matches
 /// `paint_spec_to_component`'s policy — typos shouldn't make the
 /// visual disappear).
-fn build_compound_visual(
+pub(crate) fn build_compound_visual(
     name: &str,
     spec: Option<&CompoundVisualSpec>,
     node_index: &std::collections::BTreeMap<String, flow::NodeId>,
     theme: &Theme,
+    current_params: &std::collections::BTreeMap<String, flow::dsl::expand::CtValue>,
 ) -> crate::compound::CompoundVisual {
     let Some(spec) = spec else {
         return crate::compound::CompoundVisual::default_for(name);
@@ -619,10 +725,33 @@ fn build_compound_visual(
                 label,
             }
         }
-        CompoundVisualSpec::Grid { columns, rows, cell_size, gap, member_pattern, paint } => {
-            let mut members = Vec::with_capacity((columns * rows) as usize);
-            for row in 0..*rows {
-                for col in 0..*columns {
+        CompoundVisualSpec::Grid {
+            columns,
+            rows,
+            columns_param,
+            rows_param,
+            cell_size,
+            gap,
+            member_pattern,
+            paint,
+        } => {
+            // Resolve dimensions: prefer the compound-param reference
+            // if the canvas declared one (so editing `width` resizes
+            // the grid on rebuild), otherwise fall back to the
+            // literal `columns` / `rows` from `visual.json`.
+            let resolve_dim = |param_name: Option<&String>, fallback: u32| -> u32 {
+                if let Some(p) = param_name {
+                    if let Some(flow::dsl::expand::CtValue::Int(n)) = current_params.get(p) {
+                        if *n > 0 { return *n as u32; }
+                    }
+                }
+                fallback
+            };
+            let cols = resolve_dim(columns_param.as_ref(), *columns);
+            let rows_n = resolve_dim(rows_param.as_ref(), *rows);
+            let mut members = Vec::with_capacity((cols * rows_n) as usize);
+            for row in 0..rows_n {
+                for col in 0..cols {
                     let resolved = crate::compound::resolve_member_pattern(member_pattern, col, row);
                     members.push(node_index.get(&resolved).copied());
                 }
@@ -635,8 +764,8 @@ fn build_compound_visual(
                 ),
             };
             crate::compound::CompoundVisual::Grid {
-                columns: *columns,
-                rows: *rows,
+                columns: cols,
+                rows: rows_n,
                 cell_size: *cell_size,
                 gap: *gap,
                 members,

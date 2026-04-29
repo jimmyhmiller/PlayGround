@@ -208,3 +208,96 @@ fn plain_name_tpl_round_trips_through_expansion() {
     assert_eq!(n.as_plain(), Some("Foo"));
     assert!(n.is_plain());
 }
+
+#[test]
+fn expand_compound_subtree_with_width_override_yields_new_grid() {
+    use flow::dsl::expand::{expand_compound_subtree, CtValue};
+    use std::collections::BTreeMap;
+
+    let src = r#"
+        compound Life(width: Int = 3, height: Int = 3) {
+            for x in 0..width, y in 0..height {
+                node Cell_{x}_{y} { slots { v: Int = 0 } }
+            }
+        }
+    "#;
+    let file = dsl::parse(src).expect("parse");
+
+    // Default expansion → 3*3 = 9 cells.
+    let mut overrides = BTreeMap::new();
+    let items_default = expand_compound_subtree(&file, "Life", &overrides).expect("expand");
+    let cells_default = items_default.iter().filter(|it| matches!(it, Item::Node(_))).count();
+    assert_eq!(cells_default, 9);
+
+    // Override `width = 5` → 5*3 = 15 cells.
+    overrides.insert("width".to_string(), CtValue::Int(5));
+    let items_w5 = expand_compound_subtree(&file, "Life", &overrides).expect("expand w=5");
+    let cells_w5 = items_w5.iter().filter(|it| matches!(it, Item::Node(_))).count();
+    assert_eq!(cells_w5, 15);
+
+    // Override both → 7*4 = 28.
+    overrides.insert("height".to_string(), CtValue::Int(4));
+    let items_w5h4 = expand_compound_subtree(&file, "Life", &overrides).expect("expand w=5 h=4");
+    let cells_w5h4 = items_w5h4.iter().filter(|it| matches!(it, Item::Node(_))).count();
+    assert_eq!(cells_w5h4, 5 * 4);
+
+    // Cell names should reflect the new dimensions and be prefixed
+    // with `Life::`.
+    let names: Vec<&str> = items_w5h4.iter().filter_map(|it| match it {
+        Item::Node(n) => n.name.as_plain(),
+        _ => None,
+    }).collect();
+    assert!(names.contains(&"Life::Cell_0_0"));
+    assert!(names.contains(&"Life::Cell_4_3"));
+    assert!(!names.contains(&"Life::Cell_5_0"), "x=5 should be out of range");
+}
+
+#[test]
+fn expand_compound_subtree_rejects_unknown_compound() {
+    use flow::dsl::expand::expand_compound_subtree;
+    use std::collections::BTreeMap;
+
+    let src = r#"
+        compound Life(width: Int = 3) {
+            for x in 0..width { node Cell_{x} { slots { v: Int = 0 } } }
+        }
+    "#;
+    let file = dsl::parse(src).unwrap();
+    let err = expand_compound_subtree(&file, "Pool", &BTreeMap::new()).unwrap_err();
+    assert!(err.contains("no compound named `Pool`"), "unexpected error: {}", err);
+}
+
+#[test]
+fn expand_compound_subtree_rejects_type_mismatched_override() {
+    use flow::dsl::expand::{expand_compound_subtree, CtValue};
+    use std::collections::BTreeMap;
+
+    let src = r#"
+        compound Life(width: Int = 3) {
+            for x in 0..width { node Cell_{x} { slots { v: Int = 0 } } }
+        }
+    "#;
+    let file = dsl::parse(src).unwrap();
+    let mut overrides = BTreeMap::new();
+    overrides.insert("width".to_string(), CtValue::Bool(true));
+    let err = expand_compound_subtree(&file, "Life", &overrides).unwrap_err();
+    assert!(err.contains("override type Bool"), "unexpected error: {}", err);
+}
+
+#[test]
+fn dsl_param_range_surfaces_through_compound_param_summary() {
+    use flow::dsl::expand::{collect_compound_params, CtValue};
+
+    let src = r#"
+        compound Life(width: Int = 5 in 1..50, period_ns: Int = 200000000 in 50000000..1000000000) {
+            node Tick { slots { v: Int = 0 } }
+        }
+    "#;
+    let file = dsl::parse(src).unwrap();
+    let summaries = collect_compound_params(&file);
+    let life = summaries.iter().find(|s| s.name == "Life").unwrap();
+    let width = life.params.iter().find(|p| p.name == "width").unwrap();
+    assert!(matches!(width.range, Some((CtValue::Int(1), CtValue::Int(50)))));
+    let period = life.params.iter().find(|p| p.name == "period_ns").unwrap();
+    assert!(matches!(period.range, Some((CtValue::Int(50_000_000), CtValue::Int(1_000_000_000)))));
+}

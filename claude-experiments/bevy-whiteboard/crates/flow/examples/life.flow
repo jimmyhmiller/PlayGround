@@ -13,12 +13,17 @@
 # patterns (blinker, glider, pentadecathlon), add an `alive` override
 # to the relevant cells via additional `node Cell_{x}_{y} : LifeCell`
 # instance forms or by parameterising the `alive` expression.
+#
+# Each compound param carries an `… in LO..HI` range hint that the
+# editor's slider widget reads to pick min/max. The range is a soft
+# UX hint (the engine doesn't enforce it); pick bounds wide enough to
+# explore but not so wide that the slider feels imprecise.
 
 compound Life(
-    width:           Int = 5,
-    height:          Int = 5,
-    period_ns:       Int = 200000000,
-    cell_latency_ns: Int = 1000000,
+    width:           Int = 5            in 2..40,
+    height:          Int = 5            in 2..40,
+    period_ns:       Int = 200000000    in 50000000..1000000000,
+    cell_latency_ns: Int = 1000000      in 100000..50000000,
 ) {
     # Self-ticking Life cell. The template is reusable — declared
     # once and instantiated W×H times below.

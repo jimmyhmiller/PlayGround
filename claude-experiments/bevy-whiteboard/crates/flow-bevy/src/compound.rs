@@ -16,16 +16,19 @@
 //!   richer authoring surface (a stack/expression DSL, a script, etc.)
 //!   can be added by appending variants without touching the spawn
 //!   path or anyone else's call site.
-//! - [`Inside`] component — marker we drop on every Bevy entity whose
-//!   `flow::NodeId` belongs to a compound. `sync_compound_visibility`
-//!   reads it together with [`CurrentScope`] to decide each frame which
-//!   inner / boundary entities are visible.
+//! - [`Scoped`] component — **the** marker we drop on every Bevy
+//!   entity that visualizes a sim entity. Carries the `NodeId` whose
+//!   scope it inherits (the node itself for a node entity, an edge's
+//!   canonical owner for an edge / packet / probe). One marker, one
+//!   visibility system ([`sync_scoped_visibility`]), every layer.
 //!
 //! ## What this module deliberately does NOT do
 //!
 //! - It does not spawn entities. The canvas loader does that and
-//!   stamps `Inside` / `EdgeInside` on the right ones during the same
-//!   pass.
+//!   stamps `Scoped` on the right ones during the same pass; subsystems
+//!   that draw via single GPU entities (the packet cloud, the edge
+//!   line-list mesh) apply the same predicate inline at draw time
+//!   using [`canonical_edge_owner`] and [`CompoundMembership`].
 //! - It does not author compound visuals. The current shape is a hard
 //!   fallback; visual authoring (ie. coming from `visual.json` or the
 //!   future stack DSL) attaches a [`CompoundVisual`] component when
@@ -61,35 +64,70 @@ impl Plugin for CompoundPlugin {
         app.init_resource::<CompoundMembership>()
             .init_resource::<CurrentScope>()
             .init_resource::<CompoundParamRegistry>()
+            .init_resource::<CachedCanvasAst>()
+            .init_resource::<CompoundOverrides>()
             .init_resource::<DoubleClickTracker>()
+            .init_resource::<crate::canvas::CurrentCanvasVisual>()
+            .add_message::<RebuildCompound>()
             .add_systems(Update, (
                 drill_in_on_double_click,
                 drill_out_on_escape,
-                sync_compound_visibility,
+                sync_canvas_population,
                 sync_grid_cell_paint,
-            ).chain());
+            ).chain())
+            // Rebuild handler runs before the population sync so new
+            // sim entities are visible to it on the same frame.
+            .add_systems(Update, handle_rebuild_compound.before(sync_canvas_population));
     }
 }
 
 /// Authoring-time compound metadata, indexed by qualified compound
 /// name. Populated at canvas-load and re-populated on every reload;
 /// read by the inspector to render compound-param rows.
-///
-/// **Read-only today.** Editing + rebuild is the natural next step:
-/// the resource would gain an `overrides` map and an "apply" entry
-/// point that re-runs `parse → expand-with-overrides → lower` and
-/// respawns the world.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct CompoundParamRegistry {
     pub by_name: std::collections::BTreeMap<String, Vec<flow::dsl::expand::CompoundParamEntry>>,
 }
 
+/// Parsed (un-expanded) main.flow AST, cached at canvas-load so the
+/// surgical-rebuild path can re-expand any compound with new
+/// overrides without touching the disk. Wrapped in `Arc` so cheap
+/// clones land on event readers without copying the whole tree.
+#[derive(Resource, Default, Clone)]
+pub struct CachedCanvasAst(pub std::sync::Arc<flow::dsl::ast::File>);
+
+/// User-supplied param overrides per compound. Each compound name
+/// keys into a `param_name → CtValue` map; missing entries fall back
+/// to the param's declared default at expansion time.
+///
+/// The slider widgets mutate this resource; emitting [`RebuildCompound`]
+/// is what actually applies the new values to the running canvas.
+/// Decoupling the two means slider drag stays interactive even while
+/// a rebuild is in flight, and "set the value but don't rebuild yet"
+/// (e.g. mid-drag) is a single-resource write.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct CompoundOverrides {
+    pub by_compound: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, flow::dsl::expand::CtValue>,
+    >,
+}
+
+/// Fired when a compound's interior should be torn down and rebuilt
+/// from its source AST with the current overrides applied. Surgical:
+/// only entities and edges *inside* the named compound are touched —
+/// top-level state, sim time, scenarios, viewport, selection of
+/// non-interior entities — all preserved.
+#[derive(Message, Debug, Clone)]
+pub struct RebuildCompound(pub String);
+
 /// `child NodeId → innermost-enclosing compound NodeId`.
 ///
-/// Recomputed wholesale every time the canvas reloads. Node entities
-/// that are inside any compound carry an [`Inside`] marker that mirrors
-/// the *inner-most* entry from this map; outer ancestry is recovered
-/// by walking the map (`while let Some(parent) = membership.get(&nid)`).
+/// Recomputed wholesale every time the canvas reloads. Every visual
+/// entity carries a [`Scoped`] marker pointing at the NodeId whose
+/// scope it inherits; this map answers "what compound does that
+/// NodeId live in" in one lookup. Outer ancestry is recovered by
+/// walking the map repeatedly.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct CompoundMembership {
     pub parent: BTreeMap<NodeId, NodeId>,
@@ -280,25 +318,57 @@ pub fn resolve_member_pattern(pattern: &str, x: u32, y: u32) -> String {
 // Markers + visibility
 // ─────────────────────────────────────────────────────────────────────
 
-/// Marker stamped on each node entity that lives inside a compound.
-/// Carries the **innermost** enclosing compound's `NodeId`. The
-/// visibility system reads this against [`CurrentScope`] to decide
-/// per-frame whether the entity is rendered.
+/// **The** scope marker. Stamped on every Bevy entity that visualizes
+/// a sim entity (node body, edge line, traveling packet, edge label,
+/// probe readout, …) and carries the `NodeId` whose scope it inherits.
+///
+/// For a node, that's the node's own id. For an edge, packet, or
+/// edge-attached label, it's the edge's *canonical owner* —
+/// [`canonical_edge_owner`] picks the inner endpoint when both
+/// endpoints belong to the same compound (so internal edges hide with
+/// their compound) and the outer endpoint otherwise (so boundary edges
+/// stay visible when their outside end is in scope).
+///
+/// One marker, one visibility system, one rule: every visual subsystem
+/// stamps `Scoped` at spawn time and the central [`sync_scoped_visibility`]
+/// reconciles them with [`CurrentScope`] + [`CompoundMembership`].
+/// Adding a new visual subsystem? It's one `.insert(Scoped(owner))`
+/// at its spawn site — nothing else.
 #[derive(Component, Clone, Copy, Debug)]
-pub struct Inside(pub NodeId);
+pub struct Scoped(pub NodeId);
 
-/// Marker stamped on edge entities both of whose endpoints sit inside
-/// the same compound (i.e. internal wiring). Carries that compound's
-/// `NodeId`. Boundary edges (one endpoint inside, one outside) are
-/// **not** marked — they remain visible in either scope today; future
-/// work will reroute them visually to attach to the compound's body.
-#[derive(Component, Clone, Copy, Debug)]
-pub struct EdgeInside(pub NodeId);
+/// Pick the canonical owning node for an edge. The choice determines
+/// which scope the edge (and any visuals attached to it: packets,
+/// labels, …) lives in.
+///
+/// Rule: if both endpoints are inside the *same* compound, that's an
+/// internal edge → owner is either endpoint (same scope answer). If
+/// exactly one endpoint is inside a compound, that's a boundary edge
+/// → owner is the *outer* endpoint, so the edge remains visible at
+/// the top level. If neither endpoint is inside anything, owner is
+/// either.
+///
+/// The function never returns the compound body's own id — that would
+/// give edges a separate scope from the nodes they connect, which is
+/// the bug we're explicitly avoiding.
+pub fn canonical_edge_owner(from: NodeId, to: NodeId, m: &CompoundMembership) -> NodeId {
+    match (m.parent_of(from), m.parent_of(to)) {
+        (Some(a), Some(b)) if a == b => from,   // internal — both inside same compound
+        (Some(_), None) => to,                  // boundary — outer wins
+        (None, Some(_)) => from,                // boundary — outer wins
+        (Some(_), Some(_)) => from,             // cross-compound (shouldn't happen, pick one)
+        (None, None) => from,                   // both top-level
+    }
+}
 
 /// Marker stamped on the compound's own body entity. Mirrors the
 /// `flow::NodeId` so the double-click drill-in handler can tell the
 /// difference between "user clicked a compound" (zoom into it) and
-/// "user clicked a leaf" (selection / inspector).
+/// "user clicked a leaf" (selection / inspector). The body **also**
+/// carries a `Scoped`, set to its parent compound (or itself if at top
+/// level) so the unified visibility system handles it like everything
+/// else; see the special-case branch in [`sync_scoped_visibility`] for
+/// the "hide self when drilled into self" rule.
 #[derive(Component, Clone, Copy, Debug)]
 pub struct CompoundBodyMarker(pub NodeId);
 
@@ -317,59 +387,180 @@ pub struct GridCellPaintRef {
     pub off: Color,
 }
 
-/// Per-frame visibility update. Cheap when nothing changed; only does
-/// work the first frame after the canvas loads or [`CurrentScope`]
-/// flips. Intentionally bypasses any "dirty" gating for now — it's a
-/// single iteration over compound-tagged entities and the vast
-/// majority of canvases have a few hundred at most.
-fn sync_compound_visibility(
-    scope: Res<CurrentScope>,
-    mut nodes: Query<(&Inside, &mut Visibility), (Without<EdgeInside>, Without<CompoundBodyMarker>)>,
-    mut edges: Query<(&EdgeInside, &mut Visibility), (Without<Inside>, Without<CompoundBodyMarker>)>,
-    mut bodies: Query<(&CompoundBodyMarker, Option<&Inside>, &mut Visibility), Without<EdgeInside>>,
-) {
-    for (inside, mut vis) in nodes.iter_mut() {
-        *vis = compute_inside_visibility(inside.0, &scope.0);
-    }
-    for (inside, mut vis) in edges.iter_mut() {
-        *vis = compute_inside_visibility(inside.0, &scope.0);
-    }
-    // A compound body is visible iff (a) we're at the scope where it
-    // appears as one face — i.e. the user is *outside* this compound —
-    // AND (b) any enclosing parent compound is the current scope (so
-    // drilling into Outer reveals Inner's body, not Outer::Inner::Leaf).
-    for (marker, inside, mut vis) in bodies.iter_mut() {
-        let parent_scope = inside.map(|i| i.0);
-        *vis = if scope.0 == Some(marker.0) {
-            // Drilled INTO this compound — hide its outer face so the
-            // interior reads cleanly.
-            Visibility::Hidden
-        } else if parent_scope == scope.0 {
-            // Either both are None (top-level) or both point at the
-            // same enclosing compound (drilled into our parent).
-            Visibility::Visible
-        } else {
-            Visibility::Hidden
-        };
-    }
-}
+/// **The** canvas population reconciler. Diffs `EntityMaps` against
+/// what [`is_in_scope_node`] / [`is_in_scope_edge`] say should exist
+/// right now, then despawns out-of-scope entities and spawns
+/// missing in-scope ones. Runs whenever scope or membership changes
+/// (the only two inputs to the predicate).
+///
+/// This is what implements "inner cells don't exist on the canvas
+/// at the top level" — they're not Hidden, they're not present.
+/// Selection, drag, packet rendering, edge drawing all naturally
+/// stop being concerns because there's no entity for them to find.
+fn sync_canvas_population(world: &mut World) {
+    let scope_changed = world.is_resource_changed::<CurrentScope>();
+    let membership_changed = world.is_resource_changed::<CompoundMembership>();
+    if !scope_changed && !membership_changed { return; }
 
-/// "Should this inside-compound entity be visible right now?" Pulled
-/// out so node and edge updates share the same rule, and so it's easy
-/// to reuse from the (incoming) drill-in handler when it preflights a
-/// scope change.
-fn compute_inside_visibility(parent: NodeId, scope: &Option<NodeId>) -> Visibility {
-    match scope {
-        // Top-level view: nothing inside any compound is visible.
-        None => Visibility::Hidden,
-        // Drilled-in view: only entities directly inside the scope's
-        // compound are visible. (Multi-level nesting will need to walk
-        // the membership chain — wired up when we add nested-drill-in
-        // UI; for now LCD is fine because only one nesting level is
-        // exercised.)
-        Some(s) if *s == parent => Visibility::Visible,
-        Some(_) => Visibility::Hidden,
+    let scope = world.resource::<CurrentScope>().clone();
+    let membership = world.resource::<CompoundMembership>().clone();
+
+    // ── Snapshot what the sim says exists.
+    let (sim_nodes, sim_edges): (
+        Vec<(NodeId, String, Option<String>, Option<usize>, bool)>,
+        Vec<(flow::EdgeId, NodeId, NodeId)>,
+    ) = {
+        let mut driver = world.resource_mut::<crate::sim_driver::SimDriverRes>();
+        driver.0.with_sim_mut(|sim| {
+            let nodes: Vec<_> = sim.nodes.iter().map(|(id, n)| {
+                let class = sim.class_name(*id).map(|s| s.to_owned());
+                let color = match n.slots.get("color") {
+                    Some(flow::Value::Int(i)) => Some(*i as usize),
+                    _ => None,
+                };
+                (*id, n.name.clone(), class, color, n.is_compound())
+            }).collect();
+            let edges: Vec<_> = sim.edges.iter().map(|(eid, e)| (*eid, e.from, e.to)).collect();
+            (nodes, edges)
+        })
+    };
+
+    // ── Compute target set for this scope.
+    let mut target_nodes: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
+    for (nid, _, _, _, _) in &sim_nodes {
+        if is_in_scope_node(*nid, &scope, &membership) {
+            target_nodes.insert(*nid);
+        }
     }
+    let mut target_edges: std::collections::HashSet<flow::EdgeId> = std::collections::HashSet::new();
+    for (eid, from, to) in &sim_edges {
+        if is_in_scope_edge(*from, *to, &scope, &membership) {
+            target_edges.insert(*eid);
+        }
+    }
+
+    // ── Diff against EntityMaps.
+    let (current_nodes, current_edges): (Vec<NodeId>, Vec<flow::EdgeId>) = {
+        let maps = world.resource::<crate::bridge::EntityMaps>();
+        (
+            maps.node_to_entity.keys().copied().collect(),
+            maps.edge_to_entity.keys().copied().collect(),
+        )
+    };
+
+    // Node despawns: in maps but not in target.
+    let mut node_despawns: Vec<(NodeId, bevy::prelude::Entity)> = Vec::new();
+    {
+        let maps = world.resource::<crate::bridge::EntityMaps>();
+        for nid in &current_nodes {
+            if !target_nodes.contains(nid) {
+                if let Some(e) = maps.node_to_entity.get(nid).copied() {
+                    node_despawns.push((*nid, e));
+                }
+            }
+        }
+    }
+    // Edge despawns: in maps but not in target.
+    let mut edge_despawns: Vec<(flow::EdgeId, bevy::prelude::Entity)> = Vec::new();
+    {
+        let maps = world.resource::<crate::bridge::EntityMaps>();
+        for eid in &current_edges {
+            if !target_edges.contains(eid) {
+                if let Some(e) = maps.edge_to_entity.get(eid).copied() {
+                    edge_despawns.push((*eid, e));
+                }
+            }
+        }
+    }
+
+    // ── Apply despawns through Commands so the relationship system
+    // (ChildOf / Children) cleans up bidirectionally without
+    // warnings. Direct world.despawn leaves dangling parent→child
+    // references in the same-frame batch.
+    let needs_despawn = !node_despawns.is_empty() || !edge_despawns.is_empty();
+    if needs_despawn {
+        let mut state: bevy::ecs::system::SystemState<(
+            Commands,
+            ResMut<crate::bridge::EntityMaps>,
+        )> = bevy::ecs::system::SystemState::new(world);
+        let (mut commands, mut maps) = state.get_mut(world);
+        for (nid, e) in &node_despawns {
+            commands.entity(*e).despawn();
+            maps.node_to_entity.remove(nid);
+            maps.entity_to_node.remove(e);
+        }
+        for (eid, e) in &edge_despawns {
+            commands.entity(*e).despawn();
+            maps.edge_to_entity.remove(eid);
+            maps.entity_to_edge.remove(e);
+        }
+        state.apply(world);
+    }
+
+    // ── Compute spawns: in target but not in maps.
+    let to_spawn_nodes: Vec<&(NodeId, String, Option<String>, Option<usize>, bool)> = {
+        let maps = world.resource::<crate::bridge::EntityMaps>();
+        sim_nodes
+            .iter()
+            .filter(|(nid, _, _, _, _)| {
+                target_nodes.contains(nid) && !maps.node_to_entity.contains_key(nid)
+            })
+            .collect()
+    };
+    let to_spawn_edges: Vec<&(flow::EdgeId, NodeId, NodeId)> = {
+        let maps = world.resource::<crate::bridge::EntityMaps>();
+        sim_edges
+            .iter()
+            .filter(|(eid, _, _)| {
+                target_edges.contains(eid) && !maps.edge_to_entity.contains_key(eid)
+            })
+            .collect()
+    };
+
+    if to_spawn_nodes.is_empty() && to_spawn_edges.is_empty() { return; }
+
+    // ── Apply spawns.
+    let visual = world.resource::<crate::canvas::CurrentCanvasVisual>().0.clone();
+    // Names → NodeId for compound visuals' member-pattern lookup.
+    let node_data_by_name: std::collections::BTreeMap<String, NodeId> = sim_nodes
+        .iter()
+        .map(|(id, name, _, _, _)| (name.clone(), *id))
+        .collect();
+    // Live param map (defaults ⊕ overrides) for `Grid` dimensions.
+    let compound_param_values = {
+        let registry = world.resource::<CompoundParamRegistry>().clone();
+        let overrides = world.resource::<CompoundOverrides>().clone();
+        crate::canvas::merged_compound_params(&registry, &overrides)
+    };
+
+    let mut state: bevy::ecs::system::SystemState<(
+        Commands,
+        ResMut<crate::nodes::NodeAssetCache>,
+        ResMut<Assets<Mesh>>,
+        ResMut<Assets<ColorMaterial>>,
+        ResMut<crate::bridge::EntityMaps>,
+        ResMut<crate::tool::NodeColors>,
+        Res<crate::theme::Theme>,
+        Res<crate::bitmap_label::AtlasMetrics>,
+    )> = bevy::ecs::system::SystemState::new(world);
+    {
+        let (mut commands, mut cache, mut meshes, mut materials, mut maps, mut node_colors, theme, metrics) =
+            state.get_mut(world);
+        for (i, (nid, name, class_name, color_slot_raw, is_compound)) in to_spawn_nodes.iter().enumerate() {
+            crate::canvas::spawn_one_canvas_node(
+                &mut commands, &mut cache, &mut meshes, &mut materials,
+                &mut maps, &mut node_colors, &theme, &metrics,
+                &visual, &node_data_by_name, &compound_param_values,
+                *nid, name, class_name.as_deref(), *color_slot_raw, *is_compound, i,
+            );
+        }
+        for (eid, from, to) in &to_spawn_edges {
+            crate::canvas::spawn_one_canvas_edge(
+                &mut commands, &mut maps, &membership, *eid, *from, *to,
+            );
+        }
+    }
+    state.apply(world);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -398,17 +589,107 @@ pub fn spawn_compound_body_entity(
     full_name: String,
     pos: Vec2,
 ) -> Entity {
+    // Spawn a minimal body entity (Mesh2d/material set to a temporary
+    // default — the real geometry comes from the apply step below).
+    // This pattern means the rebuild path can call the same
+    // `apply_compound_visual` helper to refresh body geometry +
+    // chrome + content without re-creating the Entity, so selection
+    // / drag state persists.
+    let placeholder_shape = BodyShape::Rect(Vec2::splat(1.0));
+    let placeholder_mesh = cache.body_mesh(&placeholder_shape, meshes);
+    let paper_mat = cache.material(theme.paper, materials);
+    let entity = commands
+        .spawn((
+            Mesh2d(placeholder_mesh),
+            MeshMaterial2d(paper_mat),
+            Transform::from_translation(pos.extend(1.0)),
+            FlowNodeRef(flow_id),
+            CompoundBodyMarker(flow_id),
+            placeholder_shape,
+        ))
+        .id();
+    maps.node_to_entity.insert(flow_id, entity);
+    maps.entity_to_node.insert(entity, flow_id);
+
+    apply_compound_visual(commands, cache, meshes, materials, theme, metrics, entity, &visual);
+    let _ = full_name;
+    entity
+}
+
+/// **The** scope predicate. A sim node should have a Bevy canvas
+/// entity right now iff this returns `true`. There are no "hidden
+/// ghosts" — entities outside the current scope don't exist on the
+/// canvas at all. Selection, dragging, hit-testing, packet rendering
+/// all stop being concerns the moment the entity isn't there.
+///
+/// Rule: a node renders iff its enclosing compound matches the
+/// current scope. Top-level nodes (no enclosing compound) render at
+/// the top scope (`CurrentScope == None`). Inner nodes of compound
+/// `C` render at scope `Some(C)`. Compound bodies follow the same
+/// rule — at top scope they render as "an outer face you can click
+/// to drill into"; when drilled into themselves they don't exist
+/// (you're inside, looking at the interior).
+pub fn is_in_scope_node(nid: NodeId, scope: &CurrentScope, membership: &CompoundMembership) -> bool {
+    membership.parent_of(nid) == scope.0
+}
+
+/// Edge variant of [`is_in_scope_node`]: an edge has a Bevy entity
+/// iff both endpoints are in scope. Boundary edges (one inside, one
+/// outside a compound) don't render at either scope today — visually
+/// rerouting them to attach to the compound's body is a documented
+/// follow-up.
+pub fn is_in_scope_edge(
+    from: NodeId,
+    to: NodeId,
+    scope: &CurrentScope,
+    membership: &CompoundMembership,
+) -> bool {
+    is_in_scope_node(from, scope, membership) && is_in_scope_node(to, scope, membership)
+}
+
+/// Pad a rectangular body to draw the surrounding ink border / shadow
+/// at the right size. Mirrors `nodes::padded_shape`'s rect arm; kept
+/// local so this module doesn't depend on a crate-private helper.
+fn pad_rect(shape: &BodyShape, pad: f32) -> BodyShape {
+    match shape {
+        BodyShape::Rect(v) => BodyShape::Rect(Vec2::new(v.x + pad * 2.0, v.y + pad * 2.0)),
+        BodyShape::Circle(r) => BodyShape::Circle(r + pad),
+    }
+}
+
+/// **The** entry point for setting / refreshing what a compound body
+/// looks like. Wipes the body's existing children, recomputes its
+/// frame size + shape from the [`CompoundVisual`], and spawns fresh
+/// chrome (border, shadow, optional label) plus per-cell content.
+///
+/// Called from initial spawn (right after the body Entity is created)
+/// and from the surgical-rebuild handler (so the body grows /
+/// shrinks when its `width` / `height` params change). One source of
+/// truth means the body's appearance is always derived from the
+/// current visual, never partially-stale.
+pub fn apply_compound_visual(
+    commands: &mut Commands,
+    cache: &mut NodeAssetCache,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+    theme: &Theme,
+    metrics: &AtlasMetrics,
+    body_entity: Entity,
+    visual: &CompoundVisual,
+) {
+    // Wipe whatever children were there last (border, shadow, label,
+    // grid cells). Cheaper than diffing — the body's children are a
+    // few-tens of entities for grids in the dozens; for thousand-cell
+    // grids we can revisit when it bites.
+    commands.entity(body_entity).despawn_related::<Children>();
+
     match visual {
         CompoundVisual::Grid { columns, rows, cell_size, gap, members, paint } => {
-            // Outer frame just big enough to contain the grid plus a
-            // little padding on every side so the cells don't touch
-            // the ink border.
             let pad = 12.0;
             let pitch = cell_size + gap;
-            let inner_w = (columns as f32) * pitch - gap;
-            let inner_h = (rows as f32) * pitch - gap;
+            let inner_w = (*columns as f32) * pitch - gap;
+            let inner_h = (*rows as f32) * pitch - gap;
             let frame_size = Vec2::new(inner_w + 2.0 * pad, inner_h + 2.0 * pad);
-
             let frame_shape = BodyShape::Rect(frame_size);
             let body_handle = cache.body_mesh(&frame_shape, meshes);
             let border_handle = cache.body_mesh(&pad_rect(&frame_shape, 3.0), meshes);
@@ -417,27 +698,24 @@ pub fn spawn_compound_body_entity(
             let ink_mat = cache.material(theme.ink, materials);
             let ink_soft_mat = cache.material(theme.ink_soft, materials);
 
-            let entity = commands.spawn((
-                Mesh2d(body_handle),
-                MeshMaterial2d(paper_mat.clone()),
-                Transform::from_translation(pos.extend(1.0)),
-                FlowNodeRef(flow_id),
-                CompoundBodyMarker(flow_id),
-                frame_shape,
-            )).id();
-            maps.node_to_entity.insert(flow_id, entity);
-            maps.entity_to_node.insert(entity, flow_id);
+            // Refresh the body's own mesh + shape (not just children)
+            // so hit-testing, shadows, and any `BodyShape`-driven layout
+            // pick up the new dimensions on rebuild.
+            commands
+                .entity(body_entity)
+                .insert(Mesh2d(body_handle))
+                .insert(MeshMaterial2d(paper_mat))
+                .insert(frame_shape);
 
-            // Pre-compute the cell mesh once — every cell is the same
-            // square, so they all share one mesh handle.
-            let cell_shape = BodyShape::Rect(Vec2::new(cell_size, cell_size));
+            let cell_shape = BodyShape::Rect(Vec2::new(*cell_size, *cell_size));
             let cell_mesh = cache.body_mesh(&cell_shape, meshes);
+            let origin_x = -inner_w * 0.5 + cell_size * 0.5;
+            let origin_y =  inner_h * 0.5 - cell_size * 0.5;
 
-            commands.entity(entity).with_children(|parent| {
-                // Frame border + shadow.
+            commands.entity(body_entity).with_children(|parent| {
                 parent.spawn((
                     Mesh2d(border_handle),
-                    MeshMaterial2d(ink_mat.clone()),
+                    MeshMaterial2d(ink_mat),
                     Transform::from_xyz(0.0, 0.0, -0.1),
                 ));
                 parent.spawn((
@@ -445,22 +723,12 @@ pub fn spawn_compound_body_entity(
                     MeshMaterial2d(ink_soft_mat),
                     Transform::from_xyz(6.0, -6.0, -0.2),
                 ));
-
-                // Grid cells. Layout: row 0 at the top, increasing y
-                // visually downward — matches how Life canvases store
-                // their cell positions in `visual.json`. The inner
-                // origin is the top-left of the cell rectangle area.
-                let origin_x = -inner_w * 0.5 + cell_size * 0.5;
-                let origin_y =  inner_h * 0.5 - cell_size * 0.5;
-                for row in 0..rows {
-                    for col in 0..columns {
+                for row in 0..*rows {
+                    for col in 0..*columns {
                         let idx = (row * columns + col) as usize;
                         let source = members.get(idx).copied().flatten();
                         let cx = origin_x + (col as f32) * pitch;
                         let cy = origin_y - (row as f32) * pitch;
-                        // Default to "off" — the per-frame painter
-                        // will flip to "on" as soon as the snapshot
-                        // shows the source slot is non-zero.
                         let mat = cache.material(paint.off, materials);
                         parent.spawn((
                             Mesh2d(cell_mesh.clone()),
@@ -476,12 +744,9 @@ pub fn spawn_compound_body_entity(
                     }
                 }
             });
-
-            let _ = full_name;
-            entity
         }
         CompoundVisual::LabeledBox { size, label } => {
-            let shape = BodyShape::Rect(size);
+            let shape = BodyShape::Rect(*size);
             let body_handle = cache.body_mesh(&shape, meshes);
             let border_handle = cache.body_mesh(&pad_rect(&shape, 3.0), meshes);
             let shadow_handle = cache.body_mesh(&pad_rect(&shape, 3.0), meshes);
@@ -489,73 +754,64 @@ pub fn spawn_compound_body_entity(
             let ink_mat = cache.material(theme.ink, materials);
             let ink_soft_mat = cache.material(theme.ink_soft, materials);
 
-            let entity = commands.spawn((
-                Mesh2d(body_handle),
-                MeshMaterial2d(paper_mat),
-                Transform::from_translation(pos.extend(1.0)),
-                FlowNodeRef(flow_id),
-                CompoundBodyMarker(flow_id),
-                shape,
-            )).id();
-            maps.node_to_entity.insert(flow_id, entity);
-            maps.entity_to_node.insert(entity, flow_id);
+            commands
+                .entity(body_entity)
+                .insert(Mesh2d(body_handle))
+                .insert(MeshMaterial2d(paper_mat))
+                .insert(shape);
 
-            commands.entity(entity).with_children(|parent| {
-                // Ink outline behind the body.
+            let label_text = label.to_uppercase();
+            let label_capacity = label_text.chars().count().max(8);
+            let label_color = theme.ink;
+            let label_cell_w = metrics.cell_w;
+            let label_cell_h = metrics.cell_h;
+            let metrics_clone = metrics.clone();
+
+            commands.entity(body_entity).with_children(|parent| {
                 parent.spawn((
                     Mesh2d(border_handle),
-                    MeshMaterial2d(ink_mat.clone()),
+                    MeshMaterial2d(ink_mat),
                     Transform::from_xyz(0.0, 0.0, -0.1),
                 ));
-                // Subtle drop shadow so the body reads as a panel
-                // rather than a thin frame.
                 parent.spawn((
                     Mesh2d(shadow_handle),
                     MeshMaterial2d(ink_soft_mat),
                     Transform::from_xyz(6.0, -6.0, -0.2),
                 ));
-                // Centered label. We deliberately render just the
-                // unqualified compound name (e.g. "Life") rather than
-                // the full path — when the user is at the top level
-                // the path is always one level, and inside a deeper
-                // scope the breadcrumb (forthcoming) carries the rest.
-                let label_text = label.to_uppercase();
-                let label_capacity = label_text.chars().count().max(8);
                 let label_entity = parent.spawn((
                     BitmapLabel {
                         text: label_text,
-                        color: theme.ink,
+                        color: label_color,
                         align: TextAlign::Center,
                         capacity: label_capacity,
-                        cell_w: metrics.cell_w,
-                        cell_h: metrics.cell_h,
+                        cell_w: label_cell_w,
+                        cell_h: label_cell_h,
                     },
                     Transform::from_xyz(0.0, 0.0, 0.1),
                     Visibility::Inherited,
                 )).id();
                 parent.commands().entity(label_entity).with_children(|cp| {
-                    spawn_label_chars(cp, metrics, label_capacity, theme.ink, metrics.cell_w, metrics.cell_h);
+                    spawn_label_chars(cp, &metrics_clone, label_capacity, label_color, label_cell_w, label_cell_h);
                 });
             });
-
-            // Suppress the unused-warning on the full qualified name
-            // — we keep the parameter so the future visual variants
-            // can use it (e.g. a script-driven body that wants to
-            // resolve sibling names relative to the compound).
-            let _ = full_name;
-            entity
         }
     }
 }
 
-/// Pad a rectangular body to draw the surrounding ink border / shadow
-/// at the right size. Mirrors `nodes::padded_shape`'s rect arm; kept
-/// local so this module doesn't depend on a crate-private helper.
-fn pad_rect(shape: &BodyShape, pad: f32) -> BodyShape {
-    match shape {
-        BodyShape::Rect(v) => BodyShape::Rect(Vec2::new(v.x + pad * 2.0, v.y + pad * 2.0)),
-        BodyShape::Circle(r) => BodyShape::Circle(r + pad),
-    }
+/// Back-compat alias — kept so callers that only want grid
+/// repopulation don't need to think about chrome refresh. New code
+/// should call [`apply_compound_visual`] directly.
+pub fn populate_grid_cells_under(
+    commands: &mut Commands,
+    cache: &mut NodeAssetCache,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+    theme: &Theme,
+    metrics: &AtlasMetrics,
+    body_entity: Entity,
+    visual: &CompoundVisual,
+) {
+    apply_compound_visual(commands, cache, meshes, materials, theme, metrics, body_entity, visual);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -661,6 +917,156 @@ fn sync_grid_cell_paint(
             mat.0 = want_handle;
         }
     }
+}
+
+/// Surgical-rebuild handler. Reads `RebuildCompound` events and, for
+/// each one, demolishes the named compound's current interior in both
+/// the sim and the Bevy world, re-expands the compound from the
+/// cached AST with the current overrides, lowers the new interior
+/// into the existing sim, and spawns Bevy entities for the new sim
+/// nodes/edges.
+///
+/// **Surgical** — top-level entities, sim time, scenarios, viewport,
+/// snapshot, and any *other* compound's interior are untouched. The
+/// compound body's Bevy entity itself stays, so selection on it
+/// survives a rebuild.
+///
+/// Implemented as an exclusive system because it needs `&mut World`
+/// (despawn, query, then mutate resources, then despawn again) and
+/// the access pattern doesn't compose into a single `SystemParam`.
+fn handle_rebuild_compound(world: &mut World) {
+    // Drain events first; we mutate them out so a re-fire doesn't
+    // double-rebuild on the next frame.
+    let pending: Vec<String> = {
+        let mut messages = world.resource_mut::<bevy::ecs::message::Messages<RebuildCompound>>();
+        let collected: Vec<String> = messages.drain().map(|m| m.0).collect();
+        collected
+    };
+    if pending.is_empty() { return; }
+
+    for compound_name in pending {
+        if let Err(e) = rebuild_one_compound(world, &compound_name) {
+            bevy::log::warn!("rebuild compound `{}`: {}", compound_name, e);
+        }
+    }
+}
+
+fn rebuild_one_compound(world: &mut World, compound_name: &str) -> Result<(), String> {
+    use crate::bridge::EntityMaps;
+    use crate::sim_driver::SimDriverRes;
+
+    // ── Step 1: re-expand the subtree with current overrides.
+    //
+    // `expand_compound_subtree` returns the interior + the compound's
+    // own port-shim. We drop the top-level port-shim so `lower_into`
+    // doesn't create a duplicate body NodeId — the original body's
+    // identity stays stable across rebuilds.
+    let new_items = {
+        let ast = world.resource::<CachedCanvasAst>().0.clone();
+        let overrides = world.resource::<CompoundOverrides>()
+            .by_compound
+            .get(compound_name)
+            .cloned()
+            .unwrap_or_default();
+        let raw = flow::dsl::expand::expand_compound_subtree(&ast, compound_name, &overrides)?;
+        raw.into_iter()
+            .filter(|item| match item {
+                flow::dsl::ast::Item::Compound(c) => c.name != compound_name,
+                _ => true,
+            })
+            .collect::<Vec<_>>()
+    };
+
+    // ── Step 2: sim demolition + lowering, in one driver borrow so
+    // intermediate state is never visible.
+    let body_id: Option<flow::NodeId>;
+    {
+        let mut driver = world.resource_mut::<SimDriverRes>();
+        let compound_name_owned = compound_name.to_string();
+        let r = driver.0.with_sim_mut(move |sim| {
+            let _removed = sim.despawn_compound_interior(&compound_name_owned, false);
+            let bid = sim.nodes.iter()
+                .find(|(_, n)| n.name == compound_name_owned)
+                .map(|(id, _)| *id);
+            let synth = flow::dsl::ast::File { items: new_items };
+            flow::dsl::lower_into(sim, &synth)
+                .map(|_| bid)
+                .map_err(|e| format!("lower_into: {}", e))
+        });
+        body_id = r?;
+    }
+
+    // ── Step 3: recompute membership and assign it. The assignment
+    // triggers `is_resource_changed::<CompoundMembership>`, which is
+    // what wakes `sync_canvas_population` next frame to reconcile
+    // Bevy entities against the new sim state — despawn old cells
+    // (whose NodeIds no longer exist), spawn new ones if the
+    // compound is currently in scope. We don't despawn or spawn here;
+    // that would duplicate the population sync's work.
+    let new_membership: CompoundMembership = {
+        let mut driver = world.resource_mut::<SimDriverRes>();
+        driver.0.with_sim_mut(|sim| compute_membership(sim))
+    };
+    *world.resource_mut::<CompoundMembership>() = new_membership;
+
+    // ── Step 4: refresh the compound body's grid view (if its Bevy
+    // entity is currently alive — i.e. the body is in scope). The
+    // sim's old cells are gone, so the body's existing grid mini-cells
+    // hold stale `GridCellPaintRef.source` references. `apply_compound_visual`
+    // wipes the body's children and re-spawns them pointing at the
+    // new NodeIds.
+    let body_entity = body_id.and_then(|id| {
+        world.resource::<EntityMaps>().node_to_entity.get(&id).copied()
+    });
+    let Some(body_entity) = body_entity else { return Ok(()); };
+
+    let visual = world.resource::<crate::canvas::CurrentCanvasVisual>().0.clone();
+    let node_data_by_name: BTreeMap<String, flow::NodeId> = {
+        let mut driver = world.resource_mut::<SimDriverRes>();
+        driver.0.with_sim_mut(|sim| {
+            sim.nodes.iter().map(|(id, n)| (n.name.clone(), *id)).collect()
+        })
+    };
+    let compound_param_values = {
+        let registry = world.resource::<CompoundParamRegistry>().clone();
+        let overrides = world.resource::<CompoundOverrides>().clone();
+        crate::canvas::merged_compound_params(&registry, &overrides)
+    };
+
+    let body_name = node_data_by_name
+        .iter()
+        .find(|(_, id)| **id == body_id.unwrap())
+        .map(|(n, _)| n.clone());
+    let Some(body_name) = body_name else { return Ok(()); };
+
+    let mut state: bevy::ecs::system::SystemState<(
+        Commands,
+        ResMut<crate::nodes::NodeAssetCache>,
+        ResMut<Assets<Mesh>>,
+        ResMut<Assets<ColorMaterial>>,
+        Res<crate::theme::Theme>,
+        Res<crate::bitmap_label::AtlasMetrics>,
+    )> = bevy::ecs::system::SystemState::new(world);
+    {
+        let (mut commands, mut cache, mut meshes, mut materials, theme, metrics) =
+            state.get_mut(world);
+        let empty = std::collections::BTreeMap::new();
+        let params = compound_param_values.get(&body_name).unwrap_or(&empty);
+        let cv = crate::canvas::build_compound_visual(
+            &body_name,
+            visual.compounds.get(&body_name),
+            &node_data_by_name,
+            &theme,
+            params,
+        );
+        apply_compound_visual(
+            &mut commands, &mut cache, &mut meshes, &mut materials,
+            &theme, &metrics, body_entity, &cv,
+        );
+    }
+    state.apply(world);
+
+    Ok(())
 }
 
 /// Pop the current scope on Escape. Single-level drill-out for now —

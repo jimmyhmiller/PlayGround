@@ -634,7 +634,22 @@ impl Parser {
         } else {
             None
         };
-        Ok(TplParam { name, ty, default })
+        // Optional range hint: `… in LO..HI`. Reuses the same
+        // expression grammar + `..` token as `for IDENT in LO..HI`,
+        // and shares the same compile-time-only semantics — bounds
+        // must evaluate to integers at expand time. Today the hint
+        // only surfaces in the UI (slider min/max); the engine
+        // doesn't enforce the bound, so a deliberate value outside
+        // it is still allowed (acts as a soft hint, not a constraint).
+        let range = if self.eat(&Tok::In) {
+            let lo = self.parse_expr()?;
+            self.expect(Tok::DotDot)?;
+            let hi = self.parse_expr()?;
+            Some((lo, hi))
+        } else {
+            None
+        };
+        Ok(TplParam { name, ty, default, range })
     }
 
     fn parse_port_map(&mut self, out: &mut Vec<PortDecl>) -> Result<(), String> {

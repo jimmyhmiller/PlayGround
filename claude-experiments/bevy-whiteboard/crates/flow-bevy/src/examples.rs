@@ -30,8 +30,25 @@ pub struct ExamplesPlugin;
 impl Plugin for ExamplesPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<LoadExample>()
-            .add_systems(Update, handle_load_example);
+            .add_systems(Update, (drain_stale_events_on_load, handle_load_example).chain());
     }
+}
+
+/// Runs immediately before [`handle_load_example`] when a LoadExample
+/// is in the queue. Drains any events the previous sim queued in the
+/// worker→main channel — they reference soon-to-be-stale NodeIds and
+/// would otherwise flood the freshly-reset VisualTimeline with ghosts
+/// after handle_load_example calls `timeline.reset()`. With high-
+/// throughput canvases (region.whiteboard) this backlog can be
+/// thousands of events deep; without the drain the user sees no
+/// example packets for many seconds while the channel clears.
+fn drain_stale_events_on_load(
+    events: MessageReader<LoadExample>,
+    event_rx: Res<crate::sim_driver::SimEventRx>,
+) {
+    if events.is_empty() { return; }
+    let rx = event_rx.0.lock().expect("event channel mutex poisoned");
+    while rx.try_recv().is_ok() { /* discard */ }
 }
 
 /// Fire this message to clear the canvas and load the chosen example.

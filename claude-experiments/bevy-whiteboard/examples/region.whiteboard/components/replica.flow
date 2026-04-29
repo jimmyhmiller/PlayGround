@@ -1,0 +1,116 @@
+# Replica — versioned KV node that participates in BOTH the read
+# quorum and the TPC commit broadcast.
+#
+# Two protocols share one node so reads and writes operate on the
+# same dataset:
+#
+#  - Read path (from QuorumReader):
+#      read_req(_)  →  read_resp(version)
+#    Stochastic flake: with probability `flake_prob` the request is
+#    silently dropped, simulating a slow / unresponsive replica.
+#    The quorum tolerates flakes as long as R replicas reply.
+#
+#  - Write path (from TPCCoordinator):
+#      prepare(_)   →  vote(1) | vote(0)
+#      commit(_)    → bumps `version` and fans `packet(color)` out
+#                     to local DB sinks (every out_neighbor that
+#                     isn't the coordinator at head(return_path))
+#      abort(_)     → no version bump, no DB write
+#
+# `up == 0` means the whole replica is offline: no reply at all to
+# read_req (the quorum may stall if too many are down) and votes no
+# on prepare so the round aborts.
+#
+# `flake_prob` only affects reads. Writes always vote (so we can
+# distinguish "slow" from "broken" cleanly).
+
+node Replica {
+    slots {
+        # Last committed version. Bumped per `commit`.
+        version:    Int = 0
+        # Counters surfaced as probes.
+        reads:      Int = 0
+        commits:    Int = 0
+        aborts:     Int = 0
+        flakes:     Int = 0
+        # Read-path flake. 0.0 = always reply. 1.0 = always drop.
+        flake_prob: Float = 0.0
+        color:      Int = 1
+        up:         Int = 1
+    }
+    probes {
+        ver:    "{version}"
+        reads:  "{reads}"
+        cmt:    "{commits}"
+        flk:    "{flake_prob}"
+    }
+
+    # ── Read path ────────────────────────────────────────────────
+
+    # Healthy reply: bump counter and pop back to QuorumReader.
+    rule on_read_ok {
+        on read_req(_)
+        when up == 1 && !Bernoulli(flake_prob)
+        do {
+            reads := reads + 1
+            emit read_resp(version) popping to (head(return_path))
+        }
+    }
+
+    # Flaked reply: drop the request silently. The quorum reader
+    # has to make do with whatever fast replies it got.
+    rule on_read_flake {
+        on read_req(_)
+        when up == 1
+        do {
+            flakes := flakes + 1
+        }
+    }
+
+    # Down reply: no answer at all. Tightens the quorum.
+    rule on_read_down {
+        on read_req(_)
+        when up == 0
+        do {
+            error "node_down" "replica: read to down replica"
+        }
+    }
+
+    # ── Write path (TPC participant role) ────────────────────────
+
+    rule on_prepare_yes {
+        on prepare(_)
+        when up == 1
+        do {
+            emit vote(1) popping to (head(return_path))
+        }
+    }
+
+    rule on_prepare_down {
+        on prepare(_)
+        when up == 0
+        do {
+            emit vote(0) popping to (head(return_path))
+        }
+    }
+
+    # Commit applies the write: bump version, fan `packet(color)`
+    # out to every neighbour that isn't the coordinator. Sinks and
+    # downstream observers count these to distinguish committed vs
+    # aborted rounds visually.
+    rule on_commit {
+        on commit(_)
+        do {
+            commits := commits + 1
+            version := version + 1
+            emit_each packet(color) to filter(out_neighbors(), "n", n != head(return_path))
+        }
+    }
+
+    rule on_abort {
+        on abort(_)
+        do {
+            aborts := aborts + 1
+        }
+    }
+}

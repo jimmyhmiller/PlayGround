@@ -661,6 +661,39 @@ impl Sim {
     /// emits into the void. Replacing them with `Nil` lets subsequent
     /// `ToTargetExpr(slot(...))` calls fall through the silent-drop
     /// path instead of chasing a ghost.
+    /// Tear down every node whose name is prefixed by `<compound_name>::`,
+    /// plus their edges, plus optionally the compound body itself.
+    /// Returns the set of removed `NodeId`s in deterministic order so
+    /// the visual layer can mirror the demolition (despawn matching
+    /// Bevy entities, drop traveling-packet rows on those edges, etc.).
+    ///
+    /// Used by the live-edit path: the canvas captures this before
+    /// re-lowering a fresh interior, and the same set drives Bevy
+    /// entity cleanup.
+    pub fn despawn_compound_interior(
+        &mut self,
+        compound_name: &str,
+        include_self: bool,
+    ) -> Vec<NodeId> {
+        let prefix = format!("{}::", compound_name);
+        let mut targets: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                n.name.starts_with(&prefix)
+                    || (include_self && n.name == compound_name)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        // Deterministic — `nodes` is a BTreeMap so the iter order is
+        // already stable; collecting NodeIds preserves it.
+        targets.sort();
+        for nid in &targets {
+            self.despawn_node(*nid);
+        }
+        targets
+    }
+
     pub fn despawn_node(&mut self, nid: NodeId) {
         let Some(_) = self.nodes.remove(&nid) else { return; };
         self.fireable.remove(&nid);

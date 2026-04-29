@@ -4,9 +4,9 @@
 
 use bevy::prelude::*;
 use poster_ui::{
-    HudButtonFill, HudButtonStyle, Mono, Theme,
+    HudButtonFill, HudButtonStyle, Mono, Slider, Theme,
     hud_bottom_left, hud_button_cell, hud_chip_strip, hud_counter, hud_counter_strip,
-    hud_speed_chip, hud_step_cell, hud_text_cell, spawn_hud_bar,
+    hud_speed_chip, hud_step_cell, hud_text_cell, spawn_hud_bar, spawn_slider_with_step,
 };
 
 use crate::bridge::SimClock;
@@ -16,7 +16,7 @@ use crate::sim_driver::{SimCommand, SimDriverRes, SimSnapshotRes};
 pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, spawn_hud)
+        app.add_systems(Startup, (spawn_hud, spawn_vis_k_popup))
             .add_systems(
                 Update,
                 (
@@ -26,6 +26,9 @@ impl Plugin for HudPlugin {
                     handle_play_button,
                     handle_step_button,
                     handle_speed_chips,
+                    handle_vis_k_click,
+                    push_vis_k_slider,
+                    sync_vis_k_slider_from_resource,
                     sync_play_button_visual,
                     sync_speed_chip_visuals,
                 ),
@@ -86,7 +89,30 @@ fn spawn_hud(mut commands: Commands, theme: Res<Theme>, clock: Res<SimClock>) {
         hud_button_cell(bar, &theme, play_style, play_glyph, HudPlayBtn);
         hud_step_cell(bar, &theme, "›|", HudStepBtn);
         hud_text_cell(bar, &theme, "0.000 ms", HudTimeText);
-        hud_text_cell(bar, &theme, "vis k=410", HudVisScale);
+        // The vis-k cell is clickable: tapping it toggles a small
+        // popup slider so the user can dial `k` directly without
+        // memorising the `-` / `=` keybindings. Bare `Button` makes
+        // it Interaction-tracked the same way the speed chips are.
+        bar.spawn((
+            Button,
+            Node {
+                min_width: Val::Px(78.0),
+                padding: UiRect::horizontal(Val::Px(12.0)),
+                border: UiRect::right(Val::Px(1.5)),
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BorderColor::all(theme.ink),
+        ))
+        .with_children(|cell| {
+            cell.spawn((
+                Text::new("vis k=…"),
+                TextFont { font_size: 13.0, ..default() },
+                TextColor(theme.ink),
+                Mono,
+                HudVisScale,
+            ));
+        });
 
         hud_chip_strip(bar, &theme, |chips| {
             for (i, (val, label)) in SPEED_OPTIONS.iter().enumerate() {
@@ -230,6 +256,115 @@ fn sync_speed_chip_visuals(
             if let Ok(mut tc) = text_q.get_mut(c) {
                 tc.0 = if active { theme.paper } else { theme.ink_soft };
             }
+        }
+    }
+}
+
+// ────────────────────────────────────────────────────────────
+// Vis-k popup slider
+// ────────────────────────────────────────────────────────────
+
+/// Marker on the popup container so we can toggle its visibility.
+#[derive(Component)]
+struct VisKPopup;
+
+/// Marker on the slider entity inside the popup. The push system
+/// converts the slider's value back into `VisualTimelineRes.set_k`;
+/// the sync system writes the resource's value back when something
+/// else (the `-` / `=` keys, a snapshot load) changes `k`.
+#[derive(Component)]
+struct VisKSlider;
+
+const VIS_K_MIN: f32 = 1.0;
+const VIS_K_MAX: f32 = 2000.0;
+
+/// Spawn the (initially hidden) popup just above where the bottom-left
+/// HUD sits. Positioning is absolute relative to the screen so we
+/// don't need to thread a layout-anchor through the HUD bar; eyeball
+/// values that line up with `hud_bottom_left()` are good enough today
+/// (and easy to revisit when the HUD shape changes).
+fn spawn_vis_k_popup(mut commands: Commands, theme: Res<Theme>, timeline: Res<VisualTimelineRes>) {
+    let initial = (timeline.0.k as f32).clamp(VIS_K_MIN, VIS_K_MAX);
+    commands
+        .spawn((
+            VisKPopup,
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(258.0),
+                bottom: Val::Px(56.0),
+                width: Val::Px(220.0),
+                padding: UiRect::all(Val::Px(10.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(theme.paper_alt),
+            BorderColor::all(theme.ink),
+            Visibility::Hidden,
+        ))
+        .with_children(|panel| {
+            spawn_slider_with_step(
+                panel,
+                &theme,
+                "vis k",
+                VIS_K_MIN,
+                VIS_K_MAX,
+                /*step=*/ 1.0,
+                initial,
+                "",
+                VisKSlider,
+            );
+        });
+}
+
+/// Toggle popup visibility on click of the vis-k cell. Pinned to the
+/// `Pressed` transition so a held click doesn't keep flipping.
+fn handle_vis_k_click(
+    cells: Query<&Interaction, (Changed<Interaction>, With<Button>)>,
+    cell_text_q: Query<&ChildOf, With<HudVisScale>>,
+    mut popup: Query<&mut Visibility, With<VisKPopup>>,
+) {
+    // Find the cell entity that owns the HudVisScale text. (We could
+    // attach the marker to the cell itself, but doing it through the
+    // text child keeps the spawn shape symmetric with the other HUD
+    // text cells.)
+    let Some(cell_entity) = cell_text_q.iter().next().map(|p| p.parent()) else { return };
+    let Ok(interaction) = cells.get(cell_entity) else { return };
+    if *interaction != Interaction::Pressed { return; }
+    let Ok(mut vis) = popup.single_mut() else { return };
+    *vis = match *vis {
+        Visibility::Hidden => Visibility::Visible,
+        _ => Visibility::Hidden,
+    };
+}
+
+/// Slider drag → write into `VisualTimelineRes.k`. Uses `set_k` so
+/// the clamp to `[K_MIN, K_MAX]` happens once and stays consistent
+/// with the keybind path.
+fn push_vis_k_slider(
+    sliders: Query<&Slider, (Changed<Slider>, With<VisKSlider>)>,
+    mut timeline: ResMut<VisualTimelineRes>,
+) {
+    for slider in sliders.iter() {
+        let new_k = slider.value as f64;
+        if (timeline.0.k - new_k).abs() < 1e-3 { continue; }
+        timeline.0.set_k(new_k);
+    }
+}
+
+/// Push `k` resource changes (e.g. `-` / `=` keybind) back to the
+/// slider so the popup matches reality whenever it's opened. Only
+/// writes when the values disagree — avoids fighting an in-flight
+/// drag.
+fn sync_vis_k_slider_from_resource(
+    timeline: Res<VisualTimelineRes>,
+    mut sliders: Query<&mut Slider, With<VisKSlider>>,
+) {
+    if !timeline.is_changed() { return; }
+    let k = (timeline.0.k as f32).clamp(VIS_K_MIN, VIS_K_MAX);
+    for mut slider in sliders.iter_mut() {
+        if (slider.value - k).abs() > 1e-3 {
+            slider.value = k;
         }
     }
 }

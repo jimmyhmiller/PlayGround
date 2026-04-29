@@ -44,11 +44,19 @@ impl Plugin for SliderPlugin {
 
 /// Horizontal slider. `value` lives in `[min, max]` inclusive. Consumers
 /// react to `Changed<Slider>` to push the new value into their domain.
+///
+/// `step > 0` snaps `value` to the nearest multiple of `step` during
+/// drag (offset from `min`), so e.g. `min = 2, step = 1` produces a
+/// slider that lands only on `2, 3, 4, …` regardless of cursor
+/// precision. `step = 0` (the default) keeps the slider continuous.
+/// Display formatting follows the same rule as before: clean
+/// integers render without a decimal.
 #[derive(Component, Debug, Clone)]
 pub struct Slider {
     pub value: f32,
     pub min: f32,
     pub max: f32,
+    pub step: f32,
 }
 
 impl Slider {
@@ -99,7 +107,29 @@ pub fn spawn_slider(
     unit: &'static str,
     extra: impl Bundle,
 ) {
-    let value = initial.clamp(min, max);
+    spawn_slider_with_step(parent, theme, label, min, max, /*step=*/ 0.0, initial, unit, extra);
+}
+
+/// `spawn_slider` plus a `step` knob — see [`Slider`]. Spawns
+/// pass-through to the same widget; the only difference is the
+/// `step` field on the `Slider` component. `step = 0.0` is identical
+/// to the continuous form.
+pub fn spawn_slider_with_step(
+    parent: &mut ChildSpawnerCommands,
+    theme: &Theme,
+    label: &str,
+    min: f32,
+    max: f32,
+    step: f32,
+    initial: f32,
+    unit: &'static str,
+    extra: impl Bundle,
+) {
+    let value = if step > 0.0 {
+        snap_to_step(initial.clamp(min, max), min, step)
+    } else {
+        initial.clamp(min, max)
+    };
     parent
         .spawn(Node {
             width: Val::Percent(100.0),
@@ -124,7 +154,7 @@ pub fn spawn_slider(
                     },
                     BackgroundColor(theme.paper),
                     BorderColor::all(theme.ink),
-                    Slider { min, max, value },
+                    Slider { min, max, value, step },
                     extra,
                 ))
                 .id();
@@ -222,9 +252,22 @@ fn continue_slider_drag(
     let center_x = xform.translation.x;
     let left = center_x - size.x * 0.5;
     let frac = ((cursor_px - left) / size.x).clamp(0.0, 1.0);
-    let new_val = slider.min + frac * (slider.max - slider.min);
+    let mut new_val = slider.min + frac * (slider.max - slider.min);
+    if slider.step > 0.0 {
+        new_val = snap_to_step(new_val, slider.min, slider.step).clamp(slider.min, slider.max);
+    }
     if (new_val - slider.value).abs() < 1e-4 { return; }
     slider.value = new_val;
+}
+
+/// Snap `v` to the nearest multiple of `step`, anchored at zero. So
+/// `step = 1` lands the slider on integer values regardless of where
+/// `min` falls — `min = 0.1, step = 1` still snaps `1.0` to `1.0`,
+/// not `1.1`. Caller is responsible for clamping back to `[min, max]`
+/// after the snap if the rounded value drifted out of range.
+fn snap_to_step(v: f32, _min: f32, step: f32) -> f32 {
+    if step <= 0.0 { return v; }
+    (v / step).round() * step
 }
 
 fn sync_slider_fill(

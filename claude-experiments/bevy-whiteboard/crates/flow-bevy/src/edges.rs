@@ -307,6 +307,8 @@ fn draw_edges(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     edge_mat: Query<&MeshMaterial2d<ColorMaterial>, With<EdgeMesh>>,
+    membership: Res<crate::compound::CompoundMembership>,
+    current_scope: Res<crate::compound::CurrentScope>,
     mut gizmos: Gizmos,
     mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
@@ -326,6 +328,12 @@ fn draw_edges(
     if !hide_all.0 {
         for (eid, edge) in snapshot.0.edges.iter() {
             if hidden.set.contains(eid) { continue; }
+            // Scope filter — same single rule as `Scoped` /
+            // `sync_scoped_visibility`. The arrow mesh is one big
+            // line-list (no per-edge entity to flag) so we apply the
+            // membership/scope check inline at draw time.
+            let owner = crate::compound::canonical_edge_owner(edge.from, edge.to, &membership);
+            if membership.parent_of(owner) != current_scope.0 { continue; }
             let Some(&ent_from) = maps.node_to_entity.get(&edge.from) else { continue; };
             let Some(&ent_to)   = maps.node_to_entity.get(&edge.to)   else { continue; };
             let Ok((tf_from, shape_from)) = nodes.get(ent_from) else { continue; };

@@ -102,11 +102,17 @@ fn spawn_probe_entity(
     world_pos: Vec2,
     probe: Probe,
 ) {
+    let host = probe.node;
     commands
         .spawn((
             Transform::from_translation(world_pos.extend(4.0)),
             GlobalTransform::default(),
             Visibility::Inherited,
+            // Probes inherit the scope of the node they attach to. The
+            // central visibility system handles the rest — at top
+            // level a probe on a Life cell hides; drill in and it
+            // appears alongside the cell.
+            crate::compound::Scoped(host),
             probe,
         ))
         .with_children(|p| {

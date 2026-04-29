@@ -18,15 +18,16 @@ fn project_root() -> PathBuf {
         .to_path_buf()
 }
 
-fn alive(sim: &Sim, name: &str) -> i64 {
+fn alive(sim: &Sim, name: &str) -> bool {
     let n = sim
         .nodes
         .values()
         .find(|n| n.name == name)
         .unwrap_or_else(|| panic!("no node named `{}`", name));
     match n.slots.get("alive") {
-        Some(Value::Int(i)) => *i,
-        other => panic!("{}.alive: expected Int, got {:?}", name, other),
+        Some(Value::Int(i)) => *i != 0,
+        Some(Value::Bool(b)) => *b,
+        other => panic!("{}.alive: expected Int or Bool, got {:?}", name, other),
     }
 }
 
@@ -45,7 +46,7 @@ fn assert_grid_named(
     for y in 0..h {
         for x in 0..w {
             let want = expected.contains(&(x, y));
-            let got = alive(sim, &format!("{}{}_{}", prefix, x, y)) == 1;
+            let got = alive(sim, &format!("{}{}_{}", prefix, x, y));
             if want != got {
                 wrong.push((x, y, want, got));
             }
@@ -62,7 +63,7 @@ fn assert_grid_named(
         msg.push_str("\nactual grid:\n");
         for y in 0..h {
             for x in 0..w {
-                msg.push(if alive(sim, &format!("{}{}_{}", prefix, x, y)) == 1 {
+                msg.push(if alive(sim, &format!("{}{}_{}", prefix, x, y)) {
                     '#'
                 } else {
                     '.'

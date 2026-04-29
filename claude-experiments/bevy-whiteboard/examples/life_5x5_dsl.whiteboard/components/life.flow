@@ -19,7 +19,7 @@
 
 node LifeCell {
     slots {
-        alive: Int = 0
+        alive: Bool = false
         period_ns: Int = 200000000
         reports_seen: Int = 0
         live_neighbors: Int = 0
@@ -34,7 +34,7 @@ node LifeCell {
         do {
             reports_seen := 0
             live_neighbors := 0
-            emit_each report(alive) to out_neighbors()
+            emit_each report(if alive then 1 else 0) to out_neighbors()
             emit tick(nil) to self
         }
     }
@@ -54,7 +54,7 @@ node LifeCell {
         do {
             reports_seen := reports_seen + 1
             live_neighbors := live_neighbors + v
-            alive := if (alive == 1 && (live_neighbors == 2 || live_neighbors == 3)) || (alive == 0 && live_neighbors == 3) then 1 else 0
+            alive := (alive && (live_neighbors == 2 || live_neighbors == 3)) || (!alive && live_neighbors == 3)
         }
     }
 }

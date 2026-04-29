@@ -1,0 +1,139 @@
+# QuorumReader — race-of-N gather. Fans out a `read_req` to every
+# neighbour (excluding the caller at head(return_path)), then
+# replies to the caller as soon as the **R-th** `read_resp` lands.
+# Stragglers after the Rth reply are silently dropped.
+#
+# This is the contrast to TPCCoordinator's "wait for ALL votes":
+# read latency is bounded by the R-th fastest replica, not the
+# slowest. With R = 2 of 3 replicas, one slow / flaky / down
+# replica doesn't slow reads down.
+#
+# The client's return_path is stashed in `pending_rp: Samples(1)`
+# across the asynchronous fan-out window — same pattern TPC uses.
+#
+# Conflict resolution (latest-wins): each `read_resp` carries the
+# replica's `version` as payload. We track `best_version` and
+# `replies_seen`; the Rth reply triggers `emit resp(best_version)`.
+# The values may diverge between replicas (esp. mid-write); the
+# response surfaces the highest version observed in the quorum.
+#
+# Note: there is no expressive way (yet) to take a max across
+# arrivals into a single `Samples` slot and reduce at quorum time
+# without storing each arrival. We use a running scalar
+# `best_version`, updated per arrival via `if v > best_version
+# then v else best_version`. This biases toward the highest seen
+# value across the whole window, including stragglers — which is
+# arguably fine for read-repair purposes.
+
+node QuorumReader {
+    slots {
+        # Quorum size R. Replies after R replies received.
+        r:             Int    = 2
+        # Phase machine.
+        # "idle"   — no transaction in flight.
+        # "racing" — fanned out, awaiting R replies.
+        phase:         String = "idle"
+        replies_seen:  Int    = 0
+        best_version:  Int    = -1
+        # Stash for the original caller's return_path. Samples(1)
+        # so we can pop it on the Rth arrival.
+        pending_rp:    Samples(1)
+        # Counters
+        reads:         Int    = 0
+        stragglers:    Int    = 0
+        rejected_busy: Int    = 0
+        color:         Int    = 1
+        up:            Int    = 1
+    }
+    probes {
+        phase:    "{phase}"
+        reads:    "{reads}"
+        strag:    "{stragglers}"
+        ver:      "{best_version}"
+    }
+
+    # ── Begin a new read transaction ─────────────────────────────
+
+    # Healthy entry: stash caller, fan out to every non-caller
+    # neighbour. `pushing self` so each replica's read_resp pops
+    # back to us (not back to the original client).
+    rule begin_read {
+        on req(c)
+        when up == 1 && c == color && phase == "idle"
+        do {
+            phase := "racing"
+            replies_seen := 0
+            best_version := -1
+            push pending_rp <- return_path
+            emit_each read_req(nil) pushing self to filter(out_neighbors(), "n", n != head(return_path))
+        }
+    }
+
+    # Reject overlapping reads. v1 simplification: one inflight
+    # read at a time. (To support concurrent reads we'd need
+    # per-tx state keyed on something like meta("corr_id"); see the
+    # GAPS note in the canvas description.)
+    rule reject_busy {
+        on req(_)
+        when phase != "idle"
+        do {
+            rejected_busy := rejected_busy + 1
+            error "quorum_busy" "quorum_reader: busy with another read"
+            emit resp_error(nil) popping to (head(return_path))
+        }
+    }
+
+    rule reject_down {
+        on req(_)
+        when up == 0
+        do {
+            error "node_down" "quorum_reader: read to down reader"
+            emit resp_error(nil) popping to (head(return_path))
+        }
+    }
+
+    rule reject_color {
+        on req(_)
+        do { error "color_mismatch" "quorum_reader: wrong-colour req rejected" }
+    }
+
+    # ── Quorum reply tally ───────────────────────────────────────
+
+    # Quorum reached on this arrival. Reply to the original client
+    # popping pending_rp's frame. Set phase back to "idle" so
+    # subsequent stragglers fall into on_straggler.
+    rule on_reply_quorum {
+        on read_resp(v)
+        when phase == "racing" && replies_seen + 1 >= r
+        do {
+            replies_seen := replies_seen + 1
+            reads := reads + 1
+            best_version := if v > best_version then v else best_version
+            phase := "idle"
+            pop pending_rp -> rp
+            emit resp(best_version) return_path tail(rp) to (head(rp))
+        }
+    }
+
+    # Sub-quorum: tally and wait. Track best version-so-far so
+    # the Rth arrival can finalise without needing to inspect
+    # earlier-arrived values.
+    rule on_reply_partial {
+        on read_resp(v)
+        when phase == "racing"
+        do {
+            replies_seen := replies_seen + 1
+            best_version := if v > best_version then v else best_version
+        }
+    }
+
+    # Late reply after quorum closed. Don't double-reply; just
+    # bump a counter. Useful for the inspector to see how many
+    # replies were "wasted" per round.
+    rule on_straggler {
+        on read_resp(_)
+        do {
+            stragglers := stragglers + 1
+        }
+    }
+}

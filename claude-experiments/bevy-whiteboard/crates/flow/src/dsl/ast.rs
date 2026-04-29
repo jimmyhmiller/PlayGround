@@ -4,7 +4,7 @@
 //! lowering step in `lower.rs` maps most things 1:1 and resolves
 //! context-dependent identifiers (slot vs variable vs param).
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct File {
     pub items: Vec<Item>,
 }
@@ -156,6 +156,14 @@ pub struct TplParam {
     pub name: String,
     pub ty: CtType,
     pub default: Option<Expr>,
+    /// Optional range hint for editable UI surfaces (sliders / steppers).
+    /// Authored as `width: Int = 5 in 1..50` — `lo` and `hi` must be
+    /// pure compile-time integer expressions, same evaluation rules as
+    /// any other CT context. Inclusive `lo`, **exclusive** `hi` (matches
+    /// Rust's `..` range semantics and the existing `for i in lo..hi`
+    /// generative loops). `None` = no hint, the inspector falls back to
+    /// `[1, max(value*4, 50)]` derived from the current value.
+    pub range: Option<(Expr, Expr)>,
 }
 
 #[derive(Debug, Clone)]

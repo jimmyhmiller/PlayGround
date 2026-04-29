@@ -102,7 +102,7 @@ impl Plugin for CanvasSeedPlugin {
 }
 
 #[derive(Resource)]
-pub(crate) struct PendingCanvas(pub Option<PathBuf>);
+pub struct PendingCanvas(pub Option<PathBuf>);
 
 /// Plugin variant of [`build_app`] for integration tests that want to start
 /// from a [`poster_ui::testing::test_app_headless`] and layer the flow-bevy

@@ -26,7 +26,7 @@
 //! That property is what lets us golden-file the expanded source in
 //! tests.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use super::ast::{
     self, CompoundDecl, EdgeBodyItem, EdgeDecl, EdgeEndpoint, EdgeFor, Expr, File, ForBinding,
@@ -119,6 +119,10 @@ pub struct CompoundParamEntry {
     /// inspector should display the param without a current value
     /// rather than fabricate one.
     pub default: Option<CtValue>,
+    /// `[lo, hi)` range hint (DSL `… in LO..HI`) with both bounds
+    /// already evaluated. `None` = no hint authored; UI falls back to
+    /// a heuristic derived from the current value.
+    pub range: Option<(CtValue, CtValue)>,
 }
 
 fn walk_compound_summaries(
@@ -137,10 +141,16 @@ fn walk_compound_summaries(
                         .default
                         .as_ref()
                         .and_then(|e| ct_eval(e, env).ok());
+                    let range = p.range.as_ref().and_then(|(lo, hi)| {
+                        let lo = ct_eval(lo, env).ok()?;
+                        let hi = ct_eval(hi, env).ok()?;
+                        Some((lo, hi))
+                    });
                     params.push(CompoundParamEntry {
                         name: p.name.clone(),
                         ty: p.ty.clone(),
                         default,
+                        range,
                     });
                 }
                 out.push(CompoundParamSummary { name: qualified.clone(), params });
@@ -160,6 +170,171 @@ fn walk_compound_summaries(
             _ => {}
         }
     }
+}
+
+/// Re-expand **just one named compound** with explicit param overrides
+/// instead of evaluating its declared defaults. Returns the residual
+/// items belonging to that compound's interior — the inner nodes,
+/// edges, scenarios, and the port-shim itself, with names already
+/// prefixed by `<compound_name>::`.
+///
+/// Used by the live-edit path: when the user drags a slider on a
+/// compound param, the canvas demolishes the compound's current
+/// interior in the sim, calls this function to produce the new
+/// interior items, and lowers them back into the same sim. None of
+/// the surrounding canvas (top-level nodes, scenarios, viewport, sim
+/// time, snapshot) is touched.
+///
+/// Override semantics: `overrides` is `param_name → CtValue`. Any
+/// param the user didn't override falls back to its declared default
+/// (same evaluation rules as `expand`). If the named compound doesn't
+/// exist, returns `Err`.
+pub fn expand_compound_subtree(
+    file: &File,
+    compound_name: &str,
+    overrides: &BTreeMap<String, CtValue>,
+) -> Result<Vec<Item>, String> {
+    let mut out = Vec::new();
+    let env = Env::new();
+    let scope = ClassScope::new();
+    let found = expand_named_compound(
+        &file.items,
+        &env,
+        &scope,
+        "",
+        compound_name,
+        overrides,
+        &mut out,
+    )?;
+    if !found {
+        return Err(format!(
+            "expand_compound_subtree: no compound named `{}` in source",
+            compound_name
+        ));
+    }
+    Ok(out)
+}
+
+/// Walk the tree looking for a `Item::Compound` whose qualified name
+/// matches `target`. When found, run the same expansion logic
+/// `expand_compound` uses but with the user-supplied overrides folded
+/// into the compound's param env. Returns `true` iff the target was
+/// matched (so the caller can surface a helpful error otherwise).
+fn expand_named_compound(
+    items: &[Item],
+    env: &Env,
+    parent_scope: &ClassScope,
+    name_prefix: &str,
+    target: &str,
+    overrides: &BTreeMap<String, CtValue>,
+    out: &mut Vec<Item>,
+) -> Result<bool, String> {
+    for item in items {
+        match item {
+            Item::Compound(c) => {
+                let qualified = prefix_str(name_prefix, &c.name);
+                if qualified == target {
+                    return expand_compound_with_overrides(
+                        c,
+                        env,
+                        parent_scope,
+                        name_prefix,
+                        overrides,
+                        out,
+                    ).map(|_| true);
+                }
+                // Recurse into nested compounds in case `target` is
+                // something like `Outer::Inner` and we need to walk
+                // through `Outer` first.
+                let mut inner_env = env.clone();
+                for p in &c.params {
+                    let v = bind_compound_param(p, env, &c.name)?;
+                    inner_env.insert(p.name.clone(), v);
+                }
+                let inner_prefix = format!("{}::", qualified);
+                let mut inner_scope = parent_scope.clone();
+                collect_class_names(&c.items, &inner_prefix, &mut inner_scope);
+                if expand_named_compound(
+                    &c.items, &inner_env, &inner_scope,
+                    &inner_prefix, target, overrides, out,
+                )? {
+                    return Ok(true);
+                }
+            }
+            Item::For(ItemFor { body, .. }) => {
+                // For loops at the file level still have to be
+                // walked — a nested compound could live inside.
+                // We don't iterate the for here because we're only
+                // looking for a *named* compound, not generating
+                // anything; the compound declaration itself doesn't
+                // depend on for-binding values (those affect its
+                // body, which we re-expand from inside `expand_compound_with_overrides`).
+                if expand_named_compound(
+                    body, env, parent_scope, name_prefix,
+                    target, overrides, out,
+                )? {
+                    return Ok(true);
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(false)
+}
+
+/// Same shape as `expand_compound`, but binds the compound's params
+/// from `(declared default ⊕ overrides)` instead of just defaults.
+/// Mismatched override types (e.g. user supplies a Bool for an Int
+/// param) are rejected; missing override + missing default is
+/// rejected with the same error `bind_compound_param` already
+/// produces.
+fn expand_compound_with_overrides(
+    c: &CompoundDecl,
+    env: &Env,
+    parent_scope: &ClassScope,
+    name_prefix: &str,
+    overrides: &BTreeMap<String, CtValue>,
+    out: &mut Vec<Item>,
+) -> Result<(), String> {
+    let qualified_name = prefix_str(name_prefix, &c.name);
+    let mut inner_env = env.clone();
+    for p in &c.params {
+        let v = if let Some(ov) = overrides.get(&p.name) {
+            // Type-check the override. We don't promote (e.g. Int → Float).
+            match (&p.ty, ov) {
+                (ast::CtType::Int, CtValue::Int(_))
+                | (ast::CtType::Bool, CtValue::Bool(_))
+                | (ast::CtType::Str, CtValue::Str(_)) => {}
+                _ => return Err(format!(
+                    "compound `{}` param `{}`: override type {} doesn't match declared type {:?}",
+                    c.name, p.name, ov.type_name(), p.ty
+                )),
+            }
+            ov.clone()
+        } else {
+            bind_compound_param(p, env, &c.name)?
+        };
+        inner_env.insert(p.name.clone(), v);
+    }
+
+    let inner_prefix = format!("{}::", qualified_name);
+    let mut inner_scope = parent_scope.clone();
+    collect_class_names(&c.items, &inner_prefix, &mut inner_scope);
+    expand_items(&c.items, &inner_env, &inner_scope, &inner_prefix, out)?;
+
+    // Emit the compound's port-shim too. Same logic as the regular
+    // `expand_compound`, kept inline to avoid threading overrides into
+    // the existing function (its callers don't need overrides).
+    let in_ports = resolve_ports(&c.in_ports, &inner_env, &inner_prefix, &qualified_name)?;
+    let out_ports = resolve_ports(&c.out_ports, &inner_env, &inner_prefix, &qualified_name)?;
+    out.push(Item::Compound(CompoundDecl {
+        name: qualified_name,
+        params: Vec::new(),
+        items: Vec::new(),
+        in_ports,
+        out_ports,
+    }));
+    Ok(())
 }
 
 /// Run the expansion pass on a parsed file. Returns a residual `File`

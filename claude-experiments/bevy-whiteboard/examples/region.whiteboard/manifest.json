@@ -1,0 +1,10 @@
+{
+  "format_version": 1,
+  "canvas": {
+    "name": "Region (saga + TPC + quorum, shared replicas)",
+    "description": "Two parallel paths share a 3-replica cluster. WRITE: WriteClient → WriteCB → Saga → ReserveInv (RR over 3 inventory shards) → ChargePay (CB-fronted worker) → PersistOrder (TPC commit across 3 replicas → 3 DB sinks). READ: ReadClient → ReadCache → QuorumReader (R=2 of 3) → same 3 replicas. The Replica is a custom component that acts as both a TPC participant (prepare/vote/commit, bumps version on commit) and a read-quorum endpoint (read_req → read_resp(version), with stochastic flake). Chaos timeline drives degradation: replica down (writes abort, reads survive), payment worker down (saga compensates, CB trips), inventory shard hung, saga itself down (CB trips). The point being demonstrated: one Replica node serves two protocols at once, and saga + TPC compose cleanly when each saga step calls a real backend mid-step (WorkingSagaStep)."
+  },
+  "load": {
+    "components": ["replica", "working_step", "quorum_reader"]
+  }
+}

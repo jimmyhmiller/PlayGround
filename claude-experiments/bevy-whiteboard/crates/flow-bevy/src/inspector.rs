@@ -16,9 +16,11 @@
 
 use bevy::prelude::*;
 use flow::{NodeId, Value};
-use poster_ui::{Bold, Mono, Slider, Theme, caps_spaced, spawn_slider};
+use poster_ui::{Bold, Mono, Slider, Theme, caps_spaced, spawn_slider, spawn_slider_with_step};
 
-use crate::compound::{CompoundBodyMarker, CompoundParamRegistry};
+use crate::compound::{
+    CompoundBodyMarker, CompoundOverrides, CompoundParamRegistry, RebuildCompound,
+};
 use crate::errors::NodeErrorStats;
 use crate::gadgets::Kind;
 use crate::nodes::{NodeKind, Selection};
@@ -54,11 +56,58 @@ impl Plugin for InspectorPlugin {
                     push_generic_float_slider_to_sim,
                     sync_generic_float_slider_from_slot,
                 ).chain(),
+                (
+                    push_generic_int_slider_to_sim,
+                    sync_generic_int_slider_from_slot,
+                ).chain(),
                 sync_generic_readout,
                 handle_generic_bool_toggle_clicks,
                 sync_generic_bool_toggle_visual,
+                push_compound_param_slider,
             ),
         );
+    }
+}
+
+/// Slider drag → `CompoundOverrides` update + `RebuildCompound`
+/// event. Fires on every `Changed<Slider>`, which means a continuous
+/// drag triggers continuous rebuilds. Each rebuild is surgical (only
+/// the affected compound's interior is touched), so the cost scales
+/// with the compound's interior size, not the whole canvas.
+///
+/// For very large compounds (~thousands of cells) we'd want to
+/// debounce on slider release; for grids in the dozens-to-hundreds
+/// range this is interactive.
+fn push_compound_param_slider(
+    sliders: Query<(&Slider, &CompoundParamSlider), Changed<Slider>>,
+    mut overrides: ResMut<CompoundOverrides>,
+    mut events: bevy::ecs::message::MessageWriter<RebuildCompound>,
+) {
+    for (slider, marker) in sliders.iter() {
+        // Map slider value back to the underlying Int (rounding to
+        // the nearest integer in the param's domain).
+        let raw = (slider.value * marker.scale).round() as i64;
+        let prev_override = overrides
+            .by_compound
+            .get(&marker.compound)
+            .and_then(|m| m.get(&marker.param))
+            .cloned();
+        // Skip when the slider is reporting its initial value AND
+        // there's no prior override AND the value matches the
+        // declared default. This is what we see on the very first
+        // `Changed<Slider>` after the inspector spawns sliders for a
+        // freshly-selected compound body — without this guard, every
+        // selection would kick off a structural rebuild for no
+        // semantic reason.
+        if prev_override.is_none() && raw == marker.default_value {
+            continue;
+        }
+        let next = flow::dsl::expand::CtValue::Int(raw);
+        let unchanged = matches!(prev_override, Some(flow::dsl::expand::CtValue::Int(p)) if p == raw);
+        if unchanged { continue; }
+        let entry = overrides.by_compound.entry(marker.compound.clone()).or_default();
+        entry.insert(marker.param.clone(), next);
+        events.write(RebuildCompound(marker.compound.clone()));
     }
 }
 
@@ -132,6 +181,7 @@ fn rebuild_inspector_on_selection_change(
     theme: Res<Theme>,
     snapshot: Res<SimSnapshotRes>,
     compound_params: Res<CompoundParamRegistry>,
+    current_overrides: Res<CompoundOverrides>,
     mount_q: Query<Entity, With<InspectorMount>>,
     kind_q: Query<(&NodeKind, &crate::bridge::FlowNodeRef)>,
     compound_q: Query<&CompoundBodyMarker>,
@@ -158,9 +208,15 @@ fn rebuild_inspector_on_selection_change(
         let nid = marker.0;
         let Some(node) = snapshot.0.nodes.get(&nid) else { return };
         let params = compound_params.by_name.get(&node.name).cloned().unwrap_or_default();
+        let overrides_for = current_overrides
+            .by_compound
+            .get(&node.name)
+            .cloned()
+            .unwrap_or_default();
+        let compound_name = node.name.clone();
         commands.entity(mount).with_children(|body| {
-            inspector_heading(body, &theme, &node.name);
-            spawn_compound_param_section(body, &theme, &params);
+            inspector_heading(body, &theme, &compound_name);
+            spawn_compound_param_section(body, &theme, &compound_name, &params, &overrides_for);
             spawn_error_breakdown(body, &theme, nid);
         });
         return;
@@ -515,19 +571,22 @@ fn sink_row(parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands, theme: &The
         });
 }
 
-/// Compound construction-param read-only section. Surfaces every
-/// param the canvas authored (with its evaluated default) so the user
-/// can see what knobs the compound exposes. **Read-only** today —
-/// editing + rebuilding the canvas is the next iteration.
+/// Compound construction-param section — **editable**. Int params
+/// get a slider (range from the DSL `… in LO..HI` hint, or a derived
+/// fallback when the author didn't supply one); Bool / Str params
+/// stay read-only for now (Bool toggle wired-but-not-yet, Str
+/// presents text). Slider drags update [`CompoundOverrides`]; on
+/// release we fire a [`RebuildCompound`] so the canvas surgically
+/// rebuilds the affected compound's interior.
 fn spawn_compound_param_section(
     parent: &mut bevy::ecs::hierarchy::ChildSpawnerCommands,
     theme: &Theme,
+    compound_name: &str,
     params: &[flow::dsl::expand::CompoundParamEntry],
+    current_overrides: &std::collections::BTreeMap<String, flow::dsl::expand::CtValue>,
 ) {
     use flow::dsl::expand::CtValue;
     if params.is_empty() {
-        // Still useful to say "no params authored on this compound"
-        // — it's quieter than the inspector going blank.
         parent
             .spawn(Node {
                 width: Val::Percent(100.0),
@@ -565,65 +624,121 @@ fn spawn_compound_param_section(
                 Bold,
             ));
             for p in params {
-                let value_str = match &p.default {
-                    None => "—".to_string(),
-                    Some(CtValue::Int(n)) => {
-                        // Period-style ints render as ms for ergonomics —
-                        // matches the heuristic the regular state
-                        // section uses for `_ns` slots.
-                        if p.name.ends_with("_ns") {
-                            format!("{} ms", *n / 1_000_000)
-                        } else {
-                            n.to_string()
-                        }
-                    }
-                    Some(CtValue::Bool(b)) => b.to_string(),
-                    Some(CtValue::Str(s)) => s.clone(),
-                };
-                let ty_str = match p.ty {
-                    flow::dsl::ast::CtType::Int => "Int",
-                    flow::dsl::ast::CtType::Bool => "Bool",
-                    flow::dsl::ast::CtType::Str => "String",
-                };
-                let label = format!("{}: {}", p.name, ty_str);
-                section
-                    .spawn(Node {
-                        width: Val::Percent(100.0),
-                        padding: UiRect::vertical(Val::Px(3.0)),
-                        column_gap: Val::Px(6.0),
-                        justify_content: JustifyContent::SpaceBetween,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        row.spawn((
-                            Text::new(label),
-                            TextFont { font_size: 10.0, ..default() },
-                            TextColor(theme.ink_soft),
-                            Mono,
-                        ));
-                        row.spawn((
-                            Text::new(value_str),
-                            TextFont { font_size: 11.0, ..default() },
-                            TextColor(theme.ink),
-                            Bold,
-                            Mono,
-                            CompoundParamReadout {
+                let current = current_overrides
+                    .get(&p.name)
+                    .cloned()
+                    .or_else(|| p.default.clone());
+                match (&p.ty, &current) {
+                    (flow::dsl::ast::CtType::Int, Some(CtValue::Int(n))) => {
+                        let (min_i, max_i) = match p.range {
+                            Some((CtValue::Int(lo), CtValue::Int(hi))) => (lo, hi),
+                            _ => (1, (n.saturating_mul(4)).max(50)),
+                        };
+                        // `_ns` slots render in ms — same ergonomic
+                        // heuristic as the regular state section.
+                        let unit: &'static str = if p.name.ends_with("_ns") { "ms" } else { "" };
+                        let scale = if unit == "ms" { 1_000_000.0 } else { 1.0 };
+                        let value_f = (*n as f32) / scale;
+                        let min_f = (min_i as f32) / scale;
+                        let max_f = (max_i as f32) / scale;
+                        let default_value = match p.default {
+                            Some(CtValue::Int(d)) => d,
+                            _ => *n,
+                        };
+                        // Step in display units: 1 for plain Int
+                        // params, 1ms for `_ns` params (since the
+                        // slider is in ms). Snapping happens inside
+                        // `continue_slider_drag` so the slider visibly
+                        // jumps to the nearest integer step as the
+                        // user drags — and the value pushed to
+                        // `CompoundOverrides` is always a clean
+                        // integer in the param's native unit.
+                        let step = if unit == "ms" { 1.0 } else { 1.0 };
+                        spawn_slider_with_step(
+                            section,
+                            theme,
+                            &p.name,
+                            min_f,
+                            max_f,
+                            step,
+                            value_f,
+                            unit,
+                            CompoundParamSlider {
+                                compound: compound_name.to_string(),
                                 param: p.name.clone(),
+                                scale,
+                                default_value,
                             },
-                        ));
-                    });
+                        );
+                    }
+                    _ => {
+                        // Non-Int (or Int with no current value): fall
+                        // back to a read-only row. Editing for these
+                        // types lands when the widgets do.
+                        let value_str = match &current {
+                            None => "—".to_string(),
+                            Some(CtValue::Int(n)) if p.name.ends_with("_ns") => {
+                                format!("{} ms", *n / 1_000_000)
+                            }
+                            Some(CtValue::Int(n)) => n.to_string(),
+                            Some(CtValue::Bool(b)) => b.to_string(),
+                            Some(CtValue::Str(s)) => s.clone(),
+                        };
+                        let ty_str = match p.ty {
+                            flow::dsl::ast::CtType::Int => "Int",
+                            flow::dsl::ast::CtType::Bool => "Bool",
+                            flow::dsl::ast::CtType::Str => "String",
+                        };
+                        let label = format!("{}: {}", p.name, ty_str);
+                        section
+                            .spawn(Node {
+                                width: Val::Percent(100.0),
+                                padding: UiRect::vertical(Val::Px(3.0)),
+                                column_gap: Val::Px(6.0),
+                                justify_content: JustifyContent::SpaceBetween,
+                                align_items: AlignItems::Center,
+                                ..default()
+                            })
+                            .with_children(|row| {
+                                row.spawn((
+                                    Text::new(label),
+                                    TextFont { font_size: 10.0, ..default() },
+                                    TextColor(theme.ink_soft),
+                                    Mono,
+                                ));
+                                row.spawn((
+                                    Text::new(value_str),
+                                    TextFont { font_size: 11.0, ..default() },
+                                    TextColor(theme.ink),
+                                    Bold,
+                                    Mono,
+                                ));
+                            });
+                    }
+                }
             }
         });
 }
 
-/// Marker on the readout text so a future "edit + rebuild" pass can
-/// find the right cell to repaint after a slider drag without
-/// rebuilding the whole inspector.
-#[derive(Component)]
-struct CompoundParamReadout {
-    #[allow(dead_code)]
-    param: String,
+/// Slider for an Int compound param. The slider's `value` is the
+/// **display** value (already divided by `scale` for `_ns` params, so
+/// the user thinks in ms not ns). The push system multiplies back up
+/// when storing into `CompoundOverrides`.
+#[derive(Component, Debug, Clone)]
+pub struct CompoundParamSlider {
+    pub compound: String,
+    pub param: String,
+    /// 1.0 for plain Int params; 1_000_000.0 for `_ns` params (slider
+    /// is in ms, override stored in ns).
+    pub scale: f32,
+    /// Param's authored default value in its native unit (Int). Used
+    /// by the push system to suppress the no-op rebuild that would
+    /// otherwise fire the moment the inspector spawns the slider —
+    /// `Changed<Slider>` triggers on initial component creation, so
+    /// without this guard every selection of a compound body would
+    /// kick off a structural rebuild even though the value matches
+    /// what the canvas was already lowered with.
+    pub default_value: i64,
 }
 
 fn simple_readout(
@@ -856,6 +971,17 @@ pub struct GenericFloatSlider {
     pub slot: String,
 }
 
+/// Slider that writes to an Int slot. The slider holds the value in
+/// **display** units; `scale` is the multiplier back to the slot's
+/// native unit (1.0 for plain Ints, 1_000_000.0 for `_ns` slots that
+/// the slider exposes as ms).
+#[derive(Component, Debug, Clone)]
+pub struct GenericIntSlider {
+    pub node: NodeId,
+    pub slot: String,
+    pub scale: f32,
+}
+
 /// Live readout showing a slot's current scalar value. Used for Int /
 /// String slots that aren't yet edit-capable.
 #[derive(Component, Debug, Clone)]
@@ -939,12 +1065,36 @@ fn spawn_generic_slot_row(
             spawn_generic_bool_toggle_row(parent, theme, nid, name, *b);
         }
         Value::Int(i) => {
-            let label = if name.ends_with("_ns") {
-                format!("{} ms", *i / 1_000_000)
+            // `_ns` slots render in ms (slider is in ms, slot is in
+            // ns) — same ergonomic heuristic as the compound-param
+            // section. Plain Int slots are 1:1 with the slider.
+            let (unit, scale): (&'static str, f32) = if name.ends_with("_ns") {
+                ("ms", 1_000_000.0)
             } else {
-                format!("{}", i)
+                ("", 1.0)
             };
-            simple_readout(parent, theme, name, &label, GenericReadout { node: nid, slot: name.to_string() });
+            let value_f = (*i as f32) / scale;
+            // No declared range on slot types yet — pick a window
+            // wide enough that 0..max stays meaningful as the value
+            // grows. Bounds are inclusive of 0 so counters that start
+            // at 0 don't snap to 1.
+            let min_f = 0.0;
+            let max_f = ((*i).saturating_mul(4)).max(50) as f32 / scale;
+            spawn_slider_with_step(
+                parent,
+                theme,
+                name,
+                min_f,
+                max_f,
+                /*step=*/ 1.0,
+                value_f,
+                unit,
+                GenericIntSlider {
+                    node: nid,
+                    slot: name.to_string(),
+                    scale,
+                },
+            );
         }
         Value::Str(s) => {
             simple_readout(parent, theme, name, s, GenericReadout { node: nid, slot: name.to_string() });
@@ -1043,6 +1193,52 @@ fn sync_generic_float_slider_from_slot(
         let want = (*f as f32).clamp(slider.min, slider.max);
         if (slider.value - want).abs() > 1e-6 {
             slider.value = want;
+        }
+    }
+}
+
+/// Slider drag → Int slot write. Mirrors the float version but
+/// rounds the slider's display-unit value back into the slot's
+/// native unit using `scale`.
+fn push_generic_int_slider_to_sim(
+    q: Query<(&Slider, &GenericIntSlider), Changed<Slider>>,
+    snapshot: Res<SimSnapshotRes>,
+    mut driver: ResMut<SimDriverRes>,
+) {
+    for (slider, marker) in q.iter() {
+        let Some(node) = snapshot.0.nodes.get(&marker.node) else { continue };
+        let Some(Value::Int(current)) = node.slots.get(&marker.slot) else { continue };
+        let raw = (slider.value * marker.scale).round() as i64;
+        if raw == *current { continue; }
+        let nid = marker.node;
+        let slot = marker.slot.clone();
+        driver.0.send_command(SimCommand::new(move |sim| {
+            sim.user_edit_slot(nid, slot, Value::Int(raw));
+        }));
+    }
+}
+
+/// Slot write → slider value. Mirrors the float version. Tracks the
+/// current slot value (and scrolls the slider's max upward if the
+/// value outgrows the initial window) so external writes still show
+/// up without an inspector rebuild.
+fn sync_generic_int_slider_from_slot(
+    snapshot: Res<SimSnapshotRes>,
+    mut q: Query<(&mut Slider, &GenericIntSlider)>,
+) {
+    for (mut slider, marker) in q.iter_mut() {
+        let Some(node) = snapshot.0.nodes.get(&marker.node) else { continue };
+        let Some(Value::Int(i)) = node.slots.get(&marker.slot) else { continue };
+        let want = (*i as f32) / marker.scale;
+        // Grow the slider's range if the slot's value exceeds the
+        // initial heuristic window. Without this an external write
+        // (e.g. counter ticking up) would clamp to the old max and
+        // the slider would lie about the slot's true value.
+        if want > slider.max {
+            slider.max = want;
+        }
+        if (slider.value - want).abs() > 1e-6 {
+            slider.value = want.clamp(slider.min, slider.max);
         }
     }
 }

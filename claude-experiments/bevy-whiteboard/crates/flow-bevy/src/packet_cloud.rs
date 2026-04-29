@@ -84,6 +84,16 @@ pub struct PacketCloudMaterial {
     clock: PacketClock,
 }
 
+impl PacketCloudMaterial {
+    /// Number of packets the most recent `update_packet_cloud` pass
+    /// packed into the storage buffer. Exposed for tests and (in the
+    /// future) UI overlays that want to surface the active packet
+    /// count without poking shader internals.
+    pub fn active_count(&self) -> u32 {
+        self.clock.active_count
+    }
+}
+
 impl Material2d for PacketCloudMaterial {
     fn vertex_shader() -> ShaderRef {
         "embedded://flow_bevy/shaders/packet_cloud.wgsl".into()
@@ -199,6 +209,8 @@ fn update_packet_cloud(
     mut mats: ResMut<Assets<PacketCloudMaterial>>,
     mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
     hide_all: Res<crate::edges::HideAll>,
+    membership: Res<crate::compound::CompoundMembership>,
+    current_scope: Res<crate::compound::CurrentScope>,
     mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
     let Ok(handle) = cloud.single() else { return };
@@ -218,6 +230,15 @@ fn update_packet_cloud(
             break;
         }
         if now < vp.emit_real || now >= vp.arrive_real {
+            continue;
+        }
+        // Scope filter — same rule as `Scoped` / `sync_scoped_visibility`,
+        // applied here because the packet cloud is one GPU entity
+        // (no per-packet Bevy entity to stamp). The packet inherits
+        // its edge's canonical owner; we drop it if that owner's
+        // scope doesn't match the current view.
+        let owner = crate::compound::canonical_edge_owner(vp.from, vp.to, &membership);
+        if membership.parent_of(owner) != current_scope.0 {
             continue;
         }
         let Some(&from_e) = maps.node_to_entity.get(&vp.from) else { continue };

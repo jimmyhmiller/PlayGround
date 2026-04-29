@@ -17,17 +17,17 @@
 # folds it to a literal `0` or `1` per cell.
 
 compound Life(
-    width:           Int = 5,
-    height:          Int = 5,
-    period_ns:       Int = 200000000,
-    cell_latency_ns: Int = 1000000,
+    width:           Int = 5            in 2..15,
+    height:          Int = 5            in 2..15,
+    period_ns:       Int = 200000000    in 50000000..1000000000,
+    cell_latency_ns: Int = 1000000      in 100000..50000000,
 ) {
     for x in 0..width, y in 0..height {
         node Cell_{x}_{y} : LifeCell {
             alive:     if y == (height / 2)
                           && x >= ((width / 2) - 1)
                           && x <= ((width / 2) + 1)
-                       then 1 else 0
+                       then true else false
             period_ns: period_ns
         }
     }

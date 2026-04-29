@@ -1,0 +1,205 @@
+# region.whiteboard — multi-tier transactional system.
+#
+# Two parallel paths share a 3-replica cluster:
+#
+#  WRITE path (saga + TPC, strongly consistent):
+#    WriteClient ──► WriteCB ──► Saga ──► ReserveInv ──► InvShard{0,1,2}
+#                                  │            (RR-by-edge_last_sent over color=1 backends)
+#                                  ├──► ChargePay ──► PaymentCB ──► PaymentWorker
+#                                  └──► PersistOrder ──► TPCCoord ──► Replica{0,1,2}
+#                                                                       │
+#                                                                       ├──► DB0
+#                                                                       ├──► DB1
+#                                                                       └──► DB2
+#
+#  READ path (cache + quorum, eventually consistent):
+#    ReadClient ──► ReadCache ──► QuorumReader ──► Replica{0,1,2}
+#                                                  (R = 2 of 3; stragglers dropped)
+#
+# Replica{0,1,2} are SHARED between the write path's TPC commit
+# fanout (which bumps `version`) and the read path's quorum fanout
+# (which returns the current version). So a successful saga's TPC
+# commit becomes visible to subsequent reads via the quorum.
+#
+# Colour discipline:
+#   color = 0 — write control plane (Client, CB, Saga, all WorkingSteps)
+#   color = 1 — backends, replicas, read path, DB sinks
+#
+# Saga steps (`WorkingSagaStep`) cross the colour boundary by emitting
+# `req(backend_color)` to whichever neighbour has `color == 1`,
+# rather than going to the next saga-chain neighbour. Picks the
+# least-recently-used colour=1 neighbour for free RR balancing across
+# the inventory shards.
+#
+# Chaos timeline at the bottom drives the system through degradation
+# scenarios. The first 3 seconds are healthy — tests load and tick
+# the canvas without firing any chaos.
+
+# ──────────────────────────────────────────────────────────────────
+# WRITE control plane (color = 0)
+# ──────────────────────────────────────────────────────────────────
+
+node WriteClient : Client {
+    # 2.5s period — the visual layer's causal-clamp pipeline needs
+    # several real-time seconds per node to drain a saga round; faster
+    # than this and the timeline rapidly schedules packets into the
+    # far future and they appear to disappear. Tune up only after
+    # cutting visual `k` (`-` key) or you'll see the same stall.
+    period_ns: 2500000000
+    color:     0
+}
+
+node WriteCB : CircuitBreaker {
+    threshold:   3
+    window_ns:   1000000000
+    recovery_ns: 1500000000
+    color:       0
+}
+
+node Saga : Saga {
+    color: 0
+}
+
+node ReserveInv : WorkingSagaStep {
+    backend_color: 1
+    color:         0
+}
+
+node ChargePay : WorkingSagaStep {
+    backend_color: 1
+    color:         0
+}
+
+node PersistOrder : WorkingSagaStep {
+    backend_color: 1
+    color:         0
+}
+
+# ──────────────────────────────────────────────────────────────────
+# Inventory tier (color = 1) — sharded workers behind ReserveInv.
+# ──────────────────────────────────────────────────────────────────
+
+node InvShard0 : Worker { color: 1  service_ns: 25000000 }
+node InvShard1 : Worker { color: 1  service_ns: 30000000 }
+node InvShard2 : Worker { color: 1  service_ns: 35000000 }
+
+# ──────────────────────────────────────────────────────────────────
+# Payment tier (color = 1) — CircuitBreaker fronting a flaky worker.
+# ──────────────────────────────────────────────────────────────────
+
+node PaymentCB : CircuitBreaker {
+    threshold:   3
+    window_ns:   1000000000
+    recovery_ns: 1500000000
+    color:       1
+}
+
+node PaymentWorker : Worker {
+    color:      1
+    service_ns: 50000000
+}
+
+# ──────────────────────────────────────────────────────────────────
+# Persistence tier (color = 1) — TPC writes versioned KV, fans out
+# to per-replica DB sinks on commit.
+# ──────────────────────────────────────────────────────────────────
+
+node TPCCoord : TPCCoordinator {
+    color: 1
+}
+
+node Replica0 : Replica { color: 1 }
+node Replica1 : Replica { color: 1 }
+node Replica2 : Replica { color: 1 }
+
+node DB0 : Sink { color: 1 }
+node DB1 : Sink { color: 1 }
+node DB2 : Sink { color: 1 }
+
+# ──────────────────────────────────────────────────────────────────
+# READ path (color = 1)
+# ──────────────────────────────────────────────────────────────────
+
+node ReadClient : Client {
+    # 1.5s period — same drain-rate constraint as WriteClient.
+    period_ns: 1500000000
+    color:     1
+}
+
+node ReadCache : Cache {
+    hit_rate:       0.4    # mixed hits/misses on the wire
+    hit_latency_ns: 5000000
+    color:          1
+}
+
+node QuorumReader : QuorumReader {
+    r:     2
+    color: 1
+}
+
+# ──────────────────────────────────────────────────────────────────
+# Wiring. Forward and reverse edges so resp / compensate / vote /
+# read_resp can walk back along the same paths.
+# ──────────────────────────────────────────────────────────────────
+
+edges {
+    # Write forward chain
+    WriteClient   -> WriteCB      : 100ms
+    WriteCB       -> Saga         : 100ms
+    Saga          -> ReserveInv   : 100ms
+    ReserveInv    -> ChargePay    : 100ms
+    ChargePay     -> PersistOrder : 100ms
+
+    # Write reverse chain (resp, compensate)
+    Saga          -> WriteCB      : 100ms
+    WriteCB       -> WriteClient  : 100ms
+    ReserveInv    -> Saga         : 100ms
+    ChargePay    -> ReserveInv    : 100ms
+    PersistOrder  -> ChargePay    : 100ms
+
+    # ReserveInv → InvShards (3 backends, RR by edge_last_sent)
+    ReserveInv -> InvShard0 : 100ms
+    ReserveInv -> InvShard1 : 100ms
+    ReserveInv -> InvShard2 : 100ms
+    InvShard0  -> ReserveInv : 100ms
+    InvShard1  -> ReserveInv : 100ms
+    InvShard2  -> ReserveInv : 100ms
+
+    # ChargePay → PaymentCB → PaymentWorker
+    ChargePay     -> PaymentCB     : 100ms
+    PaymentCB     -> PaymentWorker : 100ms
+    PaymentWorker -> PaymentCB     : 100ms
+    PaymentCB     -> ChargePay     : 100ms
+
+    # PersistOrder → TPCCoord → Replicas → DB sinks
+    PersistOrder -> TPCCoord : 100ms
+    TPCCoord     -> PersistOrder : 100ms
+    TPCCoord     -> Replica0 : 100ms
+    TPCCoord     -> Replica1 : 100ms
+    TPCCoord     -> Replica2 : 100ms
+    Replica0     -> TPCCoord : 100ms
+    Replica1     -> TPCCoord : 100ms
+    Replica2     -> TPCCoord : 100ms
+    Replica0     -> DB0 : 100ms
+    Replica1     -> DB1 : 100ms
+    Replica2     -> DB2 : 100ms
+
+    # Read path: ReadClient → ReadCache → QuorumReader → Replicas
+    ReadClient   -> ReadCache    : 100ms
+    ReadCache    -> ReadClient   : 100ms
+    ReadCache    -> QuorumReader : 100ms
+    QuorumReader -> ReadCache    : 100ms
+    QuorumReader -> Replica0     : 100ms
+    QuorumReader -> Replica1     : 100ms
+    QuorumReader -> Replica2     : 100ms
+    Replica0     -> QuorumReader : 100ms
+    Replica1     -> QuorumReader : 100ms
+    Replica2     -> QuorumReader : 100ms
+}
+
+# ──────────────────────────────────────────────────────────────────
+# Chaos timeline. Healthy phase (0–3s) lets observers see a clean
+# baseline; everything after is scripted degradation + recovery.
+# ──────────────────────────────────────────────────────────────────
+
+# No scenario block — just steady state for now.

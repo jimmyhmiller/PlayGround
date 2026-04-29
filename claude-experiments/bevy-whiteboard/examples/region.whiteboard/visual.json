@@ -1,0 +1,32 @@
+{
+  "format_version": 1,
+  "nodes": {
+    "ReadClient":   { "pos": [-380.0, -260.0] },
+    "ReadCache":    { "pos": [-180.0, -260.0] },
+    "QuorumReader": { "pos":   [40.0, -260.0] },
+
+    "Replica0":     { "pos":  [-90.0, -110.0] },
+    "Replica1":     { "pos":   [70.0, -110.0] },
+    "Replica2":     { "pos":  [230.0, -110.0] },
+
+    "DB0":          { "pos":  [-90.0,   30.0] },
+    "DB1":          { "pos":   [70.0,   30.0] },
+    "DB2":          { "pos":  [230.0,   30.0] },
+
+    "WriteClient":  { "pos": [-560.0,  170.0] },
+    "WriteCB":      { "pos": [-420.0,  170.0] },
+    "Saga":         { "pos": [-280.0,  170.0] },
+    "ReserveInv":   { "pos": [-140.0,  170.0] },
+    "ChargePay":    { "pos":   [10.0,  170.0] },
+    "PersistOrder": { "pos":  [160.0,  170.0] },
+    "TPCCoord":     { "pos":  [310.0,  170.0] },
+
+    "InvShard0":    { "pos": [-220.0,  300.0] },
+    "InvShard1":    { "pos": [-140.0,  340.0] },
+    "InvShard2":    { "pos":  [-60.0,  300.0] },
+
+    "PaymentCB":    { "pos":   [10.0,  300.0] },
+    "PaymentWorker":{ "pos":   [10.0,  390.0] }
+  },
+  "viewport": { "pos": [0.0, 0.0], "zoom": 0.7 }
+}
