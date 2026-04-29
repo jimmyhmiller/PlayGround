@@ -1,9 +1,16 @@
 // Packet cloud — single-draw-call instanced renderer for traveling
-// packets. The mesh has no real geometry; vertex_index drives both
-// quad-corner selection and instance lookup ("vertex pulling"). All
-// interpolation happens GPU-side from the storage buffer of
-// `PacketInstance` records — the CPU just rewrites the buffer each
-// frame and uniform `now_real` advances.
+// packets. The mesh's per-vertex `ATTRIBUTE_POSITION` carries
+// `(corner.x, corner.y, instance_id_as_f32)`; the vertex shader pulls
+// the per-packet record from the storage buffer using `instance_id`
+// and expands the corner. All interpolation happens GPU-side — the
+// CPU just rewrites the buffer each frame and `now_real` advances.
+//
+// **Why a position attribute and not `@builtin(vertex_index)`:**
+// Bevy 0.18's `MeshAllocator` packs every Mesh2d into one shared
+// vertex buffer; the 2D draw uses our slice's offset as `firstVertex`,
+// so `@builtin(vertex_index)` returns a *global* index. Attributes
+// fetch via the buffer-slice binding (local to our mesh), which is
+// the only safe way to know which packet/corner this vertex is.
 
 #import bevy_sprite::mesh2d_view_bindings::view
 
@@ -25,28 +32,21 @@ struct PacketClock {
 @group(2) @binding(0) var<storage, read> instances: array<PacketInstance>;
 @group(2) @binding(1) var<uniform> clock: PacketClock;
 
+struct VertexInput {
+    @location(0) position: vec3<f32>,
+};
+
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
     @location(1) color: vec4<f32>,
 };
 
-// Two triangles per quad: corners 0..5 → (-1,-1), (1,-1), (1,1), (1,1), (-1,1), (-1,-1)
-fn quad_corner(i: u32) -> vec2<f32> {
-    switch (i) {
-        case 0u, 5u: { return vec2(-1.0, -1.0); }
-        case 1u:     { return vec2( 1.0, -1.0); }
-        case 2u, 3u: { return vec2( 1.0,  1.0); }
-        case 4u:     { return vec2(-1.0,  1.0); }
-        default:     { return vec2(0.0); }
-    }
-}
-
 @vertex
-fn vertex(@builtin(vertex_index) vid: u32) -> VertexOutput {
+fn vertex(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    let instance_id = vid / 6u;
-    let corner_id   = vid % 6u;
+    let corner      = in.position.xy;
+    let instance_id = u32(in.position.z);
 
     // Out-of-range slots collapse to a degenerate clip-space point so
     // the GPU rasterizes nothing for them. Means we don't need to
@@ -64,7 +64,6 @@ fn vertex(@builtin(vertex_index) vid: u32) -> VertexOutput {
     let t      = clamp((clock.now_real - inst.emit_real) / denom, 0.0, 1.0);
     let center = mix(inst.start, inst.end, t);
 
-    let corner = quad_corner(corner_id);
     let world  = center + corner * clock.quad_radius;
 
     // Push packets to a high world-z so they sort above gizmo arrows

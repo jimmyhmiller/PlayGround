@@ -1,0 +1,77 @@
+   Compiling flow-bevy v0.1.0 (/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/bevy-whiteboard/crates/flow-bevy)
+warning: field `event_id` is never read
+  --> crates/flow-bevy/src/timeline.rs:55:5
+   |
+54 | struct TimelineEventMarker {
+   |        ------------------- field in this struct
+55 |     event_id: u64,
+   |     ^^^^^^^^
+   |
+   = note: `TimelineEventMarker` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `flow-bevy` (lib) generated 1 warning
+    Finished `dev` profile [optimized + debuginfo] target(s) in 7.26s
+     Running `target/debug/flow-bevy`
+[2m2026-04-29T15:42:47.571490Z[0m [34mDEBUG[0m [2mbevy_render::renderer[0m[2m:[0m Searching for adapter with options: RequestAdapterOptions { power_preference: HighPerformance, force_fallback_adapter: false, compatible_surface: None }
+[2m2026-04-29T15:42:47.579157Z[0m [32m INFO[0m [2mbevy_render::renderer[0m[2m:[0m AdapterInfo { name: "Apple M2 Max", vendor: 0, device: 0, device_type: IntegratedGpu, driver: "", driver_info: "", backend: Metal }
+[2m2026-04-29T15:42:47.586847Z[0m [34mDEBUG[0m [2mbevy_render::renderer[0m[2m:[0m Configured wgpu adapter Limits: Limits {
+    max_texture_dimension_1d: 16384,
+    max_texture_dimension_2d: 16384,
+    max_texture_dimension_3d: 2048,
+    max_texture_array_layers: 2048,
+    max_bind_groups: 8,
+    max_bindings_per_bind_group: 65535,
+    max_dynamic_uniform_buffers_per_pipeline_layout: 8,
+    max_dynamic_storage_buffers_per_pipeline_layout: 4,
+    max_sampled_textures_per_shader_stage: 128,
+    max_samplers_per_shader_stage: 16,
+    max_storage_buffers_per_shader_stage: 31,
+    max_storage_textures_per_shader_stage: 128,
+    max_uniform_buffers_per_shader_stage: 31,
+    max_binding_array_elements_per_shader_stage: 1000000,
+    max_binding_array_sampler_elements_per_shader_stage: 1000,
+    max_uniform_buffer_binding_size: 4294967295,
+    max_storage_buffer_binding_size: 4294967295,
+    max_vertex_buffers: 16,
+    max_buffer_size: 41747087360,
+    max_vertex_attributes: 31,
+    max_vertex_buffer_array_stride: 2048,
+    min_uniform_buffer_offset_alignment: 256,
+    min_storage_buffer_offset_alignment: 256,
+    max_inter_stage_shader_components: 124,
+    max_color_attachments: 8,
+    max_color_attachment_bytes_per_sample: 64,
+    max_compute_workgroup_storage_size: 32768,
+    max_compute_invocations_per_workgroup: 1024,
+    max_compute_workgroup_size_x: 1024,
+    max_compute_workgroup_size_y: 1024,
+    max_compute_workgroup_size_z: 1024,
+    max_compute_workgroups_per_dimension: 65535,
+    min_subgroup_size: 4,
+    max_subgroup_size: 64,
+    max_push_constant_size: 4096,
+    max_non_sampler_bindings: 4294967295,
+    max_task_workgroup_total_count: 0,
+    max_task_workgroups_per_dimension: 0,
+    max_mesh_output_layers: 0,
+    max_mesh_multiview_count: 0,
+    max_blas_primitive_count: 0,
+    max_blas_geometry_count: 0,
+    max_tlas_instance_count: 0,
+    max_acceleration_structures_per_shader_stage: 0,
+}
+[2m2026-04-29T15:42:47.586875Z[0m [34mDEBUG[0m [2mbevy_render::renderer[0m[2m:[0m Configured wgpu adapter Features: Features {
+    features_wgpu: FeaturesWGPU(
+        SHADER_FLOAT32_ATOMIC | TEXTURE_FORMAT_16BIT_NORM | TEXTURE_COMPRESSION_ASTC_HDR | TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES | TIMESTAMP_QUERY_INSIDE_ENCODERS | MAPPABLE_PRIMARY_BUFFERS | TEXTURE_BINDING_ARRAY | SAMPLED_TEXTURE_AND_STORAGE_BUFFER_ARRAY_NON_UNIFORM_INDEXING | STORAGE_TEXTURE_ARRAY_NON_UNIFORM_INDEXING | PARTIALLY_BOUND_BINDING_ARRAY | PUSH_CONSTANTS | ADDRESS_MODE_CLAMP_TO_ZERO | ADDRESS_MODE_CLAMP_TO_BORDER | POLYGON_MODE_LINE | VERTEX_WRITABLE_STORAGE | CLEAR_TEXTURE | TEXTURE_ATOMIC | EXTERNAL_TEXTURE | SHADER_PRIMITIVE_INDEX | SHADER_INT64 | SUBGROUP | SUBGROUP_BARRIER | SHADER_INT64_ATOMIC_MIN_MAX | TEXTURE_INT64_ATOMIC | EXPERIMENTAL_PASSTHROUGH_SHADERS,
+    ),
+    features_webgpu: FeaturesWebGPU(
+        DEPTH_CLIP_CONTROL | DEPTH32FLOAT_STENCIL8 | TEXTURE_COMPRESSION_BC | TEXTURE_COMPRESSION_BC_SLICED_3D | TEXTURE_COMPRESSION_ETC2 | TEXTURE_COMPRESSION_ASTC | TEXTURE_COMPRESSION_ASTC_SLICED_3D | TIMESTAMP_QUERY | INDIRECT_FIRST_INSTANCE | SHADER_F16 | RG11B10UFLOAT_RENDERABLE | BGRA8UNORM_STORAGE | FLOAT32_FILTERABLE | DUAL_SOURCE_BLENDING,
+    ),
+}
+[2m2026-04-29T15:42:47.698435Z[0m [32m INFO[0m [2mbevy_render::batching::gpu_preprocessing[0m[2m:[0m GPU preprocessing is fully supported on this device.
+[poster-ui] system-font fallback enabled (807 faces loaded)
+[poster-ui] loaded primary font (embedded Jost)
+[poster-ui] loaded bold font (embedded Jost)
+[poster-ui] loaded mono font '/System/Library/Fonts/Menlo.ttc'
+[2m2026-04-29T15:42:59.151564Z[0m [34mDEBUG[0m [2mbevy_render::pipelined_rendering[0m[2m:[0m exiting pipelined rendering thread

@@ -1,0 +1,35 @@
+# Minimal repro for "no packets render + weird line" bug.
+#
+# 5 nodes, 4 edges:
+#   WriteClient -> ReserveInv -> ChargePay  (linear chain)
+#   ReserveInv  -> InvShard0   (backend for ReserveInv)
+#   ChargePay   -> PaymentWorker (backend for ChargePay)
+#
+# Both saga steps have plain Worker backends. Replacing either Worker
+# with a CircuitBreaker (CB->Worker) makes packets render correctly.
+
+node WriteClient : Client {
+    period_ns: 2500000000
+    color:     0
+}
+
+node ReserveInv : WorkingSagaStep {
+    backend_color: 1
+    color:         0
+}
+
+node ChargePay : WorkingSagaStep {
+    backend_color: 1
+    color:         0
+}
+
+node InvShard0     : Worker { color: 1  service_ns: 25000000 }
+node PaymentWorker : Worker { color: 1  service_ns: 50000000 }
+
+edges {
+    WriteClient -> ReserveInv : 100ms
+    ReserveInv  -> ChargePay  : 100ms
+
+    ReserveInv -> InvShard0     : 100ms
+    ChargePay  -> PaymentWorker : 100ms
+}

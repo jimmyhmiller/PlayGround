@@ -1,16 +1,17 @@
 //! GPU-instanced packet renderer.
 //!
 //! All visible packets render in a single draw call backed by a custom
-//! `Material2d`. The CPU side just rewrites a storage buffer of
-//! `PacketInstance` records each frame and bumps `clock.now_real`; the
-//! vertex shader does the lerp from→to and rasterizes a small soft
-//! circle per packet (see `shaders/packet_cloud.wgsl`).
+//! `Material2d`. Each frame the CPU encodes the active packets into a
+//! storage buffer and updates `clock.now_real`; the vertex shader does
+//! the lerp from→to and rasterizes a small soft circle per packet (see
+//! `shaders/packet_cloud.wgsl`).
 //!
-//! Mesh structure: a fixed-size index-only mesh covering up to
-//! `MAX_PACKETS` quads. Each vertex's `vertex_index` is divided by 6
-//! to yield an instance id; out-of-range slots collapse off-clip in
-//! the shader so we never need to resize the mesh as the live count
-//! changes.
+//! Mesh structure: a fixed-size mesh of `MAX_PACKETS * 6` vertices
+//! whose per-vertex `ATTRIBUTE_POSITION` carries
+//! `(corner.x, corner.y, instance_id_as_f32)`. The shader reads packet
+//! id and corner from that attribute directly. Out-of-range slots
+//! (`instance_id >= active_count`) collapse off-clip so we never need
+//! to resize the mesh as the live count changes.
 //!
 //! `TravelingPacket` entities are still spawned (kept lightweight —
 //! no mesh/material) so existing tests can keep asserting on the
@@ -21,9 +22,11 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::mesh::PrimitiveTopology;
 use bevy::prelude::*;
-use bevy::render::batching::NoAutomaticBatching;
-use bevy::render::render_resource::{AsBindGroup, ShaderType};
-use bevy::render::storage::ShaderStorageBuffer;
+use bevy::render::render_asset::RenderAssets;
+use bevy::render::render_resource::{AsBindGroup, BufferUsages, ShaderType};
+use bevy::render::renderer::RenderQueue;
+use bevy::render::storage::{GpuShaderStorageBuffer, ShaderStorageBuffer};
+use bevy::render::{Extract, Render, RenderApp, RenderSystems};
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dPlugin};
 
@@ -109,6 +112,27 @@ impl Material2d for PacketCloudMaterial {
 #[derive(Component)]
 pub struct PacketCloud;
 
+/// Main-world handoff for the per-frame instance bytes.
+/// `update_packet_cloud` fills `bytes`; an extract system moves them
+/// into `ExtractedPacketUpload`, and a `PrepareResources` system writes
+/// them into the GPU buffer via `RenderQueue::write_buffer` — so the
+/// underlying `wgpu::Buffer` is allocated *once* at startup and reused
+/// every frame. Calling `ShaderStorageBuffer::set_data` per frame would
+/// instead make `prepare_asset` reallocate the buffer every frame and
+/// re-invalidate the material's bind group, which is a lot of churn
+/// for no reason.
+#[derive(Resource, Default)]
+struct PendingPacketUpload {
+    bytes: Vec<u8>,
+    handle: Option<Handle<ShaderStorageBuffer>>,
+}
+
+#[derive(Resource, Default)]
+struct ExtractedPacketUpload {
+    bytes: Vec<u8>,
+    handle_id: Option<AssetId<ShaderStorageBuffer>>,
+}
+
 pub struct PacketCloudPlugin;
 
 impl Plugin for PacketCloudPlugin {
@@ -119,8 +143,19 @@ impl Plugin for PacketCloudPlugin {
         embedded_asset!(app, "shaders/packet_cloud.wgsl");
 
         app.add_plugins(Material2dPlugin::<PacketCloudMaterial>::default())
+            .init_resource::<PendingPacketUpload>()
             .add_systems(Startup, spawn_packet_cloud)
             .add_systems(Update, update_packet_cloud);
+
+        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+            render_app
+                .init_resource::<ExtractedPacketUpload>()
+                .add_systems(ExtractSchedule, extract_packet_upload)
+                .add_systems(
+                    Render,
+                    upload_packet_buffer.in_set(RenderSystems::PrepareResources),
+                );
+        }
     }
 }
 
@@ -129,18 +164,28 @@ fn spawn_packet_cloud(
     mut meshes: ResMut<Assets<Mesh>>,
     mut mats: ResMut<Assets<PacketCloudMaterial>>,
     mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
+    mut pending: ResMut<PendingPacketUpload>,
 ) {
-    let mesh = build_index_only_mesh(MAX_PACKETS);
-    // Allocate the storage buffer pre-sized for the max packet count so
-    // the GPU buffer is created once at startup and we just memcpy
-    // into it each frame via `set_data`.
+    let mesh = build_packet_cloud_mesh(MAX_PACKETS);
+    // Allocate the storage buffer once at MAX_PACKETS capacity, with
+    // `COPY_DST` so we can rewrite contents each frame via
+    // `RenderQueue::write_buffer` without ever reallocating. Leaving
+    // `data` as `None` makes `prepare_asset` take the empty branch and
+    // call `create_buffer` (not `create_buffer_with_data`), so the
+    // buffer is created uninitialized — the first frame's
+    // `write_buffer` populates it before the shader reads.
+    let max_size = encode_packet_instances(vec![PacketInstance::default(); MAX_PACKETS])
+        .len() as u64;
     let mut storage = ShaderStorageBuffer::default();
+    storage.buffer_description.label = Some("packet_cloud_instances");
+    storage.buffer_description.size = max_size;
+    storage.buffer_description.usage = BufferUsages::STORAGE | BufferUsages::COPY_DST;
+    storage.buffer_description.mapped_at_creation = false;
     storage.asset_usage = RenderAssetUsages::default();
-    storage.set_data(PacketInstances {
-        items: vec![PacketInstance::default(); MAX_PACKETS],
-    });
+    let handle = buffers.add(storage);
+    pending.handle = Some(handle.clone());
     let mat = PacketCloudMaterial {
-        instances: buffers.add(storage),
+        instances: handle,
         clock: PacketClock {
             now_real: 0.0,
             active_count: 0,
@@ -151,42 +196,43 @@ fn spawn_packet_cloud(
     // Z=3 to match the previous per-packet z so packets render above
     // edges/nodes the same way.
     //
-    // `NoFrustumCulling`: the dummy mesh has all vertex positions at
-    // origin → AABB is a single point. Real packet positions come
-    // from the storage buffer at draw time, which the culler doesn't
-    // know about. Without this the cloud disappears whenever the
-    // camera is anywhere off origin.
-    // `NoAutomaticBatching`: Bevy 0.18 batches Mesh2d entities into a
-    // shared vertex buffer with base-vertex offsets. That breaks our
-    // shader's `vid / 6` math because `@builtin(vertex_index)` then
-    // counts from the global merged buffer, not 0..N*6 of our quad
-    // mesh. Opting out keeps each packet-cloud draw as its own draw
-    // call with vertex_index starting at 0.
+    // `NoFrustumCulling`: the mesh's vertex positions encode corner +
+    // instance id, not real world coordinates — actual packet
+    // positions come from the storage buffer at draw time. The
+    // mesh-derived AABB is therefore meaningless to the culler;
+    // without this opt-out the cloud disappears whenever the camera
+    // pans off the AABB.
     commands.spawn((
         Mesh2d(meshes.add(mesh)),
         MeshMaterial2d(mats.add(mat)),
         Transform::from_xyz(0.0, 0.0, 3.0),
         Visibility::Visible,
         NoFrustumCulling,
-        NoAutomaticBatching,
         PacketCloud,
     ));
 }
 
-/// Build the dummy mesh: `MAX_PACKETS * 6` vertices, no index buffer.
+/// Build the cloud's vertex mesh: `MAX_PACKETS * 6` vertices, one
+/// triangle list, no index buffer. Per-vertex `ATTRIBUTE_POSITION`
+/// carries `(corner.x, corner.y, instance_id_as_f32)` so the shader
+/// reads packet id and corner from the attribute directly.
 ///
-/// Why no indices: under `draw_indexed`, `@builtin(vertex_index)` in
-/// the vertex shader returns the *indexed value*, not the linear step
-/// number. We rely on `vertex_index` walking 0..N*6 linearly so the
-/// shader can derive `instance_id = vid / 6` and `corner_id = vid % 6`.
-/// A non-indexed `draw` call gives us that.
-///
-/// The position attribute is required by the 2D mesh pipeline even
-/// though the shader recomputes everything from `vertex_index`; we
-/// hand it zeros.
-fn build_index_only_mesh(max_packets: usize) -> Mesh {
+/// Why a position attribute and not `@builtin(vertex_index)`: Bevy's
+/// `MeshAllocator` packs every Mesh2d into one shared vertex buffer
+/// and the 2D draw uses our slice's start as `firstVertex`. So
+/// `@builtin(vertex_index)` returns a *global* index — when the slice
+/// start isn't a multiple of 6, the 6 vertices of a single quad
+/// straddle two storage-buffer entries and the quad stretches into a
+/// streak between two packets' paths. Vertex attribute fetches are
+/// local to our buffer slice, which sidesteps the offset entirely.
+fn build_packet_cloud_mesh(max_packets: usize) -> Mesh {
     let n_verts = max_packets * 6;
-    let positions: Vec<[f32; 3]> = vec![[0.0, 0.0, 0.0]; n_verts];
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n_verts);
+    for i in 0..n_verts {
+        let instance_id = (i / 6) as f32;
+        let [cx, cy] = quad_corner(i % 6);
+        positions.push([cx, cy, instance_id]);
+    }
 
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -196,8 +242,21 @@ fn build_index_only_mesh(max_packets: usize) -> Mesh {
     mesh
 }
 
-/// Each frame: walk the visual timeline, pack visible packets into
-/// the storage buffer, advance the clock uniform.
+/// Two triangles per quad: corners 0..5 →
+/// (-1,-1), (1,-1), (1,1), (1,1), (-1,1), (-1,-1).
+fn quad_corner(i: usize) -> [f32; 2] {
+    match i {
+        0 | 5 => [-1.0, -1.0],
+        1 => [1.0, -1.0],
+        2 | 3 => [1.0, 1.0],
+        4 => [-1.0, 1.0],
+        _ => unreachable!("quad_corner called with i={i} > 5"),
+    }
+}
+
+/// Each frame: walk the visual timeline, encode visible packets into
+/// `PendingPacketUpload.bytes` for the render world to write into the
+/// GPU buffer, and advance the clock uniform.
 fn update_packet_cloud(
     timeline: Res<VisualTimelineRes>,
     clock: Res<SimClock>,
@@ -207,11 +266,11 @@ fn update_packet_cloud(
     maps: Res<EntityMaps>,
     cloud: Query<&MeshMaterial2d<PacketCloudMaterial>, With<PacketCloud>>,
     mut mats: ResMut<Assets<PacketCloudMaterial>>,
-    mut buffers: ResMut<Assets<ShaderStorageBuffer>>,
     hide_all: Res<crate::edges::HideAll>,
     membership: Res<crate::compound::CompoundMembership>,
     current_scope: Res<crate::compound::CurrentScope>,
     mut perf: ResMut<crate::perf::PhaseTimings>,
+    mut pending: ResMut<PendingPacketUpload>,
 ) {
     let Ok(handle) = cloud.single() else { return };
     let Some(mat) = mats.get_mut(&handle.0) else { return };
@@ -266,9 +325,7 @@ fn update_packet_cloud(
 
     let count = packed.len();
 
-    if let Some(storage) = buffers.get_mut(&mat.instances) {
-        storage.set_data(PacketInstances { items: packed });
-    }
+    pending.bytes = encode_packet_instances(packed);
 
     mat.clock = PacketClock {
         now_real: now as f32,
@@ -277,6 +334,47 @@ fn update_packet_cloud(
         _pad: 0.0,
     };
     });
+}
+
+/// Encode a `Vec<PacketInstance>` into the WGSL `array<PacketInstance>`
+/// storage-buffer layout via encase, matching what `set_data` would do
+/// — but landing the bytes in our own buffer so we can hand them to
+/// `RenderQueue::write_buffer` instead of round-tripping through Bevy's
+/// `ShaderStorageBuffer` asset re-prepare path.
+fn encode_packet_instances(items: Vec<PacketInstance>) -> Vec<u8> {
+    use bevy::render::render_resource::encase::StorageBuffer;
+    let mut wrapper = StorageBuffer::<Vec<u8>>::new(Vec::new());
+    wrapper.write(&PacketInstances { items }).unwrap();
+    wrapper.into_inner()
+}
+
+/// Copy the encoded bytes from the main world into the render world's
+/// `ExtractedPacketUpload`. `Extract` is read-only so we clone — bytes
+/// are at most `MAX_PACKETS * stride` (~5 MB) and typically far less.
+fn extract_packet_upload(
+    pending: Extract<Res<PendingPacketUpload>>,
+    mut extracted: ResMut<ExtractedPacketUpload>,
+) {
+    extracted.bytes.clear();
+    extracted.bytes.extend_from_slice(&pending.bytes);
+    extracted.handle_id = pending.handle.as_ref().map(|h| h.id());
+}
+
+/// Write the extracted bytes into the persistent GPU buffer in place.
+/// Runs in `PrepareResources`, after `prepare_assets::<GpuShaderStorageBuffer>`
+/// (which `RenderSystems::PrepareAssets` ensures has already created
+/// the buffer for our handle).
+fn upload_packet_buffer(
+    extracted: Res<ExtractedPacketUpload>,
+    ssbos: Res<RenderAssets<GpuShaderStorageBuffer>>,
+    queue: Res<RenderQueue>,
+) {
+    if extracted.bytes.is_empty() {
+        return;
+    }
+    let Some(id) = extracted.handle_id else { return };
+    let Some(gpu) = ssbos.get(id) else { return };
+    queue.write_buffer(&gpu.buffer, 0, &extracted.bytes);
 }
 
 #[cfg(test)]
@@ -354,15 +452,12 @@ mod tests {
             mat.clock.active_count
         );
 
-        // And the storage-buffer data should have been written.
-        let storage = app
-            .world()
-            .resource::<Assets<bevy::render::storage::ShaderStorageBuffer>>()
-            .get(&mat.instances)
-            .expect("storage buffer missing");
+        // And the per-frame instance bytes should have been encoded
+        // into `PendingPacketUpload` for the render world to upload.
+        let pending = app.world().resource::<PendingPacketUpload>();
         assert!(
-            storage.data.as_ref().is_some_and(|d| !d.is_empty()),
-            "storage buffer should hold serialized instance data"
+            !pending.bytes.is_empty(),
+            "PendingPacketUpload.bytes should hold serialized instance data"
         );
     }
 }

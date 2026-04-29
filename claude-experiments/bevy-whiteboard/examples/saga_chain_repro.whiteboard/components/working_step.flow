@@ -1,0 +1,200 @@
+# WorkingSagaStep — saga step that performs a real backend call
+# mid-step.
+#
+# Difference from the stock `SagaStep`: instead of bumping `done`
+# and immediately forwarding to the next chain step, this step
+# emits a req to a *backend* (a non-saga-chain neighbour), waits
+# for its resp, and only then forwards to the next chain step
+# (or terminates and replies up the saga).
+#
+# A backend `resp_error` triggers compensation, exactly as if the
+# step's own `fail_prob` had fired.
+#
+# ── Tier discipline ───────────────────────────────────────────────
+#
+# We distinguish "saga chain" neighbours from "backend" neighbours
+# by colour. Saga chain nodes (Saga, every WorkingStep) share
+# `color = 0`. Backends (CircuitBreaker fronting a Worker, a Router
+# fronting shards, a TPCCoordinator…) sit at `color = 1` (or
+# whatever `backend_color` is set to).
+#
+# When the step receives `req(0)` from the previous chain hop:
+#   1. push the previous hop's frame onto pending_rp (we'll need it
+#      to resume forwarding once the backend replies — at that
+#      point return_path on the resp will already have us popped).
+#   2. emit `req(backend_color)` pushing self to the colour=1
+#      neighbour. The backend's reply pops back to us.
+#   3. set `phase = "calling_backend"` so subsequent resp/resp_error
+#      arrivals are routed to this transaction's resumption logic
+#      rather than the relay-up logic.
+#
+# When backend replies `resp(_)` to us (phase == "calling_backend"):
+#   - if there's a non-RP-head saga-chain (colour == 0) neighbour:
+#       forward to it pushing self, return to phase == "idle".
+#   - otherwise: this step is terminal, reply `resp(nil)` popping
+#       to head(return_path) — i.e. the previous chain step.
+#
+# When backend replies `resp_error(_)` to us (phase == "calling_backend"):
+#   - emit `compensate(nil)` popping to head(return_path) — the
+#     previous chain step. Each prior step's `step_compensate` then
+#     bumps its `compensated` counter all the way back to Saga.
+#
+# When `resp(_)` arrives while phase == "idle" — that's a downstream
+# step's success relayed THROUGH us back toward the saga entry. Pop
+# and propagate.
+
+node WorkingSagaStep {
+    slots {
+        # Lifecycle counters
+        done:        Int    = 0
+        compensated: Int    = 0
+        # Forced-failure knob (matches stock SagaStep semantics).
+        # 0.0 = always succeed, 1.0 = always fail at *this* step
+        # without contacting backend (saves a wasted call).
+        fail_prob:   Float  = 0.0
+        # Which neighbour set is the "backend" tier.
+        backend_color: Int  = 1
+        color:       Int    = 0
+        up:          Int    = 1
+        # In-flight bookkeeping. Samples(8) gives enough headroom
+        # that several concurrent transactions can be in the air;
+        # the saga itself rate-limits things in practice.
+        phase:       String = "idle"
+    }
+    probes {
+        done:    "{done}"
+        comp:    "{compensated}"
+        fail:    "{fail_prob}"
+    }
+
+    # ── Forward path: req from previous chain hop ────────────────
+
+    # Local-failure short-circuit. `fail_prob == 1.0` means "this
+    # step's logic refuses without trying the backend." Compensate
+    # immediately. Don't bump `done` — nothing was done.
+    rule step_fail_local {
+        on req(c)
+        when c == color && up == 1 && fail_prob == 1.0
+        do {
+            emit compensate(nil) popping to (head(return_path))
+        }
+    }
+
+    # Healthy req: stash phase, dispatch to backend. If multiple
+    # backend neighbours are wired (e.g. inventory shards), pick the
+    # least-recently-used by `edge_last_sent` — gives free RR
+    # load-balancing across the backend tier.
+    rule step_call_backend {
+        on req(c)
+        when c == color && up == 1 && phase == "idle"
+            && length(filter(out_neighbors(), "n", slot_of(n, "color") == backend_color)) > 0
+        do {
+            phase := "calling_backend"
+            emit req(backend_color) pushing self to (argmin(
+                filter(out_neighbors(), "n", slot_of(n, "color") == backend_color),
+                "n", edge_last_sent(n)))
+        }
+    }
+
+    # No backend wired. Same forward semantics as a stock
+    # SagaStep: if there's a next chain hop, forward; else reply.
+    rule step_forward_no_backend {
+        on req(c)
+        when c == color && up == 1
+            && length(filter(out_neighbors(), "n", slot_of(n, "color") == backend_color)) == 0
+            && length(filter(out_neighbors(), "n", slot_of(n, "color") == color && n != head(return_path))) > 0
+        do {
+            done := done + 1
+            emit req(color) pushing self to (head(filter(out_neighbors(), "n", slot_of(n, "color") == color && n != head(return_path))))
+        }
+    }
+    rule step_terminal_no_backend {
+        on req(c)
+        when c == color && up == 1
+            && length(filter(out_neighbors(), "n", slot_of(n, "color") == backend_color)) == 0
+        do {
+            done := done + 1
+            emit resp(nil) popping to (head(return_path))
+        }
+    }
+
+    rule step_down {
+        on req(_)
+        when up == 0
+        do {
+            error "node_down" "working_step: req to down step"
+            emit compensate(nil) popping to (head(return_path))
+        }
+    }
+
+    rule step_reject {
+        on req(_)
+        do { error "color_mismatch" "working_step: wrong-colour req rejected" }
+    }
+
+    # ── Backend reply path ──────────────────────────────────────
+
+    # Backend succeeded. We now look for a next saga-chain hop.
+    rule on_backend_ok_forward {
+        on resp(_)
+        when phase == "calling_backend"
+            && length(filter(out_neighbors(), "n", slot_of(n, "color") == color && n != head(return_path))) > 0
+        do {
+            done := done + 1
+            phase := "idle"
+            emit req(color) pushing self to (head(filter(out_neighbors(), "n", slot_of(n, "color") == color && n != head(return_path))))
+        }
+    }
+
+    # Backend succeeded and we're terminal — reply up to the
+    # previous chain hop (eventually Saga, eventually the client).
+    rule on_backend_ok_terminal {
+        on resp(_)
+        when phase == "calling_backend"
+        do {
+            done := done + 1
+            phase := "idle"
+            emit resp(nil) popping to (head(return_path))
+        }
+    }
+
+    # Backend failed. Begin compensation.
+    rule on_backend_error {
+        on resp_error(_)
+        when phase == "calling_backend"
+        do {
+            phase := "idle"
+            emit compensate(nil) popping to (head(return_path))
+        }
+    }
+
+    # ── Relay path: downstream success/error walking back up ────
+
+    # Once we've forwarded and reset phase to "idle", a downstream
+    # step's resp will land here. Just pop+propagate.
+    rule relay_resp {
+        on resp(x)
+        when phase == "idle"
+        do {
+            emit resp(x) popping to (head(return_path))
+        }
+    }
+
+    rule relay_resp_error {
+        on resp_error(x)
+        when phase == "idle"
+        do {
+            emit resp_error(x) popping to (head(return_path))
+        }
+    }
+
+    # ── Compensate walks back through us ────────────────────────
+
+    rule on_compensate {
+        on compensate(_)
+        do {
+            compensated := compensated + 1
+            emit compensate(nil) popping to (head(return_path))
+        }
+    }
+}

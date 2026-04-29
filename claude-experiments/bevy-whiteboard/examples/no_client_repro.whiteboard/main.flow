@@ -1,0 +1,7 @@
+node Gen    : Generator { period_ns: 200000000 }
+node Worker : Worker    { service_ns: 30000000 }
+
+edges {
+    Gen    -> Worker : 1ms
+    Worker -> Gen    : 1ms
+}

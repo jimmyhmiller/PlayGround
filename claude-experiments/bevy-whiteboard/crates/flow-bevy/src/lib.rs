@@ -57,8 +57,6 @@ pub fn build_app(canvas: Option<PathBuf>) -> App {
     // cluttered for screenshots / demos.
     if std::env::var("FLOW_BEVY_FPS").ok().filter(|s| !s.is_empty()).is_some() {
         use bevy::dev_tools::fps_overlay::{FpsOverlayConfig, FpsOverlayPlugin};
-        use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
-        app.add_plugins(FrameTimeDiagnosticsPlugin::default());
         app.add_plugins(FpsOverlayPlugin {
             config: FpsOverlayConfig {
                 text_config: TextFont { font_size: 14.0, ..default() },

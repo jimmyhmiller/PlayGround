@@ -1,0 +1,24 @@
+   Compiling flow-bevy v0.1.0 (/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/bevy-whiteboard/crates/flow-bevy)
+warning: field `event_id` is never read
+  --> crates/flow-bevy/src/timeline.rs:55:5
+   |
+54 | struct TimelineEventMarker {
+   |        ------------------- field in this struct
+55 |     event_id: u64,
+   |     ^^^^^^^^
+   |
+   = note: `TimelineEventMarker` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `flow-bevy` (lib) generated 1 warning
+    Finished `dev` profile [optimized + debuginfo] target(s) in 7.52s
+     Running `target/debug/flow-bevy examples/saga_chain_repro.whiteboard`
+[2m2026-04-29T16:45:24.764334Z[0m [32m INFO[0m [2mbevy_diagnostic::system_information_diagnostics_plugin::internal[0m[2m:[0m SystemInfo { os: "macOS 26.3.1", kernel: "25.3.0", cpu: "Apple M2 Max", core_count: "12", memory: "64.0 GiB" }
+[2m2026-04-29T16:45:24.813760Z[0m [32m INFO[0m [2mbevy_render::renderer[0m[2m:[0m AdapterInfo { name: "Apple M2 Max", vendor: 0, device: 0, device_type: IntegratedGpu, driver: "", driver_info: "", backend: Metal }
+[2m2026-04-29T16:45:24.935498Z[0m [32m INFO[0m [2mbevy_render::batching::gpu_preprocessing[0m[2m:[0m GPU preprocessing is fully supported on this device.
+[2m2026-04-29T16:45:24.959051Z[0m [32m INFO[0m [2mbevy_winit::system[0m[2m:[0m Creating new window Flow Whiteboard (0v0)
+[2m2026-04-29T16:45:25.057898Z[0m [32m INFO[0m [2mflow_bevy::canvas[0m[2m:[0m loaded canvas `Saga chain repro` (5 nodes, 7 edges)
+[poster-ui] system-font fallback enabled (807 faces loaded)
+[poster-ui] loaded primary font (embedded Jost)
+[poster-ui] loaded bold font (embedded Jost)
+[poster-ui] loaded mono font '/System/Library/Fonts/Menlo.ttc'
