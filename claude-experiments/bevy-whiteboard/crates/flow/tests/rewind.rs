@@ -164,3 +164,63 @@ fn snapshot_ring_captures_multiple() {
     rewound.restore_from(snap.sim);
     assert!(rewound.now_ns <= 150_000_000);
 }
+
+#[test]
+fn snapshot_ring_anchor_survives_eviction() {
+    use flow::SnapshotRing;
+
+    // Cap of 2 — easy to overflow. The anchor at t=0 must remain
+    // available even after the ring has rolled forward many times.
+    let mut sim = build_sim();
+    let mut ring = SnapshotRing::new(2);
+
+    // First capture seeds the anchor at t=0.
+    ring.capture(&sim);
+    assert!(ring.anchor.is_some());
+    assert_eq!(ring.anchor.as_ref().unwrap().sim_now_ns, 0);
+
+    // Advance and capture several times to evict everything.
+    for t in (50_000_000u64..=400_000_000).step_by(50_000_000) {
+        sim.run_until(t);
+        ring.capture(&sim);
+    }
+    // Ring holds only the two newest, but anchor is still t=0.
+    assert_eq!(ring.len(), 2);
+    assert_eq!(ring.anchor.as_ref().unwrap().sim_now_ns, 0);
+
+    // Querying for a time before any ring entry falls back to the
+    // anchor instead of returning None.
+    let snap = ring.latest_before_ns(10_000_000).expect("anchor fallback");
+    assert_eq!(snap.sim_now_ns, 0);
+}
+
+#[test]
+fn auto_capture_respects_interval() {
+    use flow::{CapturePolicy, SnapshotRing};
+
+    let mut sim = build_sim();
+    let mut ring = SnapshotRing::new(64);
+    let policy = CapturePolicy {
+        min_interval_ns: 100_000_000,
+        min_event_delta: u64::MAX,
+    };
+
+    // First call always captures (seeds anchor).
+    assert!(ring.auto_capture(&sim, policy));
+    assert_eq!(ring.len(), 1);
+
+    // 50ms later: below threshold, skipped.
+    sim.run_until(50_000_000);
+    assert!(!ring.auto_capture(&sim, policy));
+    assert_eq!(ring.len(), 1);
+
+    // 150ms total: crosses 100ms threshold, captured.
+    sim.run_until(150_000_000);
+    assert!(ring.auto_capture(&sim, policy));
+    assert_eq!(ring.len(), 2);
+
+    // Marker times start at the anchor (0) and progress forward.
+    let marks = ring.marker_times_ns();
+    assert_eq!(marks.first().copied(), Some(0));
+    assert!(marks.windows(2).all(|w| w[0] <= w[1]));
+}

@@ -150,7 +150,7 @@ pub struct Edge {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct Scheduled {
+pub struct Scheduled {
     pub arrives_at_ns: Time,
     pub packet: Packet,
     /// The edge this travel is associated with (for observability and
@@ -184,7 +184,7 @@ pub struct Sim {
     pub rng: SimRng,
     pub log: EventLog,
     #[serde(with = "reverse_heap_serde")]
-    pub(crate) in_flight: BinaryHeap<Reverse<Scheduled>>,
+    pub in_flight: BinaryHeap<Reverse<Scheduled>>,
     pub(crate) next_node_id: u64,
     pub(crate) next_edge_id: u64,
     pub(crate) next_packet_id: u64,

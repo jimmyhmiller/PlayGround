@@ -782,26 +782,43 @@ fn simple_readout(
 /// Translate the slider's live value back into the node's period / service
 /// slot, every frame the user drags. The slider owns the authoritative
 /// value — when it changes, the sim follows.
+///
+/// `Changed<Slider>` also fires on the *initial spawn* of the slider
+/// component, which happens on every inspector rebuild — i.e. every
+/// time the user clicks/selects a node. Without a same-value guard,
+/// that fires a no-op `user_edit_slot`, which logs a
+/// `UserSlotEdit` boundary that the visual layer interprets as
+/// "user changed state, drop future-queued packets." Replay's
+/// causal-clamp future-queue then visibly resets on every click.
+/// We compare the slider-derived value against the current snapshot
+/// and bail when they match.
 fn push_rate_slider_to_sim(
     q: Query<(&Slider, &RateSlider), Changed<Slider>>,
     snapshot: Res<SimSnapshotRes>,
     mut driver: ResMut<SimDriverRes>,
 ) {
     for (slider, rs) in q.iter() {
-        if !snapshot.0.nodes.contains_key(&rs.node) { continue; }
+        let Some(node) = snapshot.0.nodes.get(&rs.node) else { continue };
         let nid = rs.node;
         match rs.kind {
             RateSliderKind::EmitPerSecond => {
                 let rate = slider.value.max(0.01) as f64;
                 let period_ns = (1_000_000_000.0 / rate) as i64;
+                if let Some(Value::Int(cur)) = node.slots.get("period_ns") {
+                    if *cur == period_ns { continue; }
+                }
                 driver.0.send_command(SimCommand::new(move |sim| {
                     sim.user_edit_slot(nid, "period_ns", Value::Int(period_ns));
                 }));
             }
             RateSliderKind::ServiceMs => {
                 let ms = slider.value.max(0.5) as i64;
+                let service_ns = ms * 1_000_000;
+                if let Some(Value::Int(cur)) = node.slots.get("service_ns") {
+                    if *cur == service_ns { continue; }
+                }
                 driver.0.send_command(SimCommand::new(move |sim| {
-                    sim.user_edit_slot(nid, "service_ns", Value::Int(ms * 1_000_000));
+                    sim.user_edit_slot(nid, "service_ns", Value::Int(service_ns));
                 }));
             }
         }

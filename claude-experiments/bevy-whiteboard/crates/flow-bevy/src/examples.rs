@@ -177,7 +177,7 @@ fn handle_load_example(
     // per-node causal arrival history. F12 uses `real_now` freshly
     // at each ingestion so no anchor update is needed here — the
     // next event after load will emit near the current wall clock.
-    timeline.0.reset();
+    timeline.reset();
 
     maps.node_to_entity.clear();
     maps.entity_to_node.clear();
@@ -209,6 +209,17 @@ fn handle_load_example(
         Example::ClientQueueWorker  => build_client_queue_worker(&mut ctx),
         Example::BackoffHerd        => build_backoff_herd(&mut ctx),
     }
+
+    // The snapshot ring still holds entries from the pre-load sim.
+    // Drop them and re-anchor on the now-populated example so rewind
+    // doesn't restore the empty pre-load canvas. Done after the build
+    // so the new anchor captures the example's topology, not the
+    // empty fresh sim that `*sim = new_sim` left behind.
+    driver.0.reset_history();
+    // Note: reset_history put `sim.now_ns` back to 0. The
+    // visual_offset adjustment that keeps visual_now monotonic
+    // across this transition lives in `edges::apply_rewind_reset`,
+    // which runs in response to the rewind_epoch bump.
 }
 
 // ────────────────────────────────────────────────────────────

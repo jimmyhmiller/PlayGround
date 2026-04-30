@@ -277,19 +277,15 @@ fn update_packet_cloud(
 
     crate::time_phase!(perf, "packet_cloud.update", {
     let now = clock.visual_now;
-    let mut packed: Vec<PacketInstance> =
-        Vec::with_capacity(timeline.packets.len().min(MAX_PACKETS));
+    let mut packed: Vec<PacketInstance> = Vec::with_capacity(MAX_PACKETS);
 
     // Hide-all toggle (`H` key) zeroes out the active count so the
     // shader rasterizes nothing, mirroring the gating that `edges.rs`
     // applies to arrow drawing and per-packet entity spawning.
     if !hide_all.0 {
-    for vp in &timeline.packets {
+    for (vp, _prog) in timeline.visible_at(now) {
         if packed.len() >= MAX_PACKETS {
             break;
-        }
-        if now < vp.emit_real || now >= vp.arrive_real {
-            continue;
         }
         // Scope filter — same rule as `Scoped` / `sync_scoped_visibility`,
         // applied here because the packet cloud is one GPU entity
@@ -405,7 +401,7 @@ mod tests {
             let mut tl = app
                 .world_mut()
                 .resource_mut::<crate::edges::VisualTimelineRes>();
-            tl.0.k = 200.0;
+            tl.set_k(200.0);
         }
         app.world_mut()
             .resource_mut::<bevy::ecs::message::Messages<crate::examples::LoadExample>>()
@@ -423,6 +419,7 @@ mod tests {
             .world()
             .resource::<crate::edges::VisualTimelineRes>()
             .0
+            .as_replay()
             .packets
             .len();
         assert!(
@@ -479,7 +476,7 @@ mod flow_bevy_internal_test_helpers {
             let mut tl = app
                 .world_mut()
                 .resource_mut::<crate::edges::VisualTimelineRes>();
-            tl.0.k = 1.0;
+            tl.set_k(1.0);
         }
         // Tests must drive the sim deterministically — swap the
         // worker-mode driver the bridge installs for a Direct one.

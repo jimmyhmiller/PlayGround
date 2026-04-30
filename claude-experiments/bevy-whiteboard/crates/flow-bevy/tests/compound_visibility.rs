@@ -40,7 +40,7 @@ fn boot_with_life_dsl() -> App {
     app.world_mut().resource_mut::<flow_bevy::bridge::SimClock>().multiplier = 1.0;
     {
         let mut tl = app.world_mut().resource_mut::<flow_bevy::edges::VisualTimelineRes>();
-        tl.0.k = 1.0;
+        tl.0.as_replay_mut().k = 1.0;
     }
     {
         let world = app.world_mut();
@@ -493,7 +493,7 @@ fn packet_cloud_filters_internal_packets_at_top_level() {
     // Use the production visual scale so each 1ms edge animates as a
     // 200ms visible packet — otherwise the packets are too narrow a
     // window for any update tick to catch them mid-flight.
-    app.world_mut().resource_mut::<VisualTimelineRes>().0.k = 200.0;
+    app.world_mut().resource_mut::<VisualTimelineRes>().0.as_replay_mut().k = 200.0;
 
     // Drive the sim in alternating advance/update cycles so the
     // bridge can ingest the events into the visual timeline (single
@@ -508,7 +508,7 @@ fn packet_cloud_filters_internal_packets_at_top_level() {
     }
 
     // Sanity: the timeline should now hold inbound packets.
-    let timeline_len = app.world().resource::<VisualTimelineRes>().0.packets.len();
+    let timeline_len = app.world().resource::<VisualTimelineRes>().0.as_replay().packets.len();
     assert!(
         timeline_len > 0,
         "timeline should have ingested cell-report packets after sim activity"

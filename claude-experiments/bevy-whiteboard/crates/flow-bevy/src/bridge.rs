@@ -53,7 +53,7 @@ impl Plugin for FlowBridgePlugin {
             .add_systems(PreUpdate, sync_snapshot_system.in_set(SnapshotReady))
             .add_systems(
                 Update,
-                (advance_visual_clock, push_clock_to_driver, collect_new_events).chain(),
+                (push_clock_to_driver, sync_visual_now_from_sim, collect_new_events).chain(),
             );
     }
 }
@@ -95,19 +95,43 @@ pub struct SimClock {
     pub multiplier: f64,
     pub paused: bool,
     pub step_once_ns: Option<u64>,
-    /// Pause-aware wall clock used by every visual system that needs
-    /// "now" in real seconds. Advanced by `time.delta_secs_f64()`
-    /// each frame, EXCEPT while `paused == true` — so packet
-    /// animations freeze in place when the user pauses, and resume
-    /// from where they left off when the user unpauses.
-    /// Bevy's `time.elapsed_secs_f64()` keeps ticking through pause;
-    /// using it directly was the bug that let visuals keep
-    /// animating while the sim sat still.
+    /// Real-time clock used by visual systems for animation. Derived
+    /// every frame from `sim_now * 1e-9 + visual_offset`. Both
+    /// clocks advance in lockstep under multiplier and pause (the
+    /// worker scales sim time the same way the visual layer does),
+    /// so binding visual_now to sim time makes pause/multiplier
+    /// changes and rewinds automatically pixel-perfect — when the
+    /// sim jumps back to time `T`, `visual_now` snaps to exactly
+    /// the wall-clock value it had when the sim was originally at
+    /// `T`. `visible_at(visual_now)` then returns the same packets
+    /// that were on screen at `T`.
     pub visual_now: f64,
+    /// Anchors the `sim_now → visual_now` mapping. Set on
+    /// `reset_history` (LoadExample, canvas load) so the visual
+    /// clock keeps advancing monotonically across topology resets,
+    /// even though `sim_now` snaps back to 0.
+    pub visual_offset: f64,
+    /// Debug feature: continuous backward playback. `0.0` means
+    /// off; `1.0` rewinds at real-time speed (1 sim-second of
+    /// backward travel per wall-second); larger values play in
+    /// reverse faster. While non-zero, normal forward sim advance
+    /// is suspended and `push_clock_to_driver` issues a small
+    /// `driver.rewind(now - dt)` each frame. Each rewind bumps
+    /// `rewind_epoch`, so the visual layer recomputes from the sim
+    /// log every frame — same path that produces pixel-identical
+    /// scrub-back.
+    pub reverse_play_rate: f64,
 }
 impl Default for SimClock {
     fn default() -> Self {
-        Self { multiplier: 1.0, paused: false, step_once_ns: None, visual_now: 0.0 }
+        Self {
+            multiplier: 1.0,
+            paused: false,
+            step_once_ns: None,
+            visual_now: 0.0,
+            visual_offset: 0.0,
+            reverse_play_rate: 0.0,
+        }
     }
 }
 
@@ -115,12 +139,29 @@ impl Default for SimClock {
 #[derive(Resource, Default)]
 pub struct NewEvents(pub Vec<Event>);
 
-/// Advance the pause-aware visual clock. Runs first in the update
-/// chain so every visual system that reads `clock.visual_now` sees
-/// today's value, not yesterday's. Stepping (`step_once_ns`)
-/// advances visual time by the same delta the sim takes, so a
-/// single-step is visible: packets that emit/arrive within the step
-/// flash in their lane.
+/// Derive `clock.visual_now` from `sim.now_ns` plus the offset.
+/// Replaces the old "increment by delta_real each frame" approach
+/// with a deterministic function of sim time, which means rewinds
+/// snap visual_now back to its original value at the rewound moment
+/// without any per-handler bookkeeping. Pause and multiplier are
+/// handled implicitly: when the sim doesn't advance, neither does
+/// visual_now; when the sim advances 4× faster, so does visual_now.
+///
+/// Reads `now_ns` directly off the driver's latest published
+/// `RenderSnapshot` (not via `SimSnapshotRes`, which only refreshes
+/// in `PreUpdate`) so that the visual clock reflects this frame's
+/// sim advance, not last frame's.
+fn sync_visual_now_from_sim(
+    driver: Res<crate::sim_driver::SimDriverRes>,
+    mut clock: ResMut<SimClock>,
+) {
+    let now_ns = driver.0.snapshot().now_ns;
+    clock.visual_now = now_ns as f64 * 1e-9 + clock.visual_offset;
+}
+
+/// Kept around for now in case any test still calls it; the
+/// derivation system above replaces its role.
+#[allow(dead_code)]
 fn advance_visual_clock(
     time: Res<Time>,
     mut clock: ResMut<SimClock>,
@@ -146,6 +187,26 @@ fn push_clock_to_driver(
     let control = driver.0.control().clone();
     control.set_multiplier(clock.multiplier);
     control.set_paused(clock.paused);
+
+    // Debug: continuous reverse playback. Drives a small
+    // `driver.rewind(now - dt)` every frame, which bumps
+    // `rewind_epoch` and recomputes visuals from the sim log — so
+    // packets visually flow backward along edges at real-time
+    // speed. Mode-aware: in Worker mode the rewind is queued.
+    if clock.reverse_play_rate > 0.0 {
+        let dt_real = time.delta_secs_f64();
+        let dt_sim_ns =
+            (dt_real * 1_000_000_000.0 * clock.reverse_play_rate * clock.multiplier).max(0.0)
+                as u64;
+        if dt_sim_ns > 0 {
+            let now_ns = driver.0.snapshot().now_ns;
+            let target = now_ns.saturating_sub(dt_sim_ns);
+            crate::time_phase!(perf, "bridge.reverse_step", {
+                driver.0.rewind(target);
+            });
+        }
+        return;
+    }
 
     if driver.0.is_worker() {
         if let Some(step) = clock.step_once_ns.take() {

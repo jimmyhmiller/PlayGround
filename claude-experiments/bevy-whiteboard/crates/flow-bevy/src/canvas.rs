@@ -418,6 +418,9 @@ pub fn seed_from_path(
     // through `with_sim_mut`; in worker mode the cost is one tick of
     // latency, which is invisible to the user.
     let new_sim = canvas.sim;
+    // Wholesale-replacing the sim invalidates the snapshot ring; we
+    // re-anchor below via `reset_history` so rewind doesn't roll
+    // back to the pre-load canvas.
     let load_data = driver.0.with_sim_mut(move |sim| {
         *sim = new_sim;
         let membership = crate::compound::compute_membership(sim);
@@ -437,6 +440,7 @@ pub fn seed_from_path(
         (nodes, edges, node_count, membership)
     });
     let (node_data, edge_data, node_count, membership) = load_data;
+    driver.0.reset_history();
     counter.0 = node_count;
     commands.insert_resource(membership.clone());
     // Surface compound authoring params so the inspector can show

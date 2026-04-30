@@ -31,5 +31,5 @@ pub use event::{Event, EventLog};
 pub use template::{Template, EdgeSpec, EdgeEnd, Probe, ProbePart};
 pub use scenario::{Scenario, Action};
 pub use timeline::{Timeline, TimelineEvent, TimelineAction};
-pub use history::{Snapshot, SnapshotRing};
+pub use history::{CapturePolicy, Snapshot, SnapshotRing};
 pub use snapshot::SimSnapshot;

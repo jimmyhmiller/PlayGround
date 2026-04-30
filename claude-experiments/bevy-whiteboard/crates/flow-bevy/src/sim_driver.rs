@@ -30,8 +30,14 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use bevy::prelude::*;
-use flow::{EdgeId, Event, NodeId, Sim, Time, Value};
+use flow::{CapturePolicy, EdgeId, Event, NodeId, Sim, SnapshotRing, Time, Value};
+use flow::sim::Scheduled;
 use flow::timeline::Timeline;
+
+use crate::rewind_strategy::{
+    initial_strategy as initial_rewind_strategy, RewindContext, RewindStrategy,
+    RewindStrategyDispatch, RewindStrategyKind,
+};
 
 // ─────────────────────────────────────────────────────────────────
 // Snapshot data
@@ -80,6 +86,27 @@ pub struct RenderSnapshot {
     pub timeline: Timeline,
     /// Class names registered in the sim. Used by `has_class` checks.
     pub class_names: BTreeSet<String>,
+    /// Increments every time the visual layer needs to recompute
+    /// from the sim's event log: rewinds and topology resets
+    /// (LoadExample / canvas load) both bump it. The visual layer
+    /// watches this and on every bump (a) resets its strategy state
+    /// and (b) replays `replay_events` with the correct
+    /// `sim_now → visual_now` time mapping, reconstructing exactly
+    /// the on-screen state the user originally saw at that sim time.
+    pub rewind_epoch: u64,
+    /// Sim-ns of every snapshot the user can scrub to, anchor first.
+    /// Sourced from `SnapshotRing::marker_times_ns`. The HUD uses
+    /// these to draw scrub-strip markers.
+    pub rewind_markers_ns: Vec<u64>,
+    /// Strategy-computed `PacketEmitted` events the visual layer
+    /// should replay on the next rewind-epoch bump. Held in an `Arc`
+    /// so per-frame snapshot publishes are cheap pointer bumps
+    /// rather than `Vec` clones — important because the same Arc
+    /// rides on every snapshot until the next rewind replaces it.
+    /// Empty until the first rewind / topology reset; updated by the
+    /// driver each time the active `RewindStrategy` produces a new
+    /// set.
+    pub replay_events: Arc<Vec<Event>>,
 }
 
 impl RenderSnapshot {
@@ -92,6 +119,9 @@ impl RenderSnapshot {
             perf_samples: Vec::new(),
             timeline: Timeline::default(),
             class_names: BTreeSet::new(),
+            rewind_epoch: 0,
+            rewind_markers_ns: Vec::new(),
+            replay_events: Arc::new(Vec::new()),
         }
     }
 
@@ -102,6 +132,31 @@ impl RenderSnapshot {
 
 /// Build a snapshot from the live sim. Drains `perf_samples` out of
 /// the sim. Clones: nodes, edges, error_counts, timeline.
+///
+/// `rewind_epoch` is forwarded straight onto the snapshot; the visual
+/// layer watches it to detect rewinds. `rewind_markers_ns` is the
+/// snapshot ring's marker list, included so the HUD can render scrub
+/// strip ticks without a separate read of the ring.
+/// Build a render snapshot, attaching rewind metadata. The
+/// strategy-computed `replay_events` is only populated *on the
+/// rewind itself* (passed in via `replay_events`); regular
+/// per-frame snapshots leave it empty so we don't pay the cost of
+/// derivation on every publish.
+pub fn make_snapshot_with(
+    sim: &mut Sim,
+    rewind_epoch: u64,
+    rewind_markers_ns: Vec<u64>,
+    replay_events: Arc<Vec<Event>>,
+) -> RenderSnapshot {
+    let mut snap = make_snapshot(sim);
+    snap.rewind_epoch = rewind_epoch;
+    snap.rewind_markers_ns = rewind_markers_ns;
+    snap.replay_events = replay_events;
+    snap
+}
+
+/// Plain snapshot — no rewind metadata. Kept for sites that don't own
+/// a `SnapshotRing` (e.g. tests).
 pub fn make_snapshot(sim: &mut Sim) -> RenderSnapshot {
     let mut nodes = BTreeMap::new();
     for (nid, node) in sim.nodes.iter() {
@@ -143,6 +198,9 @@ pub fn make_snapshot(sim: &mut Sim) -> RenderSnapshot {
         perf_samples,
         timeline: sim.timeline.clone(),
         class_names,
+        rewind_epoch: 0,
+        rewind_markers_ns: Vec::new(),
+        replay_events: Arc::new(Vec::new()),
     }
 }
 
@@ -230,10 +288,20 @@ impl SimControl {
 pub enum SimDriver {
     Direct {
         sim: Sim,
+        ring: SnapshotRing,
+        rewind_epoch: u64,
         snapshot: Arc<ArcSwap<RenderSnapshot>>,
         prev_log_index: u64,
         events_tx: mpsc::Sender<Event>,
         control: SimControl,
+        rewind_strategy: RewindStrategyDispatch,
+        /// Strategy-computed replay events for the next snapshot
+        /// publish. Set by `rewind` / `reset_history`; drained by
+        /// `republish`. We stash it here rather than inline-publishing
+        /// because the bridge's per-frame `republish_after_mut` would
+        /// otherwise overwrite the post-rewind snapshot with an
+        /// empty replay list before the host could consume it.
+        pending_replay_events: Arc<Vec<Event>>,
     },
     Worker {
         tx: mpsc::Sender<WorkerMsg>,
@@ -251,7 +319,25 @@ pub enum WorkerMsg {
     /// callers that need an immediate return value (palette drops,
     /// canvas load, test harness in worker mode).
     CmdReply(Box<dyn FnOnce(&mut Sim) + Send + 'static>),
+    /// Rewind the sim to `target_ns` using the newest captured
+    /// snapshot at or before that time (falling back to the anchor at
+    /// t=0). After restore the worker runs forward to `target_ns`,
+    /// bumps the rewind epoch, and republishes.
+    Rewind { target_ns: Time },
+    /// Discard all captured snapshots (anchor + ring) and re-anchor
+    /// from the live sim. Sites that wholesale-replace the sim
+    /// (`LoadExample`, canvas load) must send this so future rewinds
+    /// don't restore the pre-replace state.
+    ResetHistory,
+    /// Swap the worker's active rewind strategy. Takes effect on
+    /// the next rewind.
+    SetRewindStrategy(RewindStrategyKind),
 }
+
+/// Default ring size (number of cadence-captured snapshots beyond the
+/// sticky anchor). At the default 250ms cadence this gives ~16s of
+/// scrubback before captures start rolling off.
+pub const DEFAULT_SNAPSHOT_RING_CAP: usize = 64;
 
 impl SimDriver {
     /// In-process synchronous driver. Used by tests.
@@ -262,12 +348,19 @@ impl SimDriver {
         let snapshot = Arc::new(ArcSwap::from_pointee(RenderSnapshot::empty()));
         let prev_log_index = sim.log.total_recorded;
         let (events_tx, events_rx) = mpsc::channel::<Event>();
+        let mut ring = SnapshotRing::new(DEFAULT_SNAPSHOT_RING_CAP);
+        // Seed the anchor immediately so rewind to 0 is always possible.
+        ring.capture(&sim);
         let mut me = Self::Direct {
             sim,
+            ring,
+            rewind_epoch: 0,
             snapshot,
             prev_log_index,
             events_tx,
             control: SimControl::new(multiplier),
+            rewind_strategy: initial_rewind_strategy(),
+            pending_replay_events: Arc::new(Vec::new()),
         };
         me.republish();
         (me, events_rx)
@@ -358,15 +451,37 @@ impl SimDriver {
     }
 
     /// In Direct mode only: drain new events to channel + republish
-    /// snapshot. In Worker mode this is a no-op because the worker
+    /// snapshot, attaching any pending strategy-computed replay
+    /// events. In Worker mode this is a no-op because the worker
     /// republishes on its own cadence.
     fn republish(&mut self) {
-        if let Self::Direct { sim, snapshot, prev_log_index, events_tx, .. } = self {
+        if let Self::Direct {
+            sim,
+            snapshot,
+            prev_log_index,
+            events_tx,
+            ring,
+            rewind_epoch,
+            pending_replay_events,
+            ..
+        } = self {
             let new_events = drain_new_events(sim, prev_log_index);
             for ev in new_events {
                 let _ = events_tx.send(ev);
             }
-            let snap = make_snapshot(sim);
+            // Stamp the current pending replay set onto the
+            // snapshot. Cheap (Arc clone) — does NOT drain, so
+            // subsequent per-frame republishes re-attach the same
+            // Arc until a new rewind/reset replaces it. The visual
+            // layer only consumes on `rewind_epoch` changes, so
+            // restamping a stale Arc is harmless.
+            let replay = pending_replay_events.clone();
+            let snap = make_snapshot_with(
+                sim,
+                *rewind_epoch,
+                ring.marker_times_ns(),
+                replay,
+            );
             snapshot.store(Arc::new(snap));
         }
     }
@@ -375,11 +490,108 @@ impl SimDriver {
     /// bridge's per-frame advance system when running synchronously.
     /// In Worker mode the worker advances itself.
     pub fn advance_direct(&mut self, dt_sim_ns: u64) {
-        if let Self::Direct { sim, .. } = self {
+        if let Self::Direct { sim, ring, .. } = self {
             if dt_sim_ns == 0 { return; }
             let target = sim.now_ns.saturating_add(dt_sim_ns);
             sim.run_until(target);
+            ring.auto_capture(sim, CapturePolicy::DEFAULT);
             self.republish();
+        }
+    }
+
+    /// Swap the active rewind strategy. Takes effect on the next
+    /// rewind. Mode-aware: in Direct mode replaces the field
+    /// inline, in Worker mode ships a message.
+    pub fn set_rewind_strategy(&mut self, kind: RewindStrategyKind) {
+        match self {
+            Self::Direct { rewind_strategy, .. } => {
+                *rewind_strategy = kind.build();
+            }
+            Self::Worker { tx, .. } => {
+                tx.send(WorkerMsg::SetRewindStrategy(kind))
+                    .expect("worker channel closed");
+            }
+        }
+    }
+
+    /// Throw away all captured snapshots and re-anchor from the live
+    /// sim. Call this after wholesale-replacing the sim (LoadExample,
+    /// canvas load) so future rewinds don't restore the pre-replace
+    /// state. Bumps the rewind epoch so the visual layer also resets.
+    pub fn reset_history(&mut self) {
+        match self {
+            Self::Direct { sim, ring, rewind_epoch, prev_log_index, .. } => {
+                ring.entries.clear();
+                ring.anchor = None;
+                ring.capture(sim);
+                *prev_log_index = sim.log.total_recorded;
+                *rewind_epoch += 1;
+                self.republish();
+            }
+            Self::Worker { tx, .. } => {
+                tx.send(WorkerMsg::ResetHistory)
+                    .expect("worker channel closed");
+            }
+        }
+    }
+
+    /// Rewind to `target_ns`. Works in both Direct and Worker mode.
+    /// Returns the actual sim time after the rewind (which equals
+    /// `target_ns` if a snapshot at or before `target_ns` was found,
+    /// otherwise leaves the sim unchanged and returns its current
+    /// `now_ns`).
+    ///
+    /// Bumps `rewind_epoch` so the visual layer recomputes its
+    /// state from the rewound sim's event log on the next frame —
+    /// that's how on-screen visuals snap to exactly what was on
+    /// screen at the rewound moment.
+    pub fn rewind(&mut self, target_ns: Time) -> Time {
+        match self {
+            Self::Direct {
+                sim,
+                ring,
+                prev_log_index,
+                rewind_epoch,
+                rewind_strategy,
+                pending_replay_events,
+                ..
+            } => {
+                let Some(snap) = ring.latest_before_ns(target_ns).cloned() else {
+                    return sim.now_ns;
+                };
+                sim.restore_from(snap.sim);
+
+                let start_idx = sim.log.total_recorded;
+                let in_flight_at_snap: Vec<Scheduled> =
+                    sim.in_flight.iter().map(|r| r.0.clone()).collect();
+                let edges_at_snap = sim.edges.clone();
+
+                if sim.now_ns < target_ns {
+                    sim.run_until(target_ns);
+                }
+                let end_idx = sim.log.total_recorded;
+
+                let events = rewind_strategy.compute_replay(&RewindContext {
+                    sim,
+                    in_flight_at_snap: &in_flight_at_snap,
+                    edges_at_snap: &edges_at_snap,
+                    start_idx,
+                    end_idx,
+                    target_ns,
+                });
+                *pending_replay_events = Arc::new(events);
+
+                *prev_log_index = sim.log.total_recorded;
+                *rewind_epoch += 1;
+                let now = sim.now_ns;
+                self.republish();
+                now
+            }
+            Self::Worker { tx, .. } => {
+                tx.send(WorkerMsg::Rewind { target_ns })
+                    .expect("worker channel closed");
+                target_ns
+            }
         }
     }
 
@@ -442,18 +654,72 @@ fn worker_loop(
 ) {
     let mut prev_log_index = sim.log.total_recorded;
     let mut last_tick = Instant::now();
+    let mut ring = SnapshotRing::new(DEFAULT_SNAPSHOT_RING_CAP);
+    // Seed anchor at t=0 before any work runs.
+    ring.capture(&sim);
+    let mut rewind_epoch: u64 = 0;
+    let mut rewind_strategy = initial_rewind_strategy();
+    // Strategy-computed replay set rides on every snapshot publish
+    // until the next rewind replaces it. The visual layer only
+    // consumes on `rewind_epoch` changes.
+    let mut pending_replay: Arc<Vec<Event>> = Arc::new(Vec::new());
 
-    let publish = |sim: &mut Sim, prev_log_index: &mut u64| {
+    let publish = |sim: &mut Sim,
+                   prev_log_index: &mut u64,
+                   ring: &SnapshotRing,
+                   rewind_epoch: u64,
+                   replay_events: Arc<Vec<Event>>| {
         let new_events = drain_new_events(sim, prev_log_index);
         for ev in new_events {
             // Receiver hung up if main thread is shutting down — fine.
             let _ = events_tx.send(ev);
         }
-        let snap = make_snapshot(sim);
+        let snap = make_snapshot_with(
+            sim,
+            rewind_epoch,
+            ring.marker_times_ns(),
+            replay_events,
+        );
         snapshot_out.store(Arc::new(snap));
     };
 
-    publish(&mut sim, &mut prev_log_index);
+    let do_rewind = |sim: &mut Sim,
+                     prev_log_index: &mut u64,
+                     ring: &SnapshotRing,
+                     rewind_epoch: &mut u64,
+                     strategy: &RewindStrategyDispatch,
+                     target_ns: Time|
+     -> Option<Arc<Vec<Event>>> {
+        let snap = ring.latest_before_ns(target_ns).cloned()?;
+        sim.restore_from(snap.sim);
+
+        let start_idx = sim.log.total_recorded;
+        let in_flight_at_snap: Vec<Scheduled> =
+            sim.in_flight.iter().map(|r| r.0.clone()).collect();
+        let edges_at_snap = sim.edges.clone();
+
+        if sim.now_ns < target_ns {
+            sim.run_until(target_ns);
+        }
+        let end_idx = sim.log.total_recorded;
+
+        let replay = strategy.compute_replay(&RewindContext {
+            sim,
+            in_flight_at_snap: &in_flight_at_snap,
+            edges_at_snap: &edges_at_snap,
+            start_idx,
+            end_idx,
+            target_ns,
+        });
+        // Forward play after this point doesn't re-feed the visual
+        // ingest with the post-snap delta — the strategy already
+        // included it.
+        *prev_log_index = sim.log.total_recorded;
+        *rewind_epoch += 1;
+        Some(Arc::new(replay))
+    };
+
+    publish(&mut sim, &mut prev_log_index, &ring, rewind_epoch, pending_replay.clone());
 
     loop {
         if shutdown.load(Ordering::Relaxed) { break; }
@@ -461,6 +727,7 @@ fn worker_loop(
         // Drain commands first so Pause / LoadCanvas / EditSlot take
         // effect before we advance time.
         let mut applied_cmd = false;
+        let mut rewound = false;
         loop {
             match rx.try_recv() {
                 Ok(WorkerMsg::Cmd(cmd)) => {
@@ -469,6 +736,32 @@ fn worker_loop(
                 }
                 Ok(WorkerMsg::CmdReply(job)) => {
                     job(&mut sim);
+                    applied_cmd = true;
+                }
+                Ok(WorkerMsg::Rewind { target_ns }) => {
+                    if let Some(events) = do_rewind(
+                        &mut sim,
+                        &mut prev_log_index,
+                        &ring,
+                        &mut rewind_epoch,
+                        &rewind_strategy,
+                        target_ns,
+                    ) {
+                        pending_replay = events;
+                        rewound = true;
+                        last_tick = Instant::now();
+                    }
+                }
+                Ok(WorkerMsg::ResetHistory) => {
+                    ring.entries.clear();
+                    ring.anchor = None;
+                    ring.capture(&sim);
+                    prev_log_index = sim.log.total_recorded;
+                    rewind_epoch += 1;
+                    applied_cmd = true;
+                }
+                Ok(WorkerMsg::SetRewindStrategy(kind)) => {
+                    rewind_strategy = kind.build();
                     applied_cmd = true;
                 }
                 Err(mpsc::TryRecvError::Empty) => break,
@@ -499,8 +792,12 @@ fn worker_loop(
             }
         };
 
-        if advanced || applied_cmd {
-            publish(&mut sim, &mut prev_log_index);
+        if advanced {
+            ring.auto_capture(&sim, CapturePolicy::DEFAULT);
+        }
+
+        if advanced || applied_cmd || rewound {
+            publish(&mut sim, &mut prev_log_index, &ring, rewind_epoch, pending_replay.clone());
         } else {
             // Idle. Block on the channel with a small timeout so we
             // wake promptly on a new command but also tick the wall
@@ -510,8 +807,31 @@ fn worker_loop(
                     match msg {
                         WorkerMsg::Cmd(c) => (c.0)(&mut sim),
                         WorkerMsg::CmdReply(j) => j(&mut sim),
+                        WorkerMsg::Rewind { target_ns } => {
+                            if let Some(events) = do_rewind(
+                                &mut sim,
+                                &mut prev_log_index,
+                                &ring,
+                                &mut rewind_epoch,
+                                &rewind_strategy,
+                                target_ns,
+                            ) {
+                                pending_replay = events;
+                            }
+                            last_tick = Instant::now();
+                        }
+                        WorkerMsg::ResetHistory => {
+                            ring.entries.clear();
+                            ring.anchor = None;
+                            ring.capture(&sim);
+                            prev_log_index = sim.log.total_recorded;
+                            rewind_epoch += 1;
+                        }
+                        WorkerMsg::SetRewindStrategy(kind) => {
+                            rewind_strategy = kind.build();
+                        }
                     }
-                    publish(&mut sim, &mut prev_log_index);
+                    publish(&mut sim, &mut prev_log_index, &ring, rewind_epoch, pending_replay.clone());
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => { /* loop and retry tick */ }
                 Err(mpsc::RecvTimeoutError::Disconnected) => return,

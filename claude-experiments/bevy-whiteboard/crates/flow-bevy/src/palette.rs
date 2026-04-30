@@ -200,12 +200,19 @@ fn handle_hotkeys(
     // `set_k` only affects future ingestions; already-in-flight
     // packets complete their existing windows naturally.
     if keys.just_pressed(KeyCode::Minus) {
-        let k = timeline.0.k * 0.5;
-        timeline.0.set_k(k);
+        let k = timeline.k() * 0.5;
+        timeline.set_k(k);
     }
     if keys.just_pressed(KeyCode::Equal) {
-        let k = timeline.0.k * 2.0;
-        timeline.0.set_k(k);
+        let k = timeline.k() * 2.0;
+        timeline.set_k(k);
+    }
+    // Cycle visual strategy (replay → rate-sampled → …). Strategy
+    // owns its own internal state so a fresh start on switch is
+    // honest — in-flight visuals from the prior strategy fade out as
+    // their timers expire; new events feed the new strategy.
+    if keys.just_pressed(KeyCode::KeyV) {
+        timeline.0.cycle();
     }
     // Silence unused-param warnings when neither key was pressed.
     let _ = (&time, &driver);

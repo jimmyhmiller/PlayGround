@@ -197,7 +197,7 @@ fn region_then_example_renders_example_packets() {
         .add_systems(Startup, flow_bevy::canvas::seed_from_path);
     {
         let mut tl = app.world_mut().resource_mut::<flow_bevy::edges::VisualTimelineRes>();
-        tl.0.k = 1.0;
+        tl.0.as_replay_mut().k = 1.0;
     }
     app.world_mut().resource_mut::<flow_bevy::bridge::SimClock>().multiplier = 1.0;
 
@@ -210,7 +210,7 @@ fn region_then_example_renders_example_packets() {
         app.update();
     }
 
-    let region_packet_count = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.packets.len();
+    let region_packet_count = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.as_replay().packets.len();
     eprintln!("region phase: timeline.packets.len() = {}", region_packet_count);
 
     // Click an example.
@@ -220,7 +220,7 @@ fn region_then_example_renders_example_packets() {
     app.update();
     app.update();
 
-    let post_load_count = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.packets.len();
+    let post_load_count = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.as_replay().packets.len();
     let post_hide_all = app.world().resource::<flow_bevy::edges::HideAll>().0;
     let post_membership_len = {
         let m = app.world().resource::<flow_bevy::compound::CompoundMembership>();
@@ -235,16 +235,16 @@ fn region_then_example_renders_example_packets() {
         app.update();
     }
 
-    let example_packet_count = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.packets.len();
+    let example_packet_count = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.as_replay().packets.len();
     eprintln!("example phase: timeline.packets.len() = {}", example_packet_count);
 
     let visual_now = app.world().resource::<flow_bevy::bridge::SimClock>().visual_now;
     let timeline = app.world().resource::<flow_bevy::edges::VisualTimelineRes>();
-    let in_flight = timeline.0.packets.iter()
+    let in_flight = timeline.0.as_replay().packets.iter()
         .filter(|p| p.emit_real <= visual_now && visual_now < p.arrive_real)
         .count();
     eprintln!("example phase: visual_now={}, in_flight_now={}", visual_now, in_flight);
-    for (i, p) in timeline.0.packets.iter().enumerate().take(10) {
+    for (i, p) in timeline.0.as_replay().packets.iter().enumerate().take(10) {
         eprintln!("  pkt[{}]: emit_real={:.3} arrive_real={:.3} from={:?} to={:?}",
             i, p.emit_real, p.arrive_real, p.from, p.to);
     }
@@ -270,7 +270,7 @@ fn region_then_example_renders_example_packets() {
         .copied()
         .collect();
     let stale_packet_count = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0
-        .packets.iter()
+        .as_replay().packets.iter()
         .filter(|p| !known_node_ids.contains(&p.from) || !known_node_ids.contains(&p.to))
         .count();
     assert_eq!(stale_packet_count, 0,
@@ -311,7 +311,7 @@ fn region_then_example_worker_mode_packets_visible() {
     };
     pump(&mut app, 0.6);
 
-    let region_packets = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.packets.len();
+    let region_packets = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.as_replay().packets.len();
     eprintln!("region phase: timeline.packets.len() = {}", region_packets);
     assert!(region_packets > 5,
         "region.whiteboard should have produced visible packets in 600ms; got {}",
@@ -338,7 +338,7 @@ fn region_then_example_worker_mode_packets_visible() {
     // jitter.
     pump(&mut app, 0.6);
 
-    let timeline = &app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0;
+    let timeline = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.as_replay();
     let visual_now = app.world().resource::<flow_bevy::bridge::SimClock>().visual_now;
     let known: std::collections::HashSet<flow::NodeId> = app
         .world()
