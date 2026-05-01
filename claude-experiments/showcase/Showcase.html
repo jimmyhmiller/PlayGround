@@ -19,7 +19,6 @@
   <script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
 
   <script src="projects-data.js"></script>
-  <script type="text/babel" src="tweaks-panel.jsx"></script>
   <script type="text/babel" src="primitives.jsx"></script>
   <script type="text/babel" src="project-section.jsx"></script>
 </head>
@@ -27,32 +26,101 @@
   <div id="root"></div>
 
   <script type="text/babel">
-    const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
-      "theme": "dark",
-      "density": "comfortable",
-      "useProjectColors": true
-    }/*EDITMODE-END*/;
-
     function App() {
-      const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+      const [editMode, setEditMode] = React.useState(false);
+      const [toast, setToast] = React.useState(null);
+      const originalsRef = React.useRef(null);
+
+      const visibleProjects = window.PROJECTS;
+
+      // Snapshot the original prose strings on first paint so we can diff later.
+      React.useEffect(() => {
+        const id = requestAnimationFrame(() => {
+          const map = {};
+          document.querySelectorAll("[data-edit-key]").forEach((el) => {
+            map[el.dataset.editKey] = el.textContent.trim();
+          });
+          originalsRef.current = map;
+        });
+        return () => cancelAnimationFrame(id);
+      }, []);
+
+      // Toggle contentEditable imperatively when edit mode flips. Doing this
+      // outside React's render avoids React clobbering edits on re-render.
+      React.useEffect(() => {
+        document.querySelectorAll("[data-edit-key]").forEach((el) => {
+          if (editMode) el.setAttribute("contenteditable", "plaintext-only");
+          else el.removeAttribute("contenteditable");
+        });
+        document.documentElement.classList.toggle("edit-mode", editMode);
+      }, [editMode]);
+
+      const exportEdits = React.useCallback(() => {
+        const orig = originalsRef.current || {};
+        const changes = {};
+        document.querySelectorAll("[data-edit-key]").forEach((el) => {
+          const key = el.dataset.editKey;
+          const cur = el.textContent.trim().replace(/\s+/g, " ");
+          if (cur !== (orig[key] || "").replace(/\s+/g, " ")) changes[key] = cur;
+        });
+        const n = Object.keys(changes).length;
+        if (n === 0) {
+          setToast("No changes to copy");
+          setTimeout(() => setToast(null), 1500);
+          return;
+        }
+        const json = JSON.stringify(changes, null, 2);
+        navigator.clipboard.writeText(json).then(
+          () => {
+            setToast(`Copied ${n} edit${n === 1 ? "" : "s"} to clipboard`);
+            setTimeout(() => setToast(null), 2000);
+          },
+          () => {
+            console.log("[showcase edits]\n" + json);
+            setToast("Clipboard blocked — see console");
+            setTimeout(() => setToast(null), 2500);
+          }
+        );
+      }, []);
 
       React.useEffect(() => {
-        document.documentElement.setAttribute("data-theme", t.theme);
-        document.documentElement.setAttribute("data-density", t.density);
-      }, [t.theme, t.density]);
+        const onKey = (e) => {
+          const mod = e.metaKey || e.ctrlKey;
+          if (mod && !e.shiftKey && e.key.toLowerCase() === "e") {
+            e.preventDefault();
+            setEditMode((v) => !v);
+          } else if (mod && e.shiftKey && e.key.toLowerCase() === "x") {
+            e.preventDefault();
+            exportEdits();
+          }
+        };
+        window.addEventListener("keydown", onKey);
+        window.__copyEdits = exportEdits;
+        window.__toggleEdits = () => setEditMode((v) => !v);
+        return () => window.removeEventListener("keydown", onKey);
+      }, [exportEdits]);
 
-      const projects = window.PROJECTS;
-
-      // When useProjectColors is off, strip per-project bg/fg/accent so every
-      // section inherits the global theme instead.
-      const visibleProjects = React.useMemo(() => {
-        if (t.useProjectColors) return projects;
-        return projects.map((p) => ({
-          ...p,
-          bg: undefined,
-          fg: undefined,
-        }));
-      }, [projects, t.useProjectColors]);
+      // Print-to-PDF: pin layout width to 1280px (= 13.333in) so headless
+      // Chrome's print pass renders at the same width we view at. The @page
+      // size is a generous fixed height set in styles.css; print.sh runs
+      // pdfcrop afterward to trim trailing whitespace.
+      React.useEffect(() => {
+        const isPrint = /[?&]print=1/.test(window.location.search);
+        if (!isPrint) return;
+        document.documentElement.style.width = "1280px";
+        document.body.style.width = "1280px";
+        document.body.style.margin = "0 auto";
+        document.documentElement.style.setProperty("--section-pad-y", "90px");
+        document.documentElement.style.setProperty("--gutter", "60px");
+        const printMirror = document.createElement("style");
+        printMirror.textContent =
+          ".hero { padding: 110px 60px 80px !important; } " +
+          ".project { padding: 90px 60px !important; } " +
+          ".imgblock video { display: none !important; } " +
+          ".imgblock .video-poster { display: block !important; width: 100%; height: auto; border-radius: 6px; } " +
+          ".edit-hint, .edit-toast { display: none !important; }";
+        document.head.appendChild(printMirror);
+      }, []);
 
       return (
         <>
@@ -71,10 +139,8 @@
                 Things I've been<br />
                 <span className="accent">building</span>, lately
               </h1>
-              <p className="hero-bio">
-                A working notebook of recent projects — a mix of tools, libraries,
-                prototypes, and the occasional finished product. Some of it shipped.
-                Some of it still figuring itself out.
+              <p className="hero-bio" data-edit-key="hero.bio">
+                I've been having a lot of fun exploring projects lately. Below are just a handful of a projects I've been messing with. Some are utilities. Some are learning projects. All of them have been incredibly fun and helped along with AI to various degrees.
               </p>
             </section>
 
@@ -84,10 +150,17 @@
                 project={p}
                 index={i}
                 total={visibleProjects.length}
-                density={t.density}
+                density="comfortable"
               />
             ))}
           </main>
+
+          {editMode && (
+            <div className="edit-hint">
+              Edit mode — click any paragraph to edit · ⌘E to exit · ⌘⇧X to copy edits
+            </div>
+          )}
+          {toast && <div className="edit-toast">{toast}</div>}
         </>
       );
     }

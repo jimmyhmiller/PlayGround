@@ -1,7 +1,7 @@
 // Visual primitives: code blocks, terminal mocks, browser/phone frames,
 // reveal-on-scroll wrapper.
 
-const Reveal = ({ children, delay = 0, as: Tag = "div", className, style }) => {
+const Reveal = ({ children, delay = 0, as: Tag = "div", className, style, ...rest }) => {
   const ref = React.useRef(null);
   const [shown, setShown] = React.useState(false);
   React.useEffect(() => {
@@ -26,6 +26,7 @@ const Reveal = ({ children, delay = 0, as: Tag = "div", className, style }) => {
       ref={ref}
       className={(className || "") + " reveal" + (shown ? " reveal-in" : "")}
       style={{ ...style, transitionDelay: `${delay}ms` }}
+      {...rest}
     >
       {children}
     </Tag>
@@ -323,16 +324,27 @@ const PerfTable = ({ table, accent }) => (
 );
 
 // ─── Architecture list ────────────────────────────────────────────────────
-const ArchList = ({ arch, accent }) => (
+const ArchList = ({ arch, accent, projectId }) => (
   <div className="archlist" style={{ "--accent": accent }}>
-    {arch.title && <div className="archlist-title">{arch.title}</div>}
+    {arch.title && (
+      <div
+        className="archlist-title"
+        data-edit-key={projectId ? `${projectId}.arch.title` : undefined}
+      >
+        {arch.title}
+      </div>
+    )}
     <div className="archlist-items">
       {arch.items.map((it, i) => (
         <div className="archlist-item" key={i}>
           <span className="archlist-num">{String(i + 1).padStart(2, "0")}</span>
           <div className="archlist-body">
-            <b>{it.label}</b>
-            <p>{it.body}</p>
+            <b data-edit-key={projectId ? `${projectId}.arch.${i}.label` : undefined}>
+              {it.label}
+            </b>
+            <p data-edit-key={projectId ? `${projectId}.arch.${i}.body` : undefined}>
+              {it.body}
+            </p>
           </div>
         </div>
       ))}

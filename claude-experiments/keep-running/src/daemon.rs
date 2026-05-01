@@ -339,18 +339,43 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
 
     // Track whether we've notified the client about exit
     let mut exit_notified = false;
+    // When we queued ChildExited for the current client. A well-behaved client
+    // disconnects shortly after receiving this; if the connection is still alive
+    // `grace_period` later, the peer is a zombie.
+    let mut exit_notified_at: Option<std::time::Instant> = None;
     // Track if PTY has been drained after child exit
     let mut pty_drained = false;
     // When child exited (for grace period)
     let mut child_exit_time: Option<std::time::Instant> = None;
     // True when a client received the ChildExited message and then disconnected
     let mut exit_delivered = false;
+    // Zombie-client detection: when did `send_buf` last fail to make progress?
+    // If a peer connects but never reads (SIGSTOP'd, kernel-buffer-deadlocked,
+    // or just abandoned), `send_buf` accumulates and `flush_send_buf` keeps
+    // returning WouldBlock without an error. Without this, the daemon would
+    // think a client is attached forever.
+    let mut send_stalled_since: Option<std::time::Instant> = None;
+    let mut prev_send_buf_len: usize = 0;
 
     let listener_fd = listener.as_raw_fd();
 
     // Grace period: keep daemon alive this long after child exits with no client,
     // so detached clients have time to reattach and see the output.
-    const EXIT_GRACE_PERIOD: Duration = Duration::from_secs(30);
+    // Tunable via KEEP_RUNNING_GRACE_SECS so tests don't have to wait 30s.
+    let grace_period: Duration = std::env::var("KEEP_RUNNING_GRACE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30));
+
+    // Zombie-client timeout: how long send_buf can sit non-empty without making
+    // progress before we treat the peer as unresponsive and force-disconnect.
+    // Tunable via KEEP_RUNNING_ZOMBIE_SECS for tests.
+    let zombie_timeout: Duration = std::env::var("KEEP_RUNNING_ZOMBIE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(Duration::from_secs(30));
 
     loop {
         // Check if child has exited
@@ -370,13 +395,19 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
             }
         }
 
-        // Daemon exits when child has exited, PTY is drained, no client connected, AND either:
+        // Daemon exits when child has exited, no client connected, AND either:
         // - a client received the ChildExited notification and then disconnected, OR
-        // - the grace period has elapsed (no one is coming back)
-        if state.child_exited && pty_drained && state.client.is_none() {
+        // - the grace period has elapsed (no one is coming back).
+        //
+        // We deliberately do not require `pty_drained` here. If the PTY hasn't
+        // drained yet (e.g. POLLHUP semantics differ across platforms) we still
+        // want to exit once the grace window is up — anything we haven't read
+        // by then is lost regardless. Previously this condition could deadlock
+        // the daemon at ~95% CPU forever if `pty_drained` never flipped.
+        if state.child_exited && state.client.is_none() {
             let should_exit = exit_delivered
                 || child_exit_time
-                    .map(|t| t.elapsed() >= EXIT_GRACE_PERIOD)
+                    .map(|t| t.elapsed() >= grace_period)
                     .unwrap_or(false);
             if should_exit {
                 let _ = session::remove_session(&name);
@@ -387,10 +418,19 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
         // Build poll fds: [pty_master, listener, client?]
         let mut pollfds: Vec<libc::pollfd> = Vec::with_capacity(3);
 
-        // Always poll PTY master for readable data — never block the child.
-        // If the client can't keep up, handle_output() skips queueing to send_buf.
+        // Poll PTY master for readable data — never block the child.
+        // Once the child has exited AND the PTY is drained, set fd to -1
+        // (poll() ignores negative fds). Otherwise POLLHUP keeps firing on
+        // the closed slave end and the loop spins at 100% CPU during the
+        // grace period. We still keep the slot in pollfds so subsequent
+        // index references (pollfds[0]) stay valid.
+        let master_pollfd = if state.child_exited && pty_drained {
+            -1
+        } else {
+            master_fd
+        };
         pollfds.push(libc::pollfd {
-            fd: master_fd,
+            fd: master_pollfd,
             events: libc::POLLIN,
             revents: 0,
         });
@@ -418,11 +458,17 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
             None
         };
 
-        // Use a longer timeout when idle, short when we have pending sends or replay
-        let timeout_ms = if !state.send_buf.is_empty() || state.replay_offset.is_some() {
-            1 // Short timeout when we have data to flush or replay to pump
+        // Use a longer timeout when idle, short when we have pending sends or replay.
+        // The short timeout is only useful when there's actually a client to drain
+        // `send_buf` into — otherwise we'd burn ~95% CPU spinning on a buffer with
+        // no consumer (this is what caused stuck daemons after a child exited but
+        // a queued ChildExited message had no client to receive it).
+        let has_drainable_work =
+            !state.send_buf.is_empty() || state.replay_offset.is_some();
+        let timeout_ms = if has_drainable_work && state.client.is_some() {
+            1
         } else {
-            500 // Longer timeout when idle; still wakes to check child status
+            500
         };
 
         let poll_ret = unsafe {
@@ -447,6 +493,7 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
                 state.send_buf.clear();
                 client_msg_buf.clear();
                 exit_notified = false;
+                exit_notified_at = None;
             }
         }
 
@@ -496,6 +543,7 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
             };
             state.queue_message(&msg);
             exit_notified = true;
+            exit_notified_at = Some(std::time::Instant::now());
         }
 
         // Read from client
@@ -533,6 +581,7 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
                                                     };
                                                     state.queue_message(&msg);
                                                     exit_notified = true;
+                                                    exit_notified_at = Some(std::time::Instant::now());
                                                 }
                                             }
                                             ClientMessage::Input(data) => {
@@ -591,10 +640,61 @@ pub fn run_daemon(name: String, command: Vec<String>) -> Result<()> {
             state.send_buf.clear();
             state.replay_offset = None;
             client_msg_buf.clear();
+            send_stalled_since = None;
+            prev_send_buf_len = 0;
+            exit_notified_at = None;
         }
 
         // Flush queued data to client (non-blocking)
         state.flush_send_buf();
+
+        // Zombie-client detection (variant A): the peer connected but our
+        // `send_buf` is stuck — the kernel-side socket buffer filled up and
+        // they aren't reading. Happens when a client is SIGSTOP'd or wedged.
+        if state.client.is_some() && !state.send_buf.is_empty() {
+            if state.send_buf.len() < prev_send_buf_len {
+                send_stalled_since = None;
+            } else {
+                let started = send_stalled_since.get_or_insert_with(std::time::Instant::now);
+                if started.elapsed() >= zombie_timeout {
+                    if exit_notified {
+                        exit_delivered = true;
+                    }
+                    state.client = None;
+                    state.send_buf.clear();
+                    state.replay_offset = None;
+                    client_msg_buf.clear();
+                    send_stalled_since = None;
+                    exit_notified_at = None;
+                }
+            }
+        } else {
+            send_stalled_since = None;
+        }
+        prev_send_buf_len = state.send_buf.len();
+
+        // Zombie-client detection (variant B): we sent ChildExited and the
+        // peer never disconnected. Real clients show a final status and exit
+        // within milliseconds of receiving this; anyone still here a full
+        // grace period later is wedged. This is the failure mode that lets
+        // a backgrounded `keep-running run -- <cmd> &` (the client gets
+        // SIGTTIN-stopped on its first stdin read) hold the daemon open
+        // forever — `send_buf` empties because the kernel buffer absorbed
+        // the small ChildExited frame, so variant A above never triggers.
+        if state.client.is_some() && exit_notified {
+            if let Some(t) = exit_notified_at {
+                if t.elapsed() >= grace_period {
+                    state.client = None;
+                    state.send_buf.clear();
+                    state.replay_offset = None;
+                    client_msg_buf.clear();
+                    exit_notified_at = None;
+                    // Don't set exit_delivered — we don't know the peer
+                    // actually saw the message. Cleanup will fall through
+                    // to the grace-period branch above.
+                }
+            }
+        }
     }
 }
 

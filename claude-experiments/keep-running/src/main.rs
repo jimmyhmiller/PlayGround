@@ -9,7 +9,7 @@ mod terminal;
 use anyhow::Result;
 use cli::Commands;
 use std::path::{Path, PathBuf};
-use terminal::{status, status_dim};
+use terminal::status;
 
 fn session_not_found_message(query: &str) -> String {
     match session::list_sessions() {
@@ -59,10 +59,17 @@ fn humanize_age(secs: u64) -> String {
 fn resolve_program(program: &str) -> Result<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
 
+    fn is_executable_file(meta: &std::fs::Metadata) -> bool {
+        meta.is_file() && meta.permissions().mode() & 0o111 != 0
+    }
+
     let path = Path::new(program);
     if program.contains('/') {
-        if !path.exists() {
-            anyhow::bail!("command not found: {}", program);
+        let meta = path
+            .metadata()
+            .map_err(|_| anyhow::anyhow!("command not found: {}", program))?;
+        if !is_executable_file(&meta) {
+            anyhow::bail!("not executable: {}", program);
         }
         return Ok(path.to_path_buf());
     }
@@ -72,7 +79,7 @@ fn resolve_program(program: &str) -> Result<PathBuf> {
     for dir in std::env::split_paths(&path_var) {
         let candidate = dir.join(program);
         if let Ok(meta) = candidate.metadata() {
-            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+            if is_executable_file(&meta) {
                 return Ok(candidate);
             }
         }
@@ -164,9 +171,8 @@ fn cmd_attach(session_query: &str) -> Result<()> {
         None => anyhow::bail!("{}", session_not_found_message(session_query)),
     };
 
-    status(&format!("attached to '{}' · pid {}", session.name, session.pid));
-    status_dim("detach with ctrl-a d  ·  kill with ctrl-a k");
-
+    // The banner is printed inside client::attach after it clears the screen,
+    // so don't print one here — it would be wallpapered over immediately.
     client::attach(&session)?;
 
     Ok(())
@@ -186,20 +192,16 @@ fn cmd_list() -> Result<()> {
 
     let now = session::timestamp();
 
-    println!(
-        "{:<20} {:<8} {:<8} {:<8} {}",
-        "NAME", "PID", "STATUS", "UPTIME", "COMMAND"
-    );
+    println!("{:<20} {:<8} {:<8} {}", "NAME", "PID", "UPTIME", "COMMAND");
 
     for s in sessions {
         let age = humanize_age(now.saturating_sub(s.created_at));
         let cmd = s.command.join(" ");
         let cmd_display = truncate_chars(&cmd, 40);
         println!(
-            "{:<20} {:<8} {:<8} {:<8} {}",
+            "{:<20} {:<8} {:<8} {}",
             truncate_chars(&s.name, 20),
             s.pid,
-            "running",
             age,
             cmd_display
         );
@@ -297,11 +299,26 @@ mod tests {
     }
 
     #[test]
-    fn resolve_program_absolute_existing() {
+    fn resolve_program_absolute_existing_executable() {
+        use std::os::unix::fs::PermissionsExt;
         let f = tempfile::NamedTempFile::new().unwrap();
         let path = f.path().to_path_buf();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         let resolved = resolve_program(path.to_str().unwrap()).unwrap();
         assert_eq!(resolved, path);
+    }
+
+    #[test]
+    fn resolve_program_absolute_existing_but_not_executable() {
+        // A regular non-executable file (e.g. README.md) should be rejected
+        // here rather than silently passed to the daemon, which would then
+        // print "Failed to exec" into the PTY.
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let err = resolve_program(f.path().to_str().unwrap()).unwrap_err();
+        assert!(
+            err.to_string().contains("not executable"),
+            "got: {err}"
+        );
     }
 
     #[test]

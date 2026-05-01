@@ -111,33 +111,18 @@ fn apply_rewind_reset(
 
     let visual_now = clock.visual_now;
     let sim_now_ns = snapshot.0.now_ns;
-    let k = timeline.k();
-    // Visual liveness window in sim-ns: a packet emitted at at_ns
-    // is on screen iff
-    //   emit_real ≤ visual_now < arrive_real = emit_real + sim_lat * k.
-    // With the lockstep mapping `synth_real_now = visual_now +
-    // (at_ns - sim_now) * 1e-9`, an event with at_ns < sim_now -
-    // max_sim_lat × k has its arrive_real ≤ visual_now and would
-    // be GC'd within one frame. Skip those — they contribute only
-    // to the throwaway gc trail. For long replays this trims the
-    // ingest from O(events_in_session) to
-    // O(events_in_visible_window).
-    let mut max_lat_ns: u64 = 0;
-    for ev in snapshot.0.replay_events.iter() {
-        if let flow::Event::PacketEmitted { at_ns, arrives_at_ns, .. } = ev {
-            let lat = arrives_at_ns.saturating_sub(*at_ns);
-            if lat > max_lat_ns { max_lat_ns = lat; }
-        }
-    }
-    let liveness_ns: u64 =
-        ((max_lat_ns as f64) * k.max(1.0)) as u64 + 250_000_000;
-    let cutoff_ns = sim_now_ns.saturating_sub(liveness_ns);
+    // Each rewind strategy already produces the events it
+    // believes the visual layer needs. We ingest them all here —
+    // the visual strategy's own `gc_before` handles trimming
+    // arrived visuals. A filter at this layer (we used to have
+    // one) would silently disagree with each strategy's window
+    // and make AnchorReplay vs FullLog produce visibly different
+    // state for the same sim moment.
     for ev in snapshot.0.replay_events.iter() {
         let at_ns = match ev {
             flow::Event::PacketEmitted { at_ns, .. } => *at_ns,
             _ => continue,
         };
-        if at_ns < cutoff_ns { continue; }
         // Map sim time → wall clock with the lockstep relationship
         // (no `k`). For at_ns == sim_now_ns this gives `visual_now`
         // exactly; for older events it walks backwards in real time

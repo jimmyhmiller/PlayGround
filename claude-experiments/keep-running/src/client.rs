@@ -14,6 +14,15 @@ use std::time::Duration;
 /// Detach sequence: Ctrl+a followed by 'd'
 const CTRL_A: u8 = 0x01;
 
+/// Drop raw mode (restoring ONLCR etc.) and emit a clean newline so the
+/// next status line lands at column 0. Centralises the previous
+/// `drop(raw_guard); eprint!("\r\n");` repetition — the explicit `\r` was
+/// redundant once cooked mode was restored.
+fn exit_raw(guard: RawModeGuard) {
+    drop(guard);
+    eprintln!();
+}
+
 /// Connect to a session and run the interactive client
 pub fn attach(session: &SessionInfo) -> Result<()> {
     // Check if we have a terminal
@@ -72,7 +81,7 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
     // Welcome banner (cooked mode — survives at the top of the cleared screen
     // until program output scrolls over it).
     status(&format!("attached to '{}' · pid {}", session.name, session.pid));
-    status_dim("detach with ctrl-a d  ·  kill with ctrl-a k");
+    status_dim("detach with Ctrl+a d  ·  kill with Ctrl+a k");
 
     // Enter raw mode
     let raw_guard = RawModeGuard::enter()?;
@@ -160,8 +169,7 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
                                     let _ = stream.write_all(&encoded);
                                 }
                                 // Drop raw mode before printing so the banner reflows cleanly.
-                                drop(raw_guard);
-                                eprint!("\r\n");
+                                exit_raw(raw_guard);
                                 status(&format!("detached from '{}'", session.name));
                                 status_dim(&format!("reattach: keep-running {}", session.name));
                                 return Ok(());
@@ -171,8 +179,7 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
                                 unsafe {
                                     libc::kill(session.pid as i32, libc::SIGHUP);
                                 }
-                                drop(raw_guard);
-                                eprint!("\r\n");
+                                exit_raw(raw_guard);
                                 status(&format!("killed '{}'", session.name));
                                 return Ok(());
                             }
@@ -258,8 +265,7 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
                             let _ = execute!(io::stdout(), Show);
                         }
                         DaemonMessage::ChildExited { code } => {
-                            drop(raw_guard);
-                            eprint!("\r\n");
+                            exit_raw(raw_guard);
                             match code {
                                 Some(c) => status(&format!("process exited with code {}", c)),
                                 None => status("process terminated by signal"),
@@ -267,8 +273,7 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
                             return Ok(());
                         }
                         DaemonMessage::Error(e) => {
-                            drop(raw_guard);
-                            eprint!("\r\n");
+                            exit_raw(raw_guard);
                             status(&format!("daemon error: {}", e));
                             return Ok(());
                         }
@@ -287,14 +292,12 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
 
         // Now that we've processed all buffered messages, handle EOF/hangup
         if let Some(e) = protocol_error.take() {
-            drop(raw_guard);
-            eprint!("\r\n");
+            exit_raw(raw_guard);
             status(&format!("protocol error: {}", e));
             return Ok(());
         }
         if socket_eof {
-            drop(raw_guard);
-            eprint!("\r\n");
+            exit_raw(raw_guard);
             status("session ended");
             break;
         }
@@ -323,7 +326,7 @@ pub fn run_and_attach(name: &str, command: &[String]) -> Result<()> {
         std::thread::sleep(Duration::from_millis(20));
     };
 
-    status(&format!("session '{}' started · pid {}", session.name, session.pid));
-
+    // Don't print a banner here — `attach()` clears the screen before printing
+    // its own welcome banner, so anything we print would be wallpapered over.
     attach(&session)
 }

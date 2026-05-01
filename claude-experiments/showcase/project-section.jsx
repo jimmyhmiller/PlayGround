@@ -26,6 +26,9 @@ const ProjectSection = ({ project, index, total, density }) => {
         <div className="stack-artifact">
           <figure className="imgblock">
             <video src={project.video} controls loop muted playsInline preload="metadata" />
+            {project.videoPoster && (
+              <img className="video-poster" src={project.videoPoster} alt={project.title} />
+            )}
             {project.videoCaption && <figcaption>{project.videoCaption}</figcaption>}
           </figure>
           <CodeBlock code={project.code} accent={accent} />
@@ -37,7 +40,7 @@ const ProjectSection = ({ project, index, total, density }) => {
       return (
         <div className="stack-artifact">
           <CodeBlock code={project.code} accent={accent} />
-          <ArchList arch={project.arch} accent={accent} />
+          <ArchList arch={project.arch} accent={accent} projectId={id} />
         </div>
       );
     }
@@ -61,6 +64,9 @@ const ProjectSection = ({ project, index, total, density }) => {
       return (
         <figure className="imgblock">
           <video src={project.video} controls loop muted playsInline preload="metadata" />
+          {project.videoPoster && (
+            <img className="video-poster" src={project.videoPoster} alt={project.title} />
+          )}
           {project.videoCaption && <figcaption>{project.videoCaption}</figcaption>}
         </figure>
       );
@@ -88,8 +94,12 @@ const ProjectSection = ({ project, index, total, density }) => {
   const heading = (
     <>
       <Reveal as="h2" className="project-title">{title}</Reveal>
-      <Reveal as="p" className="project-tagline" delay={60}>{tagline}</Reveal>
-      <Reveal as="p" className="project-blurb" delay={120}>{blurb}</Reveal>
+      <Reveal as="p" className="project-tagline" delay={60} data-edit-key={`${id}.tagline`}>{tagline}</Reveal>
+      <p
+        className="project-blurb reveal reveal-in"
+        data-edit-key={`${id}.blurb`}
+        dangerouslySetInnerHTML={{ __html: blurb }}
+      />
     </>
   );
 
