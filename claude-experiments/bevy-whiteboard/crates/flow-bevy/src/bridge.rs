@@ -188,11 +188,10 @@ fn push_clock_to_driver(
     let control = driver.0.control().clone();
     control.set_multiplier(clock.multiplier);
     control.set_paused(clock.paused);
-    // Push the live visual scale `k` so the rewind layer's
-    // lookback window is sized to the visible-on-screen region.
-    // Without this, rewinds at high `k` drop most of the gc trail
-    // — visuals leaving sinks/workers go missing.
-    control.set_visual_k(timeline.k());
+    // Lookback is pushed by `edges::push_visual_lookback_to_driver`
+    // — that system has access to both the active visual strategy
+    // and the live snapshot's `max_edge_lat_ns`.
+    let _ = &timeline;
 
     // Debug: continuous reverse playback. Drives a small
     // `driver.rewind(now - dt)` every frame, which bumps

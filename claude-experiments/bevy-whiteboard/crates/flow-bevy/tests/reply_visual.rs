@@ -64,7 +64,7 @@ fn count_packets_by_direction(app: &App) -> (usize, usize) {
     // is checking that the visual layer received the emit, not
     // that the renderer has it visible at this exact `visual_now`.
     let edges = edges_snapshot(app);
-    let timeline = app.world().resource::<VisualTimelineRes>().0.as_replay();
+    let timeline = app.world().resource::<VisualTimelineRes>().strategy.as_replay();
     let mut forward = 0;
     let mut reverse = 0;
     for pkt in timeline.packets.iter() {
@@ -82,7 +82,7 @@ fn count_packets_by_direction(app: &App) -> (usize, usize) {
 fn snapshot_packets(app: &App) -> Vec<(bool, bool, f32, f32)> {
     let edges = edges_snapshot(app);
     let now = app.world().resource::<SimClock>().visual_now;
-    let timeline = app.world().resource::<VisualTimelineRes>().0.as_replay();
+    let timeline = app.world().resource::<VisualTimelineRes>().strategy.as_replay();
     timeline.packets.iter()
         .map(|pkt| {
             let (_fw, rv) = classify(pkt, &edges);

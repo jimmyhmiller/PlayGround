@@ -152,10 +152,10 @@ fn baseline_load_example_only_worker_mode() {
 
     pump(&mut app, 6.0);
 
-    let n = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.as_replay().packets.len();
+    let n = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().strategy.as_replay().packets.len();
     let visual_now = app.world().resource::<flow_bevy::bridge::SimClock>().visual_now;
     eprintln!("baseline: timeline.packets={}, visual_now={:.3}", n, visual_now);
-    let timeline = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.as_replay();
+    let timeline = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().strategy.as_replay();
     for (i, p) in timeline.packets.iter().enumerate().take(20) {
         eprintln!("  pkt[{}]: emit={:.3} arrive={:.3} from={:?} to={:?}",
             i, p.emit_real, p.arrive_real, p.from, p.to);
@@ -187,7 +187,7 @@ fn repro_then_example_worker_mode_packets_visible() {
     };
     pump(&mut app, 3.0);
 
-    let repro_packets = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.as_replay().packets.len();
+    let repro_packets = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().strategy.as_replay().packets.len();
     eprintln!("repro phase: timeline.packets.len() = {}", repro_packets);
 
     let repro_node_ids: std::collections::HashSet<flow::NodeId> = app
@@ -231,7 +231,7 @@ fn repro_then_example_worker_mode_packets_visible() {
         eprintln!("[steady] sim nodes={} edges={} names={:?} errors={:?}", nc, ec, names, errors);
     }
 
-    let timeline = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().0.as_replay();
+    let timeline = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().strategy.as_replay();
     let visual_now = app.world().resource::<flow_bevy::bridge::SimClock>().visual_now;
     let known: std::collections::HashSet<flow::NodeId> = app
         .world()

@@ -115,7 +115,7 @@ proptest! {
         // Conversely, the COUNT of visible-eligible events in the
         // stream must equal the packets vector length. We filter
         // events by the same rule as `is_visible_event`.
-        let expected: usize = events.iter().filter(|ev| VisualTimeline::is_visible_event(ev)
+        let expected: usize = events.iter().filter(|ev| flow_bevy::visual::is_visible_event(ev)
             && match ev {
                 Event::PacketEmitted { at_ns, arrives_at_ns, .. } => arrives_at_ns > at_ns,
                 _ => false,

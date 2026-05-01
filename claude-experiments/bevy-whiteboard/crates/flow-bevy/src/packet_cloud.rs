@@ -282,8 +282,9 @@ fn update_packet_cloud(
     // Hide-all toggle (`H` key) zeroes out the active count so the
     // shader rasterizes nothing, mirroring the gating that `edges.rs`
     // applies to arrow drawing and per-packet entity spawning.
+    let _ = now;
     if !hide_all.0 {
-    for (vp, _prog) in timeline.visible_at(now) {
+    for (vp, _prog) in timeline.visible.iter() {
         if packed.len() >= MAX_PACKETS {
             break;
         }
@@ -418,7 +419,7 @@ mod tests {
         let timeline_len = app
             .world()
             .resource::<crate::edges::VisualTimelineRes>()
-            .0
+            .strategy
             .as_replay()
             .packets
             .len();

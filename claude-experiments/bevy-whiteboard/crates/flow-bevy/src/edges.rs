@@ -32,7 +32,10 @@ use crate::camera::{MainCamera, cursor_to_world};
 use crate::nodes::NodeKind;
 use crate::theme::Theme;
 use crate::tool::{ActiveTool, Tool};
-use crate::visual::{Strategy, StrategyKind, VisualStrategy, VisualTimeline};
+use crate::visual::{
+    SimView, Strategy, StrategyKind, TimeCursor, VisualFrameCtx, VisualPacket, VisualStrategy,
+    VisualTimeline,
+};
 
 pub struct EdgesPlugin;
 impl Plugin for EdgesPlugin {
@@ -41,17 +44,16 @@ impl Plugin for EdgesPlugin {
             .init_resource::<HiddenEdges>()
             .init_resource::<HideAll>()
             .init_resource::<RewindEpochSeen>()
-            .insert_resource(VisualTimelineRes(initial_strategy()))
+            .insert_resource(VisualTimelineRes::new(initial_strategy()))
             .add_systems(Startup, spawn_edge_mesh)
             .add_systems(Update, (
                 handle_connect_click,
                 toggle_hide_all,
                 draw_edges,
-                apply_rewind_reset,
-                ingest_new_events,
-                gc_timeline,
+                push_visual_lookback_to_driver,
+                compute_visual_frame,
                 dump_visible_packets,
-            ).chain());
+            ).chain().after(crate::bridge::collect_new_events));
     }
 }
 
@@ -86,62 +88,86 @@ pub struct RewindEpochSeen(pub u64);
 /// per-packet animation duration via `arrive_real - emit_real`, not
 /// the temporal anchor at which each event is ingested.
 ///
-/// On topology resets `replay_events` is empty (the new sim hasn't
-/// emitted anything yet), so the result is just "reset". Also
-/// rebases `visual_offset` so `visual_now` doesn't snap backwards
-/// when `sim.now_ns` jumps to 0 on a reset.
-fn apply_rewind_reset(
+/// Per-frame: build the [`VisualFrameCtx`], hand it to the active
+/// strategy, and store the result in `VisualTimelineRes.visible`
+/// for downstream renderers.
+///
+/// On `rewind_epoch` bump (rewind / topology reset) the strategy's
+/// derived state is wiped via `invalidate`, the regular
+/// `NewEvents` bucket is replaced with the snapshot's
+/// `replay_events`, and the clock's `visual_now` is snapped to
+/// `sim_now × 1e-9` so the frame we render lines up exactly with
+/// the rewound moment.
+fn compute_visual_frame(
     snapshot: Res<SimSnapshotRes>,
     mut clock: ResMut<crate::bridge::SimClock>,
     mut seen: ResMut<RewindEpochSeen>,
     mut events: ResMut<NewEvents>,
     mut timeline: ResMut<VisualTimelineRes>,
+    mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
     let cur = snapshot.0.rewind_epoch;
-    if cur == seen.0 {
-        return;
+    let new_epoch = cur != seen.0;
+    if new_epoch {
+        seen.0 = cur;
+        timeline.strategy.invalidate();
+        // Snap visual_now to sim_now after rewind. Visual_now is
+        // normally rebased on topology resets via `visual_offset`,
+        // but on a rewind we want the frame at the rewound moment
+        // — that requires `visual_now ≈ sim_now × 1e-9` exactly.
+        let sim_now_ns = snapshot.0.now_ns;
+        let visual_now = sim_now_ns as f64 * 1e-9;
+        clock.visual_offset = 0.0;
+        clock.visual_now = visual_now;
+        // Prepend the rewind's synthesized events so they land
+        // ahead of any forward-play events that arrived this frame
+        // (the latter are post-anchor and need to be ingested in
+        // sim-time order). `LoadExample` and other topology resets
+        // produce an empty `replay_events`, so this is a no-op there
+        // — the freshly-loaded sim's events flow through normally
+        // via `NewEvents`.
+        if !snapshot.0.replay_events.is_empty() {
+            let mut combined: Vec<flow::Event> =
+                Vec::with_capacity(snapshot.0.replay_events.len() + events.0.len());
+            combined.extend(snapshot.0.replay_events.iter().cloned());
+            combined.append(&mut events.0);
+            events.0 = combined;
+        }
     }
-    seen.0 = cur;
-    events.0.clear();
-    timeline.reset();
-    // Snap `visual_now` to match `sim_now` after rewind. The
-    // earlier behaviour rebased `visual_offset` so `visual_now`
-    // stayed put across the rewind (smooth scrub feel), but
-    // "rewind to t" must render the frame that was on screen at
-    // sim_now=t — which only holds when
-    // `visual_now = sim_now × 1e-9` (lockstep).
-    //
-    // Compute `visual_now` directly from the rewound snapshot
-    // here rather than reading `clock.visual_now`. Bevy doesn't
-    // order this system relative to `sync_visual_now_from_sim`,
-    // so `clock.visual_now` may still be the *pre*-rewind value
-    // this frame; reading it would feed every event into ingest
-    // with stale synth times. We also push the new value back
-    // into the clock so other systems running later this frame
-    // see the rewound visual_now.
-    let sim_now_ns = snapshot.0.now_ns;
-    let visual_now = sim_now_ns as f64 * 1e-9;
-    clock.visual_offset = 0.0;
-    clock.visual_now = visual_now;
-    // Each rewind strategy already produces the events it
-    // believes the visual layer needs. We ingest them all here —
-    // the visual strategy's own `gc_before` handles trimming
-    // arrived visuals. A filter at this layer (we used to have
-    // one) would silently disagree with each strategy's window
-    // and make AnchorReplay vs FullLog produce visibly different
-    // state for the same sim moment.
-    for ev in snapshot.0.replay_events.iter() {
-        let at_ns = match ev {
-            flow::Event::PacketEmitted { at_ns, .. } => *at_ns,
-            _ => continue,
+    crate::time_phase!(perf, "edges.compute_visual_frame", {
+        // Split-borrow `strategy` and `visible` from the resource so
+        // `frame_into` can write into the buffer while it owns a mut
+        // reference to the strategy.
+        let VisualTimelineRes { strategy, visible } = &mut *timeline;
+        let ctx = VisualFrameCtx {
+            time: TimeCursor {
+                sim_now_ns: snapshot.0.now_ns,
+                visual_now: clock.visual_now,
+                k: strategy.k(),
+            },
+            sim: SimView {
+                edges: snapshot.0.edges_full.as_ref(),
+                in_flight: snapshot.0.in_flight.as_ref(),
+            },
+            new_events: &events.0,
         };
-        // Map sim time → wall clock with the lockstep relationship
-        // (no `k`). For at_ns == sim_now_ns this gives `visual_now`
-        // exactly; for older events it walks backwards in real time
-        // by the same number of seconds the event is older in sim.
-        let synth_real_now = visual_now + (at_ns as i64 - sim_now_ns as i64) as f64 * 1e-9;
-        timeline.ingest(ev, synth_real_now);
-    }
+        visible.clear();
+        strategy.frame_into(&ctx, visible);
+    });
+}
+
+/// Push the current strategy's lookback window to the driver each
+/// frame so a rewind that fires later this frame uses the right
+/// snapshot depth. Cheap (one atomic store).
+fn push_visual_lookback_to_driver(
+    timeline: Res<VisualTimelineRes>,
+    snapshot: Res<SimSnapshotRes>,
+    driver: Res<SimDriverRes>,
+) {
+    let k = timeline.strategy.k();
+    let max_edge_lat = snapshot.0.max_edge_lat_ns;
+    let lookback = timeline.strategy.rewind_lookback_ns(k, max_edge_lat);
+    driver.0.control().set_rewind_lookback_ns(lookback);
 }
 
 /// Global "hide everything visual" toggle. When on, `draw_edges`
@@ -170,7 +196,6 @@ fn dump_visible_packets(
     timeline: Res<VisualTimelineRes>,
     clock: Res<crate::bridge::SimClock>,
     sim_snapshot: Res<crate::sim_driver::SimSnapshotRes>,
-    setting: Res<crate::hud::RewindStrategySetting>,
 ) {
     if !keys.just_pressed(KeyCode::F12) { return; }
 
@@ -197,21 +222,20 @@ fn dump_visible_packets(
          rewind_epoch:{}\n\
          ---",
         n,
-        setting.0.label(),
+        timeline.strategy.kind().label(),
         visual_now,
         clock.visual_offset,
         sim_now_ns,
         sim_now_ns as f64 * 1e-9,
-        timeline.k(),
+        timeline.strategy.k(),
         clock.paused,
         sim_snapshot.0.rewind_epoch,
     );
 
-    // Sorted, stable lines. One line per visible packet —
-    // everything that determines its rendered position.
     let mut rows: Vec<(u64, u64, u64, f64, f64, f32)> = timeline
-        .visible_at(visual_now)
-        .map(|(p, prog)| (p.from.0, p.to.0, p.packet_id.0, p.emit_real, p.arrive_real, prog))
+        .visible
+        .iter()
+        .map(|(p, prog)| (p.from.0, p.to.0, p.packet_id.0, p.emit_real, p.arrive_real, *prog))
         .collect();
     rows.sort_by(|a, b| {
         a.0.cmp(&b.0)
@@ -235,13 +259,13 @@ fn dump_visible_packets(
 }
 
 /// Build the initial visual strategy. `FLOW_BEVY_VISUAL_STRATEGY`
-/// (case-insensitive `replay` / `rate-sampled` / `rate_sampled`)
-/// picks the variant for one-off A/B comparisons without
-/// recompiling. Default: Replay (the historical behavior).
+/// picks the variant for one-off A/B comparisons without recompiling.
+/// Default: Replay (the historical behavior).
 fn initial_strategy() -> Strategy {
     let kind = std::env::var("FLOW_BEVY_VISUAL_STRATEGY")
         .ok()
         .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+            "sim-mirror" | "sim_mirror" | "simmirror" | "mirror" => Some(StrategyKind::SimMirror),
             "replay" => Some(StrategyKind::Replay),
             "rate-sampled" | "rate_sampled" | "ratesampled" => Some(StrategyKind::RateSampled),
             "drop-orphans" | "drop_orphans" | "droporphans" => Some(StrategyKind::DropOrphans),
@@ -254,23 +278,31 @@ fn initial_strategy() -> Strategy {
     Strategy::new_of_kind(kind, VisualTimeline::K_DEFAULT)
 }
 
-/// Bevy wrapper around the visual `Strategy` so it can live as a
-/// `Resource`. The underlying `Strategy` (and the strategies it
-/// dispatches to) deliberately has no Bevy dependency.
-///
-/// Deref still targets the trait so existing call sites can write
-/// `timeline.visible_at(now)` etc. without caring which concrete
-/// strategy is in play. Tests that need Replay-specific fields
-/// (`packets`, `node_arrivals`) reach in via `.0.as_replay()`.
+/// Bevy resource holding the active visual strategy plus the buffer
+/// of `(VisualPacket, progress)` pairs `compute_visual_frame` writes
+/// each frame. The packet-cloud renderer and other readers iterate
+/// `visible` directly — there's no separate "query the strategy at
+/// time t" path.
 #[derive(Resource)]
-pub struct VisualTimelineRes(pub Strategy);
-
-impl std::ops::Deref for VisualTimelineRes {
-    type Target = dyn VisualStrategy;
-    fn deref(&self) -> &(dyn VisualStrategy + 'static) { &self.0 }
+pub struct VisualTimelineRes {
+    pub strategy: Strategy,
+    pub visible: Vec<(VisualPacket, f32)>,
 }
-impl std::ops::DerefMut for VisualTimelineRes {
-    fn deref_mut(&mut self) -> &mut (dyn VisualStrategy + 'static) { &mut self.0 }
+
+impl VisualTimelineRes {
+    pub fn new(strategy: Strategy) -> Self {
+        Self {
+            strategy,
+            visible: Vec::new(),
+        }
+    }
+
+    pub fn k(&self) -> f64 {
+        self.strategy.k()
+    }
+    pub fn set_k(&mut self, k: f64) {
+        self.strategy.set_k(k);
+    }
 }
 
 /// Sim edges that exist solely for routing — not drawn, not visualized.
@@ -604,72 +636,8 @@ fn push_arrow_segments(positions: &mut Vec<[f32; 3]>, a: Vec2, b: Vec2) {
     positions.push([right.x, right.y, 0.0]);
 }
 
-// ---------------- packet pipeline (F1) ----------------
-
-/// Feed sim events into the pure timeline and spawn a Bevy entity
-/// for each new visible packet.
-///
-/// F5: the anchor is NOT re-set per frame. It's set once at
-/// scenario load (see `examples::handle_load_example`) or when the
-/// user changes `k` (see `apply_visual_scale_change`). Events are
-/// ingested through a fixed sim↔real mapping, so visuals play at a
-/// rate that's independent of sim speed.
-fn ingest_new_events(
-    evs: Res<NewEvents>,
-    clock: Res<crate::bridge::SimClock>,
-    mut timeline: ResMut<VisualTimelineRes>,
-    mut perf: ResMut<crate::perf::PhaseTimings>,
-) {
-    let visual_now = clock.visual_now;
-    let sim_now_s = clock.visual_now - clock.visual_offset;
-    crate::time_phase!(perf, "edges.ingest_new_events", {
-    for ev in &evs.0 {
-        // Per-event `real_now` matches the lockstep mapping used
-        // on the rewind path
-        // (`synth_real_now = visual_now + (at_ns - sim_now) × 1e-9`).
-        // Without this, every event in a single frame's batch
-        // shares the same `real_now = visual_now`, producing
-        // `emit_real` values quantised to frame boundaries; rewind
-        // ingest is continuous (per-event), so forward and rewound
-        // states diverge at boundary-visible packets. With the
-        // per-event mapping the two paths produce identical
-        // `emit_real` for the same `(at_ns, source-state)`.
-        let real_now = match ev {
-            flow::Event::PacketEmitted { at_ns, .. } => {
-                visual_now + (*at_ns as f64 * 1e-9 - sim_now_s)
-            }
-            _ => visual_now,
-        };
-        timeline.ingest(ev, real_now);
-    }
-    });
-}
-
-/// Trim the timeline's arrived-history so long sessions don't grow
-/// unbounded. The keep window matches the snapshot ring's
-/// scrub-back horizon so the user can rewind anywhere within that
-/// horizon and still see the visuals that were on screen at the
-/// rewound moment. (A 2s window — the original value — clipped
-/// scrub-back to exactly 2 seconds of past visuals because anything
-/// older had already been GC'd before the rewind happened.)
-///
-/// While the sim is paused, GC is skipped entirely. Pause is a
-/// strong signal that the user is scrubbing through history; we
-/// don't want a pause-during-scrub to silently delete past visuals
-/// the user is about to navigate to.
-const VISUAL_GC_KEEP_PAST_S: f64 = 30.0;
-
-fn gc_timeline(
-    clock: Res<crate::bridge::SimClock>,
-    mut timeline: ResMut<VisualTimelineRes>,
-    mut perf: ResMut<crate::perf::PhaseTimings>,
-) {
-    if clock.paused { return; }
-    let now = clock.visual_now;
-    crate::time_phase!(perf, "edges.gc_timeline", {
-        timeline.gc_before(now, VISUAL_GC_KEEP_PAST_S);
-    });
-}
+// Packet pipeline lives in `compute_visual_frame` above — single
+// system that wraps strategy ingest + GC + visible-set computation.
 
 #[cfg(test)]
 mod color_tests {

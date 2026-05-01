@@ -21,6 +21,7 @@ use crate::probes::Probe;
 use crate::sim_driver::{SimCommand, SimDriverRes};
 use crate::theme::Theme;
 use crate::tool::NodeColors;
+use crate::visual::VisualStrategy;
 
 // ────────────────────────────────────────────────────────────
 // Plugin + event
@@ -177,7 +178,8 @@ fn handle_load_example(
     // per-node causal arrival history. F12 uses `real_now` freshly
     // at each ingestion so no anchor update is needed here — the
     // next event after load will emit near the current wall clock.
-    timeline.reset();
+    timeline.strategy.invalidate();
+    timeline.visible.clear();
 
     maps.node_to_entity.clear();
     maps.entity_to_node.clear();

@@ -39,7 +39,7 @@ pub fn make_app() -> App {
     app.world_mut().resource_mut::<flow_bevy::bridge::SimClock>().multiplier = 1.0;
     {
         let mut tl = app.world_mut().resource_mut::<flow_bevy::edges::VisualTimelineRes>();
-        tl.0.as_replay_mut().k = 1.0;
+        tl.strategy.as_replay_mut().k = 1.0;
     }
     // Replace the worker-mode driver the bridge installs with a
     // Direct one. Default-fresh `Sim` carries the gadget params the

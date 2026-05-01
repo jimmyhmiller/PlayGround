@@ -212,7 +212,7 @@ fn handle_hotkeys(
     // honest — in-flight visuals from the prior strategy fade out as
     // their timers expire; new events feed the new strategy.
     if keys.just_pressed(KeyCode::KeyV) {
-        timeline.0.cycle();
+        timeline.strategy.cycle();
     }
     // Silence unused-param warnings when neither key was pressed.
     let _ = (&time, &driver);

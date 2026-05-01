@@ -16,6 +16,7 @@ use dynlang::{
 use dynsym::{DispatchTable, InlineCacheArray, InlineCacheEntry, Symbol, SymbolTable};
 
 use crate::ast::{Ast, Condition, Pattern};
+use crate::types::{Ty, TypeEnv, analyze_types};
 
 /// Growable pool of string literals. We intern every `Ast::String` and
 /// materialise a NanBox with `STRING_TAG` + the intern ID. At runtime,
@@ -89,71 +90,6 @@ pub struct IcContext {
 struct StructInfo {
     type_id: ObjTypeId,
     field_offsets: HashMap<String, i32>,
-}
-
-/// Static type lattice used by the `num_*` specialization analysis.
-/// Deliberately minimal — just enough to recognize "definitely a NaN-boxed
-/// f64" and pass that knowledge through `let` bindings, struct fields,
-/// array elements, and function returns. Anything we can't prove falls
-/// back to `Unknown` and the call site emits the safe `dyn_*` form.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Ty {
-    /// Bottom: no value of this type exists yet. Used for empty array
-    /// literals (`[]` is `Array<Bottom>`) and for fresh let-mut bindings
-    /// before any assignment has been observed. `Bottom.lub(T) = T` for
-    /// any `T`, which lets a `let mut xs = []` accumulate into
-    /// `Array<T>` once `push(xs, x: T)` is observed.
-    Bottom,
-    Number,
-    Object(String),
-    /// Array with statically-known element type. Only assigned to array
-    /// literals whose elements all share a type, and to chains of `push`
-    /// that preserve it.
-    Array(Box<Ty>),
-    Unknown,
-}
-
-impl Ty {
-    fn is_number(&self) -> bool {
-        matches!(self, Ty::Number)
-    }
-
-    /// Pointwise least-upper-bound. Bottom is the identity; same-type
-    /// joins (incl. matching object/array element) preserve type;
-    /// mismatches collapse to `Unknown`.
-    fn lub(&self, other: &Ty) -> Ty {
-        if self == other {
-            return self.clone();
-        }
-        match (self, other) {
-            (Ty::Bottom, t) | (t, Ty::Bottom) => t.clone(),
-            (Ty::Array(a), Ty::Array(b)) => Ty::Array(Box::new(a.lub(b))),
-            _ => Ty::Unknown,
-        }
-    }
-}
-
-/// Whole-program type information produced by `analyze_types` and
-/// consumed by `Lowerer` while choosing between `num_*` and `dyn_*`.
-#[derive(Default)]
-struct TypeInfo {
-    /// Top-level function name → inferred return type. Functions in a
-    /// recursive cycle (or that we couldn't otherwise analyse) are
-    /// absent or `Unknown`.
-    fn_returns: HashMap<String, Ty>,
-    /// Inferred type of each top-level function's parameters, by index.
-    /// Used to seed the per-function var_types env when lowering the
-    /// standalone body. Each entry is keyed by function name.
-    fn_param_types: HashMap<String, Vec<Ty>>,
-    /// Per-struct, per-field LUB of every value ever assigned to that
-    /// field at a `StructCreation` site. `(struct_name, field_name)`.
-    struct_fields: HashMap<(String, String), Ty>,
-    /// Per top-level function: for each let-mut-bound variable in that
-    /// function's body, the LUB of (its initializer ∪ every reachable
-    /// `Assignment`). This is the type we bind when lowering the
-    /// `let mut`. Reads of the variable use this type uniformly so a
-    /// later assignment's type can't surprise an earlier read.
-    let_mut_types: HashMap<String, HashMap<String, Ty>>,
 }
 
 /// A function that's safe to inline at every call site.
@@ -422,7 +358,7 @@ pub fn lower_program(program: &Ast) -> Lowered {
     // struct-field types, and per-function let-mut narrowed types. Used
     // by lowering to skip the `dyn_*` tag-test branch when both operands
     // of an arithmetic / comparison op are provably `Number`.
-    let type_info = analyze_types(elements, &globals, &inlinable);
+    let type_info = analyze_types(elements, &globals);
     if std::env::var("BEAGLE_DUMP_TYPES").is_ok() {
         let mut fns: Vec<(&String, &Ty)> = type_info.fn_returns.iter().collect();
         fns.sort_by_key(|(n, _)| (*n).clone());
@@ -465,25 +401,12 @@ pub fn lower_program(program: &Ast) -> Lowered {
             let fref = *func_refs.get(fname).unwrap();
             let mut f = dm.start_func(fref);
             {
-                // Seed the function's var_types with the analyzed
-                // parameter types so reads of params during lowering see
-                // them as Number where applicable.
-                let mut entry_scope: HashMap<String, Ty> = HashMap::new();
-                if let Some(param_tys) = type_info.fn_param_types.get(fname) {
-                    for (pat, ty) in args.iter().zip(param_tys.iter()) {
-                        if let Pattern::Identifier { name, .. } = pat {
-                            entry_scope.insert(name.clone(), ty.clone());
-                        }
-                    }
-                }
-
                 let mut lw = Lowerer {
                     structs: &structs,
                     func_refs: &func_refs,
                     globals: &globals,
                     inlinable: &inlinable,
-                    types: &type_info,
-                    var_types: vec![entry_scope],
+                    types: TypeEnv::new(&type_info, &globals, fname.clone(), args),
                     array: array_layout,
                     print_ref,
                     println_ref,
@@ -494,7 +417,6 @@ pub fn lower_program(program: &Ast) -> Lowered {
                     sin_ref,
                     time_now_ref,
                     prop_slow_ref,
-                    current_fn: fname.clone(),
                     strings: &mut strings,
                     symbols: &mut symbols,
                     ic_base_addr,
@@ -556,13 +478,11 @@ struct Lowerer<'a> {
     func_refs: &'a HashMap<String, FuncRef>,
     globals: &'a HashMap<String, Ast>,
     inlinable: &'a HashMap<String, InlineableFn>,
-    types: &'a TypeInfo,
-    /// Parallel scope stack tracking the static type of each in-scope
-    /// variable. Pushed/popped in lockstep with `DynFunc::push_scope` so
-    /// inlined function frames don't bleed types into the caller. Each
-    /// `let` / `let mut` / inlined-arg binding records a type here at
-    /// the same point its `def_var` happens.
-    var_types: Vec<HashMap<String, Ty>>,
+    /// Per-function type-tracking scope. Pushed/popped in lockstep with
+    /// `DynFunc::push_scope` so inlined function frames don't bleed
+    /// types into the caller. Also carries a borrow of the
+    /// whole-program `TypeInfo` and the `current_fn` name.
+    types: TypeEnv<'a>,
     array: ArrayLayout,
     print_ref: FuncRef,
     println_ref: FuncRef,
@@ -573,7 +493,6 @@ struct Lowerer<'a> {
     sin_ref: FuncRef,
     time_now_ref: FuncRef,
     prop_slow_ref: FuncRef,
-    current_fn: String,
     strings: &'a mut StringPool,
     symbols: &'a mut SymbolTable,
     /// Base address of the InlineCacheArray, embedded as an IR constant.
@@ -600,172 +519,6 @@ struct Lowerer<'a> {
 }
 
 impl<'a> Lowerer<'a> {
-    // ── Type tracking helpers ────────────────────────────────────────
-    //
-    // Maintained in lockstep with `DynFunc`'s scope/var stacks so the
-    // type env always matches the variable env.
-
-    fn push_type_scope(&mut self) {
-        self.var_types.push(HashMap::new());
-    }
-
-    fn pop_type_scope(&mut self) {
-        self.var_types.pop();
-    }
-
-    fn bind_type(&mut self, name: &str, ty: Ty) {
-        if let Some(scope) = self.var_types.last_mut() {
-            scope.insert(name.to_string(), ty);
-        }
-    }
-
-    /// Resolve a let-mut variable's type. Tries the analysis's
-    /// per-function table first (which reflects the LUB of init +
-    /// every assignment in scope). Falls back to typing the initializer
-    /// directly when no analysis entry exists — useful for synthetic
-    /// helper let-muts inserted by lowering itself.
-    fn let_mut_type(&self, name: &str, init: &Ast) -> Ty {
-        if let Some(per_fn) = self.types.let_mut_types.get(&self.current_fn) {
-            if let Some(t) = per_fn.get(name) {
-                return t.clone();
-            }
-        }
-        self.type_of(init)
-    }
-
-    fn lookup_type(&self, name: &str) -> Ty {
-        for scope in self.var_types.iter().rev() {
-            if let Some(t) = scope.get(name) {
-                return t.clone();
-            }
-        }
-        Ty::Unknown
-    }
-
-    /// Static type of an arbitrary expression, evaluated against the
-    /// current var-types env + the whole-program `TypeInfo`. Used at
-    /// arithmetic and comparison call sites to decide between `num_*`
-    /// and `dyn_*`. Conservative: when in doubt, returns `Unknown` and
-    /// the call site falls back to `dyn_*`.
-    fn type_of(&self, ast: &Ast) -> Ty {
-        match ast {
-            Ast::IntegerLiteral(..) | Ast::FloatLiteral(..) => Ty::Number,
-            // Bool / null / strings aren't `Number`; we don't bother
-            // distinguishing them further — the consumer only checks
-            // `is_number()`.
-            Ast::True(..) | Ast::False(..) | Ast::Null(..) | Ast::String(..) => Ty::Unknown,
-
-            Ast::Identifier(name, _) => {
-                if let Some(global) = self.globals.get(name) {
-                    return self.type_of(global);
-                }
-                self.lookup_type(name)
-            }
-
-            Ast::Add { left, right, .. }
-            | Ast::Sub { left, right, .. }
-            | Ast::Mul { left, right, .. }
-            | Ast::Div { left, right, .. }
-            | Ast::Modulo { left, right, .. } => {
-                if self.type_of(left).is_number() && self.type_of(right).is_number() {
-                    Ty::Number
-                } else {
-                    Ty::Unknown
-                }
-            }
-
-            // Comparisons and boolean ops aren't `Number`. We don't need
-            // a `Bool` slot in the lattice yet.
-            Ast::Condition { .. }
-            | Ast::And { .. }
-            | Ast::Or { .. }
-            | Ast::Not { .. } => Ty::Unknown,
-
-            Ast::If { then, else_, .. } => {
-                let tt = then
-                    .last()
-                    .map(|e| self.type_of(e))
-                    .unwrap_or(Ty::Unknown);
-                let et = else_
-                    .last()
-                    .map(|e| self.type_of(e))
-                    .unwrap_or(Ty::Unknown);
-                tt.lub(&et)
-            }
-
-            Ast::Let { value, .. } | Ast::LetMut { value, .. } => self.type_of(value),
-
-            Ast::Assignment { value, .. } => self.type_of(value),
-
-            Ast::StructCreation { name, .. } => Ty::Object(name.clone()),
-
-            Ast::Array { array, .. } => {
-                if array.is_empty() {
-                    return Ty::Array(Box::new(Ty::Bottom));
-                }
-                let mut acc = self.type_of(&array[0]);
-                for x in &array[1..] {
-                    acc = acc.lub(&self.type_of(x));
-                }
-                Ty::Array(Box::new(acc))
-            }
-
-            Ast::IndexOperator { array, .. } => {
-                if let Ty::Array(elem) = self.type_of(array) {
-                    *elem
-                } else {
-                    Ty::Unknown
-                }
-            }
-
-            Ast::PropertyAccess { object, property, .. } => {
-                let obj_ty = self.type_of(object);
-                if let Ty::Object(struct_name) = obj_ty {
-                    if let Ast::Identifier(field, _) = property.as_ref() {
-                        if let Some(t) =
-                            self.types.struct_fields.get(&(struct_name, field.clone()))
-                        {
-                            return t.clone();
-                        }
-                    }
-                }
-                Ty::Unknown
-            }
-
-            Ast::Call { name, args, .. } => {
-                // Builtins with hard-coded return types.
-                match name.as_str() {
-                    "cos" | "sin" | "to-float" | "to-number" | "length"
-                    | "core/time-now" => return Ty::Number,
-                    "push" => {
-                        // `push(arr, x)` returns Array<LUB(prior_elem, type_of(x))>.
-                        if args.len() == 2 {
-                            let arr_ty = self.type_of(&args[0]);
-                            let val_ty = self.type_of(&args[1]);
-                            if let Ty::Array(prior) = arr_ty {
-                                return Ty::Array(Box::new(prior.lub(&val_ty)));
-                            }
-                            return Ty::Array(Box::new(val_ty));
-                        }
-                    }
-                    _ => {}
-                }
-                // User function: consult analysis.
-                self.types
-                    .fn_returns
-                    .get(name)
-                    .cloned()
-                    .unwrap_or(Ty::Unknown)
-            }
-
-            Ast::CallExpr { .. } => Ty::Unknown,
-
-            // Statement-ish or unsupported forms: not a value we care
-            // about for arithmetic dispatch.
-            _ => Ty::Unknown,
-        }
-    }
-
     fn lower_block(&mut self, f: &mut DynFunc, body: &[Ast]) -> Value {
         if body.is_empty() {
             return f.nil();
@@ -810,10 +563,10 @@ impl<'a> Lowerer<'a> {
                     Pattern::Identifier { name, .. } => name.clone(),
                     _ => panic!("only simple `let <name> = ...` supported, got {:?}", pattern),
                 };
-                let ty = self.type_of(value);
+                let ty = self.types.type_of(value);
                 let v = self.lower_expr(f, value);
                 f.def_var(&vname, v);
-                self.bind_type(&vname, ty);
+                self.types.bind(&vname, ty);
                 v
             }
             Ast::LetMut { pattern, value, .. } => {
@@ -826,10 +579,10 @@ impl<'a> Lowerer<'a> {
                 // each let-mut name. Use that here so reads of the
                 // variable downstream see the conservative type — even
                 // before the assignments have been lowered.
-                let ty = self.let_mut_type(&vname, value);
+                let ty = self.types.let_mut_type(&vname, value);
                 let v = self.lower_expr(f, value);
                 f.def_var(&vname, v);
-                self.bind_type(&vname, ty);
+                self.types.bind(&vname, ty);
                 v
             }
 
@@ -855,8 +608,8 @@ impl<'a> Lowerer<'a> {
             // (`num_*`) which skips the tag-check branch. Otherwise the
             // full `dyn_*` fast/slow dispatch remains in place.
             Ast::Add { left, right, .. } => {
-                let lt = self.type_of(left);
-                let rt = self.type_of(right);
+                let lt = self.types.type_of(left);
+                let rt = self.types.type_of(right);
                 let l = self.lower_expr(f, left);
                 let r = self.lower_expr(f, right);
                 if lt.is_number() && rt.is_number() {
@@ -866,8 +619,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Ast::Sub { left, right, .. } => {
-                let lt = self.type_of(left);
-                let rt = self.type_of(right);
+                let lt = self.types.type_of(left);
+                let rt = self.types.type_of(right);
                 let l = self.lower_expr(f, left);
                 let r = self.lower_expr(f, right);
                 if lt.is_number() && rt.is_number() {
@@ -877,8 +630,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Ast::Mul { left, right, .. } => {
-                let lt = self.type_of(left);
-                let rt = self.type_of(right);
+                let lt = self.types.type_of(left);
+                let rt = self.types.type_of(right);
                 let l = self.lower_expr(f, left);
                 let r = self.lower_expr(f, right);
                 if lt.is_number() && rt.is_number() {
@@ -888,8 +641,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
             Ast::Div { left, right, .. } => {
-                let lt = self.type_of(left);
-                let rt = self.type_of(right);
+                let lt = self.types.type_of(left);
+                let rt = self.types.type_of(right);
                 let l = self.lower_expr(f, left);
                 let r = self.lower_expr(f, right);
                 if lt.is_number() && rt.is_number() {
@@ -901,8 +654,8 @@ impl<'a> Lowerer<'a> {
 
             // ── Comparison ──────────────────────────────────────────
             Ast::Condition { operator, left, right, .. } => {
-                let lt = self.type_of(left);
-                let rt = self.type_of(right);
+                let lt = self.types.type_of(left);
+                let rt = self.types.type_of(right);
                 let both_num = lt.is_number() && rt.is_number();
                 let l = self.lower_expr(f, left);
                 let r = self.lower_expr(f, right);
@@ -1151,7 +904,7 @@ impl<'a> Lowerer<'a> {
 
             other => panic!(
                 "beagle lowering: unsupported AST node in `{}`: {:?}",
-                self.current_fn, other
+                self.types.current_fn, other
             ),
         }
     }
@@ -1225,9 +978,9 @@ impl<'a> Lowerer<'a> {
                     // Compute arg types BEFORE pushing the scope — they
                     // resolve in the caller's env. Inside the inlinee
                     // they bind to the params' names.
-                    let arg_types: Vec<Ty> = args.iter().map(|a| self.type_of(a)).collect();
+                    let arg_types: Vec<Ty> = args.iter().map(|a| self.types.type_of(a)).collect();
                     f.push_scope();
-                    self.push_type_scope();
+                    self.types.push_scope();
                     for ((p, v), t) in inlinee
                         .params
                         .iter()
@@ -1235,16 +988,16 @@ impl<'a> Lowerer<'a> {
                         .zip(arg_types.iter())
                     {
                         f.def_var(p, *v);
-                        self.bind_type(p, t.clone());
+                        self.types.bind(p, t.clone());
                     }
                     let result = self.lower_block(f, &inlinee.body);
-                    self.pop_type_scope();
+                    self.types.pop_scope();
                     f.pop_scope();
                     return result;
                 }
 
                 let fref = *self.func_refs.get(other).unwrap_or_else(|| {
-                    panic!("unknown function `{other}` called from `{}`", self.current_fn)
+                    panic!("unknown function `{other}` called from `{}`", self.types.current_fn)
                 });
                 f.fb.call(fref, &arg_vals).unwrap()
             }
@@ -1462,782 +1215,6 @@ impl<'a> Lowerer<'a> {
         let t = f.bool_val(true);
         let fal = f.bool_val(false);
         f.fb.select(falsey, t, fal)
-    }
-}
-
-/// Whole-program type analysis. Produces a `TypeInfo` consumed by the
-/// lowerer to decide between `num_*` and `dyn_*` ops.
-///
-/// Iterates a forward dataflow analysis to a fixed point (or up to a
-/// small cap — anything still oscillating after that gets `Unknown`).
-/// The lattice is the simple `Ty` type; LUB is monotonic so the fixpoint
-/// terminates. Three things settle together:
-///
-///   - **Function return types.** Each top-level fn's return is the
-///     type of its body's last expression, evaluated against the
-///     current env. Recursive cycles converge to whatever the LUB of
-///     each pass produces (often `Unknown`).
-///
-///   - **Struct field types.** For each `(struct, field)` pair, take
-///     the LUB of every value passed at every `StructCreation` site.
-///     A struct's field type can stabilize as `Number` only if every
-///     constructor passes a known-`Number` value.
-///
-///   - **Let-mut narrowed types.** For each top-level fn body, walk
-///     every `let mut x = init` and join with the type of every
-///     `Assignment(Identifier(x), v)` reachable in the same body. We
-///     don't track shadowing here — the analysis assumes a let-mut
-///     name is unique within its function (true for the bench).
-fn analyze_types(
-    elements: &[Ast],
-    globals: &HashMap<String, Ast>,
-    inlinable: &HashMap<String, InlineableFn>,
-) -> TypeInfo {
-    let mut info = TypeInfo::default();
-
-    // Pre-seed param types as `Bottom` for every declared function so
-    // Pass C's LUB across call sites accumulates properly: `Bottom.lub(T) = T`,
-    // letting the first observed argument actually contribute. Seeding
-    // with `Unknown` would lock the lattice at the top forever, since
-    // `Unknown.lub(T) = Unknown`.
-    for el in elements {
-        if let Ast::Function { name, args, .. } = el {
-            if let Some(n) = name {
-                info.fn_param_types
-                    .insert(n.clone(), vec![Ty::Bottom; args.len()]);
-            }
-        }
-    }
-
-    // Iterate to fixpoint. The lattice is finite, but our "recompute
-    // fresh" passes (Pass B for struct_fields, Pass C for fn_param_types)
-    // can take several rounds to settle as fn_returns and the field
-    // table feed each other. 15 iterations is overkill for the
-    // benchmark (settles in ~6) and cheap.
-    for _ in 0..15 {
-        let mut changed = false;
-        analyze_pass(elements, globals, inlinable, &mut info, &mut changed);
-        if !changed {
-            break;
-        }
-    }
-
-    info
-}
-
-fn analyze_pass(
-    elements: &[Ast],
-    globals: &HashMap<String, Ast>,
-    inlinable: &HashMap<String, InlineableFn>,
-    info: &mut TypeInfo,
-    changed: &mut bool,
-) {
-    // ── Pass A: function return types + per-fn let-mut LUBs. ────────
-    for el in elements {
-        if let Ast::Function { name, args, body, .. } = el {
-            let Some(fname) = name.as_ref() else { continue };
-            // Build a per-function env from current param-type guesses.
-            let mut env: Vec<HashMap<String, Ty>> = vec![HashMap::new()];
-            if let Some(param_tys) = info.fn_param_types.get(fname) {
-                for (pat, ty) in args.iter().zip(param_tys.iter()) {
-                    if let Pattern::Identifier { name, .. } = pat {
-                        env[0].insert(name.clone(), ty.clone());
-                    }
-                }
-            }
-
-            // Let-mut LUBs: walk body, collecting (name → init type)
-            // and joining over every assignment to that name.
-            let mut let_mut: HashMap<String, Ty> = HashMap::new();
-            collect_let_mut_types(body, &env, info, globals, &mut let_mut);
-
-            // Stage entries into env so subsequent reads in this
-            // function's analysis pick them up.
-            for (k, v) in &let_mut {
-                env[0].insert(k.clone(), v.clone());
-            }
-
-            // Update the stored let-mut table; mark `changed` if it
-            // actually moved.
-            let prev = info.let_mut_types.get(fname).cloned().unwrap_or_default();
-            if prev != let_mut {
-                info.let_mut_types.insert(fname.clone(), let_mut);
-                *changed = true;
-            }
-
-            // Now compute the function's return type by typing every
-            // statement of its body in order, updating `env` for `let`s.
-            let ret_ty = type_block(body, &mut env, info, globals);
-            let prev_ret = info.fn_returns.get(fname).cloned();
-            if prev_ret.as_ref() != Some(&ret_ty) {
-                info.fn_returns.insert(fname.clone(), ret_ty);
-                *changed = true;
-            }
-        }
-    }
-
-    // ── Pass B: struct field LUBs. ─────────────────────────────────
-    // Recompute fresh each iteration. We do NOT carry forward a prior
-    // pass's `struct_fields` value: doing so would let an early
-    // iteration's pessimistic `Unknown` (from before fn_param_types
-    // converged) permanently poison the field. Instead, drop the table
-    // and rebuild from a clean start using the latest env / param
-    // types — once those stabilize, the field types do too.
-    let prev_fields = std::mem::take(&mut info.struct_fields);
-    for el in elements {
-        if let Ast::Function { args, body, name, .. } = el {
-            let mut env: Vec<HashMap<String, Ty>> = vec![HashMap::new()];
-            if let Some(fname) = name {
-                if let Some(param_tys) = info.fn_param_types.get(fname) {
-                    for (pat, ty) in args.iter().zip(param_tys.iter()) {
-                        if let Pattern::Identifier { name, .. } = pat {
-                            env[0].insert(name.clone(), ty.clone());
-                        }
-                    }
-                }
-            }
-            for s in body {
-                walk_struct_creations(s, &mut env, info, globals, changed);
-            }
-        }
-    }
-    if prev_fields != info.struct_fields {
-        *changed = true;
-    }
-
-    // ── Pass C: function param types from call sites. ──────────────
-    // For each Call/inline site, take LUB of arg types into the
-    // callee's params. Like Pass B, this restarts from a `Bottom` seed
-    // so an early iteration's `Unknown` (computed before fn_returns
-    // converged) doesn't permanently poison the param.
-    let mut new_params: HashMap<String, Vec<Ty>> = info
-        .fn_param_types
-        .iter()
-        .map(|(k, v)| (k.clone(), vec![Ty::Bottom; v.len()]))
-        .collect();
-    for el in elements {
-        if let Ast::Function { body, args: caller_args, name, .. } = el {
-            let mut env: Vec<HashMap<String, Ty>> = vec![HashMap::new()];
-            if let Some(fname) = name {
-                if let Some(param_tys) = info.fn_param_types.get(fname) {
-                    for (pat, ty) in caller_args.iter().zip(param_tys.iter()) {
-                        if let Pattern::Identifier { name, .. } = pat {
-                            env[0].insert(name.clone(), ty.clone());
-                        }
-                    }
-                }
-            }
-            for s in body {
-                walk_calls_for_params(s, &mut env, info, globals, &mut new_params);
-            }
-        }
-    }
-    if new_params != info.fn_param_types {
-        info.fn_param_types = new_params;
-        *changed = true;
-    }
-
-    // Avoid `unused` warnings — `inlinable` is here for symmetry with
-    // call-site logic that may want to recognise inline-only types
-    // later, but the analysis above doesn't actually need to walk
-    // inlinable bodies separately (they're top-level functions too).
-    let _ = inlinable;
-}
-
-/// Type the full block in order, updating `env` as `let`s are
-/// encountered. Returns the type of the final expression.
-fn type_block(
-    body: &[Ast],
-    env: &mut Vec<HashMap<String, Ty>>,
-    info: &TypeInfo,
-    globals: &HashMap<String, Ast>,
-) -> Ty {
-    let mut last = Ty::Unknown;
-    for stmt in body {
-        match stmt {
-            Ast::Let { pattern, value, .. } => {
-                let ty = expr_type(value, env, info, globals);
-                if let Pattern::Identifier { name, .. } = pattern {
-                    if let Some(scope) = env.last_mut() {
-                        scope.insert(name.clone(), ty.clone());
-                    }
-                }
-                last = ty;
-            }
-            Ast::LetMut { value, .. } => {
-                // The pre-pass already staged the LUB type into env;
-                // don't overwrite it with the (narrower) initializer's
-                // type — later assignments may widen it.
-                last = expr_type(value, env, info, globals);
-            }
-            other => last = expr_type(other, env, info, globals),
-        }
-    }
-    last
-}
-
-/// Type a sequence of statements in a fresh nested scope. Used for if /
-/// while / for branches whose `let` bindings shouldn't leak past them.
-/// Returns the type of the last statement.
-fn type_block_local(
-    body: &[Ast],
-    env: &Vec<HashMap<String, Ty>>,
-    info: &TypeInfo,
-    globals: &HashMap<String, Ast>,
-) -> Ty {
-    let mut local: Vec<HashMap<String, Ty>> = env.clone();
-    local.push(HashMap::new());
-    let mut last = Ty::Unknown;
-    for stmt in body {
-        match stmt {
-            Ast::Let { pattern, value, .. } => {
-                let ty = expr_type(value, &local, info, globals);
-                if let Pattern::Identifier { name, .. } = pattern {
-                    if let Some(scope) = local.last_mut() {
-                        scope.insert(name.clone(), ty.clone());
-                    }
-                }
-                last = ty;
-            }
-            Ast::LetMut { pattern, value, .. } => {
-                let ty = expr_type(value, &local, info, globals);
-                if let Pattern::Identifier { name, .. } = pattern {
-                    if let Some(scope) = local.last_mut() {
-                        scope.insert(name.clone(), ty.clone());
-                    }
-                }
-                last = ty;
-            }
-            other => last = expr_type(other, &local, info, globals),
-        }
-    }
-    last
-}
-
-/// Mirror of `Lowerer::type_of`, free-standing so the analysis pass can
-/// invoke it before any `Lowerer` exists. Should stay in sync — they
-/// implement the same lattice rules.
-fn expr_type(
-    ast: &Ast,
-    env: &Vec<HashMap<String, Ty>>,
-    info: &TypeInfo,
-    globals: &HashMap<String, Ast>,
-) -> Ty {
-    match ast {
-        Ast::IntegerLiteral(..) | Ast::FloatLiteral(..) => Ty::Number,
-        Ast::True(..) | Ast::False(..) | Ast::Null(..) | Ast::String(..) => Ty::Unknown,
-
-        Ast::Identifier(name, _) => {
-            if let Some(global) = globals.get(name) {
-                return expr_type(global, env, info, globals);
-            }
-            for scope in env.iter().rev() {
-                if let Some(t) = scope.get(name) {
-                    return t.clone();
-                }
-            }
-            Ty::Unknown
-        }
-
-        Ast::Add { left, right, .. }
-        | Ast::Sub { left, right, .. }
-        | Ast::Mul { left, right, .. }
-        | Ast::Div { left, right, .. }
-        | Ast::Modulo { left, right, .. } => {
-            if expr_type(left, env, info, globals).is_number()
-                && expr_type(right, env, info, globals).is_number()
-            {
-                Ty::Number
-            } else {
-                Ty::Unknown
-            }
-        }
-
-        Ast::Condition { .. } | Ast::And { .. } | Ast::Or { .. } | Ast::Not { .. } => {
-            Ty::Unknown
-        }
-
-        Ast::If { then, else_, .. } => {
-            // Each branch is a Vec<Ast> with its own `let` chain. We
-            // can't just type the last expression — `let` bindings made
-            // earlier in the branch must be visible to it. Run a
-            // statement-by-statement walk in a fresh scope for each.
-            let tt = type_block_local(then, env, info, globals);
-            let et = type_block_local(else_, env, info, globals);
-            tt.lub(&et)
-        }
-
-        Ast::Let { value, .. } | Ast::LetMut { value, .. } => {
-            expr_type(value, env, info, globals)
-        }
-        Ast::Assignment { value, .. } => expr_type(value, env, info, globals),
-
-        Ast::StructCreation { name, .. } => Ty::Object(name.clone()),
-
-        Ast::Array { array, .. } => {
-            if array.is_empty() {
-                return Ty::Array(Box::new(Ty::Bottom));
-            }
-            let mut acc = expr_type(&array[0], env, info, globals);
-            for x in &array[1..] {
-                acc = acc.lub(&expr_type(x, env, info, globals));
-            }
-            Ty::Array(Box::new(acc))
-        }
-
-        Ast::IndexOperator { array, .. } => {
-            if let Ty::Array(elem) = expr_type(array, env, info, globals) {
-                *elem
-            } else {
-                Ty::Unknown
-            }
-        }
-
-        Ast::PropertyAccess { object, property, .. } => {
-            let obj_ty = expr_type(object, env, info, globals);
-            if let Ty::Object(struct_name) = obj_ty {
-                if let Ast::Identifier(field, _) = property.as_ref() {
-                    if let Some(t) =
-                        info.struct_fields.get(&(struct_name, field.clone()))
-                    {
-                        return t.clone();
-                    }
-                }
-            }
-            Ty::Unknown
-        }
-
-        Ast::Call { name, args, .. } => {
-            match name.as_str() {
-                "cos" | "sin" | "to-float" | "to-number" | "length" | "core/time-now" => {
-                    return Ty::Number;
-                }
-                "push" => {
-                    if args.len() == 2 {
-                        let arr_ty = expr_type(&args[0], env, info, globals);
-                        let val_ty = expr_type(&args[1], env, info, globals);
-                        if let Ty::Array(prior) = arr_ty {
-                            return Ty::Array(Box::new(prior.lub(&val_ty)));
-                        }
-                        return Ty::Array(Box::new(val_ty));
-                    }
-                }
-                _ => {}
-            }
-            info.fn_returns.get(name).cloned().unwrap_or(Ty::Unknown)
-        }
-
-        Ast::CallExpr { .. } => Ty::Unknown,
-
-        Ast::While { .. } | Ast::Loop { .. } | Ast::For { .. } => Ty::Unknown,
-
-        _ => Ty::Unknown,
-    }
-}
-
-/// Collect let-mut narrowed types via a forward walk over the function
-/// body. Threads a mutable env through so `let` bindings encountered
-/// mid-body (including ones inside loop bodies) are visible when we
-/// type subsequent expressions — including assignments to outer
-/// let-muts whose RHS reads those inner lets.
-fn collect_let_mut_types(
-    body: &[Ast],
-    seed_env: &Vec<HashMap<String, Ty>>,
-    info: &TypeInfo,
-    globals: &HashMap<String, Ast>,
-    out: &mut HashMap<String, Ty>,
-) {
-    // Working env, seeded from the function's parameter scope.
-    let mut env = seed_env.clone();
-
-    for s in body {
-        forward_let_mut(s, &mut env, info, globals, out);
-    }
-}
-
-/// Walk the AST in lexical order. Maintains `env` as encountered
-/// `let`/`let mut` bindings extend it. For each `let mut x = init`,
-/// record/init `out[x] = init_type`. For each `Assignment(Identifier(x),
-/// v)`, update `out[x] = out[x].lub(value_type)` AND `env[x] = out[x]`
-/// so later reads of `x` see the running LUB.
-fn forward_let_mut(
-    ast: &Ast,
-    env: &mut Vec<HashMap<String, Ty>>,
-    info: &TypeInfo,
-    globals: &HashMap<String, Ast>,
-    out: &mut HashMap<String, Ty>,
-) {
-    match ast {
-        Ast::Let { pattern, value, .. } => {
-            forward_let_mut(value, env, info, globals, out);
-            let ty = expr_type(value, env, info, globals);
-            if let Pattern::Identifier { name, .. } = pattern {
-                if let Some(scope) = env.last_mut() {
-                    scope.insert(name.clone(), ty);
-                }
-            }
-        }
-        Ast::LetMut { pattern, value, .. } => {
-            forward_let_mut(value, env, info, globals, out);
-            let init_ty = expr_type(value, env, info, globals);
-            if let Pattern::Identifier { name, .. } = pattern {
-                let merged = match out.get(name) {
-                    Some(prev) => prev.lub(&init_ty),
-                    None => init_ty.clone(),
-                };
-                out.insert(name.clone(), merged.clone());
-                if let Some(scope) = env.last_mut() {
-                    scope.insert(name.clone(), merged);
-                }
-            }
-        }
-        Ast::Assignment { name, value, .. } => {
-            forward_let_mut(value, env, info, globals, out);
-            if let Ast::Identifier(n, _) = name.as_ref() {
-                let v_ty = expr_type(value, env, info, globals);
-                let merged = match out.get(n) {
-                    Some(prev) => prev.lub(&v_ty),
-                    None => v_ty,
-                };
-                out.insert(n.clone(), merged.clone());
-                // Push the running LUB into env so subsequent reads of
-                // the variable in this same pass see the wider type.
-                for scope in env.iter_mut().rev() {
-                    if scope.contains_key(n) {
-                        scope.insert(n.clone(), merged);
-                        break;
-                    }
-                }
-            }
-        }
-        Ast::While { condition, body, .. } => {
-            forward_let_mut(condition, env, info, globals, out);
-            // Loops can iterate, so a let-mut written inside the body
-            // can be read back at the top of the body. Two passes
-            // suffice for the simple lattice we use (a third pass would
-            // make no further progress).
-            for _ in 0..2 {
-                env.push(HashMap::new());
-                for s in body {
-                    forward_let_mut(s, env, info, globals, out);
-                }
-                env.pop();
-            }
-        }
-        Ast::For { collection, body, .. } => {
-            forward_let_mut(collection, env, info, globals, out);
-            for _ in 0..2 {
-                env.push(HashMap::new());
-                for s in body {
-                    forward_let_mut(s, env, info, globals, out);
-                }
-                env.pop();
-            }
-        }
-        Ast::Loop { body, .. } => {
-            for _ in 0..2 {
-                env.push(HashMap::new());
-                for s in body {
-                    forward_let_mut(s, env, info, globals, out);
-                }
-                env.pop();
-            }
-        }
-        Ast::If { condition, then, else_, .. } => {
-            forward_let_mut(condition, env, info, globals, out);
-            env.push(HashMap::new());
-            for s in then {
-                forward_let_mut(s, env, info, globals, out);
-            }
-            env.pop();
-            env.push(HashMap::new());
-            for s in else_ {
-                forward_let_mut(s, env, info, globals, out);
-            }
-            env.pop();
-        }
-        _ => {
-            walk_children(ast, |c| forward_let_mut(c, env, info, globals, out));
-        }
-    }
-}
-
-/// Walk every `StructCreation` reachable from `ast`. For each one, type
-/// each field value in the current env and LUB into
-/// `info.struct_fields[(struct_name, field_name)]`. `let` bindings
-/// inside the walk extend `env` so subsequent expressions see them.
-fn walk_struct_creations(
-    ast: &Ast,
-    env: &mut Vec<HashMap<String, Ty>>,
-    info: &mut TypeInfo,
-    globals: &HashMap<String, Ast>,
-    changed: &mut bool,
-) {
-    match ast {
-        Ast::Let { pattern, value, .. } | Ast::LetMut { pattern, value, .. } => {
-            walk_struct_creations(value, env, info, globals, changed);
-            let ty = expr_type(value, env, info, globals);
-            if let Pattern::Identifier { name, .. } = pattern {
-                if let Some(scope) = env.last_mut() {
-                    scope.insert(name.clone(), ty);
-                }
-            }
-        }
-        Ast::StructCreation { name, fields, .. } => {
-            for (fname, fval) in fields {
-                walk_struct_creations(fval, env, info, globals, changed);
-                let ty = expr_type(fval, env, info, globals);
-                let key = (name.clone(), fname.clone());
-                let merged = match info.struct_fields.get(&key) {
-                    Some(prev) => prev.lub(&ty),
-                    None => ty.clone(),
-                };
-                if info.struct_fields.get(&key) != Some(&merged) {
-                    info.struct_fields.insert(key, merged);
-                    *changed = true;
-                }
-            }
-        }
-        _ => {
-            walk_children(ast, |c| walk_struct_creations(c, env, info, globals, changed));
-        }
-    }
-}
-
-/// Walk every call site and propagate caller's arg types into the
-/// callee's param types via LUB.
-fn walk_calls_for_params(
-    ast: &Ast,
-    env: &mut Vec<HashMap<String, Ty>>,
-    info: &TypeInfo,
-    globals: &HashMap<String, Ast>,
-    new_params: &mut HashMap<String, Vec<Ty>>,
-) {
-    match ast {
-        Ast::Let { pattern, value, .. } | Ast::LetMut { pattern, value, .. } => {
-            walk_calls_for_params(value, env, info, globals, new_params);
-            let ty = expr_type(value, env, info, globals);
-            if let Pattern::Identifier { name, .. } = pattern {
-                if let Some(scope) = env.last_mut() {
-                    scope.insert(name.clone(), ty);
-                }
-            }
-        }
-        Ast::Call { name, args, .. } => {
-            for a in args {
-                walk_calls_for_params(a, env, info, globals, new_params);
-            }
-            // Skip builtins — we don't track those in fn_param_types.
-            if !matches!(
-                name.as_str(),
-                "cos" | "sin" | "to-float" | "to-number" | "length" | "core/time-now"
-                    | "push" | "print" | "println" | "get" | "beagle.core/equal"
-            ) {
-                if let Some(existing) = new_params.get(name).cloned() {
-                    let mut updated = existing.clone();
-                    for (i, a) in args.iter().enumerate() {
-                        if i >= updated.len() {
-                            break;
-                        }
-                        let arg_ty = expr_type(a, env, info, globals);
-                        updated[i] = updated[i].lub(&arg_ty);
-                    }
-                    if updated != existing {
-                        new_params.insert(name.clone(), updated);
-                    }
-                }
-            }
-        }
-        _ => walk_children(ast, |c| {
-            walk_calls_for_params(c, env, info, globals, new_params)
-        }),
-    }
-}
-
-/// Generic AST child-walker: invokes `f` on every immediate child
-/// expression. Used by the small AST passes above to avoid duplicating
-/// the structural recursion. Doesn't recurse into nested function
-/// definitions or other top-level forms — those are walked at the
-/// program level.
-fn walk_children(ast: &Ast, mut f: impl FnMut(&Ast)) {
-    match ast {
-        Ast::If { condition, then, else_, .. } => {
-            f(condition);
-            for x in then {
-                f(x);
-            }
-            for x in else_ {
-                f(x);
-            }
-        }
-        Ast::While { condition, body, .. } => {
-            f(condition);
-            for x in body {
-                f(x);
-            }
-        }
-        Ast::For { collection, body, .. } => {
-            f(collection);
-            for x in body {
-                f(x);
-            }
-        }
-        Ast::Loop { body, .. }
-        | Ast::Reset { body, .. }
-        | Ast::Shift { body, .. }
-        | Ast::Test { body, .. } => {
-            for x in body {
-                f(x);
-            }
-        }
-        Ast::Condition { left, right, .. }
-        | Ast::Add { left, right, .. }
-        | Ast::Sub { left, right, .. }
-        | Ast::Mul { left, right, .. }
-        | Ast::Div { left, right, .. }
-        | Ast::Modulo { left, right, .. }
-        | Ast::ShiftLeft { left, right, .. }
-        | Ast::ShiftRight { left, right, .. }
-        | Ast::ShiftRightZero { left, right, .. }
-        | Ast::BitWiseAnd { left, right, .. }
-        | Ast::BitWiseOr { left, right, .. }
-        | Ast::BitWiseXor { left, right, .. }
-        | Ast::And { left, right, .. }
-        | Ast::Or { left, right, .. } => {
-            f(left);
-            f(right);
-        }
-        Ast::Call { args, .. } | Ast::Recurse { args, .. } | Ast::TailRecurse { args, .. } => {
-            for a in args {
-                f(a);
-            }
-        }
-        Ast::CallExpr { callee, args, .. } => {
-            f(callee);
-            for a in args {
-                f(a);
-            }
-        }
-        Ast::Let { value, .. } | Ast::LetMut { value, .. } | Ast::LetDynamic { value, .. } => {
-            f(value);
-        }
-        Ast::Binding { value_expr, body, .. } => {
-            f(value_expr);
-            for s in body {
-                f(s);
-            }
-        }
-        Ast::Assignment { name, value, .. } => {
-            f(name);
-            f(value);
-        }
-        Ast::Not { expr, .. } => f(expr),
-        Ast::PropertyAccess { object, property, .. } => {
-            f(object);
-            f(property);
-        }
-        Ast::IndexOperator { array, index, .. } => {
-            f(array);
-            f(index);
-        }
-        Ast::Array { array, .. } => {
-            for x in array {
-                f(x);
-            }
-        }
-        Ast::StructCreation { fields, spread, .. } => {
-            for (_, v) in fields {
-                f(v);
-            }
-            if let Some(s) = spread {
-                f(s);
-            }
-        }
-        Ast::EnumCreation { fields, .. } => {
-            for (_, v) in fields {
-                f(v);
-            }
-        }
-        Ast::MapLiteral { pairs, .. } => {
-            for (k, v) in pairs {
-                f(k);
-                f(v);
-            }
-        }
-        Ast::SetLiteral { elements, .. } => {
-            for x in elements {
-                f(x);
-            }
-        }
-        Ast::Break { value, .. } | Ast::Return { value, .. } | Ast::Throw { value, .. } => {
-            f(value);
-        }
-        Ast::StringInterpolation { parts, .. } => {
-            for p in parts {
-                if let crate::ast::StringInterpolationPart::Expression(e) = p {
-                    f(e);
-                }
-            }
-        }
-        Ast::Try { body, catch_body, .. } => {
-            for x in body {
-                f(x);
-            }
-            for x in catch_body {
-                f(x);
-            }
-        }
-        Ast::Match { value, arms, .. } => {
-            f(value);
-            for arm in arms {
-                if let Some(g) = &arm.guard {
-                    f(g);
-                }
-                for x in &arm.body {
-                    f(x);
-                }
-            }
-        }
-        Ast::MultiArityFunction { cases, .. } => {
-            for c in cases {
-                for x in &c.body {
-                    f(x);
-                }
-            }
-        }
-        Ast::Perform { value, .. } => f(value),
-        Ast::Handle { handler_instance, body, .. } => {
-            f(handler_instance);
-            for x in body {
-                f(x);
-            }
-        }
-        Ast::Future { body, .. } => f(body),
-        Ast::Use { alias, .. } => f(alias),
-
-        // Leaves and top-level decls — no children we walk in this
-        // helper.
-        Ast::Program { .. }
-        | Ast::Function { .. }
-        | Ast::FunctionStub { .. }
-        | Ast::Struct { .. }
-        | Ast::StructField { .. }
-        | Ast::Enum { .. }
-        | Ast::EnumVariant { .. }
-        | Ast::EnumStaticVariant { .. }
-        | Ast::Protocol { .. }
-        | Ast::Extend { .. }
-        | Ast::ProtocolDispatch { .. }
-        | Ast::IntegerLiteral(..)
-        | Ast::FloatLiteral(..)
-        | Ast::Identifier(..)
-        | Ast::String(..)
-        | Ast::Keyword(..)
-        | Ast::True(..)
-        | Ast::False(..)
-        | Ast::Null(..)
-        | Ast::Namespace { .. }
-        | Ast::Continue { .. } => {}
     }
 }
 

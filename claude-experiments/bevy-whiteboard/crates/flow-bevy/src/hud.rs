@@ -16,14 +16,8 @@ use crate::sim_driver::{SimCommand, SimDriverRes, SimSnapshotRes};
 pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        let initial_kind = crate::rewind::initial_strategy_kind();
         app.init_resource::<PendingRewindTarget>()
-            .insert_resource(RewindStrategySetting(initial_kind))
             .add_systems(Startup, (spawn_hud, spawn_vis_k_popup, spawn_rewind_popup))
-            // Bevy's `add_systems` tuple arity tops out around 16
-            // — split the HUD's per-frame systems across two calls
-            // by domain. Order is irrelevant here: every system is
-            // independent.
             .add_systems(
                 Update,
                 (
@@ -35,9 +29,8 @@ impl Plugin for HudPlugin {
                     handle_rewind_zero_button,
                     handle_rewind_step_button,
                     handle_reverse_play_button,
-                    handle_rewind_strategy_click,
-                    push_rewind_strategy_to_driver,
-                    update_rewind_strategy_readout,
+                    handle_visual_strategy_click,
+                    update_visual_strategy_readout,
                     clear_pending_rewind_when_caught_up,
                     auto_stop_reverse_play_at_zero,
                 ),
@@ -78,21 +71,15 @@ pub struct HudRewindZeroBtn;
 #[derive(Component)]
 pub struct HudRewindStepBtn;
 
-/// Live setting for the rewind strategy. Click cycles it; the
-/// `push_rewind_strategy_to_driver` system mirrors changes onto the
-/// sim driver so the next rewind uses the new strategy.
-#[derive(Resource, Clone, Copy, Debug)]
-pub struct RewindStrategySetting(pub crate::rewind::RewindStrategyKind);
-
-/// Marker on the cell wrapping the rewind-strategy text. Clicking
-/// the cell rotates through `STRATEGY_CYCLE`.
+/// Marker on the cell wrapping the visual-strategy text. Clicking
+/// the cell rotates through `StrategyKind::ALL`.
 #[derive(Component)]
-struct HudRewindStrategyCell;
+struct HudVisualStrategyCell;
 
-/// Marker on the inner `Text` of the rewind-strategy cell so the
+/// Marker on the inner `Text` of the visual-strategy cell so the
 /// readout system can find and update it.
 #[derive(Component)]
-struct HudRewindStrategyText;
+struct HudVisualStrategyText;
 
 /// Most recent rewind target the HUD asked for. Worker-mode rewinds
 /// are async — the snapshot's `now_ns` lags. When the user clicks «
@@ -213,15 +200,15 @@ fn spawn_hud(mut commands: Commands, theme: Res<Theme>, clock: Res<SimClock>) {
                 ..default()
             },
             BorderColor::all(theme.ink),
-            HudRewindStrategyCell,
+            HudVisualStrategyCell,
         ))
         .with_children(|cell| {
             cell.spawn((
-                Text::new("rwd: …"),
+                Text::new("vis: …"),
                 TextFont { font_size: 13.0, ..default() },
                 TextColor(theme.ink),
                 Mono,
-                HudRewindStrategyText,
+                HudVisualStrategyText,
             ));
         });
 
@@ -264,7 +251,7 @@ fn update_vis_readout(
 ) {
     let Ok(mut text) = q.single_mut() else { return };
     let k = timeline.k();
-    let strategy = timeline.0.kind().label();
+    let strategy = timeline.strategy.kind().label();
     let new = if k >= 10.0 {
         format!("vis k={} [{}]", k.round() as i64, strategy)
     } else {
@@ -714,35 +701,27 @@ fn sync_rewind_slider_max(
 // Rewind-strategy cell
 // ────────────────────────────────────────────────────────────
 
-/// Cycle through `RewindStrategyKind` variants on click.
-fn handle_rewind_strategy_click(
-    cells: Query<&Interaction, (Changed<Interaction>, With<HudRewindStrategyCell>)>,
-    mut setting: ResMut<RewindStrategySetting>,
+/// Cycle the active visual strategy on click. Goes straight at the
+/// `VisualTimelineRes` — there's no separate setting resource because
+/// the timeline already owns the truth.
+fn handle_visual_strategy_click(
+    cells: Query<&Interaction, (Changed<Interaction>, With<HudVisualStrategyCell>)>,
+    mut timeline: ResMut<VisualTimelineRes>,
 ) {
     for interaction in cells.iter() {
         if *interaction == Interaction::Pressed {
-            setting.0 = setting.0.next();
+            timeline.strategy.cycle();
         }
     }
 }
 
-/// Mirror the live `RewindStrategySetting` onto the driver. Pushes
-/// only on resource change so we don't spam messages every frame.
-fn push_rewind_strategy_to_driver(
-    setting: Res<RewindStrategySetting>,
-    mut driver: ResMut<SimDriverRes>,
-) {
-    if !setting.is_changed() { return; }
-    driver.0.set_rewind_strategy(setting.0);
-}
-
-/// Keep the readout text in sync with the live setting.
-fn update_rewind_strategy_readout(
-    setting: Res<RewindStrategySetting>,
-    mut q: Query<&mut Text, With<HudRewindStrategyText>>,
+/// Keep the readout text in sync with the live strategy.
+fn update_visual_strategy_readout(
+    timeline: Res<VisualTimelineRes>,
+    mut q: Query<&mut Text, With<HudVisualStrategyText>>,
 ) {
     let Ok(mut text) = q.single_mut() else { return; };
-    let label = format!("rwd: {}", setting.0.label());
+    let label = format!("vis: {}", timeline.strategy.kind().label());
     if text.0 != label { text.0 = label; }
 }
 

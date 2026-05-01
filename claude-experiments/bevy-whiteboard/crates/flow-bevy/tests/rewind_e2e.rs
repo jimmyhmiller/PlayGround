@@ -9,7 +9,6 @@ use common::{advance_sim_ns, make_app};
 use flow_bevy::bridge::FlowSim;
 use flow_bevy::edges::{RewindEpochSeen, VisualTimelineRes};
 use flow_bevy::gadgets::Kind;
-use flow_bevy::visual::VisualStrategy;
 
 fn now_ns(app: &App) -> u64 {
     app.world().resource::<FlowSim>().now_ns
@@ -163,14 +162,14 @@ fn rewind_repopulates_visuals_with_in_flight_packets() {
     let in_flight_count = app.world().resource::<FlowSim>().in_flight.len();
     let timeline_packet_count = app.world()
         .resource::<VisualTimelineRes>()
-        .0
+        .strategy
         .as_replay()
         .packets
         .len();
     let visual_now = app.world().resource::<flow_bevy::bridge::SimClock>().visual_now;
     let visible = {
         let tl = app.world().resource::<VisualTimelineRes>();
-        tl.0.visible_at(visual_now).count()
+        tl.visible.len()
     };
     assert!(
         visible > 0,
@@ -293,54 +292,36 @@ fn spawn_dense_topology(app: &mut App) {
 /// reported multi-second lockups in this scenario.
 #[test]
 fn rewind_from_long_session_completes_quickly() {
-    for kind in [
-        flow_bevy::rewind::RewindStrategyKind::AnchorReplay,
-        flow_bevy::rewind::RewindStrategyKind::FullLog,
-        flow_bevy::rewind::RewindStrategyKind::PostSnap,
-        flow_bevy::rewind::RewindStrategyKind::InFlightOnly,
-    ] {
-        let mut app = make_app();
-        spawn_dense_topology(&mut app);
-        {
-            let world = app.world_mut();
-            let mut driver = world.resource_mut::<FlowSim>();
-            driver.0.set_rewind_strategy(kind);
-        }
-        // 60s session. advance in 250ms increments so the snapshot
-        // ring gets populated naturally; a single huge advance only
-        // produces one ring entry at the tail and doesn't model the
-        // live app where the worker captures continuously.
-        for _ in 0..240 {
-            advance_sim_ns(&mut app, 250_000_000);
-        }
-        app.update();
-
-        // Warmup frame so we're measuring steady-state frame cost,
-        // not first-frame initialization (which is dominated by
-        // Bevy's lazy plugin work, not anything rewind-related).
-        app.update();
-
-        // Target 30s — outside the ring's coverage of [44s, 60s],
-        // so all strategies fall through to the t=0 anchor and
-        // must run forward 30 sim-seconds during do_rewind.
-        let t0 = Instant::now();
-        let landed = {
-            let world = app.world_mut();
-            let mut driver = world.resource_mut::<FlowSim>();
-            driver.0.rewind(30_000_000_000)
-        };
-        // One frame so apply_rewind_reset runs and ingests the
-        // strategy's replay events.
-        app.update();
-        let elapsed = t0.elapsed();
-
-        assert!(
-            elapsed.as_millis() < 100,
-            "[{:?}] rewind from 60s to 30s took {}ms — UI would lock up",
-            kind, elapsed.as_millis(),
-        );
-        assert_eq!(landed, 30_000_000_000, "[{:?}] rewind didn't land at target", kind);
+    let mut app = make_app();
+    spawn_dense_topology(&mut app);
+    // 60s session. Advance in 250ms increments so the snapshot
+    // ring gets populated naturally; a single huge advance only
+    // produces one ring entry at the tail and doesn't model the
+    // live app where the worker captures continuously.
+    for _ in 0..240 {
+        advance_sim_ns(&mut app, 250_000_000);
     }
+    app.update();
+    app.update(); // warmup
+
+    // Target 30s — outside the ring's coverage of [44s, 60s], so we
+    // fall through to the t=0 anchor and must run forward 30
+    // sim-seconds during do_rewind.
+    let t0 = Instant::now();
+    let landed = {
+        let world = app.world_mut();
+        let mut driver = world.resource_mut::<FlowSim>();
+        driver.0.rewind(30_000_000_000)
+    };
+    app.update();
+    let elapsed = t0.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 100,
+        "rewind from 60s to 30s took {}ms — UI would lock up",
+        elapsed.as_millis(),
+    );
+    assert_eq!(landed, 30_000_000_000, "rewind didn't land at target");
 }
 
 /// Scrub-back simulation: many rapid rewinds, like the user
@@ -348,41 +329,28 @@ fn rewind_from_long_session_completes_quickly() {
 /// run-forward; if those add up linearly the experience janks.
 #[test]
 fn many_rewinds_in_a_row_stay_bounded() {
-    for kind in [
-        flow_bevy::rewind::RewindStrategyKind::AnchorReplay,
-        flow_bevy::rewind::RewindStrategyKind::PostSnap,
-    ] {
-        let mut app = make_app();
-        spawn_dense_topology(&mut app);
-        {
-            let world = app.world_mut();
-            let mut driver = world.resource_mut::<FlowSim>();
-            driver.0.set_rewind_strategy(kind);
-        }
-        for _ in 0..120 {
-            advance_sim_ns(&mut app, 250_000_000);
-        }
-        app.update();
-
-        // 30 rewinds stepping from 25s back to ~10s.
-        let start = Instant::now();
-        for i in 0..30 {
-            let target_ns = 25_000_000_000_u64 - (i as u64) * 500_000_000;
-            let world = app.world_mut();
-            let mut driver = world.resource_mut::<FlowSim>();
-            driver.0.rewind(target_ns);
-        }
-        let elapsed = start.elapsed();
-
-        // Loose budget: 30 rewinds in under 2s of wall time. Real
-        // smooth scrub would be much faster; this just catches the
-        // multi-second-per-rewind lockup case.
-        assert!(
-            elapsed.as_millis() < 2_000,
-            "[{:?}] 30 rewinds took {}ms — scrubbing won't be smooth",
-            kind, elapsed.as_millis(),
-        );
+    let mut app = make_app();
+    spawn_dense_topology(&mut app);
+    for _ in 0..120 {
+        advance_sim_ns(&mut app, 250_000_000);
     }
+    app.update();
+
+    // 30 rewinds stepping from 25s back to ~10s.
+    let start = Instant::now();
+    for i in 0..30 {
+        let target_ns = 25_000_000_000_u64 - (i as u64) * 500_000_000;
+        let world = app.world_mut();
+        let mut driver = world.resource_mut::<FlowSim>();
+        driver.0.rewind(target_ns);
+    }
+    let elapsed = start.elapsed();
+
+    assert!(
+        elapsed.as_millis() < 2_000,
+        "30 rewinds took {}ms — scrubbing won't be smooth",
+        elapsed.as_millis(),
+    );
 }
 
 /// Repro for the « bug: when there was a sparse marker spacing

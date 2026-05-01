@@ -329,12 +329,12 @@ a { color: inherit; text-decoration: none; }
    content's natural min-width — wide content (long code lines) scrolls
    inside its own container instead of forcing the column to expand. */
 .project-wide .project-inner { grid-template-columns: minmax(0, 1fr); }
-.project-narrow .project-inner { grid-template-columns: minmax(0, 1fr) 360px; }
+.project-narrow .project-inner { grid-template-columns: minmax(0, 1fr) 320px; align-items: center; }
 .project-split .project-inner { grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); }
 .project-code-right .project-inner { grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); }
 .project-code-left  .project-inner { grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr); }
 
-@media (max-width: 880px) {
+@media screen and (max-width: 880px) {
   .project-inner { grid-template-columns: minmax(0, 1fr) !important; }
 }
 

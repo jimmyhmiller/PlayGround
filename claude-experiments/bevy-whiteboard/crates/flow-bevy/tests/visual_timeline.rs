@@ -138,7 +138,7 @@ fn sample_frame(app: &mut App) -> Vec<PacketFrame> {
 
     let timeline = world.resource::<VisualTimelineRes>();
     timeline
-        .0
+        .strategy
         .as_replay()
         .packets
         .iter()
@@ -454,7 +454,7 @@ fn p6_visuals_keep_flowing_while_sim_emits() {
         "scenario produced only {} data emits over 10s — test misconfigured",
         total_data_emits);
 
-    let timeline_len = app.world().resource::<VisualTimelineRes>().0.as_replay().packets.len();
+    let timeline_len = app.world().resource::<VisualTimelineRes>().strategy.as_replay().packets.len();
     assert!(
         timeline_len >= recent_data_emits,
         "visual timeline holds {} packets but sim emitted {} data packets in \
@@ -498,7 +498,7 @@ fn p4s_one_visual_per_emit_packet_id() {
         step_frame(&mut app, 30_000_000);
 
         // Per-frame count by packet_id.
-        let timeline = app.world().resource::<VisualTimelineRes>().0.as_replay();
+        let timeline = app.world().resource::<VisualTimelineRes>().strategy.as_replay();
         let mut per_id: HashMap<flow::PacketId, usize> = HashMap::new();
         for p in &timeline.packets {
             *per_id.entry(p.packet_id).or_insert(0) += 1;
@@ -642,7 +642,7 @@ fn p4_packet_entity_count_tracks_emissions() {
     // (`gc_before`), so this snapshot is bounded by emit_count + a
     // small slop for in-flight + just-arrived. We assert no spurious
     // extra ingests.
-    let live = app.world().resource::<VisualTimelineRes>().0.as_replay().packets.len();
+    let live = app.world().resource::<VisualTimelineRes>().strategy.as_replay().packets.len();
     assert!(
         live <= emit_count + 5,
         "visual timeline holds {} packets but the sim emitted only {} \
