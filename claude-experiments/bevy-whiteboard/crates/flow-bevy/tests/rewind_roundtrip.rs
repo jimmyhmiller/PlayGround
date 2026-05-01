@@ -47,7 +47,13 @@ fn quantise(progress: f32) -> u32 {
     (progress.clamp(0.0, 1.0) * 1000.0).round() as u32
 }
 
-/// Capture the on-screen state from the visual layer.
+/// Capture exactly what the renderer would draw — query at
+/// `clock.visual_now` (the same value `sync_packet_transforms`
+/// passes to `visible_at` for every rendered packet), no
+/// boundary filter, no quantisation softening. If forward and
+/// rewound `visual_now` differ even slightly, the rendered sets
+/// differ, even when the underlying timeline records carry the
+/// same `emit_real` / `arrive_real`. That's the gap I missed.
 fn screenshot(app: &App) -> Vec<ScreenshotPacket> {
     let visual_now = app.world().resource::<SimClock>().visual_now;
     let timeline = app.world().resource::<VisualTimelineRes>();
@@ -60,7 +66,6 @@ fn screenshot(app: &App) -> Vec<ScreenshotPacket> {
             progress_q: quantise(prog),
         })
         .collect();
-    // Stable ordering for diffing.
     shot.sort_by_key(|p| (p.from.0, p.to.0, p.packet_id.0));
     shot
 }

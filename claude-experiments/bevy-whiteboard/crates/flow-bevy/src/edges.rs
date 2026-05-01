@@ -50,6 +50,7 @@ impl Plugin for EdgesPlugin {
                 apply_rewind_reset,
                 ingest_new_events,
                 gc_timeline,
+                dump_visible_packets,
             ).chain());
     }
 }
@@ -103,14 +104,25 @@ fn apply_rewind_reset(
     seen.0 = cur;
     events.0.clear();
     timeline.reset();
-    // Re-anchor visual_now to whatever it was just before the
-    // reset, so `sync_visual_now_from_sim` produces a consistent
-    // value next frame even if `sim.now_ns` jumped (e.g. a
-    // topology reset to 0 or a rewind from 30s back to 5s).
-    clock.visual_offset = clock.visual_now - snapshot.0.now_ns as f64 * 1e-9;
-
-    let visual_now = clock.visual_now;
+    // Snap `visual_now` to match `sim_now` after rewind. The
+    // earlier behaviour rebased `visual_offset` so `visual_now`
+    // stayed put across the rewind (smooth scrub feel), but
+    // "rewind to t" must render the frame that was on screen at
+    // sim_now=t — which only holds when
+    // `visual_now = sim_now × 1e-9` (lockstep).
+    //
+    // Compute `visual_now` directly from the rewound snapshot
+    // here rather than reading `clock.visual_now`. Bevy doesn't
+    // order this system relative to `sync_visual_now_from_sim`,
+    // so `clock.visual_now` may still be the *pre*-rewind value
+    // this frame; reading it would feed every event into ingest
+    // with stale synth times. We also push the new value back
+    // into the clock so other systems running later this frame
+    // see the rewound visual_now.
     let sim_now_ns = snapshot.0.now_ns;
+    let visual_now = sim_now_ns as f64 * 1e-9;
+    clock.visual_offset = 0.0;
+    clock.visual_now = visual_now;
     // Each rewind strategy already produces the events it
     // believes the visual layer needs. We ingest them all here —
     // the visual strategy's own `gc_before` handles trimming
@@ -145,6 +157,80 @@ pub struct HideAll(pub bool);
 fn toggle_hide_all(keys: Res<ButtonInput<KeyCode>>, mut hide: ResMut<HideAll>) {
     if keys.just_pressed(KeyCode::KeyH) {
         hide.0 = !hide.0;
+    }
+}
+
+/// Debug: when `F12` is pressed, dump the currently-visible packet
+/// records to `/tmp/flow-rewind-dump-N.txt` (auto-incrementing).
+/// Capture once during forward play and once after a rewind to
+/// the same sim moment; `diff` the two files to see exactly
+/// which packets the rewind reproduced and which it didn't.
+fn dump_visible_packets(
+    keys: Res<ButtonInput<KeyCode>>,
+    timeline: Res<VisualTimelineRes>,
+    clock: Res<crate::bridge::SimClock>,
+    sim_snapshot: Res<crate::sim_driver::SimSnapshotRes>,
+    setting: Res<crate::hud::RewindStrategySetting>,
+) {
+    if !keys.just_pressed(KeyCode::F12) { return; }
+
+    use std::fmt::Write as _;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = format!("/tmp/flow-rewind-dump-{}.txt", n);
+
+    let visual_now = clock.visual_now;
+    let sim_now_ns = sim_snapshot.0.now_ns;
+    let mut buf = String::new();
+    let _ = writeln!(
+        buf,
+        "# rewind dump #{}\n\
+         strategy:    {}\n\
+         visual_now:  {:.9}\n\
+         visual_offset: {:.9}\n\
+         sim_now_ns:  {}\n\
+         sim_now_s:   {:.9}\n\
+         k:           {}\n\
+         paused:      {}\n\
+         rewind_epoch:{}\n\
+         ---",
+        n,
+        setting.0.label(),
+        visual_now,
+        clock.visual_offset,
+        sim_now_ns,
+        sim_now_ns as f64 * 1e-9,
+        timeline.k(),
+        clock.paused,
+        sim_snapshot.0.rewind_epoch,
+    );
+
+    // Sorted, stable lines. One line per visible packet —
+    // everything that determines its rendered position.
+    let mut rows: Vec<(u64, u64, u64, f64, f64, f32)> = timeline
+        .visible_at(visual_now)
+        .map(|(p, prog)| (p.from.0, p.to.0, p.packet_id.0, p.emit_real, p.arrive_real, prog))
+        .collect();
+    rows.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    let _ = writeln!(buf, "visible_count: {}", rows.len());
+    for (from, to, pid, emit, arr, prog) in &rows {
+        let _ = writeln!(
+            buf,
+            "from={:>3} to={:>3} pkt={:>5}  emit={:.9} arr={:.9} prog={:.6}",
+            from, to, pid, emit, arr, prog,
+        );
+    }
+
+    if let Err(e) = std::fs::write(&path, &buf) {
+        eprintln!("[F12 dump] write failed: {}", e);
+    } else {
+        eprintln!("[F12 dump] wrote {} ({} visible packets)", path, rows.len());
     }
 }
 
@@ -534,19 +620,26 @@ fn ingest_new_events(
     mut timeline: ResMut<VisualTimelineRes>,
     mut perf: ResMut<crate::perf::PhaseTimings>,
 ) {
-    let real_now = clock.visual_now;
+    let visual_now = clock.visual_now;
+    let sim_now_s = clock.visual_now - clock.visual_offset;
     crate::time_phase!(perf, "edges.ingest_new_events", {
     for ev in &evs.0 {
-        // State-change boundaries (`TimelineEventFired`, `UserSlotEdit`)
-        // used to wipe the future-queued visual backlog here. We
-        // dropped that on purpose: it made Replay's clamp visibly
-        // "reset" on every UI interaction, and the other strategies
-        // don't future-queue, so they had nothing to drop anyway.
-        // Now boundary events fall through to `ingest` like any
-        // other; the strategies' `parse_emit` filter rejects every
-        // non-`PacketEmitted` variant, so this is a no-op for them.
-        // In-flight visuals play out naturally; new sim events feed
-        // the strategy from the moment they arrive.
+        // Per-event `real_now` matches the lockstep mapping used
+        // on the rewind path
+        // (`synth_real_now = visual_now + (at_ns - sim_now) × 1e-9`).
+        // Without this, every event in a single frame's batch
+        // shares the same `real_now = visual_now`, producing
+        // `emit_real` values quantised to frame boundaries; rewind
+        // ingest is continuous (per-event), so forward and rewound
+        // states diverge at boundary-visible packets. With the
+        // per-event mapping the two paths produce identical
+        // `emit_real` for the same `(at_ns, source-state)`.
+        let real_now = match ev {
+            flow::Event::PacketEmitted { at_ns, .. } => {
+                visual_now + (*at_ns as f64 * 1e-9 - sim_now_s)
+            }
+            _ => visual_now,
+        };
         timeline.ingest(ev, real_now);
     }
     });

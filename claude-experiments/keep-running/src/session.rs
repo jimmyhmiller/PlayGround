@@ -1,40 +1,9 @@
 use anyhow::{Context, Result};
 use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
 use std::fs;
 use std::path::PathBuf;
 use std::time::SystemTime;
-
-// Thread-local overrides for test isolation
-thread_local! {
-    static SESSION_DIR_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-    static SOCKET_DIR_OVERRIDE: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-}
-
-/// Set custom session directory (for testing)
-pub fn set_session_dir(path: Option<PathBuf>) {
-    SESSION_DIR_OVERRIDE.with(|cell| {
-        *cell.borrow_mut() = path;
-    });
-}
-
-/// Set custom socket directory (for testing)
-pub fn set_socket_dir(path: Option<PathBuf>) {
-    SOCKET_DIR_OVERRIDE.with(|cell| {
-        *cell.borrow_mut() = path;
-    });
-}
-
-/// Get the current session directory override (for passing to daemon)
-pub fn get_session_dir_override() -> Option<PathBuf> {
-    SESSION_DIR_OVERRIDE.with(|cell| cell.borrow().clone())
-}
-
-/// Get the current socket directory override (for passing to daemon)
-pub fn get_socket_dir_override() -> Option<PathBuf> {
-    SOCKET_DIR_OVERRIDE.with(|cell| cell.borrow().clone())
-}
 
 const ADJECTIVES: &[&str] = &[
     "fuzzy", "quick", "lazy", "happy", "sleepy", "brave", "calm", "eager",
@@ -60,12 +29,6 @@ pub struct SessionInfo {
 
 /// Get the directory for session metadata
 pub fn sessions_dir() -> Result<PathBuf> {
-    // Check for thread-local override first
-    if let Some(override_path) = SESSION_DIR_OVERRIDE.with(|cell| cell.borrow().clone()) {
-        fs::create_dir_all(&override_path)?;
-        return Ok(override_path);
-    }
-
     // Check for environment variable override (for subprocess tests)
     if let Ok(env_path) = std::env::var("KEEP_RUNNING_SESSION_DIR") {
         let path = PathBuf::from(env_path);
@@ -83,12 +46,6 @@ pub fn sessions_dir() -> Result<PathBuf> {
 
 /// Get the directory for session sockets
 pub fn sockets_dir() -> Result<PathBuf> {
-    // Check for thread-local override first
-    if let Some(override_path) = SOCKET_DIR_OVERRIDE.with(|cell| cell.borrow().clone()) {
-        fs::create_dir_all(&override_path)?;
-        return Ok(override_path);
-    }
-
     // Check for environment variable override (for subprocess tests)
     if let Ok(env_path) = std::env::var("KEEP_RUNNING_SOCKET_DIR") {
         let path = PathBuf::from(env_path);

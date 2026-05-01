@@ -74,6 +74,15 @@ fn edge_lat_ceiling_ns(edge: &Edge) -> u64 {
 pub fn rewind_lookback_ns(sim: &Sim, k: f64) -> Time {
     let mut max_lat: u64 = 0;
     for edge in sim.edges.values() {
+        // Self-loops carry service-time / wake / dwell events
+        // that the visual strategy filters out (`from == to` is
+        // not a visible packet). Their `latency_ns` is often a
+        // runtime `Expr::Slot("service_ns")` etc., which my
+        // static pattern can't recognise — falling back to the
+        // 100ms ceiling and (with `k=200..400`) blowing the
+        // lookback up by 100×. Skip them entirely; their
+        // latencies don't bound any *visible* packet's window.
+        if edge.from == edge.to { continue; }
         let lat = edge_lat_ceiling_ns(edge);
         if lat > max_lat { max_lat = lat; }
     }
@@ -315,6 +324,14 @@ impl RewindStrategy for AnchorReplay {
         let lookback = rewind_lookback_ns(sim, visual_k);
         let anchor_ns = target_ns.saturating_sub(lookback);
         let snap = snap_anchor_replay(ring, target_ns, anchor_ns)?;
+        if std::env::var("FLOW_BEVY_REWIND_DEBUG").is_ok() {
+            eprintln!(
+                "[anchor-replay] target_ns={} k={:.1} lookback_ms={:.1} anchor_ns={} snap_ns={}",
+                target_ns, visual_k,
+                lookback as f64 / 1e6,
+                anchor_ns, snap.sim_now_ns,
+            );
+        }
         sim.restore_from(snap.sim);
 
         let in_flight_at_anchor: Vec<Scheduled> =

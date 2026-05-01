@@ -4,11 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bevy = { version = "0.18", default-features = false, features = [
-    "2d",
-    "x11",
-    "wayland",
-] }
+bevy = { version = "0.18", features = ["x11", "wayland"] }
 bevy_egui = "0.39"
 
 [[bin]]

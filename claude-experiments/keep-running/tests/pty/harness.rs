@@ -148,12 +148,7 @@ impl PtySession {
         loop {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    let exit = status
-                        .exit_code()
-                        .try_into()
-                        .ok()
-                        .and_then(|c: i32| Some(c))
-                        .unwrap_or(0);
+                    let exit: i32 = status.exit_code().try_into().unwrap_or(0);
                     // Convert portable_pty::ExitStatus -> std::process::ExitStatus
                     // by faking one through libc. Easier: just return a synthetic.
                     return Ok(synth_exit_status(exit));

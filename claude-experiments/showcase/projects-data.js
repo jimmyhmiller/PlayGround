@@ -22,7 +22,7 @@ window.PROJECTS = [
     repo: "github.com/_/beagle",
     bg: "#1a0e0a", fg: "#f0d8c0", accent: "#fb923c", theme: "dark",
     kind: "code+arch",
-    blurb: "No VM, no bytecode, no JIT warm-up. By far my longest running most complete project. All compilation and code generation are dependency free custom backends for x86 and arm. The goal is to be a language with fantastic live coding support allowing for humans or ai to build full applications without ever restarting a process.",
+    blurb: "No VM, no bytecode, no JIT warm-up. By far my longest-running, <a href=\"https://github.com/jimmyhmiller/beagle\" target=\"_blank\" rel=\"noreferrer\">most complete project</a>. All compilation and code generation use dependency-free custom backends for x86 and ARM. The goal is to be a language with fantastic live coding support allowing for humans or AI to build full applications without ever restarting a process.",
     code: {
       lang: "beagle",
       filename: "examples/echo_server.bg",
@@ -50,10 +50,10 @@ window.PROJECTS = [
     arch: {
       title: "Feature Rich Language",
       items: [
-        { label: "Algebraic effects", body: "Built-in algebraic effects make it easy to control and test io" },
+        { label: "Algebraic effects", body: "Built-in algebraic effects make it easy to control and test IO" },
         { label: "Live coding", body: "Redefine functions, structs, and enums while your code is running" },
         { label: "Async without function coloring", body: "Delimited continuations give us the power to have transparent asynchrony" },
-        { label: "Compiled", body: "no VM, no bytecode — direct machine code" },
+        { label: "Compiled", body: "No VM, no bytecode — direct machine code" },
       ],
     },
     layout: "wide",
@@ -69,7 +69,7 @@ window.PROJECTS = [
     repo: "github.com/_/keep-running",
     bg: "#0a1410", fg: "#d4e4d8", accent: "#22c55e", theme: "dark",
     kind: "terminal",
-    blurb: "Run a long process, detach, let it keep going, reattach later from anywhere. Small utility, but I've found it incredibly useful",
+    blurb: "Run a long process, detach, let it keep going, reattach later from anywhere. Small utility, but I've found it incredibly useful.",
     terminal: [
       { prompt: "$", cmd: "keep-running run -n build -- cargo build --release" },
       { out: "→ session 'build' started · pid 84219" },
@@ -90,7 +90,7 @@ window.PROJECTS = [
   },
   {
     id: "bevy-whiteboard",
-    title: "bevy-whiteboard",
+    title: "flow-whiteboard",
     tagline: "The diagram on the whiteboard, but it actually runs",
     year: "2025",
     role: "solo",
@@ -101,7 +101,7 @@ window.PROJECTS = [
     kind: "image",
     image: "assets/whiteboard.png",
     imageCaption: "Conway's Game of Life running as 9 self-ticking nodes — packets in flight, no global clock.",
-    blurb: "I've always wanted to be able to draw on a whiteboard and then truly simulate the system. This proof-of-concept does exactly that. Under the hood is a simulation driven by a rules-based language. Enabling running simulations faster than real time or rewinding through time. It is quickly approach something powerful and flexible enough to model real systems.",
+    blurb: "I've always wanted to be able to draw on a whiteboard and then truly simulate the system. This proof-of-concept does exactly that. Under the hood is a simulation driven by a rules-based language, enabling running simulations faster than real time or rewinding through time. It is quickly approaching something powerful and flexible enough to model real systems.",
     layout: "wide",
   },
   {
@@ -116,7 +116,7 @@ window.PROJECTS = [
     bg: "#0e0d11", fg: "#e8e6f0", accent: "#a78bfa", theme: "dark",
     kind: "image-phone",
     image: "assets/ease.png",
-    blurb: "Ease is an incredibly simple, but handy progress tracker I've made for myself. Rather than track exact time I work on projects, it lets me fuzzily measure the amount of work I've put in",
+    blurb: "Ease is an incredibly simple but handy progress tracker I've made for myself. Rather than track exact time I work on projects, it lets me fuzzily measure the amount of work I've put in.",
     layout: "narrow",
   },
   {
@@ -132,7 +132,7 @@ window.PROJECTS = [
     kind: "video",
     video: "https://jimmyhmiller.com/images/turbopack-visualizer.mp4",
     videoPoster: "assets/turbopack-poster.jpg",
-    blurb: "I have aphantasia. From my very first job I realized if I want to fully understand a codebase, I needed to build something that visualizes how it works and let's me interact with it. This is now how I learn new codebases. <a href=\"https://jimmyhmiller.com/learn-codebase-visualizer\" target=\"_blank\" rel=\"noreferrer\">I wrote a blog post</a> where I walk through how I do this using turbopack as my case study. Below is the video of the quick Vc visualizer and stepping debug that was the end result of the endeavor.",
+    blurb: "I have aphantasia. From my very first job, I realized if I wanted to fully understand a codebase, I needed to build something that visualizes how it works and lets me interact with it. This is now how I learn new codebases. <a href=\"https://jimmyhmiller.com/learn-codebase-visualizer\" target=\"_blank\" rel=\"noreferrer\">I wrote a blog post</a> where I walk through how I do this using turbopack as my case study. Below is the video of the quick Vc visualizer and stepping debug that was the end result of the endeavor.",
     layout: "wide",
   },
   {
@@ -146,7 +146,7 @@ window.PROJECTS = [
     repo: "github.com/_/simd-lang",
     bg: "#0a0e1a", fg: "#dde7f5", accent: "#7fd1ff", theme: "dark",
     kind: "code",
-    blurb: "I've always wanted to explore what a language that took simd as the primitive would look like. This was a fun exploration. I was able to with 53 lines of a dsl (simplified below by cutting out unicode handling) get something that does the stage1 parsing of json about .75x the speed of simd json. The whole language compiles using mlir taking full advantage of its vector dialect. In many ways this is a learning project for me to start better understanding simd approaches.",
+    blurb: "I've always wanted to explore what a language that took SIMD as the primitive would look like. This was a fun exploration. With 53 lines of a DSL (simplified below by cutting out Unicode handling), I got something that does the stage1 parsing of JSON at about .75x the speed of simdjson. The whole language compiles using MLIR, taking full advantage of its vector dialect. In many ways this is a learning project for me to start better understanding SIMD approaches.",
     code: {
       lang: "simd",
       filename: "examples/json_stage1.simd",
@@ -192,10 +192,10 @@ window.PROJECTS = [
     repo: "github.com/_/tensor-lang",
     bg: "#f7f4ee", fg: "#1c1a16", accent: "#65a30d", theme: "light",
     kind: "video+code+table",
-    video: "assets/training.mov",
+    video: "assets/training.mp4",
     videoPoster: "assets/training-poster.jpg",
     videoCaption: "Live tensor visualizer — every weight, activation, gradient, and loss curve updating as the model trains.",
-    blurb: "I've become increasingly interested in how llm compilers do their optimization. But also in deeply understanding the transformer architecture. This is an on going project where I have a simple dsl that can express simple models like gpt2. I think take this and compile it into arm machine code, wasm (scalar), wasm (simd), and wgpu. As part of this I tried a tiny model to learn some jazz chord progressions and made a UI where you can watch it train live and inspect every tensor. All of this is powered by my compilers and dsl.",
+    blurb: "I've become increasingly interested in how LLM compilers do their optimization. But also in deeply understanding the transformer architecture. This is an ongoing project where I have a simple DSL that can express simple models like GPT-2. I then take this and compile it into ARM machine code, WASM (scalar), WASM (SIMD), and WGPU. As part of this I trained a tiny model on some jazz chord progressions and made a UI where you can watch it train live and inspect every tensor. All of this is powered by my compilers and DSL.",
     code: {
       lang: "tensor",
       filename: "examples/gpt2.tl — the attention block",
@@ -246,7 +246,7 @@ window.PROJECTS = [
     repo: "github.com/_/datalog-db",
     bg: "#0e0f1a", fg: "#dfe2f5", accent: "#a78bfa", theme: "dark",
     kind: "code",
-    blurb: "I've grown to love datalog. It is a fascinating way to look at databases and truly gives some amazing expressiveness. This is only a POC right now, but the goal is the build a proper datalog data base on top of a key value store. But I don't want users to need to think about the exact details of the underlying store and instead work in a much higher level fashion. To that end I've added something I always want in a db, algebraic data types.",
+    blurb: "I've grown to love datalog. It is a fascinating way to look at databases and truly gives some amazing expressiveness. This is only a POC right now, but the goal is to build a proper Datalog database on top of a key-value store. But I don't want users to need to think about the exact details of the underlying store and instead work in a much higher-level fashion. To that end, I've added something I always want in a DB: algebraic data types.",
     code: {
       lang: "datalog",
       filename: "repl session",

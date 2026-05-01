@@ -726,18 +726,3 @@ pub fn start_daemon(name: String, command: Vec<String>) -> Result<()> {
     Ok(())
 }
 
-/// Run the daemon in foreground with configurable paths (for testing)
-/// This runs in the current process without daemonizing
-pub fn run_daemon_foreground(
-    name: String,
-    command: Vec<String>,
-    session_dir: std::path::PathBuf,
-    socket_dir: std::path::PathBuf,
-) -> Result<()> {
-    // Set the directory overrides for this thread
-    session::set_session_dir(Some(session_dir));
-    session::set_socket_dir(Some(socket_dir));
-
-    // Run the daemon (will use the overridden paths)
-    run_daemon(name, command)
-}

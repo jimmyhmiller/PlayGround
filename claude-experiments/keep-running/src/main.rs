@@ -192,7 +192,7 @@ fn cmd_list() -> Result<()> {
 
     let now = session::timestamp();
 
-    println!("{:<20} {:<8} {:<8} {}", "NAME", "PID", "UPTIME", "COMMAND");
+    println!("{:<20} {:<8} {:<8} COMMAND", "NAME", "PID", "UPTIME");
 
     for s in sessions {
         let age = humanize_age(now.saturating_sub(s.created_at));
@@ -223,6 +223,29 @@ fn cmd_kill(session_query: &str) -> Result<()> {
     session::remove_session(&session.name)?;
 
     status(&format!("killed '{}'", session.name));
+
+    Ok(())
+}
+
+/// Start a daemon without attaching (useful for scripts/tests)
+fn cmd_start(name: Option<String>, command: Vec<String>) -> Result<()> {
+    if command.is_empty() {
+        anyhow::bail!("no command specified");
+    }
+
+    resolve_program(&command[0])?;
+
+    let session_name = name.unwrap_or_else(|| {
+        session::generate_unique_name().unwrap_or_else(|_| session::generate_name())
+    });
+
+    if session::load_session(&session_name)?.is_some() {
+        anyhow::bail!("session '{}' already exists", session_name);
+    }
+
+    daemon::start_daemon(session_name.clone(), command)?;
+
+    println!("{}", session_name);
 
     Ok(())
 }
@@ -351,27 +374,4 @@ mod tests {
         assert!(resolved.is_absolute(), "got: {resolved:?}");
         assert_eq!(resolved.file_name().and_then(|s| s.to_str()), Some("sh"));
     }
-}
-
-/// Start a daemon without attaching (useful for scripts/tests)
-fn cmd_start(name: Option<String>, command: Vec<String>) -> Result<()> {
-    if command.is_empty() {
-        anyhow::bail!("no command specified");
-    }
-
-    resolve_program(&command[0])?;
-
-    let session_name = name.unwrap_or_else(|| {
-        session::generate_unique_name().unwrap_or_else(|_| session::generate_name())
-    });
-
-    if session::load_session(&session_name)?.is_some() {
-        anyhow::bail!("session '{}' already exists", session_name);
-    }
-
-    daemon::start_daemon(session_name.clone(), command)?;
-
-    println!("{}", session_name);
-
-    Ok(())
 }
