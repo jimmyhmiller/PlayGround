@@ -275,6 +275,9 @@ impl TestClient {
                                 return Ok(());
                             }
                         }
+                        DaemonMessage::ReplayStart | DaemonMessage::ReplayEnd => {
+                            // Replay framing — content arrives as Output messages.
+                        }
                     }
                 }
                 None => {

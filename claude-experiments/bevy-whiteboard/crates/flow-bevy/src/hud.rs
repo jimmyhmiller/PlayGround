@@ -16,7 +16,7 @@ use crate::sim_driver::{SimCommand, SimDriverRes, SimSnapshotRes};
 pub struct HudPlugin;
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
-        let initial_kind = crate::rewind_strategy::initial_strategy_kind();
+        let initial_kind = crate::rewind::initial_strategy_kind();
         app.init_resource::<PendingRewindTarget>()
             .insert_resource(RewindStrategySetting(initial_kind))
             .add_systems(Startup, (spawn_hud, spawn_vis_k_popup, spawn_rewind_popup))
@@ -64,24 +64,24 @@ impl Plugin for HudPlugin {
 // ────────────────────────────────────────────────────────────
 
 #[derive(Component)]
-struct HudPlayBtn;
+pub struct HudPlayBtn;
 
 #[derive(Component)]
-struct HudStepBtn;
+pub struct HudStepBtn;
 
 /// Rewind to t=0 — uses the sticky anchor in the snapshot ring.
 #[derive(Component)]
-struct HudRewindZeroBtn;
+pub struct HudRewindZeroBtn;
 
 /// Rewind one capture marker back from current sim time.
 #[derive(Component)]
-struct HudRewindStepBtn;
+pub struct HudRewindStepBtn;
 
 /// Live setting for the rewind strategy. Click cycles it; the
 /// `push_rewind_strategy_to_driver` system mirrors changes onto the
 /// sim driver so the next rewind uses the new strategy.
 #[derive(Resource, Clone, Copy, Debug)]
-pub struct RewindStrategySetting(pub crate::rewind_strategy::RewindStrategyKind);
+pub struct RewindStrategySetting(pub crate::rewind::RewindStrategyKind);
 
 /// Marker on the cell wrapping the rewind-strategy text. Clicking
 /// the cell rotates through `STRATEGY_CYCLE`.
@@ -199,8 +199,9 @@ fn spawn_hud(mut commands: Commands, theme: Res<Theme>, clock: Res<SimClock>) {
             ));
         });
 
-        // Rewind-strategy cycler: click rotates between FullLog,
-        // PostSnap, and InFlightOnly. Same visual idiom as `vis k`.
+        // Rewind-strategy cycler: click rotates through the
+        // available strategies (anchor-replay default, then the
+        // legacy three for A/B testing).
         bar.spawn((
             Button,
             Node {
@@ -575,7 +576,7 @@ fn push_vis_k_slider(
 struct RewindPopup;
 
 #[derive(Component)]
-struct RewindSlider;
+pub struct RewindSlider;
 
 /// Bottom-aligned popup with a horizontal slider whose range is
 /// `[0, max(observed_now_ns, last_marker_ns)]`. The slider value is
@@ -707,9 +708,7 @@ fn sync_rewind_slider_max(
 // Rewind-strategy cell
 // ────────────────────────────────────────────────────────────
 
-/// Cycle through `RewindStrategyKind` variants on click. Mutates
-/// the [`RewindStrategySetting`] resource; a separate system
-/// observes the change and pushes it onto the driver.
+/// Cycle through `RewindStrategyKind` variants on click.
 fn handle_rewind_strategy_click(
     cells: Query<&Interaction, (Changed<Interaction>, With<HudRewindStrategyCell>)>,
     mut setting: ResMut<RewindStrategySetting>,
@@ -722,9 +721,7 @@ fn handle_rewind_strategy_click(
 }
 
 /// Mirror the live `RewindStrategySetting` onto the driver. Pushes
-/// only on resource change (Bevy's `Res::is_changed` is true on the
-/// frame the setting flipped) so we don't spam messages every
-/// frame.
+/// only on resource change so we don't spam messages every frame.
 fn push_rewind_strategy_to_driver(
     setting: Res<RewindStrategySetting>,
     mut driver: ResMut<SimDriverRes>,
@@ -733,9 +730,7 @@ fn push_rewind_strategy_to_driver(
     driver.0.set_rewind_strategy(setting.0);
 }
 
-/// Keep the readout text in sync with the live setting. Always
-/// shows `rwd: <label>`; the label maps to a short, fixed string
-/// per strategy so the cell width is stable.
+/// Keep the readout text in sync with the live setting.
 fn update_rewind_strategy_readout(
     setting: Res<RewindStrategySetting>,
     mut q: Query<&mut Text, With<HudRewindStrategyText>>,

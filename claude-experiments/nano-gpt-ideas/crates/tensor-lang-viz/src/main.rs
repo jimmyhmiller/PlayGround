@@ -45,12 +45,143 @@ impl ColorVertex {
     }
 }
 
+#[allow(dead_code)]
 fn viridis(t: f32) -> [f32; 4] {
     let t = t.clamp(0.0, 1.0);
     let r = (0.267 + t * (0.993 - 0.267 + t * (-1.02 + t * 0.76))).clamp(0.0, 1.0);
     let g = (0.004 + t * (1.53 + t * (-1.74 + t * 0.76))).clamp(0.0, 1.0);
     let b = (0.329 + t * (1.16 + t * (-2.24 + t * 1.15))).clamp(0.0, 1.0);
     [r, g, b, 1.0]
+}
+
+/// Magma colormap — warmer, higher-contrast alternative to viridis.
+#[allow(dead_code)]
+fn magma(t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    let r = (-0.002 + t * (0.55 + t * (3.50 + t * (-5.40 + t * 2.34)))).clamp(0.0, 1.0);
+    let g = (0.000 + t * (-0.05 + t * (1.36 + t * (-1.75 + t * 1.34)))).clamp(0.0, 1.0);
+    let b = (-0.013 + t * (2.46 + t * (-5.24 + t * (5.16 + t * -1.69)))).clamp(0.0, 1.0);
+    [r, g, b, 1.0]
+}
+
+/// Linear interp between two RGB colors.
+#[inline]
+fn mix3(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    [
+        a[0] + (b[0] - a[0]) * t,
+        a[1] + (b[1] - a[1]) * t,
+        a[2] + (b[2] - a[2]) * t,
+    ]
+}
+
+/// Diverging colormap (teal → cream → rose). t in [0,1] with 0.5 = zero.
+/// Use for tensor data that spans negative→positive.
+fn diverging(t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    // Stops: deep teal, soft teal, cream, warm peach, deep rose
+    let c0 = [0.04, 0.22, 0.32];   // deep teal
+    let c1 = [0.20, 0.55, 0.62];   // soft teal
+    let c2 = [0.95, 0.92, 0.85];   // cream
+    let c3 = [0.92, 0.62, 0.45];   // warm peach
+    let c4 = [0.72, 0.22, 0.36];   // deep rose
+    let rgb = if t < 0.25 {
+        mix3(c0, c1, t / 0.25)
+    } else if t < 0.5 {
+        mix3(c1, c2, (t - 0.25) / 0.25)
+    } else if t < 0.75 {
+        mix3(c2, c3, (t - 0.5) / 0.25)
+    } else {
+        mix3(c3, c4, (t - 0.75) / 0.25)
+    };
+    [rgb[0], rgb[1], rgb[2], 1.0]
+}
+
+/// Map a signed tensor value to a diverging color, zero-centered.
+/// `abs_max` should be the symmetric range; v=0 maps to mid (cream).
+fn diverging_signed(v: f32, abs_max: f32) -> [f32; 4] {
+    let m = abs_max.max(1e-6);
+    let t = 0.5 + 0.5 * (v / m).clamp(-1.0, 1.0);
+    diverging(t)
+}
+
+/// Sequential colormap (deep navy → teal → warm sand). For 0..1 data
+/// like attention weights. Tasteful, no purple dominant.
+fn sequential(t: f32) -> [f32; 4] {
+    let t = t.clamp(0.0, 1.0);
+    let c0 = [0.05, 0.08, 0.18];   // deep navy
+    let c1 = [0.13, 0.32, 0.48];   // ocean
+    let c2 = [0.22, 0.62, 0.66];   // teal
+    let c3 = [0.65, 0.78, 0.55];   // sage
+    let c4 = [0.97, 0.86, 0.55];   // warm sand
+    let rgb = if t < 0.25 {
+        mix3(c0, c1, t / 0.25)
+    } else if t < 0.5 {
+        mix3(c1, c2, (t - 0.25) / 0.25)
+    } else if t < 0.75 {
+        mix3(c2, c3, (t - 0.5) / 0.25)
+    } else {
+        mix3(c3, c4, (t - 0.75) / 0.25)
+    };
+    [rgb[0], rgb[1], rgb[2], 1.0]
+}
+
+// ─── Palette ──────────────────────────────────────────────────────────────
+// Cohesive midnight-slate palette with cool primary + warm accents.
+mod palette {
+    use glyphon::Color as GC;
+
+    // Backgrounds
+    pub const CLEAR:        wgpu::Color = wgpu::Color { r: 0.043, g: 0.055, b: 0.082, a: 1.0 };
+    pub const PANEL:        [f32; 4] = [0.082, 0.094, 0.122, 1.0];
+    pub const PANEL_RAISED: [f32; 4] = [0.110, 0.125, 0.158, 1.0];
+    pub const ROW_HOVER:    [f32; 4] = [0.165, 0.190, 0.270, 1.0];
+    pub const TOKEN_HL:     [f32; 4] = [0.220, 0.245, 0.330, 1.0];
+
+    // Borders / dividers
+    pub const BORDER_SOFT:  [f32; 4] = [0.230, 0.250, 0.330, 0.50];
+    pub const BORDER_FOCUS: [f32; 4] = [0.520, 0.660, 0.980, 0.85];
+    pub const ZERO_LINE:    [f32; 4] = [0.500, 0.540, 0.620, 0.45];
+
+    // Text (glyphon)
+    pub const TEXT_PRIMARY:   GC = GC::rgb(232, 234, 240);
+    pub const TEXT_SECONDARY: GC = GC::rgb(150, 160, 178);
+    pub const TEXT_MUTED:     GC = GC::rgb(110, 120, 140);
+    pub const TEXT_TITLE:     GC = GC::rgb(245, 197, 96);   // amber
+    pub const TEXT_OK:        GC = GC::rgb( 94, 218, 199);  // teal
+    pub const TEXT_BAD:       GC = GC::rgb(238, 119, 138);  // rose
+    pub const TEXT_ACCENT:    GC = GC::rgb(168, 159, 240);  // lavender (op symbol)
+    pub const TEXT_FORWARD:   GC = GC::rgb(122, 178, 240);  // sky
+    pub const TEXT_BACKWARD:  GC = GC::rgb(238, 145, 110);  // peach
+
+    // Vertex (RGBA)
+    pub const ACCENT_LOSS:  [f32; 4] = [0.32, 0.84, 0.78, 1.0];  // teal line
+    pub const BAR_DEFAULT:  [f32; 4] = [0.40, 0.55, 0.78, 0.85]; // muted blue
+    pub const BAR_ACTUAL:   [f32; 4] = [0.37, 0.85, 0.69, 1.0];  // mint
+    pub const BAR_PRED:     [f32; 4] = [0.93, 0.47, 0.55, 1.0];  // soft rose
+    pub const BAR_POS:      [f32; 4] = [0.40, 0.74, 0.92, 1.0];  // sky for positive values
+    pub const BAR_NEG:      [f32; 4] = [0.93, 0.47, 0.55, 1.0];  // rose for negative values
+
+    // Categorical palette for scatter (10 hues, harmonious)
+    pub const CAT10: [[f32; 4]; 10] = [
+        [0.40, 0.62, 0.92, 1.0], // sky
+        [0.36, 0.81, 0.66, 1.0], // mint
+        [0.96, 0.70, 0.34, 1.0], // amber
+        [0.93, 0.47, 0.55, 1.0], // rose
+        [0.65, 0.55, 0.92, 1.0], // lavender
+        [0.40, 0.81, 0.86, 1.0], // turquoise
+        [0.93, 0.61, 0.35, 1.0], // peach
+        [0.62, 0.80, 0.45, 1.0], // sage
+        [0.85, 0.50, 0.78, 1.0], // pink
+        [0.55, 0.65, 0.78, 1.0], // steel
+    ];
+
+    // DAG node header colors — same family, gentler saturation
+    pub const DAG_INPUT:     [f32; 4] = [0.40, 0.62, 0.86, 1.0];
+    pub const DAG_EMBED:     [f32; 4] = [0.36, 0.71, 0.85, 1.0];
+    pub const DAG_NORM:      [f32; 4] = [0.36, 0.78, 0.69, 1.0];
+    pub const DAG_ATTENTION: [f32; 4] = [0.62, 0.50, 0.88, 1.0];
+    pub const DAG_MLP:       [f32; 4] = [0.95, 0.69, 0.42, 1.0];
+    pub const DAG_OUTPUT:    [f32; 4] = [0.93, 0.47, 0.55, 1.0];
 }
 
 fn px_to_ndc(px_x: f32, px_y: f32, win_w: f32, win_h: f32) -> (f32, f32) {
@@ -170,12 +301,12 @@ const SUB_NODE_W: f32 = 160.0;
 const SUB_NODE_H: f32 = 160.0;
 
 fn build_dag_graph() -> DagGraph {
-    let ci = [0.35, 0.55, 0.75, 1.0];
-    let ce = [0.25, 0.50, 0.80, 1.0];
-    let cn = [0.30, 0.65, 0.60, 1.0];
-    let ca = [0.55, 0.35, 0.75, 1.0];
-    let cm = [0.80, 0.55, 0.25, 1.0];
-    let co = [0.75, 0.30, 0.30, 1.0];
+    let ci = palette::DAG_INPUT;
+    let ce = palette::DAG_EMBED;
+    let cn = palette::DAG_NORM;
+    let ca = palette::DAG_ATTENTION;
+    let cm = palette::DAG_MLP;
+    let co = palette::DAG_OUTPUT;
 
     let rm = 250.0; let rt = 30.0; let rb = 470.0; let sp = 400.0;
 
@@ -404,8 +535,17 @@ fn render_mini_heatmap(
     if flat.is_empty() || pw < 2.0 || ph < 2.0 { return; }
     let fmin = flat.iter().copied().fold(f32::MAX, f32::min);
     let fmax = flat.iter().copied().fold(f32::MIN, f32::max);
-    let frange = (fmax - fmin).max(0.001);
     let shape = val.shape();
+
+    // Pick colormap: diverging+zero-centered if data spans both signs,
+    // sequential otherwise. Removes the all-purple look from viridis.
+    let signed = fmin < -1e-6 && fmax > 1e-6;
+    let abs_max = fmin.abs().max(fmax.abs()).max(1e-6);
+    let frange = (fmax - fmin).max(1e-6);
+    let color_at = |v: f32| -> [f32; 4] {
+        if signed { diverging_signed(v, abs_max) }
+        else { sequential((v - fmin) / frange) }
+    };
 
     if shape.len() >= 2 {
         let (rows, cols, data) = collapse_to_2d(val);
@@ -416,13 +556,10 @@ fn render_mini_heatmap(
         // Fit within bounding box preserving aspect ratio
         let aspect = max_c as f32 / max_r as f32;
         let (draw_w, draw_h) = if pw / ph > aspect {
-            // Box is wider than tensor — constrain by height
             (ph * aspect, ph)
         } else {
-            // Box is taller than tensor — constrain by width
             (pw, pw / aspect)
         };
-        // Center within the bounding box
         let draw_x = px + (pw - draw_w) * 0.5;
         let draw_y = py + (ph - draw_h) * 0.5;
 
@@ -431,9 +568,8 @@ fn render_mini_heatmap(
         for r in 0..max_r {
             for c in 0..max_c {
                 let v = data[r * cols + c];
-                let t = (v - fmin) / frange;
                 quad_px(vertices, draw_x + c as f32 * cell_w, draw_y + r as f32 * cell_h,
-                    cell_w, cell_h, win_w, win_h, viridis(t));
+                    cell_w, cell_h, win_w, win_h, color_at(v));
             }
         }
     } else {
@@ -441,10 +577,11 @@ fn render_mini_heatmap(
         let n = flat.len().min(128);
         let bar_w = pw / n as f32;
         for i in 0..n {
-            let t = (flat[i] - fmin) / frange;
+            let v = flat[i];
+            let t = (v - fmin) / frange;
             let h = t * ph;
             quad_px(vertices, px + i as f32 * bar_w, py + ph - h,
-                bar_w.max(1.0), h, win_w, win_h, viridis(t));
+                bar_w.max(1.0), h, win_w, win_h, color_at(v));
         }
     }
 }
@@ -607,8 +744,8 @@ impl App {
         texts: &mut Vec<TextEntry>,
         win_w: f32, win_h: f32,
     ) {
-        let tw = GlyphonColor::rgb(220, 220, 220);
-        let td = GlyphonColor::rgb(150, 150, 165);
+        let tw = palette::TEXT_PRIMARY;
+        let td = palette::TEXT_SECONDARY;
 
         // Background
         quad_px(vertices, 0.0, 0.0, win_w, win_h, win_w, win_h, [0.08, 0.08, 0.11, 1.0]);
@@ -775,11 +912,12 @@ impl App {
                     if !data.is_empty() && (rows > 1 || cols > 1) {
                         let fmin = data.iter().copied().fold(f32::MAX, f32::min);
                         let fmax = data.iter().copied().fold(f32::MIN, f32::max);
-                        let frange = (fmax - fmin).max(0.001);
+                        let signed = fmin < -1e-6 && fmax > 1e-6;
+                        let abs_max = fmin.abs().max(fmax.abs()).max(1e-6);
+                        let frange = (fmax - fmin).max(1e-6);
 
                         let max_r = rows.min(64);
                         let max_c = cols.min(128);
-                        // Fit with correct aspect ratio
                         let aspect = max_c as f32 / max_r as f32;
                         let (dw, dh) = if hw / hh > aspect {
                             (hh * aspect, hh)
@@ -793,9 +931,13 @@ impl App {
                         for r in 0..max_r {
                             for c in 0..max_c {
                                 let v = data[r * cols + c];
-                                let t = (v - fmin) / frange;
+                                let color = if signed {
+                                    diverging_signed(v, abs_max)
+                                } else {
+                                    sequential((v - fmin) / frange)
+                                };
                                 quad_px(vertices, dx + c as f32 * cw, dy + r as f32 * ch,
-                                    cw, ch, win_w, win_h, viridis(t));
+                                    cw, ch, win_w, win_h, color);
                             }
                         }
                     }
@@ -830,9 +972,9 @@ impl App {
         texts: &mut Vec<TextEntry>,
         win_w: f32, win_h: f32,
     ) {
-        let tw = GlyphonColor::rgb(230, 230, 230);
-        let td = GlyphonColor::rgb(150, 150, 165);
-        let to = GlyphonColor::rgb(200, 180, 130);
+        let tw = palette::TEXT_PRIMARY;
+        let td = palette::TEXT_SECONDARY;
+        let to = palette::TEXT_ACCENT;
         let z = self.dag_zoom;
         let (offx, offy) = self.dag_offset;
         let time = self.start_time.elapsed().as_secs_f32();
@@ -921,10 +1063,10 @@ impl App {
             }
 
             // Body + header + border
-            let bg = if is_sel { [0.18, 0.18, 0.24, 1.0] } else { [0.13, 0.13, 0.17, 1.0] };
+            let bg = if is_sel { palette::PANEL_RAISED } else { palette::PANEL };
             quad_px(vertices, bx, by, cur_w, cur_h, win_w, win_h, bg);
             quad_px(vertices, bx, by, cur_w, header_h, win_w, win_h, node.header_color);
-            let bc = if is_sel { [0.6, 0.7, 1.0, 0.9] } else { [0.25, 0.25, 0.35, 0.5] };
+            let bc = if is_sel { palette::BORDER_FOCUS } else { palette::BORDER_SOFT };
             for &(rx,ry,rw,rh) in &[(bx,by,cur_w,1.5),(bx,by+cur_h-1.5,cur_w,1.5),(bx,by,1.5,cur_h),(bx+cur_w-1.5,by,1.5,cur_h)] {
                 quad_px(vertices, rx, ry, rw, rh, win_w, win_h, bc);
             }
@@ -1180,11 +1322,11 @@ impl App {
         m: f32, left_w: f32, right_x: f32, right_w: f32,
         bot_y: f32, bot_h: f32, win_w: f32, win_h: f32,
     ) {
-        let tw = GlyphonColor::rgb(220, 220, 220);
-        let tg = GlyphonColor::rgb(100, 220, 120);
-        let ty = GlyphonColor::rgb(220, 200, 80);
-        let td = GlyphonColor::rgb(140, 140, 140);
-        let tr = GlyphonColor::rgb(230, 100, 80);
+        let tw = palette::TEXT_PRIMARY;
+        let _tg = palette::TEXT_OK;
+        let ty = palette::TEXT_TITLE;
+        let td = palette::TEXT_SECONDARY;
+        let _tr = palette::TEXT_BAD;
 
         let graph = &runner.inf_graph;
         let logits_idx = runner.inf_logits_idx;
@@ -1211,16 +1353,16 @@ impl App {
 
             // Color by section
             let section_color = if node_idx <= logits_idx {
-                GlyphonColor::rgb(100, 160, 255)  // blue = forward
+                palette::TEXT_FORWARD
             } else {
-                GlyphonColor::rgb(255, 120, 80)   // red = loss+backward
+                palette::TEXT_BACKWARD
             };
 
             // Highlight selected row
             if is_selected {
                 quad_px(vertices, list_x - 4.0, y - 2.0,
                     left_w - 2.0 * m - 12.0, row_h,
-                    win_w, win_h, [0.2, 0.2, 0.3, 1.0]);
+                    win_w, win_h, palette::ROW_HOVER);
             }
 
             let desc = model::describe_node(graph, node_idx);
@@ -1241,8 +1383,8 @@ impl App {
             let sb_h = bot_h - 30.0;
             let thumb_h = (visible_rows as f32 / n_nodes as f32 * sb_h).max(10.0);
             let thumb_y = list_top + (graph_scroll as f32 / n_nodes as f32) * sb_h;
-            quad_px(vertices, sb_x, list_top, 4.0, sb_h, win_w, win_h, [0.2, 0.2, 0.2, 1.0]);
-            quad_px(vertices, sb_x, thumb_y, 4.0, thumb_h, win_w, win_h, [0.5, 0.5, 0.5, 1.0]);
+            quad_px(vertices, sb_x, list_top, 4.0, sb_h, win_w, win_h, palette::PANEL_RAISED);
+            quad_px(vertices, sb_x, thumb_y, 4.0, thumb_h, win_w, win_h, palette::BORDER_SOFT);
         }
 
         // ── Right panel: Value inspector ──
@@ -1294,7 +1436,7 @@ impl App {
                 for i in 0..n {
                     let v = flat[i];
                     let h = (v / flat_abs_max) * (viz_h * 0.45);
-                    let color = if v >= 0.0 { [0.3, 0.7, 0.9, 1.0] } else { [0.9, 0.4, 0.3, 1.0] };
+                    let color = if v >= 0.0 { palette::BAR_POS } else { palette::BAR_NEG };
                     if h >= 0.0 {
                         quad_px(vertices, insp_x + i as f32 * bar_w + 1.0, mid_y - h,
                             bar_w - 2.0, h, win_w, win_h, color);
@@ -1304,7 +1446,7 @@ impl App {
                     }
                 }
                 // Zero line
-                quad_px(vertices, insp_x, mid_y, viz_w, 1.0, win_w, win_h, [0.5, 0.5, 0.5, 0.5]);
+                quad_px(vertices, insp_x, mid_y, viz_w, 1.0, win_w, win_h, palette::ZERO_LINE);
             } else {
                 // 2D+ — heatmap (use first 2D slice)
                 // Collapse to 2D: take first element of all leading dims
@@ -1313,10 +1455,12 @@ impl App {
                     let cell_w = (viz_w / cols as f32).min(viz_h / rows as f32);
                     let cell_h = cell_w;
 
-                    // Find range for colormap
+                    // Find range for colormap (zero-centered if signed)
                     let dmin = data.iter().copied().fold(f32::MAX, f32::min);
                     let dmax = data.iter().copied().fold(f32::MIN, f32::max);
-                    let drange = (dmax - dmin).max(0.001);
+                    let signed = dmin < -1e-6 && dmax > 1e-6;
+                    let abs_max = dmin.abs().max(dmax.abs()).max(1e-6);
+                    let drange = (dmax - dmin).max(1e-6);
 
                     let max_r = ((viz_h / cell_h) as usize).min(rows);
                     let max_c = ((viz_w / cell_w) as usize).min(cols);
@@ -1324,12 +1468,16 @@ impl App {
                     for r in 0..max_r {
                         for c in 0..max_c {
                             let v = data[r * cols + c];
-                            let t = (v - dmin) / drange;
+                            let color = if signed {
+                                diverging_signed(v, abs_max)
+                            } else {
+                                sequential((v - dmin) / drange)
+                            };
                             quad_px(vertices,
                                 insp_x + c as f32 * cell_w,
                                 viz_y + r as f32 * cell_h,
                                 cell_w - 1.0, cell_h - 1.0,
-                                win_w, win_h, viridis(t));
+                                win_w, win_h, color);
                         }
                     }
 
@@ -1366,7 +1514,7 @@ impl App {
             } else {
                 self.render_wall(&mut vertices, &mut texts, win_w, win_h);
             }
-            let td = GlyphonColor::rgb(140, 140, 140);
+            let td = palette::TEXT_MUTED;
             let controls = if self.view_mode == ViewMode::DAG {
                 "[Tab]=Wall  [Drag]=Pan  [Pinch]=Zoom  [Click]=Expand  [S]=Train  [N]=New  [Left/Right]=Pos  [B]=Backend  [Q]=Quit"
             } else {
@@ -1416,7 +1564,7 @@ impl App {
                     label: Some("dag_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: &view, depth_slice: None, resolve_target: None,
-                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.08, g: 0.08, b: 0.1, a: 1.0 }),
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(palette::CLEAR),
                             store: wgpu::StoreOp::Store },
                     })],
                     depth_stencil_attachment: None, timestamp_writes: None,
@@ -1433,14 +1581,14 @@ impl App {
             return;
         }
 
-        let green = [0.2, 0.8, 0.4, 1.0];
-        let red_highlight = [0.9, 0.3, 0.1, 1.0];
-        let blue_bar = [0.3, 0.5, 0.8, 1.0];
+        let green = palette::ACCENT_LOSS;
+        let red_highlight = palette::BAR_PRED;
+        let blue_bar = palette::BAR_DEFAULT;
 
-        let tw = GlyphonColor::rgb(220, 220, 220);
-        let tg = GlyphonColor::rgb(100, 220, 120);
-        let ty = GlyphonColor::rgb(220, 200, 80);
-        let td = GlyphonColor::rgb(140, 140, 140);
+        let tw = palette::TEXT_PRIMARY;
+        let tg = palette::TEXT_OK;
+        let ty = palette::TEXT_TITLE;
+        let td = palette::TEXT_SECONDARY;
 
         let n_head = self.runner.cfg.n_head;
         let seq_len = self.runner.cfg.seq_len;
@@ -1456,7 +1604,7 @@ impl App {
         let bot_y = top_h + m;
         let bot_h = win_h - bot_y - m;
 
-        let bg = [0.12, 0.12, 0.15, 1.0];
+        let bg = palette::PANEL;
         quad_px(&mut vertices, m, m, left_w - 2.0 * m, top_h - m, win_w, win_h, bg);
         quad_px(&mut vertices, right_x, m, right_w - m, top_h - m, win_w, win_h, bg);
         quad_px(&mut vertices, m, bot_y, left_w - 2.0 * m, bot_h, win_w, win_h, bg);
@@ -1494,7 +1642,7 @@ impl App {
                     for col in 0..t {
                         let idx = head * t * t + row * t + col;
                         let val = self.attn_weights.get(idx).copied().unwrap_or(0.0);
-                        let mut color = viridis(val);
+                        let mut color = sequential(val);
                         if !is_cursor_row {
                             color[3] = 0.4;
                         }
@@ -1599,7 +1747,7 @@ impl App {
                 if is_cursor {
                     let label_w = name.len() as f32 * 20.0 + 8.0;
                     quad_px(&mut vertices, sx - 4.0, tok_y - 4.0, label_w, 38.0,
-                        win_w, win_h, [0.25, 0.25, 0.35, 1.0]);
+                        win_w, win_h, palette::TOKEN_HL);
                 }
                 texts.push(TextEntry {
                     text: name.to_string(),
@@ -1666,7 +1814,7 @@ impl App {
                 for (i, &p) in probs.iter().enumerate() {
                     let h = p * chart_h;
                     let color = if Some(i) == actual_next {
-                        [0.2, 0.85, 0.4, 1.0]
+                        palette::BAR_ACTUAL
                     } else if i == predicted {
                         red_highlight
                     } else {
@@ -1733,15 +1881,7 @@ impl App {
                     let sx = ox + ((px - min_x) / rx) * plot_w;
                     let sy = oy + ((py - min_y) / ry) * plot_h;
 
-                    let color = match i {
-                        0..=2 => [0.5, 0.5, 0.5, 1.0],
-                        3 => [1.0, 0.8, 0.2, 1.0],
-                        4..=5 | 8 => [0.3, 0.7, 1.0, 1.0],
-                        6..=7 => [0.2, 0.9, 0.4, 1.0],
-                        9..=11 => [0.9, 0.4, 0.7, 1.0],
-                        12..=13 => [1.0, 0.5, 0.2, 1.0],
-                        _ => [0.7, 0.3, 0.9, 1.0],
-                    };
+                    let color = palette::CAT10[i % palette::CAT10.len()];
 
                     quad_px(&mut vertices, sx - 10.0, sy - 10.0, 20.0, 20.0, win_w, win_h, color);
 

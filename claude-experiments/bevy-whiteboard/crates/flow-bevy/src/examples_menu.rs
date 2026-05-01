@@ -36,6 +36,7 @@ impl Plugin for ExamplesMenuPlugin {
                 (
                     track_hover,
                     update_dropdown_visibility,
+                    update_trigger_visibility,
                     handle_example_buttons,
                     style_example_buttons,
                 ),
@@ -49,6 +50,12 @@ impl Plugin for ExamplesMenuPlugin {
 
 #[derive(Component)]
 struct ExamplesTrigger;
+
+/// Marker on the `Text` child of the trigger so the
+/// `update_trigger_visibility` system can dim/restore its alpha
+/// alongside the trigger background.
+#[derive(Component)]
+struct ExamplesTriggerLabel;
 
 #[derive(Component)]
 struct ExamplesDropdown;
@@ -88,8 +95,12 @@ fn spawn_examples_menu(mut commands: Commands, theme: Res<Theme>) {
             border_radius: BorderRadius::all(Val::Px(6.0)),
             ..default()
         },
-        BackgroundColor(theme.paper_alt),
-        BorderColor::all(theme.ink),
+        // Start fully transparent: the user only wants the trigger
+        // to surface when their cursor is on it. The
+        // `update_trigger_visibility` system swaps these to
+        // `theme.paper_alt` / `theme.ink` once a hover is detected.
+        BackgroundColor(Color::NONE),
+        BorderColor::all(Color::NONE),
         ZIndex(500),
         ExamplesTrigger,
     ))
@@ -97,8 +108,11 @@ fn spawn_examples_menu(mut commands: Commands, theme: Res<Theme>) {
         p.spawn((
             Text::new(caps_spaced("Examples")),
             TextFont { font_size: 11.0, ..default() },
-            TextColor(theme.ink),
+            // Same idea — text is invisible by default; the
+            // visibility system fades it in on hover.
+            TextColor(Color::NONE),
             Bold,
+            ExamplesTriggerLabel,
         ));
     });
 
@@ -231,5 +245,32 @@ fn style_example_buttons(
         let hovered = matches!(interaction, Interaction::Hovered | Interaction::Pressed);
         bg.0 = if hovered { theme.paper } else { Color::NONE };
         *border = BorderColor::all(if hovered { theme.ink } else { theme.rule });
+    }
+}
+
+/// Toggle the trigger pill's visual look so it's invisible by
+/// default and only surfaces when the cursor is on it (or while
+/// the dropdown is already open). The trigger's `Node` and `Button`
+/// stay live so hover detection still works — only the colors flip.
+fn update_trigger_visibility(
+    state: Res<DropdownState>,
+    theme: Res<Theme>,
+    trigger_q: Query<&Interaction, With<ExamplesTrigger>>,
+    mut trigger_style: Query<
+        (&mut BackgroundColor, &mut BorderColor),
+        With<ExamplesTrigger>,
+    >,
+    mut trigger_text: Query<&mut TextColor, With<ExamplesTriggerLabel>>,
+) {
+    let trigger_hot = trigger_q
+        .iter()
+        .any(|i| matches!(i, Interaction::Hovered | Interaction::Pressed));
+    let visible = trigger_hot || state.open;
+    for (mut bg, mut border) in trigger_style.iter_mut() {
+        bg.0 = if visible { theme.paper_alt } else { Color::NONE };
+        *border = BorderColor::all(if visible { theme.ink } else { Color::NONE });
+    }
+    for mut tc in trigger_text.iter_mut() {
+        tc.0 = if visible { theme.ink } else { Color::NONE };
     }
 }

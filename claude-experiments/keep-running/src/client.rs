@@ -1,6 +1,6 @@
 use crate::protocol::{decode_message, encode_message, ClientMessage, DaemonMessage};
 use crate::session::{self, SessionInfo};
-use crate::terminal::{self, RawModeGuard};
+use crate::terminal::{self, status, status_dim, RawModeGuard};
 use anyhow::{Context, Result};
 use crossterm::tty::IsTty;
 use crossterm::{execute, terminal::{Clear, ClearType}, cursor::{Hide, MoveTo, Show}};
@@ -69,8 +69,13 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
     // Clear screen and move cursor to top-left before showing session content
     execute!(io::stdout(), Clear(ClearType::All), MoveTo(0, 0))?;
 
+    // Welcome banner (cooked mode — survives at the top of the cleared screen
+    // until program output scrolls over it).
+    status(&format!("attached to '{}' · pid {}", session.name, session.pid));
+    status_dim("detach with ctrl-a d  ·  kill with ctrl-a k");
+
     // Enter raw mode
-    let _raw_guard = RawModeGuard::enter()?;
+    let raw_guard = RawModeGuard::enter()?;
 
     // Set up signal handling for SIGWINCH (terminal resize)
     let resize_flag = Arc::new(AtomicBool::new(false));
@@ -90,6 +95,10 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
 
     // State for detecting Ctrl+a d
     let mut saw_ctrl_a = false;
+
+    // Holds a protocol error message captured during decoding so we can
+    // surface it cleanly after dropping raw mode.
+    let mut protocol_error: Option<String> = None;
 
     // Get file descriptors for polling
     let stdin_fd = 0i32;
@@ -150,15 +159,21 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
                                 if let Ok(encoded) = encode_message(&msg) {
                                     let _ = stream.write_all(&encoded);
                                 }
-                                eprintln!("\r\n[detached from {}]", session.name);
+                                // Drop raw mode before printing so the banner reflows cleanly.
+                                drop(raw_guard);
+                                eprint!("\r\n");
+                                status(&format!("detached from '{}'", session.name));
+                                status_dim(&format!("reattach: keep-running {}", session.name));
                                 return Ok(());
                             }
                             b'k' | b'K' => {
                                 // Kill session!
-                                eprintln!("\r\n[killing session {}]", session.name);
                                 unsafe {
                                     libc::kill(session.pid as i32, libc::SIGHUP);
                                 }
+                                drop(raw_guard);
+                                eprint!("\r\n");
+                                status(&format!("killed '{}'", session.name));
                                 return Ok(());
                             }
                             CTRL_A => {
@@ -243,15 +258,18 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
                             let _ = execute!(io::stdout(), Show);
                         }
                         DaemonMessage::ChildExited { code } => {
-                            if let Some(c) = code {
-                                eprintln!("\r\n[process exited with code {}]", c);
-                            } else {
-                                eprintln!("\r\n[process terminated by signal]");
+                            drop(raw_guard);
+                            eprint!("\r\n");
+                            match code {
+                                Some(c) => status(&format!("process exited with code {}", c)),
+                                None => status("process terminated by signal"),
                             }
                             return Ok(());
                         }
                         DaemonMessage::Error(e) => {
-                            eprintln!("\r\n[daemon error: {}]", e);
+                            drop(raw_guard);
+                            eprint!("\r\n");
+                            status(&format!("daemon error: {}", e));
                             return Ok(());
                         }
                         DaemonMessage::Attached => {
@@ -261,15 +279,23 @@ pub fn attach(session: &SessionInfo) -> Result<()> {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    eprintln!("\r\n[protocol error: {}]", e);
+                    protocol_error = Some(e.to_string());
                     break;
                 }
             }
         }
 
         // Now that we've processed all buffered messages, handle EOF/hangup
+        if let Some(e) = protocol_error.take() {
+            drop(raw_guard);
+            eprint!("\r\n");
+            status(&format!("protocol error: {}", e));
+            return Ok(());
+        }
         if socket_eof {
-            eprintln!("\r\n[session ended]");
+            drop(raw_guard);
+            eprint!("\r\n");
+            status("session ended");
             break;
         }
     }
@@ -282,13 +308,22 @@ pub fn run_and_attach(name: &str, command: &[String]) -> Result<()> {
     // Start the daemon
     crate::daemon::start_daemon(name.to_string(), command.to_vec())?;
 
-    // Wait for session to be available
-    std::thread::sleep(Duration::from_millis(100));
+    // Poll for the daemon to register itself + bind its socket. Replaces a
+    // fixed 100ms sleep that could race on slower machines.
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    let session = loop {
+        if let Some(s) = session::load_session(name)? {
+            if std::path::Path::new(&s.socket_path).exists() {
+                break s;
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            anyhow::bail!("session daemon failed to start within 2s");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
 
-    // Load session info
-    let session = session::load_session(name)?
-        .context("Session not found after starting daemon")?;
+    status(&format!("session '{}' started · pid {}", session.name, session.pid));
 
-    // Attach
     attach(&session)
 }

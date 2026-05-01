@@ -7,11 +7,21 @@ Keybindings (inside an attached session):
   Ctrl+a k        Kill the session
   Ctrl+a Ctrl+a   Send a literal Ctrl+a to the program";
 
+const TOP_LEVEL_HELP: &str = "\
+Shortcuts:
+  keep-running                  list running sessions
+  keep-running <name>           attach to a session (prefix match works)
+
+Keybindings (inside an attached session):
+  Ctrl+a d        Detach from the session (leave it running)
+  Ctrl+a k        Kill the session
+  Ctrl+a Ctrl+a   Send a literal Ctrl+a to the program";
+
 #[derive(Parser)]
 #[command(name = "keep-running")]
 #[command(about = "Human-friendly terminal session manager with dtach-style detach")]
-#[command(after_help = KEYBINDINGS_HELP)]
-#[command(after_long_help = KEYBINDINGS_HELP)]
+#[command(after_help = TOP_LEVEL_HELP)]
+#[command(after_long_help = TOP_LEVEL_HELP)]
 #[command(version)]
 pub struct Cli {
     #[command(subcommand)]

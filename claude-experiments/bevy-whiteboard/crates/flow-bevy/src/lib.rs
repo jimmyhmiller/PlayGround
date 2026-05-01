@@ -20,7 +20,7 @@ pub mod packet_cloud;
 pub mod palette;
 pub mod perf;
 pub mod probes;
-pub mod rewind_strategy;
+pub mod rewind;
 pub mod sim_driver;
 pub mod theme;
 pub mod timeline;

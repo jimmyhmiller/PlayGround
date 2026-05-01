@@ -6,10 +6,91 @@ mod protocol;
 mod session;
 mod terminal;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use cli::Commands;
+use std::path::{Path, PathBuf};
+use terminal::{status, status_dim};
 
-fn main() -> Result<()> {
+fn session_not_found_message(query: &str) -> String {
+    match session::list_sessions() {
+        Ok(sessions) if sessions.is_empty() => {
+            format!("session '{}' not found (no sessions running)", query)
+        }
+        Ok(sessions) => {
+            let names: Vec<_> = sessions.iter().map(|s| s.name.as_str()).collect();
+            format!(
+                "session '{}' not found. Running sessions: {}",
+                query,
+                names.join(", ")
+            )
+        }
+        Err(_) => format!("session '{}' not found", query),
+    }
+}
+
+/// Truncate a string to at most `max` characters, appending `...` if truncated.
+/// Char-safe (won't panic on multibyte boundaries).
+fn truncate_chars(s: &str, max: usize) -> String {
+    let count = s.chars().count();
+    if count <= max {
+        return s.to_string();
+    }
+    let keep = max.saturating_sub(3);
+    let mut out: String = s.chars().take(keep).collect();
+    out.push_str("...");
+    out
+}
+
+/// Format a duration in seconds as "5s", "12m", "3h", "2d".
+fn humanize_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h", secs / 3600)
+    } else {
+        format!("{}d", secs / 86400)
+    }
+}
+
+/// Resolve a command's binary against PATH so we can fail fast with a clean error
+/// instead of letting the daemon's child print "Failed to exec ..." into the PTY.
+fn resolve_program(program: &str) -> Result<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = Path::new(program);
+    if program.contains('/') {
+        if !path.exists() {
+            anyhow::bail!("command not found: {}", program);
+        }
+        return Ok(path.to_path_buf());
+    }
+
+    let path_var = std::env::var_os("PATH")
+        .ok_or_else(|| anyhow::anyhow!("PATH is not set"))?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join(program);
+        if let Ok(meta) = candidate.metadata() {
+            if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+                return Ok(candidate);
+            }
+        }
+    }
+    anyhow::bail!("command not found: {}", program);
+}
+
+fn main() {
+    if let Err(err) = run() {
+        eprintln!("error: {}", err);
+        for cause in err.chain().skip(1) {
+            eprintln!("  caused by: {}", cause);
+        }
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<()> {
     let cli = cli::parse();
 
     match cli.command {
@@ -36,12 +117,9 @@ fn main() -> Result<()> {
 }
 
 fn detect_shell() -> String {
-    // Try SHELL environment variable first
     if let Ok(shell) = std::env::var("SHELL") {
         return shell;
     }
-
-    // Fallback to /bin/sh
     "/bin/sh".to_string()
 }
 
@@ -53,7 +131,7 @@ fn cmd_shell(name: Option<String>) -> Result<()> {
 
 fn check_nested() -> Result<()> {
     if std::env::var("KEEP_RUNNING").is_ok() {
-        anyhow::bail!("Already inside a keep-running session. Detach first (Ctrl+a d).");
+        anyhow::bail!("already inside a keep-running session. Detach first (Ctrl+a d).");
     }
     Ok(())
 }
@@ -61,21 +139,19 @@ fn check_nested() -> Result<()> {
 fn cmd_run(name: Option<String>, command: Vec<String>) -> Result<()> {
     check_nested()?;
     if command.is_empty() {
-        anyhow::bail!("No command specified");
+        anyhow::bail!("no command specified");
     }
+
+    // Pre-validate so the user gets a clean error instead of a flash inside the PTY.
+    resolve_program(&command[0])?;
 
     let session_name = name.unwrap_or_else(|| {
         session::generate_unique_name().unwrap_or_else(|_| session::generate_name())
     });
 
-    // Check if session already exists
     if session::load_session(&session_name)?.is_some() {
-        anyhow::bail!("Session '{}' already exists", session_name);
+        anyhow::bail!("session '{}' already exists", session_name);
     }
-
-    println!("Starting session: {}", session_name);
-    println!("Detach: Ctrl+a d | Kill: Ctrl+a k");
-    println!();
 
     client::run_and_attach(&session_name, &command)?;
 
@@ -83,12 +159,13 @@ fn cmd_run(name: Option<String>, command: Vec<String>) -> Result<()> {
 }
 
 fn cmd_attach(session_query: &str) -> Result<()> {
-    let session = session::find_session(session_query)?
-        .with_context(|| format!("Session '{}' not found", session_query))?;
+    let session = match session::find_session(session_query)? {
+        Some(s) => s,
+        None => anyhow::bail!("{}", session_not_found_message(session_query)),
+    };
 
-    println!("Attaching to: {}", session.name);
-    println!("Detach: Ctrl+a d | Kill: Ctrl+a k");
-    println!();
+    status(&format!("attached to '{}' · pid {}", session.name, session.pid));
+    status_dim("detach with ctrl-a d  ·  kill with ctrl-a k");
 
     client::attach(&session)?;
 
@@ -99,39 +176,51 @@ fn cmd_list() -> Result<()> {
     let sessions = session::list_sessions()?;
 
     if sessions.is_empty() {
-        println!("No running sessions");
+        println!("No running sessions.");
+        println!();
+        println!("Try:");
+        println!("  keep-running shell                  start a session running your shell");
+        println!("  keep-running run -- <command>       start a session running a command");
         return Ok(());
     }
 
-    println!("{:<20} {:<10} {}", "NAME", "PID", "COMMAND");
-    println!("{}", "-".repeat(60));
+    let now = session::timestamp();
 
-    for session in sessions {
-        let cmd = session.command.join(" ");
-        let cmd_display = if cmd.len() > 30 {
-            format!("{}...", &cmd[..27])
-        } else {
-            cmd
-        };
-        println!("{:<20} {:<10} {}", session.name, session.pid, cmd_display);
+    println!(
+        "{:<20} {:<8} {:<8} {:<8} {}",
+        "NAME", "PID", "STATUS", "UPTIME", "COMMAND"
+    );
+
+    for s in sessions {
+        let age = humanize_age(now.saturating_sub(s.created_at));
+        let cmd = s.command.join(" ");
+        let cmd_display = truncate_chars(&cmd, 40);
+        println!(
+            "{:<20} {:<8} {:<8} {:<8} {}",
+            truncate_chars(&s.name, 20),
+            s.pid,
+            "running",
+            age,
+            cmd_display
+        );
     }
 
     Ok(())
 }
 
 fn cmd_kill(session_query: &str) -> Result<()> {
-    let session = session::find_session(session_query)?
-        .with_context(|| format!("Session '{}' not found", session_query))?;
+    let session = match session::find_session(session_query)? {
+        Some(s) => s,
+        None => anyhow::bail!("{}", session_not_found_message(session_query)),
+    };
 
-    // Send SIGTERM to the daemon
     unsafe {
         libc::kill(session.pid as i32, libc::SIGTERM);
     }
 
-    // Clean up session files
     session::remove_session(&session.name)?;
 
-    println!("Killed session: {}", session.name);
+    status(&format!("killed '{}'", session.name));
 
     Ok(())
 }
@@ -139,19 +228,19 @@ fn cmd_kill(session_query: &str) -> Result<()> {
 /// Start a daemon without attaching (useful for scripts/tests)
 fn cmd_start(name: Option<String>, command: Vec<String>) -> Result<()> {
     if command.is_empty() {
-        anyhow::bail!("No command specified");
+        anyhow::bail!("no command specified");
     }
+
+    resolve_program(&command[0])?;
 
     let session_name = name.unwrap_or_else(|| {
         session::generate_unique_name().unwrap_or_else(|_| session::generate_name())
     });
 
-    // Check if session already exists
     if session::load_session(&session_name)?.is_some() {
-        anyhow::bail!("Session '{}' already exists", session_name);
+        anyhow::bail!("session '{}' already exists", session_name);
     }
 
-    // Start the daemon
     daemon::start_daemon(session_name.clone(), command)?;
 
     println!("{}", session_name);

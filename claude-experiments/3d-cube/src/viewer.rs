@@ -599,14 +599,7 @@ impl App {
         self.inspect_text = None;
         self.update_sidebar();
 
-        if path.extension().is_some_and(|ext| ext == "hprof") {
-            if matches!(self.view_mode, ViewMode::Binary) {
-                self.view_mode = ViewMode::HeapTreemap;
-            }
-        } else {
-            self.view_mode = ViewMode::Binary;
-        }
-
+        self.view_mode = ViewMode::Binary;
         self.source = (self.source_factory)(path, self.view_mode);
 
         let name = self.file_name.clone();
@@ -1466,13 +1459,6 @@ impl ApplicationHandler for App {
                             self.update_minimap();
                             self.update_title();
                             self.update_sidebar();
-                        }
-                        Key::Character(ref c) if c.as_str() == "v" => {
-                            if let Some(path) = self.file_path.clone() {
-                                self.view_mode = crate::next_view_mode(&path, self.view_mode);
-                                eprintln!("Toggling view mode: {}", self.view_mode.label());
-                                self.load_file(&path);
-                            }
                         }
                         Key::Named(NamedKey::Escape) => event_loop.exit(),
                         _ => {}
