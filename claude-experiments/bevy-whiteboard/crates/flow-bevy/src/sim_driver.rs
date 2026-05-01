@@ -260,6 +260,16 @@ pub struct SimControl {
     /// idle yield: if non-zero, advances by exactly that many ns and
     /// then resets it to zero (regardless of pause state).
     pub step_once_ns: Arc<AtomicU64>,
+    /// Visual scale `k` from `VisualTimeline`. AnchorReplay needs
+    /// this to size its lookback window: the visible-on-screen
+    /// region is `sim_lat × k` in real time, which equals
+    /// `sim_lat_ns × k` in sim ns under the lockstep mapping. With
+    /// `k=200`, even a 1ms edge keeps a packet visible for 200ms
+    /// of sim time worth of past events — those need to be in the
+    /// rewind's replay set or the gc trail goes missing on rewind.
+    /// Stored as `f64::to_bits` so the worker can `load`/`store`
+    /// without a lock.
+    pub visual_k_bits: Arc<AtomicU64>,
 }
 
 impl SimControl {
@@ -268,6 +278,7 @@ impl SimControl {
             multiplier_bits: Arc::new(AtomicU64::new(multiplier.to_bits())),
             paused: Arc::new(AtomicBool::new(false)),
             step_once_ns: Arc::new(AtomicU64::new(0)),
+            visual_k_bits: Arc::new(AtomicU64::new(1.0_f64.to_bits())),
         }
     }
     pub fn multiplier(&self) -> f64 {
@@ -280,6 +291,12 @@ impl SimControl {
     pub fn set_paused(&self, p: bool) { self.paused.store(p, Ordering::Relaxed); }
     pub fn request_step(&self, ns: u64) {
         self.step_once_ns.store(ns, Ordering::Relaxed);
+    }
+    pub fn visual_k(&self) -> f64 {
+        f64::from_bits(self.visual_k_bits.load(Ordering::Relaxed))
+    }
+    pub fn set_visual_k(&self, k: f64) {
+        self.visual_k_bits.store(k.to_bits(), Ordering::Relaxed);
     }
 }
 
@@ -553,6 +570,7 @@ impl SimDriver {
                 rewind_epoch,
                 rewind_strategy,
                 pending_replay_events,
+                control,
                 ..
             } => {
                 let Some(events) = rewind_strategy.do_rewind(
@@ -561,6 +579,7 @@ impl SimDriver {
                     prev_log_index,
                     rewind_epoch,
                     target_ns,
+                    control.visual_k(),
                 ) else {
                     return sim.now_ns;
                 };
@@ -736,6 +755,7 @@ fn worker_loop(
                 &mut prev_log_index,
                 &mut rewind_epoch,
                 target_ns,
+                control.visual_k(),
             ) {
                 pending_replay = events;
                 rewound = true;
@@ -837,6 +857,7 @@ fn worker_loop(
                             &mut prev_log_index,
                             &mut rewind_epoch,
                             target_ns,
+                            control.visual_k(),
                         ) {
                             pending_replay = events;
                         }

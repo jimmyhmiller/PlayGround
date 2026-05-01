@@ -225,6 +225,117 @@ fn cmd_kill(session_query: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn humanize_age_seconds() {
+        assert_eq!(humanize_age(0), "0s");
+        assert_eq!(humanize_age(1), "1s");
+        assert_eq!(humanize_age(59), "59s");
+    }
+
+    #[test]
+    fn humanize_age_minutes() {
+        assert_eq!(humanize_age(60), "1m");
+        assert_eq!(humanize_age(61), "1m");
+        assert_eq!(humanize_age(3599), "59m");
+    }
+
+    #[test]
+    fn humanize_age_hours() {
+        assert_eq!(humanize_age(3600), "1h");
+        assert_eq!(humanize_age(3661), "1h");
+        assert_eq!(humanize_age(86399), "23h");
+    }
+
+    #[test]
+    fn humanize_age_days() {
+        assert_eq!(humanize_age(86400), "1d");
+        assert_eq!(humanize_age(172800), "2d");
+        assert_eq!(humanize_age(86400 * 30), "30d");
+    }
+
+    #[test]
+    fn truncate_chars_shorter_than_max_unchanged() {
+        assert_eq!(truncate_chars("hi", 10), "hi");
+    }
+
+    #[test]
+    fn truncate_chars_exactly_max_unchanged() {
+        assert_eq!(truncate_chars("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_chars_longer_appends_ellipsis() {
+        assert_eq!(truncate_chars("hello world", 8), "hello...");
+        // Result fits within max.
+        assert!(truncate_chars("hello world", 8).chars().count() <= 8);
+    }
+
+    #[test]
+    fn truncate_chars_handles_multibyte_without_panic() {
+        // 11 chars but >11 bytes — the original `&s[..n]` slicing approach
+        // would panic on a non-char-boundary cut. Char-based truncation
+        // must not.
+        let s = "héllo wörld";
+        let out = truncate_chars(s, 8);
+        assert!(out.chars().count() <= 8);
+        // The output is still valid UTF-8 (String guarantees this; the real
+        // assertion is that we didn't panic above).
+        assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn truncate_chars_max_smaller_than_ellipsis() {
+        // saturating_sub means max < 3 collapses to just "..." (which itself
+        // exceeds max). Documenting current behaviour so it doesn't change
+        // silently.
+        assert_eq!(truncate_chars("abcdef", 2), "...");
+        assert_eq!(truncate_chars("abcdef", 0), "...");
+    }
+
+    #[test]
+    fn resolve_program_absolute_existing() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let path = f.path().to_path_buf();
+        let resolved = resolve_program(path.to_str().unwrap()).unwrap();
+        assert_eq!(resolved, path);
+    }
+
+    #[test]
+    fn resolve_program_absolute_missing() {
+        let err = resolve_program("/nonexistent/path/xyzzy-12345").unwrap_err();
+        assert!(
+            err.to_string().contains("command not found"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_program_relative_with_slash_missing() {
+        // Anything containing a `/` skips PATH lookup and is checked literally.
+        let err = resolve_program("./does-not-exist-abc").unwrap_err();
+        assert!(err.to_string().contains("command not found"));
+    }
+
+    #[test]
+    fn resolve_program_bare_name_not_on_path() {
+        let err =
+            resolve_program("definitely-not-a-real-binary-xyzzy-987").unwrap_err();
+        assert!(err.to_string().contains("command not found"));
+    }
+
+    #[test]
+    fn resolve_program_bare_name_found_on_path() {
+        // /bin/sh exists on every supported platform (macOS + Linux).
+        let resolved = resolve_program("sh").expect("sh should be on PATH");
+        assert!(resolved.is_absolute(), "got: {resolved:?}");
+        assert_eq!(resolved.file_name().and_then(|s| s.to_str()), Some("sh"));
+    }
+}
+
 /// Start a daemon without attaching (useful for scripts/tests)
 fn cmd_start(name: Option<String>, command: Vec<String>) -> Result<()> {
     if command.is_empty() {

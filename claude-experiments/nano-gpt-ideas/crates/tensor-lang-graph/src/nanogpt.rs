@@ -24,9 +24,9 @@
 ///     4 + n_layer*12 + 0: ln_f_gamma [n_embd]
 ///     4 + n_layer*12 + 1: ln_f_beta  [n_embd]
 ///   (lm_head reuses wte due to weight tying)
-pub const GPT2_DSL: &str = include_str!("gpt2.dsl");
+pub const GPT2_DSL: &str = include_str!("gpt2.tensor");
 
-/// Compile the static `gpt2.dsl` source into a [`crate::Graph`] with the
+/// Compile the static `gpt2.tensor` source into a [`crate::Graph`] with the
 /// given configuration. `seq_len = None` leaves `T` symbolic (bind at
 /// runtime via `run_with_dim_params`); `Some(t)` bakes `T = t` in.
 /// `n_layer` must be concrete because the layer loop is unrolled at

@@ -915,6 +915,61 @@ a { color: inherit; text-decoration: none; }
   border-radius: 28px;
 }
 
+/* ─── Light-section code/terminal/table override ─────────────────────────── */
+/* On light project sections, render code surfaces on a soft off-white with a
+   GitHub-Light-style token palette so the contrast stays readable. */
+[data-section-theme="light"] {
+  --code-kw:   #cf222e; /* red */
+  --code-str:  #0a3069; /* deep blue */
+  --code-fn:   #8250df; /* purple */
+  --code-num:  #0550ae; /* blue */
+  --code-cmt:  #6e7781; /* gray */
+  --code-pun:  #1f2328; /* near-black */
+  --code-type: #953800; /* orange */
+}
+[data-section-theme="light"] .codeblock,
+[data-section-theme="light"] .terminal,
+[data-section-theme="light"] .perftable {
+  background: #ffffff;
+  color: #1f2328;
+  border-color: #d8d4c7;
+  box-shadow: 0 1px 0 rgba(31, 35, 40, 0.04);
+}
+[data-section-theme="light"] .codeblock-bar,
+[data-section-theme="light"] .terminal-bar {
+  background: #faf8f1;
+  border-bottom-color: #e6e1d2;
+  color: #6e7781;
+}
+[data-section-theme="light"] .codeblock-code,
+[data-section-theme="light"] .terminal-out,
+[data-section-theme="light"] .perftable-row { color: #1f2328; }
+[data-section-theme="light"] .codeblock-ln,
+[data-section-theme="light"] .terminal-title,
+[data-section-theme="light"] .codeblock-file,
+[data-section-theme="light"] .terminal-muted { color: #8b929a; }
+[data-section-theme="light"] .perftable-head {
+  background: #faf8f1;
+  color: #6e7781;
+  border-bottom-color: #e6e1d2;
+}
+[data-section-theme="light"] .perftable-row {
+  border-bottom-color: #ece8db;
+}
+[data-section-theme="light"] .perftable-row span:first-child { color: #3a3f47; }
+[data-section-theme="light"] .perftable-row.is-highlight {
+  background: color-mix(in oklab, var(--accent) 14%, #ffffff);
+}
+[data-section-theme="light"] .perftable-row.is-highlight span { color: #1f2328; }
+[data-section-theme="light"] .perftable-row.is-highlight span:last-child {
+  color: color-mix(in oklab, var(--accent) 70%, #1f2328);
+}
+[data-section-theme="light"] .perftable-caption {
+  background: #faf8f1;
+  color: #6e7781;
+  border-top-color: #e6e1d2;
+}
+
 /* ─── Footer ─────────────────────────────────────────────────────────────── */
 .footer {
   max-width: var(--max);

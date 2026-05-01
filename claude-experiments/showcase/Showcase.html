@@ -57,41 +57,25 @@
       return (
         <>
           <header className="topbar">
-            <div className="topbar-left">
-              <span className="topbar-mark">~/showcase</span>
-            </div>
+            <div className="topbar-left"></div>
             <nav className="topbar-right">
-              <span className="pill">v1.0</span>
-              <a href="https://github.com" target="_blank" rel="noreferrer">github</a>
-              <a href="mailto:hello@example.com">contact</a>
+              <a href="https://jimmyhmiller.com" target="_blank" rel="noreferrer">Website</a>
+              <a href="https://github.com/jimmyhmiller" target="_blank" rel="noreferrer">GitHub</a>
+              <a href="mailto:jimmyhmiller@gmail.com">Contact</a>
             </nav>
           </header>
 
           <main>
             <section className="hero" data-screen-label="00 Hero">
-              <div className="hero-eyebrow">
-                <span><b>selected_work</b></span>
-                <span className="sep">|</span>
-                <span>2024..2026</span>
-                <span className="sep">|</span>
-                <span>{visibleProjects.length} projects</span>
-                <span className="sep">|</span>
-                <span>last updated apr 2026</span>
-              </div>
               <h1 className="hero-title">
-                things i've been<br />
-                <span className="accent">building</span>, lately<span className="cursor"></span>
+                Things I've been<br />
+                <span className="accent">building</span>, lately
               </h1>
               <p className="hero-bio">
-                a working notebook of recent projects — a mix of tools, libraries,
-                prototypes, and the occasional finished product. some of it shipped.
-                some of it still figuring itself out. read top-to-bottom or jump from
-                the index below.
+                A working notebook of recent projects — a mix of tools, libraries,
+                prototypes, and the occasional finished product. Some of it shipped.
+                Some of it still figuring itself out.
               </p>
-              <div className="hero-foot">
-                <span>↓ scroll, or pick from the index</span>
-                <span><b>$</b> updated apr 2026</span>
-              </div>
             </section>
 
             {visibleProjects.map((p, i) => (
@@ -104,36 +88,6 @@
               />
             ))}
           </main>
-
-          <footer className="footer" data-screen-label="99 Footer">
-            <div className="footer-mark">end of file</div>
-            <div className="footer-meta">
-              <b>built &amp; maintained solo</b>
-              2026 · v1.0 · {visibleProjects.length} entries
-            </div>
-          </footer>
-
-          <TweaksPanel title="Tweaks">
-            <TweakSection label="Theme" />
-            <TweakRadio
-              label="Mode"
-              value={t.theme}
-              options={["light", "dark"]}
-              onChange={(v) => setTweak("theme", v)}
-            />
-            <TweakRadio
-              label="Density"
-              value={t.density}
-              options={["compact", "comfortable", "spacious"]}
-              onChange={(v) => setTweak("density", v)}
-            />
-            <TweakSection label="Sections" />
-            <TweakToggle
-              label="Per-project colors"
-              value={t.useProjectColors}
-              onChange={(v) => setTweak("useProjectColors", v)}
-            />
-          </TweaksPanel>
         </>
       );
     }

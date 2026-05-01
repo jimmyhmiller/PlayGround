@@ -90,15 +90,6 @@ const ProjectSection = ({ project, index, total, density }) => {
       <Reveal as="h2" className="project-title">{title}</Reveal>
       <Reveal as="p" className="project-tagline" delay={60}>{tagline}</Reveal>
       <Reveal as="p" className="project-blurb" delay={120}>{blurb}</Reveal>
-      <Reveal delay={180}>
-        <div className="project-meta">
-          <div className="project-meta-row"><span>year</span><b>{year}</b></div>
-          <div className="project-meta-row"><span>role</span><b>{role}</b></div>
-          <div className="project-meta-row"><span>stack</span><b>{stack.join(", ")}</b></div>
-          <div className="project-meta-row"><span>status</span><b>{status}</b></div>
-          <div className="project-meta-row"><span>repo</span><b>{repo}</b></div>
-        </div>
-      </Reveal>
     </>
   );
 
@@ -144,6 +135,7 @@ const ProjectSection = ({ project, index, total, density }) => {
   return (
     <section
       data-screen-label={`${String(index + 1).padStart(2, "0")} ${title}`}
+      data-section-theme={project.theme || "dark"}
       className={`project project-${layout} density-${density}`}
       style={{
         "--proj-bg": bg,

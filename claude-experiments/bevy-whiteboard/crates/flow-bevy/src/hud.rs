@@ -39,6 +39,7 @@ impl Plugin for HudPlugin {
                     push_rewind_strategy_to_driver,
                     update_rewind_strategy_readout,
                     clear_pending_rewind_when_caught_up,
+                    auto_stop_reverse_play_at_zero,
                 ),
             )
             .add_systems(
@@ -371,34 +372,39 @@ fn handle_reverse_play_button(
     }
 }
 
-/// Rewind to the most recent capture marker strictly before the
-/// current rewind target. Successive clicks step further back: each
-/// click bases its "previous marker" lookup on the *previously
-/// requested* target rather than `snapshot.now_ns`, so multiple
-/// rapid clicks before the worker catches up still walk backwards
-/// through the marker list one step per click.
+/// Toggle continuous animated reverse-playback. First click flips
+/// reverse-play on (sim time walks backward at real-time speed via
+/// `bridge::push_clock_to_driver`). Second click stops it. Auto-stops
+/// when sim_now reaches 0 — see `auto_stop_reverse_play_at_zero`.
 fn handle_rewind_step_button(
     q: Query<&Interaction, (Changed<Interaction>, With<HudRewindStepBtn>)>,
-    snapshot: Res<SimSnapshotRes>,
-    mut driver: ResMut<SimDriverRes>,
     mut clock: ResMut<SimClock>,
-    mut pending: ResMut<PendingRewindTarget>,
 ) {
     for i in q.iter() {
         if *i == Interaction::Pressed {
-            let anchor = pending.0.unwrap_or(snapshot.0.now_ns);
-            let prev = snapshot.0
-                .rewind_markers_ns
-                .iter()
-                .copied()
-                .filter(|m| *m < anchor)
-                .max();
-            if let Some(target) = prev {
-                apply_rewind(target, &mut driver);
+            if clock.reverse_play_rate > 0.0 {
+                clock.reverse_play_rate = 0.0;
+            } else {
+                clock.reverse_play_rate = 1.0;
+                // Reverse-play paths in `bridge` only fire while
+                // forward advance is suppressed. Setting paused
+                // here matches `handle_reverse_play_button`.
                 clock.paused = true;
-                pending.0 = Some(target);
             }
         }
+    }
+}
+
+/// While reverse-playback is active, stop it as soon as sim time
+/// hits 0. Without this, `bridge::push_clock_to_driver` keeps
+/// dispatching `driver.rewind(0)` every frame — the worker
+/// processes them but burns cycles for no visible effect.
+fn auto_stop_reverse_play_at_zero(
+    snapshot: Res<SimSnapshotRes>,
+    mut clock: ResMut<SimClock>,
+) {
+    if clock.reverse_play_rate > 0.0 && snapshot.0.now_ns == 0 {
+        clock.reverse_play_rate = 0.0;
     }
 }
 
