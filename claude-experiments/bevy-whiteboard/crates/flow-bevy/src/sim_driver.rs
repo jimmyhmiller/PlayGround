@@ -650,6 +650,11 @@ fn worker_loop(
         } else if rewound {
             false
         } else if control.paused() {
+            // Keep `last_tick` current while paused. Otherwise, on
+            // resume, `elapsed = now - last_tick` would span the
+            // entire pause window and the worker would jump the sim
+            // forward by however long the user was paused.
+            last_tick = Instant::now();
             false
         } else {
             let now = Instant::now();

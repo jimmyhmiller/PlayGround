@@ -10,13 +10,42 @@ impl Alloc for SemiSpace {
     }
 }
 
-// Forwarding pointers are stored in the header word (at type_id_offset)
-// with bit 63 set as a marker. Valid heap pointers use at most 48 bits
-// on current hardware, and the original header word (u16 type_id + padding)
-// never has bit 63 set. This avoids the old bit-0 scheme which broke when
-// headers switched from *const TypeInfo (always aligned) to u16 type_id
-// (which can be odd).
-pub(crate) const FORWARDING_BIT: u64 = 1 << 63;
+/// High bit of an object header word indicates the object has been moved
+/// by the collector; the low 63 bits hold the to-space address.
+///
+/// Valid heap pointers use at most 48 bits on current hardware, and the
+/// original header word (u16 type_id + zero padding) never has bit 63
+/// set, so this is a safe sentinel. (Earlier revisions used bit 0, but
+/// that broke when headers switched from `*const TypeInfo` — always
+/// aligned — to a u16 type_id, which can be odd.)
+pub const FORWARDING_BIT: u64 = 1 << 63;
+
+/// If `ptr`'s header word is a forwarding entry, return the to-space
+/// pointer; otherwise return `ptr` unchanged. Reads exactly one header
+/// word.
+///
+/// In debug builds, asserts that the followed pointer's header is itself
+/// not a forwarding entry — chains are a collector bug.
+///
+/// # Safety
+/// `ptr` must point to a live or forwarded GC object header. Calling on
+/// arbitrary memory is UB. Single-threaded read; for concurrent paths
+/// see [`crate::read_barrier_atomic`].
+#[inline]
+pub unsafe fn follow_forwarding(ptr: *const u8) -> *const u8 {
+    let header = unsafe { *(ptr as *const u64) };
+    if header & FORWARDING_BIT == 0 {
+        return ptr;
+    }
+    let to = (header & !FORWARDING_BIT) as usize as *const u8;
+    debug_assert_eq!(
+        unsafe { *(to as *const u64) } & FORWARDING_BIT,
+        0,
+        "dynalloc: forwarding pointer chain (to-space {:p} also forwarded)",
+        to,
+    );
+    to
+}
 
 // ─── PtrPolicy ──────────────────────────────────────────────────────
 
@@ -244,5 +273,68 @@ impl SemiSpace {
         unsafe { self.install_forwarding(old, new) };
 
         new
+    }
+}
+
+#[cfg(test)]
+mod follow_forwarding_tests {
+    use super::*;
+
+    /// Header word with no forwarding bit set should pass through.
+    #[test]
+    fn passthrough_when_no_forwarding_bit() {
+        let header: u64 = 0x0000_0000_0000_0042; // arbitrary type_id
+        let header_ptr = &header as *const u64 as *const u8;
+        let result = unsafe { follow_forwarding(header_ptr) };
+        assert_eq!(result, header_ptr);
+    }
+
+    /// Header word with FORWARDING_BIT set returns the to-space pointer
+    /// stored in the low 63 bits.
+    #[test]
+    fn follows_when_forwarding_bit_set() {
+        // Build a "to-space" object with a normal header.
+        let to_header: u64 = 0x0000_0000_0000_0007;
+        let to_ptr = &to_header as *const u64 as *const u8;
+
+        // Build a "from-space" header that points at it.
+        let from_header: u64 = (to_ptr as u64) | FORWARDING_BIT;
+        let from_ptr = &from_header as *const u64 as *const u8;
+
+        let result = unsafe { follow_forwarding(from_ptr) };
+        assert_eq!(result, to_ptr);
+
+        // The header at the followed location is itself not forwarded.
+        let followed_header = unsafe { *(result as *const u64) };
+        assert_eq!(followed_header & FORWARDING_BIT, 0);
+        assert_eq!(followed_header, 0x0000_0000_0000_0007);
+    }
+
+    /// Single-hop only: even if to-space happens to itself look forwarded,
+    /// the function only does one hop. The debug assertion guards against
+    /// chains in debug builds; release builds silently follow once.
+    #[test]
+    #[cfg_attr(debug_assertions, should_panic(expected = "forwarding pointer chain"))]
+    fn single_hop_only() {
+        let leaf_header: u64 = 0x0000_0000_0000_0099;
+        let leaf_ptr = &leaf_header as *const u64 as *const u8;
+
+        let middle_header: u64 = (leaf_ptr as u64) | FORWARDING_BIT;
+        let middle_ptr = &middle_header as *const u64 as *const u8;
+
+        let root_header: u64 = (middle_ptr as u64) | FORWARDING_BIT;
+        let root_ptr = &root_header as *const u64 as *const u8;
+
+        // Debug build: the assertion fires because middle is forwarded.
+        // Release: silently returns middle_ptr (one hop).
+        let _ = unsafe { follow_forwarding(root_ptr) };
+    }
+
+    /// FORWARDING_BIT exposes the same constant `pub(crate)` callers
+    /// inside the crate already use. Sanity check the public re-export.
+    #[test]
+    fn forwarding_bit_is_high_bit() {
+        assert_eq!(FORWARDING_BIT, 1 << 63);
+        assert_eq!(crate::FORWARDING_BIT, FORWARDING_BIT);
     }
 }

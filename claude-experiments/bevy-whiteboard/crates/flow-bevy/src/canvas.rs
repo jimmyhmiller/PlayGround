@@ -396,6 +396,7 @@ pub fn seed_from_path(
     theme: Res<Theme>,
     metrics: Res<AtlasMetrics>,
     mut pending: ResMut<crate::PendingCanvas>,
+    mut clock: ResMut<crate::bridge::SimClock>,
 ) {
     let Some(path) = pending.0.take() else { return; };
     let canvas = match load_canvas(&path, 1) {
@@ -405,6 +406,9 @@ pub fn seed_from_path(
             return;
         }
     };
+    // Whiteboards always boot paused so the user can read the topology
+    // before the sim starts firing. They press play when ready.
+    clock.paused = true;
     hide_all.0 = canvas.visual.hide_all;
     bevy::log::info!(
         "loaded canvas `{}` ({} nodes, {} edges)",

@@ -53,7 +53,13 @@ impl Plugin for FlowBridgePlugin {
             .add_systems(PreUpdate, sync_snapshot_system.in_set(SnapshotReady))
             .add_systems(
                 Update,
-                (push_clock_to_driver, sync_visual_now_from_sim, collect_new_events).chain(),
+                (
+                    push_clock_to_driver,
+                    push_edge_latency_scale_to_sim,
+                    sync_visual_now_from_sim,
+                    collect_new_events,
+                )
+                    .chain(),
             );
     }
 }
@@ -121,6 +127,13 @@ pub struct SimClock {
     /// log every frame — same path that produces pixel-identical
     /// scrub-back.
     pub reverse_play_rate: f64,
+    /// Multiplier applied to every edge latency at emit time, AND used
+    /// to rescale every in-flight packet's remaining travel time when
+    /// it changes. `1.0` = normal; `>1.0` slows packet transit only
+    /// (rule firings, scenarios, sim time still advance at
+    /// `multiplier`). `push_edge_latency_scale_to_sim` ships changes
+    /// to the worker via a `SimCommand`.
+    pub edge_latency_scale: f64,
 }
 impl Default for SimClock {
     fn default() -> Self {
@@ -131,6 +144,7 @@ impl Default for SimClock {
             visual_now: 0.0,
             visual_offset: 0.0,
             reverse_play_rate: 0.0,
+            edge_latency_scale: 1.0,
         }
     }
 }
@@ -233,6 +247,33 @@ fn push_clock_to_driver(
     crate::time_phase!(perf, "bridge.advance_sim", {
         driver.0.advance_direct(dt_sim_ns);
     });
+}
+
+/// Ship `SimClock.edge_latency_scale` changes into the sim via a
+/// `SimCommand`. Tracked locally so we only emit a command when the
+/// user-facing value actually changes — every other frame is a no-op.
+/// Goes through the command channel (not an atomic) because applying
+/// the scale also requires walking `in_flight` to rescale remaining
+/// travel time, which has to happen on the sim thread.
+fn push_edge_latency_scale_to_sim(
+    clock: Res<SimClock>,
+    mut driver: ResMut<SimDriverRes>,
+    mut last_pushed: Local<f64>,
+) {
+    if *last_pushed == 0.0 {
+        *last_pushed = 1.0;
+    }
+    let target = clock.edge_latency_scale;
+    if !target.is_finite() || target <= 0.0 {
+        return;
+    }
+    if (target - *last_pushed).abs() < 1e-6 {
+        return;
+    }
+    *last_pushed = target;
+    driver.0.send_command(crate::sim_driver::SimCommand::new(move |sim| {
+        sim.set_edge_latency_scale(target);
+    }));
 }
 
 /// Drain events the sim worker has produced since last frame into

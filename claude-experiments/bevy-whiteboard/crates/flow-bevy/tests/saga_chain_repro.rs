@@ -185,6 +185,9 @@ fn repro_then_example_worker_mode_packets_visible() {
             sleep(Duration::from_millis(33));
         }
     };
+    // Whiteboards boot paused now — let the seed system run, then unpause.
+    app.update();
+    app.world_mut().resource_mut::<flow_bevy::bridge::SimClock>().paused = false;
     pump(&mut app, 3.0);
 
     let repro_packets = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().strategy.as_replay().packets.len();

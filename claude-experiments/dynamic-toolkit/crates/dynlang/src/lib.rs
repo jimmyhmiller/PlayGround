@@ -36,6 +36,10 @@
 //! ```
 
 pub mod gc;
+pub mod host;
+pub mod ic;
+pub mod slow_paths;
+pub mod stdlib;
 
 use std::collections::HashMap;
 
@@ -130,6 +134,28 @@ pub struct ObjRef {
 impl ObjRef {
     pub fn value(self) -> Value {
         self.value
+    }
+}
+
+/// Handle to a GC-rooted slot minted by [`DynFunc::with_rooted`]. Use
+/// `get(f)` to reload the current (post-forwarding) value from the slot.
+#[derive(Clone, Debug)]
+pub struct RootedSlot {
+    name: String,
+}
+
+impl RootedSlot {
+    /// Reload the slot's current value. Call this *after* every safepoint
+    /// or `gc_alloc` in the rooted-scope body to pick up any forwarding
+    /// the GC performed.
+    pub fn get(&self, f: &mut DynFunc) -> Value {
+        f.get_var(&self.name)
+    }
+
+    /// The underlying slot name. Useful when interoperating with
+    /// `def_var`/`get_var`/`set_var` directly.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -433,6 +459,12 @@ pub struct DynModule {
     pub obj_types: Vec<ObjType>,
     /// Extern for GC allocation (declared when first obj_type is built).
     gc_alloc_extern: Option<FuncRef>,
+    /// Externs the toolkit auto-binds at JIT time. Populated by
+    /// `register_slow_paths_with_defaults`. Keyed by extern name.
+    /// `DynGcRuntime::compile_jit` consults this after the reserved names
+    /// (`__gc_alloc__`, `__dynlang_prop_slow__`) and before the
+    /// embedder-supplied resolver.
+    pub auto_externs: HashMap<String, *const u8>,
 }
 
 fn sig(params: &[Type], ret: Option<Type>) -> Signature {
@@ -457,6 +489,7 @@ impl DynModule {
             func_refs: HashMap::new(),
             obj_types: Vec::new(),
             gc_alloc_extern: None,
+            auto_externs: HashMap::new(),
         }
     }
 
@@ -500,6 +533,11 @@ impl DynModule {
     /// Get the GC configuration.
     pub fn gc_config(&self) -> &GcConfig {
         &self.gc_config
+    }
+
+    /// Get the NanBox tag scheme.
+    pub fn tags(&self) -> &NanBoxTags {
+        &self.tags
     }
 
     // ── String pool ───────────────────────────────────────────
@@ -548,6 +586,42 @@ impl DynModule {
         self.slow.lt = Some(self.mb.declare_extern(&format!("{prefix}_lt"), i64_2.clone()));
         self.slow.gt = Some(self.mb.declare_extern(&format!("{prefix}_gt"), i64_2.clone()));
         self.slow.not = Some(self.mb.declare_extern(&format!("{prefix}_not"), i64_1));
+    }
+
+    /// Like [`register_slow_paths`](Self::register_slow_paths), but also
+    /// pre-binds each declared extern to a default panic stub from
+    /// [`crate::slow_paths`]. The runtime auto-binds these at JIT time, so
+    /// the embedder gets sane behavior (clear panic on slow-path entry)
+    /// without writing 9 stub thunks. Call
+    /// [`override_extern`](Self::override_extern) to replace any one with
+    /// a real implementation.
+    pub fn register_slow_paths_with_defaults(&mut self, prefix: &str) {
+        self.register_slow_paths(prefix);
+        self.auto_externs
+            .insert(format!("{prefix}_add"), slow_paths::panic_add as *const u8);
+        self.auto_externs
+            .insert(format!("{prefix}_sub"), slow_paths::panic_sub as *const u8);
+        self.auto_externs
+            .insert(format!("{prefix}_mul"), slow_paths::panic_mul as *const u8);
+        self.auto_externs
+            .insert(format!("{prefix}_div"), slow_paths::panic_div as *const u8);
+        self.auto_externs
+            .insert(format!("{prefix}_eq"), slow_paths::panic_eq as *const u8);
+        self.auto_externs
+            .insert(format!("{prefix}_lt"), slow_paths::panic_lt as *const u8);
+        self.auto_externs
+            .insert(format!("{prefix}_gt"), slow_paths::panic_gt as *const u8);
+        self.auto_externs
+            .insert(format!("{prefix}_neg"), slow_paths::panic_neg as *const u8);
+        self.auto_externs
+            .insert(format!("{prefix}_not"), slow_paths::panic_not as *const u8);
+    }
+
+    /// Override (or set) the auto-bound implementation for an extern.
+    /// Use this to replace a default panic stub installed by
+    /// `register_slow_paths_with_defaults` with a real implementation.
+    pub fn override_extern(&mut self, name: &str, ptr: *const u8) {
+        self.auto_externs.insert(name.to_string(), ptr);
     }
 
     /// Register a single slow-path extern for a specific operation.
@@ -608,6 +682,7 @@ impl DynModule {
             gc_alloc_extern: self.gc_alloc_extern,
             slow: self.slow.clone(),
             vars: vec![HashMap::new()],
+            next_fresh_slot: 0,
         }
     }
 
@@ -643,6 +718,36 @@ pub enum DynOp {
     Not,
 }
 
+// ── TypeHint ──────────────────────────────────────────────────────
+
+/// Static knowledge a frontend has about a NanBox value at a use site.
+/// Drives [`DynFunc::add`] etc. to pick between the `num_*` fast path
+/// (no tag check) and the conservative `dyn_*` form (tag check + slow
+/// extern). `Unknown` is always sound.
+///
+/// Non-exhaustive: future variants (`Bool`, `Object(ObjTypeId)`,
+/// `IntInRange { lo, hi }`) can be added without breaking matchers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TypeHint {
+    /// No information; emit the conservative `dyn_*` form.
+    #[default]
+    Unknown,
+    /// Operand is statically known to be a NanBox-encoded number (float).
+    Number,
+    /// Operand is statically known to be a NanBox-encoded boolean.
+    Bool,
+}
+
+impl TypeHint {
+    pub fn is_number(&self) -> bool {
+        matches!(self, TypeHint::Number)
+    }
+    pub fn is_bool(&self) -> bool {
+        matches!(self, TypeHint::Bool)
+    }
+}
+
 // ── DynFunc ───────────────────────────────────────────────────────
 
 /// High-level function builder for dynamic languages.
@@ -666,6 +771,9 @@ pub struct DynFunc {
     slow: SlowPaths,
     /// Variable scopes (public for inspection, e.g. checking if a var exists).
     pub vars: Vec<HashMap<String, StackSlot>>,
+    /// Monotonic counter for `fresh_slot_name`. Per-DynFunc; never resets,
+    /// so even nested inlining never mints a colliding slot name.
+    next_fresh_slot: u32,
 }
 
 impl DynFunc {
@@ -705,6 +813,55 @@ impl DynFunc {
         let slot = self.find_var(name);
         let addr = self.fb.stack_addr(slot);
         self.fb.load(Type::I64, addr, 0)
+    }
+
+    // ── GC-rooted temporaries ────────────────────────────────
+
+    /// Mint a unique slot name. The counter is per-`DynFunc` and monotonic,
+    /// so nested inlining can mint as many fresh names as it wants without
+    /// colliding with anything in the caller's scope.
+    pub fn fresh_slot_name(&mut self) -> String {
+        let id = self.next_fresh_slot;
+        self.next_fresh_slot += 1;
+        format!("__rooted_{}__", id)
+    }
+
+    /// Pin `values` into uniquely-named GC-rooted slots so they survive any
+    /// safepoint or `gc_alloc` inside `body`. The closure receives
+    /// `RootedSlot` handles whose `get(f)` reloads the (possibly forwarded)
+    /// current value from the slot — call it *after* each allocation site
+    /// in the body, before reading the value again.
+    ///
+    /// The caller is still responsible for emitting `safepoint` and
+    /// `gc_alloc` inside the closure; this helper only owns the rooting.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let new_obj = f.with_rooted(&[v1, v2], |f, slots| {
+    ///     f.fb.safepoint(&[]);
+    ///     let raw = f.gc_alloc(ty, len);
+    ///     // Reload after alloc — pointers may have been forwarded.
+    ///     let v1_now = slots[0].get(f);
+    ///     let v2_now = slots[1].get(f);
+    ///     f.fb.store(v1_now, raw, off1);
+    ///     f.fb.store(v2_now, raw, off2);
+    ///     raw
+    /// });
+    /// ```
+    pub fn with_rooted<R>(
+        &mut self,
+        values: &[Value],
+        body: impl FnOnce(&mut Self, &[RootedSlot]) -> R,
+    ) -> R {
+        let slots: Vec<RootedSlot> = values
+            .iter()
+            .map(|v| {
+                let name = self.fresh_slot_name();
+                self.def_var(&name, *v);
+                RootedSlot { name }
+            })
+            .collect();
+        body(self, &slots)
     }
 
     /// Assign a new value to an existing variable.
@@ -880,6 +1037,36 @@ impl DynFunc {
     /// Bitcast a NanBox float (I64) → F64. Caller must ensure it's a float.
     pub fn unbox_number(&mut self, v: Value) -> Value {
         self.fb.bitcast(v, Type::F64)
+    }
+
+    /// Decode a NanBox-encoded float and truncate to a signed I64. Used
+    /// for array indices and other "this float is really an int" sites.
+    /// Caller must ensure the value is a number; out-of-range floats
+    /// follow the IR's `float_to_int` semantics (target-dependent).
+    pub fn nanbox_to_int(&mut self, v: Value) -> Value {
+        let as_f64 = self.unbox_number(v);
+        self.fb.float_to_int(as_f64)
+    }
+
+    /// Bit-equal two NanBox values: true iff their underlying I64 bits
+    /// are equal. Correct for nil / boolean / pointer-identity / canonical
+    /// integer comparisons. **Not IEEE equality** — `NaN == NaN` here, so
+    /// non-canonical floats with the same bits compare equal regardless
+    /// of whether IEEE would agree. Returns a NanBox bool.
+    pub fn bit_eq(&mut self, a: Value, b: Value) -> Value {
+        let raw = self.fb.icmp(CmpOp::Eq, a, b);
+        let t = self.bool_val(true);
+        let fal = self.bool_val(false);
+        self.fb.select(raw, t, fal)
+    }
+
+    /// Logical not of a NanBox value, using the configured truthiness
+    /// policy ([`is_falsey`](Self::is_falsey)). Returns a NanBox bool.
+    pub fn bool_not(&mut self, v: Value) -> Value {
+        let falsey = self.is_falsey(v);
+        let t = self.bool_val(true);
+        let fal = self.bool_val(false);
+        self.fb.select(falsey, t, fal)
     }
 
     /// Bitcast F64 → I64 with NaN canonicalization.
@@ -1063,6 +1250,54 @@ impl DynFunc {
     /// Dynamic greater-than. Float fast path, else extern.
     pub fn dyn_gt(&mut self, a: Value, b: Value) -> Value {
         self.dyn_float_cmp(a, b, CmpOp::Sgt, DynOp::Gt)
+    }
+
+    // ── Type-hinted binop dispatch ────────────────────────────
+    //
+    // Pick between `num_*` (skip the tag-check branch) and `dyn_*`
+    // (full fast/slow dispatch) based on caller-supplied type hints.
+    // For comparisons that don't have a `dyn_*` primitive (`le`, `ge`),
+    // synthesize via `!gt` / `!lt`.
+
+    /// Hinted addition. Emits `num_add` when both operands are `Number`,
+    /// else `dyn_add`.
+    pub fn add(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
+        if lh.is_number() && rh.is_number() { self.num_add(l, r) } else { self.dyn_add(l, r) }
+    }
+    pub fn sub(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
+        if lh.is_number() && rh.is_number() { self.num_sub(l, r) } else { self.dyn_sub(l, r) }
+    }
+    pub fn mul(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
+        if lh.is_number() && rh.is_number() { self.num_mul(l, r) } else { self.dyn_mul(l, r) }
+    }
+    pub fn div(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
+        if lh.is_number() && rh.is_number() { self.num_div(l, r) } else { self.dyn_div(l, r) }
+    }
+    pub fn lt(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
+        if lh.is_number() && rh.is_number() { self.num_lt(l, r) } else { self.dyn_lt(l, r) }
+    }
+    pub fn gt(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
+        if lh.is_number() && rh.is_number() { self.num_gt(l, r) } else { self.dyn_gt(l, r) }
+    }
+    /// Less-than-or-equal. No `dyn_le` primitive exists — synthesize as
+    /// `!gt` when operands aren't both numbers.
+    pub fn le(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
+        if lh.is_number() && rh.is_number() {
+            self.num_le(l, r)
+        } else {
+            let gt = self.dyn_gt(l, r);
+            self.bool_not(gt)
+        }
+    }
+    /// Greater-than-or-equal. No `dyn_ge` primitive exists — synthesize as
+    /// `!lt` when operands aren't both numbers.
+    pub fn ge(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
+        if lh.is_number() && rh.is_number() {
+            self.num_ge(l, r)
+        } else {
+            let lt = self.dyn_lt(l, r);
+            self.bool_not(lt)
+        }
     }
 
     // ── Internal: float binop fast path ───────────────────────
@@ -1835,5 +2070,273 @@ mod tests {
             }
             other => panic!("unexpected: {:?}", other),
         }
+    }
+
+    #[test]
+    fn fresh_slot_name_is_unique_and_with_rooted_reloads() {
+        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        dm.register_slow_paths("rt");
+        let main = dm.declare_func("main", 0);
+
+        let mut f = dm.start_func(main);
+        // Counter mints distinct names monotonically.
+        let n1 = f.fresh_slot_name();
+        let n2 = f.fresh_slot_name();
+        assert_ne!(n1, n2);
+
+        // with_rooted closure receives slots whose `get` reloads from the
+        // backing stack slot. Reading should produce the same value bits
+        // (no GC ran between def and read).
+        let v1 = f.number(1.5);
+        let v2 = f.number(2.5);
+        let result = f.with_rooted(&[v1, v2], |f, slots| {
+            assert_eq!(slots.len(), 2);
+            assert_ne!(slots[0].name(), slots[1].name());
+            let r1 = slots[0].get(f);
+            let r2 = slots[1].get(f);
+            f.dyn_add(r1, r2)
+        });
+        f.fb.ret(result);
+        dm.finish_func(f);
+
+        let built = dm.build();
+        let roots = NoGcRoots;
+        let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
+        interp.bind_by_name("rt_add", |_| {
+            panic!("slow path should not be called");
+        });
+        match interp.run(main, &[]) {
+            Ok(InterpResult::Value(v)) => assert_eq!(f64::from_bits(v), 4.0),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    // ── DynFunc helpers (doc 10) ─────────────────────────────────
+
+    /// Returns a closure that takes a `DynFunc` argument constructor for
+    /// `bool_not(input)` and runs it through the interp; result is the
+    /// raw NanBox `u64` returned.
+    fn run_unary<B>(build: B) -> u64
+    where
+        B: FnOnce(&mut DynFunc) -> Value,
+    {
+        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let main = dm.declare_func("main", 0);
+        let mut f = dm.start_func(main);
+        let v = build(&mut f);
+        f.fb.ret(v);
+        dm.finish_func(f);
+        let built = dm.build();
+        run(&built.module, main, &[])
+    }
+
+    #[test]
+    fn bool_not_inverts_falsey_and_truthy() {
+        let true_v = run_unary(|f| {
+            let v = f.bool_val(true);
+            f.bool_not(v)
+        });
+        assert_eq!(true_v, nanbox_encode(1, 0)); // false
+
+        let false_v = run_unary(|f| {
+            let v = f.bool_val(false);
+            f.bool_not(v)
+        });
+        assert_eq!(false_v, nanbox_encode(1, 1)); // true
+
+        let nil_v = run_unary(|f| {
+            let v = f.nil();
+            f.bool_not(v)
+        });
+        assert_eq!(nil_v, nanbox_encode(1, 1)); // !nil = true (nil is falsey)
+
+        let num_v = run_unary(|f| {
+            let v = f.number(0.0);
+            f.bool_not(v)
+        });
+        // 0.0 is *truthy* in dynlang (only nil and false are falsey),
+        // so !0.0 = false.
+        assert_eq!(num_v, nanbox_encode(1, 0));
+    }
+
+    #[test]
+    fn bit_eq_returns_nanbox_bool() {
+        // Equal floats → true.
+        let eq_floats = run_unary(|f| {
+            let a = f.number(3.0);
+            let b = f.number(3.0);
+            f.bit_eq(a, b)
+        });
+        assert_eq!(eq_floats, nanbox_encode(1, 1));
+
+        // Unequal floats → false.
+        let neq_floats = run_unary(|f| {
+            let a = f.number(3.0);
+            let b = f.number(4.0);
+            f.bit_eq(a, b)
+        });
+        assert_eq!(neq_floats, nanbox_encode(1, 0));
+
+        // nil == nil → true (bit-equal).
+        let eq_nil = run_unary(|f| {
+            let a = f.nil();
+            let b = f.nil();
+            f.bit_eq(a, b)
+        });
+        assert_eq!(eq_nil, nanbox_encode(1, 1));
+
+        // nil vs false: different bit patterns (different tag), so false.
+        let nil_vs_false = run_unary(|f| {
+            let a = f.nil();
+            let b = f.bool_val(false);
+            f.bit_eq(a, b)
+        });
+        assert_eq!(nil_vs_false, nanbox_encode(1, 0));
+    }
+
+    #[test]
+    fn nanbox_to_int_truncates() {
+        // 3.7 → 3 (truncate, not round).
+        let r = run_unary(|f| {
+            let v = f.number(3.7);
+            f.nanbox_to_int(v)
+        });
+        assert_eq!(r as i64, 3);
+
+        // Negative.
+        let r = run_unary(|f| {
+            let v = f.number(-2.9);
+            f.nanbox_to_int(v)
+        });
+        assert_eq!(r as i64, -2);
+
+        // Integer-valued float round-trips.
+        let r = run_unary(|f| {
+            let v = f.number(42.0);
+            f.nanbox_to_int(v)
+        });
+        assert_eq!(r as i64, 42);
+    }
+
+    // ── Typed binops (doc 08) ────────────────────────────────────
+
+    /// Build + run a binop with the given type hints, asserting the
+    /// rt_<op> slow path is never called. Returns the raw NanBox bits.
+    fn run_binop<B>(slow_name: &str, build: B) -> u64
+    where
+        B: FnOnce(&mut DynFunc, Value, Value) -> Value,
+    {
+        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        dm.register_slow_paths("rt");
+        let main = dm.declare_func("main", 0);
+        let mut f = dm.start_func(main);
+        let a = f.number(10.0);
+        let b = f.number(3.0);
+        let r = build(&mut f, a, b);
+        f.fb.ret(r);
+        dm.finish_func(f);
+        let built = dm.build();
+        let roots = NoGcRoots;
+        let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
+        let slow_owned = slow_name.to_string();
+        interp.bind_by_name(slow_name, move |_| {
+            panic!("slow path `{}` should not be called", slow_owned);
+        });
+        match interp.run(main, &[]) {
+            Ok(InterpResult::Value(v)) => v,
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn add_number_number_takes_fast_path() {
+        // Number + Number → num_add; the rt_add panic stub must not fire.
+        let r = run_binop("rt_add", |f, a, b| {
+            f.add(a, TypeHint::Number, b, TypeHint::Number)
+        });
+        assert_eq!(as_float(r), 13.0);
+    }
+
+    #[test]
+    fn sub_mul_div_number_number_take_fast_path() {
+        let r = run_binop("rt_sub", |f, a, b| {
+            f.sub(a, TypeHint::Number, b, TypeHint::Number)
+        });
+        assert_eq!(as_float(r), 7.0);
+
+        let r = run_binop("rt_mul", |f, a, b| {
+            f.mul(a, TypeHint::Number, b, TypeHint::Number)
+        });
+        assert_eq!(as_float(r), 30.0);
+
+        let r = run_binop("rt_div", |f, a, b| {
+            f.div(a, TypeHint::Number, b, TypeHint::Number)
+        });
+        assert!((as_float(r) - 10.0 / 3.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn cmp_number_number_take_fast_path() {
+        // 10 < 3 → false; 10 > 3 → true; 10 <= 3 → false; 10 >= 3 → true.
+        let lt = run_binop("rt_lt", |f, a, b| {
+            f.lt(a, TypeHint::Number, b, TypeHint::Number)
+        });
+        assert_eq!(lt, nanbox_encode(1, 0));
+
+        let gt = run_binop("rt_gt", |f, a, b| {
+            f.gt(a, TypeHint::Number, b, TypeHint::Number)
+        });
+        assert_eq!(gt, nanbox_encode(1, 1));
+
+        let le = run_binop("rt_lt", |f, a, b| {
+            f.le(a, TypeHint::Number, b, TypeHint::Number)
+        });
+        assert_eq!(le, nanbox_encode(1, 0));
+
+        let ge = run_binop("rt_gt", |f, a, b| {
+            f.ge(a, TypeHint::Number, b, TypeHint::Number)
+        });
+        assert_eq!(ge, nanbox_encode(1, 1));
+    }
+
+    #[test]
+    fn add_unknown_unknown_takes_dyn_path_with_inline_fast() {
+        // (Unknown, Unknown) routes through dyn_add. dyn_add still has
+        // an inline float fast path that fires when both operands are
+        // floats at runtime, so the rt_add stub doesn't need to be
+        // bound — but the IR shape is the conservative one.
+        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        dm.register_slow_paths("rt");
+        let main = dm.declare_func("main", 0);
+        let mut f = dm.start_func(main);
+        let a = f.number(10.0);
+        let b = f.number(3.0);
+        // No type hints → conservative dyn_add.
+        let r = f.add(a, TypeHint::Unknown, b, TypeHint::Unknown);
+        f.fb.ret(r);
+        dm.finish_func(f);
+        let built = dm.build();
+        let roots = NoGcRoots;
+        let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
+        // Inline fast path fires at runtime since both args are floats —
+        // slow stub still shouldn't be hit.
+        interp.bind_by_name("rt_add", |_| {
+            panic!("rt_add hit even though operands are float at runtime");
+        });
+        match interp.run(main, &[]) {
+            Ok(InterpResult::Value(v)) => assert_eq!(as_float(v), 13.0),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_hint_default_is_unknown() {
+        // Sanity check the Default impl — easy to break with a
+        // non_exhaustive enum.
+        assert_eq!(TypeHint::default(), TypeHint::Unknown);
+        assert!(!TypeHint::Unknown.is_number());
+        assert!(TypeHint::Number.is_number());
+        assert!(!TypeHint::Bool.is_number());
+        assert!(TypeHint::Bool.is_bool());
     }
 }

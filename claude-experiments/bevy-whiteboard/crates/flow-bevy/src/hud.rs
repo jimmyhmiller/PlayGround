@@ -43,11 +43,13 @@ impl Plugin for HudPlugin {
                     sync_rewind_slider_from_snapshot,
                     sync_rewind_slider_max,
                     handle_speed_chips,
+                    handle_edge_scale_chips,
                     handle_vis_k_click,
                     push_vis_k_slider,
                     sync_vis_k_slider_from_resource,
                     sync_play_button_visual,
                     sync_speed_chip_visuals,
+                    sync_edge_scale_chip_visuals,
                 ),
             );
     }
@@ -119,6 +121,21 @@ const SPEED_OPTIONS: [(f64, &str); 5] = [
     (1.0,  "1x"),
     (2.0,  "2x"),
     (4.0,  "4x"),
+];
+
+#[derive(Component, Clone, Copy)]
+struct HudEdgeScaleChip(f64);
+
+/// Edge-latency scale chips. `1×` is neutral; `2× / 4× / 10×` make
+/// every edge latency that much longer (and rescale in-flight packets
+/// so the change feels uniform). Independent of the sim-speed chips:
+/// you can run the sim at `4×` speed but with edge transit `4×`
+/// slower to see "fast logic, slow lines".
+const EDGE_SCALE_OPTIONS: [(f64, &str); 4] = [
+    (1.0,  "e1x"),
+    (2.0,  "e2x"),
+    (4.0,  "e4x"),
+    (10.0, "e10x"),
 ];
 
 // ────────────────────────────────────────────────────────────
@@ -217,6 +234,14 @@ fn spawn_hud(mut commands: Commands, theme: Res<Theme>, clock: Res<SimClock>) {
                 let active = !clock.paused && (clock.multiplier - val).abs() < 1e-3;
                 let is_last = i + 1 == SPEED_OPTIONS.len();
                 hud_speed_chip(chips, &theme, label, active, is_last, HudSpeedChip(*val));
+            }
+        });
+
+        hud_chip_strip(bar, &theme, |chips| {
+            for (i, (val, label)) in EDGE_SCALE_OPTIONS.iter().enumerate() {
+                let active = (clock.edge_latency_scale - val).abs() < 1e-3;
+                let is_last = i + 1 == EDGE_SCALE_OPTIONS.len();
+                hud_speed_chip(chips, &theme, label, active, is_last, HudEdgeScaleChip(*val));
             }
         });
 
@@ -418,6 +443,34 @@ fn handle_speed_chips(
         if *interaction == Interaction::Pressed {
             clock.multiplier = chip.0;
             clock.paused = false;
+        }
+    }
+}
+
+fn handle_edge_scale_chips(
+    q: Query<(&Interaction, &HudEdgeScaleChip), Changed<Interaction>>,
+    mut clock: ResMut<SimClock>,
+) {
+    for (interaction, chip) in q.iter() {
+        if *interaction == Interaction::Pressed {
+            clock.edge_latency_scale = chip.0;
+        }
+    }
+}
+
+fn sync_edge_scale_chip_visuals(
+    theme: Res<Theme>,
+    clock: Res<SimClock>,
+    mut chips: Query<(&HudEdgeScaleChip, &Children, &mut BackgroundColor)>,
+    mut text_q: Query<&mut TextColor, Without<Mono>>,
+) {
+    for (chip, children, mut bg) in chips.iter_mut() {
+        let active = (clock.edge_latency_scale - chip.0).abs() < 1e-3;
+        bg.0 = if active { theme.ink } else { Color::NONE };
+        for c in children.iter() {
+            if let Ok(mut tc) = text_q.get_mut(c) {
+                tc.0 = if active { theme.paper } else { theme.ink_soft };
+            }
         }
     }
 }

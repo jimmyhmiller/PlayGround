@@ -193,8 +193,22 @@ fn handle_hotkeys(
     }
     if keys.just_pressed(KeyCode::Escape) { active.0 = Tool::Select; }
     if keys.just_pressed(KeyCode::Space) { clock.paused = !clock.paused; }
-    if keys.just_pressed(KeyCode::BracketLeft)  { clock.multiplier *= 0.5; }
-    if keys.just_pressed(KeyCode::BracketRight) { clock.multiplier *= 2.0; }
+    let shift = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    if keys.just_pressed(KeyCode::BracketLeft) {
+        // `{` (shift+[) → slow edges down; `[` → slow whole sim down.
+        if shift {
+            clock.edge_latency_scale = (clock.edge_latency_scale * 2.0).min(1024.0);
+        } else {
+            clock.multiplier *= 0.5;
+        }
+    }
+    if keys.just_pressed(KeyCode::BracketRight) {
+        if shift {
+            clock.edge_latency_scale = (clock.edge_latency_scale * 0.5).max(1.0 / 1024.0);
+        } else {
+            clock.multiplier *= 2.0;
+        }
+    }
     // Visual scale — decoupled from sim speed. `-` halves (packets
     // flash quicker); `=` doubles (packets linger longer). Under F12
     // `set_k` only affects future ingestions; already-in-flight

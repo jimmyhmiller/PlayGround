@@ -261,7 +261,27 @@ pub struct Sim {
     /// cap allocation so steady-state runs don't reallocate.
     #[serde(skip)]
     pub perf_samples: Vec<(&'static str, f64)>,
+    /// Global multiplier applied to every edge latency at emit time.
+    /// Used by the host to "slow down packet transit" without slowing
+    /// the rest of the sim (rule firings, scenario actions). 1.0 is
+    /// neutral. Changes also rescale the remaining travel time of
+    /// every in-flight packet — see `Sim::set_edge_latency_scale` —
+    /// so the visible effect is uniform across already-emitted and
+    /// future packets.
+    #[serde(default = "default_edge_latency_scale")]
+    pub edge_latency_scale: f64,
 }
+
+fn default_edge_latency_scale() -> f64 { 1.0 }
+
+/// Per-step floor (ns) added to the edge-latency scale. At
+/// `edge_latency_scale = S > 1`, every edge's effective latency is at
+/// least `(S - 1) * EDGE_LATENCY_SCALE_FLOOR_NS`. This makes
+/// 0-latency edges (broadcast fan-outs, "wires" with no declared
+/// time cost) still visibly slow down when the user cranks the
+/// scale; without it `0 * S = 0` would leave them instant. At
+/// `S = 1` the floor is 0 and behavior is unchanged.
+pub const EDGE_LATENCY_SCALE_FLOOR_NS: u64 = 50_000_000;
 
 /// Serde adapter for `BinaryHeap<Reverse<T>>` — serializes as a flat
 /// `Vec<T>` (losing the Reverse-wrap and the heap order, both of which
@@ -344,7 +364,35 @@ impl Sim {
             error_counts: BTreeMap::new(),
             timeline: crate::timeline::Timeline::new(),
             perf_samples: Vec::new(),
+            edge_latency_scale: 1.0,
         }
+    }
+
+    /// Set the edge-latency multiplier and rescale every in-flight
+    /// packet's remaining travel time so the change feels uniform.
+    /// `new = now + (arrives - now) * (new_scale / old_scale)`.
+    /// No-op if the scale is unchanged or non-positive (we refuse to
+    /// invert / zero out time).
+    pub fn set_edge_latency_scale(&mut self, new_scale: f64) {
+        if !(new_scale.is_finite() && new_scale > 0.0) {
+            return;
+        }
+        let old = self.edge_latency_scale;
+        if (old - new_scale).abs() < f64::EPSILON {
+            return;
+        }
+        let factor = new_scale / old;
+        let now = self.now_ns;
+        let drained: Vec<Scheduled> = self.in_flight.drain().map(|r| r.0).collect();
+        let mut rescaled: Vec<Reverse<Scheduled>> = Vec::with_capacity(drained.len());
+        for mut s in drained {
+            let remaining = s.arrives_at_ns.saturating_sub(now);
+            let new_rem = (remaining as f64 * factor).round() as u64;
+            s.arrives_at_ns = now.saturating_add(new_rem);
+            rescaled.push(Reverse(s));
+        }
+        self.in_flight = BinaryHeap::from(rescaled);
+        self.edge_latency_scale = new_scale;
     }
 
     /// Drain the per-phase timing samples accumulated during the most

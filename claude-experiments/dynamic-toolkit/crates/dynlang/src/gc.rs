@@ -10,6 +10,7 @@
 //! those are implementation details of this facade.
 
 use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 use dynalloc::{BumpAllocator, Heap, PtrPolicy, SemiSpace, alloc_obj};
 use dynir::interp::ExternCallResult;
@@ -115,6 +116,11 @@ pub struct DynGcRuntime {
     type_infos: Vec<TypeInfo>,
     tags: NanBoxTags,
     roots: RootSet,
+    /// Externs to auto-bind at JIT time, in addition to the built-in
+    /// `__gc_alloc__` and `__dynlang_prop_slow__`. Populated via
+    /// [`set_auto_externs`](Self::set_auto_externs); typically the
+    /// `DynModule::auto_externs` map verbatim.
+    auto_externs: HashMap<String, *const u8>,
 }
 
 /// The canonical name of dynlang's GC-allocation extern. `compile_jit`
@@ -149,7 +155,17 @@ impl DynGcRuntime {
             type_infos,
             tags: tags.clone(),
             roots: RootSet::new(),
+            auto_externs: HashMap::new(),
         }
+    }
+
+    /// Install the auto-bound extern map (typically
+    /// `DynModule::auto_externs`). At JIT time, `compile_jit` consults
+    /// this after the reserved names (`__gc_alloc__`,
+    /// `__dynlang_prop_slow__`) and before the embedder-supplied
+    /// resolver. Replaces any previous map.
+    pub fn set_auto_externs(&mut self, map: HashMap<String, *const u8>) {
+        self.auto_externs = map;
     }
 
     pub fn tags(&self) -> &NanBoxTags { &self.tags }
@@ -294,11 +310,15 @@ impl DynGcRuntime {
                 FuncDef::Extern(ef) => {
                     if ef.name == GC_ALLOC_EXTERN {
                         Some(gc_alloc_thunk as *const u8)
+                    } else if ef.name == crate::ic::PROP_SLOW_EXTERN {
+                        Some(crate::ic::prop_slow_thunk as *const u8)
+                    } else if let Some(ptr) = self.auto_externs.get(&ef.name) {
+                        Some(*ptr)
                     } else {
                         Some(user_extern_for(&ef.name).unwrap_or_else(|| {
                             panic!(
                                 "dynlang: unresolved extern `{}` — DynGcRuntime::compile_jit's \
-                                 user_extern_for returned None",
+                                 user_extern_for returned None and it isn't in auto_externs",
                                 ef.name
                             )
                         }))

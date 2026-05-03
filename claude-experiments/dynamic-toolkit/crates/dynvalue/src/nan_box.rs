@@ -128,3 +128,104 @@ impl HasUnboxedFloat for NanBox {
         f64::from_bits(bits)
     }
 }
+
+// ── Embedder helpers ─────────────────────────────────────────────────
+//
+// Conveniences for host code that needs to construct NanBox values
+// without going through the JIT or interpreter.
+
+impl NanBox {
+    /// Canonical nil bit pattern: tag 0 with payload 0. Assumes the
+    /// embedder uses `NanBoxTags::default()` (nil = tag 0). Custom tag
+    /// schemes should call `encode_tagged(custom_nil_tag, 0)` instead.
+    pub const NIL: u64 = TAG_PATTERN;
+
+    /// Encode an integer as a NanBox float. Lossless for `|n| < 2^53`;
+    /// larger magnitudes lose low-order bits to f64 rounding.
+    #[inline(always)]
+    pub fn from_int(n: i64) -> u64 {
+        (n as f64).to_bits()
+    }
+
+    /// Encode an `f64`. Equivalent to `<NanBox as TagScheme>::encode_float`,
+    /// surfaced as an inherent method for discoverability. Canonicalizes
+    /// NaN bit patterns that would collide with the tag pattern.
+    #[inline(always)]
+    pub fn from_f64(f: f64) -> u64 {
+        <NanBox as TagScheme>::encode_float(f)
+    }
+}
+
+#[cfg(test)]
+mod inherent_tests {
+    use super::*;
+    use crate::scheme::Decoded;
+
+    #[test]
+    fn nil_decodes_to_tag_zero() {
+        match <NanBox as TagScheme>::decode(NanBox::NIL) {
+            Decoded::Tagged { tag: 0, payload: 0 } => {}
+            other => panic!("NIL decoded as {:?}", other),
+        }
+    }
+
+    #[test]
+    fn nil_is_canonical_tag_pattern() {
+        // tag 0, payload 0 → just the bare tag pattern.
+        assert_eq!(NanBox::NIL, TAG_PATTERN);
+    }
+
+    #[test]
+    fn from_int_round_trips_for_small_ints() {
+        for n in [-1000i64, -1, 0, 1, 42, 524272] {
+            let bits = NanBox::from_int(n);
+            match <NanBox as TagScheme>::decode(bits) {
+                Decoded::Float(f) => assert_eq!(f as i64, n, "lost precision on {}", n),
+                other => panic!("from_int({}) decoded as {:?}, not a float", n, other),
+            }
+        }
+    }
+
+    #[test]
+    fn from_int_lossless_below_2_pow_53() {
+        // 2^53 - 1 fits in f64 mantissa exactly.
+        let n = (1i64 << 53) - 1;
+        let bits = NanBox::from_int(n);
+        match <NanBox as TagScheme>::decode(bits) {
+            Decoded::Float(f) => assert_eq!(f as i64, n),
+            other => panic!("decoded as {:?}", other),
+        }
+    }
+
+    #[test]
+    fn from_f64_passthrough_for_finite() {
+        for f in [0.0f64, -1.5, 3.14159, 1e100, -1e-100] {
+            let bits = NanBox::from_f64(f);
+            match <NanBox as TagScheme>::decode(bits) {
+                Decoded::Float(decoded) => {
+                    if f.is_nan() {
+                        assert!(decoded.is_nan());
+                    } else {
+                        assert_eq!(decoded, f);
+                    }
+                }
+                other => panic!("from_f64({}) decoded as {:?}", f, other),
+            }
+        }
+    }
+
+    #[test]
+    fn from_f64_canonicalizes_colliding_nan() {
+        // The tag pattern itself is a NaN bit pattern that collides with
+        // tagged values; encode_float canonicalizes it.
+        let colliding = f64::from_bits(TAG_PATTERN);
+        assert!(colliding.is_nan());
+        let bits = NanBox::from_f64(colliding);
+        // Result must NOT be a tagged value — it should still decode as
+        // a Float.
+        match <NanBox as TagScheme>::decode(bits) {
+            Decoded::Float(f) => assert!(f.is_nan()),
+            other => panic!("canonicalized NaN decoded as {:?}, not Float", other),
+        }
+    }
+}

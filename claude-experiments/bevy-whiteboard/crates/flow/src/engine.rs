@@ -1078,7 +1078,7 @@ impl Sim {
                 }
                 for eid in edge_ids {
                     let edge = self.edges[&eid].clone();
-                    let latency = self.eval_latency_expr(&edge.latency_ns, compound_nid, bindings, &payload);
+                    let latency = self.eval_latency_expr(&edge.latency_ns, compound_nid, edge.to, bindings, &payload);
                     let arrives_at = self.now_ns.saturating_add(latency);
                     let pid = self.next_packet_id();
                     self.log.push(Event::PacketEmitted {
@@ -1114,7 +1114,7 @@ impl Sim {
             }
         };
         let edge = self.edges[&target_edge_id].clone();
-        let latency = self.eval_latency_expr(&edge.latency_ns, from_nid, &Bindings::new(), &payload);
+        let latency = self.eval_latency_expr(&edge.latency_ns, from_nid, deliver_to, &Bindings::new(), &payload);
         let arrives_at = self.now_ns.saturating_add(latency);
         let pid = self.next_packet_id();
         self.log.push(Event::PacketEmitted {
@@ -1188,6 +1188,7 @@ impl Sim {
         &mut self,
         latency_ns: &Expr,
         src_nid: NodeId,
+        dst_nid: NodeId,
         bindings: &Bindings,
         packet_payload: &Value,
     ) -> Time {
@@ -1238,7 +1239,38 @@ impl Sim {
             );
             return 0;
         }
-        n as Time
+        // Self-loops carry a node's internal clock (Generator,
+        // Client, BackoffClient all schedule their next tick via
+        // `self -> self : period_ns`). Slowing those down would slow
+        // emit *rate*, not transit — which is exactly what the user
+        // is trying to keep stable. Skip the scale on self-loops; only
+        // node-to-node edges feel it.
+        if src_nid == dst_nid {
+            return n as Time;
+        }
+        // Apply the global edge-latency scale. Rescaling in-flight
+        // packets when the scale changes is `Sim::set_edge_latency_scale`'s
+        // job; here we only handle new emits.
+        //
+        // Floor: a pure multiply leaves 0-latency edges at 0 regardless
+        // of scale. At scale > 1 we want previously-instant edges to
+        // also visibly slow down, so we floor the result at
+        // `(scale - 1) * EDGE_LATENCY_SCALE_FLOOR_NS`. At scale=1 the
+        // floor is 0 — exact original behavior. Non-zero edges with
+        // natural latencies above the floor are unaffected.
+        let scale = self.edge_latency_scale;
+        let scaled = (n as f64 * scale).round();
+        let floor = ((scale - 1.0).max(0.0)
+            * crate::sim::EDGE_LATENCY_SCALE_FLOOR_NS as f64)
+            .round();
+        let result = scaled.max(floor);
+        if result <= 0.0 {
+            return 0;
+        }
+        if result >= u64::MAX as f64 {
+            return Time::MAX;
+        }
+        result as Time
     }
 
     fn write_slot(&mut self, nid: NodeId, slot: &str, value: Value, at_ns: Time) {

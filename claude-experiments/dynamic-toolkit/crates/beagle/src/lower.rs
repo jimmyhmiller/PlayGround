@@ -9,11 +9,13 @@
 
 use std::collections::HashMap;
 
-use dynir::{CmpOp, FuncRef, Module, Signature, Type, Value};
+use dynir::{FuncRef, Module, Signature, Type, Value};
 use dynlang::{
-    DynFunc, DynModule, FieldKind, GcConfig, NanBoxTags, ObjTypeId, gc::DynGcRuntime,
+    DynFunc, DynModule, FieldKind, GcConfig, NanBoxTags, ObjTypeId,
+    gc::DynGcRuntime,
+    ic::{PropertyIc, PropertyIcRuntime},
+    stdlib::IndexedSeq,
 };
-use dynsym::{DispatchTable, InlineCacheArray, InlineCacheEntry, Symbol, SymbolTable};
 
 use crate::ast::{Ast, Condition, Pattern};
 use crate::types::{Ty, TypeEnv, analyze_types};
@@ -55,33 +57,14 @@ pub struct Lowered {
     /// or `interp_gc_alloc`. Language embedders should never roll their
     /// own `Heap` / `PtrPolicy` / `JitSafepointSession`.
     pub gc: DynGcRuntime,
-    /// Inline-cache state for dynamic property access. Must outlive the JIT
-    /// module — the JIT holds a raw pointer into `ic.array`. Host binary
-    /// installs this into a thread_local and reads it from the slow path.
-    pub ic: IcContext,
-    /// `u16` type id for the synthetic `__Array__` GC type. The host needs
-    /// this so `ext_length` can recognise array NanBoxes and read their
-    /// `len` field directly.
-    pub array_type_id_u16: u16,
-    /// Byte offset of the array's `len` Raw64 field, relative to the
-    /// object's raw header pointer. Same value the lowerer baked into IR.
-    pub array_len_offset: i32,
-}
-
-/// Inline-cache state: interned field names, per-struct offset tables
-/// keyed by class key (u16 type_id + 1, stored as u64), and the array of
-/// call-site cache slots whose stable base pointer is embedded in JIT code.
-///
-/// Why the +1: the object header stores a u16 `type_id` at offset 0
-/// (`dynobj::Compact`). We load it as u64 and shift by 1 so that
-/// `class_key = 0` can be used as the empty-cache sentinel — the first
-/// struct declared in a program would otherwise collide with the
-/// `InlineCacheEntry::EMPTY` marker and never take the fast path.
-pub struct IcContext {
-    pub symbols: SymbolTable,
-    /// class_key (type_id as u64, +1) → (symbol → field byte offset as u64).
-    pub per_type: HashMap<u64, DispatchTable>,
-    pub array: InlineCacheArray,
+    /// Property-access inline-cache runtime. Must outlive the JIT —
+    /// IR holds the address of its indirection cell. Host calls
+    /// `ic.install_thread()` before `run_jit`.
+    pub ic: PropertyIcRuntime,
+    /// Handle to the synthetic Array obj-type. Carries everything the
+    /// host needs to recognize array NanBoxes (`view`) and the lowerer
+    /// needs to emit literal/push/get IR. `Copy` — pass by value.
+    pub array_seq: IndexedSeq,
 }
 
 /// Field layout we extract from dynlang up front, so we can do field
@@ -102,23 +85,9 @@ struct InlineableFn {
     body: Vec<Ast>,
 }
 
-/// Layout for the synthetic `__Array__` GC type. One Raw64 `len` field +
-/// `varlen_values` storage. `elem_base` is the byte offset of element 0
-/// from the object's raw pointer.
-#[derive(Clone, Copy)]
-struct ArrayLayout {
-    type_id: ObjTypeId,
-    len_offset: i32,
-    elem_base: i64,
-}
-
 /// Tag used by beagle to carry string-pool IDs inline. Tags 0..2 are
 /// reserved by NanBoxTags::default (nil/bool/ptr); tag 3 is ours.
 pub const STRING_TAG: u32 = 3;
-
-/// Internal name of the synthetic array obj-type. Not user-visible —
-/// `Ast::Array` lowers to allocations of this type.
-const ARRAY_TYPE_NAME: &str = "__Array__";
 
 pub fn lower_program(program: &Ast) -> Lowered {
     let elements = match program {
@@ -130,7 +99,10 @@ pub fn lower_program(program: &Ast) -> Lowered {
     let tags = NanBoxTags::default();
     let mut dm = DynModule::new(gc_config.clone(), tags.clone());
 
-    dm.register_slow_paths("beagle");
+    // Slow paths default to panic stubs from `dynlang::slow_paths`.
+    // The binary_trees / ray_cast_bench subset never hits them; future
+    // beagle features can override individual ops via `dm.override_extern`.
+    dm.register_slow_paths_with_defaults("beagle");
 
     let print_ref = dm.declare_extern(
         "beagle_print",
@@ -172,47 +144,31 @@ pub fn lower_program(program: &Ast) -> Lowered {
         Signature { params: vec![], ret: Some(Type::I64) },
     );
 
-    // Inline-cache slow path for property access. The host binary
-    // registers this in `jit_extern_for`. Takes (obj, sym_id, cache_id),
-    // fills the IC entry, returns the loaded field.
-    let prop_slow_ref = dm.declare_extern(
-        "beagle_prop_slow",
-        Signature {
-            params: vec![Type::I64, Type::I64, Type::I64],
-            ret: Some(Type::I64),
-        },
-    );
+    // Property-access inline cache. dynlang owns the slow-path extern,
+    // the IC array, and the class-key encoding — see crates/dynlang/src/ic.rs.
+    let mut ic = PropertyIc::new(&mut dm);
 
     // ── Phase 1a: register the synthetic Array type. ──────────────
     // Single Raw64 field `len` (current logical length, in elements) +
     // a varlen-values backing region whose capacity is fixed at alloc time.
     // `Ast::Array` literals allocate with capacity = literal length;
     // `push` allocates a fresh array of capacity old_len + 1 and copies.
-    let array_type_id = dm
-        .obj_type(ARRAY_TYPE_NAME)
-        .field("len", FieldKind::Raw64)
-        .varlen_values()
-        .build();
+    let array_seq = IndexedSeq::register(&mut dm, "__Array__");
 
-    // Phase 1b: register object types for all `struct` declarations. ──
-    // Also build the symbol table + per-type dispatch tables that the IC
-    // slow path will consult. Field names are allowed to collide across
-    // structs — polymorphic access goes through the inline cache.
+    // Phase 1b: register object types for all `struct` declarations.
+    // Field names are allowed to collide across structs — polymorphic
+    // property access goes through the inline cache.
     let mut structs: HashMap<String, StructInfo> = HashMap::new();
-    let mut symbols = SymbolTable::new();
-    let mut per_type: HashMap<u64, DispatchTable> = HashMap::new();
 
     for el in elements {
         if let Ast::Struct { name, fields, .. } = el {
             let mut builder = dm.obj_type(name);
-            let mut field_names: Vec<String> = Vec::new();
             for f in fields {
                 let fname = match f {
                     Ast::StructField { name, .. } => name.clone(),
                     _ => panic!("struct body: expected StructField, got {:?}", f),
                 };
                 builder = builder.field(&fname, FieldKind::Value);
-                field_names.push(fname);
             }
             let id = builder.build();
             let ty = dm.get_obj_type(id);
@@ -221,18 +177,7 @@ pub fn lower_program(program: &Ast) -> Lowered {
                 .iter()
                 .map(|(k, (off, _kind))| (k.clone(), *off))
                 .collect();
-            // Class key = u16 type_id + 1, so no valid key is 0 (which
-            // InlineCacheEntry reserves as "empty"). type_ids are
-            // assigned sequentially from 0 by ObjTypeBuilder::build.
-            let class_key = (ty.type_info.type_id as u64) + 1;
-
-            let mut table = DispatchTable::with_capacity(0);
-            for fname in &field_names {
-                let sym = symbols.intern(fname);
-                let off = offsets[fname] as u64;
-                table.set(sym, off);
-            }
-            per_type.insert(class_key, table);
+            ic.register_type(ty);
 
             structs.insert(
                 name.clone(),
@@ -240,19 +185,6 @@ pub fn lower_program(program: &Ast) -> Lowered {
             );
         }
     }
-
-    // Pull the array layout out *now*, while we still have `&dm`.
-    let array_layout = {
-        let ty = dm.get_obj_type(array_type_id);
-        let len_offset = ty
-            .field_offsets
-            .get("len")
-            .map(|(o, _)| *o)
-            .expect("__Array__ must have len field");
-        let elem_base = ty.type_info.varlen_element_offset(0) as i64;
-        ArrayLayout { type_id: array_type_id, len_offset, elem_base }
-    };
-    let array_type_id_u16 = dm.get_obj_type(array_type_id).type_info.type_id;
 
     // ── Phase 2a: collect top-level `let` constants. ─────────────
     // The bench uses these for `SHADOW_FAR` and `PI`. Restricted to literal
@@ -354,47 +286,30 @@ pub fn lower_program(program: &Ast) -> Lowered {
     let mut strings = StringPool::default();
 
     // ── Phase 2d: type analysis. ────────────────────────────────────
-    // Whole-program forward analysis producing function return types,
-    // struct-field types, and per-function let-mut narrowed types. Used
-    // by lowering to skip the `dyn_*` tag-test branch when both operands
-    // of an arithmetic / comparison op are provably `Number`.
+    // Per-function forward analysis producing let-mut narrowed types.
+    // Sound under open-world: each function's facts depend only on its
+    // own body. Used by lowering to skip the `dyn_*` tag-test branch
+    // when both operands of an arithmetic / comparison op are provably
+    // `Number` from local context (literals, locals, arithmetic on
+    // them, array literal/push chains).
     let type_info = analyze_types(elements, &globals);
     if std::env::var("BEAGLE_DUMP_TYPES").is_ok() {
-        let mut fns: Vec<(&String, &Ty)> = type_info.fn_returns.iter().collect();
+        let mut fns: Vec<(&String, &HashMap<String, Ty>)> =
+            type_info.let_mut_types.iter().collect();
         fns.sort_by_key(|(n, _)| (*n).clone());
-        eprintln!("[beagle] fn_returns:");
-        for (n, t) in fns {
-            eprintln!("  {n:24} -> {t:?}");
-        }
-        let mut fields: Vec<(&(String, String), &Ty)> = type_info.struct_fields.iter().collect();
-        fields.sort_by_key(|(k, _)| (*k).clone());
-        eprintln!("[beagle] struct_fields:");
-        for ((s, f), t) in fields {
-            eprintln!("  {s}.{f:18} -> {t:?}");
-        }
-        let mut params: Vec<(&String, &Vec<Ty>)> = type_info.fn_param_types.iter().collect();
-        params.sort_by_key(|(n, _)| (*n).clone());
-        eprintln!("[beagle] fn_param_types:");
-        for (n, ps) in params {
-            eprintln!("  {n:24} -> {ps:?}");
+        eprintln!("[beagle] let_mut_types:");
+        for (n, m) in fns {
+            let mut entries: Vec<(&String, &Ty)> = m.iter().collect();
+            entries.sort_by_key(|(k, _)| (*k).clone());
+            for (var, t) in entries {
+                eprintln!("  {n}.{var:24} -> {t:?}");
+            }
         }
     }
 
-    // Pre-walk the program to count property-access sites so we can
-    // allocate a fixed-size `InlineCacheArray` whose base pointer we can
-    // embed in IR as a constant. Growing the array later would invalidate
-    // that pointer.
-    //
-    // Inlining duplicates property accesses: each call site to an inlinable
-    // callee expands into a fresh copy of the callee's body, which gets its
-    // own IC slots. The count below walks the program with inline expansion
-    // simulated, so the IC array is sized correctly.
-    let num_ic_sites = count_property_accesses_with_inlining(program, &inlinable);
-    let ic_array = InlineCacheArray::new(num_ic_sites);
-    let ic_base_addr = ic_array.as_ptr() as u64;
-    let mut next_cache_id: u32 = 0;
-
     // ── Phase 3: define bodies. ──
+    // PropertyIc mints cache slot ids during emit_load; finalize allocates
+    // the array once we know the total count. No pre-walk needed.
     for el in elements {
         if let Ast::Function { name, args, body, .. } = el {
             let fname = name.as_ref().unwrap();
@@ -406,8 +321,8 @@ pub fn lower_program(program: &Ast) -> Lowered {
                     func_refs: &func_refs,
                     globals: &globals,
                     inlinable: &inlinable,
-                    types: TypeEnv::new(&type_info, &globals, fname.clone(), args),
-                    array: array_layout,
+                    types: TypeEnv::new(&type_info, &globals, fname.clone()),
+                    array_seq,
                     print_ref,
                     println_ref,
                     length_ref,
@@ -416,15 +331,9 @@ pub fn lower_program(program: &Ast) -> Lowered {
                     cos_ref,
                     sin_ref,
                     time_now_ref,
-                    prop_slow_ref,
                     strings: &mut strings,
-                    symbols: &mut symbols,
-                    ic_base_addr,
-                    next_cache_id: &mut next_cache_id,
-                    push_counter: 0,
-                    arr_lit_counter: 0,
+                    ic: &mut ic,
                     hoisted_len_for: HashMap::new(),
-                    hoist_counter: 0,
                 };
                 let entry = f.fb.entry_block();
                 for (i, pat) in args.iter().enumerate() {
@@ -446,16 +355,12 @@ pub fn lower_program(program: &Ast) -> Lowered {
     // consume `dm` via `build()`. The runtime carries everything needed
     // to compile and run the module: tag scheme, type table, safepoint
     // handler, __gc_alloc__ thunk.
-    let gc = DynGcRuntime::new(&gc_config, &tags, &dm.obj_types);
+    let mut gc = DynGcRuntime::new(&gc_config, &tags, &dm.obj_types);
+    gc.set_auto_externs(dm.auto_externs.clone());
 
     let built = dm.build();
     // `built.strings` is dynlang's pool, not ours. Discard it.
     let _ = built.strings;
-
-    assert_eq!(
-        next_cache_id as usize, num_ic_sites,
-        "IC site count mismatch: pre-count said {num_ic_sites} but lowering consumed {next_cache_id}",
-    );
 
     Lowered {
         module: built.module,
@@ -463,13 +368,8 @@ pub fn lower_program(program: &Ast) -> Lowered {
         main_arity,
         strings,
         gc,
-        ic: IcContext {
-            symbols,
-            per_type,
-            array: ic_array,
-        },
-        array_type_id_u16,
-        array_len_offset: array_layout.len_offset,
+        ic: ic.finalize(),
+        array_seq,
     }
 }
 
@@ -483,7 +383,7 @@ struct Lowerer<'a> {
     /// types into the caller. Also carries a borrow of the
     /// whole-program `TypeInfo` and the `current_fn` name.
     types: TypeEnv<'a>,
-    array: ArrayLayout,
+    array_seq: IndexedSeq,
     print_ref: FuncRef,
     println_ref: FuncRef,
     length_ref: FuncRef,
@@ -492,30 +392,19 @@ struct Lowerer<'a> {
     cos_ref: FuncRef,
     sin_ref: FuncRef,
     time_now_ref: FuncRef,
-    prop_slow_ref: FuncRef,
     strings: &'a mut StringPool,
-    symbols: &'a mut SymbolTable,
-    /// Base address of the InlineCacheArray, embedded as an IR constant.
-    ic_base_addr: u64,
-    next_cache_id: &'a mut u32,
-    /// Per-function counter used to mint unique stack-slot var names for
-    /// nested `push` calls (the slots are GC roots — must not collide).
-    push_counter: u32,
-    /// Per-function counter used to mint unique stack-slot var names for
-    /// each array literal. Without this, a nested literal like
-    /// `[[1.0, 2.0], [3.0, 4.0]]` would have its inner literals reuse the
-    /// outer's `__beagle_arr_elem_N__` names, silently clobbering the
-    /// outer bindings before the outer alloc could read them back.
-    arr_lit_counter: u32,
+    /// Property-access inline cache builder. Mints cache slot ids and
+    /// emits the guard / fast-load / slow-call IR shape per site.
+    ic: &'a mut PropertyIc,
     /// LICM for `length(x)`: when entering a `while` whose body never
     /// reassigns or rebinds `x`, the call is hoisted into a let above
-    /// the loop and `x → hoisted_var_name` is recorded here. While
+    /// the loop and `x → hoisted_slot_name` is recorded here. While
     /// lowering, `Call("length", [Identifier(x)])` consults this map
     /// and emits a stack-slot load instead of an extern call. The map
     /// is a stack of overrides — when leaving the loop we restore the
-    /// previous mapping (saved in `hoist_save`).
+    /// previous mapping (saved in `hoist_save`). Slot names are minted
+    /// via `DynFunc::fresh_slot_name`.
     hoisted_len_for: HashMap<String, String>,
-    hoist_counter: u32,
 }
 
 impl<'a> Lowerer<'a> {
@@ -608,84 +497,45 @@ impl<'a> Lowerer<'a> {
             // (`num_*`) which skips the tag-check branch. Otherwise the
             // full `dyn_*` fast/slow dispatch remains in place.
             Ast::Add { left, right, .. } => {
-                let lt = self.types.type_of(left);
-                let rt = self.types.type_of(right);
+                let (lh, rh) = (self.types.type_of(left), self.types.type_of(right));
                 let l = self.lower_expr(f, left);
                 let r = self.lower_expr(f, right);
-                if lt.is_number() && rt.is_number() {
-                    f.num_add(l, r)
-                } else {
-                    f.dyn_add(l, r)
-                }
+                f.add(l, (&lh).into(), r, (&rh).into())
             }
             Ast::Sub { left, right, .. } => {
-                let lt = self.types.type_of(left);
-                let rt = self.types.type_of(right);
+                let (lh, rh) = (self.types.type_of(left), self.types.type_of(right));
                 let l = self.lower_expr(f, left);
                 let r = self.lower_expr(f, right);
-                if lt.is_number() && rt.is_number() {
-                    f.num_sub(l, r)
-                } else {
-                    f.dyn_sub(l, r)
-                }
+                f.sub(l, (&lh).into(), r, (&rh).into())
             }
             Ast::Mul { left, right, .. } => {
-                let lt = self.types.type_of(left);
-                let rt = self.types.type_of(right);
+                let (lh, rh) = (self.types.type_of(left), self.types.type_of(right));
                 let l = self.lower_expr(f, left);
                 let r = self.lower_expr(f, right);
-                if lt.is_number() && rt.is_number() {
-                    f.num_mul(l, r)
-                } else {
-                    f.dyn_mul(l, r)
-                }
+                f.mul(l, (&lh).into(), r, (&rh).into())
             }
             Ast::Div { left, right, .. } => {
-                let lt = self.types.type_of(left);
-                let rt = self.types.type_of(right);
+                let (lh, rh) = (self.types.type_of(left), self.types.type_of(right));
                 let l = self.lower_expr(f, left);
                 let r = self.lower_expr(f, right);
-                if lt.is_number() && rt.is_number() {
-                    f.num_div(l, r)
-                } else {
-                    f.dyn_div(l, r)
-                }
+                f.div(l, (&lh).into(), r, (&rh).into())
             }
 
             // ── Comparison ──────────────────────────────────────────
             Ast::Condition { operator, left, right, .. } => {
-                let lt = self.types.type_of(left);
-                let rt = self.types.type_of(right);
-                let both_num = lt.is_number() && rt.is_number();
+                let (lh, rh) = (self.types.type_of(left), self.types.type_of(right));
+                let (lhint, rhint) = ((&lh).into(), (&rh).into());
                 let l = self.lower_expr(f, left);
                 let r = self.lower_expr(f, right);
                 match operator {
-                    Condition::LessThan => {
-                        if both_num { f.num_lt(l, r) } else { f.dyn_lt(l, r) }
-                    }
-                    Condition::GreaterThan => {
-                        if both_num { f.num_gt(l, r) } else { f.dyn_gt(l, r) }
-                    }
-                    Condition::Equal => self.bit_eq(f, l, r),
+                    Condition::LessThan => f.lt(l, lhint, r, rhint),
+                    Condition::GreaterThan => f.gt(l, lhint, r, rhint),
+                    Condition::LessThanOrEqual => f.le(l, lhint, r, rhint),
+                    Condition::GreaterThanOrEqual => f.ge(l, lhint, r, rhint),
+                    Condition::Equal => f.bit_eq(l, r),
                     Condition::NotEqual => {
-                        let eq = self.bit_eq(f, l, r);
-                        self.bool_not(f, eq)
-                    }
-                    Condition::LessThanOrEqual => {
-                        if both_num {
-                            f.num_le(l, r)
-                        } else {
-                            let gt = f.dyn_gt(l, r);
-                            self.bool_not(f, gt)
-                        }
-                    }
-                    Condition::GreaterThanOrEqual => {
-                        if both_num {
-                            f.num_ge(l, r)
-                        } else {
-                            let lt_v = f.dyn_lt(l, r);
-                            self.bool_not(f, lt_v)
-                        }
+                        let eq = f.bit_eq(l, r);
+                        f.bool_not(eq)
                     }
                 }
             }
@@ -720,7 +570,7 @@ impl<'a> Lowerer<'a> {
             }
             Ast::Not { expr, .. } => {
                 let v = self.lower_expr(f, expr);
-                self.bool_not(f, v)
+                f.bool_not(v)
             }
 
             // ── Control flow ────────────────────────────────────────
@@ -785,9 +635,7 @@ impl<'a> Lowerer<'a> {
                 for x in &candidates {
                     let arr_v = self.lower_expr(f, &Ast::Identifier(x.clone(), 0));
                     let len_v = f.fb.call(self.length_ref, &[arr_v]).unwrap();
-                    let hoist_name =
-                        format!("__hlen_{}_{}__", x, self.hoist_counter);
-                    self.hoist_counter += 1;
+                    let hoist_name = f.fresh_slot_name();
                     f.def_var(&hoist_name, len_v);
                     let prev = self.hoisted_len_for.insert(x.clone(), hoist_name);
                     hoist_save.push((x.clone(), prev));
@@ -834,43 +682,41 @@ impl<'a> Lowerer<'a> {
                     .unwrap_or_else(|| panic!("unknown struct `{name}`"))
                     .clone();
 
-                // Evaluate all field values first. We bind each into a
-                // fresh `let` so it lives in a stack slot — the
-                // interpreter's root manager scans stack slots (via the
-                // NanBox PtrPolicy) so pointers survive collection.
-                // This sidesteps the safepoint-live-values type
-                // restriction (Safepoint requires GcPtr-typed values,
-                // but our field values are NanBox I64s).
-                let field_vals: Vec<(String, Value)> = fields
+                // Evaluate field values first; pin them across the alloc
+                // via with_rooted. Per-field offsets are looked up before
+                // the closure so the inner store loop has only the data
+                // it needs.
+                let field_offsets: Vec<i32> = fields
                     .iter()
-                    .map(|(fname, fexpr)| {
-                        let v = self.lower_expr(f, fexpr);
-                        // Stash in a stack slot by name-shadowing so it
-                        // is visible to frame-scan GC roots.
-                        let slot_name = format!("__beagle_tmp_{}__", fname);
-                        f.def_var(&slot_name, v);
-                        (fname.clone(), f.get_var(&slot_name))
+                    .map(|(fname, _)| {
+                        *info
+                            .field_offsets
+                            .get(fname)
+                            .unwrap_or_else(|| panic!("unknown field `{fname}` on `{name}`"))
                     })
                     .collect();
+                let field_vals: Vec<Value> = fields
+                    .iter()
+                    .map(|(_, fexpr)| self.lower_expr(f, fexpr))
+                    .collect();
 
-                let zero = f.fb.iconst(Type::I64, 0);
-                // Emit an empty safepoint right before the allocation. The
-                // JIT's batch_lower records ALL stack/spill/callee-save
-                // slots here regardless of the `live` list, and the
-                // PtrPolicy filters non-pointer NanBox words out during
-                // GC. This gives the collector a place to safely run.
-                f.fb.safepoint(&[]);
-                let raw = f.gc_alloc(info.type_id, zero);
+                let type_id = info.type_id;
+                f.with_rooted(&field_vals, |f, slots| {
+                    let zero = f.fb.iconst(Type::I64, 0);
+                    // Empty safepoint before the allocation: dynlower's
+                    // batch_lower records ALL stack/spill/callee-save
+                    // slots here, and the NanBox PtrPolicy filters out
+                    // non-pointer payloads at scan time.
+                    f.fb.safepoint(&[]);
+                    let raw = f.gc_alloc(type_id, zero);
 
-                for (fname, val) in &field_vals {
-                    let offset = *info
-                        .field_offsets
-                        .get(fname)
-                        .unwrap_or_else(|| panic!("unknown field `{fname}` on `{name}`"));
-                    f.fb.store(*val, raw, offset);
-                }
+                    for (slot, offset) in slots.iter().zip(field_offsets.iter()) {
+                        let v = slot.get(f);
+                        f.fb.store(v, raw, *offset);
+                    }
 
-                f.obj_wrap(raw)
+                    f.obj_wrap(raw)
+                })
             }
 
             // ── Array literal ───────────────────────────────────────
@@ -880,20 +726,17 @@ impl<'a> Lowerer<'a> {
             Ast::IndexOperator { array, index, .. } => {
                 let arr = self.lower_expr(f, array);
                 let idx_box = self.lower_expr(f, index);
-                self.array_load_at(f, arr, idx_box)
+                self.array_seq.emit_get(f, arr, idx_box)
             }
 
             // ── Property access ─────────────────────────────────────
             Ast::PropertyAccess { object, property, .. } => {
                 let obj_val = self.lower_expr(f, object);
                 let fname = match property.as_ref() {
-                    Ast::Identifier(n, _) => n.clone(),
+                    Ast::Identifier(n, _) => n.as_str(),
                     other => panic!("property access expects ident, got {:?}", other),
                 };
-                let sym = self.symbols.intern(&fname);
-                let cache_id = *self.next_cache_id;
-                *self.next_cache_id += 1;
-                self.emit_ic_property_load(f, obj_val, sym, cache_id)
+                self.ic.emit_load(f, obj_val, fname)
             }
 
             // ── Inert at lowering ──────────────────────────────────
@@ -959,7 +802,7 @@ impl<'a> Lowerer<'a> {
             // NanBox-encoded numbers, nils, and pointer-tagged objects.
             "beagle.core/equal" => {
                 assert_eq!(arg_vals.len(), 2, "beagle.core/equal takes 2 args");
-                self.bit_eq(f, arg_vals[0], arg_vals[1])
+                f.bit_eq(arg_vals[0], arg_vals[1])
             }
             other => {
                 // Static inlining: if the callee is a single-expression
@@ -1010,211 +853,15 @@ impl<'a> Lowerer<'a> {
     /// during alloc preserves it (the slots are GC roots and the moving
     /// collector updates them in place).
     fn lower_array_literal(&mut self, f: &mut DynFunc, elems: &[Ast]) -> Value {
-        // Evaluate elements into rooted slots first. Reusing the
-        // struct-creation pattern: bind each into a uniquely-named
-        // stack slot so its NanBox bits live across the gc_alloc call.
-        // The id is per-literal so a nested literal like
-        // `[[1.0, 2.0], [3.0, 4.0]]` doesn't have its inner element
-        // bindings clobber the outer's by name.
-        let id = self.arr_lit_counter;
-        self.arr_lit_counter += 1;
-        let slot_names: Vec<String> = (0..elems.len())
-            .map(|i| format!("__beagle_arr_{id}_elem_{i}__"))
-            .collect();
-        for (i, elem) in elems.iter().enumerate() {
-            let v = self.lower_expr(f, elem);
-            f.def_var(&slot_names[i], v);
-        }
-
-        let n = elems.len() as i64;
-        let n_const = f.fb.iconst(Type::I64, n);
-        f.fb.safepoint(&[]);
-        let raw = f.gc_alloc(self.array.type_id, n_const);
-
-        // len is stored as a raw i64 in the Raw64 field.
-        f.fb.store(n_const, raw, self.array.len_offset);
-
-        // Write each element. After alloc, reload from the slots so the
-        // values reflect any forwarding the GC may have done.
-        for (i, slot_name) in slot_names.iter().enumerate() {
-            let v = f.get_var(slot_name);
-            let idx = f.fb.iconst(Type::I64, i as i64);
-            self.array_store_elem(f, raw, idx, v);
-        }
-
-        f.obj_wrap(raw)
+        let elem_vals: Vec<Value> =
+            elems.iter().map(|e| self.lower_expr(f, e)).collect();
+        self.array_seq.emit_literal(f, &elem_vals)
     }
 
-    /// Lower `push(arr, x)`. Allocates a new array of capacity old_len+1,
-    /// copies the existing elements over, then appends `x`. The source
-    /// array NanBox and the new value are both pinned into stack slots
-    /// across the alloc. Element copying happens via a tight `while` loop
-    /// in IR.
     fn lower_push(&mut self, f: &mut DynFunc, src_ast: &Ast, val_ast: &Ast) -> Value {
-        let id = self.push_counter;
-        self.push_counter += 1;
-        let src_slot = format!("__beagle_push_src_{id}__");
-        let val_slot = format!("__beagle_push_val_{id}__");
-
         let src_arr = self.lower_expr(f, src_ast);
         let val = self.lower_expr(f, val_ast);
-        f.def_var(&src_slot, src_arr);
-        f.def_var(&val_slot, val);
-
-        // Read old length from the source array (no alloc has happened yet).
-        let src0 = f.get_var(&src_slot);
-        let src_raw0 = f.obj_unwrap(src0);
-        let old_len = f.fb.load(Type::I64, src_raw0, self.array.len_offset);
-        let one = f.fb.iconst(Type::I64, 1);
-        let new_len = f.fb.add(old_len, one);
-
-        // Allocate the new array. After this point the source pointer
-        // we read above may be stale — reload from the slot.
-        f.fb.safepoint(&[]);
-        let new_raw = f.gc_alloc(self.array.type_id, new_len);
-        f.fb.store(new_len, new_raw, self.array.len_offset);
-
-        // Reload the source after the alloc so we copy from the live
-        // (post-forwarding) location.
-        let src1 = f.get_var(&src_slot);
-        let src_raw1 = f.obj_unwrap(src1);
-
-        // Copy loop: for i in 0..old_len, new[i] = src[i].
-        let i_slot = f.fb.create_stack_slot(8, false);
-        let zero = f.fb.iconst(Type::I64, 0);
-        let i_addr0 = f.fb.stack_addr(i_slot);
-        f.fb.store(zero, i_addr0, 0);
-
-        let header_bb = f.fb.create_block(&[]);
-        let body_bb = f.fb.create_block(&[]);
-        let exit_bb = f.fb.create_block(&[]);
-        f.fb.jump(header_bb, &[]);
-
-        f.fb.switch_to_block(header_bb);
-        let i_addr_h = f.fb.stack_addr(i_slot);
-        let i_h = f.fb.load(Type::I64, i_addr_h, 0);
-        let cond = f.fb.icmp(CmpOp::Slt, i_h, old_len);
-        f.fb.br_if(cond, body_bb, &[], exit_bb, &[]);
-
-        f.fb.switch_to_block(body_bb);
-        let i_addr_b = f.fb.stack_addr(i_slot);
-        let i_b = f.fb.load(Type::I64, i_addr_b, 0);
-        let elem = self.array_load_elem_raw(f, src_raw1, i_b);
-        self.array_store_elem(f, new_raw, i_b, elem);
-        let i_inc = f.fb.add(i_b, one);
-        f.fb.store(i_inc, i_addr_b, 0);
-        f.fb.jump(header_bb, &[]);
-
-        f.fb.switch_to_block(exit_bb);
-        // Append the new value at index old_len.
-        let val_v = f.get_var(&val_slot);
-        self.array_store_elem(f, new_raw, old_len, val_v);
-
-        f.obj_wrap(new_raw)
-    }
-
-    /// Index a NanBox-tagged array by a NanBox-float index. Caller is
-    /// responsible for ensuring `arr` actually points at an `__Array__` —
-    /// we don't type-check here (no out-of-bounds either). Lowering for
-    /// a benchmark, not a safe runtime.
-    fn array_load_at(&mut self, f: &mut DynFunc, arr: Value, idx_box: Value) -> Value {
-        let raw = f.obj_unwrap(arr);
-        let idx_int = nanbox_to_int(f, idx_box);
-        self.array_load_elem_raw(f, raw, idx_int)
-    }
-
-    fn array_load_elem_raw(&self, f: &mut DynFunc, raw: Value, idx_int: Value) -> Value {
-        let base = f.fb.iconst(Type::I64, self.array.elem_base);
-        let eight = f.fb.iconst(Type::I64, 8);
-        let byte_off = f.fb.mul(idx_int, eight);
-        let off = f.fb.add(base, byte_off);
-        let addr = f.fb.add(raw, off);
-        f.fb.load(Type::I64, addr, 0)
-    }
-
-    fn array_store_elem(&self, f: &mut DynFunc, raw: Value, idx_int: Value, val: Value) {
-        let base = f.fb.iconst(Type::I64, self.array.elem_base);
-        let eight = f.fb.iconst(Type::I64, 8);
-        let byte_off = f.fb.mul(idx_int, eight);
-        let off = f.fb.add(base, byte_off);
-        let addr = f.fb.add(raw, off);
-        f.fb.store(val, addr, 0);
-    }
-
-    /// Emit inline-cache dispatch for a property load. The shape is
-    /// monomorphic-with-slow-path: compare the object header's TypeInfo*
-    /// against the cached class id, take the fast load on hit, call the
-    /// slow-path extern on miss (which fills the entry and does the load).
-    fn emit_ic_property_load(
-        &mut self,
-        f: &mut DynFunc,
-        obj: Value,
-        sym: Symbol,
-        cache_id: u32,
-    ) -> Value {
-        // Raw heap pointer. `dynobj::Compact` stores a u16 `type_id` at
-        // offset 0 with zeroed padding in the remaining 6 bytes, so a
-        // full I64 load gives `type_id as u64`. We add 1 to produce the
-        // class key (keeps 0 free as the IC empty-sentinel).
-        let raw = f.obj_unwrap(obj);
-        let type_id = f.fb.load(Type::I64, raw, 0);
-        let one = f.fb.iconst(Type::I64, 1);
-        let ti = f.fb.add(type_id, one);
-
-        // IC entry address: ic_base + cache_id * sizeof(InlineCacheEntry).
-        // The base is a compile-time-known u64; the array is heap-allocated
-        // once with fixed capacity, so the pointer is stable.
-        let entry_size = std::mem::size_of::<InlineCacheEntry>() as i64;
-        let entry_addr_const =
-            self.ic_base_addr as i64 + (cache_id as i64) * entry_size;
-        let entry_addr = f.fb.iconst(Type::I64, entry_addr_const);
-
-        // cached_class_id is the first u64 in InlineCacheEntry.
-        let cached_class = f.fb.load(Type::I64, entry_addr, 0);
-        let hit = f.fb.icmp(CmpOp::Eq, cached_class, ti);
-
-        let hit_bb = f.fb.create_block(&[]);
-        let miss_bb = f.fb.create_block(&[]);
-        let merge_bb = f.fb.create_block(&[Type::I64]);
-        f.fb.br_if(hit, hit_bb, &[], miss_bb, &[]);
-
-        // ── Fast path: load(raw + cached_offset) ───────────────────
-        f.fb.switch_to_block(hit_bb);
-        let cached_off = f.fb.load(Type::I64, entry_addr, 8); // cached_value field
-        let addr = f.fb.add(raw, cached_off);
-        let fast_val = f.fb.load(Type::I64, addr, 0);
-        f.fb.jump(merge_bb, &[fast_val]);
-
-        // ── Slow path: extern call, fills the IC entry and returns value ─
-        f.fb.switch_to_block(miss_bb);
-        let sym_val = f.fb.iconst(Type::I64, sym.as_u32() as i64);
-        let cid_val = f.fb.iconst(Type::I64, cache_id as i64);
-        let slow_val = f
-            .fb
-            .call(self.prop_slow_ref, &[obj, sym_val, cid_val])
-            .unwrap();
-        f.fb.jump(merge_bb, &[slow_val]);
-
-        f.fb.switch_to_block(merge_bb);
-        f.fb.block_param(merge_bb, 0)
-    }
-
-    /// Bit-equal two NanBox values. For beagle's `==`, this gives the
-    /// correct answer for `null` checks against pointers (different bit
-    /// patterns), integer-valued floats (stored as canonical bits), and
-    /// pointer identity. Not IEEE eq — NaN == NaN here.
-    fn bit_eq(&mut self, f: &mut DynFunc, a: Value, b: Value) -> Value {
-        let raw_eq = f.fb.icmp(CmpOp::Eq, a, b);
-        let t = f.bool_val(true);
-        let fal = f.bool_val(false);
-        f.fb.select(raw_eq, t, fal)
-    }
-
-    fn bool_not(&mut self, f: &mut DynFunc, v: Value) -> Value {
-        let falsey = f.is_falsey(v);
-        let t = f.bool_val(true);
-        let fal = f.bool_val(false);
-        f.fb.select(falsey, t, fal)
+        self.array_seq.emit_push(f, src_arr, val)
     }
 }
 
@@ -2023,204 +1670,3 @@ fn is_const_literal(ast: &Ast) -> bool {
     )
 }
 
-/// Convert a NanBox-encoded float (stored as I64 bits) into a signed
-/// 64-bit integer. Used for array indices.
-fn nanbox_to_int(f: &mut DynFunc, v: Value) -> Value {
-    let as_f64 = f.unbox_number(v);
-    f.fb.float_to_int(as_f64)
-}
-
-/// Count every `Ast::PropertyAccess` node reachable from `ast`,
-/// **simulating static inlining** of any `Call` whose target is in
-/// `inlinable`. Each inlined call site expands into a fresh copy of the
-/// callee's body, so its property accesses count again per call site.
-///
-/// Recursion guard: a cycle in the inlinable set (mutual recursion that
-/// my self-call check missed) would cause unbounded counting; the
-/// `visited` set bails out the second time we'd recurse into the same
-/// callee. Lowering uses the same guard implicitly via Rust's stack
-/// limit, but better to fail loudly here than to crash later.
-fn count_property_accesses_with_inlining(
-    ast: &Ast,
-    inlinable: &HashMap<String, InlineableFn>,
-) -> usize {
-    let mut n = 0;
-    let mut visited = std::collections::HashSet::new();
-    count_in(ast, inlinable, &mut visited, &mut n);
-    n
-}
-
-fn count_in(
-    ast: &Ast,
-    inlinable: &HashMap<String, InlineableFn>,
-    visited: &mut std::collections::HashSet<String>,
-    n: &mut usize,
-) {
-    macro_rules! recur {
-        ($e:expr) => { count_in($e, inlinable, visited, n) };
-    }
-    macro_rules! recur_vec {
-        ($xs:expr) => { for x in $xs { recur!(x) } };
-    }
-    macro_rules! recur_opt {
-        ($x:expr) => { if let Some(b) = $x { recur!(b) } };
-    }
-    match ast {
-        Ast::PropertyAccess { object, property, .. } => {
-            *n += 1;
-            recur!(object);
-            recur!(property);
-        }
-
-        Ast::Program { elements, .. } => recur_vec!(elements),
-        Ast::Function { body, .. } => recur_vec!(body),
-        Ast::Struct { fields, .. } => recur_vec!(fields),
-        Ast::StructField { default_value, .. } => recur_opt!(default_value),
-        Ast::Enum { variants, .. } => recur_vec!(variants),
-        Ast::EnumVariant { fields, .. } => recur_vec!(fields),
-        Ast::Protocol { body, .. } => recur_vec!(body),
-        Ast::Extend { body, .. } => recur_vec!(body),
-        Ast::If { condition, then, else_, .. } => {
-            recur!(condition);
-            recur_vec!(then);
-            recur_vec!(else_);
-        }
-        Ast::Condition { left, right, .. }
-        | Ast::Add { left, right, .. }
-        | Ast::Sub { left, right, .. }
-        | Ast::Mul { left, right, .. }
-        | Ast::Div { left, right, .. }
-        | Ast::Modulo { left, right, .. }
-        | Ast::ShiftLeft { left, right, .. }
-        | Ast::ShiftRight { left, right, .. }
-        | Ast::ShiftRightZero { left, right, .. }
-        | Ast::BitWiseAnd { left, right, .. }
-        | Ast::BitWiseOr { left, right, .. }
-        | Ast::BitWiseXor { left, right, .. }
-        | Ast::And { left, right, .. }
-        | Ast::Or { left, right, .. } => {
-            recur!(left);
-            recur!(right);
-        }
-        Ast::Recurse { args, .. } | Ast::TailRecurse { args, .. } => recur_vec!(args),
-        Ast::Call { name, args, .. } => {
-            for a in args {
-                recur!(a);
-            }
-            // Inline expansion: each call site to an inlinable callee
-            // contributes another copy of the callee body's PA count.
-            // The `visited` set is a cycle guard — should only fire if
-            // mutual recursion sneaks past the per-function self-call
-            // check.
-            if let Some(inlinee) = inlinable.get(name) {
-                if visited.insert(name.clone()) {
-                    for stmt in &inlinee.body {
-                        count_in(stmt, inlinable, visited, n);
-                    }
-                    visited.remove(name);
-                }
-            }
-        }
-        Ast::CallExpr { callee, args, .. } => {
-            recur!(callee);
-            recur_vec!(args);
-        }
-        Ast::Let { value, .. }
-        | Ast::LetMut { value, .. }
-        | Ast::LetDynamic { value, .. } => recur!(value),
-        Ast::Binding { value_expr, body, .. } => {
-            recur!(value_expr);
-            recur_vec!(body);
-        }
-        Ast::StringInterpolation { parts, .. } => {
-            for p in parts {
-                if let crate::ast::StringInterpolationPart::Expression(e) = p {
-                    recur!(e);
-                }
-            }
-        }
-        Ast::StructCreation { fields, spread, .. } => {
-            for (_, v) in fields {
-                recur!(v);
-            }
-            recur_opt!(spread);
-        }
-        Ast::EnumCreation { fields, .. } => {
-            for (_, v) in fields {
-                recur!(v);
-            }
-        }
-        Ast::Use { alias, .. } => recur!(alias),
-        Ast::Not { expr, .. } => recur!(expr),
-        Ast::Array { array, .. } => recur_vec!(array),
-        Ast::MapLiteral { pairs, .. } => {
-            for (k, v) in pairs {
-                recur!(k);
-                recur!(v);
-            }
-        }
-        Ast::SetLiteral { elements, .. } => recur_vec!(elements),
-        Ast::IndexOperator { array, index, .. } => {
-            recur!(array);
-            recur!(index);
-        }
-        Ast::Loop { body, .. } => recur_vec!(body),
-        Ast::While { condition, body, .. } => {
-            recur!(condition);
-            recur_vec!(body);
-        }
-        Ast::Break { value, .. } | Ast::Return { value, .. } | Ast::Throw { value, .. } => {
-            recur!(value);
-        }
-        Ast::For { collection, body, .. } => {
-            recur!(collection);
-            recur_vec!(body);
-        }
-        Ast::Assignment { name, value, .. } => {
-            recur!(name);
-            recur!(value);
-        }
-        Ast::Try { body, catch_body, .. } => {
-            recur_vec!(body);
-            recur_vec!(catch_body);
-        }
-        Ast::Match { value, arms, .. } => {
-            recur!(value);
-            for arm in arms {
-                if let Some(g) = &arm.guard {
-                    recur!(g);
-                }
-                recur_vec!(&arm.body);
-            }
-        }
-        Ast::MultiArityFunction { cases, .. } => {
-            for c in cases {
-                recur_vec!(&c.body);
-            }
-        }
-        Ast::Reset { body, .. } | Ast::Shift { body, .. } | Ast::Test { body, .. } => {
-            recur_vec!(body);
-        }
-        Ast::Perform { value, .. } => recur!(value),
-        Ast::Handle { handler_instance, body, .. } => {
-            recur!(handler_instance);
-            recur_vec!(body);
-        }
-        Ast::Future { body, .. } => recur!(body),
-
-        // Leaves and inert declarations — no child expressions.
-        Ast::FunctionStub { .. }
-        | Ast::EnumStaticVariant { .. }
-        | Ast::IntegerLiteral(..)
-        | Ast::FloatLiteral(..)
-        | Ast::Identifier(..)
-        | Ast::String(..)
-        | Ast::Keyword(..)
-        | Ast::True(..)
-        | Ast::False(..)
-        | Ast::Null(..)
-        | Ast::Namespace { .. }
-        | Ast::Continue { .. }
-        | Ast::ProtocolDispatch { .. } => {}
-    }
-}

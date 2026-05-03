@@ -309,6 +309,10 @@ fn region_then_example_worker_mode_packets_visible() {
             sleep(Duration::from_millis(33));
         }
     };
+    // Whiteboards boot paused now — Startup runs before the first
+    // app.update(), so unpause after the seed system has taken effect.
+    app.update();
+    app.world_mut().resource_mut::<flow_bevy::bridge::SimClock>().paused = false;
     pump(&mut app, 0.6);
 
     let region_packets = app.world().resource::<flow_bevy::edges::VisualTimelineRes>().strategy.as_replay().packets.len();
