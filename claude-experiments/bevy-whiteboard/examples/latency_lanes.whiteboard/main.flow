@@ -1,0 +1,38 @@
+# Latency lanes demo. Five independent Client → Worker pairs whose
+# wire runs at very different speeds. Same packet shape, same Worker
+# service time — the only thing that changes per lane is the edge
+# latency. Watch packets zip across the top lane and crawl across
+# the bottom one in real time.
+#
+# Each Client's `period_ns` is tuned so the lane stays sustainable
+# (round-trip < period). Without that the slow lanes would fill
+# Worker.backlog and start rejecting reqs, which would obscure the
+# point of the demo.
+
+# 1ms — effectively instant; mostly Worker service time visible.
+node ClientFast   : Client { period_ns: 200000000  }   # 200ms
+node WorkerFast   : Worker { service_ns: 30000000  }   # 30ms
+
+# 20ms — clearly slower than instant, still snappy.
+node ClientQuick  : Client { period_ns: 300000000  }   # 300ms
+node WorkerQuick  : Worker { service_ns: 30000000  }
+
+# 100ms — perceptible "travel time" across the wire.
+node ClientMid    : Client { period_ns: 500000000  }   # 500ms
+node WorkerMid    : Worker { service_ns: 30000000  }
+
+# 500ms — half a second of packet-on-wire each direction.
+node ClientSlow   : Client { period_ns: 1500000000 }   # 1.5s
+node WorkerSlow   : Worker { service_ns: 30000000  }
+
+# 2s — long-haul wire, like a cross-region call.
+node ClientGlacial: Client { period_ns: 5000000000 }   # 5s
+node WorkerGlacial: Worker { service_ns: 30000000  }
+
+edges {
+    ClientFast    -> WorkerFast    : 1ms
+    ClientQuick   -> WorkerQuick   : 20ms
+    ClientMid     -> WorkerMid     : 100ms
+    ClientSlow    -> WorkerSlow    : 500ms
+    ClientGlacial -> WorkerGlacial : 2s
+}

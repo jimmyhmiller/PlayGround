@@ -56,16 +56,20 @@ pub use dynobj::{TypeInfo, VarLenKind, Compact, ObjHeader};
 pub enum GcConfig {
     /// Bump allocator, never collects. Zero overhead — no safepoints,
     /// no root tracking. Objects are allocated and never freed.
+    ///
+    /// Suitable for benchmark harnesses or short-lived programs where
+    /// retaining everything is fine. **Pair with `CallMode::FastCall`**.
     Leak,
-    /// Semi-space copying collector. Use `gc_alloc_with_roots` when raw
-    /// object pointers must survive a moving collection across allocation.
-    SemiSpace {
-        /// Initial heap size in bytes.
-        heap_size: usize,
-    },
     /// Generational, thread-aware, concurrent-capable `dynalloc::Heap`.
     /// Supports precise stack-map roots for the JIT and card-table
     /// write barriers for old→young pointers.
+    ///
+    /// **Pair with `CallMode::ControlAware { safepoint_handler }`** and
+    /// emit `Inst::Safepoint` at every allocation site (`Module::
+    /// validate_safepoints` enforces this). Anything else is a memory-
+    /// safety bug waiting to happen — a moving collection running
+    /// without a stack map for the active frame relocates objects out
+    /// from under live values that the GC can't see.
     Generational {
         /// Total heap size per space, in bytes.
         heap_size: usize,
@@ -77,7 +81,6 @@ pub enum GcConfig {
 
 impl GcConfig {
     pub fn leak() -> Self { GcConfig::Leak }
-    pub fn semi_space(heap_size: usize) -> Self { GcConfig::SemiSpace { heap_size } }
     pub fn generational(heap_size: usize) -> Self {
         GcConfig::Generational { heap_size, nursery_size: None }
     }
@@ -86,7 +89,7 @@ impl GcConfig {
     }
 
     pub fn is_collecting(&self) -> bool {
-        matches!(self, GcConfig::SemiSpace { .. } | GcConfig::Generational { .. })
+        matches!(self, GcConfig::Generational { .. })
     }
 }
 
@@ -476,7 +479,7 @@ fn sig(params: &[Type], ret: Option<Type>) -> Signature {
 
 impl DynModule {
     /// Create a new module. GcConfig is required — use `GcConfig::leak()`
-    /// for zero-overhead no-collection, or `GcConfig::semi_space(size)`
+    /// for zero-overhead no-collection, or `GcConfig::generational(size)`
     /// for automatic garbage collection.
     pub fn new(gc: GcConfig, tags: NanBoxTags) -> Self {
         DynModule {
@@ -698,6 +701,27 @@ impl DynModule {
             strings: self.strings,
             func_refs: self.func_refs,
         }
+    }
+
+    /// Snapshot the currently-defined IR module without consuming `self`.
+    ///
+    /// The `DynModule` remains live and can be extended with additional
+    /// `declare_func` / `start_func` / `finish_func` calls; later snapshots
+    /// will include the new functions. Strings, func_refs, obj_types,
+    /// and auto_externs are all keyed by stable IDs that survive across
+    /// snapshots.
+    pub fn snapshot(&self) -> Module {
+        self.mb.snapshot()
+    }
+
+    /// Number of functions declared so far (extern + internal).
+    pub fn func_count(&self) -> usize {
+        self.mb.func_count()
+    }
+
+    /// Number of internal functions defined so far.
+    pub fn internal_func_count(&self) -> usize {
+        self.mb.internal_func_count()
     }
 }
 
@@ -1893,7 +1917,7 @@ mod tests {
 
     #[test]
     fn test_gc_alloc_with_roots_survives_moving_gc() {
-        let mut dm = DynModule::new(GcConfig::semi_space(256), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(8192), NanBoxTags::default());
 
         let pair_ty = dm.obj_type("Pair")
             .field("value", FieldKind::Value)
@@ -1946,7 +1970,7 @@ mod tests {
 
     #[test]
     fn test_boxed_object_round_trip_after_rooted_gc_alloc() {
-        let mut dm = DynModule::new(GcConfig::semi_space(256), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(8192), NanBoxTags::default());
 
         let pair_ty = dm.obj_type("Pair")
             .field("value", FieldKind::Value)
@@ -2000,7 +2024,7 @@ mod tests {
 
     #[test]
     fn test_obj_ref_api_survives_rooted_allocation() {
-        let mut dm = DynModule::new(GcConfig::semi_space(256), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(8192), NanBoxTags::default());
 
         let pair_ty = dm.obj_type("Pair")
             .field("value", FieldKind::Value)

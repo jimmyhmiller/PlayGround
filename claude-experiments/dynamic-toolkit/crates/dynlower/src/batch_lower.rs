@@ -473,6 +473,13 @@ impl<'a> BatchEmitter<'a> {
                 Arm64Backend::emit_mov_imm(&mut self.buf, preg_to_machine(dst), *imm as u64);
             }
 
+            Inst::GcLiteral(_) => {
+                // The batch register allocator path doesn't support GcLiteral
+                // yet — frontends that need a moving GC use the greedy /
+                // linear-scan path through `JitModule::extend`.
+                unimplemented!("GcLiteral not yet supported in batch_lower");
+            }
+
             Inst::F64Const(f) => {
                 let dst = get_def(&self.alloc);
                 // Load float bits into GP scratch, then move to FP reg

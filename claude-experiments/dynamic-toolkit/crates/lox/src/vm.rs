@@ -1657,7 +1657,7 @@ impl VM {
             module, &externs, Some(active_jit_safepoint_handler as u64),
         );
 
-        self.jit_call_table = jit.call_table().to_vec();
+        self.jit_call_table = jit.call_table();
 
         if std::env::var("LOX_DUMP_JIT").is_ok() {
             jit.dump_code();

@@ -876,6 +876,19 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
         self
     }
 
+    /// Register an additional `RootSource` to be scanned at every collection
+    /// during this session. Use this for module-scoped roots that aren't
+    /// frame-resident (literal pools, global root sets, interned constants).
+    ///
+    /// # Safety
+    ///
+    /// `source` must remain valid for the lifetime of the session. The
+    /// session does not take ownership; the caller is responsible for
+    /// keeping the pointee alive (e.g., via `&'a` shared borrow).
+    pub unsafe fn register_extra_root(&self, source: *const dyn RootSource) {
+        self.extra_roots.borrow_mut().push(source);
+    }
+
     pub fn payload_kind(&self) -> SafepointHandlerPayloadKind {
         self.transport.payload_kind()
     }

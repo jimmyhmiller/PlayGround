@@ -28,6 +28,7 @@ use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::light::{CascadeShadowConfigBuilder, GlobalAmbientLight};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use geo::{BooleanOps, Contains, Coord, LineString, MultiPolygon, Polygon};
 use lyon::math::point as lyon_point;
@@ -41,8 +42,8 @@ use std::path::PathBuf;
 use ttf_parser::{Face, GlyphId, OutlineBuilder};
 
 // World-unit dimensions of the paper.
-const PAPER_W: f32 = 10.24;
-const PAPER_H: f32 = 10.24;
+const PAPER_W: f32 = 16.0;
+const PAPER_H: f32 = 16.0;
 const N_LAYERS: u16 = 32;
 const DEFAULT_PAPER_THICKNESS: f32 = 0.018;
 /// Per-layer inward inset of the carve outline. Stacking N
@@ -75,7 +76,7 @@ const COLOR_PRESETS: &[(&str, Color)] = &[
 /// Bumped whenever the on-disk schema or default palette changes.
 /// Older states get their palette discarded and recomputed from the
 /// current `default_palette`, but other settings load through.
-const CURRENT_STATE_VERSION: u32 = 2;
+const CURRENT_STATE_VERSION: u32 = 5;
 
 /// Snapshot of the user-facing settings (camera, lights, brush, etc.)
 /// that survive across runs. The carved geometry itself is *not*
@@ -184,9 +185,18 @@ struct DirLightIndex(usize);
 #[derive(Resource)]
 struct PaperStack {
     paper_size: Vec2,
-    /// `layers[0]` = bottom layer, `layers[len-1]` = top layer.
-    /// Each layer is a 2D region; carving subtracts from it.
+    /// 2D region of each layer; layer index is identity-only — z is
+    /// explicit via `layer_z` so multiple layers can share a height
+    /// in different XY territories.
     layers: Vec<MultiPolygon<f64>>,
+    /// World-z of the TOP face of each layer. Bottom face is
+    /// `layer_z[i] - paper_thickness`. Defaults to `(i+1) * pt` to
+    /// keep the original carved-down model working unchanged, but
+    /// callers can override with arbitrary values.
+    layer_z: Vec<f32>,
+    /// Per-layer wall slope: how far the BOTTOM of the wall is
+    /// offset INTO THE VOID from the top, in world units.
+    layer_slope_inset: Vec<f32>,
     palette: Vec<Color>,
     paper_thickness: f32,
     pyramid_inset: f32,
@@ -196,11 +206,14 @@ struct PaperStack {
 impl PaperStack {
     fn new(size: Vec2, n_layers: u16, palette: Vec<Color>) -> Self {
         let full = full_rect(size);
+        let pt = DEFAULT_PAPER_THICKNESS;
         Self {
             paper_size: size,
             layers: vec![full; n_layers as usize],
+            layer_z: (0..n_layers as usize).map(|i| (i as f32 + 1.0) * pt).collect(),
+            layer_slope_inset: vec![DEFAULT_PYRAMID_INSET; n_layers as usize],
             palette,
-            paper_thickness: DEFAULT_PAPER_THICKNESS,
+            paper_thickness: pt,
             pyramid_inset: DEFAULT_PYRAMID_INSET,
             miter_limit: DEFAULT_MITER_LIMIT,
         }
@@ -210,13 +223,23 @@ impl PaperStack {
     }
     fn reset_full(&mut self) {
         let full = full_rect(self.paper_size);
+        let pt = self.paper_thickness;
         for layer in self.layers.iter_mut() {
             *layer = full.clone();
         }
+        for (i, z) in self.layer_z.iter_mut().enumerate() {
+            *z = (i as f32 + 1.0) * pt;
+        }
+        for s in self.layer_slope_inset.iter_mut() {
+            *s = self.pyramid_inset;
+        }
     }
-    /// World-z of the top of layer `i` (0 = bottom layer).
+    /// World-z of the top of layer `i`.
     fn layer_top_z(&self, i: u16) -> f32 {
-        (i as f32 + 1.0) * self.paper_thickness
+        self.layer_z
+            .get(i as usize)
+            .copied()
+            .unwrap_or((i as f32 + 1.0) * self.paper_thickness)
     }
 }
 
@@ -322,31 +345,23 @@ struct LettersUi {
 
 fn default_lights() -> [LightDef; 3] {
     [
-        LightDef { dir: Vec3::new(-0.55, -0.55, 0.55), intensity: 1.0, color_idx: 0 },
-        LightDef { dir: Vec3::new( 0.55, -0.40, 0.55), intensity: 0.0, color_idx: 2 },
-        LightDef { dir: Vec3::new( 0.0,   0.55, 0.55), intensity: 0.0, color_idx: 1 },
+        // Key — soft top-left, dominant.
+        LightDef { dir: Vec3::new(-0.30, -0.30, 0.90), intensity: 0.85, color_idx: 0 },
+        // Fill — gentler top-right to lift shadows on the opposite side.
+        LightDef { dir: Vec3::new( 0.40, -0.20, 0.85), intensity: 0.35, color_idx: 0 },
+        // Back rim — faint, opposite direction.
+        LightDef { dir: Vec3::new( 0.0,   0.45, 0.70), intensity: 0.18, color_idx: 0 },
     ]
 }
 
-/// Layer palette. `palette[0]` is the bottom sheet, `palette[N-1]`
-/// is the top sheet — that top color is what's visible on uncarved
-/// paper from a top-down view, so it should look paper-like. Sweep:
-///
-///   bottom: deep indigo  → magenta → rose → peach → top: warm cream
-///
-/// Hue interpolation goes the long way (258° → 38°, +140° wrap)
-/// through the magenta/red/orange side, never through cyan or green.
-/// Saturation peaks in the middle layers to make the strata pop when
-/// a carve exposes them; lightness rises monotonically toward the
-/// top sheet.
+/// Hue-rotated rainbow palette used for layer side-banding.
 fn default_palette(n: u16) -> Vec<Color> {
     (0..n)
         .map(|i| {
-            // t=0 at the bottom layer, t=1 at the top.
             let t = i as f32 / (n.max(2) - 1) as f32;
-            let h = (258.0 + 140.0 * t).rem_euclid(360.0);
-            let s = 0.22 + 0.40 * (4.0 * t * (1.0 - t)).clamp(0.0, 1.0);
-            let l = 0.30 + 0.58 * t;
+            let h = (t * 320.0) % 360.0;
+            let s = 0.55;
+            let l = 0.42 + 0.18 * (1.0 - (t - 0.5).abs() * 2.0);
             Color::hsl(h, s, l)
         })
         .collect()
@@ -358,20 +373,17 @@ fn main() {
     let font_data = load_font();
     let font_library = load_font_library();
     let persisted = load_persisted_state();
+    let screenshot_out = std::env::var("SCREENSHOT_OUT").ok();
+    let auto_scene = screenshot_out.is_some();
 
-    let camera_ctrl = CameraControl {
-        pan: persisted
-            .as_ref()
-            .map(|s| Vec2::from_array(s.camera_pan))
-            .unwrap_or(Vec2::ZERO),
-        zoom: persisted.as_ref().map(|s| s.camera_zoom).unwrap_or(1.0),
-        tilt: persisted.as_ref().map(|s| s.camera_tilt).unwrap_or(0.0),
-    };
+    // Always start framed on the demo scene. The user can pan/zoom/tilt
+    // after; that gets persisted as usual.
+    let camera_ctrl = CameraControl { pan: Vec2::ZERO, zoom: 0.48, tilt: 0.0 };
 
     let light_ctrl = LightControl {
         lights: persisted
             .as_ref()
-            .filter(|s| s.lights.len() == 3)
+            .filter(|s| s.version == CURRENT_STATE_VERSION && s.lights.len() == 3)
             .map(|s| {
                 let mut arr = default_lights();
                 for (i, pl) in s.lights.iter().take(3).enumerate() {
@@ -384,7 +396,11 @@ fn main() {
                 arr
             })
             .unwrap_or_else(default_lights),
-        ambient: persisted.as_ref().map(|s| s.ambient).unwrap_or(0.32),
+        ambient: persisted
+            .as_ref()
+            .filter(|s| s.version == CURRENT_STATE_VERSION)
+            .map(|s| s.ambient)
+            .unwrap_or(0.65),
     };
 
     let mut stack = PaperStack::new(
@@ -416,20 +432,22 @@ fn main() {
         }
     }
 
+    let default_brush = Brush {
+        tool: Tool::Dig,
+        radius: 0.05,
+        strength: 4,
+        layer_shrink: 0.9,
+    };
     let brush = persisted
         .as_ref()
+        .filter(|s| s.version == CURRENT_STATE_VERSION)
         .map(|s| Brush {
             tool: Tool::Dig,
-            radius: s.brush_radius.max(0.05),
+            radius: s.brush_radius.clamp(0.002, 1.0),
             strength: s.brush_strength.max(1),
             layer_shrink: s.brush_layer_shrink.clamp(0.5, 0.99),
         })
-        .unwrap_or(Brush {
-            tool: Tool::Dig,
-            radius: 0.4,
-            strength: 4,
-            layer_shrink: 0.9,
-        });
+        .unwrap_or(default_brush);
 
     let letters = persisted
         .as_ref()
@@ -461,17 +479,29 @@ fn main() {
             bevel: true,
         });
 
-    App::new()
-        .add_plugins(
-            DefaultPlugins.set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: "paper-stack editor".into(),
-                    resolution: (1400, 900).into(),
-                    ..default()
-                }),
-                ..default()
-            }),
-        )
+    let window_resolution = if auto_scene {
+        (1200u32, 1200u32).into()
+    } else {
+        (1400u32, 900u32).into()
+    };
+    // Screenshot mode: open the window unfocused and hidden so it
+    // doesn't steal focus from whatever the user is doing. The
+    // renderer still draws to it; we capture and exit.
+    let primary_window = Window {
+        title: "paper-stack editor".into(),
+        resolution: window_resolution,
+        visible: !auto_scene,
+        focused: !auto_scene,
+        ..default()
+    };
+
+    let mut app = App::new();
+    app.add_plugins(
+        DefaultPlugins.set(WindowPlugin {
+            primary_window: Some(primary_window),
+            ..default()
+        }),
+    )
         .add_plugins(EguiPlugin::default())
         .insert_resource(DebugMode(false))
         .insert_resource(light_ctrl)
@@ -490,8 +520,11 @@ fn main() {
         .insert_resource(font_library)
         .insert_resource(letters)
         .insert_resource(doc)
-        .insert_resource(FormUi { depth: 6, bevel: true })
+        .insert_resource(FormUi { depth: 2, bevel: false })
         .insert_resource(ClearColor(Color::srgb(0.05, 0.04, 0.07)))
+        // Shadow map resolution: bump to 4096 to reduce stair-step
+        // quantization artifacts on the layer-edge shadows.
+        .insert_resource(bevy::light::DirectionalLightShadowMap { size: 4096 })
         .add_systems(Startup, setup)
         .add_systems(
             Update,
@@ -508,10 +541,34 @@ fn main() {
             ),
         )
         .add_systems(EguiPrimaryContextPass, debug_panel)
-        .run();
+        // Always start with the Create Account scene already carved.
+        .add_systems(Startup, auto_build_create_account_scene.after(setup));
+
+    if let Some(out_path) = screenshot_out {
+        app.insert_resource(AutoScreenshot {
+            path: out_path,
+            state: AutoScreenshotState::Waiting(60),
+        });
+        app.add_systems(Update, auto_screenshot_system);
+    }
+
+    app.run();
+}
+
+/// Startup hook used in screenshot mode: re-create the reference
+/// "Create Account" scene into the freshly-initialized stack.
+fn auto_build_create_account_scene(
+    mut stack: ResMut<PaperStack>,
+    font_lib: Res<FontLibrary>,
+    mut dirty: ResMut<StackDirty>,
+) {
+    stack.reset_full();
+    carve_create_account_form(&mut stack, &font_lib);
+    dirty.0 = true;
 }
 
 fn save_state_periodic(
+    auto: Option<Res<AutoScreenshot>>,
     time: Res<Time>,
     mut last_save: Local<f64>,
     camera: Res<CameraControl>,
@@ -521,6 +578,11 @@ fn save_state_periodic(
     letters: Res<LettersUi>,
     doc: Res<DocumentUi>,
 ) {
+    // Don't persist in screenshot mode — it'd overwrite the user's
+    // saved palette and brush settings with the demo scene's values.
+    if auto.is_some() {
+        return;
+    }
     let now = time.elapsed_secs_f64();
     if now - *last_save < 2.0 {
         return;
@@ -644,6 +706,10 @@ fn setup(
             far: 200.0,
             ..default()
         }),
+        // Gaussian PCF blurs the shadow map sampling so individual
+        // texel boundaries don't show as ridges along faceted wall
+        // edges.
+        bevy::light::ShadowFilteringMethod::Gaussian,
     ));
 
     for i in 0..3 {
@@ -657,9 +723,15 @@ fn setup(
                 ..default()
             },
             CascadeShadowConfigBuilder {
-                num_cascades: 2,
-                first_cascade_far_bound: 6.0,
-                maximum_distance: 40.0,
+                // Four cascades with a wide reach so shadows stay
+                // intact across the full pinch-zoom range (camera
+                // distance up to ~140 world units at min zoom).
+                // Front cascade keeps high resolution for the
+                // near-field scene at default zoom.
+                num_cascades: 4,
+                minimum_distance: 0.05,
+                first_cascade_far_bound: 8.0,
+                maximum_distance: 160.0,
                 ..default()
             }
             .build(),
@@ -669,11 +741,9 @@ fn setup(
 
     let stack_mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
-        perceptual_roughness: 0.92,
+        perceptual_roughness: 1.0,
         metallic: 0.0,
-        reflectance: 0.04,
-        double_sided: true,
-        cull_mode: None,
+        reflectance: 0.0,
         ..default()
     });
 
@@ -695,22 +765,42 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
     let mut indices: Vec<u32> = Vec::new();
 
     let pt = stack.paper_thickness;
+    let miter = stack.miter_limit as f64;
     let n = stack.layers.len();
-    let empty_mp: MultiPolygon<f64> = MultiPolygon(vec![]);
 
     for i in 0..n {
         let layer = &stack.layers[i];
-        let above: &MultiPolygon<f64> = if i + 1 < n { &stack.layers[i + 1] } else { &empty_mp };
-
-        // Visible top of this layer = layer minus what's above it.
-        let exposed = layer.difference(above);
+        if layer.0.is_empty() {
+            continue;
+        }
+        let z_top = stack.layer_top_z(i as u16);
+        let z_bot = z_top - pt;
         let color = color_to_rgba(stack.palette[i % stack.palette.len()]);
-        let tris_before = indices.len();
+
+        // Exposed top = layer's region MINUS the union of every
+        // layer that sits at a strictly higher z. Layers at the
+        // same z but in different XY don't occlude each other.
+        let mut above_union: MultiPolygon<f64> = MultiPolygon(vec![]);
+        for j in 0..n {
+            if j == i {
+                continue;
+            }
+            if stack.layer_top_z(j as u16) > z_top + 1e-6
+                && !stack.layers[j].0.is_empty()
+            {
+                above_union = above_union.union(&stack.layers[j]);
+            }
+        }
+        let exposed = if above_union.0.is_empty() {
+            layer.clone()
+        } else {
+            layer.difference(&above_union)
+        };
+
         if !exposed.0.is_empty() {
-            let z = (i as f32 + 1.0) * pt;
             tessellate_region(
                 &exposed,
-                z,
+                z_top,
                 color,
                 &mut positions,
                 &mut normals,
@@ -718,18 +808,34 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
                 &mut indices,
             );
         }
-        let _ = tris_before;
 
-        // Vertical walls along this layer's interior holes.
-        let z_top = (i as f32 + 1.0) * pt;
-        let z_bot = i as f32 * pt;
+        // Walls along EVERY boundary of this layer (exterior +
+        // interior holes). Each wall is one paper_thickness tall.
+        let slope = stack
+            .layer_slope_inset
+            .get(i)
+            .copied()
+            .unwrap_or(stack.pyramid_inset) as f64;
         for poly in &layer.0 {
+            emit_wall_for_ring(
+                poly.exterior(),
+                z_top,
+                z_bot,
+                slope,
+                miter,
+                color,
+                &mut positions,
+                &mut normals,
+                &mut colors,
+                &mut indices,
+            );
             for hole in poly.interiors() {
                 emit_wall_for_ring(
                     hole,
-                    /* is_interior_hole */ true,
                     z_top,
                     z_bot,
+                    slope,
+                    miter,
                     color,
                     &mut positions,
                     &mut normals,
@@ -794,10 +900,17 @@ fn tessellate_region(
         for v in &buffers.vertices {
             positions.push([v[0], v[1], z]);
             normals.push([0.0, 0.0, 1.0]);
-            colors.push(color);
+            colors.push(tinted(color, v[0], v[1]));
         }
-        for idx in &buffers.indices {
-            indices.push(base + idx);
+        // Lyon emits triangles in y-down convention. When we promote
+        // them to a 3D plane with y_3D = y_2D and z = const, the
+        // geometric winding flips relative to a +Z viewer — the cap
+        // would render as a back face and get culled. Swap each
+        // triangle's last two indices to restore CCW-from-+Z.
+        for chunk in buffers.indices.chunks_exact(3) {
+            indices.push(base + chunk[0]);
+            indices.push(base + chunk[2]);
+            indices.push(base + chunk[1]);
         }
     }
 }
@@ -829,50 +942,63 @@ fn push_ring_to_path(ring: &LineString<f64>, pb: &mut lyon::path::path::Builder)
     true
 }
 
-/// Emit a vertical wall along a closed ring. For interior holes, the
-/// outward normal points into the void (right of CW walking direction).
+/// Emit a wall along a closed ring with **smoothly averaged per-vertex
+/// normals** so curved sections (circles, rounded-rect corners) shade
+/// as continuous slopes instead of flat facets. The wall's BOTTOM is
+/// offset inward by `slope_inset`; `slope_inset = 0` ⇒ vertical wall.
 fn emit_wall_for_ring(
     ring: &LineString<f64>,
-    is_interior_hole: bool,
     z_top: f32,
     z_bot: f32,
+    slope_inset: f64,
+    miter_limit: f64,
     color: [f32; 4],
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
     colors: &mut Vec<[f32; 4]>,
     indices: &mut Vec<u32>,
 ) {
-    let pts = ring_points(ring);
-    let n = pts.len();
+    let pts_top = ring_points(ring);
+    let n = pts_top.len();
     if n < 3 {
         return;
     }
+    let pts_bot: Vec<Vec2> = if slope_inset > 1e-9 {
+        let coords = ring_to_coords(ring);
+        miter_offset_right_f64(&coords, slope_inset, miter_limit)
+            .iter()
+            .map(|c| Vec2::new(c.x as f32, c.y as f32))
+            .collect()
+    } else {
+        pts_top.clone()
+    };
 
+    // Per-quad FLAT normals. Smooth/averaged per-vertex normals
+    // looked nicer on continuous curves but caused shadow ridge
+    // artifacts: the shading pretends the wall is curved, but the
+    // shadow caster is still faceted, so each segment-vertex
+    // produced a tiny shadow discontinuity. Flat shading matches
+    // the geometry exactly — uniform shadows per facet.
     for i in 0..n {
         let j = (i + 1) % n;
-        let pi = pts[i];
-        let pj = pts[j];
+        let p_top_i = Vec3::new(pts_top[i].x, pts_top[i].y, z_top);
+        let p_top_j = Vec3::new(pts_top[j].x, pts_top[j].y, z_top);
+        let p_bot_i = Vec3::new(pts_bot[i].x, pts_bot[i].y, z_bot);
+        let p_bot_j = Vec3::new(pts_bot[j].x, pts_bot[j].y, z_bot);
 
-        let edge = (pj - pi).try_normalize().unwrap_or(Vec2::X);
-        // For a CW interior hole, void is on the RIGHT of walking dir.
-        // For a CCW exterior, void is on the LEFT (outside).
-        let perp = if is_interior_hole {
-            Vec2::new(edge.y, -edge.x)
-        } else {
-            Vec2::new(-edge.y, edge.x)
-        };
-        let normal = [perp.x, perp.y, 0.0];
-
-        let p_top_i = [pi.x, pi.y, z_top];
-        let p_top_j = [pj.x, pj.y, z_top];
-        let p_bot_i = [pi.x, pi.y, z_bot];
-        let p_bot_j = [pj.x, pj.y, z_bot];
+        let edge_top = p_top_j - p_top_i;
+        let down = p_bot_i - p_top_i;
+        let n_face = down
+            .cross(edge_top)
+            .try_normalize()
+            .unwrap_or(Vec3::Z);
+        let normal = [n_face.x, n_face.y, n_face.z];
 
         let base = positions.len() as u32;
         for v in [p_top_i, p_bot_i, p_bot_j, p_top_j] {
-            positions.push(v);
+            positions.push([v.x, v.y, v.z]);
             normals.push(normal);
-            colors.push(color);
+            colors.push(tinted(color, v.x, v.y));
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
     }
@@ -902,6 +1028,77 @@ fn ring_points(ring: &LineString<f64>) -> Vec<Vec2> {
 fn color_to_rgba(c: Color) -> [f32; 4] {
     let lc = c.to_linear();
     [lc.red, lc.green, lc.blue, lc.alpha]
+}
+
+/// Smooth deterministic hash in [-1, 1] used for per-vertex paper
+/// grain. Sampled at the vertex's world-space (x, y) so adjacent
+/// vertices carry similar values and the result interpolates as a
+/// subtle texture across each face instead of flickering.
+fn paper_grain(x: f32, y: f32) -> f32 {
+    let octave = |fx: f32, fy: f32, freq: f32| -> f32 {
+        let h = ((fx * freq * 12.9898 + fy * freq * 78.2331).sin()
+            * 43758.5453)
+            .fract();
+        h * 2.0 - 1.0
+    };
+    (octave(x, y, 7.0) * 0.55 + octave(x, y, 17.0) * 0.30 + octave(x, y, 41.0) * 0.15)
+        .clamp(-1.0, 1.0)
+}
+
+/// Identity. Per-vertex tinting interpolates linearly across long
+/// fan-triangles in lyon's tessellation of rect-with-hole regions,
+/// producing visible diagonal streaks radiating from the outer
+/// corners. Paper texture, when we add it, has to be sampled in
+/// fragment space (an actual texture mapped over UVs) — not via
+/// per-vertex modulation.
+fn tinted(color: [f32; 4], _x: f32, _y: f32) -> [f32; 4] {
+    color
+}
+
+/// Rounded-rect outline with a small concave dimple at the midpoint
+/// of each corner — the "bracketed" decorative profile from the
+/// reference image. `dimple_depth` is the inward radial offset at
+/// the deepest point of the dimple.
+fn bracketed_rect_pts_ccw(
+    cx: f32,
+    cy: f32,
+    w: f32,
+    h: f32,
+    r: f32,
+    dimple_depth: f32,
+) -> Vec<(f64, f64)> {
+    let r_c = r.min(w * 0.5).min(h * 0.5).max(0.0);
+    if r_c < 1e-4 {
+        return rect_pts_ccw(cx, cy, w, h);
+    }
+    let dimple = dimple_depth.min(r_c * 0.7).max(0.0) as f64;
+    let segs = 40u32;
+    let hw = (w * 0.5 - r_c) as f64;
+    let hh = (h * 0.5 - r_c) as f64;
+    let cx = cx as f64;
+    let cy = cy as f64;
+    let r = r_c as f64;
+
+    let mut pts: Vec<(f64, f64)> = Vec::new();
+    let mut corner = |center: (f64, f64), start: f64| {
+        for i in 0..=segs {
+            let t = i as f64 / segs as f64;
+            let theta = start + t * std::f64::consts::FRAC_PI_2;
+            // Single soft inward dimple at the corner midpoint
+            // (t = 0.5). Wide Gaussian envelope so the radial dip
+            // blends smoothly into the surrounding arc.
+            let env = (-(((t - 0.50) * 4.0).powi(2))).exp();
+            let radius = r - dimple * env;
+            pts.push((center.0 + theta.cos() * radius, center.1 + theta.sin() * radius));
+        }
+    };
+    corner((cx + hw, cy - hh), -std::f64::consts::FRAC_PI_2);
+    corner((cx + hw, cy + hh), 0.0);
+    corner((cx - hw, cy + hh), std::f64::consts::FRAC_PI_2);
+    corner((cx - hw, cy - hh), std::f64::consts::PI);
+    let first = pts[0];
+    pts.push(first);
+    pts
 }
 
 // ─── Carve operations ─────────────────────────────────────────────
@@ -963,10 +1160,12 @@ fn circle_polygon(center: Vec2, radius: f32, segments: u32) -> Polygon<f64> {
 
 fn carve_brush(stack: &mut PaperStack, brush: &Brush, world_pos: Vec2) {
     let n = stack.layers.len();
-    let depth = (brush.strength as usize).min(n);
-    let mut shapes: Vec<Option<MultiPolygon<f64>>> = Vec::with_capacity(depth);
+    if n == 0 {
+        return;
+    }
     let shrink = brush.layer_shrink.clamp(0.05, 0.99);
-    for k in 0..depth {
+    let mut shapes: Vec<Option<MultiPolygon<f64>>> = Vec::with_capacity(brush.strength as usize);
+    for k in 0..brush.strength as usize {
         let r = brush.radius * shrink.powi(k as i32);
         if r < 0.002 {
             break;
@@ -974,9 +1173,46 @@ fn carve_brush(stack: &mut PaperStack, brush: &Brush, world_pos: Vec2) {
         let circ = circle_polygon(world_pos, r, 48);
         shapes.push(Some(MultiPolygon(vec![circ])));
     }
+
     match brush.tool {
-        Tool::Dig => carve_stepped(stack, &shapes),
+        Tool::Dig => {
+            // Start from the topmost layer that still has material at
+            // the brush center, so dragging into an already-dug pit
+            // keeps cutting deeper instead of no-op'ing on absent layers.
+            let pt_geo = geo::Point::new(world_pos.x as f64, world_pos.y as f64);
+            let mut start: Option<usize> = None;
+            for i in (0..n).rev() {
+                if stack.layers[i].contains(&pt_geo) {
+                    start = Some(i);
+                    break;
+                }
+            }
+            let Some(start) = start else { return };
+            carve_stepped_from(stack, &shapes, start);
+        }
         Tool::Extrude => extrude_stepped(stack, &shapes),
+    }
+}
+
+/// Subtract `shapes[k]` from layer `start - k` (clamped to 0). Used by
+/// the brush to carve down from a chosen surface layer rather than
+/// always from the absolute top.
+fn carve_stepped_from(
+    stack: &mut PaperStack,
+    shapes: &[Option<MultiPolygon<f64>>],
+    start: usize,
+) {
+    for (k, maybe_shape) in shapes.iter().enumerate() {
+        if k > start {
+            break;
+        }
+        if let Some(shape) = maybe_shape {
+            if shape.0.is_empty() {
+                continue;
+            }
+            let layer_idx = start - k;
+            stack.layers[layer_idx] = stack.layers[layer_idx].difference(shape);
+        }
     }
 }
 
@@ -1301,6 +1537,43 @@ fn miter_offset_left_f64(pts: &[Coord<f64>], inset: f64, miter_limit: f64) -> Ve
     out
 }
 
+/// Mirror of `miter_offset_left_f64` that offsets to the *right* of
+/// the walking direction. Used for sloped wall bottoms — for both
+/// CCW exteriors and CW interior holes the wall slopes into the
+/// "void" side, which is to the right of the walking direction.
+fn miter_offset_right_f64(pts: &[Coord<f64>], inset: f64, miter_limit: f64) -> Vec<Coord<f64>> {
+    let n = pts.len();
+    if n < 2 {
+        return pts.to_vec();
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let prev = pts[(i + n - 1) % n];
+        let curr = pts[i];
+        let next = pts[(i + 1) % n];
+        let e_in = norm2_f64(curr.x - prev.x, curr.y - prev.y);
+        let e_out = norm2_f64(next.x - curr.x, next.y - curr.y);
+        // Right perpendicular of (dx, dy) = (dy, -dx).
+        let n_in = (e_in.1, -e_in.0);
+        let n_out = (e_out.1, -e_out.0);
+        let bx = n_in.0 + n_out.0;
+        let by = n_in.1 + n_out.1;
+        let blen = (bx * bx + by * by).sqrt();
+        let (bxn, byn) = if blen > 1e-12 {
+            (bx / blen, by / blen)
+        } else {
+            n_in
+        };
+        let cos_half = (bxn * n_in.0 + byn * n_in.1).max(1.0 / miter_limit.max(1.0));
+        let miter_len = inset / cos_half;
+        out.push(Coord {
+            x: curr.x + bxn * miter_len,
+            y: curr.y + byn * miter_len,
+        });
+    }
+    out
+}
+
 fn norm2_f64(x: f64, y: f64) -> (f64, f64) {
     let len = (x * x + y * y).sqrt();
     if len < 1e-12 {
@@ -1575,34 +1848,33 @@ fn carve_text(stack: &mut PaperStack, font_data: &[u8], text: &str, em_world: f3
 
 // ─── Form fields (lines + UI shapes) ──────────────────────────────
 
-fn rect_polygon(cx: f32, cy: f32, w: f32, h: f32) -> Polygon<f64> {
+fn rect_pts_ccw(cx: f32, cy: f32, w: f32, h: f32) -> Vec<(f64, f64)> {
     let hw = w as f64 * 0.5;
     let hh = h as f64 * 0.5;
     let cx = cx as f64;
     let cy = cy as f64;
-    Polygon::new(
-        LineString::from(vec![
-            (cx - hw, cy - hh),
-            (cx + hw, cy - hh),
-            (cx + hw, cy + hh),
-            (cx - hw, cy + hh),
-            (cx - hw, cy - hh),
-        ]),
-        vec![],
-    )
+    vec![
+        (cx - hw, cy - hh),
+        (cx + hw, cy - hh),
+        (cx + hw, cy + hh),
+        (cx - hw, cy + hh),
+        (cx - hw, cy - hh),
+    ]
 }
 
-fn rounded_rect_polygon(cx: f32, cy: f32, w: f32, h: f32, r: f32) -> Polygon<f64> {
-    let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
-    if r < 1e-4 {
-        return rect_polygon(cx, cy, w, h);
+fn rounded_rect_pts_ccw(cx: f32, cy: f32, w: f32, h: f32, r: f32) -> Vec<(f64, f64)> {
+    let r_c = r.min(w * 0.5).min(h * 0.5).max(0.0);
+    if r_c < 1e-4 {
+        return rect_pts_ccw(cx, cy, w, h);
     }
-    let segs = 8u32;
-    let hw = (w * 0.5 - r) as f64;
-    let hh = (h * 0.5 - r) as f64;
+    // Lots of segments per corner so the miter offset (used for the
+    // beveled wall slopes) doesn't spike or kink at the arc joints.
+    let segs = 32u32;
+    let hw = (w * 0.5 - r_c) as f64;
+    let hh = (h * 0.5 - r_c) as f64;
     let cx = cx as f64;
     let cy = cy as f64;
-    let r = r as f64;
+    let r = r_c as f64;
 
     let mut pts: Vec<(f64, f64)> = Vec::new();
     let mut corner = |center: (f64, f64), start: f64| {
@@ -1612,21 +1884,74 @@ fn rounded_rect_polygon(cx: f32, cy: f32, w: f32, h: f32, r: f32) -> Polygon<f64
             pts.push((center.0 + theta.cos() * r, center.1 + theta.sin() * r));
         }
     };
-    // CCW around the rect: bottom-right corner → top-right → top-left → bottom-left.
     corner((cx + hw, cy - hh), -std::f64::consts::FRAC_PI_2);
     corner((cx + hw, cy + hh), 0.0);
     corner((cx - hw, cy + hh), std::f64::consts::FRAC_PI_2);
     corner((cx - hw, cy - hh), std::f64::consts::PI);
     let first = pts[0];
     pts.push(first);
-    Polygon::new(LineString::from(pts), vec![])
+    pts
 }
 
-fn circle_polygon_at(cx: f32, cy: f32, r: f32, segments: u32) -> Polygon<f64> {
-    circle_polygon(Vec2::new(cx, cy), r, segments)
+fn circle_pts_ccw(cx: f32, cy: f32, r: f32, segments: u32) -> Vec<(f64, f64)> {
+    let cx = cx as f64;
+    let cy = cy as f64;
+    let r = r as f64;
+    let mut pts: Vec<(f64, f64)> = Vec::with_capacity(segments as usize + 1);
+    for i in 0..segments {
+        let theta = i as f64 / segments as f64 * std::f64::consts::TAU;
+        pts.push((cx + theta.cos() * r, cy + theta.sin() * r));
+    }
+    pts.push(pts[0]);
+    pts
 }
 
-fn triangle_polygon(p1: Vec2, p2: Vec2, p3: Vec2) -> Polygon<f64> {
+fn polygon_filled(outer_ccw: Vec<(f64, f64)>) -> Polygon<f64> {
+    Polygon::new(LineString::from(outer_ccw), vec![])
+}
+
+/// A frame: outer ring filled, with an inner ring as a hole. Both
+/// rings should be supplied CCW; the inner one is reversed to CW
+/// internally for geo's hole convention.
+fn polygon_frame(outer_ccw: Vec<(f64, f64)>, mut inner_ccw: Vec<(f64, f64)>) -> Polygon<f64> {
+    inner_ccw.reverse();
+    Polygon::new(LineString::from(outer_ccw), vec![LineString::from(inner_ccw)])
+}
+
+fn rect_filled(cx: f32, cy: f32, w: f32, h: f32) -> Polygon<f64> {
+    polygon_filled(rect_pts_ccw(cx, cy, w, h))
+}
+
+#[allow(dead_code)]
+fn rect_frame(cx: f32, cy: f32, w: f32, h: f32, t: f32) -> Polygon<f64> {
+    polygon_frame(
+        rect_pts_ccw(cx, cy, w, h),
+        rect_pts_ccw(cx, cy, (w - 2.0 * t).max(1e-4), (h - 2.0 * t).max(1e-4)),
+    )
+}
+
+fn rounded_rect_frame(cx: f32, cy: f32, w: f32, h: f32, r: f32, t: f32) -> Polygon<f64> {
+    polygon_frame(
+        rounded_rect_pts_ccw(cx, cy, w, h, r),
+        rounded_rect_pts_ccw(
+            cx,
+            cy,
+            (w - 2.0 * t).max(1e-4),
+            (h - 2.0 * t).max(1e-4),
+            (r - t).max(0.0),
+        ),
+    )
+}
+
+fn circle_ring(cx: f32, cy: f32, outer_r: f32, t: f32, segments: u32) -> Polygon<f64> {
+    let inner_r = (outer_r - t).max(1e-4);
+    polygon_frame(
+        circle_pts_ccw(cx, cy, outer_r, segments),
+        circle_pts_ccw(cx, cy, inner_r, segments),
+    )
+}
+
+fn triangle_filled(p1: Vec2, p2: Vec2, p3: Vec2) -> Polygon<f64> {
     Polygon::new(
         LineString::from(vec![
             (p1.x as f64, p1.y as f64),
@@ -1638,47 +1963,524 @@ fn triangle_polygon(p1: Vec2, p2: Vec2, p3: Vec2) -> Polygon<f64> {
     )
 }
 
-/// Build a panel of form-style UI primitives carved into the paper.
-/// All shapes are *filled* polygons that get subtracted from the
-/// stack — so each one carves a depression in the shape of the
-/// affordance.
+/// Carved form composed of fine linework — outlined frames, hairline
+/// rules, ring-outlined radios and checkboxes. Stroke width and
+/// element sizes are sized for a precise/blueprint look; the user is
+/// expected to zoom in to see them clearly.
 fn build_form_polygons() -> MultiPolygon<f64> {
     let mut polys: Vec<Polygon<f64>> = Vec::new();
 
-    // Two horizontal divider lines (top and bottom of the form area).
-    polys.push(rect_polygon(0.0, 3.6, 7.0, 0.04));
-    polys.push(rect_polygon(0.0, -3.6, 7.0, 0.04));
+    // Stroke widths.
+    let line: f32 = 0.012;
+    let frame: f32 = 0.014;
 
-    // Two text-input fields stacked vertically — long pill-rects.
-    polys.push(rounded_rect_polygon(0.0, 2.7, 6.0, 0.55, 0.12));
-    polys.push(rounded_rect_polygon(0.0, 1.85, 6.0, 0.55, 0.12));
+    // Outer frame.
+    polys.push(rounded_rect_frame(0.0, 0.0, 4.6, 5.4, 0.10, frame));
 
-    // Three radio-button circles in a row.
+    // Header rule below title area.
+    polys.push(rect_filled(0.0, 2.10, 4.0, line));
+
+    // Two text-input underlines (label area to the left would sit
+    // here; we just carve the rule itself).
+    polys.push(rect_filled(0.30, 1.50, 3.4, line));
+    polys.push(rect_filled(0.30, 1.00, 3.4, line));
+
+    // Three radio rings.
     for i in 0..3 {
-        let x = -2.0 + i as f32 * 2.0;
-        polys.push(circle_polygon_at(x, 0.85, 0.22, 48));
+        let x = -1.30 + i as f32 * 0.55;
+        polys.push(circle_ring(x, 0.30, 0.090, line, 48));
     }
 
-    // Three checkbox squares in a row (slightly rounded).
+    // Three checkbox squares (outlined).
     for i in 0..3 {
-        let x = -2.0 + i as f32 * 2.0;
-        polys.push(rounded_rect_polygon(x, -0.1, 0.45, 0.45, 0.06));
+        let x = -1.30 + i as f32 * 0.55;
+        polys.push(rounded_rect_frame(x, -0.30, 0.180, 0.180, 0.018, line));
     }
 
-    // Dropdown — wide pill-rect with a chevron triangle in the right.
-    polys.push(rounded_rect_polygon(0.0, -1.2, 6.0, 0.55, 0.12));
-    let chev_x = 2.5;
-    let chev_y = -1.2;
-    polys.push(triangle_polygon(
-        Vec2::new(chev_x - 0.18, chev_y + 0.10),
-        Vec2::new(chev_x + 0.18, chev_y + 0.10),
-        Vec2::new(chev_x,        chev_y - 0.18),
+    // Dropdown: underline rule + chevron glyph at the right end.
+    polys.push(rect_filled(0.10, -0.95, 3.6, line));
+    let chev_cx = 1.78;
+    let chev_cy = -0.86;
+    polys.push(triangle_filled(
+        Vec2::new(chev_cx - 0.07, chev_cy),
+        Vec2::new(chev_cx + 0.07, chev_cy),
+        Vec2::new(chev_cx,        chev_cy - 0.085),
     ));
 
-    // Submit-style button — small rounded rect.
-    polys.push(rounded_rect_polygon(0.0, -2.4, 1.8, 0.65, 0.18));
+    // Button — small outlined rounded rect.
+    polys.push(rounded_rect_frame(0.0, -1.65, 1.10, 0.36, 0.08, line));
+
+    // Footer rule.
+    polys.push(rect_filled(0.0, -2.20, 4.0, line));
 
     MultiPolygon(polys)
+}
+
+// ─── Icon polygon library ─────────────────────────────────────────
+
+fn ellipse_polygon(cx: f32, cy: f32, rx: f32, ry: f32, segments: u32) -> Polygon<f64> {
+    let cx = cx as f64;
+    let cy = cy as f64;
+    let rx = rx as f64;
+    let ry = ry as f64;
+    let mut pts: Vec<(f64, f64)> = Vec::with_capacity(segments as usize + 1);
+    for i in 0..segments {
+        let theta = i as f64 / segments as f64 * std::f64::consts::TAU;
+        pts.push((cx + theta.cos() * rx, cy + theta.sin() * ry));
+    }
+    pts.push(pts[0]);
+    Polygon::new(LineString::from(pts), vec![])
+}
+
+/// Half-disc polygon with a flat bottom edge at `cy`. Used as the
+/// shoulders of the avatar silhouette.
+fn half_disc_top(cx: f32, cy: f32, w: f32, h: f32, segments: u32) -> Polygon<f64> {
+    let cx = cx as f64;
+    let cy = cy as f64;
+    let hw = (w * 0.5) as f64;
+    let hh = h as f64;
+    let mut pts: Vec<(f64, f64)> = Vec::with_capacity(segments as usize + 3);
+    // CCW, y-up: start at right end of flat bottom, arc over the top
+    // to the left end, then return along the bottom.
+    for i in 0..=segments {
+        let theta = (i as f64 / segments as f64) * std::f64::consts::PI;
+        pts.push((cx + hw * theta.cos(), cy + hh * theta.sin()));
+    }
+    pts.push((cx + hw, cy)); // close
+    Polygon::new(LineString::from(pts), vec![])
+}
+
+/// Person silhouette: a clear head circle above a half-disc shoulders.
+/// `size` is the total silhouette height. Pieces overlap slightly so
+/// the union reads as one figure with a subtle neck.
+fn person_silhouette(cx: f32, cy: f32, size: f32) -> Vec<Polygon<f64>> {
+    let head_r = size * 0.20;
+    let head_cy = cy + size * 0.30;
+    let head = circle_polygon(Vec2::new(cx, head_cy), head_r, 48);
+    // Shoulders flat-bottom slightly below the figure center; arc
+    // peaks up *into* the head so the two pieces merge cleanly.
+    let shoulders_flat_bottom = cy - size * 0.46;
+    let shoulders_h = size * 0.74;
+    let shoulders_w = size * 0.95;
+    let shoulders = half_disc_top(cx, shoulders_flat_bottom, shoulders_w, shoulders_h, 32);
+    vec![head, shoulders]
+}
+
+fn envelope_icon(cx: f32, cy: f32, size: f32) -> Vec<Polygon<f64>> {
+    // Envelope body as an outlined rectangle with a V-fold inside
+    // (two filled triangles meeting at the top center).
+    let w = size * 1.10;
+    let h = size * 0.78;
+    let line = size * 0.07;
+    let body_frame = rect_frame(cx, cy, w, h, line);
+
+    // V-fold: two triangles whose hypotenuses dive from the top
+    // corners to the center. Approximated as filled triangles.
+    let top_l = Vec2::new(cx - w * 0.5 + line, cy + h * 0.5 - line);
+    let top_r = Vec2::new(cx + w * 0.5 - line, cy + h * 0.5 - line);
+    let bottom_c = Vec2::new(cx, cy - h * 0.05);
+    let v_left = triangle_filled(
+        top_l,
+        Vec2::new(cx, cy + h * 0.5 - line),
+        bottom_c,
+    );
+    let v_right = triangle_filled(
+        Vec2::new(cx, cy + h * 0.5 - line),
+        top_r,
+        bottom_c,
+    );
+    vec![body_frame, v_left, v_right]
+}
+
+fn lock_icon(cx: f32, cy: f32, size: f32) -> Vec<Polygon<f64>> {
+    let body_w = size * 0.78;
+    let body_h = size * 0.55;
+    let body_cy = cy - size * 0.12;
+    let body = polygon_filled(rounded_rect_pts_ccw(
+        cx,
+        body_cy,
+        body_w,
+        body_h,
+        size * 0.08,
+    ));
+    // Shackle = inverted U: outer rounded-frame whose bottom is
+    // clipped by the body. We just emit the rounded-rect frame and
+    // accept that it overlaps the body slightly.
+    let shackle_w = size * 0.52;
+    let shackle_h = size * 0.46;
+    let shackle_cy = cy + size * 0.20;
+    let shackle = rounded_rect_frame(
+        cx,
+        shackle_cy,
+        shackle_w,
+        shackle_h,
+        shackle_w * 0.5,
+        size * 0.10,
+    );
+    vec![body, shackle]
+}
+
+fn eye_icon(cx: f32, cy: f32, size: f32) -> Vec<Polygon<f64>> {
+    // Almond outline (horizontal ellipse) + pupil dot.
+    let almond = ellipse_polygon(cx, cy, size * 0.55, size * 0.30, 48);
+    let pupil = circle_polygon(Vec2::new(cx, cy), size * 0.16, 24);
+    vec![almond, pupil]
+}
+
+fn arrow_right_icon(cx: f32, cy: f32, size: f32) -> Vec<Polygon<f64>> {
+    let head_w = size * 0.55;
+    let head_h = size * 0.75;
+    let tail_w = size * 0.55;
+    let tail_h = size * 0.16;
+    let head_tip_x = cx + size * 0.40;
+    let head_base_x = head_tip_x - head_w;
+    let tail_cx = head_base_x - tail_w * 0.5 + size * 0.05;
+
+    let tail = rect_filled(tail_cx, cy, tail_w, tail_h);
+    let head = triangle_filled(
+        Vec2::new(head_tip_x, cy),
+        Vec2::new(head_base_x, cy + head_h * 0.5),
+        Vec2::new(head_base_x, cy - head_h * 0.5),
+    );
+    vec![tail, head]
+}
+
+// ─── Recreation of the "Create Account" reference image ──────────
+
+/// Layout a single line of text as a list of glyph polygons, starting
+/// at `origin` (baseline-left) at the given em size in world units.
+fn layout_text(font_data: &[u8], text: &str, origin: Vec2, em: f32, tol: f32) -> Vec<Polygon<f64>> {
+    let face = match Face::parse(font_data, 0) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+    let upem = face.units_per_em() as f32;
+    let scale = em / upem;
+    let mut polys = Vec::new();
+    let mut x = origin.x;
+    for ch in text.chars() {
+        let Some(gid) = face.glyph_index(ch) else {
+            x += em * 0.3;
+            continue;
+        };
+        let advance = face.glyph_hor_advance(gid).unwrap_or(0) as f32 * scale;
+        let path = outline_glyph_to_path(&face, gid, scale, Vec2::new(x, origin.y));
+        let contours = flatten_path_to_contours(&path, tol);
+        polys.extend(build_glyph_polygons(&contours));
+        x += advance;
+    }
+    polys
+}
+
+fn pick_font<'a>(lib: &'a FontLibrary, names: &[&str]) -> Option<&'a NamedFont> {
+    for name in names {
+        if let Some(f) = lib.fonts.iter().find(|f| f.name == *name) {
+            return Some(f);
+        }
+    }
+    lib.fonts.first()
+}
+
+/// Build the "Create Account" reference as a RAISED stepped pyramid.
+/// Each layer is a complete colored sheet sitting on top of the
+/// previous one — not a hole carved into a bigger sheet. The base
+/// (red) is largest; successive layers are smaller concentric
+/// sheets stacking upward toward the centered purple card on top.
+///
+/// Layer plan (z increases upward; layer 0 is the bottom sheet):
+///   0  red           — base, full paper.
+///   1  orange        — first pyramid step.
+///   2  yellow
+///   3  green
+///   4  teal
+///   5  blue          — last rainbow ring.
+///   6  dark purple   — card-shaped, peeks through form-field cutouts.
+///   7  purple        — card top, with input/button/text/icon cutouts.
+///
+/// Walls between layers are vertical (no chamfer): the reference has
+/// crisp edges between each color band, with ambient light dimming
+/// the wall just enough that it reads as a clean line.
+fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary) {
+    stack.paper_thickness = 0.18;
+
+    let n_layers = stack.layers.len();
+    if n_layers < 8 {
+        return;
+    }
+
+    // Palette (indexed 0..=7):
+    //   0 = blue (carve floor)
+    //   1 = teal
+    //   2 = green
+    //   3 = yellow
+    //   4 = orange
+    //   5 = red (outermost paper)
+    //   6 = card dark purple
+    //   7 = card light purple (card top surface)
+    let n_pal = stack.palette.len();
+    if n_pal >= 8 {
+        stack.palette[0] = Color::srgb(0.27, 0.50, 0.86); // blue
+        stack.palette[1] = Color::srgb(0.36, 0.75, 0.68); // teal
+        stack.palette[2] = Color::srgb(0.62, 0.78, 0.36); // green
+        stack.palette[3] = Color::srgb(0.96, 0.78, 0.30); // yellow
+        stack.palette[4] = Color::srgb(0.96, 0.59, 0.26); // orange
+        stack.palette[5] = Color::srgb(0.93, 0.31, 0.27); // red
+        stack.palette[6] = Color::srgb(0.32, 0.22, 0.55); // dark purple
+        stack.palette[7] = Color::srgb(0.60, 0.50, 0.84); // card purple
+        for i in 8..n_pal {
+            stack.palette[i] = stack.palette[7];
+        }
+    }
+
+    // Reset all layers and slopes (vertical walls = crisp edges).
+    for layer in stack.layers.iter_mut() {
+        *layer = MultiPolygon(vec![]);
+    }
+    for s in stack.layer_slope_inset.iter_mut() {
+        *s = 0.0;
+    }
+
+    // Explicit z heights. Carved-down rainbow: red highest, blue
+    // lowest. Card sits ON blue and rises back UP to the same
+    // heights as teal and green (but in different XY).
+    let pt = stack.paper_thickness;
+    let z_blue   = 1.0 * pt; // floor
+    let z_teal   = 2.0 * pt;
+    let z_green  = 3.0 * pt;
+    let z_yellow = 4.0 * pt;
+    let z_orange = 5.0 * pt;
+    let z_red    = 6.0 * pt; // top
+    stack.layer_z[0] = z_blue;
+    stack.layer_z[1] = z_teal;
+    stack.layer_z[2] = z_green;
+    stack.layer_z[3] = z_yellow;
+    stack.layer_z[4] = z_orange;
+    stack.layer_z[5] = z_red;
+    stack.layer_z[6] = z_teal;  // card dark — same height as teal
+    stack.layer_z[7] = z_green; // card light — same height as green
+
+    // Geometry sizes.
+    let paper_w: f32 = 18.0;
+    let paper = polygon_filled(rounded_rect_pts_ccw(0.0, 0.0, paper_w, paper_w, 0.5));
+
+    // Each carve is the SAME shape size at successive higher z. Going
+    // from inside-out (smallest carve to biggest), each step grows by
+    // `step` so the rings exposed between carves are uniform width.
+    let smallest_carve_w: f32 = 7.4;
+    let step: f32 = 0.55;
+    let carve = |size: f32, radius: f32| -> Polygon<f64> {
+        polygon_filled(rounded_rect_pts_ccw(0.0, 0.0, size, size, radius))
+    };
+    let carve_teal   = carve(smallest_carve_w + 0.0  * step, 0.42);
+    let carve_green  = carve(smallest_carve_w + 1.0  * step, 0.46);
+    let carve_yellow = carve(smallest_carve_w + 2.0  * step, 0.50);
+    let carve_orange = carve(smallest_carve_w + 3.0  * step, 0.54);
+    let carve_red    = carve(smallest_carve_w + 4.0  * step, 0.58);
+
+    let mp = |p: Polygon<f64>| MultiPolygon(vec![p]);
+
+    // Layer 0: blue = full paper, no carve. The floor that the card
+    // sits on.
+    stack.layers[0] = MultiPolygon(vec![paper.clone()]);
+
+    // Layers 1..=5: each is full paper MINUS its respective carve.
+    stack.layers[1] = mp(paper.clone()).difference(&mp(carve_teal.clone()));
+    stack.layers[2] = mp(paper.clone()).difference(&mp(carve_green.clone()));
+    stack.layers[3] = mp(paper.clone()).difference(&mp(carve_yellow));
+    stack.layers[4] = mp(paper.clone()).difference(&mp(carve_orange));
+    stack.layers[5] = mp(paper.clone()).difference(&mp(carve_red));
+
+    // Card body. Smaller than the smallest rainbow carve so blue
+    // floor is visible as a ring around the card.
+    let card_w: f32 = 5.6;
+    let card_h: f32 = 5.6;
+    let card_r: f32 = 0.30;
+    let card_shape = polygon_filled(rounded_rect_pts_ccw(0.0, 0.0, card_w, card_h, card_r));
+
+    // Layout (relative to card center).
+    let avatar_x: f32 = -2.0;
+    let avatar_y: f32 = 1.95;
+    let avatar_r: f32 = 0.32;
+
+    let input_w: f32 = 4.5;
+    let input_h: f32 = 0.50;
+    let input_r: f32 = 0.13;
+    let input_ys: [f32; 3] = [1.05, 0.40, -0.25];
+
+    let row_y: f32 = -0.95;
+    let checkbox_size: f32 = 0.26;
+
+    let button_w: f32 = 4.5;
+    let button_h: f32 = 0.62;
+    let button_r: f32 = 0.16;
+    let button_y: f32 = -1.75;
+
+    let mut cutouts: Vec<Polygon<f64>> = Vec::new();
+    cutouts.push(circle_polygon(Vec2::new(avatar_x, avatar_y), avatar_r, 64));
+    for &y in &input_ys {
+        cutouts.push(polygon_filled(rounded_rect_pts_ccw(
+            0.0, y, input_w, input_h, input_r,
+        )));
+    }
+    cutouts.push(polygon_filled(rounded_rect_pts_ccw(
+        -2.00, row_y, checkbox_size, checkbox_size, 0.04,
+    )));
+    cutouts.push(polygon_filled(rounded_rect_pts_ccw(
+        0.0, button_y, button_w, button_h, button_r,
+    )));
+
+    let mut icons: Vec<Polygon<f64>> = Vec::new();
+    icons.extend(person_silhouette(avatar_x, avatar_y, 0.46));
+    let icon_size: f32 = 0.24;
+    let icon_x: f32 = -1.86;
+    icons.extend(person_silhouette(icon_x, input_ys[0], icon_size));
+    icons.extend(envelope_icon(icon_x, input_ys[1], icon_size));
+    icons.extend(lock_icon(icon_x, input_ys[2], icon_size));
+    icons.extend(eye_icon(2.00, input_ys[2], icon_size));
+    icons.extend(arrow_right_icon(1.80, button_y, 0.30));
+
+    let mut texts: Vec<Polygon<f64>> = Vec::new();
+    if let Some(font) = pick_font(font_lib, &["Arial Bold", "Helvetica", "Arial"]) {
+        let tol = 0.005;
+        texts.extend(layout_text(&font.data, "Create Account",
+            Vec2::new(-1.30, 2.10), 0.40, tol));
+        texts.extend(layout_text(&font.data, "Let's get you started.",
+            Vec2::new(-1.30, 1.75), 0.21, tol));
+        texts.extend(layout_text(&font.data, "Full Name",
+            Vec2::new(-1.55, input_ys[0] - 0.08), 0.26, tol));
+        texts.extend(layout_text(&font.data, "Email Address",
+            Vec2::new(-1.55, input_ys[1] - 0.08), 0.26, tol));
+        texts.extend(layout_text(&font.data, "Password",
+            Vec2::new(-1.55, input_ys[2] - 0.08), 0.26, tol));
+        texts.extend(layout_text(&font.data, "Remember me",
+            Vec2::new(-1.75, row_y - 0.08), 0.20, tol));
+        texts.extend(layout_text(&font.data, "Forgot password?",
+            Vec2::new(0.50, row_y - 0.08), 0.20, tol));
+        texts.extend(layout_text(&font.data, "Sign Up",
+            Vec2::new(-0.65, button_y - 0.11), 0.28, tol));
+    }
+
+    // THREE purple layers stacked on the blue floor:
+    //   layer 6 = deep purple (z=z_teal)   — visible inside text/icons.
+    //   layer 7 = mid purple  (z=z_green)  — visible at form-field bottoms.
+    //   layer 8 = top purple  (z=z_yellow) — visible card surface.
+    //
+    // Cuts:
+    //   layer 8: card MINUS (form fields ∪ icons ∪ text).
+    //   layer 7: card MINUS (icons ∪ text).      (form fields don't go this deep)
+    //   layer 6: card (no cuts).
+    //
+    // Visibility:
+    //   inside form field, outside icon/text  → layer 7 (mid purple).
+    //   inside icon                            → layer 6 (deep purple).
+    //   inside text                            → layer 6 (deep purple).
+    //   on bare card surface                   → layer 8 (top purple).
+    if n_layers < 9 {
+        return;
+    }
+    if n_pal >= 9 {
+        // Re-grade purples: 6 = darkest text-recess color,
+        //                   7 = mid (form-field bottom),
+        //                   8 = lightest card surface.
+        stack.palette[6] = Color::srgb(0.18, 0.10, 0.32); // deep
+        stack.palette[7] = Color::srgb(0.40, 0.30, 0.65); // mid
+        stack.palette[8] = Color::srgb(0.66, 0.54, 0.86); // top
+    }
+    stack.layer_z[6] = z_teal;
+    stack.layer_z[7] = z_green;
+    stack.layer_z[8] = z_yellow;
+
+    // Build subtractions iteratively. Geo's difference with a
+    // MultiPolygon containing OVERLAPPING subtrahends (e.g. button
+    // rect that already contains the Sign Up text) can drop subtle
+    // holes; subtracting one polygon at a time is more reliable.
+    let subtract_each = |start: MultiPolygon<f64>,
+                         shapes: &[Polygon<f64>]|
+     -> MultiPolygon<f64> {
+        let mut acc = start;
+        for s in shapes {
+            acc = acc.difference(&MultiPolygon(vec![s.clone()]));
+        }
+        acc
+    };
+
+    // layer 6 = full card body.
+    stack.layers[6] = mp(card_shape.clone());
+
+    // layer 7 = card MINUS every icon MINUS every text glyph.
+    let icons_and_text: Vec<Polygon<f64>> = icons
+        .iter()
+        .cloned()
+        .chain(texts.iter().cloned())
+        .collect();
+    stack.layers[7] = subtract_each(mp(card_shape.clone()), &icons_and_text);
+
+    // layer 8 = card MINUS form-field cutouts MINUS icons MINUS text.
+    let all_holes: Vec<Polygon<f64>> = cutouts
+        .iter()
+        .cloned()
+        .chain(icons.iter().cloned())
+        .chain(texts.iter().cloned())
+        .collect();
+    stack.layers[8] = subtract_each(mp(card_shape), &all_holes);
+    let _ = (cutouts, icons, texts); // borrowed by the cloned all_holes; drop here
+
+    // Empty + push out-of-the-way any layers above 8.
+    for i in 9..n_layers {
+        stack.layers[i] = MultiPolygon(vec![]);
+        stack.layer_z[i] = z_red + (i as f32 - 5.0) * pt;
+    }
+}
+
+// ─── Auto-screenshot ──────────────────────────────────────────────
+
+#[derive(Resource)]
+struct AutoScreenshot {
+    path: String,
+    state: AutoScreenshotState,
+}
+
+enum AutoScreenshotState {
+    /// Frames to wait so the mesh has time to regenerate and render.
+    Waiting(u32),
+    /// Screenshot has been spawned; wait this many frames for the
+    /// async write to finish before exiting.
+    AfterCapture(u32),
+    Done,
+}
+
+fn auto_screenshot_system(
+    mut commands: Commands,
+    auto: Option<ResMut<AutoScreenshot>>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Some(mut auto) = auto else { return; };
+    match &mut auto.state {
+        AutoScreenshotState::Waiting(n) => {
+            if *n > 0 {
+                *n -= 1;
+                return;
+            }
+            let path = auto.path.clone();
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(path));
+            auto.state = AutoScreenshotState::AfterCapture(60);
+        }
+        AutoScreenshotState::AfterCapture(n) => {
+            if *n > 0 {
+                *n -= 1;
+                return;
+            }
+            exit.write(AppExit::Success);
+            auto.state = AutoScreenshotState::Done;
+            // Belt-and-braces: AppExit alone sometimes leaves the
+            // window lingering on macOS — force-exit the process so
+            // the window goes down immediately.
+            std::process::exit(0);
+        }
+        AutoScreenshotState::Done => {}
+    }
 }
 
 fn carve_form(stack: &mut PaperStack, depth: u16, bevel: bool) {
@@ -1758,14 +2560,15 @@ fn debug_inputs(
             MouseScrollUnit::Pixel => 0.005,
             MouseScrollUnit::Line  => 0.10,
         };
-        // Natural-scroll convention: scroll up → camera moves up
-        // (content scrolls down on screen).
-        pan_delta.x += event.x * factor;
+        // Vertical follows the user's reported feel; horizontal is
+        // inverted from the wheel-event sign so the paper tracks the
+        // finger direction.
+        pan_delta.x -= event.x * factor;
         pan_delta.y += event.y * factor;
     }
     for event in pan_gesture.read() {
         if egui_has_pointer { continue; }
-        pan_delta.x += event.0.x * 0.005;
+        pan_delta.x -= event.0.x * 0.005;
         pan_delta.y += event.0.y * 0.005;
     }
     if pan_delta != Vec2::ZERO {
@@ -1776,7 +2579,7 @@ fn debug_inputs(
     // Pinch: positive delta = pinch out = zoom in.
     for event in pinch.read() {
         if egui_has_pointer { continue; }
-        camera.zoom = (camera.zoom * (1.0 + event.0)).clamp(0.2, 8.0);
+        camera.zoom = (camera.zoom * (1.0 + event.0)).clamp(0.1, 64.0);
     }
 
     // Tilt — keyboard fallback; rotate gesture left as a future hook.
@@ -1900,13 +2703,15 @@ fn sync_lights(
 
         let on = l.intensity > 0.01;
         dl.color = l.color();
-        dl.illuminance = l.intensity * 12_000.0;
-        dl.shadows_enabled = on;
+        dl.illuminance = l.intensity * 7_500.0;
+        // Disable shadows on the fill / back lights — they'd mush
+        // together and produce muddy shading.
+        dl.shadows_enabled = on && idx.0 == 0;
     }
 }
 
 fn sync_ambient(light: Res<LightControl>, mut ambient: ResMut<GlobalAmbientLight>) {
-    ambient.brightness = light.ambient * 800.0;
+    ambient.brightness = light.ambient * 1500.0;
 }
 
 fn sync_camera(
@@ -1951,7 +2756,11 @@ fn debug_panel(
                     ui.selectable_value(&mut brush.tool, Tool::Dig, "Dig (1)");
                     ui.selectable_value(&mut brush.tool, Tool::Extrude, "Extrude (2)");
                 });
-                ui.add(egui::Slider::new(&mut brush.radius, 0.05..=2.0).text("radius"));
+                ui.add(
+                    egui::Slider::new(&mut brush.radius, 0.002..=1.0)
+                        .logarithmic(true)
+                        .text("radius"),
+                );
                 let mut s = brush.strength as i32;
                 if ui.add(egui::Slider::new(&mut s, 1..=16).text("strength (layers)")).changed() {
                     brush.strength = s.max(1) as u16;
@@ -1965,6 +2774,23 @@ fn debug_panel(
                     stack.reset_full();
                     dirty.0 = true;
                 }
+            });
+
+            ui.collapsing("Demo scenes", |ui| {
+                if ui.button("Show \"Create Account\" demo").clicked() {
+                    stack.reset_full();
+                    carve_create_account_form(&mut stack, &font_lib);
+                    // Frame it: top-down, zoomed out enough to fit the
+                    // 9.6-wide outer carve plus a margin of red paper.
+                    camera.pan = Vec2::ZERO;
+                    camera.zoom = 0.58;
+                    camera.tilt = 0.0;
+                    dirty.0 = true;
+                }
+                ui.label(
+                    "Carves the full layered reference scene and\n\
+                     sets the camera to frame it top-down.",
+                );
             });
 
             ui.collapsing("Form fields (lines + UI shapes)", |ui| {
@@ -2147,7 +2973,11 @@ fn debug_panel(
             ui.collapsing("Camera", |ui| {
                 ui.add(egui::Slider::new(&mut camera.pan.x, -10.0..=10.0).text("pan x"));
                 ui.add(egui::Slider::new(&mut camera.pan.y, -10.0..=10.0).text("pan y"));
-                ui.add(egui::Slider::new(&mut camera.zoom, 0.2..=8.0).text("zoom"));
+                ui.add(
+                    egui::Slider::new(&mut camera.zoom, 0.1..=64.0)
+                        .logarithmic(true)
+                        .text("zoom"),
+                );
                 let mut tilt_deg = camera.tilt.to_degrees();
                 if ui
                     .add(egui::Slider::new(&mut tilt_deg, 0.0..=80.0).text("tilt (°)"))

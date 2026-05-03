@@ -55,6 +55,7 @@ impl fmt::Display for Inst {
         match self {
             Inst::Iconst(ty, val) => write!(f, "iconst.{ty} {val}"),
             Inst::F64Const(val) => write!(f, "f64const {val}"),
+            Inst::GcLiteral(lit) => write!(f, "gc_literal lit{}", lit.as_u32()),
 
             Inst::Add(a, b) => write!(f, "add {a}, {b}"),
             Inst::Sub(a, b) => write!(f, "sub {a}, {b}"),

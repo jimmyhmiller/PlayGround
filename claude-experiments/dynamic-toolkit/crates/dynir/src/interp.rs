@@ -1328,6 +1328,12 @@ fn exec_non_call_inst<S: ValueLayout>(
         // Constants
         Inst::Iconst(t, imm) => Ok(Some(InstResult::Val(mask(*imm as u64, *t)))),
         Inst::F64Const(f) => Ok(Some(InstResult::Val(f.to_bits()))),
+        Inst::GcLiteral(_) => {
+            // The interpreter doesn't have a literal pool — JitModule owns it.
+            // Frontends that want interp + GcLiteral should plumb the pool
+            // through ConfiguredModuleInterpreter (not yet implemented).
+            panic!("GcLiteral is JIT-only in this interpreter; use the JIT path");
+        }
 
         // Integer arithmetic
         Inst::Add(a, b) => {

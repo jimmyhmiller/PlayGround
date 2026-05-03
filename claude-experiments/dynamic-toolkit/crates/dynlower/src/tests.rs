@@ -2347,6 +2347,40 @@ fn jit_module_safepoint_with_handler() {
 }
 
 #[test]
+fn jit_entry_fp_fence_stops_walker_at_rust_boundary() {
+    use crate::{
+        push_jit_entry_fp, pop_jit_entry_fp, walk_jit_ancestor_roots,
+    };
+    // Without a fence, the walker would try to crawl arbitrarily far up
+    // the FP chain. Establish a fence and verify that walking from a
+    // synthetic JIT-frame FP stops at the fence (zero ancestor visits).
+    //
+    // We construct a fake "JIT frame" on the stack: just two u64 slots
+    // representing [saved_fp, saved_lr]. Set saved_fp to a sentinel
+    // value, install that sentinel as the fence, and confirm the walker
+    // sees no ancestors.
+
+    // Fake frame: saved_fp = 0xDEAD_BEEF (a value we'll fence), saved_lr = 0
+    let fake_frame: [u64; 2] = [0xDEAD_BEEF_DEAD_BEEFu64, 0];
+    let synthetic_jit_fp = fake_frame.as_ptr() as *const u8;
+
+    let visited = std::cell::Cell::new(0usize);
+    unsafe { push_jit_entry_fp(0xDEAD_BEEF_DEAD_BEEFu64 as *const u8) };
+    walk_jit_ancestor_roots(synthetic_jit_fp, &mut |_slot| {
+        visited.set(visited.get() + 1);
+    });
+    pop_jit_entry_fp();
+
+    // The first hop walks: saved_fp = 0xDEAD_BEEF == fence → stop
+    // before visiting any roots.
+    assert_eq!(
+        visited.get(),
+        0,
+        "walker visited a root past the fence"
+    );
+}
+
+#[test]
 fn jit_module_bench_fifty_nested() {
     let n = 50;
     let mut wat = String::from("(module\n");
@@ -2529,4 +2563,326 @@ fn linear_scan_fib_loop() {
     assert_eq!(run_jit_linear_scan(&func, &[1]), 1);
     assert_eq!(run_jit_linear_scan(&func, &[10]), 55);
     assert_eq!(run_jit_linear_scan(&func, &[20]), 6765);
+}
+
+// ─── Incremental extend tests (microlisp prerequisite) ────────────
+
+#[test]
+fn extend_compile_then_extend_calls_first() {
+    // Step 1: declare and compile `f(x) = x * 2`. Run it.
+    // Step 2: extend with `g(x) = f(x) + 1`. Run g (which calls f via the
+    // stable call table). Run f again to confirm it still works.
+    let mut mb = ModuleBuilder::new();
+    let f = mb.declare_func("f", &[Type::I64], Some(Type::I64));
+    {
+        let mut fb = mb.define_func(f);
+        let entry = fb.entry_block();
+        let x = fb.block_param(entry, 0);
+        let two = fb.iconst(Type::I64, 2);
+        let r = fb.mul(x, two);
+        fb.ret(r);
+        mb.finish_func(f, fb);
+    }
+
+    let mut jit = JitModule::new_empty::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(64, 16, crate::CallMode::FastCall);
+
+    let snap1 = mb.snapshot();
+    let new1 = jit.extend::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&snap1, &[]);
+    assert_eq!(new1, vec![f]);
+    assert_eq!(jit.call(f, &[7]), 14);
+
+    // Step 2: declare g, define it (it calls f), snapshot, extend.
+    let g = mb.declare_func("g", &[Type::I64], Some(Type::I64));
+    {
+        let mut fb = mb.define_func(g);
+        let entry = fb.entry_block();
+        let x = fb.block_param(entry, 0);
+        let doubled = fb.call(f, &[x]).unwrap();
+        let one = fb.iconst(Type::I64, 1);
+        let r = fb.add(doubled, one);
+        fb.ret(r);
+        mb.finish_func(g, fb);
+    }
+
+    let snap2 = mb.snapshot();
+    let new2 = jit.extend::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&snap2, &[]);
+    assert_eq!(new2, vec![g]);
+
+    // g(10) = f(10) + 1 = 21
+    assert_eq!(jit.call(g, &[10]), 21);
+    // f still works after extend
+    assert_eq!(jit.call(f, &[3]), 6);
+    assert_eq!(jit.call(g, &[0]), 1);
+}
+
+#[test]
+fn extend_three_batches_chained_calls() {
+    // Compile f, then g calling f, then h calling g calling f — three extends.
+    let mut mb = ModuleBuilder::new();
+    let f = mb.declare_func("f", &[Type::I64], Some(Type::I64));
+    {
+        let mut fb = mb.define_func(f);
+        let e = fb.entry_block();
+        let x = fb.block_param(e, 0);
+        let one = fb.iconst(Type::I64, 1);
+        let r = fb.add(x, one);
+        fb.ret(r);
+        mb.finish_func(f, fb);
+    }
+
+    let mut jit = JitModule::new_empty::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(64, 16, crate::CallMode::FastCall);
+    let _ = jit.extend::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&mb.snapshot(), &[]);
+    assert_eq!(jit.call(f, &[10]), 11);
+
+    let g = mb.declare_func("g", &[Type::I64], Some(Type::I64));
+    {
+        let mut fb = mb.define_func(g);
+        let e = fb.entry_block();
+        let x = fb.block_param(e, 0);
+        let r = fb.call(f, &[x]).unwrap();
+        let r2 = fb.call(f, &[r]).unwrap();
+        fb.ret(r2);
+        mb.finish_func(g, fb);
+    }
+    let _ = jit.extend::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&mb.snapshot(), &[]);
+    assert_eq!(jit.call(g, &[5]), 7);
+
+    let h = mb.declare_func("h", &[Type::I64], Some(Type::I64));
+    {
+        let mut fb = mb.define_func(h);
+        let e = fb.entry_block();
+        let x = fb.block_param(e, 0);
+        let r = fb.call(g, &[x]).unwrap();
+        fb.ret(r);
+        mb.finish_func(h, fb);
+    }
+    let _ = jit.extend::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&mb.snapshot(), &[]);
+    assert_eq!(jit.call(h, &[100]), 102);
+
+    // All three still callable directly.
+    assert_eq!(jit.call(f, &[0]), 1);
+    assert_eq!(jit.call(g, &[0]), 2);
+    assert_eq!(jit.call(h, &[0]), 2);
+}
+
+#[test]
+fn literal_pool_load_returns_slot_value() {
+    // Function: just returns gc_literal(0). Push a value into slot 0,
+    // verify the call reads it. Then mutate the slot (simulating a GC
+    // relocation in place) and verify the call sees the new value.
+    let mut mb = ModuleBuilder::new();
+    let f = mb.declare_func("read_lit", &[], Some(Type::I64));
+    let lit = LiteralRef::from_u32(0);
+    {
+        let mut fb = mb.define_func(f);
+        let v = fb.gc_literal(lit);
+        fb.ret(v);
+        mb.finish_func(f, fb);
+    }
+
+    let mut jit = JitModule::new_empty::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(64, 16, crate::CallMode::FastCall);
+
+    let idx = jit.literal_pool().push(0xDEAD_BEEF);
+    assert_eq!(idx, 0);
+    let _ = jit.extend::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&mb.snapshot(), &[]);
+
+    assert_eq!(jit.call(f, &[]), 0xDEAD_BEEF);
+
+    // Mutate the slot — the next call must see the new value because the
+    // emitted code reads through the pool, never bakes the value in.
+    jit.literal_pool().set(0, 0x1234_5678);
+    assert_eq!(jit.call(f, &[]), 0x1234_5678);
+
+    jit.literal_pool().set(0, 42);
+    assert_eq!(jit.call(f, &[]), 42);
+}
+
+#[test]
+fn literal_pool_scan_roots_can_rewrite_slots_in_place() {
+    // Simulates a moving GC: scan_roots gives us *mut u64 to each live slot,
+    // and we rewrite it. The next call must reflect the new value.
+    use dynobj::RootSource;
+
+    let mut mb = ModuleBuilder::new();
+    let f = mb.declare_func("read_lit", &[], Some(Type::I64));
+    {
+        let mut fb = mb.define_func(f);
+        let v0 = fb.gc_literal(LiteralRef::from_u32(0));
+        let v1 = fb.gc_literal(LiteralRef::from_u32(1));
+        let s = fb.add(v0, v1);
+        fb.ret(s);
+        mb.finish_func(f, fb);
+    }
+
+    let mut jit = JitModule::new_empty::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(64, 16, crate::CallMode::FastCall);
+    jit.literal_pool().push(10);
+    jit.literal_pool().push(20);
+    let _ = jit.extend::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&mb.snapshot(), &[]);
+    assert_eq!(jit.call(f, &[]), 30);
+
+    // Pretend the GC ran and "relocated" each value, doubling it.
+    let pool = jit.literal_pool();
+    pool.scan_roots(&mut |slot_ptr| unsafe {
+        let old = *slot_ptr;
+        *slot_ptr = old * 2;
+    });
+    assert_eq!(jit.call(f, &[]), 60); // (10*2) + (20*2)
+}
+
+#[test]
+fn literal_pool_survives_extend() {
+    // Push a literal, compile a function that reads it, extend, run.
+    // Then push ANOTHER literal, compile a second function that reads slot 1,
+    // extend again, run. Both functions resolve correctly through the same
+    // stable pool base.
+    let mut mb = ModuleBuilder::new();
+    let f = mb.declare_func("read0", &[], Some(Type::I64));
+    {
+        let mut fb = mb.define_func(f);
+        let v = fb.gc_literal(LiteralRef::from_u32(0));
+        fb.ret(v);
+        mb.finish_func(f, fb);
+    }
+
+    let mut jit = JitModule::new_empty::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(64, 16, crate::CallMode::FastCall);
+    jit.literal_pool().push(100);
+    let _ = jit.extend::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&mb.snapshot(), &[]);
+    assert_eq!(jit.call(f, &[]), 100);
+
+    let g = mb.declare_func("read1", &[], Some(Type::I64));
+    {
+        let mut fb = mb.define_func(g);
+        let v = fb.gc_literal(LiteralRef::from_u32(1));
+        fb.ret(v);
+        mb.finish_func(g, fb);
+    }
+    jit.literal_pool().push(200);
+    let _ = jit.extend::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&mb.snapshot(), &[]);
+
+    assert_eq!(jit.call(f, &[]), 100);
+    assert_eq!(jit.call(g, &[]), 200);
+
+    // Update both, verify each function tracks its own slot.
+    jit.literal_pool().set(0, 999);
+    jit.literal_pool().set(1, 1001);
+    assert_eq!(jit.call(f, &[]), 999);
+    assert_eq!(jit.call(g, &[]), 1001);
+}
+
+#[test]
+fn extend_with_extern_added_in_second_batch() {
+    use dynir::types::Signature;
+
+    extern "C" fn add_seven(x: u64) -> u64 {
+        x + 7
+    }
+
+    let mut mb = ModuleBuilder::new();
+    let f = mb.declare_func("f", &[Type::I64], Some(Type::I64));
+    {
+        let mut fb = mb.define_func(f);
+        let e = fb.entry_block();
+        let x = fb.block_param(e, 0);
+        let two = fb.iconst(Type::I64, 2);
+        let r = fb.mul(x, two);
+        fb.ret(r);
+        mb.finish_func(f, fb);
+    }
+
+    let mut jit = JitModule::new_empty::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(64, 16, crate::CallMode::FastCall);
+    let _ = jit.extend::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&mb.snapshot(), &[]);
+    assert_eq!(jit.call(f, &[3]), 6);
+
+    // Add an extern + a function that uses it.
+    let ext = mb.declare_extern(
+        "add_seven",
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
+    );
+    let g = mb.declare_func("g", &[Type::I64], Some(Type::I64));
+    {
+        let mut fb = mb.define_func(g);
+        let e = fb.entry_block();
+        let x = fb.block_param(e, 0);
+        let doubled = fb.call(f, &[x]).unwrap();
+        let plus_seven = fb.call(ext, &[doubled]).unwrap();
+        fb.ret(plus_seven);
+        mb.finish_func(g, fb);
+    }
+    let externs: &[*const u8] = &[add_seven as *const u8];
+    let _ = jit.extend::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&mb.snapshot(), externs);
+
+    // g(4) = f(4) + 7 = 8 + 7 = 15
+    assert_eq!(jit.call(g, &[4]), 15);
+    assert_eq!(jit.call(f, &[10]), 20);
 }

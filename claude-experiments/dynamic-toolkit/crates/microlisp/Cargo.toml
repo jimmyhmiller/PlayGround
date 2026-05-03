@@ -1,0 +1,20 @@
+[package]
+name = "microlisp"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "microlisp"
+path = "src/main.rs"
+
+[dependencies]
+dynir = { path = "../dynir" }
+dynexec = { path = "../dynexec" }
+dynvalue = { path = "../dynvalue" }
+dynlower = { path = "../dynlower" }
+dynlang = { path = "../dynlang" }
+dynobj = { path = "../dynobj" }
+dynruntime = { path = "../dynruntime" }

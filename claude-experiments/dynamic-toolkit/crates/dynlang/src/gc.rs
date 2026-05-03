@@ -12,7 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use dynalloc::{BumpAllocator, Heap, PtrPolicy, SemiSpace, alloc_obj};
+use dynalloc::{BumpAllocator, Heap, PtrPolicy, alloc_obj};
 use dynir::interp::ExternCallResult;
 use dynir::{FuncDef, FuncRef, Module};
 use dynexec::{CodegenConfig, FrameStrategy};
@@ -100,9 +100,6 @@ impl RootSource for RootSet {
 enum Backend {
     /// Bump allocator, never collects. Zero overhead.
     Leak(BumpAllocator),
-    /// Cheney semi-space copying collector. `RefCell` because
-    /// `SemiSpace::collect` takes `&mut self`.
-    SemiSpace(RefCell<SemiSpace>),
     /// Generational, thread-aware, concurrent-capable `Heap`.
     Generational(Heap),
 }
@@ -121,6 +118,12 @@ pub struct DynGcRuntime {
     /// [`set_auto_externs`](Self::set_auto_externs); typically the
     /// `DynModule::auto_externs` map verbatim.
     auto_externs: HashMap<String, *const u8>,
+    /// Additional root sources walked at every collection (whether triggered
+    /// by `collect()` or by a JIT safepoint). Each entry is a raw pointer; the
+    /// caller is responsible for keeping the pointee alive at least as long
+    /// as the runtime lives. Typical use: register a `JitModule`'s literal
+    /// pool so quote-literals are traced by the moving GC.
+    extra_root_sources: RefCell<Vec<*const dyn RootSource>>,
 }
 
 /// The canonical name of dynlang's GC-allocation extern. `compile_jit`
@@ -138,9 +141,6 @@ impl DynGcRuntime {
 
         let backend = match config {
             GcConfig::Leak => Backend::Leak(BumpAllocator::new::<Compact>(64 * 1024 * 1024)),
-            GcConfig::SemiSpace { heap_size } => {
-                Backend::SemiSpace(RefCell::new(SemiSpace::new::<Compact>(*heap_size)))
-            }
             GcConfig::Generational { heap_size, nursery_size } => {
                 let heap = match nursery_size {
                     Some(nsize) => Heap::new_generational::<Compact>(*nsize, *heap_size, type_infos.clone()),
@@ -156,7 +156,46 @@ impl DynGcRuntime {
             tags: tags.clone(),
             roots: RootSet::new(),
             auto_externs: HashMap::new(),
+            extra_root_sources: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Register an additional `RootSource` to be scanned at every GC.
+    ///
+    /// Permanent registration — the source stays in the root list until
+    /// the runtime is dropped. For scoped (LIFO) registration, use
+    /// [`push_extra_root_source`](Self::push_extra_root_source).
+    ///
+    /// # Safety
+    /// `source` must remain valid for the lifetime of the runtime. The
+    /// runtime stores it as a raw pointer; the caller is responsible for
+    /// keeping the pointee alive (e.g., behind a `Box` or other stable
+    /// allocation).
+    pub unsafe fn register_extra_root_source(&self, source: *const dyn RootSource) {
+        self.extra_root_sources.borrow_mut().push(source);
+    }
+
+    /// Push a temporary `RootSource` and return a guard that pops it on
+    /// drop. Use this for stack-scoped roots — for example, a list of
+    /// pending top-level forms that the compiler hasn't reached yet.
+    ///
+    /// Pops in LIFO order: each guard's drop pops the most-recently-pushed
+    /// extra root. Drop a guard out of order at your peril.
+    ///
+    /// # Safety
+    /// `source` must remain valid for the lifetime of the returned guard.
+    pub unsafe fn push_extra_root_source<'a>(
+        &'a self,
+        source: *const (dyn RootSource + 'a),
+    ) -> ExtraRootGuard<'a> {
+        // `'a` is the lifetime of the borrow; the cast erases it because
+        // `extra_root_sources` stores `'static` raw pointers internally.
+        // Soundness is the caller's responsibility (see Safety).
+        let erased: *const dyn RootSource = unsafe {
+            core::mem::transmute::<*const (dyn RootSource + 'a), *const dyn RootSource>(source)
+        };
+        self.extra_root_sources.borrow_mut().push(erased);
+        ExtraRootGuard { gc: self }
     }
 
     /// Install the auto-bound extern map (typically
@@ -189,7 +228,6 @@ impl DynGcRuntime {
         let info = &self.type_infos[type_id];
         match &self.backend {
             Backend::Leak(bump) => unsafe { alloc_obj::<Compact>(bump, info, varlen_len) },
-            Backend::SemiSpace(ss) => ss.borrow().alloc_obj::<Compact>(info, varlen_len),
             Backend::Generational(heap) => heap.alloc_obj::<Compact>(info, varlen_len),
         }
     }
@@ -200,17 +238,28 @@ impl DynGcRuntime {
         TAG_PATTERN | ((self.tags.ptr as u64) << 48) | ((ptr as u64) & PAYLOAD_MASK)
     }
 
+    /// Number of collections performed by the underlying heap so far.
+    /// Always 0 for `Leak`. Useful for tests and diagnostics.
+    pub fn collection_count(&self) -> usize {
+        match &self.backend {
+            Backend::Leak(_) => 0,
+            Backend::Generational(heap) => heap.collections(),
+        }
+    }
+
     /// Force a collection (no-op for Leak).
     pub fn collect(&self) {
         match &self.backend {
             Backend::Leak(_) => {}
-            Backend::SemiSpace(ss) => {
-                let _guard = self.install_thread();
-                unsafe { ss.borrow_mut().collect::<NanBoxPolicy>(&self.type_infos, &mut [&self.roots]); }
-            }
             Backend::Generational(heap) => {
                 let _guard = self.install_thread();
-                unsafe { heap.collect::<NanBoxPolicy>(&[&self.roots]); }
+                let extras = self.extra_root_sources.borrow();
+                let mut sources: Vec<&dyn RootSource> = Vec::with_capacity(1 + extras.len());
+                sources.push(&self.roots);
+                for &p in extras.iter() {
+                    sources.push(unsafe { &*p });
+                }
+                unsafe { heap.collect::<NanBoxPolicy>(&sources); }
             }
         }
     }
@@ -246,6 +295,10 @@ impl DynGcRuntime {
     /// state installed. This is the only supported way to execute a
     /// `JitModule` produced from a `DynModule` — call sites must not
     /// construct `JitSafepointSession` themselves.
+    ///
+    /// The module's `literal_pool` is registered as an extra root source so
+    /// quote-style GC literals embedded as `Inst::GcLiteral(idx)` are traced
+    /// (and updated in place if the GC moves the referenced object).
     pub fn run_jit(&self, jit: &JitModule, entry: FuncRef, args: &[u64]) -> JitOutcome {
         let _thread = self.install_thread();
         match &self.backend {
@@ -254,6 +307,10 @@ impl DynGcRuntime {
                 let session = JitSafepointSession::<NanBoxPolicy, _>::new(
                     heap, StackMapJitTransport, &safepoints,
                 );
+                // Safety: `jit` outlives this call, so `&jit.literal_pool()`
+                // is valid for the session's lifetime.
+                let pool_ptr: *const dyn RootSource = jit.literal_pool();
+                unsafe { session.register_extra_root(pool_ptr); }
                 session.with_installed(|| jit.call_outcome(entry, args))
             }
             _ => jit.call_outcome(entry, args),
@@ -277,6 +334,8 @@ impl DynGcRuntime {
                 let session = JitSafepointSession::<NanBoxPolicy, _>::new(
                     heap, StackMapJitTransport, &safepoints,
                 ).with_gc_threshold(gc_threshold);
+                let pool_ptr: *const dyn RootSource = jit.literal_pool();
+                unsafe { session.register_extra_root(pool_ptr); }
                 session.with_installed(|| jit.call_outcome(entry, args))
             }
             _ => jit.call_outcome(entry, args),
@@ -331,6 +390,19 @@ impl DynGcRuntime {
 }
 
 /// Guard returned by `install_thread`. On drop, restores the previous
+/// RAII guard that pops the most-recently-pushed extra root source on drop.
+/// Returned by [`DynGcRuntime::push_extra_root_source`].
+pub struct ExtraRootGuard<'a> {
+    gc: &'a DynGcRuntime,
+}
+
+impl Drop for ExtraRootGuard<'_> {
+    fn drop(&mut self) {
+        let popped = self.gc.extra_root_sources.borrow_mut().pop();
+        debug_assert!(popped.is_some(), "ExtraRootGuard: pop on empty stack");
+    }
+}
+
 /// thread-local runtime + ptr tag.
 pub struct ThreadGuard<'a> {
     prev_rt: *const DynGcRuntime,

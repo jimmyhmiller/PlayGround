@@ -77,6 +77,35 @@ impl FuncRef {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+
+    /// Construct a `FuncRef` from a raw index. Caller is responsible for
+    /// ensuring the index points at a valid module slot.
+    pub fn from_u32(idx: u32) -> Self {
+        FuncRef(idx)
+    }
+}
+
+/// Reference to an entry in a JitModule's literal pool.
+///
+/// The pool is a pointer-stable, GC-traced array of `u64` (NanBox-encoded)
+/// slots. Quote-style literals whose payload is a heap pointer go through
+/// the pool so a moving collector can rewrite slots in place — emitted code
+/// reads the current slot value on each access.
+///
+/// Numbers, nil/true/false, symbols, and other immortal/non-pointer values
+/// can stay as inline `Iconst`s; only literals that point at the GC heap
+/// need the indirection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct LiteralRef(pub u32);
+
+impl LiteralRef {
+    pub fn index(self) -> usize { self.0 as usize }
+    pub fn as_u32(self) -> u32 { self.0 }
+    pub fn from_u32(idx: u32) -> Self { LiteralRef(idx) }
 }
 
 /// Reference to deoptimization metadata.
@@ -133,6 +162,11 @@ pub enum Inst {
     // -- Constants --
     Iconst(Type, i64),
     F64Const(f64),
+    /// Load a NanBox-encoded GC-managed literal from the JitModule's
+    /// literal pool. Result type is `I64`. Lowered to a base+index load
+    /// against a pointer-stable pool whose slots the GC traces and may
+    /// rewrite during collection.
+    GcLiteral(LiteralRef),
 
     // -- Integer arithmetic (result type = operand type) --
     Add(Value, Value),
@@ -258,6 +292,7 @@ impl Inst {
         match self {
             Inst::Iconst(ty, _) => Some(*ty),
             Inst::F64Const(_) => Some(Type::F64),
+            Inst::GcLiteral(_) => Some(Type::I64),
 
             Inst::Add(a, b)
             | Inst::Sub(a, b)
@@ -324,7 +359,7 @@ impl Inst {
     /// Call `f` on every Value operand.
     pub fn for_each_value(&self, mut f: impl FnMut(Value)) {
         match self {
-            Inst::Iconst(_, _) | Inst::F64Const(_) | Inst::StackAddr(_) => {}
+            Inst::Iconst(_, _) | Inst::F64Const(_) | Inst::GcLiteral(_) | Inst::StackAddr(_) => {}
 
             Inst::Add(a, b)
             | Inst::Sub(a, b)
@@ -403,7 +438,7 @@ impl Inst {
     /// Call `f` on every Value operand (mutable).
     pub fn for_each_value_mut(&mut self, mut f: impl FnMut(&mut Value)) {
         match self {
-            Inst::Iconst(_, _) | Inst::F64Const(_) | Inst::StackAddr(_) => {}
+            Inst::Iconst(_, _) | Inst::F64Const(_) | Inst::GcLiteral(_) | Inst::StackAddr(_) => {}
 
             Inst::Add(a, b)
             | Inst::Sub(a, b)
@@ -971,6 +1006,66 @@ impl Module {
         match &self.func_table[fref.index()] {
             FuncDef::Internal(idx) => &self.functions[*idx].sig,
             FuncDef::Extern(ef) => &ef.sig,
+        }
+    }
+
+    /// Verify the safepoint contract for a module compiled under a moving GC.
+    ///
+    /// For every function in the module, every call to an allocating extern
+    /// (anything in `allocator_frefs`) must be **immediately preceded** by an
+    /// `Inst::Safepoint` in the same basic block. Without this discipline, a
+    /// collection that fires inside the allocator would have no stack map for
+    /// the calling frame's live values — they'd be invisible to the GC and
+    /// would either get freed (use-after-free) or, with a moving collector,
+    /// would point at relocated memory and silently corrupt.
+    ///
+    /// This is a static check on the IR, before machine code emission. The
+    /// JIT calls it automatically when compiled with a safepoint handler;
+    /// frontends shipping with `CallMode::ControlAware { safepoint_handler }`
+    /// can rely on a missing safepoint being caught at compile time, not at
+    /// the next collection.
+    ///
+    /// # Panics
+    ///
+    /// Panics with a descriptive message naming the offending function,
+    /// block, and instruction position. Panic rather than `Result` because a
+    /// missing safepoint is a frontend bug, not a recoverable error — there's
+    /// nothing reasonable for the caller to do but fix the compiler.
+    pub fn validate_safepoints(&self, allocator_frefs: &[FuncRef]) {
+        if allocator_frefs.is_empty() {
+            return;
+        }
+        let allocators: std::collections::HashSet<u32> =
+            allocator_frefs.iter().map(|f| f.0).collect();
+        for func in &self.functions {
+            for (block_idx, block) in func.blocks.iter().enumerate() {
+                for (inst_idx, node) in block.insts.iter().enumerate() {
+                    let calls_allocator = match &node.inst {
+                        Inst::Call(fref, _) => allocators.contains(&fref.0),
+                        // CallIndirect can't be statically resolved; we
+                        // require an immediately-preceding safepoint for
+                        // *every* indirect call in a control-aware module.
+                        Inst::CallIndirect(_, _, _) => true,
+                        Inst::InvokeDynamic { .. } => true,
+                        _ => false,
+                    };
+                    if !calls_allocator {
+                        continue;
+                    }
+                    let preceded_by_safepoint = inst_idx > 0
+                        && matches!(block.insts[inst_idx - 1].inst, Inst::Safepoint(_));
+                    assert!(
+                        preceded_by_safepoint,
+                        "validate_safepoints: function `{}` block {} inst {} \
+                         calls an allocating function (or indirect/dynamic \
+                         dispatch) without an immediately-preceding \
+                         `Inst::Safepoint`. \
+                         A moving GC running inside the callee would corrupt \
+                         the caller's live values.",
+                        func.name, block_idx, inst_idx,
+                    );
+                }
+            }
         }
     }
 

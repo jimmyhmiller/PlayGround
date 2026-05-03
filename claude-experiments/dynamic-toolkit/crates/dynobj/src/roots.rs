@@ -308,6 +308,26 @@ impl DynRootFrame {
         slot_ptr.get()
     }
 
+    /// Direct access to slot `i`. The slot is the GC's canonical storage
+    /// for that root: the collector may rewrite it during a moving
+    /// collection, so the cell type guarantees interior mutability is safe
+    /// for shared (`&self`) borrows. Used by the `Rooted` / `RootScope`
+    /// abstraction to hand out slot references that are stable across
+    /// GC points.
+    pub fn slot(&self, i: usize) -> &Cell<u64> {
+        assert!(
+            i < self.slot_count,
+            "slot index {i} >= slot_count {}",
+            self.slot_count
+        );
+        let header_words = std::mem::size_of::<FrameHeader>() / 8;
+        unsafe {
+            (self.backing.as_ptr().add(header_words + i) as *const Cell<u64>)
+                .as_ref()
+                .unwrap()
+        }
+    }
+
     /// Set the value in slot `i`.
     pub fn set(&self, i: usize, val: u64) {
         assert!(
@@ -330,6 +350,194 @@ impl DynRootFrame {
             self.set(i, 0);
         }
     }
+}
+
+// ─── Rooted<T> + RootScope (high-level handle abstraction) ─────────
+//
+// `Rooted<'scope, T>` and `RootScope` are the safe, hard-to-misuse face
+// of the rooting machinery. Frontends that hold u64 GC handles in Rust
+// across allocation points (every allocator extern called from JIT, every
+// host-side helper that walks heap-allocated trees) should pin them in a
+// `RootScope`. The compiler's borrow checker enforces that:
+//
+//   * a `Rooted` cannot outlive its scope (the slot would be stale),
+//   * a `Rooted` cannot be fabricated from a raw u64 (no public ctor),
+//   * the only way to *read* the current value is via `.get()`, which
+//     re-loads through the slot — so a moving GC that rewrote the slot
+//     in place is observed correctly on the next access.
+//
+// The scope's storage is a `DynRootFrame` registered with the active
+// `FrameChain`. The collector traces the chain (via the
+// `RootSource for FrameChain` impl), so every live `Rooted` is a real
+// GC root for the duration of its scope.
+
+use std::marker::PhantomData;
+
+/// A heap value pinned for the GC. Holding `Rooted<'scope, T>` keeps the
+/// underlying slot scannable: the GC sees the slot as a root and rewrites
+/// it in place across moving collections. Reading via `.get()` always
+/// observes the current (possibly relocated) value.
+///
+/// `Rooted` is bound to a `RootScope` by lifetime — it cannot outlive the
+/// scope it was created from. There is no public constructor that takes a
+/// raw `u64`; the only way to mint a `Rooted` is through `RootScope::root`.
+/// That eliminates the "I cached the raw pointer somewhere" footgun at
+/// the API layer.
+///
+/// `T` is a phantom type tag for documentation (e.g., `NanBox`, `GcPtr`).
+/// It plays no runtime role today; future work can give it `Rootable` /
+/// `from_bits` semantics for type-safe access.
+#[must_use = "a Rooted must be held in a binding to keep the slot rooted"]
+pub struct Rooted<'scope, T: ?Sized> {
+    slot: &'scope Cell<u64>,
+    _phantom: PhantomData<*const T>,
+}
+
+// `*const T` makes Rooted !Send + !Sync regardless of T — the underlying
+// FrameChain is per-thread.
+
+impl<'scope, T: ?Sized> Rooted<'scope, T> {
+    /// Read the current value through the slot. Re-loads each call: a
+    /// moving GC that ran since the last read will have already written
+    /// the relocated address into the slot.
+    #[inline]
+    pub fn get(&self) -> u64 {
+        self.slot.get()
+    }
+
+    /// Update the rooted value. The GC will see the new value at the next
+    /// collection.
+    #[inline]
+    pub fn set(&self, value: u64) {
+        self.slot.set(value);
+    }
+}
+
+impl<'scope, T> std::fmt::Debug for Rooted<'scope, T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Rooted(0x{:016x})", self.slot.get())
+    }
+}
+
+/// A LIFO-scoped batch of GC roots backed by a `DynRootFrame` registered
+/// with the active `FrameChain`. Bump-allocates slots up to a fixed
+/// capacity. The frame is unregistered (popped) when the scope drops.
+///
+/// Construct one per logical work unit that needs to hold heap handles
+/// across allocations. Typical uses: an extern's body, a recursive walker
+/// in the host frontend, a code-emission helper that holds tree nodes.
+pub struct RootScope<'chain> {
+    /// Owned frame storage. Boxed so its address is stable across moves
+    /// of the `RootScope` itself; `Rooted` borrows directly into it.
+    frame: Box<DynRootFrame>,
+    /// Bump cursor — next free slot index.
+    cursor: Cell<usize>,
+    _guard: FrameGuard<'chain>,
+}
+
+impl<'chain> RootScope<'chain> {
+    /// Create a new scope with `capacity` slots. The scope registers
+    /// itself with `chain` for the lifetime of the returned value; it is
+    /// popped on drop.
+    pub fn new(chain: &'chain FrameChain, capacity: usize) -> Self {
+        let frame = Box::new(DynRootFrame::new(capacity));
+        let _guard = unsafe { chain.push_raw(frame.header_ptr()) };
+        RootScope {
+            frame,
+            cursor: Cell::new(0),
+            _guard,
+        }
+    }
+
+    /// Mint a fresh `Rooted` initialized to `value`. The handle borrows
+    /// from this scope and cannot outlive it. Panics if the scope's slot
+    /// capacity is exhausted.
+    pub fn root<T>(&self, value: u64) -> Rooted<'_, T> {
+        let i = self.cursor.get();
+        assert!(
+            i < self.frame.slot_count(),
+            "RootScope: capacity {} exhausted",
+            self.frame.slot_count()
+        );
+        let slot = self.frame.slot(i);
+        slot.set(value);
+        self.cursor.set(i + 1);
+        Rooted {
+            slot,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.frame.slot_count()
+    }
+
+    pub fn used(&self) -> usize {
+        self.cursor.get()
+    }
+}
+
+// ─── Thread-local active FrameChain ─────────────────────────────────
+//
+// Most callers don't want to thread a `&FrameChain` through every
+// function signature. The runtime/Engine installs a chain once per
+// thread; helpers that need rooting reach for it via `with_scope`.
+
+thread_local! {
+    static ACTIVE_CHAIN: Cell<*const FrameChain> = const { Cell::new(std::ptr::null()) };
+}
+
+/// Install `chain` as the thread-local active frame chain. The previous
+/// installation is restored when the returned guard drops.
+pub fn install_chain<'a>(chain: &'a FrameChain) -> InstallChainGuard<'a> {
+    let prev = ACTIVE_CHAIN.with(|c| {
+        let p = c.get();
+        c.set(chain as *const _);
+        p
+    });
+    InstallChainGuard {
+        prev,
+        _phantom: PhantomData,
+    }
+}
+
+/// RAII guard restoring the previous thread-local chain on drop.
+pub struct InstallChainGuard<'a> {
+    prev: *const FrameChain,
+    _phantom: PhantomData<&'a FrameChain>,
+}
+
+impl Drop for InstallChainGuard<'_> {
+    fn drop(&mut self) {
+        ACTIVE_CHAIN.with(|c| c.set(self.prev));
+    }
+}
+
+/// Run `f` within a fresh `RootScope` of `capacity` slots, attached to
+/// the thread's active frame chain. Panics if no chain is installed.
+///
+/// Typical pattern at an FFI / extern boundary:
+/// ```ignore
+/// extern "C" fn ml_cons(car: u64, cdr: u64) -> u64 {
+///     dynobj::roots::with_scope(2, |scope| {
+///         let car = scope.root::<NanBox>(car);
+///         let cdr = scope.root::<NanBox>(cdr);
+///         // ... can call gc.alloc here; car/cdr re-read via .get() ...
+///     })
+/// }
+/// ```
+pub fn with_scope<R>(capacity: usize, f: impl FnOnce(&RootScope<'_>) -> R) -> R {
+    let chain_ptr = ACTIVE_CHAIN.with(|c| c.get());
+    assert!(
+        !chain_ptr.is_null(),
+        "with_scope: no FrameChain installed on this thread; \
+         call dynobj::roots::install_chain(&chain) first",
+    );
+    // Safety: `install_chain` recorded a borrow tied to its guard, which
+    // outlives any scope created here per the runtime contract.
+    let chain: &FrameChain = unsafe { &*chain_ptr };
+    let scope = RootScope::new(chain, capacity);
+    f(&scope)
 }
 
 // ─── RootSet (for globals, constants, pinned roots) ────────────────

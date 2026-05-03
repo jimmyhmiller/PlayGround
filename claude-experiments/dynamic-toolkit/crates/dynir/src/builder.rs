@@ -149,6 +149,56 @@ impl ModuleBuilder {
             func_table,
         }
     }
+
+    /// Snapshot the currently-defined functions and externs into a [`Module`],
+    /// without consuming the builder. The builder remains live and can be
+    /// extended with additional `declare_*` / `define_func` / `finish_func`
+    /// calls; later snapshots will include the new functions.
+    ///
+    /// Panics if any declared internal function was not yet defined — only a
+    /// fully-defined builder snapshots cleanly.
+    pub fn snapshot(&self) -> Module {
+        for (i, func_opt) in self.internal_funcs.iter().enumerate() {
+            assert!(
+                func_opt.is_some(),
+                "internal function at index {} was declared but not defined",
+                i
+            );
+        }
+
+        let functions: Vec<Function> = self
+            .internal_funcs
+            .iter()
+            .map(|f| f.as_ref().unwrap().clone())
+            .collect();
+
+        let func_table: Vec<FuncDef> = self
+            .entries
+            .iter()
+            .map(|entry| match entry.kind {
+                ModuleEntryKind::Internal(idx) => FuncDef::Internal(idx),
+                ModuleEntryKind::Extern => FuncDef::Extern(ExternFunc {
+                    name: entry.name.clone(),
+                    sig: entry.sig.clone(),
+                }),
+            })
+            .collect();
+
+        Module {
+            functions,
+            func_table,
+        }
+    }
+
+    /// Number of currently-declared functions (extern + internal).
+    pub fn func_count(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Number of currently-defined internal functions (those in `Module::functions`).
+    pub fn internal_func_count(&self) -> usize {
+        self.internal_funcs.len()
+    }
 }
 
 /// Internal mutable block data during construction.
@@ -262,15 +312,29 @@ impl FunctionBuilder {
 
     // ── Constants ──────────────────────────────────────────────
 
-    /// Emit a safepoint: a GC-safe point where live GcPtr values are recorded.
-    /// The lowering will emit a stack map here so the collector can trace roots.
+    /// Emit a safepoint: a GC-safe point where live values that may hold
+    /// heap pointers are recorded.
+    ///
+    /// Each live value must be one of:
+    /// - `GcPtr` — typed root, always traced.
+    /// - `I64` — used by NanBox-style frontends. The runtime's `PtrPolicy`
+    ///   filters non-pointer payloads at scan time.
+    /// - `Ptr` — raw pointer that the GC's policy may also choose to
+    ///   trace.
+    /// - `FrameSlice` — captured continuation frame slice.
+    ///
+    /// Values of other types (`I8`/`I32`/`F64`) cannot hold heap pointers
+    /// and are rejected — listing them is almost certainly a bug.
     pub fn safepoint(&mut self, live: &[Value]) {
         for &v in live {
+            let ty = self.value_type(v);
+            let acceptable =
+                ty.is_gc() || matches!(ty, Type::I64 | Type::Ptr);
             assert!(
-                self.value_type(v).is_gc(),
-                "safepoint live value {} must be GcPtr, got {}",
-                v,
-                self.value_type(v)
+                acceptable,
+                "safepoint live value {} has type {} — only GcPtr, I64, \
+                 Ptr, and FrameSlice can hold heap pointers",
+                v, ty
             );
         }
         self.push_void_inst(Inst::Safepoint(live.to_vec()));
@@ -286,6 +350,13 @@ impl FunctionBuilder {
 
     pub fn f64const(&mut self, val: f64) -> Value {
         self.push_inst(Type::F64, Inst::F64Const(val))
+    }
+
+    /// Load a NanBox-encoded GC-managed literal from the JitModule's
+    /// literal pool by index. The pool slot must be populated (via the
+    /// JitModule's `literal_pool().push(...)`) before the emitted code runs.
+    pub fn gc_literal(&mut self, lit: LiteralRef) -> Value {
+        self.push_inst(Type::I64, Inst::GcLiteral(lit))
     }
 
     // ── Integer arithmetic ─────────────────────────────────────

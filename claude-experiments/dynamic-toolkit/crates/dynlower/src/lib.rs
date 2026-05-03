@@ -1,8 +1,9 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::marker::PhantomData;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub mod backend;
 pub mod batch_lower;
@@ -121,6 +122,80 @@ fn write_perf_map_entries(entries: &[(usize, usize, &str)]) {
     }
 }
 
+// ─── JIT-entry FP fence ────────────────────────────────────────────
+//
+// The FP-chain walker (`walk_jit_ancestor_roots`) walks UP from a JIT
+// frame's saved FP, looking up each saved LR in the JIT code registry.
+// Without a stop condition it would happily walk into Rust frames above
+// the JIT call boundary. There it could:
+//   - Pattern-match a Rust-saved LR against the JIT registry by accident
+//     (vanishingly unlikely, but possible if JIT code lives near Rust
+//     code in address space and the LR happens to fall inside a JIT range).
+//   - Follow a Rust frame's saved-FP into compiler-elided territory
+//     (Rust doesn't always preserve x29 along the chain).
+//
+// The fix: every Rust → JIT trampoline records the Rust caller's FP onto
+// a per-thread fence stack just before the BLR, and pops on return. The
+// walker stops when it reaches the topmost fence — which is exactly the
+// FP the JIT prologue saved when the trampoline entered JIT.
+//
+// Nested calls (Rust → JIT → extern → Rust → JIT → …) are supported via
+// the stack: each nested entry pushes its own fence; the walker uses the
+// topmost. Outer JIT frames above an intervening Rust segment are not
+// scanned by an inner-call collection — those values are the Rust
+// segment's responsibility (it must hold them in a `RootSet` or
+// `FrameChain`).
+
+thread_local! {
+    static JIT_ENTRY_FP_STACK: RefCell<Vec<*const u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Push the current JIT-entry FP fence. Must be paired with `pop_jit_entry_fp`
+/// in LIFO order. Typical use: the trampoline (`call_jit_regs_with_reg_limit`)
+/// captures `x29` immediately before the BLR and pushes it.
+///
+/// # Safety
+/// `fp` must point to a real Rust caller frame whose stack memory remains
+/// valid until the matching pop. The trampoline guarantees this by
+/// capturing `x29` of its own frame and popping before the trampoline
+/// returns.
+pub unsafe fn push_jit_entry_fp(fp: *const u8) {
+    JIT_ENTRY_FP_STACK.with(|c| c.borrow_mut().push(fp));
+}
+
+/// Pop the top of the fence stack. Must match a prior `push_jit_entry_fp`.
+pub fn pop_jit_entry_fp() {
+    JIT_ENTRY_FP_STACK.with(|c| {
+        let popped = c.borrow_mut().pop();
+        debug_assert!(popped.is_some(), "pop_jit_entry_fp on empty stack");
+    });
+}
+
+/// The topmost fence FP, or null if no JIT call is active on this thread.
+fn current_jit_entry_fp() -> *const u8 {
+    JIT_ENTRY_FP_STACK.with(|c| c.borrow().last().copied().unwrap_or(std::ptr::null()))
+}
+
+/// RAII guard that pushes a fence on construction and pops on drop.
+pub struct JitEntryFpGuard {
+    _phantom: PhantomData<*const ()>, // !Send + !Sync; thread-local
+}
+
+impl JitEntryFpGuard {
+    /// # Safety
+    /// See `push_jit_entry_fp`.
+    pub unsafe fn new(fp: *const u8) -> Self {
+        unsafe { push_jit_entry_fp(fp) };
+        JitEntryFpGuard { _phantom: PhantomData }
+    }
+}
+
+impl Drop for JitEntryFpGuard {
+    fn drop(&mut self) {
+        pop_jit_entry_fp();
+    }
+}
+
 /// Walk ancestor JIT frames starting from `jit_fp` (the FP of the frame
 /// that hit the safepoint). The current frame is skipped — the safepoint
 /// handler already scans it via the `(frame_ptr, payload)` arguments.
@@ -130,12 +205,18 @@ fn write_perf_map_entries(entries: &[(usize, usize, &str)]) {
 /// scan *only* the root slots recorded as live at that point —
 /// conservative whole-frame sweeping would resurrect stale spill slots
 /// as phantom roots.
+///
+/// Stops when `saved_fp` reaches the topmost JIT-entry FP fence: that's
+/// the frame the Rust caller of `call_jit_outcome` was in. Anything
+/// above is host-side stack, not JIT — its roots (if any) are managed
+/// by the host's `FrameChain`.
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u64)) {
     let registry = JIT_CODE_REGISTRY.read().unwrap();
     if registry.is_empty() {
         return;
     }
+    let fence = current_jit_entry_fp();
 
     let mut fp = jit_fp as *const u64;
     loop {
@@ -146,6 +227,12 @@ pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u
         let saved_lr = unsafe { *fp.add(1) } as usize;
 
         if saved_fp.is_null() {
+            break;
+        }
+        // Stop at the JIT-entry boundary: `saved_fp` here is the FP of
+        // the Rust frame that called `call_jit_outcome`. Above it is
+        // host code, not JIT.
+        if !fence.is_null() && (saved_fp as *const u8) == fence {
             break;
         }
 
@@ -586,7 +673,7 @@ impl JitFunction {
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
         let mut lowerer =
-            Lowerer::<Cfg, B, R>::new_inner(0, func, externs, None, None, safepoint_handler);
+            Lowerer::<Cfg, B, R>::new_inner(0, func, externs, None, None, None, safepoint_handler);
         lowerer.run();
         let safepoints = std::mem::take(&mut lowerer.safepoints);
         let frame_reify_records = std::mem::take(&mut lowerer.frame_reify_records);
@@ -726,7 +813,251 @@ impl JitFunction {
     }
 }
 
+// ─── CallTable ─────────────────────────────────────────────────────
+
+/// Pointer-stable call table.
+///
+/// JIT'd code reads function pointers via `ldr [base + idx*8]` where `base`
+/// is baked into the instruction stream as an immediate. The base must stay
+/// valid for the entire life of the JIT image — pushing past a `Vec`'s
+/// capacity reallocates and silently invalidates every emitted call site.
+///
+/// `CallTable` solves that by allocating a fixed-size `Box<[Cell<*const u8>]>`
+/// up front. Pushes never reallocate (panicking on overflow is preferable to
+/// undefined behavior). `Cell<*const u8>` is `#[repr(transparent)]` so the
+/// emitted load reads the inner pointer directly.
+pub struct CallTable {
+    slots: Box<[Cell<*const u8>]>,
+    len: AtomicUsize,
+}
+
+// Single-threaded compilation; raw reads from JIT code are not synchronized.
+unsafe impl Sync for CallTable {}
+unsafe impl Send for CallTable {}
+
+impl CallTable {
+    pub fn new(capacity: usize) -> Self {
+        let slots: Box<[Cell<*const u8>]> = (0..capacity)
+            .map(|_| Cell::new(std::ptr::null()))
+            .collect();
+        Self {
+            slots,
+            len: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Acquire)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Stable base address baked into emitted call sites as an immediate.
+    pub fn base(&self) -> *const Cell<*const u8> {
+        self.slots.as_ptr()
+    }
+
+    pub fn base_addr(&self) -> u64 {
+        self.base() as u64
+    }
+
+    /// Append a new slot, returning its index. Panics if capacity exhausted.
+    pub fn push(&self, ptr: *const u8) -> usize {
+        let idx = self.len.fetch_add(1, Ordering::AcqRel);
+        assert!(
+            idx < self.slots.len(),
+            "CallTable: capacity {} exhausted",
+            self.slots.len()
+        );
+        self.slots[idx].set(ptr);
+        idx
+    }
+
+    /// Update an existing slot — used to late-patch internal function entries
+    /// after their machine code is finalized.
+    pub fn set(&self, idx: usize, ptr: *const u8) {
+        assert!(
+            idx < self.len(),
+            "CallTable: set({}) past len {}",
+            idx,
+            self.len()
+        );
+        self.slots[idx].set(ptr);
+    }
+
+    pub fn get(&self, idx: usize) -> *const u8 {
+        assert!(
+            idx < self.len(),
+            "CallTable: get({}) past len {}",
+            idx,
+            self.len()
+        );
+        self.slots[idx].get()
+    }
+
+    /// Snapshot the live slots into a Vec (for callers that need to copy out).
+    pub fn snapshot(&self) -> Vec<*const u8> {
+        let len = self.len();
+        self.slots[..len].iter().map(|c| c.get()).collect()
+    }
+}
+
+// ─── LiteralPool ──────────────────────────────────────────────────
+
+/// Pointer-stable, GC-traced array of NanBox-encoded literal slots.
+///
+/// `Inst::GcLiteral(idx)` lowers to a load of `slots[idx]`. Slots can hold
+/// any 64-bit NanBox value, but the point of the indirection is to support
+/// GC-managed payloads: when a moving collector relocates a heap object,
+/// it walks the pool (registered as a root set) and rewrites the affected
+/// slot — the next execution of the emitted `ldr` reads the new pointer.
+///
+/// Same invariants as [`CallTable`]: fixed-capacity backing storage, base
+/// address stable across pushes, baked into emitted code as an immediate.
+pub struct LiteralPool {
+    slots: Box<[Cell<u64>]>,
+    len: AtomicUsize,
+}
+
+unsafe impl Sync for LiteralPool {}
+unsafe impl Send for LiteralPool {}
+
+impl LiteralPool {
+    pub fn new(capacity: usize) -> Self {
+        let slots: Box<[Cell<u64>]> = (0..capacity).map(|_| Cell::new(0)).collect();
+        Self { slots, len: AtomicUsize::new(0) }
+    }
+
+    pub fn capacity(&self) -> usize { self.slots.len() }
+
+    pub fn len(&self) -> usize { self.len.load(Ordering::Acquire) }
+
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
+
+    /// Stable base address baked into emitted `GcLiteral` loads.
+    pub fn base(&self) -> *const Cell<u64> { self.slots.as_ptr() }
+
+    pub fn base_addr(&self) -> u64 { self.base() as u64 }
+
+    /// Append a slot, return its index. Panics if capacity exhausted.
+    pub fn push(&self, value: u64) -> usize {
+        let idx = self.len.fetch_add(1, Ordering::AcqRel);
+        assert!(
+            idx < self.slots.len(),
+            "LiteralPool: capacity {} exhausted",
+            self.slots.len()
+        );
+        self.slots[idx].set(value);
+        idx
+    }
+
+    pub fn get(&self, idx: usize) -> u64 {
+        assert!(idx < self.len(), "LiteralPool: get({}) past len {}", idx, self.len());
+        self.slots[idx].get()
+    }
+
+    /// Update an existing slot. Used by the GC after relocating an object.
+    pub fn set(&self, idx: usize, value: u64) {
+        assert!(idx < self.len(), "LiteralPool: set({}) past len {}", idx, self.len());
+        self.slots[idx].set(value);
+    }
+
+    /// Iterate `(slot_addr, current_value)` pairs over live slots — used by
+    /// GC root-tracing impls so they can decode each NanBox, follow it, and
+    /// rewrite the slot in place.
+    pub fn iter_addrs(&self) -> impl Iterator<Item = (*mut u64, u64)> + '_ {
+        let len = self.len();
+        self.slots[..len].iter().map(|c| {
+            // Cell<u64> is repr(transparent) over UnsafeCell<u64>; raw pointer
+            // to the inner u64 is sound for read+write under the GC's STW
+            // contract.
+            (c.as_ptr(), c.get())
+        })
+    }
+
+    pub fn snapshot(&self) -> Vec<u64> {
+        let len = self.len();
+        self.slots[..len].iter().map(|c| c.get()).collect()
+    }
+}
+
+/// `LiteralPool` is a GC root set: every live slot may hold a NanBox-encoded
+/// heap pointer that the collector must trace and may rewrite during a
+/// moving collection. The visitor receives `*mut u64` pointing directly at
+/// the underlying `Cell<u64>`'s storage so a moving GC can replace the
+/// pointer in place — emitted code reads the new value on next access
+/// without any code patching.
+impl dynobj::RootSource for LiteralPool {
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
+        let len = self.len();
+        for cell in &self.slots[..len] {
+            visitor(cell.as_ptr());
+        }
+    }
+}
+
 // ─── JitModule ─────────────────────────────────────────────────────
+
+/// Default capacity (slot count) for `JitModule::literal_pool`. 4096 slots
+/// = 32 KiB. The legacy batch entry points use this; `new_empty` takes the
+/// capacity explicitly.
+pub const DEFAULT_LITERAL_POOL_CAPACITY: usize = 4096;
+
+/// How internal calls are emitted in this `JitModule`, and whether the GC
+/// can fire from inside JIT-executed code.
+///
+/// Pinned at construction. The choice has to be uniform across the whole
+/// module because emitted call sites bake the sequence in — you can't mix
+/// fast and control-aware calls in the same image.
+///
+/// Coupling the safepoint handler with the call mode is deliberate. The
+/// previous API exposed an `Option<u64>` that let frontends pass `None`
+/// alongside a moving GC — a silent footgun where allocations could trigger
+/// without any stack-map metadata, corrupting whichever live values weren't
+/// re-rooted by hand. This enum makes that combination unrepresentable: if
+/// you want JIT-time GC, you provide a handler; if you don't want one, you
+/// get `FastCall` and any `Inst::Safepoint` in the IR fails at extend time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallMode {
+    /// Control-aware calls plus a GC-aware safepoint handler.
+    ///
+    /// `safepoint_handler` is the address of the C-ABI function the JIT
+    /// invokes at every `Inst::Safepoint` — typically
+    /// `dynruntime::active_jit_safepoint_handler` (or your own root
+    /// scanner). Required for any frontend that lets allocations happen
+    /// during JIT execution, since the handler is what reads the live
+    /// values out of the current stack frame and hands them to the GC.
+    ///
+    /// Required for delimited continuations, deopts, `Invoke` terminators,
+    /// and any moving GC. Roughly 2x call-site code size compared to
+    /// `FastCall`; small constant runtime overhead per call.
+    ControlAware { safepoint_handler: u64 },
+    /// Plain call/return, no safepoints.
+    ///
+    /// `Inst::Safepoint`, `Terminator::Invoke`, deopts, and prompt usage
+    /// all fail at extend time. Suitable for stateless numeric code or
+    /// frontends with no GC interaction.
+    FastCall,
+}
+
+impl CallMode {
+    pub fn is_control_aware(self) -> bool {
+        matches!(self, CallMode::ControlAware { .. })
+    }
+
+    pub fn safepoint_handler(self) -> Option<u64> {
+        match self {
+            CallMode::ControlAware { safepoint_handler } => Some(safepoint_handler),
+            CallMode::FastCall => None,
+        }
+    }
+}
 
 /// JIT-compiled module: multiple functions that can call each other.
 ///
@@ -737,13 +1068,23 @@ pub struct JitModule {
     /// One entry per `Module::func_table` slot. Extern entries hold the
     /// provided extern pointers; internal entries are filled in after
     /// compilation with pointers into `memory`.
-    call_table: Vec<*const u8>,
+    call_table: CallTable,
+    /// GC-traced NanBox literal slots. Emitted `GcLiteral` instructions load
+    /// from `literal_pool.base() + idx*8`.
+    literal_pool: LiteralPool,
     function_entry_offsets: Vec<usize>,
     function_suspend_records: Vec<Vec<Box<CallSuspendRecord>>>,
     function_safepoints: Vec<Vec<SafepointRecord>>,
     function_frame_reify_records: Vec<Vec<FrameReifyRecord>>,
     handler_payload_kind: SafepointHandlerPayloadKind,
     max_deopt_live_values: usize,
+    /// Pinned at construction; uniform across all calls in the module.
+    call_mode: CallMode,
+    /// Pinned at construction; passed to every Lowerer.
+    safepoint_handler: Option<u64>,
+    /// How many extern declarations from `module.func_table` we've already
+    /// pulled pointers for. Used by `extend` to index into the externs slice.
+    extern_count_seen: usize,
 }
 
 impl Drop for JitModule {
@@ -825,7 +1166,7 @@ impl JitModule {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        let mut call_table: Vec<*const u8> = Vec::with_capacity(module.func_table.len());
+        let call_table = CallTable::new(module.func_table.len());
         let mut extern_idx = 0usize;
         for def in &module.func_table {
             match def {
@@ -838,7 +1179,7 @@ impl JitModule {
                 }
             }
         }
-        let call_table_base = call_table.as_ptr() as u64;
+        let call_table_base = call_table.base_addr();
 
         let mut memory = PagedCodeMemory::new();
         let mut entry_offsets: Vec<usize> = Vec::new();
@@ -863,6 +1204,7 @@ impl JitModule {
                 func,
                 &direct_call_is_internal,
                 call_table_base,
+                None, // legacy batch path: no GC literal pool
                 None,
             );
             lowerer.run();
@@ -901,19 +1243,27 @@ impl JitModule {
         for (ft_idx, def) in module.func_table.iter().enumerate() {
             if let FuncDef::Internal(func_idx) = def {
                 let ptr = unsafe { base.add(entry_offsets[*func_idx]) };
-                call_table[ft_idx] = ptr;
+                call_table.set(ft_idx, ptr);
             }
         }
 
         JitModule {
             memory,
             call_table,
+            literal_pool: LiteralPool::new(DEFAULT_LITERAL_POOL_CAPACITY),
             function_entry_offsets: entry_offsets,
             function_suspend_records,
             function_safepoints,
             function_frame_reify_records,
             handler_payload_kind,
             max_deopt_live_values,
+            call_mode: CallMode::FastCall,
+            safepoint_handler: None,
+            extern_count_seen: module
+                .func_table
+                .iter()
+                .filter(|d| matches!(d, FuncDef::Extern(_)))
+                .count(),
         }
     }
 
@@ -990,7 +1340,7 @@ impl JitModule {
         };
 
         // 1. Build call table
-        let mut call_table: Vec<*const u8> = Vec::with_capacity(module.func_table.len());
+        let call_table = CallTable::new(module.func_table.len());
         let mut extern_ptrs: Vec<*const u8> = Vec::new();
         for def in &module.func_table {
             match def {
@@ -1004,7 +1354,7 @@ impl JitModule {
                 }
             }
         }
-        let call_table_base = call_table.as_ptr() as u64;
+        let call_table_base = call_table.base_addr();
 
         // 2. Compile each function with the batch allocator
         let mut memory = PagedCodeMemory::new();
@@ -1058,19 +1408,31 @@ impl JitModule {
         for (ft_idx, def) in module.func_table.iter().enumerate() {
             if let FuncDef::Internal(func_idx) = def {
                 let ptr = unsafe { base.add(entry_offsets[*func_idx]) };
-                call_table[ft_idx] = ptr;
+                call_table.set(ft_idx, ptr);
             }
         }
 
+        let call_mode = match safepoint_handler {
+            Some(h) => CallMode::ControlAware { safepoint_handler: h },
+            None => CallMode::FastCall,
+        };
         JitModule {
             memory,
             call_table,
+            literal_pool: LiteralPool::new(DEFAULT_LITERAL_POOL_CAPACITY),
             function_entry_offsets: entry_offsets,
             function_suspend_records: module.functions.iter().map(|_| vec![]).collect(),
             function_safepoints,
             function_frame_reify_records: module.functions.iter().map(|_| vec![]).collect(),
             handler_payload_kind: SafepointHandlerPayloadKind::SafepointIndex,
             max_deopt_live_values: 0,
+            call_mode,
+            safepoint_handler,
+            extern_count_seen: module
+                .func_table
+                .iter()
+                .filter(|d| matches!(d, FuncDef::Extern(_)))
+                .count(),
         }
     }
 
@@ -1134,7 +1496,7 @@ impl JitModule {
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
         // 1. Build call table: fill externs, leave internals as null
-        let mut call_table: Vec<*const u8> = Vec::with_capacity(module.func_table.len());
+        let call_table = CallTable::new(module.func_table.len());
         let mut extern_idx = 0usize;
         for def in &module.func_table {
             match def {
@@ -1148,8 +1510,7 @@ impl JitModule {
             }
         }
 
-        // The Vec's heap pointer is stable across pushes (we pre-allocated)
-        let call_table_base = call_table.as_ptr() as u64;
+        let call_table_base = call_table.base_addr();
 
         // 2. Compile each internal function
         let mut memory = PagedCodeMemory::new();
@@ -1209,6 +1570,7 @@ impl JitModule {
                 func,
                 &direct_call_is_internal,
                 call_table_base,
+                None, // legacy compile_with_regalloc: no literal pool
                 safepoint_handler,
             );
             lowerer.run();
@@ -1248,25 +1610,268 @@ impl JitModule {
         for (ft_idx, def) in module.func_table.iter().enumerate() {
             if let FuncDef::Internal(func_idx) = def {
                 let ptr = unsafe { base.add(entry_offsets[*func_idx]) };
-                call_table[ft_idx] = ptr;
+                call_table.set(ft_idx, ptr);
             }
         }
 
+        let call_mode = match safepoint_handler {
+            Some(h) => CallMode::ControlAware { safepoint_handler: h },
+            None => CallMode::FastCall,
+        };
         JitModule {
             memory,
             call_table,
+            literal_pool: LiteralPool::new(DEFAULT_LITERAL_POOL_CAPACITY),
             function_entry_offsets: entry_offsets,
             function_suspend_records,
             function_safepoints,
             function_frame_reify_records,
             handler_payload_kind,
             max_deopt_live_values,
+            call_mode,
+            safepoint_handler,
+            extern_count_seen: module
+                .func_table
+                .iter()
+                .filter(|d| matches!(d, FuncDef::Extern(_)))
+                .count(),
         }
+    }
+
+    /// Create an empty `JitModule` ready to be incrementally extended via
+    /// [`extend`](Self::extend).
+    ///
+    /// `call_table_capacity` is the maximum number of `func_table` slots the
+    /// module can ever hold — fixed because emitted call sites bake the
+    /// call table base address as an immediate. 64K (= 512 KiB) is a
+    /// sensible default for REPL-scale workloads.
+    ///
+    /// `literal_pool_capacity` is the maximum number of GC-managed literal
+    /// slots. Quote-style literals from frontends with a moving GC go here;
+    /// see [`LiteralPool`]. Pass [`DEFAULT_LITERAL_POOL_CAPACITY`] (4096
+    /// slots, 32 KiB) for a sane default.
+    ///
+    /// `call_mode` carries the safepoint handler when GC is in play; see
+    /// [`CallMode`]. The previous separate `Option<u64>` for handler was
+    /// removed deliberately — pairing "moving GC" with "no safepoints" is
+    /// no longer a representable state.
+    ///
+    /// Type parameters fix the codegen choice for the lifetime of the
+    /// module. `extend` must be called with the same parameters.
+    pub fn new_empty<Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator>(
+        call_table_capacity: usize,
+        literal_pool_capacity: usize,
+        call_mode: CallMode,
+    ) -> Self
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
+        let _phantom: PhantomData<(Cfg, B, R)> = PhantomData;
+        let handler_payload_kind = match Cfg::RootTransport::kind() {
+            RootTransportKind::FrameScan => SafepointHandlerPayloadKind::FrameSize,
+            RootTransportKind::ShadowStack | RootTransportKind::StackMap => {
+                SafepointHandlerPayloadKind::SafepointIndex
+            }
+        };
+        let safepoint_handler = call_mode.safepoint_handler();
+        JitModule {
+            memory: PagedCodeMemory::new(),
+            call_table: CallTable::new(call_table_capacity),
+            literal_pool: LiteralPool::new(literal_pool_capacity),
+            function_entry_offsets: Vec::new(),
+            function_suspend_records: Vec::new(),
+            function_safepoints: Vec::new(),
+            function_frame_reify_records: Vec::new(),
+            handler_payload_kind,
+            max_deopt_live_values: 0,
+            call_mode,
+            safepoint_handler,
+            extern_count_seen: 0,
+        }
+    }
+
+    /// Compile and link the functions in `module` that aren't already in this
+    /// `JitModule`, returning the [`FuncRef`]s of the newly added internal
+    /// functions in declaration order.
+    ///
+    /// `module` is expected to be a superset of whatever was last passed in:
+    /// the existing `func_table` slots and `functions` must match (by index)
+    /// what we've already compiled. Anything beyond is treated as new.
+    ///
+    /// `externs` is the full extern pointer slice for `module` — the new call
+    /// table slots pull their pointers starting at `extern_count_seen`.
+    ///
+    /// Cross-batch calls work for free: the call table base is stable, slots
+    /// filled in earlier extends keep their addresses, and newly emitted
+    /// `ldr + blr` against the same base resolves either old or new entries.
+    pub fn extend<Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator>(
+        &mut self,
+        module: &Module,
+        externs: &[*const u8],
+    ) -> Vec<FuncRef>
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
+        // 1. Append new func_table slots to the call table.
+        let old_table_len = self.call_table.len();
+        let new_table_len = module.func_table.len();
+        assert!(
+            new_table_len >= old_table_len,
+            "extend: module has fewer func_table entries ({}) than already compiled ({})",
+            new_table_len,
+            old_table_len
+        );
+        for ft_idx in old_table_len..new_table_len {
+            match &module.func_table[ft_idx] {
+                FuncDef::Extern(_) => {
+                    let ext_idx = self.extern_count_seen;
+                    self.extern_count_seen += 1;
+                    assert!(
+                        ext_idx < externs.len(),
+                        "extend: externs slice too short ({}) for extern slot {}",
+                        externs.len(),
+                        ext_idx
+                    );
+                    self.call_table.push(externs[ext_idx]);
+                }
+                FuncDef::Internal(_) => {
+                    self.call_table.push(std::ptr::null());
+                }
+            }
+        }
+
+        // 2. Build direct_call_is_internal from the pinned CallMode.
+        let direct_call_is_internal: Vec<bool> = if self.call_mode.is_control_aware() {
+            module
+                .func_table
+                .iter()
+                .map(|d| matches!(d, FuncDef::Internal(_)))
+                .collect()
+        } else {
+            vec![false; module.func_table.len()]
+        };
+
+        // 3. Compile each new function.
+        let new_func_start = self.function_entry_offsets.len();
+        let new_func_end = module.functions.len();
+        assert!(
+            new_func_end >= new_func_start,
+            "extend: module has fewer internal functions ({}) than already compiled ({})",
+            new_func_end,
+            new_func_start
+        );
+
+        if matches!(self.call_mode, CallMode::FastCall) {
+            for func in &module.functions[new_func_start..new_func_end] {
+                assert!(
+                    func.prompt_count == 0,
+                    "FastCall mode rejects continuations in '{}'",
+                    func.name
+                );
+                assert!(
+                    func.deopt_info.is_empty(),
+                    "FastCall mode rejects deopts in '{}'",
+                    func.name
+                );
+                for b in &func.blocks {
+                    assert!(
+                        !matches!(
+                            b.terminator,
+                            Terminator::Invoke { .. } | Terminator::InvokeIndirect { .. }
+                        ),
+                        "FastCall mode rejects Invoke terminator in '{}'",
+                        func.name
+                    );
+                }
+            }
+        }
+
+        let call_table_base = self.call_table.base_addr();
+        let literal_pool_base = self.literal_pool.base_addr();
+        for func_idx in new_func_start..new_func_end {
+            let func = &module.functions[func_idx];
+            let mut lowerer = Lowerer::<Cfg, B, R>::new_module(
+                func_idx,
+                func,
+                &direct_call_is_internal,
+                call_table_base,
+                Some(literal_pool_base),
+                self.safepoint_handler,
+            );
+            lowerer.run();
+            self.function_suspend_records
+                .push(std::mem::take(&mut lowerer.suspend_records));
+            self.function_safepoints
+                .push(std::mem::take(&mut lowerer.safepoints));
+            self.function_frame_reify_records
+                .push(std::mem::take(&mut lowerer.frame_reify_records));
+            self.max_deopt_live_values = self
+                .max_deopt_live_values
+                .max(lowerer.max_deopt_live_values);
+            let code = lowerer.buf.into_code();
+            let offset = self.memory.push(&code);
+            self.function_entry_offsets.push(offset);
+        }
+
+        // 4. Finalize new pages (existing pages are already RX, no-op for them).
+        self.memory.finalize();
+
+        // 5. Patch the new internal slots and register code ranges.
+        let base_addr = self.memory.base_ptr() as usize;
+        let total_len = self.memory.len();
+        let mut perf_entries: Vec<(usize, usize, &str)> = Vec::new();
+        for ft_idx in old_table_len..new_table_len {
+            if let FuncDef::Internal(func_idx) = &module.func_table[ft_idx] {
+                let ptr = unsafe {
+                    self.memory
+                        .base_ptr()
+                        .add(self.function_entry_offsets[*func_idx])
+                };
+                self.call_table.set(ft_idx, ptr);
+            }
+        }
+        for func_idx in new_func_start..new_func_end {
+            let code_start = base_addr + self.function_entry_offsets[func_idx];
+            let code_end = if func_idx + 1 < self.function_entry_offsets.len() {
+                base_addr + self.function_entry_offsets[func_idx + 1]
+            } else {
+                base_addr + total_len
+            };
+            let safepoints_arc: std::sync::Arc<[SafepointRecord]> =
+                self.function_safepoints[func_idx].clone().into();
+            register_jit_code(code_start, code_end, safepoints_arc);
+            perf_entries.push((
+                code_start,
+                code_end - code_start,
+                &module.functions[func_idx].name,
+            ));
+        }
+        write_perf_map_entries(&perf_entries);
+
+        // 6. Collect FuncRefs of newly added internals.
+        let mut new_refs = Vec::new();
+        for ft_idx in old_table_len..new_table_len {
+            if let FuncDef::Internal(_) = &module.func_table[ft_idx] {
+                new_refs.push(FuncRef::from_u32(ft_idx as u32));
+            }
+        }
+        new_refs
+    }
+
+    /// The pinned [`CallMode`] for this module.
+    pub fn call_mode(&self) -> CallMode {
+        self.call_mode
+    }
+
+    /// The GC-traced literal pool. Frontends push values here and emit
+    /// `Inst::GcLiteral(idx)` to load them at runtime.
+    pub fn literal_pool(&self) -> &LiteralPool {
+        &self.literal_pool
     }
 
     /// Call a function in the module by its `FuncRef`.
     pub fn call(&self, func_ref: FuncRef, args: &[u64]) -> u64 {
-        let ptr = self.call_table[func_ref.index()];
+        let ptr = self.call_table.get(func_ref.index());
         assert!(!ptr.is_null(), "call to unresolved function");
         match self.call_outcome(func_ref, args) {
             JitOutcome::Value(v) => v,
@@ -1276,18 +1881,18 @@ impl JitModule {
     }
 
     pub fn call_outcome(&self, func_ref: FuncRef, args: &[u64]) -> JitOutcome {
-        let ptr = self.call_table[func_ref.index()];
+        let ptr = self.call_table.get(func_ref.index());
         assert!(!ptr.is_null(), "call to unresolved function");
         unsafe { call_jit_outcome(ptr, args, self.max_deopt_live_values) }
     }
 
-    /// Get a copy of the call table (func_table_index → code pointer).
-    pub fn call_table(&self) -> &[*const u8] {
-        &self.call_table
+    /// Snapshot the call table (func_table_index → code pointer).
+    pub fn call_table(&self) -> Vec<*const u8> {
+        self.call_table.snapshot()
     }
 
     pub fn function_ptr(&self, func_ref: FuncRef) -> *const u8 {
-        let ptr = self.call_table[func_ref.index()];
+        let ptr = self.call_table.get(func_ref.index());
         assert!(!ptr.is_null(), "call to unresolved function");
         ptr
     }
@@ -1474,6 +2079,18 @@ unsafe fn call_jit_regs_with_reg_limit(
     let kind: u64;
     let payload0: u64;
     let payload1: u64;
+
+    // Capture this Rust frame's FP (x29). The JIT prologue, on entry via
+    // BLR, will save *this exact* value as the saved-FP slot of its
+    // first frame. The FP-chain walker uses it as a stop sentinel so
+    // GC-time root scanning doesn't follow the FP chain past JIT into
+    // host (Rust) frames whose layout the JIT registry doesn't describe.
+    let fence_fp: *const u8;
+    unsafe {
+        core::arch::asm!("mov {0}, x29", out(reg) fence_fp);
+    }
+    let _fence_guard = unsafe { JitEntryFpGuard::new(fence_fp) };
+
     unsafe {
         core::arch::asm!(
             "mov x23, {ctx}",
@@ -1939,6 +2556,9 @@ where
     /// When Some, all calls go through an indirect call table at this
     /// address. `call_table[func_ref.index()]` holds the function pointer.
     call_table_base: Option<u64>,
+    /// When Some, `Inst::GcLiteral(idx)` loads from this base address.
+    /// Pointer is the JitModule's `literal_pool.base()`.
+    literal_pool_base: Option<u64>,
     /// When Some, safepoints emit a call to this handler function.
     /// Signature: `extern "C" fn(frame_ptr: *mut u8, frame_size: usize)`.
     safepoint_handler: Option<u64>,
@@ -2318,6 +2938,7 @@ where
         func: &'a Function,
         direct_call_is_internal: &'a [bool],
         call_table_base: u64,
+        literal_pool_base: Option<u64>,
         safepoint_handler: Option<u64>,
     ) -> Self {
         Self::new_inner(
@@ -2326,6 +2947,7 @@ where
             &[],
             Some(direct_call_is_internal),
             Some(call_table_base),
+            literal_pool_base,
             safepoint_handler,
         )
     }
@@ -2336,6 +2958,7 @@ where
         externs: &'a [*const u8],
         direct_call_is_internal: Option<&'a [bool]>,
         call_table_base: Option<u64>,
+        literal_pool_base: Option<u64>,
         safepoint_handler: Option<u64>,
     ) -> Self {
         let num_values = func.value_types.len();
@@ -2393,6 +3016,7 @@ where
             externs,
             direct_call_is_internal,
             call_table_base,
+            literal_pool_base,
             safepoint_handler,
             buf,
             regs,
@@ -2628,6 +3252,26 @@ where
                 let fr = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_f64_const(&mut self.buf, machine_fp(fr), bits);
                 self.assign_fp_value(val, fr);
+            }
+
+            Inst::GcLiteral(lit) => {
+                let val = result_val.unwrap();
+                let pool_base = self
+                    .literal_pool_base
+                    .expect("Inst::GcLiteral requires a literal_pool_base; new_module/extend should have provided one");
+                let r = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
+                // Load pool base into x27 (scratch — same convention used by
+                // call-table-indirect call lowering).
+                B::emit_mov_imm(&mut self.buf, machine_gp(27), pool_base);
+                let offset = (lit.index() * 8) as i32;
+                B::emit_load_gp(
+                    &mut self.buf,
+                    machine_gp(r),
+                    machine_gp(27),
+                    offset,
+                    MachineWordSize::W64,
+                );
+                self.assign_gp_value(val, r);
             }
 
             Inst::Add(a, b) => self.lower_gp_binop(result_val.unwrap(), *a, *b, BinOp::Add),
