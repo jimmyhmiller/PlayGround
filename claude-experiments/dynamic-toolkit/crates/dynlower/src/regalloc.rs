@@ -28,8 +28,8 @@ pub struct ValueInfo {
 pub const NUM_GP: usize = 28; // X0-X27
 pub const NUM_FP: usize = 32; // D0-D31
 
-// Allocatable GP regs: caller-saved only.
-// We do not allocate callee-saved regs until the backend preserves them.
+// Default AArch64 register sets. Backends can override these through
+// LoweringBackend; keep the constants for tests and non-backend helpers.
 pub const ALLOCATABLE_GP: &[u8] = &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
 
 // Allocatable FP regs: caller-saved only.
@@ -73,7 +73,7 @@ pub trait RegisterAllocator: Sized {
 
     /// Pre-lowering analysis. Called after use counts and types are set.
     /// Greedy: no-op. Linear scan: compute live intervals and assign registers.
-    fn prepare(&mut self, _func: &Function) {}
+    fn prepare<B: LoweringBackend>(&mut self, _func: &Function) {}
 
     // Value queries
     fn value_type(&self, val: Value) -> Type;
@@ -119,6 +119,7 @@ pub trait RegisterAllocator: Sized {
     /// allocations don't clobber destination registers that already hold
     /// the correct value.
     fn mark_gp_occupied(&mut self, r: u8, val: Value);
+    fn clear_gp_occupied(&mut self, r: u8, val: Value);
 
     // Spilling
     fn spill_caller_saved<B: LoweringBackend>(
@@ -161,7 +162,7 @@ pub trait RegisterAllocator: Sized {
     /// After a call returns, caller-saved registers are clobbered.
     /// Clear their occupants and revert values to spill slots.
     /// No code is emitted — values were already spilled before the call.
-    fn clobber_caller_saved(&mut self);
+    fn clobber_caller_saved<B: LoweringBackend>(&mut self);
 
     // State save/restore (for BrIf)
     type SavedState: Clone;
@@ -220,19 +221,20 @@ impl GreedyRegState {
         frame: &mut impl FrameLayout,
     ) -> u8 {
         // Try to find a free allocatable GP reg
-        for &r in ALLOCATABLE_GP {
+        for &r in B::allocatable_gp() {
             if self.gp_occupant[r as usize].is_none() {
                 return r;
             }
         }
         // Evict: round-robin through allocatable regs
         let start = self.gp_evict_cursor;
-        for i in 0..ALLOCATABLE_GP.len() {
-            let idx = (start + i) % ALLOCATABLE_GP.len();
-            let r = ALLOCATABLE_GP[idx];
+        let regs = B::allocatable_gp();
+        for i in 0..regs.len() {
+            let idx = (start + i) % regs.len();
+            let r = regs[idx];
             if let Some(val) = self.gp_occupant[r as usize] {
                 self.spill_gp_reg::<B>(buf, frame, r, val);
-                self.gp_evict_cursor = (idx + 1) % ALLOCATABLE_GP.len();
+                self.gp_evict_cursor = (idx + 1) % regs.len();
                 return r;
             }
         }
@@ -244,18 +246,19 @@ impl GreedyRegState {
         buf: &mut CodeBuffer<B::Arch>,
         frame: &mut impl FrameLayout,
     ) -> u8 {
-        for &r in ALLOCATABLE_FP {
+        for &r in B::allocatable_fp() {
             if self.fp_occupant[r as usize].is_none() {
                 return r;
             }
         }
         let start = self.fp_evict_cursor;
-        for i in 0..ALLOCATABLE_FP.len() {
-            let idx = (start + i) % ALLOCATABLE_FP.len();
-            let r = ALLOCATABLE_FP[idx];
+        let regs = B::allocatable_fp();
+        for i in 0..regs.len() {
+            let idx = (start + i) % regs.len();
+            let r = regs[idx];
             if let Some(val) = self.fp_occupant[r as usize] {
                 self.spill_fp_reg::<B>(buf, frame, r, val);
-                self.fp_evict_cursor = (idx + 1) % ALLOCATABLE_FP.len();
+                self.fp_evict_cursor = (idx + 1) % regs.len();
                 return r;
             }
         }
@@ -389,7 +392,7 @@ impl GreedyRegState {
         buf: &mut CodeBuffer<B::Arch>,
         frame: &mut impl FrameLayout,
     ) {
-        for &r in CALLER_SAVED_GP {
+        for &r in B::caller_saved_gp() {
             if let Some(val) = self.gp_occupant[r as usize] {
                 if self.values[val.index()].remaining_uses > 0 {
                     self.spill_gp_reg::<B>(buf, frame, r, val);
@@ -404,7 +407,7 @@ impl GreedyRegState {
                 }
             }
         }
-        for &r in CALLER_SAVED_FP {
+        for &r in B::caller_saved_fp() {
             if let Some(val) = self.fp_occupant[r as usize] {
                 if self.values[val.index()].remaining_uses > 0 {
                     self.spill_fp_reg::<B>(buf, frame, r, val);
@@ -535,6 +538,12 @@ impl RegisterAllocator for GreedyRegState {
         self.gp_occupant[r as usize] = Some(val);
     }
 
+    fn clear_gp_occupied(&mut self, r: u8, val: Value) {
+        if self.gp_occupant[r as usize] == Some(val) {
+            self.gp_occupant[r as usize] = None;
+        }
+    }
+
     fn set_spill_slot(&mut self, val: Value, offset: i32) {
         self.values[val.index()].spill_slot = Some(offset);
     }
@@ -634,8 +643,8 @@ impl RegisterAllocator for GreedyRegState {
         }
     }
 
-    fn clobber_caller_saved(&mut self) {
-        for &r in CALLER_SAVED_GP {
+    fn clobber_caller_saved<B: LoweringBackend>(&mut self) {
+        for &r in B::caller_saved_gp() {
             if let Some(val) = self.gp_occupant[r as usize] {
                 if let Some(slot) = self.values[val.index()].spill_slot {
                     self.values[val.index()].loc = ValueLoc::Spill(slot);
@@ -643,7 +652,7 @@ impl RegisterAllocator for GreedyRegState {
                 self.gp_occupant[r as usize] = None;
             }
         }
-        for &r in CALLER_SAVED_FP {
+        for &r in B::caller_saved_fp() {
             if let Some(val) = self.fp_occupant[r as usize] {
                 if let Some(slot) = self.values[val.index()].spill_slot {
                     self.values[val.index()].loc = ValueLoc::Spill(slot);
@@ -657,11 +666,7 @@ impl RegisterAllocator for GreedyRegState {
 
     fn save_state(&self) -> GreedySavedState {
         GreedySavedState {
-            values: self
-                .values
-                .iter()
-                .map(|v| (v.loc, v.spill_slot))
-                .collect(),
+            values: self.values.iter().map(|v| (v.loc, v.spill_slot)).collect(),
             gp_occupant: self.gp_occupant,
             fp_occupant: self.fp_occupant,
         }
@@ -689,10 +694,7 @@ impl RegisterAllocator for GreedyRegState {
     }
 
     fn value_info_snapshot(&self) -> Vec<(Option<i32>, Type)> {
-        self.values
-            .iter()
-            .map(|v| (v.spill_slot, v.ty))
-            .collect()
+        self.values.iter().map(|v| (v.spill_slot, v.ty)).collect()
     }
 }
 
@@ -704,9 +706,9 @@ struct LiveInterval {
     value: Value,
     #[allow(dead_code)]
     ty: Type,
-    start: u32,     // inclusive
-    end: u32,       // inclusive
-    reg: Option<u8>, // assigned physical register (after allocation)
+    start: u32,         // inclusive
+    end: u32,           // inclusive
+    reg: Option<u8>,    // assigned physical register (after allocation)
     spill: Option<i32>, // spill slot offset (if spilled)
     is_float: bool,
 }
@@ -715,8 +717,8 @@ struct LiveInterval {
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct PhiMove {
-    src: Value,         // Value in predecessor
-    dst_reg: Option<u8>, // Target register for the block param
+    src: Value,             // Value in predecessor
+    dst_reg: Option<u8>,    // Target register for the block param
     dst_spill: Option<i32>, // Target spill slot if param is spilled
     is_float: bool,
 }
@@ -833,20 +835,22 @@ impl LinearScanAllocator {
         // at the end of the current block. Also, block params must be live
         // through their entire block (at minimum).
         for &bi in &rpo {
-            func.blocks[bi].terminator.for_each_successor_args(|target, args| {
-                for &arg in args {
-                    // Arg value must be live up to end of this block
-                    let vi = arg.index();
-                    interval_end[vi] = interval_end[vi].max(block_end[bi]);
-                }
-                // Target block params must be live from block start
-                for (pi, (pval, _)) in func.blocks[target.index()].params.iter().enumerate() {
-                    let _ = pi;
-                    let vi = pval.index();
-                    // Param is live from block start to at least block start
-                    interval_start[vi] = interval_start[vi].min(block_start[target.index()]);
-                }
-            });
+            func.blocks[bi]
+                .terminator
+                .for_each_successor_args(|target, args| {
+                    for &arg in args {
+                        // Arg value must be live up to end of this block
+                        let vi = arg.index();
+                        interval_end[vi] = interval_end[vi].max(block_end[bi]);
+                    }
+                    // Target block params must be live from block start
+                    for (pi, (pval, _)) in func.blocks[target.index()].params.iter().enumerate() {
+                        let _ = pi;
+                        let vi = pval.index();
+                        // Param is live from block start to at least block start
+                        interval_start[vi] = interval_start[vi].min(block_start[target.index()]);
+                    }
+                });
         }
 
         // Extend intervals for values live across block boundaries:
@@ -895,9 +899,7 @@ impl LinearScanAllocator {
                 // If a value is live at the start of this block, it must be
                 // live at the end of all predecessors.
                 for val_idx in 0..num_values {
-                    if interval_start[val_idx] < block_s
-                        && interval_end[val_idx] >= block_s
-                    {
+                    if interval_start[val_idx] < block_s && interval_end[val_idx] >= block_s {
                         for &pred in &preds[bi] {
                             let pred_end = block_end[pred];
                             if interval_end[val_idx] < pred_end
@@ -932,7 +934,7 @@ impl LinearScanAllocator {
     }
 
     /// Run the linear scan allocation algorithm.
-    fn allocate(
+    fn allocate<B: LoweringBackend>(
         intervals: &mut [LiveInterval],
         func: &Function,
     ) -> (Vec<u32>, i32) {
@@ -965,8 +967,8 @@ impl LinearScanAllocator {
         // Active intervals sorted by end position.
         let mut active_gp: Vec<usize> = Vec::new(); // indices into intervals
         let mut active_fp: Vec<usize> = Vec::new();
-        let mut free_gp: Vec<u8> = ALLOCATABLE_GP.to_vec();
-        let mut free_fp: Vec<u8> = ALLOCATABLE_FP.to_vec();
+        let mut free_gp: Vec<u8> = B::allocatable_gp().to_vec();
+        let mut free_fp: Vec<u8> = B::allocatable_fp().to_vec();
         let mut next_spill: i32 = -8; // first spill slot
 
         for i in 0..intervals.len() {
@@ -1107,9 +1109,10 @@ fn resolve_parallel_moves<B: LoweringBackend>(
             }
             let dst = moves[i].dst;
             // Check if dst is used as src by any other pending move.
-            let blocked = moves.iter().enumerate().any(|(j, m)| {
-                j != i && pending[j] && m.src == dst
-            });
+            let blocked = moves
+                .iter()
+                .enumerate()
+                .any(|(j, m)| j != i && pending[j] && m.src == dst);
             if !blocked {
                 emit_single_move::<B>(moves[i], buf, frame);
                 pending[i] = false;
@@ -1129,7 +1132,11 @@ fn resolve_parallel_moves<B: LoweringBackend>(
                     };
                     // Save: move dst -> temp (preserve the value being overwritten)
                     emit_single_move::<B>(
-                        &ParallelMove { src: moves[i].dst, dst: temp, is_float: moves[i].is_float },
+                        &ParallelMove {
+                            src: moves[i].dst,
+                            dst: temp,
+                            is_float: moves[i].is_float,
+                        },
                         buf,
                         frame,
                     );
@@ -1146,7 +1153,11 @@ fn resolve_parallel_moves<B: LoweringBackend>(
                     for j in 0..moves.len() {
                         if pending[j] && moves[j].src == moves[i].dst {
                             emit_single_move::<B>(
-                                &ParallelMove { src: temp, dst: moves[j].dst, is_float: moves[j].is_float },
+                                &ParallelMove {
+                                    src: temp,
+                                    dst: moves[j].dst,
+                                    is_float: moves[j].is_float,
+                                },
                                 buf,
                                 frame,
                             );
@@ -1233,9 +1244,9 @@ impl RegisterAllocator for LinearScanAllocator {
         }
     }
 
-    fn prepare(&mut self, func: &Function) {
+    fn prepare<B: LoweringBackend>(&mut self, func: &Function) {
         let mut intervals = Self::compute_live_intervals(func);
-        let (block_positions, next_spill) = Self::allocate(&mut intervals, func);
+        let (block_positions, next_spill) = Self::allocate::<B>(&mut intervals, func);
         self.block_positions = block_positions;
         self.next_spill_offset = next_spill;
 
@@ -1243,7 +1254,11 @@ impl RegisterAllocator for LinearScanAllocator {
         for iv in &intervals {
             let vi = iv.value.index();
             self.assignments[vi] = iv.reg;
-            self.assigned_spills[vi] = iv.spill;
+            // Linear-scan spill ids are allocation decisions, not concrete
+            // frame-layout offsets. The streaming lowerer allocates frame
+            // slots lazily and block params without registers use their
+            // canonical block-param slots.
+            self.assigned_spills[vi] = None;
         }
 
         // Pre-compute block param register assignments.
@@ -1286,16 +1301,17 @@ impl RegisterAllocator for LinearScanAllocator {
         // If prepared, the caller is lowering an instruction whose result has
         // a pre-assigned register. But the lowerer calls alloc_gp generically.
         // We fall back to greedy allocation for robustness.
-        for &r in ALLOCATABLE_GP {
+        let regs = B::allocatable_gp();
+        for &r in regs {
             if self.gp_occupant[r as usize].is_none() {
                 return r;
             }
         }
         // Evict round-robin.
         let start = self.gp_evict_cursor;
-        for i in 0..ALLOCATABLE_GP.len() {
-            let idx = (start + i) % ALLOCATABLE_GP.len();
-            let r = ALLOCATABLE_GP[idx];
+        for i in 0..regs.len() {
+            let idx = (start + i) % regs.len();
+            let r = regs[idx];
             if let Some(val) = self.gp_occupant[r as usize] {
                 // Spill the evicted value.
                 if self.values[val.index()].remaining_uses > 0 {
@@ -1311,7 +1327,7 @@ impl RegisterAllocator for LinearScanAllocator {
                     self.values[val.index()].loc = ValueLoc::Spill(offset);
                 }
                 self.gp_occupant[r as usize] = None;
-                self.gp_evict_cursor = (idx + 1) % ALLOCATABLE_GP.len();
+                self.gp_evict_cursor = (idx + 1) % regs.len();
                 return r;
             }
         }
@@ -1323,15 +1339,16 @@ impl RegisterAllocator for LinearScanAllocator {
         buf: &mut CodeBuffer<B::Arch>,
         frame: &mut impl FrameLayout,
     ) -> u8 {
-        for &r in ALLOCATABLE_FP {
+        let regs = B::allocatable_fp();
+        for &r in regs {
             if self.fp_occupant[r as usize].is_none() {
                 return r;
             }
         }
         let start = self.fp_evict_cursor;
-        for i in 0..ALLOCATABLE_FP.len() {
-            let idx = (start + i) % ALLOCATABLE_FP.len();
-            let r = ALLOCATABLE_FP[idx];
+        for i in 0..regs.len() {
+            let idx = (start + i) % regs.len();
+            let r = regs[idx];
             if let Some(val) = self.fp_occupant[r as usize] {
                 if self.values[val.index()].remaining_uses > 0 {
                     let offset = match self.values[val.index()].spill_slot {
@@ -1346,7 +1363,7 @@ impl RegisterAllocator for LinearScanAllocator {
                     self.values[val.index()].loc = ValueLoc::Spill(offset);
                 }
                 self.fp_occupant[r as usize] = None;
-                self.fp_evict_cursor = (idx + 1) % ALLOCATABLE_FP.len();
+                self.fp_evict_cursor = (idx + 1) % regs.len();
                 return r;
             }
         }
@@ -1424,6 +1441,12 @@ impl RegisterAllocator for LinearScanAllocator {
         self.gp_occupant[r as usize] = Some(val);
     }
 
+    fn clear_gp_occupied(&mut self, r: u8, val: Value) {
+        if self.gp_occupant[r as usize] == Some(val) {
+            self.gp_occupant[r as usize] = None;
+        }
+    }
+
     fn set_spill_slot(&mut self, val: Value, offset: i32) {
         self.values[val.index()].spill_slot = Some(offset);
     }
@@ -1462,7 +1485,7 @@ impl RegisterAllocator for LinearScanAllocator {
         frame: &mut impl FrameLayout,
     ) {
         // Same as greedy: spill all values in caller-saved registers.
-        for &r in CALLER_SAVED_GP {
+        for &r in B::caller_saved_gp() {
             if let Some(val) = self.gp_occupant[r as usize] {
                 if self.values[val.index()].remaining_uses > 0 {
                     let offset = match self.values[val.index()].spill_slot {
@@ -1482,7 +1505,7 @@ impl RegisterAllocator for LinearScanAllocator {
                 }
             }
         }
-        for &r in CALLER_SAVED_FP {
+        for &r in B::caller_saved_fp() {
             if let Some(val) = self.fp_occupant[r as usize] {
                 if self.values[val.index()].remaining_uses > 0 {
                     let offset = match self.values[val.index()].spill_slot {
@@ -1600,7 +1623,8 @@ impl RegisterAllocator for LinearScanAllocator {
         // (placed there by emit_block_args at the predecessor). Set up
         // register state to match.
         self.clear_regs();
-        for &(val, ty) in &func.blocks[block_idx].params {
+        let param_slots = frame.block_param_slots(block_idx).to_vec();
+        for (param_idx, &(val, ty)) in func.blocks[block_idx].params.iter().enumerate() {
             let vi = val.index();
             if let Some(r) = self.assignments[vi] {
                 if is_float_type(ty) {
@@ -1611,6 +1635,9 @@ impl RegisterAllocator for LinearScanAllocator {
                     self.values[vi].loc = ValueLoc::GpReg(r);
                 }
             } else if let Some(off) = self.assigned_spills[vi] {
+                self.values[vi].loc = ValueLoc::Spill(off);
+                self.values[vi].spill_slot = Some(off);
+            } else if let Some(&off) = param_slots.get(param_idx) {
                 self.values[vi].loc = ValueLoc::Spill(off);
                 self.values[vi].spill_slot = Some(off);
             }
@@ -1693,7 +1720,11 @@ impl RegisterAllocator for LinearScanAllocator {
                 MoveLocation::Spill(slots[i])
             };
 
-            moves.push(ParallelMove { src, dst, is_float: is_fp });
+            moves.push(ParallelMove {
+                src,
+                dst,
+                is_float: is_fp,
+            });
         }
 
         resolve_parallel_moves::<B>(&moves, buf, frame);
@@ -1703,8 +1734,8 @@ impl RegisterAllocator for LinearScanAllocator {
         }
     }
 
-    fn clobber_caller_saved(&mut self) {
-        for &r in CALLER_SAVED_GP {
+    fn clobber_caller_saved<B: LoweringBackend>(&mut self) {
+        for &r in B::caller_saved_gp() {
             if let Some(val) = self.gp_occupant[r as usize] {
                 if let Some(slot) = self.values[val.index()].spill_slot {
                     self.values[val.index()].loc = ValueLoc::Spill(slot);
@@ -1712,7 +1743,7 @@ impl RegisterAllocator for LinearScanAllocator {
                 self.gp_occupant[r as usize] = None;
             }
         }
-        for &r in CALLER_SAVED_FP {
+        for &r in B::caller_saved_fp() {
             if let Some(val) = self.fp_occupant[r as usize] {
                 if let Some(slot) = self.values[val.index()].spill_slot {
                     self.values[val.index()].loc = ValueLoc::Spill(slot);

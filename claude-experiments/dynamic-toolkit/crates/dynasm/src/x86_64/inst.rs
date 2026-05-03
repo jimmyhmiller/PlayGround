@@ -1,6 +1,6 @@
 use super::cond::Condition;
 use super::encoding::*;
-use super::reg::X64Reg;
+use super::reg::{Size, X64Reg};
 use smallvec::{SmallVec, smallvec};
 
 /// x86-64 instruction set.
@@ -111,6 +111,12 @@ pub enum X64Inst {
     TestRI { reg: X64Reg, imm: i32 },
     /// SETcc r/m8
     Setcc { dest: X64Reg, cond: Condition },
+    /// CMOVcc r64, r64
+    Cmovcc {
+        dest: X64Reg,
+        src: X64Reg,
+        cond: Condition,
+    },
 
     // === Control flow instructions ===
     /// JMP rel32
@@ -161,6 +167,8 @@ pub enum X64Inst {
     MovqXR { dest: X64Reg, src: X64Reg },
     /// CVTSI2SD xmm, r64
     Cvtsi2sd { dest: X64Reg, src: X64Reg },
+    /// CVTTSD2SI r64, xmm
+    Cvttsd2si { dest: X64Reg, src: X64Reg },
     /// UCOMISD xmm, xmm
     Ucomisd { a: X64Reg, b: X64Reg },
 
@@ -370,7 +378,15 @@ impl X64Inst {
 
             // === Comparison ===
             X64Inst::CmpRR { a, b } => {
-                smallvec![rex_w(b.index, a.index), 0x39, modrm(0b11, b.index, a.index)]
+                let mut bytes: SmallVec<[u8; 15]> = SmallVec::new();
+                if a.size == Size::S64 {
+                    bytes.push(rex_w(b.index, a.index));
+                } else if let Some(r) = rex_opt(b.index, a.index) {
+                    bytes.push(r);
+                }
+                bytes.push(0x39);
+                bytes.push(modrm(0b11, b.index, a.index));
+                bytes
             }
             X64Inst::CmpRI { reg, imm } => {
                 let mut bytes: SmallVec<[u8; 15]> =
@@ -389,13 +405,23 @@ impl X64Inst {
             }
             X64Inst::Setcc { dest, cond } => {
                 let mut bytes: SmallVec<[u8; 15]> = SmallVec::new();
-                if let Some(r) = rex_opt(0, dest.index) {
+                if dest.index >= 4 {
+                    bytes.push(rex(false, false, false, dest.index >= 8));
+                } else if let Some(r) = rex_opt(0, dest.index) {
                     bytes.push(r);
                 }
                 bytes.push(0x0F);
                 bytes.push(0x90 + (*cond as u8));
                 bytes.push(modrm(0b11, 0, dest.index));
                 bytes
+            }
+            X64Inst::Cmovcc { dest, src, cond } => {
+                smallvec![
+                    rex_w(dest.index, src.index),
+                    0x0F,
+                    0x40 + (*cond as u8),
+                    modrm(0b11, dest.index, src.index)
+                ]
             }
 
             // === Control flow ===
@@ -506,6 +532,15 @@ impl X64Inst {
                     rex_w(dest.index, src.index),
                     0x0F,
                     0x2A,
+                    modrm(0b11, dest.index, src.index)
+                ]
+            }
+            X64Inst::Cvttsd2si { dest, src } => {
+                smallvec![
+                    0xF2,
+                    rex_w(dest.index, src.index),
+                    0x0F,
+                    0x2C,
                     modrm(0b11, dest.index, src.index)
                 ]
             }

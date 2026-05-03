@@ -7,13 +7,12 @@ use dynvalue::{LowBit, NanBox, TagScheme};
 pub mod cont_heap;
 pub mod cont_ops;
 pub use cont_heap::{
-    capture_continuation, read_continuation,
-    BuilderFrame, CapturedStackBuilder, ContinuationContext,
-    ContinuationTypes, ContinuationView, FrameView, NoContinuations,
+    BuilderFrame, CapturedStackBuilder, ContinuationContext, ContinuationTypes, ContinuationView,
+    FrameView, NoContinuations, capture_continuation, read_continuation,
 };
 pub use cont_ops::{
-    do_capture, do_clone, do_resume, resolve_prompt_boundary, FrameCapture,
-    FrameRestorable, PromptBoundaryAction,
+    FrameCapture, FrameRestorable, PromptBoundaryAction, do_capture, do_clone, do_resume,
+    resolve_prompt_boundary,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -45,7 +44,10 @@ pub enum FrameSliceError {
 impl Display for FrameSliceError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
-            FrameSliceError::InvalidRootIndex { frame_idx, root_idx } => {
+            FrameSliceError::InvalidRootIndex {
+                frame_idx,
+                root_idx,
+            } => {
                 write!(
                     f,
                     "frame slice root index {root_idx} is out of bounds for captured frame {frame_idx}"
@@ -115,7 +117,9 @@ impl Error for ConfigError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FrameResume {
     TopLevel,
-    FromCall { return_dest: Option<usize> },
+    FromCall {
+        return_dest: Option<usize>,
+    },
     FromInvoke {
         normal_block: usize,
         normal_args_vals: Vec<u64>,
@@ -141,7 +145,11 @@ pub struct StackConfig {
 }
 
 impl Default for StackConfig {
-    fn default() -> Self { StackConfig { heap_size: 1024 * 1024 } }
+    fn default() -> Self {
+        StackConfig {
+            heap_size: 1024 * 1024,
+        }
+    }
 }
 
 /// The interpreter's frame store — what the interpreter dispatch loop calls.
@@ -156,8 +164,14 @@ pub trait InterpFrameStore {
 
     /// Push a new frame. `args` are written into the frame's param slots.
     /// `slot_count` is the number of stack-allocated slots for StackAddr instructions.
-    fn push_frame(&mut self, func_idx: usize, val_count: usize, slot_count: usize,
-                  args: &[(usize, u64)], resume: FrameResume);
+    fn push_frame(
+        &mut self,
+        func_idx: usize,
+        val_count: usize,
+        slot_count: usize,
+        args: &[(usize, u64)],
+        resume: FrameResume,
+    );
     /// Pop the current frame. Returns the caller resume info.
     fn pop_frame(&mut self) -> FrameResume;
     /// Read the current top frame's resume info without popping.
@@ -219,14 +233,17 @@ pub trait InterpFrameStore {
     // ── GC integration ─────────────────────────────────────────
 
     /// Whether the runtime wants a GC collection before the next allocation.
-    fn needs_gc(&self) -> bool { false }
+    fn needs_gc(&self) -> bool {
+        false
+    }
     /// Run a GC collection. Only called when `needs_gc()` returns true.
     fn collect_gc(&mut self) {}
     /// Precise safepoint: only the given value indices are live GC roots.
     /// Default: falls back to `collect_gc()`.
-    fn safepoint(&mut self, _live_indices: &[usize]) { self.collect_gc() }
+    fn safepoint(&mut self, _live_indices: &[usize]) {
+        self.collect_gc()
+    }
 }
-
 
 /// The unified stack strategy trait. Language authors implement this
 /// (or use a prebuilt one) to control stack behavior for both
@@ -237,15 +254,25 @@ pub trait UnifiedStackStrategy: Sized + 'static {
     // ── Compile-time configuration (JIT reads these) ─────────────
 
     /// Does the JIT prologue need a segment overflow check?
-    fn needs_prologue_check() -> bool { false }
+    fn needs_prologue_check() -> bool {
+        false
+    }
     /// Default segment size for segmented modes.
-    fn segment_size() -> Option<usize> { None }
+    fn segment_size() -> Option<usize> {
+        None
+    }
     /// Whether continuation IR instructions are supported.
-    fn supports_continuations() -> bool { true }
+    fn supports_continuations() -> bool {
+        true
+    }
     /// Whether prompts create segment boundaries.
-    fn prompt_creates_segment_boundary() -> bool { false }
+    fn prompt_creates_segment_boundary() -> bool {
+        false
+    }
     /// Whether captured continuation roots need stack maps.
-    fn captured_roots_need_stack_maps() -> bool { false }
+    fn captured_roots_need_stack_maps() -> bool {
+        false
+    }
 
     // ── Runtime ──────────────────────────────────────────────────
 
@@ -256,7 +283,9 @@ pub trait UnifiedStackStrategy: Sized + 'static {
 
     // ── Validation ───────────────────────────────────────────────
 
-    fn validate() -> Result<(), ConfigError> { Ok(()) }
+    fn validate() -> Result<(), ConfigError> {
+        Ok(())
+    }
 }
 
 // ─── Prebuilt Strategies ───────────────────────────────────
@@ -268,9 +297,13 @@ pub struct ContiguousVecStack;
 
 impl UnifiedStackStrategy for ContiguousVecStack {
     const NAME: &'static str = "contiguous-vec";
-    fn supports_continuations() -> bool { true }
+    fn supports_continuations() -> bool {
+        true
+    }
     type Runtime = VecFrameStore;
-    fn create_runtime(_: StackConfig) -> VecFrameStore { VecFrameStore::new() }
+    fn create_runtime(_: StackConfig) -> VecFrameStore {
+        VecFrameStore::new()
+    }
 }
 
 struct VecFrame {
@@ -287,7 +320,6 @@ pub struct VecFrameStore {
     stack: Vec<VecFrame>,
 }
 
-
 impl VecFrameStore {
     pub fn new() -> Self {
         VecFrameStore { stack: Vec::new() }
@@ -295,18 +327,31 @@ impl VecFrameStore {
 }
 
 impl Default for VecFrameStore {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InterpFrameStore for VecFrameStore {
-    fn push_frame(&mut self, func_idx: usize, val_count: usize, slot_count: usize, args: &[(usize, u64)], resume: FrameResume) {
+    fn push_frame(
+        &mut self,
+        func_idx: usize,
+        val_count: usize,
+        slot_count: usize,
+        args: &[(usize, u64)],
+        resume: FrameResume,
+    ) {
         let mut vals = vec![0u64; val_count];
         for &(idx, val) in args {
             vals[idx] = val;
         }
         self.stack.push(VecFrame {
-            func_idx, vals, slots: vec![0u64; slot_count],
-            block_idx: 0, inst_idx: 0, resume,
+            func_idx,
+            vals,
+            slots: vec![0u64; slot_count],
+            block_idx: 0,
+            inst_idx: 0,
+            resume,
             active_prompts: Vec::new(),
         });
     }
@@ -316,25 +361,47 @@ impl InterpFrameStore for VecFrameStore {
     }
 
     fn peek_top_resume(&self) -> FrameResume {
-        self.stack.last().expect("peek_top_resume on empty stack").resume.clone()
+        self.stack
+            .last()
+            .expect("peek_top_resume on empty stack")
+            .resume
+            .clone()
     }
 
-    fn is_empty(&self) -> bool { self.stack.is_empty() }
+    fn is_empty(&self) -> bool {
+        self.stack.is_empty()
+    }
 
-    fn get(&self, idx: usize) -> u64 { self.stack.last().unwrap().vals[idx] }
-    fn set(&mut self, idx: usize, val: u64) { self.stack.last_mut().unwrap().vals[idx] = val; }
+    fn get(&self, idx: usize) -> u64 {
+        self.stack.last().unwrap().vals[idx]
+    }
+    fn set(&mut self, idx: usize, val: u64) {
+        self.stack.last_mut().unwrap().vals[idx] = val;
+    }
 
     fn slot_ptr(&self, slot_idx: usize) -> *const u64 {
         let frame = self.stack.last().unwrap();
         unsafe { frame.slots.as_ptr().add(slot_idx) }
     }
 
-    fn func_idx(&self) -> usize { self.stack.last().unwrap().func_idx }
-    fn block_idx(&self) -> usize { self.stack.last().unwrap().block_idx }
-    fn set_block(&mut self, block: usize) { self.stack.last_mut().unwrap().block_idx = block; }
-    fn inst_idx(&self) -> usize { self.stack.last().unwrap().inst_idx }
-    fn set_inst(&mut self, inst: usize) { self.stack.last_mut().unwrap().inst_idx = inst; }
-    fn advance_inst(&mut self) { self.stack.last_mut().unwrap().inst_idx += 1; }
+    fn func_idx(&self) -> usize {
+        self.stack.last().unwrap().func_idx
+    }
+    fn block_idx(&self) -> usize {
+        self.stack.last().unwrap().block_idx
+    }
+    fn set_block(&mut self, block: usize) {
+        self.stack.last_mut().unwrap().block_idx = block;
+    }
+    fn inst_idx(&self) -> usize {
+        self.stack.last().unwrap().inst_idx
+    }
+    fn set_inst(&mut self, inst: usize) {
+        self.stack.last_mut().unwrap().inst_idx = inst;
+    }
+    fn advance_inst(&mut self) {
+        self.stack.last_mut().unwrap().inst_idx += 1;
+    }
 
     fn push_prompt(&mut self, prompt: u32) {
         self.stack.last_mut().unwrap().active_prompts.push(prompt);
@@ -344,14 +411,15 @@ impl InterpFrameStore for VecFrameStore {
         assert_eq!(popped, Some(prompt));
     }
     fn find_prompt_depth(&self, prompt: u32) -> Option<usize> {
-        self.stack.iter().rposition(|f| f.active_prompts.contains(&prompt))
+        self.stack
+            .iter()
+            .rposition(|f| f.active_prompts.contains(&prompt))
     }
     fn pop_frames_above(&mut self, depth: usize) {
         while self.stack.len() > depth + 1 {
             self.stack.pop();
         }
     }
-
 }
 
 // ─── Value Layout ──────────────────────────────────────────
@@ -407,7 +475,8 @@ pub trait RootTransport<L: ValueLayout, R: RootStrategy<L>> {
         matches!(Self::kind(), RootTransportKind::StackMap)
     }
 
-    fn validate_frame<F: FrameStrategy<L, R, C>, C: CallingConvention<L>>() -> Result<(), ConfigError> {
+    fn validate_frame<F: FrameStrategy<L, R, C>, C: CallingConvention<L>>()
+    -> Result<(), ConfigError> {
         if Self::requires_frame_roots() && !F::exposes_slot_class(SlotClass::Root) {
             return Err(ConfigError {
                 message: "root transport requires frame-visible root slots",
@@ -621,12 +690,14 @@ pub trait SafepointStrategy<
     T: RootTransport<L, R>,
     F: FrameStrategy<L, R, C>,
     C: CallingConvention<L>,
-> {
+>
+{
     const NAME: &'static str;
 
     fn validates_frame() -> bool {
         if T::requires_frame_roots() {
-            F::exposes_slot_class(SlotClass::Root) || R::precision() == RootPrecision::ConservativeWords
+            F::exposes_slot_class(SlotClass::Root)
+                || R::precision() == RootPrecision::ConservativeWords
         } else if T::requires_shadow_slots() {
             F::supports_shadow_roots()
         } else if T::emits_stack_maps() {
@@ -733,14 +804,21 @@ pub trait CodegenConfig {
         + SoundTransport<Self::Layout, Self::Roots>;
     type CallingConvention: CallingConvention<Self::Layout>;
     type Frames: FrameStrategy<Self::Layout, Self::Roots, Self::CallingConvention>;
-    type Safepoints:
-        SafepointStrategy<
+    type Safepoints: SafepointStrategy<
             Self::Layout,
             Self::Roots,
             Self::RootTransport,
             Self::Frames,
             Self::CallingConvention,
         >;
+
+    fn validate() -> Result<(), ConfigError> {
+        Self::Roots::validate()?;
+        Self::Frames::validate()?;
+        Self::RootTransport::validate_frame::<Self::Frames, Self::CallingConvention>()?;
+        Self::Safepoints::validate()?;
+        Ok(())
+    }
 }
 
 pub struct PreciseStackRoots;
@@ -790,6 +868,26 @@ impl<L: ValueLayout> CallingConvention<L> for AArch64CAbi {
         8
     }
 }
+
+pub struct X64SysVCAbi;
+
+impl<L: ValueLayout> CallingConvention<L> for X64SysVCAbi {
+    const NAME: &'static str = "x86_64-sysv-c-abi";
+
+    fn stack_align() -> usize {
+        16
+    }
+
+    fn register_arg_limit() -> usize {
+        6
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+pub type PlatformDefaultCc = X64SysVCAbi;
+
+#[cfg(not(target_arch = "x86_64"))]
+pub type PlatformDefaultCc = AArch64InternalCc;
 
 pub struct StackSlotFrames;
 
@@ -875,12 +973,12 @@ impl<L: ValueLayout, R: RootStrategy<L>> RootTransport<L, R> for StackMapRoots {
 pub struct CallbackSafepoints;
 
 impl<
-        L: ValueLayout,
-        R: RootStrategy<L>,
-        T: RootTransport<L, R>,
-        F: FrameStrategy<L, R, C>,
-        C: CallingConvention<L>,
-    > SafepointStrategy<L, R, T, F, C> for CallbackSafepoints
+    L: ValueLayout,
+    R: RootStrategy<L>,
+    T: RootTransport<L, R>,
+    F: FrameStrategy<L, R, C>,
+    C: CallingConvention<L>,
+> SafepointStrategy<L, R, T, F, C> for CallbackSafepoints
 {
     const NAME: &'static str = "callback-safepoints";
 }
@@ -888,12 +986,12 @@ impl<
 pub struct StackMapSafepoints;
 
 impl<
-        L: ValueLayout,
-        R: RootStrategy<L>,
-        T: RootTransport<L, R>,
-        F: FrameStrategy<L, R, C>,
-        C: CallingConvention<L>,
-    > SafepointStrategy<L, R, T, F, C> for StackMapSafepoints
+    L: ValueLayout,
+    R: RootStrategy<L>,
+    T: RootTransport<L, R>,
+    F: FrameStrategy<L, R, C>,
+    C: CallingConvention<L>,
+> SafepointStrategy<L, R, T, F, C> for StackMapSafepoints
 {
     const NAME: &'static str = "stack-map-safepoints";
 
@@ -924,7 +1022,7 @@ where
     type Layout = L;
     type Roots = L::DefaultRoots;
     type RootTransport = L::DefaultRootTransport;
-    type CallingConvention = AArch64InternalCc;
+    type CallingConvention = PlatformDefaultCc;
     type Frames = StackSlotFrames;
     type Safepoints = CallbackSafepoints;
 }
@@ -948,6 +1046,9 @@ impl CodegenConfig for NanBoxConfig {
     type Safepoints = StackMapSafepoints;
 }
 
+pub fn validate_codegen_config<C: CodegenConfig>() -> Result<(), ConfigError> {
+    <C as CodegenConfig>::validate()
+}
 
 impl<const TAG_BITS: u32> ValueLayout for LowBit<TAG_BITS> {
     const NAME: &'static str = "low-bit";
@@ -995,7 +1096,34 @@ mod tests {
         _assert_sound::<NanBoxConfig>();
     }
 
-    // Negative combinations are enforced by the type system — see the
-    // `compile_fail` docs on `NanBoxConfig`. We can't test them from
-    // Rust code because constructing them would itself fail to compile.
+    // Negative combinations on `DefaultCodegenConfig` are enforced by the
+    // `SoundRoots` / `SoundTransport` type bounds — see the `compile_fail`
+    // docs on `NanBoxConfig`. We can't construct those configs from Rust
+    // because they fail to compile. The runtime tests below exercise the
+    // `validate_codegen_config` path on hand-built configs that bypass
+    // the soundness bounds.
+
+    struct InvalidStackMapSafepointConfig;
+    impl CodegenConfig for InvalidStackMapSafepointConfig {
+        type Layout = LowBit<3>;
+        type Roots = PreciseStackRoots;
+        type RootTransport = FrameScanRoots;
+        type CallingConvention = AArch64InternalCc;
+        type Frames = StackSlotFrames;
+        type Safepoints = StackMapSafepoints;
+    }
+
+    #[test]
+    fn nan_box_default_config_is_valid() {
+        assert!(validate_codegen_config::<DefaultCodegenConfig<NanBox>>().is_ok());
+    }
+
+    #[test]
+    fn stack_map_safepoints_require_stack_map_transport() {
+        let err = validate_codegen_config::<InvalidStackMapSafepointConfig>().unwrap_err();
+        assert_eq!(
+            err.message,
+            "stack-map safepoints require stack-map root transport"
+        );
+    }
 }

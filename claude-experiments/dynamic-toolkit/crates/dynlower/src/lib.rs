@@ -5,31 +5,31 @@ use std::marker::PhantomData;
 use std::sync::RwLock;
 
 pub mod backend;
+pub mod batch_lower;
 pub mod regalloc;
 pub mod regalloc_bridge;
-pub mod batch_lower;
 
 pub use backend::Arm64Backend;
 
+#[cfg(target_arch = "x86_64")]
+use backend::X64Backend;
 use backend::{
-    LoweringBackend, MachineFpBinOp, MachineGpBinOp, MachineLocation,
-    MachineWordSize,
-};
-use regalloc::{
-    GreedyRegState, ValueLoc, RegisterAllocator,
-    machine_gp, machine_fp, is_float_type,
-};
-use dynexec::{
-    BuilderFrame, CallArgLocation, CallingConvention, FrameResume,
-    CodegenConfig, DefaultCodegenConfig, FrameLayout, FrameResumePoint, FrameSlotAccess,
-    FrameSlotBase, FrameStrategy, LayoutConfigDefaults, RootTransport, RootTransportKind,
-    SoundRoots, SoundTransport,
+    LoweringBackend, MachineFpBinOp, MachineGpBinOp, MachineLocation, MachineWordSize,
 };
 use dynasm::buffer::{CodeBuffer, Label};
 use dynasm::code_memory::{CodeMemory, PagedCodeMemory};
+use dynexec::{
+    BuilderFrame, CallArgLocation, CallingConvention, CodegenConfig, DefaultCodegenConfig,
+    FrameLayout, FrameResume, FrameResumePoint, FrameSlotAccess, FrameSlotBase, FrameStrategy,
+    LayoutConfigDefaults, RootTransport, RootTransportKind, SoundRoots, SoundTransport,
+    validate_codegen_config,
+};
 use dynir::ir::*;
 use dynir::types::Type;
 use dynvalue::TagScheme;
+use regalloc::{
+    GreedyRegState, RegisterAllocator, ValueLoc, is_float_type, machine_fp, machine_gp,
+};
 
 #[cfg(test)]
 mod tests;
@@ -90,9 +90,15 @@ fn unregister_jit_code(code_start: usize) {
 
 fn lookup_code_entry(registry: &[JitCodeEntry], addr: usize) -> Option<&JitCodeEntry> {
     let idx = registry.partition_point(|e| e.code_start <= addr);
-    if idx == 0 { return None; }
+    if idx == 0 {
+        return None;
+    }
     let entry = &registry[idx - 1];
-    if addr < entry.code_end { Some(entry) } else { None }
+    if addr < entry.code_end {
+        Some(entry)
+    } else {
+        None
+    }
 }
 
 // ─── perf-pid.map support ──────────────────────────────────────────
@@ -124,7 +130,7 @@ fn write_perf_map_entries(entries: &[(usize, usize, &str)]) {
 /// scan *only* the root slots recorded as live at that point —
 /// conservative whole-frame sweeping would resurrect stale spill slots
 /// as phantom roots.
-#[cfg(target_arch = "aarch64")]
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u64)) {
     let registry = JIT_CODE_REGISTRY.read().unwrap();
     if registry.is_empty() {
@@ -179,7 +185,7 @@ pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u
     }
 }
 
-#[cfg(not(target_arch = "aarch64"))]
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub fn walk_jit_ancestor_roots(_jit_fp: *const u8, _visitor: &mut dyn FnMut(*mut u64)) {
     // FP-chain walking is architecture-specific; no-op on unsupported targets.
 }
@@ -476,18 +482,36 @@ impl JitFunction {
         L::DefaultRoots: SoundRoots<L>,
         L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
     {
-        Self::compile_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
-            func,
-            externs,
-            Some(handler as u64),
-        )
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::compile_with_regalloc::<
+                DefaultJitConfig<L>,
+                Arm64Backend,
+                regalloc::LinearScanAllocator,
+            >(func, externs, Some(handler as u64))
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::compile_with_regalloc::<
+                DefaultJitConfig<L>,
+                X64Backend,
+                regalloc::LinearScanAllocator,
+            >(func, externs, Some(handler as u64))
+        }
     }
 
     pub fn compile_with_config<Cfg: CodegenConfig>(func: &Function, externs: &[*const u8]) -> Self
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(func, externs, None)
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(func, externs, None)
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::compile_with_backend_and_config::<Cfg, X64Backend>(func, externs, None)
+        }
     }
 
     pub fn compile_with_config_and_gc<Cfg: CodegenConfig>(
@@ -498,7 +522,48 @@ impl JitFunction {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(func, externs, safepoint_handler)
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(
+                func,
+                externs,
+                safepoint_handler,
+            )
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::compile_with_backend_and_config::<Cfg, X64Backend>(
+                func,
+                externs,
+                safepoint_handler,
+            )
+        }
+    }
+
+    pub fn compile_with_config_and_gc_linear_scan<Cfg: CodegenConfig>(
+        func: &Function,
+        externs: &[*const u8],
+        safepoint_handler: Option<u64>,
+    ) -> Self
+    where
+        Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
+    {
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::compile_with_regalloc::<Cfg, Arm64Backend, regalloc::LinearScanAllocator>(
+                func,
+                externs,
+                safepoint_handler,
+            )
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::compile_with_regalloc::<Cfg, X64Backend, regalloc::LinearScanAllocator>(
+                func,
+                externs,
+                safepoint_handler,
+            )
+        }
     }
 
     pub fn compile_with_backend_and_config<Cfg: CodegenConfig, B: LoweringBackend>(
@@ -589,7 +654,10 @@ impl JitFunction {
         let path = "/tmp/jit_dump.bin";
         std::fs::write(path, bytes).unwrap();
         eprintln!("Disassemble with:");
-        eprintln!("  llvm-objdump -d -m aarch64 -b binary {} | head -200", path);
+        eprintln!(
+            "  llvm-objdump -d -m aarch64 -b binary {} | head -200",
+            path
+        );
     }
 
     pub fn native_resume_ptr(&self, record: &FrameReifyRecord) -> Option<*const u8> {
@@ -612,7 +680,11 @@ impl JitFunction {
         } else {
             resume_args.as_ptr()
         };
-        let args = [frame_values_ptr as u64, args_ptr as u64, resume_args.len() as u64];
+        let args = [
+            frame_values_ptr as u64,
+            args_ptr as u64,
+            resume_args.len() as u64,
+        ];
         unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) }
     }
 
@@ -632,9 +704,10 @@ impl JitFunction {
             return Some(self.call_resume_outcome(record, values.as_ptr(), resume_args));
         }
 
-        let suspend = self.suspend_records.iter().find(|record| {
-            record.native_resume_offset.is_some() && record.resume == *resume
-        })?;
+        let suspend = self
+            .suspend_records
+            .iter()
+            .find(|record| record.native_resume_offset.is_some() && record.resume == *resume)?;
         let ptr = unsafe {
             self.as_ptr()
                 .add(suspend.native_resume_offset.expect("checked above"))
@@ -644,7 +717,11 @@ impl JitFunction {
         } else {
             resume_args.as_ptr()
         };
-        let args = [values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
+        let args = [
+            values.as_ptr() as u64,
+            args_ptr as u64,
+            resume_args.len() as u64,
+        ];
         Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) })
     }
 }
@@ -696,11 +773,22 @@ impl JitModule {
         L::DefaultRoots: SoundRoots<L>,
         L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
     {
-        Self::compile_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
-            module,
-            externs,
-            None,
-        )
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::compile_with_regalloc::<
+                DefaultJitConfig<L>,
+                Arm64Backend,
+                regalloc::LinearScanAllocator,
+            >(module, externs, None)
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::compile_with_regalloc::<
+                DefaultJitConfig<L>,
+                X64Backend,
+                regalloc::LinearScanAllocator,
+            >(module, externs, None)
+        }
     }
 
     /// Compile a module with fast calls: internal calls are treated as plain
@@ -712,10 +800,22 @@ impl JitModule {
         L::DefaultRoots: SoundRoots<L>,
         L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
     {
-        Self::compile_fast_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
-            module,
-            externs,
-        )
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::compile_fast_with_regalloc::<
+                DefaultJitConfig<L>,
+                Arm64Backend,
+                regalloc::LinearScanAllocator,
+            >(module, externs)
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::compile_fast_with_regalloc::<
+                DefaultJitConfig<L>,
+                X64Backend,
+                regalloc::LinearScanAllocator,
+            >(module, externs)
+        }
     }
 
     fn compile_fast_with_regalloc<Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator>(
@@ -850,11 +950,22 @@ impl JitModule {
         L::DefaultRoots: SoundRoots<L>,
         L::DefaultRootTransport: SoundTransport<L, L::DefaultRoots>,
     {
-        Self::compile_with_regalloc::<DefaultJitConfig<L>, Arm64Backend, regalloc::LinearScanAllocator>(
-            module,
-            externs,
-            Some(handler as u64),
-        )
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::compile_with_regalloc::<
+                DefaultJitConfig<L>,
+                Arm64Backend,
+                regalloc::LinearScanAllocator,
+            >(module, externs, Some(handler as u64))
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::compile_with_regalloc::<
+                DefaultJitConfig<L>,
+                X64Backend,
+                regalloc::LinearScanAllocator,
+            >(module, externs, Some(handler as u64))
+        }
     }
 
     /// Compile a module using the **batch** register allocator from the
@@ -869,7 +980,7 @@ impl JitModule {
         externs: &[*const u8],
         safepoint_handler: Option<u64>,
     ) -> Self {
-        use batch_lower::{compile_function_batch, TagConfig};
+        use batch_lower::{TagConfig, compile_function_batch};
 
         let tags = TagConfig {
             has_unboxed_float: L::HAS_UNBOXED_FLOAT,
@@ -903,14 +1014,18 @@ impl JitModule {
 
         for (_func_idx, func) in module.functions.iter().enumerate() {
             let (code, frame_size, safepoints) = compile_function_batch(
-                func, &extern_ptrs, call_table_base, TagConfig {
+                func,
+                &extern_ptrs,
+                call_table_base,
+                TagConfig {
                     has_unboxed_float: L::HAS_UNBOXED_FLOAT,
                     payload_bits: L::PAYLOAD_BITS as u8,
                     tag_count: L::TAG_COUNT,
                     encode_tagged: L::encode_tagged,
                 },
                 safepoint_handler,
-            ).unwrap_or_else(|e| panic!("batch compile failed: {e}"));
+            )
+            .unwrap_or_else(|e| panic!("batch compile failed: {e}"));
             let offset = memory.push(&code);
             entry_offsets.push(offset);
             frame_sizes.push(frame_size);
@@ -963,7 +1078,14 @@ impl JitModule {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(module, externs, None)
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(module, externs, None)
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::compile_with_backend_and_config::<Cfg, X64Backend>(module, externs, None)
+        }
     }
 
     pub fn compile_with_config_and_gc<Cfg: CodegenConfig>(
@@ -974,7 +1096,22 @@ impl JitModule {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(module, externs, safepoint_handler)
+        #[cfg(target_arch = "aarch64")]
+        {
+            Self::compile_with_backend_and_config::<Cfg, Arm64Backend>(
+                module,
+                externs,
+                safepoint_handler,
+            )
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            Self::compile_with_backend_and_config::<Cfg, X64Backend>(
+                module,
+                externs,
+                safepoint_handler,
+            )
+        }
     }
 
     pub fn compile_with_backend_and_config<Cfg: CodegenConfig, B: LoweringBackend>(
@@ -1034,10 +1171,7 @@ impl JitModule {
         //   - The CALLEE has guards/deopts that might propagate non-standard outcomes
         //   - The CALLER uses Invoke terminators (exception dispatch needs X1 check)
         // Plain call/return is the fast path with no outcome checking.
-        let uses_continuations = module
-            .functions
-            .iter()
-            .any(|f| f.prompt_count > 0);
+        let uses_continuations = module.functions.iter().any(|f| f.prompt_count > 0);
 
         // Per-function: does this function have deopts that callers need to handle?
         let func_has_deopts: Vec<bool> = module
@@ -1047,27 +1181,24 @@ impl JitModule {
             .collect();
 
         // Any caller uses Invoke terminators?
-        let any_invoke = module
-            .functions
-            .iter()
-            .any(|f| f.blocks.iter().any(|b| matches!(
-                b.terminator,
-                Terminator::Invoke { .. } | Terminator::InvokeIndirect { .. }
-            )));
+        let any_invoke = module.functions.iter().any(|f| {
+            f.blocks.iter().any(|b| {
+                matches!(
+                    b.terminator,
+                    Terminator::Invoke { .. } | Terminator::InvokeIndirect { .. }
+                )
+            })
+        });
 
         let direct_call_is_internal: Vec<bool> = module
             .func_table
             .iter()
             .enumerate()
-            .map(|(idx, def)| {
-                match def {
-                    FuncDef::Internal(func_idx) => {
-                        uses_continuations
-                            || func_has_deopts[*func_idx]
-                            || any_invoke
-                    }
-                    _ => false,
+            .map(|(idx, def)| match def {
+                FuncDef::Internal(func_idx) => {
+                    uses_continuations || func_has_deopts[*func_idx] || any_invoke
                 }
+                _ => false,
             })
             .collect();
 
@@ -1167,7 +1298,10 @@ impl JitModule {
 
     /// All safepoint records across all functions, flattened.
     pub fn all_safepoints(&self) -> Vec<SafepointRecord> {
-        self.function_safepoints.iter().flat_map(|v| v.iter().cloned()).collect()
+        self.function_safepoints
+            .iter()
+            .flat_map(|v| v.iter().cloned())
+            .collect()
     }
 
     /// Dump all JIT code to a temp file and print disassembly commands.
@@ -1175,7 +1309,12 @@ impl JitModule {
     pub fn dump_code(&self) {
         let base = self.memory.base_ptr();
         let len = self.memory.len();
-        eprintln!("JIT module: {:?} ({} bytes, {} functions)", base, len, self.function_entry_offsets.len());
+        eprintln!(
+            "JIT module: {:?} ({} bytes, {} functions)",
+            base,
+            len,
+            self.function_entry_offsets.len()
+        );
         for (i, &off) in self.function_entry_offsets.iter().enumerate() {
             eprintln!("  func[{}] at offset {:#x}", i, off);
         }
@@ -1183,14 +1322,21 @@ impl JitModule {
         let path = "/tmp/jit_dump.bin";
         std::fs::write(path, bytes).unwrap();
         eprintln!("Disassemble with:");
-        eprintln!("  llvm-objdump -d -m aarch64 -b binary {} | head -500", path);
+        eprintln!(
+            "  llvm-objdump -d -m aarch64 -b binary {} | head -500",
+            path
+        );
     }
 
     pub fn frame_reify_records_for_function(&self, func_idx: usize) -> &[FrameReifyRecord] {
         &self.function_frame_reify_records[func_idx]
     }
 
-    pub fn native_resume_ptr(&self, func_idx: usize, record: &FrameReifyRecord) -> Option<*const u8> {
+    pub fn native_resume_ptr(
+        &self,
+        func_idx: usize,
+        record: &FrameReifyRecord,
+    ) -> Option<*const u8> {
         record.native_resume_offset.map(|offset| unsafe {
             self.memory
                 .base_ptr()
@@ -1213,7 +1359,11 @@ impl JitModule {
         } else {
             resume_args.as_ptr()
         };
-        let args = [frame_values_ptr as u64, args_ptr as u64, resume_args.len() as u64];
+        let args = [
+            frame_values_ptr as u64,
+            args_ptr as u64,
+            resume_args.len() as u64,
+        ];
         unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) }
     }
 
@@ -1226,17 +1376,15 @@ impl JitModule {
         resume_args: &[u64],
     ) -> Option<JitOutcome> {
         let func_idx = resume.func_idx;
-        if let Some(record) = self.function_frame_reify_records[func_idx].iter().find(|record| {
-            record.kind == FrameReifyKind::CaptureSlice
-                && record.native_resume_offset.is_some()
-                && record.resume == *resume
-        }) {
-            return Some(self.call_resume_outcome(
-                func_idx,
-                record,
-                values.as_ptr(),
-                resume_args,
-            ));
+        if let Some(record) = self.function_frame_reify_records[func_idx]
+            .iter()
+            .find(|record| {
+                record.kind == FrameReifyKind::CaptureSlice
+                    && record.native_resume_offset.is_some()
+                    && record.resume == *resume
+            })
+        {
+            return Some(self.call_resume_outcome(func_idx, record, values.as_ptr(), resume_args));
         }
 
         let suspend = self.function_suspend_records[func_idx]
@@ -1253,7 +1401,11 @@ impl JitModule {
         } else {
             resume_args.as_ptr()
         };
-        let args = [values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
+        let args = [
+            values.as_ptr() as u64,
+            args_ptr as u64,
+            resume_args.len() as u64,
+        ];
         Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) })
     }
 
@@ -1284,7 +1436,11 @@ impl JitModule {
         } else {
             resume_args.as_ptr()
         };
-        let args = [values.as_ptr() as u64, args_ptr as u64, resume_args.len() as u64];
+        let args = [
+            values.as_ptr() as u64,
+            args_ptr as u64,
+            resume_args.len() as u64,
+        ];
         Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) })
     }
 
@@ -1360,11 +1516,7 @@ unsafe fn call_jit_regs_with_reg_limit(
 }
 
 #[cfg(target_arch = "aarch64")]
-pub unsafe fn call_jit_with_reg_limit(
-    ptr: *const u8,
-    args: &[u64],
-    reg_limit: usize,
-) -> u64 {
+pub unsafe fn call_jit_with_reg_limit(ptr: *const u8, args: &[u64], reg_limit: usize) -> u64 {
     match unsafe { call_jit_outcome_with_reg_limit(ptr, args, reg_limit, 0) } {
         JitOutcome::Value(v) => v,
         JitOutcome::Void => 0,
@@ -1440,8 +1592,173 @@ pub unsafe fn call_jit_outcome_with_reg_limit(
 }
 
 #[cfg(target_arch = "aarch64")]
-pub unsafe fn call_jit_outcome(ptr: *const u8, args: &[u64], max_deopt_live_values: usize) -> JitOutcome {
+pub unsafe fn call_jit_outcome(
+    ptr: *const u8,
+    args: &[u64],
+    max_deopt_live_values: usize,
+) -> JitOutcome {
     unsafe { call_jit_outcome_with_reg_limit(ptr, args, 16, max_deopt_live_values) }
+}
+
+#[cfg(target_arch = "x86_64")]
+unsafe fn call_jit_regs_with_reg_limit(
+    ptr: *const u8,
+    args: &[u64],
+    reg_limit: usize,
+    ctx: *mut JitControlContext,
+) -> (u64, u64, u64, u64) {
+    let reg_count = reg_limit.min(6);
+    let padded_len = args.len().max(6);
+    let mut padded = vec![0u64; padded_len];
+    padded[..args.len()].copy_from_slice(args);
+    let overflow = args.len().saturating_sub(reg_count);
+    let overflow_bytes = align_up(overflow * 8, 16);
+    let overflow_src = unsafe { padded.as_ptr().add(reg_count) };
+    let result: u64;
+    let kind: u64;
+    let payload0: u64;
+    let payload1: u64;
+    unsafe {
+        core::arch::asm!(
+            "push r12",
+            "push r13",
+            "push r14",
+            "push r15",
+            "mov r15, {ctx}",
+            "mov r12, {arg_ptr}",
+            "mov r13, {target}",
+            "mov r14, {overflow_bytes}",
+            "sub rsp, r14",
+            "mov r10, {overflow_count}",
+            "mov r11, {overflow_src}",
+            "test r10, r10",
+            "jz 4f",
+            "mov rdi, rsp",
+            "3:",
+            "mov rax, [r11]",
+            "mov [rdi], rax",
+            "add r11, 8",
+            "add rdi, 8",
+            "dec r10",
+            "jnz 3b",
+            "4:",
+            "mov rdi, [r12 + 0]",
+            "mov rsi, [r12 + 8]",
+            "mov rdx, [r12 + 16]",
+            "mov rcx, [r12 + 24]",
+            "mov r8,  [r12 + 32]",
+            "mov r9,  [r12 + 40]",
+            "call r13",
+            "add rsp, r14",
+            "pop r15",
+            "pop r14",
+            "pop r13",
+            "pop r12",
+            ctx = in(reg) ctx,
+            overflow_bytes = in(reg) overflow_bytes,
+            overflow_count = in(reg) overflow,
+            overflow_src = in(reg) overflow_src,
+            arg_ptr = in(reg) padded.as_ptr(),
+            target = in(reg) ptr,
+            lateout("rax") result,
+            lateout("rcx") kind,
+            lateout("rdx") payload0,
+            lateout("rsi") payload1,
+            lateout("r10") _,
+            lateout("r11") _,
+            lateout("r12") _,
+            lateout("r13") _,
+            lateout("r14") _,
+            lateout("r15") _,
+            clobber_abi("C"),
+        );
+    }
+    (result, kind, payload0, payload1)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn call_jit_with_reg_limit(ptr: *const u8, args: &[u64], reg_limit: usize) -> u64 {
+    match unsafe { call_jit_outcome_with_reg_limit(ptr, args, reg_limit, 0) } {
+        JitOutcome::Value(v) => v,
+        JitOutcome::Void => 0,
+        other => panic!("unexpected non-return outcome from JIT entry: {other:?}"),
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn call_jit(ptr: *const u8, args: &[u64]) -> u64 {
+    unsafe { call_jit_with_reg_limit(ptr, args, 6) }
+}
+
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn call_jit_outcome_with_reg_limit(
+    ptr: *const u8,
+    args: &[u64],
+    reg_limit: usize,
+    max_deopt_live_values: usize,
+) -> JitOutcome {
+    let mut live_values = vec![0u64; max_deopt_live_values];
+    let mut ctx = JitControlContext {
+        live_values_ptr: live_values.as_mut_ptr(),
+        live_values_len: 0,
+    };
+    let (result, kind, payload0, payload1) =
+        unsafe { call_jit_regs_with_reg_limit(ptr, args, reg_limit, &mut ctx) };
+    match kind {
+        x if x == JitOutcomeKind::ReturnValue as u64 => JitOutcome::Value(result),
+        x if x == JitOutcomeKind::ReturnVoid as u64 => JitOutcome::Void,
+        x if x == JitOutcomeKind::Exception as u64 => JitOutcome::Exception(payload0),
+        x if x == JitOutcomeKind::Deopt as u64 => {
+            live_values.truncate(ctx.live_values_len);
+            JitOutcome::Deopt {
+                deopt_id: DeoptId::from_index(payload0 as usize),
+                resume_point: payload1,
+                live_values,
+            }
+        }
+        x if x == JitOutcomeKind::CaptureSlice as u64 => {
+            live_values.truncate(ctx.live_values_len);
+            JitOutcome::CaptureSlice {
+                func_idx: payload1 as usize,
+                record_idx: payload0 as usize,
+                values: live_values,
+            }
+        }
+        x if x == JitOutcomeKind::CloneSlice as u64 => {
+            live_values.truncate(ctx.live_values_len);
+            JitOutcome::CloneSlice {
+                func_idx: payload1 as usize,
+                record_idx: payload0 as usize,
+                values: live_values,
+            }
+        }
+        x if x == JitOutcomeKind::ResumeSlice as u64 => {
+            live_values.truncate(ctx.live_values_len);
+            JitOutcome::ResumeSlice {
+                func_idx: payload1 as usize,
+                record_idx: payload0 as usize,
+                values: live_values,
+            }
+        }
+        x if x == JitOutcomeKind::AbortToPrompt as u64 => {
+            live_values.truncate(ctx.live_values_len);
+            JitOutcome::AbortToPrompt {
+                func_idx: payload1 as usize,
+                record_idx: payload0 as usize,
+                values: live_values,
+            }
+        }
+        _ => panic!("unknown JIT outcome kind: {kind}"),
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn call_jit_outcome(
+    ptr: *const u8,
+    args: &[u64],
+    max_deopt_live_values: usize,
+) -> JitOutcome {
+    unsafe { call_jit_outcome_with_reg_limit(ptr, args, 6, max_deopt_live_values) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1559,7 +1876,11 @@ fn terminator_successors(terminator: &Terminator) -> Vec<BlockId> {
             normal, exception, ..
         } => vec![*normal, *exception],
         Terminator::ResumeSlice { return_block, .. } => vec![*return_block],
-        Terminator::CaptureSlice { handler_block, resume_block, .. } => {
+        Terminator::CaptureSlice {
+            handler_block,
+            resume_block,
+            ..
+        } => {
             vec![*handler_block, *resume_block]
         }
         Terminator::Ret(_)
@@ -1623,11 +1944,7 @@ where
     safepoint_handler: Option<u64>,
     buf: CodeBuffer<B::Arch>,
     regs: R,
-    frame: <Cfg::Frames as FrameStrategy<
-        Cfg::Layout,
-        Cfg::Roots,
-        Cfg::CallingConvention,
-    >>::Layout,
+    frame: <Cfg::Frames as FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>>::Layout,
     block_meta: Vec<BlockMeta>,
     root_transport: RootTransportState,
     safepoints: Vec<SafepointRecord>,
@@ -1673,7 +1990,9 @@ where
     }
 
     fn ensure_shadow_slot_for_value(&mut self, val: Value) -> Option<i32> {
-        if Cfg::RootTransport::kind() != RootTransportKind::ShadowStack || !self.is_gc_ptr_value(val) {
+        if Cfg::RootTransport::kind() != RootTransportKind::ShadowStack
+            || !self.is_gc_ptr_value(val)
+        {
             return None;
         }
         let slot = &mut self.root_transport.shadow_slots_by_value[val.index()];
@@ -1685,21 +2004,35 @@ where
 
     fn track_value_in_gp(&mut self, val: Value, reg: u8) {
         if let Some(shadow_slot) = self.ensure_shadow_slot_for_value(val) {
-            B::emit_store_gp_to_frame(&mut self.buf, machine_gp(reg), self.frame.slot_access(shadow_slot));
+            B::emit_store_gp_to_frame(
+                &mut self.buf,
+                machine_gp(reg),
+                self.frame.slot_access(shadow_slot),
+            );
         }
     }
 
     fn track_value_in_frame_slot(&mut self, val: Value, slot_offset: i32) {
         if let Some(shadow_slot) = self.ensure_shadow_slot_for_value(val) {
             if shadow_slot != slot_offset {
-                B::emit_load_gp_from_frame(&mut self.buf, machine_gp(27), self.frame.slot_access(slot_offset));
-                B::emit_store_gp_to_frame(&mut self.buf, machine_gp(27), self.frame.slot_access(shadow_slot));
+                B::emit_load_gp_from_frame(
+                    &mut self.buf,
+                    machine_gp(27),
+                    self.frame.slot_access(slot_offset),
+                );
+                B::emit_store_gp_to_frame(
+                    &mut self.buf,
+                    machine_gp(27),
+                    self.frame.slot_access(shadow_slot),
+                );
             }
         }
     }
 
     fn ensure_shadow_value_materialized(&mut self, val: Value) {
-        if Cfg::RootTransport::kind() != RootTransportKind::ShadowStack || !self.is_gc_ptr_value(val) {
+        if Cfg::RootTransport::kind() != RootTransportKind::ShadowStack
+            || !self.is_gc_ptr_value(val)
+        {
             return;
         }
         if self.root_transport.shadow_slots_by_value[val.index()].is_some() {
@@ -1799,7 +2132,11 @@ where
                 ValueLoc::FpReg(_) => unreachable!("non-float value in FP register"),
             }
         }
-        B::emit_mov_imm(&mut self.buf, machine_gp(28), self.func.value_types.len() as u64);
+        B::emit_mov_imm(
+            &mut self.buf,
+            machine_gp(28),
+            self.func.value_types.len() as u64,
+        );
         B::emit_store_gp(
             &mut self.buf,
             machine_gp(28),
@@ -1820,7 +2157,9 @@ where
         for (idx, &value) in values.iter().enumerate() {
             let ty = self.regs.value_type(value);
             if is_float_type(ty) {
-                let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, value);
+                let src = self
+                    .regs
+                    .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, value);
                 B::emit_fp_to_gp_move(&mut self.buf, machine_gp(27), machine_fp(src));
                 B::emit_store_gp(
                     &mut self.buf,
@@ -1830,7 +2169,9 @@ where
                     MachineWordSize::W64,
                 );
             } else {
-                let src = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, value);
+                let src = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, value);
                 B::emit_store_gp(
                     &mut self.buf,
                     machine_gp(src),
@@ -1851,7 +2192,8 @@ where
     }
 
     fn emit_deopt_return(&mut self, deopt_id: DeoptId, resume_point: u64, live: &[Value]) {
-        self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+        self.regs
+            .spill_all_live::<B>(&mut self.buf, &mut self.frame);
         self.emit_write_deopt_live_values(live);
         self.emit_set_outcome_kind(JitOutcomeKind::Deopt);
         B::emit_mov_imm(&mut self.buf, machine_gp(2), deopt_id.index() as u64);
@@ -1880,7 +2222,9 @@ where
             .iter()
             .enumerate()
             .filter_map(|(idx, ty)| {
-                (ty.is_gc() && self.regs.value_loc(Value::from_index(value_indices[idx])) != ValueLoc::Unassigned)
+                (ty.is_gc()
+                    && self.regs.value_loc(Value::from_index(value_indices[idx]))
+                        != ValueLoc::Unassigned)
                     .then_some(idx)
             })
             .collect();
@@ -1907,7 +2251,8 @@ where
         record_idx: usize,
         values: &[Value],
     ) {
-        self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+        self.regs
+            .spill_all_live::<B>(&mut self.buf, &mut self.frame);
         self.emit_write_outcome_values(values);
         self.emit_set_outcome_kind(kind);
         B::emit_mov_imm(&mut self.buf, machine_gp(2), record_idx as u64);
@@ -1948,9 +2293,9 @@ where
     }
 
     fn emit_push_suspended_frame(&mut self, record_ptr: *const CallSuspendRecord) {
-        B::emit_mov_imm(&mut self.buf, machine_gp(0), record_ptr as usize as u64);
-        B::emit_gp_move(&mut self.buf, machine_gp(1), machine_gp(29));
-        B::emit_stack_pointer_to_gp(&mut self.buf, machine_gp(2));
+        B::emit_mov_imm(&mut self.buf, B::call_arg_gp(0), record_ptr as usize as u64);
+        B::emit_gp_move(&mut self.buf, B::call_arg_gp(1), machine_gp(29));
+        B::emit_stack_pointer_to_gp(&mut self.buf, B::call_arg_gp(2));
         B::emit_mov_imm(
             &mut self.buf,
             machine_gp(28),
@@ -2028,7 +2373,7 @@ where
         }
 
         // Run allocator-specific pre-analysis (e.g., linear scan interval computation).
-        regs.prepare(func);
+        regs.prepare::<B>(func);
 
         // Allocate canonical spill slots for ALL blocks with params.
         // This simplifies block transitions: every block param has a
@@ -2068,11 +2413,15 @@ where
                     Inst::CloneSlice(_) => Some(func.value_types.len()),
                     _ => None,
                 })
-                .chain(func.blocks.iter().filter_map(|block| match &block.terminator {
-                    Terminator::AbortToPrompt { args, .. } => Some(args.len()),
-                    Terminator::ResumeSlice { args, .. } => Some(args.len() + 1),
-                    _ => None,
-                }))
+                .chain(
+                    func.blocks
+                        .iter()
+                        .filter_map(|block| match &block.terminator {
+                            Terminator::AbortToPrompt { args, .. } => Some(args.len()),
+                            Terminator::ResumeSlice { args, .. } => Some(args.len() + 1),
+                            _ => None,
+                        }),
+                )
                 .max()
                 .unwrap_or(0),
             prologue_stp_offset: 0,
@@ -2239,7 +2588,8 @@ where
                 self.read_entry_arg_into_value(val, ty, slot);
             }
         } else {
-            self.regs.enter_block::<B>(block_idx, self.func, &mut self.buf, &mut self.frame);
+            self.regs
+                .enter_block::<B>(block_idx, self.func, &mut self.buf, &mut self.frame);
         }
 
         for (inst_idx, inst_node) in block.insts.iter().enumerate() {
@@ -2294,7 +2644,9 @@ where
 
             Inst::Neg(a) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
@@ -2309,7 +2661,9 @@ where
 
             Inst::Not(a) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
@@ -2329,7 +2683,9 @@ where
 
             Inst::FNeg(a) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let ra = self
+                    .regs
+                    .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_fp_neg(&mut self.buf, machine_fp(rd_idx), machine_fp(ra));
@@ -2338,8 +2694,12 @@ where
 
             Inst::Icmp(op, a, b) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
-                let rb = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *b);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let rb = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *b);
                 let ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
                 self.regs.dec_use(*b);
@@ -2358,8 +2718,12 @@ where
 
             Inst::Fcmp(op, a, b) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
-                let rb = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *b);
+                let ra = self
+                    .regs
+                    .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let rb = self
+                    .regs
+                    .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *b);
                 self.regs.dec_use(*a);
                 self.regs.dec_use(*b);
                 let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
@@ -2375,12 +2739,18 @@ where
 
             Inst::Select(cond, t, f) => {
                 let val = result_val.unwrap();
-                let rc = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *cond);
+                let rc = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *cond);
                 let ty = self.regs.value_type(*t);
 
                 if is_float_type(ty) {
-                    let rt = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *t);
-                    let rf = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *f);
+                    let rt = self
+                        .regs
+                        .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *t);
+                    let rf = self
+                        .regs
+                        .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *f);
                     self.regs.dec_use(*cond);
                     self.regs.dec_use(*t);
                     self.regs.dec_use(*f);
@@ -2394,8 +2764,12 @@ where
                     );
                     self.assign_fp_value(val, rd_idx);
                 } else {
-                    let rt = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *t);
-                    let rf = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *f);
+                    let rt = self
+                        .regs
+                        .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *t);
+                    let rf = self
+                        .regs
+                        .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *f);
                     let size = type_to_machine_word_size(ty);
                     self.regs.dec_use(*cond);
                     self.regs.dec_use(*t);
@@ -2415,21 +2789,26 @@ where
 
             Inst::OverflowCheck(op, a, b) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
-                let rb = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *b);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let rb = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *b);
                 let ty = self.regs.value_type(*a);
                 if let Some(reg) = self.try_lower_overflow_check_inline(*op, ty, ra, rb) {
                     self.regs.dec_use(*a);
                     self.regs.dec_use(*b);
                     self.assign_gp_value(val, reg);
                 } else {
-                    self.regs.spill_caller_saved::<B>(&mut self.buf, &mut self.frame);
+                    self.regs
+                        .spill_caller_saved::<B>(&mut self.buf, &mut self.frame);
                     B::emit_gp_move(&mut self.buf, machine_gp(26), machine_gp(ra));
                     B::emit_gp_move(&mut self.buf, machine_gp(27), machine_gp(rb));
-                    B::emit_mov_imm(&mut self.buf, machine_gp(0), overflow_op_code(*op));
-                    B::emit_mov_imm(&mut self.buf, machine_gp(1), overflow_type_code(ty));
-                    B::emit_gp_move(&mut self.buf, machine_gp(2), machine_gp(26));
-                    B::emit_gp_move(&mut self.buf, machine_gp(3), machine_gp(27));
+                    B::emit_mov_imm(&mut self.buf, B::call_arg_gp(0), overflow_op_code(*op));
+                    B::emit_mov_imm(&mut self.buf, B::call_arg_gp(1), overflow_type_code(ty));
+                    B::emit_gp_move(&mut self.buf, B::call_arg_gp(2), machine_gp(26));
+                    B::emit_gp_move(&mut self.buf, B::call_arg_gp(3), machine_gp(27));
                     B::emit_mov_imm(
                         &mut self.buf,
                         machine_gp(28),
@@ -2445,7 +2824,9 @@ where
 
             Inst::Sext(a, target_ty) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let src_ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
@@ -2461,7 +2842,9 @@ where
 
             Inst::Zext(a, target_ty) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let src_ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
@@ -2477,16 +2860,25 @@ where
 
             Inst::Trunc(a, target_ty) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
-                B::emit_trunc(&mut self.buf, machine_gp(rd_idx), machine_gp(ra), *target_ty);
+                B::emit_trunc(
+                    &mut self.buf,
+                    machine_gp(rd_idx),
+                    machine_gp(ra),
+                    *target_ty,
+                );
                 self.assign_gp_value(val, rd_idx);
             }
 
             Inst::IntToFloat(a) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 let src_ty = self.regs.value_type(*a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
@@ -2496,7 +2888,9 @@ where
 
             Inst::FloatToInt(a) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let ra = self
+                    .regs
+                    .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_float_to_int(&mut self.buf, machine_gp(rd_idx), machine_fp(ra));
@@ -2510,14 +2904,18 @@ where
 
                 if is_float_type(src_ty) && !is_float_type(dst_ty) {
                     // FP -> GP: FMOV Xd, Dn
-                    let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                    let ra = self
+                        .regs
+                        .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                     self.regs.dec_use(*a);
                     let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                     B::emit_fp_to_gp_move(&mut self.buf, machine_gp(rd_idx), machine_fp(ra));
                     self.assign_gp_value(val, rd_idx);
                 } else if !is_float_type(src_ty) && is_float_type(dst_ty) {
                     // GP -> FP: FMOV Dd, Xn
-                    let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                    let ra = self
+                        .regs
+                        .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                     self.regs.dec_use(*a);
                     let rd_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
                     B::emit_gp_to_fp_move(&mut self.buf, machine_fp(rd_idx), machine_gp(ra));
@@ -2525,11 +2923,15 @@ where
                 } else {
                     // Same class: just rename
                     if is_float_type(src_ty) {
-                        let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                        let ra =
+                            self.regs
+                                .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                         self.regs.dec_use(*a);
                         self.assign_fp_value(val, ra);
                     } else {
-                        let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                        let ra =
+                            self.regs
+                                .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                         self.regs.dec_use(*a);
                         self.assign_gp_value(val, ra);
                     }
@@ -2548,17 +2950,14 @@ where
 
             Inst::Load(ty, addr, offset) => {
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
                 self.regs.dec_use(*addr);
 
                 if is_float_type(*ty) {
                     let rd_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
-                    B::emit_load_fp(
-                        &mut self.buf,
-                        machine_fp(rd_idx),
-                        machine_gp(ra),
-                        *offset,
-                    );
+                    B::emit_load_fp(&mut self.buf, machine_fp(rd_idx), machine_gp(ra), *offset);
                     self.assign_fp_value(val, rd_idx);
                 } else {
                     let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
@@ -2580,32 +2979,40 @@ where
                 // Load the value FIRST, then the address. This ensures the
                 // address register isn't evicted when loading the value.
                 if is_float_type(val_ty) {
-                    let rv = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *val_to_store);
-                    let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
-                    B::emit_store_fp(
+                    let rv = self.regs.ensure_in_fp_reg::<B>(
                         &mut self.buf,
-                        machine_fp(rv),
-                        machine_gp(ra),
-                        *offset,
+                        &mut self.frame,
+                        *val_to_store,
                     );
+                    let ra = self
+                        .regs
+                        .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
+                    B::emit_store_fp(&mut self.buf, machine_fp(rv), machine_gp(ra), *offset);
                 } else {
-                    let rv = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *val_to_store);
-                    let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
-                    let size = type_to_machine_word_size(val_ty);
-                    B::emit_store_gp(
+                    let rv = self.regs.ensure_in_gp_reg::<B>(
                         &mut self.buf,
-                        machine_gp(rv),
-                        machine_gp(ra),
-                        *offset,
-                        size,
+                        &mut self.frame,
+                        *val_to_store,
                     );
+                    let ra = self
+                        .regs
+                        .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *addr);
+                    let size = type_to_machine_word_size(val_ty);
+                    B::emit_store_gp(&mut self.buf, machine_gp(rv), machine_gp(ra), *offset, size);
                 }
                 self.regs.dec_use(*val_to_store);
                 self.regs.dec_use(*addr);
             }
 
             Inst::Call(func_ref, args) => {
-                self.lower_call(*func_ref, args, result_val, block_idx, inst_idx, active_prompts);
+                self.lower_call(
+                    *func_ref,
+                    args,
+                    result_val,
+                    block_idx,
+                    inst_idx,
+                    active_prompts,
+                );
             }
 
             Inst::CallIndirect(callee, args, _ret_ty) => {
@@ -2619,7 +3026,9 @@ where
             Inst::Payload(a) => {
                 // Layout::extract_payload(bits)
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_extract_payload(
@@ -2635,7 +3044,9 @@ where
             Inst::IsTag(a, tag) => {
                 // Layout::has_tag(bits, tag)
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 let expected = if Cfg::Layout::HAS_UNBOXED_FLOAT {
@@ -2658,7 +3069,9 @@ where
             Inst::MakeTagged(tag, payload) => {
                 // Layout::encode_tagged(tag, payload)
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *payload);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *payload);
                 self.regs.dec_use(*payload);
                 let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_make_tagged(
@@ -2676,7 +3089,9 @@ where
             Inst::TagOf(a) => {
                 // Extract tag from bits
                 let val = result_val.unwrap();
-                let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
+                let ra = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *a);
                 self.regs.dec_use(*a);
                 let rd_idx = self.regs.alloc_gp::<B>(&mut self.buf, &mut self.frame);
                 B::emit_tag_of(
@@ -2738,7 +3153,8 @@ where
                         inst_idx,
                     },
                 );
-                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                self.regs
+                    .spill_all_live::<B>(&mut self.buf, &mut self.frame);
                 self.emit_write_full_frame_values();
                 self.emit_set_outcome_kind(JitOutcomeKind::CaptureSlice);
                 B::emit_mov_imm(&mut self.buf, machine_gp(2), record_idx as u64);
@@ -2797,7 +3213,8 @@ where
                         inst_idx,
                     },
                 );
-                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                self.regs
+                    .spill_all_live::<B>(&mut self.buf, &mut self.frame);
                 self.emit_write_full_frame_values();
                 self.emit_set_outcome_kind(JitOutcomeKind::CloneSlice);
                 B::emit_mov_imm(&mut self.buf, machine_gp(2), record_idx as u64);
@@ -2820,13 +3237,16 @@ where
                 });
                 self.regs.dec_use(*slice);
             }
-
         }
     }
 
     fn lower_gp_binop(&mut self, val: Value, a: Value, b: Value, op: BinOp) {
-        let ra = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, a);
-        let rb = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, b);
+        let ra = self
+            .regs
+            .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, a);
+        let rb = self
+            .regs
+            .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, b);
         let ty = self.regs.value_type(a);
         self.regs.dec_use(a);
         self.regs.dec_use(b);
@@ -2860,8 +3280,12 @@ where
     }
 
     fn lower_fp_binop(&mut self, val: Value, a: Value, b: Value, op: FpBinOp) {
-        let ra = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, a);
-        let rb = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, b);
+        let ra = self
+            .regs
+            .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, a);
+        let rb = self
+            .regs
+            .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, b);
         self.regs.dec_use(a);
         self.regs.dec_use(b);
 
@@ -3050,33 +3474,54 @@ where
 
     fn write_value_to_frame_slot(&mut self, arg: Value, ty: Type, slot: FrameSlotAccess) {
         if is_float_type(ty) {
-            let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
+            let src = self
+                .regs
+                .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
             B::emit_store_fp_to_frame(&mut self.buf, machine_fp(src), slot);
         } else {
-            let src = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, arg);
+            let src = self
+                .regs
+                .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, arg);
             B::emit_store_gp_to_frame(&mut self.buf, machine_gp(src), slot);
         }
     }
 
-    fn write_value_to_assignment_target(
-        &mut self,
-        arg: Value,
-        ty: Type,
-        target: AssignmentTarget,
-    ) {
-        match target.as_machine_location() {
+    fn write_value_to_assignment_target(&mut self, arg: Value, ty: Type, target: AssignmentTarget) {
+        let machine_location = match target {
+            AssignmentTarget::CallArg(CallArgLocation::Register(reg_idx)) => {
+                MachineLocation::Reg(B::call_arg_gp(reg_idx))
+            }
+            other => other.as_machine_location(),
+        };
+        match machine_location {
             MachineLocation::Reg(dst) => {
-                if is_float_type(ty) {
-                    let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
-                    B::emit_fp_to_gp_move(&mut self.buf, dst, machine_fp(src));
-                } else {
-                    let src = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, arg);
-                    if src != dst.index {
-                        B::emit_gp_move(
+                if matches!(
+                    target,
+                    AssignmentTarget::CallArg(CallArgLocation::Register(_))
+                ) {
+                    if let Some(slot) = self.regs.value_spill_slot(arg) {
+                        B::emit_load_gp_from_frame(
                             &mut self.buf,
                             dst,
-                            machine_gp(src),
+                            self.frame.slot_access(slot),
                         );
+                        self.regs.mark_gp_occupied(dst.index, arg);
+                        return;
+                    }
+                }
+                if is_float_type(ty) {
+                    let src = self
+                        .regs
+                        .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
+                    B::emit_fp_to_gp_move(&mut self.buf, dst, machine_fp(src));
+                } else {
+                    let src = self
+                        .regs
+                        .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, arg);
+                    if src != dst.index {
+                        B::emit_gp_move(&mut self.buf, dst, machine_gp(src));
+                        self.regs.clear_gp_occupied(src, arg);
+                        self.regs.set_value_loc(arg, ValueLoc::GpReg(dst.index));
                         // Mark the destination register as occupied so that
                         // subsequent alloc_gp calls don't clobber it.  This is
                         // critical when the same SSA value appears in multiple
@@ -3087,31 +3532,19 @@ where
             }
             MachineLocation::StackArg(stack_offset) => {
                 if is_float_type(ty) {
-                    let src = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
-                    B::emit_fp_to_gp_move(
-                        &mut self.buf,
-                        machine_gp(27),
-                        machine_fp(src),
-                    );
-                    B::emit_store_gp_to_stack_arg(
-                        &mut self.buf,
-                        machine_gp(27),
-                        stack_offset,
-                    );
+                    let src = self
+                        .regs
+                        .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, arg);
+                    B::emit_fp_to_gp_move(&mut self.buf, machine_gp(27), machine_fp(src));
+                    B::emit_store_gp_to_stack_arg(&mut self.buf, machine_gp(27), stack_offset);
                 } else {
-                    let src = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, arg);
+                    let src = self
+                        .regs
+                        .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, arg);
                     if src != 27 {
-                        B::emit_gp_move(
-                            &mut self.buf,
-                            machine_gp(27),
-                            machine_gp(src),
-                        );
+                        B::emit_gp_move(&mut self.buf, machine_gp(27), machine_gp(src));
                     }
-                    B::emit_store_gp_to_stack_arg(
-                        &mut self.buf,
-                        machine_gp(27),
-                        stack_offset,
-                    );
+                    B::emit_store_gp_to_stack_arg(&mut self.buf, machine_gp(27), stack_offset);
                 }
             }
             MachineLocation::FrameSlot(slot) => {
@@ -3133,17 +3566,13 @@ where
     fn read_entry_arg_into_value(&mut self, val: Value, ty: Type, slot: usize) {
         match Cfg::CallingConvention::arg_location(slot) {
             CallArgLocation::Register(reg_idx) => {
+                let arg_reg = B::call_arg_gp(reg_idx);
                 if is_float_type(ty) {
-                    let gp = machine_gp(reg_idx as u8);
                     let fp_idx = self.regs.alloc_fp::<B>(&mut self.buf, &mut self.frame);
-                    B::emit_gp_to_fp_move(
-                        &mut self.buf,
-                        machine_fp(fp_idx),
-                        gp,
-                    );
+                    B::emit_gp_to_fp_move(&mut self.buf, machine_fp(fp_idx), arg_reg);
                     self.assign_fp_value(val, fp_idx);
                 } else {
-                    self.assign_gp_value(val, reg_idx as u8);
+                    self.assign_gp_value(val, arg_reg.index);
                 }
             }
             CallArgLocation::Stack(incoming_offset) => {
@@ -3151,11 +3580,7 @@ where
                 self.assign_spill_value(val, slot_offset);
                 if is_float_type(ty) {
                     B::emit_load_incoming_stack_arg(&mut self.buf, machine_gp(27), incoming_offset);
-                    B::emit_gp_to_fp_move(
-                        &mut self.buf,
-                        machine_fp(31),
-                        machine_gp(27),
-                    );
+                    B::emit_gp_to_fp_move(&mut self.buf, machine_fp(31), machine_gp(27));
                     B::emit_store_fp_to_frame(
                         &mut self.buf,
                         machine_fp(31),
@@ -3174,8 +3599,12 @@ where
     }
 
     fn prepare_call_args(&mut self, args: &[Value]) -> i32 {
-        // Spill caller-saved regs
-        self.regs.spill_caller_saved::<B>(&mut self.buf, &mut self.frame);
+        // Materialize all live values before assigning ABI registers.  The
+        // assignment pass is sequential, so an early argument can overwrite
+        // the register holding a later argument unless that later value has a
+        // frame home to reload from.
+        self.regs
+            .spill_all_live::<B>(&mut self.buf, &mut self.frame);
 
         let outgoing_size = Cfg::CallingConvention::outgoing_stack_size(args.len());
         self.frame.reserve_outgoing_arg_bytes(outgoing_size);
@@ -3207,8 +3636,7 @@ where
 
         // Values loaded into caller-saved regs during arg setup must have
         // their locs restored to their spill slots (BLR clobbered the regs).
-        self.regs.clobber_caller_saved();
-
+        self.regs.clobber_caller_saved::<B>();
     }
 
     fn assign_call_result(&mut self, result_val: Option<Value>) {
@@ -3233,7 +3661,8 @@ where
     ) {
         let control_aware = self.direct_call_is_control_aware(func_ref);
         let suspend_record = if control_aware {
-            self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+            self.regs
+                .spill_all_live::<B>(&mut self.buf, &mut self.frame);
             Some(self.push_call_suspend_record(
                 active_prompts,
                 SuspendCallerResume::FromCall {
@@ -3327,13 +3756,11 @@ where
 
     fn lower_call_indirect(&mut self, callee: Value, args: &[Value], result_val: Option<Value>) {
         // Get callee pointer first
-        let callee_reg = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, callee);
+        let callee_reg = self
+            .regs
+            .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, callee);
         // Move to the backend's call scratch register before spilling.
-        B::emit_gp_move(
-            &mut self.buf,
-            machine_gp(28),
-            machine_gp(callee_reg),
-        );
+        B::emit_gp_move(&mut self.buf, machine_gp(28), machine_gp(callee_reg));
         self.regs.dec_use(callee);
 
         let outgoing_size = self.prepare_call_args(args);
@@ -3362,7 +3789,11 @@ where
         if slots.is_empty() {
             return;
         }
-        B::emit_store_gp_to_frame(&mut self.buf, machine_gp(0), self.frame.slot_access(slots[0]));
+        B::emit_store_gp_to_frame(
+            &mut self.buf,
+            machine_gp(0),
+            self.frame.slot_access(slots[0]),
+        );
     }
 
     fn lower_invoke_common(
@@ -3382,7 +3813,11 @@ where
             let normal_label = self.buf.create_label();
             let normal_post_pop_label = self.buf.create_label();
             let exception_post_pop_label = self.buf.create_label();
-            B::emit_cmp_gp_imm(&mut self.buf, machine_gp(1), JitOutcomeKind::Exception as u64);
+            B::emit_cmp_gp_imm(
+                &mut self.buf,
+                machine_gp(1),
+                JitOutcomeKind::Exception as u64,
+            );
             B::emit_branch_eq_to_label(&mut self.buf, exception_label);
             let expected_kind = if has_ret_param {
                 JitOutcomeKind::ReturnValue as u64
@@ -3461,10 +3896,14 @@ where
                 let ty = self.regs.value_type(*v);
                 if is_float_type(ty) {
                     // Return float bits in X0 (call_jit reads X0 as u64)
-                    let r = self.regs.ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *v);
+                    let r = self
+                        .regs
+                        .ensure_in_fp_reg::<B>(&mut self.buf, &mut self.frame, *v);
                     B::emit_return_fp_bits(&mut self.buf, machine_fp(r));
                 } else {
-                    let r = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *v);
+                    let r = self
+                        .regs
+                        .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *v);
                     B::emit_return_gp(&mut self.buf, machine_gp(r));
                 }
                 self.regs.dec_use(*v);
@@ -3478,12 +3917,13 @@ where
             }
 
             Terminator::Jump(target, args) => {
-                // Emit block args first while values are still in registers,
-                // avoiding the double memory hop (spill → reload → store to
-                // canonical). Safe because block params no longer alias their
-                // canonical slots as spill slots.
+                // Spill live-through values before assigning successor params.
+                // Linear-scan block args are register-to-register moves, so
+                // doing them first can overwrite unrelated live values before
+                // they are materialized to their frame homes.
+                self.regs
+                    .spill_all_live::<B>(&mut self.buf, &mut self.frame);
                 self.emit_block_args(*target, args);
-                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
                 let label = self.block_meta[target.index()].label;
                 B::emit_branch_to_label(&mut self.buf, label);
             }
@@ -3495,13 +3935,16 @@ where
                 else_block,
                 else_args,
             } => {
-                let rc = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *cond);
+                let rc = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *cond);
                 // Don't dec_use cond yet - keep its register occupied so
                 // spill_all_live won't allocate it for something else.
                 // spill_all_live will spill it (harmless, just a redundant store).
 
                 // Spill all live values before the conditional branch
-                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                self.regs
+                    .spill_all_live::<B>(&mut self.buf, &mut self.frame);
 
                 // Now safe to use rc - spill_all_live only emits STR (reads regs)
                 self.regs.dec_use(*cond);
@@ -3539,8 +3982,11 @@ where
                 default_args,
             } => {
                 // Spill everything first
-                let rv = self.regs.ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *val);
-                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                let rv = self
+                    .regs
+                    .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *val);
+                self.regs
+                    .spill_all_live::<B>(&mut self.buf, &mut self.frame);
 
                 // For each case: CMP + B.EQ
                 for (case_val, target, args) in cases {
@@ -3572,7 +4018,8 @@ where
             } => {
                 let control_aware = self.direct_call_is_control_aware(*func);
                 let suspended_invoke_idx = if control_aware {
-                    self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                    self.regs
+                        .spill_all_live::<B>(&mut self.buf, &mut self.frame);
                     let record_ptr = self.push_call_suspend_record(
                         active_prompts,
                         SuspendCallerResume::FromInvoke {
@@ -3644,7 +4091,8 @@ where
                 exception_args,
             } => {
                 let suspended_invoke_idx = {
-                    self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                    self.regs
+                        .spill_all_live::<B>(&mut self.buf, &mut self.frame);
                     let record_ptr = self.push_call_suspend_record(
                         active_prompts,
                         SuspendCallerResume::FromInvoke {
@@ -3717,11 +4165,7 @@ where
                         inst_idx: block.insts.len(),
                     },
                 );
-                self.emit_frame_reify_outcome(
-                    JitOutcomeKind::AbortToPrompt,
-                    record_idx,
-                    args,
-                );
+                self.emit_frame_reify_outcome(JitOutcomeKind::AbortToPrompt, record_idx, args);
                 for &value in args {
                     self.regs.dec_use(value);
                 }
@@ -3744,11 +4188,7 @@ where
                         inst_idx: block.insts.len(),
                     },
                 );
-                self.emit_frame_reify_outcome(
-                    JitOutcomeKind::ResumeSlice,
-                    record_idx,
-                    &values,
-                );
+                self.emit_frame_reify_outcome(JitOutcomeKind::ResumeSlice, record_idx, &values);
                 self.regs.dec_use(*slice);
                 for &value in args {
                     self.regs.dec_use(value);
@@ -3766,11 +4206,23 @@ where
     /// Store block args to canonical spill slots for multi-pred blocks,
     /// or set up renaming for single-pred blocks.
     fn emit_block_args(&mut self, target: BlockId, args: &[Value]) {
-        self.regs.emit_block_args::<B>(target.index(), args, self.func, &mut self.buf, &mut self.frame);
+        self.regs.emit_block_args::<B>(
+            target.index(),
+            args,
+            self.func,
+            &mut self.buf,
+            &mut self.frame,
+        );
     }
 
     fn store_block_args_for_branch(&mut self, target: BlockId, args: &[Value]) {
-        self.regs.emit_block_args::<B>(target.index(), args, self.func, &mut self.buf, &mut self.frame);
+        self.regs.emit_block_args::<B>(
+            target.index(),
+            args,
+            self.func,
+            &mut self.buf,
+            &mut self.frame,
+        );
     }
 
     fn store_block_args_to_canonical_with_param_offset(
@@ -3886,14 +4338,16 @@ where
         match Cfg::RootTransport::kind() {
             RootTransportKind::FrameScan => {
                 if let Some(handler) = self.safepoint_handler {
-                    self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                    self.regs
+                        .spill_all_live::<B>(&mut self.buf, &mut self.frame);
                     let frame_size = self.frame.root_scan_size() as u64;
                     B::emit_call_safepoint_handler(&mut self.buf, handler, frame_size);
                     self.regs.clear_regs();
                 }
             }
             RootTransportKind::StackMap => {
-                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                self.regs
+                    .spill_all_live::<B>(&mut self.buf, &mut self.frame);
                 let code_offset = self.buf.current_offset();
                 let root_slots = self.collect_live_root_slots(live);
                 let safepoint_index = self.safepoints.len() as u64;
@@ -3909,7 +4363,8 @@ where
                 self.regs.clear_regs();
             }
             RootTransportKind::ShadowStack => {
-                self.regs.spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                self.regs
+                    .spill_all_live::<B>(&mut self.buf, &mut self.frame);
                 let code_offset = self.buf.current_offset();
                 let root_slots = self.collect_live_root_slots(live);
                 let safepoint_index = self.safepoints.len() as u64;
@@ -3926,7 +4381,6 @@ where
             }
         }
     }
-
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────
@@ -3957,9 +4411,7 @@ enum FpBinOp {
 fn type_to_machine_word_size(ty: Type) -> MachineWordSize {
     match ty {
         Type::I8 | Type::I32 => MachineWordSize::W32,
-        Type::I64 | Type::Ptr | Type::GcPtr | Type::F64 | Type::FrameSlice => {
-            MachineWordSize::W64
-        }
+        Type::I64 | Type::Ptr | Type::GcPtr | Type::F64 | Type::FrameSlice => MachineWordSize::W64,
     }
 }
 

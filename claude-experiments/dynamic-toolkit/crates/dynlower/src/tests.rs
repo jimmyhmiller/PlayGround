@@ -1,13 +1,13 @@
+use crate::backend::{Arm64Backend, X64Backend};
 use crate::{
     DefaultJitConfig, FrameReifyKind, JitFunction, JitModule, JitOutcome,
     SafepointHandlerPayloadKind, call_jit, call_jit_with_reg_limit,
 };
-use crate::backend::{Arm64Backend, X64Backend};
 use dynexec::{
-    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, ConservativeWordRoots,
-    CodegenConfig, FrameLayout, FrameScanRoots, FrameStrategy, PreciseStackRoots,
-    ShadowStackFrames, ShadowStackRoots, StackFrameLayout,
-    StackMapFrames, StackMapRoots, StackMapSafepoints, StackSlotFrames,
+    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, CodegenConfig, ConservativeWordRoots,
+    FrameLayout, FrameScanRoots, FrameStrategy, PreciseStackRoots, ShadowStackFrames,
+    ShadowStackRoots, StackFrameLayout, StackMapFrames, StackMapRoots, StackMapSafepoints,
+    StackSlotFrames, X64SysVCAbi,
 };
 use dynir::builder::{FunctionBuilder, ModuleBuilder};
 use dynir::ir::*;
@@ -57,7 +57,9 @@ fn capture_slice_returns_frame_reify_outcome() {
 
     let jit = JitFunction::compile::<NanBox>(&func, &[]);
     match jit.call_outcome(&[55]) {
-        JitOutcome::CaptureSlice { record_idx, values, .. } => {
+        JitOutcome::CaptureSlice {
+            record_idx, values, ..
+        } => {
             assert_eq!(record_idx, 0);
             // arg=55, handler_param=0 (block param), slice=0 (not yet assigned)
             assert_eq!(values, vec![55, 0, 0]);
@@ -71,15 +73,25 @@ fn capture_slice_returns_frame_reify_outcome() {
     assert_eq!(records[0].prompt, Some(prompt));
     assert_eq!(records[0].active_prompts, vec![prompt]);
     assert_eq!(records[0].frame_value_count, func.value_types.len());
-    assert_eq!(records[0].value_indices, vec![arg.index(), _handler_param.index(), slice.index()]);
-    assert_eq!(records[0].value_types, vec![Type::I64, Type::FrameSlice, Type::FrameSlice]);
+    assert_eq!(
+        records[0].value_indices,
+        vec![arg.index(), _handler_param.index(), slice.index()]
+    );
+    assert_eq!(
+        records[0].value_types,
+        vec![Type::I64, Type::FrameSlice, Type::FrameSlice]
+    );
     assert!(records[0].root_payload_indices.is_empty());
     assert_eq!(records[0].return_dest, Some(slice.index()));
 }
 
 #[test]
 fn capture_slice_marks_gc_payload_positions_as_roots() {
-    let mut b = FunctionBuilder::new("capture_gc", &[Type::GcPtr, Type::I64], Some(Type::FrameSlice));
+    let mut b = FunctionBuilder::new(
+        "capture_gc",
+        &[Type::GcPtr, Type::I64],
+        Some(Type::FrameSlice),
+    );
     let entry = b.entry_block();
     let obj = b.block_param(entry, 0);
     let num = b.block_param(entry, 1);
@@ -98,8 +110,19 @@ fn capture_slice_marks_gc_payload_positions_as_roots() {
     let records = jit.frame_reify_records();
     assert_eq!(records.len(), 1);
     assert_eq!(records[0].frame_value_count, func.value_types.len());
-    assert_eq!(records[0].value_indices, vec![obj.index(), num.index(), _handler_param.index(), slice.index()]);
-    assert_eq!(records[0].value_types, vec![Type::GcPtr, Type::I64, Type::FrameSlice, Type::FrameSlice]);
+    assert_eq!(
+        records[0].value_indices,
+        vec![
+            obj.index(),
+            num.index(),
+            _handler_param.index(),
+            slice.index()
+        ]
+    );
+    assert_eq!(
+        records[0].value_types,
+        vec![Type::GcPtr, Type::I64, Type::FrameSlice, Type::FrameSlice]
+    );
     assert_eq!(records[0].root_payload_indices, vec![0]);
 }
 
@@ -114,7 +137,9 @@ fn abort_to_prompt_returns_frame_reify_outcome() {
 
     let jit = JitFunction::compile::<NanBox>(&func, &[]);
     match jit.call_outcome(&[77]) {
-        JitOutcome::AbortToPrompt { record_idx, values, .. } => {
+        JitOutcome::AbortToPrompt {
+            record_idx, values, ..
+        } => {
             assert_eq!(record_idx, 0);
             assert_eq!(values, vec![77]);
         }
@@ -144,7 +169,9 @@ fn clone_slice_returns_frame_reify_outcome() {
 
     let jit = JitFunction::compile::<NanBox>(&func, &[]);
     match jit.call_outcome(&[123]) {
-        JitOutcome::CloneSlice { record_idx, values, .. } => {
+        JitOutcome::CloneSlice {
+            record_idx, values, ..
+        } => {
             assert_eq!(record_idx, 0);
             assert_eq!(values, vec![123, 0]);
         }
@@ -157,16 +184,26 @@ fn clone_slice_returns_frame_reify_outcome() {
     assert_eq!(records[0].prompt, None);
     assert_eq!(records[0].active_prompts, Vec::<PromptId>::new());
     assert_eq!(records[0].frame_value_count, func.value_types.len());
-    assert_eq!(records[0].value_indices, vec![slice.index(), cloned.index()]);
+    assert_eq!(
+        records[0].value_indices,
+        vec![slice.index(), cloned.index()]
+    );
     assert_eq!(records[0].control_value_indices, vec![slice.index()]);
-    assert_eq!(records[0].value_types, vec![Type::FrameSlice, Type::FrameSlice]);
+    assert_eq!(
+        records[0].value_types,
+        vec![Type::FrameSlice, Type::FrameSlice]
+    );
     assert_eq!(records[0].root_payload_indices, vec![0]);
     assert_eq!(records[0].return_dest, Some(cloned.index()));
 }
 
 #[test]
 fn resume_slice_returns_frame_reify_outcome() {
-    let mut b = FunctionBuilder::new("resume_slice", &[Type::FrameSlice, Type::I64], Some(Type::I64));
+    let mut b = FunctionBuilder::new(
+        "resume_slice",
+        &[Type::FrameSlice, Type::I64],
+        Some(Type::I64),
+    );
     let entry = b.entry_block();
     let slice = b.block_param(entry, 0);
     let value = b.block_param(entry, 1);
@@ -179,7 +216,9 @@ fn resume_slice_returns_frame_reify_outcome() {
 
     let jit = JitFunction::compile::<NanBox>(&func, &[]);
     match jit.call_outcome(&[456, 99]) {
-        JitOutcome::ResumeSlice { record_idx, values, .. } => {
+        JitOutcome::ResumeSlice {
+            record_idx, values, ..
+        } => {
             assert_eq!(record_idx, 0);
             assert_eq!(values, vec![456, 99]);
         }
@@ -193,7 +232,10 @@ fn resume_slice_returns_frame_reify_outcome() {
     assert_eq!(records[0].active_prompts, Vec::<PromptId>::new());
     assert_eq!(records[0].frame_value_count, func.value_types.len());
     assert_eq!(records[0].value_indices, vec![slice.index(), value.index()]);
-    assert_eq!(records[0].control_value_indices, vec![slice.index(), value.index()]);
+    assert_eq!(
+        records[0].control_value_indices,
+        vec![slice.index(), value.index()]
+    );
     assert_eq!(records[0].value_types, vec![Type::FrameSlice, Type::I64]);
     assert_eq!(records[0].root_payload_indices, vec![0]);
     assert_eq!(records[0].return_dest, None);
@@ -240,11 +282,20 @@ where
 }
 
 struct TestInternalConfig;
+#[cfg(target_arch = "aarch64")]
+type TestInternalCc = AArch64InternalCc;
+#[cfg(target_arch = "x86_64")]
+type TestInternalCc = X64SysVCAbi;
+#[cfg(target_arch = "aarch64")]
+type TestCAbiCc = AArch64CAbi;
+#[cfg(target_arch = "x86_64")]
+type TestCAbiCc = X64SysVCAbi;
+
 impl CodegenConfig for TestInternalConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
     type RootTransport = FrameScanRoots;
-    type CallingConvention = AArch64InternalCc;
+    type CallingConvention = TestInternalCc;
     type Frames = StackSlotFrames;
     type Safepoints = CallbackSafepoints;
 }
@@ -254,7 +305,7 @@ impl CodegenConfig for TestCAbiConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
     type RootTransport = FrameScanRoots;
-    type CallingConvention = AArch64CAbi;
+    type CallingConvention = TestCAbiCc;
     type Frames = ShadowStackFrames;
     type Safepoints = CallbackSafepoints;
 }
@@ -283,7 +334,7 @@ impl CodegenConfig for TestStackMapConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
     type RootTransport = StackMapRoots;
-    type CallingConvention = AArch64InternalCc;
+    type CallingConvention = TestInternalCc;
     type Frames = StackMapFrames;
     type Safepoints = StackMapSafepoints;
 }
@@ -293,7 +344,7 @@ impl CodegenConfig for TestShadowStackConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
     type RootTransport = ShadowStackRoots;
-    type CallingConvention = AArch64InternalCc;
+    type CallingConvention = TestInternalCc;
     type Frames = ShadowStackFrames;
     type Safepoints = CallbackSafepoints;
 }
@@ -365,7 +416,7 @@ impl CodegenConfig for TestWrappedFrameConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
     type RootTransport = FrameScanRoots;
-    type CallingConvention = AArch64InternalCc;
+    type CallingConvention = TestInternalCc;
     type Frames = WrappedFrameStrategy;
     type Safepoints = CallbackSafepoints;
 }
@@ -397,8 +448,18 @@ fn compile_with_explicit_backend_type() {
     let v = b.iconst(Type::I64, 13);
     b.ret(v);
     let func = b.build();
-    let jit =
-        JitFunction::compile_with_backend_and_config::<TestInternalConfig, Arm64Backend>(&func, &[], None);
+    #[cfg(target_arch = "aarch64")]
+    let jit = JitFunction::compile_with_backend_and_config::<TestInternalConfig, Arm64Backend>(
+        &func,
+        &[],
+        None,
+    );
+    #[cfg(target_arch = "x86_64")]
+    let jit = JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(
+        &func,
+        &[],
+        None,
+    );
     assert_eq!(unsafe { call_jit(jit.as_ptr(), &[]) }, 13);
 }
 
@@ -442,8 +503,11 @@ fn x64_backend_can_compile_simple_integer_function() {
     let v = b.iconst(Type::I64, 17);
     b.ret(v);
     let func = b.build();
-    let jit =
-        JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(&func, &[], None);
+    let jit = JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(
+        &func,
+        &[],
+        None,
+    );
     assert!(!jit.as_ptr().is_null());
 }
 
@@ -456,8 +520,11 @@ fn x64_backend_can_compile_simple_integer_add() {
     let sum = b.add(a, c);
     b.ret(sum);
     let func = b.build();
-    let jit =
-        JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(&func, &[], None);
+    let jit = JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(
+        &func,
+        &[],
+        None,
+    );
     assert!(!jit.as_ptr().is_null());
 }
 
@@ -470,8 +537,11 @@ fn x64_backend_can_compile_integer_compare() {
     let eq = b.icmp(CmpOp::Eq, a, c);
     b.ret(eq);
     let func = b.build();
-    let jit =
-        JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(&func, &[], None);
+    let jit = JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(
+        &func,
+        &[],
+        None,
+    );
     assert!(!jit.as_ptr().is_null());
 }
 
@@ -483,8 +553,11 @@ fn x64_backend_can_compile_integer_negation() {
     let neg = b.neg(a);
     b.ret(neg);
     let func = b.build();
-    let jit =
-        JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(&func, &[], None);
+    let jit = JitFunction::compile_with_backend_and_config::<TestInternalConfig, X64Backend>(
+        &func,
+        &[],
+        None,
+    );
     assert!(!jit.as_ptr().is_null());
 }
 
@@ -561,7 +634,14 @@ fn alternate_calling_convention_controls_arg_window() {
     let func = b.build();
     let jit = JitFunction::compile_with_config::<TestCAbiConfig>(&func, &[]);
     let args = [1u64, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-    assert_eq!(unsafe { call_jit_with_reg_limit(jit.as_ptr(), &args, 8) }, 55);
+    #[cfg(target_arch = "aarch64")]
+    let reg_limit = 8;
+    #[cfg(target_arch = "x86_64")]
+    let reg_limit = 6;
+    assert_eq!(
+        unsafe { call_jit_with_reg_limit(jit.as_ptr(), &args, reg_limit) },
+        55
+    );
 }
 
 #[test]
@@ -703,7 +783,15 @@ fn invoke_indirect_normal_path_in_jit() {
     let arg = b.iconst(Type::I64, 5);
     let normal = b.create_block(&[Type::I64]);
     let exception = b.create_block(&[]);
-    b.invoke_indirect(callee_ptr, &[arg], Some(Type::I64), normal, &[], exception, &[]);
+    b.invoke_indirect(
+        callee_ptr,
+        &[arg],
+        Some(Type::I64),
+        normal,
+        &[],
+        exception,
+        &[],
+    );
     b.switch_to_block(normal);
     let ret = b.block_param(normal, 0);
     b.ret(ret);
@@ -1712,7 +1800,10 @@ fn store_then_load_round_trip() {
     let func = b.build();
 
     let mut slot = 0u64;
-    let result = run_jit(&func, &[(&mut slot as *mut u64) as u64, 0xDEAD_BEEF_CAFE_BABE]);
+    let result = run_jit(
+        &func,
+        &[(&mut slot as *mut u64) as u64, 0xDEAD_BEEF_CAFE_BABE],
+    );
     assert_eq!(result, 0xDEAD_BEEF_CAFE_BABE);
     assert_eq!(slot, 0xDEAD_BEEF_CAFE_BABE);
 }
@@ -2309,9 +2400,16 @@ fn jit_module_bench_fifty_nested() {
 // ─── Linear Scan Register Allocator Tests ─────────────────────────
 
 fn run_jit_linear_scan(func: &dynir::Function, args: &[u64]) -> u64 {
+    #[cfg(target_arch = "aarch64")]
     let jit = JitFunction::compile_with_regalloc::<
         DefaultJitConfig<NanBox>,
         crate::backend::Arm64Backend,
+        crate::regalloc::LinearScanAllocator,
+    >(func, &[], None);
+    #[cfg(target_arch = "x86_64")]
+    let jit = JitFunction::compile_with_regalloc::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::X64Backend,
         crate::regalloc::LinearScanAllocator,
     >(func, &[], None);
     unsafe { call_jit(jit.as_ptr(), args) }

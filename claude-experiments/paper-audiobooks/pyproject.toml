@@ -1,0 +1,47 @@
+[project]
+name = "paper-audiobooks"
+version = "0.1.0"
+description = "PDF papers -> layout-aware text -> LLM-rewritten script -> local TTS audiobook"
+readme = "README.md"
+authors = [
+    { name = "Jimmy Miller", email = "jimmyhmiller@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "marker-pdf>=1.6.0",
+    "kokoro>=0.9.0",
+    "soundfile>=0.12.1",
+    "numpy>=1.26",
+    "httpx>=0.27",
+    "click>=8.1",
+    "pydub>=0.25.1",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "ebooklib>=0.18",
+    "html2text>=2024.2.26",
+]
+
+[project.scripts]
+paper-audiobooks = "paper_audiobooks.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.11.2,<0.12.0"]
+build-backend = "uv_build"
+
+# This machine has an AMD Ryzen AI MAX+ 395 / Radeon 8060S (gfx1151).
+# Default torch wheels on PyPI are CUDA-built and silently fall back to CPU
+# here. Pin torch to PyTorch's ROCm 6.4 channel; gfx1151 is supported via
+# HSA_OVERRIDE_GFX_VERSION=11.0.0 (see README / GPU section).
+[tool.uv.sources]
+torch = { index = "pytorch-rocm" }
+torchvision = { index = "pytorch-rocm" }
+torchaudio = { index = "pytorch-rocm" }
+
+[[tool.uv.index]]
+name = "pytorch-rocm"
+url = "https://download.pytorch.org/whl/rocm7.2"
+
+# Lock only for this machine's environment — ROCm wheels are linux-x86_64 only.
+[tool.uv]
+environments = ["sys_platform == 'linux' and platform_machine == 'x86_64'"]

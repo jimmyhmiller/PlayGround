@@ -1,13 +1,15 @@
+use dynasm::Arch;
+use dynasm::arm64::Arm64;
 use dynasm::arm64::inst::*;
 use dynasm::arm64::reg::*;
 use dynasm::arm64::reloc::Arm64RelocKind;
-use dynasm::arm64::Arm64;
 use dynasm::buffer::{CodeBuffer, Label};
 use dynasm::x86_64::cond::Condition as X64Cond;
 use dynasm::x86_64::inst::X64Inst;
-use dynasm::x86_64::reg::{R14, RAX, RBP, RSP, X64Reg};
+use dynasm::x86_64::reg::{
+    R8, R9, R10, R11, R12, R13, R14, R15, RAX, RBP, RBX, RCX, RDI, RDX, RSI, RSP, X64Reg,
+};
 use dynasm::x86_64::{X64, X64RelocKind};
-use dynasm::Arch;
 use dynexec::{FrameSlotAccess, FrameSlotBase};
 use dynir::ir::CmpOp;
 use dynir::types::Type;
@@ -63,6 +65,33 @@ pub enum MachineWordSize {
 pub trait LoweringBackend {
     type Arch: Arch;
 
+    fn allocatable_gp() -> &'static [u8] {
+        &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    }
+
+    fn allocatable_fp() -> &'static [u8] {
+        &[
+            0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+        ]
+    }
+
+    fn caller_saved_gp() -> &'static [u8] {
+        &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    }
+
+    fn caller_saved_fp() -> &'static [u8] {
+        &[
+            0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+        ]
+    }
+
+    fn call_arg_gp(slot: usize) -> MachineReg {
+        MachineReg {
+            class: MachineRegClass::Gp,
+            index: slot as u8,
+        }
+    }
+
     fn emit_prologue(buf: &mut CodeBuffer<Self::Arch>) -> usize;
     fn emit_epilogue(buf: &mut CodeBuffer<Self::Arch>, patch_offsets: &mut Vec<usize>);
     fn emit_frame_size_patch(
@@ -76,10 +105,26 @@ pub trait LoweringBackend {
     fn emit_stack_pointer_to_gp(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg);
     fn emit_fp_to_gp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg);
     fn emit_gp_to_fp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg);
-    fn emit_store_gp_to_frame(buf: &mut CodeBuffer<Self::Arch>, src: MachineReg, slot: FrameSlotAccess);
-    fn emit_load_gp_from_frame(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, slot: FrameSlotAccess);
-    fn emit_store_fp_to_frame(buf: &mut CodeBuffer<Self::Arch>, src: MachineReg, slot: FrameSlotAccess);
-    fn emit_load_fp_from_frame(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, slot: FrameSlotAccess);
+    fn emit_store_gp_to_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        src: MachineReg,
+        slot: FrameSlotAccess,
+    );
+    fn emit_load_gp_from_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        slot: FrameSlotAccess,
+    );
+    fn emit_store_fp_to_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        src: MachineReg,
+        slot: FrameSlotAccess,
+    );
+    fn emit_load_fp_from_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        slot: FrameSlotAccess,
+    );
     fn emit_store_gp_to_stack_arg(buf: &mut CodeBuffer<Self::Arch>, src: MachineReg, offset: i32);
 
     fn emit_gp_binop(
@@ -202,7 +247,12 @@ pub trait LoweringBackend {
         src: MachineReg,
         target_ty: Type,
     );
-    fn emit_int_to_float(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg, src_ty: Type);
+    fn emit_int_to_float(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        src: MachineReg,
+        src_ty: Type,
+    );
     fn emit_float_to_int(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg);
     fn emit_mov_imm(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, value: u64);
     fn emit_f64_const(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, bits: u64);
@@ -245,11 +295,7 @@ pub trait LoweringBackend {
         payload_bits: u8,
         tag_mask: u64,
     );
-    fn emit_call_safepoint_handler(
-        buf: &mut CodeBuffer<Self::Arch>,
-        handler: u64,
-        frame_size: u64,
-    );
+    fn emit_call_safepoint_handler(buf: &mut CodeBuffer<Self::Arch>, handler: u64, frame_size: u64);
 
     fn bind_label(buf: &mut CodeBuffer<Self::Arch>, label: Label);
     fn emit_branch_to_label(buf: &mut CodeBuffer<Self::Arch>, label: Label);
@@ -353,14 +399,38 @@ impl Arm64Backend {
         let lo = frame_size & 0xFFF;
 
         // Prologue: sub SP, SP, #hi, LSL #12 ; sub SP, SP, #lo
-        let sub_hi = Arm64Inst::SubImm { sf: 1, sh: 1, imm12: hi, rn: SP, rd: SP };
-        let sub_lo = Arm64Inst::SubImm { sf: 1, sh: 0, imm12: lo, rn: SP, rd: SP };
+        let sub_hi = Arm64Inst::SubImm {
+            sf: 1,
+            sh: 1,
+            imm12: hi,
+            rn: SP,
+            rd: SP,
+        };
+        let sub_lo = Arm64Inst::SubImm {
+            sf: 1,
+            sh: 0,
+            imm12: lo,
+            rn: SP,
+            rd: SP,
+        };
         buf.patch_bytes(prologue_offset, &sub_hi.encode().to_le_bytes());
         buf.patch_bytes(prologue_offset + 4, &sub_lo.encode().to_le_bytes());
 
         // Epilogue: add SP, SP, #hi, LSL #12 ; add SP, SP, #lo
-        let add_hi = Arm64Inst::AddImm { sf: 1, sh: 1, imm12: hi, rn: SP, rd: SP };
-        let add_lo = Arm64Inst::AddImm { sf: 1, sh: 0, imm12: lo, rn: SP, rd: SP };
+        let add_hi = Arm64Inst::AddImm {
+            sf: 1,
+            sh: 1,
+            imm12: hi,
+            rn: SP,
+            rd: SP,
+        };
+        let add_lo = Arm64Inst::AddImm {
+            sf: 1,
+            sh: 0,
+            imm12: lo,
+            rn: SP,
+            rd: SP,
+        };
         let add_hi_bytes = add_hi.encode().to_le_bytes();
         let add_lo_bytes = add_lo.encode().to_le_bytes();
         for &offset in epilogue_offsets {
@@ -401,7 +471,11 @@ impl Arm64Backend {
         }
     }
 
-    pub fn emit_store_gp_to_frame(buf: &mut CodeBuffer<Arm64>, src: MachineReg, slot: FrameSlotAccess) {
+    pub fn emit_store_gp_to_frame(
+        buf: &mut CodeBuffer<Arm64>,
+        src: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
         debug_assert!(slot.offset >= 0 && slot.offset % 8 == 0);
         buf.emit(Arm64Inst::str(
             Self::gp_hw(src, RegSize::X64),
@@ -410,7 +484,11 @@ impl Arm64Backend {
         ));
     }
 
-    pub fn emit_load_gp_from_frame(buf: &mut CodeBuffer<Arm64>, dst: MachineReg, slot: FrameSlotAccess) {
+    pub fn emit_load_gp_from_frame(
+        buf: &mut CodeBuffer<Arm64>,
+        dst: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
         debug_assert!(slot.offset >= 0 && slot.offset % 8 == 0);
         buf.emit(Arm64Inst::ldr(
             Self::gp_hw(dst, RegSize::X64),
@@ -419,7 +497,11 @@ impl Arm64Backend {
         ));
     }
 
-    pub fn emit_store_fp_to_frame(buf: &mut CodeBuffer<Arm64>, src: MachineReg, slot: FrameSlotAccess) {
+    pub fn emit_store_fp_to_frame(
+        buf: &mut CodeBuffer<Arm64>,
+        src: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
         debug_assert!(slot.offset >= 0 && slot.offset % 8 == 0);
         buf.emit(Arm64Inst::str_fp(
             Self::fp_hw(src),
@@ -428,7 +510,11 @@ impl Arm64Backend {
         ));
     }
 
-    pub fn emit_load_fp_from_frame(buf: &mut CodeBuffer<Arm64>, dst: MachineReg, slot: FrameSlotAccess) {
+    pub fn emit_load_fp_from_frame(
+        buf: &mut CodeBuffer<Arm64>,
+        dst: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
         debug_assert!(slot.offset >= 0 && slot.offset % 8 == 0);
         buf.emit(Arm64Inst::ldr_fp(
             Self::fp_hw(dst),
@@ -553,19 +639,35 @@ impl LoweringBackend for Arm64Backend {
         Arm64Backend::emit_gp_to_fp_move(buf, dst, src);
     }
 
-    fn emit_store_gp_to_frame(buf: &mut CodeBuffer<Self::Arch>, src: MachineReg, slot: FrameSlotAccess) {
+    fn emit_store_gp_to_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        src: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
         Arm64Backend::emit_store_gp_to_frame(buf, src, slot);
     }
 
-    fn emit_load_gp_from_frame(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, slot: FrameSlotAccess) {
+    fn emit_load_gp_from_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
         Arm64Backend::emit_load_gp_from_frame(buf, dst, slot);
     }
 
-    fn emit_store_fp_to_frame(buf: &mut CodeBuffer<Self::Arch>, src: MachineReg, slot: FrameSlotAccess) {
+    fn emit_store_fp_to_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        src: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
         Arm64Backend::emit_store_fp_to_frame(buf, src, slot);
     }
 
-    fn emit_load_fp_from_frame(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, slot: FrameSlotAccess) {
+    fn emit_load_fp_from_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
         Arm64Backend::emit_load_fp_from_frame(buf, dst, slot);
     }
 
@@ -836,7 +938,13 @@ impl LoweringBackend for Arm64Backend {
         src_ty: Type,
         target_ty: Type,
     ) {
-        let rd = Arm64Backend::gp_hw(dst, match target_ty { Type::I32 => RegSize::W32, _ => RegSize::X64 });
+        let rd = Arm64Backend::gp_hw(
+            dst,
+            match target_ty {
+                Type::I32 => RegSize::W32,
+                _ => RegSize::X64,
+            },
+        );
         let rn = Arm64Backend::gp_hw(src, RegSize::W32);
         match (src_ty, target_ty) {
             (Type::I32, Type::I64) => buf.emit(Arm64Inst::sxtw(rd, rn)),
@@ -871,8 +979,20 @@ impl LoweringBackend for Arm64Backend {
                 buf.emit(Arm64Inst::mov(rd, rn));
             }
             _ => {
-                let rd = Arm64Backend::gp_hw(dst, match target_ty { Type::I32 => RegSize::W32, _ => RegSize::X64 });
-                let rn = Arm64Backend::gp_hw(src, match src_ty { Type::I32 | Type::I8 => RegSize::W32, _ => RegSize::X64 });
+                let rd = Arm64Backend::gp_hw(
+                    dst,
+                    match target_ty {
+                        Type::I32 => RegSize::W32,
+                        _ => RegSize::X64,
+                    },
+                );
+                let rn = Arm64Backend::gp_hw(
+                    src,
+                    match src_ty {
+                        Type::I32 | Type::I8 => RegSize::W32,
+                        _ => RegSize::X64,
+                    },
+                );
                 buf.emit(Arm64Inst::mov(rd, rn));
             }
         }
@@ -916,7 +1036,13 @@ impl LoweringBackend for Arm64Backend {
         src: MachineReg,
         src_ty: Type,
     ) {
-        let rn = Arm64Backend::gp_hw(src, match src_ty { Type::I32 | Type::I8 => RegSize::W32, _ => RegSize::X64 });
+        let rn = Arm64Backend::gp_hw(
+            src,
+            match src_ty {
+                Type::I32 | Type::I8 => RegSize::W32,
+                _ => RegSize::X64,
+            },
+        );
         buf.emit(Arm64Inst::scvtf_to_double(Arm64Backend::fp_hw(dst), rn));
     }
 
@@ -969,7 +1095,12 @@ impl LoweringBackend for Arm64Backend {
         } else {
             let tag_bits = 64 - payload_bits;
             Arm64Backend::emit_mov_imm64(buf, X28, tag_bits as u64);
-            buf.emit(Arm64Inst::LsrReg { sf: 1, rm: X28, rn, rd });
+            buf.emit(Arm64Inst::LsrReg {
+                sf: 1,
+                rm: X28,
+                rn,
+                rd,
+            });
         }
     }
 
@@ -999,7 +1130,10 @@ impl LoweringBackend for Arm64Backend {
             Arm64Backend::emit_mov_imm64(buf, Arm64Backend::gp_hw(dst, RegSize::X64), expected_tag);
             buf.emit(Arm64Inst::cmp(X28, Arm64Backend::gp_hw(dst, RegSize::X64)));
         }
-        buf.emit(Arm64Inst::cset(Arm64Backend::gp_hw(dst, RegSize::W32), Arm64Cond::EQ));
+        buf.emit(Arm64Inst::cset(
+            Arm64Backend::gp_hw(dst, RegSize::W32),
+            Arm64Cond::EQ,
+        ));
     }
 
     fn emit_make_tagged(
@@ -1019,7 +1153,12 @@ impl LoweringBackend for Arm64Backend {
         } else {
             let tag_bits = 64 - payload_bits;
             Arm64Backend::emit_mov_imm64(buf, X28, tag_bits as u64);
-            buf.emit(Arm64Inst::LslReg { sf: 1, rm: X28, rn, rd });
+            buf.emit(Arm64Inst::LslReg {
+                sf: 1,
+                rm: X28,
+                rn,
+                rd,
+            });
             Arm64Backend::emit_mov_imm64(buf, X28, tag);
             buf.emit(Arm64Inst::orr(rd, rd, X28));
         }
@@ -1037,7 +1176,12 @@ impl LoweringBackend for Arm64Backend {
         let rn = Arm64Backend::gp_hw(src, RegSize::X64);
         if has_unboxed_float {
             Arm64Backend::emit_mov_imm64(buf, X28, payload_bits as u64);
-            buf.emit(Arm64Inst::LsrReg { sf: 1, rm: X28, rn, rd });
+            buf.emit(Arm64Inst::LsrReg {
+                sf: 1,
+                rm: X28,
+                rn,
+                rd,
+            });
             Arm64Backend::emit_mov_imm64(buf, X28, tag_mask);
             buf.emit(Arm64Inst::and(rd, rd, X28));
         } else {
@@ -1094,7 +1238,13 @@ impl LoweringBackend for Arm64Backend {
             let hi = (amount >> 12) & 0xFFF;
             let lo = amount & 0xFFF;
             if hi > 0 {
-                buf.emit(Arm64Inst::SubImm { sf: 1, sh: 1, imm12: hi, rn: SP, rd: SP });
+                buf.emit(Arm64Inst::SubImm {
+                    sf: 1,
+                    sh: 1,
+                    imm12: hi,
+                    rn: SP,
+                    rd: SP,
+                });
             }
             if lo > 0 || hi == 0 {
                 buf.emit(Arm64Inst::sub_imm(SP, SP, lo));
@@ -1104,7 +1254,13 @@ impl LoweringBackend for Arm64Backend {
             let hi = (abs >> 12) & 0xFFF;
             let lo = abs & 0xFFF;
             if hi > 0 {
-                buf.emit(Arm64Inst::AddImm { sf: 1, sh: 1, imm12: hi, rn: SP, rd: SP });
+                buf.emit(Arm64Inst::AddImm {
+                    sf: 1,
+                    sh: 1,
+                    imm12: hi,
+                    rn: SP,
+                    rd: SP,
+                });
             }
             if lo > 0 || hi == 0 {
                 buf.emit(Arm64Inst::add_imm(SP, SP, lo));
@@ -1125,12 +1281,43 @@ impl X64Backend {
 
     fn gp_hw(reg: MachineReg) -> X64Reg {
         debug_assert_eq!(reg.class, MachineRegClass::Gp);
-        X64Reg::new(reg.index, dynasm::x86_64::reg::Size::S64)
+        let hw = match reg.index {
+            0 => RAX,
+            1 => RCX,
+            2 => RDX,
+            3 => RSI,
+            4 => RDI,
+            5 => R8,
+            6 => R9,
+            7 | 27 => R10,
+            8 | 28 => R11,
+            9 => RBX,
+            10 => R12,
+            11 => R13,
+            22 => R14,
+            23 => R15,
+            24 => R14,
+            26 => R11,
+            29 => RBP,
+            other => panic!("x64 backend has no physical GP mapping for machine register {other}"),
+        };
+        X64Reg::new(hw.index, dynasm::x86_64::reg::Size::S64)
     }
 
     fn gp_hw8(reg: MachineReg) -> X64Reg {
         debug_assert_eq!(reg.class, MachineRegClass::Gp);
-        X64Reg::new(reg.index, dynasm::x86_64::reg::Size::S8)
+        let hw = Self::gp_hw(reg);
+        X64Reg::new(hw.index, dynasm::x86_64::reg::Size::S8)
+    }
+
+    fn gp_hw_sized(reg: MachineReg, size: MachineWordSize) -> X64Reg {
+        debug_assert_eq!(reg.class, MachineRegClass::Gp);
+        let hw = Self::gp_hw(reg);
+        let reg_size = match size {
+            MachineWordSize::W32 => dynasm::x86_64::reg::Size::S32,
+            MachineWordSize::W64 => dynasm::x86_64::reg::Size::S64,
+        };
+        X64Reg::new(hw.index, reg_size)
     }
 
     fn fp_hw(reg: MachineReg) -> X64Reg {
@@ -1152,21 +1339,176 @@ impl X64Backend {
             CmpOp::Uge => X64Cond::AE,
         }
     }
+
+    fn fcond(op: CmpOp) -> X64Cond {
+        match op {
+            CmpOp::Eq => X64Cond::E,
+            CmpOp::Ne => X64Cond::NE,
+            CmpOp::Slt | CmpOp::Ult => X64Cond::B,
+            CmpOp::Sle | CmpOp::Ule => X64Cond::BE,
+            CmpOp::Sgt | CmpOp::Ugt => X64Cond::A,
+            CmpOp::Sge | CmpOp::Uge => X64Cond::AE,
+        }
+    }
+
+    fn slot_base_reg(slot: FrameSlotAccess) -> X64Reg {
+        match slot.base {
+            FrameSlotBase::FramePointer => RBP,
+            FrameSlotBase::StackPointer => RSP,
+        }
+    }
+
+    fn emit_mov_imm_to_hw(buf: &mut CodeBuffer<X64>, dst: X64Reg, value: u64) {
+        let imm = i64::from_le_bytes(value.to_le_bytes());
+        buf.emit(X64Inst::MovRI { dest: dst, imm });
+    }
+
+    fn emit_shift_by_reg(
+        buf: &mut CodeBuffer<X64>,
+        op: MachineGpBinOp,
+        dst: X64Reg,
+        lhs: X64Reg,
+        rhs: X64Reg,
+    ) {
+        if rhs.index != RCX.index {
+            // Save the shift count before clobbering dst; dst may be rhs.
+            buf.emit(X64Inst::MovRR {
+                dest: RCX,
+                src: rhs,
+            });
+        } else if dst.index == RCX.index {
+            // CL already holds the count, so compute through a scratch result.
+            buf.emit(X64Inst::MovRR {
+                dest: R11,
+                src: lhs,
+            });
+            match op {
+                MachineGpBinOp::Shl => buf.emit(X64Inst::ShlRCL { dest: R11 }),
+                MachineGpBinOp::LShr => buf.emit(X64Inst::ShrRCL { dest: R11 }),
+                MachineGpBinOp::AShr => buf.emit(X64Inst::SarRCL { dest: R11 }),
+                _ => unreachable!(),
+            };
+            buf.emit(X64Inst::MovRR {
+                dest: dst,
+                src: R11,
+            });
+            return;
+        }
+
+        if dst.index != lhs.index {
+            buf.emit(X64Inst::MovRR {
+                dest: dst,
+                src: lhs,
+            });
+        }
+        match op {
+            MachineGpBinOp::Shl => buf.emit(X64Inst::ShlRCL { dest: dst }),
+            MachineGpBinOp::LShr => buf.emit(X64Inst::ShrRCL { dest: dst }),
+            MachineGpBinOp::AShr => buf.emit(X64Inst::SarRCL { dest: dst }),
+            _ => unreachable!(),
+        };
+    }
+
+    fn emit_zero_gp(buf: &mut CodeBuffer<X64>, reg: X64Reg) {
+        buf.emit(X64Inst::XorRR {
+            dest: reg,
+            src: reg,
+        });
+    }
 }
 
 impl LoweringBackend for X64Backend {
     type Arch = X64;
 
+    fn allocatable_gp() -> &'static [u8] {
+        &[3, 4, 5, 6, 9, 10, 11]
+    }
+
+    fn allocatable_fp() -> &'static [u8] {
+        &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    }
+
+    fn caller_saved_gp() -> &'static [u8] {
+        &[0, 1, 2, 3, 4, 5, 6, 7, 8]
+    }
+
+    fn caller_saved_fp() -> &'static [u8] {
+        Self::allocatable_fp()
+    }
+
+    fn call_arg_gp(slot: usize) -> MachineReg {
+        let reg = match slot {
+            0 => 4,   // RDI
+            1 => 3,   // RSI
+            2 => 2,   // RDX
+            3 => 1,   // RCX
+            4 => 5,   // R8
+            5 => 6,   // R9
+            6 => 7,   // R10, internal-only extension
+            7 => 8,   // R11, internal-only extension
+            8 => 9,   // RBX, internal-only extension
+            9 => 10,  // R12, internal-only extension
+            10 => 11, // R13, internal-only extension
+            other => other as u8,
+        };
+        MachineReg {
+            class: MachineRegClass::Gp,
+            index: reg,
+        }
+    }
+
     fn emit_prologue(buf: &mut CodeBuffer<Self::Arch>) -> usize {
         buf.emit(X64Inst::Push { reg: RBP });
-        buf.emit(X64Inst::MovRR { dest: RBP, src: RSP });
-        buf.emit(X64Inst::MovRR { dest: R14, src: RSP });
-        buf.emit(X64Inst::SubRI { dest: RSP, imm: 16 })
+        buf.emit(X64Inst::Push { reg: RBX });
+        buf.emit(X64Inst::Push { reg: R12 });
+        buf.emit(X64Inst::Push { reg: R13 });
+        buf.emit(X64Inst::Push { reg: R14 });
+        buf.emit(X64Inst::Push { reg: R15 });
+        buf.emit(X64Inst::Lea {
+            dest: R14,
+            base: RSP,
+            offset: 48,
+        });
+        let patch = buf.emit(X64Inst::SubRI { dest: RSP, imm: 24 });
+        buf.emit(X64Inst::MovRR {
+            dest: RBP,
+            src: RSP,
+        });
+        buf.emit(X64Inst::MovRM {
+            dest: R10,
+            base: R14,
+            offset: -8,
+        });
+        buf.emit(X64Inst::MovMR {
+            base: RBP,
+            offset: 0,
+            src: R10,
+        });
+        buf.emit(X64Inst::MovRM {
+            dest: R10,
+            base: R14,
+            offset: 0,
+        });
+        buf.emit(X64Inst::MovMR {
+            base: RBP,
+            offset: 8,
+            src: R10,
+        });
+        patch
     }
 
     fn emit_epilogue(buf: &mut CodeBuffer<Self::Arch>, patch_offsets: &mut Vec<usize>) {
-        let add_offset = buf.emit(X64Inst::AddRI { dest: RSP, imm: 16 });
+        buf.emit(X64Inst::MovRR {
+            dest: RSP,
+            src: RBP,
+        });
+        let add_offset = buf.emit(X64Inst::AddRI { dest: RSP, imm: 24 });
         patch_offsets.push(add_offset);
+        buf.emit(X64Inst::Pop { reg: R15 });
+        buf.emit(X64Inst::Pop { reg: R14 });
+        buf.emit(X64Inst::Pop { reg: R13 });
+        buf.emit(X64Inst::Pop { reg: R12 });
+        buf.emit(X64Inst::Pop { reg: RBX });
         buf.emit(X64Inst::Pop { reg: RBP });
         buf.emit(X64Inst::Ret);
     }
@@ -1177,9 +1519,18 @@ impl LoweringBackend for X64Backend {
         epilogue_offsets: &[usize],
         frame_size: i32,
     ) {
-        let sub = X64Inst::SubRI { dest: RSP, imm: frame_size }.encode();
+        let aligned_frame_size = frame_size + 8;
+        let sub = X64Inst::SubRI {
+            dest: RSP,
+            imm: aligned_frame_size,
+        }
+        .encode();
         buf.patch_bytes(prologue_offset, &sub);
-        let add = X64Inst::AddRI { dest: RSP, imm: frame_size }.encode();
+        let add = X64Inst::AddRI {
+            dest: RSP,
+            imm: aligned_frame_size,
+        }
+        .encode();
         for &offset in epilogue_offsets {
             buf.patch_bytes(offset, &add);
         }
@@ -1187,7 +1538,10 @@ impl LoweringBackend for X64Backend {
 
     fn emit_gp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg) {
         if dst.index != src.index {
-            buf.emit(X64Inst::MovRR { dest: Self::gp_hw(dst), src: Self::gp_hw(src) });
+            buf.emit(X64Inst::MovRR {
+                dest: Self::gp_hw(dst),
+                src: Self::gp_hw(src),
+            });
         }
     }
 
@@ -1199,113 +1553,862 @@ impl LoweringBackend for X64Backend {
     }
 
     fn emit_fp_to_gp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg) {
-        buf.emit(X64Inst::MovqRX { dest: Self::gp_hw(dst), src: Self::fp_hw(src) });
+        buf.emit(X64Inst::MovqRX {
+            dest: Self::gp_hw(dst),
+            src: Self::fp_hw(src),
+        });
     }
 
     fn emit_gp_to_fp_move(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg) {
-        buf.emit(X64Inst::MovqXR { dest: Self::fp_hw(dst), src: Self::gp_hw(src) });
+        buf.emit(X64Inst::MovqXR {
+            dest: Self::fp_hw(dst),
+            src: Self::gp_hw(src),
+        });
     }
 
-    fn emit_store_gp_to_frame(_buf: &mut CodeBuffer<Self::Arch>, _src: MachineReg, _slot: FrameSlotAccess) { todo!("x64 frame stores") }
-    fn emit_load_gp_from_frame(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _slot: FrameSlotAccess) { todo!("x64 frame loads") }
-    fn emit_store_fp_to_frame(_buf: &mut CodeBuffer<Self::Arch>, _src: MachineReg, _slot: FrameSlotAccess) { todo!("x64 fp frame stores") }
-    fn emit_load_fp_from_frame(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _slot: FrameSlotAccess) { todo!("x64 fp frame loads") }
-    fn emit_store_gp_to_stack_arg(_buf: &mut CodeBuffer<Self::Arch>, _src: MachineReg, _offset: i32) { todo!("x64 outgoing stack args") }
+    fn emit_store_gp_to_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        src: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
+        buf.emit(X64Inst::MovMR {
+            base: Self::slot_base_reg(slot),
+            offset: slot.offset,
+            src: Self::gp_hw(src),
+        });
+    }
+    fn emit_load_gp_from_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
+        buf.emit(X64Inst::MovRM {
+            dest: Self::gp_hw(dst),
+            base: Self::slot_base_reg(slot),
+            offset: slot.offset,
+        });
+    }
+    fn emit_store_fp_to_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        src: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
+        buf.emit(X64Inst::MovsdMR {
+            base: Self::slot_base_reg(slot),
+            offset: slot.offset,
+            src: Self::fp_hw(src),
+        });
+    }
+    fn emit_load_fp_from_frame(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
+        buf.emit(X64Inst::MovsdRM {
+            dest: Self::fp_hw(dst),
+            base: Self::slot_base_reg(slot),
+            offset: slot.offset,
+        });
+    }
+    fn emit_store_gp_to_stack_arg(buf: &mut CodeBuffer<Self::Arch>, src: MachineReg, offset: i32) {
+        buf.emit(X64Inst::MovMR {
+            base: RSP,
+            offset,
+            src: Self::gp_hw(src),
+        });
+    }
 
-    fn emit_gp_binop(buf: &mut CodeBuffer<Self::Arch>, op: MachineGpBinOp, dst: MachineReg, lhs: MachineReg, rhs: MachineReg, _size: MachineWordSize) {
-        if dst.index != lhs.index {
-            buf.emit(X64Inst::MovRR { dest: Self::gp_hw(dst), src: Self::gp_hw(lhs) });
+    fn emit_gp_binop(
+        buf: &mut CodeBuffer<Self::Arch>,
+        op: MachineGpBinOp,
+        dst: MachineReg,
+        lhs: MachineReg,
+        rhs: MachineReg,
+        _size: MachineWordSize,
+    ) {
+        let dst_hw = Self::gp_hw(dst);
+        let lhs_hw = Self::gp_hw(lhs);
+        let rhs_hw = Self::gp_hw(rhs);
+        match op {
+            MachineGpBinOp::Shl | MachineGpBinOp::LShr | MachineGpBinOp::AShr => {
+                Self::emit_shift_by_reg(buf, op, dst_hw, lhs_hw, rhs_hw);
+                return;
+            }
+            MachineGpBinOp::SDiv | MachineGpBinOp::UDiv => {
+                let divisor = if rhs_hw.index == RAX.index || rhs_hw.index == RDX.index {
+                    buf.emit(X64Inst::MovRR {
+                        dest: R11,
+                        src: rhs_hw,
+                    });
+                    R11
+                } else {
+                    rhs_hw
+                };
+                if lhs_hw.index != RAX.index {
+                    buf.emit(X64Inst::MovRR {
+                        dest: RAX,
+                        src: lhs_hw,
+                    });
+                }
+                if matches!(op, MachineGpBinOp::SDiv) {
+                    buf.emit(X64Inst::Cqo);
+                } else {
+                    Self::emit_zero_gp(buf, RDX);
+                }
+                buf.emit(X64Inst::Idiv { divisor });
+                if dst_hw.index != RAX.index {
+                    buf.emit(X64Inst::MovRR {
+                        dest: dst_hw,
+                        src: RAX,
+                    });
+                }
+                return;
+            }
+            _ => {}
+        }
+        if dst_hw.index != lhs_hw.index {
+            if dst_hw.index == rhs_hw.index {
+                match op {
+                    MachineGpBinOp::Add
+                    | MachineGpBinOp::Mul
+                    | MachineGpBinOp::And
+                    | MachineGpBinOp::Or
+                    | MachineGpBinOp::Xor => {
+                        match op {
+                            MachineGpBinOp::Add => {
+                                buf.emit(X64Inst::AddRR {
+                                    dest: dst_hw,
+                                    src: lhs_hw,
+                                });
+                            }
+                            MachineGpBinOp::Mul => {
+                                buf.emit(X64Inst::ImulRR {
+                                    dest: dst_hw,
+                                    src: lhs_hw,
+                                });
+                            }
+                            MachineGpBinOp::And => {
+                                buf.emit(X64Inst::AndRR {
+                                    dest: dst_hw,
+                                    src: lhs_hw,
+                                });
+                            }
+                            MachineGpBinOp::Or => {
+                                buf.emit(X64Inst::OrRR {
+                                    dest: dst_hw,
+                                    src: lhs_hw,
+                                });
+                            }
+                            MachineGpBinOp::Xor => {
+                                buf.emit(X64Inst::XorRR {
+                                    dest: dst_hw,
+                                    src: lhs_hw,
+                                });
+                            }
+                            _ => unreachable!(),
+                        }
+                        return;
+                    }
+                    _ => {
+                        buf.emit(X64Inst::MovRR {
+                            dest: R11,
+                            src: rhs_hw,
+                        });
+                    }
+                }
+            }
+            buf.emit(X64Inst::MovRR {
+                dest: dst_hw,
+                src: lhs_hw,
+            });
         }
         match op {
-            MachineGpBinOp::Add => buf.emit(X64Inst::AddRR { dest: Self::gp_hw(dst), src: Self::gp_hw(rhs) }),
-            MachineGpBinOp::Sub => buf.emit(X64Inst::SubRR { dest: Self::gp_hw(dst), src: Self::gp_hw(rhs) }),
-            MachineGpBinOp::Mul => buf.emit(X64Inst::ImulRR { dest: Self::gp_hw(dst), src: Self::gp_hw(rhs) }),
-            _ => todo!("x64 gp binop {:?}", op),
+            MachineGpBinOp::Add => {
+                let src = if dst_hw.index == rhs_hw.index && lhs_hw.index != rhs_hw.index {
+                    lhs_hw
+                } else {
+                    rhs_hw
+                };
+                buf.emit(X64Inst::AddRR { dest: dst_hw, src });
+            }
+            MachineGpBinOp::Sub => {
+                let src = if dst_hw.index == rhs_hw.index && lhs_hw.index != rhs_hw.index {
+                    R11
+                } else {
+                    rhs_hw
+                };
+                buf.emit(X64Inst::SubRR { dest: dst_hw, src });
+            }
+            MachineGpBinOp::Mul => {
+                let src = if dst_hw.index == rhs_hw.index && lhs_hw.index != rhs_hw.index {
+                    lhs_hw
+                } else {
+                    rhs_hw
+                };
+                buf.emit(X64Inst::ImulRR { dest: dst_hw, src });
+            }
+            MachineGpBinOp::And => {
+                let src = if dst_hw.index == rhs_hw.index && lhs_hw.index != rhs_hw.index {
+                    lhs_hw
+                } else {
+                    rhs_hw
+                };
+                buf.emit(X64Inst::AndRR { dest: dst_hw, src });
+            }
+            MachineGpBinOp::Or => {
+                let src = if dst_hw.index == rhs_hw.index && lhs_hw.index != rhs_hw.index {
+                    lhs_hw
+                } else {
+                    rhs_hw
+                };
+                buf.emit(X64Inst::OrRR { dest: dst_hw, src });
+            }
+            MachineGpBinOp::Xor => {
+                let src = if dst_hw.index == rhs_hw.index && lhs_hw.index != rhs_hw.index {
+                    lhs_hw
+                } else {
+                    rhs_hw
+                };
+                buf.emit(X64Inst::XorRR { dest: dst_hw, src });
+            }
+            MachineGpBinOp::SDiv | MachineGpBinOp::UDiv => unreachable!(),
+            MachineGpBinOp::Shl | MachineGpBinOp::LShr | MachineGpBinOp::AShr => unreachable!(),
         };
     }
 
-    fn emit_fp_binop(_buf: &mut CodeBuffer<Self::Arch>, _op: MachineFpBinOp, _dst: MachineReg, _lhs: MachineReg, _rhs: MachineReg) { todo!("x64 fp binops") }
-
-    fn emit_icmp_set(buf: &mut CodeBuffer<Self::Arch>, op: CmpOp, dst: MachineReg, lhs: MachineReg, rhs: MachineReg, _size: MachineWordSize) {
-        buf.emit(X64Inst::CmpRR { a: Self::gp_hw(lhs), b: Self::gp_hw(rhs) });
-        buf.emit(X64Inst::Setcc { dest: Self::gp_hw8(dst), cond: Self::cond(op) });
-    }
-
-    fn emit_fcmp_set(_buf: &mut CodeBuffer<Self::Arch>, _op: CmpOp, _dst: MachineReg, _lhs: MachineReg, _rhs: MachineReg) { todo!("x64 fp cmp") }
-    fn emit_gp_select(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _cond: MachineReg, _when_true: MachineReg, _when_false: MachineReg, _size: MachineWordSize) { todo!("x64 select") }
-    fn emit_fp_select(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _cond: MachineReg, _when_true: MachineReg, _when_false: MachineReg) { todo!("x64 fp select") }
-    fn emit_load_gp(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _base: MachineReg, _offset: i32, _size: MachineWordSize) { todo!("x64 load gp") }
-    fn emit_load_fp(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _base: MachineReg, _offset: i32) { todo!("x64 load fp") }
-    fn emit_store_gp(_buf: &mut CodeBuffer<Self::Arch>, _src: MachineReg, _base: MachineReg, _offset: i32, _size: MachineWordSize) { todo!("x64 store gp") }
-    fn emit_store_fp(_buf: &mut CodeBuffer<Self::Arch>, _src: MachineReg, _base: MachineReg, _offset: i32) { todo!("x64 store fp") }
-    fn emit_gp_neg(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg, _size: MachineWordSize) {
-        if dst.index != src.index {
-            buf.emit(X64Inst::MovRR { dest: Self::gp_hw(dst), src: Self::gp_hw(src) });
+    fn emit_fp_binop(
+        buf: &mut CodeBuffer<Self::Arch>,
+        op: MachineFpBinOp,
+        dst: MachineReg,
+        lhs: MachineReg,
+        rhs: MachineReg,
+    ) {
+        let dst_hw = Self::fp_hw(dst);
+        let lhs_hw = Self::fp_hw(lhs);
+        let rhs_hw = Self::fp_hw(rhs);
+        let fp_scratch = X64Reg::new(15, dynasm::x86_64::reg::Size::S64);
+        if dst_hw.index != lhs_hw.index {
+            if dst_hw.index == rhs_hw.index {
+                match op {
+                    MachineFpBinOp::Add => {
+                        buf.emit(X64Inst::Addsd {
+                            dest: dst_hw,
+                            src: lhs_hw,
+                        });
+                        return;
+                    }
+                    MachineFpBinOp::Mul => {
+                        buf.emit(X64Inst::Mulsd {
+                            dest: dst_hw,
+                            src: lhs_hw,
+                        });
+                        return;
+                    }
+                    MachineFpBinOp::Sub | MachineFpBinOp::Div => {
+                        buf.emit(X64Inst::MovsdRR {
+                            dest: fp_scratch,
+                            src: rhs_hw,
+                        });
+                    }
+                }
+            }
+            buf.emit(X64Inst::MovsdRR {
+                dest: dst_hw,
+                src: lhs_hw,
+            });
         }
-        buf.emit(X64Inst::Neg { reg: Self::gp_hw(dst) });
+        match op {
+            MachineFpBinOp::Add => {
+                let src = if dst_hw.index == rhs_hw.index && lhs_hw.index != rhs_hw.index {
+                    lhs_hw
+                } else {
+                    rhs_hw
+                };
+                buf.emit(X64Inst::Addsd { dest: dst_hw, src });
+            }
+            MachineFpBinOp::Sub => {
+                let src = if dst_hw.index == rhs_hw.index && lhs_hw.index != rhs_hw.index {
+                    fp_scratch
+                } else {
+                    rhs_hw
+                };
+                buf.emit(X64Inst::Subsd { dest: dst_hw, src });
+            }
+            MachineFpBinOp::Mul => {
+                let src = if dst_hw.index == rhs_hw.index && lhs_hw.index != rhs_hw.index {
+                    lhs_hw
+                } else {
+                    rhs_hw
+                };
+                buf.emit(X64Inst::Mulsd { dest: dst_hw, src });
+            }
+            MachineFpBinOp::Div => {
+                let src = if dst_hw.index == rhs_hw.index && lhs_hw.index != rhs_hw.index {
+                    fp_scratch
+                } else {
+                    rhs_hw
+                };
+                buf.emit(X64Inst::Divsd { dest: dst_hw, src });
+            }
+        };
     }
-    fn emit_gp_not(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg, _size: MachineWordSize) {
-        if dst.index != src.index {
-            buf.emit(X64Inst::MovRR { dest: Self::gp_hw(dst), src: Self::gp_hw(src) });
+
+    fn emit_icmp_set(
+        buf: &mut CodeBuffer<Self::Arch>,
+        op: CmpOp,
+        dst: MachineReg,
+        lhs: MachineReg,
+        rhs: MachineReg,
+        size: MachineWordSize,
+    ) {
+        buf.emit(X64Inst::CmpRR {
+            a: Self::gp_hw_sized(lhs, size),
+            b: Self::gp_hw_sized(rhs, size),
+        });
+        buf.emit(X64Inst::MovRI32 {
+            dest: Self::gp_hw(dst),
+            imm: 0,
+        });
+        buf.emit(X64Inst::Setcc {
+            dest: Self::gp_hw8(dst),
+            cond: Self::cond(op),
+        });
+    }
+
+    fn emit_fcmp_set(
+        buf: &mut CodeBuffer<Self::Arch>,
+        op: CmpOp,
+        dst: MachineReg,
+        lhs: MachineReg,
+        rhs: MachineReg,
+    ) {
+        buf.emit(X64Inst::Ucomisd {
+            a: Self::fp_hw(lhs),
+            b: Self::fp_hw(rhs),
+        });
+        buf.emit(X64Inst::MovRI32 {
+            dest: Self::gp_hw(dst),
+            imm: 0,
+        });
+        buf.emit(X64Inst::Setcc {
+            dest: Self::gp_hw8(dst),
+            cond: Self::fcond(op),
+        });
+    }
+    fn emit_gp_select(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        cond: MachineReg,
+        when_true: MachineReg,
+        when_false: MachineReg,
+        _size: MachineWordSize,
+    ) {
+        let dst_hw = Self::gp_hw(dst);
+        buf.emit(X64Inst::TestRR {
+            a: Self::gp_hw(cond),
+            b: Self::gp_hw(cond),
+        });
+        if dst_hw.index == Self::gp_hw(when_true).index
+            && dst_hw.index != Self::gp_hw(when_false).index
+        {
+            buf.emit(X64Inst::Cmovcc {
+                dest: dst_hw,
+                src: Self::gp_hw(when_false),
+                cond: X64Cond::E,
+            });
+        } else {
+            buf.emit(X64Inst::MovRR {
+                dest: dst_hw,
+                src: Self::gp_hw(when_false),
+            });
+            buf.emit(X64Inst::Cmovcc {
+                dest: dst_hw,
+                src: Self::gp_hw(when_true),
+                cond: X64Cond::NE,
+            });
         }
-        buf.emit(X64Inst::Not { reg: Self::gp_hw(dst) });
     }
-    fn emit_fp_neg(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _src: MachineReg) { todo!("x64 fp neg") }
-    fn emit_sign_extend(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _src: MachineReg, _src_ty: Type, _target_ty: Type) { todo!("x64 sext") }
-    fn emit_zero_extend(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _src: MachineReg, _src_ty: Type, _target_ty: Type) { todo!("x64 zext") }
-    fn emit_trunc(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _src: MachineReg, _target_ty: Type) { todo!("x64 trunc") }
-    fn emit_int_to_float(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _src: MachineReg, _src_ty: Type) { todo!("x64 int->float") }
-    fn emit_float_to_int(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _src: MachineReg) { todo!("x64 float->int") }
+    fn emit_fp_select(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        cond: MachineReg,
+        when_true: MachineReg,
+        when_false: MachineReg,
+    ) {
+        let false_label = buf.create_label();
+        let end = buf.create_label();
+        buf.emit(X64Inst::TestRR {
+            a: Self::gp_hw(cond),
+            b: Self::gp_hw(cond),
+        });
+        let off = buf.emit(X64Inst::Jcc {
+            offset: 0,
+            cond: X64Cond::E,
+        });
+        buf.add_reloc(off + 2, false_label, X64RelocKind::Rel32);
+        buf.emit(X64Inst::MovsdRR {
+            dest: Self::fp_hw(dst),
+            src: Self::fp_hw(when_true),
+        });
+        let jmp = buf.emit(X64Inst::Jmp { offset: 0 });
+        buf.add_reloc(jmp + 1, end, X64RelocKind::Rel32);
+        buf.bind_label(false_label);
+        buf.emit(X64Inst::MovsdRR {
+            dest: Self::fp_hw(dst),
+            src: Self::fp_hw(when_false),
+        });
+        buf.bind_label(end);
+    }
+    fn emit_load_gp(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        base: MachineReg,
+        offset: i32,
+        _size: MachineWordSize,
+    ) {
+        buf.emit(X64Inst::MovRM {
+            dest: Self::gp_hw(dst),
+            base: Self::gp_hw(base),
+            offset,
+        });
+    }
+    fn emit_load_fp(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        base: MachineReg,
+        offset: i32,
+    ) {
+        buf.emit(X64Inst::MovsdRM {
+            dest: Self::fp_hw(dst),
+            base: Self::gp_hw(base),
+            offset,
+        });
+    }
+    fn emit_store_gp(
+        buf: &mut CodeBuffer<Self::Arch>,
+        src: MachineReg,
+        base: MachineReg,
+        offset: i32,
+        _size: MachineWordSize,
+    ) {
+        buf.emit(X64Inst::MovMR {
+            base: Self::gp_hw(base),
+            offset,
+            src: Self::gp_hw(src),
+        });
+    }
+    fn emit_store_fp(
+        buf: &mut CodeBuffer<Self::Arch>,
+        src: MachineReg,
+        base: MachineReg,
+        offset: i32,
+    ) {
+        buf.emit(X64Inst::MovsdMR {
+            base: Self::gp_hw(base),
+            offset,
+            src: Self::fp_hw(src),
+        });
+    }
+    fn emit_gp_neg(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        src: MachineReg,
+        _size: MachineWordSize,
+    ) {
+        if dst.index != src.index {
+            buf.emit(X64Inst::MovRR {
+                dest: Self::gp_hw(dst),
+                src: Self::gp_hw(src),
+            });
+        }
+        buf.emit(X64Inst::Neg {
+            reg: Self::gp_hw(dst),
+        });
+    }
+    fn emit_gp_not(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        src: MachineReg,
+        _size: MachineWordSize,
+    ) {
+        if dst.index != src.index {
+            buf.emit(X64Inst::MovRR {
+                dest: Self::gp_hw(dst),
+                src: Self::gp_hw(src),
+            });
+        }
+        buf.emit(X64Inst::Not {
+            reg: Self::gp_hw(dst),
+        });
+    }
+    fn emit_fp_neg(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg) {
+        buf.emit(X64Inst::MovqRX {
+            dest: R11,
+            src: Self::fp_hw(src),
+        });
+        Self::emit_mov_imm_to_hw(buf, R10, 0x8000_0000_0000_0000);
+        buf.emit(X64Inst::XorRR {
+            dest: R11,
+            src: R10,
+        });
+        buf.emit(X64Inst::MovqXR {
+            dest: Self::fp_hw(dst),
+            src: R11,
+        });
+    }
+    fn emit_sign_extend(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        src: MachineReg,
+        src_ty: Type,
+        target_ty: Type,
+    ) {
+        let dst_hw = Self::gp_hw(dst);
+        if dst_hw.index != Self::gp_hw(src).index {
+            buf.emit(X64Inst::MovRR {
+                dest: dst_hw,
+                src: Self::gp_hw(src),
+            });
+        }
+        match (src_ty, target_ty) {
+            (Type::I8, Type::I32 | Type::I64) => {
+                buf.emit(X64Inst::ShlRI {
+                    dest: dst_hw,
+                    imm: 56,
+                });
+                buf.emit(X64Inst::SarRI {
+                    dest: dst_hw,
+                    imm: 56,
+                });
+            }
+            (Type::I32, Type::I64) => {
+                buf.emit(X64Inst::ShlRI {
+                    dest: dst_hw,
+                    imm: 32,
+                });
+                buf.emit(X64Inst::SarRI {
+                    dest: dst_hw,
+                    imm: 32,
+                });
+            }
+            _ => {}
+        }
+    }
+    fn emit_zero_extend(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        src: MachineReg,
+        src_ty: Type,
+        _target_ty: Type,
+    ) {
+        let dst_hw = Self::gp_hw(dst);
+        if dst_hw.index != Self::gp_hw(src).index {
+            buf.emit(X64Inst::MovRR {
+                dest: dst_hw,
+                src: Self::gp_hw(src),
+            });
+        }
+        match src_ty {
+            Type::I8 => {
+                buf.emit(X64Inst::AndRI {
+                    dest: dst_hw,
+                    imm: 0xFF,
+                });
+            }
+            Type::I32 => {
+                buf.emit(X64Inst::ShlRI {
+                    dest: dst_hw,
+                    imm: 32,
+                });
+                buf.emit(X64Inst::ShrRI {
+                    dest: dst_hw,
+                    imm: 32,
+                });
+            }
+            _ => {}
+        }
+    }
+    fn emit_trunc(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        src: MachineReg,
+        target_ty: Type,
+    ) {
+        Self::emit_zero_extend(buf, dst, src, target_ty, target_ty);
+    }
+    fn emit_int_to_float(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        src: MachineReg,
+        _src_ty: Type,
+    ) {
+        buf.emit(X64Inst::Cvtsi2sd {
+            dest: Self::fp_hw(dst),
+            src: Self::gp_hw(src),
+        });
+    }
+    fn emit_float_to_int(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, src: MachineReg) {
+        buf.emit(X64Inst::Cvttsd2si {
+            dest: Self::gp_hw(dst),
+            src: Self::fp_hw(src),
+        });
+    }
     fn emit_mov_imm(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, value: u64) {
         let imm = i64::from_le_bytes(value.to_le_bytes());
-        buf.emit(X64Inst::MovRI { dest: Self::gp_hw(dst), imm });
+        buf.emit(X64Inst::MovRI {
+            dest: Self::gp_hw(dst),
+            imm,
+        });
     }
-    fn emit_f64_const(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _bits: u64) { todo!("x64 f64 const") }
-    fn emit_load_incoming_stack_arg(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _incoming_offset: i32) { todo!("x64 incoming stack arg") }
+    fn emit_f64_const(buf: &mut CodeBuffer<Self::Arch>, dst: MachineReg, bits: u64) {
+        Self::emit_mov_imm_to_hw(buf, R11, bits);
+        buf.emit(X64Inst::MovqXR {
+            dest: Self::fp_hw(dst),
+            src: R11,
+        });
+    }
+    fn emit_load_incoming_stack_arg(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        incoming_offset: i32,
+    ) {
+        buf.emit(X64Inst::MovRM {
+            dest: Self::gp_hw(dst),
+            base: R14,
+            offset: incoming_offset + 8,
+        });
+    }
     fn emit_cmp_gp_imm(buf: &mut CodeBuffer<Self::Arch>, reg: MachineReg, imm: u64) {
-        buf.emit(X64Inst::CmpRI { reg: Self::gp_hw(reg), imm: imm as i32 });
+        if i32::try_from(imm as i64).is_ok() {
+            buf.emit(X64Inst::CmpRI {
+                reg: Self::gp_hw(reg),
+                imm: imm as i32,
+            });
+        } else {
+            Self::emit_mov_imm_to_hw(buf, R11, imm);
+            buf.emit(X64Inst::CmpRR {
+                a: Self::gp_hw(reg),
+                b: R11,
+            });
+        }
     }
-    fn emit_extract_payload(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _src: MachineReg, _has_unboxed_float: bool, _payload_bits: u8) { todo!("x64 payload") }
-    fn emit_is_tag(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _src: MachineReg, _has_unboxed_float: bool, _payload_bits: u8, _tag_mask: u64, _expected_tag: u64) { todo!("x64 is_tag") }
-    fn emit_make_tagged(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _payload: MachineReg, _has_unboxed_float: bool, _payload_bits: u8, _encoded_tag_pattern: u64, _tag: u64) { todo!("x64 make_tagged") }
-    fn emit_tag_of(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _src: MachineReg, _has_unboxed_float: bool, _payload_bits: u8, _tag_mask: u64) { todo!("x64 tag_of") }
-    fn emit_call_safepoint_handler(_buf: &mut CodeBuffer<Self::Arch>, _handler: u64, _frame_size: u64) { todo!("x64 safepoint handler") }
-    fn emit_lea_frame_slot(_buf: &mut CodeBuffer<Self::Arch>, _dst: MachineReg, _slot: FrameSlotAccess) { todo!("x64 lea frame slot") }
+    fn emit_extract_payload(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        src: MachineReg,
+        has_unboxed_float: bool,
+        payload_bits: u8,
+    ) {
+        let dst_hw = Self::gp_hw(dst);
+        if dst_hw.index != Self::gp_hw(src).index {
+            buf.emit(X64Inst::MovRR {
+                dest: dst_hw,
+                src: Self::gp_hw(src),
+            });
+        }
+        if has_unboxed_float {
+            let mask = (1u64 << payload_bits) - 1;
+            Self::emit_mov_imm_to_hw(buf, R11, mask);
+            buf.emit(X64Inst::AndRR {
+                dest: dst_hw,
+                src: R11,
+            });
+        } else {
+            buf.emit(X64Inst::ShrRI {
+                dest: dst_hw,
+                imm: 64 - payload_bits,
+            });
+        }
+    }
+    fn emit_is_tag(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        src: MachineReg,
+        has_unboxed_float: bool,
+        payload_bits: u8,
+        tag_mask: u64,
+        expected_tag: u64,
+    ) {
+        let dst_hw = Self::gp_hw(dst);
+        buf.emit(X64Inst::MovRR {
+            dest: dst_hw,
+            src: Self::gp_hw(src),
+        });
+        if has_unboxed_float {
+            buf.emit(X64Inst::ShrRI {
+                dest: dst_hw,
+                imm: payload_bits,
+            });
+        } else {
+            Self::emit_mov_imm_to_hw(buf, R11, tag_mask);
+            buf.emit(X64Inst::AndRR {
+                dest: dst_hw,
+                src: R11,
+            });
+        }
+        Self::emit_cmp_gp_imm(buf, dst, expected_tag);
+        buf.emit(X64Inst::MovRI32 {
+            dest: dst_hw,
+            imm: 0,
+        });
+        buf.emit(X64Inst::Setcc {
+            dest: Self::gp_hw8(dst),
+            cond: X64Cond::E,
+        });
+    }
+    fn emit_make_tagged(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        payload: MachineReg,
+        has_unboxed_float: bool,
+        payload_bits: u8,
+        encoded_tag_pattern: u64,
+        tag: u64,
+    ) {
+        let dst_hw = Self::gp_hw(dst);
+        buf.emit(X64Inst::MovRR {
+            dest: dst_hw,
+            src: Self::gp_hw(payload),
+        });
+        if has_unboxed_float {
+            Self::emit_mov_imm_to_hw(buf, R11, encoded_tag_pattern);
+            buf.emit(X64Inst::OrRR {
+                dest: dst_hw,
+                src: R11,
+            });
+        } else {
+            buf.emit(X64Inst::ShlRI {
+                dest: dst_hw,
+                imm: 64 - payload_bits,
+            });
+            if tag != 0 {
+                Self::emit_mov_imm_to_hw(buf, R11, tag);
+                buf.emit(X64Inst::OrRR {
+                    dest: dst_hw,
+                    src: R11,
+                });
+            }
+        }
+    }
+    fn emit_tag_of(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        src: MachineReg,
+        has_unboxed_float: bool,
+        payload_bits: u8,
+        tag_mask: u64,
+    ) {
+        let dst_hw = Self::gp_hw(dst);
+        buf.emit(X64Inst::MovRR {
+            dest: dst_hw,
+            src: Self::gp_hw(src),
+        });
+        if has_unboxed_float {
+            buf.emit(X64Inst::ShrRI {
+                dest: dst_hw,
+                imm: payload_bits,
+            });
+        }
+        Self::emit_mov_imm_to_hw(buf, R11, tag_mask);
+        buf.emit(X64Inst::AndRR {
+            dest: dst_hw,
+            src: R11,
+        });
+    }
+    fn emit_call_safepoint_handler(
+        buf: &mut CodeBuffer<Self::Arch>,
+        handler: u64,
+        frame_size: u64,
+    ) {
+        buf.emit(X64Inst::MovRR {
+            dest: RDI,
+            src: RBP,
+        });
+        Self::emit_mov_imm_to_hw(buf, RSI, frame_size);
+        Self::emit_mov_imm_to_hw(buf, R11, handler);
+        buf.emit(X64Inst::CallR { target: R11 });
+    }
+    fn emit_lea_frame_slot(
+        buf: &mut CodeBuffer<Self::Arch>,
+        dst: MachineReg,
+        slot: FrameSlotAccess,
+    ) {
+        buf.emit(X64Inst::Lea {
+            dest: Self::gp_hw(dst),
+            base: Self::slot_base_reg(slot),
+            offset: slot.offset,
+        });
+    }
 
-    fn bind_label(buf: &mut CodeBuffer<Self::Arch>, label: Label) { buf.bind_label(label); }
+    fn bind_label(buf: &mut CodeBuffer<Self::Arch>, label: Label) {
+        buf.bind_label(label);
+    }
     fn emit_branch_to_label(buf: &mut CodeBuffer<Self::Arch>, label: Label) {
         let off = buf.emit(X64Inst::Jmp { offset: 0 });
         buf.add_reloc(off + 1, label, X64RelocKind::Rel32);
     }
     fn emit_cbz_to_label(buf: &mut CodeBuffer<Self::Arch>, reg: MachineReg, label: Label) {
-        buf.emit(X64Inst::TestRR { a: Self::gp_hw(reg), b: Self::gp_hw(reg) });
-        let off = buf.emit(X64Inst::Jcc { offset: 0, cond: X64Cond::E });
+        buf.emit(X64Inst::TestRR {
+            a: Self::gp_hw(reg),
+            b: Self::gp_hw(reg),
+        });
+        let off = buf.emit(X64Inst::Jcc {
+            offset: 0,
+            cond: X64Cond::E,
+        });
         buf.add_reloc(off + 2, label, X64RelocKind::Rel32);
     }
     fn emit_cbnz_to_label(buf: &mut CodeBuffer<Self::Arch>, reg: MachineReg, label: Label) {
-        buf.emit(X64Inst::TestRR { a: Self::gp_hw(reg), b: Self::gp_hw(reg) });
-        let off = buf.emit(X64Inst::Jcc { offset: 0, cond: X64Cond::NE });
+        buf.emit(X64Inst::TestRR {
+            a: Self::gp_hw(reg),
+            b: Self::gp_hw(reg),
+        });
+        let off = buf.emit(X64Inst::Jcc {
+            offset: 0,
+            cond: X64Cond::NE,
+        });
         buf.add_reloc(off + 2, label, X64RelocKind::Rel32);
     }
     fn emit_branch_eq_to_label(buf: &mut CodeBuffer<Self::Arch>, label: Label) {
-        let off = buf.emit(X64Inst::Jcc { offset: 0, cond: X64Cond::E });
+        let off = buf.emit(X64Inst::Jcc {
+            offset: 0,
+            cond: X64Cond::E,
+        });
         buf.add_reloc(off + 2, label, X64RelocKind::Rel32);
     }
-    fn emit_call_reg(buf: &mut CodeBuffer<Self::Arch>, reg: MachineReg) { buf.emit(X64Inst::CallR { target: Self::gp_hw(reg) }); }
+    fn emit_call_reg(buf: &mut CodeBuffer<Self::Arch>, reg: MachineReg) {
+        buf.emit(X64Inst::CallR {
+            target: Self::gp_hw(reg),
+        });
+    }
     fn emit_return_gp(buf: &mut CodeBuffer<Self::Arch>, src: MachineReg) {
         if src.index != 0 {
-            buf.emit(X64Inst::MovRR { dest: RAX, src: Self::gp_hw(src) });
+            buf.emit(X64Inst::MovRR {
+                dest: RAX,
+                src: Self::gp_hw(src),
+            });
         }
     }
     fn emit_return_fp_bits(buf: &mut CodeBuffer<Self::Arch>, src: MachineReg) {
-        buf.emit(X64Inst::MovqRX { dest: RAX, src: Self::fp_hw(src) });
+        buf.emit(X64Inst::MovqRX {
+            dest: RAX,
+            src: Self::fp_hw(src),
+        });
     }
     fn emit_stack_adjust(buf: &mut CodeBuffer<Self::Arch>, amount: i32) {
         if amount >= 0 {
-            buf.emit(X64Inst::SubRI { dest: RSP, imm: amount });
+            buf.emit(X64Inst::SubRI {
+                dest: RSP,
+                imm: amount,
+            });
         } else {
-            buf.emit(X64Inst::AddRI { dest: RSP, imm: -amount });
+            buf.emit(X64Inst::AddRI {
+                dest: RSP,
+                imm: -amount,
+            });
         }
     }
-    fn emit_trap(buf: &mut CodeBuffer<Self::Arch>) { buf.emit(X64Inst::Int3); }
+    fn emit_trap(buf: &mut CodeBuffer<Self::Arch>) {
+        buf.emit(X64Inst::Int3);
+    }
 }

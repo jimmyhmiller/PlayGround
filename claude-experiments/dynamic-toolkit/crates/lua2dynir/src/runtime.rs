@@ -378,15 +378,7 @@ fn table_set_rooted(
             let (hc, hcap, array_len, array_cap) = table_read_meta(table_ptr);
             if idx <= array_len + 1 {
                 table_array_set_rooted(
-                    heap,
-                    roots,
-                    table_root,
-                    val_root,
-                    idx,
-                    hc,
-                    hcap,
-                    array_len,
-                    array_cap,
+                    heap, roots, table_root, val_root, idx, hc, hcap, array_len, array_cap,
                 );
                 return;
             }
@@ -438,8 +430,8 @@ fn table_array_set_rooted(
     if idx > array_len {
         array_len = idx;
     }
-    let table_ptr = table_ptr_from_boxed(roots.get(table_root))
-        .expect("rooted table value must stay a table");
+    let table_ptr =
+        table_ptr_from_boxed(roots.get(table_root)).expect("rooted table value must stay a table");
     table_write_meta(table_ptr, hash_count, hash_cap, array_len, array_cap);
 
     let arr = table_get_array_ptr(table_ptr).unwrap();
@@ -460,8 +452,8 @@ fn table_hash_set_rooted(
     key_root: ScopedJitRoot,
     val_root: ScopedJitRoot,
 ) {
-    let table_ptr = table_ptr_from_boxed(roots.get(table_root))
-        .expect("rooted table value must stay a table");
+    let table_ptr =
+        table_ptr_from_boxed(roots.get(table_root)).expect("rooted table value must stay a table");
     let (mut hash_count, mut hash_cap, array_len, array_cap) = table_read_meta(table_ptr);
     let nil = make_nil();
 
@@ -565,8 +557,8 @@ fn table_hash_set_rooted(
         table_write_meta(table_ptr, hash_count, hash_cap, array_len, array_cap);
     }
 
-    let table_ptr = table_ptr_from_boxed(roots.get(table_root))
-        .expect("rooted table value must stay a table");
+    let table_ptr =
+        table_ptr_from_boxed(roots.get(table_root)).expect("rooted table value must stay a table");
     let hash_arr = table_get_hash_ptr(table_ptr).unwrap();
     let key = roots.get(key_root);
     let mask = hash_cap - 1;
@@ -605,6 +597,7 @@ pub struct LuaRuntime {
     pub constants: Vec<String>,
     /// Register file snapshot for passing args to calls
     pub register_file: Vec<u64>,
+    pub mirror_stack: Vec<usize>,
     /// Captured output from print
     pub output: String,
 }
@@ -628,6 +621,7 @@ impl LuaRuntime {
             globals: HashMap::new(),
             constants: string_constants,
             register_file: Vec::new(),
+            mirror_stack: Vec::new(),
             output: String::new(),
         };
 
@@ -959,7 +953,13 @@ impl LuaRuntime {
         });
     }
 
-    pub fn lua_setlist_from_regfile(&mut self, table: u64, base: usize, offset: usize, count: usize) {
+    pub fn lua_setlist_from_regfile(
+        &mut self,
+        table: u64,
+        base: usize,
+        offset: usize,
+        count: usize,
+    ) {
         if !is_table(table) {
             return;
         }
@@ -1038,7 +1038,9 @@ impl LuaRuntime {
             }
             1 => {
                 // type(val) → string name
-                if nargs < 1 { return make_nil(); }
+                if nargs < 1 {
+                    return make_nil();
+                }
                 let v = self.register_file[base_reg];
                 let type_name = if is_nil(v) {
                     "nil"
@@ -1072,7 +1074,9 @@ impl LuaRuntime {
             }
             2 => {
                 // tostring(val)
-                if nargs < 1 { return make_nil(); }
+                if nargs < 1 {
+                    return make_nil();
+                }
                 let v = self.register_file[base_reg];
                 let s = self.value_to_string(v);
                 make_string_on_heap(self.heap_ref(), &s)

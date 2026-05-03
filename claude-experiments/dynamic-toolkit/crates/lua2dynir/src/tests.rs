@@ -4,7 +4,7 @@ use std::process::Command;
 
 use dynir::dynexec::{
     AArch64InternalCc, CodegenConfig, PreciseStackRoots, StackMapFrames, StackMapRoots,
-    StackMapSafepoints,
+    StackMapSafepoints, X64SysVCAbi,
 };
 #[allow(unused_imports)]
 use dynlower::{JitFunction, SafepointHandlerPayloadKind, SafepointRecord, call_jit};
@@ -27,7 +27,7 @@ use crate::translate::{self, TranslatedFunction};
 struct JitContext {
     rt: *mut LuaRuntime,
     child_jit_ptrs: Vec<*const u8>,
-    child_info: Vec<(u8, u8)>,      // (num_params, is_vararg) per child
+    child_info: Vec<(u8, u8)>, // (num_params, is_vararg) per child
     /// child_offsets[global_id] = global index where that proto's children start.
     child_offsets: Vec<usize>,
     /// Current function's child offset — `local_bx + current_child_offset = global_id`.
@@ -46,11 +46,16 @@ fn with_jit_ctx<R>(f: impl FnOnce(&JitContext, &mut LuaRuntime) -> R) -> R {
 }
 
 struct LuaJitStackMapConfig;
+#[cfg(target_arch = "aarch64")]
+type LuaJitCc = AArch64InternalCc;
+#[cfg(target_arch = "x86_64")]
+type LuaJitCc = X64SysVCAbi;
+
 impl CodegenConfig for LuaJitStackMapConfig {
     type Layout = NanBox;
     type Roots = PreciseStackRoots;
     type RootTransport = StackMapRoots;
-    type CallingConvention = AArch64InternalCc;
+    type CallingConvention = LuaJitCc;
     type Frames = StackMapFrames;
     type Safepoints = StackMapSafepoints;
 }
@@ -253,7 +258,6 @@ extern "C" fn jit_lua_call(func: u64, base: u64, nargs: u64) -> u64 {
 
             // Read args from register_file
             let args: Vec<u64> = (0..nargs).map(|i| rt.register_file[base + i]).collect();
-
             // Set child_offset for the callee's scope (no constant swap needed —
             // string constants use global indices).
             let saved_offset = ctx.current_child_offset;
@@ -310,6 +314,37 @@ extern "C" fn jit_lua_store_reg(idx: u64, val: u64) -> u64 {
     })
 }
 
+extern "C" fn jit_lua_load_reg(idx: u64) -> u64 {
+    with_jit_ctx(|_, rt| {
+        rt.register_file
+            .get(idx as usize)
+            .copied()
+            .unwrap_or_else(make_nil)
+    })
+}
+
+extern "C" fn jit_lua_push_frame_mirror(count: u64) -> u64 {
+    with_jit_ctx(|_, rt| {
+        let base = rt.register_file.len();
+        rt.register_file.resize(base + count as usize, make_nil());
+        rt.mirror_stack.push(base);
+        base as u64
+    })
+}
+
+extern "C" fn jit_lua_pop_frame_mirror(base: u64) -> u64 {
+    with_jit_ctx(|_, rt| {
+        let base = base as usize;
+        let popped = rt
+            .mirror_stack
+            .pop()
+            .expect("lua frame mirror stack underflow");
+        assert_eq!(popped, base, "lua frame mirror stack popped out of order");
+        rt.register_file.truncate(base);
+        0
+    })
+}
+
 /// Remap a local proto index (bx from CLOSURE instruction) to a global func_id.
 fn remap_func_id(ctx: &JitContext, local_bx: usize) -> usize {
     ctx.current_child_offset + local_bx
@@ -329,9 +364,7 @@ extern "C" fn jit_lua_make_closure_1(func_id: u64, _num: u64, u0: u64) -> u64 {
     let global_id = remap_func_id(ctx, func_id as usize);
     let mut roots = ScopedJitRoots::new();
     let up0 = roots.push(u0);
-    roots.with_active(|| {
-        runtime::make_closure_from_roots(rt.heap_ref(), global_id, &roots, &[up0])
-    })
+    roots.with_active(|| runtime::make_closure_from_roots(rt.heap_ref(), global_id, &roots, &[up0]))
 }
 extern "C" fn jit_lua_make_closure_2(func_id: u64, _num: u64, u0: u64, u1: u64) -> u64 {
     let ctx_ptr = JIT_CTX.with(|c| c.get());
@@ -408,6 +441,9 @@ fn jit_extern_ptrs() -> Vec<*const u8> {
         jit_lua_is_nil as *const u8,
         jit_lua_self as *const u8,
         jit_lua_store_reg as *const u8,
+        jit_lua_load_reg as *const u8,
+        jit_lua_push_frame_mirror as *const u8,
+        jit_lua_pop_frame_mirror as *const u8,
         jit_lua_make_closure as *const u8,
         jit_lua_make_closure_1 as *const u8,
         jit_lua_make_closure_2 as *const u8,
@@ -435,7 +471,9 @@ fn compile_lua(source: &str) -> Vec<u8> {
     let status = Command::new(&luac)
         .args(["-o", out_path.to_str().unwrap(), src_path.to_str().unwrap()])
         .status()
-        .unwrap_or_else(|_| panic!("failed to run luac at {luac} — run `make macosx` in lua-5.1.5/"));
+        .unwrap_or_else(|_| {
+            panic!("failed to run luac at {luac} — run `make macosx` in lua-5.1.5/")
+        });
 
     assert!(status.success(), "luac compilation failed");
     let data = std::fs::read(&out_path).unwrap();
@@ -481,18 +519,18 @@ fn build_string_remap(
     global_strings: &mut Vec<String>,
     string_index_map: &mut HashMap<String, usize>,
 ) -> Vec<usize> {
-    proto.constants.iter().map(|c| {
-        match c {
-            Constant::String(s) => {
-                *string_index_map.entry(s.clone()).or_insert_with(|| {
-                    let idx = global_strings.len();
-                    global_strings.push(s.clone());
-                    idx
-                })
-            }
+    proto
+        .constants
+        .iter()
+        .map(|c| match c {
+            Constant::String(s) => *string_index_map.entry(s.clone()).or_insert_with(|| {
+                let idx = global_strings.len();
+                global_strings.push(s.clone());
+                idx
+            }),
             _ => 0,
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 fn run_lua(source: &str) -> (u64, LuaRuntime) {
@@ -503,15 +541,28 @@ fn run_lua_with_heap(source: &str, heap_size: usize) -> (u64, LuaRuntime) {
     run_lua_with_opts(source, heap_size, &dynir::opt::OptConfig::all())
 }
 
-fn run_lua_linear_scan(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig) -> (u64, LuaRuntime) {
+fn run_lua_linear_scan(
+    source: &str,
+    heap_size: usize,
+    opt: &dynir::opt::OptConfig,
+) -> (u64, LuaRuntime) {
     run_lua_inner(source, heap_size, opt, true)
 }
 
-fn run_lua_with_opts(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig) -> (u64, LuaRuntime) {
+fn run_lua_with_opts(
+    source: &str,
+    heap_size: usize,
+    opt: &dynir::opt::OptConfig,
+) -> (u64, LuaRuntime) {
     run_lua_inner(source, heap_size, opt, false)
 }
 
-fn run_lua_inner(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig, use_linear_scan: bool) -> (u64, LuaRuntime) {
+fn run_lua_inner(
+    source: &str,
+    heap_size: usize,
+    opt: &dynir::opt::OptConfig,
+    use_linear_scan: bool,
+) -> (u64, LuaRuntime) {
     let gc_heap_size = Some(heap_size);
     let bytecode_data = compile_lua(source);
     let mut chunk = bytecode::parse(&bytecode_data).expect("bytecode parse failed");
@@ -522,9 +573,8 @@ fn run_lua_inner(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig, us
     let mut global_strings: Vec<String> = Vec::new();
     let mut string_index_map: HashMap<String, usize> = HashMap::new();
 
-    let main_string_remap = build_string_remap(
-        &chunk.main, &mut global_strings, &mut string_index_map,
-    );
+    let main_string_remap =
+        build_string_remap(&chunk.main, &mut global_strings, &mut string_index_map);
     let child_string_remaps: Vec<Vec<usize>> = all_protos
         .iter()
         .map(|p| build_string_remap(p, &mut global_strings, &mut string_index_map))
@@ -556,10 +606,10 @@ fn run_lua_inner(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig, us
     let extern_ptrs = jit_extern_ptrs();
     let compile_fn = |func: &dynir::Function, externs: &[*const u8]| -> JitFunction {
         if use_linear_scan {
-            JitFunction::compile_with_gc_linear_scan::<NanBox>(
+            JitFunction::compile_with_config_and_gc_linear_scan::<LuaJitStackMapConfig>(
                 func,
                 externs,
-                active_jit_safepoint_handler,
+                Some(active_jit_safepoint_handler as u64),
             )
         } else {
             JitFunction::compile_with_config_and_gc::<LuaJitStackMapConfig>(
@@ -587,17 +637,19 @@ fn run_lua_inner(source: &str, heap_size: usize, opt: &dynir::opt::OptConfig, us
 
     let transport = LuaJitTransport {
         register_file: &rt.register_file as *const Vec<u64>,
-        precise_frame_roots: !use_linear_scan,
+        precise_frame_roots: true,
     };
     let threshold = if gc_enabled { 0.75 } else { f64::INFINITY };
     let session = JitSafepointSession::<NanBoxPtrPolicy, LuaJitTransport>::new(
-        roots.heap(), transport, main_jit.safepoints(),
-    ).with_gc_threshold(threshold);
+        roots.heap(),
+        transport,
+        main_jit.safepoints(),
+    )
+    .with_gc_threshold(threshold);
 
     let call_args = LuaCallArgs::for_proto(&chunk.main, make_nil(), &[]);
-    let result = session.with_installed(|| {
-        unsafe { call_jit(main_jit.as_ptr(), &call_args.abi_args) }
-    });
+    let result =
+        session.with_installed(|| unsafe { call_jit(main_jit.as_ptr(), &call_args.abi_args) });
 
     JIT_CTX.with(|c| c.set(std::ptr::null_mut()));
 
@@ -1673,7 +1725,8 @@ fn test_table_bench_multi_closure() {
     // Regression: multiple closures in the same chunk used to get corrupted
     // by the GC because the safepoint handler only scanned the innermost
     // JIT frame, not parent frames holding other closure pointers.
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local function f1(n)
             local t = {}
             for i = 1, n do t[i] = i end
@@ -1691,7 +1744,8 @@ fn test_table_bench_multi_closure() {
         local a = f1(10)
         local b = f2(10)
         return a + b
-    "#);
+    "#,
+    );
     // 55 + 385 = 440
     assert_eq!(as_number(result), 440.0);
 }
@@ -1708,7 +1762,8 @@ fn test_table_bench_multi_closure() {
 fn test_gc_multi_closure_stress() {
     let heap_size = 32 * 1024; // 32KB — each semi-space is 16KB
 
-    let bytecode_data = compile_lua(r#"
+    let bytecode_data = compile_lua(
+        r#"
         local function f1(n)
             local sum = 0
             for i = 1, n do
@@ -1728,15 +1783,15 @@ fn test_gc_multi_closure_stress() {
         local a = f1(5000)
         local b = f2(10)
         return a + b
-    "#);
+    "#,
+    );
     let chunk = bytecode::parse(&bytecode_data).expect("bytecode parse failed");
     let (all_protos, child_offsets) = flatten_all_protos(&chunk.main);
 
     let mut global_strings: Vec<String> = Vec::new();
     let mut string_index_map: HashMap<String, usize> = HashMap::new();
-    let main_string_remap = build_string_remap(
-        &chunk.main, &mut global_strings, &mut string_index_map,
-    );
+    let main_string_remap =
+        build_string_remap(&chunk.main, &mut global_strings, &mut string_index_map);
     let child_string_remaps: Vec<Vec<usize>> = all_protos
         .iter()
         .map(|p| build_string_remap(p, &mut global_strings, &mut string_index_map))
@@ -1794,13 +1849,15 @@ fn test_gc_multi_closure_stress() {
         precise_frame_roots: true,
     };
     let session = JitSafepointSession::<NanBoxPtrPolicy, LuaJitTransport>::new(
-        roots.heap(), transport, main_jit.safepoints(),
-    ).with_gc_threshold(0.75);
+        roots.heap(),
+        transport,
+        main_jit.safepoints(),
+    )
+    .with_gc_threshold(0.75);
 
     let call_args = LuaCallArgs::for_proto(&chunk.main, make_nil(), &[]);
-    let result = session.with_installed(|| {
-        unsafe { call_jit(main_jit.as_ptr(), &call_args.abi_args) }
-    });
+    let result =
+        session.with_installed(|| unsafe { call_jit(main_jit.as_ptr(), &call_args.abi_args) });
 
     JIT_CTX.with(|c| c.set(std::ptr::null_mut()));
 
@@ -1821,44 +1878,53 @@ fn test_gc_multi_closure_stress() {
 #[test]
 fn test_nested_call_as_arg() {
     // Simple: g(f(10))
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local function f(x) return x end
         local function g(x) return x * 2 end
         local r = g(f(10))
         return r
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 20.0);
 
     // Two args from nested calls: h(f(3), g(4))
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local function f(x) return x + 1 end
         local function g(x) return x * 2 end
         local function h(a, b) return a + b end
         return h(f(3), g(4))
-    "#);
+    "#,
+    );
     // f(3)=4, g(4)=8, h(4,8)=12
     assert_eq!(as_number(result), 12.0);
 
     // Three levels deep: f(g(h(5)))
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local function f(x) return x + 1 end
         local function g(x) return x * 2 end
         local function h(x) return x * 3 end
         return f(g(h(5)))
-    "#);
+    "#,
+    );
     // h(5)=15, g(15)=30, f(30)=31
     assert_eq!(as_number(result), 31.0);
 
     // Nested calls as function args: binop("+", num(3), num(4))
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local function num(n) return n end
         local function binop(op, a, b) return a + b end
         return binop("+", num(3), num(4))
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 7.0);
 
     // Higher-order: fold
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local function fold(t, init, f)
             local acc = init
             for i = 1, #t do
@@ -1871,11 +1937,13 @@ fn test_nested_call_as_arg() {
         t[2] = 20
         t[3] = 30
         return fold(t, 0, function(a, b) return a + b end)
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 60.0);
 
     // Forward-declared self-referencing closure
-    let (result, _) = run_lua(r#"
+    let (result, _) = run_lua(
+        r#"
         local function make_counter()
             local count
             count = function(n)
@@ -1886,7 +1954,8 @@ fn test_nested_call_as_arg() {
         end
         local f = make_counter()
         return f(5)
-    "#);
+    "#,
+    );
     assert_eq!(as_number(result), 5.0);
 }
 
@@ -1905,9 +1974,8 @@ fn bench_table_heavy_jit() {
 
     let mut global_strings: Vec<String> = Vec::new();
     let mut string_index_map: HashMap<String, usize> = HashMap::new();
-    let main_string_remap = build_string_remap(
-        &chunk.main, &mut global_strings, &mut string_index_map,
-    );
+    let main_string_remap =
+        build_string_remap(&chunk.main, &mut global_strings, &mut string_index_map);
     let child_string_remaps: Vec<Vec<usize>> = all_protos
         .iter()
         .map(|p| build_string_remap(p, &mut global_strings, &mut string_index_map))
@@ -1952,8 +2020,9 @@ fn bench_table_heavy_jit() {
     for _ in 0..iterations {
         // Fresh runtime state each iteration
         let heap_size = 64 * 1024 * 1024;
-        let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size, crate::runtime::type_table())
-            .with_gc_threshold(0.75);
+        let roots =
+            MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size, crate::runtime::type_table())
+                .with_gc_threshold(0.75);
         let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
         rt.constants = global_strings.clone();
 
@@ -1966,20 +2035,22 @@ fn bench_table_heavy_jit() {
         };
         JIT_CTX.with(|c| c.set(&mut jit_ctx as *mut JitContext));
 
-    let transport = LuaJitTransport {
-        register_file: &rt.register_file as *const Vec<u64>,
-        precise_frame_roots: true,
-    };
+        let transport = LuaJitTransport {
+            register_file: &rt.register_file as *const Vec<u64>,
+            precise_frame_roots: true,
+        };
         let session = JitSafepointSession::<NanBoxPtrPolicy, LuaJitTransport>::new(
-            roots.heap(), transport, main_jit.safepoints(),
-        ).with_gc_threshold(0.75);
+            roots.heap(),
+            transport,
+            main_jit.safepoints(),
+        )
+        .with_gc_threshold(0.75);
 
         let call_args = LuaCallArgs::for_proto(&chunk.main, make_nil(), &[]);
 
         let start = std::time::Instant::now();
-        let result = session.with_installed(|| {
-            unsafe { call_jit(main_jit.as_ptr(), &call_args.abi_args) }
-        });
+        let result =
+            session.with_installed(|| unsafe { call_jit(main_jit.as_ptr(), &call_args.abi_args) });
         let elapsed = start.elapsed();
 
         JIT_CTX.with(|c| c.set(std::ptr::null_mut()));
@@ -1992,7 +2063,10 @@ fn bench_table_heavy_jit() {
     let min = times.iter().min().unwrap();
     let max = times.iter().max().unwrap();
 
-    eprintln!("\n── JIT table benchmark ({} runs, exec only) ──", iterations);
+    eprintln!(
+        "\n── JIT table benchmark ({} runs, exec only) ──",
+        iterations
+    );
     eprintln!("  avg: {:?}", avg);
     eprintln!("  min: {:?}", min);
     eprintln!("  max: {:?}", max);
@@ -2025,7 +2099,10 @@ fn bench_table_heavy_jit() {
     let lua_min = lua_times.iter().min().unwrap();
     let lua_max = lua_times.iter().max().unwrap();
 
-    eprintln!("\n── Lua 5.1 interpreter ({} runs, includes parse) ──", iterations);
+    eprintln!(
+        "\n── Lua 5.1 interpreter ({} runs, includes parse) ──",
+        iterations
+    );
     eprintln!("  avg: {:?}", lua_avg);
     eprintln!("  min: {:?}", lua_min);
     eprintln!("  max: {:?}", lua_max);
@@ -2062,40 +2139,60 @@ fn opt_test_expected() -> f64 {
 
 #[test]
 fn test_opt_none() {
-    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &dynir::opt::OptConfig::none());
+    let (r, _) = run_lua_with_opts(
+        OPT_TEST_SRC,
+        64 * 1024 * 1024,
+        &dynir::opt::OptConfig::none(),
+    );
     assert_eq!(as_number(r), opt_test_expected());
 }
 
 #[test]
 fn test_opt_all() {
-    let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    let (r, _) = run_lua_with_opts(
+        OPT_TEST_SRC,
+        64 * 1024 * 1024,
+        &dynir::opt::OptConfig::all(),
+    );
     assert_eq!(as_number(r), opt_test_expected());
 }
 
 #[test]
 fn test_opt_mem2reg_only() {
-    let cfg = dynir::opt::OptConfig { mem2reg: true, ..dynir::opt::OptConfig::none() };
+    let cfg = dynir::opt::OptConfig {
+        mem2reg: true,
+        ..dynir::opt::OptConfig::none()
+    };
     let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
     assert_eq!(as_number(r), opt_test_expected());
 }
 
 #[test]
 fn test_opt_constfold_only() {
-    let cfg = dynir::opt::OptConfig { constant_fold: true, ..dynir::opt::OptConfig::none() };
+    let cfg = dynir::opt::OptConfig {
+        constant_fold: true,
+        ..dynir::opt::OptConfig::none()
+    };
     let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
     assert_eq!(as_number(r), opt_test_expected());
 }
 
 #[test]
 fn test_opt_gvn_only() {
-    let cfg = dynir::opt::OptConfig { gvn: true, ..dynir::opt::OptConfig::none() };
+    let cfg = dynir::opt::OptConfig {
+        gvn: true,
+        ..dynir::opt::OptConfig::none()
+    };
     let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
     assert_eq!(as_number(r), opt_test_expected());
 }
 
 #[test]
 fn test_opt_dce_only() {
-    let cfg = dynir::opt::OptConfig { dce: true, ..dynir::opt::OptConfig::none() };
+    let cfg = dynir::opt::OptConfig {
+        dce: true,
+        ..dynir::opt::OptConfig::none()
+    };
     let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
     assert_eq!(as_number(r), opt_test_expected());
 }
@@ -2103,21 +2200,32 @@ fn test_opt_dce_only() {
 #[test]
 fn test_opt_licm_only() {
     // LICM alone (without mem2reg) should be a no-op but must not break anything.
-    let cfg = dynir::opt::OptConfig { licm: true, ..dynir::opt::OptConfig::none() };
+    let cfg = dynir::opt::OptConfig {
+        licm: true,
+        ..dynir::opt::OptConfig::none()
+    };
     let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
     assert_eq!(as_number(r), opt_test_expected());
 }
 
 #[test]
 fn test_opt_mem2reg_gvn() {
-    let cfg = dynir::opt::OptConfig { mem2reg: true, gvn: true, ..dynir::opt::OptConfig::none() };
+    let cfg = dynir::opt::OptConfig {
+        mem2reg: true,
+        gvn: true,
+        ..dynir::opt::OptConfig::none()
+    };
     let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
     assert_eq!(as_number(r), opt_test_expected());
 }
 
 #[test]
 fn test_opt_mem2reg_licm() {
-    let cfg = dynir::opt::OptConfig { mem2reg: true, licm: true, ..dynir::opt::OptConfig::none() };
+    let cfg = dynir::opt::OptConfig {
+        mem2reg: true,
+        licm: true,
+        ..dynir::opt::OptConfig::none()
+    };
     let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
     assert_eq!(as_number(r), opt_test_expected());
 }
@@ -2125,7 +2233,11 @@ fn test_opt_mem2reg_licm() {
 #[test]
 fn test_opt_mem2reg_constfold_gvn_dce() {
     let cfg = dynir::opt::OptConfig {
-        mem2reg: true, constant_fold: true, gvn: true, dce: true, licm: false,
+        mem2reg: true,
+        constant_fold: true,
+        gvn: true,
+        dce: true,
+        licm: false,
         ..dynir::opt::OptConfig::all()
     };
     let (r, _) = run_lua_with_opts(OPT_TEST_SRC, 64 * 1024 * 1024, &cfg);
@@ -2135,54 +2247,70 @@ fn test_opt_mem2reg_constfold_gvn_dce() {
 #[test]
 fn test_opt_all_closures() {
     // Exercises closures under full optimization.
-    let (r, _) = run_lua_with_opts(r#"
+    let (r, _) = run_lua_with_opts(
+        r#"
         local function make_adder(x)
             return function(y) return x + y end
         end
         local add5 = make_adder(5)
         local add10 = make_adder(10)
         return add5(3) + add10(7)
-    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    "#,
+        64 * 1024 * 1024,
+        &dynir::opt::OptConfig::all(),
+    );
     assert_eq!(as_number(r), 25.0);
 }
 
 #[test]
 fn test_opt_all_recursive() {
     // Exercises recursive calls under full optimization.
-    let (r, _) = run_lua_with_opts(r#"
+    let (r, _) = run_lua_with_opts(
+        r#"
         local function fib(n)
             if n < 2 then return n end
             return fib(n - 1) + fib(n - 2)
         end
         return fib(15)
-    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    "#,
+        64 * 1024 * 1024,
+        &dynir::opt::OptConfig::all(),
+    );
     assert_eq!(as_number(r), 610.0);
 }
 
 #[test]
 fn test_opt_none_closures() {
     // Same closure test with NO optimization.
-    let (r, _) = run_lua_with_opts(r#"
+    let (r, _) = run_lua_with_opts(
+        r#"
         local function make_adder(x)
             return function(y) return x + y end
         end
         local add5 = make_adder(5)
         local add10 = make_adder(10)
         return add5(3) + add10(7)
-    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::none());
+    "#,
+        64 * 1024 * 1024,
+        &dynir::opt::OptConfig::none(),
+    );
     assert_eq!(as_number(r), 25.0);
 }
 
 #[test]
 fn test_opt_none_recursive() {
     // Same recursive test with NO optimization.
-    let (r, _) = run_lua_with_opts(r#"
+    let (r, _) = run_lua_with_opts(
+        r#"
         local function fib(n)
             if n < 2 then return n end
             return fib(n - 1) + fib(n - 2)
         end
         return fib(15)
-    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::none());
+    "#,
+        64 * 1024 * 1024,
+        &dynir::opt::OptConfig::none(),
+    );
     assert_eq!(as_number(r), 610.0);
 }
 
@@ -2191,38 +2319,51 @@ fn test_opt_none_recursive() {
 #[test]
 #[ignore] // TODO: SIGSEGV with table operations — linear scan needs call-site interval splitting
 fn test_linear_scan_build_and_sum() {
-    let (r, _) = run_lua_linear_scan(OPT_TEST_SRC, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    let (r, _) = run_lua_linear_scan(
+        OPT_TEST_SRC,
+        64 * 1024 * 1024,
+        &dynir::opt::OptConfig::all(),
+    );
     assert_eq!(as_number(r), opt_test_expected());
 }
 
 #[test]
 fn test_linear_scan_closures() {
-    let (r, _) = run_lua_linear_scan(r#"
+    let (r, _) = run_lua_linear_scan(
+        r#"
         local function make_adder(x)
             return function(y) return x + y end
         end
         local add5 = make_adder(5)
         local add10 = make_adder(10)
         return add5(3) + add10(7)
-    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    "#,
+        64 * 1024 * 1024,
+        &dynir::opt::OptConfig::all(),
+    );
     assert_eq!(as_number(r), 25.0);
 }
 
 #[test]
 fn test_linear_scan_recursive() {
-    let (r, _) = run_lua_linear_scan(r#"
+    let (r, _) = run_lua_linear_scan(
+        r#"
         local function fib(n)
             if n < 2 then return n end
             return fib(n - 1) + fib(n - 2)
         end
         return fib(15)
-    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    "#,
+        64 * 1024 * 1024,
+        &dynir::opt::OptConfig::all(),
+    );
     assert_eq!(as_number(r), 610.0);
 }
 
 #[test]
 fn test_linear_scan_loop_heavy() {
-    let (r, _) = run_lua_linear_scan(r#"
+    let (r, _) = run_lua_linear_scan(
+        r#"
         local function sum(n)
             local total = 0
             for i = 1, n do
@@ -2231,7 +2372,10 @@ fn test_linear_scan_loop_heavy() {
             return total
         end
         return sum(10000)
-    "#, 64 * 1024 * 1024, &dynir::opt::OptConfig::all());
+    "#,
+        64 * 1024 * 1024,
+        &dynir::opt::OptConfig::all(),
+    );
     assert_eq!(as_number(r), 50005000.0);
 }
 
@@ -2270,8 +2414,14 @@ fn test_linear_scan_benchmark() {
     eprintln!("  greedy:      {:?}", greedy_time);
     eprintln!("  linear scan: {:?}", lsra_time);
     if lsra_time < greedy_time {
-        eprintln!("  speedup:     {:.1}x", greedy_time.as_secs_f64() / lsra_time.as_secs_f64());
+        eprintln!(
+            "  speedup:     {:.1}x",
+            greedy_time.as_secs_f64() / lsra_time.as_secs_f64()
+        );
     } else {
-        eprintln!("  slowdown:    {:.1}x", lsra_time.as_secs_f64() / greedy_time.as_secs_f64());
+        eprintln!(
+            "  slowdown:    {:.1}x",
+            lsra_time.as_secs_f64() / greedy_time.as_secs_f64()
+        );
     }
 }

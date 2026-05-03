@@ -60,10 +60,10 @@ struct Translator<'a> {
     string_remap: Option<Vec<usize>>,
 
     // Stack slots for Lua registers and metadata (declared in new, addressed in emit_abi_entry)
-    reg_slots: Vec<StackSlot>,      // reg_slots[i] = stack slot for R[i]
-    closure_slot: StackSlot,        // stack slot for closure
-    vararg_count_slot: StackSlot,   // stack slot for vararg_count
-    vararg_ptr_slot: StackSlot,     // stack slot for vararg_ptr
+    reg_slots: Vec<StackSlot>,    // reg_slots[i] = stack slot for R[i]
+    closure_slot: StackSlot,      // stack slot for closure
+    vararg_count_slot: StackSlot, // stack slot for vararg_count
+    vararg_ptr_slot: StackSlot,   // stack slot for vararg_ptr
 }
 
 impl<'a> Translator<'a> {
@@ -182,6 +182,10 @@ impl<'a> Translator<'a> {
         let lua_is_nil = self.declare_extern("lua_is_nil", &[Type::I64], Some(Type::I64));
         let lua_self = self.declare_extern("lua_self", &[Type::I64, Type::I64], Some(Type::I64));
         let lua_store_reg = self.declare_extern("lua_store_reg", &[Type::I64, Type::I64], None);
+        let lua_load_reg = self.declare_extern("lua_load_reg", &[Type::I64], Some(Type::I64));
+        let lua_push_frame_mirror =
+            self.declare_extern("lua_push_frame_mirror", &[Type::I64], Some(Type::I64));
+        let lua_pop_frame_mirror = self.declare_extern("lua_pop_frame_mirror", &[Type::I64], None);
         // Closure creation externs for 0-4 upvalues
         let lua_make_closure_0 =
             self.declare_extern("lua_make_closure", &[Type::I64, Type::I64], Some(Type::I64));
@@ -239,6 +243,9 @@ impl<'a> Translator<'a> {
             lua_is_nil,
             lua_self,
             lua_store_reg,
+            lua_load_reg,
+            lua_push_frame_mirror,
+            lua_pop_frame_mirror,
             lua_make_closure_0,
             lua_make_closure_1,
             lua_make_closure_2,
@@ -365,6 +372,35 @@ impl<'a> Translator<'a> {
     fn store_reg(&mut self, i: usize, val: Value) {
         let addr = self.builder.stack_addr(self.reg_slots[i]);
         self.builder.store(val, addr, 0);
+    }
+
+    fn push_lua_frame_mirror(&mut self, ext: &ExternFuncs) -> Value {
+        let count = self.builder.iconst(Type::I64, self.num_regs as i64);
+        self.builder
+            .call(ext.lua_push_frame_mirror, &[count])
+            .unwrap()
+    }
+
+    fn pop_lua_frame_mirror(&mut self, ext: &ExternFuncs, base: Value) {
+        self.builder.call(ext.lua_pop_frame_mirror, &[base]);
+    }
+
+    fn mirror_lua_regs_to_runtime(&mut self, ext: &ExternFuncs, base: Value) {
+        for i in 0..self.num_regs {
+            let offset = self.builder.iconst(Type::I64, i as i64);
+            let idx = self.builder.add(base, offset);
+            let val = self.load_reg(i);
+            self.builder.call(ext.lua_store_reg, &[idx, val]);
+        }
+    }
+
+    fn restore_lua_regs_from_runtime(&mut self, ext: &ExternFuncs, base: Value) {
+        for i in 0..self.num_regs {
+            let offset = self.builder.iconst(Type::I64, i as i64);
+            let idx = self.builder.add(base, offset);
+            let val = self.builder.call(ext.lua_load_reg, &[idx]).unwrap();
+            self.store_reg(i, val);
+        }
     }
 
     /// Load closure from its slot.
@@ -603,7 +639,9 @@ impl<'a> Translator<'a> {
                         let mut result = self.load_reg(b);
                         for i in (b + 1)..=c {
                             let reg_i = self.load_reg(i);
-                            result = self.call_allocating_extern(ext.lua_concat, &[result, reg_i]).unwrap();
+                            result = self
+                                .call_allocating_extern(ext.lua_concat, &[result, reg_i])
+                                .unwrap();
                         }
                         self.store_reg(a, result);
                     }
@@ -727,13 +765,8 @@ impl<'a> Translator<'a> {
                         let jmp_target_block = self.pc_to_block[&jmp_target];
                         let fall_through_block = self.pc_to_block[&fall_through];
 
-                        self.builder.br_if(
-                            cond,
-                            store_block,
-                            &[],
-                            fall_through_block,
-                            &[],
-                        );
+                        self.builder
+                            .br_if(cond, store_block, &[], fall_through_block, &[]);
 
                         self.builder.switch_to_block(store_block);
                         self.store_reg(a, reg_b);
@@ -804,9 +837,13 @@ impl<'a> Translator<'a> {
                         let func_val = self.load_reg(a);
                         let base_idx = self.builder.iconst(Type::I64, 0i64);
                         let nargs_val = self.builder.iconst(Type::I64, nargs as i64);
+                        let mirror_base = self.push_lua_frame_mirror(&ext);
+                        self.mirror_lua_regs_to_runtime(&ext, mirror_base);
                         let result = self
                             .call_allocating_extern(ext.lua_call, &[func_val, base_idx, nargs_val])
                             .unwrap();
+                        self.restore_lua_regs_from_runtime(&ext, mirror_base);
+                        self.pop_lua_frame_mirror(&ext, mirror_base);
 
                         if c == 0 {
                             // Variable returns: top = A + 1 (we always return 1 value)
@@ -837,9 +874,12 @@ impl<'a> Translator<'a> {
                         let func_val = self.load_reg(a);
                         let base_idx = self.builder.iconst(Type::I64, 0i64);
                         let nargs_val = self.builder.iconst(Type::I64, nargs as i64);
+                        let mirror_base = self.push_lua_frame_mirror(&ext);
+                        self.mirror_lua_regs_to_runtime(&ext, mirror_base);
                         let result = self
                             .call_allocating_extern(ext.lua_call, &[func_val, base_idx, nargs_val])
                             .unwrap();
+                        self.pop_lua_frame_mirror(&ext, mirror_base);
                         self.builder.ret(result);
                         terminated = true;
                     }
@@ -1034,7 +1074,8 @@ impl<'a> Translator<'a> {
                         // but Lua's VM sets R(A) first. Store the closure into its own upvalue slots.
                         for &j in &self_ref_indices {
                             let raw_ptr = self.builder.payload(closure_val);
-                            self.builder.store(closure_val, raw_ptr, (24 + j * 8) as i32);
+                            self.builder
+                                .store(closure_val, raw_ptr, (24 + j * 8) as i32);
                         }
                     }
                     Some(OpCode::GetUpval) => {
@@ -1073,8 +1114,7 @@ impl<'a> Translator<'a> {
                                 let reg_idx = a + i;
                                 if reg_idx < self.num_regs {
                                     let idx = self.builder.iconst(Type::I64, i as i64);
-                                    let present =
-                                        self.builder.icmp(CmpOp::Ult, idx, vararg_count);
+                                    let present = self.builder.icmp(CmpOp::Ult, idx, vararg_count);
                                     let loaded =
                                         self.builder.load(Type::I64, vararg_ptr, (i * 8) as i32);
                                     let val = self.builder.select(present, loaded, nil);
@@ -1098,10 +1138,14 @@ impl<'a> Translator<'a> {
                         let func_val = self.load_reg(a);
                         let base_idx = self.builder.iconst(Type::I64, 0i64);
                         let nargs_val = self.builder.iconst(Type::I64, 2i64);
+                        let mirror_base = self.push_lua_frame_mirror(&ext);
+                        self.mirror_lua_regs_to_runtime(&ext, mirror_base);
                         let result = self
                             .builder
                             .call(ext.lua_call, &[func_val, base_idx, nargs_val])
                             .unwrap();
+                        self.restore_lua_regs_from_runtime(&ext, mirror_base);
+                        self.pop_lua_frame_mirror(&ext, mirror_base);
                         self.store_reg(a + 3, result);
                         if c > 1 {
                             // Additional return values would need support
@@ -1161,21 +1205,19 @@ impl<'a> Translator<'a> {
 
     /// NanBox float detection: `(bits & 0xFFFC_0000_0000_0000) != 0x7FFC_0000_0000_0000`
     fn is_nanbox_float(&mut self, v: Value) -> Value {
-        let mask = self.builder.iconst(Type::I64, 0xFFFC_0000_0000_0000u64 as i64);
-        let pattern = self.builder.iconst(Type::I64, 0x7FFC_0000_0000_0000u64 as i64);
+        let mask = self
+            .builder
+            .iconst(Type::I64, 0xFFFC_0000_0000_0000u64 as i64);
+        let pattern = self
+            .builder
+            .iconst(Type::I64, 0x7FFC_0000_0000_0000u64 as i64);
         let masked = self.builder.and(v, mask);
         self.builder.icmp(CmpOp::Ne, masked, pattern)
     }
 
     /// Emit inline NanBox binary float op with extern fallback.
     /// Uses branch to avoid the extern call overhead on the fast path.
-    fn emit_float_binop(
-        &mut self,
-        a: Value,
-        b: Value,
-        op: FloatBinOp,
-        fallback: FuncRef,
-    ) -> Value {
+    fn emit_float_binop(&mut self, a: Value, b: Value, op: FloatBinOp, fallback: FuncRef) -> Value {
         let a_is_float = self.is_nanbox_float(a);
         let b_is_float = self.is_nanbox_float(b);
         let both = self.builder.and(a_is_float, b_is_float);
@@ -1225,8 +1267,7 @@ impl<'a> Translator<'a> {
         let slow_block = self.builder.create_block(&[]);
         let merge_block = self.builder.create_block(&[Type::I64]);
 
-        self.builder
-            .br_if(both, fast_block, &[], slow_block, &[]);
+        self.builder.br_if(both, fast_block, &[], slow_block, &[]);
 
         self.builder.switch_to_block(fast_block);
         let init_f = self.builder.bitcast(init, Type::F64);
@@ -1236,10 +1277,7 @@ impl<'a> Translator<'a> {
         self.builder.jump(merge_block, &[result_i]);
 
         self.builder.switch_to_block(slow_block);
-        let slow = self
-            .builder
-            .call(fallback, &[init, limit, step])
-            .unwrap();
+        let slow = self.builder.call(fallback, &[init, limit, step]).unwrap();
         self.builder.jump(merge_block, &[slow]);
 
         self.builder.switch_to_block(merge_block);
@@ -1298,12 +1336,7 @@ impl<'a> Translator<'a> {
     }
 
     /// Emit inline GETTABLE with array fast path.
-    fn emit_inline_gettable(
-        &mut self,
-        table: Value,
-        key: Value,
-        fallback: FuncRef,
-    ) -> Value {
+    fn emit_inline_gettable(&mut self, table: Value, key: Value, fallback: FuncRef) -> Value {
         // First check: key is a NanBox float (not a tagged value).
         // We must branch before doing float_to_int, because converting
         // a NaN (tagged value) to int is undefined on ARM64.
@@ -1339,8 +1372,7 @@ impl<'a> Translator<'a> {
         let c2 = self.builder.and(c1, in_bounds);
         let all_ok = self.builder.and(c2, has_array);
 
-        self.builder
-            .br_if(all_ok, fast_block, &[], slow_block, &[]);
+        self.builder.br_if(all_ok, fast_block, &[], slow_block, &[]);
 
         // Fast path: load element from array
         self.builder.switch_to_block(fast_block);
@@ -1354,7 +1386,9 @@ impl<'a> Translator<'a> {
 
         // Slow path: call extern
         self.builder.switch_to_block(slow_block);
-        let slow = self.call_allocating_extern(fallback, &[table, key]).unwrap();
+        let slow = self
+            .call_allocating_extern(fallback, &[table, key])
+            .unwrap();
         self.builder.jump(merge_block, &[slow]);
 
         self.builder.switch_to_block(merge_block);
@@ -1363,13 +1397,7 @@ impl<'a> Translator<'a> {
 
     /// Emit inline SETTABLE with array fast path.
     #[allow(dead_code)]
-    fn emit_inline_settable(
-        &mut self,
-        table: Value,
-        key: Value,
-        val: Value,
-        fallback: FuncRef,
-    ) {
+    fn emit_inline_settable(&mut self, table: Value, key: Value, val: Value, fallback: FuncRef) {
         let key_is_float = self.is_nanbox_float(key);
 
         let check_block = self.builder.create_block(&[]);
@@ -1401,8 +1429,7 @@ impl<'a> Translator<'a> {
         let c2 = self.builder.and(c1, in_bounds);
         let all_ok = self.builder.and(c2, has_array);
 
-        self.builder
-            .br_if(all_ok, fast_block, &[], slow_block, &[]);
+        self.builder.br_if(all_ok, fast_block, &[], slow_block, &[]);
 
         // Fast path: store element into array
         self.builder.switch_to_block(fast_block);
@@ -1457,6 +1484,9 @@ struct ExternFuncs {
     #[allow(dead_code)]
     lua_self: FuncRef,
     lua_store_reg: FuncRef,
+    lua_load_reg: FuncRef,
+    lua_push_frame_mirror: FuncRef,
+    lua_pop_frame_mirror: FuncRef,
     lua_make_closure_0: FuncRef,
     lua_make_closure_1: FuncRef,
     #[allow(dead_code)]
