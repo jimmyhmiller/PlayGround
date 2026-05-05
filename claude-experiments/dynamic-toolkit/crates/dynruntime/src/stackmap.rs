@@ -6,6 +6,8 @@ use dynexec::{ConservativeWordRoots, PreciseStackRoots, RootTransport, ValueLayo
 use dynir::InterpRootManager;
 use dynobj::{Compact, ObjHeader, TypeInfo};
 
+use crate::jit::GcPolicy;
+
 // ─── MutatorRootManager ─────────────────────────────────────────────
 
 /// Per-frame scope info for the MutatorRootManager.
@@ -25,18 +27,20 @@ pub struct MutatorRootManager<P: PtrPolicy> {
     heap: Heap,
     mutator: RefCell<Mutator>,
     frame_scopes: RefCell<Vec<MutatorFrameScope>>,
-    gc_threshold: f64,
+    gc_policy: GcPolicy,
     _policy: PhantomData<P>,
 }
 
 impl<P: PtrPolicy> MutatorRootManager<P> {
     /// Create a new root manager with the given semi-space size.
+    /// Defaults to [`GcPolicy::NeverAuto`]; use [`Self::with_gc_policy`]
+    /// to opt into pressure-based or stress-mode collection.
     pub fn new(space_size: usize, type_table: Vec<TypeInfo>) -> Self {
         MutatorRootManager {
             heap: Heap::new::<Compact>(space_size, type_table),
             mutator: RefCell::new(Mutator::new()),
             frame_scopes: RefCell::new(Vec::new()),
-            gc_threshold: 0.0,
+            gc_policy: GcPolicy::NeverAuto,
             _policy: PhantomData,
         }
     }
@@ -47,15 +51,14 @@ impl<P: PtrPolicy> MutatorRootManager<P> {
             heap: Heap::new::<H>(space_size, type_table),
             mutator: RefCell::new(Mutator::new()),
             frame_scopes: RefCell::new(Vec::new()),
-            gc_threshold: 0.0,
+            gc_policy: GcPolicy::NeverAuto,
             _policy: PhantomData,
         }
     }
 
-    /// Set GC threshold: only collect when from-space usage exceeds this fraction (0.0–1.0).
-    /// Default 0.0 means collect at every safepoint.
-    pub fn with_gc_threshold(mut self, threshold: f64) -> Self {
-        self.gc_threshold = threshold;
+    /// Set the collection policy. See [`GcPolicy`].
+    pub fn with_gc_policy(mut self, policy: GcPolicy) -> Self {
+        self.gc_policy = policy;
         self
     }
 
@@ -135,11 +138,11 @@ where
     }
 
     fn collect(&self) {
-        if self.gc_threshold > 0.0 {
-            let usage = self.heap.from_used() as f64 / self.heap.space_size() as f64;
-            if usage < self.gc_threshold {
-                return;
-            }
+        if !self
+            .gc_policy
+            .should_collect(self.heap.from_used(), self.heap.space_size())
+        {
+            return;
         }
         let mutator = self.mutator.borrow();
         unsafe {
@@ -194,11 +197,11 @@ where
     }
 
     fn collect(&self) {
-        if self.gc_threshold > 0.0 {
-            let usage = self.heap.from_used() as f64 / self.heap.space_size() as f64;
-            if usage < self.gc_threshold {
-                return;
-            }
+        if !self
+            .gc_policy
+            .should_collect(self.heap.from_used(), self.heap.space_size())
+        {
+            return;
         }
         let mutator = self.mutator.borrow();
         unsafe {

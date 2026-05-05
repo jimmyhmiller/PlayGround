@@ -396,6 +396,14 @@ pub struct Rooted<'scope, T: ?Sized> {
 // `*const T` makes Rooted !Send + !Sync regardless of T — the underlying
 // FrameChain is per-thread.
 
+// Copying a Rooted is aliasing — both handles refer to the same slot,
+// both `.get()` return the same value. Cheap, useful for passing the
+// same root to multiple callees.
+impl<T: ?Sized> Copy for Rooted<'_, T> {}
+impl<T: ?Sized> Clone for Rooted<'_, T> {
+    fn clone(&self) -> Self { *self }
+}
+
 impl<'scope, T: ?Sized> Rooted<'scope, T> {
     /// Read the current value through the slot. Re-loads each call: a
     /// moving GC that ran since the last read will have already written
@@ -427,12 +435,15 @@ impl<'scope, T> std::fmt::Debug for Rooted<'scope, T> {
 /// across allocations. Typical uses: an extern's body, a recursive walker
 /// in the host frontend, a code-emission helper that holds tree nodes.
 pub struct RootScope<'chain> {
+    // Field order matters: the `FrameGuard` must drop *before* `frame`
+    // so it can read the frame header to walk to the parent. Rust drops
+    // struct fields in declaration order, so _guard is first.
+    _guard: FrameGuard<'chain>,
     /// Owned frame storage. Boxed so its address is stable across moves
     /// of the `RootScope` itself; `Rooted` borrows directly into it.
     frame: Box<DynRootFrame>,
     /// Bump cursor — next free slot index.
     cursor: Cell<usize>,
-    _guard: FrameGuard<'chain>,
 }
 
 impl<'chain> RootScope<'chain> {
@@ -443,9 +454,9 @@ impl<'chain> RootScope<'chain> {
         let frame = Box::new(DynRootFrame::new(capacity));
         let _guard = unsafe { chain.push_raw(frame.header_ptr()) };
         RootScope {
+            _guard,
             frame,
             cursor: Cell::new(0),
-            _guard,
         }
     }
 
@@ -1069,5 +1080,147 @@ mod atomic_root_set_tests {
         // New slots correct
         assert_eq!(rs.get(2), 0);
         assert_eq!(rs.get(50), 48 * 5);
+    }
+}
+
+#[cfg(test)]
+mod rooted_tests {
+    use super::*;
+
+    /// Trivial T parameter — Rooted<T> uses it as a phantom marker.
+    struct TestVal;
+
+    #[test]
+    fn rooted_get_set_round_trip() {
+        let chain = FrameChain::new();
+        let scope = RootScope::new(&chain, 4);
+        let r: Rooted<'_, TestVal> = scope.root(0xDEAD_BEEF);
+        assert_eq!(r.get(), 0xDEAD_BEEF);
+        r.set(0x1234);
+        assert_eq!(r.get(), 0x1234);
+    }
+
+    #[test]
+    fn moving_gc_simulation_rooted_observes_new_address() {
+        // The whole point: if a "GC" rewrites the slot in place, the
+        // Rooted's .get() returns the new value. This is what makes
+        // Rooted safe across moving collections.
+        let chain = FrameChain::new();
+        let scope = RootScope::new(&chain, 1);
+        let r: Rooted<'_, TestVal> = scope.root(0xAAAA);
+        assert_eq!(r.get(), 0xAAAA);
+
+        // Simulate a moving GC: walk the chain via scan_roots, rewrite
+        // every slot to a "relocated" address.
+        chain.scan_roots(&mut |slot| unsafe {
+            let bits = *slot;
+            *slot = bits | 0xBBBB_0000;
+        });
+
+        assert_eq!(r.get(), 0xAAAA | 0xBBBB_0000,
+            "Rooted::get must see the GC's in-place update");
+    }
+
+    #[test]
+    fn scope_drops_pop_frame_from_chain() {
+        let chain = FrameChain::new();
+        assert_eq!(chain.depth(), 0);
+        {
+            let _scope = RootScope::new(&chain, 4);
+            assert_eq!(chain.depth(), 1);
+        }
+        assert_eq!(chain.depth(), 0,
+            "RootScope drop must pop its frame from the chain");
+    }
+
+    #[test]
+    fn nested_scopes_lifo() {
+        let chain = FrameChain::new();
+        let outer = RootScope::new(&chain, 2);
+        assert_eq!(chain.depth(), 1);
+        let outer_r: Rooted<'_, TestVal> = outer.root(1);
+
+        {
+            let inner = RootScope::new(&chain, 2);
+            assert_eq!(chain.depth(), 2);
+            let inner_r: Rooted<'_, TestVal> = inner.root(2);
+            assert_eq!(inner_r.get(), 2);
+            assert_eq!(outer_r.get(), 1);
+
+            // GC walks BOTH frames. Frames have full capacity slot count
+            // even when not all slots are used; unused slots are zero and
+            // a real PtrPolicy will filter them out at decode time.
+            let mut visited = Vec::new();
+            chain.scan_roots(&mut |slot| visited.push(unsafe { *slot }));
+            assert!(visited.contains(&1), "outer root not scanned");
+            assert!(visited.contains(&2), "inner root not scanned");
+            assert_eq!(visited.iter().filter(|&&v| v != 0).count(), 2);
+        }
+
+        // Inner scope dropped — only outer remains.
+        assert_eq!(chain.depth(), 1);
+        let mut visited = Vec::new();
+        chain.scan_roots(&mut |slot| visited.push(unsafe { *slot }));
+        assert!(visited.contains(&1));
+        assert_eq!(visited.iter().filter(|&&v| v != 0).count(), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "capacity")]
+    fn scope_exhaustion_panics() {
+        let chain = FrameChain::new();
+        let scope = RootScope::new(&chain, 2);
+        let _a: Rooted<'_, TestVal> = scope.root(1);
+        let _b: Rooted<'_, TestVal> = scope.root(2);
+        // 3rd root exceeds capacity 2.
+        let _c: Rooted<'_, TestVal> = scope.root(3);
+    }
+
+    #[test]
+    fn with_scope_uses_thread_local_chain() {
+        let chain = FrameChain::new();
+        let _g = install_chain(&chain);
+        let result = with_scope(2, |scope| {
+            let r: Rooted<'_, TestVal> = scope.root(42);
+            r.get()
+        });
+        assert_eq!(result, 42);
+        // Chain is empty after with_scope returns.
+        assert_eq!(chain.depth(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "no FrameChain installed")]
+    fn with_scope_panics_without_installed_chain() {
+        with_scope(2, |_scope| {});
+    }
+
+    #[test]
+    fn install_chain_lifo_restores_previous() {
+        let outer_chain = FrameChain::new();
+        let inner_chain = FrameChain::new();
+
+        let _g1 = install_chain(&outer_chain);
+        // outer is active
+        with_scope(1, |s| {
+            let _r: Rooted<'_, TestVal> = s.root(10);
+            assert_eq!(outer_chain.depth(), 1);
+        });
+
+        {
+            let _g2 = install_chain(&inner_chain);
+            with_scope(1, |s| {
+                let _r: Rooted<'_, TestVal> = s.root(20);
+                assert_eq!(inner_chain.depth(), 1);
+                assert_eq!(outer_chain.depth(), 0,
+                    "inner install must hide outer chain");
+            });
+        }
+
+        // After inner guard drops, outer is active again.
+        with_scope(1, |s| {
+            let _r: Rooted<'_, TestVal> = s.root(30);
+            assert_eq!(outer_chain.depth(), 1);
+        });
     }
 }

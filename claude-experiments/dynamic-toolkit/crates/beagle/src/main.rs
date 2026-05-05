@@ -145,6 +145,18 @@ fn real_main() {
     };
     let _host_guard = dynlang::host::install_thread(&host);
 
+    if std::env::var("BEAGLE_DUMP_IR").is_ok() {
+        for func in &lowered.module.functions {
+            eprintln!("{}", func);
+            eprintln!("---");
+        }
+    }
+    // IR-level soundness check: every direct `Call` to a GC allocator
+    // (currently just `__gc_alloc__`) must be preceded by `Inst::Safepoint`.
+    // Catches frontend bugs at compile time rather than corrupting at
+    // the next collection.
+    lowered.module.validate_safepoints(&lowered.allocator_frefs);
+
     // Compile with `NanBoxConfig` (precise stack maps) + LinearScan regalloc
     // for tighter frames (binary_trees recurses millions deep).
     //
@@ -167,10 +179,19 @@ fn real_main() {
         jit.dump_code();
     }
 
-    let gc_threshold: f64 = std::env::var("BEAGLE_GC_THRESHOLD")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0.75);
+    // BEAGLE_GC_THRESHOLD overrides the default OnPressure threshold.
+    // Special string "stress" maps to GcPolicy::EveryPoint (collect at
+    // every safepoint — slow, useful for finding root-coverage bugs).
+    // Special string "never" disables auto-collect entirely.
+    let gc_policy: dynlang::GcPolicy = match std::env::var("BEAGLE_GC_THRESHOLD").as_deref() {
+        Ok("stress") => dynlang::GcPolicy::EveryPoint,
+        Ok("never") => dynlang::GcPolicy::NeverAuto,
+        Ok(s) => match s.parse::<f64>() {
+            Ok(threshold) => dynlang::GcPolicy::OnPressure { threshold },
+            Err(_) => dynlang::GcPolicy::OnPressure { threshold: 0.75 },
+        },
+        Err(_) => dynlang::GcPolicy::OnPressure { threshold: 0.75 },
+    };
 
     // Build the `args` nanbox. If an N was passed on the CLI, encode
     // it as a plain float NanBox and rely on beagle_length/get/to_number
@@ -195,10 +216,9 @@ fn real_main() {
     // the PtrPolicy, and this thread as the active runtime for
     // `__gc_alloc__` callbacks.
     let _ic_guard = lowered.ic.install_thread();
-    let result =
-        lowered
-            .gc
-            .run_jit_with_threshold(&jit, lowered.main, &main_args, gc_threshold);
+    let result = lowered
+        .gc
+        .run_jit(&jit, lowered.main, &main_args, gc_policy);
 
     match result {
         JitOutcome::Value(_) | JitOutcome::Void => {}

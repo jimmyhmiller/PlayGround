@@ -17,9 +17,9 @@ use dynir::interp::ExternCallResult;
 use dynir::{FuncDef, FuncRef, Module};
 use dynexec::{CodegenConfig, FrameStrategy};
 use dynlower::{JitModule, JitOutcome, backend::LoweringBackend, regalloc::RegisterAllocator};
-use dynobj::roots::RootSource;
+use dynobj::roots::{Rooted, RootScope, RootSource};
 use dynobj::{Compact, TypeInfo};
-use dynruntime::{JitSafepointSession, StackMapJitTransport, active_jit_safepoint_handler};
+use dynruntime::{GcPolicy, JitSafepointSession, StackMapJitTransport, active_jit_safepoint_handler};
 
 use crate::{GcConfig, NanBoxTags, ObjType};
 
@@ -221,9 +221,20 @@ impl DynGcRuntime {
         ThreadGuard { prev_rt, prev_tag, _phantom: std::marker::PhantomData }
     }
 
-    /// Allocate an object. Returns a raw, untagged heap pointer. Callers
-    /// typically don't invoke this — the IR `gc_alloc` instruction lowers
-    /// to a call into our internal thunk, which calls this.
+    /// Allocate an object. Returns a raw, untagged heap pointer.
+    ///
+    /// **Prefer [`alloc_in`](Self::alloc_in)** — it returns a `Rooted` handle
+    /// scoped to a `RootScope`, which is required for safety any time the
+    /// caller might invoke another allocation or JIT call before letting the
+    /// pointer go. This raw form is provided for the IR `gc_alloc` thunk
+    /// (called from JIT code, where stack-map roots cover the caller's
+    /// frame) and for low-level toolkit code that knows what it's doing.
+    ///
+    /// # Safety / contract
+    /// The returned pointer is a GC root only for as long as a caller's
+    /// stack map / `Rooted` keeps it alive. Crossing any allocation,
+    /// safepoint, or JIT call without that protection corrupts under a
+    /// moving GC.
     pub fn alloc(&self, type_id: usize, varlen_len: usize) -> *mut u8 {
         let info = &self.type_infos[type_id];
         match &self.backend {
@@ -232,7 +243,38 @@ impl DynGcRuntime {
         }
     }
 
+    /// Allocate and immediately root in `scope`.
+    ///
+    /// This is the safe public allocator. The returned `Rooted` borrows a
+    /// slot from `scope`, so the GC tracks the freshly-allocated pointer
+    /// until the scope drops — even across additional allocations or JIT
+    /// calls inside the same scope.
+    ///
+    /// `T` is a phantom type tag (typically a frontend's value type, like
+    /// `NanBox`). It plays no runtime role today; future `Rootable` work
+    /// can give it `from_bits` / `to_bits` semantics.
+    pub fn alloc_in<'a, T>(
+        &self,
+        scope: &'a RootScope<'_>,
+        type_id: usize,
+        varlen_len: usize,
+    ) -> Rooted<'a, T> {
+        let raw = self.alloc(type_id, varlen_len);
+        assert!(
+            !raw.is_null(),
+            "DynGcRuntime::alloc_in: allocator returned null \
+             (heap exhausted? — collection should have been triggered \
+             by the JIT-side safepoint preceding this call)"
+        );
+        let tagged = self.tag_ptr(raw);
+        scope.root::<T>(tagged)
+    }
+
     /// Encode a raw pointer as a NanBox ptr-tagged value.
+    ///
+    /// Unsafe to use directly under a moving GC: a tagged value held in an
+    /// unrooted `u64` is invalidated on the next collection. Prefer
+    /// [`alloc_in`](Self::alloc_in), which returns a `Rooted`.
     pub fn tag_ptr(&self, ptr: *mut u8) -> u64 {
         if ptr.is_null() { return 0; }
         TAG_PATTERN | ((self.tags.ptr as u64) << 48) | ((ptr as u64) & PAYLOAD_MASK)
@@ -296,36 +338,21 @@ impl DynGcRuntime {
     /// `JitModule` produced from a `DynModule` — call sites must not
     /// construct `JitSafepointSession` themselves.
     ///
+    /// `policy` controls when the safepoint handler runs a collection.
+    /// Pass [`GcPolicy::OnPressure { threshold: 0.75 }`] for typical
+    /// production behavior; [`GcPolicy::EveryPoint`] for GC-stress
+    /// testing; [`GcPolicy::NeverAuto`] when the frontend manages
+    /// collection cadence itself (e.g. between top-level forms).
+    ///
     /// The module's `literal_pool` is registered as an extra root source so
     /// quote-style GC literals embedded as `Inst::GcLiteral(idx)` are traced
     /// (and updated in place if the GC moves the referenced object).
-    pub fn run_jit(&self, jit: &JitModule, entry: FuncRef, args: &[u64]) -> JitOutcome {
-        let _thread = self.install_thread();
-        match &self.backend {
-            Backend::Generational(heap) => {
-                let safepoints = jit.all_safepoints();
-                let session = JitSafepointSession::<NanBoxPolicy, _>::new(
-                    heap, StackMapJitTransport, &safepoints,
-                );
-                // Safety: `jit` outlives this call, so `&jit.literal_pool()`
-                // is valid for the session's lifetime.
-                let pool_ptr: *const dyn RootSource = jit.literal_pool();
-                unsafe { session.register_extra_root(pool_ptr); }
-                session.with_installed(|| jit.call_outcome(entry, args))
-            }
-            _ => jit.call_outcome(entry, args),
-        }
-    }
-
-    /// Same as `run_jit` but with a configurable GC trigger threshold
-    /// (fraction of from-space in use, 0.0–1.0). Only matters for
-    /// `Generational`.
-    pub fn run_jit_with_threshold(
+    pub fn run_jit(
         &self,
         jit: &JitModule,
         entry: FuncRef,
         args: &[u64],
-        gc_threshold: f64,
+        policy: GcPolicy,
     ) -> JitOutcome {
         let _thread = self.install_thread();
         match &self.backend {
@@ -333,9 +360,24 @@ impl DynGcRuntime {
                 let safepoints = jit.all_safepoints();
                 let session = JitSafepointSession::<NanBoxPolicy, _>::new(
                     heap, StackMapJitTransport, &safepoints,
-                ).with_gc_threshold(gc_threshold);
+                )
+                .with_gc_policy(policy);
+                // Safety: `jit` outlives this call, so `&jit.literal_pool()`
+                // is valid for the session's lifetime.
                 let pool_ptr: *const dyn RootSource = jit.literal_pool();
                 unsafe { session.register_extra_root(pool_ptr); }
+                // Mirror the runtime's permanent extra root sources onto
+                // the session — those are typically per-thread frame
+                // chains and similar host-side root sets that must also
+                // be scanned at every JIT-time safepoint, not just at
+                // explicit `gc.collect()` calls. Without this, host code
+                // that holds GC handles in `Rooted` slots would silently
+                // see them collected when the JIT triggers a GC.
+                let extras = self.extra_root_sources.borrow();
+                for &ptr in extras.iter() {
+                    unsafe { session.register_extra_root(ptr); }
+                }
+                drop(extras);
                 session.with_installed(|| jit.call_outcome(entry, args))
             }
             _ => jit.call_outcome(entry, args),

@@ -43,7 +43,16 @@ pub extern "C" fn ml_ge(a: u64, b: u64) -> u64 {
 
 // ── Cons / list ───────────────────────────────────────────────────
 
-pub extern "C" fn ml_cons(a: u64, b: u64) -> u64 { alloc_cons(a, b) }
+pub extern "C" fn ml_cons(a: u64, b: u64) -> u64 {
+    // FFI boundary: JIT hands us raw bits via the C ABI. Root them in a
+    // fresh scope so any `gc.alloc`-fired collection (none today, but the
+    // contract permits it) sees them as live; the result is freshly
+    // returned to JIT where the next safepoint's stack map roots it.
+    // Three slots: car + cdr + result.
+    dynobj::roots::with_scope(3, |scope| {
+        alloc_cons_from_raw(scope, a, b).get()
+    })
+}
 pub extern "C" fn ml_car(v: u64) -> u64 { car(v) }
 pub extern "C" fn ml_cdr(v: u64) -> u64 { cdr(v) }
 pub extern "C" fn ml_set_car(v: u64, x: u64) -> u64 { set_car(v, x); NIL }
@@ -58,15 +67,23 @@ pub extern "C" fn ml_eq_p(a: u64, b: u64) -> u64 { bool_(a == b) }
 pub extern "C" fn ml_equal_p(a: u64, b: u64) -> u64 { bool_(equal(a, b)) }
 pub extern "C" fn ml_not(v: u64) -> u64 { bool_(!is_true_value(v)) }
 
-/// `append` — copy the spine of `a`, then connect to `b`.
+/// `append` — copy the spine of `a`, then connect to `b`. Allocates one
+/// cons per element of `a`; each allocation gets its own fresh scope so
+/// we don't grow the outer scope unbounded for long lists.
 pub extern "C" fn ml_append(a: u64, b: u64) -> u64 {
     if is_nil(a) { return b; }
-    let elems: Vec<u64> = list_iter(a).collect();
-    let mut tail = b;
-    for x in elems.into_iter().rev() {
-        tail = alloc_cons(x, tail);
-    }
-    tail
+    dynobj::roots::with_scope(2, |scope| {
+        let a_root = scope.root::<NanBoxTag>(a);
+        let elems: Vec<u64> = list_iter(a_root.get()).collect();
+        let tail = scope.root::<NanBoxTag>(b);
+        for x in elems.into_iter().rev() {
+            let new_bits = dynobj::roots::with_scope(3, |inner| {
+                alloc_cons_from_raw(inner, x, tail.get()).get()
+            });
+            tail.set(new_bits);
+        }
+        tail.get()
+    })
 }
 
 pub extern "C" fn ml_length(v: u64) -> u64 {

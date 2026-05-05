@@ -1,4 +1,5 @@
 use dynalloc::{Alloc, PtrPolicy};
+use dynir::gc_runtime::GcInterpPolicy;
 use dynir::verify;
 use dynobj::ObjHeader;
 use dynvalue::NanBox;
@@ -39,17 +40,17 @@ impl dynalloc::PtrPolicy for ContlangPolicy {
 }
 
 fn run_interp(src: &str, entry_name: &str, args: &[u64]) -> u64 {
-    run_interp_with(src, entry_name, args, usize::MAX, 256 * 1024).0
+    run_interp_with(src, entry_name, args, GcInterpPolicy::NeverAuto, 256 * 1024).0
 }
 
 /// Extended harness: returns (result, collection_count) and lets the
-/// caller configure the auto-GC threshold and heap size. Used by
+/// caller configure the auto-GC policy and heap size. Used by
 /// stress / reclamation tests.
 fn run_interp_with(
     src: &str,
     entry_name: &str,
     args: &[u64],
-    gc_threshold: usize,
+    gc_policy: GcInterpPolicy,
     heap_size: usize,
 ) -> (u64, usize) {
     use std::sync::Arc;
@@ -82,7 +83,7 @@ fn run_interp_with(
         dynexec::ContinuationTypes::register_into::<Compact>(&mut type_table);
     let heap = dynalloc::SemiSpace::new::<Compact>(heap_size);
     let ctx = GcInterpCtx::<Compact, ContlangPolicy>::new(heap, type_table, cont_types);
-    ctx.set_gc_threshold(gc_threshold);
+    ctx.set_gc_policy(gc_policy);
 
     let entry = lowered.func_refs[entry_name];
     let mut interp = dynir::interp::ModuleInterpreter::<NanBox, _>::new(
@@ -334,7 +335,7 @@ fn multi_frame_capture_gc_forwards_non_top_frame_pointer() {
 
     // Aggressive GC: threshold 3, small heap.
     let (result, collections) =
-        run_interp_with(src, "main", &[], 3, 16 * 1024);
+        run_interp_with(src, "main", &[], GcInterpPolicy::EveryNAllocs(3), 16 * 1024);
 
     assert_eq!(result, 77 + 88, "bytes must survive GC across a multi-frame capture");
     assert!(
@@ -391,7 +392,7 @@ fn chained_continuations_trace_through_each_other() {
     "#;
 
     let (result, collections) =
-        run_interp_with(src, "main", &[], 4, 32 * 1024);
+        run_interp_with(src, "main", &[], GcInterpPolicy::EveryNAllocs(4), 32 * 1024);
 
     assert_eq!(result, 300);
     assert!(
@@ -471,7 +472,7 @@ fn captured_continuation_does_not_re_execute_post_reset_code() {
     "#;
 
     let (result, collections) =
-        run_interp_with(src, "main", &[], 4, 16 * 1024);
+        run_interp_with(src, "main", &[], GcInterpPolicy::EveryNAllocs(4), 16 * 1024);
 
     assert_eq!(result, 55);
     assert!(
@@ -520,7 +521,7 @@ fn continuation_outlives_via_new_shift_form() {
 
     // Aggressive threshold to force collection during allocate_many.
     let (result, collections) =
-        run_interp_with(src, "main", &[], 4, 16 * 1024);
+        run_interp_with(src, "main", &[], GcInterpPolicy::EveryNAllocs(4), 16 * 1024);
 
     // Capture flow:
     //   get_cont enters reset, push prompt P
@@ -585,7 +586,7 @@ fn continuation_outlives_original_reset_and_survives_gc() {
 
     // Aggressive threshold to force collection during allocate_many.
     let (result, collections) =
-        run_interp_with(src, "main", &[], 4, 16 * 1024);
+        run_interp_with(src, "main", &[], GcInterpPolicy::EveryNAllocs(4), 16 * 1024);
 
     // At capture, the old-style shift() returns the handle into the
     // `k` slot, then `abort(k)` fires and the reset yields k
@@ -649,7 +650,7 @@ fn multi_shot_with_interleaved_gc() {
 
     // Low threshold so allocate_many actually triggers GC.
     let (result, collections) =
-        run_interp_with(src, "main", &[], 5, 16 * 1024);
+        run_interp_with(src, "main", &[], GcInterpPolicy::EveryNAllocs(5), 16 * 1024);
 
     // Each invocation runs `v + 1` on its resume arg:
     //   first:  10 + 1 = 11
@@ -713,12 +714,66 @@ fn bytes_pointer_survives_gc_through_captured_continuation() {
     // Auto-GC threshold of 5 — forces collection to actually run
     // inside allocate_many while the continuation is dormant.
     let (result, collections) =
-        run_interp_with(src, "main", &[], 5, 16 * 1024);
+        run_interp_with(src, "main", &[], GcInterpPolicy::EveryNAllocs(5), 16 * 1024);
 
     assert_eq!(result, 77 + 88 + 99 + 11, "bytes must survive GC via the captured continuation");
     assert!(
         collections >= 2,
         "auto-gc should have fired during allocate_many; got {}",
+        collections
+    );
+}
+
+/// Stress: same program as `bytes_pointer_survives_gc_through_captured_continuation`
+/// but with `GcInterpPolicy::EVERY_ALLOC` — the GC fires after every
+/// single allocation, exercising every safepoint as a real moving
+/// collection. If any of contlang's lowered IR forgot to root a value
+/// across an allocation point, this test will produce a wrong byte
+/// sum or crash with a corrupted pointer.
+#[test]
+fn every_alloc_stress_preserves_correctness() {
+    let src = r#"
+        fn allocate_many() {
+            let i = 0;
+            while i < 5 {
+                let scratch: bytes = bytes_alloc(8);
+                bytes_set(scratch, 0, i);
+                i = i + 1;
+            }
+            0
+        }
+
+        fn main() {
+            let p: bytes = bytes_alloc(4);
+            bytes_set(p, 0, 77);
+            bytes_set(p, 1, 88);
+            bytes_set(p, 2, 99);
+            bytes_set(p, 3, 11);
+            reset {
+                let v = shift |k| {
+                    allocate_many();
+                    resume(k, 0)
+                };
+                bytes_get(p, 0) + bytes_get(p, 1)
+                    + bytes_get(p, 2) + bytes_get(p, 3)
+            }
+        }
+    "#;
+
+    let (result, collections) =
+        run_interp_with(src, "main", &[], GcInterpPolicy::EVERY_ALLOC, 64 * 1024);
+
+    assert_eq!(
+        result,
+        77 + 88 + 99 + 11,
+        "EVERY_ALLOC mode: bytes must survive a moving GC at every alloc"
+    );
+    // EVERY_ALLOC means every allocation triggers a collection. The
+    // program allocates many bytes buffers + the ContObj — should be
+    // many collections, not just a couple.
+    assert!(
+        collections > 5,
+        "EVERY_ALLOC should produce many collections; got {}",
         collections
     );
 }
@@ -1180,7 +1235,7 @@ fn reclamation_under_capture_loop_keeps_heap_bounded() {
     // allocations — much more frequent than necessary to keep the
     // heap clear.
     let (result, collections) =
-        run_interp_with(src, "main", &[], 3, 8 * 1024);
+        run_interp_with(src, "main", &[], GcInterpPolicy::EveryNAllocs(3), 8 * 1024);
 
     assert_eq!(result, 50, "loop should have counted to 50");
     assert!(

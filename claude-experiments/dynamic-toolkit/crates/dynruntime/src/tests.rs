@@ -5,6 +5,7 @@ use dynobj::{Compact, ObjHeader, TypeInfo};
 use dynvalue::{LowBit, NanBox, TagScheme};
 
 use crate::framechain::FrameChainRootManager;
+use crate::jit::GcPolicy;
 use crate::ptr_policy::{LowBitPtrPolicy, NanBoxPtrPolicy};
 use crate::stackmap::MutatorRootManager;
 
@@ -57,7 +58,8 @@ fn alloc_store_safepoint_load_lowbit() {
             b.ret(loaded);
         });
 
-    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE]);
+    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE])
+        .with_gc_policy(GcPolicy::EveryPoint);
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(f_alloc, |_args| {
         let ptr = roots.alloc(&PAIR_TYPE, 0);
@@ -127,7 +129,8 @@ fn multiple_objects_survive_gc_lowbit() {
             b.ret(sum);
         });
 
-    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE]);
+    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE])
+        .with_gc_policy(GcPolicy::EveryPoint);
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(f_alloc, |_args| {
         let ptr = roots.alloc(&PAIR_TYPE, 0);
@@ -190,7 +193,8 @@ fn gc_in_loop_lowbit() {
     }
 
     let module = mb.build();
-    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(8192, vec![PAIR_TYPE]);
+    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(8192, vec![PAIR_TYPE])
+        .with_gc_policy(GcPolicy::EveryPoint);
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(f_alloc, |_args| {
         let ptr = roots.alloc(&PAIR_TYPE, 0);
@@ -226,7 +230,8 @@ fn proves_object_moved_lowbit() {
         });
 
     let original_ptr = Cell::new(0u64);
-    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE]);
+    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE])
+        .with_gc_policy(GcPolicy::EveryPoint);
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(f_alloc, |_args| {
         let ptr = roots.alloc(&PAIR_TYPE, 0);
@@ -352,7 +357,8 @@ fn dead_objects_reclaimed_lowbit() {
 
     let module = mb.build();
     let alloc_count = Cell::new(0usize);
-    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE]);
+    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE])
+        .with_gc_policy(GcPolicy::EveryPoint);
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(f_alloc, |_args| {
         let ptr = roots.alloc(&PAIR_TYPE, 0);
@@ -449,7 +455,8 @@ fn boxed_fib_lowbit() {
     }
 
     let module = mb.build();
-    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(8192, vec![PAIR_TYPE]);
+    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(8192, vec![PAIR_TYPE])
+        .with_gc_policy(GcPolicy::EveryPoint);
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(f_alloc, |_args| {
         let ptr = roots.alloc(&PAIR_TYPE, 0);
@@ -724,7 +731,8 @@ fn build_callee_allocs_module() -> (dynir::Module, FuncRef, FuncRef, FuncRef) {
 fn module_gc_callee_allocs_lowbit() {
     let (module, f_main, f_alloc, _) = build_callee_allocs_module();
 
-    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE]);
+    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE])
+        .with_gc_policy(GcPolicy::EveryPoint);
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(f_alloc, |_args| {
         let ptr = roots.alloc(&PAIR_TYPE, 0);
@@ -838,7 +846,8 @@ fn build_caller_roots_survive_module() -> (dynir::Module, FuncRef, FuncRef) {
 fn module_gc_caller_roots_survive_callee_gc_lowbit() {
     let (module, f_main, f_alloc) = build_caller_roots_survive_module();
 
-    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE]);
+    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(4096, vec![PAIR_TYPE])
+        .with_gc_policy(GcPolicy::EveryPoint);
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(f_alloc, |_args| {
         let ptr = roots.alloc(&PAIR_TYPE, 0);
@@ -963,7 +972,8 @@ fn build_recursive_gc_module() -> (dynir::Module, FuncRef, FuncRef) {
 fn module_gc_recursive_lowbit() {
     let (module, f_rec, f_alloc) = build_recursive_gc_module();
 
-    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(8192, vec![PAIR_TYPE]);
+    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(8192, vec![PAIR_TYPE])
+        .with_gc_policy(GcPolicy::EveryPoint);
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(f_alloc, |_args| {
         let ptr = roots.alloc(&PAIR_TYPE, 0);
@@ -1048,7 +1058,8 @@ fn module_gc_recursive_nanbox() {
 fn module_gc_proves_object_moved_lowbit() {
     let (module, f_main, f_alloc) = build_caller_roots_survive_module();
 
-    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(512, vec![PAIR_TYPE]);
+    let roots = MutatorRootManager::<LowBitPtrPolicy<3>>::new(512, vec![PAIR_TYPE])
+        .with_gc_policy(GcPolicy::EveryPoint);
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(f_alloc, |_args| {
         let ptr = roots.alloc(&PAIR_TYPE, 0);
@@ -1103,7 +1114,8 @@ fn cross_mutator_with_nanbox() {
     // Mutator root strategy + NanBox pointer policy
     let (module, f_main, f_alloc, _) = build_callee_allocs_module_nanbox();
 
-    let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(4096, vec![PAIR_TYPE]);
+    let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(4096, vec![PAIR_TYPE])
+        .with_gc_policy(GcPolicy::EveryPoint);
     let mut interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     interp.bind(f_alloc, |_args| {
         let ptr = roots.alloc(&PAIR_TYPE, 0);

@@ -73,6 +73,11 @@ pub struct LoweredProgram {
     pub entry: FuncRef,
     pub strings: Vec<String>,
     pub gc_types: LoxGcTypes,
+    /// Allocator externs that are required to be preceded by an
+    /// `Inst::Safepoint`. Passed to `Module::validate_safepoints` at
+    /// JIT-compile time so the IR is rejected if any allocator call
+    /// site forgot the safepoint.
+    pub allocator_frefs: Vec<FuncRef>,
 }
 
 // ── String pool ───────────────────────────────────────────────────
@@ -494,6 +499,7 @@ pub fn lower(program: &Program) -> LoweredProgram {
             let clock_name_val = f.fb.iconst(Type::I64, clock_name_id as i64);
             // Make a closure with func_ptr=0, arity=0, name="clock" -- but we need a special NativeFn.
             // Instead, use lox_make_native_fn extern.
+            f.fb.safepoint(&[]);
             let native_fn = f.fb.call(ctx.externs.make_native_fn, &[clock_name_val]).unwrap();
             f.fb.call(ctx.externs.define_global, &[clock_name_val, native_fn]);
             f.def_var("clock", native_fn);
@@ -544,12 +550,21 @@ pub fn lower(program: &Program) -> LoweredProgram {
         }
     }
 
+    let allocator_frefs = vec![
+        externs.alloc_upvalue,
+        externs.make_closure,
+        externs.make_class,
+        externs.make_native_fn,
+        externs.instantiate,
+    ];
+
     let built = dm.build();
     LoweredProgram {
         module: built.module,
         entry: script,
         strings: strings.strings,
         gc_types,
+        allocator_frefs,
     }
 }
 
@@ -623,6 +638,7 @@ fn lower_function(
         param_idx += 1;
         if ctx.captured_locals.contains(param) {
             // This param is captured — wrap in upvalue cell
+            f.fb.safepoint(&[]);
             let cell = f.fb.call(ctx.externs.alloc_upvalue, &[val]).unwrap();
             let cell_var = format!("__upval_{}__", param);
             f.def_var(&cell_var, cell);
@@ -678,6 +694,7 @@ fn lower_stmt(f: &mut DynFunc, ctx: &mut Ctx, stmt: &Stmt) {
                 f.fb.call(ctx.externs.define_global, &[id_val, val]);
                 // Also local for fast access within script
                 if ctx.captured_locals.contains(name) {
+                    f.fb.safepoint(&[]);
                     let cell = f.fb.call(ctx.externs.alloc_upvalue, &[val]).unwrap();
                     let cell_var = format!("__upval_{}__", name);
                     f.def_var(&cell_var, cell);
@@ -686,6 +703,7 @@ fn lower_stmt(f: &mut DynFunc, ctx: &mut Ctx, stmt: &Stmt) {
                     f.def_var(name, val);
                 }
             } else if ctx.captured_locals.contains(name) {
+                f.fb.safepoint(&[]);
                 let cell = f.fb.call(ctx.externs.alloc_upvalue, &[val]).unwrap();
                 let cell_var = format!("__upval_{}__", name);
                 f.def_var(&cell_var, cell);
@@ -777,6 +795,7 @@ fn lower_stmt(f: &mut DynFunc, ctx: &mut Ctx, stmt: &Stmt) {
                 f.fb.call(ctx.externs.define_global, &[id_val, nil]);
             }
             if ctx.captured_locals.contains(&decl.name) && !ctx.upvalue_cells.contains_key(&decl.name) {
+                f.fb.safepoint(&[]);
                 let cell = f.fb.call(ctx.externs.alloc_upvalue, &[nil]).unwrap();
                 let cell_var = format!("__upval_{}__", decl.name);
                 f.def_var(&cell_var, cell);
@@ -1051,6 +1070,7 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
         let func_ptr = f.fb.call(ctx.externs.closure_func_ptr, &[callee]).unwrap();
         let mut all_args = vec![callee];
         all_args.extend_from_slice(args);
+        f.fb.safepoint(&[]);
         let result = f.fb.call_indirect(func_ptr, &all_args, Some(Type::I64)).unwrap();
         f.fb.jump(merge_bb, &[result]);
     }
@@ -1064,6 +1084,7 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
 
         f.fb.switch_to_block(real_class_bb);
         // Combined: allocate instance + look up init method in one call
+        f.fb.safepoint(&[]);
         let instance = f.fb.call(ctx.externs.instantiate, &[callee]).unwrap();
         let init_arity = f.fb.call(ctx.externs.last_init_arity, &[]).unwrap();
         let sentinel = f.fb.iconst(Type::I64, 255);
@@ -1090,6 +1111,7 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
             let init_closure = f.fb.call(ctx.externs.invoke_closure, &[]).unwrap();
             let mut init_args = vec![init_closure, instance];
             init_args.extend_from_slice(args);
+            f.fb.safepoint(&[]);
             f.fb.call_indirect(init_ptr, &init_args, Some(Type::I64));
             f.fb.jump(merge_bb, &[instance]);
         }
@@ -1133,6 +1155,7 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
         let func_ptr = f.fb.call(ctx.externs.bound_closure_func_ptr, &[callee]).unwrap();
         let mut method_args = vec![method_val, receiver];
         method_args.extend_from_slice(args);
+        f.fb.safepoint(&[]);
         let result = f.fb.call_indirect(func_ptr, &method_args, Some(Type::I64)).unwrap();
         f.fb.jump(merge_bb, &[result]);
     }
@@ -1256,6 +1279,7 @@ fn emit_invoke(f: &mut DynFunc, ctx: &mut Ctx, obj: Value, method_name: &str, ar
     let sym = dynsym::Symbol::from_raw(ctx.strings.intern(method_name));
     let cache_id = ctx.next_cache_id;
     ctx.next_cache_id += 1;
+    f.fb.safepoint(&[]);
     f.fb.invoke_dynamic(obj, sym, args, cache_id)
 }
 
@@ -1264,6 +1288,7 @@ fn emit_invoke(f: &mut DynFunc, ctx: &mut Ctx, obj: Value, method_name: &str, ar
 fn lower_class(f: &mut DynFunc, ctx: &mut Ctx, decl: &ClassDecl) {
     let name_id = ctx.strings.intern(&decl.name);
     let name_val = f.fb.iconst(Type::I64, name_id as i64);
+    f.fb.safepoint(&[]);
     let class_val = f.fb.call(ctx.externs.make_class, &[name_val]).unwrap();
 
     // Define class variable early so methods can reference it
@@ -1288,6 +1313,7 @@ fn lower_class(f: &mut DynFunc, ctx: &mut Ctx, decl: &ClassDecl) {
         let super_captures = ctx.resolve.functions.get(&super_scope_key);
         if super_captures.map_or(false, |c| c.captured_locals.contains("super")) {
             // 'super' is captured by a method — wrap in upvalue cell
+            f.fb.safepoint(&[]);
             let cell = f.fb.call(ctx.externs.alloc_upvalue, &[class_val]).unwrap();
             let cell_var = "__upval_super__".to_string();
             f.def_var(&cell_var, cell);
@@ -1329,6 +1355,7 @@ fn make_closure(f: &mut DynFunc, ctx: &mut Ctx, func_key: &str, decl_name: &str)
     // lox_make_closure(func_table_idx, num_upvalues, arity, name_id) -> closure_val
     let arity_val = f.fb.iconst(Type::I64, arity as i64);
     let name_id_val = f.fb.iconst(Type::I64, name_id as i64);
+    f.fb.safepoint(&[]);
     let closure_val = f.fb.call(ctx.externs.make_closure, &[func_idx, num_upvalues, arity_val, name_id_val]).unwrap();
 
     // Set each upvalue
@@ -1346,6 +1373,7 @@ fn make_closure(f: &mut DynFunc, ctx: &mut Ctx, func_key: &str, decl_name: &str)
                 let id_val = f.fb.iconst(Type::I64, name_id as i64);
                 f.fb.call(ctx.externs.get_global, &[id_val]).unwrap()
             };
+            f.fb.safepoint(&[]);
             let cell = f.fb.call(ctx.externs.alloc_upvalue, &[val]).unwrap();
             let cell_var = format!("__upval_{}__", uv_name);
             f.def_var(&cell_var, cell);

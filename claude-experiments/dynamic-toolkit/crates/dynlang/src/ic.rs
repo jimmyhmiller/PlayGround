@@ -112,6 +112,14 @@ impl PropertyIc {
         }
     }
 
+    /// FuncRef of the IC slow-path extern (`__dynlang_prop_slow__`).
+    /// The slow path may allocate (boxing methods into bound closures),
+    /// so frontends running `Module::validate_safepoints` should include
+    /// this in their allocator list.
+    pub fn slow_ref(&self) -> FuncRef {
+        self.slow_ref
+    }
+
     /// Register an object type's field-offset table. Hides the
     /// `class_key = type_id + 1` encoding the slow path uses.
     pub fn register_type(&mut self, ty: &ObjType) {
@@ -165,9 +173,13 @@ impl PropertyIc {
         f.fb.jump(merge_bb, &[fast]);
 
         // Slow path: extern call fills the entry and returns the value.
+        // The slow path may allocate (e.g. boxing a method into a bound
+        // closure), so emit an explicit safepoint immediately before
+        // the call. `Module::validate_safepoints` enforces this.
         f.fb.switch_to_block(miss_bb);
         let sym_v = f.fb.iconst(Type::I64, sym.as_u32() as i64);
         let cid_v = f.fb.iconst(Type::I64, cache_id as i64);
+        f.fb.safepoint(&[]);
         let slow = f.fb.call(self.slow_ref, &[obj, sym_v, cid_v]).unwrap();
         f.fb.jump(merge_bb, &[slow]);
 

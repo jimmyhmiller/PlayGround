@@ -11,10 +11,17 @@
 //! `DynGcRuntime::alloc` via the active microlisp `Host`, which holds a
 //! pointer to the engine's `DynGcRuntime`.
 
+use dynobj::roots::{Rooted, RootScope};
 use dynobj::{Compact, ObjHeader};
 use dynvalue::{NanBox, TagScheme};
 
 use crate::host::with_host;
+
+/// Phantom type tag for `Rooted<NanBoxTag>` — identifies the rooted slot
+/// as carrying a microlisp NanBox value (cons pointer, symbol, number,
+/// nil, or boolean). The tag plays no runtime role; it's documentation
+/// for code that's holding GC-managed handles.
+pub struct NanBoxTag;
 
 pub const TAG_IMM: u32 = 0;
 pub const TAG_SYM: u32 = 1;
@@ -99,24 +106,74 @@ pub fn as_cons_ptr(v: u64) -> *mut u8 {
     <NanBox as TagScheme>::extract_payload(v) as *mut u8
 }
 
-/// Allocate a cons cell on the GC heap.
+/// Allocate a cons cell on the GC heap, in `scope`.
 ///
-/// The active `Host` (installed by `Engine::run_source`) carries a pointer
-/// to the engine's `DynGcRuntime`. We allocate a `cons` typed object and
-/// initialize its two value fields. The returned NanBox is tagged with the
-/// configured ptr tag (`TAG_CONS`), so a moving GC can find and trace cons
-/// cells from any root.
-pub fn alloc_cons(car: u64, cdr: u64) -> u64 {
+/// **The toolkit-enforced safe allocator.** Both arguments must already
+/// be rooted in some scope (theirs or ours), and the result is rooted in
+/// `scope`. This makes "hold a raw `u64` GC pointer across an allocation"
+/// statically impossible: there's no signature you can call where the
+/// car/cdr pointers aren't visible to the GC.
+///
+/// Implementation: we re-fetch via `.get()` AFTER `gc.alloc` (which may
+/// itself fire a moving collection in the future — currently `Generational`
+/// doesn't, but the contract permits it), so the cons fields receive the
+/// correct (post-GC) addresses.
+pub fn alloc_cons<'scope>(
+    scope: &'scope RootScope<'_>,
+    car: &Rooted<'_, NanBoxTag>,
+    cdr: &Rooted<'_, NanBoxTag>,
+) -> Rooted<'scope, NanBoxTag> {
     with_host(|h| {
         debug_assert!(!h.gc.is_null(), "alloc_cons: Host has no GC installed");
         let gc = unsafe { &*h.gc };
         let raw = gc.alloc(CONS_TYPE_ID, 0);
         assert!(!raw.is_null(), "microlisp: GC alloc returned null");
+        // Re-fetch after alloc: even though current backends don't auto-GC
+        // inside alloc, the API contract permits it. Reading via .get()
+        // now picks up any in-place GC update of the rooted slots.
+        let car_bits = car.get();
+        let cdr_bits = cdr.get();
         unsafe {
-            (raw.add(car_offset()) as *mut u64).write(car);
-            (raw.add(cdr_offset()) as *mut u64).write(cdr);
+            (raw.add(car_offset()) as *mut u64).write(car_bits);
+            (raw.add(cdr_offset()) as *mut u64).write(cdr_bits);
         }
-        gc.tag_ptr(raw)
+        scope.root::<NanBoxTag>(gc.tag_ptr(raw))
+    })
+}
+
+/// Convenience: allocate a cons from raw `u64` bits. Roots them in
+/// `scope` for the duration of the allocation, then returns a `Rooted`
+/// for the result. Use this at FFI boundaries where the JIT hands us
+/// raw bits via the C ABI; for Rust-internal callers prefer
+/// [`alloc_cons`] which forces explicit rooting at every site.
+pub fn alloc_cons_from_raw<'scope>(
+    scope: &'scope RootScope<'_>,
+    car_bits: u64,
+    cdr_bits: u64,
+) -> Rooted<'scope, NanBoxTag> {
+    let car = scope.root::<NanBoxTag>(car_bits);
+    let cdr = scope.root::<NanBoxTag>(cdr_bits);
+    alloc_cons(scope, &car, &cdr)
+}
+
+/// Compile-time-only cons builder. Self-contained `with_scope` per call,
+/// returns raw `u64`. Use **only** in code paths that don't trigger GC
+/// — currently the IR-construction helpers in `compile.rs` and the
+/// `quasiquote_rewrite` family in `expand.rs`. Each call pays the cost
+/// of a one-slot frame push/pop, but the result is always a valid GC
+/// pointer at the moment of return.
+///
+/// Why this exists: those helpers chain many small `cons` calls in
+/// expressions like `cons(a, cons(b, cons(c, NIL)))`. Forcing each
+/// intermediate to be `Rooted` would require restructuring every
+/// expression. Since the helpers themselves are GC-free, we accept the
+/// raw-`u64` return and wall the rooting discipline behind a clear
+/// "compile-time-only" name.
+pub fn cons_compile_time(car: u64, cdr: u64) -> u64 {
+    // Each call uses a fresh 3-slot scope (car + cdr + result) — the
+    // minimum that `alloc_cons_from_raw` needs internally.
+    dynobj::roots::with_scope(3, |scope| {
+        alloc_cons_from_raw(scope, car, cdr).get()
     })
 }
 
@@ -140,11 +197,17 @@ pub fn set_cdr(v: u64, x: u64) {
     unsafe { (as_cons_ptr(v).add(cdr_offset()) as *mut u64).write(x) }
 }
 
-/// Build a list from a Rust slice, right-folded with `cons`.
-pub fn list_from_slice(items: &[u64]) -> u64 {
-    let mut tail = NIL;
+/// Build a list from a Rust slice, right-folded with `cons`. Returns a
+/// `Rooted` because each iteration's `tail` must survive the next
+/// iteration's allocation.
+pub fn list_from_slice<'scope>(
+    scope: &'scope RootScope<'_>,
+    items: &[u64],
+) -> Rooted<'scope, NanBoxTag> {
+    let tail = scope.root::<NanBoxTag>(NIL);
     for &x in items.iter().rev() {
-        tail = alloc_cons(x, tail);
+        let new = alloc_cons_from_raw(scope, x, tail.get());
+        tail.set(new.get());
     }
     tail
 }

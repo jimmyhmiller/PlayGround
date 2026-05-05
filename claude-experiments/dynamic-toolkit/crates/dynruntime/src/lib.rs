@@ -12,7 +12,7 @@ pub use engine::{
 };
 pub use framechain::FrameChainRootManager;
 pub use jit::{
-    FrameScanJitTransport, JitExecutionResult, JitFrameControl, JitFrameControlError,
+    FrameScanJitTransport, GcPolicy, JitExecutionResult, JitFrameControl, JitFrameControlError,
     JitFrameSliceRuntime, JitRootTransportRuntime, JitSafepointSession, ScopedJitRoot,
     ScopedJitRoots,
     ResumeWithInterpreterError, ShadowStackJitTransport, StackMapJitTransport,

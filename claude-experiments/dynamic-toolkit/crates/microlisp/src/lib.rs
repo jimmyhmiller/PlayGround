@@ -18,8 +18,8 @@ use dynexec::NanBoxConfig;
 use dynir::builder::ModuleBuilder;
 use dynir::ir::FuncRef;
 use dynlang::gc::DynGcRuntime;
-use dynlang::{GcConfig, NanBoxTags, ObjType};
-use dynobj::roots::RootSet;
+use dynlang::{GcConfig, GcPolicy, NanBoxTags, ObjType};
+use dynobj::roots::{FrameChain, RootScope, RootSet};
 use dynlower::{CallMode, JitModule};
 use dynobj::{Compact, ObjHeader, TypeInfo, VarLenKind};
 use dynruntime::active_jit_safepoint_handler;
@@ -38,18 +38,25 @@ pub struct Engine {
     /// GC runtime owning the heap that cons cells live on.
     /// Boxed so the address is stable — the `Host` carries a raw pointer to it.
     gc: Box<DynGcRuntime>,
+    /// Per-thread shadow stack. Every Rust function that holds a NanBox
+    /// cons handle across a GC point must push a `RootScope` onto this
+    /// chain. Boxed for a stable address (the GC holds a pointer to it
+    /// via `register_extra_root_source`).
+    chain: Box<FrameChain>,
     pub host: Host,
     anon_counter: u32,
     /// When set, `run_source` triggers a moving collection between every
     /// pair of top-level forms. The literal pool gets walked and slots
     /// rewritten as objects move; the next form's compilation reads (and
     /// the JIT-emitted code loads) the relocated values transparently.
-    ///
-    /// True "GC on every cons allocation" requires safepoints inside the
-    /// JIT (so the mutator can be paused mid-execution with stack maps);
-    /// that's deliberately out of scope for v0. Between-form GC is the
-    /// largest dose of GC pressure we can apply safely.
     gc_stress: bool,
+    /// GC policy passed to `gc.run_jit` for every JIT invocation
+    /// (top-level form evaluation and macro expansion). Default is
+    /// `OnPressure { threshold: 0.75 }`. Set to `EveryPoint` to force a
+    /// moving collection at every JIT safepoint — the strongest stress
+    /// test of root coverage; if any safepoint's stack-map omits a live
+    /// value, this mode will corrupt or panic.
+    jit_gc_policy: GcPolicy,
 }
 
 const JIT_CALL_TABLE_CAPACITY: usize = 64 * 1024;
@@ -106,12 +113,15 @@ impl Engine {
             call_mode,
         ));
 
-        let mut engine = Engine {
+        let chain = Box::new(FrameChain::new());
+
+        let engine = Engine {
             mb,
             func_refs,
             jit,
             externs,
             gc,
+            chain,
             host: Host {
                 sym: std::cell::RefCell::new(SymbolTable::new()),
                 macro_env: std::cell::RefCell::new(HashMap::new()),
@@ -119,14 +129,17 @@ impl Engine {
             },
             anon_counter: 0,
             gc_stress: false,
+            jit_gc_policy: GcPolicy::OnPressure { threshold: 0.75 },
         };
 
-        // Register the JitModule's literal pool with the GC AFTER moving it
-        // into Engine. The pool's address must be stable for the lifetime of
-        // the engine — recording it before the move would leave a dangling
-        // pointer once `jit` relocates into `Engine`.
+        // Register the JitModule's literal pool AND the host-side
+        // FrameChain with the GC, AFTER moving them into Engine. Both
+        // need stable addresses for the lifetime of the engine —
+        // recording before the move would leave a dangling pointer.
         let pool_ptr: *const dyn dynobj::RootSource = engine.jit.literal_pool();
         unsafe { engine.gc.register_extra_root_source(pool_ptr); }
+        let chain_ptr: *const dyn dynobj::RootSource = &*engine.chain;
+        unsafe { engine.gc.register_extra_root_source(chain_ptr); }
 
         engine
     }
@@ -152,16 +165,22 @@ impl Engine {
             jit,
             externs,
             gc,
+            chain,
             host,
             anon_counter,
             gc_stress,
+            jit_gc_policy,
         } = self;
 
-        // Both guards must be in scope: the dynlang `RUNTIME` thread-local
-        // (so `NanBoxPolicy::try_decode_ptr` and ml_cons can find the GC),
-        // and microlisp's `Host` (so externs see the symbol table).
+        // Three thread-local guards must all be in scope:
+        //  - dynlang `RUNTIME` (so `NanBoxPolicy::try_decode_ptr` and
+        //    `ml_cons` can find the GC).
+        //  - microlisp `Host` (so externs see the symbol table).
+        //  - dynobj `ACTIVE_CHAIN` (so `with_scope` finds our shadow
+        //    stack — the GC scans this chain at every safepoint).
         let _gc_thread = gc.install_thread();
         let _host_g = host::install(host);
+        let _chain_g = dynobj::roots::install_chain(chain);
 
         // Read all forms upfront. Each form may be a heap-allocated cons
         // tree; the slice's u64 bits are GC pointers we MUST keep visible
@@ -187,7 +206,7 @@ impl Engine {
             // Re-read each iteration: a previous between-form collection
             // may have rewritten this slot to a relocated address.
             let form = pending.get(i);
-            last = process_form_inner(form, mb, func_refs, jit, externs, gc, host, anon_counter);
+            last = process_form_inner(form, mb, func_refs, jit, externs, gc, chain, host, anon_counter, *jit_gc_policy);
             if *gc_stress && i + 1 < n_forms {
                 gc.collect();
             }
@@ -206,12 +225,22 @@ impl Engine {
         self.gc_stress
     }
 
-    /// Force a garbage collection. The active SemiSpace backend copies all
-    /// reachable objects to to-space; the LiteralPool's slots get rewritten
-    /// in place to point at the new addresses.
+    /// Override the GC policy used when the JIT runs (top-level form
+    /// evaluation and macro-body invocation). The default is
+    /// `OnPressure { threshold: 0.75 }`. Set to `EveryPoint` to validate
+    /// JIT root coverage by collecting at every safepoint.
+    pub fn set_jit_gc_policy(&mut self, policy: GcPolicy) {
+        self.jit_gc_policy = policy;
+    }
+
+    /// Force a garbage collection. The active backend copies all
+    /// reachable objects to to-space; the LiteralPool's slots and the
+    /// host-side FrameChain's slots get rewritten in place to point at
+    /// the new addresses.
     pub fn collect(&self) {
         let _gc_thread = self.gc.install_thread();
         let _g = host::install(&self.host);
+        let _chain_g = dynobj::roots::install_chain(&self.chain);
         self.gc.collect();
     }
 
@@ -245,12 +274,15 @@ impl Engine {
         f(self)
     }
 
-    /// Install both the dynlang `RUNTIME` and microlisp `Host` thread-locals
-    /// for the closure. Used by tests that want to allocate cons cells (via
-    /// the reader, e.g.) without going through `run_source`.
+    /// Install the full thread-local state needed to allocate or run
+    /// JIT code through this engine: the dynlang `RUNTIME`, microlisp's
+    /// `Host`, and dynobj's active `FrameChain`. Used by tests that want
+    /// to allocate cons cells (via the reader, e.g.) without going
+    /// through `run_source`.
     pub fn with_thread_state<R>(&self, f: impl FnOnce(&Host) -> R) -> R {
         let _gc_thread = self.gc.install_thread();
         let _g = host::install(&self.host);
+        let _chain_g = dynobj::roots::install_chain(&self.chain);
         f(&self.host)
     }
 }
@@ -271,11 +303,20 @@ fn process_form_inner(
     jit: &mut JitModule,
     externs: &[*const u8],
     gc: &DynGcRuntime,
+    chain: &FrameChain,
     host: &Host,
     anon_counter: &mut u32,
+    jit_gc_policy: GcPolicy,
 ) -> u64 {
+    // Top-level rooting scope. Holds the in-flight `form` and `expanded`
+    // values across expansion (which fires JIT calls and may collect)
+    // and across compile / extend (which may also allocate cons cells
+    // for the literal pool, intermediate trees, etc.).
+    let scope = RootScope::new(chain, 4);
+    let form_root = scope.root::<crate::value::NanBoxTag>(form);
+
     // Expand macros.
-    let expanded = {
+    let expanded_root = {
         let macro_env = host.macro_env.borrow().clone();
         let mut ctx = expand::ExpandCtx {
             host,
@@ -283,8 +324,10 @@ fn process_form_inner(
             jit,
             gc,
             max_iters: 256,
+            jit_gc_policy,
         };
-        ctx.expand_all(form)
+        let result_bits = ctx.expand_all(form_root.get());
+        scope.root::<crate::value::NanBoxTag>(result_bits)
     };
 
     // Compile.
@@ -297,8 +340,9 @@ fn process_form_inner(
             sym: &mut sym,
             anon_counter,
             literal_pool: lit_pool,
+            live_stack: Vec::new(),
         };
-        compiler.compile_top(expanded)
+        compiler.compile_top(expanded_root.get())
     };
 
     // Snapshot + extend the JIT, with safepoint validation.
@@ -320,11 +364,13 @@ fn process_form_inner(
             host.macro_env.borrow_mut().insert(id, fref);
             value::NIL
         }
-        compile::TopResult::Expr(fref) => match gc.run_jit(jit, fref, &[]) {
-            dynlower::JitOutcome::Value(v) => v,
-            dynlower::JitOutcome::Void => value::NIL,
-            other => panic!("unexpected outcome from top-level form: {other:?}"),
-        },
+        compile::TopResult::Expr(fref) => {
+            match gc.run_jit(jit, fref, &[], jit_gc_policy) {
+                dynlower::JitOutcome::Value(v) => v,
+                dynlower::JitOutcome::Void => value::NIL,
+                other => panic!("unexpected outcome from top-level form: {other:?}"),
+            }
+        }
         compile::TopResult::None => value::NIL,
     }
 }

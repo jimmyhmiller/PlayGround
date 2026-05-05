@@ -1,5 +1,7 @@
 //! S-expression reader: text → cons-cell tree.
 
+use dynobj::roots::with_scope;
+
 use crate::symbols::SymbolTable;
 use crate::value::*;
 
@@ -143,18 +145,36 @@ impl<'a> Reader<'a> {
         }
         if !have_dot { tail = NIL; }
         let _ = have_dot;
-        let mut result = tail;
-        for x in items.into_iter().rev() {
-            result = alloc_cons(x, result);
-        }
+        // Use the outer scope for the running tail; each iteration's
+        // alloc gets its own fresh scope so we don't exhaust slots on
+        // long lists.
+        let result = with_scope(2, |scope| {
+            let acc = scope.root::<NanBoxTag>(tail);
+            for x in items.into_iter().rev() {
+                let new_bits = with_scope(3, |inner| {
+                    alloc_cons_from_raw(inner, x, acc.get()).get()
+                });
+                acc.set(new_bits);
+            }
+            acc.get()
+        });
         Ok(result)
     }
 
     fn read_quoted(&mut self, head: &str) -> Result<u64, ReadError> {
-        let inner = self.read()?;
+        let inner_bits = self.read()?;
         let head_id = self.sym.intern(head);
         let head_val = encode_sym(head_id);
-        Ok(alloc_cons(head_val, alloc_cons(inner, NIL)))
+        // Per-step scopes: each `alloc_cons_from_raw` needs 3 slots, so
+        // chaining two cons calls uses 6 transiently. Sequential nested
+        // scopes keeps each one lean.
+        let inner_cons_bits = with_scope(3, |s| {
+            alloc_cons_from_raw(s, inner_bits, NIL).get()
+        });
+        let result = with_scope(3, |s| {
+            alloc_cons_from_raw(s, head_val, inner_cons_bits).get()
+        });
+        Ok(result)
     }
 
     fn read_hash(&mut self) -> Result<u64, ReadError> {

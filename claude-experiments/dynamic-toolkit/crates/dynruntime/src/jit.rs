@@ -839,11 +839,50 @@ impl<T: JitRootTransportRuntime> RootSource for RuntimeRootSource<'_, T> {
     }
 }
 
+/// When the safepoint handler should run a collection.
+///
+/// The handler runs at every JIT safepoint (entry to allocation, loop
+/// backedge, etc.) once a session is installed; this enum controls
+/// whether each invocation actually triggers a collection cycle.
+///
+/// Replaces the older `gc_threshold: f64` API where `0.0` meant "every
+/// point" and a positive fraction meant "only past that usage" — that
+/// encoding made the stress contract (every safepoint) the default,
+/// which surprised frontends.
+#[derive(Debug, Clone, Copy)]
+pub enum GcPolicy {
+    /// Don't auto-collect at safepoints. The frontend triggers
+    /// collection itself (e.g. `gc.collect()` between top-level forms,
+    /// or never — the heap is large enough for the workload).
+    NeverAuto,
+    /// Collect when from-space usage reaches `threshold` (0.0..=1.0).
+    /// `0.75` is a reasonable default for a copying collector.
+    OnPressure { threshold: f64 },
+    /// Collect at every safepoint. The GC-stress contract: useful for
+    /// testing root coverage but several orders of magnitude slower
+    /// than `OnPressure`. Don't ship.
+    EveryPoint,
+}
+
+impl GcPolicy {
+    /// Decide whether to collect now given current heap usage.
+    pub(crate) fn should_collect(&self, used: usize, space_size: usize) -> bool {
+        match self {
+            GcPolicy::NeverAuto => false,
+            GcPolicy::EveryPoint => true,
+            GcPolicy::OnPressure { threshold } => {
+                let usage = used as f64 / space_size as f64;
+                usage >= *threshold
+            }
+        }
+    }
+}
+
 pub struct JitSafepointSession<'a, P: PtrPolicy, T: JitRootTransportRuntime> {
     heap: &'a Heap,
     transport: T,
     safepoints: &'a [SafepointRecord],
-    gc_threshold: f64,
+    gc_policy: GcPolicy,
     extra_roots: RefCell<Vec<*const dyn RootSource>>,
     _policy: PhantomData<P>,
 }
@@ -857,22 +896,24 @@ struct ActiveJitSafepointSession {
 }
 
 impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T> {
+    /// Create a session that never auto-collects at safepoints. The
+    /// frontend is expected to either call `gc.collect()` at its own
+    /// cadence, or use `with_gc_policy` to opt into pressure-based or
+    /// stress-mode collection.
     pub fn new(heap: &'a Heap, transport: T, safepoints: &'a [SafepointRecord]) -> Self {
         Self {
             heap,
             transport,
             safepoints,
-            gc_threshold: 0.0,
+            gc_policy: GcPolicy::NeverAuto,
             extra_roots: RefCell::new(Vec::new()),
             _policy: PhantomData,
         }
     }
 
-    /// Set the GC threshold: only collect when from-space usage exceeds
-    /// this fraction (0.0–1.0). Default 0.0 means collect at every safepoint.
-    /// Mirrors `MutatorRootManager::with_gc_threshold`.
-    pub fn with_gc_threshold(mut self, threshold: f64) -> Self {
-        self.gc_threshold = threshold;
+    /// Set the collection policy for this session. See [`GcPolicy`].
+    pub fn with_gc_policy(mut self, policy: GcPolicy) -> Self {
+        self.gc_policy = policy;
         self
     }
 
@@ -929,11 +970,11 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
     }
 
     unsafe fn handle(&self, frame_ptr: *mut u8, payload: usize) {
-        if self.gc_threshold > 0.0 {
-            let usage = self.heap.from_used() as f64 / self.heap.space_size() as f64;
-            if usage < self.gc_threshold {
-                return;
-            }
+        if !self
+            .gc_policy
+            .should_collect(self.heap.from_used(), self.heap.space_size())
+        {
+            return;
         }
         let root_source = RuntimeRootSource {
             transport: &self.transport,
@@ -1942,8 +1983,11 @@ mod tests {
         let transport = CountingTransport {
             last_payload: &last_payload,
         };
-        let session =
-            JitSafepointSession::<crate::ptr_policy::LowBitPtrPolicy<3>, _>::new(&heap, transport, &[]);
+        let session = JitSafepointSession::<
+            crate::ptr_policy::LowBitPtrPolicy<3>,
+            _,
+        >::new(&heap, transport, &[])
+        .with_gc_policy(GcPolicy::EveryPoint);
         let mut frame = [0u64; 2];
 
         session.with_installed(|| {

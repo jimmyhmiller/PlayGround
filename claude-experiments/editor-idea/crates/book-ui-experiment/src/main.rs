@@ -22,10 +22,16 @@
 //! `~/.book_ui_state.json` (saved every ~2 s).
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::Viewport;
+use bevy::camera::visibility::RenderLayers;
+use bevy::image::{
+    Image, ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor,
+};
 use bevy::input::ButtonInput;
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::input::gestures::{PanGesture, PinchGesture};
-use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
-use bevy::light::{CascadeShadowConfigBuilder, GlobalAmbientLight};
+use bevy::input::mouse::{MouseMotion, MouseScrollUnit, MouseWheel};
+use bevy::light::{CascadeShadowConfigBuilder, GlobalAmbientLight, NotShadowCaster};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
@@ -51,6 +57,11 @@ const DEFAULT_PAPER_THICKNESS: f32 = 0.018;
 /// whose slope is `pyramid_inset / paper_thickness`.
 const DEFAULT_PYRAMID_INSET: f32 = 0.012;
 const DEFAULT_MITER_LIMIT: f32 = 4.0;
+/// How many times the paper texture repeats across the full PAPER_W
+/// span. Smaller = more detail per repeat; larger = finer grain. The
+/// paper texture is fairly uniform so 1.5 keeps obvious tiling out of
+/// sight at typical zoom levels.
+const PAPER_TEX_TILES: f32 = 1.5;
 
 const FONT_FALLBACKS: &[&str] = &[
     "/System/Library/Fonts/Supplemental/Georgia Bold.ttf",
@@ -181,6 +192,55 @@ struct CameraControl {
 
 #[derive(Component)]
 struct DirLightIndex(usize);
+
+// ─── Debug 3D scene view ──────────────────────────────────────────
+
+const SCENE_LAYER: usize = 1;
+/// Radius of the dome on which light gizmos are placed. Light
+/// directions are unit vectors; we draw the gizmo at `dir * DOME_R`
+/// so the user has a tangible 3D position to grab.
+const LIGHT_GIZMO_DOME_R: f32 = 8.0;
+const LIGHT_GIZMO_PICK_R: f32 = 0.55;
+
+#[derive(Component)]
+struct MainCam;
+
+#[derive(Component)]
+struct SceneCam;
+
+#[derive(Component)]
+struct LightGizmo(usize);
+
+#[derive(Component)]
+struct LightGizmoMaterial(Handle<StandardMaterial>);
+
+#[derive(Resource)]
+struct DebugView {
+    enabled: bool,
+    /// Orbit yaw (around world Y, radians)
+    yaw: f32,
+    /// Orbit pitch (radians, +up)
+    pitch: f32,
+    /// Camera distance from origin
+    dist: f32,
+    selected_light: Option<usize>,
+    dragging_light: bool,
+    orbiting: bool,
+}
+
+impl Default for DebugView {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            yaw: 0.7,
+            pitch: 0.6,
+            dist: 22.0,
+            selected_light: None,
+            dragging_light: false,
+            orbiting: false,
+        }
+    }
+}
 
 #[derive(Resource)]
 struct PaperStack {
@@ -346,11 +406,11 @@ struct LettersUi {
 fn default_lights() -> [LightDef; 3] {
     [
         // Key — soft top-left, dominant.
-        LightDef { dir: Vec3::new(-0.30, -0.30, 0.90), intensity: 0.85, color_idx: 0 },
+        LightDef { dir: Vec3::new(-0.30, -0.30, 0.90), intensity: 0.40, color_idx: 0 },
         // Fill — gentler top-right to lift shadows on the opposite side.
-        LightDef { dir: Vec3::new( 0.40, -0.20, 0.85), intensity: 0.35, color_idx: 0 },
+        LightDef { dir: Vec3::new( 0.40, -0.20, 0.85), intensity: 0.10, color_idx: 0 },
         // Back rim — faint, opposite direction.
-        LightDef { dir: Vec3::new( 0.0,   0.45, 0.70), intensity: 0.18, color_idx: 0 },
+        LightDef { dir: Vec3::new( 0.0,   0.45, 0.70), intensity: 0.05, color_idx: 0 },
     ]
 }
 
@@ -372,9 +432,18 @@ fn default_palette(n: u16) -> Vec<Color> {
 fn main() {
     let font_data = load_font();
     let font_library = load_font_library();
-    let persisted = load_persisted_state();
     let screenshot_out = std::env::var("SCREENSHOT_OUT").ok();
-    let auto_scene = screenshot_out.is_some();
+    // BOOK_UI_TUNE=1 keeps the app running with a hidden window and
+    // the demo scene pre-built — used by the python tuning harness
+    // to drive the app via /tmp/book_ui_tune.json without needing
+    // a fresh build/launch per iteration.
+    let tune_mode = std::env::var("BOOK_UI_TUNE").is_ok();
+    let auto_scene = screenshot_out.is_some() || tune_mode;
+    // In screenshot / tune mode skip persisted state — we want a
+    // deterministic baseline (default lights / ambient / camera) so
+    // automated palette comparisons don't drift with whatever the
+    // user happened to leave on disk.
+    let persisted = if auto_scene { None } else { load_persisted_state() };
 
     // Always start framed on the demo scene. The user can pan/zoom/tilt
     // after; that gets persisted as usual.
@@ -400,7 +469,7 @@ fn main() {
             .as_ref()
             .filter(|s| s.version == CURRENT_STATE_VERSION)
             .map(|s| s.ambient)
-            .unwrap_or(0.65),
+            .unwrap_or(0.10),
     };
 
     let mut stack = PaperStack::new(
@@ -504,6 +573,9 @@ fn main() {
     )
         .add_plugins(EguiPlugin::default())
         .insert_resource(DebugMode(false))
+        .insert_resource(DebugView::default())
+        .insert_resource(TuningWatcher::default())
+        .insert_resource(TuneMode(tune_mode))
         .insert_resource(light_ctrl)
         .insert_resource(camera_ctrl)
         .insert_resource(GlobalAmbientLight {
@@ -522,21 +594,30 @@ fn main() {
         .insert_resource(doc)
         .insert_resource(FormUi { depth: 2, bevel: false })
         .insert_resource(ClearColor(Color::srgb(0.05, 0.04, 0.07)))
-        // Shadow map resolution: bump to 4096 to reduce stair-step
-        // quantization artifacts on the layer-edge shadows.
-        .insert_resource(bevy::light::DirectionalLightShadowMap { size: 4096 })
+        // 8192-sq directional shadow map. Combined with the single
+        // tightly-fit cascade above, this gives the best texel
+        // density we can practically afford for the wall→shelf
+        // shadows on a 0.018-thick layer stack. ~256 MB of GPU
+        // memory for the shadow target.
+        .insert_resource(bevy::light::DirectionalLightShadowMap { size: 8192 })
         .add_systems(Startup, setup)
         .add_systems(
             Update,
             (
                 toggle_debug,
+                toggle_debug_view,
                 debug_inputs,
+                scene_view_input,
                 update_hover,
                 apply_brush_input,
                 regen_stack_mesh,
                 sync_lights,
                 sync_ambient,
                 sync_camera,
+                sync_scene_cam,
+                sync_light_gizmos,
+                apply_viewport_layout,
+                poll_tuning_file,
                 save_state_periodic,
             ),
         )
@@ -565,6 +646,131 @@ fn auto_build_create_account_scene(
     stack.reset_full();
     carve_create_account_form(&mut stack, &font_lib);
     dirty.0 = true;
+}
+
+// ─── Live tuning over a JSON command file ─────────────────────────
+//
+// The app polls `/tmp/book_ui_tune.json` ~twice a second. Whenever
+// the file's mtime changes, we deserialize a `TuneCmd` and apply the
+// fields that are present:
+//   { "palette":       [[r,g,b], ...]  // sRGB floats, optional
+//   , "ambient":       0.10             // optional
+//   , "light_intensities": [0.4, 0.1, 0.05]  // optional, len ≤ 3
+//   , "screenshot_to": "/tmp/iter5.png" }   // optional one-shot
+//
+// This lets a python harness nudge palette / lighting and snap a
+// screenshot for measurement without ever restarting the app.
+
+#[derive(serde::Deserialize, Default)]
+struct TuneCmd {
+    /// Monotonic sequence number — the harness bumps this on every
+    /// command so we can tell back-to-back writes apart even when
+    /// the filesystem's mtime resolution can't.
+    #[serde(default)]
+    seq: u64,
+    #[serde(default)]
+    palette: Option<Vec<[f32; 3]>>,
+    #[serde(default)]
+    ambient: Option<f32>,
+    #[serde(default)]
+    light_intensities: Option<Vec<f32>>,
+    #[serde(default)]
+    screenshot_to: Option<String>,
+}
+
+#[derive(Resource, Default)]
+struct TuningWatcher {
+    last_seq: u64,
+    poll_counter: u32,
+    /// When a tune command asks for a screenshot, we don't spawn it
+    /// immediately — the mesh regen runs in the SAME Update tick
+    /// and Bevy doesn't guarantee an ordering between unrelated
+    /// systems, so the screenshot can be taken before the new
+    /// vertex colors land on the GPU. Defer by a few frames.
+    pending_screenshot: Option<(u32, String)>,
+}
+
+const TUNE_PATH: &str = "/tmp/book_ui_tune.json";
+const TUNE_DONE_PATH: &str = "/tmp/book_ui_tune.done";
+
+#[derive(Resource)]
+struct TuneMode(bool);
+
+fn poll_tuning_file(
+    mut commands: Commands,
+    tune_mode: Res<TuneMode>,
+    mut watcher: ResMut<TuningWatcher>,
+    mut stack: ResMut<PaperStack>,
+    mut light: ResMut<LightControl>,
+    mut dirty: ResMut<StackDirty>,
+) {
+    // Tune file only drives the app when BOOK_UI_TUNE=1. Otherwise a
+    // stale /tmp/book_ui_tune.json from an old harness run would
+    // silently overwrite the user's saved lights/palette every poll.
+    if !tune_mode.0 {
+        return;
+    }
+    watcher.poll_counter = watcher.poll_counter.wrapping_add(1);
+
+    // Service any deferred screenshot first (every frame). We wait
+    // a few frames after applying a tune so the mesh regen lands
+    // on the GPU before the screenshot is captured.
+    if let Some((frames_left, path)) = watcher.pending_screenshot.take() {
+        if frames_left == 0 {
+            commands
+                .spawn(Screenshot::primary_window())
+                .observe(save_to_disk(path.clone()));
+            // The screenshot writer is async — give it ~0.5s on a
+            // background thread before announcing the done file.
+            let done = TUNE_DONE_PATH.to_string();
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                let _ = std::fs::write(&done, path.as_bytes());
+            });
+        } else {
+            watcher.pending_screenshot = Some((frames_left - 1, path));
+        }
+    }
+
+    if watcher.poll_counter % 10 != 0 {
+        return;
+    }
+    let Ok(bytes) = std::fs::read(TUNE_PATH) else { return; };
+    let cmd: TuneCmd = match serde_json::from_slice(&bytes) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[tune] bad json: {e}");
+            return;
+        }
+    };
+    if cmd.seq == 0 || cmd.seq == watcher.last_seq {
+        return;
+    }
+    watcher.last_seq = cmd.seq;
+
+    if let Some(palette) = cmd.palette {
+        for (i, c) in palette.iter().enumerate() {
+            if i < stack.palette.len() {
+                stack.palette[i] = Color::srgb(c[0], c[1], c[2]);
+            }
+        }
+        dirty.0 = true;
+    }
+    if let Some(amb) = cmd.ambient {
+        light.ambient = amb;
+    }
+    if let Some(intensities) = cmd.light_intensities {
+        for (i, v) in intensities.iter().take(3).enumerate() {
+            light.lights[i].intensity = *v;
+        }
+    }
+    if let Some(out) = cmd.screenshot_to {
+        // Defer 4 frames — enough for the dirty-flag-driven mesh
+        // regen + GPU upload to complete before the screenshot is
+        // captured. Independent of system ordering.
+        watcher.pending_screenshot = Some((4, out));
+    }
+    eprintln!("[tune] applied seq={}", cmd.seq);
 }
 
 fn save_state_periodic(
@@ -695,6 +901,7 @@ fn setup(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
     stack: Res<PaperStack>,
 ) {
     commands.spawn((
@@ -710,6 +917,72 @@ fn setup(
         // texel boundaries don't show as ridges along faceted wall
         // edges.
         bevy::light::ShadowFilteringMethod::Gaussian,
+        MainCam,
+    ));
+
+    // Second camera for the debug "scene view" — orbits the paper
+    // stack and renders the light gizmos (RenderLayer 1). Inactive by
+    // default; enabled when `DebugView.enabled` is on.
+    commands.spawn((
+        Camera3d::default(),
+        Camera {
+            is_active: false,
+            order: 1,
+            ..default()
+        },
+        Transform::from_xyz(12.0, 12.0, 18.0).looking_at(Vec3::ZERO, Vec3::Z),
+        Projection::from(PerspectiveProjection {
+            fov: 35f32.to_radians(),
+            near: 0.1,
+            far: 400.0,
+            ..default()
+        }),
+        RenderLayers::from_layers(&[0, SCENE_LAYER]),
+        SceneCam,
+    ));
+
+    // Light gizmos: one unlit emissive sphere per directional light,
+    // visible only on render layer 1 (so it shows in the scene-view
+    // camera but not in the main book UI).
+    let gizmo_mesh = meshes.add(Sphere::new(0.45));
+    for i in 0..3 {
+        let mat = materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            emissive: LinearRgba::WHITE,
+            unlit: true,
+            ..default()
+        });
+        commands.spawn((
+            Mesh3d(gizmo_mesh.clone()),
+            MeshMaterial3d(mat.clone()),
+            Transform::from_xyz(0.0, 0.0, LIGHT_GIZMO_DOME_R),
+            RenderLayers::layer(SCENE_LAYER),
+            NotShadowCaster,
+            LightGizmo(i),
+            LightGizmoMaterial(mat),
+        ));
+    }
+
+    // Faint reference plane at the paper level — just for the scene
+    // cam, so the user has spatial context for where the lights sit
+    // relative to the paper.
+    // Thin reference plate (lying flat in the XY plane, just below
+    // the paper) — gives the scene cam a sense of where the book
+    // surface is relative to the lights.
+    let ref_mesh = meshes.add(Cuboid::new(PAPER_W * 1.05, PAPER_H * 1.05, 0.005));
+    let ref_mat = materials.add(StandardMaterial {
+        base_color: Color::srgba(0.4, 0.4, 0.45, 0.35),
+        emissive: LinearRgba::new(0.04, 0.04, 0.06, 1.0),
+        unlit: true,
+        alpha_mode: AlphaMode::Blend,
+        ..default()
+    });
+    commands.spawn((
+        Mesh3d(ref_mesh),
+        MeshMaterial3d(ref_mat),
+        Transform::from_xyz(0.0, 0.0, -0.01),
+        RenderLayers::layer(SCENE_LAYER),
+        NotShadowCaster,
     ));
 
     for i in 0..3 {
@@ -718,20 +991,24 @@ fn setup(
                 color: Color::WHITE,
                 illuminance: 0.0,
                 shadows_enabled: false,
-                shadow_depth_bias: 0.005,
-                shadow_normal_bias: 0.1,
+                // Bumped above Bevy's defaults for thin stacked
+                // geometry: at 0.018-unit layer thickness, undersized
+                // bias causes wavy shadow acne along every transition.
+                shadow_depth_bias: 0.04,
+                shadow_normal_bias: 0.8,
                 ..default()
             },
             CascadeShadowConfigBuilder {
-                // Four cascades with a wide reach so shadows stay
-                // intact across the full pinch-zoom range (camera
-                // distance up to ~140 world units at min zoom).
-                // Front cascade keeps high resolution for the
-                // near-field scene at default zoom.
-                num_cascades: 4,
+                // Single cascade tightly fit to the paper. With the
+                // 8192 shadow-map resolution below, this gives
+                // ~270 texels per world unit (≈ 5 texels per layer
+                // thickness) — enough that PCF can smooth the wall
+                // shadows on each shelf instead of producing a wavy
+                // few-texel-wide ridge.
+                num_cascades: 1,
                 minimum_distance: 0.05,
-                first_cascade_far_bound: 8.0,
-                maximum_distance: 160.0,
+                first_cascade_far_bound: 30.0,
+                maximum_distance: 30.0,
                 ..default()
             }
             .build(),
@@ -739,8 +1016,24 @@ fn setup(
         ));
     }
 
+    // Paper textures, loaded directly with a CPU-generated mipmap
+    // chain. Bevy 0.18's JPG loader produces a single-mip texture;
+    // viewed at high tilt, that aliases into vertical streaks because
+    // the GPU has nothing smaller to sample from. Mipmaps + 16x
+    // anisotropy collapse the aliasing.
+    let diffuse_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/textures/paper_diffuse.jpg");
+    let normal_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/textures/paper_normal.jpg");
+    let paper_diffuse = images.add(load_mipped_image(&diffuse_path, true));
+    // Normal map is linear data — sRGB-decoding the encoded
+    // (R, G, B) = (Tx, Ty, Tz) values would warp the tangent vectors.
+    let paper_normal = images.add(load_mipped_image(&normal_path, false));
+
     let stack_mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
+        base_color_texture: Some(paper_diffuse),
+        normal_map_texture: Some(paper_normal),
         perceptual_roughness: 1.0,
         metallic: 0.0,
         reflectance: 0.0,
@@ -761,6 +1054,7 @@ fn setup(
 fn build_stack_mesh(stack: &PaperStack) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
     let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
@@ -804,6 +1098,7 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
                 color,
                 &mut positions,
                 &mut normals,
+                &mut uvs,
                 &mut colors,
                 &mut indices,
             );
@@ -826,6 +1121,7 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
                 color,
                 &mut positions,
                 &mut normals,
+                &mut uvs,
                 &mut colors,
                 &mut indices,
             );
@@ -839,6 +1135,7 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
                     color,
                     &mut positions,
                     &mut normals,
+                    &mut uvs,
                     &mut colors,
                     &mut indices,
                 );
@@ -849,8 +1146,13 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
     let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
+    // Tangents are required for the normal-map sampling on the
+    // StandardMaterial. generate_tangents needs positions, normals,
+    // UVs, and indices already present (they are).
+    let _ = mesh.generate_tangents();
     mesh
 }
 
@@ -860,6 +1162,7 @@ fn tessellate_region(
     color: [f32; 4],
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
     colors: &mut Vec<[f32; 4]>,
     indices: &mut Vec<u32>,
 ) {
@@ -900,6 +1203,7 @@ fn tessellate_region(
         for v in &buffers.vertices {
             positions.push([v[0], v[1], z]);
             normals.push([0.0, 0.0, 1.0]);
+            uvs.push(planar_uv(v[0], v[1]));
             colors.push(tinted(color, v[0], v[1]));
         }
         // Lyon emits triangles in y-down convention. When we promote
@@ -955,6 +1259,7 @@ fn emit_wall_for_ring(
     color: [f32; 4],
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
     colors: &mut Vec<[f32; 4]>,
     indices: &mut Vec<u32>,
 ) {
@@ -972,6 +1277,34 @@ fn emit_wall_for_ring(
     } else {
         pts_top.clone()
     };
+
+    // Cumulative arclength along the top rim, used as the U axis for
+    // wall UVs. Without this — i.e. if walls reused the cap's planar
+    // (x, y) UV — the top and bottom rim would share UVs (vertical
+    // walls) or differ by only `slope_inset`, giving a near-degenerate
+    // UV quad that the sampler stretches across the whole wall face
+    // as a single column of texels.
+    //
+    // V (vertical on the wall face) deliberately uses a different
+    // scale than U: the wall is only paper_thickness (~0.018) tall,
+    // so a strict world-units mapping samples just a few texels of
+    // texture height — which the GPU smears as vertical streaks
+    // across the visible wall. Mapping each wall face to a fixed
+    // fraction of the texture instead gives a real chunk of grain on
+    // every wall regardless of its physical thinness.
+    let mut cum_len = vec![0.0_f32; n + 1];
+    for i in 0..n {
+        let j = (i + 1) % n;
+        cum_len[i + 1] = cum_len[i] + (pts_top[j] - pts_top[i]).length();
+    }
+    let u_scale = PAPER_TEX_TILES / PAPER_W;
+    // Per-wall vertical span in UV. 0.15 = ~15% of texture height;
+    // big enough that the wall shows recognizable paper grain but
+    // small enough that it reads as continuous fibers rather than a
+    // distinct second tile.
+    const WALL_V_SPAN: f32 = 0.15;
+    let v_top = 0.0;
+    let v_bot = WALL_V_SPAN;
 
     // Per-quad FLAT normals. Smooth/averaged per-vertex normals
     // looked nicer on continuous curves but caused shadow ridge
@@ -994,10 +1327,20 @@ fn emit_wall_for_ring(
             .unwrap_or(Vec3::Z);
         let normal = [n_face.x, n_face.y, n_face.z];
 
+        let u_i = cum_len[i] * u_scale;
+        let u_j = cum_len[i + 1] * u_scale;
+        let wall_uvs = [
+            [u_i, v_top],
+            [u_i, v_bot],
+            [u_j, v_bot],
+            [u_j, v_top],
+        ];
+
         let base = positions.len() as u32;
-        for v in [p_top_i, p_bot_i, p_bot_j, p_top_j] {
+        for (k, v) in [p_top_i, p_bot_i, p_bot_j, p_top_j].iter().enumerate() {
             positions.push([v.x, v.y, v.z]);
             normals.push(normal);
+            uvs.push(wall_uvs[k]);
             colors.push(tinted(color, v.x, v.y));
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -1023,6 +1366,82 @@ fn ring_points(ring: &LineString<f64>) -> Vec<Vec2> {
         .iter()
         .map(|c| Vec2::new(c.x as f32, c.y as f32))
         .collect()
+}
+
+/// Decode a JPG and build a Bevy `Image` with a full mipmap chain
+/// (full-res down to 1×1 by box filter), wrapping repeat with 16x
+/// anisotropy. Mipmaps are essential — at high camera tilt the cap
+/// textures get sampled at oblique angles, and a single-mip texture
+/// aliases into pronounced vertical streaks.
+fn load_mipped_image(path: &std::path::Path, is_srgb: bool) -> Image {
+    let img = image::open(path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()))
+        .to_rgba8();
+
+    // Square + power-of-two so each mip halves cleanly. Round DOWN
+    // to the nearest power of two — `next_power_of_two` returns the
+    // input itself when already PoT, but this needs to land on the
+    // largest PoT ≤ min(w, h) regardless.
+    let raw = img.width().min(img.height());
+    let dim = if raw.is_power_of_two() {
+        raw
+    } else {
+        raw.next_power_of_two() / 2
+    };
+    let mut current = if img.width() == dim && img.height() == dim {
+        img
+    } else {
+        image::imageops::resize(&img, dim, dim, image::imageops::FilterType::Triangle)
+    };
+
+    let mut data: Vec<u8> = current.as_raw().clone();
+    let mut size = dim;
+    let mut mip_count: u32 = 1;
+    while size > 1 {
+        let next = size / 2;
+        current = image::imageops::resize(&current, next, next, image::imageops::FilterType::Triangle);
+        data.extend_from_slice(current.as_raw());
+        size = next;
+        mip_count += 1;
+    }
+
+    let format = if is_srgb {
+        TextureFormat::Rgba8UnormSrgb
+    } else {
+        TextureFormat::Rgba8Unorm
+    };
+    // `Image::new` asserts that data length matches the *base level*
+    // volume only — it doesn't know about mip chains and would panic
+    // on the concatenated data. `new_uninit` skips that check; we
+    // attach the full mip data and bump mip_level_count manually.
+    let mut image = Image::new_uninit(
+        Extent3d { width: dim, height: dim, depth_or_array_layers: 1 },
+        TextureDimension::D2,
+        format,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.data = Some(data);
+    image.texture_descriptor.mip_level_count = mip_count;
+    image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::Repeat,
+        address_mode_v: ImageAddressMode::Repeat,
+        address_mode_w: ImageAddressMode::Repeat,
+        mag_filter: ImageFilterMode::Linear,
+        min_filter: ImageFilterMode::Linear,
+        mipmap_filter: ImageFilterMode::Linear,
+        anisotropy_clamp: 16,
+        ..ImageSamplerDescriptor::linear()
+    });
+    image
+}
+
+/// Planar UV from world XY for cap (top) faces. Wall faces compute
+/// their own UVs from arclength + z — see `emit_wall_for_ring`.
+fn planar_uv(x: f32, y: f32) -> [f32; 2] {
+    [
+        x * PAPER_TEX_TILES / PAPER_W + 0.5,
+        y * PAPER_TEX_TILES / PAPER_H + 0.5,
+    ]
 }
 
 fn color_to_rgba(c: Color) -> [f32; 4] {
@@ -2204,31 +2623,43 @@ fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary) {
     stack.paper_thickness = 0.18;
 
     let n_layers = stack.layers.len();
-    if n_layers < 8 {
+    if n_layers < 9 {
         return;
     }
 
-    // Palette (indexed 0..=7):
-    //   0 = blue (carve floor)
-    //   1 = teal
-    //   2 = green
+    // Palette (indexed 0..=8). The reference quantizes cleanly to
+    // SIX rainbow bands (no separate green AND teal — what looks
+    // green in the reference is a single teal-green band):
+    //   0 = blue        (carve floor — innermost rainbow ring)
+    //   1 = teal-green  (was: separate teal + green slots)
+    //   2 = lime        (yellow-green)
     //   3 = yellow
     //   4 = orange
-    //   5 = red (outermost paper)
-    //   6 = card dark purple
-    //   7 = card light purple (card top surface)
+    //   5 = red         (outermost paper)
+    //   6 = card dark purple   (text / icon recess)
+    //   7 = card mid purple    (form-field bottom)
+    //   8 = card light purple  (card top surface)
+    //
+    // Each rainbow color was inverse-solved from the actual rendered
+    // output: starting from a target sampled from the reference, we
+    // ran a screenshot, measured what came out, and offset the asked
+    // sRGB by `(rendered - target)` so the next render lands on the
+    // target. Every value here is darker than the reference RGB
+    // because the lighting / ambient adds a ~+25-byte brightness on
+    // top of whatever we ask for.
     let n_pal = stack.palette.len();
-    if n_pal >= 8 {
-        stack.palette[0] = Color::srgb(0.27, 0.50, 0.86); // blue
-        stack.palette[1] = Color::srgb(0.36, 0.75, 0.68); // teal
-        stack.palette[2] = Color::srgb(0.62, 0.78, 0.36); // green
-        stack.palette[3] = Color::srgb(0.96, 0.78, 0.30); // yellow
-        stack.palette[4] = Color::srgb(0.96, 0.59, 0.26); // orange
-        stack.palette[5] = Color::srgb(0.93, 0.31, 0.27); // red
-        stack.palette[6] = Color::srgb(0.32, 0.22, 0.55); // dark purple
-        stack.palette[7] = Color::srgb(0.60, 0.50, 0.84); // card purple
-        for i in 8..n_pal {
-            stack.palette[i] = stack.palette[7];
+    if n_pal >= 9 {
+        // Calibrated by /tmp/tune_loop.py over 12 iterations against
+        // the cut-paper reference. Best mean Δ = 13.7 RGB-units.
+        stack.palette[0] = Color::srgb(0.145, 0.231, 0.412); // blue        (target #2C4475)
+        stack.palette[1] = Color::srgb(0.086, 0.545, 0.494); // teal-green  (target #308D7A)
+        stack.palette[2] = Color::srgb(0.475, 0.706, 0.208); // lime        (target #7AA73F)
+        stack.palette[3] = Color::srgb(1.000, 0.702, 0.000); // yellow      (target #E49F12)
+        stack.palette[4] = Color::srgb(1.000, 0.416, 0.000); // orange      (target #F6701F)
+        stack.palette[5] = Color::srgb(0.984, 0.208, 0.137); // red         (target #E54834)
+        // Card purples filled in below.
+        for i in 9..n_pal {
+            stack.palette[i] = stack.palette[5];
         }
     }
 
@@ -2241,23 +2672,21 @@ fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary) {
     }
 
     // Explicit z heights. Carved-down rainbow: red highest, blue
-    // lowest. Card sits ON blue and rises back UP to the same
-    // heights as teal and green (but in different XY).
+    // lowest. Card sits ON blue and rises back UP to roughly the
+    // teal-green / lime / yellow heights (in different XY).
     let pt = stack.paper_thickness;
     let z_blue   = 1.0 * pt; // floor
     let z_teal   = 2.0 * pt;
-    let z_green  = 3.0 * pt;
+    let z_lime   = 3.0 * pt;
     let z_yellow = 4.0 * pt;
     let z_orange = 5.0 * pt;
     let z_red    = 6.0 * pt; // top
     stack.layer_z[0] = z_blue;
     stack.layer_z[1] = z_teal;
-    stack.layer_z[2] = z_green;
+    stack.layer_z[2] = z_lime;
     stack.layer_z[3] = z_yellow;
     stack.layer_z[4] = z_orange;
     stack.layer_z[5] = z_red;
-    stack.layer_z[6] = z_teal;  // card dark — same height as teal
-    stack.layer_z[7] = z_green; // card light — same height as green
 
     // Geometry sizes.
     let paper_w: f32 = 18.0;
@@ -2272,7 +2701,7 @@ fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary) {
         polygon_filled(rounded_rect_pts_ccw(0.0, 0.0, size, size, radius))
     };
     let carve_teal   = carve(smallest_carve_w + 0.0  * step, 0.42);
-    let carve_green  = carve(smallest_carve_w + 1.0  * step, 0.46);
+    let carve_lime   = carve(smallest_carve_w + 1.0  * step, 0.46);
     let carve_yellow = carve(smallest_carve_w + 2.0  * step, 0.50);
     let carve_orange = carve(smallest_carve_w + 3.0  * step, 0.54);
     let carve_red    = carve(smallest_carve_w + 4.0  * step, 0.58);
@@ -2285,7 +2714,7 @@ fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary) {
 
     // Layers 1..=5: each is full paper MINUS its respective carve.
     stack.layers[1] = mp(paper.clone()).difference(&mp(carve_teal.clone()));
-    stack.layers[2] = mp(paper.clone()).difference(&mp(carve_green.clone()));
+    stack.layers[2] = mp(paper.clone()).difference(&mp(carve_lime));
     stack.layers[3] = mp(paper.clone()).difference(&mp(carve_yellow));
     stack.layers[4] = mp(paper.clone()).difference(&mp(carve_orange));
     stack.layers[5] = mp(paper.clone()).difference(&mp(carve_red));
@@ -2362,7 +2791,7 @@ fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary) {
 
     // THREE purple layers stacked on the blue floor:
     //   layer 6 = deep purple (z=z_teal)   — visible inside text/icons.
-    //   layer 7 = mid purple  (z=z_green)  — visible at form-field bottoms.
+    //   layer 7 = mid purple  (z=z_lime)   — visible at form-field bottoms.
     //   layer 8 = top purple  (z=z_yellow) — visible card surface.
     //
     // Cuts:
@@ -2379,15 +2808,14 @@ fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary) {
         return;
     }
     if n_pal >= 9 {
-        // Re-grade purples: 6 = darkest text-recess color,
-        //                   7 = mid (form-field bottom),
-        //                   8 = lightest card surface.
-        stack.palette[6] = Color::srgb(0.18, 0.10, 0.32); // deep
-        stack.palette[7] = Color::srgb(0.40, 0.30, 0.65); // mid
-        stack.palette[8] = Color::srgb(0.66, 0.54, 0.86); // top
+        // Card purples — calibrated against reference samples
+        // (top #8761AB, mid #69408D, deep #35214B).
+        stack.palette[6] = Color::srgb(0.282, 0.000, 0.075); // deep
+        stack.palette[7] = Color::srgb(0.380, 0.220, 0.600); // mid
+        stack.palette[8] = Color::srgb(0.525, 0.353, 0.682); // top
     }
     stack.layer_z[6] = z_teal;
-    stack.layer_z[7] = z_green;
+    stack.layer_z[7] = z_lime;
     stack.layer_z[8] = z_yellow;
 
     // Build subtractions iteratively. Geo's difference with a
@@ -2528,6 +2956,8 @@ fn debug_inputs(
     mut dirty: ResMut<StackDirty>,
     mut light: ResMut<LightControl>,
     mut contexts: EguiContexts,
+    debug_view: Res<DebugView>,
+    windows: Query<&Window>,
 ) {
     let dt = time.delta_secs();
 
@@ -2536,6 +2966,16 @@ fn debug_inputs(
         .ctx_mut()
         .map(|c| c.is_pointer_over_area() || c.wants_pointer_input())
         .unwrap_or(false);
+
+    // In split-view mode the right half of the window belongs to the
+    // scene-view camera; pan/zoom input there must not move the book.
+    let cursor_in_scene = debug_view.enabled
+        && windows
+            .single()
+            .ok()
+            .and_then(|w| w.cursor_position().map(|c| c.x >= w.width() * 0.5))
+            .unwrap_or(false);
+    let block_pointer_input = egui_has_pointer || cursor_in_scene;
 
     if keys.just_pressed(KeyCode::KeyR) {
         camera.pan = Vec2::ZERO;
@@ -2555,7 +2995,7 @@ fn debug_inputs(
     // apply whichever fires. Skip when egui owns the pointer.
     let mut pan_delta = Vec2::ZERO;
     for event in wheel.read() {
-        if egui_has_pointer { continue; }
+        if block_pointer_input { continue; }
         let factor = match event.unit {
             MouseScrollUnit::Pixel => 0.005,
             MouseScrollUnit::Line  => 0.10,
@@ -2567,7 +3007,7 @@ fn debug_inputs(
         pan_delta.y += event.y * factor;
     }
     for event in pan_gesture.read() {
-        if egui_has_pointer { continue; }
+        if block_pointer_input { continue; }
         pan_delta.x -= event.0.x * 0.005;
         pan_delta.y += event.0.y * 0.005;
     }
@@ -2578,7 +3018,7 @@ fn debug_inputs(
 
     // Pinch: positive delta = pinch out = zoom in.
     for event in pinch.read() {
-        if egui_has_pointer { continue; }
+        if block_pointer_input { continue; }
         camera.zoom = (camera.zoom * (1.0 + event.0)).clamp(0.1, 64.0);
     }
 
@@ -2596,10 +3036,11 @@ fn debug_inputs(
 
 fn update_hover(
     windows: Query<&Window>,
-    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
+    cameras: Query<(&Camera, &GlobalTransform), (With<Camera3d>, With<MainCam>)>,
     stack: Res<PaperStack>,
     mut hover: ResMut<HoverPos>,
     mut contexts: EguiContexts,
+    debug_view: Res<DebugView>,
 ) {
     if let Ok(ctx) = contexts.ctx_mut() {
         if ctx.is_pointer_over_area() {
@@ -2609,6 +3050,12 @@ fn update_hover(
     }
     let Ok(window) = windows.single() else { hover.0 = None; return; };
     let Some(cursor) = window.cursor_position() else { hover.0 = None; return; };
+    // In split-view mode the cursor only addresses the book UI when
+    // it's over the left half of the window.
+    if debug_view.enabled && cursor.x > window.width() * 0.5 {
+        hover.0 = None;
+        return;
+    }
     let Ok((camera, cam_tf)) = cameras.single() else { hover.0 = None; return; };
     let Ok(ray) = camera.viewport_to_world(cam_tf, cursor) else { hover.0 = None; return; };
     hover.0 = pick_top_visible(ray, &stack);
@@ -2704,8 +3151,8 @@ fn sync_lights(
         let on = l.intensity > 0.01;
         dl.color = l.color();
         dl.illuminance = l.intensity * 7_500.0;
-        // Disable shadows on the fill / back lights — they'd mush
-        // together and produce muddy shading.
+        // Only the key light casts shadows — fill / back lights would
+        // mush together into muddy double-shadows otherwise.
         dl.shadows_enabled = on && idx.0 == 0;
     }
 }
@@ -2716,14 +3163,315 @@ fn sync_ambient(light: Res<LightControl>, mut ambient: ResMut<GlobalAmbientLight
 
 fn sync_camera(
     camera_ctrl: Res<CameraControl>,
-    mut q: Query<&mut Transform, With<Camera3d>>,
+    debug_view: Res<DebugView>,
+    mut q: Query<&mut Transform, (With<Camera3d>, With<MainCam>)>,
 ) {
     let Ok(mut tf) = q.single_mut() else { return };
     let target = Vec3::new(camera_ctrl.pan.x, camera_ctrl.pan.y, 0.0);
     let base_distance = 14.0;
     let distance = base_distance / camera_ctrl.zoom;
-    let offset = Quat::from_rotation_x(-camera_ctrl.tilt) * Vec3::new(0.0, 0.0, distance);
+    // When the debug 3D view is active the left viewport is locked to
+    // top-down so the user has a stable plan-view of the book UI.
+    let tilt = if debug_view.enabled { 0.0 } else { camera_ctrl.tilt };
+    let offset = Quat::from_rotation_x(-tilt) * Vec3::new(0.0, 0.0, distance);
     *tf = Transform::from_translation(target + offset).looking_at(target, Vec3::Y);
+}
+
+/// Compact 2D direction pad for a directional light. The pad is a
+/// top-down projection of the upper hemisphere: center = overhead,
+/// edge = grazing, +y on screen = +y in world. Click/drag to set the
+/// direction; Z is auto-derived as the remaining elevation. Returns
+/// `true` if the user changed the value.
+fn light_dir_pad(ui: &mut egui::Ui, dir: &mut Vec3, dot_color: egui::Color32) -> bool {
+    let size = egui::vec2(72.0, 72.0);
+    let (resp, painter) = ui.allocate_painter(size, egui::Sense::click_and_drag());
+    let rect = resp.rect;
+    let center = rect.center();
+    let r = rect.width().min(rect.height()) * 0.5 - 3.0;
+
+    let bg = egui::Color32::from_rgb(28, 28, 32);
+    let grid = egui::Color32::from_rgb(70, 70, 80);
+    painter.circle_filled(center, r, bg);
+    painter.circle_stroke(center, r, egui::Stroke::new(1.0, grid));
+    painter.circle_stroke(center, r * 0.5, egui::Stroke::new(0.5, grid));
+    painter.line_segment(
+        [egui::pos2(center.x - r, center.y), egui::pos2(center.x + r, center.y)],
+        egui::Stroke::new(0.5, grid),
+    );
+    painter.line_segment(
+        [egui::pos2(center.x, center.y - r), egui::pos2(center.x, center.y + r)],
+        egui::Stroke::new(0.5, grid),
+    );
+
+    // Stored l.dir is in shader-space (y-down). Project to world for
+    // the pad: world = (dir.x, -dir.y, dir.z), normalized.
+    let world = Vec3::new(dir.x, -dir.y, dir.z)
+        .try_normalize()
+        .unwrap_or(Vec3::Z);
+    let dot_pos = egui::pos2(center.x + world.x * r, center.y - world.y * r);
+    painter.circle_filled(dot_pos, 5.0, dot_color);
+    painter.circle_stroke(dot_pos, 5.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+
+    let mut changed = false;
+    if (resp.clicked() || resp.dragged()) && let Some(pos) = resp.interact_pointer_pos() {
+        let mut u = (pos.x - center.x) / r;
+        let mut v = -(pos.y - center.y) / r;
+        let len = (u * u + v * v).sqrt();
+        if len > 1.0 {
+            u /= len;
+            v /= len;
+        }
+        let z = (1.0 - (u * u + v * v)).max(0.0).sqrt();
+        *dir = Vec3::new(u, -v, z);
+        changed = true;
+    }
+    changed
+}
+
+// ─── Debug 3D scene view systems ──────────────────────────────────
+
+/// Convert the stored "shader-space, y-down" light direction into a
+/// world-space unit vector pointing FROM the origin TOWARD the light.
+fn light_dir_to_world(dir: Vec3) -> Vec3 {
+    Vec3::new(dir.x, -dir.y, dir.z).try_normalize().unwrap_or(Vec3::Z)
+}
+
+/// Inverse of [`light_dir_to_world`].
+fn world_to_light_dir(world: Vec3) -> Vec3 {
+    let n = world.try_normalize().unwrap_or(Vec3::Z);
+    Vec3::new(n.x, -n.y, n.z)
+}
+
+/// Resize each camera's viewport to either fullscreen (debug view
+/// off) or split halves (debug view on). Run every frame so window
+/// resizes flow through.
+fn apply_viewport_layout(
+    debug_view: Res<DebugView>,
+    windows: Query<&Window>,
+    mut main_q: Query<&mut Camera, (With<MainCam>, Without<SceneCam>)>,
+    mut scene_q: Query<&mut Camera, (With<SceneCam>, Without<MainCam>)>,
+) {
+    let Ok(window) = windows.single() else { return };
+    let w = window.physical_width().max(2);
+    let h = window.physical_height().max(2);
+
+    let Ok(mut main_cam) = main_q.single_mut() else { return };
+    let Ok(mut scene_cam) = scene_q.single_mut() else { return };
+
+    if debug_view.enabled {
+        let half = w / 2;
+        main_cam.viewport = Some(Viewport {
+            physical_position: UVec2::ZERO,
+            physical_size: UVec2::new(half, h),
+            ..default()
+        });
+        scene_cam.viewport = Some(Viewport {
+            physical_position: UVec2::new(half, 0),
+            physical_size: UVec2::new(w - half, h),
+            ..default()
+        });
+        scene_cam.is_active = true;
+    } else {
+        main_cam.viewport = None;
+        scene_cam.viewport = None;
+        scene_cam.is_active = false;
+    }
+}
+
+/// Position the scene-view camera from orbit params (yaw/pitch/dist
+/// around origin), Z-up.
+fn sync_scene_cam(
+    debug_view: Res<DebugView>,
+    mut q: Query<&mut Transform, (With<SceneCam>, Without<MainCam>)>,
+) {
+    if !debug_view.enabled {
+        return;
+    }
+    let Ok(mut tf) = q.single_mut() else { return };
+    let cp = debug_view.pitch.cos();
+    let offset = Vec3::new(
+        debug_view.dist * cp * debug_view.yaw.sin(),
+        debug_view.dist * cp * debug_view.yaw.cos(),
+        debug_view.dist * debug_view.pitch.sin(),
+    );
+    *tf = Transform::from_translation(offset).looking_at(Vec3::ZERO, Vec3::Z);
+}
+
+/// Position/scale/colorize each light gizmo from `LightControl`.
+fn sync_light_gizmos(
+    light: Res<LightControl>,
+    debug_view: Res<DebugView>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut q: Query<(
+        &LightGizmo,
+        &LightGizmoMaterial,
+        &mut Transform,
+        &mut Visibility,
+    )>,
+) {
+    for (idx, mat_h, mut tf, mut vis) in q.iter_mut() {
+        *vis = if debug_view.enabled {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        };
+        let l = light.lights[idx.0];
+        let world_dir = light_dir_to_world(l.dir);
+        let pos = world_dir * LIGHT_GIZMO_DOME_R;
+        let selected = debug_view.selected_light == Some(idx.0);
+        let scale = if selected { 1.6 } else { 1.0 } * (0.6 + l.intensity.min(2.0) * 0.5);
+        *tf = Transform::from_translation(pos).with_scale(Vec3::splat(scale));
+
+        if let Some(m) = materials.get_mut(&mat_h.0) {
+            let c = l.color().to_linear();
+            // Boost emission with intensity so brighter lights glow more.
+            let k = 0.6 + l.intensity.min(2.0) * 1.4;
+            m.base_color = Color::linear_rgb(c.red, c.green, c.blue);
+            m.emissive = LinearRgba::new(c.red * k, c.green * k, c.blue * k, 1.0);
+        }
+    }
+}
+
+/// Ray–sphere intersection (returns the closer positive t if any).
+fn ray_sphere_t(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<f32> {
+    let oc = origin - center;
+    let b = oc.dot(dir);
+    let c = oc.length_squared() - radius * radius;
+    let disc = b * b - c;
+    if disc < 0.0 {
+        return None;
+    }
+    let s = disc.sqrt();
+    let t1 = -b - s;
+    let t2 = -b + s;
+    if t1 > 1e-4 {
+        Some(t1)
+    } else if t2 > 1e-4 {
+        Some(t2)
+    } else {
+        None
+    }
+}
+
+/// Cursor in the scene viewport drives:
+///   • left-click on a gizmo → drag along the dome (updates light dir)
+///   • right-drag → orbit yaw/pitch
+///   • wheel → dolly in/out
+fn scene_view_input(
+    mut debug_view: ResMut<DebugView>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    mut motion: MessageReader<MouseMotion>,
+    mut wheel: MessageReader<MouseWheel>,
+    windows: Query<&Window>,
+    cameras: Query<(&Camera, &GlobalTransform), (With<SceneCam>, Without<MainCam>)>,
+    mut light: ResMut<LightControl>,
+    mut contexts: EguiContexts,
+) {
+    if !debug_view.enabled {
+        motion.clear();
+        return;
+    }
+    let egui_has_pointer = contexts
+        .ctx_mut()
+        .map(|c| c.is_pointer_over_area() || c.wants_pointer_input())
+        .unwrap_or(false);
+
+    let Ok(window) = windows.single() else { return };
+    let Ok((camera, cam_tf)) = cameras.single() else { return };
+    let cursor = window.cursor_position();
+    let cursor_in_scene = cursor
+        .map(|c| c.x >= window.width() * 0.5)
+        .unwrap_or(false);
+
+    // ── Left click: pick a gizmo and start dragging ─────────────────
+    if !debug_view.dragging_light
+        && mouse.just_pressed(MouseButton::Left)
+        && cursor_in_scene
+        && !egui_has_pointer
+    {
+        if let Some(c) = cursor {
+            if let Ok(ray) = camera.viewport_to_world(cam_tf, c) {
+                let origin = ray.origin;
+                let dir = ray.direction.as_vec3();
+                let mut best: Option<(usize, f32)> = None;
+                for (i, l) in light.lights.iter().enumerate() {
+                    let center = light_dir_to_world(l.dir) * LIGHT_GIZMO_DOME_R;
+                    if let Some(t) = ray_sphere_t(origin, dir, center, LIGHT_GIZMO_PICK_R) {
+                        if best.map_or(true, |(_, bt)| t < bt) {
+                            best = Some((i, t));
+                        }
+                    }
+                }
+                if let Some((i, _)) = best {
+                    debug_view.selected_light = Some(i);
+                    debug_view.dragging_light = true;
+                }
+            }
+        }
+    }
+
+    // ── Drag: project ray onto the dome, update light direction ─────
+    if debug_view.dragging_light && mouse.pressed(MouseButton::Left) {
+        if let (Some(c), Some(idx)) = (cursor, debug_view.selected_light) {
+            if let Ok(ray) = camera.viewport_to_world(cam_tf, c) {
+                let origin = ray.origin;
+                let dir = ray.direction.as_vec3();
+                let new_pos = ray_sphere_t(origin, dir, Vec3::ZERO, LIGHT_GIZMO_DOME_R)
+                    .map(|t| origin + dir * t)
+                    .unwrap_or_else(|| {
+                        // Ray misses the dome — use closest approach to origin.
+                        let t = (-origin).dot(dir);
+                        let p = origin + dir * t.max(0.1);
+                        p.try_normalize().unwrap_or(Vec3::Z) * LIGHT_GIZMO_DOME_R
+                    });
+                light.lights[idx].dir = world_to_light_dir(new_pos);
+            }
+        }
+    }
+
+    if mouse.just_released(MouseButton::Left) {
+        debug_view.dragging_light = false;
+    }
+
+    // ── Right-drag: orbit yaw/pitch ─────────────────────────────────
+    if mouse.just_pressed(MouseButton::Right) && cursor_in_scene && !egui_has_pointer {
+        debug_view.orbiting = true;
+    }
+    if mouse.just_released(MouseButton::Right) {
+        debug_view.orbiting = false;
+    }
+    if debug_view.orbiting {
+        let mut delta = Vec2::ZERO;
+        for ev in motion.read() {
+            delta += ev.delta;
+        }
+        debug_view.yaw -= delta.x * 0.005;
+        debug_view.pitch = (debug_view.pitch + delta.y * 0.005)
+            .clamp(-1.45, 1.45);
+    } else {
+        motion.clear();
+    }
+
+    // ── Wheel in scene viewport: dolly ──────────────────────────────
+    if cursor_in_scene && !egui_has_pointer {
+        for ev in wheel.read() {
+            let factor = match ev.unit {
+                MouseScrollUnit::Pixel => 0.01,
+                MouseScrollUnit::Line => 0.2,
+            };
+            debug_view.dist = (debug_view.dist * (1.0 - ev.y * factor)).clamp(4.0, 80.0);
+        }
+    }
+}
+
+/// Toggle the split-view debug interface with `G`.
+fn toggle_debug_view(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut debug_view: ResMut<DebugView>,
+) {
+    if keys.just_pressed(KeyCode::KeyG) {
+        debug_view.enabled = !debug_view.enabled;
+    }
 }
 
 // ─── Debug panel ──────────────────────────────────────────────────
@@ -2741,6 +3489,7 @@ fn debug_panel(
     mut form: ResMut<FormUi>,
     font: Res<LoadedFont>,
     font_lib: Res<FontLibrary>,
+    mut debug_view: ResMut<DebugView>,
 ) -> Result {
     if !debug.0 {
         return Ok(());
@@ -2955,9 +3704,35 @@ fn debug_panel(
                                 l.intensity = if on { 1.0_f32.max(l.intensity) } else { 0.0 };
                             }
                             ui.add(egui::Slider::new(&mut l.intensity, 0.0..=2.0).text("intensity"));
-                            ui.add(egui::Slider::new(&mut l.dir.x, -2.0..=2.0).text("dir x"));
-                            ui.add(egui::Slider::new(&mut l.dir.y, -2.0..=2.0).text("dir y"));
-                            ui.add(egui::Slider::new(&mut l.dir.z, 0.0..=2.0).text("dir z (elev)"));
+                            let lc = l.color().to_linear();
+                            let dot_color = egui::Color32::from_rgb(
+                                (lc.red.clamp(0.0, 1.0) * 255.0) as u8,
+                                (lc.green.clamp(0.0, 1.0) * 255.0) as u8,
+                                (lc.blue.clamp(0.0, 1.0) * 255.0) as u8,
+                            );
+                            ui.horizontal(|ui| {
+                                light_dir_pad(ui, &mut l.dir, dot_color);
+                                ui.vertical(|ui| {
+                                    ui.add(
+                                        egui::DragValue::new(&mut l.dir.x)
+                                            .speed(0.01)
+                                            .range(-1.0..=1.0)
+                                            .prefix("x "),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(&mut l.dir.y)
+                                            .speed(0.01)
+                                            .range(-1.0..=1.0)
+                                            .prefix("y "),
+                                    );
+                                    ui.add(
+                                        egui::DragValue::new(&mut l.dir.z)
+                                            .speed(0.01)
+                                            .range(0.0..=1.0)
+                                            .prefix("z "),
+                                    );
+                                });
+                            });
                             let cur = l.color_name();
                             egui::ComboBox::from_label("color")
                                 .selected_text(cur)
@@ -2987,8 +3762,37 @@ fn debug_panel(
                 }
             });
 
+            ui.collapsing("Debug 3D scene view", |ui| {
+                ui.checkbox(&mut debug_view.enabled, "split-view (G)");
+                ui.label(
+                    "Left = book UI top-down · right = 3D scene with\n\
+                     light gizmos. Drag a sphere to move that light;\n\
+                     right-drag to orbit; wheel to dolly.",
+                );
+                let mut yaw_deg = debug_view.yaw.to_degrees();
+                if ui
+                    .add(egui::Slider::new(&mut yaw_deg, -180.0..=180.0).text("orbit yaw (°)"))
+                    .changed()
+                {
+                    debug_view.yaw = yaw_deg.to_radians();
+                }
+                let mut pitch_deg = debug_view.pitch.to_degrees();
+                if ui
+                    .add(egui::Slider::new(&mut pitch_deg, -85.0..=85.0).text("orbit pitch (°)"))
+                    .changed()
+                {
+                    debug_view.pitch = pitch_deg.to_radians();
+                }
+                ui.add(egui::Slider::new(&mut debug_view.dist, 4.0..=80.0).text("orbit dist"));
+                if let Some(i) = debug_view.selected_light {
+                    ui.label(format!("selected: light {}", i + 1));
+                } else {
+                    ui.label("selected: (none)");
+                }
+            });
+
             ui.separator();
-            ui.label("Tab to hide. Two-finger pan, pinch zoom, [ / ] tilt.");
+            ui.label("Tab to hide. Two-finger pan, pinch zoom, [ / ] tilt. G toggles 3D view.");
         });
     Ok(())
 }

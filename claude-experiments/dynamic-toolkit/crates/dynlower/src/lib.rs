@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::VecDeque;
 use std::io::Write;
 use std::marker::PhantomData;
@@ -147,7 +147,17 @@ fn write_perf_map_entries(entries: &[(usize, usize, &str)]) {
 // `FrameChain`).
 
 thread_local! {
-    static JIT_ENTRY_FP_STACK: RefCell<Vec<*const u8>> = const { RefCell::new(Vec::new()) };
+    // `UnsafeCell` rather than `RefCell`: runtime borrow tracking is not
+    // needed here — the access is thread-local (no cross-thread races)
+    // and push/pop are non-reentrant by construction (each pair is
+    // bracketed by a `JitEntryFpGuard` around an asm! call into JIT).
+    // `RefCell` was tried first and caused a hard-to-reproduce
+    // "RefCell already borrowed" panic in `--release` builds, where
+    // LLVM appears to reorder the temporary `RefMut`'s borrow-flag
+    // decrement around the inline-asm BLR in `call_jit_regs_with_reg_limit`.
+    // Removing the borrow flag entirely sidesteps that interaction.
+    static JIT_ENTRY_FP_STACK: UnsafeCell<Vec<*const u8>> =
+        const { UnsafeCell::new(Vec::new()) };
 }
 
 /// Push the current JIT-entry FP fence. Must be paired with `pop_jit_entry_fp`
@@ -160,20 +170,31 @@ thread_local! {
 /// capturing `x29` of its own frame and popping before the trampoline
 /// returns.
 pub unsafe fn push_jit_entry_fp(fp: *const u8) {
-    JIT_ENTRY_FP_STACK.with(|c| c.borrow_mut().push(fp));
+    JIT_ENTRY_FP_STACK.with(|c| {
+        // SAFETY: thread-local; no concurrent access. Caller (trampoline)
+        // does not invoke `current_jit_entry_fp` between push and pop on
+        // this thread.
+        unsafe { (*c.get()).push(fp) };
+    });
 }
 
 /// Pop the top of the fence stack. Must match a prior `push_jit_entry_fp`.
 pub fn pop_jit_entry_fp() {
     JIT_ENTRY_FP_STACK.with(|c| {
-        let popped = c.borrow_mut().pop();
+        // SAFETY: see `push_jit_entry_fp`.
+        let popped = unsafe { (*c.get()).pop() };
         debug_assert!(popped.is_some(), "pop_jit_entry_fp on empty stack");
     });
 }
 
 /// The topmost fence FP, or null if no JIT call is active on this thread.
 fn current_jit_entry_fp() -> *const u8 {
-    JIT_ENTRY_FP_STACK.with(|c| c.borrow().last().copied().unwrap_or(std::ptr::null()))
+    JIT_ENTRY_FP_STACK.with(|c| {
+        // SAFETY: read-only access; no concurrent push/pop in flight on
+        // this thread (push/pop bracket the asm! call, peek runs from
+        // the GC walker invoked during JIT execution).
+        unsafe { (*c.get()).last().copied().unwrap_or(std::ptr::null()) }
+    })
 }
 
 /// RAII guard that pushes a fence on construction and pops on drop.
@@ -672,8 +693,16 @@ impl JitFunction {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        let mut lowerer =
-            Lowerer::<Cfg, B, R>::new_inner(0, func, externs, None, None, None, safepoint_handler);
+        let mut lowerer = Lowerer::<Cfg, B, R>::new_inner(
+            0,
+            func,
+            externs,
+            None,
+            None,
+            None,
+            safepoint_handler,
+            0, // single-function compile: no preceding safepoints in any flat array
+        );
         lowerer.run();
         let safepoints = std::mem::take(&mut lowerer.safepoints);
         let frame_reify_records = std::mem::take(&mut lowerer.frame_reify_records);
@@ -1198,6 +1227,7 @@ impl JitModule {
         let direct_call_is_internal: Vec<bool> = vec![false; module.func_table.len()];
 
         let mut function_root_scan_sizes: Vec<usize> = Vec::new();
+        let mut sp_offset: u64 = 0;
         for (func_idx, func) in module.functions.iter().enumerate() {
             let mut lowerer = Lowerer::<Cfg, B, R>::new_module(
                 func_idx,
@@ -1206,9 +1236,11 @@ impl JitModule {
                 call_table_base,
                 None, // legacy batch path: no GC literal pool
                 None,
+                sp_offset,
             );
             lowerer.run();
             function_suspend_records.push(std::mem::take(&mut lowerer.suspend_records));
+            sp_offset += lowerer.safepoints.len() as u64;
             function_safepoints.push(std::mem::take(&mut lowerer.safepoints));
             function_frame_reify_records.push(std::mem::take(&mut lowerer.frame_reify_records));
             max_deopt_live_values = max_deopt_live_values.max(lowerer.max_deopt_live_values);
@@ -1564,6 +1596,7 @@ impl JitModule {
             .collect();
 
         let mut function_root_scan_sizes: Vec<usize> = Vec::new();
+        let mut sp_offset: u64 = 0;
         for (func_idx, func) in module.functions.iter().enumerate() {
             let mut lowerer = Lowerer::<Cfg, B, R>::new_module(
                 func_idx,
@@ -1572,9 +1605,11 @@ impl JitModule {
                 call_table_base,
                 None, // legacy compile_with_regalloc: no literal pool
                 safepoint_handler,
+                sp_offset,
             );
             lowerer.run();
             function_suspend_records.push(std::mem::take(&mut lowerer.suspend_records));
+            sp_offset += lowerer.safepoints.len() as u64;
             function_safepoints.push(std::mem::take(&mut lowerer.safepoints));
             function_frame_reify_records.push(std::mem::take(&mut lowerer.frame_reify_records));
             max_deopt_live_values = max_deopt_live_values.max(lowerer.max_deopt_live_values);
@@ -1788,6 +1823,14 @@ impl JitModule {
 
         let call_table_base = self.call_table.base_addr();
         let literal_pool_base = self.literal_pool.base_addr();
+        // Running global offset into the flat-safepoint array used by the
+        // runtime session. Starts at the total safepoint count from all
+        // previously-extended functions, grows as we lower each new one.
+        let mut sp_offset: u64 = self
+            .function_safepoints
+            .iter()
+            .map(|v| v.len() as u64)
+            .sum();
         for func_idx in new_func_start..new_func_end {
             let func = &module.functions[func_idx];
             let mut lowerer = Lowerer::<Cfg, B, R>::new_module(
@@ -1797,10 +1840,12 @@ impl JitModule {
                 call_table_base,
                 Some(literal_pool_base),
                 self.safepoint_handler,
+                sp_offset,
             );
             lowerer.run();
             self.function_suspend_records
                 .push(std::mem::take(&mut lowerer.suspend_records));
+            sp_offset += lowerer.safepoints.len() as u64;
             self.function_safepoints
                 .push(std::mem::take(&mut lowerer.safepoints));
             self.function_frame_reify_records
@@ -2562,6 +2607,13 @@ where
     /// When Some, safepoints emit a call to this handler function.
     /// Signature: `extern "C" fn(frame_ptr: *mut u8, frame_size: usize)`.
     safepoint_handler: Option<u64>,
+    /// Number of safepoint records emitted by all PREVIOUS functions in
+    /// this module. Added to the per-function safepoint index when
+    /// emitting the handler call so the runtime's flat
+    /// `JitSafepointSession::safepoints` lookup hits the right record.
+    /// Without this, function N's safepoint indices collide with
+    /// function 0's.
+    safepoint_global_offset: u64,
     buf: CodeBuffer<B::Arch>,
     regs: R,
     frame: <Cfg::Frames as FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>>::Layout,
@@ -2940,6 +2992,7 @@ where
         call_table_base: u64,
         literal_pool_base: Option<u64>,
         safepoint_handler: Option<u64>,
+        safepoint_global_offset: u64,
     ) -> Self {
         Self::new_inner(
             current_func_idx,
@@ -2949,6 +3002,7 @@ where
             Some(call_table_base),
             literal_pool_base,
             safepoint_handler,
+            safepoint_global_offset,
         )
     }
 
@@ -2960,6 +3014,7 @@ where
         call_table_base: Option<u64>,
         literal_pool_base: Option<u64>,
         safepoint_handler: Option<u64>,
+        safepoint_global_offset: u64,
     ) -> Self {
         let num_values = func.value_types.len();
         let mut buf = CodeBuffer::<B::Arch>::new();
@@ -3018,6 +3073,7 @@ where
             call_table_base,
             literal_pool_base,
             safepoint_handler,
+            safepoint_global_offset,
             buf,
             regs,
             frame,
@@ -4994,7 +5050,13 @@ where
                     .spill_all_live::<B>(&mut self.buf, &mut self.frame);
                 let code_offset = self.buf.current_offset();
                 let root_slots = self.collect_live_root_slots(live);
-                let safepoint_index = self.safepoints.len() as u64;
+                // Global index = this function's offset + per-function index.
+                // The runtime's `JitSafepointSession` uses a flat array
+                // (`jit.all_safepoints()`) and indexes it directly with this
+                // payload, so the per-function index alone would resolve to
+                // a different function's record.
+                let safepoint_index =
+                    self.safepoint_global_offset + self.safepoints.len() as u64;
                 if let Some(handler) = self.safepoint_handler {
                     B::emit_call_safepoint_handler(&mut self.buf, handler, safepoint_index);
                 }
@@ -5011,7 +5073,8 @@ where
                     .spill_all_live::<B>(&mut self.buf, &mut self.frame);
                 let code_offset = self.buf.current_offset();
                 let root_slots = self.collect_live_root_slots(live);
-                let safepoint_index = self.safepoints.len() as u64;
+                let safepoint_index =
+                    self.safepoint_global_offset + self.safepoints.len() as u64;
                 if let Some(handler) = self.safepoint_handler {
                     B::emit_call_safepoint_handler(&mut self.buf, handler, safepoint_index);
                 }

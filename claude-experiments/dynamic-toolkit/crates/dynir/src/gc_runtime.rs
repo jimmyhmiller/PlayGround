@@ -40,6 +40,36 @@ use crate::interp::InterpRootManager;
 ///
 /// Generic over `P: PtrPolicy` so the embedding language can bring its
 /// own pointer tag scheme (NanBox, LowBit, etc.).
+/// When the interpreter should auto-collect.
+///
+/// Controls the `should_auto_collect()` check the interpreter calls at
+/// every instruction boundary. The interpreter-side analog of
+/// `dynruntime::GcPolicy`, but counted in allocations rather than
+/// from-space usage (the interpreter doesn't have a direct view of
+/// heap fill).
+#[derive(Debug, Clone, Copy)]
+pub enum GcInterpPolicy {
+    /// Don't auto-collect. The frontend triggers `collect()` itself.
+    NeverAuto,
+    /// Auto-collect once `n` allocations have happened since the last
+    /// collection. `n = 1` means collect on every allocation (stress).
+    EveryNAllocs(usize),
+}
+
+impl GcInterpPolicy {
+    /// `EveryNAllocs(1)` — collect at every allocation. The GC-stress
+    /// contract; useful for finding root-coverage bugs but very slow.
+    pub const EVERY_ALLOC: GcInterpPolicy = GcInterpPolicy::EveryNAllocs(1);
+
+    /// Whether the given alloc count has reached the threshold.
+    fn should_collect(&self, alloc_count: usize) -> bool {
+        match self {
+            GcInterpPolicy::NeverAuto => false,
+            GcInterpPolicy::EveryNAllocs(n) => alloc_count >= *n,
+        }
+    }
+}
+
 pub struct GcInterpCtx<H: ObjHeader, P: PtrPolicy> {
     heap: RefCell<SemiSpace>,
     type_table: Vec<TypeInfo>,
@@ -52,10 +82,8 @@ pub struct GcInterpCtx<H: ObjHeader, P: PtrPolicy> {
     /// Number of allocations since the last collection. Bumped by
     /// `Alloc::alloc`, checked by `should_collect`.
     alloc_count: Cell<usize>,
-    /// Allocations-since-last-gc threshold for auto-collection. When
-    /// `alloc_count >= gc_threshold`, the next call to `needs_gc`
-    /// returns `true`. Set to `usize::MAX` to disable auto-gc.
-    gc_threshold: Cell<usize>,
+    /// When auto-collection fires. See [`GcInterpPolicy`].
+    gc_policy: Cell<GcInterpPolicy>,
     _phantom: PhantomData<(H, P)>,
 }
 
@@ -85,8 +113,8 @@ impl<H: ObjHeader, P: PtrPolicy> GcInterpCtx<H, P> {
             extra_roots: RefCell::new(Vec::new()),
             alloc_count: Cell::new(0),
             // Default: disable auto-gc. Tests and real programs can
-            // call `set_gc_threshold` to turn it on.
-            gc_threshold: Cell::new(usize::MAX),
+            // call `set_gc_policy` to turn it on.
+            gc_policy: Cell::new(GcInterpPolicy::NeverAuto),
             _phantom: PhantomData,
         }
     }
@@ -105,12 +133,9 @@ impl<H: ObjHeader, P: PtrPolicy> GcInterpCtx<H, P> {
         self.extra_roots.borrow_mut().push(source);
     }
 
-    /// Set the auto-gc threshold: after this many `alloc` calls, the
-    /// next `needs_gc()` returns `true`, which the interpreter checks
-    /// at instruction boundaries and uses to drive a `collect()`.
-    /// Pass `usize::MAX` to disable auto-gc.
-    pub fn set_gc_threshold(&self, threshold: usize) {
-        self.gc_threshold.set(threshold);
+    /// Set the auto-gc policy. See [`GcInterpPolicy`].
+    pub fn set_gc_policy(&self, policy: GcInterpPolicy) {
+        self.gc_policy.set(policy);
     }
 
     /// Number of allocations since the last collection.
@@ -122,7 +147,9 @@ impl<H: ObjHeader, P: PtrPolicy> GcInterpCtx<H, P> {
     /// `needs_gc()` at instruction boundaries — the only safe points
     /// for collection.
     pub fn should_auto_collect(&self) -> bool {
-        self.alloc_count.get() >= self.gc_threshold.get()
+        self.gc_policy
+            .get()
+            .should_collect(self.alloc_count.get())
     }
 
     pub fn cont_types(&self) -> &ContinuationTypes {
@@ -547,7 +574,7 @@ mod tests {
             GcInterpCtx::new(heap, type_table, cont_types);
 
         // Low threshold: auto-gc every 10 allocations.
-        ctx.set_gc_threshold(10);
+        ctx.set_gc_policy(GcInterpPolicy::EveryNAllocs(10));
 
         // Build a module with:
         //   extern alloc_bytes(n) -> GcPtr   (allocates, discards result)
@@ -685,7 +712,7 @@ mod tests {
         // bumps the counter but NEVER triggers; collection only fires
         // at instruction boundaries (where no raw heap pointers are
         // held in Rust locals).
-        ctx.set_gc_threshold(1);
+        ctx.set_gc_policy(GcInterpPolicy::EVERY_ALLOC);
 
         // ── Build the IR module ─────────────────────────────────────
         let mut mb = ModuleBuilder::new();

@@ -25,6 +25,21 @@ pub struct Compiler<'a> {
     /// runtime via `Inst::GcLiteral` so a moving GC can rewrite the slot
     /// when it relocates the underlying object.
     pub literal_pool: &'a LiteralPool,
+    /// Stack of "in-flight" IR values: results computed by `lower_expr`
+    /// that are about to be passed as arguments to a parent call but
+    /// haven't been consumed yet. Pushed when a value is produced as an
+    /// arg, popped after the parent's call completes.
+    ///
+    /// At every safepoint the compiler emits, the `live` set is:
+    ///     env.live_values() ∪ live_stack
+    /// This is necessary because nested allocator calls each emit their
+    /// own safepoint; without listing the OUTER call's already-evaluated
+    /// args, the GC would relocate them out from under the IR's spill
+    /// slots and the outer call's `Inst::Call` would receive stale bits.
+    /// Concrete example: in `(cons A (cons B C))`, the inner cons's
+    /// safepoint must list `A`'s value as live — otherwise its spill
+    /// slot isn't included in the stack map and a moving GC corrupts it.
+    pub live_stack: Vec<Value>,
 }
 
 /// Names of primitive externs that allocate on the GC heap. Every IR call
@@ -286,31 +301,34 @@ impl<'a> Compiler<'a> {
     }
 
     fn lower_list(&mut self, fb: &mut FunctionBuilder, env: &mut Env, args: u64) -> Value {
-        // Build cons chain from the right. Each cons is an allocation, so
-        // each call site needs a preceding safepoint listing every live
-        // value (env bindings + the in-flight tail + any earlier evaluated
-        // items).
+        // Build cons chain from the right. Each cons is an allocation
+        // and emits its own safepoint via `lower_call`-style discipline:
+        // evaluate args, push them onto `live_stack`, emit safepoint with
+        // env + full live_stack, do the call, pop.
         let items: Vec<u64> = list_iter(args).collect();
         let cons_fref = *self.func_refs.get("cons").expect("cons primitive missing");
-        // Evaluate items left-to-right so the env at each safepoint has
-        // them visible. Build cons chain right-to-left after.
-        let item_vals: Vec<Value> = items
-            .into_iter()
-            .map(|x| self.lower_expr(fb, env, x))
-            .collect();
+        // Evaluate items left-to-right; each result pushed onto live_stack.
+        let mut item_vals: Vec<Value> = Vec::with_capacity(items.len());
+        for x in items {
+            let v = self.lower_expr(fb, env, x);
+            self.live_stack.push(v);
+            item_vals.push(v);
+        }
         let mut tail = fb.iconst(Type::I64, v::NIL as i64);
+        // Track tail on live_stack across each cons call.
+        self.live_stack.push(tail);
         for &xv in item_vals.iter().rev() {
+            // Live = env bindings ∪ everything in live_stack.
             let mut live = env.live_values();
-            live.push(tail);
-            // Push every not-yet-consed item as a live root too.
-            for &v2 in item_vals.iter() {
-                if v2 != xv {
-                    live.push(v2);
-                }
-            }
+            live.extend_from_slice(&self.live_stack);
             fb.safepoint(&live);
             tail = fb.call(cons_fref, &[xv, tail]).expect("cons returns value");
+            // Update tail's slot on the stack.
+            *self.live_stack.last_mut().unwrap() = tail;
         }
+        // Pop tail and all item_vals.
+        self.live_stack.pop(); // tail
+        for _ in 0..item_vals.len() { self.live_stack.pop(); }
         tail
     }
 
@@ -319,27 +337,36 @@ impl<'a> Compiler<'a> {
         let args = cdr(form);
         assert!(is_symbol(head), "call head must be a symbol; got 0x{:016x}", head);
         let head_name = self.sym.name(as_symbol_id(head)).to_string();
-        let arg_vals: Vec<Value> = list_iter(args)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|a| self.lower_expr(fb, env, a))
-            .collect();
+        // Evaluate args left-to-right; push each onto live_stack so a
+        // safepoint emitted by a nested allocator call sees this arg as
+        // live. (Without this, the inner safepoint's stack map omits our
+        // already-evaluated args, and a moving GC fired by the inner call
+        // relocates their cons cells without updating our spill slots.)
+        let mut arg_vals: Vec<Value> = Vec::new();
+        for a in list_iter(args).collect::<Vec<_>>() {
+            let v = self.lower_expr(fb, env, a);
+            self.live_stack.push(v);
+            arg_vals.push(v);
+        }
         let fref = *self.func_refs.get(&head_name).unwrap_or_else(|| {
             panic!("undefined function: {}", head_name)
         });
-        // Allocator calls require a preceding safepoint so the GC has a
-        // stack map for the caller's live values when collection triggers.
-        // `Module::validate_safepoints` will refuse to compile otherwise.
+        // Allocator calls require a preceding safepoint listing every
+        // live IR value: env bindings + the entire live_stack (which
+        // covers our args plus any partially-evaluated parent call's args).
+        // `Module::validate_safepoints` enforces the safepoint's presence.
         if ALLOCATING_PRIMITIVES.contains(&head_name.as_str()) {
             let mut live = env.live_values();
-            // Already-evaluated arg values are also live across the call.
-            for &v in &arg_vals { live.push(v); }
+            live.extend_from_slice(&self.live_stack);
             fb.safepoint(&live);
         }
-        fb.call(fref, &arg_vals).unwrap_or_else(|| {
+        let result = fb.call(fref, &arg_vals).unwrap_or_else(|| {
             // Void return — produce nil so callers have a value.
             fb.iconst(Type::I64, v::NIL as i64)
-        })
+        });
+        // Pop our args from the live stack (they're consumed by the call).
+        for _ in 0..arg_vals.len() { self.live_stack.pop(); }
+        result
     }
 }
 
@@ -363,15 +390,37 @@ pub fn wrap_body(body_list: u64, sym: &mut SymbolTable) -> u64 {
         return car(body_list);
     }
     let begin_id = sym.intern("begin");
-    alloc_cons(encode_sym(begin_id), body_list)
+    dynobj::roots::with_scope(2, |scope| {
+        let head = scope.root::<NanBoxTag>(encode_sym(begin_id));
+        let tail = scope.root::<NanBoxTag>(body_list);
+        alloc_cons(scope, &head, &tail).get()
+    })
 }
 
 /// `(let ((<name> <value-form>)) <body>)`.
 pub fn wrap_let_single(name: u32, value_form: u64, body: u64, sym: &mut SymbolTable) -> u64 {
-    let let_sym = encode_sym(sym.intern("let"));
-    let binding = alloc_cons(encode_sym(name), alloc_cons(value_form, v::NIL));
-    let bindings = alloc_cons(binding, v::NIL);
-    alloc_cons(let_sym, alloc_cons(bindings, alloc_cons(body, v::NIL)))
+    let let_sym_bits = encode_sym(sym.intern("let"));
+    // 5 input roots + 1 result per alloc_cons * 6 alloc_cons calls = 11.
+    // Round up generously.
+    dynobj::roots::with_scope(16, |scope| {
+        let let_sym = scope.root::<NanBoxTag>(let_sym_bits);
+        let name_sym = scope.root::<NanBoxTag>(encode_sym(name));
+        let value = scope.root::<NanBoxTag>(value_form);
+        let body_root = scope.root::<NanBoxTag>(body);
+        let nil_root = scope.root::<NanBoxTag>(v::NIL);
+        // (value . NIL)
+        let value_list = alloc_cons(scope, &value, &nil_root);
+        // (name value)
+        let binding = alloc_cons(scope, &name_sym, &value_list);
+        // ((name value))
+        let bindings = alloc_cons(scope, &binding, &nil_root);
+        // (body . NIL)
+        let body_list = alloc_cons(scope, &body_root, &nil_root);
+        // (bindings body)
+        let bindings_body = alloc_cons(scope, &bindings, &body_list);
+        // (let bindings body)
+        alloc_cons(scope, &let_sym, &bindings_body).get()
+    })
 }
 
 /// Build a `let` that destructures the args list according to `pattern`.
@@ -388,22 +437,18 @@ fn wrap_destructure(pattern: u64, args_sym: u32, body: u64, sym: &mut SymbolTabl
     let cdr_v = encode_sym(cdr_sym);
     let _ = (car_v, cdr_v);
 
-    // Build bindings:
-    //   __cursor__0 = args
-    //   <p_i> = (car __cursor__{i})
-    //   __cursor__{i+1} = (cdr __cursor__{i})
-    //   ...
-    //   <rest> = __cursor__N    (when dotted)
+    // Build bindings list. Each call to `cons2` allocates via the safe
+    // rooted path and immediately returns the bits; we hold them in
+    // `bindings` (a Rust Vec) — safe because compile-time helpers don't
+    // trigger GC (the only safe-by-construction context where Rust-side
+    // raw u64 cons handles are OK).
     let mut current_cursor = args_sym;
     let mut bindings: Vec<(u32, u64)> = Vec::new();
     let mut p = pattern;
     let mut cursor_idx = 0u32;
     loop {
-        if is_nil(p) {
-            break;
-        }
+        if is_nil(p) { break; }
         if is_symbol(p) {
-            // dotted tail: <p> = current_cursor
             let pat_id = as_symbol_id(p);
             bindings.push((pat_id, encode_sym(current_cursor)));
             break;
@@ -414,31 +459,39 @@ fn wrap_destructure(pattern: u64, args_sym: u32, body: u64, sym: &mut SymbolTabl
         let elem = car(p);
         assert!(is_symbol(elem), "destructure: each pattern element must be a symbol");
         let elem_id = as_symbol_id(elem);
-        // <elem> = (car <current_cursor>)
-        let car_call = alloc_cons(encode_sym(car_sym), alloc_cons(encode_sym(current_cursor), v::NIL));
+        let car_call = cons2(encode_sym(car_sym), cons2(encode_sym(current_cursor), v::NIL));
         bindings.push((elem_id, car_call));
         let next_p = cdr(p);
-        if is_nil(next_p) {
-            break;
-        }
-        // next cursor = (cdr <current_cursor>)
+        if is_nil(next_p) { break; }
         cursor_idx += 1;
         let next_cursor_id = sym.intern(&format!("__cursor_{cursor_idx}__"));
-        let cdr_call = alloc_cons(encode_sym(cdr_sym), alloc_cons(encode_sym(current_cursor), v::NIL));
+        let cdr_call = cons2(encode_sym(cdr_sym), cons2(encode_sym(current_cursor), v::NIL));
         bindings.push((next_cursor_id, cdr_call));
         current_cursor = next_cursor_id;
         p = next_p;
     }
 
-    // Construct nested let from outside in: (let ((b1)) (let ((b2)) ... body))
     let let_sym = encode_sym(sym.intern("let"));
     let mut result = body;
     for (name, val_form) in bindings.into_iter().rev() {
-        let binding = alloc_cons(encode_sym(name), alloc_cons(val_form, v::NIL));
-        let bindings_list = alloc_cons(binding, v::NIL);
-        result = alloc_cons(let_sym, alloc_cons(bindings_list, alloc_cons(result, v::NIL)));
+        let binding = cons2(encode_sym(name), cons2(val_form, v::NIL));
+        let bindings_list = cons2(binding, v::NIL);
+        result = cons2(let_sym, cons2(bindings_list, cons2(result, v::NIL)));
     }
     result
+}
+
+/// Compile-time-only cons builder. Wraps `alloc_cons_from_raw` and
+/// returns raw `u64`; only safe in code paths that don't trigger GC
+/// (currently: the macroexpansion-time IR-construction helpers in this
+/// module). The `with_scope` per call is overhead but keeps the rooting
+/// discipline honest and prevents any future change to `gc.alloc`'s
+/// auto-collection behaviour from silently breaking these helpers.
+fn cons2(car: u64, cdr: u64) -> u64 {
+    // 3 slots: alloc_cons_from_raw needs car + cdr + result.
+    dynobj::roots::with_scope(3, |scope| {
+        alloc_cons_from_raw(scope, car, cdr).get()
+    })
 }
 
 /// Truthy = (val != NIL) && (val != FALSE).

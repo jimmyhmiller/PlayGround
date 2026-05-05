@@ -53,7 +53,7 @@ fn quote_load_reads_through_pool_not_baked() {
     // Build a different cons cell '(99 100) and overwrite the pool slot
     // (simulating a GC having relocated the original to a new address).
     let new_cell = e.with_thread_state(|_h| {
-        alloc_cons(encode_num(99.0), alloc_cons(encode_num(100.0), NIL))
+        cons_compile_time(encode_num(99.0), cons_compile_time(encode_num(100.0), NIL))
     });
     pool.set(idx, new_cell);
 

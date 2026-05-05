@@ -4,6 +4,7 @@
 
 use microlisp::Engine;
 use microlisp::value::*;
+use dynlang::GcPolicy;
 
 const PROGRAM: &str = r#"
 (defmacro cond clauses
@@ -112,4 +113,35 @@ fn stress_and_normal_produce_identical_output() {
     // enough that it doesn't auto-collect during this small program).
     assert_eq!(e_normal.gc().collection_count(), 0);
     assert!(e_stress.gc().collection_count() > 0);
+}
+
+/// Run the same program with `GcPolicy::EveryPoint` — the JIT triggers
+/// a moving collection at every safepoint. This is the strongest test
+/// of root-coverage correctness: a missing root would leave a stale
+/// pointer in a spill slot, the next allocation would reuse the freed
+/// space, and the result would be corrupted (circular cons / wrong car
+/// or cdr / panic in `car`/`cdr` typecheck).
+///
+/// Compares the printed output byte-for-byte against the OnPressure
+/// run; mismatch means a root was missed.
+#[test]
+fn every_safepoint_collection_preserves_correctness() {
+    let mut e_normal = Engine::new();
+    let r_normal = e_normal.run_source(PROGRAM);
+    let pretty_normal = e_normal.print(r_normal);
+
+    let mut e_every = Engine::new();
+    e_every.set_jit_gc_policy(GcPolicy::EveryPoint);
+    let r_every = e_every.run_source(PROGRAM);
+    let pretty_every = e_every.print(r_every);
+
+    assert_eq!(pretty_normal, pretty_every);
+    // EveryPoint should produce many collections — every safepoint hit
+    // by every form's evaluation path. If this is small (say < 10) the
+    // policy isn't actually firing.
+    assert!(
+        e_every.gc().collection_count() > 10,
+        "EveryPoint should trigger many collections, got {}",
+        e_every.gc().collection_count()
+    );
 }

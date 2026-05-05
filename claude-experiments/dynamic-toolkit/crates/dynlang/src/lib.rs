@@ -48,6 +48,7 @@ pub use dynir::builder::{FunctionBuilder, ModuleBuilder};
 pub use dynir::ir::{BlockId, CmpOp, FuncRef, Module, StackSlot, Value};
 pub use dynir::types::{Signature, Type};
 pub use dynobj::{TypeInfo, VarLenKind, Compact, ObjHeader};
+pub use dynruntime::GcPolicy;
 
 // ── GC Configuration ──────────────────────────────────────────────
 
@@ -443,6 +444,13 @@ pub struct BuiltModule {
     pub strings: Vec<String>,
     /// Name → FuncRef for all declared language functions.
     pub func_refs: HashMap<String, FuncRef>,
+    /// FuncRefs that the toolkit considers GC-allocators — every direct
+    /// `Call` to one of these must be preceded by `Inst::Safepoint`.
+    /// Currently this is just `__gc_alloc__` (declared on first
+    /// `obj_type` call); frontends can extend this list with their own
+    /// allocator externs and pass the combined vec to
+    /// `Module::validate_safepoints` at JIT-compile time.
+    pub allocator_frefs: Vec<FuncRef>,
 }
 
 /// High-level module builder for dynamic languages.
@@ -696,10 +704,13 @@ impl DynModule {
 
     /// Build the final module.
     pub fn build(self) -> BuiltModule {
+        let allocator_frefs: Vec<FuncRef> =
+            self.gc_alloc_extern.into_iter().collect();
         BuiltModule {
             module: self.mb.build(),
             strings: self.strings,
             func_refs: self.func_refs,
+            allocator_frefs,
         }
     }
 
@@ -1463,9 +1474,14 @@ impl DynFunc {
         let alloc_fn = self.gc_alloc_extern
             .expect("gc_alloc: no object types declared on this module");
         let type_id_val = self.fb.iconst(Type::I64, type_id.0 as i64);
-        if self.gc_config.is_collecting() && !live_roots.is_empty() {
-            self.fb.safepoint(live_roots);
-        }
+        // Always emit a safepoint immediately before the alloc call, so
+        // `Module::validate_safepoints` accepts this site. (Frontends
+        // that have caller-side roots already emitted a safepoint before
+        // entering this method; the validator only requires *some*
+        // safepoint immediately preceding the call, and an empty live
+        // set is harmless — the precise dynlower stack-map collector
+        // sweeps all spilled values regardless of `live`.)
+        self.fb.safepoint(live_roots);
         self.fb.call(alloc_fn, &[type_id_val, varlen_len]).unwrap()
     }
 
@@ -1622,7 +1638,7 @@ mod tests {
     use super::*;
     use dynalloc::{PtrPolicy, SemiSpace, alloc_obj};
     use dynir::dynexec::ContinuationTypes;
-    use dynir::gc_runtime::GcInterpCtx;
+    use dynir::gc_runtime::{GcInterpCtx, GcInterpPolicy};
     use dynir::interp::{ExternCallResult, InterpResult, ModuleInterpreter, NoGcRoots};
     use dynobj::{Compact, TypeInfo};
     use dynvalue::NanBox;
@@ -1945,7 +1961,7 @@ mod tests {
         dm.finish_func(f);
 
         let ctx = make_gc_ctx(&dm.obj_types, 256);
-        ctx.set_gc_threshold(1);
+        ctx.set_gc_policy(GcInterpPolicy::EVERY_ALLOC);
         let built = dm.build();
 
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &ctx);
@@ -1999,7 +2015,7 @@ mod tests {
         dm.finish_func(f);
 
         let ctx = make_gc_ctx(&dm.obj_types, 256);
-        ctx.set_gc_threshold(1);
+        ctx.set_gc_policy(GcInterpPolicy::EVERY_ALLOC);
         let built = dm.build();
 
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &ctx);
@@ -2045,7 +2061,7 @@ mod tests {
         dm.finish_func(f);
 
         let ctx = make_gc_ctx(&dm.obj_types, 256);
-        ctx.set_gc_threshold(1);
+        ctx.set_gc_policy(GcInterpPolicy::EVERY_ALLOC);
         let built = dm.build();
 
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &ctx);

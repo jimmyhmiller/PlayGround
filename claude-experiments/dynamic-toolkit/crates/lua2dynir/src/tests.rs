@@ -9,7 +9,7 @@ use dynir::dynexec::{
 #[allow(unused_imports)]
 use dynlower::{JitFunction, SafepointHandlerPayloadKind, SafepointRecord, call_jit};
 use dynruntime::{
-    JitRootTransportRuntime, JitSafepointSession, MutatorRootManager, NanBoxPtrPolicy,
+    GcPolicy, JitRootTransportRuntime, JitSafepointSession, MutatorRootManager, NanBoxPtrPolicy,
     ScopedJitRoots, active_jit_safepoint_handler,
 };
 use dynvalue::{Decoded, NanBox, TagScheme};
@@ -599,7 +599,11 @@ fn run_lua_inner(
     let heap_size = gc_heap_size.unwrap_or(64 * 1024 * 1024);
     let gc_enabled = gc_heap_size.is_some();
     let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size, crate::runtime::type_table())
-        .with_gc_threshold(if gc_enabled { 0.75 } else { f64::INFINITY });
+        .with_gc_policy(if gc_enabled {
+            GcPolicy::OnPressure { threshold: 0.75 }
+        } else {
+            GcPolicy::NeverAuto
+        });
     let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
     rt.constants = global_strings.clone();
 
@@ -639,13 +643,17 @@ fn run_lua_inner(
         register_file: &rt.register_file as *const Vec<u64>,
         precise_frame_roots: true,
     };
-    let threshold = if gc_enabled { 0.75 } else { f64::INFINITY };
+    let policy = if gc_enabled {
+        GcPolicy::OnPressure { threshold: 0.75 }
+    } else {
+        GcPolicy::NeverAuto
+    };
     let session = JitSafepointSession::<NanBoxPtrPolicy, LuaJitTransport>::new(
         roots.heap(),
         transport,
         main_jit.safepoints(),
     )
-    .with_gc_threshold(threshold);
+    .with_gc_policy(policy);
 
     let call_args = LuaCallArgs::for_proto(&chunk.main, make_nil(), &[]);
     let result =
@@ -1813,7 +1821,7 @@ fn test_gc_multi_closure_stress() {
         .collect();
 
     let roots = MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size, crate::runtime::type_table())
-        .with_gc_threshold(0.75);
+        .with_gc_policy(GcPolicy::OnPressure { threshold: 0.75 });
     let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
     rt.constants = global_strings.clone();
 
@@ -1853,7 +1861,7 @@ fn test_gc_multi_closure_stress() {
         transport,
         main_jit.safepoints(),
     )
-    .with_gc_threshold(0.75);
+    .with_gc_policy(GcPolicy::OnPressure { threshold: 0.75 });
 
     let call_args = LuaCallArgs::for_proto(&chunk.main, make_nil(), &[]);
     let result =
@@ -2022,7 +2030,7 @@ fn bench_table_heavy_jit() {
         let heap_size = 64 * 1024 * 1024;
         let roots =
             MutatorRootManager::<NanBoxPtrPolicy>::new(heap_size, crate::runtime::type_table())
-                .with_gc_threshold(0.75);
+                .with_gc_policy(GcPolicy::OnPressure { threshold: 0.75 });
         let mut rt = LuaRuntime::new(roots.heap(), &chunk.main.constants);
         rt.constants = global_strings.clone();
 
@@ -2044,7 +2052,7 @@ fn bench_table_heavy_jit() {
             transport,
             main_jit.safepoints(),
         )
-        .with_gc_threshold(0.75);
+        .with_gc_policy(GcPolicy::OnPressure { threshold: 0.75 });
 
         let call_args = LuaCallArgs::for_proto(&chunk.main, make_nil(), &[]);
 

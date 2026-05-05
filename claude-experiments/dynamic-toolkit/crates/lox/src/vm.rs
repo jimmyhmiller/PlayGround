@@ -1621,6 +1621,11 @@ impl VM {
         self.had_error = false;
 
         if self.use_jit {
+            // IR-level soundness check: every Call to an allocator must
+            // be preceded by `Inst::Safepoint`. Panics with a clear
+            // error pointing at the offending function/instruction
+            // rather than corrupting at runtime.
+            lowered.module.validate_safepoints(&lowered.allocator_frefs);
             self.run_jit(&lowered.module, lowered.entry)
         } else {
             self.run_interp(&lowered.module, lowered.entry)
@@ -1649,7 +1654,7 @@ impl VM {
     }
 
     fn run_jit(&mut self, module: &Module, entry: dynlang::FuncRef) -> InterpretResult {
-        use dynruntime::{StackMapJitTransport, JitSafepointSession, active_jit_safepoint_handler};
+        use dynruntime::{GcPolicy, StackMapJitTransport, JitSafepointSession, active_jit_safepoint_handler};
 
         let externs = build_jit_externs(module);
 
@@ -1668,7 +1673,7 @@ impl VM {
         let safepoints = jit.all_safepoints();
         let session = JitSafepointSession::<LoxPtrPolicy, _>::new(
             heap, StackMapJitTransport, &safepoints,
-        ).with_gc_threshold(0.75);
+        ).with_gc_policy(GcPolicy::OnPressure { threshold: 0.75 });
 
         unsafe { RAW_VM = self as *mut VM; }
         let result = session.with_installed(|| {

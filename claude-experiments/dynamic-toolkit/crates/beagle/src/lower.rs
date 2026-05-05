@@ -65,6 +65,9 @@ pub struct Lowered {
     /// host needs to recognize array NanBoxes (`view`) and the lowerer
     /// needs to emit literal/push/get IR. `Copy` — pass by value.
     pub array_seq: IndexedSeq,
+    /// Allocator FuncRefs (currently just `__gc_alloc__`). Pass to
+    /// `Module::validate_safepoints` at JIT compile time.
+    pub allocator_frefs: Vec<FuncRef>,
 }
 
 /// Field layout we extract from dynlang up front, so we can do field
@@ -362,6 +365,11 @@ pub fn lower_program(program: &Ast) -> Lowered {
     // `built.strings` is dynlang's pool, not ours. Discard it.
     let _ = built.strings;
 
+    // Include the IC slow-path extern in allocator_frefs — it can box a
+    // method into a bound closure, which allocates.
+    let mut allocator_frefs = built.allocator_frefs;
+    allocator_frefs.push(ic.slow_ref());
+
     Lowered {
         module: built.module,
         main: main_ref,
@@ -370,6 +378,7 @@ pub fn lower_program(program: &Ast) -> Lowered {
         gc,
         ic: ic.finalize(),
         array_seq,
+        allocator_frefs,
     }
 }
 
