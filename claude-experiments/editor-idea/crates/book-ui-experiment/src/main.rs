@@ -45,6 +45,102 @@ use lyon::tessellation::{
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+
+/// Polygon atlas produced by `extract_icons` — a list of icons each
+/// decomposed into per-depth contour polygons in [0, 1]² icon-local
+/// coordinates with y down.
+#[derive(Resource, Deserialize, Debug)]
+struct IconAtlas {
+    legend: Vec<[u8; 3]>,
+    icons: Vec<IconEntry>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct IconEntry {
+    row: usize,
+    col: usize,
+    name: String,
+    aspect: f32,
+    layers: Vec<IconAtlasLayer>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct IconAtlasLayer {
+    depth: u8,
+    polygons: Vec<IconAtlasPolygon>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct IconAtlasPolygon {
+    exterior: Vec<[f32; 2]>,
+    #[serde(default)]
+    holes: Vec<Vec<[f32; 2]>>,
+}
+
+impl IconAtlas {
+    fn get(&self, name: &str) -> Option<&IconEntry> {
+        self.icons.iter().find(|i| i.name == name)
+    }
+}
+
+fn load_icon_atlas() -> IconAtlas {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("assets/icons/icons.json");
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    serde_json::from_slice(&bytes)
+        .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()))
+}
+
+/// Place an icon at world `center` with height `size_h`. Returns a
+/// list of `(depth, polygons)` ready to be subtracted from the
+/// stack: the icon's depth-K mask should be cut from the card's top
+/// K layers (clamped to the card's actual thickness by the caller).
+fn icon_at(
+    atlas: &IconAtlas,
+    name: &str,
+    center: Vec2,
+    size_h: f32,
+) -> Vec<(u8, Vec<Polygon<f64>>)> {
+    let Some(icon) = atlas.get(name) else {
+        eprintln!("icon '{name}' not in atlas");
+        return Vec::new();
+    };
+    // Atlas polys are y-down in [0,1]². Flip Y for our y-up world.
+    let size_w = size_h * icon.aspect;
+    let to_world = |[u, v]: [f32; 2]| -> Coord<f64> {
+        Coord {
+            x: (center.x + (u - 0.5) * size_w) as f64,
+            y: (center.y - (v - 0.5) * size_h) as f64,
+        }
+    };
+    let to_ring = |pts: &[[f32; 2]]| -> Option<LineString<f64>> {
+        if pts.len() < 3 {
+            return None;
+        }
+        let mut coords: Vec<Coord<f64>> = pts.iter().map(|p| to_world(*p)).collect();
+        if coords[0] != *coords.last().unwrap() {
+            coords.push(coords[0]);
+        }
+        Some(LineString::from(coords))
+    };
+    icon.layers
+        .iter()
+        .map(|layer| {
+            let polys: Vec<Polygon<f64>> = layer
+                .polygons
+                .iter()
+                .filter_map(|p| {
+                    let ext = to_ring(&p.exterior)?;
+                    let holes: Vec<LineString<f64>> =
+                        p.holes.iter().filter_map(|h| to_ring(h)).collect();
+                    Some(Polygon::new(ext, holes))
+                })
+                .collect();
+            (layer.depth, polys)
+        })
+        .collect()
+}
 use ttf_parser::{Face, GlyphId, OutlineBuilder};
 
 // World-unit dimensions of the paper.
@@ -87,7 +183,7 @@ const COLOR_PRESETS: &[(&str, Color)] = &[
 /// Bumped whenever the on-disk schema or default palette changes.
 /// Older states get their palette discarded and recomputed from the
 /// current `default_palette`, but other settings load through.
-const CURRENT_STATE_VERSION: u32 = 5;
+const CURRENT_STATE_VERSION: u32 = 7;
 
 /// Snapshot of the user-facing settings (camera, lights, brush, etc.)
 /// that survive across runs. The carved geometry itself is *not*
@@ -104,6 +200,10 @@ struct PersistedState {
     paper_thickness: f32,
     pyramid_inset: f32,
     miter_limit: f32,
+    #[serde(default)]
+    chamfer_w_frac: f32,
+    #[serde(default)]
+    chamfer_h_frac: f32,
     brush_radius: f32,
     brush_strength: u16,
     brush_layer_shrink: f32,
@@ -123,6 +223,11 @@ struct PersistedLight {
     dir: [f32; 3],
     intensity: f32,
     color_idx: usize,
+    /// Whether this slot casts shadows. Older saved states are
+    /// missing this field; serde_default keeps them loadable, and
+    /// the version-aware loader fills the right initial value.
+    #[serde(default)]
+    casts_shadow: bool,
 }
 
 fn state_path() -> PathBuf {
@@ -165,6 +270,11 @@ struct LightDef {
     dir: Vec3,
     intensity: f32,
     color_idx: usize,
+    /// Whether this slot's directional light casts shadows.
+    /// Multiple shadow casters tend to produce muddy double-shadows
+    /// on the layered paper, so the default scene only gives this
+    /// to the key light — but it's a per-slot toggle now.
+    casts_shadow: bool,
 }
 
 impl LightDef {
@@ -261,6 +371,13 @@ struct PaperStack {
     paper_thickness: f32,
     pyramid_inset: f32,
     miter_limit: f32,
+    /// Top-of-wall chamfer width as a fraction of the wall's
+    /// `slope_inset`. 0 = no chamfer; 0.5 = chamfer takes half the
+    /// slope. The chamfer faces up-and-out and catches the key/fill
+    /// light, producing the thin "shine" along every cut edge.
+    chamfer_w_frac: f32,
+    /// Top-of-wall chamfer height as a fraction of `paper_thickness`.
+    chamfer_h_frac: f32,
 }
 
 impl PaperStack {
@@ -276,6 +393,8 @@ impl PaperStack {
             paper_thickness: pt,
             pyramid_inset: DEFAULT_PYRAMID_INSET,
             miter_limit: DEFAULT_MITER_LIMIT,
+            chamfer_w_frac: 0.5,
+            chamfer_h_frac: 0.2,
         }
     }
     fn n_layers(&self) -> u16 {
@@ -405,12 +524,12 @@ struct LettersUi {
 
 fn default_lights() -> [LightDef; 3] {
     [
-        // Key — soft top-left, dominant.
-        LightDef { dir: Vec3::new(-0.30, -0.30, 0.90), intensity: 0.40, color_idx: 0 },
+        // Key — soft top-left, dominant. Casts shadows.
+        LightDef { dir: Vec3::new(-0.30, -0.30, 0.90), intensity: 0.40, color_idx: 0, casts_shadow: true },
         // Fill — gentler top-right to lift shadows on the opposite side.
-        LightDef { dir: Vec3::new( 0.40, -0.20, 0.85), intensity: 0.10, color_idx: 0 },
+        LightDef { dir: Vec3::new( 0.40, -0.20, 0.85), intensity: 0.10, color_idx: 0, casts_shadow: false },
         // Back rim — faint, opposite direction.
-        LightDef { dir: Vec3::new( 0.0,   0.45, 0.70), intensity: 0.05, color_idx: 0 },
+        LightDef { dir: Vec3::new( 0.0,   0.45, 0.70), intensity: 0.05, color_idx: 0, casts_shadow: false },
     ]
 }
 
@@ -432,6 +551,7 @@ fn default_palette(n: u16) -> Vec<Color> {
 fn main() {
     let font_data = load_font();
     let font_library = load_font_library();
+    let icon_atlas = load_icon_atlas();
     let screenshot_out = std::env::var("SCREENSHOT_OUT").ok();
     // BOOK_UI_TUNE=1 keeps the app running with a hidden window and
     // the demo scene pre-built — used by the python tuning harness
@@ -460,6 +580,7 @@ fn main() {
                         dir: Vec3::from_array(pl.dir),
                         intensity: pl.intensity,
                         color_idx: pl.color_idx,
+                        casts_shadow: pl.casts_shadow,
                     };
                 }
                 arr
@@ -486,6 +607,10 @@ fn main() {
         }
         if s.miter_limit >= 1.0 {
             stack.miter_limit = s.miter_limit;
+        }
+        if s.version == CURRENT_STATE_VERSION {
+            stack.chamfer_w_frac = s.chamfer_w_frac;
+            stack.chamfer_h_frac = s.chamfer_h_frac;
         }
         // Only restore the saved palette if the schema version matches
         // — old saves get the new default to avoid dragging stale color
@@ -590,6 +715,7 @@ fn main() {
         .insert_resource(StackDirty(true))
         .insert_resource(LoadedFont(font_data))
         .insert_resource(font_library)
+        .insert_resource(icon_atlas)
         .insert_resource(letters)
         .insert_resource(doc)
         .insert_resource(FormUi { depth: 2, bevel: false })
@@ -641,10 +767,11 @@ fn main() {
 fn auto_build_create_account_scene(
     mut stack: ResMut<PaperStack>,
     font_lib: Res<FontLibrary>,
+    icon_atlas: Res<IconAtlas>,
     mut dirty: ResMut<StackDirty>,
 ) {
     stack.reset_full();
-    carve_create_account_form(&mut stack, &font_lib);
+    carve_create_account_form(&mut stack, &font_lib, &icon_atlas);
     dirty.0 = true;
 }
 
@@ -807,12 +934,15 @@ fn save_state_periodic(
                 dir: l.dir.to_array(),
                 intensity: l.intensity,
                 color_idx: l.color_idx,
+                casts_shadow: l.casts_shadow,
             })
             .collect(),
         ambient: light.ambient,
         paper_thickness: stack.paper_thickness,
         pyramid_inset: stack.pyramid_inset,
         miter_limit: stack.miter_limit,
+        chamfer_w_frac: stack.chamfer_w_frac,
+        chamfer_h_frac: stack.chamfer_h_frac,
         brush_radius: brush.radius,
         brush_strength: brush.strength,
         brush_layer_shrink: brush.layer_shrink,
@@ -1118,6 +1248,8 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
                 z_bot,
                 slope,
                 miter,
+                stack.chamfer_w_frac,
+                stack.chamfer_h_frac,
                 color,
                 &mut positions,
                 &mut normals,
@@ -1132,6 +1264,8 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
                     z_bot,
                     slope,
                     miter,
+                    stack.chamfer_w_frac,
+                    stack.chamfer_h_frac,
                     color,
                     &mut positions,
                     &mut normals,
@@ -1256,6 +1390,8 @@ fn emit_wall_for_ring(
     z_bot: f32,
     slope_inset: f64,
     miter_limit: f64,
+    chamfer_w_frac: f32,
+    chamfer_h_frac: f32,
     color: [f32; 4],
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
@@ -1268,8 +1404,8 @@ fn emit_wall_for_ring(
     if n < 3 {
         return;
     }
+    let coords = ring_to_coords(ring);
     let pts_bot: Vec<Vec2> = if slope_inset > 1e-9 {
-        let coords = ring_to_coords(ring);
         miter_offset_right_f64(&coords, slope_inset, miter_limit)
             .iter()
             .map(|c| Vec2::new(c.x as f32, c.y as f32))
@@ -1277,6 +1413,36 @@ fn emit_wall_for_ring(
     } else {
         pts_top.clone()
     };
+
+    // Top chamfer: a thin up-and-out facing ring inserted between
+    // the cap rim and the wall proper. The wall faces sideways and
+    // sits in shadow under the (mostly downward) lights; the chamfer
+    // tilts upward enough to catch direct light, producing a thin
+    // shine highlight along every cut edge.
+    //
+    // chamfer_w is taken from slope_inset so the chamfer never
+    // overhangs further than the wall already slopes — on vertical
+    // walls (slope_inset == 0) we suppress it entirely, since an
+    // outward-leaning lip would look wrong.
+    // Chamfer dimensions are scaled off the wall *thickness*, not
+    // its slope — the demo scene sets per-layer slope_inset to 0 for
+    // every wall, so basing chamfer_w on slope produced zero chamfer
+    // even at max slider value. With a vertical wall (slope == 0)
+    // the resulting chamfer overhangs the wall slightly, which is
+    // fine: it still reads as a beveled top edge catching light.
+    let pt = (z_top - z_bot).max(0.0);
+    let chamfer_w = pt * chamfer_w_frac;
+    let chamfer_h = pt * chamfer_h_frac;
+    let has_chamfer = chamfer_w > 1e-6 && chamfer_h > 1e-6;
+    let pts_chamfer: Vec<Vec2> = if has_chamfer {
+        miter_offset_right_f64(&coords, chamfer_w as f64, miter_limit)
+            .iter()
+            .map(|c| Vec2::new(c.x as f32, c.y as f32))
+            .collect()
+    } else {
+        pts_top.clone()
+    };
+    let z_chamfer = if has_chamfer { z_top - chamfer_h } else { z_top };
 
     // Cumulative arclength along the top rim, used as the U axis for
     // wall UVs. Without this — i.e. if walls reused the cap's planar
@@ -1301,9 +1467,14 @@ fn emit_wall_for_ring(
     // Per-wall vertical span in UV. 0.15 = ~15% of texture height;
     // big enough that the wall shows recognizable paper grain but
     // small enough that it reads as continuous fibers rather than a
-    // distinct second tile.
+    // distinct second tile. The chamfer takes a small slice at the
+    // top of that span so its texture flows continuously into the
+    // wall below.
     const WALL_V_SPAN: f32 = 0.15;
-    let v_top = 0.0;
+    const CHAMFER_V_FRAC: f32 = 0.2;
+    let v_cham_top = 0.0;
+    let v_cham_bot = WALL_V_SPAN * CHAMFER_V_FRAC;
+    let v_top = if has_chamfer { v_cham_bot } else { 0.0 };
     let v_bot = WALL_V_SPAN;
 
     // Per-quad FLAT normals. Smooth/averaged per-vertex normals
@@ -1312,10 +1483,52 @@ fn emit_wall_for_ring(
     // shadow caster is still faceted, so each segment-vertex
     // produced a tiny shadow discontinuity. Flat shading matches
     // the geometry exactly — uniform shadows per facet.
+
+    // Chamfer ring (when present): one quad per segment, going from
+    // the cap rim down-and-inward to the wall's true top.
+    if has_chamfer {
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let p_top_i = Vec3::new(pts_top[i].x, pts_top[i].y, z_top);
+            let p_top_j = Vec3::new(pts_top[j].x, pts_top[j].y, z_top);
+            let p_cham_i = Vec3::new(pts_chamfer[i].x, pts_chamfer[i].y, z_chamfer);
+            let p_cham_j = Vec3::new(pts_chamfer[j].x, pts_chamfer[j].y, z_chamfer);
+
+            let edge_top = p_top_j - p_top_i;
+            let down = p_cham_i - p_top_i;
+            let n_face = down
+                .cross(edge_top)
+                .try_normalize()
+                .unwrap_or(Vec3::Z);
+            let normal = [n_face.x, n_face.y, n_face.z];
+
+            let u_i = cum_len[i] * u_scale;
+            let u_j = cum_len[i + 1] * u_scale;
+            let cham_uvs = [
+                [u_i, v_cham_top],
+                [u_i, v_cham_bot],
+                [u_j, v_cham_bot],
+                [u_j, v_cham_top],
+            ];
+
+            let base = positions.len() as u32;
+            for (k, v) in [p_top_i, p_cham_i, p_cham_j, p_top_j].iter().enumerate() {
+                positions.push([v.x, v.y, v.z]);
+                normals.push(normal);
+                uvs.push(cham_uvs[k]);
+                colors.push(tinted(color, v.x, v.y));
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
+
+    // Main wall: from chamfer-bottom (or cap rim, if no chamfer)
+    // down to z_bot.
+    let pts_wtop = if has_chamfer { &pts_chamfer } else { &pts_top };
     for i in 0..n {
         let j = (i + 1) % n;
-        let p_top_i = Vec3::new(pts_top[i].x, pts_top[i].y, z_top);
-        let p_top_j = Vec3::new(pts_top[j].x, pts_top[j].y, z_top);
+        let p_top_i = Vec3::new(pts_wtop[i].x, pts_wtop[i].y, z_chamfer);
+        let p_top_j = Vec3::new(pts_wtop[j].x, pts_wtop[j].y, z_chamfer);
         let p_bot_i = Vec3::new(pts_bot[i].x, pts_bot[i].y, z_bot);
         let p_bot_j = Vec3::new(pts_bot[j].x, pts_bot[j].y, z_bot);
 
@@ -1449,75 +1662,14 @@ fn color_to_rgba(c: Color) -> [f32; 4] {
     [lc.red, lc.green, lc.blue, lc.alpha]
 }
 
-/// Smooth deterministic hash in [-1, 1] used for per-vertex paper
-/// grain. Sampled at the vertex's world-space (x, y) so adjacent
-/// vertices carry similar values and the result interpolates as a
-/// subtle texture across each face instead of flickering.
-fn paper_grain(x: f32, y: f32) -> f32 {
-    let octave = |fx: f32, fy: f32, freq: f32| -> f32 {
-        let h = ((fx * freq * 12.9898 + fy * freq * 78.2331).sin()
-            * 43758.5453)
-            .fract();
-        h * 2.0 - 1.0
-    };
-    (octave(x, y, 7.0) * 0.55 + octave(x, y, 17.0) * 0.30 + octave(x, y, 41.0) * 0.15)
-        .clamp(-1.0, 1.0)
-}
-
 /// Identity. Per-vertex tinting interpolates linearly across long
 /// fan-triangles in lyon's tessellation of rect-with-hole regions,
 /// producing visible diagonal streaks radiating from the outer
-/// corners. Paper texture, when we add it, has to be sampled in
-/// fragment space (an actual texture mapped over UVs) — not via
+/// corners. Paper texture is sampled in fragment space via the
+/// diffuse + normal maps on the StandardMaterial, not via
 /// per-vertex modulation.
 fn tinted(color: [f32; 4], _x: f32, _y: f32) -> [f32; 4] {
     color
-}
-
-/// Rounded-rect outline with a small concave dimple at the midpoint
-/// of each corner — the "bracketed" decorative profile from the
-/// reference image. `dimple_depth` is the inward radial offset at
-/// the deepest point of the dimple.
-fn bracketed_rect_pts_ccw(
-    cx: f32,
-    cy: f32,
-    w: f32,
-    h: f32,
-    r: f32,
-    dimple_depth: f32,
-) -> Vec<(f64, f64)> {
-    let r_c = r.min(w * 0.5).min(h * 0.5).max(0.0);
-    if r_c < 1e-4 {
-        return rect_pts_ccw(cx, cy, w, h);
-    }
-    let dimple = dimple_depth.min(r_c * 0.7).max(0.0) as f64;
-    let segs = 40u32;
-    let hw = (w * 0.5 - r_c) as f64;
-    let hh = (h * 0.5 - r_c) as f64;
-    let cx = cx as f64;
-    let cy = cy as f64;
-    let r = r_c as f64;
-
-    let mut pts: Vec<(f64, f64)> = Vec::new();
-    let mut corner = |center: (f64, f64), start: f64| {
-        for i in 0..=segs {
-            let t = i as f64 / segs as f64;
-            let theta = start + t * std::f64::consts::FRAC_PI_2;
-            // Single soft inward dimple at the corner midpoint
-            // (t = 0.5). Wide Gaussian envelope so the radial dip
-            // blends smoothly into the surrounding arc.
-            let env = (-(((t - 0.50) * 4.0).powi(2))).exp();
-            let radius = r - dimple * env;
-            pts.push((center.0 + theta.cos() * radius, center.1 + theta.sin() * radius));
-        }
-    };
-    corner((cx + hw, cy - hh), -std::f64::consts::FRAC_PI_2);
-    corner((cx + hw, cy + hh), 0.0);
-    corner((cx - hw, cy + hh), std::f64::consts::FRAC_PI_2);
-    corner((cx - hw, cy - hh), std::f64::consts::PI);
-    let first = pts[0];
-    pts.push(first);
-    pts
 }
 
 // ─── Carve operations ─────────────────────────────────────────────
@@ -2436,115 +2588,11 @@ fn build_form_polygons() -> MultiPolygon<f64> {
 }
 
 // ─── Icon polygon library ─────────────────────────────────────────
-
-fn ellipse_polygon(cx: f32, cy: f32, rx: f32, ry: f32, segments: u32) -> Polygon<f64> {
-    let cx = cx as f64;
-    let cy = cy as f64;
-    let rx = rx as f64;
-    let ry = ry as f64;
-    let mut pts: Vec<(f64, f64)> = Vec::with_capacity(segments as usize + 1);
-    for i in 0..segments {
-        let theta = i as f64 / segments as f64 * std::f64::consts::TAU;
-        pts.push((cx + theta.cos() * rx, cy + theta.sin() * ry));
-    }
-    pts.push(pts[0]);
-    Polygon::new(LineString::from(pts), vec![])
-}
-
-/// Half-disc polygon with a flat bottom edge at `cy`. Used as the
-/// shoulders of the avatar silhouette.
-fn half_disc_top(cx: f32, cy: f32, w: f32, h: f32, segments: u32) -> Polygon<f64> {
-    let cx = cx as f64;
-    let cy = cy as f64;
-    let hw = (w * 0.5) as f64;
-    let hh = h as f64;
-    let mut pts: Vec<(f64, f64)> = Vec::with_capacity(segments as usize + 3);
-    // CCW, y-up: start at right end of flat bottom, arc over the top
-    // to the left end, then return along the bottom.
-    for i in 0..=segments {
-        let theta = (i as f64 / segments as f64) * std::f64::consts::PI;
-        pts.push((cx + hw * theta.cos(), cy + hh * theta.sin()));
-    }
-    pts.push((cx + hw, cy)); // close
-    Polygon::new(LineString::from(pts), vec![])
-}
-
-/// Person silhouette: a clear head circle above a half-disc shoulders.
-/// `size` is the total silhouette height. Pieces overlap slightly so
-/// the union reads as one figure with a subtle neck.
-fn person_silhouette(cx: f32, cy: f32, size: f32) -> Vec<Polygon<f64>> {
-    let head_r = size * 0.20;
-    let head_cy = cy + size * 0.30;
-    let head = circle_polygon(Vec2::new(cx, head_cy), head_r, 48);
-    // Shoulders flat-bottom slightly below the figure center; arc
-    // peaks up *into* the head so the two pieces merge cleanly.
-    let shoulders_flat_bottom = cy - size * 0.46;
-    let shoulders_h = size * 0.74;
-    let shoulders_w = size * 0.95;
-    let shoulders = half_disc_top(cx, shoulders_flat_bottom, shoulders_w, shoulders_h, 32);
-    vec![head, shoulders]
-}
-
-fn envelope_icon(cx: f32, cy: f32, size: f32) -> Vec<Polygon<f64>> {
-    // Envelope body as an outlined rectangle with a V-fold inside
-    // (two filled triangles meeting at the top center).
-    let w = size * 1.10;
-    let h = size * 0.78;
-    let line = size * 0.07;
-    let body_frame = rect_frame(cx, cy, w, h, line);
-
-    // V-fold: two triangles whose hypotenuses dive from the top
-    // corners to the center. Approximated as filled triangles.
-    let top_l = Vec2::new(cx - w * 0.5 + line, cy + h * 0.5 - line);
-    let top_r = Vec2::new(cx + w * 0.5 - line, cy + h * 0.5 - line);
-    let bottom_c = Vec2::new(cx, cy - h * 0.05);
-    let v_left = triangle_filled(
-        top_l,
-        Vec2::new(cx, cy + h * 0.5 - line),
-        bottom_c,
-    );
-    let v_right = triangle_filled(
-        Vec2::new(cx, cy + h * 0.5 - line),
-        top_r,
-        bottom_c,
-    );
-    vec![body_frame, v_left, v_right]
-}
-
-fn lock_icon(cx: f32, cy: f32, size: f32) -> Vec<Polygon<f64>> {
-    let body_w = size * 0.78;
-    let body_h = size * 0.55;
-    let body_cy = cy - size * 0.12;
-    let body = polygon_filled(rounded_rect_pts_ccw(
-        cx,
-        body_cy,
-        body_w,
-        body_h,
-        size * 0.08,
-    ));
-    // Shackle = inverted U: outer rounded-frame whose bottom is
-    // clipped by the body. We just emit the rounded-rect frame and
-    // accept that it overlaps the body slightly.
-    let shackle_w = size * 0.52;
-    let shackle_h = size * 0.46;
-    let shackle_cy = cy + size * 0.20;
-    let shackle = rounded_rect_frame(
-        cx,
-        shackle_cy,
-        shackle_w,
-        shackle_h,
-        shackle_w * 0.5,
-        size * 0.10,
-    );
-    vec![body, shackle]
-}
-
-fn eye_icon(cx: f32, cy: f32, size: f32) -> Vec<Polygon<f64>> {
-    // Almond outline (horizontal ellipse) + pupil dot.
-    let almond = ellipse_polygon(cx, cy, size * 0.55, size * 0.30, 48);
-    let pupil = circle_polygon(Vec2::new(cx, cy), size * 0.16, 24);
-    vec![almond, pupil]
-}
+//
+// Most icons (profile, mail, lock, eye, …) come from the SVG icon
+// atlas built by `extract_svg_icons`. The arrow on the Sign Up
+// button is still hand-coded because it's tightly coupled to the
+// button's geometry and trivial to construct.
 
 fn arrow_right_icon(cx: f32, cy: f32, size: f32) -> Vec<Polygon<f64>> {
     let head_w = size * 0.55;
@@ -2619,7 +2667,7 @@ fn pick_font<'a>(lib: &'a FontLibrary, names: &[&str]) -> Option<&'a NamedFont> 
 /// Walls between layers are vertical (no chamfer): the reference has
 /// crisp edges between each color band, with ambient light dimming
 /// the wall just enough that it reads as a clean line.
-fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary) {
+fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary, atlas: &IconAtlas) {
     stack.paper_thickness = 0.18;
 
     let n_layers = stack.layers.len();
@@ -2744,75 +2792,148 @@ fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary) {
     let button_r: f32 = 0.16;
     let button_y: f32 = -1.75;
 
-    let mut cutouts: Vec<Polygon<f64>> = Vec::new();
-    cutouts.push(circle_polygon(Vec2::new(avatar_x, avatar_y), avatar_r, 64));
+    // Per-target-layer cut buckets. Each feature stamps into
+    // exactly *one* layer (the layer immediately below the surface
+    // it sits on); cumulative recess depth comes from features
+    // overlapping in XY, not from one feature cutting many layers.
+    //
+    //   cuts[0] → cut layer 8 (visible bottom = layer 7, mid purple)
+    //   cuts[1] → cut layer 7 (visible bottom = layer 6, deep purple)
+    //   cuts[2] → cut layer 6 (visible bottom = blue floor)
+    //
+    // Anything deeper clamps to cuts[2].
+    let mut cuts: [Vec<Polygon<f64>>; 3] = Default::default();
+
+    // Form fields, checkbox, button — 1-cut features on the bare
+    // card → bucket 0 (cut layer 8).
     for &y in &input_ys {
-        cutouts.push(polygon_filled(rounded_rect_pts_ccw(
+        cuts[0].push(polygon_filled(rounded_rect_pts_ccw(
             0.0, y, input_w, input_h, input_r,
         )));
     }
-    cutouts.push(polygon_filled(rounded_rect_pts_ccw(
+    cuts[0].push(polygon_filled(rounded_rect_pts_ccw(
         -2.00, row_y, checkbox_size, checkbox_size, 0.04,
     )));
-    cutouts.push(polygon_filled(rounded_rect_pts_ccw(
+    cuts[0].push(polygon_filled(rounded_rect_pts_ccw(
         0.0, button_y, button_w, button_h, button_r,
     )));
 
-    let mut icons: Vec<Polygon<f64>> = Vec::new();
-    icons.extend(person_silhouette(avatar_x, avatar_y, 0.46));
-    let icon_size: f32 = 0.24;
+    // Icons. Each icon is one feature, just like text: it cuts ONE
+    // layer — the layer it sits on. The atlas's per-pixel depth
+    // values are used only as a way to define the icon's overall
+    // shape (union of every colored pixel, regardless of which
+    // legend swatch it matched). If we want multi-level relief
+    // *inside* an icon later, we can revisit; right now an icon
+    // recesses by exactly one step like every other element.
+    let push_atlas = |name: &str,
+                      pos: Vec2,
+                      size_h: f32,
+                      base_depth: usize,
+                      cuts: &mut [Vec<Polygon<f64>>; 3]| {
+        let layers = icon_at(atlas, name, pos, size_h);
+        let mut all_polys: Vec<Polygon<f64>> = Vec::new();
+        for (_depth, polys) in layers {
+            all_polys.extend(polys);
+        }
+        cuts[base_depth.min(2)].extend(all_polys);
+    };
+    let avatar_size_h = avatar_r * 2.0;
+    // Avatar sits on the card surface — base_depth 0.
+    push_atlas(
+        "profile_circle",
+        Vec2::new(avatar_x, avatar_y),
+        avatar_size_h,
+        0,
+        &mut cuts,
+    );
+    let icon_size_h: f32 = 0.42;
     let icon_x: f32 = -1.86;
-    icons.extend(person_silhouette(icon_x, input_ys[0], icon_size));
-    icons.extend(envelope_icon(icon_x, input_ys[1], icon_size));
-    icons.extend(lock_icon(icon_x, input_ys[2], icon_size));
-    icons.extend(eye_icon(2.00, input_ys[2], icon_size));
-    icons.extend(arrow_right_icon(1.80, button_y, 0.30));
+    // Field-row icons sit inside their respective form-field
+    // cutouts, which already cut 1 layer → base_depth 1.
+    push_atlas(
+        "profile_simple",
+        Vec2::new(icon_x, input_ys[0]),
+        icon_size_h,
+        1,
+        &mut cuts,
+    );
+    push_atlas(
+        "mail",
+        Vec2::new(icon_x, input_ys[1]),
+        icon_size_h,
+        1,
+        &mut cuts,
+    );
+    push_atlas(
+        "lock",
+        Vec2::new(icon_x, input_ys[2]),
+        icon_size_h,
+        1,
+        &mut cuts,
+    );
+    push_atlas(
+        "eye",
+        Vec2::new(2.00, input_ys[2]),
+        icon_size_h,
+        1,
+        &mut cuts,
+    );
+    // Hand-drawn arrow_right inside the Sign Up button — 1-cut
+    // feature at base_depth 1 → bucket 1.
+    cuts[1].extend(arrow_right_icon(1.80, button_y, 0.30));
 
-    let mut texts: Vec<Polygon<f64>> = Vec::new();
-    if let Some(font) = pick_font(font_lib, &["Arial Bold", "Helvetica", "Arial"]) {
-        let tol = 0.005;
-        texts.extend(layout_text(&font.data, "Create Account",
-            Vec2::new(-1.30, 2.10), 0.40, tol));
-        texts.extend(layout_text(&font.data, "Let's get you started.",
-            Vec2::new(-1.30, 1.75), 0.21, tol));
-        texts.extend(layout_text(&font.data, "Full Name",
-            Vec2::new(-1.55, input_ys[0] - 0.08), 0.26, tol));
-        texts.extend(layout_text(&font.data, "Email Address",
-            Vec2::new(-1.55, input_ys[1] - 0.08), 0.26, tol));
-        texts.extend(layout_text(&font.data, "Password",
-            Vec2::new(-1.55, input_ys[2] - 0.08), 0.26, tol));
-        texts.extend(layout_text(&font.data, "Remember me",
-            Vec2::new(-1.75, row_y - 0.08), 0.20, tol));
-        texts.extend(layout_text(&font.data, "Forgot password?",
-            Vec2::new(0.50, row_y - 0.08), 0.20, tol));
-        texts.extend(layout_text(&font.data, "Sign Up",
-            Vec2::new(-0.65, button_y - 0.11), 0.28, tol));
-    }
+    // Text. Each label is a 1-cut feature: cuts ONE layer below the
+    // surface it sits on. Texts on the bare card go to bucket 0
+    // (cut layer 8 → visible at mid). Texts inside form fields /
+    // the button go to bucket 1 (cut layer 7 → visible at deep,
+    // since the field/button has already cut layer 8).
+    let mut push_text = |text: &str,
+                         pos: Vec2,
+                         em: f32,
+                         tol: f64,
+                         base_depth: usize,
+                         cuts: &mut [Vec<Polygon<f64>>; 3]| {
+        if let Some(font) = pick_font(font_lib, &["Arial Bold", "Helvetica", "Arial"]) {
+            let polys = layout_text(&font.data, text, pos, em, tol as f32);
+            cuts[base_depth.min(2)].extend(polys);
+        }
+    };
+    let tol = 0.005;
+    // On-card titles + side text → base 0.
+    push_text("Create Account", Vec2::new(-1.30, 2.10), 0.40, tol, 0, &mut cuts);
+    push_text("Let's get you started.", Vec2::new(-1.30, 1.75), 0.21, tol, 0, &mut cuts);
+    push_text("Remember me", Vec2::new(-1.75, row_y - 0.08), 0.20, tol, 0, &mut cuts);
+    push_text("Forgot password?", Vec2::new(0.50, row_y - 0.08), 0.20, tol, 0, &mut cuts);
+    // Field labels sit inside the form-field rectangles → base 1.
+    push_text("Full Name", Vec2::new(-1.55, input_ys[0] - 0.08), 0.26, tol, 1, &mut cuts);
+    push_text("Email Address", Vec2::new(-1.55, input_ys[1] - 0.08), 0.26, tol, 1, &mut cuts);
+    push_text("Password", Vec2::new(-1.55, input_ys[2] - 0.08), 0.26, tol, 1, &mut cuts);
+    // Sign Up sits inside the button → base 1.
+    push_text("Sign Up", Vec2::new(-0.65, button_y - 0.11), 0.28, tol, 1, &mut cuts);
 
     // THREE purple layers stacked on the blue floor:
-    //   layer 6 = deep purple (z=z_teal)   — visible inside text/icons.
-    //   layer 7 = mid purple  (z=z_lime)   — visible at form-field bottoms.
-    //   layer 8 = top purple  (z=z_yellow) — visible card surface.
+    //   layer 6 = deep purple (z=z_teal)
+    //   layer 7 = mid purple  (z=z_lime)
+    //   layer 8 = top purple  (z=z_yellow) — bare card surface
     //
-    // Cuts:
-    //   layer 8: card MINUS (form fields ∪ icons ∪ text).
-    //   layer 7: card MINUS (icons ∪ text).      (form fields don't go this deep)
-    //   layer 6: card (no cuts).
-    //
-    // Visibility:
-    //   inside form field, outside icon/text  → layer 7 (mid purple).
-    //   inside icon                            → layer 6 (deep purple).
-    //   inside text                            → layer 6 (deep purple).
-    //   on bare card surface                   → layer 8 (top purple).
+    // Each layer is the card shape MINUS the features targeting
+    // that layer (built up in `cuts[0..2]` above). Cumulative
+    // visibility comes from features that overlap in XY: e.g. a
+    // text glyph inside a form field cuts only layer 7, but the
+    // form field has already cut layer 8 there, so the bottom of
+    // the well at the glyph position is layer 6 (deep purple).
     if n_layers < 9 {
         return;
     }
     if n_pal >= 9 {
         // Card purples — calibrated against reference samples
         // (top #8761AB, mid #69408D, deep #35214B).
-        stack.palette[6] = Color::srgb(0.282, 0.000, 0.075); // deep
-        stack.palette[7] = Color::srgb(0.380, 0.220, 0.600); // mid
-        stack.palette[8] = Color::srgb(0.525, 0.353, 0.682); // top
+        // #35214B
+        stack.palette[6] = Color::srgb(0.208, 0.129, 0.294); // deep
+        // #69408D
+        stack.palette[7] = Color::srgb(0.412, 0.251, 0.553); // mid
+        // #8761AB
+        stack.palette[8] = Color::srgb(0.529, 0.380, 0.671); // top
     }
     stack.layer_z[6] = z_teal;
     stack.layer_z[7] = z_lime;
@@ -2832,26 +2953,10 @@ fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary) {
         acc
     };
 
-    // layer 6 = full card body.
-    stack.layers[6] = mp(card_shape.clone());
-
-    // layer 7 = card MINUS every icon MINUS every text glyph.
-    let icons_and_text: Vec<Polygon<f64>> = icons
-        .iter()
-        .cloned()
-        .chain(texts.iter().cloned())
-        .collect();
-    stack.layers[7] = subtract_each(mp(card_shape.clone()), &icons_and_text);
-
-    // layer 8 = card MINUS form-field cutouts MINUS icons MINUS text.
-    let all_holes: Vec<Polygon<f64>> = cutouts
-        .iter()
-        .cloned()
-        .chain(icons.iter().cloned())
-        .chain(texts.iter().cloned())
-        .collect();
-    stack.layers[8] = subtract_each(mp(card_shape), &all_holes);
-    let _ = (cutouts, icons, texts); // borrowed by the cloned all_holes; drop here
+    // Each card layer subtracts only the features that target it.
+    stack.layers[8] = subtract_each(mp(card_shape.clone()), &cuts[0]);
+    stack.layers[7] = subtract_each(mp(card_shape.clone()), &cuts[1]);
+    stack.layers[6] = subtract_each(mp(card_shape), &cuts[2]);
 
     // Empty + push out-of-the-way any layers above 8.
     for i in 9..n_layers {
@@ -3151,9 +3256,7 @@ fn sync_lights(
         let on = l.intensity > 0.01;
         dl.color = l.color();
         dl.illuminance = l.intensity * 7_500.0;
-        // Only the key light casts shadows — fill / back lights would
-        // mush together into muddy double-shadows otherwise.
-        dl.shadows_enabled = on && idx.0 == 0;
+        dl.shadows_enabled = on && l.casts_shadow;
     }
 }
 
@@ -3489,6 +3592,7 @@ fn debug_panel(
     mut form: ResMut<FormUi>,
     font: Res<LoadedFont>,
     font_lib: Res<FontLibrary>,
+    icon_atlas: Res<IconAtlas>,
     mut debug_view: ResMut<DebugView>,
 ) -> Result {
     if !debug.0 {
@@ -3528,7 +3632,7 @@ fn debug_panel(
             ui.collapsing("Demo scenes", |ui| {
                 if ui.button("Show \"Create Account\" demo").clicked() {
                     stack.reset_full();
-                    carve_create_account_form(&mut stack, &font_lib);
+                    carve_create_account_form(&mut stack, &font_lib, &icon_atlas);
                     // Frame it: top-down, zoomed out enough to fit the
                     // 9.6-wide outer carve plus a margin of red paper.
                     camera.pan = Vec2::ZERO;
@@ -3664,6 +3768,24 @@ fn debug_panel(
                 ui.add(
                     egui::Slider::new(&mut stack.miter_limit, 1.0..=8.0).text("miter limit"),
                 );
+                if ui
+                    .add(
+                        egui::Slider::new(&mut stack.chamfer_w_frac, 0.0..=1.0)
+                            .text("chamfer width (× thickness)"),
+                    )
+                    .changed()
+                {
+                    dirty.0 = true;
+                }
+                if ui
+                    .add(
+                        egui::Slider::new(&mut stack.chamfer_h_frac, 0.0..=1.0)
+                            .text("chamfer height (× thickness)"),
+                    )
+                    .changed()
+                {
+                    dirty.0 = true;
+                }
                 ui.label(format!(
                     "stack height: {:.3}",
                     stack.layer_top_z(stack.n_layers().saturating_sub(1))
@@ -3703,6 +3825,7 @@ fn debug_panel(
                             if ui.checkbox(&mut on, "enabled").changed() {
                                 l.intensity = if on { 1.0_f32.max(l.intensity) } else { 0.0 };
                             }
+                            ui.checkbox(&mut l.casts_shadow, "casts shadow");
                             ui.add(egui::Slider::new(&mut l.intensity, 0.0..=2.0).text("intensity"));
                             let lc = l.color().to_linear();
                             let dot_color = egui::Color32::from_rgb(

@@ -176,10 +176,17 @@ impl PropertyIc {
         // The slow path may allocate (e.g. boxing a method into a bound
         // closure), so emit an explicit safepoint immediately before
         // the call. `Module::validate_safepoints` enforces this.
+        //
+        // `obj` must be listed as a live root at the safepoint: it's a
+        // heap-pointer regalloc Value with no `is_gc_root` stack slot,
+        // and the call uses it after the safepoint. Without rooting,
+        // a moving GC firing at this safepoint would forward the object
+        // but leave `obj`'s spill slot pointing at the from-space copy;
+        // the slow_ref call would then read a stale pointer.
         f.fb.switch_to_block(miss_bb);
         let sym_v = f.fb.iconst(Type::I64, sym.as_u32() as i64);
         let cid_v = f.fb.iconst(Type::I64, cache_id as i64);
-        f.fb.safepoint(&[]);
+        f.fb.safepoint(&[obj]);
         let slow = f.fb.call(self.slow_ref, &[obj, sym_v, cid_v]).unwrap();
         f.fb.jump(merge_bb, &[slow]);
 

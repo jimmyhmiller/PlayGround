@@ -529,6 +529,38 @@ impl<'a> Function for DynIRFunction<'a> {
         )
     }
 
+    /// `Inst::Safepoint` is also a safepoint, in addition to all calls.
+    /// The default `is_safepoint = is_call`, so we extend it explicitly.
+    fn is_safepoint(&self, inst: InstId) -> bool {
+        self.is_call(inst)
+            || matches!(self.get_inst(inst), Some(Inst::Safepoint(_)))
+    }
+
+    /// Every live *heap-pointer-eligible* value at a safepoint is a root:
+    /// spill it to the stack and record its location in the stackmap.
+    ///
+    /// Heap-pointer-eligible types:
+    ///   - `Type::GcPtr`/`Type::FrameSlice` — definite GC roots (`Type::is_gc()`)
+    ///   - `Type::I64` — may be a NaN-boxed heap pointer in tagged-value
+    ///     frontends like dynlang/beagle/lox. The runtime `PtrPolicy`
+    ///     decodes tag bits and skips non-pointer payloads at scan time.
+    ///
+    /// Non-eligible types (Ignore — never a heap pointer):
+    ///   - `Type::F64` — raw float bits; recording would feed random
+    ///     bit patterns to `PtrPolicy`, which is wasteful and risks
+    ///     false-positives.
+    ///   - `Type::I8`/`I32` — small integers, not pointer-shaped.
+    ///   - `Type::Ptr` — raw (non-GC) pointer. The IR distinguishes
+    ///     these from `GcPtr` precisely so they don't end up in stackmaps.
+    fn safepoint_action(&self, _inst: InstId, vreg: VReg) -> SafepointAction {
+        let ty = self.func.value_types[vreg.0 as usize];
+        if ty.is_gc() || matches!(ty, Type::I64) {
+            SafepointAction::SpillAndRecord
+        } else {
+            SafepointAction::Ignore
+        }
+    }
+
     fn inst_clobbers(&self, inst: InstId) -> &[PReg] {
         if self.is_call(inst) {
             &self.call_clobbers

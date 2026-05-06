@@ -10,6 +10,8 @@ lyon = "1.0"
 ttf-parser = "0.25"
 geo = "0.33"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+kurbo = "0.11"
+roxmltree = "0.20"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -24,3 +26,7 @@ path = "src/carved_demo.rs"
 [[bin]]
 name = "letters_demo"
 path = "src/letters_demo.rs"
+
+[[bin]]
+name = "extract_svg_icons"
+path = "src/extract_svg_icons.rs"

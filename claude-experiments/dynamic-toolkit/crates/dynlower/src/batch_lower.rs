@@ -446,6 +446,66 @@ impl<'a> BatchEmitter<'a> {
         self.spill_base_offset + (slot.0 as i32) * 8
     }
 
+    /// Push a SafepointRecord for the return address right after a Call/
+    /// CallIndirect/InvokeDynamic. Used by the FP-chain walker if GC fires
+    /// inside the callee — we need to know the caller's live roots so the
+    /// collector can update them when forwarding moving heap pointers.
+    ///
+    /// The regalloc has already spilled live values to slots (via
+    /// `SafepointAction::SpillAndRecord` from `DynIRFunction::safepoint_action`)
+    /// because every call is a safepoint. `alloc.stackmaps[inst_id]`
+    /// enumerates the slots; we record exactly those, plus `is_gc_root`
+    /// stack slots.
+    fn record_call_return_safepoint(&mut self, inst_id: InstId) {
+        if self.safepoint_handler.is_none() {
+            return;
+        }
+        let return_offset = self.buf.current_offset();
+        let root_slots = self.collect_live_root_slots(inst_id);
+        self.safepoints.push(crate::SafepointRecord {
+            code_offset: return_offset,
+            return_offset,
+            root_slots,
+        });
+    }
+
+    /// Precise root-slot collection for a safepoint instruction.
+    ///
+    /// The regalloc has already arranged (via `SafepointAction::SpillAndRecord`
+    /// in `DynIRFunction::safepoint_action`) for every live vreg at this
+    /// safepoint to be in a spill slot. `alloc.stackmaps[inst_id]` enumerates
+    /// each live vreg's slot. We add the function's `is_gc_root` stack
+    /// slots — those are the user-declared GC roots (e.g. local
+    /// variables defined via `def_var` in dynlang).
+    ///
+    /// Crucially: we do *not* iterate all `num_spill_slots` (which would
+    /// include dead/unallocated slots), nor all stack slots (which would
+    /// include non-GC scratch slots), nor all callee-saved register
+    /// banks (which would include preserved caller state). Only what the
+    /// regalloc says is actually live, plus declared GC roots.
+    fn collect_live_root_slots(&self, inst_id: InstId) -> Vec<i32> {
+        let mut root_slots: Vec<i32> = Vec::new();
+        if let Some(entries) = self.alloc.stackmaps.get(&inst_id) {
+            for entry in entries {
+                if let MoveOperand::SpillSlot(slot) = entry.location {
+                    root_slots.push(self.spill_offset(slot));
+                }
+            }
+        }
+        // is_gc_root stack slots (declared GC roots, e.g. dynlang `def_var`).
+        let spill_bytes = self.alloc.num_spill_slots * 8;
+        let mut ss_offset = self.spill_base_offset + spill_bytes as i32;
+        for ss in &self.func.stack_slots {
+            if ss.is_gc_root {
+                root_slots.push(ss_offset);
+            }
+            ss_offset += ss.size as i32;
+        }
+        root_slots.sort_unstable();
+        root_slots.dedup();
+        root_slots
+    }
+
     // ── Instruction emission ──────────────────────────────────
 
     fn emit_inst(&mut self, inst_id: InstId, node: &InstNode, _block_idx: usize) {
@@ -719,10 +779,12 @@ impl<'a> BatchEmitter<'a> {
 
             Inst::Call(fref, args) => {
                 self.emit_call(inst_id, *fref, args, node.value);
+                self.record_call_return_safepoint(inst_id);
             }
 
-            Inst::CallIndirect(callee_val, args, _ret_ty) => {
+            Inst::CallIndirect(_callee_val, args, _ret_ty) => {
                 self.emit_call_indirect(inst_id, args, node.value);
+                self.record_call_return_safepoint(inst_id);
             }
 
             Inst::IntToFloat(_) | Inst::FloatToInt(_) => {
@@ -770,6 +832,10 @@ impl<'a> BatchEmitter<'a> {
                             &mut self.buf, machine_gp(28), machine_gp(27), (idx * 8) as i32, MachineWordSize::W64,
                         );
                         Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
+                        // Post-BLR safepoint record: GC could fire inside
+                        // lox_invoke_fast (it may allocate when promoting
+                        // a method to a bound closure).
+                        self.record_call_return_safepoint(inst_id);
                     }
                     // X0 = closure. Save it.
                     Arm64Backend::emit_store_gp(
@@ -783,6 +849,10 @@ impl<'a> BatchEmitter<'a> {
                             &mut self.buf, machine_gp(28), machine_gp(27), (idx * 8) as i32, MachineWordSize::W64,
                         );
                         Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
+                        // Pure load on closure object — shouldn't allocate
+                        // — but conservatively record so the FP-chain walker
+                        // never lands on an unrecorded return address.
+                        self.record_call_return_safepoint(inst_id);
                     }
                     // X0 = func_ptr
                     Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(28), machine_gp(0));
@@ -803,6 +873,9 @@ impl<'a> BatchEmitter<'a> {
                     }
                     // Call the resolved func_ptr
                     Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
+                    // Post-BLR safepoint record: the user closure body can
+                    // freely allocate; GC may fire deep inside.
+                    self.record_call_return_safepoint(inst_id);
                     // Result in X0
                     if def_preg != gp_preg(0) {
                         Arm64Backend::emit_gp_move(&mut self.buf, preg_to_machine(def_preg), machine_gp(0));
@@ -898,6 +971,9 @@ impl<'a> BatchEmitter<'a> {
                 }
                 // Call cached func_ptr
                 Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
+                // Post-BLR safepoint record: cached method body can
+                // allocate freely; GC may fire deep inside.
+                self.record_call_return_safepoint(inst_id);
                 // Result in X0
                 Arm64Backend::emit_branch_to_label(&mut self.buf, done_label);
 
@@ -913,6 +989,10 @@ impl<'a> BatchEmitter<'a> {
                 // Call slow lookup
                 Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), self.slow_invoke);
                 Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
+                // Post-BLR safepoint record: slow_invoke may allocate
+                // (e.g. promoting a method to a bound closure when filling
+                // the IC entry).
+                self.record_call_return_safepoint(inst_id);
                 // slow_invoke returned func_ptr in X0, closure is in IC entry (already updated)
                 // Reload closure from IC entry
                 Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), self.ic_base.wrapping_add(ic_offset as u64));
@@ -938,6 +1018,9 @@ impl<'a> BatchEmitter<'a> {
                 // Call the resolved func_ptr
                 Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(28), func_ptr_reg);
                 Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
+                // Post-BLR safepoint record: user closure body can
+                // allocate freely; GC may fire deep inside.
+                self.record_call_return_safepoint(inst_id);
 
                 // ── Done ──
                 self.buf.bind_label(done_label);
@@ -950,6 +1033,11 @@ impl<'a> BatchEmitter<'a> {
                     );
                 }
                 } // end else (IC enabled)
+                // Each inner BLR inside this InvokeDynamic body has its
+                // own post-call SafepointRecord above (one per BLR), so
+                // the FP-chain walker finds a record at *whichever*
+                // saved_lr it encounters. No outer record is needed
+                // here — the saved_lr never lands at this point.
             }
 
             Inst::PushPrompt(_, _) | Inst::PopPrompt(_) |
@@ -957,45 +1045,17 @@ impl<'a> BatchEmitter<'a> {
                 todo!("Prompt/Slice operations in batch lowerer");
             }
 
-            Inst::Safepoint(live) => {
+            Inst::Safepoint(_live) => {
                 if let Some(handler) = self.safepoint_handler {
-                    // Spill callee-saved register values to a SEPARATE safepoint area
-                    // (not the prologue/epilogue save area) so the GC can find them
-                    // without corrupting the caller's saved register values.
-                    let sp_base = self.safepoint_callee_save_base;
-                    for (i, &preg) in self.callee_saved_used.iter().enumerate() {
-                        let offset = sp_base + (i as i32) * 8;
-                        Arm64Backend::emit_store_gp(
-                            &mut self.buf, preg_to_machine(preg), machine_gp(29), offset,
-                            MachineWordSize::W64,
-                        );
-                    }
-
-                    // Collect precise root slot offsets for all live values.
-                    // Values live at this safepoint are in:
-                    // - Safepoint callee-saved area (safepoint_callee_save_base + i*8)
-                    // - Spill slots (spill_base_offset + slot*8)
-                    // - Stack slots (via stack_slot_offset)
-                    let mut root_slots: Vec<i32> = Vec::new();
-
-                    // All safepoint callee-saved slots (they contain live register values)
-                    for (i, _) in self.callee_saved_used.iter().enumerate() {
-                        root_slots.push(sp_base + (i as i32) * 8);
-                    }
-
-                    // All spill slots that are in use
-                    for slot_idx in 0..self.alloc.num_spill_slots {
-                        root_slots.push(self.spill_offset(SpillSlot(slot_idx)));
-                    }
-
-                    // All stack slots (local variables)
-                    // Compute offsets inline since we can't construct StackSlot from outside dynir
-                    let spill_bytes = self.alloc.num_spill_slots * 8;
-                    let mut ss_offset = self.spill_base_offset + spill_bytes as i32;
-                    for ss in &self.func.stack_slots {
-                        root_slots.push(ss_offset);
-                        ss_offset += ss.size as i32;
-                    }
+                    // Precise root slots: the regalloc has already spilled
+                    // every live vreg to a slot for us (via
+                    // `SafepointAction::SpillAndRecord`) and recorded the
+                    // mapping in `alloc.stackmaps[inst_id]`. We just emit
+                    // the spill-slot frame offsets — no spilling of
+                    // callee-saved register banks, no walking of all spill
+                    // slots, no walking of all stack slots. Only what's
+                    // actually live.
+                    let root_slots = self.collect_live_root_slots(inst_id);
 
                     let safepoint_index = self.safepoints.len();
                     let code_offset = self.buf.current_offset();
@@ -1012,15 +1072,6 @@ impl<'a> BatchEmitter<'a> {
                         return_offset,
                         root_slots,
                     });
-
-                    // After GC, reload callee-saved registers (GC may have updated pointers)
-                    for (i, &preg) in self.callee_saved_used.iter().enumerate() {
-                        let offset = sp_base + (i as i32) * 8;
-                        Arm64Backend::emit_load_gp(
-                            &mut self.buf, preg_to_machine(preg), machine_gp(29), offset,
-                            MachineWordSize::W64,
-                        );
-                    }
                 }
             }
         }

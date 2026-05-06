@@ -4953,18 +4953,56 @@ where
     }
 
     fn collect_live_root_slots(&mut self, live: &[Value]) -> Vec<i32> {
-        let mut root_slots: Vec<i32> = live
-            .iter()
-            .filter_map(|&v| match Cfg::RootTransport::kind() {
-                RootTransportKind::FrameScan | RootTransportKind::StackMap => {
-                    self.regs.value_spill_slot(v)
-                }
-                RootTransportKind::ShadowStack => {
+        // Record the spill slot of every value the regalloc currently
+        // considers live (use-def precise: `remaining_uses > 0`) AND
+        // whose IR type is heap-pointer-eligible (`GcPtr`/`FrameSlice`
+        // or `I64`-which-may-be-NaN-boxed). Skip pure scalars (`F64`,
+        // `I8`/`I32`, raw `Ptr`) — recording their bits as candidate
+        // roots is wasteful and risks `PtrPolicy` false-positives.
+        //
+        // The frontend-supplied `live` annotation is unioned in: it's
+        // the root-of-truth for `ShadowStack` transport (which uses
+        // shadow slots, not regalloc spill slots), and a safety net
+        // for `StackMap`/`FrameScan` if the value's home isn't yet a
+        // spill slot (e.g. still in a register the regalloc hasn't
+        // materialized).
+        //
+        // This mirrors `record_call_return_safepoint` so the explicit
+        // safepoint and the post-call safepoint record the same precise
+        // live set, eliminating "frontend forgot to enumerate a root"
+        // bugs (e.g. dynlang's IC slow-path safepoint where `obj` was a
+        // regalloc Value with no `is_gc_root` stack slot).
+        let value_types = &self.func.value_types;
+        let is_root_eligible = |v: Value| {
+            let ty = value_types[v.index()];
+            ty.is_gc() || matches!(ty, Type::I64)
+        };
+        let mut root_slots: Vec<i32> = match Cfg::RootTransport::kind() {
+            RootTransportKind::FrameScan | RootTransportKind::StackMap => {
+                (0..self.regs.num_values())
+                    .filter_map(|i| {
+                        let v = Value::from_index(i);
+                        if self.regs.remaining_uses(v) == 0 || !is_root_eligible(v) {
+                            return None;
+                        }
+                        self.regs.value_spill_slot(v)
+                    })
+                    .chain(
+                        live.iter()
+                            .filter(|&&v| is_root_eligible(v))
+                            .filter_map(|&v| self.regs.value_spill_slot(v)),
+                    )
+                    .collect()
+            }
+            RootTransportKind::ShadowStack => live
+                .iter()
+                .filter(|&&v| is_root_eligible(v))
+                .filter_map(|&v| {
                     self.ensure_shadow_value_materialized(v);
                     self.root_transport.shadow_slots_by_value[v.index()]
-                }
-            })
-            .collect();
+                })
+                .collect(),
+        };
         root_slots.extend(
             self.func
                 .stack_slots
@@ -5000,16 +5038,25 @@ where
         let return_offset = self.buf.current_offset();
         let code_offset = return_offset;
 
-        // Every still-live regalloc value whose home is a spill slot
+        // Every still-live regalloc value whose IR type is heap-pointer-
+        // eligible (`GcPtr`/`FrameSlice` or `I64`-which-may-be-NaN-boxed)
         // plus every user-declared `is_gc_root = true` stack slot.
         // `spill_caller_saved` before the BLR has already flushed live
-        // values into their spill slots, so reading the spill slot is
-        // guaranteed to see a live heap reference (or a non-pointer
-        // payload that `PtrPolicy` will filter).
+        // values into their spill slots, so reading the slot is guaranteed
+        // to see a live heap reference (or a tagged-non-pointer payload
+        // that `PtrPolicy` will filter at scan time). Pure scalars
+        // (`F64`, `I8`/`I32`, raw `Ptr`) are skipped — they can't be
+        // heap pointers, so recording their bits is wasteful and risks
+        // `PtrPolicy` false-positives.
+        let value_types = &self.func.value_types;
         let mut root_slots: Vec<i32> = (0..self.regs.num_values())
             .filter_map(|i| {
                 let v = Value::from_index(i);
                 if self.regs.remaining_uses(v) == 0 {
+                    return None;
+                }
+                let ty = value_types[v.index()];
+                if !(ty.is_gc() || matches!(ty, Type::I64)) {
                     return None;
                 }
                 self.regs.value_spill_slot(v)
