@@ -16,14 +16,7 @@ pub use cont_ops::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RootPrecision {
-    PreciseSlots,
-    ConservativeWords,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RootTransportKind {
-    FrameScan,
     ShadowStack,
     StackMap,
 }
@@ -426,8 +419,6 @@ impl InterpFrameStore for VecFrameStore {
 
 pub trait ValueLayout: TagScheme {
     const NAME: &'static str;
-
-    fn root_precision_hint() -> RootPrecision;
 }
 
 pub trait LayoutConfigDefaults: ValueLayout {
@@ -438,23 +429,8 @@ pub trait LayoutConfigDefaults: ValueLayout {
 pub trait RootStrategy<L: ValueLayout> {
     const NAME: &'static str;
 
-    fn precision() -> RootPrecision;
-
-    fn supports_layout() -> bool {
-        match (Self::precision(), L::root_precision_hint()) {
-            (RootPrecision::PreciseSlots, RootPrecision::ConservativeWords) => false,
-            _ => true,
-        }
-    }
-
     fn validate() -> Result<(), ConfigError> {
-        if Self::supports_layout() {
-            Ok(())
-        } else {
-            Err(ConfigError {
-                message: "root strategy is incompatible with value layout",
-            })
-        }
+        Ok(())
     }
 }
 
@@ -462,10 +438,6 @@ pub trait RootTransport<L: ValueLayout, R: RootStrategy<L>> {
     const NAME: &'static str;
 
     fn kind() -> RootTransportKind;
-
-    fn requires_frame_roots() -> bool {
-        matches!(Self::kind(), RootTransportKind::FrameScan)
-    }
 
     fn requires_shadow_slots() -> bool {
         matches!(Self::kind(), RootTransportKind::ShadowStack)
@@ -477,11 +449,6 @@ pub trait RootTransport<L: ValueLayout, R: RootStrategy<L>> {
 
     fn validate_frame<F: FrameStrategy<L, R, C>, C: CallingConvention<L>>()
     -> Result<(), ConfigError> {
-        if Self::requires_frame_roots() && !F::exposes_slot_class(SlotClass::Root) {
-            return Err(ConfigError {
-                message: "root transport requires frame-visible root slots",
-            });
-        }
         if Self::requires_shadow_slots() && !F::supports_shadow_roots() {
             return Err(ConfigError {
                 message: "root transport requires shadow-root frame support",
@@ -695,10 +662,7 @@ pub trait SafepointStrategy<
     const NAME: &'static str;
 
     fn validates_frame() -> bool {
-        if T::requires_frame_roots() {
-            F::exposes_slot_class(SlotClass::Root)
-                || R::precision() == RootPrecision::ConservativeWords
-        } else if T::requires_shadow_slots() {
+        if T::requires_shadow_slots() {
             F::supports_shadow_roots()
         } else if T::emits_stack_maps() {
             F::supports_stack_maps()
@@ -734,40 +698,16 @@ mod sound {
 pub trait SoundRoots<L: ValueLayout>: RootStrategy<L> + sound::Sealed {}
 
 /// Marker trait: `Self` is a sound root transport for `(L, R)`.
-///
-/// Sound means the transport reports *only* slots that are live at
-/// the current safepoint — `FrameScanRoots` is intentionally not sound
-/// under a moving collector because it scans every root slot ever
-/// allocated in the frame, including stale spill slots left by dead
-/// values.
 pub trait SoundTransport<L: ValueLayout, R: RootStrategy<L>>:
     RootTransport<L, R> + sound::Sealed {}
 
 impl sound::Sealed for PreciseStackRoots {}
-impl sound::Sealed for ConservativeWordRoots {}
 impl sound::Sealed for StackMapRoots {}
 impl sound::Sealed for ShadowStackRoots {}
-impl sound::Sealed for FrameScanRoots {}
 
-// Which `RootStrategy` is sound for which layout.
-//
-// `PreciseStackRoots` requires that the lowerer mark every slot that can
-// hold a GC reference with `is_gc_root = true` — true for all layouts
-// the library supports today.
 impl<const TAG_BITS: u32> SoundRoots<LowBit<TAG_BITS>> for PreciseStackRoots {}
 impl SoundRoots<NanBox> for PreciseStackRoots {}
 
-// `ConservativeWordRoots` scans every word in the root-slot region.
-// For `LowBit` that's fine (tag bits reliably distinguish pointers).
-// For `NanBox` stale bits can masquerade as `0x7FFE…` pointer-tags,
-// which is precisely how the n=21 livelock happens — so it is *not*
-// sound here.
-impl<const TAG_BITS: u32> SoundRoots<LowBit<TAG_BITS>> for ConservativeWordRoots {}
-
-// Which `RootTransport` is sound for which `(L, R)`.
-//
-// `StackMapRoots` and `ShadowStackRoots` record live-slot sets per
-// safepoint — precise in both time and space. Sound everywhere.
 impl<L, R> SoundTransport<L, R> for StackMapRoots
 where
     L: ValueLayout,
@@ -778,15 +718,6 @@ impl<L, R> SoundTransport<L, R> for ShadowStackRoots
 where
     L: ValueLayout,
     R: RootStrategy<L> + SoundRoots<L>,
-{
-}
-
-// `FrameScanRoots` scans the entire root-slot region at each safepoint.
-// Sound for `LowBit` (tagged pointers rarely collide with residue) but
-// unsafe under `NanBox` — stale spill slots become phantom roots.
-impl<const TAG_BITS: u32, R> SoundTransport<LowBit<TAG_BITS>, R> for FrameScanRoots
-where
-    R: RootStrategy<LowBit<TAG_BITS>> + SoundRoots<LowBit<TAG_BITS>>,
 {
 }
 
@@ -825,20 +756,6 @@ pub struct PreciseStackRoots;
 
 impl<L: ValueLayout> RootStrategy<L> for PreciseStackRoots {
     const NAME: &'static str = "precise-stack-roots";
-
-    fn precision() -> RootPrecision {
-        RootPrecision::PreciseSlots
-    }
-}
-
-pub struct ConservativeWordRoots;
-
-impl<L: ValueLayout> RootStrategy<L> for ConservativeWordRoots {
-    const NAME: &'static str = "conservative-word-roots";
-
-    fn precision() -> RootPrecision {
-        RootPrecision::ConservativeWords
-    }
 }
 
 pub struct AArch64InternalCc;
@@ -937,16 +854,6 @@ impl<L: ValueLayout, R: RootStrategy<L>, C: CallingConvention<L>> FrameStrategy<
 
     fn supports_stack_maps() -> bool {
         true
-    }
-}
-
-pub struct FrameScanRoots;
-
-impl<L: ValueLayout, R: RootStrategy<L>> RootTransport<L, R> for FrameScanRoots {
-    const NAME: &'static str = "frame-scan-roots";
-
-    fn kind() -> RootTransportKind {
-        RootTransportKind::FrameScan
     }
 }
 
@@ -1052,33 +959,17 @@ pub fn validate_codegen_config<C: CodegenConfig>() -> Result<(), ConfigError> {
 
 impl<const TAG_BITS: u32> ValueLayout for LowBit<TAG_BITS> {
     const NAME: &'static str = "low-bit";
-
-    fn root_precision_hint() -> RootPrecision {
-        RootPrecision::PreciseSlots
-    }
 }
 
 impl<const TAG_BITS: u32> LayoutConfigDefaults for LowBit<TAG_BITS> {
     type DefaultRoots = PreciseStackRoots;
-    type DefaultRootTransport = FrameScanRoots;
+    type DefaultRootTransport = StackMapRoots;
 }
 
 impl ValueLayout for NanBox {
     const NAME: &'static str = "nan-box";
-
-    fn root_precision_hint() -> RootPrecision {
-        // NanBox values are stored in ordinary u64 slots. Precise root maps are
-        // still sound because the GC's PtrPolicy filters non-pointer payloads.
-        RootPrecision::PreciseSlots
-    }
 }
 
-// The historical `NanBox` defaults (`ConservativeWordRoots` +
-// `FrameScanRoots`) were unsound — stale spill slots retain the whole
-// heap under a moving GC (see binary_trees n=21 livelock). We keep the
-// impl but point it at the *sound* pairing, and the `SoundRoots` /
-// `SoundTransport` bounds on `CodegenConfig` enforce that any other
-// combination would fail to typecheck.
 impl LayoutConfigDefaults for NanBox {
     type DefaultRoots = PreciseStackRoots;
     type DefaultRootTransport = StackMapRoots;
@@ -1096,34 +987,8 @@ mod tests {
         _assert_sound::<NanBoxConfig>();
     }
 
-    // Negative combinations on `DefaultCodegenConfig` are enforced by the
-    // `SoundRoots` / `SoundTransport` type bounds — see the `compile_fail`
-    // docs on `NanBoxConfig`. We can't construct those configs from Rust
-    // because they fail to compile. The runtime tests below exercise the
-    // `validate_codegen_config` path on hand-built configs that bypass
-    // the soundness bounds.
-
-    struct InvalidStackMapSafepointConfig;
-    impl CodegenConfig for InvalidStackMapSafepointConfig {
-        type Layout = LowBit<3>;
-        type Roots = PreciseStackRoots;
-        type RootTransport = FrameScanRoots;
-        type CallingConvention = AArch64InternalCc;
-        type Frames = StackSlotFrames;
-        type Safepoints = StackMapSafepoints;
-    }
-
     #[test]
     fn nan_box_default_config_is_valid() {
         assert!(validate_codegen_config::<DefaultCodegenConfig<NanBox>>().is_ok());
-    }
-
-    #[test]
-    fn stack_map_safepoints_require_stack_map_transport() {
-        let err = validate_codegen_config::<InvalidStackMapSafepointConfig>().unwrap_err();
-        assert_eq!(
-            err.message,
-            "stack-map safepoints require stack-map root transport"
-        );
     }
 }

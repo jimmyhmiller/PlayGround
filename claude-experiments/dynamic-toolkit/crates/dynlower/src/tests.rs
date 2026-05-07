@@ -4,8 +4,8 @@ use crate::{
     SafepointHandlerPayloadKind, call_jit, call_jit_with_reg_limit,
 };
 use dynexec::{
-    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, CodegenConfig, ConservativeWordRoots,
-    FrameLayout, FrameScanRoots, FrameStrategy, PreciseStackRoots, ShadowStackFrames,
+    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, CodegenConfig,
+    FrameLayout, FrameStrategy, PreciseStackRoots, ShadowStackFrames,
     ShadowStackRoots, StackFrameLayout, StackMapFrames, StackMapRoots, StackMapSafepoints,
     StackSlotFrames, X64SysVCAbi,
 };
@@ -294,39 +294,20 @@ type TestCAbiCc = X64SysVCAbi;
 impl CodegenConfig for TestInternalConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
-    type RootTransport = FrameScanRoots;
+    type RootTransport = StackMapRoots;
     type CallingConvention = TestInternalCc;
-    type Frames = StackSlotFrames;
-    type Safepoints = CallbackSafepoints;
+    type Frames = StackMapFrames;
+    type Safepoints = StackMapSafepoints;
 }
 
 struct TestCAbiConfig;
 impl CodegenConfig for TestCAbiConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
-    type RootTransport = FrameScanRoots;
+    type RootTransport = ShadowStackRoots;
     type CallingConvention = TestCAbiCc;
     type Frames = ShadowStackFrames;
     type Safepoints = CallbackSafepoints;
-}
-
-// `InvalidNanBoxConfig` and the old `TestNanBoxConfig` (PreciseStackRoots +
-// FrameScanRoots, and ConservativeWordRoots + FrameScanRoots respectively)
-// used to live here. Both are now rejected at the type level by the
-// `SoundRoots` / `SoundTransport` bounds on `CodegenConfig` — attempting
-// to declare them fails to compile, which is the guarantee we want.
-//
-// The corresponding positive test is the one on `NanBoxConfig` itself
-// (in `dynexec::tests`), plus beagle's production use of it.
-
-struct TestNanBoxConfig;
-impl CodegenConfig for TestNanBoxConfig {
-    type Layout = NanBox;
-    type Roots = PreciseStackRoots;
-    type RootTransport = StackMapRoots;
-    type CallingConvention = AArch64InternalCc;
-    type Frames = StackMapFrames;
-    type Safepoints = StackMapSafepoints;
 }
 
 struct TestStackMapConfig;
@@ -408,6 +389,10 @@ where
     fn new_layout(block_count: usize) -> Self::Layout {
         WrappedFrameLayout(StackFrameLayout::new(block_count))
     }
+
+    fn supports_stack_maps() -> bool {
+        true
+    }
 }
 
 struct TestWrappedFrameConfig;
@@ -415,10 +400,10 @@ struct TestWrappedFrameConfig;
 impl CodegenConfig for TestWrappedFrameConfig {
     type Layout = LowBit<3>;
     type Roots = PreciseStackRoots;
-    type RootTransport = FrameScanRoots;
+    type RootTransport = StackMapRoots;
     type CallingConvention = TestInternalCc;
     type Frames = WrappedFrameStrategy;
-    type Safepoints = CallbackSafepoints;
+    type Safepoints = StackMapSafepoints;
 }
 
 // ── Phase 1: return_const ──────────────────────────────────────────
@@ -481,15 +466,6 @@ fn compile_with_wrapped_frame_layout() {
     let func = b.build();
     let jit = JitFunction::compile_with_config::<TestWrappedFrameConfig>(&func, &[]);
     assert_eq!(unsafe { call_jit(jit.as_ptr(), &[]) }, 19);
-}
-
-#[test]
-fn compile_with_explicit_nanbox_conservative_config() {
-    let mut b = FunctionBuilder::new("ret11", &[], Some(Type::I64));
-    let v = b.iconst(Type::I64, 11);
-    b.ret(v);
-    let func = b.build();
-    assert_eq!(run_jit_with_config::<TestNanBoxConfig>(&func, &[]), 11);
 }
 
 #[test]

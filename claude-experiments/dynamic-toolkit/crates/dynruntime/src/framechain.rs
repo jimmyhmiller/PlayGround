@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
 
 use dynalloc::{Heap, PtrPolicy};
-use dynexec::{ConservativeWordRoots, PreciseStackRoots, RootTransport, ValueLayout};
+use dynexec::{PreciseStackRoots, RootTransport, ValueLayout};
 use dynir::InterpRootManager;
 use dynobj::{Compact, DynRootFrame, FrameChain, ObjHeader, TypeInfo};
 
@@ -120,46 +120,3 @@ where
     }
 }
 
-impl<P, L, Transport> InterpRootManager<L, ConservativeWordRoots, Transport>
-    for FrameChainRootManager<P>
-where
-    P: PtrPolicy,
-    L: ValueLayout,
-    Transport: RootTransport<L, ConservativeWordRoots>,
-{
-    fn push_frame(&self, gc_slot_count: usize) -> usize {
-        let mut frames = self.frames.borrow_mut();
-        let idx = frames.len();
-        let frame = DynRootFrame::new(gc_slot_count);
-        unsafe {
-            self.chain.push_raw_unguarded(frame.header_ptr());
-        }
-        frames.push(frame);
-        idx
-    }
-
-    fn pop_frame(&self) {
-        unsafe {
-            self.chain.pop_raw();
-        }
-        self.frames.borrow_mut().pop().expect("no frame to pop");
-    }
-
-    fn set_root(&self, frame: usize, slot: usize, value: u64) {
-        self.frames.borrow()[frame].set(slot, value);
-    }
-
-    fn get_root(&self, frame: usize, slot: usize) -> u64 {
-        self.frames.borrow()[frame].get(slot)
-    }
-
-    fn clear_frame(&self, frame: usize) {
-        self.frames.borrow()[frame].clear_all();
-    }
-
-    fn collect(&self) {
-        unsafe {
-            self.heap.collect::<P>(&[&self.chain]);
-        }
-    }
-}

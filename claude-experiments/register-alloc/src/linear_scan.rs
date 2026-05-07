@@ -358,7 +358,7 @@ fn insert_active(state: &mut ClassState, end: u32, idx: usize, preg: PReg) {
 fn build_allocation<F: Function, T: Target>(
     func: &F,
     target: &T,
-    _liveness: &LivenessInfo,
+    liveness: &LivenessInfo,
     alloc_result: &HashMap<VReg, IntervalAlloc>,
     num_spill_slots: u32,
 ) -> Result<Allocation, AllocError> {
@@ -387,6 +387,31 @@ fn build_allocation<F: Function, T: Target>(
     for (&vreg, result) in alloc_result {
         if let IntervalAlloc::Reg(preg) = result {
             preg_owner.insert(*preg, vreg);
+        }
+    }
+
+    // Build vreg → interval (start, end) map so the Remat scratch picker
+    // below can detect when a candidate preg currently holds a vreg whose
+    // live range extends past `pos`. Without this check the allocator
+    // happily reuses any preg not used by the *current* instruction's
+    // operands, even if that preg holds a value that the *next*
+    // instruction expects to read — corrupting the value via the Remat
+    // mov before the next inst sees the stale register.
+    // Live-interval bounds per vreg, used by the Remat scratch picker
+    // below to detect when a candidate preg is currently the home of
+    // *some* vreg whose live range includes the current instruction.
+    let mut vreg_interval: HashMap<VReg, (u32, u32)> = HashMap::new();
+    for interval in &liveness.intervals {
+        vreg_interval.insert(interval.vreg, (interval.start, interval.end));
+    }
+    // Per-preg list of all vregs that have it as their `IntervalAlloc::Reg`
+    // home. A preg is reused across non-overlapping intervals, so this is
+    // a multi-valued map; the Remat picker checks each resident's interval
+    // against the current position rather than assuming a single owner.
+    let mut preg_residents: HashMap<PReg, Vec<VReg>> = HashMap::new();
+    for (&vreg, result) in alloc_result {
+        if let IntervalAlloc::Reg(preg) = result {
+            preg_residents.entry(*preg).or_default().push(vreg);
         }
     }
 
@@ -470,11 +495,49 @@ fn build_allocation<F: Function, T: Target>(
                         let temp_preg = match &operand.constraint {
                             OperandConstraint::FixedReg(preg) => *preg,
                             _ => {
-                                // Pick any non-conflicting register
+                                // Pick a register that is:
+                                //   1. Not used by this instruction's operands
+                                //   2. Not currently holding a vreg that's
+                                //      live across this point
+                                // Without check #2, the Remat mov clobbers
+                                // a preg whose owner is needed at the next
+                                // instruction.
                                 let available = target.allocatable_regs(class);
-                                *available.iter()
-                                    .find(|r| !operand_pregs.contains(r))
-                                    .unwrap_or(&available[0])
+                                let pos = liveness.inst_position[&inst];
+                                let pick = available.iter().find(|r| {
+                                    if operand_pregs.contains(r) {
+                                        return false;
+                                    }
+                                    // Skip pregs that *any* vreg-mapped-to-this-preg
+                                    // is live across right now. A preg can be the
+                                    // home of several vregs over the function's
+                                    // lifetime — we just need one of them to be
+                                    // live at `pos` for the Remat write to clobber
+                                    // a value the next instruction will read.
+                                    if let Some(residents) = preg_residents.get(r) {
+                                        for &resident in residents {
+                                            if resident == vreg {
+                                                continue;
+                                            }
+                                            if let Some(&(start, end)) =
+                                                vreg_interval.get(&resident)
+                                            {
+                                                if pos >= start && pos <= end {
+                                                    return false;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    true
+                                });
+                                *pick.unwrap_or_else(|| {
+                                    // Fall back to the original (bad) heuristic
+                                    // if nothing else fits — the allocator
+                                    // didn't reserve enough scratch room.
+                                    available.iter()
+                                        .find(|r| !operand_pregs.contains(r))
+                                        .unwrap_or(&available[0])
+                                })
                             }
                         };
                         op_assignments[op_idx] = Some(temp_preg);
@@ -739,6 +802,17 @@ fn build_stackmaps<F: Function>(
             for interval in &liveness.intervals {
                 // Is this vreg live at this instruction?
                 if pos < interval.start || pos > interval.end {
+                    continue;
+                }
+                // A vreg whose only event at `pos` is a def (and no use) is
+                // *not* live "across" the safepoint — its value doesn't exist
+                // before the inst, and the result lands after. Spilling it
+                // before is meaningless (the spill captures whatever happened
+                // to be in the register), and reloading after would overwrite
+                // the just-defined value. Skip these.
+                let defined_here = interval.def_points.iter().any(|&p| p == pos);
+                let used_here = interval.use_points.iter().any(|&p| p == pos);
+                if defined_here && !used_here && interval.start == pos {
                     continue;
                 }
 

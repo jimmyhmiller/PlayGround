@@ -25,7 +25,7 @@ use dynalloc::{Alloc, PtrPolicy, SemiSpace};
 use dynobj::{ObjHeader, RootSource, TypeInfo};
 use dynexec::{
     capture_continuation, read_continuation, CapturedStackBuilder, ContinuationContext,
-    ContinuationTypes, ContinuationView, RootPrecision, RootStrategy, RootTransport,
+    ContinuationTypes, ContinuationView, RootStrategy, RootTransport,
     ValueLayout,
 };
 
@@ -292,9 +292,6 @@ where
         // SAFETY: delegated from the caller who guarantees the source
         // outlives all collect() calls.
         unsafe { self.register_extra_roots(source) }
-    }
-    fn root_precision(&self) -> RootPrecision {
-        RootPrecision::PreciseSlots
     }
 }
 

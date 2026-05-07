@@ -76,7 +76,6 @@ pub trait JitRootTransportRuntime {
     );
 }
 
-pub struct FrameScanJitTransport;
 pub struct StackMapJitTransport;
 pub struct ShadowStackJitTransport;
 
@@ -728,26 +727,6 @@ fn execute_outcome(
     })
 }
 
-impl JitRootTransportRuntime for FrameScanJitTransport {
-    fn payload_kind(&self) -> SafepointHandlerPayloadKind {
-        SafepointHandlerPayloadKind::FrameSize
-    }
-
-    unsafe fn scan_roots(
-        &self,
-        frame_ptr: *mut u8,
-        payload: usize,
-        _safepoints: &[SafepointRecord],
-        visitor: &mut dyn FnMut(*mut u64),
-    ) {
-        let root_source = FrameWordRootSource {
-            frame_ptr,
-            frame_size: payload,
-        };
-        root_source.scan_roots(visitor);
-    }
-}
-
 impl JitRootTransportRuntime for StackMapJitTransport {
     fn payload_kind(&self) -> SafepointHandlerPayloadKind {
         SafepointHandlerPayloadKind::SafepointIndex
@@ -791,21 +770,6 @@ impl JitRootTransportRuntime for ShadowStackJitTransport {
             slot_offsets: &record.root_slots,
         };
         root_source.scan_roots(visitor);
-    }
-}
-
-struct FrameWordRootSource {
-    frame_ptr: *mut u8,
-    frame_size: usize,
-}
-
-impl RootSource for FrameWordRootSource {
-    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
-        let word_count = self.frame_size / 8;
-        for idx in 0..word_count {
-            let slot = unsafe { self.frame_ptr.add(idx * 8).cast::<u64>() };
-            visitor(slot);
-        }
     }
 }
 
@@ -1124,24 +1088,6 @@ mod tests {
     #[cfg(target_arch = "aarch64")]
     unsafe extern "C" {
         fn dynruntime_test_throw_exception_stub();
-    }
-
-    #[test]
-    fn frame_scan_transport_scans_full_frame_words() {
-        let mut frame = [0u64; 4];
-        frame[1] = 11;
-        frame[2] = 22;
-
-        let mut seen = Vec::new();
-        unsafe {
-            FrameScanJitTransport.scan_roots(
-                frame.as_mut_ptr().cast::<u8>(),
-                frame.len() * 8,
-                &[],
-                &mut |slot| seen.push(*slot),
-            );
-        }
-        assert_eq!(seen, vec![0, 11, 22, 0]);
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::marker::PhantomData;
 
 use dynalloc::{Heap, Mutator, PtrPolicy, Root, RootScope};
-use dynexec::{ConservativeWordRoots, PreciseStackRoots, RootTransport, ValueLayout};
+use dynexec::{PreciseStackRoots, RootTransport, ValueLayout};
 use dynir::InterpRootManager;
 use dynobj::{Compact, ObjHeader, TypeInfo};
 
@@ -151,61 +151,3 @@ where
     }
 }
 
-impl<P, L, Transport> InterpRootManager<L, ConservativeWordRoots, Transport> for MutatorRootManager<P>
-where
-    P: PtrPolicy,
-    L: ValueLayout,
-    Transport: RootTransport<L, ConservativeWordRoots>,
-{
-    fn push_frame(&self, gc_slot_count: usize) -> usize {
-        let mut mutator = self.mutator.borrow_mut();
-        let scope = mutator.save();
-        let roots: Vec<Root> = (0..gc_slot_count).map(|_| mutator.root(0)).collect();
-        let mut scopes = self.frame_scopes.borrow_mut();
-        let idx = scopes.len();
-        scopes.push(MutatorFrameScope { scope, roots });
-        idx
-    }
-
-    fn pop_frame(&self) {
-        let frame_scope = self
-            .frame_scopes
-            .borrow_mut()
-            .pop()
-            .expect("no frame to pop");
-        self.mutator.borrow_mut().restore(frame_scope.scope);
-    }
-
-    fn set_root(&self, frame: usize, slot: usize, value: u64) {
-        let scopes = self.frame_scopes.borrow();
-        let root = &scopes[frame].roots[slot];
-        self.mutator.borrow().set(root, value);
-    }
-
-    fn get_root(&self, frame: usize, slot: usize) -> u64 {
-        let scopes = self.frame_scopes.borrow();
-        let root = &scopes[frame].roots[slot];
-        self.mutator.borrow().get(root).bits()
-    }
-
-    fn clear_frame(&self, frame: usize) {
-        let scopes = self.frame_scopes.borrow();
-        let mutator = self.mutator.borrow();
-        for root in &scopes[frame].roots {
-            mutator.set(root, 0);
-        }
-    }
-
-    fn collect(&self) {
-        if !self
-            .gc_policy
-            .should_collect(self.heap.from_used(), self.heap.space_size())
-        {
-            return;
-        }
-        let mutator = self.mutator.borrow();
-        unsafe {
-            self.heap.collect::<P>(&[&*mutator]);
-        }
-    }
-}

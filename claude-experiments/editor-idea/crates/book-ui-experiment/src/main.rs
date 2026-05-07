@@ -145,6 +145,11 @@ use ttf_parser::{Face, GlyphId, OutlineBuilder};
 
 // World-unit dimensions of the paper.
 const PAPER_W: f32 = 16.0;
+/// World-space extent that the roughness map covers along x and y.
+/// Wider than any paper currently in the scene (18 in the Create
+/// Account scene) so the roughness map always has the whole stack
+/// inside its [0,1] UV range with margin to spare.
+const SCENE_UV_EXTENT: f32 = 24.0;
 const PAPER_H: f32 = 16.0;
 const N_LAYERS: u16 = 32;
 const DEFAULT_PAPER_THICKNESS: f32 = 0.018;
@@ -152,7 +157,6 @@ const DEFAULT_PAPER_THICKNESS: f32 = 0.018;
 /// successively-eroded carves at this inset gives a chiseled bevel
 /// whose slope is `pyramid_inset / paper_thickness`.
 const DEFAULT_PYRAMID_INSET: f32 = 0.012;
-const DEFAULT_MITER_LIMIT: f32 = 4.0;
 /// How many times the paper texture repeats across the full PAPER_W
 /// span. Smaller = more detail per repeat; larger = finer grain. The
 /// paper texture is fairly uniform so 1.5 keeps obvious tiling out of
@@ -199,11 +203,6 @@ struct PersistedState {
     ambient: f32,
     paper_thickness: f32,
     pyramid_inset: f32,
-    miter_limit: f32,
-    #[serde(default)]
-    chamfer_w_frac: f32,
-    #[serde(default)]
-    chamfer_h_frac: f32,
     brush_radius: f32,
     brush_strength: u16,
     brush_layer_shrink: f32,
@@ -370,14 +369,6 @@ struct PaperStack {
     palette: Vec<Color>,
     paper_thickness: f32,
     pyramid_inset: f32,
-    miter_limit: f32,
-    /// Top-of-wall chamfer width as a fraction of the wall's
-    /// `slope_inset`. 0 = no chamfer; 0.5 = chamfer takes half the
-    /// slope. The chamfer faces up-and-out and catches the key/fill
-    /// light, producing the thin "shine" along every cut edge.
-    chamfer_w_frac: f32,
-    /// Top-of-wall chamfer height as a fraction of `paper_thickness`.
-    chamfer_h_frac: f32,
 }
 
 impl PaperStack {
@@ -392,9 +383,6 @@ impl PaperStack {
             palette,
             paper_thickness: pt,
             pyramid_inset: DEFAULT_PYRAMID_INSET,
-            miter_limit: DEFAULT_MITER_LIMIT,
-            chamfer_w_frac: 0.5,
-            chamfer_h_frac: 0.2,
         }
     }
     fn n_layers(&self) -> u16 {
@@ -464,6 +452,66 @@ struct StackDirty(bool);
 
 #[derive(Component)]
 struct StackMesh;
+
+/// One painted shine — a band of gloss varnish stamped into the
+/// roughness map. The shine appears wherever the underlying cap
+/// (or wall) samples this band: the diffuse and normal map are
+/// unchanged; only the per-pixel roughness drops, so the surface
+/// picks up a specular response in that region while staying matte
+/// elsewhere. No mesh, no separate entity — just texels in a map.
+#[derive(Clone, Debug)]
+struct Highlight {
+    /// Polyline along ONE edge of the band, in world xy. Usually
+    /// placed right on the underlying paper's silhouette so the
+    /// band's outer rail hugs that edge.
+    points: Vec<Vec2>,
+    /// Width of the band in world units, perpendicular to the
+    /// polyline. ~0.04 ≈ 3-4 px at the default camera distance.
+    width: f32,
+    /// +1 = band extends to the LEFT of the walking direction;
+    /// -1 = to the RIGHT. Pick whichever side puts the band ON the
+    /// paper.
+    side: f32,
+    /// 0.0 = no effect (keeps surface matte), 1.0 = mirror-glossy.
+    /// In the roughness map this maps to G = 255*(1-intensity).
+    intensity: f32,
+}
+
+#[derive(Resource, Default)]
+struct Highlights {
+    list: Vec<Highlight>,
+}
+
+#[derive(Resource, Default)]
+struct HighlightsDirty(bool);
+
+/// Handle to the procedural roughness/metallic Image bound to the
+/// stack material's `metallic_roughness_texture`. The G channel of
+/// each pixel scales the surface's perceptual_roughness; we paint
+/// dark zones where the user wants gloss, leaving everything else
+/// at G=255 (matte). The whole scene shares one such map; UV channel
+/// 1 on the stack mesh maps world (x,y) into [0,1] across SCENE_W.
+#[derive(Resource)]
+struct RoughnessMap {
+    handle: Handle<Image>,
+    size: u32,
+}
+
+/// Handle to the StackMesh's StandardMaterial, exposed as a resource
+/// so the debug UI can tweak global params (e.g. reflectance) at
+/// runtime without re-spawning the entity.
+#[derive(Resource)]
+struct StackMaterial(Handle<StandardMaterial>);
+
+/// Bundled highlight-editing params for the debug panel. Counts as
+/// one system param against Bevy's 16-cap.
+#[derive(bevy::ecs::system::SystemParam)]
+struct HighlightUiParams<'w> {
+    highlights: ResMut<'w, Highlights>,
+    dirty: ResMut<'w, HighlightsDirty>,
+    material: Res<'w, StackMaterial>,
+    materials: ResMut<'w, Assets<StandardMaterial>>,
+}
 
 #[derive(Resource)]
 struct LoadedFont(Vec<u8>);
@@ -605,13 +653,6 @@ fn main() {
         if s.pyramid_inset >= 0.0 {
             stack.pyramid_inset = s.pyramid_inset;
         }
-        if s.miter_limit >= 1.0 {
-            stack.miter_limit = s.miter_limit;
-        }
-        if s.version == CURRENT_STATE_VERSION {
-            stack.chamfer_w_frac = s.chamfer_w_frac;
-            stack.chamfer_h_frac = s.chamfer_h_frac;
-        }
         // Only restore the saved palette if the schema version matches
         // — old saves get the new default to avoid dragging stale color
         // schemes forward across redesigns.
@@ -713,6 +754,8 @@ fn main() {
         .insert_resource(HoverPos::default())
         .insert_resource(StrokeLast::default())
         .insert_resource(StackDirty(true))
+        .insert_resource(Highlights::default())
+        .insert_resource(HighlightsDirty(true))
         .insert_resource(LoadedFont(font_data))
         .insert_resource(font_library)
         .insert_resource(icon_atlas)
@@ -737,6 +780,7 @@ fn main() {
                 update_hover,
                 apply_brush_input,
                 regen_stack_mesh,
+                repaint_roughness_map,
                 sync_lights,
                 sync_ambient,
                 sync_camera,
@@ -769,11 +813,75 @@ fn auto_build_create_account_scene(
     font_lib: Res<FontLibrary>,
     icon_atlas: Res<IconAtlas>,
     mut dirty: ResMut<StackDirty>,
+    mut highlights: ResMut<Highlights>,
+    mut hl_dirty: ResMut<HighlightsDirty>,
 ) {
     stack.reset_full();
     carve_create_account_form(&mut stack, &font_lib, &icon_atlas);
     dirty.0 = true;
+
+    // Two example shines: glossy bands stamped into the roughness
+    // map along the top edge of each layer. Polylines hug the
+    // silhouette; the band extends INWARD into the body by `width`.
+    // side = -1 so the perpendicular points into the body (polylines
+    // walk left-to-right; body is RIGHT at the top edge).
+    highlights.list.clear();
+
+    // ---- Card top edge with both rounded corners ----
+    let card_pts = top_edge_with_corners(2.50, 2.50, 0.30, 8);
+    highlights.list.push(Highlight {
+        points: card_pts,
+        width: 0.04,
+        side: -1.0,
+        intensity: 0.9,
+    });
+
+    // ---- Blue floor top edge with both rounded corners ----
+    let blue_pts = top_edge_with_corners(8.50, 8.50, 0.50, 10);
+    highlights.list.push(Highlight {
+        points: blue_pts,
+        width: 0.06,
+        side: -1.0,
+        intensity: 0.9,
+    });
+    hl_dirty.0 = true;
 }
+
+/// Polyline tracing the TOP edge of a rounded rectangle centered at
+/// origin: top-left arc, then straight section, then top-right arc.
+/// `cx_inset = card_w/2 - r`, `cy_inset = card_h/2 - r` are the arc
+/// centers' offsets from origin (the corners of the inner inset
+/// rectangle); `r` is the corner radius. Walked left-to-right so
+/// `side: 1.0` gives the wall's outward (+Y-ish) normal.
+fn top_edge_with_corners(cx_inset: f32, cy_inset: f32, r: f32, arc_steps: usize) -> Vec<Vec2> {
+    let mut pts = Vec::new();
+    let arc = |center: Vec2, t0: f32, t1: f32, n: usize, out: &mut Vec<Vec2>| {
+        for i in 0..=n {
+            let t = t0 + (t1 - t0) * (i as f32 / n as f32);
+            out.push(center + Vec2::new(t.cos(), t.sin()) * r);
+        }
+    };
+    // Top-left corner: from (-cx_inset - r, cy_inset) to (-cx_inset, cy_inset + r).
+    arc(
+        Vec2::new(-cx_inset, cy_inset),
+        std::f32::consts::PI,
+        std::f32::consts::FRAC_PI_2,
+        arc_steps,
+        &mut pts,
+    );
+    // Straight top: from (-cx_inset, cy_inset + r) to (cx_inset, cy_inset + r).
+    pts.push(Vec2::new(cx_inset, cy_inset + r));
+    // Top-right corner: from (cx_inset, cy_inset + r) to (cx_inset + r, cy_inset).
+    arc(
+        Vec2::new(cx_inset, cy_inset),
+        std::f32::consts::FRAC_PI_2,
+        0.0,
+        arc_steps,
+        &mut pts,
+    );
+    pts
+}
+
 
 // ─── Live tuning over a JSON command file ─────────────────────────
 //
@@ -940,9 +1048,6 @@ fn save_state_periodic(
         ambient: light.ambient,
         paper_thickness: stack.paper_thickness,
         pyramid_inset: stack.pyramid_inset,
-        miter_limit: stack.miter_limit,
-        chamfer_w_frac: stack.chamfer_w_frac,
-        chamfer_h_frac: stack.chamfer_h_frac,
         brush_radius: brush.radius,
         brush_strength: brush.strength,
         brush_layer_shrink: brush.layer_shrink,
@@ -1160,23 +1265,65 @@ fn setup(
     // (R, G, B) = (Tx, Ty, Tz) values would warp the tangent vectors.
     let paper_normal = images.add(load_mipped_image(&normal_path, false));
 
+    // Procedural roughness/metallic map. G channel = roughness
+    // (1.0 = matte, 0.0 = mirror); we paint dark bands into G where
+    // we want gloss. R is unused, B is metallic (kept at 0). Filled
+    // with (255, 255, 0, 255) = matte everywhere by default; the
+    // `repaint_roughness_map` system later stamps highlights into it.
+    // ClampToEdge sampler so uv1 outside [0,1] just samples the
+    // border (no wrap → no shine echoing across the scene).
+    let rough_size: u32 = 2048;
+    let mut roughness_image = Image::new_fill(
+        bevy::render::render_resource::Extent3d {
+            width: rough_size,
+            height: rough_size,
+            depth_or_array_layers: 1,
+        },
+        bevy::render::render_resource::TextureDimension::D2,
+        &[255u8, 255, 0, 255],
+        bevy::render::render_resource::TextureFormat::Rgba8Unorm,
+        RenderAssetUsages::default(),
+    );
+    {
+        use bevy::image::{ImageAddressMode, ImageSampler, ImageSamplerDescriptor};
+        let mut desc = ImageSamplerDescriptor::linear();
+        desc.address_mode_u = ImageAddressMode::ClampToEdge;
+        desc.address_mode_v = ImageAddressMode::ClampToEdge;
+        desc.address_mode_w = ImageAddressMode::ClampToEdge;
+        roughness_image.sampler = ImageSampler::Descriptor(desc);
+    }
+    let roughness_handle = images.add(roughness_image);
+
     let stack_mat = materials.add(StandardMaterial {
         base_color: Color::WHITE,
         base_color_texture: Some(paper_diffuse),
         normal_map_texture: Some(paper_normal),
         perceptual_roughness: 1.0,
         metallic: 0.0,
-        reflectance: 0.0,
+        // Bumped from 0.0 — `metallic_roughness_texture` only modulates
+        // roughness/metallic, not reflectance. Reflectance is global,
+        // so we set it high enough that the painted gloss zones get a
+        // meaningful spec contribution. Matte zones (G=1.0) stay
+        // visually matte because their effective roughness is 1.0,
+        // which produces a very wide, dim spec lobe regardless.
+        reflectance: 0.6,
+        metallic_roughness_texture: Some(roughness_handle.clone()),
+        metallic_roughness_channel: bevy::pbr::UvChannel::Uv1,
         ..default()
     });
 
     let mesh_handle = meshes.add(build_stack_mesh(&stack));
     commands.spawn((
         Mesh3d(mesh_handle),
-        MeshMaterial3d(stack_mat),
+        MeshMaterial3d(stack_mat.clone()),
         Transform::IDENTITY,
         StackMesh,
     ));
+    commands.insert_resource(RoughnessMap {
+        handle: roughness_handle,
+        size: rough_size,
+    });
+    commands.insert_resource(StackMaterial(stack_mat));
 }
 
 // ─── Mesh generation ──────────────────────────────────────────────
@@ -1185,11 +1332,11 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut uv1s: Vec<[f32; 2]> = Vec::new();
     let mut colors: Vec<[f32; 4]> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
     let pt = stack.paper_thickness;
-    let miter = stack.miter_limit as f64;
     let n = stack.layers.len();
 
     for i in 0..n {
@@ -1229,6 +1376,7 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
                 &mut positions,
                 &mut normals,
                 &mut uvs,
+                &mut uv1s,
                 &mut colors,
                 &mut indices,
             );
@@ -1247,13 +1395,11 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
                 z_top,
                 z_bot,
                 slope,
-                miter,
-                stack.chamfer_w_frac,
-                stack.chamfer_h_frac,
                 color,
                 &mut positions,
                 &mut normals,
                 &mut uvs,
+                &mut uv1s,
                 &mut colors,
                 &mut indices,
             );
@@ -1263,13 +1409,11 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
                     z_top,
                     z_bot,
                     slope,
-                    miter,
-                    stack.chamfer_w_frac,
-                    stack.chamfer_h_frac,
                     color,
                     &mut positions,
                     &mut normals,
                     &mut uvs,
+                    &mut uv1s,
                     &mut colors,
                     &mut indices,
                 );
@@ -1281,6 +1425,7 @@ fn build_stack_mesh(stack: &PaperStack) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1s);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     // Tangents are required for the normal-map sampling on the
@@ -1297,6 +1442,7 @@ fn tessellate_region(
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
     uvs: &mut Vec<[f32; 2]>,
+    uv1s: &mut Vec<[f32; 2]>,
     colors: &mut Vec<[f32; 4]>,
     indices: &mut Vec<u32>,
 ) {
@@ -1338,6 +1484,7 @@ fn tessellate_region(
             positions.push([v[0], v[1], z]);
             normals.push([0.0, 0.0, 1.0]);
             uvs.push(planar_uv(v[0], v[1]));
+            uv1s.push(roughness_uv(v[0], v[1]));
             colors.push(tinted(color, v[0], v[1]));
         }
         // Lyon emits triangles in y-down convention. When we promote
@@ -1389,13 +1536,11 @@ fn emit_wall_for_ring(
     z_top: f32,
     z_bot: f32,
     slope_inset: f64,
-    miter_limit: f64,
-    chamfer_w_frac: f32,
-    chamfer_h_frac: f32,
     color: [f32; 4],
     positions: &mut Vec<[f32; 3]>,
     normals: &mut Vec<[f32; 3]>,
     uvs: &mut Vec<[f32; 2]>,
+    uv1s: &mut Vec<[f32; 2]>,
     colors: &mut Vec<[f32; 4]>,
     indices: &mut Vec<u32>,
 ) {
@@ -1406,43 +1551,13 @@ fn emit_wall_for_ring(
     }
     let coords = ring_to_coords(ring);
     let pts_bot: Vec<Vec2> = if slope_inset > 1e-9 {
-        miter_offset_right_f64(&coords, slope_inset, miter_limit)
+        miter_offset_right_f64(&coords, slope_inset)
             .iter()
             .map(|c| Vec2::new(c.x as f32, c.y as f32))
             .collect()
     } else {
         pts_top.clone()
     };
-
-    // Top chamfer: a thin up-and-out facing ring inserted between
-    // the cap rim and the wall proper. The wall faces sideways and
-    // sits in shadow under the (mostly downward) lights; the chamfer
-    // tilts upward enough to catch direct light, producing a thin
-    // shine highlight along every cut edge.
-    //
-    // chamfer_w is taken from slope_inset so the chamfer never
-    // overhangs further than the wall already slopes — on vertical
-    // walls (slope_inset == 0) we suppress it entirely, since an
-    // outward-leaning lip would look wrong.
-    // Chamfer dimensions are scaled off the wall *thickness*, not
-    // its slope — the demo scene sets per-layer slope_inset to 0 for
-    // every wall, so basing chamfer_w on slope produced zero chamfer
-    // even at max slider value. With a vertical wall (slope == 0)
-    // the resulting chamfer overhangs the wall slightly, which is
-    // fine: it still reads as a beveled top edge catching light.
-    let pt = (z_top - z_bot).max(0.0);
-    let chamfer_w = pt * chamfer_w_frac;
-    let chamfer_h = pt * chamfer_h_frac;
-    let has_chamfer = chamfer_w > 1e-6 && chamfer_h > 1e-6;
-    let pts_chamfer: Vec<Vec2> = if has_chamfer {
-        miter_offset_right_f64(&coords, chamfer_w as f64, miter_limit)
-            .iter()
-            .map(|c| Vec2::new(c.x as f32, c.y as f32))
-            .collect()
-    } else {
-        pts_top.clone()
-    };
-    let z_chamfer = if has_chamfer { z_top - chamfer_h } else { z_top };
 
     // Cumulative arclength along the top rim, used as the U axis for
     // wall UVs. Without this — i.e. if walls reused the cap's planar
@@ -1464,17 +1579,8 @@ fn emit_wall_for_ring(
         cum_len[i + 1] = cum_len[i] + (pts_top[j] - pts_top[i]).length();
     }
     let u_scale = PAPER_TEX_TILES / PAPER_W;
-    // Per-wall vertical span in UV. 0.15 = ~15% of texture height;
-    // big enough that the wall shows recognizable paper grain but
-    // small enough that it reads as continuous fibers rather than a
-    // distinct second tile. The chamfer takes a small slice at the
-    // top of that span so its texture flows continuously into the
-    // wall below.
     const WALL_V_SPAN: f32 = 0.15;
-    const CHAMFER_V_FRAC: f32 = 0.2;
-    let v_cham_top = 0.0;
-    let v_cham_bot = WALL_V_SPAN * CHAMFER_V_FRAC;
-    let v_top = if has_chamfer { v_cham_bot } else { 0.0 };
+    let v_top = 0.0;
     let v_bot = WALL_V_SPAN;
 
     // Per-quad FLAT normals. Smooth/averaged per-vertex normals
@@ -1483,52 +1589,10 @@ fn emit_wall_for_ring(
     // shadow caster is still faceted, so each segment-vertex
     // produced a tiny shadow discontinuity. Flat shading matches
     // the geometry exactly — uniform shadows per facet.
-
-    // Chamfer ring (when present): one quad per segment, going from
-    // the cap rim down-and-inward to the wall's true top.
-    if has_chamfer {
-        for i in 0..n {
-            let j = (i + 1) % n;
-            let p_top_i = Vec3::new(pts_top[i].x, pts_top[i].y, z_top);
-            let p_top_j = Vec3::new(pts_top[j].x, pts_top[j].y, z_top);
-            let p_cham_i = Vec3::new(pts_chamfer[i].x, pts_chamfer[i].y, z_chamfer);
-            let p_cham_j = Vec3::new(pts_chamfer[j].x, pts_chamfer[j].y, z_chamfer);
-
-            let edge_top = p_top_j - p_top_i;
-            let down = p_cham_i - p_top_i;
-            let n_face = down
-                .cross(edge_top)
-                .try_normalize()
-                .unwrap_or(Vec3::Z);
-            let normal = [n_face.x, n_face.y, n_face.z];
-
-            let u_i = cum_len[i] * u_scale;
-            let u_j = cum_len[i + 1] * u_scale;
-            let cham_uvs = [
-                [u_i, v_cham_top],
-                [u_i, v_cham_bot],
-                [u_j, v_cham_bot],
-                [u_j, v_cham_top],
-            ];
-
-            let base = positions.len() as u32;
-            for (k, v) in [p_top_i, p_cham_i, p_cham_j, p_top_j].iter().enumerate() {
-                positions.push([v.x, v.y, v.z]);
-                normals.push(normal);
-                uvs.push(cham_uvs[k]);
-                colors.push(tinted(color, v.x, v.y));
-            }
-            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
-        }
-    }
-
-    // Main wall: from chamfer-bottom (or cap rim, if no chamfer)
-    // down to z_bot.
-    let pts_wtop = if has_chamfer { &pts_chamfer } else { &pts_top };
     for i in 0..n {
         let j = (i + 1) % n;
-        let p_top_i = Vec3::new(pts_wtop[i].x, pts_wtop[i].y, z_chamfer);
-        let p_top_j = Vec3::new(pts_wtop[j].x, pts_wtop[j].y, z_chamfer);
+        let p_top_i = Vec3::new(pts_top[i].x, pts_top[i].y, z_top);
+        let p_top_j = Vec3::new(pts_top[j].x, pts_top[j].y, z_top);
         let p_bot_i = Vec3::new(pts_bot[i].x, pts_bot[i].y, z_bot);
         let p_bot_j = Vec3::new(pts_bot[j].x, pts_bot[j].y, z_bot);
 
@@ -1554,6 +1618,7 @@ fn emit_wall_for_ring(
             positions.push([v.x, v.y, v.z]);
             normals.push(normal);
             uvs.push(wall_uvs[k]);
+            uv1s.push(roughness_uv(v.x, v.y));
             colors.push(tinted(color, v.x, v.y));
         }
         indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
@@ -1654,6 +1719,16 @@ fn planar_uv(x: f32, y: f32) -> [f32; 2] {
     [
         x * PAPER_TEX_TILES / PAPER_W + 0.5,
         y * PAPER_TEX_TILES / PAPER_H + 0.5,
+    ]
+}
+
+/// Non-tiling UV used by the roughness map (UV channel 1). World
+/// (x, y) maps linearly into [0, 1] across SCENE_UV_EXTENT, with v
+/// flipped so screen-up world (+y) lands at top of texture (v=0).
+fn roughness_uv(x: f32, y: f32) -> [f32; 2] {
+    [
+        x / SCENE_UV_EXTENT + 0.5,
+        0.5 - y / SCENE_UV_EXTENT,
     ]
 }
 
@@ -2076,7 +2151,13 @@ fn translate_polygon(poly: &Polygon<f64>, dx: f64, dy: f64) -> Polygon<f64> {
 
 // ─── Inward miter offset (for glyph erosion per layer) ────────────
 
-fn miter_offset_left_f64(pts: &[Coord<f64>], inset: f64, miter_limit: f64) -> Vec<Coord<f64>> {
+// Cap on how far a miter can extend at sharp inside corners before
+// it's clamped, in multiples of `inset`. The current scenes don't
+// have corners tight enough for this to bite, so a sane fixed value
+// is enough — no reason to expose it as a knob.
+const MITER_LIMIT: f64 = 4.0;
+
+fn miter_offset_left_f64(pts: &[Coord<f64>], inset: f64) -> Vec<Coord<f64>> {
     let n = pts.len();
     if n < 2 {
         return pts.to_vec();
@@ -2098,7 +2179,7 @@ fn miter_offset_left_f64(pts: &[Coord<f64>], inset: f64, miter_limit: f64) -> Ve
         } else {
             n_in
         };
-        let cos_half = (bxn * n_in.0 + byn * n_in.1).max(1.0 / miter_limit.max(1.0));
+        let cos_half = (bxn * n_in.0 + byn * n_in.1).max(1.0 / MITER_LIMIT);
         let miter_len = inset / cos_half;
         out.push(Coord {
             x: curr.x + bxn * miter_len,
@@ -2112,7 +2193,7 @@ fn miter_offset_left_f64(pts: &[Coord<f64>], inset: f64, miter_limit: f64) -> Ve
 /// the walking direction. Used for sloped wall bottoms — for both
 /// CCW exteriors and CW interior holes the wall slopes into the
 /// "void" side, which is to the right of the walking direction.
-fn miter_offset_right_f64(pts: &[Coord<f64>], inset: f64, miter_limit: f64) -> Vec<Coord<f64>> {
+fn miter_offset_right_f64(pts: &[Coord<f64>], inset: f64) -> Vec<Coord<f64>> {
     let n = pts.len();
     if n < 2 {
         return pts.to_vec();
@@ -2135,7 +2216,7 @@ fn miter_offset_right_f64(pts: &[Coord<f64>], inset: f64, miter_limit: f64) -> V
         } else {
             n_in
         };
-        let cos_half = (bxn * n_in.0 + byn * n_in.1).max(1.0 / miter_limit.max(1.0));
+        let cos_half = (bxn * n_in.0 + byn * n_in.1).max(1.0 / MITER_LIMIT);
         let miter_len = inset / cos_half;
         out.push(Coord {
             x: curr.x + bxn * miter_len,
@@ -2157,14 +2238,14 @@ fn norm2_f64(x: f64, y: f64) -> (f64, f64) {
 /// Erode (shrink) every polygon in a MultiPolygon inward by `inset`.
 /// Then union the results back together so the cleanup of any
 /// self-intersections produced by the offset is left to geo.
-fn erode_multipolygon(mp: &MultiPolygon<f64>, inset: f64, miter_limit: f64) -> MultiPolygon<f64> {
+fn erode_multipolygon(mp: &MultiPolygon<f64>, inset: f64) -> MultiPolygon<f64> {
     let mut out = MultiPolygon(vec![]);
     for poly in &mp.0 {
         let ext_pts = ring_to_coords(poly.exterior());
         if ext_pts.len() < 3 {
             continue;
         }
-        let new_ext = miter_offset_left_f64(&ext_pts, inset, miter_limit);
+        let new_ext = miter_offset_left_f64(&ext_pts, inset);
         let new_holes: Vec<LineString<f64>> = poly
             .interiors()
             .iter()
@@ -2177,7 +2258,7 @@ fn erode_multipolygon(mp: &MultiPolygon<f64>, inset: f64, miter_limit: f64) -> M
                 // walking direction (same as exterior). So shrinking
                 // the polygon means offsetting holes LEFT too — this
                 // expands the hole inward into the fill.
-                let new_pts = miter_offset_left_f64(&pts, inset, miter_limit);
+                let new_pts = miter_offset_left_f64(&pts, inset);
                 Some(coords_to_closed_linestring(&new_pts))
             })
             .collect();
@@ -2382,7 +2463,6 @@ fn carve_document(
             current = erode_multipolygon(
                 &current,
                 stack.pyramid_inset as f64,
-                stack.miter_limit as f64,
             );
         }
     }
@@ -2410,7 +2490,6 @@ fn carve_text(stack: &mut PaperStack, font_data: &[u8], text: &str, em_world: f3
             current = erode_multipolygon(
                 &current,
                 stack.pyramid_inset as f64,
-                stack.miter_limit as f64,
             );
         }
     }
@@ -3034,7 +3113,6 @@ fn carve_form(stack: &mut PaperStack, depth: u16, bevel: bool) {
             current = erode_multipolygon(
                 &current,
                 stack.pyramid_inset as f64,
-                stack.miter_limit as f64,
             );
         }
     }
@@ -3235,6 +3313,105 @@ fn regen_stack_mesh(
     if let Some(mesh) = meshes.get_mut(&handle.0) {
         *mesh = build_stack_mesh(&stack);
     }
+    dirty.0 = false;
+}
+
+/// Repaint the roughness map's G channel from the current Highlights.
+/// Resets every pixel to G=255 (matte), then for each Highlight
+/// rasterizes its band into the image at G = 255*(1-intensity).
+/// `images.get_mut(...)` triggers Bevy's asset change detection so the
+/// new texels get re-uploaded to the GPU.
+fn repaint_roughness_map(
+    highlights: Res<Highlights>,
+    mut dirty: ResMut<HighlightsDirty>,
+    mut images: ResMut<Assets<Image>>,
+    map: Res<RoughnessMap>,
+) {
+    if !dirty.0 {
+        return;
+    }
+    let Some(image) = images.get_mut(&map.handle) else { return };
+    let Some(data) = image.data.as_mut() else { return };
+    let size = map.size as usize;
+    let sf = size as f32;
+
+    // Reset to matte. Layout: RGBA8, G = roughness, B = metallic.
+    for px in 0..(size * size) {
+        let i = px * 4;
+        data[i] = 255;
+        data[i + 1] = 255;
+        data[i + 2] = 0;
+        data[i + 3] = 255;
+    }
+
+    let world_to_px = |w: Vec2| -> Vec2 {
+        Vec2::new(
+            (w.x / SCENE_UV_EXTENT + 0.5) * sf,
+            (0.5 - w.y / SCENE_UV_EXTENT) * sf,
+        )
+    };
+    let px_to_world = |p: Vec2| -> Vec2 {
+        Vec2::new(
+            (p.x / sf - 0.5) * SCENE_UV_EXTENT,
+            (0.5 - p.y / sf) * SCENE_UV_EXTENT,
+        )
+    };
+
+    for h in &highlights.list {
+        if h.points.len() < 2 || h.width <= 0.0 || h.intensity <= 0.0 {
+            continue;
+        }
+        let g_val = (255.0 * (1.0 - h.intensity.clamp(0.0, 1.0))) as u8;
+        let side_sign = if h.side >= 0.0 { 1.0 } else { -1.0 };
+
+        for i in 0..(h.points.len() - 1) {
+            let p0 = h.points[i];
+            let p1 = h.points[i + 1];
+            let seg = p1 - p0;
+            let seg_len = seg.length();
+            if seg_len < 1e-6 {
+                continue;
+            }
+            let dir = seg / seg_len;
+            let perp = Vec2::new(-dir.y, dir.x) * side_sign;
+            let outer_p0 = p0 + perp * h.width;
+            let outer_p1 = p1 + perp * h.width;
+
+            // Pixel-space bbox of the band quad (with 1-px margin).
+            let corners_px = [
+                world_to_px(p0),
+                world_to_px(p1),
+                world_to_px(outer_p0),
+                world_to_px(outer_p1),
+            ];
+            let xs = corners_px.iter().map(|p| p.x);
+            let ys = corners_px.iter().map(|p| p.y);
+            let x_lo = xs.clone().fold(f32::INFINITY, f32::min).floor() - 1.0;
+            let x_hi = xs.fold(f32::NEG_INFINITY, f32::max).ceil() + 1.0;
+            let y_lo = ys.clone().fold(f32::INFINITY, f32::min).floor() - 1.0;
+            let y_hi = ys.fold(f32::NEG_INFINITY, f32::max).ceil() + 1.0;
+            let x_lo = (x_lo.max(0.0) as usize).min(size - 1);
+            let x_hi = (x_hi.min(sf - 1.0) as usize).min(size - 1);
+            let y_lo = (y_lo.max(0.0) as usize).min(size - 1);
+            let y_hi = (y_hi.min(sf - 1.0) as usize).min(size - 1);
+
+            for py in y_lo..=y_hi {
+                for px in x_lo..=x_hi {
+                    let pw = px_to_world(Vec2::new(px as f32 + 0.5, py as f32 + 0.5));
+                    let rel = pw - p0;
+                    let t = rel.dot(dir);
+                    let u = rel.dot(perp);
+                    if t >= 0.0 && t <= seg_len && u >= 0.0 && u <= h.width {
+                        let idx = (py * size + px) * 4 + 1;
+                        if g_val < data[idx] {
+                            data[idx] = g_val;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     dirty.0 = false;
 }
 
@@ -3594,6 +3771,7 @@ fn debug_panel(
     font_lib: Res<FontLibrary>,
     icon_atlas: Res<IconAtlas>,
     mut debug_view: ResMut<DebugView>,
+    mut hl: HighlightUiParams,
 ) -> Result {
     if !debug.0 {
         return Ok(());
@@ -3746,6 +3924,64 @@ fn debug_panel(
                 });
             });
 
+            ui.collapsing("Highlights (rim shines)", |ui| {
+                // Material params — modify the shared StandardMaterial
+                // directly. Takes effect next frame; no remesh needed.
+                if let Some(mat) = hl.materials.get_mut(&hl.material.0) {
+                    let mut rough = mat.perceptual_roughness;
+                    if ui
+                        .add(egui::Slider::new(&mut rough, 0.05..=1.0).text("roughness"))
+                        .changed()
+                    {
+                        mat.perceptual_roughness = rough;
+                    }
+                    let mut refl = mat.reflectance;
+                    if ui
+                        .add(egui::Slider::new(&mut refl, 0.0..=1.0).text("reflectance"))
+                        .changed()
+                    {
+                        mat.reflectance = refl;
+                    }
+                }
+                ui.separator();
+
+                // Per-highlight tunables. Geometry changes flip the
+                // dirty flag so the mesh rebuilds; color changes do
+                // too (per-vertex colors are baked into the mesh).
+                let n_h = hl.highlights.list.len();
+                for i in 0..n_h {
+                    egui::CollapsingHeader::new(format!("Highlight {i}"))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            let h = &mut hl.highlights.list[i];
+                            let mut width = h.width;
+                            if ui
+                                .add(egui::Slider::new(&mut width, 0.0..=0.3).text("width (band)"))
+                                .changed()
+                            {
+                                h.width = width;
+                                hl.dirty.0 = true;
+                            }
+                            let mut intensity = h.intensity;
+                            if ui
+                                .add(egui::Slider::new(&mut intensity, 0.0..=1.0)
+                                    .text("intensity (gloss)"))
+                                .changed()
+                            {
+                                h.intensity = intensity;
+                                hl.dirty.0 = true;
+                            }
+                            let mut side_pos = h.side >= 0.0;
+                            if ui.checkbox(&mut side_pos, "band extends LEFT of walking dir")
+                                .changed()
+                            {
+                                h.side = if side_pos { 1.0 } else { -1.0 };
+                                hl.dirty.0 = true;
+                            }
+                        });
+                }
+            });
+
             ui.collapsing("Layer geometry", |ui| {
                 if ui
                     .add(
@@ -3760,27 +3996,6 @@ fn debug_panel(
                     .add(
                         egui::Slider::new(&mut stack.pyramid_inset, 0.0..=0.05)
                             .text("pyramid inset (per-layer erosion)"),
-                    )
-                    .changed()
-                {
-                    dirty.0 = true;
-                }
-                ui.add(
-                    egui::Slider::new(&mut stack.miter_limit, 1.0..=8.0).text("miter limit"),
-                );
-                if ui
-                    .add(
-                        egui::Slider::new(&mut stack.chamfer_w_frac, 0.0..=1.0)
-                            .text("chamfer width (× thickness)"),
-                    )
-                    .changed()
-                {
-                    dirty.0 = true;
-                }
-                if ui
-                    .add(
-                        egui::Slider::new(&mut stack.chamfer_h_frac, 0.0..=1.0)
-                            .text("chamfer height (× thickness)"),
                     )
                     .changed()
                 {

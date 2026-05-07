@@ -460,7 +460,6 @@ impl Heap {
     unsafe fn collect_inner<P: PtrPolicy>(&self, extra_roots: &[&dyn RootSource]) {
         // Phase 1: scan all roots → copy/forward targets into to-space
 
-        // Global roots
         self.globals.scan_roots(&mut |slot| {
             unsafe { self.process_slot::<P>(slot) };
         });
@@ -476,7 +475,7 @@ impl Heap {
         }
 
         // Extra roots (caller-provided)
-        for source in extra_roots {
+        for source in extra_roots.iter() {
             source.scan_roots(&mut |slot| {
                 unsafe { self.process_slot::<P>(slot) };
             });
@@ -1074,7 +1073,6 @@ impl Heap {
             atomic.load(Ordering::Relaxed)
         };
         if let Some(ptr) = P::try_decode_ptr(bits) {
-            // Skip nursery pointers during major GC — they aren't being collected
             if self.is_nursery(ptr) {
                 return;
             }

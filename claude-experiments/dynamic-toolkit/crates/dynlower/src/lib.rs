@@ -710,12 +710,7 @@ impl JitFunction {
         let max_deopt_live_values = lowerer.max_deopt_live_values;
         let root_scan_size = lowerer.frame.root_scan_size() as usize;
         let code = lowerer.buf.into_code();
-        let handler_payload_kind = match Cfg::RootTransport::kind() {
-            RootTransportKind::FrameScan => SafepointHandlerPayloadKind::FrameSize,
-            RootTransportKind::ShadowStack | RootTransportKind::StackMap => {
-                SafepointHandlerPayloadKind::SafepointIndex
-            }
-        };
+        let handler_payload_kind = SafepointHandlerPayloadKind::SafepointIndex;
 
         let mut memory = PagedCodeMemory::new();
         memory.push(&code);
@@ -1216,12 +1211,7 @@ impl JitModule {
         let mut function_safepoints: Vec<Vec<SafepointRecord>> = Vec::new();
         let mut function_frame_reify_records: Vec<Vec<FrameReifyRecord>> = Vec::new();
         let mut max_deopt_live_values = 0usize;
-        let handler_payload_kind = match Cfg::RootTransport::kind() {
-            RootTransportKind::FrameScan => SafepointHandlerPayloadKind::FrameSize,
-            RootTransportKind::ShadowStack | RootTransportKind::StackMap => {
-                SafepointHandlerPayloadKind::SafepointIndex
-            }
-        };
+        let handler_payload_kind = SafepointHandlerPayloadKind::SafepointIndex;
 
         // All false → no call is control-aware → no suspend/resume overhead
         let direct_call_is_internal: Vec<bool> = vec![false; module.func_table.len()];
@@ -1394,6 +1384,7 @@ impl JitModule {
         let mut frame_sizes: Vec<u32> = Vec::new();
         let mut function_safepoints: Vec<Vec<SafepointRecord>> = Vec::new();
 
+        let mut safepoint_index_base: usize = 0;
         for (_func_idx, func) in module.functions.iter().enumerate() {
             let (code, frame_size, safepoints) = compile_function_batch(
                 func,
@@ -1406,11 +1397,13 @@ impl JitModule {
                     encode_tagged: L::encode_tagged,
                 },
                 safepoint_handler,
+                safepoint_index_base,
             )
             .unwrap_or_else(|e| panic!("batch compile failed: {e}"));
             let offset = memory.push(&code);
             entry_offsets.push(offset);
             frame_sizes.push(frame_size);
+            safepoint_index_base += safepoints.len();
             function_safepoints.push(safepoints);
         }
 
@@ -1551,12 +1544,7 @@ impl JitModule {
         let mut function_safepoints: Vec<Vec<SafepointRecord>> = Vec::new();
         let mut function_frame_reify_records: Vec<Vec<FrameReifyRecord>> = Vec::new();
         let mut max_deopt_live_values = 0usize;
-        let handler_payload_kind = match Cfg::RootTransport::kind() {
-            RootTransportKind::FrameScan => SafepointHandlerPayloadKind::FrameSize,
-            RootTransportKind::ShadowStack | RootTransportKind::StackMap => {
-                SafepointHandlerPayloadKind::SafepointIndex
-            }
-        };
+        let handler_payload_kind = SafepointHandlerPayloadKind::SafepointIndex;
 
         // Mark internal calls as control-aware per function.
         // A call is control-aware when:
@@ -1702,12 +1690,7 @@ impl JitModule {
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
         let _phantom: PhantomData<(Cfg, B, R)> = PhantomData;
-        let handler_payload_kind = match Cfg::RootTransport::kind() {
-            RootTransportKind::FrameScan => SafepointHandlerPayloadKind::FrameSize,
-            RootTransportKind::ShadowStack | RootTransportKind::StackMap => {
-                SafepointHandlerPayloadKind::SafepointIndex
-            }
-        };
+        let handler_payload_kind = SafepointHandlerPayloadKind::SafepointIndex;
         let safepoint_handler = call_mode.safepoint_handler();
         JitModule {
             memory: PagedCodeMemory::new(),
@@ -4963,9 +4946,8 @@ where
         // The frontend-supplied `live` annotation is unioned in: it's
         // the root-of-truth for `ShadowStack` transport (which uses
         // shadow slots, not regalloc spill slots), and a safety net
-        // for `StackMap`/`FrameScan` if the value's home isn't yet a
-        // spill slot (e.g. still in a register the regalloc hasn't
-        // materialized).
+        // for `StackMap` if the value's home isn't yet a spill slot
+        // (e.g. still in a register the regalloc hasn't materialized).
         //
         // This mirrors `record_call_return_safepoint` so the explicit
         // safepoint and the post-call safepoint record the same precise
@@ -4978,7 +4960,7 @@ where
             ty.is_gc() || matches!(ty, Type::I64)
         };
         let mut root_slots: Vec<i32> = match Cfg::RootTransport::kind() {
-            RootTransportKind::FrameScan | RootTransportKind::StackMap => {
+            RootTransportKind::StackMap => {
                 (0..self.regs.num_values())
                     .filter_map(|i| {
                         let v = Value::from_index(i);
@@ -5026,15 +5008,7 @@ where
     /// `SoundRoots` / `SoundTransport` contract nothing else in the
     /// frame can contain a heap reference while the callee is running.
     ///
-    /// No-op for `FrameScan` transport, which doesn't consult the
-    /// per-PC records (it scans by `root_scan_size`).
     fn record_call_return_safepoint(&mut self) {
-        if !matches!(
-            Cfg::RootTransport::kind(),
-            RootTransportKind::StackMap | RootTransportKind::ShadowStack,
-        ) {
-            return;
-        }
         let return_offset = self.buf.current_offset();
         let code_offset = return_offset;
 
@@ -5083,15 +5057,6 @@ where
 
     fn emit_safepoint(&mut self, live: &[Value]) {
         match Cfg::RootTransport::kind() {
-            RootTransportKind::FrameScan => {
-                if let Some(handler) = self.safepoint_handler {
-                    self.regs
-                        .spill_all_live::<B>(&mut self.buf, &mut self.frame);
-                    let frame_size = self.frame.root_scan_size() as u64;
-                    B::emit_call_safepoint_handler(&mut self.buf, handler, frame_size);
-                    self.regs.clear_regs();
-                }
-            }
             RootTransportKind::StackMap => {
                 self.regs
                     .spill_all_live::<B>(&mut self.buf, &mut self.frame);

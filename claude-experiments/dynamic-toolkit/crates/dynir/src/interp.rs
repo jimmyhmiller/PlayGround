@@ -4,7 +4,7 @@ use dynexec::{
     BuilderFrame, CapturedStackBuilder, CodegenConfig,
     ContinuationView, DefaultCodegenConfig, FrameCapture, FrameResume,
     FrameRestorable, FrameSliceError, InterpFrameStore,
-    LayoutConfigDefaults, PromptBoundaryAction, RootPrecision, RootStrategy, RootTransport,
+    LayoutConfigDefaults, PromptBoundaryAction, RootStrategy, RootTransport,
     RootTransportKind, ValueLayout,
 };
 use dynvalue::Decoded;
@@ -90,11 +90,6 @@ pub trait InterpRootManager<
     /// `collect()` calls.
     fn register_root_source_raw(&self, _source: *const dyn dynobj::RootSource) {}
 
-    /// How precisely this root manager tracks interpreter frame values.
-    fn root_precision(&self) -> RootPrecision {
-        Roots::precision()
-    }
-
     fn root_transport_kind(&self) -> RootTransportKind {
         Transport::kind()
     }
@@ -119,13 +114,6 @@ where
     }
     fn clear_frame(&self, _frame: usize) {}
     fn collect(&self) {}
-
-    /// NoGcRoots has no actual root storage, so report PreciseSlots to avoid
-    /// mapping all values to root slots. With ConservativeWords, sync_all_from_roots
-    /// would overwrite caller frame values with 0 after internal calls.
-    fn root_precision(&self) -> RootPrecision {
-        RootPrecision::PreciseSlots
-    }
 }
 
 /// `NoGcRoots` also serves as a trivial `ContinuationContext` that
@@ -176,7 +164,6 @@ pub struct InterpStackRuntime<'a, L: ValueLayout, Roots: RootStrategy<L>, Transp
     stack: Vec<InterpFrame>,
     roots: &'a R,
     functions: &'a [Function],
-    root_precision: RootPrecision,
     _phantom: PhantomData<(L, Roots, Transport)>,
 }
 
@@ -186,7 +173,6 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
             stack: Vec::new(),
             roots,
             functions,
-            root_precision: roots.root_precision(),
             _phantom: PhantomData,
         }
     }
@@ -380,7 +366,7 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         self.sync_top_to_roots();
 
         let func = &self.functions[func_idx];
-        let val_to_slot = build_gc_slot_map(func, self.root_precision);
+        let val_to_slot = build_gc_slot_map(func);
         let gc_slots = count_gc_slots_from_map(&val_to_slot);
         let root_frame = self.roots.push_frame(gc_slots);
 
@@ -503,33 +489,22 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
 
     fn safepoint(&mut self, live_indices: &[usize]) {
         let frame = self.stack.last_mut().unwrap();
-        if self.root_precision == RootPrecision::ConservativeWords {
-            // Sync ALL frame values as potential roots (NanBox-style).
-            self.roots.clear_frame(frame.root_frame);
-            for (i, slot_opt) in frame.val_to_slot.iter().enumerate() {
-                if let Some(slot) = slot_opt {
-                    self.roots.set_root(frame.root_frame, *slot, frame.vals[i]);
-                }
+        // Precise: sync exactly the values listed by `Inst::Safepoint`.
+        // The IR-level `augment_safepoint_liveness` pass guarantees the
+        // list contains every live heap-pointer-eligible value at this
+        // point; the runtime `PtrPolicy` filters non-pointer payloads at
+        // scan time but the *set* of candidates is precisely determined
+        // at compile time.
+        self.roots.clear_frame(frame.root_frame);
+        for &idx in live_indices {
+            if let Some(slot) = frame.val_to_slot[idx] {
+                self.roots.set_root(frame.root_frame, slot, frame.vals[idx]);
             }
-            self.roots.collect();
-            for (i, slot_opt) in frame.val_to_slot.iter().enumerate() {
-                if let Some(slot) = slot_opt {
-                    frame.vals[i] = self.roots.get_root(frame.root_frame, *slot);
-                }
-            }
-        } else {
-            // Precise: only sync live GcPtr values
-            self.roots.clear_frame(frame.root_frame);
-            for &idx in live_indices {
-                if let Some(slot) = frame.val_to_slot[idx] {
-                    self.roots.set_root(frame.root_frame, slot, frame.vals[idx]);
-                }
-            }
-            self.roots.collect();
-            for &idx in live_indices {
-                if let Some(slot) = frame.val_to_slot[idx] {
-                    frame.vals[idx] = self.roots.get_root(frame.root_frame, slot);
-                }
+        }
+        self.roots.collect();
+        for &idx in live_indices {
+            if let Some(slot) = frame.val_to_slot[idx] {
+                frame.vals[idx] = self.roots.get_root(frame.root_frame, slot);
             }
         }
     }
@@ -1582,15 +1557,18 @@ fn exec_non_call_inst<S: ValueLayout>(
 // ─── GC root helpers ───────────────────────────────────────────────
 
 /// Build a mapping from SSA value index to GC root slot index.
-fn build_gc_slot_map(func: &Function, precision: RootPrecision) -> Vec<Option<usize>> {
-    if precision == RootPrecision::ConservativeWords {
-        let mut map = vec![None; func.value_types.len()];
-        for i in 0..func.value_types.len() {
-            map[i] = Some(i);
-        }
-        return map;
-    }
-
+///
+/// A vreg gets a slot iff its type is *heap-pointer-eligible* per the
+/// layout's encoding contract — `GcPtr` and `FrameSlice` always, plus
+/// `I64` and `Ptr` for layouts that may carry tagged pointers in those
+/// types (NaN-box / low-bit-tag). The runtime `PtrPolicy` filters
+/// non-pointer payloads at scan time. Values of types that *cannot*
+/// hold pointers (`F64`, `I8`, `I32`) are excluded.
+///
+/// Values produced by integer arithmetic on `GcPtr` are excluded as
+/// "derived" — they're offset pointers, not roots; the original GcPtr
+/// the offset was computed from is the root.
+fn build_gc_slot_map(func: &Function) -> Vec<Option<usize>> {
     let mut derived = vec![false; func.value_types.len()];
     for block in &func.blocks {
         for node in &block.insts {
@@ -1614,7 +1592,9 @@ fn build_gc_slot_map(func: &Function, precision: RootPrecision) -> Vec<Option<us
     let mut map = vec![None; func.value_types.len()];
     let mut slot = 0;
     for (i, ty) in func.value_types.iter().enumerate() {
-        if ty.is_gc() && !derived[i] {
+        let eligible =
+            (ty.is_gc() || matches!(ty, Type::I64 | Type::Ptr)) && !derived[i];
+        if eligible {
             map[i] = Some(slot);
             slot += 1;
         }

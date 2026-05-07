@@ -982,6 +982,201 @@ pub fn dead_block_param_elim(func: &mut Function) {
     }
 }
 
+// ─── Precise Safepoint Liveness ─────────────────────────────────
+//
+// At every `Inst::Safepoint`, the live list must contain *every* SSA
+// value that is alive at that point and may hold a heap pointer
+// according to the layout's encoding contract:
+//
+// - `GcPtr` / `FrameSlice` — definite GC pointers
+// - `I64` / `Ptr`         — may carry a tagged pointer (the runtime
+//                            `PtrPolicy` filters non-pointers at scan
+//                            time, but every live such value MUST be
+//                            in the safepoint set or the GC misses it)
+//
+// `F64` / `I8` / `I32` are excluded — the layout never encodes pointers
+// in those types, so a value of those types at a safepoint cannot be
+// a root.
+//
+// This is precise: liveness is computed at compile time via standard
+// backward dataflow, and every live heap-pointer-eligible value is
+// listed exactly once. Frontends that pass `safepoint(&[])` get the
+// correct live set automatically; frontends that pre-populate the list
+// have it augmented (already-listed values are kept; missing live ones
+// are added).
+
+fn type_is_pointer_eligible(ty: Type) -> bool {
+    ty.is_gc() || matches!(ty, Type::I64 | Type::Ptr)
+}
+
+pub fn augment_safepoint_liveness(func: &mut Function) {
+    let n = func.blocks.len();
+    if n == 0 {
+        return;
+    }
+
+    // Per-block use/def sets restricted to pointer-eligible vregs.
+    // For SSA, "def" of a block includes its block parameters; "use"
+    // is any value referenced before being def'd in the block.
+    let mut block_use: Vec<HashSet<Value>> = vec![HashSet::new(); n];
+    let mut block_def: Vec<HashSet<Value>> = vec![HashSet::new(); n];
+    for (bi, block) in func.blocks.iter().enumerate() {
+        for &(val, ty) in &block.params {
+            if type_is_pointer_eligible(ty) {
+                block_def[bi].insert(val);
+            }
+        }
+        for inst_node in &block.insts {
+            inst_node.inst.for_each_value(|v| {
+                let ty = func.value_type(v);
+                if type_is_pointer_eligible(ty) && !block_def[bi].contains(&v) {
+                    block_use[bi].insert(v);
+                }
+            });
+            if let Some(def) = inst_node.value {
+                let ty = func.value_type(def);
+                if type_is_pointer_eligible(ty) {
+                    block_def[bi].insert(def);
+                }
+            }
+        }
+        block.terminator.for_each_value(|v| {
+            let ty = func.value_type(v);
+            if type_is_pointer_eligible(ty) && !block_def[bi].contains(&v) {
+                block_use[bi].insert(v);
+            }
+        });
+    }
+
+    // Block-edge values flowing into successors' params count as live-out
+    // of the source block (the value is alive across the branch).
+    let edge_outs: Vec<Vec<HashSet<Value>>> = func
+        .blocks
+        .iter()
+        .map(|b| match &b.terminator {
+            Terminator::Jump(_, args) => vec![args
+                .iter()
+                .filter(|v| type_is_pointer_eligible(func.value_type(**v)))
+                .copied()
+                .collect()],
+            Terminator::BrIf {
+                then_args,
+                else_args,
+                ..
+            } => vec![
+                then_args
+                    .iter()
+                    .filter(|v| type_is_pointer_eligible(func.value_type(**v)))
+                    .copied()
+                    .collect(),
+                else_args
+                    .iter()
+                    .filter(|v| type_is_pointer_eligible(func.value_type(**v)))
+                    .copied()
+                    .collect(),
+            ],
+            _ => Vec::new(),
+        })
+        .collect();
+
+    let preds = compute_predecessors(func);
+
+    // Iterate live-in / live-out to fixed point.
+    let mut live_in: Vec<HashSet<Value>> = vec![HashSet::new(); n];
+    let mut live_out: Vec<HashSet<Value>> = vec![HashSet::new(); n];
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for bi in (0..n).rev() {
+            // live_out[b] = union over successors s of (live_in[s] − s.params + edge_args(b→s))
+            let mut new_out = HashSet::new();
+            let term = &func.blocks[bi].terminator;
+            let succs: Vec<BlockId> = term.successors();
+            for (i, succ) in succs.iter().enumerate() {
+                let s = succ.index();
+                // Successor's live-in minus its block params (the params
+                // are defined at successor entry; the corresponding live
+                // values come in via edge args, handled below).
+                let succ_param_set: HashSet<Value> =
+                    func.blocks[s].params.iter().map(|&(v, _)| v).collect();
+                for &v in &live_in[s] {
+                    if !succ_param_set.contains(&v) {
+                        new_out.insert(v);
+                    }
+                }
+                // Add edge args at this branch's i-th successor slot.
+                if let Some(args) = edge_outs[bi].get(i) {
+                    for &v in args {
+                        new_out.insert(v);
+                    }
+                }
+            }
+            if new_out != live_out[bi] {
+                live_out[bi] = new_out;
+                changed = true;
+            }
+            // live_in[b] = use[b] ∪ (live_out[b] − def[b])
+            let mut new_in = block_use[bi].clone();
+            for &v in &live_out[bi] {
+                if !block_def[bi].contains(&v) {
+                    new_in.insert(v);
+                }
+            }
+            if new_in != live_in[bi] {
+                live_in[bi] = new_in;
+                changed = true;
+            }
+        }
+        let _ = &preds; // preds available if needed for non-RPO orderings
+    }
+
+    // Walk each block forward, maintaining the current live set.
+    // Augment each Safepoint's live list with all currently-live
+    // pointer-eligible vregs, deduplicated against what's already there.
+    for bi in 0..n {
+        let mut live: HashSet<Value> = live_out[bi].clone();
+        let term = &func.blocks[bi].terminator;
+        term.for_each_value(|v| {
+            if type_is_pointer_eligible(func.value_type(v)) {
+                live.insert(v);
+            }
+        });
+        // Walk instructions in reverse to compute live-before for each
+        // safepoint, then patch the safepoint's live list. We do this
+        // in two passes (compute backward, then a forward write) to
+        // avoid a borrow-checker tangle: the closure on `for_each_value`
+        // borrows `func`, which we'd then need to mutate.
+        let inst_count = func.blocks[bi].insts.len();
+        let mut live_before: Vec<HashSet<Value>> = vec![HashSet::new(); inst_count];
+        for i in (0..inst_count).rev() {
+            let inst_node = &func.blocks[bi].insts[i];
+            // Live AFTER this inst is `live` (before applying this inst's def/uses).
+            // Live BEFORE this inst = (live AFTER − def) ∪ uses (filtered to eligible).
+            if let Some(def) = inst_node.value {
+                live.remove(&def);
+            }
+            inst_node.inst.for_each_value(|v| {
+                if type_is_pointer_eligible(func.value_type(v)) {
+                    live.insert(v);
+                }
+            });
+            live_before[i] = live.clone();
+        }
+        for i in 0..inst_count {
+            if let Inst::Safepoint(ref mut existing) = func.blocks[bi].insts[i].inst {
+                let mut seen: HashSet<Value> = existing.iter().copied().collect();
+                let mut sorted: Vec<Value> = live_before[i].iter().copied().collect();
+                sorted.sort_by_key(|v| v.index());
+                for v in sorted {
+                    if seen.insert(v) {
+                        existing.push(v);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ─── Dead Code Elimination ──────────────────────────────────────
 
 pub fn dce(func: &mut Function) {
@@ -1621,6 +1816,13 @@ pub fn optimize_with(func: &mut Function, config: &OptConfig) {
             break;
         }
     }
+
+    // Final phase (after all motion / DCE has settled): augment every
+    // safepoint with the precise live set of heap-pointer-eligible
+    // values. The interp/JIT runtime root scan walks exactly this set
+    // — it must be computed *after* any pass that could change
+    // liveness (LICM/DCE/dead-block-params).
+    augment_safepoint_liveness(func);
 }
 
 /// Run all optimization passes to fixpoint.

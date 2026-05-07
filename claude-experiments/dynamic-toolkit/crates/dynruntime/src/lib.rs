@@ -12,7 +12,7 @@ pub use engine::{
 };
 pub use framechain::FrameChainRootManager;
 pub use jit::{
-    FrameScanJitTransport, GcPolicy, JitExecutionResult, JitFrameControl, JitFrameControlError,
+    GcPolicy, JitExecutionResult, JitFrameControl, JitFrameControlError,
     JitFrameSliceRuntime, JitRootTransportRuntime, JitSafepointSession, ScopedJitRoot,
     ScopedJitRoots,
     ResumeWithInterpreterError, ShadowStackJitTransport, StackMapJitTransport,
@@ -24,7 +24,7 @@ pub use jit::{
 };
 pub use ptr_policy::{LowBitPtrPolicy, NanBoxPtrPolicy};
 pub use root_strategies::{
-    FrameChainPreciseRoots, MutatorConservativeRoots, MutatorPreciseRoots,
+    FrameChainPreciseRoots, MutatorPreciseRoots,
 };
 pub use stackmap::MutatorRootManager;
 

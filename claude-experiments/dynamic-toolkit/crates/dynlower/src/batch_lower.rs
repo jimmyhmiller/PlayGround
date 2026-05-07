@@ -91,6 +91,13 @@ pub struct BatchEmitter<'a> {
     instance_class_offset: i32,
     /// Collected safepoint records (precise stack map slots)
     safepoints: Vec<crate::SafepointRecord>,
+    /// Number of safepoint records that precede this function's records in
+    /// the flat global safepoint array passed to the JIT runtime. Inst::
+    /// Safepoint emission uses `base + self.safepoints.len()` as the
+    /// payload so the runtime's index into the flat array points to this
+    /// function's record, not whatever record happens to be at the same
+    /// per-function offset in another function.
+    safepoint_index_base: usize,
 }
 
 impl<'a> BatchEmitter<'a> {
@@ -105,6 +112,7 @@ impl<'a> BatchEmitter<'a> {
         ic_base: u64,
         slow_invoke: u64,
         instance_class_offset: i32,
+        safepoint_index_base: usize,
     ) -> Self {
         let n_blocks = func.blocks.len();
         let mut buf = CodeBuffer::new();
@@ -135,6 +143,7 @@ impl<'a> BatchEmitter<'a> {
             slow_invoke,
             instance_class_offset,
             safepoints: Vec::new(),
+            safepoint_index_base,
         }
     }
 
@@ -696,16 +705,19 @@ impl<'a> BatchEmitter<'a> {
                 }
             }
 
-            Inst::Bitcast(_, _) => {
+            Inst::Bitcast(src_v, _) => {
                 let dst = get_def(&self.alloc);
                 let src = get_use(&self.alloc, 1);
                 let dst_ty = node.value.map(|v| self.func.value_type(v)).unwrap_or(Type::I64);
-                if dst_ty == Type::F64 {
-                    // I64 → F64
-                    Arm64Backend::emit_gp_to_fp_move(&mut self.buf, preg_to_machine(dst), preg_to_machine(src));
-                } else {
-                    // F64 → I64
-                    Arm64Backend::emit_fp_to_gp_move(&mut self.buf, preg_to_machine(dst), preg_to_machine(src));
+                let src_ty = self.func.value_type(*src_v);
+                match (src_ty == Type::F64, dst_ty == Type::F64) {
+                    (false, true) => Arm64Backend::emit_gp_to_fp_move(
+                        &mut self.buf, preg_to_machine(dst), preg_to_machine(src)),
+                    (true, false) => Arm64Backend::emit_fp_to_gp_move(
+                        &mut self.buf, preg_to_machine(dst), preg_to_machine(src)),
+                    // Same register class (GP→GP for I64↔GcPtr↔Ptr, or FP→FP) — just a move.
+                    _ => Arm64Backend::emit_gp_move(
+                        &mut self.buf, preg_to_machine(dst), preg_to_machine(src)),
                 }
             }
 
@@ -1057,7 +1069,10 @@ impl<'a> BatchEmitter<'a> {
                     // actually live.
                     let root_slots = self.collect_live_root_slots(inst_id);
 
-                    let safepoint_index = self.safepoints.len();
+                    // The runtime indexes into the *flat* safepoint array
+                    // (`JitModule::all_safepoints()`), so emit a global
+                    // index, not the per-function one.
+                    let safepoint_index = self.safepoint_index_base + self.safepoints.len();
                     let code_offset = self.buf.current_offset();
 
                     // Call handler: X0 = FP, X1 = safepoint_index
@@ -1174,6 +1189,7 @@ pub fn compile_function_batch(
     call_table_base: u64,
     tags: TagConfig,
     safepoint_handler: Option<u64>,
+    safepoint_index_base: usize,
 ) -> Result<(Vec<u8>, u32, Vec<crate::SafepointRecord>), String> {
     use regalloc::allocator::RegisterAllocator as _;
     use regalloc::linear_scan::LinearScanAllocator;
@@ -1257,6 +1273,7 @@ pub fn compile_function_batch(
     let emitter = BatchEmitter::new(
         func, &adapted, &allocation, externs, call_table_base, tags,
         safepoint_handler, 0, 0, 0, // IC not yet wired — no InvokeDynamic in IR yet
+        safepoint_index_base,
     );
     let (mut buf, frame_size, safepoints) = emitter.emit();
 

@@ -264,37 +264,6 @@ where
     }
 }
 
-impl<L, Transport> InterpRootManager<L, dynexec::ConservativeWordRoots, Transport> for LoxGcRuntime
-where
-    L: ValueLayout,
-    Transport: RootTransport<L, dynexec::ConservativeWordRoots>,
-{
-    fn push_frame(&self, gc_slot_count: usize) -> usize {
-        let mut frames = self.frames.borrow_mut();
-        let idx = frames.len();
-        let frame = DynRootFrame::new(gc_slot_count);
-        unsafe { self.chain.push_raw_unguarded(frame.header_ptr()); }
-        frames.push(frame);
-        idx
-    }
-    fn pop_frame(&self) {
-        unsafe { self.chain.pop_raw(); }
-        self.frames.borrow_mut().pop().expect("no frame to pop");
-    }
-    fn set_root(&self, frame: usize, slot: usize, value: u64) {
-        self.frames.borrow()[frame].set(slot, value);
-    }
-    fn get_root(&self, frame: usize, slot: usize) -> u64 {
-        self.frames.borrow()[frame].get(slot)
-    }
-    fn clear_frame(&self, frame: usize) {
-        self.frames.borrow()[frame].clear_all();
-    }
-    fn collect(&self) {
-        self.do_collect();
-    }
-}
-
 // ── VM struct ────────────────────────────────────────────────────
 
 pub struct VM {
@@ -1606,12 +1575,17 @@ impl VM {
             }
         }
 
-        // Initialize GC runtime with semi-space collector
+        // Initialize GC runtime with semi-space collector.
+        // Heap size is configurable via LOX_HEAP_BYTES (per semi-space) for
+        // GC stress testing — default is 32MB per side (64MB total).
         let type_infos = lowered.gc_types.type_infos.clone();
         self.gc_types = Some(lowered.gc_types);
         self.compile_strings = lowered.strings.clone();
-        // 64MB heap (32MB each semi-space)
-        self.gc_runtime = Some(LoxGcRuntime::new(32 * 1024 * 1024, type_infos));
+        let semispace_bytes: usize = std::env::var("LOX_HEAP_BYTES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(32 * 1024 * 1024);
+        self.gc_runtime = Some(LoxGcRuntime::new(semispace_bytes, type_infos));
 
         // Intern compile-time strings
         for s in &lowered.strings {
@@ -1671,15 +1645,23 @@ impl VM {
         // Safety: gc_runtime outlives the session.
         let heap: &Heap = unsafe { &*((&self.gc_runtime.as_ref().unwrap().heap) as *const _) };
         let safepoints = jit.all_safepoints();
+        let policy = match std::env::var("LOX_JIT_GC_POLICY").as_deref() {
+            Ok("never") => GcPolicy::NeverAuto,
+            Ok("every") => GcPolicy::EveryPoint,
+            _ => GcPolicy::OnPressure { threshold: 0.75 },
+        };
         let session = JitSafepointSession::<LoxPtrPolicy, _>::new(
             heap, StackMapJitTransport, &safepoints,
-        ).with_gc_policy(GcPolicy::OnPressure { threshold: 0.75 });
+        ).with_gc_policy(policy);
 
         unsafe { RAW_VM = self as *mut VM; }
         let result = session.with_installed(|| {
             jit.call_outcome(entry, &[nil_val()])
         });
         unsafe { RAW_VM = std::ptr::null_mut(); }
+        if std::env::var("LOX_GC_STATS").is_ok() {
+            eprintln!("GC collections: {}", heap.collections());
+        }
         self.jit_call_table.clear();
 
         match result {
