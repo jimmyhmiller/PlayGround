@@ -35,7 +35,10 @@ use bevy::light::{CascadeShadowConfigBuilder, GlobalAmbientLight, NotShadowCaste
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::render::view::screenshot::{Screenshot, save_to_disk};
-use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
+use bevy_egui::{
+    EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext,
+    egui,
+};
 use geo::{BooleanOps, Contains, Coord, LineString, MultiPolygon, Polygon};
 use lyon::math::point as lyon_point;
 use lyon::path::iterator::PathIterator;
@@ -203,6 +206,8 @@ struct PersistedState {
     ambient: f32,
     paper_thickness: f32,
     pyramid_inset: f32,
+    #[serde(default)]
+    layer_gap: f32,
     brush_radius: f32,
     brush_strength: u16,
     brush_layer_shrink: f32,
@@ -215,6 +220,16 @@ struct PersistedState {
     doc_line_factor: f32,
     doc_depth: u16,
     doc_bevel: bool,
+    #[serde(default)]
+    highlights: Vec<PersistedHighlight>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct PersistedHighlight {
+    points: Vec<[f32; 2]>,
+    width: f32,
+    side: f32,
+    intensity: f32,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -359,15 +374,25 @@ struct PaperStack {
     /// in different XY territories.
     layers: Vec<MultiPolygon<f64>>,
     /// World-z of the TOP face of each layer. Bottom face is
-    /// `layer_z[i] - paper_thickness`. Defaults to `(i+1) * pt` to
-    /// keep the original carved-down model working unchanged, but
-    /// callers can override with arbitrary values.
+    /// `layer_z[i] - paper_thickness`. Derived from `layer_step` *
+    /// `paper_thickness` + `(layer_step - 1) * layer_gap` whenever
+    /// either of those two knobs change, so the panel sliders for
+    /// thickness/gap actually shift the rendered stack.
     layer_z: Vec<f32>,
+    /// Step index per layer: 1 = sits one paper-thickness off the
+    /// floor, 2 = two, etc. Lets multiple layers share a "rung" in
+    /// different XY (e.g. the demo's terraced rainbow + card share
+    /// rungs). Recomputed via the simple `(i+1)` default in `new()`,
+    /// and overridden by demo builders that want a custom layout.
+    layer_step: Vec<u16>,
     /// Per-layer wall slope: how far the BOTTOM of the wall is
     /// offset INTO THE VOID from the top, in world units.
     layer_slope_inset: Vec<f32>,
     palette: Vec<Color>,
     paper_thickness: f32,
+    /// Vertical air gap between successive layers. Stack height grows
+    /// by `paper_thickness + layer_gap` per layer.
+    layer_gap: f32,
     pyramid_inset: f32,
 }
 
@@ -375,28 +400,42 @@ impl PaperStack {
     fn new(size: Vec2, n_layers: u16, palette: Vec<Color>) -> Self {
         let full = full_rect(size);
         let pt = DEFAULT_PAPER_THICKNESS;
-        Self {
+        let mut s = Self {
             paper_size: size,
             layers: vec![full; n_layers as usize],
-            layer_z: (0..n_layers as usize).map(|i| (i as f32 + 1.0) * pt).collect(),
+            layer_z: vec![0.0; n_layers as usize],
+            layer_step: (1..=n_layers).collect(),
             layer_slope_inset: vec![DEFAULT_PYRAMID_INSET; n_layers as usize],
             palette,
             paper_thickness: pt,
+            layer_gap: 0.0,
             pyramid_inset: DEFAULT_PYRAMID_INSET,
-        }
+        };
+        s.recompute_layer_z();
+        s
     }
     fn n_layers(&self) -> u16 {
         self.layers.len() as u16
     }
+    /// Re-derive `layer_z[i]` from `layer_step[i]`, `paper_thickness`
+    /// and `layer_gap`. Top of layer i = step·thickness + (step-1)·gap.
+    fn recompute_layer_z(&mut self) {
+        let pt = self.paper_thickness;
+        let g = self.layer_gap;
+        for (i, z) in self.layer_z.iter_mut().enumerate() {
+            let s = *self.layer_step.get(i).unwrap_or(&((i as u16) + 1)) as f32;
+            *z = s * pt + (s - 1.0) * g;
+        }
+    }
     fn reset_full(&mut self) {
         let full = full_rect(self.paper_size);
-        let pt = self.paper_thickness;
         for layer in self.layers.iter_mut() {
             *layer = full.clone();
         }
-        for (i, z) in self.layer_z.iter_mut().enumerate() {
-            *z = (i as f32 + 1.0) * pt;
+        for (i, s) in self.layer_step.iter_mut().enumerate() {
+            *s = (i as u16) + 1;
         }
+        self.recompute_layer_z();
         for s in self.layer_slope_inset.iter_mut() {
             *s = self.pyramid_inset;
         }
@@ -653,6 +692,10 @@ fn main() {
         if s.pyramid_inset >= 0.0 {
             stack.pyramid_inset = s.pyramid_inset;
         }
+        if s.layer_gap >= 0.0 {
+            stack.layer_gap = s.layer_gap;
+        }
+        stack.recompute_layer_z();
         // Only restore the saved palette if the schema version matches
         // — old saves get the new default to avoid dragging stale color
         // schemes forward across redesigns.
@@ -754,7 +797,22 @@ fn main() {
         .insert_resource(HoverPos::default())
         .insert_resource(StrokeLast::default())
         .insert_resource(StackDirty(true))
-        .insert_resource(Highlights::default())
+        .insert_resource(Highlights {
+            list: persisted
+                .as_ref()
+                .map(|s| {
+                    s.highlights
+                        .iter()
+                        .map(|h| Highlight {
+                            points: h.points.iter().map(|p| Vec2::new(p[0], p[1])).collect(),
+                            width: h.width,
+                            side: h.side,
+                            intensity: h.intensity,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
         .insert_resource(HighlightsDirty(true))
         .insert_resource(LoadedFont(font_data))
         .insert_resource(font_library)
@@ -777,8 +835,7 @@ fn main() {
                 toggle_debug_view,
                 debug_inputs,
                 scene_view_input,
-                update_hover,
-                apply_brush_input,
+                // brush input removed — the demo scene is read-only.
                 regen_stack_mesh,
                 repaint_roughness_map,
                 sync_lights,
@@ -788,7 +845,7 @@ fn main() {
                 sync_light_gizmos,
                 apply_viewport_layout,
                 poll_tuning_file,
-                save_state_periodic,
+                handle_save_shortcut,
             ),
         )
         .add_systems(EguiPrimaryContextPass, debug_panel)
@@ -813,37 +870,13 @@ fn auto_build_create_account_scene(
     font_lib: Res<FontLibrary>,
     icon_atlas: Res<IconAtlas>,
     mut dirty: ResMut<StackDirty>,
-    mut highlights: ResMut<Highlights>,
     mut hl_dirty: ResMut<HighlightsDirty>,
 ) {
     stack.reset_full();
     carve_create_account_form(&mut stack, &font_lib, &icon_atlas);
     dirty.0 = true;
-
-    // Two example shines: glossy bands stamped into the roughness
-    // map along the top edge of each layer. Polylines hug the
-    // silhouette; the band extends INWARD into the body by `width`.
-    // side = -1 so the perpendicular points into the body (polylines
-    // walk left-to-right; body is RIGHT at the top edge).
-    highlights.list.clear();
-
-    // ---- Card top edge with both rounded corners ----
-    let card_pts = top_edge_with_corners(2.50, 2.50, 0.30, 8);
-    highlights.list.push(Highlight {
-        points: card_pts,
-        width: 0.04,
-        side: -1.0,
-        intensity: 0.9,
-    });
-
-    // ---- Blue floor top edge with both rounded corners ----
-    let blue_pts = top_edge_with_corners(8.50, 8.50, 0.50, 10);
-    highlights.list.push(Highlight {
-        points: blue_pts,
-        width: 0.06,
-        side: -1.0,
-        intensity: 0.9,
-    });
+    // Highlights are not auto-populated any more — the user adds them
+    // via the panel and Cmd+S persists them across runs.
     hl_dirty.0 = true;
 }
 
@@ -1008,28 +1041,30 @@ fn poll_tuning_file(
     eprintln!("[tune] applied seq={}", cmd.seq);
 }
 
-fn save_state_periodic(
+/// Cmd+S (or Ctrl+S) writes a snapshot of camera, lights, palette,
+/// thickness/gap, and the highlights list. There is no auto-save —
+/// edits live in memory until the user explicitly hits Save.
+fn handle_save_shortcut(
+    keys: Res<ButtonInput<KeyCode>>,
     auto: Option<Res<AutoScreenshot>>,
-    time: Res<Time>,
-    mut last_save: Local<f64>,
     camera: Res<CameraControl>,
     light: Res<LightControl>,
     brush: Res<Brush>,
     stack: Res<PaperStack>,
     letters: Res<LettersUi>,
     doc: Res<DocumentUi>,
+    highlights: Res<Highlights>,
 ) {
-    // Don't persist in screenshot mode — it'd overwrite the user's
-    // saved palette and brush settings with the demo scene's values.
     if auto.is_some() {
         return;
     }
-    let now = time.elapsed_secs_f64();
-    if now - *last_save < 2.0 {
+    let cmd = keys.pressed(KeyCode::SuperLeft)
+        || keys.pressed(KeyCode::SuperRight)
+        || keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight);
+    if !(cmd && keys.just_pressed(KeyCode::KeyS)) {
         return;
     }
-    *last_save = now;
-
     let state = PersistedState {
         version: CURRENT_STATE_VERSION,
         camera_pan: camera.pan.to_array(),
@@ -1048,6 +1083,7 @@ fn save_state_periodic(
         ambient: light.ambient,
         paper_thickness: stack.paper_thickness,
         pyramid_inset: stack.pyramid_inset,
+        layer_gap: stack.layer_gap,
         brush_radius: brush.radius,
         brush_strength: brush.strength,
         brush_layer_shrink: brush.layer_shrink,
@@ -1067,6 +1103,16 @@ fn save_state_periodic(
         doc_line_factor: doc.line_factor,
         doc_depth: doc.depth,
         doc_bevel: doc.bevel,
+        highlights: highlights
+            .list
+            .iter()
+            .map(|h| PersistedHighlight {
+                points: h.points.iter().map(|p| [p.x, p.y]).collect(),
+                width: h.width,
+                side: h.side,
+                intensity: h.intensity,
+            })
+            .collect(),
     };
     save_persisted_state(&state);
 }
@@ -1137,8 +1183,15 @@ fn setup(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
+    mut egui_settings: ResMut<EguiGlobalSettings>,
     stack: Res<PaperStack>,
 ) {
+    // Pin the egui primary context to MainCam so the panel renders
+    // even when the (initially inactive) SceneCam isn't enabled.
+    // Without this, bevy_egui auto-attaches to whichever camera its
+    // Added<Camera> query sees first — which may be SceneCam — and
+    // the panel becomes invisible until the user presses G.
+    egui_settings.auto_create_primary_context = false;
     commands.spawn((
         Camera3d::default(),
         Transform::from_xyz(0.0, 0.0, 20.0).looking_at(Vec3::ZERO, Vec3::Y),
@@ -1153,6 +1206,7 @@ fn setup(
         // edges.
         bevy::light::ShadowFilteringMethod::Gaussian,
         MainCam,
+        PrimaryEguiContext,
     ));
 
     // Second camera for the debug "scene view" — orbits the paper
@@ -2798,22 +2852,18 @@ fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary, atl
         *s = 0.0;
     }
 
-    // Explicit z heights. Carved-down rainbow: red highest, blue
-    // lowest. Card sits ON blue and rises back UP to roughly the
-    // teal-green / lime / yellow heights (in different XY).
+    // Explicit step indices (rungs above the floor). Carved-down
+    // rainbow: red highest, blue lowest. Card layers reuse rungs 2/3/4
+    // in different XY. Actual world-z is derived later via
+    // `recompute_layer_z` so the panel's thickness/gap sliders shift
+    // the whole stack consistently.
+    stack.layer_step[0] = 1; // blue   floor
+    stack.layer_step[1] = 2; // teal
+    stack.layer_step[2] = 3; // lime
+    stack.layer_step[3] = 4; // yellow
+    stack.layer_step[4] = 5; // orange
+    stack.layer_step[5] = 6; // red    top
     let pt = stack.paper_thickness;
-    let z_blue   = 1.0 * pt; // floor
-    let z_teal   = 2.0 * pt;
-    let z_lime   = 3.0 * pt;
-    let z_yellow = 4.0 * pt;
-    let z_orange = 5.0 * pt;
-    let z_red    = 6.0 * pt; // top
-    stack.layer_z[0] = z_blue;
-    stack.layer_z[1] = z_teal;
-    stack.layer_z[2] = z_lime;
-    stack.layer_z[3] = z_yellow;
-    stack.layer_z[4] = z_orange;
-    stack.layer_z[5] = z_red;
 
     // Geometry sizes.
     let paper_w: f32 = 18.0;
@@ -3014,9 +3064,10 @@ fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary, atl
         // #8761AB
         stack.palette[8] = Color::srgb(0.529, 0.380, 0.671); // top
     }
-    stack.layer_z[6] = z_teal;
-    stack.layer_z[7] = z_lime;
-    stack.layer_z[8] = z_yellow;
+    // Card layers reuse the rainbow rungs (different XY).
+    stack.layer_step[6] = 2; // deep — at teal rung
+    stack.layer_step[7] = 3; // mid  — at lime rung
+    stack.layer_step[8] = 4; // top  — at yellow rung
 
     // Build subtractions iteratively. Geo's difference with a
     // MultiPolygon containing OVERLAPPING subtrahends (e.g. button
@@ -3040,8 +3091,14 @@ fn carve_create_account_form(stack: &mut PaperStack, font_lib: &FontLibrary, atl
     // Empty + push out-of-the-way any layers above 8.
     for i in 9..n_layers {
         stack.layers[i] = MultiPolygon(vec![]);
-        stack.layer_z[i] = z_red + (i as f32 - 5.0) * pt;
+        stack.layer_step[i] = 7 + (i as u16 - 9);
     }
+    let _ = pt;
+
+    // Now derive world-z from the step indices we just set, using the
+    // current paper_thickness + layer_gap. The panel sliders call
+    // recompute_layer_z again whenever the user moves them.
+    stack.recompute_layer_z();
 }
 
 // ─── Auto-screenshot ──────────────────────────────────────────────
@@ -3170,8 +3227,7 @@ fn debug_inputs(
         dirty.0 = true;
     }
 
-    if keys.just_pressed(KeyCode::Digit1) { brush.tool = Tool::Dig; }
-    if keys.just_pressed(KeyCode::Digit2) { brush.tool = Tool::Extrude; }
+    let _ = &mut brush; // brush retained as a resource for save schema compat, no input
 
     // Pan: macOS sends two-finger trackpad scroll as MouseWheel events,
     // and (on some configs) also as PanGesture events. Read both and
@@ -3761,15 +3817,8 @@ fn debug_panel(
     debug: Res<DebugMode>,
     mut light: ResMut<LightControl>,
     mut camera: ResMut<CameraControl>,
-    mut brush: ResMut<Brush>,
     mut stack: ResMut<PaperStack>,
     mut dirty: ResMut<StackDirty>,
-    mut letters: ResMut<LettersUi>,
-    mut doc: ResMut<DocumentUi>,
-    mut form: ResMut<FormUi>,
-    font: Res<LoadedFont>,
-    font_lib: Res<FontLibrary>,
-    icon_atlas: Res<IconAtlas>,
     mut debug_view: ResMut<DebugView>,
     mut hl: HighlightUiParams,
 ) -> Result {
@@ -3782,148 +3831,6 @@ fn debug_panel(
         .default_pos([12.0, 12.0])
         .default_width(320.0)
         .show(ctx, |ui| {
-            ui.collapsing("Tool", |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut brush.tool, Tool::Dig, "Dig (1)");
-                    ui.selectable_value(&mut brush.tool, Tool::Extrude, "Extrude (2)");
-                });
-                ui.add(
-                    egui::Slider::new(&mut brush.radius, 0.002..=1.0)
-                        .logarithmic(true)
-                        .text("radius"),
-                );
-                let mut s = brush.strength as i32;
-                if ui.add(egui::Slider::new(&mut s, 1..=16).text("strength (layers)")).changed() {
-                    brush.strength = s.max(1) as u16;
-                }
-                ui.add(
-                    egui::Slider::new(&mut brush.layer_shrink, 0.5..=0.99)
-                        .text("layer shrink")
-                        .fixed_decimals(2),
-                );
-                if ui.button("Reset stack").clicked() {
-                    stack.reset_full();
-                    dirty.0 = true;
-                }
-            });
-
-            ui.collapsing("Demo scenes", |ui| {
-                if ui.button("Show \"Create Account\" demo").clicked() {
-                    stack.reset_full();
-                    carve_create_account_form(&mut stack, &font_lib, &icon_atlas);
-                    // Frame it: top-down, zoomed out enough to fit the
-                    // 9.6-wide outer carve plus a margin of red paper.
-                    camera.pan = Vec2::ZERO;
-                    camera.zoom = 0.58;
-                    camera.tilt = 0.0;
-                    dirty.0 = true;
-                }
-                ui.label(
-                    "Carves the full layered reference scene and\n\
-                     sets the camera to frame it top-down.",
-                );
-            });
-
-            ui.collapsing("Form fields (lines + UI shapes)", |ui| {
-                let mut d = form.depth as i32;
-                if ui
-                    .add(egui::Slider::new(&mut d, 1..=N_LAYERS as i32).text("depth (layers)"))
-                    .changed()
-                {
-                    form.depth = d.max(1) as u16;
-                }
-                ui.checkbox(&mut form.bevel, "chiseled bevel");
-                if ui.button("Carve form").clicked() {
-                    carve_form(&mut stack, form.depth, form.bevel);
-                    dirty.0 = true;
-                }
-            });
-
-            ui.collapsing("Letters", |ui| {
-                let mut text = letters.text.clone();
-                if ui.text_edit_singleline(&mut text).changed() {
-                    letters.text = text;
-                }
-                ui.add(
-                    egui::Slider::new(&mut letters.em_world, 0.4..=6.0)
-                        .text("em (world)")
-                        .fixed_decimals(2),
-                );
-                let mut d = letters.depth as i32;
-                if ui
-                    .add(egui::Slider::new(&mut d, 1..=N_LAYERS as i32).text("depth (layers)"))
-                    .changed()
-                {
-                    letters.depth = d.max(1) as u16;
-                }
-                ui.checkbox(&mut letters.bevel, "chiseled bevel");
-                if ui.button("Carve text into pad").clicked() {
-                    carve_text(
-                        &mut stack,
-                        &font.0,
-                        &letters.text,
-                        letters.em_world,
-                        letters.depth,
-                        letters.bevel,
-                    );
-                    dirty.0 = true;
-                }
-            });
-
-            ui.collapsing("Lorem ipsum (multi-font)", |ui| {
-                ui.label(format!("{} fonts loaded", font_lib.fonts.len()));
-                egui::ScrollArea::vertical().max_height(80.0).show(ui, |ui| {
-                    for (i, f) in font_lib.fonts.iter().enumerate() {
-                        ui.label(format!("  {i:>2}. {}", f.name));
-                    }
-                });
-                ui.add(
-                    egui::Slider::new(&mut doc.max_width, 2.0..=20.0)
-                        .text("max width (world)"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut doc.line_factor, 1.0..=2.5)
-                        .text("line spacing")
-                        .fixed_decimals(2),
-                );
-                let mut d = doc.depth as i32;
-                if ui
-                    .add(egui::Slider::new(&mut d, 1..=N_LAYERS as i32).text("depth (layers)"))
-                    .changed()
-                {
-                    doc.depth = d.max(1) as u16;
-                }
-                ui.checkbox(&mut doc.bevel, "chiseled bevel");
-                ui.horizontal(|ui| {
-                    if ui.button("Carve lorem ipsum").clicked() {
-                        let lines = lorem_ipsum_doc(&font_lib, 4);
-                        carve_document(
-                            &mut stack,
-                            &font_lib,
-                            &lines,
-                            doc.max_width,
-                            doc.line_factor,
-                            doc.depth,
-                            doc.bevel,
-                        );
-                        dirty.0 = true;
-                    }
-                    if ui.button("Carve (8 words/line)").clicked() {
-                        let lines = lorem_ipsum_doc(&font_lib, 8);
-                        carve_document(
-                            &mut stack,
-                            &font_lib,
-                            &lines,
-                            doc.max_width,
-                            doc.line_factor,
-                            doc.depth,
-                            doc.bevel,
-                        );
-                        dirty.0 = true;
-                    }
-                });
-            });
-
             ui.collapsing("Highlights (rim shines)", |ui| {
                 // Material params — modify the shared StandardMaterial
                 // directly. Takes effect next frame; no remesh needed.
@@ -3983,22 +3890,30 @@ fn debug_panel(
             });
 
             ui.collapsing("Layer geometry", |ui| {
+                let mut pt = stack.paper_thickness;
                 if ui
                     .add(
-                        egui::Slider::new(&mut stack.paper_thickness, 0.002..=0.06)
-                            .text("paper thickness"),
+                        egui::Slider::new(&mut pt, 0.002..=0.30)
+                            .text("paper thickness")
+                            .fixed_decimals(3),
                     )
                     .changed()
                 {
+                    stack.paper_thickness = pt.max(0.0001);
+                    stack.recompute_layer_z();
                     dirty.0 = true;
                 }
+                let mut gap = stack.layer_gap;
                 if ui
                     .add(
-                        egui::Slider::new(&mut stack.pyramid_inset, 0.0..=0.05)
-                            .text("pyramid inset (per-layer erosion)"),
+                        egui::Slider::new(&mut gap, 0.0..=0.30)
+                            .text("layer gap")
+                            .fixed_decimals(3),
                     )
                     .changed()
                 {
+                    stack.layer_gap = gap.max(0.0);
+                    stack.recompute_layer_z();
                     dirty.0 = true;
                 }
                 ui.label(format!(
