@@ -63,7 +63,14 @@ def _die_with_parent() -> None:
 
 
 def stage_extract_subproc(paths: PipelinePaths, *, max_pages: int | None = None) -> str:
-    """Extract via a separate subprocess so multiple extractions don't share torch state."""
+    """Extract via a separate subprocess so multiple extractions don't share torch state.
+
+    The worker's full stdout+stderr is streamed to the parent's stderr live
+    (so progress bars and error tracebacks are visible) AND tee'd to
+    `paths.log.with_suffix('.extract.log')` so the diagnostic survives even
+    if the parent's output buffer is truncated. On non-zero exit, the tail
+    of the captured log is included in the raised exception.
+    """
     import json as _json
     import subprocess as _subprocess
     import sys as _sys
@@ -73,13 +80,40 @@ def stage_extract_subproc(paths: PipelinePaths, *, max_pages: int | None = None)
     req: dict = {"source_path": str(paths.source), "out_path": str(paths.md)}
     if max_pages:
         req["page_range"] = list(range(max_pages))
-    r = _subprocess.run(
-        [_sys.executable, "-m", "paper_audiobooks.extract_worker"],
-        input=_json.dumps(req), text=True, capture_output=True,
-        preexec_fn=_die_with_parent,
-    )
-    if r.returncode != 0:
-        raise RuntimeError(f"extract worker failed for {paths.source}:\n{r.stderr}")
+
+    log_path = paths.md.with_suffix(".extract.log")
+    captured: list[str] = []
+    with open(log_path, "w", buffering=1) as logf:
+        proc = _subprocess.Popen(
+            [_sys.executable, "-m", "paper_audiobooks.extract_worker"],
+            stdin=_subprocess.PIPE,
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.STDOUT,  # merge stderr into stdout — tracebacks land here
+            text=True,
+            bufsize=1,
+            preexec_fn=_die_with_parent,
+        )
+        assert proc.stdin is not None and proc.stdout is not None
+        proc.stdin.write(_json.dumps(req))
+        proc.stdin.close()
+        # Stream merged stdout+stderr line-by-line, mirror to log + parent stderr.
+        for line in proc.stdout:
+            _sys.stderr.write(line)
+            _sys.stderr.flush()
+            logf.write(line)
+            captured.append(line)
+        rc = proc.wait()
+    if rc != 0:
+        # Capture the final ~80 lines of output for the exception message —
+        # plenty for a Python traceback, not so much that it floods batch logs.
+        # Negative rc on POSIX = killed by signal (e.g. -9 = SIGKILL/OOM).
+        sig_note = f" (killed by signal {-rc})" if rc < 0 else ""
+        tail = "".join(captured[-80:]).rstrip()
+        raise RuntimeError(
+            f"extract worker failed for {paths.source} rc={rc}{sig_note}.\n"
+            f"Full log: {log_path}\n"
+            f"--- last lines ---\n{tail}"
+        )
     return paths.md.read_text()
 
 

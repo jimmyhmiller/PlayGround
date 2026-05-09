@@ -24,7 +24,27 @@ def _assert_gpu() -> None:
 
 import click
 
-from .chapters import select_content_chapters, select_first_chapter, split_by_headers
+from .chapters import (
+    Chapter,
+    select_content_chapters,
+    select_first_chapter,
+    split_by_headers,
+    split_by_pdf_toc,
+)
+
+
+def _split_chapters(markdown: str, source: Path) -> list[Chapter]:
+    """Use the PDF outline when present (TOC is ground truth), otherwise
+    fall back to header-heuristic splitting. EPUB/DJVU and outline-less PDFs
+    take the heuristic path.
+    """
+    if source.suffix.lower() == ".pdf":
+        toc_chapters = split_by_pdf_toc(markdown, source)
+        if toc_chapters:
+            click.echo(f"[chapters] using PDF outline: {len(toc_chapters)} chapter(s)")
+            return toc_chapters
+        click.echo("[chapters] no usable PDF outline; falling back to header heuristics")
+    return split_by_headers(markdown)
 from .pipeline import (
     announce_chapters,
     paths_for,
@@ -86,7 +106,7 @@ def one(source: Path, out_dir: Path, llm_base_url: str, tts_backend: str, voice:
     if first_chapter and max_pages is None:
         max_pages = 60
     markdown = stage_extract(paths, skip=skip_extract, max_pages=max_pages)
-    raw_chapters = split_by_headers(markdown)
+    raw_chapters = _split_chapters(markdown, paths.source)
     if first_chapter:
         raw_chapters = select_first_chapter(raw_chapters)
         click.echo(f"[first-chapter] selected: {raw_chapters[0].title!r}")
@@ -211,7 +231,7 @@ def batch(sources: tuple[Path, ...], out_dir: Path, llm_base_url: str, tts_backe
                 continue
 
             try:
-                raw_chapters = split_by_headers(markdown)
+                raw_chapters = _split_chapters(markdown, paths.source)
                 if first_chapter:
                     raw_chapters = select_first_chapter(raw_chapters)
                     click.echo(f"[first-chapter] selected: {raw_chapters[0].title!r}")

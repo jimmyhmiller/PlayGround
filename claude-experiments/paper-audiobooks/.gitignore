@@ -2,6 +2,34 @@
 output/
 samples/
 
+# Audio / debugging artifacts
+*.wav
+*.mp3
+*.flac
+*.m4a
+*.m4b
+*.npy
+*.log
+*.log.*
+batch.log*
+
+# Local repro / experiment output dirs
+big_run_100/
+bisect_results/
+bisect_results_halt1/
+cfg_topp_sweep/
+clear_cache_test/
+cpu_repro_clips/
+eager_attn_test/
+f5_repro/
+ground_truth_clips/
+inline_replay_results/
+noise_confirm/
+repro_clips/
+repro_clips_short/
+suspect_clips_book2/
+temp_sweep/
+
 # Python
 __pycache__/
 *.pyc
