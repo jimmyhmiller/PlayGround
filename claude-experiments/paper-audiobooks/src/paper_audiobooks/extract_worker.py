@@ -6,9 +6,19 @@ markdown to out_path, prints "ok" on success.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import traceback
 from pathlib import Path
+
+# Reduce HIP allocator fragmentation. Strix Halo unified memory shares VRAM
+# with system RAM and other GPU consumers (llama-server on Vulkan, any other
+# torch process), so the allocator's default behaviour leaves big holes that
+# OOM marker's batched conv kernels even when total free memory is plenty.
+# expandable_segments grows allocations dynamically instead of reserving fixed
+# chunks. The OOM error message itself recommends this exact setting.
+os.environ.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 
 def main() -> int:

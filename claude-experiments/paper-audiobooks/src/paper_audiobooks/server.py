@@ -15,7 +15,7 @@ DEFAULT_BINARY = Path("/home/jimmyhmiller/Documents/Code/open-source/llama.cpp/b
 DEFAULT_MODEL = Path(
     "/home/jimmyhmiller/.cache/llama.cpp/unsloth_Qwen3.5-35B-A3B-GGUF_Qwen3.5-35B-A3B-UD-Q8_K_XL.gguf"
 )
-DEFAULT_CTX = 32768
+DEFAULT_CTX = 131072
 DEFAULT_ALIAS = "qwen3"
 
 

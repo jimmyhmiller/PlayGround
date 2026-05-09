@@ -31,9 +31,11 @@ SKIP_TITLE_PATTERNS = [
         r"^notes?$",
         r"^endnotes?$",
         r"^footnotes?$",
-        r"^index$",
+        r"^(\[[^\]]*\]\s*)?index(es|of\s+.+)?$",
         r"^subject\s+index$",
         r"^author\s+index$",
+        r"^name\s+index$",
+        r"^index\s+of\s+",
         r"^acknowledgements?$",
         r"^acknowledgments?$",
         r"^about\s+the\s+authors?$",
@@ -59,6 +61,8 @@ SKIP_TITLE_PATTERNS = [
 FRONT_MATTER_PATTERNS = [
     re.compile(p, re.IGNORECASE)
     for p in [
+        r"^cover$",
+        r"^about\s+this\s+book$",
         r"^preface(\s.*)?$",
         r"^foreword(\s.*)?$",
         r"^contents$",
@@ -378,6 +382,118 @@ def split_by_headers(markdown: str, *, min_body_chars: int = 400) -> list[Chapte
 
     chapters = _merge_orphan_subsections(chapters)
     return chapters or [Chapter(title="Paper", body=markdown.strip())]
+
+
+def split_by_pdf_toc(markdown: str, pdf_path: Path) -> list[Chapter] | None:
+    """Split a marker-extracted markdown using the source PDF's outline.
+
+    Books worth audiobook-ifying almost always carry a real TOC in the PDF
+    bookmarks. Header-heuristic splitting (split_by_headers) is unreliable
+    on these — marker promotes running heads, sub-numbered sections, and
+    bare page numbers to the same level as real chapter titles, so the
+    split-by-headers output for a 12-chapter book frequently degenerates
+    into 4 mega-chapters. The TOC is the ground truth.
+
+    How it works:
+      - Read the PDF's outline (top-level entries only).
+      - Marker emits per-page anchors as `<span id="page-{N}-{X}"></span>`
+        in the markdown body, where N is the 0-indexed PDF page that
+        matches `pdfium.OutlineItem.page_index`. We search forward by up
+        to 5 pages so chapters whose start page lacks an anchor (figure
+        page, section break) still split correctly.
+      - The chapter slice runs from one anchor to the next.
+      - Front matter, bibliography, and index entries are filtered using
+        the same helpers split_by_headers uses.
+
+    Returns None if the PDF has no outline or no body anchors are found
+    (in which case the caller should fall back to split_by_headers).
+    """
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        return None
+
+    try:
+        pdf = pdfium.PdfDocument(str(pdf_path))
+        toc = list(pdf.get_toc())
+    except Exception:
+        return None
+    if not toc:
+        return None
+
+    top = [item for item in toc if item.level == 0 and item.page_index is not None]
+    if len(top) < 2:
+        return None  # one or zero entries — nothing to split on
+
+    # If the L0 entries are mostly book-part dividers ("Part I", "Book Two",
+    # ...), the real chapters live one level deeper. Descend in that case.
+    # Look at the non-front-matter L0 entries: if more than half are part
+    # dividers and L1 entries exist below them, switch to L1.
+    contentish_top = [it for it in top if not _is_front_matter(it.title)]
+    part_count = sum(1 for it in contentish_top if PART_DIVIDER_RE.match(it.title))
+    if contentish_top and part_count >= max(2, len(contentish_top) // 2 + 1):
+        l1 = [item for item in toc if item.level == 1 and item.page_index is not None]
+        if len(l1) >= 2:
+            top = l1
+
+    # Locate each TOC entry's start position in the markdown by searching
+    # for the corresponding body anchor. Skip TOC pages, which contain
+    # `(#page-N-...)` LINK references rather than `<span id=...>` anchors.
+    body_anchor = re.compile(r'<span\s+id="page-(\d+)-\d+"></span>')
+    anchor_pos: dict[int, int] = {}
+    for m in body_anchor.finditer(markdown):
+        page = int(m.group(1))
+        if page not in anchor_pos:
+            anchor_pos[page] = m.start()
+
+    if not anchor_pos:
+        return None
+
+    # Build chapter boundaries: (start_pos, end_pos, title) tuples.
+    boundaries: list[tuple[int, str]] = []
+    for item in top:
+        pi = item.page_index
+        # Walk forward until we find an anchor; some pages (figures, blanks)
+        # have no anchor at all.
+        pos = None
+        for offset in range(0, 6):
+            pos = anchor_pos.get(pi + offset)
+            if pos is not None:
+                break
+        if pos is None:
+            continue
+        boundaries.append((pos, item.title.strip()))
+
+    if len(boundaries) < 2:
+        return None
+
+    # Sort by position to defend against weird outline orderings, then
+    # collapse duplicates that landed on the same anchor (rare; happens
+    # when a chapter title and its first subsection both point at the
+    # same page).
+    boundaries.sort(key=lambda b: b[0])
+    deduped: list[tuple[int, str]] = []
+    for pos, title in boundaries:
+        if deduped and deduped[-1][0] == pos:
+            continue
+        deduped.append((pos, title))
+    boundaries = deduped
+
+    chapters: list[Chapter] = []
+    for i, (start, title) in enumerate(boundaries):
+        end = boundaries[i + 1][0] if i + 1 < len(boundaries) else len(markdown)
+        body = markdown[start:end].strip()
+        if not body:
+            continue
+        # Apply the same content filters as split_by_headers so we don't
+        # synthesize the index / bibliography / contents page.
+        if _is_skip_title(title) or _is_front_matter(title):
+            continue
+        if _looks_like_bibliography(body):
+            continue
+        chapters.append(Chapter(title=title, body=body))
+
+    return chapters or None
 
 
 def _top_number(title: str) -> int | None:
