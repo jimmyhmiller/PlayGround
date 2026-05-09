@@ -1,0 +1,302 @@
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -685,6 +685,11 @@
+ version = "~2.5.0"
+ optional = true
+ 
++# cf-runtime hooks — instrumentation for cf-runtime UI. Always-on in this
++# fork; the hook functions are zero-cost when no observer is registered.
++[dependencies.cf-runtime]
++path = "../../../crates/cf-runtime"
++
+ [dev-dependencies.async-stream]
+ version = "0.3"
+ 
+diff --git a/src/net/tcp/stream.rs b/src/net/tcp/stream.rs
+--- a/src/net/tcp/stream.rs
++++ b/src/net/tcp/stream.rs
+@@ -1329,7 +1329,20 @@
+         cx: &mut Context<'_>,
+         buf: &mut ReadBuf<'_>,
+     ) -> Poll<io::Result<()>> {
+-        self.poll_read_priv(cx, buf)
++        let r = self.poll_read_priv(cx, buf);
++        if matches!(r, Poll::Pending) {
++            if let Some(id) = crate::runtime::context::current_task_id() {
++                let peer = self
++                    .peer_addr()
++                    .map(|a| a.to_string())
++                    .unwrap_or_default();
++                cf_runtime::hooks::set_wait_reason(
++                    id.0.get(),
++                    cf_runtime::WaitReason::TcpRead { peer },
++                );
++            }
++        }
++        r
+     }
+ }
+ 
+diff --git a/src/runtime/scheduler/multi_thread/handle.rs b/src/runtime/scheduler/multi_thread/handle.rs
+--- a/src/runtime/scheduler/multi_thread/handle.rs
++++ b/src/runtime/scheduler/multi_thread/handle.rs
+@@ -41,6 +41,8 @@
+         F: crate::future::Future + Send + 'static,
+         F::Output: Send + 'static,
+     {
++        // cf-runtime hook: emit a Spawned event with the tokio task id.
++        cf_runtime::hooks::on_spawn(id.0.get(), None, None);
+         Self::bind_new_task(me, future, id)
+     }
+ 
+diff --git a/src/runtime/scheduler/multi_thread/worker.rs b/src/runtime/scheduler/multi_thread/worker.rs
+--- a/src/runtime/scheduler/multi_thread/worker.rs
++++ b/src/runtime/scheduler/multi_thread/worker.rs
+@@ -591,6 +591,12 @@
+         // Make the core available to the runtime context
+         *self.core.borrow_mut() = Some(core);
+ 
++        // cf-runtime: stamp the worker index so raw::poll (the single
++        // hook chokepoint) can attribute polls to a worker. Hooks fire
++        // inside raw::poll, not here — that way LIFO-slot polls and any
++        // future poll paths get the same instrumentation.
++        cf_runtime::hooks::set_current_worker(self.worker.index);
++
+         // Run the task
+         coop::budget(|| {
+             task.run();
+@@ -653,7 +659,8 @@
+                     super::counters::inc_lifo_capped();
+                 }
+ 
+-                // Run the LIFO task, then loop
++                // Run the LIFO task, then loop. Hooks fire inside
++                // raw::poll (the single chokepoint).
+                 *self.core.borrow_mut() = Some(core);
+                 let task = self.worker.handle.shared.owned.assert_owner(task);
+                 task.run();
+@@ -1052,6 +1059,16 @@
+ 
+ impl Handle {
+     pub(super) fn schedule_task(&self, task: Notified, is_yield: bool) {
++        // cf-runtime hook: emit Wake. `from_task` is the task currently
++        // being polled on this thread (if any) — that's the task that
++        // *caused* this wake by sending on a channel, calling notify,
++        // releasing a lock, etc. Captured via thread-local set in
++        // raw::poll. `from_worker` is this thread's worker index.
++        cf_runtime::hooks::on_wake(
++            task.cf_id_u64(),
++            cf_runtime::hooks::polling_tokio_id(),
++            cf_runtime::hooks::current_worker(),
++        );
+         with_current(|maybe_cx| {
+             if let Some(cx) = maybe_cx {
+                 // Make sure the task is part of the **current** scheduler.
+diff --git a/src/runtime/task/harness.rs b/src/runtime/task/harness.rs
+--- a/src/runtime/task/harness.rs
++++ b/src/runtime/task/harness.rs
+@@ -375,6 +375,9 @@
+                 })
+             }));
+         }
++        // cf-runtime hook: emit Completed and clean up the task-id map
++        // entry so it can be reused by a new task with the same tokio id.
++        cf_runtime::hooks::on_complete(self.core().task_id.0.get());
+ 
+         // The task has completed execution and will no longer be scheduled.
+         let num_release = self.release();
+diff --git a/src/runtime/task/mod.rs b/src/runtime/task/mod.rs
+--- a/src/runtime/task/mod.rs
++++ b/src/runtime/task/mod.rs
+@@ -386,6 +386,14 @@
+         self.raw.header_ptr()
+     }
+ 
++    /// cf-runtime hook helper: read this task's id without requiring the
++    /// `tokio_unstable` cfg or the taskdump feature gate. Always available
++    /// in this fork.
++    pub(crate) fn cf_id_u64(&self) -> u64 {
++        // Safety: header pointer is valid for the lifetime of `self`.
++        unsafe { Header::get_id(self.raw.header_ptr()).0.get() }
++    }
++
+     cfg_taskdump! {
+         /// Notify the task for task dumping.
+         ///
+@@ -416,6 +424,11 @@
+     fn header(&self) -> &Header {
+         self.0.header()
+     }
++
++    /// cf-runtime hook helper: read this task's id. Mirrors `Task::cf_id_u64`.
++    pub(crate) fn cf_id_u64(&self) -> u64 {
++        self.0.cf_id_u64()
++    }
+ }
+ 
+ impl<S: 'static> Notified<S> {
+@@ -447,6 +460,11 @@
+         let raw = self.task.raw;
+         mem::forget(self);
+         raw.poll();
++    }
++
++    /// cf-runtime hook helper.
++    pub(crate) fn cf_id_u64(&self) -> u64 {
++        self.task.cf_id_u64()
+     }
+ }
+ 
+diff --git a/src/runtime/task/raw.rs b/src/runtime/task/raw.rs
+--- a/src/runtime/task/raw.rs
++++ b/src/runtime/task/raw.rs
+@@ -267,8 +267,27 @@
+ impl Copy for RawTask {}
+ 
+ unsafe fn poll<T: Future, S: Schedule>(ptr: NonNull<Header>) {
+-    let harness = Harness::<T, S>::from_raw(ptr);
+-    harness.poll();
++    // cf-runtime hook: single chokepoint for every poll. Sets a
++    // thread-local "currently polling task" so wakes fired from inside
++    // the poll body can attribute their source — that's what makes the
++    // wake graph readable instead of every edge starting from the left.
++    let __cf_id = Header::get_id(ptr).0.get();
++    let __cf_worker = cf_runtime::hooks::current_worker().unwrap_or(usize::MAX);
++    let __cf_proceed = cf_runtime::hooks::on_poll_begin(__cf_id, __cf_worker);
++    let __cf_prev_polling = cf_runtime::hooks::polling_tokio_id();
++    cf_runtime::hooks::set_polling_tokio_id(__cf_id);
++    let __cf_start = std::time::Instant::now();
++    if __cf_proceed {
++        let harness = Harness::<T, S>::from_raw(ptr);
++        harness.poll();
++    }
++    let __cf_dur = __cf_start.elapsed().as_nanos() as u64;
++    // Restore previous polling id (handles re-entrant raw::poll calls).
++    match __cf_prev_polling {
++        Some(prev) => cf_runtime::hooks::set_polling_tokio_id(prev),
++        None => cf_runtime::hooks::clear_polling_tokio_id(),
++    }
++    cf_runtime::hooks::on_poll_end(__cf_id, __cf_worker, __cf_dur, false);
+ }
+ 
+ unsafe fn schedule<S: Schedule>(ptr: NonNull<Header>) {
+diff --git a/src/sync/notify.rs b/src/sync/notify.rs
+--- a/src/sync/notify.rs
++++ b/src/sync/notify.rs
+@@ -211,6 +211,9 @@
+     //   be modified only if `waiters` lock is held
+     state: AtomicUsize,
+     waiters: Mutex<WaitList>,
++    /// cf-runtime resource id, returned by `resource_register` at
++    /// construction. Zero when no observer is installed (no-op).
++    cf_resource_id: u64,
+ }
+ 
+ #[derive(Debug)]
+@@ -448,9 +451,16 @@
+     /// let notify = Notify::new();
+     /// ```
+     pub fn new() -> Notify {
++        // cf-runtime: register this Notify so the Resources tab can
++        // list every live one. Drop deregisters.
++        let cf_resource_id = cf_runtime::hooks::resource_register(
++            cf_runtime::resource::ResourceKind::Notify,
++            "Notify".to_string(),
++        );
+         Notify {
+             state: AtomicUsize::new(0),
+             waiters: Mutex::new(LinkedList::new()),
++            cf_resource_id,
+         }
+     }
+ 
+@@ -476,6 +486,10 @@
+         Notify {
+             state: AtomicUsize::new(0),
+             waiters: Mutex::const_new(LinkedList::new()),
++            // const_new can't call resource_register (non-const fn).
++            // Static Notifys aren't tracked — this is fine; turbopack
++            // creates ephemeral Notifys via `new()`.
++            cf_resource_id: 0,
+         }
+     }
+ 
+@@ -739,6 +753,13 @@
+ impl Default for Notify {
+     fn default() -> Notify {
+         Notify::new()
++    }
++}
++
++impl Drop for Notify {
++    fn drop(&mut self) {
++        // cf-runtime: deregister from the resource registry.
++        cf_runtime::hooks::resource_unregister(self.cf_resource_id);
+     }
+ }
+ 
+diff --git a/src/sync/semaphore.rs b/src/sync/semaphore.rs
+--- a/src/sync/semaphore.rs
++++ b/src/sync/semaphore.rs
+@@ -394,6 +394,8 @@
+     ll_sem: ll::Semaphore,
+     #[cfg(all(tokio_unstable, feature = "tracing"))]
+     resource_span: tracing::Span,
++    /// cf-runtime resource id (Stage 6).
++    cf_resource_id: u64,
+ }
+ 
+ /// A permit from the semaphore.
+@@ -470,10 +472,15 @@
+         #[cfg(any(not(tokio_unstable), not(feature = "tracing")))]
+         let ll_sem = ll::Semaphore::new(permits);
+ 
++        let cf_resource_id = cf_runtime::hooks::resource_register(
++            cf_runtime::resource::ResourceKind::Semaphore,
++            format!("Semaphore({permits})"),
++        );
+         Self {
+             ll_sem,
+             #[cfg(all(tokio_unstable, feature = "tracing"))]
+             resource_span,
++            cf_resource_id,
+         }
+     }
+ 
+@@ -500,6 +507,7 @@
+             ll_sem: ll::Semaphore::const_new(permits),
+             #[cfg(all(tokio_unstable, feature = "tracing"))]
+             resource_span: tracing::Span::none(),
++            cf_resource_id: 0,
+         }
+     }
+ 
+@@ -509,6 +517,7 @@
+             ll_sem: ll::Semaphore::new_closed(),
+             #[cfg(all(tokio_unstable, feature = "tracing"))]
+             resource_span: tracing::Span::none(),
++            cf_resource_id: 0,
+         }
+     }
+ 
+@@ -519,6 +528,7 @@
+             ll_sem: ll::Semaphore::const_new_closed(),
+             #[cfg(all(tokio_unstable, feature = "tracing"))]
+             resource_span: tracing::Span::none(),
++            cf_resource_id: 0,
+         }
+     }
+ 
+@@ -1196,5 +1206,11 @@
+ impl Drop for OwnedSemaphorePermit {
+     fn drop(&mut self) {
+         self.sem.add_permits(self.permits as usize);
++    }
++}
++
++impl Drop for Semaphore {
++    fn drop(&mut self) {
++        cf_runtime::hooks::resource_unregister(self.cf_resource_id);
+     }
+ }

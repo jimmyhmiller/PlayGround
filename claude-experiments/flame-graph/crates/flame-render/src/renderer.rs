@@ -221,8 +221,10 @@ pub struct Renderer {
     pub layout_mode: LayoutMode,
     /// Floating layout-mode toggle button rects (bottom-left of timeline).
     pub layout_button_rects: Vec<(LayoutMode, [f32; 4])>,
-    /// Pre-computed left-heavy slice table (one per profile load).
-    pub aggregated_slices: Option<flame_core::SliceTable>,
+    /// Pre-computed left-heavy slice table (one per profile load). Wrapped in
+    /// `Arc` so the renderer can take a cheap reference into the GPU rebuild
+    /// loop alongside `&mut self` for `self.instances.push(...)`.
+    pub aggregated_slices: Option<Arc<flame_core::SliceTable>>,
     /// Time range of the aggregated layout (different scale than wall time).
     pub aggregated_time_range: (u64, u64),
     /// Per-track row counts for the aggregated layout.
@@ -455,7 +457,7 @@ impl Renderer {
         self.functions_by_total = sort_functions_desc_by(&by_name, false);
         self.functions_by_self = sort_functions_desc_by(&by_name, true);
         let (agg_slices, agg_range, agg_rows) = build_left_heavy_layout(&profile);
-        self.aggregated_slices = Some(agg_slices);
+        self.aggregated_slices = Some(Arc::new(agg_slices));
         self.aggregated_time_range = agg_range;
         self.aggregated_track_rows = agg_rows;
         log::debug!(
@@ -464,13 +466,15 @@ impl Renderer {
             started.elapsed()
         );
         self.profile = Some(profile);
-        self.viewport.fit_time(start_ns, end_ns);
-        self.viewport.clamp(start_ns, end_ns);
         self.hovered = None;
         self.selected_slice = None;
         self.sandwich_cache = None;
         self.collapsed_tracks.clear();
         self.layout_mode = LayoutMode::TimeOrdered;
+        self.viewport.fit_time(start_ns, end_ns);
+        self.viewport.row_height_px = ROW_HEIGHT_PX;
+        self.viewport.scroll_y_px = 0.0;
+        self.clamp_viewport();
         self.refresh_status_for_idle();
     }
 
@@ -857,11 +861,12 @@ impl Renderer {
         self.track_layouts.clear();
         self.inspector_hotspot_rects.clear();
         self.inspector_tab_rects.clear();
-
-        // Always: top global tab bar.
-        self.emit_top_tab_bar();
+        self.track_header_rects.clear();
+        self.layout_button_rects.clear();
 
         let Some(profile) = self.profile.clone() else {
+            // Empty state — still draw the tab bar.
+            self.emit_top_tab_bar();
             self.instance_count = 0;
             return;
         };
@@ -869,6 +874,8 @@ impl Renderer {
         // Non-flame tabs render a full-window content list below the tab bar.
         if self.active_tab != MainTab::Flame {
             self.emit_full_tab_content();
+            // Top tab bar last so it overdraws any spillover from rows.
+            self.emit_top_tab_bar();
             self.finalize_instance_buffer();
             return;
         }
@@ -882,19 +889,42 @@ impl Renderer {
         let view_h_px = self.viewport.size_px.1 - STATUS_BAR_HEIGHT_PX - top_offset;
         let scroll_y = self.viewport.scroll_y_px;
         let direction = self.direction;
+        let layout_mode = self.layout_mode;
+        // Hold the active SliceTable behind an Arc so the rest of this method
+        // can read it freely while still mutating `self` for instance pushes.
+        let slices_arc: Arc<flame_core::SliceTable> = match (
+            layout_mode,
+            self.aggregated_slices.clone(),
+        ) {
+            (LayoutMode::LeftHeavy, Some(s)) => s,
+            _ => Arc::new(flame_core::SliceTable::default()), // placeholder; real path uses profile
+        };
+        // For TimeOrdered we use profile.slices directly (no Arc).
+        let use_aggregated = layout_mode == LayoutMode::LeftHeavy && self.aggregated_slices.is_some();
+        macro_rules! slices {
+            () => {
+                if use_aggregated { &*slices_arc } else { &profile.slices }
+            };
+        }
 
-        // Compute per-track canvas-space layout. Empty tracks (row_count == 0) are
-        // still listed so the user knows they exist, but render at minimal height.
+        // Compute per-track canvas-space layout. Collapsed tracks render only
+        // their header (content_h = 0). Empty tracks still list their header
+        // so the user knows they exist.
         let mut y = 0.0_f32;
-        for (i, track) in profile.tracks.iter().enumerate() {
+        for (i, _track) in profile.tracks.iter().enumerate() {
             let track_id = TrackId(i as u32);
-            let rows = track.row_count;
-            let content_h = rows as f32 * row_h;
+            let rows = if use_aggregated {
+                self.aggregated_track_rows.get(i).copied().unwrap_or(0)
+            } else {
+                profile.tracks[i].row_count
+            };
+            let collapsed = self.collapsed_tracks.contains(&track_id);
+            let content_h = if collapsed { 0.0 } else { rows as f32 * row_h };
             let layout = TrackLayout {
                 track: track_id,
                 y_top: y,
                 header_h: TRACK_HEADER_HEIGHT_PX,
-                rows,
+                rows: if collapsed { 0 } else { rows },
                 content_h,
             };
             y += TRACK_HEADER_HEIGHT_PX + content_h + TRACK_GAP_PX;
@@ -911,19 +941,32 @@ impl Renderer {
                 continue;
             }
 
-            // Header bar instance: full-width at the top of the track. Marked with
-            // the sentinel index so hit-testing skips it.
+            // Header bar instance: full-width at the top of the track. Click
+            // the header to toggle collapse.
             let header_y = track_y;
             if header_y + layout.header_h > 0.0 && header_y < view_h_px {
                 let inst_id = self.instances.len() as u32;
+                let rect = [0.0, header_y + top_offset, view_w_px, layout.header_h - 2.0];
                 self.instances.push(SliceInstance {
-                    rect_px: [0.0, header_y + top_offset, view_w_px, layout.header_h - 2.0],
+                    rect_px: rect,
                     color: HEADER_COLOR,
                     instance_id: inst_id,
                     flags: 1, // bit 0 = header
                     _pad: [0; 2],
                 });
                 self.slice_indices.push(NON_SLICE_SENTINEL);
+                // Restrict click hit-test to timeline width (don't trigger when
+                // the user clicks the inspector area at the same y).
+                let header_w = view_w_px;
+                self.track_header_rects.push((
+                    layout.track,
+                    [0.0, header_y + top_offset, header_w, layout.header_h - 2.0],
+                ));
+            }
+
+            // Collapsed → no slice content for this track.
+            if self.collapsed_tracks.contains(&layout.track) {
+                continue;
             }
 
             // Compute the slice of `depth` values that actually fall in the
@@ -952,38 +995,100 @@ impl Renderer {
                     continue;
                 }
 
-                let row = profile.slices.visible_in_row(layout.track, depth, lo_ns, hi_ns);
+                let active_slices: &flame_core::SliceTable = slices!();
+                let row = active_slices.visible_in_row(layout.track, depth, lo_ns, hi_ns);
+                let max_x = view_w_px;
+
+                // Sub-pixel slices get *bucketed* by pixel column instead of
+                // culled. For every pixel column with sub-pixel slices we emit
+                // one 1px-wide instance representing the longest-duration
+                // slice in that column — that way deep rows still show content
+                // at zoom-out, but we don't push millions of overlapping
+                // instances. Wide slices (>= 1px) emit normally.
+                let mut pending_col: Option<(u32, i32, u64, [f32; 4])> = None;
+
                 for i in row.start..row.end {
                     let idx = i as usize;
-                    let s = profile.slices.start_ns[idx];
-                    let d = profile.slices.dur_ns[idx];
+                    let s = active_slices.start_ns[idx];
+                    let d = active_slices.dur_ns[idx];
                     let x = self.viewport.ns_to_x(s);
                     let w_px = (d as f64 / self.viewport.ns_per_pixel) as f32;
-                    if w_px < 1.0 {
-                        continue;
-                    }
-                    let x_clamped = x.max(-2.0);
-                    let w_clamped = (w_px - (x_clamped - x)).min(view_w_px - x_clamped + 4.0);
-                    if w_clamped <= 0.0 {
-                        continue;
-                    }
-                    let name_id = profile.slices.name[idx];
+                    let name_id = active_slices.name[idx];
                     let name = profile.strings.get(name_id);
                     let color = palette::color_for(name);
 
-                    let inst_id = self.instances.len() as u32;
-                    let mut flags: u32 = 0;
-                    if Some(i) == self.selected_slice {
-                        flags |= 2; // bit 1 = selected
+                    if w_px >= 1.0 {
+                        // Flush pending sub-pixel bucket first.
+                        if let Some((bidx, col, _, bcolor)) = pending_col.take() {
+                            push_subpx_instance(
+                                &mut self.instances,
+                                &mut self.slice_indices,
+                                bidx,
+                                col as f32,
+                                y_top + top_offset,
+                                row_h,
+                                bcolor,
+                                self.selected_slice == Some(bidx),
+                            );
+                        }
+                        let x_clamped = x.max(-2.0);
+                        let w_clamped = (w_px - (x_clamped - x)).min(max_x - x_clamped);
+                        if w_clamped <= 0.0 {
+                            continue;
+                        }
+                        let inst_id = self.instances.len() as u32;
+                        let mut flags: u32 = 0;
+                        if Some(i) == self.selected_slice {
+                            flags |= 2;
+                        }
+                        self.instances.push(SliceInstance {
+                            rect_px: [x_clamped, y_top + top_offset, w_clamped, row_h - 1.0],
+                            color,
+                            instance_id: inst_id,
+                            flags,
+                            _pad: [0; 2],
+                        });
+                        self.slice_indices.push(i);
+                    } else {
+                        let col = x.floor().max(0.0).min(max_x - 1.0) as i32;
+                        match pending_col {
+                            Some((bidx, bcol, bdur, bcolor)) if bcol == col => {
+                                if d > bdur {
+                                    pending_col = Some((i, col, d, color));
+                                } else {
+                                    pending_col = Some((bidx, bcol, bdur, bcolor));
+                                }
+                            }
+                            Some((bidx, bcol, _bdur, bcolor)) => {
+                                push_subpx_instance(
+                                    &mut self.instances,
+                                    &mut self.slice_indices,
+                                    bidx,
+                                    bcol as f32,
+                                    y_top + top_offset,
+                                    row_h,
+                                    bcolor,
+                                    self.selected_slice == Some(bidx),
+                                );
+                                pending_col = Some((i, col, d, color));
+                            }
+                            None => {
+                                pending_col = Some((i, col, d, color));
+                            }
+                        }
                     }
-                    self.instances.push(SliceInstance {
-                        rect_px: [x_clamped, y_top + top_offset, w_clamped, row_h - 1.0],
-                        color,
-                        instance_id: inst_id,
-                        flags,
-                        _pad: [0; 2],
-                    });
-                    self.slice_indices.push(i);
+                }
+                if let Some((bidx, col, _, bcolor)) = pending_col.take() {
+                    push_subpx_instance(
+                        &mut self.instances,
+                        &mut self.slice_indices,
+                        bidx,
+                        col as f32,
+                        y_top + top_offset,
+                        row_h,
+                        bcolor,
+                        self.selected_slice == Some(bidx),
+                    );
                 }
             }
         }
@@ -1002,6 +1107,59 @@ impl Renderer {
                 _pad: [0; 2],
             });
             self.slice_indices.push(NON_SLICE_SENTINEL);
+        }
+
+        // Floating layout-mode toggle buttons in the bottom-left of the timeline.
+        {
+            let btn_h = 44.0_f32;
+            let btn_w = 156.0_f32;
+            let btn_gap = 4.0_f32;
+            let pad = 16.0_f32;
+            let total_w = btn_w * LayoutMode::ALL.len() as f32
+                + btn_gap * (LayoutMode::ALL.len() as f32 - 1.0);
+            let bar_w = total_w + pad * 2.0;
+            let bar_h = btn_h + pad;
+            let bar_x = 12.0_f32;
+            let bar_y = self.viewport.size_px.1 - STATUS_BAR_HEIGHT_PX - bar_h - 12.0;
+
+            // Backing pill so the buttons read against the timeline.
+            let inst_id = self.instances.len() as u32;
+            self.instances.push(SliceInstance {
+                rect_px: [bar_x, bar_y, bar_w, bar_h],
+                color: [0.10, 0.11, 0.14, 0.92],
+                instance_id: inst_id,
+                flags: 1,
+                _pad: [0; 2],
+            });
+            self.slice_indices.push(NON_SLICE_SENTINEL);
+
+            for (i, &mode) in LayoutMode::ALL.iter().enumerate() {
+                let x = bar_x + pad + (btn_w + btn_gap) * i as f32;
+                let y = bar_y + pad * 0.5;
+                let active = mode == self.layout_mode;
+                let bg = if active { TOP_TAB_ACTIVE } else { TOP_TAB_INACTIVE };
+                let inst_id = self.instances.len() as u32;
+                self.instances.push(SliceInstance {
+                    rect_px: [x, y, btn_w, btn_h],
+                    color: bg,
+                    instance_id: inst_id,
+                    flags: 1,
+                    _pad: [0; 2],
+                });
+                self.slice_indices.push(NON_SLICE_SENTINEL);
+                self.layout_button_rects.push((mode, [x, y, btn_w, btn_h]));
+                if active {
+                    let inst_id = self.instances.len() as u32;
+                    self.instances.push(SliceInstance {
+                        rect_px: [x, y + btn_h - 3.0, btn_w, 3.0],
+                        color: TOP_TAB_ACCENT,
+                        instance_id: inst_id,
+                        flags: 1,
+                        _pad: [0; 2],
+                    });
+                    self.slice_indices.push(NON_SLICE_SENTINEL);
+                }
+            }
         }
 
         // SANDWICH section — only when a slice is selected. Renders below STACK.
@@ -1047,6 +1205,11 @@ impl Renderer {
                 }
             }
         }
+
+        // Top tab bar last so it always overdraws any slice that scrolled up
+        // into its y-range. (Same applies to the tab content path; the no-tab
+        // empty state path emits its tab bar earlier.)
+        self.emit_top_tab_bar();
 
         self.finalize_instance_buffer();
     }
@@ -1219,11 +1382,24 @@ impl Renderer {
             return;
         };
 
-        // Each label entry: (text, x, y, max_w, font_metric, color).
+        // Each label entry: (text, x, y, max_w, font_metric, color, zone).
+        // `zone` tells us where the label lives — it determines glyphon's
+        // clip bounds so timeline labels don't bleed into the tab bar (and
+        // tab bar labels don't bleed below it).
         #[derive(Copy, Clone)]
         enum Metric { Slice, Header, InspectorHeading, InspectorTitle, InspectorBody }
+        #[derive(Copy, Clone, PartialEq, Eq)]
+        enum Zone {
+            /// Top tab bar (y in [0, TAB_BAR_HEIGHT_PX]). Anything below clipped.
+            TabBar,
+            /// Timeline / inspector content (clip top at TAB_BAR_HEIGHT_PX,
+            /// bottom at status-bar top).
+            Below,
+            /// Status bar (no extra clipping).
+            Status,
+        }
         let row_h = self.viewport.row_height_px;
-        let mut labels: Vec<(String, f32, f32, f32, Metric, GlyphonColor)> = Vec::new();
+        let mut labels: Vec<(String, f32, f32, f32, Metric, GlyphonColor, Zone)> = Vec::new();
         let inner_pad = 6.0_f32;
         let scroll_y = self.viewport.scroll_y_px;
         let top_offset = TAB_BAR_HEIGHT_PX;
@@ -1237,7 +1413,6 @@ impl Renderer {
             let color = if tab == self.active_tab { title_color } else { dim_color };
             let tx = rect[0];
             let ty = rect[1] + (rect[3] - INSPECTOR_LINE_HEIGHT_PX) * 0.5;
-            // Center-ish via leading padding; glyphon left-aligns by default.
             labels.push((
                 format!("  {}", tab.label()),
                 tx,
@@ -1245,6 +1420,25 @@ impl Renderer {
                 rect[2],
                 Metric::InspectorBody,
                 color,
+                Zone::TabBar,
+            ));
+        }
+
+        // Floating layout-mode button labels.
+        for (mode, rect) in self.layout_button_rects.clone() {
+            let active = mode == self.layout_mode;
+            let color = if active { title_color } else { dim_color };
+            let lh = INSPECTOR_LINE_HEIGHT_PX;
+            let tx = rect[0];
+            let ty = rect[1] + (rect[3] - lh) * 0.5;
+            labels.push((
+                format!("  {}", mode.label()),
+                tx,
+                ty,
+                rect[2],
+                Metric::InspectorHeading,
+                color,
+                Zone::Below,
             ));
         }
 
@@ -1274,6 +1468,7 @@ impl Renderer {
                     self.viewport.size_px.0 - 24.0,
                     Metric::Header,
                     label_color,
+                    Zone::Below,
                 ));
             }
 
@@ -1294,6 +1489,7 @@ impl Renderer {
                     (inst.rect_px[2] - inner_pad * 2.0).max(0.0),
                     Metric::Slice,
                     GlyphonColor::rgb(20, 20, 22),
+                    Zone::Below,
                 ));
             }
         }
@@ -1319,17 +1515,17 @@ impl Renderer {
                 let track_idx = profile.slices.track[i].0 as usize;
                 let track_name = profile.tracks.get(track_idx).map(|t| profile.strings.get(t.name)).unwrap_or("?");
 
-                labels.push(("SELECTED".into(), inspector_text_x, iy, inspector_text_w, Metric::InspectorHeading, dim_color));
+                labels.push(("SELECTED".into(), inspector_text_x, iy, inspector_text_w, Metric::InspectorHeading, dim_color, Zone::Below));
                 iy += line;
-                labels.push((name, inspector_text_x, iy, inspector_text_w, Metric::InspectorTitle, title_color));
+                labels.push((name, inspector_text_x, iy, inspector_text_w, Metric::InspectorTitle, title_color, Zone::Below));
                 iy += INSPECTOR_TITLE_LINE_HEIGHT;
                 let meta = format!("{}    depth {}    {}", format_duration(dur), depth, track_name);
-                labels.push((meta, inspector_text_x, iy, inspector_text_w, Metric::InspectorBody, dim_color));
+                labels.push((meta, inspector_text_x, iy, inspector_text_w, Metric::InspectorBody, dim_color, Zone::Below));
                 iy += line + SECTION_GAP_PX;
 
                 // Reconstruct call stack.
                 let stack = self.reconstruct_stack(sel_idx);
-                labels.push(("STACK".into(), inspector_text_x, iy, inspector_text_w, Metric::InspectorHeading, dim_color));
+                labels.push(("STACK".into(), inspector_text_x, iy, inspector_text_w, Metric::InspectorHeading, dim_color, Zone::Below));
                 iy += line;
                 // Show up to last 8 entries; deeper traces get truncated with an ellipsis.
                 let max_lines = 8;
@@ -1339,7 +1535,7 @@ impl Renderer {
                     stack.iter().collect()
                 };
                 if stack.len() > max_lines {
-                    labels.push(("…".into(), inspector_text_x + 16.0, iy, inspector_text_w - 16.0, Metric::InspectorBody, dim_color));
+                    labels.push(("…".into(), inspector_text_x + 16.0, iy, inspector_text_w - 16.0, Metric::InspectorBody, dim_color, Zone::Below));
                     iy += line;
                 }
                 for sidx_ref in show {
@@ -1356,6 +1552,7 @@ impl Renderer {
                         inspector_text_w,
                         Metric::InspectorBody,
                         label_color,
+                        Zone::Below,
                     ));
                     iy += line;
                 }
@@ -1371,6 +1568,7 @@ impl Renderer {
                         inspector_text_w,
                         Metric::InspectorHeading,
                         dim_color,
+                        Zone::Below,
                     ));
                     let row_data = self.sandwich_rows(5).unwrap_or_default();
                     for (hi, rect) in self.inspector_hotspot_rects.clone().iter().enumerate() {
@@ -1389,6 +1587,7 @@ impl Renderer {
                             rect.rect[2] - 24.0,
                             Metric::InspectorBody,
                             color,
+                            Zone::Below,
                         ));
                     }
                 }
@@ -1406,6 +1605,7 @@ impl Renderer {
                 self.window_w_px - pad * 2.0,
                 Metric::InspectorHeading,
                 dim_color,
+                Zone::Below,
             ));
 
             let rows_data: Vec<(u32, String)> = self.tab_rows();
@@ -1419,6 +1619,7 @@ impl Renderer {
                         rect.rect[2] - 24.0,
                         Metric::InspectorHeading,
                         dim_color,
+                        Zone::Below,
                     ));
                     continue;
                 }
@@ -1432,6 +1633,7 @@ impl Renderer {
                     rect.rect[2] - 24.0,
                     Metric::InspectorBody,
                     label_color,
+                    Zone::Below,
                 ));
                 if !sub.is_empty() {
                     labels.push((
@@ -1441,6 +1643,7 @@ impl Renderer {
                         rect.rect[2] - 24.0,
                         Metric::InspectorHeading,
                         dim_color,
+                        Zone::Below,
                     ));
                 }
             }
@@ -1457,6 +1660,7 @@ impl Renderer {
             self.viewport.size_px.0 - 24.0,
             Metric::Slice,
             GlyphonColor::rgb(220, 220, 224),
+            Zone::Status,
         ));
 
         // Resize the buffer pool to match.
@@ -1472,7 +1676,7 @@ impl Renderer {
             self.text_buffers.truncate(labels.len() + 256);
         }
 
-        for (i, (text, _x, _y, max_w, metric, _color)) in labels.iter().enumerate() {
+        for (i, (text, _x, _y, max_w, metric, _color, _zone)) in labels.iter().enumerate() {
             let buf = &mut self.text_buffers[i];
             let (fs, lh) = match metric {
                 Metric::Slice => (LABEL_FONT_SIZE, LABEL_LINE_HEIGHT),
@@ -1503,7 +1707,7 @@ impl Renderer {
         let text_areas: Vec<TextArea> = labels
             .iter()
             .enumerate()
-            .map(|(i, (_, x, y, max_w, metric, color))| {
+            .map(|(i, (_, x, y, max_w, metric, color, zone))| {
                 let lh = match metric {
                     Metric::Slice => LABEL_LINE_HEIGHT,
                     Metric::Header => HEADER_LINE_HEIGHT,
@@ -1514,6 +1718,13 @@ impl Renderer {
                 let bounds_top = y.floor() as i32;
                 let bounds_right = (x + max_w).ceil() as i32;
                 let bounds_bottom = (y + lh).ceil() as i32;
+                let tab_bar_h = TAB_BAR_HEIGHT_PX as i32;
+                let status_top = (self.viewport.size_px.1 - STATUS_BAR_HEIGHT_PX) as i32;
+                let (clip_top, clip_bot) = match zone {
+                    Zone::TabBar => (0, tab_bar_h),
+                    Zone::Below => (tab_bar_h, status_top),
+                    Zone::Status => (status_top, view_h),
+                };
                 TextArea {
                     buffer: &self.text_buffers[i],
                     left: *x,
@@ -1521,9 +1732,9 @@ impl Renderer {
                     scale: 1.0,
                     bounds: TextBounds {
                         left: bounds_left.max(0),
-                        top: bounds_top.max(0),
+                        top: bounds_top.max(clip_top),
                         right: bounds_right.min(view_w),
-                        bottom: bounds_bottom.min(view_h),
+                        bottom: bounds_bottom.min(clip_bot),
                     },
                     default_color: *color,
                     custom_glyphs: &[],
@@ -1726,6 +1937,235 @@ fn compute_sandwich(profile: &Profile, target: StringId) -> CallerCalleeAggregat
         v
     };
     CallerCalleeAggregate { callers: to_list(callers), callees: to_list(callees) }
+}
+
+/// Push a 1-pixel-wide bucket instance representing one or more sub-pixel
+/// slices that all share a pixel column. Indexed back to a real SoA slice so
+/// hover/click still work (the largest-duration slice in the bucket wins).
+fn push_subpx_instance(
+    instances: &mut Vec<SliceInstance>,
+    slice_indices: &mut Vec<u32>,
+    slice_idx: u32,
+    x_px: f32,
+    y_px: f32,
+    row_h: f32,
+    color: [f32; 4],
+    selected: bool,
+) {
+    let inst_id = instances.len() as u32;
+    let flags: u32 = if selected { 2 } else { 0 };
+    instances.push(SliceInstance {
+        rect_px: [x_px, y_px, 1.0, row_h - 1.0],
+        color,
+        instance_id: inst_id,
+        flags,
+        _pad: [0; 2],
+    });
+    slice_indices.push(slice_idx);
+}
+
+struct AggNode {
+    frame: StringId,
+    category: flame_core::CategoryId,
+    total: u64,
+    children: Vec<usize>,
+}
+
+/// Build a left-heavy / aggregated SliceTable from the time-ordered profile.
+/// For each track, identical (parent_chain → frame) paths collapse into one
+/// wide bar; siblings sort by total duration desc. The new x-axis represents
+/// total time spent (0..track_total), not wall time.
+fn build_left_heavy_layout(
+    profile: &Profile,
+) -> (flame_core::SliceTable, (u64, u64), Vec<u16>) {
+    let n_tracks = profile.tracks.len();
+    let mut row_counts = vec![0u16; n_tracks];
+    let mut max_total: u64 = 0;
+
+    let mut out_track: Vec<TrackId> = Vec::new();
+    let mut out_depth: Vec<u16> = Vec::new();
+    let mut out_start: Vec<u64> = Vec::new();
+    let mut out_dur: Vec<u64> = Vec::new();
+    let mut out_name: Vec<StringId> = Vec::new();
+    let mut out_cat: Vec<flame_core::CategoryId> = Vec::new();
+
+    for t_idx in 0..n_tracks {
+        let track_id = TrackId(t_idx as u32);
+        let mut nodes: Vec<AggNode> = Vec::new();
+        let row_0 = profile
+            .slices
+            .rows
+            .get(&(track_id, 0))
+            .cloned()
+            .unwrap_or(0..0);
+        let roots: Vec<u32> = (row_0.start..row_0.end).collect();
+        let root_nodes = aggregate_children_lh(profile, track_id, 0, &roots, &mut nodes);
+
+        let mut max_depth = 0u16;
+        let total = lay_out_lh(
+            &nodes,
+            &root_nodes,
+            track_id,
+            0,
+            0,
+            &mut out_track,
+            &mut out_depth,
+            &mut out_start,
+            &mut out_dur,
+            &mut out_name,
+            &mut out_cat,
+            &mut max_depth,
+        );
+        row_counts[t_idx] = if root_nodes.is_empty() { 0 } else { max_depth + 1 };
+        max_total = max_total.max(total);
+    }
+
+    // Sort all collected slices into the canonical (track, depth, start) order
+    // and build the SliceTable + rows index.
+    let n = out_start.len();
+    let mut idx: Vec<usize> = (0..n).collect();
+    idx.sort_by_key(|&i| (out_track[i].0, out_depth[i], out_start[i]));
+    let track = idx.iter().map(|&i| out_track[i]).collect::<Vec<_>>();
+    let depth = idx.iter().map(|&i| out_depth[i]).collect::<Vec<_>>();
+    let start_ns = idx.iter().map(|&i| out_start[i]).collect::<Vec<_>>();
+    let dur_ns = idx.iter().map(|&i| out_dur[i]).collect::<Vec<_>>();
+    let name = idx.iter().map(|&i| out_name[i]).collect::<Vec<_>>();
+    let category = idx.iter().map(|&i| out_cat[i]).collect::<Vec<_>>();
+    let stack = vec![None; n];
+
+    let mut rows: AHashMap<(TrackId, u16), std::ops::Range<u32>> = AHashMap::new();
+    let mut row_start: u32 = 0;
+    let mut cur_key: Option<(TrackId, u16)> = None;
+    for i in 0..n {
+        let key = (track[i], depth[i]);
+        if Some(key) != cur_key {
+            if let Some(prev) = cur_key {
+                rows.insert(prev, row_start..i as u32);
+            }
+            row_start = i as u32;
+            cur_key = Some(key);
+        }
+    }
+    if let Some(prev) = cur_key {
+        rows.insert(prev, row_start..n as u32);
+    }
+
+    let table = flame_core::SliceTable {
+        track,
+        depth,
+        start_ns,
+        dur_ns,
+        name,
+        category,
+        stack,
+        rows,
+    };
+    (table, (0, max_total), row_counts)
+}
+
+fn aggregate_children_lh(
+    profile: &Profile,
+    track_id: TrackId,
+    depth: u16,
+    slice_indices: &[u32],
+    nodes: &mut Vec<AggNode>,
+) -> Vec<usize> {
+    let mut by_frame: AHashMap<StringId, usize> = AHashMap::new();
+    let mut order: Vec<usize> = Vec::new();
+    let mut children_per_frame: AHashMap<StringId, Vec<u32>> = AHashMap::new();
+
+    for &idx in slice_indices {
+        let i = idx as usize;
+        let frame = profile.slices.name[i];
+        let dur = profile.slices.dur_ns[i];
+        let cat = profile.slices.category[i];
+
+        let node_idx = match by_frame.entry(frame) {
+            std::collections::hash_map::Entry::Occupied(e) => *e.get(),
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let new_idx = nodes.len();
+                nodes.push(AggNode {
+                    frame,
+                    category: cat,
+                    total: 0,
+                    children: Vec::new(),
+                });
+                e.insert(new_idx);
+                order.push(new_idx);
+                new_idx
+            }
+        };
+        nodes[node_idx].total += dur;
+
+        // Gather direct children of this slice into the merged children pool.
+        let s = profile.slices.start_ns[i];
+        let end = s + dur;
+        let row = profile.slices.visible_in_row(track_id, depth + 1, s, end);
+        let cv = children_per_frame.entry(frame).or_default();
+        for c in row.start..row.end {
+            let cs = profile.slices.start_ns[c as usize];
+            let cd = profile.slices.dur_ns[c as usize];
+            if cs >= s && cs + cd <= end {
+                cv.push(c);
+            }
+        }
+    }
+
+    // Recurse on each unique frame's merged children.
+    for &node_idx in &order {
+        let frame = nodes[node_idx].frame;
+        let kids = children_per_frame.remove(&frame).unwrap_or_default();
+        if !kids.is_empty() {
+            let cn = aggregate_children_lh(profile, track_id, depth + 1, &kids, nodes);
+            nodes[node_idx].children = cn;
+        }
+    }
+    order
+}
+
+fn lay_out_lh(
+    nodes: &[AggNode],
+    roots: &[usize],
+    track: TrackId,
+    x_offset: u64,
+    depth: u16,
+    out_track: &mut Vec<TrackId>,
+    out_depth: &mut Vec<u16>,
+    out_start: &mut Vec<u64>,
+    out_dur: &mut Vec<u64>,
+    out_name: &mut Vec<StringId>,
+    out_cat: &mut Vec<flame_core::CategoryId>,
+    max_depth: &mut u16,
+) -> u64 {
+    let mut sorted = roots.to_vec();
+    sorted.sort_by_key(|&i| std::cmp::Reverse(nodes[i].total));
+    let mut x = x_offset;
+    for &i in &sorted {
+        let n = &nodes[i];
+        out_track.push(track);
+        out_depth.push(depth);
+        out_start.push(x);
+        out_dur.push(n.total);
+        out_name.push(n.frame);
+        out_cat.push(n.category);
+        *max_depth = (*max_depth).max(depth);
+        lay_out_lh(
+            nodes,
+            &n.children,
+            track,
+            x,
+            depth + 1,
+            out_track,
+            out_depth,
+            out_start,
+            out_dur,
+            out_name,
+            out_cat,
+            max_depth,
+        );
+        x += n.total;
+    }
+    x - x_offset
 }
 
 /// Compute per-slice self-time: `dur - sum(direct-children dur)`. Children are

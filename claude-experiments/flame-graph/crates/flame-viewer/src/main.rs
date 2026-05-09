@@ -121,6 +121,25 @@ fn parse_stress_arg(arg: &str) -> Option<(u32, u32)> {
     Some((a.parse().ok()?, b.parse().ok()?))
 }
 
+#[allow(dead_code)]
+/// Largest row height that still lets every track's full depth fit vertically
+/// in the timeline area. Capped at the default `ROW_HEIGHT_PX` so things stay
+/// readable when there's plenty of room.
+fn compute_fit_row_height(r: &Renderer) -> f32 {
+    let Some(p) = &r.profile else { return flame_render::ROW_HEIGHT_PX };
+    let total_rows: u32 = p.tracks.iter().map(|t| t.row_count as u32).sum();
+    if total_rows == 0 {
+        return flame_render::ROW_HEIGHT_PX;
+    }
+    // Match the math in flame_render::Renderer::fit_all so the two paths agree.
+    let usable_h = (r.viewport.size_px.1 - 60.0 /* status */ - 70.0 /* tab bar */).max(1.0);
+    let n_tracks = p.tracks.len() as f32;
+    let header_total = 36.0 * n_tracks;
+    let gap_total = 8.0 * (n_tracks - 1.0).max(0.0);
+    let row_h = (usable_h - header_total - gap_total) / total_rows as f32;
+    row_h.clamp(0.5, flame_render::ROW_HEIGHT_PX)
+}
+
 /// `Home`, `Escape`, or `0` all act as the "reset to readable defaults" key.
 fn is_reset_key(k: &Key) -> bool {
     match k {
@@ -269,6 +288,22 @@ impl ApplicationHandler for App {
                                     if let Some(w) = &self.window {
                                         w.request_redraw();
                                     }
+                                } else if let Some(mode) =
+                                    r.hit_test_layout_button(self.cursor.0, self.cursor.1)
+                                {
+                                    r.set_layout_mode(mode);
+                                    r.rebuild_instances();
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
+                                } else if let Some(track_id) =
+                                    r.hit_test_track_header(self.cursor.0, self.cursor.1)
+                                {
+                                    r.toggle_track_collapsed(track_id);
+                                    r.rebuild_instances();
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
                                 } else if r.cursor_in_inspector(self.cursor.0) {
                                     if let Some(slice_idx) =
                                         r.hit_test_inspector(self.cursor.0, self.cursor.1)
@@ -342,9 +377,8 @@ impl ApplicationHandler for App {
                 if let Some(r) = &mut self.renderer {
                     let factor = (1.0 - delta).clamp(0.5, 2.0);
                     r.viewport.zoom_at(self.cursor.0, factor);
-                    // If we're zooming in while row height is squashed (e.g.
-                    // after pressing `A`), grow row height proportionally so
-                    // the user can naturally zoom back to readable.
+                    // Pinch in (zoom in): grow row height back toward default
+                    // if it was squashed by an explicit fit-all reset.
                     if factor < 1.0 && r.viewport.row_height_px < flame_render::ROW_HEIGHT_PX {
                         r.viewport.row_height_px = ((r.viewport.row_height_px as f64 / factor)
                             as f32)
@@ -363,14 +397,11 @@ impl ApplicationHandler for App {
                     let mut redraw = true;
                     match event.logical_key {
                         ref k if is_reset_key(k) => {
-                            // Reset to readable defaults: time-fit + default row height.
-                            if let Some(p) = &r.profile {
-                                let (s, e) = p.time_range;
-                                r.viewport.fit_time(s, e);
-                            }
-                            r.viewport.row_height_px = flame_render::ROW_HEIGHT_PX;
-                            r.viewport.scroll_y_px = 0.0;
-                            r.clamp_viewport();
+                            // Full reset: fit the entire trace into the viewport
+                            // both horizontally AND vertically so every depth on
+                            // every track is visible at once. Row height shrinks
+                            // (capped at ROW_HEIGHT_PX) to make all rows fit.
+                            r.fit_all();
                             r.rebuild_instances();
                         }
                         Key::Character(ref s) if s.as_str().eq_ignore_ascii_case("a") => {
