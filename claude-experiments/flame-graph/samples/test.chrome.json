@@ -1,0 +1,16 @@
+{
+  "traceEvents": [
+    {"name": "process_name", "ph": "M", "pid": 1, "tid": 0, "args": {"name": "demo"}},
+    {"name": "thread_name",  "ph": "M", "pid": 1, "tid": 1, "args": {"name": "main"}},
+
+    {"name": "main",   "ph": "B", "ts":   0, "pid": 1, "tid": 1, "cat": "app"},
+    {"name": "load",   "ph": "B", "ts":  10, "pid": 1, "tid": 1, "cat": "io"},
+    {"name": "parse",  "ph": "X", "ts":  15, "dur": 20, "pid": 1, "tid": 1, "cat": "cpu"},
+    {"name": "load",   "ph": "E", "ts":  40, "pid": 1, "tid": 1},
+    {"name": "render", "ph": "B", "ts":  50, "pid": 1, "tid": 1, "cat": "gpu"},
+    {"name": "draw",   "ph": "X", "ts":  55, "dur": 30, "pid": 1, "tid": 1, "cat": "gpu"},
+    {"name": "swap",   "ph": "X", "ts":  90, "dur": 5,  "pid": 1, "tid": 1, "cat": "gpu"},
+    {"name": "render", "ph": "E", "ts": 100, "pid": 1, "tid": 1},
+    {"name": "main",   "ph": "E", "ts": 120, "pid": 1, "tid": 1}
+  ]
+}

@@ -1,0 +1,13 @@
+[package]
+name = "cf-tracing-layer"
+version = "0.1.0"
+edition.workspace = true
+description = "tracing-subscriber Layer that pipes spans + events into cf-runtime's EventLog. Cross-links spans to tokio tasks via the polling-task thread-local."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cf-runtime = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,0 +1,16 @@
+[package]
+name = "cf-turbo-demo"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "cf-turbo-demo"
+path = "src/main.rs"
+
+[dependencies]
+cf-runtime = { workspace = true }
+cf-tokio = { workspace = true }
+turbo-tasks = { workspace = true }
+turbo-tasks-testing = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }

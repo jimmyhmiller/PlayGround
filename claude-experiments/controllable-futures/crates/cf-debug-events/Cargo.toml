@@ -1,0 +1,10 @@
+[package]
+name = "cf-debug-events"
+version = "0.1.0"
+edition.workspace = true
+[[bin]]
+name = "cf-debug-events"
+path = "src/main.rs"
+[dependencies]
+cf-runtime = { workspace = true }
+tokio = { workspace = true }

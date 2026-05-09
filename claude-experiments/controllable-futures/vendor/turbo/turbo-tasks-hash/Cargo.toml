@@ -1,0 +1,14 @@
+[package]
+name = "turbo-tasks-hash"
+version = "0.1.0"
+description = "TBD"
+license = "MIT"
+edition = "2024"
+autobenches = false
+
+[lib]
+bench = false
+
+[dependencies]
+turbo-tasks-macros = { workspace = true }
+twox-hash = { workspace = true }

@@ -1,0 +1,278 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cf-runtime",
+    "crates/cf-tokio",
+    "crates/cf-tokio-macros",
+    "crates/cf-ui",
+    "crates/cf-host",
+    "crates/cf-turbo-demo",
+    "crates/cf-tokio-hooks-test",
+    "crates/cf-debug-events",
+    "crates/cf-tracing-layer",
+    "crates/cf-trace-to-perfetto",
+    "vendor/mini-redis",
+    # Forked tokio + tokio-util. We patch these in place; everything else
+    # in the workspace links to them via [patch.crates-io] below.
+    "vendor/tokio-fork/tokio",
+    "vendor/tokio-fork/tokio-util",
+    "vendor/tokio-fork/tokio-macros",
+    "vendor/turbo/*",
+    "vendor/next-taskless",
+]
+exclude = [
+    # WIP visualizer crates the user already has — they don't pay rent
+    # for our work and have heavy node_modules deps.
+    "vendor/turbo/turbo-tasks-viz-server",
+    "vendor/turbo/turbo-tasks-viz-ui",
+    # Fuzzing harness — needs cargo-fuzz nightly bin to even parse.
+    "vendor/turbo/turbo-tasks-fuzz",
+]
+# Default build set — crates we'll actually compile by default. Test/bench/
+# utility crates stay as members so their `workspace = true` deps resolve,
+# but we don't compile them on `cargo build --workspace`.
+default-members = [
+    "crates/cf-runtime",
+    "crates/cf-tokio",
+    "crates/cf-tokio-macros",
+    "crates/cf-ui",
+    "crates/cf-host",
+    "crates/cf-turbo-demo",
+    "vendor/mini-redis",
+    "vendor/tokio-fork/tokio",
+    "vendor/tokio-fork/tokio-util",
+    "vendor/tokio-fork/tokio-macros",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# === Our crates ===
+cf-runtime = { path = "crates/cf-runtime" }
+cf-tokio = { path = "crates/cf-tokio" }
+cf-tokio-macros = { path = "crates/cf-tokio-macros" }
+cf-ui = { path = "crates/cf-ui" }
+cf-tracing-layer = { path = "crates/cf-tracing-layer" }
+
+# === Vendored turbo-* and turbopack-* path overrides. Names match the
+# entries in next.js-backend-visualizer's workspace, but paths point into
+# our vendor/ tree. ===
+auto-hash-map = { path = "vendor/turbo/turbo-tasks-auto-hash-map" }
+turbo-bincode = { path = "vendor/turbo/turbo-bincode" }
+turbo-dyn-eq-hash = { path = "vendor/turbo/turbo-dyn-eq-hash" }
+turbo-esregex = { path = "vendor/turbo/turbo-esregex" }
+turbo-frozenmap = { path = "vendor/turbo/turbo-frozenmap" }
+turbo-persistence = { path = "vendor/turbo/turbo-persistence" }
+turbo-prehash = { path = "vendor/turbo/turbo-prehash" }
+turbo-rcstr = { path = "vendor/turbo/turbo-rcstr" }
+turbo-tasks = { path = "vendor/turbo/turbo-tasks" }
+turbo-tasks-backend = { path = "vendor/turbo/turbo-tasks-backend" }
+turbo-tasks-bytes = { path = "vendor/turbo/turbo-tasks-bytes" }
+turbo-tasks-env = { path = "vendor/turbo/turbo-tasks-env" }
+turbo-tasks-fetch = { path = "vendor/turbo/turbo-tasks-fetch" }
+turbo-tasks-fs = { path = "vendor/turbo/turbo-tasks-fs" }
+turbo-tasks-hash = { path = "vendor/turbo/turbo-tasks-hash" }
+turbo-tasks-macros = { path = "vendor/turbo/turbo-tasks-macros" }
+turbo-tasks-malloc = { path = "vendor/turbo/turbo-tasks-malloc", default-features = false }
+turbo-tasks-testing = { path = "vendor/turbo/turbo-tasks-testing" }
+turbo-unix-path = { path = "vendor/turbo/turbo-unix-path" }
+turbopack = { path = "vendor/turbo/turbopack" }
+turbopack-nodejs = { path = "vendor/turbo/turbopack-nodejs" }
+turbopack-cli-utils = { path = "vendor/turbo/turbopack-cli-utils" }
+turbopack-core = { path = "vendor/turbo/turbopack-core" }
+turbopack-css = { path = "vendor/turbo/turbopack-css" }
+turbopack-analyze = { path = "vendor/turbo/turbopack-analyze" }
+turbopack-browser = { path = "vendor/turbo/turbopack-browser" }
+turbopack-dev-server = { path = "vendor/turbo/turbopack-dev-server" }
+turbopack-ecmascript = { path = "vendor/turbo/turbopack-ecmascript" }
+turbopack-ecmascript-plugins = { path = "vendor/turbo/turbopack-ecmascript-plugins", default-features = false }
+turbopack-ecmascript-runtime = { path = "vendor/turbo/turbopack-ecmascript-runtime" }
+turbopack-ecmascript-hmr-protocol = { path = "vendor/turbo/turbopack-ecmascript-hmr-protocol" }
+turbopack-env = { path = "vendor/turbo/turbopack-env" }
+turbopack-image = { path = "vendor/turbo/turbopack-image" }
+turbopack-json = { path = "vendor/turbo/turbopack-json" }
+turbopack-mdx = { path = "vendor/turbo/turbopack-mdx" }
+turbopack-node = { path = "vendor/turbo/turbopack-node" }
+turbopack-resolve = { path = "vendor/turbo/turbopack-resolve" }
+turbopack-static = { path = "vendor/turbo/turbopack-static" }
+turbopack-swc-utils = { path = "vendor/turbo/turbopack-swc-utils" }
+turbopack-trace-server = { path = "vendor/turbo/turbopack-trace-server" }
+turbopack-trace-utils = { path = "vendor/turbo/turbopack-trace-utils" }
+turbopack-wasm = { path = "vendor/turbo/turbopack-wasm" }
+# Excluded from workspace member compilation, but other crates' Cargo.toml
+# reference these by `workspace = true`, so we still need a path entry.
+turbopack-test-utils = { path = "vendor/turbo/turbopack-test-utils" }
+turbopack-create-test-app = { path = "vendor/turbo/turbopack-create-test-app" }
+turbopack-bench = { path = "vendor/turbo/turbopack-bench" }
+next-taskless = { path = "vendor/next-taskless" }
+
+# === Our async stack ===
+async-task = "4.7"
+async-io = "2.3"
+async-channel = "2.3"
+async-lock = "3.4"
+async-net = "2.0"
+async-broadcast = "0.7"
+event-listener = "5"
+futures-lite = "2.3"
+futures-core = "0.3"
+
+# tokio + tokio-util go through [patch.crates-io] (see below) to our facade
+# crates that forward to cf-tokio.
+tokio = { version = "1.43.0", features = ["full"] }
+tokio-util = { version = "0.7.13", features = ["io", "rt"] }
+
+# === SWC ecosystem (massive) ===
+swc_core = { version = "49.0.0", features = [
+  "ecma_loader_lru",
+  "ecma_loader_parking_lot",
+  "parallel_rayon",
+] }
+swc_plugin_backend_wasmer = { version = "6.0.0" }
+testing = "19.0.0"
+browserslist-rs = "0.19.0"
+mdxjs = "1.0.3"
+modularize_imports = "0.104.0"
+styled_components = "0.132.0"
+styled_jsx = "0.107.0"
+swc_emotion = "0.108.0"
+swc_relay = "0.78.0"
+react_remove_properties = "0.58.0"
+remove_console = "0.59.0"
+preset_env_base = "6.0.0"
+swc_sourcemap = "9.3.4"
+
+# === General deps from the original next.js workspace ===
+chromiumoxide = { version = "0.5.4", features = ["tokio-runtime"], default-features = false }
+tungstenite = "0.20.1"
+allsorts = { version = "0.14.0", default-features = false, features = ["flate2_rust"] }
+anyhow = "1.0.100"
+axum = "0.7.5"
+async-trait = "0.1.64"
+bincode = { git = "https://github.com/bgw/bincode.git", branch = "bgw/patches", features = ["serde"] }
+bitfield = "0.18.0"
+byteorder = "1.5.0"
+bytes = "1.1.0"
+bytes-str = "0.2.7"
+chrono = "0.4.23"
+clap = { version = "4.5.2", features = ["derive"] }
+concurrent-queue = "2.5.0"
+console-subscriber = "0.4.1"
+const_format = "0.2.30"
+criterion = { package = "codspeed-criterion-compat", version = "3.0.5" }
+crossbeam-channel = "0.5.8"
+dashmap = "6.1.0"
+data-encoding = "2.3.3"
+dhat = "0.3.2"
+dunce = "1.0.3"
+either = "1.9.0"
+erased-serde = "0.4.5"
+flate2 = "1.0.28"
+futures = "0.3.31"
+futures-retry = "0.6.0"
+futures-util = "0.3.31"
+hashbrown = "0.14.5"
+image = { version = "0.25.8", default-features = false }
+indexmap = "2.7.1"
+indoc = "2.0.0"
+inventory = "0.3.21"
+itertools = "0.10.5"
+lightningcss = { version = "1.0.0-alpha.68", features = ["serde", "visitor", "into_owned", "browserslist"] }
+lightningcss-napi = { version = "0.4.5", default-features = false, features = ["visitor"] }
+markdown = "1.0.0-alpha.18"
+mime = "0.3.16"
+napi = { version = "2", default-features = false, features = ["napi3", "serde-json", "tokio_rt", "error_anyhow", "napi4", "napi5", "compat-mode"] }
+nohash-hasher = "0.2.0"
+notify = "8.1.0"
+once_cell = "1.17.1"
+owo-colors = "4.2.2"
+parcel_selectors = "0.28.2"
+parking_lot = { version = "0.12.1", features = ["serde"] }
+pathdiff = "0.2.1"
+petgraph = "0.8.3"
+pin-project-lite = "0.2.9"
+postcard = "1.0.4"
+proc-macro2 = "1.0.79"
+qstring = "0.7.2"
+quick_cache = "0.6.14"
+quote = "1.0.23"
+rand = "0.9.0"
+rayon = "1.10.0"
+regex = "1.10.6"
+regress = "0.10.4"
+reqwest = { version = "0.12.24", default-features = false }
+ringmap = "0.1.3"
+roaring = "0.10.10"
+rstest = "0.16.0"
+rusqlite = { version = "0.31.0", features = ["bundled"] }
+rustc-hash = "2.1.1"
+semver = "1.0.16"
+serde = { version = "1.0.217", features = ["derive", "rc"] }
+serde_json = "1.0.138"
+serde_path_to_error = "0.1.16"
+serde_qs = "0.13.0"
+serde_with = "3.12.0"
+shrink-to-fit = { version = "0.2.10", features = ["indexmap", "serde_json", "smallvec", "nightly"] }
+smallvec = { version = "1.15.1", features = ["serde", "const_generics", "union", "const_new", "impl_bincode"] }
+strsim = "0.11.1"
+syn = { version = "2.0.100", features = ["full"] }
+tempfile = "3.20.0"
+thiserror = "1.0.48"
+thread_local = "1.1.8"
+tower-http = { version = "0.6", features = ["cors"] }
+tracing = "0.1.37"
+tracing-subscriber = { version = "0.3.16", features = ["env-filter"] }
+triomphe = { git = "https://github.com/sokra/triomphe", branch = "sokra/unstable", features = ["unsize", "unstable"] }
+twox-hash = { version = "2.1.0", features = ["xxhash64", "xxhash3_128"] }
+unsize = "1.1.0"
+unty = "0.0.4"
+url = "2.2.2"
+urlencoding = "2.1.2"
+uuid = "1.18.1"
+vergen = { version = "9.0.6", features = ["cargo"] }
+vergen-gitcl = { version = "1.0.8", features = ["cargo"] }
+webbrowser = "1.0.6"
+
+# === Our UI ===
+crossbeam-deque = "0.8"
+slab = "0.4"
+eframe = { version = "0.29", default-features = false, features = ["default_fonts", "glow"] }
+egui = "0.29"
+
+[workspace.lints.clippy]
+too_many_arguments = "allow"
+
+[workspace.lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(rust_analyzer)',
+  'cfg(fuzzing)',
+  'cfg(codspeed)',
+] }
+
+[profile.dev]
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 1
+
+[profile.dev.build-override]
+opt-level = 3
+
+# bincode_derive's transitive virtue dep needs a fork that handles default
+# generic parameters; the crates.io version has a parser bug.
+# Plus tokio + tokio-util redirect to our facade crates so source code
+# elsewhere keeps writing `use tokio::*` and resolves to cf-tokio.
+[patch.crates-io]
+virtue = { git = "https://github.com/bgw/virtue.git", branch = "bgw/fix-generic-default-parsing" }
+# Force every bincode reference (including transitive deps like smallvec's
+# impl_bincode feature) to the bgw fork, not crates.io 2.0.1.
+bincode = { git = "https://github.com/bgw/bincode.git", branch = "bgw/patches" }
+# Fork: vendored tokio at 1.43.4 with our hooks for visibility/control.
+tokio = { path = "vendor/tokio-fork/tokio" }
+tokio-util = { path = "vendor/tokio-fork/tokio-util" }
+tokio-macros = { path = "vendor/tokio-fork/tokio-macros" }
+# Same fork the original Next.js workspace uses: mdxjs needs an updated
+# swc_core version than crates.io currently ships.
+mdxjs = { git = "https://github.com/mischnic/mdxjs-rs.git", branch = "swc-core-32" }

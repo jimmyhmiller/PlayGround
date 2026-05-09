@@ -1,0 +1,33 @@
+{
+  "$schema": "https://www.speedscope.app/file-format-schema.json",
+  "exporter": "test",
+  "name": "demo",
+  "activeProfileIndex": 0,
+  "shared": {
+    "frames": [
+      {"name": "main"},
+      {"name": "compute"},
+      {"name": "io"},
+      {"name": "render"}
+    ]
+  },
+  "profiles": [
+    {
+      "type": "evented",
+      "name": "evented demo",
+      "unit": "microseconds",
+      "startValue": 0,
+      "endValue": 100,
+      "events": [
+        {"type": "O", "frame": 0, "at": 0},
+        {"type": "O", "frame": 1, "at": 10},
+        {"type": "C", "frame": 1, "at": 40},
+        {"type": "O", "frame": 2, "at": 45},
+        {"type": "C", "frame": 2, "at": 60},
+        {"type": "O", "frame": 3, "at": 65},
+        {"type": "C", "frame": 3, "at": 90},
+        {"type": "C", "frame": 0, "at": 100}
+      ]
+    }
+  ]
+}

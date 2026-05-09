@@ -1,0 +1,15 @@
+[package]
+name = "next-taskless"
+version = "0.0.1"
+description = "TBD"
+license = "MIT"
+edition = "2024"
+
+[lib]
+bench = false
+
+[dependencies]
+anyhow = { workspace = true }
+regex = { workspace = true }
+serde_json = { workspace = true }
+turbo-unix-path = { workspace = true }

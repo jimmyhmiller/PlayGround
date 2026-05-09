@@ -1,0 +1,11 @@
+[package]
+name = "cf-tokio-hooks-test"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+cf-runtime = { workspace = true }
+tokio = { workspace = true }

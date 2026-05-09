@@ -1,0 +1,8 @@
+[build]
+rustflags = [
+  "--cfg",
+  "tokio_unstable",
+  "-Zshare-generics=y",
+  "-Zthreads=8",
+  "-Csymbol-mangling-version=v0",
+]

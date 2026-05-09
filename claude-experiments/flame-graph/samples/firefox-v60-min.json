@@ -1,0 +1,53 @@
+{
+  "meta": {
+    "interval": 1.0,
+    "startTime": 0,
+    "preprocessedProfileVersion": 60,
+    "categories": [
+      {"name": "Other", "color": "grey"},
+      {"name": "Layout", "color": "purple"}
+    ]
+  },
+  "libs": [],
+  "shared": {
+    "stringArray": ["main", "compute", "io", "render"],
+    "frameTable": {
+      "length": 4,
+      "func": [0, 1, 2, 3],
+      "line": [null, null, null, null],
+      "category": [0, 0, 0, 1]
+    },
+    "funcTable": {
+      "length": 4,
+      "name": [0, 1, 2, 3],
+      "resource": [-1, -1, -1, -1],
+      "fileName": [null, null, null, null],
+      "lineNumber": [null, null, null, null]
+    },
+    "stackTable": {
+      "length": 4,
+      "prefix": [null, 0, 1, 0],
+      "frame":  [0,    1, 2, 3]
+    }
+  },
+  "threads": [
+    {
+      "name": "GeckoMain",
+      "tid": 1,
+      "pid": 1000,
+      "samples": {
+        "length": 5,
+        "stack": [0, 1, 2, 2, 3],
+        "time":  [0, 10, 20, 30, 40]
+      },
+      "markers": {
+        "length": 1,
+        "name": [0],
+        "startTime": [5],
+        "endTime": [35],
+        "phase": [1],
+        "category": [0]
+      }
+    }
+  ]
+}

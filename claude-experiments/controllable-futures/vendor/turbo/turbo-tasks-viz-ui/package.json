@@ -1,0 +1,41 @@
+{
+  "name": "turbo-tasks-viz-ui",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --port 5749",
+    "build": "next build",
+    "start": "next start --port 5749",
+    "postinstall": "mkdir -p node_modules/@next/swc/native && echo '{\"name\":\"@next/swc\",\"version\":\"0.0.0\"}' > node_modules/@next/swc/package.json && echo 'INVALID' > node_modules/@next/swc/native/next-swc.darwin-arm64.node"
+  },
+  "dependencies": {
+    "@dagrejs/dagre": "^2.0.3",
+    "@dagrejs/graphlib": "^3.0.2",
+    "@radix-ui/react-checkbox": "^1.0.4",
+    "@radix-ui/react-scroll-area": "^1.0.5",
+    "@radix-ui/react-separator": "^1.0.3",
+    "@radix-ui/react-slot": "^1.0.2",
+    "@xyflow/react": "^12.10.0",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.0",
+    "lucide-react": "^0.344.0",
+    "next": "^14.1.0",
+    "prism-react-renderer": "^2.4.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-resizable-panels": "^4.6.2",
+    "tailwind-merge": "^2.2.0",
+    "tailwindcss-animate": "^1.0.7"
+  },
+  "devDependencies": {
+    "@types/dagre": "^0.7.53",
+    "@types/node": "^20.11.0",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "autoprefixer": "^10.4.17",
+    "postcss": "^8.4.33",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5.3.0"
+  }
+}

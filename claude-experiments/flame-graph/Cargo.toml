@@ -1,0 +1,43 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/flame-core",
+    "crates/flame-format-folded",
+    "crates/flame-format-chrome",
+    "crates/flame-format-speedscope",
+    "crates/flame-format-firefox",
+    "crates/flame-render",
+    "crates/flame-viewer",
+]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+flame-core              = { path = "crates/flame-core" }
+flame-format-folded     = { path = "crates/flame-format-folded" }
+flame-format-chrome     = { path = "crates/flame-format-chrome" }
+flame-format-speedscope = { path = "crates/flame-format-speedscope" }
+flame-format-firefox    = { path = "crates/flame-format-firefox" }
+flame-render            = { path = "crates/flame-render" }
+
+wgpu       = "29"
+winit      = "0.30"
+glyphon    = "0.11"
+glam       = "0.32"
+bytemuck   = { version = "1", features = ["derive"] }
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+ahash      = "0.8"
+anyhow     = "1"
+thiserror  = "2"
+pollster   = "0.4"
+log        = "0.4"
+env_logger = "0.11"
+flate2     = "1"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

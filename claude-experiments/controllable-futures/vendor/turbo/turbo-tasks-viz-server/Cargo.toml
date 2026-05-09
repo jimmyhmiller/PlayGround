@@ -1,0 +1,21 @@
+[package]
+name = "turbo-tasks-viz-server"
+version = "0.1.0"
+description = "HTTP server for visualizing turbo-tasks backend events"
+license = "MIT"
+edition = "2024"
+autobenches = false
+
+[[bin]]
+name = "turbo-tasks-viz-server"
+path = "src/main.rs"
+bench = false
+
+[dependencies]
+axum = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
+tower-http = { version = "0.5", features = ["cors"] }
+clap = { workspace = true }
