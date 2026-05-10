@@ -288,6 +288,17 @@ impl ApplicationHandler for App {
                                     if let Some(w) = &self.window {
                                         w.request_redraw();
                                     }
+                                } else if r.active_tab == flame_render::MainTab::CallTree {
+                                    // CallTree-tab click: toggle expand/collapse.
+                                    if let Some(node_idx) =
+                                        r.hit_test_call_tree(self.cursor.0, self.cursor.1)
+                                    {
+                                        r.toggle_tree_node(node_idx);
+                                        r.rebuild_instances();
+                                        if let Some(w) = &self.window {
+                                            w.request_redraw();
+                                        }
+                                    }
                                 } else if let Some(mode) =
                                     r.hit_test_layout_button(self.cursor.0, self.cursor.1)
                                 {
@@ -356,16 +367,26 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
                 };
                 if let Some(r) = &mut self.renderer {
-                    if dx != 0.0 {
-                        r.viewport.pan_x_px(dx);
-                    }
-                    if dy != 0.0 {
-                        r.viewport.pan_y_px(dy);
-                    }
-                    r.clamp_viewport();
-                    r.rebuild_instances();
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
+                    if r.active_tab == flame_render::MainTab::CallTree {
+                        if dy != 0.0 {
+                            r.pan_call_tree(dy);
+                            r.rebuild_instances();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                    } else {
+                        if dx != 0.0 {
+                            r.viewport.pan_x_px(dx);
+                        }
+                        if dy != 0.0 {
+                            r.viewport.pan_y_px(dy);
+                        }
+                        r.clamp_viewport();
+                        r.rebuild_instances();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
                     }
                 }
             }

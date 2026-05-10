@@ -1,8 +1,8 @@
 //! Value → text. Used by the REPL and by tests.
 
 use crate::collections::{
-    is_keyword, is_list, is_map, is_set, is_string, is_var, is_vector, keyword_sym_id,
-    set_backing, string_bytes, vector_iter,
+    array_count, array_get, is_array, is_keyword, is_list, is_map, is_set, is_string,
+    is_var, is_vector, keyword_sym_id, set_backing, string_bytes, vector_iter,
 };
 use crate::namespace::{map_count, map_entry, var_sym};
 use crate::symbols::SymbolTable;
@@ -96,6 +96,16 @@ fn write(out: &mut String, v: u64, sym: &SymbolTable) {
                 write(out, x, sym);
             }
             out.push('}');
+        } else if is_array(v) {
+            // Mutable native array — print with an explicit prefix so
+            // it's distinguishable from a persistent vector at the REPL.
+            out.push_str("#array[");
+            let n = array_count(v);
+            for i in 0..n {
+                if i > 0 { out.push(' '); }
+                write(out, array_get(v, i), sym);
+            }
+            out.push(']');
         } else if is_var(v) {
             out.push_str("#'");
             let s = var_sym(v);

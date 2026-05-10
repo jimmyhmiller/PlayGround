@@ -8,9 +8,11 @@ pub mod collections;
 pub mod compile;
 pub mod expand;
 pub mod externs;
+pub mod freevars;
 pub mod host;
 pub mod namespace;
 pub mod printer;
+pub mod quasiquote;
 pub mod reader;
 pub mod symbols;
 pub mod types;
@@ -72,7 +74,7 @@ pub struct Engine {
 /// own `RwLock` so concurrent runs aren't blocked.
 struct CompileState {
     mb: ModuleBuilder,
-    func_refs: HashMap<String, FuncRef>,
+    func_refs: HashMap<String, compile::FnEntry>,
     /// Externs in declaration order. Mutated only at startup.
     externs: Vec<*const u8>,
     anon_counter: u32,
@@ -140,7 +142,7 @@ impl Engine {
         // in the same order as their FuncRef's table-index — the
         // JitModule reads this slice when filling call-table slots.
         let mut mb = ModuleBuilder::new();
-        let mut func_refs: HashMap<String, FuncRef> = HashMap::new();
+        let mut func_refs: HashMap<String, compile::FnEntry> = HashMap::new();
         let mut externs: Vec<*const u8> = Vec::new();
         for prim in externs::all_prims() {
             let sig = Signature {
@@ -168,17 +170,30 @@ impl Engine {
                 sym: std::sync::Mutex::new(SymbolTable::new()),
                 gc: gc_ptr,
                 types,
+                // Filled in below once we have a stable address for
+                // the JitModule. Engine fields are constructed before
+                // the host because the host's `jit` pointer must live
+                // as long as the JitModule itself.
+                jit: std::ptr::null(),
+                kw_index: std::sync::Mutex::new(std::collections::HashMap::new()),
+                kw_roots: dynobj::roots::AtomicRootSet::new(),
             },
             jit_gc_policy: GcPolicy::OnPressure { threshold: 0.75 },
         };
 
+        // Stash a raw pointer to the JitModule in the host so that
+        // higher-order `clj_invoke_N` externs can resolve a runtime
+        // FuncRef into the code pointer to call. The JitModule lives
+        // inside `Box<JitModule>` whose address is stable for the
+        // lifetime of the engine.
+        let jit_ptr: *const JitModule = {
+            let g = engine.jit.read().unwrap();
+            &**g as *const JitModule
+        };
+        engine.host.jit = jit_ptr;
+
         // Register the JIT literal pool, the FrameChain, and the
-        // long-lived `globals` slot array as GC root sources. All
-        // three must have stable addresses for the lifetime of the
-        // engine, which the surrounding `Box`es guarantee. The
-        // literal-pool pointer comes from inside the RwLock; the
-        // pointer is stable across read/write transitions because it
-        // points into the inner `Box`'s heap allocation.
+        // long-lived `globals` slot array as GC root sources.
         let pool_ptr: *const dyn dynobj::RootSource = {
             let g = engine.jit.read().unwrap();
             g.literal_pool() as *const dyn dynobj::RootSource
@@ -188,6 +203,11 @@ impl Engine {
         unsafe { engine.gc.register_extra_root_source(chain_ptr) };
         let globals_ptr: *const dyn dynobj::RootSource = &*engine.globals;
         unsafe { engine.gc.register_extra_root_source(globals_ptr) };
+        // The keyword intern table holds GC-traced Keyword pointers.
+        // It must be a root source so a moving collector rewrites the
+        // interned pointers in place.
+        let kw_ptr: *const dyn dynobj::RootSource = &engine.host.kw_roots;
+        unsafe { engine.gc.register_extra_root_source(kw_ptr) };
 
         // Allocate the Registry singleton and the `clojure.core`
         // namespace, writing both into `globals` so they survive
@@ -307,27 +327,28 @@ impl Engine {
         let jit_g = self.jit.read().expect("jit RwLock poisoned");
         let jit: &JitModule = &*jit_g;
 
-        // Read all forms upfront.
-        let mut forms: Vec<u64> = Vec::new();
+        // Read all forms upfront — but each parsed form must be
+        // immediately rooted before the next read runs, otherwise an
+        // intermediate allocation could relocate earlier forms and
+        // leave us with stale pointers. We register `pending` as a
+        // GC root source UP FRONT and `add()` each value as it comes
+        // back from the reader.
+        let mut pending = dynobj::roots::RootSet::new();
+        let pending_src: *const dyn dynobj::RootSource = &pending;
+        let _root_guard =
+            unsafe { self.gc.push_extra_root_source(pending_src) };
         {
             let mut sym = self.host.sym.lock().unwrap();
             let mut r = reader::Reader::new(src, &mut sym);
             while !r.at_eof() {
                 match r.read() {
-                    Ok(v) => forms.push(v),
+                    Ok(v) => {
+                        pending.add(v);
+                    }
                     Err(e) => panic!("read error: {}", e),
                 }
             }
         }
-
-        let mut pending = dynobj::roots::RootSet::new();
-        for f in &forms {
-            pending.add(*f);
-        }
-        drop(forms);
-        let pending_src: &dyn dynobj::RootSource = &pending;
-        let _root_guard =
-            unsafe { self.gc.push_extra_root_source(pending_src as *const _) };
 
         let mut last = value::NIL;
         for i in 0..pending.len() {
@@ -367,6 +388,8 @@ impl Engine {
                         sym: &mut sym,
                         anon_counter,
                         literal_pool: jit.literal_pool(),
+                        call_table_base: jit.call_table_base_addr(),
+                        loop_targets: Vec::new(),
                     };
                     compiler.compile_top(expanded)
                 };

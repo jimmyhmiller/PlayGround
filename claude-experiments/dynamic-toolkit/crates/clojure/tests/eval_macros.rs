@@ -65,6 +65,50 @@ fn macros_compose() {
 }
 
 #[test]
+fn macro_inside_let_body_expands() {
+    // Previously the expander returned let-forms unchanged, leaving
+    // any nested macro calls unexpanded.
+    let src = "\
+        (defmacro unless [c body] \
+          (cons (quote if) (cons c (cons nil (cons body nil))))) \
+        (let [x 5] (unless false x))";
+    assert_eq!(eval_str(src), "5");
+}
+
+#[test]
+fn macro_inside_if_branches_expands() {
+    let src = "\
+        (defmacro double [x] (cons (quote *) (cons x (cons 2 nil)))) \
+        (if true (double 21) (double 0))";
+    assert_eq!(eval_str(src), "42");
+}
+
+#[test]
+fn macro_inside_do_expands() {
+    let src = "\
+        (defmacro answer [] 42) \
+        (do (answer))";
+    assert_eq!(eval_str(src), "42");
+}
+
+#[test]
+fn macro_inside_fn_body_expands() {
+    let src = "\
+        (defmacro identity-mac [x] x) \
+        (def f (fn [n] (identity-mac (* n n)))) \
+        (f 7)";
+    assert_eq!(eval_str(src), "49");
+}
+
+#[test]
+fn macro_inside_let_value_expands() {
+    let src = "\
+        (defmacro answer [] 42) \
+        (let [x (answer)] x)";
+    assert_eq!(eval_str(src), "42");
+}
+
+#[test]
 fn fn_calls_still_work_when_macros_exist() {
     // Defining a macro shouldn't break ordinary fn dispatch.
     let src = "\

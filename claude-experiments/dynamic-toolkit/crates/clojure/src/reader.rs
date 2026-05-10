@@ -9,9 +9,10 @@
 //! and the reader macros `'`, `` ` ``, `~`, `~@` which expand to
 //! `(quote …)`, `(quasiquote …)`, `(unquote …)`, `(unquote-splicing …)`.
 
-use dynobj::roots::with_scope;
+use dynobj::roots::{with_scope, RootSet};
 
-use crate::collections::{alloc_keyword, alloc_set, alloc_string, alloc_vector};
+use crate::collections::{alloc_set, alloc_string, alloc_vector};
+use crate::host::with_host;
 use crate::namespace::alloc_map_pairs;
 use crate::symbols::SymbolTable;
 use crate::value::*;
@@ -186,60 +187,74 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// Read items until `close`, returning a Clojure list.
+    /// Read items until `close`, returning a Clojure list. Items are
+    /// rooted across the read loop via `read_collection`, so a GC
+    /// fired during a later read can't invalidate earlier ones.
     fn read_list_to_terminator(&mut self, close: u8) -> Result<u64, ReadError> {
-        let items = self.read_until(close)?;
-        Ok(build_list(&items))
+        self.read_collection(close, |scope, items| {
+            // Build the list right-to-left from the rooted items.
+            let acc = scope.root::<NanBoxTag>(NIL);
+            for i in (0..items.len()).rev() {
+                let new_bits = with_scope(3, |inner| {
+                    alloc_list_cell_from_raw(inner, items.get(i), acc.get()).get()
+                });
+                acc.set(new_bits);
+            }
+            acc.get()
+        })
     }
 
     fn read_vector(&mut self, close: u8) -> Result<u64, ReadError> {
-        let items = self.read_until(close)?;
-        let v = with_scope(2 + items.len(), |scope| {
-            // Root each item once before alloc; items came back as raw
-            // bits and could move on intermediate allocs.
-            let mut rooted = Vec::with_capacity(items.len());
-            for x in &items {
-                rooted.push(scope.root::<NanBoxTag>(*x));
-            }
-            let raw_items: Vec<u64> = rooted.iter().map(|r| r.get()).collect();
-            alloc_vector(scope, &raw_items).get()
-        });
-        Ok(v)
+        self.read_collection(close, |scope, items| {
+            let raw: Vec<u64> = (0..items.len()).map(|i| items.get(i)).collect();
+            alloc_vector(scope, &raw).get()
+        })
     }
 
     fn read_map(&mut self, close: u8) -> Result<u64, ReadError> {
         let start = self.pos;
-        let items = self.read_until(close)?;
-        if items.len() % 2 != 0 {
-            return Err(ReadError::OddMapEntries(start));
-        }
-        let pairs: Vec<(u64, u64)> = items.chunks(2).map(|c| (c[0], c[1])).collect();
-        let v = with_scope(2 + items.len(), |scope| {
-            // Root all items first.
-            let mut rooted: Vec<_> = items.iter().map(|x| scope.root::<NanBoxTag>(*x)).collect();
-            let pairs_r: Vec<(u64, u64)> = rooted
-                .chunks_mut(2)
-                .map(|c| (c[0].get(), c[1].get()))
+        self.read_collection(close, move |scope, items| {
+            if items.len() % 2 != 0 {
+                panic!(
+                    "map literal at byte {} has an odd number of forms",
+                    start
+                );
+            }
+            let pairs: Vec<(u64, u64)> = (0..items.len() / 2)
+                .map(|i| (items.get(2 * i), items.get(2 * i + 1)))
                 .collect();
-            let _ = pairs;
-            alloc_map_pairs(scope, &pairs_r).get()
-        });
-        Ok(v)
+            alloc_map_pairs(scope, &pairs).get()
+        })
     }
 
     fn read_set(&mut self, close: u8) -> Result<u64, ReadError> {
-        let items = self.read_until(close)?;
-        let v = with_scope(2 + items.len(), |scope| {
-            let rooted: Vec<_> = items.iter().map(|x| scope.root::<NanBoxTag>(*x)).collect();
-            let raw_items: Vec<u64> = rooted.iter().map(|r| r.get()).collect();
-            alloc_set(scope, &raw_items).get()
-        });
-        Ok(v)
+        self.read_collection(close, |scope, items| {
+            let raw: Vec<u64> = (0..items.len()).map(|i| items.get(i)).collect();
+            alloc_set(scope, &raw).get()
+        })
     }
 
-    /// Read items until the matching closer; consume the closer.
-    fn read_until(&mut self, close: u8) -> Result<Vec<u64>, ReadError> {
-        let mut items: Vec<u64> = Vec::new();
+    /// Read items until the matching closer (consuming it), keeping
+    /// every parsed value GC-rooted across subsequent reads, then
+    /// invoke `f` with a fresh `RootScope` and the live items still
+    /// rooted. This is the only safe shape for accumulating heap
+    /// values across a series of allocating reads — a plain
+    /// `Vec<u64>` would leave earlier items unrooted while later
+    /// reads allocated, and a relocating GC would invalidate them.
+    ///
+    /// The `RootSet` is pinned to a stable address (we only take
+    /// `&` of it) and registered as an `extra_root_source` for the
+    /// duration of this call.
+    fn read_collection<F>(&mut self, close: u8, f: F) -> Result<u64, ReadError>
+    where
+        F: FnOnce(&dynobj::roots::RootScope<'_>, &RootSet) -> u64,
+    {
+        let mut items = RootSet::new();
+        let host_gc = with_host(|h| h.gc);
+        let items_src: *const dyn dynobj::RootSource = &items;
+        let _root_guard =
+            unsafe { (*host_gc).push_extra_root_source(items_src) };
+
         loop {
             self.skip_ws_and_comments();
             match self.peek() {
@@ -248,10 +263,15 @@ impl<'a> Reader<'a> {
                     self.bump();
                     break;
                 }
-                Some(_) => items.push(self.read()?),
+                Some(_) => {
+                    let v = self.read()?;
+                    items.add(v);
+                }
             }
         }
-        Ok(items)
+
+        let result = with_scope(items.len() + 8, |scope| f(scope, &items));
+        Ok(result)
     }
 
     fn read_string(&mut self) -> Result<u64, ReadError> {
@@ -292,7 +312,10 @@ impl<'a> Reader<'a> {
         }
         let name = std::str::from_utf8(&self.src[begin..self.pos]).unwrap();
         let id = self.sym.intern(name);
-        let v = with_scope(2, |scope| alloc_keyword(scope, id).get());
+        // Use the host's keyword intern table so identical literals
+        // share the same heap object — `(= :foo :foo)` then works
+        // under bitwise `clj_eq`.
+        let v = with_host(|h| h.intern_keyword(id));
         Ok(v)
     }
 
@@ -397,7 +420,7 @@ impl<'a> Reader<'a> {
     fn wrap_with_head(&mut self, head: &str, inner: u64) -> u64 {
         let head_id = self.sym.intern(head);
         let head_val = encode_sym_id(head_id);
-        with_scope(4, |scope| {
+        with_scope(8, |scope| {
             let inner_r = scope.root::<NanBoxTag>(inner);
             let head_r = scope.root::<NanBoxTag>(head_val);
             let tail = alloc_list_cell_from_raw(scope, inner_r.get(), NIL);
@@ -415,14 +438,3 @@ fn is_token_break(c: u8) -> bool {
         )
 }
 
-/// Build a Clojure list from a slice of NanBox-encoded items.
-fn build_list(items: &[u64]) -> u64 {
-    with_scope(2 + items.len(), |scope| {
-        let acc = scope.root::<NanBoxTag>(NIL);
-        for x in items.iter().rev() {
-            let new_bits = with_scope(3, |inner| alloc_list_cell_from_raw(inner, *x, acc.get()).get());
-            acc.set(new_bits);
-        }
-        acc.get()
-    })
-}

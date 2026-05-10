@@ -338,8 +338,16 @@ impl FrameLayout for WrappedFrameLayout {
         self.0.alloc_local_slot()
     }
 
+    fn alloc_local_slot_bytes(&mut self, size_bytes: i32) -> i32 {
+        self.0.alloc_local_slot_bytes(size_bytes)
+    }
+
     fn alloc_root_slot(&mut self) -> i32 {
         self.0.alloc_root_slot()
+    }
+
+    fn alloc_root_slot_bytes(&mut self, size_bytes: i32) -> i32 {
+        self.0.alloc_root_slot_bytes(size_bytes)
     }
 
     fn alloc_shadow_root_slot(&mut self) -> i32 {

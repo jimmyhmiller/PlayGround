@@ -18,7 +18,6 @@ use dynobj::roots::{Rooted, RootScope};
 use dynobj::{Compact, ObjHeader};
 
 use crate::host::with_host;
-use crate::namespace::alloc_node_values;
 use crate::value::{self as v, NanBoxTag};
 
 const HDR: usize = Compact::SIZE; // 8 bytes (see header.rs)
@@ -49,8 +48,6 @@ pub fn alloc_string<'scope>(
             (raw.add(STR_VARLEN_COUNT_OFFSET) as *mut u64).write(bytes.len() as u64);
             std::ptr::copy_nonoverlapping(bytes.as_ptr(), raw.add(STR_BYTES_OFFSET), bytes.len());
         }
-        let after_init = unsafe { (raw as *const u16).read() };
-        eprintln!("[debug alloc_string] requested={} header_after={}", type_id, after_init);
         scope.root::<NanBoxTag>(gc.tag_ptr(raw))
     })
 }
@@ -151,7 +148,7 @@ pub fn alloc_vector<'scope>(
     scope: &'scope RootScope<'_>,
     items: &[u64],
 ) -> Rooted<'scope, NanBoxTag> {
-    let node = alloc_node_values(scope, items);
+    let node = alloc_array(scope, items);
     with_host(|h| {
         let gc = unsafe { &*h.gc };
         let type_id = h.types.vector.0;
@@ -175,7 +172,7 @@ pub fn vector_count(v_: u64) -> usize {
 pub fn vector_get(vec: u64, i: usize) -> u64 {
     let p = v::as_ptr(vec);
     let node = unsafe { (p.add(VEC_ROOT_OFFSET) as *const u64).read() };
-    crate::namespace::node_get(node, i)
+    array_get(node, i)
 }
 
 /// Iterate a Vector. Each element is yielded once.
@@ -260,6 +257,95 @@ pub fn is_var(v: u64) -> bool {
     is_obj_of(v, |t| t.var.0)
 }
 
+// ── Native mutable Array ────────────────────────────────────────────
+//
+// Layout: pure varlen-values (no fixed fields).
+//   varlen_count at HDR
+//   first element at HDR + 8
+//
+// This is the user-visible primitive on which core.clj's persistent
+// collections (PersistentVector, PersistentHashMap, etc.) are built,
+// AND the internal storage for the reader's transient Vector type.
+// They share the same heap shape, the same type-id, and the same
+// access fns.
+
+const ARRAY_VARLEN_COUNT_OFFSET: usize = HDR;
+const ARRAY_ELEM_BASE: usize = HDR + 8;
+
+/// Allocate a fresh Array of `items.len()` slots, copying `items` in.
+pub fn alloc_array<'scope>(
+    scope: &'scope RootScope<'_>,
+    items: &[u64],
+) -> Rooted<'scope, NanBoxTag> {
+    with_host(|h| {
+        let gc = unsafe { &*h.gc };
+        let type_id = h.types.array.0;
+        let raw = gc.alloc(type_id, items.len());
+        assert!(!raw.is_null(), "alloc_array: GC alloc returned null");
+        unsafe {
+            (raw.add(ARRAY_VARLEN_COUNT_OFFSET) as *mut u64).write(items.len() as u64);
+            for (i, x) in items.iter().enumerate() {
+                (raw.add(ARRAY_ELEM_BASE + i * 8) as *mut u64).write(*x);
+            }
+        }
+        scope.root::<NanBoxTag>(gc.tag_ptr(raw))
+    })
+}
+
+/// Allocate an Array of `n` slots filled with `nil`. The shape used
+/// by `(make-array n)` from Clojure.
+pub fn alloc_array_nil<'scope>(
+    scope: &'scope RootScope<'_>,
+    n: usize,
+) -> Rooted<'scope, NanBoxTag> {
+    with_host(|h| {
+        let gc = unsafe { &*h.gc };
+        let type_id = h.types.array.0;
+        let raw = gc.alloc(type_id, n);
+        assert!(!raw.is_null(), "alloc_array_nil: GC alloc returned null");
+        unsafe {
+            (raw.add(ARRAY_VARLEN_COUNT_OFFSET) as *mut u64).write(n as u64);
+            for i in 0..n {
+                (raw.add(ARRAY_ELEM_BASE + i * 8) as *mut u64).write(v::NIL);
+            }
+        }
+        scope.root::<NanBoxTag>(gc.tag_ptr(raw))
+    })
+}
+
+pub fn array_count(arr: u64) -> usize {
+    let p = v::as_ptr(arr);
+    unsafe { (p.add(ARRAY_VARLEN_COUNT_OFFSET) as *const u64).read() as usize }
+}
+
+pub fn array_get(arr: u64, i: usize) -> u64 {
+    let p = v::as_ptr(arr);
+    debug_assert!(i < array_count(arr), "array_get: out of bounds");
+    unsafe { (p.add(ARRAY_ELEM_BASE + i * 8) as *const u64).read() }
+}
+
+/// Mutating store. Visible to user code via `aset!`. Two important
+/// safety notes:
+///   1. The new value `v` doesn't need a write-barrier here because
+///      our generational GC handles old → young pointer writes via
+///      the shadow stack at the next safepoint, not by intercepting
+///      individual stores. (The current design is non-incremental
+///      mark-compact within the generation; if/when that changes
+///      this fn must grow a barrier.)
+///   2. Mutating an Array that backs a reader-Vector that has
+///      already been observed by the user as a "snapshot" violates
+///      Clojure's value semantics. Don't do that — `(aset! …)` is
+///      meant for collection-internals use only.
+pub fn array_set(arr: u64, i: usize, val: u64) {
+    let p = v::as_ptr(arr);
+    debug_assert!(i < array_count(arr), "array_set: out of bounds");
+    unsafe { (p.add(ARRAY_ELEM_BASE + i * 8) as *mut u64).write(val) }
+}
+
+pub fn is_array(v: u64) -> bool {
+    is_obj_of(v, |t| t.array.0)
+}
+
 // ── Generic sequential iteration ────────────────────────────────────
 //
 // Many places in the compiler want to walk a "sequence of forms"
@@ -267,20 +353,63 @@ pub fn is_var(v: u64) -> bool {
 // (e.g. `(let [x 1 y 2] body)` reads its bindings as a Vector;
 // `(unless c body)` reads its args as a List). `seq_iter` accepts
 // either, plus nil.
+//
+// Returns a concrete enum cursor — no `Box<dyn Iterator>`, no
+// per-call heap allocation. Hot paths in the compiler (lower_call's
+// arg list walk, the freevars analyzer, the expander) all use this.
 
-pub fn seq_iter(coll: u64) -> Box<dyn Iterator<Item = u64>> {
+#[derive(Clone, Copy)]
+enum SeqState {
+    Empty,
+    /// Walking a List: `cur` points to either a List cell or nil.
+    List(u64),
+    /// Walking a Vector by index: `(vec, next_idx, len)`.
+    Vec(u64, usize, usize),
+}
+
+pub struct SeqCursor(SeqState);
+
+impl Iterator for SeqCursor {
+    type Item = u64;
+    #[inline]
+    fn next(&mut self) -> Option<u64> {
+        match self.0 {
+            SeqState::Empty => None,
+            SeqState::List(cur) => {
+                if !v::is_ptr(cur) {
+                    self.0 = SeqState::Empty;
+                    return None;
+                }
+                let f = v::first(cur);
+                self.0 = SeqState::List(v::rest(cur));
+                Some(f)
+            }
+            SeqState::Vec(vec, idx, len) => {
+                if idx >= len {
+                    self.0 = SeqState::Empty;
+                    return None;
+                }
+                let v = vector_get(vec, idx);
+                self.0 = SeqState::Vec(vec, idx + 1, len);
+                Some(v)
+            }
+        }
+    }
+}
+
+pub fn seq_iter(coll: u64) -> SeqCursor {
     if v::is_nil(coll) {
-        Box::new(std::iter::empty())
+        SeqCursor(SeqState::Empty)
     } else if is_vector(coll) {
-        Box::new(vector_iter(coll))
-    } else if v::is_ptr(coll) && is_list(coll) {
-        Box::new(v::list_iter(coll))
+        let len = vector_count(coll);
+        SeqCursor(SeqState::Vec(coll, 0, len))
     } else if v::is_ptr(coll) {
-        // Fall back to list iteration if the type-id is unknown
-        // (covers the older test inputs that used `[...]` as a list).
-        Box::new(v::list_iter(coll))
+        // List or list-shaped (older callers may pass a list-tagged
+        // ptr without an explicit type-id check). The cursor walks
+        // the spine until it sees a non-ptr.
+        SeqCursor(SeqState::List(coll))
     } else {
-        Box::new(std::iter::empty())
+        SeqCursor(SeqState::Empty)
     }
 }
 

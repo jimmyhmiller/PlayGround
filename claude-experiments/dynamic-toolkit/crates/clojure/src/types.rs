@@ -32,11 +32,12 @@ pub struct Types {
     pub string: ObjTypeId,
     pub list: ObjTypeId,
     pub vector: ObjTypeId,
-    /// Internal storage used by Vector / future HAMT nodes. Layout is
-    /// just `varlen_values` (no fixed fields). Distinct from `map` so
-    /// type-id checks for "is this a vector backing array" don't
-    /// confuse it with a user-visible map.
-    pub node: ObjTypeId,
+    /// Native mutable array — the primitive on which user-space
+    /// persistent collections (PersistentVector, PersistentHashMap,
+    /// etc.) are built in `core.clj`. Layout is pure
+    /// `varlen_values`. Also used internally as the storage for the
+    /// reader's transient Vector type.
+    pub array: ObjTypeId,
     pub map: ObjTypeId,
     pub set: ObjTypeId,
     pub fn_obj: ObjTypeId,
@@ -99,9 +100,14 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
         .field("tail", FieldKind::Value)
         .build();
 
-    // ── Node: backing storage for Vector / HAMT. Pure varlen_values.
-    let node = dm
-        .obj_type("Node")
+    // ── Array: native mutable array. Pure varlen_values.
+    //
+    // Shared between user-callable `(make-array N)` / `aget` / `aset!`
+    // and the reader's transient Vector storage — same layout, same
+    // type-id. core.clj treats it as the primitive backing store for
+    // its PersistentVector / PersistentHashMap implementations.
+    let array = dm
+        .obj_type("Array")
         .varlen_values()
         .build();
 
@@ -172,7 +178,7 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
         string,
         list,
         vector,
-        node,
+        array,
         map,
         set,
         fn_obj,

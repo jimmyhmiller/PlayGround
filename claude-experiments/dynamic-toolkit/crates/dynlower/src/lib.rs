@@ -2083,6 +2083,14 @@ impl JitModule {
         self.call_table.snapshot()
     }
 
+    /// Stable base address of the call table. Frontends that emit an
+    /// indirect dispatch (e.g. `call_indirect` through a runtime
+    /// `FuncRef` index) bake this address into the IR as a constant
+    /// and emit `load (base + idx*8)` to fetch the code pointer.
+    pub fn call_table_base_addr(&self) -> u64 {
+        self.call_table.base_addr()
+    }
+
     pub fn function_ptr(&self, func_ref: FuncRef) -> *const u8 {
         let ptr = self.call_table.get(func_ref.index());
         assert!(!ptr.is_null(), "call to unresolved function");
@@ -3280,10 +3288,11 @@ where
             .stack_slots
             .iter()
             .map(|slot_data| {
+                let bytes = slot_data.size as i32;
                 if slot_data.is_gc_root {
-                    self.frame.alloc_root_slot()
+                    self.frame.alloc_root_slot_bytes(bytes)
                 } else {
-                    self.frame.alloc_local_slot()
+                    self.frame.alloc_local_slot_bytes(bytes)
                 }
             })
             .collect();

@@ -56,45 +56,6 @@ const REG_NAMESPACES_OFFSET: usize = HDR;
 const FN_FUNCREF_OFFSET: usize = HDR;
 const FN_ARITY_OFFSET: usize = HDR + 8;
 
-// ── Node (vector backing) ───────────────────────────────────────────
-//
-// Layout: pure varlen-values (no fixed fields).
-//   varlen_count at HDR
-//   first element at HDR + 8
-
-const NODE_VARLEN_COUNT_OFFSET: usize = HDR;
-const NODE_ELEM_BASE: usize = HDR + 8;
-
-pub fn alloc_node_values<'scope>(
-    scope: &'scope RootScope<'_>,
-    items: &[u64],
-) -> Rooted<'scope, NanBoxTag> {
-    with_host(|h| {
-        let gc = unsafe { &*h.gc };
-        let type_id = h.types.node.0;
-        let raw = gc.alloc(type_id, items.len());
-        assert!(!raw.is_null(), "alloc_node_values: GC alloc returned null");
-        unsafe {
-            (raw.add(NODE_VARLEN_COUNT_OFFSET) as *mut u64).write(items.len() as u64);
-            for (i, x) in items.iter().enumerate() {
-                (raw.add(NODE_ELEM_BASE + i * 8) as *mut u64).write(*x);
-            }
-        }
-        scope.root::<NanBoxTag>(gc.tag_ptr(raw))
-    })
-}
-
-pub fn node_count(node: u64) -> usize {
-    let p = v::as_ptr(node);
-    unsafe { (p.add(NODE_VARLEN_COUNT_OFFSET) as *const u64).read() as usize }
-}
-
-pub fn node_get(node: u64, i: usize) -> u64 {
-    let p = v::as_ptr(node);
-    debug_assert!(i < node_count(node), "node_get: out of bounds");
-    unsafe { (p.add(NODE_ELEM_BASE + i * 8) as *const u64).read() }
-}
-
 // ── Map allocators / accessors ──────────────────────────────────────
 
 /// Allocate an empty Map.
@@ -433,4 +394,62 @@ pub fn alloc_fn<'scope>(
 pub fn fn_func_ref(fn_obj: u64) -> u32 {
     let p = v::as_ptr(fn_obj);
     unsafe { (p.add(FN_FUNCREF_OFFSET) as *const u64).read() as u32 }
+}
+
+// Captures live in the varlen-values tail right after the
+// `varlen_count` word at HDR + 16.
+const FN_VARLEN_COUNT_OFFSET: usize = HDR + 16;
+const FN_CAPTURES_OFFSET: usize = HDR + 24;
+
+/// Allocate an Fn obj with `captures.len()` captured values laid out
+/// in the varlen tail. Captures are NanBox values; the caller is
+/// responsible for keeping them rooted up to this call (they are
+/// copied into the new object before any further allocation).
+pub fn alloc_fn_with_captures<'scope>(
+    scope: &'scope RootScope<'_>,
+    func_ref: u32,
+    arity: usize,
+    captures: &[u64],
+) -> Rooted<'scope, NanBoxTag> {
+    with_host(|h| {
+        let gc = unsafe { &*h.gc };
+        let type_id = h.types.fn_obj.0;
+        let raw = gc.alloc(type_id, captures.len());
+        assert!(!raw.is_null(), "alloc_fn_with_captures: GC alloc returned null");
+        unsafe {
+            (raw.add(FN_FUNCREF_OFFSET) as *mut u64).write(func_ref as u64);
+            (raw.add(FN_ARITY_OFFSET) as *mut u64).write(arity as u64);
+            (raw.add(FN_VARLEN_COUNT_OFFSET) as *mut u64).write(captures.len() as u64);
+            for (i, &c) in captures.iter().enumerate() {
+                (raw.add(FN_CAPTURES_OFFSET + i * 8) as *mut u64).write(c);
+            }
+        }
+        scope.root::<NanBoxTag>(gc.tag_ptr(raw))
+    })
+}
+
+/// Byte offset within an Fn obj where capture index `i` lives. Used
+/// by IR emitted at fn-expression call sites to read captures
+/// through the receiver `self_fn`.
+pub fn fn_capture_offset(i: usize) -> i32 {
+    (FN_CAPTURES_OFFSET + i * 8) as i32
+}
+
+/// Byte offset of the `func_ref` field within an Fn heap object.
+/// Used by IR emitted at higher-order call sites to load the
+/// runtime FuncRef index for indirect dispatch.
+pub fn fn_func_ref_offset() -> i32 {
+    FN_FUNCREF_OFFSET as i32
+}
+
+/// Byte offset of the `arity` field within an Fn heap object.
+pub fn fn_arity_offset() -> i32 {
+    FN_ARITY_OFFSET as i32
+}
+
+/// Read the `arity` field directly. Used by externs that do
+/// arity checks before invoking.
+pub fn fn_arity(fn_obj: u64) -> usize {
+    let p = v::as_ptr(fn_obj);
+    unsafe { (p.add(FN_ARITY_OFFSET) as *const u64).read() as usize }
 }

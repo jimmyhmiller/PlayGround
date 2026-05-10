@@ -48,10 +48,13 @@ impl<'a> ExpandCtx<'a> {
                 break;
             }
         }
-        // Recurse into subforms. We only walk lists; atoms have no
-        // sub-structure. Special forms get partial recursion (we
-        // don't expand inside `quote`, etc.).
-        if v::is_ptr(current) {
+        // Recurse into subforms. We only walk LISTS — vectors, maps,
+        // strings etc. are heap objects whose internal layout differs
+        // from a cons cell, so iterating them via `v::first/rest`
+        // reads garbage. Compound literals are self-evaluating; the
+        // compiler pins them in the literal pool, so the expander
+        // does not need to descend into them.
+        if v::is_ptr(current) && crate::collections::is_list(current) {
             current = self.walk_subforms(current);
         }
         current
@@ -59,7 +62,9 @@ impl<'a> ExpandCtx<'a> {
 
     /// One step of head-position expansion. Returns (form, did_expand).
     fn expand_one(&mut self, form: u64) -> (u64, bool) {
-        if !v::is_ptr(form) {
+        // Only Lists carry a head/rest spine. Other heap shapes
+        // (Vector, Map, String, Keyword, …) are values, not calls.
+        if !v::is_ptr(form) || !crate::collections::is_list(form) {
             return (form, false);
         }
         let head = v::first(form);
@@ -95,47 +100,193 @@ impl<'a> ExpandCtx<'a> {
         }
     }
 
-    /// Recursively expand subforms.
-    ///
-    /// For non-special-form lists `(f arg1 arg2 ...)`, expand each
-    /// arg. For special forms, currently we punt: we leave the
-    /// special-form structure as-is. (More precise per-special-form
-    /// handling — only expanding the bodies, not the binding-name
-    /// lists — is a refinement; the current behavior happens to work
-    /// for our tests because macros only appear in expression
-    /// positions.)
+    /// Recursively expand subforms. Each special form has its own
+    /// sub-walk that respects what positions are EXPRESSION positions
+    /// (where a macro call could legitimately appear) vs. NAME /
+    /// PATTERN positions (where the form's literal shape is part of
+    /// its meaning and must be preserved).
     fn walk_subforms(&mut self, form: u64) -> u64 {
         let head = v::first(form);
+        let rest = v::rest(form);
         if v::is_sym_id(head) {
             let head_name = self.sym.name(v::as_sym_id(head)).to_string();
-            if SPECIAL_FORMS.contains(&head_name.as_str()) {
-                // For now, don't recurse into special-form bodies.
-                // This is conservative — it means a macro inside
-                // (let [x ...] (macro-call ...)) won't expand. We'll
-                // refine when needed.
-                return form;
+            match head_name.as_str() {
+                // ── Skip-entirely: quoted data is literal. ─────────
+                "quote" => return form,
+
+                // ── Bindings: leave name slots untouched, expand the
+                //    value forms and the body. ──────────────────────
+                "let" | "loop" => {
+                    let new_tail = self.walk_let_like(rest);
+                    return rebuild_with_head(head, new_tail);
+                }
+
+                // ── (fn [params] body…) — preserve the param vector
+                //    verbatim, expand each body form. Multi-arity
+                //    `(fn ([a] …) ([a b] …))` recurses into each
+                //    body block. ────────────────────────────────────
+                "fn" => {
+                    let new_tail = self.walk_fn(rest);
+                    return rebuild_with_head(head, new_tail);
+                }
+
+                // ── Definers: name is literal, value form expands. ─
+                "def" => {
+                    let new_tail = self.walk_def(rest);
+                    return rebuild_with_head(head, new_tail);
+                }
+                "defmacro" => {
+                    // (defmacro NAME [params] body…) — same shape as
+                    // a fn with a leading name slot.
+                    let new_tail = self.walk_defmacro(rest);
+                    return rebuild_with_head(head, new_tail);
+                }
+
+                // ── Sequencing/branching: every subform is an expr. ─
+                "if" | "do" | "recur" => {
+                    let new_tail = self.expand_each_form(rest);
+                    return rebuild_with_head(head, new_tail);
+                }
+
+                // ── Quasiquote: rewrite to (cons/__concat/quote …)
+                //    using the quasiquote pass. The result is itself
+                //    an ordinary form that gets re-walked, so any
+                //    macros inside an unquote do get expanded. ─────
+                "quasiquote" => {
+                    let inner = v::first(rest);
+                    let mut qq = crate::quasiquote::QqCtx { sym: self.sym };
+                    let rewritten = qq.expand_top(inner);
+                    return self.expand_all(rewritten);
+                }
+                "unquote" | "unquote-splicing" => {
+                    panic!("`unquote`/`unquote-splicing` outside a quasiquote");
+                }
+
+                _ => {}
             }
         }
         // Generic call: expand each argument.
-        let mut new_args: Vec<u64> = Vec::new();
-        for a in v::list_iter(v::rest(form)) {
-            new_args.push(self.expand_all(a));
-        }
-        // Rebuild the list: (head . expanded-args).
-        // Use cons via the host so the new cells are properly rooted.
-        dynobj::roots::with_scope(2 + new_args.len(), |scope| {
-            let acc = scope.root::<v::NanBoxTag>(v::NIL);
-            for x in new_args.into_iter().rev() {
-                let new_bits = dynobj::roots::with_scope(3, |inner| {
-                    v::alloc_list_cell_from_raw(inner, x, acc.get()).get()
-                });
-                acc.set(new_bits);
+        let head = v::first(form); // re-read in case of GC
+        let new_args = self.expand_each_form(v::rest(form));
+        rebuild_with_head(head, new_args)
+    }
+
+    /// `(let [n0 v0 n1 v1 ...] body…)` — names stay literal, values
+    /// get expanded, body gets expanded.
+    fn walk_let_like(&mut self, rest: u64) -> u64 {
+        let bindings_form = v::first(rest);
+        let body = v::rest(rest);
+
+        // Walk bindings: name slot literal, value slot expanded.
+        let pairs: Vec<u64> = crate::collections::seq_iter(bindings_form).collect();
+        let mut new_pairs: Vec<u64> = Vec::with_capacity(pairs.len());
+        let mut i = 0;
+        while i < pairs.len() {
+            new_pairs.push(pairs[i]);
+            if i + 1 < pairs.len() {
+                new_pairs.push(self.expand_all(pairs[i + 1]));
             }
-            // Prepend the original head.
-            let with_head = dynobj::roots::with_scope(3, |inner| {
-                v::alloc_list_cell_from_raw(inner, head, acc.get()).get()
-            });
-            with_head
+            i += 2;
+        }
+        // Rebuild bindings as a Vector (matching reader output).
+        let new_bindings = dynobj::roots::with_scope(new_pairs.len() + 8, |scope| {
+            crate::collections::alloc_vector(scope, &new_pairs).get()
+        });
+        let new_body = self.expand_each_form(body);
+        // Build the rest list: (new_bindings . new_body)
+        dynobj::roots::with_scope(8, |scope| {
+            v::alloc_list_cell_from_raw(scope, new_bindings, new_body).get()
         })
     }
+
+    /// `(fn [params] body…)` or `(fn ([params] body…) ([params] body…))`.
+    fn walk_fn(&mut self, rest: u64) -> u64 {
+        let head_of_rest = v::first(rest);
+        if v::is_ptr(head_of_rest) && crate::collections::is_list(head_of_rest) {
+            // Multi-arity: each item in `rest` is a `([params] body…)` list.
+            let arities: Vec<u64> = v::list_iter(rest).collect();
+            let mut walked: Vec<u64> = Vec::with_capacity(arities.len());
+            for arity_form in arities {
+                let params = v::first(arity_form);
+                let body = v::rest(arity_form);
+                let expanded_body = self.expand_each_form(body);
+                walked.push(dynobj::roots::with_scope(8, |scope| {
+                    v::alloc_list_cell_from_raw(scope, params, expanded_body).get()
+                }));
+            }
+            // Rebuild a plain list from `walked`.
+            return list_from_vec(&walked);
+        }
+        // Single-arity: rest = ([params] body…). params literal, body expands.
+        let params = v::first(rest);
+        let body = v::rest(rest);
+        let new_body = self.expand_each_form(body);
+        dynobj::roots::with_scope(8, |scope| {
+            v::alloc_list_cell_from_raw(scope, params, new_body).get()
+        })
+    }
+
+    /// `(def NAME value)` — name literal, value expanded.
+    fn walk_def(&mut self, rest: u64) -> u64 {
+        let name = v::first(rest);
+        let after_name = v::rest(rest);
+        let value_form = v::first(after_name);
+        let new_value = self.expand_all(value_form);
+        // Rebuild as (NAME new_value).
+        let with_value = dynobj::roots::with_scope(8, |scope| {
+            v::alloc_list_cell_from_raw(scope, new_value, v::NIL).get()
+        });
+        dynobj::roots::with_scope(8, |scope| {
+            v::alloc_list_cell_from_raw(scope, name, with_value).get()
+        })
+    }
+
+    /// `(defmacro NAME [params] body…)` — name + params literal,
+    /// body expands.
+    fn walk_defmacro(&mut self, rest: u64) -> u64 {
+        let name = v::first(rest);
+        let after_name = v::rest(rest);
+        let params = v::first(after_name);
+        let body = v::rest(after_name);
+        let new_body = self.expand_each_form(body);
+        let with_params = dynobj::roots::with_scope(8, |scope| {
+            v::alloc_list_cell_from_raw(scope, params, new_body).get()
+        });
+        dynobj::roots::with_scope(8, |scope| {
+            v::alloc_list_cell_from_raw(scope, name, with_params).get()
+        })
+    }
+
+    /// Expand each form in a list, returning a new list of expanded
+    /// forms (preserving order, terminated by nil).
+    fn expand_each_form(&mut self, list: u64) -> u64 {
+        let items: Vec<u64> = v::list_iter(list).collect();
+        let expanded: Vec<u64> = items.into_iter().map(|f| self.expand_all(f)).collect();
+        list_from_vec(&expanded)
+    }
+
+}
+
+/// Build `(head . tail-list)` where tail-list is already a list.
+/// Free function (not a method) so it doesn't take `&mut self` —
+/// avoids overlapping borrows when the tail is itself produced from
+/// a `&mut self` call.
+fn rebuild_with_head(head: u64, tail: u64) -> u64 {
+    dynobj::roots::with_scope(8, |scope| {
+        v::alloc_list_cell_from_raw(scope, head, tail).get()
+    })
+}
+
+/// Build a Clojure list from a Vec, returning the head.
+fn list_from_vec(items: &[u64]) -> u64 {
+    dynobj::roots::with_scope(items.len() + 4, |scope| {
+        let acc = scope.root::<v::NanBoxTag>(v::NIL);
+        for x in items.iter().rev() {
+            let cell = dynobj::roots::with_scope(3, |inner| {
+                v::alloc_list_cell_from_raw(inner, *x, acc.get()).get()
+            });
+            acc.set(cell);
+        }
+        acc.get()
+    })
 }
