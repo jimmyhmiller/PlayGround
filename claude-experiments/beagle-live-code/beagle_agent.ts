@@ -467,16 +467,65 @@ function formatCrashInfo(crash: ProcessCrashInfo): string {
 // MCP Tools
 // ---------------------------------------------------------------------------
 
+// Actively probe the REPL by trying to connect (if needed) and round-trip a
+// describe op. Returns "connected" if the round-trip succeeds, otherwise an
+// error string explaining why. This is what beagle_status uses, because the
+// cached `replConnected` flag lags reality: after beagle_run, the initial
+// connect can fail silently (server still booting, early connection kicked),
+// leaving replConnected=false even though the next eval would reconnect fine.
+// Returns null on success, or a string describing why the probe failed.
+async function probeReplConnection(): Promise<string | null> {
+  if (!replConnected) {
+    try {
+      await connectRepl();
+    } catch (err: any) {
+      return `connect failed: ${err.message ?? err}`;
+    }
+  }
+
+  const id = String(++reqCounter);
+  const msg = JSON.stringify({ op: "describe", id }) + "\n";
+
+  return new Promise<string | null>((resolve) => {
+    const timer = setTimeout(() => {
+      pendingEvals.delete(id);
+      resolve("describe round-trip timed out after 2s");
+    }, 2_000);
+
+    pendingEvals.set(id, {
+      messages: [],
+      resolve: () => {
+        clearTimeout(timer);
+        resolve(null);
+      },
+      timer,
+    });
+    try {
+      replSocket!.write(msg);
+    } catch (err: any) {
+      clearTimeout(timer);
+      pendingEvals.delete(id);
+      resolve(`write failed: ${err.message ?? err}`);
+    }
+  });
+}
+
 const beagleStatus = tool(
   "beagle_status",
-  "Check the status of the Beagle process. Shows whether it's running, and if it crashed, " +
-  "shows the exit code, signal, stdout, stderr, and timing information.",
+  "Check the status of the Beagle process. Shows whether it's running and whether the REPL " +
+  "is actually reachable (probed by round-tripping a describe op, not just a cached flag). " +
+  "If the process crashed, shows the exit code, signal, stdout, stderr, and timing.",
   {},
   async () => {
     const parts: string[] = [];
     if (beagProcess && !beagProcess.killed) {
       parts.push(`Process is running (PID: ${beagProcess.pid})`);
-      parts.push(`REPL connected: ${replConnected}`);
+      const probeError = await probeReplConnection();
+      if (probeError === null) {
+        parts.push("REPL connected: true (describe round-trip ok)");
+      } else {
+        parts.push(`REPL connected: false (${probeError})`);
+      }
     } else {
       parts.push("Process is not running.");
     }
@@ -1219,6 +1268,9 @@ async function main() {
   console.log("Ask me to run a .bg file or start the default REPL server.\n");
 
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+  // Make stdin emit 'keypress' events so we can listen for Escape during a
+  // running query without disturbing rl.question (which only consumes whole lines).
+  readline.emitKeypressEvents(process.stdin);
 
   const prompt = (): Promise<string> =>
     new Promise((resolve) => rl.question("> ", resolve));
@@ -1276,8 +1328,35 @@ async function main() {
 
     log("INFO", "Sending query to Claude", { promptLength: userInput.length, hasSession: !!sessionId });
 
+    // Per-query AbortController so Escape can cancel mid-flight.
+    const abortController = new AbortController();
+    let aborted = false;
+
+    // Switch stdin to raw mode while the query runs so we can catch Escape
+    // (and Ctrl+C) as individual keypresses. We restore the original mode in
+    // the `finally` block so the next rl.question() works normally.
+    const wasRaw = (process.stdin as any).isRaw === true;
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
+
+    const onKeypress = (_str: string, key: { name?: string; ctrl?: boolean; sequence?: string } | undefined) => {
+      if (!key) return;
+      if (key.name === "escape") {
+        if (!aborted) {
+          aborted = true;
+          console.log("\n\x1b[33m[escape — aborting query…]\x1b[0m");
+          log("INFO", "User aborted query via escape");
+          abortController.abort();
+        }
+      } else if (key.ctrl && key.name === "c") {
+        // Preserve normal Ctrl+C behavior (the global SIGINT handler kills the
+        // beag child and exits). Without this, raw mode swallows Ctrl+C.
+        process.kill(process.pid, "SIGINT");
+      }
+    };
+    process.stdin.on("keypress", onKeypress);
+
     try {
-      for await (const message of query({ prompt: userInput, options })) {
+      for await (const message of query({ prompt: userInput, options: { ...options, abortController } })) {
         log("INFO", "Received message", { type: message.type, subtype: (message as any).subtype });
 
         if (message.type === "assistant") {
@@ -1299,6 +1378,12 @@ async function main() {
           const result = (message as any).result;
           // Don't print result text — it duplicates the last assistant message's text block
           log("INFO", "Query completed with result", { resultLength: result?.length });
+          // The SDK's async iterator sometimes doesn't close after the terminal
+          // `result` message, leaving us hung waiting for a next message that
+          // never arrives. `result` is documented as the end-of-query signal,
+          // so break explicitly. The for-await semantics call iterator.return()
+          // for us, which cleans up the underlying stream.
+          break;
         } else if (
           message.type === "system" &&
           (message as any).subtype === "init" &&
@@ -1310,10 +1395,19 @@ async function main() {
       }
       log("INFO", "Query stream ended normally");
     } catch (err: any) {
-      log("ERROR", "Query failed", { message: err.message, stack: err.stack, name: err.name });
-      console.error(`\n[ERROR] Agent query failed: ${err.message}`);
-      console.error(`See ${LOG_FILE} for details.`);
-      // Don't exit — let the user try again
+      if (aborted) {
+        // The SDK throws when its subprocess is killed by abort — that's
+        // expected, not a real failure. Just log and move on.
+        log("INFO", "Query aborted by user", { message: err.message });
+      } else {
+        log("ERROR", "Query failed", { message: err.message, stack: err.stack, name: err.name });
+        console.error(`\n[ERROR] Agent query failed: ${err.message}`);
+        console.error(`See ${LOG_FILE} for details.`);
+        // Don't exit — let the user try again
+      }
+    } finally {
+      process.stdin.off("keypress", onKeypress);
+      if (process.stdin.isTTY) process.stdin.setRawMode(wasRaw);
     }
   }
 

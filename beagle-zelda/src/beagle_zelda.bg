@@ -68,7 +68,7 @@ let fps_cap = atom(60)
 // Editor state types
 // ============================================================
 
-enum Tool { Select, Wall, Monster, Sentinel, Door, Spawn }
+enum Tool { Select, Wall, Monster, Sentinel, Door, Spawn, Gold }
 
 // raygui's toggle_group writes the active tab index as an i32 into tool_slot.
 // Convert at the FFI boundary so the rest of the code works with the enum.
@@ -78,6 +78,7 @@ fn int_to_tool(n) {
     else if n == 3 { Tool.Sentinel }
     else if n == 4 { Tool.Door }
     else if n == 5 { Tool.Spawn }
+    else if n == 6 { Tool.Gold }
     else { Tool.Select }
 }
 
@@ -88,7 +89,8 @@ fn tool_to_int(t) {
         Tool.Monster => 2,
         Tool.Sentinel => 3,
         Tool.Door => 4,
-        Tool.Spawn => 5
+        Tool.Spawn => 5,
+        Tool.Gold => 6
     }
 }
 
@@ -98,7 +100,8 @@ enum Selection {
     Monster { index },
     Sentinel { index },
     Door { index },
-    Spawn { index }
+    Spawn { index },
+    Gold { index }
 }
 
 struct Editor {
@@ -141,6 +144,8 @@ struct World {
     sentinels     // list<Sentinel>
     doors         // list<Door>
     spawns        // list<Spawn>
+    gold_items    // list<Gold> — pickups still on the ground
+    gold_collected // int — running total picked up this session
     camera        // Vec2 center in world space
     tuning
     mode          // MODE_PLAYING or MODE_EDITING
@@ -148,6 +153,7 @@ struct World {
     editor        // Editor (only relevant in MODE_EDITING)
     current_map   // string — name of the currently-loaded map
     transition    // Transition enum — play-mode fade state machine
+    menu_open     // bool — true when the pause menu overlay is visible
 }
 
 // Extracted from a save file OR produced by `initial_map_data`. Kept separate
@@ -159,6 +165,7 @@ struct LevelData {
     sentinels
     doors
     spawns
+    gold_items
 }
 
 // ============================================================
@@ -321,7 +328,8 @@ fn initial_map_data(name) {
             spawns: [
                 g/Spawn { name: "default", pos: v/make(0.0, 0.0 - hh + 40.0) },
                 g/Spawn { name: "from_dungeon", pos: v/make(0.0, hh - 60.0) }
-            ]
+            ],
+            gold_items: []
         }
     } else if name == "dungeon_1" {
         // Cave: ~4400 x 3200 interior. Built procedurally from jagged-wall and
@@ -380,22 +388,47 @@ fn initial_map_data(name) {
             rock_scatter(0.0 - 300.0, 500.0, 400.0, 350.0, 10, 20.0, 50.0, 160),
             rock_scatter(600.0, 0.0 - 250.0, 400.0, 200.0, 8, 18.0, 45.0, 170)
         ])
+        // --- Guardian: the one enemy type ---
+        // Large, powerful, punishing if you get caught. Moderate detection
+        // range + generous notice window means you can observe its patrol and
+        // slip past — but once it sees you, it's fast, relentless, and hits
+        // hard. Placed ONLY at chokepoints (wall gaps) so the level geometry
+        // is what makes things tense.
+        let guardian = fn(pos) {
+            e/Monster {
+                ...e/default_monster(pos),
+                half: v/make(18.0, 18.0),
+                speed: 190.0,
+                detection_range: 280.0,
+                attack_reach: 36.0,
+                strength: 2.5,
+                notice_threshold: 0.6
+            }
+        }
+
         LevelData {
             walls: walls,
             monsters: [
-                // Entry corridor
-                e/default_monster(v/make(0.0 - 60.0, 0.0 - 1000.0)),
-                // SE chamber
-                e/default_monster(v/make(1200.0, 0.0 - 700.0)),
-                e/default_monster(v/make(1800.0, 0.0 - 300.0)),
-                // SW chamber
-                e/default_monster(v/make(0.0 - 1500.0, 0.0 - 1100.0)),
-                e/default_monster(v/make(0.0 - 1700.0, 0.0 - 400.0)),
-                // NE chamber
-                e/default_monster(v/make(1000.0, 400.0)),
-                e/default_monster(v/make(1600.0, 800.0)),
-                // Far-north
-                e/default_monster(v/make(0.0 - 1200.0, 1400.0))
+                // Entry corridor exit — first gate, teaches the mechanic
+                guardian(v/make(0.0, 0.0 - 940.0)),
+
+                // SE/SW divider passage (gap at y ~ -700, x ~ 0)
+                guardian(v/make(0.0, 0.0 - 700.0)),
+
+                // Central E-W divider — gap at x ≈ -1000
+                guardian(v/make(0.0 - 1000.0, 0.0)),
+
+                // Central E-W divider — gap at x ≈ 200
+                guardian(v/make(200.0, 0.0)),
+
+                // Central E-W divider — gap at x ≈ 1600
+                guardian(v/make(1600.0, 0.0)),
+
+                // NW chamber entrance (gap in vertical wall at x ~ -1200)
+                guardian(v/make(0.0 - 1200.0, 160.0)),
+
+                // Far-north passage (gap at x ≈ 400-500, y ~ 1120)
+                guardian(v/make(480.0, 1120.0))
             ],
             sentinels: [],
             doors: [
@@ -409,6 +442,26 @@ fn initial_map_data(name) {
             spawns: [
                 g/Spawn { name: "default", pos: v/make(0.0, 0.0 - hh + 80.0) },
                 g/Spawn { name: "from_entry", pos: v/make(0.0, 0.0 - hh + 80.0) }
+            ],
+            gold_items: [
+                // Entry corridor
+                g/Gold { pos: v/make(40.0, 0.0 - 1100.0), value: 1 },
+                g/Gold { pos: v/make(0.0 - 30.0, 0.0 - 1200.0), value: 1 },
+                // SE chamber
+                g/Gold { pos: v/make(1100.0, 0.0 - 500.0), value: 2 },
+                g/Gold { pos: v/make(1400.0, 0.0 - 800.0), value: 1 },
+                g/Gold { pos: v/make(1900.0, 0.0 - 200.0), value: 3 },
+                // SW chamber
+                g/Gold { pos: v/make(0.0 - 1600.0, 0.0 - 600.0), value: 2 },
+                g/Gold { pos: v/make(0.0 - 1400.0, 0.0 - 1000.0), value: 1 },
+                // NE chamber
+                g/Gold { pos: v/make(1200.0, 600.0), value: 2 },
+                g/Gold { pos: v/make(1500.0, 900.0), value: 3 },
+                // NW chamber
+                g/Gold { pos: v/make(0.0 - 1500.0, 500.0), value: 2 },
+                // Far north
+                g/Gold { pos: v/make(0.0 - 800.0, 1350.0), value: 5 },
+                g/Gold { pos: v/make(500.0, 1400.0), value: 3 }
             ]
         }
     } else {
@@ -424,7 +477,7 @@ fn default_player() {
         half: v/make(14.0, 14.0),
         aim: v/UNIT_X,
         speed_mult: 1.0,
-        hp: 5.0,
+        hp: 3.0,
         iframes: 0.0
     }
 }
@@ -442,13 +495,16 @@ fn world_from_data(data, map_name, spawn_name, tuning, editor, mode, frame) {
         sentinels: data.sentinels,
         doors: data.doors,
         spawns: data.spawns,
+        gold_items: data.gold_items,
+        gold_collected: 0,
         camera: p_pos,
         tuning: tuning,
         mode: mode,
         frame: frame,
         editor: editor,
         current_map: map_name,
-        transition: Transition.None
+        transition: Transition.None,
+        menu_open: false
     }
 }
 
@@ -516,6 +572,28 @@ fn advance_transition(world, dt) {
     }
 }
 
+// Check which gold items the player overlaps. Returns { remaining, collected }
+// where `remaining` is the items NOT picked up, and `collected` is the total
+// value of those that were.
+struct PickupResult { remaining, collected }
+
+fn collect_gold(player, gold_items) {
+    let pickup_radius = 22.0   // generous — player half is 14
+    let mut remaining = []
+    let mut collected = 0
+    let mut i = 0
+    while i < length(gold_items) {
+        let g = gold_items[i]
+        if v/length(v/sub(player.pos, g.pos)) < pickup_radius {
+            collected = collected + g.value
+        } else {
+            remaining = push(remaining, g)
+        }
+        i = i + 1
+    }
+    PickupResult { remaining: remaining, collected: collected }
+}
+
 fn playing_tick(world) {
     let dt = g/current_dt()
     // Freeze simulation entirely during a transition — player can't move or
@@ -536,6 +614,8 @@ fn playing_tick(world) {
         let monsters = e/advance_all_monsters(world.monsters, player_b.pos, world.walls, dt)
         let sentinels = e/advance_all_sentinels(world.sentinels, player_b.pos, world.walls, dt)
         let player_c = g/apply_monster_attacks(player_b, monsters, world.walls)
+        // Gold pickup
+        let pickup = collect_gold(player_c, world.gold_items)
         // If the player walked onto a door this tick, start the fade-out.
         let maybe_door = door_under_player(player_c, world.doors)
         let next_transition = if maybe_door == null {
@@ -553,6 +633,8 @@ fn playing_tick(world) {
             player: player_c,
             monsters: monsters,
             sentinels: sentinels,
+            gold_items: pickup.remaining,
+            gold_collected: world.gold_collected + pickup.collected,
             camera: camera,
             transition: next_transition
         }
@@ -652,6 +734,14 @@ fn draw_editor_selection(world) {
                                              v/make(EDITOR_SELECT_RADIUS, EDITOR_SELECT_RADIUS),
                                              r/YELLOW, world.camera)
             } else { 0 }
+        },
+        Selection.Gold { index } => {
+            if index < length(world.gold_items) {
+                let gg = world.gold_items[index]
+                render/draw_world_rect_lines(gg.pos,
+                                             v/make(12.0, 12.0),
+                                             r/YELLOW, world.camera)
+            } else { 0 }
         }
     }
 }
@@ -731,8 +821,8 @@ fn draw_editor_panel(world, ui_bufs) {
 
     // Tool toggle group — 6 tools must fit in (panel_w - 20) = 240 px.
     r/label(panel_x + 10.0, 104.0, 80.0, 18.0, "Tool:")
-    r/toggle_group(panel_x + 10.0, 124.0, 38.0, 24.0,
-                   "Sel;Wall;Mon;Sent;Door;Spwn", world.editor.tool_slot)
+    r/toggle_group(panel_x + 10.0, 124.0, 33.0, 24.0,
+                   "Sel;Wall;Mon;Sent;Door;Spwn;Gold", world.editor.tool_slot)
 
     let sx = panel_x + 80.0
     let sw = 150.0
@@ -786,6 +876,11 @@ fn render_editor(world, shader_ctx, ui_bufs) {
     while si < length(world.sentinels) {
         render/draw_sentinel(world.sentinels[si], world.camera)
         si = si + 1
+    }
+    let mut gdi = 0
+    while gdi < length(world.gold_items) {
+        render/draw_gold(world.gold_items[gdi], world.camera)
+        gdi = gdi + 1
     }
     render/draw_player(world.player, world.camera)
 
@@ -867,6 +962,19 @@ fn pick_at(world, p) {
             _ => 0
         }
         s = s + 1
+    }
+    let mut gi = 0
+    while gi < length(world.gold_items) {
+        match result {
+            Selection.None => {
+                let gg = world.gold_items[gi]
+                if v/length(v/sub(p, gg.pos)) < EDITOR_SELECT_RADIUS {
+                    result = Selection.Gold { index: gi }
+                }
+            },
+            _ => 0
+        }
+        gi = gi + 1
     }
     let mut sp = 0
     while sp < length(world.spawns) {
@@ -960,6 +1068,10 @@ fn editor_place(world, tool, p, drag_start) {
             })
             World { ...world, frame: world.frame + 1, spawns: spawns }
         },
+        Tool.Gold => {
+            let gold_items = push(world.gold_items, g/default_gold(p))
+            World { ...world, frame: world.frame + 1, gold_items: gold_items }
+        },
         Tool.Select => world
     }
 }
@@ -992,6 +1104,11 @@ fn editor_delete_selected(world) {
             let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted spawn" }
             World { ...world, frame: world.frame + 1, spawns: spawns, editor: new_ed }
         },
+        Selection.Gold { index } => {
+            let gold_items = list_remove_at(world.gold_items, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted gold" }
+            World { ...world, frame: world.frame + 1, gold_items: gold_items, editor: new_ed }
+        },
         Selection.None => world
     }
 }
@@ -1011,6 +1128,7 @@ fn editor_tick(world) {
         Tool.Monster => true,
         Tool.Sentinel => true,
         Tool.Spawn => true,
+        Tool.Gold => true,
         _ => false
     }
 
@@ -1057,6 +1175,12 @@ fn editor_tick(world) {
                     let s = world1.spawns[index]
                     "spawn: ${s.name}"
                 } else { "spawn selected" }
+            },
+            Selection.Gold { index } => {
+                if index < length(world1.gold_items) {
+                    let gg = world1.gold_items[index]
+                    "gold (value: ${gg.value})"
+                } else { "gold selected" }
             }
         }
         ed2 = Editor {
@@ -1129,6 +1253,13 @@ fn serialize_level(world) {
         s = s ++ "${spn.name} ${spn.pos.x} ${spn.pos.y}\n"
         sp = sp + 1
     }
+    s = s ++ "gold\n"
+    let mut gi = 0
+    while gi < length(world.gold_items) {
+        let gg = world.gold_items[gi]
+        s = s ++ "${gg.pos.x} ${gg.pos.y} ${gg.value}\n"
+        gi = gi + 1
+    }
     s
 }
 
@@ -1158,6 +1289,7 @@ fn deserialize_level(text) {
     let mut sentinels = []
     let mut doors = []
     let mut spawns = []
+    let mut gold_items = []
     let mut section = "none"
     let mut i = 0
     while i < length(lines) {
@@ -1167,6 +1299,7 @@ fn deserialize_level(text) {
         else if line == "sentinels" || line == "sentinels\r" { section = "sentinels" }
         else if line == "doors" || line == "doors\r" { section = "doors" }
         else if line == "spawns" || line == "spawns\r" { section = "spawns" }
+        else if line == "gold" || line == "gold\r" { section = "gold" }
         else if length(line) > 0 {
             let parts = strip_blanks(split(line, " "))
             if section == "walls" && length(parts) >= 4 {
@@ -1206,12 +1339,17 @@ fn deserialize_level(text) {
                     name: parts[0],
                     pos: v/make(to-float(parts[1]), to-float(parts[2]))
                 })
+            } else if section == "gold" && length(parts) >= 3 {
+                gold_items = push(gold_items, g/Gold {
+                    pos: v/make(to-float(parts[0]), to-float(parts[1])),
+                    value: to-int(to-float(parts[2]))
+                })
             }
         }
         i = i + 1
     }
     LevelData { walls: walls, monsters: monsters, sentinels: sentinels,
-                doors: doors, spawns: spawns }
+                doors: doors, spawns: spawns, gold_items: gold_items }
 }
 
 // Read the named map from disk if present; otherwise fall back to the
@@ -1250,6 +1388,7 @@ fn switch_map(world, name, spawn_name) {
         sentinels: data.sentinels,
         doors: data.doors,
         spawns: data.spawns,
+        gold_items: data.gold_items,
         player: new_player,
         camera: p_pos,
         current_map: name
@@ -1267,7 +1406,8 @@ fn load_level(world) {
         monsters: data.monsters,
         sentinels: data.sentinels,
         doors: data.doors,
-        spawns: data.spawns
+        spawns: data.spawns,
+        gold_items: data.gold_items
     }
 }
 
@@ -1279,7 +1419,8 @@ fn maybe_toggle_mode(world) {
     let mut w = world
     if r/is_key_pressed(r/KEY_TAB) {
         let new_mode = if w.mode == MODE_PLAYING { MODE_EDITING } else { MODE_PLAYING }
-        w = World { ...w, frame: w.frame + 1, mode: new_mode }
+        // Always close the menu when switching modes.
+        w = World { ...w, frame: w.frame + 1, mode: new_mode, menu_open: false }
     }
     // F1 (raylib keycode 290) toggles the cone overlay + shadow mesh so the
     // user can confirm where the player actually is when lighting obscures it.
@@ -1313,13 +1454,22 @@ fn game_loop(world, shader_ctx, ui_bufs, max_frames) {
     } else if r/window_should_close() {
         world
     } else {
-        let after_toggle = maybe_toggle_mode(world)
+        // Escape in play mode opens/closes the pause menu.
+        let w0 = if world.mode == MODE_PLAYING && r/is_key_pressed(r/KEY_ESCAPE) {
+            World { ...world, menu_open: !world.menu_open }
+        } else { world }
+
+        let after_toggle = maybe_toggle_mode(w0)
+        // Freeze simulation while the pause menu is visible.
         let next = if after_toggle.mode == MODE_EDITING {
             editor_tick(after_toggle)
+        } else if after_toggle.menu_open {
+            after_toggle
         } else {
             playing_tick(after_toggle)
         }
-        let world_after = if next.mode == MODE_EDITING {
+
+        if next.mode == MODE_EDITING {
             let ui = render_editor(next, shader_ctx, ui_bufs)
             // Apply any save/load/tuning/map-nav updates the UI produced.
             let w1 = World { ...next, frame: next.frame + 1, tuning: ui.new_tuning }
@@ -1331,7 +1481,7 @@ fn game_loop(world, shader_ctx, ui_bufs, max_frames) {
             let w3 = if ui.load { load_level(w2) } else { w2 }
             // Map nav — cycle through MAP_NAMES and reload. Save first if
             // the user wants to keep changes (explicit, not automatic).
-            if ui.prev_map || ui.next_map {
+            let w4 = if ui.prev_map || ui.next_map {
                 let n = length(MAP_NAMES)
                 let mut idx = 0
                 let mut k = 0
@@ -1346,11 +1496,21 @@ fn game_loop(world, shader_ctx, ui_bufs, max_frames) {
                 let ed = Editor { ...switched.editor, status_text: "editing ${name}" }
                 World { ...switched, editor: ed, mode: MODE_EDITING }
             } else { w3 }
+            game_loop(w4, shader_ctx, ui_bufs, max_frames)
         } else {
-            render/render_world(next, shader_ctx, fade_alpha(next))
-            next
+            // render_world returns: 0 = no action, 1 = resume, 2 = quit.
+            let menu_action = render/render_world(next, shader_ctx, fade_alpha(next))
+            if menu_action == 2 {
+                next  // "Quit" pressed — exit the loop
+            } else {
+                let w_next = if menu_action == 1 {
+                    World { ...next, menu_open: false }  // "Resume" — close menu
+                } else {
+                    next
+                }
+                game_loop(w_next, shader_ctx, ui_bufs, max_frames)
+            }
         }
-        game_loop(world_after, shader_ctx, ui_bufs, max_frames)
     }
 }
 
@@ -1374,6 +1534,9 @@ fn main() {
     }
     r/set_config_flags(flags)
     r/init_window(INITIAL_W, INITIAL_H, "beagle-zelda")
+    // Disable raylib's default escape-key-closes-window behaviour so we can
+    // intercept escape ourselves and show the pause menu instead.
+    r/set_exit_key(0)
     r/set_target_fps(60)
 
     let shader_ctx = render/load_cone_light_shader()

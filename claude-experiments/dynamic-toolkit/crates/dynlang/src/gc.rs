@@ -12,7 +12,8 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use dynalloc::{BumpAllocator, Heap, PtrPolicy, alloc_obj};
+use dynalloc::{BumpAllocator, Heap, MutatorThread, PtrPolicy, ThreadState, alloc_obj};
+use std::sync::Arc;
 use dynir::interp::ExternCallResult;
 use dynir::{FuncDef, FuncRef, Module};
 use dynexec::{CodegenConfig, FrameStrategy};
@@ -39,6 +40,63 @@ const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 thread_local! {
     static PTR_TAG: Cell<u32> = const { Cell::new(u32::MAX) };
     static RUNTIME: Cell<*const DynGcRuntime> = const { Cell::new(std::ptr::null()) };
+    /// Per-OS-thread `MutatorThread` registration. Created lazily on
+    /// the first `install_thread` call from each thread that targets
+    /// a `Generational` runtime; lives until the thread exits (when
+    /// thread-local destructors fire and `MutatorThread::Drop`
+    /// deregisters from the heap).
+    ///
+    /// We don't deregister on `ThreadGuard::drop` — registration is
+    /// idempotent across nested `install_thread` calls and per-OS-
+    /// thread tear-down via thread-local Drop is the correct
+    /// boundary for "this thread is leaving the runtime."
+    static MUTATOR: RefCell<Option<MutatorThread<NanBoxPolicy>>> = const { RefCell::new(None) };
+}
+
+/// Ensure the current OS thread has a registered `MutatorThread`
+/// for the heap inside `gc`. Idempotent. Returns immediately if a
+/// MutatorThread is already registered.
+fn ensure_mutator_registered(gc: &DynGcRuntime) {
+    if let Backend::Generational(heap) = &gc.backend {
+        MUTATOR.with(|cell| {
+            let mut slot = cell.borrow_mut();
+            if slot.is_none() {
+                *slot = Some(MutatorThread::<NanBoxPolicy>::register(heap.clone()));
+            }
+        });
+    }
+}
+
+/// Run `f` with the current thread's `MutatorThread` (creating it
+/// lazily). Panics if the runtime isn't `Generational`.
+fn with_mutator<R>(f: impl FnOnce(&MutatorThread<NanBoxPolicy>) -> R) -> R {
+    MUTATOR.with(|cell| {
+        let slot = cell.borrow();
+        let mt = slot
+            .as_ref()
+            .expect("with_mutator: no MutatorThread registered on this thread \
+                     (call DynGcRuntime::install_thread first)");
+        f(mt)
+    })
+}
+
+/// Get a clone of the current thread's `ThreadState` for use as the
+/// triggering thread argument to `Heap::mutator_triggered_gc`.
+fn current_thread_state() -> Option<Arc<ThreadState>> {
+    MUTATOR.with(|cell| cell.borrow().as_ref().map(|mt| mt.state().clone()))
+}
+
+/// Adapter: passes through to dynlower's
+/// `walk_parked_thread_jit_roots`. Used by the heap's STW GC to
+/// scan another thread's parked JIT frame chain. The "parked"
+/// variant stops at the first non-JIT frame (instead of using the
+/// caller's thread-local JIT-entry fence), which is required for
+/// cross-thread walks.
+unsafe fn jit_frame_walker_thunk(
+    jit_fp: *const u8,
+    visitor: &mut dyn FnMut(*mut u64),
+) {
+    dynlower::walk_parked_thread_jit_roots(jit_fp, visitor)
 }
 
 /// `PtrPolicy` that reads the current thread's ptr tag from a thread-local
@@ -101,7 +159,9 @@ enum Backend {
     /// Bump allocator, never collects. Zero overhead.
     Leak(BumpAllocator),
     /// Generational, thread-aware, concurrent-capable `Heap`.
-    Generational(Heap),
+    /// Stored behind `Arc` so each `MutatorThread` can hold a clone
+    /// for the lifetime of its registration.
+    Generational(Arc<Heap>),
 }
 
 // ── DynGcRuntime ──────────────────────────────────────────────────
@@ -123,7 +183,7 @@ pub struct DynGcRuntime {
     /// caller is responsible for keeping the pointee alive at least as long
     /// as the runtime lives. Typical use: register a `JitModule`'s literal
     /// pool so quote-literals are traced by the moving GC.
-    extra_root_sources: RefCell<Vec<*const dyn RootSource>>,
+    extra_root_sources: std::sync::Mutex<Vec<*const dyn RootSource>>,
 }
 
 /// The canonical name of dynlang's GC-allocation extern. `compile_jit`
@@ -146,7 +206,14 @@ impl DynGcRuntime {
                     Some(nsize) => Heap::new_generational::<Compact>(*nsize, *heap_size, type_infos.clone()),
                     None => Heap::new::<Compact>(*heap_size, type_infos.clone()),
                 };
-                Backend::Generational(heap)
+                // Install the JIT-frame walker so the heap can scan
+                // each parked thread's JIT frame as roots during GC.
+                // This is what enables truly-concurrent compile + run:
+                // when one thread is parked deep in JIT recursion and
+                // another triggers GC, the parked thread's spill
+                // slots get updated when objects relocate.
+                heap.set_jit_frame_walker(jit_frame_walker_thunk);
+                Backend::Generational(Arc::new(heap))
             }
         };
 
@@ -156,7 +223,7 @@ impl DynGcRuntime {
             tags: tags.clone(),
             roots: RootSet::new(),
             auto_externs: HashMap::new(),
-            extra_root_sources: RefCell::new(Vec::new()),
+            extra_root_sources: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -172,7 +239,7 @@ impl DynGcRuntime {
     /// keeping the pointee alive (e.g., behind a `Box` or other stable
     /// allocation).
     pub unsafe fn register_extra_root_source(&self, source: *const dyn RootSource) {
-        self.extra_root_sources.borrow_mut().push(source);
+        self.extra_root_sources.lock().unwrap().push(source);
     }
 
     /// Push a temporary `RootSource` and return a guard that pops it on
@@ -194,7 +261,7 @@ impl DynGcRuntime {
         let erased: *const dyn RootSource = unsafe {
             core::mem::transmute::<*const (dyn RootSource + 'a), *const dyn RootSource>(source)
         };
-        self.extra_root_sources.borrow_mut().push(erased);
+        self.extra_root_sources.lock().unwrap().push(erased);
         ExtraRootGuard { gc: self }
     }
 
@@ -215,9 +282,17 @@ impl DynGcRuntime {
     /// Install this runtime as the current thread's active runtime. All
     /// `__gc_alloc__` thunks and `NanBoxPolicy` lookups read this. The
     /// returned guard restores the previous state on drop.
+    ///
+    /// For a `Generational` backend, this *also* lazily registers
+    /// the calling OS thread as a `dynalloc::MutatorThread` on the
+    /// shared heap, so concurrent GC waits for this thread to reach
+    /// a safepoint before scanning roots / relocating objects. The
+    /// MutatorThread is reused across nested `install_thread` calls
+    /// and lives until the OS thread exits.
     pub fn install_thread(&self) -> ThreadGuard<'_> {
         let prev_rt = RUNTIME.with(|c| c.replace(self as *const _));
         let prev_tag = PTR_TAG.with(|c| c.replace(self.tags.ptr));
+        ensure_mutator_registered(self);
         ThreadGuard { prev_rt, prev_tag, _phantom: std::marker::PhantomData }
     }
 
@@ -239,7 +314,18 @@ impl DynGcRuntime {
         let info = &self.type_infos[type_id];
         match &self.backend {
             Backend::Leak(bump) => unsafe { alloc_obj::<Compact>(bump, info, varlen_len) },
-            Backend::Generational(heap) => heap.alloc_obj::<Compact>(info, varlen_len),
+            Backend::Generational(_) => {
+                // Route through the per-thread MutatorThread. This is
+                // critical for multi-thread safety: the MutatorThread's
+                // alloc auto-triggers GC under pressure via
+                // `Heap::mutator_triggered_gc`, which uses STW that
+                // waits for ALL registered threads to reach a
+                // safepoint before relocating objects. Bypassing this
+                // (calling `Heap::alloc_obj` directly) skips
+                // safepoint coordination and lets concurrent runs
+                // observe relocated-but-not-yet-updated pointers.
+                with_mutator(|mt| mt.alloc_obj::<Compact>(info, varlen_len))
+            }
         }
     }
 
@@ -295,7 +381,7 @@ impl DynGcRuntime {
             Backend::Leak(_) => {}
             Backend::Generational(heap) => {
                 let _guard = self.install_thread();
-                let extras = self.extra_root_sources.borrow();
+                let extras = self.extra_root_sources.lock().unwrap();
                 let mut sources: Vec<&dyn RootSource> = Vec::with_capacity(1 + extras.len());
                 sources.push(&self.roots);
                 for &p in extras.iter() {
@@ -358,10 +444,18 @@ impl DynGcRuntime {
         match &self.backend {
             Backend::Generational(heap) => {
                 let safepoints = jit.all_safepoints();
-                let session = JitSafepointSession::<NanBoxPolicy, _>::new(
+                let mut session = JitSafepointSession::<NanBoxPolicy, _>::new(
                     heap, StackMapJitTransport, &safepoints,
                 )
                 .with_gc_policy(policy);
+                // Bind to the calling thread's MutatorThread state so
+                // pressure-driven GC at JIT safepoints uses the STW
+                // protocol that waits for ALL registered threads.
+                // Without this, a GC fired here would corrupt
+                // concurrent runs on other threads.
+                if let Some(ts) = current_thread_state() {
+                    session = session.with_triggering_thread(ts);
+                }
                 // Safety: `jit` outlives this call, so `&jit.literal_pool()`
                 // is valid for the session's lifetime.
                 let pool_ptr: *const dyn RootSource = jit.literal_pool();
@@ -373,7 +467,7 @@ impl DynGcRuntime {
                 // explicit `gc.collect()` calls. Without this, host code
                 // that holds GC handles in `Rooted` slots would silently
                 // see them collected when the JIT triggers a GC.
-                let extras = self.extra_root_sources.borrow();
+                let extras = self.extra_root_sources.lock().unwrap();
                 for &ptr in extras.iter() {
                     unsafe { session.register_extra_root(ptr); }
                 }
@@ -440,7 +534,7 @@ pub struct ExtraRootGuard<'a> {
 
 impl Drop for ExtraRootGuard<'_> {
     fn drop(&mut self) {
-        let popped = self.gc.extra_root_sources.borrow_mut().pop();
+        let popped = self.gc.extra_root_sources.lock().unwrap().pop();
         debug_assert!(popped.is_some(), "ExtraRootGuard: pop on empty stack");
     }
 }

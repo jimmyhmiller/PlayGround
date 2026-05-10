@@ -139,6 +139,15 @@ fn draw_door(d, camera) {
     draw_world_rect_lines(d.center, d.half, ring, camera)
 }
 
+// Gold pickup — a small bright yellow square with a shiny outline.
+fn draw_gold(gold, camera) {
+    let half = v/make(8.0, 8.0)
+    let body = r/rgb(255, 215, 0)
+    let outline = r/rgb(255, 255, 120)
+    draw_world_rect(gold.pos, half, body, camera)
+    draw_world_rect_lines(gold.pos, half, outline, camera)
+}
+
 // Editor-only marker: a cyan crosshair at the spawn position with a label.
 // Not drawn in play mode — spawns are authoring metadata, not world objects.
 fn draw_spawn(sp, camera) {
@@ -486,6 +495,7 @@ enum Drawable {
     Wall { index, ground_y },
     Monster { index, ground_y },
     Sentinel { index, ground_y },
+    Gold { index, ground_y },
     Player { ground_y }
 }
 
@@ -494,6 +504,7 @@ fn drawable_ground_y(d) {
         Drawable.Wall { index, ground_y } => ground_y,
         Drawable.Monster { index, ground_y } => ground_y,
         Drawable.Sentinel { index, ground_y } => ground_y,
+        Drawable.Gold { index, ground_y } => ground_y,
         Drawable.Player { ground_y } => ground_y
     }
 }
@@ -523,6 +534,12 @@ fn ysort_drawables(world) {
         items = push(items, Drawable.Sentinel { index: s, ground_y: ss.pos.y - ss.half.y })
         s = s + 1
     }
+    let mut gi = 0
+    while gi < length(world.gold_items) {
+        let gg = world.gold_items[gi]
+        items = push(items, Drawable.Gold { index: gi, ground_y: gg.pos.y - 8.0 })
+        gi = gi + 1
+    }
     let p = world.player
     items = push(items, Drawable.Player { ground_y: p.pos.y - p.half.y })
 
@@ -539,6 +556,7 @@ fn draw_scene_ysorted(world) {
             Drawable.Wall     { index, ground_y } => draw_wall(world.walls[index], world.camera),
             Drawable.Monster  { index, ground_y } => draw_monster(world.monsters[index], world.camera),
             Drawable.Sentinel { index, ground_y } => draw_sentinel(world.sentinels[index], world.camera),
+            Drawable.Gold     { index, ground_y } => draw_gold(world.gold_items[index], world.camera),
             Drawable.Player   { ground_y }        => draw_player(world.player, world.camera)
         }
         i = i + 1
@@ -615,7 +633,7 @@ fn render_world(world, shader_ctx, fade_alpha) {
         draw_sentinel_indicators(world)
     }
 
-    r/draw_text("WASD/arrows move  Shift=run  Ctrl=sneak  Tab=edit  ESC=quit",
+    r/draw_text("WASD/arrows move  Shift=run  Ctrl=sneak  Tab=edit  ESC=menu",
                 10, 10, 18, r/LIGHTGRAY)
     r/draw_fps(10, 35)
 
@@ -626,13 +644,43 @@ fn render_world(world, shader_ctx, fade_alpha) {
     r/draw_rectangle_lines(10, hp_y, 100, 16, r/WHITE)
     r/draw_text("HP", 115, hp_y - 2, 18, r/WHITE)
 
-    // Fade overlay for door transitions — drawn last so it's on top of the
-    // HUD too. 0 = transparent (no transition), 1 = fully black (mid-teleport).
+    // Gold counter
+    let gold_y = hp_y - 26
+    let gold_text = "Gold: ${world.gold_collected}"
+    r/draw_text(gold_text, 10, gold_y, 18, r/rgb(255, 215, 0))
+
+    // Fade overlay for door transitions — drawn before menu so fades don't
+    // obscure the pause menu. 0 = transparent, 1 = fully black.
     if fade_alpha > 0.0 {
         let a = if fade_alpha > 1.0 { 255 } else { to-int(fade_alpha * 255.0) }
         r/draw_rectangle(0, 0, r/screen_width(), r/screen_height(),
                          r/color(0, 0, 0, a))
     }
 
+    // Pause menu overlay — drawn on top of everything.
+    // Returns: 0 = no action, 1 = Resume clicked, 2 = Quit clicked.
+    let menu_action = if world.menu_open {
+        // Semi-transparent dark scrim
+        r/draw_rectangle(0, 0, r/screen_width(), r/screen_height(), r/color(0, 0, 0, 180))
+        // Centered panel
+        let pw = 280
+        let ph = 200
+        let px = (r/screen_width() - pw) / 2
+        let py = (r/screen_height() - ph) / 2
+        r/draw_rectangle(px, py, pw, ph, r/rgb(25, 27, 40))
+        r/draw_rectangle_lines(px, py, pw, ph, r/LIGHTGRAY)
+        r/draw_text("PAUSED", px + 82, py + 22, 28, r/WHITE)
+        // Buttons
+        let btn_w = 220
+        let btn_h = 44
+        let btn_x = to-float(px + (pw - btn_w) / 2)
+        let resumed = r/button(btn_x, to-float(py + 72), to-float(btn_w), to-float(btn_h), "Resume") != 0
+        let quitting = r/button(btn_x, to-float(py + 132), to-float(btn_w), to-float(btn_h), "Quit") != 0
+        if quitting { 2 }
+        else if resumed { 1 }
+        else { 0 }
+    } else { 0 }
+
     r/end_drawing()
+    menu_action
 }

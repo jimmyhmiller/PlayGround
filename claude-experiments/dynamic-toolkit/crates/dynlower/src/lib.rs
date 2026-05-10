@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub mod backend;
 pub mod batch_lower;
+pub mod growable_table;
 pub mod regalloc;
 pub mod regalloc_bridge;
 
@@ -296,6 +297,82 @@ pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub fn walk_jit_ancestor_roots(_jit_fp: *const u8, _visitor: &mut dyn FnMut(*mut u64)) {
     // FP-chain walking is architecture-specific; no-op on unsupported targets.
+}
+
+/// Walk a parked thread's JIT frame chain. Same as
+/// [`walk_jit_ancestor_roots`] but **stops at the first frame whose
+/// return address is not in any registered JIT code range**, instead
+/// of relying on the thread-local `current_jit_entry_fp` fence.
+///
+/// Use this when scanning roots for a thread *other than* the
+/// caller — the thread-local fence belongs to the wrong thread, so
+/// the standard walker would overrun the parked thread's JIT region
+/// into its Rust host stack and dereference garbage.
+///
+/// The parked thread, by construction, is parked at a JIT safepoint,
+/// so its FP-chain at the moment of parking has only JIT frames
+/// until the JIT-entry frame; the next frame above is host Rust
+/// (not in the registry). Stopping there is the right boundary.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+pub fn walk_parked_thread_jit_roots(
+    jit_fp: *const u8,
+    visitor: &mut dyn FnMut(*mut u64),
+) {
+    let registry = JIT_CODE_REGISTRY.read().unwrap();
+    if registry.is_empty() {
+        return;
+    }
+
+    let mut fp = jit_fp as *const u64;
+    loop {
+        if fp.is_null() {
+            break;
+        }
+        let saved_fp = unsafe { *fp } as *const u64;
+        let saved_lr = unsafe { *fp.add(1) } as usize;
+
+        if saved_fp.is_null() {
+            break;
+        }
+
+        // CROSS-THREAD walk: stop at the first non-JIT frame. We
+        // can't rely on the thread-local entry-FP fence because that
+        // belongs to the WALKING thread, not the parked thread.
+        let entry = match lookup_code_entry(&registry, saved_lr) {
+            Some(e) => e,
+            None => break,
+        };
+        let return_offset = saved_lr - entry.code_start;
+        match entry
+            .safepoints
+            .binary_search_by_key(&return_offset, |sp| sp.return_offset)
+        {
+            Ok(idx) => {
+                let record = &entry.safepoints[idx];
+                for &slot_offset in &record.root_slots {
+                    let slot = unsafe {
+                        (saved_fp as *mut u8).offset(slot_offset as isize) as *mut u64
+                    };
+                    visitor(slot);
+                }
+            }
+            Err(_) => {
+                // No exact safepoint match: the saved_lr came from a
+                // call site that didn't record one. Skip this frame
+                // (no roots from it) but keep walking — the caller's
+                // call site might be a recorded safepoint.
+            }
+        }
+
+        fp = saved_fp;
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub fn walk_parked_thread_jit_roots(
+    _jit_fp: *const u8,
+    _visitor: &mut dyn FnMut(*mut u64),
+) {
 }
 
 /// Root source that walks all ancestor JIT frames via the FP chain.
@@ -1087,35 +1164,100 @@ impl CallMode {
 ///
 /// Internal calls go through an indirect call table so all function
 /// pointers are resolved after compilation.
+/// Per-function bookkeeping produced by compilation. Allocated once
+/// per function and never mutated after publication, so concurrent
+/// readers (running JIT code, GC stack walking) can safely take
+/// `&FunctionMetadata` while another thread is appending a new
+/// function elsewhere.
+pub struct FunctionMetadata {
+    pub(crate) entry_offset: usize,
+    pub(crate) safepoints: Vec<SafepointRecord>,
+    pub(crate) suspend_records: Vec<Box<CallSuspendRecord>>,
+    pub(crate) frame_reify_records: Vec<FrameReifyRecord>,
+}
+
+impl FunctionMetadata {
+    pub fn entry_offset(&self) -> usize {
+        self.entry_offset
+    }
+    pub fn safepoints(&self) -> &[SafepointRecord] {
+        &self.safepoints
+    }
+    pub fn frame_reify_records(&self) -> &[FrameReifyRecord] {
+        &self.frame_reify_records
+    }
+}
+
+/// Drain four parallel per-function Vecs (built up during a batch
+/// compile) into a single growable function table. Used by the
+/// batch constructors. Vecs are consumed by `mem::take` per index
+/// so the resulting `FunctionMetadata` owns its storage.
+fn build_functions_table(
+    entry_offsets: &mut Vec<usize>,
+    safepoints: &mut Vec<Vec<SafepointRecord>>,
+    suspend_records: &mut Vec<Vec<Box<CallSuspendRecord>>>,
+    frame_reify_records: &mut Vec<Vec<FrameReifyRecord>>,
+) -> crate::growable_table::GrowableTable<FunctionMetadata> {
+    let n = entry_offsets.len();
+    debug_assert_eq!(safepoints.len(), n);
+    debug_assert_eq!(suspend_records.len(), n);
+    debug_assert_eq!(frame_reify_records.len(), n);
+    let table = crate::growable_table::GrowableTable::new();
+    for i in 0..n {
+        table.push(FunctionMetadata {
+            entry_offset: entry_offsets[i],
+            safepoints: std::mem::take(&mut safepoints[i]),
+            suspend_records: std::mem::take(&mut suspend_records[i]),
+            frame_reify_records: std::mem::take(&mut frame_reify_records[i]),
+        });
+    }
+    table
+}
+
 pub struct JitModule {
-    memory: PagedCodeMemory,
+    /// Code memory. Mutated only by `extend` (under `extend_lock`);
+    /// readers don't go through this Rust API — JIT-compiled code
+    /// jumps to virtual addresses directly.
+    memory: std::sync::Mutex<PagedCodeMemory>,
     /// One entry per `Module::func_table` slot. Extern entries hold the
     /// provided extern pointers; internal entries are filled in after
-    /// compilation with pointers into `memory`.
+    /// compilation with pointers into `memory`. Lock-free, stable
+    /// addresses (see `CallTable`).
     call_table: CallTable,
     /// GC-traced NanBox literal slots. Emitted `GcLiteral` instructions load
     /// from `literal_pool.base() + idx*8`.
     literal_pool: LiteralPool,
-    function_entry_offsets: Vec<usize>,
-    function_suspend_records: Vec<Vec<Box<CallSuspendRecord>>>,
-    function_safepoints: Vec<Vec<SafepointRecord>>,
-    function_frame_reify_records: Vec<Vec<FrameReifyRecord>>,
+    /// Per-function bookkeeping. Replaces four parallel `Vec<...>`
+    /// fields with one append-only growable table whose entries have
+    /// stable addresses — required for concurrent `extend` + run.
+    functions: crate::growable_table::GrowableTable<FunctionMetadata>,
     handler_payload_kind: SafepointHandlerPayloadKind,
-    max_deopt_live_values: usize,
+    /// Tracks the maximum across all functions. Uses `fetch_max`
+    /// during extend so concurrent observers see a monotonic value.
+    max_deopt_live_values: std::sync::atomic::AtomicUsize,
     /// Pinned at construction; uniform across all calls in the module.
     call_mode: CallMode,
     /// Pinned at construction; passed to every Lowerer.
     safepoint_handler: Option<u64>,
     /// How many extern declarations from `module.func_table` we've already
     /// pulled pointers for. Used by `extend` to index into the externs slice.
-    extern_count_seen: usize,
+    extern_count_seen: std::sync::atomic::AtomicUsize,
+    /// Serializes concurrent `extend` calls — one writer at a time.
+    /// Crucially, this lock is **not** acquired by `run_jit` or any
+    /// reader-side code, so a long-running JIT execution never
+    /// blocks a concurrent compile.
+    ///
+    /// Read via `extend()` — the field looks dead to the compiler
+    /// because guards are introduced via `.lock()` directly.
+    #[allow(dead_code)]
+    extend_lock: std::sync::Mutex<()>,
 }
 
 impl Drop for JitModule {
     fn drop(&mut self) {
-        let base = self.memory.base_ptr() as usize;
-        for &offset in &self.function_entry_offsets {
-            unregister_jit_code(base + offset);
+        let base = self.memory.lock().unwrap().base_ptr() as usize;
+        for meta in self.functions.iter() {
+            unregister_jit_code(base + meta.entry_offset);
         }
     }
 }
@@ -1269,23 +1411,28 @@ impl JitModule {
             }
         }
 
+        let functions = build_functions_table(
+            &mut entry_offsets,
+            &mut function_safepoints,
+            &mut function_suspend_records,
+            &mut function_frame_reify_records,
+        );
+
         JitModule {
-            memory,
+            memory: std::sync::Mutex::new(memory),
             call_table,
             literal_pool: LiteralPool::new(DEFAULT_LITERAL_POOL_CAPACITY),
-            function_entry_offsets: entry_offsets,
-            function_suspend_records,
-            function_safepoints,
-            function_frame_reify_records,
+            functions,
             handler_payload_kind,
-            max_deopt_live_values,
+            max_deopt_live_values: std::sync::atomic::AtomicUsize::new(max_deopt_live_values),
             call_mode: CallMode::FastCall,
             safepoint_handler: None,
             extern_count_seen: module
                 .func_table
                 .iter()
                 .filter(|d| matches!(d, FuncDef::Extern(_)))
-                .count(),
+                .count().into(),
+            extend_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -1441,23 +1588,31 @@ impl JitModule {
             Some(h) => CallMode::ControlAware { safepoint_handler: h },
             None => CallMode::FastCall,
         };
+        let mut empty_suspend: Vec<Vec<Box<CallSuspendRecord>>> =
+            module.functions.iter().map(|_| vec![]).collect();
+        let mut empty_frame_reify: Vec<Vec<FrameReifyRecord>> =
+            module.functions.iter().map(|_| vec![]).collect();
+        let functions = build_functions_table(
+            &mut entry_offsets,
+            &mut function_safepoints,
+            &mut empty_suspend,
+            &mut empty_frame_reify,
+        );
         JitModule {
-            memory,
+            memory: std::sync::Mutex::new(memory),
             call_table,
             literal_pool: LiteralPool::new(DEFAULT_LITERAL_POOL_CAPACITY),
-            function_entry_offsets: entry_offsets,
-            function_suspend_records: module.functions.iter().map(|_| vec![]).collect(),
-            function_safepoints,
-            function_frame_reify_records: module.functions.iter().map(|_| vec![]).collect(),
+            functions,
             handler_payload_kind: SafepointHandlerPayloadKind::SafepointIndex,
-            max_deopt_live_values: 0,
+            max_deopt_live_values: std::sync::atomic::AtomicUsize::new(0),
             call_mode,
             safepoint_handler,
             extern_count_seen: module
                 .func_table
                 .iter()
                 .filter(|d| matches!(d, FuncDef::Extern(_)))
-                .count(),
+                .count().into(),
+            extend_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -1641,23 +1796,27 @@ impl JitModule {
             Some(h) => CallMode::ControlAware { safepoint_handler: h },
             None => CallMode::FastCall,
         };
+        let functions = build_functions_table(
+            &mut entry_offsets,
+            &mut function_safepoints,
+            &mut function_suspend_records,
+            &mut function_frame_reify_records,
+        );
         JitModule {
-            memory,
+            memory: std::sync::Mutex::new(memory),
             call_table,
             literal_pool: LiteralPool::new(DEFAULT_LITERAL_POOL_CAPACITY),
-            function_entry_offsets: entry_offsets,
-            function_suspend_records,
-            function_safepoints,
-            function_frame_reify_records,
+            functions,
             handler_payload_kind,
-            max_deopt_live_values,
+            max_deopt_live_values: std::sync::atomic::AtomicUsize::new(max_deopt_live_values),
             call_mode,
             safepoint_handler,
             extern_count_seen: module
                 .func_table
                 .iter()
                 .filter(|d| matches!(d, FuncDef::Extern(_)))
-                .count(),
+                .count().into(),
+            extend_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -1693,18 +1852,16 @@ impl JitModule {
         let handler_payload_kind = SafepointHandlerPayloadKind::SafepointIndex;
         let safepoint_handler = call_mode.safepoint_handler();
         JitModule {
-            memory: PagedCodeMemory::new(),
+            memory: std::sync::Mutex::new(PagedCodeMemory::new()),
             call_table: CallTable::new(call_table_capacity),
             literal_pool: LiteralPool::new(literal_pool_capacity),
-            function_entry_offsets: Vec::new(),
-            function_suspend_records: Vec::new(),
-            function_safepoints: Vec::new(),
-            function_frame_reify_records: Vec::new(),
+            functions: crate::growable_table::GrowableTable::new(),
             handler_payload_kind,
-            max_deopt_live_values: 0,
+            max_deopt_live_values: std::sync::atomic::AtomicUsize::new(0),
             call_mode,
             safepoint_handler,
-            extern_count_seen: 0,
+            extern_count_seen: std::sync::atomic::AtomicUsize::new(0),
+            extend_lock: std::sync::Mutex::new(()),
         }
     }
 
@@ -1723,13 +1880,18 @@ impl JitModule {
     /// filled in earlier extends keep their addresses, and newly emitted
     /// `ldr + blr` against the same base resolves either old or new entries.
     pub fn extend<Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator>(
-        &mut self,
+        &self,
         module: &Module,
         externs: &[*const u8],
     ) -> Vec<FuncRef>
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
+        // Serialize concurrent extends. Run-side `gc.run_jit` does
+        // NOT acquire this lock, so a long-running JIT execution
+        // never blocks a compile.
+        let _extend_guard = self.extend_lock.lock().expect("extend_lock poisoned");
+
         // 1. Append new func_table slots to the call table.
         let old_table_len = self.call_table.len();
         let new_table_len = module.func_table.len();
@@ -1742,8 +1904,9 @@ impl JitModule {
         for ft_idx in old_table_len..new_table_len {
             match &module.func_table[ft_idx] {
                 FuncDef::Extern(_) => {
-                    let ext_idx = self.extern_count_seen;
-                    self.extern_count_seen += 1;
+                    let ext_idx = self
+                        .extern_count_seen
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     assert!(
                         ext_idx < externs.len(),
                         "extend: externs slice too short ({}) for extern slot {}",
@@ -1770,7 +1933,7 @@ impl JitModule {
         };
 
         // 3. Compile each new function.
-        let new_func_start = self.function_entry_offsets.len();
+        let new_func_start = self.functions.len();
         let new_func_end = module.functions.len();
         assert!(
             new_func_end >= new_func_start,
@@ -1810,9 +1973,9 @@ impl JitModule {
         // runtime session. Starts at the total safepoint count from all
         // previously-extended functions, grows as we lower each new one.
         let mut sp_offset: u64 = self
-            .function_safepoints
+            .functions
             .iter()
-            .map(|v| v.len() as u64)
+            .map(|m| m.safepoints.len() as u64)
             .sum();
         for func_idx in new_func_start..new_func_end {
             let func = &module.functions[func_idx];
@@ -1826,47 +1989,48 @@ impl JitModule {
                 sp_offset,
             );
             lowerer.run();
-            self.function_suspend_records
-                .push(std::mem::take(&mut lowerer.suspend_records));
             sp_offset += lowerer.safepoints.len() as u64;
-            self.function_safepoints
-                .push(std::mem::take(&mut lowerer.safepoints));
-            self.function_frame_reify_records
-                .push(std::mem::take(&mut lowerer.frame_reify_records));
-            self.max_deopt_live_values = self
-                .max_deopt_live_values
-                .max(lowerer.max_deopt_live_values);
+            self.max_deopt_live_values
+                .fetch_max(lowerer.max_deopt_live_values, std::sync::atomic::Ordering::AcqRel);
             let code = lowerer.buf.into_code();
-            let offset = self.memory.push(&code);
-            self.function_entry_offsets.push(offset);
+            let offset = self.memory.lock().unwrap().push(&code);
+            self.functions.push(FunctionMetadata {
+                entry_offset: offset,
+                safepoints: std::mem::take(&mut lowerer.safepoints),
+                suspend_records: std::mem::take(&mut lowerer.suspend_records),
+                frame_reify_records: std::mem::take(&mut lowerer.frame_reify_records),
+            });
         }
 
         // 4. Finalize new pages (existing pages are already RX, no-op for them).
-        self.memory.finalize();
+        self.memory.lock().unwrap().finalize();
 
         // 5. Patch the new internal slots and register code ranges.
-        let base_addr = self.memory.base_ptr() as usize;
-        let total_len = self.memory.len();
+        let base_addr = self.memory.lock().unwrap().base_ptr() as usize;
+        let total_len = self.memory.lock().unwrap().len();
         let mut perf_entries: Vec<(usize, usize, &str)> = Vec::new();
         for ft_idx in old_table_len..new_table_len {
             if let FuncDef::Internal(func_idx) = &module.func_table[ft_idx] {
-                let ptr = unsafe {
-                    self.memory
-                        .base_ptr()
-                        .add(self.function_entry_offsets[*func_idx])
-                };
+                let entry_offset = self
+                    .functions
+                    .get(*func_idx)
+                    .expect("internal func has metadata")
+                    .entry_offset;
+                let ptr = unsafe { self.memory.lock().unwrap().base_ptr().add(entry_offset) };
                 self.call_table.set(ft_idx, ptr);
             }
         }
         for func_idx in new_func_start..new_func_end {
-            let code_start = base_addr + self.function_entry_offsets[func_idx];
-            let code_end = if func_idx + 1 < self.function_entry_offsets.len() {
-                base_addr + self.function_entry_offsets[func_idx + 1]
-            } else {
-                base_addr + total_len
-            };
+            let meta = self.functions.get(func_idx).expect("just-pushed metadata");
+            let next_offset = self
+                .functions
+                .get(func_idx + 1)
+                .map(|m| m.entry_offset)
+                .unwrap_or(total_len);
+            let code_start = base_addr + meta.entry_offset;
+            let code_end = base_addr + next_offset;
             let safepoints_arc: std::sync::Arc<[SafepointRecord]> =
-                self.function_safepoints[func_idx].clone().into();
+                meta.safepoints.clone().into();
             register_jit_code(code_start, code_end, safepoints_arc);
             perf_entries.push((
                 code_start,
@@ -1911,7 +2075,7 @@ impl JitModule {
     pub fn call_outcome(&self, func_ref: FuncRef, args: &[u64]) -> JitOutcome {
         let ptr = self.call_table.get(func_ref.index());
         assert!(!ptr.is_null(), "call to unresolved function");
-        unsafe { call_jit_outcome(ptr, args, self.max_deopt_live_values) }
+        unsafe { call_jit_outcome(ptr, args, self.max_deopt_live_values.load(std::sync::atomic::Ordering::Acquire)) }
     }
 
     /// Snapshot the call table (func_table_index → code pointer).
@@ -1926,30 +2090,33 @@ impl JitModule {
     }
 
     pub fn safepoints_for_function(&self, func_idx: usize) -> &[SafepointRecord] {
-        &self.function_safepoints[func_idx]
+        &self
+            .functions
+            .get(func_idx)
+            .expect("safepoints_for_function: unknown idx")
+            .safepoints
     }
 
     /// All safepoint records across all functions, flattened.
     pub fn all_safepoints(&self) -> Vec<SafepointRecord> {
-        self.function_safepoints
+        self.functions
             .iter()
-            .flat_map(|v| v.iter().cloned())
+            .flat_map(|m| m.safepoints.iter().cloned())
             .collect()
     }
 
     /// Dump all JIT code to a temp file and print disassembly commands.
     /// Each function's entry offset is printed for correlation.
     pub fn dump_code(&self) {
-        let base = self.memory.base_ptr();
-        let len = self.memory.len();
+        let base = self.memory.lock().unwrap().base_ptr();
+        let len = self.memory.lock().unwrap().len();
+        let n_funcs = self.functions.len();
         eprintln!(
             "JIT module: {:?} ({} bytes, {} functions)",
-            base,
-            len,
-            self.function_entry_offsets.len()
+            base, len, n_funcs,
         );
-        for (i, &off) in self.function_entry_offsets.iter().enumerate() {
-            eprintln!("  func[{}] at offset {:#x}", i, off);
+        for (i, m) in self.functions.iter().enumerate() {
+            eprintln!("  func[{}] at offset {:#x}", i, m.entry_offset);
         }
         let bytes = unsafe { std::slice::from_raw_parts(base, len) };
         let path = "/tmp/jit_dump.bin";
@@ -1962,7 +2129,11 @@ impl JitModule {
     }
 
     pub fn frame_reify_records_for_function(&self, func_idx: usize) -> &[FrameReifyRecord] {
-        &self.function_frame_reify_records[func_idx]
+        &self
+            .functions
+            .get(func_idx)
+            .expect("frame_reify_records_for_function: unknown idx")
+            .frame_reify_records
     }
 
     pub fn native_resume_ptr(
@@ -1970,10 +2141,13 @@ impl JitModule {
         func_idx: usize,
         record: &FrameReifyRecord,
     ) -> Option<*const u8> {
+        let entry_offset = self
+            .functions
+            .get(func_idx)
+            .expect("native_resume_ptr: unknown idx")
+            .entry_offset;
         record.native_resume_offset.map(|offset| unsafe {
-            self.memory
-                .base_ptr()
-                .add(self.function_entry_offsets[func_idx] + offset)
+            self.memory.lock().unwrap().base_ptr().add(entry_offset + offset)
         })
     }
 
@@ -1997,7 +2171,7 @@ impl JitModule {
             args_ptr as u64,
             resume_args.len() as u64,
         ];
-        unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) }
+        unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values.load(std::sync::atomic::Ordering::Acquire)) }
     }
 
     /// View-based resume entry point. Takes the resume point and frame
@@ -2009,25 +2183,28 @@ impl JitModule {
         resume_args: &[u64],
     ) -> Option<JitOutcome> {
         let func_idx = resume.func_idx;
-        if let Some(record) = self.function_frame_reify_records[func_idx]
-            .iter()
-            .find(|record| {
-                record.kind == FrameReifyKind::CaptureSlice
-                    && record.native_resume_offset.is_some()
-                    && record.resume == *resume
-            })
-        {
+        let meta = self
+            .functions
+            .get(func_idx)
+            .expect("call_view_resume_outcome: unknown idx");
+        if let Some(record) = meta.frame_reify_records.iter().find(|record| {
+            record.kind == FrameReifyKind::CaptureSlice
+                && record.native_resume_offset.is_some()
+                && record.resume == *resume
+        }) {
             return Some(self.call_resume_outcome(func_idx, record, values.as_ptr(), resume_args));
         }
 
-        let suspend = self.function_suspend_records[func_idx]
+        let suspend = meta
+            .suspend_records
             .iter()
             .find(|record| record.native_resume_offset.is_some() && record.resume == *resume)?;
         let ptr = unsafe {
-            self.memory.base_ptr().add(
-                self.function_entry_offsets[func_idx]
-                    + suspend.native_resume_offset.expect("checked above"),
-            )
+            self.memory
+                .lock()
+                .unwrap()
+                .base_ptr()
+                .add(meta.entry_offset + suspend.native_resume_offset.expect("checked above"))
         };
         let args_ptr = if resume_args.is_empty() {
             std::ptr::null()
@@ -2039,7 +2216,7 @@ impl JitModule {
             args_ptr as u64,
             resume_args.len() as u64,
         ];
-        Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) })
+        Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values.load(std::sync::atomic::Ordering::Acquire)) })
     }
 
     /// View-based invoke-resume entry point.
@@ -2051,7 +2228,12 @@ impl JitModule {
         resume_args: &[u64],
     ) -> Option<JitOutcome> {
         let func_idx = resume.func_idx;
-        let suspend = self.function_suspend_records[func_idx]
+        let meta = self
+            .functions
+            .get(func_idx)
+            .expect("call_view_invoke_resume_outcome: unknown idx");
+        let suspend = meta
+            .suspend_records
             .iter()
             .find(|record| record.resume == *resume)?;
         let offset = if is_exception {
@@ -2059,11 +2241,7 @@ impl JitModule {
         } else {
             suspend.native_resume_offset?
         };
-        let ptr = unsafe {
-            self.memory
-                .base_ptr()
-                .add(self.function_entry_offsets[func_idx] + offset)
-        };
+        let ptr = unsafe { self.memory.lock().unwrap().base_ptr().add(meta.entry_offset + offset) };
         let args_ptr = if resume_args.is_empty() {
             std::ptr::null()
         } else {
@@ -2074,7 +2252,7 @@ impl JitModule {
             args_ptr as u64,
             resume_args.len() as u64,
         ];
-        Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values) })
+        Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values.load(std::sync::atomic::Ordering::Acquire)) })
     }
 
     pub fn handler_payload_kind(&self) -> SafepointHandlerPayloadKind {

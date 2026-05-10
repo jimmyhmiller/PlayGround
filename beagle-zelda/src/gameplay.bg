@@ -46,13 +46,13 @@ fn default_tuning() {
         max_speed: 280.0,
         accel: 3200.0,
         friction: 3600.0,
-        light_range: 520.0,
-        light_half_angle_deg: 83.0,
+        light_range: 380.0,
+        light_half_angle_deg: 60.0,
         light_intensity: 1.3,
-        // 0.15 baseline keeps the scene (and especially the player) visible
-        // outside the cone — pure-black ambient makes it look like the
-        // character has disappeared whenever the aim points away from their body.
-        ambient: 0.15,
+        // 0.08 baseline — dark enough that monsters outside your cone are
+        // nearly invisible, but the player sprite stays barely visible so
+        // you don't lose yourself.
+        ambient: 0.08,
         camera_smoothing: 8.0,
         run_multiplier: 1.75,
         sneak_multiplier: 0.4
@@ -95,6 +95,17 @@ struct Door {
 struct Spawn {
     name          // string
     pos           // Vec2
+}
+
+// A gold pickup — the player walks over it and it disappears. `value` is how
+// many coins it's worth (usually 1-5 for gold, more for treasure later).
+struct Gold {
+    pos           // Vec2
+    value         // int — coins awarded on pickup
+}
+
+fn default_gold(pos) {
+    Gold { pos: pos, value: 1 }
 }
 
 fn default_walls() {
@@ -319,9 +330,9 @@ fn apply_monster_attacks(player, monsters, walls) {
             player
         } else if hp <= 0.0 {
             let spawn = pick_respawn(player, monsters, walls)
-            Player { ...player, pos: spawn, prev: spawn, vel: v/ZERO, hp: 5.0, iframes: 2.0 }
+            Player { ...player, pos: spawn, prev: spawn, vel: v/ZERO, hp: 3.0, iframes: 1.5 }
         } else {
-            Player { ...player, hp: hp, iframes: 0.75 }
+            Player { ...player, hp: hp, iframes: 0.4 }
         }
     }
 }

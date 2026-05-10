@@ -848,6 +848,13 @@ pub struct JitSafepointSession<'a, P: PtrPolicy, T: JitRootTransportRuntime> {
     safepoints: &'a [SafepointRecord],
     gc_policy: GcPolicy,
     extra_roots: RefCell<Vec<*const dyn RootSource>>,
+    /// When `Some`, this session's pressure-driven GC uses
+    /// `Heap::mutator_triggered_gc` (STW-coordinated across all
+    /// registered MutatorThreads). When `None` (legacy callers
+    /// without thread registration), it falls back to
+    /// `Heap::collect`, which is unsafe in concurrent settings but
+    /// preserves the single-threaded behavior of older frontends.
+    triggering_thread: Option<std::sync::Arc<dynalloc::ThreadState>>,
     _policy: PhantomData<P>,
 }
 
@@ -871,8 +878,26 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
             safepoints,
             gc_policy: GcPolicy::NeverAuto,
             extra_roots: RefCell::new(Vec::new()),
+            triggering_thread: None,
             _policy: PhantomData,
         }
+    }
+
+    /// Bind this session to the calling thread's registered
+    /// `MutatorThread`. Pressure-driven GC at JIT safepoints will
+    /// then go through `Heap::mutator_triggered_gc` — coordinating
+    /// STW with every other mutator thread sharing the heap.
+    ///
+    /// Without this, a JIT-safepoint-triggered collection calls
+    /// `Heap::collect` directly, which assumes all threads are
+    /// already at safepoints (true only for single-threaded
+    /// frontends).
+    pub fn with_triggering_thread(
+        mut self,
+        thread: std::sync::Arc<dynalloc::ThreadState>,
+    ) -> Self {
+        self.triggering_thread = Some(thread);
+        self
     }
 
     /// Set the collection policy for this session. See [`GcPolicy`].
@@ -934,6 +959,25 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
     }
 
     unsafe fn handle(&self, frame_ptr: *mut u8, payload: usize) {
+        // STW participation: if another thread has requested GC,
+        // park here so the requesting thread's snapshot includes
+        // ours and can scan our roots safely.
+        //
+        // Crucially, we publish our **JIT frame pointer** into our
+        // ThreadState before parking. The collecting thread reads
+        // every parked thread's `parked_jit_fp` and walks the JIT
+        // frame as a root source. Without this, the GC scans our
+        // FrameChain (host roots) but misses the JIT-frame spill
+        // slots — and so doesn't update them when relocating, and
+        // we resume reading stale pointers (SIGBUS).
+        if let Some(ref ts) = self.triggering_thread
+            && self.heap.gc_requested()
+        {
+            ts.set_parked_jit_fp(frame_ptr);
+            ts.enter_safepoint();
+            ts.clear_parked_jit_fp();
+        }
+
         if !self
             .gc_policy
             .should_collect(self.heap.from_used(), self.heap.space_size())
@@ -956,8 +1000,32 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
         for &ptr in extra_roots.iter() {
             sources.push(unsafe { &*ptr });
         }
-        unsafe {
-            self.heap.collect::<P>(&sources);
+        // STW-coordinated path: when this session is bound to a
+        // registered MutatorThread, route through
+        // `mutator_triggered_gc_with_extras` so concurrent runs on
+        // other threads park at their safepoints before we relocate.
+        //
+        // For each parked thread, build a `JitFrameRoots` from its
+        // published `parked_jit_fp` so that thread's JIT-frame
+        // spill slots get updated when we relocate.
+        if let Some(ref ts) = self.triggering_thread {
+            let parked_fps = self.heap.parked_thread_jit_fps();
+            let parked_root_sources: Vec<dynlower::JitFrameRoots> = parked_fps
+                .into_iter()
+                .map(|fp| dynlower::JitFrameRoots { jit_fp: fp })
+                .collect();
+            let mut all_sources: Vec<&dyn RootSource> = sources.clone();
+            for r in parked_root_sources.iter() {
+                all_sources.push(r);
+            }
+            unsafe {
+                self.heap
+                    .mutator_triggered_gc_with_extras::<P>(ts, &all_sources)
+            };
+        } else {
+            unsafe {
+                self.heap.collect::<P>(&sources);
+            }
         }
     }
 }

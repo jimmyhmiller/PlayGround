@@ -80,6 +80,18 @@ pub struct Heap {
 
     /// Generational nursery state. `None` for non-generational heaps.
     nursery_state: Option<NurseryState>,
+
+    /// Optional walker for the JIT frame chain pointed to by each
+    /// parked thread's `parked_jit_fp`. dynalloc cannot itself
+    /// understand JIT-frame layouts (that's dynlower's job), so the
+    /// embedder installs this hook at runtime via `set_jit_frame_walker`.
+    /// `None` means "no JIT integration" — used by tests and
+    /// non-JIT clients.
+    ///
+    /// SIGNATURE: `(jit_fp, visitor) -> ()`. The walker calls `visitor`
+    /// with each `*mut u64` slot it finds, exactly as a `RootSource`
+    /// would.
+    jit_frame_walker: std::sync::atomic::AtomicPtr<()>,
 }
 
 // Safety: All fields are either Sync (atomics, mutexes) or accessed
@@ -108,6 +120,7 @@ impl Heap {
             tracer: None,
             gc_every_alloc: AtomicBool::new(false),
             nursery_state: None,
+            jit_frame_walker: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         }
     }
 
@@ -145,7 +158,41 @@ impl Heap {
                 card_tables,
                 minor_collections: AtomicUsize::new(0),
             }),
+            jit_frame_walker: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()),
         }
+    }
+
+    /// Install a walker for JIT frames pointed to by parked threads.
+    /// Called by frontends with JIT integration (e.g. dynlang) at
+    /// runtime-construction time. The walker is consulted at every
+    /// GC: each registered thread's `parked_jit_fp` is read; if
+    /// non-null, the walker is invoked with that fp and a visitor.
+    ///
+    /// # Safety
+    /// The walker must remain valid for the lifetime of the Heap.
+    /// The supplied `*mut u64` slots must be live for the duration of
+    /// the visitor call (they are, by the safepoint contract).
+    pub fn set_jit_frame_walker(
+        &self,
+        walker: unsafe fn(*const u8, &mut dyn FnMut(*mut u64)),
+    ) {
+        let p = walker as *mut ();
+        self.jit_frame_walker
+            .store(p, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Walk a single parked-thread JIT frame using the registered
+    /// walker. No-op if no walker is installed.
+    fn walk_jit_frame(&self, jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u64)) {
+        let walker = self
+            .jit_frame_walker
+            .load(std::sync::atomic::Ordering::Acquire);
+        if walker.is_null() {
+            return;
+        }
+        let walker: unsafe fn(*const u8, &mut dyn FnMut(*mut u64)) =
+            unsafe { std::mem::transmute(walker as *const ()) };
+        unsafe { walker(jit_fp, visitor) };
     }
 
     /// Enable or disable GC-on-every-allocation (stress testing mode).
@@ -471,6 +518,12 @@ impl Heap {
                 ts.scan_roots(&mut |slot| {
                     unsafe { self.process_slot::<P>(slot) };
                 });
+                let jit_fp = ts.parked_jit_fp();
+                if !jit_fp.is_null() {
+                    self.walk_jit_frame(jit_fp, &mut |slot| {
+                        unsafe { self.process_slot::<P>(slot) };
+                    });
+                }
             }
         }
 
@@ -577,8 +630,37 @@ impl Heap {
     /// safepoint and waits for that collection to finish instead.
     ///
     /// # Safety
-    /// Same as `collect`.
+    /// Same as `collect`. Convenience wrapper: no extra root sources.
     pub unsafe fn mutator_triggered_gc<P: PtrPolicy>(&self, triggering_thread: &ThreadState) {
+        unsafe { self.mutator_triggered_gc_with_extras::<P>(triggering_thread, &[]) }
+    }
+
+    /// Read each registered `ThreadState`'s `parked_jit_fp`. Returns
+    /// only non-null FPs (threads currently parked at a JIT
+    /// safepoint). Used by the JIT safepoint session to walk every
+    /// parked thread's JIT frame as a root source during STW GC,
+    /// ensuring the GC's relocations update spill slots in those
+    /// frames.
+    pub fn parked_thread_jit_fps(&self) -> Vec<*const u8> {
+        let threads = self.threads.lock().unwrap();
+        threads
+            .iter()
+            .filter_map(|ts| {
+                let fp = ts.parked_jit_fp();
+                if fp.is_null() { None } else { Some(fp) }
+            })
+            .collect()
+    }
+
+    /// Like [`mutator_triggered_gc`], but also scans `extra_roots`
+    /// after the registered threads. Used by JIT frontends to thread
+    /// per-safepoint frame roots and module-level literal pools into
+    /// the trace alongside the standard root set.
+    pub unsafe fn mutator_triggered_gc_with_extras<P: PtrPolicy>(
+        &self,
+        triggering_thread: &ThreadState,
+        extra_roots: &[&dyn RootSource],
+    ) {
         // Try to become the GC thread. If someone else is already collecting,
         // enter our safepoint and wait for them to finish.
         let gc_guard = match self.gc_lock.try_lock() {
@@ -631,6 +713,25 @@ impl Heap {
 
         for ts in thread_snapshot.iter() {
             ts.scan_roots(&mut |slot| {
+                unsafe { self.process_slot::<P>(slot) };
+            });
+            // If this thread is parked at a JIT safepoint, walk its
+            // JIT frame chain too. Without this, GC misses the
+            // spill slots holding live GC pointers in the parked
+            // thread's recursion stack — and the thread reads stale
+            // (relocated) pointers when it resumes.
+            let jit_fp = ts.parked_jit_fp();
+            if !jit_fp.is_null() {
+                self.walk_jit_frame(jit_fp, &mut |slot| {
+                    unsafe { self.process_slot::<P>(slot) };
+                });
+            }
+        }
+
+        // Caller-provided extra roots (e.g. JIT-frame stack-map roots,
+        // module-level literal pools, host-side scoped frame chains).
+        for source in extra_roots.iter() {
+            source.scan_roots(&mut |slot| {
                 unsafe { self.process_slot::<P>(slot) };
             });
         }
@@ -913,7 +1014,16 @@ impl Heap {
         for (i, (ts, stw1_gen)) in thread_snapshot.iter().zip(stw1_gens.iter()).enumerate() {
             // Wait for thread to be at a NEW safepoint (gen > stw1_gen)
             // AND truly blocked (no stale resume pending).
+            //
+            // Threads in STATE_BLOCKED are accepted unconditionally:
+            // they cannot be running mutator code, so by definition no
+            // new allocations or root mutations have occurred since
+            // STW #1. Re-scanning their (unchanged) roots is sound
+            // even though their gen hasn't advanced.
             loop {
+                if ts.is_blocked() && ts.is_safely_at_safepoint() {
+                    break;
+                }
                 if ts.safepoint_gen() > *stw1_gen && ts.is_safely_at_safepoint() {
                     break;
                 }
@@ -1401,6 +1511,12 @@ impl Heap {
             ts.scan_roots(&mut |slot| {
                 unsafe { self.promote_slot::<P>(slot) };
             });
+            let jit_fp = ts.parked_jit_fp();
+            if !jit_fp.is_null() {
+                self.walk_jit_frame(jit_fp, &mut |slot| {
+                    unsafe { self.promote_slot::<P>(slot) };
+                });
+            }
         }
 
         // Phase 2: Scan dirty cards in tenured from-space
