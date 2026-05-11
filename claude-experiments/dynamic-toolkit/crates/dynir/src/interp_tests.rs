@@ -649,8 +649,9 @@ fn invoke_normal_path() {
 
 #[test]
 fn invoke_exception_path() {
-    // Exception path: exception block receives no implicit exception value,
-    // it just gets exception_args. We pass the arg through to verify control flow.
+    // Exception block convention: first param receives the runtime
+    // thrown value (the `ExternCallResult::Exception(exc)` payload);
+    // user-supplied `exception_args` fill slots 1..
     let mut b = FunctionBuilder::new("inv_exc", &[Type::I64], Some(Type::I64));
     let entry = b.entry_block();
     let arg = b.block_param(entry, 0);
@@ -662,7 +663,9 @@ fn invoke_exception_path() {
         },
     );
     let normal = b.create_block(&[Type::I64]);
-    let exception = b.create_block(&[Type::I64]); // receives arg via exception_args
+    // Exception block: first param = thrown value (implicit),
+    // second param = `arg` (passed via exception_args).
+    let exception = b.create_block(&[Type::I64, Type::I64]);
     b.invoke(fref, &[arg], normal, &[], exception, &[arg]);
 
     b.switch_to_block(normal);
@@ -670,10 +673,12 @@ fn invoke_exception_path() {
     b.ret(ret_val);
 
     b.switch_to_block(exception);
-    let exc_val = b.block_param(exception, 0);
-    // Return a sentinel to prove we took the exception path
+    let thrown = b.block_param(exception, 0); // exception value
+    let passed = b.block_param(exception, 1); // user exception_arg
+    // Return thrown + passed + 999 = 7 + 1 + 999 = 1007
     let sentinel = b.iconst(Type::I64, 999);
-    let result = b.add(exc_val, sentinel);
+    let t1 = b.add(thrown, passed);
+    let result = b.add(t1, sentinel);
     b.ret(result);
 
     let func = b.build();
@@ -681,10 +686,10 @@ fn invoke_exception_path() {
     let (module, entry) = Module::from_function(func.clone());
     let roots = NoGcRoots;
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
-    interp.bind(fref, |_args| ExternCallResult::Exception(0));
+    interp.bind(fref, |_args| ExternCallResult::Exception(7));
     match interp.run(entry, &[1]).unwrap() {
-        // 1 (arg passed via exception_args) + 999 = 1000
-        InterpResult::Value(v) => assert_eq!(v, 1000),
+        // thrown=7 + passed=1 + sentinel=999 = 1007
+        InterpResult::Value(v) => assert_eq!(v, 1007),
         other => panic!("expected Value, got {:?}", other),
     }
 }

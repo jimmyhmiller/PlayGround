@@ -20,7 +20,7 @@ use crate::value::*;
 pub struct Reader<'a> {
     src: &'a [u8],
     pos: usize,
-    sym: &'a mut SymbolTable,
+    sym: &'a SymbolTable,
 }
 
 #[derive(Debug)]
@@ -49,7 +49,7 @@ impl std::fmt::Display for ReadError {
 }
 
 impl<'a> Reader<'a> {
-    pub fn new(src: &'a str, sym: &'a mut SymbolTable) -> Self {
+    pub fn new(src: &'a str, sym: &'a SymbolTable) -> Self {
         Reader {
             src: src.as_bytes(),
             pos: 0,
@@ -165,11 +165,14 @@ impl<'a> Reader<'a> {
                 Ok(self.wrap_with_head("deref", inner))
             }
             b'^' => {
-                // Metadata: `^X form` — for now, read X and discard. We
-                // do not yet support metadata; just attach nothing.
-                self.bump();
-                let _meta = self.read()?;
-                self.read()
+                // Metadata: `^X form`. Silently dropping the meta would
+                // produce subtly wrong programs (`^:dynamic`, type
+                // hints, `^{...}` maps all become no-ops). Refuse until
+                // IObj-meta attachment is wired up.
+                unimplemented!(
+                    "reader: `^...` metadata not yet supported \
+                     (see TODO.md). Refusing to silently discard meta."
+                );
             }
             b'-' | b'+' => {
                 let start = self.pos;
@@ -329,18 +332,13 @@ impl<'a> Reader<'a> {
             self.bump();
         }
         let token = std::str::from_utf8(&self.src[begin..self.pos]).unwrap();
-        let ch: u8 = match token {
-            "space" => b' ',
-            "newline" => b'\n',
-            "tab" => b'\t',
-            "return" => b'\r',
-            "" => return Err(ReadError::UnexpectedChar('\\', begin)),
-            t if t.len() == 1 => t.as_bytes()[0],
-            other => return Err(ReadError::BadEscape(other.chars().next().unwrap_or('?'), begin)),
-        };
-        // Encode as a 1-byte string for now (no dedicated char tag yet).
-        let v = with_scope(2, |scope| alloc_string(scope, &[ch]).get());
-        Ok(v)
+        // Don't fake characters as 1-byte strings: that makes `(= \a "a")`
+        // silently true, breaks `char?`, and truncates multi-byte chars.
+        // Wait until we have a real char tag (toolkit task #6).
+        unimplemented!(
+            "reader: character literal `\\{token}` not yet supported \
+             (no Char tag yet — see TODO.md / toolkit task #6)."
+        );
     }
 
     fn read_number(&mut self, start: usize) -> Result<u64, ReadError> {
@@ -349,6 +347,37 @@ impl<'a> Reader<'a> {
         let mut is_float = false;
         if matches!(self.peek(), Some(b'+') | Some(b'-')) {
             self.bump();
+        }
+        // Hex literal: 0x... or 0X...
+        if self.peek() == Some(b'0')
+            && matches!(self.peek_at(1), Some(b'x') | Some(b'X'))
+        {
+            self.bump(); // '0'
+            self.bump(); // 'x'
+            let hex_start = self.pos;
+            while let Some(c) = self.peek() {
+                if c.is_ascii_hexdigit() {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+            let hex_txt = std::str::from_utf8(&self.src[hex_start..self.pos]).unwrap();
+            if hex_txt.is_empty() {
+                return Err(ReadError::BadNumber(
+                    String::from_utf8_lossy(&self.src[begin..self.pos]).to_string(),
+                    begin,
+                ));
+            }
+            let n = i64::from_str_radix(hex_txt, 16).map_err(|_| {
+                ReadError::BadNumber(
+                    String::from_utf8_lossy(&self.src[begin..self.pos]).to_string(),
+                    begin,
+                )
+            })?;
+            // Apply leading sign if present.
+            let signed = if self.src[begin] == b'-' { -n } else { n };
+            return Ok(encode_int(signed));
         }
         while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
             self.bump();

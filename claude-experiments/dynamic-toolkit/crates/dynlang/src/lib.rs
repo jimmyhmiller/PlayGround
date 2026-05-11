@@ -35,9 +35,11 @@
 //! // Run with ModuleInterpreter::<NanBox, _>::new(&built.module, ...)
 //! ```
 
+pub mod closure;
 pub mod gc;
 pub mod host;
 pub mod ic;
+pub mod inline_body;
 pub mod slow_paths;
 pub mod stdlib;
 
@@ -303,6 +305,42 @@ pub struct ObjType {
     pub varlen: VarLenKind,
 }
 
+impl ObjType {
+    /// Byte offset of the named `Value` field. Panics with a clear
+    /// message if the field doesn't exist or isn't a Value field.
+    /// Use this once at startup to populate a layout cache; not meant
+    /// for hot-path lookups (HashMap hashing on every call).
+    pub fn value_field_offset_named(&self, name: &str) -> usize {
+        match self.field_offsets.get(name) {
+            Some((off, FieldKind::Value)) => *off as usize,
+            Some((_, k)) => panic!(
+                "ObjType {:?}: field {:?} is {:?}, not Value",
+                self.name, name, k
+            ),
+            None => panic!(
+                "ObjType {:?}: no field named {:?}",
+                self.name, name
+            ),
+        }
+    }
+
+    /// Byte offset of the named `Raw64` field. Panics with a clear
+    /// message if the field doesn't exist or isn't a Raw64 field.
+    pub fn raw64_field_offset_named(&self, name: &str) -> usize {
+        match self.field_offsets.get(name) {
+            Some((off, FieldKind::Raw64)) => *off as usize,
+            Some((_, k)) => panic!(
+                "ObjType {:?}: field {:?} is {:?}, not Raw64",
+                self.name, name, k
+            ),
+            None => panic!(
+                "ObjType {:?}: no field named {:?}",
+                self.name, name
+            ),
+        }
+    }
+}
+
 /// Builder for declaring an object type.
 pub struct ObjTypeBuilder<'a> {
     module: &'a mut DynModule,
@@ -459,7 +497,7 @@ pub struct BuiltModule {
 /// and a convenient `declare_func` that assumes all params/returns are I64
 /// (NanBox-encoded values).
 pub struct DynModule {
-    mb: ModuleBuilder,
+    pub(crate) mb: ModuleBuilder,
     tags: NanBoxTags,
     gc_config: GcConfig,
     slow: SlowPaths,
@@ -544,6 +582,14 @@ impl DynModule {
     /// Get the GC configuration.
     pub fn gc_config(&self) -> &GcConfig {
         &self.gc_config
+    }
+
+    /// The GC allocator extern's FuncRef, if any `obj_type` has been
+    /// declared on this module (the extern is registered lazily). Used
+    /// by primitives that emit GC-allocation IR without going through
+    /// `DynFunc` (e.g. `ClosureKit::make`).
+    pub fn gc_alloc_extern(&self) -> Option<FuncRef> {
+        self.gc_alloc_extern
     }
 
     /// Get the NanBox tag scheme.

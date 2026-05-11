@@ -44,6 +44,24 @@ pub struct Types {
     pub var: ObjTypeId,
     pub namespace: ObjTypeId,
     pub registry: ObjTypeId,
+    /// Uniform heap-object backing for every user-declared
+    /// `(deftype* Name [fields])`. Layout:
+    ///   `type_name: Value` (a symbol identifying the user type)
+    ///   `varlen_values` (the user's fields, in declaration order)
+    /// We don't dynamically register one `ObjType` per user type:
+    /// that would require runtime extension of the GC's type table,
+    /// which the toolkit doesn't currently support. Tagging
+    /// instances with a `type_name` symbol gets the same observable
+    /// behavior — `instance?` is a sym-id compare, `.-field` is a
+    /// `varlen_values[i]` load — at the cost of slightly looser
+    /// type identity in the heap walker.
+    pub record: ObjTypeId,
+    /// Mutable single-cell reference type. `(atom v)` allocates one
+    /// of these; `@a` / `(deref a)` reads the cell; `(reset! a v')`
+    /// stores. Concurrent mutation uses Relaxed atomic load/store
+    /// today (single-threaded mutator); a future revision can
+    /// graduate to a CAS-based path for proper `swap!`.
+    pub atom: ObjTypeId,
 }
 
 /// Declare all Clojure heap types on `dm`, returning their IDs.
@@ -172,6 +190,19 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
         .field("namespaces", FieldKind::Value)
         .build();
 
+    // ── Record: backing storage for all user `deftype*` instances.
+    let record = dm
+        .obj_type("Record")
+        .field("type_name", FieldKind::Value)
+        .varlen_values()
+        .build();
+
+    // ── Atom.
+    let atom = dm
+        .obj_type("Atom")
+        .field("val", FieldKind::Value)
+        .build();
+
     Types {
         symbol,
         keyword,
@@ -185,6 +216,159 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
         var,
         namespace,
         registry,
+        record,
+        atom,
+    }
+}
+
+/// All heap-object field offsets, resolved from the dynlang `ObjType`
+/// declarations once at engine init. This is the single source of
+/// truth — every `unsafe { p.add(N) }` site reads from here instead
+/// of duplicating its own `const FOO_OFFSET: usize = ...` constant.
+///
+/// `Copy` so it can be passed by value (it's just `usize`s).
+#[derive(Clone, Copy)]
+pub struct Layouts {
+    // ── String (varlen_bytes) ────────────────────────────────────
+    pub string_hash: usize,
+    pub string_varlen_count: usize,
+    pub string_bytes: usize,
+
+    // ── Keyword ──────────────────────────────────────────────────
+    pub keyword_sym: usize,
+    pub keyword_hash: usize,
+
+    // ── List (cons cell) ─────────────────────────────────────────
+    pub list_first: usize,
+    pub list_rest: usize,
+    pub list_count: usize,
+
+    // ── Vector (HAMT/RRB-shaped declaration) ─────────────────────
+    pub vector_root: usize,
+    pub vector_tail: usize,
+    pub vector_count: usize,
+    pub vector_shift: usize,
+
+    // ── Set ──────────────────────────────────────────────────────
+    pub set_backing: usize,
+
+    // ── Atom ─────────────────────────────────────────────────────
+    pub atom_val: usize,
+
+    // ── Map (varlen_values) ──────────────────────────────────────
+    pub map_count: usize,
+    pub map_varlen_count: usize,
+    pub map_varlen_elem_base: usize,
+
+    // ── Array (pure varlen_values) ───────────────────────────────
+    pub array_varlen_count: usize,
+    pub array_elem_base: usize,
+
+    // ── Record (varlen_values) ───────────────────────────────────
+    pub record_type_name: usize,
+    pub record_varlen_count: usize,
+    pub record_fields_base: usize,
+
+    // ── Fn (varlen_values capture) ───────────────────────────────
+    pub fn_func_ref: usize,
+    pub fn_arity: usize,
+    pub fn_varlen_count: usize,
+    pub fn_captures_base: usize,
+
+    // ── Var ──────────────────────────────────────────────────────
+    pub var_ns: usize,
+    pub var_sym: usize,
+    pub var_root: usize,
+    pub var_meta: usize,
+    pub var_flags: usize,
+
+    // ── Namespace ────────────────────────────────────────────────
+    pub ns_name: usize,
+    pub ns_mappings: usize,
+    pub ns_aliases: usize,
+    pub ns_meta: usize,
+    pub ns_version: usize,
+
+    // ── Registry ─────────────────────────────────────────────────
+    pub registry_namespaces: usize,
+}
+
+impl Layouts {
+    /// Resolve every offset from the dynlang `ObjType` registry. Call
+    /// once at engine init (after `declare_types`). Panics with a
+    /// clear message if any field is missing or has the wrong kind —
+    /// surfacing a `declare_types` typo immediately rather than at the
+    /// first runtime field access.
+    pub fn from_module(dm: &DynModule, t: &Types) -> Self {
+        let str_t = dm.get_obj_type(t.string);
+        let kw_t = dm.get_obj_type(t.keyword);
+        let list_t = dm.get_obj_type(t.list);
+        let vec_t = dm.get_obj_type(t.vector);
+        let set_t = dm.get_obj_type(t.set);
+        let atom_t = dm.get_obj_type(t.atom);
+        let map_t = dm.get_obj_type(t.map);
+        let array_t = dm.get_obj_type(t.array);
+        let rec_t = dm.get_obj_type(t.record);
+        let fn_t = dm.get_obj_type(t.fn_obj);
+        let var_t = dm.get_obj_type(t.var);
+        let ns_t = dm.get_obj_type(t.namespace);
+        let reg_t = dm.get_obj_type(t.registry);
+
+        Layouts {
+            // String: hash (Raw64) then varlen_bytes. The first byte
+            // of the bytes section is varlen_element_offset(0).
+            string_hash: str_t.raw64_field_offset_named("hash"),
+            string_varlen_count: str_t.type_info.varlen_count_offset(),
+            string_bytes: str_t.type_info.varlen_element_offset(0),
+
+            keyword_sym: kw_t.value_field_offset_named("sym"),
+            keyword_hash: kw_t.raw64_field_offset_named("hash"),
+
+            list_first: list_t.value_field_offset_named("first"),
+            list_rest: list_t.value_field_offset_named("rest"),
+            list_count: list_t.raw64_field_offset_named("count"),
+
+            // Builder reorders: value fields first, then raw64. So
+            // root/tail (Value) come before count/shift (Raw64).
+            vector_root: vec_t.value_field_offset_named("root"),
+            vector_tail: vec_t.value_field_offset_named("tail"),
+            vector_count: vec_t.raw64_field_offset_named("count"),
+            vector_shift: vec_t.raw64_field_offset_named("shift"),
+
+            set_backing: set_t.value_field_offset_named("backing"),
+
+            atom_val: atom_t.value_field_offset_named("val"),
+
+            map_count: map_t.raw64_field_offset_named("count"),
+            map_varlen_count: map_t.type_info.varlen_count_offset(),
+            map_varlen_elem_base: map_t.type_info.varlen_element_offset(0),
+
+            array_varlen_count: array_t.type_info.varlen_count_offset(),
+            array_elem_base: array_t.type_info.varlen_element_offset(0),
+
+            record_type_name: rec_t.value_field_offset_named("type_name"),
+            record_varlen_count: rec_t.type_info.varlen_count_offset(),
+            record_fields_base: rec_t.type_info.varlen_element_offset(0),
+
+            fn_func_ref: fn_t.raw64_field_offset_named("func_ref"),
+            fn_arity: fn_t.raw64_field_offset_named("arity"),
+            fn_varlen_count: fn_t.type_info.varlen_count_offset(),
+            fn_captures_base: fn_t.type_info.varlen_element_offset(0),
+
+            var_ns: var_t.value_field_offset_named("ns"),
+            var_sym: var_t.value_field_offset_named("sym"),
+            var_root: var_t.value_field_offset_named("root"),
+            var_meta: var_t.value_field_offset_named("meta"),
+            var_flags: var_t.raw64_field_offset_named("flags"),
+
+            ns_name: ns_t.value_field_offset_named("name"),
+            ns_mappings: ns_t.value_field_offset_named("mappings"),
+            ns_aliases: ns_t.value_field_offset_named("aliases"),
+            ns_meta: ns_t.value_field_offset_named("meta"),
+            ns_version: ns_t.raw64_field_offset_named("version"),
+
+            registry_namespaces: reg_t.value_field_offset_named("namespaces"),
+        }
     }
 }
 

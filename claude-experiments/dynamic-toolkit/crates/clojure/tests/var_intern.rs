@@ -15,7 +15,7 @@ fn engine_has_clojure_core() {
     let core = e.core_ns();
     assert!(v::is_ptr(core), "clojure.core should be a heap pointer");
     // Registry should also resolve clojure.core by name.
-    let name_id = e.host.sym.lock().unwrap().intern("clojure.core");
+    let name_id = e.host.sym.intern("clojure.core");
     let found = registry_find_ns(reg, v::encode_sym_id(name_id));
     assert_eq!(found, core, "registry should map 'clojure.core to core_ns");
 }
@@ -26,7 +26,7 @@ fn def_creates_var_in_core() {
     let _ = e.eval("(def square (fn [x] (* x x)))");
 
     let core = e.core_ns();
-    let sym_id = e.host.sym.lock().unwrap().intern("square");
+    let sym_id = e.host.sym.intern("square");
     let var = ns_lookup(core, v::encode_sym_id(sym_id));
     assert!(v::is_ptr(var), "square Var should be a heap object");
     // Var.sym should match the symbol we asked about.
@@ -39,7 +39,7 @@ fn var_root_is_fn_with_correct_funcref() {
     let _ = e.eval("(def add2 (fn [a b] (+ a b)))");
 
     let core = e.core_ns();
-    let sym_id = e.host.sym.lock().unwrap().intern("add2");
+    let sym_id = e.host.sym.intern("add2");
     let var = ns_lookup(core, v::encode_sym_id(sym_id));
     let root = var_root(var);
     assert!(v::is_ptr(root), "var.root should be a Fn heap object");
@@ -55,7 +55,7 @@ fn redefining_a_var_preserves_identity() {
     let mut e = Engine::new();
     e.eval("(def f (fn [x] x))");
     let core = e.core_ns();
-    let sym_id = e.host.sym.lock().unwrap().intern("f");
+    let sym_id = e.host.sym.intern("f");
     let var1 = ns_lookup(core, v::encode_sym_id(sym_id));
 
     // Redefine. Var identity must persist.
@@ -85,7 +85,7 @@ fn original_fib_program_still_works_after_var_intern() {
     assert_eq!(e.print(v), "55");
     // And the fib var is in the namespace.
     let core = e.core_ns();
-    let sym_id = e.host.sym.lock().unwrap().intern("fib");
+    let sym_id = e.host.sym.intern("fib");
     let var = ns_lookup(core, v::encode_sym_id(sym_id));
     assert!(v::is_ptr(var), "fib Var should be in clojure.core");
 }

@@ -759,7 +759,7 @@ impl JitFunction {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        Self::compile_with_regalloc::<Cfg, B, GreedyRegState>(func, externs, safepoint_handler)
+        Self::compile_with_regalloc::<Cfg, B, regalloc::LinearScanAllocator>(func, externs, safepoint_handler)
     }
 
     pub fn compile_with_regalloc<Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator>(
@@ -2759,7 +2759,7 @@ fn assign_block_prompt_stacks(func: &Function, block_meta: &mut [BlockMeta]) {
 
 // ─── Lowerer ───────────────────────────────────────────────────────
 
-struct Lowerer<'a, Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator = GreedyRegState>
+struct Lowerer<'a, Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator = regalloc::LinearScanAllocator>
 where
     Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
 {
@@ -4654,15 +4654,27 @@ where
     }
 
     fn write_invoke_return_to_target(&mut self, target: BlockId) {
+        // The implicit first param of an Invoke's normal/exception
+        // block holds the return value (normal: callee return; or
+        // exception: the thrown value, preserved in x0 across the
+        // suspended-frame pop). Route x0/fp0 to wherever the
+        // regalloc has assigned that param — register, spill slot,
+        // or canonical frame slot. Without going through the
+        // regalloc, LinearScan's pre-assigned-register convention
+        // is silently bypassed and the consumer reads stale data.
         let block_idx = target.index();
-        let slots = self.frame.block_param_slots(block_idx);
-        if slots.is_empty() {
+        let params = &self.func.blocks[block_idx].params;
+        if params.is_empty() {
             return;
         }
-        B::emit_store_gp_to_frame(
+        let ret_ty = params[0].1;
+        self.regs.place_call_return_in_block_param::<B>(
+            block_idx,
+            0,
+            ret_ty,
+            self.func,
             &mut self.buf,
-            machine_gp(0),
-            self.frame.slot_access(slots[0]),
+            &mut self.frame,
         );
     }
 
@@ -4708,7 +4720,22 @@ where
             }
             B::bind_label(&mut self.buf, exception_post_pop_label);
             self.finish_call_cleanup(call_args, outgoing_size);
-            self.emit_block_args(exception, exception_args);
+            // Convention: if the exception block has any params, the
+            // first one receives the runtime exception value. The asm
+            // stub that produces JitOutcome::Exception leaves the
+            // value in x0 (it copies x0 → x2 = payload0 but doesn't
+            // clobber x0); the exception path's save/restore around
+            // pop_suspended_frame above preserves x0. User-supplied
+            // exception_args fill slots 1.. as usual.
+            let has_exc_param = !self.func.blocks[exception.index()].params.is_empty();
+            if has_exc_param {
+                self.write_invoke_return_to_target(exception);
+            }
+            self.store_block_args_to_canonical_with_param_offset(
+                exception,
+                exception_args,
+                usize::from(has_exc_param),
+            );
             B::emit_branch_to_label(&mut self.buf, self.block_meta[exception.index()].label);
 
             B::bind_label(&mut self.buf, normal_label);

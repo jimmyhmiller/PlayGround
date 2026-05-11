@@ -18,43 +18,12 @@
 //! the allocation.
 
 use dynobj::roots::{Rooted, RootScope};
-use dynobj::{Compact, ObjHeader};
 
-use crate::host::with_host;
+use crate::host::{layouts, with_host};
 use crate::value::{self as v, NanBoxTag};
 
-// ── Field-offset constants ──────────────────────────────────────────
-//
-// Mirrors declaration order in `types.rs`. If you reorder fields
-// there, update these. Header is `Compact::SIZE` (= 16).
-
-const HDR: usize = Compact::SIZE;
-
-// Map: count: Raw64 (8B) → then varlen.
-const MAP_COUNT_OFFSET: usize = HDR;
-const MAP_VARLEN_COUNT_OFFSET: usize = HDR + 8;
-const MAP_VARLEN_ELEM_BASE: usize = HDR + 16;
-
-// Namespace: name(V) + mappings(V) + aliases(V) + meta(V) + version(R64).
-const NS_NAME_OFFSET: usize = HDR;
-const NS_MAPPINGS_OFFSET: usize = HDR + 8;
-const NS_ALIASES_OFFSET: usize = HDR + 16;
-const NS_META_OFFSET: usize = HDR + 24;
-const NS_VERSION_OFFSET: usize = HDR + 32;
-
-// Var: ns(V) + sym(V) + root(V) + meta(V) + flags(R64).
-const VAR_NS_OFFSET: usize = HDR;
-const VAR_SYM_OFFSET: usize = HDR + 8;
-const VAR_ROOT_OFFSET: usize = HDR + 16;
-const VAR_META_OFFSET: usize = HDR + 24;
-const VAR_FLAGS_OFFSET: usize = HDR + 32;
-
-// Registry: namespaces(V).
-const REG_NAMESPACES_OFFSET: usize = HDR;
-
-// Fn: func_ref(R64) + arity(R64) → then varlen env.
-const FN_FUNCREF_OFFSET: usize = HDR;
-const FN_ARITY_OFFSET: usize = HDR + 8;
+// All field offsets come from `host::layouts()`, populated once at
+// engine init from the dynlang `ObjType` registry. See `types::Layouts`.
 
 // ── Map allocators / accessors ──────────────────────────────────────
 
@@ -77,15 +46,16 @@ pub fn alloc_map_pairs<'scope>(
         let varlen_len = pairs.len() * 2;
         let raw = gc.alloc(type_id, varlen_len);
         assert!(!raw.is_null(), "alloc_map_pairs: GC alloc returned null");
+        let l = h.layouts;
         unsafe {
             // count field (entry count, NOT slot count)
-            (raw.add(MAP_COUNT_OFFSET) as *mut u64).write(pairs.len() as u64);
+            (raw.add(l.map_count) as *mut u64).write(pairs.len() as u64);
             // varlen count word (slot count)
-            (raw.add(MAP_VARLEN_COUNT_OFFSET) as *mut u64).write(varlen_len as u64);
+            (raw.add(l.map_varlen_count) as *mut u64).write(varlen_len as u64);
             // entries
             for (i, (k, vv)) in pairs.iter().enumerate() {
-                let kp = raw.add(MAP_VARLEN_ELEM_BASE + i * 16) as *mut u64;
-                let vp = raw.add(MAP_VARLEN_ELEM_BASE + i * 16 + 8) as *mut u64;
+                let kp = raw.add(l.map_varlen_elem_base + i * 16) as *mut u64;
+                let vp = raw.add(l.map_varlen_elem_base + i * 16 + 8) as *mut u64;
                 kp.write(*k);
                 vp.write(*vv);
             }
@@ -98,16 +68,17 @@ pub fn alloc_map_pairs<'scope>(
 pub fn map_count(map: u64) -> u64 {
     debug_assert!(v::is_ptr(map));
     let p = v::as_ptr(map);
-    unsafe { (p.add(MAP_COUNT_OFFSET) as *const u64).read() }
+    unsafe { (p.add(layouts().map_count) as *const u64).read() }
 }
 
 /// Read the i-th key/value pair from a Map.
 pub fn map_entry(map: u64, i: usize) -> (u64, u64) {
     debug_assert!(v::is_ptr(map));
     let p = v::as_ptr(map);
+    let base = layouts().map_varlen_elem_base;
     unsafe {
-        let k = (p.add(MAP_VARLEN_ELEM_BASE + i * 16) as *const u64).read();
-        let v = (p.add(MAP_VARLEN_ELEM_BASE + i * 16 + 8) as *const u64).read();
+        let k = (p.add(base + i * 16) as *const u64).read();
+        let v = (p.add(base + i * 16 + 8) as *const u64).read();
         (k, v)
     }
 }
@@ -183,12 +154,13 @@ pub fn alloc_namespace<'scope>(
         let type_id = h.types.namespace.0;
         let raw = gc.alloc(type_id, 0);
         assert!(!raw.is_null(), "alloc_namespace: GC alloc returned null");
+        let l = h.layouts;
         unsafe {
-            (raw.add(NS_NAME_OFFSET) as *mut u64).write(name_r.get());
-            (raw.add(NS_MAPPINGS_OFFSET) as *mut u64).write(mappings.get());
-            (raw.add(NS_ALIASES_OFFSET) as *mut u64).write(aliases.get());
-            (raw.add(NS_META_OFFSET) as *mut u64).write(meta.get());
-            (raw.add(NS_VERSION_OFFSET) as *mut u64).write(0);
+            (raw.add(l.ns_name) as *mut u64).write(name_r.get());
+            (raw.add(l.ns_mappings) as *mut u64).write(mappings.get());
+            (raw.add(l.ns_aliases) as *mut u64).write(aliases.get());
+            (raw.add(l.ns_meta) as *mut u64).write(meta.get());
+            (raw.add(l.ns_version) as *mut u64).write(0);
         }
         scope.root::<NanBoxTag>(gc.tag_ptr(raw))
     })
@@ -196,24 +168,25 @@ pub fn alloc_namespace<'scope>(
 
 pub fn ns_name(ns: u64) -> u64 {
     let p = v::as_ptr(ns);
-    unsafe { (p.add(NS_NAME_OFFSET) as *const u64).read() }
+    unsafe { (p.add(layouts().ns_name) as *const u64).read() }
 }
 
 pub fn ns_mappings(ns: u64) -> u64 {
     let p = v::as_ptr(ns);
-    unsafe { (p.add(NS_MAPPINGS_OFFSET) as *const u64).read() }
+    unsafe { (p.add(layouts().ns_mappings) as *const u64).read() }
 }
 
 pub fn ns_set_mappings(ns: u64, new_map: u64) {
     let p = v::as_ptr(ns);
-    unsafe { (p.add(NS_MAPPINGS_OFFSET) as *mut u64).write(new_map) }
+    unsafe { (p.add(layouts().ns_mappings) as *mut u64).write(new_map) }
 }
 
 pub fn ns_bump_version(ns: u64) {
     let p = v::as_ptr(ns);
+    let off = layouts().ns_version;
     unsafe {
-        let cur = (p.add(NS_VERSION_OFFSET) as *const u64).read();
-        (p.add(NS_VERSION_OFFSET) as *mut u64).write(cur + 1);
+        let cur = (p.add(off) as *const u64).read();
+        (p.add(off) as *mut u64).write(cur + 1);
     }
 }
 
@@ -268,12 +241,13 @@ pub fn alloc_var<'scope>(
         let type_id = h.types.var.0;
         let raw = gc.alloc(type_id, 0);
         assert!(!raw.is_null(), "alloc_var: GC alloc returned null");
+        let l = h.layouts;
         unsafe {
-            (raw.add(VAR_NS_OFFSET) as *mut u64).write(ns_r.get());
-            (raw.add(VAR_SYM_OFFSET) as *mut u64).write(sym_r.get());
-            (raw.add(VAR_ROOT_OFFSET) as *mut u64).write(root_r.get());
-            (raw.add(VAR_META_OFFSET) as *mut u64).write(v::NIL);
-            (raw.add(VAR_FLAGS_OFFSET) as *mut u64).write(0);
+            (raw.add(l.var_ns) as *mut u64).write(ns_r.get());
+            (raw.add(l.var_sym) as *mut u64).write(sym_r.get());
+            (raw.add(l.var_root) as *mut u64).write(root_r.get());
+            (raw.add(l.var_meta) as *mut u64).write(v::NIL);
+            (raw.add(l.var_flags) as *mut u64).write(0);
         }
         scope.root::<NanBoxTag>(gc.tag_ptr(raw))
     })
@@ -281,17 +255,17 @@ pub fn alloc_var<'scope>(
 
 pub fn var_root(var: u64) -> u64 {
     let p = v::as_ptr(var);
-    unsafe { (p.add(VAR_ROOT_OFFSET) as *const u64).read() }
+    unsafe { (p.add(layouts().var_root) as *const u64).read() }
 }
 
 pub fn var_set_root(var: u64, root: u64) {
     let p = v::as_ptr(var);
-    unsafe { (p.add(VAR_ROOT_OFFSET) as *mut u64).write(root) }
+    unsafe { (p.add(layouts().var_root) as *mut u64).write(root) }
 }
 
 pub fn var_sym(var: u64) -> u64 {
     let p = v::as_ptr(var);
-    unsafe { (p.add(VAR_SYM_OFFSET) as *const u64).read() }
+    unsafe { (p.add(layouts().var_sym) as *const u64).read() }
 }
 
 // Var flag bits (mirror `types::var::FLAG_*`).
@@ -302,14 +276,15 @@ pub const FLAG_BOUND: u64 = 1 << 3;
 
 pub fn var_flags(var: u64) -> u64 {
     let p = v::as_ptr(var);
-    unsafe { (p.add(VAR_FLAGS_OFFSET) as *const u64).read() }
+    unsafe { (p.add(layouts().var_flags) as *const u64).read() }
 }
 
 pub fn var_set_flag(var: u64, flag: u64) {
     let p = v::as_ptr(var);
+    let off = layouts().var_flags;
     unsafe {
-        let cur = (p.add(VAR_FLAGS_OFFSET) as *const u64).read();
-        (p.add(VAR_FLAGS_OFFSET) as *mut u64).write(cur | flag);
+        let cur = (p.add(off) as *const u64).read();
+        (p.add(off) as *mut u64).write(cur | flag);
     }
 }
 
@@ -327,7 +302,7 @@ pub fn alloc_registry<'scope>(scope: &'scope RootScope<'_>) -> Rooted<'scope, Na
         let raw = gc.alloc(type_id, 0);
         assert!(!raw.is_null(), "alloc_registry: GC alloc returned null");
         unsafe {
-            (raw.add(REG_NAMESPACES_OFFSET) as *mut u64).write(nss.get());
+            (raw.add(h.layouts.registry_namespaces) as *mut u64).write(nss.get());
         }
         scope.root::<NanBoxTag>(gc.tag_ptr(raw))
     })
@@ -335,12 +310,12 @@ pub fn alloc_registry<'scope>(scope: &'scope RootScope<'_>) -> Rooted<'scope, Na
 
 pub fn registry_namespaces(reg: u64) -> u64 {
     let p = v::as_ptr(reg);
-    unsafe { (p.add(REG_NAMESPACES_OFFSET) as *const u64).read() }
+    unsafe { (p.add(layouts().registry_namespaces) as *const u64).read() }
 }
 
 pub fn registry_set_namespaces(reg: u64, m: u64) {
     let p = v::as_ptr(reg);
-    unsafe { (p.add(REG_NAMESPACES_OFFSET) as *mut u64).write(m) }
+    unsafe { (p.add(layouts().registry_namespaces) as *mut u64).write(m) }
 }
 
 pub fn registry_create_ns<'scope>(
@@ -374,32 +349,13 @@ pub fn alloc_fn<'scope>(
     func_ref: u32,
     arity: usize,
 ) -> Rooted<'scope, NanBoxTag> {
-    with_host(|h| {
-        let gc = unsafe { &*h.gc };
-        let type_id = h.types.fn_obj.0;
-        let raw = gc.alloc(type_id, 0);
-        assert!(!raw.is_null(), "alloc_fn: GC alloc returned null");
-        unsafe {
-            (raw.add(FN_FUNCREF_OFFSET) as *mut u64).write(func_ref as u64);
-            (raw.add(FN_ARITY_OFFSET) as *mut u64).write(arity as u64);
-            // varlen count = 0
-            // The varlen count word lives after FN_ARITY_OFFSET + 8.
-            // For our checkpoint there's no captured env, so write 0.
-            (raw.add(FN_ARITY_OFFSET + 8) as *mut u64).write(0);
-        }
-        scope.root::<NanBoxTag>(gc.tag_ptr(raw))
-    })
+    alloc_fn_with_captures(scope, func_ref, arity, &[])
 }
 
 pub fn fn_func_ref(fn_obj: u64) -> u32 {
     let p = v::as_ptr(fn_obj);
-    unsafe { (p.add(FN_FUNCREF_OFFSET) as *const u64).read() as u32 }
+    unsafe { (p.add(layouts().fn_func_ref) as *const u64).read() as u32 }
 }
-
-// Captures live in the varlen-values tail right after the
-// `varlen_count` word at HDR + 16.
-const FN_VARLEN_COUNT_OFFSET: usize = HDR + 16;
-const FN_CAPTURES_OFFSET: usize = HDR + 24;
 
 /// Allocate an Fn obj with `captures.len()` captured values laid out
 /// in the varlen tail. Captures are NanBox values; the caller is
@@ -416,40 +372,29 @@ pub fn alloc_fn_with_captures<'scope>(
         let type_id = h.types.fn_obj.0;
         let raw = gc.alloc(type_id, captures.len());
         assert!(!raw.is_null(), "alloc_fn_with_captures: GC alloc returned null");
+        let l = h.layouts;
         unsafe {
-            (raw.add(FN_FUNCREF_OFFSET) as *mut u64).write(func_ref as u64);
-            (raw.add(FN_ARITY_OFFSET) as *mut u64).write(arity as u64);
-            (raw.add(FN_VARLEN_COUNT_OFFSET) as *mut u64).write(captures.len() as u64);
+            (raw.add(l.fn_func_ref) as *mut u64).write(func_ref as u64);
+            (raw.add(l.fn_arity) as *mut u64).write(arity as u64);
+            (raw.add(l.fn_varlen_count) as *mut u64).write(captures.len() as u64);
             for (i, &c) in captures.iter().enumerate() {
-                (raw.add(FN_CAPTURES_OFFSET + i * 8) as *mut u64).write(c);
+                (raw.add(l.fn_captures_base + i * 8) as *mut u64).write(c);
             }
         }
         scope.root::<NanBoxTag>(gc.tag_ptr(raw))
     })
 }
 
-/// Byte offset within an Fn obj where capture index `i` lives. Used
-/// by IR emitted at fn-expression call sites to read captures
-/// through the receiver `self_fn`.
-pub fn fn_capture_offset(i: usize) -> i32 {
-    (FN_CAPTURES_OFFSET + i * 8) as i32
-}
-
-/// Byte offset of the `func_ref` field within an Fn heap object.
-/// Used by IR emitted at higher-order call sites to load the
-/// runtime FuncRef index for indirect dispatch.
-pub fn fn_func_ref_offset() -> i32 {
-    FN_FUNCREF_OFFSET as i32
-}
-
-/// Byte offset of the `arity` field within an Fn heap object.
-pub fn fn_arity_offset() -> i32 {
-    FN_ARITY_OFFSET as i32
+/// Byte offset of `Var.root` within a Var heap object. Used by
+/// the compiler to emit `load Var.root` for top-level fn-as-value
+/// references.
+pub fn var_root_offset() -> i32 {
+    layouts().var_root as i32
 }
 
 /// Read the `arity` field directly. Used by externs that do
 /// arity checks before invoking.
 pub fn fn_arity(fn_obj: u64) -> usize {
     let p = v::as_ptr(fn_obj);
-    unsafe { (p.add(FN_ARITY_OFFSET) as *const u64).read() as usize }
+    unsafe { (p.add(layouts().fn_arity) as *const u64).read() as usize }
 }

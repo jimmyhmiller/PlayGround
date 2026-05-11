@@ -553,11 +553,20 @@ impl Drop for ThreadGuard<'_> {
     }
 }
 
-// ── Internal thunk called by JIT code ─────────────────────────────
+// ── JIT-callable thunk ────────────────────────────────────────────
 
 /// The extern function the JIT calls for `__gc_alloc__`. Reads the
 /// installed runtime from thread-local storage.
-extern "C" fn gc_alloc_thunk(type_id: u64, varlen_len: u64) -> u64 {
+///
+/// Exposed for embeddings that maintain a separate `ModuleBuilder`
+/// from the `DynModule` (e.g. Clojure): declare `__gc_alloc__` on your
+/// own `mb` with signature `(I64, I64) -> GcPtr` and pass
+/// `gc_alloc_thunk as *const u8` in your externs vec at JIT-extend
+/// time. Then thread the resulting `FuncRef` into
+/// `DynModule::closures_for(..., Some(fref))` so the kit emits calls
+/// to your `mb`'s FuncRef rather than the auto-detected one (which
+/// indexes into a different table).
+pub extern "C" fn gc_alloc_thunk(type_id: u64, varlen_len: u64) -> u64 {
     let rt_ptr = RUNTIME.with(|c| c.get());
     assert!(!rt_ptr.is_null(), "dynlang: __gc_alloc__ called without DynGcRuntime installed");
     let rt = unsafe { &*rt_ptr };

@@ -295,6 +295,18 @@ impl FunctionBuilder {
         self.blocks[block.index()].params[index].0
     }
 
+    /// True iff the current block already has a terminator (the next
+    /// `switch_to_block` is required). Useful when a sub-expression
+    /// might emit a non-returning terminator (recur, throw, abort)
+    /// and the caller wants to skip subsequent cleanup that would
+    /// land in an unreachable block with the wrong prompt stack.
+    pub fn current_block_is_terminated(&self) -> bool {
+        match self.current_block {
+            Some(b) => self.blocks[b.index()].terminator.is_some(),
+            None => true,
+        }
+    }
+
     /// Declare an external function that can be called.
     pub fn declare_func(&mut self, name: &str, sig: Signature) -> FuncRef {
         let id = FuncRef(self.extern_funcs.len() as u32);
@@ -303,6 +315,36 @@ impl FunctionBuilder {
             sig,
         });
         id
+    }
+
+    /// Inform this `FunctionBuilder` about a function declared on the
+    /// owning `ModuleBuilder` *after* this builder was created (e.g.
+    /// a helper function synthesized while compiling the body of the
+    /// current function). Without this, `fb.call(fref)` /
+    /// `fb.invoke(fref)` would index past the snapshot taken at
+    /// `define_func` time and panic.
+    ///
+    /// `fref` must equal the one returned by `mb.declare_func`. The
+    /// internal table is grown with placeholder entries up to
+    /// `fref.index()` if needed; the slot at `fref.index()` is then
+    /// set to `(name, sig)`.
+    pub fn import_module_func(&mut self, fref: FuncRef, name: &str, sig: Signature) {
+        let placeholder = || ExternFunc {
+            name: String::new(),
+            sig: Signature { params: Vec::new(), ret: None },
+        };
+        while self.extern_funcs.len() < fref.index() {
+            self.extern_funcs.push(placeholder());
+        }
+        let entry = ExternFunc {
+            name: name.to_string(),
+            sig,
+        };
+        if self.extern_funcs.len() == fref.index() {
+            self.extern_funcs.push(entry);
+        } else {
+            self.extern_funcs[fref.index()] = entry;
+        }
     }
 
     /// Get the type of a value.
@@ -695,6 +737,34 @@ impl FunctionBuilder {
         }
     }
 
+    /// Indirect call resolved at runtime through a JIT call table.
+    ///
+    /// Treats the table as `[u64; N]` of code pointers indexed by
+    /// FuncRef value. Emits the canonical lookup sequence
+    /// `code_ptr = *(table_base + fr * 8)` and a `call_indirect`.
+    ///
+    /// `table_base` is typically `JitModule::call_table_base_addr()`
+    /// — baked in as a constant at codegen time.
+    /// `fr_value` is a runtime I64 holding the FuncRef index.
+    ///
+    /// Frontends that store FuncRefs inside their own heap shapes
+    /// should wrap this with a one-liner that loads the FuncRef from
+    /// the receiver and forwards everything else through.
+    pub fn call_via_func_ref(
+        &mut self,
+        table_base: u64,
+        fr_value: Value,
+        args: &[Value],
+        ret_ty: Option<Type>,
+    ) -> Option<Value> {
+        let base = self.iconst(Type::I64, table_base as i64);
+        let three = self.iconst(Type::I64, 3);
+        let off = self.shl(fr_value, three);
+        let addr = self.add(base, off);
+        let code_ptr = self.load(Type::I64, addr, 0);
+        self.call_indirect(code_ptr, args, ret_ty)
+    }
+
     /// Emit an inline-cached dynamic dispatch.
     ///
     /// Dispatches `symbol` on `receiver` with the given `args`.
@@ -808,7 +878,9 @@ impl FunctionBuilder {
         }
         // Normal block: first param is the return value (if any), rest must match normal_args
         self.check_invoke_normal_args(sig.ret, normal, normal_args);
-        self.check_branch_args(exception, exception_args);
+        // Exception block: first param (if any) is the thrown value
+        // (always I64), rest must match exception_args.
+        self.check_invoke_exception_args(exception, exception_args);
         self.set_terminator(Terminator::Invoke {
             func,
             args: args.to_vec(),
@@ -830,7 +902,7 @@ impl FunctionBuilder {
         exception_args: &[Value],
     ) {
         self.check_invoke_normal_args(ret_ty, normal, normal_args);
-        self.check_branch_args(exception, exception_args);
+        self.check_invoke_exception_args(exception, exception_args);
         self.set_terminator(Terminator::InvokeIndirect {
             callee,
             args: args.to_vec(),
@@ -890,6 +962,52 @@ impl FunctionBuilder {
             prompt,
             args: args.to_vec(),
         });
+    }
+
+    // ── Exceptions ─────────────────────────────────────────────
+    //
+    // Exceptions are a degenerate use of the prompt machinery: a try
+    // block pushes a prompt, the matching throw aborts to it, the
+    // handler block runs. None of the multi-shot continuation ops
+    // (`capture_slice`, `clone_slice`, `resume_slice`) are involved.
+    //
+    // Lowering cost (per `crates/dynlower/src/lib.rs`):
+    //   - `push_prompt`/`pop_prompt` emit ZERO machine instructions —
+    //     they only update the lowerer's compile-time active-prompt
+    //     stack.
+    //   - `abort_to_prompt` emits a static jump-to-runtime carrying a
+    //     precomputed record_idx; no runtime stack walk.
+    // This is the LLVM `invoke`/`landingpad` cost model — zero
+    // overhead on the happy path, cost paid only at throw sites.
+
+    /// Open a try region for exception handling. Allocates a fresh
+    /// prompt id, pushes it with `handler_block` as the catch target,
+    /// and returns the id so the caller can close the region with
+    /// `pop_prompt(id)` and target it from `throw_to(id, value)`.
+    ///
+    /// `handler_block` must take exactly one I64 block parameter
+    /// (the thrown value). Equivalent to:
+    /// ```ignore
+    /// let p = fb.create_prompt();
+    /// fb.push_prompt(p, handler_block);
+    /// ```
+    pub fn try_scope(&mut self, handler_block: BlockId) -> PromptId {
+        let p = self.create_prompt();
+        self.push_prompt(p, handler_block);
+        p
+    }
+
+    /// Throw `value` to the given try-scope prompt. The handler block
+    /// associated with `prompt` (from `try_scope` / `push_prompt`)
+    /// receives `value` as its single block parameter.
+    ///
+    /// Aliases `abort_to_prompt(prompt, &[value])` with single-value
+    /// semantics. If no enclosing prompt with this id is on the
+    /// active stack at runtime, the JIT exits with
+    /// `JitOutcome::AbortToPrompt` and the surrounding runtime is
+    /// expected to propagate or convert it to `JitOutcome::Exception`.
+    pub fn throw_to(&mut self, prompt: PromptId, value: Value) {
+        self.abort_to_prompt(prompt, &[value]);
     }
 
     // ── Build ──────────────────────────────────────────────────
@@ -973,6 +1091,47 @@ impl FunctionBuilder {
                 pty,
                 "branch to bb{} arg {i} type mismatch: expected {pty}, got {at}",
                 target.index()
+            );
+        }
+    }
+
+    /// For invoke: if the exception block has any params, the first
+    /// one is implicitly the runtime exception value (always I64).
+    /// Remaining params match `exception_args`.
+    fn check_invoke_exception_args(&self, target: BlockId, args: &[Value]) {
+        let params = &self.blocks[target.index()].params;
+        let exc_param_count = if params.is_empty() { 0 } else { 1 };
+        let expected_args = params.len() - exc_param_count;
+        assert_eq!(
+            expected_args,
+            args.len(),
+            "invoke exception branch to bb{} arg count mismatch: \
+             expected {expected_args} (block has {} params, {} is exception value), got {}",
+            target.index(),
+            params.len(),
+            exc_param_count,
+            args.len()
+        );
+        if exc_param_count == 1 {
+            assert_eq!(
+                params[0].1,
+                Type::I64,
+                "invoke exception bb{} first param must be I64 (the thrown value), got {}",
+                target.index(),
+                params[0].1
+            );
+        }
+        for (i, (&(_, pty), &arg)) in params[exc_param_count..]
+            .iter()
+            .zip(args.iter())
+            .enumerate()
+        {
+            let at = self.value_type(arg);
+            assert_eq!(
+                at, pty,
+                "invoke exception bb{} arg {} type mismatch: expected {pty}, got {at}",
+                target.index(),
+                i + exc_param_count
             );
         }
     }

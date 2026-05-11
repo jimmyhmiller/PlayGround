@@ -1566,8 +1566,8 @@ impl Renderer {
         // `zone` tells us where the label lives — it determines glyphon's
         // clip bounds so timeline labels don't bleed into the tab bar (and
         // tab bar labels don't bleed below it).
-        #[derive(Copy, Clone)]
-        enum Metric { Slice, Header, InspectorHeading, InspectorTitle, InspectorBody }
+        #[derive(Copy, Clone, PartialEq, Eq)]
+        enum Metric { Slice, Header, InspectorHeading, InspectorTitle, InspectorBody, MonoBody }
         #[derive(Copy, Clone, PartialEq, Eq)]
         enum Zone {
             /// Top tab bar (y in [0, TAB_BAR_HEIGHT_PX]). Anything below clipped.
@@ -1790,16 +1790,21 @@ impl Renderer {
                 header_y,
                 name_col_w - 12.0,
                 Metric::InspectorHeading,
-                dim_color,
+                title_color,
                 Zone::Below,
             ));
+            // Column widths must match the row format below: {:>9}  {:>6}%  {:>9}  {:>5}
+            let header_text = format!(
+                "{:>9}  {:>6}{}  {:>9}  {:>5}",
+                "TOTAL", "%TOTAL", " ", "SELF", "×",
+            );
             labels.push((
-                "  TOTAL    %TOTAL      SELF      ×".into(),
+                header_text,
                 metrics_x,
                 header_y,
                 metrics_w,
-                Metric::InspectorHeading,
-                dim_color,
+                Metric::MonoBody,
+                title_color,
                 Zone::Below,
             ));
 
@@ -1833,12 +1838,12 @@ impl Renderer {
                     row_y,
                     left_w,
                     Metric::InspectorBody,
-                    label_color,
+                    title_color,
                     Zone::Below,
                 ));
                 let pct = (node.total_ns as f64 / total_ns) * 100.0;
                 let metrics_text = format!(
-                    "{:>9}  {:>6.2}%  {:>9}  ×{}",
+                    "{:>9}  {:>6.2}%  {:>9}  {:>5}",
                     format_duration(node.total_ns),
                     pct,
                     format_duration(node.self_ns),
@@ -1849,8 +1854,8 @@ impl Renderer {
                     metrics_x,
                     row_y,
                     metrics_w,
-                    Metric::InspectorBody,
-                    dim_color,
+                    Metric::MonoBody,
+                    label_color,
                     Zone::Below,
                 ));
             }
@@ -1946,13 +1951,19 @@ impl Renderer {
                 }
                 Metric::InspectorTitle => (INSPECTOR_TITLE_FONT, INSPECTOR_TITLE_LINE_HEIGHT),
                 Metric::InspectorBody => (INSPECTOR_BODY_FONT, INSPECTOR_LINE_HEIGHT_PX),
+                Metric::MonoBody => (INSPECTOR_BODY_FONT, INSPECTOR_LINE_HEIGHT_PX),
             };
             buf.set_metrics(&mut self.font_system, Metrics::new(fs, lh));
             buf.set_size(&mut self.font_system, Some(*max_w), Some(lh));
+            let family = if *metric == Metric::MonoBody {
+                Family::Monospace
+            } else {
+                Family::SansSerif
+            };
             buf.set_text(
                 &mut self.font_system,
                 text,
-                &Attrs::new().family(Family::SansSerif),
+                &Attrs::new().family(family),
                 Shaping::Advanced,
                 None,
             );
@@ -1971,7 +1982,9 @@ impl Renderer {
                 let lh = match metric {
                     Metric::Slice => LABEL_LINE_HEIGHT,
                     Metric::Header => HEADER_LINE_HEIGHT,
-                    Metric::InspectorHeading | Metric::InspectorBody => INSPECTOR_LINE_HEIGHT_PX,
+                    Metric::InspectorHeading
+                    | Metric::InspectorBody
+                    | Metric::MonoBody => INSPECTOR_LINE_HEIGHT_PX,
                     Metric::InspectorTitle => INSPECTOR_TITLE_LINE_HEIGHT,
                 };
                 let bounds_left = x.floor() as i32;

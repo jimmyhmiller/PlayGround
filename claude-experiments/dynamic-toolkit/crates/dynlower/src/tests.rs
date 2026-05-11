@@ -718,6 +718,146 @@ fn guard_deopt_returns_jit_outcome() {
 }
 
 #[test]
+fn invoke_internal_declared_late_via_import_module_func() {
+    // Mirrors clojure's lower_try shape: outer is defined first;
+    // callee is declared and defined DURING outer compilation;
+    // outer's `extern_funcs` snapshot doesn't see it; the new
+    // `import_module_func` API teaches the outer fb about it.
+    let mut mb = ModuleBuilder::new();
+    let f_main = mb.declare_func("main", &[], Some(Type::I64));
+
+    // Start defining main first.
+    let mut main_fb = mb.define_func(f_main);
+    let _entry = main_fb.entry_block();
+
+    // NOW (mid-stream) declare and define callee.
+    let f_callee = mb.declare_func("callee", &[], Some(Type::I64));
+    main_fb.import_module_func(
+        f_callee,
+        "callee",
+        dynir::types::Signature {
+            params: vec![],
+            ret: Some(Type::I64),
+        },
+    );
+    let mut callee_fb = mb.define_func(f_callee);
+    let _e = callee_fb.entry_block();
+    let body = callee_fb.iconst(Type::I64, 42);
+    callee_fb.ret(body);
+    mb.finish_func(f_callee, callee_fb);
+
+    // Back in main: invoke callee.
+    let normal = main_fb.create_block(&[Type::I64]);
+    let exception = main_fb.create_block(&[Type::I64]);
+    main_fb.invoke(f_callee, &[], normal, &[], exception, &[]);
+    main_fb.switch_to_block(normal);
+    let rv = main_fb.block_param(normal, 0);
+    main_fb.ret(rv);
+    main_fb.switch_to_block(exception);
+    let _exc = main_fb.block_param(exception, 0);
+    let sentinel = main_fb.iconst(Type::I64, -1);
+    main_fb.ret(sentinel);
+    mb.finish_func(f_main, main_fb);
+
+    let module = mb.build();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call_outcome(f_main, &[]), JitOutcome::Value(42));
+}
+
+#[test]
+fn invoke_internal_declared_late_with_safepoint_inst_and_linscan() {
+    // Closer to clojure's setup: emits a Safepoint([]) inst inside
+    // main's entry block before the invoke, AND uses the linear-scan
+    // register allocator.
+    let mut mb = ModuleBuilder::new();
+    let f_main = mb.declare_func("main", &[], Some(Type::I64));
+    // BISECT: declare callee BEFORE define_func(main) to test if
+    // late-import is the issue (vs declaration order itself).
+    let f_callee = mb.declare_func("callee", &[], Some(Type::I64));
+
+    let mut main_fb = mb.define_func(f_main);
+    let _entry = main_fb.entry_block();
+
+    // No-op: callee was already declared before define_func, so the
+    // outer fb's snapshot already includes it. No import needed.
+    let _f_callee_check = f_callee;
+    let mut callee_fb = mb.define_func(f_callee);
+    let _e = callee_fb.entry_block();
+    let body = callee_fb.iconst(Type::I64, 0x4045000000000000_i64);  // 42.0 NaN-boxed
+    callee_fb.ret(body);
+    mb.finish_func(f_callee, callee_fb);
+
+    let normal = main_fb.create_block(&[Type::I64]);
+    let exception = main_fb.create_block(&[Type::I64]);
+    main_fb.invoke(f_callee, &[], normal, &[], exception, &[]);
+    main_fb.switch_to_block(normal);
+    let rv = main_fb.block_param(normal, 0);
+    main_fb.ret(rv);
+    main_fb.switch_to_block(exception);
+    let _exc = main_fb.block_param(exception, 0);
+    let neg = main_fb.iconst(Type::I64, -1);
+    main_fb.ret(neg);
+    mb.finish_func(f_main, main_fb);
+
+    let module = mb.build();
+    // BISECT: GreedyRegState (default) instead of LinearScan.
+    let jit = JitModule::compile_with_regalloc::<
+        DefaultJitConfig<NanBox>,
+        crate::backend::Arm64Backend,
+        crate::regalloc::GreedyRegState,
+    >(&module, &[], None);
+    assert_eq!(jit.call_outcome(f_main, &[]), JitOutcome::Value(0x4045000000000000));
+}
+
+#[test]
+fn invoke_internal_declared_late_with_control_aware_safepoint() {
+    // Reproducer for clojure's setup: control_aware mode (with
+    // safepoint handler), late-declared callee imported via
+    // import_module_func, then invoked.
+    let mut mb = ModuleBuilder::new();
+    let f_main = mb.declare_func("main", &[], Some(Type::I64));
+
+    let mut main_fb = mb.define_func(f_main);
+    let _entry = main_fb.entry_block();
+
+    let f_callee = mb.declare_func("callee", &[], Some(Type::I64));
+    main_fb.import_module_func(
+        f_callee,
+        "callee",
+        dynir::types::Signature {
+            params: vec![],
+            ret: Some(Type::I64),
+        },
+    );
+    let mut callee_fb = mb.define_func(f_callee);
+    let _e = callee_fb.entry_block();
+    let body = callee_fb.iconst(Type::I64, 42);
+    callee_fb.ret(body);
+    mb.finish_func(f_callee, callee_fb);
+
+    let normal = main_fb.create_block(&[Type::I64]);
+    let exception = main_fb.create_block(&[]);
+    main_fb.invoke(f_callee, &[], normal, &[], exception, &[]);
+    main_fb.switch_to_block(normal);
+    let rv = main_fb.block_param(normal, 0);
+    main_fb.ret(rv);
+    main_fb.switch_to_block(exception);
+    let neg = main_fb.iconst(Type::I64, -1);
+    main_fb.ret(neg);
+    mb.finish_func(f_main, main_fb);
+
+    let module = mb.build();
+    // Control-aware mode (safepoint handler set), like clojure.
+    let dummy_safepoint_handler = 0u64;
+    let jit = JitModule::compile_with_config_and_gc::<DefaultJitConfig<NanBox>>(
+        &module,
+        &[],
+        Some(dummy_safepoint_handler),
+    );
+    assert_eq!(jit.call_outcome(f_main, &[]), JitOutcome::Value(42));
+}
+
+#[test]
 fn invoke_internal_normal_path_in_jit_module() {
     let mut mb = ModuleBuilder::new();
     let f_callee = mb.declare_func("callee", &[Type::I64], Some(Type::I64));

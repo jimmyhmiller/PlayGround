@@ -765,10 +765,22 @@ where
                                 exception_args_vals,
                                 ..
                             } => {
+                                // New convention: first exception
+                                // block param receives the runtime
+                                // exception value; exception_args
+                                // fill slots 1.. (mirrors dynlower).
                                 let func = &self.module.functions[sr.func_idx()];
                                 let target_block = &func.blocks[exception_block];
+                                let mut param_idx = 0;
+                                if !target_block.params.is_empty() {
+                                    sr.set(target_block.params[0].0.index(), exc);
+                                    param_idx = 1;
+                                }
                                 for (i, val) in exception_args_vals.iter().enumerate() {
-                                    sr.set(target_block.params[i].0.index(), *val);
+                                    sr.set(
+                                        target_block.params[param_idx + i].0.index(),
+                                        *val,
+                                    );
                                 }
                                 sr.set_block(exception_block);
                                 sr.set_inst(0);
@@ -1149,8 +1161,29 @@ where
                                 sr.set_block(normal.index());
                                 sr.set_inst(0);
                             }
-                            ExternCallResult::Exception(_exc) => {
-                                transfer_args(sr, *exception, exception_args, func);
+                            ExternCallResult::Exception(exc) => {
+                                // New convention: if the exception
+                                // block has any params, the first one
+                                // receives the runtime exception
+                                // value; user-supplied exception_args
+                                // fill slots 1.. Mirrors the dynlower
+                                // codegen path.
+                                let target_block = &func.blocks[exception.index()];
+                                let mut param_idx = 0;
+                                if !target_block.params.is_empty() {
+                                    sr.set(target_block.params[0].0.index(), exc);
+                                    param_idx = 1;
+                                }
+                                let extra: Vec<u64> = exception_args
+                                    .iter()
+                                    .map(|v| sr.get(v.index()))
+                                    .collect();
+                                for (i, val) in extra.iter().enumerate() {
+                                    sr.set(
+                                        target_block.params[param_idx + i].0.index(),
+                                        *val,
+                                    );
+                                }
                                 sr.set_block(exception.index());
                                 sr.set_inst(0);
                             }
@@ -1195,8 +1228,25 @@ where
                             sr.set_block(normal.index());
                             sr.set_inst(0);
                         }
-                        ExternCallResult::Exception(_exc) => {
-                            transfer_args(sr, *exception, exception_args, func);
+                        ExternCallResult::Exception(exc) => {
+                            // Same exception-block convention as
+                            // direct Invoke above.
+                            let target_block = &func.blocks[exception.index()];
+                            let mut param_idx = 0;
+                            if !target_block.params.is_empty() {
+                                sr.set(target_block.params[0].0.index(), exc);
+                                param_idx = 1;
+                            }
+                            let extra: Vec<u64> = exception_args
+                                .iter()
+                                .map(|v| sr.get(v.index()))
+                                .collect();
+                            for (i, val) in extra.iter().enumerate() {
+                                sr.set(
+                                    target_block.params[param_idx + i].0.index(),
+                                    *val,
+                                );
+                            }
                             sr.set_block(exception.index());
                             sr.set_inst(0);
                         }

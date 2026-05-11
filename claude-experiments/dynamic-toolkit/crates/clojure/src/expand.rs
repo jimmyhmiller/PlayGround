@@ -23,12 +23,15 @@ use crate::value as v;
 
 /// Special form heads that the expander must NOT treat as macros.
 const SPECIAL_FORMS: &[&str] = &[
-    "def", "defmacro", "fn", "if", "let", "do", "quote",
+    "def", "defmacro", "fn", "if", "let", "loop", "recur", "do", "quote",
+    "quasiquote", "unquote", "unquote-splicing",
+    "deftype*", "defprotocol", "extend-type",
+    "try", "throw", "catch",
 ];
 
 pub struct ExpandCtx<'a> {
     pub core_ns: u64,
-    pub sym: &'a mut SymbolTable,
+    pub sym: &'a SymbolTable,
     pub gc: &'a DynGcRuntime,
     pub jit: &'a JitModule,
     pub jit_gc_policy: GcPolicy,
@@ -40,30 +43,59 @@ pub struct ExpandCtx<'a> {
 impl<'a> ExpandCtx<'a> {
     pub fn expand_all(&mut self, form: u64) -> u64 {
         // Head expansion to fixed point, then recurse into subforms.
-        let mut current = form;
+        // Macro fns can return any seqable shape — most commonly a
+        // PList/Cons spine that core.clj's `(defn cons …)` builds,
+        // but in principle any deftype that satisfies ISeq. After
+        // each expansion step, normalize the result to a built-in
+        // __ReaderList by walking through the seq protocol. The
+        // rest of the walker (and the compiler downstream) only
+        // needs to handle one shape.
+        let mut current = self.maybe_normalize(form);
         for _ in 0..self.max_iters {
             let (next, expanded) = self.expand_one(current);
             current = next;
             if !expanded {
                 break;
             }
+            current = self.maybe_normalize(current);
         }
-        // Recurse into subforms. We only walk LISTS — vectors, maps,
-        // strings etc. are heap objects whose internal layout differs
-        // from a cons cell, so iterating them via `v::first/rest`
-        // reads garbage. Compound literals are self-evaluating; the
-        // compiler pins them in the literal pool, so the expander
-        // does not need to descend into them.
         if v::is_ptr(current) && crate::collections::is_list(current) {
             current = self.walk_subforms(current);
         }
         current
     }
 
+    /// If `form` is a record-shaped LIST (claims `IList`), walk it
+    /// via the protocol and rebuild as a built-in __ReaderList so
+    /// the rest of the expander/compiler — which uses
+    /// `v::first`/`v::rest` and only understands built-in lists —
+    /// sees one shape.
+    ///
+    /// We gate on IList specifically (not just ISeq) because the
+    /// compiler must distinguish "code-as-data list" from "data
+    /// value." PersistentVector implements ISeq but is a vector
+    /// literal: turning `(macro)` ⇒ `[1 2 3]` into `(1 2 3)` would
+    /// flip the meaning.
+    fn maybe_normalize(&self, form: u64) -> u64 {
+        if !v::is_ptr(form) || crate::collections::is_list(form) {
+            return form;
+        }
+        if !crate::collections::is_record(form) {
+            return form;
+        }
+        let ilist_sym = crate::host::with_host(|h| h.ilist_sym);
+        if !crate::protocol::type_satisfies(ilist_sym, form) {
+            return form;
+        }
+        let items: Vec<u64> = crate::collections::seq_iter(form).collect();
+        list_from_vec(&items)
+    }
+
     /// One step of head-position expansion. Returns (form, did_expand).
     fn expand_one(&mut self, form: u64) -> (u64, bool) {
-        // Only Lists carry a head/rest spine. Other heap shapes
-        // (Vector, Map, String, Keyword, …) are values, not calls.
+        // Only Lists carry a head/rest spine. Record-shaped lists
+        // already got normalized to __ReaderList in expand_all, so we
+        // can use the cheap v::first / v::rest accessors here.
         if !v::is_ptr(form) || !crate::collections::is_list(form) {
             return (form, false);
         }
@@ -82,16 +114,48 @@ impl<'a> ExpandCtx<'a> {
         if !v::is_ptr(var) || !var_is_macro(var) {
             return (form, false);
         }
-        // It's a macro. Collect args (the rest of the form), JIT-call
-        // the macro fn, and replace the form with its result.
+        // It's a macro. Collect args (the rest of the form), prepend
+        // the &form/&env Clojure-style implicit parameters, pack the
+        // whole thing into a list to match the def-fn single-list ABI,
+        // JIT-call the macro fn, and replace the form with the result.
+        //
+        // &form is the entire (head args…) call form; &env is the
+        // local-binding map at the call site (we don't track that
+        // yet, so pass nil — same as `clojure.core/macroexpand-1`
+        // when called outside a let-context).
         let args: Vec<u64> = v::list_iter(v::rest(form)).collect();
         let fn_obj = var_root(var);
         if !v::is_ptr(fn_obj) {
             panic!("macro Var.root is not an Fn: {}", head_name);
         }
         let fref = FuncRef::from_u32(fn_func_ref(fn_obj));
-        match self.gc.run_jit(self.jit, fref, &args, self.jit_gc_policy) {
-            dynlower::JitOutcome::Value(result) => (result, true),
+        let args_list = dynobj::roots::with_scope(args.len() + 8, |scope| {
+            let acc = scope.root::<v::NanBoxTag>(v::NIL);
+            // Walk user args back-to-front, then prepend env, then form.
+            for &x in args.iter().rev() {
+                let cell = dynobj::roots::with_scope(3, |inner| {
+                    v::alloc_list_cell_from_raw(inner, x, acc.get()).get()
+                });
+                acc.set(cell);
+            }
+            let env_cell = dynobj::roots::with_scope(3, |inner| {
+                v::alloc_list_cell_from_raw(inner, v::NIL, acc.get()).get()
+            });
+            acc.set(env_cell);
+            let form_cell = dynobj::roots::with_scope(3, |inner| {
+                v::alloc_list_cell_from_raw(inner, form, acc.get()).get()
+            });
+            acc.set(form_cell);
+            acc.get()
+        });
+        match self.gc.run_jit(self.jit, fref, &[fn_obj, args_list], self.jit_gc_policy) {
+            dynlower::JitOutcome::Value(result) => {
+                if std::env::var("CLJ_DEBUG_MACRO").is_ok() {
+                    let s = crate::printer::print(result, self.sym);
+                    eprintln!("MACRO {} =>\n  {}", head_name, s);
+                }
+                (result, true)
+            }
             dynlower::JitOutcome::Void => (v::NIL, true),
             other => panic!(
                 "unexpected JIT outcome from macro `{}`: {:?}",
@@ -277,6 +341,9 @@ fn rebuild_with_head(head: u64, tail: u64) -> u64 {
     })
 }
 
+/// Convert a record-shaped list (PList / Cons spine produced by
+/// `(defn cons …)`) into a built-in __ReaderList of the same
+/// elements. Recurses into elements that are themselves record-lists
 /// Build a Clojure list from a Vec, returning the head.
 fn list_from_vec(items: &[u64]) -> u64 {
     dynobj::roots::with_scope(items.len() + 4, |scope| {

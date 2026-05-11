@@ -12,6 +12,7 @@ pub mod freevars;
 pub mod host;
 pub mod namespace;
 pub mod printer;
+pub mod protocol;
 pub mod quasiquote;
 pub mod reader;
 pub mod symbols;
@@ -25,6 +26,9 @@ use dynexec::NanBoxConfig;
 use dynir::builder::ModuleBuilder;
 use dynir::ir::FuncRef;
 use dynir::types::{Signature, Type};
+use dynlang::closure::{
+    ArgsListReaders, CallConv, CaptureShape, ClosureConfig, ClosureKit,
+};
 use dynlang::gc::DynGcRuntime;
 use dynlang::{DynModule, GcConfig, GcPolicy, NanBoxTags};
 use dynlower::{CallMode, JitModule};
@@ -33,17 +37,22 @@ use dynruntime::active_jit_safepoint_handler;
 
 use crate::host::Host;
 use crate::symbols::SymbolTable;
-use crate::types::declare_types;
+use crate::types::{declare_types, Layouts};
 
 const JIT_CALL_TABLE_CAPACITY: usize = 64 * 1024;
 const JIT_LITERAL_POOL_CAPACITY: usize = 64 * 1024;
-/// Default heap size: 4 MiB. Each semispace is half this.
-const HEAP_SIZE: usize = 4 * 1024 * 1024;
+/// Default heap size: 64 MiB. Each semispace is half this.
+const HEAP_SIZE: usize = 64 * 1024 * 1024;
 
 pub struct Engine {
     /// dynlang module — used to look up obj_types, externs, slow paths.
     /// Kept alive because the GC's type table aliases its `obj_types`.
     pub dm: DynModule,
+    /// First-class function-value primitive. Built atop `types.fn_obj`
+    /// (the existing `Fn` heap shape) using `DynModule::closures_for`.
+    /// Used by every closure-related IR site to emit the allocation,
+    /// body prologue, and indirect-call sequences.
+    pub closures: ClosureKit,
     /// Compile-time mutable state. Locked during compile (a brief
     /// section before extend); released so `call_compiled` running
     /// concurrently isn't blocked on it.
@@ -78,6 +87,13 @@ struct CompileState {
     /// Externs in declaration order. Mutated only at startup.
     externs: Vec<*const u8>,
     anon_counter: u32,
+    /// Compile-time mirror of the runtime `deftype_fields` map:
+    /// `type-name sym → field-name syms in declaration order`.
+    /// Populated by `(deftype* …)` and read by `(extend-type T …)`
+    /// so each method body can be wrapped with implicit field
+    /// bindings — `[this] (foo a)` resolves `a` to `(.-a this)`
+    /// the same way Clojure does it.
+    deftype_fields: HashMap<u32, Vec<u32>>,
 }
 
 const GLOBAL_SLOT_REGISTRY: usize = 0;
@@ -107,6 +123,10 @@ impl Engine {
         let tags = NanBoxTags::default();
         let mut dm = DynModule::new(gc_config.clone(), tags.clone());
         let types = declare_types(&mut dm);
+        // Resolve every field offset from the dynlang ObjType
+        // registry. Single source of truth for the heap field layout —
+        // see `Layouts` for the rationale.
+        let layouts = Layouts::from_module(&dm, &types);
 
         // GC runtime: needs obj_types to scan heap objects correctly.
         let gc = Box::new(DynGcRuntime::new(&gc_config, &tags, &dm.obj_types));
@@ -150,33 +170,121 @@ impl Engine {
                 ret: Some(Type::I64),
             };
             let fref = mb.declare_extern(prim.name, sig);
-            func_refs.insert(prim.name.to_string(), fref);
+            func_refs.insert(
+                prim.name.to_string(),
+                compile::FnEntry::Extern { fref, arity: prim.arity },
+            );
             externs.push(prim.ptr);
         }
 
+        // Register `__gc_alloc__` on the COMPILER's `mb` so JIT code can
+        // call it. The toolkit's `DynModule` auto-registers this extern
+        // on its own `mb` when the first obj_type is declared, but that
+        // FuncRef indexes into a different table than the one Clojure
+        // compiles through — `ClosureKit::make` needs a FuncRef valid
+        // in OUR table, so we declare a parallel entry here.
+        // Signature mirrors dynlang's: (type_id, varlen_len) -> GcPtr.
+        let gc_alloc_fref = mb.declare_extern(
+            dynlang::gc::GC_ALLOC_EXTERN,
+            Signature {
+                params: vec![Type::I64, Type::I64],
+                ret: Some(Type::GcPtr),
+            },
+        );
+        externs.push(dynlang::gc::gc_alloc_thunk as *const u8);
+
+        // Build the ClosureKit on top of the already-declared `Fn`
+        // type. This adopts the existing layout (so namespace.rs's
+        // runtime allocators stay valid) and provides the IR-emitting
+        // half: body declaration, prologue, alloc, indirect call,
+        // multi-arity dispatch.
+        let closures = {
+            let lookup = |name: &str| match func_refs.get(name) {
+                Some(compile::FnEntry::Extern { fref, .. }) => *fref,
+                Some(compile::FnEntry::DefFn { fref }) => *fref,
+                None => panic!("ClosureKit setup: missing extern {name:?}"),
+            };
+            let readers = ArgsListReaders {
+                first: lookup("__reader_list_first"),
+                rest: lookup("__reader_list_rest"),
+                count: lookup("__reader_list_count"),
+                encode_arity: |n| value::encode_int(n as i64),
+                check_arity: lookup("__check_args_list"),
+                no_matching_arity: lookup("__make_no_matching_arity_exception"),
+                raise: lookup("__raise_exception"),
+                // The kit emits `raise` via call_via_func_ref through
+                // the JIT call table so the Exception outcome
+                // propagates — see ArgsListReaders::raise doc. The
+                // JitModule's call-table base is stable for the
+                // engine's lifetime.
+                call_table_base: jit.call_table_base_addr(),
+                success_sentinel: value::NIL,
+            };
+            let config = ClosureConfig {
+                captures: CaptureShape::Inline,
+                call_conv: CallConv::ArgsList { readers },
+                extra_fields: Vec::new(),
+            };
+            dm.closures_for(
+                types.fn_obj,
+                config,
+                "func_ref",
+                "arity",
+                Some(gc_alloc_fref),
+            )
+        };
+
         let mut engine = Engine {
             dm,
+            closures,
             compile: Mutex::new(CompileState {
                 mb,
                 func_refs,
                 externs,
                 anon_counter: 0,
+                deftype_fields: HashMap::new(),
             }),
             jit: RwLock::new(jit),
             gc,
             chain,
             globals,
             host: Host {
-                sym: std::sync::Mutex::new(SymbolTable::new()),
+                sym: SymbolTable::new(),
                 gc: gc_ptr,
                 types,
+                layouts,
                 // Filled in below once we have a stable address for
                 // the JitModule. Engine fields are constructed before
                 // the host because the host's `jit` pointer must live
                 // as long as the JitModule itself.
                 jit: std::ptr::null(),
                 kw_index: std::sync::Mutex::new(std::collections::HashMap::new()),
-                kw_roots: dynobj::roots::AtomicRootSet::new(),
+                kw_roots: Box::new(dynobj::roots::AtomicRootSet::new()),
+                deftype_fields: std::sync::Mutex::new(std::collections::HashMap::new()),
+                method_table: std::sync::Mutex::new(std::collections::HashMap::new()),
+                method_roots: Box::new(dynobj::roots::AtomicRootSet::new()),
+                // Filled in below — needs the engine's `globals`
+                // address, which only becomes stable once the
+                // engine value is in its final location.
+                globals_ptr: std::ptr::null(),
+                core_ns_slot: GLOBAL_SLOT_CORE_NS,
+                // Filled in below: needs the symbol table to be
+                // initialized first so we can intern the user-facing
+                // names for the built-in types.
+                builtin_type_names: std::sync::Mutex::new(std::collections::HashMap::new()),
+                protocol_membership: std::sync::Mutex::new(std::collections::HashSet::new()),
+                // Filled in by bootstrap_builtin_type_names; the
+                // initial 0 placeholders are never read because that
+                // bootstrap runs before the first eval call.
+                seq_method_sym: 0,
+                first_method_sym: 0,
+                next_method_sym: 0,
+                rest_method_sym: 0,
+                count_method_sym: 0,
+                iseq_sym: 0,
+                ivector_sym: 0,
+                imap_sym: 0,
+                ilist_sym: 0,
             },
             jit_gc_policy: GcPolicy::OnPressure { threshold: 0.75 },
         };
@@ -206,15 +314,73 @@ impl Engine {
         // The keyword intern table holds GC-traced Keyword pointers.
         // It must be a root source so a moving collector rewrites the
         // interned pointers in place.
-        let kw_ptr: *const dyn dynobj::RootSource = &engine.host.kw_roots;
+        let kw_ptr: *const dyn dynobj::RootSource = &*engine.host.kw_roots;
         unsafe { engine.gc.register_extra_root_source(kw_ptr) };
+        let method_ptr: *const dyn dynobj::RootSource = &*engine.host.method_roots;
+        unsafe { engine.gc.register_extra_root_source(method_ptr) };
+
+        // Now that the Engine has settled into its final location,
+        // wire host.globals_ptr to the engine's globals RootSet so
+        // externs can read the current `clojure.core` namespace
+        // pointer from a stable, GC-traced source.
+        engine.host.globals_ptr = &*engine.globals;
 
         // Allocate the Registry singleton and the `clojure.core`
         // namespace, writing both into `globals` so they survive
         // future collections.
         engine.bootstrap_namespaces();
 
+        // Map every built-in heap type to its core.clj-facing name
+        // (`__ReaderList`, `__ReaderVector`, …). Without this,
+        // `(extend-type __ReaderList …)` would only register methods
+        // for a type that the runtime never recognizes — built-ins
+        // have no per-instance type-name field, so we resolve via
+        // this table at dispatch time.
+        engine.bootstrap_builtin_type_names();
+
         engine
+    }
+
+    fn bootstrap_builtin_type_names(&mut self) {
+        let sym = &self.host.sym;
+        let mut tbl = self.host.builtin_type_names.lock().unwrap();
+        // Names mirror the `(extend-type X …)` heads core.clj uses
+        // for the corresponding heap shapes.
+        let pairs: &[(usize, &str)] = &[
+            (self.host.types.list.0, "__ReaderList"),
+            (self.host.types.vector.0, "__ReaderVector"),
+            (self.host.types.map.0, "__ReaderMap"),
+            (self.host.types.set.0, "__ReaderSet"),
+        ];
+        for &(type_id, name) in pairs {
+            let id = sym.intern(name);
+            tbl.insert(type_id, id);
+        }
+        // Pre-intern protocol-method and protocol names so
+        // `protocol::invoke_method_0` and the lock-free helpers in
+        // collections / printer don't need to grab `host.sym`. The
+        // expander and compiler each hold that lock when they call
+        // into the seq/print machinery.
+        let seq_m = sym.intern("-seq");
+        let first_m = sym.intern("-first");
+        let next_m = sym.intern("-next");
+        let rest_m = sym.intern("-rest");
+        let count_m = sym.intern("-count");
+        let iseq_p = sym.intern("ISeq");
+        let ivector_p = sym.intern("IVector");
+        let imap_p = sym.intern("IMap");
+        let ilist_p = sym.intern("IList");
+        drop(tbl);
+        drop(sym);
+        self.host.seq_method_sym = seq_m;
+        self.host.first_method_sym = first_m;
+        self.host.next_method_sym = next_m;
+        self.host.rest_method_sym = rest_m;
+        self.host.count_method_sym = count_m;
+        self.host.iseq_sym = iseq_p;
+        self.host.ivector_sym = ivector_p;
+        self.host.imap_sym = imap_p;
+        self.host.ilist_sym = ilist_p;
     }
 
     /// Allocate the singleton Registry and the `clojure.core`
@@ -225,7 +391,7 @@ impl Engine {
         let _host_g = host::install(&self.host);
         let _chain_g = dynobj::roots::install_chain(&self.chain);
         let core_name = {
-            let mut sym = self.host.sym.lock().unwrap();
+            let sym = &self.host.sym;
             sym.intern("clojure.core")
         };
         dynobj::roots::with_scope(64, |scope| {
@@ -265,7 +431,7 @@ impl Engine {
     /// panics or the extern asserts.
     pub fn call_compiled(&self, name: &str, args: &[u64]) -> u64 {
         // Resolve the symbol → Var → Fn → FuncRef. Brief sym lock.
-        let sym_id = self.host.sym.lock().unwrap().intern(name);
+        let sym_id = self.host.sym.intern(name);
         let var = namespace::ns_lookup(self.core_ns(), value::encode_sym_id(sym_id));
         if !value::is_ptr(var) {
             return value::NIL;
@@ -276,25 +442,50 @@ impl Engine {
         }
         let fref = FuncRef::from_u32(namespace::fn_func_ref(fn_obj));
 
-        // Install thread-locals for this call. NOTE: we deliberately
-        // do NOT install the engine's shared `chain` because (a) it
-        // is not Sync, and (b) pure-runtime calls into already-
-        // compiled functions don't need a host-side rooting chain
-        // unless the called code triggers a host-side allocation
-        // (e.g. via the `cons` extern). Any function that just does
-        // arithmetic and recursion (`fib`, `square`, `fact`) is safe
-        // without the chain.
+        // Install thread-locals for this call. Each thread needs:
+        //   - the GC's per-thread MutatorThread (for allocs)
+        //   - the host (so externs can reach the symbol table etc.)
+        //   - a FrameChain (needed by `with_scope` which the cons
+        //     extern uses to root list cells during alloc)
         let _gc_thread = self.gc.install_thread();
         let _host_g = host::install(&self.host);
+        let local_chain = dynobj::roots::FrameChain::new();
+        let chain_src: *const dyn dynobj::RootSource = &local_chain;
+        let _chain_root_guard =
+            unsafe { self.gc.push_extra_root_source(chain_src) };
+        let _chain_g = dynobj::roots::install_chain(&local_chain);
+
+        // User-defined fns use the unified `(self_fn, args_list)`
+        // ABI. Pack args into a list; pass `fn_obj` as self_fn so
+        // closures can read their captures (def-fns ignore it but
+        // still accept it).
+        let args_list = if args.is_empty() {
+            value::NIL
+        } else {
+            dynobj::roots::with_scope(args.len() + 4, |scope| {
+                let acc = scope.root::<value::NanBoxTag>(value::NIL);
+                for &x in args.iter().rev() {
+                    let new_bits = dynobj::roots::with_scope(3, |inner| {
+                        value::alloc_list_cell_from_raw(inner, x, acc.get()).get()
+                    });
+                    acc.set(new_bits);
+                }
+                acc.get()
+            })
+        };
 
         // Read lock on the JIT — many threads can hold simultaneously.
         let jit_r = self.jit.read().expect("jit RwLock poisoned");
         match self
             .gc
-            .run_jit(&jit_r, fref, args, self.jit_gc_policy)
+            .run_jit(&jit_r, fref, &[fn_obj, args_list], self.jit_gc_policy)
         {
             dynlower::JitOutcome::Value(v) => v,
             dynlower::JitOutcome::Void => value::NIL,
+            dynlower::JitOutcome::Exception(exc) => {
+                let printed = printer::print(exc, &self.host.sym);
+                panic!("Exception: {}", printed);
+            }
             other => panic!("unexpected JIT outcome: {other:?}"),
         }
     }
@@ -338,8 +529,7 @@ impl Engine {
         let _root_guard =
             unsafe { self.gc.push_extra_root_source(pending_src) };
         {
-            let mut sym = self.host.sym.lock().unwrap();
-            let mut r = reader::Reader::new(src, &mut sym);
+            let mut r = reader::Reader::new(src, &self.host.sym);
             while !r.at_eof() {
                 match r.read() {
                     Ok(v) => {
@@ -354,14 +544,16 @@ impl Engine {
         for i in 0..pending.len() {
             let form = pending.get(i);
 
-            // Macroexpansion uses gc.run_jit for any macro Var. No
-            // compile lock needed here — macros are read-only on
-            // the JIT, but they may need the symbol table.
+            // Macroexpansion uses gc.run_jit for any macro Var. We
+            // pass `&Mutex<SymbolTable>` rather than holding the
+            // lock for the duration: when expand JIT-calls a macro
+            // body, that body may invoke externs (gensym, list_like_*,
+            // …) that themselves lock `host.sym`. Holding it across
+            // the JIT call deadlocks. Each lookup site locks briefly.
             let expanded = {
-                let mut sym = self.host.sym.lock().unwrap();
                 let mut ctx = expand::ExpandCtx {
                     core_ns: self.globals.get(GLOBAL_SLOT_CORE_NS),
-                    sym: &mut sym,
+                    sym: &self.host.sym,
                     gc: &self.gc,
                     jit,
                     jit_gc_policy: self.jit_gc_policy,
@@ -378,18 +570,27 @@ impl Engine {
                     func_refs,
                     externs,
                     anon_counter,
+                    deftype_fields,
                 } = &mut *compile;
 
                 let result = {
-                    let mut sym = self.host.sym.lock().unwrap();
+                    // Same pattern as expand: pass `&Mutex<…>`,
+                    // lock briefly per access. compile_top can JIT
+                    // (e.g. via macros invoked from compile-time
+                    // helpers) and those JIT bodies may need the sym
+                    // table; holding the lock across them deadlocks.
                     let mut compiler = compile::Compiler {
                         mb,
                         func_refs,
-                        sym: &mut sym,
+                        sym: &self.host.sym,
                         anon_counter,
                         literal_pool: jit.literal_pool(),
                         call_table_base: jit.call_table_base_addr(),
                         loop_targets: Vec::new(),
+                        last_expr_non_returning: false,
+                        core_ns: self.globals.get(GLOBAL_SLOT_CORE_NS),
+                        deftype_fields,
+                        closures: &self.closures,
                     };
                     compiler.compile_top(expanded)
                 };
@@ -407,18 +608,26 @@ impl Engine {
                     match self.gc.run_jit(jit, fref, &[], self.jit_gc_policy) {
                         dynlower::JitOutcome::Value(v) => v,
                         dynlower::JitOutcome::Void => value::NIL,
+                        dynlower::JitOutcome::Exception(exc) => {
+                            // Uncaught throw bubbled to the top.
+                            // Print and panic — same surface
+                            // behavior as the legacy `clj_throw`
+                            // path.
+                            let printed = printer::print(exc, &self.host.sym);
+                            panic!("Exception: {}", printed);
+                        }
                         other => panic!("unexpected JIT outcome: {other:?}"),
                     }
                 }
                 compile::TopResult::Define {
                     name,
                     fref,
-                    arity,
+                    arity_word,
                     is_macro,
                 } => {
-                    let sym_id = self.host.sym.lock().unwrap().intern(&name);
+                    let sym_id = self.host.sym.intern(&name);
                     dynobj::roots::with_scope(64, |scope| {
-                        let fn_obj = namespace::alloc_fn(scope, fref.as_u32(), arity);
+                        let fn_obj = namespace::alloc_fn(scope, fref.as_u32(), arity_word as usize);
                         let var = namespace::ns_intern(
                             scope,
                             self.globals.get(GLOBAL_SLOT_CORE_NS),
@@ -431,6 +640,34 @@ impl Engine {
                     });
                     value::NIL
                 }
+                compile::TopResult::DefineValue { name, value_thunk } => {
+                    // Run the thunk to compute the value, then
+                    // intern it as a Var in clojure.core.
+                    let value = match self.gc.run_jit(
+                        jit,
+                        value_thunk,
+                        &[],
+                        self.jit_gc_policy,
+                    ) {
+                        dynlower::JitOutcome::Value(v) => v,
+                        dynlower::JitOutcome::Void => value::NIL,
+                        dynlower::JitOutcome::Exception(exc) => {
+                            let printed = printer::print(exc, &self.host.sym);
+                            panic!("Exception: {}", printed);
+                        }
+                        other => panic!("unexpected JIT outcome: {other:?}"),
+                    };
+                    let sym_id = self.host.sym.intern(&name);
+                    dynobj::roots::with_scope(16, |scope| {
+                        let _ = namespace::ns_intern(
+                            scope,
+                            self.globals.get(GLOBAL_SLOT_CORE_NS),
+                            value::encode_sym_id(sym_id),
+                            value,
+                        );
+                    });
+                    value::NIL
+                }
                 compile::TopResult::None => value::NIL,
             };
         }
@@ -438,11 +675,16 @@ impl Engine {
     }
 
     pub fn print(&self, v: u64) -> String {
-        // Type-id checks live behind `host::with_host`, so install the
-        // engine's host before printing. (The shared FrameChain is fine
-        // here — `print` doesn't allocate.)
+        // Install the same per-thread context the eval driver does:
+        // GC thread, host, FrameChain. The printer now JIT-calls
+        // `-seq`/`-first`/`-next` to walk records that satisfy ISeq,
+        // which allocates list cells via `dynobj::roots::with_scope`
+        // and runs JIT code (so the safepoint session needs gc.run_jit
+        // to set it up).
+        let _gc_thread = self.gc.install_thread();
         let _host_g = host::install(&self.host);
-        let sym = self.host.sym.lock().unwrap();
+        let _chain_g = dynobj::roots::install_chain(&self.chain);
+        let sym = &self.host.sym;
         printer::print(v, &sym)
     }
 }
