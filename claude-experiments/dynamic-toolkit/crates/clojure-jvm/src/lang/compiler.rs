@@ -3063,7 +3063,7 @@ impl Compiler {
     /// matches at JIT-binding time.
     pub fn new() -> Self {
         let mut dm = dynlang::DynModule::new(
-            dynlang::GcConfig::leak(),
+            dynlang::GcConfig::generational(65536),
             dynlang::NanBoxTags::default(),
         );
         // Declare runtime externs. ORDER MATTERS — must match
@@ -3720,7 +3720,7 @@ mod tests {
         let lb = LocalBinding::new(0, Symbol::intern("x"), None, None, false);
         let val: Box<dyn Expr> = Box::new(NumberExpr::new(Object::Long(1)));
         let mut dm = dynlang::DynModule::new(
-            dynlang::GcConfig::leak(),
+            dynlang::GcConfig::generational(65536),
             dynlang::NanBoxTags::default(),
         );
         let fref = dm.declare_func("test_assign", 0);
