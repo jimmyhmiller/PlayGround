@@ -410,7 +410,7 @@ fn declare_gc_types(dm: &mut DynModule) -> (LoxGcTypes, TypeHandles) {
 
 pub fn lower(program: &Program) -> LoweredProgram {
     let mut dm = DynModule::new(
-        GcConfig::leak(),
+        GcConfig::generational(64 * 1024),
         NanBoxTags { nil: TAG_NIL, bool_tag: TAG_BOOL, ptr: TAG_OBJ },
     );
     dm.register_slow_paths("lox");

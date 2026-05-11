@@ -32,7 +32,7 @@
 //!
 //! ## Lifecycle
 //!
-//! 1. Once per language: `let kit = dm.closures(config)` to register the
+//! 1. Once per language: `let kit = dyn_module.closures(config)` to register the
 //!    `Closure` GC object type and capture the layout.
 //! 2. Per closure: `kit.declare_body(...)` declares the inner FuncRef,
 //!    `kit.begin_body(...)` (or `kit.begin_multi_arity_body(...)`) emits
@@ -303,13 +303,11 @@ impl DynModule {
     /// Clojure's `types::declare_types` declares an `Fn` type) and you
     /// want to bolt the kit on without re-registering the type.
     ///
-    /// `gc_alloc` is the FuncRef the kit will emit calls to when
-    /// allocating a closure. If `None`, the kit uses the `__gc_alloc__`
-    /// declared on `self` (suitable for frontends that compile through
-    /// the same `DynModule`'s `ModuleBuilder`). Frontends that maintain
-    /// a separate `ModuleBuilder` for compilation must declare their
-    /// own `__gc_alloc__` extern on that `mb` and pass its FuncRef here
-    /// — otherwise the auto-detected one indexes into the wrong table.
+    /// The kit emits calls to `__gc_alloc__` via the FuncRef
+    /// auto-registered on this `DynModule` when its first `obj_type`
+    /// was declared. The frontend must compile through this same
+    /// builder (i.e. `self.module_builder`) so the FuncRef is valid in
+    /// the table the JIT receives at extend time.
     ///
     /// The existing type must:
     /// - have a `Raw64` field named `body_ref_field` (the FuncRef)
@@ -319,14 +317,14 @@ impl DynModule {
     /// - end in a `varlen_values` section (captures)
     ///
     /// Panics with a clear message if any expected field is missing or
-    /// has the wrong kind.
+    /// has the wrong kind, or if no `obj_type` has been declared yet
+    /// (which is what registers `__gc_alloc__`).
     pub fn closures_for(
         &self,
         obj_type: ObjTypeId,
         config: ClosureConfig,
         body_ref_field: &str,
         arity_field: &str,
-        gc_alloc: Option<FuncRef>,
     ) -> ClosureKit {
         ClosureKit::from_existing(
             self,
@@ -334,22 +332,20 @@ impl DynModule {
             config,
             body_ref_field,
             arity_field,
-            gc_alloc,
         )
     }
 }
 
 impl ClosureKit {
     fn from_existing(
-        dm: &DynModule,
+        dyn_module: &DynModule,
         obj_type: ObjTypeId,
         config: ClosureConfig,
         body_ref_field: &str,
         arity_field: &str,
-        gc_alloc_override: Option<FuncRef>,
     ) -> Self {
-        let obj_handle = dm.obj_handle(obj_type);
-        let t = dm.get_obj_type(obj_type);
+        let obj_handle = dyn_module.obj_handle(obj_type);
+        let t = dyn_module.get_obj_type(obj_type);
         let body_ref_offset = t.raw64_field_offset_named(body_ref_field) as i32;
         let arity_offset = t.raw64_field_offset_named(arity_field) as i32;
         let captures_base_offset = t.type_info.varlen_element_offset(0) as i32;
@@ -361,12 +357,12 @@ impl ClosureKit {
                 FieldKind::Raw64 => t.raw64_field_offset_named(n) as i32,
             })
             .collect();
-        let gc_alloc_extern = gc_alloc_override.or_else(|| dm.gc_alloc_extern()).expect(
-            "ClosureKit::from_existing: no gc_alloc extern available — either \
-             declare an obj_type on this DynModule (which auto-registers \
-             __gc_alloc__) or pass an explicit FuncRef via the override",
+        let gc_alloc_extern = dyn_module.gc_alloc_extern().expect(
+            "ClosureKit::from_existing: __gc_alloc__ not registered on this \
+             DynModule — declare at least one obj_type first (the toolkit \
+             auto-registers the extern on the first `obj_type` call)",
         );
-        let ptr_tag = dm.tags().ptr;
+        let ptr_tag = dyn_module.tags().ptr;
         ClosureKit {
             obj_type,
             obj_handle,
@@ -381,13 +377,13 @@ impl ClosureKit {
         }
     }
 
-    fn declare(dm: &mut DynModule, config: ClosureConfig, name: &str) -> Self {
+    fn declare(dyn_module: &mut DynModule, config: ClosureConfig, name: &str) -> Self {
         // Build the Closure GC object type:
         //   body_ref: Raw64
         //   arity:    Raw64
         //   [extras...]
         //   varlen_values (captures or upvalue-cell pointers)
-        let mut builder = dm
+        let mut builder = dyn_module
             .obj_type(name)
             .field("body_ref", FieldKind::Raw64)
             .field("arity", FieldKind::Raw64);
@@ -399,7 +395,7 @@ impl ClosureKit {
         // `from_existing` does the offset lookups and grabs the
         // gc_alloc extern + ptr tag — keep the two paths in sync by
         // delegating.
-        ClosureKit::from_existing(dm, obj_type, config, "body_ref", "arity", None)
+        ClosureKit::from_existing(dyn_module, obj_type, config, "body_ref", "arity")
             .with_type_name(name)
     }
 
@@ -434,10 +430,10 @@ impl ClosureKit {
     /// kit composes cleanly with embeddings that maintain a separate
     /// `ModuleBuilder` for code-generation (e.g. the Clojure frontend,
     /// where `DynModule` is used at startup to register GC types and a
-    /// distinct `mb` holds the per-compile-pass declarations).
+    /// distinct `ModuleBuilder` holds the per-compile-pass declarations).
     pub fn declare_body(
         &self,
-        mb: &mut ModuleBuilder,
+        module_builder: &mut ModuleBuilder,
         name: &str,
         shape: BodyShape,
     ) -> FuncRef {
@@ -452,7 +448,7 @@ impl ClosureKit {
             }
             CallConv::ArgsList { .. } => vec![Type::I64, Type::I64],
         };
-        mb.declare_func(name, &params, Some(Type::I64))
+        module_builder.declare_func(name, &params, Some(Type::I64))
     }
 
     /// Open a single-arity body: switch `fb` to the entry block, emit
@@ -940,29 +936,29 @@ mod tests {
     /// with the right field layout.
     #[test]
     fn declare_closure_type_args_list() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         // Stub externs — never invoked in this test; just need FuncRefs.
-        let first = dm.declare_extern(
+        let first = dyn_module.declare_extern(
             "first",
             crate::Signature { params: vec![Type::I64], ret: Some(Type::I64) },
         );
-        let rest = dm.declare_extern(
+        let rest = dyn_module.declare_extern(
             "rest",
             crate::Signature { params: vec![Type::I64], ret: Some(Type::I64) },
         );
-        let count = dm.declare_extern(
+        let count = dyn_module.declare_extern(
             "count",
             crate::Signature { params: vec![Type::I64], ret: Some(Type::I64) },
         );
-        let check_arity = dm.declare_extern(
+        let check_arity = dyn_module.declare_extern(
             "check_arity",
             crate::Signature { params: vec![Type::I64, Type::I64], ret: Some(Type::I64) },
         );
-        let no_matching = dm.declare_extern(
+        let no_matching = dyn_module.declare_extern(
             "no_matching",
             crate::Signature { params: vec![Type::I64], ret: Some(Type::I64) },
         );
-        let raise = dm.declare_extern(
+        let raise = dyn_module.declare_extern(
             "raise",
             crate::Signature { params: vec![Type::I64], ret: None },
         );
@@ -977,7 +973,7 @@ mod tests {
             call_table_base: 0, // tests don't actually invoke raise
             success_sentinel: 0,
         };
-        let kit = dm.closures(ClosureConfig::new(CallConv::ArgsList { readers }));
+        let kit = dyn_module.closures(ClosureConfig::new(CallConv::ArgsList { readers }));
         // Two fixed Raw64 fields (body_ref, arity) before the varlen.
         assert!(kit.body_ref_offset() < kit.arity_offset());
         assert!(kit.arity_offset() < kit.captures_base_offset());
@@ -985,18 +981,18 @@ mod tests {
 
     #[test]
     fn declare_closure_type_positional() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let kit = dm.closures(ClosureConfig::new(CallConv::Positional));
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let kit = dyn_module.closures(ClosureConfig::new(CallConv::Positional));
         assert!(kit.body_ref_offset() < kit.arity_offset());
         assert!(kit.arity_offset() < kit.captures_base_offset());
     }
 
     #[test]
     fn extra_fields_get_offsets() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let cfg = ClosureConfig::new(CallConv::Positional)
             .with_extra_field("name", FieldKind::Value);
-        let kit = dm.closures(cfg);
+        let kit = dyn_module.closures(cfg);
         assert_eq!(kit.extra_field_offsets.len(), 1);
         // Name field sits after body_ref/arity (Raw64) — Value fields
         // come first in ObjTypeBuilder's layout, so it should be at the
@@ -1006,10 +1002,10 @@ mod tests {
 
     #[test]
     fn positional_body_signature_matches_shape() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let kit = dm.closures(ClosureConfig::new(CallConv::Positional));
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let kit = dyn_module.closures(ClosureConfig::new(CallConv::Positional));
         let _ = kit.declare_body(
-            &mut dm.mb,
+            &mut dyn_module.module_builder,
             "fn_two_args",
             BodyShape { fixed: 2, variadic: false, n_captures: 0 },
         );
@@ -1021,12 +1017,12 @@ mod tests {
 
     #[test]
     fn args_list_body_signature_is_always_two() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let dummy = dm.declare_extern(
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let dummy = dyn_module.declare_extern(
             "dummy",
             crate::Signature { params: vec![Type::I64], ret: Some(Type::I64) },
         );
-        let raise = dm.declare_extern(
+        let raise = dyn_module.declare_extern(
             "raise",
             crate::Signature { params: vec![Type::I64], ret: None },
         );
@@ -1041,9 +1037,9 @@ mod tests {
             call_table_base: 0,
             success_sentinel: 0,
         };
-        let kit = dm.closures(ClosureConfig::new(CallConv::ArgsList { readers }));
+        let kit = dyn_module.closures(ClosureConfig::new(CallConv::ArgsList { readers }));
         let _ = kit.declare_body(
-            &mut dm.mb,
+            &mut dyn_module.module_builder,
             "fn_anything",
             BodyShape { fixed: 7, variadic: true, n_captures: 3 },
         );
@@ -1053,14 +1049,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "Positional convention does not support multi-arity")]
     fn positional_multi_arity_panics() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let kit = dm.closures(ClosureConfig::new(CallConv::Positional));
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let kit = dyn_module.closures(ClosureConfig::new(CallConv::Positional));
         let body_ref = kit.declare_body(
-            &mut dm.mb,
+            &mut dyn_module.module_builder,
             "multi",
             BodyShape { fixed: 0, variadic: false, n_captures: 0 },
         );
-        let mut fb = dm.mb.define_func(body_ref);
+        let mut fb = dyn_module.module_builder.define_func(body_ref);
         let _ = kit.begin_multi_arity_body(
             &mut fb,
             &[BodyShape { fixed: 0, variadic: false, n_captures: 0 }],
@@ -1070,9 +1066,9 @@ mod tests {
     #[test]
     #[should_panic(expected = "MutableCells capture shape not implemented")]
     fn mutable_cells_make_panics() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         // Declare a fake cell type just to satisfy the ObjTypeId field.
-        let cell = dm
+        let cell = dyn_module
             .obj_type("Cell")
             .field("value", FieldKind::Value)
             .build();
@@ -1084,14 +1080,14 @@ mod tests {
             call_conv: CallConv::Positional,
             extra_fields: vec![],
         };
-        let kit = dm.closures(config);
+        let kit = dyn_module.closures(config);
         let body_ref = kit.declare_body(
-            &mut dm.mb,
+            &mut dyn_module.module_builder,
             "lam",
             BodyShape { fixed: 0, variadic: false, n_captures: 0 },
         );
-        let host_ref = dm.declare_func("host", 0);
-        let mut f = dm.start_func(host_ref);
+        let host_ref = dyn_module.declare_func("host", 0);
+        let mut f = dyn_module.start_func(host_ref);
         let _ = kit.make(
             &mut f.fb,
             MakeClosure {
@@ -1102,6 +1098,6 @@ mod tests {
             },
             &[],
         );
-        dm.finish_func(f);
+        dyn_module.finish_func(f);
     }
 }

@@ -64,16 +64,16 @@ pub struct Types {
     pub atom: ObjTypeId,
 }
 
-/// Declare all Clojure heap types on `dm`, returning their IDs.
+/// Declare all Clojure heap types on `dyn_module`, returning their IDs.
 ///
 /// Call this exactly once, before any function declarations. The
 /// returned [`Types`] struct must outlive the [`DynModule`].
-pub fn declare_types(dm: &mut DynModule) -> Types {
+pub fn declare_types(dyn_module: &mut DynModule) -> Types {
     // ── Symbol: immutable. ────────────────────────────────────────
     // `ns` is an Optional<String> represented as a String pointer or
     // nil. `name` is always a String pointer. Hash is cached for
     // map lookups (Clojure's PersistentHashMap relies on it heavily).
-    let symbol = dm
+    let symbol = dyn_module
         .obj_type("Symbol")
         .field("ns", FieldKind::Value)
         .field("name", FieldKind::Value)
@@ -84,14 +84,14 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
     // Backed by a Symbol (so `:foo` and `'foo` share the textual
     // representation but have distinct identity tags). All keywords
     // are interned via the registry-side keyword table.
-    let keyword = dm
+    let keyword = dyn_module
         .obj_type("Keyword")
         .field("sym", FieldKind::Value)
         .field("hash", FieldKind::Raw64)
         .build();
 
     // ── String: immutable bytes. ──────────────────────────────────
-    let string = dm
+    let string = dyn_module
         .obj_type("String")
         .field("hash", FieldKind::Raw64)
         .varlen_bytes()
@@ -99,7 +99,7 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
 
     // ── List (cons cell): immutable. ──────────────────────────────
     // `count` is precomputed so `count` on a list is O(1).
-    let list = dm
+    let list = dyn_module
         .obj_type("List")
         .field("first", FieldKind::Value)
         .field("rest", FieldKind::Value)
@@ -110,7 +110,7 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
     // Stored as a tree of Value-array nodes; the count and shift live
     // in the root. The varlen-values storage holds either child
     // pointers (interior) or values (leaf).
-    let vector = dm
+    let vector = dyn_module
         .obj_type("Vector")
         .field("count", FieldKind::Raw64)
         .field("shift", FieldKind::Raw64)
@@ -124,7 +124,7 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
     // and the reader's transient Vector storage — same layout, same
     // type-id. core.clj treats it as the primitive backing store for
     // its PersistentVector / PersistentHashMap implementations.
-    let array = dm
+    let array = dyn_module
         .obj_type("Array")
         .varlen_values()
         .build();
@@ -132,13 +132,13 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
     // ── Map: v1 is a flat array of [k0, v0, k1, v1, …] entries.
     // `count` stores the entry count (= varlen_count / 2). HAMT
     // replaces this layout once user-facing {} literals demand it.
-    let map = dm
+    let map = dyn_module
         .obj_type("Map")
         .field("count", FieldKind::Raw64)
         .varlen_values()
         .build();
 
-    let set = dm
+    let set = dyn_module
         .obj_type("Set")
         .field("backing", FieldKind::Value)
         .build();
@@ -147,7 +147,7 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
     // `func_ref` stores the FuncRef as a Raw64 (it's a u32, but kept
     // 64-bit aligned for simplicity). The varlen-values section
     // captures the closure's environment.
-    let fn_obj = dm
+    let fn_obj = dyn_module
         .obj_type("Fn")
         .field("func_ref", FieldKind::Raw64)
         .field("arity", FieldKind::Raw64)
@@ -160,7 +160,7 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
     // boolean attributes (:dynamic, :macro, :private, :bound) into
     // a Raw64 — these are effectively set-once at `def` time, so
     // non-atomic Raw64 access is acceptable.
-    let var = dm
+    let var = dyn_module
         .obj_type("Var")
         .field("ns", FieldKind::Value)
         .field("sym", FieldKind::Value)
@@ -174,7 +174,7 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
     // updated pointer-to-persistent-map. `version` bumps on every
     // mappings/aliases mutation; the Property IC uses it to
     // invalidate cached var resolutions.
-    let namespace = dm
+    let namespace = dyn_module
         .obj_type("Namespace")
         .field("name", FieldKind::Value)
         .field("mappings", FieldKind::Value)
@@ -185,20 +185,20 @@ pub fn declare_types(dm: &mut DynModule) -> Types {
 
     // ── Registry: singleton, holds the global namespace table. ────
     // CAS-updated on `create-ns` / `remove-ns`.
-    let registry = dm
+    let registry = dyn_module
         .obj_type("Registry")
         .field("namespaces", FieldKind::Value)
         .build();
 
     // ── Record: backing storage for all user `deftype*` instances.
-    let record = dm
+    let record = dyn_module
         .obj_type("Record")
         .field("type_name", FieldKind::Value)
         .varlen_values()
         .build();
 
     // ── Atom.
-    let atom = dm
+    let atom = dyn_module
         .obj_type("Atom")
         .field("val", FieldKind::Value)
         .build();
@@ -299,20 +299,20 @@ impl Layouts {
     /// clear message if any field is missing or has the wrong kind —
     /// surfacing a `declare_types` typo immediately rather than at the
     /// first runtime field access.
-    pub fn from_module(dm: &DynModule, t: &Types) -> Self {
-        let str_t = dm.get_obj_type(t.string);
-        let kw_t = dm.get_obj_type(t.keyword);
-        let list_t = dm.get_obj_type(t.list);
-        let vec_t = dm.get_obj_type(t.vector);
-        let set_t = dm.get_obj_type(t.set);
-        let atom_t = dm.get_obj_type(t.atom);
-        let map_t = dm.get_obj_type(t.map);
-        let array_t = dm.get_obj_type(t.array);
-        let rec_t = dm.get_obj_type(t.record);
-        let fn_t = dm.get_obj_type(t.fn_obj);
-        let var_t = dm.get_obj_type(t.var);
-        let ns_t = dm.get_obj_type(t.namespace);
-        let reg_t = dm.get_obj_type(t.registry);
+    pub fn from_module(dyn_module: &DynModule, t: &Types) -> Self {
+        let str_t = dyn_module.get_obj_type(t.string);
+        let kw_t = dyn_module.get_obj_type(t.keyword);
+        let list_t = dyn_module.get_obj_type(t.list);
+        let vec_t = dyn_module.get_obj_type(t.vector);
+        let set_t = dyn_module.get_obj_type(t.set);
+        let atom_t = dyn_module.get_obj_type(t.atom);
+        let map_t = dyn_module.get_obj_type(t.map);
+        let array_t = dyn_module.get_obj_type(t.array);
+        let rec_t = dyn_module.get_obj_type(t.record);
+        let fn_t = dyn_module.get_obj_type(t.fn_obj);
+        let var_t = dyn_module.get_obj_type(t.var);
+        let ns_t = dyn_module.get_obj_type(t.namespace);
+        let reg_t = dyn_module.get_obj_type(t.registry);
 
         Layouts {
             // String: hash (Raw64) then varlen_bytes. The first byte

@@ -11,7 +11,7 @@
 //!
 //! ## Usage
 //! ```ignore
-//! let seq = IndexedSeq::register(&mut dm, "Array");
+//! let seq = IndexedSeq::register(&mut dyn_module, "Array");
 //!
 //! // During lowering:
 //! let v = seq.emit_literal(f, &[a, b, c]);    // [a, b, c]
@@ -52,16 +52,16 @@ pub struct IndexedSeq {
 }
 
 impl IndexedSeq {
-    /// Register an indexed-sequence obj type on `dm`. The `name` is
-    /// user-visible only in obj-type-table dumps — the language-level
+    /// Register an indexed-sequence obj type on `dyn_module`. The `name`
+    /// is user-visible only in obj-type-table dumps — the language-level
     /// name is whatever the embedder calls it.
-    pub fn register(dm: &mut DynModule, name: &str) -> Self {
-        let type_id = dm
+    pub fn register(dyn_module: &mut DynModule, name: &str) -> Self {
+        let type_id = dyn_module
             .obj_type(name)
             .field("len", FieldKind::Raw64)
             .varlen_values()
             .build();
-        let ty = dm.get_obj_type(type_id);
+        let ty = dyn_module.get_obj_type(type_id);
         let len_offset = ty
             .field_offsets
             .get("len")
@@ -69,7 +69,7 @@ impl IndexedSeq {
             .expect("IndexedSeq must have len field");
         let elem_base = ty.type_info.varlen_element_offset(0) as i64;
         let type_id_u16 = ty.type_info.type_id;
-        let ptr_tag = dm.tags().ptr;
+        let ptr_tag = dyn_module.tags().ptr;
         IndexedSeq {
             type_id,
             len_offset,
@@ -275,9 +275,9 @@ mod tests {
 
     #[test]
     fn register_captures_layout() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let seq = IndexedSeq::register(&mut dm, "Array");
-        let ty = dm.get_obj_type(seq.type_id());
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let seq = IndexedSeq::register(&mut dyn_module, "Array");
+        let ty = dyn_module.get_obj_type(seq.type_id());
         // type_id matches what the obj_types table assigned.
         assert_eq!(seq.type_id_u16, ty.type_info.type_id);
         // elem_base comes from dynobj's varlen_element_offset(0), which
@@ -288,13 +288,13 @@ mod tests {
             ty.type_info.varlen_element_offset(0)
         );
         // Ptr tag matches the module's NanBoxTags.
-        assert_eq!(seq.ptr_tag, dm.tags().ptr);
+        assert_eq!(seq.ptr_tag, dyn_module.tags().ptr);
     }
 
     #[test]
     fn view_rejects_non_pointer_nanbox() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let seq = IndexedSeq::register(&mut dm, "Array");
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let seq = IndexedSeq::register(&mut dyn_module, "Array");
         // A raw float NanBox shouldn't match.
         let f_bits = (1.5_f64).to_bits();
         assert!(seq.view(f_bits).is_none());
@@ -309,26 +309,26 @@ mod tests {
     /// returns the array's NanBox, then read it back via SeqView.
     #[test]
     fn emit_literal_then_view() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let seq = IndexedSeq::register(&mut dm, "Array");
-        let main = dm.declare_func("main", 0);
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let seq = IndexedSeq::register(&mut dyn_module, "Array");
+        let main = dyn_module.declare_func("main", 0);
 
-        let mut f = dm.start_func(main);
+        let mut f = dyn_module.start_func(main);
         let a = f.number(10.0);
         let b = f.number(20.0);
         let c = f.number(30.0);
         let arr = seq.emit_literal(&mut f, &[a, b, c]);
         f.fb.ret(arr);
-        dm.finish_func(f);
+        dyn_module.finish_func(f);
 
         // Need the GC runtime alive for the duration of the SeqView read
         // — the BumpAllocator owns the heap-backed memory.
         let gc = crate::gc::DynGcRuntime::new(
-            &GcConfig::leak(),
+            &GcConfig::generational(64 * 1024),
             &NanBoxTags::default(),
-            &dm.obj_types,
+            &dyn_module.obj_types,
         );
-        let built = dm.build();
+        let built = dyn_module.build();
 
         let roots = NoGcRoots;
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
@@ -350,23 +350,23 @@ mod tests {
     /// Build a function that returns `length(arr)` as a raw I64.
     #[test]
     fn emit_length_unboxed_returns_raw_i64() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let seq = IndexedSeq::register(&mut dm, "Array");
-        let main = dm.declare_func("main", 0);
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let seq = IndexedSeq::register(&mut dyn_module, "Array");
+        let main = dyn_module.declare_func("main", 0);
 
-        let mut f = dm.start_func(main);
+        let mut f = dyn_module.start_func(main);
         let elems: Vec<Value> = (0..5).map(|i| f.number(i as f64)).collect();
         let arr = seq.emit_literal(&mut f, &elems);
         let len = seq.emit_length_unboxed(&mut f, arr);
         f.fb.ret(len);
-        dm.finish_func(f);
+        dyn_module.finish_func(f);
 
         let gc = crate::gc::DynGcRuntime::new(
-            &GcConfig::leak(),
+            &GcConfig::generational(64 * 1024),
             &NanBoxTags::default(),
-            &dm.obj_types,
+            &dyn_module.obj_types,
         );
-        let built = dm.build();
+        let built = dyn_module.build();
 
         let roots = NoGcRoots;
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
@@ -382,11 +382,11 @@ mod tests {
     /// Build a function that does `arr[1]` and returns the element.
     #[test]
     fn emit_get_returns_element_at_index() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let seq = IndexedSeq::register(&mut dm, "Array");
-        let main = dm.declare_func("main", 0);
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let seq = IndexedSeq::register(&mut dyn_module, "Array");
+        let main = dyn_module.declare_func("main", 0);
 
-        let mut f = dm.start_func(main);
+        let mut f = dyn_module.start_func(main);
         let a = f.number(11.0);
         let b = f.number(22.0);
         let c = f.number(33.0);
@@ -395,14 +395,14 @@ mod tests {
         let idx = f.number(1.0);
         let elem = seq.emit_get(&mut f, arr, idx);
         f.fb.ret(elem);
-        dm.finish_func(f);
+        dyn_module.finish_func(f);
 
         let gc = crate::gc::DynGcRuntime::new(
-            &GcConfig::leak(),
+            &GcConfig::generational(64 * 1024),
             &NanBoxTags::default(),
-            &dm.obj_types,
+            &dyn_module.obj_types,
         );
-        let built = dm.build();
+        let built = dyn_module.build();
 
         let roots = NoGcRoots;
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
@@ -419,11 +419,11 @@ mod tests {
     /// `length(pushed)` — should be 3.
     #[test]
     fn emit_push_extends_by_one() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let seq = IndexedSeq::register(&mut dm, "Array");
-        let main = dm.declare_func("main", 0);
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let seq = IndexedSeq::register(&mut dyn_module, "Array");
+        let main = dyn_module.declare_func("main", 0);
 
-        let mut f = dm.start_func(main);
+        let mut f = dyn_module.start_func(main);
         let a = f.number(7.0);
         let b = f.number(8.0);
         let arr = seq.emit_literal(&mut f, &[a, b]);
@@ -431,14 +431,14 @@ mod tests {
         let pushed = seq.emit_push(&mut f, arr, v);
         let len = seq.emit_length_unboxed(&mut f, pushed);
         f.fb.ret(len);
-        dm.finish_func(f);
+        dyn_module.finish_func(f);
 
         let gc = crate::gc::DynGcRuntime::new(
-            &GcConfig::leak(),
+            &GcConfig::generational(64 * 1024),
             &NanBoxTags::default(),
-            &dm.obj_types,
+            &dyn_module.obj_types,
         );
-        let built = dm.build();
+        let built = dyn_module.build();
 
         let roots = NoGcRoots;
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);

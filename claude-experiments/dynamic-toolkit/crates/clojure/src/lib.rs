@@ -23,7 +23,6 @@ use std::collections::HashMap;
 use std::sync::{Mutex, RwLock};
 
 use dynexec::NanBoxConfig;
-use dynir::builder::ModuleBuilder;
 use dynir::ir::FuncRef;
 use dynir::types::{Signature, Type};
 use dynlang::closure::{
@@ -45,14 +44,14 @@ const JIT_LITERAL_POOL_CAPACITY: usize = 64 * 1024;
 const HEAP_SIZE: usize = 64 * 1024 * 1024;
 
 pub struct Engine {
-    /// dynlang module — used to look up obj_types, externs, slow paths.
-    /// Kept alive because the GC's type table aliases its `obj_types`.
-    pub dm: DynModule,
     /// First-class function-value primitive. Built atop `types.fn_obj`
     /// (the existing `Fn` heap shape) using `DynModule::closures_for`.
     /// Used by every closure-related IR site to emit the allocation,
     /// body prologue, and indirect-call sequences.
     pub closures: ClosureKit,
+    /// Pre-resolved FuncRefs for every runtime extern the lowering
+    /// pipeline calls by name. Stable for the engine's lifetime.
+    pub externs: compile::Externs,
     /// Compile-time mutable state. Locked during compile (a brief
     /// section before extend); released so `call_compiled` running
     /// concurrently isn't blocked on it.
@@ -82,10 +81,23 @@ pub struct Engine {
 /// pass. Doesn't include the JitModule itself — that lives in its
 /// own `RwLock` so concurrent runs aren't blocked.
 struct CompileState {
-    mb: ModuleBuilder,
+    /// The `DynModule` owns the toolkit-side state (obj types, NanBox
+    /// tags, GC config) and the inner `ModuleBuilder` that every
+    /// compile pass mutates. Lives behind the same `Mutex` as the
+    /// other compile-pass mutables; post-init reads of obj_types from
+    /// outside the lock would require an accessor (today, nothing
+    /// reads them post-init — the GC copies what it needs at
+    /// startup).
+    dyn_module: DynModule,
     func_refs: HashMap<String, compile::FnEntry>,
     /// Externs in declaration order. Mutated only at startup.
-    externs: Vec<*const u8>,
+    /// Raw C function pointers for every extern declared on
+    /// `dyn_module.module_builder`, in declaration order. Passed to
+    /// `JitModule::extend` so the JIT can fill its call-table slots
+    /// with the right pointers. Distinct from `Engine.externs`, which
+    /// is the typed FuncRef registry compile-side code looks up by
+    /// field name.
+    extern_ptrs: Vec<*const u8>,
     anon_counter: u32,
     /// Compile-time mirror of the runtime `deftype_fields` map:
     /// `type-name sym → field-name syms in declaration order`.
@@ -118,18 +130,18 @@ unsafe impl Sync for Engine {}
 impl Engine {
     pub fn new() -> Self {
         // Set up the dynlang module FIRST and declare all heap types
-        // on it. The GC's type table aliases dm.obj_types.
+        // on it. The GC's type table aliases dyn_module.obj_types.
         let gc_config = GcConfig::generational(HEAP_SIZE);
         let tags = NanBoxTags::default();
-        let mut dm = DynModule::new(gc_config.clone(), tags.clone());
-        let types = declare_types(&mut dm);
+        let mut dyn_module = DynModule::new(gc_config.clone(), tags.clone());
+        let types = declare_types(&mut dyn_module);
         // Resolve every field offset from the dynlang ObjType
         // registry. Single source of truth for the heap field layout —
         // see `Layouts` for the rationale.
-        let layouts = Layouts::from_module(&dm, &types);
+        let layouts = Layouts::from_module(&dyn_module, &types);
 
         // GC runtime: needs obj_types to scan heap objects correctly.
-        let gc = Box::new(DynGcRuntime::new(&gc_config, &tags, &dm.obj_types));
+        let gc = Box::new(DynGcRuntime::new(&gc_config, &tags, &dyn_module.obj_types));
         let gc_ptr: *const DynGcRuntime = &*gc;
 
         // JitModule. ControlAware so we can later add macros without
@@ -156,48 +168,61 @@ impl Engine {
         globals.add(value::NIL);
         globals.add(value::NIL);
 
-        // Declare every primitive on the ModuleBuilder. Each gets a
-        // FuncRef that the compiler looks up by source name when it
-        // sees `(name args...)`. The extern pointers go into `externs`
-        // in the same order as their FuncRef's table-index — the
-        // JitModule reads this slice when filling call-table slots.
-        let mut mb = ModuleBuilder::new();
+        // Declare every primitive on `dyn_module`'s underlying
+        // `ModuleBuilder` — the same one the toolkit auto-registered
+        // `__gc_alloc__` into when the first obj_type was declared
+        // above. Single FuncRef table; no parallel-builder shenanigans.
+        //
+        // The JIT's `extend` walks the snapshot's func_table in order,
+        // increments an extern counter per `FuncDef::Extern` slot, and
+        // indexes into `externs[]` with that counter. So `externs` must
+        // mirror the declaration order of externs on
+        // `dyn_module.module_builder`:
+        //
+        //   FuncRef 0 → __gc_alloc__ (auto-registered by `declare_types`
+        //                via the first `obj_type` call) → gc_alloc_thunk
+        //   FuncRef 1.. → Clojure prims in `all_prims()` order
+        //                 → prim.ptr in matching order
+        //
+        // If anyone ever adds another auto-registered extern to
+        // DynModule that lands between obj_type declarations and the
+        // prim loop, this invariant breaks and JIT calls will jump to
+        // the wrong function pointer. Guard with the assertion at the
+        // end of this block.
         let mut func_refs: HashMap<String, compile::FnEntry> = HashMap::new();
-        let mut externs: Vec<*const u8> = Vec::new();
+        let mut extern_ptrs: Vec<*const u8> = vec![dynlang::gc::gc_alloc_thunk as *const u8];
         for prim in externs::all_prims() {
             let sig = Signature {
                 params: vec![Type::I64; prim.arity],
                 ret: Some(Type::I64),
             };
-            let fref = mb.declare_extern(prim.name, sig);
+            let fref = dyn_module.module_builder.declare_extern(prim.name, sig);
             func_refs.insert(
                 prim.name.to_string(),
                 compile::FnEntry::Extern { fref, arity: prim.arity },
             );
-            externs.push(prim.ptr);
+            extern_ptrs.push(prim.ptr);
         }
 
-        // Register `__gc_alloc__` on the COMPILER's `mb` so JIT code can
-        // call it. The toolkit's `DynModule` auto-registers this extern
-        // on its own `mb` when the first obj_type is declared, but that
-        // FuncRef indexes into a different table than the one Clojure
-        // compiles through — `ClosureKit::make` needs a FuncRef valid
-        // in OUR table, so we declare a parallel entry here.
-        // Signature mirrors dynlang's: (type_id, varlen_len) -> GcPtr.
-        let gc_alloc_fref = mb.declare_extern(
-            dynlang::gc::GC_ALLOC_EXTERN,
-            Signature {
-                params: vec![Type::I64, Type::I64],
-                ret: Some(Type::GcPtr),
-            },
+        // Invariant check: extern table on `dyn_module.module_builder`
+        // matches `externs[]` in length (auto-registered __gc_alloc__ +
+        // every prim). If this fails, something declared an extern
+        // somewhere this code path doesn't see and the externs vec
+        // ordering will be wrong at JIT time.
+        debug_assert_eq!(
+            extern_ptrs.len(),
+            dyn_module.module_builder.func_count(),
+            "extern_ptrs vec out of sync with dyn_module's FuncRef table"
         );
-        externs.push(dynlang::gc::gc_alloc_thunk as *const u8);
+
+        // Resolve the typed extern registry once all prims are declared.
+        // Used by every lowering site that calls a runtime extern.
+        let externs = compile::Externs::resolve(&func_refs);
 
         // Build the ClosureKit on top of the already-declared `Fn`
-        // type. This adopts the existing layout (so namespace.rs's
-        // runtime allocators stay valid) and provides the IR-emitting
-        // half: body declaration, prologue, alloc, indirect call,
-        // multi-arity dispatch.
+        // type. The kit uses `dyn_module`'s auto-detected
+        // `__gc_alloc__` FuncRef — no override needed now that we
+        // share a single builder.
         let closures = {
             let lookup = |name: &str| match func_refs.get(name) {
                 Some(compile::FnEntry::Extern { fref, .. }) => *fref,
@@ -225,22 +250,16 @@ impl Engine {
                 call_conv: CallConv::ArgsList { readers },
                 extra_fields: Vec::new(),
             };
-            dm.closures_for(
-                types.fn_obj,
-                config,
-                "func_ref",
-                "arity",
-                Some(gc_alloc_fref),
-            )
+            dyn_module.closures_for(types.fn_obj, config, "func_ref", "arity")
         };
 
         let mut engine = Engine {
-            dm,
             closures,
+            externs,
             compile: Mutex::new(CompileState {
-                mb,
+                dyn_module,
                 func_refs,
-                externs,
+                extern_ptrs,
                 anon_counter: 0,
                 deftype_fields: HashMap::new(),
             }),
@@ -566,9 +585,9 @@ impl Engine {
             let result = {
                 let mut compile = self.compile.lock().expect("compile poisoned");
                 let CompileState {
-                    mb,
+                    dyn_module,
                     func_refs,
-                    externs,
+                    extern_ptrs,
                     anon_counter,
                     deftype_fields,
                 } = &mut *compile;
@@ -580,8 +599,9 @@ impl Engine {
                     // helpers) and those JIT bodies may need the sym
                     // table; holding the lock across them deadlocks.
                     let mut compiler = compile::Compiler {
-                        mb,
+                        dyn_module,
                         func_refs,
+                        externs: &self.externs,
                         sym: &self.host.sym,
                         anon_counter,
                         literal_pool: jit.literal_pool(),
@@ -594,12 +614,12 @@ impl Engine {
                     };
                     compiler.compile_top(expanded)
                 };
-                let snap = mb.snapshot();
+                let snap = dyn_module.snapshot();
                 jit.extend::<
                     NanBoxConfig,
                     dynlower::Arm64Backend,
                     dynlower::regalloc::LinearScanAllocator,
-                >(&snap, externs);
+                >(&snap, extern_ptrs);
                 result
             };
 

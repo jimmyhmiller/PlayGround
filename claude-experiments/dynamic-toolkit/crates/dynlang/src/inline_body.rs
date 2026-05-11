@@ -38,7 +38,7 @@
 //! let (mut inner_fb, captures, extras) = body.open(mb);
 //!
 //! // 3. Lower the body using the FunctionBuilder. The caller is free
-//! //    to use `self` (and `self.mb`) recursively here — no borrow is
+//! //    to use `self` (and `self.module_builder`) recursively here — no borrow is
 //! //    held by InlineBody during this phase.
 //! let result = self.lower_do(&mut inner_fb, &mut inner_env, body_forms);
 //! inner_fb.ret(result);
@@ -78,7 +78,7 @@ impl InlineBody {
     ///
     /// Returns a handle. Open the body with [`InlineBody::open`].
     pub fn declare(
-        mb: &mut ModuleBuilder,
+        module_builder: &mut ModuleBuilder,
         name: &str,
         n_captures: usize,
         n_extras: usize,
@@ -86,7 +86,7 @@ impl InlineBody {
         let total = n_captures + n_extras;
         let params: Vec<Type> = vec![Type::I64; total];
         let sig = Signature { params: params.clone(), ret: Some(Type::I64) };
-        let fref = mb.declare_func(name, &params, Some(Type::I64));
+        let fref = module_builder.declare_func(name, &params, Some(Type::I64));
         InlineBody {
             fref,
             n_captures,
@@ -104,8 +104,8 @@ impl InlineBody {
     /// After the caller has emitted the body and terminated with
     /// `fb.ret(...)` (or `fb.unreachable()`), call [`InlineBody::finish`]
     /// to install it back into the module.
-    pub fn open(&self, mb: &ModuleBuilder) -> (FunctionBuilder, Vec<Value>, Vec<Value>) {
-        let fb = mb.define_func(self.fref);
+    pub fn open(&self, module_builder: &ModuleBuilder) -> (FunctionBuilder, Vec<Value>, Vec<Value>) {
+        let fb = module_builder.define_func(self.fref);
         let entry = fb.entry_block();
         let captures: Vec<Value> = (0..self.n_captures)
             .map(|i| fb.block_param(entry, i))
@@ -119,8 +119,8 @@ impl InlineBody {
     /// Install a body that was opened via [`InlineBody::open`]. The
     /// caller is responsible for having terminated every block in
     /// `fb` (e.g. with `fb.ret`).
-    pub fn finish(&self, mb: &mut ModuleBuilder, fb: FunctionBuilder) {
-        mb.finish_func(self.fref, fb);
+    pub fn finish(&self, module_builder: &mut ModuleBuilder, fb: FunctionBuilder) {
+        module_builder.finish_func(self.fref, fb);
     }
 
     /// Emit `fb.invoke` of this body at `fb`'s current insertion point.
@@ -211,7 +211,7 @@ impl DynModule {
         n_captures: usize,
         n_extras: usize,
     ) -> InlineBody {
-        InlineBody::declare(&mut self.mb, name, n_captures, n_extras)
+        InlineBody::declare(&mut self.module_builder, name, n_captures, n_extras)
     }
 }
 
@@ -226,46 +226,46 @@ mod tests {
 
     #[test]
     fn declare_then_open_returns_block_params() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let body = dm.inline_body("helper", 2, 1);
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let body = dyn_module.inline_body("helper", 2, 1);
         assert_eq!(body.n_captures, 2);
         assert_eq!(body.n_extras, 1);
 
-        let (mut fb, captures, extras) = body.open(&dm.mb);
+        let (mut fb, captures, extras) = body.open(&dyn_module.module_builder);
         assert_eq!(captures.len(), 2);
         assert_eq!(extras.len(), 1);
         // Use them to keep things real — sum captures + extra and ret.
         let sum1 = fb.add(captures[0], captures[1]);
         let sum2 = fb.add(sum1, extras[0]);
         fb.ret(sum2);
-        body.finish(&mut dm.mb, fb);
+        body.finish(&mut dyn_module.module_builder, fb);
     }
 
     #[test]
     fn zero_captures_zero_extras_is_just_a_thunk() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let body = dm.inline_body("thunk", 0, 0);
-        let (mut fb, captures, extras) = body.open(&dm.mb);
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let body = dyn_module.inline_body("thunk", 0, 0);
+        let (mut fb, captures, extras) = body.open(&dyn_module.module_builder);
         assert!(captures.is_empty());
         assert!(extras.is_empty());
         let nil = fb.iconst(Type::I64, 0);
         fb.ret(nil);
-        body.finish(&mut dm.mb, fb);
+        body.finish(&mut dyn_module.module_builder, fb);
     }
 
     #[test]
     #[should_panic(expected = "expected 2 captures, got 1")]
     fn invoke_with_wrong_capture_count_panics() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let body = dm.inline_body("helper", 2, 0);
-        let (mut bfb, _, _) = body.open(&dm.mb);
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let body = dyn_module.inline_body("helper", 2, 0);
+        let (mut bfb, _, _) = body.open(&dyn_module.module_builder);
         let nil = bfb.iconst(Type::I64, 0);
         bfb.ret(nil);
-        body.finish(&mut dm.mb, bfb);
+        body.finish(&mut dyn_module.module_builder, bfb);
 
         // Outer fn that invokes it with wrong arity:
-        let outer = dm.declare_func("outer", 0);
-        let mut fb = dm.start_func(outer);
+        let outer = dyn_module.declare_func("outer", 0);
+        let mut fb = dyn_module.start_func(outer);
         let v = fb.fb.iconst(Type::I64, 0);
         let normal_bb = fb.fb.create_block(&[Type::I64]);
         let exc_bb = fb.fb.create_block(&[Type::I64]);
@@ -277,14 +277,14 @@ mod tests {
         // We can't easily inspect the emitted IR without going through
         // the verifier, but we can at least exercise the API end-to-end
         // and trust the builder's own validation.
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        let body = dm.inline_body("helper", 1, 0);
-        let (mut bfb, caps, _) = body.open(&dm.mb);
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let body = dyn_module.inline_body("helper", 1, 0);
+        let (mut bfb, caps, _) = body.open(&dyn_module.module_builder);
         bfb.ret(caps[0]);
-        body.finish(&mut dm.mb, bfb);
+        body.finish(&mut dyn_module.module_builder, bfb);
 
-        let outer = dm.declare_func("outer", 1);
-        let mut fb = dm.start_func(outer);
+        let outer = dyn_module.declare_func("outer", 1);
+        let mut fb = dyn_module.start_func(outer);
         let arg0 = fb.fb.block_param(fb.fb.entry_block(), 0);
         let normal_bb = fb.fb.create_block(&[Type::I64]);
         let exc_bb = fb.fb.create_block(&[Type::I64]);
@@ -296,6 +296,6 @@ mod tests {
         fb.fb.ret(n);
         fb.fb.switch_to_block(exc_bb);
         fb.fb.unreachable();
-        dm.finish_func(fb);
+        dyn_module.finish_func(fb);
     }
 }

@@ -52,18 +52,18 @@ mod tests {
 
     #[test]
     fn register_with_defaults_populates_auto_externs() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        dm.register_slow_paths_with_defaults("rt");
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        dyn_module.register_slow_paths_with_defaults("rt");
 
         for op in [
             "rt_add", "rt_sub", "rt_mul", "rt_div", "rt_eq", "rt_lt", "rt_gt", "rt_neg", "rt_not",
         ] {
             assert!(
-                dm.auto_externs.contains_key(op),
+                dyn_module.auto_externs.contains_key(op),
                 "auto_externs missing `{op}`"
             );
         }
-        assert_eq!(dm.auto_externs.len(), 9);
+        assert_eq!(dyn_module.auto_externs.len(), 9);
     }
 
     #[test]
@@ -72,17 +72,17 @@ mod tests {
             0xDEADBEEF
         }
 
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        dm.register_slow_paths_with_defaults("rt");
-        let default_add = dm.auto_externs["rt_add"];
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        dyn_module.register_slow_paths_with_defaults("rt");
+        let default_add = dyn_module.auto_externs["rt_add"];
 
-        dm.override_extern("rt_add", my_add as *const u8);
-        let new_add = dm.auto_externs["rt_add"];
+        dyn_module.override_extern("rt_add", my_add as *const u8);
+        let new_add = dyn_module.auto_externs["rt_add"];
 
         assert_ne!(default_add, new_add);
         assert_eq!(new_add, my_add as *const u8);
         // Other entries unchanged.
-        assert_ne!(dm.auto_externs["rt_sub"], my_add as *const u8);
+        assert_ne!(dyn_module.auto_externs["rt_sub"], my_add as *const u8);
     }
 
     // Note: panic_add / panic_neg etc. are `extern "C" fn` and abort on
@@ -92,8 +92,8 @@ mod tests {
 
     #[test]
     fn register_without_defaults_leaves_auto_externs_empty() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
-        dm.register_slow_paths("rt"); // declare-only form
-        assert!(dm.auto_externs.is_empty());
+        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        dyn_module.register_slow_paths("rt"); // declare-only form
+        assert!(dyn_module.auto_externs.is_empty());
     }
 }

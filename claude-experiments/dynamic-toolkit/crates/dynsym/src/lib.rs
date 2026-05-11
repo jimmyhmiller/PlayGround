@@ -287,13 +287,39 @@ impl InlineCacheEntry {
 /// Allocated once per module, indexed by cache_id from the IR.
 pub struct InlineCacheArray {
     entries: Vec<InlineCacheEntry>,
+    /// True when `cached_value` slots may hold NanBox heap pointers
+    /// (e.g., method-dispatch ICs that cache fn_obj). False for caches
+    /// of offsets / immediates (property ICs). Used by GC integration
+    /// to decide whether to scan `cached_value` slots as roots.
+    value_is_ptr: bool,
 }
 
 impl InlineCacheArray {
+    /// Create an IC array whose `cached_value` slots hold offsets or
+    /// other GC-invariant integers. The GC will NOT scan these slots.
     pub fn new(num_sites: usize) -> Self {
         InlineCacheArray {
             entries: vec![InlineCacheEntry::EMPTY; num_sites],
+            value_is_ptr: false,
         }
+    }
+
+    /// Create an IC array whose `cached_value` slots MAY hold NanBox
+    /// heap pointers. Callers must register the array as a GC root
+    /// source so the moving GC can update cached pointers post-collection.
+    /// Slot-level tag inspection in the scanner safely handles mixed
+    /// pointer/immediate entries.
+    pub fn new_with_pointer_values(num_sites: usize) -> Self {
+        InlineCacheArray {
+            entries: vec![InlineCacheEntry::EMPTY; num_sites],
+            value_is_ptr: true,
+        }
+    }
+
+    /// True iff `cached_value` slots in this array may hold heap pointers.
+    #[inline(always)]
+    pub fn value_is_ptr(&self) -> bool {
+        self.value_is_ptr
     }
 
     /// Base pointer for JIT code to index into.
@@ -329,6 +355,42 @@ impl InlineCacheArray {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Iterate `*mut u64` addresses of `cached_value` slots. Used by GC
+    /// root scanners; returns an empty iterator when `!value_is_ptr` so
+    /// callers can iterate unconditionally.
+    ///
+    /// The pointers alias slots inside `self`; callers must not hold
+    /// them across operations that could grow or drop the array.
+    pub fn cached_value_slots(&self) -> CachedValueSlots<'_> {
+        CachedValueSlots {
+            entries: if self.value_is_ptr { &self.entries[..] } else { &[] },
+            i: 0,
+        }
+    }
+}
+
+/// Iterator over `*mut u64` slot addresses for `cached_value` fields.
+/// See [`InlineCacheArray::cached_value_slots`].
+pub struct CachedValueSlots<'a> {
+    entries: &'a [InlineCacheEntry],
+    i: usize,
+}
+
+impl<'a> Iterator for CachedValueSlots<'a> {
+    type Item = *mut u64;
+    fn next(&mut self) -> Option<*mut u64> {
+        if self.i >= self.entries.len() {
+            return None;
+        }
+        // SAFETY: pointer aliases an element of `entries`; we hand out
+        // *mut u64 because the GC root-scan API mutates slots in place
+        // under STW (no concurrent readers). The slot type matches: the
+        // field is `cached_value: u64`.
+        let p = &self.entries[self.i].cached_value as *const u64 as *mut u64;
+        self.i += 1;
+        Some(p)
     }
 }
 
@@ -407,5 +469,45 @@ mod tests {
 
         cache.invalidate_all();
         assert!(cache.get(2).is_empty());
+    }
+
+    #[test]
+    fn cached_value_slots_empty_when_offsets() {
+        // Offset-caching IC (default constructor) must yield no slots.
+        let cache = InlineCacheArray::new(4);
+        assert!(!cache.value_is_ptr());
+        assert_eq!(cache.cached_value_slots().count(), 0);
+    }
+
+    #[test]
+    fn cached_value_slots_visits_each_entry_when_pointer_values() {
+        let mut cache = InlineCacheArray::new_with_pointer_values(3);
+        assert!(cache.value_is_ptr());
+        // Seed each cached_value with a distinguishable u64 so we can
+        // verify the iterator yields the right addresses in order.
+        cache.get_mut(0).cached_value = 0xAAAA;
+        cache.get_mut(1).cached_value = 0xBBBB;
+        cache.get_mut(2).cached_value = 0xCCCC;
+
+        let mut seen = Vec::new();
+        for slot in cache.cached_value_slots() {
+            seen.push(unsafe { *slot });
+        }
+        assert_eq!(seen, vec![0xAAAA, 0xBBBB, 0xCCCC]);
+    }
+
+    #[test]
+    fn cached_value_slot_writes_propagate() {
+        // The slot pointers must alias the actual entries so a GC
+        // forwarding-update writes back into the array.
+        let mut cache = InlineCacheArray::new_with_pointer_values(2);
+        cache.get_mut(0).cached_value = 0x1111;
+        cache.get_mut(1).cached_value = 0x2222;
+
+        for slot in cache.cached_value_slots() {
+            unsafe { *slot += 1 };
+        }
+        assert_eq!(cache.get(0).cached_value, 0x1112);
+        assert_eq!(cache.get(1).cached_value, 0x2223);
     }
 }

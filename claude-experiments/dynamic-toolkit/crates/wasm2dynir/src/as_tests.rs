@@ -1,8 +1,10 @@
 use crate::translate_wasm;
+use dynalloc::NanBoxPtrPolicy;
+use dynir::gc_runtime::GcInterpCtx;
 use dynir::interp::*;
 use dynir::ir::Module;
 use dynir::verify::verify;
-use dynir::NoGcRoots;
+use dynobj::Compact;
 use dynvalue::NanBox;
 
 fn run_wasm_file_i32(wasm_bytes: &[u8], args: &[u64]) -> i32 {
@@ -12,7 +14,7 @@ fn run_wasm_file_i32(wasm_bytes: &[u8], args: &[u64]) -> i32 {
         panic!("IR verification failed: {:?}", errors);
     });
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, NanBoxPtrPolicy> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v as i32,
@@ -27,7 +29,7 @@ fn run_wasm_file_i64(wasm_bytes: &[u8], args: &[u64]) -> i64 {
         panic!("IR verification failed: {:?}", errors);
     });
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, NanBoxPtrPolicy> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v as i64,

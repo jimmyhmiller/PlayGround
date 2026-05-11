@@ -2,6 +2,7 @@ mod alloc;
 mod barrier;
 pub mod card_table;
 mod mutator;
+mod ptr_policy;
 mod semi_space;
 
 mod heap;
@@ -13,6 +14,7 @@ pub use barrier::{SATBBuffer, SATBQueue, read_barrier, read_barrier_atomic};
 pub use card_table::CardTable;
 pub use heap::Heap;
 pub use mutator::{GcRef, Mutator, Root, RootScope};
+pub use ptr_policy::{LowBitPtrPolicy, NanBoxPtrPolicy};
 pub use semi_space::{FORWARDING_BIT, PtrPolicy, SemiSpace, follow_forwarding};
 pub use statemap::StatemapTracer;
 pub use thread::{MutatorThread, ThreadState};

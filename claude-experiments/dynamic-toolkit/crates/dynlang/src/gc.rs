@@ -12,7 +12,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
-use dynalloc::{BumpAllocator, Heap, MutatorThread, PtrPolicy, ThreadState, alloc_obj};
+use dynalloc::{Heap, MutatorThread, PtrPolicy, ThreadState};
 use std::sync::Arc;
 use dynir::interp::ExternCallResult;
 use dynir::{FuncDef, FuncRef, Module};
@@ -155,9 +155,11 @@ impl RootSource for RootSet {
 
 // ── Backend ───────────────────────────────────────────────────────
 
+/// Wraps the underlying allocator. Single variant today — the
+/// generational `dynalloc::Heap` — kept as an enum so future
+/// allocator strategies can be added without touching the public
+/// `GcConfig` shape.
 enum Backend {
-    /// Bump allocator, never collects. Zero overhead.
-    Leak(BumpAllocator),
     /// Generational, thread-aware, concurrent-capable `Heap`.
     /// Stored behind `Arc` so each `MutatorThread` can hold a clone
     /// for the lifetime of its registration.
@@ -200,7 +202,6 @@ impl DynGcRuntime {
         let type_infos: Vec<TypeInfo> = obj_types.iter().map(|t| *t.type_info).collect();
 
         let backend = match config {
-            GcConfig::Leak => Backend::Leak(BumpAllocator::new::<Compact>(64 * 1024 * 1024)),
             GcConfig::Generational { heap_size, nursery_size } => {
                 let heap = match nursery_size {
                     Some(nsize) => Heap::new_generational::<Compact>(*nsize, *heap_size, type_infos.clone()),
@@ -313,7 +314,6 @@ impl DynGcRuntime {
     pub fn alloc(&self, type_id: usize, varlen_len: usize) -> *mut u8 {
         let info = &self.type_infos[type_id];
         match &self.backend {
-            Backend::Leak(bump) => unsafe { alloc_obj::<Compact>(bump, info, varlen_len) },
             Backend::Generational(_) => {
                 // Route through the per-thread MutatorThread. This is
                 // critical for multi-thread safety: the MutatorThread's
@@ -367,18 +367,15 @@ impl DynGcRuntime {
     }
 
     /// Number of collections performed by the underlying heap so far.
-    /// Always 0 for `Leak`. Useful for tests and diagnostics.
     pub fn collection_count(&self) -> usize {
         match &self.backend {
-            Backend::Leak(_) => 0,
             Backend::Generational(heap) => heap.collections(),
         }
     }
 
-    /// Force a collection (no-op for Leak).
+    /// Force a collection.
     pub fn collect(&self) {
         match &self.backend {
-            Backend::Leak(_) => {}
             Backend::Generational(heap) => {
                 let _guard = self.install_thread();
                 let extras = self.extra_root_sources.lock().unwrap();
@@ -414,7 +411,6 @@ impl DynGcRuntime {
         let externs = self.build_extern_table(module, user_extern_for);
         let safepoint_handler = match &self.backend {
             Backend::Generational(_) => Some(active_jit_safepoint_handler as u64),
-            _ => None,
         };
         JitModule::compile_with_regalloc::<Cfg, B, R>(module, &externs, safepoint_handler)
     }
@@ -474,7 +470,6 @@ impl DynGcRuntime {
                 drop(extras);
                 session.with_installed(|| jit.call_outcome(entry, args))
             }
-            _ => jit.call_outcome(entry, args),
         }
     }
 
@@ -507,6 +502,8 @@ impl DynGcRuntime {
                         Some(gc_alloc_thunk as *const u8)
                     } else if ef.name == crate::ic::PROP_SLOW_EXTERN {
                         Some(crate::ic::prop_slow_thunk as *const u8)
+                    } else if ef.name == crate::ic::DISPATCH_SLOW_EXTERN {
+                        Some(crate::ic::dispatch_slow_thunk as *const u8)
                     } else if let Some(ptr) = self.auto_externs.get(&ef.name) {
                         Some(*ptr)
                     } else {
@@ -558,14 +555,12 @@ impl Drop for ThreadGuard<'_> {
 /// The extern function the JIT calls for `__gc_alloc__`. Reads the
 /// installed runtime from thread-local storage.
 ///
-/// Exposed for embeddings that maintain a separate `ModuleBuilder`
-/// from the `DynModule` (e.g. Clojure): declare `__gc_alloc__` on your
-/// own `mb` with signature `(I64, I64) -> GcPtr` and pass
-/// `gc_alloc_thunk as *const u8` in your externs vec at JIT-extend
-/// time. Then thread the resulting `FuncRef` into
-/// `DynModule::closures_for(..., Some(fref))` so the kit emits calls
-/// to your `mb`'s FuncRef rather than the auto-detected one (which
-/// indexes into a different table).
+/// Public so frontends that build their JIT externs vec themselves
+/// (rather than going through [`DynGcRuntime::compile_jit`]) can wire
+/// up the thunk at the index matching `__gc_alloc__`'s FuncRef on the
+/// shared `DynModule.module_builder`. The toolkit auto-registers
+/// `__gc_alloc__` as FuncRef 0 on the first `obj_type` call, so the
+/// thunk lands at `externs[0]`.
 pub extern "C" fn gc_alloc_thunk(type_id: u64, varlen_len: u64) -> u64 {
     let rt_ptr = RUNTIME.with(|c| c.get());
     assert!(!rt_ptr.is_null(), "dynlang: __gc_alloc__ called without DynGcRuntime installed");

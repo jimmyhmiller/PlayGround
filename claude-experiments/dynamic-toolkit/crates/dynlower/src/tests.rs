@@ -1836,12 +1836,14 @@ fn bench_primes() {
     let jit_time = start.elapsed();
 
     // Interpreter run
-    use dynir::NoGcRoots;
+    use dynalloc::LowBitPtrPolicy;
+    use dynir::gc_runtime::GcInterpCtx;
     use dynir::interp::*;
+    use dynobj::Compact;
     use dynir::ir::Module;
     use dynvalue::LowBit;
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     let start = std::time::Instant::now();
     let interp_result = match interp.run(entry, &[10000]).unwrap() {
@@ -2531,10 +2533,12 @@ fn jit_module_bench_fifty_nested() {
     let jit_time = start.elapsed();
 
     // Interpreter run
-    use dynir::NoGcRoots;
+    use dynalloc::LowBitPtrPolicy;
+    use dynir::gc_runtime::GcInterpCtx;
     use dynir::interp::*;
+    use dynobj::Compact;
     use dynvalue::LowBit;
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     let start = std::time::Instant::now();
     let interp_result = match interp.run(entry, &[0]).unwrap() {

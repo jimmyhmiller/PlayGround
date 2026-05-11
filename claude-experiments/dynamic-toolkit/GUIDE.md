@@ -28,7 +28,7 @@ Your Language
 
 | Crate | What it does |
 |-------|-------------|
-| **dynlang** | **Start here.** High-level builder for dynamic languages: mutable variables, NanBox constants, inline fast paths for arithmetic, string pool, truthiness checks. Wraps dynir. |
+| **dynlang** | **Start here.** High-level builder for dynamic languages: mutable variables, NanBox constants, inline fast paths for arithmetic, string pool, truthiness checks, and the `ClosureKit` / `InlineBody` primitives for first-class functions and synthesized helper fns. Wraps dynir. |
 | **dynir** | The IR: SSA instructions, `FunctionBuilder`/`ModuleBuilder`, reference interpreter, verifier, optimizer. dynlang wraps this; use directly for advanced needs. |
 | **dynvalue** | Tagged value encoding. Two schemes: `LowBit<N>` (tag in low bits) and `NanBox` (NaN-boxing for unboxed floats). |
 | **dynexec** | Execution semantics: delimited continuations, frame capture/resume, calling conventions, root management strategies. |
@@ -492,6 +492,147 @@ fb.resume_slice(k, &[resume_value]);
 let copy = fb.clone_slice(k); // multi-shot
 ```
 
+## First-Class Functions: ClosureKit
+
+Every dynamic language needs heap-allocated callable values that close
+over an environment. `dynlang::closure::ClosureKit` factors out the
+IR-emitting half: heap-object layout, capture-spill at the alloc site,
+indirect-call dispatch through the JIT call table, body-prologue that
+loads captures + binds positional/args-list params, and optional
+multi-arity dispatch. Free-variable analysis stays in your frontend
+(it's AST-specific); the kit picks up at "here are the captures, here's
+the body."
+
+### Knobs
+
+`ClosureConfig` has three:
+
+- **`CallConv`** — how the body receives arguments.
+  - `Positional`: signature `(self_fn, p0, p1, …, pN)`. Direct
+    positional calls; one arity per body fn.
+  - `ArgsList { readers: ArgsListReaders }`: signature
+    `(self_fn, args_list)`. The body walks a runtime list to bind
+    individual params; multiple arity clauses can share one body via the
+    kit's dispatcher. Required if you want Clojure-style multi-arity
+    on a single callable. Frontend supplies the list reader externs
+    (`first`, `rest`, `count`) + a `raise` extern + the JIT
+    `call_table_base` so the kit can route `raise` correctly.
+- **`CaptureShape`** — `Inline` (immutable, varlen tail) or
+  `MutableCells` (Lox-style upvalues; not yet implemented — panics
+  clearly).
+- **`extra_fields`** — language-specific metadata (a `name` symbol for
+  stack traces, etc.).
+
+### Lifecycle
+
+```rust
+// 1. Once at engine init: register the Closure GC type (or adopt an
+// existing one via `closures_for`).
+let kit = dyn_module.closures(ClosureConfig::new(
+    CallConv::ArgsList { readers: my_args_list_readers },
+));
+
+// 2. Per closure: declare the body FuncRef, then open it.
+let body_ref = kit.declare_body(
+    &mut dyn_module.module_builder,
+    "__lambda_42",
+    BodyShape { fixed: 2, variadic: false, n_captures: 3 },
+);
+let mut fb = dyn_module.module_builder.define_func(body_ref);
+let bound = kit.begin_body(&mut fb, shape);
+// bound.args = [Value; 2], bound.captures = [Value; 3],
+// bound.recur_block = BlockId. Bind them into your environment and
+// lower the body.
+fb.ret(result);
+dyn_module.module_builder.finish_func(body_ref, fb);
+
+// 3. At each use site: emit the alloc IR.
+let closure_val = kit.make(&mut outer_fb, MakeClosure {
+    body_ref,
+    arity_word: encode_arity(2, false) as i64,
+    captures: &cap_vals,
+    extras: &[],
+}, &env.live_values());
+
+// 4. At each indirect-call site: unbox + load + call_via_func_ref.
+let result = kit.call(&mut fb, call_table_base, callee, &args, &live);
+```
+
+For multi-arity (`ArgsList` only), use `begin_multi_arity_body` —
+returns a `MultiArityDispatch` with one block per clause, plus a
+synthesized dispatch chain at the body's entry that picks the matching
+clause by arg count.
+
+See `crates/clojure/src/compile.rs::lower_fn_expr` and
+`compile_closure_body_clauses` for the full integration. Single
+primitive replaces ~470 lines of hand-rolled closure machinery.
+
+## Synthesized Helper Fns: InlineBody
+
+When you want to *lift a block into a helper fn* — typically because
+the outer needs `fb.invoke` to catch exceptions from inside it, or
+because you need a clean control-flow boundary — but the body should
+never escape, never go on the heap, and never have a `self_fn`, reach
+for `dynlang::inline_body::InlineBody`. Right shape for `try`/`catch`
+wrappers and catch-arm bodies.
+
+```rust
+let body = InlineBody::declare(
+    &mut dyn_module.module_builder,
+    "__try_body_3",
+    /*n_captures=*/ captures.len(),
+    /*n_extras=*/ 0,
+);
+
+// Open + lower the body.
+{
+    let (mut inner_fb, cap_vals, _extras) = body.open(&dyn_module.module_builder);
+    // Bind captures into your inner env, lower body forms, ret.
+    body.finish(&mut dyn_module.module_builder, inner_fb);
+}
+
+// Invoke at the synthesis site with normal/exception blocks.
+let normal_bb = fb.create_block(&[Type::I64]);    // body result
+let exception_bb = fb.create_block(&[Type::I64]); // thrown value
+body.invoke(&mut fb, &cap_values, &[], normal_bb, exception_bb, &live);
+```
+
+`InlineBody` is intentionally a *sibling* primitive to `ClosureKit`,
+not a knob on it. The two share `freevars`-style analysis at the
+frontend, but their IR shapes differ (heap vs stack storage,
+`call_via_func_ref` vs `fb.invoke`, many-shot vs one-shot). Fusing them
+would dilute both.
+
+See `crates/clojure/src/compile.rs::lower_try_no_finally` /
+`lower_try_with_finally` for the full integration. The primitive
+replaced ~290 lines of hand-rolled wrapper-fn synthesis.
+
+## Typed Extern Registries
+
+Once you have more than a handful of runtime externs, the
+`func_refs.get("__name").copied().expect("...").fref()` chain at every
+call site becomes a readability sink. Resolve once at engine init into
+a struct of named `FuncRef` fields:
+
+```rust
+pub struct Externs {
+    pub raise_exception: FuncRef,
+    pub cons: FuncRef,
+    // … one field per extern the lowering pipeline calls by name …
+}
+
+impl Externs {
+    pub fn resolve(func_refs: &HashMap<String, FnEntry>) -> Self {
+        // panic with a clear message if anything's missing — that's
+        // an engine-init bug, not user error
+    }
+}
+```
+
+Then every call site is `fb.call(self.externs.cons, &args)` instead of
+six lines of lookup boilerplate. See
+`crates/clojure/src/compile.rs::Externs` for a fully-worked example.
+
 ## Reference Implementations
 
 - **`contlang`** — Cleanest example. Small language with delimited continuations.
@@ -528,6 +669,14 @@ let copy = fb.clone_slice(k); // multi-shot
 7. **Terminators end blocks**. Every block must end with exactly one terminator:
    `ret`, `ret_void`, `jump`, `br_if`, `switch`, `unreachable`, etc. After a terminator,
    call `f.fb.switch_to_block(next_bb)` before emitting more instructions.
+
+8. **Don't hand-roll closures or capture-spill wrappers**. If you find yourself
+   declaring a body fn that takes captures as block params, walking an args list
+   to bind locals, or synthesizing a wrapper-fn just so the outer can `fb.invoke`
+   it, you're reinventing `ClosureKit` (heap-allocated callable values) or
+   `InlineBody` (stack-only synthesized helpers). See the dedicated sections
+   above — both primitives expect frontend-side free-variable analysis as input
+   and own the IR-emitting side end-to-end.
 
 ## DynFunc Quick Reference
 

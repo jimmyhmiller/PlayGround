@@ -19,7 +19,7 @@
 //! ```ignore
 //! use dynlang::*;
 //!
-//! let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+//! let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
 //! dm.register_slow_paths("lox");
 //!
 //! let main = dm.declare_func("main", 0);
@@ -55,24 +55,19 @@ pub use dynruntime::GcPolicy;
 // ── GC Configuration ──────────────────────────────────────────────
 
 /// GC strategy. Required when creating a DynModule.
+///
+/// Generational, thread-aware, concurrent-capable `dynalloc::Heap`.
+/// Supports precise stack-map roots for the JIT and card-table write
+/// barriers for old→young pointers.
+///
+/// **Pair with `CallMode::ControlAware { safepoint_handler }`** and
+/// emit `Inst::Safepoint` at every allocation site (`Module::
+/// validate_safepoints` enforces this). Anything else is a memory-
+/// safety bug waiting to happen — a moving collection running
+/// without a stack map for the active frame relocates objects out
+/// from under live values that the GC can't see.
 #[derive(Clone, Debug)]
 pub enum GcConfig {
-    /// Bump allocator, never collects. Zero overhead — no safepoints,
-    /// no root tracking. Objects are allocated and never freed.
-    ///
-    /// Suitable for benchmark harnesses or short-lived programs where
-    /// retaining everything is fine. **Pair with `CallMode::FastCall`**.
-    Leak,
-    /// Generational, thread-aware, concurrent-capable `dynalloc::Heap`.
-    /// Supports precise stack-map roots for the JIT and card-table
-    /// write barriers for old→young pointers.
-    ///
-    /// **Pair with `CallMode::ControlAware { safepoint_handler }`** and
-    /// emit `Inst::Safepoint` at every allocation site (`Module::
-    /// validate_safepoints` enforces this). Anything else is a memory-
-    /// safety bug waiting to happen — a moving collection running
-    /// without a stack map for the active frame relocates objects out
-    /// from under live values that the GC can't see.
     Generational {
         /// Total heap size per space, in bytes.
         heap_size: usize,
@@ -83,16 +78,11 @@ pub enum GcConfig {
 }
 
 impl GcConfig {
-    pub fn leak() -> Self { GcConfig::Leak }
     pub fn generational(heap_size: usize) -> Self {
         GcConfig::Generational { heap_size, nursery_size: None }
     }
     pub fn generational_with_nursery(heap_size: usize, nursery_size: usize) -> Self {
         GcConfig::Generational { heap_size, nursery_size: Some(nursery_size) }
-    }
-
-    pub fn is_collecting(&self) -> bool {
-        matches!(self, GcConfig::Generational { .. })
     }
 }
 
@@ -497,7 +487,13 @@ pub struct BuiltModule {
 /// and a convenient `declare_func` that assumes all params/returns are I64
 /// (NanBox-encoded values).
 pub struct DynModule {
-    pub(crate) mb: ModuleBuilder,
+    /// The underlying IR builder. Public so frontends that emit IR
+    /// outside the methods on `DynModule` itself can declare/define
+    /// functions on the same builder the toolkit registers
+    /// `__gc_alloc__` and other auto-externs into. Reach in only when
+    /// you need a `ModuleBuilder` API not surfaced through `DynModule`;
+    /// otherwise prefer the higher-level wrappers on this type.
+    pub module_builder: ModuleBuilder,
     tags: NanBoxTags,
     gc_config: GcConfig,
     slow: SlowPaths,
@@ -524,12 +520,12 @@ fn sig(params: &[Type], ret: Option<Type>) -> Signature {
 }
 
 impl DynModule {
-    /// Create a new module. GcConfig is required — use `GcConfig::leak()`
+    /// Create a new module. GcConfig is required — use `GcConfig::generational(64 * 1024)`
     /// for zero-overhead no-collection, or `GcConfig::generational(size)`
     /// for automatic garbage collection.
     pub fn new(gc: GcConfig, tags: NanBoxTags) -> Self {
         DynModule {
-            mb: ModuleBuilder::new(),
+            module_builder: ModuleBuilder::new(),
             tags,
             gc_config: gc,
             slow: SlowPaths::default(),
@@ -551,7 +547,7 @@ impl DynModule {
                 params: vec![Type::I64, Type::I64],  // type_id, varlen_len
                 ret: Some(Type::GcPtr),               // returns raw GC pointer
             };
-            self.gc_alloc_extern = Some(self.mb.declare_extern("__gc_alloc__", sig));
+            self.gc_alloc_extern = Some(self.module_builder.declare_extern("__gc_alloc__", sig));
         }
         ObjTypeBuilder {
             module: self,
@@ -620,7 +616,7 @@ impl DynModule {
 
     /// Declare a raw extern function (full control over signature).
     pub fn declare_extern(&mut self, name: &str, sig: Signature) -> FuncRef {
-        self.mb.declare_extern(name, sig)
+        self.module_builder.declare_extern(name, sig)
     }
 
     /// Register slow-path extern functions for dynamic operations.
@@ -634,15 +630,15 @@ impl DynModule {
         let i64_2 = sig(&[Type::I64, Type::I64], Some(Type::I64));
         let i64_1 = sig(&[Type::I64], Some(Type::I64));
 
-        self.slow.add = Some(self.mb.declare_extern(&format!("{prefix}_add"), i64_2.clone()));
-        self.slow.sub = Some(self.mb.declare_extern(&format!("{prefix}_sub"), i64_2.clone()));
-        self.slow.mul = Some(self.mb.declare_extern(&format!("{prefix}_mul"), i64_2.clone()));
-        self.slow.div = Some(self.mb.declare_extern(&format!("{prefix}_div"), i64_2.clone()));
-        self.slow.neg = Some(self.mb.declare_extern(&format!("{prefix}_neg"), i64_1.clone()));
-        self.slow.eq = Some(self.mb.declare_extern(&format!("{prefix}_eq"), i64_2.clone()));
-        self.slow.lt = Some(self.mb.declare_extern(&format!("{prefix}_lt"), i64_2.clone()));
-        self.slow.gt = Some(self.mb.declare_extern(&format!("{prefix}_gt"), i64_2.clone()));
-        self.slow.not = Some(self.mb.declare_extern(&format!("{prefix}_not"), i64_1));
+        self.slow.add = Some(self.module_builder.declare_extern(&format!("{prefix}_add"), i64_2.clone()));
+        self.slow.sub = Some(self.module_builder.declare_extern(&format!("{prefix}_sub"), i64_2.clone()));
+        self.slow.mul = Some(self.module_builder.declare_extern(&format!("{prefix}_mul"), i64_2.clone()));
+        self.slow.div = Some(self.module_builder.declare_extern(&format!("{prefix}_div"), i64_2.clone()));
+        self.slow.neg = Some(self.module_builder.declare_extern(&format!("{prefix}_neg"), i64_1.clone()));
+        self.slow.eq = Some(self.module_builder.declare_extern(&format!("{prefix}_eq"), i64_2.clone()));
+        self.slow.lt = Some(self.module_builder.declare_extern(&format!("{prefix}_lt"), i64_2.clone()));
+        self.slow.gt = Some(self.module_builder.declare_extern(&format!("{prefix}_gt"), i64_2.clone()));
+        self.slow.not = Some(self.module_builder.declare_extern(&format!("{prefix}_not"), i64_1));
     }
 
     /// Like [`register_slow_paths`](Self::register_slow_paths), but also
@@ -686,15 +682,15 @@ impl DynModule {
         let i64_2 = sig(&[Type::I64, Type::I64], Some(Type::I64));
         let i64_1 = sig(&[Type::I64], Some(Type::I64));
         let fref = match op {
-            DynOp::Add => { let f = self.mb.declare_extern(name, i64_2); self.slow.add = Some(f); f }
-            DynOp::Sub => { let f = self.mb.declare_extern(name, i64_2); self.slow.sub = Some(f); f }
-            DynOp::Mul => { let f = self.mb.declare_extern(name, i64_2); self.slow.mul = Some(f); f }
-            DynOp::Div => { let f = self.mb.declare_extern(name, i64_2); self.slow.div = Some(f); f }
-            DynOp::Neg => { let f = self.mb.declare_extern(name, i64_1); self.slow.neg = Some(f); f }
-            DynOp::Eq  => { let f = self.mb.declare_extern(name, i64_2); self.slow.eq = Some(f); f }
-            DynOp::Lt  => { let f = self.mb.declare_extern(name, i64_2); self.slow.lt = Some(f); f }
-            DynOp::Gt  => { let f = self.mb.declare_extern(name, i64_2); self.slow.gt = Some(f); f }
-            DynOp::Not => { let f = self.mb.declare_extern(name, i64_1); self.slow.not = Some(f); f }
+            DynOp::Add => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.add = Some(f); f }
+            DynOp::Sub => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.sub = Some(f); f }
+            DynOp::Mul => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.mul = Some(f); f }
+            DynOp::Div => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.div = Some(f); f }
+            DynOp::Neg => { let f = self.module_builder.declare_extern(name, i64_1); self.slow.neg = Some(f); f }
+            DynOp::Eq  => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.eq = Some(f); f }
+            DynOp::Lt  => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.lt = Some(f); f }
+            DynOp::Gt  => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.gt = Some(f); f }
+            DynOp::Not => { let f = self.module_builder.declare_extern(name, i64_1); self.slow.not = Some(f); f }
         };
         fref
     }
@@ -704,7 +700,7 @@ impl DynModule {
     /// Declare a language function. All params and return are I64 (NanBox values).
     pub fn declare_func(&mut self, name: &str, arity: usize) -> FuncRef {
         let params = vec![Type::I64; arity];
-        let fref = self.mb.declare_func(name, &params, Some(Type::I64));
+        let fref = self.module_builder.declare_func(name, &params, Some(Type::I64));
         self.func_refs.insert(name.to_string(), fref);
         fref
     }
@@ -712,7 +708,7 @@ impl DynModule {
     /// Declare a void language function (no return value).
     pub fn declare_void_func(&mut self, name: &str, arity: usize) -> FuncRef {
         let params = vec![Type::I64; arity];
-        let fref = self.mb.declare_func(name, &params, None);
+        let fref = self.module_builder.declare_func(name, &params, None);
         self.func_refs.insert(name.to_string(), fref);
         fref
     }
@@ -730,7 +726,7 @@ impl DynModule {
     ///
     /// Call `finish_func` when done.
     pub fn start_func(&mut self, fref: FuncRef) -> DynFunc {
-        let fb = self.mb.define_func(fref);
+        let fb = self.module_builder.define_func(fref);
         DynFunc {
             fb,
             fref,
@@ -745,7 +741,7 @@ impl DynModule {
 
     /// Finish defining a function.
     pub fn finish_func(&mut self, func: DynFunc) {
-        self.mb.finish_func(func.fref, func.fb);
+        self.module_builder.finish_func(func.fref, func.fb);
     }
 
     /// Build the final module.
@@ -753,7 +749,7 @@ impl DynModule {
         let allocator_frefs: Vec<FuncRef> =
             self.gc_alloc_extern.into_iter().collect();
         BuiltModule {
-            module: self.mb.build(),
+            module: self.module_builder.build(),
             strings: self.strings,
             func_refs: self.func_refs,
             allocator_frefs,
@@ -768,17 +764,17 @@ impl DynModule {
     /// and auto_externs are all keyed by stable IDs that survive across
     /// snapshots.
     pub fn snapshot(&self) -> Module {
-        self.mb.snapshot()
+        self.module_builder.snapshot()
     }
 
     /// Number of functions declared so far (extern + internal).
     pub fn func_count(&self) -> usize {
-        self.mb.func_count()
+        self.module_builder.func_count()
     }
 
     /// Number of internal functions defined so far.
     pub fn internal_func_count(&self) -> usize {
-        self.mb.internal_func_count()
+        self.module_builder.internal_func_count()
     }
 }
 
@@ -1735,7 +1731,7 @@ mod tests {
 
     #[test]
     fn test_number_constant() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let main = dm.declare_func("main", 0);
 
         let mut f = dm.start_func(main);
@@ -1750,7 +1746,7 @@ mod tests {
 
     #[test]
     fn test_nil_and_bool() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let main = dm.declare_func("main", 0);
 
         let mut f = dm.start_func(main);
@@ -1766,7 +1762,7 @@ mod tests {
 
     #[test]
     fn test_mutable_variables() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let main = dm.declare_func("main", 0);
 
         let mut f = dm.start_func(main);
@@ -1785,7 +1781,7 @@ mod tests {
 
     #[test]
     fn test_dyn_add_fast_path() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         // Register slow paths even though we won't hit them.
         dm.register_slow_paths("rt");
         let main = dm.declare_func("main", 0);
@@ -1812,7 +1808,7 @@ mod tests {
 
     #[test]
     fn test_dyn_add_slow_path() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         dm.register_slow_paths("rt");
         let main = dm.declare_func("main", 0);
 
@@ -1838,7 +1834,7 @@ mod tests {
 
     #[test]
     fn test_is_falsey() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let main = dm.declare_func("main", 1);
 
         let mut f = dm.start_func(main);
@@ -1862,7 +1858,7 @@ mod tests {
 
     #[test]
     fn test_scoped_variables() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let main = dm.declare_func("main", 0);
 
         let mut f = dm.start_func(main);
@@ -1893,7 +1889,7 @@ mod tests {
 
     #[test]
     fn test_string_pool() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let id1 = dm.add_string("hello");
         let id2 = dm.add_string("world");
         let id3 = dm.add_string("hello"); // dedup
@@ -1906,7 +1902,7 @@ mod tests {
 
     #[test]
     fn test_gc_obj_type_declaration() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
 
         // Declare an object type with two value fields and a varlen values section
         let pair_ty = dm.obj_type("Pair")
@@ -1932,7 +1928,7 @@ mod tests {
 
     #[test]
     fn test_gc_alloc_and_field_access() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
 
         let upval_ty = dm.obj_type("Upvalue")
             .field("value", FieldKind::Value)
@@ -1960,7 +1956,7 @@ mod tests {
 
         // Create GC runtime and wire up __gc_alloc__
         let gc = crate::gc::DynGcRuntime::new(
-            &GcConfig::leak(),
+            &GcConfig::generational(64 * 1024),
             &NanBoxTags::default(),
             &dm.obj_types,
         );
@@ -2132,7 +2128,7 @@ mod tests {
 
     #[test]
     fn test_dyn_lt_fast_path() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         dm.register_slow_paths("rt");
         let main = dm.declare_func("main", 0);
 
@@ -2160,7 +2156,7 @@ mod tests {
 
     #[test]
     fn fresh_slot_name_is_unique_and_with_rooted_reloads() {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         dm.register_slow_paths("rt");
         let main = dm.declare_func("main", 0);
 
@@ -2206,7 +2202,7 @@ mod tests {
     where
         B: FnOnce(&mut DynFunc) -> Value,
     {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let main = dm.declare_func("main", 0);
         let mut f = dm.start_func(main);
         let v = build(&mut f);
@@ -2312,7 +2308,7 @@ mod tests {
     where
         B: FnOnce(&mut DynFunc, Value, Value) -> Value,
     {
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         dm.register_slow_paths("rt");
         let main = dm.declare_func("main", 0);
         let mut f = dm.start_func(main);
@@ -2391,7 +2387,7 @@ mod tests {
         // an inline float fast path that fires when both operands are
         // floats at runtime, so the rt_add stub doesn't need to be
         // bound — but the IR shape is the conservative one.
-        let mut dm = DynModule::new(GcConfig::leak(), NanBoxTags::default());
+        let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         dm.register_slow_paths("rt");
         let main = dm.declare_func("main", 0);
         let mut f = dm.start_func(main);

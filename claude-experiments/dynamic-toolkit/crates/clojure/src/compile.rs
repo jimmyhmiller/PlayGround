@@ -13,9 +13,10 @@
 
 use std::collections::HashMap;
 
-use dynir::builder::{FunctionBuilder, ModuleBuilder};
+use dynir::builder::FunctionBuilder;
 use dynir::ir::{BlockId, CmpOp, FuncRef, LiteralRef, Value};
 use dynir::types::Type;
+use dynlang::DynModule;
 use dynlang::closure::{BodyShape, BoundBodyEnv, MakeClosure};
 use dynlang::inline_body::InlineBody;
 use dynlower::LiteralPool;
@@ -91,6 +92,87 @@ impl FnEntry {
         match self {
             FnEntry::Extern { fref, .. } => fref,
             FnEntry::DefFn { fref, .. } => fref,
+        }
+    }
+}
+
+/// Pre-resolved FuncRefs for every extern the lowering pipeline calls
+/// by name. Resolved once at engine init from `func_refs`; held by
+/// `Compiler` for the lifetime of the engine.
+///
+/// Hot-path benefit is incidental — the real win is readability at
+/// every call site. Compare:
+///
+/// ```ignore
+/// let fref = self.func_refs.get("__cons").copied()
+///     .expect("__cons extern not registered").fref();
+/// fb.call(fref, &[head, tail]).expect("__cons returns a value")
+/// ```
+///
+/// to:
+///
+/// ```ignore
+/// fb.call(self.externs.cons, &[head, tail])
+///     .expect("__cons returns a value")
+/// ```
+///
+/// New externs added here must also be registered in
+/// [`crate::externs::all_prims`] (which is what populates the
+/// `func_refs` map this struct is resolved from).
+#[derive(Clone, Copy)]
+pub struct Externs {
+    pub alloc_record: FuncRef,
+    pub arity_check: FuncRef,
+    pub cons: FuncRef,
+    pub def_value: FuncRef,
+    pub exception_type_matches: FuncRef,
+    pub method_lookup: FuncRef,
+    pub raise_exception: FuncRef,
+    pub reader_list_first: FuncRef,
+    pub record_get_field: FuncRef,
+    pub record_set_field: FuncRef,
+    pub register_deftype: FuncRef,
+    pub register_method: FuncRef,
+    pub register_protocol_member: FuncRef,
+    pub vector_from_list: FuncRef,
+}
+
+impl Externs {
+    /// Resolve every required extern from `func_refs`. Panics with a
+    /// clear message naming the missing extern if any aren't
+    /// registered — that's an engine-init bug (`externs::all_prims`
+    /// out of sync with this struct), not user error.
+    pub fn resolve(func_refs: &HashMap<String, FnEntry>) -> Self {
+        let lookup = |name: &str| -> FuncRef {
+            match func_refs.get(name) {
+                Some(FnEntry::Extern { fref, .. }) => *fref,
+                Some(FnEntry::DefFn { .. }) => panic!(
+                    "Externs::resolve: '{name}' is registered as a def-fn, \
+                     not an extern — probably means a user `(def {name} …)` \
+                     shadowed the runtime primitive"
+                ),
+                None => panic!(
+                    "Externs::resolve: extern '{name}' not declared by \
+                     `externs::all_prims()` — Externs struct out of sync \
+                     with the prim registry"
+                ),
+            }
+        };
+        Externs {
+            alloc_record: lookup("__alloc_record"),
+            arity_check: lookup("__arity_check"),
+            cons: lookup("__cons"),
+            def_value: lookup("__def_value"),
+            exception_type_matches: lookup("__exception_type_matches"),
+            method_lookup: lookup("__method_lookup"),
+            raise_exception: lookup("__raise_exception"),
+            reader_list_first: lookup("__reader_list_first"),
+            record_get_field: lookup("__record_get_field"),
+            record_set_field: lookup("__record_set_field"),
+            register_deftype: lookup("__register_deftype"),
+            register_method: lookup("__register_method"),
+            register_protocol_member: lookup("__register_protocol_member"),
+            vector_from_list: lookup("__vector_from_list"),
         }
     }
 }
@@ -231,8 +313,15 @@ pub enum TopResult {
 }
 
 pub struct Compiler<'a> {
-    pub mb: &'a mut ModuleBuilder,
+    /// The toolkit module — owns the `ModuleBuilder` we declare/define
+    /// every Clojure function on, plus the obj-type registry that
+    /// ClosureKit and friends consult. Reach in via
+    /// `self.dyn_module.module_builder` for raw IR operations.
+    pub dyn_module: &'a mut DynModule,
     pub func_refs: &'a mut HashMap<String, FnEntry>,
+    /// Pre-resolved FuncRefs for every extern the lowering pipeline
+    /// calls by name. See [`Externs`].
+    pub externs: &'a Externs,
     pub sym: &'a SymbolTable,
     pub anon_counter: &'a mut u32,
     /// Literal pool we push GC-managed compile-time constants into.
@@ -321,16 +410,16 @@ impl<'a> Compiler<'a> {
         // Otherwise: anonymous top-level expression.
         *self.anon_counter += 1;
         let name = format!("__top_{}", *self.anon_counter);
-        let fref = self.mb.declare_func(&name, &[], Some(Type::I64));
+        let fref = self.dyn_module.module_builder.declare_func(&name, &[], Some(Type::I64));
         // Top-level exprs aren't callable by name — they're invoked
         // directly by `Engine::eval` via `run_jit(fref, &[], …)`.
         // No `func_refs` entry needed.
 
-        let mut fb = self.mb.define_func(fref);
+        let mut fb = self.dyn_module.module_builder.define_func(fref);
         let mut env = Env::new();
         let result = self.lower_expr(&mut fb, &mut env, form);
         fb.ret(result);
-        self.mb.finish_func(fref, fb);
+        self.dyn_module.module_builder.finish_func(fref, fb);
 
         TopResult::Expr(fref)
     }
@@ -397,12 +486,12 @@ impl<'a> Compiler<'a> {
         // Non-fn def. Compile a 0-arg thunk that evaluates `expr`.
         *self.anon_counter += 1;
         let thunk_name = format!("__def_value_thunk_{}", *self.anon_counter);
-        let thunk_fref = self.mb.declare_func(&thunk_name, &[], Some(Type::I64));
-        let mut fb = self.mb.define_func(thunk_fref);
+        let thunk_fref = self.dyn_module.module_builder.declare_func(&thunk_name, &[], Some(Type::I64));
+        let mut fb = self.dyn_module.module_builder.define_func(thunk_fref);
         let mut env = Env::new();
         let result = self.lower_expr(&mut fb, &mut env, expr);
         fb.ret(result);
-        self.mb.finish_func(thunk_fref, fb);
+        self.dyn_module.module_builder.finish_func(thunk_fref, fb);
         TopResult::DefineValue {
             name,
             value_thunk: thunk_fref,
@@ -557,16 +646,16 @@ impl<'a> Compiler<'a> {
         let combined_name =
             format!("__deftype_combined_{}", *self.anon_counter);
         let combined_fref =
-            self.mb.declare_func(&combined_name, &[], Some(Type::I64));
+            self.dyn_module.module_builder.declare_func(&combined_name, &[], Some(Type::I64));
         {
-            let mut fb = self.mb.define_func(combined_fref);
+            let mut fb = self.dyn_module.module_builder.define_func(combined_fref);
             fb.safepoint(&[]);
             fb.call(dt_fref, &[]);
             fb.safepoint(&[]);
             fb.call(ext_fref, &[]);
             let nil_v = fb.iconst(Type::I64, v::NIL as i64);
             fb.ret(nil_v);
-            self.mb.finish_func(combined_fref, fb);
+            self.dyn_module.module_builder.finish_func(combined_fref, fb);
         }
         TopResult::Expr(combined_fref)
     }
@@ -604,73 +693,30 @@ impl<'a> Compiler<'a> {
         // waiting for the runtime registration thunk.
         self.deftype_fields.insert(name_id, field_ids.clone());
 
-        // Generate the constructor `Name.` as a regular def-fn whose
-        // body allocates a Record. The constructor accepts the
-        // fields as its user args.
+        // Generate the constructor `Name.` as a regular def-fn. The
+        // body uses the closure-kit prologue (args-list ABI, no
+        // captures) to bind each field, then allocates a Record from
+        // the bound values.
         let ctor_name = format!("{}.", name);
-        let ctor_fref = self
-            .mb
-            .declare_func(&ctor_name, &[Type::I64, Type::I64], Some(Type::I64));
+        let ctor_shape = BodyShape {
+            fixed: n_fields,
+            variadic: false,
+            n_captures: 0,
+        };
+        let ctor_fref = self.closures.declare_body(
+            &mut self.dyn_module.module_builder,
+            &ctor_name,
+            ctor_shape,
+        );
         self.func_refs
             .insert(ctor_name, FnEntry::DefFn { fref: ctor_fref });
 
-        // Body: takes (self_fn, args_list), unpacks N fields,
-        // calls __alloc_record(type_name_sym, n, &fields[0]).
+        // Body: prologue (arity check + args-list walk → field values),
+        // then spill fields into a buffer and call __alloc_record.
         {
-            let mut fb = self.mb.define_func(ctor_fref);
-            let entry = fb.entry_block();
-            let _self_fn = fb.block_param(entry, 0);
-            let args_list = fb.block_param(entry, 1);
-
-            // Arity check
-            let check_args_fref = self
-                .func_refs
-                .get("__check_args_list")
-                .copied()
-                .expect("__check_args_list extern not registered")
-                .fref();
-            let arity_word_const = fb.iconst(
-                Type::I64,
-                encode_arity(n_fields, /*is_variadic=*/ false) as i64,
-            );
-            fb.safepoint(&[args_list]);
-            let check_result = fb
-                .call(check_args_fref, &[args_list, arity_word_const])
-                .expect("__check_args_list returns a value");
-            self.emit_throw_if_not_nil(&mut fb, check_result);
-
-            // Walk args_list to extract each field.
-            let cons_first_fref = self
-                .func_refs
-                .get("__reader_list_first")
-                .copied()
-                .expect("__reader_list_first not registered")
-                .fref();
-            let cons_rest_fref = self
-                .func_refs
-                .get("__reader_list_rest")
-                .copied()
-                .expect("__reader_list_rest not registered")
-                .fref();
-
-            let mut cur_list = args_list;
-            let mut field_vals: Vec<Value> = Vec::with_capacity(n_fields);
-            for _ in 0..n_fields {
-                let mut live = field_vals.clone();
-                live.push(cur_list);
-                fb.safepoint(&live);
-                let fv = fb
-                    .call(cons_first_fref, &[cur_list])
-                    .expect("first returns a value");
-                let mut live2 = field_vals.clone();
-                live2.push(cur_list);
-                live2.push(fv);
-                fb.safepoint(&live2);
-                cur_list = fb
-                    .call(cons_rest_fref, &[cur_list])
-                    .expect("rest returns a value");
-                field_vals.push(fv);
-            }
+            let mut fb = self.dyn_module.module_builder.define_func(ctor_fref);
+            let bound = self.closures.begin_body(&mut fb, ctor_shape);
+            let field_vals = bound.args;
 
             // Spill fields to a stack buffer for __alloc_record.
             let buf_slot = fb.create_stack_slot((n_fields * 8) as u32, /*is_gc_root=*/ true);
@@ -680,12 +726,6 @@ impl<'a> Compiler<'a> {
             }
             let buf_addr_i64 = fb.bitcast(buf_addr, Type::I64);
 
-            let alloc_rec_fref = self
-                .func_refs
-                .get("__alloc_record")
-                .copied()
-                .expect("__alloc_record not registered")
-                .fref();
             let type_name_const = fb.iconst(Type::I64, v::encode_sym_id(name_id) as i64);
             let n_const = fb.iconst(Type::I64, n_fields as i64);
 
@@ -693,19 +733,19 @@ impl<'a> Compiler<'a> {
             live.push(buf_addr_i64);
             fb.safepoint(&live);
             let result = fb
-                .call(alloc_rec_fref, &[type_name_const, n_const, buf_addr_i64])
+                .call(self.externs.alloc_record, &[type_name_const, n_const, buf_addr_i64])
                 .expect("__alloc_record returns a value");
             fb.ret(result);
-            self.mb.finish_func(ctor_fref, fb);
+            self.dyn_module.module_builder.finish_func(ctor_fref, fb);
         }
 
         // Top-level registration thunk: call __register_deftype with
         // the type-name and field-name list.
         *self.anon_counter += 1;
         let reg_name = format!("__register_deftype_{}", *self.anon_counter);
-        let reg_fref = self.mb.declare_func(&reg_name, &[], Some(Type::I64));
+        let reg_fref = self.dyn_module.module_builder.declare_func(&reg_name, &[], Some(Type::I64));
         {
-            let mut fb = self.mb.define_func(reg_fref);
+            let mut fb = self.dyn_module.module_builder.define_func(reg_fref);
             // Spill field-name sym values to a buffer.
             let buf_slot = fb.create_stack_slot((n_fields.max(1) * 8) as u32, /*is_gc_root=*/ false);
             let buf_addr = fb.stack_addr(buf_slot);
@@ -714,32 +754,20 @@ impl<'a> Compiler<'a> {
                 fb.store(fv, buf_addr, (i * 8) as i32);
             }
             let buf_addr_i64 = fb.bitcast(buf_addr, Type::I64);
-            let reg_extern = self
-                .func_refs
-                .get("__register_deftype")
-                .copied()
-                .expect("__register_deftype not registered")
-                .fref();
             let type_name_const = fb.iconst(Type::I64, v::encode_sym_id(name_id) as i64);
             let n_const = fb.iconst(Type::I64, n_fields as i64);
             fb.safepoint(&[]);
-            fb.call(reg_extern, &[type_name_const, n_const, buf_addr_i64]);
+            fb.call(self.externs.register_deftype, &[type_name_const, n_const, buf_addr_i64]);
 
             // Also bind a Var `Name` whose root is the symbol
             // `'Name` so bare references to the type name (e.g.
             // `(instance? Reduced x)`) resolve to a value.
-            let def_value = self
-                .func_refs
-                .get("__def_value")
-                .copied()
-                .expect("__def_value not registered")
-                .fref();
             fb.safepoint(&[]);
-            fb.call(def_value, &[type_name_const, type_name_const]);
+            fb.call(self.externs.def_value, &[type_name_const, type_name_const]);
 
             let nil_v = fb.iconst(Type::I64, v::NIL as i64);
             fb.ret(nil_v);
-            self.mb.finish_func(reg_fref, fb);
+            self.dyn_module.module_builder.finish_func(reg_fref, fb);
         }
         TopResult::Expr(reg_fref)
     }
@@ -801,21 +829,15 @@ impl<'a> Compiler<'a> {
         // `(satisfies? ProtoName x)` resolves.
         *self.anon_counter += 1;
         let thunk_name = format!("__defprotocol_bind_{}", *self.anon_counter);
-        let thunk_fref = self.mb.declare_func(&thunk_name, &[], Some(Type::I64));
+        let thunk_fref = self.dyn_module.module_builder.declare_func(&thunk_name, &[], Some(Type::I64));
         {
-            let mut fb = self.mb.define_func(thunk_fref);
-            let def_value = self
-                .func_refs
-                .get("__def_value")
-                .copied()
-                .expect("__def_value not registered")
-                .fref();
+            let mut fb = self.dyn_module.module_builder.define_func(thunk_fref);
             let proto_const = fb.iconst(Type::I64, v::encode_sym_id(proto_sym_id) as i64);
             fb.safepoint(&[]);
-            fb.call(def_value, &[proto_const, proto_const]);
+            fb.call(self.externs.def_value, &[proto_const, proto_const]);
             let nil_v = fb.iconst(Type::I64, v::NIL as i64);
             fb.ret(nil_v);
-            self.mb.finish_func(thunk_fref, fb);
+            self.dyn_module.module_builder.finish_func(thunk_fref, fb);
         }
         TopResult::Expr(thunk_fref)
     }
@@ -831,46 +853,35 @@ impl<'a> Compiler<'a> {
             return;
         }
         let fref = self
-            .mb
+            .dyn_module
+            .module_builder
             .declare_func(&method_name, &[Type::I64, Type::I64], Some(Type::I64));
         self.func_refs
             .insert(method_name, FnEntry::DefFn { fref });
 
-        let mut fb = self.mb.define_func(fref);
+        let mut fb = self.dyn_module.module_builder.define_func(fref);
         let entry = fb.entry_block();
         let _self_fn = fb.block_param(entry, 0);
         let args_list = fb.block_param(entry, 1);
 
         // receiver = first(args_list)
-        let first_fref = self
-            .func_refs
-            .get("__reader_list_first")
-            .copied()
-            .expect("__reader_list_first not registered")
-            .fref();
         fb.safepoint(&[args_list]);
         let receiver = fb
-            .call(first_fref, &[args_list])
+            .call(self.externs.reader_list_first, &[args_list])
             .expect("first returns a value");
 
         // fn_obj = __method_lookup('method, receiver)
-        let lookup_fref = self
-            .func_refs
-            .get("__method_lookup")
-            .copied()
-            .expect("__method_lookup not registered")
-            .fref();
         let method_const = fb.iconst(Type::I64, v::encode_sym_id(method_sym) as i64);
         fb.safepoint(&[args_list, receiver]);
         let fn_obj = fb
-            .call(lookup_fref, &[method_const, receiver])
+            .call(self.externs.method_lookup, &[method_const, receiver])
             .expect("__method_lookup returns a value");
 
         // Trampoline through Fn.func_ref → call_table → indirect call.
         fb.safepoint(&[fn_obj, args_list]);
         let result = self.lower_indirect_call(&mut fb, fn_obj, &[fn_obj, args_list]);
         fb.ret(result);
-        self.mb.finish_func(fref, fb);
+        self.dyn_module.module_builder.finish_func(fref, fb);
     }
 
     /// `(extend-type T (Proto (m1 [this …] body) (m2 …) …) (Proto2 …))`
@@ -986,7 +997,7 @@ impl<'a> Compiler<'a> {
         // wraps it in an Fn, and calls __register_method.
         *self.anon_counter += 1;
         let reg_name = format!("__extend_type_{}", *self.anon_counter);
-        let reg_fref = self.mb.declare_func(&reg_name, &[], Some(Type::I64));
+        let reg_fref = self.dyn_module.module_builder.declare_func(&reg_name, &[], Some(Type::I64));
 
         // Group impls by method name first — protocols can declare
         // multiple arities of the same method, and we need them all
@@ -1042,7 +1053,7 @@ impl<'a> Compiler<'a> {
                 self.sym.name(*method_sym),
                 *self.anon_counter
             );
-            let method_fref = self.mb.declare_func(
+            let method_fref = self.dyn_module.module_builder.declare_func(
                 &method_func_name,
                 &[Type::I64, Type::I64],
                 Some(Type::I64),
@@ -1053,13 +1064,7 @@ impl<'a> Compiler<'a> {
 
         // Build the registration thunk.
         {
-            let mut fb = self.mb.define_func(reg_fref);
-            let register_fref = self
-                .func_refs
-                .get("__register_method")
-                .copied()
-                .expect("__register_method not registered")
-                .fref();
+            let mut fb = self.dyn_module.module_builder.define_func(reg_fref);
             for (method_sym, method_fref) in &compiled_methods {
                 // Allocate a closure wrapping the method body. No
                 // captures (extend-type methods close over nothing —
@@ -1081,30 +1086,24 @@ impl<'a> Compiler<'a> {
                 let m_sym_const = fb.iconst(Type::I64, v::encode_sym_id(*method_sym) as i64);
                 let t_sym_const = fb.iconst(Type::I64, v::encode_sym_id(type_sym) as i64);
                 fb.safepoint(&[fn_val]);
-                fb.call(register_fref, &[m_sym_const, t_sym_const, fn_val]);
+                fb.call(self.externs.register_method, &[m_sym_const, t_sym_const, fn_val]);
             }
             // Register protocol-membership for every protocol named in
             // this extend-type, including marker protocols with no
             // methods. Lets `(satisfies? IList xs)` answer true when
             // the type only "claims" IList without implementing
             // anything.
-            let register_member_fref = self
-                .func_refs
-                .get("__register_protocol_member")
-                .copied()
-                .expect("__register_protocol_member not registered")
-                .fref();
             for proto_sym in &protocol_syms {
                 let p_sym_const =
                     fb.iconst(Type::I64, v::encode_sym_id(*proto_sym) as i64);
                 let t_sym_const =
                     fb.iconst(Type::I64, v::encode_sym_id(type_sym) as i64);
                 fb.safepoint(&[]);
-                fb.call(register_member_fref, &[t_sym_const, p_sym_const]);
+                fb.call(self.externs.register_protocol_member, &[t_sym_const, p_sym_const]);
             }
             let nil_v = fb.iconst(Type::I64, v::NIL as i64);
             fb.ret(nil_v);
-            self.mb.finish_func(reg_fref, fb);
+            self.dyn_module.module_builder.finish_func(reg_fref, fb);
         }
         TopResult::Expr(reg_fref)
     }
@@ -1184,7 +1183,8 @@ impl<'a> Compiler<'a> {
         // through the same indirect path that calls closures.
         // Static call sites pass NIL as `self_fn`.
         let fref = self
-            .mb
+            .dyn_module
+            .module_builder
             .declare_func(name, &[Type::I64, Type::I64], Some(Type::I64));
         self.func_refs
             .insert(name.to_string(), FnEntry::DefFn { fref });
@@ -1251,12 +1251,6 @@ impl<'a> Compiler<'a> {
         // itself gets shadowed by core.clj's seq-aware `(defn cons …)`,
         // which would turn this static call into a malformed indirect
         // call (def-fn ABI expects (self_fn, args_list), not raw args).
-        let cons_fref = self
-            .func_refs
-            .get("__cons")
-            .copied()
-            .expect("__cons extern not registered")
-            .fref();
         let mut acc = fb.iconst(Type::I64, v::NIL as i64);
         for (i, &a) in args.iter().enumerate().rev() {
             let mut live = env.live_values();
@@ -1267,7 +1261,7 @@ impl<'a> Compiler<'a> {
             live.extend_from_slice(&args[..i]);
             fb.safepoint(&live);
             acc = fb
-                .call(cons_fref, &[a, acc])
+                .call(self.externs.cons, &[a, acc])
                 .expect("cons returns a value");
         }
         acc
@@ -1279,13 +1273,7 @@ impl<'a> Compiler<'a> {
     /// terminated; the caller must switch to a fresh block to
     /// continue emission.
     fn emit_raise(&mut self, fb: &mut FunctionBuilder, exc_value: Value) {
-        let raise_fref = self
-            .func_refs
-            .get("__raise_exception")
-            .copied()
-            .expect("__raise_exception extern not registered")
-            .fref();
-        let fr_value = fb.iconst(Type::I64, raise_fref.as_u32() as i64);
+        let fr_value = fb.iconst(Type::I64, self.externs.raise_exception.as_u32() as i64);
         fb.safepoint(&[exc_value]);
         fb.call_via_func_ref(self.call_table_base, fr_value, &[exc_value], Some(Type::I64));
         fb.unreachable();
@@ -1530,18 +1518,12 @@ impl<'a> Compiler<'a> {
         let val = self.lower_expr(fb, env, val_form);
 
         let field_sym = self.sym.intern(field_name);
-        let setter = self
-            .func_refs
-            .get("__record_set_field")
-            .copied()
-            .expect("__record_set_field not registered")
-            .fref();
         let field_const = fb.iconst(Type::I64, v::encode_sym_id(field_sym) as i64);
         let mut live = env.live_values();
         live.push(receiver);
         live.push(val);
         fb.safepoint(&live);
-        fb.call(setter, &[receiver, field_const, val])
+        fb.call(self.externs.record_set_field, &[receiver, field_const, val])
             .expect("__record_set_field returns a value")
     }
 
@@ -1558,13 +1540,7 @@ impl<'a> Compiler<'a> {
     fn lower_throw(&mut self, fb: &mut FunctionBuilder, env: &mut Env, args: u64) -> Value {
         let val_form = v::first(args);
         let val = self.lower_expr(fb, env, val_form);
-        let raise_fref = self
-            .func_refs
-            .get("__raise_exception")
-            .copied()
-            .expect("__raise_exception extern not registered")
-            .fref();
-        let fr_value = fb.iconst(Type::I64, raise_fref.as_u32() as i64);
+        let fr_value = fb.iconst(Type::I64, self.externs.raise_exception.as_u32() as i64);
         let mut live = env.live_values();
         live.push(val);
         fb.safepoint(&live);
@@ -1712,13 +1688,13 @@ impl<'a> Compiler<'a> {
 
         *self.anon_counter += 1;
         let name = format!("__try_body_{}", *self.anon_counter);
-        let body = InlineBody::declare(self.mb, &name, captures.len(), 0);
+        let body = InlineBody::declare(&mut self.dyn_module.module_builder, &name, captures.len(), 0);
 
         // Open + lower the body. The kit doesn't hold a borrow on
-        // `self.mb` between `open` and `finish`, so recursive
+        // `&mut self.dyn_module.module_builder` between `open` and `finish`, so recursive
         // `self.lower_expr` works normally here.
         {
-            let (mut inner_fb, cap_vals, _extras) = body.open(self.mb);
+            let (mut inner_fb, cap_vals, _extras) = body.open(&mut self.dyn_module.module_builder);
             let mut inner_env = Env::new();
             for (i, &cap_id) in captures.iter().enumerate() {
                 inner_env.bind(cap_id, cap_vals[i]);
@@ -1737,7 +1713,7 @@ impl<'a> Compiler<'a> {
             } else {
                 inner_fb.unreachable();
             }
-            body.finish(self.mb, inner_fb);
+            body.finish(&mut self.dyn_module.module_builder, inner_fb);
         }
 
         // Invoke from outer `fb`; dispatch + arms emitted here.
@@ -1823,12 +1799,12 @@ impl<'a> Compiler<'a> {
 
         *self.anon_counter += 1;
         let name = format!("__try_wrapper_{}", *self.anon_counter);
-        let wrapper = InlineBody::declare(self.mb, &name, captures.len(), 0);
+        let wrapper = InlineBody::declare(&mut self.dyn_module.module_builder, &name, captures.len(), 0);
 
         // Compile wrapper: contains the try-catch (no finally), which
         // itself synthesizes another inline body via `lower_try_no_finally`.
         {
-            let (mut wrapper_fb, cap_vals, _extras) = wrapper.open(self.mb);
+            let (mut wrapper_fb, cap_vals, _extras) = wrapper.open(&mut self.dyn_module.module_builder);
             let mut wrapper_env = Env::new();
             for (i, &cap_id) in captures.iter().enumerate() {
                 wrapper_env.bind(cap_id, cap_vals[i]);
@@ -1844,7 +1820,7 @@ impl<'a> Compiler<'a> {
             } else {
                 wrapper_fb.unreachable();
             }
-            wrapper.finish(self.mb, wrapper_fb);
+            wrapper.finish(&mut self.dyn_module.module_builder, wrapper_fb);
         }
 
         // Outer: invoke the wrapper, with finally on both paths.
@@ -1916,12 +1892,7 @@ impl<'a> Compiler<'a> {
         arms: &[CatchArm],
         merge_bb: BlockId,
     ) {
-        let type_match_fref = self
-            .func_refs
-            .get("__exception_type_matches")
-            .copied()
-            .expect("__exception_type_matches not registered")
-            .fref();
+        let type_match_fref = self.externs.exception_type_matches;
 
         // Pre-create per-arm body blocks + the no-match terminal.
         let arm_blocks: Vec<BlockId> =
@@ -1988,16 +1959,7 @@ impl<'a> Compiler<'a> {
 
         // No-match path: re-raise.
         fb.switch_to_block(no_match_bb);
-        let raise_fref = self
-            .func_refs
-            .get("__raise_exception")
-            .copied()
-            .expect("__raise_exception extern not registered")
-            .fref();
-        let fr_value = fb.iconst(Type::I64, raise_fref.as_u32() as i64);
-        fb.safepoint(&[thrown]);
-        fb.call_via_func_ref(self.call_table_base, fr_value, &[thrown], Some(Type::I64));
-        fb.unreachable();
+        self.emit_raise(fb, thrown);
     }
 
     /// Recognize a `(catch ...)` form.
@@ -2145,16 +2107,10 @@ impl<'a> Compiler<'a> {
         let element_vals: Vec<Value> =
             elems.iter().map(|e| self.lower_expr(fb, env, *e)).collect();
         let list = self.build_args_list(fb, env, &element_vals);
-        let vec_fref = self
-            .func_refs
-            .get("__vector_from_list")
-            .copied()
-            .expect("__vector_from_list extern not registered")
-            .fref();
         let mut live = env.live_values();
         live.push(list);
         fb.safepoint(&live);
-        fb.call(vec_fref, &[list])
+        fb.call(self.externs.vector_from_list, &[list])
             .expect("__vector_from_list returns a value")
     }
 
@@ -2187,18 +2143,12 @@ impl<'a> Compiler<'a> {
                 }
                 let field_sym = self.sym.intern(field);
                 let receiver = self.lower_expr(fb, env, arg_forms[0]);
-                let getter = self
-                    .func_refs
-                    .get("__record_get_field")
-                    .copied()
-                    .expect("__record_get_field not registered")
-                    .fref();
                 let field_const = fb.iconst(Type::I64, v::encode_sym_id(field_sym) as i64);
                 let mut live = env.live_values();
                 live.push(receiver);
                 fb.safepoint(&live);
                 return fb
-                    .call(getter, &[receiver, field_const])
+                    .call(self.externs.record_get_field, &[receiver, field_const])
                     .expect("__record_get_field returns a value");
             }
             if let Some(method) = head_name.strip_prefix('.') {
@@ -2212,19 +2162,13 @@ impl<'a> Compiler<'a> {
                     .iter()
                     .map(|a| self.lower_expr(fb, env, *a))
                     .collect();
-                let lookup = self
-                    .func_refs
-                    .get("__method_lookup")
-                    .copied()
-                    .expect("__method_lookup not registered")
-                    .fref();
                 let method_const = fb.iconst(Type::I64, v::encode_sym_id(method_sym) as i64);
                 let mut live = env.live_values();
                 live.push(receiver);
                 live.extend_from_slice(&user_args);
                 fb.safepoint(&live);
                 let fn_obj = fb
-                    .call(lookup, &[method_const, receiver])
+                    .call(self.externs.method_lookup, &[method_const, receiver])
                     .expect("__method_lookup returns a value");
                 // Pack [receiver, args…] into a single list for the
                 // closure-shape call.
@@ -2283,12 +2227,6 @@ impl<'a> Compiler<'a> {
             user_args.push(self.lower_expr(fb, env, *a));
         }
 
-        let arity_check = self
-            .func_refs
-            .get("__arity_check")
-            .copied()
-            .expect("__arity_check extern not registered")
-            .fref();
         let n_const = fb.iconst(Type::I64, n as i64);
         let mut live_for_check = env.live_values();
         live_for_check.push(callee);
@@ -2298,7 +2236,7 @@ impl<'a> Compiler<'a> {
         // failure. emit_throw_if_not_nil routes to __raise_exception
         // on the failure path so (catch ArityException e ...) works.
         let arity_result = fb
-            .call(arity_check, &[callee, n_const])
+            .call(self.externs.arity_check, &[callee, n_const])
             .expect("__arity_check returns a value");
         self.emit_throw_if_not_nil(fb, arity_result);
 
@@ -2361,7 +2299,7 @@ impl<'a> Compiler<'a> {
         // dispatcher picks the right clause at runtime from the list
         // count.
         let inner_fref = self.closures.declare_body(
-            self.mb,
+            &mut self.dyn_module.module_builder,
             &name,
             BodyShape { fixed: 0, variadic: false, n_captures: captures.len() },
         );
@@ -2409,7 +2347,7 @@ impl<'a> Compiler<'a> {
         clauses: &[Clause],
         captures: &[u32],
     ) {
-        let mut fb = self.mb.define_func(fref);
+        let mut fb = self.dyn_module.module_builder.define_func(fref);
 
         if clauses.len() == 1 {
             let c = &clauses[0];
@@ -2420,7 +2358,7 @@ impl<'a> Compiler<'a> {
             };
             let bound = self.closures.begin_body(&mut fb, shape);
             self.lower_kit_clause(&mut fb, &c.params, captures, c.body, bound);
-            self.mb.finish_func(fref, fb);
+            self.dyn_module.module_builder.finish_func(fref, fb);
             return;
         }
 
@@ -2437,7 +2375,7 @@ impl<'a> Compiler<'a> {
             let bound = dispatch.begin_clause(self.closures, &mut fb, i);
             self.lower_kit_clause(&mut fb, &clause.params, captures, clause.body, bound);
         }
-        self.mb.finish_func(fref, fb);
+        self.dyn_module.module_builder.finish_func(fref, fb);
     }
 
     /// Bind a kit-produced `BoundBodyEnv` into our `Env` and lower a

@@ -1,12 +1,15 @@
 use crate::builder::FunctionBuilder;
+use crate::gc_runtime::GcInterpCtx;
 use crate::interp::*;
 use crate::ir::*;
 use crate::types::{Signature, Type};
+use dynalloc::LowBitPtrPolicy;
+use dynobj::Compact;
 use dynvalue::{Decoded, LowBit, NanBox, TagScheme};
 
 fn run_simple(func: &Function, args: &[u64]) -> u64 {
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v,
@@ -400,7 +403,7 @@ fn tagged_roundtrip_lowbit() {
 
     let input = 0x0ABC_DEF0_1234u64; // must fit in 60 bits
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<4>, _>::new(&module, &roots);
     let result = match interp.run(entry, &[input]).unwrap() {
         InterpResult::Value(v) => v,
@@ -430,7 +433,7 @@ fn tagged_roundtrip_nanbox() {
 
     let input = 0x1234_5678_9ABCu64;
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     let result = match interp.run(entry, &[input]).unwrap() {
         InterpResult::Value(v) => v,
@@ -450,7 +453,7 @@ fn is_tag_check_lowbit() {
     let func = b.build();
 
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<4>, _>::new(&module, &roots);
     // LowBit<4>: encode = (payload << 4) | tag
     let tagged_3 = (42u64 << 4) | 3;
@@ -473,7 +476,7 @@ fn is_tag_check_nanbox() {
     let func = b.build();
 
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     let run = |args: &[u64]| match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v,
@@ -516,7 +519,7 @@ fn guard_fails_deopt() {
     let func = b.build();
 
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     match interp.run(entry, &[99]).unwrap() {
         InterpResult::Deopt {
@@ -551,7 +554,7 @@ fn call_extern() {
     let func = b.build();
 
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(fref, |args| ExternCallResult::Value(Some(args[0] * 2)));
     match interp.run(entry, &[21]).unwrap() {
@@ -577,7 +580,7 @@ fn call_void_extern() {
     let func = b.build();
 
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(fref, |_args| ExternCallResult::Value(None));
     assert_eq!(
@@ -600,7 +603,7 @@ fn call_indirect() {
     let func = b.build();
 
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind_indirect(|_callee, args| ExternCallResult::Value(Some(args[0] + 5)));
     match interp.run(entry, &[0xCAFE]).unwrap() {
@@ -638,7 +641,7 @@ fn invoke_normal_path() {
     let func = b.build();
 
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(fref, |args| ExternCallResult::Value(Some(args[0] * 3)));
     match interp.run(entry, &[14]).unwrap() {
@@ -684,7 +687,7 @@ fn invoke_exception_path() {
     let func = b.build();
 
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(fref, |_args| ExternCallResult::Exception(7));
     match interp.run(entry, &[1]).unwrap() {
@@ -756,7 +759,7 @@ fn error_unreachable() {
     b.unreachable();
     let func = b.build();
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     match interp.run(entry, &[]) {
         Err(InterpError::Unreachable) => {}
@@ -778,7 +781,7 @@ fn error_unbound_extern() {
     b.ret(r);
     let func = b.build();
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     match interp.run(entry, &[]) {
         Err(InterpError::UnknownExternFunc(name)) => assert_eq!(name, "missing"),
@@ -795,7 +798,7 @@ fn error_divide_by_zero() {
     b.ret(r);
     let func = b.build();
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     match interp.run(entry, &[]) {
         Err(InterpError::DivideByZero) => {}
@@ -817,7 +820,7 @@ fn error_uncaught_exception() {
     b.ret(r);
     let func = b.build();
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(fref, |_| ExternCallResult::Exception(42));
     match interp.run(entry, &[]) {
@@ -903,7 +906,7 @@ fn pic_add_tagged() {
     let a_tagged = NanBox::encode_tagged(1, 10);
     let b_tagged = NanBox::encode_tagged(1, 32);
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     let result = match interp.run(entry, &[a_tagged, b_tagged]).unwrap() {
         InterpResult::Value(v) => v,
@@ -981,7 +984,7 @@ fn bind_by_name() {
     let func = b.build();
 
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind_by_name("get_value", |_| ExternCallResult::Value(Some(123)));
     match interp.run(entry, &[]).unwrap() {
@@ -996,7 +999,7 @@ fn void_return() {
     b.ret_void();
     let func = b.build();
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     match interp.run(entry, &[]).unwrap() {
         InterpResult::Void => {}
@@ -1038,7 +1041,7 @@ fn invoke_indirect_normal() {
     let func = b.build();
 
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind_indirect(|_callee, args| ExternCallResult::Value(Some(args[0] * 10)));
     match interp.run(entry, &[0xBEEF]).unwrap() {
@@ -1060,7 +1063,7 @@ fn guard_with_multiple_live_values() {
     let func = b.build();
 
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     match interp.run(entry, &[10, 20]).unwrap() {
         InterpResult::Deopt { live_values, .. } => {
@@ -1109,7 +1112,7 @@ use crate::builder::ModuleBuilder;
 use crate::interp::ModuleInterpreter;
 
 fn run_module_simple(entry: FuncRef, module: &crate::ir::Module, args: &[u64]) -> u64 {
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<3>, _>::new(module, &roots);
     match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v,
@@ -1261,7 +1264,7 @@ fn module_abort_to_prompt_unwinds_to_prompt_owner() {
     mb.finish_func(f_main, fb);
 
     let module = mb.build();
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
 
     let result = match interp.run(f_main, &[41]).unwrap() {
@@ -1471,7 +1474,7 @@ fn module_with_extern() {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     let printed = Arc::new(AtomicU64::new(0));
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     let printed_clone = printed.clone();
     interp.bind(f_print, move |args| {
@@ -1580,7 +1583,7 @@ fn module_invoke_internal_exception() {
     mb.finish_func(f_main, fb);
 
     let module = mb.build();
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
     let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
     interp.bind(f_throw, |_args| ExternCallResult::Exception(42));
     match interp.run(f_main, &[10]).unwrap() {

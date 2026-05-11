@@ -14,9 +14,10 @@
 //! types registered via `ContinuationTypes::register_into`), and
 //! passes `&ctx` to `ModuleInterpreter::new`.
 //!
-//! This is the first type in the tree that plugs a real `SemiSpace`
-//! into the reference interpreter. Before this, the only existing
-//! `InterpRootManager` impl was `NoGcRoots`, a no-op.
+//! This is the only `InterpRootManager` impl in the toolkit — there is
+//! no "no-op" / "leak" variant. Tests that don't allocate should use
+//! [`GcInterpCtx::new_unallocating`], which sets up a real (but tiny)
+//! heap so safepoint round-trips actually preserve live values.
 
 use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
@@ -117,6 +118,24 @@ impl<H: ObjHeader, P: PtrPolicy> GcInterpCtx<H, P> {
             gc_policy: Cell::new(GcInterpPolicy::NeverAuto),
             _phantom: PhantomData,
         }
+    }
+
+    /// Build a context with a tiny (4 KiB) heap and an otherwise empty
+    /// type table — only the continuation types are registered.
+    ///
+    /// For tests or interpretive frontends that never trigger an
+    /// allocation through the IR. A real heap is still created (because
+    /// safepoint round-trips need real root slots — there is no
+    /// "trivial" root manager), but it stays unused.
+    ///
+    /// Pick this over inlining the three-line `SemiSpace + register_into
+    /// + new` boilerplate. Use [`new`](Self::new) when you need a real
+    /// heap with actual type entries.
+    pub fn new_unallocating() -> Self {
+        let mut type_table: Vec<TypeInfo> = Vec::new();
+        let cont_types = ContinuationTypes::register_into::<H>(&mut type_table);
+        let heap = SemiSpace::new::<H>(4096);
+        Self::new(heap, type_table, cont_types)
     }
 
     /// Register an additional root source that the GC should scan

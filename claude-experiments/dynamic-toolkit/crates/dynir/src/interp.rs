@@ -95,53 +95,6 @@ pub trait InterpRootManager<
     }
 }
 
-/// No-op root manager for when GC is not needed.
-pub struct NoGcRoots;
-
-impl<L, Roots, Transport> InterpRootManager<L, Roots, Transport> for NoGcRoots
-where
-    L: ValueLayout,
-    Roots: RootStrategy<L>,
-    Transport: RootTransport<L, Roots>,
-{
-    fn push_frame(&self, _gc_slot_count: usize) -> usize {
-        0
-    }
-    fn pop_frame(&self) {}
-    fn set_root(&self, _frame: usize, _slot: usize, _value: u64) {}
-    fn get_root(&self, _frame: usize, _slot: usize) -> u64 {
-        0
-    }
-    fn clear_frame(&self, _frame: usize) {}
-    fn collect(&self) {}
-}
-
-/// `NoGcRoots` also serves as a trivial `ContinuationContext` that
-/// panics on any capture/resume attempt. Interpreters using `NoGcRoots`
-/// are implicitly saying "this program will never use continuations";
-/// if one tries to, the panic makes the mistake loud.
-impl dynexec::ContinuationContext for NoGcRoots {
-    fn capture(
-        &self,
-        _builder: &dynexec::CapturedStackBuilder,
-    ) -> Option<u64> {
-        panic!(
-            "NoGcRoots: capture_continuation called but no heap was \
-             configured. Use GcInterpCtx as the root manager if you \
-             need delimited continuations."
-        );
-    }
-    fn read<'h>(
-        &'h self,
-        _handle: u64,
-    ) -> Option<dynexec::ContinuationView<'h>> {
-        panic!(
-            "NoGcRoots: read_continuation called but no heap was \
-             configured. Use GcInterpCtx as the root manager if you \
-             need delimited continuations."
-        );
-    }
-}
 
 // ─── InterpStackRuntime ───────────────────────────────────────────
 
@@ -543,7 +496,7 @@ enum FrameAction {
 pub struct ConfiguredModuleInterpreter<
     'a,
     Cfg: CodegenConfig,
-    R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport> = NoGcRoots,
+    R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport>,
 > {
     module: &'a Module,
     roots: &'a R,
@@ -563,7 +516,7 @@ pub struct ConfiguredModuleInterpreter<
 static NO_CONT_CTX: dynexec::NoContinuations = dynexec::NoContinuations;
 
 
-pub type ModuleInterpreter<'a, S, R = NoGcRoots> =
+pub type ModuleInterpreter<'a, S, R> =
     ConfiguredModuleInterpreter<'a, DefaultCodegenConfig<S>, R>;
 
 impl<'a, Cfg: CodegenConfig, R> ConfiguredModuleInterpreter<'a, Cfg, R>

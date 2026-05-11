@@ -19,7 +19,7 @@ mod tests;
 pub use builder::{FunctionBuilder, ModuleBuilder};
 pub use interp::{
     ConfiguredModuleInterpreter, ExternCallResult, InterpError, InterpResult, InterpRootManager,
-    ModuleInterpreter, NoGcRoots,
+    ModuleInterpreter,
 };
 pub use ir::{
     Block, BlockId, CmpOp, DeoptId, DeoptInfo, ExternFunc, FuncDef, FuncRef, Function, Inst,
