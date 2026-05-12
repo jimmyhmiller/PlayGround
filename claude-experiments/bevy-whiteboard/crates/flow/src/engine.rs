@@ -561,6 +561,47 @@ impl Sim {
     /// starting descendant. This is how an inner leaf's
     /// `ToOutPort("name")` is resolved to a specific compound
     /// boundary.
+    /// Compound-aware target resolution for `ToTargetExpr`.
+    ///
+    /// Walks the target's parent chain looking for any ancestor compound
+    /// whose `in_ports` map a port name to `target_id` (directly or
+    /// transitively via nested compounds). For each such (ancestor,
+    /// port) pair, checks if `from_nid` has an outbound edge landing on
+    /// that ancestor with a matching `to_port`. Returns the edge id and
+    /// the original target as the delivery node so the engine's normal
+    /// `resolve_in_port_chain` will re-derive the inner leaf at delivery
+    /// time.
+    fn resolve_via_compound_in_port(
+        &self,
+        from_nid: NodeId,
+        target_id: NodeId,
+    ) -> Option<(EdgeId, NodeId)> {
+        let mut cur = self.nodes.get(&target_id)?.parent;
+        let mut depth_target = target_id;
+        while let Some(pid) = cur {
+            let p_node = self.nodes.get(&pid)?;
+            if let Some(body) = &p_node.compound {
+                for (port_name, &inner) in &body.in_ports {
+                    if inner != depth_target { continue; }
+                    if let Some(eid) = self
+                        .outbound(from_nid)
+                        .iter()
+                        .copied()
+                        .find(|eid| {
+                            let e = &self.edges[eid];
+                            e.to == pid && e.to_port.as_deref() == Some(port_name.as_str())
+                        })
+                    {
+                        return Some((eid, target_id));
+                    }
+                }
+                depth_target = pid;
+            }
+            cur = p_node.parent;
+        }
+        None
+    }
+
     fn find_enclosing_compound_for_out_port(&self, start: NodeId, port_name: &str) -> Option<NodeId> {
         let mut cur = self.nodes.get(&start)?.parent;
         let seeker = start;
@@ -1041,6 +1082,21 @@ impl Sim {
                     // auto-created one — the single wire the user drew
                     // carries both directions.
                     (eid, target_id)
+                } else if let Some((eid, deliver)) =
+                    self.resolve_via_compound_in_port(from_nid, target_id)
+                {
+                    // Compound-aware fallback: when the target node lives
+                    // inside a compound, the caller's outbound edge will
+                    // typically point at the *compound shim* via an in-port
+                    // (e.g. `Echo -> ClientComposite.reply`). The earlier
+                    // direct/reverse checks compare against the inner node
+                    // id and miss those edges. Walk the target's parent
+                    // chain and look for an outbound edge of `from_nid`
+                    // landing on an ancestor compound with an `in_port`
+                    // mapped to the target. If found, route via that edge
+                    // — `resolve_in_port_chain` re-derives the inner leaf
+                    // at delivery.
+                    (eid, deliver)
                 } else {
                     // Neither direction available — the target genuinely
                     // isn't reachable from this node. Silent-drop matches

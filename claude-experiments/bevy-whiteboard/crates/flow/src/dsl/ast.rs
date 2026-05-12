@@ -167,7 +167,7 @@ pub struct TplParam {
 }
 
 #[derive(Debug, Clone)]
-pub enum CtType { Int, Bool, Str }
+pub enum CtType { Int, Bool, Str, Float }
 
 #[derive(Debug, Clone)]
 pub struct PortDecl { pub port: String, pub inner: NameTpl }

@@ -629,8 +629,9 @@ impl Parser {
             "Int" => CtType::Int,
             "Bool" => CtType::Bool,
             "String" => CtType::Str,
+            "Float" => CtType::Float,
             other => return Err(format!(
-                "{}: compound param `{}`: type must be Int|Bool|String, got `{}`",
+                "{}: compound param `{}`: type must be Int|Bool|String|Float, got `{}`",
                 self.here(), name, other
             )),
         };

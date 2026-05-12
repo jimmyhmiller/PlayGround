@@ -48,6 +48,12 @@ impl<'a> Reader<'a> {
         Reader { src, pos: 0 }
     }
 
+    /// Current byte cursor — used by progressive loaders that read+eval
+    /// one form at a time and need to skip past the consumed bytes.
+    pub fn byte_pos(&self) -> usize {
+        self.pos
+    }
+
     /// Read one form. Returns `Ok(None)` at EOF.
     pub fn read(&mut self) -> Result<Option<Object>, ReaderError> {
         self.skip_ws_and_comments();
@@ -71,23 +77,11 @@ impl<'a> Reader<'a> {
                 self.skip_line_comment();
                 self.read_form()
             }
-            b'{' => crate::unimplemented_port!(
-                "LispReader: map literal `{}`",
-                "needs IPersistentMap port"
-            ),
-            b'#' => crate::unimplemented_port!(
-                "LispReader: dispatch macro `#`",
-                "needs set / regex / var / anon-fn / reader-conditional ports"
-            ),
+            b'{' => self.read_map_placeholder(),
+            b'#' => self.read_dispatch_placeholder(),
             b'^' => self.read_meta(),
-            b'`' => crate::unimplemented_port!(
-                "LispReader: syntax-quote ` `",
-                "needs syntax-quote expansion"
-            ),
-            b'~' => crate::unimplemented_port!(
-                "LispReader: unquote `~`",
-                "only meaningful inside syntax-quote"
-            ),
+            b'`' => self.read_syntax_quote_placeholder(),
+            b'~' => self.read_unquote_placeholder(),
             b'@' => crate::unimplemented_port!(
                 "LispReader: deref `@`",
                 "needs `clojure.core/deref` Var"
@@ -292,13 +286,42 @@ impl<'a> Reader<'a> {
                 name == "macro"
             }
             Some(b'{') => {
-                // For `^{:macro true}` we'd need a real map literal. Until
-                // map support lands, refuse this shape rather than silently
-                // ignoring meta the user clearly cares about.
-                return Err(self.err_with(
-                    "LispReader: ^{...} metadata not yet supported (needs map literal)"
-                        .to_string(),
-                ));
+                // `^{:k v :k2 v2 ...} form`. Real Clojure attaches the map
+                // as IPersistentMap metadata. We don't have maps yet, so
+                // we parse the entries and look for `:macro true` (the
+                // only metadata key we currently *act on*). Everything
+                // else is recognized but ignored — preserves reader
+                // progress without silently dropping meta the user might
+                // actually depend on for a feature we haven't ported.
+                self.pos += 1; // consume '{'
+                let mut sees_macro_true = false;
+                loop {
+                    self.skip_ws_and_comments();
+                    match self.peek_byte() {
+                        Some(b'}') => {
+                            self.pos += 1;
+                            break;
+                        }
+                        None => return Err(self.err("EOF inside ^{...} map")),
+                        Some(_) => {}
+                    }
+                    let key = self.read_form()?;
+                    self.skip_ws_and_comments();
+                    if matches!(self.peek_byte(), Some(b'}') | None) {
+                        return Err(self.err(
+                            "Map literal must have an even number of forms",
+                        ));
+                    }
+                    let val = self.read_form()?;
+                    if let Object::Keyword(k) = &key {
+                        if k.get_namespace().is_none() && k.get_name() == "macro" {
+                            if let Object::Bool(true) = val {
+                                sees_macro_true = true;
+                            }
+                        }
+                    }
+                }
+                sees_macro_true
             }
             Some(_) => {
                 // Probably `^Tag form` — read the tag form, ignore. (Not
@@ -326,6 +349,122 @@ impl<'a> Reader<'a> {
         let inner = self.read_form()?;
         let quote_sym = Object::Symbol(Symbol::intern("quote"));
         Ok(Object::List(PersistentList::create(vec![quote_sym, inner])))
+    }
+
+    /// Placeholder for the `#` dispatch macro. Handles the most common
+    /// dispatches we encounter while loading upstream `clojure/core.clj`:
+    ///
+    /// * `#{ … }` — set literal: read+discard contents, return `Nil`.
+    ///   We don't have IPersistentSet yet.
+    /// * `#_ form` — discard reader macro: skip the next form entirely
+    ///   (and don't return anything for it). We implement this by reading
+    ///   the discarded form and then recursing back into `read_form`.
+    /// * `#'sym` — var reference shorthand: reads as `(var sym)`. Our
+    ///   compiler doesn't have the `var` special form yet, so this is
+    ///   substituted away by the loader's substitution pass.
+    /// * Other dispatches (`##NaN`, `#?`, `#"regex"`, `#(...)`, ...) are
+    ///   not yet handled and will panic with `unimplemented_port!`.
+    fn read_dispatch_placeholder(&mut self) -> Result<Object, ReaderError> {
+        self.pos += 1; // consume '#'
+        let c = self.peek_byte().ok_or_else(|| self.err("EOF after `#` dispatch"))?;
+        match c {
+            b'{' => {
+                self.pos += 1;
+                loop {
+                    self.skip_ws_and_comments();
+                    match self.peek_byte() {
+                        Some(b'}') => { self.pos += 1; return Ok(Object::Nil); }
+                        None => return Err(self.err("EOF inside set literal `#{...}`")),
+                        Some(_) => {}
+                    }
+                    let _e = self.read_form()?;
+                }
+            }
+            b'_' => {
+                self.pos += 1;
+                let _discarded = self.read_form()?;
+                // Then read the next form for real.
+                self.read_form()
+            }
+            b'\'' => {
+                self.pos += 1;
+                let sym = self.read_form()?;
+                let var_sym = Object::Symbol(Symbol::intern("var"));
+                Ok(Object::List(PersistentList::create(vec![var_sym, sym])))
+            }
+            _ => crate::unimplemented_port!(
+                "LispReader: dispatch macro `#?`",
+                "needs set / regex / var / anon-fn / reader-conditional ports"
+            ),
+        }
+    }
+
+    /// Placeholder syntax-quote: treats ``` `<form> ``` as `(quote <form>)`.
+    ///
+    /// This is NOT correct upstream semantics — real syntax-quote auto-
+    /// qualifies symbols against the current namespace and walks the form
+    /// transforming unquotes (`~`) and unquote-splices (`~@`) into a
+    /// `(seq (concat ...))` expansion. We don't have any of that yet.
+    ///
+    /// For the bootstrap loader's purposes, the *reader* just needs to
+    /// consume the form so subsequent forms can be processed. Macros
+    /// whose bodies rely on syntax-quote semantics will produce wrong
+    /// expansions when run, but that's a separate problem from reading.
+    fn read_syntax_quote_placeholder(&mut self) -> Result<Object, ReaderError> {
+        self.pos += 1; // consume '`'
+        let inner = self.read_form()?;
+        let quote_sym = Object::Symbol(Symbol::intern("quote"));
+        Ok(Object::List(PersistentList::create(vec![quote_sym, inner])))
+    }
+
+    /// Placeholder unquote: `~<form>` reads as `<form>` (the marker is
+    /// dropped). `~@<form>` reads the same way — the splice is gone too.
+    /// As with `read_syntax_quote_placeholder`, this is wrong-by-design;
+    /// we accept the wrong semantics to keep the reader advancing.
+    fn read_unquote_placeholder(&mut self) -> Result<Object, ReaderError> {
+        self.pos += 1; // consume '~'
+        // Optional `@` for unquote-splicing.
+        if self.peek_byte() == Some(b'@') {
+            self.pos += 1;
+        }
+        self.read_form()
+    }
+
+    /// Read a `{k1 v1 k2 v2 ...}` map literal and discard the contents,
+    /// returning `Object::Nil`.
+    ///
+    /// This is a placeholder until `IPersistentMap` is ported: map
+    /// literals appear pervasively in upstream `clojure/core.clj` as
+    /// metadata and configuration, but during bootstrap loading we never
+    /// actually need their values (they're substituted away at the
+    /// loader's substitution pass, or they live on metadata our analyzer
+    /// already discards). The point is for the reader to make forward
+    /// progress so the rest of the file can be processed.
+    ///
+    /// The keys and values are still *read* (and discarded) so the cursor
+    /// advances past them correctly, including any nested forms.
+    fn read_map_placeholder(&mut self) -> Result<Object, ReaderError> {
+        self.pos += 1; // consume '{'
+        loop {
+            self.skip_ws_and_comments();
+            match self.peek_byte() {
+                Some(b'}') => {
+                    self.pos += 1;
+                    return Ok(Object::Nil);
+                }
+                None => return Err(self.err("EOF inside map literal `{...}`")),
+                Some(_) => {}
+            }
+            // Read and discard a key + value.
+            let _k = self.read_form()?;
+            self.skip_ws_and_comments();
+            if matches!(self.peek_byte(), Some(b'}') | None) {
+                return Err(self.err(
+                    "Map literal must have an even number of forms",
+                ));
+            }
+            let _v = self.read_form()?;
+        }
     }
 
     fn skip_ws_and_comments(&mut self) {
@@ -594,6 +733,30 @@ mod tests {
         match form {
             Object::List(l) => assert_eq!(l.count(), 3),
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn reader_skips_doc_meta_via_map_form() {
+        // `^{:doc "..."} sym` — map metadata parsed and discarded; sym
+        // still reads cleanly.
+        match rd(r#"^{:doc "hello"} foo"#) {
+            Object::Symbol(s) => {
+                assert_eq!(s.get_name(), "foo");
+                assert!(!s.has_macro_meta(), "no :macro in this map");
+            }
+            other => panic!("expected Symbol, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reader_picks_up_macro_true_inside_map_meta() {
+        match rd(r#"^{:macro true :doc "x"} bar"#) {
+            Object::Symbol(s) => {
+                assert_eq!(s.get_name(), "bar");
+                assert!(s.has_macro_meta(), "expected :macro true detected");
+            }
+            other => panic!("expected Symbol, got {other:?}"),
         }
     }
 

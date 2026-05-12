@@ -163,7 +163,12 @@ fn float_in_for_bound_is_rejected() {
         for x in 0..3.5 { node Cell_{x} { slots { v: Int = 0 } } }
     "#;
     let err = parse_and_expand(src).expect_err("float bounds must be rejected");
-    assert!(err.contains("floats are not supported"), "unexpected error: {}", err);
+    // After float support was added to compound param defaults, `for` bounds
+    // still require Int — the rejection now surfaces as a type mismatch.
+    assert!(
+        err.contains("expected Int") || err.contains("floats are not supported"),
+        "unexpected error: {}", err
+    );
 }
 
 #[test]

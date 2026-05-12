@@ -107,6 +107,7 @@ pub struct HeapTypeIds {
     pub symbol: usize,
     pub keyword: usize,
     pub cons: usize,
+    pub vector: usize,
 }
 
 /// Process-global type-id registry. `Compiler::new` calls
@@ -129,6 +130,19 @@ pub fn heap_type_ids() -> HeapTypeIds {
     *HEAP_TYPE_IDS
         .get()
         .expect("clojure-jvm: heap_type_ids() called before Compiler::new ran")
+}
+
+/// Decode an arbitrary NanBox into an `Object`. Handles immediates
+/// (nil / bool / long / double) directly and dispatches to
+/// `heap_bits_to_object` for TAG_PTR pointers.
+pub fn any_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
+    match nanbox_tag(bits) {
+        None => Object::Double(f64::from_bits(bits)),
+        Some(TAG_NIL) => Object::Nil,
+        Some(TAG_BOOL) => Object::Bool(nanbox_payload(bits) != 0),
+        Some(TAG_PTR) => unsafe { heap_bits_to_object(bits, ids) },
+        _ => Object::Unported { java_class: "unknown NanBox tag" },
+    }
 }
 
 /// Decode a heap-tagged NanBox into a fully-materialized `Object` by reading
@@ -192,6 +206,21 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
             rest: rest_list,
             count: 1 + count_list(&rest_bits, ids),
         }));
+    }
+    if type_id == ids.vector {
+        // `clojure.lang.PersistentVector` (our flat varlen-values shape):
+        // Header(8) + varlen-count(8) + N * 8 byte slots. The count word
+        // lives at offset 8; items start at offset 16.
+        let count = unsafe { ptr.add(8).cast::<u64>().read_unaligned() } as usize;
+        let mut items: Vec<Object> = Vec::with_capacity(count);
+        for i in 0..count {
+            let off = 16 + i * 8;
+            let bits = unsafe { ptr.add(off).cast::<u64>().read_unaligned() };
+            items.push(decode_value_bits(bits, ids));
+        }
+        return Object::Vector(crate::lang::persistent_vector::PersistentVector::create(
+            items,
+        ));
     }
     Object::Unported {
         java_class: "heap object of unrecognized type_id",
@@ -567,6 +596,33 @@ pub unsafe extern "C" fn cljvm_rt_is_nil(x_bits: u64) -> u64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_more(bits: u64) -> u64 {
     unsafe { cljvm_rt_next(bits) }
+}
+
+/// `clojure.lang.RT.seq(Object coll)` — returns a seq on coll, nil for
+/// empty/nil. For our Cons-only model: nil-in → nil-out; Cons-in →
+/// the cons itself (already a seq).
+///
+/// Java distinguishes seqable types here (Iterable, CharSequence,
+/// Map, native arrays, etc.). We only handle Cons + nil for now.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_seq(bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    match nanbox_tag(bits) {
+        Some(TAG_NIL) => nanbox_nil(),
+        Some(TAG_PTR) => {
+            let ptr = nanbox_payload(bits) as *const u8;
+            if ptr.is_null() {
+                return nanbox_nil();
+            }
+            let type_id = unsafe { ptr.cast::<u16>().read_unaligned() } as usize;
+            if type_id == ids.cons {
+                bits
+            } else {
+                panic!("clojure-jvm: RT.seq on unsupported heap type_id {type_id} (only Cons supported yet)");
+            }
+        }
+        _ => panic!("clojure-jvm: RT.seq on non-seqable NanBox tag"),
+    }
 }
 
 /// `clojure.lang.RT.next(Object coll)` — return the next seq, or nil if
