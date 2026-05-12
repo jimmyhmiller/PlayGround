@@ -48,6 +48,7 @@ pub mod cons;
 pub mod persistent_list;
 pub mod persistent_vector;
 pub mod persistent_hash_map;
+pub mod persistent_hash_set;
 
 // Runtime utilities.
 pub mod rt;

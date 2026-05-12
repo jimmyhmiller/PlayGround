@@ -1289,6 +1289,8 @@ impl Expr for ConstantExpr {
             Object::Namespace(_) => "clojure.lang.Namespace",
             Object::List(_) => "clojure.lang.PersistentList",
             Object::Vector(_) => "clojure.lang.PersistentVector",
+            Object::Map(_) => "clojure.lang.PersistentHashMap",
+            Object::Set(_) => "clojure.lang.PersistentHashSet",
             Object::Host(_) => return None,
             Object::Unported { .. } => return None,
         };
@@ -1962,6 +1964,8 @@ pub fn analyze_named(
             "treated as ConstantExpr in Java — wire when Var-as-constant lands"
         ),
         Object::Vector(v) => analyze_vector(context, v),
+        Object::Map(m) => analyze_map(context, m),
+        Object::Set(s) => analyze_set(context, s),
         Object::Namespace(_) | Object::Host(_) | Object::Unported { .. } => {
             Box::new(ConstantExpr::new(form))
         }
@@ -2148,6 +2152,8 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
             keyword: sess.compiler.keyword_type_id.0,
             cons: sess.compiler.cons_type_id.0,
             vector: sess.compiler.vector_type_id.0,
+            map: sess.compiler.map_type_id.0,
+            set: sess.compiler.set_type_id.0,
         };
         crate::runtime::any_bits_to_object(result_bits, ids)
     });
@@ -2188,6 +2194,49 @@ fn analyze_vector(context: C, v: Arc<PersistentVector>) -> Box<dyn Expr> {
     Box::new(ConstantLiteralExpr { idx })
 }
 
+/// Same shape as [`analyze_vector`] — handles set literals whose elements
+/// are all constants. Dynamic sets need a runtime builder; not yet ported.
+fn analyze_set(context: C, s: Arc<crate::lang::persistent_hash_set::PersistentHashSet>) -> Box<dyn Expr> {
+    if context == C::Statement {
+        return Box::new(NIL_EXPR);
+    }
+    for el in s.iter() {
+        if !is_constant_object(&el) {
+            crate::unimplemented_port!(
+                "Compiler.analyze on Set with non-constant element",
+                "needs runtime set-builder; got element {el:?}"
+            );
+        }
+    }
+    let idx = with_active_compiler(|c| c.intern_literal(PendingLiteral::Set(s)));
+    Box::new(ConstantLiteralExpr { idx })
+}
+
+/// Same shape as [`analyze_vector`] — handles map literals whose keys and
+/// values are all constants. Dynamic maps (one of the values is a Var
+/// reference, fn call, etc.) need a runtime builder; not yet ported.
+fn analyze_map(context: C, m: Arc<crate::lang::persistent_hash_map::PersistentHashMap>) -> Box<dyn Expr> {
+    if context == C::Statement {
+        return Box::new(NIL_EXPR);
+    }
+    for (k, v) in m.iter() {
+        if !is_constant_object(&k) {
+            crate::unimplemented_port!(
+                "Compiler.analyze on Map with non-constant key",
+                "needs runtime map-builder; got key {k:?}"
+            );
+        }
+        if !is_constant_object(&v) {
+            crate::unimplemented_port!(
+                "Compiler.analyze on Map with non-constant value",
+                "needs runtime map-builder; got value {v:?}"
+            );
+        }
+    }
+    let idx = with_active_compiler(|c| c.intern_literal(PendingLiteral::Map(m)));
+    Box::new(ConstantLiteralExpr { idx })
+}
+
 fn is_constant_object(o: &Object) -> bool {
     match o {
         Object::Nil | Object::Bool(_) | Object::Long(_) | Object::Double(_)
@@ -2211,6 +2260,19 @@ fn is_constant_object(o: &Object) -> bool {
                     }
                 }
             }
+        }
+        Object::Map(m) => {
+            for (k, v) in m.iter() {
+                if !is_constant_object(&k) { return false; }
+                if !is_constant_object(&v) { return false; }
+            }
+            true
+        }
+        Object::Set(s) => {
+            for el in s.iter() {
+                if !is_constant_object(&el) { return false; }
+            }
+            true
         }
         _ => false,
     }
@@ -2292,6 +2354,12 @@ fn analyze_seq(context: C, form: Object) -> Box<dyn Expr> {
         if **sym == *specials.SET_MACRO_BANG {
             return parse_set_macro_bang_form(context, form);
         }
+        if **sym == *specials.THROW {
+            return parse_throw_form(context, form);
+        }
+        if **sym == *specials.TRY {
+            return parse_try_form(context, form);
+        }
         // Built-in primitive op stand-in (eventually replaced by Var-based
         // resolution to clojure.core/+ etc. with `:inline` metadata).
         if let Some(op) = primop_for_symbol(sym) {
@@ -2317,6 +2385,406 @@ fn parse_primop_form(_context: C, op: PrimOp, form: Object) -> Box<dyn Expr> {
 /// Inline `IfExpr.Parser.parse` — restricted to what we can do without
 /// `pushThreadBindings` / `PathNode` / line tracking. Walks the form using
 /// the ported `RT.{count,second,third,fourth}` helpers.
+/// `(throw expr)` — evaluate `expr`, then transfer control to the
+/// nearest enclosing `try`/`catch` handler, or fall out of the JIT
+/// entry as a host-visible `JitOutcome::Exception` if none.
+///
+/// Lowered via the toolkit's `fb.raise(v)` terminator — emits the
+/// LLVM `invoke`/`landingpad` cost model: same-fn handler scopes
+/// installed via `fb.push_handler(catch_bb)` route locally; otherwise
+/// the fn returns with `JitOutcomeKind::Exception` and the caller's
+/// post-`Call` check (if any handler is active there) catches it.
+/// Cross-function unwind is automatic — no shared prompt id needed.
+#[derive(Debug)]
+pub struct ThrowExpr {
+    payload: Box<dyn Expr>,
+}
+
+impl Expr for ThrowExpr {
+    fn eval(&self) -> Object {
+        crate::unimplemented_port!(
+            "ThrowExpr.eval",
+            "throw is JIT-only — no tree-walking interpreter path yet"
+        )
+    }
+
+    fn emit(&self, _context: C, objx: &ObjExpr, ir: &mut IrEmitter<'_>) -> Option<Value> {
+        // Payload is evaluated in EXPRESSION context regardless of the
+        // enclosing context — its bits must reach `raise`.
+        let val = self
+            .payload
+            .emit(C::Expression, objx, ir)
+            .expect("clojure-jvm: throw payload must produce a value");
+        ir.f.fb.raise(val);
+        // raise is a terminator — `current_block_is_terminated()` is
+        // now true, and no caller should try to use a returned value.
+        None
+    }
+
+    fn has_java_class(&self) -> bool { false }
+    fn get_java_class(&self) -> Option<HostClass> { None }
+}
+
+/// One catch arm of a `try`. Holds the class symbol for type-filter
+/// dispatch (currently unused — we accept any exception, matching the
+/// catch-all `_` case), the bound exception variable, and the catch
+/// body Expr already analyzed in a scope that has the binding visible.
+#[derive(Debug)]
+pub struct CatchClause {
+    /// `(catch <class> binding body…)` — the class symbol. Reserved for
+    /// future type-based dispatch; currently every catch arm acts as a
+    /// catch-all (in Clojure, the JVM's class hierarchy decides; without
+    /// a JVM here we'd need a host class registry).
+    #[allow(dead_code)]
+    pub class_sym: Option<Arc<Symbol>>,
+    /// The binding's LocalBinding entry — its `idx` gives the slot name.
+    pub binding: Arc<LocalBinding>,
+    /// Catch body, analyzed in a scope with `binding` registered.
+    pub body: Box<dyn Expr>,
+}
+
+/// `(try body* (catch C binding handler*)* (finally body*)?)`.
+///
+/// Lowered as:
+///   ```text
+///   ; body
+///   push_handler(catch_bb)
+///   <body>            ; emits a value
+///   pop_handler()
+///   jump merge_bb([<body value>])
+///   catch_bb(thrown):
+///   <catch body>       ; with `binding` bound to `thrown`
+///   jump merge_bb([<catch value>])
+///   merge_bb(result):
+///   <fall through to caller with `result`>
+///   ```
+///
+/// Multiple catch arms chain: the catch_bb dispatches by class to
+/// arm bodies, with a fall-through `raise` if no arm matches. Finally
+/// (not yet implemented) wraps the entire region in an outer handler
+/// that runs the finally block on both normal and exception paths.
+#[derive(Debug)]
+pub struct TryExpr {
+    /// Body forms, parsed as a do-block.
+    pub body: Box<dyn Expr>,
+    /// Catch arms, in order. Empty if there's only a `finally`.
+    pub catches: Vec<CatchClause>,
+    /// Optional finally body (not yet implemented — panics if present).
+    #[allow(dead_code)]
+    pub finally: Option<Box<dyn Expr>>,
+}
+
+impl Expr for TryExpr {
+    fn eval(&self) -> Object {
+        crate::unimplemented_port!(
+            "TryExpr.eval",
+            "try is JIT-only — no tree-walking interpreter path yet"
+        )
+    }
+
+    fn emit(&self, context: C, objx: &ObjExpr, ir: &mut IrEmitter<'_>) -> Option<Value> {
+        // Block topology:
+        //   - catch_bb: receives the thrown value as its first I64 param
+        //   - merge_bb: receives the try-or-catch result as its first I64
+        //     param (only in EXPRESSION context; STATEMENT has no result)
+        //
+        // With `finally`, we add an outer `push_handler(finally_handler_bb)`
+        // that wraps the entire try-catch region. On normal exit from body
+        // or catch, control reaches a `finally_then_merge_bb` that pops the
+        // outer handler, runs finally, and jumps to merge_bb with the
+        // captured value. On an unhandled exception (body raises with no
+        // catch, or catch arm itself raises), `finally_handler_bb` runs
+        // finally and re-raises.  The finally body's IR is emitted twice
+        // (inline duplication) — a synthetic-fn approach would be cleaner
+        // but isn't needed yet.
+        let phi_ty: Option<dynir::Type> = if context == C::Statement {
+            None
+        } else {
+            Some(dynir::Type::I64)
+        };
+        let catch_bb = ir.f.fb.create_block(&[dynir::Type::I64]);
+        let merge_bb = match phi_ty {
+            Some(ty) => ir.f.fb.create_block(&[ty]),
+            None => ir.f.fb.create_block(&[]),
+        };
+        // Only used when self.finally is Some — see below.
+        let (finally_handler_bb, finally_then_merge_bb) = if self.finally.is_some() {
+            let h = ir.f.fb.create_block(&[dynir::Type::I64]);
+            let m = match phi_ty {
+                Some(ty) => ir.f.fb.create_block(&[ty]),
+                None => ir.f.fb.create_block(&[]),
+            };
+            (Some(h), Some(m))
+        } else {
+            (None, None)
+        };
+
+        // If finally is active, install the outer handler now so it
+        // catches anything that body/catch don't.
+        if let Some(fhb) = finally_handler_bb {
+            ir.f.fb.push_handler(fhb);
+        }
+
+        // The "normal-exit join" — without finally this IS merge_bb;
+        // with finally it's finally_then_merge_bb (which runs finally,
+        // then jumps to merge_bb).
+        let body_join_bb = finally_then_merge_bb.unwrap_or(merge_bb);
+
+        // Track whether either path actually jumps to merge_bb. If
+        // both body and catch diverge (e.g. both end with a `throw`),
+        // merge_bb is unreachable and we must NOT switch to it —
+        // doing so leaves the caller in a dead block with no
+        // predecessors, which crashes the lowerer (no entry-handler
+        // state, regalloc can't enter, etc.). Mirrors IfExpr's
+        // `any_reached` pattern.
+        let mut any_reached = false;
+
+        // ── Body region (under handler) ─────────────────────────
+        ir.f.fb.push_handler(catch_bb);
+        let body_val = self.body.emit(context, objx, ir);
+        if !ir.f.fb.current_block_is_terminated() {
+            any_reached = true;
+            ir.f.fb.pop_handler();
+            match (phi_ty.is_some(), body_val) {
+                (true, Some(v)) => ir.f.fb.jump(body_join_bb, &[v]),
+                (false, _) => ir.f.fb.jump(body_join_bb, &[]),
+                (true, None) => panic!(
+                    "clojure-jvm: TryExpr body produced no value in non-STATEMENT context"
+                ),
+            }
+        }
+
+        // ── Catch dispatch ──────────────────────────────────────
+        ir.f.fb.switch_to_block(catch_bb);
+        let thrown = ir.f.fb.block_param(catch_bb, 0);
+
+        if self.catches.is_empty() {
+            // No catch arms (a `(try body (finally f))`). Re-raise
+            // so the outer finally handler runs and propagates.
+            ir.f.fb.raise(thrown);
+        } else {
+            // Single-arm case (simplest): bind `thrown` to the arm's
+            // local binding slot, emit the arm body, jump to merge.
+            // Multi-arm case extends this with class-based dispatch
+            // between arms; we don't have a host class registry yet,
+            // so every arm acts as a catch-all and the FIRST arm wins.
+            if self.catches.len() > 1 {
+                crate::unimplemented_port!(
+                    "TryExpr.emit with multiple catch arms",
+                    "needs host-class registry for type-filter dispatch"
+                );
+            }
+            let arm = &self.catches[0];
+            ir.f.def_var(&local_slot_name(arm.binding.idx), thrown);
+            let arm_val = arm.body.emit(context, objx, ir);
+            if !ir.f.fb.current_block_is_terminated() {
+                any_reached = true;
+                match (phi_ty.is_some(), arm_val) {
+                    (true, Some(v)) => ir.f.fb.jump(body_join_bb, &[v]),
+                    (false, _) => ir.f.fb.jump(body_join_bb, &[]),
+                    (true, None) => panic!(
+                        "clojure-jvm: TryExpr catch arm produced no value in non-STATEMENT context"
+                    ),
+                }
+            }
+        }
+
+        // ── Finally (if present) ────────────────────────────────
+        if let (Some(finally_expr), Some(fjm), Some(fhb)) =
+            (self.finally.as_ref(), finally_then_merge_bb, finally_handler_bb)
+        {
+            // Normal-exit join: pop the outer (finally) handler, run
+            // finally inline, jump to the real merge with the captured
+            // value. Only reachable if body or catch normally exits;
+            // otherwise plug with unreachable so the verifier accepts
+            // the block.
+            ir.f.fb.switch_to_block(fjm);
+            if any_reached {
+                let saved_val = if phi_ty.is_some() {
+                    Some(ir.f.fb.block_param(fjm, 0))
+                } else {
+                    None
+                };
+                ir.f.fb.pop_handler();
+                let _ = finally_expr.emit(C::Statement, objx, ir);
+                if !ir.f.fb.current_block_is_terminated() {
+                    match (phi_ty.is_some(), saved_val) {
+                        (true, Some(v)) => ir.f.fb.jump(merge_bb, &[v]),
+                        (false, _) => ir.f.fb.jump(merge_bb, &[]),
+                        (true, None) => unreachable!(),
+                    }
+                }
+            } else {
+                // Still need block_param to satisfy the type sig if
+                // phi_ty was set (the block carries a param).
+                if phi_ty.is_some() {
+                    let _ = ir.f.fb.block_param(fjm, 0);
+                }
+                ir.f.fb.unreachable();
+            }
+
+            // Exception path: finally runs, then re-raises the original
+            // thrown value. Always emitted — finally_handler_bb is
+            // reachable via the outer push_handler whenever ANYTHING
+            // inside the try region raises.
+            ir.f.fb.switch_to_block(fhb);
+            let exn = ir.f.fb.block_param(fhb, 0);
+            let _ = finally_expr.emit(C::Statement, objx, ir);
+            if !ir.f.fb.current_block_is_terminated() {
+                ir.f.fb.raise(exn);
+            }
+        }
+
+        // ── Merge ───────────────────────────────────────────────
+        if !any_reached {
+            // Body and catch both diverged. merge_bb is unreachable
+            // but we created it — `fb.build()` requires every block
+            // to be terminated, so plug it with `unreachable`. The
+            // current block stays terminated (catch_bb's raise), so
+            // returning None tells the caller we don't produce a
+            // value at the join site.
+            ir.f.fb.switch_to_block(merge_bb);
+            ir.f.fb.unreachable();
+            return None;
+        }
+        ir.f.fb.switch_to_block(merge_bb);
+        if phi_ty.is_some() {
+            Some(ir.f.fb.block_param(merge_bb, 0))
+        } else {
+            None
+        }
+    }
+
+    fn has_java_class(&self) -> bool { false }
+    fn get_java_class(&self) -> Option<HostClass> { None }
+}
+
+fn parse_try_form(context: C, form: Object) -> Box<dyn Expr> {
+    let specials = &*SPECIAL_SYMBOLS;
+    // Walk the children classifying: body | catch | finally. Body forms
+    // must precede catch/finally; any subsequent body form is rejected.
+    let mut body_forms: Vec<Object> = Vec::new();
+    let mut catch_specs: Vec<(Object, Arc<Symbol>, Arc<Symbol>, Vec<Object>)> = Vec::new();
+    let mut finally_forms: Option<Vec<Object>> = None;
+    let mut rest = super::rt::next(&form);
+    while !matches!(rest, Object::Nil) {
+        let head = super::rt::first(&rest);
+        let head_op = if let Object::List(l) = &head {
+            if l.count() >= 1 {
+                let f0 = super::rt::first(&head);
+                if let Object::Symbol(s) = &f0 {
+                    if **s == *specials.CATCH {
+                        Some("catch")
+                    } else if **s == *specials.FINALLY {
+                        Some("finally")
+                    } else {
+                        None
+                    }
+                } else { None }
+            } else { None }
+        } else { None };
+
+        match head_op {
+            Some("catch") => {
+                // (catch Class binding body...)
+                let class_form = super::rt::second(&head);
+                let class_sym = match class_form {
+                    Object::Symbol(s) => s.clone(),
+                    other => panic!(
+                        "clojure-jvm: bad catch class spec (expected symbol), got {other:?}"
+                    ),
+                };
+                let bind_form = super::rt::third(&head);
+                let bind_sym = match bind_form {
+                    Object::Symbol(s) => s.clone(),
+                    other => panic!(
+                        "clojure-jvm: bad catch binding spec (expected symbol), got {other:?}"
+                    ),
+                };
+                // Body of the catch arm: everything after Class and binding.
+                let body_seq = super::rt::next(&super::rt::next(&super::rt::next(&head)));
+                let mut arm_body: Vec<Object> = Vec::new();
+                let mut cur = body_seq;
+                while !matches!(cur, Object::Nil) {
+                    arm_body.push(super::rt::first(&cur));
+                    cur = super::rt::next(&cur);
+                }
+                catch_specs.push((head.clone(), class_sym, bind_sym, arm_body));
+            }
+            Some("finally") => {
+                let body_seq = super::rt::next(&head);
+                let mut fb: Vec<Object> = Vec::new();
+                let mut cur = body_seq;
+                while !matches!(cur, Object::Nil) {
+                    fb.push(super::rt::first(&cur));
+                    cur = super::rt::next(&cur);
+                }
+                if finally_forms.is_some() {
+                    panic!("clojure-jvm: try can have at most one finally clause");
+                }
+                finally_forms = Some(fb);
+            }
+            None => {
+                if !catch_specs.is_empty() || finally_forms.is_some() {
+                    panic!(
+                        "clojure-jvm: try body forms must precede catch/finally"
+                    );
+                }
+                body_forms.push(head);
+            }
+            Some(_) => unreachable!(),
+        }
+        rest = super::rt::next(&rest);
+    }
+
+    // Analyze the body as a do-block, in the EXPRESSION context (so it
+    // produces a value when caller wants one). STATEMENT context still
+    // propagates through.
+    let body_seq = Object::List(PersistentList::create(body_forms));
+    let body = parse_body_seq(context, body_seq);
+
+    // Analyze each catch arm in a scope with its binding registered.
+    let mut catches: Vec<CatchClause> = Vec::new();
+    for (_orig, class_sym, bind_sym, arm_body_forms) in catch_specs {
+        Var::push_thread_bindings(vec![
+            (COMPILER_VARS.LOCAL_ENV.clone(), Object::Host(current_local_env())),
+            (COMPILER_VARS.NEXT_LOCAL_NUM.clone(), Object::Long(current_next_local_num() as i64)),
+        ]);
+        let arm_lb = register_local(bind_sym, None, None, false);
+        let arm_seq = Object::List(PersistentList::create(arm_body_forms));
+        let arm_body_expr = parse_body_seq(context, arm_seq);
+        Var::pop_thread_bindings();
+
+        catches.push(CatchClause {
+            class_sym: Some(class_sym),
+            binding: arm_lb,
+            body: arm_body_expr,
+        });
+    }
+
+    let finally = finally_forms.map(|forms| {
+        let seq = Object::List(PersistentList::create(forms));
+        parse_body_seq(C::Statement, seq)
+    });
+
+    Box::new(TryExpr { body, catches, finally })
+}
+
+fn parse_throw_form(_context: C, form: Object) -> Box<dyn Expr> {
+    // (throw x) — exactly one argument. (throw) with no payload is
+    // legal in Clojure (rethrows the active exception) but we don't
+    // support rethrow yet; flag it loudly.
+    let n = super::rt::count(&form);
+    if n != 2 {
+        panic!(
+            "clojure-jvm: RuntimeException — Wrong number of args ({}) to throw (only (throw expr) is supported)",
+            n - 1
+        );
+    }
+    let payload = analyze(C::Expression, super::rt::second(&form));
+    Box::new(ThrowExpr { payload })
+}
+
 fn parse_if_form(context: C, form: Object) -> Box<dyn Expr> {
     let n = super::rt::count(&form);
     if n > 4 {
@@ -4320,6 +4788,16 @@ pub struct Compiler {
     /// (efficient for compile-time literals + macro arg passing, simpler
     /// than the HAMT). Update / grow operations re-allocate.
     pub vector_type_id: dynlang::ObjTypeId,
+    /// ObjTypeId for `clojure.lang.PersistentHashMap` — Raw64 wrapper holding
+    /// an `Arc<PersistentHashMap>` raw pointer. The host-side Arc is kept
+    /// alive by `CompileRoots._maps` for the JIT module's lifetime. Same
+    /// shape as `Symbol`/`Keyword`: the heap wrapper exists so `type_id`
+    /// dispatch in `heap_bits_to_object` can recover `Object::Map`, while
+    /// the actual key/value storage lives in the host-side `Vec`.
+    pub map_type_id: dynlang::ObjTypeId,
+    /// ObjTypeId for `clojure.lang.PersistentHashSet` — same shape as Map.
+    /// The host-side Arc lives in `CompileRoots._sets`.
+    pub set_type_id: dynlang::ObjTypeId,
 
     /// Pending compile-time literals. `*Expr.emit` interns into this queue
     /// and emits `gc_literal(LiteralRef(idx))`. After `gc.compile_jit`
@@ -4360,6 +4838,15 @@ pub enum PendingLiteral {
     /// Built at literal-pool-fill time; each element is recursively
     /// allocated, then packed into the vector's varlen area.
     Vector(Arc<PersistentVector>),
+    /// `clojure.lang.PersistentHashMap` — Raw64 wrapper holding an
+    /// `Arc<PersistentHashMap>` pointer. The Arc is rooted in `CompileRoots`
+    /// so the keys/values stay alive across the JIT module's lifetime
+    /// (those values are held by-value inside the Arc, not on the GC heap).
+    Map(Arc<crate::lang::persistent_hash_map::PersistentHashMap>),
+    /// `clojure.lang.PersistentHashSet` — same shape as Map, with element
+    /// values stored under `Object::Nil` placeholder values in the
+    /// underlying map.
+    Set(Arc<crate::lang::persistent_hash_set::PersistentHashSet>),
 }
 
 // SAFETY: the `*const Var` keys point at `Arc<Var>` interned in the global
@@ -4516,6 +5003,19 @@ impl Compiler {
             .obj_type("clojure.lang.PersistentVector")
             .varlen_values()
             .build();
+        // `clojure.lang.PersistentHashMap`: same shape as Symbol/Keyword — a
+        // Raw64 field "arc_ptr" carrying an `Arc<PersistentHashMap>` raw
+        // pointer. The host-side Arc owns the actual key/value Vec, kept
+        // alive by `CompileRoots._maps`.
+        let map_type_id = dm
+            .obj_type("clojure.lang.PersistentHashMap")
+            .field("arc_ptr", dynlang::FieldKind::Raw64)
+            .build();
+        // `clojure.lang.PersistentHashSet`: same shape as Map.
+        let set_type_id = dm
+            .obj_type("clojure.lang.PersistentHashSet")
+            .field("arc_ptr", dynlang::FieldKind::Raw64)
+            .build();
 
         // Stash type_ids globally so Rust externs called from JIT-executing
         // code (`cljvm_rt_cons` etc.) can allocate the right ObjType without
@@ -4526,6 +5026,8 @@ impl Compiler {
             keyword: keyword_type_id.0,
             cons: cons_type_id.0,
             vector: vector_type_id.0,
+            map: map_type_id.0,
+            set: set_type_id.0,
         });
 
         Compiler {
@@ -4543,6 +5045,8 @@ impl Compiler {
             cons_type_id,
             closure_type_id,
             vector_type_id,
+            map_type_id,
+            set_type_id,
             pending_literals: std::sync::Mutex::new(Vec::new()),
             literal_pool_offset: std::sync::atomic::AtomicUsize::new(0),
             host_methods,
@@ -4738,6 +5242,14 @@ pub struct CompileRoots {
     pub _symbols: Vec<Arc<Symbol>>,
     pub _strings: Vec<Arc<String>>,
     pub _keywords: Vec<Arc<Keyword>>,
+    /// `Arc<PersistentHashMap>`s referenced by `Object::Map` literals. The
+    /// heap wrapper stores a `Arc::as_ptr` raw pointer into one of these;
+    /// without keeping the Arc alive here, the host-side Vec backing the
+    /// map would drop and the raw pointer would dangle.
+    pub _maps: Vec<Arc<crate::lang::persistent_hash_map::PersistentHashMap>>,
+    /// `Arc<PersistentHashSet>`s referenced by `Object::Set` literals.
+    /// Same lifetime story as `_maps`.
+    pub _sets: Vec<Arc<crate::lang::persistent_hash_set::PersistentHashSet>>,
 }
 
 /// Encode an `Object` as a NanBox u64 suitable for placing in a heap-traced
@@ -4775,6 +5287,16 @@ fn alloc_object_as_nanbox(
                 gc, obj_types, vector_type_id, cons_type_id, string_type_id,
                 symbol_type_id, keyword_type_id, roots, v,
             )
+        }
+        Object::Map(m) => {
+            // Map type_id is 6 (declared right after Vector in `Compiler::new`).
+            let map_type_id = dynlang::ObjTypeId(6);
+            alloc_map_as_nanbox(gc, obj_types, map_type_id, roots, m)
+        }
+        Object::Set(s) => {
+            // Set type_id is 7 (declared right after Map).
+            let set_type_id = dynlang::ObjTypeId(7);
+            alloc_set_as_nanbox(gc, obj_types, set_type_id, roots, s)
         }
         other => panic!(
             "clojure-jvm: alloc_object_as_nanbox: variant {other:?} not yet representable on the GC heap"
@@ -4905,6 +5427,50 @@ fn alloc_symbol(
     gc.tag_ptr(ptr)
 }
 
+fn alloc_set_as_nanbox(
+    gc: &dynlang::gc::DynGcRuntime,
+    obj_types: &[dynlang::ObjType],
+    set_type_id: dynlang::ObjTypeId,
+    roots: &mut CompileRoots,
+    s: &Arc<crate::lang::persistent_hash_set::PersistentHashSet>,
+) -> u64 {
+    roots._sets.push(s.clone());
+    let ptr = gc.alloc(set_type_id.0, 0);
+    assert!(!ptr.is_null(), "alloc_set_as_nanbox: null");
+    let arc_ptr_bits = Arc::as_ptr(s) as u64;
+    let type_info = &obj_types[set_type_id.0].type_info;
+    let raw_offset = type_info.raw_data_offset();
+    unsafe {
+        let dst = ptr.add(raw_offset).cast::<u64>();
+        dst.write_unaligned(arc_ptr_bits);
+    }
+    gc.tag_ptr(ptr)
+}
+
+fn alloc_map_as_nanbox(
+    gc: &dynlang::gc::DynGcRuntime,
+    obj_types: &[dynlang::ObjType],
+    map_type_id: dynlang::ObjTypeId,
+    roots: &mut CompileRoots,
+    m: &Arc<crate::lang::persistent_hash_map::PersistentHashMap>,
+) -> u64 {
+    // Same shape as Symbol/Keyword: allocate the Raw64 wrapper, stash the
+    // `Arc::as_ptr` in the raw_data slot, and extend the Arc's lifetime via
+    // `CompileRoots._maps`. Map keys/values are owned by the Arc's Vec, not
+    // the GC heap, so this is the only allocation needed.
+    roots._maps.push(m.clone());
+    let ptr = gc.alloc(map_type_id.0, 0);
+    assert!(!ptr.is_null(), "alloc_map_as_nanbox: null");
+    let arc_ptr_bits = Arc::as_ptr(m) as u64;
+    let type_info = &obj_types[map_type_id.0].type_info;
+    let raw_offset = type_info.raw_data_offset();
+    unsafe {
+        let dst = ptr.add(raw_offset).cast::<u64>();
+        dst.write_unaligned(arc_ptr_bits);
+    }
+    gc.tag_ptr(ptr)
+}
+
 fn alloc_keyword(
     gc: &dynlang::gc::DynGcRuntime,
     obj_types: &[dynlang::ObjType],
@@ -4979,8 +5545,6 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
 pub fn compile_form_to_jit(
     form: Object,
 ) -> (dynlang::gc::DynGcRuntime, dynlower::JitModule, dynir::FuncRef, CompileRoots) {
-    use dynvalue::NanBox;
-
     let mut compiler = Compiler::new();
     let entry = compiler.with_active(|c| {
         // Declare the entry fn (`__top_level__`) up front.
@@ -4999,13 +5563,27 @@ pub fn compile_form_to_jit(
 
         // Now lower the entry fn.
         let mut df = c.dm.start_func(entry);
-        let result_val = {
+        let needs_ret = {
             let mut ir = IrEmitter::new(&mut df);
             let objx = ObjExpr::placeholder();
-            expr.emit(C::Expression, &*objx, &mut ir)
-                .expect("top-level form must produce a value in EXPRESSION context")
+            match expr.emit(C::Expression, &*objx, &mut ir) {
+                Some(v) => Some(v),
+                None => {
+                    // Body terminated the entry block before producing a
+                    // value — e.g. `(throw …)` ends in `abort_to_prompt`,
+                    // which is itself a terminator. No `ret` needed in
+                    // that case; the block already has a terminator.
+                    assert!(
+                        ir.f.fb.current_block_is_terminated(),
+                        "top-level form produced no value but the entry block isn't terminated"
+                    );
+                    None
+                }
+            }
         };
-        df.fb.ret(result_val);
+        if let Some(result_val) = needs_ret {
+            df.fb.ret(result_val);
+        }
         c.dm.finish_func(df);
 
         entry
@@ -5071,6 +5649,8 @@ pub fn compile_form_to_jit(
         _symbols: Vec::new(),
         _strings: Vec::new(),
         _keywords: Vec::new(),
+        _maps: Vec::new(),
+        _sets: Vec::new(),
     };
     {
         let _thread = gc.install_thread();
@@ -5158,6 +5738,12 @@ pub fn compile_form_to_jit(
                     compiler.symbol_type_id, compiler.keyword_type_id,
                     &mut roots, v,
                 ),
+                PendingLiteral::Map(m) => alloc_map_as_nanbox(
+                    &gc, &obj_types, compiler.map_type_id, &mut roots, m,
+                ),
+                PendingLiteral::Set(s) => alloc_set_as_nanbox(
+                    &gc, &obj_types, compiler.set_type_id, &mut roots, s,
+                ),
             };
             let pushed_idx = jit.literal_pool().push(nanbox_bits);
             assert_eq!(
@@ -5183,13 +5769,26 @@ pub fn compile_form_to_interp(form: Object) -> (dynlang::BuiltModule, dynir::Fun
             lower_pending_fn(c, p);
         }
         let mut df = c.dm.start_func(entry);
-        let result_val = {
+        let needs_ret = {
             let mut ir = IrEmitter::new(&mut df);
             let objx = ObjExpr::placeholder();
-            expr.emit(C::Expression, &*objx, &mut ir)
-                .expect("top-level form must produce a value in EXPRESSION context")
+            match expr.emit(C::Expression, &*objx, &mut ir) {
+                Some(v) => Some(v),
+                None => {
+                    // Top-level form emitted a terminator itself (e.g.
+                    // `(throw …)` ends in `abort_to_prompt`). No `ret`
+                    // needed — block is already terminated.
+                    assert!(
+                        ir.f.fb.current_block_is_terminated(),
+                        "top-level form produced no value but the entry block isn't terminated"
+                    );
+                    None
+                }
+            }
         };
-        df.fb.ret(result_val);
+        if let Some(result_val) = needs_ret {
+            df.fb.ret(result_val);
+        }
         c.dm.finish_func(df);
         entry
     });
@@ -5387,6 +5986,8 @@ impl Session {
                 _symbols: Vec::new(),
                 _strings: Vec::new(),
                 _keywords: Vec::new(),
+                _maps: Vec::new(),
+                _sets: Vec::new(),
             },
             next_form_id: 0,
             _extern_count_seen: 0,
@@ -5480,6 +6081,14 @@ impl Session {
                         self.compiler.vector_type_id, cons_type_id,
                         string_type_id, symbol_type_id, keyword_type_id,
                         &mut self.roots, v,
+                    ),
+                    PendingLiteral::Map(m) => alloc_map_as_nanbox(
+                        &self.gc, &self.obj_types, self.compiler.map_type_id,
+                        &mut self.roots, m,
+                    ),
+                    PendingLiteral::Set(s) => alloc_set_as_nanbox(
+                        &self.gc, &self.obj_types, self.compiler.set_type_id,
+                        &mut self.roots, s,
                     ),
                 };
                 self.jit.literal_pool().push(nanbox_bits);
@@ -6145,7 +6754,7 @@ mod tests {
             JitOutcome::Value(v) => v,
             other => panic!("unexpected JIT outcome: {other:?}"),
         };
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7 };
         unsafe { crate::runtime::heap_bits_to_object(bits, ids) }
     }
 
@@ -6163,10 +6772,183 @@ mod tests {
         }
     }
 
+    /// Run a form through the JIT and return the raw `JitOutcome` — the
+    /// path tests use when they need to inspect non-Value outcomes
+    /// (currently `AbortToPrompt` from `(throw …)`).
+    fn eval_form_via_jit_outcome(form: Object) -> dynlower::JitOutcome {
+        use dynruntime::GcPolicy;
+        let (gc, jit, entry, _roots) = super::compile_form_to_jit(form);
+        let _call_base = crate::runtime::install_call_table_base(jit.call_table_base_addr());
+        gc.run_jit(&jit, entry, &[], GcPolicy::OnPressure { threshold: 0.75 })
+    }
+
     #[test]
     fn jit_e2e_literal_long_returns_42() {
         let v = eval_form_via_jit(Object::Long(42));
         assert_eq!(nanbox_to_f64(v), 42.0);
+    }
+
+    #[test]
+    fn jit_try_catch_catches_throw_and_returns_handler_value() {
+        // (try (throw 42) (catch Throwable e e)) → 42
+        // The handler binds `e` to the thrown value and returns it.
+        let v = with_fresh_ns("test.try.basic", || {
+            eval_str_via_jit("(try (throw 42) (catch Throwable e e))")
+        });
+        assert_eq!(nanbox_to_f64(v), 42.0);
+    }
+
+    #[test]
+    fn jit_try_catch_handler_can_compute_with_caught_value() {
+        // (try (throw 10) (catch Throwable e (+ e 1))) → 11
+        let v = with_fresh_ns("test.try.bump", || {
+            eval_str_via_jit("(try (throw 10) (catch Throwable e (+ e 1)))")
+        });
+        assert_eq!(nanbox_to_f64(v), 11.0);
+    }
+
+    #[test]
+    fn jit_try_with_normal_body_skips_catch() {
+        // (try 7 (catch Throwable e 99)) → 7
+        // Body returns normally; catch arm is not entered.
+        let v = with_fresh_ns("test.try.normal", || {
+            eval_str_via_jit("(try 7 (catch Throwable e 99))")
+        });
+        assert_eq!(nanbox_to_f64(v), 7.0);
+    }
+
+    #[test]
+    fn jit_nested_try_inner_catches_first() {
+        // (try (try (throw 1) (catch Throwable a (+ a 10)))
+        //      (catch Throwable b (+ b 100)))
+        // Inner catch wins → 11.
+        let v = with_fresh_ns("test.try.nested.inner", || {
+            eval_str_via_jit(
+                "(try (try (throw 1) (catch Throwable a (+ a 10))) \
+                      (catch Throwable b (+ b 100)))",
+            )
+        });
+        assert_eq!(nanbox_to_f64(v), 11.0);
+    }
+
+    #[test]
+    fn jit_outer_try_catches_rethrow_from_inner_catch() {
+        // (try (try (throw 1) (catch Throwable a (throw 2)))
+        //      (catch Throwable b (+ b 100)))
+        // Inner catches 1, re-throws 2. Outer catches 2 → 102.
+        let v = with_fresh_ns("test.try.nested.rethrow", || {
+            eval_str_via_jit(
+                "(try (try (throw 1) (catch Throwable a (throw 2))) \
+                      (catch Throwable b (+ b 100)))",
+            )
+        });
+        assert_eq!(nanbox_to_f64(v), 102.0);
+    }
+
+    #[test]
+    fn jit_try_finally_runs_on_normal_exit() {
+        // (try 7 (finally 99)) → 7. Finally runs but its value is
+        // discarded.
+        let v = with_fresh_ns("test.try.finally.normal", || {
+            eval_str_via_jit("(try 7 (finally 99))")
+        });
+        assert_eq!(nanbox_to_f64(v), 7.0);
+    }
+
+    #[test]
+    fn jit_try_finally_propagates_uncaught_throw() {
+        // (try (throw 5) (finally 99)) — finally runs, then re-raises
+        // → outcome Exception(5).
+        let form = list_of(vec![
+            sym("try"),
+            list_of(vec![sym("throw"), Object::Long(5)]),
+            list_of(vec![sym("finally"), Object::Long(99)]),
+        ]);
+        match eval_form_via_jit_outcome(form) {
+            dynlower::JitOutcome::Exception(bits) => {
+                assert_eq!(f64::from_bits(bits), 5.0);
+            }
+            other => panic!("expected Exception(5), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jit_try_finally_runs_after_caught_throw() {
+        // (try (throw 5) (catch Throwable e (+ e 1)) (finally 99))
+        // → catch returns 6, finally runs and discards 99, result is 6.
+        let v = with_fresh_ns("test.try.finally.caught", || {
+            eval_str_via_jit(
+                "(try (throw 5) (catch Throwable e (+ e 1)) (finally 99))",
+            )
+        });
+        assert_eq!(nanbox_to_f64(v), 6.0);
+    }
+
+    #[test]
+    fn jit_try_finally_propagates_rethrow_from_catch() {
+        // (try (try (throw 1)
+        //           (catch Throwable a (throw 2))
+        //           (finally 99))
+        //      (catch Throwable b (+ b 100)))
+        // → inner catches 1, throws 2, inner finally runs, outer
+        //   catches 2 → 102.
+        let v = with_fresh_ns("test.try.finally.rethrow", || {
+            eval_str_via_jit(
+                "(try (try (throw 1) \
+                           (catch Throwable a (throw 2)) \
+                           (finally 99)) \
+                      (catch Throwable b (+ b 100)))",
+            )
+        });
+        assert_eq!(nanbox_to_f64(v), 102.0);
+    }
+
+    #[test]
+    fn jit_try_catches_throw_from_nested_fn() {
+        // (try ((fn* [] (throw 5))) (catch Throwable e e)) → 5
+        // The throw happens INSIDE a callee; the caller's try catches.
+        // Tests cross-fn raise propagation via the JIT outcome ABI.
+        let v = with_fresh_ns("test.try.crossfn", || {
+            eval_str_via_jit("(try ((fn* [] (throw 5))) (catch Throwable e e))")
+        });
+        assert_eq!(nanbox_to_f64(v), 5.0);
+    }
+
+    #[test]
+    fn jit_throw_long_surfaces_as_exception_outcome() {
+        // (throw 42) — payload is a numeric literal; the JIT exits via
+        // `JitOutcome::Exception` carrying the NanBox-encoded value.
+        // No try/catch yet, so this is an "uncaught exception" surfaced
+        // at the JIT boundary — instead of the SIGABRT we'd get from a
+        // raw Rust panic across an `extern "C"` boundary.
+        let form = list_of(vec![sym("throw"), Object::Long(42)]);
+        match eval_form_via_jit_outcome(form) {
+            dynlower::JitOutcome::Exception(bits) => {
+                // Long roundtrips as f64 bits in our NanBox encoding.
+                assert_eq!(f64::from_bits(bits), 42.0);
+            }
+            other => panic!(
+                "expected JitOutcome::Exception from (throw 42), got {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn jit_throw_string_carries_payload() {
+        // (throw "boom") — payload is a heap-allocated string. The
+        // Exception payload is the NanBox-tagged pointer.
+        let form = list_of(vec![sym("throw"), Object::String(Arc::new("boom".to_string()))]);
+        let outcome = eval_form_via_jit_outcome(form);
+        match outcome {
+            dynlower::JitOutcome::Exception(bits) => {
+                // The pointer bits should be a TAG_PTR-tagged NanBox.
+                assert!(
+                    bits != crate::runtime::nanbox_nil(),
+                    "throw payload must not be nil"
+                );
+            }
+            other => panic!("expected JitOutcome::Exception, got {other:?}"),
+        }
     }
 
     #[test]
@@ -6956,7 +7738,7 @@ mod tests {
         // Compiler::new declares the heap ObjTypes in a fixed order; their
         // type_ids match the indices below. Hard-coded for tests; production
         // code would route through the Compiler / DynGcRuntime instances.
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7 };
         let obj = unsafe { crate::runtime::heap_bits_to_object(bits, ids) };
         match obj {
             Object::String(s) => (*s).clone(),
@@ -7036,7 +7818,7 @@ mod tests {
             JitOutcome::Value(v) => v,
             other => panic!("unexpected JIT outcome: {other:?}"),
         };
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7 };
         let obj = unsafe { crate::runtime::heap_bits_to_object(bits, ids) };
         match obj {
             Object::Symbol(s) => s,
@@ -7088,7 +7870,7 @@ mod tests {
         eprintln!("DIAG: nanbox=0x{nanbox_bits:x}");
 
         // Now decode.
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7 };
         let obj = unsafe { crate::runtime::heap_bits_to_object(nanbox_bits, ids) };
         match obj {
             Object::Symbol(s) => {
@@ -7165,7 +7947,7 @@ mod tests {
             JitOutcome::Value(v) => v,
             other => panic!("unexpected JIT outcome: {other:?}"),
         };
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7 };
         let obj = unsafe { crate::runtime::heap_bits_to_object(bits, ids) };
         match obj {
             Object::Keyword(k) => k,
@@ -7234,7 +8016,7 @@ mod tests {
             JitOutcome::Value(v) => v,
             other => panic!("unexpected JIT outcome: {other:?}"),
         };
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7 };
         let obj = unsafe { crate::runtime::heap_bits_to_object(bits, ids) };
         match obj {
             Object::List(l) => l,
@@ -7727,6 +8509,77 @@ mod tests {
         match obj {
             Object::Keyword(k) => assert_eq!(k.get_name(), "done"),
             other => panic!("expected :done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_literal_roundtrips_through_jit() {
+        // `{:a 1 :b 2}` should read, intern as a PersistentHashMap literal,
+        // allocate the host-side Arc + heap wrapper, evaluate to its
+        // tagged-pointer NanBox, and decode back into Object::Map with the
+        // same two entries.
+        let obj = with_fresh_ns("test.diag.map.lit", || {
+            eval_str_via_jit_to_object("{:a 1 :b 2}")
+        });
+        match obj {
+            Object::Map(m) => {
+                assert_eq!(m.count(), 2);
+                let a = m.val_at(&Object::Keyword(
+                    super::super::keyword::Keyword::intern_ns_name(None, "a"),
+                ));
+                let b = m.val_at(&Object::Keyword(
+                    super::super::keyword::Keyword::intern_ns_name(None, "b"),
+                ));
+                // Numeric literals NanBox-roundtrip as f64 bits; decode may
+                // surface as Long or Double depending on path.
+                assert_eq!(a.as_f64(), Some(1.0), "expected :a → 1, got {a:?}");
+                assert_eq!(b.as_f64(), Some(2.0), "expected :b → 2, got {b:?}");
+            }
+            other => panic!("expected Object::Map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_map_literal_roundtrips_through_jit() {
+        let obj = with_fresh_ns("test.diag.map.empty", || {
+            eval_str_via_jit_to_object("{}")
+        });
+        match obj {
+            Object::Map(m) => assert_eq!(m.count(), 0),
+            other => panic!("expected Object::Map, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_literal_roundtrips_through_jit() {
+        let obj = with_fresh_ns("test.diag.set.lit", || {
+            eval_str_via_jit_to_object("#{:a :b :c}")
+        });
+        match obj {
+            Object::Set(s) => {
+                assert_eq!(s.count(), 3);
+                assert!(s.contains(&Object::Keyword(
+                    super::super::keyword::Keyword::intern_ns_name(None, "a"),
+                )));
+                assert!(s.contains(&Object::Keyword(
+                    super::super::keyword::Keyword::intern_ns_name(None, "b"),
+                )));
+                assert!(s.contains(&Object::Keyword(
+                    super::super::keyword::Keyword::intern_ns_name(None, "c"),
+                )));
+            }
+            other => panic!("expected Object::Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_set_literal_roundtrips_through_jit() {
+        let obj = with_fresh_ns("test.diag.set.empty", || {
+            eval_str_via_jit_to_object("#{}")
+        });
+        match obj {
+            Object::Set(s) => assert_eq!(s.count(), 0),
+            other => panic!("expected Object::Set, got {other:?}"),
         }
     }
 
@@ -9307,7 +10160,7 @@ mod tests {
         // (. clojure.lang.RT (first nil)) → nil (NanBox-encoded)
         let v = eval_str_via_jit("(. clojure.lang.RT (first nil))");
         // Decode the NanBox; should be Object::Nil.
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7 };
         // Nil isn't a TAG_PTR — handled in object_to_nanbox roundtrip.
         // For tests just check it's the nil tag pattern.
         let _ = ids;

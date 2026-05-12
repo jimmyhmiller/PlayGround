@@ -33,6 +33,8 @@ use std::sync::Arc;
 
 use super::keyword::Keyword;
 use super::object::Object;
+use super::persistent_hash_map::PersistentHashMap;
+use super::persistent_hash_set::PersistentHashSet;
 use super::persistent_list::PersistentList;
 use super::persistent_vector::PersistentVector;
 use super::symbol::Symbol;
@@ -77,7 +79,7 @@ impl<'a> Reader<'a> {
                 self.skip_line_comment();
                 self.read_form()
             }
-            b'{' => self.read_map_placeholder(),
+            b'{' => self.read_map(),
             b'#' => self.read_dispatch_placeholder(),
             b'^' => self.read_meta(),
             b'`' => self.read_syntax_quote_placeholder(),
@@ -370,14 +372,19 @@ impl<'a> Reader<'a> {
         match c {
             b'{' => {
                 self.pos += 1;
+                let mut items: Vec<Object> = Vec::new();
                 loop {
                     self.skip_ws_and_comments();
                     match self.peek_byte() {
-                        Some(b'}') => { self.pos += 1; return Ok(Object::Nil); }
+                        Some(b'}') => {
+                            self.pos += 1;
+                            return Ok(Object::Set(PersistentHashSet::create(items)));
+                        }
                         None => return Err(self.err("EOF inside set literal `#{...}`")),
                         Some(_) => {}
                     }
-                    let _e = self.read_form()?;
+                    let e = self.read_form()?;
+                    items.push(e);
                 }
             }
             b'_' => {
@@ -430,40 +437,34 @@ impl<'a> Reader<'a> {
         self.read_form()
     }
 
-    /// Read a `{k1 v1 k2 v2 ...}` map literal and discard the contents,
-    /// returning `Object::Nil`.
-    ///
-    /// This is a placeholder until `IPersistentMap` is ported: map
-    /// literals appear pervasively in upstream `clojure/core.clj` as
-    /// metadata and configuration, but during bootstrap loading we never
-    /// actually need their values (they're substituted away at the
-    /// loader's substitution pass, or they live on metadata our analyzer
-    /// already discards). The point is for the reader to make forward
-    /// progress so the rest of the file can be processed.
-    ///
-    /// The keys and values are still *read* (and discarded) so the cursor
-    /// advances past them correctly, including any nested forms.
-    fn read_map_placeholder(&mut self) -> Result<Object, ReaderError> {
+    /// Read a `{k1 v1 k2 v2 ...}` map literal into an `Object::Map`.
+    /// Matches `LispReader.MapReader` — reads `k v` pairs until `}`, then
+    /// builds a `PersistentHashMap` via `create_pairs`. Duplicate keys
+    /// keep the last value (Clojure's `PersistentArrayMap` reader does the
+    /// same; the upstream check that errors on duplicates lives in a later
+    /// macro-expansion pass, not the reader itself).
+    fn read_map(&mut self) -> Result<Object, ReaderError> {
         self.pos += 1; // consume '{'
+        let mut pairs: Vec<(Object, Object)> = Vec::new();
         loop {
             self.skip_ws_and_comments();
             match self.peek_byte() {
                 Some(b'}') => {
                     self.pos += 1;
-                    return Ok(Object::Nil);
+                    return Ok(Object::Map(PersistentHashMap::create_pairs(pairs)));
                 }
                 None => return Err(self.err("EOF inside map literal `{...}`")),
                 Some(_) => {}
             }
-            // Read and discard a key + value.
-            let _k = self.read_form()?;
+            let k = self.read_form()?;
             self.skip_ws_and_comments();
             if matches!(self.peek_byte(), Some(b'}') | None) {
                 return Err(self.err(
                     "Map literal must have an even number of forms",
                 ));
             }
-            let _v = self.read_form()?;
+            let v = self.read_form()?;
+            pairs.push((k, v));
         }
     }
 

@@ -694,6 +694,36 @@ impl FunctionBuilder {
         self.push_inst(Type::FrameSlice, Inst::CloneSlice(slice))
     }
 
+    // ── Exception handlers ─────────────────────────────────────
+    //
+    // The same-shape sibling of `push_prompt`/`pop_prompt`, but for the
+    // exception channel instead of abort-to-prompt control flow. See the
+    // doc comments on `Inst::PushHandler` / `Terminator::Raise` for the
+    // semantics (LLVM invoke/landingpad cost model).
+
+    /// Install an exception handler. Any `raise(v)` in this push's
+    /// static scope lowers to a local jump to `handler_block` with `v`
+    /// as the handler's first block param. Plain `Call`s in scope are
+    /// implicitly invokes against this handler too.
+    ///
+    /// `handler_block` must have exactly one I64 block param.
+    pub fn push_handler(&mut self, handler_block: BlockId) {
+        self.push_void_inst(Inst::PushHandler(handler_block));
+    }
+
+    /// Pop the most-recently-pushed exception handler.
+    pub fn pop_handler(&mut self) {
+        self.push_void_inst(Inst::PopHandler);
+    }
+
+    /// Raise an exception. Lowers to a jump to the nearest active
+    /// `push_handler` block (with `value` as its first block param), or
+    /// — if no handler is in scope — to a return with outcome kind set
+    /// to `Exception` and `value` as payload.
+    pub fn raise(&mut self, value: Value) {
+        self.set_terminator(Terminator::Raise(value));
+    }
+
     // ── Calls ──────────────────────────────────────────────────
 
     pub fn call(&mut self, func: FuncRef, args: &[Value]) -> Option<Value> {

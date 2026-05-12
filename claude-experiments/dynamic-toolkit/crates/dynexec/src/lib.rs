@@ -217,6 +217,30 @@ pub trait InterpFrameStore {
     /// Pop all frames above `depth`, keeping the frame at `depth` as the new top.
     fn pop_frames_above(&mut self, depth: usize);
 
+    // ── Exception handlers ──────────────────────────────────────
+
+    /// Push an exception handler onto the current top frame. The block
+    /// is jumped to (with the thrown value as its first block param)
+    /// when `Terminator::Raise` fires or when a callee's exception
+    /// propagates up to this frame.
+    ///
+    /// Default impl panics — only interpreter implementations that
+    /// honor `Inst::PushHandler` need to override.
+    fn push_handler(&mut self, _handler_block_idx: usize) {
+        panic!("push_handler not supported by this InterpFrameStore")
+    }
+    /// Pop the most-recently-pushed exception handler from the current
+    /// top frame. Default impl panics — see `push_handler`.
+    fn pop_handler(&mut self) {
+        panic!("pop_handler not supported by this InterpFrameStore")
+    }
+    /// Return the topmost active exception handler in the current
+    /// frame, or `None` if no handler is active. Default returns
+    /// `None` so stores without handler support don't see catches.
+    fn top_handler(&self) -> Option<usize> {
+        None
+    }
+
     // Heap-backed continuation support lives in the `FrameCapture` and
     // `FrameRestorable` traits (in `cont_ops`). Stores that support
     // heap-backed continuations implement those in addition to

@@ -1628,3 +1628,117 @@ fn module_recursive_fibonacci() {
     assert_eq!(run_module_simple(f_fib, &module, &[10]), 55);
     assert_eq!(run_module_simple(f_fib, &module, &[15]), 610);
 }
+
+// ───────────────── Exception primitives ─────────────────
+//
+// `raise` + `push_handler` / `pop_handler`. Same-fn raise jumps to
+// the active handler block; raises across plain `Call` propagate up
+// until a handler frame catches; uncaught raises surface as
+// `InterpResult::Uncaught` / `InterpError::UncaughtException`.
+
+#[test]
+fn raise_with_active_handler_jumps_locally() {
+    // (push_handler h ; body raises 42 ; h: ret param0+1) → 43
+    let mut b = FunctionBuilder::new("local_catch", &[], Some(Type::I64));
+    let handler_bb = b.create_block(&[Type::I64]);
+    b.push_handler(handler_bb);
+    let v = b.iconst(Type::I64, 42);
+    b.raise(v);
+
+    b.switch_to_block(handler_bb);
+    let caught = b.block_param(handler_bb, 0);
+    let one = b.iconst(Type::I64, 1);
+    let r = b.add(caught, one);
+    b.ret(r);
+
+    let func = b.build();
+    assert_eq!(run_simple(&func, &[]), 43);
+}
+
+#[test]
+fn raise_without_handler_propagates_via_uncaught() {
+    let mut b = FunctionBuilder::new("uncaught", &[], Some(Type::I64));
+    let v = b.iconst(Type::I64, 99);
+    b.raise(v);
+    let func = b.build();
+
+    let (module, entry) = Module::from_function(func);
+    let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
+    let interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &roots);
+    match interp.run(entry, &[]) {
+        Err(InterpError::UncaughtException(v)) => assert_eq!(v, 99),
+        other => panic!("expected UncaughtException(99), got {other:?}"),
+    }
+}
+
+#[test]
+fn cross_function_raise_unwinds_to_caller_handler() {
+    // f_thrower: raise(arg)
+    // f_main: push_handler h; call f_thrower(7); ret(unreachable);
+    //         h: ret(param+1)  ; expected 8
+    let mut mb = ModuleBuilder::new();
+    let f_thrower = mb.declare_func("thrower", &[Type::I64], Some(Type::I64));
+    let f_main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_thrower);
+    let entry = fb.entry_block();
+    let v = fb.block_param(entry, 0);
+    fb.raise(v);
+    mb.finish_func(f_thrower, fb);
+
+    let mut fb = mb.define_func(f_main);
+    let entry = fb.entry_block();
+    let arg = fb.block_param(entry, 0);
+    let handler_bb = fb.create_block(&[Type::I64]);
+    fb.push_handler(handler_bb);
+    let _ = fb.call(f_thrower, &[arg]);
+    // If thrower returns normally (it won't), bump and return its value.
+    // We need a terminator regardless — emit an unreachable; the actual
+    // path is the handler block.
+    fb.unreachable();
+
+    fb.switch_to_block(handler_bb);
+    let caught = fb.block_param(handler_bb, 0);
+    let one = fb.iconst(Type::I64, 1);
+    let r = fb.add(caught, one);
+    fb.ret(r);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+    assert_eq!(run_module_simple(f_main, &module, &[41]), 42);
+}
+
+#[test]
+fn nested_handlers_innermost_catches_first() {
+    // push_handler outer
+    //   push_handler inner
+    //     raise 5
+    //   pop  (unreachable here)
+    // pop (unreachable)
+    //
+    // inner: ret(param + 10)         → 15
+    // outer: ret(param + 100)        → not reached
+    let mut b = FunctionBuilder::new("nested", &[], Some(Type::I64));
+    let outer_bb = b.create_block(&[Type::I64]);
+    let inner_bb = b.create_block(&[Type::I64]);
+
+    b.push_handler(outer_bb);
+    b.push_handler(inner_bb);
+    let v = b.iconst(Type::I64, 5);
+    b.raise(v);
+
+    b.switch_to_block(inner_bb);
+    let caught = b.block_param(inner_bb, 0);
+    let ten = b.iconst(Type::I64, 10);
+    let r = b.add(caught, ten);
+    b.ret(r);
+
+    b.switch_to_block(outer_bb);
+    let caught = b.block_param(outer_bb, 0);
+    let hundred = b.iconst(Type::I64, 100);
+    let r = b.add(caught, hundred);
+    b.ret(r);
+
+    let func = b.build();
+    assert_eq!(run_simple(&func, &[]), 15);
+}

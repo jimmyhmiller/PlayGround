@@ -625,6 +625,17 @@ fn check_terminator(
                 });
             }
         }
+        Terminator::Raise(v) => {
+            // Raised value is always I64-typed (the exception payload
+            // convention matches Invoke's exception-block first-param).
+            if func.value_type(*v) != Type::I64 {
+                errors.push(VerifyError::TypeMismatch {
+                    expected: Type::I64,
+                    got: func.value_type(*v),
+                    context: "raise value must be i64".into(),
+                });
+            }
+        }
         Terminator::Unreachable => {}
     }
 }

@@ -1706,6 +1706,9 @@ impl JitModule {
         //   - The module uses continuations (prompts) — ALL internal calls need it
         //   - The CALLEE has guards/deopts that might propagate non-standard outcomes
         //   - The CALLER uses Invoke terminators (exception dispatch needs X1 check)
+        //   - The CALLER or CALLEE uses Raise / PushHandler — calls inside a
+        //     push_handler region must check x1 for the Exception outcome, and
+        //     any callee that raises returns a non-Return outcome.
         // Plain call/return is the fast path with no outcome checking.
         let uses_continuations = module.functions.iter().any(|f| f.prompt_count > 0);
 
@@ -1726,13 +1729,29 @@ impl JitModule {
             })
         });
 
+        // Any function uses the exception primitives? If so, every
+        // internal call needs to be control-aware so callers in a
+        // push_handler scope can route Exception outcomes locally and
+        // callers without one can propagate them up.
+        let uses_exceptions = module.functions.iter().any(|f| {
+            f.blocks.iter().any(|b| {
+                matches!(b.terminator, Terminator::Raise(_))
+                    || b.insts.iter().any(|n| {
+                        matches!(n.inst, Inst::PushHandler(_) | Inst::PopHandler)
+                    })
+            })
+        });
+
         let direct_call_is_internal: Vec<bool> = module
             .func_table
             .iter()
             .enumerate()
             .map(|(idx, def)| match def {
                 FuncDef::Internal(func_idx) => {
-                    uses_continuations || func_has_deopts[*func_idx] || any_invoke
+                    uses_continuations
+                        || func_has_deopts[*func_idx]
+                        || any_invoke
+                        || uses_exceptions
                 }
                 _ => false,
             })
@@ -2638,6 +2657,11 @@ struct ValueAssignment {
 struct BlockMeta {
     label: Label,
     active_prompts: Vec<PromptId>,
+    /// Stack of exception-handler block ids active on entry to this
+    /// block, in push order (topmost handler last). Lowering of
+    /// `Raise` and post-`Call` return checks consult `last()` to find
+    /// the in-scope handler.
+    active_handlers: Vec<BlockId>,
 }
 
 struct PendingResumeStub {
@@ -2727,7 +2751,8 @@ fn terminator_successors(terminator: &Terminator) -> Vec<BlockId> {
         Terminator::Ret(_)
         | Terminator::RetVoid
         | Terminator::Unreachable
-        | Terminator::AbortToPrompt { .. } => Vec::new(),
+        | Terminator::AbortToPrompt { .. }
+        | Terminator::Raise(_) => Vec::new(),
     }
 }
 
@@ -2764,6 +2789,107 @@ fn assign_block_prompt_stacks(func: &Function, block_meta: &mut [BlockMeta]) {
 
     for (idx, meta) in block_meta.iter_mut().enumerate() {
         meta.active_prompts = incoming[idx].clone().unwrap_or_default();
+    }
+}
+
+fn simulate_block_handler_stack(block: &Block, stack: &[BlockId]) -> Vec<BlockId> {
+    let mut handlers = stack.to_vec();
+    for inst_node in &block.insts {
+        match &inst_node.inst {
+            Inst::PushHandler(h) => handlers.push(*h),
+            Inst::PopHandler => {
+                handlers.pop().unwrap_or_else(|| {
+                    panic!("pop_handler without matching push_handler in block")
+                });
+            }
+            _ => {}
+        }
+    }
+    handlers
+}
+
+/// Walk a block's insts in order; for each `PushHandler(h)`, record the
+/// active-handlers stack state JUST BEFORE the push. When `h` is later
+/// reached at runtime (via `Raise` route or `Call`-with-handler), the
+/// "implicit" raise unwinds past the inner push — so `h`'s entry state
+/// is what was active outside the push, not what's active inside.
+fn collect_block_handler_seeds(
+    block: &Block,
+    entry_stack: &[BlockId],
+) -> Vec<(BlockId, Vec<BlockId>)> {
+    let mut seeds: Vec<(BlockId, Vec<BlockId>)> = Vec::new();
+    let mut handlers = entry_stack.to_vec();
+    for inst_node in &block.insts {
+        match &inst_node.inst {
+            Inst::PushHandler(h) => {
+                seeds.push((*h, handlers.clone()));
+                handlers.push(*h);
+            }
+            Inst::PopHandler => {
+                handlers.pop().unwrap_or_else(|| {
+                    panic!("pop_handler without matching push_handler in block")
+                });
+            }
+            _ => {}
+        }
+    }
+    seeds
+}
+
+fn assign_block_handler_stacks(func: &Function, block_meta: &mut [BlockMeta]) {
+    if func.blocks.is_empty() {
+        return;
+    }
+    let mut incoming: Vec<Option<Vec<BlockId>>> = vec![None; func.blocks.len()];
+    incoming[0] = Some(Vec::new());
+    let mut queue = VecDeque::from([0usize]);
+
+    while let Some(block_idx) = queue.pop_front() {
+        let entry_handlers = incoming[block_idx]
+            .clone()
+            .expect("queued block missing handler stack");
+        // Seed handler blocks reached via implicit Raise/Call routes
+        // from PushHandler sites in this block.
+        let seeds =
+            collect_block_handler_seeds(&func.blocks[block_idx], &entry_handlers);
+        for (handler_bb, handler_entry_stack) in seeds {
+            let h_idx = handler_bb.index();
+            match &incoming[h_idx] {
+                Some(existing) => {
+                    assert_eq!(
+                        existing, &handler_entry_stack,
+                        "inconsistent handler stack entering handler bb{}",
+                        h_idx
+                    );
+                }
+                None => {
+                    incoming[h_idx] = Some(handler_entry_stack);
+                    queue.push_back(h_idx);
+                }
+            }
+        }
+        let exit_handlers =
+            simulate_block_handler_stack(&func.blocks[block_idx], &entry_handlers);
+        for succ in terminator_successors(&func.blocks[block_idx].terminator) {
+            let succ_idx = succ.index();
+            match &incoming[succ_idx] {
+                Some(existing) => {
+                    assert_eq!(
+                        existing, &exit_handlers,
+                        "inconsistent handler stack entering block bb{}",
+                        succ_idx
+                    );
+                }
+                None => {
+                    incoming[succ_idx] = Some(exit_handlers.clone());
+                    queue.push_back(succ_idx);
+                }
+            }
+        }
+    }
+
+    for (idx, meta) in block_meta.iter_mut().enumerate() {
+        meta.active_handlers = incoming[idx].clone().unwrap_or_default();
     }
 }
 
@@ -3205,9 +3331,11 @@ where
             block_meta.push(BlockMeta {
                 label,
                 active_prompts: Vec::new(),
+                active_handlers: Vec::new(),
             });
         }
         assign_block_prompt_stacks(func, &mut block_meta);
+        assign_block_handler_stacks(func, &mut block_meta);
 
         let mut regs = R::new(num_values);
         let mut frame = Cfg::Frames::new_layout(func.blocks.len());
@@ -3437,6 +3565,7 @@ where
     fn lower_block(&mut self, block_idx: usize) {
         let block = &self.func.blocks[block_idx];
         let mut active_prompts = self.block_meta[block_idx].active_prompts.clone();
+        let mut active_handlers = self.block_meta[block_idx].active_handlers.clone();
 
         // Bind label
         B::bind_label(&mut self.buf, self.block_meta[block_idx].label);
@@ -3453,11 +3582,17 @@ where
         }
 
         for (inst_idx, inst_node) in block.insts.iter().enumerate() {
-            self.lower_inst(block_idx, inst_idx, inst_node, &mut active_prompts);
+            self.lower_inst(
+                block_idx,
+                inst_idx,
+                inst_node,
+                &mut active_prompts,
+                &mut active_handlers,
+            );
         }
 
         // Lower terminator
-        self.lower_terminator(block_idx, &active_prompts);
+        self.lower_terminator(block_idx, &active_prompts, &active_handlers);
     }
 
     fn lower_inst(
@@ -3466,6 +3601,7 @@ where
         inst_idx: usize,
         inst_node: &InstNode,
         active_prompts: &mut Vec<PromptId>,
+        active_handlers: &mut Vec<BlockId>,
     ) {
         let result_val = inst_node.value;
 
@@ -3892,11 +4028,12 @@ where
                     block_idx,
                     inst_idx,
                     active_prompts,
+                    active_handlers,
                 );
             }
 
             Inst::CallIndirect(callee, args, _ret_ty) => {
-                self.lower_call_indirect(*callee, args, result_val);
+                self.lower_call_indirect(*callee, args, result_val, active_handlers);
             }
 
             // ── Tagged value operations (TagScheme-generic) ─────────
@@ -4073,6 +4210,22 @@ where
                     "mismatched prompt stack in JIT lowering: expected {:?}, got {:?}",
                     popped, prompt
                 );
+            }
+
+            Inst::PushHandler(handler) => {
+                // Compile-time tracking only — no machine code. The
+                // `Raise` terminator + post-`Call` checks read this
+                // stack to decide whether to route locally or
+                // propagate out via the outcome-kind convention.
+                active_handlers.push(*handler);
+            }
+
+            Inst::PopHandler => {
+                active_handlers
+                    .pop()
+                    .unwrap_or_else(|| {
+                        panic!("pop_handler without active handler in JIT lowering")
+                    });
             }
 
             Inst::CloneSlice(slice) => {
@@ -4538,6 +4691,7 @@ where
         block_idx: usize,
         inst_idx: usize,
         active_prompts: &[PromptId],
+        active_handlers: &[BlockId],
     ) {
         let control_aware = self.direct_call_is_control_aware(func_ref);
         let suspend_record = if control_aware {
@@ -4600,7 +4754,44 @@ where
             };
             B::emit_cmp_gp_imm(&mut self.buf, machine_gp(1), expected_kind);
             B::emit_branch_eq_to_label(&mut self.buf, continue_label);
-            self.emit_return_current_outcome();
+            // Outcome wasn't the expected normal-return kind. If an
+            // exception handler is active in this fn AND the outcome
+            // is `Exception`, route locally to it. Otherwise propagate
+            // (return our current outcome to *our* caller).
+            if let Some(&handler_bb) = active_handlers.last() {
+                let route_label = self.buf.create_label();
+                B::emit_cmp_gp_imm(
+                    &mut self.buf,
+                    machine_gp(1),
+                    JitOutcomeKind::Exception as u64,
+                );
+                B::emit_branch_eq_to_label(&mut self.buf, route_label);
+                self.emit_return_current_outcome();
+                B::bind_label(&mut self.buf, route_label);
+                // The thrown value lives in x0/x2 by raise convention.
+                // Mirror the Invoke exception path exactly: save x0
+                // across the pop, restore it, run call cleanup so SP
+                // is right, write x0 to the handler's first param,
+                // and branch.
+                let save_slot = self.frame.alloc_local_slot();
+                let save_access = self.frame.slot_access(save_slot);
+                B::emit_store_gp_to_frame(&mut self.buf, machine_gp(0), save_access);
+                self.emit_pop_suspended_frame();
+                B::emit_load_gp_from_frame(&mut self.buf, machine_gp(0), save_access);
+                self.finish_call_cleanup(args, outgoing_size);
+                self.write_invoke_return_to_target(handler_bb);
+                // Mirror the Invoke exception path: spill block args
+                // to the canonical multi-pred slots. The handler has
+                // only its implicit value param (no user args), so
+                // pass an empty extra-args list with param_offset=1.
+                self.store_block_args_to_canonical_with_param_offset(handler_bb, &[], 1);
+                B::emit_branch_to_label(
+                    &mut self.buf,
+                    self.block_meta[handler_bb.index()].label,
+                );
+            } else {
+                self.emit_return_current_outcome();
+            }
             B::bind_label(&mut self.buf, continue_label);
             // Save return value (X0) across the pop call — it follows
             // the C ABI and clobbers all caller-saved registers.
@@ -4634,7 +4825,13 @@ where
         self.assign_call_result(result_val);
     }
 
-    fn lower_call_indirect(&mut self, callee: Value, args: &[Value], result_val: Option<Value>) {
+    fn lower_call_indirect(
+        &mut self,
+        callee: Value,
+        args: &[Value],
+        result_val: Option<Value>,
+        active_handlers: &[BlockId],
+    ) {
         // Get callee pointer first
         let callee_reg = self
             .regs
@@ -4656,7 +4853,29 @@ where
         };
         B::emit_cmp_gp_imm(&mut self.buf, machine_gp(1), expected_kind);
         B::emit_branch_eq_to_label(&mut self.buf, continue_label);
-        self.emit_return_current_outcome();
+        // Outcome wasn't a normal return. If an exception handler is
+        // active in this fn AND outcome == Exception, route locally.
+        // Otherwise propagate. No suspended-frame pop here — indirect
+        // calls don't push a suspend record (control-flow ops via
+        // indirect call must use `invoke_indirect`).
+        if let Some(&handler_bb) = active_handlers.last() {
+            let route_label = self.buf.create_label();
+            B::emit_cmp_gp_imm(
+                &mut self.buf,
+                machine_gp(1),
+                JitOutcomeKind::Exception as u64,
+            );
+            B::emit_branch_eq_to_label(&mut self.buf, route_label);
+            self.emit_return_current_outcome();
+            B::bind_label(&mut self.buf, route_label);
+            self.write_invoke_return_to_target(handler_bb);
+            B::emit_branch_to_label(
+                &mut self.buf,
+                self.block_meta[handler_bb.index()].label,
+            );
+        } else {
+            self.emit_return_current_outcome();
+        }
         B::bind_label(&mut self.buf, continue_label);
 
         self.finish_call_cleanup(args, outgoing_size);
@@ -4796,7 +5015,12 @@ where
         B::emit_branch_to_label(&mut self.buf, self.block_meta[normal.index()].label);
     }
 
-    fn lower_terminator(&mut self, block_idx: usize, active_prompts: &[PromptId]) {
+    fn lower_terminator(
+        &mut self,
+        block_idx: usize,
+        active_prompts: &[PromptId],
+        active_handlers: &[BlockId],
+    ) {
         let block = &self.func.blocks[block_idx];
         match &block.terminator {
             Terminator::Ret(v) => {
@@ -5056,6 +5280,47 @@ where
 
             Terminator::Unreachable => {
                 B::emit_trap(&mut self.buf);
+            }
+
+            Terminator::Raise(value) => {
+                // Two-path lowering, mirroring `Inst::Raise` semantics:
+                //
+                //   * Active handler in this fn → emit a local jump to
+                //     the topmost handler block, passing `value` as its
+                //     first block param. No outcome-kind setup, no JIT
+                //     exit. Cheap.
+                //   * No handler → set the outcome convention registers
+                //     (x1 = Exception, x2 = value) and emit the epilogue.
+                //     The caller's post-`Call` check (or its enclosing
+                //     `Invoke`) sees `JitOutcomeKind::Exception` in x1
+                //     and routes to its own handler / propagates further.
+                if let Some(&handler_bb) = active_handlers.last() {
+                    self.regs
+                        .spill_all_live::<B>(&mut self.buf, &mut self.frame);
+                    self.emit_block_args(handler_bb, std::slice::from_ref(value));
+                    let label = self.block_meta[handler_bb.index()].label;
+                    B::emit_branch_to_label(&mut self.buf, label);
+                } else {
+                    // Materialize `value` in a GP register, route to
+                    // payload0 (x2) and result-result (x0). The
+                    // `lower_invoke_common` exception path explicitly
+                    // preserves x0 across the suspended-frame pop, so
+                    // both registers carrying the value is the safe
+                    // convention.
+                    let vreg = self.regs.ensure_in_gp_reg::<B>(
+                        &mut self.buf,
+                        &mut self.frame,
+                        *value,
+                    );
+                    // x2 = payload0 = value
+                    B::emit_gp_move(&mut self.buf, machine_gp(2), machine_gp(vreg));
+                    // x0 = result = value (for the exception-block
+                    // first-param convention used by Invoke lowering)
+                    B::emit_gp_move(&mut self.buf, machine_gp(0), machine_gp(vreg));
+                    self.regs.dec_use(*value);
+                    self.emit_set_outcome_kind(JitOutcomeKind::Exception);
+                    self.emit_return_current_outcome();
+                }
             }
 
             Terminator::AbortToPrompt { prompt, args } => {

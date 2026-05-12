@@ -244,6 +244,24 @@ pub enum Inst {
     PushPrompt(PromptId, BlockId),
     /// Pop a prompt boundary when leaving its extent. Void instruction.
     PopPrompt(PromptId),
+
+    // -- Exception handlers --
+    /// Install an exception handler in the current dynamic extent.
+    /// Any `Terminator::Raise` in the static scope of this push routes to
+    /// `handler` with the raised value as `handler`'s first block param
+    /// (must be I64). Additionally, the lowerer arranges plain `Call`
+    /// sites in the scope to branch to `handler` when the callee returns
+    /// `JitOutcomeKind::Exception` — turning every call into an implicit
+    /// invoke under the handler.
+    ///
+    /// Like `PushPrompt`/`PopPrompt`, this emits zero machine code: only
+    /// compile-time tracking that affects how `Raise` and `Call` lower.
+    /// Cost is paid at raise sites and post-call return checks, not at
+    /// push/pop.
+    PushHandler(BlockId),
+    /// Pop the most-recently-pushed exception handler when leaving its
+    /// extent. Void instruction.
+    PopHandler,
     /// Capture the current delimited suffix of frames up to `prompt`.
     /// `live` values are explicitly reified into the captured slice.
     CaptureSlice(PromptId, Vec<Value>),
@@ -347,6 +365,7 @@ impl Inst {
             Inst::OverflowCheck(_, _, _) => Some(Type::I8),
             Inst::Guard(_, _, _) => None,
             Inst::PushPrompt(_, _) | Inst::PopPrompt(_) => None,
+            Inst::PushHandler(_) | Inst::PopHandler => None,
             Inst::CaptureSlice(_, _) | Inst::CloneSlice(_) => Some(Type::FrameSlice),
 
             Inst::Call(fref, _) => extern_sigs[fref.index()].sig.ret,
@@ -419,6 +438,7 @@ impl Inst {
             }
 
             Inst::PushPrompt(_, _) | Inst::PopPrompt(_) => {}
+            Inst::PushHandler(_) | Inst::PopHandler => {}
             Inst::CaptureSlice(_, live) => live.iter().for_each(|v| f(*v)),
             Inst::CloneSlice(v) => f(*v),
 
@@ -498,6 +518,7 @@ impl Inst {
             }
 
             Inst::PushPrompt(_, _) | Inst::PopPrompt(_) => {}
+            Inst::PushHandler(_) | Inst::PopHandler => {}
             Inst::CaptureSlice(_, live) => live.iter_mut().for_each(|v| f(v)),
             Inst::CloneSlice(v) => f(v),
 
@@ -587,6 +608,17 @@ pub enum Terminator {
         prompt: PromptId,
         args: Vec<Value>,
     },
+    /// Raise an exception with `value` as the payload. If a `PushHandler`
+    /// is statically active in the current function, lowers to a local
+    /// jump to that handler block with `value` as the handler's first
+    /// block param. Otherwise lowers to "set outcome=Exception,
+    /// payload0=value, return" — which the caller's post-`Call` check
+    /// (if any handler is active there) catches and re-routes.
+    ///
+    /// This is the LLVM `invoke`/`landingpad` cost model: zero overhead
+    /// on the happy path, cost paid at raise sites and post-call return
+    /// checks. The handler block must have exactly one I64 param.
+    Raise(Value),
     Unreachable,
 }
 
@@ -597,6 +629,7 @@ impl Terminator {
             Terminator::RetVoid | Terminator::Unreachable => {}
             Terminator::CaptureSlice { .. } => {}
             Terminator::AbortToPrompt { args, .. } => args.iter().for_each(|v| f(*v)),
+            Terminator::Raise(v) => f(*v),
             Terminator::ResumeSlice { slice, args, return_args, .. } => {
                 f(*slice);
                 args.iter().for_each(|v| f(*v));
@@ -656,6 +689,7 @@ impl Terminator {
             Terminator::RetVoid | Terminator::Unreachable => {}
             Terminator::CaptureSlice { .. } => {}
             Terminator::AbortToPrompt { args, .. } => args.iter_mut().for_each(|v| f(v)),
+            Terminator::Raise(v) => f(v),
             Terminator::ResumeSlice { slice, args, return_args, .. } => {
                 f(slice);
                 args.iter_mut().for_each(|v| f(v));
@@ -721,6 +755,7 @@ impl Terminator {
             Terminator::Ret(_)
             | Terminator::RetVoid
             | Terminator::AbortToPrompt { .. }
+            | Terminator::Raise(_)
             | Terminator::Unreachable
             | Terminator::CaptureSlice { .. } => {}
             Terminator::ResumeSlice { return_block, return_args, .. } => f(*return_block, return_args),
@@ -775,6 +810,7 @@ impl Terminator {
             Terminator::Ret(_)
             | Terminator::RetVoid
             | Terminator::AbortToPrompt { .. }
+            | Terminator::Raise(_)
             | Terminator::Unreachable => {}
             Terminator::CaptureSlice { handler_block, resume_block, .. } => {
                 f(*handler_block, &[]);
@@ -831,6 +867,7 @@ impl Terminator {
             Terminator::Ret(_)
             | Terminator::RetVoid
             | Terminator::AbortToPrompt { .. }
+            | Terminator::Raise(_)
             | Terminator::Unreachable => vec![],
             Terminator::CaptureSlice { handler_block, resume_block, .. } => vec![*handler_block, *resume_block],
             Terminator::ResumeSlice { return_block, .. } => vec![*return_block],
@@ -953,6 +990,32 @@ impl Function {
             if let Terminator::AbortToPrompt { prompt, .. } = &block.terminator {
                 if let Some(&handler) = prompt_handlers.get(&prompt.index_u32()) {
                     preds[handler.index()].push(BlockId(i as u32));
+                }
+            }
+        }
+        // ── Raise → exception-handler implicit edges ─────────────
+        //
+        // `Terminator::Raise(v)` has no static successors — at
+        // runtime it routes to the topmost active `Inst::PushHandler(h)`
+        // in the dynamic extent (or unwinds the call stack). For CFG
+        // analyses, every PushHandler handler block is a *potential*
+        // successor of every Raise: we don't statically know which
+        // PushHandler is topmost without per-block active-handler
+        // tracking, so we over-approximate by linking every Raise
+        // site to every PushHandler in the function. Conservative but
+        // sound for SSA dominance / dead-block detection.
+        let raise_blocks: Vec<BlockId> = self
+            .blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| matches!(b.terminator, Terminator::Raise(_)).then_some(BlockId(i as u32)))
+            .collect();
+        for block in &self.blocks {
+            for node in &block.insts {
+                if let Inst::PushHandler(h) = &node.inst {
+                    for &raiser in &raise_blocks {
+                        preds[h.index()].push(raiser);
+                    }
                 }
             }
         }

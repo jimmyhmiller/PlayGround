@@ -3014,3 +3014,217 @@ fn extend_with_extern_added_in_second_batch() {
     assert_eq!(jit.call(g, &[4]), 15);
     assert_eq!(jit.call(f, &[10]), 20);
 }
+
+// ────────── Raise + push_handler (exception primitive) ──────────
+
+#[test]
+fn raise_without_handler_surfaces_as_jit_outcome_exception() {
+    let mut b = FunctionBuilder::new("raise_top", &[], Some(Type::I64));
+    let v = b.iconst(Type::I64, 99);
+    b.raise(v);
+    let func = b.build();
+
+    match run_jit_outcome(&func, &[]) {
+        JitOutcome::Exception(v) => assert_eq!(v, 99),
+        other => panic!("expected Exception(99), got {other:?}"),
+    }
+}
+
+#[test]
+fn raise_inside_local_handler_jumps_to_catch_block() {
+    // push_handler h ; raise 42 ; h: ret(param + 1) → 43
+    let mut b = FunctionBuilder::new("local_catch", &[], Some(Type::I64));
+    let handler_bb = b.create_block(&[Type::I64]);
+    b.push_handler(handler_bb);
+    let v = b.iconst(Type::I64, 42);
+    b.raise(v);
+
+    b.switch_to_block(handler_bb);
+    let caught = b.block_param(handler_bb, 0);
+    let one = b.iconst(Type::I64, 1);
+    let r = b.add(caught, one);
+    b.ret(r);
+
+    let func = b.build();
+    assert_eq!(run_jit(&func, &[]), 43);
+}
+
+#[test]
+fn raise_from_callee_caught_by_caller_handler() {
+    // f_throw(x): raise(x)
+    // f_main(x): push_handler h; call f_throw(x); unreachable.
+    //            h: ret(param + 1)        → main(41) = 42
+    let mut mb = ModuleBuilder::new();
+    let f_throw = mb.declare_func("throw_v", &[Type::I64], Some(Type::I64));
+    let f_main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_throw);
+    let entry = fb.entry_block();
+    let v = fb.block_param(entry, 0);
+    fb.raise(v);
+    mb.finish_func(f_throw, fb);
+
+    let mut fb = mb.define_func(f_main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let handler_bb = fb.create_block(&[Type::I64]);
+    fb.push_handler(handler_bb);
+    let _ = fb.call(f_throw, &[x]);
+    fb.unreachable();
+
+    fb.switch_to_block(handler_bb);
+    let caught = fb.block_param(handler_bb, 0);
+    let one = fb.iconst(Type::I64, 1);
+    let r = fb.add(caught, one);
+    fb.ret(r);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(f_main, &[41]), 42);
+}
+
+#[test]
+fn call_with_handler_active_returns_normally_when_callee_doesnt_throw() {
+    // f_id(x): ret(x)
+    // f_main(x): push_handler h; ret(call f_id(x)); h: ret(param + 1000)
+    // Calling main(7) should land on the *normal* path → 7, NOT 1007.
+    let mut mb = ModuleBuilder::new();
+    let f_id = mb.declare_func("id", &[Type::I64], Some(Type::I64));
+    let f_main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_id);
+    let entry = fb.entry_block();
+    let v = fb.block_param(entry, 0);
+    fb.ret(v);
+    mb.finish_func(f_id, fb);
+
+    let mut fb = mb.define_func(f_main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let handler_bb = fb.create_block(&[Type::I64]);
+    fb.push_handler(handler_bb);
+    let r = fb.call(f_id, &[x]).unwrap();
+    fb.ret(r);
+
+    fb.switch_to_block(handler_bb);
+    let caught = fb.block_param(handler_bb, 0);
+    let k = fb.iconst(Type::I64, 1000);
+    let r2 = fb.add(caught, k);
+    fb.ret(r2);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(f_main, &[7]), 7);
+}
+
+#[test]
+fn raise_in_callee_caught_by_caller_invoke_directly() {
+    // Same as raise_from_callee_caught_by_caller_handler but uses
+    // explicit `fb.invoke` instead of push_handler + plain Call. If
+    // this works but the push_handler version doesn't, my push_handler
+    // routing in lower_call has a bug.
+    let mut mb = ModuleBuilder::new();
+    let f_throw = mb.declare_func("throw_v", &[Type::I64], Some(Type::I64));
+    let f_main = mb.declare_func("main", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_throw);
+    let entry = fb.entry_block();
+    let v = fb.block_param(entry, 0);
+    fb.raise(v);
+    mb.finish_func(f_throw, fb);
+
+    let mut fb = mb.define_func(f_main);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let normal_bb = fb.create_block(&[Type::I64]);
+    let handler_bb = fb.create_block(&[Type::I64]);
+    fb.invoke(f_throw, &[x], normal_bb, &[], handler_bb, &[]);
+
+    fb.switch_to_block(normal_bb);
+    let _ = fb.block_param(normal_bb, 0);
+    fb.unreachable();
+
+    fb.switch_to_block(handler_bb);
+    let caught = fb.block_param(handler_bb, 0);
+    let one = fb.iconst(Type::I64, 1);
+    let r = fb.add(caught, one);
+    fb.ret(r);
+    mb.finish_func(f_main, fb);
+
+    let module = mb.build();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(f_main, &[41]), 42);
+}
+
+#[test]
+fn raise_propagates_through_no_handler_frame_to_outer_handler() {
+    // f_inner(x): raise(x)
+    // f_mid(x): call f_inner(x); unreachable.   (no handler; propagates)
+    // f_outer(x): push_handler h; call f_mid(x); unreachable.
+    //             h: ret(param + 100)            → outer(5) = 105
+    let mut mb = ModuleBuilder::new();
+    let f_inner = mb.declare_func("inner", &[Type::I64], Some(Type::I64));
+    let f_mid = mb.declare_func("mid", &[Type::I64], Some(Type::I64));
+    let f_outer = mb.declare_func("outer", &[Type::I64], Some(Type::I64));
+
+    let mut fb = mb.define_func(f_inner);
+    let entry = fb.entry_block();
+    let v = fb.block_param(entry, 0);
+    fb.raise(v);
+    mb.finish_func(f_inner, fb);
+
+    let mut fb = mb.define_func(f_mid);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let _ = fb.call(f_inner, &[x]);
+    fb.unreachable();
+    mb.finish_func(f_mid, fb);
+
+    let mut fb = mb.define_func(f_outer);
+    let entry = fb.entry_block();
+    let x = fb.block_param(entry, 0);
+    let handler_bb = fb.create_block(&[Type::I64]);
+    fb.push_handler(handler_bb);
+    let _ = fb.call(f_mid, &[x]);
+    fb.unreachable();
+
+    fb.switch_to_block(handler_bb);
+    let caught = fb.block_param(handler_bb, 0);
+    let hundred = fb.iconst(Type::I64, 100);
+    let r = fb.add(caught, hundred);
+    fb.ret(r);
+    mb.finish_func(f_outer, fb);
+
+    let module = mb.build();
+    let jit = JitModule::compile::<NanBox>(&module, &[]);
+    assert_eq!(jit.call(f_outer, &[5]), 105);
+}
+
+#[test]
+fn nested_handlers_innermost_catches_first_jit() {
+    let mut b = FunctionBuilder::new("nested", &[], Some(Type::I64));
+    let outer_bb = b.create_block(&[Type::I64]);
+    let inner_bb = b.create_block(&[Type::I64]);
+
+    b.push_handler(outer_bb);
+    b.push_handler(inner_bb);
+    let v = b.iconst(Type::I64, 5);
+    b.raise(v);
+
+    b.switch_to_block(inner_bb);
+    let caught = b.block_param(inner_bb, 0);
+    let ten = b.iconst(Type::I64, 10);
+    let r = b.add(caught, ten);
+    b.ret(r);
+
+    b.switch_to_block(outer_bb);
+    let caught = b.block_param(outer_bb, 0);
+    let hundred = b.iconst(Type::I64, 100);
+    let r = b.add(caught, hundred);
+    b.ret(r);
+
+    let func = b.build();
+    assert_eq!(run_jit(&func, &[]), 15);
+}

@@ -108,6 +108,8 @@ pub struct HeapTypeIds {
     pub keyword: usize,
     pub cons: usize,
     pub vector: usize,
+    pub map: usize,
+    pub set: usize,
 }
 
 /// Process-global type-id registry. `Compiler::new` calls
@@ -221,6 +223,25 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
         return Object::Vector(crate::lang::persistent_vector::PersistentVector::create(
             items,
         ));
+    }
+    if type_id == ids.map {
+        // `clojure.lang.PersistentHashMap`: Header(8) + Raw64 "arc_ptr"(8)
+        // holding the host-side `Arc<PersistentHashMap>` pointer. Reconstruct
+        // by `Arc::increment_strong_count` on the stored pointer — the Arc
+        // is kept alive by `CompileRoots._maps`, so the pointer is valid.
+        let arc_ptr = unsafe { ptr.add(8).cast::<u64>().read_unaligned() }
+            as *const crate::lang::persistent_hash_map::PersistentHashMap;
+        unsafe { std::sync::Arc::increment_strong_count(arc_ptr) };
+        let arc = unsafe { std::sync::Arc::from_raw(arc_ptr) };
+        return Object::Map(arc);
+    }
+    if type_id == ids.set {
+        // `clojure.lang.PersistentHashSet`: same layout as Map.
+        let arc_ptr = unsafe { ptr.add(8).cast::<u64>().read_unaligned() }
+            as *const crate::lang::persistent_hash_set::PersistentHashSet;
+        unsafe { std::sync::Arc::increment_strong_count(arc_ptr) };
+        let arc = unsafe { std::sync::Arc::from_raw(arc_ptr) };
+        return Object::Set(arc);
     }
     Object::Unported {
         java_class: "heap object of unrecognized type_id",
@@ -579,6 +600,33 @@ unsafe fn equiv_impl(a: u64, b: u64) -> bool {
         let a_rest = unsafe { a_ptr.add(16).cast::<u64>().read_unaligned() };
         let b_rest = unsafe { b_ptr.add(16).cast::<u64>().read_unaligned() };
         return unsafe { equiv_impl(a_rest, b_rest) };
+    }
+    if a_type == ids.map {
+        // Read the host-side Arc pointers stored as Raw64. Pointer-equal
+        // Arcs (same instance) short-circuit; otherwise dispatch to the
+        // host-side structural comparator.
+        let a_arc = unsafe { a_ptr.add(8).cast::<u64>().read_unaligned() }
+            as *const crate::lang::persistent_hash_map::PersistentHashMap;
+        let b_arc = unsafe { b_ptr.add(8).cast::<u64>().read_unaligned() }
+            as *const crate::lang::persistent_hash_map::PersistentHashMap;
+        if a_arc == b_arc {
+            return true;
+        }
+        let a_map = unsafe { &*a_arc };
+        let b_map = unsafe { &*b_arc };
+        return a_map.equiv(b_map);
+    }
+    if a_type == ids.set {
+        let a_arc = unsafe { a_ptr.add(8).cast::<u64>().read_unaligned() }
+            as *const crate::lang::persistent_hash_set::PersistentHashSet;
+        let b_arc = unsafe { b_ptr.add(8).cast::<u64>().read_unaligned() }
+            as *const crate::lang::persistent_hash_set::PersistentHashSet;
+        if a_arc == b_arc {
+            return true;
+        }
+        let a_set = unsafe { &*a_arc };
+        let b_set = unsafe { &*b_arc };
+        return a_set.equiv(b_set);
     }
     false
 }

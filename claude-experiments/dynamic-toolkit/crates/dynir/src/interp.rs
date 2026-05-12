@@ -107,6 +107,11 @@ struct InterpFrame {
     inst_idx: usize,
     resume: FrameResume,
     active_prompts: Vec<u32>,
+    /// Stack of `Inst::PushHandler` handler block indices that are
+    /// currently active in this frame. `Raise` (and exceptions
+    /// propagating up from extern calls / internal calls) check the
+    /// top of this stack first before unwinding past the frame.
+    active_handlers: Vec<usize>,
     root_frame: usize,
     val_to_slot: Vec<Option<usize>>,
 }
@@ -256,6 +261,7 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
                 inst_idx: f.inst_idx as usize,
                 resume,
                 active_prompts: f.active_prompts.to_vec(),
+                active_handlers: Vec::new(),
                 root_frame,
                 val_to_slot,
             };
@@ -335,6 +341,7 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
             inst_idx: 0,
             resume,
             active_prompts: Vec::new(),
+            active_handlers: Vec::new(),
             root_frame,
             val_to_slot,
         });
@@ -418,6 +425,34 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
         self.stack
             .iter()
             .rposition(|f| f.active_prompts.contains(&prompt))
+    }
+
+    /// Push an exception handler on the current top frame's handler
+    /// stack. `handler_block_idx` is the block to jump to when an
+    /// exception fires in the dynamic scope of this push.
+    fn push_handler(&mut self, handler_block_idx: usize) {
+        self.stack
+            .last_mut()
+            .unwrap()
+            .active_handlers
+            .push(handler_block_idx);
+    }
+
+    /// Pop the most-recently-pushed exception handler from the current
+    /// top frame. Asserts a handler was active (mismatched push/pop is
+    /// a programmer error in the IR).
+    fn pop_handler(&mut self) {
+        let popped = self.stack.last_mut().unwrap().active_handlers.pop();
+        assert!(
+            popped.is_some(),
+            "pop_handler without matching push_handler"
+        );
+    }
+
+    /// Return the topmost active exception handler block in the current
+    /// frame, or `None` if no handler is pushed.
+    fn top_handler(&self) -> Option<usize> {
+        self.stack.last().and_then(|f| f.active_handlers.last().copied())
     }
 
     fn pop_frames_above(&mut self, depth: usize) {
@@ -741,6 +776,27 @@ where
                             }
                             FrameResume::FromCall { .. }
                             | FrameResume::FromResume { .. } => {
+                                // We just popped a callee frame. If
+                                // the caller (now top) has an active
+                                // `push_handler`, route to it — this
+                                // is what turns plain `Call`s inside
+                                // a try region into implicit invokes.
+                                if let Some(handler_bb) = sr.top_handler() {
+                                    let func =
+                                        &self.module.functions[sr.func_idx()];
+                                    let target = &func.blocks[handler_bb];
+                                    assert!(
+                                        !target.params.is_empty(),
+                                        "push_handler target block must have a value param",
+                                    );
+                                    sr.set(
+                                        target.params[0].0.index(),
+                                        exc,
+                                    );
+                                    sr.set_block(handler_bb);
+                                    sr.set_inst(0);
+                                    break;
+                                }
                                 continue;
                             }
                         }
@@ -849,6 +905,18 @@ where
 
                     Inst::PopPrompt(prompt) => {
                         sr.pop_prompt(prompt.index_u32());
+                        sr.advance_inst();
+                        continue;
+                    }
+
+                    Inst::PushHandler(handler) => {
+                        sr.push_handler(handler.index());
+                        sr.advance_inst();
+                        continue;
+                    }
+
+                    Inst::PopHandler => {
+                        sr.pop_handler();
                         sr.advance_inst();
                         continue;
                     }
@@ -1236,6 +1304,28 @@ where
                     });
                 }
 
+                Terminator::Raise(v) => {
+                    // If a `push_handler` is active in the current
+                    // frame, route locally. Otherwise propagate up to
+                    // the caller via `FrameAction::Exception`, which
+                    // walks the stack looking for the nearest handler
+                    // (push_handler OR invoke exception_block).
+                    let exc = sr.get(v.index());
+                    if let Some(handler_bb) = sr.top_handler() {
+                        let func = &self.module.functions[sr.func_idx()];
+                        let target = &func.blocks[handler_bb];
+                        assert!(
+                            !target.params.is_empty(),
+                            "push_handler target block must have at least one param (the thrown value)",
+                        );
+                        sr.set(target.params[0].0.index(), exc);
+                        sr.set_block(handler_bb);
+                        sr.set_inst(0);
+                        continue;
+                    }
+                    return Ok(FrameAction::Exception(exc));
+                }
+
                 Terminator::Unreachable => {
                     return Err(InterpError::Unreachable);
                 }
@@ -1550,6 +1640,8 @@ fn exec_non_call_inst<S: ValueLayout>(
         | Inst::StackAddr(..)
         | Inst::PushPrompt(..)
         | Inst::PopPrompt(..)
+        | Inst::PushHandler(..)
+        | Inst::PopHandler
         | Inst::CaptureSlice(..)
         | Inst::CloneSlice(..) => {
             panic!("Call/CallIndirect/InvokeDynamic/Safepoint/StackAddr must be handled by the interpreter, not exec_non_call_inst");

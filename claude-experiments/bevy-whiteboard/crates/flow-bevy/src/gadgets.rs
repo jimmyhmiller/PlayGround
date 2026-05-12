@@ -225,6 +225,8 @@ pub const GADGETS_DSL: &str = concat!(
     include_str!("gadgets/primitives/service.flow"),   "\n",
     include_str!("gadgets/primitives/aggregator.flow"),"\n",
     include_str!("gadgets/primitives/egress.flow"),    "\n",
+    include_str!("gadgets/primitives/constant_packet.flow"), "\n",
+    include_str!("gadgets/primitives/constant_signal.flow"), "\n",
 );
 
 // ============================================================================

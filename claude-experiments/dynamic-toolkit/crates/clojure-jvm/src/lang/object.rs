@@ -18,6 +18,8 @@ use std::any::Any;
 
 use super::keyword::Keyword;
 use super::namespace::Namespace;
+use super::persistent_hash_map::PersistentHashMap;
+use super::persistent_hash_set::PersistentHashSet;
 use super::persistent_list::PersistentList;
 use super::persistent_vector::PersistentVector;
 use super::symbol::Symbol;
@@ -63,6 +65,12 @@ pub enum Object {
 
     /// `clojure.lang.PersistentVector`. `[a b c]` reads as this.
     Vector(Arc<PersistentVector>),
+
+    /// `clojure.lang.PersistentHashMap`. `{a 1 b 2}` reads as this.
+    Map(Arc<PersistentHashMap>),
+
+    /// `clojure.lang.PersistentHashSet`. `#{a b c}` reads as this.
+    Set(Arc<PersistentHashSet>),
 
     /// Escape hatch for arbitrary host-side state Java threads through `Var`s
     /// during compilation (`LOCAL_ENV` map, `METHOD` (ObjMethod), `PathNode`
@@ -129,6 +137,84 @@ impl Object {
     }
 }
 
+/// `clojure.lang.Util.equiv(a, b)` — Clojure's structural equality, ported
+/// to host-side `Object`s. The runtime extern [`crate::runtime::equiv_impl`]
+/// is the sibling on NanBox-encoded heap values; both should agree on every
+/// case they have in common.
+///
+/// Rules:
+/// * `nil` equals only `nil`.
+/// * `true`/`false` equal themselves; `false` is NOT equiv to `nil`
+///   (Clojure's `=`, unlike its truthiness rules, distinguishes them).
+/// * `Long` and `Double` cross-compare numerically (Clojure's
+///   `Util.equiv(Number, Number)` defers to `Numbers.equal` which treats
+///   `1` and `1.0` as `=`).
+/// * `String`, `Symbol`, `Keyword`: structural over their fields. Keywords
+///   are globally interned so pointer equality short-circuits.
+/// * `List`, `Vector`: element-wise structural recursion.
+/// * `Map`: delegates to [`PersistentHashMap::equiv`].
+/// * `Var`, `Namespace`, `Host`, `Unported`: identity (`Arc::ptr_eq` for the
+///   first two; otherwise `false`).
+pub fn object_equiv(a: &Object, b: &Object) -> bool {
+    use Object::*;
+    match (a, b) {
+        (Nil, Nil) => true,
+        (Bool(x), Bool(y)) => x == y,
+        (Long(x), Long(y)) => x == y,
+        (Double(x), Double(y)) => x == y,
+        (Long(x), Double(y)) | (Double(y), Long(x)) => (*x as f64) == *y,
+        (String(x), String(y)) => **x == **y,
+        (Symbol(x), Symbol(y)) => x == y || **x == **y,
+        (Keyword(x), Keyword(y)) => Arc::ptr_eq(x, y) || **x == **y,
+        (Var(x), Var(y)) => Arc::ptr_eq(x, y),
+        (Namespace(x), Namespace(y)) => Arc::ptr_eq(x, y),
+        (List(x), List(y)) => list_equiv(x, y),
+        (Vector(x), Vector(y)) => vector_equiv(x, y),
+        (Map(x), Map(y)) => x.equiv(y),
+        (Set(x), Set(y)) => x.equiv(y),
+        _ => false,
+    }
+}
+
+fn list_equiv(a: &Arc<PersistentList>, b: &Arc<PersistentList>) -> bool {
+    if Arc::ptr_eq(a, b) {
+        return true;
+    }
+    let mut ca: &PersistentList = a;
+    let mut cb: &PersistentList = b;
+    loop {
+        match (ca, cb) {
+            (PersistentList::Empty, PersistentList::Empty) => return true,
+            (
+                PersistentList::Cons { first: fa, rest: ra, .. },
+                PersistentList::Cons { first: fb, rest: rb, .. },
+            ) => {
+                if !object_equiv(fa, fb) {
+                    return false;
+                }
+                ca = ra;
+                cb = rb;
+            }
+            _ => return false,
+        }
+    }
+}
+
+fn vector_equiv(a: &Arc<PersistentVector>, b: &Arc<PersistentVector>) -> bool {
+    if Arc::ptr_eq(a, b) {
+        return true;
+    }
+    if a.count() != b.count() {
+        return false;
+    }
+    for i in 0..a.count() {
+        if !object_equiv(&a.nth(i), &b.nth(i)) {
+            return false;
+        }
+    }
+    true
+}
+
 impl std::fmt::Debug for Object {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -143,6 +229,8 @@ impl std::fmt::Debug for Object {
             Object::Namespace(n) => write!(f, "{n:?}"),
             Object::List(l) => write!(f, "{l:?}"),
             Object::Vector(v) => write!(f, "{v:?}"),
+            Object::Map(m) => write!(f, "{m:?}"),
+            Object::Set(s) => write!(f, "{s:?}"),
             Object::Host(_) => write!(f, "#<host>"),
             Object::Unported { java_class } => {
                 write!(f, "#<unported {java_class}>")
