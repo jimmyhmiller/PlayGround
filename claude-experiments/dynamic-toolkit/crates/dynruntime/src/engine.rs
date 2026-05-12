@@ -572,8 +572,9 @@ mod tests {
             let v = b.iconst(Type::I64, 77);
             b.ret(v);
         });
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
         let mut engine: ExecutionEngine =
-            ExecutionEngine::with_tier_policy(&module, &NoGcRoots, &ENGINE_NO_CONTS, Box::new(AlwaysCompile::new()));
+            ExecutionEngine::with_tier_policy(&module, &roots, &ENGINE_NO_CONTS, Box::new(AlwaysCompile::new()));
         // First call triggers compilation
         assert_eq!(engine.run(entry, &[]).unwrap(), ExecutionResult::Value(77));
         // JIT module should now be set
@@ -588,9 +589,10 @@ mod tests {
             let v = b.iconst(Type::I64, 55);
             b.ret(v);
         });
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
         let mut engine: ExecutionEngine<'_> = ExecutionEngine::with_tier_policy(
             &module,
-            &NoGcRoots,
+            &roots,
             &ENGINE_NO_CONTS,
             Box::new(CallCountTier::new(3)),
         );

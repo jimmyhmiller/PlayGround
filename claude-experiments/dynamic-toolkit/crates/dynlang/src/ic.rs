@@ -911,8 +911,12 @@ mod tests {
     ///      for one class_key don't pollute another.
     #[test]
     fn direct_mode_emit_lookup_round_trip() {
-        use dynir::interp::{ExternCallResult, InterpResult, ModuleInterpreter, NoGcRoots};
+        use dynalloc::LowBitPtrPolicy;
+        use dynir::gc_runtime::GcInterpCtx;
+        use dynir::interp::{ExternCallResult, InterpResult, ModuleInterpreter};
+        use dynobj::Compact;
         use dynvalue::NanBox;
+        type TestRoots = GcInterpCtx<Compact, LowBitPtrPolicy<3>>;
 
         let mut dyn_module = DynModule::new(
             GcConfig::generational(64 * 1024),
@@ -953,7 +957,7 @@ mod tests {
         // harness itself is wrong; if it passes, the slow-path issue
         // is downstream.
         {
-            let roots = NoGcRoots;
+            let roots: TestRoots = GcInterpCtx::new_unallocating();
             let interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
             match interp.run(echo_fn, &[100]) {
                 Ok(InterpResult::Value(v)) => assert_eq!(v, 100, "echo sanity check"),
@@ -999,7 +1003,8 @@ mod tests {
             args: &[u64],
             _runtime: &TypeDispatchIcRuntime,
         ) -> u64 {
-            let roots = NoGcRoots;
+            let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> =
+                GcInterpCtx::new_unallocating();
             let mut interp = ModuleInterpreter::<NanBox, _>::new(module, &roots);
             interp.bind_by_name(DISPATCH_SLOW_EXTERN, |args| {
                 eprintln!("[binding closure] received args: {:?}", args);

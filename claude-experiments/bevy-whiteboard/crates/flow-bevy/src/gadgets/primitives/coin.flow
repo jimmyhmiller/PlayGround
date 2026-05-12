@@ -1,0 +1,15 @@
+# Probabilistic two-way split. A Bernoulli(p) draw on each incoming
+# packet decides whether it goes out `heads` or `tails`. Use to model
+# cache hit/miss, lossy networks, vote outcomes.
+node Coin {
+    slots { p: Float = 0.5 }
+    rule heads {
+        on packet(x)
+        when Bernoulli(p)
+        do { emit packet(x) to port heads }
+    }
+    rule tails {
+        on packet(x)
+        do { emit packet(x) to port tails }
+    }
+}

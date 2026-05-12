@@ -1,0 +1,14 @@
+# Increments a counter on every incoming packet and forwards the packet
+# unchanged on the default outbound edge. Building block for any metric.
+node Counter {
+    slots { count: Int = 0 }
+    probes { count: "{count}" }
+    rule pass {
+        on packet(p)
+        do {
+            count := count + 1
+            record count count
+            emit packet(p) to default
+        }
+    }
+}

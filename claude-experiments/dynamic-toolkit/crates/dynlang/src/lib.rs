@@ -1680,10 +1680,12 @@ mod tests {
     use super::*;
     use dynalloc::{PtrPolicy, SemiSpace, alloc_obj};
     use dynir::dynexec::ContinuationTypes;
+    use dynalloc::LowBitPtrPolicy;
     use dynir::gc_runtime::{GcInterpCtx, GcInterpPolicy};
-    use dynir::interp::{ExternCallResult, InterpResult, ModuleInterpreter, NoGcRoots};
+    use dynir::interp::{ExternCallResult, InterpResult, ModuleInterpreter};
     use dynobj::{Compact, TypeInfo};
     use dynvalue::NanBox;
+    type TestRoots = GcInterpCtx<Compact, LowBitPtrPolicy<3>>;
 
     struct TestNanBoxPolicy;
 
@@ -1712,7 +1714,7 @@ mod tests {
     }
 
     fn run(module: &Module, entry: FuncRef, args: &[u64]) -> u64 {
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let interp = ModuleInterpreter::<NanBox, _>::new(module, &roots);
         match interp.run(entry, args) {
             Ok(InterpResult::Value(v)) => v,
@@ -1794,7 +1796,7 @@ mod tests {
         dm.finish_func(f);
 
         let built = dm.build();
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
         // Bind slow paths (won't be called for float+float).
         interp.bind_by_name("rt_add", |_args| {
@@ -1820,7 +1822,7 @@ mod tests {
         dm.finish_func(f);
 
         let built = dm.build();
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
         interp.bind_by_name("rt_add", |_args| {
             // Return 42.0 to prove the slow path was taken.
@@ -1963,7 +1965,7 @@ mod tests {
 
         let built = dm.build();
 
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
         interp.bind_by_name(crate::gc::GC_ALLOC_EXTERN, gc.interp_gc_alloc());
 
@@ -2140,7 +2142,7 @@ mod tests {
         dm.finish_func(f);
 
         let built = dm.build();
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
         interp.bind_by_name("rt_lt", |_| {
             panic!("slow path should not be called");
@@ -2182,7 +2184,7 @@ mod tests {
         dm.finish_func(f);
 
         let built = dm.build();
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
         interp.bind_by_name("rt_add", |_| {
             panic!("slow path should not be called");
@@ -2318,7 +2320,7 @@ mod tests {
         f.fb.ret(r);
         dm.finish_func(f);
         let built = dm.build();
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
         let slow_owned = slow_name.to_string();
         interp.bind_by_name(slow_name, move |_| {
@@ -2398,7 +2400,7 @@ mod tests {
         f.fb.ret(r);
         dm.finish_func(f);
         let built = dm.build();
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
         // Inline fast path fires at runtime since both args are floats —
         // slow stub still shouldn't be hit.

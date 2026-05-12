@@ -55,6 +55,16 @@ pub enum EmitTo {
     /// mapped to the emitting leaf, and fans the packet onto every
     /// outgoing edge from that compound whose `from_port` matches.
     ToOutPort(String),
+    /// Emit on every outbound edge of the firing node whose
+    /// `from_port` matches `name`. Lets a leaf node distinguish
+    /// multiple outputs (e.g. a `Switch` with `pass` and `divert`
+    /// ports) without inventing variant-broadcast conventions.
+    /// Differs from `ToOutPort` in two ways: (1) no parent-chain
+    /// walk — edges originate at the firing node itself, and
+    /// (2) it's a fan-out across matching edges, like `ToOutPort`,
+    /// not a single-edge pick. If no edge matches, silently drop —
+    /// same contract as `DefaultOut` for unwired outputs.
+    FromPort(String),
 }
 
 /// Modification to a packet's `metadata` map during an emit. Applied

@@ -1738,6 +1738,16 @@ impl JitModule {
             })
             .collect();
 
+        // Construct the LiteralPool up front so we can thread its base
+        // address into the lowerer — `Inst::GcLiteral(idx)` lowers to a load
+        // from `pool_base + idx*8`, and the base must be baked into the
+        // emitted instructions. Without this, frontends that need quote-style
+        // GC literals (heap-allocated strings, symbols, etc.) get a
+        // "GcLiteral requires a literal_pool_base" panic when their IR runs
+        // through this path.
+        let literal_pool = LiteralPool::new(DEFAULT_LITERAL_POOL_CAPACITY);
+        let literal_pool_base = literal_pool.base_addr();
+
         let mut function_root_scan_sizes: Vec<usize> = Vec::new();
         let mut sp_offset: u64 = 0;
         for (func_idx, func) in module.functions.iter().enumerate() {
@@ -1746,7 +1756,7 @@ impl JitModule {
                 func,
                 &direct_call_is_internal,
                 call_table_base,
-                None, // legacy compile_with_regalloc: no literal pool
+                Some(literal_pool_base),
                 safepoint_handler,
                 sp_offset,
             );
@@ -1805,7 +1815,7 @@ impl JitModule {
         JitModule {
             memory: std::sync::Mutex::new(memory),
             call_table,
-            literal_pool: LiteralPool::new(DEFAULT_LITERAL_POOL_CAPACITY),
+            literal_pool,
             functions,
             handler_payload_kind,
             max_deopt_live_values: std::sync::atomic::AtomicUsize::new(max_deopt_live_values),

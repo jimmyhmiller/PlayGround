@@ -302,8 +302,12 @@ mod tests {
 
     // ── End-to-end: lower IR + run via interpreter ────────────────
 
+    use dynalloc::LowBitPtrPolicy;
+    use dynir::gc_runtime::GcInterpCtx;
     use dynir::interp::{InterpResult, ModuleInterpreter};
-    use dynir::NoGcRoots;
+    use dynobj::Compact;
+
+    type TestRoots = GcInterpCtx<Compact, LowBitPtrPolicy<3>>;
 
     /// Build a function that emits an array literal of three floats and
     /// returns the array's NanBox, then read it back via SeqView.
@@ -330,7 +334,7 @@ mod tests {
         );
         let built = dyn_module.build();
 
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
         interp.bind_by_name(crate::gc::GC_ALLOC_EXTERN, gc.interp_gc_alloc());
 
@@ -368,7 +372,7 @@ mod tests {
         );
         let built = dyn_module.build();
 
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
         interp.bind_by_name(crate::gc::GC_ALLOC_EXTERN, gc.interp_gc_alloc());
 
@@ -404,7 +408,7 @@ mod tests {
         );
         let built = dyn_module.build();
 
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
         interp.bind_by_name(crate::gc::GC_ALLOC_EXTERN, gc.interp_gc_alloc());
 
@@ -440,7 +444,7 @@ mod tests {
         );
         let built = dyn_module.build();
 
-        let roots = NoGcRoots;
+        let roots: TestRoots = GcInterpCtx::new_unallocating();
         let mut interp = ModuleInterpreter::<NanBox, _>::new(&built.module, &roots);
         interp.bind_by_name(crate::gc::GC_ALLOC_EXTERN, gc.interp_gc_alloc());
 

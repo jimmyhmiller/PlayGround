@@ -1048,6 +1048,57 @@ impl Sim {
                     return;
                 }
             }
+            EmitTo::FromPort(port_name) => {
+                // Fan onto every outbound edge of `from_nid` whose
+                // `from_port` matches. Same broadcast pattern as
+                // `ToOutPort` but scoped to the firing leaf node —
+                // no parent walk. Silently drops if nothing matches
+                // (unwired output, like DefaultOut).
+                let edge_ids: Vec<EdgeId> = self
+                    .outbound(from_nid)
+                    .iter()
+                    .copied()
+                    .filter(|eid| {
+                        self.edges[eid].from_port.as_deref() == Some(port_name.as_str())
+                    })
+                    .collect();
+                if edge_ids.is_empty() {
+                    return;
+                }
+                for eid in edge_ids {
+                    let edge = self.edges[&eid].clone();
+                    let latency = self.eval_latency_expr(&edge.latency_ns, from_nid, edge.to, bindings, &payload);
+                    let arrives_at = self.now_ns.saturating_add(latency);
+                    let pid = self.next_packet_id();
+                    self.log.push(Event::PacketEmitted {
+                        packet: pid,
+                        from: from_nid,
+                        to: edge.to,
+                        at_ns: self.now_ns,
+                        arrives_at_ns: arrives_at,
+                        payload: payload.clone(),
+                    });
+                    self.in_flight.push(Reverse(Scheduled {
+                        arrives_at_ns: arrives_at,
+                        packet: Packet {
+                            id: pid,
+                            payload: payload.clone(),
+                            from_edge: None,
+                            metadata: metadata.clone(),
+                            return_path: return_path.clone(),
+                            emitted_at_ns: self.now_ns,
+                        },
+                        edge: eid,
+                        deliver_to: edge.to,
+                    }));
+                    let seq = self.next_emit_seq;
+                    self.next_emit_seq += 1;
+                    if let Some(e) = self.edges.get_mut(&eid) {
+                        e.last_sent_seq = Some(seq);
+                    }
+                }
+                return;
+            }
             EmitTo::ToOutPort(port_name) => {
                 // Find the nearest ancestor compound that has this out-port
                 // mapped to `from_nid`. Fan onto ALL outgoing edges whose

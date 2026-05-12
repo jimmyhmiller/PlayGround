@@ -82,8 +82,8 @@ pub trait InterpRootManager<
 
     /// Register an additional root source (e.g., the JIT's
     /// continuation store) that should be scanned during collection.
-    /// Default: no-op (NoGcRoots doesn't collect so extra roots are
-    /// meaningless).
+    /// Default: no-op (a non-allocating root manager doesn't collect
+    /// so extra roots are meaningless).
     ///
     /// # Safety
     /// The pointed-to RootSource must remain valid for all subsequent

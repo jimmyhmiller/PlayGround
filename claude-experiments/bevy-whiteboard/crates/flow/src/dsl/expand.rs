@@ -690,6 +690,7 @@ fn expand_emit_target(t: &EmitTarget, env: &Env, name_prefix: &str) -> Result<Em
         EmitTarget::Default => EmitTarget::Default,
         EmitTarget::Self_ => EmitTarget::Self_,
         EmitTarget::OutPort(s) => EmitTarget::OutPort(s.clone()),
+        EmitTarget::FromPort(s) => EmitTarget::FromPort(s.clone()),
         EmitTarget::Target(name) => {
             let resolved = resolve_name(name, env, name_prefix)
                 .map_err(|e| format!("emit target: {}", e))?;

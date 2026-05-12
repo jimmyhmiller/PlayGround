@@ -249,6 +249,10 @@ pub enum EmitTarget {
     Default,
     Self_,
     OutPort(String),
+    /// Leaf-node named output port: `emit X to port pass`. Fans
+    /// onto outbound edges of the firing node whose `from_port`
+    /// matches. See `flow::EmitTo::FromPort`.
+    FromPort(String),
     Target(NameTpl),             // static node name (template-aware)
     Dynamic(Expr),               // evaluates to Str or NodeRef
 }

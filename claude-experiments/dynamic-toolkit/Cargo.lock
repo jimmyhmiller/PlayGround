@@ -158,6 +158,15 @@ dependencies = [
 [[package]]
 name = "clojure-jvm"
 version = "0.0.1"
+dependencies = [
+ "dynalloc",
+ "dynir",
+ "dynlang",
+ "dynlower",
+ "dynobj",
+ "dynruntime",
+ "dynvalue",
+]
 
 [[package]]
 name = "contlang"

@@ -200,4 +200,19 @@ pub const GADGETS_DSL: &str = concat!(
     include_str!("gadgets/circuit_breaker.flow"), "\n",
     include_str!("gadgets/saga.flow"),            "\n",
     include_str!("gadgets/tpc.flow"),             "\n",
+    // Composable primitives. Each is a tiny single-purpose gadget
+    // intended to be wired into bigger gadgets visually. Together
+    // they cover everything the higher-level gadgets above can do.
+    include_str!("gadgets/primitives/tick.flow"),      "\n",
+    include_str!("gadgets/primitives/counter.flow"),   "\n",
+    include_str!("gadgets/primitives/filter.flow"),    "\n",
+    include_str!("gadgets/primitives/switch.flow"),    "\n",
+    include_str!("gadgets/primitives/threshold.flow"), "\n",
+    include_str!("gadgets/primitives/window.flow"),    "\n",
+    include_str!("gadgets/primitives/delay.flow"),     "\n",
+    include_str!("gadgets/primitives/stamp.flow"),     "\n",
+    include_str!("gadgets/primitives/unstamp.flow"),   "\n",
+    include_str!("gadgets/primitives/fanout.flow"),    "\n",
+    include_str!("gadgets/primitives/coin.flow"),      "\n",
+    include_str!("gadgets/primitives/buffer.flow"),    "\n",
 );

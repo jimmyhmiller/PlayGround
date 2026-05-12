@@ -1,0 +1,34 @@
+# Watches a numeric input and emits a signal when it crosses `limit`.
+# `count(v)` packets arrive (typically from a Window or Counter);
+# crossing v >= limit emits signal(1) on default. Crossing back emits
+# signal(0). Hysteresis-free: the `tripped` slot prevents repeated
+# trips at the boundary.
+node Threshold {
+    slots { limit: Int = 5; tripped: Int = 0 }
+    probes { tripped: "{tripped}" }
+    rule trip {
+        on count(v)
+        when v >= limit && tripped == 0
+        do {
+            tripped := 1
+            emit signal(1) to default
+        }
+    }
+    rule untrip {
+        on count(v)
+        when v < limit && tripped == 1
+        do {
+            tripped := 0
+            emit signal(0) to default
+        }
+    }
+    # Fallthrough: consume packets that don't cause a transition.
+    # Without this, packets that arrive while neither guard matches
+    # linger in the inbox and fire later when the state flips —
+    # producing spurious crossings (e.g. an early count(3) firing
+    # untrip after a later count(6) tripped the breaker).
+    rule consume {
+        on count(_)
+        do { }
+    }
+}
