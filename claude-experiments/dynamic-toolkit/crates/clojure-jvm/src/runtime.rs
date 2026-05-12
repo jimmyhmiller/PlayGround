@@ -291,49 +291,123 @@ fn call_table_base() -> u64 {
     base
 }
 
-/// Decode a TAG_FN NanBox handle into a function pointer by indexing the
-/// JitModule's call table at `base + idx * 8` and dereferencing.
-unsafe fn fn_ptr_from_handle(handle_bits: u64) -> *const u8 {
-    if nanbox_tag(handle_bits) != Some(TAG_FN) {
-        panic!(
-            "clojure-jvm: cljvm_rt_invoke_*: receiver is not a fn handle (NanBox tag != TAG_FN)"
-        );
+/// Decode a fn-value NanBox into a function pointer + optional self arg.
+/// Two shapes:
+///   * TAG_FN: payload is the FuncRef index; no self arg.
+///   * TAG_PTR pointing at a `clojure.lang.Closure`: read the
+///     `fref_index` Raw64 field; the closure handle becomes the body's
+///     implicit first arg.
+unsafe fn dispatch_target(handle_bits: u64) -> (*const u8, Option<u64>) {
+    match nanbox_tag(handle_bits) {
+        Some(TAG_FN) => {
+            let idx = nanbox_payload(handle_bits) as usize;
+            let slot_addr = call_table_base() + (idx as u64) * 8;
+            let ptr = unsafe { *(slot_addr as *const *const u8) };
+            (ptr, None)
+        }
+        Some(TAG_PTR) => {
+            let ids = heap_type_ids();
+            let raw = nanbox_payload(handle_bits) as *const u8;
+            if raw.is_null() {
+                panic!("clojure-jvm: cljvm_rt_invoke_*: receiver is nil");
+            }
+            let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            if type_id == ids.string
+                || type_id == ids.symbol
+                || type_id == ids.keyword
+                || type_id == ids.cons
+            {
+                panic!(
+                    "clojure-jvm: cljvm_rt_invoke_*: receiver is a non-callable \
+                     heap value (type_id {type_id})"
+                );
+            }
+            // Closure layout (from `dynlang`'s ObjType builder for a type
+            // with `.field(_, Raw64).varlen_values()`):
+            //   * [0..8]  Compact header (type_id at offset 0)
+            //   * [8..16] One Value slot (unused — the builder reserves it
+            //             because varlen_values's `fixed_fields` count
+            //             includes the raw64 field)
+            //   * [16..24] Raw64 `fref_index`
+            //   * [24..32] varlen-count word
+            //   * [32..]  varlen NanBox values (captures)
+            // Read fref_index at offset 16.
+            let fref_idx = unsafe { raw.add(16).cast::<u64>().read_unaligned() } as usize;
+            let slot_addr = call_table_base() + (fref_idx as u64) * 8;
+            let ptr = unsafe { *(slot_addr as *const *const u8) };
+            (ptr, Some(handle_bits))
+        }
+        _ => panic!(
+            "clojure-jvm: cljvm_rt_invoke_*: receiver is not a fn (bits 0x{handle_bits:x})"
+        ),
     }
-    let idx = nanbox_payload(handle_bits) as usize;
-    let slot_addr = call_table_base() + (idx as u64) * 8;
-    unsafe { *(slot_addr as *const *const u8) }
 }
 
 /// `IFn.invoke()` — 0 arity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_0(fn_bits: u64) -> u64 {
-    let f: unsafe extern "C" fn() -> u64 =
-        unsafe { std::mem::transmute(fn_ptr_from_handle(fn_bits)) };
-    unsafe { f() }
+    let (ptr, self_arg) = unsafe { dispatch_target(fn_bits) };
+    match self_arg {
+        None => {
+            let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(ptr) };
+            unsafe { f() }
+        }
+        Some(s) => {
+            let f: unsafe extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(ptr) };
+            unsafe { f(s) }
+        }
+    }
 }
 
 /// `IFn.invoke(arg1)` — 1 arity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_1(fn_bits: u64, a: u64) -> u64 {
-    let f: unsafe extern "C" fn(u64) -> u64 =
-        unsafe { std::mem::transmute(fn_ptr_from_handle(fn_bits)) };
-    unsafe { f(a) }
+    let (ptr, self_arg) = unsafe { dispatch_target(fn_bits) };
+    match self_arg {
+        None => {
+            let f: unsafe extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(ptr) };
+            unsafe { f(a) }
+        }
+        Some(s) => {
+            let f: unsafe extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(ptr) };
+            unsafe { f(s, a) }
+        }
+    }
 }
 
 /// `IFn.invoke(arg1, arg2)` — 2 arity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_2(fn_bits: u64, a: u64, b: u64) -> u64 {
-    let f: unsafe extern "C" fn(u64, u64) -> u64 =
-        unsafe { std::mem::transmute(fn_ptr_from_handle(fn_bits)) };
-    unsafe { f(a, b) }
+    let (ptr, self_arg) = unsafe { dispatch_target(fn_bits) };
+    match self_arg {
+        None => {
+            let f: unsafe extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(ptr) };
+            unsafe { f(a, b) }
+        }
+        Some(s) => {
+            let f: unsafe extern "C" fn(u64, u64, u64) -> u64 =
+                unsafe { std::mem::transmute(ptr) };
+            unsafe { f(s, a, b) }
+        }
+    }
 }
 
 /// `IFn.invoke(arg1, arg2, arg3)` — 3 arity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_3(fn_bits: u64, a: u64, b: u64, c: u64) -> u64 {
-    let f: unsafe extern "C" fn(u64, u64, u64) -> u64 =
-        unsafe { std::mem::transmute(fn_ptr_from_handle(fn_bits)) };
-    unsafe { f(a, b, c) }
+    let (ptr, self_arg) = unsafe { dispatch_target(fn_bits) };
+    match self_arg {
+        None => {
+            let f: unsafe extern "C" fn(u64, u64, u64) -> u64 =
+                unsafe { std::mem::transmute(ptr) };
+            unsafe { f(a, b, c) }
+        }
+        Some(s) => {
+            let f: unsafe extern "C" fn(u64, u64, u64, u64) -> u64 =
+                unsafe { std::mem::transmute(ptr) };
+            unsafe { f(s, a, b, c) }
+        }
+    }
 }
 
 /// `clojure.lang.RT.inc(Object x)` — for now, a primitive Long-only
@@ -484,6 +558,15 @@ unsafe fn equiv_impl(a: u64, b: u64) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_is_nil(x_bits: u64) -> u64 {
     nanbox_bool(nanbox_tag(x_bits) == Some(TAG_NIL))
+}
+
+/// `clojure.lang.RT.more(Object coll)` — same shape as `next` for our
+/// Cons-only model. Real Clojure distinguishes seq-empty (returns
+/// `()`) from nil (returns `()`); for us, both return nil. Used by
+/// `clojure.core/rest`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_more(bits: u64) -> u64 {
+    unsafe { cljvm_rt_next(bits) }
 }
 
 /// `clojure.lang.RT.next(Object coll)` — return the next seq, or nil if

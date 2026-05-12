@@ -22,7 +22,7 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicI64};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Mutex, RwLock};
 
 
@@ -102,6 +102,12 @@ pub struct Var {
     pub sym: Option<Arc<Symbol>>,
     /// Java: `public final Namespace ns;`
     pub ns: Option<Arc<Namespace>>,
+    /// Java: stored as `:macro true` in the Var's metadata map (Var.meta).
+    /// We model it as a dedicated boolean since the compiler reads it on
+    /// every analyze and we don't yet have IPersistentMap on Vars.
+    /// Set via `setMacro()`; checked by `analyze_seq` to decide whether
+    /// to macroexpand a `(name args...)` call.
+    pub(crate) is_macro: AtomicBool,
 }
 
 /// Java: `static public volatile int rev = 0;` — bumped on Var changes; readers
@@ -123,6 +129,7 @@ impl Var {
             thread_bound: AtomicBool::new(false),
             sym: None,
             ns: None,
+            is_macro: AtomicBool::new(false),
         });
         // Java sets root via `setRoot` after construction so it can install
         // `Unbound` when root is `null`. We mirror that — but until we have an
@@ -141,7 +148,19 @@ impl Var {
             thread_bound: AtomicBool::new(false),
             sym: Some(sym),
             ns: Some(ns),
+            is_macro: AtomicBool::new(false),
         })
+    }
+
+    /// Java: `Var.setMacro()` — flags this var as a macro. Called from
+    /// `def` analysis when the symbol carries `:macro` metadata.
+    pub fn set_macro(&self) {
+        self.is_macro.store(true, Ordering::Release);
+    }
+
+    /// Java: `Var.isMacro()`.
+    pub fn is_macro(&self) -> bool {
+        self.is_macro.load(Ordering::Acquire)
     }
 
     /// `Var.intern(Namespace, Symbol)` — interns (or finds) a Var in the

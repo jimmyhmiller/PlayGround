@@ -79,10 +79,7 @@ impl<'a> Reader<'a> {
                 "LispReader: dispatch macro `#`",
                 "needs set / regex / var / anon-fn / reader-conditional ports"
             ),
-            b'^' => crate::unimplemented_port!(
-                "LispReader: metadata `^`",
-                "needs `with-meta` + map literal"
-            ),
+            b'^' => self.read_meta(),
             b'`' => crate::unimplemented_port!(
                 "LispReader: syntax-quote ` `",
                 "needs syntax-quote expansion"
@@ -261,6 +258,66 @@ impl<'a> Reader<'a> {
                 }
             }
         }
+    }
+
+    /// `^:keyword <form>` → `<form>` with `{:keyword true}` metadata.
+    /// `^{:k v ...} <form>` → `<form>` with that map as metadata.
+    /// `^Tag <form>`  → `<form>` with `{:tag Tag}` metadata.
+    ///
+    /// Narrow port: until we have IPersistentMap to carry full metadata,
+    /// the only meta we *act on* is `:macro` on a Symbol (toggles
+    /// `Symbol::is_macro_meta`). Other metadata is parsed and discarded.
+    /// The reader still walks past the meta correctly.
+    fn read_meta(&mut self) -> Result<Object, ReaderError> {
+        self.pos += 1; // consume '^'
+        self.skip_ws_and_comments();
+        // Read the metadata form. It's :keyword, {map}, Tag-symbol, or
+        // "string" — but we only special-case :keyword (extract its name).
+        let macro_meta = match self.peek_byte() {
+            Some(b':') => {
+                // :foo → meta is `{:foo true}`. We extract just the name to
+                // detect `:macro`.
+                self.pos += 1;
+                let start = self.pos;
+                while let Some(c) = self.peek_byte() {
+                    if is_terminating_macro(c) {
+                        break;
+                    }
+                    self.pos += 1;
+                }
+                let name = &self.src[start..self.pos];
+                if name.is_empty() {
+                    return Err(self.err("Invalid token: :"));
+                }
+                name == "macro"
+            }
+            Some(b'{') => {
+                // For `^{:macro true}` we'd need a real map literal. Until
+                // map support lands, refuse this shape rather than silently
+                // ignoring meta the user clearly cares about.
+                return Err(self.err_with(
+                    "LispReader: ^{...} metadata not yet supported (needs map literal)"
+                        .to_string(),
+                ));
+            }
+            Some(_) => {
+                // Probably `^Tag form` — read the tag form, ignore. (Not
+                // implemented as actionable meta; preserves reader progress.)
+                let _ignored = self.read_form()?;
+                false
+            }
+            None => return Err(self.err("EOF after `^`")),
+        };
+
+        // Now read the target form and apply the meta (if recognized).
+        self.skip_ws_and_comments();
+        let form = self.read_form()?;
+        if macro_meta {
+            if let Object::Symbol(s) = &form {
+                s.set_macro_meta();
+            }
+        }
+        Ok(form)
     }
 
     fn read_quote(&mut self) -> Result<Object, ReaderError> {
@@ -537,6 +594,23 @@ mod tests {
         match form {
             Object::List(l) => assert_eq!(l.count(), 3),
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn reader_handles_macro_meta() {
+        // `^:macro foo` → Symbol `foo` with is_macro_meta = true.
+        match rd("^:macro foo") {
+            Object::Symbol(s) => {
+                assert_eq!(s.get_name(), "foo");
+                assert!(s.has_macro_meta(), "expected is_macro_meta=true");
+            }
+            other => panic!("expected Symbol, got {other:?}"),
+        }
+        // Bare `foo` (no meta).
+        match rd("foo") {
+            Object::Symbol(s) => assert!(!s.has_macro_meta()),
+            other => panic!("expected Symbol, got {other:?}"),
         }
     }
 

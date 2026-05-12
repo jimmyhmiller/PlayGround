@@ -14,7 +14,7 @@
 //! ported.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 
 /// `clojure.lang.Symbol`.
@@ -34,6 +34,14 @@ pub struct Symbol {
     /// Symbol metadata (`IPersistentMap` in Java). Stubbed until
     /// `IPersistentMap` is ported.
     pub(crate) _meta: Option<()>,
+    /// Per-occurrence "this symbol carries `:macro true` metadata" flag,
+    /// set by the reader on `^:macro x` / `^{:macro true} x` shorthand.
+    /// `Symbol::intern_ns_name` returns a fresh Arc each call, so this
+    /// is safely per-form. Read by `parse_def_form` to call
+    /// `Var::set_macro` on the def'd Var.
+    ///
+    /// Replace with proper IPersistentMap metadata once that's ported.
+    pub(crate) is_macro_meta: AtomicBool,
 }
 
 impl Symbol {
@@ -54,7 +62,22 @@ impl Symbol {
             name: Arc::new(name.to_string()),
             _hasheq: AtomicI32::new(0),
             _meta: None,
+            is_macro_meta: AtomicBool::new(false),
         })
+    }
+
+    /// Reader-side helper: mark this Symbol as carrying `:macro true`
+    /// metadata. Used by `^:macro x` and `^{:macro true} x` shorthand.
+    /// Safe because `intern_ns_name` returns a fresh Arc per call.
+    pub fn set_macro_meta(&self) {
+        self.is_macro_meta
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    /// Whether the reader saw `:macro` metadata on this Symbol form.
+    pub fn has_macro_meta(&self) -> bool {
+        self.is_macro_meta
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// `Symbol.intern(String nsname)`. Splits on the first `'/'`, except for

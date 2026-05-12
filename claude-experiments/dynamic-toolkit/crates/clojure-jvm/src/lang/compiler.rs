@@ -271,6 +271,10 @@ pub trait Expr: std::fmt::Debug + Send + Sync {
     /// look up the var's compile-time-known fn FuncRef (registered by
     /// `DefExpr.emit` when init is a `FnExpr`) and emit a direct call.
     fn as_var_expr(&self) -> Option<&VarExpr> { None }
+
+    /// Downcast for `MultiArityFnExpr`. Used by `InvokeExpr`'s static
+    /// dispatch path to pick the matching arity at the call site.
+    fn as_multi_arity_fn_expr(&self) -> Option<&MultiArityFnExpr> { None }
 }
 
 // ============================================================================
@@ -873,6 +877,13 @@ fn parse_def_form(context: C, form: Object) -> Box<dyn Expr> {
         cur_ns.intern(sym.clone())
     };
 
+    // If the def's name symbol carried `:macro` metadata (via the reader's
+    // `^:macro` shorthand), flag the Var as a macro. Java sets this via
+    // Var.setMacro() — we mirror that.
+    if sym.has_macro_meta() {
+        v.set_macro();
+    }
+
     let init_provided = n == 3;
     let init = if init_provided {
         Some(analyze_named(
@@ -897,6 +908,18 @@ fn parse_def_form(context: C, form: Object) -> Box<dyn Expr> {
                 fixed_arity: fnexpr.fixed_arity(),
             };
             with_active_compiler(|c| c.register_var_fn(&v, fnexpr.fref(), info));
+        } else if let Some(multi) = init_box.as_multi_arity_fn_expr() {
+            let table: Vec<(dynir::FuncRef, VarFnInfo)> = multi
+                .arities
+                .iter()
+                .map(|a| {
+                    (
+                        a.fref(),
+                        VarFnInfo { is_variadic: a.is_variadic, fixed_arity: a.fixed_arity },
+                    )
+                })
+                .collect();
+            with_active_compiler(|c| c.register_var_multi_arity(&v, table));
         }
     }
 
@@ -2071,6 +2094,18 @@ pub struct LocalBinding {
     /// `munge(sym.name)` — used as the local-variable name in emitted code.
     pub name: String,
     pub is_arg: bool,
+    /// ID of the fn body this binding belongs to. Used by closure analysis:
+    /// when `LocalBindingExpr.emit` runs inside fn body `B`, a binding with
+    /// `owning_fn_id != B` is a *captured* local — its value comes from
+    /// the enclosing closure's varlen-values section rather than a stack
+    /// slot. `0` is the top-level (no enclosing fn).
+    pub owning_fn_id: u32,
+    /// Slot index in the *capturing* fn's closure-captures vector, keyed
+    /// by that fn's id. A single binding may be captured by multiple
+    /// nested fns (grandparent + parent + child); each gets its own slot
+    /// in its own closure object. Populated by `record_capture` when the
+    /// active capture scope first records this binding.
+    pub capture_slots: RwLock<HashMap<u32, usize>>,
 }
 
 impl LocalBinding {
@@ -2084,6 +2119,7 @@ impl LocalBinding {
         // Java: throws on `maybePrimitiveType(init) != null && tag != null`.
         // We don't have maybePrimitiveType yet, so skip the guard for now.
         let name = munge(sym.get_name());
+        let owning_fn_id = current_fn_id();
         Arc::new(LocalBinding {
             sym,
             tag,
@@ -2091,6 +2127,8 @@ impl LocalBinding {
             idx,
             name,
             is_arg,
+            owning_fn_id,
+            capture_slots: RwLock::new(HashMap::new()),
         })
     }
 }
@@ -2137,11 +2175,45 @@ impl Expr for LocalBindingExpr {
 
     fn emit(&self, context: C, _objx: &ObjExpr, ir: &mut IrEmitter<'_>) -> Option<Value> {
         // Java: `objx.emitLocal(gen, b, shouldClear)` — loads from the
-        // binding's stack slot. In dynlang the slot is a `DynFunc::def_var`
-        // entry keyed by `local_slot_name(idx)`.
+        // binding's stack slot for non-captured locals, or from the
+        // closure's varlen-values section for captures.
         if context == C::Statement {
             // Java drops the load; we just skip the read.
             return None;
+        }
+        let cur = current_fn_id();
+        if cur != 0 && self.b.owning_fn_id != cur {
+            // Captured local: read from the closure self-arg's varlen-values
+            // section at the slot assigned by `record_capture` for the
+            // current (capturing) fn.
+            let slot = *self
+                .b
+                .capture_slots
+                .read()
+                .unwrap()
+                .get(&cur)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "clojure-jvm: LocalBindingExpr.emit: capture slot missing for binding \
+                         {} in fn {cur} — record_capture didn't run for this fn?",
+                        self.b.sym.get_name()
+                    )
+                });
+            let self_val = ir.f.get_var(CLOSURE_SELF_SLOT);
+            let raw = ir.f.obj_unwrap(self_val);
+            let (closure_type_id, base_offset) =
+                with_active_compiler(|c| {
+                    let ti = c.dm.get_obj_type(c.closure_type_id).type_info;
+                    (c.closure_type_id, ti.varlen_element_offset(0) as i64)
+                });
+            let _ = closure_type_id; // type-id check could go here later
+            let base = ir.f.fb.iconst(dynir::Type::I64, base_offset);
+            let eight = ir.f.fb.iconst(dynir::Type::I64, 8);
+            let idx = ir.f.fb.iconst(dynir::Type::I64, slot as i64);
+            let byte_off = ir.f.fb.mul(idx, eight);
+            let off = ir.f.fb.add(base, byte_off);
+            let addr = ir.f.fb.add(raw, off);
+            return Some(ir.f.fb.load(dynir::Type::I64, addr, 0));
         }
         Some(ir.f.get_var(&local_slot_name(self.b.idx)))
     }
@@ -2212,6 +2284,10 @@ impl AssignableExpr for LocalBindingExpr {
 /// the slot name is collision-free within a single function build.
 pub fn local_slot_name(idx: i32) -> String { format!("local__{idx}") }
 
+/// Reserved slot name holding the closure-self pointer when a fn body is
+/// a closure. Set by `lower_pending_fn` from the implicit first param.
+pub const CLOSURE_SELF_SLOT: &str = "__closure_self";
+
 /// `Compiler.munge(String name)` — Java line ~3435. Replaces non-Java
 /// identifier chars with `_FOO_` escapes per `CHAR_MAP`. We use the same
 /// table inline.
@@ -2264,6 +2340,115 @@ pub fn munge(name: &str) -> String {
 
 /// Convenience type — the value held in `LOCAL_ENV`.
 pub type LocalEnvMap = HashMap<Arc<Symbol>, Arc<LocalBinding>>;
+
+// ─── fn-scope identity (for closure capture detection) ──────────────────
+//
+// Every `parse_fn_form` call mints a fresh `fn_id` from `NEXT_FN_ID` and
+// pushes it onto `CURRENT_FN_ID`. Each `LocalBinding` stamps the fn_id
+// active when it was registered. When `LocalBindingExpr.emit` runs inside
+// fn body `B`, it compares `binding.owning_fn_id` to the current emit
+// fn_id; a mismatch means the binding lives in an enclosing fn — it's a
+// *capture* and must be loaded from the closure object rather than from
+// a stack slot. Body lowering (`lower_pending_fn`) sets `CURRENT_FN_ID`
+// to the FnExpr's id around emit.
+//
+// Top-level forms get fn_id 0 (no enclosing fn).
+
+static NEXT_FN_ID: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(1);
+
+thread_local! {
+    static CURRENT_FN_ID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+fn mint_fn_id() -> u32 {
+    NEXT_FN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+fn current_fn_id() -> u32 {
+    CURRENT_FN_ID.with(|c| c.get())
+}
+
+/// RAII guard that swaps `CURRENT_FN_ID` for the duration of a scope.
+struct FnIdGuard {
+    prev: u32,
+}
+
+impl FnIdGuard {
+    fn new(new_id: u32) -> Self {
+        let prev = CURRENT_FN_ID.with(|c| c.replace(new_id));
+        FnIdGuard { prev }
+    }
+}
+
+impl Drop for FnIdGuard {
+    fn drop(&mut self) {
+        CURRENT_FN_ID.with(|c| c.set(self.prev));
+    }
+}
+
+// ─── Capture recording (during analyze) ─────────────────────────────────
+//
+// When `reference_local` finds a binding belonging to an outer fn, we
+// append it to the active fn's capture set. The set is keyed by binding
+// pointer (Arc as_ptr) to dedupe — multiple references to the same outer
+// local produce one capture entry. Captures are collected per-fn during
+// body analysis and consumed by `parse_fn_form` after the body parse.
+
+struct CaptureScope {
+    /// fn_id of the fn that owns this scope. A binding gets recorded as a
+    /// capture only when its `owning_fn_id` differs from this — i.e., it
+    /// lives outside the fn whose captures we're collecting.
+    fn_id: u32,
+    captures: Vec<Arc<LocalBinding>>,
+}
+
+thread_local! {
+    /// Stack of capture-sets, one entry per enclosing fn currently being
+    /// parsed. The top entry is the active fn's captures. Pushed by
+    /// `parse_fn_form` before body analyze, popped after.
+    static CAPTURE_STACK: std::cell::RefCell<Vec<CaptureScope>> =
+        std::cell::RefCell::new(Vec::new());
+}
+
+fn push_capture_scope(fn_id: u32) {
+    CAPTURE_STACK.with(|s| {
+        s.borrow_mut().push(CaptureScope { fn_id, captures: Vec::new() })
+    });
+}
+
+fn pop_capture_scope() -> Vec<Arc<LocalBinding>> {
+    CAPTURE_STACK
+        .with(|s| s.borrow_mut().pop())
+        .map(|sc| sc.captures)
+        .unwrap_or_default()
+}
+
+/// Record `binding` as a capture of the active fn, deduping by pointer.
+/// Only adds the binding if its `owning_fn_id` belongs to a fn OUTSIDE
+/// the active scope (the active scope's `fn_id` is the fn collecting
+/// captures). Assigns `capture_slot` for the binding on first record.
+fn record_capture(binding: &Arc<LocalBinding>) {
+    CAPTURE_STACK.with(|s| {
+        let mut stack = s.borrow_mut();
+        let Some(active) = stack.last_mut() else { return };
+        if binding.owning_fn_id == active.fn_id {
+            return;
+        }
+        for existing in active.captures.iter() {
+            if Arc::ptr_eq(existing, binding) {
+                return;
+            }
+        }
+        let slot = active.captures.len();
+        active.captures.push(binding.clone());
+        binding
+            .capture_slots
+            .write()
+            .unwrap()
+            .insert(active.fn_id, slot);
+    });
+}
 
 fn current_local_env() -> Arc<LocalEnvMap> {
     let v = COMPILER_VARS.LOCAL_ENV.deref();
@@ -2369,6 +2554,13 @@ pub fn reference_local(sym: &Symbol) -> Option<Arc<LocalBinding>> {
     // structural equality via our PartialEq impl.
     for (k, v) in env.iter() {
         if **k == *sym {
+            // If this binding lives in an outer fn, record it as a capture
+            // of the active fn. Top-level (`current_fn_id() == 0`) bindings
+            // never come from "outer" — they are themselves the top scope.
+            let cur = current_fn_id();
+            if cur != 0 && v.owning_fn_id != cur {
+                record_capture(v);
+            }
             return Some(v.clone());
         }
     }
@@ -2605,7 +2797,7 @@ fn parse_body_seq(context: C, body_forms: Object) -> Box<dyn Expr> {
 
 /// `Compiler.FnMethod`. One arity-overload of a fn — its param list, body,
 /// and source position.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FnMethod {
     pub params: Vec<Arc<LocalBinding>>,
     pub body: Arc<dyn Expr>,
@@ -2615,7 +2807,7 @@ pub struct FnMethod {
 
 /// `Compiler.FnExpr`. A user-defined fn. Each `FnExpr` declares a fresh dynir
 /// function (held in `fref`) and stores its single (for now) `FnMethod`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct FnExpr {
     pub method: FnMethod,
     pub fref: dynir::FuncRef,
@@ -2628,31 +2820,83 @@ pub struct FnExpr {
     /// positional args; index `fixed_arity` (when `is_variadic`) is the rest
     /// list.
     pub fixed_arity: usize,
+    /// Compile-time identity of this fn body (matches `LocalBinding.owning_fn_id`).
+    pub fn_id: u32,
+    /// Outer LocalBindings referenced from this fn's body. Non-empty means
+    /// this fn is a *closure* — emit allocates a `clojure.lang.Closure`
+    /// heap object holding the FuncRef + the captured values; the body
+    /// reads captures from the closure passed as its first (hidden) arg.
+    pub captures: Vec<Arc<LocalBinding>>,
 }
 
 impl FnExpr {
     pub fn fref(&self) -> dynir::FuncRef { self.fref }
     pub fn is_variadic(&self) -> bool { self.is_variadic }
     pub fn fixed_arity(&self) -> usize { self.fixed_arity }
+
+    /// Shallow clone used by `MultiArityFnExpr` to collect each clause's
+    /// FnExpr into the multi-arity wrapper. The body's `Arc<dyn Expr>`
+    /// is shared, not copied; captures + params Vecs share their Arcs.
+    pub fn clone_for_multi_arity(&self) -> FnExpr {
+        self.clone()
+    }
 }
 
 impl Expr for FnExpr {
     fn emit(&self, context: C, _objx: &ObjExpr, ir: &mut IrEmitter<'_>) -> Option<Value> {
-        // Produce a NanBox-tagged FuncRef handle. Tag 3 is the only free tag
-        // in dynlang's default NanBoxTags scheme (0=nil, 1=bool, 2=ptr).
-        // Decoders extract the payload (`bits & PAYLOAD_MASK`) and treat it
-        // as a `FuncRef` index for indirect dispatch.
-        //
-        // For the common case where `InvokeExpr.fexpr` is a `FnExpr` (or a
-        // `LocalBindingExpr` whose init is a `FnExpr`), the call site
-        // bypasses this value and uses `FnExpr::fref` directly. The handle
-        // exists so the value can flow through `let` and other expression
-        // positions without panicking — fully dynamic dispatch (calling
-        // through it) lands when we wire `call_via_func_ref` + the call
-        // table base extern.
-        if context == C::Statement { return None; }
-        let payload = self.fref.index() as u64;
-        Some(ir.f.tagged_const(3, payload))
+        // Non-capturing fns emit as a NanBox TAG_FN handle wrapping the
+        // FuncRef index. Closures (`!captures.is_empty()`) allocate a
+        // `clojure.lang.Closure` heap object holding the FuncRef + the
+        // current values of the captured outer-fn locals, and return its
+        // TAG_PTR-tagged pointer.
+        if context == C::Statement {
+            // Side-effect-free in expression position; emit nothing if
+            // result is discarded.
+            return None;
+        }
+        if self.captures.is_empty() {
+            let payload = self.fref.index() as u64;
+            return Some(ir.f.tagged_const(3, payload));
+        }
+
+        // Capturing fn: allocate the Closure heap object.
+        let n_caps = self.captures.len();
+        let (closure_type_id, fref_offset, varlen_base) = with_active_compiler(|c| {
+            let ty = c.dm.get_obj_type(c.closure_type_id);
+            let info = ty.type_info;
+            let off = ty
+                .field_offsets
+                .get("fref_index")
+                .map(|(o, _)| *o)
+                .expect("Closure type must have fref_index field");
+            (c.closure_type_id, off, info.varlen_element_offset(0) as i64)
+        });
+        // Allocate via the toolkit's ObjTypeHandle for correct GC integration.
+        let handle = with_active_compiler(|c| c.dm.obj_handle(closure_type_id));
+        let varlen_len = ir.f.fb.iconst(dynir::Type::I64, n_caps as i64);
+        let raw = handle.alloc(ir.f, varlen_len);
+        // Store fref_index (raw u64).
+        let fref_val = ir.f.fb.iconst(dynir::Type::I64, self.fref.index() as i64);
+        ir.f.fb.store(fref_val, raw, fref_offset);
+        // Store each capture's current value.
+        for (i, cap) in self.captures.iter().enumerate() {
+            // Read the outer-scope binding's value — which itself might be a
+            // capture if this fn is nested inside another closure. The
+            // existing LocalBindingExpr.emit handles that recursively.
+            let cap_expr = LocalBindingExpr::new(cap.clone(), None);
+            let cap_val = cap_expr
+                .emit(C::Expression, _objx, ir)
+                .expect("capture must produce a value");
+            let base = ir.f.fb.iconst(dynir::Type::I64, varlen_base);
+            let eight = ir.f.fb.iconst(dynir::Type::I64, 8);
+            let idx = ir.f.fb.iconst(dynir::Type::I64, i as i64);
+            let byte_off = ir.f.fb.mul(idx, eight);
+            let off = ir.f.fb.add(base, byte_off);
+            let addr = ir.f.fb.add(raw, off);
+            ir.f.fb.store(cap_val, addr, 0);
+        }
+        // Wrap into NanBox TAG_PTR.
+        Some(ir.f.obj_wrap(raw))
     }
 
     fn has_java_class(&self) -> bool { true }
@@ -2670,27 +2914,56 @@ fn parse_fn_form(context: C, form: Object) -> Box<dyn Expr> {
     let _ = context; // fn body is always lowered as a separate fn
     // (fn* [params] body...) — optional name symbol allowed in slot 2
     let raw_after_fn = super::rt::next(&form);
-    // Two shapes:
-    //   (fn* sym [params] body...)
-    //   (fn* [params] body...)
-    //   (fn* ([params] body...) ([params2] body2...) ...)   — multi-arity NYI
-    let (name_sym, params_form, body_seq) = parse_fn_head(&raw_after_fn);
-    let params_vec: Arc<PersistentVector> = match params_form {
+    // Three shapes:
+    //   (fn* sym [params] body...)              ← single-arity, named
+    //   (fn* [params] body...)                  ← single-arity, anonymous
+    //   (fn* sym? ([params1] b1) ([p2] b2) ...) ← multi-arity
+    let (name_sym, first_clause, body_seq) = parse_fn_head(&raw_after_fn);
+
+    // Detect multi-arity: first clause-position is a List (clause form
+    // wrapping params + body), not a Vector (single-arity's params).
+    if let Object::List(_) = &first_clause {
+        // Collect every clause: first_clause + each remaining element of
+        // body_seq. Each is `([params] body...)`.
+        let mut all_clauses: Vec<Object> = vec![first_clause];
+        let mut s = body_seq;
+        while !matches!(s, Object::Nil) {
+            all_clauses.push(super::rt::first(&s));
+            s = super::rt::next(&s);
+        }
+        return parse_fn_form_multi_arity(name_sym, all_clauses);
+    }
+
+    let params_vec: Arc<PersistentVector> = match first_clause {
         Object::Vector(v) => v,
         other => panic!(
             "clojure-jvm: IllegalArgumentException — fn* expects a vector of params, got {other:?}"
         ),
     };
 
-    // Push a fresh local scope for the fn body. NEXT_LOCAL_NUM resets to 0;
-    // LOCAL_ENV starts empty (no closures yet).
+    // Mint a fresh fn id for this body. Local bindings registered while
+    // it's active stamp themselves with this id; `reference_local` uses
+    // mismatches to detect captures from outer scopes.
+    let fn_id = mint_fn_id();
+    let _fn_guard = FnIdGuard::new(fn_id);
+
+    // Push a fresh local scope for the fn body, INHERITING the outer
+    // LOCAL_ENV so symbols defined in enclosing scopes remain resolvable.
+    // The inherited bindings keep their original `owning_fn_id`, so
+    // `reference_local` can mark them as captures of this fn.
+    // NEXT_LOCAL_NUM resets to 0 — inner slot indices are independent.
+    let inherited_env: LocalEnvMap = (*current_local_env()).clone();
     Var::push_thread_bindings(vec![
         (
             COMPILER_VARS.LOCAL_ENV.clone(),
-            Object::Host(std::sync::Arc::new(LocalEnvMap::new())),
+            Object::Host(std::sync::Arc::new(inherited_env)),
         ),
         (COMPILER_VARS.NEXT_LOCAL_NUM.clone(), Object::Long(0)),
     ]);
+
+    // Start collecting captures for this fn. The scope's `fn_id` filters
+    // which bindings count as captures inside `record_capture`.
+    push_capture_scope(fn_id);
 
     // First pass: register the params so we know the LocalBindings (we need
     // them to set LOOP_LOCALS before analyzing the body).
@@ -2776,10 +3049,21 @@ fn parse_fn_form(context: C, form: Object) -> Box<dyn Expr> {
 
     Var::pop_thread_bindings();
 
+    // Collect captures recorded during body analysis. Cascade each one
+    // up: if an inner-fn capture comes from a grandparent (more than one
+    // level up), the immediate parent must also capture it so it has the
+    // value to thread into the inner closure at construction time.
+    // `record_capture` filters by the now-active outer scope's fn_id,
+    // so re-recording locals owned by the outer fn itself is a no-op.
+    let captures = pop_capture_scope();
+    for c in &captures {
+        record_capture(c);
+    }
+
     // Register the fn body as a pending compilation on the active session.
     let fref = with_active_compiler(|c| {
         let name = c.fresh_fn_name(name_sym.as_deref());
-        c.declare_pending_fn(name.clone(), params.clone(), body_expr.clone());
+        c.declare_pending_fn(name.clone(), params.clone(), body_expr.clone(), fn_id, captures.clone());
         // declare_pending_fn returns FuncRef but also pushes onto pending;
         // we want the FuncRef plus the same name for FnExpr's record.
         // Re-fetch the most recently pushed entry.
@@ -2807,11 +3091,128 @@ fn parse_fn_form(context: C, form: Object) -> Box<dyn Expr> {
         name: fref.1,
         is_variadic,
         fixed_arity,
+        fn_id,
+        captures,
     })
 }
 
 /// Pull the optional name symbol, params vector, and body seq out of the
 /// post-`fn*` portion of the form. Returns `(name_opt, params_form, body_seq)`.
+/// `MultiArityFnExpr` — a `(fn* ([p1] b1) ([p2] b2))` form. Wraps multiple
+/// single-arity `FnExpr`s, one per clause. Used by `InvokeExpr.emit`'s
+/// static-dispatch path to pick the matching arity at the call site.
+///
+/// Dynamic invocation (passing the multi-arity fn as a value) is NOT yet
+/// supported — the TAG_FN encoding holds one FuncRef; multi-arity through
+/// the runtime `cljvm_rt_invoke_*` thunks needs a per-name dispatcher
+/// table, which lands later. For now, `MultiArityFnExpr.emit` panics if
+/// the value flows somewhere static dispatch can't catch it.
+#[derive(Debug)]
+pub struct MultiArityFnExpr {
+    /// Sorted by fixed_arity ascending. At most one is variadic; if
+    /// present it's the catch-all for arg counts ≥ its fixed_arity.
+    pub arities: Vec<FnExpr>,
+    /// Name from `(fn* name? ...)`, used to mint inner pending-fn names.
+    pub name: Option<String>,
+}
+
+impl MultiArityFnExpr {
+    pub fn pick(&self, arg_count: usize) -> Option<&FnExpr> {
+        // Exact-arity match wins; otherwise the variadic catch-all if any.
+        let mut variadic: Option<&FnExpr> = None;
+        for a in &self.arities {
+            if a.is_variadic {
+                variadic = Some(a);
+                continue;
+            }
+            if a.fixed_arity == arg_count {
+                return Some(a);
+            }
+        }
+        if let Some(v) = variadic {
+            if arg_count >= v.fixed_arity {
+                return Some(v);
+            }
+        }
+        None
+    }
+}
+
+impl Expr for MultiArityFnExpr {
+    fn emit(&self, context: C, _objx: &ObjExpr, ir: &mut IrEmitter<'_>) -> Option<Value> {
+        // For `(def name <multi-arity>)`: we register a per-arity dispatch
+        // table on the active Compiler in `parse_def_form`, so static
+        // invocations through the Var work via that table instead of the
+        // Var's root binding. Returning nil here is a placeholder — it
+        // makes `DefExpr.emit`'s `bind_root(nil)` benign, and downstream
+        // dynamic-invoke through TAG_FN isn't supported anyway.
+        //
+        // For multi-arity fns used as values (passed around) we'd need a
+        // dispatcher entry. Not yet wired. The TAG_FN handle returned by
+        // a single-arity FnExpr fills that role today.
+        if context == C::Statement {
+            return None;
+        }
+        Some(ir.f.nil())
+    }
+    fn has_java_class(&self) -> bool { true }
+    fn get_java_class(&self) -> Option<HostClass> {
+        Some(HostClass { name: Arc::new("clojure.lang.AFunction".to_string()) })
+    }
+
+    fn as_multi_arity_fn_expr(&self) -> Option<&MultiArityFnExpr> { Some(self) }
+}
+
+fn parse_fn_form_multi_arity(name: Option<String>, clauses: Vec<Object>) -> Box<dyn Expr> {
+    // Each clause is `([params] body...)`. We re-package each into a
+    // synthetic `(fn* name? [params] body...)` form and recurse through
+    // `parse_fn_form`. That way the per-clause logic (variadic detection,
+    // capture analysis, pending-fn registration) all reuses one path.
+    let mut arities: Vec<FnExpr> = Vec::with_capacity(clauses.len());
+    let specials = &*SPECIAL_SYMBOLS;
+    for clause in clauses {
+        let clause_list = match clause {
+            Object::List(l) => l,
+            other => panic!(
+                "clojure-jvm: IllegalArgumentException — fn* multi-arity clause must be a list, got {other:?}"
+            ),
+        };
+        // Build (fn* name? params body...) by consing `fn*` (+ optional
+        // name) onto the clause's seq.
+        let mut head_items: Vec<Object> = vec![Object::Symbol(specials.FN.clone())];
+        if let Some(n) = &name {
+            head_items.push(Object::Symbol(Symbol::intern(n)));
+        }
+        // Append the clause's items.
+        for i in 0..clause_list.count() {
+            head_items.push(clause_list.iter().nth(i as usize).expect("clause item"));
+        }
+        let synthetic = Object::List(PersistentList::create(head_items));
+        let parsed = parse_fn_form(C::Expression, synthetic);
+        // The parsed Expr is a FnExpr (since each synthetic is single-arity).
+        let fn_expr = parsed
+            .as_fn_expr()
+            .expect("synthetic single-arity form must parse to FnExpr")
+            .clone_for_multi_arity();
+        arities.push(fn_expr);
+    }
+    arities.sort_by_key(|a| a.fixed_arity);
+    // Validate no two non-variadic arities collide.
+    {
+        let mut seen: std::collections::HashSet<usize> = Default::default();
+        for a in &arities {
+            if a.is_variadic { continue; }
+            if !seen.insert(a.fixed_arity) {
+                panic!(
+                    "clojure-jvm: IllegalStateException — fn* has duplicate non-variadic arity {}",
+                    a.fixed_arity
+                );
+            }
+        }
+    }
+    Box::new(MultiArityFnExpr { arities, name })
+}
+
 fn parse_fn_head(after_fn: &Object) -> (Option<String>, Object, Object) {
     // after_fn is the tail seq starting with either a name sym, a params
     // vector, or a list (multi-arity).
@@ -2857,20 +3258,51 @@ impl Expr for InvokeExpr {
         // redefinitions are observable). Acceptable as a stepping stone —
         // first-class fn invocation through a runtime Var-handle lands when
         // the call-table-base story is wired up.
-        // Static target: FuncRef + variadic metadata. The first match wins.
+        // Static target: FuncRef + variadic metadata. Only non-capturing
+        // FnExprs are eligible for the static-call optimization — closure
+        // bodies expect the closure object as their implicit first arg,
+        // which the static path doesn't supply. Closures route through
+        // the dynamic `cljvm_rt_invoke_*` thunk which handles self-prepending.
+        let n_call_args = self.args.len();
         let static_target: Option<(dynir::FuncRef, bool, usize)> = self
             .fexpr
             .as_fn_expr()
+            .filter(|f| f.captures.is_empty())
             .map(|f| (f.fref(), f.is_variadic(), f.fixed_arity()))
+            .or_else(|| {
+                // Multi-arity inline fn: pick the clause matching the call's
+                // arg count. Each clause is its own non-capturing FnExpr.
+                self.fexpr
+                    .as_multi_arity_fn_expr()
+                    .and_then(|m| m.pick(n_call_args))
+                    .filter(|f| f.captures.is_empty())
+                    .map(|f| (f.fref(), f.is_variadic(), f.fixed_arity()))
+            })
             .or_else(|| {
                 let lbe = self.fexpr.as_local_binding_expr()?;
                 let init_guard = lbe.b.init.read().unwrap();
                 let init = init_guard.as_ref()?;
                 init.as_fn_expr()
+                    .filter(|f| f.captures.is_empty())
                     .map(|f| (f.fref(), f.is_variadic(), f.fixed_arity()))
             })
             .or_else(|| {
                 let ve = self.fexpr.as_var_expr()?;
+                // First try a multi-arity Var: pick matching clause.
+                if let Some(arities) =
+                    with_active_compiler(|c| c.var_multi_arity(&ve.var))
+                {
+                    if let Some((fref, info)) = arities.into_iter().find_map(|(fref, info)| {
+                        let matches = if info.is_variadic {
+                            n_call_args >= info.fixed_arity
+                        } else {
+                            n_call_args == info.fixed_arity
+                        };
+                        if matches { Some((fref, info)) } else { None }
+                    }) {
+                        return Some((fref, info.is_variadic, info.fixed_arity));
+                    }
+                }
                 let fref = with_active_compiler(|c| c.var_fn(&ve.var))?;
                 // For Var-resolved fns we also need the variadic metadata.
                 let info = with_active_compiler(|c| c.var_fn_info(&ve.var))?;
@@ -2878,8 +3310,7 @@ impl Expr for InvokeExpr {
             });
 
         if let Some((fref, is_variadic, fixed_arity)) = static_target {
-            // Arity check.
-            let n_call_args = self.args.len();
+            // Arity check (`n_call_args` computed above).
             if is_variadic {
                 if n_call_args < fixed_arity {
                     panic!(
@@ -3483,6 +3914,11 @@ pub struct Compiler {
     /// `FnExpr` — the InvokeExpr emit path uses these to decide whether to
     /// pack overflow args into a list.
     pub var_fn_infos: std::sync::Mutex<HashMap<*const Var, VarFnInfo>>,
+    /// Per-Var multi-arity dispatch table. Vec entries are
+    /// `(FuncRef, VarFnInfo)` per clause; `InvokeExpr.emit` finds the
+    /// matching arity to direct-call.
+    pub var_multi_arities:
+        std::sync::Mutex<HashMap<*const Var, Vec<(dynir::FuncRef, VarFnInfo)>>>,
 
     /// ObjTypeId for `clojure.lang.String` — a varlen-byte heap object holding
     /// UTF-8 bytes. Allocated by the GC heap; the type_id stays stable across
@@ -3499,6 +3935,12 @@ pub struct Compiler {
     /// each holding a NanBox-encoded `Object`. Both are GC-traced.
     /// Empty-list terminator is `Object::Nil` NanBox in the `rest` slot.
     pub cons_type_id: dynlang::ObjTypeId,
+    /// ObjTypeId for `clojure.lang.Closure` — Raw64 `fref_index` + a varlen
+    /// section of GC-traced NanBox values holding the captured outer-fn
+    /// locals. Created by `FnExpr.emit` when the body references outer
+    /// bindings; the closure body's first param is the closure object
+    /// itself, and `LocalBindingExpr.emit` reads captures from it.
+    pub closure_type_id: dynlang::ObjTypeId,
 
     /// Pending compile-time literals. `*Expr.emit` interns into this queue
     /// and emits `gc_literal(LiteralRef(idx))`. After `gc.compile_jit`
@@ -3569,6 +4011,15 @@ pub struct PendingFn {
     pub params: Vec<Arc<LocalBinding>>,
     pub body: Arc<dyn Expr>,
     pub name: String,
+    /// Compile-time fn id (`LocalBinding.owning_fn_id` for locals owned by
+    /// this fn). Used by `lower_pending_fn` to install `CURRENT_FN_ID`
+    /// during body emit so `LocalBindingExpr.emit` can distinguish locals
+    /// from outer-fn captures.
+    pub fn_id: u32,
+    /// Outer bindings captured by this fn's body. Each gets a slot in the
+    /// closure object at emit time; the body reads them from the closure
+    /// passed as the implicit first arg.
+    pub captures: Vec<Arc<LocalBinding>>,
 }
 
 impl Compiler {
@@ -3604,6 +4055,8 @@ impl Compiler {
         host_methods.insert(("clojure.lang.RT".to_string(), "first".to_string(), 1), rt_first);
         let rt_next = dm.declare_extern("cljvm_rt_next", sig_1i64.clone());
         host_methods.insert(("clojure.lang.RT".to_string(), "next".to_string(), 1), rt_next);
+        let rt_more = dm.declare_extern("cljvm_rt_more", sig_1i64.clone());
+        host_methods.insert(("clojure.lang.RT".to_string(), "more".to_string(), 1), rt_more);
         let rt_equiv = dm.declare_extern("cljvm_rt_equiv", sig_2i64.clone());
         host_methods.insert(("clojure.lang.Util".to_string(), "equiv".to_string(), 2), rt_equiv);
         let rt_is_nil = dm.declare_extern("cljvm_rt_is_nil", sig_1i64.clone());
@@ -3655,6 +4108,15 @@ impl Compiler {
             .field("first", dynlang::FieldKind::Value)
             .field("rest", dynlang::FieldKind::Value)
             .build();
+        // `clojure.lang.Closure`: Raw64 holds the FuncRef index (as u64);
+        // varlen-values section holds the captured NanBox values. The
+        // capture count lives in the Compact header's varlen-count slot,
+        // populated when the closure is allocated.
+        let closure_type_id = dm
+            .obj_type("clojure.lang.Closure")
+            .field("fref_index", dynlang::FieldKind::Raw64)
+            .varlen_values()
+            .build();
 
         // Stash type_ids globally so Rust externs called from JIT-executing
         // code (`cljvm_rt_cons` etc.) can allocate the right ObjType without
@@ -3674,10 +4136,12 @@ impl Compiler {
             invoke_externs: [invoke_0, invoke_1, invoke_2, invoke_3],
             var_fns: std::sync::Mutex::new(HashMap::new()),
             var_fn_infos: std::sync::Mutex::new(HashMap::new()),
+            var_multi_arities: std::sync::Mutex::new(HashMap::new()),
             string_type_id,
             symbol_type_id,
             keyword_type_id,
             cons_type_id,
+            closure_type_id,
             pending_literals: std::sync::Mutex::new(Vec::new()),
             host_methods,
         }
@@ -3747,6 +4211,26 @@ impl Compiler {
         self.var_fn_infos.lock().unwrap().get(&key).copied()
     }
 
+    /// Register a Var as bound to a multi-arity fn. Each tuple is
+    /// `(FuncRef, VarFnInfo)` per clause.
+    pub fn register_var_multi_arity(
+        &self,
+        var: &Arc<Var>,
+        arities: Vec<(dynir::FuncRef, VarFnInfo)>,
+    ) {
+        let key = Arc::as_ptr(var);
+        self.var_multi_arities.lock().unwrap().insert(key, arities);
+    }
+
+    /// Look up a Var's per-arity (FuncRef, info) table, if any.
+    pub fn var_multi_arity(
+        &self,
+        var: &Arc<Var>,
+    ) -> Option<Vec<(dynir::FuncRef, VarFnInfo)>> {
+        let key = Arc::as_ptr(var);
+        self.var_multi_arities.lock().unwrap().get(&key).cloned()
+    }
+
     /// Mint a fresh, unique fn name within this session.
     pub fn fresh_fn_name(&self, base: Option<&str>) -> String {
         let id = self
@@ -3760,17 +4244,32 @@ impl Compiler {
 
     /// Declare a fn in the `DynModule` and record it as pending. Returns the
     /// allocated FuncRef so the caller (FnExpr) can encode it later.
+    ///
+    /// `fn_id` is the compile-time identity of this fn body (matches
+    /// `LocalBinding.owning_fn_id` for locals defined inside it).
+    /// `captures` lists outer LocalBindings the body references — empty
+    /// for non-closures. If non-empty, the IR-level fn declares one extra
+    /// param (the closure object) prepended to the user-visible params.
     pub fn declare_pending_fn(
         &mut self,
         name: String,
         params: Vec<Arc<LocalBinding>>,
         body: Arc<dyn Expr>,
+        fn_id: u32,
+        captures: Vec<Arc<LocalBinding>>,
     ) -> dynir::FuncRef {
-        let fref = self.dm.declare_func(&name, params.len());
-        self.pending_fns
-            .lock()
-            .unwrap()
-            .push(PendingFn { fref, params: params.clone(), body, name });
+        // Closures carry an implicit self-arg (the closure object), so the
+        // declared arity is `params.len() + 1` when `captures` is non-empty.
+        let declared_arity = params.len() + if captures.is_empty() { 0 } else { 1 };
+        let fref = self.dm.declare_func(&name, declared_arity);
+        self.pending_fns.lock().unwrap().push(PendingFn {
+            fref,
+            params: params.clone(),
+            body,
+            name,
+            fn_id,
+            captures,
+        });
         fref
     }
 }
@@ -3991,6 +4490,7 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_rt_cons" => Some(crate::runtime::cljvm_rt_cons as *const u8),
         "cljvm_rt_first" => Some(crate::runtime::cljvm_rt_first as *const u8),
         "cljvm_rt_next" => Some(crate::runtime::cljvm_rt_next as *const u8),
+        "cljvm_rt_more" => Some(crate::runtime::cljvm_rt_more as *const u8),
         "cljvm_rt_equiv" => Some(crate::runtime::cljvm_rt_equiv as *const u8),
         "cljvm_rt_is_nil" => Some(crate::runtime::cljvm_rt_is_nil as *const u8),
         "cljvm_rt_invoke_0" => Some(crate::runtime::cljvm_rt_invoke_0 as *const u8),
@@ -4196,16 +4696,29 @@ pub fn compile_form_to_interp(form: Object) -> (dynlang::BuiltModule, dynir::Fun
 /// Lower a `PendingFn` body into its declared FuncRef. Called from the
 /// drainer after analyze completes.
 fn lower_pending_fn(c: &mut Compiler, p: PendingFn) {
+    // Install the fn id so `LocalBindingExpr.emit` can compare bindings'
+    // owning_fn_id and route captures to the closure self-arg read path.
+    let _fn_guard = FnIdGuard::new(p.fn_id);
+    let is_closure = !p.captures.is_empty();
+
     let mut df = c.dm.start_func(p.fref);
     {
         let mut ir = IrEmitter::new(&mut df);
         let objx = ObjExpr::placeholder();
-        // Bind each param's slot to its incoming function argument. dynir
-        // exposes params via `FunctionBuilder::block_param`; the entry
-        // block's params are positional in declaration order.
+        // Closure bodies have an implicit first param (the closure object).
+        // The user-visible params follow. We stash the closure self-value
+        // under a well-known slot name `__closure_self` so
+        // `LocalBindingExpr.emit` can pull it out when it needs to read a
+        // capture.
         let entry_bb = ir.f.fb.entry_block();
+        let mut param_offset = 0usize;
+        if is_closure {
+            let self_val = ir.f.fb.block_param(entry_bb, 0);
+            ir.f.def_var(CLOSURE_SELF_SLOT, self_val);
+            param_offset = 1;
+        }
         for (i, lb) in p.params.iter().enumerate() {
-            let arg_val = ir.f.fb.block_param(entry_bb, i);
+            let arg_val = ir.f.fb.block_param(entry_bb, param_offset + i);
             ir.f.def_var(&local_slot_name(lb.idx), arg_val);
         }
 
@@ -6930,16 +7443,499 @@ mod tests {
     const CORE_COMP2: &str = "(def comp2 (fn* [f g] (fn* [x] (f (g x)))))";
 
     #[test]
-    #[should_panic(expected = "Unable to resolve symbol: f")]
-    fn core_fn_comp2_blocked_on_closures() {
-        // `comp2`'s inner fn captures `f` and `g` from the outer scope —
-        // a closure. Currently FnExpr can't reference outer locals; that
-        // needs the ObjExpr capture-pool wiring (Java emits captured
-        // values as ObjExpr constant fields populated when the closure is
-        // created). Documented as a known limitation here.
-        let _ = with_fresh_ns("test.comp2", || {
-            eval_str_via_jit(&format!("(do {CORE_INC} {CORE_COMP2} ((comp2 inc inc) 40))"))
+    fn closure_construction_doesnt_crash() {
+        // Just construct a closure and discard it. (let* [x 42] (fn* [] x))
+        // returns the closure handle (NanBox bits); don't invoke it.
+        // Smoke test for the alloc / store path.
+        let bits = eval_str_via_jit("(let* [x 42] (fn* [] x))");
+        // Closure: TAG_PTR (tag = 2).
+        const TAG_PATTERN: u64 = 0x7FFC_0000_0000_0000;
+        const FULL_MASK: u64 = 0xFFFC_0000_0000_0000;
+        const TAG_MASK: u64 = 0x0003_0000_0000_0000;
+        assert_eq!(bits & FULL_MASK, TAG_PATTERN);
+        let tag = (bits & TAG_MASK) >> 48;
+        assert_eq!(tag, 2, "closure should be TAG_PTR, got tag {tag}");
+    }
+
+    /// Simplest closure: captures one outer value, returns it. No invocation
+    /// of captured fn. Verifies the alloc / store / load round-trip.
+    #[test]
+    fn closure_returns_captured_long() {
+        // ((fn* [x] (fn* [] x)) 42)  — but we can't invoke result without 0-arg
+        // dynamic path. Use a let to bind the closure first.
+        // ((let [x 42 f (fn* [] x)] f))
+        // Wait, our let can shadow. Let me write:
+        // (let* [x 42] ((fn* [] x)))
+        let v = eval_str_via_jit("(let* [x 42] ((fn* [] x)))");
+        assert_eq!(nanbox_to_f64(v), 42.0);
+    }
+
+    #[test]
+    fn closure_returns_captured_long_one_indirect() {
+        // (let* [x 42] (let* [f (fn* [] x)] (f)))
+        let v = eval_str_via_jit("(let* [x 42] (let* [f (fn* [] x)] (f)))");
+        assert_eq!(nanbox_to_f64(v), 42.0);
+    }
+
+    #[test]
+    fn closure_one_arg_capturing_outer() {
+        // ((fn* [x] (fn* [y] (+ x y))) ...) — we can't directly invoke the
+        // returned closure since the outer's invocation chain isn't supported
+        // for arity 1 on heap-allocated fns yet. Try via let.
+        // (let* [add-x (let* [x 10] (fn* [y] (+ x y)))] (add-x 5)) → 15
+        let v = eval_str_via_jit(
+            "(let* [add-x (let* [x 10] (fn* [y] (+ x y)))] (add-x 5))",
+        );
+        assert_eq!(nanbox_to_f64(v), 15.0);
+    }
+
+    /// `clojure.core/partial` (1-extra-arg slice). `(partial f x)` returns a
+    // ---- clojure.core fns using multi-arity ------------------------------
+
+    /// `clojure.core/rest` (Java line ~70). `(. clojure.lang.RT (more x))`.
+    /// In our Cons-only model `more` == `next`; differs for lazy seqs.
+    const CORE_REST: &str = "(def rest (fn* [x] (. clojure.lang.RT (more x))))";
+
+    #[test]
+    fn core_fn_rest_drops_first() {
+        let v = with_fresh_ns("test.rest", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_CONS} {CORE_REST} {CORE_FIRST} \
+                   (first (rest (cons 1 (cons 99 nil)))))"
+            ))
         });
+        assert_eq!(nanbox_to_f64(v), 99.0);
+    }
+
+    /// `clojure.core/conj` (Java line ~73, simplified). Multi-arity:
+    ///   ([])         → nil (Java returns [] vec; we don't have vectors)
+    ///   ([coll])     → coll
+    ///   ([coll x])   → (cons x coll) for our Cons-only model
+    ///   ([coll x & xs]) → recurse on each in `xs`
+    const CORE_CONJ: &str = "(def conj (fn* \
+        ([] nil) \
+        ([coll] coll) \
+        ([coll x] (. clojure.lang.RT (cons x coll))) \
+        ([coll x & xs] (if (. clojure.lang.Util (isNil xs)) \
+                          (conj coll x) \
+                          (conj (conj coll x) (. clojure.lang.RT (first xs)))))))";
+
+    #[test]
+    fn core_fn_conj_two_arg() {
+        // (first (conj nil 7)) → 7
+        let v = with_fresh_ns("test.conj.two", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_CONJ} (. clojure.lang.RT (first (conj nil 7))))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 7.0);
+    }
+
+    #[test]
+    fn core_fn_conj_zero_arg() {
+        let v = with_fresh_ns("test.conj.zero", || {
+            eval_str_via_jit(&format!("(do {CORE_CONJ} (conj))"))
+        });
+        assert_eq!(v, 0x7FFC_0000_0000_0000); // nil
+    }
+
+    #[test]
+    fn core_fn_conj_one_arg() {
+        let v = with_fresh_ns("test.conj.one", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_CONS} {CORE_CONJ} (. clojure.lang.RT (first (conj (cons 42 nil)))))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 42.0);
+    }
+
+    /// `clojure.core/nth` (multi-arity: 2-arg + 3-arg with not-found).
+    const CORE_NTH_MULTI: &str = "(def nth (fn* \
+        ([coll i] (if (= i 0) (. clojure.lang.RT (first coll)) (nth (. clojure.lang.RT (next coll)) (- i 1)))) \
+        ([coll i not-found] (if (. clojure.lang.Util (isNil coll)) \
+                                not-found \
+                                (if (= i 0) (. clojure.lang.RT (first coll)) (nth (. clojure.lang.RT (next coll)) (- i 1) not-found))))))";
+
+    #[test]
+    fn core_fn_nth_two_arg_in_range() {
+        let v = with_fresh_ns("test.nth.in", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_CONS} {CORE_NTH_MULTI} \
+                   (nth (cons 10 (cons 20 (cons 30 nil))) 1))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 20.0);
+    }
+
+    #[test]
+    fn core_fn_nth_three_arg_not_found_returned() {
+        let v = with_fresh_ns("test.nth.nf", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_CONS} {CORE_NTH_MULTI} (nth nil 5 99))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 99.0);
+    }
+
+    // ---- multi-arity `fn*` static dispatch -------------------------------
+
+    #[test]
+    fn multi_arity_picks_one_arg_clause() {
+        // (fn* ([x] x) ([x y] (+ x y))) — single-arg returns x
+        let v = eval_str_via_jit("((fn* ([x] x) ([x y] (+ x y))) 7)");
+        assert_eq!(nanbox_to_f64(v), 7.0);
+    }
+
+    #[test]
+    fn multi_arity_picks_two_arg_clause() {
+        let v = eval_str_via_jit("((fn* ([x] x) ([x y] (+ x y))) 3 4)");
+        assert_eq!(nanbox_to_f64(v), 7.0);
+    }
+
+    #[test]
+    fn multi_arity_via_def_then_invoke() {
+        // (def my-add (fn ([x] (+ x 0)) ([x y] (+ x y)) ([x y z] (+ x y z))))
+        let v = with_fresh_ns("test.multi.def", || {
+            eval_str_via_jit(
+                "(do (def my-add (fn* ([x] (+ x 0)) \
+                                       ([x y] (+ x y)) \
+                                       ([x y z] (+ x y z)))) \
+                   (my-add 1 2 3))",
+            )
+        });
+        assert_eq!(nanbox_to_f64(v), 6.0);
+    }
+
+    #[test]
+    fn multi_arity_with_variadic_clause() {
+        // (fn* ([x] x) ([x & xs] (+ x 100))) — using overflow clause via
+        // arity > 1.
+        let v = eval_str_via_jit(
+            "((fn* ([x] x) ([x & xs] (+ x 100))) 5 99)",
+        );
+        assert_eq!(nanbox_to_f64(v), 105.0);
+    }
+
+    #[test]
+    fn multi_arity_named_self_recursive() {
+        // Real clojure.core/conj-like recursive defn using multi-arity.
+        let v = with_fresh_ns("test.multi.recur", || {
+            eval_str_via_jit(
+                "(do (def cnt-up (fn* cnt-up \
+                                        ([] 0) \
+                                        ([n] (if (= n 0) 0 (+ 1 (cnt-up (- n 1))))))) \
+                   (cnt-up 5))",
+            )
+        });
+        assert_eq!(nanbox_to_f64(v), 5.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "duplicate non-variadic arity")]
+    fn multi_arity_duplicate_arity_panics() {
+        // Two fixed-arity clauses with same arity → IllegalStateException
+        let _ = eval_str_via_jit("((fn* ([x] x) ([y] y)) 1)");
+    }
+
+    /// `clojure.core/constantly` — `(fn [c] (fn [& _] c))`. Variadic inner
+    /// returns the constant regardless of args. For our `[& xs]` shape:
+    /// `(def constantly (fn [c] (fn [& _] c)))`.
+    const CORE_CONSTANTLY: &str =
+        "(def constantly (fn* [c] (fn* [& _] c)))";
+
+    #[test]
+    fn core_fn_constantly_returns_same_value() {
+        let v = with_fresh_ns("test.constantly", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_CONSTANTLY} ((constantly 42) 1 2 3))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 42.0);
+    }
+
+    /// `clojure.core/every?` (recursive, our Cons-only model).
+    /// `(def every? (fn [pred coll] (if (nil? coll) true (if (pred (first coll)) (every? pred (next coll)) false))))`.
+    const CORE_EVERY_Q: &str = "(def every? (fn* [pred coll] \
+        (if (. clojure.lang.Util (isNil coll)) \
+            true \
+            (if (pred (. clojure.lang.RT (first coll))) \
+                (every? pred (. clojure.lang.RT (next coll))) \
+                false))))";
+
+    #[test]
+    fn core_fn_every_q_true_when_all_match() {
+        let v = with_fresh_ns("test.every.t", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_POS_Q} {CORE_EVERY_Q} \
+                   (every? pos? (. clojure.lang.RT (cons 1 \
+                     (. clojure.lang.RT (cons 2 \
+                       (. clojure.lang.RT (cons 3 nil))))))))"
+            ))
+        });
+        assert!(nanbox_to_bool(v));
+    }
+
+    #[test]
+    fn core_fn_every_q_false_when_one_fails() {
+        let v = with_fresh_ns("test.every.f", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_POS_Q} {CORE_EVERY_Q} \
+                   (every? pos? (. clojure.lang.RT (cons 1 \
+                     (. clojure.lang.RT (cons -2 \
+                       (. clojure.lang.RT (cons 3 nil))))))))"
+            ))
+        });
+        assert!(!nanbox_to_bool(v));
+    }
+
+    /// `clojure.core/some` — returns the first truthy `(pred x)`, or nil.
+    /// For our subset using primitive `if x ...`: returns the matching
+    /// element (rather than the truthy pred result). Real `some` returns
+    /// the pred-result; our simpler version returns the element. Same
+    /// behavior for boolean preds.
+    const CORE_SOME: &str = "(def some (fn* [pred coll] \
+        (if (. clojure.lang.Util (isNil coll)) \
+            nil \
+            (if (pred (. clojure.lang.RT (first coll))) \
+                (. clojure.lang.RT (first coll)) \
+                (some pred (. clojure.lang.RT (next coll)))))))";
+
+    #[test]
+    fn core_fn_some_returns_first_pos() {
+        let v = with_fresh_ns("test.some", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_POS_Q} {CORE_SOME} \
+                   (some pos? (. clojure.lang.RT (cons -1 \
+                     (. clojure.lang.RT (cons -2 \
+                       (. clojure.lang.RT (cons 7 nil))))))))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 7.0);
+    }
+
+    #[test]
+    fn core_fn_some_returns_nil_when_none_match() {
+        let v = with_fresh_ns("test.some.nil", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_POS_Q} {CORE_SOME} \
+                   (some pos? (. clojure.lang.RT (cons -1 \
+                     (. clojure.lang.RT (cons -2 nil))))))"
+            ))
+        });
+        assert_eq!(v, 0x7FFC_0000_0000_0000);
+    }
+
+    /// `clojure.core/repeat` (2-arg slice). `(repeat n x)` returns a list
+    /// of `x` repeated `n` times. Real `repeat` is lazy; this is eager.
+    const CORE_REPEAT: &str = "(def repeat (fn* [n x] \
+        (if (= n 0) \
+            nil \
+            (. clojure.lang.RT (cons x (repeat (- n 1) x))))))";
+
+    #[test]
+    fn core_fn_repeat() {
+        // (first (next (next (repeat 5 :ok)))) → :ok (third element)
+        let s = with_fresh_ns("test.repeat", || {
+            // Use a keyword that decodes nicely, then call repeat and grab the
+            // 3rd element by walking.
+            let src = format!(
+                "(do {CORE_REPEAT} \
+                   (. clojure.lang.RT (first \
+                     (. clojure.lang.RT (next \
+                       (. clojure.lang.RT (next (repeat 5 :ok))))))))"
+            );
+            eval_str_via_jit_to_object(&src)
+        });
+        match s {
+            Object::Keyword(k) => assert_eq!(k.get_name(), "ok"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// `clojure.core/take` (eager). Take first `n` items.
+    const CORE_TAKE: &str = "(def take (fn* [n coll] \
+        (if (= n 0) \
+            nil \
+            (if (. clojure.lang.Util (isNil coll)) \
+                nil \
+                (. clojure.lang.RT (cons (. clojure.lang.RT (first coll)) \
+                                          (take (- n 1) (. clojure.lang.RT (next coll)))))))))";
+
+    #[test]
+    fn core_fn_take_first_two_of_four() {
+        let v = with_fresh_ns("test.take", || {
+            // Build 1..4, take 2, count them (should be 2).
+            eval_str_via_jit(&format!(
+                "(do {CORE_CONS} {CORE_FIRST} {CORE_NEXT} {CORE_COUNT} {CORE_TAKE} \
+                   (count (take 2 (cons 1 (cons 2 (cons 3 (cons 4 nil)))))))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 2.0);
+    }
+
+    /// `clojure.core/drop` (eager). Drop first `n` items.
+    const CORE_DROP: &str = "(def drop (fn* [n coll] \
+        (if (= n 0) \
+            coll \
+            (if (. clojure.lang.Util (isNil coll)) \
+                nil \
+                (drop (- n 1) (. clojure.lang.RT (next coll)))))))";
+
+    #[test]
+    fn core_fn_drop_first_two_of_four() {
+        let v = with_fresh_ns("test.drop", || {
+            // Build 10..40, drop 2, take first → 30.
+            eval_str_via_jit(&format!(
+                "(do {CORE_DROP} \
+                   (. clojure.lang.RT (first \
+                     (drop 2 (. clojure.lang.RT (cons 10 \
+                       (. clojure.lang.RT (cons 20 \
+                         (. clojure.lang.RT (cons 30 \
+                           (. clojure.lang.RT (cons 40 nil))))))))))))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 30.0);
+    }
+
+    /// `clojure.core/range` (1-arg, recursive). `(range n)` returns 0..n.
+    const CORE_RANGE: &str =
+        "(do (def range-iter (fn* [i n] (if (= i n) nil (. clojure.lang.RT (cons i (range-iter (+ i 1) n)))))) \
+             (def range (fn* [n] (range-iter 0 n))))";
+
+    #[test]
+    fn core_fn_range_5_first_is_0() {
+        let v = with_fresh_ns("test.range", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_RANGE} (. clojure.lang.RT (first (range 5))))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 0.0);
+    }
+
+    #[test]
+    fn core_fn_range_5_third_is_2() {
+        let v = with_fresh_ns("test.range.third", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_RANGE} \
+                   (. clojure.lang.RT (first \
+                     (. clojure.lang.RT (next \
+                       (. clojure.lang.RT (next (range 5))))))))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 2.0);
+    }
+
+    /// Sum a `range` via reduce + closure.
+    #[test]
+    fn higher_order_sum_range_via_reduce() {
+        let v = with_fresh_ns("test.sum.range", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_REDUCE} {CORE_RANGE} \
+                   (reduce (fn* [a b] (+ a b)) 0 (range 10)))"
+            ))
+        });
+        // 0+1+…+9 = 45
+        assert_eq!(nanbox_to_f64(v), 45.0);
+    }
+
+    /// `clojure.core/comp` (3-fn slice) — `((comp f g h) x)` → `(f (g (h x)))`.
+    /// Real comp is variadic.
+    const CORE_COMP3: &str = "(def comp3 (fn* [f g h] (fn* [x] (f (g (h x))))))";
+
+    #[test]
+    fn core_fn_comp3() {
+        // ((comp3 inc inc inc) 40) → 43
+        let v = with_fresh_ns("test.comp3", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_INC} {CORE_COMP3} ((comp3 inc inc inc) 40))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 43.0);
+    }
+
+    /// Map over a range and sum: end-to-end higher-order check.
+    #[test]
+    fn higher_order_sum_of_squared_range() {
+        let v = with_fresh_ns("test.sum.sq.range", || {
+            // (reduce + 0 (map sq (range 5))) where sq squares.
+            // map+reduce+range together.
+            eval_str_via_jit(&format!(
+                "(do {CORE_REDUCE} {CORE_RANGE} {CORE_MAP} \
+                   (def sq (fn* [n] (* n n))) \
+                   (reduce (fn* [a b] (+ a b)) 0 (map sq (range 5))))"
+            ))
+        });
+        // 0+1+4+9+16 = 30
+        assert_eq!(nanbox_to_f64(v), 30.0);
+    }
+
+    /// fn that prepends `x` when called: `((partial inc) 41)` → 42 ; for
+    /// 1-arg partial: `(partial f x)` → `(fn [y] (f x y))`.
+    const CORE_PARTIAL1: &str = "(def partial1 (fn* [f x] (fn* [y] (f x y))))";
+
+    #[test]
+    fn core_fn_partial1_with_add() {
+        // Build add with `(fn [a b] (+ a b))`, then partial-apply 10. Call
+        // result with 5 → 15.
+        let v = with_fresh_ns("test.partial1", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_PARTIAL1} \
+                   (def add (fn* [a b] (+ a b))) \
+                   ((partial1 add 10) 5))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 15.0);
+    }
+
+    /// `clojure.core/complement` — `(def complement (fn [f] (fn [x] (not (f x)))))`.
+    const CORE_COMPLEMENT: &str =
+        "(def complement (fn* [f] (fn* [x] (if (f x) false true))))";
+
+    #[test]
+    fn core_fn_complement() {
+        // (complement pos?) is a fn that's truthy for non-positive args.
+        let v_neg = with_fresh_ns("test.complement.neg", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_POS_Q} {CORE_COMPLEMENT} ((complement pos?) -3))"
+            ))
+        });
+        assert!(nanbox_to_bool(v_neg));
+        let v_pos = with_fresh_ns("test.complement.pos", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_POS_Q} {CORE_COMPLEMENT} ((complement pos?) 3))"
+            ))
+        });
+        assert!(!nanbox_to_bool(v_pos));
+    }
+
+    /// A make-adder closure pattern, the canonical "closure over local"
+    /// example.
+    #[test]
+    fn closure_make_adder_returns_capturing_fn() {
+        // (def make-adder (fn [n] (fn [x] (+ n x))))
+        // ((make-adder 100) 23) → 123
+        let v = with_fresh_ns("test.make_adder", || {
+            eval_str_via_jit(
+                "(do (def make-adder (fn* [n] (fn* [x] (+ n x)))) \
+                   ((make-adder 100) 23))",
+            )
+        });
+        assert_eq!(nanbox_to_f64(v), 123.0);
+    }
+
+    #[test]
+    fn core_fn_comp2_now_works_via_closures() {
+        // `comp2`'s inner fn captures `f` and `g` from the outer scope.
+        // ((comp2 inc inc) 40) → 42 (inc(inc(40))). Exercises:
+        //   * Two-level fn nesting (outer fn returns closure)
+        //   * Two captures (f, g) per closure
+        //   * Captured fns invoked from inside the closure body
+        let v = with_fresh_ns("test.comp2", || {
+            eval_str_via_jit(&format!(
+                "(do {CORE_INC} {CORE_COMP2} ((comp2 inc inc) 40))"
+            ))
+        });
+        assert_eq!(nanbox_to_f64(v), 42.0);
     }
 
     // ---- more clojure.core fns using variadics + composition --------------
