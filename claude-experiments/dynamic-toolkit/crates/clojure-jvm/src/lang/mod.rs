@@ -49,6 +49,8 @@ pub mod persistent_list;
 pub mod persistent_vector;
 pub mod persistent_hash_map;
 pub mod persistent_hash_set;
+pub mod persistent_tree_map;
+pub mod persistent_tree_set;
 
 // Runtime utilities.
 pub mod rt;
@@ -71,3 +73,10 @@ pub mod dynamic_class_loader;
 
 // The main event.
 pub mod compiler;
+
+// Runtime Class object — name + isInstance predicate. Stand-in for
+// `java.lang.Class` as a Clojure value (registered foundational types
+// like `clojure.lang.ISeq`, `String`, etc.). Used at compile time by
+// `analyze_symbol` to resolve class-name symbols, and at runtime by
+// `cljvm_inst_isInstance` to dispatch `instance?` checks.
+pub mod host_class;

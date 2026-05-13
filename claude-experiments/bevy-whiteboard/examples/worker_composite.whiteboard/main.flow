@@ -1,0 +1,50 @@
+# Worker reimplemented from primitives — laid out flat on the canvas
+# so every internal piece is visible.
+#
+#     Caller ──req──▶ Lift ──packet──▶ Filter ─pass─▶ Service ──▶ Reply
+#                       ▲                                           │
+#                       └────────────── resp popping ────────────────┘
+#
+# `Lift` here is doing the boundary role: convert req → packet on
+# forward, and on reverse pop and emit resp to default (which routes
+# back to Caller). This is the same recipe the `compound
+# WorkerComposite` uses internally — just unwrapped so the canvas
+# shows every primitive at top level instead of as one box.
+
+# Boundary adapter: req→packet pushing self; resp pops back to the
+# previous hop on the return_path. Same as the Lower primitive but
+# without the `to out response` (no enclosing compound here).
+node L {
+    rule fwd_req {
+        on req(p)
+        do { emit packet(p) pushing self to default }
+    }
+    rule rev_resp {
+        on resp(x)
+        do { emit resp(x) popping to (head(return_path)) }
+    }
+    rule rev_resp_error {
+        on resp_error(x)
+        do { emit resp_error(x) popping to (head(return_path)) }
+    }
+}
+
+node Caller : Client {
+    period_ns: 300000000
+    color:     0
+}
+
+node F  : Filter  { match: 0 }
+node Sv : Service { service_ns: 50000000, backlog_cap: 5 }
+node R  : Reply   { }
+
+edges {
+    Caller -> L  : 5ms
+    L      -> F  : 1ms
+    F.pass -> Sv : 1ms
+    Sv     -> R  : 1ms
+    # Reverse edge so Reply's `resp popping` can reach L; L's rev_resp
+    # then pops once more and the resp walks back along the Caller -> L
+    # request edge via the engine's reverse-route fallback.
+    R      -> L  : 1ms
+}

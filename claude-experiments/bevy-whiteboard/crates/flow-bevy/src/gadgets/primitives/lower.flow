@@ -1,0 +1,27 @@
+# Service-side variant adapter: a `req(p)` arriving from upstream is
+# emitted downstream as `packet(p) pushing self`, so the rest of the
+# pipeline (packet-only primitives like Filter, Buffer, Service) can
+# process it. On the reverse leg, `resp` / `resp_error` pop Lower off
+# and emit through the enclosing compound's `response` out port —
+# this is what bridges the inner reply back to the external caller
+# without requiring the engine to walk compound boundaries during
+# `head(return_path)` resolution.
+#
+# Convention used by Lower: the enclosing composite MUST declare
+# `out { response: Lower }` so that `to out response` resolves.
+# All service-shaped composites (Worker, Cache, Saga, CircuitBreaker,
+# TPC) follow this convention.
+node Lower {
+    rule fwd_req {
+        on req(p)
+        do { emit packet(p) pushing self to default }
+    }
+    rule rev_resp {
+        on resp(x)
+        do { emit resp(x) popping to out response }
+    }
+    rule rev_resp_error {
+        on resp_error(x)
+        do { emit resp_error(x) popping to out response }
+    }
+}

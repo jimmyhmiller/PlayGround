@@ -1,0 +1,56 @@
+# CircuitBreaker reimplemented from primitives:
+#
+#                                    ┌─pass───▶ Stamp ──▶ Egress(downstream)
+#  req → Lower ─packet─▶ Switch ─────┤
+#                          ▲          └─divert──▶ ErrReply (resp_error popping)
+#                          │ signal(0/1)
+#                                       (backend resp ──▶ Stamp.rev ──▶ Lower ──▶ response port)
+#                          ▼
+#              counts-of-failures ──▶ Window ──▶ Threshold
+#  fail_tap (from backend resp_error)
+#
+# The "headline" assembly already validated in
+# `tests/primitives_compose.rs::circuit_breaker_from_primitives_*`:
+# Switch + Window + Threshold reproduce the trip-on-N-failures
+# behaviour. This composite wraps it in the standard
+# `Lower → … → response` request/reply skeleton and routes the
+# diverted path to a resp_error reply.
+compound CircuitBreakerComposite(
+    window_ns: Int = 1000000000,
+    threshold: Int = 5,
+    color:     Int = 0,
+) {
+    in  { request: L; fail_tap: W }
+    out {
+        response:   L
+        downstream: DE
+    }
+
+    node L  : Lower     { }
+    node SW : Switch    { passing: 1 }
+    node S  : Stamp     { }
+    node DE : Egress    { }  # downstream egress uses `output`; remap below
+    node W  : Window    { window_ns: window_ns }
+    node Th : Threshold { limit: threshold }
+    node ErrReply {
+        # Diverted reqs return resp_error popping back through Lower.
+        rule on_packet {
+            on packet(_)
+            do { emit resp_error(nil) popping to (head(return_path)) }
+        }
+    }
+
+    edges {
+        L         -> SW : 1
+        SW.pass   -> S  : 1
+        S         -> DE : 1   # forward to backing service
+        DE        -> S  : 1   # backend resp pops back via Stamp
+        S         -> L  : 1   # Lower's rev_resp emits via response port
+
+        SW.divert -> ErrReply : 1
+        ErrReply  -> L  : 1   # resp_error pops back to Lower → response port
+
+        W         -> Th : 1
+        Th        -> SW : 1   # signal flips the switch
+    }
+}

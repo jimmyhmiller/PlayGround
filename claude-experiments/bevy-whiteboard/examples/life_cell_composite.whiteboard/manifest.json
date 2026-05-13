@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "canvas": {
+    "name": "Life cell (one cell, primitives exposed)",
+    "description": "A single Game-of-Life cell rebuilt from primitives: Tick periodically kicks CellState; on each kick CellState emits `report(alive)` out to ReportFan (which would fan to 8 neighbors); Aggregator collects 8 inbound reports and emits `total(sum)` back to CellState, which applies the Conway B3/S23 rule and updates `alive`."
+  }
+}

@@ -1,0 +1,41 @@
+# Saga reimplemented from primitives.
+#
+# A SagaStep is Lower + Coin + Egress + a tiny inline "fail" node.
+# The Coin's `heads` outcome fires the fail path (since
+# `Coin.heads` triggers when `Bernoulli(p)` is true, and we want
+# `fail_prob` to feed that probability directly).
+#
+# Failure walks back as `resp_error popping` — the same shape as
+# any other failed request — which Lower routes out via the
+# enclosing compound's `response` port.
+#
+# A multi-step saga is built by chaining N SagaStepComposites:
+# each step's `forward` is wired to the next step's `request`,
+# and each step's `response` is wired back to the prior step's
+# `forward` reverse direction (or to the saga coordinator at the
+# entry).
+compound SagaStepComposite(fail_prob: Float = 0.0) {
+    in  { request: L }
+    out {
+        forward:  FE
+        response: L
+    }
+
+    node L  : Lower  { }
+    node C  : Coin   { p: fail_prob }
+    node FE : Egress { }
+    node Fail {
+        rule on_packet {
+            on packet(_)
+            do { emit resp_error(nil) popping to (head(return_path)) }
+        }
+    }
+
+    edges {
+        L       -> C    : 1
+        C.heads -> Fail : 1
+        C.tails -> FE   : 1
+        Fail    -> L    : 1
+        FE      -> L    : 1
+    }
+}

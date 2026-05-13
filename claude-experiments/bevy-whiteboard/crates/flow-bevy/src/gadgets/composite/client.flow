@@ -1,0 +1,60 @@
+# Client reimplemented from primitives:
+#
+#     Tick(period_ns) → Endpoint   ─req(color) pushing self──▶ E (Egress)
+#                       ▲ resp(_), resp_error(_) (via reply port)
+#
+# - `Tick` ticks at `period_ns`.
+# - `Endpoint` turns each tick into a `req(color) pushing self` and
+#   counts the resp/resp_error responses that come back.
+# - `Egress` (`E`) bridges Endpoint's emit to the compound's `request`
+#   out port. The compound's `reply` in port maps to Endpoint directly,
+#   so responses delivered to `ClientComposite.reply` land on Endpoint
+#   without extra glue.
+#
+# Why one composite (Endpoint) instead of pure primitives? `pushing
+# self` identifies the originator, and the same node must receive
+# responses back through return_path. Endpoint is the irreducible
+# "who I am" node for the client; everything else is composed.
+compound ClientComposite(
+    period_ns: Int = 500000000,
+    color:     Int = 0,
+) {
+    in  { reply:  Endpoint }
+    out { output: E }
+
+    node T : Tick { period_ns: period_ns }
+    node Endpoint {
+        slots {
+            color:     Int = color
+            emitted:   Int = 0
+            completed: Int = 0
+            failed:    Int = 0
+        }
+        probes {
+            emitted:   "{emitted}"
+            completed: "{completed}"
+            failed:    "{failed}"
+        }
+        rule on_kick {
+            on packet(_)
+            do {
+                emitted := emitted + 1
+                emit req(color) pushing self to default
+            }
+        }
+        rule on_resp {
+            on resp(_)
+            do { completed := completed + 1 }
+        }
+        rule on_resp_error {
+            on resp_error(_)
+            do { failed := failed + 1 }
+        }
+    }
+    node E : Egress { }
+
+    edges {
+        T        -> Endpoint : 1
+        Endpoint -> E        : 1
+    }
+}

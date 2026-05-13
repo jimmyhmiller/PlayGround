@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "canvas": {
+    "name": "Cache (from primitives)",
+    "description": "Cache hit/miss split rebuilt from primitives: Coin does the Bernoulli draw, heads → Delay → Reply (hit replies after hit_latency_ns), tails → Stamp → backend (miss forwards). Backend reply pops through Stamp back to L and out to caller."
+  }
+}

@@ -258,91 +258,63 @@ impl<'a> Reader<'a> {
 
     /// `^:keyword <form>` → `<form>` with `{:keyword true}` metadata.
     /// `^{:k v ...} <form>` → `<form>` with that map as metadata.
-    /// `^Tag <form>`  → `<form>` with `{:tag Tag}` metadata.
+    /// `^Tag <form>`        → `<form>` with `{:tag Tag}` metadata.
+    /// `^:kw <form>`        → `<form>` with `{:kw true}` metadata.
+    /// `^"docstring" <form>`→ `<form>` with `{:tag <string>}` metadata.
     ///
-    /// Narrow port: until we have IPersistentMap to carry full metadata,
-    /// the only meta we *act on* is `:macro` on a Symbol (toggles
-    /// `Symbol::is_macro_meta`). Other metadata is parsed and discarded.
-    /// The reader still walks past the meta correctly.
+    /// The metadata is attached as `Object::WithMeta(form, map)`. The
+    /// `:macro` key on a def-name shorthand (`^:macro foo` /
+    /// `^{:macro true} foo`) is no longer side-channeled through
+    /// `Symbol::is_macro_meta` — `parse_def_form` reads it off the
+    /// wrapper directly.
     fn read_meta(&mut self) -> Result<Object, ReaderError> {
         self.pos += 1; // consume '^'
         self.skip_ws_and_comments();
-        // Read the metadata form. It's :keyword, {map}, Tag-symbol, or
-        // "string" — but we only special-case :keyword (extract its name).
-        let macro_meta = match self.peek_byte() {
+        let meta_map: Arc<PersistentHashMap> = match self.peek_byte() {
             Some(b':') => {
-                // :foo → meta is `{:foo true}`. We extract just the name to
-                // detect `:macro`.
-                self.pos += 1;
-                let start = self.pos;
-                while let Some(c) = self.peek_byte() {
-                    if is_terminating_macro(c) {
-                        break;
-                    }
-                    self.pos += 1;
-                }
-                let name = &self.src[start..self.pos];
-                if name.is_empty() {
-                    return Err(self.err("Invalid token: :"));
-                }
-                name == "macro"
+                // ^:kw  →  {:kw true}.
+                let kw_obj = self.read_form()?;
+                let key = match kw_obj {
+                    Object::Keyword(k) => Object::Keyword(k),
+                    other => return Err(self.err(&format!(
+                        "Metadata `:` reader expects a keyword, got {other:?}"
+                    ))),
+                };
+                PersistentHashMap::create_flat(vec![key, Object::Bool(true)])
+            }
+            Some(b'"') => {
+                // ^"docstring" form — Clojure treats string metadata as
+                // a `:tag` shorthand for the named class. We use it as
+                // a `:tag` carrying the literal String, mirroring Java's
+                // `LispReader.MetaReader.invoke`.
+                let s = self.read_form()?;
+                let tag_kw = Object::Keyword(Keyword::intern(Symbol::intern("tag")));
+                PersistentHashMap::create_flat(vec![tag_kw, s])
             }
             Some(b'{') => {
-                // `^{:k v :k2 v2 ...} form`. Real Clojure attaches the map
-                // as IPersistentMap metadata. We don't have maps yet, so
-                // we parse the entries and look for `:macro true` (the
-                // only metadata key we currently *act on*). Everything
-                // else is recognized but ignored — preserves reader
-                // progress without silently dropping meta the user might
-                // actually depend on for a feature we haven't ported.
-                self.pos += 1; // consume '{'
-                let mut sees_macro_true = false;
-                loop {
-                    self.skip_ws_and_comments();
-                    match self.peek_byte() {
-                        Some(b'}') => {
-                            self.pos += 1;
-                            break;
-                        }
-                        None => return Err(self.err("EOF inside ^{...} map")),
-                        Some(_) => {}
-                    }
-                    let key = self.read_form()?;
-                    self.skip_ws_and_comments();
-                    if matches!(self.peek_byte(), Some(b'}') | None) {
-                        return Err(self.err(
-                            "Map literal must have an even number of forms",
-                        ));
-                    }
-                    let val = self.read_form()?;
-                    if let Object::Keyword(k) = &key {
-                        if k.get_namespace().is_none() && k.get_name() == "macro" {
-                            if let Object::Bool(true) = val {
-                                sees_macro_true = true;
-                            }
-                        }
-                    }
+                // ^{:k v :k2 v2 ...} — read as a map literal (delegating
+                // to read_form so the existing `{...}` handler builds it).
+                let map_obj = self.read_form()?;
+                match map_obj {
+                    Object::Map(m) => m,
+                    other => return Err(self.err(&format!(
+                        "Metadata `^{{...}}` did not read as a map, got {other:?}"
+                    ))),
                 }
-                sees_macro_true
             }
             Some(_) => {
-                // Probably `^Tag form` — read the tag form, ignore. (Not
-                // implemented as actionable meta; preserves reader progress.)
-                let _ignored = self.read_form()?;
-                false
+                // ^Tag form — `Tag` is a Symbol or class name. Build
+                // `{:tag <Tag-form>}`.
+                let tag = self.read_form()?;
+                let tag_kw = Object::Keyword(Keyword::intern(Symbol::intern("tag")));
+                PersistentHashMap::create_flat(vec![tag_kw, tag])
             }
             None => return Err(self.err("EOF after `^`")),
         };
 
-        // Now read the target form and apply the meta (if recognized).
         self.skip_ws_and_comments();
         let form = self.read_form()?;
-        if macro_meta {
-            if let Object::Symbol(s) = &form {
-                s.set_macro_meta();
-            }
-        }
-        Ok(form)
+        Ok(Object::with_meta_map(form, meta_map))
     }
 
     fn read_quote(&mut self) -> Result<Object, ReaderError> {
@@ -738,43 +710,49 @@ mod tests {
     }
 
     #[test]
-    fn reader_skips_doc_meta_via_map_form() {
-        // `^{:doc "..."} sym` — map metadata parsed and discarded; sym
-        // still reads cleanly.
-        match rd(r#"^{:doc "hello"} foo"#) {
-            Object::Symbol(s) => {
-                assert_eq!(s.get_name(), "foo");
-                assert!(!s.has_macro_meta(), "no :macro in this map");
-            }
-            other => panic!("expected Symbol, got {other:?}"),
+    fn reader_carries_doc_meta_via_map_form() {
+        // `^{:doc "..."} sym` — map metadata is real; the symbol is
+        // wrapped in `Object::WithMeta(Symbol, {:doc "hello"})`.
+        let form = rd(r#"^{:doc "hello"} foo"#);
+        let meta = form.meta_of().expect("expected metadata wrapper");
+        let doc_kw = Object::Keyword(Keyword::intern(Symbol::intern("doc")));
+        match meta.val_at(&doc_kw) {
+            Object::String(s) => assert_eq!(&*s, "hello"),
+            other => panic!("expected :doc \"hello\", got {other:?}"),
+        }
+        match form.peel_meta_ref() {
+            Object::Symbol(s) => assert_eq!(s.get_name(), "foo"),
+            other => panic!("expected wrapped Symbol, got {other:?}"),
         }
     }
 
     #[test]
     fn reader_picks_up_macro_true_inside_map_meta() {
-        match rd(r#"^{:macro true :doc "x"} bar"#) {
-            Object::Symbol(s) => {
-                assert_eq!(s.get_name(), "bar");
-                assert!(s.has_macro_meta(), "expected :macro true detected");
-            }
-            other => panic!("expected Symbol, got {other:?}"),
+        let form = rd(r#"^{:macro true :doc "x"} bar"#);
+        let meta = form.meta_of().expect("expected metadata wrapper");
+        let macro_kw = Object::Keyword(Keyword::intern(Symbol::intern("macro")));
+        assert!(matches!(meta.val_at(&macro_kw), Object::Bool(true)));
+        match form.peel_meta_ref() {
+            Object::Symbol(s) => assert_eq!(s.get_name(), "bar"),
+            other => panic!("expected wrapped Symbol, got {other:?}"),
         }
     }
 
     #[test]
     fn reader_handles_macro_meta() {
-        // `^:macro foo` → Symbol `foo` with is_macro_meta = true.
-        match rd("^:macro foo") {
-            Object::Symbol(s) => {
-                assert_eq!(s.get_name(), "foo");
-                assert!(s.has_macro_meta(), "expected is_macro_meta=true");
-            }
-            other => panic!("expected Symbol, got {other:?}"),
+        // `^:macro foo` → WithMeta(Symbol foo, {:macro true}).
+        let form = rd("^:macro foo");
+        let meta = form.meta_of().expect("expected metadata wrapper");
+        let macro_kw = Object::Keyword(Keyword::intern(Symbol::intern("macro")));
+        assert!(matches!(meta.val_at(&macro_kw), Object::Bool(true)));
+        match form.peel_meta_ref() {
+            Object::Symbol(s) => assert_eq!(s.get_name(), "foo"),
+            other => panic!("expected wrapped Symbol, got {other:?}"),
         }
-        // Bare `foo` (no meta).
+        // Bare `foo` — no wrapper.
         match rd("foo") {
-            Object::Symbol(s) => assert!(!s.has_macro_meta()),
-            other => panic!("expected Symbol, got {other:?}"),
+            Object::Symbol(s) => assert_eq!(s.get_name(), "foo"),
+            other => panic!("expected bare Symbol, got {other:?}"),
         }
     }
 

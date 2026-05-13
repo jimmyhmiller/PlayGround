@@ -1,0 +1,26 @@
+# Class-only declarations for the single-cell composite view.
+node CellState {
+    slots {
+        alive: Int = 1
+    }
+    probes { alive: "{alive}" }
+    rule on_tick {
+        on packet(_)
+        do { emit report(alive) to default }
+    }
+    rule on_total {
+        on total(sum)
+        do {
+            alive := if (alive == 1 && (sum == 2 || sum == 3))
+                      || (alive == 0 && sum == 3)
+                     then 1 else 0
+        }
+    }
+}
+
+node ReportFan {
+    rule fan {
+        on report(v)
+        do { emit_each report(v) to out_neighbors() }
+    }
+}

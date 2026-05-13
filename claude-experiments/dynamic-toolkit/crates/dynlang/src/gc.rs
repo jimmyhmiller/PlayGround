@@ -241,6 +241,17 @@ impl DynGcRuntime {
     /// allocation).
     pub unsafe fn register_extra_root_source(&self, source: *const dyn RootSource) {
         self.extra_root_sources.lock().unwrap().push(source);
+        // Also mirror to the underlying Heap so alloc-triggered GC
+        // (mutator_triggered_gc / mutator_triggered_minor_gc) — which
+        // doesn't take per-call extras — still scans this source.
+        // Without this, a JIT literal pool registered as an extra
+        // here would silently lose its slots during a nursery-fill GC
+        // that fires while the host is between `run_jit` calls.
+        match &self.backend {
+            Backend::Generational(heap) => unsafe {
+                heap.register_permanent_extra(source)
+            },
+        }
     }
 
     /// Push a temporary `RootSource` and return a guard that pops it on

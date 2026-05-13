@@ -1,0 +1,20 @@
+# Compound-edge bridge: relays every variant onto the enclosing
+# compound's `out { output: Egress }` port. Inner pipelines that end
+# in packet-only primitives (Counter, Buffer, Service…) can't emit
+# `to out` themselves — they emit `to default`, which only sees
+# direct outbound edges. Wiring `… -> Egress` then declaring the
+# compound's `out { output: Egress }` lets the pipeline cross the
+# compound boundary without modifying any primitive.
+#
+# Convention: every composite that needs an output port uses
+# `out { output: Egress }` and routes its final stage into Egress.
+# (`out` is a reserved keyword so we can't name the port `out`.)
+node Egress {
+    rule fwd_packet      { on packet(p)      do { emit packet(p)      to out output } }
+    rule fwd_req         { on req(p)         do { emit req(p)         to out output } }
+    rule fwd_resp        { on resp(p)        do { emit resp(p)        to out output } }
+    rule fwd_resp_error  { on resp_error(p)  do { emit resp_error(p)  to out output } }
+    rule fwd_signal      { on signal(p)      do { emit signal(p)      to out output } }
+    rule fwd_count       { on count(p)       do { emit count(p)       to out output } }
+    rule fwd_total       { on total(p)       do { emit total(p)       to out output } }
+}

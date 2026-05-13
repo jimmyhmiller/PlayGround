@@ -1,0 +1,20 @@
+# A single Life cell, primitives exposed.
+#
+#   T (Tick) ──packet──▶ S (CellState) ──report(alive)──▶ BE (ReportFan)
+#                          ▲                                 │
+#                          │ total(sum)                      │ (to 8 neighbors,
+#                          │                                 │  not wired here)
+#                          │                                 ▼
+#                          └─────── A (Aggregator n=8) ◀──── (8 neighbor reports
+#                                                              would arrive here)
+
+node T  : Tick       { period_ns: 200000000 }
+node S  : CellState  { alive: 1 }
+node BE : ReportFan  { }
+node A  : Aggregator { n: 8 }
+
+edges {
+    T -> S  : 1ms
+    S -> BE : 1ms
+    A -> S  : 1ms
+}

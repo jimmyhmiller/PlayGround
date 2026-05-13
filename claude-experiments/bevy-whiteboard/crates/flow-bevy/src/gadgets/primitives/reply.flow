@@ -1,0 +1,11 @@
+# Terminal reply: an arriving `packet(_)` becomes `resp(nil) popping` —
+# the one-hop reverse-walk that closes a request/reply round-trip.
+# Pair with Lift at the entry point of a service pipeline so the
+# `pushing self` from Lift on forward gets matched by `popping` from
+# Reply on reverse.
+node Reply {
+    rule on_packet {
+        on packet(_)
+        do { emit resp(nil) popping to (head(return_path)) }
+    }
+}

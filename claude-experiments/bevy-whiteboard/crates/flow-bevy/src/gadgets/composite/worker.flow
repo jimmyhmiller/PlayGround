@@ -1,0 +1,57 @@
+# Worker reimplemented from primitives:
+#
+#  request ─req(c) pushing─▶ Lower → Filter ─pass─▶ Service → Reply
+#                              ▲                                │
+#                              └──resp(nil) popping back─────────┘
+#                                                    │
+#  response ◀──── (resp/resp_error via reverse hop) ──┘
+#
+# - `Lower` converts the inbound `req(c)` to `packet(c) pushing self`
+#   so packet-only primitives (Filter, Service, Reply) can process it,
+#   and relays the eventual resp back one more pop hop.
+# - `Filter` rejects wrong-colour traffic out the `reject` port (wired
+#   externally via `WorkerComposite.reject`).
+# - `Service` holds the packet for `service_ns` with a bounded backlog;
+#   overflow exits via `WorkerComposite.overflow`.
+# - `Reply` terminates the pipeline by converting the serviced packet
+#   into `resp(nil) popping`, which walks back to Lower (since Lower
+#   pushed itself), and Lower's reverse rule walks it one more hop
+#   back to the original caller.
+#
+# What this composite does NOT model (vs. the monolithic Worker):
+# - up==0 crash semantics — wire a Switch upstream of Lower with its
+#   signal driven externally, and route Switch.divert to a Reply on
+#   the resp_error variant.
+# - the secondary `packet`/`done` packet-protocol interface — packet
+#   sources can skip Lower and wire straight into the Filter.
+compound WorkerComposite(
+    service_ns:  Int = 50000000,
+    color:       Int = 0,
+    backlog_cap: Int = 5,
+) {
+    in  { request:  L }
+    out {
+        response: L
+        reject:   F
+        overflow: Sv
+    }
+
+    node L  : Lower { }
+    node F  : Filter { match: color }
+    node Sv : Service { service_ns: service_ns, backlog_cap: backlog_cap }
+    node R  : Reply { }
+
+    edges {
+        L      -> F  : 1
+        F.pass -> Sv : 1
+        Sv     -> R  : 1
+        # Reverse edge so Reply's `resp popping` can reach Lower; the
+        # engine resolves `popping to (head(return_path))` to Lower
+        # (which pushed itself onto RP during the forward leg), and
+        # this direct edge is what carries the packet back. Without it,
+        # the resp would silently drop — neither a forward outbound
+        # from R to L nor a reverse-route fallback applies inside the
+        # compound.
+        R      -> L  : 1
+    }
+}

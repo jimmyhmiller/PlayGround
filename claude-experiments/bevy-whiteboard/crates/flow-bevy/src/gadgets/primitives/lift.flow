@@ -1,0 +1,23 @@
+# Caller-side variant adapter: a `packet(p)` arriving from upstream is
+# emitted downstream as `req(p) pushing self`, so the rest of the
+# pipeline (whoever consumes the req) can reply via return_path.
+# On the reverse leg, `resp` / `resp_error` pop Lift off and relay
+# one more hop, walking the response back toward whoever sent the
+# original packet.
+#
+# Use this at the *client* end of a request/reply pipeline. The
+# service-end mirror is `Lower` (req → packet).
+node Lift {
+    rule fwd_packet {
+        on packet(p)
+        do { emit req(p) pushing self to default }
+    }
+    rule rev_resp {
+        on resp(x)
+        do { emit resp(x) popping to (head(return_path)) }
+    }
+    rule rev_resp_error {
+        on resp_error(x)
+        do { emit resp_error(x) popping to (head(return_path)) }
+    }
+}

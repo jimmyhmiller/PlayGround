@@ -86,27 +86,81 @@ pub enum Object {
     /// A value whose Clojure type isn't ported yet. Carries the original
     /// Java class name so panic messages are actionable.
     Unported { java_class: &'static str },
+
+    /// A value with reader-attached metadata. Wraps any `Object` that
+    /// would otherwise satisfy `IMeta`/`IObj` (Symbols, collections,
+    /// fns). Equality, structural traversal, and type predicates all
+    /// peek through this wrapper transparently — only code that
+    /// explicitly asks for the metadata (`meta_of`) sees it.
+    ///
+    /// The inner is `Box`'d to keep the enum's discriminant small;
+    /// nested `WithMeta` is collapsed when constructed via
+    /// `with_meta` so the wrapper is always exactly one layer deep.
+    WithMeta(Box<Object>, Arc<PersistentHashMap>),
 }
 
 impl Object {
     /// Returns `true` if this is `Object::Nil` (Java `null`).
     #[inline]
-    pub fn is_nil(&self) -> bool { matches!(self, Object::Nil) }
+    pub fn is_nil(&self) -> bool { matches!(self.peel_meta_ref(), Object::Nil) }
 
     /// Java-style `instanceof Symbol`.
     #[inline]
     pub fn as_symbol(&self) -> Option<&Arc<Symbol>> {
-        if let Object::Symbol(s) = self { Some(s) } else { None }
+        if let Object::Symbol(s) = self.peel_meta_ref() { Some(s) } else { None }
     }
 
     #[inline]
     pub fn as_keyword(&self) -> Option<&Arc<Keyword>> {
-        if let Object::Keyword(k) = self { Some(k) } else { None }
+        if let Object::Keyword(k) = self.peel_meta_ref() { Some(k) } else { None }
     }
 
     #[inline]
     pub fn as_var(&self) -> Option<&Arc<Var>> {
-        if let Object::Var(v) = self { Some(v) } else { None }
+        if let Object::Var(v) = self.peel_meta_ref() { Some(v) } else { None }
+    }
+
+    /// View through any `WithMeta` wrapper to the underlying value.
+    /// Most type-dispatch code wants this — equality, `is_nil`, type
+    /// predicates all ignore metadata in Clojure semantics.
+    #[inline]
+    pub fn peel_meta_ref(&self) -> &Object {
+        match self {
+            Object::WithMeta(inner, _) => inner.peel_meta_ref(),
+            other => other,
+        }
+    }
+
+    /// Owned variant of `peel_meta_ref`: clone out the inner value,
+    /// dropping any metadata. Use when you need an owned `Object` for
+    /// dispatch and the metadata is irrelevant.
+    #[inline]
+    pub fn peel_meta(self) -> Object {
+        match self {
+            Object::WithMeta(inner, _) => (*inner).peel_meta(),
+            other => other,
+        }
+    }
+
+    /// Return the metadata map attached to this value, or `None` if
+    /// there is no metadata. Walks through nested `WithMeta` wrappers
+    /// (which `with_meta` normally collapses).
+    #[inline]
+    pub fn meta_of(&self) -> Option<&Arc<PersistentHashMap>> {
+        if let Object::WithMeta(_, m) = self {
+            Some(m)
+        } else {
+            None
+        }
+    }
+
+    /// Attach `meta` to `inner`, collapsing nested `WithMeta` wrappers
+    /// so the resulting `Object` is at most one layer deep. Mirrors
+    /// Java's `IObj.withMeta`: identity-comparable to the receiver only
+    /// if the receiver already carried the same metadata.
+    pub fn with_meta_map(inner: Object, meta: Arc<PersistentHashMap>) -> Object {
+        let bare = inner.peel_meta();
+        Object::WithMeta(Box::new(bare), meta)
     }
 
     /// Wrap any host-side state in `Object::Host`.
@@ -156,6 +210,10 @@ impl Object {
 /// * `Var`, `Namespace`, `Host`, `Unported`: identity (`Arc::ptr_eq` for the
 ///   first two; otherwise `false`).
 pub fn object_equiv(a: &Object, b: &Object) -> bool {
+    // Clojure equality ignores metadata: `(= ^{:m 1} '(a) '(a))` ⇒ true.
+    // Peel any `WithMeta` wrapper before structural compare.
+    let a = a.peel_meta_ref();
+    let b = b.peel_meta_ref();
     use Object::*;
     match (a, b) {
         (Nil, Nil) => true,
@@ -234,6 +292,12 @@ impl std::fmt::Debug for Object {
             Object::Host(_) => write!(f, "#<host>"),
             Object::Unported { java_class } => {
                 write!(f, "#<unported {java_class}>")
+            }
+            Object::WithMeta(inner, meta) => {
+                // Mirror Java's IObj print contract: the metadata is
+                // typically invisible to `pr`, but for Debug we want it
+                // visible so test failures show what got attached.
+                write!(f, "^{:?} {:?}", meta, inner)
             }
         }
     }

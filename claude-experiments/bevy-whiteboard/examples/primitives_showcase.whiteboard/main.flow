@@ -1,0 +1,32 @@
+# Every primitive, instantiated once.
+#
+# Row 1 — sources / counting:
+#   Tick, Counter, Aggregator, Window
+# Row 2 — routing:
+#   Filter, Switch, Threshold, FanOut, Coin
+# Row 3 — time / buffer:
+#   Delay, Buffer, Service
+# Row 4 — variant adapters / boundaries:
+#   Stamp, Unstamp, Lift, Lower, Reply, Egress
+
+node tick       : Tick       { period_ns: 500000000 }
+node counter    : Counter    { }
+node aggregator : Aggregator { n: 8 }
+node window     : Window     { window_ns: 1000000000 }
+
+node filter     : Filter     { match: 0 }
+node switch     : Switch     { passing: 1 }
+node threshold  : Threshold  { limit: 5 }
+node fanout     : FanOut     { }
+node coin       : Coin       { p: 0.5 }
+
+node delay      : Delay      { ns: 100000000 }
+node buffer     : Buffer     { cap: 16 }
+node service    : Service    { service_ns: 50000000, backlog_cap: 5 }
+
+node stamp      : Stamp      { }
+node unstamp    : Unstamp    { }
+node lift       : Lift       { }
+node lower      : Lower      { }
+node reply      : Reply      { }
+node egress     : Egress     { }

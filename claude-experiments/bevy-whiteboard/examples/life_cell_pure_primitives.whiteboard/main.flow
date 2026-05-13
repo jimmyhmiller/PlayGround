@@ -1,0 +1,48 @@
+# A single Game-of-Life cell built ONLY from primitives. No CellState,
+# no ReportFan — every node is stock.
+#
+#                          ┌──.pass───▶ C1 (ConstantPacket=1) ──┐
+#  T ──packet(nil)──▶ SW ──┤                                    ├──▶ B (FanOut)
+#  Tick               (passing = alive)                         │      to 8 neighbours
+#                          └──.divert─▶ C0 (ConstantPacket=0) ──┘
+#
+#  (8 neighbours' broadcasts) ──packet(0|1)──▶ A (Aggregator n=8)
+#                                                  │ packet(sum)
+#                                                  ▼
+#                                          F3 (Filter match=3)
+#                                          │.pass (sum==3)  ──▶ ToAlv (ConstSig=0) ─signal(0)─▶ SW
+#                                          │
+#                                          │.reject ──▶ F2 (Filter match=2)
+#                                                       │.pass   (sum==2) ──▶ (silent → stay)
+#                                                       │.reject (sum∈{0,1,4..8}) ──▶ ToDed (ConstSig=1) ─signal(1)─▶ SW
+#
+# The B3/S23 rule emerges:
+#   sum==3        → ToAlv → signal(0) → SW.passing = 1 (B3 birth)
+#   sum==2        → silent  (stay alive if alive, stay dead if dead — S2)
+#   sum otherwise → ToDed → signal(1) → SW.passing = 0 (D)
+
+node T     : Tick           { period_ns: 200000000 }
+node SW    : Switch         { passing: 1 }
+node C1    : ConstantPacket { value: 1 }
+node C0    : ConstantPacket { value: 0 }
+node B     : FanOut         { }
+node A     : Aggregator     { n: 8 }
+node F3    : Filter         { match: 3 }
+node F2    : Filter         { match: 2 }
+node ToAlv : ConstantSignal { value: 0 }
+node ToDed : ConstantSignal { value: 1 }
+
+edges {
+    T -> SW : 1ms
+    SW.pass   -> C1 : 1ms
+    SW.divert -> C0 : 1ms
+    C1 -> B : 1ms
+    C0 -> B : 1ms
+
+    A -> F3 : 1ms
+    F3.pass   -> ToAlv : 1ms
+    F3.reject -> F2    : 1ms
+    F2.reject -> ToDed : 1ms
+    ToAlv -> SW : 1ms
+    ToDed -> SW : 1ms
+}

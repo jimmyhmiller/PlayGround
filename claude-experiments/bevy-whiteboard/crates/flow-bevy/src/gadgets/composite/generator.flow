@@ -1,0 +1,32 @@
+# Generator reimplemented from primitives:
+#
+#     Tick(period_ns) → Paint → Egress → (out: output)
+#
+# `Tick` ticks. `Paint` rewrites the payload to the compound's
+# `color` parameter. `Egress` bridges the inner pipeline to the
+# compound's `output` port (without it, an inner-to-outside emit
+# would have to be authored as `to out output` inside Paint —
+# which would pollute Paint with knowledge of the compound port
+# name; making Egress the *only* node that knows about `to out`
+# keeps the primitives port-agnostic).
+compound GeneratorComposite(
+    period_ns: Int = 500000000,
+    color:     Int = 0,
+) {
+    out { output: E }
+
+    node T : Tick { period_ns: period_ns }
+    node Paint {
+        slots { color: Int = color }
+        rule recolor {
+            on packet(_)
+            do { emit packet(color) to default }
+        }
+    }
+    node E : Egress { }
+
+    edges {
+        T     -> Paint : 1
+        Paint -> E     : 1
+    }
+}

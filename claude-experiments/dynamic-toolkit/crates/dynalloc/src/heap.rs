@@ -54,6 +54,15 @@ pub struct Heap {
     /// Global roots (interned symbols, module-level constants, etc.)
     pub globals: AtomicRootSet,
 
+    /// Permanent extra `RootSource`s registered by the embedder. Scanned
+    /// during EVERY collection — including mutator-triggered (alloc-driven)
+    /// GC paths that don't take per-call extras. Use this for root sets
+    /// whose lifetime equals the heap's, like a JIT module's literal pool
+    /// or interpreter constant tables. Stored as raw pointers; the embedder
+    /// is responsible for keeping each pointee alive for the heap's
+    /// lifetime.
+    permanent_extras: Mutex<Vec<*const dyn RootSource>>,
+
     /// Flag polled by mutator threads: "should I enter safepoint?"
     gc_requested: AtomicBool,
 
@@ -110,6 +119,7 @@ impl Heap {
             from_idx: AtomicUsize::new(0),
             threads: Mutex::new(Vec::new()),
             globals: AtomicRootSet::new(),
+            permanent_extras: Mutex::new(Vec::new()),
             gc_requested: AtomicBool::new(false),
             gc_lock: Mutex::new(()),
             type_id_offset: H::TYPE_ID_OFFSET,
@@ -144,6 +154,7 @@ impl Heap {
             from_idx: AtomicUsize::new(0),
             threads: Mutex::new(Vec::new()),
             globals: AtomicRootSet::new(),
+            permanent_extras: Mutex::new(Vec::new()),
             gc_requested: AtomicBool::new(false),
             gc_lock: Mutex::new(()),
             type_id_offset: H::TYPE_ID_OFFSET,
@@ -357,6 +368,26 @@ impl Heap {
         unsafe { crate::alloc::alloc_obj::<H>(self.from_space(), info, varlen_len) }
     }
 
+    /// Register a `RootSource` that will be scanned during EVERY collection
+    /// — including the alloc-triggered (mutator-triggered) GC paths that
+    /// don't take per-call extras. The pointer must remain valid for the
+    /// heap's lifetime.
+    ///
+    /// This is the fix for a class of dangling-root bugs where embedders
+    /// (e.g. JIT modules with `LiteralPool` roots) registered an
+    /// extras source via the wrapping runtime — but mutator-triggered
+    /// GC inside `alloc_obj` ignored those wrapper-level extras and
+    /// collected the embedder's roots as garbage. Use `permanent_extras`
+    /// for any RootSource whose lifetime equals the heap's.
+    ///
+    /// # Safety
+    /// `source` must outlive the `Heap`. The heap stores it as a raw
+    /// pointer; calling code is responsible for keeping the pointee alive
+    /// (typically by holding it behind a `Box` or owned field).
+    pub unsafe fn register_permanent_extra(&self, source: *const dyn RootSource) {
+        self.permanent_extras.lock().unwrap().push(source);
+    }
+
     // ─── Generational helpers ────────────────────────────────────
 
     /// Check if this heap has a nursery (generational mode).
@@ -533,6 +564,16 @@ impl Heap {
                 unsafe { self.process_slot::<P>(slot) };
             });
         }
+
+        // Permanent extras (heap-lifetime registrations).
+        let perm = self.permanent_extras.lock().unwrap();
+        for &ptr in perm.iter() {
+            let src: &dyn RootSource = unsafe { &*ptr };
+            src.scan_roots(&mut |slot| {
+                unsafe { self.process_slot::<P>(slot) };
+            });
+        }
+        drop(perm);
 
         // Nursery objects as roots: during major GC, nursery objects may
         // hold pointers to tenured from-space objects that need forwarding.
@@ -735,6 +776,18 @@ impl Heap {
                 unsafe { self.process_slot::<P>(slot) };
             });
         }
+
+        // Permanent extras (registered once for the heap's lifetime).
+        // Without this, alloc-triggered GC misses embedder root sources
+        // like a JIT module's literal pool — see `register_permanent_extra`.
+        let perm = self.permanent_extras.lock().unwrap();
+        for &ptr in perm.iter() {
+            let src: &dyn RootSource = unsafe { &*ptr };
+            src.scan_roots(&mut |slot| {
+                unsafe { self.process_slot::<P>(slot) };
+            });
+        }
+        drop(perm);
 
         // Nursery objects as roots during major GC
         if let Some(ns) = &self.nursery_state {
@@ -1518,6 +1571,18 @@ impl Heap {
                 });
             }
         }
+
+        // Permanent extras: minor GC promotes nursery survivors that are
+        // referenced from these roots too. Without this, JIT literal pool
+        // slots holding nursery pointers would dangle after promotion.
+        let perm = self.permanent_extras.lock().unwrap();
+        for &ptr in perm.iter() {
+            let src: &dyn RootSource = unsafe { &*ptr };
+            src.scan_roots(&mut |slot| {
+                unsafe { self.promote_slot::<P>(slot) };
+            });
+        }
+        drop(perm);
 
         // Phase 2: Scan dirty cards in tenured from-space
         let from_idx = self.from_idx.load(Ordering::Acquire);
