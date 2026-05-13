@@ -18,6 +18,7 @@ pub mod inspector;
 pub mod nodes;
 pub mod packet_cloud;
 pub mod palette;
+pub mod primitive_viz;
 pub mod perf;
 pub mod probes;
 pub mod rewind;
@@ -134,6 +135,7 @@ impl Plugin for FlowBevyPlugins {
             .add_plugins((
                 compound::CompoundPlugin,
                 examples_menu::ExamplesMenuPlugin,
+                primitive_viz::PrimitiveVizPlugin,
             ));
     }
 }

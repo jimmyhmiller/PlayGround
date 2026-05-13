@@ -3598,13 +3598,39 @@ impl LetExpr {
                 .expect("clojure-jvm: LetExpr init must produce a value");
             ir.f.def_var(&local_slot_name(bi.binding.idx), init_val);
         }
-        // Java emits a `loopLabel` here for recur; skip until RecurExpr lands.
-        if self.is_loop {
-            // Best-effort warning baked into the panic site rather than
-            // silently dropping the loop semantics.
-            // (RecurExpr / LOOP_LABEL plumbing is the next piece.)
-        }
-        if emit_unboxed {
+
+        // For `loop*`: create a body_top block, jump to it, and bind
+        // LOOP_LABEL to a RecurTarget pointing at body_top with this
+        // loop's binding locals. Without this, RecurExpr.emit reads
+        // LOOP_LABEL from the enclosing fn body — recur silently
+        // jumps to the fn's body top with empty locals, the loop's
+        // `recur` ends up a no-op (slot updates are skipped because
+        // fn-arity mismatches the loop's arity), and the loop spins.
+        // Symptom seen at form 46: defmacro's inner loops never
+        // progress, eventually corrupting the macro result with
+        // stale heap pointers.
+        let pushed_loop_label = if self.is_loop {
+            let body_top = ir.f.fb.create_block(&[]);
+            ir.f.fb.jump(body_top, &[]);
+            ir.f.fb.switch_to_block(body_top);
+            let recur_target = RecurTarget {
+                block: body_top,
+                locals: self
+                    .binding_inits
+                    .iter()
+                    .map(|bi| bi.binding.clone())
+                    .collect(),
+            };
+            Var::push_thread_bindings(vec![(
+                COMPILER_VARS.LOOP_LABEL.clone(),
+                Object::Host(std::sync::Arc::new(recur_target)),
+            )]);
+            true
+        } else {
+            false
+        };
+
+        let result = if emit_unboxed {
             let body_val = self
                 .body
                 .as_maybe_primitive()
@@ -3613,7 +3639,12 @@ impl LetExpr {
             Some(body_val)
         } else {
             self.body.emit(context, objx, ir)
+        };
+
+        if pushed_loop_label {
+            Var::pop_thread_bindings();
         }
+        result
     }
 }
 
@@ -5636,6 +5667,8 @@ impl Compiler {
         instance_methods.insert(("setMacro".to_string(), 1), inst_set_macro);
         let inst_cast = dm.declare_extern("cljvm_inst_cast", sig_2i64.clone());
         instance_methods.insert(("cast".to_string(), 2), inst_cast);
+        let inst_to_string = dm.declare_extern("cljvm_inst_toString", sig_1i64.clone());
+        instance_methods.insert(("toString".to_string(), 1), inst_to_string);
         // Constructor dispatch — one extern per arity (class + N args).
         // The arity-with-class form keys it in `instance_methods` under
         // the synthetic method name `__new__` so `parse_new_form` finds it.
@@ -6533,6 +6566,7 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_inst_indexOf" => Some(crate::runtime::cljvm_inst_indexOf as *const u8),
         "cljvm_inst_setMacro" => Some(crate::runtime::cljvm_inst_setMacro as *const u8),
         "cljvm_inst_cast" => Some(crate::runtime::cljvm_inst_cast as *const u8),
+        "cljvm_inst_toString" => Some(crate::runtime::cljvm_inst_toString as *const u8),
         "cljvm_inst_new_1" => Some(crate::runtime::cljvm_inst_new_1 as *const u8),
         "cljvm_inst_new_2" => Some(crate::runtime::cljvm_inst_new_2 as *const u8),
         "cljvm_inst_new_3" => Some(crate::runtime::cljvm_inst_new_3 as *const u8),

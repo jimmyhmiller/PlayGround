@@ -638,14 +638,23 @@ pub(crate) fn spawn_one_canvas_node(
     };
     let class_visual = effective_visual.as_deref();
     let shape_override = class_visual.and_then(|cv| cv.shape.as_ref()).map(shape_spec_to_body_shape);
-    let self_painted = class_visual.and_then(|cv| cv.paint.as_ref()).is_some()
+    // Primitives with a high-fidelity mechanical visual own the entire
+    // body — the glyph and inner-label would just compete with the
+    // moving parts. Skip those decorations and let self_painted=true so
+    // the drop shadow + name + state labels are also suppressed (the
+    // mechanical visual already conveys identity and state).
+    let is_primitive_viz = class_name
+        .map(|c| crate::primitive_viz::PrimitiveKind::from_class(c).is_some())
+        .unwrap_or(false);
+    let self_painted = (class_visual.and_then(|cv| cv.paint.as_ref()).is_some()
         // Don't treat "has a glyph or inner label" as self_painted —
         // those decorations live ALONGSIDE the standard name/state
         // labels rather than replacing them.
         && class_visual.and_then(|cv| cv.glyph.as_ref()).is_none()
-        && class_visual.and_then(|cv| cv.inner_label.as_ref()).is_none();
-    let glyph_override = class_visual.and_then(|cv| cv.glyph.as_deref());
-    let inner_label = class_visual.and_then(|cv| cv.inner_label.as_ref());
+        && class_visual.and_then(|cv| cv.inner_label.as_ref()).is_none())
+        || is_primitive_viz;
+    let glyph_override = if is_primitive_viz { None } else { class_visual.and_then(|cv| cv.glyph.as_deref()) };
+    let inner_label = if is_primitive_viz { None } else { class_visual.and_then(|cv| cv.inner_label.as_ref()) };
     let entity = spawn_node_entity(
         commands, cache, meshes, materials, maps, theme, metrics,
         nid, kind, shape_override, self_painted, color_slot_raw.is_some(),
@@ -660,6 +669,16 @@ pub(crate) fn spawn_one_canvas_node(
         commands
             .entity(entity)
             .insert(paint_spec_to_component(paint, nid, theme));
+    }
+    // High-fidelity mechanical visual for the 8 Life-cell primitives.
+    // The marker drives child-entity construction + per-frame animation
+    // in the `primitive_viz` plugin; the stock body shape remains as the
+    // mechanical housing.
+    if let Some(pk) = class_name.and_then(crate::primitive_viz::PrimitiveKind::from_class) {
+        commands.entity(entity).insert((
+            pk,
+            crate::primitive_viz::PrimitivePulse::default(),
+        ));
     }
     commands.entity(entity).insert(crate::compound::Scoped(nid));
 }

@@ -24,8 +24,8 @@ const TAG_MASK: u64 = 0x0003_0000_0000_0000;
 const PAYLOAD_MASK: u64 = 0x0000_FFFF_FFFF_FFFF;
 
 // Tags (matches `dynlang::NanBoxTags::default()` + our own fn-handle tag).
-const TAG_NIL: u32 = 0;
-const TAG_BOOL: u32 = 1;
+pub const TAG_NIL: u32 = 0;
+pub const TAG_BOOL: u32 = 1;
 const TAG_PTR: u32 = 2;
 const TAG_FN: u32 = 3;
 
@@ -175,6 +175,25 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
     }
     // Compact header: type_id at offset 0, u16 little-endian.
     let type_id = unsafe { ptr.cast::<u16>().read_unaligned() } as usize;
+    if type_id == ids.symbol {
+        // Sanity-check the arc_ptr stored in the cell. Real Symbol cells
+        // hold a pointer to a leaked Arc<Symbol> — always > 0x10000.
+        // A tiny value means the cell is misidentified (the byte at offset 0
+        // happened to be 0x01 but it's not actually a Symbol cell). Panicking
+        // loudly here is much friendlier than the SIGBUS that
+        // `Arc::increment_strong_count` would produce.
+        let arc_check = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
+        if arc_check < 0x1_0000 {
+            panic!(
+                "clojure-jvm: heap_decode: 'Symbol' cell @ 0x{:x} has \
+                 implausible arc_ptr=0x{arc_check:x} — cell is misidentified, \
+                 not actually a Symbol. Pointer probably came from a stale \
+                 NanBox (e.g., a Cons.rest field that wasn't updated when GC \
+                 moved the original target).",
+                ptr as u64
+            );
+        }
+    }
     if type_id == ids.string {
         // `clojure.lang.String` (varlen_bytes): Header(8) + count word(8) +
         // N bytes. Count word lives at offset 8; bytes start at offset 16.
@@ -186,12 +205,8 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
         return Object::String(std::sync::Arc::new(s));
     }
     if type_id == ids.symbol {
-        // `clojure.lang.Symbol`: Header(8) + Raw64 "arc_ptr"(8). Reconstruct
-        // the Arc<Symbol> by `Arc::increment_strong_count` on the stored
-        // pointer. The Arc is rooted by `CompileRoots` for the JIT module's
-        // lifetime, so the pointer is valid as long as the compile output
-        // outlives this call.
-        let arc_ptr = unsafe { ptr.add(8).cast::<u64>().read_unaligned() } as *const crate::lang::symbol::Symbol;
+        let arc_ptr = unsafe { ptr.add(8).cast::<u64>().read_unaligned() }
+            as *const crate::lang::symbol::Symbol;
         unsafe { std::sync::Arc::increment_strong_count(arc_ptr) };
         let arc = unsafe { std::sync::Arc::from_raw(arc_ptr) };
         return Object::Symbol(arc);
@@ -817,12 +832,41 @@ pub unsafe extern "C" fn cljvm_rt_inc(x_bits: u64) -> u64 {
 
 /// `clojure.lang.RT.cons(Object x, Object seq)` — allocate a new Cons cell
 /// linking `x` and `seq`.
+///
+/// Mirrors Java's `RT.cons`: if `seq` isn't already an `ISeq` (Cons or nil),
+/// convert it via `RT.seq` first. Without this, `(cons x [a b c])` would
+/// store the Vector directly in `rest`, breaking downstream walkers (e.g.,
+/// `(vec (cons '&form (cons '&env [test & body])))` in defn's macro body
+/// would otherwise produce a vector containing the inner vector as a
+/// single element, and `test`/`body` would never become fn params).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_cons(x_bits: u64, seq_bits: u64) -> u64 {
     let ids = heap_type_ids();
+    // Coerce seq_bits to an ISeq before linking. Cons + nil pass through;
+    // Vector / other seqables get walked into a cons-list via cljvm_rt_seq.
+    let coerced_seq = match nanbox_tag(seq_bits) {
+        Some(TAG_NIL) => seq_bits,
+        Some(TAG_PTR) => {
+            let p = nanbox_payload(seq_bits) as *const u8;
+            if p.is_null() {
+                seq_bits
+            } else {
+                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+                if tid == ids.cons {
+                    seq_bits
+                } else {
+                    unsafe { cljvm_rt_seq(seq_bits) }
+                }
+            }
+        }
+        _ => panic!(
+            "clojure-jvm: cljvm_rt_cons: second arg must be a collection or nil, \
+             got bits 0x{seq_bits:x}"
+        ),
+    };
     dynobj::roots::with_scope(2, |scope| {
         let x = scope.root::<()>(x_bits);
-        let seq = scope.root::<()>(seq_bits);
+        let seq = scope.root::<()>(coerced_seq);
         let raw = dynlang::gc::gc_alloc_thunk(ids.cons as u64, 0);
         let ptr = raw as *mut u8;
         if ptr.is_null() {
@@ -864,23 +908,49 @@ pub unsafe extern "C" fn cljvm_rt_conj(coll_bits: u64, x_bits: u64) -> u64 {
                 // (conj <vec> x) → append x at the end. Allocate a
                 // fresh Vector heap cell with the existing items
                 // copied + the new x at the tail.
+                //
+                // Snapshot existing items + root x BEFORE allocating
+                // the new Vector — gc_alloc_thunk can move both the
+                // source vector and any heap pointers in `x_bits`.
+                // Without rooting, post-alloc reads off `raw` would
+                // dereference stale memory and silently copy garbage
+                // bits into the new cell. (This is the same class of
+                // bug as the original vector→seq SIGBUS at form 46.)
                 let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
-                let new_raw = dynlang::gc::gc_alloc_thunk(ids.vector as u64, (n + 1) as u64);
-                let new_ptr = new_raw as *mut u8;
-                if new_ptr.is_null() {
-                    panic!("clojure-jvm: RT.conj: gc_alloc returned null for Vector");
-                }
-                for i in 0..n {
-                    let src_off = 16 + i * 8;
-                    let bits = unsafe { raw.add(src_off).cast::<u64>().read_unaligned() };
-                    unsafe {
-                        new_ptr.add(16 + i * 8).cast::<u64>().write_unaligned(bits);
+                return dynobj::roots::with_scope(n + 1, |scope| {
+                    let item_roots: Vec<dynobj::roots::Rooted<()>> = (0..n)
+                        .map(|i| {
+                            let bits = unsafe {
+                                raw.add(16 + i * 8).cast::<u64>().read_unaligned()
+                            };
+                            scope.root::<()>(bits)
+                        })
+                        .collect();
+                    let x_root = scope.root::<()>(x_bits);
+                    let new_raw = dynlang::gc::gc_alloc_thunk(
+                        ids.vector as u64,
+                        (n + 1) as u64,
+                    );
+                    let new_ptr = new_raw as *mut u8;
+                    if new_ptr.is_null() {
+                        panic!("clojure-jvm: RT.conj: gc_alloc returned null for Vector");
                     }
-                }
-                unsafe {
-                    new_ptr.add(16 + n * 8).cast::<u64>().write_unaligned(x_bits);
-                }
-                return nanbox_ptr(new_raw);
+                    for i in 0..n {
+                        unsafe {
+                            new_ptr
+                                .add(16 + i * 8)
+                                .cast::<u64>()
+                                .write_unaligned(item_roots[i].get());
+                        }
+                    }
+                    unsafe {
+                        new_ptr
+                            .add(16 + n * 8)
+                            .cast::<u64>()
+                            .write_unaligned(x_root.get());
+                    }
+                    nanbox_ptr(new_raw)
+                });
             }
             if type_id == ids.map {
                 // (conj <map> nil) → <map>.
@@ -1948,16 +2018,38 @@ pub unsafe extern "C" fn cljvm_rt_seq(bits: u64) -> u64 {
             } else if type_id == ids.vector {
                 // Vector → seq: walk items right-to-left into a cons-list.
                 // Empty vector seqs to nil (matches Java `RT.seq`).
+                //
+                // Each item bits may be a heap pointer; cljvm_rt_cons
+                // triggers GC which moves cells. Root the WHOLE snapshot
+                // in a with_scope so each iteration's read of items[i]
+                // sees the post-GC forwarded address. Without rooting,
+                // items[i+1]'s heap pointer goes stale during the cons of
+                // item i and the next iteration writes garbage into
+                // the new cons cell's first field. Symptom was form 46
+                // SIGBUS when decoding a macro result whose chain pointed
+                // `rest` into the interior of an unrelated string cell.
                 let n = unsafe { ptr.add(8).cast::<u64>().read_unaligned() } as usize;
                 if n == 0 {
                     return nanbox_nil();
                 }
-                let mut cur = nanbox_nil();
-                for i in (0..n).rev() {
-                    let item = unsafe { ptr.add(16 + i * 8).cast::<u64>().read_unaligned() };
-                    cur = unsafe { cljvm_rt_cons(item, cur) };
-                }
-                cur
+                dynobj::roots::with_scope(n + 1, |scope| {
+                    let item_roots: Vec<dynobj::roots::Rooted<()>> = (0..n)
+                        .map(|i| {
+                            let bits = unsafe {
+                                ptr.add(16 + i * 8).cast::<u64>().read_unaligned()
+                            };
+                            scope.root::<()>(bits)
+                        })
+                        .collect();
+                    // Root `cur` so it survives each cons-call's GC.
+                    let cur_root = scope.root::<()>(nanbox_nil());
+                    for i in (0..n).rev() {
+                        let item = item_roots[i].get();
+                        let new_cur = unsafe { cljvm_rt_cons(item, cur_root.get()) };
+                        cur_root.set(new_cur);
+                    }
+                    cur_root.get()
+                })
             } else if type_id == ids.string {
                 // String → seq of Character. Bootstrap doesn't need this
                 // path yet; surface loudly so callers see what to add.
@@ -2180,6 +2272,68 @@ pub unsafe extern "C" fn cljvm_inst_cast(c_bits: u64, x_bits: u64) -> u64 {
         "clojure-jvm: ClassCastException — `(.cast c x)` failed: \
          x is not an instance of c (c bits 0x{c_bits:x}, x bits 0x{x_bits:x})"
     );
+}
+
+/// `(.toString x)` — Java's `Object.toString`. Per Clojure's `(str ...)`
+/// docs: nil → "" (handled before this extern is called by `(str x)`),
+/// string → string, others → printed representation. We cover what the
+/// bootstrap exercises: String, Symbol, Keyword, Long, Double, Bool,
+/// Cons (printed as a list), Vector (printed as `[...]`), Nil → "nil".
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_toString(x_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let obj = any_bits_to_object(x_bits, ids);
+    let s = format_object_for_str(&obj);
+    unsafe { alloc_string_heap(&s, ids) }
+}
+
+fn format_object_for_str(obj: &Object) -> String {
+    match obj {
+        Object::Nil => String::new(),
+        Object::Bool(b) => b.to_string(),
+        Object::Long(n) => n.to_string(),
+        Object::Double(d) => {
+            // Match Clojure's printer: integral doubles print as "1.0".
+            if d.fract() == 0.0 && d.is_finite() {
+                format!("{d:.1}")
+            } else {
+                d.to_string()
+            }
+        }
+        Object::String(s) => (**s).clone(),
+        Object::Symbol(s) => match s.get_namespace() {
+            Some(ns) => format!("{ns}/{}", s.get_name()),
+            None => s.get_name().to_string(),
+        },
+        Object::Keyword(k) => match k.get_namespace() {
+            Some(ns) => format!(":{ns}/{}", k.get_name()),
+            None => format!(":{}", k.get_name()),
+        },
+        Object::List(l) => {
+            let items: Vec<String> =
+                l.iter().map(|o| format_object_pr(&o)).collect();
+            format!("({})", items.join(" "))
+        }
+        Object::Vector(v) => {
+            let mut items: Vec<String> = Vec::with_capacity(v.count() as usize);
+            for i in 0..v.count() {
+                items.push(format_object_pr(&v.nth(i)));
+            }
+            format!("[{}]", items.join(" "))
+        }
+        Object::WithMeta(inner, _) => format_object_for_str(inner),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Print-readable form (`pr`-style) — strings get wrapping quotes, etc.
+/// Used by `format_object_for_str` when rendering nested elements.
+fn format_object_pr(obj: &Object) -> String {
+    match obj {
+        Object::String(s) => format!("\"{}\"", s),
+        Object::Nil => "nil".to_string(),
+        _ => format_object_for_str(obj),
+    }
 }
 
 /// `(.isInstance c x)` — `(instance? c x)` minus the macro layer.

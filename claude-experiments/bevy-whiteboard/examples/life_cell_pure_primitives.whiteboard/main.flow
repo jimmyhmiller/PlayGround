@@ -26,6 +26,7 @@ node SW    : Switch         { passing: 1 }
 node C1    : ConstantPacket { value: 1 }
 node C0    : ConstantPacket { value: 0 }
 node B     : FanOut         { }
+node BE    : Egress         { }
 node A     : Aggregator     { n: 8 }
 node F3    : Filter         { match: 3 }
 node F2    : Filter         { match: 2 }
@@ -38,6 +39,7 @@ edges {
     SW.divert -> C0 : 1ms
     C1 -> B : 1ms
     C0 -> B : 1ms
+    B -> BE : 1ms
 
     A -> F3 : 1ms
     F3.pass   -> ToAlv : 1ms
