@@ -29,6 +29,7 @@
 //!   * Character literals `\a` `\newline` etc.
 //!   * Reader conditionals `#?` / `#?@`
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use super::keyword::Keyword;
@@ -84,10 +85,58 @@ impl<'a> Reader<'a> {
             b'^' => self.read_meta(),
             b'`' => self.read_syntax_quote_placeholder(),
             b'~' => self.read_unquote_placeholder(),
-            b'@' => crate::unimplemented_port!(
-                "LispReader: deref `@`",
-                "needs `clojure.core/deref` Var"
-            ),
+            b'@' => {
+                // `@x` → `(deref x)`. The `deref` symbol resolves to
+                // clojure.core/deref at analyze time (defined as a defn
+                // earlier in core.clj).
+                self.pos += 1;
+                let inner = self.read_form()?;
+                Ok(Object::List(PersistentList::create(vec![
+                    Object::Symbol(Symbol::intern("deref")),
+                    inner,
+                ])))
+            }
+            b'\\' => {
+                // Character literal `\c` / `\space` / `\newline` / `\tab` /
+                // `\return` / `\formfeed` / `\backspace` / `\uHHHH`. We
+                // model chars as Long-valued NanBox (matching how the
+                // analyzer treats integer-cast chars).
+                self.pos += 1;
+                let start = self.pos;
+                // Always consume the FIRST byte even if it's a
+                // terminating macro (e.g. `\,`, `\(`, `\)`, `\"`).
+                if self.peek_byte().is_some() {
+                    self.pos += 1;
+                }
+                while let Some(c) = self.peek_byte() {
+                    if c.is_ascii_whitespace() || is_terminating_macro(c) {
+                        break;
+                    }
+                    self.pos += 1;
+                }
+                let token = &self.src[start..self.pos];
+                let code: i64 = match token {
+                    "" => return Err(self.err("EOF after `\\` character literal start")),
+                    "space" => 32,
+                    "newline" => 10,
+                    "tab" => 9,
+                    "return" => 13,
+                    "formfeed" => 12,
+                    "backspace" => 8,
+                    s if s.starts_with('u') && s.len() == 5 => {
+                        i64::from_str_radix(&s[1..], 16).map_err(|_| {
+                            self.err_with(format!("invalid unicode escape `\\{s}`"))
+                        })?
+                    }
+                    s if s.chars().count() == 1 => s.chars().next().unwrap() as i64,
+                    other => {
+                        return Err(self.err_with(format!(
+                            "unsupported character literal `\\{other}`"
+                        )));
+                    }
+                };
+                Ok(Object::Long(code))
+            }
             _ => self.read_atom(),
         }
     }
@@ -371,42 +420,151 @@ impl<'a> Reader<'a> {
                 let var_sym = Object::Symbol(Symbol::intern("var"));
                 Ok(Object::List(PersistentList::create(vec![var_sym, sym])))
             }
-            _ => crate::unimplemented_port!(
-                "LispReader: dispatch macro `#?`",
-                "needs set / regex / var / anon-fn / reader-conditional ports"
-            ),
+            b'(' => {
+                // `#(body)` anonymous fn shorthand. Read body as a list,
+                // walk it to discover `%`, `%1..%N`, `%&` references, then
+                // emit `(fn* [p1 p2 ...] body)`.
+                self.pos += 1;
+                let mut items: Vec<Object> = Vec::new();
+                loop {
+                    self.skip_ws_and_comments();
+                    match self.peek_byte() {
+                        Some(b')') => { self.pos += 1; break; }
+                        None => return Err(self.err("EOF inside #()")),
+                        Some(_) => {}
+                    }
+                    items.push(self.read_form()?);
+                }
+                let body = Object::List(PersistentList::create(items));
+                let mut max_n: usize = 0;
+                let mut has_rest = false;
+                scan_anon_fn_params(&body, &mut max_n, &mut has_rest);
+                let mut params: Vec<Object> = Vec::with_capacity(max_n + 2);
+                for i in 1..=max_n {
+                    params.push(Object::Symbol(Symbol::intern(&format!("p{i}__#"))));
+                }
+                if has_rest {
+                    params.push(Object::Symbol(Symbol::intern("&")));
+                    params.push(Object::Symbol(Symbol::intern("rest__#")));
+                }
+                let renamed = rename_anon_fn_params(&body);
+                Ok(Object::List(PersistentList::create(vec![
+                    Object::Symbol(Symbol::intern("fn*")),
+                    Object::Vector(crate::lang::persistent_vector::PersistentVector::create(params)),
+                    renamed,
+                ])))
+            }
+            b'"' => {
+                // Regex literal `#"pattern"` — read until the matching
+                // `"` WITHOUT interpreting escapes (so `\d`, `\s` etc.
+                // pass through as literal chars). Returns a String;
+                // we don't model Pattern objects.
+                self.pos += 1; // consume opening "
+                let start = self.pos;
+                let mut prev_was_backslash = false;
+                while let Some(c) = self.peek_byte() {
+                    if c == b'"' && !prev_was_backslash {
+                        break;
+                    }
+                    prev_was_backslash = c == b'\\' && !prev_was_backslash;
+                    self.pos += 1;
+                }
+                if self.peek_byte() != Some(b'"') {
+                    return Err(self.err("EOF inside regex literal"));
+                }
+                let body = self.src[start..self.pos].to_string();
+                self.pos += 1; // consume closing "
+                Ok(Object::String(Arc::new(body)))
+            }
+            b'?' => {
+                // Reader-conditional `#?(:default form)` or `#?@(...)`.
+                // Skip the `?@` if present, then read the next form
+                // (a list of cond pairs) and return nil — we don't
+                // model platform-specific code.
+                self.pos += 1;
+                if self.peek_byte() == Some(b'@') { self.pos += 1; }
+                let _ = self.read_form()?;
+                Ok(Object::Nil)
+            }
+            b'#' => {
+                // `##NaN` / `##Inf` / `##-Inf` symbolic-value literal.
+                self.pos += 1;
+                let inner = self.read_form()?;
+                Ok(match &inner {
+                    Object::Symbol(s) => match s.get_name() {
+                        "NaN" => Object::Double(f64::NAN),
+                        "Inf" => Object::Double(f64::INFINITY),
+                        "-Inf" => Object::Double(f64::NEG_INFINITY),
+                        _ => Object::Nil,
+                    },
+                    _ => Object::Nil,
+                })
+            }
+            b':' => {
+                // Namespace-qualified map `#:ns{...}` or `#::{...}`.
+                // Read the namespace token and the map body; return
+                // the map unmodified (we don't auto-qualify keys).
+                self.pos += 1;
+                // Skip optional second `:` for auto-resolved.
+                if self.peek_byte() == Some(b':') { self.pos += 1; }
+                while let Some(c) = self.peek_byte() {
+                    if c.is_ascii_whitespace() || c == b'{' { break; }
+                    self.pos += 1;
+                }
+                self.skip_ws_and_comments();
+                self.read_form()
+            }
+            b'^' => {
+                // `#^Type form` — old-style metadata. Treat as `^Type form`.
+                self.pos += 1;
+                self.read_meta()
+            }
+            _ => {
+                // Unknown dispatch — read one form and return nil so
+                // the loader continues. Logs to stderr for visibility.
+                let c_char = c as char;
+                eprintln!(
+                    "[cljvm-stub] unknown #-dispatch `{c_char}` — skipping one form, returning nil"
+                );
+                let _ = self.read_form()?;
+                Ok(Object::Nil)
+            }
         }
     }
 
-    /// Placeholder syntax-quote: treats ``` `<form> ``` as `(quote <form>)`.
-    ///
-    /// This is NOT correct upstream semantics — real syntax-quote auto-
-    /// qualifies symbols against the current namespace and walks the form
-    /// transforming unquotes (`~`) and unquote-splices (`~@`) into a
-    /// `(seq (concat ...))` expansion. We don't have any of that yet.
-    ///
-    /// For the bootstrap loader's purposes, the *reader* just needs to
-    /// consume the form so subsequent forms can be processed. Macros
-    /// whose bodies rely on syntax-quote semantics will produce wrong
-    /// expansions when run, but that's a separate problem from reading.
+    /// Syntax-quote: ``` `<form> ``` is read, then walked by
+    /// `syntax_quote_form` into a runtime expression that constructs the
+    /// form. `~x` and `~@x` get reified as `(unquote x)` /
+    /// `(unquote-splicing x)` so the walker can recognize them when it
+    /// descends through the form. Auto-gensyms (`sym#`) get unique-name
+    /// resolution within one syntax-quote scope via the walker's env.
     fn read_syntax_quote_placeholder(&mut self) -> Result<Object, ReaderError> {
         self.pos += 1; // consume '`'
         let inner = self.read_form()?;
-        let quote_sym = Object::Symbol(Symbol::intern("quote"));
-        Ok(Object::List(PersistentList::create(vec![quote_sym, inner])))
+        let mut env: HashMap<String, Arc<Symbol>> = HashMap::new();
+        Ok(syntax_quote_form(&inner, &mut env))
     }
 
-    /// Placeholder unquote: `~<form>` reads as `<form>` (the marker is
-    /// dropped). `~@<form>` reads the same way — the splice is gone too.
-    /// As with `read_syntax_quote_placeholder`, this is wrong-by-design;
-    /// we accept the wrong semantics to keep the reader advancing.
+    /// `~<form>` → `(unquote <form>)`; `~@<form>` →
+    /// `(unquote-splicing <form>)`. The syntax-quote walker recognizes
+    /// these wrappers and emits the unwrapped form (or splices it via
+    /// concat) in the constructed result.
     fn read_unquote_placeholder(&mut self) -> Result<Object, ReaderError> {
         self.pos += 1; // consume '~'
-        // Optional `@` for unquote-splicing.
-        if self.peek_byte() == Some(b'@') {
+        let splicing = self.peek_byte() == Some(b'@');
+        if splicing {
             self.pos += 1;
         }
-        self.read_form()
+        let inner = self.read_form()?;
+        let head = if splicing {
+            Symbol::intern("unquote-splicing")
+        } else {
+            Symbol::intern("unquote")
+        };
+        Ok(Object::List(PersistentList::create(vec![
+            Object::Symbol(head),
+            inner,
+        ])))
     }
 
     /// Read a `{k1 v1 k2 v2 ...}` map literal into an `Object::Map`.
@@ -533,6 +691,211 @@ pub fn read_all(src: &str) -> Result<Vec<Object>, ReaderError> {
         out.push(form);
     }
     Ok(out)
+}
+
+// ─── Syntax-quote walker ──────────────────────────────────────────────
+//
+// Transforms a syntax-quoted form into a runtime expression that
+// constructs the form. Mirrors Clojure's `LispReader.SyntaxQuoteReader`
+// at a smaller scope:
+//   * `~x`            → x   (inserted into outer concat)
+//   * `~@x`           → x   (spliced via concat)
+//   * `sym#`          → unique gensym (per syntax-quote invocation)
+//   * unqualified sym → (quote sym)   (no auto-namespacing yet)
+//   * list `(a b c)`  → (seq (concat (list a') (list b') (list c')))
+//   * vector [a b c]  → (apply vector (concat (list a') (list b') (list c')))
+//   * map / set       → not yet
+//   * other           → (quote form)   (self-evaluating types untouched)
+//
+// `gensym_env` keeps `sym#` consistent within one syntax-quote: every
+// occurrence of the same `sym#` resolves to the same gensym.
+fn syntax_quote_form(form: &Object, env: &mut HashMap<String, Arc<Symbol>>) -> Object {
+    match form {
+        // Self-evaluating literals — quote them so the surrounding
+        // (concat …) treats them as data.
+        Object::Nil
+        | Object::Bool(_)
+        | Object::Long(_)
+        | Object::Double(_)
+        | Object::String(_)
+        | Object::Keyword(_) => quote(form.clone()),
+
+        Object::Symbol(s) => {
+            let name = s.get_name();
+            if name.ends_with('#') && s.get_namespace().is_none() {
+                let g = env.entry(name.to_string()).or_insert_with(|| {
+                    use std::sync::atomic::{AtomicU64, Ordering};
+                    static N: AtomicU64 = AtomicU64::new(0);
+                    let id = N.fetch_add(1, Ordering::Relaxed);
+                    Symbol::intern(&format!("{}__{id}__auto__", &name[..name.len() - 1]))
+                });
+                quote(Object::Symbol(g.clone()))
+            } else {
+                quote(Object::Symbol(s.clone()))
+            }
+        }
+
+        Object::List(l) => {
+            // Empty list → '()
+            if l.count() == 0 {
+                return quote(Object::List(PersistentList::empty()));
+            }
+            // `(. clojure.lang.RT (sqConcat (list <items>...)))` —
+            // see `cljvm_rt_sq_concat` for why we route through the
+            // RT host-method instead of `clojure.core/concat` (which
+            // is multi-arity and binds its Var to nil currently).
+            let items: Vec<Object> =
+                l.iter().map(|item| syntax_quote_item(&item, env)).collect();
+            sq_concat_call(items)
+        }
+
+        Object::Vector(v) => {
+            // `(vec (. RT sqConcat …))` — same RT routing as the list case,
+            // then convert the resulting seq to a Vector.
+            let items: Vec<Object> =
+                (0..v.count()).map(|i| syntax_quote_item(&v.nth(i), env)).collect();
+            let inner = sq_concat_call(items);
+            Object::List(PersistentList::create(vec![
+                Object::Symbol(Symbol::intern("vec")),
+                inner,
+            ]))
+        }
+
+        // Anything else (Map, Set, …) — punt. Bootstrap macros don't use
+        // these inside syntax-quote heavily, and a wrong here is loud
+        // (compile error from a malformed result form) rather than silent.
+        _ => quote(form.clone()),
+    }
+}
+
+/// Per-element step inside a `(concat …)`. Plain forms wrap in `(list …)`;
+/// unquote-spliced forms emit the spliced expression as-is.
+fn syntax_quote_item(item: &Object, env: &mut HashMap<String, Arc<Symbol>>) -> Object {
+    if let Object::List(l) = item {
+        if l.count() == 2 {
+            let head_obj = l.iter().next().unwrap();
+            if let Object::Symbol(head) = &head_obj {
+                let name = head.get_name();
+                if (name == "clojure.core/unquote"
+                    || (name == "unquote" && head.get_namespace().is_none()))
+                    && head.get_namespace().map(|ns| ns == "clojure.core").unwrap_or(true)
+                {
+                    let inner = l.iter().nth(1).unwrap();
+                    return Object::List(PersistentList::create(vec![
+                        Object::Symbol(Symbol::intern("list")),
+                        inner,
+                    ]));
+                }
+                if name == "clojure.core/unquote-splicing"
+                    || (name == "unquote-splicing" && head.get_namespace().is_none())
+                {
+                    let inner = l.iter().nth(1).unwrap();
+                    return inner;
+                }
+            }
+        }
+    }
+    Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern("list")),
+        syntax_quote_form(item, env),
+    ]))
+}
+
+/// Build `(. clojure.lang.RT (sqConcat (list <items>...)))`. The inner
+/// `(list …)` builds the seq-of-seqs that `cljvm_rt_sq_concat` walks.
+fn sq_concat_call(items: Vec<Object>) -> Object {
+    let mut list_args = vec![Object::Symbol(Symbol::intern("list"))];
+    list_args.extend(items);
+    let list_call = Object::List(PersistentList::create(list_args));
+    let method_call = Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern("sqConcat")),
+        list_call,
+    ]));
+    Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern(".")),
+        Object::Symbol(Symbol::intern("clojure.lang.RT")),
+        method_call,
+    ]))
+}
+
+/// Walk a `#(...)` body, recording the highest `%N` index seen
+/// (`%` counts as `%1`) and whether `%&` (variadic-rest) appears.
+fn scan_anon_fn_params(form: &Object, max_n: &mut usize, has_rest: &mut bool) {
+    match form {
+        Object::Symbol(s) if s.get_namespace().is_none() => {
+            let name = s.get_name();
+            if name == "%" {
+                if *max_n < 1 { *max_n = 1; }
+            } else if name == "%&" {
+                *has_rest = true;
+            } else if let Some(rest) = name.strip_prefix('%') {
+                if let Ok(n) = rest.parse::<usize>() {
+                    if n > *max_n { *max_n = n; }
+                }
+            }
+        }
+        Object::List(l) => {
+            for item in l.iter() {
+                scan_anon_fn_params(&item, max_n, has_rest);
+            }
+        }
+        Object::Vector(v) => {
+            for i in 0..v.count() {
+                scan_anon_fn_params(&v.nth(i), max_n, has_rest);
+            }
+        }
+        Object::WithMeta(inner, _) => {
+            scan_anon_fn_params(inner, max_n, has_rest);
+        }
+        _ => {}
+    }
+}
+
+/// Rename `%`/`%N`/`%&` symbols to the synthetic param names
+/// (`p1__#`, `p2__#`, …, `rest__#`) chosen above.
+fn rename_anon_fn_params(form: &Object) -> Object {
+    match form {
+        Object::Symbol(s) if s.get_namespace().is_none() => {
+            let name = s.get_name();
+            if name == "%" {
+                return Object::Symbol(Symbol::intern("p1__#"));
+            }
+            if name == "%&" {
+                return Object::Symbol(Symbol::intern("rest__#"));
+            }
+            if let Some(rest) = name.strip_prefix('%') {
+                if let Ok(n) = rest.parse::<usize>() {
+                    return Object::Symbol(Symbol::intern(&format!("p{n}__#")));
+                }
+            }
+            form.clone()
+        }
+        Object::List(l) => {
+            let new_items: Vec<Object> =
+                l.iter().map(|i| rename_anon_fn_params(&i)).collect();
+            Object::List(PersistentList::create(new_items))
+        }
+        Object::WithMeta(inner, _meta) => {
+            // Drop metadata, recurse on inner. Metadata isn't useful
+            // here and surviving WithMeta wrappers around `%N` would
+            // shield them from the rename.
+            rename_anon_fn_params(inner)
+        }
+        Object::Vector(v) => {
+            let new_items: Vec<Object> = (0..v.count())
+                .map(|i| rename_anon_fn_params(&v.nth(i)))
+                .collect();
+            Object::Vector(crate::lang::persistent_vector::PersistentVector::create(new_items))
+        }
+        _ => form.clone(),
+    }
+}
+
+fn quote(form: Object) -> Object {
+    Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern("quote")),
+        form,
+    ]))
 }
 
 #[cfg(test)]

@@ -225,6 +225,10 @@ fn is_git_guard_command(s: &str) -> bool {
     trimmed == "git-guard" || trimmed.ends_with("/git-guard") || trimmed.starts_with("git-guard ")
 }
 
+fn is_legacy_python_git_guard(s: &str) -> bool {
+    s.contains("git_guard.py")
+}
+
 fn inject_hook(settings: &mut Value) -> Result<(), String> {
     let root = settings.as_object_mut().ok_or("settings.json root must be an object")?;
     let hooks = root
@@ -256,6 +260,19 @@ fn inject_hook(settings: &mut Value) -> Result<(), String> {
         .or_insert_with(|| json!([]))
         .as_array_mut()
         .ok_or("PreToolUse[].hooks must be an array")?;
+
+    let before = hooks_arr.len();
+    hooks_arr.retain(|h| {
+        let is_legacy = h.get("type").and_then(Value::as_str) == Some("command")
+            && h.get("command")
+                .and_then(Value::as_str)
+                .map(is_legacy_python_git_guard)
+                .unwrap_or(false);
+        !is_legacy
+    });
+    if hooks_arr.len() != before {
+        println!("removed legacy python git_guard.py hook entry");
+    }
 
     let already = hooks_arr.iter().any(|h| {
         h.get("type").and_then(Value::as_str) == Some("command")
@@ -971,6 +988,32 @@ mod tests {
         assert_eq!(
             arr[0].get("command").and_then(Value::as_str),
             Some("other-hook")
+        );
+    }
+
+    #[test]
+    fn inject_replaces_legacy_python_hook() {
+        let mut s = json!({
+            "hooks": {
+                "PreToolUse": [
+                    {
+                        "matcher": "Bash",
+                        "hooks": [
+                            {"type": "command", "command": "python3 $CLAUDE_PROJECT_DIR/.claude/hooks/git_guard.py"}
+                        ]
+                    }
+                ]
+            }
+        });
+        inject_hook(&mut s).unwrap();
+        let arr = s
+            .pointer("/hooks/PreToolUse/0/hooks")
+            .and_then(Value::as_array)
+            .unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(
+            arr[0].get("command").and_then(Value::as_str),
+            Some("git-guard")
         );
     }
 

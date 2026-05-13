@@ -175,6 +175,23 @@ fn is_number(bits: u64, _ids: HeapTypeIds) -> bool {
     nanbox_tag(bits).is_none()
 }
 
+/// Integer-typed predicate: any number whose NanBox round-trips as an
+/// integer-valued double. Used as the `instance?` impl for the various
+/// JVM integer types (Integer / Long / Short / Byte / BigInteger /
+/// clojure.lang.BigInt) since we represent all of them as Long-shaped
+/// f64 NanBoxes.
+fn is_integer(bits: u64, _ids: HeapTypeIds) -> bool {
+    if nanbox_tag(bits).is_some() { return false; }
+    let f = f64::from_bits(bits);
+    f.is_finite() && f == (f as i64) as f64
+}
+
+fn is_double(bits: u64, _ids: HeapTypeIds) -> bool {
+    if nanbox_tag(bits).is_some() { return false; }
+    let f = f64::from_bits(bits);
+    f.is_finite() && f != (f as i64) as f64
+}
+
 fn is_boolean(bits: u64, _ids: HeapTypeIds) -> bool {
     matches!(nanbox_tag(bits), Some(crate::runtime::TAG_BOOL))
 }
@@ -228,6 +245,201 @@ fn register_classes() -> Vec<HostClassInfo> {
     push(&mut v, "java.lang.String", &["String"], is_string, None);
     push(&mut v, "java.lang.Number", &["Number"], is_number, None);
     push(&mut v, "java.lang.Boolean", &["Boolean"], is_boolean, None);
+    // JVM integer family — all represented as our Long-shaped f64.
+    push(&mut v, "java.lang.Integer", &["Integer"], is_integer, None);
+    push(&mut v, "java.lang.Long", &["Long"], is_integer, None);
+    push(&mut v, "java.lang.Short", &["Short"], is_integer, None);
+    push(&mut v, "java.lang.Byte", &["Byte"], is_integer, None);
+    push(&mut v, "java.math.BigInteger", &["BigInteger"], is_integer, None);
+    push(&mut v, "clojure.lang.BigInt", &[], is_integer, None);
+    push(&mut v, "java.lang.Double", &["Double"], is_double, None);
+    push(&mut v, "java.lang.Float", &["Float"], is_double, None);
+    push(&mut v, "java.math.BigDecimal", &["BigDecimal"], is_double, None);
+    push(&mut v, "clojure.lang.Ratio", &[], always_false, None);
+    push(&mut v, "java.util.Map$Entry", &[], always_false, None);
+    push(&mut v, "clojure.lang.MapEntry", &["MapEntry"], always_false, None);
+    push(&mut v, "clojure.lang.IRecord", &[], always_false, None);
+    push(&mut v, "clojure.lang.Sequential", &[], is_seq, None);
+    push(&mut v, "clojure.lang.Reversible", &[], always_false, None);
+    push(&mut v, "clojure.lang.Counted", &[], always_false, None);
+    push(&mut v, "clojure.lang.Indexed", &[], always_false, None);
+    push(&mut v, "clojure.lang.Associative", &[], always_false, None);
+    push(&mut v, "clojure.lang.IPending", &[], always_false, None);
+    push(&mut v, "clojure.lang.IBlockingDeref", &[], always_false, None);
+    push(&mut v, "clojure.lang.IDeref", &[], always_false, None);
+    push(&mut v, "clojure.lang.IRef", &[], always_false, None);
+    push(&mut v, "clojure.lang.Ref", &[], always_false, None);
+    push(&mut v, "clojure.lang.Atom", &[], always_false, None);
+    push(&mut v, "clojure.lang.Agent", &[], always_false, None);
+    push(&mut v, "clojure.lang.Volatile", &[], always_false, None);
+    push(&mut v, "clojure.lang.Namespace", &[], always_false, None);
+    push(&mut v, "clojure.lang.IRecord", &[], always_false, None);
+    push(&mut v, "clojure.lang.IReduce", &[], always_false, None);
+    push(&mut v, "clojure.lang.IReduceInit", &[], always_false, None);
+    push(&mut v, "clojure.lang.IKVReduce", &[], always_false, None);
+    push(&mut v, "clojure.lang.ITransientCollection", &[], always_false, None);
+    push(&mut v, "clojure.lang.MultiFn", &[], always_false, None);
+    push(&mut v, "clojure.lang.Named", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentList", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentVector", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentHashMap", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentArrayMap", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentHashSet", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentTreeMap", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentTreeSet", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentQueue", &[], always_false, None);
+    push(&mut v, "clojure.lang.IteratorSeq", &[], always_false, None);
+    push(&mut v, "clojure.lang.ArraySeq", &[], always_false, None);
+    push(&mut v, "java.lang.Iterable", &["Iterable"], always_false, None);
+    push(&mut v, "java.util.Iterator", &["Iterator"], always_false, None);
+    push(&mut v, "java.util.Collection", &["Collection"], always_false, None);
+    push(&mut v, "java.util.List", &["List"], always_false, None);
+    push(&mut v, "java.util.Map", &["Map"], always_false, None);
+    push(&mut v, "java.util.Set", &["Set"], always_false, None);
+    push(&mut v, "java.lang.CharSequence", &["CharSequence"], always_false, None);
+    push(&mut v, "java.lang.Comparable", &["Comparable"], always_false, None);
+    push(&mut v, "java.lang.Throwable", &["Throwable"], always_false, None);
+    push(&mut v, "java.lang.Class", &["Class"], always_false, None);
+    push(&mut v, "java.lang.Object", &["Object"], always_false, None);
+    push(&mut v, "clojure.lang.Reduced", &[], always_false, None);
+    push(&mut v, "clojure.lang.Reductions", &[], always_false, None);
+    push(&mut v, "clojure.lang.AFn", &[], always_false, None);
+    push(&mut v, "clojure.lang.AFunction", &[], always_false, None);
+    push(&mut v, "clojure.lang.RestFn", &[], always_false, None);
+    push(&mut v, "clojure.lang.LineNumberingPushbackReader", &[], always_false, None);
+    push(&mut v, "clojure.lang.PushbackReader", &[], always_false, None);
+    push(&mut v, "clojure.lang.Compiler", &[], always_false, None);
+    push(&mut v, "clojure.lang.LispReader", &[], always_false, None);
+    push(&mut v, "clojure.lang.Util", &[], always_false, None);
+    push(&mut v, "clojure.lang.Var$Frame", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentArrayMap$TransientArrayMap", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentHashMap$TransientHashMap", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentHashSet$TransientHashSet", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentVector$TransientVector", &[], always_false, None);
+    push(&mut v, "clojure.lang.ITransientVector", &[], always_false, None);
+    push(&mut v, "clojure.lang.ITransientMap", &[], always_false, None);
+    push(&mut v, "clojure.lang.ITransientSet", &[], always_false, None);
+    push(&mut v, "clojure.lang.ITransientAssociative", &[], always_false, None);
+    push(&mut v, "clojure.lang.IEditableCollection", &[], always_false, None);
+    push(&mut v, "clojure.lang.IPersistentStack", &[], always_false, None);
+    push(&mut v, "clojure.lang.IExceptionInfo", &[], always_false, None);
+    push(&mut v, "clojure.lang.ExceptionInfo", &[], always_false, None);
+    push(&mut v, "clojure.lang.IHashEq", &[], always_false, None);
+    push(&mut v, "clojure.lang.MapEquivalence", &[], always_false, None);
+    push(&mut v, "clojure.lang.PersistentArrayMap", &[], always_false, None);
+    push(&mut v, "clojure.lang.LazilyPersistentVector", &[], always_false, None);
+    push(&mut v, "clojure.lang.LockingTransaction", &[], always_false, None);
+    push(&mut v, "clojure.lang.Numbers$Ops", &[], always_false, None);
+    push(&mut v, "clojure.lang.Numbers$LongOps", &[], always_false, None);
+    push(&mut v, "clojure.lang.Numbers$DoubleOps", &[], always_false, None);
+    push(&mut v, "clojure.lang.Numbers$RatioOps", &[], always_false, None);
+    push(&mut v, "clojure.lang.Numbers$BigIntOps", &[], always_false, None);
+    push(&mut v, "clojure.lang.Numbers$BigDecimalOps", &[], always_false, None);
+    push(&mut v, "clojure.lang.IDrop", &[], always_false, None);
+    push(&mut v, "java.io.Reader", &[], always_false, None);
+    push(&mut v, "java.io.Writer", &[], always_false, None);
+    push(&mut v, "java.io.PrintWriter", &[], always_false, None);
+    push(&mut v, "java.io.StringReader", &[], always_false, None);
+    push(&mut v, "java.io.StringWriter", &[], always_false, None);
+    push(&mut v, "java.io.BufferedReader", &[], always_false, None);
+    push(&mut v, "java.io.IOException", &[], always_false, None);
+    push(&mut v, "java.io.File", &[], always_false, None);
+    push(&mut v, "java.lang.System", &[], always_false, None);
+    push(&mut v, "java.lang.ClassLoader", &[], always_false, None);
+    push(&mut v, "java.lang.Thread", &[], always_false, None);
+    push(&mut v, "java.lang.Runtime", &[], always_false, None);
+    push(&mut v, "java.lang.UnsupportedOperationException", &[], always_false, None);
+    push(&mut v, "java.lang.NullPointerException", &[], always_false, None);
+    push(&mut v, "java.lang.IndexOutOfBoundsException", &[], always_false, None);
+    push(&mut v, "java.lang.ArrayIndexOutOfBoundsException", &[], always_false, None);
+    push(&mut v, "java.lang.StringIndexOutOfBoundsException", &[], always_false, None);
+    push(&mut v, "java.lang.ClassCastException", &[], always_false, None);
+    push(&mut v, "java.lang.ArithmeticException", &[], always_false, None);
+    push(&mut v, "java.lang.AssertionError", &[], always_false, None);
+    push(&mut v, "java.lang.NumberFormatException", &[], always_false, None);
+    push(&mut v, "java.lang.SecurityException", &[], always_false, None);
+    push(&mut v, "java.lang.InterruptedException", &[], always_false, None);
+    push(&mut v, "java.lang.OutOfMemoryError", &[], always_false, None);
+    push(&mut v, "java.lang.StackOverflowError", &[], always_false, None);
+    push(&mut v, "java.lang.Error", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.TimeUnit", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.Executor", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.ExecutorService", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.Executors", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.Future", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.CountDownLatch", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.Callable", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.atomic.AtomicReference", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.atomic.AtomicLong", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.atomic.AtomicInteger", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.locks.Lock", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.locks.ReentrantLock", &[], always_false, None);
+    push(&mut v, "java.util.concurrent.locks.ReentrantReadWriteLock", &[], always_false, None);
+    push(&mut v, "java.util.HashMap", &[], always_false, None);
+    push(&mut v, "java.util.HashSet", &[], always_false, None);
+    push(&mut v, "java.util.LinkedList", &[], always_false, None);
+    push(&mut v, "java.util.ArrayList", &[], always_false, None);
+    push(&mut v, "java.util.TreeMap", &[], always_false, None);
+    push(&mut v, "java.util.TreeSet", &[], always_false, None);
+    push(&mut v, "java.util.UUID", &[], always_false, None);
+    push(&mut v, "java.util.regex.Pattern", &[], always_false, None);
+    push(&mut v, "java.util.regex.Matcher", &[], always_false, None);
+    push(&mut v, "java.util.Random", &[], always_false, None);
+    push(&mut v, "java.util.Properties", &[], always_false, None);
+    push(&mut v, "java.lang.reflect.Method", &[], always_false, None);
+    push(&mut v, "java.lang.reflect.Constructor", &[], always_false, None);
+    push(&mut v, "java.lang.reflect.Field", &[], always_false, None);
+    push(&mut v, "java.lang.reflect.Modifier", &[], always_false, None);
+    push(&mut v, "java.lang.reflect.Array", &[], always_false, None);
+    push(
+        &mut v,
+        "java.lang.StringBuilder",
+        &["StringBuilder"],
+        is_string_builder,
+        Some(string_builder_ctor),
+    );
+    push(
+        &mut v,
+        "clojure.lang.ChunkBuffer",
+        &["ChunkBuffer"],
+        is_chunk_buffer,
+        Some(chunk_buffer_ctor),
+    );
+    push(
+        &mut v,
+        "clojure.lang.IChunk",
+        &["IChunk"],
+        is_i_chunk,
+        None,
+    );
+    push(
+        &mut v,
+        "clojure.lang.IChunkedSeq",
+        &["IChunkedSeq"],
+        always_false,
+        None,
+    );
+    push(
+        &mut v,
+        "clojure.lang.ChunkedCons",
+        &["ChunkedCons"],
+        always_false,
+        None,
+    );
+    push(
+        &mut v,
+        "clojure.lang.LazySeq",
+        &["LazySeq"],
+        is_lazy_seq,
+        Some(lazy_seq_ctor),
+    );
+    push(
+        &mut v,
+        "clojure.lang.Delay",
+        &["Delay"],
+        is_delay,
+        Some(delay_ctor),
+    );
     push(&mut v, "java.lang.Character", &["Character"], is_character, None);
     push(&mut v, "clojure.lang.Var", &[], is_var, None);
     // Exception classes — bootstrap of `clojure.core` constructs these
@@ -268,6 +480,99 @@ fn register_classes() -> Vec<HostClassInfo> {
 }
 
 fn always_false(_bits: u64, _ids: HeapTypeIds) -> bool { false }
+
+fn is_string_builder(bits: u64, ids: HeapTypeIds) -> bool {
+    use crate::runtime::{nanbox_payload, nanbox_tag};
+    match nanbox_tag(bits) {
+        Some(2 /* TAG_PTR */) => {
+            let p = nanbox_payload(bits) as *const u8;
+            if p.is_null() { return false; }
+            let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+            tid == ids.string_builder
+        }
+        _ => false,
+    }
+}
+
+/// `(new StringBuilder s)` ctor. Forwards to the runtime extern, which
+/// handles Arc allocation + Session rooting + heap-cell write.
+fn string_builder_ctor(args: &[u64], _ids: HeapTypeIds) -> u64 {
+    if args.len() != 1 {
+        panic!(
+            "clojure-jvm: StringBuilder ctor expects 1 String arg, got {}",
+            args.len()
+        );
+    }
+    unsafe { crate::runtime::cljvm_inst_StringBuilder_new1(args[0]) }
+}
+
+fn is_chunk_buffer(bits: u64, ids: HeapTypeIds) -> bool {
+    use crate::runtime::{nanbox_payload, nanbox_tag};
+    match nanbox_tag(bits) {
+        Some(2) => {
+            let p = nanbox_payload(bits) as *const u8;
+            if p.is_null() { return false; }
+            let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+            tid == ids.chunk_buffer
+        }
+        _ => false,
+    }
+}
+
+fn is_i_chunk(bits: u64, ids: HeapTypeIds) -> bool {
+    use crate::runtime::{nanbox_payload, nanbox_tag};
+    match nanbox_tag(bits) {
+        Some(2) => {
+            let p = nanbox_payload(bits) as *const u8;
+            if p.is_null() { return false; }
+            let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+            tid == ids.i_chunk
+        }
+        _ => false,
+    }
+}
+
+fn chunk_buffer_ctor(args: &[u64], _ids: HeapTypeIds) -> u64 {
+    if args.len() != 1 {
+        panic!(
+            "clojure-jvm: ChunkBuffer ctor expects 1 capacity arg, got {}",
+            args.len()
+        );
+    }
+    unsafe { crate::runtime::cljvm_inst_ChunkBuffer_new1(args[0]) }
+}
+
+fn is_lazy_seq(bits: u64, ids: HeapTypeIds) -> bool {
+    use crate::runtime::{nanbox_payload, nanbox_tag};
+    matches!(nanbox_tag(bits), Some(2)) && {
+        let p = nanbox_payload(bits) as *const u8;
+        !p.is_null()
+            && unsafe { p.cast::<u16>().read_unaligned() } as usize == ids.lazy_seq
+    }
+}
+
+fn is_delay(bits: u64, ids: HeapTypeIds) -> bool {
+    use crate::runtime::{nanbox_payload, nanbox_tag};
+    matches!(nanbox_tag(bits), Some(2)) && {
+        let p = nanbox_payload(bits) as *const u8;
+        !p.is_null()
+            && unsafe { p.cast::<u16>().read_unaligned() } as usize == ids.delay
+    }
+}
+
+fn lazy_seq_ctor(args: &[u64], _ids: HeapTypeIds) -> u64 {
+    if args.len() != 1 {
+        panic!("clojure-jvm: LazySeq ctor expects 1 fn arg, got {}", args.len());
+    }
+    unsafe { crate::runtime::cljvm_inst_LazySeq_new1(args[0]) }
+}
+
+fn delay_ctor(args: &[u64], _ids: HeapTypeIds) -> u64 {
+    if args.len() != 1 {
+        panic!("clojure-jvm: Delay ctor expects 1 fn arg, got {}", args.len());
+    }
+    unsafe { crate::runtime::cljvm_inst_Delay_new1(args[0]) }
+}
 
 /// Build a constructor closure for an exception class. The resulting
 /// fn allocates a `PersistentHashMap` carrying `:class <name>` plus
