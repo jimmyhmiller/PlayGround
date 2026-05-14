@@ -101,9 +101,17 @@ fn load_upstream_core_progressively() {
             continue;
         }
         eprintln!("[upstream] form {i} starting eval…");
+        // Sniff the form shape for `(defmacro NAME …)` / `(defn NAME …)` /
+        // `(def ^{:macro true} NAME …)` so we can print what got
+        // *defined* (vs just what evaluated). Useful for figuring out
+        // which macros are bound when the loader hits its wall.
+        let defined_name: Option<String> = sniff_defined_name(&form);
         let eval_outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             sess.eval_form(form);
         }));
+        if let (Some(name), true) = (&defined_name, eval_outcome.is_ok()) {
+            eprintln!("[upstream] form {i} DEFINED {name}");
+        }
         eprintln!("[upstream] form {i} eval completed (outcome: {})", if eval_outcome.is_ok() { "Ok" } else { "Err" });
         if let Err(err) = eval_outcome {
             let msg = LAST_PANIC.with(|p| p.borrow().clone())
@@ -120,6 +128,37 @@ fn load_upstream_core_progressively() {
         i += 1;
     }
     eprintln!("[upstream] processed {i} forms successfully");
+}
+
+/// Best-effort: inspect a top-level form and return the name being
+/// defined plus a tag (`macro:`, `defn:`, etc.). Looks one level deep
+/// only; doesn't descend into `do`/`when`/etc. — those rarely contain
+/// top-level def shape at this layer.
+fn sniff_defined_name(form: &clojure_jvm::lang::object::Object) -> Option<String> {
+    use clojure_jvm::lang::object::Object;
+    let Object::List(_) = form else { return None };
+    let head = clojure_jvm::lang::rt::first(form);
+    let head_name = match &head {
+        Object::Symbol(s) => s.get_name().to_string(),
+        _ => return None,
+    };
+    let after = clojure_jvm::lang::rt::next(form);
+    let name_form = clojure_jvm::lang::rt::first(&after);
+    let name = match name_form.peel_meta() {
+        Object::Symbol(s) => s.get_name().to_string(),
+        _ => return None,
+    };
+    // Note: `(def ^{:macro true} foo …)` is the macro-flag form
+    // upstream uses for early bootstrapping; we just call it `def`
+    // here and the cljs cross-reference reads the actual ^:macro flag
+    // on the resulting var, not this sniff.
+    let tag = match head_name.as_str() {
+        "defmacro" => "macro",
+        "defn" | "defn-" => "fn",
+        "def" => "def",
+        _ => return None,
+    };
+    Some(format!("{tag}:{name}"))
 }
 
 fn panic_msg(err: &(dyn std::any::Any + Send)) -> String {

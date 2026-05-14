@@ -2586,6 +2586,124 @@ fn expand_with_precision(form: &Object) -> Object {
 /// `(or x y z)` → `(let* [t x] (if t t (or y z)))`, or `nil` for no
 /// args, `x` alone for one arg. Host-side because the upstream
 /// recursive defmacro hits the gc_literal corruption.
+// ── Bootstrap macros (let / fn / loop / when / when-not / if-not) ─────
+//
+// Identity-shape expansions that map the unstarred surface forms onto
+// the starred special-form primitives the analyzer already dispatches
+// on. They exist so a source file (notably cljs/core.cljs) that
+// assumes its host already provides `let`/`fn`/`when`/etc. can be
+// loaded without first evaluating upstream `clojure/core.clj`'s
+// defmacros.
+//
+// NOT a destructuring impl: `(let [{:keys [a]} m] …)` will reach
+// `let*` with the map-literal binding pattern and panic there. Real
+// destructuring (and the rest of the upstream `let`/`fn` semantics —
+// type hints, pre/post conditions, ^:once metadata, etc.) is upstream's
+// `defmacro let`'s job.
+
+/// `(let [bindings…] body…)` → `(let* [bindings…] body…)`.
+fn expand_let_simple(form: &Object) -> Object {
+    let after = super::rt::next(form);
+    let bindings = super::rt::first(&after);
+    let mut items: Vec<Object> = vec![
+        Object::Symbol(Symbol::intern("let*")),
+        bindings,
+    ];
+    let mut cur = super::rt::next(&after);
+    while !matches!(cur, Object::Nil) {
+        items.push(super::rt::first(&cur));
+        cur = super::rt::next(&cur);
+    }
+    Object::List(PersistentList::create(items))
+}
+
+/// `(fn …)` → `(fn* …)`. Handles both single-arity `(fn [args] body)`
+/// and multi-arity `(fn ([args] body) ([args] body))`, plus an
+/// optional fn-name first argument (`(fn name [args] body)`).
+fn expand_fn_simple(form: &Object) -> Object {
+    let mut items: Vec<Object> = vec![Object::Symbol(Symbol::intern("fn*"))];
+    let mut cur = super::rt::next(form);
+    while !matches!(cur, Object::Nil) {
+        items.push(super::rt::first(&cur));
+        cur = super::rt::next(&cur);
+    }
+    Object::List(PersistentList::create(items))
+}
+
+/// `(loop [bindings…] body…)` → `(loop* [bindings…] body…)`.
+fn expand_loop_simple(form: &Object) -> Object {
+    let after = super::rt::next(form);
+    let bindings = super::rt::first(&after);
+    let mut items: Vec<Object> = vec![
+        Object::Symbol(Symbol::intern("loop*")),
+        bindings,
+    ];
+    let mut cur = super::rt::next(&after);
+    while !matches!(cur, Object::Nil) {
+        items.push(super::rt::first(&cur));
+        cur = super::rt::next(&cur);
+    }
+    Object::List(PersistentList::create(items))
+}
+
+/// `(when test body…)` → `(if test (do body…) nil)`.
+fn expand_when(form: &Object) -> Object {
+    let after = super::rt::next(form);
+    let test = super::rt::first(&after);
+    let body_seq = super::rt::next(&after);
+    let mut body_items: Vec<Object> = vec![Object::Symbol(Symbol::intern("do"))];
+    let mut cur = body_seq;
+    while !matches!(cur, Object::Nil) {
+        body_items.push(super::rt::first(&cur));
+        cur = super::rt::next(&cur);
+    }
+    Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern("if")),
+        test,
+        Object::List(PersistentList::create(body_items)),
+        Object::Nil,
+    ]))
+}
+
+/// `(when-not test body…)` → `(if test nil (do body…))`.
+fn expand_when_not(form: &Object) -> Object {
+    let after = super::rt::next(form);
+    let test = super::rt::first(&after);
+    let body_seq = super::rt::next(&after);
+    let mut body_items: Vec<Object> = vec![Object::Symbol(Symbol::intern("do"))];
+    let mut cur = body_seq;
+    while !matches!(cur, Object::Nil) {
+        body_items.push(super::rt::first(&cur));
+        cur = super::rt::next(&cur);
+    }
+    Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern("if")),
+        test,
+        Object::Nil,
+        Object::List(PersistentList::create(body_items)),
+    ]))
+}
+
+/// `(if-not test then else?)` → `(if test else then)`. `else` defaults to nil.
+fn expand_if_not(form: &Object) -> Object {
+    let after = super::rt::next(form);
+    let test = super::rt::first(&after);
+    let after2 = super::rt::next(&after);
+    let then_form = super::rt::first(&after2);
+    let after3 = super::rt::next(&after2);
+    let else_form = if matches!(after3, Object::Nil) {
+        Object::Nil
+    } else {
+        super::rt::first(&after3)
+    };
+    Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern("if")),
+        test,
+        else_form,
+        then_form,
+    ]))
+}
+
 fn expand_or(form: &Object) -> Object {
     static OR_N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let mut args: Vec<Object> = Vec::new();
@@ -2700,6 +2818,7 @@ fn expand_defmulti(form: &Object) -> Object {
 /// a separate `(def m nil)` plus the protocol name itself. Methods
 /// can then be referenced (their var resolves to nil).
 fn expand_defprotocol(form: &Object) -> Object {
+    use crate::lang::user_types::register_protocol;
     let after = super::rt::next(form);
     let proto_name_form = super::rt::first(&after);
     let proto_name = match proto_name_form.peel_meta_ref() {
@@ -2708,45 +2827,400 @@ fn expand_defprotocol(form: &Object) -> Object {
             "clojure-jvm: defprotocol needs a symbol name, got {other:?}"
         ),
     };
+    // Walk method specs first to harvest names + arities. Each spec
+    // looks like `(method-name [this & args] docstring?)` and we use
+    // the binding-vector length as the dispatch arity (including
+    // `this`). Multi-arity protocol methods are deferred — defprotocol
+    // with multiple binding vectors per method panics for now.
+    let mut cur = super::rt::next(&after);
+    if matches!(super::rt::first(&cur), Object::String(_)) {
+        cur = super::rt::next(&cur);
+    }
+    if matches!(super::rt::first(&cur), Object::Map(_)) {
+        cur = super::rt::next(&cur);
+    }
+    struct ParsedMethod {
+        name: Arc<Symbol>,
+        binding_form: Object,
+        arity: usize,
+    }
+    let mut methods: Vec<ParsedMethod> = Vec::new();
+    while !matches!(cur, Object::Nil) {
+        let item = super::rt::first(&cur);
+        cur = super::rt::next(&cur);
+        let l = match &item {
+            Object::List(l) => l,
+            _ => continue, // ignore loose docstrings between specs
+        };
+        let mut it = l.iter();
+        let head = match it.next() {
+            Some(h) => h,
+            None => continue,
+        };
+        let mname = match head.peel_meta_ref() {
+            Object::Symbol(s) => s.clone(),
+            other => panic!(
+                "clojure-jvm: defprotocol method-name must be a symbol, got {other:?}"
+            ),
+        };
+        // Collect remaining items so we can find the first vector
+        // (the binding form) without consuming docstrings.
+        let mut binding: Option<Object> = None;
+        for rest in it {
+            if matches!(rest, Object::Vector(_)) {
+                binding = Some(rest.clone());
+                break;
+            }
+        }
+        let binding = match binding {
+            Some(b) => b,
+            None => panic!(
+                "clojure-jvm: defprotocol method `{}` is missing a binding vector",
+                mname.get_name(),
+            ),
+        };
+        let arity = match &binding {
+            Object::Vector(v) => v.count() as usize,
+            _ => unreachable!(),
+        };
+        methods.push(ParsedMethod {
+            name: mname,
+            binding_form: binding,
+            arity,
+        });
+    }
+    // Register at the global level. The protocol_id slot itself is
+    // currently informational — `satisfies?` will read it later.
+    let method_specs: Vec<(Arc<Symbol>, Vec<usize>)> = methods
+        .iter()
+        .map(|m| (m.name.clone(), vec![m.arity]))
+        .collect();
+    let (_proto_id, method_ids) = register_protocol(proto_name.clone(), method_specs);
+
+    // Build the expansion: `(do (def Name nil) <method-def>* )`.
     let mut do_items: Vec<Object> = vec![
         Object::Symbol(Symbol::intern("do")),
         Object::List(PersistentList::create(vec![
             Object::Symbol(Symbol::intern("def")),
-            Object::Symbol(proto_name),
+            Object::Symbol(proto_name.clone()),
             Object::Nil,
         ])),
     ];
-    // Walk the rest looking for method specs `(method-name [args] doc?)`.
-    let mut cur = super::rt::next(&after);
-    // Skip a docstring if present.
-    if matches!(super::rt::first(&cur), Object::String(_)) {
-        cur = super::rt::next(&cur);
-    }
-    // Skip an optional attribute map (e.g. {:extend-via-metadata true}).
-    if matches!(super::rt::first(&cur), Object::Map(_)) {
-        cur = super::rt::next(&cur);
-    }
-    while !matches!(cur, Object::Nil) {
-        let item = super::rt::first(&cur);
-        if let Object::List(l) = &item {
-            if let Some(method_name_form) = l.iter().next() {
-                if let Object::Symbol(s) = method_name_form.peel_meta_ref() {
-                    do_items.push(Object::List(PersistentList::create(vec![
-                        Object::Symbol(Symbol::intern("def")),
-                        Object::Symbol(s.clone()),
-                        Object::Nil,
-                    ])));
-                }
+    for (m, mid) in methods.iter().zip(method_ids.iter()) {
+        let dispatch_method = match m.arity {
+            1 => "protocolDispatch1",
+            2 => "protocolDispatch2",
+            3 => "protocolDispatch3",
+            4 => "protocolDispatch4",
+            n => panic!(
+                "clojure-jvm: defprotocol method `{}` arity {n} unsupported (only 1..4 wired); \
+                 extend protocolDispatch externs and host_methods table in Compiler::new",
+                m.name.get_name(),
+            ),
+        };
+        // (. clojure.lang.RT (protocolDispatchN <method_id> this …))
+        let mut dispatch_args: Vec<Object> = Vec::with_capacity(m.arity + 1);
+        dispatch_args.push(Object::Symbol(Symbol::intern(dispatch_method)));
+        dispatch_args.push(Object::Long(*mid as i64));
+        // Pull binding-vector params and forward them by name.
+        let params_vec = match &m.binding_form {
+            Object::Vector(v) => v.clone(),
+            _ => unreachable!(),
+        };
+        for i in 0..params_vec.count() {
+            let p = params_vec.nth(i);
+            match p.peel_meta_ref() {
+                Object::Symbol(s) => dispatch_args.push(Object::Symbol(s.clone())),
+                other => panic!(
+                    "clojure-jvm: defprotocol `{}`: binding param must be a symbol, got {other:?}",
+                    m.name.get_name(),
+                ),
             }
         }
-        cur = super::rt::next(&cur);
+        let dispatch_call = Object::List(PersistentList::create(vec![
+            Object::Symbol(Symbol::intern(".")),
+            Object::Symbol(Symbol::intern_ns_name(None, "clojure.lang.RT")),
+            Object::List(PersistentList::create(dispatch_args)),
+        ]));
+        // (fn* [this …] dispatch_call)
+        let fn_form = Object::List(PersistentList::create(vec![
+            Object::Symbol(Symbol::intern("fn*")),
+            m.binding_form.clone(),
+            dispatch_call,
+        ]));
+        // (def m fn_form)
+        do_items.push(Object::List(PersistentList::create(vec![
+            Object::Symbol(Symbol::intern("def")),
+            Object::Symbol(m.name.clone()),
+            fn_form,
+        ])));
     }
     Object::List(PersistentList::create(do_items))
 }
 
-/// `(deftype Name [fields…] …)` / `(defrecord Name [fields…] …)` →
-/// `(def Name nil)`. We don't model new heap types from user code.
+/// Resolve a `(extend-type T …)` type symbol to its `LogicalTypeId`.
+///
+/// Supports today:
+///   * user-defined `deftype` names → user-type half of the LogicalTypeId space.
+///   * `nil`     → `BUILTIN_NIL`
+///   * `Object` / `default` → `BUILTIN_OBJECT` (the catch-all fallback bucket)
+///
+/// Returns `None` if the symbol doesn't correspond to a known type.
+/// Future work: register `js/String`, `js/Number`, etc. against the
+/// corresponding `HeapTypeIds` entry.
+fn resolve_extend_type_target(target_sym: &Arc<Symbol>) -> Option<u32> {
+    use crate::lang::user_types::{
+        user_type_id_by_name, user_type_logical, BUILTIN_NIL, BUILTIN_OBJECT,
+    };
+    if let Some(uid) = user_type_id_by_name(target_sym) {
+        return Some(user_type_logical(uid));
+    }
+    match target_sym.get_name() {
+        "nil" => Some(BUILTIN_NIL),
+        "Object" | "default" => Some(BUILTIN_OBJECT),
+        _ => None,
+    }
+}
+
+/// `(extend-protocol P T1 (m1 [this …] body) (m2 [this …] body) T2 (m3 […] body))`.
+///
+/// Rewrites to `(do (extend-type T1 P …) (extend-type T2 P …) …)`. The
+/// individual `extend-type` forms are then re-expanded by
+/// `expand_extend_type`.
+fn expand_extend_protocol(form: &Object) -> Object {
+    let after = super::rt::next(form);
+    let proto_form = super::rt::first(&after);
+    if !matches!(proto_form.peel_meta_ref(), Object::Symbol(_)) {
+        panic!(
+            "clojure-jvm: extend-protocol: protocol must be a symbol, got {:?}",
+            proto_form,
+        );
+    }
+    // Walk the body, accumulating per-target method blocks. A target is
+    // either a Symbol or `nil` (the nil literal target). Method blocks
+    // are Lists.
+    let mut cur = super::rt::next(&after);
+    let mut do_items: Vec<Object> = vec![Object::Symbol(Symbol::intern("do"))];
+    let mut current_target: Option<Object> = None;
+    let mut current_methods: Vec<Object> = Vec::new();
+    let emit_one = |target: &Option<Object>,
+                    methods: &Vec<Object>,
+                    proto: &Object,
+                    out: &mut Vec<Object>| {
+        let Some(t) = target else { return; };
+        if methods.is_empty() {
+            return;
+        }
+        let mut et_items: Vec<Object> = Vec::with_capacity(3 + methods.len());
+        et_items.push(Object::Symbol(Symbol::intern("extend-type")));
+        et_items.push(t.clone());
+        et_items.push(proto.clone());
+        et_items.extend(methods.iter().cloned());
+        out.push(Object::List(PersistentList::create(et_items)));
+    };
+    while !matches!(cur, Object::Nil) {
+        let item = super::rt::first(&cur);
+        cur = super::rt::next(&cur);
+        // Targets are Symbols or `nil`; method blocks are Lists.
+        let is_target = matches!(
+            item.peel_meta_ref(),
+            Object::Symbol(_) | Object::Nil
+        );
+        if is_target {
+            emit_one(&current_target, &current_methods, &proto_form, &mut do_items);
+            current_target = Some(item);
+            current_methods.clear();
+        } else {
+            current_methods.push(item);
+        }
+    }
+    emit_one(&current_target, &current_methods, &proto_form, &mut do_items);
+    Object::List(PersistentList::create(do_items))
+}
+
+/// `(satisfies? Proto x)` — does `x`'s `LogicalTypeId` have any direct
+/// impl registered for any of `Proto`'s methods? `Proto` must be a
+/// `defprotocol`-declared symbol; we resolve it at macroexpand time.
+fn expand_satisfies(form: &Object) -> Object {
+    use crate::lang::user_types::protocol_id_by_name;
+    let after = super::rt::next(form);
+    let proto_form = super::rt::first(&after);
+    let proto_sym = match proto_form.peel_meta_ref() {
+        Object::Symbol(s) => s.clone(),
+        other => panic!(
+            "clojure-jvm: satisfies?: protocol must be a symbol, got {other:?}"
+        ),
+    };
+    let pid = protocol_id_by_name(&proto_sym).unwrap_or_else(|| {
+        panic!(
+            "clojure-jvm: satisfies?: protocol `{}` not registered. \
+             Has defprotocol been evaluated?",
+            proto_sym.get_name(),
+        )
+    });
+    let after2 = super::rt::next(&after);
+    let x_form = super::rt::first(&after2);
+    // (. clojure.lang.RT (satisfies <proto_id> x))
+    Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern(".")),
+        Object::Symbol(Symbol::intern_ns_name(None, "clojure.lang.RT")),
+        Object::List(PersistentList::create(vec![
+            Object::Symbol(Symbol::intern("satisfies")),
+            Object::Long(pid as i64),
+            x_form,
+        ])),
+    ]))
+}
+
+/// `(extend-type T P1 (m1 [this …] body) (m2 [this …] body) P2 (m3 […] body))`.
+///
+/// Each `(method-name [this …] body)` block lowers to:
+///
+/// ```text
+/// (. clojure.lang.RT (installImpl <type_id> <method_id> (fn* [this …] body)))
+/// ```
+///
+/// Multiple protocols can be listed; the parser groups method blocks
+/// under the most recently seen protocol symbol so the per-block method
+/// id lookup hits the correct protocol.
+fn expand_extend_type(form: &Object) -> Object {
+    use crate::lang::user_types::{protocol_id_by_name, protocol_method_id};
+    let after = super::rt::next(form);
+    let target_form = super::rt::first(&after);
+    let (target_sym, type_id) = match target_form.peel_meta_ref() {
+        // `nil` reads as `Object::Nil`, not a Symbol; handle directly so
+        // `(extend-type nil P …)` works.
+        Object::Nil => (
+            Symbol::intern("nil"),
+            crate::lang::user_types::BUILTIN_NIL,
+        ),
+        Object::Symbol(s) => {
+            let tid = resolve_extend_type_target(s).unwrap_or_else(|| {
+                panic!(
+                    "clojure-jvm: extend-type: cannot resolve target `{}` to a LogicalTypeId. \
+                     Known: user `deftype` names, `nil`, `Object`, `default`. Extend \
+                     `resolve_extend_type_target` to support host classes (e.g. `String`, \
+                     `js/Number`) as needed.",
+                    s.get_name(),
+                )
+            });
+            (s.clone(), tid)
+        }
+        other => panic!(
+            "clojure-jvm: extend-type: target must be a symbol or nil, got {other:?}"
+        ),
+    };
+
+    let mut do_items: Vec<Object> = vec![Object::Symbol(Symbol::intern("do"))];
+    let mut cur = super::rt::next(&after);
+    let mut current_proto_id: Option<u32> = None;
+    let mut current_proto_name: Option<Arc<Symbol>> = None;
+    while !matches!(cur, Object::Nil) {
+        let item = super::rt::first(&cur);
+        cur = super::rt::next(&cur);
+        match item.peel_meta_ref() {
+            Object::Symbol(s) => {
+                // New protocol section starts.
+                let pid = protocol_id_by_name(s).unwrap_or_else(|| {
+                    panic!(
+                        "clojure-jvm: extend-type `{}`: protocol `{}` not \
+                         registered. Have you called defprotocol yet?",
+                        target_sym.get_name(),
+                        s.get_name(),
+                    )
+                });
+                current_proto_id = Some(pid);
+                current_proto_name = Some(s.clone());
+            }
+            Object::List(l) => {
+                let pid = current_proto_id.unwrap_or_else(|| {
+                    panic!(
+                        "clojure-jvm: extend-type `{}`: method block appears \
+                         before any protocol symbol",
+                        target_sym.get_name(),
+                    )
+                });
+                let pname = current_proto_name.as_ref().unwrap();
+                // Method block shape: (method-name [this …] body…)
+                let mut it = l.iter();
+                let m_head = it.next().unwrap_or(Object::Nil);
+                let mname = match m_head.peel_meta_ref() {
+                    Object::Symbol(s) => s.clone(),
+                    other => panic!(
+                        "clojure-jvm: extend-type `{}` / `{}`: method head \
+                         must be a symbol, got {other:?}",
+                        target_sym.get_name(),
+                        pname.get_name(),
+                    ),
+                };
+                let mid = protocol_method_id(pid, &mname).unwrap_or_else(|| {
+                    panic!(
+                        "clojure-jvm: extend-type `{}` / `{}`: method `{}` \
+                         is not declared on protocol `{}`",
+                        target_sym.get_name(),
+                        pname.get_name(),
+                        mname.get_name(),
+                        pname.get_name(),
+                    )
+                });
+                let binding = it.next().unwrap_or(Object::Nil);
+                if !matches!(&binding, Object::Vector(_)) {
+                    panic!(
+                        "clojure-jvm: extend-type `{}` / `{}`: method `{}` \
+                         binding must be a vector",
+                        target_sym.get_name(),
+                        pname.get_name(),
+                        mname.get_name(),
+                    );
+                }
+                let mut body_items: Vec<Object> = Vec::new();
+                for rest in it {
+                    body_items.push(rest.clone());
+                }
+                // Build `(fn* [this …] body…)`.
+                let mut fn_items: Vec<Object> = vec![
+                    Object::Symbol(Symbol::intern("fn*")),
+                    binding,
+                ];
+                fn_items.extend(body_items);
+                let fn_form = Object::List(PersistentList::create(fn_items));
+                // (. clojure.lang.RT (installImpl <tid> <mid> <fn>))
+                let install_form = Object::List(PersistentList::create(vec![
+                    Object::Symbol(Symbol::intern(".")),
+                    Object::Symbol(Symbol::intern_ns_name(None, "clojure.lang.RT")),
+                    Object::List(PersistentList::create(vec![
+                        Object::Symbol(Symbol::intern("installImpl")),
+                        Object::Long(type_id as i64),
+                        Object::Long(mid as i64),
+                        fn_form,
+                    ])),
+                ]));
+                do_items.push(install_form);
+            }
+            other => panic!(
+                "clojure-jvm: extend-type `{}`: unexpected form {other:?}",
+                target_sym.get_name(),
+            ),
+        }
+    }
+    Object::List(PersistentList::create(do_items))
+}
+
+/// `(deftype Name [fields…] body…)` / `(defrecord Name [fields…] body…)`.
+///
+/// Allocates a `UserTypeId` via `register_user_type`, then emits:
+///
+/// ```text
+/// (do
+///   (def Name (fn* [field0 field1 …]
+///     (. clojure.lang.RT (allocUserInstanceN <user_type_id> field0 …)))))
+/// ```
+///
+/// `body…` (inline protocol impls) is processed by Step 5 — for now,
+/// any body forms are dropped with a panic if they're non-trivial
+/// to keep behavior honest.
 fn expand_deftype_or_record(form: &Object) -> Object {
+    use crate::lang::user_types::register_user_type;
     let after = super::rt::next(form);
     let name_form = super::rt::first(&after);
     let name_sym = match name_form.peel_meta_ref() {
@@ -2755,10 +3229,98 @@ fn expand_deftype_or_record(form: &Object) -> Object {
             "clojure-jvm: deftype/defrecord needs a symbol name, got {other:?}"
         ),
     };
-    Object::List(PersistentList::create(vec![
+    let after2 = super::rt::next(&after);
+    let fields_form = super::rt::first(&after2);
+    let fields_vec = match fields_form.peel_meta_ref() {
+        Object::Vector(v) => v.clone(),
+        other => panic!(
+            "clojure-jvm: deftype/defrecord `{}`: fields must be a vector, got {other:?}",
+            name_sym.get_name(),
+        ),
+    };
+    let mut field_syms: Vec<Arc<Symbol>> = Vec::with_capacity(fields_vec.count() as usize);
+    for i in 0..(fields_vec.count() as i32) {
+        let p = fields_vec.nth(i);
+        match p.peel_meta_ref() {
+            Object::Symbol(s) => field_syms.push(s.clone()),
+            other => panic!(
+                "clojure-jvm: deftype/defrecord `{}`: field must be a symbol, got {other:?}",
+                name_sym.get_name(),
+            ),
+        }
+    }
+    // Inline protocol impls: the body is the same shape as
+    // `extend-type`'s tail (`P1 (m1 …) (m2 …) P2 (m3 …)`). We collect
+    // those trailing forms and emit a synthesized `extend-type Foo P1
+    // … P2 …` alongside the factory def. The synthesized form is then
+    // re-expanded by `expand_extend_type` when the analyzer recurses
+    // into the `do` body.
+    let body_tail = super::rt::next(&after2);
+    let arity = field_syms.len();
+    let alloc_method = match arity {
+        0 => "allocUserInstance0",
+        1 => "allocUserInstance1",
+        2 => "allocUserInstance2",
+        3 => "allocUserInstance3",
+        4 => "allocUserInstance4",
+        n => panic!(
+            "clojure-jvm: deftype `{}`: field count {n} exceeds wired \
+             allocUserInstanceN externs (0..4); extend Compiler::new \
+             and runtime.rs to raise the cap",
+            name_sym.get_name(),
+        ),
+    };
+    let user_type_id = register_user_type(name_sym.clone(), field_syms.clone());
+    // Build factory fn:
+    // (fn* [f0 f1 …] (. clojure.lang.RT (allocUserInstanceN <tid> f0 f1 …)))
+    let params_vec: Vec<Object> = field_syms
+        .iter()
+        .map(|s| Object::Symbol(s.clone()))
+        .collect();
+    let params_form = Object::Vector(crate::lang::persistent_vector::PersistentVector::create(params_vec));
+    let mut alloc_args: Vec<Object> = Vec::with_capacity(arity + 2);
+    alloc_args.push(Object::Symbol(Symbol::intern(alloc_method)));
+    alloc_args.push(Object::Long(user_type_id as i64));
+    for s in &field_syms {
+        alloc_args.push(Object::Symbol(s.clone()));
+    }
+    let alloc_call = Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern(".")),
+        Object::Symbol(Symbol::intern_ns_name(None, "clojure.lang.RT")),
+        Object::List(PersistentList::create(alloc_args)),
+    ]));
+    let fn_form = Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern("fn*")),
+        params_form,
+        alloc_call,
+    ]));
+    let factory_def = Object::List(PersistentList::create(vec![
         Object::Symbol(Symbol::intern("def")),
+        Object::Symbol(name_sym.clone()),
+        fn_form,
+    ]));
+    if matches!(body_tail, Object::Nil) {
+        return factory_def;
+    }
+    // Reconstruct `(extend-type Name body…)` by prepending the
+    // `extend-type` head + the type name to the body forms. The
+    // analyzer will macroexpand this through `expand_extend_type`,
+    // which already knows how to look up the user_type_id we just
+    // registered.
+    let mut et_items: Vec<Object> = vec![
+        Object::Symbol(Symbol::intern("extend-type")),
         Object::Symbol(name_sym),
-        Object::Nil,
+    ];
+    let mut cur = body_tail;
+    while !matches!(cur, Object::Nil) {
+        et_items.push(super::rt::first(&cur));
+        cur = super::rt::next(&cur);
+    }
+    let extend_form = Object::List(PersistentList::create(et_items));
+    Object::List(PersistentList::create(vec![
+        Object::Symbol(Symbol::intern("do")),
+        factory_def,
+        extend_form,
     ]))
 }
 
@@ -3341,29 +3903,7 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
     // form 202 turned out to be a missing `&form &env` on macro fn
     // params, fixed in `expand_defmacro` via `inject_macro_implicit_params`.
     if head_sym.get_namespace().is_none() {
-        // First: skip any defn / defmacro that REDEFINES a name we
-        // already treat as a special form. Upstream redefines `let`
-        // and `loop` as defmacros to add destructuring; we handle
-        // them as the analyzer's special forms and don't want the
-        // var binding to shadow that. Without this, evaluating the
-        // redefinition stack-overflows because the macro fn body
-        // references `let` which now expands recursively.
         let name = head_sym.get_name();
-        if matches!(name, "defn" | "defn-" | "defmacro") {
-            let after = super::rt::next(form);
-            if let Object::Symbol(name_sym) = super::rt::first(&after).peel_meta() {
-                let n = name_sym.get_name();
-                if matches!(
-                    n,
-                    "let" | "loop" | "fn" | "if" | "do" | "quote" | "def"
-                    | "var" | "throw" | "try" | "recur" | "new" | "."
-                    | "set!" | "monitor-enter" | "monitor-exit"
-                    | "case" | "case*"
-                ) {
-                    return Some(Object::Nil);
-                }
-            }
-        }
         match name {
             "defn" => return Some(expand_defn(form, false)),
             "defn-" => return Some(expand_defn(form, true)),
@@ -3381,30 +3921,14 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
             "lazy-seq" => return Some(expand_lazy_seq(form)),
             "doseq" => return Some(expand_doseq(form)),
             "for" => return Some(expand_for_simple(form)),
-            // Multimethods / protocols / records: collapse to a `def`
-            // of the name with nil. We don't model these yet but the
-            // var binding lets later code analyze.
             "defmulti" => return Some(expand_defmulti(form)),
-            "defmethod" => return Some(Object::Nil),
             "defprotocol" => return Some(expand_defprotocol(form)),
+            "extend-type" => return Some(expand_extend_type(form)),
+            "extend-protocol" => return Some(expand_extend_protocol(form)),
+            "satisfies?" => return Some(expand_satisfies(form)),
             "definterface" => return Some(expand_defprotocol(form)),
-            "extend-protocol" => return Some(Object::Nil),
-            "extend-type" => return Some(Object::Nil),
-            "extend" => return Some(Object::Nil),
             "deftype" => return Some(expand_deftype_or_record(form)),
             "defrecord" => return Some(expand_deftype_or_record(form)),
-            "reify" => return Some(Object::Nil),
-            "proxy" => return Some(Object::Nil),
-            "gen-class" => return Some(Object::Nil),
-            "gen-interface" => return Some(Object::Nil),
-            "import" => return Some(Object::Nil),
-            "use" => return Some(Object::Nil),
-            "require" => return Some(Object::Nil),
-            "refer" => return Some(Object::Nil),
-            "refer-clojure" => return Some(Object::Nil),
-            "load" => return Some(Object::Nil),
-            "load-file" => return Some(Object::Nil),
-            "load-string" => return Some(Object::Nil),
             // def-aset is a private defmacro generating defns for
             // aset-int / aset-long etc. We don't model Java arrays.
             "def-aset" => {
@@ -3421,13 +3945,29 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
                     Object::Nil,
                 ])));
             }
-            // assert is `(when-not (assert-true) (throw …))`. We expand to nil.
-            "assert" => return Some(Object::Nil),
-            // comment is a defmacro that returns nil regardless of body.
+            // comment is a defmacro that returns nil regardless of body
+            // (matches upstream behavior).
             "comment" => return Some(Object::Nil),
             "or" => return Some(expand_or(form)),
             "and" => return Some(expand_and(form)),
             "cond" => return Some(expand_cond(form)),
+            // Host-side bootstrap macros. When loading sources that do
+            // NOT first define their own `let`/`fn`/`when`/etc.
+            // (typically: cljs.core, or any standalone file that
+            // assumes the analyzer already provides them), these
+            // expansions let `let` mean `let*` etc. without requiring
+            // upstream `clojure/core.clj` to be loaded first.
+            //
+            // Limitation: no destructuring. `(let [{:keys [a]} m] …)`
+            // passes the destructuring pattern through to `let*`,
+            // which then panics on the non-symbol binding. Acceptable
+            // for v1 — `let*` is the actual primitive.
+            "let" => return Some(expand_let_simple(form)),
+            "fn" => return Some(expand_fn_simple(form)),
+            "loop" => return Some(expand_loop_simple(form)),
+            "when" => return Some(expand_when(form)),
+            "when-not" => return Some(expand_when_not(form)),
+            "if-not" => return Some(expand_if_not(form)),
             "doto" => return Some(expand_doto(form)),
             "->" => return Some(expand_thread_first(form)),
             "->>" => return Some(expand_thread_last(form)),
@@ -3443,19 +3983,9 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
             "letfn" => return Some(expand_letfn(form)),
             "future" => return Some(expand_future(form)),
             "future-call" => return Some(expand_future(form)),
-            "add-doc-and-meta" => return Some(Object::Nil),
-            "alter-meta!" => return Some(Object::Nil),
-            "alter-var-root" => return Some(Object::Nil),
-            "reset-meta!" => return Some(Object::Nil),
-            "vary-meta" => return Some(Object::Nil),
-            "with-meta" => return Some(Object::Nil),
             "doall" => return Some(expand_io_bang(form)),
             "dorun" => return Some(expand_io_bang(form)),
             "time" => return Some(expand_io_bang(form)),
-            "when-class" => return Some(Object::Nil),
-            "when-let*" => return Some(Object::Nil),
-            "when-not-empty" => return Some(Object::Nil),
-            "assert-args" => return Some(Object::Nil),
             _ => {}
         }
     }
@@ -3669,6 +4199,7 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
                         class: sess.compiler.class_type_id.0,
                         var: sess.compiler.var_type_id.0,
                         with_meta: sess.compiler.with_meta_type_id.0,
+                        user_instance: sess.compiler.user_instance_type_id.0,
                     };
                     let exc_obj = crate::runtime::any_bits_to_object(e, ids);
                     panic!(
@@ -3706,6 +4237,7 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
             class: sess.compiler.class_type_id.0,
             var: sess.compiler.var_type_id.0,
             with_meta: sess.compiler.with_meta_type_id.0,
+            user_instance: sess.compiler.user_instance_type_id.0,
         };
         crate::runtime::any_bits_to_object(result_bits, ids)
     });
@@ -4011,10 +4543,26 @@ fn analyze_seq(context: C, form: Object) -> Box<dyn Expr> {
                 return parse_instance_method_form(context, form);
             }
             // Trailing-dot constructor sugar: `(ClassName. args…)` →
-            // `(new ClassName args…)`. Java's reader rewrites this
-            // syntactically; we do it at analyze-seq time.
+            // `(new ClassName args…)` for host classes. For user-defined
+            // `deftype`/`defrecord` names we instead rewrite to a direct
+            // fn call on the factory: `(Foo. 1 2)` → `(Foo 1 2)`.
             if name.len() > 1 && name.ends_with('.') {
-                return parse_constructor_sugar(context, &name[..name.len() - 1], &form);
+                let class_name = &name[..name.len() - 1];
+                let class_sym = Symbol::intern(class_name);
+                if crate::lang::user_types::user_type_id_by_name(&class_sym)
+                    .is_some()
+                {
+                    // Rebuild as a direct fn-call on the factory.
+                    let mut items: Vec<Object> = Vec::new();
+                    items.push(Object::Symbol(class_sym));
+                    let mut s = super::rt::next(&form);
+                    while !matches!(s, Object::Nil) {
+                        items.push(super::rt::first(&s));
+                        s = super::rt::next(&s);
+                    }
+                    return analyze(context, Object::List(PersistentList::create(items)));
+                }
+                return parse_constructor_sugar(context, class_name, &form);
             }
         }
         // Qualified static-call sugar: `(Class/method args...)` →
@@ -5027,29 +5575,6 @@ pub fn analyze_symbol(sym: Arc<Symbol>) -> Box<dyn Expr> {
     // value). This accommodation lets Var statics and the IRef
     // family compile through, plus enum-style constants like
     // `java.util.concurrent.TimeUnit/MILLISECONDS`.
-    if let Some(_ns) = sym.get_namespace() {
-        // Any namespace-qualified symbol whose namespace doesn't
-        // resolve to a known Clojure ns gets a nil fallback. Covers
-        // Java classes (uppercase/dotted), `import` aliases, and
-        // user-namespace refs we don't model.
-        return Box::new(NIL_EXPR);
-    }
-    // Last-resort: bare uppercase-starting symbols that didn't
-    // resolve are treated as class references (e.g. `Array`,
-    // `Long`, `Math`). Returns nil at runtime; lets defns that
-    // reference unmodeled Java classes through `import` analyze.
-    let bare = sym.get_name();
-    if sym.get_namespace().is_none() {
-        // Bare uppercase-starting symbols (Array, Long, Math) AND
-        // any bare symbol containing dots (java.lang.X) get treated
-        // as class references that resolve to nil. Both forms are
-        // common in clojure.core where Java classes are referenced
-        // without our host_class registry tracking each one.
-        let starts_upper = bare.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-        if starts_upper || bare.contains('.') {
-            return Box::new(NIL_EXPR);
-        }
-    }
     panic!(
         "clojure-jvm: RuntimeException — Unable to resolve symbol: {} in this context",
         sym.get_name(),
@@ -6815,11 +7340,10 @@ fn parse_var_form(_context: C, form: Object) -> Box<dyn Expr> {
         let idx = with_active_compiler(|c| c.intern_literal(PendingLiteral::Var(v)));
         return Box::new(ConstantLiteralExpr { idx });
     }
-    // Fallback: `(var sym)` for symbols that aren't bound to a Var
-    // (special forms like `in-ns`, or names we haven't defined yet).
-    // Resolve to nil so `(alter-meta! (var in-ns) ...)` analyzes;
-    // the runtime no-op stub will accept nil.
-    Box::new(NIL_EXPR)
+    panic!(
+        "clojure-jvm: RuntimeException — Unable to resolve var: {}",
+        sym.get_name(),
+    );
 }
 
 /// `(set! target value)` — Java-side mutation. We don't model
@@ -6955,15 +7479,10 @@ fn parse_dot_form(context: C, form: Object) -> Box<dyn Expr> {
                             tag: None,
                         });
                     }
-                    None => {
-                        // Unregistered static method: emit nil at compile
-                        // time. Avoids generating a runtime extern call
-                        // whose nil cascade can SIGABRT downstream.
-                        eprintln!(
-                            "[cljvm-stub] static method `{name}/{method_name}` arity {arity} → NIL_EXPR (compile-time)"
-                        );
-                        return Box::new(NIL_EXPR);
-                    }
+                    None => panic!(
+                        "clojure-jvm: unregistered static method \
+                         `{name}/{method_name}` arity {arity}"
+                    ),
                 }
             }
         }
@@ -6974,12 +7493,10 @@ fn parse_dot_form(context: C, form: Object) -> Box<dyn Expr> {
     let fref_opt = with_active_compiler(|c| c.instance_method(&method_name, arity_with_recv));
     let fref = match fref_opt {
         Some(f) => f,
-        None => {
-            eprintln!(
-                "[cljvm-stub] instance method `.{method_name}` arity {arity_with_recv} → NIL_EXPR (compile-time)"
-            );
-            return Box::new(NIL_EXPR);
-        }
+        None => panic!(
+            "clojure-jvm: unregistered instance method \
+             `.{method_name}` arity {arity_with_recv}"
+        ),
     };
     let receiver = analyze(
         if context == C::Eval { context } else { C::Expression },
@@ -7024,12 +7541,10 @@ fn parse_qualified_static_call(
             fref,
             tag: None,
         }),
-        None => {
-            eprintln!(
-                "[cljvm-stub] static method `{class_name}/{method_name}` arity {arity} → NIL_EXPR (compile-time)"
-            );
-            Box::new(NIL_EXPR)
-        }
+        None => panic!(
+            "clojure-jvm: unregistered static method \
+             `{class_name}/{method_name}` arity {arity}"
+        ),
     }
 }
 
@@ -7098,6 +7613,28 @@ fn parse_instance_method_form(context: C, form: Object) -> Box<dyn Expr> {
             "clojure-jvm: parse_instance_method_form: head must be a `.method` Symbol, got {other:?}"
         ),
     };
+    // Field-access sugar: `(.-field-name inst)` → cljvm_rt_user_field_get_by_name.
+    // The reader produces head `.-field-name`; method_name after stripping
+    // the `.` is `-field-name`, so look for a leading dash.
+    if method_name.starts_with('-') && method_name.len() > 1 {
+        let field_name = &method_name[1..];
+        // Rewrite as `(. clojure.lang.RT (userFieldGetByName inst (quote field-name)))`.
+        let receiver = super::rt::second(&form);
+        let field_sym = Object::List(PersistentList::create(vec![
+            Object::Symbol(Symbol::intern("quote")),
+            Object::Symbol(Symbol::intern(field_name)),
+        ]));
+        let rewritten = Object::List(PersistentList::create(vec![
+            Object::Symbol(Symbol::intern(".")),
+            Object::Symbol(Symbol::intern_ns_name(None, "clojure.lang.RT")),
+            Object::List(PersistentList::create(vec![
+                Object::Symbol(Symbol::intern("userFieldGetByName")),
+                receiver,
+                field_sym,
+            ])),
+        ]));
+        return analyze(context, rewritten);
+    }
     // Receiver is the second list element; rest is args.
     let receiver_form = super::rt::second(&form);
     let receiver = analyze(
@@ -7116,12 +7653,10 @@ fn parse_instance_method_form(context: C, form: Object) -> Box<dyn Expr> {
     let fref_opt = with_active_compiler(|c| c.instance_method(&method_name, arity_with_receiver));
     let fref = match fref_opt {
         Some(f) => f,
-        None => {
-            eprintln!(
-                "[cljvm-stub] instance method `.{method_name}` arity {arity_with_receiver} → NIL_EXPR (compile-time)"
-            );
-            return Box::new(NIL_EXPR);
-        }
+        None => panic!(
+            "clojure-jvm: unregistered instance method \
+             `.{method_name}` arity {arity_with_receiver}"
+        ),
     };
     Box::new(InstanceMethodExpr {
         method_name,
@@ -7231,12 +7766,10 @@ fn parse_new_form(context: C, form: Object) -> Box<dyn Expr> {
     let fref_opt = with_active_compiler(|c| c.instance_method("__new__", arity_with_class));
     let fref = match fref_opt {
         Some(f) => f,
-        None => {
-            eprintln!(
-                "[cljvm-stub] (new {class_name} ...) arity {arity_with_class} → NIL_EXPR (compile-time)"
-            );
-            return Box::new(NIL_EXPR);
-        }
+        None => panic!(
+            "clojure-jvm: unregistered constructor `(new {class_name} ...)` \
+             arity {arity_with_class}"
+        ),
     };
     Box::new(NewExpr {
         class_expr,
@@ -7442,6 +7975,22 @@ pub struct Compiler {
     /// `clojure.lang.Var` heap layout: Raw64 holding `*const Var`.
     /// Used by `(var X)` literals + `(.setMacro v)` instance dispatch.
     pub var_type_id: dynlang::ObjTypeId,
+    /// `clojure.lang.UserInstance`: the shared ObjType for every
+    /// `deftype`/`defrecord` instance. One Raw64 field carrying the
+    /// `UserTypeId` (allocated by `lang::user_types::register_user_type`)
+    /// plus a varlen-values section holding the declared fields in
+    /// declaration order. The same ObjTypeId is used for every user
+    /// type so dispatch can read the discriminator off the Raw64 slot
+    /// rather than mint a new ObjType per `deftype`.
+    pub user_instance_type_id: dynlang::ObjTypeId,
+    /// Byte offset (from the heap cell base) of the Raw64
+    /// `user_type_id` slot. Cached at `Compiler::new` time the same
+    /// way `closure_fref_offset` is, because `dm.obj_handle` panics
+    /// after `Session::new` moves `obj_types` out.
+    pub user_instance_user_type_id_offset: i32,
+    /// Byte offset of the first varlen value slot. Subsequent slots
+    /// live at `user_instance_varlen_base + 8 * i`.
+    pub user_instance_varlen_base: i64,
 
     /// Pending compile-time literals. `*Expr.emit` interns into this queue
     /// and emits `gc_literal(LiteralRef(idx))`. After `gc.compile_jit`
@@ -7624,6 +8173,119 @@ impl Compiler {
         host_methods.insert(
             ("clojure.lang.RT".to_string(), "nth".to_string(), 2),
             rt_nth,
+        );
+        // Protocol dispatch (one extern per arity). `defprotocol`
+        // expands each declared method `(m [this … args])` to
+        // `(fn* [this … args] (. clojure.lang.RT
+        //    (protocolDispatchN <method_id> this … args)))`. The
+        // extern reads `method_id` off the Long-encoded NanBox bits,
+        // looks up the impl in `lang::user_types::DISPATCH`, then
+        // tail-calls it via the regular `cljvm_rt_invoke_N` path.
+        let rt_protocol_dispatch_1 = dm.declare_extern(
+            "cljvm_rt_protocol_dispatch_1", sig_2i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "protocolDispatch1".to_string(), 2),
+            rt_protocol_dispatch_1,
+        );
+        let sig_3i64 = dynir::Signature {
+            params: vec![dynir::Type::I64, dynir::Type::I64, dynir::Type::I64],
+            ret: Some(dynir::Type::I64),
+        };
+        let rt_protocol_dispatch_2 = dm.declare_extern(
+            "cljvm_rt_protocol_dispatch_2", sig_3i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "protocolDispatch2".to_string(), 3),
+            rt_protocol_dispatch_2,
+        );
+        let sig_4i64 = dynir::Signature {
+            params: vec![dynir::Type::I64; 4],
+            ret: Some(dynir::Type::I64),
+        };
+        let rt_protocol_dispatch_3 = dm.declare_extern(
+            "cljvm_rt_protocol_dispatch_3", sig_4i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "protocolDispatch3".to_string(), 4),
+            rt_protocol_dispatch_3,
+        );
+        let sig_5i64 = dynir::Signature {
+            params: vec![dynir::Type::I64; 5],
+            ret: Some(dynir::Type::I64),
+        };
+        let rt_protocol_dispatch_4 = dm.declare_extern(
+            "cljvm_rt_protocol_dispatch_4", sig_5i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "protocolDispatch4".to_string(), 5),
+            rt_protocol_dispatch_4,
+        );
+        // `cljvm_rt_install_impl(type_id, method_id, fn_handle)` —
+        // top-level statement emitted by `extend-type` / inline
+        // `deftype` impls to register one implementation in the
+        // dispatch table.
+        let rt_install_impl = dm.declare_extern(
+            "cljvm_rt_install_impl", sig_3i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "installImpl".to_string(), 3),
+            rt_install_impl,
+        );
+        // UserInstance allocators (one per field arity). `deftype`'s
+        // factory fn lowers to a `(. clojure.lang.RT (allocUserInstanceN
+        // <user_type_id> field0 …))` call.
+        let rt_alloc_ui_0 = dm.declare_extern(
+            "cljvm_rt_alloc_user_instance_0", sig_1i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "allocUserInstance0".to_string(), 1),
+            rt_alloc_ui_0,
+        );
+        let rt_alloc_ui_1 = dm.declare_extern(
+            "cljvm_rt_alloc_user_instance_1", sig_2i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "allocUserInstance1".to_string(), 2),
+            rt_alloc_ui_1,
+        );
+        let rt_alloc_ui_2 = dm.declare_extern(
+            "cljvm_rt_alloc_user_instance_2", sig_3i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "allocUserInstance2".to_string(), 3),
+            rt_alloc_ui_2,
+        );
+        let rt_alloc_ui_3 = dm.declare_extern(
+            "cljvm_rt_alloc_user_instance_3", sig_4i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "allocUserInstance3".to_string(), 4),
+            rt_alloc_ui_3,
+        );
+        let rt_alloc_ui_4 = dm.declare_extern(
+            "cljvm_rt_alloc_user_instance_4", sig_5i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "allocUserInstance4".to_string(), 5),
+            rt_alloc_ui_4,
+        );
+        // `(.-field-name inst)` field-access lowering target.
+        let rt_user_field_get = dm.declare_extern(
+            "cljvm_rt_user_field_get_by_name", sig_2i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "userFieldGetByName".to_string(), 2),
+            rt_user_field_get,
+        );
+        // `(satisfies? P x)` lowering target. Macro expansion bakes
+        // the proto_id as a Long literal.
+        let rt_satisfies = dm.declare_extern(
+            "cljvm_rt_satisfies", sig_2i64.clone(),
+        );
+        host_methods.insert(
+            ("clojure.lang.RT".to_string(), "satisfies".to_string(), 2),
+            rt_satisfies,
         );
         // Syntax-quote support — see `cljvm_rt_sq_concat` for why this
         // bypasses `clojure.core/concat` (which is multi-arity and binds
@@ -8453,6 +9115,30 @@ impl Compiler {
             .obj_type("clojure.lang.Var")
             .field("var_ptr", dynlang::FieldKind::Raw64)
             .build();
+        // `clojure.lang.UserInstance`: shared layout for every `deftype` /
+        // `defrecord`. The Raw64 `user_type_id` distinguishes which user
+        // type the instance belongs to (allocated by
+        // `lang::user_types::register_user_type`); the varlen-values
+        // section holds the declared fields in declaration order. One
+        // ObjTypeId backs every user type, so adding a new `deftype` at
+        // runtime does not require mutating `dm.obj_types` after the
+        // initial build.
+        let user_instance_type_id = dm
+            .obj_type("clojure.lang.UserInstance")
+            .field("user_type_id", dynlang::FieldKind::Raw64)
+            .varlen_values()
+            .build();
+        // Cache UserInstance layout offsets NOW for the same reason as
+        // Closure: `Session::new` will move `obj_types` out of `dm`,
+        // after which `dm.obj_handle` panics.
+        let user_instance_handle = dm.obj_handle(user_instance_type_id);
+        let user_instance_user_type_id_offset = user_instance_handle
+            .field_offsets
+            .get("user_type_id")
+            .map(|(o, _)| *o)
+            .expect("UserInstance type must have user_type_id field");
+        let user_instance_varlen_base =
+            user_instance_handle.type_info.varlen_element_offset(0) as i64;
 
         // Stash type_ids globally so Rust externs called from JIT-executing
         // code (`cljvm_rt_cons` etc.) can allocate the right ObjType without
@@ -8476,6 +9162,11 @@ impl Compiler {
             class: class_type_id.0,
             var: var_type_id.0,
             with_meta: with_meta_type_id.0,
+            user_instance: user_instance_type_id.0,
+        });
+        crate::runtime::set_user_instance_layout(crate::runtime::UserInstanceLayout {
+            user_type_id_offset: user_instance_user_type_id_offset,
+            varlen_base: user_instance_varlen_base,
         });
 
         // Per-arity stub host call externs. Used as fallback for
@@ -8522,6 +9213,9 @@ impl Compiler {
             class_type_id,
             var_type_id,
             with_meta_type_id,
+            user_instance_type_id,
+            user_instance_user_type_id_offset,
+            user_instance_varlen_base,
             pending_literals: std::sync::Mutex::new(Vec::new()),
             literal_pool_offset: std::sync::atomic::AtomicUsize::new(0),
             host_methods,
@@ -9158,6 +9852,18 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_rt_intCast" => Some(crate::runtime::cljvm_rt_intCast as *const u8),
         "cljvm_rt_longCast" => Some(crate::runtime::cljvm_rt_longCast as *const u8),
         "cljvm_rt_nth" => Some(crate::runtime::cljvm_rt_nth as *const u8),
+        "cljvm_rt_protocol_dispatch_1" => Some(crate::runtime::cljvm_rt_protocol_dispatch_1 as *const u8),
+        "cljvm_rt_protocol_dispatch_2" => Some(crate::runtime::cljvm_rt_protocol_dispatch_2 as *const u8),
+        "cljvm_rt_protocol_dispatch_3" => Some(crate::runtime::cljvm_rt_protocol_dispatch_3 as *const u8),
+        "cljvm_rt_protocol_dispatch_4" => Some(crate::runtime::cljvm_rt_protocol_dispatch_4 as *const u8),
+        "cljvm_rt_install_impl" => Some(crate::runtime::cljvm_rt_install_impl as *const u8),
+        "cljvm_rt_alloc_user_instance_0" => Some(crate::runtime::cljvm_rt_alloc_user_instance_0 as *const u8),
+        "cljvm_rt_alloc_user_instance_1" => Some(crate::runtime::cljvm_rt_alloc_user_instance_1 as *const u8),
+        "cljvm_rt_alloc_user_instance_2" => Some(crate::runtime::cljvm_rt_alloc_user_instance_2 as *const u8),
+        "cljvm_rt_alloc_user_instance_3" => Some(crate::runtime::cljvm_rt_alloc_user_instance_3 as *const u8),
+        "cljvm_rt_alloc_user_instance_4" => Some(crate::runtime::cljvm_rt_alloc_user_instance_4 as *const u8),
+        "cljvm_rt_user_field_get_by_name" => Some(crate::runtime::cljvm_rt_user_field_get_by_name as *const u8),
+        "cljvm_rt_satisfies" => Some(crate::runtime::cljvm_rt_satisfies as *const u8),
         "cljvm_rt_sq_concat" => Some(crate::runtime::cljvm_rt_sq_concat as *const u8),
         "cljvm_rt_peek" => Some(crate::runtime::cljvm_rt_peek as *const u8),
         "cljvm_rt_pop" => Some(crate::runtime::cljvm_rt_pop as *const u8),
@@ -10937,7 +11643,7 @@ mod tests {
             JitOutcome::Value(v) => v,
             other => panic!("unexpected JIT outcome: {other:?}"),
         };
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10, user_instance: 19 };
         unsafe { crate::runtime::heap_bits_to_object(bits, ids) }
     }
 
@@ -11929,7 +12635,7 @@ mod tests {
         // Compiler::new declares the heap ObjTypes in a fixed order; their
         // type_ids match the indices below. Hard-coded for tests; production
         // code would route through the Compiler / DynGcRuntime instances.
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10, user_instance: 19 };
         let obj = unsafe { crate::runtime::heap_bits_to_object(bits, ids) };
         match obj {
             Object::String(s) => (*s).clone(),
@@ -12012,7 +12718,7 @@ mod tests {
             JitOutcome::Value(v) => v,
             other => panic!("unexpected JIT outcome: {other:?}"),
         };
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10, user_instance: 19 };
         let obj = unsafe { crate::runtime::heap_bits_to_object(bits, ids) };
         match obj {
             Object::Symbol(s) => s,
@@ -12064,7 +12770,7 @@ mod tests {
         eprintln!("DIAG: nanbox=0x{nanbox_bits:x}");
 
         // Now decode.
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10, user_instance: 19 };
         let obj = unsafe { crate::runtime::heap_bits_to_object(nanbox_bits, ids) };
         match obj {
             Object::Symbol(s) => {
@@ -12144,7 +12850,7 @@ mod tests {
             JitOutcome::Value(v) => v,
             other => panic!("unexpected JIT outcome: {other:?}"),
         };
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10, user_instance: 19 };
         let obj = unsafe { crate::runtime::heap_bits_to_object(bits, ids) };
         match obj {
             Object::Keyword(k) => k,
@@ -12216,7 +12922,7 @@ mod tests {
             JitOutcome::Value(v) => v,
             other => panic!("unexpected JIT outcome: {other:?}"),
         };
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10, user_instance: 19 };
         let obj = unsafe { crate::runtime::heap_bits_to_object(bits, ids) };
         match obj {
             Object::List(l) => l,
@@ -12356,16 +13062,13 @@ mod tests {
     }
 
     #[test]
-    fn jit_e2e_dot_unknown_method_returns_nil() {
-        // Unregistered static methods now compile-time emit NIL_EXPR so
-        // upstream defns that reference Java methods we don't implement
-        // still analyze (they return nil at runtime).
-        let bits = eval_form_via_jit(list_of(vec![
+    #[should_panic(expected = "unregistered static method")]
+    fn jit_e2e_dot_unknown_method_panics() {
+        let _ = eval_form_via_jit(list_of(vec![
             sym("."),
             sym("clojure.lang.RT"),
             list_of(vec![sym("nonexistent"), Object::Long(0)]),
         ]));
-        assert_eq!(bits, crate::runtime::nanbox_nil());
     }
 
     #[test]
@@ -14542,7 +15245,7 @@ mod tests {
         // (. clojure.lang.RT (first nil)) → nil (NanBox-encoded)
         let v = eval_str_via_jit("(. clojure.lang.RT (first nil))");
         // Decode the NanBox; should be Object::Nil.
-        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10 };
+        let ids = crate::runtime::HeapTypeIds { string: 0, symbol: 1, keyword: 2, cons: 3, vector: 5, map: 6, set: 7, tree_map: 11, tree_set: 12, string_builder: 13, chunk_buffer: 14, i_chunk: 15, lazy_seq: 16, delay: 17, multi_arity_fn: 18, class: 8, var: 9, with_meta: 10, user_instance: 19 };
         // Nil isn't a TAG_PTR — handled in object_to_nanbox roundtrip.
         // For tests just check it's the nil tag pattern.
         let _ = ids;
@@ -14591,5 +15294,255 @@ mod tests {
             let form = list_of(vec![sym("def"), Object::Long(1), Object::Long(2)]);
             let _ = analyze(C::Statement, form);
         });
+    }
+
+    // ── defprotocol end-to-end ─────────────────────────────────────────
+    //
+    // Verifies that `defprotocol` registers methods, the generated
+    // method-fns dispatch into `cljvm_rt_protocol_dispatch_N`, and a
+    // manually-installed impl gets called.
+
+    #[test]
+    fn defprotocol_dispatches_to_installed_impl_on_nil() {
+        use crate::lang::user_types::{
+            self as ut, install_impl, protocol_id_by_name, protocol_method_id,
+            BUILTIN_NIL,
+        };
+        let mut sess = with_fresh_ns_session(
+            "test.defproto.nil",
+            || super::Session::new(),
+        );
+        // Reset registries so prior tests' ProtoMethodIds don't bleed in.
+        ut::_reset_for_tests();
+        let _ = sess.eval_str("(defprotocol IPing (-ping [this]))");
+        // The defprotocol expansion should have called register_protocol
+        // and stashed the id under the symbol name.
+        let pid = protocol_id_by_name(
+            &Symbol::intern_ns_name(None, "IPing"),
+        )
+        .expect("IPing should be registered");
+        let mid = protocol_method_id(pid, &Symbol::intern_ns_name(None, "-ping"))
+            .expect("-ping should be registered");
+        // Compile a fn impl `(fn* [this] 7)` and install it on nil.
+        let fn_handle = sess.eval_str("(fn* [this] 7)");
+        install_impl(BUILTIN_NIL, mid, fn_handle);
+        // `(-ping nil)` should dispatch through the generated method-fn,
+        // hit cljvm_rt_protocol_dispatch_1, lookup the impl, and invoke
+        // it.
+        let v = sess.eval_str("(-ping nil)");
+        assert_eq!(nanbox_to_f64(v), 7.0);
+    }
+
+    // Note: a test asserting that calling an uninstalled protocol
+    // method panics would need to cross the `extern "C"` boundary
+    // (panic-in-extern aborts the process by default — `should_panic`
+    // can't observe it). The miss-path panic in
+    // `lookup_protocol_method` is covered by the runtime-only test
+    // `dispatch_panics_with_no_impl` in `runtime::user_type_runtime_tests`.
+
+    // ── deftype field-only ───────────────────────────────────────────
+
+    #[test]
+    fn deftype_factory_and_field_access() {
+        use crate::lang::user_types as ut;
+        let mut sess = with_fresh_ns_session(
+            "test.deftype.fields",
+            || super::Session::new(),
+        );
+        ut::_reset_for_tests();
+        // Define + instantiate + field-read in one chain.
+        let _ = sess.eval_str("(deftype Foo [a b])");
+        let v_a = sess.eval_str("(.-a (Foo. 1 2))");
+        assert_eq!(nanbox_to_f64(v_a), 1.0);
+        let v_b = sess.eval_str("(.-b (Foo. 1 2))");
+        assert_eq!(nanbox_to_f64(v_b), 2.0);
+    }
+
+    // ── extend-protocol + satisfies? ─────────────────────────────────
+
+    #[test]
+    fn extend_protocol_multiple_types() {
+        use crate::lang::user_types as ut;
+        let mut sess = with_fresh_ns_session(
+            "test.extend.protocol",
+            || super::Session::new(),
+        );
+        ut::_reset_for_tests();
+        let _ = sess.eval_str("(defprotocol IShow (-show [this]))");
+        let _ = sess.eval_str("(deftype A [v])");
+        let _ = sess.eval_str("(deftype B [v])");
+        let _ = sess.eval_str(
+            "(extend-protocol IShow \
+                A (-show [this] (.-v this)) \
+                B (-show [this] 999))",
+        );
+        let va = sess.eval_str("(-show (A. 5))");
+        assert_eq!(nanbox_to_f64(va), 5.0);
+        let vb = sess.eval_str("(-show (B. 0))");
+        assert_eq!(nanbox_to_f64(vb), 999.0);
+    }
+
+    #[test]
+    fn satisfies_query_true_after_extend() {
+        use crate::lang::user_types as ut;
+        let mut sess = with_fresh_ns_session(
+            "test.satisfies.true",
+            || super::Session::new(),
+        );
+        ut::_reset_for_tests();
+        let _ = sess.eval_str("(defprotocol ICheck (-tag [this]))");
+        let _ = sess.eval_str("(deftype Foo [])");
+        let _ = sess.eval_str(
+            "(extend-type Foo ICheck (-tag [this] 1))",
+        );
+        let v = sess.eval_str("(satisfies? ICheck (Foo.))");
+        assert_eq!(v, crate::runtime::nanbox_bool(true));
+    }
+
+    #[test]
+    fn satisfies_false_when_not_extended() {
+        use crate::lang::user_types as ut;
+        let mut sess = with_fresh_ns_session(
+            "test.satisfies.false",
+            || super::Session::new(),
+        );
+        ut::_reset_for_tests();
+        let _ = sess.eval_str("(defprotocol ICheck2 (-tag [this]))");
+        let _ = sess.eval_str("(deftype Bar [])");
+        // No extend-type — Bar should not satisfy.
+        let v = sess.eval_str("(satisfies? ICheck2 (Bar.))");
+        assert_eq!(v, crate::runtime::nanbox_bool(false));
+    }
+
+    #[test]
+    fn satisfies_object_fallback_does_not_count() {
+        use crate::lang::user_types as ut;
+        let mut sess = with_fresh_ns_session(
+            "test.satisfies.object",
+            || super::Session::new(),
+        );
+        ut::_reset_for_tests();
+        let _ = sess.eval_str("(defprotocol ICheck3 (-tag [this]))");
+        let _ = sess.eval_str("(deftype Baz [])");
+        // Extend Object only — satisfies? should still report false
+        // for Baz because Object fallback isn't a "direct" impl.
+        let _ = sess.eval_str(
+            "(extend-type Object ICheck3 (-tag [this] 0))",
+        );
+        let v = sess.eval_str("(satisfies? ICheck3 (Baz.))");
+        assert_eq!(v, crate::runtime::nanbox_bool(false));
+    }
+
+    // ── inline deftype impls ─────────────────────────────────────────
+
+    #[test]
+    fn deftype_with_inline_protocol_impl() {
+        use crate::lang::user_types as ut;
+        let mut sess = with_fresh_ns_session(
+            "test.deftype.inline",
+            || super::Session::new(),
+        );
+        ut::_reset_for_tests();
+        let _ = sess.eval_str("(defprotocol IGetSum (-sum [this]))");
+        let _ = sess.eval_str(
+            "(deftype Pair [a b] \
+              IGetSum (-sum [this] (.-a this)))",
+        );
+        // The inline impl returns `.-a` of the instance.
+        let v = sess.eval_str("(-sum (Pair. 5 7))");
+        assert_eq!(nanbox_to_f64(v), 5.0);
+    }
+
+    // ── extend-type end-to-end ───────────────────────────────────────
+
+    #[test]
+    fn extend_type_on_user_deftype_dispatches() {
+        use crate::lang::user_types as ut;
+        let mut sess = with_fresh_ns_session(
+            "test.extend.user",
+            || super::Session::new(),
+        );
+        ut::_reset_for_tests();
+        let _ = sess.eval_str("(defprotocol IGetA (-get-a [this]))");
+        let _ = sess.eval_str("(deftype Pt [a b])");
+        // Extend Pt with IGetA: return the `a` field.
+        let _ = sess.eval_str(
+            "(extend-type Pt IGetA (-get-a [this] (.-a this)))",
+        );
+        let v = sess.eval_str("(-get-a (Pt. 10 20))");
+        assert_eq!(nanbox_to_f64(v), 10.0);
+    }
+
+    #[test]
+    fn extend_type_on_nil_dispatches() {
+        use crate::lang::user_types as ut;
+        let mut sess = with_fresh_ns_session(
+            "test.extend.nil",
+            || super::Session::new(),
+        );
+        ut::_reset_for_tests();
+        let _ = sess.eval_str("(defprotocol IDescribe (-describe [this]))");
+        let _ = sess.eval_str(
+            "(extend-type nil IDescribe (-describe [this] 999))",
+        );
+        let v = sess.eval_str("(-describe nil)");
+        assert_eq!(nanbox_to_f64(v), 999.0);
+    }
+
+    #[test]
+    fn extend_type_object_is_fallback() {
+        use crate::lang::user_types as ut;
+        let mut sess = with_fresh_ns_session(
+            "test.extend.object",
+            || super::Session::new(),
+        );
+        ut::_reset_for_tests();
+        let _ = sess.eval_str("(defprotocol IFallback (-fb [this]))");
+        // Install only on Object — Pt instances should still dispatch
+        // here through the BUILTIN_OBJECT fallback path.
+        let _ = sess.eval_str("(deftype Pt [a])");
+        let _ = sess.eval_str(
+            "(extend-type Object IFallback (-fb [this] 7))",
+        );
+        let v = sess.eval_str("(-fb (Pt. 1))");
+        assert_eq!(nanbox_to_f64(v), 7.0);
+    }
+
+    #[test]
+    fn deftype_via_direct_factory_call() {
+        use crate::lang::user_types as ut;
+        let mut sess = with_fresh_ns_session(
+            "test.deftype.fncall",
+            || super::Session::new(),
+        );
+        ut::_reset_for_tests();
+        // (Foo a b) without the trailing dot should also work — Foo
+        // is bound to the factory fn directly.
+        let _ = sess.eval_str("(deftype Bar [x])");
+        let v = sess.eval_str("(.-x (Bar 99))");
+        assert_eq!(nanbox_to_f64(v), 99.0);
+    }
+
+    #[test]
+    fn defprotocol_arity_2_method_dispatches() {
+        use crate::lang::user_types::{
+            self as ut, install_impl, protocol_id_by_name, protocol_method_id,
+            BUILTIN_NIL,
+        };
+        let mut sess = with_fresh_ns_session(
+            "test.defproto.arity2",
+            || super::Session::new(),
+        );
+        ut::_reset_for_tests();
+        let _ = sess.eval_str("(defprotocol IAdd (-add [this x]))");
+        let pid = protocol_id_by_name(&Symbol::intern_ns_name(None, "IAdd"))
+            .unwrap();
+        let mid = protocol_method_id(pid, &Symbol::intern_ns_name(None, "-add"))
+            .unwrap();
+        // Impl: ignore `this`, just return `x`.
+        let fn_handle = sess.eval_str("(fn* [this x] x)");
+        install_impl(BUILTIN_NIL, mid, fn_handle);
+        let v = sess.eval_str("(-add nil 42)");
+        assert_eq!(nanbox_to_f64(v), 42.0);
     }
 }

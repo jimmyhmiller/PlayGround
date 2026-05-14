@@ -80,3 +80,9 @@ pub mod compiler;
 // `analyze_symbol` to resolve class-name symbols, and at runtime by
 // `cljvm_inst_isInstance` to dispatch `instance?` checks.
 pub mod host_class;
+
+// User-defined protocols / deftypes / extend-type. The registry of
+// user-allocated TypeIds (deftype) and ProtocolIds + the global
+// (LogicalTypeId, ProtoMethodId) → FnHandle dispatch table that
+// `cljvm_rt_protocol_dispatch` reads.
+pub mod user_types;

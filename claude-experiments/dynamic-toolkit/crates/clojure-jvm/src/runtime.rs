@@ -125,6 +125,10 @@ pub struct HeapTypeIds {
     pub class: usize,
     pub var: usize,
     pub with_meta: usize,
+    /// Shared ObjTypeId backing every `deftype`/`defrecord` instance.
+    /// The actual user-type discriminator lives in the cell's Raw64
+    /// `user_type_id` field and is read by `effective_type_id`.
+    pub user_instance: usize,
 }
 
 /// Process-global type-id registry. `Compiler::new` calls
@@ -147,6 +151,32 @@ pub fn heap_type_ids() -> HeapTypeIds {
     *HEAP_TYPE_IDS
         .get()
         .expect("clojure-jvm: heap_type_ids() called before Compiler::new ran")
+}
+
+/// Byte-offset layout of `clojure.lang.UserInstance` cells. Captured at
+/// `Compiler::new` time (same as `HeapTypeIds`) so runtime externs can
+/// allocate and read user-deftype instances without threading the
+/// `Compiler` through.
+#[derive(Debug, Clone, Copy)]
+pub struct UserInstanceLayout {
+    /// Offset (from the heap cell base) of the Raw64 `user_type_id` slot.
+    pub user_type_id_offset: i32,
+    /// Offset of varlen value slot 0; slot `i` lives at
+    /// `varlen_base + 8 * i`.
+    pub varlen_base: i64,
+}
+
+static USER_INSTANCE_LAYOUT: std::sync::OnceLock<UserInstanceLayout> =
+    std::sync::OnceLock::new();
+
+pub fn set_user_instance_layout(layout: UserInstanceLayout) {
+    let _ = USER_INSTANCE_LAYOUT.set(layout);
+}
+
+pub fn user_instance_layout() -> UserInstanceLayout {
+    *USER_INSTANCE_LAYOUT.get().expect(
+        "clojure-jvm: user_instance_layout() called before Compiler::new ran",
+    )
 }
 
 /// Decode an arbitrary NanBox into an `Object`. Handles immediates
@@ -4681,4 +4711,497 @@ pub unsafe extern "C" fn cljvm_inst_with_meta(recv_bits: u64, meta_bits: u64) ->
         }
         nanbox_ptr(new_raw)
     })
+}
+
+// ── User types / protocols ─────────────────────────────────────────────
+//
+// Runtime support for `deftype`/`defrecord`/`defprotocol`/`extend-type`.
+// The registries themselves live in `lang::user_types`; the functions
+// below are the bridge between NanBox values and those registries.
+//
+// Heap layout for a UserInstance cell (one ObjType shared across all
+// user-defined types):
+//
+//     +0   u16   type_id          (= ids.user_instance for all instances)
+//     +2   u16   _gc/header pad
+//     +4   u32   _header
+//     +offs Raw64 user_type_id    (encoded as u64; the high 32 bits are 0)
+//     +base Value0, Value1, …    (one slot per declared field)
+//
+// `user_type_id_offset` and `varlen_base` are captured in
+// `UserInstanceLayout` at `Compiler::new` time.
+
+/// Map an arbitrary NanBox value to its `LogicalTypeId` for protocol
+/// dispatch lookup. The id is the union of:
+///   * Built-in `ObjTypeId.0` values for heap-allocated cells.
+///   * `BUILTIN_*` synthetic ids for tag-encoded primitives.
+///   * `USER_TYPE_BASE + user_type_id` for `UserInstance` cells
+///     (read off the cell's Raw64 discriminator slot).
+pub fn effective_type_id(bits: u64) -> crate::lang::user_types::LogicalTypeId {
+    use crate::lang::user_types::{
+        BUILTIN_BOOL, BUILTIN_DOUBLE, BUILTIN_FN, BUILTIN_NIL, user_type_logical,
+    };
+    match nanbox_tag(bits) {
+        None => BUILTIN_DOUBLE,
+        Some(TAG_NIL) => BUILTIN_NIL,
+        Some(TAG_BOOL) => BUILTIN_BOOL,
+        Some(TAG_FN) => BUILTIN_FN,
+        Some(TAG_PTR) => {
+            let raw = nanbox_payload(bits) as *const u8;
+            if raw.is_null() {
+                return BUILTIN_NIL;
+            }
+            let cell_type = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            // For UserInstance cells, read the Raw64 discriminator and
+            // shift into the user-type range. For everything else,
+            // widen the ObjTypeId to LogicalTypeId space directly.
+            let ids = heap_type_ids();
+            if cell_type == ids.user_instance {
+                let layout = user_instance_layout();
+                let off = layout.user_type_id_offset as isize;
+                let user_tid =
+                    unsafe { raw.offset(off).cast::<u64>().read_unaligned() }
+                        as u32;
+                user_type_logical(user_tid)
+            } else {
+                cell_type as u32
+            }
+        }
+        _ => crate::lang::user_types::BUILTIN_OBJECT,
+    }
+}
+
+/// Read field index `i` (zero-based, in declaration order) off a
+/// UserInstance NanBox. Panics if `bits` does not encode a UserInstance
+/// cell or if `i` is out of range for that user type. Callers that
+/// can't statically know the receiver shape should look up the field
+/// count via `lang::user_types::user_type_info` first.
+pub fn user_instance_field_get(bits: u64, i: usize) -> u64 {
+    let layout = user_instance_layout();
+    let ids = heap_type_ids();
+    let raw = match nanbox_tag(bits) {
+        Some(TAG_PTR) => {
+            let p = nanbox_payload(bits) as *const u8;
+            if p.is_null() {
+                panic!(
+                    "clojure-jvm: user_instance_field_get: null TAG_PTR payload"
+                );
+            }
+            p
+        }
+        other => panic!(
+            "clojure-jvm: user_instance_field_get: expected TAG_PTR receiver, \
+             got tag {other:?}",
+        ),
+    };
+    let cell_type = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+    if cell_type != ids.user_instance {
+        panic!(
+            "clojure-jvm: user_instance_field_get: receiver type_id {cell_type} \
+             is not UserInstance ({})",
+            ids.user_instance,
+        );
+    }
+    // Without field-count metadata on the cell itself we trust the
+    // analyzer to bake in a valid index. Out-of-range reads would walk
+    // off the end of the varlen payload — read_unaligned would still
+    // succeed but return garbage. The user-types registry has the
+    // declared count; callers needing safety should query it.
+    let off = layout.varlen_base + (i as i64) * 8;
+    unsafe { raw.offset(off as isize).cast::<u64>().read_unaligned() }
+}
+
+/// Allocate a new `clojure.lang.UserInstance` cell stamped with
+/// `user_type_id` and populated with the given field values (in
+/// declaration order). Returns the NanBox-tagged pointer.
+///
+/// Caller responsibilities:
+///   * Must be running with an installed mutator thread (the dyngc
+///     contract — same as `cljvm_rt_cons` and friends).
+///   * `fields` must be already-rooted; this function does not push
+///     them into the rootset before alloc. The expected pattern when
+///     called from JIT code is for codegen to materialize the field
+///     values, root them via `dynobj::roots::with_scope`, then call this.
+///
+/// # Safety
+/// See above — runs on a mutator thread, may trigger GC.
+pub unsafe fn alloc_user_instance(user_type_id: u32, fields: &[u64]) -> u64 {
+    let ids = heap_type_ids();
+    let layout = user_instance_layout();
+    let raw = dynlang::gc::gc_alloc_thunk(ids.user_instance as u64, fields.len() as u64);
+    let ptr = raw as *mut u8;
+    if ptr.is_null() {
+        panic!("clojure-jvm: alloc_user_instance: gc_alloc returned null");
+    }
+    let off = layout.user_type_id_offset as isize;
+    unsafe {
+        ptr.offset(off).cast::<u64>().write_unaligned(user_type_id as u64);
+        for (i, bits) in fields.iter().enumerate() {
+            let slot_off = layout.varlen_base + (i as i64) * 8;
+            ptr.offset(slot_off as isize)
+                .cast::<u64>()
+                .write_unaligned(*bits);
+        }
+    }
+    nanbox_encode(TAG_PTR, raw & PAYLOAD_MASK)
+}
+
+/// Dispatch a protocol method call. `method_id` identifies the
+/// `ProtoMethod` (allocated by `register_protocol`). Looks up an impl
+/// for `effective_type_id(this)`, falling back to `BUILTIN_OBJECT`.
+/// Returns the FnHandle (NanBox bits) of the implementation — caller
+/// is responsible for invoking it with the original args.
+///
+/// Panics with a Clojure-style "No implementation of method" message
+/// when no entry exists (matching the runtime behavior of
+/// `clojure.core/-cache-protocol-fn`'s miss path).
+pub fn lookup_protocol_method(method_id: u32, this_bits: u64) -> u64 {
+    use crate::lang::user_types::{lookup_impl, BUILTIN_OBJECT};
+    let tid = effective_type_id(this_bits);
+    if let Some(handle) = lookup_impl(tid, method_id) {
+        return handle;
+    }
+    if let Some(handle) = lookup_impl(BUILTIN_OBJECT, method_id) {
+        return handle;
+    }
+    panic!(
+        "clojure-jvm: protocol dispatch: no impl for method_id {method_id} on \
+         type_id {tid} (0x{tid:x}); receiver bits 0x{this_bits:x}",
+    );
+}
+
+// ── JIT-callable protocol dispatch externs ─────────────────────────────
+//
+// `defprotocol` lowers each declared method `(m [this …N args])` to a
+// `(def m (fn* [this …N args] (cljvm_rt_protocol_dispatch_<N+1> <method_id> this …N args)))`.
+// The method_id is a Long literal baked at expansion time. These
+// externs read it as a NanBox u64 and decode back to u32.
+//
+// Decoding: the method_id literal arrives as `f64::to_bits(method_id as f64)`
+// in NanBox form (our long encoding). `decode_method_id` reverses that.
+
+fn decode_method_id_bits(method_id_bits: u64) -> u32 {
+    // method_id is encoded the same way `(long N)` is — as a NanBox
+    // double whose bits are `(N as f64).to_bits()`. Reverse:
+    let v = f64::from_bits(method_id_bits) as i64;
+    if v < 0 || v > u32::MAX as i64 {
+        panic!(
+            "clojure-jvm: cljvm_rt_protocol_dispatch: implausible \
+             method_id {v} (decoded from bits 0x{method_id_bits:x})"
+        );
+    }
+    v as u32
+}
+
+/// Arity 1: `(m this)` — a no-extra-args protocol method.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_protocol_dispatch_1(
+    method_id_bits: u64,
+    this: u64,
+) -> u64 {
+    let mid = decode_method_id_bits(method_id_bits);
+    let handle = lookup_protocol_method(mid, this);
+    unsafe { cljvm_rt_invoke_1(handle, this) }
+}
+
+/// Arity 2: `(m this a)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_protocol_dispatch_2(
+    method_id_bits: u64,
+    this: u64,
+    a: u64,
+) -> u64 {
+    let mid = decode_method_id_bits(method_id_bits);
+    let handle = lookup_protocol_method(mid, this);
+    unsafe { cljvm_rt_invoke_2(handle, this, a) }
+}
+
+/// Arity 3: `(m this a b)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_protocol_dispatch_3(
+    method_id_bits: u64,
+    this: u64,
+    a: u64,
+    b: u64,
+) -> u64 {
+    let mid = decode_method_id_bits(method_id_bits);
+    let handle = lookup_protocol_method(mid, this);
+    unsafe { cljvm_rt_invoke_3(handle, this, a, b) }
+}
+
+/// Arity 4: `(m this a b c)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_protocol_dispatch_4(
+    method_id_bits: u64,
+    this: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+) -> u64 {
+    let mid = decode_method_id_bits(method_id_bits);
+    let handle = lookup_protocol_method(mid, this);
+    unsafe { cljvm_rt_invoke_4(handle, this, a, b, c) }
+}
+
+/// `(satisfies? P x)` query — returns true iff at least one method of
+/// protocol `proto_id` has an impl registered for `effective_type_id(x)`
+/// (exact match, no `BUILTIN_OBJECT` fallback). Matches Clojure's
+/// `clojure.core/satisfies?` semantics: a type satisfies a protocol
+/// when it has been extended via `extend-type` / `extend-protocol` /
+/// inline `deftype`. The Object fallback bucket is intentionally
+/// excluded; otherwise every receiver would "satisfy" every protocol
+/// that has an `Object` default.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_satisfies(
+    proto_id_bits: u64,
+    x_bits: u64,
+) -> u64 {
+    let pid = f64::from_bits(proto_id_bits) as i64;
+    if pid < 0 || pid > u32::MAX as i64 {
+        panic!(
+            "clojure-jvm: cljvm_rt_satisfies: implausible proto_id {pid}"
+        );
+    }
+    let info = crate::lang::user_types::protocol_info(pid as u32)
+        .unwrap_or_else(|| {
+            panic!(
+                "clojure-jvm: cljvm_rt_satisfies: protocol id {pid} not registered"
+            )
+        });
+    let tid = effective_type_id(x_bits);
+    for m in &info.methods {
+        if crate::lang::user_types::lookup_impl(tid, m.id).is_some() {
+            return nanbox_bool(true);
+        }
+    }
+    nanbox_bool(false)
+}
+
+// ── User-instance allocation externs ───────────────────────────────────
+//
+// `deftype` expands its factory `(def Foo (fn* [a b]
+//   (. clojure.lang.RT (allocUserInstanceN <user_type_id> a b))))`.
+// One extern per supported field arity; raise the cap by adding more
+// here and registering them in `Compiler::new`. v1 covers 0..4 fields.
+
+fn decode_user_type_id_bits(type_id_bits: u64) -> u32 {
+    let v = f64::from_bits(type_id_bits) as i64;
+    if v < 0 || v > u32::MAX as i64 {
+        panic!(
+            "clojure-jvm: alloc_user_instance: implausible user_type_id {v} \
+             (decoded from bits 0x{type_id_bits:x})"
+        );
+    }
+    v as u32
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_alloc_user_instance_0(type_id_bits: u64) -> u64 {
+    let tid = decode_user_type_id_bits(type_id_bits);
+    unsafe { alloc_user_instance(tid, &[]) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_alloc_user_instance_1(
+    type_id_bits: u64,
+    a: u64,
+) -> u64 {
+    let tid = decode_user_type_id_bits(type_id_bits);
+    unsafe { alloc_user_instance(tid, &[a]) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_alloc_user_instance_2(
+    type_id_bits: u64,
+    a: u64,
+    b: u64,
+) -> u64 {
+    let tid = decode_user_type_id_bits(type_id_bits);
+    unsafe { alloc_user_instance(tid, &[a, b]) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_alloc_user_instance_3(
+    type_id_bits: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+) -> u64 {
+    let tid = decode_user_type_id_bits(type_id_bits);
+    unsafe { alloc_user_instance(tid, &[a, b, c]) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_alloc_user_instance_4(
+    type_id_bits: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+) -> u64 {
+    let tid = decode_user_type_id_bits(type_id_bits);
+    unsafe { alloc_user_instance(tid, &[a, b, c, d]) }
+}
+
+/// `(.-field-name inst)` lowers to a call to this extern. Reads the
+/// receiver's `user_type_id` off the cell, looks up the type info,
+/// scans for the field by name, and returns the corresponding slot's
+/// NanBox value. Panics on non-UserInstance receivers or missing
+/// field name.
+///
+/// `field_name_bits` is the NanBox of a Symbol heap cell. We use
+/// Symbol rather than String because field names in source are
+/// already symbols — the analyzer can hand them across without
+/// allocating a String.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_user_field_get_by_name(
+    inst_bits: u64,
+    field_name_bits: u64,
+) -> u64 {
+    let ids = heap_type_ids();
+    // Decode receiver.
+    let raw = match nanbox_tag(inst_bits) {
+        Some(TAG_PTR) => {
+            let p = nanbox_payload(inst_bits) as *const u8;
+            if p.is_null() {
+                panic!(
+                    "clojure-jvm: user_field_get_by_name: null receiver"
+                );
+            }
+            p
+        }
+        other => panic!(
+            "clojure-jvm: user_field_get_by_name: receiver must be a \
+             UserInstance, got NanBox tag {other:?}"
+        ),
+    };
+    let cell_type = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+    if cell_type != ids.user_instance {
+        panic!(
+            "clojure-jvm: user_field_get_by_name: receiver type_id \
+             {cell_type} is not UserInstance ({})",
+            ids.user_instance,
+        );
+    }
+    let layout = user_instance_layout();
+    let off = layout.user_type_id_offset as isize;
+    let user_tid = unsafe { raw.offset(off).cast::<u64>().read_unaligned() } as u32;
+    // Decode field name from the Symbol heap cell.
+    let field_obj = unsafe { heap_bits_to_object(field_name_bits, ids) };
+    let field_sym = match field_obj {
+        Object::Symbol(s) => s,
+        other => panic!(
+            "clojure-jvm: user_field_get_by_name: field name must decode \
+             to a Symbol, got {other:?}",
+        ),
+    };
+    let idx = crate::lang::user_types::user_type_field_index(
+        user_tid,
+        &field_sym,
+    )
+    .unwrap_or_else(|| {
+        let info = crate::lang::user_types::user_type_info(user_tid);
+        let known: Vec<String> = info
+            .map(|t| t.fields.iter().map(|s| s.get_name().to_string()).collect())
+            .unwrap_or_default();
+        panic!(
+            "clojure-jvm: user_field_get_by_name: field `{}` not found on \
+             user type id {user_tid}; known fields: {known:?}",
+            field_sym.get_name(),
+        )
+    });
+    user_instance_field_get(inst_bits, idx)
+}
+
+/// `cljvm_rt_install_impl(type_id_bits, method_id_bits, fn_handle_bits)`:
+/// register `fn_handle_bits` as the impl of `(type_id, method_id)`. Both
+/// type_id and method_id arrive as Long-encoded NanBox bits. `fn_handle_bits`
+/// is the raw NanBox of the implementation fn (TAG_FN or TAG_PTR closure).
+/// Returns `nil` for convenience as a top-level statement.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_install_impl(
+    type_id_bits: u64,
+    method_id_bits: u64,
+    fn_handle_bits: u64,
+) -> u64 {
+    let tid = f64::from_bits(type_id_bits) as i64;
+    if tid < 0 || tid > u32::MAX as i64 {
+        panic!(
+            "clojure-jvm: cljvm_rt_install_impl: implausible type_id {tid}"
+        );
+    }
+    let mid = decode_method_id_bits(method_id_bits);
+    crate::lang::user_types::install_impl(tid as u32, mid, fn_handle_bits);
+    nanbox_nil()
+}
+
+#[cfg(test)]
+mod user_type_runtime_tests {
+    use super::*;
+    use crate::lang::user_types::{
+        self as ut, install_impl, register_protocol, register_user_type,
+        user_type_logical, BUILTIN_DOUBLE, BUILTIN_NIL, BUILTIN_OBJECT,
+        USER_TYPE_BASE,
+    };
+    use crate::lang::symbol::Symbol;
+    use std::sync::Arc;
+
+    fn sym(n: &str) -> Arc<Symbol> {
+        Symbol::intern_ns_name(None, n)
+    }
+
+    // These tests share the user_types global registries with each
+    // other; serialize via a Mutex so allocator state doesn't
+    // interleave.
+    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn guard() -> std::sync::MutexGuard<'static, ()> {
+        let g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        ut::_reset_for_tests();
+        g
+    }
+
+    #[test]
+    fn effective_type_id_handles_tag_encoded_primitives() {
+        let _g = guard();
+        // Don't need set_heap_type_ids / set_user_instance_layout for
+        // primitives — they're decided by nanbox_tag alone.
+        assert_eq!(effective_type_id(nanbox_nil()), BUILTIN_NIL);
+        assert_eq!(effective_type_id(nanbox_bool(true)), ut::BUILTIN_BOOL);
+        // f64::to_bits gives an untagged double.
+        assert_eq!(effective_type_id(1.5_f64.to_bits()), BUILTIN_DOUBLE);
+    }
+
+    #[test]
+    fn dispatch_falls_back_to_object_when_no_exact_impl() {
+        let _g = guard();
+        let (_pid, mids) = register_protocol(
+            sym("ICountable"),
+            vec![(sym("-count"), vec![1])],
+        );
+        // Install on Object only.
+        install_impl(BUILTIN_OBJECT, mids[0], 0xABCDABCD);
+        // Nil should still hit the Object fallback (no Nil-specific entry).
+        let handle = lookup_protocol_method(mids[0], nanbox_nil());
+        assert_eq!(handle, 0xABCDABCD);
+    }
+
+    #[test]
+    #[should_panic(expected = "no impl for method_id")]
+    fn dispatch_panics_with_no_impl() {
+        let _g = guard();
+        let (_pid, mids) = register_protocol(
+            sym("IUnknown"),
+            vec![(sym("-mystery"), vec![1])],
+        );
+        let _ = lookup_protocol_method(mids[0], nanbox_nil());
+    }
+
+    #[test]
+    fn user_type_logical_in_user_range() {
+        let _g = guard();
+        let uid = register_user_type(sym("Foo"), vec![]);
+        let logical = user_type_logical(uid);
+        assert!(logical >= USER_TYPE_BASE);
+    }
 }
