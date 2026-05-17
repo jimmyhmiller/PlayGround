@@ -1,0 +1,31 @@
+[workspace]
+authors = ["Jimmy Miller <jimmyhmiller@gmail.com>"]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+name = "mojo-t3"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+extract-oracle = { cmd = "python oracle/extract.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-rmsnorm = { cmd = "python oracle/dump_rmsnorm_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-rope = { cmd = "python oracle/dump_rope_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-sdpa = { cmd = "python oracle/dump_sdpa_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-mlp = { cmd = "python oracle/dump_mlp_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-block = { cmd = "python oracle/dump_block_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-forward = { cmd = "python oracle/dump_forward_case.py", env = { PYTHONNOUSERSITE = "1" } }
+test-rmsnorm = { cmd = "mojo run -I src tests/test_rmsnorm.mojo", depends-on = ["dump-rmsnorm"] }
+test-rope = { cmd = "mojo run -I src tests/test_rope.mojo", depends-on = ["dump-rope"] }
+test-sdpa = { cmd = "mojo run -I src tests/test_sdpa.mojo", depends-on = ["dump-sdpa"] }
+test-mlp = { cmd = "mojo run -I src tests/test_mlp.mojo", depends-on = ["dump-mlp"] }
+test-block = { cmd = "mojo run -I src tests/test_block.mojo", depends-on = ["dump-block"] }
+test-forward = { cmd = "mojo run -I src tests/test_forward.mojo", depends-on = ["dump-forward"] }
+
+[dependencies]
+mojo = ">=1.0.0b2.dev2026050306,<2"
+max = ">=26.4.0.dev2026050106,<27"
+python = ">=3.11,<3.13"
+pytorch = "*"
+numpy = "*"
+safetensors = "*"
+huggingface_hub = "*"
+transformers = "*"
