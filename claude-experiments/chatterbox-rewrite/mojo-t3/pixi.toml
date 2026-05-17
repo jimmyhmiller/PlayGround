@@ -14,6 +14,7 @@ dump-mlp = { cmd = "python oracle/dump_mlp_case.py", env = { PYTHONNOUSERSITE = 
 dump-block = { cmd = "python oracle/dump_block_case.py", env = { PYTHONNOUSERSITE = "1" } }
 dump-forward = { cmd = "python oracle/dump_forward_case.py", env = { PYTHONNOUSERSITE = "1" } }
 dump-decode-sdpa = { cmd = "python oracle/dump_decode_sdpa_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-block-decode = { cmd = "python oracle/dump_block_decode_case.py", env = { PYTHONNOUSERSITE = "1" } }
 test-rmsnorm = { cmd = "mojo run -I src tests/test_rmsnorm.mojo", depends-on = ["dump-rmsnorm"] }
 test-rope = { cmd = "mojo run -I src tests/test_rope.mojo", depends-on = ["dump-rope"] }
 test-sdpa = { cmd = "mojo run -I src tests/test_sdpa.mojo", depends-on = ["dump-sdpa"] }
@@ -21,6 +22,7 @@ test-mlp = { cmd = "mojo run -I src tests/test_mlp.mojo", depends-on = ["dump-ml
 test-block = { cmd = "mojo run -I src tests/test_block.mojo", depends-on = ["dump-block"] }
 test-forward = { cmd = "mojo run -I src tests/test_forward.mojo", depends-on = ["dump-forward"] }
 test-decode-sdpa = { cmd = "mojo run -I src tests/test_decode_sdpa.mojo", depends-on = ["dump-decode-sdpa"] }
+test-block-decode = { cmd = "mojo run -I src tests/test_block_decode.mojo", depends-on = ["dump-block-decode"] }
 
 [dependencies]
 mojo = ">=1.0.0b2.dev2026050306,<2"
