@@ -25,6 +25,7 @@ serve multiple HiFiGAN layers.
 """
 
 from std.gpu import block_idx, thread_idx
+from std.math import sin
 from layout import TileTensor, TensorLayout
 
 
@@ -144,6 +145,46 @@ def transposed_conv1d_kernel[
                     acc += xv * wv
 
     output[b, co, lo] = rebind[output.ElementType](acc.cast[dtype]())
+
+
+def snake_kernel[
+    dtype: DType,
+    InLayout: TensorLayout,
+    AlphaLayout: TensorLayout,
+    OutLayout: TensorLayout,
+](
+    output: TileTensor[dtype, OutLayout, MutAnyOrigin],   # (B, C, T)
+    inp: TileTensor[dtype, InLayout, MutAnyOrigin],        # (B, C, T)
+    alpha: TileTensor[dtype, AlphaLayout, MutAnyOrigin],   # (C,)
+    batch: Int, channels: Int, length: Int,
+):
+    """Snake activation:
+        y = x + (1 / (alpha[c] + 1e-9)) * sin(x * alpha[c])^2
+
+    Used by HiFiGAN ResBlocks. alpha is per-channel, learned.
+
+    Launch: grid = B * C, block_dim = length (one thread per time step).
+    Realistically we'd want length-parallel within a block; we keep
+    block_dim = length for simplicity (sizes are modest).
+    """
+    comptime assert inp.flat_rank == 3
+    comptime assert alpha.flat_rank == 1
+    comptime assert output.flat_rank == 3
+
+    var bid = block_idx.x
+    var t = thread_idx.x
+
+    var c = bid % channels
+    var b = bid // channels
+
+    if t >= length:
+        return
+
+    var x_val = rebind[Scalar[dtype]](inp[b, c, t]).cast[DType.float32]()
+    var a = rebind[Scalar[dtype]](alpha[c]).cast[DType.float32]()
+    var s = sin(x_val * a)
+    var y = x_val + (1.0 / (a + 1.0e-9)) * s * s
+    output[b, c, t] = rebind[output.ElementType](y.cast[dtype]())
 
 
 def leaky_relu_kernel[

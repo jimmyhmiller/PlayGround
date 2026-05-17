@@ -102,6 +102,76 @@ def main() -> None:
     write_tensor(OUT / "leaky_expected.bin", y_l.numpy())
     print(f"[leaky_relu] x{tuple(x_l.shape)} slope=0.1")
 
+    # ---- Snake activation ----
+    C_s, L_s = 8, 16
+    x_s = torch.randn(B, C_s, L_s, generator=g, dtype=torch.float32)
+    alpha = torch.randn(C_s, generator=g, dtype=torch.float32) * 0.5 + 1.0
+    y_s = x_s + (1.0 / (alpha.unsqueeze(0).unsqueeze(-1) + 1e-9)) * torch.sin(x_s * alpha.unsqueeze(0).unsqueeze(-1)) ** 2
+    write_tensor(OUT / "snake_x.bin", x_s.numpy())
+    write_tensor(OUT / "snake_alpha.bin", alpha.numpy())
+    write_tensor(OUT / "snake_expected.bin", y_s.numpy())
+    write_tensor(OUT / "snake_meta.bin", np.array([B, C_s, L_s], dtype=np.int64))
+    print(f"[snake] x{tuple(x_s.shape)} alpha{tuple(alpha.shape)}")
+
+    # ---- ResBlock parity (1 sub-block, dilations=[1, 3, 5]) ----
+    # Mirrors hifigan.py:ResBlock.forward for one dilation step.
+    # We dump weights+alphas+input, and the expected post-ResBlock output.
+    # Test will verify our Mojo-side composition (snake → conv → snake → conv → +residual)
+    # for the *first* dilation only; full ResBlock chains three of these.
+    C_r = 8
+    L_r = 32
+    K_r = 3
+    dilations = [1, 3, 5]
+    x_r = torch.randn(B, C_r, L_r, generator=g, dtype=torch.float32)
+    w1_list, w2_list, b1_list, b2_list, a1_list, a2_list = [], [], [], [], [], []
+    for dil in dilations:
+        pad1 = ((K_r - 1) * dil) // 2          # convs1: dilation=dil
+        pad2 = ((K_r - 1) * 1) // 2            # convs2: dilation=1 always
+        w1 = torch.randn(C_r, C_r, K_r, generator=g) * 0.1
+        b1 = torch.randn(C_r, generator=g) * 0.05
+        w2 = torch.randn(C_r, C_r, K_r, generator=g) * 0.1
+        b2 = torch.randn(C_r, generator=g) * 0.05
+        a1 = torch.ones(C_r) + torch.randn(C_r, generator=g) * 0.1
+        a2 = torch.ones(C_r) + torch.randn(C_r, generator=g) * 0.1
+        w1_list.append((w1, b1, pad1))
+        w2_list.append((w2, b2, 1, pad2))
+        a1_list.append(a1)
+        a2_list.append(a2)
+
+    def snake(x, alpha):
+        a = alpha.unsqueeze(0).unsqueeze(-1)
+        return x + (1.0 / (a + 1e-9)) * torch.sin(x * a) ** 2
+
+    x_cur = x_r
+    for i in range(len(dilations)):
+        w1, b1, pad1 = w1_list[i]
+        w2, b2, dil2, pad2 = w2_list[i]
+        a1 = a1_list[i]
+        a2 = a2_list[i]
+        xt = snake(x_cur, a1)
+        xt = F.conv1d(xt, w1, bias=b1, stride=1, padding=pad1, dilation=dilations[i])
+        xt = snake(xt, a2)
+        xt = F.conv1d(xt, w2, bias=b2, stride=1, padding=pad2, dilation=1)
+        x_cur = x_cur + xt
+    y_r = x_cur
+
+    write_tensor(OUT / "resblock_x.bin", x_r.numpy())
+    write_tensor(OUT / "resblock_expected.bin", y_r.numpy())
+    for i, dil in enumerate(dilations):
+        w1, b1, pad1 = w1_list[i]
+        w2, b2, dil2, pad2 = w2_list[i]
+        write_tensor(OUT / f"resblock_w1_{i}.bin", w1.numpy())
+        write_tensor(OUT / f"resblock_b1_{i}.bin", b1.numpy())
+        write_tensor(OUT / f"resblock_w2_{i}.bin", w2.numpy())
+        write_tensor(OUT / f"resblock_b2_{i}.bin", b2.numpy())
+        write_tensor(OUT / f"resblock_a1_{i}.bin", a1_list[i].numpy())
+        write_tensor(OUT / f"resblock_a2_{i}.bin", a2_list[i].numpy())
+        write_tensor(OUT / f"resblock_meta_{i}.bin",
+                     np.array([dil, pad1, pad2], dtype=np.int64))
+    write_tensor(OUT / "resblock_global_meta.bin",
+                 np.array([B, C_r, L_r, K_r, len(dilations)], dtype=np.int64))
+    print(f"[resblock] x{tuple(x_r.shape)} dilations={dilations} -> y{tuple(y_r.shape)}")
+
 
 if __name__ == "__main__":
     main()
