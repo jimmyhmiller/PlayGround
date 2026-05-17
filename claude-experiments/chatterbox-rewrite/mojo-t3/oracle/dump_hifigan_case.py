@@ -170,8 +170,10 @@ def main() -> None:
             write_tensor(OUT / f"stage_after_up{i}.bin",
                          x_cur.cpu().numpy().astype(np.float32))
 
-        x_cur = TF.leaky_relu(x_cur)
-        x_cur = hift.conv_post(x_cur)
+        x_after_final_lrelu = TF.leaky_relu(x_cur)
+        write_tensor(OUT / "stage_after_final_lrelu.bin",
+                     x_after_final_lrelu.cpu().numpy().astype(np.float32))
+        x_cur = hift.conv_post(x_after_final_lrelu)
         write_tensor(OUT / "stage_after_conv_post.bin",
                      x_cur.cpu().numpy().astype(np.float32))
 
@@ -233,6 +235,11 @@ def main() -> None:
             shape = tuple(sd[k].shape)
             f.write(f"{k}\t{shape}\n")
     print(f"[hifigan] manifest written")
+
+    # stft_window is a plain tensor attribute, not a registered buffer, so
+    # it's missing from state_dict(). Dump it separately.
+    write_tensor(OUT / "weights" / "stft_window.bin",
+                 hift.stft_window.cpu().numpy().astype(np.float32))
 
 
 if __name__ == "__main__":

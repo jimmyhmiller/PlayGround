@@ -25,7 +25,7 @@ serve multiple HiFiGAN layers.
 """
 
 from std.gpu import block_idx, thread_idx
-from std.math import sin
+from std.math import sin, cos, exp
 from layout import TileTensor, TensorLayout
 
 
@@ -185,6 +185,82 @@ def snake_kernel[
     var s = sin(x_val * a)
     var y = x_val + (1.0 / (a + 1.0e-9)) * s * s
     output[b, c, t] = rebind[output.ElementType](y.cast[dtype]())
+
+
+def magnitude_phase_split_kernel[
+    dtype: DType,
+    InLayout: TensorLayout,
+    MLayout: TensorLayout,
+    PLayout: TensorLayout,
+    N_FREQ: Int,
+    SECOND_HALF_OFFSET: Int,    # = N_FREQ
+](
+    magnitude: TileTensor[dtype, MLayout, MutAnyOrigin],     # (B, N_FREQ, T)
+    phase: TileTensor[dtype, PLayout, MutAnyOrigin],          # (B, N_FREQ, T)
+    inp: TileTensor[dtype, InLayout, MutAnyOrigin],            # (B, 2*N_FREQ, T)
+    batch: Int, time: Int,
+):
+    """For HiFiGAN's conv_post output:
+        magnitude[b,k,t] = exp(inp[b, k, t])              for k in [0, N_FREQ)
+        phase[b,k,t]     = sin(inp[b, N_FREQ + k, t])     for k in [0, N_FREQ)
+
+    Launch: grid = B * N_FREQ * T, block_dim = 1.
+    Also clips magnitude at 1e2 to match upstream's `torch.clip(magnitude, max=1e2)`.
+    """
+    comptime assert inp.flat_rank == 3
+    comptime assert magnitude.flat_rank == 3
+    comptime assert phase.flat_rank == 3
+
+    var idx = block_idx.x
+    var t = idx % time
+    var k = (idx // time) % N_FREQ
+    var b = idx // (time * N_FREQ)
+
+    var m_in = rebind[Scalar[dtype]](inp[b, k, t]).cast[DType.float32]()
+    var p_in = rebind[Scalar[dtype]](inp[b, SECOND_HALF_OFFSET + k, t]).cast[DType.float32]()
+
+    var m_val = exp(m_in)
+    if m_val > 100.0:
+        m_val = 100.0
+    var p_val = sin(p_in)
+
+    magnitude[b, k, t] = rebind[magnitude.ElementType](m_val.cast[dtype]())
+    phase[b, k, t] = rebind[phase.ElementType](p_val.cast[dtype]())
+
+
+def magnitude_phase_to_complex_kernel[
+    dtype: DType,
+    MLayout: TensorLayout,
+    PLayout: TensorLayout,
+    RLayout: TensorLayout,
+    ILayout: TensorLayout,
+](
+    real_out: TileTensor[dtype, RLayout, MutAnyOrigin],     # (B, N_FREQ, T)
+    imag_out: TileTensor[dtype, ILayout, MutAnyOrigin],     # (B, N_FREQ, T)
+    magnitude: TileTensor[dtype, MLayout, MutAnyOrigin],   # (B, N_FREQ, T)
+    phase: TileTensor[dtype, PLayout, MutAnyOrigin],        # (B, N_FREQ, T)
+    batch: Int, n_freq: Int, time: Int,
+):
+    """real = magnitude * cos(phase), imag = magnitude * sin(phase).
+    Used to bridge HiFiGAN's magnitude/phase output into istft_kernel's
+    real/imag input. Launch: grid = B*N_FREQ*T, block_dim = 1.
+    """
+    comptime assert real_out.flat_rank == 3
+    comptime assert imag_out.flat_rank == 3
+    comptime assert magnitude.flat_rank == 3
+    comptime assert phase.flat_rank == 3
+
+    var idx = block_idx.x
+    var t = idx % time
+    var k = (idx // time) % n_freq
+    var b = idx // (time * n_freq)
+
+    var m = rebind[Scalar[dtype]](magnitude[b, k, t]).cast[DType.float32]()
+    var p = rebind[Scalar[dtype]](phase[b, k, t]).cast[DType.float32]()
+    var re = m * cos(p)
+    var im = m * sin(p)
+    real_out[b, k, t] = rebind[real_out.ElementType](re.cast[dtype]())
+    imag_out[b, k, t] = rebind[imag_out.ElementType](im.cast[dtype]())
 
 
 def leaky_relu_kernel[
