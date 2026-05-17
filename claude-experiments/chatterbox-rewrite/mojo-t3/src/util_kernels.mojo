@@ -163,6 +163,33 @@ def cache_append_kernel[
     cache[b, h, slot, d] = rebind[cache.ElementType](v)
 
 
+def cache_copy_prefix_kernel[
+    dtype: DType,
+    SrcLayout: TensorLayout,
+    CacheLayout: TensorLayout,
+    BATCH: Int, N_HEADS: Int, HEAD_DIM: Int, SRC_SEQ: Int,
+](
+    cache: TileTensor[dtype, CacheLayout, MutAnyOrigin],     # (B, H, MAX_CTX, D)
+    src: TileTensor[dtype, SrcLayout, MutAnyOrigin],          # (B, H, SRC_SEQ, D)
+):
+    """Copy src[b,h,s,d] → cache[b,h,s,d] for s in [0..SRC_SEQ).
+
+    Launch: grid = B*H*SRC_SEQ, block_dim = HEAD_DIM.
+    """
+    comptime assert src.flat_rank == 4
+    comptime assert cache.flat_rank == 4
+
+    var bid = block_idx.x
+    var d = thread_idx.x
+
+    var s = bid % SRC_SEQ
+    var h = (bid // SRC_SEQ) % N_HEADS
+    var b = bid // (SRC_SEQ * N_HEADS)
+
+    var v = rebind[Scalar[dtype]](src[b, h, s, d])
+    cache[b, h, s, d] = rebind[cache.ElementType](v)
+
+
 def bhsd_to_bshd_kernel[
     dtype: DType,
     InLayout: TensorLayout,
