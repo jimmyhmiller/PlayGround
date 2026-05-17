@@ -129,12 +129,85 @@ def main() -> None:
     g = torch.Generator().manual_seed(0xC0FFEE)
     mel = torch.randn(1, 80, T_MEL, generator=g, dtype=torch.float32) * 0.5
 
+    # ---- Per-upsample-stage intermediates (s=zeros) ----
+    # Capture the state of `x` after each major step of decode() so we can
+    # isolate parity bugs to a specific kernel during the Mojo port.
     with torch.inference_mode():
+        T_audio = T_MEL
+        upsample_scale = 8 * 5 * 3 * 4  # 480
+        s_zero = torch.zeros(1, 1, T_MEL * upsample_scale, dtype=torch.float32)
+        s_stft_real, s_stft_imag = hift._stft(s_zero.squeeze(1))
+        s_stft_cat = torch.cat([s_stft_real, s_stft_imag], dim=1)
+        write_tensor(OUT / "stage_s_stft_cat.bin",
+                     s_stft_cat.cpu().numpy().astype(np.float32))
+
+        x_cur = mel
+        x_cur = hift.conv_pre(x_cur)
+        write_tensor(OUT / "stage_after_conv_pre.bin",
+                     x_cur.cpu().numpy().astype(np.float32))
+
+        import torch.nn.functional as TF
+        for i in range(hift.num_upsamples):
+            x_cur = TF.leaky_relu(x_cur, hift.lrelu_slope)
+            x_cur = hift.ups[i](x_cur)
+            if i == hift.num_upsamples - 1:
+                x_cur = hift.reflection_pad(x_cur)
+            si = hift.source_downs[i](s_stft_cat)
+            si = hift.source_resblocks[i](si)
+            x_cur = x_cur + si
+            xs = None
+            for j in range(hift.num_kernels):
+                rb = hift.resblocks[i * hift.num_kernels + j](x_cur)
+                xs = rb if xs is None else xs + rb
+            x_cur = xs / hift.num_kernels
+            write_tensor(OUT / f"stage_after_up{i}.bin",
+                         x_cur.cpu().numpy().astype(np.float32))
+
+        x_cur = TF.leaky_relu(x_cur)
+        x_cur = hift.conv_post(x_cur)
+        write_tensor(OUT / "stage_after_conv_post.bin",
+                     x_cur.cpu().numpy().astype(np.float32))
+
+        magnitude = torch.exp(x_cur[:, :9, :])
+        phase = torch.sin(x_cur[:, 9:, :])
+        write_tensor(OUT / "stage_magnitude.bin",
+                     magnitude.cpu().numpy().astype(np.float32))
+        write_tensor(OUT / "stage_phase.bin",
+                     phase.cpu().numpy().astype(np.float32))
+
+    with torch.inference_mode():
+        # Full pipeline (mel -> wav including f0/source).
         wav, _ = hift.inference(speech_feat=mel)
+
+        # Also dump just the decode(x, s=zeros) path so we can do an
+        # isolated parity test of the conv-only chain (no f0/source branch).
+        # s shape is (B=1, 1, T_mel * prod(upsample_rates) * istft_hop)
+        # = (1, 1, T_mel * 480) = (1, 1, 15360).
+        upsample_scale = 1
+        for u in [8, 5, 3]:
+            upsample_scale *= u
+        upsample_scale *= 4  # istft hop_len
+        s_zero = torch.zeros(1, 1, T_MEL * upsample_scale, dtype=torch.float32)
+        wav_decode_zeros = hift.decode(x=mel, s=s_zero)
+        # And capture the real s that the full inference path would compute,
+        # so a future test can plug it in directly.
+        f0 = hift.f0_predictor(mel)
+        s_real = hift.f0_upsamp(f0[:, None]).transpose(1, 2)
+        s_real, _, _ = hift.m_source(s_real)
+        s_real = s_real.transpose(1, 2)
+        wav_decode_real = hift.decode(x=mel, s=s_real)
+
     print(f"[hifigan] mel{tuple(mel.shape)} -> wav{tuple(wav.shape)}")
+    print(f"[hifigan] decode(s=zeros){tuple(wav_decode_zeros.shape)}")
+    print(f"[hifigan] decode(s=real){tuple(wav_decode_real.shape)}")
 
     write_tensor(OUT / "mel.bin", mel.numpy().astype(np.float32))
     write_tensor(OUT / "expected_wav.bin", wav.numpy().astype(np.float32))
+    write_tensor(OUT / "expected_wav_decode_zeros.bin",
+                 wav_decode_zeros.numpy().astype(np.float32))
+    write_tensor(OUT / "expected_wav_decode_real.bin",
+                 wav_decode_real.numpy().astype(np.float32))
+    write_tensor(OUT / "s_real.bin", s_real.numpy().astype(np.float32))
     write_tensor(OUT / "meta.bin", np.array(
         [1, 80, T_MEL, wav.shape[1]], dtype=np.int64))
 

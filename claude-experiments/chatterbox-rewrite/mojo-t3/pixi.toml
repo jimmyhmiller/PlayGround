@@ -34,6 +34,7 @@ test-heads = { cmd = "mojo run -I src tests/test_heads.mojo", depends-on = ["dum
 test-generate = { cmd = "mojo run -I src tests/test_generate.mojo", depends-on = ["dump-generate"] }
 test-conv = { cmd = "mojo run -I src tests/test_conv.mojo", depends-on = ["dump-conv"] }
 test-stft = { cmd = "mojo run -I src tests/test_stft.mojo", depends-on = ["dump-stft"] }
+test-hifigan-conv-pre = { cmd = "mojo run -I src tests/test_hifigan_conv_pre.mojo", depends-on = ["dump-hifigan"] }
 
 [dependencies]
 mojo = ">=1.0.0b2.dev2026050306,<2"
