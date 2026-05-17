@@ -41,6 +41,21 @@ struct TensorBF16(Movable):
         return n
 
 
+@fieldwise_init
+struct TensorI64(Movable):
+    var data: List[Int64]
+    var shape: List[Int]
+
+    def rank(self) -> Int:
+        return len(self.shape)
+
+    def numel(self) -> Int:
+        var n = 1
+        for i in range(len(self.shape)):
+            n *= self.shape[i]
+        return n
+
+
 def _read_i64_le(read bytes: List[UInt8], offset: Int) -> Int:
     var v: Int64 = 0
     for k in range(8):
@@ -114,3 +129,32 @@ def load_bf16(path: String) raises -> TensorBF16:
         data.append(src[elem_offset + i])
 
     return TensorBF16(data^, shape^)
+
+
+def load_i64(path: String) raises -> TensorI64:
+    var f = open(path, "r")
+    var bytes = f.read_bytes()
+    f.close()
+
+    var rank = _read_i64_le(bytes, 0)
+    var shape = List[Int]()
+    var off = 8
+    for _ in range(rank):
+        shape.append(_read_i64_le(bytes, off))
+        off += 8
+    var tag = _read_i32_le(bytes, off)
+    off += 4
+    if tag != 2:
+        raise Error("expected i64 tag 2, got " + String(tag))
+
+    var n = 1
+    for i in range(len(shape)):
+        n *= shape[i]
+
+    # Header is 8 + 8*rank + 4 bytes; tag bytes break 8-byte alignment so we
+    # read each i64 from raw bytes rather than via a bitcast pointer.
+    var data = List[Int64](capacity=n)
+    for i in range(n):
+        data.append(Int64(_read_i64_le(bytes, off + i * 8)))
+
+    return TensorI64(data^, shape^)
