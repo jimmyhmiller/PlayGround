@@ -21,7 +21,7 @@ from std.testing import TestSuite, assert_almost_equal
 from std.gpu.host import DeviceContext
 from layout import TileTensor, row_major
 
-from fixture import Tensor, load_fp32
+from fixture import Tensor, TensorBF16, load_fp32, load_bf16
 from sdpa import qk_decode_kernel, softmax_decode_kernel, av_decode_kernel
 
 
@@ -277,6 +277,106 @@ def test_decode_sdpa_partial_fp32() raises:
                     if diff > max_abs: max_abs = diff
                     assert_almost_equal(Float32(got[oi]), acc, atol=1.0e-5)
     print("decode SDPA partial-fp32 — max abs:", max_abs)
+
+
+def test_decode_sdpa_full_bf16() raises:
+    comptime assert has_accelerator(), "Requires GPU"
+
+    var fix = "tests/fixtures/decode_sdpa/"
+    var q_new = load_bf16(fix + "q_new_bf16.bin")
+    var k_hist = load_bf16(fix + "k_hist_bf16.bin")
+    var v_hist = load_bf16(fix + "v_hist_bf16.bin")
+    var k_new = load_bf16(fix + "k_new_bf16.bin")
+    var v_new = load_bf16(fix + "v_new_bf16.bin")
+    var exp_out = load_bf16(fix + "expected_bf16.bin")
+
+    var n_q = BATCH * N_HEADS * 1 * HEAD_DIM
+    var n_kv_cache = BATCH * N_HEADS * MAX_CTX * HEAD_DIM
+    var n_probs = BATCH * N_HEADS * 1 * MAX_CTX
+    var n_out = BATCH * N_HEADS * 1 * HEAD_DIM
+
+    var ctx = DeviceContext()
+    var q_buf = ctx.enqueue_create_buffer[DType.bfloat16](n_q)
+    var k_cache_buf = ctx.enqueue_create_buffer[DType.bfloat16](n_kv_cache)
+    var v_cache_buf = ctx.enqueue_create_buffer[DType.bfloat16](n_kv_cache)
+    var logits_buf = ctx.enqueue_create_buffer[DType.bfloat16](n_probs)
+    var probs_buf = ctx.enqueue_create_buffer[DType.bfloat16](n_probs)
+    var out_buf = ctx.enqueue_create_buffer[DType.bfloat16](n_out)
+
+    with q_buf.map_to_host() as h:
+        for i in range(n_q): h[i] = q_new.data[i]
+    with k_cache_buf.map_to_host() as h:
+        for b in range(BATCH):
+            for hd in range(N_HEADS):
+                for s in range(T_HIST):
+                    for d in range(HEAD_DIM):
+                        var src = ((b * N_HEADS + hd) * T_HIST + s) * HEAD_DIM + d
+                        var dst = ((b * N_HEADS + hd) * MAX_CTX + s) * HEAD_DIM + d
+                        h[dst] = k_hist.data[src]
+                for d in range(HEAD_DIM):
+                    var src = ((b * N_HEADS + hd) * 1 + 0) * HEAD_DIM + d
+                    var dst = ((b * N_HEADS + hd) * MAX_CTX + T_HIST) * HEAD_DIM + d
+                    h[dst] = k_new.data[src]
+    with v_cache_buf.map_to_host() as h:
+        for b in range(BATCH):
+            for hd in range(N_HEADS):
+                for s in range(T_HIST):
+                    for d in range(HEAD_DIM):
+                        var src = ((b * N_HEADS + hd) * T_HIST + s) * HEAD_DIM + d
+                        var dst = ((b * N_HEADS + hd) * MAX_CTX + s) * HEAD_DIM + d
+                        h[dst] = v_hist.data[src]
+                for d in range(HEAD_DIM):
+                    var src = ((b * N_HEADS + hd) * 1 + 0) * HEAD_DIM + d
+                    var dst = ((b * N_HEADS + hd) * MAX_CTX + T_HIST) * HEAD_DIM + d
+                    h[dst] = v_new.data[src]
+
+    var q_t = TileTensor(q_buf, q_layout)
+    var k_cache_t = TileTensor(k_cache_buf, kv_cache_layout)
+    var v_cache_t = TileTensor(v_cache_buf, kv_cache_layout)
+    var logits_t = TileTensor(logits_buf, probs_layout)
+    var probs_t = TileTensor(probs_buf, probs_layout)
+    var out_t = TileTensor(out_buf, q_layout)
+
+    comptime qk_k = qk_decode_kernel[
+        DType.bfloat16, type_of(q_layout), type_of(kv_cache_layout),
+        type_of(probs_layout), HEAD_DIM, MAX_CTX,
+    ]
+    comptime sm_k = softmax_decode_kernel[
+        DType.bfloat16, type_of(probs_layout), type_of(probs_layout),
+        MAX_CTX, SOFTMAX_BLOCK,
+    ]
+    comptime av_k = av_decode_kernel[
+        DType.bfloat16, type_of(probs_layout), type_of(kv_cache_layout),
+        type_of(q_layout), MAX_CTX, HEAD_DIM,
+    ]
+
+    ctx.enqueue_function[qk_k, qk_k](
+        logits_t, q_t, k_cache_t, N_HEADS, MAX_CTX, SCALE,
+        grid_dim=BATCH * N_HEADS, block_dim=MAX_CTX,
+    )
+    ctx.enqueue_function[sm_k, sm_k](
+        probs_t, logits_t, N_HEADS,
+        grid_dim=BATCH * N_HEADS, block_dim=SOFTMAX_BLOCK,
+    )
+    ctx.enqueue_function[av_k, av_k](
+        out_t, probs_t, v_cache_t, N_HEADS, MAX_CTX,
+        grid_dim=BATCH * N_HEADS, block_dim=HEAD_DIM,
+    )
+    ctx.synchronize()
+
+    var max_abs: Float32 = 0.0
+    var sum_abs: Float64 = 0.0
+    with out_buf.map_to_host() as h:
+        for i in range(n_out):
+            var got = Float32(h[i])
+            var want = Float32(exp_out.data[i])
+            var d = got - want
+            if d < 0.0: d = -d
+            if d > max_abs: max_abs = d
+            sum_abs += Float64(d)
+            # Match test_sdpa.mojo's bf16 atol budget (3 fused ops + softmax).
+            assert_almost_equal(got, want, atol=5.0e-2)
+    print("decode SDPA bf16 — max abs:", max_abs, "mean abs:", sum_abs / Float64(n_out))
 
 
 def main() raises:

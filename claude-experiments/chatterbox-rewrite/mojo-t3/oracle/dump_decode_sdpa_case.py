@@ -103,6 +103,30 @@ def main() -> None:
     print(f"  probs row 0 sum   = {probs_fp32[0,0,0].sum().item():.6f}")
     print(f"  probs row 0 first/last = {probs_fp32[0,0,0,0].item():.4e} / {probs_fp32[0,0,0,-1].item():.4e}")
 
+    # ---- bf16 ----
+    q_new_bf = q_new.to(torch.bfloat16)
+    k_hist_bf = k_hist.to(torch.bfloat16)
+    v_hist_bf = v_hist.to(torch.bfloat16)
+    k_new_bf = k_new.to(torch.bfloat16)
+    v_new_bf = v_new.to(torch.bfloat16)
+    out_bf16, _, _ = eager_decode(
+        q_new_bf, k_hist_bf, v_hist_bf, k_new_bf, v_new_bf, SCALE
+    )
+
+    write_tensor(OUT / "q_new_bf16.bin",
+                 fp32_to_bf16_bits(q_new_bf.float().numpy()).reshape(q_new.shape))
+    write_tensor(OUT / "k_hist_bf16.bin",
+                 fp32_to_bf16_bits(k_hist_bf.float().numpy()).reshape(k_hist.shape))
+    write_tensor(OUT / "v_hist_bf16.bin",
+                 fp32_to_bf16_bits(v_hist_bf.float().numpy()).reshape(v_hist.shape))
+    write_tensor(OUT / "k_new_bf16.bin",
+                 fp32_to_bf16_bits(k_new_bf.float().numpy()).reshape(k_new.shape))
+    write_tensor(OUT / "v_new_bf16.bin",
+                 fp32_to_bf16_bits(v_new_bf.float().numpy()).reshape(v_new.shape))
+    write_tensor(OUT / "expected_bf16.bin",
+                 fp32_to_bf16_bits(out_bf16.float().numpy()).reshape(out_fp32.shape))
+    print(f"[bf16] out[0,0,0,:4] (decoded) = {out_bf16.float()[0,0,0,:4].numpy()}")
+
 
 if __name__ == "__main__":
     main()
