@@ -136,6 +136,33 @@ def bshd_to_bhsd_kernel[
     output[b, h, s, d] = rebind[output.ElementType](v)
 
 
+def cache_append_kernel[
+    dtype: DType,
+    NewLayout: TensorLayout,
+    CacheLayout: TensorLayout,
+    BATCH: Int, N_HEADS: Int, HEAD_DIM: Int,
+](
+    cache: TileTensor[dtype, CacheLayout, MutAnyOrigin],  # (B, H, MAX_CTX, D)
+    new_v: TileTensor[dtype, NewLayout, MutAnyOrigin],     # (B, H, 1, D)
+    slot: Int,
+):
+    """Write new_v[b,h,0,d] into cache[b,h,slot,d].
+
+    Launch: grid = B*H (one block per (b,h)), block_dim = HEAD_DIM.
+    """
+    comptime assert new_v.flat_rank == 4
+    comptime assert cache.flat_rank == 4
+
+    var bid = block_idx.x
+    var d = thread_idx.x
+
+    var h = bid % N_HEADS
+    var b = bid // N_HEADS
+
+    var v = rebind[Scalar[dtype]](new_v[b, h, 0, d])
+    cache[b, h, slot, d] = rebind[cache.ElementType](v)
+
+
 def bhsd_to_bshd_kernel[
     dtype: DType,
     InLayout: TensorLayout,

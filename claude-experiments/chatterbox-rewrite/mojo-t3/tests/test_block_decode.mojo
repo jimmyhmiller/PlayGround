@@ -43,7 +43,7 @@ from rmsnorm import rmsnorm_kernel
 from rope import rope_kernel
 from sdpa import qk_decode_kernel, softmax_decode_kernel, av_decode_kernel
 from mlp import silu_mul_kernel
-from util_kernels import add_kernel, bshd_to_bhsd_kernel, bhsd_to_bshd_kernel
+from util_kernels import add_kernel, bshd_to_bhsd_kernel, bhsd_to_bshd_kernel, cache_append_kernel
 
 
 # T3 Llama config — same as test_block.
@@ -270,6 +270,10 @@ def test_block_decode_fp32() raises:
         DType.float32, type_of(intermediate_layout), type_of(intermediate_layout),
         type_of(intermediate_layout), POINTWISE_BLOCK,
     ]
+    comptime cache_k = cache_append_kernel[
+        DType.float32, type_of(bhsd_layout_dec), type_of(kv_cache_layout),
+        BATCH, N_HEADS, HEAD_DIM,
+    ]
 
     # ---- Pipeline ----
     # 1. norm = rmsnorm(x_decode, in_norm)
@@ -305,25 +309,15 @@ def test_block_decode_fp32() raises:
         grid_dim=BATCH * N_HEADS * SEQ, block_dim=HEAD_DIM,
     )
 
-    # 5. Append k_rot/v_perm to the cache at slot T_HIST.
-    # The cache is (B,H,MAX_CTX,D); we synchronize host-side reads first.
-    ctx.synchronize()
-    with k_rot_buf.map_to_host() as kr:
-        with k_cache_buf.map_to_host() as kc:
-            for b in range(BATCH):
-                for hd in range(N_HEADS):
-                    for d in range(HEAD_DIM):
-                        var src = ((b * N_HEADS + hd) * SEQ + 0) * HEAD_DIM + d
-                        var dst = ((b * N_HEADS + hd) * MAX_CTX + T_HIST) * HEAD_DIM + d
-                        kc[dst] = kr[src]
-    with v_perm_buf.map_to_host() as vr:
-        with v_cache_buf.map_to_host() as vc:
-            for b in range(BATCH):
-                for hd in range(N_HEADS):
-                    for d in range(HEAD_DIM):
-                        var src = ((b * N_HEADS + hd) * SEQ + 0) * HEAD_DIM + d
-                        var dst = ((b * N_HEADS + hd) * MAX_CTX + T_HIST) * HEAD_DIM + d
-                        vc[dst] = vr[src]
+    # 5. Append k_rot/v_perm to the cache at slot T_HIST — device-side, no host roundtrip.
+    ctx.enqueue_function[cache_k, cache_k](
+        k_cache_t, k_rot, T_HIST,
+        grid_dim=BATCH * N_HEADS, block_dim=HEAD_DIM,
+    )
+    ctx.enqueue_function[cache_k, cache_k](
+        v_cache_t, v_perm, T_HIST,
+        grid_dim=BATCH * N_HEADS, block_dim=HEAD_DIM,
+    )
 
     # 6. Decode-attention: qk_decode → softmax → av_decode (cur_len=MAX_CTX).
     ctx.enqueue_function[qk_dec, qk_dec](
