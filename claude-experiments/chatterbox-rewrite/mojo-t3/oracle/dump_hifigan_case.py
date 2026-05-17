@@ -159,12 +159,24 @@ def main() -> None:
             x_cur = x_after_up
             if i == hift.num_upsamples - 1:
                 x_cur = hift.reflection_pad(x_cur)
+            # Dump si and the post-+si state so we can isolate the source
+            # branch from the resblock branch.
             si = hift.source_downs[i](s_stft_cat)
+            write_tensor(OUT / f"stage_up{i}_source_down.bin",
+                         si.cpu().numpy().astype(np.float32))
             si = hift.source_resblocks[i](si)
-            x_cur = x_cur + si
+            write_tensor(OUT / f"stage_up{i}_si.bin",
+                         si.cpu().numpy().astype(np.float32))
+            x_pre_resblocks = x_cur + si
+            write_tensor(OUT / f"stage_up{i}_pre_resblocks.bin",
+                         x_pre_resblocks.cpu().numpy().astype(np.float32))
+            x_cur = x_pre_resblocks
+            # Also dump per-resblock outputs to isolate which (if any) fails.
             xs = None
             for j in range(hift.num_kernels):
                 rb = hift.resblocks[i * hift.num_kernels + j](x_cur)
+                write_tensor(OUT / f"stage_up{i}_resblock{j}_out.bin",
+                             rb.cpu().numpy().astype(np.float32))
                 xs = rb if xs is None else xs + rb
             x_cur = xs / hift.num_kernels
             write_tensor(OUT / f"stage_after_up{i}.bin",
