@@ -148,8 +148,15 @@ def main() -> None:
 
         import torch.nn.functional as TF
         for i in range(hift.num_upsamples):
-            x_cur = TF.leaky_relu(x_cur, hift.lrelu_slope)
-            x_cur = hift.ups[i](x_cur)
+            # Granular intermediates within this upsample stage so a Mojo
+            # test can pin the exact failing sub-step.
+            x_lrelu = TF.leaky_relu(x_cur, hift.lrelu_slope)
+            write_tensor(OUT / f"stage_up{i}_after_lrelu.bin",
+                         x_lrelu.cpu().numpy().astype(np.float32))
+            x_after_up = hift.ups[i](x_lrelu)
+            write_tensor(OUT / f"stage_up{i}_after_transposed_conv.bin",
+                         x_after_up.cpu().numpy().astype(np.float32))
+            x_cur = x_after_up
             if i == hift.num_upsamples - 1:
                 x_cur = hift.reflection_pad(x_cur)
             si = hift.source_downs[i](s_stft_cat)
