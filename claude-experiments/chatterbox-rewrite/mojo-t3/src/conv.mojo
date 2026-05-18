@@ -298,6 +298,38 @@ def reflection_pad_left1_kernel[
     output[b, c, t_out] = rebind[output.ElementType](v)
 
 
+def bias_add_2d_kernel[
+    dtype: DType,
+    InLayout: TensorLayout,
+    BiasLayout: TensorLayout,
+    OutLayout: TensorLayout,
+    BLOCK: Int,
+](
+    output: TileTensor[dtype, OutLayout, MutAnyOrigin],     # (R, C)
+    inp: TileTensor[dtype, InLayout, MutAnyOrigin],          # (R, C)
+    bias: TileTensor[dtype, BiasLayout, MutAnyOrigin],       # (C,)
+    rows: Int, cols: Int,
+):
+    """Add a per-column bias to a 2D tensor: out[r, c] = inp[r, c] + bias[c].
+
+    Launch: grid = ceildiv(rows * cols, BLOCK), block_dim = BLOCK.
+    """
+    comptime assert inp.flat_rank == 2
+    comptime assert bias.flat_rank == 1
+    comptime assert output.flat_rank == 2
+
+    var idx = block_idx.x * BLOCK + thread_idx.x
+    var n = rows * cols
+    if idx >= n:
+        return
+    var r = idx // cols
+    var c = idx % cols
+    var x = rebind[Scalar[dtype]](inp[r, c]).cast[DType.float32]()
+    var b = rebind[Scalar[dtype]](bias[c]).cast[DType.float32]()
+    var y = x + b
+    output[r, c] = rebind[output.ElementType](y.cast[dtype]())
+
+
 def elu_kernel[
     dtype: DType,
     InLayout: TensorLayout,
