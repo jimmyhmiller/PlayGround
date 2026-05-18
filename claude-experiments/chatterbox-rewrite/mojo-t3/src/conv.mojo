@@ -25,7 +25,7 @@ serve multiple HiFiGAN layers.
 """
 
 from std.gpu import block_idx, thread_idx
-from std.math import sin, cos, exp
+from std.math import sin, cos, exp, log
 from layout import TileTensor, TensorLayout
 
 
@@ -366,6 +366,113 @@ def magnitude_phase_to_complex_kernel[
     var im = m * sin(p)
     real_out[b, k, t] = rebind[real_out.ElementType](re.cast[dtype]())
     imag_out[b, k, t] = rebind[imag_out.ElementType](im.cast[dtype]())
+
+
+def reflect_pad_1d_kernel[
+    dtype: DType,
+    InLayout: TensorLayout,
+    OutLayout: TensorLayout,
+](
+    output: TileTensor[dtype, OutLayout, MutAnyOrigin],     # (B, T_in + 2*pad)
+    inp: TileTensor[dtype, InLayout, MutAnyOrigin],          # (B, T_in)
+    batch: Int, t_in: Int, pad: Int,
+):
+    """Symmetric reflect padding along the last dim (no edge repetition).
+
+    For out index t_out in [0, t_in + 2*pad):
+      src = t_out - pad
+      if src < 0: src = -src       (reflect across left edge, no repeat)
+      elif src >= t_in: src = 2*t_in - src - 2  (reflect across right edge)
+
+    Launch: grid = B * (t_in + 2*pad), block_dim = 1.
+    """
+    comptime assert inp.flat_rank == 2
+    comptime assert output.flat_rank == 2
+
+    var t_out_total = t_in + 2 * pad
+    var idx = block_idx.x
+    var t_out = idx % t_out_total
+    var b = idx // t_out_total
+
+    var src = t_out - pad
+    if src < 0:
+        src = -src
+    elif src >= t_in:
+        src = 2 * t_in - src - 2
+    var v = rebind[Scalar[dtype]](inp[b, src])
+    output[b, t_out] = rebind[output.ElementType](v)
+
+
+def stft_mag_kernel[
+    dtype: DType,
+    XLayout: TensorLayout,
+    WLayout: TensorLayout,
+    OutLayout: TensorLayout,
+    N_FFT: Int,
+    HOP: Int,
+    N_FREQ: Int,    # = N_FFT // 2 + 1
+](
+    magnitude: TileTensor[dtype, OutLayout, MutAnyOrigin],   # (B, N_FREQ, n_frames)
+    x: TileTensor[dtype, XLayout, MutAnyOrigin],              # (B, T_pad) already reflect-padded
+    window: TileTensor[dtype, WLayout, MutAnyOrigin],         # (N_FFT,)
+    batch: Int, t_pad: Int, n_frames: Int,
+):
+    """Magnitude STFT for non-centered (caller pre-pads) frames.
+
+    magnitude[b, k, t] = sqrt(re^2 + im^2 + 1e-9)  where
+      re = sum_n window[n] * x[b, t*HOP + n] * cos(2pi k n / N_FFT)
+      im = -sum_n window[n] * x[b, t*HOP + n] * sin(2pi k n / N_FFT)
+
+    Launch: grid = B * N_FREQ * n_frames, block_dim = 1.
+    """
+    comptime assert x.flat_rank == 2
+    comptime assert window.flat_rank == 1
+    comptime assert magnitude.flat_rank == 3
+
+    var idx = block_idx.x
+    var t = idx % n_frames
+    var k = (idx // n_frames) % N_FREQ
+    var b = idx // (n_frames * N_FREQ)
+
+    var two_pi_k_over_n = 6.283185307179586 * Float32(k) / Float32(N_FFT)
+    var re_acc: Float32 = 0.0
+    var im_acc: Float32 = 0.0
+    for n in range(N_FFT):
+        var pos = t * HOP + n
+        var s = rebind[Scalar[dtype]](x[b, pos]).cast[DType.float32]()
+        var w = rebind[Scalar[dtype]](window[n]).cast[DType.float32]()
+        var sw = s * w
+        var ang = two_pi_k_over_n * Float32(n)
+        re_acc += sw * cos(ang)
+        im_acc += -sw * sin(ang)
+    var mag = (re_acc * re_acc + im_acc * im_acc + 1.0e-9) ** 0.5
+    magnitude[b, k, t] = rebind[magnitude.ElementType](mag.cast[dtype]())
+
+
+def log_clamp_kernel[
+    dtype: DType,
+    InLayout: TensorLayout,
+    OutLayout: TensorLayout,
+    BLOCK: Int,
+](
+    output: TileTensor[dtype, OutLayout, MutAnyOrigin],
+    inp: TileTensor[dtype, InLayout, MutAnyOrigin],
+    n_elems: Int,
+    clip_val: Float32,
+):
+    """Pointwise: y = log(max(x, clip_val)). Operates on a flat rank-1 view."""
+    comptime assert inp.flat_rank == 1
+    comptime assert output.flat_rank == 1
+
+    var idx = block_idx.x * BLOCK + thread_idx.x
+    if idx >= n_elems:
+        return
+
+    var v = rebind[Scalar[dtype]](inp[idx]).cast[DType.float32]()
+    if v < clip_val:
+        v = clip_val
+    var y = log(v)
+    output[idx] = rebind[output.ElementType](y.cast[dtype]())
 
 
 def reflection_pad_left1_kernel[
