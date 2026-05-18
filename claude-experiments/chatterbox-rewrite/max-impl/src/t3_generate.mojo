@@ -229,8 +229,29 @@ def t3_generate(
         # The (B, 1, D) buffer doubles as the per-step (B, D) for decode.
         ctx.enqueue_copy(step_emb_buf, step_emb_3d_buf)
 
+        # Add positional embedding: step_emb += speech_pos_emb_table[speech_pos_offset + step - 1].
+        # At iteration `step` of the decode loop we embed the (step-1)-th generated token,
+        # which sits at logical speech position `speech_pos_offset + step - 1`.
+        # Upstream: cur_pos = T_PREFILL + step_of_decode_loop (where step_of_decode_loop
+        # starts at 0). My `step` starts at 1, so my pos = speech_pos_offset + (step - 1) =
+        # T_PREFILL + 0 for the first decode iteration.
+        var pos_idx = speech_pos_offset + step - 1
+        var sep = step_emb_buf.unsafe_ptr()
+        var spt = speech_pos_emb_table.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(sep, spt, D, pos_idx)
+        def add_pos[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var bi = i // D
+            var di = i - bi * D
+            sep[i] = sep[i] + spt[pos_idx * D + di]
+        elementwise[add_pos, simd_width=1, target="gpu"](
+            IndexList[1](b * D), DeviceContextPtr(ctx),
+        )
+
         # Gather cos/sin at position `cur_len` from the full RoPE table.
-        var pos_in_speech = speech_pos_offset + step  # logical pos
         gather_cos_sin_at_pos(ctx, cos_full, sin_full, cos_step, sin_step,
                               b, Dh, cur_len)
 
