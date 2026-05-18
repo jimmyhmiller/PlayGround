@@ -690,17 +690,19 @@ def load_campplus(mut ctx: DeviceContext, base: String) raises -> CAMPPlus:
     var tdnn = _load_tdnn_first(ctx, xv + "/tdnn")
 
     # CAMDense blocks with growth=32. Channel widths from upstream:
-    #   block1 in=128, 12 layers → 128 + 12*32 = 512 → transit1 to 256
-    #   block2 in=256, 24 layers → 256 + 24*32 = 1024 → transit2 to 512
-    #   block3 in=512, 16 layers → 512 + 16*32 = 1024 → transit3 to 1024
+    #   block1 in=128, 12 layers → 128 + 12*32 = 512 → transit1 (512 → 256)
+    #   block2 in=256, 24 layers → 256 + 24*32 = 1024 → transit2 (1024 → 512)
+    #   block3 in=512, 16 layers → 512 + 16*32 = 1024 → transit3 (1024 → 512)
     var block1 = _load_camdense_tdnn_block(ctx, xv + "/block1", 12, 128, 32)
     var transit1 = _load_transit_layer(ctx, xv + "/transit1", 128 + 12 * 32, 256)
     var block2 = _load_camdense_tdnn_block(ctx, xv + "/block2", 24, 256, 32)
     var transit2 = _load_transit_layer(ctx, xv + "/transit2", 256 + 24 * 32, 512)
     var block3 = _load_camdense_tdnn_block(ctx, xv + "/block3", 16, 512, 32)
-    var transit3 = _load_transit_layer(ctx, xv + "/transit3", 512 + 16 * 32, 1024)
+    var transit3 = _load_transit_layer(ctx, xv + "/transit3", 512 + 16 * 32, 512)
 
-    var out_nonlin = _load_batchnorm(ctx, xv + "/out_nonlinear", 1024)
+    # out_nonlinear is BN over 512 (output of transit3).
+    var out_nonlin = _load_batchnorm(ctx, xv + "/out_nonlinear", 512)
+    # dense: Linear(1024, 192) — input is 1024 = 512 (channels) * 2 (mean+std from StatsPool).
     var dense = _load_dense_layer(ctx, xv + "/dense", 1024, 192)
 
     var xvector = XVectorBackbone(
