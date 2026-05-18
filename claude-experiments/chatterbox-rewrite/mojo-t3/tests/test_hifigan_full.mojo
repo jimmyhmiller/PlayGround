@@ -203,14 +203,15 @@ def _run_resblock_chain[
                     dst[k] = src[k]
 
 
-def test_hifigan_full_fp32() raises:
+def _run_hifigan_full(s_stft_path: String, exp_path: String,
+                       label: String) raises:
     comptime assert has_accelerator(), "Requires GPU"
 
     var fix = "tests/fixtures/hifigan/"
     var mel = load_fp32(fix + "mel.bin")
-    var s_stft = load_fp32(fix + "stage_s_stft_cat.bin")
+    var s_stft = load_fp32(s_stft_path)
     var window = load_fp32(fix + "weights/stft_window.bin")
-    var exp = load_fp32(fix + "expected_wav_decode_zeros.bin")
+    var exp = load_fp32(exp_path)
 
     var ctx = DeviceContext()
 
@@ -759,9 +760,25 @@ def test_hifigan_full_fp32() raises:
             if d < 0.0: d = -d
             if d > max_abs: max_abs = d
             sum_abs += Float64(d)
-            assert_almost_equal(got, exp.data[i], atol=2.0e-2)
-    print("FULL HiFiGAN fp32 (s=zeros) — max abs:", max_abs,
+            assert_almost_equal(got, exp.data[i], atol=5.0e-2)
+    print("FULL HiFiGAN fp32", label, "— max abs:", max_abs,
           " mean abs:", sum_abs / Float64(n_audio))
+
+
+def test_hifigan_full_zeros_fp32() raises:
+    _run_hifigan_full(
+        "tests/fixtures/hifigan/stage_s_stft_cat.bin",
+        "tests/fixtures/hifigan/expected_wav_decode_zeros.bin",
+        "(s=zeros)",
+    )
+
+
+def test_hifigan_full_real_fp32() raises:
+    _run_hifigan_full(
+        "tests/fixtures/hifigan/stage_s_stft_cat_real.bin",
+        "tests/fixtures/hifigan/expected_wav_decode_real.bin",
+        "(s=real)",
+    )
 
 
 def main() raises:

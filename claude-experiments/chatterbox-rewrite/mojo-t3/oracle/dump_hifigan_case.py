@@ -196,6 +196,20 @@ def main() -> None:
         write_tensor(OUT / "stage_phase.bin",
                      phase.cpu().numpy().astype(np.float32))
 
+    # Also dump the STFT of the real (s != 0) source signal so a Mojo test
+    # can use it as input without having to port the f0_predictor + SineGen
+    # path. Same approach as decode() does internally: STFT of s, then cat.
+    with torch.inference_mode():
+        f0_real = hift.f0_predictor(mel)
+        s_full = hift.f0_upsamp(f0_real[:, None]).transpose(1, 2)
+        s_full, _, _ = hift.m_source(s_full)
+        s_full = s_full.transpose(1, 2)
+        # s_full shape: (1, 1, T_audio). STFT it.
+        s_stft_r, s_stft_i = hift._stft(s_full.squeeze(1))
+        s_stft_real_cat = torch.cat([s_stft_r, s_stft_i], dim=1)
+        write_tensor(OUT / "stage_s_stft_cat_real.bin",
+                     s_stft_real_cat.cpu().numpy().astype(np.float32))
+
     with torch.inference_mode():
         # Full pipeline (mel -> wav including f0/source).
         wav, _ = hift.inference(speech_feat=mel)
