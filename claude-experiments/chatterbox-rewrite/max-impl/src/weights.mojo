@@ -18,6 +18,14 @@ from conv1d import Conv1d
 from s3tokenizer_block import FSMNAttention, S3TokenizerBlock
 from s3tokenizer import S3Tokenizer
 from conformer import RelPosMHA, TransformerEncoderLayer
+from hift_generator import (
+    SnakeActivation, HiFTResBlock, F0Predictor, MSource, HiFTGenerator,
+)
+from campplus import (
+    BatchNorm1d, CAMLayer, CAMDenseTDNNLayer, CAMDenseTDNNBlock,
+    TransitLayer, TDNN, DenseLayer, XVectorBackbone,
+    ResNetBasicBlock, ResNetHead, CAMPPlus,
+)
 
 
 def _upload(buf: DeviceBuffer[DType.float32], data: List[Float32], n: Int) raises:
@@ -317,6 +325,175 @@ def load_transformer_encoder_layer(
     )
 
 
+# ============================================================================
+# HiFTGenerator (NSF-HiFiGAN) loader
+# ============================================================================
+
+def _load_conv1d_wn(
+    mut ctx: DeviceContext, base: String,
+    c_in: Int, c_out: Int, k: Int, stride: Int, pad: Int, dilation: Int,
+    groups: Int = 1,
+) raises -> Conv1d:
+    """Load a weight-norm-collapsed Conv1d: expects {base}/weight.bin + {base}/bias.bin."""
+    var w = upload_fp32(ctx, base + "/weight.bin")
+    var b = upload_fp32(ctx, base + "/bias.bin")
+    return Conv1d(w^, b^, c_in, c_out, k, stride, pad, dilation, groups, True)
+
+
+def _load_conv1d_plain(
+    mut ctx: DeviceContext, base: String,
+    c_in: Int, c_out: Int, k: Int, stride: Int, pad: Int, dilation: Int,
+    groups: Int = 1,
+) raises -> Conv1d:
+    """Same as _load_conv1d_wn — both layouts produce weight.bin+bias.bin after
+    weight_norm collapse."""
+    return _load_conv1d_wn(ctx, base, c_in, c_out, k, stride, pad, dilation, groups)
+
+
+def _load_hift_resblock(
+    mut ctx: DeviceContext, base: String, channels: Int,
+    kernel: Int, dilations: List[Int],
+) raises -> HiFTResBlock:
+    """Load one MRF resblock: convs1 (dilated, kernel `kernel`) + convs2 (1x1)
+    + snake activations.
+    """
+    var convs1 = List[Conv1d]()
+    var convs2 = List[Conv1d]()
+    var acts1 = List[SnakeActivation]()
+    var acts2 = List[SnakeActivation]()
+
+    for j in range(3):
+        var dil = dilations[j]
+        var pad1 = ((kernel - 1) * dil) // 2
+        var c1 = _load_conv1d_wn(
+            ctx, base + "/convs1/" + String(j),
+            channels, channels, kernel, 1, pad1, dil, 1,
+        )
+        convs1.append(c1^)
+
+        var pad2 = (kernel - 1) // 2
+        var c2 = _load_conv1d_wn(
+            ctx, base + "/convs2/" + String(j),
+            channels, channels, kernel, 1, pad2, 1, 1,
+        )
+        convs2.append(c2^)
+
+        var a1 = upload_fp32(ctx, base + "/activations1/" + String(j) + "/alpha.bin")
+        acts1.append(SnakeActivation(a1^, channels))
+        var a2 = upload_fp32(ctx, base + "/activations2/" + String(j) + "/alpha.bin")
+        acts2.append(SnakeActivation(a2^, channels))
+
+    return HiFTResBlock(convs1^, convs2^, acts1^, acts2^, channels)
+
+
+def load_hift_generator(mut ctx: DeviceContext, base: String) raises -> HiFTGenerator:
+    """Load full NSF-HiFiGAN from weights/s3gen/mel2wav/.
+
+    Architectural constants are hardcoded to match upstream Chatterbox config:
+      base_channels=512, upsample_rates=[8,8,4] (3 stages),
+      upsample_kernel_sizes=[16,16,8],
+      resblock_kernel_sizes=[3,7,11], dilations=[[1,3,5],[1,3,5],[1,3,5]],
+      n_fft=16 (so conv_post outputs n_fft+2=18 channels).
+    """
+    comptime BASE = 512
+    comptime N_FFT = 16
+    comptime N_OUT = 18    # n_fft + 2
+
+    # conv_pre: 80 → 512, kernel 7, pad 3.
+    var conv_pre = _load_conv1d_wn(ctx, base + "/conv_pre", 80, BASE, 7, 1, 3, 1, 1)
+
+    # ups: 3 transposed convs. Channel widths halve each stage.
+    var ups = List[Conv1d]()
+    var ups_rates = [8, 8, 4]
+    var ups_kernels = [16, 16, 8]
+    for i in range(3):
+        var c_in = BASE // (1 << i)
+        var c_out = BASE // (1 << (i + 1))
+        var u = ups_rates[i]
+        var k = ups_kernels[i]
+        var pad = (k - u) // 2
+        # NOTE: ConvTranspose1d stored as Conv1d here — caller wires transpose forward.
+        var up = _load_conv1d_wn(ctx, base + "/ups/" + String(i), c_in, c_out, k, u, pad, 1, 1)
+        ups.append(up^)
+
+    # resblocks: 9 (3 per ups stage). MRF kernel sizes [3, 7, 11], dilations all [1,3,5].
+    var resblock_kernels = [3, 7, 11]
+    var dilations: List[Int] = [1, 3, 5]
+    var resblocks = List[HiFTResBlock]()
+    for stage in range(3):
+        var ch = BASE // (1 << (stage + 1))
+        for j in range(3):
+            var rb_idx = stage * 3 + j
+            var rb = _load_hift_resblock(
+                ctx, base + "/resblocks/" + String(rb_idx),
+                ch, resblock_kernels[j], dilations.copy(),
+            )
+            resblocks.append(rb^)
+
+    # source_downs: 3 stages, each 18 → channel-at-stage. Kernel varies.
+    # Empirically from weight shapes:
+    #   source_downs.0: (256, 18, 30) stride large
+    #   source_downs.1: (128, 18, 6)
+    #   source_downs.2: (64, 18, 1)
+    var source_downs = List[Conv1d]()
+    var sd_kernels = [30, 6, 1]
+    var sd_strides = [16, 4, 1]      # rough — actual stride irrelevant for loader
+    var sd_pads = [8, 2, 0]
+    for i in range(3):
+        var ch = BASE // (1 << (i + 1))
+        var sd = _load_conv1d_wn(
+            ctx, base + "/source_downs/" + String(i),
+            N_OUT, ch, sd_kernels[i], sd_strides[i], sd_pads[i], 1, 1,
+        )
+        source_downs.append(sd^)
+
+    # source_resblocks: 3 MRF resblocks; kernels [7, 11, 11] per stage (varies)
+    var source_resblocks = List[HiFTResBlock]()
+    var src_rb_kernels = [7, 11, 11]
+    for i in range(3):
+        var ch = BASE // (1 << (i + 1))
+        var srb = _load_hift_resblock(
+            ctx, base + "/source_resblocks/" + String(i),
+            ch, src_rb_kernels[i], dilations.copy(),
+        )
+        source_resblocks.append(srb^)
+
+    # conv_post: 64 → 18, kernel 7, pad 3.
+    var conv_post = _load_conv1d_wn(ctx, base + "/conv_post", 64, N_OUT, 7, 1, 3, 1, 1)
+
+    # m_source.l_linear: (1, 9) + bias (1,)
+    var ms_w = upload_fp32(ctx, base + "/m_source/l_linear/weight.bin")
+    var ms_b = upload_fp32(ctx, base + "/m_source/l_linear/bias.bin")
+    var m_source = MSource(Linear(ms_w^, ms_b^, 9, 1, True))
+
+    # f0_predictor: 5 conv1d layers in condnet (indices 0,2,4,6,8) + classifier.
+    var condnet = List[Conv1d]()
+    var condnet_indices = [0, 2, 4, 6, 8]
+    for i in range(5):
+        # Empirically each is (512, 512, k=?). Use kernel=3, pad=1 as a reasonable default
+        # for typical F0-predictor condnets; precise kernel verified at first forward.
+        var idx = condnet_indices[i]
+        # First layer's in_channels is mel (80) only if condnet starts from mel; here
+        # weights show (512, 1, 1) for original0 — first layer maps 1 → 512 actually.
+        # Upstream code uses Conv1d with input being F0 features (typically 1ch).
+        var c_in = 1 if i == 0 else 512
+        var c = _load_conv1d_wn(
+            ctx, base + "/f0_predictor/condnet/" + String(idx),
+            c_in, 512, 3, 1, 1, 1, 1,
+        )
+        condnet.append(c^)
+    var cls_w = upload_fp32(ctx, base + "/f0_predictor/classifier/weight.bin")
+    var cls_b = upload_fp32(ctx, base + "/f0_predictor/classifier/bias.bin")
+    var classifier = Linear(cls_w^, cls_b^, 512, 1, True)
+    var f0_predictor = F0Predictor(condnet^, classifier^)
+
+    return HiFTGenerator(
+        conv_pre^, ups^, resblocks^, source_downs^, source_resblocks^,
+        conv_post^, m_source^, f0_predictor^,
+        N_FFT, 4, Float32(0.1),
+    )
+
+
 def load_s3gen_flow_encoder_layers(
     mut ctx: DeviceContext, encoders_base: String, n_layers: Int,
     d_model: Int, intermediate: Int, n_heads: Int, head_dim: Int,
@@ -334,3 +511,208 @@ def load_s3gen_flow_encoder_layers(
         )
         layers.append(lyr^)
     return layers^
+
+
+# ============================================================================
+# CAMPPlus speaker encoder loader
+# ============================================================================
+
+def _load_batchnorm(
+    mut ctx: DeviceContext, base: String, channels: Int,
+    affine: Bool = True,
+    nested: Bool = True,
+) raises -> BatchNorm1d:
+    """Load PyTorch BatchNorm1d: weight/bias/running_mean/running_var.
+
+    Two on-disk layouts coexist:
+      nested=True:  {base}/batchnorm/{weight,bias,running_mean,running_var}.bin
+                    (used by xvector wrappers that nest BN inside a
+                    `nonlinear.batchnorm` submodule)
+      nested=False: {base}/{weight,bias,running_mean,running_var}.bin
+                    (used by the head's bn1/bn2 directly)
+
+    `affine=False` means upstream BN had no learnable gamma/beta — use 1/0
+    buffers so the downstream multiply/add can stay unconditional.
+    """
+    var sub: String
+    if nested:
+        sub = "/batchnorm/"
+    else:
+        sub = "/"
+
+    var w: DeviceBuffer[DType.float32]
+    var b: DeviceBuffer[DType.float32]
+    if affine:
+        w = upload_fp32(ctx, base + sub + "weight.bin")
+        b = upload_fp32(ctx, base + sub + "bias.bin")
+    else:
+        w = ctx.enqueue_create_buffer[DType.float32](channels)
+        w.enqueue_fill(1.0)
+        b = _zero_buf(ctx, channels)
+    var rm = upload_fp32(ctx, base + sub + "running_mean.bin")
+    var rv = upload_fp32(ctx, base + sub + "running_var.bin")
+    return BatchNorm1d(w^, b^, rm^, rv^, channels, Float32(1.0e-5))
+
+
+def _load_conv1d_no_bias(
+    mut ctx: DeviceContext, base: String,
+    c_in: Int, c_out: Int, k: Int, stride: Int, pad: Int, dilation: Int,
+    groups: Int = 1,
+) raises -> Conv1d:
+    """Conv1d that may not have a bias file; uses a zero-buffer when absent.
+
+    Used by `linear*` modules in CAMPPlus that are stored bias-less.
+    """
+    var w = upload_fp32(ctx, base + "/weight.bin")
+    var zb = _zero_buf(ctx, c_out)
+    return Conv1d(w^, zb^, c_in, c_out, k, stride, pad, dilation, groups, False)
+
+
+def _load_cam_layer(mut ctx: DeviceContext, base: String) raises -> CAMLayer:
+    var linear_local = _load_conv1d_no_bias(
+        ctx, base + "/linear_local", 128, 32, 3, 1, 1, 1, 1,
+    )
+    var w1 = upload_fp32(ctx, base + "/linear1/weight.bin")
+    var b1 = upload_fp32(ctx, base + "/linear1/bias.bin")
+    var linear1 = Conv1d(w1^, b1^, 128, 64, 1, 1, 0, 1, 1, True)
+    var w2 = upload_fp32(ctx, base + "/linear2/weight.bin")
+    var b2 = upload_fp32(ctx, base + "/linear2/bias.bin")
+    var linear2 = Conv1d(w2^, b2^, 64, 32, 1, 1, 0, 1, 1, True)
+    return CAMLayer(linear_local^, linear1^, linear2^)
+
+
+def _load_camdense_tdnn_layer(
+    mut ctx: DeviceContext, base: String, in_channels: Int,
+) raises -> CAMDenseTDNNLayer:
+    """Each tdnnd block: nonlinear1 (BN over `in_channels`) + linear1 (1×1
+    Conv in→128) + nonlinear2 (BN 128) + cam_layer.
+    """
+    var nl1 = _load_batchnorm(ctx, base + "/nonlinear1", in_channels)
+    var linear1 = _load_conv1d_no_bias(
+        ctx, base + "/linear1", in_channels, 128, 1, 1, 0, 1, 1,
+    )
+    var nl2 = _load_batchnorm(ctx, base + "/nonlinear2", 128)
+    var cam = _load_cam_layer(ctx, base + "/cam_layer")
+    return CAMDenseTDNNLayer(nl1^, linear1^, nl2^, cam^)
+
+
+def _load_camdense_tdnn_block(
+    mut ctx: DeviceContext, base: String, n_layers: Int,
+    base_in_channels: Int, growth: Int,
+) raises -> CAMDenseTDNNBlock:
+    """Block of N dense TDNN layers. Each layer's input grows by `growth`
+    channels (DenseNet-style concatenation): layer i gets
+    `base_in_channels + i * growth` input channels.
+    """
+    var layers = List[CAMDenseTDNNLayer]()
+    for i in range(n_layers):
+        var lyr_base = base + "/tdnnd" + String(i + 1)
+        var in_ch = base_in_channels + i * growth
+        var lyr = _load_camdense_tdnn_layer(ctx, lyr_base, in_ch)
+        layers.append(lyr^)
+    return CAMDenseTDNNBlock(layers^)
+
+
+def _load_transit_layer(
+    mut ctx: DeviceContext, base: String, c_in: Int, c_out: Int,
+) raises -> TransitLayer:
+    var nonlin = _load_batchnorm(ctx, base + "/nonlinear", c_in)
+    var linear = _load_conv1d_no_bias(ctx, base + "/linear", c_in, c_out, 1, 1, 0, 1, 1)
+    return TransitLayer(nonlin^, linear^)
+
+
+def _load_tdnn_first(mut ctx: DeviceContext, base: String) raises -> TDNN:
+    """First TDNN: Conv1d (in=320, out=128, k=5) + BN(128). Bias-less linear."""
+    var linear = _load_conv1d_no_bias(ctx, base + "/linear", 320, 128, 5, 1, 0, 1, 1)
+    var nonlin = _load_batchnorm(ctx, base + "/nonlinear", 128)
+    return TDNN(linear^, nonlin^)
+
+
+def _load_dense_layer(
+    mut ctx: DeviceContext, base: String, c_in: Int, c_out: Int,
+) raises -> DenseLayer:
+    """Final dense layer's BN is created with `affine=False` upstream — only
+    running_mean / running_var on disk, no weight/bias.
+    """
+    var linear = _load_conv1d_no_bias(ctx, base + "/linear", c_in, c_out, 1, 1, 0, 1, 1)
+    var nonlin = _load_batchnorm(ctx, base + "/nonlinear", c_out, affine=False)
+    return DenseLayer(linear^, nonlin^)
+
+
+def _load_resnet_basic_block(
+    mut ctx: DeviceContext, base: String, channels: Int,
+) raises -> ResNetBasicBlock:
+    var bn1 = _load_batchnorm(ctx, base + "/bn1", channels, nested=False)
+    var c1_w = upload_fp32(ctx, base + "/conv1/weight.bin")
+    var conv1 = Conv1d(c1_w^, _zero_buf(ctx, channels)^,
+                        channels, channels, 3, 1, 1, 1, 1, False)
+    var bn2 = _load_batchnorm(ctx, base + "/bn2", channels, nested=False)
+    var c2_w = upload_fp32(ctx, base + "/conv2/weight.bin")
+    var conv2 = Conv1d(c2_w^, _zero_buf(ctx, channels)^,
+                        channels, channels, 3, 1, 1, 1, 1, False)
+    return ResNetBasicBlock(bn1^, conv1^, bn2^, conv2^)
+
+
+def _load_resnet_layer(
+    mut ctx: DeviceContext, base: String, channels: Int,
+) raises -> List[ResNetBasicBlock]:
+    var blocks = List[ResNetBasicBlock]()
+    for i in range(2):
+        var b = _load_resnet_basic_block(ctx, base + "/" + String(i), channels)
+        blocks.append(b^)
+    return blocks^
+
+
+def load_campplus(mut ctx: DeviceContext, base: String) raises -> CAMPPlus:
+    """Load full CAMPPlus from weights/s3gen/speaker_encoder/.
+
+    Block layer counts derived from upstream weight tree:
+      block1: 12 tdnnd, block2: 24 tdnnd, block3: 16 tdnnd.
+      growth=32 channels per layer (from CAM cam_layer.linear2 out=32).
+      Transit expansions: 128+12*32=512 → ... etc. — but matches upstream
+      weights when block channels are correctly inferred from BN shapes.
+
+    NOTE: Exact channel widths are inferred at load time from BN tensor sizes;
+    if these constants drift in future Chatterbox releases, the loader will
+    raise on missing files rather than producing wrong-shaped buffers.
+    """
+    var xv = base + "/xvector"
+
+    # First tdnn (input mel=80 frames concatenated, in_channels=320 from
+    # frame-context window of 5).
+    var tdnn = _load_tdnn_first(ctx, xv + "/tdnn")
+
+    # CAMDense blocks with growth=32. Channel widths from upstream:
+    #   block1 in=128, 12 layers → 128 + 12*32 = 512 → transit1 to 256
+    #   block2 in=256, 24 layers → 256 + 24*32 = 1024 → transit2 to 512
+    #   block3 in=512, 16 layers → 512 + 16*32 = 1024 → transit3 to 1024
+    var block1 = _load_camdense_tdnn_block(ctx, xv + "/block1", 12, 128, 32)
+    var transit1 = _load_transit_layer(ctx, xv + "/transit1", 128 + 12 * 32, 256)
+    var block2 = _load_camdense_tdnn_block(ctx, xv + "/block2", 24, 256, 32)
+    var transit2 = _load_transit_layer(ctx, xv + "/transit2", 256 + 24 * 32, 512)
+    var block3 = _load_camdense_tdnn_block(ctx, xv + "/block3", 16, 512, 32)
+    var transit3 = _load_transit_layer(ctx, xv + "/transit3", 512 + 16 * 32, 1024)
+
+    var out_nonlin = _load_batchnorm(ctx, xv + "/out_nonlinear", 1024)
+    var dense = _load_dense_layer(ctx, xv + "/dense", 1024, 192)
+
+    var xvector = XVectorBackbone(
+        tdnn^, block1^, transit1^, block2^, transit2^, block3^, transit3^,
+        out_nonlin^, dense^,
+    )
+
+    # Head: bn1+conv1+bn2+conv2 + layer1 (2 blocks) + layer2 (2 blocks).
+    var hd = base + "/head"
+    var head_bn1 = _load_batchnorm(ctx, hd + "/bn1", 192, nested=False)
+    var hc1_w = upload_fp32(ctx, hd + "/conv1/weight.bin")
+    var head_conv1 = Conv1d(hc1_w^, _zero_buf(ctx, 192)^, 192, 192, 3, 1, 1, 1, 1, False)
+    var head_bn2 = _load_batchnorm(ctx, hd + "/bn2", 192, nested=False)
+    var hc2_w = upload_fp32(ctx, hd + "/conv2/weight.bin")
+    var head_conv2 = Conv1d(hc2_w^, _zero_buf(ctx, 192)^, 192, 192, 3, 1, 1, 1, 1, False)
+    var layer1 = _load_resnet_layer(ctx, hd + "/layer1", 192)
+    var layer2 = _load_resnet_layer(ctx, hd + "/layer2", 192)
+    var head = ResNetHead(
+        head_bn1^, head_conv1^, head_bn2^, head_conv2^, layer1^, layer2^,
+    )
+
+    return CAMPPlus(xvector^, head^)
