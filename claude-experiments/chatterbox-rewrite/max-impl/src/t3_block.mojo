@@ -20,7 +20,8 @@ from modules import (
 )
 from attention import qk_scaled_and_masked, softmax_2d, av_matmul
 from transformer_blocks import (
-    reshape_bsd_to_bhsd, reshape_bhsd_to_bsd, apply_rope_s3_style,
+    reshape_bsd_to_bhsd, reshape_bhsd_to_bsd,
+    apply_rope_s3_style, apply_rope_hf_style,
     LlamaMLP, llama_mlp_forward,
 )
 
@@ -68,30 +69,24 @@ def t3_block_forward(
     linear_forward(ctx, module.to_k, x_norm, k_lin, b * s)
     linear_forward(ctx, module.to_v, x_norm, v_lin, b * s)
 
-    # Reshape (B, S, H, Dh).
-    var q_4d = ctx.enqueue_create_buffer[DType.float32](b * s * H * Dh)
-    var k_4d = ctx.enqueue_create_buffer[DType.float32](b * s * H * Dh)
-    ctx.enqueue_copy(q_4d, q_lin)
-    ctx.enqueue_copy(k_4d, k_lin)
-    # Apply RoPE on the (B, S, H, Dh) layout.
-    var q_rope = ctx.enqueue_create_buffer[DType.float32](b * s * H * Dh)
-    var k_rope = ctx.enqueue_create_buffer[DType.float32](b * s * H * Dh)
-    apply_rope_s3_style(ctx, q_4d, q_rope, cos_buf, sin_buf, b, s, H, Dh)
-    apply_rope_s3_style(ctx, k_4d, k_rope, cos_buf, sin_buf, b, s, H, Dh)
-
-    # Permute to (B, H, S, Dh) for SDPA.
+    # Reshape (B, S, D) → (B, H, S, Dh) for SDPA (matches HF Llama layout).
     var q_perm = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
     var k_perm = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
     var v_perm = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
-    reshape_bsd_to_bhsd(ctx, q_rope, q_perm, b, s, H, Dh)
-    reshape_bsd_to_bhsd(ctx, k_rope, k_perm, b, s, H, Dh)
-    reshape_bsd_to_bhsd(ctx, v_lin,  v_perm, b, s, H, Dh)
+    reshape_bsd_to_bhsd(ctx, q_lin, q_perm, b, s, H, Dh)
+    reshape_bsd_to_bhsd(ctx, k_lin, k_perm, b, s, H, Dh)
+    reshape_bsd_to_bhsd(ctx, v_lin, v_perm, b, s, H, Dh)
+    # Apply HF Llama RoPE on (B, H, S, Dh) with cos/sin of shape (B, S, Dh).
+    var q_rope = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
+    var k_rope = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
+    apply_rope_hf_style(ctx, q_perm, q_rope, cos_buf, sin_buf, b, H, s, Dh)
+    apply_rope_hf_style(ctx, k_perm, k_rope, cos_buf, sin_buf, b, H, s, Dh)
 
     var scale: Float32 = 1.0 / sqrt(Float32(Dh))
     var logits = ctx.enqueue_create_buffer[DType.float32](b * H * s * s)
     var probs  = ctx.enqueue_create_buffer[DType.float32](b * H * s * s)
     var attn_perm = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
-    qk_scaled_and_masked(ctx, q_perm, k_perm, mask_buf, logits,
+    qk_scaled_and_masked(ctx, q_rope, k_rope, mask_buf, logits,
                           b * H, s, s, Dh, scale, has_mask)
     softmax_2d(ctx, logits, probs, b * H * s, s)
     av_matmul(ctx, probs, v_perm, attn_perm, b * H, s, s, Dh)
@@ -104,6 +99,92 @@ def t3_block_forward(
     residual_add(ctx, x_buf, attn_out, b * s * D)
 
     # ---- MLP ----
+    var x_norm2 = ctx.enqueue_create_buffer[DType.float32](b * s * D)
+    rms_norm_forward(ctx, module.post_norm, x_buf, x_norm2, b * s)
+    var mlp_out = ctx.enqueue_create_buffer[DType.float32](b * s * D)
+    llama_mlp_forward(ctx, module.mlp, x_norm2, mlp_out, b * s)
+    residual_add(ctx, x_buf, mlp_out, b * s * D)
+
+
+def t3_block_prefill(
+    mut ctx: DeviceContext,
+    mut module: T3Block,
+    mut x_buf: DeviceBuffer[DType.float32],   # (B, S, D) — updated in-place
+    mut cos_buf: DeviceBuffer[DType.float32],
+    mut sin_buf: DeviceBuffer[DType.float32],
+    mut mask_buf: DeviceBuffer[DType.float32],
+    mut k_cache: DeviceBuffer[DType.float32],   # (B, H, MAX_CTX, Dh) — populated at slots [0, S)
+    mut v_cache: DeviceBuffer[DType.float32],
+    b: Int, s: Int, max_ctx: Int,
+) raises:
+    """Same as `t3_block_forward` (with causal mask) but ALSO writes the
+    post-RoPE k_perm and v_perm into the per-layer cache at slots [0..S)."""
+    var H = module.n_heads
+    var Dh = module.head_dim
+    var D = H * Dh
+
+    # ---- attention ----
+    var x_norm = ctx.enqueue_create_buffer[DType.float32](b * s * D)
+    rms_norm_forward(ctx, module.in_norm, x_buf, x_norm, b * s)
+
+    var q_lin = ctx.enqueue_create_buffer[DType.float32](b * s * D)
+    var k_lin = ctx.enqueue_create_buffer[DType.float32](b * s * D)
+    var v_lin = ctx.enqueue_create_buffer[DType.float32](b * s * D)
+    linear_forward(ctx, module.to_q, x_norm, q_lin, b * s)
+    linear_forward(ctx, module.to_k, x_norm, k_lin, b * s)
+    linear_forward(ctx, module.to_v, x_norm, v_lin, b * s)
+
+    # Reshape (B, S, D) → (B, H, S, Dh).
+    var q_perm = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
+    var k_perm = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
+    var v_perm = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
+    reshape_bsd_to_bhsd(ctx, q_lin, q_perm, b, s, H, Dh)
+    reshape_bsd_to_bhsd(ctx, k_lin, k_perm, b, s, H, Dh)
+    reshape_bsd_to_bhsd(ctx, v_lin, v_perm, b, s, H, Dh)
+    var q_rope = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
+    var k_rope = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
+    apply_rope_hf_style(ctx, q_perm, q_rope, cos_buf, sin_buf, b, H, s, Dh)
+    apply_rope_hf_style(ctx, k_perm, k_rope, cos_buf, sin_buf, b, H, s, Dh)
+
+    # Populate K/V cache at slots [0..S).
+    var kp = k_rope.unsafe_ptr()
+    var vp = v_perm.unsafe_ptr()
+    var kcp = k_cache.unsafe_ptr()
+    var vcp = v_cache.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(kp, vp, kcp, vcp, H, s, Dh, max_ctx)
+    def cache_write[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // (H * s * Dh)
+        var rem = i - bi * H * s * Dh
+        var hi = rem // (s * Dh)
+        var rem2 = rem - hi * s * Dh
+        var si = rem2 // Dh
+        var di = rem2 - si * Dh
+        var dst = bi * H * max_ctx * Dh + hi * max_ctx * Dh + si * Dh + di
+        kcp[dst] = kp[i]
+        vcp[dst] = vp[i]
+    elementwise[cache_write, simd_width=1, target="gpu"](
+        IndexList[1](b * H * s * Dh), DeviceContextPtr(ctx),
+    )
+
+    var scale: Float32 = 1.0 / sqrt(Float32(Dh))
+    var logits = ctx.enqueue_create_buffer[DType.float32](b * H * s * s)
+    var probs  = ctx.enqueue_create_buffer[DType.float32](b * H * s * s)
+    var attn_perm = ctx.enqueue_create_buffer[DType.float32](b * H * s * Dh)
+    qk_scaled_and_masked(ctx, q_rope, k_rope, mask_buf, logits,
+                          b * H, s, s, Dh, scale, True)
+    softmax_2d(ctx, logits, probs, b * H * s, s)
+    av_matmul(ctx, probs, v_perm, attn_perm, b * H, s, s, Dh)
+    var attn_flat = ctx.enqueue_create_buffer[DType.float32](b * s * D)
+    reshape_bhsd_to_bsd(ctx, attn_perm, attn_flat, b, H, s, Dh)
+    var attn_out = ctx.enqueue_create_buffer[DType.float32](b * s * D)
+    linear_forward(ctx, module.to_out, attn_flat, attn_out, b * s)
+
+    residual_add(ctx, x_buf, attn_out, b * s * D)
+
     var x_norm2 = ctx.enqueue_create_buffer[DType.float32](b * s * D)
     rms_norm_forward(ctx, module.post_norm, x_buf, x_norm2, b * s)
     var mlp_out = ctx.enqueue_create_buffer[DType.float32](b * s * D)

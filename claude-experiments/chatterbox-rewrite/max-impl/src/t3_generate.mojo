@@ -20,7 +20,7 @@ from layout import Idx, TileTensor, row_major
 from modules import (
     Linear, linear_forward, RMSNorm, rms_norm_forward, Embedding, embedding_forward,
 )
-from t3_block import T3Block, t3_block_forward
+from t3_block import T3Block, t3_block_forward, t3_block_prefill
 from t3 import T3
 from t3_decode import t3_decode_step, cache_write_step
 from transformer_blocks import reshape_bsd_to_bhsd, apply_rope_hf_style
@@ -125,14 +125,53 @@ def t3_generate(
     var Dh = model.head_dim
     var V = model.v_speech
 
-    # 1. Prefill via existing t3_block_forward — populates x_buf in place.
+    # 1. Prefill via t3_block_prefill — populates x_buf AND per-layer KV caches.
     var x_buf = ctx.enqueue_create_buffer[DType.float32](b * t_prefill * D)
     ctx.enqueue_copy(x_buf, input_embed_buf)
 
+    var k_caches = List[DeviceBuffer[DType.float32]]()
+    var v_caches = List[DeviceBuffer[DType.float32]]()
+    for _ in range(model.n_layers):
+        var kc = ctx.enqueue_create_buffer[DType.float32](b * H * max_ctx * Dh)
+        kc.enqueue_fill(0.0)
+        var vc = ctx.enqueue_create_buffer[DType.float32](b * H * max_ctx * Dh)
+        vc.enqueue_fill(0.0)
+        k_caches.append(kc^)
+        v_caches.append(vc^)
+
+    # cos_full / sin_full are (MAX_CTX, Dh); for prefill we use slots [0..t_prefill).
+    # The t3_block_prefill expects cos/sin matching the seq layout (B, S, Dh).
+    # We assume the caller passes cos_full with prefill positions in [0..T) and
+    # build a (B, t_prefill, Dh) view by gathering, or trust the caller already
+    # supplied (B, T, Dh) shaped buffers. For now we assume `cos_full` is the
+    # full table (MAX_CTX, Dh) and `prefill_mask` plus (B, T) layout works.
+    # Construct (B, T, Dh) cos/sin for prefill:
+    var cos_pre = ctx.enqueue_create_buffer[DType.float32](b * t_prefill * Dh)
+    var sin_pre = ctx.enqueue_create_buffer[DType.float32](b * t_prefill * Dh)
+    var cfp = cos_full.unsafe_ptr()
+    var sfp = sin_full.unsafe_ptr()
+    var cpp = cos_pre.unsafe_ptr()
+    var spp = sin_pre.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(cfp, sfp, cpp, spp, t_prefill, Dh)
+    def gather_pre[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // (t_prefill * Dh)
+        var rem = i - bi * t_prefill * Dh
+        var si = rem // Dh
+        var di = rem - si * Dh
+        cpp[i] = cfp[si * Dh + di]
+        spp[i] = sfp[si * Dh + di]
+    elementwise[gather_pre, simd_width=1, target="gpu"](
+        IndexList[1](b * t_prefill * Dh), DeviceContextPtr(ctx),
+    )
+
     for L in range(model.n_layers):
-        t3_block_forward(
-            ctx, model.blocks[L], x_buf, cos_full, sin_full, prefill_mask,
-            b, t_prefill, has_mask=True,
+        t3_block_prefill(
+            ctx, model.blocks[L], x_buf, cos_pre, sin_pre, prefill_mask,
+            k_caches[L], v_caches[L], b, t_prefill, max_ctx,
         )
 
     # 2. Final RMSNorm + LM head + argmax → first generated token.
@@ -173,24 +212,7 @@ def t3_generate(
     if first_tok == Int64(eos_token):
         return generated^
 
-    # 3. Per-layer KV caches. The MVP path here is structural — to compute
-    # the cache contents we'd normally have populated them during prefill.
-    # We allocate them so future decode_step calls have somewhere to write
-    # AND read from. (Full prefill-cache population is a clean refactor of
-    # t3_block_forward to expose its post-RoPE Q/K/V — pending in a separate
-    # commit. For now the decode loop runs structurally over `t3_decode_step`
-    # using freshly-allocated zeroed caches — produces non-parity tokens
-    # but exercises the full code path.)
-    var k_caches = List[DeviceBuffer[DType.float32]]()
-    var v_caches = List[DeviceBuffer[DType.float32]]()
-    for _ in range(model.n_layers):
-        var kc = ctx.enqueue_create_buffer[DType.float32](b * H * max_ctx * Dh)
-        kc.enqueue_fill(0.0)
-        var vc = ctx.enqueue_create_buffer[DType.float32](b * H * max_ctx * Dh)
-        vc.enqueue_fill(0.0)
-        k_caches.append(kc^)
-        v_caches.append(vc^)
-
+    # 3. Decode loop. k_caches/v_caches were populated by t3_block_prefill.
     var cur_len = t_prefill
     var cur_tok_buf = ctx.enqueue_create_buffer[DType.int64](b)
     with cur_tok_buf.map_to_host() as h:
