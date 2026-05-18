@@ -12,10 +12,16 @@ from s3tokenizer_block import FSMNAttention, S3TokenizerBlock
 from t3 import T3
 from s3tokenizer import S3Tokenizer
 from mel_extractor import reflect_pad_1d
+from perceiver import Perceiver, PerceiverBlock
+from cond_enc import T3CondEnc
+from conformer import ConformerLayer, FeedForward, ConformerConvModule
+from cfm import CFMEstimator
+from hifigan import HiFiGAN
+from s3gen import S3Gen
 
 
 def test_compile_check() raises:
-    print("All modules compiled")
+    print("All MAX-impl modules compiled — Phase 0/1/2/3/4 wired.")
 
 
 def main() raises:
