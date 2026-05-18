@@ -187,20 +187,64 @@ def s3tokenizer_map(k):
 # Conversion driver
 # ----------------------------------------------------------------------------
 
+def collapse_weight_norm(tensors):
+    """PyTorch's `parametrizations.weight.{original0, original1}` is
+    `weight_norm` decomposition: g = original0 (scale), v = original1 (direction).
+    Reconstruct weight = g * v / ||v||_dim0 (per-output-channel norm).
+
+    Walks `tensors` (dict: upstream_key → np.ndarray) and rewrites any
+    `<prefix>.parametrizations.weight.original0`/`original1` pair into a single
+    `<prefix>.weight` entry (g * v / ||v||).
+    """
+    out = {}
+    seen_norm = set()
+    for k in list(tensors.keys()):
+        if k.endswith(".parametrizations.weight.original0"):
+            prefix = k[:-len(".parametrizations.weight.original0")]
+            seen_norm.add(prefix)
+        elif k.endswith(".parametrizations.weight.original1"):
+            prefix = k[:-len(".parametrizations.weight.original1")]
+            seen_norm.add(prefix)
+        else:
+            out[k] = tensors[k]
+    for prefix in seen_norm:
+        g_key = prefix + ".parametrizations.weight.original0"
+        v_key = prefix + ".parametrizations.weight.original1"
+        g = tensors[g_key]
+        v = tensors[v_key]
+        v_flat = v.reshape(v.shape[0], -1)
+        v_norm = np.linalg.norm(v_flat, axis=1, keepdims=True)
+        # Avoid div-by-zero on degenerate weights.
+        v_norm = np.where(v_norm == 0.0, np.ones_like(v_norm), v_norm)
+        g_flat = g.reshape(-1, 1)
+        w_flat = g_flat * v_flat / v_norm
+        w = w_flat.reshape(v.shape)
+        out[prefix + ".weight"] = w
+    return out
+
+
 def convert(in_path, out_dir, mapper, label):
-    """Open `in_path` via safetensors.safe_open and write keys via `mapper`."""
-    n_kept = 0
-    n_skipped = 0
+    """Open `in_path` via safetensors.safe_open and write keys via `mapper`.
+
+    Collapses PyTorch `weight_norm` parametrizations into plain `.weight` keys
+    before dispatching to the per-checkpoint mapper.
+    """
+    raw = {}
     with safe_open(in_path, framework="numpy") as f:
         for upstream_key in f.keys():
-            arr = f.get_tensor(upstream_key)
-            mapped = mapper(upstream_key)
-            if mapped is None:
-                n_skipped += 1
-                continue
-            out_path = os.path.join(out_dir, mapped + ".bin")
-            write_tensor(out_path, arr)
-            n_kept += 1
+            raw[upstream_key] = f.get_tensor(upstream_key)
+    tensors = collapse_weight_norm(raw)
+
+    n_kept = 0
+    n_skipped = 0
+    for upstream_key, arr in tensors.items():
+        mapped = mapper(upstream_key)
+        if mapped is None:
+            n_skipped += 1
+            continue
+        out_path = os.path.join(out_dir, mapped + ".bin")
+        write_tensor(out_path, arr)
+        n_kept += 1
     print(f"[{label}] kept={n_kept} skipped={n_skipped} → {out_dir}")
 
 
