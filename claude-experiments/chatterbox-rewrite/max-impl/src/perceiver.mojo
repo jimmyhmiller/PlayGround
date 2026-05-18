@@ -5,11 +5,12 @@ For cross-attention we use a variant where Sq ≠ Sk.
 """
 from std.gpu.host import DeviceContext, DeviceBuffer
 from std.runtime.asyncrt import DeviceContextPtr
+from std.algorithm.functional import elementwise, IndexList
+from std.math import sqrt
 
 from modules import Linear, linear_forward, LayerNorm, layer_norm_forward, residual_add
 from attention import qk_scaled_and_masked, softmax_2d, av_matmul
 from transformer_blocks import reshape_bsd_to_bhsd, reshape_bhsd_to_bsd
-from std.math import sqrt
 
 
 @fieldwise_init
@@ -107,7 +108,6 @@ def perceiver_forward(
         # Generic tiling.
         var src = model.pre_attention_query.unsafe_ptr()
         var dst = q_buf.unsafe_ptr()
-        from std.algorithm.functional import elementwise, IndexList
 
         @always_inline
         @parameter

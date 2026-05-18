@@ -327,7 +327,7 @@ def embedding_forward(
     var table_t = TileTensor(module.table, row_major(Idx(module.vocab_size), Idx(module.dim)))
     var out_t = TileTensor(out_buf, row_major(Idx(b), Idx(s), Idx(module.dim)))
     var dctx = DeviceContextPtr(ctx)
-    nn_gather[axis=0, target="gpu"](out_t, table_t, ids_t, dctx)
+    nn_gather[axis=0, target="gpu"](out_t, table_t, ids_t, context=dctx)
 
 
 # ============================================================================
