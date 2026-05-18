@@ -20,6 +20,7 @@ from cfm_blocks import CausalResnetBlock1D, BasicTransformerBlock
 from hifigan import HiFiGAN, hifigan_forward, HiFiGANResBlock, HiFiGANUpsample
 from s3gen import S3Gen, UpsampleConformerEncoder, s3gen_synthesize
 from t3_decode import t3_decode_step, cache_write_step
+from t3_generate import t3_generate, argmax_lastdim
 from weights import load_voice_encoder, load_t3, load_t3_block, upload_fp32
 
 
