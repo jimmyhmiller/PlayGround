@@ -83,6 +83,18 @@ def main():
     print(f"[campplus] fbank: {tuple(feats.shape)}")
     write_tensor(OUT / "fbank_feat.bin", feats.cpu().numpy().astype(np.float32))
 
+    # Capture the FCM head's first-layer (conv1 -> bn1 -> relu) output.
+    head = spk.head
+    fcm_input = feats.to(device).to(torch.float32).permute(0, 2, 1)  # (B,80,T)
+    fcm_input_4d = fcm_input.unsqueeze(1)  # (B,1,80,T)
+    with torch.inference_mode():
+        conv1_out = head.conv1(fcm_input_4d)
+        bn1_out = head.bn1(conv1_out)
+        relu1_out = torch.relu(bn1_out)
+    write_tensor(OUT / "fcm_input_4d.bin", fcm_input_4d.cpu().numpy().astype(np.float32))
+    write_tensor(OUT / "fcm_conv1_out.bin", conv1_out.cpu().numpy().astype(np.float32))
+    write_tensor(OUT / "fcm_relu1_out.bin", relu1_out.cpu().numpy().astype(np.float32))
+
     # Run CAMPPlus.
     with torch.inference_mode():
         xvec = spk(feats.to(device).to(torch.float32))

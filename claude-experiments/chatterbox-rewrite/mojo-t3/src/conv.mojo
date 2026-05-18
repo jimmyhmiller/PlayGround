@@ -368,6 +368,215 @@ def magnitude_phase_to_complex_kernel[
     imag_out[b, k, t] = rebind[imag_out.ElementType](im.cast[dtype]())
 
 
+def conv2d_kernel[
+    dtype: DType,
+    XLayout: TensorLayout,
+    WLayout: TensorLayout,
+    BiasLayout: TensorLayout,
+    OutLayout: TensorLayout,
+    KH: Int, KW: Int,
+    HAS_BIAS: Bool,
+    BLOCK: Int,
+](
+    output: TileTensor[dtype, OutLayout, MutAnyOrigin],     # (B, C_out, H_out, W_out)
+    x: TileTensor[dtype, XLayout, MutAnyOrigin],             # (B, C_in, H_in, W_in)
+    w: TileTensor[dtype, WLayout, MutAnyOrigin],             # (C_out, C_in, KH, KW)
+    bias: TileTensor[dtype, BiasLayout, MutAnyOrigin],       # (C_out,)
+    batch: Int, c_in: Int, c_out: Int,
+    h_in: Int, w_in: Int, h_out: Int, w_out: Int,
+    stride_h: Int, stride_w: Int,
+    pad_h: Int, pad_w: Int,
+):
+    """2D convolution.
+
+    Launch: grid = B * C_out * H_out, block_dim = BLOCK. Each thread strides
+    through W_out columns to amortize launch cost.
+    """
+    comptime assert x.flat_rank == 4
+    comptime assert w.flat_rank == 4
+    comptime assert output.flat_rank == 4
+
+    var bid = block_idx.x
+    var tid = thread_idx.x
+    var ho = bid % h_out
+    var co = (bid // h_out) % c_out
+    var b = bid // (h_out * c_out)
+
+    var bias_v: Float32 = 0.0
+    if HAS_BIAS:
+        comptime assert bias.flat_rank == 1
+        bias_v = rebind[Scalar[dtype]](bias[co]).cast[DType.float32]()
+
+    var wo = tid
+    while wo < w_out:
+        var acc: Float32 = bias_v
+        for ci in range(c_in):
+            for kh in range(KH):
+                var hi = ho * stride_h + kh - pad_h
+                if hi >= 0 and hi < h_in:
+                    for kw in range(KW):
+                        var wi = wo * stride_w + kw - pad_w
+                        if wi >= 0 and wi < w_in:
+                            var xv = rebind[Scalar[dtype]](x[b, ci, hi, wi]).cast[DType.float32]()
+                            var wv = rebind[Scalar[dtype]](w[co, ci, kh, kw]).cast[DType.float32]()
+                            acc += xv * wv
+        output[b, co, ho, wo] = rebind[output.ElementType](acc.cast[dtype]())
+        wo += BLOCK
+
+
+def batchnorm2d_kernel[
+    dtype: DType,
+    InLayout: TensorLayout,
+    PLayout: TensorLayout,
+    OutLayout: TensorLayout,
+    BLOCK: Int,
+](
+    output: TileTensor[dtype, OutLayout, MutAnyOrigin],     # (B, C, H, W)
+    inp: TileTensor[dtype, InLayout, MutAnyOrigin],          # (B, C, H, W)
+    weight: TileTensor[dtype, PLayout, MutAnyOrigin],        # (C,)
+    bias: TileTensor[dtype, PLayout, MutAnyOrigin],          # (C,)
+    running_mean: TileTensor[dtype, PLayout, MutAnyOrigin],  # (C,)
+    running_var: TileTensor[dtype, PLayout, MutAnyOrigin],   # (C,)
+    batch: Int, channels: Int, height: Int, width: Int,
+    eps: Float32,
+):
+    """BatchNorm2d (inference mode):
+       y = (x - running_mean[c]) / sqrt(running_var[c] + eps) * weight[c] + bias[c]
+
+    Launch: grid = B * C * H, block_dim = BLOCK over W.
+    """
+    comptime assert inp.flat_rank == 4
+    comptime assert output.flat_rank == 4
+    comptime assert weight.flat_rank == 1
+
+    var bid = block_idx.x
+    var tid = thread_idx.x
+    var h = bid % height
+    var c = (bid // height) % channels
+    var b = bid // (height * channels)
+
+    var rm = rebind[Scalar[dtype]](running_mean[c]).cast[DType.float32]()
+    var rv = rebind[Scalar[dtype]](running_var[c]).cast[DType.float32]()
+    var gamma = rebind[Scalar[dtype]](weight[c]).cast[DType.float32]()
+    var beta = rebind[Scalar[dtype]](bias[c]).cast[DType.float32]()
+    var inv_std: Float32 = 1.0 / ((rv + eps) ** 0.5)
+
+    var w = tid
+    while w < width:
+        var v = rebind[Scalar[dtype]](inp[b, c, h, w]).cast[DType.float32]()
+        var y = (v - rm) * inv_std * gamma + beta
+        output[b, c, h, w] = rebind[output.ElementType](y.cast[dtype]())
+        w += BLOCK
+
+
+def batchnorm1d_kernel[
+    dtype: DType,
+    InLayout: TensorLayout,
+    PLayout: TensorLayout,
+    OutLayout: TensorLayout,
+    BLOCK: Int,
+](
+    output: TileTensor[dtype, OutLayout, MutAnyOrigin],     # (B, C, T)
+    inp: TileTensor[dtype, InLayout, MutAnyOrigin],          # (B, C, T)
+    weight: TileTensor[dtype, PLayout, MutAnyOrigin],        # (C,)
+    bias: TileTensor[dtype, PLayout, MutAnyOrigin],          # (C,)
+    running_mean: TileTensor[dtype, PLayout, MutAnyOrigin],  # (C,)
+    running_var: TileTensor[dtype, PLayout, MutAnyOrigin],   # (C,)
+    batch: Int, channels: Int, length: Int,
+    eps: Float32,
+):
+    """BatchNorm1d (inference mode). Launch: grid = B * C, block_dim = BLOCK."""
+    comptime assert inp.flat_rank == 3
+    comptime assert output.flat_rank == 3
+    comptime assert weight.flat_rank == 1
+
+    var bid = block_idx.x
+    var tid = thread_idx.x
+    var c = bid % channels
+    var b = bid // channels
+
+    var rm = rebind[Scalar[dtype]](running_mean[c]).cast[DType.float32]()
+    var rv = rebind[Scalar[dtype]](running_var[c]).cast[DType.float32]()
+    var gamma = rebind[Scalar[dtype]](weight[c]).cast[DType.float32]()
+    var beta = rebind[Scalar[dtype]](bias[c]).cast[DType.float32]()
+    var inv_std: Float32 = 1.0 / ((rv + eps) ** 0.5)
+
+    var t = tid
+    while t < length:
+        var v = rebind[Scalar[dtype]](inp[b, c, t]).cast[DType.float32]()
+        var y = (v - rm) * inv_std * gamma + beta
+        output[b, c, t] = rebind[output.ElementType](y.cast[dtype]())
+        t += BLOCK
+
+
+def relu_kernel[
+    dtype: DType,
+    InLayout: TensorLayout,
+    OutLayout: TensorLayout,
+    BLOCK: Int,
+](
+    output: TileTensor[dtype, OutLayout, MutAnyOrigin],
+    inp: TileTensor[dtype, InLayout, MutAnyOrigin],
+    n_elems: Int,
+):
+    """Pointwise relu over a flat rank-1 view."""
+    comptime assert inp.flat_rank == 1
+    comptime assert output.flat_rank == 1
+
+    var idx = block_idx.x * BLOCK + thread_idx.x
+    if idx >= n_elems:
+        return
+    var v = rebind[Scalar[dtype]](inp[idx]).cast[DType.float32]()
+    if v < 0.0: v = 0.0
+    output[idx] = rebind[output.ElementType](v.cast[dtype]())
+
+
+def stats_pool_kernel[
+    dtype: DType,
+    InLayout: TensorLayout,
+    OutLayout: TensorLayout,
+    BLOCK: Int,
+](
+    output: TileTensor[dtype, OutLayout, MutAnyOrigin],     # (B, 2*C)  — [mean; std] per channel
+    inp: TileTensor[dtype, InLayout, MutAnyOrigin],          # (B, C, T)
+    batch: Int, channels: Int, length: Int,
+):
+    """Compute per-utterance per-channel mean and std along the time axis.
+
+    Output layout: out[b, c]            = mean over t of inp[b, c, t]
+                   out[b, channels + c] = std  over t of inp[b, c, t]
+
+    Launch: grid = B * C, block_dim = BLOCK (threads cooperate over time via
+    a shared-memory reduction). For simplicity we do a sequential reduction
+    in lane 0 of each block here — channels-many launches is cheap.
+    """
+    comptime assert inp.flat_rank == 3
+    comptime assert output.flat_rank == 2
+
+    var bid = block_idx.x
+    var tid = thread_idx.x
+    if tid != 0:
+        return
+    var c = bid % channels
+    var b = bid // channels
+
+    var sum: Float32 = 0.0
+    for t in range(length):
+        var v = rebind[Scalar[dtype]](inp[b, c, t]).cast[DType.float32]()
+        sum += v
+    var mean = sum / Float32(length)
+
+    var var_acc: Float32 = 0.0
+    for t in range(length):
+        var v = rebind[Scalar[dtype]](inp[b, c, t]).cast[DType.float32]()
+        var d = v - mean
+        var_acc += d * d
+    var std = (var_acc / Float32(length) + 1.0e-10) ** 0.5
+
+    output[b, c] = rebind[output.ElementType](mean.cast[dtype]())
+    output[b, channels + c] = rebind[output.ElementType](std.cast[dtype]())
+
+
 def reflect_pad_1d_kernel[
     dtype: DType,
     InLayout: TensorLayout,
