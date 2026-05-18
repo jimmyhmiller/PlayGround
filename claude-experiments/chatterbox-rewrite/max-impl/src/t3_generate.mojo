@@ -165,13 +165,82 @@ def t3_generate(
     ctx.synchronize()
 
     var generated = List[Int64]()
+    var first_tok: Int64 = 0
     with argmax_buf.map_to_host() as h:
-        generated.append(h[0])
+        first_tok = h[0]
+    generated.append(first_tok)
 
-    # 3. Decode loop (skeleton — full KV-cache decode wired in follow-up).
-    # For MVP: a cleaner decode pass requires `t3_block_forward` to emit K/V
-    # cache writes, which is mechanical refactoring of existing tested code.
-    # The structural piece (single decode step with KV cache, sampling, EOS
-    # check) is in place via `t3_decode_step` and `argmax_lastdim`.
+    if first_tok == Int64(eos_token):
+        return generated^
+
+    # 3. Per-layer KV caches. The MVP path here is structural — to compute
+    # the cache contents we'd normally have populated them during prefill.
+    # We allocate them so future decode_step calls have somewhere to write
+    # AND read from. (Full prefill-cache population is a clean refactor of
+    # t3_block_forward to expose its post-RoPE Q/K/V — pending in a separate
+    # commit. For now the decode loop runs structurally over `t3_decode_step`
+    # using freshly-allocated zeroed caches — produces non-parity tokens
+    # but exercises the full code path.)
+    var k_caches = List[DeviceBuffer[DType.float32]]()
+    var v_caches = List[DeviceBuffer[DType.float32]]()
+    for _ in range(model.n_layers):
+        var kc = ctx.enqueue_create_buffer[DType.float32](b * H * max_ctx * Dh)
+        kc.enqueue_fill(0.0)
+        var vc = ctx.enqueue_create_buffer[DType.float32](b * H * max_ctx * Dh)
+        vc.enqueue_fill(0.0)
+        k_caches.append(kc^)
+        v_caches.append(vc^)
+
+    var cur_len = t_prefill
+    var cur_tok_buf = ctx.enqueue_create_buffer[DType.int64](b)
+    with cur_tok_buf.map_to_host() as h:
+        h[0] = first_tok
+    var step_emb_buf = ctx.enqueue_create_buffer[DType.float32](b * D)
+    var step_emb_3d_buf = ctx.enqueue_create_buffer[DType.float32](b * 1 * D)
+    var cos_step = ctx.enqueue_create_buffer[DType.float32](b * Dh)
+    var sin_step = ctx.enqueue_create_buffer[DType.float32](b * Dh)
+
+    var step = 1
+    while step < n_steps:
+        # Embed current token via speech_emb table.
+        embedding_forward(ctx, model.speech_emb, cur_tok_buf, step_emb_3d_buf, b, 1)
+        # The (B, 1, D) buffer doubles as the per-step (B, D) for decode.
+        ctx.enqueue_copy(step_emb_buf, step_emb_3d_buf)
+
+        # Gather cos/sin at position `cur_len` from the full RoPE table.
+        var pos_in_speech = speech_pos_offset + step  # logical pos
+        gather_cos_sin_at_pos(ctx, cos_full, sin_full, cos_step, sin_step,
+                              b, Dh, cur_len)
+
+        # Run all 30 decode steps over the per-layer KV caches.
+        for L in range(model.n_layers):
+            t3_decode_step(
+                ctx, model.blocks[L], step_emb_buf,
+                k_caches[L], v_caches[L], cos_step, sin_step,
+                b, max_ctx, cur_len,
+            )
+
+        # Final RMSNorm.
+        var tmp2 = ctx.enqueue_create_buffer[DType.float32](b * D)
+        rms_norm_forward(ctx, model.final_norm, step_emb_buf, tmp2, b)
+        ctx.enqueue_copy(step_emb_buf, tmp2)
+
+        # LM head + argmax.
+        linear_forward(ctx, model.speech_head, step_emb_buf, logits_buf, b)
+        argmax_lastdim(ctx, logits_buf, argmax_buf, b, V)
+        ctx.synchronize()
+
+        var next_tok: Int64 = 0
+        with argmax_buf.map_to_host() as h:
+            next_tok = h[0]
+        generated.append(next_tok)
+        if next_tok == Int64(eos_token):
+            break
+
+        # Set up next iteration: cur_tok = next_tok.
+        with cur_tok_buf.map_to_host() as h:
+            h[0] = next_tok
+        cur_len += 1
+        step += 1
 
     return generated^
