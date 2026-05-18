@@ -33,6 +33,9 @@ from cfm_estimator_new import (
 )
 from perceiver import Perceiver, PerceiverBlock
 from cond_enc import T3CondEnc
+from upsample_encoder import (
+    EmbedOut, PreLookaheadLayer, UpLayerConv, UpsampleConformerEncoderReal,
+)
 
 
 def _upload(buf: DeviceBuffer[DType.float32], data: List[Float32], n: Int) raises:
@@ -983,3 +986,99 @@ def load_t3_cond_enc(
 
     return T3CondEnc(spkr_enc^, emotion_fc^, speech_emb.copy(), perceiver^,
                       speaker_embed_size, d_model, cond_prompt_len)
+
+
+# ============================================================================
+# UpsampleConformerEncoder loader (flow encoder wrapper)
+# ============================================================================
+
+def _load_embed_out(
+    mut ctx: DeviceContext, base: String, idim: Int, odim: Int,
+) raises -> EmbedOut:
+    """Load embed.out = Sequential(Linear(idim, odim), LayerNorm(odim), Dropout).
+
+    On disk:
+      {base}/0/{weight,bias}.bin   — Linear (odim, idim)
+      {base}/1/{weight,bias}.bin   — LayerNorm (odim,)
+    """
+    var lw = upload_fp32(ctx, base + "/0/weight.bin")
+    var lb = upload_fp32(ctx, base + "/0/bias.bin")
+    var lin = Linear(lw^, lb^, idim, odim, True)
+    var nw = upload_fp32(ctx, base + "/1/weight.bin")
+    var nb = upload_fp32(ctx, base + "/1/bias.bin")
+    var ln = LayerNorm(nw^, nb^, odim, Float32(1.0e-5))
+    return EmbedOut(lin^, ln^)
+
+
+def _load_pre_lookahead(
+    mut ctx: DeviceContext, base: String, channels: Int, pre_la_len: Int = 3,
+) raises -> PreLookaheadLayer:
+    var c1_w = upload_fp32(ctx, base + "/conv1/weight.bin")
+    var c1_b = upload_fp32(ctx, base + "/conv1/bias.bin")
+    # kernel = pre_lookahead_len + 1 = 4, padding=0 (caller pads input).
+    var conv1 = Conv1d(c1_w^, c1_b^, channels, channels, pre_la_len + 1, 1, 0, 1, 1, True)
+    var c2_w = upload_fp32(ctx, base + "/conv2/weight.bin")
+    var c2_b = upload_fp32(ctx, base + "/conv2/bias.bin")
+    # kernel = 3, padding=0.
+    var conv2 = Conv1d(c2_w^, c2_b^, channels, channels, 3, 1, 0, 1, 1, True)
+    return PreLookaheadLayer(conv1^, conv2^)
+
+
+def _load_up_layer(
+    mut ctx: DeviceContext, base: String, channels: Int, stride: Int = 2,
+) raises -> UpLayerConv:
+    var cw = upload_fp32(ctx, base + "/conv/weight.bin")
+    var cb = upload_fp32(ctx, base + "/conv/bias.bin")
+    # kernel = stride*2 + 1 = 5, padding=0 (caller pads input).
+    var conv = Conv1d(cw^, cb^, channels, channels, stride * 2 + 1, 1, 0, 1, 1, True)
+    return UpLayerConv(conv^)
+
+
+def load_upsample_conformer_encoder(
+    mut ctx: DeviceContext, base: String,
+) raises -> UpsampleConformerEncoderReal:
+    """Load full UpsampleConformerEncoder from weights/s3gen/flow/.
+
+    Architectural constants from upstream:
+      vocab_size = 6562 (speech tokens), d_model = 512, n_heads = 8, head_dim = 64,
+      intermediate (FF) = 2048, mel_dim = 80,
+      6 pre-upsample encoder layers, 4 post-upsample encoder layers.
+    """
+    comptime VOCAB = 6562   # T3 speech vocab size; upstream uses 8194 incl. specials but
+    # flow.input_embedding only embeds speech tokens.
+    comptime D = 512
+    comptime INT = 2048
+    comptime H = 8
+    comptime DH = 64
+    comptime MEL = 80
+
+    # input_embedding: vocab → D.
+    var iew = upload_fp32(ctx, base + "/input_embedding/weight.bin")
+    var input_embedding = Embedding(iew^, VOCAB, D)
+
+    var embed = _load_embed_out(ctx, base + "/encoder/embed/out", D, D)
+    var up_embed = _load_embed_out(ctx, base + "/encoder/up_embed/out", D, D)
+
+    var pre_la = _load_pre_lookahead(ctx, base + "/encoder/pre_lookahead_layer", D, 3)
+    var up_layer = _load_up_layer(ctx, base + "/encoder/up_layer", D, 2)
+
+    var encoders = load_s3gen_flow_encoder_layers(
+        ctx, base + "/encoder/encoders", 6, D, INT, H, DH,
+    )
+    var up_encoders = load_s3gen_flow_encoder_layers(
+        ctx, base + "/encoder/up_encoders", 4, D, INT, H, DH,
+    )
+
+    var an_w = upload_fp32(ctx, base + "/encoder/after_norm/weight.bin")
+    var an_b = upload_fp32(ctx, base + "/encoder/after_norm/bias.bin")
+    var after_norm = LayerNorm(an_w^, an_b^, D, Float32(1.0e-5))
+
+    var ep_w = upload_fp32(ctx, base + "/encoder_proj/weight.bin")
+    var ep_b = upload_fp32(ctx, base + "/encoder_proj/bias.bin")
+    var encoder_proj = Linear(ep_w^, ep_b^, D, MEL, True)
+
+    return UpsampleConformerEncoderReal(
+        input_embedding^, embed^, up_embed^, pre_la^, up_layer^,
+        encoders^, up_encoders^, after_norm^, encoder_proj^,
+        D, MEL,
+    )
