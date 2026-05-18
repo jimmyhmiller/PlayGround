@@ -315,6 +315,39 @@ def save_wav(path: String, samples: List[Float32], sample_rate: Int = 24000) rai
     f.close()
 
 
+@fieldwise_init
+struct TensorI32(Movable):
+    var data: List[Int32]
+    var shape: List[Int]
+
+
+def load_i32(path: String) raises -> TensorI32:
+    var f = open(path, "r")
+    var bytes = f.read_bytes()
+    f.close()
+
+    var rank = _read_i64_le(bytes, 0)
+    var shape = List[Int]()
+    var off = 8
+    for _ in range(rank):
+        shape.append(_read_i64_le(bytes, off))
+        off += 8
+    var tag = _read_i32_le(bytes, off)
+    off += 4
+    if tag != 3:
+        raise Error("expected i32 tag 3, got " + String(tag))
+
+    var n = 1
+    for i in range(len(shape)):
+        n *= shape[i]
+
+    var data = List[Int32](capacity=n)
+    for i in range(n):
+        data.append(Int32(_read_i32_le(bytes, off + i * 4)))
+
+    return TensorI32(data^, shape^)
+
+
 def load_i64(path: String) raises -> TensorI64:
     var f = open(path, "r")
     var bytes = f.read_bytes()
