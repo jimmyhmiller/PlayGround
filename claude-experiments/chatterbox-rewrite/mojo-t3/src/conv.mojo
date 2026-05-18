@@ -298,6 +298,35 @@ def reflection_pad_left1_kernel[
     output[b, c, t_out] = rebind[output.ElementType](v)
 
 
+def elu_kernel[
+    dtype: DType,
+    InLayout: TensorLayout,
+    OutLayout: TensorLayout,
+    BLOCK: Int,
+](
+    output: TileTensor[dtype, OutLayout, MutAnyOrigin],
+    inp: TileTensor[dtype, InLayout, MutAnyOrigin],
+    n_elems: Int,
+    alpha: Float32,
+):
+    """Pointwise ELU: y = x if x > 0 else alpha * (exp(x) - 1).
+
+    Matches torch.nn.functional.elu(x, alpha=1.0). Operates on a rank-1
+    view of any buffer.
+    Launch: grid = ceildiv(n_elems, BLOCK), block_dim = BLOCK.
+    """
+    comptime assert inp.flat_rank == 1
+    comptime assert output.flat_rank == 1
+
+    var idx = block_idx.x * BLOCK + thread_idx.x
+    if idx >= n_elems:
+        return
+
+    var v = rebind[Scalar[dtype]](inp[idx]).cast[DType.float32]()
+    var y = v if v > 0.0 else alpha * (exp(v) - 1.0)
+    output[idx] = rebind[output.ElementType](y.cast[dtype]())
+
+
 def leaky_relu_kernel[
     dtype: DType,
     InLayout: TensorLayout,

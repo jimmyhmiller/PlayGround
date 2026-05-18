@@ -131,6 +131,46 @@ def load_bf16(path: String) raises -> TensorBF16:
     return TensorBF16(data^, shape^)
 
 
+def save_fp32_1d(path: String, data: List[Float32]) raises:
+    """Write a 1-D Float32 buffer in the same fixture format load_fp32 reads.
+    Header: i64 rank=1; i64 shape[0]=len(data); i32 tag=0; payload.
+    """
+    var f = open(path, "w")
+    var n = len(data)
+
+    # Build header bytes.
+    var hdr = List[UInt8](capacity=20)
+    # rank = 1 (i64 LE)
+    var r: Int64 = 1
+    for k in range(8):
+        hdr.append(UInt8(Int((r >> Int64(8 * k)) & 0xFF)))
+    # shape[0] = n (i64 LE)
+    var sh: Int64 = Int64(n)
+    for k in range(8):
+        hdr.append(UInt8(Int((sh >> Int64(8 * k)) & 0xFF)))
+    # tag = 0 (i32 LE)
+    var tg: Int32 = 0
+    for k in range(4):
+        hdr.append(UInt8(Int((tg >> Int32(8 * k)) & 0xFF)))
+    # Write header as a single Span.
+    f.write_bytes(Span(hdr))
+
+    # Write payload in 1024-element chunks.
+    var i = 0
+    while i < n:
+        var chunk_end = min(i + 1024, n)
+        var buf = List[UInt8](capacity=(chunk_end - i) * 4)
+        for j in range(i, chunk_end):
+            var v = data[j]
+            var p = UnsafePointer(to=v).bitcast[UInt32]()
+            var bits = p[0]
+            for k in range(4):
+                buf.append(UInt8(Int((bits >> UInt32(8 * k)) & 0xFF)))
+        f.write_bytes(Span(buf))
+        i = chunk_end
+    f.close()
+
+
 def load_i64(path: String) raises -> TensorI64:
     var f = open(path, "r")
     var bytes = f.read_bytes()
