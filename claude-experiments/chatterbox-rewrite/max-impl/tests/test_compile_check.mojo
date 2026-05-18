@@ -19,6 +19,8 @@ from cfm import CFMEstimator, cfm_euler_solve, cfm_estimator_forward
 from cfm_blocks import CausalResnetBlock1D, BasicTransformerBlock
 from hifigan import HiFiGAN, hifigan_forward, HiFiGANResBlock, HiFiGANUpsample
 from s3gen import S3Gen, UpsampleConformerEncoder, s3gen_synthesize
+from t3_decode import t3_decode_step, cache_write_step
+from weights import load_voice_encoder, load_t3, load_t3_block, upload_fp32
 
 
 def test_compile_check() raises:
