@@ -1040,11 +1040,11 @@ def load_upsample_conformer_encoder(
     """Load full UpsampleConformerEncoder from weights/s3gen/flow/.
 
     Architectural constants from upstream:
-      vocab_size = 6562 (speech tokens), d_model = 512, n_heads = 8, head_dim = 64,
+      vocab_size = 6561 (speech tokens), d_model = 512, n_heads = 8, head_dim = 64,
       intermediate (FF) = 2048, mel_dim = 80,
       6 pre-upsample encoder layers, 4 post-upsample encoder layers.
     """
-    comptime VOCAB = 6562   # T3 speech vocab size; upstream uses 8194 incl. specials but
+    comptime VOCAB = 6561   # speech token vocab from input_embedding shape
     # flow.input_embedding only embeds speech tokens.
     comptime D = 512
     comptime INT = 2048
