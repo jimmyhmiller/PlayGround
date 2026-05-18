@@ -27,6 +27,7 @@ from cfm_estimator_new import cfm_solve_euler
 from hift_generator import (
     hift_decode_trunk, istft_forward, hann_window_periodic_fill,
 )
+from fixture import save_wav
 
 
 comptime B = 1
@@ -116,6 +117,16 @@ def test_synthesize_s3gen_chain() raises:
           " max=", max_a, " nan=", n_nan, " duration ~",
           Float32(T_AUDIO) / 24000.0, "s @ 24kHz")
     assert_true(n_nan == 0, "no NaNs in audio output")
+
+    # Save the audio to disk as a tangible artifact (won't be meaningful speech
+    # without real T3 tokens + matched speaker emb, but it confirms the full
+    # forward graph runs end-to-end and produces valid PCM samples).
+    var samples = List[Float32]()
+    with audio.map_to_host() as h:
+        for i in range(T_AUDIO):
+            samples.append(h[i])
+    save_wav(String("max_impl_s3gen_chain.wav"), samples, 24000)
+    print("[e2e] saved max_impl_s3gen_chain.wav")
     print("[e2e] FULL S3GEN CHAIN PASS")
 
 
