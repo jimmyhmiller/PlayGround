@@ -141,34 +141,53 @@ class MojoHifigan:
         return audio
 
 
-# Convenience drop-in shim that paper-audiobooks could monkey-patch in.
-def make_paper_audiobooks_hift_inference(work_dir: str | Path):
-    """Return a function with the same signature as
-    `s3gen.mel2wav.inference(speech_feat, cache_source=...)` that calls
-    Mojo HiFiGAN under the hood.
+def install_mojo_hifigan(s3gen, work_dir: str | Path):
+    """Monkey-patch a Chatterbox s3gen instance to use Mojo HiFiGAN.
 
-    Wires up the source-STFT computation using upstream's own f0_predictor
-    and SineGen (still torch — those modules don't have the Winograd issue).
+    Replaces `s3gen.mel2wav.inference(speech_feat, cache_source=None)` with
+    a wrapped version that:
+      1. Computes the source signal via upstream's f0_predictor + SineGen
+         (still torch; these don't hit the MIOpen Winograd bug).
+      2. STFTs the source signal (torch).
+      3. Calls Mojo HiFiGAN to do the actual conv-heavy mel→audio step.
+      4. Returns audio in upstream's expected (torch.Tensor, source) shape.
+
+    Usage in paper-audiobooks (in the chatterbox child process):
+
+        from mojo_hifigan_py import install_mojo_hifigan
+        install_mojo_hifigan(model.s3gen, work_dir="/path/to/chatterbox-rewrite/mojo-t3")
     """
     import torch
 
     mh = MojoHifigan(work_dir)
+    mel2wav = s3gen.mel2wav
+    orig_inference = mel2wav.inference
 
-    def hift_inference(
-        speech_feat: "torch.Tensor",
-        cache_source: Optional["torch.Tensor"] = None,
-    ):
-        """speech_feat shape: (1, 80, T_mel). Returns: torch (1, T_audio) like upstream."""
-        # The caller (paper-audiobooks) is expected to pass the existing
-        # s3gen.mel2wav instance via closure so we can borrow f0_predictor +
-        # m_source. For now we assume the inputs already include a precomputed
-        # source signal STFT cat — which the caller can compute via the
-        # upstream torch f0 + sinegen path (which doesn't hit the Winograd bug).
-        raise NotImplementedError(
-            "paper-audiobooks integration shim: see MojoHifigan.synthesize for "
-            "the direct mel+s_stft entry point. To use, compute s_stft via "
-            "upstream s3gen.mel2wav.f0_predictor + m_source + ._stft, then call "
-            "MojoHifigan.synthesize(mel_np, s_stft_np)."
-        )
+    @torch.inference_mode()
+    def hift_inference(speech_feat, cache_source: Optional["torch.Tensor"] = None):
+        """Drop-in for HiFTGenerator.inference."""
+        # Compute source signal via upstream torch (no MIOpen issue here).
+        f0 = mel2wav.f0_predictor(speech_feat)
+        s_full = mel2wav.f0_upsamp(f0[:, None]).transpose(1, 2)
+        s_full, _, _ = mel2wav.m_source(s_full)
+        s_full = s_full.transpose(1, 2)
+        # Apply cache_source if provided (matches upstream's anti-glitch logic).
+        if cache_source is not None and cache_source.shape[2] != 0:
+            s_full[:, :, : cache_source.shape[2]] = cache_source
+        # STFT the source signal (still torch — small op).
+        s_r, s_i = mel2wav._stft(s_full.squeeze(1))
+        s_stft = torch.cat([s_r, s_i], dim=1)
 
-    return hift_inference
+        # Hand mel + s_stft to Mojo HiFiGAN.
+        mel_np = speech_feat.detach().cpu().numpy().astype(np.float32)
+        s_stft_np = s_stft.detach().cpu().numpy().astype(np.float32)
+        audio_np = mh.synthesize(mel_np, s_stft_np)
+
+        # Cast back to torch on the original device.
+        audio = torch.from_numpy(audio_np).to(speech_feat.device)
+        return audio, s_full
+
+    mel2wav.inference = hift_inference
+    print(f"[mojo_hifigan_py] installed Mojo HiFiGAN on s3gen.mel2wav.inference "
+          f"(work_dir={work_dir})")
+    return orig_inference  # keep so caller can restore if needed
