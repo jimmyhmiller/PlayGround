@@ -1,5 +1,7 @@
 import Foundation
+#if !MAS
 import Sparkle
+#endif
 
 enum UpdateChannel: String, CaseIterable {
     case production = "production"
@@ -26,6 +28,27 @@ enum UpdateChannel: String, CaseIterable {
     }
 }
 
+#if MAS
+
+// Mac App Store builds receive updates through the App Store itself.
+// UpdateManager is reduced to a stub so the rest of the app can compile
+// against the same API surface without linking Sparkle.
+@MainActor
+final class UpdateManager: NSObject, ObservableObject {
+    static let shared = UpdateManager()
+
+    @Published var currentChannel: UpdateChannel = .production
+
+    let canCheckForUpdates: Bool = false
+    var automaticallyChecksForUpdates: Bool = false
+    let lastUpdateCheckDate: Date? = nil
+    let isAvailable: Bool = false
+
+    func checkForUpdates() {}
+}
+
+#else
+
 @MainActor
 class UpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate {
     static let shared = UpdateManager()
@@ -37,6 +60,8 @@ class UpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate {
             UserDefaults.standard.set(currentChannel.rawValue, forKey: "updateChannel")
         }
     }
+
+    let isAvailable: Bool = true
 
     override private init() {
         // Load saved channel preference
@@ -82,3 +107,5 @@ class UpdateManager: NSObject, ObservableObject, SPUUpdaterDelegate {
         updaterController.updater.lastUpdateCheckDate
     }
 }
+
+#endif

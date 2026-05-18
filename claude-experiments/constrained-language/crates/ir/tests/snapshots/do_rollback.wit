@@ -1,0 +1,82 @@
+package program:deploy-monitor;
+
+// Generated for handler `do_rollback`.
+// The declared footprint in the manifest is the complete authoring surface.
+
+world do-rollback {
+  // Types
+  type repo-id = string;
+  type channel-id = string;
+  type deploy-id = string;
+  type user-id = string;
+  variant deploy-status {
+    queued,
+    running,
+    success,
+    failed,
+  }
+  record deploy-record {
+    id: deploy-id,
+    sha: string,
+    repo: repo-id,
+    status: deploy-status,
+    started-at: u64,
+  }
+  record http-request {
+    method: string,
+    url: string,
+    body: list<u8>,
+  }
+  record http-response {
+    status: u32,
+    body: list<u8>,
+  }
+  record slack-post {
+    channel: channel-id,
+    text: string,
+  }
+  record ack {
+  }
+  variant log-level {
+    info,
+    warn,
+    error,
+  }
+  record log-entry {
+    level: log-level,
+    msg: string,
+  }
+  record merge-to-main {
+    sha: string,
+    author: user-id,
+    repo: repo-id,
+  }
+  record deploy-status-update {
+    deploy-id: deploy-id,
+    status: deploy-status,
+  }
+  record timer-tick {
+    now: u64,
+  }
+  record rollback-requested {
+    deploy-id: deploy-id,
+    by: user-id,
+  }
+
+  // State reads (one function per declared read slice)
+  import get-in-progress: func(key: deploy-id) -> option<deploy-record>;
+
+  // State writes (one function per writable slice; Map cells get put + delete)
+  import put-in-progress: func(key: deploy-id, value: deploy-record);
+  import delete-in-progress: func(key: deploy-id);
+  import put-history: func(key: deploy-id, value: deploy-record);
+  import delete-history: func(key: deploy-id);
+
+  // Effects (one emit-<name> per declared effect type; returns an opaque emit id)
+  import emit-http-request: func(req: http-request) -> u64;
+  import emit-slack-post: func(req: slack-post) -> u64;
+  import emit-log-write: func(req: log-entry) -> u64;
+
+  // Handler entry point
+  export handle: func(event: rollback-requested);
+}

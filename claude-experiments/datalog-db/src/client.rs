@@ -82,6 +82,11 @@ impl Client {
     pub fn connect(addr: &str) -> Result<Self> {
         let mut stream = TcpStream::connect(addr)
             .map_err(|e| protocol::ProtocolError::Io(e))?;
+        // Disable Nagle: every request is small and round-trips immediately,
+        // so coalescing into MSS-sized frames just adds 40ms delayed-ACK
+        // stalls under request/response loads. Loopback workloads suffer
+        // most because RTT is microseconds and the kernel still waits.
+        let _ = stream.set_nodelay(true);
         protocol::client_handshake(&mut stream)?;
         Ok(Self {
             stream,

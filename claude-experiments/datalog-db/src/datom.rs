@@ -1,15 +1,32 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
 pub type EntityId = u64;
 pub type TxId = u64;
 
+/// Interned string used inside `Value::String`. `Arc<str>` makes
+/// `clone()` a refcount bump instead of a heap allocation —
+/// critical on join workloads where tuples (and the strings they
+/// contain) are cloned thousands of times per query.
+pub type Str = Arc<str>;
+
+/// Payload for `Value::Enum`. Boxed inside `Value` so the rare enum
+/// variant doesn't bloat every other `Value` in memory — relevant
+/// because every tuple slot is `Option<Value>`, and intermediate
+/// tuples are clone-hot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EnumValue {
+    pub variant: String,
+    pub fields: HashMap<String, Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value")]
 pub enum Value {
     #[serde(rename = "string")]
-    String(String),
+    String(Str),
     #[serde(rename = "i64")]
     I64(i64),
     #[serde(rename = "f64")]
@@ -22,11 +39,9 @@ pub enum Value {
     Bytes(Vec<u8>),
     /// High-level enum value — expanded to tag + field datoms during transaction.
     /// Never stored directly in a datom; only exists in the user-facing API.
+    /// Boxed to keep `Value` small.
     #[serde(rename = "enum")]
-    Enum {
-        variant: String,
-        fields: HashMap<String, Value>,
-    },
+    Enum(Box<EnumValue>),
     /// Null — represents a missing optional field in query results.
     /// Never stored as a datom.
     #[serde(rename = "null")]
@@ -43,7 +58,7 @@ impl Value {
             Value::Bool(_) => 0x04,
             Value::Ref(_) => 0x05,
             Value::Bytes(_) => 0x06,
-            Value::Enum { .. } => panic!("Enum values cannot be stored directly as datoms"),
+            Value::Enum(_) => panic!("Enum values cannot be stored directly as datoms"),
             Value::Null => panic!("Null values cannot be stored directly as datoms"),
         }
     }
@@ -58,11 +73,11 @@ impl std::fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Ref(id) => write!(f, "ref({})", id),
             Value::Bytes(b) => write!(f, "bytes({})", b.len()),
-            Value::Enum { variant, fields } => {
-                if fields.is_empty() {
-                    write!(f, "{}", variant)
+            Value::Enum(e) => {
+                if e.fields.is_empty() {
+                    write!(f, "{}", e.variant)
                 } else {
-                    write!(f, "{}{{...}}", variant)
+                    write!(f, "{}{{...}}", e.variant)
                 }
             }
             Value::Null => write!(f, "null"),

@@ -3,6 +3,7 @@ pub mod client;
 pub mod datom;
 pub mod db;
 pub mod index;
+pub mod intern;
 pub mod protocol;
 pub mod query;
 pub mod schema;

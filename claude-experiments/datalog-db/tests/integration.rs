@@ -82,11 +82,11 @@ fn test_transact_insert() {
     db.define_type(user_type()).unwrap();
 
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert("age".to_string(), Value::I64(30));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
 
     let result = db
@@ -109,9 +109,9 @@ fn test_transact_and_get_entity() {
     db.define_type(user_type()).unwrap();
 
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("name".to_string(), Value::String("Bob".into()));
     data.insert("age".to_string(), Value::I64(25));
-    data.insert("email".to_string(), Value::String("bob@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("bob@example.com".into()));
 
     let result = db
         .transact(vec![TxOp::Assert {
@@ -124,11 +124,11 @@ fn test_transact_and_get_entity() {
     let eid = result.entity_ids[0];
     let entity = db.get_entity(eid).unwrap().unwrap();
 
-    assert_eq!(entity.get("User/name"), Some(&Value::String("Bob".to_string())));
+    assert_eq!(entity.get("User/name"), Some(&Value::String("Bob".into())));
     assert_eq!(entity.get("User/age"), Some(&Value::I64(25)));
     assert_eq!(
         entity.get("__type"),
-        Some(&Value::String("User".to_string()))
+        Some(&Value::String("User".into()))
     );
 }
 
@@ -139,9 +139,9 @@ fn test_transact_update() {
 
     // Insert
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Charlie".to_string()));
+    data.insert("name".to_string(), Value::String("Charlie".into()));
     data.insert("age".to_string(), Value::I64(20));
-    data.insert("email".to_string(), Value::String("charlie@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("charlie@example.com".into()));
 
     let result = db
         .transact(vec![TxOp::Assert {
@@ -169,7 +169,7 @@ fn test_transact_update() {
     // Name should still be there
     assert_eq!(
         entity.get("User/name"),
-        Some(&Value::String("Charlie".to_string()))
+        Some(&Value::String("Charlie".into()))
     );
 }
 
@@ -179,11 +179,11 @@ fn test_transact_retract() {
     db.define_type(user_type()).unwrap();
 
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Diana".to_string()));
+    data.insert("name".to_string(), Value::String("Diana".into()));
     data.insert("age".to_string(), Value::I64(40));
     data.insert(
         "email".to_string(),
-        Value::String("diana@example.com".to_string()),
+        Value::String("diana@example.com".into()),
     );
 
     let result = db
@@ -206,7 +206,7 @@ fn test_transact_retract() {
     let entity = db.get_entity(eid).unwrap().unwrap();
     assert_eq!(
         entity.get("User/name"),
-        Some(&Value::String("Diana".to_string()))
+        Some(&Value::String("Diana".into()))
     );
     assert_eq!(entity.get("User/age"), Some(&Value::I64(40)));
     assert!(entity.get("User/email").is_none()); // retracted
@@ -217,7 +217,7 @@ fn test_schema_validation_unknown_type() {
     let (db, _dir) = test_db();
 
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Eve".to_string()));
+    data.insert("name".to_string(), Value::String("Eve".into()));
 
     let result = db
         .transact(vec![TxOp::Assert {
@@ -235,8 +235,8 @@ fn test_schema_validation_type_mismatch() {
     db.define_type(user_type()).unwrap();
 
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Frank".to_string()));
-    data.insert("age".to_string(), Value::String("not a number".to_string())); // wrong type
+    data.insert("name".to_string(), Value::String("Frank".into()));
+    data.insert("age".to_string(), Value::String("not a number".into())); // wrong type
 
     let result = db
         .transact(vec![TxOp::Assert {
@@ -274,9 +274,9 @@ fn test_basic_query() {
     // Insert two users
     for (name, age, email) in [("Alice", 30, "alice@example.com"), ("Bob", 25, "bob@example.com")] {
         let mut data = HashMap::new();
-        data.insert("name".to_string(), Value::String(name.to_string()));
+        data.insert("name".to_string(), Value::String(name.into()));
         data.insert("age".to_string(), Value::I64(age));
-        data.insert("email".to_string(), Value::String(email.to_string()));
+        data.insert("email".to_string(), Value::String(email.into()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -300,8 +300,8 @@ fn test_basic_query() {
 
     // Check both users are present (order may vary)
     let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
-    assert!(names.contains(&&Value::String("Alice".to_string())));
-    assert!(names.contains(&&Value::String("Bob".to_string())));
+    assert!(names.contains(&&Value::String("Alice".into())));
+    assert!(names.contains(&&Value::String("Bob".into())));
 }
 
 #[test]
@@ -311,9 +311,9 @@ fn test_query_with_constant_filter() {
 
     for (name, age, email) in [("Alice", 30, "alice@example.com"), ("Bob", 25, "bob@example.com"), ("Charlie", 35, "charlie@example.com")] {
         let mut data = HashMap::new();
-        data.insert("name".to_string(), Value::String(name.to_string()));
+        data.insert("name".to_string(), Value::String(name.into()));
         data.insert("age".to_string(), Value::I64(age));
-        data.insert("email".to_string(), Value::String(email.to_string()));
+        data.insert("email".to_string(), Value::String(email.into()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -343,9 +343,9 @@ fn test_query_with_predicate() {
 
     for (name, age, email) in [("Alice", 30, "alice@example.com"), ("Bob", 25, "bob@example.com"), ("Charlie", 35, "charlie@example.com")] {
         let mut data = HashMap::new();
-        data.insert("name".to_string(), Value::String(name.to_string()));
+        data.insert("name".to_string(), Value::String(name.into()));
         data.insert("age".to_string(), Value::I64(age));
-        data.insert("email".to_string(), Value::String(email.to_string()));
+        data.insert("email".to_string(), Value::String(email.into()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -366,8 +366,8 @@ fn test_query_with_predicate() {
 
     assert_eq!(result.rows.len(), 2);
     let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
-    assert!(names.contains(&&Value::String("Alice".to_string())));
-    assert!(names.contains(&&Value::String("Charlie".to_string())));
+    assert!(names.contains(&&Value::String("Alice".into())));
+    assert!(names.contains(&&Value::String("Charlie".into())));
 }
 
 #[test]
@@ -378,9 +378,9 @@ fn test_query_with_join() {
 
     // Create users
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert("age".to_string(), Value::I64(30));
-    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("alice@example.com".into()));
     let alice_result = db
         .transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -391,9 +391,9 @@ fn test_query_with_join() {
     let alice_id = alice_result.entity_ids[0];
 
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("name".to_string(), Value::String("Bob".into()));
     data.insert("age".to_string(), Value::I64(25));
-    data.insert("email".to_string(), Value::String("bob@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("bob@example.com".into()));
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
         entity: None,
@@ -404,7 +404,7 @@ fn test_query_with_join() {
     // Create posts by Alice
     for title in ["First Post", "Second Post"] {
         let mut data = HashMap::new();
-        data.insert("title".to_string(), Value::String(title.to_string()));
+        data.insert("title".to_string(), Value::String(title.into()));
         data.insert("author".to_string(), Value::Ref(alice_id));
         db.transact(vec![TxOp::Assert {
             entity_type: "Post".to_string(),
@@ -428,11 +428,11 @@ fn test_query_with_join() {
     // Alice has 2 posts, Bob has 0 — so 2 result rows
     assert_eq!(result.rows.len(), 2);
     for row in &result.rows {
-        assert_eq!(row[0], Value::String("Alice".to_string()));
+        assert_eq!(row[0], Value::String("Alice".into()));
     }
     let titles: Vec<&Value> = result.rows.iter().map(|r| &r[1]).collect();
-    assert!(titles.contains(&&Value::String("First Post".to_string())));
-    assert!(titles.contains(&&Value::String("Second Post".to_string())));
+    assert!(titles.contains(&&Value::String("First Post".into())));
+    assert!(titles.contains(&&Value::String("Second Post".into())));
 }
 
 #[test]
@@ -442,9 +442,9 @@ fn test_time_travel_query() {
 
     // Insert user at tx1
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert("age".to_string(), Value::I64(30));
-    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("alice@example.com".into()));
     let result1 = db
         .transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -505,8 +505,8 @@ fn test_schema_persists_across_reopen() {
 
         // Transact a user
         let mut data = HashMap::new();
-        data.insert("name".to_string(), Value::String("Persist".to_string()));
-        data.insert("email".to_string(), Value::String("persist@example.com".to_string()));
+        data.insert("name".to_string(), Value::String("Persist".into()));
+        data.insert("email".to_string(), Value::String("persist@example.com".into()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -522,8 +522,8 @@ fn test_schema_persists_across_reopen() {
 
         // Should be able to transact without re-defining
         let mut data = HashMap::new();
-        data.insert("name".to_string(), Value::String("Persist2".to_string()));
-        data.insert("email".to_string(), Value::String("persist2@example.com".to_string()));
+        data.insert("name".to_string(), Value::String("Persist2".into()));
+        data.insert("email".to_string(), Value::String("persist2@example.com".into()));
         let result = db
             .transact(vec![TxOp::Assert {
                 entity_type: "User".to_string(),
@@ -799,13 +799,10 @@ fn test_enum_insert_and_query() {
 
     // Insert a circle
     let mut data = HashMap::new();
-    data.insert("label".to_string(), Value::String("my circle".to_string()));
+    data.insert("label".to_string(), Value::String("my circle".into()));
     data.insert(
         "shape".to_string(),
-        Value::Enum {
-            variant: "Circle".to_string(),
-            fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]),
-        },
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Circle".to_string(), fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]) })),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -829,7 +826,7 @@ fn test_enum_insert_and_query() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][0], Value::String("my circle".to_string()));
+    assert_eq!(result.rows[0][0], Value::String("my circle".into()));
     assert_eq!(result.rows[0][1], Value::F64(5.0));
 }
 
@@ -841,8 +838,8 @@ fn test_enum_unit_variant() {
 
     // Insert a Point (unit variant — no fields)
     let mut data = HashMap::new();
-    data.insert("label".to_string(), Value::String("origin".to_string()));
-    data.insert("shape".to_string(), Value::String("Point".to_string()));
+    data.insert("label".to_string(), Value::String("origin".into()));
+    data.insert("shape".to_string(), Value::String("Point".into()));
     db.transact(vec![TxOp::Assert {
         entity_type: "Drawing".to_string(),
         entity: None,
@@ -861,7 +858,7 @@ fn test_enum_unit_variant() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][0], Value::String("origin".to_string()));
+    assert_eq!(result.rows[0][0], Value::String("origin".into()));
 }
 
 #[test]
@@ -874,27 +871,21 @@ fn test_enum_match_filters_variants() {
     let drawings = vec![
         (
             "my circle",
-            Value::Enum {
-                variant: "Circle".to_string(),
-                fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]),
-            },
+            Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Circle".to_string(), fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]) })),
         ),
         (
             "my rect",
-            Value::Enum {
-                variant: "Rect".to_string(),
-                fields: HashMap::from([
+            Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Rect".to_string(), fields: HashMap::from([
                     ("w".to_string(), Value::F64(10.0)),
                     ("h".to_string(), Value::F64(20.0)),
-                ]),
-            },
+                ]) })),
         ),
-        ("origin", Value::String("Point".to_string())),
+        ("origin", Value::String("Point".into())),
     ];
 
     for (label, shape) in drawings {
         let mut data = HashMap::new();
-        data.insert("label".to_string(), Value::String(label.to_string()));
+        data.insert("label".to_string(), Value::String(label.into()));
         data.insert("shape".to_string(), shape);
         db.transact(vec![TxOp::Assert {
             entity_type: "Drawing".to_string(),
@@ -915,7 +906,7 @@ fn test_enum_match_filters_variants() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][0], Value::String("my circle".to_string()));
+    assert_eq!(result.rows[0][0], Value::String("my circle".into()));
     assert_eq!(result.rows[0][1], Value::F64(5.0));
 
     // Query only rects
@@ -929,7 +920,7 @@ fn test_enum_match_filters_variants() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][0], Value::String("my rect".to_string()));
+    assert_eq!(result.rows[0][0], Value::String("my rect".into()));
     assert_eq!(result.rows[0][1], Value::F64(10.0));
     assert_eq!(result.rows[0][2], Value::F64(20.0));
 
@@ -944,7 +935,7 @@ fn test_enum_match_filters_variants() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][0], Value::String("origin".to_string()));
+    assert_eq!(result.rows[0][0], Value::String("origin".into()));
 }
 
 #[test]
@@ -956,15 +947,12 @@ fn test_enum_bind_variant_tag() {
     for (label, shape) in [
         (
             "c1",
-            Value::Enum {
-                variant: "Circle".to_string(),
-                fields: HashMap::from([("radius".to_string(), Value::F64(1.0))]),
-            },
+            Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Circle".to_string(), fields: HashMap::from([("radius".to_string(), Value::F64(1.0))]) })),
         ),
-        ("p1", Value::String("Point".to_string())),
+        ("p1", Value::String("Point".into())),
     ] {
         let mut data = HashMap::new();
-        data.insert("label".to_string(), Value::String(label.to_string()));
+        data.insert("label".to_string(), Value::String(label.into()));
         data.insert("shape".to_string(), shape);
         db.transact(vec![TxOp::Assert {
             entity_type: "Drawing".to_string(),
@@ -997,10 +985,10 @@ fn test_enum_bind_variant_tag() {
         .collect();
     tags.sort_by(|a, b| format!("{}", a.0).cmp(&format!("{}", b.0)));
 
-    assert_eq!(tags[0].0, Value::String("c1".to_string()));
-    assert_eq!(tags[0].1, Value::String("Circle".to_string()));
-    assert_eq!(tags[1].0, Value::String("p1".to_string()));
-    assert_eq!(tags[1].1, Value::String("Point".to_string()));
+    assert_eq!(tags[0].0, Value::String("c1".into()));
+    assert_eq!(tags[0].1, Value::String("Circle".into()));
+    assert_eq!(tags[1].0, Value::String("p1".into()));
+    assert_eq!(tags[1].1, Value::String("Point".into()));
 }
 
 #[test]
@@ -1011,13 +999,10 @@ fn test_enum_variant_change() {
 
     // Insert as Circle
     let mut data = HashMap::new();
-    data.insert("label".to_string(), Value::String("morphing".to_string()));
+    data.insert("label".to_string(), Value::String("morphing".into()));
     data.insert(
         "shape".to_string(),
-        Value::Enum {
-            variant: "Circle".to_string(),
-            fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]),
-        },
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Circle".to_string(), fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]) })),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1032,13 +1017,10 @@ fn test_enum_variant_change() {
     let mut data = HashMap::new();
     data.insert(
         "shape".to_string(),
-        Value::Enum {
-            variant: "Rect".to_string(),
-            fields: HashMap::from([
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Rect".to_string(), fields: HashMap::from([
                 ("w".to_string(), Value::F64(10.0)),
                 ("h".to_string(), Value::F64(20.0)),
-            ]),
-        },
+            ]) })),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "Drawing".to_string(),
@@ -1132,16 +1114,13 @@ fn test_enum_same_variant_stale_field_retraction() {
 
     // Insert with Suspended{reason: "TOS", until: 1000}
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("name".to_string(), Value::String("Bob".into()));
     data.insert(
         "status".to_string(),
-        Value::Enum {
-            variant: "Suspended".to_string(),
-            fields: HashMap::from([
-                ("reason".to_string(), Value::String("TOS".to_string())),
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Suspended".to_string(), fields: HashMap::from([
+                ("reason".to_string(), Value::String("TOS".into())),
                 ("until".to_string(), Value::I64(1000)),
-            ]),
-        },
+            ]) })),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1156,10 +1135,7 @@ fn test_enum_same_variant_stale_field_retraction() {
     let mut data = HashMap::new();
     data.insert(
         "status".to_string(),
-        Value::Enum {
-            variant: "Suspended".to_string(),
-            fields: HashMap::from([("reason".to_string(), Value::String("Spam".to_string()))]),
-        },
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Suspended".to_string(), fields: HashMap::from([("reason".to_string(), Value::String("Spam".into()))]) })),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "Account".to_string(),
@@ -1192,7 +1168,7 @@ fn test_enum_same_variant_stale_field_retraction() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][0], Value::String("Spam".to_string()));
+    assert_eq!(result.rows[0][0], Value::String("Spam".into()));
 }
 
 #[test]
@@ -1202,13 +1178,10 @@ fn test_enum_retract_whole_field() {
     db.define_type(drawing_type()).unwrap();
 
     let mut data = HashMap::new();
-    data.insert("label".to_string(), Value::String("gone".to_string()));
+    data.insert("label".to_string(), Value::String("gone".into()));
     data.insert(
         "shape".to_string(),
-        Value::Enum {
-            variant: "Circle".to_string(),
-            fields: HashMap::from([("radius".to_string(), Value::F64(3.0))]),
-        },
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Circle".to_string(), fields: HashMap::from([("radius".to_string(), Value::F64(3.0))]) })),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1248,13 +1221,13 @@ fn test_enum_schema_validation() {
 
     // Wrong variant name
     let mut data = HashMap::new();
-    data.insert("label".to_string(), Value::String("bad".to_string()));
+    data.insert("label".to_string(), Value::String("bad".into()));
     data.insert(
         "shape".to_string(),
-        Value::Enum {
+        Value::Enum(Box::new(datalog_db::datom::EnumValue {
             variant: "Triangle".to_string(), // doesn't exist
             fields: HashMap::new(),
-        },
+        })),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1266,13 +1239,16 @@ fn test_enum_schema_validation() {
 
     // Wrong field type in variant
     let mut data = HashMap::new();
-    data.insert("label".to_string(), Value::String("bad".to_string()));
+    data.insert("label".to_string(), Value::String("bad".into()));
     data.insert(
         "shape".to_string(),
-        Value::Enum {
+        Value::Enum(Box::new(datalog_db::datom::EnumValue {
             variant: "Circle".to_string(),
-            fields: HashMap::from([("radius".to_string(), Value::String("not a number".to_string()))]),
-        },
+            fields: HashMap::from([(
+                "radius".to_string(),
+                Value::String("not a number".into()),
+            )]),
+        })),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1284,13 +1260,13 @@ fn test_enum_schema_validation() {
 
     // Missing required variant field
     let mut data = HashMap::new();
-    data.insert("label".to_string(), Value::String("bad".to_string()));
+    data.insert("label".to_string(), Value::String("bad".into()));
     data.insert(
         "shape".to_string(),
-        Value::Enum {
+        Value::Enum(Box::new(datalog_db::datom::EnumValue {
             variant: "Rect".to_string(),
             fields: HashMap::from([("w".to_string(), Value::F64(10.0))]), // missing 'h'
-        },
+        })),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1340,7 +1316,7 @@ fn test_enum_json_wire_format() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][0], Value::String("wire circle".to_string()));
+    assert_eq!(result.rows[0][0], Value::String("wire circle".into()));
     assert_eq!(result.rows[0][1], Value::F64(7.5));
 }
 
@@ -1355,13 +1331,10 @@ fn test_enum_persists_across_reopen() {
         db.define_type(drawing_type()).unwrap();
 
         let mut data = HashMap::new();
-        data.insert("label".to_string(), Value::String("persistent".to_string()));
+        data.insert("label".to_string(), Value::String("persistent".into()));
         data.insert(
             "shape".to_string(),
-            Value::Enum {
-                variant: "Circle".to_string(),
-                fields: HashMap::from([("radius".to_string(), Value::F64(42.0))]),
-            },
+            Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Circle".to_string(), fields: HashMap::from([("radius".to_string(), Value::F64(42.0))]) })),
         );
         db.transact(vec![TxOp::Assert {
             entity_type: "Drawing".to_string(),
@@ -1378,16 +1351,13 @@ fn test_enum_persists_across_reopen() {
 
         // Should be able to insert without re-defining
         let mut data = HashMap::new();
-        data.insert("label".to_string(), Value::String("after reopen".to_string()));
+        data.insert("label".to_string(), Value::String("after reopen".into()));
         data.insert(
             "shape".to_string(),
-            Value::Enum {
-                variant: "Rect".to_string(),
-                fields: HashMap::from([
+            Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Rect".to_string(), fields: HashMap::from([
                     ("w".to_string(), Value::F64(1.0)),
                     ("h".to_string(), Value::F64(2.0)),
-                ]),
-            },
+                ]) })),
         );
         db.transact(vec![TxOp::Assert {
             entity_type: "Drawing".to_string(),
@@ -1407,7 +1377,7 @@ fn test_enum_persists_across_reopen() {
         let query = Query::from_json(&query_json).unwrap();
         let result = db.query(&query).unwrap();
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0][0], Value::String("persistent".to_string()));
+        assert_eq!(result.rows[0][0], Value::String("persistent".into()));
         assert_eq!(result.rows[0][1], Value::F64(42.0));
     }
 }
@@ -1451,9 +1421,9 @@ fn test_snapshot_scalar_insert() {
 
     // Insert Alice
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert("age".to_string(), Value::I64(30));
-    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("alice@example.com".into()));
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
         entity: None,
@@ -1472,9 +1442,9 @@ fn test_snapshot_scalar_update() {
 
     // Insert
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert("age".to_string(), Value::I64(30));
-    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("alice@example.com".into()));
     let result = db
         .transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -1508,13 +1478,10 @@ fn test_snapshot_enum_insert() {
     db.define_type(drawing_type()).unwrap();
 
     let mut data = HashMap::new();
-    data.insert("label".to_string(), Value::String("my circle".to_string()));
+    data.insert("label".to_string(), Value::String("my circle".into()));
     data.insert(
         "shape".to_string(),
-        Value::Enum {
-            variant: "Circle".to_string(),
-            fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]),
-        },
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Circle".to_string(), fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]) })),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "Drawing".to_string(),
@@ -1535,13 +1502,10 @@ fn test_snapshot_enum_variant_change() {
 
     // Insert Circle
     let mut data = HashMap::new();
-    data.insert("label".to_string(), Value::String("shape1".to_string()));
+    data.insert("label".to_string(), Value::String("shape1".into()));
     data.insert(
         "shape".to_string(),
-        Value::Enum {
-            variant: "Circle".to_string(),
-            fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]),
-        },
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Circle".to_string(), fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]) })),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1562,13 +1526,10 @@ fn test_snapshot_enum_variant_change() {
     let mut data = HashMap::new();
     data.insert(
         "shape".to_string(),
-        Value::Enum {
-            variant: "Rect".to_string(),
-            fields: HashMap::from([
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Rect".to_string(), fields: HashMap::from([
                 ("w".to_string(), Value::F64(10.0)),
                 ("h".to_string(), Value::F64(20.0)),
-            ]),
-        },
+            ]) })),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "Drawing".to_string(),
@@ -1641,16 +1602,13 @@ fn test_snapshot_enum_same_variant_update() {
 
     // Insert: Suspended{reason: "TOS", until: 1000}
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("name".to_string(), Value::String("Bob".into()));
     data.insert(
         "status".to_string(),
-        Value::Enum {
-            variant: "Suspended".to_string(),
-            fields: HashMap::from([
-                ("reason".to_string(), Value::String("TOS".to_string())),
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Suspended".to_string(), fields: HashMap::from([
+                ("reason".to_string(), Value::String("TOS".into())),
                 ("until".to_string(), Value::I64(1000)),
-            ]),
-        },
+            ]) })),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1671,10 +1629,7 @@ fn test_snapshot_enum_same_variant_update() {
     let mut data = HashMap::new();
     data.insert(
         "status".to_string(),
-        Value::Enum {
-            variant: "Suspended".to_string(),
-            fields: HashMap::from([("reason".to_string(), Value::String("Spam".to_string()))]),
-        },
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Suspended".to_string(), fields: HashMap::from([("reason".to_string(), Value::String("Spam".into()))]) })),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "Account".to_string(),
@@ -1722,7 +1677,7 @@ fn test_concurrent_stress() {
         handles.push(std::thread::spawn(move || {
             // Insert
             let mut data = HashMap::new();
-            data.insert("label".to_string(), Value::String(format!("task_{}", i)));
+            data.insert("label".to_string(), Value::String(format!("task_{}", i).into()));
             data.insert("value".to_string(), Value::I64(i));
             let result = db
                 .transact(vec![TxOp::Assert {
@@ -1773,10 +1728,10 @@ fn test_unique_basic() {
 
     // Insert user with unique email
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
@@ -1787,10 +1742,10 @@ fn test_unique_basic() {
 
     // Try to insert another user with the same email — should fail
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("name".to_string(), Value::String("Bob".into()));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1809,10 +1764,10 @@ fn test_unique_same_entity_update() {
     db.define_type(user_type()).unwrap();
 
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1827,7 +1782,7 @@ fn test_unique_same_entity_update() {
     let mut data = HashMap::new();
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1845,10 +1800,10 @@ fn test_unique_after_retract() {
 
     // Alice claims the email
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1869,10 +1824,10 @@ fn test_unique_after_retract() {
 
     // Bob can now take the email
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("name".to_string(), Value::String("Bob".into()));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1890,10 +1845,10 @@ fn test_unique_update_to_taken_value() {
 
     // Alice
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
@@ -1904,10 +1859,10 @@ fn test_unique_update_to_taken_value() {
 
     // Bob with different email
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("name".to_string(), Value::String("Bob".into()));
     data.insert(
         "email".to_string(),
-        Value::String("bob@example.com".to_string()),
+        Value::String("bob@example.com".into()),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1922,7 +1877,7 @@ fn test_unique_update_to_taken_value() {
     let mut data = HashMap::new();
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -1940,16 +1895,16 @@ fn test_unique_within_single_tx() {
 
     // Two inserts in one transaction with same unique email — should fail
     let mut data1 = HashMap::new();
-    data1.insert("name".to_string(), Value::String("Alice".to_string()));
+    data1.insert("name".to_string(), Value::String("Alice".into()));
     data1.insert(
         "email".to_string(),
-        Value::String("shared@example.com".to_string()),
+        Value::String("shared@example.com".into()),
     );
     let mut data2 = HashMap::new();
-    data2.insert("name".to_string(), Value::String("Bob".to_string()));
+    data2.insert("name".to_string(), Value::String("Bob".into()));
     data2.insert(
         "email".to_string(),
-        Value::String("shared@example.com".to_string()),
+        Value::String("shared@example.com".into()),
     );
     let result = db
         .transact(vec![
@@ -1998,10 +1953,10 @@ fn test_unique_different_types_independent() {
 
     // User with email
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
@@ -2012,10 +1967,10 @@ fn test_unique_different_types_independent() {
 
     // Admin with same email value — should succeed (different type → different attribute)
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice Admin".to_string()));
+    data.insert("name".to_string(), Value::String("Alice Admin".into()));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     let result = db
         .transact(vec![TxOp::Assert {
@@ -2041,9 +1996,9 @@ fn test_query_constant_uses_index() {
         } else {
             format!("user_{}", i)
         };
-        data.insert("name".to_string(), Value::String(name));
+        data.insert("name".to_string(), Value::String(name.into()));
         data.insert("age".to_string(), Value::I64(i));
-        data.insert("email".to_string(), Value::String(format!("user{}@example.com", i)));
+        data.insert("email".to_string(), Value::String(format!("user{}@example.com", i).into()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -2073,8 +2028,8 @@ fn test_query_bound_variable_uses_index() {
 
     // Create Alice
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
-    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
+    data.insert("email".to_string(), Value::String("alice@example.com".into()));
     let alice_result = db
         .transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -2086,8 +2041,8 @@ fn test_query_bound_variable_uses_index() {
 
     // Create Bob
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Bob".to_string()));
-    data.insert("email".to_string(), Value::String("bob@example.com".to_string()));
+    data.insert("name".to_string(), Value::String("Bob".into()));
+    data.insert("email".to_string(), Value::String("bob@example.com".into()));
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
         entity: None,
@@ -2098,7 +2053,7 @@ fn test_query_bound_variable_uses_index() {
     // Create posts — some by Alice, some by Bob
     for i in 0..10 {
         let mut data = HashMap::new();
-        data.insert("title".to_string(), Value::String(format!("Post {}", i)));
+        data.insert("title".to_string(), Value::String(format!("Post {}", i).into()));
         data.insert("author".to_string(), Value::Ref(alice_id));
         db.transact(vec![TxOp::Assert {
             entity_type: "Post".to_string(),
@@ -2137,13 +2092,10 @@ fn test_query_enum_field_still_works() {
 
     // Insert drawings
     let mut data = HashMap::new();
-    data.insert("label".to_string(), Value::String("circle1".to_string()));
+    data.insert("label".to_string(), Value::String("circle1".into()));
     data.insert(
         "shape".to_string(),
-        Value::Enum {
-            variant: "Circle".to_string(),
-            fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]),
-        },
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Circle".to_string(), fields: HashMap::from([("radius".to_string(), Value::F64(5.0))]) })),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "Drawing".to_string(),
@@ -2153,16 +2105,13 @@ fn test_query_enum_field_still_works() {
     .unwrap();
 
     let mut data = HashMap::new();
-    data.insert("label".to_string(), Value::String("rect1".to_string()));
+    data.insert("label".to_string(), Value::String("rect1".into()));
     data.insert(
         "shape".to_string(),
-        Value::Enum {
-            variant: "Rect".to_string(),
-            fields: HashMap::from([
+        Value::Enum(Box::new(datalog_db::datom::EnumValue { variant: "Rect".to_string(), fields: HashMap::from([
                 ("w".to_string(), Value::F64(10.0)),
                 ("h".to_string(), Value::F64(20.0)),
-            ]),
-        },
+            ]) })),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "Drawing".to_string(),
@@ -2182,7 +2131,7 @@ fn test_query_enum_field_still_works() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][0], Value::String("circle1".to_string()));
+    assert_eq!(result.rows[0][0], Value::String("circle1".into()));
     assert_eq!(result.rows[0][1], Value::F64(5.0));
 }
 
@@ -2198,9 +2147,9 @@ fn test_query_multiple_constants() {
         ("Charlie", 30, "charlie@example.com"),
     ] {
         let mut data = HashMap::new();
-        data.insert("name".to_string(), Value::String(name.to_string()));
+        data.insert("name".to_string(), Value::String(name.into()));
         data.insert("age".to_string(), Value::I64(age));
-        data.insert("email".to_string(), Value::String(email.to_string()));
+        data.insert("email".to_string(), Value::String(email.into()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -2221,7 +2170,7 @@ fn test_query_multiple_constants() {
     assert_eq!(result.rows.len(), 1);
     assert_eq!(
         result.rows[0][0],
-        Value::String("alice@example.com".to_string())
+        Value::String("alice@example.com".into())
     );
 }
 
@@ -2232,9 +2181,9 @@ fn test_query_predicate_falls_back() {
 
     for (name, age, email) in [("Alice", 30, "alice@example.com"), ("Bob", 25, "bob@example.com"), ("Charlie", 35, "charlie@example.com")] {
         let mut data = HashMap::new();
-        data.insert("name".to_string(), Value::String(name.to_string()));
+        data.insert("name".to_string(), Value::String(name.into()));
         data.insert("age".to_string(), Value::I64(age));
-        data.insert("email".to_string(), Value::String(email.to_string()));
+        data.insert("email".to_string(), Value::String(email.into()));
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
             entity: None,
@@ -2254,8 +2203,8 @@ fn test_query_predicate_falls_back() {
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 2);
     let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
-    assert!(names.contains(&&Value::String("Alice".to_string())));
-    assert!(names.contains(&&Value::String("Charlie".to_string())));
+    assert!(names.contains(&&Value::String("Alice".into())));
+    assert!(names.contains(&&Value::String("Charlie".into())));
 }
 
 // --- Retract entity (soft delete) tests ---
@@ -2267,9 +2216,9 @@ fn test_retract_entity() {
 
     // Insert two users
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert("age".to_string(), Value::I64(30));
-    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("alice@example.com".into()));
     let result = db
         .transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -2281,9 +2230,9 @@ fn test_retract_entity() {
     let insert_tx = result.tx_id;
 
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("name".to_string(), Value::String("Bob".into()));
     data.insert("age".to_string(), Value::I64(25));
-    data.insert("email".to_string(), Value::String("bob@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("bob@example.com".into()));
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
         entity: None,
@@ -2312,7 +2261,7 @@ fn test_retract_entity() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][0], Value::String("Bob".to_string()));
+    assert_eq!(result.rows[0][0], Value::String("Bob".into()));
 
     // Time-travel query as_of the insert tx should still show Alice
     let query_json = serde_json::json!({
@@ -2325,7 +2274,7 @@ fn test_retract_entity() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     let names: Vec<&Value> = result.rows.iter().map(|r| &r[0]).collect();
-    assert!(names.contains(&&Value::String("Alice".to_string())));
+    assert!(names.contains(&&Value::String("Alice".into())));
 }
 
 // --- Wall-clock timestamp tests ---
@@ -2336,9 +2285,9 @@ fn test_transact_returns_timestamp() {
     db.define_type(user_type()).unwrap();
 
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert("age".to_string(), Value::I64(30));
-    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("alice@example.com".into()));
 
     let before = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2369,9 +2318,9 @@ fn test_as_of_time_between_transactions() {
 
     // Insert Alice
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert("age".to_string(), Value::I64(30));
-    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("alice@example.com".into()));
     let result1 = db
         .transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -2394,9 +2343,9 @@ fn test_as_of_time_between_transactions() {
 
     // Insert Bob
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Bob".to_string()));
+    data.insert("name".to_string(), Value::String("Bob".into()));
     data.insert("age".to_string(), Value::I64(25));
-    data.insert("email".to_string(), Value::String("bob@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("bob@example.com".into()));
     let result2 = db
         .transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -2417,7 +2366,7 @@ fn test_as_of_time_between_transactions() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][0], Value::String("Alice".to_string()));
+    assert_eq!(result.rows[0][0], Value::String("Alice".into()));
 
     // Query latest — should see both
     let query_json = serde_json::json!({
@@ -2446,9 +2395,9 @@ fn test_as_of_time_before_all_transactions() {
 
     // Insert Alice
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert("age".to_string(), Value::I64(30));
-    data.insert("email".to_string(), Value::String("alice@example.com".to_string()));
+    data.insert("email".to_string(), Value::String("alice@example.com".into()));
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
         entity: None,
@@ -2480,11 +2429,11 @@ fn test_hash_join_correctness() {
     // Insert 20 users
     for i in 0..20 {
         let mut data = HashMap::new();
-        data.insert("name".to_string(), Value::String(format!("user_{}", i)));
+        data.insert("name".to_string(), Value::String(format!("user_{}", i).into()));
         data.insert("age".to_string(), Value::I64(20 + i));
         data.insert(
             "email".to_string(),
-            Value::String(format!("user_{}@example.com", i)),
+            Value::String(format!("user_{}@example.com", i).into()),
         );
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -2510,7 +2459,7 @@ fn test_hash_join_correctness() {
             let mut data = HashMap::new();
             data.insert(
                 "title".to_string(),
-                Value::String(format!("Post {} by user {}", j, uid)),
+                Value::String(format!("Post {} by user {}", j, uid).into()),
             );
             data.insert("author".to_string(), Value::Ref(uid));
             db.transact(vec![TxOp::Assert {
@@ -2558,10 +2507,10 @@ fn test_explain_returns_plan() {
     // Insert some data so counts are non-zero
     for i in 0..5 {
         let mut data = HashMap::new();
-        data.insert("name".to_string(), Value::String(format!("user_{}", i)));
+        data.insert("name".to_string(), Value::String(format!("user_{}", i).into()));
         data.insert(
             "email".to_string(),
-            Value::String(format!("user_{}@example.com", i)),
+            Value::String(format!("user_{}@example.com", i).into()),
         );
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -2654,11 +2603,11 @@ fn test_reorder_preserves_results() {
     let mut user_ids = Vec::new();
     for i in 0..10 {
         let mut data = HashMap::new();
-        data.insert("name".to_string(), Value::String(format!("user_{}", i)));
+        data.insert("name".to_string(), Value::String(format!("user_{}", i).into()));
         data.insert("age".to_string(), Value::I64(20 + i));
         data.insert(
             "email".to_string(),
-            Value::String(format!("user_{}@example.com", i)),
+            Value::String(format!("user_{}@example.com", i).into()),
         );
         let result = db
             .transact(vec![TxOp::Assert {
@@ -2673,7 +2622,7 @@ fn test_reorder_preserves_results() {
     // Insert posts for first 3 users
     for &uid in &user_ids[..3] {
         let mut data = HashMap::new();
-        data.insert("title".to_string(), Value::String(format!("Post by {}", uid)));
+        data.insert("title".to_string(), Value::String(format!("Post by {}", uid).into()));
         data.insert("author".to_string(), Value::Ref(uid));
         db.transact(vec![TxOp::Assert {
             entity_type: "Post".to_string(),
@@ -2726,10 +2675,10 @@ fn test_hash_join_empty_result() {
     // Insert users but NO posts
     for i in 0..5 {
         let mut data = HashMap::new();
-        data.insert("name".to_string(), Value::String(format!("user_{}", i)));
+        data.insert("name".to_string(), Value::String(format!("user_{}", i).into()));
         data.insert(
             "email".to_string(),
-            Value::String(format!("user_{}@example.com", i)),
+            Value::String(format!("user_{}@example.com", i).into()),
         );
         db.transact(vec![TxOp::Assert {
             entity_type: "User".to_string(),
@@ -2789,10 +2738,10 @@ fn test_multi_clause_join() {
 
     // Insert a user
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     let alice_result = db
         .transact(vec![TxOp::Assert {
@@ -2805,7 +2754,7 @@ fn test_multi_clause_join() {
 
     // Insert a post
     let mut data = HashMap::new();
-    data.insert("title".to_string(), Value::String("Hello".to_string()));
+    data.insert("title".to_string(), Value::String("Hello".into()));
     data.insert("author".to_string(), Value::Ref(alice_id));
     let post_result = db
         .transact(vec![TxOp::Assert {
@@ -2818,7 +2767,7 @@ fn test_multi_clause_join() {
 
     // Insert a comment
     let mut data = HashMap::new();
-    data.insert("body".to_string(), Value::String("Great post!".to_string()));
+    data.insert("body".to_string(), Value::String("Great post!".into()));
     data.insert("post".to_string(), Value::Ref(post_id));
     data.insert("commenter".to_string(), Value::Ref(alice_id));
     db.transact(vec![TxOp::Assert {
@@ -2840,9 +2789,9 @@ fn test_multi_clause_join() {
     let query = Query::from_json(&query_json).unwrap();
     let result = db.query(&query).unwrap();
     assert_eq!(result.rows.len(), 1);
-    assert_eq!(result.rows[0][0], Value::String("Alice".to_string()));
-    assert_eq!(result.rows[0][1], Value::String("Hello".to_string()));
-    assert_eq!(result.rows[0][2], Value::String("Great post!".to_string()));
+    assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+    assert_eq!(result.rows[0][1], Value::String("Hello".into()));
+    assert_eq!(result.rows[0][2], Value::String("Great post!".into()));
 
     // Verify the plan builds a left-deep tree
     let plan = db.explain(&query).unwrap();
@@ -2881,10 +2830,10 @@ fn test_explain_constant_uses_index_lookup() {
 
     // Insert data so type count > 0
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
@@ -2913,11 +2862,11 @@ fn test_explain_range_uses_range_scan() {
 
     // Insert data so type count > 0
     let mut data = HashMap::new();
-    data.insert("name".to_string(), Value::String("Alice".to_string()));
+    data.insert("name".to_string(), Value::String("Alice".into()));
     data.insert("age".to_string(), Value::I64(30));
     data.insert(
         "email".to_string(),
-        Value::String("alice@example.com".to_string()),
+        Value::String("alice@example.com".into()),
     );
     db.transact(vec![TxOp::Assert {
         entity_type: "User".to_string(),
@@ -2964,4 +2913,850 @@ fn test_explain_join_shows_join_vars() {
         "join should be on ?u, got: {:?}",
         join_on
     );
+}
+
+// --- Storage durability options ---
+
+mod durability {
+    use super::*;
+    use datalog_db::storage::{Durability, StorageOptions};
+
+    fn open_at(path: &std::path::Path, durability: Durability) -> Arc<Database> {
+        let opts = StorageOptions {
+            durability,
+            ..StorageOptions::default()
+        };
+        let storage = RocksDbStorage::open_with(path, opts).unwrap();
+        Arc::new(Database::open(Arc::new(storage)).unwrap())
+    }
+
+    fn assert_round_trip(durability: Durability) {
+        let dir = tempfile::tempdir().unwrap();
+
+        // Write under the requested durability and close cleanly.
+        {
+            let db = open_at(dir.path(), durability);
+            db.define_type(user_type()).unwrap();
+
+            let mut data = HashMap::new();
+            data.insert("name".to_string(), Value::String("Alice".into()));
+            data.insert(
+                "email".to_string(),
+                Value::String("alice@example.com".into()),
+            );
+            db.transact(vec![TxOp::Assert {
+                entity_type: "User".to_string(),
+                entity: None,
+                data,
+            }])
+            .unwrap();
+        }
+
+        // Reopen and verify the data is still there. A clean close should
+        // make every durability mode equivalent — only the per-commit
+        // WAL/fsync semantics differ on crash, which we can't simulate
+        // portably.
+        let db = open_at(dir.path(), durability);
+        let query = Query::from_json(&serde_json::json!({
+            "find": ["?name"],
+            "where": [{"bind": "?u", "type": "User", "name": "?name"}]
+        }))
+        .unwrap();
+        let result = db.query(&query).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+    }
+
+    #[test]
+    fn buffered_round_trip() {
+        assert_round_trip(Durability::Buffered);
+    }
+
+    #[test]
+    fn sync_round_trip() {
+        assert_round_trip(Durability::Sync);
+    }
+
+    #[test]
+    fn memory_only_round_trip() {
+        // Clean close flushes the memtable to SSTs, so even MemoryOnly
+        // (WAL-off) data survives a graceful drop. This only checks the
+        // option plumbs through; crash-loss behavior is documented, not
+        // tested here.
+        assert_round_trip(Durability::MemoryOnly);
+    }
+
+    #[test]
+    fn default_is_buffered() {
+        assert_eq!(Durability::default(), Durability::Buffered);
+        assert_eq!(StorageOptions::default().durability, Durability::Buffered);
+    }
+
+    #[test]
+    fn open_default_equivalent_to_buffered() {
+        // RocksDbStorage::open should be a thin wrapper over
+        // open_with(StorageOptions::default()). Verify both paths work.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open(dir.path()).unwrap();
+        let db = Arc::new(Database::open(Arc::new(storage)).unwrap());
+        db.define_type(user_type()).unwrap();
+        // If we got here without a panic, the default path works.
+        let _ = db;
+    }
+}
+
+// --- Storage tuning knobs (block cache, compression, bloom filter, memtable) ---
+
+mod tuning {
+    use super::*;
+    use datalog_db::storage::{Compression, StorageOptions};
+
+    fn open_with(opts: StorageOptions) -> (Arc<Database>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = RocksDbStorage::open_with(dir.path(), opts).unwrap();
+        let db = Arc::new(Database::open(Arc::new(storage)).unwrap());
+        (db, dir)
+    }
+
+    fn assert_round_trip(opts: StorageOptions) {
+        let (db, _dir) = open_with(opts);
+        db.define_type(user_type()).unwrap();
+
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String("Alice".into()));
+        data.insert(
+            "email".to_string(),
+            Value::String("alice@example.com".into()),
+        );
+        db.transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+
+        let query = Query::from_json(&serde_json::json!({
+            "find": ["?name"],
+            "where": [{"bind": "?u", "type": "User", "name": "?name"}]
+        }))
+        .unwrap();
+        let result = db.query(&query).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert_eq!(result.rows[0][0], Value::String("Alice".into()));
+    }
+
+    #[test]
+    fn compression_none() {
+        assert_round_trip(StorageOptions {
+            compression: Compression::None,
+            ..StorageOptions::default()
+        });
+    }
+
+    #[test]
+    fn compression_snappy() {
+        assert_round_trip(StorageOptions {
+            compression: Compression::Snappy,
+            ..StorageOptions::default()
+        });
+    }
+
+    #[test]
+    fn compression_lz4() {
+        assert_round_trip(StorageOptions {
+            compression: Compression::Lz4,
+            ..StorageOptions::default()
+        });
+    }
+
+    #[test]
+    fn compression_zstd() {
+        assert_round_trip(StorageOptions {
+            compression: Compression::Zstd,
+            ..StorageOptions::default()
+        });
+    }
+
+    #[test]
+    fn bloom_filter_disabled() {
+        assert_round_trip(StorageOptions {
+            bloom_filter_bits_per_key: None,
+            ..StorageOptions::default()
+        });
+    }
+
+    #[test]
+    fn block_cache_disabled() {
+        // 0 means "don't override RocksDB's built-in default" — should
+        // still work, just with less RAM dedicated to the cache.
+        assert_round_trip(StorageOptions {
+            block_cache_bytes: 0,
+            ..StorageOptions::default()
+        });
+    }
+
+    #[test]
+    fn small_write_buffer() {
+        // Tiny memtable forces frequent SST flushes — exercises that
+        // code path and verifies data survives across flushes.
+        assert_round_trip(StorageOptions {
+            write_buffer_size: 64 * 1024,
+            ..StorageOptions::default()
+        });
+    }
+
+    #[test]
+    fn default_constants_are_sensible() {
+        // Guardrails on the public default. These numbers can change;
+        // the assertion is just that they're at least a sane order of
+        // magnitude — catches accidental reverts to RocksDB's tiny 8 MB
+        // block cache or to bloom filters being disabled.
+        let opts = StorageOptions::default();
+        assert!(opts.block_cache_bytes >= 16 * 1024 * 1024);
+        assert!(opts.bloom_filter_bits_per_key.is_some());
+        assert_eq!(opts.compression, Compression::Lz4);
+    }
+}
+
+// --- Query cache policy ---
+
+mod cache_policy {
+    use super::*;
+    use datalog_db::cache::CachePolicy;
+    use datalog_db::db::DatabaseOptions;
+
+    fn open(cache: CachePolicy) -> (Arc<Database>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+        let opts = DatabaseOptions {
+            cache,
+            ..DatabaseOptions::default()
+        };
+        let db = Database::open_with(storage, opts).unwrap();
+        (Arc::new(db), dir)
+    }
+
+    fn insert_user(db: &Database, name: &str, email: &str) {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(name.into()));
+        data.insert("email".to_string(), Value::String(email.into()));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    fn run_user_query(db: &Database) -> usize {
+        let query = Query::from_json(&serde_json::json!({
+            "find": ["?name"],
+            "where": [{"bind": "?u", "type": "User", "name": "?name"}]
+        }))
+        .unwrap();
+        db.query(&query).unwrap().rows.len()
+    }
+
+    #[test]
+    fn default_policy_is_unbounded() {
+        assert_eq!(CachePolicy::default(), CachePolicy::Unbounded);
+    }
+
+    #[test]
+    fn unbounded_caches_after_query() {
+        let (db, _dir) = open(CachePolicy::Unbounded);
+        db.define_type(user_type()).unwrap();
+        insert_user(&db, "Alice", "alice@example.com");
+
+        // No cache hit yet.
+        assert_eq!(run_user_query(&db), 1);
+        // A query should have warmed the cache.
+        // (We can't reach into Database to inspect the cache directly,
+        // but the query result correctness is the contract — the
+        // dedicated cache_policy_disabled test below proves the
+        // uncached path still works.)
+    }
+
+    #[test]
+    fn disabled_policy_still_returns_correct_results() {
+        // The critical contract: queries must return the same answer
+        // whether the cache is on or off. Otherwise disabling the cache
+        // for memory reasons would silently change behavior.
+        let (db, _dir) = open(CachePolicy::None);
+        db.define_type(user_type()).unwrap();
+
+        insert_user(&db, "Alice", "alice@example.com");
+        insert_user(&db, "Bob", "bob@example.com");
+        insert_user(&db, "Carol", "carol@example.com");
+
+        assert_eq!(run_user_query(&db), 3);
+        // Run it twice to exercise the "no cache to hit" path
+        // repeatedly — the result must still be stable.
+        assert_eq!(run_user_query(&db), 3);
+    }
+
+    #[test]
+    fn bounded_zero_behaves_like_disabled() {
+        let (db, _dir) = open(CachePolicy::Bounded { max_types: 0 });
+        db.define_type(user_type()).unwrap();
+        insert_user(&db, "Alice", "alice@example.com");
+        assert_eq!(run_user_query(&db), 1);
+    }
+
+    #[test]
+    fn bounded_evicts_lru_type() {
+        // Use a 1-type cache so any new query evicts the previous type.
+        let (db, _dir) = open(CachePolicy::Bounded { max_types: 1 });
+        db.define_type(user_type()).unwrap();
+        db.define_type(post_type()).unwrap();
+
+        // Insert one user and one post so each type has data to load.
+        insert_user(&db, "Alice", "alice@example.com");
+
+        let mut post_data = HashMap::new();
+        post_data.insert("title".to_string(), Value::String("Hello".into()));
+        // post_type requires an author ref — find Alice's id.
+        let users = db
+            .query(
+                &Query::from_json(&serde_json::json!({
+                    "find": ["?u"],
+                    "where": [{"bind": "?u", "type": "User"}]
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+        let alice_id = match &users.rows[0][0] {
+            Value::Ref(id) => *id,
+            _ => panic!("expected ref"),
+        };
+        post_data.insert("author".to_string(), Value::Ref(alice_id));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "Post".to_string(),
+            entity: None,
+            data: post_data,
+        }])
+        .unwrap();
+
+        // Query User → cache holds {User}.
+        assert_eq!(run_user_query(&db), 1);
+
+        // Query Post → cache should evict User to make room for Post.
+        let post_query = Query::from_json(&serde_json::json!({
+            "find": ["?title"],
+            "where": [{"bind": "?p", "type": "Post", "title": "?title"}]
+        }))
+        .unwrap();
+        assert_eq!(db.query(&post_query).unwrap().rows.len(), 1);
+
+        // Query User again → must still return correct data. With
+        // max_types=1 the User cache was evicted, so this exercises the
+        // reload path.
+        assert_eq!(run_user_query(&db), 1);
+    }
+
+    #[test]
+    fn bounded_keeps_recently_used() {
+        // max_types=2, query A then B then A then C → C evicts B (LRU).
+        // Hard to assert directly without cache inspection, but we can
+        // at least verify all queries return correct results regardless
+        // of which one happens to be a hit vs a miss.
+        let (db, _dir) = open(CachePolicy::Bounded { max_types: 2 });
+        db.define_type(user_type()).unwrap();
+        db.define_type(post_type()).unwrap();
+
+        insert_user(&db, "Alice", "alice@example.com");
+        for _ in 0..5 {
+            assert_eq!(run_user_query(&db), 1);
+        }
+    }
+}
+
+// --- Group commit (transact_many) ---
+
+mod group_commit {
+    use super::*;
+
+    fn assert_user(name: &str, email: &str) -> TxOp {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(name.into()));
+        data.insert("email".to_string(), Value::String(email.into()));
+        TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }
+    }
+
+    fn count_users(db: &Database) -> usize {
+        let query = Query::from_json(&serde_json::json!({
+            "find": ["?name"],
+            "where": [{"bind": "?u", "type": "User", "name": "?name"}]
+        }))
+        .unwrap();
+        db.query(&query).unwrap().rows.len()
+    }
+
+    #[test]
+    fn empty_group_returns_empty_vec() {
+        let (db, _dir) = test_db();
+        let results = db.transact_many(vec![]).unwrap();
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn all_success_group_commits_all() {
+        let (db, _dir) = test_db();
+        db.define_type(user_type()).unwrap();
+
+        let results = db
+            .transact_many(vec![
+                vec![assert_user("Alice", "alice@example.com")],
+                vec![assert_user("Bob", "bob@example.com")],
+                vec![assert_user("Carol", "carol@example.com")],
+            ])
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        for r in &results {
+            assert!(r.is_ok(), "expected success, got {:?}", r);
+        }
+        assert_eq!(count_users(&db), 3);
+    }
+
+    #[test]
+    fn tx_ids_are_strictly_increasing_in_group() {
+        let (db, _dir) = test_db();
+        db.define_type(user_type()).unwrap();
+
+        let results = db
+            .transact_many(vec![
+                vec![assert_user("A", "a@x.com")],
+                vec![assert_user("B", "b@x.com")],
+                vec![assert_user("C", "c@x.com")],
+            ])
+            .unwrap();
+
+        let tx_ids: Vec<u64> = results
+            .iter()
+            .map(|r| r.as_ref().unwrap().tx_id)
+            .collect();
+        assert_eq!(tx_ids.len(), 3);
+        assert!(
+            tx_ids[0] < tx_ids[1] && tx_ids[1] < tx_ids[2],
+            "tx_ids should be strictly increasing in group order, got {:?}",
+            tx_ids
+        );
+    }
+
+    #[test]
+    fn failing_tx_does_not_affect_siblings() {
+        let (db, _dir) = test_db();
+        db.define_type(user_type()).unwrap();
+
+        // Middle tx violates the schema (unknown field) — it should
+        // fail, but the first and third must still commit. Two users
+        // must be visible.
+        let mut bad_data = HashMap::new();
+        bad_data.insert(
+            "this_field_does_not_exist".to_string(),
+            Value::String("oops".into()),
+        );
+
+        let results = db
+            .transact_many(vec![
+                vec![assert_user("Alice", "alice@example.com")],
+                vec![TxOp::Assert {
+                    entity_type: "User".to_string(),
+                    entity: None,
+                    data: bad_data,
+                }],
+                vec![assert_user("Carol", "carol@example.com")],
+            ])
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert!(results[0].is_ok());
+        assert!(results[1].is_err(), "middle tx should have failed");
+        assert!(results[2].is_ok());
+        assert_eq!(count_users(&db), 2);
+    }
+
+    #[test]
+    fn unique_constraint_visible_across_group() {
+        // Two transactions in the same group both try to insert the
+        // same unique email. The second must see the first's pending
+        // write via the overlay and fail with a UniqueViolation.
+        let (db, _dir) = test_db();
+        db.define_type(user_type()).unwrap();
+
+        let results = db
+            .transact_many(vec![
+                vec![assert_user("Alice", "shared@example.com")],
+                vec![assert_user("Bob", "shared@example.com")],
+            ])
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_ok(), "first tx should succeed");
+        assert!(
+            results[1].is_err(),
+            "second tx should fail on unique constraint, got {:?}",
+            results[1]
+        );
+        // Exactly one user persisted.
+        assert_eq!(count_users(&db), 1);
+    }
+
+    #[test]
+    fn as_of_includes_first_committed_tx_in_group() {
+        // Group commits txs A, B, C. asOf(A.tx_id) should return only
+        // tx A's data, even though B and C committed atomically in the
+        // same batch. Verifies tx_id ordering is preserved.
+        let (db, _dir) = test_db();
+        db.define_type(user_type()).unwrap();
+
+        let results = db
+            .transact_many(vec![
+                vec![assert_user("A", "a@x.com")],
+                vec![assert_user("B", "b@x.com")],
+                vec![assert_user("C", "c@x.com")],
+            ])
+            .unwrap();
+
+        let tx_a = results[0].as_ref().unwrap().tx_id;
+
+        let query = Query::from_json(&serde_json::json!({
+            "find": ["?name"],
+            "where": [{"bind": "?u", "type": "User", "name": "?name"}],
+            "as_of": tx_a,
+        }))
+        .unwrap();
+        let result = db.query(&query).unwrap();
+        assert_eq!(
+            result.rows.len(),
+            1,
+            "asOf the first tx should return only that tx's data, got {} rows",
+            result.rows.len()
+        );
+    }
+
+    #[test]
+    fn group_durably_persists_across_reopen() {
+        // The whole point of group commit is one atomic WriteBatch.
+        // Verify that after a clean drop + reopen, all members of a
+        // group are present together.
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+            let db = Database::open(storage).unwrap();
+            db.define_type(user_type()).unwrap();
+            let results = db
+                .transact_many(vec![
+                    vec![assert_user("A", "a@x.com")],
+                    vec![assert_user("B", "b@x.com")],
+                    vec![assert_user("C", "c@x.com")],
+                ])
+                .unwrap();
+            for r in &results {
+                assert!(r.is_ok());
+            }
+        }
+        // Reopen and check.
+        let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+        let db = Database::open(storage).unwrap();
+        assert_eq!(count_users(&db), 3);
+    }
+}
+
+// --- Background writer thread (auto-batching group commit) ---
+
+mod writer_thread {
+    use super::*;
+    use datalog_db::db::{DatabaseOptions, GroupCommitConfig};
+    use std::sync::Arc as StdArc;
+    use std::thread;
+    use std::time::Duration;
+
+    fn open_with_writer(config: GroupCommitConfig) -> (StdArc<Database>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+        let opts = DatabaseOptions {
+            group_commit: Some(config),
+            ..DatabaseOptions::default()
+        };
+        let db = Database::open_with(storage, opts).unwrap();
+        (StdArc::new(db), dir)
+    }
+
+    fn count_users(db: &Database) -> usize {
+        let query = Query::from_json(&serde_json::json!({
+            "find": ["?name"],
+            "where": [{"bind": "?u", "type": "User", "name": "?name"}]
+        }))
+        .unwrap();
+        db.query(&query).unwrap().rows.len()
+    }
+
+    fn assert_user(name: &str, email: &str) -> TxOp {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(name.into()));
+        data.insert("email".to_string(), Value::String(email.into()));
+        TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }
+    }
+
+    #[test]
+    fn single_transact_with_writer_works() {
+        // 1-element batch path through the writer must produce the same
+        // result as the sync path.
+        let (db, _dir) = open_with_writer(GroupCommitConfig::default());
+        db.define_type(user_type()).unwrap();
+
+        let result = db
+            .transact(vec![assert_user("Alice", "alice@example.com")])
+            .unwrap();
+        assert!(result.tx_id > 0);
+        assert_eq!(count_users(&db), 1);
+    }
+
+    #[test]
+    fn concurrent_transacts_all_succeed() {
+        // Spawn many threads each issuing one transact(). All must
+        // succeed. With a large window the writer should coalesce a
+        // bunch of them into one group commit.
+        let (db, _dir) = open_with_writer(GroupCommitConfig {
+            max_batch_size: 32,
+            max_window: Duration::from_millis(20),
+        });
+        db.define_type(user_type()).unwrap();
+
+        let n = 50;
+        let mut handles = Vec::new();
+        for i in 0..n {
+            let db = db.clone();
+            handles.push(thread::spawn(move || {
+                db.transact(vec![assert_user(
+                    &format!("user{}", i),
+                    &format!("user{}@example.com", i),
+                )])
+            }));
+        }
+
+        let mut tx_ids = Vec::new();
+        for h in handles {
+            let r = h.join().unwrap().unwrap();
+            tx_ids.push(r.tx_id);
+        }
+        assert_eq!(tx_ids.len(), n);
+        // All tx_ids must be unique.
+        tx_ids.sort();
+        tx_ids.dedup();
+        assert_eq!(tx_ids.len(), n);
+        assert_eq!(count_users(&db), n);
+    }
+
+    #[test]
+    fn concurrent_unique_constraint_enforced() {
+        // Many threads race to insert the same unique email. With the
+        // writer auto-batching, only one must succeed; the rest get
+        // UniqueViolation. Critical correctness property: the overlay's
+        // read-your-prior-writes makes this safe even when all threads
+        // submit "simultaneously".
+        let (db, _dir) = open_with_writer(GroupCommitConfig {
+            max_batch_size: 32,
+            max_window: Duration::from_millis(20),
+        });
+        db.define_type(user_type()).unwrap();
+
+        let n = 20;
+        let mut handles = Vec::new();
+        for i in 0..n {
+            let db = db.clone();
+            handles.push(thread::spawn(move || {
+                db.transact(vec![assert_user(
+                    &format!("racer{}", i),
+                    "shared@example.com",
+                )])
+            }));
+        }
+
+        let mut ok_count = 0;
+        let mut err_count = 0;
+        for h in handles {
+            match h.join().unwrap() {
+                Ok(_) => ok_count += 1,
+                Err(_) => err_count += 1,
+            }
+        }
+        assert_eq!(ok_count, 1, "exactly one tx should win the unique race");
+        assert_eq!(err_count, n - 1);
+        assert_eq!(count_users(&db), 1);
+    }
+
+    #[test]
+    fn writer_shutdown_on_drop() {
+        // After dropping the Database, the writer thread must exit
+        // cleanly. We can't directly observe thread exit, but if the
+        // join hangs, this test will hang too — which is the assertion.
+        let (db, dir) = open_with_writer(GroupCommitConfig::default());
+        db.define_type(user_type()).unwrap();
+        db.transact(vec![assert_user("Alice", "a@x.com")]).unwrap();
+        drop(db);
+        // If we got here, Drop completed (writer thread joined).
+        // Reopen to verify the data is still there.
+        let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+        let db = Database::open(storage).unwrap();
+        let query = Query::from_json(&serde_json::json!({
+            "find": ["?n"],
+            "where": [{"bind": "?u", "type": "User", "name": "?n"}]
+        }))
+        .unwrap();
+        assert_eq!(db.query(&query).unwrap().rows.len(), 1);
+    }
+}
+
+// --- Attribute interning ---
+
+mod attribute_interning {
+    use super::*;
+    use datalog_db::intern::AttrInterner;
+
+    /// Touch a typical schema and a few asserts so the attribute table
+    /// has interesting content to inspect.
+    fn populate_db(db: &Database) {
+        db.define_type(user_type()).unwrap();
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String("Alice".into()));
+        data.insert(
+            "email".to_string(),
+            Value::String("alice@example.com".into()),
+        );
+        db.transact(vec![TxOp::Assert {
+            entity_type: "User".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    #[test]
+    fn attribute_ids_are_persisted_and_reused_across_reopens() {
+        // Open, populate, drop. Then reopen and assert the interner
+        // loaded the same IDs from storage.
+        let dir = tempfile::tempdir().unwrap();
+        let attrs_first_open: Vec<(String, u32)>;
+        {
+            let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+            let db = Database::open(storage.clone()).unwrap();
+            populate_db(&db);
+
+            // Inspect via a fresh interner loaded from the same storage —
+            // proves what's actually persisted, not just what's in
+            // memory.
+            let inspector = AttrInterner::new();
+            inspector.load_from_storage(&*storage).unwrap();
+            // The populate inserts a User with `name` and `email` set
+            // (age is optional, left unset). So we expect at least
+            // __schema_type, __type, User/name, User/email — four
+            // distinct attributes. age is not interned because no datom
+            // uses it.
+            assert!(
+                inspector.len() >= 4,
+                "expected at least 4 interned attrs, got {}",
+                inspector.len()
+            );
+
+            attrs_first_open = ["__schema_type", "__type", "User/name", "User/email"]
+                .iter()
+                .filter_map(|n| inspector.lookup(n).map(|id| (n.to_string(), id)))
+                .collect();
+            assert_eq!(attrs_first_open.len(), 4);
+        }
+
+        // Reopen with a fresh storage handle.
+        let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+        let inspector = AttrInterner::new();
+        inspector.load_from_storage(&*storage).unwrap();
+
+        for (name, expected_id) in &attrs_first_open {
+            assert_eq!(
+                inspector.lookup(name),
+                Some(*expected_id),
+                "attr id for `{}` did not survive reopen",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn writes_do_not_allocate_duplicate_ids() {
+        // Multiple transacts touching the same attributes must reuse
+        // the existing IDs. The interner length must equal the number
+        // of distinct attributes, not the number of writes.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+        let db = Database::open(storage.clone()).unwrap();
+        populate_db(&db);
+        let after_first: usize;
+        {
+            let inspector = AttrInterner::new();
+            inspector.load_from_storage(&*storage).unwrap();
+            after_first = inspector.len();
+        }
+
+        // Five more inserts on the same type — all reuse User/name,
+        // User/email, User/age, __type. No new attributes.
+        for i in 0..5 {
+            let mut data = HashMap::new();
+            data.insert("name".to_string(), Value::String(format!("user{}", i).into()));
+            data.insert(
+                "email".to_string(),
+                Value::String(format!("u{}@x.com", i).into()),
+            );
+            db.transact(vec![TxOp::Assert {
+                entity_type: "User".to_string(),
+                entity: None,
+                data,
+            }])
+            .unwrap();
+        }
+
+        let inspector = AttrInterner::new();
+        inspector.load_from_storage(&*storage).unwrap();
+        assert_eq!(
+            inspector.len(),
+            after_first,
+            "no new attribute IDs should have been allocated"
+        );
+    }
+
+    #[test]
+    fn unique_attribute_names_get_distinct_ids() {
+        // Sanity check that the forward + reverse maps are coherent —
+        // every name maps to a unique id and vice versa.
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+        let db = Database::open(storage.clone()).unwrap();
+        populate_db(&db);
+
+        let inspector = AttrInterner::new();
+        inspector.load_from_storage(&*storage).unwrap();
+
+        // Collect (name, id) for the well-known attrs.
+        let attrs = ["__schema_type", "__type", "User/name", "User/email"];
+        let mut seen_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for name in attrs {
+            let id = inspector.lookup(name).expect("attr not interned");
+            assert!(
+                seen_ids.insert(id),
+                "attr id {} was assigned to multiple names",
+                id
+            );
+            // Reverse lookup matches.
+            assert_eq!(inspector.name_of(id).as_deref(), Some(name));
+        }
+    }
 }

@@ -1,0 +1,18 @@
+Handler: kick_off_deploy
+  on:    MergeToMain
+         payload: { sha, author, repo }
+
+  read   (1 path)
+    subscribers[$event.repo]
+
+  write  (1 path)
+    in_progress[*]
+
+  emit   (3 effects)
+    HttpRequest
+    SlackPost
+    LogWrite
+
+  body
+    hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    uri:  components/kick_off_deploy.wasm

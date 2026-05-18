@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use datalog_db::client::Client;
-use datalog_db::db::Database;
+use datalog_db::db::{Database, DatabaseOptions, GroupCommitConfig};
 use datalog_db::schema::{EntityTypeDef, FieldDef, FieldType};
 use datalog_db::server::Server;
 use datalog_db::storage::rocksdb_backend::RocksDbStorage;
@@ -39,7 +39,21 @@ fn main() {
     // -- Start datalog-db --------------------------------------------------
     let tmp = tempfile::tempdir().expect("tempdir");
     let storage = RocksDbStorage::open(tmp.path()).expect("open rocksdb");
-    let db = Database::open(Arc::new(storage)).expect("open db");
+    // parallel_writes=true lets multiple `transact()` callers run their
+    // batches concurrently — counter allocation is atomic fetch_add and
+    // there's no internal write lock. Mixed 4-thread is the workload
+    // this targets: 4 client threads → 4 server threads → 4 simultaneous
+    // RocksDB writes coalesced by the WAL writer. group_commit is
+    // suppressed in this mode (the writer thread would re-serialize).
+    let opts = DatabaseOptions {
+        parallel_writes: true,
+        group_commit: Some(GroupCommitConfig {
+            max_batch_size: 64,
+            max_window: Duration::ZERO,
+        }),
+        ..DatabaseOptions::default()
+    };
+    let db = Database::open_with(Arc::new(storage), opts).expect("open db");
     let db = Arc::new(db);
 
     let server = Server::bind("127.0.0.1:0", db).expect("bind");

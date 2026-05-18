@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::datom::{TxId, Value};
+use crate::intern::AttrInterner;
 use crate::query::{Pattern, PredOp, WhereClause, Query};
 use crate::schema::SchemaRegistry;
 use crate::storage::ReadOps;
@@ -337,6 +338,7 @@ pub fn plan_query(
     txn: &dyn ReadOps,
     query: &Query,
     schema: &SchemaRegistry,
+    interner: &AttrInterner,
 ) -> Result<QueryPlan, String> {
     if query.where_clauses.is_empty() {
         return Err("query must have at least one where clause".into());
@@ -348,7 +350,7 @@ pub fn plan_query(
     let mut clause_estimates: Vec<(WhereClause, ScanStrategy, CostEstimate)> = Vec::new();
     for clause in &query.where_clauses {
         let (strategy, estimate) =
-            estimate_clause(txn, clause, schema, query.as_of, &mut type_counts);
+            estimate_clause(txn, interner, clause, schema, query.as_of, &mut type_counts);
         clause_estimates.push((clause.clone(), strategy, estimate));
     }
 
@@ -376,6 +378,7 @@ pub fn plan_query(
 /// Estimate cardinality of a clause.
 fn estimate_clause(
     txn: &dyn ReadOps,
+    interner: &AttrInterner,
     clause: &WhereClause,
     schema: &SchemaRegistry,
     as_of: Option<TxId>,
@@ -431,7 +434,7 @@ fn estimate_clause(
     let mut type_count = || -> usize {
         *type_counts
             .entry(clause.entity_type.clone())
-            .or_insert_with(|| count_entities_of_type(txn, &clause.entity_type, as_of))
+            .or_insert_with(|| count_entities_of_type(txn, interner, &clause.entity_type, as_of))
     };
 
     if has_exact {
@@ -456,6 +459,7 @@ fn estimate_clause(
 /// First tries the metadata key (O(1) lookup), falls back to AVET scan.
 fn count_entities_of_type(
     txn: &dyn ReadOps,
+    interner: &AttrInterner,
     type_name: &str,
     as_of: Option<TxId>,
 ) -> usize {
@@ -471,9 +475,14 @@ fn count_entities_of_type(
         }
     }
 
-    // Fall back to AVET scan (for as_of queries or if metadata doesn't exist)
-    let type_value = Value::String(type_name.to_string());
-    let prefix = index::avet_attr_value_prefix("__type", &type_value);
+    // Fall back to AVET scan (for as_of queries or if metadata doesn't exist).
+    // If `__type` has never been interned, there's nothing to scan.
+    let type_attr_id = match interner.lookup("__type") {
+        Some(id) => id,
+        None => return 0,
+    };
+    let type_value = Value::String(type_name.into());
+    let prefix = index::avet_attr_value_prefix(type_attr_id, &type_value);
     let end = index::prefix_end(&prefix);
 
     let entries = match txn.scan(&prefix, &end) {

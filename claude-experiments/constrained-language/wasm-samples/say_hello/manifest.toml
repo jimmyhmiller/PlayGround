@@ -1,0 +1,98 @@
+# ----------------------------------------------------------------------------
+# Hello-world program manifest.
+#
+# This file is the SOURCE OF TRUTH for the program. The WIT in `wit/world.wit`
+# is just the guest's view of the same contract — `ir::wit::generate_world`
+# can produce it mechanically from this manifest.
+#
+# Everything a handler may do is declared here:
+#   - what events it reacts to (`on`)
+#   - what state slices it may read or write
+#   - which effects it may request
+# The runtime enforces these limits at every host-function call.
+# ----------------------------------------------------------------------------
+
+name = "hello-world"
+version = "0.1.0"
+
+# ---------------------------------------------------------------------------
+# Schemas
+# Reusable structural type definitions. Named entries are referenced from
+# events, state, and effects by their bare name (e.g. `payload = "Greeting"`).
+# ---------------------------------------------------------------------------
+
+[schemas.Greeting]
+kind = "record"
+fields = { name = "string" }
+
+[schemas.PrintReq]
+kind = "record"
+fields = { text = "string" }
+
+# ---------------------------------------------------------------------------
+# Events
+# Inputs the runtime accepts. A handler with `on = "<event>"` fires once per
+# arriving event of that name.
+# ---------------------------------------------------------------------------
+
+[events.Greeted]
+payload = "Greeting"
+
+# ---------------------------------------------------------------------------
+# State
+# Persistent cells the runtime owns. Two kinds:
+#   - Atom<T>: single slot of type T
+#   - Map<K, V>: keyed collection
+# Handlers address them by `cell`, `cell[$event.key]`, or `cell[*]`.
+# ---------------------------------------------------------------------------
+
+[state.greet_counts]
+kind = "map"
+key = "string"
+value = "u32"
+
+# ---------------------------------------------------------------------------
+# Effects
+# Things a handler may *request*. The host fulfills them through registered
+# adapters and feeds the response back in via the auto-routed
+# `response_event` (when declared), or just as a log entry otherwise.
+# ---------------------------------------------------------------------------
+
+[effects.Print]
+request = "PrintReq"
+response = "string"
+
+# ---------------------------------------------------------------------------
+# Handlers
+# Pure functions: (event, declared reads) -> (declared writes, declared emits).
+# The body URI points to a WASM component the runtime loads via
+# `wasm::load_handler_body`; the component must export `handle(event)` and
+# may only call imports matching the declared footprint.
+# ---------------------------------------------------------------------------
+
+[[handlers]]
+name  = "say_hello"
+on    = "Greeted"
+read  = ["greet_counts[$event.name]"]
+write = ["greet_counts[$event.name]"]
+emit  = ["Print"]
+body  = { hash = "sha256:0", uri = "say_hello" }
+
+# ---------------------------------------------------------------------------
+# Generators: typed event sources. Each one runs on its own thread, blocking
+# on its source and pushing events into the runtime queue. When all
+# generators finish AND the queue drains, the runtime exits.
+# ---------------------------------------------------------------------------
+
+# Each line of stdin becomes a Greeted event with `name = <the line>`.
+[generators.input]
+event = "Greeted"
+kind = "stdin_lines"
+payload = { name = "$input" }
+
+# ---------------------------------------------------------------------------
+# Host wiring: one adapter per declared effect.
+# ---------------------------------------------------------------------------
+
+[adapters.Print]
+kind = "stdout"

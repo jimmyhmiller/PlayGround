@@ -1,0 +1,74 @@
+package program:deploy-monitor;
+
+// Generated for handler `poll_in_flight`.
+// The declared footprint in the manifest is the complete authoring surface.
+
+world poll-in-flight {
+  // Types
+  type repo-id = string;
+  type channel-id = string;
+  type deploy-id = string;
+  type user-id = string;
+  variant deploy-status {
+    queued,
+    running,
+    success,
+    failed,
+  }
+  record deploy-record {
+    id: deploy-id,
+    sha: string,
+    repo: repo-id,
+    status: deploy-status,
+    started-at: u64,
+  }
+  record http-request {
+    method: string,
+    url: string,
+    body: list<u8>,
+  }
+  record http-response {
+    status: u32,
+    body: list<u8>,
+  }
+  record slack-post {
+    channel: channel-id,
+    text: string,
+  }
+  record ack {
+  }
+  variant log-level {
+    info,
+    warn,
+    error,
+  }
+  record log-entry {
+    level: log-level,
+    msg: string,
+  }
+  record merge-to-main {
+    sha: string,
+    author: user-id,
+    repo: repo-id,
+  }
+  record deploy-status-update {
+    deploy-id: deploy-id,
+    status: deploy-status,
+  }
+  record timer-tick {
+    now: u64,
+  }
+  record rollback-requested {
+    deploy-id: deploy-id,
+    by: user-id,
+  }
+
+  // State reads (one function per declared read slice)
+  import list-in-progress: func() -> list<tuple<deploy-id, deploy-record>>;
+
+  // Effects (one emit-<name> per declared effect type; returns an opaque emit id)
+  import emit-http-request: func(req: http-request) -> u64;
+
+  // Handler entry point
+  export handle: func(event: timer-tick);
+}

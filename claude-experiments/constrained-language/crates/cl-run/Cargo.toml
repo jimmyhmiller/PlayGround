@@ -1,0 +1,20 @@
+[package]
+name = "cl-run"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "cl-run"
+path = "src/main.rs"
+
+[dependencies]
+ir = { path = "../ir" }
+runtime = { path = "../runtime" }
+host-adapters = { path = "../host-adapters" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+indexmap = { workspace = true }
+clap = { workspace = true }

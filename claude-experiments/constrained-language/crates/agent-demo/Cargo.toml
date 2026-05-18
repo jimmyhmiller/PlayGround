@@ -1,0 +1,16 @@
+[package]
+name = "agent-demo"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "agent-demo"
+path = "src/main.rs"
+
+[dependencies]
+ir = { path = "../ir" }
+runtime = { path = "../runtime" }
+host-adapters = { path = "../host-adapters" }
+serde_json = { workspace = true }
+clap = { workspace = true }
