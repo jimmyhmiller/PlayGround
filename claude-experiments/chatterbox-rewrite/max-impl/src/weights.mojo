@@ -26,6 +26,11 @@ from campplus import (
     TransitLayer, TDNN, DenseLayer, XVectorBackbone,
     ResNetBasicBlock, ResNetHead, CAMPPlus,
 )
+from cfm_estimator_new import (
+    GroupNorm1d, Block1D, Resnet1D,
+    CFMAttention, CFMFeedForward, BasicTransformerBlock,
+    CFMDownStage, CFMMidStage, CFMUpStage, CFMEstimatorReal,
+)
 
 
 def _upload(buf: DeviceBuffer[DType.float32], data: List[Float32], n: Int) raises:
@@ -716,3 +721,202 @@ def load_campplus(mut ctx: DeviceContext, base: String) raises -> CAMPPlus:
     )
 
     return CAMPPlus(xvector^, head^)
+
+
+# ============================================================================
+# CFM estimator loader (real upstream shape)
+# ============================================================================
+
+def _load_groupnorm(
+    mut ctx: DeviceContext, base: String, channels: Int, num_groups: Int = 8,
+) raises -> GroupNorm1d:
+    """Load PyTorch GroupNorm: weight (γ) + bias (β), both shape (channels,)."""
+    var w = upload_fp32(ctx, base + "/weight.bin")
+    var b = upload_fp32(ctx, base + "/bias.bin")
+    return GroupNorm1d(w^, b^, channels, num_groups, Float32(1.0e-5))
+
+
+def _load_block1d(
+    mut ctx: DeviceContext, base: String, c_in: Int, c_out: Int,
+) raises -> Block1D:
+    """Block1D = Sequential(Conv1d, Mish, GroupNorm).
+
+    On disk:
+      {base}/block/0/{weight,bias}.bin   — Conv1d (c_out, c_in, 3)
+      {base}/block/2/{weight,bias}.bin   — GroupNorm (c_out,)
+    Activation (Mish, index 1) has no weights.
+    """
+    var cw = upload_fp32(ctx, base + "/block/0/weight.bin")
+    var cb = upload_fp32(ctx, base + "/block/0/bias.bin")
+    var conv = Conv1d(cw^, cb^, c_in, c_out, 3, 1, 1, 1, 1, True)
+    var gn = _load_groupnorm(ctx, base + "/block/2", c_out)
+    return Block1D(conv^, gn^)
+
+
+def _load_resnet1d(
+    mut ctx: DeviceContext, base: String, c_in: Int, c_out: Int,
+    time_emb_dim: Int,
+) raises -> Resnet1D:
+    """Resnet1D: block1 + block2 + mlp + res_conv (1x1, only when c_in ≠ c_out)."""
+    var block1 = _load_block1d(ctx, base + "/block1", c_in, c_out)
+    var block2 = _load_block1d(ctx, base + "/block2", c_out, c_out)
+    # mlp is stored as `mlp.1.{weight,bias}.bin` (index 0 is activation).
+    var mw = upload_fp32(ctx, base + "/mlp/1/weight.bin")
+    var mb = upload_fp32(ctx, base + "/mlp/1/bias.bin")
+    var mlp = Linear(mw^, mb^, time_emb_dim, c_out, True)
+    # res_conv is always present in upstream weights (even when c_in == c_out — uses identity-ish 1x1).
+    var rw = upload_fp32(ctx, base + "/res_conv/weight.bin")
+    var rb = upload_fp32(ctx, base + "/res_conv/bias.bin")
+    var res_conv = Conv1d(rw^, rb^, c_in, c_out, 1, 1, 0, 1, 1, True)
+    return Resnet1D(block1^, block2^, mlp^, res_conv^)
+
+
+def _load_cfm_attention(
+    mut ctx: DeviceContext, base: String,
+    d_model: Int, n_heads: Int, head_dim: Int,
+) raises -> CFMAttention:
+    """Attention with Q/K/V dim=512, output dim=256. Stored as Conv1d-like
+    Linear (`.weight` shape (out, in), no kernel dim).
+
+    On disk per the dump:
+      attn1.to_q.weight (512, 256)    — no bias
+      attn1.to_k.weight (512, 256)    — no bias
+      attn1.to_v.weight (512, 256)    — no bias
+      attn1.to_out.0.weight (256, 512), .bias (256,)
+    """
+    var inner = n_heads * head_dim   # 512
+    var qw = upload_fp32(ctx, base + "/to_q/weight.bin")
+    var kw = upload_fp32(ctx, base + "/to_k/weight.bin")
+    var vw = upload_fp32(ctx, base + "/to_v/weight.bin")
+    var ow = upload_fp32(ctx, base + "/to_out/0/weight.bin")
+    var ob = upload_fp32(ctx, base + "/to_out/0/bias.bin")
+
+    var zero = _zero_buf(ctx, inner)
+    var to_q = Conv1d(qw^, zero^, d_model, inner, 1, 1, 0, 1, 1, False)
+    var zero_k = _zero_buf(ctx, inner)
+    var to_k = Conv1d(kw^, zero_k^, d_model, inner, 1, 1, 0, 1, 1, False)
+    var zero_v = _zero_buf(ctx, inner)
+    var to_v = Conv1d(vw^, zero_v^, d_model, inner, 1, 1, 0, 1, 1, False)
+    var to_out = Conv1d(ow^, ob^, inner, d_model, 1, 1, 0, 1, 1, True)
+    return CFMAttention(to_q^, to_k^, to_v^, to_out^, n_heads, head_dim)
+
+
+def _load_cfm_ff(
+    mut ctx: DeviceContext, base: String, d_model: Int, intermediate: Int,
+) raises -> CFMFeedForward:
+    """GEGLU FF — net.0.proj (intermediate, d_model), net.2 (d_model, intermediate)."""
+    var p0w = upload_fp32(ctx, base + "/net/0/proj/weight.bin")
+    var p0b = upload_fp32(ctx, base + "/net/0/proj/bias.bin")
+    var net0 = Linear(p0w^, p0b^, d_model, intermediate, True)
+    var p2w = upload_fp32(ctx, base + "/net/2/weight.bin")
+    var p2b = upload_fp32(ctx, base + "/net/2/bias.bin")
+    var net2 = Linear(p2w^, p2b^, intermediate, d_model, True)
+    return CFMFeedForward(net0^, net2^)
+
+
+def _load_basic_transformer_block(
+    mut ctx: DeviceContext, base: String,
+    d_model: Int, n_heads: Int, head_dim: Int, intermediate: Int,
+) raises -> BasicTransformerBlock:
+    var n1_w = upload_fp32(ctx, base + "/norm1/weight.bin")
+    var n1_b = upload_fp32(ctx, base + "/norm1/bias.bin")
+    var norm1 = LayerNorm(n1_w^, n1_b^, d_model, Float32(1.0e-5))
+    var attn1 = _load_cfm_attention(ctx, base + "/attn1", d_model, n_heads, head_dim)
+    var n3_w = upload_fp32(ctx, base + "/norm3/weight.bin")
+    var n3_b = upload_fp32(ctx, base + "/norm3/bias.bin")
+    var norm3 = LayerNorm(n3_w^, n3_b^, d_model, Float32(1.0e-5))
+    var ff = _load_cfm_ff(ctx, base + "/ff", d_model, intermediate)
+    return BasicTransformerBlock(norm1^, attn1^, norm3^, ff^)
+
+
+def _load_transformer_stack(
+    mut ctx: DeviceContext, base: String, n_blocks: Int,
+    d_model: Int, n_heads: Int, head_dim: Int, intermediate: Int,
+) raises -> List[BasicTransformerBlock]:
+    var blocks = List[BasicTransformerBlock]()
+    for i in range(n_blocks):
+        var b = _load_basic_transformer_block(
+            ctx, base + "/" + String(i),
+            d_model, n_heads, head_dim, intermediate,
+        )
+        blocks.append(b^)
+    return blocks^
+
+
+def load_cfm_estimator_real(mut ctx: DeviceContext, base: String) raises -> CFMEstimatorReal:
+    """Load CFM estimator (Matcha-TTS / CosyVoice style) from
+    weights/s3gen/flow/decoder/estimator/.
+
+    Hardcoded architectural constants matching the upstream weight shapes:
+      d_model = 256, time_emb_dim = 1024,
+      attn inner = 512 (n_heads = 8, head_dim = 64),
+      ff intermediate = 1024,
+      down/up have 1 stage each, mid has 12 stages,
+      each stage has 4 transformer blocks after the resnet,
+      first down stage Conv1d input = 320 (mel + cond + spk emb concat).
+    """
+    comptime D = 256
+    comptime TIME_DIM = 1024
+    comptime N_HEADS = 8
+    comptime HEAD_DIM = 64
+    comptime FF_INTER = 1024
+    comptime N_TRANSFORMER_PER_STAGE = 4
+    comptime FIRST_IN = 320   # mel + cond + spk concat
+    comptime MEL = 80
+
+    # time_mlp: Linear (TIME_DIM, time_input=320) → silu (no params) → Linear (TIME_DIM, TIME_DIM)
+    var t1_w = upload_fp32(ctx, base + "/time_mlp/linear_1/weight.bin")
+    var t1_b = upload_fp32(ctx, base + "/time_mlp/linear_1/bias.bin")
+    var time_mlp1 = Linear(t1_w^, t1_b^, 320, TIME_DIM, True)
+    var t2_w = upload_fp32(ctx, base + "/time_mlp/linear_2/weight.bin")
+    var t2_b = upload_fp32(ctx, base + "/time_mlp/linear_2/bias.bin")
+    var time_mlp2 = Linear(t2_w^, t2_b^, TIME_DIM, TIME_DIM, True)
+
+    # down_blocks: 1 stage.
+    var down_blocks = List[CFMDownStage]()
+    var d0_resnet = _load_resnet1d(ctx, base + "/down_blocks/0/0", FIRST_IN, D, TIME_DIM)
+    var d0_trans = _load_transformer_stack(
+        ctx, base + "/down_blocks/0/1", N_TRANSFORMER_PER_STAGE,
+        D, N_HEADS, HEAD_DIM, FF_INTER,
+    )
+    var d0_dn_w = upload_fp32(ctx, base + "/down_blocks/0/2/weight.bin")
+    var d0_dn_b = upload_fp32(ctx, base + "/down_blocks/0/2/bias.bin")
+    var d0_downsampler = Conv1d(d0_dn_w^, d0_dn_b^, D, D, 3, 2, 1, 1, 1, True)
+    down_blocks.append(CFMDownStage(d0_resnet^, d0_trans^, d0_downsampler^))
+
+    # mid_blocks: 12 stages.
+    var mid_blocks = List[CFMMidStage]()
+    for i in range(12):
+        var m_base = base + "/mid_blocks/" + String(i)
+        var m_resnet = _load_resnet1d(ctx, m_base + "/0", D, D, TIME_DIM)
+        var m_trans = _load_transformer_stack(
+            ctx, m_base + "/1", N_TRANSFORMER_PER_STAGE,
+            D, N_HEADS, HEAD_DIM, FF_INTER,
+        )
+        mid_blocks.append(CFMMidStage(m_resnet^, m_trans^))
+
+    # up_blocks: 1 stage. Resnet takes concat (skip + x) so input is 2*D = 512.
+    var up_blocks = List[CFMUpStage]()
+    var u0_resnet = _load_resnet1d(ctx, base + "/up_blocks/0/0", D * 2, D, TIME_DIM)
+    var u0_trans = _load_transformer_stack(
+        ctx, base + "/up_blocks/0/1", N_TRANSFORMER_PER_STAGE,
+        D, N_HEADS, HEAD_DIM, FF_INTER,
+    )
+    var u0_up_w = upload_fp32(ctx, base + "/up_blocks/0/2/weight.bin")
+    var u0_up_b = upload_fp32(ctx, base + "/up_blocks/0/2/bias.bin")
+    var u0_upsampler = Conv1d(u0_up_w^, u0_up_b^, D, D, 3, 1, 1, 1, 1, True)
+    up_blocks.append(CFMUpStage(u0_resnet^, u0_trans^, u0_upsampler^))
+
+    # final_block: just a Block1D — Conv1d + GroupNorm.
+    var final_block = _load_block1d(ctx, base + "/final_block", D, D)
+
+    # final_proj: Conv1d 256 → 80 (k=1).
+    var fp_w = upload_fp32(ctx, base + "/final_proj/weight.bin")
+    var fp_b = upload_fp32(ctx, base + "/final_proj/bias.bin")
+    var final_proj = Conv1d(fp_w^, fp_b^, D, MEL, 1, 1, 0, 1, 1, True)
+
+    return CFMEstimatorReal(
+        time_mlp1^, time_mlp2^,
+        down_blocks^, mid_blocks^, up_blocks^,
+        final_block^, final_proj^,
+    )
