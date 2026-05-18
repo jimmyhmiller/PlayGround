@@ -42,6 +42,7 @@ test-hifigan-up2-full = { cmd = "mojo run -I src tests/test_hifigan_up2_full.moj
 test-hifigan-full = { cmd = "mojo run -I src tests/test_hifigan_full.mojo", depends-on = ["dump-hifigan"] }
 test-hifigan-real-mel = { cmd = "mojo run -I src tests/test_hifigan_real_mel.mojo", depends-on = ["dump-hifigan"] }
 test-s3gen-linear = { cmd = "mojo run -I src tests/test_s3gen_linear.mojo" }
+test-cfm-euler = { cmd = "mojo run -I src tests/test_cfm_euler.mojo" }
 
 [dependencies]
 mojo = ">=1.0.0b2.dev2026050306,<2"

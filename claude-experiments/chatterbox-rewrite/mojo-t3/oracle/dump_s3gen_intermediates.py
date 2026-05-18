@@ -137,22 +137,32 @@ def main():
         captured["cfm_cond"] = cond.detach()
         captured["cfm_t_span"] = t_span.detach()
         steps = []
-        # Upstream calls self.estimator.forward(...) directly (bypassing
-        # __call__), so hooks don't fire. Replace .forward with a wrapper.
+        step_inputs = []   # (x, mask, mu, t, spks, cond) per step
+        step_outputs = []  # estimator output per step (the dxdt before CFG split)
         orig_forward = cfm.estimator.forward
         def estimator_forward(*fargs, **fkwargs):
-            # Upstream passes x as a keyword arg; tolerate both forms.
+            inputs = {}
             if fargs:
                 steps.append(fargs[0].detach())
             elif "x" in fkwargs:
                 steps.append(fkwargs["x"].detach())
-            return orig_forward(*fargs, **fkwargs)
+            # Snapshot ALL named inputs so we can replay the estimator
+            # against this exact state later.
+            for name in ("x", "mask", "mu", "t", "spks", "cond"):
+                if name in fkwargs and fkwargs[name] is not None:
+                    inputs[name] = fkwargs[name].detach()
+            step_inputs.append(inputs)
+            out = orig_forward(*fargs, **fkwargs)
+            step_outputs.append(out.detach())
+            return out
         cfm.estimator.forward = estimator_forward
         try:
             result = orig_solve(x, t_span, mu, mask, spks, cond, *args, **kwargs)
         finally:
             cfm.estimator.forward = orig_forward
         captured["cfm_step_zs"] = steps
+        captured["cfm_step_inputs"] = step_inputs   # list of dicts
+        captured["cfm_step_outputs"] = step_outputs # list of estimator outputs
         captured["cfm_mel_out"] = result.detach() if isinstance(result, torch.Tensor) else None
         return result
     cfm.solve_euler = hook_solve
@@ -195,6 +205,17 @@ def main():
                 write_tensor(OUT / f"cfm_step_{i:02d}.bin",
                              z.cpu().numpy().astype(np.float32))
             print(f"  cfm_step_zs: {len(v)} steps, shape {tuple(v[0].shape)}")
+        elif k == "cfm_step_inputs":
+            for i, inp in enumerate(v):
+                for name, tensor in inp.items():
+                    write_tensor(OUT / f"cfm_step_{i:02d}_input_{name}.bin",
+                                 tensor.cpu().numpy().astype(np.float32))
+            print(f"  cfm_step_inputs: {len(v)} steps with named inputs")
+        elif k == "cfm_step_outputs":
+            for i, out in enumerate(v):
+                write_tensor(OUT / f"cfm_step_{i:02d}_output.bin",
+                             out.cpu().numpy().astype(np.float32))
+            print(f"  cfm_step_outputs: {len(v)} steps, shape {tuple(v[0].shape)}")
         elif isinstance(v, torch.Tensor):
             dtype = v.dtype
             if dtype == torch.int64 or dtype == torch.int32:
