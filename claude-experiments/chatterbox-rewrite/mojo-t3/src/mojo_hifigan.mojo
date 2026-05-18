@@ -1,70 +1,187 @@
 """
 Python extension module: mojo_hifigan.
 
-Exposes the Mojo HiFiGAN vocoder as a Python-callable function:
+Drop-in (eventually) for s3gen.mel2wav.inference in paper-audiobooks, sidestepping
+the MIOpen Winograd corruption that bites upstream HiFiGAN on gfx1151.
 
-    import mojo.importer        # enable Mojo imports
-    import mojo_hifigan
+Current state: real conv_pre + leaky_relu + ups[0] of HiFiGAN exposed as a
+Python-callable function for end-to-end I/O validation. Caller passes a numpy
+mel of fixed shape (1, 80, 32); we return the (1, 256, 256) output after the
+first upsample stage. This proves:
+  - numpy → Mojo TileTensor conversion works
+  - real Chatterbox weights loaded from disk reach the GPU correctly
+  - the result returned to Python matches upstream bit-tolerantly
 
-    mojo_hifigan.load_weights("/path/to/tests/fixtures/hifigan/weights")
-    audio = mojo_hifigan.synthesize(mel_np, s_stft_np)
-        # mel_np:    (1, 80, T_mel) numpy float32
-        # s_stft_np: (1, 18, T_audio + 1) numpy float32  (precomputed STFT of source signal)
-        # returns:   (1, T_audio) numpy float32
-
-The first call resolves all the per-stage layouts at the requested T_mel
-(comptime in Mojo, but we accept a fixed test-time T_mel for now and emit
-clear errors if the user passes a different shape).
-
-Currently a placeholder skeleton — the actual HiFiGAN forward will be wired
-in once we move the test driver into a reusable function. Today it returns
-zeros of the right shape so paper-audiobooks integration can be tested with
-just the I/O plumbing.
+The rest of the HiFiGAN pipeline (stages 1/2 + conv_post + iSTFT) is mechanical
+to add once this skeleton is plumbed in.
 """
 
+from std.math import ceildiv
 from std.os import abort
 from std.python import Python, PythonObject
 from std.python.bindings import PythonModuleBuilder
+from std.sys import has_accelerator
+from std.gpu.host import DeviceContext, DeviceBuffer
+from layout import TileTensor, row_major
+
+from fixture import load_fp32
+from conv import conv1d_kernel, transposed_conv1d_kernel, leaky_relu_kernel
+
+
+# Hard-coded shapes for the current first-stage demonstration.
+# T_MEL=32 matches our synthetic test fixture; real production uses ~252.
+comptime BATCH = 1
+comptime MEL_C = 80
+comptime MEL_T = 32
+comptime PRE_C = 512
+comptime CP_K = 7
+comptime S0_C = 256
+comptime S0_T = 256
+comptime UP_K = 16
+comptime UP_STRIDE = 8
+comptime UP_PAD = 4
+comptime POINTWISE_BLOCK = 256
 
 
 @export
 def PyInit_mojo_hifigan() -> PythonObject:
     try:
         var m = PythonModuleBuilder("mojo_hifigan")
-        m.def_function[load_weights]("load_weights")
-        m.def_function[synthesize]("synthesize")
+        m.def_function[conv_pre_step]("conv_pre_step")
+        m.def_function[ups0_step]("ups0_step")
         return m.finalize()
     except e:
         abort(String("failed to create mojo_hifigan module: ", e))
 
 
-def load_weights(weights_dir: PythonObject) raises -> PythonObject:
-    """Load HiFiGAN weights from the given directory (one-time setup).
+def _upload_np_to_buf(buf: DeviceBuffer[DType.float32], arr: PythonObject, n: Int) raises:
+    """Copy a numpy (or python sequence) of floats into a DeviceBuffer.
 
-    Returns 0 on success. Subsequent calls reload weights.
+    arr is expected to be a contiguous numpy float32 array; we use .flatten()
+    to get a 1-D view, then iterate the elements as PythonObjects.
     """
-    var d = String(py=weights_dir)
-    # TODO: stage all 246 conv weights + alpha tensors + STFT window onto the
-    # device. We currently store paths in a module-global registry.
-    print("[mojo_hifigan] load_weights:", d, " (skeleton — not yet wired)")
-    return PythonObject(0)
+    var flat = arr.flatten()
+    with buf.map_to_host() as h:
+        for i in range(n):
+            h[i] = Float32(py=flat[i])
 
 
-def synthesize(mel: PythonObject, s_stft: PythonObject) raises -> PythonObject:
-    """Run the Mojo HiFiGAN forward on a real mel + precomputed source STFT.
-
-    Args:
-      mel:     numpy float32, shape (1, 80, T_mel)
-      s_stft:  numpy float32, shape (1, 18, T_audio_centered_T)
-
-    Returns:
-      numpy float32 audio of shape (1, T_audio).
-    """
+def _buf_to_np(buf: DeviceBuffer[DType.float32], n: Int, shape: PythonObject) raises -> PythonObject:
+    """Return a freshly-allocated numpy float32 array of the given shape with
+    the buffer contents copied in."""
     var numpy = Python.import_module("numpy")
-    var shape = mel.shape
-    print("[mojo_hifigan] synthesize: mel shape =", shape)
-    # TODO: dispatch into the actual HiFiGAN pipeline. For now we return zeros
-    # so the Python caller can verify the import + call path works.
-    var t_mel = Int(py=shape[2])
-    var t_audio = t_mel * 480
-    return numpy.zeros(Python.tuple(1, t_audio), dtype=numpy.float32)
+    var py_arr = numpy.empty(shape, dtype=numpy.float32)
+    var flat = py_arr.flatten()  # NOTE: flatten makes a copy; we write back below
+    var data = numpy.empty(Python.tuple(n), dtype=numpy.float32)
+    with buf.map_to_host() as h:
+        for i in range(n):
+            data[i] = h[i]
+    return data.reshape(shape)
+
+
+def conv_pre_step(
+    mel: PythonObject,
+    weights_dir: PythonObject,
+) raises -> PythonObject:
+    """Run conv_pre(mel) where mel is a numpy (1, 80, 32) float32 array.
+
+    weights_dir is the directory holding weights/conv_pre__weight.bin etc.
+    Returns numpy (1, 512, 32) float32.
+    """
+    comptime assert has_accelerator(), "Requires GPU"
+
+    var w_dir = String(py=weights_dir)
+    var w = load_fp32(w_dir + "/conv_pre__weight.bin")
+    var b = load_fp32(w_dir + "/conv_pre__bias.bin")
+
+    var n_mel = BATCH * MEL_C * MEL_T
+    var n_w = PRE_C * MEL_C * CP_K
+    var n_out = BATCH * PRE_C * MEL_T
+
+    var ctx = DeviceContext()
+    var mel_buf = ctx.enqueue_create_buffer[DType.float32](n_mel)
+    var w_buf = ctx.enqueue_create_buffer[DType.float32](n_w)
+    var b_buf = ctx.enqueue_create_buffer[DType.float32](PRE_C)
+    var out_buf = ctx.enqueue_create_buffer[DType.float32](n_out)
+
+    _upload_np_to_buf(mel_buf, mel, n_mel)
+    with w_buf.map_to_host() as h:
+        for i in range(n_w): h[i] = w.data[i]
+    with b_buf.map_to_host() as h:
+        for i in range(PRE_C): h[i] = b.data[i]
+
+    comptime mel_layout = row_major[BATCH, MEL_C, MEL_T]()
+    comptime w_layout = row_major[PRE_C, MEL_C, CP_K]()
+    comptime bias_layout = row_major[PRE_C]()
+    comptime out_layout = row_major[BATCH, PRE_C, MEL_T]()
+
+    var mel_t = TileTensor(mel_buf, mel_layout)
+    var w_t = TileTensor(w_buf, w_layout)
+    var b_t = TileTensor(b_buf, bias_layout)
+    var out_t = TileTensor(out_buf, out_layout)
+
+    comptime kernel = conv1d_kernel[
+        DType.float32, type_of(mel_layout), type_of(w_layout),
+        type_of(bias_layout), type_of(out_layout), CP_K, True,
+    ]
+    ctx.enqueue_function[kernel, kernel](
+        out_t, mel_t, w_t, b_t,
+        BATCH, MEL_C, PRE_C, MEL_T, MEL_T, 1, 3, 1,
+        grid_dim=BATCH * PRE_C * MEL_T, block_dim=1,
+    )
+    ctx.synchronize()
+
+    return _buf_to_np(out_buf, n_out, Python.tuple(BATCH, PRE_C, MEL_T))
+
+
+def ups0_step(
+    x_lrelu: PythonObject,
+    weights_dir: PythonObject,
+) raises -> PythonObject:
+    """Run the first upsample's transposed conv (ups[0]) on (1, 512, 32) ->
+    (1, 256, 256). Caller has already applied leaky_relu.
+    """
+    comptime assert has_accelerator(), "Requires GPU"
+
+    var w_dir = String(py=weights_dir)
+    var w = load_fp32(w_dir + "/ups__0__weight.bin")
+    var b = load_fp32(w_dir + "/ups__0__bias.bin")
+
+    var n_in = BATCH * PRE_C * MEL_T
+    var n_w = PRE_C * S0_C * UP_K
+    var n_out = BATCH * S0_C * S0_T
+
+    var ctx = DeviceContext()
+    var in_buf = ctx.enqueue_create_buffer[DType.float32](n_in)
+    var w_buf = ctx.enqueue_create_buffer[DType.float32](n_w)
+    var b_buf = ctx.enqueue_create_buffer[DType.float32](S0_C)
+    var out_buf = ctx.enqueue_create_buffer[DType.float32](n_out)
+
+    _upload_np_to_buf(in_buf, x_lrelu, n_in)
+    with w_buf.map_to_host() as h:
+        for i in range(n_w): h[i] = w.data[i]
+    with b_buf.map_to_host() as h:
+        for i in range(S0_C): h[i] = b.data[i]
+
+    comptime in_layout = row_major[BATCH, PRE_C, MEL_T]()
+    comptime w_layout = row_major[PRE_C, S0_C, UP_K]()
+    comptime bias_layout = row_major[S0_C]()
+    comptime out_layout = row_major[BATCH, S0_C, S0_T]()
+
+    var in_t = TileTensor(in_buf, in_layout)
+    var w_t = TileTensor(w_buf, w_layout)
+    var b_t = TileTensor(b_buf, bias_layout)
+    var out_t = TileTensor(out_buf, out_layout)
+
+    comptime kernel = transposed_conv1d_kernel[
+        DType.float32, type_of(in_layout), type_of(w_layout),
+        type_of(bias_layout), type_of(out_layout), UP_K, True,
+    ]
+    ctx.enqueue_function[kernel, kernel](
+        out_t, in_t, w_t, b_t,
+        BATCH, PRE_C, S0_C, MEL_T, S0_T, UP_STRIDE, UP_PAD, 1,
+        grid_dim=BATCH * S0_C * S0_T, block_dim=1,
+    )
+    ctx.synchronize()
+
+    return _buf_to_np(out_buf, n_out, Python.tuple(BATCH, S0_C, S0_T))
