@@ -139,6 +139,24 @@ def main():
         steps = []
         step_inputs = []   # (x, mask, mu, t, spks, cond) per step
         step_outputs = []  # estimator output per step (the dxdt before CFG split)
+        # Also capture sub-intermediates of the estimator (ConditionalDecoder)
+        # at step 0, so we have parity targets for each sub-layer.
+        sub_captured = {}
+
+        orig_time_emb = cfm.estimator.time_embeddings.forward
+        def hook_time_emb(t_in):
+            out = orig_time_emb(t_in)
+            sub_captured.setdefault("time_emb_out", out.detach())
+            return out
+        cfm.estimator.time_embeddings.forward = hook_time_emb
+
+        orig_time_mlp = cfm.estimator.time_mlp.forward
+        def hook_time_mlp(t_in):
+            out = orig_time_mlp(t_in)
+            sub_captured.setdefault("time_mlp_out", out.detach())
+            return out
+        cfm.estimator.time_mlp.forward = hook_time_mlp
+
         orig_forward = cfm.estimator.forward
         def estimator_forward(*fargs, **fkwargs):
             inputs = {}
@@ -164,6 +182,8 @@ def main():
         captured["cfm_step_inputs"] = step_inputs   # list of dicts
         captured["cfm_step_outputs"] = step_outputs # list of estimator outputs
         captured["cfm_mel_out"] = result.detach() if isinstance(result, torch.Tensor) else None
+        for k, v in sub_captured.items():
+            captured["estimator_" + k] = v
         return result
     cfm.solve_euler = hook_solve
 
