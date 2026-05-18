@@ -21,7 +21,7 @@ from std.testing import TestSuite, assert_almost_equal, assert_equal
 from std.gpu.host import DeviceContext, DeviceBuffer
 from layout import TileTensor, row_major
 
-from fixture import Tensor, load_fp32, save_fp32_1d
+from fixture import Tensor, load_fp32, save_fp32_1d, save_wav
 from conv import (
     conv1d_kernel_fast, transposed_conv1d_kernel_fast,
     leaky_relu_kernel, snake_kernel,
