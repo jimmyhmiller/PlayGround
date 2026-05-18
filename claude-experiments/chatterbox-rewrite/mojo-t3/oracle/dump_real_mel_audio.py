@@ -56,6 +56,10 @@ def write_tensor(path: Path, arr: np.ndarray) -> None:
 def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"[real] device={device}")
+    # Seed all RNGs so T3 sampling produces a reproducible token sequence.
+    torch.manual_seed(42)
+    if device == "cuda":
+        torch.cuda.manual_seed_all(42)
     model = ChatterboxTTS.from_pretrained(device=device)
     model.s3gen.eval()
     s3gen = model.s3gen
@@ -71,34 +75,13 @@ def main():
             _strip(child)
     _strip(s3gen.mel2wav)
 
-    # ---- Run T3 → S3Gen flow to produce a mel + final audio ----
-    with torch.inference_mode():
-        # Use the synthesis path that paper-audiobooks uses.
-        wav = model.generate(text=PROMPT, audio_prompt_path=str(REF_VOICE))
-        # `wav` is a torch tensor (1, T_audio) at S3GEN_SR (24000).
-        # We also want the mel that was produced internally. The simplest
-        # way is to monkey-patch s3gen.flow_inference to capture it.
-    print(f"[real] full inference wav shape: {tuple(wav.shape)}")
-
-    # Re-run with capture hooks for mel.
+    # Install hooks then do ONE seeded generate() so mel and audio match.
     captured = {}
-    orig_flow_inference = s3gen.flow_inference
-
-    @torch.inference_mode()
-    def capture_flow_inference(*args, **kwargs):
-        result = orig_flow_inference(*args, **kwargs)
-        # flow_inference returns the mel; the exact shape depends on the API.
-        captured["mel"] = result.detach() if isinstance(result, torch.Tensor) else result
-        return result
-
-    s3gen.flow_inference = capture_flow_inference
-
     orig_hift_inference = s3gen.mel2wav.inference
 
     @torch.inference_mode()
     def capture_hift(speech_feat, **kwargs):
         captured["mel"] = speech_feat.detach()
-        # also capture the source signal s
         f0 = s3gen.mel2wav.f0_predictor(speech_feat)
         s = s3gen.mel2wav.f0_upsamp(f0[:, None]).transpose(1, 2)
         s, _, _ = s3gen.mel2wav.m_source(s)
@@ -109,9 +92,12 @@ def main():
 
     s3gen.mel2wav.inference = capture_hift
 
+    torch.manual_seed(42)
+    if device == "cuda":
+        torch.cuda.manual_seed_all(42)
     with torch.inference_mode():
         wav2 = model.generate(text=PROMPT, audio_prompt_path=str(REF_VOICE))
-    print(f"[real] re-run wav: {tuple(wav2.shape)}")
+    print(f"[real] generated wav: {tuple(wav2.shape)}")
     print(f"[real] captured mel: {tuple(captured['mel'].shape)}")
     print(f"[real] captured s_stft_cat: {tuple(captured['s_stft_cat'].shape)}")
 

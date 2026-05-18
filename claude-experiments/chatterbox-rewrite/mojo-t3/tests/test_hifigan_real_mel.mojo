@@ -23,7 +23,8 @@ from layout import TileTensor, row_major
 
 from fixture import Tensor, load_fp32, save_fp32_1d
 from conv import (
-    conv1d_kernel, transposed_conv1d_kernel, leaky_relu_kernel, snake_kernel,
+    conv1d_kernel_fast, transposed_conv1d_kernel_fast,
+    leaky_relu_kernel, snake_kernel,
     reflection_pad_left1_kernel,
     magnitude_phase_split_kernel, magnitude_phase_to_complex_kernel,
 )
@@ -37,14 +38,14 @@ comptime SNAKE_BLOCK = 256
 
 # ---- Conv-pre stage (mel -> 512 channels) ----
 comptime MEL_C = 80
-comptime MEL_T = 248
+comptime MEL_T = 262
 comptime PRE_C = 512
-comptime PRE_T = 248
+comptime PRE_T = 262
 comptime CP_PRE_K = 7
 
 # ---- Stage 0: PRE (512 x 32) -> S0 (256 x 256) ----
 comptime S0_C = 256
-comptime S0_T = 1984
+comptime S0_T = 2096
 comptime UP0_K = 16
 comptime UP0_STRIDE = 8
 comptime UP0_PAD = 4
@@ -54,7 +55,7 @@ comptime S0_SRC_DOWN_PAD = 7
 
 # ---- Stage 1: S0 (256 x 256) -> S1 (128 x 1280) ----
 comptime S1_C = 128
-comptime S1_T = 9920
+comptime S1_T = 10480
 comptime UP1_K = 11
 comptime UP1_STRIDE = 5
 comptime UP1_PAD = 3
@@ -64,8 +65,8 @@ comptime S1_SRC_DOWN_PAD = 1
 
 # ---- Stage 2: S1 (128 x 1280) -> S2 (64 x 3841 after reflection_pad) ----
 comptime S2_C = 64
-comptime S2_PRE_PAD_T = 29760
-comptime S2_T = 29761
+comptime S2_PRE_PAD_T = 31440
+comptime S2_T = 31441
 comptime UP2_K = 7
 comptime UP2_STRIDE = 3
 comptime UP2_PAD = 2
@@ -81,11 +82,11 @@ comptime CP_POST_K = 7
 comptime N_FFT = 16
 comptime HOP = 4
 comptime N_FREQ = N_FFT // 2 + 1   # 9
-comptime T_AUDIO = 119040
+comptime T_AUDIO = 125760
 
 # ---- Source STFT input (B, 18, 3841) ----
 comptime S_STFT_C = 18
-comptime S_STFT_T = 29761
+comptime S_STFT_T = 31441
 
 
 def upload(buf: DeviceBuffer[DType.float32], data: List[Float32], n: Int) raises:
@@ -140,9 +141,10 @@ def _run_resblock_chain[
     var b_t = TileTensor(b_buf, b_layout)
     var alpha_t = TileTensor(alpha_buf, b_layout)
 
-    comptime conv_k = conv1d_kernel[
+    comptime CONV_BLOCK = 256
+    comptime conv_k = conv1d_kernel_fast[
         DType.float32, type_of(x_layout), type_of(w_layout),
-        type_of(b_layout), type_of(x_layout), K, True,
+        type_of(b_layout), type_of(x_layout), K, True, 256,
     ]
     comptime snake_k = snake_kernel[
         DType.float32, type_of(x_layout), type_of(b_layout), type_of(x_layout),
@@ -178,7 +180,7 @@ def _run_resblock_chain[
         ctx.enqueue_function[conv_k, conv_k](
             rb_xt2_t, rb_xt_t, w_t, b_t,
             BATCH, C, C, T, T, 1, pad1, dil,
-            grid_dim=BATCH * C * T, block_dim=1,
+            grid_dim=BATCH * C, block_dim=256,
         )
         upload(alpha_buf, a2.data, C)
         ctx.enqueue_function[snake_k, snake_k](
@@ -190,7 +192,7 @@ def _run_resblock_chain[
         ctx.enqueue_function[conv_k, conv_k](
             rb_xt2_t, rb_xt_t, w_t, b_t,
             BATCH, C, C, T, T, 1, pad2, 1,
-            grid_dim=BATCH * C * T, block_dim=1,
+            grid_dim=BATCH * C, block_dim=256,
         )
         ctx.enqueue_function[add_k, add_k](
             rb_next_flat, rb_x_flat, rb_xt2_flat, n,
@@ -456,21 +458,21 @@ def _run_hifigan_full(s_stft_path: String, exp_path: String,
     var cp_post_b_t = TileTensor(cp_post_b_buf, post_bias_layout)
 
     # ---- Kernel bindings ----
-    comptime cp_pre_k = conv1d_kernel[
+    comptime cp_pre_k = conv1d_kernel_fast[
         DType.float32, type_of(mel_layout), type_of(cp_pre_w_layout),
-        type_of(pre_bias_layout), type_of(pre_layout), CP_PRE_K, True,
+        type_of(pre_bias_layout), type_of(pre_layout), CP_PRE_K, True, 256,
     ]
     comptime lrelu_pre_k = leaky_relu_kernel[
         DType.float32, type_of(pre_lrelu_layout), type_of(pre_lrelu_layout),
         POINTWISE_BLOCK,
     ]
-    comptime up0_k = transposed_conv1d_kernel[
+    comptime up0_k = transposed_conv1d_kernel_fast[
         DType.float32, type_of(pre_layout), type_of(up0_w_layout),
-        type_of(s0_bias_layout), type_of(s0_layout), UP0_K, True,
+        type_of(s0_bias_layout), type_of(s0_layout), UP0_K, True, 256,
     ]
-    comptime s0_src_down_k = conv1d_kernel[
+    comptime s0_src_down_k = conv1d_kernel_fast[
         DType.float32, type_of(s_stft_layout), type_of(s0_src_down_w_layout),
-        type_of(s0_bias_layout), type_of(s0_layout), S0_SRC_DOWN_K, True,
+        type_of(s0_bias_layout), type_of(s0_layout), S0_SRC_DOWN_K, True, 256,
     ]
     comptime s0_add_k = add_kernel[
         DType.float32, type_of(s0_flat_layout), type_of(s0_flat_layout),
@@ -480,13 +482,13 @@ def _run_hifigan_full(s_stft_path: String, exp_path: String,
         DType.float32, type_of(s0_lrelu_layout), type_of(s0_lrelu_layout),
         POINTWISE_BLOCK,
     ]
-    comptime up1_k = transposed_conv1d_kernel[
+    comptime up1_k = transposed_conv1d_kernel_fast[
         DType.float32, type_of(s0_layout), type_of(up1_w_layout),
-        type_of(s1_bias_layout), type_of(s1_layout), UP1_K, True,
+        type_of(s1_bias_layout), type_of(s1_layout), UP1_K, True, 256,
     ]
-    comptime s1_src_down_k = conv1d_kernel[
+    comptime s1_src_down_k = conv1d_kernel_fast[
         DType.float32, type_of(s_stft_layout), type_of(s1_src_down_w_layout),
-        type_of(s1_bias_layout), type_of(s1_layout), S1_SRC_DOWN_K, True,
+        type_of(s1_bias_layout), type_of(s1_layout), S1_SRC_DOWN_K, True, 256,
     ]
     comptime s1_add_k = add_kernel[
         DType.float32, type_of(s1_flat_layout), type_of(s1_flat_layout),
@@ -496,16 +498,16 @@ def _run_hifigan_full(s_stft_path: String, exp_path: String,
         DType.float32, type_of(s1_lrelu_layout), type_of(s1_lrelu_layout),
         POINTWISE_BLOCK,
     ]
-    comptime up2_k = transposed_conv1d_kernel[
+    comptime up2_k = transposed_conv1d_kernel_fast[
         DType.float32, type_of(s1_layout), type_of(up2_w_layout),
-        type_of(s2_bias_layout), type_of(s2_pre_pad_layout), UP2_K, True,
+        type_of(s2_bias_layout), type_of(s2_pre_pad_layout), UP2_K, True, 256,
     ]
     comptime refpad_k = reflection_pad_left1_kernel[
         DType.float32, type_of(s2_pre_pad_layout), type_of(s2_layout),
     ]
-    comptime s2_src_down_k = conv1d_kernel[
+    comptime s2_src_down_k = conv1d_kernel_fast[
         DType.float32, type_of(s_stft_layout), type_of(s2_src_down_w_layout),
-        type_of(s2_bias_layout), type_of(s2_layout), S2_SRC_DOWN_K, True,
+        type_of(s2_bias_layout), type_of(s2_layout), S2_SRC_DOWN_K, True, 256,
     ]
     comptime s2_add_k = add_kernel[
         DType.float32, type_of(s2_flat_layout), type_of(s2_flat_layout),
@@ -515,9 +517,9 @@ def _run_hifigan_full(s_stft_path: String, exp_path: String,
         DType.float32, type_of(s2_lrelu_layout), type_of(s2_lrelu_layout),
         POINTWISE_BLOCK,
     ]
-    comptime cp_post_k = conv1d_kernel[
+    comptime cp_post_k = conv1d_kernel_fast[
         DType.float32, type_of(s2_layout), type_of(cp_post_w_layout),
-        type_of(post_bias_layout), type_of(post_layout), CP_POST_K, True,
+        type_of(post_bias_layout), type_of(post_layout), CP_POST_K, True, 256,
     ]
     comptime split_k = magnitude_phase_split_kernel[
         DType.float32, type_of(post_layout), type_of(spec_layout),
@@ -540,7 +542,7 @@ def _run_hifigan_full(s_stft_path: String, exp_path: String,
     ctx.enqueue_function[cp_pre_k, cp_pre_k](
         pre_t, mel_t, cp_pre_w_t, cp_pre_b_t,
         BATCH, MEL_C, PRE_C, MEL_T, PRE_T, 1, 3, 1,
-        grid_dim=BATCH * PRE_C * PRE_T, block_dim=1,
+        grid_dim=BATCH * PRE_C, block_dim=256,
     )
 
     # ===== Stage 0 =====
@@ -553,14 +555,14 @@ def _run_hifigan_full(s_stft_path: String, exp_path: String,
     ctx.enqueue_function[up0_k, up0_k](
         s0_up_t, pre_lrelu_t, up0_w_t, up0_b_t,
         BATCH, PRE_C, S0_C, PRE_T, S0_T, UP0_STRIDE, UP0_PAD, 1,
-        grid_dim=BATCH * S0_C * S0_T, block_dim=1,
+        grid_dim=BATCH * S0_C, block_dim=256,
     )
     # source_downs[0] -> source_resblocks[0]
     ctx.enqueue_function[s0_src_down_k, s0_src_down_k](
         s0_si_after_down_t, s_stft_t, s0_src_down_w_t, s0_src_down_b_t,
         BATCH, S_STFT_C, S0_C, S_STFT_T, S0_T,
         S0_SRC_DOWN_STRIDE, S0_SRC_DOWN_PAD, 1,
-        grid_dim=BATCH * S0_C * S0_T, block_dim=1,
+        grid_dim=BATCH * S0_C, block_dim=256,
     )
     copy_device_buf(ctx, s0_si_after_down_buf, s0_rb_x_buf, n_s0)
     _run_resblock_chain[S0_C, S0_T, 7, SNAKE_BLOCK](
@@ -613,13 +615,13 @@ def _run_hifigan_full(s_stft_path: String, exp_path: String,
     ctx.enqueue_function[up1_k, up1_k](
         s1_up_t, s0_lrelu_t, up1_w_t, up1_b_t,
         BATCH, S0_C, S1_C, S0_T, S1_T, UP1_STRIDE, UP1_PAD, 1,
-        grid_dim=BATCH * S1_C * S1_T, block_dim=1,
+        grid_dim=BATCH * S1_C, block_dim=256,
     )
     ctx.enqueue_function[s1_src_down_k, s1_src_down_k](
         s1_si_after_down_t, s_stft_t, s1_src_down_w_t, s1_src_down_b_t,
         BATCH, S_STFT_C, S1_C, S_STFT_T, S1_T,
         S1_SRC_DOWN_STRIDE, S1_SRC_DOWN_PAD, 1,
-        grid_dim=BATCH * S1_C * S1_T, block_dim=1,
+        grid_dim=BATCH * S1_C, block_dim=256,
     )
     copy_device_buf(ctx, s1_si_after_down_buf, s1_rb_x_buf, n_s1)
     _run_resblock_chain[S1_C, S1_T, 7, SNAKE_BLOCK](
@@ -668,7 +670,7 @@ def _run_hifigan_full(s_stft_path: String, exp_path: String,
     ctx.enqueue_function[up2_k, up2_k](
         s2_up_pre_pad_t, s1_lrelu_t, up2_w_t, up2_b_t,
         BATCH, S1_C, S2_C, S1_T, S2_PRE_PAD_T, UP2_STRIDE, UP2_PAD, 1,
-        grid_dim=BATCH * S2_C * S2_PRE_PAD_T, block_dim=1,
+        grid_dim=BATCH * S2_C, block_dim=256,
     )
     ctx.enqueue_function[refpad_k, refpad_k](
         s2_padded_t, s2_up_pre_pad_t, BATCH, S2_C, S2_PRE_PAD_T,
@@ -678,7 +680,7 @@ def _run_hifigan_full(s_stft_path: String, exp_path: String,
         s2_si_after_down_t, s_stft_t, s2_src_down_w_t, s2_src_down_b_t,
         BATCH, S_STFT_C, S2_C, S_STFT_T, S2_T,
         S2_SRC_DOWN_STRIDE, S2_SRC_DOWN_PAD, 1,
-        grid_dim=BATCH * S2_C * S2_T, block_dim=1,
+        grid_dim=BATCH * S2_C, block_dim=256,
     )
     copy_device_buf(ctx, s2_si_after_down_buf, s2_rb_x_buf, n_s2)
     _run_resblock_chain[S2_C, S2_T, 11, SNAKE_BLOCK](
@@ -729,7 +731,7 @@ def _run_hifigan_full(s_stft_path: String, exp_path: String,
     ctx.enqueue_function[cp_post_k, cp_post_k](
         post_out_t, s2_lrelu_t, cp_post_w_t, cp_post_b_t,
         BATCH, S2_C, POST_C, S2_T, S2_T, 1, 3, 1,
-        grid_dim=BATCH * POST_C * S2_T, block_dim=1,
+        grid_dim=BATCH * POST_C, block_dim=256,
     )
     # magnitude/phase split
     ctx.enqueue_function[split_k, split_k](

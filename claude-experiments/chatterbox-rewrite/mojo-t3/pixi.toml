@@ -33,6 +33,9 @@ test-forward-decode = { cmd = "mojo run -I src tests/test_forward_decode.mojo", 
 test-heads = { cmd = "mojo run -I src tests/test_heads.mojo", depends-on = ["dump-heads"] }
 test-generate = { cmd = "mojo run -I src tests/test_generate.mojo", depends-on = ["dump-generate"] }
 test-conv = { cmd = "mojo run -I src tests/test_conv.mojo", depends-on = ["dump-conv"] }
+test-conv-fast = { cmd = "mojo run -I src tests/test_conv_fast.mojo", depends-on = ["dump-conv"] }
+test-conv-fast-real = { cmd = "mojo run -I src tests/test_conv_fast_real.mojo" }
+test-tconv-fast-real = { cmd = "mojo run -I src tests/test_tconv_fast_real.mojo" }
 test-stft = { cmd = "mojo run -I src tests/test_stft.mojo", depends-on = ["dump-stft"] }
 test-hifigan-conv-pre = { cmd = "mojo run -I src tests/test_hifigan_conv_pre.mojo", depends-on = ["dump-hifigan"] }
 test-hifigan-resblock0 = { cmd = "mojo run -I src tests/test_hifigan_resblock0.mojo", depends-on = ["dump-hifigan"] }
