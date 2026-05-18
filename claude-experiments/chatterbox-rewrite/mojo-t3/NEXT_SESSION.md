@@ -1,5 +1,26 @@
 # Next Session — Pickup Points
 
+## Status as of 2026-05-18 (post-session)
+
+**Working in Mojo with parity on real Chatterbox weights:**
+- T3 backbone (multi-step argmax generation, bit-exact vs HF)
+- Full HiFiGAN vocoder forward — mel → audio matches upstream on real Chatterbox mel (max abs 6.7e-2 with real source, 2.7e-5 with s=zeros)
+- CFM Euler ODE solver (max abs 2.9e-6 over 10 steps using upstream's per-step estimator outputs)
+- S3Gen linear layers: spk_embed_affine, input_embedding, encoder_proj
+- SinusoidalPosEmb + TimestepEmbedding (CFM time conditioning)
+- **Python↔Mojo bridge**: `mojo_hifigan.so` exposes `conv_pre_step`/`ups0_step` callable from Python with full parity (1.1e-6 / 8.3e-7) — proves the integration path works.
+
+**Most concrete next chunk (probably 1-2 sittings):**
+- Expand `src/mojo_hifigan.mojo` from 2-stage demo to full `synthesize(mel, s_stft) -> audio`. The Mojo orchestration already exists in `tests/test_hifigan_real_mel.mojo`; just need to refactor it from a test into the extension's function body. No new kernels needed.
+- Once `synthesize()` works end-to-end, plumb into paper-audiobooks: `s3gen.mel2wav.inference = mojo_hifigan.synthesize` replaces the buggy MIOpen-Winograd torch path with the bit-tolerant Mojo path.
+
+**Remaining for full "torch-free Chatterbox":**
+- ConditionalDecoder (CFM estimator network): 910 weights. Will take multiple sittings. Each ResnetBlock1D + BasicTransformerBlock × N. We have time embedding done; need GroupNorm/LayerNorm/Mish kernel, BasicTransformerBlock (multi-head attention + AdaLN + FFN), and CausalConv1d wrapper.
+- UpsampleConformerEncoder: 206 weights, 6+4 Conformer layers. Need: rel-pos attention (rel_pos_espnet variant), conv2d subsample, positional FFN with swish, Upsample1D (interp + conv1d).
+- CAMPPlus speaker encoder (xvector): TDNN + BN + statistical pooling. 428 LOC upstream.
+- Mel extractor for reference audio (STFT + mel-filterbank matmul).
+- End-to-end driver composing T3 + S3Gen + HiFiGAN, with full Mojo voice-cloning ref encoder.
+
 ## Goal restated
 
 A full Mojo Chatterbox clone that produces audio matching upstream Chatterbox using a cloned voice, drop-in for the paper-audiobooks pipeline. **Currently incomplete.**
