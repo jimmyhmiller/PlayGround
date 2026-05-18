@@ -314,8 +314,10 @@ def _run_resblock_chain[K: Int](
         DType.float32, type_of(x_layout), type_of(w_layout),
         type_of(b_layout), type_of(x_layout), K, True,
     ]
+    comptime SNAKE_BLOCK = 256
     comptime snake_k = snake_kernel[
         DType.float32, type_of(x_layout), type_of(alpha_layout), type_of(x_layout),
+        SNAKE_BLOCK,
     ]
     comptime add_k = add_kernel[
         DType.float32, type_of(flat_layout), type_of(flat_layout),
@@ -343,7 +345,7 @@ def _run_resblock_chain[K: Int](
         upload(alpha_buf, a1.data, C)
         ctx.enqueue_function[snake_k, snake_k](
             rb_xt_t, rb_x_t, alpha_t, BATCH, C, T,
-            grid_dim=BATCH * C, block_dim=T,
+            grid_dim=BATCH * C, block_dim=SNAKE_BLOCK,
         )
         # xt2 = conv1d(xt, w1, b1, dilation=dil, padding=pad1)
         upload(w_buf, w1.data, n_w)
@@ -357,7 +359,7 @@ def _run_resblock_chain[K: Int](
         upload(alpha_buf, a2.data, C)
         ctx.enqueue_function[snake_k, snake_k](
             rb_xt_t, rb_xt2_t, alpha_t, BATCH, C, T,
-            grid_dim=BATCH * C, block_dim=T,
+            grid_dim=BATCH * C, block_dim=SNAKE_BLOCK,
         )
         # xt2 = conv1d(xt, w2, b2, dilation=1, padding=pad2)
         upload(w_buf, w2.data, n_w)

@@ -81,8 +81,10 @@ def test_resblock0_fp32() raises:
         DType.float32, type_of(x_layout), type_of(w_layout),
         type_of(bias_layout), type_of(x_layout), K, True,
     ]
+    comptime SNAKE_BLOCK = 256
     comptime snake_k = snake_kernel[
         DType.float32, type_of(x_layout), type_of(alpha_layout), type_of(x_layout),
+        SNAKE_BLOCK,
     ]
     comptime add_k = add_kernel[
         DType.float32, type_of(flat_layout), type_of(flat_layout),
@@ -112,7 +114,7 @@ def test_resblock0_fp32() raises:
         upload(alpha_buf, a1.data, C)
         ctx.enqueue_function[snake_k, snake_k](
             xt_t, x_t, alpha_t, BATCH, C, T,
-            grid_dim=BATCH * C, block_dim=T,
+            grid_dim=BATCH * C, block_dim=SNAKE_BLOCK,
         )
         # xt = conv1d(xt, w1, b1, dilation=dil, padding=pad1)
         upload(w_buf, w1.data, n_w)
@@ -126,7 +128,7 @@ def test_resblock0_fp32() raises:
         upload(alpha_buf, a2.data, C)
         ctx.enqueue_function[snake_k, snake_k](
             xt_t, xt2_t, alpha_t, BATCH, C, T,
-            grid_dim=BATCH * C, block_dim=T,
+            grid_dim=BATCH * C, block_dim=SNAKE_BLOCK,
         )
         # xt2 = conv1d(xt, w2, b2, dilation=1, padding=pad2)
         upload(w_buf, w2.data, n_w)

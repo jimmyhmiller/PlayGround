@@ -152,6 +152,7 @@ def snake_kernel[
     InLayout: TensorLayout,
     AlphaLayout: TensorLayout,
     OutLayout: TensorLayout,
+    BLOCK: Int,
 ](
     output: TileTensor[dtype, OutLayout, MutAnyOrigin],   # (B, C, T)
     inp: TileTensor[dtype, InLayout, MutAnyOrigin],        # (B, C, T)
@@ -163,28 +164,30 @@ def snake_kernel[
 
     Used by HiFiGAN ResBlocks. alpha is per-channel, learned.
 
-    Launch: grid = B * C, block_dim = length (one thread per time step).
-    Realistically we'd want length-parallel within a block; we keep
-    block_dim = length for simplicity (sizes are modest).
+    Launch: grid = B * C, block_dim = BLOCK. Each thread processes
+    `length / BLOCK` (rounded up) time steps via strided iteration so we
+    can handle T > 1024 (the AMD GPU block_dim limit).
     """
     comptime assert inp.flat_rank == 3
     comptime assert alpha.flat_rank == 1
     comptime assert output.flat_rank == 3
 
     var bid = block_idx.x
-    var t = thread_idx.x
+    var tid = thread_idx.x
 
     var c = bid % channels
     var b = bid // channels
 
-    if t >= length:
-        return
-
-    var x_val = rebind[Scalar[dtype]](inp[b, c, t]).cast[DType.float32]()
     var a = rebind[Scalar[dtype]](alpha[c]).cast[DType.float32]()
-    var s = sin(x_val * a)
-    var y = x_val + (1.0 / (a + 1.0e-9)) * s * s
-    output[b, c, t] = rebind[output.ElementType](y.cast[dtype]())
+    var inv_a = 1.0 / (a + 1.0e-9)
+
+    var t = tid
+    while t < length:
+        var x_val = rebind[Scalar[dtype]](inp[b, c, t]).cast[DType.float32]()
+        var s = sin(x_val * a)
+        var y = x_val + inv_a * s * s
+        output[b, c, t] = rebind[output.ElementType](y.cast[dtype]())
+        t += BLOCK
 
 
 def magnitude_phase_split_kernel[
@@ -261,6 +264,38 @@ def magnitude_phase_to_complex_kernel[
     var im = m * sin(p)
     real_out[b, k, t] = rebind[real_out.ElementType](re.cast[dtype]())
     imag_out[b, k, t] = rebind[imag_out.ElementType](im.cast[dtype]())
+
+
+def reflection_pad_left1_kernel[
+    dtype: DType,
+    InLayout: TensorLayout,
+    OutLayout: TensorLayout,
+](
+    output: TileTensor[dtype, OutLayout, MutAnyOrigin],   # (B, C, T_in + 1)
+    inp: TileTensor[dtype, InLayout, MutAnyOrigin],        # (B, C, T_in)
+    batch: Int, channels: Int, t_in: Int,
+):
+    """ReflectionPad1d((1, 0)): pad 1 on the left via reflection.
+    out[b,c,0]      = in[b,c,1]
+    out[b,c,1..]    = in[b,c,0..T-1]
+
+    Launch: grid = B * C * (T_in + 1), block_dim = 1.
+    """
+    comptime assert inp.flat_rank == 3
+    comptime assert output.flat_rank == 3
+
+    var idx = block_idx.x
+    var t_out = idx % (t_in + 1)
+    var c = (idx // (t_in + 1)) % channels
+    var b = idx // ((t_in + 1) * channels)
+
+    var src_t: Int
+    if t_out == 0:
+        src_t = 1
+    else:
+        src_t = t_out - 1
+    var v = rebind[Scalar[dtype]](inp[b, c, src_t])
+    output[b, c, t_out] = rebind[output.ElementType](v)
 
 
 def leaky_relu_kernel[
