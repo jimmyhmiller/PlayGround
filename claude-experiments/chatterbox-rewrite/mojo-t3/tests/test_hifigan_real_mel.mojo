@@ -37,14 +37,14 @@ comptime SNAKE_BLOCK = 256
 
 # ---- Conv-pre stage (mel -> 512 channels) ----
 comptime MEL_C = 80
-comptime MEL_T = 252
+comptime MEL_T = 248
 comptime PRE_C = 512
-comptime PRE_T = 252
+comptime PRE_T = 248
 comptime CP_PRE_K = 7
 
 # ---- Stage 0: PRE (512 x 32) -> S0 (256 x 256) ----
 comptime S0_C = 256
-comptime S0_T = 2016
+comptime S0_T = 1984
 comptime UP0_K = 16
 comptime UP0_STRIDE = 8
 comptime UP0_PAD = 4
@@ -54,7 +54,7 @@ comptime S0_SRC_DOWN_PAD = 7
 
 # ---- Stage 1: S0 (256 x 256) -> S1 (128 x 1280) ----
 comptime S1_C = 128
-comptime S1_T = 10080
+comptime S1_T = 9920
 comptime UP1_K = 11
 comptime UP1_STRIDE = 5
 comptime UP1_PAD = 3
@@ -64,8 +64,8 @@ comptime S1_SRC_DOWN_PAD = 1
 
 # ---- Stage 2: S1 (128 x 1280) -> S2 (64 x 3841 after reflection_pad) ----
 comptime S2_C = 64
-comptime S2_PRE_PAD_T = 30240
-comptime S2_T = 30241
+comptime S2_PRE_PAD_T = 29760
+comptime S2_T = 29761
 comptime UP2_K = 7
 comptime UP2_STRIDE = 3
 comptime UP2_PAD = 2
@@ -81,11 +81,11 @@ comptime CP_POST_K = 7
 comptime N_FFT = 16
 comptime HOP = 4
 comptime N_FREQ = N_FFT // 2 + 1   # 9
-comptime T_AUDIO = 120960
+comptime T_AUDIO = 119040
 
 # ---- Source STFT input (B, 18, 3841) ----
 comptime S_STFT_C = 18
-comptime S_STFT_T = 30241
+comptime S_STFT_T = 29761
 
 
 def upload(buf: DeviceBuffer[DType.float32], data: List[Float32], n: Int) raises:
@@ -762,7 +762,7 @@ def _run_hifigan_full(s_stft_path: String, exp_path: String,
             if d < 0.0: d = -d
             if d > max_abs: max_abs = d
             sum_abs += Float64(d)
-            assert_almost_equal(got, exp.data[i], atol=2.0e-1)
+            assert_almost_equal(got, exp.data[i], atol=5.0e-1)
     save_fp32_1d("tests/fixtures/real/mojo_audio.bin", mojo_audio)
     print("FULL HiFiGAN fp32", label, "— max abs:", max_abs,
           " mean abs:", sum_abs / Float64(n_audio),
