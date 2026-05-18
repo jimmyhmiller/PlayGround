@@ -63,11 +63,15 @@ struct Resnet1D(Copyable, Movable):
 
 @fieldwise_init
 struct CFMAttention(Copyable, Movable):
-    """Self-attention with Q/K/V dim = 512 and output dim = 256."""
-    var to_q: Conv1d   # Stored as Conv1d 1x1 OR Linear — upstream uses Linear (no bias on qkv)
-    var to_k: Conv1d
-    var to_v: Conv1d
-    var to_out: Conv1d   # 256, 512
+    """Self-attention with Q/K/V dim = 512 and output dim = 256.
+
+    Stored as Linear (matches upstream `nn.Linear` exactly — weight (out, in),
+    bias (out,)). Q/K/V are bias-less; to_out has bias.
+    """
+    var to_q: Linear
+    var to_k: Linear
+    var to_v: Linear
+    var to_out: Linear
     var n_heads: Int
     var head_dim: Int
 
@@ -382,39 +386,19 @@ def cfm_self_attention_forward(
     mut out_buf: DeviceBuffer[DType.float32],   # (B, T, D)
     b: Int, t: Int,
 ) raises:
-    """Standard scaled-dot-product self-attention with inner dim H*Dh.
-
-    Q/K/V projections are stored as Conv1d-shaped buffers in the struct but
-    are actually plain Linear layers in upstream — we just call linear_forward
-    on them as standard matrix mults. The to_out projects inner_dim → D.
-    """
+    """Standard scaled-dot-product self-attention with inner dim H*Dh."""
     var H = module.n_heads
     var Dh = module.head_dim
     var inner = H * Dh
-    var D = inner   # In our weights D == inner = 512.
+    var D = module.to_q.in_features
 
-    # Q/K/V — upstream stores as Linear (no kernel dim). We loaded as Conv1d(k=1)
-    # — call linear_forward with the underlying Linear field embedded in Conv1d.
-    # Each Conv1d in CFMAttention is constructed as 1x1 conv (k=1, stride=1, pad=0),
-    # so it's effectively a Linear. Treat as such by reshaping (B*T, D) and using
-    # the conv1d via linear semantics. Simpler: emulate Linear via 1×1 conv.
+    # Q/K/V — plain Linear (B*T, D) → (B*T, inner).
     var q = ctx.enqueue_create_buffer[DType.float32](b * t * inner)
     var k = ctx.enqueue_create_buffer[DType.float32](b * t * inner)
     var v = ctx.enqueue_create_buffer[DType.float32](b * t * inner)
-
-    # Run as conv1d operating on (B, D, T). Need to transpose first.
-    var x_bct = ctx.enqueue_create_buffer[DType.float32](b * D * t)
-    transpose_btc_bct(ctx, x_buf, x_bct, b, t, D)
-
-    var q_bct = ctx.enqueue_create_buffer[DType.float32](b * inner * t)
-    var k_bct = ctx.enqueue_create_buffer[DType.float32](b * inner * t)
-    var v_bct = ctx.enqueue_create_buffer[DType.float32](b * inner * t)
-    conv1d_forward(ctx, module.to_q, x_bct, q_bct, b, t, t)
-    conv1d_forward(ctx, module.to_k, x_bct, k_bct, b, t, t)
-    conv1d_forward(ctx, module.to_v, x_bct, v_bct, b, t, t)
-    transpose_bct_btc(ctx, q_bct, q, b, inner, t)
-    transpose_bct_btc(ctx, k_bct, k, b, inner, t)
-    transpose_bct_btc(ctx, v_bct, v, b, inner, t)
+    linear_forward(ctx, module.to_q, x_buf, q, b * t)
+    linear_forward(ctx, module.to_k, x_buf, k, b * t)
+    linear_forward(ctx, module.to_v, x_buf, v, b * t)
 
     # Reshape (B, T, H*Dh) → (B, H, T, Dh).
     var q_perm = ctx.enqueue_create_buffer[DType.float32](b * H * t * Dh)
@@ -439,13 +423,7 @@ def cfm_self_attention_forward(
     # Reshape (B, H, T, Dh) → (B, T, D) and out_proj.
     var attn_flat = ctx.enqueue_create_buffer[DType.float32](b * t * inner)
     reshape_bhsd_to_bsd(ctx, attn_perm, attn_flat, b, H, t, Dh)
-
-    # to_out is a 1x1 conv too — run as conv on transposed.
-    var attn_bct = ctx.enqueue_create_buffer[DType.float32](b * inner * t)
-    transpose_btc_bct(ctx, attn_flat, attn_bct, b, t, inner)
-    var out_bct = ctx.enqueue_create_buffer[DType.float32](b * D * t)
-    conv1d_forward(ctx, module.to_out, attn_bct, out_bct, b, t, t)
-    transpose_bct_btc(ctx, out_bct, out_buf, b, D, t)
+    linear_forward(ctx, module.to_out, attn_flat, out_buf, b * t)
 
 
 def cfm_ff_forward(

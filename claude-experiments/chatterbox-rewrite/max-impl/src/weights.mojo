@@ -780,13 +780,13 @@ def _load_cfm_attention(
     mut ctx: DeviceContext, base: String,
     d_model: Int, n_heads: Int, head_dim: Int,
 ) raises -> CFMAttention:
-    """Attention with Q/K/V dim=512, output dim=256. Stored as Conv1d-like
-    Linear (`.weight` shape (out, in), no kernel dim).
+    """Attention with Q/K/V dim=512, output dim=256, stored as plain Linear
+    layers (matches upstream `nn.Linear`).
 
-    On disk per the dump:
-      attn1.to_q.weight (512, 256)    — no bias
-      attn1.to_k.weight (512, 256)    — no bias
-      attn1.to_v.weight (512, 256)    — no bias
+    Shapes:
+      attn1.to_q.weight (512, 256)      — no bias
+      attn1.to_k.weight (512, 256)      — no bias
+      attn1.to_v.weight (512, 256)      — no bias
       attn1.to_out.0.weight (256, 512), .bias (256,)
     """
     var inner = n_heads * head_dim   # 512
@@ -797,12 +797,12 @@ def _load_cfm_attention(
     var ob = upload_fp32(ctx, base + "/to_out/0/bias.bin")
 
     var zero = _zero_buf(ctx, inner)
-    var to_q = Conv1d(qw^, zero^, d_model, inner, 1, 1, 0, 1, 1, False)
+    var to_q = Linear(qw^, zero^, d_model, inner, False)
     var zero_k = _zero_buf(ctx, inner)
-    var to_k = Conv1d(kw^, zero_k^, d_model, inner, 1, 1, 0, 1, 1, False)
+    var to_k = Linear(kw^, zero_k^, d_model, inner, False)
     var zero_v = _zero_buf(ctx, inner)
-    var to_v = Conv1d(vw^, zero_v^, d_model, inner, 1, 1, 0, 1, 1, False)
-    var to_out = Conv1d(ow^, ob^, inner, d_model, 1, 1, 0, 1, 1, True)
+    var to_v = Linear(vw^, zero_v^, d_model, inner, False)
+    var to_out = Linear(ow^, ob^, inner, d_model, True)
     return CFMAttention(to_q^, to_k^, to_v^, to_out^, n_heads, head_dim)
 
 
