@@ -1,0 +1,163 @@
+// Distributed Game of Life as a pure ai-lang program.
+//
+// Ingest + run:
+//   ai-lang add examples/gol.ail
+//   ai-lang run main --nodes=49 -- 200 250
+//
+// - `--nodes=49` spawns 49 worker processes (one per cell of the 7x7
+//   toroidal grid). Each cell's next state is computed by exactly one
+//   `at()` call to its dedicated worker.
+// - Two positional args after `--`: max generations and ms per frame.
+
+struct Node { a: Int, b: Int, c: Int, d: Int, port: Int }
+
+enum Failure {
+    Unreachable(Node),
+    Crashed(Node),
+    CodeMissing(Node),
+    Cancelled(Node),
+}
+
+enum Result<T, E> { Ok(T), Err(E) }
+
+def make_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
+    Node { a: a, b: b, c: c, d: d, port: port }
+
+// Pool := the list of workers exposed by the runner.
+def build_pool() -> List<Node> = list_reverse(build_pool_acc(0, Nil))
+
+def build_pool_acc(i: Int, acc: List<Node>) -> List<Node> =
+    if i >= node_count() { acc } else {
+        let p = get_node_port(i);
+        build_pool_acc(i + 1, Cons(ListCell {
+            head: make_node(127, 0, 0, 1, p),
+            tail: acc,
+        }))
+    }
+
+// 7x7 grid packed into bits 0..49 of an Int. Toroidal wrap.
+
+def wrap(a: Int, m: Int) -> Int = {
+    let r = a - (a / m) * m;
+    if r < 0 { r + m } else { r }
+}
+
+def bit_at(packed: Int, i: Int) -> Int = {
+    let p = pow(2, i);
+    let shifted = packed / p;
+    shifted - (shifted / 2) * 2
+}
+
+def set_bit_one(packed: Int, i: Int) -> Int = {
+    let cur = bit_at(packed, i);
+    if cur == 1 { packed } else { packed + pow(2, i) }
+}
+
+def cell_at(packed: Int, x: Int, y: Int) -> Int =
+    bit_at(packed, wrap(y, 7) * 7 + wrap(x, 7))
+
+def count_neighbours(packed: Int, x: Int, y: Int) -> Int =
+    cell_at(packed, x - 1, y - 1) + cell_at(packed, x, y - 1) +
+    cell_at(packed, x + 1, y - 1) +
+    cell_at(packed, x - 1, y) + cell_at(packed, x + 1, y) +
+    cell_at(packed, x - 1, y + 1) + cell_at(packed, x, y + 1) +
+    cell_at(packed, x + 1, y + 1)
+
+// The kernel — runs on the worker for cell (x, y).
+def compute_cell(packed: Int, x: Int, y: Int) -> Int = {
+    let alive = cell_at(packed, x, y);
+    let n = count_neighbours(packed, x, y);
+    if alive == 1 {
+        if n == 2 { 1 } else { if n == 3 { 1 } else { 0 } }
+    } else {
+        if n == 3 { 1 } else { 0 }
+    }
+}
+
+def remote_cell(pool: List<Node>, packed: Int, x: Int, y: Int) -> Int = {
+    let i = y * 7 + x;
+    match list_at(pool, i) {
+        Some(node) => match at(node, || compute_cell(packed, x, y)) {
+            Ok(v) => v,
+            Err(_) => 0,
+        },
+        None => 0,
+    }
+}
+
+def step_grid(pool: List<Node>, packed: Int) -> Int =
+    step_grid_acc(pool, packed, 0, 0)
+
+def step_grid_acc(pool: List<Node>, src: Int, i: Int, acc: Int) -> Int =
+    if i >= 49 { acc } else {
+        let x = i - (i / 7) * 7;
+        let y = i / 7;
+        let bit = remote_cell(pool, src, x, y);
+        let next = if bit == 1 { set_bit_one(acc, i) } else { acc };
+        step_grid_acc(pool, src, i + 1, next)
+    }
+
+// Initial glider — south-east heading, top-left of grid.
+def initial_glider() -> Int =
+    pow(2, 1) + pow(2, 9) + pow(2, 14) + pow(2, 15) + pow(2, 16)
+
+// ---- Rendering, pure ai-lang ----
+
+def render_row(packed: Int, y: Int) -> String =
+    render_row_acc(packed, y, 0, "  | ")
+
+def render_row_acc(packed: Int, y: Int, x: Int, acc: String) -> String =
+    if x >= 7 {
+        string_concat(acc, "|")
+    } else {
+        let cell = cell_at(packed, x, y);
+        let glyph = if cell == 1 { "\e[32m█\e[0m " } else { "· " };
+        render_row_acc(packed, y, x + 1, string_concat(acc, glyph))
+    }
+
+def print_grid(packed: Int) -> Int = print_grid_acc(packed, 0)
+
+def print_grid_acc(packed: Int, y: Int) -> Int =
+    if y >= 7 { 0 } else {
+        let _r = println(render_row(packed, y));
+        print_grid_acc(packed, y + 1)
+    }
+
+def render_frame(packed: Int, generation: Int, total: Int) -> Int = {
+    // Clear screen + home cursor.
+    let _a = print_string("\e[2J\e[H");
+    let _b = println("  Distributed Game of Life — pure ai-lang");
+    let _c = println(string_concat(
+        "  Generation ",
+        string_concat(int_to_string(generation),
+            string_concat(" / ", int_to_string(total)))));
+    let _d = println(string_concat(
+        "  ", string_concat(int_to_string(node_count()),
+            " worker processes, one per cell, persistent TCP")));
+    let _e = println("");
+    let _f = println("  +---------------+");
+    let _g = print_grid(packed);
+    let _h = println("  +---------------+");
+    0
+}
+
+// ---- main ----
+
+def main() -> Int = {
+    let total_gens = if arg_count() > 0 { parse_int_or(get_arg(0), 200) } else { 200 };
+    let delay = if arg_count() > 1 { parse_int_or(get_arg(1), 250) } else { 250 };
+    if node_count() == 0 {
+        let _m = println("no workers. run with `--nodes=49` to spawn 49 server processes.");
+        0
+    } else {
+        let pool = build_pool();
+        animate(pool, initial_glider(), 0, total_gens, delay)
+    }
+}
+
+def animate(pool: List<Node>, grid: Int, generation: Int, max_gen: Int, delay: Int) -> Int =
+    if generation > max_gen { grid } else {
+        let _a = render_frame(grid, generation, max_gen);
+        let _b = sleep_ms(delay);
+        animate(pool, step_grid(pool, grid), generation + 1, max_gen, delay)
+    }
