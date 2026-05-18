@@ -283,3 +283,50 @@ def conformer_layer_forward(
     var ln_out = ctx.enqueue_create_buffer[DType.float32](n)
     layer_norm_forward(ctx, module.final_ln, x_buf, ln_out, b * s)
     ctx.enqueue_copy(x_buf, ln_out)
+
+
+# ============================================================================
+# Real upstream s3gen flow encoder structures.
+#
+# The downstream Chatterbox flow encoder is NOT a full Conformer (FF+Attn+Conv
+# +FF). It is a simpler pre-norm Transformer with relative-position MHA:
+#
+#   norm_mha → self_attn(q,k,v + RelPos via linear_pos + pos_bias_u/v) + res
+#   norm_ff  → feed_forward(w_1, w_2) + res
+#
+# Each TransformerEncoderLayer stores explicit norm_ff / norm_mha siblings
+# rather than fusing the norm into the FF/attn modules. This matches the
+# .safetensors layout: encoders.{L}.{norm_ff,norm_mha,self_attn,feed_forward}.
+# ============================================================================
+
+
+@fieldwise_init
+struct RelPosMHA(Copyable, Movable):
+    """Multi-head self-attention with relative position bias (Transformer-XL
+    style, used by Wenet/s3gen). Stores q/k/v/out + linear_pos + pos_bias_u/v.
+
+    Forward path is not yet wired — this struct exists so the loader can
+    populate from upstream weights; integration into upsample_conformer_forward
+    follows once the layout is validated end-to-end.
+    """
+    var to_q: Linear        # (D, D) + bias
+    var to_k: Linear        # (D, D) + bias
+    var to_v: Linear        # (D, D) + bias
+    var to_out: Linear      # (D, D) + bias
+    var linear_pos: Linear  # (D, D) — no bias; used to project sinusoidal pos enc
+    var pos_bias_u: DeviceBuffer[DType.float32]  # (H, Dh)
+    var pos_bias_v: DeviceBuffer[DType.float32]  # (H, Dh)
+    var n_heads: Int
+    var head_dim: Int
+
+
+@fieldwise_init
+struct TransformerEncoderLayer(Copyable, Movable):
+    """One real-upstream flow-encoder layer (pre-norm Transformer w/ RelPos)."""
+    var norm_mha: LayerNorm
+    var norm_ff:  LayerNorm
+    var self_attn: RelPosMHA
+    var feed_forward_w1: Linear   # (intermediate, d_model) + bias
+    var feed_forward_w2: Linear   # (d_model, intermediate) + bias
+    var d_model: Int
+    var intermediate: Int

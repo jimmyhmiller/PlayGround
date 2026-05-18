@@ -17,6 +17,7 @@ from t3 import T3
 from conv1d import Conv1d
 from s3tokenizer_block import FSMNAttention, S3TokenizerBlock
 from s3tokenizer import S3Tokenizer
+from conformer import RelPosMHA, TransformerEncoderLayer
 
 
 def _upload(buf: DeviceBuffer[DType.float32], data: List[Float32], n: Int) raises:
@@ -258,3 +259,78 @@ def load_s3tokenizer(mut ctx: DeviceContext, base: String) raises -> S3Tokenizer
         conv1^, conv2^, blocks^, project_down^,
         N_MELS, N_STATE, N_HEADS, HEAD_DIM, N_LAYERS,
     )
+
+
+# ============================================================================
+# S3Gen flow encoder layer loader — real upstream TransformerEncoderLayer
+# ============================================================================
+
+def load_transformer_encoder_layer(
+    mut ctx: DeviceContext, layer_base: String,
+    d_model: Int, intermediate: Int, n_heads: Int, head_dim: Int,
+) raises -> TransformerEncoderLayer:
+    """Load one upstream s3gen flow-encoder layer from disk.
+
+    Expects {layer_base}/{norm_mha,norm_ff,self_attn,feed_forward}/... layout
+    produced by `convert_weights.py --s3gen` (pass-through nested keys).
+    """
+    var nm_w = upload_fp32(ctx, layer_base + "/norm_mha/weight.bin")
+    var nm_b = upload_fp32(ctx, layer_base + "/norm_mha/bias.bin")
+    var nf_w = upload_fp32(ctx, layer_base + "/norm_ff/weight.bin")
+    var nf_b = upload_fp32(ctx, layer_base + "/norm_ff/bias.bin")
+
+    var qw = upload_fp32(ctx, layer_base + "/self_attn/linear_q/weight.bin")
+    var qb = upload_fp32(ctx, layer_base + "/self_attn/linear_q/bias.bin")
+    var kw = upload_fp32(ctx, layer_base + "/self_attn/linear_k/weight.bin")
+    var kb = upload_fp32(ctx, layer_base + "/self_attn/linear_k/bias.bin")
+    var vw = upload_fp32(ctx, layer_base + "/self_attn/linear_v/weight.bin")
+    var vb = upload_fp32(ctx, layer_base + "/self_attn/linear_v/bias.bin")
+    var ow = upload_fp32(ctx, layer_base + "/self_attn/linear_out/weight.bin")
+    var ob = upload_fp32(ctx, layer_base + "/self_attn/linear_out/bias.bin")
+    var pw = upload_fp32(ctx, layer_base + "/self_attn/linear_pos/weight.bin")
+    var pos_u = upload_fp32(ctx, layer_base + "/self_attn/pos_bias_u.bin")
+    var pos_v = upload_fp32(ctx, layer_base + "/self_attn/pos_bias_v.bin")
+
+    var w1_w = upload_fp32(ctx, layer_base + "/feed_forward/w_1/weight.bin")
+    var w1_b = upload_fp32(ctx, layer_base + "/feed_forward/w_1/bias.bin")
+    var w2_w = upload_fp32(ctx, layer_base + "/feed_forward/w_2/weight.bin")
+    var w2_b = upload_fp32(ctx, layer_base + "/feed_forward/w_2/bias.bin")
+
+    var norm_mha = LayerNorm(nm_w^, nm_b^, d_model, Float32(1.0e-5))
+    var norm_ff = LayerNorm(nf_w^, nf_b^, d_model, Float32(1.0e-5))
+
+    var to_q = Linear(qw^, qb^, d_model, d_model, True)
+    var to_k = Linear(kw^, kb^, d_model, d_model, True)
+    var to_v = Linear(vw^, vb^, d_model, d_model, True)
+    var to_out = Linear(ow^, ob^, d_model, d_model, True)
+    var zero_pos_b = _zero_buf(ctx, d_model)
+    var linear_pos = Linear(pw^, zero_pos_b^, d_model, d_model, False)
+
+    var self_attn = RelPosMHA(to_q^, to_k^, to_v^, to_out^, linear_pos^,
+                                pos_u^, pos_v^, n_heads, head_dim)
+
+    var w1 = Linear(w1_w^, w1_b^, d_model, intermediate, True)
+    var w2 = Linear(w2_w^, w2_b^, intermediate, d_model, True)
+
+    return TransformerEncoderLayer(
+        norm_mha^, norm_ff^, self_attn^, w1^, w2^, d_model, intermediate,
+    )
+
+
+def load_s3gen_flow_encoder_layers(
+    mut ctx: DeviceContext, encoders_base: String, n_layers: Int,
+    d_model: Int, intermediate: Int, n_heads: Int, head_dim: Int,
+) raises -> List[TransformerEncoderLayer]:
+    """Load a stack of N encoder layers from `encoders_base/{0..N-1}/`.
+
+    Use for both `encoder/encoders/` (6 layers) and `encoder/up_encoders/` (4
+    layers) — same per-layer structure.
+    """
+    var layers = List[TransformerEncoderLayer]()
+    for L in range(n_layers):
+        var layer_base = encoders_base + "/" + String(L)
+        var lyr = load_transformer_encoder_layer(
+            ctx, layer_base, d_model, intermediate, n_heads, head_dim,
+        )
+        layers.append(lyr^)
+    return layers^
