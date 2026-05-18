@@ -31,6 +31,8 @@ from cfm_estimator_new import (
     CFMAttention, CFMFeedForward, BasicTransformerBlock,
     CFMDownStage, CFMMidStage, CFMUpStage, CFMEstimatorReal,
 )
+from perceiver import Perceiver, PerceiverBlock
+from cond_enc import T3CondEnc
 
 
 def _upload(buf: DeviceBuffer[DType.float32], data: List[Float32], n: Int) raises:
@@ -920,3 +922,62 @@ def load_cfm_estimator_real(mut ctx: DeviceContext, base: String) raises -> CFME
         down_blocks^, mid_blocks^, up_blocks^,
         final_block^, final_proj^,
     )
+
+
+# ============================================================================
+# T3CondEnc loader — Perceiver resampler + speaker projection + emotion FC
+# ============================================================================
+
+def load_t3_cond_enc(
+    mut ctx: DeviceContext, base: String,
+    speech_emb: Embedding,
+    n_queries: Int = 32,
+    n_perc_heads: Int = 16,
+    perc_head_dim: Int = 64,
+    speaker_embed_size: Int = 256,
+    d_model: Int = 1024,
+    cond_prompt_len: Int = 150,
+) raises -> T3CondEnc:
+    """Load T3CondEnc from {base}/cond_enc/. Reuses `speech_emb` from the
+    parent T3 (cond_prompt tokens use the same embedding table).
+
+    Hyperparameters default to the upstream Chatterbox values; override at call
+    site if needed.
+    """
+    var ce = base + "/cond_enc"
+
+    # Speaker projection: 256 → 1024.
+    var sw = upload_fp32(ctx, ce + "/spkr_w.bin")
+    var sb = upload_fp32(ctx, ce + "/spkr_b.bin")
+    var spkr_enc = Linear(sw^, sb^, speaker_embed_size, d_model, True)
+
+    # Emotion FC: 1 → 1024.
+    var ew = upload_fp32(ctx, ce + "/emo_w.bin")
+    var zero_eb = _zero_buf(ctx, d_model)
+    var emotion_fc = Linear(ew^, zero_eb^, 1, d_model, False)
+
+    # Perceiver: pre_attention_query + one block (norm, q/k/v, proj_out).
+    var pre_q = upload_fp32(ctx, ce + "/perceiver/pre_q.bin")
+    var pn_w = upload_fp32(ctx, ce + "/perceiver/perc_norm_w.bin")
+    var pn_b = upload_fp32(ctx, ce + "/perceiver/perc_norm_b.bin")
+    var perc_ln = LayerNorm(pn_w^, pn_b^, d_model, Float32(1.0e-5))
+
+    var qw = upload_fp32(ctx, ce + "/perceiver/perc_q_w.bin")
+    var qb = upload_fp32(ctx, ce + "/perceiver/perc_q_b.bin")
+    var to_q = Linear(qw^, qb^, d_model, d_model, True)
+    var kw = upload_fp32(ctx, ce + "/perceiver/perc_k_w.bin")
+    var kb = upload_fp32(ctx, ce + "/perceiver/perc_k_b.bin")
+    var to_k = Linear(kw^, kb^, d_model, d_model, True)
+    var vw = upload_fp32(ctx, ce + "/perceiver/perc_v_w.bin")
+    var vb = upload_fp32(ctx, ce + "/perceiver/perc_v_b.bin")
+    var to_v = Linear(vw^, vb^, d_model, d_model, True)
+    var ow = upload_fp32(ctx, ce + "/perceiver/perc_o_w.bin")
+    var ob = upload_fp32(ctx, ce + "/perceiver/perc_o_b.bin")
+    var proj_out = Linear(ow^, ob^, d_model, d_model, True)
+
+    var block = PerceiverBlock(perc_ln^, to_q^, to_k^, to_v^, proj_out^,
+                                n_perc_heads, perc_head_dim)
+    var perceiver = Perceiver(pre_q^, block^, n_queries, d_model)
+
+    return T3CondEnc(spkr_enc^, emotion_fc^, speech_emb.copy(), perceiver^,
+                      speaker_embed_size, d_model, cond_prompt_len)
