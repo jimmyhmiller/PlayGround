@@ -97,6 +97,51 @@ def reshape_bhsd_to_bsd(
     )
 
 
+def apply_rope_hf_style(
+    mut ctx: DeviceContext,
+    mut in_buf: DeviceBuffer[DType.float32],    # (B, H, S, D) — HF Llama layout
+    mut out_buf: DeviceBuffer[DType.float32],
+    mut cos_buf: DeviceBuffer[DType.float32],   # (B, S, D) — full cos
+    mut sin_buf: DeviceBuffer[DType.float32],   # (B, S, D) — full sin
+    b: Int, h: Int, s: Int, d: Int,
+) raises:
+    """HF Llama RoPE on layout (B, H, S, D) with cos/sin (B, S, D).
+       For i < D/2: out[..., i] = x[..., i] * cos[s, i] + (-x[..., i+HALF]) * sin[s, i]
+       For i >= D/2: out[..., i] = x[..., i] * cos[s, i] + x[..., i-HALF] * sin[s, i]
+    """
+    var ip = in_buf.unsafe_ptr()
+    var op = out_buf.unsafe_ptr()
+    var cp = cos_buf.unsafe_ptr()
+    var sp = sin_buf.unsafe_ptr()
+    var half = d // 2
+    var total = b * h * s * d
+    var dctx = DeviceContextPtr(ctx)
+
+    @always_inline
+    @parameter
+    @__copy_capture(ip, op, cp, sp, h, s, d, half)
+    def func[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        # (B, H, S, D) layout.
+        var bi = i // (h * s * d)
+        var rem = i - bi * h * s * d
+        var hi = rem // (s * d)
+        var rem2 = rem - hi * s * d
+        var si = rem2 // d
+        var di = rem2 - si * d
+        var c = cp[bi * s * d + si * d + di]
+        var sn = sp[bi * s * d + si * d + di]
+        var x_i = ip[i]
+        var pair_di: Int = di + half if di < half else di - half
+        var pair_src = bi * h * s * d + hi * s * d + si * d + pair_di
+        var paired = ip[pair_src]
+        var rh: Float32 = -paired if di < half else paired
+        op[i] = x_i * c + rh * sn
+    elementwise[func, simd_width=1, target="gpu"](
+        IndexList[1](total), dctx,
+    )
+
+
 def apply_rope_s3_style(
     mut ctx: DeviceContext,
     mut in_buf: DeviceBuffer[DType.float32],    # (B, S, H, D) — half-rotation RoPE
