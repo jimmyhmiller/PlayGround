@@ -771,3 +771,168 @@ def cfm_estimator_forward_real(
     ctx.enqueue_copy(x_final_masked, x_final)
     multiply_mask_bct(ctx, x_final_masked, mask_buf, b, D, t)
     conv1d_forward(ctx, model.final_proj, x_final_masked, out_buf, b, t, t)
+
+
+# ============================================================================
+# CFM Euler ODE solver
+# ============================================================================
+
+
+def cfm_solve_euler(
+    mut ctx: DeviceContext,
+    mut model: CFMEstimatorReal,
+    mut x_buf: DeviceBuffer[DType.float32],       # (B, 80, T) initial noise; updated in-place
+    mut mu_buf: DeviceBuffer[DType.float32],      # (B, 80, T) encoder output
+    mut spks_buf: DeviceBuffer[DType.float32],    # (B, 80) speaker embedding (post-spk_embed_affine)
+    mut cond_buf: DeviceBuffer[DType.float32],    # (B, 80, T) prompt cond (zeros if no prompt)
+    mut mask_buf: DeviceBuffer[DType.float32],    # (B, 1, T)
+    b: Int, t: Int, n_steps: Int, cfg_rate: Float32,
+) raises:
+    """Fixed-step Euler integration of the CFM ODE with classifier-free guidance.
+
+    For each step (t_cur, t_next) in linspace(0, 1, n_steps + 1):
+       Build doubled inputs: first B = conditioned (real spks/mu/cond),
+                            second B = unconditioned (zeros for spks/mu/cond).
+       Run estimator on the doubled batch.
+       Split, combine: dxdt = (1+cfg) * cond - cfg * uncond.
+       x = x + (t_next - t_cur) * dxdt.
+
+    For inference B=1, the doubled batch has 2 samples.
+    """
+    comptime MEL = 80
+    var B2 = 2 * b
+
+    # Pre-allocate doubled input buffers once (reused across steps).
+    var x_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL * t)
+    var mu_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL * t)
+    var spks_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL)
+    var cond_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL * t)
+    var mask_in = ctx.enqueue_create_buffer[DType.float32](B2 * t)
+    var t_scalar_in = ctx.enqueue_create_buffer[DType.float32](B2)
+    var dxdt_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL * t)
+
+    var dt_per_step: Float32 = 1.0 / Float32(n_steps)
+
+    for step in range(n_steps):
+        var t_cur: Float32 = Float32(step) * dt_per_step
+        var t_next: Float32 = Float32(step + 1) * dt_per_step
+        var dt = t_next - t_cur
+
+        # Populate doubled inputs.
+        # x_in: [:B] = x, [B:] = x (same).
+        var x_ptr = x_buf.unsafe_ptr()
+        var xi_ptr = x_in.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(x_ptr, xi_ptr, b, t, MEL)
+        def x_pop_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var bi = i // (MEL * t)
+            var src_b = bi % b
+            var rem = i - bi * MEL * t
+            xi_ptr[i] = x_ptr[src_b * MEL * t + rem]
+        elementwise[x_pop_fn, simd_width=1, target="gpu"](
+            IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
+        )
+
+        # mu_in: [:B] = mu, [B:] = 0.
+        var mu_ptr = mu_buf.unsafe_ptr()
+        var mi_ptr = mu_in.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(mu_ptr, mi_ptr, b, t, MEL)
+        def mu_pop_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var bi = i // (MEL * t)
+            var rem = i - bi * MEL * t
+            if bi < b:
+                mi_ptr[i] = mu_ptr[bi * MEL * t + rem]
+            else:
+                mi_ptr[i] = 0.0
+        elementwise[mu_pop_fn, simd_width=1, target="gpu"](
+            IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
+        )
+
+        # spks_in: [:B] = spks, [B:] = 0.
+        var sp_ptr = spks_buf.unsafe_ptr()
+        var si_ptr = spks_in.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(sp_ptr, si_ptr, b)
+        def spk_pop_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var bi = i // MEL
+            var ci = i - bi * MEL
+            if bi < b:
+                si_ptr[i] = sp_ptr[bi * MEL + ci]
+            else:
+                si_ptr[i] = 0.0
+        elementwise[spk_pop_fn, simd_width=1, target="gpu"](
+            IndexList[1](B2 * MEL), DeviceContextPtr(ctx),
+        )
+
+        # cond_in: [:B] = cond, [B:] = 0.
+        var co_ptr = cond_buf.unsafe_ptr()
+        var ci_ptr = cond_in.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(co_ptr, ci_ptr, b, t, MEL)
+        def cond_pop_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var bi = i // (MEL * t)
+            var rem = i - bi * MEL * t
+            if bi < b:
+                ci_ptr[i] = co_ptr[bi * MEL * t + rem]
+            else:
+                ci_ptr[i] = 0.0
+        elementwise[cond_pop_fn, simd_width=1, target="gpu"](
+            IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
+        )
+
+        # mask_in: [:B] = mask, [B:] = mask (same — mask is applied identically).
+        var m_ptr = mask_buf.unsafe_ptr()
+        var mi2_ptr = mask_in.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(m_ptr, mi2_ptr, b, t)
+        def mask_pop_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var bi = i // t
+            var src_b = bi % b
+            var ti = i - bi * t
+            mi2_ptr[i] = m_ptr[src_b * t + ti]
+        elementwise[mask_pop_fn, simd_width=1, target="gpu"](
+            IndexList[1](B2 * t), DeviceContextPtr(ctx),
+        )
+
+        # t_scalar_in: filled with t_cur.
+        t_scalar_in.enqueue_fill(t_cur)
+
+        # Run estimator forward on doubled batch.
+        cfm_estimator_forward_real(
+            ctx, model, x_in, mu_in, spks_in, cond_in, mask_in, t_scalar_in,
+            dxdt_in, B2, t,
+        )
+
+        # Combine CFG: dxdt = (1+cfg) * cond - cfg * uncond, then x += dt * dxdt.
+        var d_ptr = dxdt_in.unsafe_ptr()
+        var xb_ptr = x_buf.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(d_ptr, xb_ptr, b, t, MEL, dt, cfg_rate)
+        def combine_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            # i indexes (B, MEL, T).
+            var cond_val = d_ptr[i]
+            var uncond_val = d_ptr[b * MEL * t + i]
+            var dxdt_val = (1.0 + cfg_rate) * cond_val - cfg_rate * uncond_val
+            xb_ptr[i] = xb_ptr[i] + dt * dxdt_val
+        elementwise[combine_fn, simd_width=1, target="gpu"](
+            IndexList[1](b * MEL * t), DeviceContextPtr(ctx),
+        )
