@@ -14,7 +14,9 @@ from std.testing import TestSuite, assert_true
 from std.gpu.host import DeviceContext
 
 from weights import load_hift_generator
-from hift_generator import hift_decode_trunk
+from hift_generator import (
+    hift_decode_trunk, istft_forward, hann_window_periodic_fill,
+)
 
 
 comptime B = 1
@@ -23,6 +25,10 @@ comptime MEL = 80
 # T grows: 4 → 32 → 256 → 1024 → +1 reflection = 1025
 comptime T_OUT = 1025
 comptime N_OUT = 18
+comptime N_FFT = 16
+comptime HOP = 4
+# After iSTFT (un-padded): T_audio = (T_OUT - 1) * HOP = 1024 * 4 = 4096
+comptime T_AUDIO = (T_OUT - 1) * HOP
 
 
 def test_hift_forward_smoke() raises:
@@ -55,9 +61,32 @@ def test_hift_forward_smoke() raises:
             if v != v: n_nan += 1
             if v < 0.0: sum_abs -= v
             else:       sum_abs += v
-    print("[hift-fwd] output mean-abs=", sum_abs / Float32(B * N_OUT * T_OUT),
-          " nan_count=", n_nan)
-    assert_true(n_nan == 0, "no NaNs in HiFT output")
+    print("[hift-fwd] pre-iSTFT output mean-abs=",
+          sum_abs / Float32(B * N_OUT * T_OUT), " nan_count=", n_nan)
+    assert_true(n_nan == 0, "no NaNs in HiFT pre-iSTFT output")
+
+    # Run iSTFT: (B, 18, T_OUT) → (B, T_AUDIO).
+    var window = ctx.enqueue_create_buffer[DType.float32](N_FFT)
+    hann_window_periodic_fill(ctx, window, N_FFT)
+    var audio = ctx.enqueue_create_buffer[DType.float32](B * T_AUDIO)
+    print("[hift-fwd] running iSTFT (T_frames=", T_OUT, " → T_audio=", T_AUDIO, ")...")
+    istft_forward(ctx, spec_out, window, audio, B, N_FFT, T_OUT, T_AUDIO)
+    ctx.synchronize()
+
+    var n_nan_a = 0
+    var sum_abs_a: Float32 = 0.0
+    var max_a: Float32 = 0.0
+    with audio.map_to_host() as h:
+        for i in range(B * T_AUDIO):
+            var v = h[i]
+            if v != v: n_nan_a += 1
+            var av = v
+            if av < 0.0: av = -av
+            sum_abs_a += av
+            if av > max_a: max_a = av
+    print("[hift-fwd] audio mean-abs=", sum_abs_a / Float32(B * T_AUDIO),
+          " max=", max_a, " nan_count=", n_nan_a)
+    assert_true(n_nan_a == 0, "no NaNs in audio output")
 
 
 def main() raises:

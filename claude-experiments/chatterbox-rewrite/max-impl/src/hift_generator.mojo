@@ -389,3 +389,159 @@ def hift_decode_trunk(
     # Final leaky_relu + conv_post: (B, 64, T) → (B, 18, T).
     leaky_relu_inplace(ctx, x, b * c_cur * t_cur, 0.01)   # default slope 0.01 for last
     conv1d_forward(ctx, model.conv_post, x, spec_out, b, t_cur, t_out)
+
+
+# ============================================================================
+# iSTFT for the final mel→audio stage.
+# ============================================================================
+
+
+def hann_window_periodic_fill(
+    mut ctx: DeviceContext,
+    mut win_buf: DeviceBuffer[DType.float32],
+    n: Int,
+) raises:
+    """torch's periodic Hann: w[i] = 0.5 * (1 - cos(2π i / N))."""
+    var w_ptr = win_buf.unsafe_ptr()
+    var two_pi_over_n: Float32 = 2.0 * Float32(pi) / Float32(n)
+
+    @always_inline
+    @parameter
+    @__copy_capture(w_ptr, two_pi_over_n)
+    def w_func[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        w_ptr[i] = 0.5 * (1.0 - mcos(two_pi_over_n * Float32(i)))
+    elementwise[w_func, simd_width=1, target="gpu"](
+        IndexList[1](n), DeviceContextPtr(ctx),
+    )
+
+
+def istft_forward(
+    mut ctx: DeviceContext,
+    mut spec_buf: DeviceBuffer[DType.float32],     # (B, n_fft+2, T_frames) — conv_post output
+    mut window_buf: DeviceBuffer[DType.float32],   # (n_fft,) Hann window
+    mut audio_out: DeviceBuffer[DType.float32],    # (B, T_audio)
+    b: Int, n_fft: Int, n_frames: Int, t_audio: Int,
+) raises:
+    """Inverse STFT of HiFTGenerator's `_istft`.
+
+    Inputs:
+      spec[:, :n_fft//2+1, :]   — log-magnitude → magnitude = exp(.)
+      spec[:, n_fft//2+1:, :]   — phase angle  (clipped via sin per upstream)
+      mag = clip(exp(spec_mag), max=1e2)
+      real = mag * cos(phase)
+      imag = mag * sin(phase)
+      audio = istft(complex(real, imag), n_fft, hop=n_fft//4, window=hann)
+
+    For n_fft=16, hop_len=4:
+      n_freq = n_fft//2 + 1 = 9
+      Frame f's window covers samples [f*hop, f*hop + n_fft) in padded coords.
+      Padded length = T_audio + n_fft (center=True with n_fft/2 pad each side).
+      T_audio = (n_frames - 1) * hop_len (post-center-trim).
+
+    Caller pre-loads the periodic Hann window into window_buf.
+    """
+    var n_freq = n_fft // 2 + 1
+    var hop = n_fft // 4
+    var pad = n_fft // 2
+    var s_ptr = spec_buf.unsafe_ptr()
+    var w_ptr = window_buf.unsafe_ptr()
+    var o_ptr = audio_out.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(s_ptr, w_ptr, o_ptr, n_fft, n_freq, hop, pad, n_frames, t_audio)
+    def istft_func[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // t_audio
+        var t_out = i - bi * t_audio
+        var t_padded = t_out + pad
+
+        var f_min_raw = t_padded - n_fft + 1
+        var f_min: Int
+        if f_min_raw <= 0:
+            f_min = 0
+        else:
+            f_min = (f_min_raw + hop - 1) // hop
+        var f_max = t_padded // hop
+        if f_max >= n_frames:
+            f_max = n_frames - 1
+
+        var sum_val: Float32 = 0.0
+        var norm: Float32 = 0.0
+        var inv_n = 1.0 / Float32(n_fft)
+        var two_pi_inv_n = 6.283185307179586 / Float32(n_fft)
+
+        for f in range(f_min, f_max + 1):
+            var local_n = t_padded - f * hop
+            if local_n < 0 or local_n >= n_fft:
+                continue
+            # Reconstruct via inverse DFT, conjugate-symmetric for k in [n_freq, n_fft).
+            var two_pi_n = two_pi_inv_n * Float32(local_n)
+            var frame_sample: Float32 = 0.0
+
+            # k = 0 (purely real DC bin).
+            var spec_mag0 = s_ptr[bi * (n_fft + 2) * n_frames + 0 * n_frames + f]
+            var mag0 = exp(spec_mag0)
+            if mag0 > 100.0: mag0 = 100.0
+            var phase0 = s_ptr[bi * (n_fft + 2) * n_frames + n_freq * n_frames + f]
+            var sin_phase0 = msin(phase0)
+            var cos_phase0 = mcos(phase0)
+            var r0 = mag0 * cos_phase0
+            frame_sample += r0
+
+            for k in range(1, n_freq):
+                var spec_mag_k = s_ptr[bi * (n_fft + 2) * n_frames + k * n_frames + f]
+                var mag_k = exp(spec_mag_k)
+                if mag_k > 100.0: mag_k = 100.0
+                var phase_k = s_ptr[bi * (n_fft + 2) * n_frames + (n_freq + k) * n_frames + f]
+                var sin_p = msin(phase_k)
+                var cos_p = mcos(phase_k)
+                var re_v = mag_k * cos_p
+                var im_v = mag_k * sin_p
+                var ang = two_pi_n * Float32(k)
+                var c = mcos(ang)
+                var s_ = msin(ang)
+                if k == n_fft // 2:
+                    frame_sample += re_v * c - im_v * s_
+                else:
+                    frame_sample += 2.0 * (re_v * c - im_v * s_)
+
+            frame_sample = frame_sample * inv_n
+
+            var w = w_ptr[local_n]
+            sum_val += w * frame_sample
+            norm += w * w
+
+        var y: Float32 = 0.0
+        if norm > 0.0:
+            y = sum_val / norm
+        # Clamp to audio_limit (default 0.99).
+        var lim: Float32 = 0.99
+        if y > lim: y = lim
+        if y < -lim: y = -lim
+        o_ptr[i] = y
+    elementwise[istft_func, simd_width=1, target="gpu"](
+        IndexList[1](b * t_audio), DeviceContextPtr(ctx),
+    )
+
+
+def hift_decode_full(
+    mut ctx: DeviceContext,
+    mut model: HiFTGenerator,
+    mut mel_buf: DeviceBuffer[DType.float32],     # (B, 80, T_mel)
+    mut s_stft_buf: DeviceBuffer[DType.float32],
+    mut window_buf: DeviceBuffer[DType.float32],  # (n_fft,) hann
+    mut audio_out: DeviceBuffer[DType.float32],   # (B, T_audio)
+    b: Int, t_mel: Int, t_s: Int, t_pre_istft: Int, t_audio: Int,
+    use_source: Bool = True,
+) raises:
+    """End-to-end NSF-HiFiGAN: mel → conv_pre/ups/MRF → conv_post → iSTFT → audio."""
+    var n_fft = model.n_fft
+    var n_out_channels = n_fft + 2
+    var spec = ctx.enqueue_create_buffer[DType.float32](b * n_out_channels * t_pre_istft)
+    hift_decode_trunk(
+        ctx, model, mel_buf, s_stft_buf, spec,
+        b, t_mel, t_s, t_pre_istft, use_source=use_source,
+    )
+    istft_forward(ctx, spec, window_buf, audio_out, b, n_fft, t_pre_istft, t_audio)
