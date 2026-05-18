@@ -132,6 +132,55 @@ def s3gen_map(k):
     return None
 
 
+def s3tokenizer_map(k):
+    """S3Tokenizer (bundled inside s3gen.safetensors under `tokenizer.*`).
+
+    Layout: 2 strided Conv1d (conv1, conv2), 6 ResidualAttentionBlocks with
+    FSMN attention + MLP, then FSQ project_down. Mel filter table is a tensor
+    `_mel_filters` (128 × 201) — kept as helper, not used in graph.
+    """
+    if k == "tokenizer._mel_filters":
+        return "s3t/mel_filters"
+    if k == "tokenizer.encoder.conv1.weight":
+        return "s3t/conv1_w"
+    if k == "tokenizer.encoder.conv1.bias":
+        return "s3t/conv1_b"
+    if k == "tokenizer.encoder.conv2.weight":
+        return "s3t/conv2_w"
+    if k == "tokenizer.encoder.conv2.bias":
+        return "s3t/conv2_b"
+    if k == "tokenizer.quantizer._codebook.project_down.weight":
+        return "s3t/project_down_w"
+    if k == "tokenizer.quantizer._codebook.project_down.bias":
+        return "s3t/project_down_b"
+    if k.startswith("tokenizer.encoder.blocks."):
+        parts = k.split(".")
+        L = parts[3]
+        comp = ".".join(parts[4:])
+        m = {
+            "attn_ln.weight": "attn_ln_w",
+            "attn_ln.bias":   "attn_ln_b",
+            "mlp_ln.weight":  "mlp_ln_w",
+            "mlp_ln.bias":    "mlp_ln_b",
+            "attn.query.weight": "qw",
+            "attn.query.bias":   "qb",
+            "attn.key.weight":   "kw",
+            # key has no bias upstream
+            "attn.value.weight": "vw",
+            "attn.value.bias":   "vb",
+            "attn.out.weight":   "ow",
+            "attn.out.bias":     "ob",
+            "attn.fsmn_block.weight": "fsmn_w",
+            "mlp.0.weight": "mlp_fc1_w",
+            "mlp.0.bias":   "mlp_fc1_b",
+            "mlp.2.weight": "mlp_fc2_w",
+            "mlp.2.bias":   "mlp_fc2_b",
+        }.get(comp)
+        if m:
+            return f"s3t/block{L}/{m}"
+    return None
+
+
 # ----------------------------------------------------------------------------
 # Conversion driver
 # ----------------------------------------------------------------------------
@@ -140,9 +189,9 @@ def convert(in_path, out_dir, mapper, label):
     """Open `in_path` via safetensors.safe_open and write keys via `mapper`."""
     n_kept = 0
     n_skipped = 0
-    with safe_open(in_path, framework="pt") as f:
+    with safe_open(in_path, framework="numpy") as f:
         for upstream_key in f.keys():
-            arr = f.get_tensor(upstream_key).cpu().numpy()
+            arr = f.get_tensor(upstream_key)
             mapped = mapper(upstream_key)
             if mapped is None:
                 n_skipped += 1
@@ -158,12 +207,14 @@ def main():
     ap.add_argument("--ve", help="VoiceEncoder safetensors")
     ap.add_argument("--t3", help="T3 backbone safetensors")
     ap.add_argument("--s3gen", help="s3gen safetensors")
+    ap.add_argument("--s3t", help="s3tokenizer (currently bundled in s3gen.safetensors)")
     ap.add_argument("--out", required=True, help="Output directory")
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
     if args.ve:    convert(args.ve, args.out, voice_encoder_map, "VE")
     if args.t3:    convert(args.t3, args.out, t3_map, "T3")
     if args.s3gen: convert(args.s3gen, args.out, s3gen_map, "s3gen")
+    if args.s3t:   convert(args.s3t, args.out, s3tokenizer_map, "s3t")
 
 
 if __name__ == "__main__":

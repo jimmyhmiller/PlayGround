@@ -11,9 +11,12 @@ from fixture import load_fp32
 from modules import Linear, LayerNorm, RMSNorm, Embedding
 from lstm import LSTMLayer
 from voice_encoder import VoiceEncoder
-from transformer_blocks import LlamaMLP
+from transformer_blocks import LlamaMLP, MLP
 from t3_block import T3Block
 from t3 import T3
+from conv1d import Conv1d
+from s3tokenizer_block import FSMNAttention, S3TokenizerBlock
+from s3tokenizer import S3Tokenizer
 
 
 def _upload(buf: DeviceBuffer[DType.float32], data: List[Float32], n: Int) raises:
@@ -148,3 +151,110 @@ def load_t3(mut ctx: DeviceContext, base: String) raises -> T3:
 
     return T3(blocks^, final_norm^, speech_emb^, speech_head^,
                 N_LAYERS, N_HEADS, HEAD_DIM, HIDDEN, V_SPEECH)
+
+
+# ============================================================================
+# S3Tokenizer loader — 2 conv1d + 6 FSMN blocks + FSQ project_down
+# ============================================================================
+
+def _zero_buf(mut ctx: DeviceContext, n: Int) raises -> DeviceBuffer[DType.float32]:
+    var b = ctx.enqueue_create_buffer[DType.float32](n)
+    b.enqueue_fill(0.0)
+    return b^
+
+
+def load_s3tokenizer_block(
+    mut ctx: DeviceContext, block_base: String,
+    hidden: Int, intermediate: Int, n_heads: Int, head_dim: Int,
+    fsmn_kernel: Int,
+) raises -> S3TokenizerBlock:
+    """Load one s3tokenizer ResidualAttentionBlock."""
+    var attn_ln_w = upload_fp32(ctx, block_base + "/attn_ln_w.bin")
+    var attn_ln_b = upload_fp32(ctx, block_base + "/attn_ln_b.bin")
+    var mlp_ln_w = upload_fp32(ctx, block_base + "/mlp_ln_w.bin")
+    var mlp_ln_b = upload_fp32(ctx, block_base + "/mlp_ln_b.bin")
+
+    var qw = upload_fp32(ctx, block_base + "/qw.bin")
+    var qb = upload_fp32(ctx, block_base + "/qb.bin")
+    var kw = upload_fp32(ctx, block_base + "/kw.bin")
+    var vw = upload_fp32(ctx, block_base + "/vw.bin")
+    var vb = upload_fp32(ctx, block_base + "/vb.bin")
+    var ow = upload_fp32(ctx, block_base + "/ow.bin")
+    var ob = upload_fp32(ctx, block_base + "/ob.bin")
+    var fsmn_w = upload_fp32(ctx, block_base + "/fsmn_w.bin")
+
+    var fc1_w = upload_fp32(ctx, block_base + "/mlp_fc1_w.bin")
+    var fc1_b = upload_fp32(ctx, block_base + "/mlp_fc1_b.bin")
+    var fc2_w = upload_fp32(ctx, block_base + "/mlp_fc2_w.bin")
+    var fc2_b = upload_fp32(ctx, block_base + "/mlp_fc2_b.bin")
+
+    var attn_ln = LayerNorm(attn_ln_w^, attn_ln_b^, hidden, Float32(1.0e-5))
+    var mlp_ln = LayerNorm(mlp_ln_w^, mlp_ln_b^, hidden, Float32(1.0e-5))
+
+    var to_q = Linear(qw^, qb^, hidden, hidden, True)
+    var zero_k = _zero_buf(ctx, hidden)
+    var to_k = Linear(kw^, zero_k^, hidden, hidden, False)
+    var to_v = Linear(vw^, vb^, hidden, hidden, True)
+    var to_out = Linear(ow^, ob^, hidden, hidden, True)
+
+    # FSMN block: depthwise conv1d, groups = hidden, kernel = fsmn_kernel.
+    # Upstream weight shape is (hidden, 1, kernel) which matches depthwise layout.
+    var zero_fsmn_b = _zero_buf(ctx, hidden)
+    var pad = (fsmn_kernel - 1) // 2
+    var fsmn_conv = Conv1d(
+        fsmn_w^, zero_fsmn_b^,
+        1, hidden, fsmn_kernel, 1, pad, 1, hidden, False,
+    )
+
+    var attn = FSMNAttention(to_q^, to_k^, to_v^, to_out^, fsmn_conv^,
+                              n_heads, head_dim)
+
+    var fc1 = Linear(fc1_w^, fc1_b^, hidden, intermediate, True)
+    var fc2 = Linear(fc2_w^, fc2_b^, intermediate, hidden, True)
+    var mlp = MLP(fc1^, fc2^, hidden, intermediate)
+
+    return S3TokenizerBlock(attn_ln^, mlp_ln^, attn^, mlp^)
+
+
+def load_s3tokenizer(mut ctx: DeviceContext, base: String) raises -> S3Tokenizer:
+    """Load S3TokenizerV2 (128-mel → 1280-state → 6 blocks → FSQ).
+
+    Expects layout produced by `convert_weights.py --s3t`:
+      {base}/{conv1_w,conv1_b,conv2_w,conv2_b}.bin
+      {base}/block{0..5}/{attn_ln_*,mlp_ln_*,qw,qb,kw,vw,vb,ow,ob,fsmn_w,mlp_*}.bin
+      {base}/{project_down_w,project_down_b}.bin
+    """
+    var N_MELS = 128
+    var N_STATE = 1280
+    var N_HEADS = 1            # FSMN multi-head uses single head in this checkpoint
+    var HEAD_DIM = 1280
+    var INTERMEDIATE = 5120
+    var N_LAYERS = 6
+    var FSMN_K = 31
+
+    var conv1_w = upload_fp32(ctx, base + "/conv1_w.bin")
+    var conv1_b = upload_fp32(ctx, base + "/conv1_b.bin")
+    var conv2_w = upload_fp32(ctx, base + "/conv2_w.bin")
+    var conv2_b = upload_fp32(ctx, base + "/conv2_b.bin")
+
+    # Upstream Whisper-style: conv1 in=mel out=state K=3 stride=1 pad=1 ;
+    # conv2 in=state out=state K=3 stride=2 pad=1.
+    var conv1 = Conv1d(conv1_w^, conv1_b^, N_MELS, N_STATE, 3, 1, 1, 1, 1, True)
+    var conv2 = Conv1d(conv2_w^, conv2_b^, N_STATE, N_STATE, 3, 2, 1, 1, 1, True)
+
+    var blocks = List[S3TokenizerBlock]()
+    for L in range(N_LAYERS):
+        var block_base = base + "/block" + String(L)
+        var blk = load_s3tokenizer_block(
+            ctx, block_base, N_STATE, INTERMEDIATE, N_HEADS, HEAD_DIM, FSMN_K,
+        )
+        blocks.append(blk^)
+
+    var proj_w = upload_fp32(ctx, base + "/project_down_w.bin")
+    var proj_b = upload_fp32(ctx, base + "/project_down_b.bin")
+    var project_down = Linear(proj_w^, proj_b^, N_STATE, 8, True)
+
+    return S3Tokenizer(
+        conv1^, conv2^, blocks^, project_down^,
+        N_MELS, N_STATE, N_HEADS, HEAD_DIM, N_LAYERS,
+    )
