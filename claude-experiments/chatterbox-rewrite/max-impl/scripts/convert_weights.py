@@ -120,16 +120,18 @@ def t3_map(k):
 
 
 def s3gen_map(k):
-    """s3gen encoder + CFM + HiFiGAN. Upstream has nested module names; we
-    flatten by top-level chunk."""
-    if k.startswith("flow."):
-        # UpsampleConformerEncoder.
-        return f"s3gen/flow/{k[5:]}"
-    if k.startswith("hift."):
-        return f"s3gen/hifigan/{k[5:]}"
-    if k.startswith("spk_embed_affine."):
-        return f"s3gen/spk_embed_affine/{k[18:]}"
-    return None
+    """s3gen weights — pass-through structure with `.` → `/` for filesystem layout.
+
+    Upstream keys are nested module paths; we mirror the tree on disk so the
+    Mojo loader can read flow/.../weight.bin directly. Top-level branches:
+      flow.*               UpsampleConformerEncoder + CFM (encoder+estimator)
+      mel2wav.*            HiFiGAN vocoder
+      speaker_encoder.*    CAMPPlus
+      tokenizer.*          Bundled S3TokenizerV2 (handled by s3tokenizer_map)
+    """
+    if k.startswith("tokenizer."):
+        return None
+    return "s3gen/" + k.replace(".", "/")
 
 
 def s3tokenizer_map(k):
