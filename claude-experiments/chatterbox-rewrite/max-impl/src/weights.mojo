@@ -729,30 +729,28 @@ def load_campplus(mut ctx: DeviceContext, base: String) raises -> CAMPPlus:
 # CFM estimator loader (real upstream shape)
 # ============================================================================
 
-def _load_groupnorm(
-    mut ctx: DeviceContext, base: String, channels: Int, num_groups: Int = 8,
-) raises -> GroupNorm1d:
-    """Load PyTorch GroupNorm: weight (γ) + bias (β), both shape (channels,)."""
-    var w = upload_fp32(ctx, base + "/weight.bin")
-    var b = upload_fp32(ctx, base + "/bias.bin")
-    return GroupNorm1d(w^, b^, channels, num_groups, Float32(1.0e-5))
-
-
 def _load_block1d(
     mut ctx: DeviceContext, base: String, c_in: Int, c_out: Int,
 ) raises -> Block1D:
-    """Block1D = Sequential(Conv1d, Mish, GroupNorm).
+    """CausalBlock1D = Sequential(CausalConv1d, Transpose, LayerNorm, Transpose, Mish).
 
     On disk:
-      {base}/block/0/{weight,bias}.bin   — Conv1d (c_out, c_in, 3)
-      {base}/block/2/{weight,bias}.bin   — GroupNorm (c_out,)
-    Activation (Mish, index 1) has no weights.
+      {base}/block/0/{weight,bias}.bin   — CausalConv1d (c_out, c_in, 3)
+      {base}/block/2/{weight,bias}.bin   — LayerNorm (c_out,)
+    (Transpose ops and Mish have no weights.)
+
+    Loader treats the conv as a normal 1D conv; the forward path pre-pads the
+    input by (k-1) on the left to realize the causal behavior, then no
+    additional pad is applied inside the conv kernel.
     """
     var cw = upload_fp32(ctx, base + "/block/0/weight.bin")
     var cb = upload_fp32(ctx, base + "/block/0/bias.bin")
-    var conv = Conv1d(cw^, cb^, c_in, c_out, 3, 1, 1, 1, 1, True)
-    var gn = _load_groupnorm(ctx, base + "/block/2", c_out)
-    return Block1D(conv^, gn^)
+    # Causal conv: padding=0 here, caller pads input by (k-1)=2 on the left.
+    var conv = Conv1d(cw^, cb^, c_in, c_out, 3, 1, 0, 1, 1, True)
+    var lw = upload_fp32(ctx, base + "/block/2/weight.bin")
+    var lb = upload_fp32(ctx, base + "/block/2/bias.bin")
+    var ln = LayerNorm(lw^, lb^, c_out, Float32(1.0e-5))
+    return Block1D(conv^, ln^)
 
 
 def _load_resnet1d(
@@ -881,9 +879,10 @@ def load_cfm_estimator_real(mut ctx: DeviceContext, base: String) raises -> CFME
         ctx, base + "/down_blocks/0/1", N_TRANSFORMER_PER_STAGE,
         D, N_HEADS, HEAD_DIM, FF_INTER,
     )
+    # is_last=True (only stage) → downsampler is CausalConv1d(k=3) (stride 1, left-pad-only).
     var d0_dn_w = upload_fp32(ctx, base + "/down_blocks/0/2/weight.bin")
     var d0_dn_b = upload_fp32(ctx, base + "/down_blocks/0/2/bias.bin")
-    var d0_downsampler = Conv1d(d0_dn_w^, d0_dn_b^, D, D, 3, 2, 1, 1, 1, True)
+    var d0_downsampler = Conv1d(d0_dn_w^, d0_dn_b^, D, D, 3, 1, 0, 1, 1, True)
     down_blocks.append(CFMDownStage(d0_resnet^, d0_trans^, d0_downsampler^))
 
     # mid_blocks: 12 stages.
@@ -904,9 +903,10 @@ def load_cfm_estimator_real(mut ctx: DeviceContext, base: String) raises -> CFME
         ctx, base + "/up_blocks/0/1", N_TRANSFORMER_PER_STAGE,
         D, N_HEADS, HEAD_DIM, FF_INTER,
     )
+    # is_last=True → upsampler is CausalConv1d(k=3) (left-pad-only).
     var u0_up_w = upload_fp32(ctx, base + "/up_blocks/0/2/weight.bin")
     var u0_up_b = upload_fp32(ctx, base + "/up_blocks/0/2/bias.bin")
-    var u0_upsampler = Conv1d(u0_up_w^, u0_up_b^, D, D, 3, 1, 1, 1, 1, True)
+    var u0_upsampler = Conv1d(u0_up_w^, u0_up_b^, D, D, 3, 1, 0, 1, 1, True)
     up_blocks.append(CFMUpStage(u0_resnet^, u0_trans^, u0_upsampler^))
 
     # final_block: just a Block1D — Conv1d + GroupNorm.
