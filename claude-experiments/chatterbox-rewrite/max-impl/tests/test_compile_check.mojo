@@ -15,9 +15,10 @@ from mel_extractor import reflect_pad_1d
 from perceiver import Perceiver, PerceiverBlock
 from cond_enc import T3CondEnc
 from conformer import ConformerLayer, FeedForward, ConformerConvModule
-from cfm import CFMEstimator
-from hifigan import HiFiGAN
-from s3gen import S3Gen
+from cfm import CFMEstimator, cfm_euler_solve, cfm_estimator_forward
+from cfm_blocks import CausalResnetBlock1D, BasicTransformerBlock
+from hifigan import HiFiGAN, hifigan_forward, HiFiGANResBlock, HiFiGANUpsample
+from s3gen import S3Gen, UpsampleConformerEncoder, s3gen_synthesize
 
 
 def test_compile_check() raises:
