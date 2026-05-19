@@ -29,6 +29,8 @@ from upsample_encoder import upsample_conformer_forward
 from cfm_estimator_new import cfm_solve_euler, gaussian_noise_fill
 from hift_generator import (
     hift_decode_trunk, istft_forward, hann_window_periodic_fill,
+    f0_predictor_forward, f0_upsample_nearest, source_module_forward,
+    build_s_stft_from_signal,
 )
 
 
@@ -186,11 +188,42 @@ def test_text_to_audio() raises:
     # ups_rates [8, 5, 3] = 120; +1 reflection; hop=4.
     var T_HIFT = T_MEL * 120 + 1
     var T_AUDIO = (T_HIFT - 1) * HOP
-    var s_stft_dummy = ctx.enqueue_create_buffer[DType.float32](B * N_OUT * 1)
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Source path: mel → f0_predictor → upsample → SourceModuleHnNSF → STFT → s_stft
+    # ─────────────────────────────────────────────────────────────────────
+    print("[tts] f0_predictor(mel)...")
+    var f0 = ctx.enqueue_create_buffer[DType.float32](B * T_MEL)
+    f0_predictor_forward(ctx, hift.f0_predictor, x, f0, B, T_MEL)
+
+    # Upsample F0 by 480 (= 8*5*3*4).
+    var T_AUDIO_FULL = T_MEL * 480
+    var f0_up = ctx.enqueue_create_buffer[DType.float32](B * T_AUDIO_FULL)
+    print("[tts] f0_upsample (", T_MEL, " → ", T_AUDIO_FULL, ")...")
+    f0_upsample_nearest(ctx, f0, f0_up, B, T_MEL, 480)
+
+    print("[tts] source_module (sine + noise + tanh mixer)...")
+    var sine_merge = ctx.enqueue_create_buffer[DType.float32](B * 1 * T_AUDIO_FULL)
+    source_module_forward(ctx, hift.m_source, f0_up, sine_merge,
+                           B, T_AUDIO_FULL,
+                           sampling_rate=24000, harmonic_num=8,
+                           sine_amp=Float32(0.1), noise_std=Float32(0.003),
+                           voiced_threshold=Float32(10.0))
+
+    # Forward STFT of sine_merge (squeeze the channel dim — it's effectively (B, T_audio)).
+    print("[tts] STFT(source)...")
+    # The STFT used by HiFT has n_fft=16, hop=4. So n_frames = T_AUDIO_FULL / hop + 1.
+    var T_S_FRAMES = T_AUDIO_FULL // HOP + 1
+    var window_s = ctx.enqueue_create_buffer[DType.float32](N_FFT)
+    hann_window_periodic_fill(ctx, window_s, N_FFT)
+    var s_stft = ctx.enqueue_create_buffer[DType.float32](B * N_OUT * T_S_FRAMES)
+    build_s_stft_from_signal(ctx, sine_merge, window_s, s_stft,
+                              B, T_AUDIO_FULL, N_FFT, HOP, T_S_FRAMES)
+
     var spec = ctx.enqueue_create_buffer[DType.float32](B * N_OUT * T_HIFT)
-    print("[tts] HiFT trunk (T_mel=", T_MEL, " → T_frames=", T_HIFT, ")...")
-    hift_decode_trunk(ctx, hift, x, s_stft_dummy, spec,
-                      B, T_MEL, 1, T_HIFT, use_source=False)
+    print("[tts] HiFT trunk w/ source fusion (T_mel=", T_MEL, " → T_frames=", T_HIFT, ")...")
+    hift_decode_trunk(ctx, hift, x, s_stft, spec,
+                      B, T_MEL, T_S_FRAMES, T_HIFT, use_source=True)
 
     var window = ctx.enqueue_create_buffer[DType.float32](N_FFT)
     hann_window_periodic_fill(ctx, window, N_FFT)

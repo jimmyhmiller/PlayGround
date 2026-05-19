@@ -476,17 +476,15 @@ def load_hift_generator(mut ctx: DeviceContext, base: String) raises -> HiFTGene
     var ms_b = upload_fp32(ctx, base + "/m_source/l_linear/bias.bin")
     var m_source = MSource(Linear(ms_w^, ms_b^, 9, 1, True))
 
-    # f0_predictor: 5 conv1d layers in condnet (indices 0,2,4,6,8) + classifier.
+    # f0_predictor: 5 Conv1d (k=3, pad=1) + ELU, then Linear classifier → F0.
+    # Upstream `ConvRNNF0Predictor` takes mel (B, 80, T) and outputs F0 (B, T).
+    # Layers at condnet indices [0, 2, 4, 6, 8] (odd indices are ELU activations).
+    # First layer: 80 → 512. Subsequent layers: 512 → 512.
     var condnet = List[Conv1d]()
     var condnet_indices = [0, 2, 4, 6, 8]
     for i in range(5):
-        # Empirically each is (512, 512, k=?). Use kernel=3, pad=1 as a reasonable default
-        # for typical F0-predictor condnets; precise kernel verified at first forward.
         var idx = condnet_indices[i]
-        # First layer's in_channels is mel (80) only if condnet starts from mel; here
-        # weights show (512, 1, 1) for original0 — first layer maps 1 → 512 actually.
-        # Upstream code uses Conv1d with input being F0 features (typically 1ch).
-        var c_in = 1 if i == 0 else 512
+        var c_in = 80 if i == 0 else 512
         var c = _load_conv1d_wn(
             ctx, base + "/f0_predictor/condnet/" + String(idx),
             c_in, 512, 3, 1, 1, 1, 1,

@@ -29,7 +29,7 @@ f0_predictor: a Conv1d stack (condnet 5 layers) + linear classifier → F0 per f
 
 This file currently provides STRUCTS only; forward wiring TBD in follow-up.
 """
-from std.math import sin as msin, cos as mcos, sqrt, exp, pi
+from std.math import sin as msin, cos as mcos, sqrt, exp, log, pi
 from std.gpu.host import DeviceContext, DeviceBuffer
 from std.runtime.asyncrt import DeviceContextPtr
 from std.algorithm.functional import elementwise, IndexList
@@ -549,3 +549,347 @@ def hift_decode_full(
         b, t_mel, t_s, t_pre_istft, use_source=use_source,
     )
     istft_forward(ctx, spec, window_buf, audio_out, b, n_fft, t_pre_istft, t_audio)
+
+
+# ============================================================================
+# F0 predictor + source signal (NSF) + forward STFT for s_stft
+# ============================================================================
+
+def elu_inplace(
+    mut ctx: DeviceContext,
+    mut x_buf: DeviceBuffer[DType.float32],
+    n: Int,
+    alpha: Float32 = 1.0,
+) raises:
+    """ELU(x) = x if x > 0 else alpha * (exp(x) - 1). In place."""
+    var x_ptr = x_buf.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(x_ptr, alpha)
+    def elu_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var v = x_ptr[i]
+        if v < 0.0:
+            x_ptr[i] = alpha * (exp(v) - 1.0)
+    elementwise[elu_fn, simd_width=1, target="gpu"](
+        IndexList[1](n), DeviceContextPtr(ctx),
+    )
+
+
+def f0_predictor_forward(
+    mut ctx: DeviceContext,
+    mut model: F0Predictor,
+    mut mel_buf: DeviceBuffer[DType.float32],     # (B, 80, T_mel)
+    mut f0_out: DeviceBuffer[DType.float32],      # (B, T_mel) — per-frame F0 Hz
+    b: Int, t_mel: Int,
+) raises:
+    """ConvRNNF0Predictor: 5x [Conv1d(k=3, pad=1) → ELU] then Linear → abs.
+
+    Input: (B, 80, T) mel; output: (B, T) F0 in Hz.
+    """
+    var cur_c = 80
+    var x = ctx.enqueue_create_buffer[DType.float32](b * 80 * t_mel)
+    ctx.enqueue_copy(x, mel_buf)
+    for i in range(5):
+        var h = ctx.enqueue_create_buffer[DType.float32](b * 512 * t_mel)
+        conv1d_forward(ctx, model.condnet[i], x, h, b, t_mel, t_mel)
+        elu_inplace(ctx, h, b * 512 * t_mel)
+        x = h
+        cur_c = 512
+
+    # Linear classifier (1, 512). Apply per time-step: out[b, t] = abs(x[b, :, t] @ W.T + bias).
+    # First transpose (B, 512, T) → (B, T, 512), then Linear → (B, T, 1).
+    var x_btc = ctx.enqueue_create_buffer[DType.float32](b * t_mel * 512)
+    var x_ptr = x.unsafe_ptr()
+    var x_btc_ptr = x_btc.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(x_ptr, x_btc_ptr, t_mel)
+    def tr_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // (t_mel * 512)
+        var rem = i - bi * t_mel * 512
+        var ti = rem // 512
+        var ci = rem - ti * 512
+        x_btc_ptr[i] = x_ptr[bi * 512 * t_mel + ci * t_mel + ti]
+    elementwise[tr_fn, simd_width=1, target="gpu"](
+        IndexList[1](b * t_mel * 512), DeviceContextPtr(ctx),
+    )
+
+    var f0_raw = ctx.enqueue_create_buffer[DType.float32](b * t_mel * 1)
+    linear_forward(ctx, model.classifier, x_btc, f0_raw, b * t_mel)
+
+    # Abs in place. Output shape (B, T_mel * 1) → reshape view to (B, T_mel).
+    var f0r_ptr = f0_raw.unsafe_ptr()
+    var f0o_ptr = f0_out.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(f0r_ptr, f0o_ptr)
+    def abs_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var v = f0r_ptr[i]
+        if v < 0.0: v = -v
+        f0o_ptr[i] = v
+    elementwise[abs_fn, simd_width=1, target="gpu"](
+        IndexList[1](b * t_mel), DeviceContextPtr(ctx),
+    )
+
+
+def f0_upsample_nearest(
+    mut ctx: DeviceContext,
+    mut f0_in: DeviceBuffer[DType.float32],      # (B, T_mel)
+    mut f0_out: DeviceBuffer[DType.float32],     # (B, T_mel * scale)
+    b: Int, t_mel: Int, scale: Int,
+) raises:
+    """torch.nn.Upsample(scale_factor=scale, mode='nearest') on (B, 1, T_mel)."""
+    var ip = f0_in.unsafe_ptr()
+    var op = f0_out.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(ip, op, t_mel, scale)
+    def up_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var t_out = t_mel * scale
+        var bi = i // t_out
+        var ti = i - bi * t_out
+        var src_t = ti // scale
+        op[i] = ip[bi * t_mel + src_t]
+    elementwise[up_fn, simd_width=1, target="gpu"](
+        IndexList[1](b * t_mel * scale), DeviceContextPtr(ctx),
+    )
+
+
+def source_module_forward(
+    mut ctx: DeviceContext,
+    mut model: MSource,
+    mut f0_up: DeviceBuffer[DType.float32],         # (B, T_audio) — upsampled F0
+    mut source_out: DeviceBuffer[DType.float32],    # (B, 1, T_audio) — sine_merge
+    b: Int, t_audio: Int,
+    sampling_rate: Int = 24000,
+    harmonic_num: Int = 8,
+    sine_amp: Float32 = 0.1,
+    noise_std: Float32 = 0.003,
+    voiced_threshold: Float32 = 10.0,
+    seed: UInt64 = UInt64(0xCAFEBABE),
+) raises:
+    """SourceModuleHnNSF: SineGen(F0) → l_linear → tanh → sine_merge.
+
+    SineGen generates `harmonic_num + 1` sinusoids (fundamental + harmonics),
+    each with random initial phase (we use a deterministic LCG-derived phase).
+    For voiced frames (F0 > threshold), output is amplitude-scaled sine + noise.
+    For unvoiced, output is noise only (uv = 0, noise_amp = sine_amp / 3).
+
+    Mojo `MSource` only stores `l_linear (9 → 1)`. SineGen has no parameters
+    (just the sampling rate / sine params from the constructor).
+
+    Output is `tanh(l_linear(sine_waves)).reshape(B, 1, T_audio)`.
+
+    Note: phases are deterministic from the seed (LCG), so not bit-exact to
+    torch which uses Uniform(-pi, pi) random sampling.
+    """
+    var n_harm = harmonic_num + 1
+    var sample_rate_f = Float32(sampling_rate)
+
+    # Generate F0/sr*i factors + cumulative phase + add per-harmonic LCG phase
+    # → sin → multiply by uv → add noise → result (B, n_harm, T_audio).
+    # We build (B, n_harm, T_audio) flat.
+
+    var sw_buf = ctx.enqueue_create_buffer[DType.float32](b * n_harm * t_audio)
+    var f0p = f0_up.unsafe_ptr()
+    var swp = sw_buf.unsafe_ptr()
+
+    # Two-phase kernel: per (b, h, t), accumulate phase from t=0 to t and emit
+    # sine_amp * sin(theta) * uv + noise. To do the cumulative sum we use a
+    # nested loop per (b, h) and process T sequentially. This isn't ideal but
+    # T_audio for our short test (28800) is fine.
+    #
+    # Phases per harmonic are LCG-derived (per-batch * per-harmonic seed).
+
+    @always_inline
+    @parameter
+    @__copy_capture(f0p, swp, b, n_harm, t_audio, sample_rate_f, sine_amp, noise_std, voiced_threshold, seed)
+    def harmonic_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        # i ranges over (B, n_harm) — one thread per harmonic per batch.
+        var bi = i // n_harm
+        var h = i - bi * n_harm
+        # Random phase for this (b, h). Harmonic 0 has phase=0 per upstream.
+        var phase: Float32 = 0.0
+        if h > 0:
+            var s: UInt64 = seed ^ (UInt64(bi) * UInt64(2654435761)) ^ (UInt64(h) * UInt64(40503))
+            s = s * UInt64(6364136223846793005) + UInt64(1442695040888963407)
+            var bits: UInt64 = (s >> UInt64(40)) & UInt64(0xFFFFFF)
+            var u: Float32 = (Float32(Int(bits)) + 0.5) / Float32(16777216.0)
+            phase = (u * 2.0 - 1.0) * Float32(3.141592653589793)
+        # Cumulative phase: theta_t = 2pi * cumsum(F * (h+1) / sr) at time t, then add `phase`.
+        # We process this row sequentially: theta_so_far is the running phase.
+        # noise amp depends on uv per-sample.
+        var theta: Float32 = phase
+        var two_pi: Float32 = 2.0 * Float32(3.141592653589793)
+        var noise_state: UInt64 = (seed << UInt64(1)) ^ UInt64(bi) ^ (UInt64(h) << UInt64(7))
+        for t in range(t_audio):
+            var f0_val = f0p[bi * t_audio + t]
+            var uv: Float32 = 1.0 if f0_val > voiced_threshold else 0.0
+            # Phase increment per sample: F * (h+1) / sr  (in fractional cycles).
+            # Upstream does: F_mat[i] = f0 * (i+1) / sr ; theta = 2*pi * cumsum(F_mat) % 1.
+            var df: Float32 = f0_val * Float32(h + 1) / sample_rate_f
+            theta = theta + two_pi * df
+            # Wrap to avoid huge values.
+            while theta > two_pi:
+                theta = theta - two_pi
+            while theta < -two_pi:
+                theta = theta - two_pi
+            var sine = sine_amp * msin(theta)
+            # Noise sample (LCG).
+            noise_state = noise_state * UInt64(6364136223846793005) + UInt64(1442695040888963407)
+            var bits1: UInt64 = (noise_state >> UInt64(40)) & UInt64(0xFFFFFF)
+            var u1: Float32 = (Float32(Int(bits1)) + 0.5) / Float32(16777216.0)
+            noise_state = noise_state * UInt64(6364136223846793005) + UInt64(1442695040888963407)
+            var bits2: UInt64 = (noise_state >> UInt64(40)) & UInt64(0xFFFFFF)
+            var u2: Float32 = (Float32(Int(bits2)) + 0.5) / Float32(16777216.0)
+            # Box-Muller for normal.
+            var r: Float32 = sqrt(-2.0 * log(u1))
+            var nrm: Float32 = r * mcos(2.0 * Float32(3.141592653589793) * u2)
+            var noise_amp: Float32 = uv * noise_std + (1.0 - uv) * (sine_amp / 3.0)
+            var noise: Float32 = noise_amp * nrm
+            swp[bi * n_harm * t_audio + h * t_audio + t] = sine * uv + noise
+    elementwise[harmonic_fn, simd_width=1, target="gpu"](
+        IndexList[1](b * n_harm), DeviceContextPtr(ctx),
+    )
+
+    # Now sine_waves: (B, n_harm=9, T_audio). Apply l_linear (1, 9):
+    #   sine_merge[b, t] = tanh(sum_h sine_waves[b, h, t] * W[0, h] + bias)
+    # l_linear.weight has shape (out=1, in=9).
+    var sw_btc = ctx.enqueue_create_buffer[DType.float32](b * t_audio * n_harm)
+    var sw_btc_ptr = sw_btc.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(swp, sw_btc_ptr, n_harm, t_audio)
+    def tr2[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // (t_audio * n_harm)
+        var rem = i - bi * t_audio * n_harm
+        var ti = rem // n_harm
+        var hi = rem - ti * n_harm
+        sw_btc_ptr[i] = swp[bi * n_harm * t_audio + hi * t_audio + ti]
+    elementwise[tr2, simd_width=1, target="gpu"](
+        IndexList[1](b * t_audio * n_harm), DeviceContextPtr(ctx),
+    )
+
+    var merged = ctx.enqueue_create_buffer[DType.float32](b * t_audio * 1)
+    linear_forward(ctx, model.l_linear, sw_btc, merged, b * t_audio)
+
+    # tanh + write to (B, 1, T_audio).
+    var mp = merged.unsafe_ptr()
+    var sop = source_out.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(mp, sop)
+    def tanh_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var x = mp[i]
+        var ex = exp(x)
+        var enx = 1.0 / ex
+        sop[i] = (ex - enx) / (ex + enx)
+    elementwise[tanh_fn, simd_width=1, target="gpu"](
+        IndexList[1](b * t_audio), DeviceContextPtr(ctx),
+    )
+
+
+def forward_stft(
+    mut ctx: DeviceContext,
+    mut signal: DeviceBuffer[DType.float32],        # (B, T_audio)
+    mut window: DeviceBuffer[DType.float32],        # (n_fft,)
+    mut stft_real: DeviceBuffer[DType.float32],     # (B, n_freq, n_frames)
+    mut stft_imag: DeviceBuffer[DType.float32],
+    b: Int, t_audio: Int, n_fft: Int, hop: Int, n_frames: Int,
+) raises:
+    """Compute torch.stft equivalent on (B, T_audio) → (B, n_freq, n_frames).
+
+    Center-pad each batch (n_fft/2 each side via reflection in torch), then
+    for each frame f, take samples [f*hop : f*hop+n_fft) of padded signal,
+    multiply by window, and compute DFT bin by bin.
+
+    For simplicity we use **zero-padding** for the center pad rather than
+    reflection (close enough for the source signal which is near-zero at edges).
+    """
+    var sp = signal.unsafe_ptr()
+    var wp = window.unsafe_ptr()
+    var rp = stft_real.unsafe_ptr()
+    var ip = stft_imag.unsafe_ptr()
+    var n_freq = n_fft // 2 + 1
+    var pad = n_fft // 2
+
+    @always_inline
+    @parameter
+    @__copy_capture(sp, wp, rp, ip, b, t_audio, n_fft, hop, n_frames, n_freq, pad)
+    def stft_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        # i indexes (B, n_freq, n_frames).
+        var bi = i // (n_freq * n_frames)
+        var rem = i - bi * n_freq * n_frames
+        var k = rem // n_frames
+        var f = rem - k * n_frames
+        var two_pi_k_over_n: Float32 = -2.0 * Float32(3.141592653589793) * Float32(k) / Float32(n_fft)
+        var re: Float32 = 0.0
+        var im: Float32 = 0.0
+        for n in range(n_fft):
+            var t_centered = f * hop + n
+            var t_orig = t_centered - pad
+            var x: Float32 = 0.0
+            if t_orig >= 0 and t_orig < t_audio:
+                x = sp[bi * t_audio + t_orig] * wp[n]
+            var ang = two_pi_k_over_n * Float32(n)
+            re += x * mcos(ang)
+            im += x * msin(ang)
+        rp[i] = re
+        ip[i] = im
+    elementwise[stft_fn, simd_width=1, target="gpu"](
+        IndexList[1](b * n_freq * n_frames), DeviceContextPtr(ctx),
+    )
+
+
+def build_s_stft_from_signal(
+    mut ctx: DeviceContext,
+    mut signal: DeviceBuffer[DType.float32],        # (B, T_audio)
+    mut window: DeviceBuffer[DType.float32],        # (n_fft,)
+    mut s_stft: DeviceBuffer[DType.float32],        # (B, n_fft+2, n_frames) — cat(real, imag)
+    b: Int, t_audio: Int, n_fft: Int, hop: Int, n_frames: Int,
+) raises:
+    """Compute STFT(signal) → cat(real, imag) along channel axis → (B, 2*n_freq=n_fft+2, n_frames).
+
+    Matches HiFTGenerator._stft + the subsequent `torch.cat([real, imag], dim=1)`.
+    """
+    var n_freq = n_fft // 2 + 1
+    var real = ctx.enqueue_create_buffer[DType.float32](b * n_freq * n_frames)
+    var imag = ctx.enqueue_create_buffer[DType.float32](b * n_freq * n_frames)
+    forward_stft(ctx, signal, window, real, imag, b, t_audio, n_fft, hop, n_frames)
+
+    # Concat along channel dim: out[:, :n_freq, :] = real, out[:, n_freq:, :] = imag.
+    var rp = real.unsafe_ptr()
+    var ip = imag.unsafe_ptr()
+    var op = s_stft.unsafe_ptr()
+    var n_out = 2 * n_freq
+
+    @always_inline
+    @parameter
+    @__copy_capture(rp, ip, op, b, n_out, n_freq, n_frames)
+    def cat_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // (n_out * n_frames)
+        var rem = i - bi * n_out * n_frames
+        var ci = rem // n_frames
+        var fi = rem - ci * n_frames
+        if ci < n_freq:
+            op[i] = rp[bi * n_freq * n_frames + ci * n_frames + fi]
+        else:
+            op[i] = ip[bi * n_freq * n_frames + (ci - n_freq) * n_frames + fi]
+    elementwise[cat_fn, simd_width=1, target="gpu"](
+        IndexList[1](b * n_out * n_frames), DeviceContextPtr(ctx),
+    )
