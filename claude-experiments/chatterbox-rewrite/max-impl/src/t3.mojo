@@ -26,11 +26,15 @@ struct T3(Copyable, Movable):
     var final_norm: RMSNorm
     var speech_emb: Embedding
     var speech_head: Linear        # (V_speech, D) → logits matmul (we use x @ W.T)
+    var text_emb: Embedding        # (V_text=704, D) text token embedding
+    var text_pos_emb: Embedding    # (max_text_seq_len, D) positional embedding
+    var speech_pos_emb: Embedding  # (max_speech_seq_len, D) speech positional embedding
     var n_layers: Int
     var n_heads: Int
     var head_dim: Int
     var d_model: Int               # = n_heads * head_dim
     var v_speech: Int
+    var v_text: Int
 
 
 def t3_prefill_forward(

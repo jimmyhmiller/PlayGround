@@ -168,8 +168,18 @@ def load_t3(mut ctx: DeviceContext, base: String) raises -> T3:
     zero_d.enqueue_fill(0.0)
     var speech_head = Linear(speech_head_w^, zero_d^, HIDDEN, V_SPEECH, False)
 
-    return T3(blocks^, final_norm^, speech_emb^, speech_head^,
-                N_LAYERS, N_HEADS, HEAD_DIM, HIDDEN, V_SPEECH)
+    var V_TEXT = 704
+    var MAX_TEXT_POS = 2050
+    var MAX_SPEECH_POS = 4100
+    var text_emb_w = upload_fp32(ctx, base + "/text_emb_w.bin")
+    var text_emb = Embedding(text_emb_w^, V_TEXT, HIDDEN)
+    var text_pos_w = upload_fp32(ctx, base + "/text_pos_w.bin")
+    var text_pos_emb = Embedding(text_pos_w^, MAX_TEXT_POS, HIDDEN)
+    var speech_pos_w = upload_fp32(ctx, base + "/speech_pos_w.bin")
+    var speech_pos_emb = Embedding(speech_pos_w^, MAX_SPEECH_POS, HIDDEN)
+
+    return T3(blocks^, final_norm^, speech_emb^, speech_head^, text_emb^, text_pos_emb^,
+                speech_pos_emb^, N_LAYERS, N_HEADS, HEAD_DIM, HIDDEN, V_SPEECH, V_TEXT)
 
 
 # ============================================================================

@@ -31,6 +31,8 @@ from weights import (
     load_hift_generator, upload_fp32,
 )
 from t3_generate import t3_generate_cfg, t3_generate_cfg_sample
+from bpe_tokenizer import load_tokenizer
+from text_embed import text_to_input_ids, build_text_emb, build_bos_emb, build_rope_tables
 from upsample_encoder import upsample_conformer_forward
 from cfm_estimator_new import cfm_solve_euler, gaussian_noise_fill
 from hift_generator import (
@@ -74,12 +76,20 @@ def test_end_to_end() raises:
     # Step 1: Build T3 CFG-doubled prefix from voice/text conditioning.
     # ─────────────────────────────────────────────────────────────────────
     var cond_emb = upload_fp32(ctx, text_dir + "cond_emb.bin")
-    var text_emb = upload_fp32(ctx, text_dir + "text_emb.bin")
-    var bos_emb = upload_fp32(ctx, text_dir + "bos_emb.bin")
-    var text_emb_t = load_fp32(text_dir + "text_emb.bin")
-    var T_TEXT = text_emb_t.shape[1]
+
+    # Build text_emb + bos_emb in Mojo from raw text.
+    var text = "the quick brown fox"
+    var tok_dir = "../mojo-t3/tests/fixtures/tokenizer/"
+    var tok = load_tokenizer(tok_dir + "vocab.txt", tok_dir + "merges.txt")
+    var ids = text_to_input_ids(text, tok)
+    var T_TEXT = len(ids)
     var T_PREFIX = T_COND + T_TEXT + T_BOS
-    print("[e2e] T_PREFIX=", T_PREFIX, " (T_COND=", T_COND, " T_TEXT=", T_TEXT, " T_BOS=", T_BOS, ")")
+    print("[e2e] tokenized '", text, "' →", T_TEXT, "ids; T_PREFIX=", T_PREFIX)
+
+    var text_emb = ctx.enqueue_create_buffer[DType.float32](B * T_TEXT * D)
+    build_text_emb(ctx, t3, ids, text_emb)
+    var bos_emb = ctx.enqueue_create_buffer[DType.float32](B * 1 * D)
+    build_bos_emb(ctx, t3, bos_emb)
 
     var B2 = 2 * B
     var prefix = ctx.enqueue_create_buffer[DType.float32](B2 * T_PREFIX * D)
@@ -112,8 +122,9 @@ def test_end_to_end() raises:
         IndexList[1](B2 * T_PREFIX * D), DeviceContextPtr(ctx),
     )
 
-    var cos_full = upload_fp32(ctx, text_dir + "cos_full.bin")
-    var sin_full = upload_fp32(ctx, text_dir + "sin_full.bin")
+    var cos_full = ctx.enqueue_create_buffer[DType.float32](MAX_CTX * 64)
+    var sin_full = ctx.enqueue_create_buffer[DType.float32](MAX_CTX * 64)
+    build_rope_tables(ctx, MAX_CTX, 64, cos_full, sin_full)
     var t3_mask = ctx.enqueue_create_buffer[DType.float32](T_PREFIX * T_PREFIX)
     with t3_mask.map_to_host() as h:
         for r in range(T_PREFIX):
@@ -122,7 +133,8 @@ def test_end_to_end() raises:
                     h[r * T_PREFIX + c] = -1.0e30
                 else:
                     h[r * T_PREFIX + c] = 0.0
-    var speech_pos = upload_fp32(ctx, text_dir + "speech_pos_emb_full.bin")
+    # speech_pos_emb table is loaded as part of T3.
+    var speech_pos = t3.speech_pos_emb.table
 
     print("[e2e] Mojo T3 generate w/ top-p sampling (max_new=", MAX_NEW, " CFG=", T3_CFG, ")...")
     var generated = t3_generate_cfg_sample(
