@@ -257,8 +257,8 @@ def load_s3tokenizer(mut ctx: DeviceContext, base: String) raises -> S3Tokenizer
     """
     var N_MELS = 128
     var N_STATE = 1280
-    var N_HEADS = 1            # FSMN multi-head uses single head in this checkpoint
-    var HEAD_DIM = 1280
+    var N_HEADS = 20
+    var HEAD_DIM = 64
     var INTERMEDIATE = 5120
     var N_LAYERS = 6
     var FSMN_K = 31
@@ -268,9 +268,8 @@ def load_s3tokenizer(mut ctx: DeviceContext, base: String) raises -> S3Tokenizer
     var conv2_w = upload_fp32(ctx, base + "/conv2_w.bin")
     var conv2_b = upload_fp32(ctx, base + "/conv2_b.bin")
 
-    # Upstream Whisper-style: conv1 in=mel out=state K=3 stride=1 pad=1 ;
-    # conv2 in=state out=state K=3 stride=2 pad=1.
-    var conv1 = Conv1d(conv1_w^, conv1_b^, N_MELS, N_STATE, 3, 1, 1, 1, 1, True)
+    # S3TokenizerV2 (25hz): both convs stride=2 → 4x downsample total.
+    var conv1 = Conv1d(conv1_w^, conv1_b^, N_MELS, N_STATE, 3, 2, 1, 1, 1, True)
     var conv2 = Conv1d(conv2_w^, conv2_b^, N_STATE, N_STATE, 3, 2, 1, 1, 1, True)
 
     var blocks = List[S3TokenizerBlock]()
