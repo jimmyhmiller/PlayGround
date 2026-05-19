@@ -26,7 +26,7 @@ from weights import (
     load_hift_generator, upload_fp32,
 )
 from upsample_encoder import upsample_conformer_forward
-from cfm_estimator_new import cfm_solve_euler, gaussian_noise_fill
+from cfm_estimator_new import cfm_solve_euler
 from hift_generator import (
     hift_decode_trunk, istft_forward, hann_window_periodic_fill,
     f0_predictor_forward, f0_upsample_nearest, source_module_forward,
@@ -37,11 +37,7 @@ from hift_generator import (
 comptime B = 1
 comptime MEL = 80
 comptime T_PROMPT_TOKEN = 250
-comptime T_GEN_TOKEN = 39
-comptime T_TOTAL_TOKEN = T_PROMPT_TOKEN + T_GEN_TOKEN   # 289
-comptime T_TOTAL_MEL = 2 * T_TOTAL_TOKEN                 # 578
 comptime T_PROMPT_MEL = 500
-comptime T_OUT_MEL = T_TOTAL_MEL - T_PROMPT_MEL          # 78
 comptime N_FFT = 16
 comptime HOP = 4
 comptime N_OUT = 18
@@ -80,10 +76,14 @@ def test_synth_with_prompt() raises:
     var hift = load_hift_generator(ctx, "weights/s3gen/mel2wav")
 
     # ─────────────────────────────────────────────────────────────────────
-    # 1. Build token = cat(prompt_token, speech_tokens) → (1, 289)
+    # 1. Build token = cat(prompt_token, speech_tokens) — sizes derived from dump.
     # ─────────────────────────────────────────────────────────────────────
     var prompt_tok = load_i64(fix + "prompt_token.bin")
     var speech_tok = load_i64(fix + "speech_tokens.bin")
+    var T_GEN_TOKEN = speech_tok.numel()
+    var T_TOTAL_TOKEN = T_PROMPT_TOKEN + T_GEN_TOKEN
+    var T_TOTAL_MEL = 2 * T_TOTAL_TOKEN
+    var T_OUT_MEL = T_TOTAL_MEL - T_PROMPT_MEL
     var tok_buf = ctx.enqueue_create_buffer[DType.int64](B * T_TOTAL_TOKEN)
     with tok_buf.map_to_host() as h:
         for i in range(T_PROMPT_TOKEN):
@@ -113,7 +113,7 @@ def test_synth_with_prompt() raises:
 
     @always_inline
     @parameter
-    @__copy_capture(pf_ptr, cond_ptr)
+    @__copy_capture(pf_ptr, cond_ptr, T_TOTAL_MEL)
     def cond_fill[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
         var i = idx[0]
         # i indexes (B, T_PROMPT_MEL, MEL).
@@ -128,11 +128,10 @@ def test_synth_with_prompt() raises:
     )
 
     # ─────────────────────────────────────────────────────────────────────
-    # 4. Load real spks (post-affine) and noise z.
+    # 4. Load real spks (post-affine) and the exact noise z upstream used.
     # ─────────────────────────────────────────────────────────────────────
     var spks = upload_fp32(ctx, fix + "embedding_normed_affine.bin")
-    var x = ctx.enqueue_create_buffer[DType.float32](B * MEL * T_TOTAL_MEL)
-    gaussian_noise_fill(ctx, x, B * MEL * T_TOTAL_MEL, UInt64(0xC0FFEE), Float32(1.0))
+    var x = upload_fp32(ctx, fix + "cfm_noise_z.bin")
 
     var mask = ctx.enqueue_create_buffer[DType.float32](B * T_TOTAL_MEL)
     mask.enqueue_fill(1.0)
@@ -154,7 +153,7 @@ def test_synth_with_prompt() raises:
 
     @always_inline
     @parameter
-    @__copy_capture(x_ptr, mo_ptr)
+    @__copy_capture(x_ptr, mo_ptr, T_TOTAL_MEL, T_OUT_MEL)
     def trim[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
         var i = idx[0]
         var bi = i // (MEL * T_OUT_MEL)

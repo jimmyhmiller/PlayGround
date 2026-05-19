@@ -766,15 +766,20 @@ def cfm_solve_euler(
     mut cond_buf: DeviceBuffer[DType.float32],    # (B, 80, T) prompt cond (zeros if no prompt)
     mut mask_buf: DeviceBuffer[DType.float32],    # (B, 1, T)
     b: Int, t: Int, n_steps: Int, cfg_rate: Float32,
+    use_cosine_schedule: Bool = True,
 ) raises:
     """Fixed-step Euler integration of the CFM ODE with classifier-free guidance.
 
-    For each step (t_cur, t_next) in linspace(0, 1, n_steps + 1):
+    For each step (t_cur, t_next) in t_span:
        Build doubled inputs: first B = conditioned (real spks/mu/cond),
                             second B = unconditioned (zeros for spks/mu/cond).
        Run estimator on the doubled batch.
        Split, combine: dxdt = (1+cfg) * cond - cfg * uncond.
        x = x + (t_next - t_cur) * dxdt.
+
+    Upstream uses a cosine schedule:
+        t_span = 1 - cos(linspace(0, 1, n_steps+1) * pi/2)
+    Set use_cosine_schedule=False for the legacy linear schedule.
 
     For inference B=1, the doubled batch has 2 samples.
     """
@@ -791,10 +796,19 @@ def cfm_solve_euler(
     var dxdt_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL * t)
 
     var dt_per_step: Float32 = 1.0 / Float32(n_steps)
+    comptime PI_HALF: Float32 = 1.5707963267948966
 
     for step in range(n_steps):
-        var t_cur: Float32 = Float32(step) * dt_per_step
-        var t_next: Float32 = Float32(step + 1) * dt_per_step
+        var lin_cur: Float32 = Float32(step) * dt_per_step
+        var lin_next: Float32 = Float32(step + 1) * dt_per_step
+        var t_cur: Float32
+        var t_next: Float32
+        if use_cosine_schedule:
+            t_cur = 1.0 - mcos(lin_cur * PI_HALF)
+            t_next = 1.0 - mcos(lin_next * PI_HALF)
+        else:
+            t_cur = lin_cur
+            t_next = lin_next
         var dt = t_next - t_cur
 
         # Populate doubled inputs.

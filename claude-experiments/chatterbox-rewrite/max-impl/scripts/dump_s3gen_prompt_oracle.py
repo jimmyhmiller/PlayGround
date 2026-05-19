@@ -41,7 +41,12 @@ def write_i64(path, arr):
 
 
 def main():
+    import random
     from chatterbox.tts import ChatterboxTTS
+
+    torch.manual_seed(0)
+    np.random.seed(0)
+    random.seed(0)
 
     OUT = "weights/s3gen_prompt"
     os.makedirs(OUT, exist_ok=True)
@@ -99,12 +104,25 @@ def main():
     orig_flow_inference = m.s3gen.flow_inference
     captured_mel = {}
     captured_tokens = {}
+    captured_noise = {}
     def my_flow_inference(speech_tokens, *args, **kwargs):
         captured_tokens["speech_tokens"] = speech_tokens.detach().clone()
         out = orig_flow_inference(speech_tokens, *args, **kwargs)
         captured_mel["mel"] = out.detach().clone()
         return out
     m.s3gen.flow_inference = my_flow_inference
+
+    # Monkey-patch torch.randn_like inside CausalConditionalCFM.forward so we capture
+    # the exact noise tensor the upstream CFM sees.
+    import torch as _torch
+    _orig_randn_like = _torch.randn_like
+    def _capturing_randn_like(t, *a, **kw):
+        z = _orig_randn_like(t, *a, **kw)
+        # Capture only the s3gen CFM call: it's (1, 80, T_mel_total).
+        if z.dim() == 3 and z.shape[1] == 80 and "z" not in captured_noise:
+            captured_noise["z"] = z.detach().clone()
+        return z
+    _torch.randn_like = _capturing_randn_like
 
     wav = m.generate(text, audio_prompt_path=ref_path, exaggeration=0.5, cfg_weight=0.5, temperature=0.8)
     if isinstance(wav, tuple): wav = wav[0]
@@ -115,10 +133,17 @@ def main():
     print(f"CFM mel (post-trim): shape={mel.shape}  mean-abs={mel.abs().mean().item():.3f}")
 
     h_decoder.remove()
+    _torch.randn_like = _orig_randn_like
 
     write_tensor(f"{OUT}/expected_mel.bin", mel.numpy())
     write_tensor(f"{OUT}/expected_audio.bin", wav.numpy())
     write_i64(f"{OUT}/speech_tokens.bin", captured_tokens["speech_tokens"].detach().cpu().numpy())
+    if "z" in captured_noise:
+        z = captured_noise["z"]
+        print(f"CFM noise z: shape={z.shape}  mean={z.mean().item():.4f}  std={z.std().item():.4f}")
+        write_tensor(f"{OUT}/cfm_noise_z.bin", z.detach().cpu().numpy())
+    else:
+        print("WARNING: did not capture CFM noise z")
     st = captured_tokens["speech_tokens"]
     print(f"speech_tokens (input to flow_inference): shape={st.shape}")
     with open(f"{OUT}/text.txt", "w") as f:
