@@ -212,7 +212,7 @@ def t3_generate(
     if first_tok == Int64(eos_token):
         return generated^
 
-    # 3. Decode loop. k_caches/v_caches were populated by t3_block_prefill.
+    # 3. Decode loop.
     var cur_len = t_prefill
     var cur_tok_buf = ctx.enqueue_create_buffer[DType.int64](b)
     with cur_tok_buf.map_to_host() as h:
@@ -224,17 +224,9 @@ def t3_generate(
 
     var step = 1
     while step < n_steps:
-        # Embed current token via speech_emb table.
         embedding_forward(ctx, model.speech_emb, cur_tok_buf, step_emb_3d_buf, b, 1)
-        # The (B, 1, D) buffer doubles as the per-step (B, D) for decode.
         ctx.enqueue_copy(step_emb_buf, step_emb_3d_buf)
 
-        # Add positional embedding: step_emb += speech_pos_emb_table[speech_pos_offset + step - 1].
-        # At iteration `step` of the decode loop we embed the (step-1)-th generated token,
-        # which sits at logical speech position `speech_pos_offset + step - 1`.
-        # Upstream: cur_pos = T_PREFILL + step_of_decode_loop (where step_of_decode_loop
-        # starts at 0). My `step` starts at 1, so my pos = speech_pos_offset + (step - 1) =
-        # T_PREFILL + 0 for the first decode iteration.
         var pos_idx = speech_pos_offset + step - 1
         var sep = step_emb_buf.unsafe_ptr()
         var spt = speech_pos_emb_table.unsafe_ptr()
@@ -251,11 +243,9 @@ def t3_generate(
             IndexList[1](b * D), DeviceContextPtr(ctx),
         )
 
-        # Gather cos/sin at position `cur_len` from the full RoPE table.
         gather_cos_sin_at_pos(ctx, cos_full, sin_full, cos_step, sin_step,
                               b, Dh, cur_len)
 
-        # Run all 30 decode steps over the per-layer KV caches.
         for L in range(model.n_layers):
             t3_decode_step(
                 ctx, model.blocks[L], step_emb_buf,
@@ -263,12 +253,10 @@ def t3_generate(
                 b, max_ctx, cur_len,
             )
 
-        # Final RMSNorm.
         var tmp2 = ctx.enqueue_create_buffer[DType.float32](b * D)
         rms_norm_forward(ctx, model.final_norm, step_emb_buf, tmp2, b)
         ctx.enqueue_copy(step_emb_buf, tmp2)
 
-        # LM head + argmax.
         linear_forward(ctx, model.speech_head, step_emb_buf, logits_buf, b)
         argmax_lastdim(ctx, logits_buf, argmax_buf, b, V)
         ctx.synchronize()
@@ -280,9 +268,217 @@ def t3_generate(
         if next_tok == Int64(eos_token):
             break
 
-        # Set up next iteration: cur_tok = next_tok.
         with cur_tok_buf.map_to_host() as h:
             h[0] = next_tok
+        cur_len += 1
+        step += 1
+
+    return generated^
+
+
+def cfg_combine_argmax(
+    mut ctx: DeviceContext,
+    mut logits_buf: DeviceBuffer[DType.float32],   # (2*b, V)
+    mut argmax_buf: DeviceBuffer[DType.int64],     # (b,)
+    b: Int, v: Int, cfg: Float32,
+) raises:
+    """Combine doubled-batch logits via CFG:
+       cond   = logits[0:b]
+       uncond = logits[b:2b]
+       out    = cond + cfg * (cond - uncond)
+    Then argmax along V.
+    """
+    var lp = logits_buf.unsafe_ptr()
+    var ap = argmax_buf.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(lp, ap, b, v, cfg)
+    def cf[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var bi = idx[0]
+        var best_val: Float32 = -1.0e30
+        var best_idx: Int64 = 0
+        for k in range(v):
+            var cond_v = lp[bi * v + k]
+            var unc_v = lp[(b + bi) * v + k]
+            var combined = cond_v + cfg * (cond_v - unc_v)
+            if combined > best_val:
+                best_val = combined
+                best_idx = Int64(k)
+        ap[bi] = best_idx
+    elementwise[cf, simd_width=1, target="gpu"](
+        IndexList[1](b), DeviceContextPtr(ctx),
+    )
+
+
+def t3_generate_cfg(
+    mut ctx: DeviceContext,
+    mut model: T3,
+    mut input_embed_buf: DeviceBuffer[DType.float32],   # (2*B, T_prefill, D) — already CFG-doubled
+    mut cos_full: DeviceBuffer[DType.float32],
+    mut sin_full: DeviceBuffer[DType.float32],
+    mut prefill_mask: DeviceBuffer[DType.float32],      # (T_prefill, T_prefill) causal bias
+    mut speech_pos_emb_table: DeviceBuffer[DType.float32],
+    b: Int, t_prefill: Int, max_ctx: Int, n_steps: Int,
+    speech_pos_offset: Int,
+    eos_token: Int,
+    cfg_weight: Float32 = 0.5,
+) raises -> List[Int64]:
+    """Generate speech tokens with classifier-free guidance.
+
+    Caller passes `input_embed_buf` of shape (2*B, T_prefill, D) where:
+      rows [0..B):   conditional prefix (cond_emb + text_emb + bos_emb)
+      rows [B..2B):  unconditional prefix (cond_emb + zero_text + bos_emb)
+
+    At each step the model runs at effective batch 2*B. Logits are CFG-combined
+    (cond + cfg * (cond - uncond)) before argmax. The same chosen token is fed
+    back to both branches for the next step.
+    """
+    var D = model.d_model
+    var H = model.n_heads
+    var Dh = model.head_dim
+    var V = model.v_speech
+    var B2 = 2 * b
+
+    # 1. Prefill at 2*B.
+    var x_buf = ctx.enqueue_create_buffer[DType.float32](B2 * t_prefill * D)
+    ctx.enqueue_copy(x_buf, input_embed_buf)
+
+    var k_caches = List[DeviceBuffer[DType.float32]]()
+    var v_caches = List[DeviceBuffer[DType.float32]]()
+    for _ in range(model.n_layers):
+        var kc = ctx.enqueue_create_buffer[DType.float32](B2 * H * max_ctx * Dh)
+        kc.enqueue_fill(0.0)
+        var vc = ctx.enqueue_create_buffer[DType.float32](B2 * H * max_ctx * Dh)
+        vc.enqueue_fill(0.0)
+        k_caches.append(kc^)
+        v_caches.append(vc^)
+
+    # Gather (B2, T, Dh) cos/sin from full table.
+    var cos_pre = ctx.enqueue_create_buffer[DType.float32](B2 * t_prefill * Dh)
+    var sin_pre = ctx.enqueue_create_buffer[DType.float32](B2 * t_prefill * Dh)
+    var cfp = cos_full.unsafe_ptr()
+    var sfp = sin_full.unsafe_ptr()
+    var cpp = cos_pre.unsafe_ptr()
+    var spp = sin_pre.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(cfp, sfp, cpp, spp, t_prefill, Dh)
+    def gather_pre[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // (t_prefill * Dh)
+        var rem = i - bi * t_prefill * Dh
+        var si = rem // Dh
+        var di = rem - si * Dh
+        cpp[i] = cfp[si * Dh + di]
+        spp[i] = sfp[si * Dh + di]
+    elementwise[gather_pre, simd_width=1, target="gpu"](
+        IndexList[1](B2 * t_prefill * Dh), DeviceContextPtr(ctx),
+    )
+
+    for L in range(model.n_layers):
+        t3_block_prefill(
+            ctx, model.blocks[L], x_buf, cos_pre, sin_pre, prefill_mask,
+            k_caches[L], v_caches[L], B2, t_prefill, max_ctx,
+        )
+
+    # 2. Final RMSNorm + LM head on last position of each row → (2B, V).
+    var tmp = ctx.enqueue_create_buffer[DType.float32](B2 * t_prefill * D)
+    rms_norm_forward(ctx, model.final_norm, x_buf, tmp, B2 * t_prefill)
+    ctx.enqueue_copy(x_buf, tmp)
+
+    var last_hidden = ctx.enqueue_create_buffer[DType.float32](B2 * D)
+    var xp = x_buf.unsafe_ptr()
+    var lhp = last_hidden.unsafe_ptr()
+    var tpf = t_prefill
+
+    @always_inline
+    @parameter
+    @__copy_capture(xp, lhp, D, tpf)
+    def take_last[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // D
+        var di = i - bi * D
+        lhp[i] = xp[bi * tpf * D + (tpf - 1) * D + di]
+    elementwise[take_last, simd_width=1, target="gpu"](
+        IndexList[1](B2 * D), DeviceContextPtr(ctx),
+    )
+
+    var logits_buf = ctx.enqueue_create_buffer[DType.float32](B2 * V)
+    linear_forward(ctx, model.speech_head, last_hidden, logits_buf, B2)
+    var argmax_buf = ctx.enqueue_create_buffer[DType.int64](b)
+    cfg_combine_argmax(ctx, logits_buf, argmax_buf, b, V, cfg_weight)
+    ctx.synchronize()
+
+    var generated = List[Int64]()
+    var first_tok: Int64 = 0
+    with argmax_buf.map_to_host() as h:
+        first_tok = h[0]
+    generated.append(first_tok)
+    if first_tok == Int64(eos_token):
+        return generated^
+
+    # 3. Decode loop at 2*B.
+    var cur_len = t_prefill
+    var cur_tok_buf = ctx.enqueue_create_buffer[DType.int64](B2)
+    with cur_tok_buf.map_to_host() as h:
+        for bi in range(B2):
+            h[bi] = first_tok       # both branches embed same token
+    var step_emb_buf = ctx.enqueue_create_buffer[DType.float32](B2 * D)
+    var step_emb_3d_buf = ctx.enqueue_create_buffer[DType.float32](B2 * 1 * D)
+    var cos_step = ctx.enqueue_create_buffer[DType.float32](B2 * Dh)
+    var sin_step = ctx.enqueue_create_buffer[DType.float32](B2 * Dh)
+
+    var step = 1
+    while step < n_steps:
+        embedding_forward(ctx, model.speech_emb, cur_tok_buf, step_emb_3d_buf, B2, 1)
+        ctx.enqueue_copy(step_emb_buf, step_emb_3d_buf)
+
+        var pos_idx = speech_pos_offset + step - 1
+        var sep = step_emb_buf.unsafe_ptr()
+        var spt = speech_pos_emb_table.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(sep, spt, D, pos_idx)
+        def add_pos[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var bi = i // D
+            var di = i - bi * D
+            sep[i] = sep[i] + spt[pos_idx * D + di]
+        elementwise[add_pos, simd_width=1, target="gpu"](
+            IndexList[1](B2 * D), DeviceContextPtr(ctx),
+        )
+
+        gather_cos_sin_at_pos(ctx, cos_full, sin_full, cos_step, sin_step,
+                              B2, Dh, cur_len)
+
+        for L in range(model.n_layers):
+            t3_decode_step(
+                ctx, model.blocks[L], step_emb_buf,
+                k_caches[L], v_caches[L], cos_step, sin_step,
+                B2, max_ctx, cur_len,
+            )
+
+        var tmp2 = ctx.enqueue_create_buffer[DType.float32](B2 * D)
+        rms_norm_forward(ctx, model.final_norm, step_emb_buf, tmp2, B2)
+        ctx.enqueue_copy(step_emb_buf, tmp2)
+
+        linear_forward(ctx, model.speech_head, step_emb_buf, logits_buf, B2)
+        cfg_combine_argmax(ctx, logits_buf, argmax_buf, b, V, cfg_weight)
+        ctx.synchronize()
+
+        var next_tok: Int64 = 0
+        with argmax_buf.map_to_host() as h:
+            next_tok = h[0]
+        generated.append(next_tok)
+        if next_tok == Int64(eos_token):
+            break
+
+        with cur_tok_buf.map_to_host() as h:
+            for bi in range(B2):
+                h[bi] = next_tok
         cur_len += 1
         step += 1
 

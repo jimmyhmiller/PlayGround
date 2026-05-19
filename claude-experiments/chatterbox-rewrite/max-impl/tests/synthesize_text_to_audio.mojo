@@ -24,7 +24,7 @@ from weights import (
     load_t3, load_upsample_conformer_encoder, load_cfm_estimator_real,
     load_hift_generator, upload_fp32,
 )
-from t3_generate import t3_generate
+from t3_generate import t3_generate, t3_generate_cfg
 from upsample_encoder import upsample_conformer_forward
 from cfm_estimator_new import cfm_solve_euler, gaussian_noise_fill
 from hift_generator import (
@@ -47,6 +47,7 @@ comptime HOP = 4
 comptime N_OUT = 18
 comptime N_CFM_STEPS = 10
 comptime CFG: Float32 = 0.7
+comptime T3_CFG: Float32 = 0.5
 
 
 def test_text_to_audio() raises:
@@ -64,7 +65,11 @@ def test_text_to_audio() raises:
     var text_emb = upload_fp32(ctx, fix + "text_emb.bin")
     var bos_emb = upload_fp32(ctx, fix + "bos_emb.bin")
 
-    var prefix = ctx.enqueue_create_buffer[DType.float32](B * T_PREFIX * D)
+    # Build CFG-doubled prefix (2*B, T_PREFIX, D):
+    #   row 0 = cond_emb + text_emb + bos_emb       (conditional)
+    #   row 1 = cond_emb + ZERO        + bos_emb    (unconditional)
+    var B2 = 2 * B
+    var prefix = ctx.enqueue_create_buffer[DType.float32](B2 * T_PREFIX * D)
     var ce = cond_emb.unsafe_ptr()
     var te = text_emb.unsafe_ptr()
     var be = bos_emb.unsafe_ptr()
@@ -72,23 +77,29 @@ def test_text_to_audio() raises:
 
     @always_inline
     @parameter
-    @__copy_capture(ce, te, be, px)
+    @__copy_capture(ce, te, be, px, B2)
     def cat_func[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
         var i = idx[0]
         var bi = i // (T_PREFIX * D)
         var rem = i - bi * T_PREFIX * D
         var ti = rem // D
         var di = rem - ti * D
+        # cond_emb in [0, T_COND), text_emb in [T_COND, T_COND+T_TEXT), bos_emb after.
         if ti < T_COND:
-            px[i] = ce[bi * T_COND * D + ti * D + di]
+            px[i] = ce[(bi % B) * T_COND * D + ti * D + di]
         elif ti < T_COND + T_TEXT:
             var src_t = ti - T_COND
-            px[i] = te[bi * T_TEXT * D + src_t * D + di]
+            # Conditional branch (bi < B): real text_emb.
+            # Unconditional branch (bi >= B): zero out text region.
+            if bi < B:
+                px[i] = te[(bi % B) * T_TEXT * D + src_t * D + di]
+            else:
+                px[i] = 0.0
         else:
             var src_t = ti - T_COND - T_TEXT
-            px[i] = be[bi * T_BOS * D + src_t * D + di]
+            px[i] = be[(bi % B) * T_BOS * D + src_t * D + di]
     elementwise[cat_func, simd_width=1, target="gpu"](
-        IndexList[1](B * T_PREFIX * D), DeviceContextPtr(ctx),
+        IndexList[1](B2 * T_PREFIX * D), DeviceContextPtr(ctx),
     )
 
     var cos_full = upload_fp32(ctx, fix + "cos_full.bin")
@@ -103,12 +114,16 @@ def test_text_to_audio() raises:
                     h[r * T_PREFIX + c] = 0.0
     var speech_pos = upload_fp32(ctx, fix + "speech_pos_emb_full.bin")
 
-    print("[tts] T3 generate (max_new=", MAX_NEW, ")...")
-    var generated = t3_generate(
+    print("[tts] T3 generate w/ CFG=", T3_CFG, " (max_new=", MAX_NEW, ")...")
+    var generated = t3_generate_cfg(
         ctx, t3, prefix, cos_full, sin_full, mask, speech_pos,
-        B, T_PREFIX, MAX_CTX, MAX_NEW, speech_pos_offset=1, eos_token=EOS,
+        B, T_PREFIX, MAX_CTX, MAX_NEW,
+        speech_pos_offset=1, eos_token=EOS, cfg_weight=T3_CFG,
     )
     ctx.synchronize()
+    print("[tts] T3 generated", len(generated), "tokens:")
+    for i in range(len(generated)):
+        print("  [", i, "] =", Int(generated[i]))
 
     # Filter to first ~30 tokens — to keep memory in check for downstream
     # s3gen which scales O(T_mel^2) for attention.
