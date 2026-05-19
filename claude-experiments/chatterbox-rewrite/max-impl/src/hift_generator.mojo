@@ -485,11 +485,16 @@ def istft_forward(
             var two_pi_n = two_pi_inv_n * Float32(local_n)
             var frame_sample: Float32 = 0.0
 
+            # Upstream: magnitude = exp(spec_mag); phase = sin(spec_phase_raw).
+            # Then real = mag * cos(phase); imag = mag * sin(phase).
+            # So we apply sin() to the raw phase value first.
+
             # k = 0 (purely real DC bin).
             var spec_mag0 = s_ptr[bi * (n_fft + 2) * n_frames + 0 * n_frames + f]
             var mag0 = exp(spec_mag0)
             if mag0 > 100.0: mag0 = 100.0
-            var phase0 = s_ptr[bi * (n_fft + 2) * n_frames + n_freq * n_frames + f]
+            var phase0_raw = s_ptr[bi * (n_fft + 2) * n_frames + n_freq * n_frames + f]
+            var phase0 = msin(phase0_raw)
             var sin_phase0 = msin(phase0)
             var cos_phase0 = mcos(phase0)
             var r0 = mag0 * cos_phase0
@@ -499,7 +504,8 @@ def istft_forward(
                 var spec_mag_k = s_ptr[bi * (n_fft + 2) * n_frames + k * n_frames + f]
                 var mag_k = exp(spec_mag_k)
                 if mag_k > 100.0: mag_k = 100.0
-                var phase_k = s_ptr[bi * (n_fft + 2) * n_frames + (n_freq + k) * n_frames + f]
+                var phase_k_raw = s_ptr[bi * (n_fft + 2) * n_frames + (n_freq + k) * n_frames + f]
+                var phase_k = msin(phase_k_raw)
                 var sin_p = msin(phase_k)
                 var cos_p = mcos(phase_k)
                 var re_v = mag_k * cos_p

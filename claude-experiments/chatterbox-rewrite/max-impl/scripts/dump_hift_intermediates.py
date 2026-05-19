@@ -89,7 +89,7 @@ def main():
         return sine_waves, uv, noise
     sine_gen.forward = patched_sine_forward
 
-    # Patch decode to capture s_stft
+    # Patch decode to capture s_stft AND the iSTFT input (magnitude, phase).
     orig_decode = hift.decode
     s_stft_capture = {}
     def my_decode(x, s):
@@ -97,6 +97,20 @@ def main():
         s_stft_capture["s_stft"] = torch.cat([sr, si], dim=1).detach().clone()
         return orig_decode(x, s)
     hift.decode = my_decode
+
+    orig_istft = hift._istft
+    def my_istft(magnitude, phase):
+        s_stft_capture["istft_in_mag_raw"] = magnitude.detach().clone()
+        s_stft_capture["istft_in_phase_raw"] = phase.detach().clone()
+        mag_clip = torch.clip(magnitude, max=1e2)
+        real = mag_clip * torch.cos(phase)
+        img = mag_clip * torch.sin(phase)
+        s_stft_capture["istft_in_real"] = real.detach().clone()
+        s_stft_capture["istft_in_imag"] = img.detach().clone()
+        out = orig_istft(magnitude, phase)
+        s_stft_capture["istft_out"] = out.detach().clone()
+        return out
+    hift._istft = my_istft
 
     with torch.inference_mode():
         wav, s_after = hift.inference(mel_t)
@@ -137,6 +151,12 @@ def main():
     write_tensor(f"{OUT}/conv_pre_out.bin", conv_pre_out.cpu().numpy())
     write_tensor(f"{OUT}/conv_post_out.bin", conv_post_out.cpu().numpy())
     write_tensor(f"{OUT}/audio.bin", wav.cpu().numpy())
+    if "istft_in_real" in s_stft_capture:
+        write_tensor(f"{OUT}/istft_in_real.bin", s_stft_capture["istft_in_real"].cpu().numpy())
+        write_tensor(f"{OUT}/istft_in_imag.bin", s_stft_capture["istft_in_imag"].cpu().numpy())
+        write_tensor(f"{OUT}/istft_out.bin", s_stft_capture["istft_out"].cpu().numpy())
+        print(f"  istft_in_real shape={s_stft_capture['istft_in_real'].shape}")
+        print(f"  istft_out shape={s_stft_capture['istft_out'].shape}")
 
     from scipy.io import wavfile
     pcm = (wav.squeeze(0).cpu().numpy() * 32767.0).clip(-32768, 32767).astype(np.int16)
