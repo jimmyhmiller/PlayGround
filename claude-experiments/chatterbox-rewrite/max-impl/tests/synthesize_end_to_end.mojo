@@ -30,7 +30,7 @@ from weights import (
     load_t3, load_upsample_conformer_encoder, load_cfm_estimator_real,
     load_hift_generator, upload_fp32,
 )
-from t3_generate import t3_generate_cfg
+from t3_generate import t3_generate_cfg, t3_generate_cfg_sample
 from upsample_encoder import upsample_conformer_forward
 from cfm_estimator_new import cfm_solve_euler, gaussian_noise_fill
 from hift_generator import (
@@ -124,11 +124,13 @@ def test_end_to_end() raises:
                     h[r * T_PREFIX + c] = 0.0
     var speech_pos = upload_fp32(ctx, text_dir + "speech_pos_emb_full.bin")
 
-    print("[e2e] Mojo T3 generate (max_new=", MAX_NEW, " CFG=", T3_CFG, ")...")
-    var generated = t3_generate_cfg(
+    print("[e2e] Mojo T3 generate w/ top-p sampling (max_new=", MAX_NEW, " CFG=", T3_CFG, ")...")
+    var generated = t3_generate_cfg_sample(
         ctx, t3, prefix, cos_full, sin_full, t3_mask, speech_pos,
         B, T_PREFIX, MAX_CTX, MAX_NEW,
         speech_pos_offset=1, eos_token=EOS, cfg_weight=T3_CFG,
+        temperature=Float32(0.8), top_p=Float32(0.95), rep_penalty=Float32(1.2),
+        rng_seed=UInt64(0xDEADBEEF),
     )
     ctx.synchronize()
     print("[e2e] T3 generated", len(generated), "speech tokens")
