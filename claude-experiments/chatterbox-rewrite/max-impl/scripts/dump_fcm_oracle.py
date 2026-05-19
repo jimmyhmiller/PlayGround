@@ -17,8 +17,9 @@ def write_tensor(path, arr):
 def main():
     from chatterbox.tts import ChatterboxTTS
     m = ChatterboxTTS.from_pretrained("cpu")
-    fcm = m.s3gen.speaker_encoder.head
-    fcm.eval()
+    spk_enc = m.s3gen.speaker_encoder
+    fcm = spk_enc.head
+    spk_enc.eval()
 
     OUT = "weights/s3gen_prompt/fcm_diag"
     os.makedirs(OUT, exist_ok=True)
@@ -31,10 +32,15 @@ def main():
 
     with torch.inference_mode():
         out = fcm(x)
+        # Full speaker_encoder forward expects (B, T, F) then permutes to (B, F, T).
+        # So we feed x.transpose(1,2) → (B, T, F).
+        full = spk_enc(x.transpose(1, 2))
     print(f"FCM output: shape={out.shape} mean-abs={out.abs().mean().item():.4f}")
+    print(f"Full speaker_enc output: shape={full.shape} mean-abs={full.abs().mean().item():.4f}")
 
     write_tensor(f"{OUT}/fcm_input.bin", x.numpy())
     write_tensor(f"{OUT}/fcm_output.bin", out.numpy())
+    write_tensor(f"{OUT}/speaker_emb.bin", full.numpy())
     print(f"Wrote to {OUT}/")
 
 

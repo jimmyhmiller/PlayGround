@@ -744,3 +744,24 @@ def xvector_forward(
 
     # dense → (B, 192)
     dense_layer_forward(ctx, backbone.dense, stats, out_buf, b, 1024, 192)
+
+
+# ============================================================================
+# Full CAMPPlus speaker encoder: mel → embedding
+# ============================================================================
+from fcm import FCM, fcm_forward
+
+
+def campplus_speaker_embedding(
+    mut ctx: DeviceContext,
+    mut fcm: FCM,
+    mut backbone: XVectorBackbone,
+    mut mel_buf: DeviceBuffer[DType.float32],     # (B, 80, T)
+    mut out_buf: DeviceBuffer[DType.float32],     # (B, 192) speaker embedding
+    b: Int, t: Int,
+) raises:
+    """Full speaker encoder forward: mel → FCM → XVector backbone → 192-d embed."""
+    # FCM compresses (B, 80, T) → (B, 320, T).
+    var fcm_out = ctx.enqueue_create_buffer[DType.float32](b * 320 * t)
+    fcm_forward(ctx, fcm, mel_buf, fcm_out, b, t)
+    xvector_forward(ctx, backbone, fcm_out, out_buf, b, t)
