@@ -63,18 +63,17 @@ def test_hift_stages() raises:
     ctx.synchronize()
     # (no upstream ref for this — skip)
 
-    # Stage 3: source_module — deterministic variant using upstream's phase_vec + noise.
-    var phase_vec = upload_fp32(ctx, fix + "sg_phase_vec.bin")    # (1, 9, 1)
-    var noise_buf = upload_fp32(ctx, fix + "sg_noise.bin")        # (1, 9, T_AUDIO_FULL)
+    # Stage 3: source_module — LCG variant (pure Mojo, no upstream dump).
     var sine_merge = ctx.enqueue_create_buffer[DType.float32](B * 1 * T_AUDIO_FULL)
-    source_module_forward_deterministic(
-        ctx, hift.m_source, f0_up, phase_vec, noise_buf, sine_merge,
+    source_module_forward(
+        ctx, hift.m_source, f0_up, sine_merge,
         B, T_AUDIO_FULL,
         sampling_rate=24000, harmonic_num=8,
-        sine_amp=Float32(0.1), voiced_threshold=Float32(10.0),
+        sine_amp=Float32(0.1), noise_std=Float32(0.003),
+        voiced_threshold=Float32(10.0),
     )
     ctx.synchronize()
-    _diff("sine_merge (deterministic)", sine_merge, fix + "sine_merge.bin")
+    _diff("sine_merge (LCG)", sine_merge, fix + "sine_merge.bin")
 
     # Stage 4: STFT → s_stft (18, T_S_FRAMES) using our deterministic sine_merge.
     var window_s = ctx.enqueue_create_buffer[DType.float32](16)

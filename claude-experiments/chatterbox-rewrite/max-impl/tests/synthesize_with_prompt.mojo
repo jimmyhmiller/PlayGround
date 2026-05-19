@@ -26,7 +26,7 @@ from weights import (
     load_hift_generator, upload_fp32,
 )
 from upsample_encoder import upsample_conformer_forward
-from cfm_estimator_new import cfm_solve_euler
+from cfm_estimator_new import cfm_solve_euler, gaussian_noise_fill
 from hift_generator import (
     hift_decode_trunk, istft_forward, hann_window_periodic_fill,
     f0_predictor_forward, f0_upsample_nearest, source_module_forward,
@@ -128,10 +128,11 @@ def test_synth_with_prompt() raises:
     )
 
     # ─────────────────────────────────────────────────────────────────────
-    # 4. Load real spks (post-affine) and the exact noise z upstream used.
+    # 4. Real spks (post-affine, from ref voice) and Mojo-generated CFM noise.
     # ─────────────────────────────────────────────────────────────────────
     var spks = upload_fp32(ctx, fix + "embedding_normed_affine.bin")
-    var x = upload_fp32(ctx, fix + "cfm_noise_z.bin")
+    var x = ctx.enqueue_create_buffer[DType.float32](B * MEL * T_TOTAL_MEL)
+    gaussian_noise_fill(ctx, x, B * MEL * T_TOTAL_MEL, UInt64(0xC0FFEE), Float32(1.0))
 
     var mask = ctx.enqueue_create_buffer[DType.float32](B * T_TOTAL_MEL)
     mask.enqueue_fill(1.0)
@@ -183,6 +184,24 @@ def test_synth_with_prompt() raises:
     var rel_l2 = sqrt(sum_diff_sq / sum_ref_sq) if sum_ref_sq > 0.0 else Float32(0.0)
     print("[synth] mel parity vs upstream: max-abs=", max_abs, " rel_l2=", rel_l2)
 
+    # Diagnostic: stats of our generated mel
+    var mel_mean: Float32 = 0.0
+    var mel_max: Float32 = -1e30
+    var mel_min: Float32 = 1e30
+    var mel_n_pos = 0
+    var mel_n_neg = 0
+    with mel_out.map_to_host() as h:
+        for i in range(B * MEL * T_OUT_MEL):
+            var v = h[i]
+            mel_mean += v
+            if v > mel_max: mel_max = v
+            if v < mel_min: mel_min = v
+            if v > 0.0: mel_n_pos += 1
+            else: mel_n_neg += 1
+    mel_mean /= Float32(B * MEL * T_OUT_MEL)
+    print("[synth] mel stats: mean=", mel_mean, " min=", mel_min, " max=", mel_max,
+          " pos=", mel_n_pos, " neg=", mel_n_neg)
+
     # ─────────────────────────────────────────────────────────────────────
     # 6. HiFT: mel → f0 → source → STFT → trunk → iSTFT → audio.
     # ─────────────────────────────────────────────────────────────────────
@@ -197,16 +216,13 @@ def test_synth_with_prompt() raises:
     var f0_up = ctx.enqueue_create_buffer[DType.float32](B * T_AUDIO_FULL)
     f0_upsample_nearest(ctx, f0, f0_up, B, T_OUT_MEL, 480)
 
-    print("[synth] source module (deterministic with upstream phase_vec/noise)...")
-    var phase_vec_sg = upload_fp32(ctx, fix + "hift_dump/sg_phase_vec.bin")
-    var noise_sg = upload_fp32(ctx, fix + "hift_dump/sg_noise.bin")
+    print("[synth] source module (Mojo LCG RNG)...")
     var sine_merge = ctx.enqueue_create_buffer[DType.float32](B * 1 * T_AUDIO_FULL)
-    source_module_forward_deterministic(
-        ctx, hift.m_source, f0_up, phase_vec_sg, noise_sg, sine_merge,
-        B, T_AUDIO_FULL,
-        sampling_rate=24000, harmonic_num=8,
-        sine_amp=Float32(0.1), voiced_threshold=Float32(10.0),
-    )
+    source_module_forward(ctx, hift.m_source, f0_up, sine_merge,
+                           B, T_AUDIO_FULL,
+                           sampling_rate=24000, harmonic_num=8,
+                           sine_amp=Float32(0.1), noise_std=Float32(0.003),
+                           voiced_threshold=Float32(10.0))
 
     print("[synth] STFT...")
     var window_s = ctx.enqueue_create_buffer[DType.float32](N_FFT)

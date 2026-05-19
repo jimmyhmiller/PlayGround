@@ -51,7 +51,10 @@ def main():
     OUT = "weights/s3gen_prompt"
     os.makedirs(OUT, exist_ok=True)
 
-    text = "the quick brown fox"
+    text = os.environ.get(
+        "DUMP_TEXT",
+        "She sells seashells by the seashore. The waves crashed against the rocky cliffs.",
+    )
     ref_path = "/home/jimmyhmiller/.config/paper-audiobooks/default-voice.wav"
 
     print("Loading Chatterbox...")
