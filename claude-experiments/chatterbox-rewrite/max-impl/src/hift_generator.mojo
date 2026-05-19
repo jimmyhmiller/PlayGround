@@ -787,43 +787,29 @@ def source_module_forward(
         IndexList[1](b * n_harm), DeviceContextPtr(ctx),
     )
 
-    # Now sine_waves: (B, n_harm=9, T_audio). Apply l_linear (1, 9):
-    #   sine_merge[b, t] = tanh(sum_h sine_waves[b, h, t] * W[0, h] + bias)
-    # l_linear.weight has shape (out=1, in=9).
-    var sw_btc = ctx.enqueue_create_buffer[DType.float32](b * t_audio * n_harm)
-    var sw_btc_ptr = sw_btc.unsafe_ptr()
-
-    @always_inline
-    @parameter
-    @__copy_capture(swp, sw_btc_ptr, n_harm, t_audio)
-    def tr2[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
-        var i = idx[0]
-        var bi = i // (t_audio * n_harm)
-        var rem = i - bi * t_audio * n_harm
-        var ti = rem // n_harm
-        var hi = rem - ti * n_harm
-        sw_btc_ptr[i] = swp[bi * n_harm * t_audio + hi * t_audio + ti]
-    elementwise[tr2, simd_width=1, target="gpu"](
-        IndexList[1](b * t_audio * n_harm), DeviceContextPtr(ctx),
-    )
-
-    var merged = ctx.enqueue_create_buffer[DType.float32](b * t_audio * 1)
-    linear_forward(ctx, model.l_linear, sw_btc, merged, b * t_audio)
-
-    # tanh + write to (B, 1, T_audio).
-    var mp = merged.unsafe_ptr()
+    # Fused l_linear (out=1, in=9) + tanh — avoid MAX gemv N=1 transpose_b bug
+    # by doing the 9-tap dot product directly. sine_waves layout: (B, n_harm, T_audio).
     var sop = source_out.unsafe_ptr()
+    var w_ptr = model.l_linear.weight.unsafe_ptr()
+    var bias_ptr = model.l_linear.bias.unsafe_ptr()
+    var has_bias = model.l_linear.has_bias
 
     @always_inline
     @parameter
-    @__copy_capture(mp, sop)
-    def tanh_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+    @__copy_capture(swp, sop, w_ptr, bias_ptr, has_bias, b, n_harm, t_audio)
+    def linear_tanh_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
         var i = idx[0]
-        var x = mp[i]
-        var ex = exp(x)
+        var bi = i // t_audio
+        var ti = i - bi * t_audio
+        var acc: Float32 = 0.0
+        if has_bias:
+            acc = bias_ptr[0]
+        for h in range(n_harm):
+            acc = acc + swp[bi * n_harm * t_audio + h * t_audio + ti] * w_ptr[h]
+        var ex = exp(acc)
         var enx = 1.0 / ex
         sop[i] = (ex - enx) / (ex + enx)
-    elementwise[tanh_fn, simd_width=1, target="gpu"](
+    elementwise[linear_tanh_fn, simd_width=1, target="gpu"](
         IndexList[1](b * t_audio), DeviceContextPtr(ctx),
     )
 
