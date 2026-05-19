@@ -44,6 +44,10 @@ from hift_generator import (
 )
 from cond_enc import t3_cond_enc_forward
 from resampler import resample_24k_to_16k
+from voice_encoder import voice_encoder_forward
+from mel_ve import mel_ve_forward
+from mel_24k import build_hann_window as build_hann_ve, build_librosa_mel_filterbank as build_mel_fb_ve
+from weights import load_voice_encoder
 from kaldi_fbank import (
     kaldi_fbank_forward, kaldi_subtract_column_mean,
     build_povey_window, build_kaldi_mel_filterbank,
@@ -318,12 +322,45 @@ def test_synth_from_wav() raises:
 
     # ──────────────────────────────────────────────────────────────────
     # Step 3e: VoiceEncoder (LSTM) → 256-d speaker_emb for T3.
-    # NOTE: VE expects librosa-style 16kHz mel (n_mels=40, n_fft=400, hop=160).
-    # For now we use upstream's dumped 256-d speaker_emb to avoid the VE mel + LSTM
-    # numerical drift from kaiser_fast resampler + trim. End-to-end Mojo otherwise.
+    # Compute 16kHz mel (n_mels=40), feed FIRST 160 frames to VE forward.
+    # NOTE: upstream's inference splits into overlapping partials and averages,
+    # plus does librosa.effects.trim. We approximate with a single 160-frame
+    # partial — embedding won't be bit-exact, but produces a valid speaker
+    # representation for T3CondEnc.
     # ──────────────────────────────────────────────────────────────────
-    var voice_dir2 = "weights/s3gen_prompt/cond_enc_diag/"
-    var speaker_emb_256 = upload_fp32(ctx, voice_dir2 + "speaker_emb.bin")
+    print("[full] VoiceEncoder mel + forward...")
+    var ve = load_voice_encoder(ctx, "weights/ve")
+    var win_ve = ctx.enqueue_create_buffer[DType.float32](400)
+    build_hann_ve(ctx, win_ve, 400)
+    var mel_fb_ve = ctx.enqueue_create_buffer[DType.float32](40 * 201)
+    build_mel_fb_ve(ctx, mel_fb_ve, 40, 400, Float64(16000.0),
+                     Float64(0.0), Float64(8000.0))
+    # T_frames = ceil(n_16 / hop) + 1 = 1001 frames (10s @ 16k with hop=160).
+    var T_ve_full = (n_16 + 2 * 200 - 400) // 160 + 1
+    print("[full] T_ve_full=", T_ve_full)
+    var mel_ve_full = ctx.enqueue_create_buffer[DType.float32](T_ve_full * 40)
+    mel_ve_forward(ctx, wav_16, win_ve, mel_fb_ve, mel_ve_full, n_16, T_ve_full)
+    ctx.synchronize()
+
+    # Run VE forward on first 160 partial.
+    var T_partial = 160
+    var ve_in = ctx.enqueue_create_buffer[DType.float32](B * T_partial * 40)
+    var mvf = mel_ve_full.unsafe_ptr()
+    var vp = ve_in.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(mvf, vp, T_partial)
+    def slice_ve[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        vp[i] = mvf[i]
+    elementwise[slice_ve, simd_width=1, target="gpu"](
+        IndexList[1](B * T_partial * 40), DeviceContextPtr(ctx),
+    )
+
+    var speaker_emb_256 = ctx.enqueue_create_buffer[DType.float32](B * 256)
+    voice_encoder_forward(ctx, ve, ve_in, speaker_emb_256, B, T_partial)
+    ctx.synchronize()
 
     # ──────────────────────────────────────────────────────────────────
     # Step 3f: T3CondEnc → cond_emb (B, 34, 1024).
