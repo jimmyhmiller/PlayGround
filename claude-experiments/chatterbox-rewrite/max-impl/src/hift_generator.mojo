@@ -220,6 +220,8 @@ def leaky_relu_inplace(
     mut x_buf: DeviceBuffer[DType.float32],
     n: Int, slope: Float32,
 ) raises:
+    """Leaky ReLU in-place via MAX's `nn.activations.leaky_relu`."""
+    from nn.activations import leaky_relu as nn_lr
     var x_ptr = x_buf.unsafe_ptr()
 
     @always_inline
@@ -227,10 +229,9 @@ def leaky_relu_inplace(
     @__copy_capture(x_ptr, slope)
     def lr_func[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
         var i = idx[0]
-        var v = x_ptr[i]
-        if v < 0.0:
-            x_ptr[i] = v * slope
-    elementwise[lr_func, simd_width=1, target="gpu"](
+        var v = x_ptr.load[width=width, alignment=alignment](i)
+        x_ptr.store[width=width, alignment=alignment](i, nn_lr(v, SIMD[DType.float32, 1](slope)))
+    elementwise[lr_func, simd_width=4, target="gpu"](
         IndexList[1](n), DeviceContextPtr(ctx),
     )
 
@@ -561,7 +562,11 @@ def elu_inplace(
     n: Int,
     alpha: Float32 = 1.0,
 ) raises:
-    """ELU(x) = x if x > 0 else alpha * (exp(x) - 1). In place."""
+    """ELU: y = x if x > 0 else alpha * (exp(x) - 1). In place.
+
+    Inlined math; MAX's `nn.activations.elu` isn't exposed in our bundled
+    mojopkg yet (the source has it but the build artifact doesn't).
+    """
     var x_ptr = x_buf.unsafe_ptr()
 
     @always_inline
@@ -588,20 +593,28 @@ def f0_predictor_forward(
 
     Input: (B, 80, T) mel; output: (B, T) F0 in Hz.
     """
-    var cur_c = 80
-    var x = ctx.enqueue_create_buffer[DType.float32](b * 80 * t_mel)
-    ctx.enqueue_copy(x, mel_buf)
-    for i in range(5):
-        var h = ctx.enqueue_create_buffer[DType.float32](b * 512 * t_mel)
-        conv1d_forward(ctx, model.condnet[i], x, h, b, t_mel, t_mel)
-        elu_inplace(ctx, h, b * 512 * t_mel)
-        x = h
-        cur_c = 512
+    # First conv: 80 → 512.
+    var h0 = ctx.enqueue_create_buffer[DType.float32](b * 512 * t_mel)
+    conv1d_forward(ctx, model.condnet[0], mel_buf, h0, b, t_mel, t_mel)
+    elu_inplace(ctx, h0, b * 512 * t_mel)
+    # Subsequent 4 convs: 512 → 512. Hold previous buf for the conv1d input.
+    var h1 = ctx.enqueue_create_buffer[DType.float32](b * 512 * t_mel)
+    conv1d_forward(ctx, model.condnet[1], h0, h1, b, t_mel, t_mel)
+    elu_inplace(ctx, h1, b * 512 * t_mel)
+    var h2 = ctx.enqueue_create_buffer[DType.float32](b * 512 * t_mel)
+    conv1d_forward(ctx, model.condnet[2], h1, h2, b, t_mel, t_mel)
+    elu_inplace(ctx, h2, b * 512 * t_mel)
+    var h3 = ctx.enqueue_create_buffer[DType.float32](b * 512 * t_mel)
+    conv1d_forward(ctx, model.condnet[3], h2, h3, b, t_mel, t_mel)
+    elu_inplace(ctx, h3, b * 512 * t_mel)
+    var h4 = ctx.enqueue_create_buffer[DType.float32](b * 512 * t_mel)
+    conv1d_forward(ctx, model.condnet[4], h3, h4, b, t_mel, t_mel)
+    elu_inplace(ctx, h4, b * 512 * t_mel)
 
     # Linear classifier (1, 512). Apply per time-step: out[b, t] = abs(x[b, :, t] @ W.T + bias).
     # First transpose (B, 512, T) → (B, T, 512), then Linear → (B, T, 1).
     var x_btc = ctx.enqueue_create_buffer[DType.float32](b * t_mel * 512)
-    var x_ptr = x.unsafe_ptr()
+    var x_ptr = h4.unsafe_ptr()
     var x_btc_ptr = x_btc.unsafe_ptr()
 
     @always_inline
@@ -618,22 +631,29 @@ def f0_predictor_forward(
         IndexList[1](b * t_mel * 512), DeviceContextPtr(ctx),
     )
 
-    var f0_raw = ctx.enqueue_create_buffer[DType.float32](b * t_mel * 1)
-    linear_forward(ctx, model.classifier, x_btc, f0_raw, b * t_mel)
-
-    # Abs in place. Output shape (B, T_mel * 1) → reshape view to (B, T_mel).
-    var f0r_ptr = f0_raw.unsafe_ptr()
+    # Classifier: Linear (1, 512). We can't use linear_forward here because
+    # MAX's nn.matmul has a bug with output dim = 1 (only writes the first
+    # row). Compute the dot product + bias + abs directly in one elementwise
+    # kernel: one thread per (b, t) writes f0[b, t] = abs(sum_k x[b, t, k] * W[0, k] + bias[0]).
+    var w_ptr = model.classifier.weight.unsafe_ptr()
+    var bias_ptr = model.classifier.bias.unsafe_ptr()
+    var has_bias = model.classifier.has_bias
+    var x_btc_p = x_btc.unsafe_ptr()
     var f0o_ptr = f0_out.unsafe_ptr()
 
     @always_inline
     @parameter
-    @__copy_capture(f0r_ptr, f0o_ptr)
-    def abs_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+    @__copy_capture(x_btc_p, w_ptr, bias_ptr, f0o_ptr, has_bias)
+    def classify_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
         var i = idx[0]
-        var v = f0r_ptr[i]
-        if v < 0.0: v = -v
-        f0o_ptr[i] = v
-    elementwise[abs_fn, simd_width=1, target="gpu"](
+        var acc: Float32 = 0.0
+        if has_bias:
+            acc = bias_ptr[0]
+        for k in range(512):
+            acc += x_btc_p[i * 512 + k] * w_ptr[k]
+        if acc < 0.0: acc = -acc
+        f0o_ptr[i] = acc
+    elementwise[classify_fn, simd_width=1, target="gpu"](
         IndexList[1](b * t_mel), DeviceContextPtr(ctx),
     )
 

@@ -19,6 +19,9 @@ from layout import Idx, TileTensor, row_major
 from nn.normalization import layer_norm as nn_layer_norm, rms_norm as nn_rms_norm
 from nn.softmax import softmax as nn_softmax
 from nn.activations import relu as nn_relu, leaky_relu as nn_leaky_relu
+# Note: gelu and elu exist in MAX source but are not exposed in our nightly's
+# `nn.activations` module. Until the build catches up we inline the math
+# (still ASIC-friendly elementwise; just not the MAX SIMD helper).
 from nn.gather_scatter import gather as nn_gather
 from linalg.matmul import matmul as nn_matmul
 
@@ -282,7 +285,11 @@ def gelu(
     mut out_buf: DeviceBuffer[DType.float32],
     n: Int,
 ) raises:
-    """Exact GELU: y = 0.5 * x * (1 + erf(x / sqrt(2)))."""
+    """Exact GELU: y = 0.5 * x * (1 + erf(x / sqrt(2))).
+
+    MAX's `nn.activations.gelu` is the same math but not exposed in our
+    bundled nightly mojopkg yet.
+    """
     var in_ptr = in_buf.unsafe_ptr()
     var out_ptr = out_buf.unsafe_ptr()
 

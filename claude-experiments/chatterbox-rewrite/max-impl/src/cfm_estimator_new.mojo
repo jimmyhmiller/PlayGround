@@ -14,7 +14,7 @@ Architecture (from chatterbox/models/s3gen/flow_matching matcha decoder):
   Block1D  = block (Sequential: Conv1d (k=3), Mish, GroupNorm)
   BasicTransformerBlock = norm1 + self-attn (q/k/v dim=512, out dim=256) + norm3 + FF (GEGLU 256→1024→256)
 """
-from std.math import sqrt, sin, cos as mcos, log, exp, pi
+from std.math import sqrt, sin, cos as mcos, log, exp, tanh as mtanh, pi
 from std.gpu.host import DeviceContext, DeviceBuffer
 from std.runtime.asyncrt import DeviceContextPtr
 from std.algorithm.functional import elementwise, IndexList
@@ -139,7 +139,11 @@ def mish(
     mut out_buf: DeviceBuffer[DType.float32],
     n: Int,
 ) raises:
-    """Mish: x * tanh(softplus(x)) = x * tanh(log(1 + exp(x)))."""
+    """Mish: x * tanh(softplus(x)) = x * tanh(log(1 + exp(x))).
+
+    Uses `std.math.tanh` for the tanh; softplus is computed in numerically
+    stable form (no built-in softplus in MAX).
+    """
     var in_ptr = in_buf.unsafe_ptr()
     var out_ptr = out_buf.unsafe_ptr()
 
@@ -150,17 +154,14 @@ def mish(
         var i = idx[0]
         var x = in_ptr[i]
         var sp: Float32
-        # softplus: numerically stable form
+        # softplus, numerically stable.
         if x > 20.0:
             sp = x
         elif x < -20.0:
             sp = exp(x)
         else:
             sp = log(1.0 + exp(x))
-        # tanh
-        var ex = exp(sp)
-        var enx = 1.0 / ex
-        var th = (ex - enx) / (ex + enx)
+        var th = mtanh(sp)
         out_ptr[i] = x * th
     elementwise[mish_func, simd_width=1, target="gpu"](
         IndexList[1](n), DeviceContextPtr(ctx),
