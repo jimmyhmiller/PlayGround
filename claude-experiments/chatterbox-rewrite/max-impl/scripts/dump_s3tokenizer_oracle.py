@@ -40,6 +40,37 @@ def main():
     print(f"wav_16 shape: {wav_16.shape}")
     write_tensor(f"{OUT}/wav_16k.bin", wav_16)
 
+    # Hook intermediates inside encoder.
+    captures = {}
+    def cap(name):
+        def hook(m, inp, out):
+            captures[name] = out.detach().clone() if torch.is_tensor(out) else out
+        return hook
+    enc = s3tok.encoder
+    enc.conv1.register_forward_hook(cap("conv1"))
+    enc.conv2.register_forward_hook(cap("conv2"))
+    enc.blocks[0].register_forward_hook(cap("block0"))
+    enc.blocks[-1].register_forward_hook(cap("block_last"))
+
+    # Capture block0's attention layer-norm input and output.
+    b0 = enc.blocks[0]
+    b0.attn_ln.register_forward_hook(cap("b0_attn_ln"))
+    b0.attn.query.register_forward_hook(cap("b0_q"))
+    b0.attn.key.register_forward_hook(cap("b0_k"))
+    b0.attn.value.register_forward_hook(cap("b0_v"))
+    b0.attn.out.register_forward_hook(cap("b0_attn_out"))
+    b0.attn.fsmn_block.register_forward_hook(cap("b0_fsmn_block"))
+    # MLP layers.
+    b0.mlp_ln.register_forward_hook(cap("b0_mlp_ln"))
+
+    # Monkey-patch forward_fsmn to capture its output (which is what gets added to attn).
+    orig_fsmn_fwd = b0.attn.forward_fsmn
+    def capture_fsmn_fwd(inputs, mask=None):
+        out = orig_fsmn_fwd(inputs, mask)
+        captures["b0_fsm_memory"] = out.detach().clone()
+        return out
+    b0.attn.forward_fsmn = capture_fsmn_fwd
+
     with torch.inference_mode():
         wav_16_t = torch.from_numpy(wav_16).unsqueeze(0)
         # log_mel_spectrogram
@@ -51,6 +82,22 @@ def main():
     print(f"tokens shape: {tokens.shape} (first 20: {tokens[0, :20].tolist()})")
     write_tensor(f"{OUT}/log_mel_16k.bin", log_mel.numpy())
     write_i64(f"{OUT}/tokens.bin", tokens.long().cpu().numpy())
+
+    for k, v in captures.items():
+        if isinstance(v, tuple):
+            v = v[0]
+        if torch.is_tensor(v):
+            print(f"  capture {k}: shape={v.shape} mean-abs={v.abs().mean().item():.4f}")
+            write_tensor(f"{OUT}/{k}.bin", v.cpu().numpy())
+
+    # Dump the precomputed freqs_cis so we can compare RoPE tables.
+    freqs_cis = enc.freqs_cis  # (1024*2, 64) complex
+    real = torch.view_as_real(freqs_cis)
+    cos_full = real[:, :, 0]
+    sin_full = real[:, :, 1]
+    print(f"  freqs_cis_cos: shape={cos_full.shape}")
+    write_tensor(f"{OUT}/rope_cos.bin", cos_full.cpu().numpy())
+    write_tensor(f"{OUT}/rope_sin.bin", sin_full.cpu().numpy())
 
     print(f"Wrote to {OUT}/")
 

@@ -146,14 +146,16 @@ def apply_rope_s3_style(
     mut ctx: DeviceContext,
     mut in_buf: DeviceBuffer[DType.float32],    # (B, S, H, D) — half-rotation RoPE
     mut out_buf: DeviceBuffer[DType.float32],
-    mut cos_buf: DeviceBuffer[DType.float32],   # (S, HALF)
-    mut sin_buf: DeviceBuffer[DType.float32],   # (S, HALF)
+    mut cos_buf: DeviceBuffer[DType.float32],   # (S, D) — cos duplicated halves
+    mut sin_buf: DeviceBuffer[DType.float32],   # (S, D) — sin duplicated halves
     b: Int, s: Int, h: Int, d: Int,
 ) raises:
-    """s3tokenizer-style RoPE (half rotation, cos/sin tiled twice across D).
+    """s3tokenizer-style RoPE (half rotation, cos/sin duplicated across D).
 
     For i < D/2:  out[..., i] = x[..., i] * cos[s, i] + (-x[..., i+HALF]) * sin[s, i]
-    For i >= D/2: out[..., i] = x[..., i] * cos[s, i-HALF] + x[..., i-HALF] * sin[s, i-HALF]
+    For i >= D/2: out[..., i] = x[..., i] * cos[s, i] + x[..., i-HALF] * sin[s, i]
+
+    cos_buf/sin_buf are full (S, D) — i.e., cos[s, i] == cos[s, i-HALF] for i>=HALF.
     """
     var ip = in_buf.unsafe_ptr()
     var op = out_buf.unsafe_ptr()
@@ -174,11 +176,9 @@ def apply_rope_s3_style(
         var rem2 = rem - si * h * d
         var hi = rem2 // d
         var di = rem2 - hi * d
-        var cs_idx = di if di < half else di - half
-        var c = cp[si * half + cs_idx]
-        var sn = sp[si * half + cs_idx]
+        var c = cp[si * d + di]
+        var sn = sp[si * d + di]
         var x_i = ip[i]
-        # Pair lookup: if di < half pair_idx is di+half (negative); else di-half.
         var pair_di: Int = di + half if di < half else di - half
         var pair_src = bi * s * h * d + si * h * d + hi * d + pair_di
         var paired = ip[pair_src]

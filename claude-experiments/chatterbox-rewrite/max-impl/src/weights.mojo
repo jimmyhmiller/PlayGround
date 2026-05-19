@@ -229,12 +229,13 @@ def load_s3tokenizer_block(
     var to_out = Linear(ow^, ob^, hidden, hidden, True)
 
     # FSMN block: depthwise conv1d, groups = hidden, kernel = fsmn_kernel.
-    # Upstream weight shape is (hidden, 1, kernel) which matches depthwise layout.
+    # Upstream weight shape is (hidden, 1, kernel). For depthwise: c_in=c_out=groups=hidden,
+    # and weight stride is c_in/groups=1 per output channel.
     var zero_fsmn_b = _zero_buf(ctx, hidden)
     var pad = (fsmn_kernel - 1) // 2
     var fsmn_conv = Conv1d(
         fsmn_w^, zero_fsmn_b^,
-        1, hidden, fsmn_kernel, 1, pad, 1, hidden, False,
+        hidden, hidden, fsmn_kernel, 1, pad, 1, hidden, False,
     )
 
     var attn = FSMNAttention(to_q^, to_k^, to_v^, to_out^, fsmn_conv^,
