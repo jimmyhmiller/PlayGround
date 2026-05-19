@@ -56,6 +56,13 @@ def main():
     print("Preparing conditionals from ref voice...")
     m.prepare_conditionals(ref_path)
     t3_cond = m.conds.t3
+
+    # Capture spks: F.normalize(xvector_192d) → spk_embed_affine_layer (192→80).
+    s3gen_ref = m.conds.gen
+    xvec = s3gen_ref["embedding"]   # (1, 192) — the CAMPPlus output
+    import torch.nn.functional as F
+    spks = m.s3gen.flow.spk_embed_affine_layer(F.normalize(xvec, dim=1))   # (1, 80)
+    print(f"spks shape: {spks.shape}, mean-abs: {spks.abs().mean().item():.4f}")
     print("t3_cond fields:")
     for f in t3_cond.__dict__:
         v = getattr(t3_cond, f)
@@ -131,6 +138,7 @@ def main():
     write_tensor(f"{OUT}/speech_pos_emb_full.bin", speech_pos_table)
     write_tensor(f"{OUT}/cos_full.bin", cos_full.numpy())
     write_tensor(f"{OUT}/sin_full.bin", sin_full.numpy())
+    write_tensor(f"{OUT}/spks.bin", spks.detach().cpu().numpy())
     print(f"Wrote oracle to {OUT}/")
     print(f"text_tokens (with BOT/EOT): {full_text_tokens.tolist()}")
     print(f"cos/sin tables: {cos_full.shape}")

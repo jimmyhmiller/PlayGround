@@ -26,7 +26,7 @@ from weights import (
 )
 from t3_generate import t3_generate
 from upsample_encoder import upsample_conformer_forward
-from cfm_estimator_new import cfm_solve_euler
+from cfm_estimator_new import cfm_solve_euler, gaussian_noise_fill
 from hift_generator import (
     hift_decode_trunk, istft_forward, hann_window_periodic_fill,
 )
@@ -45,7 +45,7 @@ comptime MEL = 80
 comptime N_FFT = 16
 comptime HOP = 4
 comptime N_OUT = 18
-comptime N_CFM_STEPS = 2
+comptime N_CFM_STEPS = 10
 comptime CFG: Float32 = 0.7
 
 
@@ -146,15 +146,13 @@ def test_text_to_audio() raises:
     print("[tts] loading CFM estimator...")
     var cfm = load_cfm_estimator_real(ctx, "weights/s3gen/flow/decoder/estimator")
 
+    # Deterministic Gaussian noise via Box-Muller LCG (per-element).
     var x = ctx.enqueue_create_buffer[DType.float32](B * MEL * T_MEL)
-    with x.map_to_host() as h:
-        for c in range(MEL):
-            for ti in range(T_MEL):
-                h[c * T_MEL + ti] = sin(Float32(c) * 0.31 + Float32(ti) * 0.71) * 0.5
-    var spks = ctx.enqueue_create_buffer[DType.float32](B * MEL)
-    with spks.map_to_host() as h:
-        for c in range(MEL):
-            h[c] = sin(Float32(c) * 0.11) * 0.1
+    gaussian_noise_fill(ctx, x, B * MEL * T_MEL, UInt64(0xC0FFEE), Float32(1.0))
+
+    # Real speaker embedding (post-spk_embed_affine, 80-d) from the upstream
+    # ref voice — dumped via dump_t3_text_to_tokens_oracle.py.
+    var spks = upload_fp32(ctx, fix + "spks.bin")
     var cond = ctx.enqueue_create_buffer[DType.float32](B * MEL * T_MEL)
     cond.enqueue_fill(0.0)
     var cfm_mask = ctx.enqueue_create_buffer[DType.float32](B * T_MEL)

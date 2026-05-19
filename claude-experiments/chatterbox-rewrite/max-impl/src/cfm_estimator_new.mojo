@@ -914,3 +914,50 @@ def cfm_solve_euler(
         elementwise[combine_fn, simd_width=1, target="gpu"](
             IndexList[1](b * MEL * t), DeviceContextPtr(ctx),
         )
+
+
+# ============================================================================
+# Deterministic Gaussian noise (Box-Muller via LCG)
+# ============================================================================
+
+def gaussian_noise_fill(
+    mut ctx: DeviceContext,
+    mut out_buf: DeviceBuffer[DType.float32],
+    n: Int, seed: UInt64,
+    sigma: Float32 = 1.0,
+) raises:
+    """Fill `out_buf` with deterministic Gaussian-distributed noise.
+
+    Each output element uses two LCG draws + Box-Muller polar transform to
+    produce a unit-variance normal sample, scaled by `sigma`.
+
+    Not bit-exact to `torch.randn` (different RNG and ordering) but it is
+    properly Gaussian-distributed, which is what CFM Euler needs.
+    """
+    var out_ptr = out_buf.unsafe_ptr()
+    from std.math import sqrt, log, sin as msin, cos as mcos, pi
+
+    @always_inline
+    @parameter
+    @__copy_capture(out_ptr, seed, sigma)
+    def gn_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        # Per-element deterministic state. 2654435761 = Knuth multiplicative hash.
+        var s: UInt64 = seed ^ (UInt64(i) * UInt64(2654435761))
+        # Two LCG steps → two uniforms in (0, 1).
+        s = s * UInt64(6364136223846793005) + UInt64(1442695040888963407)
+        # Use the top 24 bits as a uniform integer in [0, 2^24), then normalize.
+        var bits1: UInt64 = (s >> UInt64(40)) & UInt64(0xFFFFFF)
+        # Add 0.5 to avoid log(0).
+        var u1: Float32 = (Float32(Int(bits1)) + 0.5) / Float32(16777216.0)
+        s = s * UInt64(6364136223846793005) + UInt64(1442695040888963407)
+        var bits2: UInt64 = (s >> UInt64(40)) & UInt64(0xFFFFFF)
+        var u2: Float32 = (Float32(Int(bits2)) + 0.5) / Float32(16777216.0)
+        # Box-Muller (polar form).
+        var r: Float32 = sqrt(-2.0 * log(u1))
+        var theta: Float32 = 2.0 * Float32(pi) * u2
+        var z: Float32 = r * mcos(theta) * sigma
+        out_ptr[i] = z
+    elementwise[gn_fn, simd_width=1, target="gpu"](
+        IndexList[1](n), DeviceContextPtr(ctx),
+    )
