@@ -920,12 +920,10 @@ def forward_stft(
 ) raises:
     """Compute torch.stft equivalent on (B, T_audio) → (B, n_freq, n_frames).
 
-    Center-pad each batch (n_fft/2 each side via reflection in torch), then
-    for each frame f, take samples [f*hop : f*hop+n_fft) of padded signal,
-    multiply by window, and compute DFT bin by bin.
-
-    For simplicity we use **zero-padding** for the center pad rather than
-    reflection (close enough for the source signal which is near-zero at edges).
+    torch.stft(center=True) reflection-pads the signal by n_fft/2 on each side
+    before framing. Reflection at boundary b for an out-of-range index i:
+      i < 0:        i' = -i
+      i >= length:  i' = 2*(length - 1) - i
     """
     var sp = signal.unsafe_ptr()
     var wp = window.unsafe_ptr()
@@ -939,7 +937,6 @@ def forward_stft(
     @__copy_capture(sp, wp, rp, ip, b, t_audio, n_fft, hop, n_frames, n_freq, pad)
     def stft_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
         var i = idx[0]
-        # i indexes (B, n_freq, n_frames).
         var bi = i // (n_freq * n_frames)
         var rem = i - bi * n_freq * n_frames
         var k = rem // n_frames
@@ -950,9 +947,12 @@ def forward_stft(
         for n in range(n_fft):
             var t_centered = f * hop + n
             var t_orig = t_centered - pad
-            var x: Float32 = 0.0
-            if t_orig >= 0 and t_orig < t_audio:
-                x = sp[bi * t_audio + t_orig] * wp[n]
+            # Reflection padding (matches torch.stft center=True).
+            if t_orig < 0:
+                t_orig = -t_orig
+            elif t_orig >= t_audio:
+                t_orig = 2 * (t_audio - 1) - t_orig
+            var x: Float32 = sp[bi * t_audio + t_orig] * wp[n]
             var ang = two_pi_k_over_n * Float32(n)
             re += x * mcos(ang)
             im += x * msin(ang)
