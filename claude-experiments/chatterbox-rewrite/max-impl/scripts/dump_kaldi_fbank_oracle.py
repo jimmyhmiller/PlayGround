@@ -35,6 +35,17 @@ def main():
     write_tensor(f"{OUT}/wav.bin", wav.squeeze(0).numpy())
     write_tensor(f"{OUT}/fbank_raw.bin", out.numpy())
     write_tensor(f"{OUT}/fbank_after_mean.bin", out_sub.numpy())
+
+    # End-to-end: feed wav through speaker encoder, dump 192-d embedding.
+    from chatterbox.tts import ChatterboxTTS
+    m = ChatterboxTTS.from_pretrained("cpu")
+    spk_enc = m.s3gen.speaker_encoder
+    spk_enc.eval()
+    with torch.inference_mode():
+        emb = spk_enc.inference([wav.squeeze(0)])
+    print(f"end-to-end speaker emb: shape={emb.shape} mean-abs={emb.abs().mean().item():.4f}")
+    write_tensor(f"{OUT}/speaker_emb_e2e.bin", emb.cpu().numpy())
+
     print(f"Wrote to {OUT}/")
 
 
