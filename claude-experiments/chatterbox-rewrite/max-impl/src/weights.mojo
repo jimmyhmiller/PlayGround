@@ -578,9 +578,15 @@ def _load_conv1d_no_bias(
     return Conv1d(w^, zb^, c_in, c_out, k, stride, pad, dilation, groups, False)
 
 
-def _load_cam_layer(mut ctx: DeviceContext, base: String) raises -> CAMLayer:
+def _load_cam_layer(
+    mut ctx: DeviceContext, base: String, dilation: Int = 1,
+) raises -> CAMLayer:
+    """linear_local: Conv1d(128, 32, K=3, dilation=`dilation`) with padding
+    handled externally by cam_layer_forward (pre-pads input, then conv with
+    internal pad=0). dilation is 1 in block1, 2 in block2/block3.
+    """
     var linear_local = _load_conv1d_no_bias(
-        ctx, base + "/linear_local", 128, 32, 3, 1, 1, 1, 1,
+        ctx, base + "/linear_local", 128, 32, 3, 1, 0, dilation, 1,
     )
     var w1 = upload_fp32(ctx, base + "/linear1/weight.bin")
     var b1 = upload_fp32(ctx, base + "/linear1/bias.bin")
@@ -592,33 +598,34 @@ def _load_cam_layer(mut ctx: DeviceContext, base: String) raises -> CAMLayer:
 
 
 def _load_camdense_tdnn_layer(
-    mut ctx: DeviceContext, base: String, in_channels: Int,
+    mut ctx: DeviceContext, base: String, in_channels: Int, dilation: Int = 1,
 ) raises -> CAMDenseTDNNLayer:
     """Each tdnnd block: nonlinear1 (BN over `in_channels`) + linear1 (1×1
-    Conv in→128) + nonlinear2 (BN 128) + cam_layer.
+    Conv in→128) + nonlinear2 (BN 128) + cam_layer (CAM with `dilation`).
     """
     var nl1 = _load_batchnorm(ctx, base + "/nonlinear1", in_channels)
     var linear1 = _load_conv1d_no_bias(
         ctx, base + "/linear1", in_channels, 128, 1, 1, 0, 1, 1,
     )
     var nl2 = _load_batchnorm(ctx, base + "/nonlinear2", 128)
-    var cam = _load_cam_layer(ctx, base + "/cam_layer")
+    var cam = _load_cam_layer(ctx, base + "/cam_layer", dilation)
     return CAMDenseTDNNLayer(nl1^, linear1^, nl2^, cam^)
 
 
 def _load_camdense_tdnn_block(
     mut ctx: DeviceContext, base: String, n_layers: Int,
-    base_in_channels: Int, growth: Int,
+    base_in_channels: Int, growth: Int, dilation: Int = 1,
 ) raises -> CAMDenseTDNNBlock:
     """Block of N dense TDNN layers. Each layer's input grows by `growth`
     channels (DenseNet-style concatenation): layer i gets
-    `base_in_channels + i * growth` input channels.
+    `base_in_channels + i * growth` input channels. `dilation` is the
+    CAMLayer's linear_local dilation (1 in block1, 2 in block2/block3).
     """
     var layers = List[CAMDenseTDNNLayer]()
     for i in range(n_layers):
         var lyr_base = base + "/tdnnd" + String(i + 1)
         var in_ch = base_in_channels + i * growth
-        var lyr = _load_camdense_tdnn_layer(ctx, lyr_base, in_ch)
+        var lyr = _load_camdense_tdnn_layer(ctx, lyr_base, in_ch, dilation)
         layers.append(lyr^)
     return CAMDenseTDNNBlock(layers^)
 
@@ -632,8 +639,10 @@ def _load_transit_layer(
 
 
 def _load_tdnn_first(mut ctx: DeviceContext, base: String) raises -> TDNN:
-    """First TDNN: Conv1d (in=320, out=128, k=5) + BN(128). Bias-less linear."""
-    var linear = _load_conv1d_no_bias(ctx, base + "/linear", 320, 128, 5, 1, 0, 1, 1)
+    """First TDNN: Conv1d (in=320, out=128, k=5, stride=2) + BN(128). Bias-less
+    linear. Forward pre-pads input by 2 each side so internal pad=0.
+    """
+    var linear = _load_conv1d_no_bias(ctx, base + "/linear", 320, 128, 5, 2, 0, 1, 1)
     var nonlin = _load_batchnorm(ctx, base + "/nonlinear", 128)
     return TDNN(linear^, nonlin^)
 
@@ -696,11 +705,12 @@ def load_campplus(mut ctx: DeviceContext, base: String) raises -> CAMPPlus:
     #   block1 in=128, 12 layers → 128 + 12*32 = 512 → transit1 (512 → 256)
     #   block2 in=256, 24 layers → 256 + 24*32 = 1024 → transit2 (1024 → 512)
     #   block3 in=512, 16 layers → 512 + 16*32 = 1024 → transit3 (1024 → 512)
-    var block1 = _load_camdense_tdnn_block(ctx, xv + "/block1", 12, 128, 32)
+    # Upstream CAMPPlus block dilations: (1, 2, 2) per (block1, block2, block3).
+    var block1 = _load_camdense_tdnn_block(ctx, xv + "/block1", 12, 128, 32, 1)
     var transit1 = _load_transit_layer(ctx, xv + "/transit1", 128 + 12 * 32, 256)
-    var block2 = _load_camdense_tdnn_block(ctx, xv + "/block2", 24, 256, 32)
+    var block2 = _load_camdense_tdnn_block(ctx, xv + "/block2", 24, 256, 32, 2)
     var transit2 = _load_transit_layer(ctx, xv + "/transit2", 256 + 24 * 32, 512)
-    var block3 = _load_camdense_tdnn_block(ctx, xv + "/block3", 16, 512, 32)
+    var block3 = _load_camdense_tdnn_block(ctx, xv + "/block3", 16, 512, 32, 2)
     var transit3 = _load_transit_layer(ctx, xv + "/transit3", 512 + 16 * 32, 512)
 
     # out_nonlinear is BN over 512 (output of transit3).

@@ -651,9 +651,10 @@ def stats_pool_forward(
                 var d = in_ptr[bi * c * t + ci_real * t + ti] - m
                 var_acc += d * d
             # Unbiased: divide by (T - 1) when T > 1.
+            # Upstream `torch.std(unbiased=True)` doesn't add eps inside sqrt.
             var denom: Float32 = Float32(t - 1) if t > 1 else 1.0
             var v = var_acc / denom
-            o_ptr[i] = sqrt(v + Float32(1.0e-2))
+            o_ptr[i] = sqrt(v)
     elementwise[sp_fn, simd_width=1, target="gpu"](
         IndexList[1](b * 2 * c), DeviceContextPtr(ctx),
     )
@@ -696,8 +697,9 @@ def xvector_forward(
       stats_pool → 1024
       dense (1024 → 192)
     """
-    # tdnn: stride 2 → T_out = (T_in + 4 - 4) / 2 + 1 = T_in/2 (roughly)
-    var t_tdnn = (t_in + 2 * 2 - 4) // 2 + 1
+    # tdnn: PyTorch Conv1d formula: L_out = (L_in + 2*pad - dilation*(K-1) - 1) // stride + 1
+    # With K=5, stride=2, pad=2, dilation=1: (T_in + 4 - 4 - 1) // 2 + 1.
+    var t_tdnn = (t_in + 2 * 2 - 4 - 1) // 2 + 1
     var h_tdnn = ctx.enqueue_create_buffer[DType.float32](b * 128 * t_tdnn)
     tdnn_first_forward(ctx, backbone.tdnn, in_buf, h_tdnn, b, t_in, t_tdnn)
 
