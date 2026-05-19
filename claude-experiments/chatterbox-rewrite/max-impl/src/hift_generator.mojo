@@ -822,6 +822,94 @@ def source_module_forward(
     )
 
 
+def source_module_forward_deterministic(
+    mut ctx: DeviceContext,
+    mut model: MSource,
+    mut f0_up: DeviceBuffer[DType.float32],          # (B, T_audio)
+    mut phase_vec: DeviceBuffer[DType.float32],      # (B, n_harm, 1)
+    mut noise_buf: DeviceBuffer[DType.float32],      # (B, n_harm, T_audio)
+    mut source_out: DeviceBuffer[DType.float32],     # (B, 1, T_audio)
+    b: Int, t_audio: Int,
+    sampling_rate: Int = 24000,
+    harmonic_num: Int = 8,
+    sine_amp: Float32 = 0.1,
+    voiced_threshold: Float32 = 10.0,
+) raises:
+    """Same as source_module_forward, but phase_vec and noise are pre-computed
+    (typically from upstream's RNG) so the output is bit-exact to torch's SineGen.
+
+    Matches:
+        F_mat[b, h, t] = f0[b, t] * (h+1) / sr
+        theta_mat = 2*pi * (cumsum(F_mat, dim=-1) % 1) + phase_vec
+        sine_waves = sine_amp * sin(theta_mat)
+        sine_waves = sine_waves * uv + noise         (where uv from f0 > voiced_threshold)
+        sine_merge = tanh(l_linear(sine_waves))
+    """
+    var n_harm = harmonic_num + 1
+    var sample_rate_f = Float32(sampling_rate)
+
+    var sw_buf = ctx.enqueue_create_buffer[DType.float32](b * n_harm * t_audio)
+    var f0p = f0_up.unsafe_ptr()
+    var pp = phase_vec.unsafe_ptr()
+    var np_ = noise_buf.unsafe_ptr()
+    var swp = sw_buf.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(f0p, pp, np_, swp, b, n_harm, t_audio, sample_rate_f, sine_amp, voiced_threshold)
+    def harmonic_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // n_harm
+        var h = i - bi * n_harm
+        var phase = pp[bi * n_harm + h]   # (B, n_harm, 1) flat
+        var two_pi: Float32 = 2.0 * Float32(3.141592653589793)
+        var theta_acc: Float32 = 0.0   # cumulative fractional cycles, then mod 1
+        for t in range(t_audio):
+            var f0_val = f0p[bi * t_audio + t]
+            var uv: Float32 = 1.0 if f0_val > voiced_threshold else 0.0
+            var df: Float32 = f0_val * Float32(h + 1) / sample_rate_f
+            theta_acc = theta_acc + df
+            # mod 1 (match torch's `cumsum(F_mat) % 1`)
+            while theta_acc >= 1.0:
+                theta_acc = theta_acc - 1.0
+            while theta_acc < 0.0:
+                theta_acc = theta_acc + 1.0
+            var theta = two_pi * theta_acc + phase
+            var sine = sine_amp * msin(theta)
+            var noise = np_[bi * n_harm * t_audio + h * t_audio + t]
+            swp[bi * n_harm * t_audio + h * t_audio + t] = sine * uv + noise
+    elementwise[harmonic_fn, simd_width=1, target="gpu"](
+        IndexList[1](b * n_harm), DeviceContextPtr(ctx),
+    )
+
+    # Fused l_linear (out=1, in=9) + tanh — avoid MAX gemv N=1 transpose_b bug
+    # by doing the 9-tap dot product directly.
+    var sop = source_out.unsafe_ptr()
+    var w_ptr = model.l_linear.weight.unsafe_ptr()
+    var bias_ptr = model.l_linear.bias.unsafe_ptr()
+    var has_bias = model.l_linear.has_bias
+
+    @always_inline
+    @parameter
+    @__copy_capture(swp, sop, w_ptr, bias_ptr, has_bias, b, n_harm, t_audio)
+    def linear_tanh_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // t_audio
+        var ti = i - bi * t_audio
+        var acc: Float32 = 0.0
+        if has_bias:
+            acc = bias_ptr[0]
+        for h in range(n_harm):
+            # sine_waves layout: (B, n_harm, T_audio)
+            acc = acc + swp[bi * n_harm * t_audio + h * t_audio + ti] * w_ptr[h]
+        var ex = exp(acc)
+        var enx = 1.0 / ex
+        sop[i] = (ex - enx) / (ex + enx)
+    elementwise[linear_tanh_fn, simd_width=1, target="gpu"](
+        IndexList[1](b * t_audio), DeviceContextPtr(ctx),
+    )
+
+
 def forward_stft(
     mut ctx: DeviceContext,
     mut signal: DeviceBuffer[DType.float32],        # (B, T_audio)

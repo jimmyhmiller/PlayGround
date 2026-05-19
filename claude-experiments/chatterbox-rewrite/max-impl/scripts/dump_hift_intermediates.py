@@ -60,6 +60,35 @@ def main():
     h_pre = hift.conv_pre.register_forward_hook(cap("conv_pre"))
     h_post = hift.conv_post.register_forward_hook(cap("conv_post"))
 
+    # Monkey-patch SineGen.forward to capture phase_vec and noise.
+    sine_gen = hift.m_source.l_sin_gen
+    orig_sine_forward = sine_gen.forward
+    from torch.distributions.uniform import Uniform
+    sg_captures = {}
+    def patched_sine_forward(f0):
+        F_mat = torch.zeros((f0.size(0), sine_gen.harmonic_num + 1, f0.size(-1)))
+        for i in range(sine_gen.harmonic_num + 1):
+            F_mat[:, i:i+1, :] = f0 * (i + 1) / sine_gen.sampling_rate
+        theta_mat = 2 * np.pi * (torch.cumsum(F_mat, dim=-1) % 1)
+        u_dist = Uniform(low=-np.pi, high=np.pi)
+        phase_vec = u_dist.sample(sample_shape=(f0.size(0), sine_gen.harmonic_num + 1, 1))
+        phase_vec[:, 0, :] = 0
+        sine_waves_pre_uv = sine_gen.sine_amp * torch.sin(theta_mat + phase_vec)
+        sine_waves = sine_waves_pre_uv
+        uv = sine_gen._f02uv(f0)
+        noise_amp = uv * sine_gen.noise_std + (1 - uv) * sine_gen.sine_amp / 3
+        noise = noise_amp * torch.randn_like(sine_waves)
+        sg_captures["phase_vec"] = phase_vec.detach().clone()
+        sg_captures["noise"] = noise.detach().clone()
+        sg_captures["uv"] = uv.detach().clone()
+        sg_captures["theta_mat"] = theta_mat.detach().clone()
+        sg_captures["sine_waves_pre_uv"] = sine_waves_pre_uv.detach().clone()
+        sg_captures["sine_waves_post_merge"] = (sine_waves * uv + noise).detach().clone()
+        sg_captures["f0_upsampled"] = f0.detach().clone()
+        sine_waves = sine_waves * uv + noise
+        return sine_waves, uv, noise
+    sine_gen.forward = patched_sine_forward
+
     # Patch decode to capture s_stft
     orig_decode = hift.decode
     s_stft_capture = {}
@@ -91,6 +120,18 @@ def main():
 
     write_tensor(f"{OUT}/f0.bin", f0.cpu().numpy())
     write_tensor(f"{OUT}/sine_merge.bin", sine.cpu().numpy())
+    if "phase_vec" in sg_captures:
+        write_tensor(f"{OUT}/sg_phase_vec.bin", sg_captures["phase_vec"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_noise.bin", sg_captures["noise"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_uv.bin", sg_captures["uv"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_theta_mat.bin", sg_captures["theta_mat"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_sine_waves_pre_uv.bin", sg_captures["sine_waves_pre_uv"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_sine_waves_post_merge.bin", sg_captures["sine_waves_post_merge"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_f0_upsampled.bin", sg_captures["f0_upsampled"].cpu().numpy())
+        print(f"  phase_vec shape={sg_captures['phase_vec'].shape}")
+        print(f"  noise shape={sg_captures['noise'].shape}")
+        print(f"  uv shape={sg_captures['uv'].shape}")
+        print(f"  theta_mat shape={sg_captures['theta_mat'].shape}")
     write_tensor(f"{OUT}/s_after_source.bin", s_after.cpu().numpy())
     write_tensor(f"{OUT}/s_stft.bin", s_stft.cpu().numpy())
     write_tensor(f"{OUT}/conv_pre_out.bin", conv_pre_out.cpu().numpy())

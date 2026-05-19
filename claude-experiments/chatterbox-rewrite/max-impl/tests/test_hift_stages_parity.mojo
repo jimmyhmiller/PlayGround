@@ -12,7 +12,7 @@ from weights import load_hift_generator, upload_fp32
 from hift_generator import (
     hift_decode_trunk, istft_forward, hann_window_periodic_fill,
     f0_predictor_forward, f0_upsample_nearest, source_module_forward,
-    build_s_stft_from_signal,
+    source_module_forward_deterministic, build_s_stft_from_signal,
 )
 
 
@@ -63,26 +63,27 @@ def test_hift_stages() raises:
     ctx.synchronize()
     # (no upstream ref for this — skip)
 
-    # Stage 3: source_module.
+    # Stage 3: source_module — deterministic variant using upstream's phase_vec + noise.
+    var phase_vec = upload_fp32(ctx, fix + "sg_phase_vec.bin")    # (1, 9, 1)
+    var noise_buf = upload_fp32(ctx, fix + "sg_noise.bin")        # (1, 9, T_AUDIO_FULL)
     var sine_merge = ctx.enqueue_create_buffer[DType.float32](B * 1 * T_AUDIO_FULL)
-    source_module_forward(ctx, hift.m_source, f0_up, sine_merge,
-                           B, T_AUDIO_FULL,
-                           sampling_rate=24000, harmonic_num=8,
-                           sine_amp=Float32(0.1), noise_std=Float32(0.003),
-                           voiced_threshold=Float32(10.0))
+    source_module_forward_deterministic(
+        ctx, hift.m_source, f0_up, phase_vec, noise_buf, sine_merge,
+        B, T_AUDIO_FULL,
+        sampling_rate=24000, harmonic_num=8,
+        sine_amp=Float32(0.1), voiced_threshold=Float32(10.0),
+    )
     ctx.synchronize()
-    _diff("sine_merge", sine_merge, fix + "sine_merge.bin")
+    _diff("sine_merge (deterministic)", sine_merge, fix + "sine_merge.bin")
 
-    # Stage 4: STFT → s_stft (18, T_S_FRAMES). Use upstream's exact sine_merge
-    # to eliminate the source-noise divergence and isolate the STFT.
+    # Stage 4: STFT → s_stft (18, T_S_FRAMES) using our deterministic sine_merge.
     var window_s = ctx.enqueue_create_buffer[DType.float32](16)
     hann_window_periodic_fill(ctx, window_s, 16)
-    var upstream_sine = upload_fp32(ctx, fix + "sine_merge.bin")  # (B, T_AUDIO_FULL, 1)
     var s_stft = ctx.enqueue_create_buffer[DType.float32](B * 18 * T_S_FRAMES)
-    build_s_stft_from_signal(ctx, upstream_sine, window_s, s_stft,
+    build_s_stft_from_signal(ctx, sine_merge, window_s, s_stft,
                               B, T_AUDIO_FULL, 16, HOP, T_S_FRAMES)
     ctx.synchronize()
-    _diff("s_stft (from upstream sine)", s_stft, fix + "s_stft.bin")
+    _diff("s_stft", s_stft, fix + "s_stft.bin")
 
     # Stage 5: hift_decode_trunk → conv_post output (18, T_HIFT_FRAMES).
     var T_HIFT = T * 120 + 1

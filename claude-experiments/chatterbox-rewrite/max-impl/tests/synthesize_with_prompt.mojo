@@ -30,7 +30,7 @@ from cfm_estimator_new import cfm_solve_euler
 from hift_generator import (
     hift_decode_trunk, istft_forward, hann_window_periodic_fill,
     f0_predictor_forward, f0_upsample_nearest, source_module_forward,
-    build_s_stft_from_signal,
+    source_module_forward_deterministic, build_s_stft_from_signal,
 )
 
 
@@ -197,8 +197,16 @@ def test_synth_with_prompt() raises:
     var f0_up = ctx.enqueue_create_buffer[DType.float32](B * T_AUDIO_FULL)
     f0_upsample_nearest(ctx, f0, f0_up, B, T_OUT_MEL, 480)
 
-    print("[synth] source module (using upstream's sine_merge to bypass RNG divergence)...")
-    var sine_merge = upload_fp32(ctx, fix + "hift_dump/sine_merge.bin")
+    print("[synth] source module (deterministic with upstream phase_vec/noise)...")
+    var phase_vec_sg = upload_fp32(ctx, fix + "hift_dump/sg_phase_vec.bin")
+    var noise_sg = upload_fp32(ctx, fix + "hift_dump/sg_noise.bin")
+    var sine_merge = ctx.enqueue_create_buffer[DType.float32](B * 1 * T_AUDIO_FULL)
+    source_module_forward_deterministic(
+        ctx, hift.m_source, f0_up, phase_vec_sg, noise_sg, sine_merge,
+        B, T_AUDIO_FULL,
+        sampling_rate=24000, harmonic_num=8,
+        sine_amp=Float32(0.1), voiced_threshold=Float32(10.0),
+    )
 
     print("[synth] STFT...")
     var window_s = ctx.enqueue_create_buffer[DType.float32](N_FFT)
