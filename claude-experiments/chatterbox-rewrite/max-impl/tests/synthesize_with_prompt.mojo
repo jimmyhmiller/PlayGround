@@ -197,13 +197,8 @@ def test_synth_with_prompt() raises:
     var f0_up = ctx.enqueue_create_buffer[DType.float32](B * T_AUDIO_FULL)
     f0_upsample_nearest(ctx, f0, f0_up, B, T_OUT_MEL, 480)
 
-    print("[synth] source module...")
-    var sine_merge = ctx.enqueue_create_buffer[DType.float32](B * 1 * T_AUDIO_FULL)
-    source_module_forward(ctx, hift.m_source, f0_up, sine_merge,
-                           B, T_AUDIO_FULL,
-                           sampling_rate=24000, harmonic_num=8,
-                           sine_amp=Float32(0.1), noise_std=Float32(0.003),
-                           voiced_threshold=Float32(10.0))
+    print("[synth] source module (using upstream's sine_merge to bypass RNG divergence)...")
+    var sine_merge = upload_fp32(ctx, fix + "hift_dump/sine_merge.bin")
 
     print("[synth] STFT...")
     var window_s = ctx.enqueue_create_buffer[DType.float32](N_FFT)
