@@ -414,8 +414,8 @@ def load_hift_generator(mut ctx: DeviceContext, base: String) raises -> HiFTGene
 
     # ups: 3 transposed convs. Channel widths halve each stage.
     var ups = List[Conv1d]()
-    var ups_rates = [8, 8, 4]
-    var ups_kernels = [16, 16, 8]
+    var ups_rates = [8, 5, 3]
+    var ups_kernels = [16, 11, 7]
     for i in range(3):
         var c_in = BASE // (1 << i)
         var c_out = BASE // (1 << (i + 1))
@@ -447,8 +447,8 @@ def load_hift_generator(mut ctx: DeviceContext, base: String) raises -> HiFTGene
     #   source_downs.2: (64, 18, 1)
     var source_downs = List[Conv1d]()
     var sd_kernels = [30, 6, 1]
-    var sd_strides = [16, 4, 1]      # rough — actual stride irrelevant for loader
-    var sd_pads = [8, 2, 0]
+    var sd_strides = [15, 3, 1]
+    var sd_pads = [7, 1, 0]
     for i in range(3):
         var ch = BASE // (1 << (i + 1))
         var sd = _load_conv1d_wn(
@@ -459,7 +459,7 @@ def load_hift_generator(mut ctx: DeviceContext, base: String) raises -> HiFTGene
 
     # source_resblocks: 3 MRF resblocks; kernels [7, 11, 11] per stage (varies)
     var source_resblocks = List[HiFTResBlock]()
-    var src_rb_kernels = [7, 11, 11]
+    var src_rb_kernels = [7, 7, 11]
     for i in range(3):
         var ch = BASE // (1 << (i + 1))
         var srb = _load_hift_resblock(

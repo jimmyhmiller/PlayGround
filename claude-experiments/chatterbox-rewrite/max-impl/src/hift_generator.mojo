@@ -317,8 +317,9 @@ def hift_decode_trunk(
     var x = ctx.enqueue_create_buffer[DType.float32](b * BASE * t_mel)
     conv1d_forward(ctx, model.conv_pre, mel_buf, x, b, t_mel, t_mel)
 
-    # Track T as we go through the 3 ups stages with rates [8, 8, 4].
-    var ups_rates = [8, 8, 4]
+    # Track T as we go through the 3 ups stages with upstream rates [8, 5, 3]
+    # (matches `chatterbox/models/s3gen/s3gen.py`'s HiFTGenerator config).
+    var ups_rates = [8, 5, 3]
     var t_cur = t_mel
     var c_cur = BASE
 
@@ -387,7 +388,10 @@ def hift_decode_trunk(
         t_cur = t_post
 
     # Final leaky_relu + conv_post: (B, 64, T) → (B, 18, T).
-    leaky_relu_inplace(ctx, x, b * c_cur * t_cur, 0.01)   # default slope 0.01 for last
+    # NOTE: upstream calls `F.leaky_relu(x)` with no slope argument, which
+    # defaults to 0.01 — NOT lrelu_slope (0.1). Mismatching here is what made
+    # earlier parity diverge by ~0.04 per element.
+    leaky_relu_inplace(ctx, x, b * c_cur * t_cur, Float32(0.01))
     conv1d_forward(ctx, model.conv_post, x, spec_out, b, t_cur, t_out)
 
 
