@@ -171,16 +171,13 @@ def save_fp32_1d(path: String, data: List[Float32]) raises:
     f.close()
 
 
-def load_wav_with_sr(path: String) raises -> (Tensor, Int):
-    """Read a mono PCM-16 WAV file and return (float32 samples in [-1,1], sample_rate)."""
-    var t = load_wav(path)
-    # Re-read the sample rate from the fmt chunk.
+def read_wav_sample_rate(path: String) raises -> Int:
+    """Read just the sample rate from a WAV file's fmt chunk."""
     var f = open(path, "r")
     var bytes = f.read_bytes()
     f.close()
     var n_total = len(bytes)
     var off = 12
-    var sr: Int = 0
     while off + 8 <= n_total:
         var c0 = bytes[off]
         var c1 = bytes[off + 1]
@@ -188,10 +185,9 @@ def load_wav_with_sr(path: String) raises -> (Tensor, Int):
         var c3 = bytes[off + 3]
         var chunk_size = _read_i32_le(bytes, off + 4)
         if c0 == 0x66 and c1 == 0x6D and c2 == 0x74 and c3 == 0x20:  # "fmt "
-            sr = Int(_read_i32_le(bytes, off + 12))
-            break
+            return Int(_read_i32_le(bytes, off + 12))
         off += 8 + chunk_size
-    return (t^, sr)
+    return 0
 
 
 def load_wav(path: String) raises -> Tensor:
