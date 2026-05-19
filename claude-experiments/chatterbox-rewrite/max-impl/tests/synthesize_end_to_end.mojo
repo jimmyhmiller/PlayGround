@@ -34,9 +34,10 @@ from std.algorithm.functional import elementwise, IndexList
 
 from fixture import load_fp32, load_i64, save_wav
 from weights import (
-    load_t3, load_upsample_conformer_encoder, load_cfm_estimator_real,
+    load_t3, load_t3_cond_enc, load_upsample_conformer_encoder, load_cfm_estimator_real,
     load_hift_generator, upload_fp32,
 )
+from cond_enc import t3_cond_enc_forward
 from t3_generate import t3_generate_cfg, t3_generate_cfg_sample
 from bpe_tokenizer import load_tokenizer
 from text_embed import text_to_input_ids, build_text_emb, build_bos_emb, build_rope_tables
@@ -82,7 +83,28 @@ def test_end_to_end() raises:
     # ─────────────────────────────────────────────────────────────────────
     # Step 1: Build T3 CFG-doubled prefix from voice/text conditioning.
     # ─────────────────────────────────────────────────────────────────────
-    var cond_emb = upload_fp32(ctx, text_dir + "cond_emb.bin")
+    # Build cond_emb in Mojo from speaker_emb + cond_prompt_tokens + emotion.
+    # These voice inputs come from the cached voice profile (computed once per ref voice).
+    var voice_dir2 = "weights/s3gen_prompt/cond_enc_diag/"
+    var cond_enc_mod = load_t3_cond_enc(ctx, "weights/t3", t3.speech_emb, t3.speech_pos_emb)
+    var spk_emb = upload_fp32(ctx, voice_dir2 + "speaker_emb.bin")
+    var emotion = upload_fp32(ctx, voice_dir2 + "emotion_adv.bin")
+    var ctok = load_i64(voice_dir2 + "cond_prompt_speech_tokens.bin")
+    var CL = 150
+    var SQ = 32
+    var ctok_buf = ctx.enqueue_create_buffer[DType.int64](B * CL)
+    with ctok_buf.map_to_host() as h:
+        for i in range(B * CL):
+            h[i] = ctok.data[i]
+    var mask_q = ctx.enqueue_create_buffer[DType.float32](SQ * SQ)
+    mask_q.enqueue_fill(0.0)
+    var mask_qq = ctx.enqueue_create_buffer[DType.float32](SQ * CL)
+    mask_qq.enqueue_fill(0.0)
+    var cond_emb = ctx.enqueue_create_buffer[DType.float32](B * 34 * D)
+    print("[e2e] building cond_emb via T3CondEnc...")
+    t3_cond_enc_forward(ctx, cond_enc_mod, spk_emb, ctok_buf, emotion, cond_emb,
+                         mask_q, mask_qq, B)
+    ctx.synchronize()
 
     # Build text_emb + bos_emb in Mojo from raw text.
     var text = "the quick brown fox"

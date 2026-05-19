@@ -13,6 +13,7 @@ struct T3CondEnc(Copyable, Movable):
     var spkr_enc: Linear
     var emotion_fc: Linear
     var speech_emb: Embedding   # shared with T3's speech token embedding
+    var speech_pos_emb: Embedding  # shared with T3's speech pos embedding
     var perceiver: Perceiver
     var speaker_embed_size: Int
     var d_model: Int
@@ -76,9 +77,26 @@ def t3_cond_enc_forward(
     var spkr_proj = ctx.enqueue_create_buffer[DType.float32](b * D)
     linear_forward(ctx, model.spkr_enc, speaker_emb_buf, spkr_proj, b)
 
-    # speech_emb(cond_tokens): (B, CL) → (B, CL, D).
+    # speech_emb(cond_tokens) + speech_pos_emb[arange(CL)]: (B, CL) → (B, CL, D).
     var cs_emb = ctx.enqueue_create_buffer[DType.float32](b * CL * D)
     embedding_forward(ctx, model.speech_emb, cond_tokens_buf, cs_emb, b, CL)
+
+    var ce_ptr = cs_emb.unsafe_ptr()
+    var pp_ptr = model.speech_pos_emb.table.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(ce_ptr, pp_ptr, b, CL, D)
+    def add_pos_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // (CL * D)
+        var rem = i - bi * CL * D
+        var ti = rem // D
+        var di = rem - ti * D
+        ce_ptr[i] = ce_ptr[i] + pp_ptr[ti * D + di]
+    elementwise[add_pos_fn, simd_width=1, target="gpu"](
+        IndexList[1](b * CL * D), DeviceContextPtr(ctx),
+    )
 
     # perceiver(cs_emb): (B, CL, D) → (B, SQ, D).
     var perc_out = ctx.enqueue_create_buffer[DType.float32](b * SQ * D)

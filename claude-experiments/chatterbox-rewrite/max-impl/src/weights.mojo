@@ -956,9 +956,10 @@ def load_cfm_estimator_real(mut ctx: DeviceContext, base: String) raises -> CFME
 def load_t3_cond_enc(
     mut ctx: DeviceContext, base: String,
     speech_emb: Embedding,
+    speech_pos_emb: Embedding,
     n_queries: Int = 32,
-    n_perc_heads: Int = 16,
-    perc_head_dim: Int = 64,
+    n_perc_heads: Int = 4,
+    perc_head_dim: Int = 256,
     speaker_embed_size: Int = 256,
     d_model: Int = 1024,
     cond_prompt_len: Int = 150,
@@ -1004,8 +1005,8 @@ def load_t3_cond_enc(
                                 n_perc_heads, perc_head_dim)
     var perceiver = Perceiver(pre_q^, block^, n_queries, d_model)
 
-    return T3CondEnc(spkr_enc^, emotion_fc^, speech_emb.copy(), perceiver^,
-                      speaker_embed_size, d_model, cond_prompt_len)
+    return T3CondEnc(spkr_enc^, emotion_fc^, speech_emb.copy(), speech_pos_emb.copy(),
+                      perceiver^, speaker_embed_size, d_model, cond_prompt_len)
 
 
 # ============================================================================
