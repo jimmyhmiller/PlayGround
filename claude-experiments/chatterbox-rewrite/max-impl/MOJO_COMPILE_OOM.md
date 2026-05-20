@@ -230,6 +230,75 @@ disk. The Mojo TTS binary then loads them and runs inference.
 This is exactly the production deployment pattern for TTS systems —
 voice profiles are computed once and cached as small files.
 
+## UPDATE — REPRODUCED and ROOT-CAUSED
+
+Built a measurement script (`/tmp/measure_compile.sh`) that tracks peak
+mojo RSS during compile. Ran it on the same source file under different
+cache states:
+
+| cache state | peak RSS | result |
+|---|---|---|
+| populated (4.8 GB existing) | 2.2 GB | success, ~15s |
+| populated, run 5× back-to-back | 2.2 GB each | all success |
+| **empty / cleared** | **122.7 GB** | **OOM (exit 137)** |
+| restored | 2.2 GB | success again |
+
+So the 125 GB peak is **cold-compile cost**, not stale state. Mojo's
+on-disk cache at
+`.pixi/envs/default/share/max/cache/.mojo_cache/mojo/transform/...`
+(4.8 GB, 6903 entries, individual entries up to ~52 MB each) amortizes
+the cost. Once the cache is warm, peak RSS is ~2 GB.
+
+### Why cold compile blows up
+
+The synth file imports 26 modules. Across them: **163 `elementwise[...]`
+kernel sites**. Each is a comptime closure capture (often capturing 5-10
+pointer/Int values), monomorphized into a unique kernel function. Each
+unique monomorphization gets:
+1. Mojo IR generation
+2. Lowered to MLIR
+3. Lowered to LLVM IR (typically 10-100× source size for templated GPU
+   code)
+4. LLVM optimization passes (the memory hog — opt holds the whole IR in
+   memory plus working sets for each pass)
+5. AMDGPU codegen
+6. Cached to disk
+
+If all 163 (+ their inner instances from MAX abstractions like
+`linalg.matmul`, `nn.softmax`) are materialized simultaneously during a
+single pass-manager invocation, working set explodes. Per-kernel cost is
+small (~50 MB cache entry) but in-memory working set during LLVM opt is
+likely several GB per kernel held concurrently.
+
+### Reproduction
+
+```bash
+cd max-impl
+# Clear cache
+rm -rf .pixi/envs/default/share/max/cache/.mojo_cache
+# Cold compile of large file → OOM at ~122 GB
+pixi run mojo run -I src -I tests tests/synthesize_from_wav.mojo
+# (gets killed)
+
+# Restore cache (or rebuild it incrementally by compiling smaller files first)
+pixi run mojo run -I src -I tests tests/test_voice_encoder_inference.mojo
+pixi run mojo run -I src -I tests tests/test_resampler_soxr.mojo
+# ... once enough monomorphizations are cached, the big file can compile
+pixi run mojo run -I src -I tests tests/synthesize_from_wav.mojo
+# (succeeds at ~2 GB)
+```
+
+### Possible mitigations (without changing Mojo)
+
+1. **Warm the cache by compiling smaller files first** — incrementally
+   builds monomorphizations that the big file will hit.
+2. **Split the synth into stage 1 + stage 2 binaries** — each is small
+   enough to cold-compile under the limit. This is what
+   `preprocess_voice.mojo` + `synthesize_end_to_end.mojo` already do.
+3. **Reduce kernel call sites** — factor out repeated elementwise
+   patterns into reusable utilities (so a transpose used 5 times
+   monomorphizes once not five times). May help but unclear how much.
+
 ## UPDATE — found the FFI path
 
 Probing Mojo nightly 1.0.0b2.dev2026051806:
