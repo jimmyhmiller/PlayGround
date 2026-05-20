@@ -69,6 +69,19 @@ def test_ve_inference() raises:
     var cos_sim = dot / (sqrt(an) * sqrt(bn))
     print("[ve] L2 norm Mojo=", sqrt(an), " upstream=", sqrt(bn))
     print("[ve] cos_sim =", cos_sim, " max-abs diff =", max_abs)
+    var n_neg_mojo = 0
+    var n_neg_ref = 0
+    var mojo_first10 = List[Float32]()
+    with embed.map_to_host() as h:
+        for i in range(256):
+            if h[i] < 0.0: n_neg_mojo += 1
+            if reference.data[i] < 0.0: n_neg_ref += 1
+            if i < 10:
+                mojo_first10.append(h[i])
+    print("[ve] negatives: mojo=", n_neg_mojo, " upstream=", n_neg_ref)
+    print("[ve] first 10 comparison:")
+    for i in range(10):
+        print("  ", i, ": mojo=", mojo_first10[i], " upstream=", reference.data[i], " diff=", mojo_first10[i] - reference.data[i])
 
 
 def main() raises:
