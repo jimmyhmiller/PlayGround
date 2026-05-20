@@ -44,7 +44,7 @@ from hift_generator import (
 )
 from cond_enc import t3_cond_enc_forward
 from resampler import resample_24k_to_16k
-from voice_encoder import voice_encoder_forward
+from voice_encoder import voice_encoder_forward, voice_encoder_inference
 from mel_ve import mel_ve_forward
 from mel_24k import build_hann_window as build_hann_ve, build_librosa_mel_filterbank as build_mel_fb_ve
 from weights import load_voice_encoder
@@ -342,24 +342,10 @@ def test_synth_from_wav() raises:
     mel_ve_forward(ctx, wav_16, win_ve, mel_fb_ve, mel_ve_full, n_16, T_ve_full)
     ctx.synchronize()
 
-    # Run VE forward on first 160 partial.
-    var T_partial = 160
-    var ve_in = ctx.enqueue_create_buffer[DType.float32](B * T_partial * 40)
-    var mvf = mel_ve_full.unsafe_ptr()
-    var vp = ve_in.unsafe_ptr()
-
-    @always_inline
-    @parameter
-    @__copy_capture(mvf, vp, T_partial)
-    def slice_ve[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
-        var i = idx[0]
-        vp[i] = mvf[i]
-    elementwise[slice_ve, simd_width=1, target="gpu"](
-        IndexList[1](B * T_partial * 40), DeviceContextPtr(ctx),
-    )
-
-    var speaker_emb_256 = ctx.enqueue_create_buffer[DType.float32](B * 256)
-    voice_encoder_forward(ctx, ve, ve_in, speaker_emb_256, B, T_partial)
+    # Multi-partial VoiceEncoder inference matching upstream
+    # (overlapping 160-frame windows at stride=77, mean+L2norm across partials).
+    var speaker_emb_256 = ctx.enqueue_create_buffer[DType.float32](256)
+    voice_encoder_inference(ctx, ve, mel_ve_full, speaker_emb_256, T_ve_full)
     ctx.synchronize()
 
     # ──────────────────────────────────────────────────────────────────

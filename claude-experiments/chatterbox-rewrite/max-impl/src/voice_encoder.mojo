@@ -135,3 +135,118 @@ def voice_encoder_forward(
     var relu_buf = ctx.enqueue_create_buffer[DType.float32](batch * D)
     relu(ctx, proj_buf, relu_buf, batch * D)
     l2_normalize_rows(ctx, relu_buf, embed_buf, batch, D)
+
+
+def voice_encoder_inference(
+    mut ctx: DeviceContext,
+    mut ve: VoiceEncoder,
+    mut mel_full_buf: DeviceBuffer[DType.float32],   # (T, 40) full-utterance mel
+    mut embed_out: DeviceBuffer[DType.float32],      # (256,) final speaker embedding
+    t_frames: Int,
+    frame_step: Int = 77,         # default = round((16000/1.3)/160) for rate=1.3
+    partial_frames: Int = 160,
+    n_mels: Int = 40,
+    embed_dim: Int = 256,
+) raises:
+    """Multi-partial VoiceEncoder inference matching upstream's
+    `VoiceEncoder.inference(mels, mel_lens, overlap=0.5, rate=1.3)`.
+
+    Steps:
+      1. Extract overlapping partials of size partial_frames at stride frame_step.
+      2. Run VoiceEncoder forward on each (each output is L2-normalized).
+      3. Mean across partials → 256-d vector.
+      4. L2-normalize the mean → final speaker embedding.
+
+    For T=1001, frame_step=77, partial_frames=160: n_partials = 11 + edge.
+    """
+    # Compute n_partials with min_coverage=0.8 heuristic from upstream:
+    #   n_wins, remainder = divmod(max(T - W + step, 0), step)
+    #   if remainder + (W - step) / W >= min_coverage: n_wins += 1
+    # We simplify: n_partials = max(1, (t_frames - partial_frames) // frame_step + 1)
+    var n_partials = 1
+    if t_frames > partial_frames:
+        n_partials = (t_frames - partial_frames) // frame_step + 1
+
+    # Run VE forward at batch=1 for each partial, collecting embeddings.
+    var partial_embeds = ctx.enqueue_create_buffer[DType.float32](n_partials * embed_dim)
+    var ve_in = ctx.enqueue_create_buffer[DType.float32](partial_frames * n_mels)
+    var ve_out = ctx.enqueue_create_buffer[DType.float32](embed_dim)
+
+    for pi in range(n_partials):
+        var mp = mel_full_buf.unsafe_ptr()
+        var vp = ve_in.unsafe_ptr()
+        var p_start = pi * frame_step
+
+        @always_inline
+        @parameter
+        @__copy_capture(mp, vp, p_start, partial_frames, n_mels, t_frames)
+        def slice_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var fi = i // n_mels
+            var mi = i - fi * n_mels
+            var src_t = p_start + fi
+            if src_t < t_frames:
+                vp[i] = mp[src_t * n_mels + mi]
+            else:
+                vp[i] = 0.0
+        elementwise[slice_fn, simd_width=1, target="gpu"](
+            IndexList[1](partial_frames * n_mels), DeviceContextPtr(ctx),
+        )
+
+        voice_encoder_forward(ctx, ve, ve_in, ve_out, 1, partial_frames)
+        ctx.synchronize()
+
+        # Copy ve_out into partial_embeds[pi].
+        var pep = partial_embeds.unsafe_ptr()
+        var vop = ve_out.unsafe_ptr()
+        var pi_start = pi * embed_dim
+
+        @always_inline
+        @parameter
+        @__copy_capture(pep, vop, pi_start, embed_dim)
+        def copy_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var d = idx[0]
+            pep[pi_start + d] = vop[d]
+        elementwise[copy_fn, simd_width=1, target="gpu"](
+            IndexList[1](embed_dim), DeviceContextPtr(ctx),
+        )
+    ctx.synchronize()
+
+    # Mean across partials → 256-d.
+    var mean_buf = ctx.enqueue_create_buffer[DType.float32](embed_dim)
+    var pep = partial_embeds.unsafe_ptr()
+    var mbp = mean_buf.unsafe_ptr()
+    var inv_n = Float32(1.0) / Float32(n_partials)
+
+    @always_inline
+    @parameter
+    @__copy_capture(pep, mbp, n_partials, embed_dim, inv_n)
+    def mean_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var d = idx[0]
+        var s: Float32 = 0.0
+        for p in range(n_partials):
+            s += pep[p * embed_dim + d]
+        mbp[d] = s * inv_n
+    elementwise[mean_fn, simd_width=1, target="gpu"](
+        IndexList[1](embed_dim), DeviceContextPtr(ctx),
+    )
+
+    # L2-normalize the mean → final embed.
+    var sumsq: Float32 = 0.0
+    with mean_buf.map_to_host() as h:
+        for d in range(embed_dim):
+            sumsq += h[d] * h[d]
+    var inv_norm = Float32(1.0) / sqrt(sumsq) if sumsq > 0.0 else Float32(1.0)
+
+    var mbp2 = mean_buf.unsafe_ptr()
+    var op = embed_out.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(mbp2, op, inv_norm)
+    def norm_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var d = idx[0]
+        op[d] = mbp2[d] * inv_norm
+    elementwise[norm_fn, simd_width=1, target="gpu"](
+        IndexList[1](embed_dim), DeviceContextPtr(ctx),
+    )
