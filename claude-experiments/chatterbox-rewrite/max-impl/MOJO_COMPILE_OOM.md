@@ -209,8 +209,23 @@ When BOTH drifted embeddings are fed into the pipeline:
 
 The chain is correct algorithmically but loses fidelity at the resampler
 boundary. Path to fix:
-1. Implement soxr_hq-equivalent resampling (significant work).
-2. OR: precompute the speaker embeddings once per voice and cache them
-   to disk (treats voice as a fixed input, not derived at inference).
-3. OR: make CFM/HiFT robust to small embedding noise (model change, not
-   pipeline).
+
+### Why each fix path is hard right now
+
+| Path | Status | Notes |
+|---|---|---|
+| Implement soxr_hq pure-Mojo | Months of work | soxr is a multi-stage polyphase resampler with several thousand lines of C. The HQ quality uses 1024-tap Kaiser-windowed sinc filters with carefully tuned coefficients and multi-rate decomposition. Replicating bit-exact requires either reading the coefficients out of libsoxr's runtime state or re-deriving the design. |
+| Call libsoxr.so.0 via FFI | **Blocked by Mojo nightly** | Mojo 1.0.0b2.dev2026051806 doesn't expose `external_call` or `DLHandle` from `std.sys.ffi` or `std.sys.intrinsics`. Verified by grep + import attempts. The stdlib *source* at `modular/mojo/stdlib/stdlib/sys/ffi.mojo` has both, but they're not in the `std.mojopkg` shipped here. |
+| Use scipy.signal.resample_poly equivalent | Possible | Cleaner algorithm than soxr but `librosa.resample(res_type='scipy')` differs from `'soxr_hq'` by ~5% rel_l2 — still won't match upstream. |
+| Precompute voice profile once | Works today | Run upstream's `prepare_conditionals` once per voice (in chatterbox venv), dump `prompt_token`, `prompt_feat`, `embedding`, `cond_emb` to disk. Mojo binary loads these at inference. This is what production TTS deployments do. |
+| Pin upstream's exact 16kHz output | Works today | Have user supply both 24kHz and 16kHz versions of the reference (resampled with soxr offline). Mojo skips the resample step. |
+
+### Decision
+
+For "bit-exact upstream behavior", the realistic path with current Mojo
+is **precompute voice profile**: take a wav, run upstream's
+`prepare_conditionals` in Python once, save the resulting tensors to
+disk. The Mojo TTS binary then loads them and runs inference.
+
+This is exactly the production deployment pattern for TTS systems —
+voice profiles are computed once and cached as small files.
