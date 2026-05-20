@@ -168,45 +168,48 @@ def voice_encoder_inference(
         n_partials = (t_frames - partial_frames) // frame_step + 1
 
     # Run VE forward at batch=1 for each partial, collecting embeddings.
+    # The slice_fn and copy_fn closures are defined ONCE outside the loop;
+    # they read `pi_box[0]` from a host-side scratch buffer so we don't
+    # specialize the kernel per iteration.
     var partial_embeds = ctx.enqueue_create_buffer[DType.float32](n_partials * embed_dim)
     var ve_in = ctx.enqueue_create_buffer[DType.float32](partial_frames * n_mels)
     var ve_out = ctx.enqueue_create_buffer[DType.float32](embed_dim)
+    var pi_box = ctx.enqueue_create_buffer[DType.int32](1)
+
+    var mp = mel_full_buf.unsafe_ptr()
+    var vp = ve_in.unsafe_ptr()
+    var pip = pi_box.unsafe_ptr()
+    var pep = partial_embeds.unsafe_ptr()
+    var vop = ve_out.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(mp, vp, pip, partial_frames, frame_step, n_mels, t_frames)
+    def slice_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var fi = i // n_mels
+        var mi = i - fi * n_mels
+        var p_start = Int(pip[0]) * frame_step
+        var src_t = p_start + fi
+        if src_t < t_frames:
+            vp[i] = mp[src_t * n_mels + mi]
+        else:
+            vp[i] = 0.0
+
+    @always_inline
+    @parameter
+    @__copy_capture(pep, vop, pip, embed_dim)
+    def copy_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var d = idx[0]
+        pep[Int(pip[0]) * embed_dim + d] = vop[d]
 
     for pi in range(n_partials):
-        var mp = mel_full_buf.unsafe_ptr()
-        var vp = ve_in.unsafe_ptr()
-        var p_start = pi * frame_step
-
-        @always_inline
-        @parameter
-        @__copy_capture(mp, vp, p_start, partial_frames, n_mels, t_frames)
-        def slice_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
-            var i = idx[0]
-            var fi = i // n_mels
-            var mi = i - fi * n_mels
-            var src_t = p_start + fi
-            if src_t < t_frames:
-                vp[i] = mp[src_t * n_mels + mi]
-            else:
-                vp[i] = 0.0
+        with pi_box.map_to_host() as h:
+            h[0] = Int32(pi)
         elementwise[slice_fn, simd_width=1, target="gpu"](
             IndexList[1](partial_frames * n_mels), DeviceContextPtr(ctx),
         )
-
         voice_encoder_forward(ctx, ve, ve_in, ve_out, 1, partial_frames)
-        ctx.synchronize()
-
-        # Copy ve_out into partial_embeds[pi].
-        var pep = partial_embeds.unsafe_ptr()
-        var vop = ve_out.unsafe_ptr()
-        var pi_start = pi * embed_dim
-
-        @always_inline
-        @parameter
-        @__copy_capture(pep, vop, pi_start, embed_dim)
-        def copy_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
-            var d = idx[0]
-            pep[pi_start + d] = vop[d]
         elementwise[copy_fn, simd_width=1, target="gpu"](
             IndexList[1](embed_dim), DeviceContextPtr(ctx),
         )
@@ -214,18 +217,18 @@ def voice_encoder_inference(
 
     # Mean across partials → 256-d.
     var mean_buf = ctx.enqueue_create_buffer[DType.float32](embed_dim)
-    var pep = partial_embeds.unsafe_ptr()
+    var pep_mean = partial_embeds.unsafe_ptr()
     var mbp = mean_buf.unsafe_ptr()
     var inv_n = Float32(1.0) / Float32(n_partials)
 
     @always_inline
     @parameter
-    @__copy_capture(pep, mbp, n_partials, embed_dim, inv_n)
+    @__copy_capture(pep_mean, mbp, n_partials, embed_dim, inv_n)
     def mean_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
         var d = idx[0]
         var s: Float32 = 0.0
         for p in range(n_partials):
-            s += pep[p * embed_dim + d]
+            s += pep_mean[p * embed_dim + d]
         mbp[d] = s * inv_n
     elementwise[mean_fn, simd_width=1, target="gpu"](
         IndexList[1](embed_dim), DeviceContextPtr(ctx),
