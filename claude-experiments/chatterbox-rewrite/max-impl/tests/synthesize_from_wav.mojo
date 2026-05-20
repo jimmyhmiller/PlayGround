@@ -43,7 +43,7 @@ from hift_generator import (
     build_s_stft_from_signal,
 )
 from cond_enc import t3_cond_enc_forward
-from resampler import resample_24k_to_16k
+from resampler_soxr import soxr_resample_24k_to_16k
 from voice_encoder import voice_encoder_inference
 from mel_ve import mel_ve_forward
 from mel_24k import build_hann_window as build_hann_ve, build_librosa_mel_filterbank as build_mel_fb_ve
@@ -189,7 +189,7 @@ def test_synth_from_wav() raises:
     var n_16 = DEC_COND_LEN_16K
     var wav_16 = ctx.enqueue_create_buffer[DType.float32](n_16)
     print("[full] resampling 24k→16k...")
-    resample_24k_to_16k(ctx, wav_24, wav_16, n_24, n_16)
+    soxr_resample_24k_to_16k(ctx, wav_24, wav_16, n_24, n_16)
     ctx.synchronize()
 
     # ──────────────────────────────────────────────────────────────────

@@ -229,3 +229,37 @@ disk. The Mojo TTS binary then loads them and runs inference.
 
 This is exactly the production deployment pattern for TTS systems —
 voice profiles are computed once and cached as small files.
+
+## UPDATE — found the FFI path
+
+Probing Mojo nightly 1.0.0b2.dev2026051806:
+
+- `std.sys.ffi` is **not exposed** to user code.
+- BUT `std.subprocess.run(cmd)` IS exposed and works.
+- libsoxr is installed system-wide (apt `libsoxr0`) AND ffmpeg is built
+  with `--enable-libsoxr`.
+- `ffmpeg -af aresample=resampler=soxr:precision=20 -ar 16000` produces
+  **bit-exact** output (max-abs=0.0, rel_l2=0.0) vs
+  `librosa.resample(res_type='soxr_hq')`.
+
+Implemented as `src/resampler_soxr.mojo` →
+`soxr_resample_24k_to_16k(ctx, in_buf, out_buf, n_in, n_out)`. Verified
+bit-exact in `tests/test_resampler_soxr.mojo`.
+
+### Remaining OOM
+
+Importing **both** `voice_encoder_inference` AND `soxr_resample_24k_to_16k`
+into `synthesize_from_wav.mojo` triggers the compile-time OOM. Each works
+in isolation. Suspect: cumulative monomorphization across `elementwise[...]`
+closures in this large file. Workarounds:
+
+1. **Split synthesize_from_wav into two binaries**: stage 1 does voice
+   preprocessing (subprocess+soxr resample → mel → CAMPPlus → VE
+   inference → save embeddings to disk), stage 2 does the TTS inference
+   (load embeddings → T3 → CFM → HiFT → audio). The two binaries don't
+   import each other's heavy code so compile stays manageable.
+2. **Use upstream-precomputed voice profile** for the heaviest path
+   (still uses Python upstream once per voice).
+3. **Pre-resample the WAV with ffmpeg externally** so synthesize_from_wav
+   reads two WAV files (24k and 16k) — pure-Mojo at runtime, ffmpeg is
+   just a build-time data preparation step.
