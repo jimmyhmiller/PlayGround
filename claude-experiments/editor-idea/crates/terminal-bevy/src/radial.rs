@@ -232,6 +232,7 @@ fn dispatch_pick(
         kind: item.kind,
         project_id: active,
         origin: Some(origin),
+        size: None,
         config: serde_json::Value::Null,
     });
 }

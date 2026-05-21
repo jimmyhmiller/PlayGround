@@ -51,18 +51,27 @@ use pane_bevy::{
 use serde_json::Value;
 
 pub mod atlas;
+pub mod claude_events_pane;
+pub mod daemon_client;
+/// Re-export of the daemon protocol from the headless crate so existing
+/// callers can continue to write `terminal_bevy::daemon_proto::*`.
+pub use terminal_daemon::proto as daemon_proto;
 pub mod ipc;
 pub mod projects;
 pub mod pty;
 pub mod radial;
 pub mod run_button;
 pub mod selection;
+pub mod term_material;
 pub mod vt;
 pub mod worker;
 use atlas::GlyphAtlas;
+use term_material::{
+    make_cells_image, pack_rgb, GpuCell, TermMaterial, TermMaterialPlugin, TermParams,
+};
 use projects::{
-    OpenFileRequest, OpenProjectTarget, PendingActions, ProjectMembership, Projects, Renaming,
-    Sidebar,
+    NewPaneRequest, OpenFileRequest, OpenProjectTarget, PendingActions, ProjectMembership,
+    Projects, Renaming, Sidebar,
 };
 use pty::PtySize;
 use worker::{SnapCell, WorkerHandle, WorkerMsg};
@@ -90,11 +99,11 @@ fn load_primary_font() -> &'static [u8] {
 
 /// Root for all on-disk persistence (projects + per-terminal scrollback).
 /// `~/.terminal-bevy/` on every supported platform.
+///
+/// Delegates to `terminal_daemon::data_dir` so the daemon process and
+/// the editor process agree on the location of socket / pid files.
 pub fn data_dir() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let mut p = PathBuf::from(home);
-    p.push(".terminal-bevy");
-    Some(p)
+    terminal_daemon::data_dir()
 }
 
 /// Per-terminal scrollback log. Raw pty bytes are appended here as they
@@ -104,6 +113,34 @@ pub fn scrollback_path(session_id: u64) -> Option<PathBuf> {
     let mut p = data_dir()?;
     p.push("scrollback");
     Some(p.join(format!("{}.bytes", session_id)))
+}
+
+/// Unix socket the per-session daemon listens on. Forwards to the
+/// daemon crate so client and daemon share a single source of truth.
+pub fn socket_path(session_id: u64) -> Option<PathBuf> {
+    terminal_daemon::socket_path(session_id)
+}
+
+/// PID file the daemon writes on startup. Same delegation as
+/// [`socket_path`].
+pub fn pid_path(session_id: u64) -> Option<PathBuf> {
+    terminal_daemon::pid_path(session_id)
+}
+
+/// Pick the shell to launch in a new daemon. Resolution: `$SHELL` →
+/// passwd entry → `/bin/sh`. Returns a `Vec<String>` so it slots into
+/// `Command::new(args[0]).args(&args[1..])` cleanly. Matches what
+/// `Pty::spawn` used to do before we moved PTY ownership into the daemon.
+pub fn default_shell_command() -> Vec<String> {
+    use std::path::PathBuf as PB;
+    let shell = match std::env::var_os("SHELL") {
+        Some(s) if !s.is_empty() => PB::from(s),
+        _ => match nix::unistd::User::from_uid(nix::unistd::getuid()) {
+            Ok(Some(user)) => user.shell,
+            _ => PB::from("/bin/sh"),
+        },
+    };
+    vec![shell.to_string_lossy().into_owned()]
 }
 
 // ---------- Per-entity runtime ----------
@@ -135,22 +172,32 @@ pub struct TerminalSession(pub u64);
 #[derive(Component, Copy, Clone)]
 pub struct TerminalCursor(pub Entity);
 
-/// Per-terminal sprite pools — one solid-color quad per cell for the
-/// background, one atlas-sampled quad per cell for the glyph. Both
-/// pools are sized exactly `cols * rows` and stay that size between
-/// frames; only resized on grid resize. Mutating `Sprite.color` and
-/// `TextureAtlas.index` per cell (no spawn/despawn in the hot path) is
-/// what makes throughput-heavy workloads like `cat` not melt.
+/// Per-terminal GPU grid state. One `TermMaterial` + cells texture per
+/// pane; the worker → sync_grid pipeline rewrites texels of the cells
+/// texture and Bevy re-uploads it. Replaces the previous "one Sprite
+/// entity per cell" model — for a busy TUI we used to walk thousands
+/// of `Mut<Sprite>` per frame, marking each one Changed; now it's a
+/// single mutated Image asset per frame regardless of how many cells
+/// changed.
 ///
 /// `last_rendered_generation` is compared against the worker's snapshot
 /// generation to skip whole frames when the grid hasn't changed.
-#[derive(Component, Default)]
-pub struct CellSprites {
-    pub bg: Vec<Entity>,
-    pub fg: Vec<Entity>,
+#[derive(Component)]
+pub struct TermGrid {
+    pub material: Handle<term_material::TermMaterial>,
+    pub cells_image: Handle<Image>,
+    pub mesh: Handle<Mesh>,
+    /// Entity (child of `content_root`) carrying the `Mesh2d` +
+    /// `MeshMaterial2d<TermMaterial>`.
+    pub render_entity: Entity,
     pub cols: u16,
     pub rows: u16,
     pub last_rendered_generation: u64,
+    /// Was this pane visible the last time sync_grid touched it? Used
+    /// to detect the hidden→visible transition so we can force a full
+    /// repaint of the cells texture (the worker has been processing pty
+    /// bytes the whole time but not pushing snapshots into the GPU).
+    pub was_visible: bool,
 }
 
 /// Bumped whenever the Terminal for this entity is mutated (vt bytes
@@ -254,10 +301,13 @@ impl Plugin for TerminalPlugin {
             // "terminal" kind, render the grid, and handle keyboard +
             // mouse-driven selection inside the content area.
             .add_plugins(PanePlugin)
+            .add_plugins(TermMaterialPlugin)
             .add_plugins(projects::ProjectsPlugin)
             .add_plugins(radial::RadialPlugin)
             .add_plugins(selection::SelectionPlugin)
             .add_plugins(run_button::RunButtonPlugin)
+            .add_plugins(claude_events_pane::ClaudeEventsPanePlugin)
+            .add_plugins(widget_bevy::WidgetPlugin)
             .add_plugins(editor_bevy::EditorEmbedPlugin)
             .add_systems(
                 Startup,
@@ -269,6 +319,7 @@ impl Plugin for TerminalPlugin {
                 ),
             )
             .add_systems(PostStartup, release_os_focus)
+            .add_systems(Update, debug_fps_log)
             .add_systems(
                 Update,
                 (
@@ -279,6 +330,11 @@ impl Plugin for TerminalPlugin {
             .add_systems(
                 Update,
                 (
+                    // Focus-state + modifier reconciliation MUST run before
+                    // handle_keyboard so a stuck Cmd (e.g. swallowed Cmd-up
+                    // from a system shortcut) doesn't drop this frame's keys.
+                    track_app_focus,
+                    reconcile_macos_modifiers,
                     handle_terminal_content_press,
                     handle_terminal_selection_drag,
                     handle_scroll,
@@ -286,7 +342,6 @@ impl Plugin for TerminalPlugin {
                     handle_keyboard,
                     handle_file_drop,
                     sync_grid,
-                    track_app_focus,
                     apply_bell_pulse,
                     clear_active_unread,
                     sync_dock_badge,
@@ -367,7 +422,7 @@ fn release_os_focus() {}
 /// Holds the receiver half of the IPC channel. `mpsc::Receiver` is
 /// `Send` but `!Sync`, so we install it as a `NonSend` resource and
 /// drain it from a system that always runs on the main thread.
-pub struct IpcInbox(pub std::sync::mpsc::Receiver<ipc::OpenRequest>);
+pub struct IpcInbox(pub std::sync::mpsc::Receiver<ipc::IpcMessage>);
 
 fn setup_ipc_listener(world: &mut World) {
     let wakeup = world
@@ -378,25 +433,104 @@ fn setup_ipc_listener(world: &mut World) {
     }
 }
 
-/// Drain any IPC open requests received this frame and queue them as
-/// `PendingActions::open_files`. The actual file-read + editor spawn
-/// happens in `apply_pending_actions` on the next frame, so the IPC
-/// thread doesn't touch the World.
+/// Drain any IPC requests received this frame and queue them as
+/// entries in `PendingActions`. The actual world-mutating work
+/// (file-read + editor spawn, widget spawn) happens in
+/// `apply_pending_actions` next frame, so the IPC thread never touches
+/// the World.
 fn drain_ipc_open_requests(
     inbox: Option<NonSend<IpcInbox>>,
     mut pending: ResMut<PendingActions>,
+    projects: Res<Projects>,
 ) {
     let Some(inbox) = inbox else { return };
-    while let Ok(req) = inbox.0.try_recv() {
-        let project = match req.project {
-            Some(name) => OpenProjectTarget::ByName(name),
-            None => OpenProjectTarget::Active,
-        };
-        pending.open_files.push(OpenFileRequest {
-            path: req.path,
-            project,
-            origin: None,
-        });
+    while let Ok(msg) = inbox.0.try_recv() {
+        let ipc::IpcMessage {
+            req,
+            stream: mut _stream,
+        } = msg;
+        match req {
+            ipc::IpcRequest::OpenFile { path, project } => {
+                let target = match project {
+                    Some(name) => OpenProjectTarget::ByName(name),
+                    None => OpenProjectTarget::Active,
+                };
+                pending.open_files.push(OpenFileRequest {
+                    path,
+                    project: target,
+                    origin: None,
+                });
+            }
+            ipc::IpcRequest::SpawnWidget {
+                command,
+                args,
+                title,
+                cwd,
+                project,
+                position,
+                size,
+            } => {
+                let target = match project {
+                    Some(name) => OpenProjectTarget::ByName(name),
+                    None => OpenProjectTarget::Active,
+                };
+                let Some(project_id) = projects::resolve_project(&target, &projects) else {
+                    eprintln!("[ipc] spawn_widget: no matching project");
+                    continue;
+                };
+                let mut cfg = serde_json::Map::new();
+                cfg.insert("command".into(), Value::String(command));
+                if !args.is_empty() {
+                    cfg.insert(
+                        "args".into(),
+                        Value::Array(args.into_iter().map(Value::String).collect()),
+                    );
+                }
+                if let Some(t) = title {
+                    cfg.insert("title".into(), Value::String(t));
+                }
+                if let Some(p) = cwd {
+                    cfg.insert(
+                        "cwd".into(),
+                        Value::String(p.to_string_lossy().into_owned()),
+                    );
+                }
+                pending.new_panes.push(NewPaneRequest {
+                    kind: widget_bevy::PANE_KIND,
+                    project_id,
+                    origin: position.map(|[x, y]| Vec2::new(x, y)),
+                    size: size.map(|[w, h]| Vec2::new(w, h)),
+                    config: Value::Object(cfg),
+                });
+            }
+            ipc::IpcRequest::ListProjects => {
+                use std::io::Write as _;
+                let active = projects.active;
+                let entries: Vec<Value> = projects
+                    .list
+                    .iter()
+                    .map(|p| {
+                        serde_json::json!({
+                            "id": p.id,
+                            "name": p.name,
+                            "active": Some(p.id) == active,
+                        })
+                    })
+                    .collect();
+                let body = serde_json::json!({ "projects": entries });
+                let bytes = match serde_json::to_vec(&body) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        eprintln!("[ipc] list_projects: serialize: {}", e);
+                        continue;
+                    }
+                };
+                if let Err(e) = _stream.write_all(&bytes) {
+                    eprintln!("[ipc] list_projects: write: {}", e);
+                }
+                let _ = _stream.shutdown(std::net::Shutdown::Write);
+            }
+        }
     }
 }
 
@@ -469,6 +603,10 @@ pub fn setup_camera_and_font(world: &mut World) {
 
     let cell_width = measure_cell_width(font_bytes, FONT_SIZE);
     world.insert_resource(MonoMetrics { cell_width });
+    world.insert_resource(pane_bevy::PaneFontMetrics {
+        cell_width,
+        font_size: FONT_SIZE,
+    });
 
     // Build the glyph atlas now — pre-rasterizes printable ASCII so
     // first-frame rendering doesn't pay for it. Needs mutable access
@@ -539,6 +677,8 @@ fn populate_terminal_pane(
         .get_resource::<bevy::winit::EventLoopProxyWrapper>()
         .map(|w| bevy::winit::EventLoopProxy::clone(w));
     let worker = WorkerHandle::spawn(
+        session_id,
+        default_shell_command(),
         PtySize {
             cols,
             rows,
@@ -566,9 +706,14 @@ fn populate_terminal_pane(
         ))
         .id();
 
+    // Build the GPU grid for this terminal: one mesh + one cells texture +
+    // one material instance. `sync_grid` updates the cells texture
+    // texel-by-texel when the worker publishes a new snapshot.
+    let term_grid = build_term_grid(world, content_root, cell_width, cols, rows);
+
     world.entity_mut(terminal_entity).insert((
         TerminalRev::default(),
-        CellSprites::default(),
+        term_grid,
         TerminalSelection::default(),
         BellPulse::default(),
         TerminalSession(session_id),
@@ -588,6 +733,89 @@ fn grid_size_for_rect(size: Vec2, cell_width: f32) -> (u16, u16) {
     let cols = ((content_w / cell_width).floor() as u16).max(1);
     let rows = ((content_h / LINE_HEIGHT).floor() as u16).max(1);
     (cols, rows)
+}
+
+/// Spawn the single quad+material that renders an entire terminal grid
+/// on the GPU. Returns the `TermGrid` component that goes on the pane
+/// entity; the render entity itself becomes a child of `content_root`.
+fn build_term_grid(
+    world: &mut World,
+    content_root: Entity,
+    cell_width: f32,
+    cols: u16,
+    rows: u16,
+) -> TermGrid {
+    // Snapshot atlas geometry up-front so we don't hold the resource
+    // borrow across the asset writes below.
+    let (atlas_cols, atlas_slot_w, atlas_slot_h, atlas_dim, atlas_image) = {
+        let atlas = world.resource::<GlyphAtlas>();
+        (
+            atlas.cols_per_row(),
+            atlas.slot_w(),
+            atlas.slot_h(),
+            atlas.dim(),
+            atlas.image.clone(),
+        )
+    };
+
+    // Initial background is the worker's default bg (matches what a
+    // freshly-spawned libghostty Terminal reports for unwritten cells).
+    let default_bg = pack_rgb(13, 15, 20);
+    let cells_image = make_cells_image(cols as u32, rows as u32, default_bg);
+    let cells_handle = world.resource_mut::<Assets<Image>>().add(cells_image);
+
+    let grid_w = cols as f32 * cell_width;
+    let grid_h = rows as f32 * LINE_HEIGHT;
+    let mesh_handle = world
+        .resource_mut::<Assets<Mesh>>()
+        .add(Mesh::from(Rectangle::new(grid_w, grid_h)));
+
+    let params = TermParams {
+        cols: cols as u32,
+        rows: rows as u32,
+        atlas_cols,
+        atlas_slot_w,
+        atlas_slot_h,
+        atlas_dim,
+        _pad0: 0,
+        _pad1: 0,
+    };
+    let material_handle = world.resource_mut::<Assets<TermMaterial>>().add(TermMaterial {
+        params,
+        atlas: atlas_image,
+        cells: cells_handle.clone(),
+    });
+
+    // `Rectangle` mesh is centered on its origin; shift it so top-left
+    // lands at the content_root origin (matches where the cursor sprite
+    // and the previous per-cell sprites lived).
+    //
+    // `Visibility::Inherited` is load-bearing: Bevy's 2D extract path
+    // queries `&ViewVisibility`, which only exists if `Visibility` (and
+    // its required `InheritedVisibility`/`ViewVisibility` companions)
+    // is on the entity. Without it the mesh silently never reaches the
+    // render world, the shader never runs, and the pane shows the chrome
+    // background through what looks like a blank quad.
+    let render_entity = world
+        .spawn((
+            ChildOf(content_root),
+            bevy::mesh::Mesh2d(mesh_handle.clone()),
+            bevy::sprite_render::MeshMaterial2d(material_handle.clone()),
+            Transform::from_xyz(grid_w * 0.5, -(grid_h * 0.5), 0.0),
+            Visibility::Inherited,
+        ))
+        .id();
+
+    TermGrid {
+        material: material_handle,
+        cells_image: cells_handle,
+        mesh: mesh_handle,
+        render_entity,
+        cols,
+        rows,
+        last_rendered_generation: 0,
+        was_visible: true,
+    }
 }
 
 // ---------- Resize ----------
@@ -1131,6 +1359,28 @@ fn handle_scroll(
 /// spuriously even while the app is backgrounded. Polling
 /// `NSApplication.isActive` each frame matches what the user actually
 /// perceives as "looking at us". Logs every transition while diagnosing.
+fn debug_fps_log(
+    time: Res<Time>,
+    mut frames: Local<u64>,
+    mut last: Local<f64>,
+) {
+    if std::env::var("FPS_LOG").is_err() {
+        return;
+    }
+    *frames += 1;
+    let now = time.elapsed_secs_f64();
+    if *last == 0.0 {
+        *last = now;
+        *frames = 0;
+        return;
+    }
+    if now - *last >= 1.0 {
+        eprintln!("[fps] {:.1}", *frames as f64 / (now - *last));
+        *frames = 0;
+        *last = now;
+    }
+}
+
 fn track_app_focus(
     mut focused: ResMut<AppFocused>,
     mut keys: ResMut<ButtonInput<KeyCode>>,
@@ -1147,6 +1397,47 @@ fn track_app_focus(
         keys.release_all();
     }
 }
+
+/// Reconcile Bevy's modifier state with the OS's real-time view each
+/// frame. The focus-transition reset in `track_app_focus` catches the
+/// common Cmd+Tab case, but system shortcuts (Spotlight, Mission
+/// Control, screenshots) can swallow a Cmd-up without changing
+/// `frontmostApplication`, leaving `ButtonInput<KeyCode>::pressed(Super*)`
+/// stuck true. Polling NSEvent.modifierFlags is the authoritative
+/// signal: if Bevy thinks a modifier is held but the OS says it isn't,
+/// release it — otherwise every terminal keystroke after the stuck
+/// modifier gets silently dropped by handle_keyboard's gate.
+#[cfg(target_os = "macos")]
+fn reconcile_macos_modifiers(mut keys: ResMut<ButtonInput<KeyCode>>) {
+    use objc2_app_kit::{NSEvent, NSEventModifierFlags};
+
+    let flags = unsafe { NSEvent::modifierFlags_class() };
+    let want = |mask: NSEventModifierFlags| flags.contains(mask);
+
+    let cmd = want(NSEventModifierFlags::NSEventModifierFlagCommand);
+    let shift = want(NSEventModifierFlags::NSEventModifierFlagShift);
+    let ctrl = want(NSEventModifierFlags::NSEventModifierFlagControl);
+    let alt = want(NSEventModifierFlags::NSEventModifierFlagOption);
+
+    let pairs = [
+        (cmd, KeyCode::SuperLeft),
+        (cmd, KeyCode::SuperRight),
+        (shift, KeyCode::ShiftLeft),
+        (shift, KeyCode::ShiftRight),
+        (ctrl, KeyCode::ControlLeft),
+        (ctrl, KeyCode::ControlRight),
+        (alt, KeyCode::AltLeft),
+        (alt, KeyCode::AltRight),
+    ];
+    for (os_held, code) in pairs {
+        if !os_held && keys.pressed(code) {
+            keys.release(code);
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn reconcile_macos_modifiers() {}
 
 #[cfg(target_os = "macos")]
 fn current_app_active() -> bool {
@@ -1285,19 +1576,20 @@ fn sync_grid(
     mut atlas: ResMut<GlyphAtlas>,
     mut images: ResMut<Assets<Image>>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
+    mut materials: ResMut<Assets<TermMaterial>>,
+    mut meshes: ResMut<Assets<Mesh>>,
     store: Res<TerminalStore>,
-    mut terminals: Query<(Entity, &PaneChrome, &TerminalCursor, &mut CellSprites, &PaneKindMarker), With<PaneTag>>,
-    mut sprite_q: Query<&mut Sprite>,
+    mut terminals: Query<
+        (Entity, &TerminalCursor, &mut TermGrid, &PaneKindMarker, &Visibility),
+        With<PaneTag>,
+    >,
     mut transform_q: Query<&mut Transform>,
-    mut vis_q: Query<&mut Visibility>,
-    mut commands: Commands,
+    mut vis_q: Query<&mut Visibility, Without<TermGrid>>,
     mut prof: Local<SyncGridProfile>,
 ) {
     use std::time::Instant;
     let frame_start = Instant::now();
 
-    // Local reusable scratch — copied OUT of the snapshot mutex so we
-    // never hold the lock while mutating thousands of sprites.
     let mut local_cells: Vec<SnapCell> = Vec::new();
     let mut local_dirty_rows: Vec<bool> = Vec::new();
 
@@ -1306,7 +1598,11 @@ fn sync_grid(
     let mut mutate_ns: u128 = 0;
     let mut cells_touched = 0u64;
 
-    for (entity, chrome, cursor_marker, mut pools, kind) in &mut terminals {
+    // Scratch reused across terminals: avoids per-frame allocation in
+    // the dirty-row hot path.
+    let mut pending_writes: Vec<(usize, GpuCell)> = Vec::new();
+
+    for (entity, cursor_marker, mut grid, kind, vis) in &mut terminals {
         if kind.0 != PANE_KIND {
             continue;
         }
@@ -1314,9 +1610,29 @@ fn sync_grid(
             continue;
         };
 
+        // Propagate this pane's visibility to the worker so it skips the
+        // 60Hz Bevy wake while the user isn't looking. The worker keeps
+        // processing pty bytes either way — the libghostty terminal
+        // state stays correct — but inactive-project panes contribute
+        // zero to per-frame schedule cost.
+        let is_hidden = matches!(vis, Visibility::Hidden);
+        data.worker
+            .visible
+            .store(!is_hidden, std::sync::atomic::Ordering::Relaxed);
+        if is_hidden {
+            grid.was_visible = false;
+            continue;
+        }
+        // First frame after un-hide: libghostty's dirty_rows only reflect
+        // changes SINCE the last publish, but the worker has been
+        // publishing all along without us reading. Force a full repaint
+        // to bring the cells texture up to the current grid state.
+        let just_shown = !grid.was_visible;
+        grid.was_visible = true;
+
         // Lock briefly, copy snapshot fields into locals, drop lock.
         let lock_t = Instant::now();
-        let (cols, rows, _default_fg, _default_bg, cursor, generation) = {
+        let (cols, rows, _default_fg, default_bg, cursor, generation) = {
             let g = data.worker.snapshot.lock().expect("snapshot lock");
             local_cells.clear();
             local_cells.extend_from_slice(&g.cells);
@@ -1333,132 +1649,78 @@ fn sync_grid(
         };
         lock_ns += lock_t.elapsed().as_nanos();
 
+        // Cursor — compare-before-write to avoid spurious Changed.
         let cursor_entity = cursor_marker.0;
-        let _ = chrome; // keep for content_root lookup below
-        // Cursor (always update — cursor moves don't always set row-dirty).
         if let Ok(mut v) = vis_q.get_mut(cursor_entity) {
-            *v = if cursor.is_some() {
+            let want = if cursor.is_some() {
                 Visibility::Inherited
             } else {
                 Visibility::Hidden
             };
+            if *v != want {
+                *v = want;
+            }
         }
         if let Some((cx, cy)) = cursor {
             if let Ok(mut t) = transform_q.get_mut(cursor_entity) {
-                t.translation.x = cx as f32 * metrics.cell_width;
-                t.translation.y = -(cy as f32) * LINE_HEIGHT;
-                t.translation.z = 1.0;
+                let wx = cx as f32 * metrics.cell_width;
+                let wy = -(cy as f32) * LINE_HEIGHT;
+                let wz = 1.0;
+                if t.translation.x != wx
+                    || t.translation.y != wy
+                    || t.translation.z != wz
+                {
+                    t.translation.x = wx;
+                    t.translation.y = wy;
+                    t.translation.z = wz;
+                }
             }
         }
 
-        let pool_changed = pools.cols != cols || pools.rows != rows;
-        let nothing_changed = !pool_changed && pools.last_rendered_generation == generation;
+        let pool_changed = grid.cols != cols || grid.rows != rows;
+        let nothing_changed =
+            !pool_changed && !just_shown && grid.last_rendered_generation == generation;
         if nothing_changed {
             continue;
         }
         work_done = true;
         let mutate_t = Instant::now();
 
-        // Resize sprite pools to match the worker's current grid.
+        // Resize the GPU grid: replace the cells image + mesh + uniform
+        // params. Cheap because there's only one of each per terminal.
         if pool_changed {
-            let needed = cols as usize * rows as usize;
-            for &e in pools.bg.iter().skip(needed) {
-                commands.entity(e).despawn();
+            let bg_packed = pack_rgb(default_bg.r, default_bg.g, default_bg.b);
+            // Replace cells image in place — keep the same Handle so the
+            // material doesn't need rebinding.
+            if let Some(img) = images.get_mut(&grid.cells_image) {
+                *img = make_cells_image(cols as u32, rows as u32, bg_packed);
             }
-            for &e in pools.fg.iter().skip(needed) {
-                commands.entity(e).despawn();
+            // Replace mesh contents (same handle stays bound).
+            let grid_w = cols as f32 * metrics.cell_width;
+            let grid_h = rows as f32 * LINE_HEIGHT;
+            if let Some(mesh) = meshes.get_mut(&grid.mesh) {
+                *mesh = Mesh::from(Rectangle::new(grid_w, grid_h));
             }
-            pools.bg.truncate(needed);
-            pools.fg.truncate(needed);
-
-            // Spawn new sprites with their actual content from local_cells.
-            // commands.spawn is queued — these entities don't exist in the
-            // World during this system run, so a follow-up sprite_q.get_mut
-            // silently fails. By next frame the snapshot generation hasn't
-            // bumped (we already consumed it), so the dirty-row loop skips
-            // them and the sprites stay at spawn-time defaults forever.
-            // Computing content at spawn time avoids the deferred mutation.
-            let cell_w = metrics.cell_width;
-            for i in pools.bg.len()..needed {
-                let row = (i / cols as usize) as f32;
-                let col = (i % cols as usize) as f32;
-                let cell = local_cells.get(i).copied().unwrap_or_default();
-                let (_fg, init_bg) = if cell.inverse {
-                    (cell.bg, cell.fg)
-                } else {
-                    (cell.fg, cell.bg)
-                };
-                let bg = commands
-                    .spawn((
-                        ChildOf(chrome.content_root),
-                        Sprite {
-                            color: rgb_to_color(init_bg),
-                            custom_size: Some(Vec2::new(cell_w, LINE_HEIGHT)),
-                            ..default()
-                        },
-                        Anchor::TOP_LEFT,
-                        Transform::from_xyz(col * cell_w, -row * LINE_HEIGHT, 0.0),
-                    ))
-                    .id();
-                pools.bg.push(bg);
+            if let Some(mat) = materials.get_mut(&grid.material) {
+                mat.params.cols = cols as u32;
+                mat.params.rows = rows as u32;
             }
-            for i in pools.fg.len()..needed {
-                let row = (i / cols as usize) as f32;
-                let col = (i % cols as usize) as f32;
-                let cell = local_cells.get(i).copied().unwrap_or_default();
-                let (init_fg, _bg) = if cell.inverse {
-                    (cell.bg, cell.fg)
-                } else {
-                    (cell.fg, cell.bg)
-                };
-                let glyph_index =
-                    atlas.lookup_or_insert(cell.ch, &mut images, &mut layouts);
-                let fg = commands
-                    .spawn((
-                        ChildOf(chrome.content_root),
-                        Sprite {
-                            image: atlas.image.clone(),
-                            texture_atlas: Some(TextureAtlas {
-                                layout: atlas.layout.clone(),
-                                index: glyph_index as usize,
-                            }),
-                            color: rgb_to_color(init_fg),
-                            custom_size: Some(Vec2::new(cell_w, LINE_HEIGHT)),
-                            ..default()
-                        },
-                        Anchor::TOP_LEFT,
-                        Transform::from_xyz(col * cell_w, -row * LINE_HEIGHT, 0.5),
-                    ))
-                    .id();
-                pools.fg.push(fg);
+            if let Ok(mut t) = transform_q.get_mut(grid.render_entity) {
+                t.translation.x = grid_w * 0.5;
+                t.translation.y = -(grid_h * 0.5);
             }
-
-            // Reposition the existing cells too in case cell_w/line_h changed.
-            for (i, &e) in pools.bg.iter().enumerate() {
-                if let Ok(mut t) = transform_q.get_mut(e) {
-                    let row = (i / cols as usize) as f32;
-                    let col = (i % cols as usize) as f32;
-                    t.translation.x = col * cell_w;
-                    t.translation.y = -row * LINE_HEIGHT;
-                }
-            }
-            for (i, &e) in pools.fg.iter().enumerate() {
-                if let Ok(mut t) = transform_q.get_mut(e) {
-                    let row = (i / cols as usize) as f32;
-                    let col = (i % cols as usize) as f32;
-                    t.translation.x = col * cell_w;
-                    t.translation.y = -row * LINE_HEIGHT;
-                }
-            }
-
-            pools.cols = cols;
-            pools.rows = rows;
+            grid.cols = cols;
+            grid.rows = rows;
         }
 
-        // Walk dirty rows and mutate the cells. Pool resize forced a
-        // full repaint above; otherwise only rows the worker flagged
-        // as dirty get touched.
-        let force_all = pool_changed;
+        // Pass 1: resolve glyph indices and collect (idx, GpuCell) for
+        // every dirty cell. Atlas lookups borrow `images` mutably (atlas
+        // may insert a new glyph and re-upload), so we can't hold a
+        // `Image::get_mut(cells_image)` borrow at the same time. Two
+        // passes keeps the borrow checker happy and lets us compare
+        // existing-vs-new in pass 2.
+        pending_writes.clear();
+        let force_all = pool_changed || just_shown;
         for r in 0..rows as usize {
             let row_dirty = force_all
                 || local_dirty_rows.get(r).copied().unwrap_or(true);
@@ -1477,31 +1739,79 @@ fn sync_grid(
                 } else {
                     (cell.fg, cell.bg)
                 };
-
-                if let Some(&bg_entity) = pools.bg.get(idx) {
-                    if let Ok(mut s) = sprite_q.get_mut(bg_entity) {
-                        s.color = rgb_to_color(final_bg);
-                    }
-                }
-
                 let glyph_index =
                     atlas.lookup_or_insert(cell.ch, &mut images, &mut layouts);
-                if let Some(&fg_entity) = pools.fg.get(idx) {
-                    if let Ok(mut s) = sprite_q.get_mut(fg_entity) {
-                        s.color = rgb_to_color(final_fg);
-                        if let Some(ref mut ta) = s.texture_atlas {
-                            ta.index = glyph_index as usize;
-                        }
-                    }
-                }
+                let gpu = GpuCell {
+                    glyph_index,
+                    fg_packed: pack_rgb(final_fg.r, final_fg.g, final_fg.b),
+                    bg_packed: pack_rgb(final_bg.r, final_bg.g, final_bg.b),
+                    flags: 0,
+                };
+                pending_writes.push((idx, gpu));
                 cells_touched += 1;
             }
         }
 
-        pools.last_rendered_generation = generation;
+        // Pass 2: filter no-op writes (cells whose state didn't change)
+        // by reading from the current cells image, then mutate it in one
+        // go. Reading via `Assets::get` doesn't mark the asset Changed —
+        // important so we don't re-upload the texture every frame when
+        // libghostty flagged a row dirty but no visible state moved.
+        if pending_writes.is_empty() {
+            grid.last_rendered_generation = generation;
+            mutate_ns += mutate_t.elapsed().as_nanos();
+            continue;
+        }
+        let mut needs_upload = false;
+        {
+            let current = images
+                .get(&grid.cells_image)
+                .expect("cells image must be alive");
+            let current_cells: &[GpuCell] = bytemuck::cast_slice(
+                current
+                    .data
+                    .as_ref()
+                    .expect("cells image must have CPU data")
+                    .as_slice(),
+            );
+            for (idx, new_cell) in &pending_writes {
+                if current_cells
+                    .get(*idx)
+                    .map_or(true, |existing| existing != new_cell)
+                {
+                    needs_upload = true;
+                    break;
+                }
+            }
+        }
+        if needs_upload {
+            if let Some(img) = images.get_mut(&grid.cells_image) {
+                let dst: &mut [GpuCell] = bytemuck::cast_slice_mut(
+                    img.data
+                        .as_mut()
+                        .expect("cells image must have CPU data"),
+                );
+                for (idx, new_cell) in &pending_writes {
+                    if let Some(slot) = dst.get_mut(*idx) {
+                        if slot != new_cell {
+                            *slot = *new_cell;
+                        }
+                    }
+                }
+            }
+            // Mutating the cells image alone re-extracts the GpuImage with
+            // a fresh wgpu texture, but the material's bind group still
+            // caches the OLD texture view — so without poking the material
+            // too, the shader keeps sampling the pre-modification upload.
+            // (Bevy's own tilemap_chunk material follows this same pattern;
+            // see `bevy_sprite_render::tilemap_chunk::update_chunk` —
+            // `materials.get_mut(material.id())` is the load-bearing line.)
+            let _ = materials.get_mut(&grid.material);
+        }
+
+        grid.last_rendered_generation = generation;
         mutate_ns += mutate_t.elapsed().as_nanos();
     }
-
     if work_done && std::env::var("TERMINAL_PROFILE").is_ok() {
         prof.frames += 1;
         prof.frame_ns += frame_start.elapsed().as_nanos();

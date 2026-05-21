@@ -94,6 +94,13 @@ pub struct TextInputView {
 #[derive(Resource, Default)]
 pub struct FocusedTextInput(pub Option<Entity>);
 
+/// The most-recently-focused text input. Survives blur (Enter/Esc /
+/// click-outside) so we can re-focus it on the next keystroke without
+/// requiring the user to click back into the field. Cleared only by
+/// `focus_text_input` setting a new target.
+#[derive(Resource, Default)]
+pub struct LastFocusedTextInput(pub Option<Entity>);
+
 #[derive(Message, Clone, Copy, Debug)]
 pub enum TextInputEvent {
     Changed { entity: Entity },
@@ -108,15 +115,18 @@ pub struct TextInputPlugin;
 impl Plugin for TextInputPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FocusedTextInput>()
+            .init_resource::<LastFocusedTextInput>()
             .add_message::<TextInputEvent>()
             .add_systems(
                 Update,
                 (
+                    auto_refocus_last_text_input,
                     text_input_keyboard,
                     text_input_render_text,
                     text_input_render_caret,
                     text_input_render_selection,
-                ),
+                )
+                    .chain(),
             );
     }
 }
@@ -199,6 +209,12 @@ fn strip_newlines(s: &str) -> String {
 
 /// Set focus to one input (or `None` to blur all). Atomically removes
 /// the `TextInputFocused` marker from any other entity.
+///
+/// The current `focused.0` (if any non-None) is mirrored into
+/// `LastFocusedTextInput` before being overwritten — `Some(next)` makes
+/// `next` the new last-focus, and a `None` (blur) leaves the previous
+/// last-focus intact so a subsequent keystroke can refocus the same
+/// field the user was just typing into.
 pub fn focus_text_input(
     commands: &mut Commands,
     focused: &mut FocusedTextInput,
@@ -218,6 +234,7 @@ pub fn focus_text_input(
     let _ = inputs; // reserved for future "blur others" sweep if needed
 }
 
+
 /// Compute the column at a given local-x position. Used by hosts to
 /// turn a click on a text-input into a caret position.
 pub fn col_at_x(local_x: f32, cell_width: f32) -> usize {
@@ -236,6 +253,84 @@ pub fn click_to_caret(input: &mut TextInput, local_x: f32) {
     let pos = col.min(n);
     let tr = Transaction::new().select(Selection::cursor(pos));
     input.state = input.state.apply(&tr);
+}
+
+// ---------- Auto-refocus ----------
+
+/// Keeps `LastFocusedTextInput` in sync with `FocusedTextInput`, then
+/// restores focus to the most-recent input when the user starts typing
+/// with nothing focused — as long as the focused *pane* is still the
+/// one that owns that input, so clicking a terminal or editor doesn't
+/// silently redirect typing into an old run-button field.
+fn auto_refocus_last_text_input(
+    mut commands: Commands,
+    mut focused: ResMut<FocusedTextInput>,
+    mut last: ResMut<LastFocusedTextInput>,
+    focused_pane: Res<crate::FocusedPane>,
+    events: MessageReader<KeyboardInput>,
+    inputs_q: Query<(), With<TextInput>>,
+    child_of_q: Query<&ChildOf>,
+    pane_q: Query<(), With<crate::PaneTag>>,
+) {
+    // Mirror the current focus into "last" while it's set.
+    if let Some(cur) = focused.0 {
+        last.0 = Some(cur);
+    }
+
+    if focused.0.is_some() {
+        return;
+    }
+    let Some(target) = last.0 else { return };
+    if inputs_q.get(target).is_err() {
+        // The remembered input was despawned (e.g. its pane was closed).
+        last.0 = None;
+        return;
+    }
+
+    // Only restore if at least one printable key is being pressed this
+    // frame. Pure modifier presses, arrow keys, etc. shouldn't yank
+    // focus back to a field the user blurred deliberately.
+    if !any_text_press(events) {
+        return;
+    }
+
+    // Only refocus if the focused pane still owns the target input —
+    // otherwise the user clicked a different pane and we'd be stealing
+    // its keystrokes.
+    let Some(owner) = focused_pane.0 else { return };
+    if ancestor_pane(target, &child_of_q, &pane_q) != Some(owner) {
+        return;
+    }
+
+    commands.entity(target).insert(TextInputFocused);
+    focused.0 = Some(target);
+}
+
+fn any_text_press(mut events: MessageReader<KeyboardInput>) -> bool {
+    use bevy::input::keyboard::Key;
+    events.read().any(|ev| {
+        if !ev.state.is_pressed() {
+            return false;
+        }
+        matches!(&ev.logical_key, Key::Character(_) | Key::Space)
+    })
+}
+
+fn ancestor_pane(
+    mut entity: Entity,
+    child_of_q: &Query<&ChildOf>,
+    pane_q: &Query<(), With<crate::PaneTag>>,
+) -> Option<Entity> {
+    for _ in 0..32 {
+        if pane_q.get(entity).is_ok() {
+            return Some(entity);
+        }
+        match child_of_q.get(entity) {
+            Ok(p) => entity = p.parent(),
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 // ---------- Keyboard ----------

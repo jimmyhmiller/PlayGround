@@ -11,8 +11,11 @@
 //! get rasterized lazily on first sight (one full image re-upload per
 //! novel char, which is fine since they arrive slowly).
 //!
-//! When the font is missing a glyph or the atlas is full, we fall back
-//! to slot 0 — a hollow "tofu" box drawn at startup.
+//! Slot 0 is reserved as a fully-transparent "blank" slot so the cells
+//! texture's default-initialized state (all `glyph_index = 0`) samples to
+//! alpha=0 and renders as solid background — without this you get a
+//! screenful of tofu before the first publish lands. Slot 1 holds the
+//! tofu glyph, used as the genuine font-missing / atlas-full fallback.
 
 use std::collections::HashMap;
 
@@ -49,7 +52,9 @@ pub struct GlyphAtlas {
     max_slots: u32,
     next_slot: u32,
     baseline_atlas_y: u32,
-    /// Slot 0 — drawn as a hollow box for chars we couldn't rasterize.
+    /// Drawn as a hollow box for chars we couldn't rasterize. NOT slot
+    /// 0 — slot 0 is the all-transparent "blank" slot used by the
+    /// cells texture's default-initialized cells.
     tofu_slot: u32,
     /// `'static` font bytes. `swash::FontRef` borrows from this.
     font_data: &'static [u8],
@@ -203,12 +208,16 @@ impl GlyphAtlas {
         let metrics = font.metrics(&[]).scale(font_size_logical * DPI_SCALE);
         let baseline_atlas_y = metrics.ascent.round().max(0.0) as u32;
 
-        // Tofu: hollow box at slot 0. Written into `data` before the
-        // image is even uploaded to avoid an extra round-trip.
+        // Slot 0 stays empty (all-transparent). Tofu lives at slot 1
+        // so font-missing chars still show a visible box. Written into
+        // `data` before the image is uploaded to avoid an extra GPU
+        // round-trip.
+        const BLANK_SLOT: u32 = 0;
+        const TOFU_SLOT: u32 = 1;
         write_tofu_into(
             &mut data,
             ATLAS_DIM,
-            slot_rect_for(0, slot_w, slot_h, cols_per_row),
+            slot_rect_for(TOFU_SLOT, slot_w, slot_h, cols_per_row),
         );
 
         let image = Image::new(
@@ -230,8 +239,10 @@ impl GlyphAtlas {
         let image_handle = images.add(image);
 
         let mut layout = TextureAtlasLayout::new_empty(UVec2::splat(ATLAS_DIM));
-        // Slot 0 — tofu — gets registered now so its index is 0.
-        layout.add_texture(slot_rect_for(0, slot_w, slot_h, cols_per_row));
+        // Register slot 0 (blank, all-transparent) and slot 1 (tofu) so
+        // indices line up with what the shader samples.
+        layout.add_texture(slot_rect_for(BLANK_SLOT, slot_w, slot_h, cols_per_row));
+        layout.add_texture(slot_rect_for(TOFU_SLOT, slot_w, slot_h, cols_per_row));
         let layout_handle = layouts.add(layout);
 
         let mut atlas = Self {
@@ -242,9 +253,9 @@ impl GlyphAtlas {
             slot_h,
             cols_per_row,
             max_slots,
-            next_slot: 1, // 0 is tofu
+            next_slot: 2, // 0 is blank, 1 is tofu
             baseline_atlas_y,
-            tofu_slot: 0,
+            tofu_slot: TOFU_SLOT,
             font_data,
             system_fallback: SystemFallback::new(),
             font_size_logical,
@@ -263,6 +274,23 @@ impl GlyphAtlas {
 
     pub fn tofu_slot(&self) -> u32 {
         self.tofu_slot
+    }
+
+    /// Atlas-space cell width in pixels (DPI-scaled).
+    pub fn slot_w(&self) -> u32 {
+        self.slot_w
+    }
+    /// Atlas-space cell height in pixels (DPI-scaled).
+    pub fn slot_h(&self) -> u32 {
+        self.slot_h
+    }
+    /// How many slots fit along one row of the atlas.
+    pub fn cols_per_row(&self) -> u32 {
+        self.cols_per_row
+    }
+    /// Edge length of the atlas image (square).
+    pub fn dim(&self) -> u32 {
+        ATLAS_DIM
     }
 
     pub fn lookup_or_insert(

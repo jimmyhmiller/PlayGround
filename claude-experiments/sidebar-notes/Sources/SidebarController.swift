@@ -9,11 +9,13 @@ final class SidebarController {
     private let hideHysteresis: CGFloat = 12          // px outside panel before hiding
     private let slideDuration: TimeInterval = 0.24    // owned by SidebarPanel.animationResizeTime
     private let cornerRadius: CGFloat = 16
+    private let edgeDwellDuration: TimeInterval = 0.35  // mouse must linger at edge this long before showing
 
     private var panel: SidebarPanel!
     private var pollTimer: Timer?
     private var isShown = false
     private var isAnimating = false
+    private var edgeDwellStart: Date?
 
     func start() {
         buildPanel()
@@ -98,7 +100,16 @@ final class SidebarController {
                 mouse.y >= shown.minY &&
                 mouse.y <= shown.maxY
             if inTrigger {
-                show()
+                if let start = edgeDwellStart {
+                    if Date().timeIntervalSince(start) >= edgeDwellDuration {
+                        show()
+                        edgeDwellStart = nil
+                    }
+                } else {
+                    edgeDwellStart = Date()
+                }
+            } else {
+                edgeDwellStart = nil
             }
         }
     }
@@ -138,6 +149,7 @@ final class SidebarController {
         }, completionHandler: { [weak self] in
             self?.isShown = false
             self?.isAnimating = false
+            self?.edgeDwellStart = nil
         })
     }
 

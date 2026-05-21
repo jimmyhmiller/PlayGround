@@ -38,12 +38,12 @@ pub enum DaemonMessage {
     Error(String),
 }
 
-/// Encode a message for wire transmission (length-prefixed JSON)
+/// Encode a message for wire transmission (length-prefixed bincode)
 pub fn encode_message<T: Serialize>(msg: &T) -> anyhow::Result<Vec<u8>> {
-    let json = serde_json::to_vec(msg)?;
-    let len = json.len() as u32;
+    let payload = bincode::serde::encode_to_vec(msg, bincode::config::standard())?;
+    let len = payload.len() as u32;
     let mut buf = len.to_be_bytes().to_vec();
-    buf.extend(json);
+    buf.extend(payload);
     Ok(buf)
 }
 
@@ -61,6 +61,7 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(buf: &[u8]) -> anyhow::Resul
         return Ok(None);
     }
 
-    let msg: T = serde_json::from_slice(&buf[4..total])?;
+    let (msg, _): (T, usize) =
+        bincode::serde::decode_from_slice(&buf[4..total], bincode::config::standard())?;
     Ok(Some((msg, total)))
 }

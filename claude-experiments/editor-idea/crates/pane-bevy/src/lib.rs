@@ -48,10 +48,13 @@ pub const MIN_PANE_SIZE: Vec2 = Vec2::new(160.0, 120.0);
 
 const PANEL_BG: Color = Color::srgb(0.105, 0.110, 0.122);
 const TITLE_DIVIDER: Color = Color::srgb(0.165, 0.170, 0.188);
+const TITLE_DIVIDER_FOCUSED: Color = Color::srgb(0.42, 0.62, 0.92);
 const HANDLE_COLOR: Color = Color::srgb(0.22, 0.23, 0.26);
 const CLOSE_COLOR: Color = Color::srgb(0.50, 0.52, 0.56);
-const TITLE_TEXT_COLOR: Color = Color::srgb(0.78, 0.80, 0.84);
+const TITLE_TEXT_COLOR: Color = Color::srgb(0.62, 0.65, 0.70);
+const TITLE_TEXT_FOCUSED: Color = Color::srgb(0.95, 0.96, 0.98);
 const TITLE_FONT_SIZE: f32 = 12.0;
+const TITLE_DIVIDER_H_FOCUSED: f32 = 2.0;
 
 // ---------- Components ----------
 
@@ -109,6 +112,32 @@ pub struct PaneProject(pub u64);
 /// must insert this before any pane is spawned.
 #[derive(Resource)]
 pub struct PaneFont(pub Handle<Font>);
+
+/// Real per-character advance for `PaneFont`, measured by the host
+/// (typically via `skrifa` on the actual font bytes). Kinds that need
+/// to size text inline — for truncation, hit-testing, etc. — should
+/// read this rather than approximating with a `chars * size * ratio`
+/// constant. `cell_width` is measured at `font_size` px; scale linearly
+/// for other sizes (the font is monospace).
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct PaneFontMetrics {
+    pub cell_width: f32,
+    pub font_size: f32,
+}
+
+impl PaneFontMetrics {
+    /// Approximate width of `s` rendered at `size` px. Linear scaling
+    /// from the measured `(cell_width, font_size)` pair — exact for the
+    /// monospace fonts the host ships.
+    pub fn measure(&self, s: &str, size: f32) -> f32 {
+        let scale = size / self.font_size.max(1.0);
+        s.chars().count() as f32 * self.cell_width * scale
+    }
+
+    pub fn char_width(&self, size: f32) -> f32 {
+        self.cell_width * (size / self.font_size.max(1.0))
+    }
+}
 
 /// Currently-focused pane (any kind). Replaces per-kind FocusedFoo
 /// resources. Kind plugins read this from their keyboard handlers and
@@ -311,13 +340,32 @@ pub fn spawn_pane(
 
     let title_str: String = title.into();
 
+    // Compute the initial translation the same way `position_panes` does
+    // so children inherit the right GlobalTransform on the very first
+    // frame. Without this, the pane spawns at (0,0,0); children render
+    // there for one frame and then jump to the real position once
+    // `position_panes` runs and transform propagation catches up.
+    let initial_translation = world
+        .query::<&Window>()
+        .iter(world)
+        .next()
+        .map(|w| {
+            let win_size = Vec2::new(w.width(), w.height());
+            bevy::math::Vec3::new(
+                rect.pos.x - win_size.x * 0.5,
+                win_size.y * 0.5 - rect.pos.y,
+                rect.z,
+            )
+        })
+        .unwrap_or(bevy::math::Vec3::ZERO);
+
     let pane = world
         .spawn((
             PaneTag,
             PaneKindMarker(kind),
             rect,
             PaneTitle(title_str.clone()),
-            Transform::default(),
+            Transform::from_translation(initial_translation),
             Visibility::default(),
         ))
         .id();
@@ -647,9 +695,11 @@ fn bring_to_front(
 
 fn position_panes(
     windows: Query<&Window>,
+    focused: Res<FocusedPane>,
     panes: Query<(&PaneRect, &PaneChrome), With<PaneTag>>,
     mut t_q: Query<&mut Transform>,
     mut sprite_q: Query<&mut Sprite>,
+    mut color_q: Query<&mut TextColor>,
     parents: Query<Entity, With<PaneTag>>,
 ) {
     let Ok(win) = windows.single() else {
@@ -661,24 +711,78 @@ fn position_panes(
         let Ok((rect, chrome)) = panes.get(entity) else {
             continue;
         };
+        let is_focused = focused.0 == Some(entity);
+
+        // Every write below goes through a "compare first, write only on
+        // change" guard. Unconditional `*x = y` deref-mut on a Mut<T>
+        // marks the entity Changed, which keeps Bevy's reactive loop
+        // active and re-extracts the sprite/text every frame — even when
+        // the value hasn't moved. With ~6 chrome entities per pane and
+        // several terminal/widget panes alive, the unguarded version
+        // burns >300% CPU just keeping itself awake.
         if let Ok(mut t) = t_q.get_mut(entity) {
-            t.translation.x = rect.pos.x - win_size.x * 0.5;
-            t.translation.y = win_size.y * 0.5 - rect.pos.y;
-            t.translation.z = rect.z;
+            let want = bevy::math::Vec3::new(
+                rect.pos.x - win_size.x * 0.5,
+                win_size.y * 0.5 - rect.pos.y,
+                rect.z,
+            );
+            if t.translation != want {
+                t.translation = want;
+            }
         }
         if let Ok(mut s) = sprite_q.get_mut(chrome.bg) {
-            s.custom_size = Some(rect.size);
+            let want = Some(rect.size);
+            if s.custom_size != want {
+                s.custom_size = want;
+            }
         }
+        // Focused panes get a thicker, accent-colored title divider so
+        // it's obvious which one will receive keys.
+        let (bar_h, bar_color) = if is_focused {
+            (TITLE_DIVIDER_H_FOCUSED, TITLE_DIVIDER_FOCUSED)
+        } else {
+            (1.0, TITLE_DIVIDER)
+        };
         if let Ok(mut s) = sprite_q.get_mut(chrome.title_bar) {
-            s.custom_size = Some(Vec2::new(rect.size.x, 1.0));
+            let want_size = Some(Vec2::new(rect.size.x, bar_h));
+            if s.custom_size != want_size {
+                s.custom_size = want_size;
+            }
+            if s.color != bar_color {
+                s.color = bar_color;
+            }
+        }
+        if let Ok(mut t) = t_q.get_mut(chrome.title_bar) {
+            let want_y = -(TITLE_H - bar_h);
+            if t.translation.y != want_y {
+                t.translation.y = want_y;
+            }
+        }
+        if let Ok(mut c) = color_q.get_mut(chrome.title_text) {
+            let want = if is_focused {
+                TITLE_TEXT_FOCUSED
+            } else {
+                TITLE_TEXT_COLOR
+            };
+            if c.0 != want {
+                c.0 = want;
+            }
         }
         if let Ok(mut t) = t_q.get_mut(chrome.resize_handle) {
-            t.translation.x = rect.size.x - HANDLE_SIZE;
-            t.translation.y = -(rect.size.y - HANDLE_SIZE);
+            let wx = rect.size.x - HANDLE_SIZE;
+            let wy = -(rect.size.y - HANDLE_SIZE);
+            if t.translation.x != wx || t.translation.y != wy {
+                t.translation.x = wx;
+                t.translation.y = wy;
+            }
         }
         if let Ok(mut t) = t_q.get_mut(chrome.close_button) {
-            t.translation.x = rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET;
-            t.translation.y = -CLOSE_BTN_INSET;
+            let wx = rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET;
+            let wy = -CLOSE_BTN_INSET;
+            if t.translation.x != wx || t.translation.y != wy {
+                t.translation.x = wx;
+                t.translation.y = wy;
+            }
         }
     }
 }
@@ -762,6 +866,8 @@ pub struct PaneContentNoClip;
 /// editor caret all already do.
 fn enforce_pane_content_bounds(
     panes: Query<(&PaneRect, &PaneChrome), With<PaneTag>>,
+    changed_panes: Query<(), (With<PaneTag>, Changed<PaneRect>)>,
+    new_text: Query<(), Added<Text2d>>,
     children_q: Query<&Children>,
     transforms: Query<&Transform>,
     text_q: Query<(), With<Text2d>>,
@@ -769,6 +875,13 @@ fn enforce_pane_content_bounds(
     mut bounds_q: Query<&mut TextBounds>,
     mut commands: Commands,
 ) {
+    // Hot path: nothing relevant changed this frame, skip the subtree
+    // walk. Without this, we re-walk every pane's content_root every
+    // frame — for terminal panes that's thousands of cell sprites,
+    // dominating CPU even while truly idle.
+    if changed_panes.is_empty() && new_text.is_empty() {
+        return;
+    }
     for (rect, chrome) in &panes {
         let content_w = (rect.size.x - 2.0 * MARGIN).max(0.0);
         let content_h = (rect.size.y - TITLE_H - 2.0 * MARGIN).max(0.0);

@@ -293,12 +293,14 @@ fn cmd_run(name: &str, num_nodes: usize, user_args: Vec<String>, cb_path: &PathB
     // resolved module — this captures every def + every reachable lambda.
     let kb = KnowledgeBase::build(&rm);
     install_current_knowledge_base(&kb);
+    let _rb_storage;
     if let Some(rb) = rm
         .at_binding
         .as_ref()
         .and_then(|ab| build_at_runtime_binding(&rt, ab))
     {
-        install_current_at_binding(&rb);
+        _rb_storage = rb;
+        install_current_at_binding(&_rb_storage);
     }
 
     let entry = unsafe {

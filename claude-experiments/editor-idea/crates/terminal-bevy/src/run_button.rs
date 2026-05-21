@@ -41,11 +41,11 @@ use std::sync::Mutex;
 use bevy::input::mouse::{MouseScrollUnit, MouseWheel};
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
-use bevy::text::LineHeight;
+use bevy::text::{LineHeight, TextBounds};
 use pane_bevy::{
-    focus_text_input, spawn_text_input, FocusedTextInput, PaneContentPressed, PaneKindMarker,
-    PaneKindSpec, PaneRect, PaneRegistry, PaneTag, PaneTitle, TextInput, TextInputEvent,
-    TextInputStyle,
+    focus_text_input, spawn_text_input, FocusedTextInput, PaneContentNoClip, PaneContentPressed,
+    PaneKindMarker, PaneKindSpec, PaneRect, PaneRegistry, PaneTag, PaneTitle, TextInput,
+    TextInputEvent, TextInputStyle,
 };
 use serde_json::Value;
 
@@ -518,6 +518,16 @@ fn run_button_spawn_from_config(
             LineHeight::Px(OUTPUT_FONT_SIZE * 1.45),
             TextColor(COLOR_OUTPUT),
             Anchor::TOP_LEFT,
+            bevy::text::TextLayout::new_with_no_wrap(),
+            TextBounds {
+                width: Some(0.0),
+                height: Some(0.0),
+            },
+            // sync_run_button_visual manages our TextBounds explicitly
+            // so we get whole-line vertical clipping (no half-line
+            // bleed below the pane) and so per-line truncation isn't
+            // re-wrapped by the auto-bounds layout.
+            PaneContentNoClip,
             Transform::from_xyz(PLAY_X, -OUTPUT_Y, 0.0),
             Visibility::Hidden,
         ))
@@ -1048,12 +1058,14 @@ fn sync_run_button_visual(
         (&RunButton, &RunButtonChrome, &pane_bevy::PaneRect),
         Or<(Changed<RunButton>, Changed<pane_bevy::PaneRect>)>,
     >,
+    metrics: Res<MonoMetrics>,
     mut text_q: Query<&mut Text2d>,
     mut color_q: Query<&mut TextColor>,
     mut sprite_q: Query<&mut Sprite>,
     mut transform_q: Query<&mut Transform>,
     mut vis_q: Query<&mut Visibility>,
     mut input_q: Query<&mut TextInput>,
+    mut bounds_q: Query<&mut TextBounds>,
 ) {
     for (rb, chrome, rect) in &buttons {
         let content_w = (rect.size.x - 2.0 * pane_bevy::MARGIN).max(0.0);
@@ -1176,18 +1188,51 @@ fn sync_run_button_visual(
         } else {
             rb.output_scroll_top.min(max_top)
         };
+
+        // Clip each visible line to fit horizontally — the mono font's
+        // cell width tells us how many chars fit in the output region's
+        // width. Char-based truncation is fine because the output font
+        // here is the same monospace used by the terminal grid.
+        let output_cell_w = input_cell_width(metrics.cell_width, OUTPUT_FONT_SIZE);
+        let avail_w = (content_w - PLAY_X).max(0.0);
+        let max_cols = if output_cell_w > 0.0 {
+            (avail_w / output_cell_w).floor() as usize
+        } else {
+            0
+        };
         let joined = rb
             .output
             .iter()
             .skip(top)
             .take(visible)
-            .cloned()
+            .map(|line| {
+                if max_cols == 0 {
+                    String::new()
+                } else if line.chars().count() <= max_cols {
+                    line.clone()
+                } else {
+                    line.chars().take(max_cols).collect()
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
         if let Ok(mut t) = text_q.get_mut(chrome.output_text)
             && t.0 != joined
         {
             t.0 = joined;
+        }
+
+        // Set TextBounds to exactly whole-line height so a partial last
+        // line doesn't bleed below the pane. We marked output_text with
+        // PaneContentNoClip so the global enforcer leaves it to us.
+        let new_bounds = TextBounds {
+            width: Some(avail_w),
+            height: Some(visible as f32 * OUTPUT_LINE_HEIGHT),
+        };
+        if let Ok(mut b) = bounds_q.get_mut(chrome.output_text)
+            && (b.width != new_bounds.width || b.height != new_bounds.height)
+        {
+            *b = new_bounds;
         }
     }
 }
@@ -1258,25 +1303,23 @@ fn scroll_run_button_output(
     let n = rb.output.len();
     let max_top = n.saturating_sub(n.min(cap));
 
-    if whole > 0 {
+    // Anchor relative to what's *currently visible* so the first scroll
+    // up out of follow-tail doesn't snap to scroll_top=0 (the oldest
+    // line) and feel like the wheel went the wrong way.
+    let current_top = if rb.output_follow_tail {
+        max_top
+    } else {
+        rb.output_scroll_top.min(max_top)
+    };
+    let new_top = if whole > 0 {
         // wheel up = show older lines = top moves earlier in deque
-        let by = whole as usize;
-        rb.output_follow_tail = false;
-        rb.output_scroll_top = rb.output_scroll_top.saturating_sub(by);
+        current_top.saturating_sub(whole as usize)
     } else {
         // wheel down = newer lines = top moves later
-        let by = (-whole) as usize;
-        let current_top = if rb.output_follow_tail {
-            max_top
-        } else {
-            rb.output_scroll_top.min(max_top)
-        };
-        let new_top = current_top.saturating_add(by).min(max_top);
-        rb.output_scroll_top = new_top;
-        if new_top >= max_top {
-            rb.output_follow_tail = true;
-        }
-    }
+        current_top.saturating_add((-whole) as usize).min(max_top)
+    };
+    rb.output_scroll_top = new_top;
+    rb.output_follow_tail = new_top >= max_top;
 }
 
 fn set_vis(vis_q: &mut Query<&mut Visibility>, e: Entity, on: bool) {

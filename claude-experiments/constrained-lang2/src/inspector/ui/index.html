@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>constrained-lang inspector</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel2: #1c222b;
+    --border: #2a313c;
+    --fg: #c9d1d9;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --good: #56d364;
+    --bad: #f85149;
+    --warn: #d29922;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); font-family: system-ui, sans-serif; font-size: 13px; }
+  body { display: grid; grid-template-rows: auto 1fr; }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 8px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  header h1 { margin: 0; font-size: 14px; font-weight: 600; }
+  header .machine-name { color: var(--accent); font-family: var(--mono); }
+  header .conn { margin-left: auto; font-size: 12px; color: var(--muted); }
+  header .conn.ok { color: var(--good); }
+  header .conn.bad { color: var(--bad); }
+  header .frozen { color: var(--bad); font-weight: 600; }
+
+  main {
+    display: grid;
+    grid-template-columns: 1fr 360px 340px;
+    overflow: hidden;
+  }
+  .panel {
+    background: var(--panel);
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+    display: flex; flex-direction: column;
+    min-width: 0;
+  }
+  .panel:last-child { border-right: none; }
+  .panel.scroll { overflow: auto; }
+  .panel h2 {
+    margin: 0; padding: 8px 12px;
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--muted);
+    background: var(--panel2);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .panel-body { padding: 8px 12px; overflow: auto; }
+
+  /* --- Graph view ---------------------------------------------------- */
+  .graph-wrap { position: relative; flex: 1; min-height: 0; }
+  #graph { display: block; width: 100%; height: 100%; }
+
+  .graph-legend {
+    position: absolute; bottom: 8px; left: 10px;
+    font-size: 11px; color: var(--muted);
+    background: rgba(14, 17, 22, 0.7);
+    padding: 4px 8px; border-radius: 4px;
+    font-family: var(--mono);
+    pointer-events: none;
+  }
+  .graph-legend span.dot {
+    display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    vertical-align: middle; margin-right: 4px;
+  }
+  .graph-legend .current { background: var(--accent); }
+  .graph-legend .recent { background: var(--warn); }
+  .graph-legend .frozen-dot { background: var(--bad); }
+
+  /* SVG element classes */
+  .node-circle {
+    fill: var(--panel2);
+    stroke: var(--border);
+    stroke-width: 1.5;
+    transition: fill 0.2s, stroke 0.2s;
+  }
+  .node-circle.current { fill: rgba(88, 166, 255, 0.18); stroke: var(--accent); stroke-width: 2.5; }
+  .node-circle.frozen { fill: rgba(248, 81, 73, 0.18); stroke: var(--bad); stroke-width: 2.5; }
+  .node-circle:hover { stroke: var(--fg); }
+  .node-label { font-family: var(--mono); font-size: 13px; font-weight: 600; fill: var(--fg); text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+  .node-accepts { font-family: var(--mono); font-size: 9px; fill: var(--muted); text-anchor: middle; pointer-events: none; }
+
+  .edge-path { fill: none; stroke: var(--muted); stroke-width: 1.4; transition: stroke 0.2s, stroke-width 0.2s; }
+  .edge-path.recent { stroke: var(--warn); stroke-width: 2.2; }
+  .edge-path.invariant-fail { stroke: var(--bad); }
+  .edge-label {
+    font-family: var(--mono); font-size: 10px;
+    fill: var(--muted); text-anchor: middle;
+    paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round;
+    pointer-events: none;
+  }
+  .edge-label.recent { fill: var(--warn); }
+
+  .tooltip {
+    position: absolute;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 6px 8px;
+    font-size: 11px;
+    font-family: var(--mono);
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.1s;
+    max-width: 240px;
+    z-index: 10;
+  }
+  .tooltip.show { opacity: 1; }
+  .tooltip .tt-name { color: var(--accent); font-weight: 600; margin-bottom: 4px; }
+  .tooltip .tt-accepts { color: var(--muted); }
+  .tooltip .tt-accepts .ev { color: var(--fg); }
+
+  /* --- Timeline ----------------------------------------------------- */
+  .timeline { font-family: var(--mono); font-size: 12px; overflow: auto; flex: 1; }
+  .entry {
+    padding: 6px 12px;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer;
+  }
+  .entry:hover { background: var(--panel2); }
+  .entry.invariant-fail { background: rgba(248, 81, 73, 0.07); }
+  .entry .seq { color: var(--muted); margin-right: 8px; }
+  .entry .arrow { color: var(--muted); }
+  .entry .event { color: var(--warn); }
+  .entry .from { color: var(--fg); }
+  .entry .to { color: var(--good); }
+  .entry .effects { color: var(--muted); font-size: 11px; margin-top: 3px; }
+  .entry .effects .fx { color: var(--accent); }
+  .entry .inv-tag { color: var(--bad); margin-left: 8px; }
+  .entry-expanded {
+    background: var(--panel2);
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    white-space: pre-wrap;
+    font-size: 11px;
+  }
+
+  pre {
+    font-family: var(--mono); font-size: 12px;
+    background: var(--panel2);
+    border: 1px solid var(--border);
+    padding: 8px;
+    margin: 0;
+    overflow: auto;
+    border-radius: 4px;
+  }
+
+  .send-form { padding: 10px 12px; border-top: 1px solid var(--border); flex-shrink: 0; }
+  .send-form label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .send-form textarea {
+    width: 100%; min-height: 70px;
+    background: var(--bg); color: var(--fg);
+    border: 1px solid var(--border); border-radius: 4px;
+    font-family: var(--mono); font-size: 12px;
+    padding: 6px;
+  }
+  .send-form .row { display: flex; gap: 8px; margin-top: 6px; align-items: center; }
+  .send-form button {
+    background: var(--accent); color: black; border: none; padding: 6px 14px; border-radius: 4px;
+    font-weight: 600; cursor: pointer; font-size: 12px;
+  }
+  .send-form button:hover { filter: brightness(1.1); }
+  .send-form .quick { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+  .send-form .quick button {
+    background: var(--panel2); color: var(--accent);
+    border: 1px solid var(--border);
+    font-family: var(--mono); font-size: 11px;
+    padding: 3px 8px; font-weight: normal;
+  }
+  .send-form .err { color: var(--bad); margin-top: 6px; font-size: 11px; }
+
+  .empty { color: var(--muted); padding: 12px; font-style: italic; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>constrained-lang inspector — <span class="machine-name" id="machine-name">…</span></h1>
+    <span id="frozen-tag"></span>
+    <span class="conn" id="conn">connecting…</span>
+  </header>
+  <main>
+    <section class="panel">
+      <h2>State Graph</h2>
+      <div class="graph-wrap">
+        <svg id="graph" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <!-- Arrow marker; positioned so tip lands at end of the line. -->
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--muted)"/>
+            </marker>
+            <marker id="arrow-recent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--warn)"/>
+            </marker>
+            <marker id="arrow-bad" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--bad)"/>
+            </marker>
+          </defs>
+          <g id="edges-layer"></g>
+          <g id="nodes-layer"></g>
+        </svg>
+        <div class="graph-legend">
+          <span class="dot current"></span> current
+          &nbsp;&nbsp;
+          <span class="dot recent"></span> last transition
+        </div>
+        <div class="tooltip" id="tooltip"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Timeline</h2>
+      <div class="timeline" id="timeline"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Current Context</h2>
+      <div class="panel-body" style="flex: 1; min-height: 0;"><pre id="context">{}</pre></div>
+      <h2>Send Event</h2>
+      <div class="send-form">
+        <label for="event-input">Event JSON</label>
+        <textarea id="event-input" placeholder='{ "type": "FETCH", "userId": "u1" }'></textarea>
+        <div class="quick" id="quick-events"></div>
+        <div class="row">
+          <button id="send-btn">Send</button>
+          <span class="err" id="send-err"></span>
+        </div>
+      </div>
+    </section>
+  </main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const timelineEl = $('timeline');
+  const contextEl  = $('context');
+  const connEl     = $('conn');
+  const nameEl     = $('machine-name');
+  const frozenEl   = $('frozen-tag');
+  const eventInput = $('event-input');
+  const sendBtn    = $('send-btn');
+  const sendErr    = $('send-err');
+  const quickEl    = $('quick-events');
+  const svg        = $('graph');
+  const edgesLayer = $('edges-layer');
+  const nodesLayer = $('nodes-layer');
+  const tooltipEl  = $('tooltip');
+
+  // --- state ---
+  let machine = null;     // MachineSnapshot
+  let currentState = null;
+  let frozen = false;
+  let timeline = [];
+  const expanded = new Set();
+  // edges: Map<"prev|next", { prev, next, events: Set<string>, lastSeq, invariantFailure }>
+  const edges = new Map();
+  let lastSeq = -1;
+  // node positions, recomputed on resize / init
+  let nodePos = new Map(); // name -> {x, y}
+  const NODE_R = 32;
+
+  // --- WS ---
+  const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+  let ws;
+  function connect() {
+    ws = new WebSocket(wsUrl);
+    ws.onopen = () => { connEl.textContent = 'connected'; connEl.className = 'conn ok'; };
+    ws.onclose = () => {
+      connEl.textContent = 'disconnected — retrying';
+      connEl.className = 'conn bad';
+      setTimeout(connect, 1000);
+    };
+    ws.onmessage = (e) => handle(JSON.parse(e.data));
+  }
+  connect();
+
+  function handle(msg) {
+    switch (msg.type) {
+      case 'init':
+        machine = msg.machine;
+        currentState = msg.state;
+        frozen = msg.frozen;
+        timeline = [];
+        edges.clear();
+        lastSeq = -1;
+        for (const e of msg.timeline) ingestEntry(e);
+        nameEl.textContent = machine.name;
+        renderFrozen();
+        layoutNodes();
+        renderGraph();
+        renderTimeline();
+        renderContext(msg.context);
+        renderQuickEvents();
+        break;
+      case 'transition':
+        ingestEntry(msg.entry);
+        currentState = msg.state;
+        frozen = msg.frozen;
+        renderFrozen();
+        renderGraph();
+        renderTimeline();
+        renderContext(msg.context);
+        break;
+      case 'error':
+        sendErr.textContent = msg.message;
+        setTimeout(() => { if (sendErr.textContent === msg.message) sendErr.textContent = ''; }, 4000);
+        break;
+    }
+  }
+
+  function ingestEntry(entry) {
+    timeline.push(entry);
+    lastSeq = entry.seq;
+    const key = entry.prev.state + '|' + entry.next.state;
+    let edge = edges.get(key);
+    if (!edge) {
+      edge = { prev: entry.prev.state, next: entry.next.state, events: new Set(), lastSeq: -1 };
+      edges.set(key, edge);
+    }
+    edge.events.add(entry.event.type);
+    edge.lastSeq = entry.seq;
+    if (entry.invariantFailure) edge.invariantFailure = entry.invariantFailure;
+  }
+
+  function renderFrozen() {
+    frozenEl.innerHTML = frozen ? '<span class="frozen">FROZEN</span>' : '';
+  }
+
+  // --- Graph layout (circular) ---
+  // Recompute when SVG resizes or on init.
+  function layoutNodes() {
+    if (!machine) return;
+    const rect = svg.getBoundingClientRect();
+    const w = rect.width, h = rect.height;
+    svg.setAttribute('viewBox', `0 0 ${w} ${h}`);
+    const cx = w / 2, cy = h / 2;
+    const states = machine.states;
+    const n = states.length;
+    if (n === 0) { nodePos = new Map(); return; }
+    // Special-case: a single state. Place center.
+    if (n === 1) {
+      nodePos = new Map([[states[0].name, { x: cx, y: cy }]]);
+      return;
+    }
+    // Place around a circle, starting top, going clockwise.
+    const margin = NODE_R + 36;
+    const r = Math.max(40, Math.min(w, h) / 2 - margin);
+    const newPos = new Map();
+    for (let i = 0; i < n; i++) {
+      const theta = -Math.PI / 2 + (2 * Math.PI * i) / n;
+      newPos.set(states[i].name, {
+        x: cx + r * Math.cos(theta),
+        y: cy + r * Math.sin(theta),
+      });
+    }
+    nodePos = newPos;
+  }
+
+  function renderGraph() {
+    if (!machine) return;
+    // Clear layers.
+    edgesLayer.innerHTML = '';
+    nodesLayer.innerHTML = '';
+
+    // Render edges first (so nodes sit on top).
+    for (const edge of edges.values()) {
+      renderEdge(edge);
+    }
+
+    // Render nodes.
+    for (const s of machine.states) {
+      renderNode(s);
+    }
+  }
+
+  function renderNode(s) {
+    const pos = nodePos.get(s.name);
+    if (!pos) return;
+    const g = svgEl('g', { transform: `translate(${pos.x}, ${pos.y})` });
+
+    const isCurrent = s.name === currentState;
+    const cls = 'node-circle' + (isCurrent ? (frozen ? ' frozen' : ' current') : '');
+    const circle = svgEl('circle', { r: NODE_R, class: cls });
+    g.appendChild(circle);
+
+    const label = svgEl('text', { class: 'node-label', y: 0 });
+    label.textContent = s.name;
+    g.appendChild(label);
+
+    // Hover tooltip lists accepted events.
+    g.addEventListener('mouseenter', (ev) => showTooltip(s, ev));
+    g.addEventListener('mousemove', moveTooltip);
+    g.addEventListener('mouseleave', hideTooltip);
+
+    nodesLayer.appendChild(g);
+  }
+
+  function renderEdge(edge) {
+    const a = nodePos.get(edge.prev);
+    const b = nodePos.get(edge.next);
+    if (!a || !b) return;
+
+    const isRecent = edge.lastSeq === lastSeq;
+    const isBad = !!edge.invariantFailure;
+
+    let pathD, labelPos;
+    if (edge.prev === edge.next) {
+      // Self-loop: small circle on the outer side of the node.
+      // Direction: away from canvas center to keep loops from overlapping nodes.
+      const rect = svg.getBoundingClientRect();
+      const dx = a.x - rect.width / 2;
+      const dy = a.y - rect.height / 2;
+      const mag = Math.hypot(dx, dy) || 1;
+      const ux = dx / mag, uy = dy / mag;
+      // Loop center is just outside the node.
+      const loopR = 20;
+      const loopCx = a.x + ux * (NODE_R + loopR - 4);
+      const loopCy = a.y + uy * (NODE_R + loopR - 4);
+      // Two tangent points on the node where loop meets node.
+      const perpx = -uy, perpy = ux;
+      const tan = 10;
+      const p1 = { x: a.x + ux * NODE_R + perpx * tan, y: a.y + uy * NODE_R + perpy * tan };
+      const p2 = { x: a.x + ux * NODE_R - perpx * tan, y: a.y + uy * NODE_R - perpy * tan };
+      pathD = `M ${p1.x} ${p1.y} A ${loopR} ${loopR} 0 1 1 ${p2.x} ${p2.y}`;
+      labelPos = { x: loopCx + ux * (loopR + 4), y: loopCy + uy * (loopR + 4) };
+    } else {
+      // Curved edge. Curve sign flips per direction so A→B and B→A separate.
+      // Sign chosen deterministically by name comparison.
+      const sign = edge.prev < edge.next ? 1 : -1;
+      const mx = (a.x + b.x) / 2;
+      const my = (a.y + b.y) / 2;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len = Math.hypot(dx, dy) || 1;
+      // Perpendicular offset.
+      const off = 22 * sign;
+      const px = -dy / len, py = dx / len;
+      const cx = mx + px * off;
+      const cy = my + py * off;
+      // Shorten endpoints so they don't overlap node circles. Approximate.
+      const startT = NODE_R / len;
+      const endT = 1 - NODE_R / len;
+      const start = quadPoint(a, { x: cx, y: cy }, b, startT);
+      const end = quadPoint(a, { x: cx, y: cy }, b, endT);
+      pathD = `M ${start.x} ${start.y} Q ${cx} ${cy} ${end.x} ${end.y}`;
+      // Label sits on the curve apex.
+      const apex = quadPoint(a, { x: cx, y: cy }, b, 0.5);
+      labelPos = { x: apex.x, y: apex.y };
+    }
+
+    const pathCls = 'edge-path' + (isRecent ? ' recent' : '') + (isBad ? ' invariant-fail' : '');
+    const markerId = isBad ? 'arrow-bad' : (isRecent ? 'arrow-recent' : 'arrow');
+    const path = svgEl('path', { d: pathD, class: pathCls, 'marker-end': `url(#${markerId})` });
+    edgesLayer.appendChild(path);
+
+    const labelText = [...edge.events].join(', ');
+    const label = svgEl('text', {
+      class: 'edge-label' + (isRecent ? ' recent' : ''),
+      x: labelPos.x,
+      y: labelPos.y,
+    });
+    label.textContent = labelText;
+    edgesLayer.appendChild(label);
+  }
+
+  function quadPoint(p0, p1, p2, t) {
+    const omt = 1 - t;
+    return {
+      x: omt * omt * p0.x + 2 * omt * t * p1.x + t * t * p2.x,
+      y: omt * omt * p0.y + 2 * omt * t * p1.y + t * t * p2.y,
+    };
+  }
+
+  function svgEl(name, attrs) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', name);
+    if (attrs) for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+    return el;
+  }
+
+  // --- Tooltip ---
+  function showTooltip(s, ev) {
+    tooltipEl.innerHTML = `
+      <div class="tt-name">${s.name}</div>
+      <div class="tt-accepts">accepts: ${
+        s.accepts.length
+          ? s.accepts.map(a => `<span class="ev">${a}</span>`).join(', ')
+          : '<em>(none — terminal)</em>'
+      }</div>
+    `;
+    tooltipEl.classList.add('show');
+    moveTooltip(ev);
+  }
+  function moveTooltip(ev) {
+    const wrap = svg.parentElement.getBoundingClientRect();
+    tooltipEl.style.left = (ev.clientX - wrap.left + 12) + 'px';
+    tooltipEl.style.top = (ev.clientY - wrap.top + 12) + 'px';
+  }
+  function hideTooltip() {
+    tooltipEl.classList.remove('show');
+  }
+
+  // --- Resize ---
+  const ro = new ResizeObserver(() => { layoutNodes(); renderGraph(); });
+  ro.observe(svg);
+
+  // --- Timeline ---
+  function renderTimeline() {
+    if (timeline.length === 0) {
+      timelineEl.innerHTML = '<div class="empty">no transitions yet</div>';
+      return;
+    }
+    timelineEl.innerHTML = '';
+    for (let i = timeline.length - 1; i >= 0; i--) {
+      const e = timeline[i];
+      const div = document.createElement('div');
+      div.className = 'entry' + (e.invariantFailure ? ' invariant-fail' : '');
+      const fx = (e.effects && e.effects.length)
+        ? `<div class="effects">effects: ${e.effects.map(f => `<span class="fx">${f.kind}</span>`).join(' · ')}</div>`
+        : '';
+      const invTag = e.invariantFailure ? `<span class="inv-tag">!${e.invariantFailure}</span>` : '';
+      div.innerHTML = `
+        <div>
+          <span class="seq">#${e.seq}</span>
+          <span class="from">${e.prev.state}</span>
+          <span class="arrow">──</span>
+          <span class="event">${e.event.type}</span>
+          <span class="arrow">──▶</span>
+          <span class="to">${e.next.state}</span>
+          ${invTag}
+        </div>
+        ${fx}
+      `;
+      div.onclick = () => toggleExpanded(e.seq);
+      timelineEl.appendChild(div);
+      if (expanded.has(e.seq)) {
+        const ex = document.createElement('div');
+        ex.className = 'entry-expanded';
+        ex.textContent = JSON.stringify({
+          event: e.event,
+          prev: e.prev,
+          next: e.next,
+          effects: e.effects,
+        }, null, 2);
+        timelineEl.appendChild(ex);
+      }
+    }
+  }
+  function toggleExpanded(seq) {
+    if (expanded.has(seq)) expanded.delete(seq); else expanded.add(seq);
+    renderTimeline();
+  }
+
+  function renderContext(ctx) {
+    contextEl.textContent = JSON.stringify(ctx, null, 2);
+  }
+
+  function renderQuickEvents() {
+    quickEl.innerHTML = '';
+    const allEvents = new Set();
+    for (const s of machine.states) for (const a of s.accepts) allEvents.add(a);
+    for (const ev of allEvents) {
+      const btn = document.createElement('button');
+      btn.textContent = ev;
+      btn.onclick = () => {
+        eventInput.value = JSON.stringify({ type: ev }, null, 2);
+        eventInput.focus();
+      };
+      quickEl.appendChild(btn);
+    }
+  }
+
+  sendBtn.onclick = () => {
+    sendErr.textContent = '';
+    let parsed;
+    try { parsed = JSON.parse(eventInput.value); }
+    catch (e) { sendErr.textContent = 'invalid JSON: ' + e.message; return; }
+    if (!parsed || typeof parsed.type !== 'string') {
+      sendErr.textContent = 'event must have a string "type" field';
+      return;
+    }
+    ws.send(JSON.stringify({ type: 'send', event: parsed }));
+  };
+  eventInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendBtn.click(); }
+  });
+})();
+</script>
+</body>
+</html>

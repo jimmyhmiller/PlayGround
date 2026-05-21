@@ -37,12 +37,14 @@ use serde::{Deserialize, Serialize};
 
 use pane_bevy::{
     spawn_pane_from_registry, FocusedPane, PaneKindMarker, PaneProject, PaneRect, PaneRegistry,
-    PaneSnapshot, PaneTag, MIN_PANE_SIZE,
+    PaneSnapshot, PaneTag, PaneTitle, MIN_PANE_SIZE,
 };
+
+use crate::TerminalSession;
 
 use editor_bevy::EditorFilePath;
 
-use crate::MonoFont;
+use crate::{MonoFont, MonoMetrics, FONT_SIZE};
 
 pub const SIDEBAR_DEFAULT_WIDTH: f32 = 220.0;
 pub const SIDEBAR_MIN_WIDTH: f32 = 160.0;
@@ -61,7 +63,7 @@ const SIDEBAR_Z: f32 = 500.0;
 // uses a thin accent stripe instead of a full-row colour wash.
 const COLOR_SIDEBAR_BG: Color = Color::srgb(0.086, 0.090, 0.102);
 const COLOR_DIVIDER: Color = Color::srgb(0.165, 0.170, 0.188);
-const COLOR_ROW_ACTIVE_BG: Color = Color::srgb(0.125, 0.130, 0.149);
+const COLOR_ROW_ACTIVE_BG: Color = Color::srgb(0.150, 0.165, 0.205);
 const COLOR_ROW_RENAMING_BG: Color = Color::srgb(0.140, 0.146, 0.165);
 const COLOR_ACTIVE_STRIPE: Color = Color::srgb(0.42, 0.62, 0.92);
 const COLOR_EDIT_UNDERLINE: Color = Color::srgb(0.42, 0.62, 0.92);
@@ -72,7 +74,7 @@ const COLOR_TEXT_FAINT: Color = Color::srgb(0.36, 0.38, 0.42);
 const HEADER_H: f32 = 36.0;
 const ROW_H: f32 = 28.0;
 const ROW_PAD_X: f32 = 14.0;
-const STRIPE_W: f32 = 2.0;
+const STRIPE_W: f32 = 3.0;
 const DELETE_W: f32 = 22.0;
 const DIVIDER_H: f32 = 1.0;
 const TEXT_FONT_SIZE: f32 = 13.0;
@@ -342,6 +344,9 @@ pub struct NewPaneRequest {
     /// Optional window-space top-left for the new pane. `None` cascades
     /// from a default position based on how many panes the project has.
     pub origin: Option<Vec2>,
+    /// Optional pixel size. `None` uses the kind's `default_size` from
+    /// `PaneRegistry` (clamped to `MIN_PANE_SIZE`).
+    pub size: Option<Vec2>,
     pub config: serde_json::Value,
 }
 
@@ -446,7 +451,9 @@ impl Plugin for ProjectsPlugin {
                     rename_keyboard,
                     apply_pending_actions,
                     sync_visibility,
+                    refocus_on_project_change,
                     mark_terminals_dirty_on_change,
+                    publish_live_terminals,
                     save_if_dirty,
                 )
                     .chain(),
@@ -526,6 +533,7 @@ fn sidebar_layout(
     mut projects: ResMut<Projects>,
     renaming: Res<Renaming>,
     font: Res<MonoFont>,
+    metrics: Res<MonoMetrics>,
     existing: Query<Entity, With<SidebarEntity>>,
     mut last_dims: Local<LastWindowDims>,
 ) {
@@ -590,23 +598,27 @@ fn sidebar_layout(
     // Header label — uppercase, dim, like a section caption in a modern
     // sidebar. No header-bar bg; just text on the sidebar bg with a
     // divider underneath.
-    commands.spawn((
-        SidebarEntity,
-        Text2d::new("PROJECTS"),
-        TextFont {
-            font: font.0.clone(),
-            font_size: HEADER_FONT_SIZE,
-            ..default()
-        },
-        LineHeight::Px(HEADER_H),
-        TextColor(COLOR_TEXT_FAINT),
-        Anchor::TOP_LEFT,
-        Transform::from_xyz(
-            world_left_edge + ROW_PAD_X,
-            world_top_edge - 4.0,
-            SIDEBAR_Z + 0.2,
-        ),
-    ));
+    {
+        let line_h = HEADER_FONT_SIZE * 1.4;
+        let pad_y = ((HEADER_H - line_h) * 0.5).max(0.0);
+        commands.spawn((
+            SidebarEntity,
+            Text2d::new("PROJECTS"),
+            TextFont {
+                font: font.0.clone(),
+                font_size: HEADER_FONT_SIZE,
+                ..default()
+            },
+            LineHeight::Px(line_h),
+            TextColor(COLOR_TEXT_FAINT),
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(
+                world_left_edge + ROW_PAD_X,
+                world_top_edge - pad_y,
+                SIDEBAR_Z + 0.2,
+            ),
+        ));
+    }
     // Header divider.
     commands.spawn((
         SidebarEntity,
@@ -699,11 +711,9 @@ fn sidebar_layout(
             },
         ));
 
-        // Label. While renaming, append a thin caret so the field
-        // reads as an editable input. (U+2502 BOX DRAWINGS LIGHT
-        // VERTICAL — looks like a real cursor; ASCII `|` is too thick.)
+        // Label.
         let label = if renaming_this {
-            format!("{}\u{2502}", renaming.buffer)
+            renaming.buffer.clone()
         } else {
             proj.name.clone()
         };
@@ -712,23 +722,51 @@ fn sidebar_layout(
         } else {
             COLOR_TEXT_DIM
         };
-        commands.spawn((
-            SidebarEntity,
-            Text2d::new(label),
-            TextFont {
-                font: font.0.clone(),
-                font_size: TEXT_FONT_SIZE,
-                ..default()
-            },
-            LineHeight::Px(ROW_H),
-            TextColor(label_color),
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(
-                world_left_edge + ROW_PAD_X,
-                row_top_world - 5.0,
-                SIDEBAR_Z + 0.2,
-            ),
-        ));
+        {
+            let line_h = TEXT_FONT_SIZE * 1.4;
+            let pad_y = ((ROW_H - line_h) * 0.5).max(0.0);
+            commands.spawn((
+                SidebarEntity,
+                Text2d::new(label),
+                TextFont {
+                    font: font.0.clone(),
+                    font_size: TEXT_FONT_SIZE,
+                    ..default()
+                },
+                LineHeight::Px(line_h),
+                TextColor(label_color),
+                Anchor::TOP_LEFT,
+                Transform::from_xyz(
+                    world_left_edge + ROW_PAD_X,
+                    row_top_world - pad_y,
+                    SIDEBAR_Z + 0.2,
+                ),
+            ));
+        }
+
+        // Caret — real sprite (not a U+2502 glyph, which renders too
+        // low because box-drawing chars don't share the letter baseline).
+        // Positioned via monospace cell-width scaled from FONT_SIZE→TEXT_FONT_SIZE,
+        // and vertically centred in the row so it doesn't sit at the descender.
+        if renaming_this {
+            let char_advance = metrics.cell_width * (TEXT_FONT_SIZE / FONT_SIZE);
+            let caret_w = 2.0;
+            let caret_h = 16.0;
+            let caret_x = world_left_edge
+                + ROW_PAD_X
+                + renaming.buffer.chars().count() as f32 * char_advance;
+            let caret_top_y = row_top_world - (ROW_H - caret_h) * 0.5;
+            commands.spawn((
+                SidebarEntity,
+                Sprite {
+                    color: COLOR_EDIT_UNDERLINE,
+                    custom_size: Some(Vec2::new(caret_w, caret_h)),
+                    ..default()
+                },
+                Anchor::TOP_LEFT,
+                Transform::from_xyz(caret_x, caret_top_y, SIDEBAR_Z + 0.25),
+            ));
+        }
 
         // Unread bell badge — right-aligned just before the delete X
         // when the project has any unseen bells. Uses the active-stripe
@@ -743,19 +781,27 @@ fn sidebar_layout(
                 n.to_string()
             };
             let badge_anchor_x_world = world_left_edge + width - DELETE_W - 4.0;
-            commands.spawn((
-                SidebarEntity,
-                Text2d::new(badge_text),
-                TextFont {
-                    font: font.0.clone(),
-                    font_size: TEXT_FONT_SIZE,
-                    ..default()
-                },
-                LineHeight::Px(ROW_H),
-                TextColor(COLOR_ACTIVE_STRIPE),
-                Anchor::TOP_RIGHT,
-                Transform::from_xyz(badge_anchor_x_world, row_top_world - 5.0, SIDEBAR_Z + 0.2),
-            ));
+            {
+                let line_h = TEXT_FONT_SIZE * 1.4;
+                let pad_y = ((ROW_H - line_h) * 0.5).max(0.0);
+                commands.spawn((
+                    SidebarEntity,
+                    Text2d::new(badge_text),
+                    TextFont {
+                        font: font.0.clone(),
+                        font_size: TEXT_FONT_SIZE,
+                        ..default()
+                    },
+                    LineHeight::Px(line_h),
+                    TextColor(COLOR_ACTIVE_STRIPE),
+                    Anchor::TOP_RIGHT,
+                    Transform::from_xyz(
+                        badge_anchor_x_world,
+                        row_top_world - pad_y,
+                        SIDEBAR_Z + 0.2,
+                    ),
+                ));
+            }
         }
 
         // Delete glyph — just a dim × at the right edge of the row.
@@ -771,19 +817,28 @@ fn sidebar_layout(
                 max: Vec2::new(delete_x_window + DELETE_W, row_top_window + ROW_H),
             },
         ));
-        commands.spawn((
-            SidebarEntity,
-            Text2d::new("\u{00D7}"), // multiplication sign — looks better than ASCII 'x'
-            TextFont {
-                font: font.0.clone(),
-                font_size: TEXT_FONT_SIZE + 1.0,
-                ..default()
-            },
-            LineHeight::Px(ROW_H),
-            TextColor(COLOR_TEXT_FAINT),
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(delete_x_world + 6.0, row_top_world - 5.0, SIDEBAR_Z + 0.2),
-        ));
+        {
+            let glyph_size = TEXT_FONT_SIZE + 1.0;
+            let line_h = glyph_size * 1.4;
+            let pad_y = ((ROW_H - line_h) * 0.5).max(0.0);
+            commands.spawn((
+                SidebarEntity,
+                Text2d::new("\u{00D7}"), // multiplication sign — looks better than ASCII 'x'
+                TextFont {
+                    font: font.0.clone(),
+                    font_size: glyph_size,
+                    ..default()
+                },
+                LineHeight::Px(line_h),
+                TextColor(COLOR_TEXT_FAINT),
+                Anchor::TOP_LEFT,
+                Transform::from_xyz(
+                    delete_x_world + 6.0,
+                    row_top_world - pad_y,
+                    SIDEBAR_Z + 0.2,
+                ),
+            ));
+        }
     }
 
     // Divider before the "+ New Project" row.
@@ -819,23 +874,27 @@ fn sidebar_layout(
             ),
         },
     ));
-    commands.spawn((
-        SidebarEntity,
-        Text2d::new("+  New Project"),
-        TextFont {
-            font: font.0.clone(),
-            font_size: TEXT_FONT_SIZE,
-            ..default()
-        },
-        LineHeight::Px(ROW_H),
-        TextColor(COLOR_TEXT_DIM),
-        Anchor::TOP_LEFT,
-        Transform::from_xyz(
-            world_left_edge + ROW_PAD_X,
-            new_proj_top_world - 5.0,
-            SIDEBAR_Z + 0.2,
-        ),
-    ));
+    {
+        let line_h = TEXT_FONT_SIZE * 1.4;
+        let pad_y = ((ROW_H - line_h) * 0.5).max(0.0);
+        commands.spawn((
+            SidebarEntity,
+            Text2d::new("+  New Project"),
+            TextFont {
+                font: font.0.clone(),
+                font_size: TEXT_FONT_SIZE,
+                ..default()
+            },
+            LineHeight::Px(line_h),
+            TextColor(COLOR_TEXT_DIM),
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(
+                world_left_edge + ROW_PAD_X,
+                new_proj_top_world - pad_y,
+                SIDEBAR_Z + 0.2,
+            ),
+        ));
+    }
 
     projects.layout_dirty = false;
 }
@@ -1047,16 +1106,20 @@ fn apply_pending_actions(world: &mut World) {
             let count_in_project = pane_count_in_project(world, &req.kind, req.project_id);
             cascade_pos(sidebar_width, count_in_project)
         });
-        let default_size = world
-            .resource::<PaneRegistry>()
-            .get(req.kind)
-            .map(|s| s.default_size)
-            .unwrap_or(Vec2::new(560.0, 360.0))
+        let size = req
+            .size
+            .unwrap_or_else(|| {
+                world
+                    .resource::<PaneRegistry>()
+                    .get(req.kind)
+                    .map(|s| s.default_size)
+                    .unwrap_or(Vec2::new(560.0, 360.0))
+            })
             .max(MIN_PANE_SIZE);
         let next_z = pane_bevy::next_pane_z(world);
         let rect = PaneRect {
             pos,
-            size: default_size,
+            size,
             z: next_z,
         };
         if let Some(entity) = spawn_pane_from_registry(
@@ -1186,7 +1249,7 @@ fn cascade_pos(sidebar_width: f32, n: usize) -> Vec2 {
     )
 }
 
-fn resolve_project(target: &OpenProjectTarget, projects: &Projects) -> Option<u64> {
+pub fn resolve_project(target: &OpenProjectTarget, projects: &Projects) -> Option<u64> {
     match target {
         OpenProjectTarget::Active => projects.active,
         OpenProjectTarget::ById(id) => {
@@ -1217,6 +1280,147 @@ fn sync_visibility(
         if *vis != want {
             *vis = want;
         }
+    }
+}
+
+/// When the active project changes, move keyboard focus into the new
+/// project — preferring a terminal at the top of its z-stack. Without
+/// this, `FocusedPane` keeps pointing at a now-hidden pane in the old
+/// project, so typing goes nowhere (or worse, into a hidden widget).
+/// `handle_pane_mouse` already filters out hidden panes, so it's only
+/// the residual state we have to fix here.
+fn refocus_on_project_change(
+    projects: Res<Projects>,
+    mut last_active: Local<Option<u64>>,
+    mut focused: ResMut<FocusedPane>,
+    panes: Query<(Entity, &PaneProject, &PaneKindMarker, &PaneRect), With<PaneTag>>,
+) {
+    if *last_active == projects.active {
+        return;
+    }
+    *last_active = projects.active;
+
+    let Some(active) = projects.active else {
+        focused.0 = None;
+        return;
+    };
+
+    // If the current focus is already in the active project, leave it.
+    if let Some(cur) = focused.0 {
+        if let Ok((_, proj, _, _)) = panes.get(cur) {
+            if proj.0 == active {
+                return;
+            }
+        }
+    }
+
+    // Pick a candidate from the active project: prefer terminals, break
+    // ties by topmost z so the visually-frontmost pane gets focus.
+    let pick = panes
+        .iter()
+        .filter(|(_, p, _, _)| p.0 == active)
+        .max_by(|a, b| {
+            let a_term = a.2.0 == crate::PANE_KIND;
+            let b_term = b.2.0 == crate::PANE_KIND;
+            a_term
+                .cmp(&b_term)
+                .then(a.3.z.partial_cmp(&b.3.z).unwrap_or(std::cmp::Ordering::Equal))
+        })
+        .map(|(e, _, _, _)| e);
+
+    focused.0 = pick;
+}
+
+// ---------- Live terminals export ----------
+//
+// `~/.terminal-bevy/terminals.json` is a small "what's open right now"
+// snapshot that out-of-process widgets (e.g. claude-context-bars) can
+// poll to learn which terminal sessions are open, what project they
+// belong to, and their pane title. The full `projects.json` is too
+// big and only persisted on mouse-up; this file is updated within a
+// frame of any relevant change.
+
+#[derive(Serialize)]
+struct LiveTerminalEntry {
+    session_id: u64,
+    project_id: u64,
+    project_name: String,
+    title: String,
+}
+
+#[derive(Serialize)]
+struct LiveTerminals {
+    terminals: Vec<LiveTerminalEntry>,
+}
+
+fn live_terminals_path() -> Option<PathBuf> {
+    save_path().map(|d| d.join("terminals.json"))
+}
+
+fn write_live_terminals(state: &LiveTerminals) -> std::io::Result<()> {
+    let Some(file) = live_terminals_path() else {
+        return Err(std::io::Error::other("no HOME"));
+    };
+    let Some(dir) = file.parent() else {
+        return Err(std::io::Error::other("no parent"));
+    };
+    fs::create_dir_all(dir)?;
+    let bytes = serde_json::to_vec(state)?;
+    let tmp = file.with_extension("json.tmp");
+    {
+        let mut f = fs::File::create(&tmp)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+    }
+    fs::rename(&tmp, &file)
+}
+
+/// Emit `~/.terminal-bevy/terminals.json` whenever the set of open
+/// terminals, their project assignment, their title, or the project
+/// catalog changes. Hashes the snapshot to suppress redundant writes.
+fn publish_live_terminals(
+    projects: Res<Projects>,
+    terminals: Query<(&TerminalSession, &PaneProject, &PaneTitle), With<PaneTag>>,
+    mut last_hash: Local<u64>,
+) {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let name_of = |id: u64| -> String {
+        projects
+            .list
+            .iter()
+            .find(|p| p.id == id)
+            .map(|p| p.name.clone())
+            .unwrap_or_default()
+    };
+
+    let mut entries: Vec<LiveTerminalEntry> = terminals
+        .iter()
+        .map(|(s, p, t)| LiveTerminalEntry {
+            session_id: s.0,
+            project_id: p.0,
+            project_name: name_of(p.0),
+            title: t.0.clone(),
+        })
+        .collect();
+    entries.sort_by_key(|e| e.session_id);
+
+    let mut hasher = DefaultHasher::new();
+    for e in &entries {
+        e.session_id.hash(&mut hasher);
+        e.project_id.hash(&mut hasher);
+        e.project_name.hash(&mut hasher);
+        e.title.hash(&mut hasher);
+    }
+    let h = hasher.finish();
+    if h == *last_hash {
+        return;
+    }
+    *last_hash = h;
+
+    if let Err(e) = write_live_terminals(&LiveTerminals { terminals: entries }) {
+        eprintln!("[projects] write terminals.json: {}", e);
     }
 }
 

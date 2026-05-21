@@ -1,0 +1,23 @@
+{
+  "name": "constrained-lang2",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "run-example": "tsx src/examples/fetch-user.ts",
+    "inspect-example": "tsx src/examples/fetch-user-inspect.ts",
+    "agent-cli": "tsx src/examples/agent-cli.ts",
+    "agent-http": "tsx src/examples/agent-http.ts",
+    "agent-queue": "tsx src/examples/agent-queue.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}
