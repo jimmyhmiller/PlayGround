@@ -1,5 +1,21 @@
 # Mojo Compile OOM Investigation
 
+## Status: RESOLVED (2026-05-21)
+
+The monolithic synth files (`synthesize_from_wav.mojo`, `preprocess_voice.mojo`,
+and friends) have been removed in favor of per-op `.so` modules orchestrated
+from Python. See `REFACTOR_STATUS.md` and `README.md`.
+
+| Metric | Before (monolith) | After (per-op `.so`) |
+|---|---|---|
+| Cold-compile peak RSS | 125 GB OOM-kill | 3.0 GB (largest op: `op_flow`) |
+| Distinct compilation units | 1 | 9 |
+| End-to-end works | yes (warm cache only) | yes (cold + warm) |
+
+The root cause analysis below is preserved for historical reference.
+
+---
+
 ## Symptom
 
 Compiling `tests/synthesize_from_wav.mojo` (or any file that imports the

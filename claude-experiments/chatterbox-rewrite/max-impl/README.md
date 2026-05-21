@@ -1,20 +1,64 @@
 # Chatterbox on MAX (Mojo)
 
-End-to-end TTS pipeline reimplemented on top of MAX's Mojo abstractions.
+End-to-end TTS pipeline reimplemented on top of MAX's Mojo abstractions,
+split into per-op `.so` modules orchestrated from Python (matches MAX's own
+`_interpreter_ops` pattern).
+
+## Run
+
+```bash
+pixi run python -m chatterbox_mojo <ref.wav> "<text>" <out.wav>
+```
+
+First run compiles each op `.so` lazily via `mojo.importer` (cached under
+`ops/op_*/__mojocache__/`). Subsequent runs load from cache.
 
 ## Layout
 
-- `src/` — Mojo source. Thin Module wrappers around `nn.*`/`linalg.*`
-  kernel functions, model architectures composed from these Modules.
-- `tests/` — Parity tests against existing `../mojo-t3/tests/fixtures/`
-  oracle outputs (numpy/torch reference).
-- `scripts/` — Python helpers (weight conversion from upstream
-  safetensors, fixture dumps if needed).
+- `chatterbox_mojo/` — Python orchestrator (no compute; loads ops and
+  chains their `Buffer`s on the GPU).
+- `ops/op_*/` — per-op Mojo `.so` modules. Each has:
+    - `op_<name>.mojo` — `PyInit_*` + `PythonModuleBuilder` bindings,
+      `init_op` / `forward` / `destroy_op` functions.
+    - `weights_<name>.mojo` — model-specific weight loaders (extracted
+      from `src/weights.mojo`).
+    - Symlinks to relevant `src/*.mojo` source files.
+- `src/` — canonical Mojo source for kernels and model definitions.
+- `tests/` — parity tests against existing `../mojo-t3/tests/fixtures/`
+  oracle outputs.
+- `scripts/` — Python helpers (weight conversion, op dep setup).
 
-## Layer reuse from MAX
+## Why per-op .so
 
-We use the following Mojo packages from the MAX install
-(`$PIXI/lib/mojo/*.mojopkg`):
+The monolithic test harness (`tests/synthesize_from_wav.mojo`, since
+removed) hit a 125 GB peak RSS cold-compile OOM driven by 163
+`elementwise[fn, ...]` sites across 26 source files. Each is a unique
+closure type the Mojo compiler must monomorphize and hold simultaneously
+during the LLVM opt pass.
+
+Splitting into smaller `.so` modules — exactly how MAX's own kernel ops
+are packaged — bounds the per-binary monomorphization graph. The largest
+op (`op_flow`) cold-compiles at 3.0 GB peak RSS. Each `.so` is loaded by
+CPython's extension-module loader and reads/writes GPU device buffers
+directly via raw pointer handoff (`max.driver.Buffer._data_ptr()`).
+
+See `REFACTOR_STATUS.md` and `MOJO_COMPILE_OOM.md` for details.
+
+## Ops
+
+| `.so` | Role |
+|---|---|
+| `op_load_wav` | WAV header + decode + soxr resample (subprocess to ffmpeg) |
+| `op_write_wav` | Write float32 mono buffer as 16-bit PCM WAV |
+| `op_text_tokenize` | BPE tokenize → list[int] |
+| `op_audio_in` | s3tokenizer log-mel + s3tokenize + 24k mel + kaldi fbank + VE mel + VE forward |
+| `op_campplus` | FCM + xvector backbone → 192-d speaker embedding |
+| `op_spk_affine` | L2 normalize + Linear(192, 80) → spks |
+| `op_t3` | T3CondEnc + Llama-30L autoregressive speech-token generator |
+| `op_flow` | UpsampleConformerEncoder + CFM Euler |
+| `op_hift` | NSF-HiFiGAN F0 + sine source + iSTFT → audio |
+
+## Layer reuse from MAX stdlib
 
 | Need | Use |
 |---|---|
@@ -33,31 +77,10 @@ We use the following Mojo packages from the MAX install
 | pad | `nn.pad`, `nn.pad_gpu` |
 | top-k / sampling | `nn.topk`, `nn.sampling` |
 
-## Module pattern
-
-```mojo
-struct Linear:
-    var weight: TileTensor[...]   # (out, in)
-    var bias:   TileTensor[...]   # (out,)
-    def __call__(self, mut ctx: DeviceContext, x: TileTensor, out: TileTensor):
-        linalg.matmul.matmul[target="gpu"](out, x, self.weight, dctx)
-        bias_add(out, self.bias, ...)
-```
-
-## Phasing
-
-0. Project skeleton + sanity test that `nn.softmax` runs.
-1. VoiceEncoder + s3tokenizer.
-2. T3 (Llama-30L + cond_enc + perceiver) + KV-cached generation.
-3. s3gen (UpsampleConformerEncoder + CFM + HiFiGAN).
-4. End-to-end synthesize binary.
-5. Weight loading from upstream safetensors.
-
 ## Reused from `../mojo-t3`
 
-- Fixture loader format (`src/fixture.mojo` equivalent) — reuse the format,
-  paths point to existing fixture files.
-- WAV I/O (load_wav, save_wav).
+- Fixture loader format (`src/fixture.mojo`).
+- WAV I/O.
 - BPE tokenizer (pure-Mojo).
 - All `oracle/dump_*.py` numpy reference dumps.
 - All `tests/fixtures/` weight + golden-output files.
