@@ -22,8 +22,9 @@ from std.python.bindings import PythonModuleBuilder
 from std.gpu.host import DeviceContext, DeviceBuffer
 from std.runtime.asyncrt import DeviceContextPtr
 
-from campplus import XVectorBackbone, xvector_forward as _xvector_forward
-from weights_campplus import load_xvector_backbone
+from campplus import XVectorBackbone, xvector_forward as _xvector_forward, campplus_speaker_embedding as _campplus_speaker_embedding
+from fcm import FCM
+from weights_campplus import load_xvector_backbone, load_fcm
 
 
 # ---------------------------------------------------------------------------
@@ -40,6 +41,7 @@ struct OpState(Movable):
     """
     var ctx: DeviceContext
     var backbone: XVectorBackbone
+    var fcm: FCM
 
 
 # ---------------------------------------------------------------------------
@@ -85,10 +87,11 @@ def init_op(
     var base = String(py=weights_base_path)
     var ctx = _ctx_from_python(device_context_ptr)
     var backbone = load_xvector_backbone(ctx, base)
+    var fcm = load_fcm(ctx, base + "/head")
     ctx.synchronize()
 
     var ptr = alloc[OpState](1)
-    ptr.init_pointee_move(OpState(ctx^, backbone^))
+    ptr.init_pointee_move(OpState(ctx^, backbone^, fcm^))
     return PythonObject(Int(ptr))
 
 
@@ -149,6 +152,48 @@ def xvector_forward(
     return PythonObject(None)
 
 
+def speaker_embedding(
+    handle: PythonObject,
+    in_buffer: PythonObject,     # (B, 80, T_fbank) f32 on GPU — kaldi fbank output
+    out_buffer: PythonObject,    # (B, 192) f32 on GPU
+    b_obj: PythonObject,
+    t_in_obj: PythonObject,
+) raises -> PythonObject:
+    """Full CAMPPlus pipeline: FCM(80→320 channels) + xvector → 192-d embed."""
+    var addr = Int(py=handle)
+    if addr == 0:
+        raise Error("op_campplus: null state handle")
+    var state_ptr = UnsafePointer[OpState, MutExternalOrigin](unsafe_from_address=addr)
+    var b = Int(py=b_obj)
+    var t_in = Int(py=t_in_obj)
+
+    var in_addr = Int(py=in_buffer._data_ptr())
+    var in_n = Int(py=in_buffer.num_elements)
+    var out_addr = Int(py=out_buffer._data_ptr())
+    var out_n = Int(py=out_buffer.num_elements)
+
+    var expected_in = b * 80 * t_in
+    if in_n < expected_in:
+        raise Error("in_buffer too small: " + String(in_n) + " < " + String(expected_in))
+    var expected_out = b * 192
+    if out_n < expected_out:
+        raise Error("out_buffer too small: " + String(out_n) + " < " + String(expected_out))
+
+    var in_buf = DeviceBuffer[DType.float32](
+        state_ptr[].ctx, _make_ptr(in_addr), in_n, owning=False,
+    )
+    var out_buf = DeviceBuffer[DType.float32](
+        state_ptr[].ctx, _make_ptr(out_addr), out_n, owning=False,
+    )
+
+    _campplus_speaker_embedding(
+        state_ptr[].ctx, state_ptr[].fcm, state_ptr[].backbone,
+        in_buf, out_buf, b, t_in,
+    )
+    state_ptr[].ctx.synchronize()
+    return PythonObject(None)
+
+
 def destroy_op(handle: PythonObject) raises -> PythonObject:
     """Free the heap-allocated state.
 
@@ -180,6 +225,10 @@ def PyInit_op_campplus() -> PythonObject:
         b.def_function[xvector_forward](
             "xvector_forward",
             docstring="xvector_forward(handle, in_buf, out_buf, B, T_in)",
+        )
+        b.def_function[speaker_embedding](
+            "speaker_embedding",
+            docstring="speaker_embedding(handle, fbank_buf, emb_out, B, T_in) — FCM + xvector",
         )
         b.def_function[destroy_op](
             "destroy_op",
