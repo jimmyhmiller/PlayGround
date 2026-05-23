@@ -9,6 +9,7 @@ bytemuck = { version = "1", features = ["derive"] }
 editor_bevy = { path = "../editor-bevy" }
 editor_core = { path = "../editor-core" }
 pane_bevy = { path = "../pane-bevy" }
+style_bevy = { path = "../style-bevy" }
 terminal_daemon = { path = "../terminal-daemon" }
 widget_bevy = { path = "../widget-bevy" }
 claude-bus-bevy = { path = "../claude-bus-bevy" }
@@ -21,6 +22,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 bincode = { version = "2", features = ["serde"] }
 libc = "0.2"
+# File-watching for garden sprite hot reload — picks up edits to text
+# files under ~/.terminal-bevy/garden-art/ and rebuilds the relevant
+# Image assets without restarting the app.
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+# PNG decoding for the embedded garden sprite sheet (CC0 OpenGameArt
+# "Flowers" plant pack, 78 12x24 plants on a 936x24 strip).
+image = { version = "0.25", default-features = false, features = ["png"] }
 skrifa = "0.39"
 # Glyph rasterization for our own atlas — bypasses cosmic-text/Text2d
 # entirely. Already a transitive dep via Bevy's cosmic-text, declared
@@ -30,6 +38,10 @@ bevy = { version = "0.18", default-features = false, features = [
     "2d",
     "x11",
     "wayland",
+    # Hot-reload shaders / textures / any asset when their source file
+    # changes on disk. Without this, AssetServer ignores file changes
+    # and the live-edit workflow doesn't work.
+    "file_watcher",
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

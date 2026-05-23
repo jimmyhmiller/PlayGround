@@ -5,10 +5,20 @@ edition = "2024"
 
 [dependencies]
 pane_bevy = { path = "../pane-bevy" }
+style_bevy = { path = "../style-bevy" }
+claude-bus-bevy = { path = "../claude-bus-bevy" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 schemars = "0.8"
 clap = { version = "4", features = ["derive"] }
+# PNG/JPEG decoding for widget sprite paths.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Rhai scripting for hot-reloadable in-process widgets. `sync` makes the
+# Engine + AST Send so they can live in Bevy resources/components;
+# `serde` lets us serde_json::Value <-> rhai::Dynamic so widgets can
+# return frames as Rhai maps that deserialize into protocol::Element.
+rhai = { version = "1.21", features = ["sync", "serde"] }
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
 bevy = { version = "0.18", default-features = false, features = [
     "2d",
     "x11",

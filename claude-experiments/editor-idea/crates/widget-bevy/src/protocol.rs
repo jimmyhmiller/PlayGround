@@ -50,6 +50,22 @@ pub enum HostEvent {
     Refresh,
     /// The pane is closing; flush and exit promptly.
     Close,
+    /// Per-frame heartbeat. `dt` is seconds since the previous tick.
+    /// Animated widgets advance their state on each tick and emit a
+    /// new `frame`. Static widgets can ignore. Rate-limited to ~30Hz
+    /// in the host so subprocesses on a slow link don't get flooded.
+    Tick {
+        dt: f32,
+    },
+    /// A Claude Code hook event mirrored from the central bus. `kind`
+    /// matches the bus event kind (`pre_tool_use`, `user_prompt_submit`,
+    /// `stop`, etc.); `payload` is the raw event payload parsed as
+    /// JSON. Every running widget receives every event — filter by
+    /// `kind` and `payload.cwd` if you only care about a subset.
+    ClaudeEvent {
+        kind: String,
+        payload: serde_json::Value,
+    },
 }
 
 /// One node in the widget's UI tree. Every frame is a single root
@@ -139,6 +155,103 @@ pub enum Element {
         #[serde(default = "default_bar_height")]
         height: f32,
     },
+    /// Absolute-positioned drawing region. Children are placed by `x,y`
+    /// (pixels from the canvas top-left, y down) regardless of any
+    /// parent stack layout. Use this for games / gardens / visualizers
+    /// where you don't want flow layout. Canvas children are
+    /// CanvasItems (sprites, rects), not full Elements.
+    Canvas {
+        #[serde(default)]
+        children: Vec<CanvasItem>,
+    },
+}
+
+/// One item inside an absolute-positioned `Canvas`. Position is
+/// pixel-space relative to the canvas top-left, y-down.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum CanvasItem {
+    /// A textured sprite, optionally hue-shifted in HSV space.
+    Sprite {
+        /// Stable identity for the host to diff frames. Must be
+        /// unique within a frame. Reusing the same id across frames
+        /// lets the host smoothly update position/scale of an
+        /// existing sprite instead of despawn+respawn.
+        id: String,
+        x: f32,
+        y: f32,
+        /// On-screen width. The image is upscaled to fit.
+        w: f32,
+        h: f32,
+        /// `image_ref` is either a filesystem path or a host-known
+        /// builtin (sky/ground sprite shorthands, etc.).
+        #[serde(flatten)]
+        image: ImageRef,
+        /// HSV hue rotation in degrees, applied to every non-transparent
+        /// pixel. 0 = source colors.
+        #[serde(default)]
+        hue_shift: f32,
+        /// `bottom-center` is the default — useful for plants that
+        /// grow from a ground line. Set to `center` for free-floating
+        /// objects (butterflies, particles).
+        #[serde(default = "default_canvas_anchor")]
+        anchor: CanvasAnchor,
+        /// Stacking order within the canvas; higher draws on top.
+        #[serde(default)]
+        z: f32,
+    },
+    /// A solid-color rectangle. Use for backgrounds, ground strips,
+    /// status fills, etc.
+    Rect {
+        id: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        /// `#rrggbb` or `#rrggbbaa` (preserved alpha).
+        color: String,
+        #[serde(default = "default_canvas_anchor_topleft")]
+        anchor: CanvasAnchor,
+        #[serde(default)]
+        z: f32,
+    },
+}
+
+/// Where the (x,y) coordinate is on the item — i.e., what point of the
+/// sprite gets pinned at the given position.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CanvasAnchor {
+    TopLeft,
+    TopCenter,
+    Center,
+    BottomCenter,
+    BottomLeft,
+}
+
+/// Reference to an image. Today only filesystem paths are supported;
+/// future variants might add a built-in registry of host-provided
+/// sprites or inline pixel buffers.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "image", rename_all = "kebab-case")]
+pub enum ImageRef {
+    /// Filesystem path to a PNG/JPEG file. The host loads + caches the
+    /// image and shares one `Handle<Image>` across every reference.
+    /// `~` is NOT expanded; pass absolute paths or paths relative to
+    /// the widget script's directory.
+    Path { path: String },
+    /// One tile of a host-managed sprite sheet referenced by file path
+    /// + (col, row) into a `tile_w × tile_h` grid. Lets a widget pick
+    /// individual tiles out of a strip like the OGA "Flowers" sheet
+    /// without slicing it itself.
+    Tile {
+        path: String,
+        tile_w: u32,
+        tile_h: u32,
+        col: u32,
+        #[serde(default)]
+        row: u32,
+    },
 }
 
 /// Cross-axis alignment for hstack children.
@@ -176,6 +289,14 @@ fn default_bar_width() -> f32 {
 
 fn default_bar_height() -> f32 {
     8.0
+}
+
+fn default_canvas_anchor() -> CanvasAnchor {
+    CanvasAnchor::BottomCenter
+}
+
+fn default_canvas_anchor_topleft() -> CanvasAnchor {
+    CanvasAnchor::TopLeft
 }
 
 /// Parse `#rrggbb` or `#rgb` into 0..1 sRGB components.

@@ -16,6 +16,7 @@
 //!   - `state`   (any)     — last `state` blob the widget published;
 //!                            sent back as `init.state` next launch.
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -25,6 +26,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
 use bevy::text::LineHeight;
+use claude_bus_bevy::ClaudeBusEvent;
 use pane_bevy::{
     MARGIN, PaneContentPressed, PaneFont, PaneFontMetrics, PaneKindMarker, PaneKindSpec, PaneRect,
     PaneRegistry, PaneTitle, TITLE_H, FocusedTextInput, TextInput, TextInputEvent, TextInputStyle,
@@ -34,8 +36,9 @@ use serde_json::Value;
 
 pub mod protocol;
 pub mod render;
+pub mod rhai_widget;
 
-use protocol::{Element, HostEvent, Weight, WidgetMsg};
+use protocol::{CanvasAnchor, CanvasItem, Element, HostEvent, ImageRef, Weight, WidgetMsg};
 
 /// Stable identifier for widget panes. Used in `PaneKindMarker` and
 /// snapshots.
@@ -103,6 +106,10 @@ pub struct WidgetRender {
     pub current_frame: Option<Element>,
     pub last_size: Vec2,
     pub init_sent: bool,
+    /// Last time (in `Time::elapsed_secs`) we sent a `Tick` host event.
+    /// Used by `forward_ticks` to rate-limit ticks to ~30Hz regardless
+    /// of the host's frame rate.
+    pub last_tick_secs: f32,
 }
 
 /// Hit-test geometry collected while rendering the current frame.
@@ -136,6 +143,25 @@ pub struct WidgetContentRoot(pub Entity);
 #[derive(Resource, Default)]
 pub struct WidgetClipDirty(pub bool);
 
+/// Process-wide cache of images loaded from filesystem paths. Keyed by
+/// `(absolute path, optional tile coords)` so the same PNG referenced
+/// by N widgets only pays the decode + GPU upload once. Slicing a
+/// sheet into tiles is also cached per (path, tile_w, tile_h, col, row).
+#[derive(Resource, Default)]
+pub struct WidgetImageCache {
+    pub by_path: HashMap<PathBuf, Handle<Image>>,
+    pub tiles: HashMap<TileKey, Handle<Image>>,
+}
+
+#[derive(Hash, PartialEq, Eq, Clone)]
+pub struct TileKey {
+    pub path: PathBuf,
+    pub tile_w: u32,
+    pub tile_h: u32,
+    pub col: u32,
+    pub row: u32,
+}
+
 // ---------- Plugin / registry ----------
 
 pub struct WidgetPlugin;
@@ -143,11 +169,14 @@ pub struct WidgetPlugin;
 impl Plugin for WidgetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WidgetClipDirty>()
+            .init_resource::<WidgetImageCache>()
             .add_systems(Startup, register_kind)
             .add_systems(
                 Update,
                 (
                     tick_widget_io,
+                    forward_claude_events,
+                    forward_ticks,
                     rerender_widgets,
                     handle_widget_press,
                     handle_widget_edit_events,
@@ -159,17 +188,85 @@ impl Plugin for WidgetPlugin {
     }
 }
 
+/// Mirror every Claude bus event onto every initialized widget's
+/// stdin. Widgets that don't care can ignore by `kind`; the wire cost
+/// is negligible (one short NDJSON line per event per widget).
+///
+/// Gated on `WidgetRender.init_sent` so a freshly-spawned widget
+/// doesn't receive bus events before it has read its `init` line.
+/// Events that arrive during that startup window are dropped — they're
+/// available via `~/.claude/events.jsonl` if the widget needs history.
+fn forward_claude_events(
+    mut events: MessageReader<ClaudeBusEvent>,
+    widgets: Query<(&PaneKindMarker, &WidgetRender, &WidgetIO)>,
+) {
+    // Materialize once so every widget sees every event (MessageReader
+    // hands each event out exactly once per read site).
+    let mut lines: Vec<String> = Vec::new();
+    for ev in events.read() {
+        let payload: serde_json::Value = serde_json::from_str(&ev.payload_json)
+            .unwrap_or(serde_json::Value::Null);
+        let host_ev = HostEvent::ClaudeEvent {
+            kind: ev.kind.clone(),
+            payload,
+        };
+        if let Ok(json) = serde_json::to_string(&host_ev) {
+            lines.push(json);
+        }
+    }
+    if lines.is_empty() {
+        return;
+    }
+    for (kind, render_state, io) in &widgets {
+        if kind.0 != PANE_KIND || !render_state.init_sent {
+            continue;
+        }
+        for line in &lines {
+            let _ = io.tx.send(line.clone());
+        }
+    }
+}
+
+/// Per-frame heartbeat forwarded to every initialized widget. Rate-
+/// limited to ~30Hz so a 120fps host doesn't flood subprocess stdin.
+/// Each widget tracks its own `last_tick_secs` so a widget that
+/// initialized later still gets the first tick at a sensible boundary.
+fn forward_ticks(
+    time: Res<Time>,
+    mut widgets: Query<(&PaneKindMarker, &mut WidgetRender, &WidgetIO)>,
+) {
+    const TICK_INTERVAL_SECS: f32 = 1.0 / 30.0;
+    let now = time.elapsed_secs();
+    for (kind, mut render_state, io) in &mut widgets {        if kind.0 != PANE_KIND || !render_state.init_sent {
+            continue;
+        }
+        let last = render_state.last_tick_secs;
+        let dt = now - last;
+        if last > 0.0 && dt < TICK_INTERVAL_SECS {
+            continue;
+        }
+        render_state.last_tick_secs = now;
+        // First-ever tick: dt=0 so widgets don't see a huge initial dt
+        // (init happened on frame N; this tick is frame N+1 at most).
+        let dt_send = if last == 0.0 { 0.0 } else { dt };
+        let tick = HostEvent::Tick { dt: dt_send };
+        if let Ok(json) = serde_json::to_string(&tick) {
+            let _ = io.tx.send(json);
+        }
+    }
+}
+
 /// Walks every widget pane's content_root subtree and clamps every
 /// Sprite's `custom_size` so it can't escape the pane's content area.
 ///
-/// This is the single automatic bound-enforcement for widget sprites —
-/// individual `render_*` calls don't have to know the pane's current
-/// size, they just emit sprites at their intrinsic size and this
-/// system trims anything that overflows on the next frame.
-///
-/// Text2d is already clipped by pane-bevy's `enforce_pane_content_bounds`,
-/// so we don't touch it here. The two systems together cover both axes
-/// and both visual primitives.
+/// Note: visible clipping is now handled at the renderer by
+/// pane-bevy's per-pane camera viewports (see pane-bevy's top-of-file
+/// docs). This system still runs because it bounds the sprites'
+/// LAYOUT size — widget sprites are used for backgrounds, borders,
+/// and click targets, and a sprite whose `custom_size` extends past
+/// the pane edge would have its click target leak across pane
+/// boundaries even though the visible portion is clipped. Keeping
+/// custom_size honest avoids that mismatch.
 fn clip_widget_sprites(
     panes: Query<(&PaneKindMarker, &PaneRect, &WidgetContentRoot)>,
     changed_panes: Query<(), (With<PaneKindMarker>, Changed<PaneRect>)>,
@@ -550,6 +647,8 @@ fn rerender_widgets(
     pane_font: Res<PaneFont>,
     metrics: Res<PaneFontMetrics>,
     mut clip_dirty: ResMut<WidgetClipDirty>,
+    mut images: ResMut<Assets<Image>>,
+    mut image_cache: ResMut<WidgetImageCache>,
     mut q: Query<(
         &PaneKindMarker,
         &PaneRect,
@@ -598,26 +697,273 @@ fn rerender_widgets(
         targets.clicks.clear();
         targets.links.clear();
 
-        let ctx = render::LayoutCtx {
-            font: pane_font.0.clone(),
-            metrics: *metrics,
-            content_root: root.0,
-            content_size,
-        };
         let frame_clone = render_state.current_frame.clone().unwrap();
-        render::render(
-            &mut commands,
-            &ctx,
-            &mut targets,
-            &frame_clone,
-            Vec2::ZERO,
-            content_size.x,
-            0.0,
-        );
+
+        // Top-level Canvas frames bypass the text/layout renderer
+        // entirely — they're absolute-positioned sprite trees, not flow
+        // layouts, so trying to measure them through the same pipeline
+        // is just wasted work.
+        if let Element::Canvas { children } = &frame_clone {
+            render_canvas_items(
+                &mut commands,
+                &mut images,
+                &mut image_cache,
+                root.0,
+                children,
+                content_size,
+            );
+        } else {
+            let ctx = render::LayoutCtx {
+                font: pane_font.0.clone(),
+                metrics: *metrics,
+                content_root: root.0,
+                content_size,
+            };
+            render::render(
+                &mut commands,
+                &ctx,
+                &mut targets,
+                &frame_clone,
+                Vec2::ZERO,
+                content_size.x,
+                0.0,
+            );
+        }
 
         render_state.last_size = content_size;
         clip_dirty.0 = true;
     }
+}
+
+/// Spawn each `CanvasItem` as a child of `content_root` at its
+/// absolute (x, y), loading sprites through `WidgetImageCache` so the
+/// same path resolves to the same `Handle<Image>` across panes.
+///
+/// Coordinate convention: y grows downward (top-left origin), matching
+/// the `Resize` width/height the widget already sees. Internally we
+/// flip to Bevy's y-up before assigning Transform.
+fn render_canvas_items(
+    commands: &mut Commands,
+    images: &mut Assets<Image>,
+    cache: &mut WidgetImageCache,
+    content_root: Entity,
+    items: &[CanvasItem],
+    _content_size: Vec2,
+) {
+    for item in items {
+        match item {
+            CanvasItem::Sprite {
+                id: _,
+                x,
+                y,
+                w,
+                h,
+                image,
+                hue_shift,
+                anchor,
+                z,
+            } => {
+                let Some(handle) = load_image_for_ref(images, cache, image, *hue_shift) else {
+                    continue;
+                };
+                let anchor_cmp = canvas_anchor_to_bevy(*anchor);
+                commands.spawn((
+                    ChildOf(content_root),
+                    Sprite {
+                        image: handle,
+                        custom_size: Some(Vec2::new(*w, *h)),
+                        ..default()
+                    },
+                    anchor_cmp,
+                    Transform::from_xyz(*x, -*y, *z),
+                    Visibility::Inherited,
+                ));
+            }
+            CanvasItem::Rect {
+                id: _,
+                x,
+                y,
+                w,
+                h,
+                color,
+                anchor,
+                z,
+            } => {
+                let bevy_color = parse_canvas_color(color)
+                    .unwrap_or(Color::srgb(0.20, 0.22, 0.26));
+                let anchor_cmp = canvas_anchor_to_bevy(*anchor);
+                commands.spawn((
+                    ChildOf(content_root),
+                    Sprite {
+                        color: bevy_color,
+                        custom_size: Some(Vec2::new(*w, *h)),
+                        ..default()
+                    },
+                    anchor_cmp,
+                    Transform::from_xyz(*x, -*y, *z),
+                    Visibility::Inherited,
+                ));
+            }
+        }
+    }
+}
+
+pub(crate) fn canvas_anchor_to_bevy(a: CanvasAnchor) -> bevy::sprite::Anchor {
+    match a {
+        CanvasAnchor::TopLeft => bevy::sprite::Anchor::TOP_LEFT,
+        CanvasAnchor::TopCenter => bevy::sprite::Anchor::TOP_CENTER,
+        CanvasAnchor::Center => bevy::sprite::Anchor::CENTER,
+        CanvasAnchor::BottomCenter => bevy::sprite::Anchor::BOTTOM_CENTER,
+        CanvasAnchor::BottomLeft => bevy::sprite::Anchor::BOTTOM_LEFT,
+    }
+}
+
+/// Parse a `#rrggbb` or `#rrggbbaa` color into a Bevy `Color`. Accepts
+/// the same syntax as `protocol::parse_hex_color` plus an optional
+/// alpha byte. Returns None on malformed input so callers can fall
+/// back to a default.
+pub(crate) fn parse_canvas_color(s: &str) -> Option<Color> {
+    let s = s.strip_prefix('#').unwrap_or(s);
+    match s.len() {
+        6 => {
+            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+            Some(Color::srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0))
+        }
+        8 => {
+            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
+            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
+            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
+            let a = u8::from_str_radix(&s[6..8], 16).ok()?;
+            Some(Color::srgba(
+                r as f32 / 255.0,
+                g as f32 / 255.0,
+                b as f32 / 255.0,
+                a as f32 / 255.0,
+            ))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve an `ImageRef` to a Bevy `Handle<Image>`, going through the
+/// cache so repeated references to the same path don't re-decode.
+/// `hue_shift_deg != 0` bypasses the cache because the resulting
+/// image depends on the rotation — at the moment we just log and
+/// return the un-shifted image; a proper per-plant tint pass lands
+/// once a widget actually exercises it.
+pub(crate) fn load_image_for_ref(
+    images: &mut Assets<Image>,
+    cache: &mut WidgetImageCache,
+    image_ref: &ImageRef,
+    _hue_shift_deg: f32,
+) -> Option<Handle<Image>> {
+    match image_ref {
+        ImageRef::Path { path } => {
+            let path = PathBuf::from(path);
+            if let Some(handle) = cache.by_path.get(&path) {
+                return Some(handle.clone());
+            }
+            let image = load_image_from_disk(&path)?;
+            let handle = images.add(image);
+            cache.by_path.insert(path, handle.clone());
+            Some(handle)
+        }
+        ImageRef::Tile {
+            path,
+            tile_w,
+            tile_h,
+            col,
+            row,
+        } => {
+            let key = TileKey {
+                path: PathBuf::from(path),
+                tile_w: *tile_w,
+                tile_h: *tile_h,
+                col: *col,
+                row: *row,
+            };
+            if let Some(handle) = cache.tiles.get(&key) {
+                return Some(handle.clone());
+            }
+            let image = load_tile_from_disk(&key)?;
+            let handle = images.add(image);
+            cache.tiles.insert(key, handle.clone());
+            Some(handle)
+        }
+    }
+}
+
+fn load_image_from_disk(path: &Path) -> Option<Image> {
+    let bytes = std::fs::read(path)
+        .map_err(|e| eprintln!("widget: failed to read {}: {}", path.display(), e))
+        .ok()?;
+    let img = image::load_from_memory(&bytes)
+        .map_err(|e| eprintln!("widget: failed to decode {}: {}", path.display(), e))
+        .ok()?
+        .to_rgba8();
+    let (w, h) = (img.width(), img.height());
+    let data = img.into_raw();
+    Some(make_nearest_image(data, w, h))
+}
+
+fn load_tile_from_disk(key: &TileKey) -> Option<Image> {
+    let bytes = std::fs::read(&key.path)
+        .map_err(|e| eprintln!("widget: failed to read {}: {}", key.path.display(), e))
+        .ok()?;
+    let sheet = image::load_from_memory(&bytes)
+        .map_err(|e| eprintln!("widget: failed to decode {}: {}", key.path.display(), e))
+        .ok()?
+        .to_rgba8();
+    let bg_px = sheet.get_pixel(0, 0).0;
+    let (bg_r, bg_g, bg_b) = (bg_px[0], bg_px[1], bg_px[2]);
+    let mut data: Vec<u8> = Vec::with_capacity((key.tile_w * key.tile_h * 4) as usize);
+    let x0 = key.col * key.tile_w;
+    let y0 = key.row * key.tile_h;
+    for y in 0..key.tile_h {
+        for x in 0..key.tile_w {
+            let px_x = x0 + x;
+            let px_y = y0 + y;
+            if px_x >= sheet.width() || px_y >= sheet.height() {
+                data.extend_from_slice(&[0, 0, 0, 0]);
+                continue;
+            }
+            let p = sheet.get_pixel(px_x, px_y).0;
+            if p[0] == bg_r && p[1] == bg_g && p[2] == bg_b {
+                data.extend_from_slice(&[0, 0, 0, 0]);
+            } else {
+                data.extend_from_slice(&[p[0], p[1], p[2], 255]);
+            }
+        }
+    }
+    Some(make_nearest_image(data, key.tile_w, key.tile_h))
+}
+
+fn make_nearest_image(data: Vec<u8>, w: u32, h: u32) -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    let mut img = Image::new(
+        Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        data,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
+    );
+    img.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        mag_filter: ImageFilterMode::Nearest,
+        min_filter: ImageFilterMode::Nearest,
+        mipmap_filter: ImageFilterMode::Nearest,
+        address_mode_u: ImageAddressMode::ClampToEdge,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        ..ImageSamplerDescriptor::nearest()
+    });
+    img
 }
 
 fn handle_widget_press(

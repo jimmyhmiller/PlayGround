@@ -25,7 +25,15 @@ fn main() {
         terminal_daemon::daemon::run(session_id, command);
     }
 
+    eprintln!("[terminal-bevy] startup marker: bundle-identity-test");
+
     let mut app = App::new();
+    // Register the per-project asset source for style-bevy BEFORE
+    // DefaultPlugins, since AssetPlugin (part of DefaultPlugins)
+    // freezes the source registry once it's added.
+    if let Some(data_dir) = terminal_bevy::data_dir() {
+        style_bevy::register_style_asset_source(&mut app, data_dir.join("projects"));
+    }
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "terminal-bevy".into(),

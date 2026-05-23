@@ -53,6 +53,7 @@ use serde_json::Value;
 pub mod atlas;
 pub mod claude_events_pane;
 pub mod daemon_client;
+pub mod garden_pane;
 /// Re-export of the daemon protocol from the headless crate so existing
 /// callers can continue to write `terminal_bevy::daemon_proto::*`.
 pub use terminal_daemon::proto as daemon_proto;
@@ -131,6 +132,10 @@ pub fn pid_path(session_id: u64) -> Option<PathBuf> {
 /// passwd entry → `/bin/sh`. Returns a `Vec<String>` so it slots into
 /// `Command::new(args[0]).args(&args[1..])` cleanly. Matches what
 /// `Pty::spawn` used to do before we moved PTY ownership into the daemon.
+///
+/// `-l` makes it a login shell so macOS's `/etc/zprofile` runs
+/// `/usr/libexec/path_helper` — without it `PATH` is missing
+/// `/opt/homebrew/bin` etc., breaking tools like autojump.
 pub fn default_shell_command() -> Vec<String> {
     use std::path::PathBuf as PB;
     let shell = match std::env::var_os("SHELL") {
@@ -140,7 +145,7 @@ pub fn default_shell_command() -> Vec<String> {
             _ => PB::from("/bin/sh"),
         },
     };
-    vec![shell.to_string_lossy().into_owned()]
+    vec![shell.to_string_lossy().into_owned(), "-l".to_string()]
 }
 
 // ---------- Per-entity runtime ----------
@@ -307,8 +312,12 @@ impl Plugin for TerminalPlugin {
             .add_plugins(selection::SelectionPlugin)
             .add_plugins(run_button::RunButtonPlugin)
             .add_plugins(claude_events_pane::ClaudeEventsPanePlugin)
+            .add_plugins(garden_pane::ClaudeGardenPanePlugin)
             .add_plugins(widget_bevy::WidgetPlugin)
+            .add_plugins(widget_bevy::rhai_widget::RhaiWidgetPlugin)
             .add_plugins(editor_bevy::EditorEmbedPlugin)
+            .add_plugins(style_bevy::StylePlugin)
+            .add_plugins(style_bevy::state::ProjectStatePlugin)
             .add_systems(
                 Startup,
                 (
@@ -316,6 +325,14 @@ impl Plugin for TerminalPlugin {
                     register_terminal_kind,
                     editor_bevy::setup_editor_font,
                     setup_ipc_listener,
+                ),
+            )
+            .add_systems(
+                Update,
+                (
+                    mirror_active_project_to_style,
+                    mirror_focus_to_style,
+                    handle_open_dev_panel,
                 ),
             )
             .add_systems(PostStartup, release_os_focus)
@@ -469,6 +486,7 @@ fn drain_ipc_open_requests(
                 project,
                 position,
                 size,
+                kind,
             } => {
                 let target = match project {
                     Some(name) => OpenProjectTarget::ByName(name),
@@ -478,25 +496,43 @@ fn drain_ipc_open_requests(
                     eprintln!("[ipc] spawn_widget: no matching project");
                     continue;
                 };
+
+                // Route by `kind`. Rhai widgets get a different config
+                // shape (`script` field, not `command`) and a different
+                // pane kind in the registry.
+                let pane_kind = kind.as_deref().unwrap_or(widget_bevy::PANE_KIND);
                 let mut cfg = serde_json::Map::new();
-                cfg.insert("command".into(), Value::String(command));
-                if !args.is_empty() {
-                    cfg.insert(
-                        "args".into(),
-                        Value::Array(args.into_iter().map(Value::String).collect()),
-                    );
+                if pane_kind == widget_bevy::rhai_widget::PANE_KIND {
+                    // For rhai_widget, `command` is the script filename.
+                    cfg.insert("script".into(), Value::String(command));
+                    if let Some(t) = title {
+                        cfg.insert("title".into(), Value::String(t));
+                    }
+                } else {
+                    cfg.insert("command".into(), Value::String(command));
+                    if !args.is_empty() {
+                        cfg.insert(
+                            "args".into(),
+                            Value::Array(args.into_iter().map(Value::String).collect()),
+                        );
+                    }
+                    if let Some(t) = title {
+                        cfg.insert("title".into(), Value::String(t));
+                    }
+                    if let Some(p) = cwd {
+                        cfg.insert(
+                            "cwd".into(),
+                            Value::String(p.to_string_lossy().into_owned()),
+                        );
+                    }
                 }
-                if let Some(t) = title {
-                    cfg.insert("title".into(), Value::String(t));
-                }
-                if let Some(p) = cwd {
-                    cfg.insert(
-                        "cwd".into(),
-                        Value::String(p.to_string_lossy().into_owned()),
-                    );
-                }
+                let kind_static: &'static str = match pane_kind {
+                    "widget" => widget_bevy::PANE_KIND,
+                    "rhai_widget" => widget_bevy::rhai_widget::PANE_KIND,
+                    other => Box::leak(other.to_string().into_boxed_str()),
+                };
                 pending.new_panes.push(NewPaneRequest {
-                    kind: widget_bevy::PANE_KIND,
+                    kind: kind_static,
                     project_id,
                     origin: position.map(|[x, y]| Vec2::new(x, y)),
                     size: size.map(|[w, h]| Vec2::new(w, h)),
@@ -590,7 +626,14 @@ fn measure_cell_width(font_bytes: &[u8], font_size: f32) -> f32 {
 /// glyphs from our own atlas), and loading every font on the system
 /// adds ~100ms of cold-start cost for nothing.
 pub fn setup_camera_and_font(world: &mut World) {
-    world.spawn(Camera2d);
+    // Main camera explicitly on layer 0 — pane-bevy reserves layer 0
+    // for pane chrome + non-pane scene content, and uses layers 1.. for
+    // each per-pane camera. Making the main camera's layer explicit
+    // matches the contract documented in `pane-bevy/src/camera.rs`.
+    world.spawn((
+        Camera2d,
+        bevy::camera::visibility::RenderLayers::layer(0),
+    ));
 
     let font_bytes: &'static [u8] = load_primary_font();
 
@@ -989,7 +1032,16 @@ fn handle_keyboard(
             // self-insert-newline, so the user gets a literal LF in
             // their command line instead of submitting it. Same trick
             // Terminal.app's "Option-Enter inserts newline" uses.
-            if alt && matches!(ev.key_code, KeyCode::Enter | KeyCode::NumpadEnter) {
+            //
+            // Option+Backspace sends ESC+0x7f, which readline/zle bind
+            // to `backward-kill-word`. Same meta-prefix convention as
+            // Option+Enter.
+            if alt
+                && matches!(
+                    ev.key_code,
+                    KeyCode::Enter | KeyCode::NumpadEnter | KeyCode::Backspace
+                )
+            {
                 out.push(0x1b);
             }
             out.extend_from_slice(bytes);
@@ -1845,4 +1897,105 @@ struct SyncGridProfile {
 
 fn rgb_to_color(c: RgbColor) -> Color {
     Color::srgb(c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0)
+}
+
+// ---------- style-bevy glue ----------
+
+/// Mirror `Projects.active` into style-bevy's `ActiveProject` +
+/// `ActiveThemePath`. Also ensures each newly-observed project has
+/// its state.json loaded into memory so dust timers don't reset to
+/// zero across restarts.
+fn mirror_active_project_to_style(
+    projects: Res<Projects>,
+    mut active_proj: ResMut<style_bevy::shader::ActiveProject>,
+    mut active_theme: ResMut<style_bevy::theme::ActiveThemePath>,
+    mut state: ResMut<style_bevy::ProjectStyleState>,
+    data_dir: Option<Res<style_bevy::StyleDataDir>>,
+) {
+    if !projects.is_changed() {
+        return;
+    }
+    if active_proj.0 == projects.active {
+        return;
+    }
+    active_proj.0 = projects.active;
+    if let Some(pid) = projects.active {
+        if let Some(d) = data_dir.as_ref() {
+            style_bevy::state::load_project_state(d, &mut state, pid);
+            active_theme.0 = Some(style_bevy::theme::theme_path_for_project(d, pid));
+        }
+        // Intentionally NOT calling note_focus here — switching to a
+        // project on startup or via the sidebar shouldn't blow away
+        // accumulated dust. The mirror_focus_to_style hook records
+        // actual focus gestures.
+    } else {
+        active_theme.0 = None;
+    }
+}
+
+/// Cmd+Shift+D opens the style dev panel (a Rhai widget). Lets you
+/// scrub dust / edit / age / time_scale without waiting for real time
+/// to pass. Spawning goes through the same `PendingActions.new_panes`
+/// channel the radial menu uses, so all the usual pane-bevy chrome
+/// applies.
+fn handle_open_dev_panel(
+    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mods: Res<ButtonInput<KeyCode>>,
+    mut pending: ResMut<projects::PendingActions>,
+    projects: Res<projects::Projects>,
+) {
+    let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
+    let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
+    let mut triggered = false;
+    for ev in events.read() {
+        if ev.state.is_pressed() && cmd && shift && matches!(ev.key_code, KeyCode::KeyD) {
+            triggered = true;
+        }
+    }
+    if !triggered {
+        return;
+    }
+    let Some(active) = projects.active else { return };
+    pending.new_panes.push(projects::NewPaneRequest {
+        kind: widget_bevy::rhai_widget::PANE_KIND,
+        project_id: active,
+        origin: None,
+        size: Some(Vec2::new(420.0, 280.0)),
+        config: serde_json::json!({
+            "script": "dev_panel.rhai",
+            "title": "Style dev panel",
+        }),
+    });
+}
+
+/// When the user focuses any pane, mark that pane's project as
+/// recently-active so its dust timer resets. Skips the very first
+/// observation after startup — that one fires when the persistence
+/// layer restores focus, and counting "we restored your focus state"
+/// as engagement would zero out dust across restarts.
+fn mirror_focus_to_style(
+    focused: Res<pane_bevy::FocusedPane>,
+    pane_projects: Query<&pane_bevy::PaneProject>,
+    mut state: ResMut<style_bevy::ProjectStyleState>,
+    mut last: Local<Option<Entity>>,
+    mut warmed_up: Local<bool>,
+) {
+    if !focused.is_changed() {
+        return;
+    }
+    let Some(entity) = focused.0 else {
+        *last = None;
+        return;
+    };
+    if *last == Some(entity) {
+        return;
+    }
+    *last = Some(entity);
+    if !*warmed_up {
+        *warmed_up = true;
+        return;
+    }
+    if let Ok(pp) = pane_projects.get(entity) {
+        state.note_focus(pp.0);
+    }
 }

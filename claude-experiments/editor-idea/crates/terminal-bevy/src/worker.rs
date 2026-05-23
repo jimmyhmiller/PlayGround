@@ -344,6 +344,15 @@ fn worker_loop(
         cell_px,
     );
 
+    // Shared flag: are we currently feeding replay bytes into the VT?
+    // BEL bytes from past sessions show up during disk-replay (line
+    // ~387 below) and during the daemon's ReplayStart→ReplayEnd
+    // window. Both would otherwise increment `bell_count` and bump
+    // the project's unread counter for events the user already saw.
+    // The on_bell closure below reads this and skips increments
+    // while true.
+    let in_replay_flag = Arc::new(AtomicBool::new(false));
+
     // Bell handler. vt.rs deliberately doesn't register one — we own it
     // here so the closure can poke the per-terminal counter and wake
     // winit (an idle terminal in reactive mode would otherwise sit on
@@ -351,8 +360,14 @@ fn worker_loop(
     {
         let bell_count = bell_count.clone();
         let bell_wakeup = wakeup.clone();
+        let in_replay_flag = in_replay_flag.clone();
         terminal
             .on_bell(move |_term| {
+                if in_replay_flag.load(Ordering::Relaxed) {
+                    // Replay BEL — silently absorb; the user already
+                    // experienced this bell in a prior session.
+                    return;
+                }
                 let n = bell_count.fetch_add(1, Ordering::Relaxed) + 1;
                 eprintln!("[bell] fired, count={}", n);
                 if let Some(p) = &bell_wakeup {
@@ -374,7 +389,9 @@ fn worker_loop(
         if let Some(bytes) = replay_bytes
             && !bytes.is_empty()
         {
+            in_replay_flag.store(true, Ordering::Relaxed);
             terminal.vt_write(&bytes);
+            in_replay_flag.store(false, Ordering::Relaxed);
             pty_response.borrow_mut().clear();
         }
     }
@@ -464,9 +481,11 @@ fn worker_loop(
                         }
                         DaemonMessage::ReplayStart => {
                             in_replay = true;
+                            in_replay_flag.store(true, Ordering::Relaxed);
                         }
                         DaemonMessage::ReplayEnd => {
                             in_replay = false;
+                            in_replay_flag.store(false, Ordering::Relaxed);
                             replay_just_ended = true;
                         }
                         DaemonMessage::ChildExited { code: _ } => {

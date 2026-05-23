@@ -59,6 +59,13 @@ pub enum IpcRequest {
         position: Option<[f32; 2]>,
         #[serde(default)]
         size: Option<[f32; 2]>,
+        /// Optional widget kind override. Default is the subprocess
+        /// widget kind (`"widget"`). Pass `"rhai_widget"` to spawn a
+        /// Rhai-scripted in-process widget — `command` is then
+        /// interpreted as the script filename under
+        /// `~/.terminal-bevy/widgets/` (no shell invocation).
+        #[serde(default)]
+        kind: Option<String>,
     },
     /// `widget projects` — list known projects so external tools can
     /// pick one by name. Response is written back over the same socket

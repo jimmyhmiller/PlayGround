@@ -82,6 +82,11 @@ pub fn measure(el: &Element, metrics: &PaneFontMetrics) -> Vec2 {
             DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL,
         ),
         Element::Bar { width, height, .. } => Vec2::new(*width, *height),
+        // Canvas is handled by a separate render path in
+        // `widget_bevy::render_canvas_items` and never reaches the
+        // flow-layout `render`. Return zero so any accidental nesting
+        // doesn't contribute to its parent's measured size.
+        Element::Canvas { .. } => Vec2::ZERO,
     }
 }
 
@@ -188,6 +193,11 @@ pub fn render(
             origin,
             z,
         ),
+        // Canvas only renders at the top level — see
+        // `widget_bevy::render_canvas_items`. If we hit it nested
+        // inside a stack, silently drop it (zero size, no entities)
+        // rather than panic.
+        Element::Canvas { .. } => Vec2::ZERO,
     }
 }
 

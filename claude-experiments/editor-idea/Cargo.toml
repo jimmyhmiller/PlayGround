@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/editor-core", "crates/editor-bevy", "crates/pane-bevy", "crates/terminal-bevy", "crates/terminal-daemon", "crates/widget-bevy", "crates/book-ui-experiment", "crates/book-ui-wgpu", "crates/claude-bus", "crates/claude-bus-bevy", "crates/claude-statusline-bridge", "crates/claude-context-bars", "crates/claude-event-logger", "crates/claude-queue-drain", "crates/tbinject"]
+members = ["crates/editor-core", "crates/editor-bevy", "crates/pane-bevy", "crates/style-bevy", "crates/terminal-bevy", "crates/terminal-daemon", "crates/widget-bevy", "crates/book-ui-experiment", "crates/book-ui-wgpu", "crates/claude-bus", "crates/claude-bus-bevy", "crates/claude-statusline-bridge", "crates/claude-context-bars", "crates/claude-event-logger", "crates/claude-queue-drain", "crates/tbinject"]
 
 # Use a locally-patched libghostty-rs whose build.rs invokes
 # `zig build -Doptimize=ReleaseFast`. Upstream defaults to Debug,

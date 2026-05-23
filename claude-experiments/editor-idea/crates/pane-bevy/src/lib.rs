@@ -23,6 +23,33 @@
 //!
 //! That's it — chrome, drag/resize, focus, persistence, radial menu
 //! entry are all wired up by `PanePlugin`.
+//!
+//! # Clipping
+//!
+//! Pane content is clipped at pane edges by the *renderer*, not by
+//! per-kind discipline. Each pane gets its own [`Camera2d`] with a
+//! viewport restricted to the pane's screen rect and a unique
+//! [`bevy::camera::visibility::RenderLayers`] id (allocated by
+//! [`PaneLayerAllocator`]). The main camera renders layer 0 (canvas
+//! background, sidebar, anything non-pane); each pane camera renders
+//! only its own pane's layer. Chrome (bg sprite, title text, close
+//! button, resize handle) AND content are all on the pane's layer, so
+//! the pane camera draws the pane's entire visible rectangle and the
+//! GPU refuses to write fragments outside the viewport.
+//!
+//! Pane z-order is realised through `Camera.order` — the higher-z
+//! pane's camera runs later and overdraws lower-z panes wherever they
+//! overlap.
+//!
+//! The propagation system in [`mod@camera`] stamps the right
+//! `RenderLayers` on every descendant of `content_root` (and on every
+//! newly-added child anywhere under the pane), so kinds add children
+//! exactly as they always did — no clip-awareness required at the
+//! kind layer.
+//!
+//! [`enforce_pane_content_bounds`] is no longer the clipping
+//! mechanism; it survives only to set `TextBounds` for kinds that use
+//! wrap-mode text and need the wrap width.
 
 use std::collections::HashMap;
 
@@ -33,7 +60,15 @@ use bevy::text::{LineHeight, TextBounds};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod camera;
+pub mod layers;
 pub mod text_input;
+
+pub use camera::PaneCameraOf;
+pub use layers::{PaneLayer, PaneLayerAllocator};
+
+use bevy::camera::CameraUpdateSystems;
+use bevy::transform::TransformSystems;
 pub use text_input::{
     col_at_x, click_to_caret, focus_text_input, spawn_text_input, FocusedTextInput, TextInput,
     TextInputEvent, TextInputFocused, TextInputPlugin, TextInputStyle, TextInputView,
@@ -289,6 +324,7 @@ impl Plugin for PanePlugin {
             .init_resource::<PendingPaneActions>()
             .init_resource::<PaneRegistry>()
             .init_resource::<PaneInputBlockZones>()
+            .insert_resource(PaneLayerAllocator::new())
             .add_message::<PaneContentPressed>()
             .add_plugins(TextInputPlugin)
             .add_systems(
@@ -301,7 +337,37 @@ impl Plugin for PanePlugin {
                 )
                     .chain(),
             )
-            .add_systems(PostUpdate, (reset_input_consumed, enforce_pane_content_bounds));
+            .add_systems(
+                PreUpdate,
+                camera::spawn_pane_cameras,
+            )
+            // Propagation runs in PostUpdate, not PreUpdate, so
+            // children spawned by kinds during Update (the widget-bevy
+            // `rerender_widgets` system despawns + respawns its tree
+            // every resize frame, for one) get their RenderLayers
+            // stamped in the same frame they're created — otherwise
+            // they render on the default layer for one frame each,
+            // bypassing the pane camera's viewport clip.
+            .add_systems(
+                PostUpdate,
+                (
+                    reset_input_consumed,
+                    camera::propagate_render_layers,
+                    enforce_pane_content_bounds,
+                    // Run BEFORE Bevy's CameraUpdateSystems so that
+                    // when Bevy's `camera_system` runs later in
+                    // PostUpdate, it sees our just-updated viewport
+                    // and recomputes the projection in the same
+                    // frame. Otherwise resize introduces a one-frame
+                    // lag where the projection still reflects the
+                    // previous viewport size and content visibly
+                    // drifts inside the pane.
+                    camera::sync_pane_cameras
+                        .before(CameraUpdateSystems)
+                        .before(TransformSystems::Propagate),
+                )
+                    .chain(),
+            );
     }
 }
 
@@ -471,6 +537,30 @@ pub fn spawn_pane(
         resize_handle,
         close_button,
     });
+
+    // Allocate this pane's RenderLayer id. Chrome AND content all
+    // render on this layer through the per-pane camera. The main
+    // camera (layer 0) draws nothing pane-related; it owns the
+    // canvas/sidebar background. When two panes overlap on screen,
+    // the higher-z pane's camera order is higher, so its full
+    // viewport (bg included) draws over the lower-z pane's content
+    // — that's what stops one pane's text from bleeding through
+    // another pane that's stacked on top of it.
+    let layer_id = world
+        .resource_mut::<PaneLayerAllocator>()
+        .allocate();
+    let pane_layer_component = bevy::camera::visibility::RenderLayers::layer(layer_id);
+    for chrome_entity in [bg, title_bar, title_text, resize_handle, close_button] {
+        world
+            .entity_mut(chrome_entity)
+            .insert(pane_layer_component.clone());
+    }
+    // Content root + descendants get the same layer via the propagate
+    // system in `camera.rs` (it walks content_root's subtree on
+    // Added<PaneLayer>). Chrome is stamped explicitly above because
+    // propagation only descends from content_root, not from the pane
+    // entity itself.
+    world.entity_mut(pane).insert(PaneLayer(layer_id));
 
     SpawnedPane {
         entity: pane,
@@ -823,6 +913,23 @@ fn apply_pending_pane_actions(world: &mut World) {
         if let Some(cb) = on_close {
             cb(world, entity);
         }
+        // Reclaim this pane's RenderLayer id + despawn its per-pane
+        // camera. Read the layer BEFORE the pane is despawned (after
+        // despawn the component is gone and we can't recover the id).
+        let layer = world.get::<PaneLayer>(entity).copied();
+        if let Some(PaneLayer(id)) = layer {
+            // Find the camera linked back to this pane and despawn it.
+            let mut camera_q = world.query::<(Entity, &PaneCameraOf)>();
+            let cam_entity = camera_q
+                .iter(world)
+                .find_map(|(cam, owner)| (owner.0 == entity).then_some(cam));
+            if let Some(cam) = cam_entity
+                && world.get_entity(cam).is_ok()
+            {
+                world.entity_mut(cam).despawn();
+            }
+            world.resource_mut::<PaneLayerAllocator>().free(id);
+        }
         if world.get_entity(entity).is_ok() {
             world.entity_mut(entity).despawn();
         }
@@ -845,25 +952,32 @@ pub fn pane_is_kind(world: &World, entity: Entity, kind: &str) -> bool {
 
 // ---------- Content bounds enforcement ----------
 
-/// Marks a Text2d descendant of a content_root as "do not auto-clip
-/// to pane bounds". The enforcement system skips these. Use sparingly
-/// — by default every Text2d under a pane is clipped, and that is
-/// the intended invariant.
+/// Marks a Text2d descendant of a content_root as "do not auto-resize
+/// its `TextBounds` to the pane". The enforcement system skips these.
+///
+/// Note: visible clipping no longer depends on this — every pane has
+/// its own viewport-clipped camera (see [`crate::camera`]), so content
+/// outside the pane simply isn't rendered regardless of what we do
+/// here. This component remains useful only for kinds that want to
+/// manage their own `TextBounds` for layout reasons (run-button's
+/// output panel snaps bounds to whole-line increments to avoid
+/// half-line bleed at the bottom).
 #[derive(Component, Copy, Clone, Debug, Default)]
 pub struct PaneContentNoClip;
 
-/// Walks each pane's content_root subtree and forces every Text2d's
-/// `TextBounds` to fit within the remaining content area. This is the
-/// single source of truth for "text cannot escape the pane" — kinds
-/// don't have to remember to clip; if they do their own sizing this
-/// just clamps it.
+/// Walks each pane's content_root subtree and writes a `TextBounds`
+/// onto every Text2d to match the pane's content area. This is
+/// **layout** assistance for kinds that use wrapping (the wrap
+/// width comes from `TextBounds.width`) — it is *not* the clipping
+/// mechanism: that's the per-pane camera viewport in
+/// [`crate::camera`]. Kinds doing their own bounds management can
+/// opt out with [`PaneContentNoClip`].
 ///
-/// Sprites are deliberately not clamped here: textured sprites
-/// (terminal glyph cells, atlas tiles) treat `custom_size` as a render
-/// size and shrinking it would distort the glyph rather than clip it.
-/// Kinds that want sprite clipping should size their sprites to the
-/// pane themselves; the run-button divider, terminal cell pool, and
-/// editor caret all already do.
+/// Sprites are deliberately not touched here: textured sprites
+/// (terminal glyph cells, atlas tiles) treat `custom_size` as a
+/// render size and shrinking it would distort the glyph. Kinds size
+/// their own sprites; the terminal cell pool, editor caret, and
+/// run-button divider all already do.
 fn enforce_pane_content_bounds(
     panes: Query<(&PaneRect, &PaneChrome), With<PaneTag>>,
     changed_panes: Query<(), (With<PaneTag>, Changed<PaneRect>)>,

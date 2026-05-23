@@ -252,11 +252,13 @@ fn build_frame(rows_by_project: &BTreeMap<String, Vec<Row>>, content_w: f32) -> 
     }
 }
 
-/// Join feed entries (live Claude Code sessions) against the host's
-/// terminal list. Each entry becomes one bar grouped under its project
-/// name; when terminal-id matching fails (shell predates the env-var
-/// change, or Claude is running outside the app) we fall back to the
-/// cwd's last path component as the group label.
+/// Join feed entries against the host's live terminal panes. Only
+/// sessions that correspond to a currently-open terminal-bevy pane
+/// show up — entries with no `terminal_session_id` (Claude running
+/// outside the app) or with an ID whose pane has been closed are
+/// dropped. PID-liveness alone is too permissive: `claude` processes
+/// orphaned by a closed pane keep running for a long time and would
+/// otherwise haunt the bars.
 fn build_rows(
     feed: &[FeedEntry],
     terminals: &[LiveTerminalEntry],
@@ -269,30 +271,15 @@ fn build_rows(
 
     let mut groups: BTreeMap<String, Vec<Row>> = BTreeMap::new();
     for f in feed {
-        let matched = if f.terminal_session_id.is_empty() {
-            None
-        } else {
-            by_id.get(f.terminal_session_id.as_str()).copied()
-        };
-
-        let group_key = match matched {
-            Some(term) => term.project_name.clone(),
-            None => {
-                let basename = std::path::Path::new(&f.cwd)
-                    .file_name()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .to_string();
-                if basename.is_empty() {
-                    "(unknown)".to_string()
-                } else {
-                    basename
-                }
-            }
+        if f.terminal_session_id.is_empty() {
+            continue;
+        }
+        let Some(term) = by_id.get(f.terminal_session_id.as_str()).copied() else {
+            continue;
         };
 
         groups
-            .entry(group_key)
+            .entry(term.project_name.clone())
             .or_default()
             .push(Row { pct: f.context_pct });
     }
@@ -360,6 +347,8 @@ fn main() {
                 Ok(HostEvent::Refresh) => last_frame_hash = 0,
                 Ok(HostEvent::Close) => std::process::exit(0),
                 Ok(HostEvent::Click { .. }) => {}
+                Ok(HostEvent::Tick { .. }) => {}
+                Ok(HostEvent::ClaudeEvent { .. }) => {}
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => std::process::exit(0),
             }

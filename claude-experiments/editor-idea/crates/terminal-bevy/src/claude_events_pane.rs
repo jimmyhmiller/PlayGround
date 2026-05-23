@@ -101,15 +101,9 @@ fn claude_events_spawn(world: &mut World, entity: Entity, content_root: Entity, 
             TextColor(COLOR_TEXT),
             Anchor::TOP_LEFT,
             // No-wrap so seq + kind columns stay aligned. Right-overflow
-            // is fine — the user can widen the pane. We deliberately
-            // do NOT add `PaneContentNoClip` or set our own TextBounds:
-            // pane-bevy's `enforce_pane_content_bounds` will set bounds
-            // to fit the pane the first frame after spawn (and on every
-            // resize), which is the only thing keeping the text
-            // visible. The earlier draft set `TextBounds {0.0, 0.0}`
-            // and marked the text NoClip, which clipped everything to
-            // a zero-sized region and is why only the first line was
-            // ever visible.
+            // is invisibly clipped by the per-pane camera viewport
+            // (see pane-bevy's top-of-file docs) — no per-line
+            // truncation needed here.
             TextLayout::new_with_no_wrap(),
             Transform::from_xyz(TEXT_INNER_PAD_X, -TEXT_INNER_PAD_Y, 0.0),
         ))

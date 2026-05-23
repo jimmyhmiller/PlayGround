@@ -1058,7 +1058,6 @@ fn sync_run_button_visual(
         (&RunButton, &RunButtonChrome, &pane_bevy::PaneRect),
         Or<(Changed<RunButton>, Changed<pane_bevy::PaneRect>)>,
     >,
-    metrics: Res<MonoMetrics>,
     mut text_q: Query<&mut Text2d>,
     mut color_q: Query<&mut TextColor>,
     mut sprite_q: Query<&mut Sprite>,
@@ -1189,31 +1188,15 @@ fn sync_run_button_visual(
             rb.output_scroll_top.min(max_top)
         };
 
-        // Clip each visible line to fit horizontally — the mono font's
-        // cell width tells us how many chars fit in the output region's
-        // width. Char-based truncation is fine because the output font
-        // here is the same monospace used by the terminal grid.
-        let output_cell_w = input_cell_width(metrics.cell_width, OUTPUT_FONT_SIZE);
-        let avail_w = (content_w - PLAY_X).max(0.0);
-        let max_cols = if output_cell_w > 0.0 {
-            (avail_w / output_cell_w).floor() as usize
-        } else {
-            0
-        };
+        // Horizontal overflow is clipped by the per-pane camera
+        // viewport (see pane-bevy's top-of-file docs), so we no longer
+        // pre-truncate each line — just join and let the renderer cut.
         let joined = rb
             .output
             .iter()
             .skip(top)
             .take(visible)
-            .map(|line| {
-                if max_cols == 0 {
-                    String::new()
-                } else if line.chars().count() <= max_cols {
-                    line.clone()
-                } else {
-                    line.chars().take(max_cols).collect()
-                }
-            })
+            .cloned()
             .collect::<Vec<_>>()
             .join("\n");
         if let Ok(mut t) = text_q.get_mut(chrome.output_text)
@@ -1222,9 +1205,16 @@ fn sync_run_button_visual(
             t.0 = joined;
         }
 
-        // Set TextBounds to exactly whole-line height so a partial last
-        // line doesn't bleed below the pane. We marked output_text with
-        // PaneContentNoClip so the global enforcer leaves it to us.
+        // Snap TextBounds.height to a whole number of lines so the last
+        // visible line doesn't appear half-cut at the pane bottom (the
+        // viewport would otherwise show a mid-glyph cut, which looks
+        // worse than the line just not appearing). The output_text
+        // entity carries `PaneContentNoClip` to opt out of pane-bevy's
+        // default bound-setting, leaving height management to us here.
+        // Width is left as the available area as a hint — it's a no-op
+        // for our `TextLayout::new_with_no_wrap` text but keeps the
+        // bounds shape sane.
+        let avail_w = (content_w - PLAY_X).max(0.0);
         let new_bounds = TextBounds {
             width: Some(avail_w),
             height: Some(visible as f32 * OUTPUT_LINE_HEIGHT),
