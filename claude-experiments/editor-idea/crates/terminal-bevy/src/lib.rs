@@ -1943,6 +1943,7 @@ fn handle_open_dev_panel(
     mods: Res<ButtonInput<KeyCode>>,
     mut pending: ResMut<projects::PendingActions>,
     projects: Res<projects::Projects>,
+    existing_dev_panels: Query<&widget_bevy::rhai_widget::RhaiWidget>,
 ) {
     let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
     let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
@@ -1953,6 +1954,14 @@ fn handle_open_dev_panel(
         }
     }
     if !triggered {
+        return;
+    }
+    // Dedup: each Cmd+Shift+D used to spawn a new pane, leaving a fresh
+    // Rhai worker thread running the dev-panel script. Multiple presses
+    // = multiple workers, each ticking the script on its own thread at
+    // 30 Hz — burned ~50% CPU per duplicate. If a dev panel already
+    // exists anywhere on the canvas, silently do nothing.
+    if existing_dev_panels.iter().any(|w| w.script == "dev_panel.rhai") {
         return;
     }
     let Some(active) = projects.active else { return };

@@ -1,86 +1,97 @@
-//! Per-project styling: themes (Rhai-loaded design tokens) + canvas
-//! background shaders (live-editable WGSL with engine-provided data).
+//! Per-project styling — design tokens + canvas shader effects, driven
+//! by user-edited files on disk.
 //!
-//! # Two halves, one plugin
+//! # Architecture (post-rewrite)
 //!
-//! The plugin is split because the two halves are independently useful:
-//! a host that just wants design tokens (colors, sizes) can ignore the
-//! shader half; a host that just wants live shaders can ignore the theme
-//! half. They wire together at one point: the shader system exposes the
-//! theme as a uniform block so shaders can read the project's palette.
+//! Everything visual is **data on disk + scripts**, not compiled-in
+//! Rust types. The runtime is a small fixed surface:
 //!
-//! ## Files on disk
+//! - [`material::register_style_asset_source`] sets up `style://`
+//!   hot-reloadable asset paths rooted at a host-provided base dir.
+//! - [`DynamicMaterialPlugin`] spawns the canvas-overlay quad backed
+//!   by [`DynamicMaterial`] — an opaque 2 KiB uniform buffer + 8
+//!   named texture slots + a `Handle<Shader>` chosen by `bind_group_data`
+//!   so per-shader pipelines stay cached.
+//! - [`introspect::Schema::from_wgsl`] parses the user's WGSL at load
+//!   time (via naga) and learns its `UserData` struct fields' offsets
+//!   plus its texture-binding names; the host writes values into the
+//!   buffer by **name**, not by type.
+//! - [`ScriptBridgePlugin`] registers Rhai host fns (`uniform_set`,
+//!   `mask_paint`, `emit`, `state_set`, etc.) and routes worker calls
+//!   to the main thread via mpsc + a read-side `ScriptSnapshot`.
+//! - [`SystemScriptPlugin`] runs a headless Rhai script each tick
+//!   (throttled to 30 Hz). Hot-reloads on disk save. Reads engine
+//!   events (`focus_changed`, `project_changed`, scheduled emits)
+//!   from the shared `EventBus`.
 //!
-//! Per-project assets live under a host-provided base directory. The
-//! host inserts [`StyleDataDir`] at startup pointing at e.g.
-//! `~/.terminal-bevy/projects/`. For project id `42`, style-bevy reads:
-//!
-//! ```text
-//! <base>/42/
-//!   theme.rhai                  — design tokens (optional)
-//!   shaders/background.wgsl     — canvas background shader (optional)
-//!   state.json                  — engine-managed temporal state
-//! ```
-//!
-//! Missing files fall back to embedded defaults; errors are surfaced via
-//! [`StyleErrors`] but never crash the host.
-//!
-//! ## Shader data flow
-//!
-//! Engine data → providers → packed UBO bytes → shader. Each frame:
-//!
-//! 1. Tier-0/1 (world) providers run once, write to the world UBO.
-//! 2. Tier-2 (per-project) providers run once per active project, write
-//!    to that project's UBO.
-//! 3. The theme is copied into the theme UBO.
-//! 4. The background material's bind group references all three.
-//!
-//! Shaders import the auto-prelude (embedded in this crate) which
-//! declares `world`, `proj`, `theme` uniform blocks with matching layout.
+//! Adding a visual behavior is *purely* on-disk:
+//! 1. Declare any fields you want in your shader's `UserData` struct.
+//! 2. Write a Rhai script that uses `uniform_set`/`mask_paint`/etc.
+//!    by those names.
+//! 3. Save. AssetServer + the notify watcher reload both files; no
+//!    rebuild.
 
 use bevy::prelude::*;
 
-pub mod dev;
+pub mod active;
+pub mod dynamic;
+pub mod introspect;
 pub mod material;
-pub mod shader;
+pub mod script_bridge;
+pub mod script_host;
 pub mod state;
 pub mod theme;
-pub mod wipe;
 
-pub use dev::{dev_sender, register_dev_rhai_fns, DevMsg, DevOverrides};
-pub use material::{register_style_asset_source, BackgroundMaterial, BackgroundShaderPlugin};
-pub use wipe::{WipeMasks, WipePlugin};
-pub use shader::{
-    FieldScope, FieldType, FieldValue, ShaderDataRegistry, ShaderField, ShaderFieldsAppExt,
-};
+pub use active::ActiveProject;
+pub use dynamic::{DynamicMaterial, DynamicMaterialPlugin, ShaderSchemas};
+pub use material::register_style_asset_source;
+pub use script_bridge::{register_script_host_fns, EventBus, ScriptBridgePlugin};
+pub use script_host::SystemScriptPlugin;
 pub use state::{ProjectStyleState, StyleDataDir};
 pub use theme::{tokens, Theme, ThemeChanged, TokenId, TokenValue};
 
-/// Errors from theme parsing or shader compilation, surfaced as a
-/// resource so a status pane can show them. Never causes the host to
-/// crash — broken files just fall back to the last good version or to
-/// the embedded default.
+// Compatibility re-exports for hosts that still spell paths the old
+// way. Once terminal-bevy switches to `style_bevy::ActiveProject`,
+// these can go.
+pub mod shader {
+    pub use crate::active::ActiveProject;
+}
+
+/// Errors from theme parsing surfaced as a resource so a status pane
+/// can show them. Never crashes the host — broken files just keep
+/// the last good version.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct StyleErrors {
     pub theme_error: Option<String>,
-    pub shader_error: Option<String>,
 }
 
-/// Top-level plugin. Pulls in both halves of the system plus the shader
-/// material + canvas background mesh.
+/// Top-level plugin. Theme system + dynamic shader runtime + the
+/// dust system script as the canonical first effect.
 pub struct StylePlugin;
 
 impl Plugin for StylePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Theme>()
-            .init_resource::<ShaderDataRegistry>()
             .init_resource::<ProjectStyleState>()
             .init_resource::<StyleErrors>()
+            .init_resource::<ActiveProject>()
             .add_message::<ThemeChanged>()
-            .add_plugins(dev::DevPlugin)
             .add_plugins(theme::ThemePlugin)
-            .add_plugins(shader::ShaderProviderPlugin)
-            .add_plugins(wipe::WipePlugin)
-            .add_plugins(BackgroundShaderPlugin);
+            .add_plugins(ScriptBridgePlugin)
+            .add_plugins(DynamicMaterialPlugin)
+            .add_plugins(SystemScriptPlugin {
+                path: dust_script_path(),
+                bootstrap_source: Some(include_str!("dust_default.rhai")),
+            });
     }
+}
+
+fn dust_script_path() -> std::path::PathBuf {
+    let mut p = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    p.push(".terminal-bevy");
+    p.push("widgets");
+    p.push("dust.rhai");
+    p
 }

@@ -972,12 +972,11 @@ fn diff_render(
 // ============================================================
 
 fn register_host_functions(engine: &mut Engine) {
-    // Dev-overrides API (dev_dust / dev_edit / dev_age /
-    // dev_time_scale / dev_clear). Lets a scripted dev panel scrub
-    // shader inputs in real time so you don't have to wait a real day
-    // to see what dust looks like at 24h. No-op if StylePlugin isn't
-    // active (e.g. headless tests).
-    style_bevy::register_dev_rhai_fns(engine);
+    // Generic style-bevy host primitives: uniform_set/get, mask_paint,
+    // emit/schedule, state_set/get, pane_rects. Same registration the
+    // system-script side uses, so any rhai widget can drive the
+    // dynamic shader pipeline.
+    style_bevy::register_script_host_fns(engine);
 
     // Named `host_log` (not just `log`) because Rhai already has a
     // `log()` math fn for natural log; same name collides at the
