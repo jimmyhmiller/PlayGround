@@ -102,9 +102,15 @@ impl TraceSource for ChromeSource {
             TraceFile::Object { trace_events } => trace_events,
         };
 
-        // Per-(pid, tid) state: track id and open-slice stack of (start_ns, name, category).
+        // Per-(pid, tid) state: track id, plus a stack of currently-open `X`
+        // (complete) events' end timestamps. B/E nesting is handled by the
+        // builder's own open-stack; X events have explicit durations and don't
+        // touch that stack, so we compute their depth from time containment
+        // here. Assumes X events on a track arrive in start-time order with
+        // parent before child, which the Chrome spec requires.
         struct ThreadState {
             track: TrackId,
+            open_x_end_ns: Vec<u64>,
         }
         let mut state: AHashMap<(i64, i64), ThreadState> = AHashMap::new();
         let mut process_ids: AHashMap<i64, ProcessId> = AHashMap::new();
@@ -147,7 +153,7 @@ impl TraceSource for ChromeSource {
                 let thread = builder.add_thread(Some(proc_id), tid, "");
                 let label = format!("PID {pid} TID {tid}");
                 let track = builder.add_track(TrackKind::Thread(thread), &label, None);
-                ThreadState { track }
+                ThreadState { track, open_x_end_ns: Vec::new() }
             });
             let track = st.track;
 
@@ -170,18 +176,23 @@ impl TraceSource for ChromeSource {
                 "X" => {
                     let dur_ns = ev.dur.unwrap_or(0.0).max(0.0) * 1000.0;
                     let dur_ns = dur_ns as u64;
+                    let end_ns = ts_ns + dur_ns;
                     let name = builder.intern_string(&ev.name);
-                    // Depth for 'X' inside any open B/E sequence — match nesting by
-                    // peeking the open-stack height. Simplest correct: emit at depth
-                    // == current open count for that track. begin/end_slice manages
-                    // depth via push/pop; for X we don't push, so depth is the
-                    // number of currently-open slices on this track.
-                    let depth = builder.open_stack_depth(track);
+                    // Pop any open X parents that ended at or before this event's
+                    // start, then nest under whatever's still open.
+                    while st.open_x_end_ns.last().map_or(false, |&e| e <= ts_ns) {
+                        st.open_x_end_ns.pop();
+                    }
+                    let depth = builder.open_stack_depth(track) + st.open_x_end_ns.len() as u16;
                     builder.add_complete_slice(track, depth, ts_ns, dur_ns, name, category, None);
+                    st.open_x_end_ns.push(end_ns);
                 }
                 "i" | "I" => {
                     let name = builder.intern_string(&ev.name);
-                    let depth = builder.open_stack_depth(track);
+                    while st.open_x_end_ns.last().map_or(false, |&e| e <= ts_ns) {
+                        st.open_x_end_ns.pop();
+                    }
+                    let depth = builder.open_stack_depth(track) + st.open_x_end_ns.len() as u16;
                     // Zero-width slice as instant marker. Renderer can decide to draw
                     // these specially in v2; v1 just shows them as a 1px line.
                     builder.add_complete_slice(track, depth, ts_ns, 0, name, category, None);
@@ -246,6 +257,26 @@ mod tests {
         let p = b.finish();
         assert_eq!(p.slices.len(), 2);
         assert_eq!(p.duration_ns(), 30_000); // 30µs -> 30000ns
+    }
+
+    #[test]
+    fn x_events_nest_by_containment() {
+        // Parent (dur=100) fully contains child (ts=10, dur=50).
+        let input = br#"{"traceEvents":[
+            {"name":"parent","ph":"X","ts":0,"dur":100,"pid":1,"tid":1},
+            {"name":"child","ph":"X","ts":10,"dur":50,"pid":1,"tid":1},
+            {"name":"sibling","ph":"X","ts":200,"dur":5,"pid":1,"tid":1}
+        ]}"#;
+        let mut b = ProfileBuilder::new();
+        ChromeSource.load(input, &mut b).unwrap();
+        let p = b.finish();
+        assert_eq!(p.slices.len(), 3);
+        // finish() sorts by (track, depth, start_ns): parent, sibling, child.
+        let mut by_start: Vec<(u64, u16)> = (0..p.slices.len())
+            .map(|i| (p.slices.start_ns[i], p.slices.depth[i]))
+            .collect();
+        by_start.sort_by_key(|&(s, _)| s);
+        assert_eq!(by_start, vec![(0, 0), (10_000, 1), (200_000, 0)]);
     }
 
     #[test]

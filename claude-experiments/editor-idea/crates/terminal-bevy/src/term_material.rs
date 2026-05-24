@@ -64,11 +64,15 @@ pub struct TermParams {
     pub cols: u32,
     pub rows: u32,
     pub atlas_cols: u32,
+    /// Usable glyph area per slot (matches the rasterized bitmap).
     pub atlas_slot_w: u32,
     pub atlas_slot_h: u32,
     pub atlas_dim: u32,
-    pub _pad0: u32,
-    pub _pad1: u32,
+    /// Stride between slot origins in the atlas (slot + transparent
+    /// gutter). The shader needs this to find the next slot; sampling
+    /// stays within `slot_w × slot_h`.
+    pub atlas_stride_w: u32,
+    pub atlas_stride_h: u32,
 }
 
 /// One texel in the `cells` texture (matches WGSL `vec4<u32>`).

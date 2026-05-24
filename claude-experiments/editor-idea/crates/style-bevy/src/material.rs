@@ -20,6 +20,36 @@ use crate::state::StyleDataDir;
 /// [`register_style_asset_source`].
 pub const STYLE_SOURCE: &str = "style";
 
+/// Asset source rooted at `~/.terminal-bevy/styles/`. Per-preset
+/// shaders are loaded via `preset://<name>/chrome.wgsl`. Registered
+/// by [`register_preset_asset_source`].
+pub const PRESET_SOURCE: &str = "preset";
+
+/// Register the `preset://` asset source. Must be called BEFORE
+/// `DefaultPlugins` (same constraint as [`register_style_asset_source`]).
+pub fn register_preset_asset_source(app: &mut App, base_dir: PathBuf) {
+    if !base_dir.exists()
+        && let Err(e) = std::fs::create_dir_all(&base_dir)
+    {
+        eprintln!(
+            "[style] failed to create preset base dir {:?}: {} — preset shaders will be unavailable",
+            base_dir, e
+        );
+        return;
+    }
+    let path_str = match base_dir.to_str() {
+        Some(s) => s.to_string(),
+        None => {
+            eprintln!("[style] preset base dir is not utf-8: {:?}", base_dir);
+            return;
+        }
+    };
+    app.register_asset_source(
+        AssetSourceId::Name(PRESET_SOURCE.into()),
+        AssetSourceBuilder::platform_default(&path_str, None),
+    );
+}
+
 /// Call this BEFORE adding `DefaultPlugins` (which inserts
 /// `AssetPlugin`, after which sources can no longer be registered).
 /// Registers the `style://` asset source rooted at `base_dir` with

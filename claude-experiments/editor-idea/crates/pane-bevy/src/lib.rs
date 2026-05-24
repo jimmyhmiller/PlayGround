@@ -61,10 +61,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 pub mod camera;
+pub mod chrome_material;
 pub mod layers;
 pub mod text_input;
 
 pub use camera::PaneCameraOf;
+pub use chrome_material::{
+    ActiveChromeShader, ChromeMaterialPlugin, ChromeParams, ChromeStyle, PaneChromeMaterial,
+    PaneShadowMaterial, ShadowParams,
+};
 pub use layers::{PaneLayer, PaneLayerAllocator};
 
 use bevy::camera::CameraUpdateSystems;
@@ -81,7 +86,8 @@ pub const CLOSE_BTN_SIZE: f32 = 14.0;
 pub const CLOSE_BTN_INSET: f32 = 4.0;
 pub const MIN_PANE_SIZE: Vec2 = Vec2::new(160.0, 120.0);
 
-const PANEL_BG: Color = Color::srgb(0.105, 0.110, 0.122);
+// Pane body color now lives in `chrome_material::ChromeParams::default_for`
+// — the SDF material reads it as a uniform. Theme integration follows.
 const TITLE_DIVIDER: Color = Color::srgb(0.165, 0.170, 0.188);
 const TITLE_DIVIDER_FOCUSED: Color = Color::srgb(0.42, 0.62, 0.92);
 const HANDLE_COLOR: Color = Color::srgb(0.22, 0.23, 0.26);
@@ -127,6 +133,10 @@ pub struct PaneTitle(pub String);
 #[derive(Component)]
 pub struct PaneChrome {
     pub bg: Entity,
+    /// Drop-shadow quad. Lives on `RenderLayers::layer(0)` (main
+    /// camera) so it can extend past the per-pane camera's viewport
+    /// clip. Sized larger than the pane by `shadow_blur` on each side.
+    pub shadow: Entity,
     pub title_bar: Entity,
     pub title_text: Entity,
     pub content_root: Entity,
@@ -326,7 +336,7 @@ impl Plugin for PanePlugin {
             .init_resource::<PaneInputBlockZones>()
             .insert_resource(PaneLayerAllocator::new())
             .add_message::<PaneContentPressed>()
-            .add_plugins(TextInputPlugin)
+            .add_plugins((TextInputPlugin, ChromeMaterialPlugin))
             .add_systems(
                 Update,
                 (
@@ -334,6 +344,8 @@ impl Plugin for PanePlugin {
                     update_pane_titles,
                     position_panes,
                     apply_pending_pane_actions,
+                    sync_chrome_uniforms,
+                    push_chrome_time,
                 )
                     .chain(),
             )
@@ -373,6 +385,77 @@ impl Plugin for PanePlugin {
 
 fn reset_input_consumed(mut consumed: ResMut<InputConsumed>) {
     consumed.0 = false;
+}
+
+/// Drip wall time into every chrome material so the focus glow can
+/// pulse. Cheap: one f32 write per material per frame. Marks the
+/// material Changed regardless of focus state, but Bevy already
+/// detects "uniform actually differs" before re-uploading to GPU.
+fn push_chrome_time(
+    time: Res<Time>,
+    mut materials: ResMut<Assets<PaneChromeMaterial>>,
+) {
+    let t = time.elapsed_secs();
+    for (_id, mat) in materials.iter_mut() {
+        mat.params.time = t;
+    }
+}
+
+/// Keep each pane's chrome material in sync with its `PaneRect` and
+/// focus state. The bg mesh is a unit square scaled via Transform so
+/// we never need to recreate the Mesh asset on resize — only the
+/// transform and the material's uniform parameters change.
+fn sync_chrome_uniforms(
+    panes: Query<(Entity, Ref<PaneRect>, &PaneChrome)>,
+    mut bgs: Query<(&MeshMaterial2d<PaneChromeMaterial>, &mut Transform), Without<MeshMaterial2d<PaneShadowMaterial>>>,
+    mut shadows: Query<(&MeshMaterial2d<PaneShadowMaterial>, &mut Transform), Without<MeshMaterial2d<PaneChromeMaterial>>>,
+    focused: Res<FocusedPane>,
+    style: Res<chrome_material::ChromeStyle>,
+    active_shader: Res<ActiveChromeShader>,
+    mut chrome_mats: ResMut<Assets<PaneChromeMaterial>>,
+    mut shadow_mats: ResMut<Assets<PaneShadowMaterial>>,
+) {
+    let focus_changed = focused.is_changed();
+    let style_changed = style.is_changed();
+    let shader_changed = active_shader.is_changed();
+    for (pane_entity, rect, chrome) in &panes {
+        let needs_chrome_update =
+            rect.is_changed() || focus_changed || style_changed || shader_changed;
+        if !needs_chrome_update {
+            continue;
+        }
+        let is_focused = focused.0 == Some(pane_entity);
+
+        // Chrome (body): unit mesh scaled to pane size.
+        if let Ok((handle, mut transform)) = bgs.get_mut(chrome.bg) {
+            transform.translation.x = rect.size.x * 0.5;
+            transform.translation.y = -rect.size.y * 0.5;
+            transform.scale.x = rect.size.x.max(1.0);
+            transform.scale.y = rect.size.y.max(1.0);
+            if let Some(mat) = chrome_mats.get_mut(&handle.0) {
+                mat.params = style.params_for(rect.size, is_focused);
+                if shader_changed {
+                    mat.fragment = active_shader.0.clone();
+                }
+            }
+        }
+
+        // Shadow: unit mesh scaled to (pane size + 2*blur), centered
+        // on the pane. Don't bother updating on focus changes since
+        // shadow look doesn't depend on focus.
+        if rect.is_changed() || style_changed {
+            if let Ok((handle, mut transform)) = shadows.get_mut(chrome.shadow) {
+                let sp = style.shadow_params_for(rect.size);
+                transform.translation.x = rect.size.x * 0.5;
+                transform.translation.y = -rect.size.y * 0.5;
+                transform.scale.x = sp.mesh_size.x;
+                transform.scale.y = sp.mesh_size.y;
+                if let Some(mat) = shadow_mats.get_mut(&handle.0) {
+                    mat.params = sp;
+                }
+            }
+        }
+    }
 }
 
 // ---------- Spawn ----------
@@ -439,16 +522,69 @@ pub fn spawn_pane(
         world.entity_mut(pane).insert(PaneProject(pid));
     }
 
+    // Pane body: rounded-rect SDF material on a unit quad scaled via
+    // Transform to the pane size. The SDF math in the shader works in
+    // pixel units off `params.size`, so the mesh is always 1×1 and
+    // resize is just a Transform tweak — no Mesh-asset re-upload on
+    // drag. Anchor::TopLeft doesn't apply to Mesh2d, so we center the
+    // unit square at (size/2, -size/2) to put its top-left at the
+    // pane's origin. `sync_chrome_uniforms` keeps transform and
+    // `params.size` in sync with PaneRect.
+    let style = world
+        .resource::<chrome_material::ChromeStyle>()
+        .clone();
+    let initial_params = style.params_for(rect.size, false);
+    let shadow_params = style.shadow_params_for(rect.size);
+    let active_shader = world.resource::<ActiveChromeShader>().0.clone();
+    let unit_mesh = world
+        .resource_mut::<Assets<Mesh>>()
+        .add(Rectangle::new(1.0, 1.0));
+    let bg_material = world
+        .resource_mut::<Assets<PaneChromeMaterial>>()
+        .add(PaneChromeMaterial {
+            params: initial_params,
+            fragment: active_shader,
+        });
     let bg = world
         .spawn((
             ChildOf(pane),
-            Sprite {
-                color: PANEL_BG,
-                custom_size: Some(rect.size),
+            Mesh2d(unit_mesh.clone()),
+            MeshMaterial2d(bg_material),
+            Transform {
+                translation: Vec3::new(rect.size.x * 0.5, -rect.size.y * 0.5, 0.0),
+                scale: Vec3::new(rect.size.x.max(1.0), rect.size.y.max(1.0), 1.0),
                 ..default()
             },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, 0.0, 0.0),
+        ))
+        .id();
+
+    // Drop shadow: same unit mesh + scale-via-transform trick, but
+    // sized to pane + 2×blur on each side and explicitly stamped onto
+    // layer 0 so the main camera renders it (no per-pane viewport
+    // clip). Local z is just below the bg's so the chrome sits in
+    // front in the unusual case the same camera ever sees both.
+    let shadow_material_handle = world
+        .resource_mut::<Assets<PaneShadowMaterial>>()
+        .add(PaneShadowMaterial { params: shadow_params });
+    let shadow = world
+        .spawn((
+            ChildOf(pane),
+            Mesh2d(unit_mesh),
+            MeshMaterial2d(shadow_material_handle),
+            Transform {
+                translation: Vec3::new(
+                    rect.size.x * 0.5,
+                    -rect.size.y * 0.5,
+                    -0.05,
+                ),
+                scale: Vec3::new(
+                    shadow_params.mesh_size.x,
+                    shadow_params.mesh_size.y,
+                    1.0,
+                ),
+                ..default()
+            },
+            bevy::camera::visibility::RenderLayers::layer(0),
         ))
         .id();
 
@@ -531,6 +667,7 @@ pub fn spawn_pane(
 
     world.entity_mut(pane).insert(PaneChrome {
         bg,
+        shadow,
         title_bar,
         title_text,
         content_root,

@@ -1622,6 +1622,17 @@ impl Renderer {
             ));
         }
 
+        // In aggregated mode `slice_indices` and `selected_slice` index into
+        // `aggregated_slices`, not `profile.slices` — labels and the inspector
+        // both need to read from the same table the bars were drawn from.
+        let label_slices: &flame_core::SliceTable = match (
+            self.layout_mode,
+            self.aggregated_slices.as_ref(),
+        ) {
+            (LayoutMode::LeftHeavy, Some(s)) => s,
+            _ => &profile.slices,
+        };
+
         // Timeline-only content (FLAME tab only).
         if self.active_tab == MainTab::Flame {
             // Track header labels.
@@ -1661,7 +1672,7 @@ impl Renderer {
                 if inst.rect_px[2] < SLICE_LABEL_MIN_PX { continue; }
                 let slice_idx_raw = self.slice_indices[slot];
                 if slice_idx_raw == NON_SLICE_SENTINEL { continue; }
-                let name = profile.strings.get(profile.slices.name[slice_idx_raw as usize]).to_owned();
+                let name = profile.strings.get(label_slices.name[slice_idx_raw as usize]).to_owned();
                 labels.push((
                     name,
                     inst.rect_px[0] + inner_pad,
@@ -1688,11 +1699,11 @@ impl Renderer {
         if self.active_tab == MainTab::Flame {
         if let Some(sel_idx) = self.selected_slice {
             let i = sel_idx as usize;
-            if i < profile.slices.len() {
-                let name = profile.strings.get(profile.slices.name[i]).to_owned();
-                let dur = profile.slices.dur_ns[i];
-                let depth = profile.slices.depth[i];
-                let track_idx = profile.slices.track[i].0 as usize;
+            if i < label_slices.len() {
+                let name = profile.strings.get(label_slices.name[i]).to_owned();
+                let dur = label_slices.dur_ns[i];
+                let depth = label_slices.depth[i];
+                let track_idx = label_slices.track[i].0 as usize;
                 let track_name = profile.tracks.get(track_idx).map(|t| profile.strings.get(t.name)).unwrap_or("?");
 
                 labels.push(("SELECTED".into(), inspector_text_x, iy, inspector_text_w, Metric::InspectorHeading, dim_color, Zone::Below));
@@ -2364,7 +2375,8 @@ struct AggNode {
 /// For each track, identical (parent_chain → frame) paths collapse into one
 /// wide bar; siblings sort by total duration desc. The new x-axis represents
 /// total time spent (0..track_total), not wall time.
-fn build_left_heavy_layout(
+#[doc(hidden)]
+pub fn build_left_heavy_layout(
     profile: &Profile,
 ) -> (flame_core::SliceTable, (u64, u64), Vec<u16>) {
     let n_tracks = profile.tracks.len();

@@ -33,6 +33,7 @@ fn main() {
     // freezes the source registry once it's added.
     if let Some(data_dir) = terminal_bevy::data_dir() {
         style_bevy::register_style_asset_source(&mut app, data_dir.join("projects"));
+        style_bevy::register_preset_asset_source(&mut app, data_dir.join("styles"));
     }
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {

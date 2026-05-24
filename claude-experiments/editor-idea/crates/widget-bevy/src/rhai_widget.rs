@@ -36,18 +36,17 @@
 //! `WorkerHandle` also sends `Shutdown` as a safety net so a panic-
 //! despawned pane doesn't leak the worker thread.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use bevy::prelude::*;
-use bevy::sprite::Anchor;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use rhai::{Dynamic, Engine, Scope, AST};
+use rhai::{Dynamic, Engine, EvalAltResult, Scope, AST};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -67,9 +66,12 @@ use crate::{
 
 pub const PANE_KIND: &str = "rhai_widget";
 
-/// Per-tick worker step cadence. The worker self-paces — main can
-/// send Tick faster, but the worker drops ticks shorter than this.
-const WORKER_MIN_TICK_SECS: f32 = 1.0 / 30.0;
+/// Frame cadence used **only when a widget has opted into animation**
+/// via `set_animating(true)`. Idle widgets receive no Tick at all; the
+/// main thread checks `WorkerSlots::animating` before sending one. So
+/// this isn't a polling cadence, it's a max frame rate for the small
+/// subset of widgets that are actively in motion.
+const ANIMATION_MIN_FRAME_SECS: f32 = 1.0 / 30.0;
 
 pub fn widgets_dir() -> Option<PathBuf> {
     let home = std::env::var_os("HOME")?;
@@ -84,23 +86,20 @@ pub fn widgets_dir() -> Option<PathBuf> {
 // ============================================================
 
 enum HostToWorker {
-    /// Per-frame tick from the main thread. Worker decides whether to
-    /// actually rerun the script (self-throttles at WORKER_MIN_TICK_SECS).
+    /// Animation frame. Only sent while the worker has set its
+    /// `animating` flag — idle widgets get zero ticks. Drives
+    /// `on_frame(dt)` in the script.
     Tick {
         dt_secs: f32,
-        canvas_w: f32,
-        canvas_h: f32,
     },
-    /// Mouse press in the pane's content area. Delivered to the
-    /// script as a `kind == "click"` entry in the `events` array on
-    /// the next tick — same channel events use, so scripts handle
-    /// clicks with the same `events` loop they use for Claude events.
+    /// Mouse press in the pane's content area. Drives `on_click(x, y,
+    /// shift, cmd, id)` in the script.
     ///
     /// `button_id` is `Some(id)` when the click landed inside a
     /// `Button` element rendered by the previous frame; the host hit-
     /// tests against `WidgetTargets` (populated by `render::render`).
     /// Scripts that just want "which button did the user press" can
-    /// read `ev.payload.id` directly instead of doing their own
+    /// read the `id` argument directly instead of doing their own
     /// y-range routing.
     Click {
         local_x: f32,
@@ -109,13 +108,14 @@ enum HostToWorker {
         cmd: bool,
         button_id: Option<String>,
     },
-    /// Pane size changed. Worker stores the new size for the next
-    /// script run.
+    /// Pane size changed. Drives `on_resize(w, h)` in the script and
+    /// updates `canvas_w` / `canvas_h` in scope so `render` sees the
+    /// new size.
     Resize {
         canvas_w: f32,
         canvas_h: f32,
     },
-    /// A Claude bus event the script should see on its next tick.
+    /// A Claude bus event. Drives `on_event(kind, payload)`.
     ClaudeEvent {
         kind: String,
         payload: Value,
@@ -130,7 +130,8 @@ enum HostToWorker {
 }
 
 /// What main reads from the worker: the latest frame the script
-/// produced, plus diagnostic state.
+/// produced, plus diagnostic state and the animation flag main checks
+/// before deciding whether to send Tick.
 #[derive(Clone)]
 struct WorkerSlots {
     /// Latest fully-rendered frame. Worker overwrites; main clones.
@@ -143,6 +144,14 @@ struct WorkerSlots {
     /// Last runtime error the worker encountered. Cleared on next
     /// successful run.
     last_error: Arc<Mutex<Option<String>>>,
+    /// Set by the script via `set_animating(true)`. Main reads this
+    /// each frame and only sends `Tick` if true. Idle widgets =
+    /// zero Rhai eval and zero CPU.
+    animating: Arc<AtomicBool>,
+    /// Set by the script via `request_render()`. Worker calls
+    /// `render(canvas_w, canvas_h)` and publishes a frame whenever
+    /// this is set after a handler completes, then clears it.
+    render_dirty: Arc<AtomicBool>,
 }
 
 impl WorkerSlots {
@@ -152,6 +161,8 @@ impl WorkerSlots {
             snapshot: Arc::new(Mutex::new(Value::Null)),
             frame_gen: Arc::new(AtomicU64::new(0)),
             last_error: Arc::new(Mutex::new(None)),
+            animating: Arc::new(AtomicBool::new(false)),
+            render_dirty: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -200,54 +211,206 @@ fn spawn_worker(
     }
 }
 
+/// Per-worker state that the worker thread fully owns. Held in a
+/// struct so handler dispatch can be split into methods without a
+/// giant closure capture list.
+struct Worker {
+    engine: Engine,
+    scope: Scope<'static>,
+    slots: WorkerSlots,
+    ast: Option<AST>,
+    /// Last persisted state JSON. Re-seeded on Reload so the script
+    /// comes back up with the same garden state after a hot reload.
+    last_state_json: Value,
+    canvas_w: f32,
+    canvas_h: f32,
+    /// True between Reload and the next successful top-level eval.
+    /// Top-level runs once per AST (declares state shape, defines
+    /// handler functions); handlers run on every event after.
+    needs_top_level: bool,
+}
+
+impl Worker {
+    fn init_scope_state(&mut self) {
+        let initial_state = if self.last_state_json.is_null() {
+            Dynamic::from(rhai::Map::new())
+        } else {
+            rhai::serde::to_dynamic(&self.last_state_json)
+                .unwrap_or_else(|_| Dynamic::from(rhai::Map::new()))
+        };
+        self.scope.clear();
+        self.scope.push("state", initial_state);
+        self.scope.push("canvas_w", self.canvas_w as f64);
+        self.scope.push("canvas_h", self.canvas_h as f64);
+    }
+
+    /// Run the script's top-level statements: var initialization,
+    /// function definitions, one-shot migrations. Only happens once
+    /// per AST load — every subsequent event runs handler functions.
+    fn run_top_level(&mut self) -> bool {
+        let Some(ref ast) = self.ast else { return false };
+        if let Err(e) = self.engine.run_ast_with_scope(&mut self.scope, ast) {
+            self.set_error(format!("top-level: {}", e));
+            return false;
+        }
+        self.clear_error();
+        true
+    }
+
+    /// Try to call a script-defined handler. Returns Ok(()) if the
+    /// handler ran (or doesn't exist — that's not an error). Re-pushes
+    /// `state` afterwards to make sure inner mutations persist past
+    /// Rhai's CoW Map semantics.
+    fn call_handler<A: rhai::FuncArgs>(&mut self, name: &str, args: A) {
+        let Some(ref ast) = self.ast else { return };
+        match self
+            .engine
+            .call_fn::<Dynamic>(&mut self.scope, ast, name, args)
+        {
+            Ok(_) => self.clear_error(),
+            Err(e) => match *e {
+                EvalAltResult::ErrorFunctionNotFound(ref n, _) if n == name => {
+                    // Handler is optional; missing one isn't an error.
+                }
+                _ => self.set_error(format!("{}: {}", name, e)),
+            },
+        }
+        // Round-trip state to defeat CoW so inner `state.foo = ...`
+        // mutations are visible to later handlers.
+        if let Some(state_dyn) = self.scope.get_value::<Dynamic>("state") {
+            let _ = self.scope.set_value("state", state_dyn);
+        }
+    }
+
+    /// If this is the first event since spawn or reload, evaluate the
+    /// script's top-level statements (state migrations, fn defs) and
+    /// call `on_init`. Returns false if top-level eval errored — the
+    /// caller should bail without dispatching the triggering event.
+    fn ensure_initialized(&mut self) -> bool {
+        if !self.needs_top_level {
+            return true;
+        }
+        self.init_scope_state();
+        if !self.run_top_level() {
+            return false;
+        }
+        self.needs_top_level = false;
+        self.call_handler("on_init", ());
+        true
+    }
+
+    fn maybe_render_and_persist(&mut self) {
+        // Persist state to snapshot slot every cycle so closes /
+        // restarts don't lose recent changes.
+        if let Some(state_dyn) = self.scope.get_value::<Dynamic>("state") {
+            if let Ok(v) = rhai::serde::from_dynamic::<Value>(&state_dyn) {
+                self.last_state_json = v.clone();
+                if let Ok(mut slot) = self.slots.snapshot.lock() {
+                    *slot = v;
+                }
+            }
+        }
+
+        if !self.slots.render_dirty.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let Some(ref ast) = self.ast else { return };
+        let frame_dyn = match self.engine.call_fn::<Dynamic>(
+            &mut self.scope,
+            ast,
+            "render",
+            (self.canvas_w as f64, self.canvas_h as f64),
+        ) {
+            Ok(v) => v,
+            Err(e) => {
+                if let EvalAltResult::ErrorFunctionNotFound(ref n, _) = *e {
+                    if n == "render" {
+                        // No render fn defined — widget produces no
+                        // visual. Valid (a script could be purely a
+                        // bus → state_set bridge).
+                        return;
+                    }
+                }
+                self.set_error(format!("render: {}", e));
+                return;
+            }
+        };
+
+        let element = if frame_dyn.is_unit() {
+            None
+        } else {
+            match rhai::serde::from_dynamic::<Element>(&frame_dyn) {
+                Ok(el) => Some(el),
+                Err(e) => {
+                    self.set_error(format!("render: frame deserialize: {}", e));
+                    return;
+                }
+            }
+        };
+        if let Ok(mut slot) = self.slots.latest_frame.lock() {
+            *slot = element;
+        }
+        self.slots.frame_gen.fetch_add(1, Ordering::Release);
+    }
+
+    fn set_error(&self, msg: String) {
+        eprintln!("[rhai] {}", msg);
+        if let Ok(mut slot) = self.slots.last_error.lock() {
+            *slot = Some(msg);
+        }
+    }
+    fn clear_error(&self) {
+        if let Ok(mut slot) = self.slots.last_error.lock() {
+            *slot = None;
+        }
+    }
+}
+
 fn worker_main(
     rx: Receiver<HostToWorker>,
     slots: WorkerSlots,
-    mut ast: Option<AST>,
-    mut last_state_json: Value,
+    initial_ast: Option<AST>,
+    initial_state: Value,
 ) {
     let mut engine = Engine::new();
     engine.set_max_expr_depths(256, 128);
-    register_host_functions(&mut engine);
+    register_host_functions(&mut engine, &slots);
 
-    let mut scope = Scope::new();
-    let mut canvas_w: f32 = 0.0;
-    let mut canvas_h: f32 = 0.0;
-    let mut pending_events: VecDeque<(String, Value)> = VecDeque::new();
-    let mut init_done = false;
-    let mut last_tick_at: Option<std::time::Instant> = None;
-    let now = std::time::Instant::now;
-
-    let init_scope = |scope: &mut Scope<'static>, last_state_json: &Value| {
-        let initial_state = if last_state_json.is_null() {
-            Dynamic::from(rhai::Map::new())
-        } else {
-            rhai::serde::to_dynamic(last_state_json).unwrap_or(Dynamic::from(rhai::Map::new()))
-        };
-        scope.push("state", initial_state);
-        scope.push("canvas_w", 0.0_f64);
-        scope.push("canvas_h", 0.0_f64);
-        scope.push("dt", 0.0_f64);
-        scope.push("events", rhai::Array::new());
-        scope.push("frame", Dynamic::UNIT);
+    let mut worker = Worker {
+        engine,
+        scope: Scope::new(),
+        slots,
+        ast: initial_ast,
+        last_state_json: initial_state,
+        canvas_w: 0.0,
+        canvas_h: 0.0,
+        needs_top_level: true,
     };
 
     for msg in rx {
         match msg {
             HostToWorker::Shutdown => break,
             HostToWorker::Reload { ast: new_ast } => {
-                ast = Some(new_ast);
-                scope.clear();
-                init_done = false;
-                // last_state_json stays as-is so the new script comes
-                // up with the same persisted plant state.
+                worker.ast = Some(new_ast);
+                worker.needs_top_level = true;
+                // last_state_json stays so the new script comes up
+                // with the same persisted state.
             }
             HostToWorker::Resize { canvas_w: w, canvas_h: h } => {
-                canvas_w = w;
-                canvas_h = h;
+                worker.canvas_w = w;
+                worker.canvas_h = h;
+                if !worker.ensure_initialized() { continue; }
+                let _ = worker.scope.set_value("canvas_w", w as f64);
+                let _ = worker.scope.set_value("canvas_h", h as f64);
+                worker.call_handler("on_resize", (w as f64, h as f64));
+                worker.maybe_render_and_persist();
             }
             HostToWorker::ClaudeEvent { kind, payload } => {
-                pending_events.push_back((kind, payload));
+                if !worker.ensure_initialized() { continue; }
+                let payload_dyn =
+                    rhai::serde::to_dynamic(&payload).unwrap_or(Dynamic::UNIT);
+                worker.call_handler("on_event", (kind, payload_dyn));
+                worker.maybe_render_and_persist();
             }
             HostToWorker::Click {
                 local_x,
@@ -256,105 +419,20 @@ fn worker_main(
                 cmd,
                 button_id,
             } => {
-                let payload = serde_json::json!({
-                    "x": local_x,
-                    "y": local_y,
-                    "shift": shift,
-                    "cmd": cmd,
-                    "id": button_id.unwrap_or_default(),
-                });
-                pending_events.push_back(("click".to_string(), payload));
+                if !worker.ensure_initialized() { continue; }
+                let id = button_id.unwrap_or_default();
+                worker.call_handler(
+                    "on_click",
+                    (local_x as f64, local_y as f64, shift, cmd, id),
+                );
+                worker.maybe_render_and_persist();
             }
-            HostToWorker::Tick {
-                dt_secs,
-                canvas_w: w,
-                canvas_h: h,
-            } => {
-                canvas_w = w;
-                canvas_h = h;
-                let Some(ref ast) = ast else { continue };
-
-                // Self-throttle.
-                let now_inst = now();
-                if let Some(prev) = last_tick_at {
-                    if (now_inst - prev).as_secs_f32() < WORKER_MIN_TICK_SECS {
-                        continue;
-                    }
-                }
-                last_tick_at = Some(now_inst);
-
-                if !init_done {
-                    init_scope(&mut scope, &last_state_json);
-                    init_done = true;
-                }
-
-                let _ = scope.set_value("canvas_w", canvas_w as f64);
-                let _ = scope.set_value("canvas_h", canvas_h as f64);
-                let _ = scope.set_value("dt", dt_secs as f64);
-                let events_rhai: rhai::Array = pending_events
-                    .drain(..)
-                    .map(|(kind, payload)| {
-                        let mut m = rhai::Map::new();
-                        m.insert("kind".into(), Dynamic::from(kind));
-                        m.insert(
-                            "payload".into(),
-                            rhai::serde::to_dynamic(&payload).unwrap_or(Dynamic::UNIT),
-                        );
-                        Dynamic::from(m)
-                    })
-                    .collect();
-                let _ = scope.set_value("events", events_rhai);
-                let _ = scope.set_value("frame", Dynamic::UNIT);
-
-                if let Err(e) = engine.run_ast_with_scope(&mut scope, ast) {
-                    let msg = format!("{}", e);
-                    eprintln!("[rhai] runtime error: {}", msg);
-                    if let Ok(mut slot) = slots.last_error.lock() {
-                        *slot = Some(msg);
-                    }
-                    continue;
-                }
-                if let Ok(mut slot) = slots.last_error.lock() {
-                    *slot = None;
-                }
-
-                let frame_dyn = scope.get_value::<Dynamic>("frame").unwrap_or(Dynamic::UNIT);
-                let element = if frame_dyn.is_unit() {
-                    None
-                } else {
-                    match rhai::serde::from_dynamic::<Element>(&frame_dyn) {
-                        Ok(el) => Some(el),
-                        Err(e) => {
-                            eprintln!("[rhai] frame deserialize: {}", e);
-                            if let Ok(mut slot) = slots.last_error.lock() {
-                                *slot = Some(format!("frame: {}", e));
-                            }
-                            None
-                        }
-                    }
-                };
-
-                if let Some(state_dyn) = scope.get_value::<Dynamic>("state") {
-                    if let Ok(v) = rhai::serde::from_dynamic::<Value>(&state_dyn) {
-                        last_state_json = v.clone();
-                        if let Ok(mut slot) = slots.snapshot.lock() {
-                            *slot = v;
-                        }
-                    }
-                    // Re-push state so the *next* tick definitely sees
-                    // the mutations from this tick. Rhai's CoW
-                    // semantics on Map values held in Scope can make
-                    // inner mutations (`state.foo = ...`) not write
-                    // back to the scope slot — this round-trips
-                    // through the just-read Dynamic to guarantee they
-                    // stick.
-                    let _ = scope.set_value("state", state_dyn);
-                }
-
-                if let Ok(mut slot) = slots.latest_frame.lock() {
-                    *slot = element;
-                }
-                slots.frame_gen.fetch_add(1, Ordering::Release);
+            HostToWorker::Tick { dt_secs } => {
+                if !worker.ensure_initialized() { continue; }
+                // Tick only arrives while animating; on_frame is the
+                // only handler that wants a per-frame heartbeat.
+                worker.call_handler("on_frame", (dt_secs as f64,));
+                worker.maybe_render_and_persist();
             }
         }
     }
@@ -438,6 +516,10 @@ fn setup_watcher(world: &mut World) {
     if !garden_path.exists() {
         let _ = std::fs::write(&garden_path, DEFAULT_GARDEN_SCRIPT);
     }
+    let picker_path = dir.join("style_picker.rhai");
+    if !picker_path.exists() {
+        let _ = std::fs::write(&picker_path, DEFAULT_STYLE_PICKER_SCRIPT);
+    }
     // dev_panel.rhai is intentionally NOT auto-bootstrapped from an
     // embedded constant. If we shipped a Rust fallback, every edit
     // would tempt me into changing the Rust source instead of the
@@ -510,9 +592,11 @@ fn rhai_widget_spawn(world: &mut World, entity: Entity, _content_root: Entity, c
     // and we'll send a Reload after the watcher catches the file.
     let initial_ast = match std::fs::read_to_string(&script_path) {
         Ok(body) => {
+            // Parse-only engine; the worker thread builds its own with
+            // slot-aware host fns. Parse doesn't need any registration
+            // since Rhai resolves identifiers at evaluation, not parse.
             let mut engine = Engine::new();
             engine.set_max_expr_depths(256, 128);
-            register_host_functions(&mut engine);
             match engine.compile(&body) {
                 Ok(ast) => Some(ast),
                 Err(e) => {
@@ -624,7 +708,6 @@ fn apply_reloads(mut widgets: Query<&mut RhaiWidget>) {
         };
         let mut engine = Engine::new();
         engine.set_max_expr_depths(256, 128);
-        register_host_functions(&mut engine);
         match engine.compile(&body) {
             Ok(ast) => {
                 w.handle.send(HostToWorker::Reload { ast });
@@ -699,7 +782,13 @@ fn forward_inputs_to_workers(
             (rect.size.x - 2.0 * MARGIN).max(0.0),
             (rect.size.y - TITLE_H - 2.0 * MARGIN).max(0.0),
         );
-        if w.last_size != content_size && w.last_size != Vec2::ZERO {
+        // Send Resize whenever content_size changes, including the
+        // very first non-zero size after spawn. The previous guard
+        // (`w.last_size != Vec2::ZERO`) suppressed exactly that case,
+        // so the worker stayed at canvas_w=canvas_h=0 until the user
+        // manually dragged a corner — visible as garden plants
+        // rendering at the top of the pane (y = canvas_h - inset).
+        if w.last_size != content_size && content_size != Vec2::ZERO {
             w.handle.send(HostToWorker::Resize {
                 canvas_w: content_size.x,
                 canvas_h: content_size.y,
@@ -714,18 +803,24 @@ fn forward_inputs_to_workers(
             });
         }
 
-        // Tick the worker. It self-throttles so a 240Hz host doesn't
-        // run scripts 240 times per second.
+        // Tick only fires while the widget has opted into animation
+        // (`set_animating(true)` in the script). Most widgets stay
+        // event-driven and never receive a Tick — that's the whole
+        // point of the event-driven worker contract.
+        if !w.handle.slots.animating.load(Ordering::Acquire) {
+            w.last_tick_at = None;
+            continue;
+        }
         let dt = match w.last_tick_at {
             Some(prev) => (now - prev).as_secs_f32(),
             None => 0.0,
         };
+        if dt > 0.0 && dt < ANIMATION_MIN_FRAME_SECS {
+            // Cap animation frame rate; drop sub-frame ticks.
+            continue;
+        }
         w.last_tick_at = Some(now);
-        w.handle.send(HostToWorker::Tick {
-            dt_secs: dt,
-            canvas_w: content_size.x,
-            canvas_h: content_size.y,
-        });
+        w.handle.send(HostToWorker::Tick { dt_secs: dt });
         let _ = time; // suppress warning; Time is here for future use
     }
 }
@@ -971,12 +1066,33 @@ fn diff_render(
 // Host helper functions registered with the engine
 // ============================================================
 
-fn register_host_functions(engine: &mut Engine) {
+fn register_host_functions(engine: &mut Engine, slots: &WorkerSlots) {
     // Generic style-bevy host primitives: uniform_set/get, mask_paint,
     // emit/schedule, state_set/get, pane_rects. Same registration the
     // system-script side uses, so any rhai widget can drive the
     // dynamic shader pipeline.
     style_bevy::register_script_host_fns(engine);
+    // Preset switching: `list_styles()` and `set_active_style(name)`
+    // for widgets like the style picker. Empty-string clears, falling
+    // back to the per-project theme.
+    style_bevy::register_preset_host_fns(engine);
+
+    // Animation opt-in. Defaults to false. Main thread checks this
+    // before sending Tick — idle widgets cost zero CPU.
+    let animating = slots.animating.clone();
+    engine.register_fn("set_animating", move |on: bool| {
+        animating.store(on, Ordering::Release);
+    });
+
+    // Mark that the widget's visual needs to be re-rendered. After the
+    // current handler returns, the worker calls `render(canvas_w,
+    // canvas_h)` and publishes the resulting frame. Handlers that
+    // don't change visible state can skip the call and save the
+    // render cost entirely.
+    let dirty = slots.render_dirty.clone();
+    engine.register_fn("request_render", move || {
+        dirty.store(true, Ordering::Release);
+    });
 
     // Named `host_log` (not just `log`) because Rhai already has a
     // `log()` math fn for natural log; same name collides at the
@@ -1048,37 +1164,53 @@ fn rand_state(seed: u64) -> u32 {
 
 const DEFAULT_GARDEN_SCRIPT: &str = r###"// garden.rhai — Claude garden widget.
 //
-// This script is RUN AS PROCEDURAL TOP-LEVEL STATEMENTS once per tick
-// by a dedicated worker thread (~30Hz). The worker pre-populates these
-// scope variables before each run:
+// EVENT-DRIVEN. The top-level body runs ONCE per AST load (initialize
+// state, declare constants, define handlers). After that, the host
+// calls specific handler functions:
 //
-//   state      — Map. Persistent across runs. Mutate in place.
-//   events     — Array of `#{ kind, payload }` Claude bus events that
-//                arrived since the last tick.
-//   dt         — f64 seconds since last tick.
-//   canvas_w   — f64 pane content width in px.
-//   canvas_h   — f64 pane content height in px.
+//   on_init()                                  — once after top-level
+//   on_event(kind, payload)                    — Claude bus event
+//   on_click(x, y, shift, cmd, id)             — pane click
+//   on_resize(w, h)                            — pane resized
+//   on_frame(dt)                               — only while animating
+//   render(canvas_w, canvas_h) -> Element      — produces the frame
 //
-// Write the rendered frame to `frame` (a `#{ type: "canvas", children: [...] }`).
+// Two host fns control the worker:
+//   set_animating(bool)   — opts into per-frame on_frame() calls. Off
+//                           by default. Idle widgets cost 0 CPU.
+//   request_render()      — call from a handler to schedule render()
+//                           after the handler returns.
+//
+// `state` is a Map in scope, persistent across runs (round-tripped to
+// JSON for snapshot). Mutate in place.
+
+// Rhai pure-function note: user-defined `fn` blocks DO NOT see
+// top-level `const` declarations. Literals are inlined inside the
+// fns that need them.
+//
+//   PLANTS_SHEET = path below
+//   TILE_W = 12, TILE_H = 24, NUM_TILES = 78
+//   SPRITE_W = 200.0, SPRITE_H = 400.0
+//   GROW_SECS = 8.0, MAX_PLANTS = 120
+//   GROUND_INSET = 18.0, GROUND_H = 5.0
 
 if !("plants" in state) { state.plants = []; }
 if !("next_id" in state) { state.next_id = 1; }
 
-const PLANTS_SHEET = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/editor-idea/crates/terminal-bevy/assets/garden/plants.png";
-const TILE_W = 12;
-const TILE_H = 24;
-const NUM_TILES = 78;
-const SPRITE_W = 200.0;
-const SPRITE_H = 400.0;
-const GROW_SECS = 8.0;
-const MAX_PLANTS = 120;
-const GROUND_INSET = 18.0;
-const GROUND_H = 5.0;
+fn any_growing(plants) {
+    for plant in plants { if plant.age < 8.0 { return true; } }
+    false
+}
 
-// ----- handle events -----
-for ev in events {
-    let kind = ev.kind;
-    let payload = ev.payload;
+fn on_init() {
+    // Resume animation if there are still-growing plants from the
+    // previous session. If everything is mature we stay idle and
+    // burn zero CPU until the next event.
+    set_animating(any_growing(state.plants));
+    request_render();
+}
+
+fn on_event(kind, payload) {
     let payload_is_map = type_of(payload) == "map";
 
     if kind == "pre_tool_use" {
@@ -1102,10 +1234,9 @@ for ev in events {
         let spread_px = (canvas_w * 0.15).max(40.0).min(180.0);
         let center_x = cx_frac * canvas_w;
         let offset = (rand() - 0.5) * 2.0 * spread_px;
-        let margin = SPRITE_W * 0.5;
+        let margin = 100.0;  // SPRITE_W * 0.5
         let x = (center_x + offset).max(margin).min(canvas_w - margin);
 
-        // Wider scale ranges so heights actually vary.
         let target_scale = if species == "tree" {
             0.90 + rand() * 1.10
         } else if species == "flower" {
@@ -1125,15 +1256,17 @@ for ev in events {
             target_scale: target_scale,
             x: x,
             hue: (hue + (rand() - 0.5) * 30.0) % 360.0,
-            tile: (plot_key.abs() % NUM_TILES).to_int(),
+            tile: (plot_key.abs() % 78).to_int(),  // NUM_TILES
         });
         state.next_id = state.next_id + 1;
+        set_animating(true);
+        request_render();
     } else if kind == "user_prompt_submit" {
         let cwd = if payload_is_map && "cwd" in payload { payload.cwd } else { "" };
         let plot_key = hash_str(cwd);
         let cx_frac = ((plot_key & 0xFFFF).to_float() / 65535.0) * 0.84 + 0.08;
         let center_x = cx_frac * canvas_w;
-        let margin = SPRITE_W * 0.5;
+        let margin = 100.0;  // SPRITE_W * 0.5
         let i = 0;
         while i < 3 {
             let offset = (rand() - 0.5) * 80.0;
@@ -1145,76 +1278,146 @@ for ev in events {
                 target_scale: 0.30 + rand() * 0.20,
                 x: x,
                 hue: rand() * 360.0,
-                tile: (plot_key.abs() % NUM_TILES).to_int(),
+                tile: (plot_key.abs() % 78).to_int(),  // NUM_TILES
             });
             state.next_id = state.next_id + 1;
             i = i + 1;
         }
+        set_animating(true);
+        request_render();
     } else if kind == "stop" {
         for plant in state.plants {
-            if plant.age < GROW_SECS {
-                plant.age = GROW_SECS;
-            }
+            if plant.age < 8.0 { plant.age = 8.0; }  // GROW_SECS
+        }
+        set_animating(false);
+        request_render();
+    }
+}
+
+fn on_frame(dt) {
+    let still_growing = false;
+    for plant in state.plants {
+        if plant.age < 8.0 {  // GROW_SECS
+            plant.age = plant.age + dt;
+            if plant.age >= 8.0 { plant.age = 8.0; }
+            else { still_growing = true; }
         }
     }
+    while state.plants.len() > 120 {  // MAX_PLANTS
+        state.plants.shift();
+    }
+    if !still_growing { set_animating(false); }
+    request_render();
 }
 
-for plant in state.plants {
-    if plant.age < GROW_SECS {
-        plant.age = plant.age + dt;
-        if plant.age > GROW_SECS { plant.age = GROW_SECS; }
+fn on_resize(w, h) { request_render(); }
+
+fn render(canvas_w, canvas_h) {
+    let items = [];
+    items.push(#{
+        type: "rect",
+        id: "sky",
+        x: 0.0, y: 0.0,
+        w: canvas_w, h: canvas_h,
+        color: "#11192a",
+        anchor: "top-left",
+        z: 0.0,
+    });
+    items.push(#{
+        type: "rect",
+        id: "ground",
+        x: 0.0, y: canvas_h - 18.0 - 5.0,  // GROUND_INSET + GROUND_H
+        w: canvas_w, h: 5.0,
+        color: "#1a2e1a",
+        anchor: "top-left",
+        z: 0.05,
+    });
+    for plant in state.plants {
+        let t = plant.age / 8.0;  // GROW_SECS
+        if t > 1.0 { t = 1.0; }
+        let scale = plant.target_scale * (0.25 + 0.75 * t);
+        items.push(#{
+            type: "sprite",
+            id: `plant-${plant.id}`,
+            x: plant.x,
+            y: canvas_h - 18.0,  // GROUND_INSET
+            w: 200.0 * scale,    // SPRITE_W
+            h: 400.0 * scale,    // SPRITE_H
+            image: "tile",
+            path: "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/editor-idea/crates/terminal-bevy/assets/garden/plants.png",
+            tile_w: 12,
+            tile_h: 24,
+            col: plant.tile,
+            row: 0,
+            hue_shift: plant.hue,
+            anchor: "bottom-center",
+            z: 1.0,
+        });
+    }
+    #{ type: "canvas", children: items }
+}
+"###;
+
+// ============================================================
+// Default style-picker widget (written if missing)
+// ============================================================
+
+const DEFAULT_STYLE_PICKER_SCRIPT: &str = r###"// style_picker.rhai — switch between visual presets.
+//
+// EVENT-DRIVEN. Renders one button per discovered preset (plus a
+// "(project)" button to clear back to the per-project theme).
+// Clicking a button calls set_active_style(name) — the host swaps
+// the active theme path, theme.rhai reloads, and every pane's
+// chrome material updates the same frame.
+//
+// Host fns:
+//   list_styles()              -> array of preset names
+//   set_active_style(name)     -> switch to that preset
+//                                  (empty string = clear, project)
+
+if !("selected" in state) { state.selected = ""; }
+
+fn on_init() { request_render(); }
+
+fn on_click(x, y, shift, cmd, id) {
+    if id == "" { return; }
+    if id == "_project" {
+        state.selected = "";
+        set_active_style("");
+    } else if id.starts_with("style_") {
+        let name = id.sub_string(6);
+        state.selected = name;
+        set_active_style(name);
+    }
+    request_render();
+}
+
+fn render(canvas_w, canvas_h) {
+    let presets = list_styles();
+    let rows = [];
+    rows.push(#{ type: "text", value: "Style preset", size: 14.0, color: "#cfd2d8" });
+
+    let mark = if state.selected == "" { ">  " } else { "   " };
+    rows.push(#{
+        type: "button",
+        id: "_project",
+        label: mark + "(per-project theme)",
+    });
+
+    for name in presets {
+        let mark = if state.selected == name { ">  " } else { "   " };
+        rows.push(#{
+            type: "button",
+            id: "style_" + name,
+            label: mark + name,
+        });
+    }
+
+    #{
+        type: "vstack",
+        pad: 10.0,
+        gap: 4.0,
+        children: rows,
     }
 }
-
-while state.plants.len() > MAX_PLANTS {
-    state.plants.shift();
-}
-
-// ----- build frame -----
-let items = [];
-items.push(#{
-    type: "rect",
-    id: "sky",
-    x: 0.0, y: 0.0,
-    w: canvas_w, h: canvas_h,
-    color: "#11192a",
-    anchor: "top-left",
-    z: 0.0,
-});
-items.push(#{
-    type: "rect",
-    id: "ground",
-    x: 0.0, y: canvas_h - GROUND_INSET - GROUND_H,
-    w: canvas_w, h: GROUND_H,
-    color: "#1a2e1a",
-    anchor: "top-left",
-    z: 0.05,
-});
-for plant in state.plants {
-    let t = plant.age / GROW_SECS;
-    if t > 1.0 { t = 1.0; }
-    let scale = plant.target_scale * (0.25 + 0.75 * t);
-    items.push(#{
-        type: "sprite",
-        id: `plant-${plant.id}`,
-        x: plant.x,
-        y: canvas_h - GROUND_INSET,
-        w: SPRITE_W * scale,
-        h: SPRITE_H * scale,
-        image: "tile",
-        path: PLANTS_SHEET,
-        tile_w: TILE_W,
-        tile_h: TILE_H,
-        col: plant.tile,
-        row: 0,
-        hue_shift: plant.hue,
-        anchor: "bottom-center",
-        z: 1.0,
-    });
-}
-
-frame = #{
-    type: "canvas",
-    children: items,
-};
 "###;

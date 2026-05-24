@@ -126,6 +126,32 @@ pub mod tokens {
     /// 0.5 = half-strength dust; >1 amplifies but the visible result
     /// saturates fast.
     pub const DUST_INTENSITY: TokenId = TokenId("dust_intensity");
+
+    // --- pane chrome (rounded-rect SDF material in pane-bevy) ---
+    /// Body fill color of a pane.
+    pub const PANE_BG: TokenId = TokenId("pane_bg");
+    /// Border color, non-focused pane.
+    pub const PANE_BORDER: TokenId = TokenId("pane_border");
+    /// Border color, focused pane.
+    pub const PANE_BORDER_FOCUSED: TokenId = TokenId("pane_border_focused");
+    /// Focus-glow color (alpha replaced by `pane_focus_strength`).
+    pub const PANE_FOCUS_GLOW: TokenId = TokenId("pane_focus_glow");
+    /// Corner radius in pixels.
+    pub const PANE_CORNER_RADIUS: TokenId = TokenId("pane_corner_radius");
+    pub const PANE_BORDER_WIDTH: TokenId = TokenId("pane_border_width");
+    pub const PANE_BORDER_WIDTH_FOCUSED: TokenId = TokenId("pane_border_width_focused");
+    /// How far the focus glow fades into the body, in pixels.
+    pub const PANE_FOCUS_WIDTH: TokenId = TokenId("pane_focus_width");
+    /// Peak alpha of the focus glow at the inside edge of the border.
+    pub const PANE_FOCUS_STRENGTH: TokenId = TokenId("pane_focus_strength");
+    /// Drop-shadow color (rgb + base alpha).
+    pub const PANE_SHADOW_COLOR: TokenId = TokenId("pane_shadow_color");
+    /// How far the shadow fades, pixels. Also doubles as the shadow
+    /// mesh padding around the pane, so it's how far the shadow
+    /// visibly extends past the pane edge.
+    pub const PANE_SHADOW_BLUR: TokenId = TokenId("pane_shadow_blur");
+    /// Push the shadow down so it sits below the pane (positive).
+    pub const PANE_SHADOW_OFFSET_Y: TokenId = TokenId("pane_shadow_offset_y");
 }
 
 fn default_tokens() -> HashMap<String, TokenValue> {
@@ -153,6 +179,19 @@ fn default_tokens() -> HashMap<String, TokenValue> {
     m.insert(WIPE_DUST_GATE_SECS.0.into(), TokenValue::F32(60.0));
     m.insert(WIPE_BRUSH_RADIUS_PX.0.into(), TokenValue::F32(80.0));
     m.insert(DUST_INTENSITY.0.into(), TokenValue::F32(1.0));
+    // Pane chrome defaults — match `pane_bevy::ChromeStyle::default()`.
+    m.insert(PANE_BG.0.into(), srgb(0.105, 0.110, 0.122, 1.0));
+    m.insert(PANE_BORDER.0.into(), srgb(0.18, 0.19, 0.22, 1.0));
+    m.insert(PANE_BORDER_FOCUSED.0.into(), srgb(0.30, 0.40, 0.55, 1.0));
+    m.insert(PANE_FOCUS_GLOW.0.into(), srgb(0.42, 0.62, 0.92, 1.0));
+    m.insert(PANE_CORNER_RADIUS.0.into(), TokenValue::F32(6.0));
+    m.insert(PANE_BORDER_WIDTH.0.into(), TokenValue::F32(1.0));
+    m.insert(PANE_BORDER_WIDTH_FOCUSED.0.into(), TokenValue::F32(1.5));
+    m.insert(PANE_FOCUS_WIDTH.0.into(), TokenValue::F32(8.0));
+    m.insert(PANE_FOCUS_STRENGTH.0.into(), TokenValue::F32(0.35));
+    m.insert(PANE_SHADOW_COLOR.0.into(), srgb(0.0, 0.0, 0.0, 0.45));
+    m.insert(PANE_SHADOW_BLUR.0.into(), TokenValue::F32(24.0));
+    m.insert(PANE_SHADOW_OFFSET_Y.0.into(), TokenValue::F32(6.0));
     m
 }
 

@@ -53,6 +53,26 @@ fn load_path(path: &Path) -> Result<flame_core::Profile, LoadError> {
     Ok(builder.finish())
 }
 
+fn read_clipboard_path() -> Result<PathBuf, String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("open clipboard: {e}"))?;
+    let raw = cb.get_text().map_err(|e| format!("read text: {e}"))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("clipboard is empty".into());
+    }
+    // Strip a matched pair of surrounding quotes.
+    let unquoted = if (trimmed.starts_with('"') && trimmed.ends_with('"'))
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+    {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    // Strip a `file://` scheme so Finder's "Copy as URL" works.
+    let path_str = unquoted.strip_prefix("file://").unwrap_or(unquoted);
+    Ok(PathBuf::from(path_str))
+}
+
 fn is_gzip(bytes: &[u8]) -> bool {
     bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
 }
@@ -467,6 +487,33 @@ impl ApplicationHandler for App {
                             r.flip_direction();
                             log::info!("direction → {}", r.direction.label());
                             r.rebuild_instances();
+                        }
+                        Key::Character(ref s) if s.as_str().eq_ignore_ascii_case("v") => {
+                            // Open the file path currently on the clipboard.
+                            // Strips a single layer of surrounding quotes and a
+                            // `file://` scheme so paths copied from terminals
+                            // or Finder's "Copy as Pathname" both work.
+                            match read_clipboard_path() {
+                                Ok(path) => match load_path(&path) {
+                                    Ok(profile) => {
+                                        log::info!(
+                                            "loaded {}: {} slices, duration {:?}",
+                                            path.display(),
+                                            profile.slices.len(),
+                                            std::time::Duration::from_nanos(
+                                                profile.duration_ns()
+                                            )
+                                        );
+                                        r.set_profile(Arc::new(profile));
+                                        r.rebuild_instances();
+                                    }
+                                    Err(e) => log::error!(
+                                        "failed to load {}: {e}",
+                                        path.display()
+                                    ),
+                                },
+                                Err(e) => log::error!("clipboard: {e}"),
+                            }
                         }
                         Key::Character(ref s) if matches!(s.as_str(), "1" | "2" | "3" | "4" | "5") => {
                             let idx = s.as_str().parse::<usize>().unwrap_or(1).saturating_sub(1);

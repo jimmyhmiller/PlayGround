@@ -12,13 +12,16 @@ struct TermParams {
     // Grid dimensions (cells).
     cols: u32,
     rows: u32,
-    // Atlas geometry.
+    // Atlas geometry. `slot_w/h` is the usable glyph area; `stride_w/h`
+    // is the spacing between slot origins (slot + 1px transparent
+    // gutter). Sampling stays inside the slot so the gutter prevents
+    // bilinear bleed from neighboring glyphs.
     atlas_cols: u32,
     atlas_slot_w: u32,
     atlas_slot_h: u32,
     atlas_dim: u32,
-    _pad0: u32,
-    _pad1: u32,
+    atlas_stride_w: u32,
+    atlas_stride_h: u32,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: TermParams;
@@ -80,11 +83,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Cell-local UV in [0,1].
     let cell_uv = vec2<f32>(fract(col_f), fract(row_f));
 
-    // Glyph atlas: slots laid out left-to-right, top-to-bottom.
+    // Glyph atlas: slots laid out left-to-right, top-to-bottom with a
+    // 1px transparent gutter (`stride = slot + pad`). Origin uses
+    // stride; sample area is slot_w × slot_h.
     let atlas_col = glyph_index % params.atlas_cols;
     let atlas_row = glyph_index / params.atlas_cols;
     let slot_dim = vec2<f32>(f32(params.atlas_slot_w), f32(params.atlas_slot_h));
-    let atlas_origin = vec2<f32>(f32(atlas_col), f32(atlas_row)) * slot_dim;
+    let stride_dim = vec2<f32>(f32(params.atlas_stride_w), f32(params.atlas_stride_h));
+    let atlas_origin = vec2<f32>(f32(atlas_col), f32(atlas_row)) * stride_dim;
     let sample_px = atlas_origin + cell_uv * slot_dim;
     let sample_uv = sample_px / f32(params.atlas_dim);
     let glyph = textureSample(atlas_tex, atlas_sampler, sample_uv);

@@ -34,9 +34,11 @@
 use bevy::prelude::*;
 
 pub mod active;
+pub mod chrome_theme;
 pub mod dynamic;
 pub mod introspect;
 pub mod material;
+pub mod presets;
 pub mod script_bridge;
 pub mod script_host;
 pub mod state;
@@ -44,7 +46,11 @@ pub mod theme;
 
 pub use active::ActiveProject;
 pub use dynamic::{DynamicMaterial, DynamicMaterialPlugin, ShaderSchemas};
-pub use material::register_style_asset_source;
+pub use material::{register_preset_asset_source, register_style_asset_source};
+pub use presets::{
+    register_preset_host_fns, ActiveStylePreset, PresetsPlugin, StylePreset,
+    StylePresetRegistry,
+};
 pub use script_bridge::{register_script_host_fns, EventBus, ScriptBridgePlugin};
 pub use script_host::SystemScriptPlugin;
 pub use state::{ProjectStyleState, StyleDataDir};
@@ -77,6 +83,8 @@ impl Plugin for StylePlugin {
             .init_resource::<ActiveProject>()
             .add_message::<ThemeChanged>()
             .add_plugins(theme::ThemePlugin)
+            .add_plugins(chrome_theme::ChromeThemePlugin)
+            .add_plugins(PresetsPlugin)
             .add_plugins(ScriptBridgePlugin)
             .add_plugins(DynamicMaterialPlugin)
             .add_plugins(SystemScriptPlugin {

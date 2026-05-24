@@ -333,6 +333,8 @@ impl Plugin for TerminalPlugin {
                     mirror_active_project_to_style,
                     mirror_focus_to_style,
                     handle_open_dev_panel,
+                    handle_open_style_picker,
+                    maintain_winit_mode_for_animation,
                 ),
             )
             .add_systems(PostStartup, release_os_focus)
@@ -790,12 +792,14 @@ fn build_term_grid(
 ) -> TermGrid {
     // Snapshot atlas geometry up-front so we don't hold the resource
     // borrow across the asset writes below.
-    let (atlas_cols, atlas_slot_w, atlas_slot_h, atlas_dim, atlas_image) = {
+    let (atlas_cols, atlas_slot_w, atlas_slot_h, atlas_stride_w, atlas_stride_h, atlas_dim, atlas_image) = {
         let atlas = world.resource::<GlyphAtlas>();
         (
             atlas.cols_per_row(),
             atlas.slot_w(),
             atlas.slot_h(),
+            atlas.stride_w(),
+            atlas.stride_h(),
             atlas.dim(),
             atlas.image.clone(),
         )
@@ -820,8 +824,8 @@ fn build_term_grid(
         atlas_slot_w,
         atlas_slot_h,
         atlas_dim,
-        _pad0: 0,
-        _pad1: 0,
+        atlas_stride_w,
+        atlas_stride_h,
     };
     let material_handle = world.resource_mut::<Assets<TermMaterial>>().add(TermMaterial {
         params,
@@ -1973,6 +1977,79 @@ fn handle_open_dev_panel(
         config: serde_json::json!({
             "script": "dev_panel.rhai",
             "title": "Style dev panel",
+        }),
+    });
+}
+
+/// Switch the winit update mode between Continuous (every frame) and
+/// Reactive (only on input + a 5s heartbeat) depending on whether the
+/// active visual preset needs to animate. Continuous burns ~1.5 cores
+/// at 60fps because the dust shader and chrome materials all redraw
+/// every frame; Reactive is battery-friendly. The transition itself
+/// is event-driven (preset switch), so reactive mode reliably wakes
+/// up to handle it.
+///
+/// Rule: a preset that ships a chrome.wgsl that references
+/// `params.time` is assumed to animate. Static custom shaders
+/// (sketch, mesh, blueprint) are *not* animated and stay on
+/// Reactive — they paint once per Reactive frame and that's fine.
+fn maintain_winit_mode_for_animation(
+    preset: Res<style_bevy::ActiveStylePreset>,
+    registry: Res<style_bevy::StylePresetRegistry>,
+    mut settings: ResMut<bevy::winit::WinitSettings>,
+) {
+    let want_continuous = preset.0.as_deref().map_or(false, |name| {
+        registry
+            .presets
+            .iter()
+            .find(|p| p.name == name)
+            .map_or(false, |p| p.chrome_animates)
+    });
+
+    let target = if want_continuous {
+        bevy::winit::UpdateMode::Continuous
+    } else {
+        bevy::winit::UpdateMode::reactive(std::time::Duration::from_secs(5))
+    };
+    if settings.focused_mode != target {
+        settings.focused_mode = target;
+    }
+}
+
+/// Cmd+Shift+S opens the style preset picker (a Rhai widget). Lists
+/// every preset under `~/.terminal-bevy/styles/` plus a `(per-project
+/// theme)` entry; clicking switches the active style and persists the
+/// choice. Same dedup logic as the dev panel.
+fn handle_open_style_picker(
+    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mods: Res<ButtonInput<KeyCode>>,
+    mut pending: ResMut<projects::PendingActions>,
+    projects: Res<projects::Projects>,
+    existing: Query<&widget_bevy::rhai_widget::RhaiWidget>,
+) {
+    let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
+    let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
+    let mut triggered = false;
+    for ev in events.read() {
+        if ev.state.is_pressed() && cmd && shift && matches!(ev.key_code, KeyCode::KeyS) {
+            triggered = true;
+        }
+    }
+    if !triggered {
+        return;
+    }
+    if existing.iter().any(|w| w.script == "style_picker.rhai") {
+        return;
+    }
+    let Some(active) = projects.active else { return };
+    pending.new_panes.push(projects::NewPaneRequest {
+        kind: widget_bevy::rhai_widget::PANE_KIND,
+        project_id: active,
+        origin: None,
+        size: Some(Vec2::new(280.0, 240.0)),
+        config: serde_json::json!({
+            "script": "style_picker.rhai",
+            "title": "Styles",
         }),
     });
 }
