@@ -104,15 +104,33 @@ def build_rope_tables(
     mut cos_buf: DeviceBuffer[DType.float32],   # (max_ctx, head_dim)
     mut sin_buf: DeviceBuffer[DType.float32],   # (max_ctx, head_dim)
 ) raises:
-    """HF Llama RoPE: cos/sin tables for positions [0, max_ctx).
+    """HF Llama 3 RoPE for T3 backbone.
 
-        inv_freq[k] = 1 / 10000^(2k / D)       k in [0, D/2)
-        pos[t, k]   = t * inv_freq[k]
-        cos/sin tables: cat([cos(pos), cos(pos)], dim=-1) → (max_ctx, D)
+    Chatterbox T3 uses `rope_type=llama3` with:
+        rope_theta = 500000
+        factor = 8.0
+        low_freq_factor = 1.0
+        high_freq_factor = 4.0
+        original_max_position_embeddings = 8192
+
+    Base inv_freq: inv_freq[k] = 1 / 500000^(2k / D).
+    Llama3 scaling: for each frequency, depending on wavelen = 2π/inv_freq:
+      - wavelen > 8192/low_freq_factor (=8192) → inv_freq /= 8
+      - wavelen < 8192/high_freq_factor (=2048) → inv_freq unchanged
+      - in between: smooth interpolation
     """
     var cp = cos_buf.unsafe_ptr()
     var sp = sin_buf.unsafe_ptr()
     var d_half = head_dim // 2
+    alias BASE: Float32 = 500000.0
+    alias LN_BASE: Float32 = 13.122363377404328   # ln(500000)
+    alias FACTOR: Float32 = 8.0
+    alias LOW_FREQ_FACTOR: Float32 = 1.0
+    alias HIGH_FREQ_FACTOR: Float32 = 4.0
+    alias OLD_CTX_LEN: Float32 = 8192.0
+    alias TWO_PI: Float32 = 6.283185307179586
+    alias LOW_FREQ_WAVELEN: Float32 = OLD_CTX_LEN / LOW_FREQ_FACTOR   # 8192
+    alias HIGH_FREQ_WAVELEN: Float32 = OLD_CTX_LEN / HIGH_FREQ_FACTOR # 2048
 
     @always_inline
     @parameter
@@ -121,22 +139,31 @@ def build_rope_tables(
         var i = idx[0]
         var t = i // head_dim
         var k = i - t * head_dim
-        # k in [0, D) — but cos/sin are duplicated halves: position uses k_half = k % d_half.
         var k_half: Int
         if k < d_half:
             k_half = k
         else:
             k_half = k - d_half
-        # inv_freq[k_half] = 1 / 10000^(2*k_half / D).
+        # Base inv_freq: 1 / BASE^(2*k_half / D)
         var exponent: Float32 = (2.0 * Float32(k_half)) / Float32(head_dim)
-        # 10000^exponent = exp(exponent * ln(10000)).
-        # ln(10000) ≈ 9.210340371976184
-        var inv_freq: Float32 = 1.0
-        # Use repeated squaring/Taylor — but we have std.math.exp/log via from import.
-        # Just inline pow as exp(exponent * 9.210340372).
         from std.math import exp as mexp
-        inv_freq = mexp(-exponent * 9.210340371976184)
-        var pos: Float32 = Float32(t) * inv_freq
+        var inv_freq: Float32 = mexp(-exponent * LN_BASE)
+
+        # Llama3 frequency scaling.
+        var wavelen: Float32 = TWO_PI / inv_freq
+        var inv_freq_llama: Float32 = inv_freq
+        if wavelen > LOW_FREQ_WAVELEN:
+            # Low frequency (long wavelength) → divide by factor.
+            inv_freq_llama = inv_freq / FACTOR
+        elif wavelen < HIGH_FREQ_WAVELEN:
+            # High frequency (short wavelength) → keep.
+            inv_freq_llama = inv_freq
+        else:
+            # Medium frequency → smooth interpolation.
+            var smooth: Float32 = (OLD_CTX_LEN / wavelen - LOW_FREQ_FACTOR) / (HIGH_FREQ_FACTOR - LOW_FREQ_FACTOR)
+            inv_freq_llama = (1.0 - smooth) * (inv_freq / FACTOR) + smooth * inv_freq
+
+        var pos: Float32 = Float32(t) * inv_freq_llama
         cp[i] = mcos(pos)
         sp[i] = msin(pos)
     elementwise[rope_fn, simd_width=1, target="gpu"](

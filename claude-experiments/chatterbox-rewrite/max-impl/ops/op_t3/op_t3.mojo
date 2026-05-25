@@ -17,6 +17,7 @@ Public API:
 from std.os import abort
 from std.memory import OpaquePointer
 from std.python import Python, PythonObject
+from std.io.file import open
 from std.python.bindings import PythonModuleBuilder
 from std.gpu.host import DeviceContext, DeviceBuffer
 from std.runtime.asyncrt import DeviceContextPtr
@@ -24,13 +25,13 @@ from std.algorithm.functional import elementwise, IndexList
 
 from t3 import T3
 from cond_enc import T3CondEnc, t3_cond_enc_forward
-from t3_generate import t3_generate_cfg_sample
+from t3_generate import t3_generate_cfg_sample, t3_generate_cfg_sample_aligned
 from text_embed import build_text_emb, build_bos_emb, build_rope_tables
 from weights_t3 import load_t3, load_t3_cond_enc
 
 
-comptime EOS = 6561
-comptime T_BOS = 1
+comptime EOS = 6562
+comptime T_BOS = 2   # upstream prefix has TWO start_speech_tokens (initial_speech + bos), both at pos 0
 comptime T_COND = 34
 comptime D = 1024
 comptime MAX_CTX = 4096
@@ -107,6 +108,11 @@ def generate(
     var rep_penalty = Float32(py=config["rep_penalty"])
     var max_new = Int(py=config["max_new"])
     var rng_seed = UInt64(Int(py=config["rng_seed"]))
+    var min_p: Float32 = 0.0
+    try:
+        min_p = Float32(py=config["min_p"])
+    except:
+        min_p = 0.0
 
     # Wrap inputs.
     var sp_addr = Int(py=speaker_emb_buf._data_ptr())
@@ -150,6 +156,7 @@ def generate(
     var bos_emb = ctx_ref.enqueue_create_buffer[DType.float32](1 * 1 * D)
     build_bos_emb(ctx_ref, state_ptr[].t3, bos_emb)
 
+
     # 3. Build CFG prefix (2*B = 2 batches: cond + uncond).
     var B2 = 2
     var T_PREFIX = T_COND + T_TEXT + T_BOS
@@ -177,8 +184,8 @@ def generate(
             else:
                 px[i] = 0.0
         else:
-            var src_t = ti - T_COND - T_TEXT
-            px[i] = be[src_t * D + di]
+            # bos_emb is (1, D). Repeat it T_BOS times (= 2 for upstream parity).
+            px[i] = be[di]
     elementwise[cat_func, simd_width=1, target="gpu"](
         IndexList[1](B2 * T_PREFIX * D), DeviceContextPtr(ctx_ref),
     )
@@ -193,14 +200,17 @@ def generate(
                 else:
                     h[r * T_PREFIX + c] = 0.0
 
-    # 5. Generate.
+    # 5. Generate. (Upstream English chatterbox does NOT use the alignment
+    # analyzer; only multilingual does. So we use the plain sampler — quality
+    # difference vs upstream must be in the sampler/forward, not analyzer.)
     var speech_pos = state_ptr[].t3.speech_pos_emb.table
     var generated = t3_generate_cfg_sample(
         ctx_ref, state_ptr[].t3, prefix, state_ptr[].cos_t3, state_ptr[].sin_t3, t3_mask, speech_pos,
         1, T_PREFIX, MAX_CTX, max_new,
-        speech_pos_offset=1, eos_token=EOS, cfg_weight=cfg_weight,
+        speech_pos_offset=1, eos_token=EOS,
+        cfg_weight=cfg_weight,
         temperature=temperature, top_p=top_p, rep_penalty=rep_penalty,
-        rng_seed=rng_seed,
+        rng_seed=rng_seed, min_p=min_p,
     )
     ctx_ref.synchronize()
 

@@ -1,7 +1,8 @@
 """T3 + T3CondEnc weight loaders."""
 from std.gpu.host import DeviceContext, DeviceBuffer
 
-from fixture import load_fp32
+from fixture import load_fp32, load_bf16, Tensor, TensorBF16
+from std.os import getenv
 from modules import Linear, LayerNorm, RMSNorm, Embedding
 from t3_block import T3Block
 from t3 import T3
@@ -24,6 +25,70 @@ def upload_fp32(mut ctx: DeviceContext, path: String) raises -> DeviceBuffer[DTy
     return buf^
 
 
+def upload_bf16(mut ctx: DeviceContext, path: String) raises -> DeviceBuffer[DType.bfloat16]:
+    """Read a `.bf16.bin` file and upload to GPU."""
+    var t = load_bf16(path)
+    var n = len(t.data)
+    var buf = ctx.enqueue_create_buffer[DType.bfloat16](n)
+    with buf.map_to_host() as h:
+        for i in range(n):
+            h[i] = t.data[i]
+    return buf^
+
+
+def upload_bf16_concat_rows(
+    mut ctx: DeviceContext, paths: List[String]
+) raises -> DeviceBuffer[DType.bfloat16]:
+    """Concatenate row-major bf16 weights along OUT dim → (sum(OUT_i), IN)."""
+    var total = 0
+    var tensors = List[TensorBF16]()
+    for i in range(len(paths)):
+        var t = load_bf16(paths[i])
+        total += len(t.data)
+        tensors.append(t^)
+    var buf = ctx.enqueue_create_buffer[DType.bfloat16](total)
+    with buf.map_to_host() as h:
+        var off = 0
+        for ti in range(len(tensors)):
+            ref data = tensors[ti].data
+            var n = len(data)
+            for k in range(n):
+                h[off + k] = data[k]
+            off += n
+    return buf^
+
+
+def _use_bf16() -> Bool:
+    """Returns True iff CHATTERBOX_BF16=1 is set in the environment."""
+    try:
+        var v = getenv("CHATTERBOX_BF16")
+        return v == "1"
+    except:
+        return False
+
+
+def upload_concat_rows_fp32(
+    mut ctx: DeviceContext, paths: List[String]
+) raises -> DeviceBuffer[DType.float32]:
+    """Concatenate row-major (OUT_i, IN) weights along OUT dim → (sum(OUT_i), IN)."""
+    var total = 0
+    var tensors = List[Tensor]()
+    for i in range(len(paths)):
+        var t = load_fp32(paths[i])
+        total += len(t.data)
+        tensors.append(t^)
+    var buf = ctx.enqueue_create_buffer[DType.float32](total)
+    with buf.map_to_host() as h:
+        var off = 0
+        for ti in range(len(tensors)):
+            ref data = tensors[ti].data
+            var n = len(data)
+            for k in range(n):
+                h[off + k] = data[k]
+            off += n
+    return buf^
+
+
 def _zero_buf(mut ctx: DeviceContext, n: Int) raises -> DeviceBuffer[DType.float32]:
     var b = ctx.enqueue_create_buffer[DType.float32](n)
     b.enqueue_fill(0.0)
@@ -43,24 +108,77 @@ def load_t3_block(mut ctx: DeviceContext, layer_base: String,
     var up_w = upload_fp32(ctx, layer_base + "/up_w.bin")
     var down_w = upload_fp32(ctx, layer_base + "/down_w.bin")
 
+    var qkv_paths = List[String]()
+    qkv_paths.append(layer_base + "/qw.bin")
+    qkv_paths.append(layer_base + "/kw.bin")
+    qkv_paths.append(layer_base + "/vw.bin")
+    var qkv_w = upload_concat_rows_fp32(ctx, qkv_paths)
+
+    var gu_paths = List[String]()
+    gu_paths.append(layer_base + "/gate_w.bin")
+    gu_paths.append(layer_base + "/up_w.bin")
+    var gate_up_w = upload_concat_rows_fp32(ctx, gu_paths)
+
     var zero_d = ctx.enqueue_create_buffer[DType.float32](hidden)
     zero_d.enqueue_fill(0.0)
     var zero_inter = ctx.enqueue_create_buffer[DType.float32](intermediate)
     zero_inter.enqueue_fill(0.0)
+    var zero_3d = ctx.enqueue_create_buffer[DType.float32](3 * hidden)
+    zero_3d.enqueue_fill(0.0)
+    var zero_2inter = ctx.enqueue_create_buffer[DType.float32](2 * intermediate)
+    zero_2inter.enqueue_fill(0.0)
 
     var in_norm = RMSNorm(in_norm_w^, hidden, Float32(1.0e-5))
     var post_norm = RMSNorm(post_norm_w^, hidden, Float32(1.0e-5))
-    var to_q = Linear(qw^, zero_d, hidden, hidden, False)
-    var to_k = Linear(kw^, zero_d.copy(), hidden, hidden, False)
-    var to_v = Linear(vw^, zero_d.copy(), hidden, hidden, False)
-    var to_out = Linear(ow^, zero_d.copy(), hidden, hidden, False)
-    var gate = Linear(gate_w^, zero_inter, hidden, intermediate, False)
-    var up = Linear(up_w^, zero_inter.copy(), hidden, intermediate, False)
-    var down = Linear(down_w^, zero_d.copy(), intermediate, hidden, False)
-    var mlp = LlamaMLP(gate^, up^, down^, hidden, intermediate)
 
-    return T3Block(in_norm^, post_norm^, to_q^, to_k^, to_v^, to_out^, mlp^,
-                    n_heads, head_dim)
+    if _use_bf16():
+        # Load pre-cast bf16 copies alongside the f32 weights.
+        var qw_b = upload_bf16(ctx, layer_base + "/qw.bf16.bin")
+        var kw_b = upload_bf16(ctx, layer_base + "/kw.bf16.bin")
+        var vw_b = upload_bf16(ctx, layer_base + "/vw.bf16.bin")
+        var ow_b = upload_bf16(ctx, layer_base + "/ow.bf16.bin")
+        var gate_b = upload_bf16(ctx, layer_base + "/gate_w.bf16.bin")
+        var up_b = upload_bf16(ctx, layer_base + "/up_w.bf16.bin")
+        var down_b = upload_bf16(ctx, layer_base + "/down_w.bf16.bin")
+
+        var qkv_b_paths = List[String]()
+        qkv_b_paths.append(layer_base + "/qw.bf16.bin")
+        qkv_b_paths.append(layer_base + "/kw.bf16.bin")
+        qkv_b_paths.append(layer_base + "/vw.bf16.bin")
+        var qkv_b = upload_bf16_concat_rows(ctx, qkv_b_paths)
+
+        var gu_b_paths = List[String]()
+        gu_b_paths.append(layer_base + "/gate_w.bf16.bin")
+        gu_b_paths.append(layer_base + "/up_w.bf16.bin")
+        var gate_up_b = upload_bf16_concat_rows(ctx, gu_b_paths)
+
+        var to_q = Linear(qw^, zero_d, hidden, hidden, False, qw_b^)
+        var to_k = Linear(kw^, zero_d.copy(), hidden, hidden, False, kw_b^)
+        var to_v = Linear(vw^, zero_d.copy(), hidden, hidden, False, vw_b^)
+        var to_out = Linear(ow^, zero_d.copy(), hidden, hidden, False, ow_b^)
+        var gate = Linear(gate_w^, zero_inter, hidden, intermediate, False, gate_b^)
+        var up = Linear(up_w^, zero_inter.copy(), hidden, intermediate, False, up_b^)
+        var down = Linear(down_w^, zero_d.copy(), intermediate, hidden, False, down_b^)
+        var mlp = LlamaMLP(gate^, up^, down^, hidden, intermediate)
+        var qkv = Linear(qkv_w^, zero_3d, hidden, 3 * hidden, False, qkv_b^)
+        var gate_up = Linear(gate_up_w^, zero_2inter, hidden, 2 * intermediate, False, gate_up_b^)
+
+        return T3Block(in_norm^, post_norm^, to_q^, to_k^, to_v^, to_out^, mlp^,
+                        qkv^, gate_up^, n_heads, head_dim)
+    else:
+        var to_q = Linear(qw^, zero_d, hidden, hidden, False)
+        var to_k = Linear(kw^, zero_d.copy(), hidden, hidden, False)
+        var to_v = Linear(vw^, zero_d.copy(), hidden, hidden, False)
+        var to_out = Linear(ow^, zero_d.copy(), hidden, hidden, False)
+        var gate = Linear(gate_w^, zero_inter, hidden, intermediate, False)
+        var up = Linear(up_w^, zero_inter.copy(), hidden, intermediate, False)
+        var down = Linear(down_w^, zero_d.copy(), intermediate, hidden, False)
+        var mlp = LlamaMLP(gate^, up^, down^, hidden, intermediate)
+        var qkv = Linear(qkv_w^, zero_3d, hidden, 3 * hidden, False)
+        var gate_up = Linear(gate_up_w^, zero_2inter, hidden, 2 * intermediate, False)
+
+        return T3Block(in_norm^, post_norm^, to_q^, to_k^, to_v^, to_out^, mlp^,
+                        qkv^, gate_up^, n_heads, head_dim)
 
 
 def load_t3(mut ctx: DeviceContext, base: String) raises -> T3:
@@ -86,7 +204,12 @@ def load_t3(mut ctx: DeviceContext, base: String) raises -> T3:
     var speech_head_w = upload_fp32(ctx, base + "/speech_head_w.bin")
     var zero_d = ctx.enqueue_create_buffer[DType.float32](V_SPEECH)
     zero_d.enqueue_fill(0.0)
-    var speech_head = Linear(speech_head_w^, zero_d^, HIDDEN, V_SPEECH, False)
+    var speech_head: Linear
+    if _use_bf16():
+        var speech_head_b = upload_bf16(ctx, base + "/speech_head_w.bf16.bin")
+        speech_head = Linear(speech_head_w^, zero_d^, HIDDEN, V_SPEECH, False, speech_head_b^)
+    else:
+        speech_head = Linear(speech_head_w^, zero_d^, HIDDEN, V_SPEECH, False)
 
     var V_TEXT = 704
     var MAX_TEXT_POS = 2050

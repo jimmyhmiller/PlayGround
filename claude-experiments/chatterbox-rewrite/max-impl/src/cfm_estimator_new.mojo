@@ -798,6 +798,85 @@ def cfm_solve_euler(
     var dt_per_step: Float32 = 1.0 / Float32(n_steps)
     comptime PI_HALF: Float32 = 1.5707963267948966
 
+    # ── Hoist constant-across-steps inputs out of the Euler loop ──
+    # mu_in, spks_in, cond_in, mask_in depend only on inputs (not on step).
+    # Only x_in and t_scalar_in change per step. Building these once saves
+    # 9× the elementwise dispatch overhead vs the previous per-step build.
+
+    # mu_in: [:B] = mu, [B:] = 0.
+    var mu_ptr_h = mu_buf.unsafe_ptr()
+    var mi_ptr_h = mu_in.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(mu_ptr_h, mi_ptr_h, b, t, MEL)
+    def mu_init_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // (MEL * t)
+        var rem = i - bi * MEL * t
+        if bi < b:
+            mi_ptr_h[i] = mu_ptr_h[bi * MEL * t + rem]
+        else:
+            mi_ptr_h[i] = 0.0
+    elementwise[mu_init_fn, simd_width=1, target="gpu"](
+        IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
+    )
+
+    # spks_in: [:B] = spks, [B:] = 0.
+    var sp_ptr_h = spks_buf.unsafe_ptr()
+    var si_ptr_h = spks_in.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(sp_ptr_h, si_ptr_h, b)
+    def spk_init_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // MEL
+        var ci = i - bi * MEL
+        if bi < b:
+            si_ptr_h[i] = sp_ptr_h[bi * MEL + ci]
+        else:
+            si_ptr_h[i] = 0.0
+    elementwise[spk_init_fn, simd_width=1, target="gpu"](
+        IndexList[1](B2 * MEL), DeviceContextPtr(ctx),
+    )
+
+    # cond_in: [:B] = cond, [B:] = 0.
+    var co_ptr_h = cond_buf.unsafe_ptr()
+    var ci_ptr_h = cond_in.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(co_ptr_h, ci_ptr_h, b, t, MEL)
+    def cond_init_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // (MEL * t)
+        var rem = i - bi * MEL * t
+        if bi < b:
+            ci_ptr_h[i] = co_ptr_h[bi * MEL * t + rem]
+        else:
+            ci_ptr_h[i] = 0.0
+    elementwise[cond_init_fn, simd_width=1, target="gpu"](
+        IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
+    )
+
+    # mask_in: [:B] = mask, [B:] = mask.
+    var m_ptr_h = mask_buf.unsafe_ptr()
+    var mi2_ptr_h = mask_in.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(m_ptr_h, mi2_ptr_h, b, t)
+    def mask_init_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // t
+        var src_b = bi % b
+        var ti = i - bi * t
+        mi2_ptr_h[i] = m_ptr_h[src_b * t + ti]
+    elementwise[mask_init_fn, simd_width=1, target="gpu"](
+        IndexList[1](B2 * t), DeviceContextPtr(ctx),
+    )
+
     for step in range(n_steps):
         var lin_cur: Float32 = Float32(step) * dt_per_step
         var lin_next: Float32 = Float32(step + 1) * dt_per_step
@@ -829,79 +908,7 @@ def cfm_solve_euler(
             IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
         )
 
-        # mu_in: [:B] = mu, [B:] = 0.
-        var mu_ptr = mu_buf.unsafe_ptr()
-        var mi_ptr = mu_in.unsafe_ptr()
-
-        @always_inline
-        @parameter
-        @__copy_capture(mu_ptr, mi_ptr, b, t, MEL)
-        def mu_pop_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
-            var i = idx[0]
-            var bi = i // (MEL * t)
-            var rem = i - bi * MEL * t
-            if bi < b:
-                mi_ptr[i] = mu_ptr[bi * MEL * t + rem]
-            else:
-                mi_ptr[i] = 0.0
-        elementwise[mu_pop_fn, simd_width=1, target="gpu"](
-            IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
-        )
-
-        # spks_in: [:B] = spks, [B:] = 0.
-        var sp_ptr = spks_buf.unsafe_ptr()
-        var si_ptr = spks_in.unsafe_ptr()
-
-        @always_inline
-        @parameter
-        @__copy_capture(sp_ptr, si_ptr, b)
-        def spk_pop_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
-            var i = idx[0]
-            var bi = i // MEL
-            var ci = i - bi * MEL
-            if bi < b:
-                si_ptr[i] = sp_ptr[bi * MEL + ci]
-            else:
-                si_ptr[i] = 0.0
-        elementwise[spk_pop_fn, simd_width=1, target="gpu"](
-            IndexList[1](B2 * MEL), DeviceContextPtr(ctx),
-        )
-
-        # cond_in: [:B] = cond, [B:] = 0.
-        var co_ptr = cond_buf.unsafe_ptr()
-        var ci_ptr = cond_in.unsafe_ptr()
-
-        @always_inline
-        @parameter
-        @__copy_capture(co_ptr, ci_ptr, b, t, MEL)
-        def cond_pop_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
-            var i = idx[0]
-            var bi = i // (MEL * t)
-            var rem = i - bi * MEL * t
-            if bi < b:
-                ci_ptr[i] = co_ptr[bi * MEL * t + rem]
-            else:
-                ci_ptr[i] = 0.0
-        elementwise[cond_pop_fn, simd_width=1, target="gpu"](
-            IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
-        )
-
-        # mask_in: [:B] = mask, [B:] = mask (same — mask is applied identically).
-        var m_ptr = mask_buf.unsafe_ptr()
-        var mi2_ptr = mask_in.unsafe_ptr()
-
-        @always_inline
-        @parameter
-        @__copy_capture(m_ptr, mi2_ptr, b, t)
-        def mask_pop_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
-            var i = idx[0]
-            var bi = i // t
-            var src_b = bi % b
-            var ti = i - bi * t
-            mi2_ptr[i] = m_ptr[src_b * t + ti]
-        elementwise[mask_pop_fn, simd_width=1, target="gpu"](
-            IndexList[1](B2 * t), DeviceContextPtr(ctx),
-        )
+        # mu_in, spks_in, cond_in, mask_in are constant — built once before the loop.
 
         # t_scalar_in: filled with t_cur.
         t_scalar_in.enqueue_fill(t_cur)

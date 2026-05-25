@@ -14,3 +14,10 @@ _OPS_ROOT = Path(__file__).resolve().parent.parent / "ops"
 for op_dir in _OPS_ROOT.iterdir():
     if op_dir.is_dir() and (op_dir / f"{op_dir.name}.mojo").exists():
         sys.path.insert(0, str(op_dir))
+
+
+def __getattr__(name):
+    if name in ("ChatterboxTTS", "Conditionals", "punc_norm"):
+        from . import tts
+        return getattr(tts, name)
+    raise AttributeError(name)

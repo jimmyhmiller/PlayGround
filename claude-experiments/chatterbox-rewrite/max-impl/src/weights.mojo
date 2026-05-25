@@ -7,7 +7,8 @@ and uploaded to GPU via `DeviceContext.enqueue_create_buffer`.
 """
 from std.gpu.host import DeviceContext, DeviceBuffer
 
-from fixture import load_fp32
+from fixture import load_fp32, load_bf16, Tensor, TensorBF16
+from std.os import getenv
 from modules import Linear, LayerNorm, RMSNorm, Embedding
 from lstm import LSTMLayer
 from voice_encoder import VoiceEncoder
@@ -52,6 +53,84 @@ def upload_fp32(mut ctx: DeviceContext, path: String) raises -> DeviceBuffer[DTy
     var n = len(t.data)
     var buf = ctx.enqueue_create_buffer[DType.float32](n)
     _upload(buf, t.data, n)
+    return buf^
+
+
+def upload_bf16(mut ctx: DeviceContext, path: String) raises -> DeviceBuffer[DType.bfloat16]:
+    var t = load_bf16(path)
+    var n = len(t.data)
+    var buf = ctx.enqueue_create_buffer[DType.bfloat16](n)
+    with buf.map_to_host() as h:
+        for i in range(n):
+            h[i] = t.data[i]
+    return buf^
+
+
+def _use_bf16() -> Bool:
+    try:
+        var v = getenv("CHATTERBOX_BF16")
+        return v == "1"
+    except:
+        return False
+
+
+def _bf16_sibling_path(fp32_path: String) -> String:
+    """Map foo/bar.bin → foo/bar.bf16.bin."""
+    # Strip trailing .bin and append .bf16.bin.
+    var path = fp32_path
+    var n = path.byte_length()
+    if n >= 4:
+        # Check last 4 bytes are ".bin".
+        if (path[byte=n - 4] == "."
+            and path[byte=n - 3] == "b"
+            and path[byte=n - 2] == "i"
+            and path[byte=n - 1] == "n"):
+            # Strip and append.
+            var base = String("")
+            for cp in path.codepoint_slices():
+                base += String(cp)
+                if base.byte_length() == n - 4:
+                    break
+            return base + String(".bf16.bin")
+    return path + String(".bf16.bin")
+
+
+def maybe_attach_bf16(mut linear: Linear, mut ctx: DeviceContext, weight_fp32_path: String) raises:
+    """If CHATTERBOX_BF16=1, upload `<weight_fp32_path>.bf16.bin` and attach to `linear`."""
+    if not _use_bf16():
+        return
+    var path_bf16 = _bf16_sibling_path(weight_fp32_path)
+    try:
+        var w_bf = upload_bf16(ctx, path_bf16)
+        linear.weight_bf16 = w_bf^
+    except e:
+        print("[bf16] failed to attach for ", weight_fp32_path, ": ", e)
+
+
+def upload_concat_rows_fp32(
+    mut ctx: DeviceContext, paths: List[String]
+) raises -> DeviceBuffer[DType.float32]:
+    """Read multiple .bin files (each shape (OUT_i, IN), same IN) and upload
+    a single GPU buffer with rows stacked: shape (sum(OUT_i), IN).
+
+    Each weight is already row-major (OUT, IN); concatenation along OUT
+    means contiguous appending in linear memory.
+    """
+    var total = 0
+    var tensors = List[Tensor]()
+    for i in range(len(paths)):
+        var t = load_fp32(paths[i])
+        total += len(t.data)
+        tensors.append(t^)
+    var buf = ctx.enqueue_create_buffer[DType.float32](total)
+    with buf.map_to_host() as h:
+        var off = 0
+        for ti in range(len(tensors)):
+            ref data = tensors[ti].data
+            var n = len(data)
+            for k in range(n):
+                h[off + k] = data[k]
+            off += n
     return buf^
 
 
@@ -122,10 +201,27 @@ def load_t3_block(mut ctx: DeviceContext, layer_base: String,
     var up_w = upload_fp32(ctx, layer_base + "/up_w.bin")
     var down_w = upload_fp32(ctx, layer_base + "/down_w.bin")
 
+    # Fused QKV weight: rows of qw, then kw, then vw stacked.
+    var qkv_paths = List[String]()
+    qkv_paths.append(layer_base + "/qw.bin")
+    qkv_paths.append(layer_base + "/kw.bin")
+    qkv_paths.append(layer_base + "/vw.bin")
+    var qkv_w = upload_concat_rows_fp32(ctx, qkv_paths)
+
+    # Fused gate+up weight: rows of gate_w then up_w.
+    var gu_paths = List[String]()
+    gu_paths.append(layer_base + "/gate_w.bin")
+    gu_paths.append(layer_base + "/up_w.bin")
+    var gate_up_w = upload_concat_rows_fp32(ctx, gu_paths)
+
     var zero_d = ctx.enqueue_create_buffer[DType.float32](hidden)
     zero_d.enqueue_fill(0.0)
     var zero_inter = ctx.enqueue_create_buffer[DType.float32](intermediate)
     zero_inter.enqueue_fill(0.0)
+    var zero_3d = ctx.enqueue_create_buffer[DType.float32](3 * hidden)
+    zero_3d.enqueue_fill(0.0)
+    var zero_2inter = ctx.enqueue_create_buffer[DType.float32](2 * intermediate)
+    zero_2inter.enqueue_fill(0.0)
 
     var in_norm = RMSNorm(in_norm_w^, hidden, Float32(1.0e-5))
     var post_norm = RMSNorm(post_norm_w^, hidden, Float32(1.0e-5))
@@ -137,9 +233,11 @@ def load_t3_block(mut ctx: DeviceContext, layer_base: String,
     var up = Linear(up_w^, zero_inter.copy(), hidden, intermediate, False)
     var down = Linear(down_w^, zero_d.copy(), intermediate, hidden, False)
     var mlp = LlamaMLP(gate^, up^, down^, hidden, intermediate)
+    var qkv = Linear(qkv_w^, zero_3d, hidden, 3 * hidden, False)
+    var gate_up = Linear(gate_up_w^, zero_2inter, hidden, 2 * intermediate, False)
 
     return T3Block(in_norm^, post_norm^, to_q^, to_k^, to_v^, to_out^, mlp^,
-                    n_heads, head_dim)
+                    qkv^, gate_up^, n_heads, head_dim)
 
 
 def load_t3(mut ctx: DeviceContext, base: String) raises -> T3:
@@ -330,17 +428,24 @@ def load_transformer_encoder_layer(
     var norm_ff = LayerNorm(nf_w^, nf_b^, d_model, Float32(1.0e-5))
 
     var to_q = Linear(qw^, qb^, d_model, d_model, True)
+    maybe_attach_bf16(to_q, ctx, layer_base + "/self_attn/linear_q/weight.bin")
     var to_k = Linear(kw^, kb^, d_model, d_model, True)
+    maybe_attach_bf16(to_k, ctx, layer_base + "/self_attn/linear_k/weight.bin")
     var to_v = Linear(vw^, vb^, d_model, d_model, True)
+    maybe_attach_bf16(to_v, ctx, layer_base + "/self_attn/linear_v/weight.bin")
     var to_out = Linear(ow^, ob^, d_model, d_model, True)
+    maybe_attach_bf16(to_out, ctx, layer_base + "/self_attn/linear_out/weight.bin")
     var zero_pos_b = _zero_buf(ctx, d_model)
     var linear_pos = Linear(pw^, zero_pos_b^, d_model, d_model, False)
+    maybe_attach_bf16(linear_pos, ctx, layer_base + "/self_attn/linear_pos/weight.bin")
 
     var self_attn = RelPosMHA(to_q^, to_k^, to_v^, to_out^, linear_pos^,
                                 pos_u^, pos_v^, n_heads, head_dim)
 
     var w1 = Linear(w1_w^, w1_b^, d_model, intermediate, True)
+    maybe_attach_bf16(w1, ctx, layer_base + "/feed_forward/w_1/weight.bin")
     var w2 = Linear(w2_w^, w2_b^, intermediate, d_model, True)
+    maybe_attach_bf16(w2, ctx, layer_base + "/feed_forward/w_2/weight.bin")
 
     return TransformerEncoderLayer(
         norm_mha^, norm_ff^, self_attn^, w1^, w2^, d_model, intermediate,
@@ -789,6 +894,7 @@ def _load_resnet1d(
     var mw = upload_fp32(ctx, base + "/mlp/1/weight.bin")
     var mb = upload_fp32(ctx, base + "/mlp/1/bias.bin")
     var mlp = Linear(mw^, mb^, time_emb_dim, c_out, True)
+    maybe_attach_bf16(mlp, ctx, base + "/mlp/1/weight.bin")
     # res_conv is always present in upstream weights (even when c_in == c_out — uses identity-ish 1x1).
     var rw = upload_fp32(ctx, base + "/res_conv/weight.bin")
     var rb = upload_fp32(ctx, base + "/res_conv/bias.bin")
@@ -818,11 +924,15 @@ def _load_cfm_attention(
 
     var zero = _zero_buf(ctx, inner)
     var to_q = Linear(qw^, zero^, d_model, inner, False)
+    maybe_attach_bf16(to_q, ctx, base + "/to_q/weight.bin")
     var zero_k = _zero_buf(ctx, inner)
     var to_k = Linear(kw^, zero_k^, d_model, inner, False)
+    maybe_attach_bf16(to_k, ctx, base + "/to_k/weight.bin")
     var zero_v = _zero_buf(ctx, inner)
     var to_v = Linear(vw^, zero_v^, d_model, inner, False)
+    maybe_attach_bf16(to_v, ctx, base + "/to_v/weight.bin")
     var to_out = Linear(ow^, ob^, inner, d_model, True)
+    maybe_attach_bf16(to_out, ctx, base + "/to_out/0/weight.bin")
     return CFMAttention(to_q^, to_k^, to_v^, to_out^, n_heads, head_dim)
 
 
@@ -833,9 +943,11 @@ def _load_cfm_ff(
     var p0w = upload_fp32(ctx, base + "/net/0/proj/weight.bin")
     var p0b = upload_fp32(ctx, base + "/net/0/proj/bias.bin")
     var net0 = Linear(p0w^, p0b^, d_model, intermediate, True)
+    maybe_attach_bf16(net0, ctx, base + "/net/0/proj/weight.bin")
     var p2w = upload_fp32(ctx, base + "/net/2/weight.bin")
     var p2b = upload_fp32(ctx, base + "/net/2/bias.bin")
     var net2 = Linear(p2w^, p2b^, intermediate, d_model, True)
+    maybe_attach_bf16(net2, ctx, base + "/net/2/weight.bin")
     return CFMFeedForward(net0^, net2^)
 
 
@@ -893,9 +1005,11 @@ def load_cfm_estimator_real(mut ctx: DeviceContext, base: String) raises -> CFME
     var t1_w = upload_fp32(ctx, base + "/time_mlp/linear_1/weight.bin")
     var t1_b = upload_fp32(ctx, base + "/time_mlp/linear_1/bias.bin")
     var time_mlp1 = Linear(t1_w^, t1_b^, 320, TIME_DIM, True)
+    maybe_attach_bf16(time_mlp1, ctx, base + "/time_mlp/linear_1/weight.bin")
     var t2_w = upload_fp32(ctx, base + "/time_mlp/linear_2/weight.bin")
     var t2_b = upload_fp32(ctx, base + "/time_mlp/linear_2/bias.bin")
     var time_mlp2 = Linear(t2_w^, t2_b^, TIME_DIM, TIME_DIM, True)
+    maybe_attach_bf16(time_mlp2, ctx, base + "/time_mlp/linear_2/weight.bin")
 
     # down_blocks: 1 stage.
     var down_blocks = List[CFMDownStage]()
@@ -1025,6 +1139,7 @@ def _load_embed_out(
     var lw = upload_fp32(ctx, base + "/0/weight.bin")
     var lb = upload_fp32(ctx, base + "/0/bias.bin")
     var lin = Linear(lw^, lb^, idim, odim, True)
+    maybe_attach_bf16(lin, ctx, base + "/0/weight.bin")
     var nw = upload_fp32(ctx, base + "/1/weight.bin")
     var nb = upload_fp32(ctx, base + "/1/bias.bin")
     var ln = LayerNorm(nw^, nb^, odim, Float32(1.0e-5))
@@ -1097,6 +1212,7 @@ def load_upsample_conformer_encoder(
     var ep_w = upload_fp32(ctx, base + "/encoder_proj/weight.bin")
     var ep_b = upload_fp32(ctx, base + "/encoder_proj/bias.bin")
     var encoder_proj = Linear(ep_w^, ep_b^, D, MEL, True)
+    maybe_attach_bf16(encoder_proj, ctx, base + "/encoder_proj/weight.bin")
 
     return UpsampleConformerEncoderReal(
         input_embedding^, embed^, up_embed^, pre_la^, up_layer^,
