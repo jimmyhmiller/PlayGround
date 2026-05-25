@@ -11,9 +11,9 @@ from urllib.parse import urlparse
 
 import httpx
 
-DEFAULT_BINARY = Path("/home/jimmyhmiller/Documents/Code/open-source/llama.cpp/build-vulkan/bin/llama-server")
+DEFAULT_BINARY = Path("/home/jimmyhmiller/Documents/Code/open-source/llama.cpp/build/bin/llama-server")
 DEFAULT_MODEL = Path(
-    "/home/jimmyhmiller/.cache/llama.cpp/unsloth_Qwen3.5-35B-A3B-GGUF_Qwen3.5-35B-A3B-UD-Q8_K_XL.gguf"
+    "/home/jimmyhmiller/.cache/llama.cpp/unsloth_Qwen3.6-35B-A3B-MTP-GGUF_Qwen3.6-35B-A3B-UD-Q8_K_XL.gguf"
 )
 DEFAULT_CTX = 131072
 DEFAULT_ALIAS = "qwen3"

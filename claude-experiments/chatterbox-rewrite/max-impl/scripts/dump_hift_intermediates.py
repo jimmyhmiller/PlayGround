@@ -1,0 +1,167 @@
+"""Run upstream HiFT on the dumped mel and capture every intermediate.
+
+We already have the bit-exact upstream mel in weights/s3gen_prompt/expected_mel.bin.
+This script feeds it to upstream's HiFTGenerator.inference and dumps:
+  - f0 (B, T_mel)
+  - s_after_source_module (B, 1, T_audio_full)
+  - s_stft (B, 2*(n_fft//2 + 1), T_s_frames)   = source STFT used inside decode
+  - x_after_conv_pre (B, channels, T_mel)
+  - generated_speech (B, T_audio)
+"""
+import os, struct, sys
+import numpy as np
+import torch
+
+def write_tensor(path, arr):
+    arr = np.ascontiguousarray(np.asarray(arr, dtype=np.float32))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
+        f.write(struct.pack("<q", len(arr.shape)))
+        f.write(struct.pack(f"<{len(arr.shape)}q", *arr.shape))
+        f.write(struct.pack("<i", 0))
+        f.write(arr.tobytes())
+
+def read_tensor(path):
+    with open(path, "rb") as f:
+        rank = struct.unpack("<q", f.read(8))[0]
+        shape = struct.unpack(f"<{rank}q", f.read(8 * rank))
+        tag = struct.unpack("<i", f.read(4))[0]
+        assert tag == 0
+        data = np.frombuffer(f.read(), dtype=np.float32).reshape(shape)
+    return data
+
+def main():
+    from chatterbox.tts import ChatterboxTTS
+
+    OUT = "weights/s3gen_prompt/hift_dump"
+    os.makedirs(OUT, exist_ok=True)
+
+    print("Loading Chatterbox...")
+    m = ChatterboxTTS.from_pretrained("cpu")
+
+    mel = read_tensor("weights/s3gen_prompt/expected_mel.bin")  # (1, 80, T)
+    print(f"loaded mel shape={mel.shape}")
+    mel_t = torch.from_numpy(mel)
+
+    hift = m.s3gen.mel2wav
+    hift.eval()
+
+    captured = {}
+    def cap(name):
+        def hook(mod, inputs, output):
+            if isinstance(output, tuple):
+                captured[name] = tuple(o.detach().clone() if torch.is_tensor(o) else o for o in output)
+            else:
+                captured[name] = output.detach().clone() if torch.is_tensor(output) else output
+        return hook
+
+    h_f0 = hift.f0_predictor.register_forward_hook(cap("f0"))
+    h_src = hift.m_source.register_forward_hook(cap("m_source"))
+    h_pre = hift.conv_pre.register_forward_hook(cap("conv_pre"))
+    h_post = hift.conv_post.register_forward_hook(cap("conv_post"))
+
+    # Monkey-patch SineGen.forward to capture phase_vec and noise.
+    sine_gen = hift.m_source.l_sin_gen
+    orig_sine_forward = sine_gen.forward
+    from torch.distributions.uniform import Uniform
+    sg_captures = {}
+    def patched_sine_forward(f0):
+        F_mat = torch.zeros((f0.size(0), sine_gen.harmonic_num + 1, f0.size(-1)))
+        for i in range(sine_gen.harmonic_num + 1):
+            F_mat[:, i:i+1, :] = f0 * (i + 1) / sine_gen.sampling_rate
+        theta_mat = 2 * np.pi * (torch.cumsum(F_mat, dim=-1) % 1)
+        u_dist = Uniform(low=-np.pi, high=np.pi)
+        phase_vec = u_dist.sample(sample_shape=(f0.size(0), sine_gen.harmonic_num + 1, 1))
+        phase_vec[:, 0, :] = 0
+        sine_waves_pre_uv = sine_gen.sine_amp * torch.sin(theta_mat + phase_vec)
+        sine_waves = sine_waves_pre_uv
+        uv = sine_gen._f02uv(f0)
+        noise_amp = uv * sine_gen.noise_std + (1 - uv) * sine_gen.sine_amp / 3
+        noise = noise_amp * torch.randn_like(sine_waves)
+        sg_captures["phase_vec"] = phase_vec.detach().clone()
+        sg_captures["noise"] = noise.detach().clone()
+        sg_captures["uv"] = uv.detach().clone()
+        sg_captures["theta_mat"] = theta_mat.detach().clone()
+        sg_captures["sine_waves_pre_uv"] = sine_waves_pre_uv.detach().clone()
+        sg_captures["sine_waves_post_merge"] = (sine_waves * uv + noise).detach().clone()
+        sg_captures["f0_upsampled"] = f0.detach().clone()
+        sine_waves = sine_waves * uv + noise
+        return sine_waves, uv, noise
+    sine_gen.forward = patched_sine_forward
+
+    # Patch decode to capture s_stft AND the iSTFT input (magnitude, phase).
+    orig_decode = hift.decode
+    s_stft_capture = {}
+    def my_decode(x, s):
+        sr, si = hift._stft(s.squeeze(1))
+        s_stft_capture["s_stft"] = torch.cat([sr, si], dim=1).detach().clone()
+        return orig_decode(x, s)
+    hift.decode = my_decode
+
+    orig_istft = hift._istft
+    def my_istft(magnitude, phase):
+        s_stft_capture["istft_in_mag_raw"] = magnitude.detach().clone()
+        s_stft_capture["istft_in_phase_raw"] = phase.detach().clone()
+        mag_clip = torch.clip(magnitude, max=1e2)
+        real = mag_clip * torch.cos(phase)
+        img = mag_clip * torch.sin(phase)
+        s_stft_capture["istft_in_real"] = real.detach().clone()
+        s_stft_capture["istft_in_imag"] = img.detach().clone()
+        out = orig_istft(magnitude, phase)
+        s_stft_capture["istft_out"] = out.detach().clone()
+        return out
+    hift._istft = my_istft
+
+    with torch.inference_mode():
+        wav, s_after = hift.inference(mel_t)
+
+    h_f0.remove(); h_src.remove(); h_pre.remove(); h_post.remove()
+
+    f0 = captured["f0"]
+    src_out = captured["m_source"]  # tuple (sine_merge, ...)
+    sine = src_out[0] if isinstance(src_out, tuple) else src_out
+    conv_pre_out = captured["conv_pre"]
+    conv_post_out = captured["conv_post"]
+    s_stft = s_stft_capture["s_stft"]
+
+    print(f"f0 shape={f0.shape}  mean-abs={f0.abs().mean().item():.4f}")
+    print(f"sine_merge shape={sine.shape}  mean-abs={sine.abs().mean().item():.4f}")
+    print(f"s (transposed, post-source) shape={s_after.shape}  mean-abs={s_after.abs().mean().item():.4f}")
+    print(f"s_stft shape={s_stft.shape}  mean-abs={s_stft.abs().mean().item():.4f}")
+    print(f"conv_pre_out shape={conv_pre_out.shape}  mean-abs={conv_pre_out.abs().mean().item():.4f}")
+    print(f"conv_post_out shape={conv_post_out.shape}  mean-abs={conv_post_out.abs().mean().item():.4f}")
+    print(f"wav shape={wav.shape}  max-abs={wav.abs().max().item():.4f}")
+
+    write_tensor(f"{OUT}/f0.bin", f0.cpu().numpy())
+    write_tensor(f"{OUT}/sine_merge.bin", sine.cpu().numpy())
+    if "phase_vec" in sg_captures:
+        write_tensor(f"{OUT}/sg_phase_vec.bin", sg_captures["phase_vec"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_noise.bin", sg_captures["noise"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_uv.bin", sg_captures["uv"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_theta_mat.bin", sg_captures["theta_mat"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_sine_waves_pre_uv.bin", sg_captures["sine_waves_pre_uv"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_sine_waves_post_merge.bin", sg_captures["sine_waves_post_merge"].cpu().numpy())
+        write_tensor(f"{OUT}/sg_f0_upsampled.bin", sg_captures["f0_upsampled"].cpu().numpy())
+        print(f"  phase_vec shape={sg_captures['phase_vec'].shape}")
+        print(f"  noise shape={sg_captures['noise'].shape}")
+        print(f"  uv shape={sg_captures['uv'].shape}")
+        print(f"  theta_mat shape={sg_captures['theta_mat'].shape}")
+    write_tensor(f"{OUT}/s_after_source.bin", s_after.cpu().numpy())
+    write_tensor(f"{OUT}/s_stft.bin", s_stft.cpu().numpy())
+    write_tensor(f"{OUT}/conv_pre_out.bin", conv_pre_out.cpu().numpy())
+    write_tensor(f"{OUT}/conv_post_out.bin", conv_post_out.cpu().numpy())
+    write_tensor(f"{OUT}/audio.bin", wav.cpu().numpy())
+    if "istft_in_real" in s_stft_capture:
+        write_tensor(f"{OUT}/istft_in_real.bin", s_stft_capture["istft_in_real"].cpu().numpy())
+        write_tensor(f"{OUT}/istft_in_imag.bin", s_stft_capture["istft_in_imag"].cpu().numpy())
+        write_tensor(f"{OUT}/istft_out.bin", s_stft_capture["istft_out"].cpu().numpy())
+        print(f"  istft_in_real shape={s_stft_capture['istft_in_real'].shape}")
+        print(f"  istft_out shape={s_stft_capture['istft_out'].shape}")
+
+    from scipy.io import wavfile
+    pcm = (wav.squeeze(0).cpu().numpy() * 32767.0).clip(-32768, 32767).astype(np.int16)
+    wavfile.write(f"{OUT}/upstream_hift_from_mel.wav", 24000, pcm)
+    print(f"wrote {OUT}/upstream_hift_from_mel.wav")
+
+if __name__ == "__main__":
+    main()

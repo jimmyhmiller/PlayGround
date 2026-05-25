@@ -86,6 +86,12 @@ import json, os, sys, time, traceback, types
 # Reduce HIP/CUDA allocator fragmentation — same fix as extract_worker.py.
 os.environ.setdefault("PYTORCH_HIP_ALLOC_CONF", "expandable_segments:True")
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# Disable MIOpen Winograd convolution solvers on AMD gfx1151. The Winograd
+# family (ConvBinWinogradRxSf3x2 / ConvBinWinogradRxSf2x3g1) intermittently
+# produces numerically wrong output during s3gen flow-matching + HiFiGAN
+# inference, manifesting as muffled/spectrally-shifted audio. 0/140 trials
+# bad with this off vs ~10% with default. See hifigan-rocm-bisect/RESULTS_LAYER1.md.
+os.environ.setdefault("MIOPEN_DEBUG_CONV_WINOGRAD", "0")
 
 # Save the real stdout for protocol acks, then redirect fd 1 to stderr so any
 # library that prints to stdout during import/model-load (chatterbox does:
@@ -515,46 +521,19 @@ class ChatterboxBackend(Backend):
         finally:
             tmp_path.unlink(missing_ok=True)
 
-        if os.environ.get(HALT_ENV) == "1":
-            bad, stats = _is_anomalous(audio, sr)
-            if bad:
-                halt_dir = Path(os.environ.get(HALT_DIR_ENV) or DEFAULT_HALT_DIR)
-                halt_dir.mkdir(parents=True, exist_ok=True)
-                # Use a timestamped slug so multiple halts don't overwrite.
-                import time as _time
-                slug = _time.strftime("%Y%m%d-%H%M%S")
-                wav_path = halt_dir / f"halt-{slug}.wav"
-                txt_path = halt_dir / f"halt-{slug}.txt"
-                stats_path = halt_dir / f"halt-{slug}.json"
-                dumps_dir = halt_dir / f"halt-{slug}-dumps"
-                sf.write(wav_path, audio, sr)
-                txt_path.write_text(text, encoding="utf-8")
-                stats_path.write_text(json.dumps(
-                    {**stats, "voice_ref": voice_ref, "n_chars": len(text)},
-                    indent=2,
-                ), encoding="utf-8")
-                # Ask the child to flush its most recent s3gen capture buffer
-                # before any subsequent generate() overwrites it. Failure to
-                # dump (e.g. capture harness disabled) is non-fatal — we
-                # still raise with the audio artifacts.
-                dump_note = ""
-                try:
-                    child.dump_intermediates(dumps_dir)
-                    dump_note = f"\n  dumps: {dumps_dir}"
-                except Exception as exc:
-                    dump_note = f"\n  dumps: <failed: {exc}>"
-                raise ChatterboxAnomalyHalt(
-                    f"chatterbox anomaly detected: {stats}\n"
-                    f"  wav:   {wav_path}\n"
-                    f"  text:  {txt_path}\n"
-                    f"  stats: {stats_path}{dump_note}\n"
-                    f"  chars: {len(text)}"
-                )
-
         if sr != SAMPLE_RATE:
             from .higgs import _resample
             audio = _resample(audio, sr, SAMPLE_RATE)
         return audio.astype(np.float32)
+
+    def dump_intermediates(self, target_dir: Path) -> None:
+        """Flush the chatterbox child's most recent s3gen capture buffer to
+        target_dir. Only does anything when CHATTERBOX_HALT_ON_ANOMALY=1 in the
+        child env (then the capture harness runs). Safe to call unconditionally."""
+        child = self._child
+        if child is None:
+            return
+        child.dump_intermediates(target_dir)
 
     def __del__(self) -> None:
         try:

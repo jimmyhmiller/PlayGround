@@ -1,0 +1,70 @@
+{
+  "config": {
+    "vocab_size": 8,
+    "max_position_embeddings": 131072,
+    "hidden_size": 1024,
+    "intermediate_size": 4096,
+    "num_hidden_layers": 30,
+    "num_attention_heads": 16,
+    "attn_implementation": "sdpa",
+    "head_dim": 64,
+    "tie_word_embeddings": false,
+    "hidden_act": "silu",
+    "attention_bias": false,
+    "attention_dropout": 0.0,
+    "initializer_range": 0.02,
+    "mlp_bias": false,
+    "model_type": "llama",
+    "num_key_value_heads": 16,
+    "pretraining_tp": 1,
+    "rms_norm_eps": 1e-05,
+    "rope_scaling": {
+      "factor": 8.0,
+      "high_freq_factor": 4.0,
+      "low_freq_factor": 1.0,
+      "original_max_position_embeddings": 8192,
+      "rope_type": "llama3",
+      "rope_theta": 500000.0
+    },
+    "rope_theta": 500000.0,
+    "torch_dtype": "bfloat16",
+    "use_cache": true
+  },
+  "fixture": {
+    "seq_len": 16,
+    "batch": 1,
+    "hidden_size": 1024,
+    "input_seed": "0xC0FFEE",
+    "input_distribution": "torch.randn fp32 then cast"
+  },
+  "tolerances": {
+    "fp32": {
+      "rms_norm": 1e-06,
+      "rope": 1e-05,
+      "attn": 0.0001,
+      "mlp": 0.0001,
+      "single_layer": 0.001,
+      "full_forward": 0.01
+    },
+    "bf16": {
+      "rms_norm": 0.001,
+      "rope": 0.001,
+      "attn": 0.05,
+      "mlp": 0.05,
+      "single_layer": 0.1,
+      "full_forward": 0.5
+    }
+  },
+  "captured_keys_per_layer": [
+    "layer.{i}.input_layernorm_out",
+    "layer.{i}.post_attention_layernorm_out",
+    "layer.{i}.attn_out",
+    "layer.{i}.mlp_out",
+    "layer.{i}.residual_out"
+  ],
+  "global_keys": [
+    "input_embeds",
+    "final_norm_out",
+    "last_hidden_state"
+  ]
+}

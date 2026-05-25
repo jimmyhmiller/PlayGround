@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -27,3 +28,9 @@ class Backend(ABC):
 
     def list_voices(self) -> list[str]:  # pragma: no cover — optional override
         return [self.info.default_voice]
+
+    def dump_intermediates(self, target_dir: Path) -> None:  # pragma: no cover — optional
+        """Optional: when render_audio gives up on a chunk after retries, it
+        calls this to ask the backend to flush any in-memory diagnostic state
+        (e.g. captured intermediates from the last failed call). Default: no-op."""
+        return None

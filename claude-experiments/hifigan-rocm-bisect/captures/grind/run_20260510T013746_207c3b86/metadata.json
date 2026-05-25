@@ -1,0 +1,44 @@
+{
+  "timestamp": "2026-05-10T01:37:46.330584",
+  "hostname": "metaphysics",
+  "pid": 48777,
+  "python": "3.11.15 (main, Mar 24 2026, 22:50:29) [Clang 22.1.1 ]",
+  "torch_version": "2.12.0a0+rocm7.13.0a20260411",
+  "cuda_available": true,
+  "cuda_device_count": 1,
+  "cuda_device_name": "Radeon 8060S Graphics",
+  "hip_version": "7.13.60980",
+  "miopen_cache_hash": "4ff3a9393938550f703e8c03008c04bce54c26080b9c7c2a9a008c677e27b9db",
+  "env": {
+    "PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True",
+    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+  },
+  "rocm_smi": "\n\n============================ ROCm System Management Interface ============================\n====================================== Temperature =======================================\nGPU[0]\t\t: Temperature (Sensor edge) (C): 41.0\n==========================================================================================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 1\n==========================================================================================\n====================================== Product Info ======================================\nGPU[0]\t\t: Card Series: \t\tAMD Radeon Graphics\nGPU[0]\t\t: Card Model: \t\t0x1586\nGPU[0]\t\t: Card Vendor: \t\tAdvanced Micro Devices, Inc. [AMD/ATI]\nGPU[0]\t\t: Card SKU: \t\tSTRXLGEN\nGPU[0]\t\t: Subsystem ID: \t0x000a\nGPU[0]\t\t: Device Rev: \t\t0xc1\nGPU[0]\t\t: Node ID: \t\t1\nGPU[0]\t\t: GUID: \t\t19782\nGPU[0]\t\t: GFX Version: \t\tgfx1151\n==========================================================================================\n================================== End of ROCm SMI Log ===================================\n",
+  "sampling_rate": 24000,
+  "gpu_metrics": {
+    "rms": 0.03858243301510811,
+    "centroid_hz": 760.5538385112038,
+    "below_300hz": 0.5597923292682563,
+    "300_to_2k": 0.3312646693251405,
+    "duration_s": 20.04,
+    "n_samples": 480960
+  },
+  "cpu_metrics": {
+    "rms": 0.06507542729377747,
+    "centroid_hz": 871.1393597099344,
+    "below_300hz": 0.2809486299424074,
+    "300_to_2k": 0.618094873006907,
+    "duration_s": 20.04,
+    "n_samples": 480960
+  },
+  "mel_shape": [
+    1,
+    80,
+    1002
+  ],
+  "cache_source_shape": [
+    1,
+    1,
+    0
+  ]
+}

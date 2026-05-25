@@ -1,0 +1,59 @@
+{
+  "timestamp": "2026-05-10T03:39:06.779848",
+  "hostname": "metaphysics",
+  "pid": 58880,
+  "python": "3.11.15 (main, Mar 24 2026, 22:50:29) [Clang 22.1.1 ]",
+  "torch_version": "2.12.0a0+rocm7.13.0a20260411",
+  "cuda_available": true,
+  "cuda_device_count": 1,
+  "cuda_device_name": "Radeon 8060S Graphics",
+  "hip_version": "7.13.60980",
+  "miopen_cache_hash": "4ff3a9393938550f703e8c03008c04bce54c26080b9c7c2a9a008c677e27b9db",
+  "env": {
+    "PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True",
+    "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
+  },
+  "rocm_smi": "\n\n============================ ROCm System Management Interface ============================\n====================================== Temperature =======================================\nGPU[0]\t\t: Temperature (Sensor edge) (C): 42.0\n==========================================================================================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 1\n==========================================================================================\n====================================== Product Info ======================================\nGPU[0]\t\t: Card Series: \t\tAMD Radeon Graphics\nGPU[0]\t\t: Card Model: \t\t0x1586\nGPU[0]\t\t: Card Vendor: \t\tAdvanced Micro Devices, Inc. [AMD/ATI]\nGPU[0]\t\t: Card SKU: \t\tSTRXLGEN\nGPU[0]\t\t: Subsystem ID: \t0x000a\nGPU[0]\t\t: Device Rev: \t\t0xc1\nGPU[0]\t\t: Node ID: \t\t1\nGPU[0]\t\t: GUID: \t\t19782\nGPU[0]\t\t: GFX Version: \t\tgfx1151\n==========================================================================================\n================================== End of ROCm SMI Log ===================================\n",
+  "sampling_rate": 24000,
+  "gpu_metrics": {
+    "rms": 0.035983607172966,
+    "centroid_hz": 578.2873117672309,
+    "below_300hz": 0.6107120961642841,
+    "300_to_2k": 0.3198155191419206,
+    "duration_s": 20.52,
+    "n_samples": 492480
+  },
+  "cpu_metrics": {
+    "rms": 0.06565290689468384,
+    "centroid_hz": 806.1841161996113,
+    "below_300hz": 0.3108713465556447,
+    "300_to_2k": 0.6075145838592627,
+    "duration_s": 20.52,
+    "n_samples": 492480
+  },
+  "mel_shape": [
+    1,
+    80,
+    1026
+  ],
+  "cache_source_shape": [
+    1,
+    1,
+    0
+  ],
+  "miopen_snapshot": {
+    "user_db_src": "/home/jimmyhmiller/.config/miopen",
+    "cache_src": "/home/jimmyhmiller/.cache/miopen",
+    "user_db_files": [
+      "gfx1151_20.HIP.3_5_1_f000f7786e.ufdb.txt",
+      "gfx1151_20.HIP.3_5_1_5b515cf1bc.ufdb.txt",
+      "gfx1151_20.HIP.3_5_1_f000f7786e.ufdb.txt.time",
+      "gfx1151_20.HIP.3_5_1_5454e9e2da.ufdb.txt",
+      "gfx1151_20.HIP.3_5_1_5454e9e2da.ufdb.txt.time",
+      "gfx1151_20.HIP.3_5_1_5b515cf1bc.ufdb.txt.time",
+      "miopen-lockfiles/gfx1151_20.HIP.3_5_1_5b515cf1bc.ufdb.txt.lock",
+      "miopen-lockfiles/gfx1151_20.HIP.3_5_1_5b515cf1bc.udb.txt.lock"
+    ],
+    "cache_bytes": 1212416
+  }
+}

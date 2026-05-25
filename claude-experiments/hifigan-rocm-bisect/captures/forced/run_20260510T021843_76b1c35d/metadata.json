@@ -1,0 +1,43 @@
+{
+  "timestamp": "2026-05-10T02:18:43.061853",
+  "hostname": "metaphysics",
+  "pid": 52138,
+  "python": "3.11.15 (main, Mar 24 2026, 22:50:29) [Clang 22.1.1 ]",
+  "torch_version": "2.12.0a0+rocm7.13.0a20260411",
+  "cuda_available": true,
+  "cuda_device_count": 1,
+  "cuda_device_name": "Radeon 8060S Graphics",
+  "hip_version": "7.13.60980",
+  "miopen_cache_hash": "4ff3a9393938550f703e8c03008c04bce54c26080b9c7c2a9a008c677e27b9db",
+  "env": {
+    "PYTORCH_HIP_ALLOC_CONF": "expandable_segments:True"
+  },
+  "rocm_smi": "\n\n============================ ROCm System Management Interface ============================\n====================================== Temperature =======================================\nGPU[0]\t\t: Temperature (Sensor edge) (C): 41.0\n==========================================================================================\n=================================== % time GPU is busy ===================================\nGPU[0]\t\t: GPU use (%): 1\n==========================================================================================\n====================================== Product Info ======================================\nGPU[0]\t\t: Card Series: \t\tAMD Radeon Graphics\nGPU[0]\t\t: Card Model: \t\t0x1586\nGPU[0]\t\t: Card Vendor: \t\tAdvanced Micro Devices, Inc. [AMD/ATI]\nGPU[0]\t\t: Card SKU: \t\tSTRXLGEN\nGPU[0]\t\t: Subsystem ID: \t0x000a\nGPU[0]\t\t: Device Rev: \t\t0xc1\nGPU[0]\t\t: Node ID: \t\t1\nGPU[0]\t\t: GUID: \t\t19782\nGPU[0]\t\t: GFX Version: \t\tgfx1151\n==========================================================================================\n================================== End of ROCm SMI Log ===================================\n",
+  "sampling_rate": 24000,
+  "gpu_metrics": {
+    "rms": 0.060668520629405975,
+    "centroid_hz": 836.2573357925311,
+    "below_300hz": 0.2983807108409095,
+    "300_to_2k": 0.6161086108522961,
+    "duration_s": 21.32,
+    "n_samples": 511680
+  },
+  "cpu_metrics": {
+    "rms": 0.0676543116569519,
+    "centroid_hz": 876.9481073015894,
+    "below_300hz": 0.3058997501463855,
+    "300_to_2k": 0.5971999444633127,
+    "duration_s": 21.32,
+    "n_samples": 511680
+  },
+  "mel_shape": [
+    1,
+    80,
+    1066
+  ],
+  "cache_source_shape": [
+    1,
+    1,
+    0
+  ]
+}

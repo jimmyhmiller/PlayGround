@@ -749,6 +749,7 @@ def write_chapters_m4b(
     out_path: Path,
     bitrate: str = "96k",
     metadata_title: str | None = None,
+    metadata_author: str | None = None,
 ) -> Path:
     """Concatenate WAV segments and encode to M4B with chapter markers."""
     if not wav_segments:
@@ -770,6 +771,13 @@ def write_chapters_m4b(
         lines = [";FFMETADATA1"]
         if metadata_title:
             lines.append(f"title={_escape(metadata_title)}")
+            # `album` mirrors title — BookPlayer falls back to album for
+            # listings if title is missing, and many audiobook players sort
+            # by it.
+            lines.append(f"album={_escape(metadata_title)}")
+        if metadata_author:
+            lines.append(f"artist={_escape(metadata_author)}")
+            lines.append(f"album_artist={_escape(metadata_author)}")
         cursor_ms = 0
         for (chap, _), dur in zip(wav_segments, durations_ms):
             lines.append("[CHAPTER]")

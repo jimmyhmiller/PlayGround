@@ -1,0 +1,20 @@
+[workspace]
+authors = ["Jimmy Miller <jimmyhmiller@gmail.com>"]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+name = "max-impl"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+sanity = { cmd = "mojo run -I src tests/test_sanity.mojo" }
+
+[dependencies]
+mojo = ">=1.0.0b2.dev2026050306,<2"
+max = ">=26.4.0.dev2026050106,<27"
+python = ">=3.11,<3.13"
+pytorch = "*"
+numpy = "*"
+safetensors = "*"
+huggingface_hub = "*"
+transformers = "*"
+scipy = "*"

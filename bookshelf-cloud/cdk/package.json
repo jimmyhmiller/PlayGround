@@ -1,0 +1,28 @@
+{
+  "name": "cdk",
+  "version": "0.1.0",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "test": "jest",
+    "cdk": "cdk"
+  },
+  "devDependencies": {
+    "@types/jest": "^30",
+    "@types/node": "^24.10.1",
+    "aws-cdk": "2.1121.0",
+    "esbuild": "^0.28.0",
+    "jest": "^30",
+    "ts-jest": "^29",
+    "ts-node": "^10.9.2",
+    "typescript": "~5.9.3"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1045.0",
+    "@aws-sdk/client-secrets-manager": "^3.1045.0",
+    "@aws-sdk/s3-request-presigner": "^3.1045.0",
+    "aws-cdk-lib": "^2.252.0",
+    "bcryptjs": "^3.0.3",
+    "constructs": "^10.5.0"
+  }
+}

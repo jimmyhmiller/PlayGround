@@ -1,0 +1,60 @@
+[workspace]
+authors = ["Jimmy Miller <jimmyhmiller@gmail.com>"]
+channels = ["https://conda.modular.com/max-nightly", "conda-forge"]
+name = "mojo-t3"
+platforms = ["linux-64"]
+version = "0.1.0"
+
+[tasks]
+extract-oracle = { cmd = "python oracle/extract.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-rmsnorm = { cmd = "python oracle/dump_rmsnorm_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-rope = { cmd = "python oracle/dump_rope_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-sdpa = { cmd = "python oracle/dump_sdpa_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-mlp = { cmd = "python oracle/dump_mlp_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-block = { cmd = "python oracle/dump_block_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-forward = { cmd = "python oracle/dump_forward_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-decode-sdpa = { cmd = "python oracle/dump_decode_sdpa_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-block-decode = { cmd = "python oracle/dump_block_decode_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-forward-decode = { cmd = "python oracle/dump_forward_decode_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-heads = { cmd = "python oracle/dump_heads_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-generate = { cmd = "python oracle/dump_generate_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-conv = { cmd = "python oracle/dump_conv_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-stft = { cmd = "python oracle/dump_stft_case.py", env = { PYTHONNOUSERSITE = "1" } }
+dump-hifigan = { cmd = "python oracle/dump_hifigan_case.py", env = { PYTHONNOUSERSITE = "1" } }
+test-rmsnorm = { cmd = "mojo run -I src tests/test_rmsnorm.mojo", depends-on = ["dump-rmsnorm"] }
+test-rope = { cmd = "mojo run -I src tests/test_rope.mojo", depends-on = ["dump-rope"] }
+test-sdpa = { cmd = "mojo run -I src tests/test_sdpa.mojo", depends-on = ["dump-sdpa"] }
+test-mlp = { cmd = "mojo run -I src tests/test_mlp.mojo", depends-on = ["dump-mlp"] }
+test-block = { cmd = "mojo run -I src tests/test_block.mojo", depends-on = ["dump-block"] }
+test-forward = { cmd = "mojo run -I src tests/test_forward.mojo", depends-on = ["dump-forward"] }
+test-decode-sdpa = { cmd = "mojo run -I src tests/test_decode_sdpa.mojo", depends-on = ["dump-decode-sdpa"] }
+test-block-decode = { cmd = "mojo run -I src tests/test_block_decode.mojo", depends-on = ["dump-block-decode"] }
+test-forward-decode = { cmd = "mojo run -I src tests/test_forward_decode.mojo", depends-on = ["dump-forward-decode"] }
+test-heads = { cmd = "mojo run -I src tests/test_heads.mojo", depends-on = ["dump-heads"] }
+test-generate = { cmd = "mojo run -I src tests/test_generate.mojo", depends-on = ["dump-generate"] }
+test-conv = { cmd = "mojo run -I src tests/test_conv.mojo", depends-on = ["dump-conv"] }
+test-conv-fast = { cmd = "mojo run -I src tests/test_conv_fast.mojo", depends-on = ["dump-conv"] }
+test-conv-fast-real = { cmd = "mojo run -I src tests/test_conv_fast_real.mojo" }
+test-tconv-fast-real = { cmd = "mojo run -I src tests/test_tconv_fast_real.mojo" }
+test-stft = { cmd = "mojo run -I src tests/test_stft.mojo", depends-on = ["dump-stft"] }
+test-hifigan-conv-pre = { cmd = "mojo run -I src tests/test_hifigan_conv_pre.mojo", depends-on = ["dump-hifigan"] }
+test-hifigan-resblock0 = { cmd = "mojo run -I src tests/test_hifigan_resblock0.mojo", depends-on = ["dump-hifigan"] }
+test-hifigan-up0-full = { cmd = "mojo run -I src tests/test_hifigan_up0_full.mojo", depends-on = ["dump-hifigan"] }
+test-hifigan-up1-full = { cmd = "mojo run -I src tests/test_hifigan_up1_full.mojo", depends-on = ["dump-hifigan"] }
+test-hifigan-up2-full = { cmd = "mojo run -I src tests/test_hifigan_up2_full.mojo", depends-on = ["dump-hifigan"] }
+test-hifigan-full = { cmd = "mojo run -I src tests/test_hifigan_full.mojo", depends-on = ["dump-hifigan"] }
+test-hifigan-real-mel = { cmd = "mojo run -I src tests/test_hifigan_real_mel.mojo", depends-on = ["dump-hifigan"] }
+test-s3gen-linear = { cmd = "mojo run -I src tests/test_s3gen_linear.mojo" }
+test-cfm-euler = { cmd = "mojo run -I src tests/test_cfm_euler.mojo" }
+test-time-emb = { cmd = "mojo run -I src tests/test_time_emb.mojo" }
+
+[dependencies]
+mojo = ">=1.0.0b2.dev2026050306,<2"
+max = ">=26.4.0.dev2026050106,<27"
+python = ">=3.11,<3.13"
+pytorch = "*"
+numpy = "*"
+safetensors = "*"
+huggingface_hub = "*"
+transformers = "*"
+scipy = "*"

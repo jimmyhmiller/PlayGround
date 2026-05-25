@@ -14,6 +14,7 @@ import soundfile as sf
 
 from .chapters import Chapter, split_by_headers, spoken_chapter_text, write_chapters_m4b
 from .extract import extract_markdown
+from .paper_metadata import extract_paper_metadata
 from .parallel import render_chapters_parallel
 from .rewrite import rewrite_for_audio
 from .tts import SAMPLE_RATE
@@ -178,10 +179,21 @@ def stage_tts(
         click.echo(f"[tts] {completed['cached']}/{total} chapters reused from cache")
 
     paths.audio.parent.mkdir(parents=True, exist_ok=True)
+    fallback_title = paths.source.stem.replace("-", " ").replace("_", " ")
+    title = fallback_title
+    author: str | None = None
+    if paths.md.exists():
+        meta = extract_paper_metadata(paths.md.read_text())
+        if meta.title:
+            title = meta.title
+        if meta.author:
+            author = meta.author
+    click.echo(f"[meta] title={title!r} author={author!r}")
     if fmt == "m4b":
         write_chapters_m4b(
             segments, sample_rate=SAMPLE_RATE, out_path=paths.audio,
-            metadata_title=paths.source.stem.replace("-", " ").replace("_", " "),
+            metadata_title=title,
+            metadata_author=author,
         )
     else:
         _write_mp3(segments, paths.audio)
