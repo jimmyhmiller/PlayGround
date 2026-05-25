@@ -1,0 +1,42 @@
+# SagaStep from primitives. fail_prob=0.5 so half compensate, half forward.
+#
+#                       ┌─heads─▶ Fail ──resp_error popping──┐
+#  Caller → L → C (Coin)                                      │
+#                       └─tails─▶ Next (next step / success) │
+#                                                              ▼
+#                                                         L → Caller
+
+node Caller : Client { period_ns: 400000000, color: 0 }
+
+node L {
+    rule fwd_req     { on req(p)         do { emit packet(p) pushing self to default } }
+    rule rev_resp    { on resp(x)        do { emit resp(x)        popping to (head(return_path)) } }
+    rule rev_resp_er { on resp_error(x)  do { emit resp_error(x)  popping to (head(return_path)) } }
+}
+
+node C : Coin { p: 0.5 }
+
+node Fail {
+    rule on_packet { on packet(_) do { emit resp_error(nil) popping to (head(return_path)) } }
+}
+
+# Stand-in for the next step. Always succeeds for the demo.
+node Next {
+    slots { done: Int = 0 }
+    probes { done: "{done}" }
+    rule on_packet {
+        on packet(_) do {
+            done := done + 1
+            emit resp(nil) popping to (head(return_path))
+        }
+    }
+}
+
+edges {
+    Caller -> L : 5ms
+    L      -> C : 1ms
+    C.heads -> Fail : 1ms
+    C.tails -> Next : 5ms
+    Fail   -> L : 1ms
+    Next   -> L : 1ms
+}

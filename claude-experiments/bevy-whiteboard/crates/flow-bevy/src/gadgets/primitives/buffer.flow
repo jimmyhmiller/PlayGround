@@ -1,0 +1,33 @@
+# Bounded FIFO. Incoming packets queue up to `cap`; overflow goes out
+# the `overflow` port. Pull-driven: a `pull(_)` packet on the control
+# input dispatches the head out the `head` port. Wire to a Delay or
+# Worker downstream to model a service queue with bounded backlog.
+# (`out` and `in` are reserved keywords, so the port is named `head`.)
+node Buffer {
+    slots {
+        cap:   Int = 16
+        items: Samples(64)
+    }
+    probes { fill: "{len(items)}" }
+    rule on_in_room {
+        on packet(p)
+        when len(items) < cap
+        do { push items <- p }
+    }
+    rule on_in_full {
+        on packet(p)
+        do { emit packet(p) to port overflow }
+    }
+    rule on_pull_ready {
+        on pull(_)
+        when len(items) > 0
+        do {
+            pop items -> v
+            emit packet(v) to port head
+        }
+    }
+    rule on_pull_empty {
+        on pull(_)
+        do { }
+    }
+}

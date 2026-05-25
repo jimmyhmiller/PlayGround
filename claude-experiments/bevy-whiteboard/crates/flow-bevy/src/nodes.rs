@@ -15,6 +15,7 @@ use crate::bitmap_label::{
 };
 use crate::bridge::{EntityMaps, FlowNodeRef};
 use crate::camera::{MainCamera, cursor_to_world};
+use crate::canvas::InnerLabelSpec;
 use crate::gadgets::{Kind, spawn as spawn_gadget};
 use crate::sim_driver::{NodeView, SimCommand, SimDriverRes, SimSnapshotRes};
 use crate::theme::Theme;
@@ -38,6 +39,7 @@ impl Plugin for NodesPlugin {
                 sync_data_dot_colors,
                 sync_node_state_labels,
                 sync_binary_slot_paint,
+                sync_inner_label,
                 delete_selected,
             ).chain());
     }
@@ -80,6 +82,26 @@ pub struct Selection {
 pub enum BodyShape {
     Circle(f32),
     Rect(Vec2),
+    /// Equilateral diamond (rotated square) of half-width `radius`.
+    /// Reads as "two-way state toggle" — used for Switch.
+    Diamond(f32),
+    /// Regular hexagon inscribed in a circle of `radius`. Reads as
+    /// "worker / service" — used for Service, Buffer.
+    Hexagon(f32),
+    /// Regular pentagon inscribed in a circle of `radius`. Reads as
+    /// "accumulator / collector" — used for Counter, Window, Aggregator.
+    Pentagon(f32),
+    /// Equilateral triangle inscribed in a circle of `radius`. The
+    /// `point_up` flag flips it (point up for "limit / cap", point
+    /// down for "filter / funnel"). Used for Filter, Threshold.
+    Triangle { radius: f32, point_up: bool },
+    /// Two stacked triangles (top + bottom), reads as "delay / hold".
+    /// `half_height` is from center to top/bottom apex; `half_width`
+    /// is the waist width.
+    Hourglass { half_width: f32, half_height: f32 },
+    /// Pentagon-style tag (square with one corner clipped). Reads as
+    /// "constant / literal value" — used for ConstantPacket / Signal.
+    Tag(f32),
 }
 
 /// Default shape for a built-in palette `Kind`. Used when no per-entity
@@ -111,6 +133,12 @@ pub struct NodeAssetCache {
 enum BodyShapeKey {
     Circle(u32),
     Rect(u32, u32),
+    Diamond(u32),
+    Hexagon(u32),
+    Pentagon(u32),
+    Triangle(u32, bool),
+    Hourglass(u32, u32),
+    Tag(u32),
 }
 
 impl BodyShapeKey {
@@ -118,6 +146,12 @@ impl BodyShapeKey {
         match s {
             BodyShape::Circle(r) => BodyShapeKey::Circle(r.to_bits()),
             BodyShape::Rect(s) => BodyShapeKey::Rect(s.x.to_bits(), s.y.to_bits()),
+            BodyShape::Diamond(r) => BodyShapeKey::Diamond(r.to_bits()),
+            BodyShape::Hexagon(r) => BodyShapeKey::Hexagon(r.to_bits()),
+            BodyShape::Pentagon(r) => BodyShapeKey::Pentagon(r.to_bits()),
+            BodyShape::Triangle { radius, point_up } => BodyShapeKey::Triangle(radius.to_bits(), *point_up),
+            BodyShape::Hourglass { half_width, half_height } => BodyShapeKey::Hourglass(half_width.to_bits(), half_height.to_bits()),
+            BodyShape::Tag(r) => BodyShapeKey::Tag(r.to_bits()),
         }
     }
 }
@@ -134,8 +168,19 @@ impl NodeAssetCache {
         self.bodies
             .entry(key)
             .or_insert_with(|| match shape {
-                BodyShape::Circle(r) => meshes.add(Circle::new(*r)),
-                BodyShape::Rect(s) => meshes.add(Rectangle::new(s.x, s.y)),
+                BodyShape::Circle(r)   => meshes.add(Circle::new(*r)),
+                BodyShape::Rect(s)     => meshes.add(Rectangle::new(s.x, s.y)),
+                BodyShape::Diamond(r)  => meshes.add(build_polygon_mesh(&diamond_points(*r))),
+                BodyShape::Hexagon(r)  => meshes.add(build_polygon_mesh(&regular_polygon_points(6, *r, std::f32::consts::FRAC_PI_2))),
+                BodyShape::Pentagon(r) => meshes.add(build_polygon_mesh(&regular_polygon_points(5, *r, std::f32::consts::FRAC_PI_2))),
+                BodyShape::Triangle { radius, point_up } => {
+                    let rot = if *point_up { std::f32::consts::FRAC_PI_2 } else { -std::f32::consts::FRAC_PI_2 };
+                    meshes.add(build_polygon_mesh(&regular_polygon_points(3, *radius, rot)))
+                }
+                BodyShape::Hourglass { half_width, half_height } => {
+                    meshes.add(build_polygon_mesh(&hourglass_points(*half_width, *half_height)))
+                }
+                BodyShape::Tag(r) => meshes.add(build_polygon_mesh(&tag_points(*r))),
             })
             .clone()
     }
@@ -161,9 +206,84 @@ impl NodeAssetCache {
 
 fn padded_shape(shape: &BodyShape, pad: f32) -> BodyShape {
     match shape {
-        BodyShape::Circle(r) => BodyShape::Circle(r + pad),
-        BodyShape::Rect(s) => BodyShape::Rect(Vec2::new(s.x + pad * 2.0, s.y + pad * 2.0)),
+        BodyShape::Circle(r)   => BodyShape::Circle(r + pad),
+        BodyShape::Rect(s)     => BodyShape::Rect(Vec2::new(s.x + pad * 2.0, s.y + pad * 2.0)),
+        BodyShape::Diamond(r)  => BodyShape::Diamond(r + pad),
+        BodyShape::Hexagon(r)  => BodyShape::Hexagon(r + pad),
+        BodyShape::Pentagon(r) => BodyShape::Pentagon(r + pad),
+        BodyShape::Triangle { radius, point_up } => BodyShape::Triangle { radius: radius + pad, point_up: *point_up },
+        BodyShape::Hourglass { half_width, half_height } => BodyShape::Hourglass { half_width: half_width + pad, half_height: half_height + pad },
+        BodyShape::Tag(r) => BodyShape::Tag(r + pad),
     }
+}
+
+/// Build a triangle-fan mesh from a polygon's CCW vertex list. The
+/// first vertex is the center; remaining vertices wrap the perimeter.
+/// Inserts position / normal / UV attributes so the mesh renders
+/// correctly under `ColorMaterial`.
+fn build_polygon_mesh(perimeter: &[[f32; 2]]) -> Mesh {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::mesh::{Indices, PrimitiveTopology};
+    let n = perimeter.len();
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n + 1);
+    let mut normals:   Vec<[f32; 3]> = Vec::with_capacity(n + 1);
+    let mut uvs:       Vec<[f32; 2]> = Vec::with_capacity(n + 1);
+    positions.push([0.0, 0.0, 0.0]);
+    normals.push([0.0, 0.0, 1.0]);
+    uvs.push([0.5, 0.5]);
+    for p in perimeter {
+        positions.push([p[0], p[1], 0.0]);
+        normals.push([0.0, 0.0, 1.0]);
+        uvs.push([0.5, 0.5]);
+    }
+    let mut indices: Vec<u32> = Vec::with_capacity(n * 3);
+    for i in 0..n {
+        let a = (i + 1) as u32;
+        let b = ((i + 1) % n + 1) as u32;
+        indices.push(0);
+        indices.push(a);
+        indices.push(b);
+    }
+    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh
+}
+
+fn diamond_points(r: f32) -> [[f32; 2]; 4] {
+    [[r, 0.0], [0.0, r], [-r, 0.0], [0.0, -r]]
+}
+
+fn regular_polygon_points(sides: u32, radius: f32, start_angle: f32) -> Vec<[f32; 2]> {
+    let n = sides.max(3);
+    let mut out = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        let theta = start_angle + (i as f32) * std::f32::consts::TAU / (n as f32);
+        out.push([radius * theta.cos(), radius * theta.sin()]);
+    }
+    out
+}
+
+fn hourglass_points(hw: f32, hh: f32) -> [[f32; 2]; 6] {
+    // Top trapezoid + bottom trapezoid meeting at a narrow waist.
+    // Top: [(-hw, hh), (hw, hh)]; waist (-hw*0.15, 0), (hw*0.15, 0);
+    // bottom [(-hw, -hh), (hw, -hh)]. Returned in CCW order.
+    let w = hw * 0.15;
+    [[-hw, hh], [hw, hh], [w, 0.0], [hw, -hh], [-hw, -hh], [-w, 0.0]]
+}
+
+fn tag_points(r: f32) -> [[f32; 2]; 5] {
+    // Square with top-right corner clipped — reads as a tag/label.
+    let c = r * 0.4; // clip size
+    [
+        [-r, r],
+        [r - c, r],
+        [r, r - c],
+        [r, -r],
+        [-r, -r],
+    ]
 }
 
 /// Size for hit-testing / selection-outline. Circles get a square bounding
@@ -171,8 +291,14 @@ fn padded_shape(shape: &BodyShape, pad: f32) -> BodyShape {
 /// so dragging feels snappy.
 pub fn hit_size(shape: &BodyShape) -> Vec2 {
     match shape {
-        BodyShape::Circle(r) => Vec2::splat(r * 2.0),
-        BodyShape::Rect(size) => *size,
+        BodyShape::Circle(r)   => Vec2::splat(r * 2.0),
+        BodyShape::Rect(size)  => *size,
+        BodyShape::Diamond(r)  => Vec2::splat(r * 2.0),
+        BodyShape::Hexagon(r)  => Vec2::splat(r * 2.0),
+        BodyShape::Pentagon(r) => Vec2::splat(r * 2.0),
+        BodyShape::Triangle { radius, .. } => Vec2::splat(radius * 2.0),
+        BodyShape::Hourglass { half_width, half_height } => Vec2::new(half_width * 2.0, half_height * 2.0),
+        BodyShape::Tag(r) => Vec2::splat(r * 2.0),
     }
 }
 
@@ -223,6 +349,13 @@ pub fn spawn_node_entity(
     has_color: bool,
     name: String,
     pos: Vec2,
+    // Class-driven decorations that override / augment the kind-driven
+    // defaults. `glyph_override` replaces the kind's iconic unicode
+    // character; `inner_label` adds a slot-or-probe-driven text label
+    // inside the body. Both are `None` for palette-dropped or
+    // visual.json-undecorated nodes and the kind defaults stand.
+    glyph_override: Option<&str>,
+    inner_label: Option<&InnerLabelSpec>,
 ) -> Entity {
     let shape = shape_override.unwrap_or_else(|| body_shape(kind));
     let hsize = hit_size(&shape);
@@ -263,28 +396,81 @@ pub fn spawn_node_entity(
         }
 
         if !self_painted {
-            // Internal glyph — kind icon (unicode geometric chars; the
-            // atlas's CoreText cascade fills them in from system fonts
-            // when SF Mono lacks them).
-            let glyph_size = glyph_size_for(kind);
-            let glyph_scale = glyph_size / 11.0; // matches DEFAULT_FONT_SIZE
+            // Internal glyph — kind icon, or a per-class override when
+            // the canvas's class visual supplies one. (Unicode geometric
+            // chars; the atlas's CoreText cascade fills them in from
+            // system fonts when SF Mono lacks them.)
+            let glyph_text = glyph_override
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| kind.glyph().to_string());
+            let glyph_size = if glyph_override.is_some() {
+                // Class-driven glyphs run at a unified scale rather than
+                // kind-derived sizes. Smaller when an inner_label sits
+                // below so they don't crowd each other.
+                if inner_label.is_some() { 16.0 } else { 22.0 }
+            } else {
+                glyph_size_for(kind)
+            };
+            let glyph_y = if glyph_override.is_some() && inner_label.is_some() {
+                // Glyph sits in the upper half of the body; inner label
+                // takes the lower half.
+                hsize.y * 0.18
+            } else {
+                0.0
+            };
+            let glyph_capacity = glyph_text.chars().count().max(2).min(12);
+            let glyph_scale = glyph_size / 11.0;
             let glyph_cell_w = metrics.cell_w * glyph_scale;
             let glyph_cell_h = metrics.cell_h * glyph_scale;
             let glyph_label = parent.spawn((
                 BitmapLabel {
-                    text: kind.glyph().to_string(),
+                    text: glyph_text,
                     color: theme.ink,
                     align: TextAlign::Center,
-                    capacity: 2,
+                    capacity: glyph_capacity,
                     cell_w: glyph_cell_w,
                     cell_h: glyph_cell_h,
                 },
-                Transform::from_xyz(0.0, 0.0, 0.1),
+                Transform::from_xyz(0.0, glyph_y, 0.1),
                 Visibility::Inherited,
             )).id();
             parent.commands().entity(glyph_label).with_children(|cp| {
-                spawn_label_chars(cp, metrics, 2, theme.ink, glyph_cell_w, glyph_cell_h);
+                spawn_label_chars(cp, metrics, glyph_capacity, theme.ink, glyph_cell_w, glyph_cell_h);
             });
+
+            // Class-driven inner label: a slot/probe-derived text that
+            // sits inside the body (below the glyph). Use a slightly
+            // smaller font and a `NodeInnerLabel` marker so the
+            // `sync_inner_label` system can update it from sim state
+            // each frame without touching unrelated labels.
+            if let Some(spec) = inner_label {
+                let inner_size = 12.0;
+                let inner_scale = inner_size / 11.0;
+                let inner_cell_w = metrics.cell_w * inner_scale;
+                let inner_cell_h = metrics.cell_h * inner_scale;
+                let inner_capacity = 12;
+                let inner_y = if glyph_override.is_some() {
+                    -hsize.y * 0.18
+                } else {
+                    -hsize.y * 0.02
+                };
+                let inner = parent.spawn((
+                    BitmapLabel {
+                        text: String::new(),
+                        color: theme.ink,
+                        align: TextAlign::Center,
+                        capacity: inner_capacity,
+                        cell_w: inner_cell_w,
+                        cell_h: inner_cell_h,
+                    },
+                    Transform::from_xyz(0.0, inner_y, 0.15),
+                    Visibility::Inherited,
+                    NodeInnerLabel { node: flow_id, spec: spec.clone() },
+                )).id();
+                parent.commands().entity(inner).with_children(|cp| {
+                    spawn_label_chars(cp, metrics, inner_capacity, theme.ink, inner_cell_w, inner_cell_h);
+                });
+            }
 
             // Data-colour indicator dot. Drawn only for gadgets that
             // declared a `color` slot — Router (matches *by* colour),
@@ -357,6 +543,16 @@ pub fn spawn_node_entity(
 #[derive(Component)]
 pub struct NodeNameText;
 
+/// Marks an in-body text label whose content is driven by the firing
+/// node's slot or probe state. The `sync_inner_label` system evaluates
+/// the spec each frame and writes the result into the carried
+/// `BitmapLabel`.
+#[derive(Component, Clone)]
+pub struct NodeInnerLabel {
+    pub node: NodeId,
+    pub spec: InnerLabelSpec,
+}
+
 /// Marker on the small coloured dot in each node's top-right corner. The
 /// inner `NodeId` lets `sync_data_dot_colors` look the right entry up in
 /// `NodeColors` — the body's parent entity carries `FlowNodeRef` too, but
@@ -386,16 +582,10 @@ pub struct BinarySlotPaint {
 /// Where the data-colour dot sits relative to the body's centre. Top-right
 /// corner with a small inset so it doesn't hug the border.
 fn data_dot_offset(shape: &BodyShape) -> (f32, f32) {
-    match shape {
-        BodyShape::Circle(r) => {
-            // Place on the upper-right quadrant at ~45°, inside the circle.
-            let k = r / std::f32::consts::SQRT_2 - 3.0;
-            (k, k)
-        }
-        BodyShape::Rect(size) => {
-            (size.x * 0.5 - 8.0, size.y * 0.5 - 8.0)
-        }
-    }
+    let size = hit_size(shape);
+    // Generic top-right corner placement scaled to the bounding box —
+    // works decently for every shape including the new polygons.
+    (size.x * 0.5 - 8.0, size.y * 0.5 - 8.0)
 }
 
 // ---------------- drop from palette ----------------
@@ -439,7 +629,7 @@ fn handle_drop(
         let has_color = crate::gadgets::has_color_slot(sim, id);
         (id, has_color)
     });
-    spawn_node_entity(&mut commands, &mut cache, &mut meshes, &mut materials, &mut maps, &theme, &metrics, id, kind, None, false, has_color, name, pos);
+    spawn_node_entity(&mut commands, &mut cache, &mut meshes, &mut materials, &mut maps, &theme, &metrics, id, kind, None, false, has_color, name, pos, None, None);
     // Snapshot the active data-slot colour onto this node so its emitted
     // packets render in that hue. Theme swaps after drop won't recolour
     // it. Gadgets that don't declare a `color` slot in their DSL stay
@@ -675,6 +865,42 @@ fn sync_binary_slot_paint(
         if mat_handle.0.id() != want_handle.id() {
             mat_handle.0 = want_handle;
         }
+    }
+    });
+}
+
+/// Per-frame re-evaluation of `NodeInnerLabel` specs. Reads from the
+/// snapshot, looks up the probe or slot referenced by the spec, and
+/// updates the carried `BitmapLabel.text` if the formatted string
+/// changed. Skips entries whose node has disappeared (e.g. mid-rebuild).
+fn sync_inner_label(
+    snapshot: Res<SimSnapshotRes>,
+    mut labels: Query<(&NodeInnerLabel, &mut BitmapLabel)>,
+    mut perf: ResMut<crate::perf::PhaseTimings>,
+) {
+    crate::time_phase!(perf, "nodes.sync_inner_label", {
+    for (inner, mut bitmap) in labels.iter_mut() {
+        let Some(node) = snapshot.0.nodes.get(&inner.node) else { continue };
+        let text = match &inner.spec {
+            InnerLabelSpec::Probe { label } => node
+                .probe_readings
+                .iter()
+                .find(|(l, _)| l == label)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default(),
+            InnerLabelSpec::Slot { slot, format } => {
+                let value_str = match node.slots.get(slot) {
+                    Some(flow::Value::Int(n))   => n.to_string(),
+                    Some(flow::Value::Float(f)) => format!("{:.2}", f),
+                    Some(flow::Value::Bool(b))  => b.to_string(),
+                    Some(flow::Value::Str(s))   => s.clone(),
+                    _ => String::new(),
+                };
+                format.replace("{0}", &value_str)
+            }
+            InnerLabelSpec::Literal { text } => text.clone(),
+        };
+        if bitmap.text != text { bitmap.text = text; }
     }
     });
 }

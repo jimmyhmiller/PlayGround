@@ -1,0 +1,19 @@
+package program:bumper;
+
+/// A small but realistic handler world: reads an Atom cell, writes it back,
+/// and emits a Notify effect. Mirrors the shape a generated handler world
+/// would have for `handler bump_counter { on: BumpRequested; read: counter;
+/// write: counter; emit: Notify; }`.
+world bumper {
+  /// Read the Atom<u32> `counter`.
+  import get-counter: func() -> u32;
+
+  /// Write the Atom<u32> `counter`.
+  import set-counter: func(value: u32);
+
+  /// Emit a `Notify` effect. Returns the runtime-assigned emit id.
+  import emit-notify: func(text: string) -> u64;
+
+  /// Handler entry: `event` is the amount to bump the counter by.
+  export handle: func(event: u32);
+}

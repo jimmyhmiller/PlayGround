@@ -1,5 +1,6 @@
 import Foundation
 import CloudKit
+import Security
 
 @MainActor
 class CloudKitManager {
@@ -18,11 +19,25 @@ class CloudKitManager {
     private(set) var isAvailable: Bool
 
     init() {
-        // CKContainer(identifier:) crashes without CloudKit entitlements (e.g. swift run).
-        // Only attempt CloudKit when running inside a signed app bundle.
-        let hasEntitlements = Bundle.main.bundleIdentifier != nil
-            && Bundle.main.bundlePath.hasSuffix(".app")
-        isAvailable = hasEntitlements && FileManager.default.ubiquityIdentityToken != nil
+        // CKContainer(identifier:) hard-crashes the process if the running
+        // binary lacks `com.apple.developer.icloud-container-identifiers`.
+        // We can't try/catch around that — it's an Obj-C assertion. Instead,
+        // explicitly check that the entitlement is present at runtime before
+        // we ever touch the container. This protects:
+        //   • `swift run` (no entitlements at all)
+        //   • locally signed test builds that strip iCloud entitlements
+        //   • any future build configuration that drops iCloud
+        isAvailable = Self.processHasICloudEntitlement()
+            && FileManager.default.ubiquityIdentityToken != nil
+    }
+
+    private static func processHasICloudEntitlement() -> Bool {
+        var task: SecTask? = SecTaskCreateFromSelf(nil)
+        guard let task else { return false }
+        let key = "com.apple.developer.icloud-container-identifiers" as CFString
+        var error: Unmanaged<CFError>?
+        let value = SecTaskCopyValueForEntitlement(task, key, &error)
+        return (value as? [String])?.isEmpty == false
     }
 
     // MARK: - Zone & Subscription Setup

@@ -1,0 +1,15 @@
+# Holds an incoming packet for `ns` then re-emits it. The self-loop edge
+# carries the delay; live edits to `ns` apply to the NEXT packet that
+# enters. Use to model service time, hit latency, recovery timers.
+node Delay {
+    slots { ns: Int = 100000000 }
+    on_spawn { self -> self : ns }
+    rule enter {
+        on packet(p)
+        do { emit delayed(p) to self }
+    }
+    rule exit {
+        on delayed(p)
+        do { emit packet(p) to default }
+    }
+}

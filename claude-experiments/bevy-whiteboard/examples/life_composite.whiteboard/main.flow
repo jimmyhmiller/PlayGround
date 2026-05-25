@@ -1,0 +1,38 @@
+# Game of Life — every cell rebuilt from primitives.
+#
+# Each cell is FOUR nodes:
+#   T_x_y    : Tick       (period clock)
+#   S_x_y    : CellState  (alive slot + Conway B3/S23 + emit report on kick)
+#   BE_x_y   : ReportFan  (broadcasts report(alive) to 8 neighbors)
+#   A_x_y    : Aggregator (collects 8 neighbor reports → emits total(sum))
+#
+# CellState and ReportFan are in components/life.flow (class-only).
+# Tick and Aggregator are stock primitives. Wired toroidally on 3×3.
+
+for x in 0..3, y in 0..3 {
+    node T_{x}_{y} : Tick { period_ns: 200000000 }
+    node S_{x}_{y} : CellState {
+        alive: if x == 1 then 1 else 0
+    }
+    node BE_{x}_{y} : ReportFan { }
+    node A_{x}_{y}  : Aggregator { n: 8 }
+}
+
+edges {
+    for x in 0..3, y in 0..3 {
+        T_{x}_{y}  -> S_{x}_{y}  : 1ms
+        S_{x}_{y}  -> BE_{x}_{y} : 1ms
+        A_{x}_{y}  -> S_{x}_{y}  : 1ms
+    }
+    # Toroidal 8-neighbor wiring.
+    for y in 0..3, x in 0..3 {
+        BE_{x}_{y} -> A_{(x + 2) % 3}_{(y + 2) % 3} : 1ms
+        BE_{x}_{y} -> A_{x}_{(y + 2) % 3}           : 1ms
+        BE_{x}_{y} -> A_{(x + 1) % 3}_{(y + 2) % 3} : 1ms
+        BE_{x}_{y} -> A_{(x + 2) % 3}_{y}           : 1ms
+        BE_{x}_{y} -> A_{(x + 1) % 3}_{y}           : 1ms
+        BE_{x}_{y} -> A_{(x + 2) % 3}_{(y + 1) % 3} : 1ms
+        BE_{x}_{y} -> A_{x}_{(y + 1) % 3}           : 1ms
+        BE_{x}_{y} -> A_{(x + 1) % 3}_{(y + 1) % 3} : 1ms
+    }
+}

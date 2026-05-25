@@ -26,7 +26,7 @@ impl FieldType {
                 | (FieldType::Bool, Value::Bool(_))
                 | (FieldType::Ref(_), Value::Ref(_))
                 | (FieldType::Bytes, Value::Bytes(_))
-                | (FieldType::Enum(_), Value::Enum { .. })
+                | (FieldType::Enum(_), Value::Enum(_))
                 | (FieldType::Enum(_), Value::String(_)) // unit variant as string
         )
     }

@@ -38,6 +38,7 @@ let rl_close_window = ffi/get-function(raylib, "CloseWindow", [], ffi/Type.Void)
 let rl_window_should_close = ffi/get-function(raylib, "WindowShouldClose", [], ffi/Type.I32)
 let rl_set_target_fps = ffi/get-function(raylib, "SetTargetFPS", [ffi/Type.I32], ffi/Type.Void)
 let rl_set_config_flags = ffi/get-function(raylib, "SetConfigFlags", [ffi/Type.U32], ffi/Type.Void)
+let rl_set_exit_key = ffi/get-function(raylib, "SetExitKey", [ffi/Type.I32], ffi/Type.Void)
 let rl_get_screen_width = ffi/get-function(raylib, "GetScreenWidth", [], ffi/Type.I32)
 let rl_get_screen_height = ffi/get-function(raylib, "GetScreenHeight", [], ffi/Type.I32)
 let rl_get_render_width = ffi/get-function(raylib, "GetRenderWidth", [], ffi/Type.I32)
@@ -352,6 +353,8 @@ fn close_window() { rl_close_window() }
 fn window_should_close() { rl_window_should_close() != 0 }
 fn set_target_fps(fps) { rl_set_target_fps(fps) }
 fn set_config_flags(flags) { rl_set_config_flags(flags) }
+// Pass 0 to disable the default escape-key-closes-window behavior.
+fn set_exit_key(key) { rl_set_exit_key(key) }
 fn screen_width() { rl_get_screen_width() }
 fn screen_height() { rl_get_screen_height() }
 fn render_width() { rl_get_render_width() }
@@ -421,4 +424,9 @@ fn slider_bar(x, y, w, h, left, right, f32_ptr, vmin, vmax) {
 }
 fn toggle_group(x, y, w, h, text, int_ptr) {
     gui_toggle_group(x, y, w, h, text, int_ptr)
+}
+
+fn set_exit_key(key) {
+    let f = ffi/get-function(raylib, "SetExitKey", [ffi/Type.I32], ffi/Type.Void)
+    f(key)
 }

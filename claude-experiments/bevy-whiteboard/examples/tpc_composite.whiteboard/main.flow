@@ -1,0 +1,54 @@
+# Two-phase commit from primitives.
+#
+#                     ┌──▶ Part1.Yes ──resp──▶ VoteBridge
+#  Caller → L → FO ───┤                                    ─packet─▶ A → Decide → Resp
+#                     └──▶ Part2.Yes ──resp──▶ VoteBridge                       │
+#                                                                               ▼
+#                                                                          resp → L → Caller
+
+node Caller : Client {
+    period_ns: 600000000
+    color:     0
+}
+
+node L {
+    rule fwd_req     { on req(p)         do { emit packet(p) pushing self to default } }
+    rule rev_resp    { on resp(x)        do { emit resp(x)        popping to (head(return_path)) } }
+    rule rev_resp_er { on resp_error(x)  do { emit resp_error(x)  popping to (head(return_path)) } }
+}
+
+node FO  : FanOut { }
+node Part1_Yes {
+    rule on_packet { on packet(_) do { emit resp(1) popping to (head(return_path)) } }
+}
+node Part2_Yes {
+    rule on_packet { on packet(_) do { emit resp(1) popping to (head(return_path)) } }
+}
+node VoteBridge {
+    slots { dummy: Int = 0 }
+    rule on_resp { on resp(v) do { emit packet(v) to default } }
+}
+node A : Aggregator { n: 2 }
+node Decide {
+    slots { n: Int = 2 }
+    rule decide {
+        on total(sum) do { emit pkt(if sum == n then 1 else 0) to default }
+    }
+}
+node Resp {
+    rule ok    { on pkt(v) when v == 1 do { emit resp(nil)       to default } }
+    rule abort { on pkt(v) when v == 0 do { emit resp_error(nil) to default } }
+}
+
+edges {
+    Caller -> L         : 5ms
+    L      -> FO        : 1ms
+    FO     -> Part1_Yes : 5ms
+    FO     -> Part2_Yes : 5ms
+    Part1_Yes -> VoteBridge : 5ms
+    Part2_Yes -> VoteBridge : 5ms
+    VoteBridge -> A     : 1ms
+    A      -> Decide    : 1ms
+    Decide -> Resp      : 1ms
+    Resp   -> L         : 1ms
+}

@@ -200,4 +200,54 @@ pub const GADGETS_DSL: &str = concat!(
     include_str!("gadgets/circuit_breaker.flow"), "\n",
     include_str!("gadgets/saga.flow"),            "\n",
     include_str!("gadgets/tpc.flow"),             "\n",
+    // Composable primitives. Each is a tiny single-purpose gadget
+    // intended to be wired into bigger gadgets visually. Together
+    // they cover everything the higher-level gadgets above can do.
+    include_str!("gadgets/primitives/tick.flow"),      "\n",
+    include_str!("gadgets/primitives/counter.flow"),   "\n",
+    include_str!("gadgets/primitives/filter.flow"),    "\n",
+    include_str!("gadgets/primitives/switch.flow"),    "\n",
+    include_str!("gadgets/primitives/threshold.flow"), "\n",
+    include_str!("gadgets/primitives/window.flow"),    "\n",
+    include_str!("gadgets/primitives/delay.flow"),     "\n",
+    include_str!("gadgets/primitives/stamp.flow"),     "\n",
+    include_str!("gadgets/primitives/unstamp.flow"),   "\n",
+    include_str!("gadgets/primitives/fanout.flow"),    "\n",
+    include_str!("gadgets/primitives/coin.flow"),      "\n",
+    include_str!("gadgets/primitives/buffer.flow"),    "\n",
+    // Variant adapters and aggregate primitives — the additional set
+    // that lets us build every higher-level gadget (Worker, Client,
+    // Cache, CircuitBreaker, Saga, TPC, Game of Life) as a compound
+    // of primitives. See `gadgets/composite/*.flow` for the recipes.
+    include_str!("gadgets/primitives/lift.flow"),      "\n",
+    include_str!("gadgets/primitives/lower.flow"),     "\n",
+    include_str!("gadgets/primitives/reply.flow"),     "\n",
+    include_str!("gadgets/primitives/service.flow"),   "\n",
+    include_str!("gadgets/primitives/aggregator.flow"),"\n",
+    include_str!("gadgets/primitives/egress.flow"),    "\n",
+    include_str!("gadgets/primitives/constant_packet.flow"), "\n",
+    include_str!("gadgets/primitives/constant_signal.flow"), "\n",
 );
+
+// ============================================================================
+// Composite gadgets — every gadget redefined as a compound of primitives.
+// ============================================================================
+//
+// These are *not* in GADGETS_DSL because the compound machinery isn't a
+// registerable class (yet). Each constant is meant to be concatenated
+// into a DSL scene that uses the composite as a singleton compound
+// instance. The test suite under `tests/composite_gadgets.rs` exercises
+// each one against behavioural fixtures.
+
+pub const SINK_COMPOSITE: &str            = include_str!("gadgets/composite/sink.flow");
+pub const GENERATOR_COMPOSITE: &str       = include_str!("gadgets/composite/generator.flow");
+pub const CLIENT_COMPOSITE: &str          = include_str!("gadgets/composite/client.flow");
+pub const BACKOFF_CLIENT_COMPOSITE: &str  = include_str!("gadgets/composite/backoff_client.flow");
+pub const WORKER_COMPOSITE: &str          = include_str!("gadgets/composite/worker.flow");
+pub const QUEUE_COMPOSITE: &str           = include_str!("gadgets/composite/queue.flow");
+pub const ROUTER_COMPOSITE: &str          = include_str!("gadgets/composite/router.flow");
+pub const CACHE_COMPOSITE: &str           = include_str!("gadgets/composite/cache.flow");
+pub const CIRCUIT_BREAKER_COMPOSITE: &str = include_str!("gadgets/composite/circuit_breaker.flow");
+pub const SAGA_COMPOSITE: &str            = include_str!("gadgets/composite/saga.flow");
+pub const TPC_COMPOSITE: &str             = include_str!("gadgets/composite/tpc.flow");
+pub const LIFE_CELL_COMPOSITE: &str       = include_str!("gadgets/composite/life.flow");

@@ -21,7 +21,7 @@ use pane_bevy::{FocusedPane, PaneChrome, PaneKindMarker, PaneTag};
 
 use crate::worker::{SnapCell, WorkerMsg};
 use crate::{
-    CellSprites, MonoMetrics, TerminalSelection, TerminalStore, LINE_HEIGHT, PANE_KIND,
+    MonoMetrics, TermGrid, TerminalSelection, TerminalStore, LINE_HEIGHT, PANE_KIND,
 };
 
 const COLOR_SELECTION: Color = Color::srgba(0.42, 0.62, 0.92, 0.28);
@@ -57,17 +57,17 @@ fn render_selection_overlays(
     mut commands: Commands,
     metrics: Res<MonoMetrics>,
     mut q: Query<
-        (&PaneChrome, &CellSprites, &mut TerminalSelection, &PaneKindMarker),
+        (&PaneChrome, &TermGrid, &mut TerminalSelection, &PaneKindMarker),
         With<PaneTag>,
     >,
 ) {
-    for (chrome, cells, mut sel, kind) in &mut q {
+    for (chrome, grid, mut sel, kind) in &mut q {
         if kind.0 != PANE_KIND {
             continue;
         }
         let active = sel.is_active();
-        let cols = cells.cols as i32;
-        let rows = cells.rows as i32;
+        let cols = grid.cols as i32;
+        let rows = grid.rows as i32;
 
         // Tear down whatever's there. Cheap: at most `rows` entities,
         // and only when the selection is being rebuilt.

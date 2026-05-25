@@ -11,8 +11,11 @@
 //! get rasterized lazily on first sight (one full image re-upload per
 //! novel char, which is fine since they arrive slowly).
 //!
-//! When the font is missing a glyph or the atlas is full, we fall back
-//! to slot 0 — a hollow "tofu" box drawn at startup.
+//! Slot 0 is reserved as a fully-transparent "blank" slot so the cells
+//! texture's default-initialized state (all `glyph_index = 0`) samples to
+//! alpha=0 and renders as solid background — without this you get a
+//! screenful of tofu before the first publish lands. Slot 1 holds the
+//! tofu glyph, used as the genuine font-missing / atlas-full fallback.
 
 use std::collections::HashMap;
 
@@ -37,19 +40,32 @@ const ATLAS_DIM: u32 = 1024;
 /// displays without burning much memory.
 pub const DPI_SCALE: f32 = 2.0;
 
+/// Transparent gutter between slots in the atlas. Linear sampling at a
+/// cell's edge would otherwise pick up the neighboring slot's pixels —
+/// producing faint dots and speckles below glyphs whose atlas neighbor
+/// has ink near its top row. With a 1px transparent gutter the worst
+/// the sampler can do at an edge is read 50% glyph + 50% transparent.
+pub const SLOT_PAD: u32 = 1;
+
 #[derive(Resource)]
 pub struct GlyphAtlas {
     pub image: Handle<Image>,
     pub layout: Handle<TextureAtlasLayout>,
     /// Char → atlas slot index. Built up over the session.
     slots: HashMap<char, u32>,
+    /// Usable glyph area (the rect we blit into / sample from).
     slot_w: u32,
     slot_h: u32,
+    /// Stride between slot origins in the atlas image (slot + SLOT_PAD).
+    stride_w: u32,
+    stride_h: u32,
     cols_per_row: u32,
     max_slots: u32,
     next_slot: u32,
     baseline_atlas_y: u32,
-    /// Slot 0 — drawn as a hollow box for chars we couldn't rasterize.
+    /// Drawn as a hollow box for chars we couldn't rasterize. NOT slot
+    /// 0 — slot 0 is the all-transparent "blank" slot used by the
+    /// cells texture's default-initialized cells.
     tofu_slot: u32,
     /// `'static` font bytes. `swash::FontRef` borrows from this.
     font_data: &'static [u8],
@@ -184,8 +200,10 @@ impl GlyphAtlas {
     ) -> Self {
         let slot_w = (cell_w_logical * DPI_SCALE).ceil() as u32;
         let slot_h = (cell_h_logical * DPI_SCALE).ceil() as u32;
-        let cols_per_row = (ATLAS_DIM / slot_w).max(1);
-        let rows_in_atlas = (ATLAS_DIM / slot_h).max(1);
+        let stride_w = slot_w + SLOT_PAD;
+        let stride_h = slot_h + SLOT_PAD;
+        let cols_per_row = (ATLAS_DIM / stride_w).max(1);
+        let rows_in_atlas = (ATLAS_DIM / stride_h).max(1);
         let max_slots = cols_per_row * rows_in_atlas;
 
         // Atlas image starts fully transparent; we mutate the bytes
@@ -203,12 +221,16 @@ impl GlyphAtlas {
         let metrics = font.metrics(&[]).scale(font_size_logical * DPI_SCALE);
         let baseline_atlas_y = metrics.ascent.round().max(0.0) as u32;
 
-        // Tofu: hollow box at slot 0. Written into `data` before the
-        // image is even uploaded to avoid an extra round-trip.
+        // Slot 0 stays empty (all-transparent). Tofu lives at slot 1
+        // so font-missing chars still show a visible box. Written into
+        // `data` before the image is uploaded to avoid an extra GPU
+        // round-trip.
+        const BLANK_SLOT: u32 = 0;
+        const TOFU_SLOT: u32 = 1;
         write_tofu_into(
             &mut data,
             ATLAS_DIM,
-            slot_rect_for(0, slot_w, slot_h, cols_per_row),
+            slot_rect_for(TOFU_SLOT, slot_w, slot_h, stride_w, stride_h, cols_per_row),
         );
 
         let image = Image::new(
@@ -230,8 +252,10 @@ impl GlyphAtlas {
         let image_handle = images.add(image);
 
         let mut layout = TextureAtlasLayout::new_empty(UVec2::splat(ATLAS_DIM));
-        // Slot 0 — tofu — gets registered now so its index is 0.
-        layout.add_texture(slot_rect_for(0, slot_w, slot_h, cols_per_row));
+        // Register slot 0 (blank, all-transparent) and slot 1 (tofu) so
+        // indices line up with what the shader samples.
+        layout.add_texture(slot_rect_for(BLANK_SLOT, slot_w, slot_h, stride_w, stride_h, cols_per_row));
+        layout.add_texture(slot_rect_for(TOFU_SLOT, slot_w, slot_h, stride_w, stride_h, cols_per_row));
         let layout_handle = layouts.add(layout);
 
         let mut atlas = Self {
@@ -240,11 +264,13 @@ impl GlyphAtlas {
             slots: HashMap::new(),
             slot_w,
             slot_h,
+            stride_w,
+            stride_h,
             cols_per_row,
             max_slots,
-            next_slot: 1, // 0 is tofu
+            next_slot: 2, // 0 is blank, 1 is tofu
             baseline_atlas_y,
-            tofu_slot: 0,
+            tofu_slot: TOFU_SLOT,
             font_data,
             system_fallback: SystemFallback::new(),
             font_size_logical,
@@ -263,6 +289,33 @@ impl GlyphAtlas {
 
     pub fn tofu_slot(&self) -> u32 {
         self.tofu_slot
+    }
+
+    /// Atlas-space cell width in pixels (DPI-scaled). This is the
+    /// usable glyph area, not the stride — see `stride_w` for layout.
+    pub fn slot_w(&self) -> u32 {
+        self.slot_w
+    }
+    /// Atlas-space cell height in pixels (DPI-scaled).
+    pub fn slot_h(&self) -> u32 {
+        self.slot_h
+    }
+    /// Distance between slot origins along X (slot_w + SLOT_PAD). The
+    /// shader needs this to find a slot's atlas origin; sampling stays
+    /// within `slot_w × slot_h`.
+    pub fn stride_w(&self) -> u32 {
+        self.stride_w
+    }
+    pub fn stride_h(&self) -> u32 {
+        self.stride_h
+    }
+    /// How many slots fit along one row of the atlas.
+    pub fn cols_per_row(&self) -> u32 {
+        self.cols_per_row
+    }
+    /// Edge length of the atlas image (square).
+    pub fn dim(&self) -> u32 {
+        ATLAS_DIM
     }
 
     pub fn lookup_or_insert(
@@ -304,7 +357,14 @@ impl GlyphAtlas {
         };
 
         let slot = self.next_slot;
-        let rect = slot_rect_for(slot, self.slot_w, self.slot_h, self.cols_per_row);
+        let rect = slot_rect_for(
+            slot,
+            self.slot_w,
+            self.slot_h,
+            self.stride_w,
+            self.stride_h,
+            self.cols_per_row,
+        );
 
         let image = images.get_mut(&self.image).expect("atlas image asset");
         blit_glyph(
@@ -361,11 +421,18 @@ fn rasterize_in_font(
     ))
 }
 
-fn slot_rect_for(slot: u32, slot_w: u32, slot_h: u32, cols_per_row: u32) -> URect {
+fn slot_rect_for(
+    slot: u32,
+    slot_w: u32,
+    slot_h: u32,
+    stride_w: u32,
+    stride_h: u32,
+    cols_per_row: u32,
+) -> URect {
     let col = slot % cols_per_row;
     let row = slot / cols_per_row;
-    let x = col * slot_w;
-    let y = row * slot_h;
+    let x = col * stride_w;
+    let y = row * stride_h;
     URect {
         min: UVec2::new(x, y),
         max: UVec2::new(x + slot_w, y + slot_h),

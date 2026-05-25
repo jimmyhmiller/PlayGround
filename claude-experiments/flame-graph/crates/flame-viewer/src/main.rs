@@ -53,6 +53,26 @@ fn load_path(path: &Path) -> Result<flame_core::Profile, LoadError> {
     Ok(builder.finish())
 }
 
+fn read_clipboard_path() -> Result<PathBuf, String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("open clipboard: {e}"))?;
+    let raw = cb.get_text().map_err(|e| format!("read text: {e}"))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("clipboard is empty".into());
+    }
+    // Strip a matched pair of surrounding quotes.
+    let unquoted = if (trimmed.starts_with('"') && trimmed.ends_with('"'))
+        || (trimmed.starts_with('\'') && trimmed.ends_with('\''))
+    {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    // Strip a `file://` scheme so Finder's "Copy as URL" works.
+    let path_str = unquoted.strip_prefix("file://").unwrap_or(unquoted);
+    Ok(PathBuf::from(path_str))
+}
+
 fn is_gzip(bytes: &[u8]) -> bool {
     bytes.len() >= 2 && bytes[0] == 0x1f && bytes[1] == 0x8b
 }
@@ -288,6 +308,17 @@ impl ApplicationHandler for App {
                                     if let Some(w) = &self.window {
                                         w.request_redraw();
                                     }
+                                } else if r.active_tab == flame_render::MainTab::CallTree {
+                                    // CallTree-tab click: toggle expand/collapse.
+                                    if let Some(node_idx) =
+                                        r.hit_test_call_tree(self.cursor.0, self.cursor.1)
+                                    {
+                                        r.toggle_tree_node(node_idx);
+                                        r.rebuild_instances();
+                                        if let Some(w) = &self.window {
+                                            w.request_redraw();
+                                        }
+                                    }
                                 } else if let Some(mode) =
                                     r.hit_test_layout_button(self.cursor.0, self.cursor.1)
                                 {
@@ -356,16 +387,26 @@ impl ApplicationHandler for App {
                     MouseScrollDelta::PixelDelta(p) => (p.x as f32, p.y as f32),
                 };
                 if let Some(r) = &mut self.renderer {
-                    if dx != 0.0 {
-                        r.viewport.pan_x_px(dx);
-                    }
-                    if dy != 0.0 {
-                        r.viewport.pan_y_px(dy);
-                    }
-                    r.clamp_viewport();
-                    r.rebuild_instances();
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
+                    if r.active_tab == flame_render::MainTab::CallTree {
+                        if dy != 0.0 {
+                            r.pan_call_tree(dy);
+                            r.rebuild_instances();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                    } else {
+                        if dx != 0.0 {
+                            r.viewport.pan_x_px(dx);
+                        }
+                        if dy != 0.0 {
+                            r.viewport.pan_y_px(dy);
+                        }
+                        r.clamp_viewport();
+                        r.rebuild_instances();
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
                     }
                 }
             }
@@ -446,6 +487,33 @@ impl ApplicationHandler for App {
                             r.flip_direction();
                             log::info!("direction → {}", r.direction.label());
                             r.rebuild_instances();
+                        }
+                        Key::Character(ref s) if s.as_str().eq_ignore_ascii_case("v") => {
+                            // Open the file path currently on the clipboard.
+                            // Strips a single layer of surrounding quotes and a
+                            // `file://` scheme so paths copied from terminals
+                            // or Finder's "Copy as Pathname" both work.
+                            match read_clipboard_path() {
+                                Ok(path) => match load_path(&path) {
+                                    Ok(profile) => {
+                                        log::info!(
+                                            "loaded {}: {} slices, duration {:?}",
+                                            path.display(),
+                                            profile.slices.len(),
+                                            std::time::Duration::from_nanos(
+                                                profile.duration_ns()
+                                            )
+                                        );
+                                        r.set_profile(Arc::new(profile));
+                                        r.rebuild_instances();
+                                    }
+                                    Err(e) => log::error!(
+                                        "failed to load {}: {e}",
+                                        path.display()
+                                    ),
+                                },
+                                Err(e) => log::error!("clipboard: {e}"),
+                            }
                         }
                         Key::Character(ref s) if matches!(s.as_str(), "1" | "2" | "3" | "4" | "5") => {
                             let idx = s.as_str().parse::<usize>().unwrap_or(1).saturating_sub(1);

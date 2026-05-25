@@ -1,0 +1,16 @@
+Handler: poll_in_flight
+  on:    TimerTick
+         payload: { now }
+
+  read   (1 path)
+    in_progress[*]
+
+  write  (0 paths)
+    (none)
+
+  emit   (1 effect)
+    HttpRequest
+
+  body
+    hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    uri:  components/poll_in_flight.wasm

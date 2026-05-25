@@ -7,6 +7,8 @@
 //! this should hang or fail. If it passes, the bug is elsewhere
 //! (main-thread input handling, focus loss, renderer choke, etc.).
 
+mod common;
+
 use std::time::{Duration, Instant};
 
 use terminal_bevy::pty::PtySize;
@@ -40,8 +42,71 @@ fn wait_for<F: FnMut(&str) -> bool>(
 }
 
 #[test]
+fn keystroke_after_large_paste_reaches_pty() {
+    // ~64 KB paste — well past the PTY's input buffer cap on macOS
+    // (4 KB on the master side). Pre-fix the daemon's `pty_write_all`
+    // hit WouldBlock partway through and silently dropped the tail,
+    // including the closing `\x1b[201~`, which wedged the shell in
+    // bracketed-paste mode forever.
+    let _env = common::setup_isolated_daemon_env();
+    let session = common::random_session_id();
+    let handle = WorkerHandle::spawn(
+        session,
+        terminal_bevy::default_shell_command(),
+        SIZE,
+        1000,
+        None,
+        None,
+        None,
+    )
+    .expect("spawn");
+
+    // Wait for the shell prompt.
+    std::thread::sleep(Duration::from_millis(800));
+
+    // Build a ~64 KB paste body that, post-execution, will _not_ leave
+    // 64 KB of output sitting in the buffer (we just want bytes to
+    // travel through the PTY). Use a long single comment so the shell
+    // sees it as one line.
+    let big = "x".repeat(64 * 1024);
+    let paste = format!("# {big}\n");
+    let bytes = paste.len();
+    handle.send(WorkerMsg::Paste(paste));
+
+    std::thread::sleep(Duration::from_millis(2000));
+
+    // Marker keystroke. If the closing bracket of bracketed-paste was
+    // dropped, the shell is still in paste mode and AABBCC never runs.
+    handle.send(WorkerMsg::Input(b"AABBCC\n".to_vec()));
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let result = wait_for(&handle, deadline, |s| s.contains("AABBCC"));
+
+    if result.is_none() {
+        let final_snap = snapshot_text(&handle);
+        panic!(
+            "after a {bytes}-byte paste, the keystroke 'AABBCC' never \
+             appeared in the terminal snapshot — pane is unresponsive. \
+             Snapshot tail (last 400 chars):\n{}",
+            &final_snap[final_snap.len().saturating_sub(400)..]
+        );
+    }
+}
+
+#[test]
 fn keystroke_after_100_line_paste_reaches_pty() {
-    let handle = WorkerHandle::spawn(SIZE, 1000, None, None, None).expect("spawn");
+    let _env = common::setup_isolated_daemon_env();
+    let session = common::random_session_id();
+    let handle = WorkerHandle::spawn(
+        session,
+        terminal_bevy::default_shell_command(),
+        SIZE,
+        1000,
+        None,
+        None,
+        None,
+    )
+    .expect("spawn");
 
     // Wait for the shell to come up — give it a generous window.
     std::thread::sleep(Duration::from_millis(800));

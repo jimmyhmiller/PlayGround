@@ -23,6 +23,33 @@
 //!
 //! That's it — chrome, drag/resize, focus, persistence, radial menu
 //! entry are all wired up by `PanePlugin`.
+//!
+//! # Clipping
+//!
+//! Pane content is clipped at pane edges by the *renderer*, not by
+//! per-kind discipline. Each pane gets its own [`Camera2d`] with a
+//! viewport restricted to the pane's screen rect and a unique
+//! [`bevy::camera::visibility::RenderLayers`] id (allocated by
+//! [`PaneLayerAllocator`]). The main camera renders layer 0 (canvas
+//! background, sidebar, anything non-pane); each pane camera renders
+//! only its own pane's layer. Chrome (bg sprite, title text, close
+//! button, resize handle) AND content are all on the pane's layer, so
+//! the pane camera draws the pane's entire visible rectangle and the
+//! GPU refuses to write fragments outside the viewport.
+//!
+//! Pane z-order is realised through `Camera.order` — the higher-z
+//! pane's camera runs later and overdraws lower-z panes wherever they
+//! overlap.
+//!
+//! The propagation system in [`mod@camera`] stamps the right
+//! `RenderLayers` on every descendant of `content_root` (and on every
+//! newly-added child anywhere under the pane), so kinds add children
+//! exactly as they always did — no clip-awareness required at the
+//! kind layer.
+//!
+//! [`enforce_pane_content_bounds`] is no longer the clipping
+//! mechanism; it survives only to set `TextBounds` for kinds that use
+//! wrap-mode text and need the wrap width.
 
 use std::collections::HashMap;
 
@@ -33,7 +60,20 @@ use bevy::text::{LineHeight, TextBounds};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub mod camera;
+pub mod chrome_material;
+pub mod layers;
 pub mod text_input;
+
+pub use camera::PaneCameraOf;
+pub use chrome_material::{
+    ActiveChromeShader, ChromeMaterialPlugin, ChromeParams, ChromeStyle, PaneChromeMaterial,
+    PaneShadowMaterial, ShadowParams,
+};
+pub use layers::{PaneLayer, PaneLayerAllocator};
+
+use bevy::camera::CameraUpdateSystems;
+use bevy::transform::TransformSystems;
 pub use text_input::{
     col_at_x, click_to_caret, focus_text_input, spawn_text_input, FocusedTextInput, TextInput,
     TextInputEvent, TextInputFocused, TextInputPlugin, TextInputStyle, TextInputView,
@@ -46,12 +86,16 @@ pub const CLOSE_BTN_SIZE: f32 = 14.0;
 pub const CLOSE_BTN_INSET: f32 = 4.0;
 pub const MIN_PANE_SIZE: Vec2 = Vec2::new(160.0, 120.0);
 
-const PANEL_BG: Color = Color::srgb(0.105, 0.110, 0.122);
+// Pane body color now lives in `chrome_material::ChromeParams::default_for`
+// — the SDF material reads it as a uniform. Theme integration follows.
 const TITLE_DIVIDER: Color = Color::srgb(0.165, 0.170, 0.188);
+const TITLE_DIVIDER_FOCUSED: Color = Color::srgb(0.42, 0.62, 0.92);
 const HANDLE_COLOR: Color = Color::srgb(0.22, 0.23, 0.26);
 const CLOSE_COLOR: Color = Color::srgb(0.50, 0.52, 0.56);
-const TITLE_TEXT_COLOR: Color = Color::srgb(0.78, 0.80, 0.84);
+const TITLE_TEXT_COLOR: Color = Color::srgb(0.62, 0.65, 0.70);
+const TITLE_TEXT_FOCUSED: Color = Color::srgb(0.95, 0.96, 0.98);
 const TITLE_FONT_SIZE: f32 = 12.0;
+const TITLE_DIVIDER_H_FOCUSED: f32 = 2.0;
 
 // ---------- Components ----------
 
@@ -89,6 +133,10 @@ pub struct PaneTitle(pub String);
 #[derive(Component)]
 pub struct PaneChrome {
     pub bg: Entity,
+    /// Drop-shadow quad. Lives on `RenderLayers::layer(0)` (main
+    /// camera) so it can extend past the per-pane camera's viewport
+    /// clip. Sized larger than the pane by `shadow_blur` on each side.
+    pub shadow: Entity,
     pub title_bar: Entity,
     pub title_text: Entity,
     pub content_root: Entity,
@@ -109,6 +157,32 @@ pub struct PaneProject(pub u64);
 /// must insert this before any pane is spawned.
 #[derive(Resource)]
 pub struct PaneFont(pub Handle<Font>);
+
+/// Real per-character advance for `PaneFont`, measured by the host
+/// (typically via `skrifa` on the actual font bytes). Kinds that need
+/// to size text inline — for truncation, hit-testing, etc. — should
+/// read this rather than approximating with a `chars * size * ratio`
+/// constant. `cell_width` is measured at `font_size` px; scale linearly
+/// for other sizes (the font is monospace).
+#[derive(Resource, Clone, Copy, Debug)]
+pub struct PaneFontMetrics {
+    pub cell_width: f32,
+    pub font_size: f32,
+}
+
+impl PaneFontMetrics {
+    /// Approximate width of `s` rendered at `size` px. Linear scaling
+    /// from the measured `(cell_width, font_size)` pair — exact for the
+    /// monospace fonts the host ships.
+    pub fn measure(&self, s: &str, size: f32) -> f32 {
+        let scale = size / self.font_size.max(1.0);
+        s.chars().count() as f32 * self.cell_width * scale
+    }
+
+    pub fn char_width(&self, size: f32) -> f32 {
+        self.cell_width * (size / self.font_size.max(1.0))
+    }
+}
 
 /// Currently-focused pane (any kind). Replaces per-kind FocusedFoo
 /// resources. Kind plugins read this from their keyboard handlers and
@@ -260,8 +334,9 @@ impl Plugin for PanePlugin {
             .init_resource::<PendingPaneActions>()
             .init_resource::<PaneRegistry>()
             .init_resource::<PaneInputBlockZones>()
+            .insert_resource(PaneLayerAllocator::new())
             .add_message::<PaneContentPressed>()
-            .add_plugins(TextInputPlugin)
+            .add_plugins((TextInputPlugin, ChromeMaterialPlugin))
             .add_systems(
                 Update,
                 (
@@ -269,15 +344,118 @@ impl Plugin for PanePlugin {
                     update_pane_titles,
                     position_panes,
                     apply_pending_pane_actions,
+                    sync_chrome_uniforms,
+                    push_chrome_time,
                 )
                     .chain(),
             )
-            .add_systems(PostUpdate, (reset_input_consumed, enforce_pane_content_bounds));
+            .add_systems(
+                PreUpdate,
+                camera::spawn_pane_cameras,
+            )
+            // Propagation runs in PostUpdate, not PreUpdate, so
+            // children spawned by kinds during Update (the widget-bevy
+            // `rerender_widgets` system despawns + respawns its tree
+            // every resize frame, for one) get their RenderLayers
+            // stamped in the same frame they're created — otherwise
+            // they render on the default layer for one frame each,
+            // bypassing the pane camera's viewport clip.
+            .add_systems(
+                PostUpdate,
+                (
+                    reset_input_consumed,
+                    camera::propagate_render_layers,
+                    enforce_pane_content_bounds,
+                    // Run BEFORE Bevy's CameraUpdateSystems so that
+                    // when Bevy's `camera_system` runs later in
+                    // PostUpdate, it sees our just-updated viewport
+                    // and recomputes the projection in the same
+                    // frame. Otherwise resize introduces a one-frame
+                    // lag where the projection still reflects the
+                    // previous viewport size and content visibly
+                    // drifts inside the pane.
+                    camera::sync_pane_cameras
+                        .before(CameraUpdateSystems)
+                        .before(TransformSystems::Propagate),
+                )
+                    .chain(),
+            );
     }
 }
 
 fn reset_input_consumed(mut consumed: ResMut<InputConsumed>) {
     consumed.0 = false;
+}
+
+/// Drip wall time into every chrome material so the focus glow can
+/// pulse. Cheap: one f32 write per material per frame. Marks the
+/// material Changed regardless of focus state, but Bevy already
+/// detects "uniform actually differs" before re-uploading to GPU.
+fn push_chrome_time(
+    time: Res<Time>,
+    mut materials: ResMut<Assets<PaneChromeMaterial>>,
+) {
+    let t = time.elapsed_secs();
+    for (_id, mat) in materials.iter_mut() {
+        mat.params.time = t;
+    }
+}
+
+/// Keep each pane's chrome material in sync with its `PaneRect` and
+/// focus state. The bg mesh is a unit square scaled via Transform so
+/// we never need to recreate the Mesh asset on resize — only the
+/// transform and the material's uniform parameters change.
+fn sync_chrome_uniforms(
+    panes: Query<(Entity, Ref<PaneRect>, &PaneChrome)>,
+    mut bgs: Query<(&MeshMaterial2d<PaneChromeMaterial>, &mut Transform), Without<MeshMaterial2d<PaneShadowMaterial>>>,
+    mut shadows: Query<(&MeshMaterial2d<PaneShadowMaterial>, &mut Transform), Without<MeshMaterial2d<PaneChromeMaterial>>>,
+    focused: Res<FocusedPane>,
+    style: Res<chrome_material::ChromeStyle>,
+    active_shader: Res<ActiveChromeShader>,
+    mut chrome_mats: ResMut<Assets<PaneChromeMaterial>>,
+    mut shadow_mats: ResMut<Assets<PaneShadowMaterial>>,
+) {
+    let focus_changed = focused.is_changed();
+    let style_changed = style.is_changed();
+    let shader_changed = active_shader.is_changed();
+    for (pane_entity, rect, chrome) in &panes {
+        let needs_chrome_update =
+            rect.is_changed() || focus_changed || style_changed || shader_changed;
+        if !needs_chrome_update {
+            continue;
+        }
+        let is_focused = focused.0 == Some(pane_entity);
+
+        // Chrome (body): unit mesh scaled to pane size.
+        if let Ok((handle, mut transform)) = bgs.get_mut(chrome.bg) {
+            transform.translation.x = rect.size.x * 0.5;
+            transform.translation.y = -rect.size.y * 0.5;
+            transform.scale.x = rect.size.x.max(1.0);
+            transform.scale.y = rect.size.y.max(1.0);
+            if let Some(mat) = chrome_mats.get_mut(&handle.0) {
+                mat.params = style.params_for(rect.size, is_focused);
+                if shader_changed {
+                    mat.fragment = active_shader.0.clone();
+                }
+            }
+        }
+
+        // Shadow: unit mesh scaled to (pane size + 2*blur), centered
+        // on the pane. Don't bother updating on focus changes since
+        // shadow look doesn't depend on focus.
+        if rect.is_changed() || style_changed {
+            if let Ok((handle, mut transform)) = shadows.get_mut(chrome.shadow) {
+                let sp = style.shadow_params_for(rect.size);
+                transform.translation.x = rect.size.x * 0.5;
+                transform.translation.y = -rect.size.y * 0.5;
+                transform.scale.x = sp.mesh_size.x;
+                transform.scale.y = sp.mesh_size.y;
+                if let Some(mat) = shadow_mats.get_mut(&handle.0) {
+                    mat.params = sp;
+                }
+            }
+        }
+    }
 }
 
 // ---------- Spawn ----------
@@ -311,13 +489,32 @@ pub fn spawn_pane(
 
     let title_str: String = title.into();
 
+    // Compute the initial translation the same way `position_panes` does
+    // so children inherit the right GlobalTransform on the very first
+    // frame. Without this, the pane spawns at (0,0,0); children render
+    // there for one frame and then jump to the real position once
+    // `position_panes` runs and transform propagation catches up.
+    let initial_translation = world
+        .query::<&Window>()
+        .iter(world)
+        .next()
+        .map(|w| {
+            let win_size = Vec2::new(w.width(), w.height());
+            bevy::math::Vec3::new(
+                rect.pos.x - win_size.x * 0.5,
+                win_size.y * 0.5 - rect.pos.y,
+                rect.z,
+            )
+        })
+        .unwrap_or(bevy::math::Vec3::ZERO);
+
     let pane = world
         .spawn((
             PaneTag,
             PaneKindMarker(kind),
             rect,
             PaneTitle(title_str.clone()),
-            Transform::default(),
+            Transform::from_translation(initial_translation),
             Visibility::default(),
         ))
         .id();
@@ -325,16 +522,69 @@ pub fn spawn_pane(
         world.entity_mut(pane).insert(PaneProject(pid));
     }
 
+    // Pane body: rounded-rect SDF material on a unit quad scaled via
+    // Transform to the pane size. The SDF math in the shader works in
+    // pixel units off `params.size`, so the mesh is always 1×1 and
+    // resize is just a Transform tweak — no Mesh-asset re-upload on
+    // drag. Anchor::TopLeft doesn't apply to Mesh2d, so we center the
+    // unit square at (size/2, -size/2) to put its top-left at the
+    // pane's origin. `sync_chrome_uniforms` keeps transform and
+    // `params.size` in sync with PaneRect.
+    let style = world
+        .resource::<chrome_material::ChromeStyle>()
+        .clone();
+    let initial_params = style.params_for(rect.size, false);
+    let shadow_params = style.shadow_params_for(rect.size);
+    let active_shader = world.resource::<ActiveChromeShader>().0.clone();
+    let unit_mesh = world
+        .resource_mut::<Assets<Mesh>>()
+        .add(Rectangle::new(1.0, 1.0));
+    let bg_material = world
+        .resource_mut::<Assets<PaneChromeMaterial>>()
+        .add(PaneChromeMaterial {
+            params: initial_params,
+            fragment: active_shader,
+        });
     let bg = world
         .spawn((
             ChildOf(pane),
-            Sprite {
-                color: PANEL_BG,
-                custom_size: Some(rect.size),
+            Mesh2d(unit_mesh.clone()),
+            MeshMaterial2d(bg_material),
+            Transform {
+                translation: Vec3::new(rect.size.x * 0.5, -rect.size.y * 0.5, 0.0),
+                scale: Vec3::new(rect.size.x.max(1.0), rect.size.y.max(1.0), 1.0),
                 ..default()
             },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, 0.0, 0.0),
+        ))
+        .id();
+
+    // Drop shadow: same unit mesh + scale-via-transform trick, but
+    // sized to pane + 2×blur on each side and explicitly stamped onto
+    // layer 0 so the main camera renders it (no per-pane viewport
+    // clip). Local z is just below the bg's so the chrome sits in
+    // front in the unusual case the same camera ever sees both.
+    let shadow_material_handle = world
+        .resource_mut::<Assets<PaneShadowMaterial>>()
+        .add(PaneShadowMaterial { params: shadow_params });
+    let shadow = world
+        .spawn((
+            ChildOf(pane),
+            Mesh2d(unit_mesh),
+            MeshMaterial2d(shadow_material_handle),
+            Transform {
+                translation: Vec3::new(
+                    rect.size.x * 0.5,
+                    -rect.size.y * 0.5,
+                    -0.05,
+                ),
+                scale: Vec3::new(
+                    shadow_params.mesh_size.x,
+                    shadow_params.mesh_size.y,
+                    1.0,
+                ),
+                ..default()
+            },
+            bevy::camera::visibility::RenderLayers::layer(0),
         ))
         .id();
 
@@ -417,12 +667,37 @@ pub fn spawn_pane(
 
     world.entity_mut(pane).insert(PaneChrome {
         bg,
+        shadow,
         title_bar,
         title_text,
         content_root,
         resize_handle,
         close_button,
     });
+
+    // Allocate this pane's RenderLayer id. Chrome AND content all
+    // render on this layer through the per-pane camera. The main
+    // camera (layer 0) draws nothing pane-related; it owns the
+    // canvas/sidebar background. When two panes overlap on screen,
+    // the higher-z pane's camera order is higher, so its full
+    // viewport (bg included) draws over the lower-z pane's content
+    // — that's what stops one pane's text from bleeding through
+    // another pane that's stacked on top of it.
+    let layer_id = world
+        .resource_mut::<PaneLayerAllocator>()
+        .allocate();
+    let pane_layer_component = bevy::camera::visibility::RenderLayers::layer(layer_id);
+    for chrome_entity in [bg, title_bar, title_text, resize_handle, close_button] {
+        world
+            .entity_mut(chrome_entity)
+            .insert(pane_layer_component.clone());
+    }
+    // Content root + descendants get the same layer via the propagate
+    // system in `camera.rs` (it walks content_root's subtree on
+    // Added<PaneLayer>). Chrome is stamped explicitly above because
+    // propagation only descends from content_root, not from the pane
+    // entity itself.
+    world.entity_mut(pane).insert(PaneLayer(layer_id));
 
     SpawnedPane {
         entity: pane,
@@ -647,9 +922,11 @@ fn bring_to_front(
 
 fn position_panes(
     windows: Query<&Window>,
+    focused: Res<FocusedPane>,
     panes: Query<(&PaneRect, &PaneChrome), With<PaneTag>>,
     mut t_q: Query<&mut Transform>,
     mut sprite_q: Query<&mut Sprite>,
+    mut color_q: Query<&mut TextColor>,
     parents: Query<Entity, With<PaneTag>>,
 ) {
     let Ok(win) = windows.single() else {
@@ -661,24 +938,78 @@ fn position_panes(
         let Ok((rect, chrome)) = panes.get(entity) else {
             continue;
         };
+        let is_focused = focused.0 == Some(entity);
+
+        // Every write below goes through a "compare first, write only on
+        // change" guard. Unconditional `*x = y` deref-mut on a Mut<T>
+        // marks the entity Changed, which keeps Bevy's reactive loop
+        // active and re-extracts the sprite/text every frame — even when
+        // the value hasn't moved. With ~6 chrome entities per pane and
+        // several terminal/widget panes alive, the unguarded version
+        // burns >300% CPU just keeping itself awake.
         if let Ok(mut t) = t_q.get_mut(entity) {
-            t.translation.x = rect.pos.x - win_size.x * 0.5;
-            t.translation.y = win_size.y * 0.5 - rect.pos.y;
-            t.translation.z = rect.z;
+            let want = bevy::math::Vec3::new(
+                rect.pos.x - win_size.x * 0.5,
+                win_size.y * 0.5 - rect.pos.y,
+                rect.z,
+            );
+            if t.translation != want {
+                t.translation = want;
+            }
         }
         if let Ok(mut s) = sprite_q.get_mut(chrome.bg) {
-            s.custom_size = Some(rect.size);
+            let want = Some(rect.size);
+            if s.custom_size != want {
+                s.custom_size = want;
+            }
         }
+        // Focused panes get a thicker, accent-colored title divider so
+        // it's obvious which one will receive keys.
+        let (bar_h, bar_color) = if is_focused {
+            (TITLE_DIVIDER_H_FOCUSED, TITLE_DIVIDER_FOCUSED)
+        } else {
+            (1.0, TITLE_DIVIDER)
+        };
         if let Ok(mut s) = sprite_q.get_mut(chrome.title_bar) {
-            s.custom_size = Some(Vec2::new(rect.size.x, 1.0));
+            let want_size = Some(Vec2::new(rect.size.x, bar_h));
+            if s.custom_size != want_size {
+                s.custom_size = want_size;
+            }
+            if s.color != bar_color {
+                s.color = bar_color;
+            }
+        }
+        if let Ok(mut t) = t_q.get_mut(chrome.title_bar) {
+            let want_y = -(TITLE_H - bar_h);
+            if t.translation.y != want_y {
+                t.translation.y = want_y;
+            }
+        }
+        if let Ok(mut c) = color_q.get_mut(chrome.title_text) {
+            let want = if is_focused {
+                TITLE_TEXT_FOCUSED
+            } else {
+                TITLE_TEXT_COLOR
+            };
+            if c.0 != want {
+                c.0 = want;
+            }
         }
         if let Ok(mut t) = t_q.get_mut(chrome.resize_handle) {
-            t.translation.x = rect.size.x - HANDLE_SIZE;
-            t.translation.y = -(rect.size.y - HANDLE_SIZE);
+            let wx = rect.size.x - HANDLE_SIZE;
+            let wy = -(rect.size.y - HANDLE_SIZE);
+            if t.translation.x != wx || t.translation.y != wy {
+                t.translation.x = wx;
+                t.translation.y = wy;
+            }
         }
         if let Ok(mut t) = t_q.get_mut(chrome.close_button) {
-            t.translation.x = rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET;
-            t.translation.y = -CLOSE_BTN_INSET;
+            let wx = rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET;
+            let wy = -CLOSE_BTN_INSET;
+            if t.translation.x != wx || t.translation.y != wy {
+                t.translation.x = wx;
+                t.translation.y = wy;
+            }
         }
     }
 }
@@ -719,6 +1050,23 @@ fn apply_pending_pane_actions(world: &mut World) {
         if let Some(cb) = on_close {
             cb(world, entity);
         }
+        // Reclaim this pane's RenderLayer id + despawn its per-pane
+        // camera. Read the layer BEFORE the pane is despawned (after
+        // despawn the component is gone and we can't recover the id).
+        let layer = world.get::<PaneLayer>(entity).copied();
+        if let Some(PaneLayer(id)) = layer {
+            // Find the camera linked back to this pane and despawn it.
+            let mut camera_q = world.query::<(Entity, &PaneCameraOf)>();
+            let cam_entity = camera_q
+                .iter(world)
+                .find_map(|(cam, owner)| (owner.0 == entity).then_some(cam));
+            if let Some(cam) = cam_entity
+                && world.get_entity(cam).is_ok()
+            {
+                world.entity_mut(cam).despawn();
+            }
+            world.resource_mut::<PaneLayerAllocator>().free(id);
+        }
         if world.get_entity(entity).is_ok() {
             world.entity_mut(entity).despawn();
         }
@@ -741,27 +1089,36 @@ pub fn pane_is_kind(world: &World, entity: Entity, kind: &str) -> bool {
 
 // ---------- Content bounds enforcement ----------
 
-/// Marks a Text2d descendant of a content_root as "do not auto-clip
-/// to pane bounds". The enforcement system skips these. Use sparingly
-/// — by default every Text2d under a pane is clipped, and that is
-/// the intended invariant.
+/// Marks a Text2d descendant of a content_root as "do not auto-resize
+/// its `TextBounds` to the pane". The enforcement system skips these.
+///
+/// Note: visible clipping no longer depends on this — every pane has
+/// its own viewport-clipped camera (see [`crate::camera`]), so content
+/// outside the pane simply isn't rendered regardless of what we do
+/// here. This component remains useful only for kinds that want to
+/// manage their own `TextBounds` for layout reasons (run-button's
+/// output panel snaps bounds to whole-line increments to avoid
+/// half-line bleed at the bottom).
 #[derive(Component, Copy, Clone, Debug, Default)]
 pub struct PaneContentNoClip;
 
-/// Walks each pane's content_root subtree and forces every Text2d's
-/// `TextBounds` to fit within the remaining content area. This is the
-/// single source of truth for "text cannot escape the pane" — kinds
-/// don't have to remember to clip; if they do their own sizing this
-/// just clamps it.
+/// Walks each pane's content_root subtree and writes a `TextBounds`
+/// onto every Text2d to match the pane's content area. This is
+/// **layout** assistance for kinds that use wrapping (the wrap
+/// width comes from `TextBounds.width`) — it is *not* the clipping
+/// mechanism: that's the per-pane camera viewport in
+/// [`crate::camera`]. Kinds doing their own bounds management can
+/// opt out with [`PaneContentNoClip`].
 ///
-/// Sprites are deliberately not clamped here: textured sprites
-/// (terminal glyph cells, atlas tiles) treat `custom_size` as a render
-/// size and shrinking it would distort the glyph rather than clip it.
-/// Kinds that want sprite clipping should size their sprites to the
-/// pane themselves; the run-button divider, terminal cell pool, and
-/// editor caret all already do.
+/// Sprites are deliberately not touched here: textured sprites
+/// (terminal glyph cells, atlas tiles) treat `custom_size` as a
+/// render size and shrinking it would distort the glyph. Kinds size
+/// their own sprites; the terminal cell pool, editor caret, and
+/// run-button divider all already do.
 fn enforce_pane_content_bounds(
     panes: Query<(&PaneRect, &PaneChrome), With<PaneTag>>,
+    changed_panes: Query<(), (With<PaneTag>, Changed<PaneRect>)>,
+    new_text: Query<(), Added<Text2d>>,
     children_q: Query<&Children>,
     transforms: Query<&Transform>,
     text_q: Query<(), With<Text2d>>,
@@ -769,6 +1126,13 @@ fn enforce_pane_content_bounds(
     mut bounds_q: Query<&mut TextBounds>,
     mut commands: Commands,
 ) {
+    // Hot path: nothing relevant changed this frame, skip the subtree
+    // walk. Without this, we re-walk every pane's content_root every
+    // frame — for terminal panes that's thousands of cell sprites,
+    // dominating CPU even while truly idle.
+    if changed_panes.is_empty() && new_text.is_empty() {
+        return;
+    }
     for (rect, chrome) in &panes {
         let content_w = (rect.size.x - 2.0 * MARGIN).max(0.0);
         let content_h = (rect.size.y - TITLE_H - 2.0 * MARGIN).max(0.0);

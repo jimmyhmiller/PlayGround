@@ -683,11 +683,13 @@ fn spawn_compound_param_section(
                             Some(CtValue::Int(n)) => n.to_string(),
                             Some(CtValue::Bool(b)) => b.to_string(),
                             Some(CtValue::Str(s)) => s.clone(),
+                            Some(CtValue::Float(f)) => f.to_string(),
                         };
                         let ty_str = match p.ty {
                             flow::dsl::ast::CtType::Int => "Int",
                             flow::dsl::ast::CtType::Bool => "Bool",
                             flow::dsl::ast::CtType::Str => "String",
+                            flow::dsl::ast::CtType::Float => "Float",
                         };
                         let label = format!("{}: {}", p.name, ty_str);
                         section

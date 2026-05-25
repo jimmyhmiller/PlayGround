@@ -142,6 +142,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3a822ea5bc7590f9d40f1ba12c0dc3c2760f3482c6984db1573ad11031420831"
 
 [[package]]
+name = "clojure"
+version = "0.1.0"
+dependencies = [
+ "dynalloc",
+ "dynexec",
+ "dynir",
+ "dynlang",
+ "dynlower",
+ "dynobj",
+ "dynruntime",
+ "dynvalue",
+]
+
+[[package]]
+name = "clojure-jvm"
+version = "0.0.1"
+dependencies = [
+ "dynalloc",
+ "dynir",
+ "dynlang",
+ "dynlower",
+ "dynobj",
+ "dynruntime",
+ "dynvalue",
+]
+
+[[package]]
 name = "contlang"
 version = "0.1.0"
 dependencies = [
@@ -277,6 +304,7 @@ dependencies = [
 name = "dynlower"
 version = "0.1.0"
 dependencies = [
+ "dynalloc",
  "dynasm",
  "dynexec",
  "dynir",
@@ -1041,8 +1069,10 @@ name = "wasm2dynir"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "dynalloc",
  "dynir",
  "dynlower",
+ "dynobj",
  "dynvalue",
  "wasmparser 0.227.1",
  "wat",

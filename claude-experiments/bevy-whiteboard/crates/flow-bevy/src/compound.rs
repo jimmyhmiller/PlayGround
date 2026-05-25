@@ -651,9 +651,14 @@ pub fn is_in_scope_edge(
 /// at the right size. Mirrors `nodes::padded_shape`'s rect arm; kept
 /// local so this module doesn't depend on a crate-private helper.
 fn pad_rect(shape: &BodyShape, pad: f32) -> BodyShape {
+    // Mirror of `nodes::padded_shape`; kept local. Compounds only
+    // expose Rect/Circle as outward visuals today, so the extra
+    // primitive variants are passed through unchanged (they shouldn't
+    // appear here in practice but a wildcard keeps the match total).
     match shape {
         BodyShape::Rect(v) => BodyShape::Rect(Vec2::new(v.x + pad * 2.0, v.y + pad * 2.0)),
         BodyShape::Circle(r) => BodyShape::Circle(r + pad),
+        other => *other,
     }
 }
 

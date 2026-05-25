@@ -559,6 +559,11 @@ impl Parser {
                 let p = self.ident()?;
                 Ok(EmitTarget::OutPort(p))
             }
+            Tok::Port => {
+                self.bump();
+                let p = self.ident()?;
+                Ok(EmitTarget::FromPort(p))
+            }
             Tok::Ident(s) if s == "default" => { self.bump(); Ok(EmitTarget::Default) }
             Tok::Ident(_) | Tok::IdentTpl(_) => {
                 let n = self.name_tpl()?;
@@ -624,8 +629,9 @@ impl Parser {
             "Int" => CtType::Int,
             "Bool" => CtType::Bool,
             "String" => CtType::Str,
+            "Float" => CtType::Float,
             other => return Err(format!(
-                "{}: compound param `{}`: type must be Int|Bool|String, got `{}`",
+                "{}: compound param `{}`: type must be Int|Bool|String|Float, got `{}`",
                 self.here(), name, other
             )),
         };

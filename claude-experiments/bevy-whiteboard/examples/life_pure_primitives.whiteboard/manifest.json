@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "canvas": {
+    "name": "Life cell (pure primitives, no bespoke logic)",
+    "description": "Conway's Game of Life with every cell built ONLY from primitives — no custom Conway-rule node. The B3/S23 rule emerges from: Switch holding `alive` as `passing`, Aggregator summing 8 neighbour packets, Filter chain detecting sum==3 / sum==2 / else, ConstantSignal nodes converting the decision into trip/reset signals that update the Switch. 3×3 toroidal grid."
+  }
+}

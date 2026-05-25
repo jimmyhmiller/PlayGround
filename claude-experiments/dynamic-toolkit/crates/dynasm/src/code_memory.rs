@@ -237,6 +237,17 @@ impl CodeMemory for PagedCodeMemory {
         }
 
         self.executable_end = rx_end;
+        // Advance `used` past the last finalized page so subsequent
+        // pushes start on a never-yet-executable page. Without this,
+        // `ensure_writable_tail` would flip the trailing partial page
+        // back to RW — fatal if another thread is currently executing
+        // code in that page (the page's PROT_EXEC is removed mid-
+        // instruction → SIGBUS).
+        //
+        // The cost is a few bytes of wasted code memory per finalize
+        // (rounding up to the next page boundary), which is fine for
+        // any plausible workload.
+        self.used = rx_end;
     }
 
     fn base_ptr(&self) -> *const u8 {

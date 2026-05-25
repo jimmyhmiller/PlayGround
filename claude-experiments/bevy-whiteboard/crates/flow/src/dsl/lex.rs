@@ -19,7 +19,7 @@ pub enum Tok {
     DotDot,       // ..  (range bound separator inside `for IDENT in LO..HI`)
 
     // Keywords
-    Params, Node, Compound, In, Out, Edges, Scenario, Template,
+    Params, Node, Compound, In, Out, Port, Edges, Scenario, Template,
     Slots, Rule, On, OnSpawn, When, Do, Probes,
     Push, Pop, Drop, Emit, EmitEach, Record, Spawn, Error,
     To, As, At, Inject, SetParam, SetSlot, Kill,
@@ -221,6 +221,7 @@ pub fn lex(src: &str) -> Result<Vec<Token>, String> {
                 "compound" => Some(Tok::Compound),
                 "in" => Some(Tok::In),
                 "out" => Some(Tok::Out),
+                "port" => Some(Tok::Port),
                 "edges" => Some(Tok::Edges),
                 "scenario" => Some(Tok::Scenario),
                 "template" => Some(Tok::Template),

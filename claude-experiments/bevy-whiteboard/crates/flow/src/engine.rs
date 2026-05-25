@@ -561,6 +561,47 @@ impl Sim {
     /// starting descendant. This is how an inner leaf's
     /// `ToOutPort("name")` is resolved to a specific compound
     /// boundary.
+    /// Compound-aware target resolution for `ToTargetExpr`.
+    ///
+    /// Walks the target's parent chain looking for any ancestor compound
+    /// whose `in_ports` map a port name to `target_id` (directly or
+    /// transitively via nested compounds). For each such (ancestor,
+    /// port) pair, checks if `from_nid` has an outbound edge landing on
+    /// that ancestor with a matching `to_port`. Returns the edge id and
+    /// the original target as the delivery node so the engine's normal
+    /// `resolve_in_port_chain` will re-derive the inner leaf at delivery
+    /// time.
+    fn resolve_via_compound_in_port(
+        &self,
+        from_nid: NodeId,
+        target_id: NodeId,
+    ) -> Option<(EdgeId, NodeId)> {
+        let mut cur = self.nodes.get(&target_id)?.parent;
+        let mut depth_target = target_id;
+        while let Some(pid) = cur {
+            let p_node = self.nodes.get(&pid)?;
+            if let Some(body) = &p_node.compound {
+                for (port_name, &inner) in &body.in_ports {
+                    if inner != depth_target { continue; }
+                    if let Some(eid) = self
+                        .outbound(from_nid)
+                        .iter()
+                        .copied()
+                        .find(|eid| {
+                            let e = &self.edges[eid];
+                            e.to == pid && e.to_port.as_deref() == Some(port_name.as_str())
+                        })
+                    {
+                        return Some((eid, target_id));
+                    }
+                }
+                depth_target = pid;
+            }
+            cur = p_node.parent;
+        }
+        None
+    }
+
     fn find_enclosing_compound_for_out_port(&self, start: NodeId, port_name: &str) -> Option<NodeId> {
         let mut cur = self.nodes.get(&start)?.parent;
         let seeker = start;
@@ -1041,12 +1082,78 @@ impl Sim {
                     // auto-created one — the single wire the user drew
                     // carries both directions.
                     (eid, target_id)
+                } else if let Some((eid, deliver)) =
+                    self.resolve_via_compound_in_port(from_nid, target_id)
+                {
+                    // Compound-aware fallback: when the target node lives
+                    // inside a compound, the caller's outbound edge will
+                    // typically point at the *compound shim* via an in-port
+                    // (e.g. `Echo -> ClientComposite.reply`). The earlier
+                    // direct/reverse checks compare against the inner node
+                    // id and miss those edges. Walk the target's parent
+                    // chain and look for an outbound edge of `from_nid`
+                    // landing on an ancestor compound with an `in_port`
+                    // mapped to the target. If found, route via that edge
+                    // — `resolve_in_port_chain` re-derives the inner leaf
+                    // at delivery.
+                    (eid, deliver)
                 } else {
                     // Neither direction available — the target genuinely
                     // isn't reachable from this node. Silent-drop matches
                     // "unwired output" contract for interactive authoring.
                     return;
                 }
+            }
+            EmitTo::FromPort(port_name) => {
+                // Fan onto every outbound edge of `from_nid` whose
+                // `from_port` matches. Same broadcast pattern as
+                // `ToOutPort` but scoped to the firing leaf node —
+                // no parent walk. Silently drops if nothing matches
+                // (unwired output, like DefaultOut).
+                let edge_ids: Vec<EdgeId> = self
+                    .outbound(from_nid)
+                    .iter()
+                    .copied()
+                    .filter(|eid| {
+                        self.edges[eid].from_port.as_deref() == Some(port_name.as_str())
+                    })
+                    .collect();
+                if edge_ids.is_empty() {
+                    return;
+                }
+                for eid in edge_ids {
+                    let edge = self.edges[&eid].clone();
+                    let latency = self.eval_latency_expr(&edge.latency_ns, from_nid, edge.to, bindings, &payload);
+                    let arrives_at = self.now_ns.saturating_add(latency);
+                    let pid = self.next_packet_id();
+                    self.log.push(Event::PacketEmitted {
+                        packet: pid,
+                        from: from_nid,
+                        to: edge.to,
+                        at_ns: self.now_ns,
+                        arrives_at_ns: arrives_at,
+                        payload: payload.clone(),
+                    });
+                    self.in_flight.push(Reverse(Scheduled {
+                        arrives_at_ns: arrives_at,
+                        packet: Packet {
+                            id: pid,
+                            payload: payload.clone(),
+                            from_edge: None,
+                            metadata: metadata.clone(),
+                            return_path: return_path.clone(),
+                            emitted_at_ns: self.now_ns,
+                        },
+                        edge: eid,
+                        deliver_to: edge.to,
+                    }));
+                    let seq = self.next_emit_seq;
+                    self.next_emit_seq += 1;
+                    if let Some(e) = self.edges.get_mut(&eid) {
+                        e.last_sent_seq = Some(seq);
+                    }
+                }
+                return;
             }
             EmitTo::ToOutPort(port_name) => {
                 // Find the nearest ancestor compound that has this out-port

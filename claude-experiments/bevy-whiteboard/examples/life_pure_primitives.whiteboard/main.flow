@@ -1,0 +1,71 @@
+# Game of Life with cells composed PURELY of primitives.
+#
+# Per cell (10 primitive nodes):
+#   T_x_y    : Tick                — period clock
+#   SW_x_y   : Switch              — `passing` IS the alive bit
+#   C1_x_y   : ConstantPacket(1)   — "I am alive" payload (1)
+#   C0_x_y   : ConstantPacket(0)   — "I am dead" payload (0)
+#   B_x_y    : FanOut              — broadcast to 8 neighbours
+#   A_x_y    : Aggregator(n=8)     — sum 8 neighbour packets
+#   F3_x_y   : Filter(match=3)     — detect sum==3 (B3 trigger)
+#   F2_x_y   : Filter(match=2)     — detect sum==2 (S23 keep-alive)
+#   ToAlv_x_y: ConstantSignal(0)   — fires signal(0) → SW.passing=1 (alive)
+#   ToDed_x_y: ConstantSignal(1)   — fires signal(1) → SW.passing=0 (dead)
+#
+# How the Conway B3/S23 rule emerges from these primitives:
+#   Tick → SW. SW routes packet(nil) out .pass if alive=1, .divert if 0.
+#     .pass  → C1 (emits packet(1)) → B → neighbours' Aggregators
+#     .divert→ C0 (emits packet(0)) → B → neighbours' Aggregators
+#   A sums 8 incoming packets → emits packet(sum).
+#   sum routes through F3 then F2:
+#     sum==3        → F3.pass    → ToAlv → signal(0) → SW.passing=1 (B3)
+#     sum==2        → F2.pass    → unwired (silent → SW unchanged → stay)
+#     anything else → F2.reject  → ToDed → signal(1) → SW.passing=0
+#
+# No Conway-specific arithmetic anywhere: only Switch routing,
+# Filter equality matching, and two small "emit-a-constant" primitives.
+
+for x in 0..3, y in 0..3 {
+    node T_{x}_{y}     : Tick           { period_ns: 200000000 }
+    node SW_{x}_{y}    : Switch         { passing: if x == 1 then 1 else 0 }
+    node C1_{x}_{y}    : ConstantPacket { value: 1 }
+    node C0_{x}_{y}    : ConstantPacket { value: 0 }
+    node B_{x}_{y}     : FanOut         { }
+    node A_{x}_{y}     : Aggregator     { n: 8 }
+    node F3_{x}_{y}    : Filter         { match: 3 }
+    node F2_{x}_{y}    : Filter         { match: 2 }
+    node ToAlv_{x}_{y} : ConstantSignal { value: 0 }
+    node ToDed_{x}_{y} : ConstantSignal { value: 1 }
+}
+
+edges {
+    # Per-cell internal wiring.
+    for x in 0..3, y in 0..3 {
+        # Tick → Switch → ConstantPacket(0|1) → FanOut → neighbours.
+        T_{x}_{y}        -> SW_{x}_{y}     : 1ms
+        SW_{x}_{y}.pass   -> C1_{x}_{y}     : 1ms
+        SW_{x}_{y}.divert -> C0_{x}_{y}     : 1ms
+        C1_{x}_{y}       -> B_{x}_{y}      : 1ms
+        C0_{x}_{y}       -> B_{x}_{y}      : 1ms
+
+        # Aggregator output → Filter chain → ConstantSignal → Switch.
+        A_{x}_{y}         -> F3_{x}_{y}     : 1ms
+        F3_{x}_{y}.pass   -> ToAlv_{x}_{y}  : 1ms
+        F3_{x}_{y}.reject -> F2_{x}_{y}     : 1ms
+        F2_{x}_{y}.reject -> ToDed_{x}_{y}  : 1ms
+        ToAlv_{x}_{y}    -> SW_{x}_{y}     : 1ms
+        ToDed_{x}_{y}    -> SW_{x}_{y}     : 1ms
+    }
+
+    # Toroidal 8-neighbour wiring: each cell's FanOut → 8 neighbours' Aggregators.
+    for y in 0..3, x in 0..3 {
+        B_{x}_{y} -> A_{(x + 2) % 3}_{(y + 2) % 3} : 1ms
+        B_{x}_{y} -> A_{x}_{(y + 2) % 3}           : 1ms
+        B_{x}_{y} -> A_{(x + 1) % 3}_{(y + 2) % 3} : 1ms
+        B_{x}_{y} -> A_{(x + 2) % 3}_{y}           : 1ms
+        B_{x}_{y} -> A_{(x + 1) % 3}_{y}           : 1ms
+        B_{x}_{y} -> A_{(x + 2) % 3}_{(y + 1) % 3} : 1ms
+        B_{x}_{y} -> A_{x}_{(y + 1) % 3}           : 1ms
+        B_{x}_{y} -> A_{(x + 1) % 3}_{(y + 1) % 3} : 1ms
+    }
+}

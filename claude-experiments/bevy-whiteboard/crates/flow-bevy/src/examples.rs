@@ -272,6 +272,8 @@ impl BuildCtx<'_, '_, '_> {
             has_color,
             name,
             pos,
+            None,
+            None,
         );
         if has_color {
             self.node_colors.0.insert(fid, self.theme.data[slot]);

@@ -82,8 +82,8 @@ pub trait InterpRootManager<
 
     /// Register an additional root source (e.g., the JIT's
     /// continuation store) that should be scanned during collection.
-    /// Default: no-op (NoGcRoots doesn't collect so extra roots are
-    /// meaningless).
+    /// Default: no-op (a non-allocating root manager doesn't collect
+    /// so extra roots are meaningless).
     ///
     /// # Safety
     /// The pointed-to RootSource must remain valid for all subsequent
@@ -95,53 +95,6 @@ pub trait InterpRootManager<
     }
 }
 
-/// No-op root manager for when GC is not needed.
-pub struct NoGcRoots;
-
-impl<L, Roots, Transport> InterpRootManager<L, Roots, Transport> for NoGcRoots
-where
-    L: ValueLayout,
-    Roots: RootStrategy<L>,
-    Transport: RootTransport<L, Roots>,
-{
-    fn push_frame(&self, _gc_slot_count: usize) -> usize {
-        0
-    }
-    fn pop_frame(&self) {}
-    fn set_root(&self, _frame: usize, _slot: usize, _value: u64) {}
-    fn get_root(&self, _frame: usize, _slot: usize) -> u64 {
-        0
-    }
-    fn clear_frame(&self, _frame: usize) {}
-    fn collect(&self) {}
-}
-
-/// `NoGcRoots` also serves as a trivial `ContinuationContext` that
-/// panics on any capture/resume attempt. Interpreters using `NoGcRoots`
-/// are implicitly saying "this program will never use continuations";
-/// if one tries to, the panic makes the mistake loud.
-impl dynexec::ContinuationContext for NoGcRoots {
-    fn capture(
-        &self,
-        _builder: &dynexec::CapturedStackBuilder,
-    ) -> Option<u64> {
-        panic!(
-            "NoGcRoots: capture_continuation called but no heap was \
-             configured. Use GcInterpCtx as the root manager if you \
-             need delimited continuations."
-        );
-    }
-    fn read<'h>(
-        &'h self,
-        _handle: u64,
-    ) -> Option<dynexec::ContinuationView<'h>> {
-        panic!(
-            "NoGcRoots: read_continuation called but no heap was \
-             configured. Use GcInterpCtx as the root manager if you \
-             need delimited continuations."
-        );
-    }
-}
 
 // ─── InterpStackRuntime ───────────────────────────────────────────
 
@@ -154,6 +107,11 @@ struct InterpFrame {
     inst_idx: usize,
     resume: FrameResume,
     active_prompts: Vec<u32>,
+    /// Stack of `Inst::PushHandler` handler block indices that are
+    /// currently active in this frame. `Raise` (and exceptions
+    /// propagating up from extern calls / internal calls) check the
+    /// top of this stack first before unwinding past the frame.
+    active_handlers: Vec<usize>,
     root_frame: usize,
     val_to_slot: Vec<Option<usize>>,
 }
@@ -303,6 +261,7 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
                 inst_idx: f.inst_idx as usize,
                 resume,
                 active_prompts: f.active_prompts.to_vec(),
+                active_handlers: Vec::new(),
                 root_frame,
                 val_to_slot,
             };
@@ -382,6 +341,7 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
             inst_idx: 0,
             resume,
             active_prompts: Vec::new(),
+            active_handlers: Vec::new(),
             root_frame,
             val_to_slot,
         });
@@ -467,6 +427,34 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
             .rposition(|f| f.active_prompts.contains(&prompt))
     }
 
+    /// Push an exception handler on the current top frame's handler
+    /// stack. `handler_block_idx` is the block to jump to when an
+    /// exception fires in the dynamic scope of this push.
+    fn push_handler(&mut self, handler_block_idx: usize) {
+        self.stack
+            .last_mut()
+            .unwrap()
+            .active_handlers
+            .push(handler_block_idx);
+    }
+
+    /// Pop the most-recently-pushed exception handler from the current
+    /// top frame. Asserts a handler was active (mismatched push/pop is
+    /// a programmer error in the IR).
+    fn pop_handler(&mut self) {
+        let popped = self.stack.last_mut().unwrap().active_handlers.pop();
+        assert!(
+            popped.is_some(),
+            "pop_handler without matching push_handler"
+        );
+    }
+
+    /// Return the topmost active exception handler block in the current
+    /// frame, or `None` if no handler is pushed.
+    fn top_handler(&self) -> Option<usize> {
+        self.stack.last().and_then(|f| f.active_handlers.last().copied())
+    }
+
     fn pop_frames_above(&mut self, depth: usize) {
         while self.stack.len() > depth + 1 {
             self.stack.pop();
@@ -543,7 +531,7 @@ enum FrameAction {
 pub struct ConfiguredModuleInterpreter<
     'a,
     Cfg: CodegenConfig,
-    R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport> = NoGcRoots,
+    R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport>,
 > {
     module: &'a Module,
     roots: &'a R,
@@ -563,7 +551,7 @@ pub struct ConfiguredModuleInterpreter<
 static NO_CONT_CTX: dynexec::NoContinuations = dynexec::NoContinuations;
 
 
-pub type ModuleInterpreter<'a, S, R = NoGcRoots> =
+pub type ModuleInterpreter<'a, S, R> =
     ConfiguredModuleInterpreter<'a, DefaultCodegenConfig<S>, R>;
 
 impl<'a, Cfg: CodegenConfig, R> ConfiguredModuleInterpreter<'a, Cfg, R>
@@ -765,10 +753,22 @@ where
                                 exception_args_vals,
                                 ..
                             } => {
+                                // New convention: first exception
+                                // block param receives the runtime
+                                // exception value; exception_args
+                                // fill slots 1.. (mirrors dynlower).
                                 let func = &self.module.functions[sr.func_idx()];
                                 let target_block = &func.blocks[exception_block];
+                                let mut param_idx = 0;
+                                if !target_block.params.is_empty() {
+                                    sr.set(target_block.params[0].0.index(), exc);
+                                    param_idx = 1;
+                                }
                                 for (i, val) in exception_args_vals.iter().enumerate() {
-                                    sr.set(target_block.params[i].0.index(), *val);
+                                    sr.set(
+                                        target_block.params[param_idx + i].0.index(),
+                                        *val,
+                                    );
                                 }
                                 sr.set_block(exception_block);
                                 sr.set_inst(0);
@@ -776,6 +776,27 @@ where
                             }
                             FrameResume::FromCall { .. }
                             | FrameResume::FromResume { .. } => {
+                                // We just popped a callee frame. If
+                                // the caller (now top) has an active
+                                // `push_handler`, route to it — this
+                                // is what turns plain `Call`s inside
+                                // a try region into implicit invokes.
+                                if let Some(handler_bb) = sr.top_handler() {
+                                    let func =
+                                        &self.module.functions[sr.func_idx()];
+                                    let target = &func.blocks[handler_bb];
+                                    assert!(
+                                        !target.params.is_empty(),
+                                        "push_handler target block must have a value param",
+                                    );
+                                    sr.set(
+                                        target.params[0].0.index(),
+                                        exc,
+                                    );
+                                    sr.set_block(handler_bb);
+                                    sr.set_inst(0);
+                                    break;
+                                }
                                 continue;
                             }
                         }
@@ -884,6 +905,18 @@ where
 
                     Inst::PopPrompt(prompt) => {
                         sr.pop_prompt(prompt.index_u32());
+                        sr.advance_inst();
+                        continue;
+                    }
+
+                    Inst::PushHandler(handler) => {
+                        sr.push_handler(handler.index());
+                        sr.advance_inst();
+                        continue;
+                    }
+
+                    Inst::PopHandler => {
+                        sr.pop_handler();
                         sr.advance_inst();
                         continue;
                     }
@@ -1149,8 +1182,29 @@ where
                                 sr.set_block(normal.index());
                                 sr.set_inst(0);
                             }
-                            ExternCallResult::Exception(_exc) => {
-                                transfer_args(sr, *exception, exception_args, func);
+                            ExternCallResult::Exception(exc) => {
+                                // New convention: if the exception
+                                // block has any params, the first one
+                                // receives the runtime exception
+                                // value; user-supplied exception_args
+                                // fill slots 1.. Mirrors the dynlower
+                                // codegen path.
+                                let target_block = &func.blocks[exception.index()];
+                                let mut param_idx = 0;
+                                if !target_block.params.is_empty() {
+                                    sr.set(target_block.params[0].0.index(), exc);
+                                    param_idx = 1;
+                                }
+                                let extra: Vec<u64> = exception_args
+                                    .iter()
+                                    .map(|v| sr.get(v.index()))
+                                    .collect();
+                                for (i, val) in extra.iter().enumerate() {
+                                    sr.set(
+                                        target_block.params[param_idx + i].0.index(),
+                                        *val,
+                                    );
+                                }
                                 sr.set_block(exception.index());
                                 sr.set_inst(0);
                             }
@@ -1195,8 +1249,25 @@ where
                             sr.set_block(normal.index());
                             sr.set_inst(0);
                         }
-                        ExternCallResult::Exception(_exc) => {
-                            transfer_args(sr, *exception, exception_args, func);
+                        ExternCallResult::Exception(exc) => {
+                            // Same exception-block convention as
+                            // direct Invoke above.
+                            let target_block = &func.blocks[exception.index()];
+                            let mut param_idx = 0;
+                            if !target_block.params.is_empty() {
+                                sr.set(target_block.params[0].0.index(), exc);
+                                param_idx = 1;
+                            }
+                            let extra: Vec<u64> = exception_args
+                                .iter()
+                                .map(|v| sr.get(v.index()))
+                                .collect();
+                            for (i, val) in extra.iter().enumerate() {
+                                sr.set(
+                                    target_block.params[param_idx + i].0.index(),
+                                    *val,
+                                );
+                            }
                             sr.set_block(exception.index());
                             sr.set_inst(0);
                         }
@@ -1231,6 +1302,28 @@ where
                         prompt: *prompt,
                         args: arg_vals,
                     });
+                }
+
+                Terminator::Raise(v) => {
+                    // If a `push_handler` is active in the current
+                    // frame, route locally. Otherwise propagate up to
+                    // the caller via `FrameAction::Exception`, which
+                    // walks the stack looking for the nearest handler
+                    // (push_handler OR invoke exception_block).
+                    let exc = sr.get(v.index());
+                    if let Some(handler_bb) = sr.top_handler() {
+                        let func = &self.module.functions[sr.func_idx()];
+                        let target = &func.blocks[handler_bb];
+                        assert!(
+                            !target.params.is_empty(),
+                            "push_handler target block must have at least one param (the thrown value)",
+                        );
+                        sr.set(target.params[0].0.index(), exc);
+                        sr.set_block(handler_bb);
+                        sr.set_inst(0);
+                        continue;
+                    }
+                    return Ok(FrameAction::Exception(exc));
                 }
 
                 Terminator::Unreachable => {
@@ -1547,6 +1640,8 @@ fn exec_non_call_inst<S: ValueLayout>(
         | Inst::StackAddr(..)
         | Inst::PushPrompt(..)
         | Inst::PopPrompt(..)
+        | Inst::PushHandler(..)
+        | Inst::PopHandler
         | Inst::CaptureSlice(..)
         | Inst::CloneSlice(..) => {
             panic!("Call/CallIndirect/InvokeDynamic/Safepoint/StackAddr must be handled by the interpreter, not exec_non_call_inst");

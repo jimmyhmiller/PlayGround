@@ -1,0 +1,34 @@
+# Two-position routing switch. Packets go out `pass` when `passing == 1`,
+# out `divert` when `passing == 0`. Position is flipped by `signal`
+# packets on the control input: signal(1) trips (passing := 0); signal(0)
+# resets (passing := 1). Wire a Threshold's output here to make the
+# Switch close when a measured value crosses a limit (the building
+# block for circuit breakers, rate limiters, etc.).
+node Switch {
+    slots { passing: Int = 1 }
+    probes { state: "{if passing == 1 then 1 else 0}" }
+    rule pass {
+        on packet(p)
+        when passing == 1
+        do { emit packet(p) to port pass }
+    }
+    rule divert {
+        on packet(p)
+        when passing == 0
+        do { emit packet(p) to port divert }
+    }
+    rule trip {
+        on signal(v)
+        when v == 1
+        do { passing := 0 }
+    }
+    rule reset {
+        on signal(v)
+        when v == 0
+        do { passing := 1 }
+    }
+    # Fallthroughs: signals with other values, and packets when
+    # `passing` is some unexpected value, are consumed without action.
+    rule signal_consume { on signal(_) do { } }
+    rule packet_consume { on packet(_) do { } }
+}

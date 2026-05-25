@@ -46,14 +46,16 @@ pub enum CtValue {
     Int(i64),
     Bool(bool),
     Str(String),
+    Float(f64),
 }
 
 impl CtValue {
     fn type_name(&self) -> &'static str {
         match self {
-            CtValue::Int(_) => "Int",
-            CtValue::Bool(_) => "Bool",
-            CtValue::Str(_) => "String",
+            CtValue::Int(_)   => "Int",
+            CtValue::Bool(_)  => "Bool",
+            CtValue::Str(_)   => "String",
+            CtValue::Float(_) => "Float",
         }
     }
     fn as_int(&self) -> Result<i64, String> {
@@ -64,9 +66,10 @@ impl CtValue {
     }
     fn to_display_string(&self) -> String {
         match self {
-            CtValue::Int(n) => n.to_string(),
-            CtValue::Bool(b) => b.to_string(),
-            CtValue::Str(s) => s.clone(),
+            CtValue::Int(n)   => n.to_string(),
+            CtValue::Bool(b)  => b.to_string(),
+            CtValue::Str(s)   => s.clone(),
+            CtValue::Float(f) => f.to_string(),
         }
     }
 }
@@ -304,7 +307,8 @@ fn expand_compound_with_overrides(
             match (&p.ty, ov) {
                 (ast::CtType::Int, CtValue::Int(_))
                 | (ast::CtType::Bool, CtValue::Bool(_))
-                | (ast::CtType::Str, CtValue::Str(_)) => {}
+                | (ast::CtType::Str, CtValue::Str(_))
+                | (ast::CtType::Float, CtValue::Float(_)) => {}
                 _ => return Err(format!(
                     "compound `{}` param `{}`: override type {} doesn't match declared type {:?}",
                     c.name, p.name, ov.type_name(), p.ty
@@ -563,6 +567,7 @@ fn bind_compound_param(p: &TplParam, env: &Env, owner: &str) -> Result<CtValue, 
         (ast::CtType::Int, CtValue::Int(_)) => {}
         (ast::CtType::Bool, CtValue::Bool(_)) => {}
         (ast::CtType::Str, CtValue::Str(_)) => {}
+        (ast::CtType::Float, CtValue::Float(_)) => {}
         _ => return Err(bad()),
     }
     Ok(v)
@@ -690,6 +695,7 @@ fn expand_emit_target(t: &EmitTarget, env: &Env, name_prefix: &str) -> Result<Em
         EmitTarget::Default => EmitTarget::Default,
         EmitTarget::Self_ => EmitTarget::Self_,
         EmitTarget::OutPort(s) => EmitTarget::OutPort(s.clone()),
+        EmitTarget::FromPort(s) => EmitTarget::FromPort(s.clone()),
         EmitTarget::Target(name) => {
             let resolved = resolve_name(name, env, name_prefix)
                 .map_err(|e| format!("emit target: {}", e))?;
@@ -872,9 +878,10 @@ fn rewrite_expr_names(e: &Expr, env: &Env, name_prefix: &str) -> Result<Expr, St
 
 fn ct_value_to_lit_expr(v: &CtValue) -> Expr {
     match v {
-        CtValue::Int(n) => Expr::Int(*n),
-        CtValue::Bool(b) => Expr::Bool(*b),
-        CtValue::Str(s) => Expr::Str(s.clone()),
+        CtValue::Int(n)   => Expr::Int(*n),
+        CtValue::Bool(b)  => Expr::Bool(*b),
+        CtValue::Str(s)   => Expr::Str(s.clone()),
+        CtValue::Float(f) => Expr::Float(*f),
     }
 }
 
@@ -903,9 +910,10 @@ fn fold_unary(op: UnOp, x: Expr) -> Expr {
 
 fn expr_to_ct(e: &Expr) -> Option<CtValue> {
     match e {
-        Expr::Int(n) => Some(CtValue::Int(*n)),
-        Expr::Bool(b) => Some(CtValue::Bool(*b)),
-        Expr::Str(s) => Some(CtValue::Str(s.clone())),
+        Expr::Int(n)   => Some(CtValue::Int(*n)),
+        Expr::Bool(b)  => Some(CtValue::Bool(*b)),
+        Expr::Str(s)   => Some(CtValue::Str(s.clone())),
+        Expr::Float(f) => Some(CtValue::Float(*f)),
         _ => None,
     }
 }
@@ -922,7 +930,7 @@ fn expr_to_ct(e: &Expr) -> Option<CtValue> {
 fn ct_eval(e: &Expr, env: &Env) -> Result<CtValue, String> {
     match e {
         Expr::Int(n) => Ok(CtValue::Int(*n)),
-        Expr::Float(_) => Err("compile-time eval: floats are not supported".to_string()),
+        Expr::Float(f) => Ok(CtValue::Float(*f)),
         Expr::Bool(b) => Ok(CtValue::Bool(*b)),
         Expr::Str(s) => Ok(CtValue::Str(s.clone())),
         Expr::Nil => Err("compile-time eval: `nil` is not a compile-time value".to_string()),

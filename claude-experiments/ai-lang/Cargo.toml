@@ -1,0 +1,8 @@
+[package]
+name = "ai-lang"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blake3 = "1.5"
+inkwell = { git = "https://github.com/jimmyhmiller/inkwell", features = ["llvm21-1"] }

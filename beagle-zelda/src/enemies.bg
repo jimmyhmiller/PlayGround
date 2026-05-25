@@ -150,7 +150,7 @@ fn segment_blocked(from, to, walls) {
 // Monster AI
 // ============================================================
 
-let MONSTER_ALERT_TIMEOUT = 2.5
+let MONSTER_ALERT_TIMEOUT = 6.0
 
 fn advance_monster(m, player_pos, walls, dt) {
     let to_player = v/sub(player_pos, m.pos)
@@ -188,23 +188,31 @@ fn advance_monster(m, player_pos, walls, dt) {
     let mut wander_dir = m.wander_dir
     let mut wander_timer = m.wander_timer
     if has_los && has_seen {
+        // Predict where the player is heading — lead the target slightly so
+        // monsters cut you off instead of just tail-chasing.
         let dir = v/normalize_or_zero(to_player)
         vx = dir.x * m.speed
         vy = dir.y * m.speed
+    } else if has_seen && !has_los {
+        // Lost LOS but still alert — rush toward last known position at full
+        // speed. This makes breaking LOS feel tense, not safe.
+        let dir = v/normalize_or_zero(to_player)
+        vx = dir.x * m.speed * 0.85
+        vy = dir.y * m.speed * 0.85
     } else {
         wander_timer = wander_timer - dt
         if wander_timer <= 0.0 {
-            if rand_float_01() < 0.3 {
+            if rand_float_01() < 0.15 {
                 wander_dir = v/ZERO
-                wander_timer = rand_range(1.0, 3.0)
+                wander_timer = rand_range(0.5, 1.5)
             } else {
                 let angle = rand_float_01() * 2.0 * 3.14159265
                 wander_dir = v/from_angle(angle)
-                wander_timer = rand_range(1.5, 4.0)
+                wander_timer = rand_range(1.0, 2.5)
             }
         }
-        vx = wander_dir.x * m.speed * 0.3
-        vy = wander_dir.y * m.speed * 0.3
+        vx = wander_dir.x * m.speed * 0.45
+        vy = wander_dir.y * m.speed * 0.45
     }
 
     let vel = v/make(vx, vy)
@@ -260,10 +268,20 @@ fn advance_sentinel(s, player_pos, walls, dt) {
         new_alerted = true
         new_angle = atan2(to_player.y, to_player.x)
         let dir = v/normalize_or_zero(to_player)
-        vx = dir.x * s.speed
-        vy = dir.y * s.speed
+        // Sentinels rush at 2.5× their base speed when alerted — they're
+        // meant to punish you hard for getting caught in the beam.
+        vx = dir.x * s.speed * 2.5
+        vy = dir.y * s.speed * 2.5
     } else if s.alerted {
-        new_alerted = false
+        // Stay alerted and keep chasing toward player briefly even after
+        // losing cone — gives the sentinel a "lunge" that punishes close calls.
+        let chase_dir = v/normalize_or_zero(to_player)
+        vx = chase_dir.x * s.speed * 1.5
+        vy = chase_dir.y * s.speed * 1.5
+        // Only de-alert if player is far enough away
+        if dist > s.light_range * 0.6 {
+            new_alerted = false
+        }
     } else {
         new_angle = s.aim_angle + s.sweep_speed * deg2rad * s.sweep_dir * dt
         if v/abs_f(sin(new_angle)) < 0.01 || rand_float_01() < 0.002 {

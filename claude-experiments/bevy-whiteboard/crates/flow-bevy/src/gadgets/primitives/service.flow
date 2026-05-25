@@ -1,0 +1,61 @@
+# Single-track service with bounded backlog. A `packet(p)` arrival
+# either starts servicing immediately (when idle), enqueues (when busy
+# and there's room), or overflows out the `overflow` port (when full).
+# Service time is the self-loop latency; when the in-flight job finishes,
+# the next backlog entry (if any) is dequeued and served.
+#
+# Equivalent to chaining Buffer → Delay with pull-feedback — but bundled
+# so the pull loop is implicit. Use as the engine of a Worker-shaped
+# gadget (Worker = Lift → Filter → Service → Reply).
+node Service {
+    slots {
+        service_ns:  Int = 50000000
+        backlog:     Samples(64)
+        backlog_cap: Int = 5
+        busy:        Int = 0
+    }
+    probes {
+        busy:    "{busy}"
+        backlog: "{len(backlog)}"
+    }
+    on_spawn {
+        # Self-loop carries the service window. `done` rides this edge.
+        self -> self : service_ns
+    }
+    # Rule ORDER matters: finish_* must come BEFORE serve / enqueue so a
+    # `done` arriving in the same sim tick as a fresh `packet` advances
+    # the queue first, freeing the busy slot.
+    rule finish_next {
+        on done(p)
+        when len(backlog) > 0
+        do {
+            pop backlog -> next
+            emit packet(p) to default
+            emit done(next) to self
+        }
+    }
+    rule finish_idle {
+        on done(p)
+        do {
+            busy := 0
+            emit packet(p) to default
+        }
+    }
+    rule serve {
+        on packet(p)
+        when busy == 0
+        do {
+            busy := 1
+            emit done(p) to self
+        }
+    }
+    rule enqueue {
+        on packet(p)
+        when len(backlog) < backlog_cap
+        do { push backlog <- p }
+    }
+    rule overflow_out {
+        on packet(p)
+        do { emit packet(p) to port overflow }
+    }
+}

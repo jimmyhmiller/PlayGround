@@ -96,12 +96,45 @@ pub struct CallerCalleeAggregate {
     pub callees: Vec<(StringId, u64, u32, u32)>,
 }
 
+/// One node in the top-down call tree. Same-named sibling slices are merged at
+/// every level, across all tracks, so a single node represents every place a
+/// function was called from a given parent.
+#[derive(Clone, Debug)]
+pub struct CallTreeNode {
+    pub name: StringId,
+    /// Sum of `dur_ns` across all slices that contributed to this node.
+    pub total_ns: u64,
+    /// Sum of self-time (`dur - children_dur`) across contributing slices.
+    pub self_ns: u64,
+    /// Number of slices merged into this node.
+    pub count: u32,
+    /// Tree depth (root = 0).
+    pub depth: u16,
+    /// Indices into `CallTree::nodes`.
+    pub children: Vec<u32>,
+    /// Index into `CallTree::nodes`, or `u32::MAX` for roots.
+    pub parent: u32,
+    /// Largest contributing slice index — used for "jump to flame" actions.
+    pub exemplar_slice_idx: u32,
+}
+
+#[derive(Default, Clone, Debug)]
+pub struct CallTree {
+    pub nodes: Vec<CallTreeNode>,
+    pub roots: Vec<u32>,
+    /// Sum of root totals — denominator for percentages.
+    pub total_ns: u64,
+}
+
 /// Which top-level view is currently active.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum MainTab {
     /// The timeline / flame graph view (default). Sandwich/callers/callees of the
     /// selected slice live in this tab's right-side inspector panel.
     Flame,
+    /// Top-down call tree, all calls aggregated by name at each level. Click
+    /// a row to expand/collapse. Firefox-profiler "Call Tree" equivalent.
+    CallTree,
     /// Top functions by **total** duration.
     Hotspots,
     /// Top functions by **self** duration (Firefox bottom-up call tree at depth 1).
@@ -113,6 +146,7 @@ pub enum MainTab {
 impl MainTab {
     pub const ALL: &'static [MainTab] = &[
         MainTab::Flame,
+        MainTab::CallTree,
         MainTab::Hotspots,
         MainTab::BottomUp,
         MainTab::Table,
@@ -120,6 +154,7 @@ impl MainTab {
     pub fn label(self) -> &'static str {
         match self {
             MainTab::Flame => "FLAME",
+            MainTab::CallTree => "CALL TREE",
             MainTab::Hotspots => "HOTSPOTS",
             MainTab::BottomUp => "BOTTOM-UP",
             MainTab::Table => "ALL FUNCTIONS",
@@ -169,6 +204,12 @@ const SECTION_GAP_PX: f32 = 24.0;
 const TAB_HEIGHT_PX: f32 = 56.0;
 /// Height of the global tab bar at the top of the window.
 pub const TAB_BAR_HEIGHT_PX: f32 = 70.0;
+/// One row in the CALL TREE view.
+const CALL_TREE_ROW_H: f32 = 36.0;
+/// Column-header band above the CALL TREE rows.
+const CALL_TREE_HEADER_H: f32 = 44.0;
+/// Pixels of indent per call-tree depth level.
+const CALL_TREE_INDENT_PX: f32 = 18.0;
 /// Color of the tab bar background.
 const TAB_BAR_BG_COLOR: [f32; 4] = [0.095, 0.103, 0.122, 1.0];
 
@@ -231,6 +272,17 @@ pub struct Renderer {
     pub aggregated_track_rows: Vec<u16>,
     /// Cached sandwich aggregate for the currently selected slice's function name.
     pub sandwich_cache: Option<(StringId, CallerCalleeAggregate)>,
+    /// Top-down call tree, built once on profile load. None until a profile loads.
+    pub call_tree: Option<CallTree>,
+    /// Set of expanded node indices in `call_tree.nodes`. Roots are always
+    /// considered visible regardless of this set; this gates whether each
+    /// node's `children` are walked.
+    pub expanded_tree_nodes: AHashSet<u32>,
+    /// Per-frame: clickable rect + node idx for each visible tree row.
+    pub call_tree_row_rects: Vec<(u32, [f32; 4])>,
+    /// CallTree-tab-specific vertical scroll offset (in px). Decoupled from the
+    /// timeline's `viewport.scroll_y_px` so switching tabs doesn't lose either.
+    pub call_tree_scroll_y_px: f32,
 
     // glyphon text state
     font_system: FontSystem,
@@ -432,6 +484,10 @@ impl Renderer {
             inspector_tab_rects: Vec::new(),
             active_tab: MainTab::Flame,
             sandwich_cache: None,
+            call_tree: None,
+            expanded_tree_nodes: AHashSet::new(),
+            call_tree_row_rects: Vec::new(),
+            call_tree_scroll_y_px: 0.0,
             track_header_rects: Vec::new(),
             collapsed_tracks: AHashSet::new(),
             layout_mode: LayoutMode::TimeOrdered,
@@ -460,6 +516,15 @@ impl Renderer {
         self.aggregated_slices = Some(Arc::new(agg_slices));
         self.aggregated_time_range = agg_range;
         self.aggregated_track_rows = agg_rows;
+
+        let tree = build_call_tree(&profile, &self.self_dur_ns);
+        // Default-expand all roots so the user sees something useful immediately.
+        self.expanded_tree_nodes.clear();
+        for &r in &tree.roots {
+            self.expanded_tree_nodes.insert(r);
+        }
+        self.call_tree = Some(tree);
+        self.call_tree_scroll_y_px = 0.0;
         log::debug!(
             "computed aggregates for {} slices in {:?}",
             profile.slices.len(),
@@ -568,6 +633,8 @@ impl Renderer {
         let strings = &profile.strings;
         match self.active_tab {
             MainTab::Flame => Vec::new(),
+            // CallTree has its own custom rendering path; tab_rows is unused.
+            MainTab::CallTree => Vec::new(),
             MainTab::Hotspots => self
                 .functions_by_total
                 .iter()
@@ -872,6 +939,12 @@ impl Renderer {
         };
 
         // Non-flame tabs render a full-window content list below the tab bar.
+        if self.active_tab == MainTab::CallTree {
+            self.emit_call_tree_content();
+            self.emit_top_tab_bar();
+            self.finalize_instance_buffer();
+            return;
+        }
         if self.active_tab != MainTab::Flame {
             self.emit_full_tab_content();
             // Top tab bar last so it overdraws any spillover from rows.
@@ -1265,6 +1338,113 @@ impl Renderer {
         }
     }
 
+    /// Walk the call tree in display order. Yields `(node_idx, has_children)`
+    /// for every node whose ancestors are all expanded. Roots are always yielded.
+    pub fn visible_tree_nodes(&self) -> Vec<(u32, bool)> {
+        let Some(tree) = &self.call_tree else { return Vec::new() };
+        let mut out: Vec<(u32, bool)> = Vec::new();
+        let mut stack: Vec<u32> = tree.roots.iter().rev().copied().collect();
+        while let Some(node_idx) = stack.pop() {
+            let node = &tree.nodes[node_idx as usize];
+            let has_children = !node.children.is_empty();
+            out.push((node_idx, has_children));
+            if has_children && self.expanded_tree_nodes.contains(&node_idx) {
+                for &c in node.children.iter().rev() {
+                    stack.push(c);
+                }
+            }
+        }
+        out
+    }
+
+    /// Maximum scroll offset so the last row stays at least partially in view.
+    fn call_tree_max_scroll(&self) -> f32 {
+        let visible = self.visible_tree_nodes().len() as f32;
+        let row_h = CALL_TREE_ROW_H;
+        let view_h = (self.viewport.size_px.1
+            - STATUS_BAR_HEIGHT_PX
+            - TAB_BAR_HEIGHT_PX
+            - CALL_TREE_HEADER_H)
+            .max(0.0);
+        let total = visible * row_h;
+        (total - view_h * 0.5).max(0.0)
+    }
+
+    /// Pan the call-tree view by `dy_px` (positive = scroll down).
+    pub fn pan_call_tree(&mut self, dy_px: f32) {
+        self.call_tree_scroll_y_px = (self.call_tree_scroll_y_px - dy_px).max(0.0);
+        let max = self.call_tree_max_scroll();
+        if self.call_tree_scroll_y_px > max {
+            self.call_tree_scroll_y_px = max;
+        }
+    }
+
+    /// Toggle expansion of one tree node.
+    pub fn toggle_tree_node(&mut self, node_idx: u32) {
+        if !self.expanded_tree_nodes.remove(&node_idx) {
+            self.expanded_tree_nodes.insert(node_idx);
+        }
+    }
+
+    /// Hit-test the rendered call tree rows. Returns the node index whose
+    /// rect contains the cursor, or `None`.
+    pub fn hit_test_call_tree(&self, x: f32, y: f32) -> Option<u32> {
+        for (node_idx, rect) in &self.call_tree_row_rects {
+            let [rx, ry, rw, rh] = *rect;
+            if x >= rx && x < rx + rw && y >= ry && y < ry + rh {
+                return Some(*node_idx);
+            }
+        }
+        None
+    }
+
+    /// Emit row backgrounds + click rects for the CallTree tab. Text labels are
+    /// produced in `prepare_text` against the same `call_tree_row_rects`.
+    fn emit_call_tree_content(&mut self) {
+        self.call_tree_row_rects.clear();
+        let top = TAB_BAR_HEIGHT_PX + CALL_TREE_HEADER_H;
+        let view_bottom = self.viewport.size_px.1 - STATUS_BAR_HEIGHT_PX;
+        let view_h = view_bottom - top;
+        if view_h <= 0.0 {
+            return;
+        }
+        let pad = 16.0_f32;
+        let band_x = pad;
+        let band_w = (self.window_w_px - pad * 2.0).max(0.0);
+        let row_h = CALL_TREE_ROW_H;
+
+        let visible = self.visible_tree_nodes();
+        let scroll = self.call_tree_scroll_y_px;
+        for (i, (node_idx, _has_children)) in visible.iter().enumerate() {
+            let y = top + i as f32 * row_h - scroll;
+            // Skip rows entirely above or below the visible band.
+            if y + row_h <= top || y >= view_bottom {
+                continue;
+            }
+            // Even/odd alternating row colors keep tree depth readable.
+            let bg = if i % 2 == 0 { ROW_COLOR_EVEN } else { ROW_COLOR_ODD };
+            let inst_id = self.instances.len() as u32;
+            self.instances.push(SliceInstance {
+                rect_px: [band_x, y, band_w, row_h - 1.0],
+                color: bg,
+                instance_id: inst_id,
+                flags: 1,
+                _pad: [0; 2],
+            });
+            self.slice_indices.push(NON_SLICE_SENTINEL);
+            // Clip click rect to the visible content band so clicks on rows
+            // partially scrolled under the heading don't trigger.
+            let click_top = y.max(top);
+            let click_bottom = (y + row_h - 1.0).min(view_bottom);
+            if click_bottom > click_top {
+                self.call_tree_row_rects.push((
+                    *node_idx,
+                    [band_x, click_top, band_w, click_bottom - click_top],
+                ));
+            }
+        }
+    }
+
     /// Full-window content view used by HOT / SELF / SAND / ALL tabs.
     fn emit_full_tab_content(&mut self) {
         // Header band underneath the tab bar — empty so the tab content has space.
@@ -1386,8 +1566,8 @@ impl Renderer {
         // `zone` tells us where the label lives — it determines glyphon's
         // clip bounds so timeline labels don't bleed into the tab bar (and
         // tab bar labels don't bleed below it).
-        #[derive(Copy, Clone)]
-        enum Metric { Slice, Header, InspectorHeading, InspectorTitle, InspectorBody }
+        #[derive(Copy, Clone, PartialEq, Eq)]
+        enum Metric { Slice, Header, InspectorHeading, InspectorTitle, InspectorBody, MonoBody }
         #[derive(Copy, Clone, PartialEq, Eq)]
         enum Zone {
             /// Top tab bar (y in [0, TAB_BAR_HEIGHT_PX]). Anything below clipped.
@@ -1442,6 +1622,17 @@ impl Renderer {
             ));
         }
 
+        // In aggregated mode `slice_indices` and `selected_slice` index into
+        // `aggregated_slices`, not `profile.slices` — labels and the inspector
+        // both need to read from the same table the bars were drawn from.
+        let label_slices: &flame_core::SliceTable = match (
+            self.layout_mode,
+            self.aggregated_slices.as_ref(),
+        ) {
+            (LayoutMode::LeftHeavy, Some(s)) => s,
+            _ => &profile.slices,
+        };
+
         // Timeline-only content (FLAME tab only).
         if self.active_tab == MainTab::Flame {
             // Track header labels.
@@ -1481,7 +1672,7 @@ impl Renderer {
                 if inst.rect_px[2] < SLICE_LABEL_MIN_PX { continue; }
                 let slice_idx_raw = self.slice_indices[slot];
                 if slice_idx_raw == NON_SLICE_SENTINEL { continue; }
-                let name = profile.strings.get(profile.slices.name[slice_idx_raw as usize]).to_owned();
+                let name = profile.strings.get(label_slices.name[slice_idx_raw as usize]).to_owned();
                 labels.push((
                     name,
                     inst.rect_px[0] + inner_pad,
@@ -1508,11 +1699,11 @@ impl Renderer {
         if self.active_tab == MainTab::Flame {
         if let Some(sel_idx) = self.selected_slice {
             let i = sel_idx as usize;
-            if i < profile.slices.len() {
-                let name = profile.strings.get(profile.slices.name[i]).to_owned();
-                let dur = profile.slices.dur_ns[i];
-                let depth = profile.slices.depth[i];
-                let track_idx = profile.slices.track[i].0 as usize;
+            if i < label_slices.len() {
+                let name = profile.strings.get(label_slices.name[i]).to_owned();
+                let dur = label_slices.dur_ns[i];
+                let depth = label_slices.depth[i];
+                let track_idx = label_slices.track[i].0 as usize;
                 let track_name = profile.tracks.get(track_idx).map(|t| profile.strings.get(t.name)).unwrap_or("?");
 
                 labels.push(("SELECTED".into(), inspector_text_x, iy, inspector_text_w, Metric::InspectorHeading, dim_color, Zone::Below));
@@ -1594,6 +1785,91 @@ impl Renderer {
             }
         }
         // Close FLAME-only branch.
+        } else if self.active_tab == MainTab::CallTree {
+            // Column-header band: FUNCTION ......... TOTAL %TOTAL SELF COUNT.
+            let header_pad_x = 16.0_f32;
+            let header_y = top_offset + (CALL_TREE_HEADER_H - LABEL_LINE_HEIGHT) * 0.5;
+            let band_x = header_pad_x;
+            let band_w = (self.window_w_px - header_pad_x * 2.0).max(0.0);
+            let metrics_w = 460.0_f32.min(band_w * 0.55);
+            let name_col_w = (band_w - metrics_w).max(0.0);
+            let metrics_x = band_x + name_col_w;
+
+            labels.push((
+                "FUNCTION".into(),
+                band_x + 12.0,
+                header_y,
+                name_col_w - 12.0,
+                Metric::InspectorHeading,
+                title_color,
+                Zone::Below,
+            ));
+            // Column widths must match the row format below: {:>9}  {:>6}%  {:>9}  {:>5}
+            let header_text = format!(
+                "{:>9}  {:>6}{}  {:>9}  {:>5}",
+                "TOTAL", "%TOTAL", " ", "SELF", "×",
+            );
+            labels.push((
+                header_text,
+                metrics_x,
+                header_y,
+                metrics_w,
+                Metric::MonoBody,
+                title_color,
+                Zone::Below,
+            ));
+
+            // Per-row labels: chevron + indented name on the left, fixed
+            // metrics column on the right.
+            let total_ns = self
+                .call_tree
+                .as_ref()
+                .map(|t| t.total_ns)
+                .unwrap_or(0)
+                .max(1) as f64;
+            for (node_idx, rect) in self.call_tree_row_rects.clone() {
+                let Some(tree) = &self.call_tree else { break };
+                let node = &tree.nodes[node_idx as usize];
+                let chev = if node.children.is_empty() {
+                    "  "
+                } else if self.expanded_tree_nodes.contains(&node_idx) {
+                    "▾ "
+                } else {
+                    "▸ "
+                };
+                let indent_px = node.depth as f32 * CALL_TREE_INDENT_PX;
+                let name = profile.strings.get(node.name);
+                let left_text = format!("{chev}{name}");
+                let row_y = rect[1] + (rect[3] - LABEL_LINE_HEIGHT) * 0.5;
+                let left_x = rect[0] + 12.0 + indent_px;
+                let left_w = (name_col_w - 12.0 - indent_px).max(0.0);
+                labels.push((
+                    left_text,
+                    left_x,
+                    row_y,
+                    left_w,
+                    Metric::InspectorBody,
+                    title_color,
+                    Zone::Below,
+                ));
+                let pct = (node.total_ns as f64 / total_ns) * 100.0;
+                let metrics_text = format!(
+                    "{:>9}  {:>6.2}%  {:>9}  {:>5}",
+                    format_duration(node.total_ns),
+                    pct,
+                    format_duration(node.self_ns),
+                    node.count,
+                );
+                labels.push((
+                    metrics_text,
+                    metrics_x,
+                    row_y,
+                    metrics_w,
+                    Metric::MonoBody,
+                    label_color,
+                    Zone::Below,
+                ));
+            }
         } else {
             // Full-window content for HOT / SELF / SAND / ALL tabs.
             // Section heading at the top.
@@ -1686,13 +1962,19 @@ impl Renderer {
                 }
                 Metric::InspectorTitle => (INSPECTOR_TITLE_FONT, INSPECTOR_TITLE_LINE_HEIGHT),
                 Metric::InspectorBody => (INSPECTOR_BODY_FONT, INSPECTOR_LINE_HEIGHT_PX),
+                Metric::MonoBody => (INSPECTOR_BODY_FONT, INSPECTOR_LINE_HEIGHT_PX),
             };
             buf.set_metrics(&mut self.font_system, Metrics::new(fs, lh));
             buf.set_size(&mut self.font_system, Some(*max_w), Some(lh));
+            let family = if *metric == Metric::MonoBody {
+                Family::Monospace
+            } else {
+                Family::SansSerif
+            };
             buf.set_text(
                 &mut self.font_system,
                 text,
-                &Attrs::new().family(Family::SansSerif),
+                &Attrs::new().family(family),
                 Shaping::Advanced,
                 None,
             );
@@ -1711,7 +1993,9 @@ impl Renderer {
                 let lh = match metric {
                     Metric::Slice => LABEL_LINE_HEIGHT,
                     Metric::Header => HEADER_LINE_HEIGHT,
-                    Metric::InspectorHeading | Metric::InspectorBody => INSPECTOR_LINE_HEIGHT_PX,
+                    Metric::InspectorHeading
+                    | Metric::InspectorBody
+                    | Metric::MonoBody => INSPECTOR_LINE_HEIGHT_PX,
                     Metric::InspectorTitle => INSPECTOR_TITLE_LINE_HEIGHT,
                 };
                 let bounds_left = x.floor() as i32;
@@ -1939,6 +2223,122 @@ fn compute_sandwich(profile: &Profile, target: StringId) -> CallerCalleeAggregat
     CallerCalleeAggregate { callers: to_list(callers), callees: to_list(callees) }
 }
 
+/// Build a top-down call tree across all tracks. Same-named siblings under the
+/// same parent merge into one node. Root level merges depth-0 slices from
+/// every track that share a name (so a thread named `start_thread` and a
+/// process root named `start_thread` show up as one node).
+fn build_call_tree(profile: &Profile, self_dur: &[u64]) -> CallTree {
+    use std::collections::hash_map::Entry;
+
+    let mut nodes: Vec<CallTreeNode> = Vec::new();
+
+    // Each frame on the recursion stack is the work-list for one (parent, depth)
+    // pair: (parent_node_idx, depth, slice_indices_to_group).
+    fn build_level(
+        profile: &Profile,
+        self_dur: &[u64],
+        parent: u32,
+        depth: u16,
+        slice_indices: &[u32],
+        nodes: &mut Vec<CallTreeNode>,
+    ) -> Vec<u32> {
+        let mut by_name: AHashMap<StringId, u32> = AHashMap::new();
+        let mut order: Vec<u32> = Vec::new();
+        // Stash this level's children-to-recurse-on grouped by which node they belong to.
+        let mut kids_by_node: AHashMap<u32, Vec<u32>> = AHashMap::new();
+
+        for &sidx in slice_indices {
+            let i = sidx as usize;
+            let name = profile.slices.name[i];
+            let total = profile.slices.dur_ns[i];
+            let self_t = self_dur.get(i).copied().unwrap_or(0);
+
+            let node_idx = match by_name.entry(name) {
+                Entry::Occupied(e) => *e.get(),
+                Entry::Vacant(e) => {
+                    let new_idx = nodes.len() as u32;
+                    nodes.push(CallTreeNode {
+                        name,
+                        total_ns: 0,
+                        self_ns: 0,
+                        count: 0,
+                        depth,
+                        children: Vec::new(),
+                        parent,
+                        exemplar_slice_idx: sidx,
+                    });
+                    e.insert(new_idx);
+                    order.push(new_idx);
+                    new_idx
+                }
+            };
+            {
+                let n = &mut nodes[node_idx as usize];
+                n.total_ns += total;
+                n.self_ns += self_t;
+                n.count += 1;
+                let cur_ex_dur = profile.slices.dur_ns[n.exemplar_slice_idx as usize];
+                if total > cur_ex_dur {
+                    n.exemplar_slice_idx = sidx;
+                }
+            }
+
+            // Direct children of this slice on the same track.
+            let track = profile.slices.track[i];
+            let s = profile.slices.start_ns[i];
+            let e = s + total;
+            let slice_depth = profile.slices.depth[i];
+            let row = profile.slices.visible_in_row(track, slice_depth + 1, s, e);
+            let pool = kids_by_node.entry(node_idx).or_default();
+            for c in row.start..row.end {
+                let cs = profile.slices.start_ns[c as usize];
+                let cd = profile.slices.dur_ns[c as usize];
+                if cs >= s && cs + cd <= e {
+                    pool.push(c);
+                }
+            }
+        }
+
+        for &node_idx in &order {
+            let kids = kids_by_node.remove(&node_idx).unwrap_or_default();
+            if !kids.is_empty() {
+                let cn = build_level(profile, self_dur, node_idx, depth + 1, &kids, nodes);
+                nodes[node_idx as usize].children = cn;
+            }
+        }
+
+        order
+    }
+
+    // Collect all depth-0 slices across every track.
+    let mut roots_input: Vec<u32> = Vec::new();
+    for t in 0..profile.tracks.len() {
+        let track = TrackId(t as u32);
+        let row_0 = profile
+            .slices
+            .rows
+            .get(&(track, 0))
+            .cloned()
+            .unwrap_or(0..0);
+        for r in row_0.start..row_0.end {
+            roots_input.push(r);
+        }
+    }
+
+    let roots = build_level(profile, self_dur, u32::MAX, 0, &roots_input, &mut nodes);
+    // Sort roots by total desc so the "hot" path is at the top.
+    let mut roots = roots;
+    roots.sort_by_key(|&i| std::cmp::Reverse(nodes[i as usize].total_ns));
+    // Same for every node's children — recursive sort is cheap (one pass).
+    for n in 0..nodes.len() {
+        let mut kids = std::mem::take(&mut nodes[n].children);
+        kids.sort_by_key(|&i| std::cmp::Reverse(nodes[i as usize].total_ns));
+        nodes[n].children = kids;
+    }
+    let total_ns: u64 = roots.iter().map(|&i| nodes[i as usize].total_ns).sum();
+    CallTree { nodes, roots, total_ns }
+}
+
 /// Push a 1-pixel-wide bucket instance representing one or more sub-pixel
 /// slices that all share a pixel column. Indexed back to a real SoA slice so
 /// hover/click still work (the largest-duration slice in the bucket wins).
@@ -1975,7 +2375,8 @@ struct AggNode {
 /// For each track, identical (parent_chain → frame) paths collapse into one
 /// wide bar; siblings sort by total duration desc. The new x-axis represents
 /// total time spent (0..track_total), not wall time.
-fn build_left_heavy_layout(
+#[doc(hidden)]
+pub fn build_left_heavy_layout(
     profile: &Profile,
 ) -> (flame_core::SliceTable, (u64, u64), Vec<u16>) {
     let n_tracks = profile.tracks.len();

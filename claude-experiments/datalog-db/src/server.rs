@@ -28,6 +28,9 @@ impl Server {
         for stream in self.listener.incoming() {
             let stream = stream?;
             let addr = stream.peer_addr()?;
+            // Disable Nagle on the server side too — matches the client
+            // and ensures responses go out without coalescing delay.
+            let _ = stream.set_nodelay(true);
             info!("New connection from {}", addr);
             let db = self.db.clone();
             std::thread::spawn(move || {
@@ -265,7 +268,7 @@ fn handle_status() -> serde_json::Value {
 
 fn value_to_json(v: &crate::datom::Value) -> serde_json::Value {
     match v {
-        crate::datom::Value::String(s) => serde_json::Value::String(s.clone()),
+        crate::datom::Value::String(s) => serde_json::Value::String(s.to_string()),
         crate::datom::Value::I64(n) => serde_json::json!(n),
         crate::datom::Value::F64(n) => serde_json::json!(n),
         crate::datom::Value::Bool(b) => serde_json::json!(b),
@@ -273,7 +276,7 @@ fn value_to_json(v: &crate::datom::Value) -> serde_json::Value {
         crate::datom::Value::Bytes(b) => {
             serde_json::json!({"bytes": base64_encode(b)})
         }
-        crate::datom::Value::Enum { variant, fields } => {
+        crate::datom::Value::Enum(e) => { let variant = &e.variant; let fields = &e.fields;
             let field_json: serde_json::Map<_, _> = fields
                 .iter()
                 .map(|(k, v)| (k.clone(), value_to_json(v)))

@@ -1,0 +1,26 @@
+package program:hello-world;
+
+/// Hello-world handler world. Matches what `ir::wit::generate_world`
+/// produces for the say_hello handler in this project's hello-world manifest:
+/// reads/writes a Map<string, u32> keyed by `$event.name`, emits a Print
+/// effect, and handles a `Greeted { name: string }` event.
+world say-hello {
+  record greeting {
+    name: string,
+  }
+
+  record print-req {
+    text: string,
+  }
+
+  // State: Map<string, u32> greet-counts, keyed by event.name.
+  import get-greet-counts: func(key: string) -> option<u32>;
+  import put-greet-counts: func(key: string, value: u32);
+  import delete-greet-counts: func(key: string);
+
+  // Effect: Print { text: string } -> string. Returns an opaque emit id.
+  import emit-print: func(req: print-req) -> u64;
+
+  // Handler entry.
+  export handle: func(event: greeting);
+}

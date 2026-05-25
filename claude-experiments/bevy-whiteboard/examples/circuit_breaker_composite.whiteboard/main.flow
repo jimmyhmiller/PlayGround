@@ -1,0 +1,62 @@
+# CircuitBreaker from primitives — req/resp variant.
+#
+#                                  ┌─pass───▶ Stamp ──▶ Server (always fails)
+#  Caller ──req──▶ L ──packet──▶ SW                            │
+#                                  └─divert──▶ ErrReply ◀──────┘
+#                          ▲                                   │
+#                          │ signal                     packet (FailTap)
+#                          │                                   ▼
+#                         Th ◀────── W (Window)
+#
+# Failure marks feed the Window; threshold-crossing flips Switch.
+
+node Caller : Client { period_ns: 250000000, color: 0 }
+
+node L {
+    rule fwd_req     { on req(p)         do { emit packet(p) pushing self to default } }
+    rule rev_resp    { on resp(x)        do { emit resp(x)        popping to (head(return_path)) } }
+    rule rev_resp_er { on resp_error(x)  do { emit resp_error(x)  popping to (head(return_path)) } }
+}
+
+node SW : Switch { passing: 1 }
+node S  : Stamp  { }
+
+node Server {
+    slots { hits: Int = 0 }
+    probes { hits: "{hits}" }
+    rule on_packet {
+        on packet(_) do {
+            hits := hits + 1
+            # Tap the failure into the breaker's Window, then reply error.
+            emit packet(nil) to FailTap
+            emit resp_error(nil) popping to (head(return_path))
+        }
+    }
+}
+node FailTap {
+    rule fwd { on packet(p) do { emit packet(p) to default } }
+}
+
+node W  : Window    { window_ns: 1000000000 }
+node Th : Threshold { limit: 3 }
+
+node ErrReply {
+    rule on_packet {
+        on packet(_) do { emit resp_error(nil) popping to (head(return_path)) }
+    }
+}
+
+edges {
+    Caller -> L  : 5ms
+    L      -> SW : 1ms
+    SW.pass   -> S : 1ms
+    S      -> Server : 5ms
+    Server -> S : 5ms
+    S      -> L : 1ms
+    SW.divert -> ErrReply : 1ms
+    ErrReply  -> L : 1ms
+
+    FailTap -> W : 1ms
+    W       -> Th : 1ms
+    Th      -> SW : 1ms
+}

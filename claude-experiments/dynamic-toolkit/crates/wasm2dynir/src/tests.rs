@@ -1,9 +1,11 @@
 use crate::{translate_wasm, translate_wasm_module};
+use dynalloc::NanBoxPtrPolicy;
+use dynir::gc_runtime::GcInterpCtx;
 use dynir::interp::*;
 use dynir::ir::Module;
 use dynir::opt::{self, OptConfig};
 use dynir::verify::verify;
-use dynir::NoGcRoots;
+use dynobj::Compact;
 use dynvalue::NanBox;
 
 fn run_wasm_i32(wat: &str, args: &[u64]) -> i32 {
@@ -11,7 +13,7 @@ fn run_wasm_i32(wat: &str, args: &[u64]) -> i32 {
     let (func, _imports) = translate_wasm(&wasm).expect("failed to translate");
     verify(&func).expect("IR verification failed");
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, NanBoxPtrPolicy> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v as i32,
@@ -24,7 +26,7 @@ fn run_wasm_i64(wat: &str, args: &[u64]) -> i64 {
     let (func, _imports) = translate_wasm(&wasm).expect("failed to translate");
     verify(&func).expect("IR verification failed");
     let (module, entry) = Module::from_function(func.clone());
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, NanBoxPtrPolicy> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v as i64,
@@ -323,7 +325,7 @@ fn two_functions_call() {
             call $double))"#;
     let wasm = wat::parse_str(wat).expect("failed to parse WAT");
     let (module, entry) = translate_wasm_module(&wasm).expect("failed to translate");
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, NanBoxPtrPolicy> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     let result = match interp.run(entry, &[21]).unwrap() {
         InterpResult::Value(v) => v as i32,
@@ -354,7 +356,7 @@ fn recursive_factorial_module() {
             call $fact))"#;
     let wasm = wat::parse_str(wat).expect("failed to parse WAT");
     let (module, entry) = translate_wasm_module(&wasm).expect("failed to translate");
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, NanBoxPtrPolicy> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     let result = match interp.run(entry, &[10]).unwrap() {
         InterpResult::Value(v) => v as i32,
@@ -398,7 +400,7 @@ fn fifty_nested_functions() {
     let wasm = wat::parse_str(&wat).expect("failed to parse WAT");
     let (module, entry) = translate_wasm_module(&wasm).expect("failed to translate");
 
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, NanBoxPtrPolicy> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     let result = match interp.run(entry, &[0]).unwrap() {
         InterpResult::Value(v) => v as i32,
@@ -489,7 +491,7 @@ fn run_wasm_i32_opt(wat: &str, args: &[u64], config: &OptConfig) -> i32 {
     opt::optimize_with(&mut func, config);
     verify(&func).expect("IR verification failed after optimization");
     let (module, entry) = Module::from_function(func);
-    let roots = NoGcRoots;
+    let roots: GcInterpCtx<Compact, NanBoxPtrPolicy> = GcInterpCtx::new_unallocating();
     let interp = ModuleInterpreter::<NanBox, _>::new(&module, &roots);
     match interp.run(entry, args).unwrap() {
         InterpResult::Value(v) => v as i32,

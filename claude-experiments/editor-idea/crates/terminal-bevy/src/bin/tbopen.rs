@@ -26,9 +26,13 @@ use std::process::ExitCode;
 use serde::Serialize;
 
 #[derive(Serialize)]
-struct OpenRequest {
-    path: PathBuf,
-    project: Option<String>,
+#[serde(tag = "action", rename_all = "snake_case")]
+enum IpcRequest {
+    OpenFile {
+        path: PathBuf,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
 }
 
 fn socket_path() -> Option<PathBuf> {
@@ -71,7 +75,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let req = OpenRequest {
+    let req = IpcRequest::OpenFile {
         path: abs,
         project: args.project,
     };

@@ -1,0 +1,17 @@
+[package]
+name = "clojure-jvm"
+version = "0.0.1"
+edition = "2024"
+description = "Direct 1-for-1 port of Clojure JVM (clojure/lang/*.java) to Rust on the dynamic-toolkit."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+dynir = { path = "../dynir" }
+dynlang = { path = "../dynlang" }
+dynvalue = { path = "../dynvalue" }
+dynlower = { path = "../dynlower" }
+dynalloc = { path = "../dynalloc" }
+dynobj = { path = "../dynobj" }
+dynruntime = { path = "../dynruntime" }

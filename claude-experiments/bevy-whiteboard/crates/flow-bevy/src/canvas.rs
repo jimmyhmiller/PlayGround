@@ -157,6 +157,38 @@ pub struct ClassVisual {
     pub shape: Option<ShapeSpec>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paint: Option<PaintSpec>,
+    /// Optional unicode glyph rendered as a small label centered on the
+    /// body. When present, this replaces the kind-derived glyph so a
+    /// class can carry its own visual identity (clock-face for Tick,
+    /// gauge for Threshold, etc.).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub glyph: Option<String>,
+    /// Optional probe-or-slot-driven text rendered INSIDE the body
+    /// (below the glyph if both are present). Lets a primitive show
+    /// its key parameter or current state as readable text — e.g. a
+    /// Filter shows `=3`, a ConstantPacket shows its `value`. The
+    /// runtime evaluates this each frame against the node's current
+    /// slot state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inner_label: Option<InnerLabelSpec>,
+}
+
+/// How an in-body label sources its text. Either reads a declared
+/// probe by label (and the runtime evaluates the probe expression each
+/// frame), or formats a single slot value with a tiny template.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum InnerLabelSpec {
+    /// Look up a probe declared on the class (e.g. `rate`) and render
+    /// its formatted value as in-body text.
+    Probe { label: String },
+    /// Format a single slot with a `{0}`-style template
+    /// (e.g. `"={0}"`, `"{0}ms"`). The `{0}` token is replaced with
+    /// the slot's current value; everything else is rendered verbatim.
+    Slot { slot: String, format: String },
+    /// Render a fixed literal (used for stateless primitives like
+    /// FanOut where there's nothing dynamic to display).
+    Literal { text: String },
 }
 
 /// Body geometry. `square` and `circle` carry a `size` in world units —
@@ -166,6 +198,12 @@ pub struct ClassVisual {
 pub enum ShapeSpec {
     Square { size: f32 },
     Circle { size: f32 },
+    Diamond { size: f32 },
+    Hexagon { size: f32 },
+    Pentagon { size: f32 },
+    Triangle { size: f32, #[serde(default)] point_up: bool },
+    Hourglass { width: f32, height: f32 },
+    Tag { size: f32 },
 }
 
 /// Dynamic body fill driven by sim state.
@@ -178,6 +216,10 @@ pub enum ShapeSpec {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PaintSpec {
     BinarySlot { slot: String, on: String, off: String },
+    /// Fixed color regardless of sim state. Used to group primitives
+    /// by role-category (sources blue, accumulators purple, etc.) so
+    /// the role is visible without reading any text.
+    Static { color: String },
 }
 
 /// How a compound renders its outward face. Mirrors
@@ -584,13 +626,40 @@ pub(crate) fn spawn_one_canvas_node(
     }
 
     let kind = class_name.map(class_to_kind).unwrap_or(Kind::Worker);
-    let class_visual = class_name.and_then(|c| visual.classes.get(c));
+    // Merge: visual.json's explicit class entry wins, but if absent we
+    // fall back to the hardcoded `stock_class_visual` table so every
+    // stock primitive renders with its proper glyph + inner label.
+    let user_class_visual = class_name.and_then(|c| visual.classes.get(c));
+    let stock_class_visual = class_name.and_then(stock_class_visual);
+    let effective_visual: Option<std::borrow::Cow<ClassVisual>> = match (user_class_visual, stock_class_visual.as_ref()) {
+        (Some(u), _) => Some(std::borrow::Cow::Borrowed(u)),
+        (None, Some(s)) => Some(std::borrow::Cow::Owned(s.clone())),
+        (None, None) => None,
+    };
+    let class_visual = effective_visual.as_deref();
     let shape_override = class_visual.and_then(|cv| cv.shape.as_ref()).map(shape_spec_to_body_shape);
-    let self_painted = class_visual.and_then(|cv| cv.paint.as_ref()).is_some();
+    // Primitives with a high-fidelity mechanical visual own the entire
+    // body — the glyph and inner-label would just compete with the
+    // moving parts. Skip those decorations and let self_painted=true so
+    // the drop shadow + name + state labels are also suppressed (the
+    // mechanical visual already conveys identity and state).
+    let is_primitive_viz = class_name
+        .map(|c| crate::primitive_viz::PrimitiveKind::from_class(c).is_some())
+        .unwrap_or(false);
+    let self_painted = (class_visual.and_then(|cv| cv.paint.as_ref()).is_some()
+        // Don't treat "has a glyph or inner label" as self_painted —
+        // those decorations live ALONGSIDE the standard name/state
+        // labels rather than replacing them.
+        && class_visual.and_then(|cv| cv.glyph.as_ref()).is_none()
+        && class_visual.and_then(|cv| cv.inner_label.as_ref()).is_none())
+        || is_primitive_viz;
+    let glyph_override = if is_primitive_viz { None } else { class_visual.and_then(|cv| cv.glyph.as_deref()) };
+    let inner_label = if is_primitive_viz { None } else { class_visual.and_then(|cv| cv.inner_label.as_ref()) };
     let entity = spawn_node_entity(
         commands, cache, meshes, materials, maps, theme, metrics,
         nid, kind, shape_override, self_painted, color_slot_raw.is_some(),
         name.to_string(), pos,
+        glyph_override, inner_label,
     );
     if let Some(slot_raw) = color_slot_raw {
         let color_slot = slot_raw % theme.data.len();
@@ -600,6 +669,16 @@ pub(crate) fn spawn_one_canvas_node(
         commands
             .entity(entity)
             .insert(paint_spec_to_component(paint, nid, theme));
+    }
+    // High-fidelity mechanical visual for the 8 Life-cell primitives.
+    // The marker drives child-entity construction + per-frame animation
+    // in the `primitive_viz` plugin; the stock body shape remains as the
+    // mechanical housing.
+    if let Some(pk) = class_name.and_then(crate::primitive_viz::PrimitiveKind::from_class) {
+        commands.entity(entity).insert((
+            pk,
+            crate::primitive_viz::PrimitivePulse::default(),
+        ));
     }
     commands.entity(entity).insert(crate::compound::Scoped(nid));
 }
@@ -675,10 +754,16 @@ fn default_grid_position(index: usize) -> Vec2 {
 /// [`BodyShape`] component used by the rendering systems.
 fn shape_spec_to_body_shape(spec: &ShapeSpec) -> BodyShape {
     match spec {
-        // Square `size` is edge length; circle `size` is diameter, so
-        // halve to a radius for `BodyShape::Circle`.
-        ShapeSpec::Square { size } => BodyShape::Rect(Vec2::splat(*size)),
-        ShapeSpec::Circle { size } => BodyShape::Circle(*size * 0.5),
+        // `size` is the body's outer diameter / edge length; polygon
+        // shapes treat it as the diameter of the circumscribed circle.
+        ShapeSpec::Square { size }   => BodyShape::Rect(Vec2::splat(*size)),
+        ShapeSpec::Circle { size }   => BodyShape::Circle(*size * 0.5),
+        ShapeSpec::Diamond { size }  => BodyShape::Diamond(*size * 0.5),
+        ShapeSpec::Hexagon { size }  => BodyShape::Hexagon(*size * 0.5),
+        ShapeSpec::Pentagon { size } => BodyShape::Pentagon(*size * 0.5),
+        ShapeSpec::Triangle { size, point_up } => BodyShape::Triangle { radius: *size * 0.5, point_up: *point_up },
+        ShapeSpec::Hourglass { width, height } => BodyShape::Hourglass { half_width: *width * 0.5, half_height: *height * 0.5 },
+        ShapeSpec::Tag { size }      => BodyShape::Tag(*size * 0.5),
     }
 }
 
@@ -694,6 +779,20 @@ fn paint_spec_to_component(spec: &PaintSpec, node: flow::NodeId, theme: &Theme) 
             on: parse_hex_color(on).unwrap_or(theme.ink),
             off: parse_hex_color(off).unwrap_or(theme.paper),
         },
+        PaintSpec::Static { color } => {
+            // Static fill: encode as a binary slot whose `on` and `off`
+            // colors are identical, so the existing sync system applies
+            // it uniformly without needing a separate code path. The
+            // referenced slot name doesn't have to exist; the sync just
+            // picks `off` when missing.
+            let c = parse_hex_color(color).unwrap_or(theme.paper);
+            BinarySlotPaint {
+                node,
+                slot: "__static__".to_string(),
+                on: c,
+                off: c,
+            }
+        }
     }
 }
 
@@ -702,6 +801,197 @@ fn paint_spec_to_component(spec: &PaintSpec, node: flow::NodeId, theme: &Theme) 
 fn parse_hex_color(s: &str) -> Option<Color> {
     let h = s.strip_prefix('#').unwrap_or(s);
     bevy::color::Srgba::hex(h).ok().map(Into::into)
+}
+
+/// Hardcoded per-class visual specs for every stock primitive. Returned
+/// `ClassVisual` is treated as a fallback when `visual.json` doesn't
+/// supply one for the class, so a whiteboard can still override
+/// anything explicitly. Communicates each primitive's role at a glance:
+///
+/// - shape distinguishes shapes-of-event (circles for generators /
+///   broadcasters, squares for processors)
+/// - glyph carries a short unicode icon (clock, gauge, funnel…)
+/// - inner_label sources its text from a declared probe so the
+///   readout updates live (e.g. Tick shows its `rate`)
+/// - paint flips on a binary slot when one cleanly maps (Switch on
+///   `passing`, Threshold on `tripped`, Service on `busy`)
+pub fn stock_class_visual(class: &str) -> Option<ClassVisual> {
+    use ShapeSpec::*;
+    // Per-role color palette. Each primitive's role is encoded by a
+    // fixed body fill so role is readable at a glance, with shape
+    // doing the second-level disambiguation within a role:
+    //   source       (blue)    — Tick
+    //   accumulator  (purple)  — Counter, Window, Aggregator, Buffer
+    //   discriminator(orange)  — Filter, Threshold, Coin, Switch
+    //   worker       (green)   — Service, Delay
+    //   adapter      (grey)    — Stamp, Unstamp, Lift, Lower, Reply, Egress, FanOut
+    //   constant     (dark)    — ConstantPacket, ConstantSignal (paint by value)
+    const SOURCE:        &str = "#a8c8e8";  // soft blue
+    const ACCUMULATOR:   &str = "#c5a8d8";  // soft violet
+    const DISCRIMINATOR: &str = "#e8b078";  // warm orange
+    const WORKER:        &str = "#a8d4a8";  // soft green
+    const ADAPTER:       &str = "#d4ccc0";  // light grey-tan
+    const STATE_ON:      &str = "#2f4f2f";  // deep green — "alive / active"
+    const STATE_OFF:     &str = "#e8d8b0";  // sand — default body
+    const ALARM_ON:      &str = "#c14a3a";  // strong red — "tripped / die"
+    const BUSY_ON:       &str = "#3a6a9a";  // strong blue — "busy"
+
+    fn shape(s: ShapeSpec) -> Option<ShapeSpec> { Some(s) }
+    fn glyph(s: &str) -> Option<String> { Some(s.to_string()) }
+    fn probe(label: &str) -> Option<InnerLabelSpec> {
+        Some(InnerLabelSpec::Probe { label: label.to_string() })
+    }
+    fn slot_fmt(slot: &str, fmt: &str) -> Option<InnerLabelSpec> {
+        Some(InnerLabelSpec::Slot { slot: slot.to_string(), format: fmt.to_string() })
+    }
+    fn lit(text: &str) -> Option<InnerLabelSpec> {
+        Some(InnerLabelSpec::Literal { text: text.to_string() })
+    }
+    fn binary(slot: &str, on: &str, off: &str) -> Option<PaintSpec> {
+        Some(PaintSpec::BinarySlot { slot: slot.to_string(), on: on.to_string(), off: off.to_string() })
+    }
+    fn fill(color: &str) -> Option<PaintSpec> {
+        Some(PaintSpec::Static { color: color.to_string() })
+    }
+
+    // Stock sizes: large enough that the inner_label is readable at
+    // default zoom. Polygon shapes use the circumscribed-circle
+    // diameter for their `size`.
+    let v = match class {
+        // ── Source ────────────────────────────────────────────────
+        "Tick"           => ClassVisual {
+            shape: shape(Circle { size: 88.0 }),
+            paint: fill(SOURCE),
+            glyph: glyph("◉"),
+            inner_label: probe("rate"),
+        },
+
+        // ── Accumulators (pentagon = "stacks/collects") ───────────
+        "Counter"        => ClassVisual {
+            shape: shape(Pentagon { size: 88.0 }),
+            paint: fill(ACCUMULATOR),
+            glyph: glyph("#"),
+            inner_label: probe("count"),
+        },
+        "Window"         => ClassVisual {
+            shape: shape(Pentagon { size: 92.0 }),
+            paint: fill(ACCUMULATOR),
+            glyph: glyph("◧"),
+            inner_label: probe("count"),
+        },
+        "Aggregator"     => ClassVisual {
+            shape: shape(Pentagon { size: 100.0 }),
+            paint: fill(ACCUMULATOR),
+            glyph: glyph("Σ"),
+            inner_label: probe("seen"),
+        },
+        "Buffer"         => ClassVisual {
+            shape: shape(Pentagon { size: 92.0 }),
+            paint: fill(ACCUMULATOR),
+            glyph: glyph("▤"),
+            inner_label: probe("fill"),
+        },
+
+        // ── Discriminators (triangle = "funnel") ──────────────────
+        "Filter"         => ClassVisual {
+            shape: shape(Triangle { size: 96.0, point_up: false }),
+            paint: fill(DISCRIMINATOR),
+            glyph: glyph("="),
+            inner_label: slot_fmt("match", "={0}"),
+        },
+        "Threshold"      => ClassVisual {
+            shape: shape(Triangle { size: 96.0, point_up: true }),
+            paint: binary("tripped", ALARM_ON, DISCRIMINATOR),
+            glyph: glyph("⚠"),
+            inner_label: slot_fmt("limit", "≥{0}"),
+        },
+        "Coin"           => ClassVisual {
+            shape: shape(Circle { size: 80.0 }),
+            paint: fill(DISCRIMINATOR),
+            glyph: glyph("◐"),
+            inner_label: slot_fmt("p", "p={0}"),
+        },
+        "Switch"         => ClassVisual {
+            shape: shape(Diamond { size: 96.0 }),
+            paint: binary("passing", STATE_ON, STATE_OFF),
+            glyph: glyph("⇄"),
+            inner_label: slot_fmt("passing", "passing={0}"),
+        },
+
+        // ── Workers (hexagon = "service") ─────────────────────────
+        "Service"        => ClassVisual {
+            shape: shape(Hexagon { size: 104.0 }),
+            paint: binary("busy", BUSY_ON, WORKER),
+            glyph: glyph("⚙"),
+            inner_label: slot_fmt("service_ns", "{0}ns"),
+        },
+        "Delay"          => ClassVisual {
+            shape: shape(Hourglass { width: 80.0, height: 96.0 }),
+            paint: fill(WORKER),
+            glyph: glyph("⧖"),
+            inner_label: slot_fmt("ns", "{0}ns"),
+        },
+
+        // ── Adapters (square / rect = "relay station") ────────────
+        "FanOut"         => ClassVisual {
+            shape: shape(Circle { size: 72.0 }),
+            paint: fill(ADAPTER),
+            glyph: glyph("⋔"),
+            inner_label: lit("fan to all"),
+        },
+        "Stamp"          => ClassVisual {
+            shape: shape(Square { size: 76.0 }),
+            paint: fill(ADAPTER),
+            glyph: glyph("⇩"),
+            inner_label: lit("push self"),
+        },
+        "Unstamp"        => ClassVisual {
+            shape: shape(Square { size: 76.0 }),
+            paint: fill(ADAPTER),
+            glyph: glyph("⇧"),
+            inner_label: lit("pop"),
+        },
+        "Lift"           => ClassVisual {
+            shape: shape(Square { size: 76.0 }),
+            paint: fill(ADAPTER),
+            glyph: glyph("↗"),
+            inner_label: lit("pkt→req"),
+        },
+        "Lower"          => ClassVisual {
+            shape: shape(Square { size: 76.0 }),
+            paint: fill(ADAPTER),
+            glyph: glyph("↘"),
+            inner_label: lit("req→pkt"),
+        },
+        "Reply"          => ClassVisual {
+            shape: shape(Square { size: 76.0 }),
+            paint: fill(ADAPTER),
+            glyph: glyph("↩"),
+            inner_label: lit("→ resp"),
+        },
+        "Egress"         => ClassVisual {
+            shape: shape(Square { size: 64.0 }),
+            paint: fill(ADAPTER),
+            glyph: glyph("⇥"),
+            inner_label: lit("→ out"),
+        },
+
+        // ── Constants (tag shape = "literal value") ───────────────
+        "ConstantPacket" => ClassVisual {
+            shape: shape(Tag { size: 80.0 }),
+            paint: binary("value", "#222222", "#f5f5f0"),
+            glyph: glyph("●"),
+            inner_label: slot_fmt("value", "pkt={0}"),
+        },
+        "ConstantSignal" => ClassVisual {
+            shape: shape(Tag { size: 80.0 }),
+            paint: binary("value", ALARM_ON, "#e8d8b0"),
+            glyph: glyph("⚡"),
+            inner_label: slot_fmt("value", "sig={0}"),
+        },
+        _ => return None,
+    };
+    Some(v)
 }
 
 /// Translate a `visual.json` compound spec into the runtime
@@ -770,6 +1060,13 @@ pub(crate) fn build_compound_visual(
                     parse_hex_color(on).unwrap_or(theme.ink),
                     parse_hex_color(off).unwrap_or(theme.paper),
                 ),
+                PaintSpec::Static { color } => {
+                    // Grid cells with static fill: collapse to a
+                    // binary paint whose on/off are identical so each
+                    // cell renders the same colour regardless of slot.
+                    let c = parse_hex_color(color).unwrap_or(theme.paper);
+                    ("__static__".to_string(), c, c)
+                }
             };
             crate::compound::CompoundVisual::Grid {
                 columns: cols,

@@ -863,6 +863,7 @@ fn eliminate_unreachable_blocks(func: &mut Function) {
             }
             Terminator::Ret(_)
             | Terminator::RetVoid
+            | Terminator::Raise(_)
             | Terminator::Unreachable => {}
         }
     }
@@ -1717,6 +1718,7 @@ fn reorder_blocks_with_order(func: &mut Function, order: &[usize]) {
             }
             Terminator::Ret(_)
             | Terminator::RetVoid
+            | Terminator::Raise(_)
             | Terminator::Unreachable => {}
         }
     }

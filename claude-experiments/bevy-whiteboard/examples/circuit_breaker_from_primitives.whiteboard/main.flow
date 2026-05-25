@@ -1,0 +1,66 @@
+# CircuitBreaker rebuilt from composable primitives.
+#
+# Topology:
+#   ReqSource → Switch → Server (always fails) → Server.fail → Window
+#             ↘ Switch.divert → ErrSink            ↘
+#                                                   Threshold → Switch
+#
+# Behavior:
+#   - While Switch.passing == 1, reqs reach Server. Each failure
+#     adds a `now` timestamp into Window's ring.
+#   - When Window's in-horizon count crosses Threshold.limit (3),
+#     Threshold emits signal(1). The signal flips Switch.passing → 0.
+#   - With Switch tripped, subsequent reqs route to ErrSink. Server
+#     stops being hit, so Window's count decays via the sliding
+#     window. Once the count drops below limit, Threshold emits
+#     signal(0) and Switch flips back to passing — natural recovery.
+#
+# This reproduces closed→open→closed cycling without any monolithic
+# CircuitBreaker class. Just four primitives wired by edges.
+
+node ReqSource : Tick {
+    period_ns: 200000000   # 5 reqs/sec
+}
+
+node SW : Switch {
+    passing: 1
+}
+
+# Always-failing "server". On every req, increments `served` AND
+# pushes a failure observation out the `fail` port. The `fail` port
+# uses the new leaf-node FromPort routing: only edges with
+# `from_port = "fail"` receive these emits.
+node Server {
+    slots { served: Int = 0 }
+    probes { served: "{served}" }
+    rule on_req {
+        on packet(_)
+        do {
+            served := served + 1
+            record served served
+            emit packet(nil) to port fail
+        }
+    }
+}
+
+node W : Window {
+    window_ns: 1000000000   # 1s — the breaker's observation horizon
+}
+
+node T : Threshold {
+    limit: 3                # trip after 3 failures within the window
+}
+
+node ErrSink : Counter { count: 0 }
+
+edges {
+    ReqSource    -> SW         : 1ms
+
+    SW.pass      -> Server     : 1ms
+    SW.divert    -> ErrSink    : 1ms
+
+    Server.fail  -> W          : 1ms
+
+    W            -> T          : 1ms
+    T            -> SW         : 1ms
+}

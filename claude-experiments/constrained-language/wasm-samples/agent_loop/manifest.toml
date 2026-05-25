@@ -1,0 +1,203 @@
+# ----------------------------------------------------------------------------
+# Agent loop program.
+#
+# Models a minimal LLM agent: a goal arrives, the runtime calls an LLM, the
+# LLM may request a tool, the runtime calls the tool, the tool result feeds
+# back to the LLM, and eventually the LLM produces a final answer that's
+# pushed to the user via a Notify effect.
+#
+# Every step is driven by event/effect auto-routing. Handler bodies never
+# block — they emit an effect and return; the runtime fulfills the effect
+# via an adapter and the auto-routed `response_event` re-invokes the next
+# handler with the outcome.
+# ----------------------------------------------------------------------------
+
+name = "agent-loop"
+version = "0.1.0"
+
+# ----------------------------------------------------------------------------
+# Schemas
+# ----------------------------------------------------------------------------
+
+# Conversation turn (user, assistant, or tool).
+[schemas.Message]
+kind = "record"
+fields = { role = "string", text = "string" }
+
+# A whole conversation.
+[schemas.Messages]
+kind = "list"
+of = "Message"
+
+# Per-goal record stored in the goals map.
+# `status` is a free string ("thinking", "tool_calling", "complete", "failed")
+# rather than a sum, because TOML has no representation for null and unit
+# variants are awkward. The handful of legal values is documented here; the
+# runtime treats it opaquely.
+[schemas.GoalRecord]
+kind = "record"
+fields = { id = "string", prompt = "string", status = "string", messages = "Messages", step_count = "u32" }
+
+# CallLlm request: which goal, full conversation so far.
+[schemas.LlmReq]
+kind = "record"
+fields = { goal_id = "string", messages = "Messages" }
+
+# CallLlm success response. `kind` is "final" or "needs_tool". For "final",
+# `text` is the answer; for "needs_tool", `tool` + `args` describe the call.
+[schemas.LlmResp]
+kind = "record"
+fields = { kind = "string", text = "string", tool = "string", args = "string" }
+
+# ExecuteTool request/response.
+[schemas.ToolReq]
+kind = "record"
+fields = { goal_id = "string", tool = "string", args = "string" }
+
+[schemas.ToolResp]
+kind = "record"
+fields = { result = "string" }
+
+# NotifyUser request.
+[schemas.Notification]
+kind = "record"
+fields = { goal_id = "string", text = "string" }
+
+# Per-effect outcome shapes for the auto-routed response events. The runtime
+# synthesizes outcome as `{tag: "ok" | "failed", value: ...}`, so we declare
+# these as proper sums; the value type is the response schema for "ok",
+# and a string (the failure reason) for "failed".
+[schemas.LlmOutcome]
+kind = "sum"
+variants = { ok = "LlmResp", failed = "string" }
+
+[schemas.ToolOutcome]
+kind = "sum"
+variants = { ok = "ToolResp", failed = "string" }
+
+# Wrapping payloads for the auto-routed events.
+[schemas.LlmReturnedPayload]
+kind = "record"
+fields = { emit_id = "u64", outcome = "LlmOutcome" }
+
+[schemas.ToolReturnedPayload]
+kind = "record"
+fields = { emit_id = "u64", outcome = "ToolOutcome" }
+
+# User turn — every user input is a UserMessage carrying the session_id.
+# The on_user_message handler decides whether to create a new session or
+# append to an existing one.
+[schemas.UserMessagePayload]
+kind = "record"
+fields = { session_id = "string", text = "string" }
+
+# ----------------------------------------------------------------------------
+# Events
+# ----------------------------------------------------------------------------
+
+[events.UserMessage]
+payload = "UserMessagePayload"
+
+[events.LlmReturned]
+payload = "LlmReturnedPayload"
+
+[events.ToolReturned]
+payload = "ToolReturnedPayload"
+
+# ----------------------------------------------------------------------------
+# State
+# ----------------------------------------------------------------------------
+
+# All currently-tracked goals, keyed by goal_id.
+[state.goals]
+kind = "map"
+key = "string"
+value = "GoalRecord"
+
+# Outstanding LLM calls — maps emit_id to the goal_id that owns the call.
+[state.pending_llm]
+kind = "map"
+key = "u64"
+value = "string"
+
+# Outstanding tool calls — same shape.
+[state.pending_tool]
+kind = "map"
+key = "u64"
+value = "string"
+
+# ----------------------------------------------------------------------------
+# Effects
+# ----------------------------------------------------------------------------
+
+[effects.CallLlm]
+request = "LlmReq"
+response = "LlmResp"
+response_event = "LlmReturned"
+
+[effects.ExecuteTool]
+request = "ToolReq"
+response = "ToolResp"
+response_event = "ToolReturned"
+
+[effects.NotifyUser]
+request = "Notification"
+response = "string"
+
+# ----------------------------------------------------------------------------
+# Handlers
+# ----------------------------------------------------------------------------
+
+# A user turn: appends the user message to the conversation (creating the
+# session record if it doesn't yet exist) and kicks off an LLM call.
+[[handlers]]
+name  = "on_user_message"
+on    = "UserMessage"
+read  = ["goals[*]"]
+write = ["goals[*]", "pending_llm[*]"]
+emit  = ["CallLlm"]
+body  = { hash = "sha256:0", uri = "on_user_message" }
+
+# Handles an LLM response: either request a tool, or finalize the goal.
+[[handlers]]
+name  = "on_llm_returned"
+on    = "LlmReturned"
+read  = ["pending_llm[$event.emit_id]", "goals[*]"]
+write = ["goals[*]", "pending_llm[*]", "pending_tool[*]"]
+emit  = ["ExecuteTool", "NotifyUser"]
+body  = { hash = "sha256:0", uri = "on_llm_returned" }
+
+# Handles a tool response: append the result and call the LLM again.
+[[handlers]]
+name  = "on_tool_returned"
+on    = "ToolReturned"
+read  = ["pending_tool[$event.emit_id]", "goals[*]"]
+write = ["goals[*]", "pending_tool[*]", "pending_llm[*]"]
+emit  = ["CallLlm"]
+body  = { hash = "sha256:0", uri = "on_tool_returned" }
+
+# ----------------------------------------------------------------------------
+# Generators: typed event sources. The stdin generator feeds one
+# UserMessage per stdin line. All turns share the same session_id, so the
+# on_user_message handler accumulates a single conversation.
+# ----------------------------------------------------------------------------
+
+[generators.input]
+event = "UserMessage"
+kind = "stdin_lines"
+payload = { session_id = "default", text = "$input" }
+
+# ----------------------------------------------------------------------------
+# Host wiring (cl-run reads these from the same file; ir::load_manifest_file
+# ignores them as unknown).
+# ----------------------------------------------------------------------------
+
+# Swap kind to "anthropic" for a real LLM (requires ANTHROPIC_API_KEY).
+[adapters.CallLlm]
+kind = "fake_llm"
+
+[adapters.ExecuteTool]
+kind = "simple_tools"
+
+[adapters.NotifyUser]
+kind = "stdout"

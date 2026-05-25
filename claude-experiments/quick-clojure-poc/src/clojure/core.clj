@@ -474,6 +474,11 @@
 ;; These allow reader data structures (used in macros) to work with core protocols
 ;; =============================================================================
 
+;; Forward refs used inside the reader-extend method bodies. These are
+;; only invoked when the methods run (post-load), so the body just
+;; needs the names to exist as Vars at compile time — declare suffices.
+(declare seq-reduce equiv-sequential EMPTY-VECTOR)
+
 (extend-type __ReaderList
   IList
 
@@ -502,7 +507,23 @@
   (-nth [this n not-found]
     (if (< n (__reader_list_count this))
       (__reader_list_nth this n)
-      not-found)))
+      not-found))
+
+  ;; Reduce/equality/collection — same shapes the other list-like
+  ;; deftypes (PList, Cons) install. Without these, anything that
+  ;; reduces over a literal `(quote (1 2 3))` or a variadic `& args`
+  ;; binding hits "no method" and aborts.
+  IReduce
+  (-reduce [this f] (seq-reduce f this))
+  (-reduce [this f start] (seq-reduce f start this))
+
+  ICollection
+  (-conj [this o] (cons o this))
+
+  IEquiv
+  (-equiv [this other] (equiv-sequential this other))
+
+  ISequential)
 
 (extend-type __ReaderVector
   IVector
@@ -534,7 +555,25 @@
   (-nth [this n not-found]
     (if (< n (__reader_vector_count this))
       (__reader_vector_nth this n)
-      not-found)))
+      not-found))
+
+  ;; conj/equiv/reduce so vector literals from the reader behave the
+  ;; same as PersistentVector for the common code paths.
+  ICollection
+  (-conj [this o]
+    (loop [acc EMPTY-VECTOR i 0]
+      (if (< i (__reader_vector_count this))
+        (recur (-conj acc (__reader_vector_nth this i)) (+ i 1))
+        (-conj acc o))))
+
+  IReduce
+  (-reduce [this f] (seq-reduce f this))
+  (-reduce [this f start] (seq-reduce f start this))
+
+  IEquiv
+  (-equiv [this other] (equiv-sequential this other))
+
+  ISequential)
 
 (extend-type __ReaderSet
   ICounted
@@ -630,6 +669,176 @@
         (if (nil? s)
           nil
           (-next s))))))
+
+;; =============================================================================
+;; Bootstrap: helpers + macros that downstream defns rely on.
+;;
+;; Mirrors clojure.core's pattern of defining a small set of fns and
+;; the basic flow-control macros (when, when-not, cond, and, or, ->,
+;; ->>) before any defn that uses them. Bodies use only the
+;; primitives available at this point: extern cons / nil? / not /
+;; satisfies?, the seq/first/next dispatchers above, and the
+;; bootstrap helpers below.
+;;
+;; `list` and `second` get redefined later in this file with richer
+;; semantics — both produce the same shape so the redefinition is
+;; transparent to callers.
+;; =============================================================================
+
+(defn list
+  "Creates a new list containing the items."
+  [& items]
+  items)
+
+(defn second
+  "Same as (first (next x))."
+  [x]
+  (first (next x)))
+
+(defn list?
+  "Returns true if x implements IList."
+  [x]
+  (satisfies? IList x))
+
+;; defmacro itself is recognized as a special form by the compiler
+;; (see compile_defmacro in compile.rs). It auto-prepends &form/&env
+;; to the user's params, so a defmacro body just looks like a defn
+;; with the user's args.
+
+(defmacro when
+  "Evaluates test. If logical true, evaluates body in an implicit do."
+  [test & body]
+  (list (quote if) test (cons (quote do) body)))
+
+(defmacro when-not
+  "Evaluates test. If logical false, evaluates body in an implicit do."
+  [test & body]
+  (list (quote if) test nil (cons (quote do) body)))
+
+(defmacro if-not
+  "Evaluates test. If logical false, evaluates and returns then expr,
+  otherwise else expr, if supplied, else nil."
+  ([test then] (list (quote if) test nil then))
+  ([test then else] (list (quote if) test else then)))
+
+(defmacro cond
+  "Takes a set of test/expr pairs. Evaluates each test one at a time;
+  returns the value of the first matching expr. (cond) is nil."
+  [& clauses]
+  (when clauses
+    (list (quote if)
+          (first clauses)
+          (if (next clauses)
+            (second clauses)
+            (throw "cond requires an even number of forms"))
+          (cons (quote cond) (next (next clauses))))))
+
+(defmacro and
+  "Evaluates exprs one at a time; returns the first logical-false
+  value or, if all are logical-true, the value of the last expr."
+  ([] true)
+  ([x] x)
+  ([x & next]
+   (list (quote let)
+         (cons (quote and__auto__) (cons x nil))
+         (list (quote if)
+               (quote and__auto__)
+               (cons (quote and) next)
+               (quote and__auto__)))))
+
+(defmacro or
+  "Evaluates exprs one at a time; returns the first logical-true
+  value, or nil if all are logical-false."
+  ([] nil)
+  ([x] x)
+  ([x & next]
+   (list (quote let)
+         (cons (quote or__auto__) (cons x nil))
+         (list (quote if)
+               (quote or__auto__)
+               (quote or__auto__)
+               (cons (quote or) next)))))
+
+(defmacro ->
+  "Threads x through forms. With each form, inserts x as the second
+  item in the form, recursively."
+  [x & forms]
+  (if forms
+    (let [f (first forms)
+          threaded (if (list? f)
+                     (cons (first f) (cons x (next f)))
+                     (list f x))]
+      (cons (quote ->) (cons threaded (next forms))))
+    x))
+
+(defmacro ->>
+  "Threads x through forms. With each form, inserts x as the LAST
+  item in the form, recursively."
+  [x & forms]
+  (if forms
+    (let [f (first forms)
+          threaded (if (list? f)
+                     (cons (first f) (__concat (next f) (cons x nil)))
+                     (list f x))]
+      (cons (quote ->>) (cons threaded (next forms))))
+    x))
+
+(defmacro comment
+  "Ignores body, yields nil."
+  [& _]
+  nil)
+
+(defmacro dotimes
+  "bindings => name n
+  Repeatedly executes body (presumably for side-effects) with name
+  bound to integers from 0 through n-1."
+  [bindings & body]
+  (let [name-sym (first bindings)
+        n-form (first (next bindings))]
+    (list (quote let) (list (quote n__limit) n-form)
+          (list (quote loop)
+                (list name-sym 0)
+                (list (quote when) (list (quote <) name-sym (quote n__limit))
+                      (cons (quote do) body)
+                      (list (quote recur) (list (quote inc) name-sym)))))))
+
+;; ── Forward declarations ──────────────────────────────────────────────
+;; These are referenced from earlier defns / extend-types but defined
+;; later in the file. (declare rest …) interns each as an unbound Var so the
+;; compiler can emit late-bound lookups; the real def overwrites the
+;; root in place. Mirrors Clojure's own bootstrap pattern.
+(declare sequential? inc reduce count nth rest dotimes map? -ensure-editable EMPTY-BITMAP-NODE create-node EMPTY-ARRAY-MAP EMPTY-HASH-MAP has-nil? assoc contains? dissoc min max comp every? interleave create-node5 update-in type compare-and-set! __atom_compare_and_set __ns? __ns_name __find_ns __create_ns __all_ns __ns_map __ns_interns __ns_refers __ns_aliases __ns_resolve __string_upper_case __string_lower_case __string_includes __string_join __string_trim __string_replace)
+
+;; ── apply / list* / spread ────────────────────────────────────────────
+;; Lifted up here from later in the file because variadic helpers
+;; throughout core.clj forward-reference apply (e.g. `not=`).
+(defn spread
+  "Used by list* and apply to spread the final argument."
+  [arglist]
+  (cond
+    (nil? arglist) nil
+    (nil? (next arglist)) (seq (first arglist))
+    :else (cons (first arglist) (spread (next arglist)))))
+
+(defn list*
+  "Creates a new seq containing the items prepended to the rest, the
+  last of which will be treated as a sequence."
+  ([args] (seq args))
+  ([a args] (cons a args))
+  ([a b args] (cons a (cons b args)))
+  ([a b c args] (cons a (cons b (cons c args))))
+  ([a b c d & more]
+   (cons a (cons b (cons c (cons d (spread more)))))))
+
+(defn apply
+  "Applies fn f to the argument list formed by prepending intervening
+  arguments to args."
+  ([f args] (__apply f args))
+  ([f x args] (__apply f (cons x args)))
+  ([f x y args] (__apply f (list* x y args)))
+  ([f x y z args] (__apply f (list* x y z args)))
+  ([f a b c d & args]
+   (__apply f (cons a (cons b (cons c (cons d (spread args))))))))
 
 ;; =============================================================================
 ;; Variadic Arithmetic Functions
@@ -1204,14 +1413,15 @@
   (not (nil? x)))
 
 (defn quot
-  "quot[ient] of dividing numerator by denominator."
+  "quot[ient] of dividing numerator by denominator. Integer division
+  that truncates toward zero."
   [num div]
-  (/ num div))
+  (__quot num div))
 
 (defn rem
-  "remainder of dividing numerator by denominator."
+  "remainder of dividing numerator by denominator. Sign follows num."
   [num div]
-  (- num (* (quot num div) div)))
+  (__rem num div))
 
 (defn mod
   "Modulus of num and div. Truncates toward negative infinity."
@@ -1341,23 +1551,8 @@
           acc
           (recur (dec i) (cons (nth items i) acc)))))))
 
-(defn spread
-  "Used by list* and apply to spread the final argument."
-  [arglist]
-  (cond
-    (nil? arglist) nil
-    (nil? (next arglist)) (seq (first arglist))
-    :else (cons (first arglist) (spread (next arglist)))))
-
-(defn list*
-  "Creates a new seq containing the items prepended to the rest, the
-  last of which will be treated as a sequence."
-  ([args] (seq args))
-  ([a args] (cons a args))
-  ([a b args] (cons a (cons b args)))
-  ([a b c args] (cons a (cons b (cons c args))))
-  ([a b c d & more]
-   (cons a (cons b (cons c (cons d (spread more)))))))
+;; (spread, list*, apply moved into the bootstrap block at the top of
+;;  this file so other early defns can use them.)
 
 ;; =============================================================================
 ;; VERBATIM FROM CLOJURESCRIPT - PersistentVector
@@ -3117,103 +3312,9 @@
 ;; Core Macros
 ;; =============================================================================
 
-;; defmacro - the macro-defining macro, implemented in Clojure!
-;; This is similar to Clojure's bootstrap: we define defmacro as a macro
-;; using the primitive (def ^:macro name (fn ...)) form, then use __set_macro!
-;;
-;; Simplified version: (defmacro name [params] body...)
-;; Assumes no docstring, no attr-map, single arity
-(def ^:macro defmacro
-  (fn [&form &env name params & body]
-    (let [form-sym (symbol "&form")
-          env-sym (symbol "&env")
-          new-params (vec (list* form-sym env-sym params))
-          fn-form (list* 'fn new-params body)]
-      (list 'do
-            (list 'def name fn-form)
-            (list '__set_macro! (list 'var name))
-            (list 'var name)))))
-
-;; when - evaluates body when test is true
-(def ^:macro when
-  (fn [form env test & body]
-    (list (quote if) test (cons (quote do) body))))
-
-;; when-not - evaluates body when test is false
-(def ^:macro when-not
-  (fn [form env test & body]
-    (list (quote if) test nil (cons (quote do) body))))
-
-;; if-not - inverse of if
-(def ^:macro if-not
-  (fn [form env test then & else]
-    (if (nil? (first else))
-      (list (quote if) test nil then)
-      (list (quote if) test (first else) then))))
-
-;; cond - conditional with multiple clauses
-(def ^:macro cond
-  (fn cond-macro [form env & clauses]
-    (if (nil? (seq clauses))
-      nil
-      (if (nil? (next clauses))
-        (throw "cond requires an even number of forms")
-        (list (quote if)
-              (first clauses)
-              (second clauses)
-              (cons (quote cond) (next (next clauses))))))))
-
-;; and - short-circuit logical and
-;; Returns the first falsey value or the last value if all are truthy
-(def ^:macro and
-  (fn and-macro [form env & exprs]
-    (if (nil? (seq exprs))
-      true
-      (if (nil? (next exprs))
-        (first exprs)
-        (list (quote let) (vector (quote and__auto__) (first exprs))
-              (list (quote if) (quote and__auto__)
-                    (cons (quote and) (next exprs))
-                    (quote and__auto__)))))))
-
-;; or - short-circuit logical or
-(def ^:macro or
-  (fn or-macro [form env & exprs]
-    (if (nil? (seq exprs))
-      nil
-      (if (nil? (next exprs))
-        (first exprs)
-        (list (quote let) (list (quote or__auto__) (first exprs))
-              (list (quote if) (quote or__auto__)
-                    (quote or__auto__)
-                    (cons (quote or) (next exprs))))))))
-
-;; -> threading macro (thread first)
-(def ^:macro ->
-  (fn thread-first [form env x & forms]
-    (if (nil? (seq forms))
-      x
-      (let [f (first forms)
-            threaded (if (list? f)
-                       (cons (first f) (cons x (next f)))
-                       (list f x))]
-        (cons (quote ->) (cons threaded (next forms)))))))
-
-;; ->> threading macro (thread last)
-(def ^:macro ->>
-  (fn thread-last [form env x & forms]
-    (if (nil? (seq forms))
-      x
-      (let [f (first forms)
-            threaded (if (list? f)
-                       (concat (list (first f)) (next f) (list x))
-                       (list f x))]
-        (cons (quote ->>) (cons threaded (next forms)))))))
-
-;; comment - ignores all forms
-(def ^:macro comment
-  (fn [form env & _]
-    nil))
+;; (Bootstrap macros — defmacro, when, when-not, if-not, cond, and, or,
+;;  ->, ->>, comment — moved to the top of the file so subsequent defns
+;;  can use them. See the "Bootstrap" section near the start.)
 
 ;; =============================================================================
 ;; Additional Core Functions
@@ -3270,13 +3371,7 @@
   ([x] (if (nil? x) "" (__str_concat (list x))))
   ([x & ys] (__str_concat (cons x ys))))
 
-(defn apply
-  "Applies fn f to the argument list formed by prepending intervening arguments to args."
-  ([f args] (__apply f args))
-  ([f x args] (__apply f (cons x args)))
-  ([f x y args] (__apply f (list* x y args)))
-  ([f x y z args] (__apply f (list* x y z args)))
-  ([f a b c d & args] (__apply f (cons a (cons b (cons c (cons d (spread args))))))))
+;; (apply moved into the bootstrap block at the top of this file.)
 
 (defn map
   "Returns a lazy sequence consisting of the result of applying f to
@@ -3722,29 +3817,26 @@
 ;; Macros: if-let, when-let, defn-, etc.
 ;; =============================================================================
 
-(def ^:macro if-let
-  (fn [form env bindings then else]
-    (let [bind (first bindings)
+(defmacro if-let [bindings then else]
+  (let [bind (first bindings)
           test (second bindings)
           temp (gensym "temp__")]
       (list (quote let) (vector temp test)
             (list (quote if) temp
               (list (quote let) (vector bind temp) then)
-              else)))))
+              else))))
 
-(def ^:macro when-let
-  (fn [form env bindings & body]
-    (let [bind (first bindings)
+(defmacro when-let [bindings & body]
+  (let [bind (first bindings)
           test (second bindings)
           temp (gensym "temp__")]
       (list (quote let) (vector temp test)
             (list (quote if) temp
               (cons (quote let) (cons (vector bind temp) body))
-              nil)))))
+              nil))))
 
-(def ^:macro defn-
-  (fn [form env name & fdecl]
-    (cons (quote defn) (cons name fdecl))))
+(defmacro defn- [name & fdecl]
+  (cons (quote defn) (cons name fdecl)))
 
 ;; =============================================================================
 ;; Additional Core Functions
@@ -3950,18 +4042,16 @@
 ;; =============================================================================
 
 ;; as-> thread with named binding
-(def ^:macro as->
-  (fn [form env expr name & forms]
-    (let [steps (reduce (fn [acc f]
+(defmacro as-> [expr name & forms]
+  (let [steps (reduce (fn [acc f]
                           (list (quote let) (vector name acc) f))
                         expr
                         forms)]
-      steps)))
+      steps))
 
 ;; some-> thread first, short-circuit on nil
-(def ^:macro some->
-  (fn [form env expr & forms]
-    (let [g (gensym "some__")]
+(defmacro some-> [expr & forms]
+  (let [g (gensym "some__")]
       (reduce (fn [acc f]
                 (let [step (if (list? f)
                              (cons (first f) (cons g (rest f)))
@@ -3969,12 +4059,11 @@
                   (list (quote let) (vector g acc)
                         (list (quote if) (list (quote nil?) g) nil step))))
               expr
-              forms))))
+              forms)))
 
 ;; some->> thread last, short-circuit on nil
-(def ^:macro some->>
-  (fn [form env expr & forms]
-    (let [g (gensym "some__")]
+(defmacro some->> [expr & forms]
+  (let [g (gensym "some__")]
       (reduce (fn [acc f]
                 (let [step (if (list? f)
                              (concat f (list g))
@@ -3982,12 +4071,11 @@
                   (list (quote let) (vector g acc)
                         (list (quote if) (list (quote nil?) g) nil step))))
               expr
-              forms))))
+              forms)))
 
 ;; cond-> thread first with conditions
-(def ^:macro cond->
-  (fn [form env expr & clauses]
-    (let [g (gensym "cond__")
+(defmacro cond-> [expr & clauses]
+  (let [g (gensym "cond__")
           pairs (partition 2 clauses)]
       (loop [s (seq pairs) acc expr]
         (if (nil? s)
@@ -4000,12 +4088,11 @@
                            (list step g))]
             (recur (next s)
                    (list (quote let) (vector g acc)
-                         (list (quote if) test threaded g)))))))))
+                         (list (quote if) test threaded g))))))))
 
 ;; cond->> thread last with conditions
-(def ^:macro cond->>
-  (fn [form env expr & clauses]
-    (let [g (gensym "cond__")
+(defmacro cond->> [expr & clauses]
+  (let [g (gensym "cond__")
           pairs (partition 2 clauses)]
       (loop [s (seq pairs) acc expr]
         (if (nil? s)
@@ -4018,61 +4105,55 @@
                            (list step g))]
             (recur (next s)
                    (list (quote let) (vector g acc)
-                         (list (quote if) test threaded g)))))))))
+                         (list (quote if) test threaded g))))))))
 
 ;; if-some - like if-let but tests for non-nil (not just truthy)
-(def ^:macro if-some
-  (fn [form env bindings then else]
-    (let [bind (first bindings)
+(defmacro if-some [bindings then else]
+  (let [bind (first bindings)
           test (second bindings)
           temp (gensym "temp__")]
       (list (quote let) (vector temp test)
             (list (quote if) (list (quote nil?) temp)
               else
-              (list (quote let) (vector bind temp) then))))))
+              (list (quote let) (vector bind temp) then)))))
 
 ;; when-some - like when-let but tests for non-nil
-(def ^:macro when-some
-  (fn [form env bindings & body]
-    (let [bind (first bindings)
+(defmacro when-some [bindings & body]
+  (let [bind (first bindings)
           test (second bindings)
           temp (gensym "temp__")]
       (list (quote let) (vector temp test)
             (list (quote if) (list (quote nil?) temp)
               nil
-              (cons (quote let) (cons (vector bind temp) body)))))))
+              (cons (quote let) (cons (vector bind temp) body))))))
 
 ;; defonce - only defines if var is not already bound
 ;; Handled as a builtin special form in clojure_ast.rs
 ;; This macro definition exists as a fallback but the AST analyzer
 ;; intercepts (defonce ...) before macro expansion.
-(def ^:macro defonce
-  (fn [form env name expr]
-    (list (quote def) name expr)))
+(defmacro defonce [name expr]
+  (list (quote def) name expr))
 
 ;; assert - throw if not truthy
-(def ^:macro assert
-  (fn [form env x & args]
-    (let [msg (first args)]
+(defmacro assert [x & args]
+  (let [msg (first args)]
       (list (quote when) (list (quote not) x)
-            (list (quote throw) (if msg msg "Assert failed"))))))
+            (list (quote throw) (if msg msg "Assert failed")))))
 
 ;; doseq - simplified, single binding only
-(def ^:macro doseq
-  (fn [form env bindings & body]
-    (let [bind (first bindings)
+(defmacro doseq [bindings & body]
+  (let [bind (first bindings)
           coll (second bindings)
           g (gensym "s__")]
       (list (quote loop) (vector g (list (quote seq) coll))
             (list (quote when) g
               (cons (quote let) (cons (vector bind (list (quote first) g))
                 body))
-              (list (quote recur) (list (quote next) g)))))))
+              (list (quote recur) (list (quote next) g))))))
 
 ;; case - match expression against constant values
-(def ^:macro case
-  (fn [form env expr & clauses]
-    (let [g (gensym "case__")
+(defmacro case [expr & clauses]
+  (let [g (gensym "case__")
           has-default (odd? (count clauses))
           default (if has-default (last clauses) (list (quote throw) "No matching clause"))
           test-pairs (if has-default (partition 2 (butlast clauses)) (partition 2 clauses))]
@@ -4083,16 +4164,15 @@
                 test-val (first pair)
                 result (second pair)]
             (recur (next s)
-                   (list (quote if) (list (quote =) g test-val) result acc))))))))
+                   (list (quote if) (list (quote =) g test-val) result acc)))))))
 
 ;; =============================================================================
 ;; Additional Functions and Macros
 ;; =============================================================================
 
 ;; condp - match with predicate
-(def ^:macro condp
-  (fn [form env pred expr & clauses]
-    (let [has-default (odd? (count clauses))
+(defmacro condp [pred expr & clauses]
+  (let [has-default (odd? (count clauses))
           default (if has-default (last clauses) (list (quote throw) "No matching clause in condp"))
           test-pairs (if has-default (partition 2 (butlast clauses)) (partition 2 clauses))
           g (gensym "condp__")]
@@ -4104,13 +4184,12 @@
                 result (second pair)]
             (recur (next s)
                    (list (quote let) (vector g expr)
-                         (list (quote if) (list pred test-val g) result acc)))))))))
+                         (list (quote if) (list pred test-val g) result acc))))))))
 
 ;; while - loop while test is truthy
-(def ^:macro while
-  (fn [form env test & body]
-    (list (quote loop) (vector)
-          (cons (quote when) (cons test (concat body (list (list (quote recur)))))))))
+(defmacro while [test & body]
+  (list (quote loop) (vector)
+          (cons (quote when) (cons test (concat body (list (list (quote recur))))))))
 
 ;; run! - call proc for side effects on each element
 (defn run! [proc coll]
@@ -4208,9 +4287,8 @@
                 (list (quote fn) (vector sym) inner)
                 coll-expr))))))
 
-(def ^:macro for
-  (fn [form env bindings body]
-    (for-helper (seq bindings) body)))
+(defmacro for [bindings body]
+  (for-helper (seq bindings) body))
 
 ;; ============================================================================
 ;; Atoms
@@ -4269,9 +4347,8 @@
 
 ;; delay - wraps expression in a memoized thunk
 ;; Returns a function; deref calls the function (which caches the result)
-(def ^:macro delay
-  (fn [form env & body]
-    (let [val-sym (gensym "delay_val__")
+(defmacro delay [& body]
+  (let [val-sym (gensym "delay_val__")
           done-sym (gensym "delay_done__")]
       (list (quote let) (vector val-sym (list (quote atom) nil)
                                 done-sym (list (quote atom) false))
@@ -4279,7 +4356,7 @@
           (list (quote when) (list (quote not) (list (quote deref) done-sym))
             (list (quote reset!) val-sym (cons (quote do) body))
             (list (quote reset!) done-sym true))
-          (list (quote deref) val-sym))))))
+          (list (quote deref) val-sym)))))
 
 ;; pr-str - returns a string representation with pr semantics (strings quoted)
 (defn pr-str [x] (__pr_str x))

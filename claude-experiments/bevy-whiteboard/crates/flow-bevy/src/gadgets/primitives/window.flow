@@ -1,0 +1,24 @@
+# Sliding-window counter. Each incoming packet pushes `now` onto the
+# ring, then emits a `count(n)` packet where n is the number of
+# entries within the last `window_ns`. Use with Threshold to make a
+# rate-limiter or breaker.
+node Window {
+    slots {
+        window_ns: Int = 1000000000
+        ring:      Samples(256)
+    }
+    probes { count: "{count_where(ring, \"ts\", now - ts < window_ns)}" }
+    rule on_packet {
+        on packet(p)
+        do {
+            push ring <- now
+            emit count(count_where(ring, "ts", now - ts < window_ns)) to default
+        }
+    }
+    # Reset: clears the window. Useful as a "successful probe" signal
+    # for a circuit breaker — when a probe succeeds, flush the failures.
+    rule reset {
+        on reset(_)
+        do { drop ring len(ring) }
+    }
+}

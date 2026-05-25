@@ -1,0 +1,16 @@
+package program:counter;
+
+/// Tiny WIT world to prove the WASM toolchain wiring works.
+///
+/// A "handler" that, when called with `event: u32`, reads the current count
+/// via an imported host function, adds the event value, and writes back.
+world counter {
+  /// Host-provided: returns the current counter value.
+  import get-count: func() -> u32;
+
+  /// Host-provided: writes back the new counter value.
+  import set-count: func(value: u32);
+
+  /// Guest-exported: entry point invoked by the runtime.
+  export handle: func(event: u32);
+}

@@ -1,0 +1,12 @@
+State: in_progress
+  kind: Map<DeployId, DeployRecord>
+
+  READERS (3)
+    update_status                 [$event.deploy_id]
+    poll_in_flight                [*]
+    do_rollback                   [$event.deploy_id]
+
+  WRITERS (3)
+    kick_off_deploy               [*]
+    update_status                 [$event.deploy_id]
+    do_rollback                   [$event.deploy_id]

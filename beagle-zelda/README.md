@@ -34,13 +34,15 @@ the engine for 60 frames and serialize/deserialize a level round-trip.
 ## Project layout
 ```
 beagle-zelda/
+├── beagle.toml
 ├── src/
-│   ├── beagle_zelda.bg       # orchestration: World, modes, editor, save/load, main
+│   ├── main.bg               # orchestration: World, modes, editor, save/load, main
 │   ├── gameplay.bg           # Player/Wall/Tuning types, physics, camera, coord transforms
 │   ├── enemies.bg            # Monster + Sentinel types and AI (LOS, sweep, RNG)
 │   ├── rendering.bg          # shader, shadow mesh, Y-sort, play-mode render
 │   ├── ray.bg                # raylib + raygui FFI bindings
-│   ├── vec.bg                # 2D vector helpers
+│   └── vec.bg                # 2D vector helpers
+├── test/
 │   ├── headless_test.bg      # 60-frame smoke test (play mode)
 │   └── editor_test.bg        # 60-frame smoke test (editor mode + save/load)
 ├── vendor/
@@ -58,13 +60,13 @@ beagle-zelda/
 ./vendor/build_raygui.sh
 
 # run the game
-~/Documents/Code/beagle/target/release/beag src/beagle_zelda.bg
+beag run src/main.bg
 
 # smoke-test headlessly (60 frames then exits)
-~/Documents/Code/beagle/target/release/beag src/headless_test.bg
+BEAGLE_ZELDA_NOFOCUS=1 beag run test/headless_test.bg --include src/
 
 # smoke-test editor mode + serialization round-trip
-~/Documents/Code/beagle/target/release/beag src/editor_test.bg
+BEAGLE_ZELDA_NOFOCUS=1 beag run test/editor_test.bg --include src/
 ```
 
 ## Implementation notes

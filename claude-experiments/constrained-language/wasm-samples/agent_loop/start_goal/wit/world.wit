@@ -1,0 +1,74 @@
+package program:agent-loop;
+
+// Generated for handler `start_goal`.
+// The declared footprint in the manifest is the complete authoring surface.
+
+world start-goal {
+  // Types
+  record message {
+    role: string,
+    text: string,
+  }
+  type messages = list<message>;
+  record goal-record {
+    id: string,
+    prompt: string,
+    status: string,
+    messages: messages,
+    step-count: u32,
+  }
+  record llm-req {
+    goal-id: string,
+    messages: messages,
+  }
+  record llm-resp {
+    kind: string,
+    text: string,
+    tool: string,
+    args: string,
+  }
+  record tool-req {
+    goal-id: string,
+    tool: string,
+    args: string,
+  }
+  record tool-resp {
+    %result: string,
+  }
+  record notification {
+    goal-id: string,
+    text: string,
+  }
+  variant llm-outcome {
+    ok(llm-resp),
+    failed(string),
+  }
+  variant tool-outcome {
+    ok(tool-resp),
+    failed(string),
+  }
+  record llm-returned-payload {
+    emit-id: u64,
+    outcome: llm-outcome,
+  }
+  record tool-returned-payload {
+    emit-id: u64,
+    outcome: tool-outcome,
+  }
+  record goal-received-payload {
+    goal-id: string,
+    prompt: string,
+  }
+
+  // State writes (one function per writable slice; Map cells get put + delete)
+  import put-goals: func(key: string, value: goal-record);
+  import delete-goals: func(key: string);
+  import put-pending-llm: func(key: u64, value: string);
+  import delete-pending-llm: func(key: u64);
+
+  // Effects (one emit-<name> per declared effect type; returns an opaque emit id)
+  import emit-call-llm: func(req: llm-req) -> u64;
+
+  // Handler entry point
+  export handle: func(event: goal-received-payload);
+}

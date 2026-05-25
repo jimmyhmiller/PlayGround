@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use crate::datom::{Datom, EntityId, TxId, Value};
 use crate::index;
+use crate::intern::AttrInterner;
 use crate::schema::{FieldType, SchemaRegistry};
 use crate::storage::{self, TxnOps};
 
@@ -137,7 +138,7 @@ impl TxOp {
 
 fn json_to_value(v: &serde_json::Value) -> std::result::Result<Value, String> {
     match v {
-        serde_json::Value::String(s) => Ok(Value::String(s.clone())),
+        serde_json::Value::String(s) => Ok(Value::String(s.as_str().into())),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Ok(Value::I64(i))
@@ -165,10 +166,10 @@ fn json_to_value(v: &serde_json::Value) -> std::result::Result<Value, String> {
                         variant_name
                     ));
                 }
-                return Ok(Value::Enum {
+                return Ok(Value::Enum(Box::new(crate::datom::EnumValue {
                     variant: variant_name.clone(),
                     fields,
-                });
+                })));
             }
             Err("unsupported object value".to_string())
         }
@@ -182,11 +183,30 @@ pub struct TransactionResult {
     pub entity_ids: Vec<EntityId>,
     pub datom_count: usize,
     pub timestamp_ms: u64,
+    /// Pure-add fast-path payload for incremental cache updates.
+    /// Populated only when the transaction consists exclusively of
+    /// asserts on new entities (no retracts, no updates to existing
+    /// entities) — the only shape the cache can patch in-place. When
+    /// empty, callers fall back to whole-type invalidation.
+    pub cache_appends: Vec<CacheAppend>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CacheAppend {
+    pub entity_type: String,
+    pub entity_id: EntityId,
+    pub values: HashMap<String, Value>,
 }
 
 /// Process a transaction: validate against schema, generate datoms, write to storage.
+///
+/// The `interner` is consulted (and grown) for every attribute name
+/// touched by the transaction. New attributes get a fresh `AttrId`
+/// allocated and written into the same `WriteBatch` as the datoms
+/// that reference them.
 pub fn process_transaction(
     txn: &dyn TxnOps,
+    interner: &AttrInterner,
     schema: &SchemaRegistry,
     tx_id: TxId,
     entity_counter: &mut EntityId,
@@ -235,7 +255,7 @@ pub fn process_transaction(
                         datoms.push(Datom {
                             entity: eid,
                             attribute: "__type".to_string(),
-                            value: Value::String(entity_type.clone()),
+                            value: Value::String(entity_type.as_str().into()),
                             tx: tx_id,
                             added: true,
                         });
@@ -266,13 +286,15 @@ pub fn process_transaction(
                         let base_attr = type_def.attribute_name(field_name);
 
                         if !is_new {
-                            retract_current_enum(txn, &mut datoms, eid, &base_attr, tx_id)?;
+                            retract_current_enum(
+                                txn, interner, &mut datoms, eid, &base_attr, tx_id,
+                            )?;
                         }
 
                         datoms.push(Datom {
                             entity: eid,
                             attribute: format!("{}/__tag", base_attr),
-                            value: Value::String(variant_name.clone()),
+                            value: Value::String(variant_name.as_str().into()),
                             tx: tx_id,
                             added: true,
                         });
@@ -291,7 +313,8 @@ pub fn process_transaction(
                         let field_def = type_def.get_field(field_name).unwrap();
 
                         if !is_new {
-                            if let Some(current_val) = get_latest_value(txn, eid, &attr)? {
+                            if let Some(current_val) = get_latest_value(txn, interner, eid, &attr)?
+                            {
                                 if current_val == *value {
                                     continue;
                                 }
@@ -306,7 +329,7 @@ pub fn process_transaction(
                         }
 
                         if field_def.unique {
-                            check_unique_constraint(txn, eid, &attr, value, &pending_unique)?;
+                            check_unique_constraint(txn, interner, eid, &attr, value, &pending_unique)?;
                             pending_unique
                                 .insert((attr.clone(), format!("{}", value)), eid);
                         }
@@ -343,6 +366,7 @@ pub fn process_transaction(
                     if let FieldType::Enum(_) = &field_def.field_type {
                         retract_current_enum(
                             txn,
+                            interner,
                             &mut datoms,
                             *entity,
                             &type_def.attribute_name(field_name),
@@ -350,7 +374,8 @@ pub fn process_transaction(
                         )?;
                     } else {
                         let attr = type_def.attribute_name(field_name);
-                        if let Some(current_val) = get_latest_value(txn, *entity, &attr)? {
+                        if let Some(current_val) = get_latest_value(txn, interner, *entity, &attr)?
+                        {
                             datoms.push(Datom {
                                 entity: *entity,
                                 attribute: attr,
@@ -378,14 +403,18 @@ pub fn process_transaction(
                 let scan_end = index::prefix_end(&scan_prefix);
                 let all_entries = txn.scan(&scan_prefix, &scan_end)?;
 
-                // Group by attribute
+                // Group by attribute. Decoders return interned `attr_id`s;
+                // resolve to names via the interner so the rest of the
+                // function can continue to work in terms of strings.
                 let mut attr_datoms: HashMap<String, Vec<Datom>> = HashMap::new();
                 for (key, _) in &all_entries {
-                    if let Some(datom) = index::decode_datom_from_eavt(key) {
-                        attr_datoms
-                            .entry(datom.attribute.clone())
-                            .or_default()
-                            .push(datom);
+                    if let Some(decoded) = index::decode_datom_from_eavt(key) {
+                        if let Some(datom) = interner.resolve(decoded) {
+                            attr_datoms
+                                .entry(datom.attribute.clone())
+                                .or_default()
+                                .push(datom);
+                        }
                     }
                 }
 
@@ -418,8 +447,15 @@ pub fn process_transaction(
 
     let datom_count = datoms.len();
     for datom in &datoms {
+        // Intern this datom's attribute. First write of any new
+        // attribute also puts the `attr:<name>` mapping into `txn` so
+        // it commits atomically with the data datoms below.
+        let attr_id = interner.intern(txn, &datom.attribute)?;
+
         // Write historical indexes
-        for (key, value) in index::encode_datom(datom) {
+        for (key, value) in
+            index::encode_datom(datom.entity, attr_id, &datom.value, datom.tx, datom.added)
+        {
             txn.put(key, value)?;
         }
 
@@ -427,24 +463,20 @@ pub fn process_transaction(
         if datom.added {
             // Assert: look up old value to clean up stale CURRENT_AVET entry
             let (aevt_key, aevt_val) =
-                index::encode_current_aevt(&datom.attribute, datom.entity, &datom.value);
+                index::encode_current_aevt(attr_id, datom.entity, &datom.value);
 
             // Check for previous value to delete stale CURRENT_AVET
             if let Some(old_val_bytes) = txn.get(&aevt_key)? {
                 if let Some(old_val) = index::decode_current_value(&old_val_bytes) {
-                    let old_avet_key = index::encode_current_avet(
-                        &datom.attribute,
-                        &old_val,
-                        datom.entity,
-                    );
+                    let old_avet_key =
+                        index::encode_current_avet(attr_id, &old_val, datom.entity);
                     txn.delete(&old_avet_key)?;
                 }
             }
 
             txn.put(aevt_key, aevt_val)?;
 
-            let avet_key =
-                index::encode_current_avet(&datom.attribute, &datom.value, datom.entity);
+            let avet_key = index::encode_current_avet(attr_id, &datom.value, datom.entity);
             txn.put(avet_key, vec![])?;
 
             // Track entity count: new entity type assertion
@@ -455,14 +487,12 @@ pub fn process_transaction(
             }
         } else {
             // Retract: delete current-state entries
-            let aevt_prefix = index::current_aevt_attr_prefix(&datom.attribute);
-            let mut aevt_key = aevt_prefix;
+            let mut aevt_key = index::current_aevt_attr_prefix(attr_id);
             aevt_key.extend_from_slice(&datom.entity.to_be_bytes());
 
             txn.delete(&aevt_key)?;
 
-            let avet_key =
-                index::encode_current_avet(&datom.attribute, &datom.value, datom.entity);
+            let avet_key = index::encode_current_avet(attr_id, &datom.value, datom.entity);
             txn.delete(&avet_key)?;
 
             // Track entity count: entity type retraction
@@ -474,26 +504,70 @@ pub fn process_transaction(
         }
     }
 
+    // Pure-add fast path: if every op was `Assert { entity: None, .. }`
+    // with no enum-typed values, the caller can extend the type cache
+    // in place instead of invalidating it. Enums fan out into multiple
+    // `field/__tag` and `field.variant/sub_field` columns that the
+    // simple append helper doesn't handle, so we treat any enum value
+    // as a fallback-to-invalidate trigger.
+    let pure_add = ops.iter().all(|op| match op {
+        TxOp::Assert {
+            entity: None, data, ..
+        } => !data.values().any(|v| matches!(v, Value::Enum(_))),
+        _ => false,
+    });
+
+    let cache_appends = if pure_add {
+        let mut appends = Vec::with_capacity(ops.len());
+        // entity_ids was pushed in op order for Asserts; with all ops
+        // being pure asserts, the index lines up 1:1.
+        for (op, eid) in ops.iter().zip(entity_ids.iter().copied()) {
+            if let TxOp::Assert {
+                entity_type, data, ..
+            } = op
+            {
+                appends.push(CacheAppend {
+                    entity_type: entity_type.clone(),
+                    entity_id: eid,
+                    values: data.clone(),
+                });
+            }
+        }
+        appends
+    } else {
+        Vec::new()
+    };
+
     Ok(TransactionResult {
         tx_id,
         entity_ids,
         datom_count,
         timestamp_ms: 0, // Filled in by Database::transact()
+        cache_appends,
     })
 }
 
 fn get_latest_value(
     txn: &dyn TxnOps,
+    interner: &AttrInterner,
     entity: EntityId,
     attr: &str,
 ) -> Result<Option<Value>> {
-    let prefix = index::eavt_entity_attr_prefix(entity, attr);
+    // If this attribute has never been interned, no datoms exist for it.
+    let attr_id = match interner.lookup(attr) {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+
+    let prefix = index::eavt_entity_attr_prefix(entity, attr_id);
     let end = index::prefix_end(&prefix);
     let existing = txn.scan(&prefix, &end)?;
 
     let mut datoms: Vec<Datom> = existing
         .iter()
-        .filter_map(|(k, _)| index::decode_datom_from_eavt(k))
+        .filter_map(|(k, _)| {
+            index::decode_datom_from_eavt(k).and_then(|d| interner.resolve(d))
+        })
         .collect();
 
     datoms.sort_by(|a, b| a.tx.cmp(&b.tx).then_with(|| a.added.cmp(&b.added)));
@@ -512,6 +586,7 @@ fn get_latest_value(
 
 fn check_unique_constraint(
     txn: &dyn TxnOps,
+    interner: &AttrInterner,
     entity: EntityId,
     attr: &str,
     value: &Value,
@@ -530,14 +605,23 @@ fn check_unique_constraint(
         }
     }
 
-    let prefix = index::avet_attr_value_prefix(attr, value);
+    // If the attribute has no id yet, no historical data uses it — no
+    // constraint to check against.
+    let attr_id = match interner.lookup(attr) {
+        Some(id) => id,
+        None => return Ok(()),
+    };
+
+    let prefix = index::avet_attr_value_prefix(attr_id, value);
     let end = index::prefix_end(&prefix);
     let entries = txn.scan(&prefix, &end)?;
 
     let mut entity_datoms: HashMap<EntityId, Vec<Datom>> = HashMap::new();
     for (k, _) in &entries {
-        if let Some(datom) = index::decode_datom_from_avet(k) {
-            entity_datoms.entry(datom.entity).or_default().push(datom);
+        if let Some(decoded) = index::decode_datom_from_avet(k) {
+            if let Some(datom) = interner.resolve(decoded) {
+                entity_datoms.entry(datom.entity).or_default().push(datom);
+            }
         }
     }
 
@@ -572,9 +656,9 @@ fn validate_enum_value(
         .get_enum(enum_name)
         .ok_or_else(|| TxError::UnknownEnum(enum_name.to_string()))?;
 
-    let (variant_name, variant_fields) = match value {
-        Value::String(s) => (s.clone(), HashMap::new()),
-        Value::Enum { variant, fields } => (variant.clone(), fields.clone()),
+    let (variant_name, variant_fields): (String, HashMap<String, Value>) = match value {
+        Value::String(s) => (s.to_string(), HashMap::new()),
+        Value::Enum(e) => (e.variant.clone(), e.fields.clone()),
         other => {
             return Err(TxError::TypeMismatch {
                 field: field_name.to_string(),
@@ -628,8 +712,8 @@ fn validate_enum_value(
 
 fn extract_enum_parts(value: &Value) -> (String, HashMap<String, Value>) {
     match value {
-        Value::String(s) => (s.clone(), HashMap::new()),
-        Value::Enum { variant, fields } => (variant.clone(), fields.clone()),
+        Value::String(s) => (s.to_string(), HashMap::new()),
+        Value::Enum(e) => (e.variant.clone(), e.fields.clone()),
         _ => panic!("extract_enum_parts called on non-enum value"),
     }
 }
@@ -663,13 +747,14 @@ fn decrement_type_count(txn: &dyn TxnOps, type_name: &str) -> Result<()> {
 
 fn retract_current_enum(
     txn: &dyn TxnOps,
+    interner: &AttrInterner,
     datoms: &mut Vec<Datom>,
     entity: EntityId,
     field_attr_base: &str,
     tx_id: TxId,
 ) -> Result<()> {
     let tag_attr = format!("{}/__tag", field_attr_base);
-    if let Some(tag_val) = get_latest_value(txn, entity, &tag_attr)? {
+    if let Some(tag_val) = get_latest_value(txn, interner, entity, &tag_attr)? {
         datoms.push(Datom {
             entity,
             attribute: tag_attr,
@@ -686,12 +771,14 @@ fn retract_current_enum(
     let variant_attr_prefix = format!("{}.", field_attr_base);
     let mut attr_datoms: HashMap<String, Vec<Datom>> = HashMap::new();
     for (key, _) in &all_entries {
-        if let Some(datom) = index::decode_datom_from_eavt(key) {
-            if datom.attribute.starts_with(&variant_attr_prefix) {
-                attr_datoms
-                    .entry(datom.attribute.clone())
-                    .or_default()
-                    .push(datom);
+        if let Some(decoded) = index::decode_datom_from_eavt(key) {
+            if let Some(datom) = interner.resolve(decoded) {
+                if datom.attribute.starts_with(&variant_attr_prefix) {
+                    attr_datoms
+                        .entry(datom.attribute.clone())
+                        .or_default()
+                        .push(datom);
+                }
             }
         }
     }

@@ -513,7 +513,7 @@ fn check_terminator(
                 check_invoke_normal_args(func, block, sig.ret, *normal, normal_args, errors);
             }
             if exception.index() < n_blocks {
-                check_branch_args(func, block, *exception, exception_args, errors);
+                check_invoke_exception_args(func, block, *exception, exception_args, errors);
             }
         }
         Terminator::InvokeIndirect {
@@ -528,7 +528,7 @@ fn check_terminator(
                 check_invoke_normal_args(func, block, *ret_ty, *normal, normal_args, errors);
             }
             if exception.index() < n_blocks {
-                check_branch_args(func, block, *exception, exception_args, errors);
+                check_invoke_exception_args(func, block, *exception, exception_args, errors);
             }
         }
         Terminator::CaptureSlice { prompt, handler_block, resume_block } => {
@@ -625,6 +625,17 @@ fn check_terminator(
                 });
             }
         }
+        Terminator::Raise(v) => {
+            // Raised value is always I64-typed (the exception payload
+            // convention matches Invoke's exception-block first-param).
+            if func.value_type(*v) != Type::I64 {
+                errors.push(VerifyError::TypeMismatch {
+                    expected: Type::I64,
+                    got: func.value_type(*v),
+                    context: "raise value must be i64".into(),
+                });
+            }
+        }
         Terminator::Unreachable => {}
     }
 }
@@ -653,6 +664,62 @@ fn check_branch_args(
                 block: src,
                 target,
                 arg: i,
+                expected: *pty,
+                got: at,
+            });
+        }
+    }
+}
+
+/// Check branch args for invoke exception continuation.
+/// If the exception block has any params, the first one is implicitly
+/// the runtime exception value (always `I64`); the remaining params
+/// must match `exception_args`. An exception block with zero params
+/// discards the value.
+fn check_invoke_exception_args(
+    func: &Function,
+    src: BlockId,
+    target: BlockId,
+    args: &[Value],
+    errors: &mut Vec<VerifyError>,
+) {
+    let params = &func.blocks[target.index()].params;
+    let exc_param_count = if params.is_empty() { 0 } else { 1 };
+    if params.len() < exc_param_count {
+        errors.push(VerifyError::BranchArgCount {
+            block: src,
+            target,
+            expected: exc_param_count,
+            got: params.len(),
+        });
+        return;
+    }
+    if exc_param_count == 1 && params[0].1 != Type::I64 {
+        errors.push(VerifyError::BranchArgType {
+            block: src,
+            target,
+            arg: 0,
+            expected: Type::I64,
+            got: params[0].1,
+        });
+    }
+    let remaining_params = &params[exc_param_count..];
+    if remaining_params.len() != args.len() {
+        errors.push(VerifyError::BranchArgCount {
+            block: src,
+            target,
+            expected: remaining_params.len() + exc_param_count,
+            got: args.len() + exc_param_count,
+        });
+        return;
+    }
+    for (i, ((_, pty), arg)) in remaining_params.iter().zip(args.iter()).enumerate() {
+        let at = func.value_type(*arg);
+        if at != *pty {
+            errors.push(VerifyError::BranchArgType {
+                block: src,
+                target,
+                arg: i + exc_param_count,
                 expected: *pty,
                 got: at,
             });

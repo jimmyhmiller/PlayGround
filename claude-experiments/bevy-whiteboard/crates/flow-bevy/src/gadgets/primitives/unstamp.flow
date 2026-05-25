@@ -1,0 +1,9 @@
+# Pops the top entry of return_path and routes the packet back toward
+# whoever stamped it. The inverse of Stamp; together they form a
+# request/reply chain at any depth.
+node Unstamp {
+    rule pass {
+        on packet(p)
+        do { emit packet(p) popping to (head(return_path)) }
+    }
+}

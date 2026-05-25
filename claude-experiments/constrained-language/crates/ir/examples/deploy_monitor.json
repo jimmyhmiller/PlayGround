@@ -1,0 +1,183 @@
+{
+  "name": "deploy-monitor",
+  "version": "0.1.0",
+
+  "schemas": {
+    "RepoId":     { "kind": "string" },
+    "ChannelId":  { "kind": "string" },
+    "DeployId":   { "kind": "string" },
+    "UserId":     { "kind": "string" },
+
+    "DeployStatus": {
+      "kind": "sum",
+      "variants": {
+        "queued":  null,
+        "running": null,
+        "success": null,
+        "failed":  null
+      }
+    },
+
+    "DeployRecord": {
+      "kind": "record",
+      "fields": {
+        "id":         "DeployId",
+        "sha":        "string",
+        "repo":       "RepoId",
+        "status":     "DeployStatus",
+        "started_at": "timestamp"
+      }
+    },
+
+    "HttpRequest": {
+      "kind": "record",
+      "fields": {
+        "method": "string",
+        "url":    "string",
+        "body":   "bytes"
+      }
+    },
+    "HttpResponse": {
+      "kind": "record",
+      "fields": {
+        "status": "u32",
+        "body":   "bytes"
+      }
+    },
+
+    "SlackPost": {
+      "kind": "record",
+      "fields": {
+        "channel": "ChannelId",
+        "text":    "string"
+      }
+    },
+    "Ack": { "kind": "record", "fields": {} },
+
+    "LogLevel": {
+      "kind": "sum",
+      "variants": {
+        "info":  null,
+        "warn":  null,
+        "error": null
+      }
+    },
+    "LogEntry": {
+      "kind": "record",
+      "fields": {
+        "level": "LogLevel",
+        "msg":   "string"
+      }
+    }
+  },
+
+  "events": {
+    "MergeToMain": {
+      "payload": {
+        "kind": "record",
+        "fields": {
+          "sha":    "string",
+          "author": "UserId",
+          "repo":   "RepoId"
+        }
+      }
+    },
+    "DeployStatusUpdate": {
+      "payload": {
+        "kind": "record",
+        "fields": {
+          "deploy_id": "DeployId",
+          "status":    "DeployStatus"
+        }
+      }
+    },
+    "TimerTick": {
+      "payload": {
+        "kind": "record",
+        "fields": {
+          "now": "timestamp"
+        }
+      }
+    },
+    "RollbackRequested": {
+      "payload": {
+        "kind": "record",
+        "fields": {
+          "deploy_id": "DeployId",
+          "by":        "UserId"
+        }
+      }
+    }
+  },
+
+  "state": {
+    "in_progress": {
+      "kind": "map",
+      "key":   "DeployId",
+      "value": "DeployRecord"
+    },
+    "history": {
+      "kind": "map",
+      "key":   "DeployId",
+      "value": "DeployRecord"
+    },
+    "subscribers": {
+      "kind": "map",
+      "key":   "RepoId",
+      "value": { "kind": "list", "of": "ChannelId" }
+    }
+  },
+
+  "effects": {
+    "HttpRequest": { "request": "HttpRequest", "response": "HttpResponse" },
+    "SlackPost":   { "request": "SlackPost",   "response": "Ack" },
+    "LogWrite":    { "request": "LogEntry",    "response": "Ack" }
+  },
+
+  "handlers": [
+    {
+      "name": "kick_off_deploy",
+      "on":   "MergeToMain",
+      "read":  ["subscribers[$event.repo]"],
+      "write": ["in_progress[*]"],
+      "emit":  ["HttpRequest", "SlackPost", "LogWrite"],
+      "body": {
+        "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "uri":  "components/kick_off_deploy.wasm"
+      }
+    },
+    {
+      "name": "update_status",
+      "on":   "DeployStatusUpdate",
+      "read":  ["in_progress[$event.deploy_id]"],
+      "write": ["in_progress[$event.deploy_id]", "history[*]"],
+      "emit":  ["SlackPost", "LogWrite"],
+      "body": {
+        "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "uri":  "components/update_status.wasm"
+      }
+    },
+    {
+      "name": "poll_in_flight",
+      "on":   "TimerTick",
+      "read":  ["in_progress[*]"],
+      "write": [],
+      "emit":  ["HttpRequest"],
+      "body": {
+        "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "uri":  "components/poll_in_flight.wasm"
+      }
+    },
+    {
+      "name": "do_rollback",
+      "on":   "RollbackRequested",
+      "read":  ["in_progress[$event.deploy_id]"],
+      "write": ["in_progress[$event.deploy_id]", "history[*]"],
+      "emit":  ["HttpRequest", "SlackPost", "LogWrite"],
+      "body": {
+        "hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+        "uri":  "components/do_rollback.wasm"
+      }
+    }
+  ]
+}

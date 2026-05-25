@@ -1,0 +1,94 @@
+# Generator → Router → Worker → Sink, rebuilt from primitives.
+#
+# Each high-level gadget has a primitive recipe:
+#
+#   Generator → Tick
+#   Router    → Filter + Filter        (one per color lane)
+#   Worker    → Buffer + Delay + Counter (queue + service window)
+#   Sink      → Counter
+#
+# Two parallel color lanes show the Filter routing in action: red
+# packets land in RedWorker; blue packets in BlueWorker. Each
+# Worker has its own backlog + service delay + completion counter.
+
+# Source: emits one packet every 100ms. (Treat its payload as the
+# "color" tag — we'll feed it through a recolor adapter to alternate
+# colors.)
+node Source : Tick {
+    period_ns: 100000000
+}
+
+# Alternate red/blue colors. Increments toggle internally; each
+# emit picks the color based on `next`.
+node Recolor {
+    slots { next: Int = 0 }
+    rule recolor {
+        on packet(_)
+        do {
+            emit_each packet(next) to out_neighbors()
+            next := if next == 0 then 1 else 0
+        }
+    }
+}
+
+# Router = two Filter primitives in parallel, one per color lane.
+# The Source's recolored packets reach BOTH filters; each filter
+# passes its matching color out `pass` and drops everything else
+# out `reject` (unwired here, since the other filter already
+# claimed those packets).
+node RedFilter  : Filter { match: 0 }
+node BlueFilter : Filter { match: 1 }
+
+# Worker = Buffer (backlog) + Delay (service time) + Counter (served).
+# Reds:
+node RedBacklog : Buffer { cap: 8 }
+node RedService : Delay  { ns: 50000000 }   # 50ms service window
+node RedDone    : Counter { count: 0 }
+# Blues:
+node BlueBacklog : Buffer { cap: 8 }
+node BlueService : Delay  { ns: 80000000 }   # 80ms service window (slower)
+node BlueDone    : Counter { count: 0 }
+
+# To drive each backlog we need pulls. A simple Puller emits a pull
+# every period_ns. Wire it back into the Buffer.
+node RedPuller : Tick { period_ns: 50000000 }    # match service rate
+node BluePuller : Tick { period_ns: 80000000 }
+
+# The Tick's `packet(nil)` output is repurposed as a `pull(nil)`. A
+# tiny adapter rewrites packet → pull so the Buffer's `on pull`
+# rule fires.
+node ToRedPull {
+    slots { dummy: Int = 0 }
+    rule conv { on packet(_) do { emit pull(nil) to default } }
+}
+node ToBluePull {
+    slots { dummy: Int = 0 }
+    rule conv { on packet(_) do { emit pull(nil) to default } }
+}
+
+# Overflow sinks (packets dropped when backlog is full).
+node RedOverflow  : Counter { count: 0 }
+node BlueOverflow : Counter { count: 0 }
+
+edges {
+    Source -> Recolor : 1ms
+
+    Recolor -> RedFilter  : 1ms
+    Recolor -> BlueFilter : 1ms
+
+    # Red lane: Filter → Backlog → Delay (service) → Done counter.
+    RedFilter.pass -> RedBacklog : 1ms
+    RedPuller       -> ToRedPull  : 1ms
+    ToRedPull       -> RedBacklog : 1ms
+    RedBacklog.head     -> RedService : 1ms
+    RedBacklog.overflow -> RedOverflow : 1ms
+    RedService -> RedDone : 1ms
+
+    # Blue lane: same shape.
+    BlueFilter.pass -> BlueBacklog : 1ms
+    BluePuller       -> ToBluePull : 1ms
+    ToBluePull       -> BlueBacklog : 1ms
+    BlueBacklog.head     -> BlueService : 1ms
+    BlueBacklog.overflow -> BlueOverflow : 1ms
+    BlueService -> BlueDone : 1ms
+}

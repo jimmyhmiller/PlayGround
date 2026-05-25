@@ -1,0 +1,44 @@
+# Queue reimplemented from primitives:
+#
+#     input → Filter(match=color) ─pass─▶ Buffer ─head──▶ output (Egress)
+#                                   reject (silent drop)
+#
+# Buffer's `head` port is the dispatch — every `pull(_)` arriving at
+# the Buffer pops one queued item out. Bridge the head out through
+# an Egress so an external puller can drain the queue across the
+# compound boundary.
+#
+# What the composite does NOT model (vs. monolithic Queue):
+# - `up` gating (queue can be paused). Wire a Switch upstream of
+#   Filter for that.
+# - The `waiting` consumer-stash that lets pulls arrive before pushes
+#   without dropping. With Buffer the puller polls; the original
+#   queue queued the consumer.
+compound QueueComposite(
+    color:    Int = 0,
+    capacity: Int = 16,
+) {
+    in  {
+        input: F     # `packet(c)` to enqueue
+        pull:  B     # `pull(_)` to dispatch the head
+    }
+    out {
+        output:   HE  # head packets (one per pull)
+        overflow: OE  # overflow when full
+    }
+
+    node F  : Filter { match: color }
+    node B  : Buffer { cap: capacity }
+    node HE : Egress { }
+    node OE {
+        # Overflow has a different port name so it needs its own
+        # tiny egress glue (Egress emits to `out output`).
+        rule fwd { on packet(p) do { emit packet(p) to out overflow } }
+    }
+
+    edges {
+        F.pass     -> B  : 1
+        B.head     -> HE : 1
+        B.overflow -> OE : 1
+    }
+}

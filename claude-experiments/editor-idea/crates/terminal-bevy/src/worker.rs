@@ -21,12 +21,11 @@
 //! holds the snapshot mutex without releasing, so the renderer never
 //! waits more than a few KiB worth of parsing for the lock.
 
-use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::os::fd::{AsFd, OwnedFd};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -43,7 +42,58 @@ use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
 use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 
-use crate::pty::{Child, Pty, PtySize};
+use crate::daemon_client::DaemonClient;
+
+// ---------- Process-global wake throttle ----------
+
+/// Maximum rate at which any worker may wake the Bevy event loop. We
+/// share this across every terminal worker so N busy terminals can't
+/// multiply the redraw rate (the previous per-worker throttle gave us
+/// up to N × 60Hz wakes for N terminals).
+///
+/// A `cat bigfile` produces hundreds of pty chunks/sec; the display
+/// can show maybe 60 frames/sec of them. Coalescing here turns every
+/// chunk-driven wake inside the cooldown into a no-op — the snapshot
+/// the worker just published will be picked up by the next scheduled
+/// frame anyway.
+const MIN_WAKE_INTERVAL: Duration = Duration::from_millis(16);
+
+static WAKE_THROTTLE: std::sync::OnceLock<Mutex<Instant>> = std::sync::OnceLock::new();
+
+fn wake_throttle() -> &'static Mutex<Instant> {
+    WAKE_THROTTLE.get_or_init(|| Mutex::new(Instant::now() - Duration::from_secs(1)))
+}
+
+/// Send a `WinitUserEvent::WakeUp` iff the global cooldown has expired.
+/// Returns `true` on success, `false` if suppressed — the caller is
+/// expected to remember and retry later.
+fn try_wake_winit_throttled(wakeup: &Option<EventLoopProxy<WinitUserEvent>>) -> bool {
+    let mut last = wake_throttle().lock().expect("wake throttle poisoned");
+    if last.elapsed() < MIN_WAKE_INTERVAL {
+        return false;
+    }
+    *last = Instant::now();
+    drop(last);
+    if let Some(p) = wakeup.as_ref() {
+        let _ = p.send_event(WinitUserEvent::WakeUp);
+    }
+    true
+}
+
+/// Milliseconds remaining until the next wake slot opens. Used by the
+/// worker's `poll(2)` loop to size its timeout so the deferred wake
+/// fires on time.
+fn wake_cooldown_remaining_ms() -> u64 {
+    let last = wake_throttle().lock().expect("wake throttle poisoned");
+    let elapsed = last.elapsed();
+    if elapsed >= MIN_WAKE_INTERVAL {
+        0
+    } else {
+        (MIN_WAKE_INTERVAL - elapsed).as_millis() as u64 + 1
+    }
+}
+use crate::daemon_proto::{ClientMessage, DaemonMessage};
+use crate::pty::PtySize;
 use crate::vt::{self, CellPx};
 
 /// One grid cell — what the renderer actually needs. Plain POD so the
@@ -132,6 +182,13 @@ pub struct WorkerHandle {
     /// can bump it from inside libghostty's bell callback without the
     /// snapshot mutex.
     pub bell_count: Arc<AtomicU64>,
+    /// Main thread flips this when the pane's visibility changes. While
+    /// false the worker keeps processing pty bytes (so the libghostty
+    /// terminal state stays correct), but skips waking Bevy — there's
+    /// nothing for the renderer to do for a pane the user can't see.
+    /// Saves the full per-frame schedule cost for inactive-project
+    /// terminals running TUIs like `top` or Claude.
+    pub visible: Arc<AtomicBool>,
     tx: Sender<WorkerMsg>,
     /// Write end of the worker's wake pipe. Every channel send pokes
     /// one byte here so the worker's blocking `poll(2)` returns even
@@ -156,23 +213,28 @@ impl WorkerHandle {
 }
 
 impl WorkerHandle {
-    /// Spawn the worker. Forks the pty + child shell, then hands fd +
-    /// ownership of `Terminal` to a fresh thread.
+    /// Spawn the worker. Connects to (or forks) a per-session daemon and
+    /// hands the socket + a fresh libghostty `Terminal` to a worker
+    /// thread.
     ///
-    /// `scrollback_log` is the path to append raw pty bytes to. When
-    /// `Some`, every chunk read from the pty is mirrored to disk so the
-    /// next launch can replay it. `replay_bytes` is the previous run's
-    /// log — fed straight into `vt_write` before the pty drain loop
-    /// starts, so the visible scrollback comes back across restarts.
+    /// `session_id` keys the daemon (socket path is derived from it).
+    /// `command` is the shell+args the daemon should exec if it has to
+    /// fork a fresh one — ignored if the daemon is already running.
+    /// `scrollback_log` mirrors every byte the daemon delivers to disk
+    /// so cold-starts after machine reboot can still recover the screen.
+    /// `replay_bytes` is the previous run's disk log; fed into `vt_write`
+    /// only when we had to fork a *fresh* daemon (no in-memory history).
     pub fn spawn(
+        session_id: u64,
+        command: Vec<String>,
         size: PtySize,
         scrollback: usize,
         scrollback_log: Option<PathBuf>,
         replay_bytes: Option<Vec<u8>>,
         wakeup: Option<EventLoopProxy<WinitUserEvent>>,
     ) -> std::io::Result<Self> {
-        let (pty, child) = Pty::spawn(size)?;
-        pty.set_nonblock()?;
+        let client = DaemonClient::open(session_id, size.cols, size.rows, command)?;
+        let attached_existing = client.attached_existing;
 
         let snapshot = Arc::new(Mutex::new(GridSnapshot {
             cols: size.cols,
@@ -196,6 +258,8 @@ impl WorkerHandle {
         let snapshot_w = snapshot.clone();
         let bell_count = Arc::new(AtomicU64::new(0));
         let bell_count_w = bell_count.clone();
+        let visible = Arc::new(AtomicBool::new(true));
+        let visible_w = visible.clone();
 
         let (tx, rx) = channel::<WorkerMsg>();
 
@@ -210,14 +274,15 @@ impl WorkerHandle {
             .name("terminal-worker".into())
             .spawn(move || {
                 worker_loop(
-                    pty,
-                    child,
+                    client,
+                    attached_existing,
                     size,
                     scrollback,
                     scrollback_log,
                     replay_bytes,
                     snapshot_w,
                     bell_count_w,
+                    visible_w,
                     rx,
                     wakeup,
                     wake_r,
@@ -228,6 +293,7 @@ impl WorkerHandle {
         Ok(Self {
             snapshot,
             bell_count,
+            visible,
             tx,
             wake_w,
             _join: join,
@@ -242,11 +308,6 @@ fn set_nonblock(fd: &OwnedFd) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Cap how many bytes the worker feeds to `vt_write` between snapshot
-/// publishes. Same idea as Alacritty's `MAX_LOCKED_READ` — bound the
-/// snapshot lock-hold time so the renderer never waits much.
-const MAX_READ_PER_TICK: usize = 65536;
-
 /// Hard ceiling on a per-terminal scrollback log file. When the log
 /// exceeds this, the worker keeps the trailing `SCROLLBACK_LOG_KEEP`
 /// bytes and rewrites in place. Sized so a busy terminal can keep
@@ -259,26 +320,19 @@ const SCROLLBACK_LOG_KEEP: u64 = 12 * 1024 * 1024;
 const SCROLLBACK_ROTATE_CHECK_EVERY: u64 = 256 * 1024;
 
 fn worker_loop(
-    pty: Pty,
-    mut child: Child,
+    mut client: DaemonClient,
+    attached_existing: bool,
     initial_size: PtySize,
     scrollback: usize,
     scrollback_log: Option<PathBuf>,
     replay_bytes: Option<Vec<u8>>,
     snapshot: Arc<Mutex<GridSnapshot>>,
     bell_count: Arc<AtomicU64>,
+    visible: Arc<AtomicBool>,
     rx: Receiver<WorkerMsg>,
     wakeup: Option<EventLoopProxy<WinitUserEvent>>,
     wake_r: OwnedFd,
 ) {
-    let wake_winit = || {
-        if let Some(proxy) = wakeup.as_ref() {
-            // Best-effort: if the event loop has already exited the
-            // proxy returns Err — nothing meaningful to do, we're
-            // shutting down anyway.
-            let _ = proxy.send_event(WinitUserEvent::WakeUp);
-        }
-    };
     let cell_px = CellPx {
         width: initial_size.cell_width_px as u32,
         height: initial_size.cell_height_px as u32,
@@ -290,6 +344,15 @@ fn worker_loop(
         cell_px,
     );
 
+    // Shared flag: are we currently feeding replay bytes into the VT?
+    // BEL bytes from past sessions show up during disk-replay (line
+    // ~387 below) and during the daemon's ReplayStart→ReplayEnd
+    // window. Both would otherwise increment `bell_count` and bump
+    // the project's unread counter for events the user already saw.
+    // The on_bell closure below reads this and skips increments
+    // while true.
+    let in_replay_flag = Arc::new(AtomicBool::new(false));
+
     // Bell handler. vt.rs deliberately doesn't register one — we own it
     // here so the closure can poke the per-terminal counter and wake
     // winit (an idle terminal in reactive mode would otherwise sit on
@@ -297,8 +360,14 @@ fn worker_loop(
     {
         let bell_count = bell_count.clone();
         let bell_wakeup = wakeup.clone();
+        let in_replay_flag = in_replay_flag.clone();
         terminal
             .on_bell(move |_term| {
+                if in_replay_flag.load(Ordering::Relaxed) {
+                    // Replay BEL — silently absorb; the user already
+                    // experienced this bell in a prior session.
+                    return;
+                }
                 let n = bell_count.fetch_add(1, Ordering::Relaxed) + 1;
                 eprintln!("[bell] fired, count={}", n);
                 if let Some(p) = &bell_wakeup {
@@ -308,17 +377,23 @@ fn worker_loop(
             .expect("on_bell");
     }
 
-    // Replay previous-session bytes (if any) into the fresh Terminal so
-    // its scrollback matches what was on screen before. We must clear
-    // pty_response afterwards: replaying old content would otherwise
-    // re-trigger every DA / size query the original session answered,
-    // and we'd ship those replies back to the brand-new shell as if it
-    // had asked.
-    if let Some(bytes) = replay_bytes
-        && !bytes.is_empty()
-    {
-        terminal.vt_write(&bytes);
-        pty_response.borrow_mut().clear();
+    // If we had to fork a fresh daemon (no in-memory history) and we
+    // have a disk-replay log for this session_id, feed it in locally so
+    // the visible scrollback is back. We must clear pty_response after:
+    // replaying old DA / size queries would otherwise ship stale replies
+    // to the brand-new shell as if it had asked.
+    //
+    // If we attached to an *existing* daemon, ignore the disk log — the
+    // daemon's ReplayStart/Output…/ReplayEnd is the authoritative state.
+    if !attached_existing {
+        if let Some(bytes) = replay_bytes
+            && !bytes.is_empty()
+        {
+            in_replay_flag.store(true, Ordering::Relaxed);
+            terminal.vt_write(&bytes);
+            in_replay_flag.store(false, Ordering::Relaxed);
+            pty_response.borrow_mut().clear();
+        }
     }
 
     // Append-only log of every byte we feed to `vt_write`. This is what
@@ -337,15 +412,6 @@ fn worker_loop(
     let mut last_cols: u16 = initial_size.cols;
     let mut last_rows: u16 = initial_size.rows;
 
-    let mut read_buf = [0u8; 65536];
-
-    // Bytes queued to write back to the pty (VT responses, keystrokes,
-    // paste blobs). Single ordered queue so a paste followed by a
-    // keystroke reaches the shell in the right order, and so the bytes
-    // we couldn't squeeze into the kernel pty input buffer this tick
-    // simply wait until POLLOUT instead of being silently dropped.
-    let mut pending_out: VecDeque<u8> = VecDeque::new();
-
     // Lightweight throughput instrumentation, gated on TERMINAL_PROFILE
     // env var so it doesn't spam stderr in normal runs. Set
     // `TERMINAL_PROFILE=1` to re-enable for perf debugging.
@@ -358,50 +424,100 @@ fn worker_loop(
     let mut publish_ns_since_log: u128 = 0;
     let mut log_window_start = Instant::now();
 
+    // True between DaemonMessage::ReplayStart and ReplayEnd — during
+    // this window we keep feeding bytes to `vt_write` but suppress
+    // snapshot publishes, so the renderer doesn't flicker through dozens
+    // of intermediate states on attach. Final state is published once
+    // when ReplayEnd arrives.
+    let mut in_replay = false;
+    let mut replay_just_ended = false;
+    // Tracked locally; the daemon drives this via DaemonMessage::ChildExited.
+    // Starts true on attach because if the daemon's still serving, the
+    // child is presumed alive — we'll get notified if it isn't.
+    let mut child_alive = true;
+    // Set when the daemon socket closes — we publish a final snapshot
+    // and then idle waiting for Shutdown from the main thread.
+    let mut daemon_gone = false;
+
+    // Local "I have a wake pending" flag. The actual throttle is
+    // process-global (`try_wake_winit_throttled`); this flag remembers
+    // that we wanted to wake during the cooldown so the top of the
+    // loop can retry once it expires.
+    let mut pending_wake = false;
+
     loop {
+        // Drain any deferred wake whose cooldown has now expired. Safety
+        // net: a snapshot got published during the global cooldown and
+        // no further chunks have arrived; we still need to notify Bevy
+        // so the screen doesn't go stale. Hidden panes never wake — the
+        // visibility sync will fire one for us on un-hide.
+        if pending_wake && visible.load(Ordering::Relaxed) {
+            if try_wake_winit_throttled(&wakeup) {
+                pending_wake = false;
+            }
+        } else if pending_wake && !visible.load(Ordering::Relaxed) {
+            pending_wake = false;
+        }
+
         let mut did_anything = false;
         let mut force_full_publish = false;
-        let mut bytes_processed_this_tick = 0usize;
-        let mut hit_eof = false;
         tick_count += 1;
 
-        // 1. Drain pty (non-blocking). Bounded per-tick so we don't
-        // hold the snapshot lock for an entire 1 GiB cat.
-        while bytes_processed_this_tick < MAX_READ_PER_TICK {
-            match nix::unistd::read(&pty.0, &mut read_buf) {
-                Ok(0) => {
-                    hit_eof = true;
-                    break;
-                }
-                Ok(n) => {
-                    let t = Instant::now();
-                    terminal.vt_write(&read_buf[..n]);
-                    vt_write_ns_since_log += t.elapsed().as_nanos();
-                    if let Some(w) = log_writer.as_mut() {
-                        w.append(&read_buf[..n]);
+        // 1. Drain socket: pull every available DaemonMessage frame.
+        if !daemon_gone {
+            let mut output_bytes: u64 = 0;
+            let mut had_any = false;
+            let vt_start = Instant::now();
+            let alive = client
+                .poll_frames(|m| {
+                    had_any = true;
+                    match m {
+                        DaemonMessage::Output(bytes) => {
+                            terminal.vt_write(&bytes);
+                            if let Some(w) = log_writer.as_mut() {
+                                w.append(&bytes);
+                            }
+                            output_bytes += bytes.len() as u64;
+                        }
+                        DaemonMessage::ReplayStart => {
+                            in_replay = true;
+                            in_replay_flag.store(true, Ordering::Relaxed);
+                        }
+                        DaemonMessage::ReplayEnd => {
+                            in_replay = false;
+                            in_replay_flag.store(false, Ordering::Relaxed);
+                            replay_just_ended = true;
+                        }
+                        DaemonMessage::ChildExited { code: _ } => {
+                            child_alive = false;
+                        }
+                        DaemonMessage::Attached => {
+                            // Already consumed during handshake — a
+                            // second one shouldn't happen, ignore.
+                        }
                     }
-                    bytes_processed_this_tick += n;
-                    bytes_since_log += n as u64;
-                    did_anything = true;
-                }
-                Err(Errno::EAGAIN) => break,
-                Err(Errno::EINTR) => continue,
-                Err(Errno::EIO) => {
-                    hit_eof = true;
-                    break;
-                }
-                Err(_) => {
-                    hit_eof = true;
-                    break;
-                }
+                })
+                .unwrap_or(false);
+            if had_any {
+                vt_write_ns_since_log += vt_start.elapsed().as_nanos();
+                bytes_since_log += output_bytes;
+                did_anything = true;
+            }
+            if !alive {
+                daemon_gone = true;
+                child_alive = false;
+                force_full_publish = true;
+                did_anything = true;
             }
         }
 
-        // 2. Queue VT-effect responses (DA replies, etc.) for the pty.
+        // 2. Forward libghostty's pty-response bytes (DA replies, etc.)
+        //    back to the daemon as Input.
         {
             let mut response = pty_response.borrow_mut();
             if !response.is_empty() {
-                pending_out.extend(response.drain(..));
+                let bytes: Vec<u8> = response.drain(..).collect();
+                client.send(&ClientMessage::Input(bytes));
                 did_anything = true;
             }
         }
@@ -410,26 +526,19 @@ fn worker_loop(
         loop {
             match rx.try_recv() {
                 Ok(WorkerMsg::Input(bytes)) => {
-                    pending_out.extend(bytes);
+                    client.send(&ClientMessage::Input(bytes));
                     did_anything = true;
                 }
                 Ok(WorkerMsg::Paste(text)) => {
                     let bracketed = terminal.mode(Mode::BRACKETED_PASTE).unwrap_or(false);
                     let mut data = text.into_bytes();
-                    // Encoder may rewrite bytes in place (control-byte
-                    // scrub, `\n` → `\r` when not bracketed). Output
-                    // adds at most the 6-byte prefix + 6-byte suffix
-                    // when bracketed; +16 is a safe slack.
                     let mut buf = vec![0u8; data.len() + 16];
                     match paste::encode(&mut data, bracketed, &mut buf) {
                         Ok(len) => {
-                            pending_out.extend(&buf[..len]);
+                            client.send(&ClientMessage::Input(buf[..len].to_vec()));
                             did_anything = true;
                         }
                         Err(_) => {
-                            // OutOfSpace shouldn't happen with the
-                            // sizing above; bail loudly so a future
-                            // change to the encoder surfaces here.
                             panic!("paste::encode failed for {} bytes", data.len());
                         }
                     }
@@ -441,21 +550,12 @@ fn worker_loop(
                     cell_h_px,
                 }) => {
                     let _ = terminal.resize(cols, rows, cell_w_px, cell_h_px);
-                    pty.resize(PtySize {
-                        cols,
-                        rows,
-                        cell_width_px: cell_w_px as u16,
-                        cell_height_px: cell_h_px as u16,
-                    });
+                    client.send(&ClientMessage::Resize { cols, rows });
                     did_anything = true;
                 }
                 Ok(WorkerMsg::ScrollDelta(delta)) => {
                     terminal.scroll_viewport(ScrollViewport::Delta(delta));
                     did_anything = true;
-                    // Scrolling rotates which scrollback rows the
-                    // viewport refers to; libghostty's per-row dirty
-                    // bits don't always cover that, so force a full
-                    // repaint to guarantee the new content shows up.
                     force_full_publish = true;
                 }
                 Ok(WorkerMsg::ScrollToBottom) => {
@@ -463,56 +563,26 @@ fn worker_loop(
                     did_anything = true;
                     force_full_publish = true;
                 }
-                Ok(WorkerMsg::Shutdown) => return,
+                Ok(WorkerMsg::Shutdown) => {
+                    // Explicit pane close → tell the daemon to die.
+                    // Flush, give the kernel a tick to deliver, then exit.
+                    client.send(&ClientMessage::Kill);
+                    client.try_flush();
+                    return;
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return,
             }
         }
 
-        // 3b. Flush as much of the pending pty-output queue as the
-        // kernel input buffer will take right now. If `try_write`
-        // returns 0 the kernel is full — leave the rest queued; the
-        // POLLOUT branch in step 5 will wake us when it drains.
-        while !pending_out.is_empty() {
-            let (a, b) = pending_out.as_slices();
-            let slice = if !a.is_empty() { a } else { b };
-            let n = pty.try_write(slice);
-            if n == 0 {
-                break;
-            }
-            pending_out.drain(..n);
-            did_anything = true;
-        }
+        // 3b. Push queued outbound frames to the socket.
+        client.try_flush();
 
-        if hit_eof {
-            if let Child::Active(pid) = child {
-                child = Child::Exited(pid);
-            }
-            // Publish one last snapshot so the renderer sees `child_alive=false`.
-            let (pc, pr, published) = publish_snapshot(
-                &mut terminal,
-                &mut render_state,
-                &mut row_it,
-                &mut cell_it,
-                &snapshot,
-                false,
-                true,
-                last_cols,
-                last_rows,
-            );
-            last_cols = pc;
-            last_rows = pr;
-            if published {
-                wake_winit();
-            }
-            // Don't exit; let the channel-disconnect or Shutdown end us.
-            // Until then, just sleep — child is gone, no work to do.
-            thread::sleep(Duration::from_millis(50));
-            continue;
-        }
-
-        // 4. Publish snapshot if anything changed.
-        if did_anything {
+        // 4. Publish snapshot if anything changed, except during the
+        //    replay window — that's a one-shot final publish at ReplayEnd.
+        let want_publish = did_anything && !in_replay;
+        if want_publish || replay_just_ended {
+            let force = force_full_publish || replay_just_ended;
             let t = Instant::now();
             let (pc, pr, published) = publish_snapshot(
                 &mut terminal,
@@ -520,8 +590,8 @@ fn worker_loop(
                 &mut row_it,
                 &mut cell_it,
                 &snapshot,
-                matches!(child, Child::Active(_)),
-                force_full_publish,
+                child_alive,
+                force,
                 last_cols,
                 last_rows,
             );
@@ -529,12 +599,31 @@ fn worker_loop(
             last_rows = pr;
             publish_ns_since_log += t.elapsed().as_nanos();
             publishes_since_log += 1;
-            // Wake the winit event loop so the Bevy renderer schedules
-            // a frame. Without this, the loop sits idle in `Reactive`
-            // mode and pty output never makes it to the screen.
             if published {
-                wake_winit();
+                // Skip waking the renderer for hidden panes — the
+                // libghostty Terminal still tracks state correctly via
+                // the snapshot mutex, so when the pane becomes visible
+                // again `sync_grid` reads the up-to-date generation and
+                // does a forced repaint. Cuts the per-frame schedule
+                // cost of TUIs running in inactive-project terminals.
+                if visible.load(Ordering::Relaxed) {
+                    if try_wake_winit_throttled(&wakeup) {
+                        pending_wake = false;
+                    } else {
+                        pending_wake = true;
+                    }
+                } else {
+                    pending_wake = false;
+                }
             }
+            replay_just_ended = false;
+        }
+
+        if daemon_gone {
+            // Daemon socket closed — nothing more we can do here, just
+            // idle until main thread issues Shutdown / disconnects.
+            thread::sleep(Duration::from_millis(50));
+            continue;
         }
 
         if profile && tick_count % PROFILE_INTERVAL == 0 && bytes_since_log > 0 {
@@ -558,15 +647,13 @@ fn worker_loop(
             log_window_start = Instant::now();
         }
 
-        // 5. If we did work, loop right back to drain more bytes — under
-        // heavy `cat` we want to keep chewing through the kernel pty
-        // buffer as fast as possible. If we did nothing, block in
-        // poll(2) until either the pty has data or the main thread
-        // pokes our wake pipe. This is the difference between ~zero
-        // idle CPU and a 2 kHz spin loop.
+        // 5. If we did work, loop right back to drain more frames —
+        // under heavy output we want to keep chewing through the
+        // socket. If nothing happened this tick, block in poll(2)
+        // until the socket has more data or the main thread pokes
+        // our wake pipe. Difference between zero idle CPU and a 2 kHz
+        // spin loop.
         if !did_anything {
-            // Drain any wake bytes that accumulated while we were busy
-            // — otherwise poll() would return immediately on stale data.
             let mut drain_buf = [0u8; 64];
             loop {
                 match nix::unistd::read(&wake_r, &mut drain_buf) {
@@ -575,31 +662,32 @@ fn worker_loop(
                 }
             }
 
-            let pty_fd = pty.0.as_fd();
+            let sock_fd = client.as_fd();
             let wake_fd = wake_r.as_fd();
-            // If there are still bytes queued for the pty (a paste blob
-            // that didn't fit in one kernel buffer), wait for POLLOUT
-            // too so we wake the moment the shell drains some input.
-            let pty_flags = if pending_out.is_empty() {
+            let sock_flags = if client.pending_out_empty() {
                 PollFlags::POLLIN
             } else {
                 PollFlags::POLLIN | PollFlags::POLLOUT
             };
             let mut fds = [
-                PollFd::new(pty_fd, pty_flags),
+                PollFd::new(sock_fd, sock_flags),
                 PollFd::new(wake_fd, PollFlags::POLLIN),
             ];
-            // Cap the wait at a few seconds as a safety net — if a
-            // wake somehow gets lost we still recover within a few
-            // seconds instead of hanging. In practice every state
-            // change pokes the pipe.
-            let timeout = PollTimeout::try_from(5_000i32).unwrap();
+            // If a wake was deferred by the rate limiter, cap the poll
+            // timeout so we come back around in time to fire it. Without
+            // this, an output burst that ends exactly when we'd suppress
+            // the last wake could leave the screen stale for up to 5s.
+            let timeout_ms: i32 = if pending_wake {
+                wake_cooldown_remaining_ms().min(5_000) as i32
+            } else {
+                5_000
+            };
+            let timeout = PollTimeout::try_from(timeout_ms.max(0))
+                .unwrap_or(PollTimeout::try_from(16i32).unwrap());
             match poll(&mut fds, timeout) {
                 Ok(_) => {}
                 Err(Errno::EINTR) => {}
                 Err(_) => {
-                    // Unexpected — back off briefly so we don't spin if
-                    // poll returns the same error every iteration.
                     thread::sleep(Duration::from_millis(10));
                 }
             }

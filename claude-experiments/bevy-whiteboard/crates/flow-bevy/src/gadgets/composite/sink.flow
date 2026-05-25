@@ -1,0 +1,19 @@
+# Sink reimplemented from primitives:
+#
+#     packet → Filter(match=color) → Counter   (terminal)
+#                      ↓
+#                   .reject (silently dropped, or wired externally)
+#
+# The original monolithic Sink errors on color mismatch and gates on
+# `up == 1`; the composite drops mismatches via Filter.reject (an
+# unwired Filter.reject is a silent drop, identical to the engine's
+# `to default` contract for missing edges). For the up/down behaviour,
+# wire a Switch upstream — that's a separate composition concern.
+compound SinkComposite(color: Int = 0) {
+    in { input: F }
+
+    node F : Filter { match: color }
+    node C : Counter { }
+
+    edges { F.pass -> C : 1 }
+}

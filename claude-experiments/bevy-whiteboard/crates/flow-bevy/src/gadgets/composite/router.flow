@@ -1,0 +1,25 @@
+# Router (fan-out mode) reimplemented from primitives:
+#
+#     input → Filter(match=color) ─pass─▶ FanOut ─▶ (broadcasts to every wired output)
+#                                   reject → silent drop
+#
+# A whiteboard wiring `RouterComposite.output -> A` and
+# `RouterComposite.output -> B` makes every colour-matching packet
+# land at BOTH A and B — the FanOut primitive's broadcast behavior
+# composed through the compound port.
+#
+# Round-robin mode is not implemented in this composite: the
+# monolithic Router uses an `argmin(out_neighbors, edge_last_sent)`
+# selection that the primitive set doesn't currently express. RR
+# would need a dedicated RoundRobin primitive (omitted for now;
+# the fan-out variant is the canonical broadcast Router and round-robin
+# is a routing-policy tweak rather than a separate structural shape).
+compound RouterComposite(color: Int = 0) {
+    in  { input:  F }
+    out { output: E }
+
+    node F : Filter { match: color }
+    node E : Egress { }
+
+    edges { F.pass -> E : 1 }
+}

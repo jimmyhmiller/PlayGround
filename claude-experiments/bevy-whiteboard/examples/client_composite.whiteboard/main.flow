@@ -1,0 +1,44 @@
+# Client from primitives:
+#   Tick → Endpoint ──req pushing self──▶ Echo
+#            ▲                              │
+#            └────── resp popping ───────────┘
+
+node T : Tick { period_ns: 250000000 }
+
+node Endpoint {
+    slots {
+        color:     Int = 0
+        emitted:   Int = 0
+        completed: Int = 0
+    }
+    probes {
+        emitted:   "{emitted}"
+        completed: "{completed}"
+    }
+    rule on_kick {
+        on packet(_)
+        do {
+            emitted := emitted + 1
+            emit req(color) pushing self to default
+        }
+    }
+    rule on_resp {
+        on resp(_) do { completed := completed + 1 }
+    }
+}
+
+node Echo {
+    slots { served: Int = 0 }
+    probes { served: "{served}" }
+    rule on_req {
+        on req(_) do {
+            served := served + 1
+            emit resp(nil) popping to (head(return_path))
+        }
+    }
+}
+
+edges {
+    T        -> Endpoint : 1ms
+    Endpoint -> Echo     : 10ms
+}

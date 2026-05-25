@@ -1,0 +1,38 @@
+Program: deploy-monitor v0.1.0
+
+EVENTS (4)
+  MergeToMain                   payload: { sha, author, repo }
+  DeployStatusUpdate            payload: { deploy_id, status }
+  TimerTick                     payload: { now }
+  RollbackRequested             payload: { deploy_id, by }
+
+STATE (3)
+  in_progress                   Map<DeployId, DeployRecord>
+  history                       Map<DeployId, DeployRecord>
+  subscribers                   Map<RepoId, List<ChannelId>>
+
+EFFECTS (3)
+  HttpRequest                   HttpRequest -> HttpResponse
+  SlackPost                     SlackPost -> Ack
+  LogWrite                      LogEntry -> Ack
+
+HANDLERS (4)
+  kick_off_deploy
+    on:    MergeToMain
+    read:  subscribers[$event.repo]
+    write: in_progress[*]
+    emit:  HttpRequest, SlackPost, LogWrite
+  update_status
+    on:    DeployStatusUpdate
+    read:  in_progress[$event.deploy_id]
+    write: in_progress[$event.deploy_id], history[*]
+    emit:  SlackPost, LogWrite
+  poll_in_flight
+    on:    TimerTick
+    read:  in_progress[*]
+    emit:  HttpRequest
+  do_rollback
+    on:    RollbackRequested
+    read:  in_progress[$event.deploy_id]
+    write: in_progress[$event.deploy_id], history[*]
+    emit:  HttpRequest, SlackPost, LogWrite

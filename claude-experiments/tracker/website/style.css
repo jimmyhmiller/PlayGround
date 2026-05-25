@@ -1,0 +1,183 @@
+:root {
+  --bg: #fafaf8;
+  --fg: #1a1a1a;
+  --muted: #6b6b6b;
+  --accent: #0a84ff;
+  --rule: #e5e5e2;
+  --max: 720px;
+  font-size: 17px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111;
+    --fg: #f5f5f3;
+    --muted: #a0a0a0;
+    --rule: #262626;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+header {
+  border-bottom: 1px solid var(--rule);
+}
+
+nav {
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 18px 24px;
+  display: flex;
+  gap: 28px;
+  align-items: baseline;
+}
+
+nav a {
+  color: var(--muted);
+  text-decoration: none;
+  font-size: 0.95rem;
+}
+
+nav a[aria-current="page"], nav a:hover {
+  color: var(--fg);
+}
+
+nav .brand {
+  font-weight: 600;
+  color: var(--fg);
+  margin-right: auto;
+}
+
+main {
+  max-width: var(--max);
+  margin: 0 auto;
+  padding: 64px 24px;
+}
+
+.hero h1 {
+  font-size: 2.4rem;
+  line-height: 1.15;
+  margin: 0 0 18px;
+  letter-spacing: -0.02em;
+}
+
+.hero .subtitle {
+  font-size: 1.15rem;
+  color: var(--muted);
+  margin: 0 0 32px;
+  max-width: 38em;
+}
+
+.cta {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+
+.btn {
+  display: inline-block;
+  padding: 12px 22px;
+  border-radius: 10px;
+  text-decoration: none;
+  font-weight: 500;
+  font-size: 0.98rem;
+}
+
+.btn.primary {
+  background: var(--fg);
+  color: var(--bg);
+}
+
+.btn.secondary {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--rule);
+}
+
+.btn:hover {
+  opacity: 0.9;
+}
+
+.fineprint {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 4px 0 0;
+}
+
+.features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 32px;
+  padding: 64px 0;
+  border-top: 1px solid var(--rule);
+  margin-top: 64px;
+}
+
+.feature h2 {
+  font-size: 1.05rem;
+  margin: 0 0 8px;
+}
+
+.feature p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.96rem;
+}
+
+.screenshot {
+  padding-top: 32px;
+}
+
+.screenshot img {
+  display: block;
+  max-width: 100%;
+  border-radius: 12px;
+  border: 1px solid var(--rule);
+}
+
+.prose h1 {
+  font-size: 2rem;
+  letter-spacing: -0.02em;
+  margin-bottom: 4px;
+}
+
+.prose h2 {
+  margin-top: 2em;
+  font-size: 1.15rem;
+}
+
+.prose h3 {
+  margin-top: 1.6em;
+  font-size: 1rem;
+}
+
+.prose p, .prose ul {
+  color: var(--fg);
+}
+
+.prose a {
+  color: var(--accent);
+}
+
+footer {
+  border-top: 1px solid var(--rule);
+  margin-top: 64px;
+  padding: 24px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+footer a {
+  color: var(--muted);
+}

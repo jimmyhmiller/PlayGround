@@ -1,10 +1,13 @@
 //! IPC between the running `terminal-bevy` app and external CLIs
-//! (currently just `tbopen`).
+//! (`tbopen`, `tbwidget`).
 //!
 //! Wire format: one JSON object per connection, terminated by EOF —
 //! keeps both ends trivial (no framing, no length prefix). The app
 //! reads to EOF, parses, dispatches; the CLI sends one request and
 //! shuts down its half of the socket.
+//!
+//! Requests are tagged via the `action` field. Unknown actions are
+//! logged and dropped so adding new ones never breaks older daemons.
 //!
 //! Socket lives at `<data_dir()>/socket`. We unlink the path on
 //! startup so a stale socket from a previous crashed run doesn't
@@ -13,7 +16,7 @@
 //! ones fail to bind and log.
 
 use std::io::Read;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
@@ -23,14 +26,61 @@ use serde::{Deserialize, Serialize};
 
 use crate::data_dir;
 
-/// Wire format for `tbopen` → app. Mirrors `OpenFileRequest` minus the
-/// origin (the CLI never positions panes — that's the picker's job).
+/// Tagged wire format for external CLI → app. Each variant maps onto a
+/// `PendingActions` entry on the next frame.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct OpenRequest {
-    pub path: PathBuf,
-    /// Project name (case-insensitive lookup) or `None` for active.
-    #[serde(default)]
-    pub project: Option<String>,
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum IpcRequest {
+    /// `tbopen <file> [--project NAME]` — open a file in an editor pane.
+    OpenFile {
+        path: PathBuf,
+        #[serde(default)]
+        project: Option<String>,
+    },
+    /// `tbwidget [--title T] [--cwd D] [--project P] -- <cmd> [args...]` —
+    /// spawn a new widget pane running `cmd`. When `args` is non-empty
+    /// the command runs directly (no shell); otherwise `cmd` is fed to
+    /// `sh -c`.
+    ///
+    /// `position` is an optional window-space top-left `[x, y]` for the
+    /// new pane; `size` is an optional `[w, h]`. Both default to the
+    /// project's normal cascade / widget kind's default size.
+    SpawnWidget {
+        command: String,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        title: Option<String>,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+        #[serde(default)]
+        project: Option<String>,
+        #[serde(default)]
+        position: Option<[f32; 2]>,
+        #[serde(default)]
+        size: Option<[f32; 2]>,
+        /// Optional widget kind override. Default is the subprocess
+        /// widget kind (`"widget"`). Pass `"rhai_widget"` to spawn a
+        /// Rhai-scripted in-process widget — `command` is then
+        /// interpreted as the script filename under
+        /// `~/.terminal-bevy/widgets/` (no shell invocation).
+        #[serde(default)]
+        kind: Option<String>,
+    },
+    /// `widget projects` — list known projects so external tools can
+    /// pick one by name. Response is written back over the same socket
+    /// as a single JSON object then EOF: `{"projects":[{"id":N,
+    /// "name":"…","active":bool},…]}`.
+    ListProjects,
+}
+
+/// One accepted IPC connection: the parsed request plus the open socket,
+/// kept around so request-response variants (e.g. `ListProjects`) can
+/// write a reply back from the main thread. For fire-and-forget variants
+/// the receiver simply drops the stream.
+pub struct IpcMessage {
+    pub req: IpcRequest,
+    pub stream: UnixStream,
 }
 
 /// Path of the IPC socket. `None` if `$HOME` isn't set.
@@ -48,7 +98,7 @@ pub fn socket_path() -> Option<PathBuf> {
 /// immediately wakes the main loop so the drain system runs that frame.
 pub fn spawn_listener(
     wakeup: Option<EventLoopProxy<WinitUserEvent>>,
-) -> Option<Receiver<OpenRequest>> {
+) -> Option<Receiver<IpcMessage>> {
     let path = socket_path()?;
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
@@ -68,7 +118,7 @@ pub fn spawn_listener(
             return None;
         }
     };
-    let (tx, rx) = channel::<OpenRequest>();
+    let (tx, rx) = channel::<IpcMessage>();
     thread::Builder::new()
         .name("tb-ipc".into())
         .spawn(move || listener_loop(listener, tx, wakeup))
@@ -78,7 +128,7 @@ pub fn spawn_listener(
 
 fn listener_loop(
     listener: UnixListener,
-    tx: Sender<OpenRequest>,
+    tx: Sender<IpcMessage>,
     wakeup: Option<EventLoopProxy<WinitUserEvent>>,
 ) {
     for conn in listener.incoming() {
@@ -94,9 +144,9 @@ fn listener_loop(
             eprintln!("[ipc] read: {}", e);
             continue;
         }
-        match serde_json::from_str::<OpenRequest>(&buf) {
+        match serde_json::from_str::<IpcRequest>(&buf) {
             Ok(req) => {
-                if tx.send(req).is_err() {
+                if tx.send(IpcMessage { req, stream }).is_err() {
                     // Receiver dropped — app is shutting down.
                     return;
                 }

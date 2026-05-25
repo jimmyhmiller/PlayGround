@@ -1,0 +1,65 @@
+# Collects N inputs, then emits a single `total(sum)` packet on default.
+# Each `packet(v)` or `report(v)` arrival accumulates `sum` and
+# increments `seen`. When `seen == n`, the aggregator fires its
+# output and resets — ready for the next batch.
+#
+# Two input variants are supported so this primitive serves both
+# generic "tally N packets" (e.g. TPC vote tallying) and the Conway
+# Game-of-Life cell's "tally 8 neighbor reports" pattern without
+# needing a variant-specific converter.
+node Aggregator {
+    slots {
+        n:    Int = 0
+        seen: Int = 0
+        sum:  Int = 0
+    }
+    probes {
+        seen: "{seen}/{n}"
+        sum:  "{sum}"
+    }
+    # Final input — emit the aggregate and reset for the next batch.
+    rule final_packet {
+        on packet(v)
+        when seen + 1 == n && n > 0
+        do {
+            # Emit the aggregate using `sum + v` (the would-be new sum)
+            # BEFORE the reset; doing `sum := sum + v` first would mean
+            # the `emit` then reads the new `sum` and double-counts `v`.
+            emit total(sum + v) to default
+            seen := 0
+            sum  := 0
+        }
+    }
+    rule final_report {
+        on report(v)
+        when seen + 1 == n && n > 0
+        do {
+            emit total(sum + v) to default
+            seen := 0
+            sum  := 0
+        }
+    }
+    # Partial — accumulate and wait.
+    rule partial_packet {
+        on packet(v)
+        do {
+            seen := seen + 1
+            sum  := sum + v
+        }
+    }
+    rule partial_report {
+        on report(v)
+        do {
+            seen := seen + 1
+            sum  := sum + v
+        }
+    }
+    # Reset port: drop accumulated state without firing.
+    rule reset {
+        on reset(_)
+        do {
+            seen := 0
+            sum  := 0
+        }
+    }
+}

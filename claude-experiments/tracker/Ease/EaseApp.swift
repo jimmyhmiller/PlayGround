@@ -1,6 +1,8 @@
 import SwiftUI
 import AppKit
+#if !MAS
 import Sparkle
+#endif
 import Combine
 import UniformTypeIdentifiers
 
@@ -251,6 +253,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         menu.autoenablesItems = false
 
+        #if !MAS
         // Check for Updates
         let updateItem = NSMenuItem(
             title: "Check for Updates...",
@@ -276,7 +279,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         channelMenuItem.submenu = channelMenu
         menu.addItem(channelMenuItem)
 
+        // License entry — only the Direct build needs a license
+        let licenseItem = NSMenuItem(
+            title: licenseMenuTitle,
+            action: #selector(showLicenseSheet),
+            keyEquivalent: ""
+        )
+        menu.addItem(licenseItem)
+
         menu.addItem(NSMenuItem.separator())
+        #endif
 
         // Show in Dock
         let dockItem = NSMenuItem(
@@ -325,6 +337,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = nil
     }
 
+    #if !MAS
     @objc private func checkForUpdates() {
         updateManager.checkForUpdates()
     }
@@ -333,6 +346,27 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard let channel = sender.representedObject as? UpdateChannel else { return }
         updateManager.currentChannel = channel
     }
+
+    private var licenseMenuTitle: String {
+        switch LicenseManager.shared.state {
+        case .activated: return "License: Activated"
+        case .checking: return "License: Activating…"
+        default: return "Enter License…"
+        }
+    }
+
+    @objc private func showLicenseSheet() {
+        let hosting = NSHostingController(rootView: LicenseSheet())
+        let window = NSWindow(contentViewController: hosting)
+        window.title = "Ease License"
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        window.center()
+        NSApp.setActivationPolicy(.regular)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    #endif
 
     @objc private func clearDataClicked() {
         viewModel.clearAllData()

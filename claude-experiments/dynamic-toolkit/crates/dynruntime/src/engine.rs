@@ -6,15 +6,23 @@
 
 use std::marker::PhantomData;
 
+use dynalloc::LowBitPtrPolicy;
 use dynexec::{
     CodegenConfig, DefaultCodegenConfig, LayoutConfigDefaults, SoundRoots, SoundTransport,
 };
+use dynir::gc_runtime::GcInterpCtx;
 use dynir::interp::{
     ConfiguredModuleInterpreter, ExternCallResult, InterpError, InterpResult, InterpRootManager,
-    NoGcRoots,
 };
 use dynir::ir::*;
 use dynlower::JitModule;
+use dynobj::Compact;
+
+/// The default root-manager type for `default_engine` — pairs the
+/// `LowBit<3>` interpreter layout with its canonical `PtrPolicy`. Use
+/// `GcInterpCtx::new_unallocating()` to construct one for tests or
+/// embeddings that don't allocate through the IR.
+pub type DefaultRoots = GcInterpCtx<Compact, LowBitPtrPolicy<3>>;
 
 use crate::jit::{
     JitExecutionResult, JitFrameControlError, JitFrameSliceRuntime,
@@ -135,7 +143,7 @@ impl From<JitFrameControlError> for ExecutionError {
 pub struct ExecutionEngine<
     'a,
     Cfg: CodegenConfig = DefaultCodegenConfig<dynvalue::LowBit<3>>,
-    R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport> = NoGcRoots,
+    R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport> = DefaultRoots,
 > where
     Cfg::Layout: LayoutConfigDefaults,
 {
@@ -150,9 +158,16 @@ pub struct ExecutionEngine<
 /// Static singleton for engines without a heap-backed continuation context.
 static ENGINE_NO_CONTS: dynexec::NoContinuations = dynexec::NoContinuations;
 
-/// Create a default interpreter-only engine (LowBit<3>, no GC).
-pub fn default_engine<'a>(module: &'a Module) -> ExecutionEngine<'a> {
-    ExecutionEngine::with_tier_policy(module, &NoGcRoots, &ENGINE_NO_CONTS, Box::new(NeverCompile))
+/// Create a default interpreter-only engine (LowBit<3>, no JIT).
+///
+/// The caller owns the `GcInterpCtx`; in most tests
+/// `GcInterpCtx::new_unallocating()` is enough since the IR they run
+/// doesn't allocate.
+pub fn default_engine<'a>(
+    module: &'a Module,
+    roots: &'a DefaultRoots,
+) -> ExecutionEngine<'a> {
+    ExecutionEngine::with_tier_policy(module, roots, &ENGINE_NO_CONTS, Box::new(NeverCompile))
 }
 
 impl<'a, Cfg, R> ExecutionEngine<'a, Cfg, R>
@@ -376,7 +391,7 @@ mod tests {
             let v = b.iconst(Type::I64, 42);
             b.ret(v);
         });
-        let mut engine = default_engine(&module);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
         assert_eq!(engine.run(entry, &[]).unwrap(), ExecutionResult::Value(42));
     }
 
@@ -389,7 +404,7 @@ mod tests {
             let sum = b.add(a, bv);
             b.ret(sum);
         });
-        let mut engine = default_engine(&module);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
         assert_eq!(
             engine.run(entry, &[10, 32]).unwrap(),
             ExecutionResult::Value(42)
@@ -415,7 +430,7 @@ mod tests {
         mb.finish_func(f_main, fb);
         let module = mb.build();
 
-        let mut engine = default_engine(&module);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
         engine.bind("double", |args| ExternCallResult::Value(Some(args[0] * 2)));
         assert_eq!(
             engine.run(f_main, &[21]).unwrap(),
@@ -450,7 +465,7 @@ mod tests {
         }
 
         let module = mb.build();
-        let mut engine = default_engine(&module);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
         assert_eq!(
             engine.run(f_main, &[10]).unwrap(),
             ExecutionResult::Value(21)
@@ -464,7 +479,7 @@ mod tests {
             b.ret(v);
         });
         let jit = JitModule::compile::<dynvalue::LowBit<3>>(&module, &[]);
-        let mut engine = default_engine(&module);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
         engine.set_jit(jit);
         assert_eq!(engine.run(entry, &[]).unwrap(), ExecutionResult::Value(99));
     }
@@ -497,7 +512,7 @@ mod tests {
 
         let module = mb.build();
         let jit = JitModule::compile::<dynvalue::LowBit<3>>(&module, &[]);
-        let mut engine = default_engine(&module);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
         engine.set_jit(jit);
         assert_eq!(
             engine.run(f_main, &[10]).unwrap(),
@@ -543,7 +558,7 @@ mod tests {
 
         let module = mb.build();
         let jit = JitModule::compile::<dynvalue::LowBit<3>>(&module, &[]);
-        let mut engine = default_engine(&module);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
         engine.set_jit(jit);
         assert_eq!(
             engine.run(main_fn, &[5]).unwrap(),
@@ -557,8 +572,9 @@ mod tests {
             let v = b.iconst(Type::I64, 77);
             b.ret(v);
         });
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
         let mut engine: ExecutionEngine =
-            ExecutionEngine::with_tier_policy(&module, &NoGcRoots, &ENGINE_NO_CONTS, Box::new(AlwaysCompile::new()));
+            ExecutionEngine::with_tier_policy(&module, &roots, &ENGINE_NO_CONTS, Box::new(AlwaysCompile::new()));
         // First call triggers compilation
         assert_eq!(engine.run(entry, &[]).unwrap(), ExecutionResult::Value(77));
         // JIT module should now be set
@@ -573,9 +589,10 @@ mod tests {
             let v = b.iconst(Type::I64, 55);
             b.ret(v);
         });
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
         let mut engine: ExecutionEngine<'_> = ExecutionEngine::with_tier_policy(
             &module,
-            &NoGcRoots,
+            &roots,
             &ENGINE_NO_CONTS,
             Box::new(CallCountTier::new(3)),
         );
@@ -596,7 +613,7 @@ mod tests {
         let (module, entry) = one_func("main", &[], None, |b| {
             b.ret_void();
         });
-        let mut engine = default_engine(&module);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
         assert_eq!(engine.run(entry, &[]).unwrap(), ExecutionResult::Void);
     }
 }

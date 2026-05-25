@@ -217,6 +217,30 @@ pub trait InterpFrameStore {
     /// Pop all frames above `depth`, keeping the frame at `depth` as the new top.
     fn pop_frames_above(&mut self, depth: usize);
 
+    // ── Exception handlers ──────────────────────────────────────
+
+    /// Push an exception handler onto the current top frame. The block
+    /// is jumped to (with the thrown value as its first block param)
+    /// when `Terminator::Raise` fires or when a callee's exception
+    /// propagates up to this frame.
+    ///
+    /// Default impl panics — only interpreter implementations that
+    /// honor `Inst::PushHandler` need to override.
+    fn push_handler(&mut self, _handler_block_idx: usize) {
+        panic!("push_handler not supported by this InterpFrameStore")
+    }
+    /// Pop the most-recently-pushed exception handler from the current
+    /// top frame. Default impl panics — see `push_handler`.
+    fn pop_handler(&mut self) {
+        panic!("pop_handler not supported by this InterpFrameStore")
+    }
+    /// Return the topmost active exception handler in the current
+    /// frame, or `None` if no handler is active. Default returns
+    /// `None` so stores without handler support don't see catches.
+    fn top_handler(&self) -> Option<usize> {
+        None
+    }
+
     // Heap-backed continuation support lives in the `FrameCapture` and
     // `FrameRestorable` traits (in `cont_ops`). Stores that support
     // heap-backed continuations implement those in addition to
@@ -517,14 +541,36 @@ impl StackFrameLayout {
     }
 
     pub fn alloc_local_slot(&mut self) -> i32 {
+        self.alloc_local_slot_bytes(8)
+    }
+
+    /// Allocate `size_bytes` of local stack space (rounded up to a
+    /// multiple of 8) and return the offset of the first byte. Used by
+    /// frontends that spill multi-word buffers (closure capture
+    /// arrays, packed argument slots, etc.) into a contiguous slot.
+    pub fn alloc_local_slot_bytes(&mut self, size_bytes: i32) -> i32 {
+        let aligned = ((size_bytes.max(8) as i32 + 7) & !7) as i32;
         let offset = self.next_local_offset;
-        self.next_local_offset += 8;
+        self.next_local_offset += aligned;
         offset
     }
 
     pub fn alloc_root_slot(&mut self) -> i32 {
         let offset = self.alloc_local_slot();
         self.root_slots.push(offset);
+        offset
+    }
+
+    /// Like `alloc_root_slot` but for `size_bytes` of contiguous
+    /// space; **every** word in the range is registered as a GC root.
+    pub fn alloc_root_slot_bytes(&mut self, size_bytes: i32) -> i32 {
+        let aligned = ((size_bytes.max(8) as i32 + 7) & !7) as i32;
+        let offset = self.alloc_local_slot_bytes(aligned);
+        let mut o = offset;
+        while o < offset + aligned {
+            self.root_slots.push(o);
+            o += 8;
+        }
         offset
     }
 
@@ -568,7 +614,9 @@ impl StackFrameLayout {
 
 pub trait FrameLayout {
     fn alloc_local_slot(&mut self) -> i32;
+    fn alloc_local_slot_bytes(&mut self, size_bytes: i32) -> i32;
     fn alloc_root_slot(&mut self) -> i32;
+    fn alloc_root_slot_bytes(&mut self, size_bytes: i32) -> i32;
     fn alloc_shadow_root_slot(&mut self) -> i32;
     fn reserve_outgoing_arg_bytes(&mut self, bytes: i32);
     fn total_frame_size(&self, stack_align: usize) -> i32;
@@ -584,8 +632,16 @@ impl FrameLayout for StackFrameLayout {
         Self::alloc_local_slot(self)
     }
 
+    fn alloc_local_slot_bytes(&mut self, size_bytes: i32) -> i32 {
+        Self::alloc_local_slot_bytes(self, size_bytes)
+    }
+
     fn alloc_root_slot(&mut self) -> i32 {
         Self::alloc_root_slot(self)
+    }
+
+    fn alloc_root_slot_bytes(&mut self, size_bytes: i32) -> i32 {
+        Self::alloc_root_slot_bytes(self, size_bytes)
     }
 
     fn alloc_shadow_root_slot(&mut self) -> i32 {

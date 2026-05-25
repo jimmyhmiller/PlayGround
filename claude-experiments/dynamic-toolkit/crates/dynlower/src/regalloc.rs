@@ -164,6 +164,43 @@ pub trait RegisterAllocator: Sized {
     /// No code is emitted — values were already spilled before the call.
     fn clobber_caller_saved<B: LoweringBackend>(&mut self);
 
+    /// Place the value currently in the C-ABI return register
+    /// (machine GP register 0, or FP register 0 for floats) into
+    /// the location this regalloc has assigned to param `param_idx`
+    /// of `target_block`.
+    ///
+    /// Used by Invoke's normal/exception continuation paths: the
+    /// JIT calling convention always delivers the call's return
+    /// value (or — for the exception path — the thrown value
+    /// preserved in x0 across pop_suspended_frame) in machine
+    /// register 0. But the SSA block param may have been assigned
+    /// a different register (LinearScan), an explicit spill slot
+    /// (LinearScan), or only the canonical frame slot (Greedy).
+    /// Each regalloc knows its own conventions; this method
+    /// emits the appropriate store/move.
+    ///
+    /// Default impl: store to canonical block-param slot. Works for
+    /// Greedy (which loads block params from canonical slots on
+    /// block entry). LinearScan overrides to honor register/spill
+    /// assignments — without that override, an Invoke's return
+    /// value silently fails to reach its consumer.
+    fn place_call_return_in_block_param<B: LoweringBackend>(
+        &mut self,
+        target_idx: usize,
+        param_idx: usize,
+        ret_ty: Type,
+        _func: &Function,
+        buf: &mut CodeBuffer<B::Arch>,
+        frame: &mut impl FrameLayout,
+    ) {
+        let slot = frame.slot_access(frame.block_param_slots(target_idx)[param_idx]);
+        if is_float_type(ret_ty) {
+            B::emit_store_fp_to_frame(buf, machine_fp(0), slot);
+        } else {
+            B::emit_store_gp_to_frame(buf, machine_gp(0), slot);
+        }
+    }
+
     // State save/restore (for BrIf)
     type SavedState: Clone;
     fn save_state(&self) -> Self::SavedState;
@@ -181,8 +218,14 @@ pub trait RegisterAllocator: Sized {
 }
 
 // ─── Greedy Register State ─────────────────────────────────────────
+//
+// NOT a publicly-exposed allocator. `LinearScanAllocator` is the only
+// allocator frontends should use. `GreedyRegState`'s methods are
+// reused internally by `LinearScanAllocator` for the dynamic
+// (non-prepared) lowering paths — register-allocation fallbacks
+// during the lower pass when no pre-assigned home exists.
 
-pub struct GreedyRegState {
+pub(crate) struct GreedyRegState {
     pub gp_occupant: [Option<Value>; NUM_GP],
     pub fp_occupant: [Option<Value>; NUM_FP],
     pub values: Vec<ValueInfo>,
@@ -1749,6 +1792,56 @@ impl RegisterAllocator for LinearScanAllocator {
                     self.values[val.index()].loc = ValueLoc::Spill(slot);
                 }
                 self.fp_occupant[r as usize] = None;
+            }
+        }
+    }
+
+    fn place_call_return_in_block_param<B: LoweringBackend>(
+        &mut self,
+        target_idx: usize,
+        param_idx: usize,
+        ret_ty: Type,
+        func: &Function,
+        buf: &mut CodeBuffer<B::Arch>,
+        frame: &mut impl FrameLayout,
+    ) {
+        // Linear scan: place x0/fp0 into the location pre-assigned
+        // to the target block's param. Without this override, the
+        // default impl (store-to-canonical-slot) would be invisible
+        // to LinearScan's `enter_block` — which expects block-param
+        // values in registers (when assigned) and never loads from
+        // canonical slots.
+        let (param_val, _) = func.blocks[target_idx].params[param_idx];
+        let vi = param_val.index();
+        let is_fp = is_float_type(ret_ty);
+
+        if let Some(r) = self.assignments[vi] {
+            // Assigned to register r: move from machine reg 0 → r.
+            if is_fp {
+                if r != 0 {
+                    // No direct FP-FP move on ARM64; bounce through
+                    // X27 (matches `resolve_parallel_moves`).
+                    let temp = machine_gp(27);
+                    B::emit_fp_to_gp_move(buf, temp, machine_fp(0));
+                    B::emit_gp_to_fp_move(buf, machine_fp(r), temp);
+                }
+            } else if r != 0 {
+                B::emit_gp_move(buf, machine_gp(r), machine_gp(0));
+            }
+        } else if let Some(off) = self.assigned_spills[vi] {
+            let slot = frame.slot_access(off);
+            if is_fp {
+                B::emit_store_fp_to_frame(buf, machine_fp(0), slot);
+            } else {
+                B::emit_store_gp_to_frame(buf, machine_gp(0), slot);
+            }
+        } else {
+            let slot =
+                frame.slot_access(frame.block_param_slots(target_idx)[param_idx]);
+            if is_fp {
+                B::emit_store_fp_to_frame(buf, machine_fp(0), slot);
+            } else {
+                B::emit_store_gp_to_frame(buf, machine_gp(0), slot);
             }
         }
     }

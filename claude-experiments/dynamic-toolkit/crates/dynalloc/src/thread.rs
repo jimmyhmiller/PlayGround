@@ -1,6 +1,6 @@
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicPtr, AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard};
 
 use dynobj::{FrameChain, ObjHeader, RootSource, TypeInfo};
 
@@ -13,6 +13,12 @@ use crate::statemap::TraceState;
 
 pub const STATE_RUNNING: u8 = 0;
 pub const STATE_AT_SAFEPOINT: u8 = 1;
+/// Thread is parked on an external blocking call (mutex, condvar, IO).
+/// The GC treats this state as "safepoint-equivalent": it scans the
+/// thread's roots without waiting for the thread to poll. The thread
+/// must transition back to RUNNING via `exit_blocked` before resuming
+/// any mutator work.
+pub const STATE_BLOCKED: u8 = 2;
 
 // ─── ThreadState ────────────────────────────────────────────────────
 
@@ -43,6 +49,23 @@ pub struct ThreadState {
     /// during mutation, or by the GC thread after safepoint is reached.
     /// UnsafeCell because it needs interior mutability without Sync.
     satb_buffer: UnsafeCell<SATBBuffer>,
+
+    /// Frame pointer of the JIT call this thread is currently parked
+    /// at. Set by the JIT safepoint handler **before** parking, so a
+    /// concurrent GC running on another thread can walk this thread's
+    /// JIT frames as roots. Cleared (set null) on resume.
+    ///
+    /// Without this, a concurrent GC scans only the parked thread's
+    /// `frame_chain` (host-side roots), missing the JIT-frame spill
+    /// slots — and so doesn't update them when relocating objects.
+    /// The parked thread then resumes and reads stale `from`-space
+    /// pointers (SIGBUS).
+    ///
+    /// `AtomicPtr` because both the owning thread (set/clear) and
+    /// the GC coordinator (read) touch it; the value is a raw FP
+    /// that points into the owning thread's stack — valid only while
+    /// the owning thread is parked.
+    parked_jit_fp: AtomicPtr<u8>,
 }
 
 // Safety: ThreadState is designed to be shared between the owning
@@ -62,7 +85,27 @@ impl ThreadState {
             safepoint_lock: Mutex::new(false),
             safepoint_cond: Condvar::new(),
             satb_buffer: UnsafeCell::new(SATBBuffer::new(256)),
+            parked_jit_fp: AtomicPtr::new(std::ptr::null_mut()),
         }
+    }
+
+    /// Set the JIT frame pointer that should be exposed to GC root
+    /// scans while this thread is parked at a safepoint. Cleared
+    /// (with `clear_parked_jit_fp`) on resume.
+    pub fn set_parked_jit_fp(&self, fp: *const u8) {
+        self.parked_jit_fp.store(fp as *mut u8, Ordering::Release);
+    }
+
+    /// Clear the parked JIT FP pointer.
+    pub fn clear_parked_jit_fp(&self) {
+        self.parked_jit_fp
+            .store(std::ptr::null_mut(), Ordering::Release);
+    }
+
+    /// Read the parked JIT frame pointer. Returns null if this
+    /// thread isn't currently parked at a JIT safepoint.
+    pub fn parked_jit_fp(&self) -> *const u8 {
+        self.parked_jit_fp.load(Ordering::Acquire) as *const u8
     }
 
     /// Access the SATB buffer.
@@ -110,17 +153,86 @@ impl ThreadState {
     /// Use this instead of `is_at_safepoint()` when you need to ensure
     /// the thread is safe to scan and won't leave its safepoint until
     /// explicitly resumed.
+    ///
+    /// `STATE_BLOCKED` threads are also considered safely at safepoint:
+    /// they cannot transition back to RUNNING without first observing
+    /// that no GC is in progress, so it is sound to scan their roots.
     pub fn is_safely_at_safepoint(&self) -> bool {
-        if self.state.load(Ordering::Acquire) != STATE_AT_SAFEPOINT {
-            return false;
+        match self.state.load(Ordering::Acquire) {
+            STATE_BLOCKED => true,
+            STATE_AT_SAFEPOINT => {
+                let gc_done = self.safepoint_lock.lock().unwrap();
+                !*gc_done
+            }
+            _ => false,
         }
-        let gc_done = self.safepoint_lock.lock().unwrap();
-        !*gc_done
+    }
+
+    /// True if this thread is currently in the BLOCKED state.
+    pub fn is_blocked(&self) -> bool {
+        self.state.load(Ordering::Acquire) == STATE_BLOCKED
     }
 
     /// Current safepoint generation (incremented each enter_safepoint call).
     pub fn safepoint_gen(&self) -> u64 {
         self.safepoint_gen.load(Ordering::Acquire)
+    }
+
+    /// Enter a blocking region. The thread is treated as if it had
+    /// reached a safepoint, so the GC can scan its roots and proceed
+    /// without waiting for the thread to poll.
+    ///
+    /// MUST be paired with `exit_blocked`. Nesting is not supported —
+    /// callers must be in `STATE_RUNNING` when calling.
+    ///
+    /// # Preconditions
+    /// - All currently-live GC pointers must already be rooted in
+    ///   `frame_chain`. The GC may scan immediately after this returns.
+    /// - The caller must not mutate the heap or root set while in the
+    ///   blocked region. Allocations and root-set changes are only
+    ///   allowed after `exit_blocked` returns.
+    ///
+    /// # Safety
+    /// Logically — not type-system — unsafe: violating the preconditions
+    /// causes UB at the GC level (missed roots, dangling pointers).
+    pub fn enter_blocked(&self) {
+        self.safepoint_gen.fetch_add(1, Ordering::AcqRel);
+        let prev = self.state.swap(STATE_BLOCKED, Ordering::AcqRel);
+        debug_assert_eq!(
+            prev, STATE_RUNNING,
+            "enter_blocked: thread was not in STATE_RUNNING (was {prev})"
+        );
+    }
+
+    /// Exit a blocking region. Waits for any in-progress GC to finish
+    /// (so the thread does not start running with stale references after
+    /// a moving collector compacted), then transitions back to RUNNING.
+    ///
+    /// Also clears any stale `gc_done` set by `resume()` calls that
+    /// fired during the blocked window — without this, the next
+    /// `enter_safepoint` would observe the residual flag and exit early
+    /// without participating in the next collection.
+    pub fn exit_blocked(&self, heap: &Heap) {
+        // Wait for any active STW window to fully close before
+        // resuming. Concurrent GC's `barriers_active` is also a
+        // window during which we shouldn't blindly transition: the
+        // collector may still need our state stable.
+        while heap.gc_requested() || heap.barriers_active() {
+            std::thread::yield_now();
+        }
+        // Drain any stale resume flag. resume() during our BLOCKED
+        // window left gc_done = true; if we don't consume it, the
+        // next enter_safepoint short-circuits and the next GC
+        // busy-waits for us until we poll a fresh safepoint.
+        {
+            let mut gc_done = self.safepoint_lock.lock().unwrap();
+            *gc_done = false;
+        }
+        let prev = self.state.swap(STATE_RUNNING, Ordering::AcqRel);
+        debug_assert_eq!(
+            prev, STATE_BLOCKED,
+            "exit_blocked: thread was not in STATE_BLOCKED (was {prev})"
+        );
     }
 }
 
@@ -267,6 +379,43 @@ impl<P: PtrPolicy> MutatorThread<P> {
                 self.heap.mark_card_dirty(obj as *const u8);
             }
         }
+    }
+
+    /// Acquire a `Mutex` while keeping the GC unblocked.
+    ///
+    /// Naively calling `mutex.lock()` parks the OS thread without
+    /// transitioning to a safepoint state. If another thread triggers
+    /// GC while this one is parked, the GC busy-waits forever for our
+    /// thread to reach a safepoint — deadlock.
+    ///
+    /// This wrapper transitions to `STATE_BLOCKED` before locking
+    /// (telling the GC it can scan our roots and proceed), then
+    /// transitions back via `exit_blocked` after the lock is acquired
+    /// (which waits for any in-flight GC to finish before resuming).
+    ///
+    /// # Preconditions
+    /// - All currently-live GC pointers must be rooted in `frame_chain`
+    ///   before calling. The GC may scan immediately after we park.
+    /// - The caller must currently be in `STATE_RUNNING` (no nested
+    ///   `lock_safe` calls inside another blocking region).
+    ///
+    /// After this returns the thread is RUNNING again and the caller
+    /// should poll `safepoint()` reasonably soon — a fresh GC may have
+    /// started while we were exiting the blocked window.
+    pub fn lock_safe<'a, T>(&self, mutex: &'a Mutex<T>) -> MutexGuard<'a, T> {
+        self.state.enter_blocked();
+        let guard = match mutex.lock() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                // Even on poison we must restore state, otherwise the
+                // thread leaks the BLOCKED state and the GC will treat
+                // it as safepoint-equivalent forever.
+                self.state.exit_blocked(&self.heap);
+                panic!("lock_safe: mutex poisoned: {poisoned}");
+            }
+        };
+        self.state.exit_blocked(&self.heap);
+        guard
     }
 
     /// Read barrier: follow forwarding pointer if object was relocated.

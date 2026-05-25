@@ -167,7 +167,7 @@ pub struct TplParam {
 }
 
 #[derive(Debug, Clone)]
-pub enum CtType { Int, Bool, Str }
+pub enum CtType { Int, Bool, Str, Float }
 
 #[derive(Debug, Clone)]
 pub struct PortDecl { pub port: String, pub inner: NameTpl }
@@ -249,6 +249,10 @@ pub enum EmitTarget {
     Default,
     Self_,
     OutPort(String),
+    /// Leaf-node named output port: `emit X to port pass`. Fans
+    /// onto outbound edges of the firing node whose `from_port`
+    /// matches. See `flow::EmitTo::FromPort`.
+    FromPort(String),
     Target(NameTpl),             // static node name (template-aware)
     Dynamic(Expr),               // evaluates to Str or NodeRef
 }

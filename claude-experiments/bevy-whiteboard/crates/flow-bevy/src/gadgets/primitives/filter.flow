@@ -1,0 +1,31 @@
+# Color filter. Packets whose payload equals `match` go out the `pass`
+# port; everything else goes out the `reject` port. The two ports let
+# downstream wire matching and non-matching flows independently —
+# matches one outbound edge `Filter.pass -> X` and a separate
+# `Filter.reject -> Y`. Unwired ports silently drop, matching the
+# `to default` contract for missing outputs.
+#
+# Also matches on the `total(v)` variant so an Aggregator's output can
+# feed straight into a Filter chain — each branch keeps the original
+# variant.
+node Filter {
+    slots { match: Int = 0 }
+    rule pass_packet {
+        on packet(c)
+        when c == match
+        do { emit packet(c) to port pass }
+    }
+    rule reject_packet {
+        on packet(c)
+        do { emit packet(c) to port reject }
+    }
+    rule pass_total {
+        on total(c)
+        when c == match
+        do { emit total(c) to port pass }
+    }
+    rule reject_total {
+        on total(c)
+        do { emit total(c) to port reject }
+    }
+}

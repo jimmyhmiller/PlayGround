@@ -1,0 +1,66 @@
+# Game of Life cell reimplemented from primitives:
+#
+#                                ┌──▶ ReportBcast ──▶ broadcast (8 neighbors)
+#  Tick(period_ns) ──▶ CellState─┤
+#                                └──▶ (waits for 8 reports back via Aggregator)
+#
+#  reports (from 8 neighbors) ──▶ Aggregator(n=8) ──▶ total(sum) ──▶ CellState
+#                                                                    (applies Conway rule)
+#
+# - `Tick` drives the period.
+# - `CellState` holds `alive` and has TWO rules: on tick → emit
+#   `report(alive)`; on `total(sum)` → apply the Conway B3/S23 rule.
+# - `Aggregator(n=8)` collects exactly 8 inbound `report(v)` packets
+#   then emits `total(sum)` once, resetting for the next generation.
+# - `ReportBcast` is a tiny port-egress that fans `report(v)` out
+#   through the compound's `broadcast` port to all 8 neighbors.
+#
+# The Conway rule is irreducible — it's the gadget's *purpose* — but
+# the surrounding machinery (period, broadcast, 8-report wait) is
+# now built from primitives: Tick + Aggregator + Egress glue.
+compound LifeCellComposite(
+    period_ns:  Int = 200000000,
+    init_alive: Int = 0,
+) {
+    in  { report:    A }
+    out { broadcast: BE }
+
+    node T : Tick { period_ns: period_ns }
+    node A : Aggregator { n: 8 }
+
+    node CellState {
+        slots {
+            alive:     Int = init_alive
+            period_ns: Int = period_ns
+        }
+        probes { alive: "{alive}" }
+        rule on_tick {
+            on packet(_)
+            do { emit report(alive) to default }
+        }
+        rule on_total {
+            on total(sum)
+            do {
+                alive := if (alive == 1 && (sum == 2 || sum == 3))
+                          || (alive == 0 && sum == 3)
+                         then 1 else 0
+            }
+        }
+    }
+
+    node BE {
+        # Broadcast-port egress; `to out broadcast` fans onto every
+        # outbound edge of the compound shim with `from_port=broadcast`,
+        # which a whiteboard wires to the 8 neighbor cells.
+        rule fwd_report {
+            on report(v)
+            do { emit report(v) to out broadcast }
+        }
+    }
+
+    edges {
+        T         -> CellState : 1
+        CellState -> BE        : 1
+        A         -> CellState : 1
+    }
+}

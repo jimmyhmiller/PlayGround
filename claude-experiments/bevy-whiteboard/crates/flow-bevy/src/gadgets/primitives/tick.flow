@@ -1,0 +1,26 @@
+# Periodic packet source. Emits `packet(nil)` on the default outbound
+# edge every `period_ns`. The self-loop carries the timing; live edits
+# to `period_ns` apply on the next tick.
+node Tick {
+    slots { period_ns: Int = 500000000; up: Int = 1; emitted: Int = 0 }
+    probes { rate: "{1s / period_ns}/s"; emitted: "{emitted}" }
+    on_spawn {
+        self -> self : period_ns
+        inject tick(nil)
+    }
+    rule fire {
+        on tick(_)
+        when up == 1
+        do {
+            emitted := emitted + 1
+            record emitted emitted
+            emit packet(nil) to default
+            emit tick(nil) to self
+        }
+    }
+    rule fire_idle {
+        on tick(_)
+        when up == 0
+        do { emit tick(nil) to self }
+    }
+}

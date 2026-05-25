@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "canvas": {
+    "name": "TPC (from primitives)",
+    "description": "Two-phase commit coordinator + 2 participants, both built from primitives. Coordinator: FanOut prepare → participants; Aggregator collects 2 votes → Decide → resp/resp_error. Each participant flips a Coin (yes_prob=1.0 here so always yes), routes through VoteBridge as packet to the aggregator."
+  }
+}

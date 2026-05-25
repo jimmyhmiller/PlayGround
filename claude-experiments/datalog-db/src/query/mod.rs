@@ -30,7 +30,7 @@ impl Pattern {
             if s.starts_with('?') {
                 return Pattern::Variable(s.to_string());
             }
-            return Pattern::Constant(Value::String(s.to_string()));
+            return Pattern::Constant(Value::String(s.into()));
         }
         if let Some(n) = v.as_i64() {
             return Pattern::Constant(Value::I64(n));
@@ -73,13 +73,13 @@ impl Pattern {
             }
         }
         // Fallback
-        Pattern::Constant(Value::String(format!("{}", v)))
+        Pattern::Constant(Value::String(format!("{}", v).into()))
     }
 }
 
 fn value_from_json(v: &serde_json::Value) -> Value {
     if let Some(s) = v.as_str() {
-        Value::String(s.to_string())
+        Value::String(s.into())
     } else if let Some(n) = v.as_i64() {
         Value::I64(n)
     } else if let Some(n) = v.as_f64() {
@@ -87,7 +87,7 @@ fn value_from_json(v: &serde_json::Value) -> Value {
     } else if let Some(b) = v.as_bool() {
         Value::Bool(b)
     } else {
-        Value::String(format!("{}", v))
+        Value::String(format!("{}", v).into())
     }
 }
 

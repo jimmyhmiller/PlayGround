@@ -1,0 +1,21 @@
+[package]
+name = "clojure"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "clojure"
+path = "src/main.rs"
+
+[dependencies]
+dynalloc = { path = "../dynalloc" }
+dynexec = { path = "../dynexec" }
+dynir = { path = "../dynir" }
+dynlang = { path = "../dynlang" }
+dynlower = { path = "../dynlower" }
+dynobj = { path = "../dynobj" }
+dynruntime = { path = "../dynruntime" }
+dynvalue = { path = "../dynvalue" }

@@ -1,0 +1,1550 @@
+namespace main
+
+// beagle-zelda — a port of the Bevy Zelda-like prototype to raylib + raygui.
+//
+// This file holds game orchestration: the World/Editor/Tool state types,
+// the play-mode and editor-mode tick functions, the editor's own
+// rendering (grid + selection outlines + raygui panel), save/load, and
+// the main loop. Enemy simulation lives in enemies.bg, core physics
+// in gameplay.bg, and world rendering in rendering.bg.
+
+use beagle.ffi as ffi
+use beagle.async as async
+use ray as r
+use vec as v
+use gameplay as g
+use enemies as e
+use rendering as render
+
+// ============================================================
+// Constants
+// ============================================================
+
+// Initial window dimensions only — the window is resizable at runtime, so
+// never read these in render/input paths. Query r/screen_width() live.
+let INITIAL_W = 1280
+let INITIAL_H = 720
+
+let MODE_PLAYING = 0
+let MODE_EDITING = 1
+
+// All map files live under this dir as <name>.txt. Each map has its own file
+// so we can add a second floor, the entry hall, etc. without touching others.
+let LEVELS_DIR = "/Users/jimmyhmiller/Documents/Code/PlayGround/beagle-zelda/levels/"
+
+// Known maps, in order. Editor Prev/Next cycles through this list. First entry
+// is the startup map (the entry hall).
+let MAP_NAMES = ["entry_hall", "dungeon_1"]
+
+// Seconds to fade out (and seconds to fade back in) during a door transition.
+let FADE_DURATION = 0.35
+
+let EDITOR_CAMERA_SPEED = 600.0
+let EDITOR_SELECT_RADIUS = 22.0
+
+fn map_path(name) { LEVELS_DIR ++ name ++ ".txt" }
+
+// Pick the "other" map for a newly-placed door. With only two maps this is
+// unambiguous; later a proper target picker will replace this heuristic.
+fn other_map(name) {
+    let mut i = 0
+    let mut found = -1
+    while i < length(MAP_NAMES) {
+        if MAP_NAMES[i] == name { found = i }
+        i = i + 1
+    }
+    if found < 0 { MAP_NAMES[0] }
+    else {
+        let j = (found + 1) % length(MAP_NAMES)
+        MAP_NAMES[j]
+    }
+}
+
+// Current FPS cap. 60 at startup; F2 toggles between 60 and uncapped (0).
+// Held in an atom so we don't have to thread it through the World.
+let fps_cap = atom(60)
+
+// ============================================================
+// Editor state types
+// ============================================================
+
+enum Tool { Select, Wall, Monster, Sentinel, Door, Spawn, Gold }
+
+// raygui's toggle_group writes the active tab index as an i32 into tool_slot.
+// Convert at the FFI boundary so the rest of the code works with the enum.
+fn int_to_tool(n) {
+    if n == 1 { Tool.Wall }
+    else if n == 2 { Tool.Monster }
+    else if n == 3 { Tool.Sentinel }
+    else if n == 4 { Tool.Door }
+    else if n == 5 { Tool.Spawn }
+    else if n == 6 { Tool.Gold }
+    else { Tool.Select }
+}
+
+fn tool_to_int(t) {
+    match t {
+        Tool.Select => 0,
+        Tool.Wall => 1,
+        Tool.Monster => 2,
+        Tool.Sentinel => 3,
+        Tool.Door => 4,
+        Tool.Spawn => 5,
+        Tool.Gold => 6
+    }
+}
+
+enum Selection {
+    None,
+    Wall { index },
+    Monster { index },
+    Sentinel { index },
+    Door { index },
+    Spawn { index },
+    Gold { index }
+}
+
+struct Editor {
+    tool              // Tool enum
+    drag_start        // Vec2 world-space or null if not dragging
+    selection         // Selection enum
+    status_text       // short message shown in the editor HUD
+    tool_slot         // ffi/Cell<I32> — raygui toggle_group reads/writes through it
+    lighting_enabled  // F1 toggles the cone shader overlay + shadow mesh
+}
+
+fn default_editor() {
+    Editor {
+        tool: Tool.Select,
+        drag_start: null,
+        selection: Selection.None,
+        status_text: "ready",
+        tool_slot: ffi/cell(ffi/Type.I32, tool_to_int(Tool.Select)),
+        lighting_enabled: true
+    }
+}
+
+// ============================================================
+// World state (immutable-style; each tick returns a new World)
+// ============================================================
+
+// Fade state for door-triggered map transitions. The playing tick freezes
+// player+enemy simulation while the transition is non-None; the renderer
+// overlays a black rectangle whose alpha = fade_t for the "teleport" feel.
+enum Transition {
+    None,
+    Out { t, target_map, target_spawn },  // t: 0 -> 1 (fully black)
+    In { t }                              // t: 1 -> 0 (fade back up)
+}
+
+struct World {
+    player
+    walls         // list<Wall>
+    monsters      // list<Monster>
+    sentinels     // list<Sentinel>
+    doors         // list<Door>
+    spawns        // list<Spawn>
+    gold_items    // list<Gold> — pickups still on the ground
+    gold_collected // int — running total picked up this session
+    camera        // Vec2 center in world space
+    tuning
+    mode          // MODE_PLAYING or MODE_EDITING
+    frame         // int
+    editor        // Editor (only relevant in MODE_EDITING)
+    current_map   // string — name of the currently-loaded map
+    transition    // Transition enum — play-mode fade state machine
+    menu_open     // bool — true when the pause menu overlay is visible
+}
+
+// Extracted from a save file OR produced by `initial_map_data`. Kept separate
+// from World so callers can merge it into an existing world without leaking
+// editor/shader state.
+struct LevelData {
+    walls
+    monsters
+    sentinels
+    doors
+    spawns
+    gold_items
+}
+
+// ============================================================
+// Cave-generation helpers — deterministic pseudo-random jagged
+// walls and rock scatters. Used by `initial_map_data` to build
+// dungeon_1 without hand-placing every AABB. `seed` is an arbitrary
+// int that makes each call's noise pattern distinct.
+// ============================================================
+
+fn cave_noise(i) {
+    // Three small coprime buckets combined into a [0, 1] value.
+    let a = to-float((i * 37 + 11) % 17) / 17.0
+    let b = to-float((i * 53 + 7) % 23) / 23.0
+    let c = to-float((i * 101 + 3) % 13) / 13.0
+    (a + b + c) / 3.0
+}
+
+fn cave_jitter(i) { cave_noise(i) * 2.0 - 1.0 }
+
+fn append_all(a, b) {
+    let mut result = a
+    let mut i = 0
+    while i < length(b) {
+        result = push(result, b[i])
+        i = i + 1
+    }
+    result
+}
+
+fn concat_all(lists) {
+    let mut result = []
+    let mut i = 0
+    while i < length(lists) {
+        result = append_all(result, lists[i])
+        i = i + 1
+    }
+    result
+}
+
+// Beagle has floor() but no ceil — do it by hand. Also guarantees >= 1.
+fn ceil_int(x) {
+    let f = floor(x)
+    if x - f < 0.0001 { to-int(f) } else { to-int(f) + 1 }
+}
+
+// Jagged horizontal wall spanning x0..x1 at y. `thk` is the base half-height,
+// `jag` the max perpendicular jitter. Each segment overlaps its neighbour by
+// ~4 px so jitter can never open a gap the player could slip through.
+fn jagged_h(x0, x1, y, thk, jag, seed) {
+    let mut walls = []
+    let span = x1 - x0
+    let desired_step = 85.0
+    let n_raw = ceil_int(span / desired_step)
+    let n = if n_raw < 1 { 1 } else { n_raw }
+    let step = span / to-float(n)
+    let mut i = 0
+    while i < n {
+        let sx = x0 + to-float(i) * step
+        let cx = sx + step * 0.5
+        let j = cave_jitter(seed * 1000 + i) * jag
+        let tt = thk * (0.75 + cave_noise(seed * 1000 + i + 500) * 0.5)
+        walls = push(walls, g/Wall {
+            center: v/make(cx, y + j),
+            half: v/make(step * 0.5 + 4.0, tt)
+        })
+        i = i + 1
+    }
+    walls
+}
+
+fn jagged_v(x, y0, y1, thk, jag, seed) {
+    let mut walls = []
+    let span = y1 - y0
+    let desired_step = 85.0
+    let n_raw = ceil_int(span / desired_step)
+    let n = if n_raw < 1 { 1 } else { n_raw }
+    let step = span / to-float(n)
+    let mut i = 0
+    while i < n {
+        let sy = y0 + to-float(i) * step
+        let cy = sy + step * 0.5
+        let j = cave_jitter(seed * 1000 + i) * jag
+        let tt = thk * (0.75 + cave_noise(seed * 1000 + i + 500) * 0.5)
+        walls = push(walls, g/Wall {
+            center: v/make(x + j, cy),
+            half: v/make(tt, step * 0.5 + 4.0)
+        })
+        i = i + 1
+    }
+    walls
+}
+
+// Scatter `count` rocks in a rectangular area. Rock sizes vary within
+// [min_size, max_size] and each has a random aspect ratio so the crowd
+// doesn't look uniform.
+fn rock_scatter(cx, cy, hw, hh, count, min_size, max_size, seed) {
+    let mut walls = []
+    let mut i = 0
+    while i < count {
+        let nx = cave_jitter(seed + i * 31)
+        let ny = cave_jitter(seed + i * 47)
+        let ns = cave_noise(seed + i * 71)
+        let aspect = 0.55 + cave_noise(seed + i * 113) * 0.9
+        let px = cx + nx * hw
+        let py = cy + ny * hh
+        let sz = min_size + ns * (max_size - min_size)
+        walls = push(walls, g/Wall {
+            center: v/make(px, py),
+            half: v/make(sz, sz * aspect)
+        })
+        i = i + 1
+    }
+    walls
+}
+
+fn find_spawn(spawns, name) {
+    let mut i = 0
+    let mut found = null
+    while i < length(spawns) {
+        if spawns[i].name == name { found = spawns[i] }
+        i = i + 1
+    }
+    found
+}
+
+// Hardcoded content for each known map — the fallback when its file doesn't
+// exist yet. Editor Save writes to disk; subsequent boots load from disk and
+// ignore this. Adding a map here + to MAP_NAMES is the whole registration.
+fn initial_map_data(name) {
+    if name == "entry_hall" {
+        // Small rectangular room, perimeter walls, exit-door on the north wall.
+        // The "shop" zone will live here later — for now it's just the hall.
+        let t = 20.0   // wall thickness
+        let hw = 380.0 // half-width of interior
+        let hh = 240.0 // half-height of interior
+        let door_hw = 48.0
+        LevelData {
+            walls: [
+                // South wall (solid)
+                g/Wall { center: v/make(0.0, 0.0 - hh - t), half: v/make(hw + t, t) },
+                // East + West walls (solid)
+                g/Wall { center: v/make(hw + t, 0.0), half: v/make(t, hh + t) },
+                g/Wall { center: v/make(0.0 - hw - t, 0.0), half: v/make(t, hh + t) },
+                // North wall split around the door opening
+                g/Wall { center: v/make(0.0 - (hw + door_hw) * 0.5, hh + t),
+                         half: v/make((hw - door_hw) * 0.5, t) },
+                g/Wall { center: v/make((hw + door_hw) * 0.5, hh + t),
+                         half: v/make((hw - door_hw) * 0.5, t) }
+            ],
+            monsters: [],
+            sentinels: [],
+            doors: [
+                g/Door {
+                    center: v/make(0.0, hh + t),
+                    half: v/make(door_hw, t),
+                    target_map: "dungeon_1",
+                    target_spawn: "from_entry"
+                }
+            ],
+            spawns: [
+                g/Spawn { name: "default", pos: v/make(0.0, 0.0 - hh + 40.0) },
+                g/Spawn { name: "from_dungeon", pos: v/make(0.0, hh - 60.0) }
+            ],
+            gold_items: []
+        }
+    } else if name == "dungeon_1" {
+        // Cave: ~4400 x 3200 interior. Built procedurally from jagged-wall and
+        // rock-scatter helpers so the outline feels organic instead of axis-
+        // aligned. AABBs are still AABBs; the irregular shape comes from
+        // many small rects with perpendicular jitter.
+        let thk = 30.0    // base wall half-thickness
+        let jag = 22.0    // perimeter jitter amplitude (< thk so no gaps open)
+        let hw = 2200.0
+        let hh = 1600.0
+        let door_hw = 64.0
+        let walls = concat_all([
+            // --- Perimeter (5 jagged groups around the south door gap) ---
+            jagged_h(0.0 - hw, hw, hh + thk, thk, jag, 1),
+            jagged_h(0.0 - hw, 0.0 - door_hw, 0.0 - hh - thk, thk, jag, 2),
+            jagged_h(door_hw, hw, 0.0 - hh - thk, thk, jag, 3),
+            jagged_v(0.0 - hw - thk, 0.0 - hh, hh, thk, jag, 4),
+            jagged_v(hw + thk, 0.0 - hh, hh, thk, jag, 5),
+
+            // --- Entry corridor flanks (funnels player N from the door) ---
+            jagged_h(0.0 - 600.0, 0.0 - 200.0, 0.0 - 1260.0, 24.0, 14.0, 10),
+            jagged_h(200.0, 600.0, 0.0 - 1260.0, 24.0, 14.0, 11),
+            jagged_v(0.0 - 700.0, 0.0 - 1260.0, 0.0 - 920.0, 24.0, 14.0, 12),
+            jagged_v(700.0, 0.0 - 1260.0, 0.0 - 920.0, 24.0, 14.0, 13),
+
+            // --- SE / SW divider (vertical rib with passage at y ~ -700) ---
+            jagged_v(0.0, 0.0 - 1040.0, 0.0 - 760.0, 26.0, 16.0, 20),
+            jagged_v(0.0, 0.0 - 640.0, 0.0 - 300.0, 26.0, 16.0, 21),
+
+            // --- SW winding inner wall ---
+            jagged_v(0.0 - 1000.0, 0.0 - 1420.0, 0.0 - 980.0, 26.0, 14.0, 30),
+            jagged_h(0.0 - 1680.0, 0.0 - 1150.0, 0.0 - 780.0, 26.0, 14.0, 31),
+            jagged_v(0.0 - 900.0, 0.0 - 800.0, 0.0 - 420.0, 26.0, 14.0, 32),
+
+            // --- Central E-W divider with passage gaps (x≈-1000, 200, 1600) ---
+            jagged_h(0.0 - 1800.0, 0.0 - 1100.0, 0.0, 28.0, 18.0, 40),
+            jagged_h(0.0 - 900.0, 100.0, 0.0, 28.0, 18.0, 41),
+            jagged_h(300.0, 1500.0, 0.0, 28.0, 18.0, 42),
+            jagged_h(1700.0, 2150.0, 0.0, 28.0, 18.0, 43),
+
+            // --- NW chamber rim ---
+            jagged_v(0.0 - 1200.0, 180.0, 820.0, 26.0, 14.0, 50),
+            jagged_h(0.0 - 1850.0, 0.0 - 1050.0, 820.0, 26.0, 14.0, 51),
+
+            // --- Far-north divider (gap near x ~ 400-500) ---
+            jagged_h(0.0 - 1100.0, 350.0, 1120.0, 28.0, 16.0, 60),
+            jagged_h(700.0, 1750.0, 1120.0, 28.0, 16.0, 61),
+
+            // --- Rock scatters per zone (stalagmites / boulders) ---
+            rock_scatter(1350.0, 0.0 - 600.0, 700.0, 450.0, 22, 24.0, 70.0, 100),
+            rock_scatter(0.0 - 1500.0, 0.0 - 500.0, 550.0, 450.0, 16, 26.0, 70.0, 110),
+            rock_scatter(0.0 - 1500.0, 500.0, 600.0, 300.0, 14, 24.0, 65.0, 120),
+            rock_scatter(1100.0, 520.0, 1000.0, 500.0, 26, 24.0, 80.0, 130),
+            rock_scatter(0.0, 1360.0, 2000.0, 200.0, 20, 24.0, 65.0, 140),
+            rock_scatter(0.0, 0.0 - 1050.0, 420.0, 110.0, 6, 14.0, 28.0, 150),
+            rock_scatter(0.0 - 300.0, 500.0, 400.0, 350.0, 10, 20.0, 50.0, 160),
+            rock_scatter(600.0, 0.0 - 250.0, 400.0, 200.0, 8, 18.0, 45.0, 170)
+        ])
+        // --- Guardian: the one enemy type ---
+        // Large, powerful, punishing if you get caught. Moderate detection
+        // range + generous notice window means you can observe its patrol and
+        // slip past — but once it sees you, it's fast, relentless, and hits
+        // hard. Placed ONLY at chokepoints (wall gaps) so the level geometry
+        // is what makes things tense.
+        let guardian = fn(pos) {
+            e/Monster {
+                ...e/default_monster(pos),
+                half: v/make(18.0, 18.0),
+                speed: 190.0,
+                detection_range: 280.0,
+                attack_reach: 36.0,
+                strength: 2.5,
+                notice_threshold: 0.6
+            }
+        }
+
+        LevelData {
+            walls: walls,
+            monsters: [
+                // Entry corridor exit — first gate, teaches the mechanic
+                guardian(v/make(0.0, 0.0 - 940.0)),
+
+                // SE/SW divider passage (gap at y ~ -700, x ~ 0)
+                guardian(v/make(0.0, 0.0 - 700.0)),
+
+                // Central E-W divider — gap at x ≈ -1000
+                guardian(v/make(0.0 - 1000.0, 0.0)),
+
+                // Central E-W divider — gap at x ≈ 200
+                guardian(v/make(200.0, 0.0)),
+
+                // Central E-W divider — gap at x ≈ 1600
+                guardian(v/make(1600.0, 0.0)),
+
+                // NW chamber entrance (gap in vertical wall at x ~ -1200)
+                guardian(v/make(0.0 - 1200.0, 160.0)),
+
+                // Far-north passage (gap at x ≈ 400-500, y ~ 1120)
+                guardian(v/make(480.0, 1120.0))
+            ],
+            sentinels: [],
+            doors: [
+                g/Door {
+                    center: v/make(0.0, 0.0 - hh - thk),
+                    half: v/make(door_hw, thk),
+                    target_map: "entry_hall",
+                    target_spawn: "from_dungeon"
+                }
+            ],
+            spawns: [
+                g/Spawn { name: "default", pos: v/make(0.0, 0.0 - hh + 80.0) },
+                g/Spawn { name: "from_entry", pos: v/make(0.0, 0.0 - hh + 80.0) }
+            ],
+            gold_items: [
+                // Entry corridor
+                g/Gold { pos: v/make(40.0, 0.0 - 1100.0), value: 1 },
+                g/Gold { pos: v/make(0.0 - 30.0, 0.0 - 1200.0), value: 1 },
+                // SE chamber
+                g/Gold { pos: v/make(1100.0, 0.0 - 500.0), value: 2 },
+                g/Gold { pos: v/make(1400.0, 0.0 - 800.0), value: 1 },
+                g/Gold { pos: v/make(1900.0, 0.0 - 200.0), value: 3 },
+                // SW chamber
+                g/Gold { pos: v/make(0.0 - 1600.0, 0.0 - 600.0), value: 2 },
+                g/Gold { pos: v/make(0.0 - 1400.0, 0.0 - 1000.0), value: 1 },
+                // NE chamber
+                g/Gold { pos: v/make(1200.0, 600.0), value: 2 },
+                g/Gold { pos: v/make(1500.0, 900.0), value: 3 },
+                // NW chamber
+                g/Gold { pos: v/make(0.0 - 1500.0, 500.0), value: 2 },
+                // Far north
+                g/Gold { pos: v/make(0.0 - 800.0, 1350.0), value: 5 },
+                g/Gold { pos: v/make(500.0, 1400.0), value: 3 }
+            ]
+        }
+    } else {
+        // Unknown map name — treat as a runtime error rather than returning an
+        // empty placeholder. Empty maps look "fine" but hide the bug.
+        throw("initial_map_data: unknown map name: " ++ name)
+    }
+}
+
+fn default_player() {
+    g/Player {
+        pos: v/ZERO, prev: v/ZERO, vel: v/ZERO,
+        half: v/make(14.0, 14.0),
+        aim: v/UNIT_X,
+        speed_mult: 1.0,
+        hp: 3.0,
+        iframes: 0.0
+    }
+}
+
+// Build a World populated from `data`, with the player positioned at the
+// Spawn named `spawn_name` (falls back to ZERO if missing — not a crash, since
+// the editor may be mid-edit with no spawns yet).
+fn world_from_data(data, map_name, spawn_name, tuning, editor, mode, frame) {
+    let spawn = find_spawn(data.spawns, spawn_name)
+    let p_pos = if spawn == null { v/ZERO } else { spawn.pos }
+    World {
+        player: g/Player { ...default_player(), pos: p_pos, prev: p_pos },
+        walls: data.walls,
+        monsters: data.monsters,
+        sentinels: data.sentinels,
+        doors: data.doors,
+        spawns: data.spawns,
+        gold_items: data.gold_items,
+        gold_collected: 0,
+        camera: p_pos,
+        tuning: tuning,
+        mode: mode,
+        frame: frame,
+        editor: editor,
+        current_map: map_name,
+        transition: Transition.None,
+        menu_open: false
+    }
+}
+
+fn initial_world() {
+    let name = MAP_NAMES[0]
+    let data = initial_map_data(name)
+    world_from_data(data, name, "default", g/default_tuning(),
+                    default_editor(), MODE_PLAYING, 0)
+}
+
+// ============================================================
+// Play-mode tick
+// ============================================================
+
+// Black-alpha multiplier [0, 1] for the fade overlay. None => 0, mid-transition
+// => `t`, with Out and In both storing `t` where 1 is fully black.
+fn fade_alpha(world) {
+    match world.transition {
+        Transition.None => 0.0,
+        Transition.Out { t, target_map, target_spawn } => t,
+        Transition.In { t } => t
+    }
+}
+
+// Scan the doors list for one whose AABB overlaps the player. Returns the
+// Door or null. First hit wins — overlapping doors would be an authoring bug.
+fn door_under_player(player, doors) {
+    let mut i = 0
+    let mut found = null
+    while i < length(doors) && found == null {
+        let d = doors[i]
+        if v/aabb_overlap(player.pos, player.half, d.center, d.half) {
+            found = d
+        }
+        i = i + 1
+    }
+    found
+}
+
+// Advance the fade state machine. While non-None, the play tick short-circuits
+// player/enemy simulation so the scene is visually frozen during the fade.
+fn advance_transition(world, dt) {
+    match world.transition {
+        Transition.None => world,
+        Transition.Out { t, target_map, target_spawn } => {
+            let nt = t + dt / FADE_DURATION
+            if nt >= 1.0 {
+                // At full black, swap maps and flip to fade-in.
+                let after_switch = switch_map(world, target_map, target_spawn)
+                World { ...after_switch, transition: Transition.In { t: 1.0 } }
+            } else {
+                World { ...world, transition: Transition.Out {
+                    t: nt, target_map: target_map, target_spawn: target_spawn
+                } }
+            }
+        },
+        Transition.In { t } => {
+            let nt = t - dt / FADE_DURATION
+            if nt <= 0.0 {
+                World { ...world, transition: Transition.None }
+            } else {
+                World { ...world, transition: Transition.In { t: nt } }
+            }
+        }
+    }
+}
+
+// Check which gold items the player overlaps. Returns { remaining, collected }
+// where `remaining` is the items NOT picked up, and `collected` is the total
+// value of those that were.
+struct PickupResult { remaining, collected }
+
+fn collect_gold(player, gold_items) {
+    let pickup_radius = 22.0   // generous — player half is 14
+    let mut remaining = []
+    let mut collected = 0
+    let mut i = 0
+    while i < length(gold_items) {
+        let g = gold_items[i]
+        if v/length(v/sub(player.pos, g.pos)) < pickup_radius {
+            collected = collected + g.value
+        } else {
+            remaining = push(remaining, g)
+        }
+        i = i + 1
+    }
+    PickupResult { remaining: remaining, collected: collected }
+}
+
+fn playing_tick(world) {
+    let dt = g/current_dt()
+    // Freeze simulation entirely during a transition — player can't move or
+    // take hits mid-fade. Camera also stops, matching the visual teleport.
+    let is_transitioning = match world.transition {
+        Transition.None => false,
+        _ => true
+    }
+    if is_transitioning {
+        advance_transition(world, dt)
+    } else {
+        let tuning = world.tuning
+        let desired = g/read_desired_dir()
+        let speed_mult = g/read_speed_mult(tuning)
+        let player_a = g/advance_player(world.player, tuning, world.walls, desired, speed_mult, dt)
+        let camera = g/update_camera(world.camera, player_a.pos, tuning.camera_smoothing, dt)
+        let player_b = g/update_aim(player_a, camera)
+        let monsters = e/advance_all_monsters(world.monsters, player_b.pos, world.walls, dt)
+        let sentinels = e/advance_all_sentinels(world.sentinels, player_b.pos, world.walls, dt)
+        let player_c = g/apply_monster_attacks(player_b, monsters, world.walls)
+        // Gold pickup
+        let pickup = collect_gold(player_c, world.gold_items)
+        // If the player walked onto a door this tick, start the fade-out.
+        let maybe_door = door_under_player(player_c, world.doors)
+        let next_transition = if maybe_door == null {
+            Transition.None
+        } else {
+            Transition.Out {
+                t: 0.0,
+                target_map: maybe_door.target_map,
+                target_spawn: maybe_door.target_spawn
+            }
+        }
+        World {
+            ...world,
+            frame: world.frame + 1,
+            player: player_c,
+            monsters: monsters,
+            sentinels: sentinels,
+            gold_items: pickup.remaining,
+            gold_collected: world.gold_collected + pickup.collected,
+            camera: camera,
+            transition: next_transition
+        }
+    }
+}
+
+// ============================================================
+// Editor UI state — persistent buffers the raygui widgets read/write.
+// ============================================================
+
+struct UiBuffers {
+    max_speed
+    accel
+    friction
+    light_range
+    light_half_angle_deg
+    light_intensity
+    ambient
+    camera_smoothing
+    run_mult
+    sneak_mult
+}
+
+fn alloc_ui_buffers(t) {
+    UiBuffers {
+        max_speed:            ffi/cell(ffi/Type.F32, t.max_speed),
+        accel:                ffi/cell(ffi/Type.F32, t.accel),
+        friction:             ffi/cell(ffi/Type.F32, t.friction),
+        light_range:          ffi/cell(ffi/Type.F32, t.light_range),
+        light_half_angle_deg: ffi/cell(ffi/Type.F32, t.light_half_angle_deg),
+        light_intensity:      ffi/cell(ffi/Type.F32, t.light_intensity),
+        ambient:              ffi/cell(ffi/Type.F32, t.ambient),
+        camera_smoothing:     ffi/cell(ffi/Type.F32, t.camera_smoothing),
+        run_mult:             ffi/cell(ffi/Type.F32, t.run_multiplier),
+        sneak_mult:           ffi/cell(ffi/Type.F32, t.sneak_multiplier)
+    }
+}
+
+fn read_tuning_from_ui(bufs) {
+    g/Tuning {
+        max_speed:            ffi/cell-get(bufs.max_speed),
+        accel:                ffi/cell-get(bufs.accel),
+        friction:             ffi/cell-get(bufs.friction),
+        light_range:          ffi/cell-get(bufs.light_range),
+        light_half_angle_deg: ffi/cell-get(bufs.light_half_angle_deg),
+        light_intensity:      ffi/cell-get(bufs.light_intensity),
+        ambient:              ffi/cell-get(bufs.ambient),
+        camera_smoothing:     ffi/cell-get(bufs.camera_smoothing),
+        run_multiplier:       ffi/cell-get(bufs.run_mult),
+        sneak_multiplier:     ffi/cell-get(bufs.sneak_mult)
+    }
+}
+
+// ============================================================
+// Editor rendering — grid, selection outlines, drag preview, side panel
+// ============================================================
+
+fn draw_editor_selection(world) {
+    match world.editor.selection {
+        Selection.None => 0,
+        Selection.Wall { index } => {
+            if index < length(world.walls) {
+                let w = world.walls[index]
+                render/draw_world_rect_lines(w.center,
+                                             v/make(w.half.x + 3.0, w.half.y + 3.0),
+                                             r/YELLOW, world.camera)
+            } else { 0 }
+        },
+        Selection.Monster { index } => {
+            if index < length(world.monsters) {
+                let m = world.monsters[index]
+                render/draw_world_rect_lines(m.pos,
+                                             v/make(m.half.x + 4.0, m.half.y + 4.0),
+                                             r/YELLOW, world.camera)
+            } else { 0 }
+        },
+        Selection.Sentinel { index } => {
+            if index < length(world.sentinels) {
+                let s = world.sentinels[index]
+                render/draw_world_rect_lines(s.pos,
+                                             v/make(s.half.x + 4.0, s.half.y + 4.0),
+                                             r/YELLOW, world.camera)
+            } else { 0 }
+        },
+        Selection.Door { index } => {
+            if index < length(world.doors) {
+                let d = world.doors[index]
+                render/draw_world_rect_lines(d.center,
+                                             v/make(d.half.x + 4.0, d.half.y + 4.0),
+                                             r/YELLOW, world.camera)
+            } else { 0 }
+        },
+        Selection.Spawn { index } => {
+            if index < length(world.spawns) {
+                let s = world.spawns[index]
+                render/draw_world_rect_lines(s.pos,
+                                             v/make(EDITOR_SELECT_RADIUS, EDITOR_SELECT_RADIUS),
+                                             r/YELLOW, world.camera)
+            } else { 0 }
+        },
+        Selection.Gold { index } => {
+            if index < length(world.gold_items) {
+                let gg = world.gold_items[index]
+                render/draw_world_rect_lines(gg.pos,
+                                             v/make(12.0, 12.0),
+                                             r/YELLOW, world.camera)
+            } else { 0 }
+        }
+    }
+}
+
+fn draw_editor_drag_preview(world) {
+    let ed = world.editor
+    if ed.drag_start != null {
+        let is_drag_tool = match ed.tool {
+            Tool.Wall => true,
+            Tool.Door => true,
+            _ => false
+        }
+        if is_drag_tool {
+            let mouse = g/screen_to_world(r/mouse_x(), r/mouse_y(), world.camera)
+            let cx = (ed.drag_start.x + mouse.x) * 0.5
+            let cy = (ed.drag_start.y + mouse.y) * 0.5
+            let hx = v/abs_f(ed.drag_start.x - mouse.x) * 0.5
+            let hy = v/abs_f(ed.drag_start.y - mouse.y) * 0.5
+            let color = match ed.tool {
+                Tool.Door => r/rgb(140, 220, 140),
+                _         => r/rgb(120, 200, 255)
+            }
+            render/draw_world_rect_lines(v/make(cx, cy), v/make(hx, hy),
+                                         color, world.camera)
+        } else { 0 }
+    } else { 0 }
+}
+
+fn draw_editor_grid(world) {
+    // A 64-pixel grid drawn as faint lines, anchored by the camera.
+    let step = 64.0
+    let cam = world.camera
+    let half_w = 0.5 * to-float(r/screen_width())
+    let half_h = 0.5 * to-float(r/screen_height())
+    let left = cam.x - half_w
+    let right = cam.x + half_w
+    let bottom = cam.y - half_h
+    let top = cam.y + half_h
+    let faint = r/color(255, 255, 255, 20)
+    let mut x = floor(left / step) * step
+    while x < right {
+        let s1 = g/world_to_screen(v/make(x, bottom), cam)
+        let s2 = g/world_to_screen(v/make(x, top), cam)
+        r/draw_line(to-int(s1.x), to-int(s1.y), to-int(s2.x), to-int(s2.y), faint)
+        x = x + step
+    }
+    let mut y = floor(bottom / step) * step
+    while y < top {
+        let s1 = g/world_to_screen(v/make(left, y), cam)
+        let s2 = g/world_to_screen(v/make(right, y), cam)
+        r/draw_line(to-int(s1.x), to-int(s1.y), to-int(s2.x), to-int(s2.y), faint)
+        y = y + step
+    }
+}
+
+struct SaveLoadResult {
+    save
+    load
+    prev_map    // true if the "< Map" button was pressed this frame
+    next_map    // true if the "Map >" button was pressed this frame
+    new_tuning
+}
+
+// The right-hand raygui panel. Returns pressed-flags + the (possibly
+// updated) Tuning read back from the sliders.
+fn draw_editor_panel(world, ui_bufs) {
+    let panel_x = to-float(r/screen_width()) - 260.0
+    r/panel(panel_x, 0.0, 260.0, to-float(r/screen_height()), "Editor")
+
+    r/label(panel_x + 10.0, 30.0, 240.0, 20.0, world.editor.status_text)
+
+    // Map nav — which map are we editing? Prev/Next cycles MAP_NAMES and
+    // reloads from disk (or hardcoded fallback).
+    r/label(panel_x + 10.0, 54.0, 240.0, 18.0, "Map: ${world.current_map}")
+    let prev_map = r/button(panel_x + 10.0, 76.0, 60.0, 22.0, "< Map") != 0
+    let next_map = r/button(panel_x + 75.0, 76.0, 60.0, 22.0, "Map >") != 0
+
+    // Tool toggle group — 6 tools must fit in (panel_w - 20) = 240 px.
+    r/label(panel_x + 10.0, 104.0, 80.0, 18.0, "Tool:")
+    r/toggle_group(panel_x + 10.0, 124.0, 33.0, 24.0,
+                   "Sel;Wall;Mon;Sent;Door;Spwn;Gold", world.editor.tool_slot)
+
+    let sx = panel_x + 80.0
+    let sw = 150.0
+    let mut y = 164.0
+    r/slider(sx, y, sw, 18.0, "speed",   "", ui_bufs.max_speed, 0.0, 1000.0); y = y + 22.0
+    r/slider(sx, y, sw, 18.0, "accel",   "", ui_bufs.accel, 0.0, 10000.0); y = y + 22.0
+    r/slider(sx, y, sw, 18.0, "frict",   "", ui_bufs.friction, 0.0, 10000.0); y = y + 22.0
+    r/slider(sx, y, sw, 18.0, "light r", "", ui_bufs.light_range, 50.0, 2000.0); y = y + 22.0
+    r/slider(sx, y, sw, 18.0, "cone °",  "", ui_bufs.light_half_angle_deg, 1.0, 180.0); y = y + 22.0
+    r/slider(sx, y, sw, 18.0, "lightI",  "", ui_bufs.light_intensity, 0.0, 4.0); y = y + 22.0
+    r/slider(sx, y, sw, 18.0, "ambient", "", ui_bufs.ambient, 0.0, 1.0); y = y + 22.0
+    r/slider(sx, y, sw, 18.0, "cam smth","", ui_bufs.camera_smoothing, 0.0, 30.0); y = y + 22.0
+    r/slider(sx, y, sw, 18.0, "run x",   "", ui_bufs.run_mult, 1.0, 4.0); y = y + 22.0
+    r/slider(sx, y, sw, 18.0, "sneak x", "", ui_bufs.sneak_mult, 0.1, 1.0); y = y + 28.0
+
+    let save_pressed = r/button(panel_x + 10.0, y, 110.0, 28.0, "Save") != 0
+    let load_pressed = r/button(panel_x + 130.0, y, 110.0, 28.0, "Load") != 0
+
+    SaveLoadResult {
+        save: save_pressed,
+        load: load_pressed,
+        prev_map: prev_map,
+        next_map: next_map,
+        new_tuning: read_tuning_from_ui(ui_bufs)
+    }
+}
+
+fn render_editor(world, shader_ctx, ui_bufs) {
+    r/begin_drawing()
+    r/clear_background(r/rgb(25, 30, 38))
+
+    draw_editor_grid(world)
+
+    // Doors under walls so wall tops overlap them visually.
+    let mut di = 0
+    while di < length(world.doors) {
+        render/draw_door(world.doors[di], world.camera)
+        di = di + 1
+    }
+    let mut i = 0
+    while i < length(world.walls) {
+        render/draw_wall(world.walls[i], world.camera)
+        i = i + 1
+    }
+    let mut mi = 0
+    while mi < length(world.monsters) {
+        render/draw_monster(world.monsters[mi], world.camera)
+        mi = mi + 1
+    }
+    let mut si = 0
+    while si < length(world.sentinels) {
+        render/draw_sentinel(world.sentinels[si], world.camera)
+        si = si + 1
+    }
+    let mut gdi = 0
+    while gdi < length(world.gold_items) {
+        render/draw_gold(world.gold_items[gdi], world.camera)
+        gdi = gdi + 1
+    }
+    render/draw_player(world.player, world.camera)
+
+    // Spawn markers only render in the editor — they're authoring metadata.
+    let mut sp = 0
+    while sp < length(world.spawns) {
+        render/draw_spawn(world.spawns[sp], world.camera)
+        sp = sp + 1
+    }
+
+    draw_editor_selection(world)
+    draw_editor_drag_preview(world)
+
+    r/draw_text("EDITING — Tab=play  WASD=pan  LMB=place  RMB=select  Del=delete",
+                10, 10, 18, r/rgb(230, 215, 140))
+
+    let ui = draw_editor_panel(world, ui_bufs)
+
+    r/end_drawing()
+    ui
+}
+
+// ============================================================
+// Editor logic — picking, placement, deletion
+// ============================================================
+
+fn pick_at(world, p) {
+    // Order: doors > walls > monsters > sentinels > spawns. Doors take priority
+    // over walls because doors are visually on top of wall tops.
+    let mut result = Selection.None
+    let mut di = 0
+    while di < length(world.doors) {
+        let d = world.doors[di]
+        match result {
+            Selection.None => {
+                if v/aabb_overlap(p, v/make(1.0, 1.0), d.center, d.half) {
+                    result = Selection.Door { index: di }
+                }
+            },
+            _ => 0
+        }
+        di = di + 1
+    }
+    let mut i = 0
+    while i < length(world.walls) {
+        let w = world.walls[i]
+        match result {
+            Selection.None => {
+                if v/aabb_overlap(p, v/make(1.0, 1.0), w.center, w.half) {
+                    result = Selection.Wall { index: i }
+                }
+            },
+            _ => 0
+        }
+        i = i + 1
+    }
+    let mut m = 0
+    while m < length(world.monsters) {
+        match result {
+            Selection.None => {
+                let mm = world.monsters[m]
+                if v/length(v/sub(p, mm.pos)) < EDITOR_SELECT_RADIUS {
+                    result = Selection.Monster { index: m }
+                }
+            },
+            _ => 0
+        }
+        m = m + 1
+    }
+    let mut s = 0
+    while s < length(world.sentinels) {
+        match result {
+            Selection.None => {
+                let ss = world.sentinels[s]
+                if v/length(v/sub(p, ss.pos)) < EDITOR_SELECT_RADIUS {
+                    result = Selection.Sentinel { index: s }
+                }
+            },
+            _ => 0
+        }
+        s = s + 1
+    }
+    let mut gi = 0
+    while gi < length(world.gold_items) {
+        match result {
+            Selection.None => {
+                let gg = world.gold_items[gi]
+                if v/length(v/sub(p, gg.pos)) < EDITOR_SELECT_RADIUS {
+                    result = Selection.Gold { index: gi }
+                }
+            },
+            _ => 0
+        }
+        gi = gi + 1
+    }
+    let mut sp = 0
+    while sp < length(world.spawns) {
+        match result {
+            Selection.None => {
+                let spn = world.spawns[sp]
+                if v/length(v/sub(p, spn.pos)) < EDITOR_SELECT_RADIUS {
+                    result = Selection.Spawn { index: sp }
+                }
+            },
+            _ => 0
+        }
+        sp = sp + 1
+    }
+    result
+}
+
+fn list_remove_at(xs, i) {
+    let mut result = []
+    let mut k = 0
+    while k < length(xs) {
+        if k != i { result = push(result, xs[k]) }
+        k = k + 1
+    }
+    result
+}
+
+// Pick a default spawn name for a newly-placed Spawn. "default" if there
+// isn't one yet, otherwise "spawn_<N>" with N chosen to not collide.
+fn new_spawn_name(world) {
+    let has_default = find_spawn(world.spawns, "default") != null
+    if !has_default { "default" }
+    else {
+        let mut n = 1
+        let mut name = "spawn_${n}"
+        while find_spawn(world.spawns, name) != null {
+            n = n + 1
+            name = "spawn_${n}"
+        }
+        name
+    }
+}
+
+fn editor_place(world, tool, p, drag_start) {
+    match tool {
+        Tool.Wall => {
+            let cx = (drag_start.x + p.x) * 0.5
+            let cy = (drag_start.y + p.y) * 0.5
+            let hx = v/abs_f(drag_start.x - p.x) * 0.5
+            let hy = v/abs_f(drag_start.y - p.y) * 0.5
+            if hx < 5.0 || hy < 5.0 { world }
+            else {
+                let walls = push(world.walls, g/Wall {
+                    center: v/make(cx, cy),
+                    half: v/make(hx, hy)
+                })
+                World { ...world, frame: world.frame + 1, walls: walls }
+            }
+        },
+        Tool.Door => {
+            let cx = (drag_start.x + p.x) * 0.5
+            let cy = (drag_start.y + p.y) * 0.5
+            let hx = v/abs_f(drag_start.x - p.x) * 0.5
+            let hy = v/abs_f(drag_start.y - p.y) * 0.5
+            if hx < 5.0 || hy < 5.0 { world }
+            else {
+                // New doors default to linking to the "other" known map; the
+                // user can re-author the text file to aim it elsewhere until
+                // we have an in-editor target picker.
+                let doors = push(world.doors, g/Door {
+                    center: v/make(cx, cy),
+                    half: v/make(hx, hy),
+                    target_map: other_map(world.current_map),
+                    target_spawn: "default"
+                })
+                World { ...world, frame: world.frame + 1, doors: doors }
+            }
+        },
+        Tool.Monster => {
+            let monsters = push(world.monsters, e/default_monster(p))
+            World { ...world, frame: world.frame + 1, monsters: monsters }
+        },
+        Tool.Sentinel => {
+            let sentinels = push(world.sentinels, e/default_sentinel(p))
+            World { ...world, frame: world.frame + 1, sentinels: sentinels }
+        },
+        Tool.Spawn => {
+            let spawns = push(world.spawns, g/Spawn {
+                name: new_spawn_name(world),
+                pos: p
+            })
+            World { ...world, frame: world.frame + 1, spawns: spawns }
+        },
+        Tool.Gold => {
+            let gold_items = push(world.gold_items, g/default_gold(p))
+            World { ...world, frame: world.frame + 1, gold_items: gold_items }
+        },
+        Tool.Select => world
+    }
+}
+
+fn editor_delete_selected(world) {
+    let ed = world.editor
+    match ed.selection {
+        Selection.Wall { index } => {
+            let walls = list_remove_at(world.walls, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted wall" }
+            World { ...world, frame: world.frame + 1, walls: walls, editor: new_ed }
+        },
+        Selection.Monster { index } => {
+            let monsters = list_remove_at(world.monsters, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted monster" }
+            World { ...world, frame: world.frame + 1, monsters: monsters, editor: new_ed }
+        },
+        Selection.Sentinel { index } => {
+            let sentinels = list_remove_at(world.sentinels, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted sentinel" }
+            World { ...world, frame: world.frame + 1, sentinels: sentinels, editor: new_ed }
+        },
+        Selection.Door { index } => {
+            let doors = list_remove_at(world.doors, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted door" }
+            World { ...world, frame: world.frame + 1, doors: doors, editor: new_ed }
+        },
+        Selection.Spawn { index } => {
+            let spawns = list_remove_at(world.spawns, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted spawn" }
+            World { ...world, frame: world.frame + 1, spawns: spawns, editor: new_ed }
+        },
+        Selection.Gold { index } => {
+            let gold_items = list_remove_at(world.gold_items, index)
+            let new_ed = Editor { ...ed, selection: Selection.None, status_text: "deleted gold" }
+            World { ...world, frame: world.frame + 1, gold_items: gold_items, editor: new_ed }
+        },
+        Selection.None => world
+    }
+}
+
+fn editor_tick(world) {
+    let dt = g/current_dt()
+    let ed = world.editor
+    let tool = int_to_tool(ffi/cell-get(ed.tool_slot))
+    let is_select = match tool { Tool.Select => true, _ => false }
+    // Wall + Door are drag-rect tools. Monster/Sentinel/Spawn are click-to-place.
+    let is_drag_place = match tool {
+        Tool.Wall => true,
+        Tool.Door => true,
+        _ => false
+    }
+    let is_click_place = match tool {
+        Tool.Monster => true,
+        Tool.Sentinel => true,
+        Tool.Spawn => true,
+        Tool.Gold => true,
+        _ => false
+    }
+
+    // Free-camera panning with WASD / arrows.
+    let mut cx = world.camera.x
+    let mut cy = world.camera.y
+    if r/is_key_down(r/KEY_W) || r/is_key_down(r/KEY_UP) { cy = cy + EDITOR_CAMERA_SPEED * dt }
+    if r/is_key_down(r/KEY_S) || r/is_key_down(r/KEY_DOWN) { cy = cy - EDITOR_CAMERA_SPEED * dt }
+    if r/is_key_down(r/KEY_A) || r/is_key_down(r/KEY_LEFT) { cx = cx - EDITOR_CAMERA_SPEED * dt }
+    if r/is_key_down(r/KEY_D) || r/is_key_down(r/KEY_RIGHT) { cx = cx + EDITOR_CAMERA_SPEED * dt }
+    let camera = v/make(cx, cy)
+
+    let mouse_world = g/screen_to_world(r/mouse_x(), r/mouse_y(), camera)
+
+    let mut world1 = World { ...world, frame: world.frame + 1, camera: camera }
+    world1 = if r/is_key_pressed(r/KEY_DELETE) || r/is_key_pressed(r/KEY_BACKSPACE) {
+        editor_delete_selected(world1)
+    } else { world1 }
+
+    // Mouse interactions — skip if mouse is on the UI panel (right 260 px).
+    let on_ui = r/mouse_x() > r/screen_width() - 260
+    let left_pressed = r/is_mouse_button_pressed(r/MOUSE_LEFT) && !on_ui
+    let left_released = r/is_mouse_button_released(r/MOUSE_LEFT) && !on_ui
+    let right_pressed = r/is_mouse_button_pressed(r/MOUSE_RIGHT) && !on_ui
+
+    // Select-tool left-click OR right-click-anywhere picks an entity.
+    let select_click = (left_pressed && is_select) || right_pressed
+    let mut ed2 = world1.editor
+    if select_click {
+        let pick = pick_at(world1, mouse_world)
+        let status = match pick {
+            Selection.None => "no selection",
+            Selection.Wall { index } => "wall selected",
+            Selection.Monster { index } => "monster selected",
+            Selection.Sentinel { index } => "sentinel selected",
+            Selection.Door { index } => {
+                if index < length(world1.doors) {
+                    let d = world1.doors[index]
+                    "door -> ${d.target_map}/${d.target_spawn}"
+                } else { "door selected" }
+            },
+            Selection.Spawn { index } => {
+                if index < length(world1.spawns) {
+                    let s = world1.spawns[index]
+                    "spawn: ${s.name}"
+                } else { "spawn selected" }
+            },
+            Selection.Gold { index } => {
+                if index < length(world1.gold_items) {
+                    let gg = world1.gold_items[index]
+                    "gold (value: ${gg.value})"
+                } else { "gold selected" }
+            }
+        }
+        ed2 = Editor {
+            ...ed2,
+            tool: tool,
+            selection: pick,
+            status_text: status
+        }
+    }
+
+    // Left-click with a placement tool starts placement (wall/door drags,
+    // enemy/spawn clicks).
+    let mut world2 = World { ...world1, frame: world1.frame + 1, editor: ed2 }
+    if left_pressed && !is_select {
+        let mut new_ed = Editor { ...ed2, tool: tool, drag_start: mouse_world }
+        if is_click_place {
+            world2 = editor_place(world2, tool, mouse_world, mouse_world)
+            new_ed = Editor { ...new_ed, drag_start: null, status_text: "placed" }
+        }
+        world2 = World { ...world2, frame: world2.frame + 1, editor: new_ed }
+    }
+    if left_released && world2.editor.drag_start != null && is_drag_place {
+        world2 = editor_place(world2, tool, mouse_world, world2.editor.drag_start)
+        let what = match tool { Tool.Door => "door", _ => "wall" }
+        let new_ed = Editor { ...world2.editor, tool: tool, drag_start: null,
+                              status_text: "placed ${what}" }
+        world2 = World { ...world2, frame: world2.frame + 1, editor: new_ed }
+    }
+
+    world2
+}
+
+// ============================================================
+// Level save/load (plain text)
+// ============================================================
+
+fn serialize_level(world) {
+    let mut s = "walls\n"
+    let mut i = 0
+    while i < length(world.walls) {
+        let w = world.walls[i]
+        s = s ++ "${w.center.x} ${w.center.y} ${w.half.x} ${w.half.y}\n"
+        i = i + 1
+    }
+    s = s ++ "monsters\n"
+    let mut m = 0
+    while m < length(world.monsters) {
+        let mm = world.monsters[m]
+        s = s ++ "${mm.pos.x} ${mm.pos.y} ${mm.speed} ${mm.detection_range} ${mm.attack_reach} ${mm.strength}\n"
+        m = m + 1
+    }
+    s = s ++ "sentinels\n"
+    let mut n = 0
+    while n < length(world.sentinels) {
+        let ss = world.sentinels[n]
+        s = s ++ "${ss.pos.x} ${ss.pos.y} ${ss.light_range} ${ss.light_half_angle_deg} ${ss.light_intensity} ${ss.speed} ${ss.attack_reach} ${ss.sweep_speed}\n"
+        n = n + 1
+    }
+    s = s ++ "doors\n"
+    let mut d = 0
+    while d < length(world.doors) {
+        let dr = world.doors[d]
+        s = s ++ "${dr.center.x} ${dr.center.y} ${dr.half.x} ${dr.half.y} ${dr.target_map} ${dr.target_spawn}\n"
+        d = d + 1
+    }
+    s = s ++ "spawns\n"
+    let mut sp = 0
+    while sp < length(world.spawns) {
+        let spn = world.spawns[sp]
+        s = s ++ "${spn.name} ${spn.pos.x} ${spn.pos.y}\n"
+        sp = sp + 1
+    }
+    s = s ++ "gold\n"
+    let mut gi = 0
+    while gi < length(world.gold_items) {
+        let gg = world.gold_items[gi]
+        s = s ++ "${gg.pos.x} ${gg.pos.y} ${gg.value}\n"
+        gi = gi + 1
+    }
+    s
+}
+
+fn save_level(world) {
+    let result = async/blocking-write-file(map_path(world.current_map), serialize_level(world))
+    match result {
+        Result.Ok { value } => "saved ${world.current_map} (${value} bytes)",
+        Result.Err { error } => "save failed: ${error}"
+    }
+}
+
+fn strip_blanks(items) {
+    let mut result = []
+    let mut i = 0
+    while i < length(items) {
+        let s = items[i]
+        if length(s) > 0 { result = push(result, s) }
+        i = i + 1
+    }
+    result
+}
+
+fn deserialize_level(text) {
+    let lines = split(text, "\n")
+    let mut walls = []
+    let mut monsters = []
+    let mut sentinels = []
+    let mut doors = []
+    let mut spawns = []
+    let mut gold_items = []
+    let mut section = "none"
+    let mut i = 0
+    while i < length(lines) {
+        let line = lines[i]
+        if line == "walls" || line == "walls\r" { section = "walls" }
+        else if line == "monsters" || line == "monsters\r" { section = "monsters" }
+        else if line == "sentinels" || line == "sentinels\r" { section = "sentinels" }
+        else if line == "doors" || line == "doors\r" { section = "doors" }
+        else if line == "spawns" || line == "spawns\r" { section = "spawns" }
+        else if line == "gold" || line == "gold\r" { section = "gold" }
+        else if length(line) > 0 {
+            let parts = strip_blanks(split(line, " "))
+            if section == "walls" && length(parts) >= 4 {
+                walls = push(walls, g/Wall {
+                    center: v/make(to-float(parts[0]), to-float(parts[1])),
+                    half: v/make(to-float(parts[2]), to-float(parts[3]))
+                })
+            } else if section == "monsters" && length(parts) >= 6 {
+                let m = e/default_monster(v/make(to-float(parts[0]), to-float(parts[1])))
+                monsters = push(monsters, e/Monster {
+                    ...m,
+                    speed: to-float(parts[2]),
+                    detection_range: to-float(parts[3]),
+                    attack_reach: to-float(parts[4]),
+                    strength: to-float(parts[5])
+                })
+            } else if section == "sentinels" && length(parts) >= 8 {
+                let s = e/default_sentinel(v/make(to-float(parts[0]), to-float(parts[1])))
+                sentinels = push(sentinels, e/Sentinel {
+                    ...s,
+                    light_range: to-float(parts[2]),
+                    light_half_angle_deg: to-float(parts[3]),
+                    light_intensity: to-float(parts[4]),
+                    speed: to-float(parts[5]),
+                    attack_reach: to-float(parts[6]),
+                    sweep_speed: to-float(parts[7])
+                })
+            } else if section == "doors" && length(parts) >= 6 {
+                doors = push(doors, g/Door {
+                    center: v/make(to-float(parts[0]), to-float(parts[1])),
+                    half: v/make(to-float(parts[2]), to-float(parts[3])),
+                    target_map: parts[4],
+                    target_spawn: parts[5]
+                })
+            } else if section == "spawns" && length(parts) >= 3 {
+                spawns = push(spawns, g/Spawn {
+                    name: parts[0],
+                    pos: v/make(to-float(parts[1]), to-float(parts[2]))
+                })
+            } else if section == "gold" && length(parts) >= 3 {
+                gold_items = push(gold_items, g/Gold {
+                    pos: v/make(to-float(parts[0]), to-float(parts[1])),
+                    value: to-int(to-float(parts[2]))
+                })
+            }
+        }
+        i = i + 1
+    }
+    LevelData { walls: walls, monsters: monsters, sentinels: sentinels,
+                doors: doors, spawns: spawns, gold_items: gold_items }
+}
+
+// Read the named map from disk if present; otherwise fall back to the
+// hardcoded `initial_map_data`. Missing file on first boot is normal — saving
+// from the editor is what actually creates `levels/<name>.txt`.
+fn load_map_data(name) {
+    let path = map_path(name)
+    let exists = async/blocking-file-exists?(path)
+    let present = match exists {
+        Result.Ok { value } => value,
+        Result.Err { error } => false
+    }
+    if !present { initial_map_data(name) }
+    else {
+        let result = async/blocking-read-file(path)
+        match result {
+            Result.Ok { value } => deserialize_level(value),
+            Result.Err { error } => initial_map_data(name)
+        }
+    }
+}
+
+// Replace the active map in `world` with `name` and place the player at the
+// named spawn. Used by both the editor Prev/Next map buttons and the play-mode
+// door transition.
+fn switch_map(world, name, spawn_name) {
+    let data = load_map_data(name)
+    let spawn = find_spawn(data.spawns, spawn_name)
+    let p_pos = if spawn == null { v/ZERO } else { spawn.pos }
+    let new_player = g/Player { ...world.player, pos: p_pos, prev: p_pos, vel: v/ZERO }
+    World {
+        ...world,
+        frame: world.frame + 1,
+        walls: data.walls,
+        monsters: data.monsters,
+        sentinels: data.sentinels,
+        doors: data.doors,
+        spawns: data.spawns,
+        gold_items: data.gold_items,
+        player: new_player,
+        camera: p_pos,
+        current_map: name
+    }
+}
+
+// Editor "Load" reloads the current map from disk (or the hardcoded fallback
+// if no file exists). Preserves player pose — editing, not teleporting.
+fn load_level(world) {
+    let data = load_map_data(world.current_map)
+    World {
+        ...world,
+        frame: world.frame + 1,
+        walls: data.walls,
+        monsters: data.monsters,
+        sentinels: data.sentinels,
+        doors: data.doors,
+        spawns: data.spawns,
+        gold_items: data.gold_items
+    }
+}
+
+// ============================================================
+// Mode toggling (Tab) + debug toggles (F1, F2)
+// ============================================================
+
+fn maybe_toggle_mode(world) {
+    let mut w = world
+    if r/is_key_pressed(r/KEY_TAB) {
+        let new_mode = if w.mode == MODE_PLAYING { MODE_EDITING } else { MODE_PLAYING }
+        // Always close the menu when switching modes.
+        w = World { ...w, frame: w.frame + 1, mode: new_mode, menu_open: false }
+    }
+    // F1 (raylib keycode 290) toggles the cone overlay + shadow mesh so the
+    // user can confirm where the player actually is when lighting obscures it.
+    let KEY_F1 = 290
+    if r/is_key_pressed(KEY_F1) {
+        let ed = w.editor
+        let new_ed = Editor {
+            ...ed,
+            status_text: if ed.lighting_enabled { "lighting off" } else { "lighting on" },
+            lighting_enabled: !ed.lighting_enabled
+        }
+        w = World { ...w, frame: w.frame + 1, editor: new_ed }
+    }
+    // F2 toggles the FPS cap. 60 (capped) <-> 0 (uncapped in raylib).
+    let KEY_F2 = 291
+    if r/is_key_pressed(KEY_F2) {
+        let new_cap = if deref(fps_cap) == 0 { 60 } else { 0 }
+        swap!(fps_cap, fn(x) { new_cap })
+        r/set_target_fps(new_cap)
+    }
+    w
+}
+
+// ============================================================
+// Main loop
+// ============================================================
+
+fn game_loop(world, shader_ctx, ui_bufs, max_frames) {
+    if max_frames >= 0 && world.frame >= max_frames {
+        world
+    } else if r/window_should_close() {
+        world
+    } else {
+        // Escape in play mode opens/closes the pause menu.
+        let w0 = if world.mode == MODE_PLAYING && r/is_key_pressed(r/KEY_ESCAPE) {
+            World { ...world, menu_open: !world.menu_open }
+        } else { world }
+
+        let after_toggle = maybe_toggle_mode(w0)
+        // Freeze simulation while the pause menu is visible.
+        let next = if after_toggle.mode == MODE_EDITING {
+            editor_tick(after_toggle)
+        } else if after_toggle.menu_open {
+            after_toggle
+        } else {
+            playing_tick(after_toggle)
+        }
+
+        if next.mode == MODE_EDITING {
+            let ui = render_editor(next, shader_ctx, ui_bufs)
+            // Apply any save/load/tuning/map-nav updates the UI produced.
+            let w1 = World { ...next, frame: next.frame + 1, tuning: ui.new_tuning }
+            let w2 = if ui.save {
+                let msg = save_level(w1)
+                let ed = Editor { ...w1.editor, status_text: msg }
+                World { ...w1, frame: w1.frame + 1, editor: ed }
+            } else { w1 }
+            let w3 = if ui.load { load_level(w2) } else { w2 }
+            // Map nav — cycle through MAP_NAMES and reload. Save first if
+            // the user wants to keep changes (explicit, not automatic).
+            let w4 = if ui.prev_map || ui.next_map {
+                let n = length(MAP_NAMES)
+                let mut idx = 0
+                let mut k = 0
+                while k < n {
+                    if MAP_NAMES[k] == w3.current_map { idx = k }
+                    k = k + 1
+                }
+                let delta = if ui.next_map { 1 } else { n - 1 }
+                let new_idx = (idx + delta) % n
+                let name = MAP_NAMES[new_idx]
+                let switched = switch_map(w3, name, "default")
+                let ed = Editor { ...switched.editor, status_text: "editing ${name}" }
+                World { ...switched, editor: ed, mode: MODE_EDITING }
+            } else { w3 }
+            game_loop(w4, shader_ctx, ui_bufs, max_frames)
+        } else {
+            // render_world returns: 0 = no action, 1 = resume, 2 = quit.
+            let menu_action = render/render_world(next, shader_ctx, fade_alpha(next))
+            if menu_action == 2 {
+                next  // "Quit" pressed — exit the loop
+            } else {
+                let w_next = if menu_action == 1 {
+                    World { ...next, menu_open: false }  // "Resume" — close menu
+                } else {
+                    next
+                }
+                game_loop(w_next, shader_ctx, ui_bufs, max_frames)
+            }
+        }
+    }
+}
+
+// Boot straight into the entry hall (first entry in MAP_NAMES), in play mode,
+// with the player at the "default" spawn of whatever map_data load_map_data
+// returned (file if present, hardcoded fallback otherwise).
+fn startup_world() {
+    let base = initial_world()
+    switch_map(base, MAP_NAMES[0], "default")
+}
+
+fn main() {
+    // BEAGLE_ZELDA_NOFOCUS=1 launches the window without stealing focus from
+    // whatever app is frontmost — useful while iterating so the game doesn't
+    // hijack the terminal / IDE every run.
+    let no_focus = r/getenv("BEAGLE_ZELDA_NOFOCUS") != null
+    let flags = if no_focus {
+        r/FLAG_WINDOW_RESIZABLE + r/FLAG_WINDOW_UNFOCUSED
+    } else {
+        r/FLAG_WINDOW_RESIZABLE
+    }
+    r/set_config_flags(flags)
+    r/init_window(INITIAL_W, INITIAL_H, "beagle-zelda")
+    // Disable raylib's default escape-key-closes-window behaviour so we can
+    // intercept escape ourselves and show the pause menu instead.
+    r/set_exit_key(0)
+    r/set_target_fps(60)
+
+    let shader_ctx = render/load_cone_light_shader()
+    let initial = startup_world()
+    let ui_bufs = alloc_ui_buffers(initial.tuning)
+    let final_world = game_loop(initial, shader_ctx, ui_bufs, 0 - 1)
+
+    r/close_window()
+    println("exited after frame ${final_world.frame}")
+    0
+}

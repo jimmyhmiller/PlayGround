@@ -1053,8 +1053,9 @@ impl<'a> BatchEmitter<'a> {
             }
 
             Inst::PushPrompt(_, _) | Inst::PopPrompt(_) |
+            Inst::PushHandler(_) | Inst::PopHandler |
             Inst::CaptureSlice(_, _) | Inst::CloneSlice(_) => {
-                todo!("Prompt/Slice operations in batch lowerer");
+                todo!("Prompt/Slice/Handler operations in batch lowerer");
             }
 
             Inst::Safepoint(_live) => {

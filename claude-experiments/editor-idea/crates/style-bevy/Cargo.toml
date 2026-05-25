@@ -1,0 +1,31 @@
+[package]
+name = "style_bevy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pane_bevy = { path = "../pane-bevy" }
+# WGSL parsing for the dynamic shader-introspection layer. Bevy already
+# pulls naga as a transitive dep; declaring it directly lets us call
+# `naga::front::wgsl::parse_str` to discover the user's shader struct
+# fields at load time. Version pinned to whatever Bevy 0.18 is using.
+naga = { version = "27", features = ["wgsl-in"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytemuck = { version = "1", features = ["derive"] }
+# Rhai for expressive, editable theme files. `sync` makes Engine + AST
+# Send so they can live in a Bevy resource.
+rhai = { version = "1.21", features = ["sync", "serde"] }
+# File-watch theme.rhai + shaders/*.wgsl edits in per-project asset dirs.
+# AssetServer handles WGSL hot-reload itself; we use notify only for the
+# Rhai file (which isn't an asset).
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+bevy = { version = "0.18", default-features = false, features = [
+    "2d",
+    "x11",
+    "wayland",
+] }
+
+[lib]
+name = "style_bevy"
+path = "src/lib.rs"

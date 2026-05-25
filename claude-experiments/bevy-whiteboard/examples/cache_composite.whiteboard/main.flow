@@ -1,0 +1,45 @@
+# Cache from primitives:
+#
+#                       ┌─heads─▶ HD (Delay) ──▶ HR (Reply) ──┐
+#  Client ──req──▶ L ──▶ C (Coin p=0.8)                       │
+#                       └─tails─▶ S (Stamp) ──▶ Backend       │
+#                                                  │          │
+#                                          (resp pops back via S → L)
+
+node Caller : Client {
+    period_ns: 300000000
+    color:     0
+}
+
+# Boundary adapter (Lower without `out response` since this whiteboard
+# has no enclosing compound).
+node L {
+    rule fwd_req     { on req(p)         do { emit packet(p) pushing self to default } }
+    rule rev_resp    { on resp(x)        do { emit resp(x)        popping to (head(return_path)) } }
+    rule rev_resp_er { on resp_error(x)  do { emit resp_error(x)  popping to (head(return_path)) } }
+}
+
+node C  : Coin   { p: 0.7 }
+node HD : Delay  { ns: 5000000 }
+node HR : Reply  { }
+node S  : Stamp  { }
+
+# A trivial backend that always replies after a fixed delay.
+node Backend {
+    slots { dummy: Int = 0 }
+    rule on_req {
+        on req(_) do { emit resp(nil) popping to (head(return_path)) }
+    }
+}
+
+edges {
+    Caller -> L     : 5ms
+    L      -> C     : 1ms
+    C.heads -> HD   : 1ms
+    HD     -> HR    : 1ms
+    HR     -> L     : 1ms
+    C.tails -> S    : 1ms
+    S      -> Backend : 10ms
+    Backend -> S    : 10ms
+    S      -> L     : 1ms
+}

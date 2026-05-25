@@ -926,14 +926,7 @@ impl ArmBackend {
                         if std::env::var("ARM_BODY_DEBUG").is_ok() {
                             eprintln!("TILED shape={:?} result={} body_len={}", shape, *result, body.len());
                         }
-                        // Tiled matmul paths have batch-stride bugs for 4D+ tensors.
-                        // Fall back to non-tiled reduce for those until fixed.
-                        let batch_dims = shape.len().saturating_sub(2);
-                        if batch_dims > 1 {
-                            emit_reduce_loop(&mut e, &mut ctx, buf_slot, shape, reduce, body, *result);
-                        } else {
-                            emit_tiled_loop(&mut e, &mut ctx, buf_slot, shape, reduce, body, *result, tile_cfg);
-                        }
+                        emit_tiled_loop(&mut e, &mut ctx, buf_slot, shape, reduce, body, *result, tile_cfg);
                     } else if let Some(reduce) = reduce.as_ref() {
                         emit_reduce_loop(&mut e, &mut ctx, buf_slot, shape, reduce, body, *result);
                     } else {
@@ -3490,11 +3483,20 @@ fn emit_tiled_loop(
     }
     if (is_matmul_pattern || is_matmul_reversed) && simd_groups <= 8 {
         let (a_inst_idx, b_inst_idx) = if is_matmul_pattern { (0, 1) } else { (1, 0) };
-        // MR8 kernel collapses batch dims into effective_M with flat row stride.
-        // This only works when batch dims are contiguous in A (ndim <= 3).
-        // For 4D+ (e.g. batched attention matmuls), fall through to the general
-        // tiled path which handles batch loops correctly.
-        if batch_dims <= 1 {
+        // MR=8 kernel collapses all batch dims into effective_M = product(shape[..=m_dim]).
+        // This works whenever A's batch+m strides form a flat row layout — which
+        // they do for the standard `[..., M, K] @ [K, N]` matmul pattern, including
+        // GPT-2's `[1, T, 1, N]` shape (batch_dims=2, m_dim size 1, m falls back
+        // to T's stride). Skip MR=8 only when the body would need a true batched
+        // B (a 4D batched matmul like attention's Q @ Kᵀ), which we detect by
+        // whether B depends on any batch dim.
+        let b_index = match &body[b_inst_idx] {
+            Inst::Load { index, .. } => index.clone(),
+            _ => unreachable!(),
+        };
+        let b_uses_batch = (0..batch_dims).any(|d| get_stride_for_dim(&b_index, d) != 0);
+
+        if !b_uses_batch {
             if std::env::var("ARM_BODY_DEBUG").is_ok() {
                 eprintln!("MR8 HIT: shape={:?}", shape);
             }

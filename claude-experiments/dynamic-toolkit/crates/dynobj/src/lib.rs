@@ -3,6 +3,7 @@ mod header;
 pub mod roots;
 mod scan;
 mod type_info;
+mod typed_ptr;
 
 #[doc(hidden)]
 pub use paste::paste as __paste;
@@ -19,6 +20,7 @@ pub use roots::{
 };
 pub use scan::scan_object;
 pub use type_info::{TypeInfo, VarLenKind};
+pub use typed_ptr::TypedPtr;
 
 #[cfg(test)]
 mod tests;

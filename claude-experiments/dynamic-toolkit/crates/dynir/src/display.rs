@@ -110,6 +110,8 @@ impl fmt::Display for Inst {
             }
             Inst::PushPrompt(prompt, handler) => write!(f, "push_prompt prompt#{} -> {handler}", prompt.0),
             Inst::PopPrompt(prompt) => write!(f, "pop_prompt prompt#{}", prompt.0),
+            Inst::PushHandler(handler) => write!(f, "push_handler -> {handler}"),
+            Inst::PopHandler => write!(f, "pop_handler"),
             Inst::CaptureSlice(prompt, live) => {
                 write!(f, "capture_slice prompt#{}", prompt.0)?;
                 if !live.is_empty() {
@@ -241,6 +243,7 @@ impl fmt::Display for Terminator {
                 }
                 Ok(())
             }
+            Terminator::Raise(v) => write!(f, "raise {v}"),
             Terminator::Unreachable => write!(f, "unreachable"),
             Terminator::CaptureSlice { prompt, handler_block, resume_block } => {
                 write!(

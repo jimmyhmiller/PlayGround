@@ -1,0 +1,7 @@
+{
+  "format_version": 1,
+  "canvas": {
+    "name": "Life cell (from primitives)",
+    "description": "Conway's Game of Life cell rebuilt from primitives, tiled into a 3x3 toroidal grid. Each cell is the four-piece recipe: Tick (period) + State (Conway rule + report emit) + ReportFan (broadcast to 8 neighbors) + Agg (Aggregator n=8). The State node holds `alive`; the Aggregator's `total(sum)` triggers the B3/S23 update."
+  }
+}
