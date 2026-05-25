@@ -7,12 +7,20 @@ use crate::sim::NodeId;
 
 /// The primitive data type flowing through the simulation.
 ///
-/// Only scalars, tagged variants, and small records are "state-bearing"
-/// for modeling purposes. `Samples` is the one bounded-collection slot
-/// type we ship — a ring of recent values, from which statistics and
-/// representative draws are taken. Collections like `Map<K,V>` are
-/// deliberately absent; you're expected to model via counts +
-/// distributions, not implement the underlying data structure.
+/// Only scalars and small records are "state-bearing" for modeling
+/// purposes. `Samples` is the one bounded-collection slot type we ship
+/// — a ring of recent values, from which statistics and representative
+/// draws are taken. Collections like `Map<K,V>` are deliberately
+/// absent; you're expected to model via counts + distributions, not
+/// implement the underlying data structure.
+///
+/// Tagged "envelopes" (what used to be `Variant { tag, payload }`) are
+/// now plain `Record` values with the conventional shape
+/// `{ kind: Str("..."), value: ... }`. The `Value::variant(tag, payload)`
+/// constructor builds that shape; `as_variant()` reads it back. Treating
+/// envelopes as data means rules can pattern-match on the structure
+/// directly with `Pattern::Record`, including matching across any kind
+/// (just bind the `kind` field as a `Var`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Value {
     Nil,
@@ -20,8 +28,6 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Str(String),
-    /// A tagged variant, e.g. `Some(x)` as `Variant { tag: "Some", payload: x }`.
-    Variant { tag: String, payload: Box<Value> },
     /// Named fields. Uses `BTreeMap` for deterministic iteration.
     Record(BTreeMap<String, Value>),
     /// Bounded ring of recent samples. See `samples.rs`.
@@ -39,14 +45,26 @@ pub enum Value {
     List(Vec<Value>),
 }
 
+/// Field name for the tag-discriminator in the record-encoded "variant"
+/// shape. Use these so a future schema change touches one place.
+pub const KIND_FIELD: &str = "kind";
+pub const VALUE_FIELD: &str = "value";
+
 impl Value {
     pub fn int(n: i64) -> Self { Value::Int(n) }
     pub fn float(f: f64) -> Self { Value::Float(f) }
     pub fn bool(b: bool) -> Self { Value::Bool(b) }
     pub fn nil() -> Self { Value::Nil }
     pub fn str(s: impl Into<String>) -> Self { Value::Str(s.into()) }
+    /// Construct the conventional tagged envelope shape used by rules:
+    /// `{ kind: Str(tag), value: payload }`. This used to be a separate
+    /// `Variant` enum variant; it's now a plain record so pattern
+    /// matching is uniform with any other record-shaped data.
     pub fn variant(tag: impl Into<String>, payload: Value) -> Self {
-        Value::Variant { tag: tag.into(), payload: Box::new(payload) }
+        let mut m = BTreeMap::new();
+        m.insert(KIND_FIELD.to_string(), Value::Str(tag.into()));
+        m.insert(VALUE_FIELD.to_string(), payload);
+        Value::Record(m)
     }
     pub fn record<I, K>(fields: I) -> Self
     where
@@ -74,9 +92,15 @@ impl Value {
     pub fn as_bool(&self) -> Option<bool> { if let Value::Bool(b) = self { Some(*b) } else { None } }
     pub fn as_str(&self) -> Option<&str> { if let Value::Str(s) = self { Some(s) } else { None } }
 
-    /// If this is a variant, return (tag, payload).
+    /// If this is the record-encoded tagged envelope shape
+    /// (`{ kind: Str(_), value: _ }`), return `(tag, payload)`.
+    /// Reads the new uniform Record encoding (no separate Variant enum
+    /// variant exists anymore).
     pub fn as_variant(&self) -> Option<(&str, &Value)> {
-        if let Value::Variant { tag, payload } = self { Some((tag, payload)) } else { None }
+        let Value::Record(m) = self else { return None };
+        let Value::Str(tag) = m.get(KIND_FIELD)? else { return None };
+        let payload = m.get(VALUE_FIELD)?;
+        Some((tag.as_str(), payload))
     }
 }
 
@@ -90,7 +114,6 @@ impl PartialEq for Value {
             (Int(a), Float(b)) | (Float(b), Int(a)) => (*a as f64) == *b,
             (Bool(a), Bool(b)) => a == b,
             (Str(a), Str(b)) => a == b,
-            (Variant { tag: ta, payload: pa }, Variant { tag: tb, payload: pb }) => ta == tb && pa == pb,
             (Record(a), Record(b)) => a == b,
             (NodeRef(a), NodeRef(b)) => a == b,
             (List(a), List(b)) => a == b,
@@ -112,10 +135,11 @@ pub enum Pattern {
     Var(String),
     /// Matches if the value equals the literal.
     Lit(Value),
-    /// Matches a variant with the given tag; inner pattern applies to payload.
-    Variant { tag: String, inner: Box<Pattern> },
     /// Matches a record containing at least these fields, each matching.
     /// Extra fields in the value are allowed (structural, open).
+    /// "Tagged envelope" matching (what used to be `Pattern::Variant`)
+    /// is just a `Record` with `kind: Lit(Str(_))` plus a `value` sub-pattern
+    /// — built by `Pattern::variant(tag, inner)`.
     Record(BTreeMap<String, Pattern>),
 }
 
@@ -123,8 +147,14 @@ impl Pattern {
     pub fn wild() -> Self { Pattern::Wild }
     pub fn var(name: impl Into<String>) -> Self { Pattern::Var(name.into()) }
     pub fn lit(v: Value) -> Self { Pattern::Lit(v) }
+    /// Build a record pattern that matches the conventional tagged
+    /// envelope shape: `{ kind: Lit(Str(tag)), value: inner }`. Used by
+    /// the DSL when lowering `on packet(p)` etc.
     pub fn variant(tag: impl Into<String>, inner: Pattern) -> Self {
-        Pattern::Variant { tag: tag.into(), inner: Box::new(inner) }
+        let mut m = BTreeMap::new();
+        m.insert(KIND_FIELD.to_string(), Pattern::Lit(Value::Str(tag.into())));
+        m.insert(VALUE_FIELD.to_string(), inner);
+        Pattern::Record(m)
     }
     pub fn record<I, K>(fields: I) -> Self
     where
@@ -148,9 +178,6 @@ pub fn match_pattern(value: &Value, pattern: &Pattern, bindings: &mut Bindings) 
             true
         }
         (Pattern::Lit(lit), v) => lit == v,
-        (Pattern::Variant { tag, inner }, Value::Variant { tag: vtag, payload }) => {
-            tag == vtag && match_pattern(payload, inner, bindings)
-        }
         (Pattern::Record(pfields), Value::Record(vfields)) => {
             for (k, pat) in pfields {
                 let Some(vv) = vfields.get(k) else { return false; };

@@ -35,8 +35,15 @@ struct ChromeParams {
     // Wall-clock-ish time in seconds. Drives the focus pulse so the
     // glow gently breathes when a pane has focus.
     time: f32,
-    _pad0: f32,
-    _pad1: f32,
+    // > 0.5: this material is the title-cover quad (rendered above
+    // content_root). Pixels in the content area (uv.y > title_h /
+    // size.y) become transparent so the cover paints ONLY the title
+    // region — masking any pane content scrolled up under the title
+    // bar. 0.0 for the regular pane body.
+    cover_mode: f32,
+    // Title-region height in pixels. Only consulted when
+    // cover_mode > 0.5.
+    title_h: f32,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: ChromeParams;
@@ -59,9 +66,24 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Coverage: 1 deep inside, fades to 0 across a 1px band at the
     // edge. AA without MSAA.
-    let coverage = 1.0 - smoothstep(-0.5, 0.5, d);
+    var coverage = 1.0 - smoothstep(-0.5, 0.5, d);
     if (coverage <= 0.0) {
         return vec4<f32>(0.0);  // outside the rounded rect — transparent
+    }
+
+    // Title-cover cutout: the cover quad is sized to the full pane
+    // and identical to the body in every other respect, but pixels
+    // below the title-region height are punched out so scrolled
+    // content shows through there. Result: cover paints only the
+    // title region — with a 1-pixel AA band at the boundary so it
+    // doesn't seam against the body underneath.
+    if (params.cover_mode > 0.5) {
+        let y_from_top = in.uv.y * params.size.y;
+        let cover_mask = 1.0 - smoothstep(params.title_h - 0.5, params.title_h + 0.5, y_from_top);
+        if (cover_mask <= 0.0) {
+            return vec4<f32>(0.0);
+        }
+        coverage = coverage * cover_mask;
     }
 
     // Subtle vertical gradient over the body: top is slightly lifted

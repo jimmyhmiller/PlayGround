@@ -21,8 +21,28 @@ node L {
 
 node C  : Coin   { p: 0.7 }
 node HD : Delay  { ns: 5000000 }
-node HR : Reply  { }
-node S  : Stamp  { }
+# Hit-reply (was the Reply primitive).
+node HR {
+    rule rev_pass {
+        on p when p.kind == "resp" || p.kind == "resp_error"
+        do { emit p popping to (head(return_path)) }
+    }
+    rule on_packet {
+        on p
+        do { emit resp(nil) popping to (head(return_path)) }
+    }
+}
+# Miss-path stamp waystation (was the Stamp primitive).
+node S {
+    rule rev {
+        on p when p.kind == "resp" || p.kind == "resp_error"
+        do { emit p popping to (head(return_path)) }
+    }
+    rule fwd {
+        on p
+        do { emit p pushing self to default }
+    }
+}
 
 # A trivial backend that always replies after a fixed delay.
 node Backend {

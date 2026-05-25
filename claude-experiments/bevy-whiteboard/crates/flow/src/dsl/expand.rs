@@ -873,6 +873,10 @@ fn rewrite_expr_names(e: &Expr, env: &Env, name_prefix: &str) -> Result<Expr, St
                 },
             }
         }
+        Expr::Field(of, name) => Expr::Field(
+            Box::new(rewrite_expr_names(of, env, name_prefix)?),
+            name.clone(),
+        ),
     })
 }
 
@@ -936,7 +940,8 @@ fn ct_eval(e: &Expr, env: &Env) -> Result<CtValue, String> {
         Expr::Nil => Err("compile-time eval: `nil` is not a compile-time value".to_string()),
         Expr::Now | Expr::SelfRef
         | Expr::Meta(_) | Expr::ReturnPath
-        | Expr::Param(_) | Expr::Variant(_, _) | Expr::FnCall(_, _) =>
+        | Expr::Param(_) | Expr::Variant(_, _) | Expr::FnCall(_, _)
+        | Expr::Field(_, _) =>
             Err(format!(
                 "compile-time eval: `{}` is a runtime construct and cannot appear in a `for` \
                  bound, name interpolation, or compound param default",

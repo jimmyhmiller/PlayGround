@@ -32,11 +32,15 @@ use crate::StyleErrors;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct TokenId(pub &'static str);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub enum TokenValue {
     Color(LinearRgba),
     F32(f32),
     Bool(bool),
+    /// Free-form string. Used by font-family tokens that name a bundled
+    /// font (resolved through [`crate::FontRegistry`]) and by any future
+    /// token that wants a symbolic value.
+    Str(String),
 }
 
 /// Active theme. Always populated — the default theme provides every
@@ -56,11 +60,11 @@ impl Default for Theme {
 
 impl Theme {
     pub fn get(&self, id: TokenId) -> Option<TokenValue> {
-        self.tokens.get(id.0).copied()
+        self.tokens.get(id.0).cloned()
     }
 
     pub fn get_by_name(&self, name: &str) -> Option<TokenValue> {
-        self.tokens.get(name).copied()
+        self.tokens.get(name).cloned()
     }
 
     pub fn color(&self, id: TokenId) -> LinearRgba {
@@ -87,8 +91,22 @@ impl Theme {
         }
     }
 
+    pub fn str_value(&self, id: TokenId) -> &str {
+        match self.tokens.get(id.0) {
+            Some(TokenValue::Str(s)) => s.as_str(),
+            Some(other) => panic!("theme token {:?} is not a Str: {:?}", id.0, other),
+            None => panic!("theme token {:?} is missing (default theme is incomplete)", id.0),
+        }
+    }
+
     pub fn set(&mut self, name: impl Into<String>, value: TokenValue) {
         self.tokens.insert(name.into(), value);
+    }
+
+    /// All currently-known token names (engine defaults + theme.rhai
+    /// additions). Returned unsorted; callers sort if they need to.
+    pub fn token_names(&self) -> Vec<String> {
+        self.tokens.keys().cloned().collect()
     }
 }
 
@@ -152,6 +170,147 @@ pub mod tokens {
     pub const PANE_SHADOW_BLUR: TokenId = TokenId("pane_shadow_blur");
     /// Push the shadow down so it sits below the pane (positive).
     pub const PANE_SHADOW_OFFSET_Y: TokenId = TokenId("pane_shadow_offset_y");
+
+    // --- pane chrome text (title bar / close × / resize handle) ---
+    pub const CHROME_TITLE: TokenId = TokenId("chrome_title");
+    pub const CHROME_TITLE_FOCUSED: TokenId = TokenId("chrome_title_focused");
+    pub const CHROME_DIVIDER: TokenId = TokenId("chrome_divider");
+    pub const CHROME_CLOSE: TokenId = TokenId("chrome_close");
+    pub const CHROME_HANDLE: TokenId = TokenId("chrome_handle");
+
+    // --- code syntax highlighting (editor) ---
+    pub const SYNTAX_DEFAULT: TokenId = TokenId("syntax_default");
+    pub const SYNTAX_KEYWORD: TokenId = TokenId("syntax_keyword");
+    pub const SYNTAX_STRING: TokenId = TokenId("syntax_string");
+    pub const SYNTAX_COMMENT: TokenId = TokenId("syntax_comment");
+    pub const SYNTAX_FUNCTION: TokenId = TokenId("syntax_function");
+    pub const SYNTAX_TYPE: TokenId = TokenId("syntax_type");
+    pub const SYNTAX_ATTRIBUTE: TokenId = TokenId("syntax_attribute");
+    pub const SYNTAX_CONSTANT: TokenId = TokenId("syntax_constant");
+    pub const SYNTAX_OPERATOR: TokenId = TokenId("syntax_operator");
+    pub const SYNTAX_PUNCTUATION: TokenId = TokenId("syntax_punctuation");
+    pub const SYNTAX_VARIABLE: TokenId = TokenId("syntax_variable");
+    pub const SYNTAX_PROPERTY: TokenId = TokenId("syntax_property");
+    pub const SYNTAX_LABEL: TokenId = TokenId("syntax_label");
+    pub const SYNTAX_ESCAPE: TokenId = TokenId("syntax_escape");
+    pub const SYNTAX_CONSTRUCTOR: TokenId = TokenId("syntax_constructor");
+
+    // --- form fields (used by run-button and any widget text input) ---
+    pub const INPUT_BG: TokenId = TokenId("input_bg");
+    pub const INPUT_TEXT: TokenId = TokenId("input_text");
+    pub const INPUT_TEXT_FOCUSED: TokenId = TokenId("input_text_focused");
+
+    // --- buttons (run-button save/play + widget protocol Button) ---
+    pub const BUTTON_BG: TokenId = TokenId("button_bg");
+    pub const BUTTON_BG_HOVER: TokenId = TokenId("button_bg_hover");
+    pub const BUTTON_LABEL: TokenId = TokenId("button_label");
+    /// Subdued button color for "save" / "confirm" actions.
+    pub const BUTTON_PRIMARY_BG: TokenId = TokenId("button_primary_bg");
+    pub const BUTTON_PRIMARY_LABEL: TokenId = TokenId("button_primary_label");
+
+    // --- status colors (run-button play state, badge, etc.) ---
+    pub const STATUS_IDLE: TokenId = TokenId("status_idle");
+    pub const STATUS_RUNNING: TokenId = TokenId("status_running");
+    pub const STATUS_SUCCESS: TokenId = TokenId("status_success");
+    pub const STATUS_FAILED: TokenId = TokenId("status_failed");
+
+    // --- radial menu ---
+    pub const RADIAL_WEDGE: TokenId = TokenId("radial_wedge");
+    pub const RADIAL_WEDGE_HOVER: TokenId = TokenId("radial_wedge_hover");
+    pub const RADIAL_DEADZONE: TokenId = TokenId("radial_deadzone");
+    pub const RADIAL_DEADZONE_RING: TokenId = TokenId("radial_deadzone_ring");
+    pub const RADIAL_LABEL: TokenId = TokenId("radial_label");
+    pub const RADIAL_LABEL_HOVER: TokenId = TokenId("radial_label_hover");
+    pub const RADIAL_ICON: TokenId = TokenId("radial_icon");
+    pub const RADIAL_BACKDROP: TokenId = TokenId("radial_backdrop");
+
+    // --- widget protocol bits not covered above ---
+    pub const WIDGET_BAR_TRACK: TokenId = TokenId("widget_bar_track");
+    pub const WIDGET_BAR_FILL: TokenId = TokenId("widget_bar_fill");
+    pub const WIDGET_BADGE_BG: TokenId = TokenId("widget_badge_bg");
+    pub const WIDGET_BADGE_LABEL: TokenId = TokenId("widget_badge_label");
+    pub const WIDGET_LINK: TokenId = TokenId("widget_link");
+    // --- widget Button shape / shadow (SDF material) ---
+    pub const WIDGET_BUTTON_CORNER_RADIUS: TokenId = TokenId("widget_button_corner_radius");
+    pub const WIDGET_BUTTON_BORDER: TokenId = TokenId("widget_button_border");
+    pub const WIDGET_BUTTON_BORDER_WIDTH: TokenId = TokenId("widget_button_border_width");
+    pub const WIDGET_BUTTON_SHADOW_COLOR: TokenId = TokenId("widget_button_shadow_color");
+    pub const WIDGET_BUTTON_SHADOW_BLUR: TokenId = TokenId("widget_button_shadow_blur");
+    pub const WIDGET_BUTTON_SHADOW_OFFSET_Y: TokenId = TokenId("widget_button_shadow_offset_y");
+
+    // --- canvas (main camera ClearColor — the "void" behind panes) ---
+    pub const CANVAS_BG: TokenId = TokenId("canvas_bg");
+
+    // --- sidebar (project list, left edge) ---
+    pub const SIDEBAR_BG: TokenId = TokenId("sidebar_bg");
+    pub const SIDEBAR_ROW_ACTIVE_BG: TokenId = TokenId("sidebar_row_active_bg");
+    pub const SIDEBAR_ROW_RENAMING_BG: TokenId = TokenId("sidebar_row_renaming_bg");
+    pub const SIDEBAR_TEXT_FAINT: TokenId = TokenId("sidebar_text_faint");
+
+    // ---------- Design-token scales ----------
+    //
+    // Five-step ramps for layout primitives. Widget code that takes a
+    // style override is free to plug a literal pixel value, but
+    // theme.rhai authors should reach for these tokens so the whole UI
+    // moves coherently when the scale is tuned.
+
+    // --- spacing scale (px) ---
+    pub const SPACE_XS: TokenId = TokenId("space_xs");
+    pub const SPACE_SM: TokenId = TokenId("space_sm");
+    pub const SPACE_MD: TokenId = TokenId("space_md");
+    pub const SPACE_LG: TokenId = TokenId("space_lg");
+    pub const SPACE_XL: TokenId = TokenId("space_xl");
+
+    // --- radius scale (px) ---
+    pub const RADIUS_XS: TokenId = TokenId("radius_xs");
+    pub const RADIUS_SM: TokenId = TokenId("radius_sm");
+    pub const RADIUS_MD: TokenId = TokenId("radius_md");
+    pub const RADIUS_LG: TokenId = TokenId("radius_lg");
+    /// Sentinel for fully-rounded ends — render code clamps to half the
+    /// shorter side so the value itself can be any "large" number.
+    pub const RADIUS_PILL: TokenId = TokenId("radius_pill");
+
+    // --- shadow ladder ---
+    // Each step is three coupled tokens: color (rgba), blur (px), and
+    // vertical offset (px, positive = shadow below).
+    pub const SHADOW_SM_COLOR: TokenId = TokenId("shadow_sm_color");
+    pub const SHADOW_SM_BLUR: TokenId = TokenId("shadow_sm_blur");
+    pub const SHADOW_SM_OFFSET_Y: TokenId = TokenId("shadow_sm_offset_y");
+    pub const SHADOW_MD_COLOR: TokenId = TokenId("shadow_md_color");
+    pub const SHADOW_MD_BLUR: TokenId = TokenId("shadow_md_blur");
+    pub const SHADOW_MD_OFFSET_Y: TokenId = TokenId("shadow_md_offset_y");
+    pub const SHADOW_LG_COLOR: TokenId = TokenId("shadow_lg_color");
+    pub const SHADOW_LG_BLUR: TokenId = TokenId("shadow_lg_blur");
+    pub const SHADOW_LG_OFFSET_Y: TokenId = TokenId("shadow_lg_offset_y");
+
+    // --- surface ladder (card-elevation backgrounds) ---
+    /// Same as BG/PANE_BG conceptually; explicit so cards inside cards
+    /// have a coherent stack.
+    pub const SURFACE_1: TokenId = TokenId("surface_1");
+    pub const SURFACE_2: TokenId = TokenId("surface_2");
+    pub const SURFACE_3: TokenId = TokenId("surface_3");
+
+    // --- accent ramp ---
+    // Tailwind-style 50..900 tint scale derived from ACCENT. Default
+    // theme generates them by mixing ACCENT toward white (low numbers)
+    // and toward black (high numbers).
+    pub const ACCENT_50: TokenId = TokenId("accent_50");
+    pub const ACCENT_100: TokenId = TokenId("accent_100");
+    pub const ACCENT_200: TokenId = TokenId("accent_200");
+    pub const ACCENT_300: TokenId = TokenId("accent_300");
+    pub const ACCENT_400: TokenId = TokenId("accent_400");
+    pub const ACCENT_500: TokenId = TokenId("accent_500");
+    pub const ACCENT_600: TokenId = TokenId("accent_600");
+    pub const ACCENT_700: TokenId = TokenId("accent_700");
+    pub const ACCENT_800: TokenId = TokenId("accent_800");
+    pub const ACCENT_900: TokenId = TokenId("accent_900");
+
+    // --- typography ---
+    /// Resolved against the [`crate::FontRegistry`]. Names map to
+    /// bundled fonts; unknown names fall back to "mono".
+    pub const FONT_FAMILY_HEADING: TokenId = TokenId("font_family_heading");
+    pub const FONT_FAMILY_BODY: TokenId = TokenId("font_family_body");
+    pub const FONT_FAMILY_MONO: TokenId = TokenId("font_family_mono");
 }
 
 fn default_tokens() -> HashMap<String, TokenValue> {
@@ -192,6 +351,138 @@ fn default_tokens() -> HashMap<String, TokenValue> {
     m.insert(PANE_SHADOW_COLOR.0.into(), srgb(0.0, 0.0, 0.0, 0.45));
     m.insert(PANE_SHADOW_BLUR.0.into(), TokenValue::F32(24.0));
     m.insert(PANE_SHADOW_OFFSET_Y.0.into(), TokenValue::F32(6.0));
+
+    // Chrome text. Defaults match the old hardcoded constants in
+    // pane-bevy/src/lib.rs:84-93.
+    m.insert(CHROME_TITLE.0.into(), srgb(0.62, 0.65, 0.70, 1.0));
+    m.insert(CHROME_TITLE_FOCUSED.0.into(), srgb(0.95, 0.96, 0.98, 1.0));
+    m.insert(CHROME_DIVIDER.0.into(), srgb(0.165, 0.170, 0.188, 1.0));
+    m.insert(CHROME_CLOSE.0.into(), srgb(0.50, 0.52, 0.56, 1.0));
+    m.insert(CHROME_HANDLE.0.into(), srgb(0.22, 0.23, 0.26, 1.0));
+
+    // Code syntax. Defaults match editor-bevy/src/highlight.rs::color_for.
+    m.insert(SYNTAX_DEFAULT.0.into(), srgb(0.92, 0.92, 0.94, 1.0));
+    m.insert(SYNTAX_KEYWORD.0.into(), srgb(0.78, 0.55, 0.90, 1.0));
+    m.insert(SYNTAX_STRING.0.into(), srgb(0.65, 0.87, 0.60, 1.0));
+    m.insert(SYNTAX_COMMENT.0.into(), srgb(0.48, 0.52, 0.58, 1.0));
+    m.insert(SYNTAX_FUNCTION.0.into(), srgb(0.55, 0.78, 1.00, 1.0));
+    m.insert(SYNTAX_TYPE.0.into(), srgb(0.94, 0.82, 0.55, 1.0));
+    m.insert(SYNTAX_ATTRIBUTE.0.into(), srgb(0.85, 0.70, 0.50, 1.0));
+    m.insert(SYNTAX_CONSTANT.0.into(), srgb(0.95, 0.62, 0.48, 1.0));
+    m.insert(SYNTAX_OPERATOR.0.into(), srgb(0.70, 0.75, 0.82, 1.0));
+    m.insert(SYNTAX_PUNCTUATION.0.into(), srgb(0.70, 0.75, 0.82, 1.0));
+    m.insert(SYNTAX_VARIABLE.0.into(), srgb(0.92, 0.92, 0.94, 1.0));
+    m.insert(SYNTAX_PROPERTY.0.into(), srgb(0.85, 0.82, 0.95, 1.0));
+    m.insert(SYNTAX_LABEL.0.into(), srgb(0.95, 0.62, 0.48, 1.0));
+    m.insert(SYNTAX_ESCAPE.0.into(), srgb(0.95, 0.75, 0.40, 1.0));
+    m.insert(SYNTAX_CONSTRUCTOR.0.into(), srgb(0.94, 0.82, 0.55, 1.0));
+
+    // Form fields. Defaults match run-button's hardcoded constants.
+    m.insert(INPUT_BG.0.into(), srgb(0.10, 0.11, 0.13, 1.0));
+    m.insert(INPUT_TEXT.0.into(), srgb(0.72, 0.74, 0.78, 1.0));
+    m.insert(INPUT_TEXT_FOCUSED.0.into(), srgb(0.92, 0.94, 0.98, 1.0));
+
+    // Buttons.
+    m.insert(BUTTON_BG.0.into(), srgb(0.18, 0.20, 0.24, 1.0));
+    m.insert(BUTTON_BG_HOVER.0.into(), srgb(0.25, 0.28, 0.34, 1.0));
+    m.insert(BUTTON_LABEL.0.into(), srgb(0.88, 0.90, 0.94, 1.0));
+    m.insert(BUTTON_PRIMARY_BG.0.into(), srgb(0.22, 0.45, 0.30, 1.0));
+    m.insert(BUTTON_PRIMARY_LABEL.0.into(), srgb(0.92, 0.95, 0.92, 1.0));
+
+    // Status colors.
+    m.insert(STATUS_IDLE.0.into(), srgb(0.55, 0.85, 1.00, 1.0));
+    m.insert(STATUS_RUNNING.0.into(), srgb(1.00, 0.78, 0.30, 1.0));
+    m.insert(STATUS_SUCCESS.0.into(), srgb(0.50, 0.85, 0.55, 1.0));
+    m.insert(STATUS_FAILED.0.into(), srgb(0.95, 0.45, 0.45, 1.0));
+
+    // Radial menu. Defaults match terminal-bevy/src/radial.rs.
+    m.insert(RADIAL_WEDGE.0.into(), srgb(0.135, 0.143, 0.162, 1.0));
+    m.insert(RADIAL_WEDGE_HOVER.0.into(), srgb(0.22, 0.36, 0.58, 1.0));
+    m.insert(RADIAL_DEADZONE.0.into(), srgb(0.082, 0.087, 0.100, 1.0));
+    m.insert(RADIAL_DEADZONE_RING.0.into(), srgb(0.235, 0.250, 0.275, 1.0));
+    m.insert(RADIAL_LABEL.0.into(), srgb(0.84, 0.86, 0.90, 1.0));
+    m.insert(RADIAL_LABEL_HOVER.0.into(), srgb(0.98, 0.98, 1.00, 1.0));
+    m.insert(RADIAL_ICON.0.into(), srgb(0.94, 0.95, 0.97, 1.0));
+    m.insert(RADIAL_BACKDROP.0.into(), srgb(0.0, 0.0, 0.0, 0.32));
+
+    // Widget protocol extras.
+    m.insert(WIDGET_BAR_TRACK.0.into(), srgb(0.16, 0.18, 0.22, 1.0));
+    m.insert(WIDGET_BAR_FILL.0.into(), srgb(0.42, 0.62, 0.92, 1.0));
+    m.insert(WIDGET_BADGE_BG.0.into(), srgb(0.22, 0.36, 0.58, 1.0));
+    m.insert(WIDGET_BADGE_LABEL.0.into(), srgb(0.92, 0.95, 0.98, 1.0));
+    m.insert(WIDGET_LINK.0.into(), srgb(0.42, 0.62, 0.92, 1.0));
+    // Widget button shape/shadow defaults — a subtle 4 px corner +
+    // soft shadow that reads as modern UI without being showy.
+    m.insert(WIDGET_BUTTON_CORNER_RADIUS.0.into(), TokenValue::F32(4.0));
+    m.insert(WIDGET_BUTTON_BORDER.0.into(), srgb(0.0, 0.0, 0.0, 0.0));
+    m.insert(WIDGET_BUTTON_BORDER_WIDTH.0.into(), TokenValue::F32(0.0));
+    m.insert(WIDGET_BUTTON_SHADOW_COLOR.0.into(), srgb(0.0, 0.0, 0.0, 0.35));
+    m.insert(WIDGET_BUTTON_SHADOW_BLUR.0.into(), TokenValue::F32(6.0));
+    m.insert(WIDGET_BUTTON_SHADOW_OFFSET_Y.0.into(), TokenValue::F32(2.0));
+    // Canvas + sidebar defaults — match the existing hardcoded
+    // constants (`crates/terminal-bevy/src/lib.rs:294` ClearColor and
+    // `crates/terminal-bevy/src/projects.rs:64-72`).
+    m.insert(CANVAS_BG.0.into(), srgb(0.072, 0.075, 0.085, 1.0));
+    m.insert(SIDEBAR_BG.0.into(), srgb(0.086, 0.090, 0.102, 1.0));
+    m.insert(SIDEBAR_ROW_ACTIVE_BG.0.into(), srgb(0.150, 0.165, 0.205, 1.0));
+    m.insert(SIDEBAR_ROW_RENAMING_BG.0.into(), srgb(0.140, 0.146, 0.165, 1.0));
+    m.insert(SIDEBAR_TEXT_FAINT.0.into(), srgb(0.36, 0.38, 0.42, 1.0));
+
+    // --- spacing scale: roughly 4 / 8 / 12 / 20 / 32 ---
+    m.insert(SPACE_XS.0.into(), TokenValue::F32(4.0));
+    m.insert(SPACE_SM.0.into(), TokenValue::F32(8.0));
+    m.insert(SPACE_MD.0.into(), TokenValue::F32(12.0));
+    m.insert(SPACE_LG.0.into(), TokenValue::F32(20.0));
+    m.insert(SPACE_XL.0.into(), TokenValue::F32(32.0));
+
+    // --- radius scale ---
+    m.insert(RADIUS_XS.0.into(), TokenValue::F32(2.0));
+    m.insert(RADIUS_SM.0.into(), TokenValue::F32(4.0));
+    m.insert(RADIUS_MD.0.into(), TokenValue::F32(8.0));
+    m.insert(RADIUS_LG.0.into(), TokenValue::F32(14.0));
+    m.insert(RADIUS_PILL.0.into(), TokenValue::F32(9999.0));
+
+    // --- shadow ladder ---
+    // SM: hairline drop, used for buttons / pills.
+    m.insert(SHADOW_SM_COLOR.0.into(), srgb(0.0, 0.0, 0.0, 0.22));
+    m.insert(SHADOW_SM_BLUR.0.into(), TokenValue::F32(4.0));
+    m.insert(SHADOW_SM_OFFSET_Y.0.into(), TokenValue::F32(1.0));
+    // MD: card lift.
+    m.insert(SHADOW_MD_COLOR.0.into(), srgb(0.0, 0.0, 0.0, 0.32));
+    m.insert(SHADOW_MD_BLUR.0.into(), TokenValue::F32(12.0));
+    m.insert(SHADOW_MD_OFFSET_Y.0.into(), TokenValue::F32(4.0));
+    // LG: modal/overlay.
+    m.insert(SHADOW_LG_COLOR.0.into(), srgb(0.0, 0.0, 0.0, 0.45));
+    m.insert(SHADOW_LG_BLUR.0.into(), TokenValue::F32(28.0));
+    m.insert(SHADOW_LG_OFFSET_Y.0.into(), TokenValue::F32(10.0));
+
+    // --- surface ladder ---
+    // Match BG / PANE_BG; SURFACE_2 sits one notch lighter, SURFACE_3
+    // brighter still — good for nested cards.
+    m.insert(SURFACE_1.0.into(), srgb(0.072, 0.075, 0.085, 1.0));
+    m.insert(SURFACE_2.0.into(), srgb(0.105, 0.110, 0.122, 1.0));
+    m.insert(SURFACE_3.0.into(), srgb(0.145, 0.152, 0.170, 1.0));
+
+    // --- accent ramp derived from ACCENT default (0.420, 0.620, 0.920) ---
+    // Hand-tuned to read coherently as a 50..900 scale on a dark base.
+    m.insert(ACCENT_50.0.into(), srgb(0.910, 0.945, 0.992, 1.0));
+    m.insert(ACCENT_100.0.into(), srgb(0.830, 0.895, 0.985, 1.0));
+    m.insert(ACCENT_200.0.into(), srgb(0.720, 0.825, 0.970, 1.0));
+    m.insert(ACCENT_300.0.into(), srgb(0.605, 0.755, 0.955, 1.0));
+    m.insert(ACCENT_400.0.into(), srgb(0.510, 0.690, 0.940, 1.0));
+    m.insert(ACCENT_500.0.into(), srgb(0.420, 0.620, 0.920, 1.0)); // base
+    m.insert(ACCENT_600.0.into(), srgb(0.340, 0.520, 0.810, 1.0));
+    m.insert(ACCENT_700.0.into(), srgb(0.265, 0.420, 0.680, 1.0));
+    m.insert(ACCENT_800.0.into(), srgb(0.195, 0.320, 0.540, 1.0));
+    m.insert(ACCENT_900.0.into(), srgb(0.130, 0.225, 0.400, 1.0));
+
+    // --- typography ---
+    // String tokens — resolved through FontRegistry. Both heading and
+    // body fall back to "mono" until real serif/sans files are dropped
+    // into crates/style-bevy/assets/fonts/.
+    m.insert(FONT_FAMILY_HEADING.0.into(), TokenValue::Str("serif".into()));
+    m.insert(FONT_FAMILY_BODY.0.into(), TokenValue::Str("sans".into()));
+    m.insert(FONT_FAMILY_MONO.0.into(), TokenValue::Str("mono".into()));
     m
 }
 
@@ -232,22 +523,21 @@ pub fn load_theme(path: &Path) -> Result<Theme, ThemeLoadError> {
 }
 
 fn parse_token(key: &str, v: &rhai::Dynamic) -> Result<TokenValue, ThemeLoadError> {
-    // Hex string "#rrggbb" or "#rrggbbaa" -> Color
+    // Strings: try color forms first ("#rrggbb[aa]", "oklch(...)",
+    // "oklab(...)", "rgb(...)"). If none match, keep as a free-form Str
+    // — used for font-family names like "serif" / "mono".
     if let Some(s) = v.clone().try_cast::<String>() {
-        return parse_hex_color(&s).map(TokenValue::Color).map_err(|reason| {
-            ThemeLoadError::BadValue {
-                key: key.into(),
-                reason,
-            }
+        return Ok(match parse_color_string(&s) {
+            Ok(c) => TokenValue::Color(c),
+            Err(_) => TokenValue::Str(s),
         });
     }
     if let Some(s) = v.clone().try_cast::<rhai::ImmutableString>() {
-        return parse_hex_color(s.as_str())
-            .map(TokenValue::Color)
-            .map_err(|reason| ThemeLoadError::BadValue {
-                key: key.into(),
-                reason,
-            });
+        let owned = s.to_string();
+        return Ok(match parse_color_string(&owned) {
+            Ok(c) => TokenValue::Color(c),
+            Err(_) => TokenValue::Str(owned),
+        });
     }
     if let Some(b) = v.clone().try_cast::<bool>() {
         return Ok(TokenValue::Bool(b));
@@ -264,7 +554,99 @@ fn parse_token(key: &str, v: &rhai::Dynamic) -> Result<TokenValue, ThemeLoadErro
     })
 }
 
-fn parse_hex_color(s: &str) -> Result<LinearRgba, String> {
+/// Parse any of the accepted color string forms. Hex (`#rrggbb` or
+/// `#rrggbbaa`), `oklch(L, C, h[, a])`, `oklab(L, a, b[, alpha])`,
+/// or `rgb(r, g, b[, a])` (each 0-255). Whitespace is ignored.
+pub fn parse_color_string(s: &str) -> Result<LinearRgba, String> {
+    let trimmed = s.trim();
+    if trimmed.starts_with('#') || trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
+        return parse_hex_color(trimmed);
+    }
+    if let Some(args) = parse_func_call(trimmed, "oklch") {
+        return parse_oklch_args(&args);
+    }
+    if let Some(args) = parse_func_call(trimmed, "oklab") {
+        return parse_oklab_args(&args);
+    }
+    if let Some(args) = parse_func_call(trimmed, "rgb") {
+        return parse_rgb_args(&args);
+    }
+    if let Some(args) = parse_func_call(trimmed, "rgba") {
+        return parse_rgb_args(&args);
+    }
+    Err(format!("unrecognized color form: {:?}", s))
+}
+
+/// If `s` looks like `name(a, b, c)`, return `Some("a, b, c")`. Else None.
+fn parse_func_call(s: &str, name: &str) -> Option<String> {
+    let s = s.trim();
+    let lower = s.to_ascii_lowercase();
+    let prefix = format!("{}(", name);
+    if !lower.starts_with(&prefix) || !lower.ends_with(')') {
+        return None;
+    }
+    let inside = &s[prefix.len()..s.len() - 1];
+    Some(inside.to_string())
+}
+
+fn split_args(s: &str) -> Vec<&str> {
+    s.split(',').map(str::trim).filter(|p| !p.is_empty()).collect()
+}
+
+fn parse_oklch_args(s: &str) -> Result<LinearRgba, String> {
+    let parts = split_args(s);
+    if !(parts.len() == 3 || parts.len() == 4) {
+        return Err(format!("oklch expects 3 or 4 args, got {}", parts.len()));
+    }
+    let l: f32 = parts[0].parse().map_err(|e| format!("oklch L: {}", e))?;
+    let c: f32 = parts[1].parse().map_err(|e| format!("oklch C: {}", e))?;
+    let h: f32 = parts[2].parse().map_err(|e| format!("oklch h: {}", e))?;
+    let alpha: f32 = if parts.len() == 4 {
+        parts[3].parse().map_err(|e| format!("oklch alpha: {}", e))?
+    } else {
+        1.0
+    };
+    let mut out = crate::oklab::oklch_to_linear_srgb(l, c, h);
+    out.alpha = alpha;
+    Ok(out)
+}
+
+fn parse_oklab_args(s: &str) -> Result<LinearRgba, String> {
+    let parts = split_args(s);
+    if !(parts.len() == 3 || parts.len() == 4) {
+        return Err(format!("oklab expects 3 or 4 args, got {}", parts.len()));
+    }
+    let l: f32 = parts[0].parse().map_err(|e| format!("oklab L: {}", e))?;
+    let a: f32 = parts[1].parse().map_err(|e| format!("oklab a: {}", e))?;
+    let b: f32 = parts[2].parse().map_err(|e| format!("oklab b: {}", e))?;
+    let alpha: f32 = if parts.len() == 4 {
+        parts[3].parse().map_err(|e| format!("oklab alpha: {}", e))?
+    } else {
+        1.0
+    };
+    let mut out = crate::oklab::oklab_to_linear_srgb(l, a, b);
+    out.alpha = alpha;
+    Ok(out)
+}
+
+fn parse_rgb_args(s: &str) -> Result<LinearRgba, String> {
+    let parts = split_args(s);
+    if !(parts.len() == 3 || parts.len() == 4) {
+        return Err(format!("rgb expects 3 or 4 args, got {}", parts.len()));
+    }
+    let r: u8 = parts[0].parse().map_err(|e| format!("rgb r: {}", e))?;
+    let g: u8 = parts[1].parse().map_err(|e| format!("rgb g: {}", e))?;
+    let b: u8 = parts[2].parse().map_err(|e| format!("rgb b: {}", e))?;
+    let a: u8 = if parts.len() == 4 {
+        let v: f32 = parts[3].parse().map_err(|e| format!("rgb alpha: {}", e))?;
+        (v.clamp(0.0, 1.0) * 255.0).round() as u8
+    } else {
+        255
+    };
+    Ok(Color::srgba_u8(r, g, b, a).to_linear())
+}
+
+pub fn parse_hex_color(s: &str) -> Result<LinearRgba, String> {
     let s = s.trim().trim_start_matches('#');
     let bytes = (0..s.len())
         .step_by(2)
@@ -427,12 +809,55 @@ fn reload_theme(
     match load_theme(path) {
         Ok(new_theme) => {
             *theme = new_theme;
+            audit_contrast(theme, path);
             errors.theme_error = None;
             ev.write(ThemeChanged);
         }
         Err(e) => {
             errors.theme_error = Some(e.to_string());
             // Keep existing theme — don't blank everything on a typo.
+        }
+    }
+}
+
+/// Critical foreground/background pairs that should have legible
+/// contrast in every theme. Audited on each theme load; failures get
+/// logged with the OkLab ΔL between the two so the author knows how
+/// bad and on which surface.
+const AUDIT_PAIRS: &[(&str, TokenId, TokenId)] = &[
+    ("body text", tokens::FG, tokens::BG),
+    ("syntax comment", tokens::SYNTAX_COMMENT, tokens::BG),
+    ("syntax string", tokens::SYNTAX_STRING, tokens::BG),
+    ("syntax keyword", tokens::SYNTAX_KEYWORD, tokens::BG),
+    ("input text", tokens::INPUT_TEXT, tokens::INPUT_BG),
+    ("button label", tokens::BUTTON_LABEL, tokens::BUTTON_BG),
+    ("button primary", tokens::BUTTON_PRIMARY_LABEL, tokens::BUTTON_PRIMARY_BG),
+    ("chrome title", tokens::CHROME_TITLE_FOCUSED, tokens::PANE_BG),
+    ("radial label", tokens::RADIAL_LABEL, tokens::RADIAL_WEDGE),
+];
+
+/// OkLab ΔL threshold below which a pair is flagged. 25 is a rough
+/// proxy for WCAG AA on small body text — colors with less ΔL than
+/// that tend to read as the same brightness and won't separate.
+const AUDIT_DELTA_L_THRESHOLD: f32 = 25.0;
+
+fn audit_contrast(theme: &Theme, path: &Path) {
+    use crate::oklab::lightness_delta;
+    let preset = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .unwrap_or("?");
+    for (label, fg_id, bg_id) in AUDIT_PAIRS {
+        let fg = theme.color(*fg_id);
+        let bg = theme.color(*bg_id);
+        let delta = lightness_delta(fg, bg);
+        if delta < AUDIT_DELTA_L_THRESHOLD {
+            warn!(
+                "[theme/{}] low contrast on {}: ΔL = {:.1} (threshold {:.0}) — \
+                 {} on {} may be hard to read",
+                preset, label, delta, AUDIT_DELTA_L_THRESHOLD, fg_id.0, bg_id.0,
+            );
         }
     }
 }

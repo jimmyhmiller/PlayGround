@@ -79,12 +79,13 @@ fn drilling_into_a_blinker_cell_attaches_mechanical_visuals() {
     let count = |k: PrimitiveKind| kinds.iter().filter(|x| **x == k).count();
     assert_eq!(count(PrimitiveKind::Tick), 1, "kinds={:?}", kinds);
     assert_eq!(count(PrimitiveKind::Switch), 1, "kinds={:?}", kinds);
-    assert_eq!(count(PrimitiveKind::ConstantPacket), 2, "kinds={:?}", kinds);
+    // Unified Constant — both packet-flavored (C1/C0) and signal-flavored
+    // (ToAlv/ToDed) Constants count together. Four total.
+    assert_eq!(count(PrimitiveKind::Constant), 4, "kinds={:?}", kinds);
     assert_eq!(count(PrimitiveKind::FanOut), 1, "kinds={:?}", kinds);
     assert_eq!(count(PrimitiveKind::Egress), 1, "kinds={:?}", kinds);
     assert_eq!(count(PrimitiveKind::Aggregator), 1, "kinds={:?}", kinds);
     assert_eq!(count(PrimitiveKind::Filter), 2, "kinds={:?}", kinds);
-    assert_eq!(count(PrimitiveKind::ConstantSignal), 2, "kinds={:?}", kinds);
 
     // And the child entities (mechanical parts) actually built.
     let mut pend = world.query::<&TickPendulum>();

@@ -35,10 +35,21 @@ fn main() {
         style_bevy::register_style_asset_source(&mut app, data_dir.join("projects"));
         style_bevy::register_preset_asset_source(&mut app, data_dir.join("styles"));
     }
+    // Restore the size+position the user left the window at last
+    // run, if we recorded one. First run / missing-or-corrupt file →
+    // hard-coded defaults.
+    let saved = terminal_bevy::window_geometry::load();
+    let (init_w, init_h) = saved
+        .map(|g| (g.w, g.h))
+        .unwrap_or((1200, 760));
+    let init_position = saved
+        .map(|g| WindowPosition::At(IVec2::new(g.x, g.y)))
+        .unwrap_or(WindowPosition::default());
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "terminal-bevy".into(),
-            resolution: (1200u32, 760u32).into(),
+            resolution: (init_w, init_h).into(),
+            position: init_position,
             ..default()
         }),
         ..default()
@@ -50,5 +61,9 @@ fn main() {
     // running the subscriber thread just retries in the background —
     // nothing in the app blocks on it.
     app.add_plugins(claude_bus_bevy::BusEventPlugin::default());
+    // Inference layer: classifier-shaped LLM calls in response to
+    // specific bus events (currently only `terminal.cwd_changed`).
+    // Results are republished as `inference.*` events; no UI yet.
+    app.add_plugins(inference_bevy::InferencePlugin);
     app.run();
 }

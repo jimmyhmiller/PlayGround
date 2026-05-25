@@ -1,12 +1,16 @@
-# Collects N inputs, then emits a single `total(sum)` packet on default.
-# Each `packet(v)` or `report(v)` arrival accumulates `sum` and
-# increments `seen`. When `seen == n`, the aggregator fires its
-# output and resets — ready for the next batch.
+# Collects N inputs (any kind), then emits one `total(sum)` packet on
+# default. Each arrival contributes its `.value` to a running sum and
+# bumps `seen`. When `seen == n` the aggregator fires its output and
+# resets — ready for the next batch.
 #
-# Two input variants are supported so this primitive serves both
-# generic "tally N packets" (e.g. TPC vote tallying) and the Conway
-# Game-of-Life cell's "tally 8 neighbor reports" pattern without
-# needing a variant-specific converter.
+# Pattern-binds the whole packet, so this serves both generic "tally N
+# packets" (TPC vote tallying with `packet(v)`) and the Conway Game-of-
+# Life cell's "tally 8 neighbor `report(v)` packets" without needing a
+# variant-specific adapter.
+#
+# `reset(_)` packets bypass aggregation and clear `seen`/`sum`. The
+# rule order is load-bearing here: `reset` must come BEFORE `final` and
+# `partial` so a reset arriving in the same tick as data wins.
 node Aggregator {
     slots {
         n:    Int = 0
@@ -17,49 +21,31 @@ node Aggregator {
         seen: "{seen}/{n}"
         sum:  "{sum}"
     }
-    # Final input — emit the aggregate and reset for the next batch.
-    rule final_packet {
-        on packet(v)
-        when seen + 1 == n && n > 0
+    # Reset port: drop accumulated state without firing.
+    rule reset {
+        on p when p.kind == "reset"
         do {
-            # Emit the aggregate using `sum + v` (the would-be new sum)
-            # BEFORE the reset; doing `sum := sum + v` first would mean
-            # the `emit` then reads the new `sum` and double-counts `v`.
-            emit total(sum + v) to default
             seen := 0
             sum  := 0
         }
     }
-    rule final_report {
-        on report(v)
-        when seen + 1 == n && n > 0
+    # Final input — emit the aggregate and reset for the next batch.
+    # `sum + p.value` (the would-be new sum) is emitted BEFORE the
+    # reset; otherwise the emit re-reads the new `sum` and double-counts.
+    rule final {
+        on p when seen + 1 == n && n > 0
         do {
-            emit total(sum + v) to default
+            emit total(sum + p.value) to default
             seen := 0
             sum  := 0
         }
     }
     # Partial — accumulate and wait.
-    rule partial_packet {
-        on packet(v)
+    rule partial {
+        on p
         do {
             seen := seen + 1
-            sum  := sum + v
-        }
-    }
-    rule partial_report {
-        on report(v)
-        do {
-            seen := seen + 1
-            sum  := sum + v
-        }
-    }
-    # Reset port: drop accumulated state without firing.
-    rule reset {
-        on reset(_)
-        do {
-            seen := 0
-            sum  := 0
+            sum  := sum + p.value
         }
     }
 }

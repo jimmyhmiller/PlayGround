@@ -1,4 +1,4 @@
-# Every primitive, instantiated once.
+# Every primitive in the post-cleanup set, instantiated once.
 #
 # Row 1 — sources / counting:
 #   Tick, Counter, Aggregator, Window
@@ -6,8 +6,14 @@
 #   Filter, Switch, Threshold, FanOut, Coin
 # Row 3 — time / buffer:
 #   Delay, Buffer, Service
-# Row 4 — variant adapters / boundaries:
-#   Stamp, Unstamp, Lift, Lower, Reply, Egress
+# Row 4 — value source / boundary:
+#   Constant, Egress
+#
+# The variant-adapter primitives (Stamp, Lift, Lower, Reply, Unstamp)
+# have been deleted — each was a 2-3 rule node that composites now
+# inline directly. Their job is captured by the engine's
+# `pushing self` / `popping` per-emit options and the `kind`
+# discriminator on the unified record payload shape.
 
 node tick       : Tick       { period_ns: 500000000 }
 node counter    : Counter    { }
@@ -24,9 +30,5 @@ node delay      : Delay      { ns: 100000000 }
 node buffer     : Buffer     { cap: 16 }
 node service    : Service    { service_ns: 50000000, backlog_cap: 5 }
 
-node stamp      : Stamp      { }
-node unstamp    : Unstamp    { }
-node lift       : Lift       { }
-node lower      : Lower      { }
-node reply      : Reply      { }
+node constant   : Constant   { value: 1 }
 node egress     : Egress     { }

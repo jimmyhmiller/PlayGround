@@ -11,7 +11,7 @@
 //! for every pane in the same frame.
 
 use bevy::prelude::*;
-use pane_bevy::ChromeStyle;
+use pane_bevy::{ChromeStyle, ChromeTextStyle};
 
 use crate::theme::{tokens, Theme, ThemeChanged};
 
@@ -30,15 +30,35 @@ fn apply_on_theme_changed(
     mut events: MessageReader<ThemeChanged>,
     theme: Res<Theme>,
     style: ResMut<ChromeStyle>,
+    text_style: ResMut<ChromeTextStyle>,
 ) {
     if events.read().last().is_none() {
         return;
     }
     write_style(&theme, style);
+    write_text_style(&theme, text_style);
 }
 
-fn apply_theme_to_chrome(theme: Res<Theme>, style: ResMut<ChromeStyle>) {
+fn apply_theme_to_chrome(
+    theme: Res<Theme>,
+    style: ResMut<ChromeStyle>,
+    text_style: ResMut<ChromeTextStyle>,
+) {
     write_style(&theme, style);
+    write_text_style(&theme, text_style);
+}
+
+fn write_text_style(theme: &Theme, mut text_style: ResMut<ChromeTextStyle>) {
+    let title = theme.color(tokens::CHROME_TITLE);
+    let title_focused = theme.color(tokens::CHROME_TITLE_FOCUSED);
+    let divider = theme.color(tokens::CHROME_DIVIDER);
+    let close = theme.color(tokens::CHROME_CLOSE);
+    let handle = theme.color(tokens::CHROME_HANDLE);
+    text_style.title = Color::LinearRgba(title);
+    text_style.title_focused = Color::LinearRgba(title_focused);
+    text_style.divider = Color::LinearRgba(divider);
+    text_style.close = Color::LinearRgba(close);
+    text_style.handle = Color::LinearRgba(handle);
 }
 
 fn write_style(theme: &Theme, mut style: ResMut<ChromeStyle>) {

@@ -434,22 +434,21 @@ fn p6_visuals_keep_flowing_while_sim_emits() {
     let window_ns: u64 = 2_000_000_000; // 2s
     let window_start_ns = now_ns.saturating_sub(window_ns);
 
+    let is_control = |payload: &flow::Value| -> bool {
+        matches!(payload.as_variant(), Some((t, _)) if t == "pull" || t == "wake")
+    };
+
     let recent_data_emits: usize = sim.log.iter().filter(|ev| match ev {
         Event::PacketEmitted { from, to, payload, at_ns, .. } => {
-            *at_ns >= window_start_ns
-                && from != to
-                && !matches!(payload,
-                    flow::Value::Variant { tag, .. } if tag == "pull" || tag == "wake")
+            *at_ns >= window_start_ns && from != to && !is_control(payload)
         }
         _ => false,
     }).count();
 
-    let total_data_emits: usize = sim.log.iter().filter(|ev| matches!(ev,
-        Event::PacketEmitted { from, to, payload, .. }
-        if from != to && !matches!(payload,
-            flow::Value::Variant { tag, .. } if tag == "pull" || tag == "wake"
-        )
-    )).count();
+    let total_data_emits: usize = sim.log.iter().filter(|ev| match ev {
+        Event::PacketEmitted { from, to, payload, .. } => from != to && !is_control(payload),
+        _ => false,
+    }).count();
     assert!(total_data_emits > 50,
         "scenario produced only {} data emits over 10s — test misconfigured",
         total_data_emits);
@@ -534,7 +533,7 @@ fn p4s_one_visual_per_emit_packet_id() {
     let emit_ids: HashSet<flow::PacketId> = sim.log.iter()
         .filter_map(|ev| if let Event::PacketEmitted { packet, from, to, payload, .. } = ev {
             if from == to { return None; }
-            if let flow::Value::Variant { tag, .. } = payload {
+            if let Some((tag, _)) = payload.as_variant() {
                 if tag == "pull" || tag == "wake" { return None; }
             }
             Some(*packet)
@@ -630,7 +629,7 @@ fn p4_packet_entity_count_tracks_emissions() {
         if let Event::PacketEmitted { from, to, payload, .. } = ev {
             // Skip self-loops (tick, wake, done-to-self).
             if from == to { continue; }
-            if let flow::Value::Variant { tag, .. } = payload {
+            if let Some((tag, _)) = payload.as_variant() {
                 if tag == "pull" || tag == "wake" { continue; }
             }
             emit_count += 1;

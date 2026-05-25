@@ -10,8 +10,8 @@ pub mod trace_source;
 
 pub use builder::ProfileBuilder;
 pub use profile::{
-    Category, CategoryId, Process, ProcessId, Profile, Sample, SliceTable, Thread, ThreadId,
-    Track, TrackId, TrackKind,
+    AttrTable, Category, CategoryId, Process, ProcessId, Profile, Sample, SliceTable, Thread,
+    ThreadId, Track, TrackId, TrackKind,
 };
 pub use stacks::{Frame, FrameId, StackId, StackNode, StackTable};
 pub use strings::{StringId, StringInterner};

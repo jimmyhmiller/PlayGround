@@ -24,7 +24,8 @@ use crate::{
     MonoMetrics, TermGrid, TerminalSelection, TerminalStore, LINE_HEIGHT, PANE_KIND,
 };
 
-const COLOR_SELECTION: Color = Color::srgba(0.42, 0.62, 0.92, 0.28);
+// Selection color now driven by theme tokens::SELECTION (look up
+// in `render_selection_overlays`).
 
 /// Wraps the lazily-initialised system clipboard. `arboard::Clipboard`
 /// is `!Send` on some platforms, but `Mutex` lets us treat it as a
@@ -56,11 +57,13 @@ impl Plugin for SelectionPlugin {
 fn render_selection_overlays(
     mut commands: Commands,
     metrics: Res<MonoMetrics>,
+    theme: Res<style_bevy::Theme>,
     mut q: Query<
         (&PaneChrome, &TermGrid, &mut TerminalSelection, &PaneKindMarker),
         With<PaneTag>,
     >,
 ) {
+    let sel_color = Color::LinearRgba(theme.color(style_bevy::tokens::SELECTION));
     for (chrome, grid, mut sel, kind) in &mut q {
         if kind.0 != PANE_KIND {
             continue;
@@ -120,7 +123,7 @@ fn render_selection_overlays(
                 .spawn((
                     ChildOf(chrome.content_root),
                     Sprite {
-                        color: COLOR_SELECTION,
+                        color: sel_color,
                         custom_size: Some(Vec2::new(span_cells * cell_w, LINE_HEIGHT)),
                         ..default()
                     },

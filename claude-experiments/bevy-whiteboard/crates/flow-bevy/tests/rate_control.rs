@@ -33,9 +33,9 @@ fn latest_generator(app: &App) -> flow::NodeId {
 }
 
 fn period_ns(app: &App, nid: flow::NodeId) -> i64 {
-    match app.world().resource::<FlowSim>().nodes[&nid].slots["period_ns"] {
-        Value::Int(i) => i,
-        _ => panic!("period_ns isn't Int"),
+    match app.world().resource::<FlowSim>().read_slot_resolved(nid, "period_ns") {
+        Some(Value::Int(i)) => *i,
+        _ => panic!("period_ns isn't Int (or missing)"),
     }
 }
 
@@ -161,12 +161,14 @@ fn faster_rate_produces_more_emissions() {
     if base_count == 0 && fast_count == 0 {
         // No downstream edges wired — fall back to the per-node
         // `emitted` counter, which ticks on every self-fired rule.
-        let base_slot = match &sim.nodes[&baseline].slots["emitted"] {
-            Value::Int(i) => *i,
+        // GeneratorComposite's `emitted` lives on the inner Tick
+        // (`<gen>::T`), reached via read_slot_resolved.
+        let base_slot = match sim.read_slot_resolved(baseline, "emitted") {
+            Some(Value::Int(i)) => *i,
             _ => 0,
         };
-        let fast_slot = match &sim.nodes[&fast].slots["emitted"] {
-            Value::Int(i) => *i,
+        let fast_slot = match sim.read_slot_resolved(fast, "emitted") {
+            Some(Value::Int(i)) => *i,
             _ => 0,
         };
         assert!(

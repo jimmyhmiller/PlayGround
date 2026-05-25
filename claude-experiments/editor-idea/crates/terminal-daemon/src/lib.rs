@@ -10,6 +10,7 @@
 
 pub mod daemon;
 pub mod proto;
+pub mod shell_integration;
 
 use std::path::PathBuf;
 

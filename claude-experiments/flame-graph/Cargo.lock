@@ -646,6 +646,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "flame-format-otel"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "flame-core",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "flame-format-speedscope"
 version = "0.1.0"
 dependencies = [
@@ -679,6 +690,7 @@ dependencies = [
  "flame-format-chrome",
  "flame-format-firefox",
  "flame-format-folded",
+ "flame-format-otel",
  "flame-format-speedscope",
  "flame-render",
  "flate2",

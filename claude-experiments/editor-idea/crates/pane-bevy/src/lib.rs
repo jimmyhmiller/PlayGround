@@ -67,8 +67,8 @@ pub mod text_input;
 
 pub use camera::PaneCameraOf;
 pub use chrome_material::{
-    ActiveChromeShader, ChromeMaterialPlugin, ChromeParams, ChromeStyle, PaneChromeMaterial,
-    PaneShadowMaterial, ShadowParams,
+    ActiveChromeShader, ChromeMaterialPlugin, ChromeParams, ChromeStyle, ChromeTextStyle,
+    PaneChromeMaterial, PaneShadowMaterial, ShadowParams,
 };
 pub use layers::{PaneLayer, PaneLayerAllocator};
 
@@ -86,14 +86,12 @@ pub const CLOSE_BTN_SIZE: f32 = 14.0;
 pub const CLOSE_BTN_INSET: f32 = 4.0;
 pub const MIN_PANE_SIZE: Vec2 = Vec2::new(160.0, 120.0);
 
-// Pane body color now lives in `chrome_material::ChromeParams::default_for`
-// — the SDF material reads it as a uniform. Theme integration follows.
-const TITLE_DIVIDER: Color = Color::srgb(0.165, 0.170, 0.188);
-const TITLE_DIVIDER_FOCUSED: Color = Color::srgb(0.42, 0.62, 0.92);
-const HANDLE_COLOR: Color = Color::srgb(0.22, 0.23, 0.26);
-const CLOSE_COLOR: Color = Color::srgb(0.50, 0.52, 0.56);
-const TITLE_TEXT_COLOR: Color = Color::srgb(0.62, 0.65, 0.70);
-const TITLE_TEXT_FOCUSED: Color = Color::srgb(0.95, 0.96, 0.98);
+// Pane body color lives in `chrome_material::ChromeStyle` (SDF
+// uniform). Text-side chrome colors (title / close / handle /
+// divider) live in `chrome_material::ChromeTextStyle`, also theme-
+// driven via the style-bevy → pane-bevy bridge. The spawn site reads
+// the resource for initial colors; `sync_chrome_text_colors` reapplies
+// them whenever the resource OR focus state changes.
 const TITLE_FONT_SIZE: f32 = 12.0;
 const TITLE_DIVIDER_H_FOCUSED: f32 = 2.0;
 
@@ -139,6 +137,13 @@ pub struct PaneChrome {
     pub shadow: Entity,
     pub title_bar: Entity,
     pub title_text: Entity,
+    /// Opaque sprite that sits at `z > content_root` so any pane
+    /// content scrolled up into the title area gets painted over.
+    /// Inset by `corner_radius` on the x axis so it doesn't square
+    /// off the chrome's rounded top corners; content is also inset
+    /// by `MARGIN > corner_radius`, so no widget pixels can leak
+    /// through the uncovered corner regions.
+    pub title_cover: Entity,
     pub content_root: Entity,
     pub resize_handle: Entity,
     pub close_button: Entity,
@@ -426,6 +431,21 @@ fn sync_chrome_uniforms(
         }
         let is_focused = focused.0 == Some(pane_entity);
 
+        // Title cover: identical params to the body except for the
+        // cover_mode + title_h flags, so it tracks resize / focus /
+        // theme just like the body. Always uses the embedded default
+        // shader (the cover_mode cutout lives there); active_shader
+        // swaps don't touch its fragment handle.
+        if let Ok((handle, mut transform)) = bgs.get_mut(chrome.title_cover) {
+            transform.translation.x = rect.size.x * 0.5;
+            transform.translation.y = -rect.size.y * 0.5;
+            transform.scale.x = rect.size.x.max(1.0);
+            transform.scale.y = rect.size.y.max(1.0);
+            if let Some(mat) = chrome_mats.get_mut(&handle.0) {
+                mat.params = style.params_for_title_cover(rect.size, is_focused, TITLE_H);
+            }
+        }
+
         // Chrome (body): unit mesh scaled to pane size.
         if let Ok((handle, mut transform)) = bgs.get_mut(chrome.bg) {
             transform.translation.x = rect.size.x * 0.5;
@@ -569,7 +589,7 @@ pub fn spawn_pane(
     let shadow = world
         .spawn((
             ChildOf(pane),
-            Mesh2d(unit_mesh),
+            Mesh2d(unit_mesh.clone()),
             MeshMaterial2d(shadow_material_handle),
             Transform {
                 translation: Vec3::new(
@@ -588,22 +608,67 @@ pub fn spawn_pane(
         ))
         .id();
 
+    let text_style = world.resource::<ChromeTextStyle>().clone();
+
+    // Title cover: a second chrome-material quad sized identically
+    // to the body (same rounded corners, same gradient/glow, same
+    // bg color) but with `cover_mode=1` so the shader cuts out the
+    // content area. It sits at z > content_root so any pane content
+    // scrolled up past the top of the content area gets masked by
+    // the cover instead of bleeding over the title.
+    //
+    // Pinned to the embedded default shader rather than the active
+    // chrome shader: the cutout logic lives in the default shader.
+    // Preset shaders not handling cover_mode would render the cover
+    // opaquely in the content area too, hiding everything. The
+    // default's title region matches the active shader's title
+    // region for the bundled presets; user-installed presets that
+    // diverge can re-implement the cutout to make them match.
+    let default_chrome_shader = world
+        .resource::<AssetServer>()
+        .load::<Shader>("embedded://pane_bevy/chrome_material.wgsl");
+    let cover_params = style.params_for_title_cover(rect.size, false, TITLE_H);
+    let cover_material = world
+        .resource_mut::<Assets<PaneChromeMaterial>>()
+        .add(PaneChromeMaterial {
+            params: cover_params,
+            fragment: default_chrome_shader,
+        });
+    let title_cover = world
+        .spawn((
+            ChildOf(pane),
+            Mesh2d(unit_mesh),
+            MeshMaterial2d(cover_material),
+            Transform {
+                translation: Vec3::new(
+                    rect.size.x * 0.5,
+                    -rect.size.y * 0.5,
+                    0.25,
+                ),
+                scale: Vec3::new(rect.size.x.max(1.0), rect.size.y.max(1.0), 1.0),
+                ..default()
+            },
+        ))
+        .id();
+
     // Title-bar divider (1 px hairline at the bottom of the title region).
+    // z bumped above title_cover (0.25) so it stays visible.
     let title_bar = world
         .spawn((
             ChildOf(pane),
             Sprite {
-                color: TITLE_DIVIDER,
+                color: text_style.divider,
                 custom_size: Some(Vec2::new(rect.size.x, 1.0)),
                 ..default()
             },
             Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, -(TITLE_H - 1.0), 0.1),
+            Transform::from_xyz(0.0, -(TITLE_H - 1.0), 0.26),
         ))
         .id();
 
     // Title text — always created, even if empty, so we don't have to
     // conditionally spawn/despawn on PaneTitle changes.
+    // z bumped above title_cover (0.25) so it stays visible.
     let title_text = world
         .spawn((
             ChildOf(pane),
@@ -614,9 +679,9 @@ pub fn spawn_pane(
                 ..default()
             },
             LineHeight::Px(TITLE_H),
-            TextColor(TITLE_TEXT_COLOR),
+            TextColor(text_style.title),
             Anchor::TOP_LEFT,
-            Transform::from_xyz(MARGIN, -2.0, 0.15),
+            Transform::from_xyz(MARGIN, -2.0, 0.27),
         ))
         .id();
 
@@ -632,7 +697,7 @@ pub fn spawn_pane(
         .spawn((
             ChildOf(pane),
             Sprite {
-                color: HANDLE_COLOR,
+                color: text_style.handle,
                 custom_size: Some(Vec2::splat(HANDLE_SIZE)),
                 ..default()
             },
@@ -655,7 +720,7 @@ pub fn spawn_pane(
                 ..default()
             },
             LineHeight::Px(CLOSE_BTN_SIZE),
-            TextColor(CLOSE_COLOR),
+            TextColor(text_style.close),
             Anchor::TOP_LEFT,
             Transform::from_xyz(
                 rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET,
@@ -670,6 +735,7 @@ pub fn spawn_pane(
         shadow,
         title_bar,
         title_text,
+        title_cover,
         content_root,
         resize_handle,
         close_button,
@@ -687,7 +753,7 @@ pub fn spawn_pane(
         .resource_mut::<PaneLayerAllocator>()
         .allocate();
     let pane_layer_component = bevy::camera::visibility::RenderLayers::layer(layer_id);
-    for chrome_entity in [bg, title_bar, title_text, resize_handle, close_button] {
+    for chrome_entity in [bg, title_bar, title_text, title_cover, resize_handle, close_button] {
         world
             .entity_mut(chrome_entity)
             .insert(pane_layer_component.clone());
@@ -906,6 +972,13 @@ fn handle_pane_mouse(
     }
 }
 
+/// Max pane z. Above this we renormalize the whole z-stack down to
+/// [1, N] so we never bump past Bevy's default 2D camera ortho
+/// frustum (z = [-1000, 1000]). When that happens the pane silently
+/// vanishes — looked just like "clicking made the pane disappear,"
+/// which is exactly the bug this guards against.
+const MAX_PANE_Z: f32 = 500.0;
+
 fn bring_to_front(
     target: Entity,
     panes: &mut Query<(Entity, &mut PaneRect, Option<&Visibility>), With<PaneTag>>,
@@ -916,6 +989,17 @@ fn bring_to_front(
             rect.z = max_z + 1.0;
         }
     }
+    // Renormalize if the stack is approaching the camera frustum.
+    if max_z + 1.0 > MAX_PANE_Z {
+        let mut entries: Vec<(Entity, f32)> =
+            panes.iter().map(|(e, r, _)| (e, r.z)).collect();
+        entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (i, (e, _)) in entries.into_iter().enumerate() {
+            if let Ok((_, mut rect, _)) = panes.get_mut(e) {
+                rect.z = (i as f32) + 1.0;
+            }
+        }
+    }
 }
 
 // ---------- Layout ----------
@@ -923,12 +1007,23 @@ fn bring_to_front(
 fn position_panes(
     windows: Query<&Window>,
     focused: Res<FocusedPane>,
+    text_style: Res<ChromeTextStyle>,
+    chrome_style: Res<chrome_material::ChromeStyle>,
     panes: Query<(&PaneRect, &PaneChrome), With<PaneTag>>,
     mut t_q: Query<&mut Transform>,
     mut sprite_q: Query<&mut Sprite>,
     mut color_q: Query<&mut TextColor>,
     parents: Query<Entity, With<PaneTag>>,
 ) {
+    // Focused divider color = the same accent the SDF chrome material
+    // uses for border_focused, so the two cues read as one design
+    // choice rather than two unrelated highlights.
+    let focused_divider_color = Color::LinearRgba(LinearRgba::new(
+        chrome_style.border_focused.x,
+        chrome_style.border_focused.y,
+        chrome_style.border_focused.z,
+        chrome_style.border_focused.w,
+    ));
     let Ok(win) = windows.single() else {
         return;
     };
@@ -966,9 +1061,9 @@ fn position_panes(
         // Focused panes get a thicker, accent-colored title divider so
         // it's obvious which one will receive keys.
         let (bar_h, bar_color) = if is_focused {
-            (TITLE_DIVIDER_H_FOCUSED, TITLE_DIVIDER_FOCUSED)
+            (TITLE_DIVIDER_H_FOCUSED, focused_divider_color)
         } else {
-            (1.0, TITLE_DIVIDER)
+            (1.0, text_style.divider)
         };
         if let Ok(mut s) = sprite_q.get_mut(chrome.title_bar) {
             let want_size = Some(Vec2::new(rect.size.x, bar_h));
@@ -987,12 +1082,25 @@ fn position_panes(
         }
         if let Ok(mut c) = color_q.get_mut(chrome.title_text) {
             let want = if is_focused {
-                TITLE_TEXT_FOCUSED
+                text_style.title_focused
             } else {
-                TITLE_TEXT_COLOR
+                text_style.title
             };
             if c.0 != want {
                 c.0 = want;
+            }
+        }
+        // Close + handle colors track ChromeTextStyle. They don't
+        // change on focus today, but pulling them through this same
+        // loop keeps the data path uniform (one resource → one writer).
+        if let Ok(mut c) = color_q.get_mut(chrome.close_button) {
+            if c.0 != text_style.close {
+                c.0 = text_style.close;
+            }
+        }
+        if let Ok(mut s) = sprite_q.get_mut(chrome.resize_handle) {
+            if s.color != text_style.handle {
+                s.color = text_style.handle;
             }
         }
         if let Ok(mut t) = t_q.get_mut(chrome.resize_handle) {
@@ -1135,7 +1243,6 @@ fn enforce_pane_content_bounds(
     }
     for (rect, chrome) in &panes {
         let content_w = (rect.size.x - 2.0 * MARGIN).max(0.0);
-        let content_h = (rect.size.y - TITLE_H - 2.0 * MARGIN).max(0.0);
 
         let Ok(root_children) = children_q.get(chrome.content_root) else {
             continue;
@@ -1158,13 +1265,16 @@ fn enforce_pane_content_bounds(
 
             if !skip && text_q.get(entity).is_ok() {
                 let avail_w = (content_w - offset.x).max(0.0);
-                // offset.y is <= 0 for typical content (negative goes
-                // down); content_h + offset.y = remaining height below
-                // the text's top edge.
-                let avail_h = (content_h + offset.y).max(0.0);
+                // Height is intentionally `None`: visible clipping is
+                // done by the per-pane camera viewport. Setting a
+                // bounded height here breaks scrolling — anything whose
+                // initial position is below the content area gets
+                // avail_h=0 and Bevy renders no glyphs inside a
+                // zero-height TextBounds, so the text stays invisible
+                // even after the user scrolls it into view.
                 let new_bounds = TextBounds {
                     width: Some(avail_w),
-                    height: Some(avail_h),
+                    height: None,
                 };
                 if let Ok(mut existing) = bounds_q.get_mut(entity) {
                     if existing.width != new_bounds.width

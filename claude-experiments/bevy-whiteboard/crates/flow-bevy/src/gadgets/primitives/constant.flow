@@ -1,0 +1,20 @@
+# Emits a packet with kind `out_kind` and value `value` on every
+# arrival, regardless of what came in. The smallest "value source":
+# every other primitive routes/transforms its input, but none invents
+# a chosen numeric value out of nothing. Constant is that one.
+#
+# Replaces the old ConstantPacket / ConstantSignal split — pick the
+# output kind at spawn time (`out_kind: "signal"` for control-plane
+# pulses, `out_kind: "packet"` for the default data kind). Built on
+# the `tagged(kind, value)` builtin so the kind is slot-driven instead
+# of parse-time-baked.
+node Constant {
+    slots {
+        value:    Int    = 0
+        out_kind: String = "packet"
+    }
+    rule fire {
+        on _
+        do { emit tagged(out_kind, value) to default }
+    }
+}

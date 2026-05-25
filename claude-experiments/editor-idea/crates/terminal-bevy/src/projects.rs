@@ -61,15 +61,36 @@ const SIDEBAR_Z: f32 = 500.0;
 
 // Muted, modern palette — no saturated reds/greens/blues. Active state
 // uses a thin accent stripe instead of a full-row colour wash.
-const COLOR_SIDEBAR_BG: Color = Color::srgb(0.086, 0.090, 0.102);
-const COLOR_DIVIDER: Color = Color::srgb(0.165, 0.170, 0.188);
-const COLOR_ROW_ACTIVE_BG: Color = Color::srgb(0.150, 0.165, 0.205);
-const COLOR_ROW_RENAMING_BG: Color = Color::srgb(0.140, 0.146, 0.165);
-const COLOR_ACTIVE_STRIPE: Color = Color::srgb(0.42, 0.62, 0.92);
-const COLOR_EDIT_UNDERLINE: Color = Color::srgb(0.42, 0.62, 0.92);
-const COLOR_TEXT: Color = Color::srgb(0.86, 0.87, 0.90);
-const COLOR_TEXT_DIM: Color = Color::srgb(0.50, 0.52, 0.56);
-const COLOR_TEXT_FAINT: Color = Color::srgb(0.36, 0.38, 0.42);
+/// Theme-derived sidebar colors, resolved once per `sidebar_layout`
+/// call. Preset switches retone the whole sidebar in the same frame
+/// because layout rebuilds on `theme.is_changed()`.
+struct SidebarPalette {
+    bg: Color,
+    divider: Color,
+    row_active_bg: Color,
+    row_renaming_bg: Color,
+    active_stripe: Color,
+    edit_underline: Color,
+    text: Color,
+    text_dim: Color,
+    text_faint: Color,
+}
+
+fn sidebar_palette(theme: &style_bevy::Theme) -> SidebarPalette {
+    use style_bevy::tokens as t;
+    let c = |id| Color::LinearRgba(theme.color(id));
+    SidebarPalette {
+        bg: c(t::SIDEBAR_BG),
+        divider: c(t::CHROME_DIVIDER),
+        row_active_bg: c(t::SIDEBAR_ROW_ACTIVE_BG),
+        row_renaming_bg: c(t::SIDEBAR_ROW_RENAMING_BG),
+        active_stripe: c(t::ACCENT),
+        edit_underline: c(t::ACCENT),
+        text: c(t::FG),
+        text_dim: c(t::FG_MUTED),
+        text_faint: c(t::SIDEBAR_TEXT_FAINT),
+    }
+}
 
 const HEADER_H: f32 = 36.0;
 const ROW_H: f32 = 28.0;
@@ -530,6 +551,7 @@ fn sidebar_layout(
     mut commands: Commands,
     windows: Query<&Window>,
     sidebar: Res<Sidebar>,
+    theme: Res<style_bevy::Theme>,
     mut projects: ResMut<Projects>,
     renaming: Res<Renaming>,
     font: Res<MonoFont>,
@@ -544,9 +566,11 @@ fn sidebar_layout(
     let win_h = window.height();
     let width = sidebar.width;
     let dims = Vec2::new(win_w, win_h);
+    let palette = sidebar_palette(&theme);
 
     let dims_changed = last_dims.0 != Some(dims);
-    let mut needs_rebuild = projects.layout_dirty || dims_changed;
+    let mut needs_rebuild =
+        projects.layout_dirty || dims_changed || theme.is_changed();
     if existing.iter().next().is_none() {
         needs_rebuild = true;
     }
@@ -570,7 +594,7 @@ fn sidebar_layout(
     commands.spawn((
         SidebarEntity,
         Sprite {
-            color: COLOR_SIDEBAR_BG,
+            color: palette.bg,
             custom_size: Some(Vec2::new(width, win_h)),
             ..default()
         },
@@ -583,7 +607,7 @@ fn sidebar_layout(
     commands.spawn((
         SidebarEntity,
         Sprite {
-            color: COLOR_DIVIDER,
+            color: palette.divider,
             custom_size: Some(Vec2::new(DIVIDER_H, win_h)),
             ..default()
         },
@@ -610,7 +634,7 @@ fn sidebar_layout(
                 ..default()
             },
             LineHeight::Px(line_h),
-            TextColor(COLOR_TEXT_FAINT),
+            TextColor(palette.text_faint),
             Anchor::TOP_LEFT,
             Transform::from_xyz(
                 world_left_edge + ROW_PAD_X,
@@ -623,7 +647,7 @@ fn sidebar_layout(
     commands.spawn((
         SidebarEntity,
         Sprite {
-            color: COLOR_DIVIDER,
+            color: palette.divider,
             custom_size: Some(Vec2::new(width - DIVIDER_H, DIVIDER_H)),
             ..default()
         },
@@ -648,9 +672,9 @@ fn sidebar_layout(
         // ROW_H + the indent is enough visual structure.
         if active || renaming_this {
             let bg_color = if renaming_this {
-                COLOR_ROW_RENAMING_BG
+                palette.row_renaming_bg
             } else {
-                COLOR_ROW_ACTIVE_BG
+                palette.row_active_bg
             };
             commands.spawn((
                 SidebarEntity,
@@ -669,7 +693,7 @@ fn sidebar_layout(
             commands.spawn((
                 SidebarEntity,
                 Sprite {
-                    color: COLOR_ACTIVE_STRIPE,
+                    color: palette.active_stripe,
                     custom_size: Some(Vec2::new(STRIPE_W, ROW_H)),
                     ..default()
                 },
@@ -684,7 +708,7 @@ fn sidebar_layout(
             commands.spawn((
                 SidebarEntity,
                 Sprite {
-                    color: COLOR_EDIT_UNDERLINE,
+                    color: palette.edit_underline,
                     custom_size: Some(Vec2::new(width - DIVIDER_H, 2.0)),
                     ..default()
                 },
@@ -718,9 +742,9 @@ fn sidebar_layout(
             proj.name.clone()
         };
         let label_color = if active || renaming_this {
-            COLOR_TEXT
+            palette.text
         } else {
-            COLOR_TEXT_DIM
+            palette.text_dim
         };
         {
             let line_h = TEXT_FONT_SIZE * 1.4;
@@ -759,7 +783,7 @@ fn sidebar_layout(
             commands.spawn((
                 SidebarEntity,
                 Sprite {
-                    color: COLOR_EDIT_UNDERLINE,
+                    color: palette.edit_underline,
                     custom_size: Some(Vec2::new(caret_w, caret_h)),
                     ..default()
                 },
@@ -793,7 +817,7 @@ fn sidebar_layout(
                         ..default()
                     },
                     LineHeight::Px(line_h),
-                    TextColor(COLOR_ACTIVE_STRIPE),
+                    TextColor(palette.active_stripe),
                     Anchor::TOP_RIGHT,
                     Transform::from_xyz(
                         badge_anchor_x_world,
@@ -830,7 +854,7 @@ fn sidebar_layout(
                     ..default()
                 },
                 LineHeight::Px(line_h),
-                TextColor(COLOR_TEXT_FAINT),
+                TextColor(palette.text_faint),
                 Anchor::TOP_LEFT,
                 Transform::from_xyz(
                     delete_x_world + 6.0,
@@ -846,7 +870,7 @@ fn sidebar_layout(
     commands.spawn((
         SidebarEntity,
         Sprite {
-            color: COLOR_DIVIDER,
+            color: palette.divider,
             custom_size: Some(Vec2::new(width - DIVIDER_H, DIVIDER_H)),
             ..default()
         },
@@ -886,7 +910,7 @@ fn sidebar_layout(
                 ..default()
             },
             LineHeight::Px(line_h),
-            TextColor(COLOR_TEXT_DIM),
+            TextColor(palette.text_dim),
             Anchor::TOP_LEFT,
             Transform::from_xyz(
                 world_left_edge + ROW_PAD_X,

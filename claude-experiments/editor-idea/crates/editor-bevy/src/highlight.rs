@@ -11,6 +11,7 @@ use std::ops::Range;
 
 use bevy::prelude::*;
 use ropey::Rope;
+use style_bevy::{tokens, Theme, ThemeChanged};
 use tree_sitter::{Parser, Query, QueryCursor, StreamingIterator};
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -32,25 +33,113 @@ pub enum HighlightKind {
     Constructor,
 }
 
-/// Palette picked to be legible on the editor's `#1a1c1f` background.
-/// Default reuses the existing text color.
-pub fn color_for(kind: HighlightKind) -> Color {
-    match kind {
-        HighlightKind::Default => Color::srgb(0.92, 0.92, 0.94),
-        HighlightKind::Keyword => Color::srgb(0.78, 0.55, 0.90),
-        HighlightKind::String => Color::srgb(0.65, 0.87, 0.60),
-        HighlightKind::Comment => Color::srgb(0.48, 0.52, 0.58),
-        HighlightKind::Function => Color::srgb(0.55, 0.78, 1.00),
-        HighlightKind::Type => Color::srgb(0.94, 0.82, 0.55),
-        HighlightKind::Attribute => Color::srgb(0.85, 0.70, 0.50),
-        HighlightKind::Constant => Color::srgb(0.95, 0.62, 0.48),
-        HighlightKind::Operator => Color::srgb(0.70, 0.75, 0.82),
-        HighlightKind::Punctuation => Color::srgb(0.70, 0.75, 0.82),
-        HighlightKind::Variable => Color::srgb(0.92, 0.92, 0.94),
-        HighlightKind::Property => Color::srgb(0.85, 0.82, 0.95),
-        HighlightKind::Label => Color::srgb(0.95, 0.62, 0.48),
-        HighlightKind::Escape => Color::srgb(0.95, 0.75, 0.40),
-        HighlightKind::Constructor => Color::srgb(0.94, 0.82, 0.55),
+impl HighlightKind {
+    fn slot(self) -> usize {
+        self as usize
+    }
+}
+
+const PALETTE_SIZE: usize = 15;
+
+/// Per-syntax-kind color palette, refreshed from theme tokens whenever
+/// the theme changes. Held as a Bevy `Resource` so it can be read from
+/// any system without lifetime juggling on the `Highlighter`.
+#[derive(Resource, Clone, Debug)]
+pub struct SyntaxPalette {
+    colors: [Color; PALETTE_SIZE],
+    /// Bumped each time the palette is rewritten from theme. Line
+    /// renderers compare this against their stored value to decide
+    /// when to re-emit colored spans (otherwise a theme switch
+    /// wouldn't visually retone already-rendered lines).
+    pub rev: u64,
+}
+
+impl Default for SyntaxPalette {
+    fn default() -> Self {
+        // Match the legacy hardcoded defaults so a startup-before-theme
+        // render doesn't flash uncolored.
+        Self {
+            colors: [
+                Color::srgb(0.92, 0.92, 0.94),  // Default
+                Color::srgb(0.78, 0.55, 0.90),  // Keyword
+                Color::srgb(0.65, 0.87, 0.60),  // String
+                Color::srgb(0.48, 0.52, 0.58),  // Comment
+                Color::srgb(0.55, 0.78, 1.00),  // Function
+                Color::srgb(0.94, 0.82, 0.55),  // Type
+                Color::srgb(0.85, 0.70, 0.50),  // Attribute
+                Color::srgb(0.95, 0.62, 0.48),  // Constant
+                Color::srgb(0.70, 0.75, 0.82),  // Operator
+                Color::srgb(0.70, 0.75, 0.82),  // Punctuation
+                Color::srgb(0.92, 0.92, 0.94),  // Variable
+                Color::srgb(0.85, 0.82, 0.95),  // Property
+                Color::srgb(0.95, 0.62, 0.48),  // Label
+                Color::srgb(0.95, 0.75, 0.40),  // Escape
+                Color::srgb(0.94, 0.82, 0.55),  // Constructor
+            ],
+            rev: 0,
+        }
+    }
+}
+
+impl SyntaxPalette {
+    pub fn color_for(&self, kind: HighlightKind) -> Color {
+        self.colors[kind.slot()]
+    }
+}
+
+/// Convenience for callers that just need the palette singleton. The
+/// `World` form keeps lifetime juggling out of `lib.rs` where callers
+/// already have a `&World`.
+pub fn color_for(palette: &SyntaxPalette, kind: HighlightKind) -> Color {
+    palette.color_for(kind)
+}
+
+/// Sync `SyntaxPalette` from `Theme`. Called once at startup and on
+/// every `ThemeChanged` message so a preset switch retones syntax in
+/// the same frame the chrome retones.
+pub fn refresh_syntax_palette(theme: Res<Theme>, mut palette: ResMut<SyntaxPalette>) {
+    let lin = |id| {
+        let c = theme.color(id);
+        Color::LinearRgba(c)
+    };
+    palette.colors = [
+        lin(tokens::SYNTAX_DEFAULT),
+        lin(tokens::SYNTAX_KEYWORD),
+        lin(tokens::SYNTAX_STRING),
+        lin(tokens::SYNTAX_COMMENT),
+        lin(tokens::SYNTAX_FUNCTION),
+        lin(tokens::SYNTAX_TYPE),
+        lin(tokens::SYNTAX_ATTRIBUTE),
+        lin(tokens::SYNTAX_CONSTANT),
+        lin(tokens::SYNTAX_OPERATOR),
+        lin(tokens::SYNTAX_PUNCTUATION),
+        lin(tokens::SYNTAX_VARIABLE),
+        lin(tokens::SYNTAX_PROPERTY),
+        lin(tokens::SYNTAX_LABEL),
+        lin(tokens::SYNTAX_ESCAPE),
+        lin(tokens::SYNTAX_CONSTRUCTOR),
+    ];
+    palette.rev = palette.rev.wrapping_add(1);
+}
+
+fn refresh_on_theme_changed(
+    mut events: MessageReader<ThemeChanged>,
+    theme: Res<Theme>,
+    palette: ResMut<SyntaxPalette>,
+) {
+    if events.read().last().is_none() {
+        return;
+    }
+    refresh_syntax_palette(theme, palette);
+}
+
+pub struct HighlightPlugin;
+
+impl Plugin for HighlightPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<SyntaxPalette>()
+            .add_systems(Startup, refresh_syntax_palette)
+            .add_systems(Update, refresh_on_theme_changed);
     }
 }
 

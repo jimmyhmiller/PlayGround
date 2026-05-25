@@ -1,22 +1,22 @@
-# Two-phase commit, coordinator side, reimplemented from primitives.
+# Two-phase commit, coordinator side, reimplemented from primitives only.
 #
-#  req ──▶ Lower ──▶ FanOut(prepare) ──▶ (participants, external)
-#                                                │
-#                                                ▼  votes (each is `packet(0|1)`)
-#                                          Aggregator(n=participants)
-#                                                │
-#                                                ▼ total(sum)
-#                                          DecideReply (compares sum to n)
-#                                                │
-#                                       ─────────┴──────────
-#                                      ▼                    ▼
-#                       resp(nil) (commit)      resp_error(nil) (abort)
-#                       popping back through Lower
+#  req ──▶ L (entry) ──▶ FanOut(prepare) ──▶ (participants, external)
+#                                                  │
+#                                                  ▼  votes (each is `packet(0|1)`)
+#                                            Aggregator(n=participants)
+#                                                  │
+#                                                  ▼ total(sum)
+#                                            Decide (compares sum to n)
+#                                                  │
+#                                         ─────────┴──────────
+#                                        ▼                    ▼
+#                         resp(nil) (commit)      resp_error(nil) (abort)
+#                         popping back through L
 #
-# Participant side composite: each participant is a `ParticipantComposite`
+# Participant side composite: each participant is a `TPCParticipantComposite`
 # that takes `req` in, draws a Bernoulli for yes/no, and emits the vote
-# back through Lower. A whiteboard wires N of those to a single
-# `CoordinatorComposite` to model N-participant TPC.
+# back through L. A whiteboard wires N of those to a single
+# `TPCCoordinatorComposite` to model N-participant TPC.
 compound TPCCoordinatorComposite(
     participants: Int = 2,
     color:        Int = 0,
@@ -27,32 +27,42 @@ compound TPCCoordinatorComposite(
         prepare:  PE
     }
 
-    node L  : Lower      { }
+    # Inline entry adapter (formerly Lower).
+    node L {
+        rule rev {
+            on p when p.kind == "resp" || p.kind == "resp_error"
+            do { emit p popping to out response }
+        }
+        rule fwd {
+            on p when p.kind == "req"
+            do { emit packet(p.value) pushing self to default }
+        }
+    }
     node FO : FanOut     { }
     node PE {
         # Prepare-port egress (Egress emits to `out output`; this
         # routes to `out prepare`).
-        rule fwd { on packet(p) do { emit packet(p) to out prepare } }
+        rule fwd { on p do { emit p to out prepare } }
     }
     node A  : Aggregator { n: participants }
     node Decide {
         slots { n: Int = participants }
         # Commit if all voted yes (sum == n); otherwise abort.
         rule decide {
-            on total(sum)
+            on p when p.kind == "total"
             do {
-                emit pkt(if sum == n then 1 else 0) to default
+                emit pkt(if p.value == n then 1 else 0) to default
             }
         }
     }
     node Resp {
-        # Turn the verdict into a resp / resp_error popping back to Lower.
+        # Turn the verdict into a resp / resp_error popping back to L.
         rule ok {
-            on pkt(v) when v == 1
+            on p when p.kind == "pkt" && p.value == 1
             do { emit resp(nil) popping to (head(return_path)) }
         }
         rule abort {
-            on pkt(v) when v == 0
+            on p when p.kind == "pkt" && p.value == 0
             do { emit resp_error(nil) popping to (head(return_path)) }
         }
     }
@@ -67,24 +77,34 @@ compound TPCCoordinatorComposite(
 }
 
 # Each TPC participant: take an inbound prepare-as-req, flip a coin
-# for yes/no, vote back through Lower (which exits via response port).
+# for yes/no, vote back through L (which exits via response port).
 compound TPCParticipantComposite(
     yes_prob: Float = 1.0,
 ) {
     in  { request: L }
     out { response: L }
 
-    node L : Lower { }
+    # Inline entry adapter (formerly Lower).
+    node L {
+        rule rev {
+            on p when p.kind == "resp" || p.kind == "resp_error"
+            do { emit p popping to out response }
+        }
+        rule fwd {
+            on p when p.kind == "req"
+            do { emit packet(p.value) pushing self to default }
+        }
+    }
     node C : Coin  { p: yes_prob }
     node Yes {
         rule on_packet {
-            on packet(_)
+            on p
             do { emit resp(1) popping to (head(return_path)) }
         }
     }
     node No {
         rule on_packet {
-            on packet(_)
+            on p
             do { emit resp(0) popping to (head(return_path)) }
         }
     }

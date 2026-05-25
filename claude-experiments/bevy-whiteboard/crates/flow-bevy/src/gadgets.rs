@@ -19,7 +19,7 @@
 use std::sync::Once;
 
 use bevy::prelude::*;
-use flow::{Expr, NodeId, Sim, Value};
+use flow::{Expr, NodeId, Sim};
 
 /// True if this node's class declares a `color` slot. Drives whether a
 /// node participates in data-palette tagging: gadgets that opt in (by
@@ -27,9 +27,21 @@ use flow::{Expr, NodeId, Sim, Value};
 /// here and a `NodeColors` entry; gadgets that don't (Router, LifeCell,
 /// etc.) stay untagged and let their own visual control the look.
 pub fn has_color_slot(sim: &Sim, id: NodeId) -> bool {
-    sim.nodes
-        .get(&id)
-        .map_or(false, |n| n.slots.contains_key("color"))
+    // Direct hit: legacy monolithic gadgets had `color` on the node.
+    if let Some(n) = sim.nodes.get(&id) {
+        if n.slots.contains_key("color") { return true; }
+    }
+    // Composite: check the spawning compound class's params for `color`.
+    // The slot itself may live as `match` on an inner Filter (Router /
+    // Sink), not as `color` on an inner node — so a slot-name walk
+    // isn't enough; we want the *class declared a color parameter*
+    // signal.
+    if let Some(class_name) = sim.compound_class_of.get(&id) {
+        if let Some(c) = sim.compound_templates.get(class_name) {
+            return c.params.iter().any(|p| p.name == "color");
+        }
+    }
+    false
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -102,6 +114,36 @@ impl Kind {
         }
     }
 
+    /// Name of the compound's default outbound port (forward data
+    /// leaves through this). `None` for terminal kinds (Sink) and
+    /// kinds whose output is a control signal rather than packet data.
+    /// Used by `wire_flow_edge` to attach `from_port` when the source
+    /// is a compound shim — the port lookup is what routes the emit
+    /// to the right inner node.
+    pub fn default_output_port(self) -> Option<&'static str> {
+        match self {
+            Kind::Generator | Kind::Client | Kind::BackoffClient
+            | Kind::Router | Kind::Queue => Some("output"),
+            Kind::Worker => Some("response"),
+            Kind::Sink => None,
+        }
+    }
+
+    /// Name of the compound's default inbound port (forward data
+    /// arrives through this). `None` for kinds with no canonical
+    /// "request in" port (Generator). For Client / BackoffClient the
+    /// inbound port carries *replies* back to the originator, not
+    /// fresh requests — `wire_flow_edge` picks the right port based on
+    /// the wiring direction.
+    pub fn default_input_port(self) -> Option<&'static str> {
+        match self {
+            Kind::Worker => Some("request"),
+            Kind::Router | Kind::Queue | Kind::Sink => Some("input"),
+            Kind::Client | Kind::BackoffClient => Some("reply"),
+            Kind::Generator => None,
+        }
+    }
+
     pub fn size(self) -> Vec2 {
         match self {
             Kind::Generator | Kind::Client | Kind::BackoffClient | Kind::Sink => Vec2::new(60.0, 60.0),
@@ -120,35 +162,68 @@ pub fn install_default_params(sim: &mut Sim) {
     sim.set_param("queue_cap",    Expr::int(64));
 }
 
-/// Spawn a gadget of the given kind, writing the user-chosen palette
-/// slot index into its `color` slot iff the class's DSL declares one.
-/// Gadgets without a `color` slot (Router, LifeCell, etc.) stay
-/// untagged — they're either matchers (Router filters *by* colour, so
-/// pinning one to a colour would just narrow what it routes) or they
-/// own their own visual (LifeCell paints itself from `alive`).
+/// Spawn a gadget of the given kind. For monolithic classes (current
+/// default), the palette slot index is written into the spawned node's
+/// `color` slot iff the class declares one. For compound classes (when
+/// `gadget_class_name` returns a `*Composite`), the slot is threaded
+/// through as a compile-time `color` param override at expansion time.
 pub fn spawn(sim: &mut Sim, kind: Kind, name: &str, slot: usize) -> NodeId {
     ensure_gadget_classes_registered(sim);
     let class = gadget_class_name(kind);
+    if sim.compound_templates.contains_key(class) {
+        let mut overrides = std::collections::BTreeMap::new();
+        if compound_has_color_param(sim, class) {
+            overrides.insert(
+                "color".to_string(),
+                flow::dsl::expand::CtValue::Int(slot as i64),
+            );
+        }
+        return sim
+            .instantiate_compound(class, name, &overrides)
+            .unwrap_or_else(|e| panic!("instantiate compound gadget `{}`: {}", class, e));
+    }
     let id = sim
         .instantiate(class, name)
         .unwrap_or_else(|e| panic!("instantiate gadget `{}`: {}", class, e));
     if let Some(node) = sim.nodes.get_mut(&id) {
         if node.slots.contains_key("color") {
-            node.slots.insert("color".into(), Value::Int(slot as i64));
+            node.slots.insert("color".into(), flow::Value::Int(slot as i64));
         }
     }
     id
 }
 
+/// True if the named compound class declares a `color` compile-time
+/// param. Used by `spawn` to decide whether to thread the palette
+/// slot through as an override. Cheap: just inspects the stored AST.
+fn compound_has_color_param(sim: &Sim, class: &str) -> bool {
+    sim.compound_templates
+        .get(class)
+        .map(|c| c.params.iter().any(|p| p.name == "color"))
+        .unwrap_or(false)
+}
+
+/// Same mapping as `gadget_class_name`, exposed so other modules (e.g.
+/// `edges::wire_flow_edge`) can check `sim.compound_templates.contains_key(...)`
+/// before tagging an edge with compound ports.
+pub fn compound_class_name_for(kind: Kind) -> &'static str {
+    gadget_class_name(kind)
+}
+
 fn gadget_class_name(kind: Kind) -> &'static str {
+    // Palette spawns the primitive-built composite classes. Tests that
+    // pattern-match against monolithic node shapes use
+    // `Sim::compound_outermost` (event log matching) and
+    // `Sim::read_slot_resolved` / `write_slot_resolved` (slot access)
+    // to walk into the compound's children.
     match kind {
-        Kind::Generator => "Generator",
-        Kind::Client => "Client",
-        Kind::BackoffClient => "BackoffClient",
-        Kind::Worker => "Worker",
-        Kind::Router => "Router",
-        Kind::Queue => "Queue",
-        Kind::Sink => "Sink",
+        Kind::Generator     => "GeneratorComposite",
+        Kind::Client        => "ClientComposite",
+        Kind::BackoffClient => "BackoffClientComposite",
+        Kind::Worker        => "WorkerComposite",
+        Kind::Router        => "RouterComposite",
+        Kind::Queue         => "QueueComposite",
+        Kind::Sink          => "SinkComposite",
     }
 }
 
@@ -163,6 +238,38 @@ fn ensure_gadget_classes_registered(sim: &mut Sim) {
     }
     flow::dsl::register_classes(sim, GADGETS_DSL)
         .expect("gadget DSL must compile");
+    install_back_compat_aliases(sim);
+}
+
+/// Register the seven palette-kind aliases (`Generator`, `Client`, …,
+/// `Sink`) so authored whiteboards and tests that write
+/// `node x : Worker { color: 0 }` keep working after the monolithic
+/// .flow files were deleted. Each alias just copies the corresponding
+/// `*Composite` entry from `compound_templates`. Skip silently if a
+/// composite of that base name doesn't exist (e.g. Cache/Saga/TPC have
+/// no monolithic alias; they were always named `*Composite`).
+pub fn install_back_compat_aliases(sim: &mut Sim) {
+    const ALIASES: &[(&str, &str)] = &[
+        ("Generator",      "GeneratorComposite"),
+        ("Client",         "ClientComposite"),
+        ("BackoffClient",  "BackoffClientComposite"),
+        ("Worker",         "WorkerComposite"),
+        ("Router",         "RouterComposite"),
+        ("Queue",          "QueueComposite"),
+        ("Sink",           "SinkComposite"),
+        // Experimental gadgets that used to ship as monolithic .flow
+        // files. The composite versions cover the same role.
+        ("Cache",          "CacheComposite"),
+        ("CircuitBreaker", "CircuitBreakerComposite"),
+        ("Saga",           "SagaStepComposite"),
+        ("TPCCoordinator", "TPCCoordinatorComposite"),
+        ("TPCParticipant", "TPCParticipantComposite"),
+    ];
+    for (alias, source) in ALIASES {
+        if sim.has_class(alias) { continue; }
+        let Some(decl) = sim.compound_templates.get(*source).cloned() else { continue };
+        sim.compound_templates.insert(alias.to_string(), decl);
+    }
 }
 
 /// One-shot validation: parse the gadget DSL at startup so a syntax
@@ -186,23 +293,14 @@ pub fn validate_gadget_dsl() {
 // that `register_classes` consumes.
 
 pub const GADGETS_DSL: &str = concat!(
-    include_str!("gadgets/generator.flow"),      "\n",
-    include_str!("gadgets/client.flow"),         "\n",
-    include_str!("gadgets/backoff_client.flow"), "\n",
-    include_str!("gadgets/worker.flow"),         "\n",
-    include_str!("gadgets/router.flow"),         "\n",
-    include_str!("gadgets/queue.flow"),          "\n",
-    include_str!("gadgets/sink.flow"),           "\n",
-    // Experimental gadgets — registered as classes so whiteboard files
-    // can `node Foo : Cache { ... }` them. Not yet in the Kind enum;
-    // unknown classes default to a Worker-shaped node visually.
-    include_str!("gadgets/cache.flow"),           "\n",
-    include_str!("gadgets/circuit_breaker.flow"), "\n",
-    include_str!("gadgets/saga.flow"),            "\n",
-    include_str!("gadgets/tpc.flow"),             "\n",
-    // Composable primitives. Each is a tiny single-purpose gadget
-    // intended to be wired into bigger gadgets visually. Together
-    // they cover everything the higher-level gadgets above can do.
+    // Composable primitives — the irreducible set. Every higher-level
+    // gadget (Worker, Client, Cache, CircuitBreaker, Saga, TPC, Game
+    // of Life) is expressed as a compound of these 14 in
+    // `gadgets/composite/*.flow`. The former variant-adapter
+    // primitives (Stamp, Lift, Lower, Reply, Unstamp) were each 2-3
+    // rule nodes that composites now inline directly — their job is
+    // captured by `pushing self` / `popping` per-emit options plus
+    // `p.kind` discrimination on the unified record payload.
     include_str!("gadgets/primitives/tick.flow"),      "\n",
     include_str!("gadgets/primitives/counter.flow"),   "\n",
     include_str!("gadgets/primitives/filter.flow"),    "\n",
@@ -210,23 +308,31 @@ pub const GADGETS_DSL: &str = concat!(
     include_str!("gadgets/primitives/threshold.flow"), "\n",
     include_str!("gadgets/primitives/window.flow"),    "\n",
     include_str!("gadgets/primitives/delay.flow"),     "\n",
-    include_str!("gadgets/primitives/stamp.flow"),     "\n",
-    include_str!("gadgets/primitives/unstamp.flow"),   "\n",
     include_str!("gadgets/primitives/fanout.flow"),    "\n",
     include_str!("gadgets/primitives/coin.flow"),      "\n",
     include_str!("gadgets/primitives/buffer.flow"),    "\n",
-    // Variant adapters and aggregate primitives — the additional set
-    // that lets us build every higher-level gadget (Worker, Client,
-    // Cache, CircuitBreaker, Saga, TPC, Game of Life) as a compound
-    // of primitives. See `gadgets/composite/*.flow` for the recipes.
-    include_str!("gadgets/primitives/lift.flow"),      "\n",
-    include_str!("gadgets/primitives/lower.flow"),     "\n",
-    include_str!("gadgets/primitives/reply.flow"),     "\n",
     include_str!("gadgets/primitives/service.flow"),   "\n",
     include_str!("gadgets/primitives/aggregator.flow"),"\n",
     include_str!("gadgets/primitives/egress.flow"),    "\n",
-    include_str!("gadgets/primitives/constant_packet.flow"), "\n",
-    include_str!("gadgets/primitives/constant_signal.flow"), "\n",
+    // Unified Constant — replaces ConstantPacket + ConstantSignal. The
+    // `out_kind` slot picks which envelope kind the packet ships with
+    // ("packet" by default, "signal" for control-plane pulses).
+    include_str!("gadgets/primitives/constant.flow"), "\n",
+    // Composites — each higher-level gadget redefined as a compound of
+    // primitives. Registered as classes so whiteboards (and the palette)
+    // can spawn them with `sim.instantiate("WorkerComposite", "w1")`.
+    include_str!("gadgets/composite/sink.flow"),            "\n",
+    include_str!("gadgets/composite/generator.flow"),       "\n",
+    include_str!("gadgets/composite/client.flow"),          "\n",
+    include_str!("gadgets/composite/backoff_client.flow"),  "\n",
+    include_str!("gadgets/composite/worker.flow"),          "\n",
+    include_str!("gadgets/composite/queue.flow"),           "\n",
+    include_str!("gadgets/composite/router.flow"),          "\n",
+    include_str!("gadgets/composite/cache.flow"),           "\n",
+    include_str!("gadgets/composite/circuit_breaker.flow"), "\n",
+    include_str!("gadgets/composite/saga.flow"),            "\n",
+    include_str!("gadgets/composite/tpc.flow"),             "\n",
+    include_str!("gadgets/composite/life.flow"),            "\n",
 );
 
 // ============================================================================

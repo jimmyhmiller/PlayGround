@@ -1,0 +1,146 @@
+diff --git a/claude-experiments/flame-graph/Cargo.lock b/claude-experiments/flame-graph/Cargo.lock
+index 476a2cc69..dd70a346b 100644
+--- a/claude-experiments/flame-graph/Cargo.lock
++++ b/claude-experiments/flame-graph/Cargo.lock
+@@ -645,6 +645,17 @@ dependencies = [
+  "flame-core",
+ ]
+ 
++[[package]]
++name = "flame-format-otel"
++version = "0.1.0"
++dependencies = [
++ "ahash",
++ "flame-core",
++ "log",
++ "serde",
++ "serde_json",
++]
++
+ [[package]]
+ name = "flame-format-speedscope"
+ version = "0.1.0"
+@@ -679,6 +690,7 @@ dependencies = [
+  "flame-format-chrome",
+  "flame-format-firefox",
+  "flame-format-folded",
++ "flame-format-otel",
+  "flame-format-speedscope",
+  "flame-render",
+  "flate2",
+diff --git a/claude-experiments/flame-graph/Cargo.toml b/claude-experiments/flame-graph/Cargo.toml
+index 162508557..17c93bcb9 100644
+--- a/claude-experiments/flame-graph/Cargo.toml
++++ b/claude-experiments/flame-graph/Cargo.toml
+@@ -6,6 +6,7 @@ members = [
+     "crates/flame-format-chrome",
+     "crates/flame-format-speedscope",
+     "crates/flame-format-firefox",
++    "crates/flame-format-otel",
+     "crates/flame-render",
+     "crates/flame-viewer",
+ ]
+@@ -21,6 +22,7 @@ flame-format-folded     = { path = "crates/flame-format-folded" }
+ flame-format-chrome     = { path = "crates/flame-format-chrome" }
+ flame-format-speedscope = { path = "crates/flame-format-speedscope" }
+ flame-format-firefox    = { path = "crates/flame-format-firefox" }
++flame-format-otel       = { path = "crates/flame-format-otel" }
+ flame-render            = { path = "crates/flame-render" }
+ 
+ wgpu       = "29"
+diff --git a/claude-experiments/flame-graph/crates/flame-viewer/Cargo.toml b/claude-experiments/flame-graph/crates/flame-viewer/Cargo.toml
+index c6f38f402..ba963b9c2 100644
+--- a/claude-experiments/flame-graph/crates/flame-viewer/Cargo.toml
++++ b/claude-experiments/flame-graph/crates/flame-viewer/Cargo.toml
+@@ -10,6 +10,7 @@ flame-format-folded.workspace = true
+ flame-format-chrome.workspace = true
+ flame-format-speedscope.workspace = true
+ flame-format-firefox.workspace = true
++flame-format-otel.workspace = true
+ flame-render.workspace = true
+ winit.workspace = true
+ wgpu.workspace = true
+diff --git a/claude-experiments/flame-graph/crates/flame-viewer/src/main.rs b/claude-experiments/flame-graph/crates/flame-viewer/src/main.rs
+index 0b26d8309..b35a57267 100644
+--- a/claude-experiments/flame-graph/crates/flame-viewer/src/main.rs
++++ b/claude-experiments/flame-graph/crates/flame-viewer/src/main.rs
+@@ -20,10 +20,17 @@ const SOURCES: &[&dyn TraceSource] = &[
+     &flame_format_firefox::FirefoxSource,
+     &flame_format_speedscope::SpeedscopeSource,
+     &flame_format_chrome::ChromeSource,
++    &flame_format_otel::OtelSource,
+     &flame_format_folded::FoldedSource,
+ ];
+ 
+ fn load_path(path: &Path) -> Result<flame_core::Profile, LoadError> {
++    // Directory input: aggregate any .jsonl files in it (OTel emits one per
++    // pid). We concatenate them with newlines, which is valid JSONL, and let
++    // the OTel loader join spans by traceId across files.
++    if path.is_dir() {
++        return load_jsonl_dir(path);
++    }
+     let raw = std::fs::read(path)?;
+     let name = path.file_name().and_then(|s| s.to_str()).map(String::from);
+ 
+@@ -53,6 +60,55 @@ fn load_path(path: &Path) -> Result<flame_core::Profile, LoadError> {
+     Ok(builder.finish())
+ }
+ 
++fn load_jsonl_dir(dir: &Path) -> Result<flame_core::Profile, LoadError> {
++    let mut files: Vec<PathBuf> = Vec::new();
++    for entry in std::fs::read_dir(dir)? {
++        let entry = entry?;
++        let p = entry.path();
++        if !p.is_file() {
++            continue;
++        }
++        let name = match p.file_name().and_then(|n| n.to_str()) {
++            Some(s) => s.to_string(),
++            None => continue,
++        };
++        let lower = name.to_ascii_lowercase();
++        if lower.ends_with(".jsonl") {
++            files.push(p);
++        }
++    }
++    if files.is_empty() {
++        return Err(LoadError::Parse(format!(
++            "no .jsonl files in directory {}",
++            dir.display()
++        )));
++    }
++    // Sort so the loader sees files in a deterministic order — matters for
++    // tie-breaking among spans with identical start times.
++    files.sort();
++    log::info!("aggregating {} jsonl files from {}", files.len(), dir.display());
++
++    let mut buf: Vec<u8> = Vec::new();
++    for f in &files {
++        let bytes = std::fs::read(f)?;
++        buf.extend_from_slice(&bytes);
++        if !bytes.ends_with(b"\n") {
++            buf.push(b'\n');
++        }
++    }
++    // Synthesize a filename hint that includes ".jsonl" so detect() picks the
++    // OTel source unambiguously.
++    let sniff = format!("{}.jsonl", dir.file_name().and_then(|s| s.to_str()).unwrap_or("dir"));
++    let src = SOURCES
++        .iter()
++        .find(|s| s.detect(&buf, Some(&sniff)))
++        .ok_or(LoadError::UnknownFormat)?;
++    log::info!("loading aggregated jsonl via {}", src.name());
++    let mut builder = ProfileBuilder::new();
++    src.load(&buf, &mut builder)?;
++    Ok(builder.finish())
++}
++
+ fn read_clipboard_path() -> Result<PathBuf, String> {
+     let mut cb = arboard::Clipboard::new().map_err(|e| format!("open clipboard: {e}"))?;
+     let raw = cb.get_text().map_err(|e| format!("read text: {e}"))?;
+diff --git a/claude-experiments/libghostty-rs-vendored b/claude-experiments/libghostty-rs-vendored
+--- a/claude-experiments/libghostty-rs-vendored
++++ b/claude-experiments/libghostty-rs-vendored
+@@ -1 +1 @@
+-Subproject commit dfac6f3e8e7ff1567a7dead6639ef36c42e4f15a
++Subproject commit dfac6f3e8e7ff1567a7dead6639ef36c42e4f15a-dirty

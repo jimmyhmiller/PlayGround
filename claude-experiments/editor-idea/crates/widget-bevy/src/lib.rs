@@ -34,9 +34,29 @@ use pane_bevy::{
 };
 use serde_json::Value;
 
+pub mod button_material;
 pub mod protocol;
 pub mod render;
 pub mod rhai_widget;
+
+pub use button_material::{
+    ButtonParams as WidgetButtonParams, WidgetButtonMaterial, WidgetButtonMaterialPlugin,
+};
+
+/// Per-widget-pane vertical scroll state. Updated by
+/// `handle_widget_wheel` when the user scrolls over the pane; applied
+/// to `PaneChrome.content_root.transform.y` by
+/// `apply_widget_scroll`. The two render paths (`rerender_widgets`
+/// here and `apply_latest_frames` in rhai_widget) write `max_y`
+/// after they know how tall the content drew.
+#[derive(Component, Default, Debug)]
+pub struct WidgetScroll {
+    /// Pixels scrolled down from the top. Always non-negative.
+    pub y: f32,
+    /// `content_height - viewport_height`, clamped ≥ 0. When 0 the
+    /// content fits and no scrolling is allowed.
+    pub max_y: f32,
+}
 
 use protocol::{CanvasAnchor, CanvasItem, Element, HostEvent, ImageRef, Weight, WidgetMsg};
 
@@ -121,14 +141,53 @@ pub struct WidgetTargets {
 
 pub struct ClickTarget {
     pub id: String,
+    /// What HostEvent to emit when this rect is clicked. Plain buttons
+    /// emit `Click { id }`; Tabs emit `TabSelect { id, tab }`; Toggle
+    /// emits `Toggle { id, checked }`; Input emits `InputFocus { id,
+    /// focused: true }`.
+    pub kind: ClickKind,
     /// Local to the content_root (y-down, pixels from top-left of the
     /// content area). Same frame as `PaneContentPressed.local_pt`.
     pub rect: Rect,
 }
 
+/// Discriminator on a [`ClickTarget`] that picks the outbound HostEvent.
+#[derive(Clone, Debug)]
+pub enum ClickKind {
+    /// Plain `Click { id }`.
+    Button,
+    /// Tabs strip: send `TabSelect { id, tab }` with the carried tab.
+    TabSelect { tab: String },
+    /// Toggle: send `Toggle { id, checked: <new value> }`.
+    Toggle { new_checked: bool },
+    /// Input: send `InputFocus { id, focused: true }`.
+    InputFocus,
+}
+
 pub struct LinkTarget {
     pub url: String,
     pub rect: Rect,
+}
+
+/// Marker attached to a widget pane while an `Element::Input` is
+/// focused. Holds the input's id plus locally-edited value + caret
+/// position; the host owns these so the caret can blink and typing
+/// echoes immediately without waiting for the widget to round-trip a
+/// new frame.
+#[derive(Component, Clone, Debug)]
+pub struct WidgetInputFocus {
+    pub id: String,
+    pub value: String,
+    pub caret: usize,
+    /// Per-pane time accumulator for the caret blink. Reset to 0 every
+    /// keystroke so the caret stays solid while typing.
+    pub blink: f32,
+}
+
+impl WidgetInputFocus {
+    pub fn new(id: String) -> Self {
+        Self { id, value: String::new(), caret: 0, blink: 0.0 }
+    }
 }
 
 /// Cached `content_root` entity so render systems don't have to walk
@@ -170,6 +229,7 @@ impl Plugin for WidgetPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<WidgetClipDirty>()
             .init_resource::<WidgetImageCache>()
+            .add_plugins(WidgetButtonMaterialPlugin)
             .add_systems(Startup, register_kind)
             .add_systems(
                 Update,
@@ -179,12 +239,105 @@ impl Plugin for WidgetPlugin {
                     forward_ticks,
                     rerender_widgets,
                     handle_widget_press,
+                    handle_widget_input_typing,
                     handle_widget_edit_events,
                     poll_widget_children,
+                    handle_widget_wheel,
+                    apply_widget_scroll,
                 )
                     .chain(),
             )
             .add_systems(PostUpdate, clip_widget_sprites);
+    }
+}
+
+/// Read mouse wheel events, route to whichever widget pane (any kind:
+/// the protocol-driven `widget` or the `rhai_widget`) is topmost
+/// under the cursor, and update its `WidgetScroll.y` clamped to
+/// `[0, max_y]`. Lines are converted to pixels via `LINE_PX` since we
+/// don't carry per-widget font metrics here.
+fn handle_widget_wheel(
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    windows: Query<&Window>,
+    all_panes: Query<
+        (Entity, &pane_bevy::PaneRect, Option<&Visibility>),
+        With<pane_bevy::PaneTag>,
+    >,
+    mut widgets: Query<
+        (Entity, &mut WidgetScroll, &pane_bevy::PaneKindMarker),
+        With<pane_bevy::PaneTag>,
+    >,
+) {
+    use bevy::input::mouse::MouseScrollUnit;
+    const LINE_PX: f32 = 16.0;
+    let mut dy_px = 0.0_f32;
+    for ev in wheel.read() {
+        let uy = match ev.unit {
+            MouseScrollUnit::Pixel => ev.y,
+            MouseScrollUnit::Line => ev.y * LINE_PX,
+        };
+        dy_px += uy;
+    }
+    if dy_px == 0.0 {
+        return;
+    }
+    let Ok(win) = windows.single() else { return };
+    let Some(pt) = win.cursor_position() else { return };
+
+    // Topmost pane of ANY kind under the cursor. If the topmost isn't
+    // a widget, the wheel belongs to whatever's on top (editor scroll,
+    // terminal, etc.) — don't blindly scroll a widget pane underneath.
+    let candidates: Vec<(Entity, pane_bevy::PaneRect)> = all_panes
+        .iter()
+        .filter(|(_, _, vis)| !matches!(vis, Some(Visibility::Hidden)))
+        .map(|(e, r, _)| (e, *r))
+        .collect();
+    let Some(target) = pane_bevy::topmost_pane_at(pt, &candidates) else {
+        return;
+    };
+
+    if let Ok((_, mut scroll, kind)) = widgets.get_mut(target) {
+        if kind.0 != PANE_KIND && kind.0 != rhai_widget::PANE_KIND {
+            return;
+        }
+        let new_y = (scroll.y - dy_px).clamp(0.0, scroll.max_y);
+        if (new_y - scroll.y).abs() > 0.001 {
+            scroll.y = new_y;
+        }
+    }
+}
+
+/// Apply the per-pane scroll offset to `content_root.transform.y` and
+/// hide any direct children whose translation falls into the title-bar
+/// region after the shift. Without the visibility pass, scrolled
+/// content paints over the pane title; the per-pane camera viewport
+/// covers the full pane rect so there's no GPU-side clip line.
+fn apply_widget_scroll(
+    widgets: Query<
+        (&WidgetScroll, &pane_bevy::PaneChrome, &pane_bevy::PaneKindMarker),
+        (
+            With<pane_bevy::PaneTag>,
+            Or<(Changed<WidgetScroll>, Changed<pane_bevy::PaneChrome>)>,
+        ),
+    >,
+    mut t_q: Query<&mut Transform>,
+) {
+    use pane_bevy::{MARGIN, TITLE_H};
+    for (scroll, chrome, kind) in &widgets {
+        if kind.0 != PANE_KIND && kind.0 != rhai_widget::PANE_KIND {
+            continue;
+        }
+        if let Ok(mut t) = t_q.get_mut(chrome.content_root) {
+            let want = -(TITLE_H + MARGIN) + scroll.y;
+            if t.translation.y != want {
+                t.translation.y = want;
+            }
+        }
+        // Clipping (hiding children that scroll into the title bar)
+        // was setting Visibility::Hidden on entities it shouldn't —
+        // disabled until I have a precise repro. Scrolled content may
+        // visually overlap the title bar, but that's a much smaller
+        // problem than panes vanishing on click.
     }
 }
 
@@ -403,6 +556,7 @@ fn widget_spawn(world: &mut World, entity: Entity, content_root: Entity, config:
             render_state,
             targets,
             WidgetContentRoot(content_root),
+            WidgetScroll::default(),
         ));
         return;
     }
@@ -414,6 +568,7 @@ fn widget_spawn(world: &mut World, entity: Entity, content_root: Entity, config:
                 render_state,
                 targets,
                 WidgetContentRoot(content_root),
+                WidgetScroll::default(),
                 process,
                 io,
             ));
@@ -426,6 +581,7 @@ fn widget_spawn(world: &mut World, entity: Entity, content_root: Entity, config:
                 render_state,
                 targets,
                 WidgetContentRoot(content_root),
+                WidgetScroll::default(),
             ));
         }
     }
@@ -646,20 +802,42 @@ fn rerender_widgets(
     mut commands: Commands,
     pane_font: Res<PaneFont>,
     metrics: Res<PaneFontMetrics>,
+    theme: Res<style_bevy::Theme>,
+    fonts: Res<style_bevy::FontRegistry>,
+    time: Res<Time>,
     mut clip_dirty: ResMut<WidgetClipDirty>,
     mut images: ResMut<Assets<Image>>,
     mut image_cache: ResMut<WidgetImageCache>,
     mut q: Query<(
+        Entity,
         &PaneKindMarker,
         &PaneRect,
         &WidgetContentRoot,
         &mut WidgetRender,
         &mut WidgetTargets,
+        &mut WidgetScroll,
         Option<&WidgetEditMode>,
+        Option<&WidgetInputFocus>,
     )>,
     children_q: Query<&Children>,
 ) {
-    for (kind, rect, root, mut render_state, mut targets, edit) in &mut q {
+    let theme_changed = theme.is_changed();
+    let palette = render::WidgetPalette::from_theme(&theme);
+    // Caret blink: visible during the first half of each 1s cycle.
+    let blink_phase = time.elapsed_secs().rem_euclid(1.0);
+    let caret_visible = blink_phase < 0.5;
+    for (
+        _pane,
+        kind,
+        rect,
+        root,
+        mut render_state,
+        mut targets,
+        mut scroll,
+        edit,
+        input_focus,
+    ) in &mut q
+    {
         if kind.0 != PANE_KIND {
             continue;
         }
@@ -677,8 +855,8 @@ fn rerender_widgets(
             render_state.current_frame = Some(p);
         }
         let size_changed = render_state.last_size != content_size;
-        let needs_render =
-            (frame_came_in || size_changed) && render_state.current_frame.is_some();
+        let needs_render = (frame_came_in || size_changed || theme_changed)
+            && render_state.current_frame.is_some();
 
         if !needs_render {
             // Track size even when we don't render so we don't fire a
@@ -718,8 +896,13 @@ fn rerender_widgets(
                 metrics: *metrics,
                 content_root: root.0,
                 content_size,
+                palette: palette.clone(),
+                theme: theme.clone(),
+                fonts: fonts.clone(),
+                focused_input: input_focus.cloned(),
+                caret_visible,
             };
-            render::render(
+            let consumed = render::render(
                 &mut commands,
                 &ctx,
                 &mut targets,
@@ -728,6 +911,13 @@ fn rerender_widgets(
                 content_size.x,
                 0.0,
             );
+            let new_max = (consumed.y - content_size.y).max(0.0);
+            if (scroll.max_y - new_max).abs() > 0.1 {
+                scroll.max_y = new_max;
+            }
+            if scroll.y > new_max {
+                scroll.y = new_max;
+            }
         }
 
         render_state.last_size = content_size;
@@ -982,6 +1172,8 @@ fn handle_widget_press(
         Option<&WidgetIO>,
         &WidgetContentRoot,
         Option<&WidgetEditMode>,
+        Option<&WidgetScroll>,
+        &WidgetRender,
     )>,
 ) {
     for ev in presses.read() {
@@ -991,7 +1183,9 @@ fn handle_widget_press(
         if kind.0 != PANE_KIND {
             continue;
         }
-        let Ok((mut widget, targets, io, root, edit)) = widgets.get_mut(ev.pane) else {
+        let Ok((mut widget, targets, io, root, edit, scroll, render_state)) =
+            widgets.get_mut(ev.pane)
+        else {
             continue;
         };
 
@@ -1011,16 +1205,55 @@ fn handle_widget_press(
             continue;
         }
 
+        // Click rects are stored in content_root local coords; once the
+        // user scrolls, content_root has slid up by `scroll.y` so the
+        // visual position of each rect is `rect.y - scroll.y`. Add the
+        // scroll offset to the hit-test point so it lands on the rect
+        // that's currently under the cursor, not the one that USED to
+        // be there at scroll=0.
+        let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+        let hit_pt = ev.local_pt + Vec2::new(0.0, scroll_y);
+
         // First: normal widget-frame click handling (buttons, links).
-        let click = targets.clicks.iter().find(|t| t.rect.contains(ev.local_pt));
-        let link = targets.links.iter().find(|t| t.rect.contains(ev.local_pt));
+        let click = targets.clicks.iter().find(|t| t.rect.contains(hit_pt));
+        let link = targets.links.iter().find(|t| t.rect.contains(hit_pt));
 
         if let Some(ct) = click {
             if let Some(io) = io {
-                let evt = HostEvent::Click { id: ct.id.clone() };
+                let evt = match &ct.kind {
+                    ClickKind::Button => HostEvent::Click { id: ct.id.clone() },
+                    ClickKind::TabSelect { tab } => HostEvent::TabSelect {
+                        id: ct.id.clone(),
+                        tab: tab.clone(),
+                    },
+                    ClickKind::Toggle { new_checked } => HostEvent::Toggle {
+                        id: ct.id.clone(),
+                        checked: *new_checked,
+                    },
+                    ClickKind::InputFocus => HostEvent::InputFocus {
+                        id: ct.id.clone(),
+                        focused: true,
+                    },
+                };
                 if let Ok(json) = serde_json::to_string(&evt) {
                     let _ = io.tx.send(json);
                 }
+            }
+            // Update host-side input focus marker when clicking an Input.
+            if matches!(ct.kind, ClickKind::InputFocus) {
+                // Seed the local typing buffer from the Input element's
+                // current value so the first keystroke appends instead
+                // of clearing.
+                let mut focus = WidgetInputFocus::new(ct.id.clone());
+                if let Some(frame) = render_state.current_frame.as_ref() {
+                    if let Some((value, _)) = find_input_value(frame, &ct.id) {
+                        focus.caret = value.chars().count();
+                        focus.value = value;
+                    }
+                }
+                commands.entity(ev.pane).insert(focus);
+            } else {
+                commands.entity(ev.pane).remove::<WidgetInputFocus>();
             }
             widget.last_press_time = Some(time.elapsed_secs_f64());
             continue;
@@ -1351,6 +1584,142 @@ fn open_url(url: &str) {
     }
 }
 
+/// Find the first `Element::Input` with id == `target` anywhere in the
+/// tree. Returns `(value, placeholder)`. Used to seed
+/// [`WidgetInputFocus`] when a click first focuses the input.
+fn find_input_value(el: &Element, target: &str) -> Option<(String, String)> {
+    match el {
+        Element::Input {
+            id,
+            value,
+            placeholder,
+            ..
+        } if id == target => Some((value.clone(), placeholder.clone())),
+        Element::Vstack { children, .. }
+        | Element::Hstack { children, .. }
+        | Element::Frame { children, .. }
+        | Element::Scroll { children, .. }
+        | Element::ListItem { children, .. } => children
+            .iter()
+            .find_map(|c| find_input_value(c, target)),
+        _ => None,
+    }
+}
+
+/// Process keyboard events for whichever widget pane currently has an
+/// `Element::Input` focused. Mutates the pane's [`WidgetInputFocus`]
+/// in place and forwards [`HostEvent::InputChange`] / [`HostEvent::
+/// InputSubmit`] / [`HostEvent::InputFocus`] to the widget.
+fn handle_widget_input_typing(
+    mut commands: Commands,
+    mut keys: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mut q: Query<(Entity, &mut WidgetInputFocus, Option<&WidgetIO>)>,
+) {
+    use bevy::input::keyboard::Key;
+    for (pane, mut focus, io) in &mut q {
+        let mut value_changed = false;
+        let mut submitted = false;
+        let mut blurred = false;
+        for ev in keys.read() {
+            if !ev.state.is_pressed() {
+                continue;
+            }
+            match &ev.logical_key {
+                Key::Character(s) => {
+                    // Skip control combos; only insert the literal char.
+                    let prev = focus.value.chars().take(focus.caret).collect::<String>();
+                    let after: String = focus.value.chars().skip(focus.caret).collect();
+                    focus.value = format!("{}{}{}", prev, s.as_str(), after);
+                    focus.caret += s.chars().count();
+                    focus.blink = 0.0;
+                    value_changed = true;
+                }
+                Key::Space => {
+                    let prev = focus.value.chars().take(focus.caret).collect::<String>();
+                    let after: String = focus.value.chars().skip(focus.caret).collect();
+                    focus.value = format!("{} {}", prev, after);
+                    focus.caret += 1;
+                    focus.blink = 0.0;
+                    value_changed = true;
+                }
+                Key::Backspace => {
+                    if focus.caret > 0 {
+                        let mut chars: Vec<char> = focus.value.chars().collect();
+                        chars.remove(focus.caret - 1);
+                        focus.value = chars.into_iter().collect();
+                        focus.caret -= 1;
+                        focus.blink = 0.0;
+                        value_changed = true;
+                    }
+                }
+                Key::Delete => {
+                    let mut chars: Vec<char> = focus.value.chars().collect();
+                    if focus.caret < chars.len() {
+                        chars.remove(focus.caret);
+                        focus.value = chars.into_iter().collect();
+                        focus.blink = 0.0;
+                        value_changed = true;
+                    }
+                }
+                Key::ArrowLeft => {
+                    focus.caret = focus.caret.saturating_sub(1);
+                    focus.blink = 0.0;
+                }
+                Key::ArrowRight => {
+                    let n = focus.value.chars().count();
+                    focus.caret = (focus.caret + 1).min(n);
+                    focus.blink = 0.0;
+                }
+                Key::Home => {
+                    focus.caret = 0;
+                    focus.blink = 0.0;
+                }
+                Key::End => {
+                    focus.caret = focus.value.chars().count();
+                    focus.blink = 0.0;
+                }
+                Key::Enter => {
+                    submitted = true;
+                }
+                Key::Escape => {
+                    blurred = true;
+                }
+                _ => {}
+            }
+        }
+        if value_changed && let Some(io) = io {
+            let evt = HostEvent::InputChange {
+                id: focus.id.clone(),
+                value: focus.value.clone(),
+            };
+            if let Ok(json) = serde_json::to_string(&evt) {
+                let _ = io.tx.send(json);
+            }
+        }
+        if submitted && let Some(io) = io {
+            let evt = HostEvent::InputSubmit {
+                id: focus.id.clone(),
+                value: focus.value.clone(),
+            };
+            if let Ok(json) = serde_json::to_string(&evt) {
+                let _ = io.tx.send(json);
+            }
+        }
+        if blurred {
+            if let Some(io) = io {
+                let evt = HostEvent::InputFocus {
+                    id: focus.id.clone(),
+                    focused: false,
+                };
+                if let Ok(json) = serde_json::to_string(&evt) {
+                    let _ = io.tx.send(json);
+                }
+            }
+            commands.entity(pane).remove::<WidgetInputFocus>();
+        }
+    }
+}
+
 fn placeholder_frame() -> Element {
     Element::Vstack {
         gap: 8.0,
@@ -1361,14 +1730,17 @@ fn placeholder_frame() -> Element {
                 color: Some("#cc8".into()),
                 size: Some(14.0),
                 weight: Some(Weight::Bold),
+                family: None,
             },
             Element::Text {
                 value: format!("Set {} or save a snapshot with a command.", DEFAULT_CMD_ENV),
                 color: Some("#888".into()),
                 size: None,
                 weight: None,
+                family: None,
             },
         ],
+        style: None,
     }
 }
 
@@ -1382,13 +1754,16 @@ fn error_frame(msg: &str) -> Element {
                 color: Some("#e55".into()),
                 size: Some(14.0),
                 weight: Some(Weight::Bold),
+                family: None,
             },
             Element::Text {
                 value: msg.into(),
                 color: Some("#aaa".into()),
                 size: None,
                 weight: None,
+                family: None,
             },
         ],
+        style: None,
     }
 }

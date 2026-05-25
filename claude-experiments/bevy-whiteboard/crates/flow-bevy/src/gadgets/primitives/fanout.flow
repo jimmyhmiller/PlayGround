@@ -1,9 +1,10 @@
-# Broadcasts each incoming packet to every outbound neighbor. The
-# atom of fan-out — composes with Filter (per-color fan-out) and
-# Stamp (request to many participants).
+# Broadcasts each incoming packet to every outbound neighbor. The atom
+# of fan-out — composes with Filter (per-value fan-out) and Stamp
+# (request to many participants). Forwards the packet verbatim so kind
+# is preserved on each copy.
 node FanOut {
     rule fan {
-        on packet(p)
-        do { emit_each packet(p) to out_neighbors() }
+        on p
+        do { emit_each p to out_neighbors() }
     }
 }

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use ahash::{AHashMap, AHashSet};
-use flame_core::{Profile, StringId, TrackId};
+use flame_core::{Profile, SliceTable, StringId, Track, TrackId, TrackKind};
 use glyphon::{
     Attrs, Buffer, Cache as GlyphonCache, Color as GlyphonColor, Family, FontSystem, Metrics,
     Resolution, Shaping, SwashCache, TextArea, TextAtlas, TextBounds, TextRenderer,
@@ -141,6 +141,10 @@ pub enum MainTab {
     BottomUp,
     /// Full sortable function table.
     Table,
+    /// Distributed-tracing sequence diagram view: per-trace, lifelines per
+    /// participant (e.g. service), activation boxes per span, arrows for
+    /// cross-participant hops.
+    Sequence,
 }
 
 impl MainTab {
@@ -150,6 +154,7 @@ impl MainTab {
         MainTab::Hotspots,
         MainTab::BottomUp,
         MainTab::Table,
+        MainTab::Sequence,
     ];
     pub fn label(self) -> &'static str {
         match self {
@@ -158,6 +163,7 @@ impl MainTab {
             MainTab::Hotspots => "HOTSPOTS",
             MainTab::BottomUp => "BOTTOM-UP",
             MainTab::Table => "ALL FUNCTIONS",
+            MainTab::Sequence => "SEQUENCE",
         }
     }
 }
@@ -178,6 +184,46 @@ impl LayoutMode {
         match self {
             LayoutMode::TimeOrdered => "TIME",
             LayoutMode::LeftHeavy => "AGGREGATED",
+        }
+    }
+}
+
+/// Whether to display each source track separately or merge them all onto a
+/// single synthetic track (greedy row-pack so colors-by-category become bands).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum MergeMode {
+    /// One row strip per source track (default).
+    Multi,
+    /// All slices on a single synthetic track; depth assigned by greedy
+    /// first-fit so no two slices overlap in a row.
+    Single,
+}
+
+impl MergeMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            MergeMode::Multi => "multi",
+            MergeMode::Single => "single",
+        }
+    }
+}
+
+/// Tabs inside the persistent right-side panel (visible on the FLAME view).
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum SidebarTab {
+    /// Selected-slice details + stack + sandwich callers/callees. Default.
+    Inspect,
+    /// Picker for the timeline grouping attribute key. Lists `(none)` plus
+    /// every key the loaded profile carries.
+    Group,
+}
+
+impl SidebarTab {
+    pub const ALL: &'static [SidebarTab] = &[SidebarTab::Inspect, SidebarTab::Group];
+    pub fn label(self) -> &'static str {
+        match self {
+            SidebarTab::Inspect => "INSPECT",
+            SidebarTab::Group => "GROUP",
         }
     }
 }
@@ -204,6 +250,14 @@ const SECTION_GAP_PX: f32 = 24.0;
 const TAB_HEIGHT_PX: f32 = 56.0;
 /// Height of the global tab bar at the top of the window.
 pub const TAB_BAR_HEIGHT_PX: f32 = 70.0;
+/// Height of the per-sidebar tab strip (GROUP / INSPECT). Sits below the
+/// global tab bar at the top of the right inspector area.
+pub const SIDEBAR_TAB_BAR_H: f32 = 44.0;
+
+/// SEQUENCE tab: width of the left-side trace picker.
+pub const SEQUENCE_PICKER_WIDTH_PX: f32 = 360.0;
+/// SEQUENCE tab: height of the participant lifeline header band.
+pub const SEQUENCE_HEADER_H: f32 = 56.0;
 /// One row in the CALL TREE view.
 const CALL_TREE_ROW_H: f32 = 36.0;
 /// Column-header band above the CALL TREE rows.
@@ -262,6 +316,37 @@ pub struct Renderer {
     pub layout_mode: LayoutMode,
     /// Floating layout-mode toggle button rects (bottom-left of timeline).
     pub layout_button_rects: Vec<(LayoutMode, [f32; 4])>,
+    /// Track-merge mode: render each source track separately or merge into one.
+    pub merge_mode: MergeMode,
+    /// The profile as loaded — preserved so we can swap back from merged.
+    pub original_profile: Option<Arc<Profile>>,
+    /// Single-track version of the original. Built lazily on first toggle.
+    pub merged_profile: Option<Arc<Profile>>,
+    /// Current attribute key the timeline is grouped by, or None for no grouping.
+    /// Mutually exclusive with `merge_mode == Single`.
+    pub group_key: Option<StringId>,
+    /// Cache of grouped profiles by key. Built lazily on first selection of
+    /// each key so repeated toggling is cheap.
+    pub grouped_profiles: AHashMap<StringId, Arc<Profile>>,
+    /// Rows of the GROUP sidebar tab's key list. (None, _) is the "(none)" reset row.
+    pub group_picker_row_rects: Vec<(Option<StringId>, [f32; 4])>,
+    /// Active sidebar tab (GROUP / INSPECT). Only matters when MainTab::Flame.
+    pub sidebar_tab: SidebarTab,
+    /// Sidebar tab strip button rects for click hit-test.
+    pub sidebar_tab_rects: Vec<(SidebarTab, [f32; 4])>,
+    /// Vertical scroll offset (in px) for the sidebar body content. The tab
+    /// strip itself stays fixed; only what's below the strip moves.
+    pub sidebar_scroll_y_px: f32,
+    /// Total height of the sidebar body content emitted last frame. Used to
+    /// clamp scroll so the user can't pan past the bottom.
+    pub sidebar_content_h_px: f32,
+
+    // ───── SEQUENCE tab state ─────
+    /// Attribute key whose distinct values define the participant lifelines.
+    /// Defaults to "service" if present, else first available key.
+    pub sequence_lifeline_key: Option<StringId>,
+    /// Vertical scroll offset (px) for the sequence diagram body.
+    pub sequence_scroll_y_px: f32,
     /// Pre-computed left-heavy slice table (one per profile load). Wrapped in
     /// `Arc` so the renderer can take a cheap reference into the GPU rebuild
     /// loop alongside `&mut self` for `self.instances.push(...)`.
@@ -492,6 +577,18 @@ impl Renderer {
             collapsed_tracks: AHashSet::new(),
             layout_mode: LayoutMode::TimeOrdered,
             layout_button_rects: Vec::new(),
+            merge_mode: MergeMode::Multi,
+            original_profile: None,
+            merged_profile: None,
+            group_key: None,
+            grouped_profiles: AHashMap::new(),
+            group_picker_row_rects: Vec::new(),
+            sidebar_tab: SidebarTab::Inspect,
+            sidebar_tab_rects: Vec::new(),
+            sidebar_scroll_y_px: 0.0,
+            sidebar_content_h_px: 0.0,
+            sequence_lifeline_key: None,
+            sequence_scroll_y_px: 0.0,
             aggregated_slices: None,
             aggregated_time_range: (0, 0),
             aggregated_track_rows: Vec::new(),
@@ -530,6 +627,31 @@ impl Renderer {
             profile.slices.len(),
             started.elapsed()
         );
+        self.original_profile = Some(profile.clone());
+        // Drop any stale merged / grouped profiles from a previous load.
+        self.merged_profile = None;
+        self.grouped_profiles.clear();
+        self.merge_mode = MergeMode::Multi;
+        self.group_key = None;
+        self.sidebar_scroll_y_px = 0.0;
+        self.sidebar_content_h_px = 0.0;
+        self.sequence_scroll_y_px = 0.0;
+        // Default the SEQUENCE lifeline key to "service" if present, else
+        // first available attr key alphabetically.
+        self.sequence_lifeline_key = profile
+            .strings
+            .lookup("service")
+            .filter(|k| profile.attrs.key_lookup.contains_key(k))
+            .or_else(|| {
+                let mut keys: Vec<(StringId, String)> = profile
+                    .attrs
+                    .keys
+                    .iter()
+                    .map(|&sid| (sid, profile.strings.get(sid).to_string()))
+                    .collect();
+                keys.sort_by(|a, b| a.1.cmp(&b.1));
+                keys.first().map(|(sid, _)| *sid)
+            });
         self.profile = Some(profile);
         self.hovered = None;
         self.selected_slice = None;
@@ -541,6 +663,113 @@ impl Renderer {
         self.viewport.scroll_y_px = 0.0;
         self.clamp_viewport();
         self.refresh_status_for_idle();
+    }
+
+    /// Switch between multi-track and single-track display. The merged profile
+    /// is built lazily and cached. Caller must follow with `rebuild_instances`
+    /// + redraw.
+    pub fn set_merge_mode(&mut self, mode: MergeMode) {
+        if self.merge_mode == mode {
+            return;
+        }
+        self.merge_mode = mode;
+        let target = match mode {
+            MergeMode::Multi => self.original_profile.clone(),
+            MergeMode::Single => {
+                if self.merged_profile.is_none() {
+                    if let Some(orig) = &self.original_profile {
+                        let built = build_single_track_profile(orig);
+                        self.merged_profile = Some(Arc::new(built));
+                    }
+                }
+                self.merged_profile.clone()
+            }
+        };
+        if let Some(p) = target {
+            // Track IDs change between modes — drop selection / hover / collapse
+            // state to avoid dangling references.
+            self.selected_slice = None;
+            self.hovered = None;
+            self.collapsed_tracks.clear();
+            // Aggregated (left-heavy) layout is built per-track; rebuild it for
+            // the new track shape so the AGGREGATED toggle keeps working.
+            let (agg_slices, agg_range, agg_rows) = build_left_heavy_layout(&p);
+            self.aggregated_slices = Some(Arc::new(agg_slices));
+            self.aggregated_time_range = agg_range;
+            self.aggregated_track_rows = agg_rows;
+            let (s, e) = p.time_range;
+            self.profile = Some(p);
+            self.viewport.fit_time(s, e);
+            self.viewport.row_height_px = ROW_HEIGHT_PX;
+            self.viewport.scroll_y_px = 0.0;
+            self.clamp_viewport();
+        }
+    }
+
+    pub fn toggle_merge_mode(&mut self) {
+        let next = match self.merge_mode {
+            MergeMode::Multi => MergeMode::Single,
+            MergeMode::Single => MergeMode::Multi,
+        };
+        self.set_merge_mode(next);
+    }
+
+    /// Group the timeline by an attribute key (one track per distinct value),
+    /// or `None` to clear grouping and restore the original per-trace layout.
+    /// The key is a `StringId` interned in the *original* profile's string
+    /// table (look it up via `original_profile.strings`).
+    ///
+    /// Grouping and single-track merge are mutually exclusive — selecting a
+    /// group key flips merge mode back to Multi.
+    pub fn set_group_key(&mut self, key: Option<StringId>) {
+        if self.group_key == key && self.merge_mode == MergeMode::Multi {
+            return;
+        }
+        self.group_key = key;
+        self.merge_mode = MergeMode::Multi;
+        let target = match key {
+            None => self.original_profile.clone(),
+            Some(k) => {
+                if !self.grouped_profiles.contains_key(&k) {
+                    if let Some(orig) = &self.original_profile {
+                        let built = build_grouped_profile(orig, k);
+                        self.grouped_profiles.insert(k, Arc::new(built));
+                    }
+                }
+                self.grouped_profiles.get(&k).cloned()
+            }
+        };
+        if let Some(p) = target {
+            // Track IDs change between groupings — drop selection / hover /
+            // collapse state so they don't dangle.
+            self.selected_slice = None;
+            self.hovered = None;
+            self.collapsed_tracks.clear();
+            let (agg_slices, agg_range, agg_rows) = build_left_heavy_layout(&p);
+            self.aggregated_slices = Some(Arc::new(agg_slices));
+            self.aggregated_time_range = agg_range;
+            self.aggregated_track_rows = agg_rows;
+            let (s, e) = p.time_range;
+            self.profile = Some(p);
+            self.viewport.fit_time(s, e);
+            self.viewport.row_height_px = ROW_HEIGHT_PX;
+            self.viewport.scroll_y_px = 0.0;
+            self.clamp_viewport();
+        }
+    }
+
+    /// Sorted (by string) list of attribute keys available for grouping in the
+    /// *original* profile, with the key's StringId and human-readable name.
+    pub fn available_group_keys(&self) -> Vec<(StringId, String)> {
+        let Some(orig) = &self.original_profile else { return Vec::new() };
+        let mut keys: Vec<(StringId, String)> = orig
+            .attrs
+            .keys
+            .iter()
+            .map(|&sid| (sid, orig.strings.get(sid).to_string()))
+            .collect();
+        keys.sort_by(|a, b| a.1.cmp(&b.1));
+        keys
     }
 
     /// Active SliceTable based on `layout_mode`. Used by all rendering /
@@ -609,6 +838,31 @@ impl Renderer {
         None
     }
 
+    /// Hit-test the sidebar tab strip (GROUP / INSPECT) at the top of the
+    /// right inspector panel.
+    pub fn hit_test_sidebar_tab(&self, x: f32, y: f32) -> Option<SidebarTab> {
+        for (tab, rect) in &self.sidebar_tab_rects {
+            if x >= rect[0] && x < rect[0] + rect[2] && y >= rect[1] && y < rect[1] + rect[3] {
+                return Some(*tab);
+            }
+        }
+        None
+    }
+
+    /// Hit-test a row in the GROUP sidebar tab's key list. Returns the picked
+    /// value: `Some(None)` = "(none)" row, `Some(Some(sid))` = a specific key.
+    pub fn hit_test_group_row(&self, x: f32, y: f32) -> Option<Option<StringId>> {
+        if self.sidebar_tab != SidebarTab::Group {
+            return None;
+        }
+        for (val, rect) in &self.group_picker_row_rects {
+            if x >= rect[0] && x < rect[0] + rect[2] && y >= rect[1] && y < rect[1] + rect[3] {
+                return Some(*val);
+            }
+        }
+        None
+    }
+
     /// Hit-test track headers (FLAME tab only). Returns the track ID to toggle.
     pub fn hit_test_track_header(&self, x: f32, y: f32) -> Option<TrackId> {
         for (t, rect) in &self.track_header_rects {
@@ -635,6 +889,8 @@ impl Renderer {
             MainTab::Flame => Vec::new(),
             // CallTree has its own custom rendering path; tab_rows is unused.
             MainTab::CallTree => Vec::new(),
+            // SEQUENCE also has its own custom rendering path.
+            MainTab::Sequence => Vec::new(),
             MainTab::Hotspots => self
                 .functions_by_total
                 .iter()
@@ -693,7 +949,7 @@ impl Renderer {
         let sel = self.selected_slice?;
         let pad = INSPECTOR_PADDING_PX;
         let line = INSPECTOR_LINE_HEIGHT_PX;
-        let mut y = TAB_BAR_HEIGHT_PX + pad;
+        let mut y = self.inspector_content_top() + pad;
         y += line; // SELECTED heading
         y += INSPECTOR_TITLE_LINE_HEIGHT; // name
         y += line; // meta
@@ -706,7 +962,60 @@ impl Renderer {
             y += line; // "…" overflow line
         }
         y += SECTION_GAP_PX;
+        // ATTRIBUTES heading + per-attr lines (each attribute's value may wrap
+        // across several lines; `attrs_section_lines` returns the total).
+        let attr_lines = self.attrs_section_lines(sel);
+        y += line * attr_lines as f32;
+        y += SECTION_GAP_PX;
         Some(y)
+    }
+
+    /// Approximate number of wrapped lines a single attribute display takes
+    /// in the inspector body font. Caps at 8 lines (rest gets clipped).
+    pub fn attr_wrap_lines(&self, key: &str, value: &str) -> u16 {
+        // INSPECTOR_BODY_FONT ≈ 26px; inspector content width ≈ 552px after
+        // padding. Average glyph width in our sans-serif at that size is ~13px,
+        // so ~42 chars per line. The leading "key: " counts toward line 1.
+        const CHARS_PER_LINE: usize = 42;
+        let total = key.len() + 2 + value.len(); // "key: value"
+        let raw = ((total + CHARS_PER_LINE - 1) / CHARS_PER_LINE).max(1);
+        raw.min(8) as u16
+    }
+
+    /// Total inspector lines the ATTRIBUTES section occupies for a slice
+    /// (heading + one entry per attr × its wrap lines, or one "(none)" line).
+    pub fn attrs_section_lines(&self, slice_idx: u32) -> u16 {
+        let attrs = self.attrs_for_slice(slice_idx);
+        let mut total: u16 = 1; // heading
+        if attrs.is_empty() {
+            total += 1; // "(none)"
+        } else {
+            for (k, v) in &attrs {
+                total = total.saturating_add(self.attr_wrap_lines(k, v));
+            }
+        }
+        total
+    }
+
+    /// Return the attribute (key, value) pairs for a slice, sorted by key.
+    /// Empty vec if the slice has no attrs or the profile carries no attrs.
+    pub fn attrs_for_slice(&self, slice_idx: u32) -> Vec<(String, String)> {
+        let Some(profile) = &self.profile else { return Vec::new() };
+        let Some(row) = profile.attrs.per_slice.get(slice_idx as usize) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, String)> = row
+            .iter()
+            .filter_map(|(k_idx, v_sid)| {
+                let key_sid = profile.attrs.keys.get(*k_idx as usize).copied()?;
+                Some((
+                    profile.strings.get(key_sid).to_string(),
+                    profile.strings.get(*v_sid).to_string(),
+                ))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
     }
 
     /// Sandwich rows for the inspector sidebar — top-N callers + top-N callees
@@ -849,6 +1158,37 @@ impl Renderer {
         self.window_w_px - INSPECTOR_WIDTH_PX
     }
 
+    /// Y where the right-sidebar *content* (below the per-sidebar tab strip)
+    /// begins. Use this anywhere the inspector lays out body content.
+    pub fn inspector_content_top(&self) -> f32 {
+        TAB_BAR_HEIGHT_PX + SIDEBAR_TAB_BAR_H
+    }
+
+    /// Vertical scroll on the SEQUENCE diagram. `dy > 0` moves content up.
+    pub fn pan_sequence(&mut self, dy: f32) {
+        // Clamping is approximate (no precomputed content height); we just
+        // floor at zero. Over-scrolling past the end is harmless visually
+        // since out-of-band activation boxes are culled.
+        self.sequence_scroll_y_px = (self.sequence_scroll_y_px + dy).max(0.0);
+    }
+
+    pub fn set_sidebar_tab(&mut self, tab: SidebarTab) {
+        if self.sidebar_tab != tab {
+            // Reset scroll when switching tabs so the new tab starts at top.
+            self.sidebar_scroll_y_px = 0.0;
+        }
+        self.sidebar_tab = tab;
+    }
+
+    /// Add `dy` pixels to the sidebar scroll offset, clamped to the content
+    /// height. `dy > 0` scrolls toward the bottom (content moves up).
+    pub fn pan_sidebar(&mut self, dy: f32) {
+        let visible = (self.viewport.size_px.1 - self.inspector_content_top() - STATUS_BAR_HEIGHT_PX)
+            .max(0.0);
+        let max_scroll = (self.sidebar_content_h_px - visible).max(0.0);
+        self.sidebar_scroll_y_px = (self.sidebar_scroll_y_px + dy).clamp(0.0, max_scroll);
+    }
+
     /// True if `x` falls inside the inspector area (right side of the window).
     pub fn cursor_in_inspector(&self, x: f32) -> bool {
         x >= self.inspector_x()
@@ -941,6 +1281,12 @@ impl Renderer {
         // Non-flame tabs render a full-window content list below the tab bar.
         if self.active_tab == MainTab::CallTree {
             self.emit_call_tree_content();
+            self.emit_top_tab_bar();
+            self.finalize_instance_buffer();
+            return;
+        }
+        if self.active_tab == MainTab::Sequence {
+            self.emit_sequence_content();
             self.emit_top_tab_bar();
             self.finalize_instance_buffer();
             return;
@@ -1088,7 +1434,18 @@ impl Renderer {
                     let w_px = (d as f64 / self.viewport.ns_per_pixel) as f32;
                     let name_id = active_slices.name[idx];
                     let name = profile.strings.get(name_id);
-                    let color = palette::color_for(name);
+                    let cat_id = active_slices.category[idx];
+                    let cat_name_id = profile.categories[cat_id.0 as usize].name;
+                    let cat_name = profile.strings.get(cat_name_id);
+                    // Formats that don't carry meaningful categories fall back
+                    // to the bland built-in "default" — for those we use the
+                    // classic name-based warm palette so each function still
+                    // varies visually.
+                    let color = if cat_name == "default" {
+                        palette::color_for(name)
+                    } else {
+                        palette::color_for_blend(cat_name, name)
+                    };
 
                     if w_px >= 1.0 {
                         // Flush pending sub-pixel bucket first.
@@ -1235,21 +1592,122 @@ impl Renderer {
             }
         }
 
+        // Right-sidebar body content (GROUP key list when GROUP tab is
+        // active). INSPECT body content (SANDWICH row chrome) is emitted in
+        // its own block further down. Both are scroll-shifted by
+        // `sidebar_scroll_y_px` and clipped to the inspector body area; the
+        // tab strip itself is emitted at the very end so it always masks
+        // anything that scrolled into its y range.
+        self.group_picker_row_rects.clear();
+        self.sidebar_tab_rects.clear();
+        let sidebar_scroll = self.sidebar_scroll_y_px;
+        let body_top = self.inspector_content_top();
+        let body_bot = self.viewport.size_px.1 - STATUS_BAR_HEIGHT_PX;
+        if self.active_tab == MainTab::Flame {
+            // GROUP-tab content: list of (none) + every attribute key.
+            if self.sidebar_tab == SidebarTab::Group {
+                let pad = INSPECTOR_PADDING_PX;
+                let row_h = 40.0_f32;
+                let content_x = inspector_x + pad;
+                let content_w = INSPECTOR_WIDTH_PX - pad * 2.0;
+                // Natural (unscrolled) start; scroll applied per-row below so
+                // we know which rows fall outside the visible band.
+                let base_y = body_top + pad;
+                let mut natural_y = base_y;
+
+                let emit_row = |rect: [f32; 4],
+                                selected: bool,
+                                even: bool,
+                                instances: &mut Vec<SliceInstance>,
+                                indices: &mut Vec<u32>| {
+                    let bg = if selected {
+                        TOP_TAB_ACTIVE
+                    } else if even {
+                        ROW_COLOR_EVEN
+                    } else {
+                        ROW_COLOR_ODD
+                    };
+                    let inst_id = instances.len() as u32;
+                    instances.push(SliceInstance {
+                        rect_px: rect,
+                        color: bg,
+                        instance_id: inst_id,
+                        flags: 1,
+                        _pad: [0; 2],
+                    });
+                    indices.push(NON_SLICE_SENTINEL);
+                };
+
+                let keys = self.available_group_keys();
+                let emit = |val: Option<StringId>,
+                                row_idx: usize,
+                                natural_y: f32,
+                                instances: &mut Vec<SliceInstance>,
+                                indices: &mut Vec<u32>,
+                                rects: &mut Vec<(Option<StringId>, [f32; 4])>,
+                                selected: bool| {
+                    let y = natural_y - sidebar_scroll;
+                    // Skip rows that are entirely above or below the visible
+                    // body band — saves draw work and keeps rects from being
+                    // hit-tested where they shouldn't be.
+                    if y + row_h <= body_top || y >= body_bot {
+                        return;
+                    }
+                    let rect = [content_x, y, content_w, row_h - 2.0];
+                    emit_row(rect, selected, row_idx % 2 == 0, instances, indices);
+                    rects.push((val, rect));
+                };
+
+                // "(none)" row.
+                emit(
+                    None,
+                    0,
+                    natural_y,
+                    &mut self.instances,
+                    &mut self.slice_indices,
+                    &mut self.group_picker_row_rects,
+                    self.group_key.is_none(),
+                );
+                natural_y += row_h;
+                for (i, (sid, _name)) in keys.iter().enumerate() {
+                    emit(
+                        Some(*sid),
+                        i + 1,
+                        natural_y,
+                        &mut self.instances,
+                        &mut self.slice_indices,
+                        &mut self.group_picker_row_rects,
+                        self.group_key == Some(*sid),
+                    );
+                    natural_y += row_h;
+                }
+                self.sidebar_content_h_px = (natural_y - base_y).max(0.0);
+            }
+        }
+
         // SANDWICH section — only when a slice is selected. Renders below STACK.
+        // Skipped entirely when the sidebar is on the GROUP tab so the key
+        // list owns the inspector area.
+        if self.active_tab == MainTab::Flame
+            && self.sidebar_tab == SidebarTab::Inspect
+        {
         if let Some(section_y) = self.sandwich_section_y() {
             let pad = INSPECTOR_PADDING_PX;
             let line = INSPECTOR_LINE_HEIGHT_PX;
             // Skip the SANDWICH heading line; chrome rows start below it.
-            let mut y = section_y + line + 4.0;
+            // `section_y` is in unscrolled (natural) coordinates.
+            let mut natural_y = section_y + line + 4.0;
             let row_h = line * 1.4;
             let band_x = inspector_x + pad;
             let band_w = INSPECTOR_WIDTH_PX - pad * 2.0;
-            let max_y = self.viewport.size_px.1 - STATUS_BAR_HEIGHT_PX;
 
             if let Some(rows) = self.sandwich_rows(5) {
                 for (i, (slice_idx, _)) in rows.iter().enumerate() {
-                    if y + row_h > max_y {
-                        break;
+                    let y = natural_y - sidebar_scroll;
+                    natural_y += row_h;
+                    // Skip rows entirely outside the visible sidebar body band.
+                    if y + row_h <= body_top || y >= body_bot {
+                        continue;
                     }
                     // Section markers ("── CALLERS ──") get a faint divider band
                     // instead of a normal alternating row.
@@ -1274,7 +1732,64 @@ impl Renderer {
                         rect: [band_x, y, band_w, row_h - 2.0],
                         slice_idx: *slice_idx,
                     });
-                    y += row_h;
+                }
+            }
+            // Total INSPECT body content height = how far the natural y went
+            // past the body top.
+            self.sidebar_content_h_px = (natural_y - body_top).max(0.0);
+        } else {
+            self.sidebar_content_h_px = 0.0;
+        }
+        }
+
+        // Sidebar tab strip — emitted AFTER any body content so it always
+        // overdraws what may have scrolled up into its y range.
+        if self.active_tab == MainTab::Flame {
+            let strip_x = inspector_x;
+            let strip_y = TAB_BAR_HEIGHT_PX;
+            let strip_w = INSPECTOR_WIDTH_PX;
+            let strip_h = SIDEBAR_TAB_BAR_H;
+
+            let inst_id = self.instances.len() as u32;
+            self.instances.push(SliceInstance {
+                rect_px: [strip_x, strip_y, strip_w, strip_h],
+                color: TAB_BAR_BG_COLOR,
+                instance_id: inst_id,
+                flags: 1,
+                _pad: [0; 2],
+            });
+            self.slice_indices.push(NON_SLICE_SENTINEL);
+
+            let n = SidebarTab::ALL.len();
+            let outer = 12.0_f32;
+            let gap = 6.0_f32;
+            let btn_w = (strip_w - outer * 2.0 - gap * (n as f32 - 1.0)) / n as f32;
+            let btn_h = strip_h - 8.0;
+            let btn_y = strip_y + 4.0;
+            for (i, &tab) in SidebarTab::ALL.iter().enumerate() {
+                let x = strip_x + outer + (btn_w + gap) * i as f32;
+                let active = tab == self.sidebar_tab;
+                let bg = if active { TOP_TAB_ACTIVE } else { TOP_TAB_INACTIVE };
+                let inst_id = self.instances.len() as u32;
+                self.instances.push(SliceInstance {
+                    rect_px: [x, btn_y, btn_w, btn_h],
+                    color: bg,
+                    instance_id: inst_id,
+                    flags: 1,
+                    _pad: [0; 2],
+                });
+                self.slice_indices.push(NON_SLICE_SENTINEL);
+                self.sidebar_tab_rects.push((tab, [x, btn_y, btn_w, btn_h]));
+                if active {
+                    let inst_id = self.instances.len() as u32;
+                    self.instances.push(SliceInstance {
+                        rect_px: [x, btn_y + btn_h - 3.0, btn_w, 3.0],
+                        color: TOP_TAB_ACCENT,
+                        instance_id: inst_id,
+                        flags: 1,
+                        _pad: [0; 2],
+                    });
+                    self.slice_indices.push(NON_SLICE_SENTINEL);
                 }
             }
         }
@@ -1396,6 +1911,222 @@ impl Renderer {
             }
         }
         None
+    }
+
+    /// Distinct values of `key` across the whole original profile, in stable
+    /// alphabetical order. `None` slot reserved at the end for spans missing
+    /// the key. Used for SEQUENCE column ordering.
+    pub fn sequence_global_lifelines(&self, key: StringId) -> Vec<Option<StringId>> {
+        let Some(orig) = &self.original_profile else { return Vec::new() };
+        let mut set: std::collections::HashSet<Option<StringId>> = std::collections::HashSet::new();
+        for i in 0..orig.slices.len() as u32 {
+            set.insert(orig.attrs.get(i, key));
+        }
+        let mut out: Vec<Option<StringId>> = set.into_iter().collect();
+        out.sort_by(|a, b| match (a, b) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, _) => std::cmp::Ordering::Greater,
+            (_, None) => std::cmp::Ordering::Less,
+            (Some(av), Some(bv)) => orig.strings.get(*av).cmp(orig.strings.get(*bv)),
+        });
+        out
+    }
+
+    /// Emit the SEQUENCE tab: full-window swimlane. Vertical columns = the
+    /// distinct values of the configured lifeline key (default `service`).
+    /// Time runs top→bottom over the entire capture. Every span becomes an
+    /// activation box on its column. Cross-host parent→child relationships
+    /// get a solid request line at the child's start and a dashed return at
+    /// its end.
+    fn emit_sequence_content(&mut self) {
+        let top = TAB_BAR_HEIGHT_PX;
+        let bot = self.viewport.size_px.1 - STATUS_BAR_HEIGHT_PX;
+        let w = self.window_w_px;
+
+        // Full-window dark background.
+        let inst_id = self.instances.len() as u32;
+        self.instances.push(SliceInstance {
+            rect_px: [0.0, top, w, bot - top],
+            color: [0.085, 0.092, 0.110, 1.0],
+            instance_id: inst_id,
+            flags: 1,
+            _pad: [0; 2],
+        });
+        self.slice_indices.push(NON_SLICE_SENTINEL);
+
+        let (Some(key), Some(orig)) = (self.sequence_lifeline_key, self.original_profile.clone())
+        else {
+            return;
+        };
+        let lifelines = self.sequence_global_lifelines(key);
+        if lifelines.is_empty() || orig.slices.len() == 0 {
+            return;
+        }
+
+        let (cap_start, cap_end) = orig.time_range;
+        let duration = (cap_end.saturating_sub(cap_start)).max(1);
+
+        let header_h = SEQUENCE_HEADER_H;
+        let body_top = top + header_h;
+        let body_bot = bot - 16.0;
+        let body_h = (body_bot - body_top).max(1.0);
+        let scroll = self.sequence_scroll_y_px;
+
+        // Time scale: fit `duration` into `body_h` minus scroll. Vertical
+        // panning shifts content; horizontal pan / zoom are follow-ups.
+        let ns_to_y = |ns: u64| -> f32 {
+            let dt = ns.saturating_sub(cap_start) as f64;
+            body_top + (dt / duration as f64) as f32 * body_h - scroll
+        };
+
+        let n_lanes = lifelines.len() as f32;
+        let lane_w = (w / n_lanes).max(60.0);
+        let lifeline_x = |lane_idx: usize| -> f32 { lane_w * (lane_idx as f32 + 0.5) };
+
+        // Vertical lifeline rules.
+        for li in 0..lifelines.len() {
+            let x = lifeline_x(li);
+            let inst_id = self.instances.len() as u32;
+            self.instances.push(SliceInstance {
+                rect_px: [x - 1.0, body_top, 2.0, body_h],
+                color: [0.30, 0.33, 0.40, 1.0],
+                instance_id: inst_id,
+                flags: 1,
+                _pad: [0; 2],
+            });
+            self.slice_indices.push(NON_SLICE_SENTINEL);
+        }
+
+        // Header band.
+        let inst_id = self.instances.len() as u32;
+        self.instances.push(SliceInstance {
+            rect_px: [0.0, top, w, header_h],
+            color: HEADER_COLOR,
+            instance_id: inst_id,
+            flags: 1,
+            _pad: [0; 2],
+        });
+        self.slice_indices.push(NON_SLICE_SENTINEL);
+
+        // Build span_id → slice_idx map for parent lookups.
+        let span_id_key = orig.strings.lookup("span_id");
+        let parent_key = orig.strings.lookup("parent_span_id");
+        let span_by_id: AHashMap<StringId, u32> = if let Some(sk) = span_id_key {
+            (0..orig.slices.len() as u32)
+                .filter_map(|i| orig.attrs.get(i, sk).map(|sid| (sid, i)))
+                .collect()
+        } else {
+            AHashMap::new()
+        };
+
+        // Per-span: (lane_idx, y0, y1). Precompute so the arrow pass can
+        // reuse the same x/y math without re-doing the lookup.
+        let n = orig.slices.len();
+        let mut lane_of: Vec<i32> = vec![-1; n];
+        for i in 0..n as u32 {
+            if let Some(val) = orig.attrs.get(i, key) {
+                if let Some(li) = lifelines.iter().position(|l| *l == Some(val)) {
+                    lane_of[i as usize] = li as i32;
+                }
+            } else if let Some(li) = lifelines.iter().position(|l| l.is_none()) {
+                lane_of[i as usize] = li as i32;
+            }
+        }
+
+        // Activation boxes — one per span.
+        let box_w = (lane_w * 0.18).clamp(10.0, 32.0);
+        for i in 0..n {
+            let li = lane_of[i];
+            if li < 0 {
+                continue;
+            }
+            let y0 = ns_to_y(orig.slices.start_ns[i]);
+            let y1 = ns_to_y(orig.slices.start_ns[i] + orig.slices.dur_ns[i]);
+            if y1 < body_top - 4.0 || y0 > body_bot + 4.0 {
+                continue;
+            }
+            let cat_id = orig.slices.category[i];
+            let cat_name = orig.strings.get(orig.categories[cat_id.0 as usize].name);
+            let name = orig.strings.get(orig.slices.name[i]);
+            let color = if cat_name == "default" {
+                palette::color_for(name)
+            } else {
+                palette::color_for_blend(cat_name, name)
+            };
+            let x = lifeline_x(li as usize) - box_w * 0.5;
+            let h = (y1 - y0).max(1.5);
+            let inst_id = self.instances.len() as u32;
+            self.instances.push(SliceInstance {
+                rect_px: [x, y0, box_w, h],
+                color,
+                instance_id: inst_id,
+                flags: 1,
+                _pad: [0; 2],
+            });
+            self.slice_indices.push(NON_SLICE_SENTINEL);
+        }
+
+        // Cross-lane arrows. For each span with a parent that resolves to a
+        // different lane: solid line at child.start from parent→child,
+        // dashed line at child.end from child→parent.
+        if let (Some(pk), true) = (parent_key, !span_by_id.is_empty()) {
+            let request_color = [0.92, 0.62, 0.30, 0.85];
+            let response_color = [0.55, 0.62, 0.78, 0.70];
+            for i in 0..n as u32 {
+                let child_li = lane_of[i as usize];
+                if child_li < 0 {
+                    continue;
+                }
+                let Some(pid) = orig.attrs.get(i, pk) else { continue };
+                let Some(&parent_i) = span_by_id.get(&pid) else { continue };
+                let parent_li = lane_of[parent_i as usize];
+                if parent_li < 0 || parent_li == child_li {
+                    continue;
+                }
+                let start = orig.slices.start_ns[i as usize];
+                let end = start + orig.slices.dur_ns[i as usize];
+                let y_req = ns_to_y(start);
+                let y_resp = ns_to_y(end);
+                let px = lifeline_x(parent_li as usize);
+                let cx = lifeline_x(child_li as usize);
+                let lo = px.min(cx) + box_w * 0.5;
+                let hi = px.max(cx) - box_w * 0.5;
+                if hi - lo < 2.0 {
+                    continue;
+                }
+                // Request: solid horizontal line at child start.
+                if y_req >= body_top - 2.0 && y_req <= body_bot + 2.0 {
+                    let inst_id = self.instances.len() as u32;
+                    self.instances.push(SliceInstance {
+                        rect_px: [lo, y_req - 1.0, hi - lo, 2.0],
+                        color: request_color,
+                        instance_id: inst_id,
+                        flags: 1,
+                        _pad: [0; 2],
+                    });
+                    self.slice_indices.push(NON_SLICE_SENTINEL);
+                }
+                // Response: dashed horizontal line at child end (segments).
+                if y_resp >= body_top - 2.0 && y_resp <= body_bot + 2.0 && y_resp != y_req {
+                    let seg = 6.0_f32;
+                    let gap = 4.0_f32;
+                    let mut x = lo;
+                    while x < hi {
+                        let w = seg.min(hi - x);
+                        let inst_id = self.instances.len() as u32;
+                        self.instances.push(SliceInstance {
+                            rect_px: [x, y_resp - 1.0, w, 2.0],
+                            color: response_color,
+                            instance_id: inst_id,
+                            flags: 1,
+                            _pad: [0; 2],
+                        });
+                        self.slice_indices.push(NON_SLICE_SENTINEL);
+                        x += seg + gap;
+                    }
+                }
+            }
+        }
     }
 
     /// Emit row backgrounds + click rects for the CallTree tab. Text labels are
@@ -1575,11 +2306,18 @@ impl Renderer {
             /// Timeline / inspector content (clip top at TAB_BAR_HEIGHT_PX,
             /// bottom at status-bar top).
             Below,
+            /// Sidebar body — like `Below` but clip top is `inspector_content_top()`
+            /// so scrolled body labels never bleed up into the sidebar tab strip.
+            SidebarBody,
             /// Status bar (no extra clipping).
             Status,
         }
         let row_h = self.viewport.row_height_px;
         let mut labels: Vec<(String, f32, f32, f32, Metric, GlyphonColor, Zone)> = Vec::new();
+        // Per-label wrap line count. 0/1 = single line (no wrap). N > 1 enables
+        // word wrap into up to N lines; the y-bounds and clip rect grow with it.
+        // Parallel to `labels`; only entries we explicitly override get N > 1.
+        let mut wrap_lines_overrides: Vec<(usize, u16)> = Vec::new();
         let inner_pad = 6.0_f32;
         let scroll_y = self.viewport.scroll_y_px;
         let top_offset = TAB_BAR_HEIGHT_PX;
@@ -1620,6 +2358,58 @@ impl Renderer {
                 color,
                 Zone::Below,
             ));
+        }
+
+        // Sidebar tab-strip labels (GROUP / INSPECT).
+        if self.active_tab == MainTab::Flame {
+            let rects = self.sidebar_tab_rects.clone();
+            for (tab, rect) in rects {
+                let active = tab == self.sidebar_tab;
+                let color = if active { title_color } else { dim_color };
+                let lh = INSPECTOR_LINE_HEIGHT_PX;
+                // Center text in the button.
+                let approx_glyph_w = 11.0_f32;
+                let text_w = tab.label().len() as f32 * approx_glyph_w;
+                let tx = rect[0] + ((rect[2] - text_w) * 0.5).max(0.0);
+                labels.push((
+                    tab.label().to_string(),
+                    tx,
+                    rect[1] + (rect[3] - lh) * 0.5,
+                    rect[2],
+                    Metric::InspectorHeading,
+                    color,
+                    Zone::Below,
+                ));
+            }
+
+            // GROUP-tab row labels. Rects already carry the scroll offset
+            // (applied at chrome-emit time), and SidebarBody clips so labels
+            // scrolled into the tab-strip area don't bleed through.
+            if self.sidebar_tab == SidebarTab::Group {
+                let rows = self.group_picker_row_rects.clone();
+                let lh = INSPECTOR_LINE_HEIGHT_PX;
+                for (val, rect) in rows {
+                    let text = match val {
+                        None => "(none)".to_string(),
+                        Some(sid) => self
+                            .original_profile
+                            .as_ref()
+                            .map(|p| p.strings.get(sid).to_string())
+                            .unwrap_or_else(|| "?".into()),
+                    };
+                    let selected = self.group_key == val;
+                    let color = if selected { title_color } else { dim_color };
+                    labels.push((
+                        format!("  {text}"),
+                        rect[0] + 12.0,
+                        rect[1] + (rect[3] - lh) * 0.5,
+                        rect[2] - 12.0,
+                        Metric::InspectorBody,
+                        color,
+                        Zone::SidebarBody,
+                    ));
+                }
+            }
         }
 
         // In aggregated mode `slice_indices` and `selected_slice` index into
@@ -1690,13 +2480,19 @@ impl Renderer {
         let pad = INSPECTOR_PADDING_PX;
         let line = INSPECTOR_LINE_HEIGHT_PX;
 
-        let mut iy = top_offset + pad;
+        // Account for the sidebar tab strip that sits between the global tab
+        // bar and the inspector body. Body labels then apply the sidebar
+        // scroll offset and use Zone::SidebarBody so they're clipped to the
+        // body area (never bleed up into the tab strip).
+        let mut iy = self.inspector_content_top() + pad - self.sidebar_scroll_y_px;
+        let _ = top_offset; // shadowed for inspector y; keep var for other consumers
         let inspector_text_x = inspector_x + pad;
         let inspector_text_w = INSPECTOR_WIDTH_PX - pad * 2.0;
 
-        // FLAME tab inspector content (SELECTED + STACK only). Other tabs show
-        // their own full-window content view below the tab bar.
-        if self.active_tab == MainTab::Flame {
+        // FLAME tab inspector content (SELECTED + STACK only). Skipped when
+        // the sidebar's GROUP tab owns the inspector area. Other MainTabs
+        // render their own full-window content view below the tab bar.
+        if self.active_tab == MainTab::Flame && self.sidebar_tab == SidebarTab::Inspect {
         if let Some(sel_idx) = self.selected_slice {
             let i = sel_idx as usize;
             if i < label_slices.len() {
@@ -1706,17 +2502,17 @@ impl Renderer {
                 let track_idx = label_slices.track[i].0 as usize;
                 let track_name = profile.tracks.get(track_idx).map(|t| profile.strings.get(t.name)).unwrap_or("?");
 
-                labels.push(("SELECTED".into(), inspector_text_x, iy, inspector_text_w, Metric::InspectorHeading, dim_color, Zone::Below));
+                labels.push(("SELECTED".into(), inspector_text_x, iy, inspector_text_w, Metric::InspectorHeading, dim_color, Zone::SidebarBody));
                 iy += line;
-                labels.push((name, inspector_text_x, iy, inspector_text_w, Metric::InspectorTitle, title_color, Zone::Below));
+                labels.push((name, inspector_text_x, iy, inspector_text_w, Metric::InspectorTitle, title_color, Zone::SidebarBody));
                 iy += INSPECTOR_TITLE_LINE_HEIGHT;
                 let meta = format!("{}    depth {}    {}", format_duration(dur), depth, track_name);
-                labels.push((meta, inspector_text_x, iy, inspector_text_w, Metric::InspectorBody, dim_color, Zone::Below));
+                labels.push((meta, inspector_text_x, iy, inspector_text_w, Metric::InspectorBody, dim_color, Zone::SidebarBody));
                 iy += line + SECTION_GAP_PX;
 
                 // Reconstruct call stack.
                 let stack = self.reconstruct_stack(sel_idx);
-                labels.push(("STACK".into(), inspector_text_x, iy, inspector_text_w, Metric::InspectorHeading, dim_color, Zone::Below));
+                labels.push(("STACK".into(), inspector_text_x, iy, inspector_text_w, Metric::InspectorHeading, dim_color, Zone::SidebarBody));
                 iy += line;
                 // Show up to last 8 entries; deeper traces get truncated with an ellipsis.
                 let max_lines = 8;
@@ -1726,7 +2522,7 @@ impl Renderer {
                     stack.iter().collect()
                 };
                 if stack.len() > max_lines {
-                    labels.push(("…".into(), inspector_text_x + 16.0, iy, inspector_text_w - 16.0, Metric::InspectorBody, dim_color, Zone::Below));
+                    labels.push(("…".into(), inspector_text_x + 16.0, iy, inspector_text_w - 16.0, Metric::InspectorBody, dim_color, Zone::SidebarBody));
                     iy += line;
                 }
                 for sidx_ref in show {
@@ -1743,9 +2539,59 @@ impl Renderer {
                         inspector_text_w,
                         Metric::InspectorBody,
                         label_color,
-                        Zone::Below,
+                        Zone::SidebarBody,
                     ));
                     iy += line;
+                }
+                iy += SECTION_GAP_PX;
+
+                // ATTRIBUTES section: every (key, value) on the selected
+                // span, sorted by key. Includes inherited attributes for OTel
+                // (the loader resolves the parent-chain at load time). Long
+                // values (SQL queries etc.) word-wrap across multiple lines
+                // via `attr_wrap_lines`.
+                labels.push((
+                    "ATTRIBUTES".into(),
+                    inspector_text_x,
+                    iy,
+                    inspector_text_w,
+                    Metric::InspectorHeading,
+                    dim_color,
+                    Zone::SidebarBody,
+                ));
+                iy += line;
+                let attrs = self.attrs_for_slice(sel_idx);
+                if attrs.is_empty() {
+                    labels.push((
+                        "(none)".into(),
+                        inspector_text_x + 16.0,
+                        iy,
+                        inspector_text_w - 16.0,
+                        Metric::InspectorBody,
+                        dim_color,
+                        Zone::SidebarBody,
+                    ));
+                    iy += line;
+                } else {
+                    for (k, v) in &attrs {
+                        let display_v = v.replace('\n', " ");
+                        let line_text = format!("{k}:  {display_v}");
+                        let wraps = self.attr_wrap_lines(k, &display_v);
+                        let idx = labels.len();
+                        labels.push((
+                            line_text,
+                            inspector_text_x,
+                            iy,
+                            inspector_text_w,
+                            Metric::InspectorBody,
+                            label_color,
+                            Zone::SidebarBody,
+                        ));
+                        if wraps > 1 {
+                            wrap_lines_overrides.push((idx, wraps));
+                        }
+                        iy += line * wraps as f32;
+                    }
                 }
                 iy += SECTION_GAP_PX;
 
@@ -1759,7 +2605,7 @@ impl Renderer {
                         inspector_text_w,
                         Metric::InspectorHeading,
                         dim_color,
-                        Zone::Below,
+                        Zone::SidebarBody,
                     ));
                     let row_data = self.sandwich_rows(5).unwrap_or_default();
                     for (hi, rect) in self.inspector_hotspot_rects.clone().iter().enumerate() {
@@ -1778,7 +2624,7 @@ impl Renderer {
                             rect.rect[2] - 24.0,
                             Metric::InspectorBody,
                             color,
-                            Zone::Below,
+                            Zone::SidebarBody,
                         ));
                     }
                 }
@@ -1870,6 +2716,46 @@ impl Renderer {
                     Zone::Below,
                 ));
             }
+        } else if self.active_tab == MainTab::Sequence {
+            // SEQUENCE tab: column-header labels for each lifeline (no trace
+            // picker — the diagram covers the entire capture).
+            let lh = INSPECTOR_LINE_HEIGHT_PX;
+            if let (Some(key), Some(orig)) =
+                (self.sequence_lifeline_key, self.original_profile.clone())
+            {
+                let lifelines = self.sequence_global_lifelines(key);
+                if !lifelines.is_empty() {
+                    let n_lanes = lifelines.len() as f32;
+                    let lane_w = (self.window_w_px / n_lanes).max(60.0);
+                    let key_label = orig.strings.get(key).to_string();
+                    labels.push((
+                        key_label.to_uppercase(),
+                        12.0,
+                        top_offset + 4.0,
+                        self.window_w_px - 24.0,
+                        Metric::InspectorBody,
+                        dim_color,
+                        Zone::Below,
+                    ));
+                    for (li, val) in lifelines.iter().enumerate() {
+                        let txt = match val {
+                            None => format!("(no {})", key_label),
+                            Some(sid) => orig.strings.get(*sid).to_string(),
+                        };
+                        let cx = lane_w * (li as f32 + 0.5);
+                        let approx_w = (txt.len() as f32 * 11.0).min(lane_w - 8.0);
+                        labels.push((
+                            txt,
+                            cx - approx_w * 0.5,
+                            top_offset + SEQUENCE_HEADER_H - lh - 4.0,
+                            approx_w,
+                            Metric::InspectorHeading,
+                            title_color,
+                            Zone::Below,
+                        ));
+                    }
+                }
+            }
         } else {
             // Full-window content for HOT / SELF / SAND / ALL tabs.
             // Section heading at the top.
@@ -1952,6 +2838,15 @@ impl Renderer {
             self.text_buffers.truncate(labels.len() + 256);
         }
 
+        // Materialize per-label wrap-line counts: default 1, overridden where
+        // the label requested word-wrap (currently only ATTRIBUTES values).
+        let mut wrap_lines: Vec<u16> = vec![1; labels.len()];
+        for &(idx, n) in &wrap_lines_overrides {
+            if idx < wrap_lines.len() {
+                wrap_lines[idx] = n;
+            }
+        }
+
         for (i, (text, _x, _y, max_w, metric, _color, _zone)) in labels.iter().enumerate() {
             let buf = &mut self.text_buffers[i];
             let (fs, lh) = match metric {
@@ -1965,7 +2860,10 @@ impl Renderer {
                 Metric::MonoBody => (INSPECTOR_BODY_FONT, INSPECTOR_LINE_HEIGHT_PX),
             };
             buf.set_metrics(&mut self.font_system, Metrics::new(fs, lh));
-            buf.set_size(&mut self.font_system, Some(*max_w), Some(lh));
+            let n_lines = wrap_lines[i].max(1) as f32;
+            let wrap_mode = if n_lines > 1.0 { Wrap::Word } else { Wrap::None };
+            buf.set_wrap(&mut self.font_system, wrap_mode);
+            buf.set_size(&mut self.font_system, Some(*max_w), Some(lh * n_lines));
             let family = if *metric == Metric::MonoBody {
                 Family::Monospace
             } else {
@@ -1985,6 +2883,8 @@ impl Renderer {
         // of the timeline.
         let view_w = self.window_w_px as i32;
         let view_h = self.viewport.size_px.1 as i32;
+        // Precompute so the closure below doesn't reborrow &self.
+        let inspector_body_top = self.inspector_content_top() as i32;
 
         let text_areas: Vec<TextArea> = labels
             .iter()
@@ -1998,15 +2898,17 @@ impl Renderer {
                     | Metric::MonoBody => INSPECTOR_LINE_HEIGHT_PX,
                     Metric::InspectorTitle => INSPECTOR_TITLE_LINE_HEIGHT,
                 };
+                let n_lines = wrap_lines[i].max(1) as f32;
                 let bounds_left = x.floor() as i32;
                 let bounds_top = y.floor() as i32;
                 let bounds_right = (x + max_w).ceil() as i32;
-                let bounds_bottom = (y + lh).ceil() as i32;
+                let bounds_bottom = (y + lh * n_lines).ceil() as i32;
                 let tab_bar_h = TAB_BAR_HEIGHT_PX as i32;
                 let status_top = (self.viewport.size_px.1 - STATUS_BAR_HEIGHT_PX) as i32;
                 let (clip_top, clip_bot) = match zone {
                     Zone::TabBar => (0, tab_bar_h),
                     Zone::Below => (tab_bar_h, status_top),
+                    Zone::SidebarBody => (inspector_body_top, status_top),
                     Zone::Status => (status_top, view_h),
                 };
                 TextArea {
@@ -2681,6 +3583,287 @@ fn visible_depth_range(
             let end = (rows_i - dp_start).max(0) as u16;
             (start, end)
         }
+    }
+}
+
+/// Build a single-track view of a profile. Strings, categories, processes,
+/// threads, stacks, and samples are cloned verbatim. The track list is
+/// replaced with one synthetic "all spans" track; every slice is repacked
+/// onto it with greedy first-fit row assignment so no two slices overlap
+/// in the same row.
+fn build_single_track_profile(orig: &Profile) -> Profile {
+    let n = orig.slices.len();
+
+    // Greedy first-fit row pack. `row_end[r]` is the last end_ns assigned to
+    // row r. Walk spans in start-order; pick the smallest-indexed row whose
+    // last-end is <= this start, else open a new row.
+    let mut visit: Vec<u32> = (0..n as u32).collect();
+    visit.sort_by_key(|&i| orig.slices.start_ns[i as usize]);
+
+    let mut row_end: Vec<u64> = Vec::new();
+    let mut new_depth: Vec<u16> = vec![0; n];
+    for &i in &visit {
+        let i = i as usize;
+        let start = orig.slices.start_ns[i];
+        let end = start.saturating_add(orig.slices.dur_ns[i]);
+        let mut chose: Option<usize> = None;
+        for (r, &e) in row_end.iter().enumerate() {
+            if e <= start {
+                chose = Some(r);
+                break;
+            }
+        }
+        let d = match chose {
+            Some(r) => {
+                row_end[r] = end;
+                r
+            }
+            None => {
+                row_end.push(end);
+                row_end.len() - 1
+            }
+        };
+        new_depth[i] = d as u16;
+    }
+    let row_count = row_end.len() as u16;
+
+    // Sort entries into (depth, start_ns) order so the SoA respects the
+    // flame-graph invariant (sorted by track, depth, start_ns) and the
+    // per-row range index is contiguous.
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    order.sort_by_key(|&i| {
+        let i = i as usize;
+        (new_depth[i], orig.slices.start_ns[i])
+    });
+
+    let mut strings = orig.strings.clone();
+    let track_name = strings.intern("all spans (merged)");
+
+    let synth_track = Track {
+        kind: TrackKind::Global,
+        name: track_name,
+        parent: None,
+        row_count,
+    };
+    let track_id = TrackId(0);
+
+    let mut slices = SliceTable {
+        track: Vec::with_capacity(n),
+        depth: Vec::with_capacity(n),
+        start_ns: Vec::with_capacity(n),
+        dur_ns: Vec::with_capacity(n),
+        name: Vec::with_capacity(n),
+        category: Vec::with_capacity(n),
+        stack: Vec::with_capacity(n),
+        rows: ahash::AHashMap::new(),
+    };
+    let mut row_start: u32 = 0;
+    let mut cur_depth: Option<u16> = None;
+    let mut per_slice_attrs: Vec<Vec<(u16, StringId)>> = Vec::with_capacity(n);
+    for (pos, &src) in order.iter().enumerate() {
+        let src = src as usize;
+        let d = new_depth[src];
+        if Some(d) != cur_depth {
+            if let Some(prev) = cur_depth {
+                slices.rows.insert((track_id, prev), row_start..pos as u32);
+            }
+            row_start = pos as u32;
+            cur_depth = Some(d);
+        }
+        slices.track.push(track_id);
+        slices.depth.push(d);
+        slices.start_ns.push(orig.slices.start_ns[src]);
+        slices.dur_ns.push(orig.slices.dur_ns[src]);
+        slices.name.push(orig.slices.name[src]);
+        slices.category.push(orig.slices.category[src]);
+        slices.stack.push(orig.slices.stack[src]);
+        per_slice_attrs.push(
+            orig.attrs
+                .per_slice
+                .get(src)
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+    if let Some(prev) = cur_depth {
+        slices.rows.insert((track_id, prev), row_start..n as u32);
+    }
+
+    let attrs = flame_core::AttrTable {
+        keys: orig.attrs.keys.clone(),
+        key_lookup: orig.attrs.key_lookup.clone(),
+        per_slice: per_slice_attrs,
+    };
+
+    Profile {
+        strings,
+        categories: orig.categories.clone(),
+        processes: orig.processes.clone(),
+        threads: orig.threads.clone(),
+        tracks: vec![synth_track],
+        stacks: orig.stacks.clone(),
+        slices,
+        samples: orig.samples.clone(),
+        attrs,
+        time_range: orig.time_range,
+    }
+}
+
+/// Bucket slices by their value of attribute `key`, then build one track per
+/// bucket (alphabetically by value), greedy-row-packed within each. Spans
+/// missing the key land in an "(none)" bucket.
+fn build_grouped_profile(orig: &Profile, key: StringId) -> Profile {
+    let n = orig.slices.len();
+
+    // Step 1: bucket assignment per slice. The bucket key is the value
+    // StringId (or None for absent).
+    let mut bucket_for: Vec<Option<StringId>> = Vec::with_capacity(n);
+    for i in 0..n {
+        bucket_for.push(orig.attrs.get(i as u32, key));
+    }
+
+    // Step 2: ordered bucket list (stable: sort by value string).
+    let mut distinct_values: Vec<Option<StringId>> = bucket_for
+        .iter()
+        .copied()
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    distinct_values.sort_by(|a, b| match (a, b) {
+        (None, None) => std::cmp::Ordering::Equal,
+        // Put "(none)" track at the bottom of the list.
+        (None, _) => std::cmp::Ordering::Greater,
+        (_, None) => std::cmp::Ordering::Less,
+        (Some(av), Some(bv)) => orig.strings.get(*av).cmp(orig.strings.get(*bv)),
+    });
+    let bucket_idx: AHashMap<Option<StringId>, u32> = distinct_values
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| (v, i as u32))
+        .collect();
+
+    // Step 3: per-bucket greedy first-fit row packing. Track row_end[bucket] =
+    // Vec<u64> (last end_ns per row). Walk slices in start order.
+    let mut visit: Vec<u32> = (0..n as u32).collect();
+    visit.sort_by_key(|&i| orig.slices.start_ns[i as usize]);
+
+    let mut row_end_per_bucket: Vec<Vec<u64>> = vec![Vec::new(); distinct_values.len()];
+    let mut new_track: Vec<u32> = vec![0; n];
+    let mut new_depth: Vec<u16> = vec![0; n];
+    for &i in &visit {
+        let i = i as usize;
+        let b = bucket_idx[&bucket_for[i]];
+        let start = orig.slices.start_ns[i];
+        let end = start.saturating_add(orig.slices.dur_ns[i]);
+        let rows = &mut row_end_per_bucket[b as usize];
+        let mut chose: Option<usize> = None;
+        for (r, &e) in rows.iter().enumerate() {
+            if e <= start {
+                chose = Some(r);
+                break;
+            }
+        }
+        let d = match chose {
+            Some(r) => {
+                rows[r] = end;
+                r
+            }
+            None => {
+                rows.push(end);
+                rows.len() - 1
+            }
+        };
+        new_track[i] = b;
+        new_depth[i] = d as u16;
+    }
+
+    // Step 4: re-intern strings (so original + this profile can coexist in
+    // Arcs without aliasing surprises) and build per-bucket Track entries.
+    let mut strings = orig.strings.clone();
+    let mut tracks: Vec<Track> = Vec::with_capacity(distinct_values.len());
+    for (b, val) in distinct_values.iter().enumerate() {
+        let label = match val {
+            Some(sid) => format!("{} = {}", strings.get(key), strings.get(*sid)),
+            None => format!("(no {})", strings.get(key)),
+        };
+        let name_id = strings.intern(&label);
+        tracks.push(Track {
+            kind: TrackKind::Global,
+            name: name_id,
+            parent: None,
+            row_count: row_end_per_bucket[b].len() as u16,
+        });
+    }
+
+    // Step 5: sort all slices into (track, depth, start_ns) order for the SoA
+    // invariant, build SliceTable + parallel attrs.
+    let mut order: Vec<u32> = (0..n as u32).collect();
+    order.sort_by_key(|&i| {
+        let i = i as usize;
+        (new_track[i], new_depth[i], orig.slices.start_ns[i])
+    });
+
+    let mut slices = SliceTable {
+        track: Vec::with_capacity(n),
+        depth: Vec::with_capacity(n),
+        start_ns: Vec::with_capacity(n),
+        dur_ns: Vec::with_capacity(n),
+        name: Vec::with_capacity(n),
+        category: Vec::with_capacity(n),
+        stack: Vec::with_capacity(n),
+        rows: ahash::AHashMap::new(),
+    };
+    let mut per_slice_attrs: Vec<Vec<(u16, StringId)>> = Vec::with_capacity(n);
+    let mut row_start: u32 = 0;
+    let mut cur_key: Option<(TrackId, u16)> = None;
+    for (pos, &src) in order.iter().enumerate() {
+        let src = src as usize;
+        let t = TrackId(new_track[src]);
+        let d = new_depth[src];
+        let key2 = (t, d);
+        if Some(key2) != cur_key {
+            if let Some(prev) = cur_key {
+                slices.rows.insert(prev, row_start..pos as u32);
+            }
+            row_start = pos as u32;
+            cur_key = Some(key2);
+        }
+        slices.track.push(t);
+        slices.depth.push(d);
+        slices.start_ns.push(orig.slices.start_ns[src]);
+        slices.dur_ns.push(orig.slices.dur_ns[src]);
+        slices.name.push(orig.slices.name[src]);
+        slices.category.push(orig.slices.category[src]);
+        slices.stack.push(orig.slices.stack[src]);
+        per_slice_attrs.push(
+            orig.attrs
+                .per_slice
+                .get(src)
+                .cloned()
+                .unwrap_or_default(),
+        );
+    }
+    if let Some(prev) = cur_key {
+        slices.rows.insert(prev, row_start..n as u32);
+    }
+
+    let attrs = flame_core::AttrTable {
+        keys: orig.attrs.keys.clone(),
+        key_lookup: orig.attrs.key_lookup.clone(),
+        per_slice: per_slice_attrs,
+    };
+
+    Profile {
+        strings,
+        categories: orig.categories.clone(),
+        processes: orig.processes.clone(),
+        threads: orig.threads.clone(),
+        tracks,
+        stacks: orig.stacks.clone(),
+        slices,
+        samples: orig.samples.clone(),
+        attrs,
+        time_range: orig.time_range,
     }
 }
 

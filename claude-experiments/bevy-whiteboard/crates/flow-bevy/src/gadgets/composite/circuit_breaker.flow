@@ -1,19 +1,19 @@
-# CircuitBreaker reimplemented from primitives:
+# CircuitBreaker reimplemented from primitives only:
 #
-#                                    ┌─pass───▶ Stamp ──▶ Egress(downstream)
-#  req → Lower ─packet─▶ Switch ─────┤
-#                          ▲          └─divert──▶ ErrReply (resp_error popping)
-#                          │ signal(0/1)
-#                                       (backend resp ──▶ Stamp.rev ──▶ Lower ──▶ response port)
-#                          ▼
-#              counts-of-failures ──▶ Window ──▶ Threshold
+#                                       ┌─pass───▶ S (stamp) ──▶ DE (downstream egress)
+#  req → L (entry) ─packet─▶ Switch ────┤
+#                              ▲          └─divert──▶ ErrReply (resp_error popping)
+#                              │ signal(0/1)
+#                                          (backend resp → S.rev → L → response port)
+#                              ▼
+#                  counts-of-failures ──▶ Window ──▶ Threshold
 #  fail_tap (from backend resp_error)
 #
 # The "headline" assembly already validated in
 # `tests/primitives_compose.rs::circuit_breaker_from_primitives_*`:
 # Switch + Window + Threshold reproduce the trip-on-N-failures
 # behaviour. This composite wraps it in the standard
-# `Lower → … → response` request/reply skeleton and routes the
+# `L → … → response` request/reply skeleton and routes the
 # diverted path to a resp_error reply.
 compound CircuitBreakerComposite(
     window_ns: Int = 1000000000,
@@ -26,16 +26,36 @@ compound CircuitBreakerComposite(
         downstream: DE
     }
 
-    node L  : Lower     { }
+    # Inline entry adapter (formerly Lower).
+    node L {
+        rule rev {
+            on p when p.kind == "resp" || p.kind == "resp_error"
+            do { emit p popping to out response }
+        }
+        rule fwd {
+            on p when p.kind == "req"
+            do { emit packet(p.value) pushing self to default }
+        }
+    }
     node SW : Switch    { passing: 1 }
-    node S  : Stamp     { }
+    # Inline stamp waystation (formerly Stamp).
+    node S {
+        rule rev {
+            on p when p.kind == "resp" || p.kind == "resp_error"
+            do { emit p popping to (head(return_path)) }
+        }
+        rule fwd {
+            on p
+            do { emit p pushing self to default }
+        }
+    }
     node DE : Egress    { }  # downstream egress uses `output`; remap below
     node W  : Window    { window_ns: window_ns }
     node Th : Threshold { limit: threshold }
     node ErrReply {
-        # Diverted reqs return resp_error popping back through Lower.
+        # Diverted reqs return resp_error popping back through L.
         rule on_packet {
-            on packet(_)
+            on p
             do { emit resp_error(nil) popping to (head(return_path)) }
         }
     }
@@ -44,11 +64,11 @@ compound CircuitBreakerComposite(
         L         -> SW : 1
         SW.pass   -> S  : 1
         S         -> DE : 1   # forward to backing service
-        DE        -> S  : 1   # backend resp pops back via Stamp
-        S         -> L  : 1   # Lower's rev_resp emits via response port
+        DE        -> S  : 1   # backend resp pops back via S
+        S         -> L  : 1   # L's rev emits via response port
 
         SW.divert -> ErrReply : 1
-        ErrReply  -> L  : 1   # resp_error pops back to Lower → response port
+        ErrReply  -> L  : 1   # resp_error pops back to L → response port
 
         W         -> Th : 1
         Th        -> SW : 1   # signal flips the switch

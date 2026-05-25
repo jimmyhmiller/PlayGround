@@ -24,6 +24,7 @@ impl Plugin for ChromeMaterialPlugin {
         bevy::asset::embedded_asset!(app, "chrome_material.wgsl");
         bevy::asset::embedded_asset!(app, "shadow_material.wgsl");
         app.init_resource::<ChromeStyle>()
+            .init_resource::<ChromeTextStyle>()
             .init_resource::<ActiveChromeShader>()
             .add_systems(Startup, init_default_chrome_shader)
             .add_plugins(Material2dPlugin::<PaneChromeMaterial>::default())
@@ -38,6 +39,32 @@ impl Plugin for ChromeMaterialPlugin {
 /// material the same frame.
 #[derive(Resource, Default, Clone)]
 pub struct ActiveChromeShader(pub Handle<Shader>);
+
+/// Theme-driven colors for the chrome text/sprite children that the
+/// SDF material doesn't cover: title text, the close button, the
+/// resize-handle square, and the title divider line. Same bridge
+/// pattern as `ChromeStyle` — pane-bevy reads it, style-bevy writes
+/// it from theme tokens.
+#[derive(Resource, Clone, Debug)]
+pub struct ChromeTextStyle {
+    pub title: Color,
+    pub title_focused: Color,
+    pub divider: Color,
+    pub close: Color,
+    pub handle: Color,
+}
+
+impl Default for ChromeTextStyle {
+    fn default() -> Self {
+        Self {
+            title: Color::srgb(0.62, 0.65, 0.70),
+            title_focused: Color::srgb(0.95, 0.96, 0.98),
+            divider: Color::srgb(0.165, 0.170, 0.188),
+            close: Color::srgb(0.50, 0.52, 0.56),
+            handle: Color::srgb(0.22, 0.23, 0.26),
+        }
+    }
+}
 
 fn init_default_chrome_shader(
     asset_server: Res<AssetServer>,
@@ -185,9 +212,28 @@ impl ChromeStyle {
             ),
             focus_width: self.focus_width,
             time: 0.0,
-            _pad0: 0.0,
-            _pad1: 0.0,
+            cover_mode: 0.0,
+            title_h: 0.0,
         }
+    }
+
+    /// Params for the title-cover quad. The cover is sized to the
+    /// full pane (same mesh + params as the body) so its rounded
+    /// corners, gradient, border, and focus glow all match the body
+    /// pixel-for-pixel; the shader cuts out the content area via
+    /// `cover_mode` + `title_h`, leaving the cover painting *only*
+    /// the title region — which is exactly what we need to mask
+    /// scrolled content out from under the title bar.
+    pub fn params_for_title_cover(
+        &self,
+        pane_size: Vec2,
+        focused: bool,
+        title_h: f32,
+    ) -> ChromeParams {
+        let mut p = self.params_for(pane_size, focused);
+        p.cover_mode = 1.0;
+        p.title_h = title_h;
+        p
     }
 }
 
@@ -261,8 +307,19 @@ pub struct ChromeParams {
     /// Driven by `push_chrome_time` each frame. Used by the shader's
     /// focus-pulse sin.
     pub time: f32,
-    pub _pad0: f32,
-    pub _pad1: f32,
+    /// `1.0` if this material is the title-cover quad (rendered above
+    /// the content_root to mask scrolled content out of the title
+    /// region). Default 0.0 for the regular pane body. The shader
+    /// returns transparent in the content area when this is set, so
+    /// the cover overpaints the title region only. Repurposes one of
+    /// the old `_pad` slots; user-installed chrome shaders that still
+    /// declare `_pad0/_pad1` keep working — they just ignore this.
+    pub cover_mode: f32,
+    /// Title-region height in pixels. Used by the shader (when
+    /// `cover_mode > 0`) to know where the title region ends and the
+    /// content area begins. Set to `pane_bevy::TITLE_H` on the cover;
+    /// 0.0 on the regular pane body.
+    pub title_h: f32,
 }
 
 // Look is driven by the `ChromeStyle` resource (built from theme

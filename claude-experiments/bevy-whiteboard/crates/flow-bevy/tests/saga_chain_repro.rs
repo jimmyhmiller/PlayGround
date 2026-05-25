@@ -79,12 +79,12 @@ fn saga_chain_repro_diagnostics() {
     for ev in &canvas.sim.log.events {
         if let Event::PacketEmitted { from, to, payload, at_ns, arrives_at_ns, .. } = ev {
             pkt_count += 1;
-            let tag = if let Value::Variant { tag, .. } = payload {
-                tag.clone()
+            let tag = if let Some((tag, _)) = payload.as_variant() {
+                tag.to_string()
             } else {
                 "<non-variant>".into()
             };
-            *by_tag.entry(tag.clone()).or_default() += 1;
+            *by_tag.entry(tag.to_string()).or_default() += 1;
             if from != to && arrives_at_ns > at_ns && tag != "pull" && tag != "wake" {
                 visible_count += 1;
                 let k = (

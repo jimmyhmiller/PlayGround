@@ -122,23 +122,53 @@ struct RunButtonChrome {
 
 // ---------- Colors / sizes ----------
 
-const COLOR_IDLE: Color = Color::srgb(0.55, 0.85, 1.0);
-const COLOR_RUNNING: Color = Color::srgb(1.0, 0.78, 0.30);
-const COLOR_SUCCESS: Color = Color::srgb(0.50, 0.85, 0.55);
-const COLOR_FAILED: Color = Color::srgb(0.95, 0.45, 0.45);
-const COLOR_COMMAND_TEXT: Color = Color::srgb(0.78, 0.80, 0.84);
-const COLOR_PROMPT: Color = Color::srgb(0.50, 0.78, 0.95);
-const COLOR_OUTPUT: Color = Color::srgb(0.70, 0.72, 0.76);
-const COLOR_DIVIDER: Color = Color::srgb(0.165, 0.170, 0.188);
-const COLOR_FORM_LABEL: Color = Color::srgb(0.70, 0.72, 0.78);
-const COLOR_INPUT_TEXT: Color = Color::srgb(0.92, 0.94, 0.98);
-const COLOR_INPUT_FOCUSED: Color = Color::srgb(0.97, 0.98, 1.00);
-const COLOR_INPUT_BG: Color = Color::srgb(0.10, 0.11, 0.13);
-const COLOR_CARET: Color = Color::srgb(0.55, 0.85, 1.0);
-const COLOR_SELECTION: Color = Color::srgba(0.42, 0.62, 0.92, 0.35);
-const COLOR_SAVE_BG: Color = Color::srgb(0.22, 0.45, 0.30);
-const COLOR_SAVE_TEXT: Color = Color::srgb(0.94, 0.98, 0.95);
-const COLOR_DETAILS_DIM: Color = Color::srgb(0.55, 0.58, 0.64);
+/// Theme-derived colors for one run-button render pass. Resolved
+/// once at the top of `run_button_spawn_from_config` and
+/// `sync_run_button_visual` so a preset switch retones every input,
+/// label, divider, and status indicator in one shot.
+struct RunButtonPalette {
+    idle: Color,
+    running: Color,
+    success: Color,
+    failed: Color,
+    command_text: Color,
+    prompt: Color,
+    output: Color,
+    divider: Color,
+    form_label: Color,
+    input_text: Color,
+    input_focused: Color,
+    input_bg: Color,
+    caret: Color,
+    selection: Color,
+    save_bg: Color,
+    save_text: Color,
+    details_dim: Color,
+}
+
+fn run_button_palette(theme: &style_bevy::Theme) -> RunButtonPalette {
+    use style_bevy::tokens as t;
+    let c = |id| Color::LinearRgba(theme.color(id));
+    RunButtonPalette {
+        idle: c(t::STATUS_IDLE),
+        running: c(t::STATUS_RUNNING),
+        success: c(t::STATUS_SUCCESS),
+        failed: c(t::STATUS_FAILED),
+        command_text: c(t::FG),
+        prompt: c(t::ACCENT),
+        output: c(t::FG_MUTED),
+        divider: c(t::CHROME_DIVIDER),
+        form_label: c(t::FG_MUTED),
+        input_text: c(t::INPUT_TEXT),
+        input_focused: c(t::INPUT_TEXT_FOCUSED),
+        input_bg: c(t::INPUT_BG),
+        caret: c(t::CARET),
+        selection: c(t::SELECTION),
+        save_bg: c(t::BUTTON_PRIMARY_BG),
+        save_text: c(t::BUTTON_PRIMARY_LABEL),
+        details_dim: c(t::FG_MUTED),
+    }
+}
 
 const ICON_FONT_SIZE: f32 = 22.0;
 const COMMAND_FONT_SIZE: f32 = 13.0;
@@ -237,6 +267,11 @@ fn run_button_spawn_from_config(
     content_root: Entity,
     config: &Value,
 ) {
+    let palette = run_button_palette(
+        world
+            .get_resource::<style_bevy::Theme>()
+            .expect("Theme resource missing; StylePlugin must run before spawning a RunButton"),
+    );
     // A snapshot always emits "command"; its absence means this is a
     // freshly-created pane that should start in draft mode.
     let is_restore = config.get("command").is_some();
@@ -278,7 +313,7 @@ fn run_button_spawn_from_config(
                 ..default()
             },
             LineHeight::Px(FORM_LABEL_FONT_SIZE * 1.4),
-            TextColor(COLOR_FORM_LABEL),
+            TextColor(palette.form_label),
             Anchor::TOP_LEFT,
             Transform::from_xyz(FORM_PAD_X, -(TITLE_LABEL_Y + FORM_INPUT_PAD_Y), 0.0),
             Visibility::Hidden,
@@ -289,7 +324,7 @@ fn run_button_spawn_from_config(
         .spawn((
             ChildOf(content_root),
             Sprite {
-                color: COLOR_INPUT_BG,
+                color: palette.input_bg,
                 custom_size: Some(Vec2::new(200.0, FORM_ROW_H)),
                 ..default()
             },
@@ -305,10 +340,10 @@ fn run_button_spawn_from_config(
             font_size: FORM_INPUT_FONT_SIZE,
             line_height: FORM_INPUT_FONT_SIZE * 1.4,
             cell_width: input_cell_width(measured_cell, FORM_INPUT_FONT_SIZE),
-            color_idle: COLOR_INPUT_TEXT,
-            color_focused: COLOR_INPUT_FOCUSED,
-            color_caret: COLOR_CARET,
-            color_selection: COLOR_SELECTION,
+            color_idle: palette.input_text,
+            color_focused: palette.input_focused,
+            color_caret: palette.caret,
+            color_selection: palette.selection,
         };
         let mut commands_queue = world.commands();
         spawn_text_input(
@@ -340,7 +375,7 @@ fn run_button_spawn_from_config(
                 ..default()
             },
             LineHeight::Px(FORM_LABEL_FONT_SIZE * 1.4),
-            TextColor(COLOR_FORM_LABEL),
+            TextColor(palette.form_label),
             Anchor::TOP_LEFT,
             Transform::from_xyz(FORM_PAD_X, -(COMMAND_LABEL_Y + FORM_INPUT_PAD_Y), 0.0),
             Visibility::Hidden,
@@ -351,7 +386,7 @@ fn run_button_spawn_from_config(
         .spawn((
             ChildOf(content_root),
             Sprite {
-                color: COLOR_INPUT_BG,
+                color: palette.input_bg,
                 custom_size: Some(Vec2::new(200.0, FORM_ROW_H)),
                 ..default()
             },
@@ -367,10 +402,10 @@ fn run_button_spawn_from_config(
             font_size: FORM_INPUT_FONT_SIZE,
             line_height: FORM_INPUT_FONT_SIZE * 1.4,
             cell_width: input_cell_width(measured_cell, FORM_INPUT_FONT_SIZE),
-            color_idle: COLOR_INPUT_TEXT,
-            color_focused: COLOR_INPUT_FOCUSED,
-            color_caret: COLOR_CARET,
-            color_selection: COLOR_SELECTION,
+            color_idle: palette.input_text,
+            color_focused: palette.input_focused,
+            color_caret: palette.caret,
+            color_selection: palette.selection,
         };
         let mut commands_queue = world.commands();
         spawn_text_input(
@@ -396,7 +431,7 @@ fn run_button_spawn_from_config(
         .spawn((
             ChildOf(content_root),
             Sprite {
-                color: COLOR_SAVE_BG,
+                color: palette.save_bg,
                 custom_size: Some(Vec2::new(SAVE_BTN_W, SAVE_BTN_H)),
                 ..default()
             },
@@ -416,7 +451,7 @@ fn run_button_spawn_from_config(
                 ..default()
             },
             LineHeight::Px(SAVE_FONT_SIZE * 1.4),
-            TextColor(COLOR_SAVE_TEXT),
+            TextColor(palette.save_text),
             Anchor::TOP_LEFT,
             Transform::from_xyz(0.0, -(SAVE_BTN_Y + 4.0), 0.1),
             Visibility::Hidden,
@@ -434,7 +469,7 @@ fn run_button_spawn_from_config(
                 ..default()
             },
             LineHeight::Px(ICON_FONT_SIZE),
-            TextColor(COLOR_IDLE),
+            TextColor(palette.idle),
             Anchor::TOP_LEFT,
             Transform::from_xyz(PLAY_X, -ROW_Y, 0.0),
             Visibility::Hidden,
@@ -451,7 +486,7 @@ fn run_button_spawn_from_config(
                 ..default()
             },
             LineHeight::Px(COMMAND_FONT_SIZE * 1.4),
-            TextColor(COLOR_PROMPT),
+            TextColor(palette.prompt),
             Anchor::TOP_LEFT,
             Transform::from_xyz(PROMPT_X, -COMMAND_TEXT_Y, 0.0),
             Visibility::Hidden,
@@ -468,7 +503,7 @@ fn run_button_spawn_from_config(
                 ..default()
             },
             LineHeight::Px(COMMAND_FONT_SIZE * 1.4),
-            TextColor(COLOR_COMMAND_TEXT),
+            TextColor(palette.command_text),
             Anchor::TOP_LEFT,
             Transform::from_xyz(COMMAND_X, -COMMAND_TEXT_Y, 0.0),
             Visibility::Hidden,
@@ -479,7 +514,7 @@ fn run_button_spawn_from_config(
         .spawn((
             ChildOf(content_root),
             Sprite {
-                color: COLOR_DIVIDER,
+                color: palette.divider,
                 custom_size: Some(Vec2::new(800.0, 1.0)),
                 ..default()
             },
@@ -499,7 +534,7 @@ fn run_button_spawn_from_config(
                 ..default()
             },
             LineHeight::Px(DETAILS_FONT_SIZE * 1.4),
-            TextColor(COLOR_DETAILS_DIM),
+            TextColor(palette.details_dim),
             Anchor::TOP_LEFT,
             Transform::from_xyz(DETAILS_TOGGLE_X, -DETAILS_TOGGLE_Y, 0.0),
             Visibility::Hidden,
@@ -516,7 +551,7 @@ fn run_button_spawn_from_config(
                 ..default()
             },
             LineHeight::Px(OUTPUT_FONT_SIZE * 1.45),
-            TextColor(COLOR_OUTPUT),
+            TextColor(palette.output),
             Anchor::TOP_LEFT,
             bevy::text::TextLayout::new_with_no_wrap(),
             TextBounds {
@@ -1054,10 +1089,12 @@ fn poll_run_button_children(
 // ---------- Visual sync ----------
 
 fn sync_run_button_visual(
-    buttons: Query<
-        (&RunButton, &RunButtonChrome, &pane_bevy::PaneRect),
-        Or<(Changed<RunButton>, Changed<pane_bevy::PaneRect>)>,
-    >,
+    theme: Res<style_bevy::Theme>,
+    // Dropped the Or<Changed<...>> filter so theme changes also retone
+    // the run button in the same frame. The body work is cheap (few
+    // sprite color compares per pane); cost is amortized by Bevy
+    // running in Reactive mode anyway when nothing's happening.
+    buttons: Query<(&RunButton, &RunButtonChrome, &pane_bevy::PaneRect)>,
     mut text_q: Query<&mut Text2d>,
     mut color_q: Query<&mut TextColor>,
     mut sprite_q: Query<&mut Sprite>,
@@ -1066,6 +1103,7 @@ fn sync_run_button_visual(
     mut input_q: Query<&mut TextInput>,
     mut bounds_q: Query<&mut TextBounds>,
 ) {
+    let palette = run_button_palette(&theme);
     for (rb, chrome, rect) in &buttons {
         let content_w = (rect.size.x - 2.0 * pane_bevy::MARGIN).max(0.0);
         let is_small = content_w < SMALL_WIDTH_THRESHOLD;
@@ -1125,10 +1163,10 @@ fn sync_run_button_visual(
         let show_divider = show_command_row;
 
         let action_color = match &rb.status {
-            RunStatus::Idle => COLOR_IDLE,
-            RunStatus::Running { .. } => COLOR_RUNNING,
-            RunStatus::Finished { success: true, .. } => COLOR_SUCCESS,
-            RunStatus::Finished { success: false, .. } => COLOR_FAILED,
+            RunStatus::Idle => palette.idle,
+            RunStatus::Running { .. } => palette.running,
+            RunStatus::Finished { success: true, .. } => palette.success,
+            RunStatus::Finished { success: false, .. } => palette.failed,
         };
         let action_glyph = if rb.status.is_running() {
             "\u{25A0}"

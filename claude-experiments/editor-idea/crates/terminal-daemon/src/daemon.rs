@@ -188,11 +188,23 @@ fn spawn_in_pty(
         // EDITOR_IDEA_TERMINAL_SESSION_ID lets child processes (notably
         // claude-statusline-bridge) identify which of our terminal panes
         // they are running in, so per-terminal widgets can match by id.
-        let err = Command::new(program)
-            .args(args)
+        //
+        // Default cwd to $HOME so new terminals don't inherit whatever
+        // the editor was launched from. The inference layer may later
+        // override this per-project once we've learned a sensible
+        // default for that project.
+        let home = std::env::var_os("HOME").unwrap_or_else(|| "/".into());
+        let mut cmd = Command::new(program);
+        cmd.args(args)
+            .current_dir(&home)
             .env("TERM", "xterm-256color")
-            .env("EDITOR_IDEA_TERMINAL_SESSION_ID", session_id.to_string())
-            .exec();
+            .env("EDITOR_IDEA_TERMINAL_SESSION_ID", session_id.to_string());
+        // Shell-integration injection (OSC 7 emission on cd / prompt).
+        // No-op for shells we don't recognise.
+        for (k, v) in crate::shell_integration::env_overrides_for(Path::new(program)) {
+            cmd.env(k, v);
+        }
+        let err = cmd.exec();
         eprintln!("[terminal-daemon] exec '{}' failed: {}", program, err);
         std::process::exit(127);
     }

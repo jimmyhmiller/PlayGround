@@ -36,7 +36,19 @@ node Caller : Client {
 
 node F  : Filter  { match: 0 }
 node Sv : Service { service_ns: 50000000, backlog_cap: 5 }
-node R  : Reply   { }
+# Terminal reply: was the Reply primitive, now inline. On a forward
+# packet, emit resp(nil) popping back to head(return_path); responses
+# coming back through this node are passed through unchanged.
+node R {
+    rule rev_pass {
+        on p when p.kind == "resp" || p.kind == "resp_error"
+        do { emit p popping to (head(return_path)) }
+    }
+    rule on_packet {
+        on p
+        do { emit resp(nil) popping to (head(return_path)) }
+    }
+}
 
 edges {
     Caller -> L  : 5ms

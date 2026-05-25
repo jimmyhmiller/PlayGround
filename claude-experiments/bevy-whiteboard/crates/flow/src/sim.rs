@@ -208,6 +208,30 @@ pub struct Sim {
     /// touch this map.
     #[serde(default)]
     pub template_by_name: HashMap<String, TemplateId>,
+    /// Compound-class library. A `compound Foo { ... }` block registered
+    /// via [`crate::dsl::register_classes`] is stored here unexpanded;
+    /// [`Sim::instantiate`] expands the recipe on demand into the live
+    /// sim, with the instance name as the per-instance prefix for all
+    /// inner nodes. Lets the palette spawn composites the same way it
+    /// spawns leaf classes.
+    ///
+    /// Skipped during serde because [`crate::dsl::ast::CompoundDecl`]
+    /// isn't (de)serializable today — restoring a snapshot loses the
+    /// compound registry, which is fine because snapshots reload the
+    /// DSL source separately during canvas re-hydration. Tests that
+    /// round-trip through snapshot need to re-register if they
+    /// instantiate compounds afterwards.
+    #[serde(skip)]
+    pub compound_templates: HashMap<String, crate::dsl::ast::CompoundDecl>,
+    /// `instance NodeId → compound class name` map for shim nodes
+    /// produced by [`Sim::instantiate_compound`]. Lets external code
+    /// (palette UX, has_color_slot, inspector) recover which compound
+    /// recipe spawned a given shim without re-deriving from its inner
+    /// nodes. Empty for any compound created via the inline DSL path
+    /// (those don't track an originating class — their interior was
+    /// authored directly).
+    #[serde(skip)]
+    pub compound_class_of: HashMap<NodeId, String>,
     /// Named scenario library. Populated by the DSL lowerer so callers
     /// can pick which scenario to run (via [`Sim::run_scenario`])
     /// instead of all scenarios firing at load. The DSL's single
@@ -355,6 +379,8 @@ impl Sim {
             next_scenario_seq: 1,
             templates: Vec::new(),
             template_by_name: HashMap::new(),
+            compound_templates: HashMap::new(),
+            compound_class_of: HashMap::new(),
             scenarios: HashMap::new(),
             params: HashMap::new(),
             pending_actions: BinaryHeap::new(),
@@ -459,9 +485,86 @@ impl Sim {
         self.template_by_name.get(name).copied()
     }
 
-    /// Convenience: did we register a template with this DSL name?
+    /// Convenience: did we register a class (leaf template OR compound)
+    /// with this DSL name?
     pub fn has_class(&self, name: &str) -> bool {
         self.template_by_name.contains_key(name)
+            || self.compound_templates.contains_key(name)
+    }
+
+    /// Did we register a *compound* class with this name? Distinct from
+    /// `has_class` so callers can branch on which expansion path to use
+    /// (the leaf path goes through `templates`; compounds go through
+    /// on-demand expansion into the existing sim).
+    pub fn has_compound_class(&self, name: &str) -> bool {
+        self.compound_templates.contains_key(name)
+    }
+
+    /// Walk a NodeId up the compound-parent chain to find the outermost
+    /// ancestor that's still itself a compound (or the node itself if
+    /// it isn't inside a compound). Lets tests pattern-match
+    /// `PacketEmitted { from, .. }` events against a compound shim id
+    /// even though the actual emit comes from one of the shim's inner
+    /// nodes. Returns `nid` unchanged for monolithic / unparented
+    /// nodes.
+    pub fn compound_outermost(&self, nid: NodeId) -> NodeId {
+        let mut cur = nid;
+        while let Some(parent) = self.nodes.get(&cur).and_then(|n| n.parent) {
+            cur = parent;
+        }
+        cur
+    }
+
+    /// Read a slot from `nid` or, if `nid` is a compound shim, walk into
+    /// its prefixed inner nodes (`<shim.name>::*`) and return the first
+    /// inner that declares the slot. Used by tests and inspector code
+    /// that want the equivalent of "the node named X's `period_ns`"
+    /// regardless of whether X is a monolithic leaf or a composite —
+    /// for composites the slot actually lives on an inner like
+    /// `client::T`.
+    pub fn read_slot_resolved<'a>(&'a self, nid: NodeId, slot: &str) -> Option<&'a Value> {
+        if let Some(n) = self.nodes.get(&nid) {
+            if let Some(v) = n.slots.get(slot) { return Some(v); }
+            let prefix = format!("{}::", n.name);
+            for inner in self.nodes.values() {
+                if inner.name.starts_with(&prefix) {
+                    if let Some(v) = inner.slots.get(slot) { return Some(v); }
+                }
+            }
+        }
+        None
+    }
+
+    /// Write a slot on `nid` or its compound children. Same resolution
+    /// rules as `read_slot_resolved`: direct hit wins, otherwise
+    /// propagate to every prefixed inner that declares the slot.
+    /// Returns the number of nodes mutated (0 = no slot of that name
+    /// reachable). Tests use this to set e.g. a composite Worker's
+    /// `up = 0` without knowing which inner owns the slot. Named
+    /// `_resolved` to distinguish from the engine-internal `write_slot`
+    /// rule-firing path which writes one specific node unconditionally.
+    pub fn write_slot_resolved(&mut self, nid: NodeId, slot: &str, value: Value) -> usize {
+        if let Some(n) = self.nodes.get_mut(&nid) {
+            if n.slots.contains_key(slot) {
+                n.slots.insert(slot.to_string(), value);
+                return 1;
+            }
+        }
+        let prefix = self.nodes.get(&nid).map(|n| format!("{}::", n.name));
+        let Some(prefix) = prefix else { return 0 };
+        let targets: Vec<NodeId> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.name.starts_with(&prefix) && n.slots.contains_key(slot))
+            .map(|(id, _)| *id)
+            .collect();
+        let count = targets.len();
+        for id in targets {
+            if let Some(n) = self.nodes.get_mut(&id) {
+                n.slots.insert(slot.to_string(), value.clone());
+            }
+        }
+        count
     }
 
     /// Record a runtime error: increments `error_counts[kind]` and
@@ -502,8 +605,18 @@ impl Sim {
     pub fn user_edit_slot(&mut self, node: NodeId, slot: impl Into<String>, value: Value) {
         let slot_name = slot.into();
         let at_ns = self.now_ns;
-        if let Some(n) = self.nodes.get_mut(&node) {
-            n.slots.insert(slot_name.clone(), value.clone());
+        // For compound shims the slot lives on an inner node (e.g.
+        // `period_ns` is on `<gen>::T`). Use write_slot_resolved to
+        // walk into prefixed children. If the slot is on the node
+        // itself, that path is also a 1-node write.
+        let touched = self.write_slot_resolved(node, &slot_name, value.clone());
+        if touched == 0 {
+            // No slot of that name anywhere — preserve the legacy
+            // behaviour of creating it on the target node so a fresh
+            // user-edit doesn't silently disappear.
+            if let Some(n) = self.nodes.get_mut(&node) {
+                n.slots.insert(slot_name.clone(), value.clone());
+            }
         }
         self.log.push(crate::event::Event::SlotWritten {
             node, slot: slot_name.clone(), value: value.clone(), at_ns,

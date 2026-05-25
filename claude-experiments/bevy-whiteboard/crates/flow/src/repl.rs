@@ -363,16 +363,22 @@ fn format_value(v: &Value) -> String {
         Value::Float(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::Str(s) => format!("{:?}", s),
-        Value::Variant { tag, payload } => {
-            match payload.as_ref() {
-                Value::Nil => tag.clone(),
-                other => format!("{}({})", tag, format_value(other)),
+        Value::Record(_) => {
+            // Detect the conventional tagged-envelope shape and pretty-print
+            // it as `tag` or `tag(payload)`; otherwise fall back to record
+            // formatting. as_variant() returns Some iff kind/value present.
+            if let Some((tag, payload)) = v.as_variant() {
+                match payload {
+                    Value::Nil => tag.to_string(),
+                    other => format!("{}({})", tag, format_value(other)),
+                }
+            } else if let Value::Record(fs) = v {
+                let inner: Vec<String> = fs.iter()
+                    .map(|(k, v)| format!("{}:{}", k, format_value(v))).collect();
+                format!("{{{}}}", inner.join(", "))
+            } else {
+                unreachable!()
             }
-        }
-        Value::Record(fs) => {
-            let inner: Vec<String> = fs.iter()
-                .map(|(k, v)| format!("{}:{}", k, format_value(v))).collect();
-            format!("{{{}}}", inner.join(", "))
         }
         Value::Samples(s) => format!("[Samples {}/{}]", s.items.len(), s.cap),
         Value::NodeRef(id) => format!("→{}", id.0),

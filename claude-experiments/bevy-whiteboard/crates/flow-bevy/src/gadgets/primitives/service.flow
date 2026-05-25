@@ -1,12 +1,17 @@
-# Single-track service with bounded backlog. A `packet(p)` arrival
+# Single-track service with bounded backlog. A data packet arrival
 # either starts servicing immediately (when idle), enqueues (when busy
 # and there's room), or overflows out the `overflow` port (when full).
-# Service time is the self-loop latency; when the in-flight job finishes,
-# the next backlog entry (if any) is dequeued and served.
+# Service time is the self-loop latency; when the in-flight job
+# finishes, the next backlog entry (if any) is dequeued and served.
 #
-# Equivalent to chaining Buffer → Delay with pull-feedback — but bundled
+# Equivalent to chaining Buffer → Delay with pull-feedback — bundled
 # so the pull loop is implicit. Use as the engine of a Worker-shaped
 # gadget (Worker = Lift → Filter → Service → Reply).
+#
+# Internal protocol uses a `done` kind on the self-loop to mark
+# completion. Rules discriminate by `p.kind`. Rule ORDER matters: the
+# `done` rules must come BEFORE serve / enqueue so a completion in
+# the same tick as a fresh packet advances the queue first.
 node Service {
     slots {
         service_ns:  Int = 50000000
@@ -22,40 +27,34 @@ node Service {
         # Self-loop carries the service window. `done` rides this edge.
         self -> self : service_ns
     }
-    # Rule ORDER matters: finish_* must come BEFORE serve / enqueue so a
-    # `done` arriving in the same sim tick as a fresh `packet` advances
-    # the queue first, freeing the busy slot.
     rule finish_next {
-        on done(p)
-        when len(backlog) > 0
+        on p when p.kind == "done" && len(backlog) > 0
         do {
             pop backlog -> next
-            emit packet(p) to default
+            emit packet(p.value) to default
             emit done(next) to self
         }
     }
     rule finish_idle {
-        on done(p)
+        on p when p.kind == "done"
         do {
             busy := 0
-            emit packet(p) to default
+            emit packet(p.value) to default
         }
     }
     rule serve {
-        on packet(p)
-        when busy == 0
+        on p when busy == 0
         do {
             busy := 1
-            emit done(p) to self
+            emit done(p.value) to self
         }
     }
     rule enqueue {
-        on packet(p)
-        when len(backlog) < backlog_cap
-        do { push backlog <- p }
+        on p when len(backlog) < backlog_cap
+        do { push backlog <- p.value }
     }
     rule overflow_out {
-        on packet(p)
-        do { emit packet(p) to port overflow }
+        on p
+        do { emit p to port overflow }
     }
 }

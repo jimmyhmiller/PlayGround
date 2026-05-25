@@ -177,14 +177,17 @@ fn build_frame(rows_by_project: &BTreeMap<String, Vec<Row>>, content_w: f32) -> 
                     color: Some("#cc8".into()),
                     size: Some(13.0),
                     weight: Some(Weight::Bold),
+                    family: None,
                 },
                 Element::Text {
                     value: "Configure ~/.claude/settings.json statusLine to claude-statusline-bridge".into(),
                     color: Some("#888".into()),
                     size: Some(11.0),
                     weight: None,
+                    family: None,
                 },
             ],
+            style: None,
         };
     }
 
@@ -215,6 +218,7 @@ fn build_frame(rows_by_project: &BTreeMap<String, Vec<Row>>, content_w: f32) -> 
             color: Some("#b8bcc4".into()),
             size: Some(12.0),
             weight: Some(Weight::Bold),
+            family: None,
         });
 
         for row in rows {
@@ -234,6 +238,7 @@ fn build_frame(rows_by_project: &BTreeMap<String, Vec<Row>>, content_w: f32) -> 
                     color: Some("#aab0b8".into()),
                     size: Some(11.0),
                     weight: None,
+                    family: None,
                 },
             ];
             children.push(Element::Hstack {
@@ -241,6 +246,7 @@ fn build_frame(rows_by_project: &BTreeMap<String, Vec<Row>>, content_w: f32) -> 
                 pad: 0.0,
                 align: Align::Center,
                 children: row_children,
+                style: None,
             });
         }
     }
@@ -349,6 +355,11 @@ fn main() {
                 Ok(HostEvent::Click { .. }) => {}
                 Ok(HostEvent::Tick { .. }) => {}
                 Ok(HostEvent::ClaudeEvent { .. }) => {}
+                Ok(HostEvent::TabSelect { .. }) => {}
+                Ok(HostEvent::Toggle { .. }) => {}
+                Ok(HostEvent::InputChange { .. }) => {}
+                Ok(HostEvent::InputFocus { .. }) => {}
+                Ok(HostEvent::InputSubmit { .. }) => {}
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
                 Err(std::sync::mpsc::TryRecvError::Disconnected) => std::process::exit(0),
             }

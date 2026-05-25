@@ -353,6 +353,10 @@ pub fn load_canvas(path: impl AsRef<Path>, seed: u64) -> Result<LoadedCanvas, St
     // can reference them by name.
     flow::dsl::register_classes(&mut sim, gadgets::GADGETS_DSL)
         .map_err(|e| format!("registering stock gadgets: {}", e))?;
+    // Back-compat aliases so authored whiteboards that still write
+    // `node x : Worker { ... }` resolve to WorkerComposite, matching
+    // the palette-spawn path.
+    gadgets::install_back_compat_aliases(&mut sim);
 
     // User-supplied component classes (custom node types this canvas
     // adds). Each component file declares one or more `node X { }`
@@ -976,18 +980,16 @@ pub fn stock_class_visual(class: &str) -> Option<ClassVisual> {
             inner_label: lit("→ out"),
         },
 
-        // ── Constants (tag shape = "literal value") ───────────────
-        "ConstantPacket" => ClassVisual {
+        // ── Constant (tag shape = "literal value") ────────────────
+        // Replaces the old ConstantPacket / ConstantSignal split.
+        // Visual cue defaults to the packet flavour (dot glyph); the
+        // signal flavour distinction is parked until visual dispatch
+        // grows slot-based discrimination via `out_kind`.
+        "Constant" => ClassVisual {
             shape: shape(Tag { size: 80.0 }),
             paint: binary("value", "#222222", "#f5f5f0"),
             glyph: glyph("●"),
-            inner_label: slot_fmt("value", "pkt={0}"),
-        },
-        "ConstantSignal" => ClassVisual {
-            shape: shape(Tag { size: 80.0 }),
-            paint: binary("value", ALARM_ON, "#e8d8b0"),
-            glyph: glyph("⚡"),
-            inner_label: slot_fmt("value", "sig={0}"),
+            inner_label: slot_fmt("value", "={0}"),
         },
         _ => return None,
     };

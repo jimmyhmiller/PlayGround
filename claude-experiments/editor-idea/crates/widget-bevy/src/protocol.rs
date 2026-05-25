@@ -66,6 +66,137 @@ pub enum HostEvent {
         kind: String,
         payload: serde_json::Value,
     },
+    /// User clicked a tab in an `Element::Tabs`. `id` is the tabs
+    /// group id; `tab` is the selected `TabItem.id`.
+    TabSelect { id: String, tab: String },
+    /// User toggled an `Element::Toggle`. `checked` is the new value.
+    Toggle { id: String, checked: bool },
+    /// User edited an `Element::Input`. `value` is the new full
+    /// string; widget echoes it back in the next frame.
+    InputChange { id: String, value: String },
+    /// User focused/blurred an `Element::Input`. Widget mirrors
+    /// `focused` in the next frame to reflect the new state.
+    InputFocus { id: String, focused: bool },
+    /// User submitted an `Element::Input` (typically Enter key).
+    InputSubmit { id: String, value: String },
+}
+
+/// Optional visual override applied on top of theme defaults. Every
+/// flow-layout element accepts a `style: Style` to set its own
+/// background / border / radius / shadow / padding / margin.
+///
+/// String values for color / radius / shadow accept either a literal
+/// value (e.g. `"#1a1d24"`, `"oklch(0.65, 0.04, 250)"`, `"12"`) or a
+/// theme token name (e.g. `"surface_2"`, `"radius_md"`, `"shadow_sm"`).
+/// The renderer resolves token names against the active theme; literal
+/// values short-circuit the lookup.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct Style {
+    /// Solid background color (token name or literal). Painted as a
+    /// rounded rect when `radius` is also set; otherwise a sharp rect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background: Option<String>,
+    /// Optional background image painted under the children. Anchored
+    /// to the element's top-left and stretched to fill. Use this for
+    /// the "Textures & motifs" thumbnails in the Atelier mockup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_image: Option<String>,
+    /// Corner radius. Accepts a token name (e.g. `"radius_md"`,
+    /// `"radius_pill"`) or a literal pixel value as a string
+    /// (e.g. `"8"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<String>,
+    /// Border drawn just inside the element's bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<Border>,
+    /// Drop shadow rendered outside the element bounds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shadow: Option<Shadow>,
+    /// Inner padding. Stacks already accept `pad`; setting both means
+    /// `style.padding` wins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub padding: Option<Edges>,
+    /// Outer margin around the element.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub margin: Option<Edges>,
+}
+
+/// Border specification. `color` is a token name or literal; `width`
+/// is in pixels.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Border {
+    pub color: String,
+    #[serde(default = "default_border_width")]
+    pub width: f32,
+}
+
+fn default_border_width() -> f32 {
+    1.0
+}
+
+/// Drop shadow. Either set `token: "shadow_md"` to pull a coupled
+/// triple from the theme, or supply explicit `color` / `blur` /
+/// `offset_y`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct Shadow {
+    /// Convenience: name of a `shadow_*` token triple. When present,
+    /// `color/blur/offset_y` below are ignored unless they explicitly
+    /// override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
+    /// Shadow color (token name or literal). Defaults to `shadow_md_color`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// Blur radius in px.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blur: Option<f32>,
+    /// Positive pushes shadow downward.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_y: Option<f32>,
+}
+
+/// Four-sided edge values. Use named fields for asymmetric padding/
+/// margin. Missing sides default to 0.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
+pub struct Edges {
+    #[serde(default)]
+    pub top: f32,
+    #[serde(default)]
+    pub right: f32,
+    #[serde(default)]
+    pub bottom: f32,
+    #[serde(default)]
+    pub left: f32,
+}
+
+impl Edges {
+    pub fn all(v: f32) -> Self {
+        Self { top: v, right: v, bottom: v, left: v }
+    }
+    pub fn symmetric(h: f32, v: f32) -> Self {
+        Self { top: v, right: h, bottom: v, left: h }
+    }
+    pub fn horizontal(&self) -> f32 { self.left + self.right }
+    pub fn vertical(&self) -> f32 { self.top + self.bottom }
+}
+
+/// Visual kind for an Element::Button. Filled draws the standard
+/// solid-bg button; Outline draws transparent bg + accent border;
+/// Ghost draws label only with a subtle hover fill.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ButtonKind {
+    #[default]
+    Filled,
+    Outline,
+    Ghost,
+}
+
+/// One tab in an Element::Tabs strip.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TabItem {
+    pub id: String,
+    pub label: String,
 }
 
 /// One node in the widget's UI tree. Every frame is a single root
@@ -82,6 +213,8 @@ pub enum Element {
         pad: f32,
         #[serde(default)]
         children: Vec<Element>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
     },
     /// Horizontal stack — children laid out left-to-right. `align`
     /// controls cross-axis (vertical) placement of children.
@@ -94,6 +227,21 @@ pub enum Element {
         align: Align,
         #[serde(default)]
         children: Vec<Element>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
+    },
+    /// Generic styled container. Functionally a Vstack, but exists so
+    /// `style` is the primary affordance (the name reads as "give me a
+    /// card / section / panel" at a call site).
+    Frame {
+        #[serde(default)]
+        gap: f32,
+        #[serde(default)]
+        pad: f32,
+        #[serde(default)]
+        children: Vec<Element>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
     },
     /// A run of text. `color` accepts `#rrggbb` / `#rgb`. `size` is in
     /// logical pixels; defaults to the pane's body size. Overflow is
@@ -106,10 +254,86 @@ pub enum Element {
         size: Option<f32>,
         #[serde(default)]
         weight: Option<Weight>,
+        /// Font family name resolved through the host's
+        /// `style_bevy::FontRegistry`. Unknown names fall back to mono.
+        /// Typical values: `"serif"`, `"sans"`, `"mono"`, or pull a
+        /// token name from theme.rhai (`"font_family_heading"`).
+        #[serde(default)]
+        family: Option<String>,
     },
     /// Clickable button. The host sends `{"event":"click","id":"<id>"}`
     /// back to the widget on press; ids must be unique within a frame.
-    Button { id: String, label: String },
+    Button {
+        id: String,
+        label: String,
+        #[serde(default)]
+        kind: ButtonKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
+    },
+    /// Tab strip. Renders one `Text` per item with an indicator under
+    /// the selected one. Click sends
+    /// `{"event":"tab-select","id":"<tabs-id>","tab":"<tab-id>"}` back
+    /// to the widget.
+    Tabs {
+        /// Identity for the tab group; used as the `id` in the
+        /// outbound event.
+        id: String,
+        items: Vec<TabItem>,
+        /// Id of the currently-selected tab. Empty string = none.
+        #[serde(default)]
+        selected: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
+    },
+    /// On/off pill toggle. Renders an iOS-style track with a sliding
+    /// knob. Click sends `{"event":"toggle","id":"<id>","checked":<bool>}`
+    /// — `checked` is the new value (already inverted).
+    Toggle {
+        id: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default)]
+        checked: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
+    },
+    /// Selectable row. Functionally a Frame that's click-targetable,
+    /// with `selected` driving a visual highlight (the accent border /
+    /// background pulled from the active theme).
+    ListItem {
+        id: String,
+        #[serde(default)]
+        children: Vec<Element>,
+        #[serde(default)]
+        gap: f32,
+        #[serde(default)]
+        pad: f32,
+        #[serde(default)]
+        selected: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
+    },
+    /// Single-line text input. Click to focus; typing emits
+    /// `{"event":"input-change","id":"<id>","value":"<new>"}` back to
+    /// the widget on every change. Maintains a blinking caret while
+    /// focused; supports left/right arrows, Home/End, backspace,
+    /// delete. No IME.
+    Input {
+        id: String,
+        #[serde(default)]
+        value: String,
+        #[serde(default)]
+        placeholder: String,
+        /// Mirrored from the widget. Set this to drive focus
+        /// programmatically; otherwise the host updates it on click.
+        #[serde(default)]
+        focused: bool,
+        #[serde(default = "default_input_width")]
+        width: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
+    },
     /// Hyperlink. Click opens `url` in the system browser; no event is
     /// delivered back to the widget.
     Link { url: String, label: String },
@@ -125,6 +349,8 @@ pub enum Element {
         value: String,
         #[serde(default)]
         color: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
     },
     /// Vertical scroll region. v0 lays children out as a vstack and
     /// clips to the available height (no actual scrolling yet — clipping
@@ -164,6 +390,35 @@ pub enum Element {
         #[serde(default)]
         children: Vec<CanvasItem>,
     },
+    /// Colored block, fixed size. Useful for color swatches inside
+    /// theme/picker UIs — render a solid square of the given color
+    /// at a known size. Hex / oklch() / oklab() / rgb() all accepted.
+    /// Optional `id` makes it click-targetable like a Button.
+    Swatch {
+        color: String,
+        #[serde(default = "default_swatch_size")]
+        size: f32,
+        #[serde(default)]
+        id: Option<String>,
+    },
+    /// Clickable colored swatch tile. Same as Swatch but always emits
+    /// a click target so the widget receives `id` on press. Kept as
+    /// a separate variant so non-interactive swatches don't take a
+    /// hit-test slot.
+    SwatchButton {
+        id: String,
+        color: String,
+        #[serde(default = "default_swatch_size")]
+        size: f32,
+    },
+}
+
+fn default_swatch_size() -> f32 {
+    14.0
+}
+
+fn default_input_width() -> f32 {
+    160.0
 }
 
 /// One item inside an absolute-positioned `Canvas`. Position is

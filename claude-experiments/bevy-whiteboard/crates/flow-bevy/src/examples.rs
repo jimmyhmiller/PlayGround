@@ -298,11 +298,44 @@ impl BuildCtx<'_, '_, '_> {
 
     /// Overwrite a slot on a sim node. Used to tune rates / service
     /// times from their gadget defaults.
+    ///
+    /// For monolithic nodes, sets the slot directly. For compound
+    /// instances (where `nid` is the port shim), walks the prefixed
+    /// inner nodes (`<instance_name>::*`) and sets the slot on every
+    /// inner that declares it — covers the case where the actual
+    /// state lives on a primitive child like `client::T` (Tick) for
+    /// `period_ns` or `worker::Sv` (Service) for `service_ns`.
     fn set_slot(&mut self, nid: NodeId, slot: &str, value: Value) {
         let slot_owned = slot.to_string();
         self.driver.0.send_command(SimCommand::new(move |sim| {
+            let prefix = sim
+                .nodes
+                .get(&nid)
+                .map(|n| format!("{}::", n.name));
+            // Direct hit first (handles legacy monolithic nodes).
             if let Some(n) = sim.nodes.get_mut(&nid) {
-                n.slots.insert(slot_owned, value);
+                if n.slots.contains_key(&slot_owned) {
+                    n.slots.insert(slot_owned.clone(), value.clone());
+                    return;
+                }
+            }
+            // Compound shim: propagate to every prefixed inner that
+            // declares the slot. Targeting "all matching inners" keeps
+            // the call idempotent and avoids guessing which child owns
+            // it (e.g. a Worker with both a Tick and a Service might
+            // legitimately have two slots called `period_ns` in the
+            // future).
+            let Some(prefix) = prefix else { return };
+            let targets: Vec<flow::NodeId> = sim
+                .nodes
+                .iter()
+                .filter(|(_, n)| n.name.starts_with(&prefix) && n.slots.contains_key(&slot_owned))
+                .map(|(id, _)| *id)
+                .collect();
+            for id in targets {
+                if let Some(n) = sim.nodes.get_mut(&id) {
+                    n.slots.insert(slot_owned.clone(), value.clone());
+                }
             }
         }));
     }

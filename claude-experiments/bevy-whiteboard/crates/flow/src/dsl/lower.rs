@@ -111,21 +111,51 @@ pub fn lower_into(sim: &mut Sim, file: &ast::File) -> Result<Lowered, String> {
                     "lower: instance name still contains unresolved `{...}` interpolations \
                      (run expand pass first)".to_string()
                 )?;
-                let id = sim.instantiate(&inst.class, inst_name)?;
-                let node = sim.nodes.get_mut(&id).ok_or_else(|| {
-                    format!("instantiate `{}` of `{}`: just-spawned node missing", inst_name, inst.class)
-                })?;
-                for (slot, expr) in &inst.overrides {
-                    if !node.slots.contains_key(slot) {
-                        return Err(format!(
-                            "instance `{}` of `{}`: override targets unknown slot `{}`",
-                            inst_name, inst.class, slot
-                        ));
+                // Dispatch on whether CLASS is a leaf template or a
+                // compound recipe. Compounds want their overrides as
+                // compile-time *param* substitutions (the value gets
+                // threaded through expansion into inner-node slots);
+                // leaf classes write overrides as direct slot inserts.
+                // Leaf templates win over compound aliases (matches
+                // the dispatch order in `Sim::instantiate`).
+                if !sim.template_by_name.contains_key(&inst.class)
+                    && sim.has_compound_class(&inst.class)
+                {
+                    let mut param_overrides = BTreeMap::new();
+                    for (slot, expr) in &inst.overrides {
+                        let v = lower_literal(expr)?;
+                        let ct = match v {
+                            Value::Int(i) => crate::dsl::expand::CtValue::Int(i),
+                            Value::Float(f) => crate::dsl::expand::CtValue::Float(f),
+                            Value::Bool(b) => crate::dsl::expand::CtValue::Bool(b),
+                            Value::Str(s) => crate::dsl::expand::CtValue::Str(s),
+                            other => return Err(format!(
+                                "compound `{}`: override `{}` of unsupported type `{:?}` \
+                                 (compound params accept Int/Float/Bool/Str literals)",
+                                inst.class, slot, other
+                            )),
+                        };
+                        param_overrides.insert(slot.clone(), ct);
                     }
-                    let v = lower_literal(expr)?;
-                    node.slots.insert(slot.clone(), v);
+                    let id = sim.instantiate_compound(&inst.class, inst_name, &param_overrides)?;
+                    name_to_id.insert(inst_name.to_string(), id);
+                } else {
+                    let id = sim.instantiate(&inst.class, inst_name)?;
+                    let node = sim.nodes.get_mut(&id).ok_or_else(|| {
+                        format!("instantiate `{}` of `{}`: just-spawned node missing", inst_name, inst.class)
+                    })?;
+                    for (slot, expr) in &inst.overrides {
+                        if !node.slots.contains_key(slot) {
+                            return Err(format!(
+                                "instance `{}` of `{}`: override targets unknown slot `{}`",
+                                inst_name, inst.class, slot
+                            ));
+                        }
+                        let v = lower_literal(expr)?;
+                        node.slots.insert(slot.clone(), v);
+                    }
+                    name_to_id.insert(inst_name.to_string(), id);
                 }
-                name_to_id.insert(inst_name.to_string(), id);
             }
             ast::Item::Compound(c) => {
                 if !c.params.is_empty() {
@@ -494,6 +524,7 @@ fn lower_expr(e: &ast::Expr, bound: &HashSet<String>) -> Result<Ie, String> {
         ),
         ast::Expr::Meta(key) => Ie::meta(key.clone()),
         ast::Expr::ReturnPath => Ie::return_path(),
+        ast::Expr::Field(of, name) => Ie::field(lower_expr(of, bound)?, name.clone()),
     })
 }
 
@@ -525,6 +556,17 @@ fn lower_fn_call(name: &str, args: &[ast::Expr], bound: &HashSet<String>) -> Res
     // closure body — handled before bulk arg lowering.
     match (name, args.len()) {
         ("out_neighbors", 0) => return Ok(Ie::out_neighbors()),
+        // `tagged(kind, value)` — build the conventional tagged
+        // envelope record `{kind: <kind_expr>, value: <value_expr>}`.
+        // Lets primitives like Constant emit a packet whose kind is
+        // controlled by a slot (e.g. `out_kind: "signal"`) instead of
+        // being a parse-time literal.
+        ("tagged", 2) => {
+            return Ok(Ie::record([
+                (crate::value::KIND_FIELD.to_string(), lower_expr(&args[0], bound)?),
+                (crate::value::VALUE_FIELD.to_string(), lower_expr(&args[1], bound)?),
+            ]));
+        }
         ("slot_of", 2) => {
             let node = lower_expr(&args[0], bound)?;
             let slot = expect_str_lit(&args[1], "slot_of")?;

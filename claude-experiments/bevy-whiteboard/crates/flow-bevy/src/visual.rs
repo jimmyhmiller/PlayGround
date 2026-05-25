@@ -311,7 +311,7 @@ pub fn is_visible_event(ev: &Event) -> bool {
     if arrives_at_ns <= at_ns {
         return false;
     }
-    if let Value::Variant { tag, .. } = payload {
+    if let Some((tag, _)) = payload.as_variant() {
         if tag == "pull" || tag == "wake" {
             return false;
         }
@@ -393,7 +393,7 @@ impl VisualStrategy for SimMirror {
             if s.arrives_at_ns <= s.packet.emitted_at_ns {
                 continue;
             }
-            if let Value::Variant { tag, .. } = &s.packet.payload {
+            if let Some((tag, _)) = s.packet.payload.as_variant() {
                 if tag == "pull" || tag == "wake" {
                     continue;
                 }
@@ -550,7 +550,7 @@ impl VisualTimeline {
         if arrives_at_ns <= at_ns {
             return None;
         }
-        if let Value::Variant { tag, .. } = payload {
+        if let Some((tag, _)) = payload.as_variant() {
             if tag == "pull" || tag == "wake" {
                 return None;
             }
@@ -704,7 +704,7 @@ fn parse_emit(ev: &Event) -> Option<ParsedEmit<'_>> {
     if arrives_at_ns <= at_ns {
         return None;
     }
-    if let Value::Variant { tag, .. } = payload {
+    if let Some((tag, _)) = payload.as_variant() {
         if tag == "pull" || tag == "wake" {
             return None;
         }

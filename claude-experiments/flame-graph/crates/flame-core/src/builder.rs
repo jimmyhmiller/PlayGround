@@ -1,8 +1,8 @@
 use ahash::AHashMap;
 
 use crate::profile::{
-    Category, CategoryId, Process, ProcessId, Profile, Sample, SliceTable, Thread, ThreadId,
-    Track, TrackId, TrackKind,
+    AttrTable, Category, CategoryId, Process, ProcessId, Profile, Sample, SliceTable, Thread,
+    ThreadId, Track, TrackId, TrackKind,
 };
 use crate::stacks::{FrameId, StackId, StackTable};
 use crate::strings::{StringId, StringInterner};
@@ -20,6 +20,10 @@ pub struct ProfileBuilder {
 
     // Unsorted slice records — finish() sorts and partitions them into the SoA SliceTable.
     pending_slices: Vec<PendingSlice>,
+    /// One entry per pending_slice, parallel index. Inner Vec is the (key_idx,
+    /// value_string_id) list for that slice, or empty if it has no attrs.
+    /// The permutation from finish()'s sort is applied to both vectors together.
+    pending_attrs: Vec<Vec<(u16, StringId)>>,
     /// Stack of open B-events keyed by track. Used by `begin_slice` / `end_slice`.
     open_stacks: AHashMap<TrackId, Vec<OpenSlice>>,
     /// Min/max timestamp seen, used to populate Profile::time_range.
@@ -30,6 +34,10 @@ pub struct ProfileBuilder {
     thread_dedup: AHashMap<(Option<ProcessId>, i64), ThreadId>,
     process_dedup: AHashMap<i64, ProcessId>,
     category_dedup: AHashMap<StringId, CategoryId>,
+
+    /// Attribute keys observed so far. attr_idx is the position in this Vec.
+    attr_keys: Vec<StringId>,
+    attr_key_lookup: AHashMap<StringId, u16>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,13 +82,30 @@ impl ProfileBuilder {
             stacks: StackTable::new(),
             samples: Vec::new(),
             pending_slices: Vec::new(),
+            pending_attrs: Vec::new(),
             open_stacks: AHashMap::new(),
             min_ts: None,
             max_ts: 0,
             thread_dedup: AHashMap::new(),
             process_dedup: AHashMap::new(),
             category_dedup: AHashMap::new(),
+            attr_keys: Vec::new(),
+            attr_key_lookup: AHashMap::new(),
         }
+    }
+
+    /// Intern an attribute key. Returns a compact `u16` index. Caller passes
+    /// this index to `add_complete_slice_with_attrs` instead of re-hashing the
+    /// key string per slice.
+    pub fn intern_attr_key(&mut self, key: &str) -> u16 {
+        let sid = self.strings.intern(key);
+        if let Some(&i) = self.attr_key_lookup.get(&sid) {
+            return i;
+        }
+        let i = self.attr_keys.len() as u16;
+        self.attr_keys.push(sid);
+        self.attr_key_lookup.insert(sid, i);
+        i
     }
 
     pub fn intern_string(&mut self, s: &str) -> StringId {
@@ -183,6 +208,7 @@ impl ProfileBuilder {
             category: open.category,
             stack: None,
         });
+        self.pending_attrs.push(Vec::new());
     }
 
     /// Direct emit of a complete slice (Chrome 'X' phase, synthesized samples, etc.).
@@ -196,11 +222,31 @@ impl ProfileBuilder {
         category: CategoryId,
         stack: Option<StackId>,
     ) {
+        self.add_complete_slice_with_attrs(
+            track, depth, start_ns, dur_ns, name, category, stack, Vec::new(),
+        );
+    }
+
+    /// Same as `add_complete_slice` but with a per-span attribute list. Each
+    /// entry is `(attr_key_idx, value_string_id)`; the key index must come from
+    /// `intern_attr_key`. Pass an empty Vec to skip attrs for this slice.
+    pub fn add_complete_slice_with_attrs(
+        &mut self,
+        track: TrackId,
+        depth: u16,
+        start_ns: u64,
+        dur_ns: u64,
+        name: StringId,
+        category: CategoryId,
+        stack: Option<StackId>,
+        attrs: Vec<(u16, StringId)>,
+    ) {
         self.observe_ts(start_ns);
         self.observe_ts(start_ns + dur_ns);
         self.pending_slices.push(PendingSlice {
             track, depth, start_ns, dur_ns, name, category, stack,
         });
+        self.pending_attrs.push(attrs);
     }
 
     pub fn add_sample(&mut self, thread: ThreadId, ts_ns: u64, stack: StackId, weight: u32) {
@@ -301,6 +347,7 @@ impl ProfileBuilder {
                 category,
                 stack: None,
             });
+            self.pending_attrs.push(Vec::new());
             // Sort children for deterministic layout, then push in reverse so leftmost
             // is processed first (preserves left-to-right visual order regardless of
             // pop order).
@@ -344,10 +391,17 @@ impl ProfileBuilder {
     }
 
     pub fn finish(mut self) -> Profile {
-        // Sort slices by (track, depth, start_ns).
-        self.pending_slices.sort_by_key(|s| (s.track.0, s.depth, s.start_ns));
-
         let n = self.pending_slices.len();
+        debug_assert_eq!(self.pending_attrs.len(), n);
+
+        // Sort an index vector by (track, depth, start_ns) so the same
+        // permutation can reorder both pending_slices and pending_attrs.
+        let mut order: Vec<u32> = (0..n as u32).collect();
+        order.sort_by_key(|&i| {
+            let s = &self.pending_slices[i as usize];
+            (s.track.0, s.depth, s.start_ns)
+        });
+
         let mut slices = SliceTable {
             track:    Vec::with_capacity(n),
             depth:    Vec::with_capacity(n),
@@ -358,17 +412,20 @@ impl ProfileBuilder {
             stack:    Vec::with_capacity(n),
             rows:     AHashMap::new(),
         };
+        let mut attrs_per_slice: Vec<Vec<(u16, StringId)>> = Vec::with_capacity(n);
 
         // Compute per-(track, depth) row ranges and per-track max depth.
         let mut row_start: u32 = 0;
         let mut cur_key: Option<(TrackId, u16)> = None;
-        for (i, s) in self.pending_slices.iter().enumerate() {
+        for (out_i, &src) in order.iter().enumerate() {
+            let src = src as usize;
+            let s = &self.pending_slices[src];
             let key = (s.track, s.depth);
             if Some(key) != cur_key {
                 if let Some(prev) = cur_key {
-                    slices.rows.insert(prev, row_start..i as u32);
+                    slices.rows.insert(prev, row_start..out_i as u32);
                 }
-                row_start = i as u32;
+                row_start = out_i as u32;
                 cur_key = Some(key);
             }
             slices.track.push(s.track);
@@ -378,6 +435,7 @@ impl ProfileBuilder {
             slices.name.push(s.name);
             slices.category.push(s.category);
             slices.stack.push(s.stack);
+            attrs_per_slice.push(std::mem::take(&mut self.pending_attrs[src]));
         }
         if let Some(prev) = cur_key {
             slices.rows.insert(prev, row_start..n as u32);
@@ -395,6 +453,12 @@ impl ProfileBuilder {
             t.row_count = max_depth.map(|d| d + 1).unwrap_or(0);
         }
 
+        let attrs = AttrTable {
+            keys: self.attr_keys,
+            key_lookup: self.attr_key_lookup,
+            per_slice: attrs_per_slice,
+        };
+
         Profile {
             strings: self.strings,
             categories: self.categories,
@@ -404,6 +468,7 @@ impl ProfileBuilder {
             stacks: self.stacks,
             slices,
             samples: self.samples,
+            attrs,
             time_range: (self.min_ts.unwrap_or(0), self.max_ts),
         }
     }

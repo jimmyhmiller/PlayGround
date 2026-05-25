@@ -1029,7 +1029,7 @@ fn spawn_generic_state_section(
     let mut rows: Vec<(&String, &Value)> = Vec::new();
     for (name, value) in node.slots.iter() {
         if HIDDEN_GENERIC_SLOTS.contains(&name.as_str()) { continue; }
-        if matches!(value, Value::Samples(_) | Value::Nil | Value::List(_) | Value::Variant { .. } | Value::Record(_) | Value::NodeRef(_)) {
+        if matches!(value, Value::Samples(_) | Value::Nil | Value::List(_) | Value::Record(_) | Value::NodeRef(_)) {
             continue;
         }
         rows.push((name, value));

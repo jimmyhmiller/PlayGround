@@ -520,6 +520,10 @@ fn setup_watcher(world: &mut World) {
     if !picker_path.exists() {
         let _ = std::fs::write(&picker_path, DEFAULT_STYLE_PICKER_SCRIPT);
     }
+    let editor_path = dir.join("theme_editor.rhai");
+    if !editor_path.exists() {
+        let _ = std::fs::write(&editor_path, DEFAULT_THEME_EDITOR_SCRIPT);
+    }
     // dev_panel.rhai is intentionally NOT auto-bootstrapped from an
     // embedded constant. If we shipped a Rust fallback, every edit
     // would tempt me into changing the Rust source instead of the
@@ -627,6 +631,7 @@ fn rhai_widget_spawn(world: &mut World, entity: Entity, _content_root: Entity, c
             sprite_entities: HashMap::new(),
         },
         WidgetTargets::default(),
+        crate::WidgetScroll::default(),
     ));
 }
 
@@ -730,28 +735,37 @@ fn apply_reloads(mut widgets: Query<&mut RhaiWidget>) {
 fn forward_clicks_to_workers(
     mut presses: MessageReader<PaneContentPressed>,
     keys: Res<ButtonInput<KeyCode>>,
-    widgets: Query<(&PaneKindMarker, &RhaiWidget, Option<&WidgetTargets>)>,
+    widgets: Query<(
+        &PaneKindMarker,
+        &RhaiWidget,
+        Option<&WidgetTargets>,
+        Option<&crate::WidgetScroll>,
+    )>,
 ) {
     let cmd = keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight);
     for ev in presses.read() {
-        let Ok((kind, w, targets)) = widgets.get(ev.pane) else {
+        let Ok((kind, w, targets, scroll)) = widgets.get(ev.pane) else {
             continue;
         };
         if kind.0 != PANE_KIND {
             continue;
         }
-        // Hit-test against last-rendered button rects. The script gets
-        // the matched id (if any) in `ev.payload.id` and can route
-        // directly without estimating row y-ranges.
+        // `ev.local_pt` is pane-content coords with scroll=0 baked in.
+        // Click rects in `targets` are stored relative to content_root's
+        // local frame, which slides up by `scroll.y` when the user
+        // scrolls. Add the scroll offset so the hit-test matches the
+        // visually-rendered position of each rect.
+        let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+        let hit_pt = ev.local_pt + Vec2::new(0.0, scroll_y);
         let button_id = targets.and_then(|t| {
             t.clicks
                 .iter()
-                .find(|ct| ct.rect.contains(ev.local_pt))
+                .find(|ct| ct.rect.contains(hit_pt))
                 .map(|ct| ct.id.clone())
         });
         w.handle.send(HostToWorker::Click {
-            local_x: ev.local_pt.x,
-            local_y: ev.local_pt.y,
+            local_x: hit_pt.x,
+            local_y: hit_pt.y,
             shift: ev.shift,
             cmd,
             button_id,
@@ -836,21 +850,29 @@ fn apply_latest_frames(
     mut clip_dirty: ResMut<WidgetClipDirty>,
     pane_font: Res<PaneFont>,
     pane_metrics: Res<pane_bevy::PaneFontMetrics>,
+    theme: Res<style_bevy::Theme>,
+    fonts: Res<style_bevy::FontRegistry>,
     mut q: Query<(
         &PaneKindMarker,
         &PaneChrome,
         &PaneRect,
         &mut RhaiWidget,
         &mut WidgetTargets,
+        &mut crate::WidgetScroll,
     )>,
     children_q: Query<&Children>,
 ) {
-    for (kind, chrome, rect, mut w, mut targets) in &mut q {
+    let theme_changed = theme.is_changed();
+    for (kind, chrome, rect, mut w, mut targets, mut scroll) in &mut q {
         if kind.0 != PANE_KIND {
             continue;
         }
         let current_gen = w.handle.slots.frame_gen.load(Ordering::Acquire);
-        if current_gen == w.applied_frame_gen {
+        // Theme changes also need to re-emit the frame so widgets
+        // pick up new palette colors; without this, switching presets
+        // wouldn't retone existing widget buttons/text/dividers until
+        // the next event triggered a worker re-render.
+        if current_gen == w.applied_frame_gen && !theme_changed {
             continue;
         }
         w.applied_frame_gen = current_gen;
@@ -920,13 +942,18 @@ fn apply_latest_frames(
                     metrics: *pane_metrics,
                     content_root: chrome.content_root,
                     content_size,
+                    palette: crate::render::WidgetPalette::from_theme(&theme),
+                    theme: theme.clone(),
+                    fonts: fonts.clone(),
+                    focused_input: None,
+                    caret_visible: true,
                 };
                 // Wipe last frame's click targets so a stale button
                 // rect from before a script reload doesn't keep
                 // matching clicks.
                 targets.clicks.clear();
                 targets.links.clear();
-                crate::render::render(
+                let consumed = crate::render::render(
                     &mut commands,
                     &ctx,
                     &mut targets,
@@ -935,6 +962,17 @@ fn apply_latest_frames(
                     content_size.x,
                     0.0,
                 );
+                // Update scroll bounds based on what the render
+                // actually consumed. Clamp current scroll to new max
+                // so resizing the pane shorter doesn't strand the
+                // user past the new bottom.
+                let new_max = (consumed.y - content_size.y).max(0.0);
+                if (scroll.max_y - new_max).abs() > 0.1 {
+                    scroll.max_y = new_max;
+                }
+                if scroll.y > new_max {
+                    scroll.y = new_max;
+                }
             }
         }
         clip_dirty.0 = true;
@@ -1076,6 +1114,9 @@ fn register_host_functions(engine: &mut Engine, slots: &WorkerSlots) {
     // for widgets like the style picker. Empty-string clears, falling
     // back to the per-project theme.
     style_bevy::register_preset_host_fns(engine);
+    // Live theme editing: `theme_tokens()`, `theme_get`, `theme_get_oklch`,
+    // `theme_set_oklch`, `theme_set_color`, `theme_set_number`, `theme_reset`.
+    style_bevy::register_theme_host_fns(engine);
 
     // Animation opt-in. Defaults to false. Main thread checks this
     // before sending Tick — idle widgets cost zero CPU.
@@ -1417,6 +1458,262 @@ fn render(canvas_w, canvas_h) {
         type: "vstack",
         pad: 10.0,
         gap: 4.0,
+        children: rows,
+    }
+}
+"###;
+
+// ============================================================
+// Default theme-editor widget (written if missing)
+// ============================================================
+
+const DEFAULT_THEME_EDITOR_SCRIPT: &str = r###"// theme_editor.rhai — live OkLCh theme editor with a real color
+// picker.
+//
+// EVENT-DRIVEN. Click a token to focus it; the focused token reveals
+// an LxH (lightness × hue) swatch grid at the token's current chroma,
+// plus chroma steppers. Clicking a swatch in the grid commits that
+// (L, C, h) directly. Writes go through theme_set_oklch — the bridge
+// rewrites the active preset's theme.rhai and the notify watcher
+// retones the rest of the app in the same frame.
+
+// NOTE on Rhai scoping: top-level `const` declarations are NOT visible
+// inside user-defined `fn` bodies. So every list below is duplicated
+// locally inside `render()` / `color_row()` where it's used.
+
+if !("focus" in state) { state.focus = "fg"; }
+
+fn on_init() { request_render(); }
+
+fn on_click(x, y, shift, cmd, id) {
+    if id == "" { return; }
+    if id.starts_with("focus_") {
+        state.focus = id.sub_string(6);
+        request_render();
+        return;
+    }
+    if id.starts_with("pick_") {
+        // pick_<token>_<L>_<h> — chroma stays at current value
+        let rest = id.sub_string(5);
+        let parts = rest.split("_");
+        let l = parts[parts.len() - 2].parse_float();
+        let h = parts[parts.len() - 1].parse_float();
+        let token = "";
+        let i = 0;
+        while i < parts.len() - 2 {
+            if i > 0 { token = token + "_"; }
+            token = token + parts[i];
+            i = i + 1;
+        }
+        let cur = theme_get_oklch(token);
+        let c = if type_of(cur) == "array" { cur[1] } else { 0.1 };
+        theme_set_oklch(token, l, c, h);
+        request_render();
+        return;
+    }
+    if id.starts_with("chr_") {
+        // chr_<token>_<sign> — sign is p (more chroma) / m (less)
+        let rest = id.sub_string(4);
+        let last_us = rest.index_of("_");
+        let token = rest.sub_string(0, last_us);
+        let sign = rest.sub_string(last_us + 1);
+        let cur = theme_get_oklch(token);
+        if type_of(cur) != "array" { return; }
+        let l = cur[0]; let c = cur[1]; let h = cur[2];
+        let delta = if sign == "p" { 0.02 } else { -0.02 };
+        c = c + delta;
+        if c < 0.0 { c = 0.0; }
+        if c > 0.4 { c = 0.4; }
+        theme_set_oklch(token, l, c, h);
+        request_render();
+        return;
+    }
+    if id.starts_with("num_") {
+        let rest = id.sub_string(4);
+        let last_us = rest.index_of("_");
+        let token = rest.sub_string(0, last_us);
+        let sign = rest.sub_string(last_us + 1);
+        let cur = theme_get(token);
+        if type_of(cur) != "f64" && type_of(cur) != "i64" { return; }
+        let v = if type_of(cur) == "i64" { cur.to_float() } else { cur };
+        let step = if sign == "p" { 1.0 }
+            else if sign == "P" { 5.0 }
+            else if sign == "m" { -1.0 }
+            else if sign == "M" { -5.0 }
+            else { 0.0 };
+        v = v + step;
+        if v < 0.0 { v = 0.0; }
+        theme_set_number(token, v);
+        request_render();
+        return;
+    }
+    if id == "reset_all" {
+        theme_reset_all();
+        request_render();
+        return;
+    }
+    if id.starts_with("reset_") {
+        let token = id.sub_string(6);
+        theme_reset(token);
+        request_render();
+        return;
+    }
+}
+
+fn on_event(kind, payload) {
+    if kind == "theme_changed" { request_render(); }
+}
+
+fn fmt_oklch(arr) {
+    "L " + arr[0].to_int() + " C " + (arr[1] * 100.0).to_int() + " h " + arr[2].to_int()
+}
+
+fn fmt_num(v) {
+    if type_of(v) == "i64" { v.to_string() }
+    else { ((v * 10.0).to_int().to_float() / 10.0).to_string() }
+}
+
+fn color_row(token, is_focused) {
+    let cur = theme_get(token);
+    let lch = theme_get_oklch(token);
+    let lch_text = if type_of(lch) == "array" { fmt_oklch(lch) } else { "" };
+    let prefix = if is_focused { "> " } else { "  " };
+    let swatch_color = if type_of(cur) == "string" { cur } else { "#000000" };
+    let header = #{ type: "hstack", gap: 6.0, align: "center", children: [
+        #{ type: "swatch", color: swatch_color, size: 16.0 },
+        #{ type: "button", id: "focus_" + token, label: prefix + token + "    " + lch_text },
+    ]};
+    if !is_focused { return [header]; }
+    let rows = [header];
+    let chroma = if type_of(lch) == "array" { lch[1] } else { 0.1 };
+    rows.push(#{ type: "text", value: "  pick L (rows) x h (cols) at C=" + (chroma * 100.0).to_int(), size: 10.0, color: "#888c98" });
+    // Lightest at the top — first-row clicks default to bright,
+    // not "near-black", which has wrecked themes by setting fg to
+    // L=12 and making the whole app unreadable.
+    let ls = [95, 85, 70, 55, 40, 25, 12];
+    let hs = [0, 25, 50, 80, 110, 140, 170, 210, 240, 270, 300, 330];
+    for l_pct in ls {
+        let cells = [];
+        for h in hs {
+            let col = oklch(l_pct.to_float(), chroma, h.to_float());
+            cells.push(#{
+                type: "swatch-button",
+                id: "pick_" + token + "_" + l_pct + "_" + h,
+                color: col,
+                size: 18.0,
+            });
+        }
+        rows.push(#{ type: "hstack", gap: 2.0, children: cells });
+    }
+    rows.push(#{ type: "hstack", gap: 4.0, align: "center", children: [
+        #{ type: "text", value: "  chroma:", size: 11.0, color: "#bdc1c9" },
+        #{ type: "button", id: "chr_" + token + "_m", label: "-" },
+        #{ type: "button", id: "chr_" + token + "_p", label: "+" },
+        #{ type: "button", id: "reset_" + token, label: "reset" },
+    ]});
+    rows
+}
+
+fn num_row(token) {
+    let cur = theme_get(token);
+    let v = if type_of(cur) == "i64" { cur.to_float() }
+        else if type_of(cur) == "f64" { cur }
+        else { 0.0 };
+    #{ type: "hstack", gap: 4.0, align: "center", children: [
+        #{ type: "text", value: token + "  " + fmt_num(v), size: 11.0, color: "#bdc1c9" },
+        #{ type: "button", id: "num_" + token + "_M", label: "-5" },
+        #{ type: "button", id: "num_" + token + "_m", label: "-1" },
+        #{ type: "button", id: "num_" + token + "_p", label: "+1" },
+        #{ type: "button", id: "num_" + token + "_P", label: "+5" },
+        #{ type: "button", id: "reset_" + token, label: "reset" },
+    ]}
+}
+
+fn contrast_row(pair) {
+    let fg_v = theme_get(pair.fg);
+    let bg_v = theme_get(pair.bg);
+    let score = if type_of(fg_v) == "string" && type_of(bg_v) == "string" {
+        theme_contrast(fg_v, bg_v)
+    } else { 0.0 };
+    let pass = if score >= 25.0 { "✓" } else { "!" };
+    let txt_color = if score >= 25.0 { "#7bd58a" } else { "#ff7a7a" };
+    let bg_color = if type_of(bg_v) == "string" { bg_v } else { "#000000" };
+    let fg_color = if type_of(fg_v) == "string" { fg_v } else { "#ffffff" };
+    #{ type: "hstack", gap: 6.0, align: "center", children: [
+        #{ type: "swatch", color: bg_color, size: 14.0 },
+        #{ type: "swatch", color: fg_color, size: 14.0 },
+        #{ type: "text", value: pair.label + "   ΔL " + score.to_int() + "  " + pass, size: 11.0, color: txt_color },
+    ]}
+}
+
+fn render(canvas_w, canvas_h) {
+    let color_tokens = [
+        "bg", "fg", "fg_muted", "accent", "caret",
+        "pane_bg", "pane_border", "pane_border_focused", "pane_focus_glow",
+        "chrome_title", "chrome_title_focused",
+        "syntax_keyword", "syntax_string", "syntax_comment", "syntax_function",
+        "syntax_type", "syntax_constant",
+        "button_bg", "button_label", "button_primary_bg",
+        "input_bg", "input_text",
+        "radial_wedge", "radial_wedge_hover",
+        "canvas_bg", "sidebar_bg",
+    ];
+    let num_tokens = [
+        "pane_corner_radius",
+        "pane_border_width",
+        "pane_border_width_focused",
+        "pane_focus_width",
+        "pane_focus_strength",
+        "pane_shadow_blur",
+        "pane_shadow_offset_y",
+        "widget_button_corner_radius",
+        "widget_button_border_width",
+        "widget_button_shadow_blur",
+        "widget_button_shadow_offset_y",
+    ];
+    let contrast_pairs = [
+        #{ label: "body",    fg: "fg",                    bg: "bg" },
+        #{ label: "comment", fg: "syntax_comment",        bg: "bg" },
+        #{ label: "string",  fg: "syntax_string",         bg: "bg" },
+        #{ label: "keyword", fg: "syntax_keyword",        bg: "bg" },
+        #{ label: "input",   fg: "input_text",            bg: "input_bg" },
+        #{ label: "button",  fg: "button_label",          bg: "button_bg" },
+        #{ label: "title",   fg: "chrome_title_focused",  bg: "pane_bg" },
+    ];
+
+    let rows = [];
+    rows.push(#{ type: "text", value: "Theme editor", size: 14.0, color: "#dde1ea" });
+    rows.push(#{ type: "text", value: "Click a token to pick its color from the L x h grid.", size: 10.0, color: "#888c98" });
+    rows.push(#{ type: "hstack", gap: 6.0, align: "center", children: [
+        #{ type: "button", id: "reset_all", label: "RESET ALL OVERRIDES" },
+        #{ type: "text", value: "(emergency escape — clears every override on the active theme)", size: 10.0, color: "#888c98" },
+    ]});
+    rows.push(#{ type: "divider" });
+
+    rows.push(#{ type: "text", value: "Contrast (OkLab dL; 25 = pass)", size: 11.0, color: "#bdc1c9" });
+    for pair in contrast_pairs {
+        rows.push(contrast_row(pair));
+    }
+    rows.push(#{ type: "divider" });
+
+    rows.push(#{ type: "text", value: "Colors", size: 11.0, color: "#bdc1c9" });
+    for token in color_tokens {
+        let is_focused = state.focus == token;
+        for r in color_row(token, is_focused) {
+            rows.push(r);
+        }
+    }
+
+    rows.push(#{ type: "divider" });
+    rows.push(#{ type: "text", value: "Numbers", size: 11.0, color: "#bdc1c9" });
+    for token in num_tokens {
+        rows.push(num_row(token));
+    }
+
+    #{
+        type: "scroll",
+        pad: 10.0,
+        gap: 3.0,
         children: rows,
     }
 }

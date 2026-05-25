@@ -1,18 +1,20 @@
-# Cache reimplemented from primitives:
+# Cache reimplemented from primitives only:
 #
-#                  ┌─heads─▶ Delay(hit_latency_ns) ──▶ Reply ──▶ Lower (response port)
-#  req(c) ─▶ Lower─▶ Coin(p=hit_rate)
-#                  └─tails─▶ Stamp ──▶ MissEgress (miss port; backend wired here)
-#                                       (backend reply pops back through Stamp → Lower)
+#                       ┌─heads─▶ Delay(hit_latency_ns) ──▶ HR (hit-reply) ──▶ L (response port)
+#  req(c) ─▶ L (entry)─▶ Coin(p=hit_rate)
+#                       └─tails─▶ S (stamp) ──▶ ME (miss-egress; backend wired here)
+#                                                 (backend reply pops back: ME → S → L)
 #
-# - `Lower` lifts `req(c)` into the inner packet pipeline (push self).
-# - `Coin` does the Bernoulli hit/miss split.
-# - Hit path holds the packet in `Delay` for `hit_latency_ns`, then
-#   `Reply` converts it into a `resp(nil) popping`. Reply's pop pops
-#   Lower off, and Lower's reverse rule emits via the `response` port.
-# - Miss path uses `Stamp`: pushes self again, forwards as `req`. The
-#   external backend's `resp` (popping) pops back to Stamp, which
-#   relays it one more hop to Lower; Lower's reverse emits via
+# - L (formerly Lower): on `req(c)` push self, forward as `packet(c)`;
+#   on resp/resp_error pop and emit via the compound's `response` port.
+# - Coin does the Bernoulli hit/miss split.
+# - Hit path holds the packet in Delay for `hit_latency_ns`, then HR
+#   (formerly Reply, now inline) converts it into `resp(nil) popping`.
+#   HR's pop pops L off, and L's reverse rule emits via the `response`
+#   port.
+# - Miss path uses S (formerly Stamp, now inline): pushes self again,
+#   forwards as `req`. The external backend's `resp` (popping) pops back
+#   to S, which relays it one more hop to L; L's reverse emits via
 #   `response` as in the hit case.
 compound CacheComposite(
     hit_rate:       Float = 0.8,
@@ -25,19 +27,48 @@ compound CacheComposite(
         miss:     ME
     }
 
-    node L  : Lower  { }
+    # Inline entry adapter (formerly Lower).
+    node L {
+        rule rev {
+            on p when p.kind == "resp" || p.kind == "resp_error"
+            do { emit p popping to out response }
+        }
+        rule fwd {
+            on p when p.kind == "req"
+            do { emit packet(p.value) pushing self to default }
+        }
+    }
     node F  : Filter { match: color }
     node C  : Coin   { p: hit_rate }
     node HD : Delay  { ns: hit_latency_ns }
-    node HR : Reply  { }
-
-    node S  : Stamp  { }
+    # Inline hit-reply (formerly Reply).
+    node HR {
+        rule rev_pass {
+            on p when p.kind == "resp" || p.kind == "resp_error"
+            do { emit p popping to (head(return_path)) }
+        }
+        rule on_packet {
+            on p
+            do { emit resp(nil) popping to (head(return_path)) }
+        }
+    }
+    # Inline stamp waystation (formerly Stamp). Pushes self forward,
+    # relays popping resp back one hop.
+    node S {
+        rule rev {
+            on p when p.kind == "resp" || p.kind == "resp_error"
+            do { emit p popping to (head(return_path)) }
+        }
+        rule fwd {
+            on p
+            do { emit p pushing self to default }
+        }
+    }
+    # Miss-egress: routes both directions of req/resp through the
+    # compound's `miss` port. (Egress proper emits via `out output`;
+    # this bespoke version routes via `out miss`.)
     node ME {
-        # Egress glue for the `miss` port. (Egress emits via `out output`;
-        # this one routes via `out miss`.)
-        rule fwd_req         { on req(p)         do { emit req(p)         to out miss } }
-        rule fwd_resp        { on resp(x)        do { emit resp(x)        to out miss } }
-        rule fwd_resp_error  { on resp_error(x)  do { emit resp_error(x)  to out miss } }
+        rule fwd { on p do { emit p to out miss } }
     }
 
     edges {
@@ -50,8 +81,8 @@ compound CacheComposite(
         C.tails -> S  : 1
         S       -> ME : 1
         # When the backend replies, the resp pops back through Stamp to
-        # Lower. The reverse edges mirror the forward chain so popping
-        # has somewhere to go.
+        # L. The reverse edges mirror the forward chain so popping has
+        # somewhere to go.
         ME      -> S  : 1
         S       -> L  : 1
     }

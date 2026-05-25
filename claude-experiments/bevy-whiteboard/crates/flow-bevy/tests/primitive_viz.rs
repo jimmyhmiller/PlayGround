@@ -70,17 +70,20 @@ fn every_primitive_in_pure_life_cell_gets_a_kind_marker() {
     assert!(!kinds.is_empty(), "expected primitive viz markers");
 
     // The canvas has these primitives (per main.flow):
-    //   T (Tick), SW (Switch), C1/C0 (ConstantPacket x2), B (FanOut),
-    //   A (Aggregator), F3/F2 (Filter x2), ToAlv/ToDed (ConstantSignal x2)
+    //   T (Tick), SW (Switch), C1/C0 (Constant x2 packet-flavored),
+    //   B (FanOut), A (Aggregator), F3/F2 (Filter x2),
+    //   ToAlv/ToDed (Constant x2 signal-flavored)
     let count = |k: PrimitiveKind| kinds.iter().filter(|x| **x == k).count();
     assert_eq!(count(PrimitiveKind::Tick), 1, "kinds={:?}", kinds);
     assert_eq!(count(PrimitiveKind::Switch), 1, "kinds={:?}", kinds);
-    assert_eq!(count(PrimitiveKind::ConstantPacket), 2, "kinds={:?}", kinds);
+    // Unified Constant — covers both the value-source (C1/C0) and the
+    // signal-source (ToAlv/ToDed) roles, distinguished only by the
+    // `out_kind` slot. Four total in this scene.
+    assert_eq!(count(PrimitiveKind::Constant), 4, "kinds={:?}", kinds);
     assert_eq!(count(PrimitiveKind::FanOut), 1, "kinds={:?}", kinds);
     assert_eq!(count(PrimitiveKind::Egress), 1, "kinds={:?}", kinds);
     assert_eq!(count(PrimitiveKind::Aggregator), 1, "kinds={:?}", kinds);
     assert_eq!(count(PrimitiveKind::Filter), 2, "kinds={:?}", kinds);
-    assert_eq!(count(PrimitiveKind::ConstantSignal), 2, "kinds={:?}", kinds);
 }
 
 #[test]

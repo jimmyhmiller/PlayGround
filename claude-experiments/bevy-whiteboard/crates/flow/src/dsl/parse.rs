@@ -898,12 +898,27 @@ impl Parser {
         }
     }
     fn parse_pow(&mut self) -> Result<Expr, String> {
-        let lhs = self.parse_primary()?;
+        let lhs = self.parse_postfix()?;
         if matches!(self.peek(), Tok::Caret) {
             self.bump();
             let rhs = self.parse_unary()?;       // right-assoc
             Ok(Expr::Binary(BinOp::Pow, Box::new(lhs), Box::new(rhs)))
         } else { Ok(lhs) }
+    }
+
+    /// Wrap `parse_primary` with left-associative postfix `.field` access:
+    /// `p.kind`, `pkt.value.id`, etc. Lets rules bind a whole packet
+    /// (`on p`) and read its record fields rather than duplicating one
+    /// rule per variant name. Field access binds tighter than `^` so
+    /// `a.b ^ c` parses as `(a.b) ^ c`.
+    fn parse_postfix(&mut self) -> Result<Expr, String> {
+        let mut e = self.parse_primary()?;
+        while matches!(self.peek(), Tok::Dot) {
+            self.bump();
+            let field = self.ident()?;
+            e = Expr::Field(Box::new(e), field);
+        }
+        Ok(e)
     }
     fn parse_primary(&mut self) -> Result<Expr, String> {
         match self.peek().clone() {
@@ -973,6 +988,14 @@ impl Parser {
                         | "length" | "index" | "filter" | "map" | "reduce" | "argmin"
                         | "head" | "tail"
                         | "edge_last_sent"
+                        // `tagged(kind, value)` — build a packet with a
+                        // dynamic kind (slot- or param-controlled). The
+                        // shape `foo(x)` only works when `foo` is a
+                        // literal kind; tagged() takes the kind as an
+                        // expression so primitives like Constant can
+                        // emit `signal(v)` or `packet(v)` selected at
+                        // spawn time.
+                        | "tagged"
                     );
                     if is_builtin {
                         Ok(Expr::FnCall(name, args))

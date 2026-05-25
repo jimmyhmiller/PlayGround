@@ -7,5 +7,7 @@ pub mod palette;
 pub mod renderer;
 pub mod viewport;
 
-pub use renderer::{Direction, MainTab, Renderer, TrackLayout, ROW_HEIGHT_PX};
+pub use renderer::{
+    Direction, MainTab, MergeMode, Renderer, SidebarTab, TrackLayout, ROW_HEIGHT_PX,
+};
 pub use viewport::Viewport;

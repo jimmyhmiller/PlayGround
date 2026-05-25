@@ -104,6 +104,43 @@ impl Subscriber {
     }
 }
 
+/// Fire-and-forget publish: open the bus socket, send Hello+Publish, drop.
+///
+/// Returns the wire error if the socket is missing or the bus is down;
+/// callers in best-effort emitters (worker threads emitting telemetry,
+/// etc.) typically discard it. Blocking on the connect + two short
+/// writes is fine off-the-main-thread; on a worker that runs in a poll
+/// loop, prefer batching or spawning a one-shot thread.
+pub fn publish_oneshot(
+    socket: &std::path::Path,
+    kind: &str,
+    ts: u64,
+    terminal_session_id: &str,
+    claude_pid: u32,
+    payload_json: &str,
+) -> std::io::Result<()> {
+    let mut s = UnixStream::connect(socket)?;
+    s.write_all(
+        &encode(&ClientFrame::Hello {
+            role: Role::Publisher,
+        })
+        .map_err(std::io::Error::other)?,
+    )?;
+    s.write_all(
+        &encode(&ClientFrame::Publish {
+            kind: kind.into(),
+            ts,
+            terminal_session_id: terminal_session_id.into(),
+            claude_pid,
+            payload_json: payload_json.into(),
+        })
+        .map_err(std::io::Error::other)?,
+    )?;
+    // Caller's drop closes the socket; the daemon parses and broadcasts
+    // even after the publisher hangs up.
+    Ok(())
+}
+
 impl Drop for Subscriber {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);

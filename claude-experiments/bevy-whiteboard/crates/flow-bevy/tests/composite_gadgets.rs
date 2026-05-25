@@ -42,6 +42,7 @@ fn build_sim(composite: &str, scene: &str) -> flow::sim::Sim {
     let mut sim = flow::sim::Sim::new(0);
     flow::dsl::register_classes(&mut sim, GADGETS_DSL)
         .expect("primitive registry must compile");
+    flow_bevy::gadgets::install_back_compat_aliases(&mut sim);
     let mut src = String::new();
     src.push_str(composite);
     src.push('\n');
@@ -377,13 +378,30 @@ fn cache_composite_hit_path_replies() {
 compound CacheComposite(hit_rate: Float = 1.0, hit_latency_ns: Int = 1000000, color: Int = 0) {
     in  { request:  L }
     out { response: L; miss: ME }
-    node L  : Lower  { }
+    # Inline entry adapter (formerly Lower).
+    node L {
+        rule rev { on p when p.kind == "resp" || p.kind == "resp_error"
+                  do { emit p popping to out response } }
+        rule fwd { on p when p.kind == "req"
+                  do { emit packet(p.value) pushing self to default } }
+    }
     node F  : Filter { match: color }
     node C  : Coin   { p: hit_rate }
     node HD : Delay  { ns: hit_latency_ns }
-    node HR : Reply  { }
-    node S  : Stamp  { }
-    node ME { rule fwd_req { on req(p) do { emit req(p) to out miss } } }
+    # Inline hit-reply (formerly Reply).
+    node HR {
+        rule rev_pass { on p when p.kind == "resp" || p.kind == "resp_error"
+                       do { emit p popping to (head(return_path)) } }
+        rule on_packet { on p
+                       do { emit resp(nil) popping to (head(return_path)) } }
+    }
+    # Inline stamp waystation (formerly Stamp).
+    node S {
+        rule rev { on p when p.kind == "resp" || p.kind == "resp_error"
+                  do { emit p popping to (head(return_path)) } }
+        rule fwd { on p do { emit p pushing self to default } }
+    }
+    node ME { rule fwd { on p do { emit p to out miss } } }
     edges {
         L -> F : 1
         F.pass -> C : 1
@@ -494,13 +512,19 @@ fn saga_step_failure_emits_compensate() {
 compound SagaStepC(fail_prob: Float = 1.0) {
     in  { request: L }
     out { forward: FE; response: L }
-    node L : Lower { }
+    # Inline entry adapter (formerly Lower).
+    node L {
+        rule rev { on p when p.kind == "resp" || p.kind == "resp_error"
+                  do { emit p popping to out response } }
+        rule fwd { on p when p.kind == "req"
+                  do { emit packet(p.value) pushing self to default } }
+    }
     # Coin's heads fires when Bernoulli(p) is true; with `p: fail_prob`
     # that's the fail probability, so heads → Fail, tails → forward.
     node C : Coin  { p: fail_prob }
     node FE : Egress { }
     node Fail {
-        rule on_packet { on packet(_) do { emit resp_error(nil) popping to (head(return_path)) } }
+        rule on_packet { on p do { emit resp_error(nil) popping to (head(return_path)) } }
     }
     edges {
         L -> C : 1
@@ -541,22 +565,29 @@ fn tpc_unanimous_yes_commits() {
 compound Coord(participants: Int = 2, color: Int = 0) {
     in  { request: L; vote: A }
     out { response: L; prepare: PE }
-    node L : Lower { }
+    # Inline entry adapter (formerly Lower).
+    node L {
+        rule rev { on p when p.kind == "resp" || p.kind == "resp_error"
+                  do { emit p popping to out response } }
+        rule fwd { on p when p.kind == "req"
+                  do { emit packet(p.value) pushing self to default } }
+    }
     node FO : FanOut { }
-    node PE { rule fwd { on packet(p) do { emit packet(p) to out prepare } } }
+    node PE { rule fwd { on p do { emit p to out prepare } } }
     node A : Aggregator { n: participants }
     node Decide {
         slots { n: Int = participants }
         rule decide {
-            on total(sum) do { emit pkt(if sum == n then 1 else 0) to default }
+            on p when p.kind == "total"
+            do { emit pkt(if p.value == n then 1 else 0) to default }
         }
     }
     node Resp {
-        # Emit through L: L's rev_resp / rev_resp_error rules know how
-        # to pop and route via the compound's response port. Doing the
-        # popping here would leave L popping an empty return_path.
-        rule ok    { on pkt(v) when v == 1 do { emit resp(nil) to default } }
-        rule abort { on pkt(v) when v == 0 do { emit resp_error(nil) to default } }
+        # Emit through L: L's rev rule knows how to pop and route via the
+        # compound's response port. Doing the popping here would leave L
+        # popping an empty return_path.
+        rule ok    { on p when p.kind == "pkt" && p.value == 1 do { emit resp(nil) to default } }
+        rule abort { on p when p.kind == "pkt" && p.value == 0 do { emit resp_error(nil) to default } }
     }
     edges {
         L -> FO : 1
@@ -569,10 +600,16 @@ compound Coord(participants: Int = 2, color: Int = 0) {
 compound Part(yes_prob: Float = 1.0) {
     in  { request: L }
     out { response: L }
-    node L : Lower { }
+    # Inline entry adapter (formerly Lower).
+    node L {
+        rule rev { on p when p.kind == "resp" || p.kind == "resp_error"
+                  do { emit p popping to out response } }
+        rule fwd { on p when p.kind == "req"
+                  do { emit packet(p.value) pushing self to default } }
+    }
     node C : Coin  { p: yes_prob }
-    node Yes { rule on_packet { on packet(_) do { emit resp(1) popping to (head(return_path)) } } }
-    node No  { rule on_packet { on packet(_) do { emit resp(0) popping to (head(return_path)) } } }
+    node Yes { rule on_packet { on p do { emit resp(1) popping to (head(return_path)) } } }
+    node No  { rule on_packet { on p do { emit resp(0) popping to (head(return_path)) } } }
     edges {
         L -> C : 1
         C.heads -> Yes : 1
@@ -745,14 +782,14 @@ fn build_pure_primitives_life_grid(w: usize, h: usize, init: &[Vec<u8>]) -> flow
             src.push_str(&format!(r#"
 node T_{x}_{y}     : Tick           {{ period_ns: 200000000 }}
 node SW_{x}_{y}    : Switch         {{ passing: {alive} }}
-node C1_{x}_{y}    : ConstantPacket {{ value: 1 }}
-node C0_{x}_{y}    : ConstantPacket {{ value: 0 }}
+node C1_{x}_{y}    : Constant {{ value: 1 }}
+node C0_{x}_{y}    : Constant {{ value: 0 }}
 node B_{x}_{y}     : FanOut         {{ }}
 node A_{x}_{y}     : Aggregator     {{ n: 8 }}
 node F3_{x}_{y}    : Filter         {{ match: 3 }}
 node F2_{x}_{y}    : Filter         {{ match: 2 }}
-node ToAlv_{x}_{y} : ConstantSignal {{ value: 0 }}
-node ToDed_{x}_{y} : ConstantSignal {{ value: 1 }}
+node ToAlv_{x}_{y} : Constant {{ value: 0, out_kind: "signal" }}
+node ToDed_{x}_{y} : Constant {{ value: 1, out_kind: "signal" }}
 "#));
         }
     }
@@ -785,6 +822,7 @@ node ToDed_{x}_{y} : ConstantSignal {{ value: 1 }}
 
     let mut sim = flow::sim::Sim::new(0);
     flow::dsl::register_classes(&mut sim, GADGETS_DSL).expect("primitive registry");
+    flow_bevy::gadgets::install_back_compat_aliases(&mut sim);
     let file = flow::dsl::parse(&src).unwrap_or_else(|e| panic!("parse: {}", e));
     let file = flow::dsl::expand::expand(&file).unwrap_or_else(|e| panic!("expand: {}", e));
     let _ = flow::dsl::lower_into(&mut sim, &file).unwrap_or_else(|e| panic!("lower: {}", e));

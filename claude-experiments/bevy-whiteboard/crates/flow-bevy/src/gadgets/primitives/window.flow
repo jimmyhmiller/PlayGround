@@ -1,24 +1,28 @@
 # Sliding-window counter. Each incoming packet pushes `now` onto the
-# ring, then emits a `count(n)` packet where n is the number of
-# entries within the last `window_ns`. Use with Threshold to make a
-# rate-limiter or breaker.
+# ring, then emits a `count(n)` packet where n is the number of entries
+# within the last `window_ns`. Pair with Threshold to make a rate
+# limiter or circuit breaker.
+#
+# Pattern-binds the whole packet so any kind triggers the window — the
+# value/kind isn't read, just the arrival timestamp is recorded.
 node Window {
     slots {
         window_ns: Int = 1000000000
         ring:      Samples(256)
     }
     probes { count: "{count_where(ring, \"ts\", now - ts < window_ns)}" }
-    rule on_packet {
-        on packet(p)
+    # Reset: clears the window. Useful as a "successful probe" signal
+    # for a circuit breaker — when a probe succeeds, flush the failures.
+    # Comes first so reset wins over the generic accumulate rule.
+    rule reset {
+        on p when p.kind == "reset"
+        do { drop ring len(ring) }
+    }
+    rule sample {
+        on p
         do {
             push ring <- now
             emit count(count_where(ring, "ts", now - ts < window_ns)) to default
         }
-    }
-    # Reset: clears the window. Useful as a "successful probe" signal
-    # for a circuit breaker — when a probe succeeds, flush the failures.
-    rule reset {
-        on reset(_)
-        do { drop ring len(ring) }
     }
 }

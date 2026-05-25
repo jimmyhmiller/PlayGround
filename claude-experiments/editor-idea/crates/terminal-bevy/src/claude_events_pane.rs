@@ -31,7 +31,7 @@ const TEXT_LINE_HEIGHT: f32 = TEXT_FONT_SIZE * 1.3;
 const MAX_LINES_PER_PANE: usize = 500;
 const TEXT_INNER_PAD_X: f32 = 8.0;
 const TEXT_INNER_PAD_Y: f32 = 6.0;
-const COLOR_TEXT: Color = Color::srgb(0.85, 0.87, 0.9);
+// COLOR_TEXT removed — now driven by theme `FG` token; see spawn().
 
 /// Per-pane state. Lives on the pane entity (the same one PaneTag is
 /// on). `text_entity` is the child Text2d we mutate as events stream
@@ -87,6 +87,10 @@ fn claude_events_spawn(world: &mut World, entity: Entity, content_root: Entity, 
         .and_then(|v| v.as_str())
         .unwrap_or("Claude Events")
         .to_string();
+    let text_color = world
+        .get_resource::<style_bevy::Theme>()
+        .map(|t| Color::LinearRgba(t.color(style_bevy::tokens::FG)))
+        .unwrap_or(Color::srgb(0.85, 0.87, 0.9));
 
     let text_entity = world
         .spawn((
@@ -98,7 +102,7 @@ fn claude_events_spawn(world: &mut World, entity: Entity, content_root: Entity, 
                 ..default()
             },
             LineHeight::Px(TEXT_LINE_HEIGHT),
-            TextColor(COLOR_TEXT),
+            TextColor(text_color),
             Anchor::TOP_LEFT,
             // No-wrap so seq + kind columns stay aligned. Right-overflow
             // is invisibly clipped by the per-pane camera viewport

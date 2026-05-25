@@ -5,20 +5,19 @@ import FoundationModels
 struct CWeatherTool: Tool {
     let name = "getWeather"
     let description = "Get weather for a city"
-    let callFunction: (String) -> String
-    
+    let callFunction: @Sendable (String) -> String
+
     @Generable
     struct Arguments {
         let city: String
     }
-    
+
     var parameters: GenerationSchema {
         return Arguments.generationSchema
     }
-    
-    func call(arguments: Arguments) async throws -> ToolOutput {
-        let result = callFunction(arguments.city)
-        return ToolOutput(result)
+
+    func call(arguments: Arguments) async throws -> String {
+        return callFunction(arguments.city)
     }
 }
 
@@ -48,7 +47,7 @@ struct CWeatherTool: Tool {
         self.session = LanguageModelSession(model: systemModel)
     }
     
-    @objc public init(weatherToolFunction: @escaping (String) -> String, instructions: String?) {
+    @objc public init(weatherToolFunction: @escaping @Sendable (String) -> String, instructions: String?) {
         super.init()
         
         let weatherTool = CWeatherTool(callFunction: weatherToolFunction)
@@ -78,8 +77,17 @@ struct CWeatherTool: Tool {
                     completion(content, nil)
                 }
             } catch {
+                let ns = error as NSError
+                var parts: [String] = ["\(error)"]
+                if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? Error {
+                    parts.append("underlying: \(underlying)")
+                }
+                if let multi = ns.userInfo[NSMultipleUnderlyingErrorsKey] as? [Error] {
+                    for e in multi { parts.append("also: \(e)") }
+                }
+                let detail = parts.joined(separator: " | ")
                 await MainActor.run {
-                    completion(nil, error.localizedDescription)
+                    completion(nil, detail)
                 }
             }
         }
@@ -91,7 +99,7 @@ struct CWeatherTool: Tool {
     
     @objc public var transcript: String {
         guard let session = session else { return "" }
-        return "Transcript with \(session.transcript.entries.count) entries"
+        return "Transcript with \(session.transcript.count) entries"
     }
     
     @objc public static func checkAvailability() -> Bool {

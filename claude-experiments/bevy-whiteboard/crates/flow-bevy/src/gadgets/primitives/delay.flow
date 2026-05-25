@@ -1,15 +1,22 @@
 # Holds an incoming packet for `ns` then re-emits it. The self-loop edge
 # carries the delay; live edits to `ns` apply to the NEXT packet that
 # enters. Use to model service time, hit latency, recovery timers.
+#
+# Uses a private `delayed` kind on the self-loop hop so the exit rule
+# can recognize "this is the round-tripped packet, time to release it."
+# Forward kind is preserved in `.value` so on exit we re-emit the
+# original. Today we just re-emit the value as a `packet` for
+# simplicity — that matches what the existing composites assumed when
+# `delayed(p)` was a variant tag.
 node Delay {
     slots { ns: Int = 100000000 }
     on_spawn { self -> self : ns }
     rule enter {
-        on packet(p)
-        do { emit delayed(p) to self }
+        on p when p.kind != "delayed"
+        do { emit delayed(p.value) to self }
     }
     rule exit {
-        on delayed(p)
-        do { emit packet(p) to default }
+        on p when p.kind == "delayed"
+        do { emit packet(p.value) to default }
     }
 }

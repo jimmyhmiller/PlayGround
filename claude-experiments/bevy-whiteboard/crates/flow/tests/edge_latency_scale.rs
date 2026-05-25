@@ -27,10 +27,7 @@ fn future_emits_scale() {
     sim.set_edge_latency_scale(2.0);
 
     let src_id = sim.nodes.values().find(|n| n.name == "Src").unwrap().id;
-    sim.inject(src_id, flow::Value::Variant {
-        tag: "go".into(),
-        payload: Box::new(flow::Value::Nil),
-    });
+    sim.inject(src_id, flow::Value::variant("go", flow::Value::Nil));
     sim.run_until(1); // fire the rule, schedule the emit
 
     let arr = sim.in_flight.peek().expect("emitted").0.arrives_at_ns;
@@ -41,10 +38,7 @@ fn future_emits_scale() {
 fn in_flight_rescale_doubles_remaining_travel() {
     let mut sim = flow::dsl::load(SRC, 0).unwrap();
     let src_id = sim.nodes.values().find(|n| n.name == "Src").unwrap().id;
-    sim.inject(src_id, flow::Value::Variant {
-        tag: "go".into(),
-        payload: Box::new(flow::Value::Nil),
-    });
+    sim.inject(src_id, flow::Value::variant("go", flow::Value::Nil));
     sim.run_until(1);
     let arr0 = sim.in_flight.peek().unwrap().0.arrives_at_ns;
     assert_eq!(arr0, 100_000_000);
@@ -61,10 +55,7 @@ fn scaling_back_down_compresses_remaining_travel() {
     let mut sim = flow::dsl::load(SRC, 0).unwrap();
     sim.set_edge_latency_scale(4.0);
     let src_id = sim.nodes.values().find(|n| n.name == "Src").unwrap().id;
-    sim.inject(src_id, flow::Value::Variant {
-        tag: "go".into(),
-        payload: Box::new(flow::Value::Nil),
-    });
+    sim.inject(src_id, flow::Value::variant("go", flow::Value::Nil));
     sim.run_until(1);
     // 100ms × 4 = 400ms
     assert_eq!(sim.in_flight.peek().unwrap().0.arrives_at_ns, 400_000_000);
@@ -97,18 +88,14 @@ fn zero_latency_edges_pick_up_floor_at_high_scale() {
     let src_id = sim.nodes.values().find(|n| n.name == "Src").unwrap().id;
 
     // At scale=1, 0-latency edge stays 0-latency.
-    sim.inject(src_id, flow::Value::Variant {
-        tag: "go".into(), payload: Box::new(flow::Value::Nil),
-    });
+    sim.inject(src_id, flow::Value::variant("go", flow::Value::Nil));
     sim.run_until(1);
     assert!(sim.in_flight.is_empty(),
         "0-latency edge at scale=1 should deliver in same instant");
 
     // At scale=4, 0-latency edge should arrive at (4 - 1) * 50ms = 150ms.
     sim.set_edge_latency_scale(4.0);
-    sim.inject(src_id, flow::Value::Variant {
-        tag: "go".into(), payload: Box::new(flow::Value::Nil),
-    });
+    sim.inject(src_id, flow::Value::variant("go", flow::Value::Nil));
     let emit_ns = sim.now_ns;
     sim.run_until(sim.now_ns + 1);
     let arr = sim.in_flight.peek().expect("emitted at scale=4").0.arrives_at_ns;
@@ -125,9 +112,7 @@ fn non_zero_edges_above_floor_still_scale_purely() {
     let mut sim = flow::dsl::load(SRC, 0).unwrap();
     sim.set_edge_latency_scale(2.0);
     let src_id = sim.nodes.values().find(|n| n.name == "Src").unwrap().id;
-    sim.inject(src_id, flow::Value::Variant {
-        tag: "go".into(), payload: Box::new(flow::Value::Nil),
-    });
+    sim.inject(src_id, flow::Value::variant("go", flow::Value::Nil));
     sim.run_until(1);
     // 100ms × 2 = 200ms, floor at scale=2 is 50ms — pure scale wins.
     assert_eq!(sim.in_flight.peek().unwrap().0.arrives_at_ns, 200_000_000);

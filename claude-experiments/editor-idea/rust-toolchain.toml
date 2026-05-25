@@ -1,0 +1,6 @@
+[toolchain]
+# libghostty-vt 0.1.1 requires rustc ≥ 1.93. Pin here so `cargo` /
+# `dev-restart.sh` don't silently fall back to whatever the system
+# rustup default is — earlier silent fallbacks left us deploying
+# stale binaries from cache when builds actually failed.
+channel = "1.95.0"

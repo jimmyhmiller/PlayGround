@@ -14,15 +14,18 @@ use flow_bevy::palette::ToolBtn;
 use flow_bevy::tool::Tool;
 use poster_ui::testing::{click_by_marker, simulate_canvas_click};
 
-/// Count nodes in the sim whose name matches the `{kind.label()}_N` pattern.
-/// The seed_demo_graph already created one Gen_, one Queue_, one Worker_,
-/// one Sink_ — so delta against the baseline is what we check.
+/// Count *outer* sim nodes whose name matches the `{kind.label()}_N`
+/// pattern. The seed_demo_graph already created one Gen_, one Queue_,
+/// one Worker_, one Sink_ — so delta against the baseline is what we
+/// check. Composite inner nodes (e.g. `Worker_2::L`, `Worker_2::F`)
+/// also start with the kind prefix and would inflate the count — we
+/// filter them out with the `::` discriminator.
 fn count_by_label_prefix(app: &App, prefix: &str) -> usize {
     app.world()
         .resource::<FlowSim>()
         .nodes
         .values()
-        .filter(|n| n.name.starts_with(prefix))
+        .filter(|n| n.name.starts_with(prefix) && !n.name.contains("::"))
         .count()
 }
 
@@ -41,10 +44,12 @@ fn drop_and_assert(kind: Kind, prefix: &str) {
 
     let after_total = node_count(&app);
     let after_kind = count_by_label_prefix(&app, prefix);
-    assert_eq!(
-        after_total,
-        before_total + 1,
-        "expected 1 new node after dropping {:?}, got delta {}",
+    // Composites spawn N inner nodes plus the port shim, so the total
+    // delta is >1. The kind-prefix delta is still exactly 1 — only the
+    // shim has the user-facing `<Kind.label()>_N` name.
+    assert!(
+        after_total > before_total,
+        "expected at least one new node after dropping {:?}, got delta {}",
         kind,
         after_total as i64 - before_total as i64
     );

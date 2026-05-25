@@ -1,14 +1,17 @@
-# Increments a counter on every incoming packet and forwards the packet
-# unchanged on the default outbound edge. Building block for any metric.
+# Increments a counter on every incoming packet (any kind) and forwards
+# the packet unchanged. Pattern-binds the whole packet as `p`, re-emits
+# `p` so the kind/value pair is preserved verbatim. Works for any kind
+# of payload — a Counter after an Aggregator sees `total(sum)`, one
+# after a Filter sees `packet(c)`, etc.
 node Counter {
     slots { count: Int = 0 }
     probes { count: "{count}" }
     rule pass {
-        on packet(p)
+        on p
         do {
             count := count + 1
             record count count
-            emit packet(p) to default
+            emit p to default
         }
     }
 }

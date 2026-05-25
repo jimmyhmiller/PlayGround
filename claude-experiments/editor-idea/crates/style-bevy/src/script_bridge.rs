@@ -300,9 +300,75 @@ pub fn register_script_host_fns(engine: &mut Engine) {
         let _ = tx_state.send(DynamicMsg::StateSet(key.to_string(), v));
     });
 
+    // ---- OkLCh / OkLab color helpers ----
+    //
+    // Return the chosen color as a `#rrggbbaa` hex string. Widgets use
+    // these in build-up code (e.g. `text { color: oklch(70, 0.15, 280) }`
+    // in dev panels) so authors can think in perceptual coordinates
+    // without leaving Rhai.
+    engine.register_fn("oklch", |l: f64, c: f64, h: f64| -> String {
+        let rgba = crate::oklab::oklch_to_linear_srgb(l as f32, c as f32, h as f32);
+        linear_rgba_to_hex(rgba)
+    });
+    engine.register_fn(
+        "oklch",
+        |l: f64, c: f64, h: f64, alpha: f64| -> String {
+            let mut rgba =
+                crate::oklab::oklch_to_linear_srgb(l as f32, c as f32, h as f32);
+            rgba.alpha = alpha as f32;
+            linear_rgba_to_hex(rgba)
+        },
+    );
+    engine.register_fn("oklab", |l: f64, a: f64, b: f64| -> String {
+        let rgba = crate::oklab::oklab_to_linear_srgb(l as f32, a as f32, b as f32);
+        linear_rgba_to_hex(rgba)
+    });
+    engine.register_fn(
+        "oklab",
+        |l: f64, a: f64, b: f64, alpha: f64| -> String {
+            let mut rgba =
+                crate::oklab::oklab_to_linear_srgb(l as f32, a as f32, b as f32);
+            rgba.alpha = alpha as f32;
+            linear_rgba_to_hex(rgba)
+        },
+    );
+
+    // ---- theme_contrast(a, b) → OkLab L difference [0, 100] ----
+    //
+    // `a` and `b` are any color string the theme parser accepts
+    // (hex / oklch() / oklab() / rgb()). Returns the absolute OkLab
+    // lightness difference — a quick perceptual contrast score.
+    engine.register_fn("theme_contrast", |a: &str, b: &str| -> f64 {
+        use crate::theme::parse_color_string;
+        let ca = match parse_color_string(a) {
+            Ok(c) => c,
+            Err(_) => return 0.0,
+        };
+        let cb = match parse_color_string(b) {
+            Ok(c) => c,
+            Err(_) => return 0.0,
+        };
+        crate::oklab::lightness_delta(ca, cb) as f64
+    });
+
     // Drain `tx` so the borrow checker doesn't grumble (keeps last
     // clone alive too).
     let _keep = tx;
+}
+
+/// Format a `LinearRgba` as `#rrggbbaa` (alpha appended only when not 1).
+fn linear_rgba_to_hex(c: bevy::color::LinearRgba) -> String {
+    use bevy::color::Color;
+    let srgb = Color::LinearRgba(c).to_srgba();
+    let r = (srgb.red.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let g = (srgb.green.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let b = (srgb.blue.clamp(0.0, 1.0) * 255.0).round() as u8;
+    let a = (srgb.alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+    if a == 255 {
+        format!("#{:02x}{:02x}{:02x}", r, g, b)
+    } else {
+        format!("#{:02x}{:02x}{:02x}{:02x}", r, g, b, a)
+    }
 }
 
 fn dynamic_to_f32(d: &Dynamic) -> f32 {

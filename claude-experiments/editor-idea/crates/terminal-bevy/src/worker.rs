@@ -402,6 +402,16 @@ fn worker_loop(
         .as_ref()
         .and_then(|p| ScrollbackLogWriter::open(p.clone()));
 
+    // OSC 7 (current-directory report) watcher. The shell-integration
+    // shim makes zsh emit `\e]7;file://host/path\e\\` on every prompt
+    // and on every `cd`. We feed the same byte stream we hand to
+    // `vt_write` through this watcher and publish a bus event each
+    // time the cwd changes. Suppressed during replay — those OSC 7s
+    // are from prior sessions.
+    let mut osc7 = crate::osc7::Osc7Watcher::default();
+    let mut last_published_cwd: Option<String> = None;
+    let session_id = client.session_id();
+
     let mut render_state = RenderState::new().expect("RenderState");
     let mut row_it = RowIterator::new().expect("RowIterator");
     let mut cell_it = CellIterator::new().expect("CellIterator");
@@ -476,6 +486,14 @@ fn worker_loop(
                             terminal.vt_write(&bytes);
                             if let Some(w) = log_writer.as_mut() {
                                 w.append(&bytes);
+                            }
+                            if !in_replay {
+                                osc7.feed(&bytes, |cwd| {
+                                    if last_published_cwd.as_deref() != Some(cwd.as_str()) {
+                                        publish_cwd_changed(session_id, &cwd);
+                                        last_published_cwd = Some(cwd);
+                                    }
+                                });
                             }
                             output_bytes += bytes.len() as u64;
                         }
@@ -866,6 +884,33 @@ fn publish_snapshot(
 /// Marker type for OwnedFd round-trip if needed elsewhere.
 #[allow(dead_code)]
 pub struct WorkerFd(pub OwnedFd);
+
+/// Best-effort publish of a `terminal.cwd_changed` event to the bus.
+/// Called from the worker thread on each unique OSC 7 report. The
+/// publish is fire-and-forget — if the bus daemon isn't running we
+/// silently drop the event rather than perturb terminal output.
+fn publish_cwd_changed(session_id: u64, cwd: &str) {
+    let Some(socket) = claude_bus::socket_path() else {
+        return;
+    };
+    let payload = serde_json::json!({
+        "session_id": session_id,
+        "cwd": cwd,
+    })
+    .to_string();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = claude_bus::client::publish_oneshot(
+        &socket,
+        "terminal.cwd_changed",
+        ts,
+        &session_id.to_string(),
+        std::process::id(),
+        &payload,
+    );
+}
 
 /// Append-only writer for a per-terminal scrollback log. Bytes written
 /// here are exactly what was fed to `vt_write`, so the next launch can

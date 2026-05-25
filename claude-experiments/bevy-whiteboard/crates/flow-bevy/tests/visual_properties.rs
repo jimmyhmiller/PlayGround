@@ -271,7 +271,7 @@ proptest! {
             // No self-loops.
             prop_assert!(vp.from != vp.to);
             // No control-plane variants.
-            if let Value::Variant { tag, .. } = &vp.payload {
+            if let Some((tag, _)) = vp.payload.as_variant() {
                 prop_assert!(tag != "pull" && tag != "wake",
                     "V7: {} payload leaked into timeline", tag);
             }

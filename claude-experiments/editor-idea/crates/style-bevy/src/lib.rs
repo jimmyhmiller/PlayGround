@@ -36,22 +36,27 @@ use bevy::prelude::*;
 pub mod active;
 pub mod chrome_theme;
 pub mod dynamic;
+pub mod fonts;
 pub mod introspect;
 pub mod material;
+pub mod oklab;
 pub mod presets;
 pub mod script_bridge;
 pub mod script_host;
 pub mod state;
 pub mod theme;
+pub mod theme_bridge;
 
 pub use active::ActiveProject;
 pub use dynamic::{DynamicMaterial, DynamicMaterialPlugin, ShaderSchemas};
+pub use fonts::{FontRegistry, FontRegistryPlugin};
 pub use material::{register_preset_asset_source, register_style_asset_source};
 pub use presets::{
     register_preset_host_fns, ActiveStylePreset, PresetsPlugin, StylePreset,
     StylePresetRegistry,
 };
 pub use script_bridge::{register_script_host_fns, EventBus, ScriptBridgePlugin};
+pub use theme_bridge::{register_theme_host_fns, ThemeBridgePlugin};
 pub use script_host::SystemScriptPlugin;
 pub use state::{ProjectStyleState, StyleDataDir};
 pub use theme::{tokens, Theme, ThemeChanged, TokenId, TokenValue};
@@ -83,9 +88,11 @@ impl Plugin for StylePlugin {
             .init_resource::<ActiveProject>()
             .add_message::<ThemeChanged>()
             .add_plugins(theme::ThemePlugin)
+            .add_plugins(FontRegistryPlugin)
             .add_plugins(chrome_theme::ChromeThemePlugin)
             .add_plugins(PresetsPlugin)
             .add_plugins(ScriptBridgePlugin)
+            .add_plugins(ThemeBridgePlugin)
             .add_plugins(DynamicMaterialPlugin)
             .add_plugins(SystemScriptPlugin {
                 path: dust_script_path(),

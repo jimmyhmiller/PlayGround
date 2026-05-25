@@ -46,9 +46,9 @@ pub enum Expr {
     /// `Sim::set_param`. Each reference re-evaluates on access, so
     /// changing a param propagates to every use on the next evaluation.
     Param(String),
-    /// Construct a variant.
-    Variant { tag: String, payload: Box<Expr> },
     /// Construct a record from field-expression pairs.
+    /// The "tagged envelope" shape used by rules is just a Record:
+    /// `Expr::variant(tag, payload)` builds `Record({kind: Lit(tag), value: payload})`.
     Record(Vec<(String, Expr)>),
     /// Binary op.
     BinOp(BinOp, Box<Expr>, Box<Expr>),
@@ -169,8 +169,15 @@ impl Expr {
     pub fn field(of: Expr, field: impl Into<String>) -> Self {
         Expr::Field { of: Box::new(of), field: field.into() }
     }
+    /// Construct the conventional "tagged envelope" record:
+    /// `{ kind: Lit(Str(tag)), value: payload }`. Used by the DSL when
+    /// lowering `emit packet(p)` / `req(p)` / etc. — there is no
+    /// separate Variant variant on `Expr`; envelopes are just records.
     pub fn variant(tag: impl Into<String>, payload: Expr) -> Self {
-        Expr::Variant { tag: tag.into(), payload: Box::new(payload) }
+        Expr::record([
+            (crate::value::KIND_FIELD.to_string(), Expr::Lit(crate::value::Value::Str(tag.into()))),
+            (crate::value::VALUE_FIELD.to_string(), payload),
+        ])
     }
     pub fn record<I, K>(fields: I) -> Self
     where I: IntoIterator<Item = (K, Expr)>, K: Into<String>,
@@ -285,9 +292,6 @@ impl Expr {
                 let v = e.eval(ctx);
                 ctx.param_stack.pop();
                 v
-            }
-            Expr::Variant { tag, payload } => {
-                Value::variant(tag.clone(), payload.eval(ctx))
             }
             Expr::Record(fields) => {
                 let mut m = std::collections::BTreeMap::new();

@@ -1,19 +1,18 @@
-# Saga reimplemented from primitives.
+# Saga reimplemented from primitives only.
 #
-# A SagaStep is Lower + Coin + Egress + a tiny inline "fail" node.
-# The Coin's `heads` outcome fires the fail path (since
-# `Coin.heads` triggers when `Bernoulli(p)` is true, and we want
-# `fail_prob` to feed that probability directly).
+# A SagaStep is L (inline entry adapter) + Coin + Egress + a tiny
+# inline "fail" node. The Coin's `heads` outcome fires the fail path
+# (since `Coin.heads` triggers when `Bernoulli(p)` is true, and we
+# want `fail_prob` to feed that probability directly).
 #
-# Failure walks back as `resp_error popping` — the same shape as
-# any other failed request — which Lower routes out via the
-# enclosing compound's `response` port.
+# Failure walks back as `resp_error popping` — the same shape as any
+# other failed request — which L routes out via the enclosing
+# compound's `response` port.
 #
-# A multi-step saga is built by chaining N SagaStepComposites:
-# each step's `forward` is wired to the next step's `request`,
-# and each step's `response` is wired back to the prior step's
-# `forward` reverse direction (or to the saga coordinator at the
-# entry).
+# A multi-step saga is built by chaining N SagaStepComposites: each
+# step's `forward` is wired to the next step's `request`, and each
+# step's `response` is wired back to the prior step's `forward`
+# reverse direction (or to the saga coordinator at the entry).
 compound SagaStepComposite(fail_prob: Float = 0.0) {
     in  { request: L }
     out {
@@ -21,12 +20,22 @@ compound SagaStepComposite(fail_prob: Float = 0.0) {
         response: L
     }
 
-    node L  : Lower  { }
+    # Inline entry adapter (formerly Lower).
+    node L {
+        rule rev {
+            on p when p.kind == "resp" || p.kind == "resp_error"
+            do { emit p popping to out response }
+        }
+        rule fwd {
+            on p when p.kind == "req"
+            do { emit packet(p.value) pushing self to default }
+        }
+    }
     node C  : Coin   { p: fail_prob }
     node FE : Egress { }
     node Fail {
         rule on_packet {
-            on packet(_)
+            on p
             do { emit resp_error(nil) popping to (head(return_path)) }
         }
     }

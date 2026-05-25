@@ -19,7 +19,18 @@ node L {
 }
 
 node SW : Switch { passing: 1 }
-node S  : Stamp  { }
+# Stamp waystation (was the Stamp primitive). Pushes self forward,
+# relays popping resp back one hop.
+node S {
+    rule rev {
+        on p when p.kind == "resp" || p.kind == "resp_error"
+        do { emit p popping to (head(return_path)) }
+    }
+    rule fwd {
+        on p
+        do { emit p pushing self to default }
+    }
+}
 
 node Server {
     slots { hits: Int = 0 }

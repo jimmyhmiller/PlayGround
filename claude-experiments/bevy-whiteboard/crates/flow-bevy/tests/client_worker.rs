@@ -59,9 +59,11 @@ fn client_to_worker_does_not_panic() {
     advance_sim_ns(&mut app, 3_000_000_000);
 
     // Client tracks `completed` responses. With auto-wired return path
-    // it should be > 0.
-    let completed = match &app.world().resource::<FlowSim>().nodes[&client].slots["completed"] {
-        Value::Int(i) => *i,
+    // it should be > 0. Use read_slot_resolved so this works whether
+    // `client` is a monolithic node or a compound shim (the slot lives
+    // on `client::Endpoint` for the composite version).
+    let completed = match app.world().resource::<FlowSim>().read_slot_resolved(client, "completed") {
+        Some(Value::Int(i)) => *i,
         _ => 0,
     };
     assert!(
@@ -89,20 +91,20 @@ fn worker_waits_service_ns_before_responding() {
     // Slow worker (200ms service) vs fast client (10ms period). With
     // the bug, a resp lands in a few ms. With the fix, the first resp
     // can't land before ~200ms (service) + a couple of 1ms edge hops.
+    // write_slot_resolved walks into composite children so this works
+    // whether worker/client are monolithic or compound shims.
     {
         let world = app.world_mut();
         let mut flow = world.resource_mut::<FlowSim>();
-        flow.nodes.get_mut(&worker).unwrap().slots
-            .insert("service_ns".into(), flow::Value::Int(200_000_000));
-        flow.nodes.get_mut(&client).unwrap().slots
-            .insert("period_ns".into(), flow::Value::Int(10_000_000));
+        flow.write_slot_resolved(worker, "service_ns", flow::Value::Int(200_000_000));
+        flow.write_slot_resolved(client, "period_ns", flow::Value::Int(10_000_000));
     }
 
     // t = 50ms: well before service_ns, so nothing should have
     // completed yet.
     advance_sim_ns(&mut app, 50_000_000);
-    let completed_early = match &app.world().resource::<FlowSim>().nodes[&client].slots["completed"] {
-        flow::Value::Int(i) => *i,
+    let completed_early = match app.world().resource::<FlowSim>().read_slot_resolved(client, "completed") {
+        Some(flow::Value::Int(i)) => *i,
         _ => -1,
     };
     assert_eq!(
@@ -114,8 +116,8 @@ fn worker_waits_service_ns_before_responding() {
     // t = 500ms: comfortably past service_ns, at least one resp should
     // have made it back.
     advance_sim_ns(&mut app, 450_000_000);
-    let completed_late = match &app.world().resource::<FlowSim>().nodes[&client].slots["completed"] {
-        flow::Value::Int(i) => *i,
+    let completed_late = match app.world().resource::<FlowSim>().read_slot_resolved(client, "completed") {
+        Some(flow::Value::Int(i)) => *i,
         _ => -1,
     };
     assert!(

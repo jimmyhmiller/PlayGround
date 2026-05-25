@@ -355,6 +355,12 @@ pub enum Expr {
     /// `return_path` bare — the consumed packet's return_path as a List
     /// of NodeRefs. Lowers to `flow::Expr::ReturnPath`.
     ReturnPath,
+    /// `expr.field` — read a record field. Lowers to `flow::Expr::Field`.
+    /// Lets rules pattern-bind a whole packet (`on p`) and then read its
+    /// kind/value parts (`p.kind`, `p.value`), instead of duplicating one
+    /// rule per variant name. Chains left-associatively: `a.b.c` =
+    /// `(a.b).c`.
+    Field(Box<Expr>, String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

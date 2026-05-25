@@ -1,11 +1,14 @@
-//! High-fidelity mechanical visualizations for the 8 Life-cell primitive
+//! High-fidelity mechanical visualizations for the Life-cell primitive
 //! gadgets. Each one trades the generic shape+glyph rendering for a
 //! purpose-built moving-parts visual:
 //!
 //! - Tick           — swinging pendulum (heartbeat)
 //! - Switch         — railway points with rotating blade
-//! - ConstantPacket — stamping press with engraved value
-//! - ConstantSignal — telegraph striker (signals are visually distinct)
+//! - Constant       — stamping press with engraved value (covers both
+//!                    packet- and signal-flavored Constants — the
+//!                    former separate `ConstantSignal` telegraph
+//!                    striker visual is parked until the viz dispatch
+//!                    grows slot-based discrimination)
 //! - FanOut         — sunburst manifold with nozzle spokes
 //! - Egress         — bulkhead / wall plug
 //! - Aggregator     — 3×3-minus-center abacus (mirrors Conway neighbourhood)
@@ -37,7 +40,6 @@ impl Plugin for PrimitiveVizPlugin {
                 animate_tick,
                 animate_switch,
                 animate_constant_packet,
-                animate_constant_signal,
                 animate_fanout,
                 animate_egress,
                 animate_aggregator,
@@ -56,8 +58,7 @@ impl Plugin for PrimitiveVizPlugin {
 pub enum PrimitiveKind {
     Tick,
     Switch,
-    ConstantPacket,
-    ConstantSignal,
+    Constant,
     FanOut,
     Egress,
     Aggregator,
@@ -72,8 +73,7 @@ impl PrimitiveKind {
         Some(match class {
             "Tick" => PrimitiveKind::Tick,
             "Switch" => PrimitiveKind::Switch,
-            "ConstantPacket" => PrimitiveKind::ConstantPacket,
-            "ConstantSignal" => PrimitiveKind::ConstantSignal,
+            "Constant" => PrimitiveKind::Constant,
             "FanOut" => PrimitiveKind::FanOut,
             "Egress" => PrimitiveKind::Egress,
             "Aggregator" => PrimitiveKind::Aggregator,
@@ -257,13 +257,9 @@ fn construct_primitive_visuals(
         match *kind {
             PrimitiveKind::Tick => build_tick(&mut commands, entity, &mut meshes, &mut materials),
             PrimitiveKind::Switch => build_switch(&mut commands, entity, &mut meshes, &mut materials),
-            PrimitiveKind::ConstantPacket => {
+            PrimitiveKind::Constant => {
                 let v = read_slot_i64(&snapshot, node_ref.0, "value").unwrap_or(0);
                 build_constant_packet(&mut commands, entity, &mut meshes, &mut materials, v);
-            }
-            PrimitiveKind::ConstantSignal => {
-                let v = read_slot_i64(&snapshot, node_ref.0, "value").unwrap_or(0);
-                build_constant_signal(&mut commands, entity, &mut meshes, &mut materials, v);
             }
             PrimitiveKind::FanOut => build_fanout(&mut commands, entity, &mut meshes, &mut materials),
             PrimitiveKind::Egress => build_egress(&mut commands, entity, &mut meshes, &mut materials),
@@ -452,47 +448,11 @@ fn build_constant_packet(
     });
 }
 
-// ---- ConstantSignal (telegraph striker) ----
-
-fn build_constant_signal(
-    commands: &mut Commands,
-    parent: Entity,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<ColorMaterial>,
-    value: i64,
-) {
-    let warm = value != 0;
-    let head_color = if warm { Color::srgb(0.78, 0.20, 0.18) } else { COOL };
-    commands.entity(parent).with_children(|p| {
-        // Base contact plate.
-        p.spawn((
-            Mesh2d(rect_mesh(40.0, 6.0, meshes)),
-            MeshMaterial2d(mat(STEEL, materials)),
-            Transform::from_xyz(0.0, -10.0, 0.10),
-            StrikerContact,
-        ));
-        // Striker arm — pivots near the right edge, hammer head on left.
-        let arm = p
-            .spawn((
-                Transform::from_xyz(14.0, 0.0, 0.20),
-                Visibility::Inherited,
-                StrikerArm,
-            ))
-            .id();
-        p.commands().entity(arm).with_children(|cp| {
-            cp.spawn((
-                Mesh2d(rect_mesh(34.0, 4.0, meshes)),
-                MeshMaterial2d(mat(INK, materials)),
-                Transform::from_xyz(-17.0, 0.0, 0.0),
-            ));
-            cp.spawn((
-                Mesh2d(rect_mesh(10.0, 14.0, meshes)),
-                MeshMaterial2d(mat(head_color, materials)),
-                Transform::from_xyz(-30.0, 0.0, 0.05),
-            ));
-        });
-    });
-}
+// (Former `build_constant_signal` telegraph-striker visual removed
+// when ConstantSignal collapsed into the unified Constant class.
+// Constant now uses the stamping-press visual for both packet- and
+// signal-flavored variants. If we want them visually distinct again,
+// reintroduce a slot-aware build_* dispatch that reads `out_kind`.)
 
 // ---- FanOut (sunburst manifold) ----
 
@@ -788,14 +748,17 @@ fn animate_switch(
     }
 }
 
-/// ConstantPacket: press head slams down on arrival, springs back up.
+/// Constant: press head slams down on arrival, springs back up. Used
+/// for both packet- and signal-flavored Constants (the dedicated
+/// telegraph-striker visual is parked until visual dispatch grows
+/// slot-based discrimination).
 fn animate_constant_packet(
     clock: Res<SimClock>,
     parents: Query<(&PrimitivePulse, &Children, &PrimitiveKind)>,
     mut heads: Query<&mut Transform, With<PressHead>>,
 ) {
     for (pulse, children, kind) in parents.iter() {
-        if *kind != PrimitiveKind::ConstantPacket {
+        if *kind != PrimitiveKind::Constant {
             continue;
         }
         let since = (clock.visual_now - pulse.last_arrival).max(0.0) as f32;
@@ -816,32 +779,12 @@ fn animate_constant_packet(
     }
 }
 
-/// ConstantSignal: striker arm swings down on arrival, rebounds.
-fn animate_constant_signal(
-    clock: Res<SimClock>,
-    parents: Query<(&PrimitivePulse, &Children, &PrimitiveKind)>,
-    mut arms: Query<&mut Transform, With<StrikerArm>>,
-) {
-    for (pulse, children, kind) in parents.iter() {
-        if *kind != PrimitiveKind::ConstantSignal {
-            continue;
-        }
-        let since = (clock.visual_now - pulse.last_arrival).max(0.0) as f32;
-        // Strike profile: hammer arcs from +0.4 rad (cocked) down to -0.2 (strike) and back.
-        let angle = if since < 0.12 {
-            0.4 - 0.6 * (since / 0.12)
-        } else if since < 0.40 {
-            -0.2 + 0.6 * ((since - 0.12) / 0.28)
-        } else {
-            0.4
-        };
-        for child in children.iter() {
-            if let Ok(mut tf) = arms.get_mut(child) {
-                tf.rotation = Quat::from_rotation_z(angle);
-            }
-        }
-    }
-}
+// ConstantSignal striker-arm animator removed when ConstantSignal and
+// ConstantPacket collapsed into a single Constant class. The striker
+// visual is parked: if we want signal-flavored Constants to look
+// different (telegraph striker vs. stamping press), it'll come back as
+// slot-based dispatch in this module driven by `out_kind == "signal"`.
+// Today every Constant uses the stamping-press visual.
 
 /// FanOut: spokes briefly brighten on arrival, hub pulses, all 8 spokes
 /// receive the broadcast together so they pulse in sync.

@@ -42,14 +42,8 @@ const HIT_OUTER_R: f32 = 220.0;
 /// separate sectors.
 const WEDGE_GAP_RAD: f32 = 0.04;
 
-const COLOR_BACKDROP: Color = Color::srgba(0.0, 0.0, 0.0, 0.32);
-const COLOR_WEDGE: Color = Color::srgb(0.135, 0.143, 0.162);
-const COLOR_WEDGE_HOVER: Color = Color::srgb(0.22, 0.36, 0.58);
-const COLOR_DEADZONE: Color = Color::srgb(0.082, 0.087, 0.100);
-const COLOR_DEADZONE_RING: Color = Color::srgb(0.235, 0.250, 0.275);
-const COLOR_LABEL: Color = Color::srgb(0.84, 0.86, 0.90);
-const COLOR_LABEL_HOVER: Color = Color::srgb(0.97, 0.98, 1.0);
-const COLOR_ICON: Color = Color::srgb(0.94, 0.95, 0.97);
+// Radial menu colors all live in theme tokens (radial_*); see
+// `radial_render` for the lookups.
 
 #[derive(Clone, Debug)]
 pub struct RadialItem {
@@ -252,6 +246,7 @@ fn radial_render(
     menu: Res<RadialMenu>,
     windows: Query<&Window>,
     font: Res<MonoFont>,
+    theme: Res<style_bevy::Theme>,
     existing: Query<Entity, With<RadialEntity>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ColorMaterial>>,
@@ -263,12 +258,26 @@ fn radial_render(
     let win_w = window.width();
     let win_h = window.height();
 
+    // Theme-driven palette. Re-resolving every frame is cheap (10 hash
+    // lookups) and we don't need to bother with change detection because
+    // the existing "is anything different?" gate gets us most of the
+    // savings.
+    let bg_backdrop = Color::LinearRgba(theme.color(style_bevy::tokens::RADIAL_BACKDROP));
+    let wedge = Color::LinearRgba(theme.color(style_bevy::tokens::RADIAL_WEDGE));
+    let wedge_hover = Color::LinearRgba(theme.color(style_bevy::tokens::RADIAL_WEDGE_HOVER));
+    let deadzone = Color::LinearRgba(theme.color(style_bevy::tokens::RADIAL_DEADZONE));
+    let deadzone_ring = Color::LinearRgba(theme.color(style_bevy::tokens::RADIAL_DEADZONE_RING));
+    let label = Color::LinearRgba(theme.color(style_bevy::tokens::RADIAL_LABEL));
+    let label_hover = Color::LinearRgba(theme.color(style_bevy::tokens::RADIAL_LABEL_HOVER));
+    let icon = Color::LinearRgba(theme.color(style_bevy::tokens::RADIAL_ICON));
+
     let want_open = menu.center.is_some();
     let already_open = existing.iter().next().is_some();
     let signature_changed = last.open != want_open
         || last.hovered != menu.hovered
         || last.center != menu.center
-        || last.item_count != menu.item_count();
+        || last.item_count != menu.item_count()
+        || theme.is_changed();
     if !signature_changed && !(want_open && !already_open) {
         return;
     }
@@ -290,7 +299,7 @@ fn radial_render(
     commands.spawn((
         RadialEntity,
         Sprite {
-            color: COLOR_BACKDROP,
+            color: bg_backdrop,
             custom_size: Some(Vec2::new(win_w, win_h)),
             ..default()
         },
@@ -311,9 +320,9 @@ fn radial_render(
         let mesh = meshes.add(build_wedge_mesh(half_width, INNER_R, OUTER_R));
         let hovered = menu.hovered == Some(i);
         let mat = materials.add(ColorMaterial::from_color(if hovered {
-            COLOR_WEDGE_HOVER
+            wedge_hover
         } else {
-            COLOR_WEDGE
+            wedge
         }));
         commands.spawn((
             RadialEntity,
@@ -332,11 +341,7 @@ fn radial_render(
         let label_r = (INNER_R + OUTER_R) * 0.5;
         let win_off = Vec2::new(center_angle.cos(), center_angle.sin()) * label_r;
         let world_off = Vec2::new(win_off.x, -win_off.y);
-        let label_color = if hovered {
-            COLOR_LABEL_HOVER
-        } else {
-            COLOR_LABEL
-        };
+        let label_color = if hovered { label_hover } else { label };
         commands.spawn((
             RadialEntity,
             Text2d::new(item.icon),
@@ -346,7 +351,7 @@ fn radial_render(
                 ..default()
             },
             LineHeight::Px(18.0),
-            TextColor(COLOR_ICON),
+            TextColor(icon),
             Anchor::CENTER,
             Transform::from_xyz(
                 center_world.x + world_off.x,
@@ -375,7 +380,7 @@ fn radial_render(
 
     // Dead-zone disc — `half_angle = PI` makes a full revolution.
     let disc_mesh = meshes.add(build_wedge_mesh(PI, 0.0, INNER_R));
-    let disc_mat = materials.add(ColorMaterial::from_color(COLOR_DEADZONE));
+    let disc_mat = materials.add(ColorMaterial::from_color(deadzone));
     commands.spawn((
         RadialEntity,
         Mesh2d(disc_mesh),
@@ -386,7 +391,7 @@ fn radial_render(
     // Hairline ring around the dead-zone — gives the cancel zone a
     // visible boundary.
     let ring_mesh = meshes.add(build_wedge_mesh(PI, INNER_R - 0.5, INNER_R + 0.5));
-    let ring_mat = materials.add(ColorMaterial::from_color(COLOR_DEADZONE_RING));
+    let ring_mat = materials.add(ColorMaterial::from_color(deadzone_ring));
     commands.spawn((
         RadialEntity,
         Mesh2d(ring_mesh),

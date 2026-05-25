@@ -61,7 +61,7 @@ pub struct Category {
 /// Slices stored as struct-of-arrays. After `ProfileBuilder::finish`, slices are
 /// sorted by (track, depth, start_ns) and `rows` indexes contiguous spans for fast
 /// viewport culling via two `partition_point` calls.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct SliceTable {
     pub track:    Vec<TrackId>,
     pub depth:    Vec<u16>,
@@ -129,7 +129,36 @@ pub struct Sample {
     pub weight: u32,
 }
 
-#[derive(Default)]
+/// Per-slice attribute side-table. Populated by loaders that have free-form
+/// span-level metadata (OpenTelemetry `attributes`, Chrome `args`, …); empty
+/// otherwise. Indexed by SoA slice index (so it stays valid through the
+/// builder's sort).
+///
+/// Storage shape: keys are interned once into `keys`; each slice's row is a
+/// tiny Vec of `(key_index, value_string_id)`. Typical span carries 0–10
+/// attrs, so linear lookup is fine.
+#[derive(Default, Clone, Debug)]
+pub struct AttrTable {
+    /// Ordered list of distinct attribute keys observed across the profile.
+    pub keys: Vec<StringId>,
+    /// `keys.len() == key_lookup.len()`. Maps StringId of key name → index in `keys`.
+    pub key_lookup: AHashMap<StringId, u16>,
+    /// One entry per slice (same indexing as `SliceTable.start_ns` etc.). Inner
+    /// vec is `(key_idx, value_string_id)`. Empty when the slice has no attrs.
+    pub per_slice: Vec<Vec<(u16, StringId)>>,
+}
+
+impl AttrTable {
+    /// Look up an attribute on a slice by key StringId. Returns the value's
+    /// interned StringId, or None if the slice doesn't carry that key.
+    pub fn get(&self, slice_idx: u32, key: StringId) -> Option<StringId> {
+        let key_idx = *self.key_lookup.get(&key)?;
+        let row = self.per_slice.get(slice_idx as usize)?;
+        row.iter().find(|(k, _)| *k == key_idx).map(|(_, v)| *v)
+    }
+}
+
+#[derive(Default, Clone)]
 pub struct Profile {
     pub strings: StringInterner,
     pub categories: Vec<Category>,
@@ -139,6 +168,7 @@ pub struct Profile {
     pub stacks: StackTable,
     pub slices: SliceTable,
     pub samples: Vec<Sample>,
+    pub attrs: AttrTable,
     pub time_range: (u64, u64),
 }
 

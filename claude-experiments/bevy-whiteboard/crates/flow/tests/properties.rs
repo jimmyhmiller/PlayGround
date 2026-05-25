@@ -183,7 +183,7 @@ proptest! {
                     );
                 }
                 Event::PacketEmitted { from, payload, .. } if *from == worker => {
-                    if let Value::Variant { tag, .. } = payload {
+                    if let Some((tag, _)) = payload.as_variant() {
                         if tag == "resp" {
                             worker_resp_emits += 1;
                         }
@@ -253,7 +253,7 @@ proptest! {
         for ev in sim.log.iter() {
             if let Event::PacketEmitted { from, to, payload, .. } = ev {
                 if *from != worker || *to != client { continue; }
-                if let Value::Variant { tag, .. } = payload {
+                if let Some((tag, _)) = payload.as_variant() {
                     if tag == "resp" { resp_to_client += 1; }
                 }
             }
@@ -442,7 +442,7 @@ proptest! {
         for ev in sim.log.iter() {
             if let Event::PacketEmitted { from, to, payload, .. } = ev {
                 if *from != worker { continue; }
-                if let Value::Variant { tag, .. } = payload {
+                if let Some((tag, _)) = payload.as_variant() {
                     if tag == "resp" {
                         *resp_to.entry(*to).or_insert(0) += 1;
                     }

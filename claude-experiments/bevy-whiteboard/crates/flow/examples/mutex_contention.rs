@@ -118,13 +118,9 @@ fn main() {
         sim.run_until(t);
 
         let mnode = &sim.nodes[&mutex];
-        let holder_str = match &mnode.slots["holder"] {
-            Value::Variant { tag, payload } if tag == "Some" => {
-                match payload.as_ref() {
-                    Value::Str(s) => s.clone(),
-                    _ => "?".into(),
-                }
-            }
+        let holder_str = match (&mnode.slots["holder"]).as_variant() {
+            Some(("Some", Value::Str(s))) => s.clone(),
+            Some(("Some", _)) => "?".into(),
             _ => "-".into(),
         };
         let queue = mnode.inbox.len();

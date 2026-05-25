@@ -23,15 +23,15 @@
 
 node T     : Tick           { period_ns: 200000000 }
 node SW    : Switch         { passing: 1 }
-node C1    : ConstantPacket { value: 1 }
-node C0    : ConstantPacket { value: 0 }
+node C1    : Constant { value: 1 }
+node C0    : Constant { value: 0 }
 node B     : FanOut         { }
 node BE    : Egress         { }
 node A     : Aggregator     { n: 8 }
 node F3    : Filter         { match: 3 }
 node F2    : Filter         { match: 2 }
-node ToAlv : ConstantSignal { value: 0 }
-node ToDed : ConstantSignal { value: 1 }
+node ToAlv : Constant { value: 0, out_kind: "signal" }
+node ToDed : Constant { value: 1, out_kind: "signal" }
 
 edges {
     T -> SW : 1ms

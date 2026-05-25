@@ -28,14 +28,14 @@
 for x in 0..3, y in 0..3 {
     node T_{x}_{y}     : Tick           { period_ns: 200000000 }
     node SW_{x}_{y}    : Switch         { passing: if x == 1 then 1 else 0 }
-    node C1_{x}_{y}    : ConstantPacket { value: 1 }
-    node C0_{x}_{y}    : ConstantPacket { value: 0 }
+    node C1_{x}_{y}    : Constant { value: 1 }
+    node C0_{x}_{y}    : Constant { value: 0 }
     node B_{x}_{y}     : FanOut         { }
     node A_{x}_{y}     : Aggregator     { n: 8 }
     node F3_{x}_{y}    : Filter         { match: 3 }
     node F2_{x}_{y}    : Filter         { match: 2 }
-    node ToAlv_{x}_{y} : ConstantSignal { value: 0 }
-    node ToDed_{x}_{y} : ConstantSignal { value: 1 }
+    node ToAlv_{x}_{y} : Constant { value: 0, out_kind: "signal" }
+    node ToDed_{x}_{y} : Constant { value: 1, out_kind: "signal" }
 }
 
 edges {

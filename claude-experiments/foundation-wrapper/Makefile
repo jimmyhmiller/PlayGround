@@ -1,6 +1,6 @@
 CC = clang
-SWIFTC = /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc
-XCODE_PATH = /Applications/Xcode-beta.app/Contents/Developer
+SWIFTC = /Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc
+XCODE_PATH = /Applications/Xcode.app/Contents/Developer
 SDK_PATH = $(XCODE_PATH)/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
 CFLAGS = -Wall -Wextra -std=c99 -isysroot $(SDK_PATH)
 OBJCFLAGS = -fobjc-arc -isysroot $(SDK_PATH)

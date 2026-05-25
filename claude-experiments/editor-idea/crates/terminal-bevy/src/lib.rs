@@ -54,6 +54,7 @@ pub mod atlas;
 pub mod claude_events_pane;
 pub mod daemon_client;
 pub mod garden_pane;
+pub mod osc7;
 /// Re-export of the daemon protocol from the headless crate so existing
 /// callers can continue to write `terminal_bevy::daemon_proto::*`.
 pub use terminal_daemon::proto as daemon_proto;
@@ -65,6 +66,7 @@ pub mod run_button;
 pub mod selection;
 pub mod term_material;
 pub mod vt;
+pub mod window_geometry;
 pub mod worker;
 use atlas::GlyphAtlas;
 use term_material::{
@@ -334,7 +336,10 @@ impl Plugin for TerminalPlugin {
                     mirror_focus_to_style,
                     handle_open_dev_panel,
                     handle_open_style_picker,
+                    handle_open_theme_editor,
                     maintain_winit_mode_for_animation,
+                    sync_canvas_clear_color,
+                    window_geometry::save_on_change,
                 ),
             )
             .add_systems(PostStartup, release_os_focus)
@@ -1341,8 +1346,9 @@ fn handle_scroll(
     sidebar: Res<Sidebar>,
     projects: Res<Projects>,
     store: Res<TerminalStore>,
+    all_panes: Query<(Entity, &PaneRect, Option<&Visibility>), With<PaneTag>>,
     terminals: Query<
-        (Entity, &PaneRect, Option<&ProjectMembership>, &PaneKindMarker),
+        (Entity, Option<&ProjectMembership>, &PaneKindMarker),
         With<PaneTag>,
     >,
 ) {
@@ -1374,20 +1380,33 @@ fn handle_scroll(
         return;
     }
 
-    let rects: Vec<(Entity, PaneRect)> = terminals
+    // Topmost pane of ANY kind under the cursor. If something is
+    // sitting over the terminal (e.g. a widget pane), the wheel
+    // belongs to that pane — don't steal it for the terminal
+    // underneath.
+    let all_rects: Vec<(Entity, PaneRect)> = all_panes
         .iter()
-        .filter(|(_, _, m, kind)| {
-            kind.0 == PANE_KIND
-                && match (projects.active, m) {
-                    (Some(a), Some(p)) => a == p.0,
-                    _ => false,
-                }
-        })
-        .map(|(e, r, _, _)| (e, *r))
+        .filter(|(_, _, vis)| !matches!(vis, Some(Visibility::Hidden)))
+        .map(|(e, r, _)| (e, *r))
         .collect();
-    let Some(target) = pane_bevy::topmost_pane_at(pt, &rects) else {
+    let Some(target) = pane_bevy::topmost_pane_at(pt, &all_rects) else {
         return;
     };
+    // Only consume the wheel if that topmost pane is a terminal in
+    // the active project.
+    let Ok((_, membership, kind)) = terminals.get(target) else {
+        return;
+    };
+    if kind.0 != PANE_KIND {
+        return;
+    }
+    let in_active_project = match (projects.active, membership) {
+        (Some(a), Some(p)) => a == p.0,
+        _ => false,
+    };
+    if !in_active_project {
+        return;
+    }
     let Some(data) = store.map.get(&target) else {
         return;
     };
@@ -1629,6 +1648,7 @@ fn sync_dock_badge(_projects: Res<Projects>, _last: Local<u64>) {}
 
 fn sync_grid(
     metrics: Res<MonoMetrics>,
+    theme: Res<style_bevy::Theme>,
     mut atlas: ResMut<GlyphAtlas>,
     mut images: ResMut<Assets<Image>>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
@@ -1645,6 +1665,15 @@ fn sync_grid(
 ) {
     use std::time::Instant;
     let frame_start = Instant::now();
+
+    // Theme-driven defaults. Substituted in below for any cell whose
+    // fg or bg matches libghostty's reported `default_fg/default_bg`
+    // for that terminal — i.e. plain text the shell didn't color
+    // explicitly. So a paper preset gives ink-on-cream terminals, a
+    // terminal preset gives phosphor-on-near-black, etc.
+    let theme_default_fg = lin_to_rgb_bytes(theme.color(style_bevy::tokens::FG));
+    let theme_default_bg = lin_to_rgb_bytes(theme.color(style_bevy::tokens::BG));
+    let theme_changed = theme.is_changed();
 
     let mut local_cells: Vec<SnapCell> = Vec::new();
     let mut local_dirty_rows: Vec<bool> = Vec::new();
@@ -1688,7 +1717,7 @@ fn sync_grid(
 
         // Lock briefly, copy snapshot fields into locals, drop lock.
         let lock_t = Instant::now();
-        let (cols, rows, _default_fg, default_bg, cursor, generation) = {
+        let (cols, rows, default_fg, default_bg, cursor, generation) = {
             let g = data.worker.snapshot.lock().expect("snapshot lock");
             local_cells.clear();
             local_cells.extend_from_slice(&g.cells);
@@ -1734,8 +1763,10 @@ fn sync_grid(
         }
 
         let pool_changed = grid.cols != cols || grid.rows != rows;
-        let nothing_changed =
-            !pool_changed && !just_shown && grid.last_rendered_generation == generation;
+        let nothing_changed = !pool_changed
+            && !just_shown
+            && !theme_changed
+            && grid.last_rendered_generation == generation;
         if nothing_changed {
             continue;
         }
@@ -1745,7 +1776,11 @@ fn sync_grid(
         // Resize the GPU grid: replace the cells image + mesh + uniform
         // params. Cheap because there's only one of each per terminal.
         if pool_changed {
-            let bg_packed = pack_rgb(default_bg.r, default_bg.g, default_bg.b);
+            let bg_packed = pack_rgb(
+                theme_default_bg.0,
+                theme_default_bg.1,
+                theme_default_bg.2,
+            );
             // Replace cells image in place — keep the same Handle so the
             // material doesn't need rebinding.
             if let Some(img) = images.get_mut(&grid.cells_image) {
@@ -1776,7 +1811,7 @@ fn sync_grid(
         // passes keeps the borrow checker happy and lets us compare
         // existing-vs-new in pass 2.
         pending_writes.clear();
-        let force_all = pool_changed || just_shown;
+        let force_all = pool_changed || just_shown || theme_changed;
         for r in 0..rows as usize {
             let row_dirty = force_all
                 || local_dirty_rows.get(r).copied().unwrap_or(true);
@@ -1795,12 +1830,39 @@ fn sync_grid(
                 } else {
                     (cell.fg, cell.bg)
                 };
+                // Substitute theme defaults for cells the shell didn't
+                // color explicitly. libghostty has already filled in
+                // its own palette default at the worker; we recognize
+                // it by exact-equal byte match and swap in the theme
+                // color instead. False positives (shell explicitly set
+                // a color that happens to equal libghostty's default)
+                // are visually identical to the user's intent, since
+                // the theme picks "the same color the shell would've
+                // shown" anyway.
+                let theme_fg =
+                    if final_fg.r == default_fg.r
+                        && final_fg.g == default_fg.g
+                        && final_fg.b == default_fg.b
+                    {
+                        theme_default_fg
+                    } else {
+                        (final_fg.r, final_fg.g, final_fg.b)
+                    };
+                let theme_bg =
+                    if final_bg.r == default_bg.r
+                        && final_bg.g == default_bg.g
+                        && final_bg.b == default_bg.b
+                    {
+                        theme_default_bg
+                    } else {
+                        (final_bg.r, final_bg.g, final_bg.b)
+                    };
                 let glyph_index =
                     atlas.lookup_or_insert(cell.ch, &mut images, &mut layouts);
                 let gpu = GpuCell {
                     glyph_index,
-                    fg_packed: pack_rgb(final_fg.r, final_fg.g, final_fg.b),
-                    bg_packed: pack_rgb(final_bg.r, final_bg.g, final_bg.b),
+                    fg_packed: pack_rgb(theme_fg.0, theme_fg.1, theme_fg.2),
+                    bg_packed: pack_rgb(theme_bg.0, theme_bg.1, theme_bg.2),
                     flags: 0,
                 };
                 pending_writes.push((idx, gpu));
@@ -1903,6 +1965,18 @@ fn rgb_to_color(c: RgbColor) -> Color {
     Color::srgb(c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0)
 }
 
+/// Linear-RGB theme color → (r, g, b) byte triple in sRGB space, the
+/// format libghostty + `pack_rgb` use. Used by `sync_grid` to convert
+/// theme tokens before stuffing them into per-cell colors.
+fn lin_to_rgb_bytes(c: bevy::color::LinearRgba) -> (u8, u8, u8) {
+    let srgb = Color::LinearRgba(c).to_srgba();
+    (
+        (srgb.red.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (srgb.green.clamp(0.0, 1.0) * 255.0).round() as u8,
+        (srgb.blue.clamp(0.0, 1.0) * 255.0).round() as u8,
+    )
+}
+
 // ---------- style-bevy glue ----------
 
 /// Mirror `Projects.active` into style-bevy's `ActiveProject` +
@@ -1981,6 +2055,22 @@ fn handle_open_dev_panel(
     });
 }
 
+/// Track the active theme's `canvas_bg` token in `ClearColor` so a
+/// preset switch retones the void around the dust shader (visible at
+/// pane rounded-corners + during the windex sweep).
+fn sync_canvas_clear_color(
+    theme: Res<style_bevy::Theme>,
+    mut clear: ResMut<ClearColor>,
+) {
+    if !theme.is_changed() {
+        return;
+    }
+    let c = Color::LinearRgba(theme.color(style_bevy::tokens::CANVAS_BG));
+    if clear.0 != c {
+        clear.0 = c;
+    }
+}
+
 /// Switch the winit update mode between Continuous (every frame) and
 /// Reactive (only on input + a 5s heartbeat) depending on whether the
 /// active visual preset needs to animate. Continuous burns ~1.5 cores
@@ -2014,6 +2104,45 @@ fn maintain_winit_mode_for_animation(
     if settings.focused_mode != target {
         settings.focused_mode = target;
     }
+}
+
+/// Cmd+Shift+T opens the live theme editor (a Rhai widget). OkLCh
+/// steppers per color token; click to focus a token, then ± each
+/// of L / C / h. Writes propagate to the active preset's `theme.rhai`
+/// via the bridge; notify watcher reloads it and the rest of the
+/// app retones the same frame.
+fn handle_open_theme_editor(
+    mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
+    mods: Res<ButtonInput<KeyCode>>,
+    mut pending: ResMut<projects::PendingActions>,
+    projects: Res<projects::Projects>,
+    existing: Query<&widget_bevy::rhai_widget::RhaiWidget>,
+) {
+    let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
+    let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
+    let mut triggered = false;
+    for ev in events.read() {
+        if ev.state.is_pressed() && cmd && shift && matches!(ev.key_code, KeyCode::KeyT) {
+            triggered = true;
+        }
+    }
+    if !triggered {
+        return;
+    }
+    if existing.iter().any(|w| w.script == "theme_editor.rhai") {
+        return;
+    }
+    let Some(active) = projects.active else { return };
+    pending.new_panes.push(projects::NewPaneRequest {
+        kind: widget_bevy::rhai_widget::PANE_KIND,
+        project_id: active,
+        origin: None,
+        size: Some(Vec2::new(420.0, 600.0)),
+        config: serde_json::json!({
+            "script": "theme_editor.rhai",
+            "title": "Theme editor",
+        }),
+    });
 }
 
 /// Cmd+Shift+S opens the style preset picker (a Rhai widget). Lists

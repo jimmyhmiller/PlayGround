@@ -1,31 +1,21 @@
-# Color filter. Packets whose payload equals `match` go out the `pass`
-# port; everything else goes out the `reject` port. The two ports let
-# downstream wire matching and non-matching flows independently —
-# matches one outbound edge `Filter.pass -> X` and a separate
-# `Filter.reject -> Y`. Unwired ports silently drop, matching the
-# `to default` contract for missing outputs.
+# Value filter. Packets whose `.value` equals `match` go out the `pass`
+# port; everything else goes out the `reject`. The two ports let
+# downstream wire matching and non-matching flows independently. Unwired
+# ports silently drop, matching the `to default` contract for missing
+# outputs.
 #
-# Also matches on the `total(v)` variant so an Aggregator's output can
-# feed straight into a Filter chain — each branch keeps the original
-# variant.
+# Pattern-binds the whole packet as `p` and re-emits it on the chosen
+# port — kind is preserved verbatim. So a Filter chained after an
+# Aggregator sees `total(v)` and routes `total(v)` through, the same
+# way it routes `packet(v)` from a generator. One rule pair, every kind.
 node Filter {
     slots { match: Int = 0 }
-    rule pass_packet {
-        on packet(c)
-        when c == match
-        do { emit packet(c) to port pass }
+    rule pass {
+        on p when p.value == match
+        do { emit p to port pass }
     }
-    rule reject_packet {
-        on packet(c)
-        do { emit packet(c) to port reject }
-    }
-    rule pass_total {
-        on total(c)
-        when c == match
-        do { emit total(c) to port pass }
-    }
-    rule reject_total {
-        on total(c)
-        do { emit total(c) to port reject }
+    rule reject {
+        on p
+        do { emit p to port reject }
     }
 }

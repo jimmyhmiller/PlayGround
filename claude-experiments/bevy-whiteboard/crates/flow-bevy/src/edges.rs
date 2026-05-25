@@ -330,11 +330,9 @@ pub struct ConnectState {
 /// the slot index. Returns `None` for nil payloads or other shapes —
 /// caller falls back to the emitter's colour.
 pub fn payload_slot(payload: &flow::Value) -> Option<usize> {
-    let inner = match payload {
-        flow::Value::Variant { tag, payload } if tag == "packet" || tag == "req" => payload,
-        _ => return None,
-    };
-    match inner.as_ref() {
+    let (tag, inner) = payload.as_variant()?;
+    if tag != "packet" && tag != "req" { return None; }
+    match inner {
         flow::Value::Int(i) if *i >= 0 => Some(*i as usize),
         _ => None,
     }
@@ -470,18 +468,70 @@ pub fn wire_flow_edge(
     }
 
     let from_kind_local = from_kind;
-    let eid = driver.0.with_sim_mut(move |sim| {
-        let eid = sim.add_edge(from_nid, to_nid, flow::Expr::int(1_000_000));
+    let to_kind_local = to_kind;
+    let (eid, response_eid) = driver.0.with_sim_mut(move |sim| {
+        // Port-aware wiring: if either endpoint is a compound shim
+        // (composite gadget), tag the edge with the compound's default
+        // forward port so the engine's emit routing finds the right
+        // inner node. Monolithic nodes pass `None` ports — same as the
+        // pre-composites path.
+        let from_is_compound = matches!(
+            from_kind_local,
+            Some(k) if sim.compound_templates.contains_key(crate::gadgets::compound_class_name_for(k))
+        );
+        let to_is_compound = matches!(
+            to_kind_local,
+            Some(k) if sim.compound_templates.contains_key(crate::gadgets::compound_class_name_for(k))
+        );
+        let from_port = if from_is_compound {
+            from_kind_local.and_then(|k| k.default_output_port()).map(|s| s.to_string())
+        } else { None };
+        let to_port = if to_is_compound {
+            to_kind_local.and_then(|k| k.default_input_port()).map(|s| s.to_string())
+        } else { None };
+        let eid = sim.add_edge_ports(from_nid, from_port, to_nid, to_port, flow::Expr::int(1_000_000));
         if matches!(from_kind_local, Some(Kind::Worker)) {
             if let Some(n) = sim.nodes.get_mut(&from_nid) {
                 n.slots.insert("downstream".into(), flow::Value::NodeRef(to_nid));
             }
         }
-        eid
+        // Compound→compound wirings get an automatic reverse edge for
+        // the response leg. The single-edge "reverse-route fallback"
+        // the engine uses for monoliths can't traverse compound ports,
+        // because `to out response` resolves through the *outbound*
+        // edges of the compound shim — not through the inverse of an
+        // inbound. So we explicitly create
+        // `to.response_port → from.reply_port` whenever both sides are
+        // compounds AND both report a reverse port.
+        let response_eid = if from_is_compound && to_is_compound {
+            let resp_out = to_kind_local.and_then(|k| k.default_output_port()).map(|s| s.to_string());
+            let resp_in = from_kind_local.and_then(|k| k.default_input_port()).map(|s| s.to_string());
+            // Only wire a response edge if BOTH sides have ports for
+            // the reverse direction. A Generator (no input port) talking
+            // to a Sink (no output port) gets a forward-only wire.
+            match (&resp_out, &resp_in) {
+                (Some(_), Some(_)) => Some(sim.add_edge_ports(
+                    to_nid, resp_out, from_nid, resp_in,
+                    flow::Expr::int(1_000_000),
+                )),
+                _ => None,
+            }
+        } else { None };
+        (eid, response_eid)
     });
     let ent = commands.spawn((FlowEdgeRef(eid),)).id();
     maps.edge_to_entity.insert(eid, ent);
     maps.entity_to_edge.insert(ent, eid);
+    if let Some(resp_eid) = response_eid {
+        let resp_ent = commands.spawn((FlowEdgeRef(resp_eid),)).id();
+        maps.edge_to_entity.insert(resp_eid, resp_ent);
+        maps.entity_to_edge.insert(resp_ent, resp_eid);
+        // Keep the reverse response edge visually hidden so the canvas
+        // shows just the one user-drawn wire, matching the pre-composite
+        // visual model where the resp travelled back along the forward
+        // edge invisibly.
+        hidden.set.insert(resp_eid);
+    }
 }
 
 // ---------------- arrow rendering ----------------

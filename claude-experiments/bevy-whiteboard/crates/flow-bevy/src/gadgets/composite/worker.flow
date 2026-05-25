@@ -1,29 +1,29 @@
-# Worker reimplemented from primitives:
+# Worker reimplemented from primitives only:
 #
-#  request ─req(c) pushing─▶ Lower → Filter ─pass─▶ Service → Reply
-#                              ▲                                │
-#                              └──resp(nil) popping back─────────┘
-#                                                    │
-#  response ◀──── (resp/resp_error via reverse hop) ──┘
+#  request ─req(c) pushing─▶ L (entry-adapter) → Filter ─pass─▶ Service → R (terminal-reply)
+#                              ▲                                              │
+#                              └──resp(nil) popping back ────────────────────┘
+#                              │
+#  response ◀── out response ──┘  (L's reverse rule)
 #
-# - `Lower` converts the inbound `req(c)` to `packet(c) pushing self`
-#   so packet-only primitives (Filter, Service, Reply) can process it,
-#   and relays the eventual resp back one more pop hop.
-# - `Filter` rejects wrong-colour traffic out the `reject` port (wired
+# - L (formerly the Lower primitive, now inline): on `req(c)` push self
+#   and forward as `packet(c)`; on `resp`/`resp_error` pop and emit
+#   through the compound's `response` out port.
+# - Filter rejects wrong-colour traffic out the `reject` port (wired
 #   externally via `WorkerComposite.reject`).
-# - `Service` holds the packet for `service_ns` with a bounded backlog;
+# - Service holds the packet for `service_ns` with a bounded backlog;
 #   overflow exits via `WorkerComposite.overflow`.
-# - `Reply` terminates the pipeline by converting the serviced packet
-#   into `resp(nil) popping`, which walks back to Lower (since Lower
-#   pushed itself), and Lower's reverse rule walks it one more hop
-#   back to the original caller.
+# - R (formerly the Reply primitive, now inline): terminates the
+#   pipeline by converting the serviced packet into `resp(nil)
+#   popping`, which walks back to L (since L pushed itself), and L's
+#   reverse rule walks it one more hop back to the original caller.
 #
 # What this composite does NOT model (vs. the monolithic Worker):
-# - up==0 crash semantics — wire a Switch upstream of Lower with its
+# - up==0 crash semantics — wire a Switch upstream of L with its
 #   signal driven externally, and route Switch.divert to a Reply on
 #   the resp_error variant.
 # - the secondary `packet`/`done` packet-protocol interface — packet
-#   sources can skip Lower and wire straight into the Filter.
+#   sources can skip L and wire straight into the Filter.
 compound WorkerComposite(
     service_ns:  Int = 50000000,
     color:       Int = 0,
@@ -36,22 +36,41 @@ compound WorkerComposite(
         overflow: Sv
     }
 
-    node L  : Lower { }
+    # Inline entry adapter (service-side). Was the Lower primitive.
+    node L {
+        rule rev {
+            on p when p.kind == "resp" || p.kind == "resp_error"
+            do { emit p popping to out response }
+        }
+        rule fwd {
+            on p when p.kind == "req"
+            do { emit packet(p.value) pushing self to default }
+        }
+    }
     node F  : Filter { match: color }
     node Sv : Service { service_ns: service_ns, backlog_cap: backlog_cap }
-    node R  : Reply { }
+    # Inline terminal reply. Was the Reply primitive.
+    node R {
+        rule rev_pass {
+            on p when p.kind == "resp" || p.kind == "resp_error"
+            do { emit p popping to (head(return_path)) }
+        }
+        rule on_packet {
+            on p
+            do { emit resp(nil) popping to (head(return_path)) }
+        }
+    }
 
     edges {
         L      -> F  : 1
         F.pass -> Sv : 1
         Sv     -> R  : 1
-        # Reverse edge so Reply's `resp popping` can reach Lower; the
-        # engine resolves `popping to (head(return_path))` to Lower
-        # (which pushed itself onto RP during the forward leg), and
-        # this direct edge is what carries the packet back. Without it,
-        # the resp would silently drop — neither a forward outbound
-        # from R to L nor a reverse-route fallback applies inside the
-        # compound.
+        # Reverse edge so R's `resp popping` reaches L; the engine
+        # resolves `popping to (head(return_path))` to L (which pushed
+        # itself onto RP on the forward leg), and this direct edge is
+        # what carries the packet back. Without it, the resp would
+        # silently drop — neither a forward outbound from R to L nor a
+        # reverse-route fallback applies inside the compound.
         R      -> L  : 1
     }
 }

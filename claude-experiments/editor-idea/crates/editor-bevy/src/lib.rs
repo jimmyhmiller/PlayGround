@@ -41,7 +41,7 @@ use pane_bevy::{
 use serde_json::Value;
 
 pub mod highlight;
-use highlight::{color_for, Highlighter};
+use highlight::{color_for, Highlighter, SyntaxPalette};
 
 pub const FONT_SIZE: f32 = 16.0;
 pub const LINE_HEIGHT: f32 = 20.0;
@@ -79,6 +79,10 @@ pub struct EditorHighlighter(pub Highlighter);
 struct LineRender {
     text: String,
     rev: u64,
+    /// Snapshot of `SyntaxPalette.rev` at the time we built the
+    /// colored spans. A theme switch bumps the palette rev; we rebuild
+    /// the line so the new colors apply.
+    palette_rev: u64,
 }
 
 #[derive(Component)]
@@ -102,7 +106,8 @@ pub struct EditorEmbedPlugin;
 
 impl Plugin for EditorEmbedPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, register_editor_kind)
+        app.add_plugins(highlight::HighlightPlugin)
+            .add_systems(Startup, register_editor_kind)
             .add_systems(
                 Update,
                 (
@@ -209,14 +214,28 @@ pub fn setup_editor_camera(mut commands: Commands) {
 /// (the latter is what pane-bevy uses for chrome). Standalone hosts
 /// can call this; embedders that already have a font may skip it and
 /// insert their own.
-pub fn setup_editor_font(mut commands: Commands, mut fonts: ResMut<Assets<Font>>) {
-    let font = fonts.add(
-        Font::try_from_bytes(EMBEDDED_FONT.to_vec())
-            .expect("embedded JetBrainsMono-Regular.ttf must parse"),
-    );
+///
+/// Resolves the font through [`style_bevy::FontRegistry`] using
+/// `FONT_FAMILY_MONO` from the active theme, so adding a real mono
+/// family later (or pointing the token at a different bundled name)
+/// retones the editor without code changes. `measure_cell_width` still
+/// reads from the bundled bytes since skrifa needs raw bytes.
+pub fn setup_editor_font(
+    mut commands: Commands,
+    mut fonts: ResMut<Assets<Font>>,
+    mut registry: ResMut<style_bevy::FontRegistry>,
+    theme: Res<style_bevy::Theme>,
+) {
+    // Make sure the registry has its bundled families — Startup-system
+    // ordering is unreliable across plugins, so push entries from here
+    // too. `ensure_initialized` is idempotent.
+    style_bevy::fonts::ensure_initialized(&mut registry, &mut fonts);
+    let mono_name = theme.str_value(style_bevy::tokens::FONT_FAMILY_MONO).to_string();
+    let font = registry.resolve(&mono_name);
+    let measure_bytes = registry.bytes(&mono_name).unwrap_or(EMBEDDED_FONT);
     commands.insert_resource(EditorFont(font.clone()));
     commands.insert_resource(EditorMetrics {
-        cell_width: measure_cell_width(EMBEDDED_FONT, FONT_SIZE),
+        cell_width: measure_cell_width(measure_bytes, FONT_SIZE),
     });
     commands.insert_resource(PaneFont(font));
 }
@@ -261,12 +280,16 @@ fn populate_editor_pane(
         EditorScroll::default(),
         TextDragAnchor::default(),
     ));
+    let caret_color = world
+        .get_resource::<style_bevy::Theme>()
+        .map(|t| Color::LinearRgba(t.color(style_bevy::tokens::CARET)))
+        .unwrap_or_else(|| Color::srgb(0.55, 0.85, 1.0));
     let _caret = world
         .spawn((
             ChildOf(content_root),
             EditorCaret(entity),
             Sprite {
-                color: Color::srgb(0.55, 0.85, 1.0),
+                color: caret_color,
                 custom_size: Some(Vec2::new(2.0, LINE_HEIGHT)),
                 ..default()
             },
@@ -428,6 +451,7 @@ fn ensure_caret_visible(
 fn sync_text(
     font: Res<EditorFont>,
     metrics: Res<EditorMetrics>,
+    palette: Res<SyntaxPalette>,
     mut editors: Query<
         (
             &EditorStateComp,
@@ -454,6 +478,7 @@ fn sync_text(
             chrome,
             *scroll,
             &hl.0,
+            &palette,
             &mut pool,
             &font,
             &metrics,
@@ -470,6 +495,7 @@ fn sync_editor_lines(
     chrome: &PaneChrome,
     scroll: EditorScroll,
     hl: &Highlighter,
+    palette: &SyntaxPalette,
     pool: &mut LineRows,
     font: &EditorFont,
     metrics: &EditorMetrics,
@@ -506,7 +532,11 @@ fn sync_editor_lines(
             Some(entity) => {
                 let needs_rebuild = line_q
                     .get(entity)
-                    .map(|lr| lr.text != truncated || lr.rev != hl.rev)
+                    .map(|lr| {
+                        lr.text != truncated
+                            || lr.rev != hl.rev
+                            || lr.palette_rev != palette.rev
+                    })
                     .unwrap_or(true);
                 if needs_rebuild {
                     rebuild_line_spans(
@@ -514,6 +544,7 @@ fn sync_editor_lines(
                         entity,
                         children_q,
                         hl,
+                        palette,
                         rope,
                         idx,
                         byte_offset,
@@ -523,10 +554,12 @@ fn sync_editor_lines(
                     if let Ok(mut lr) = line_q.get_mut(entity) {
                         lr.text = truncated;
                         lr.rev = hl.rev;
+                        lr.palette_rev = palette.rev;
                     } else {
                         commands.entity(entity).insert(LineRender {
                             text: truncated,
                             rev: hl.rev,
+                            palette_rev: palette.rev,
                         });
                     }
                 }
@@ -542,12 +575,13 @@ fn sync_editor_lines(
                             ..default()
                         },
                         LineHeight::Px(LINE_HEIGHT),
-                        TextColor(color_for(highlight::HighlightKind::Default)),
+                        TextColor(palette.color_for(highlight::HighlightKind::Default)),
                         Anchor::TOP_LEFT,
                         Transform::from_xyz(0.0, -(idx as f32) * LINE_HEIGHT, 0.0),
                         LineRender {
                             text: truncated.clone(),
                             rev: hl.rev,
+                            palette_rev: palette.rev,
                         },
                     ))
                     .id();
@@ -556,6 +590,7 @@ fn sync_editor_lines(
                     entity,
                     children_q,
                     hl,
+                    palette,
                     rope,
                     idx,
                     byte_offset,
@@ -573,6 +608,7 @@ fn rebuild_line_spans(
     parent: Entity,
     children_q: &Query<&Children>,
     hl: &Highlighter,
+    palette: &SyntaxPalette,
     rope: &ropey::Rope,
     line_idx: usize,
     byte_offset: usize,
@@ -594,7 +630,7 @@ fn rebuild_line_spans(
                 ..default()
             },
             LineHeight::Px(LINE_HEIGHT),
-            TextColor(color_for(kind)),
+            TextColor(color_for(palette, kind)),
         ));
     }
 }
@@ -645,6 +681,7 @@ fn sync_content_root(
 
 fn sync_caret(
     metrics: Res<EditorMetrics>,
+    theme: Res<style_bevy::Theme>,
     editors: Query<
         (&EditorStateComp, &PaneRect, &EditorScroll, &PaneKindMarker),
         With<PaneTag>,
@@ -652,7 +689,10 @@ fn sync_caret(
     carets: Query<(Entity, &EditorCaret)>,
     mut t_q: Query<&mut Transform>,
     mut vis_q: Query<&mut Visibility>,
+    mut sprite_q: Query<&mut Sprite>,
 ) {
+    let caret_color = Color::LinearRgba(theme.color(style_bevy::tokens::CARET));
+    let theme_changed = theme.is_changed();
     for (caret_entity, parent) in &carets {
         let Ok((state, rect, scroll, kind)) = editors.get(parent.0) else {
             continue;
@@ -684,6 +724,11 @@ fn sync_caret(
                 Visibility::Hidden
             };
         }
+        if theme_changed {
+            if let Ok(mut s) = sprite_q.get_mut(caret_entity) {
+                s.color = caret_color;
+            }
+        }
     }
 }
 
@@ -699,6 +744,7 @@ pub fn char_to_line_col(doc: &ropey::Rope, char_idx: usize) -> (usize, usize) {
 
 fn sync_selection(
     metrics: Res<EditorMetrics>,
+    theme: Res<style_bevy::Theme>,
     editors: Query<
         (
             Entity,
@@ -753,7 +799,7 @@ fn sync_selection(
                 },
                 ChildOf(chrome.content_root),
                 Sprite {
-                    color: Color::srgba(0.35, 0.55, 0.9, 0.35),
+                    color: Color::LinearRgba(theme.color(style_bevy::tokens::SELECTION)),
                     custom_size: Some(Vec2::new((x1 - x0).max(1.0), LINE_HEIGHT)),
                     ..default()
                 },
@@ -790,6 +836,7 @@ fn handle_scroll(
     mut wheel: MessageReader<MouseWheel>,
     metrics: Res<EditorMetrics>,
     windows: Query<&Window>,
+    all_panes: Query<(Entity, &PaneRect, Option<&Visibility>), With<PaneTag>>,
     mut editors: Query<
         (Entity, &PaneRect, &EditorStateComp, &mut EditorScroll, &PaneKindMarker),
         With<PaneTag>,
@@ -811,13 +858,23 @@ fn handle_scroll(
     let Ok(win) = windows.single() else { return };
     let Some(pt) = win.cursor_position() else { return };
 
-    let candidates: Vec<(Entity, PaneRect)> = editors
+    // Topmost pane of ANY kind under the cursor. Bail if it isn't an
+    // editor — otherwise scrolling on a widget/terminal that happens
+    // to overlap an editor underneath would also scroll the editor.
+    let all_rects: Vec<(Entity, PaneRect)> = all_panes
         .iter()
-        .filter(|(_, _, _, _, kind)| kind.0 == PANE_KIND)
-        .map(|(e, r, _, _, _)| (e, *r))
+        .filter(|(_, _, vis)| !matches!(vis, Some(Visibility::Hidden)))
+        .map(|(e, r, _)| (e, *r))
         .collect();
-    let target = pane_bevy::topmost_pane_at(pt, &candidates);
-    let Some(editor) = target else { return };
+    let Some(editor) = pane_bevy::topmost_pane_at(pt, &all_rects) else {
+        return;
+    };
+    let Ok((_, _, _, _, kind)) = editors.get(editor) else {
+        return;
+    };
+    if kind.0 != PANE_KIND {
+        return;
+    }
 
     if let Ok((_, rect, state, mut scroll, _)) = editors.get_mut(editor) {
         let content_size = content_area_size(rect);

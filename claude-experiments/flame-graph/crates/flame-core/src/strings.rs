@@ -7,6 +7,7 @@ impl StringId {
     pub const EMPTY: StringId = StringId(0);
 }
 
+#[derive(Clone)]
 pub struct StringInterner {
     values: Vec<String>,
     by_value: AHashMap<String, StringId>,
@@ -41,6 +42,13 @@ impl StringInterner {
 
     pub fn get(&self, id: StringId) -> &str {
         &self.values[id.0 as usize]
+    }
+
+    /// Look up an existing string. Returns `None` if not interned. Use this
+    /// when you want to query attrs by a known key name without mutating the
+    /// interner.
+    pub fn lookup(&self, s: &str) -> Option<StringId> {
+        self.by_value.get(s).copied()
     }
 
     pub fn len(&self) -> usize {

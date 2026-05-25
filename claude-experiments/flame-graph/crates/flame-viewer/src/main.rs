@@ -20,10 +20,17 @@ const SOURCES: &[&dyn TraceSource] = &[
     &flame_format_firefox::FirefoxSource,
     &flame_format_speedscope::SpeedscopeSource,
     &flame_format_chrome::ChromeSource,
+    &flame_format_otel::OtelSource,
     &flame_format_folded::FoldedSource,
 ];
 
 fn load_path(path: &Path) -> Result<flame_core::Profile, LoadError> {
+    // Directory input: aggregate any .jsonl files in it (OTel emits one per
+    // pid). We concatenate them with newlines, which is valid JSONL, and let
+    // the OTel loader join spans by traceId across files.
+    if path.is_dir() {
+        return load_jsonl_dir(path);
+    }
     let raw = std::fs::read(path)?;
     let name = path.file_name().and_then(|s| s.to_str()).map(String::from);
 
@@ -50,6 +57,55 @@ fn load_path(path: &Path) -> Result<flame_core::Profile, LoadError> {
     log::info!("loading {} via {}", path.display(), src.name());
     let mut builder = ProfileBuilder::new();
     src.load(&bytes, &mut builder)?;
+    Ok(builder.finish())
+}
+
+fn load_jsonl_dir(dir: &Path) -> Result<flame_core::Profile, LoadError> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let name = match p.file_name().and_then(|n| n.to_str()) {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+        let lower = name.to_ascii_lowercase();
+        if lower.ends_with(".jsonl") {
+            files.push(p);
+        }
+    }
+    if files.is_empty() {
+        return Err(LoadError::Parse(format!(
+            "no .jsonl files in directory {}",
+            dir.display()
+        )));
+    }
+    // Sort so the loader sees files in a deterministic order — matters for
+    // tie-breaking among spans with identical start times.
+    files.sort();
+    log::info!("aggregating {} jsonl files from {}", files.len(), dir.display());
+
+    let mut buf: Vec<u8> = Vec::new();
+    for f in &files {
+        let bytes = std::fs::read(f)?;
+        buf.extend_from_slice(&bytes);
+        if !bytes.ends_with(b"\n") {
+            buf.push(b'\n');
+        }
+    }
+    // Synthesize a filename hint that includes ".jsonl" so detect() picks the
+    // OTel source unambiguously.
+    let sniff = format!("{}.jsonl", dir.file_name().and_then(|s| s.to_str()).unwrap_or("dir"));
+    let src = SOURCES
+        .iter()
+        .find(|s| s.detect(&buf, Some(&sniff)))
+        .ok_or(LoadError::UnknownFormat)?;
+    log::info!("loading aggregated jsonl via {}", src.name());
+    let mut builder = ProfileBuilder::new();
+    src.load(&buf, &mut builder)?;
     Ok(builder.finish())
 }
 
@@ -327,6 +383,22 @@ impl ApplicationHandler for App {
                                     if let Some(w) = &self.window {
                                         w.request_redraw();
                                     }
+                                } else if let Some(tab) =
+                                    r.hit_test_sidebar_tab(self.cursor.0, self.cursor.1)
+                                {
+                                    r.set_sidebar_tab(tab);
+                                    r.rebuild_instances();
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
+                                } else if let Some(pick) =
+                                    r.hit_test_group_row(self.cursor.0, self.cursor.1)
+                                {
+                                    r.set_group_key(pick);
+                                    r.rebuild_instances();
+                                    if let Some(w) = &self.window {
+                                        w.request_redraw();
+                                    }
                                 } else if let Some(track_id) =
                                     r.hit_test_track_header(self.cursor.0, self.cursor.1)
                                 {
@@ -390,6 +462,32 @@ impl ApplicationHandler for App {
                     if r.active_tab == flame_render::MainTab::CallTree {
                         if dy != 0.0 {
                             r.pan_call_tree(dy);
+                            r.rebuild_instances();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                    } else if r.active_tab == flame_render::MainTab::Sequence {
+                        // SEQUENCE: vertical scroll pans the diagram down the
+                        // time axis. (Picker has no overflow yet, so a single
+                        // pan handler is enough.)
+                        if dy != 0.0 {
+                            r.pan_sequence(-dy);
+                            r.rebuild_instances();
+                            if let Some(w) = &self.window {
+                                w.request_redraw();
+                            }
+                        }
+                    } else if r.active_tab == flame_render::MainTab::Flame
+                        && r.cursor_in_inspector(self.cursor.0)
+                    {
+                        // Wheel inside the right sidebar scrolls its body
+                        // content, not the timeline.
+                        if dy != 0.0 {
+                            // Trackpad convention: scrolling up moves content
+                            // down (negative dy). Sidebar scroll is positive =
+                            // content up, so flip.
+                            r.pan_sidebar(-dy);
                             r.rebuild_instances();
                             if let Some(w) = &self.window {
                                 w.request_redraw();
@@ -486,6 +584,14 @@ impl ApplicationHandler for App {
                         Key::Character(ref s) if s.as_str().eq_ignore_ascii_case("f") => {
                             r.flip_direction();
                             log::info!("direction → {}", r.direction.label());
+                            r.rebuild_instances();
+                        }
+                        Key::Character(ref s) if s.as_str().eq_ignore_ascii_case("m") => {
+                            // Toggle multi-track vs single-track (all spans
+                            // greedy-packed onto one synthetic track, banded
+                            // by service via the category color).
+                            r.toggle_merge_mode();
+                            log::info!("merge → {}", r.merge_mode.label());
                             r.rebuild_instances();
                         }
                         Key::Character(ref s) if s.as_str().eq_ignore_ascii_case("v") => {

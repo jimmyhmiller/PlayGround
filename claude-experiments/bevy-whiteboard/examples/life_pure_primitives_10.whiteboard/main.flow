@@ -4,1202 +4,1202 @@
 # Cell (0,0)
 node T_0_0     : Tick           { period_ns: 200000000 }
 node SW_0_0    : Switch         { passing: 0 }
-node C1_0_0    : ConstantPacket { value: 1 }
-node C0_0_0    : ConstantPacket { value: 0 }
+node C1_0_0    : Constant { value: 1 }
+node C0_0_0    : Constant { value: 0 }
 node B_0_0     : FanOut         { }
 node A_0_0     : Aggregator     { n: 8 }
 node F3_0_0    : Filter         { match: 3 }
 node F2_0_0    : Filter         { match: 2 }
-node ToAlv_0_0 : ConstantSignal { value: 0 }
-node ToDed_0_0 : ConstantSignal { value: 1 }
+node ToAlv_0_0 : Constant { value: 0, out_kind: "signal" }
+node ToDed_0_0 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (1,0)
 node T_1_0     : Tick           { period_ns: 200000000 }
 node SW_1_0    : Switch         { passing: 1 }
-node C1_1_0    : ConstantPacket { value: 1 }
-node C0_1_0    : ConstantPacket { value: 0 }
+node C1_1_0    : Constant { value: 1 }
+node C0_1_0    : Constant { value: 0 }
 node B_1_0     : FanOut         { }
 node A_1_0     : Aggregator     { n: 8 }
 node F3_1_0    : Filter         { match: 3 }
 node F2_1_0    : Filter         { match: 2 }
-node ToAlv_1_0 : ConstantSignal { value: 0 }
-node ToDed_1_0 : ConstantSignal { value: 1 }
+node ToAlv_1_0 : Constant { value: 0, out_kind: "signal" }
+node ToDed_1_0 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (2,0)
 node T_2_0     : Tick           { period_ns: 200000000 }
 node SW_2_0    : Switch         { passing: 1 }
-node C1_2_0    : ConstantPacket { value: 1 }
-node C0_2_0    : ConstantPacket { value: 0 }
+node C1_2_0    : Constant { value: 1 }
+node C0_2_0    : Constant { value: 0 }
 node B_2_0     : FanOut         { }
 node A_2_0     : Aggregator     { n: 8 }
 node F3_2_0    : Filter         { match: 3 }
 node F2_2_0    : Filter         { match: 2 }
-node ToAlv_2_0 : ConstantSignal { value: 0 }
-node ToDed_2_0 : ConstantSignal { value: 1 }
+node ToAlv_2_0 : Constant { value: 0, out_kind: "signal" }
+node ToDed_2_0 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (3,0)
 node T_3_0     : Tick           { period_ns: 200000000 }
 node SW_3_0    : Switch         { passing: 1 }
-node C1_3_0    : ConstantPacket { value: 1 }
-node C0_3_0    : ConstantPacket { value: 0 }
+node C1_3_0    : Constant { value: 1 }
+node C0_3_0    : Constant { value: 0 }
 node B_3_0     : FanOut         { }
 node A_3_0     : Aggregator     { n: 8 }
 node F3_3_0    : Filter         { match: 3 }
 node F2_3_0    : Filter         { match: 2 }
-node ToAlv_3_0 : ConstantSignal { value: 0 }
-node ToDed_3_0 : ConstantSignal { value: 1 }
+node ToAlv_3_0 : Constant { value: 0, out_kind: "signal" }
+node ToDed_3_0 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (4,0)
 node T_4_0     : Tick           { period_ns: 200000000 }
 node SW_4_0    : Switch         { passing: 0 }
-node C1_4_0    : ConstantPacket { value: 1 }
-node C0_4_0    : ConstantPacket { value: 0 }
+node C1_4_0    : Constant { value: 1 }
+node C0_4_0    : Constant { value: 0 }
 node B_4_0     : FanOut         { }
 node A_4_0     : Aggregator     { n: 8 }
 node F3_4_0    : Filter         { match: 3 }
 node F2_4_0    : Filter         { match: 2 }
-node ToAlv_4_0 : ConstantSignal { value: 0 }
-node ToDed_4_0 : ConstantSignal { value: 1 }
+node ToAlv_4_0 : Constant { value: 0, out_kind: "signal" }
+node ToDed_4_0 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (5,0)
 node T_5_0     : Tick           { period_ns: 200000000 }
 node SW_5_0    : Switch         { passing: 0 }
-node C1_5_0    : ConstantPacket { value: 1 }
-node C0_5_0    : ConstantPacket { value: 0 }
+node C1_5_0    : Constant { value: 1 }
+node C0_5_0    : Constant { value: 0 }
 node B_5_0     : FanOut         { }
 node A_5_0     : Aggregator     { n: 8 }
 node F3_5_0    : Filter         { match: 3 }
 node F2_5_0    : Filter         { match: 2 }
-node ToAlv_5_0 : ConstantSignal { value: 0 }
-node ToDed_5_0 : ConstantSignal { value: 1 }
+node ToAlv_5_0 : Constant { value: 0, out_kind: "signal" }
+node ToDed_5_0 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (6,0)
 node T_6_0     : Tick           { period_ns: 200000000 }
 node SW_6_0    : Switch         { passing: 0 }
-node C1_6_0    : ConstantPacket { value: 1 }
-node C0_6_0    : ConstantPacket { value: 0 }
+node C1_6_0    : Constant { value: 1 }
+node C0_6_0    : Constant { value: 0 }
 node B_6_0     : FanOut         { }
 node A_6_0     : Aggregator     { n: 8 }
 node F3_6_0    : Filter         { match: 3 }
 node F2_6_0    : Filter         { match: 2 }
-node ToAlv_6_0 : ConstantSignal { value: 0 }
-node ToDed_6_0 : ConstantSignal { value: 1 }
+node ToAlv_6_0 : Constant { value: 0, out_kind: "signal" }
+node ToDed_6_0 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (7,0)
 node T_7_0     : Tick           { period_ns: 200000000 }
 node SW_7_0    : Switch         { passing: 1 }
-node C1_7_0    : ConstantPacket { value: 1 }
-node C0_7_0    : ConstantPacket { value: 0 }
+node C1_7_0    : Constant { value: 1 }
+node C0_7_0    : Constant { value: 0 }
 node B_7_0     : FanOut         { }
 node A_7_0     : Aggregator     { n: 8 }
 node F3_7_0    : Filter         { match: 3 }
 node F2_7_0    : Filter         { match: 2 }
-node ToAlv_7_0 : ConstantSignal { value: 0 }
-node ToDed_7_0 : ConstantSignal { value: 1 }
+node ToAlv_7_0 : Constant { value: 0, out_kind: "signal" }
+node ToDed_7_0 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (8,0)
 node T_8_0     : Tick           { period_ns: 200000000 }
 node SW_8_0    : Switch         { passing: 0 }
-node C1_8_0    : ConstantPacket { value: 1 }
-node C0_8_0    : ConstantPacket { value: 0 }
+node C1_8_0    : Constant { value: 1 }
+node C0_8_0    : Constant { value: 0 }
 node B_8_0     : FanOut         { }
 node A_8_0     : Aggregator     { n: 8 }
 node F3_8_0    : Filter         { match: 3 }
 node F2_8_0    : Filter         { match: 2 }
-node ToAlv_8_0 : ConstantSignal { value: 0 }
-node ToDed_8_0 : ConstantSignal { value: 1 }
+node ToAlv_8_0 : Constant { value: 0, out_kind: "signal" }
+node ToDed_8_0 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (9,0)
 node T_9_0     : Tick           { period_ns: 200000000 }
 node SW_9_0    : Switch         { passing: 1 }
-node C1_9_0    : ConstantPacket { value: 1 }
-node C0_9_0    : ConstantPacket { value: 0 }
+node C1_9_0    : Constant { value: 1 }
+node C0_9_0    : Constant { value: 0 }
 node B_9_0     : FanOut         { }
 node A_9_0     : Aggregator     { n: 8 }
 node F3_9_0    : Filter         { match: 3 }
 node F2_9_0    : Filter         { match: 2 }
-node ToAlv_9_0 : ConstantSignal { value: 0 }
-node ToDed_9_0 : ConstantSignal { value: 1 }
+node ToAlv_9_0 : Constant { value: 0, out_kind: "signal" }
+node ToDed_9_0 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (0,1)
 node T_0_1     : Tick           { period_ns: 200000000 }
 node SW_0_1    : Switch         { passing: 1 }
-node C1_0_1    : ConstantPacket { value: 1 }
-node C0_0_1    : ConstantPacket { value: 0 }
+node C1_0_1    : Constant { value: 1 }
+node C0_0_1    : Constant { value: 0 }
 node B_0_1     : FanOut         { }
 node A_0_1     : Aggregator     { n: 8 }
 node F3_0_1    : Filter         { match: 3 }
 node F2_0_1    : Filter         { match: 2 }
-node ToAlv_0_1 : ConstantSignal { value: 0 }
-node ToDed_0_1 : ConstantSignal { value: 1 }
+node ToAlv_0_1 : Constant { value: 0, out_kind: "signal" }
+node ToDed_0_1 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (1,1)
 node T_1_1     : Tick           { period_ns: 200000000 }
 node SW_1_1    : Switch         { passing: 0 }
-node C1_1_1    : ConstantPacket { value: 1 }
-node C0_1_1    : ConstantPacket { value: 0 }
+node C1_1_1    : Constant { value: 1 }
+node C0_1_1    : Constant { value: 0 }
 node B_1_1     : FanOut         { }
 node A_1_1     : Aggregator     { n: 8 }
 node F3_1_1    : Filter         { match: 3 }
 node F2_1_1    : Filter         { match: 2 }
-node ToAlv_1_1 : ConstantSignal { value: 0 }
-node ToDed_1_1 : ConstantSignal { value: 1 }
+node ToAlv_1_1 : Constant { value: 0, out_kind: "signal" }
+node ToDed_1_1 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (2,1)
 node T_2_1     : Tick           { period_ns: 200000000 }
 node SW_2_1    : Switch         { passing: 1 }
-node C1_2_1    : ConstantPacket { value: 1 }
-node C0_2_1    : ConstantPacket { value: 0 }
+node C1_2_1    : Constant { value: 1 }
+node C0_2_1    : Constant { value: 0 }
 node B_2_1     : FanOut         { }
 node A_2_1     : Aggregator     { n: 8 }
 node F3_2_1    : Filter         { match: 3 }
 node F2_2_1    : Filter         { match: 2 }
-node ToAlv_2_1 : ConstantSignal { value: 0 }
-node ToDed_2_1 : ConstantSignal { value: 1 }
+node ToAlv_2_1 : Constant { value: 0, out_kind: "signal" }
+node ToDed_2_1 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (3,1)
 node T_3_1     : Tick           { period_ns: 200000000 }
 node SW_3_1    : Switch         { passing: 1 }
-node C1_3_1    : ConstantPacket { value: 1 }
-node C0_3_1    : ConstantPacket { value: 0 }
+node C1_3_1    : Constant { value: 1 }
+node C0_3_1    : Constant { value: 0 }
 node B_3_1     : FanOut         { }
 node A_3_1     : Aggregator     { n: 8 }
 node F3_3_1    : Filter         { match: 3 }
 node F2_3_1    : Filter         { match: 2 }
-node ToAlv_3_1 : ConstantSignal { value: 0 }
-node ToDed_3_1 : ConstantSignal { value: 1 }
+node ToAlv_3_1 : Constant { value: 0, out_kind: "signal" }
+node ToDed_3_1 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (4,1)
 node T_4_1     : Tick           { period_ns: 200000000 }
 node SW_4_1    : Switch         { passing: 0 }
-node C1_4_1    : ConstantPacket { value: 1 }
-node C0_4_1    : ConstantPacket { value: 0 }
+node C1_4_1    : Constant { value: 1 }
+node C0_4_1    : Constant { value: 0 }
 node B_4_1     : FanOut         { }
 node A_4_1     : Aggregator     { n: 8 }
 node F3_4_1    : Filter         { match: 3 }
 node F2_4_1    : Filter         { match: 2 }
-node ToAlv_4_1 : ConstantSignal { value: 0 }
-node ToDed_4_1 : ConstantSignal { value: 1 }
+node ToAlv_4_1 : Constant { value: 0, out_kind: "signal" }
+node ToDed_4_1 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (5,1)
 node T_5_1     : Tick           { period_ns: 200000000 }
 node SW_5_1    : Switch         { passing: 0 }
-node C1_5_1    : ConstantPacket { value: 1 }
-node C0_5_1    : ConstantPacket { value: 0 }
+node C1_5_1    : Constant { value: 1 }
+node C0_5_1    : Constant { value: 0 }
 node B_5_1     : FanOut         { }
 node A_5_1     : Aggregator     { n: 8 }
 node F3_5_1    : Filter         { match: 3 }
 node F2_5_1    : Filter         { match: 2 }
-node ToAlv_5_1 : ConstantSignal { value: 0 }
-node ToDed_5_1 : ConstantSignal { value: 1 }
+node ToAlv_5_1 : Constant { value: 0, out_kind: "signal" }
+node ToDed_5_1 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (6,1)
 node T_6_1     : Tick           { period_ns: 200000000 }
 node SW_6_1    : Switch         { passing: 1 }
-node C1_6_1    : ConstantPacket { value: 1 }
-node C0_6_1    : ConstantPacket { value: 0 }
+node C1_6_1    : Constant { value: 1 }
+node C0_6_1    : Constant { value: 0 }
 node B_6_1     : FanOut         { }
 node A_6_1     : Aggregator     { n: 8 }
 node F3_6_1    : Filter         { match: 3 }
 node F2_6_1    : Filter         { match: 2 }
-node ToAlv_6_1 : ConstantSignal { value: 0 }
-node ToDed_6_1 : ConstantSignal { value: 1 }
+node ToAlv_6_1 : Constant { value: 0, out_kind: "signal" }
+node ToDed_6_1 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (7,1)
 node T_7_1     : Tick           { period_ns: 200000000 }
 node SW_7_1    : Switch         { passing: 0 }
-node C1_7_1    : ConstantPacket { value: 1 }
-node C0_7_1    : ConstantPacket { value: 0 }
+node C1_7_1    : Constant { value: 1 }
+node C0_7_1    : Constant { value: 0 }
 node B_7_1     : FanOut         { }
 node A_7_1     : Aggregator     { n: 8 }
 node F3_7_1    : Filter         { match: 3 }
 node F2_7_1    : Filter         { match: 2 }
-node ToAlv_7_1 : ConstantSignal { value: 0 }
-node ToDed_7_1 : ConstantSignal { value: 1 }
+node ToAlv_7_1 : Constant { value: 0, out_kind: "signal" }
+node ToDed_7_1 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (8,1)
 node T_8_1     : Tick           { period_ns: 200000000 }
 node SW_8_1    : Switch         { passing: 0 }
-node C1_8_1    : ConstantPacket { value: 1 }
-node C0_8_1    : ConstantPacket { value: 0 }
+node C1_8_1    : Constant { value: 1 }
+node C0_8_1    : Constant { value: 0 }
 node B_8_1     : FanOut         { }
 node A_8_1     : Aggregator     { n: 8 }
 node F3_8_1    : Filter         { match: 3 }
 node F2_8_1    : Filter         { match: 2 }
-node ToAlv_8_1 : ConstantSignal { value: 0 }
-node ToDed_8_1 : ConstantSignal { value: 1 }
+node ToAlv_8_1 : Constant { value: 0, out_kind: "signal" }
+node ToDed_8_1 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (9,1)
 node T_9_1     : Tick           { period_ns: 200000000 }
 node SW_9_1    : Switch         { passing: 1 }
-node C1_9_1    : ConstantPacket { value: 1 }
-node C0_9_1    : ConstantPacket { value: 0 }
+node C1_9_1    : Constant { value: 1 }
+node C0_9_1    : Constant { value: 0 }
 node B_9_1     : FanOut         { }
 node A_9_1     : Aggregator     { n: 8 }
 node F3_9_1    : Filter         { match: 3 }
 node F2_9_1    : Filter         { match: 2 }
-node ToAlv_9_1 : ConstantSignal { value: 0 }
-node ToDed_9_1 : ConstantSignal { value: 1 }
+node ToAlv_9_1 : Constant { value: 0, out_kind: "signal" }
+node ToDed_9_1 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (0,2)
 node T_0_2     : Tick           { period_ns: 200000000 }
 node SW_0_2    : Switch         { passing: 0 }
-node C1_0_2    : ConstantPacket { value: 1 }
-node C0_0_2    : ConstantPacket { value: 0 }
+node C1_0_2    : Constant { value: 1 }
+node C0_0_2    : Constant { value: 0 }
 node B_0_2     : FanOut         { }
 node A_0_2     : Aggregator     { n: 8 }
 node F3_0_2    : Filter         { match: 3 }
 node F2_0_2    : Filter         { match: 2 }
-node ToAlv_0_2 : ConstantSignal { value: 0 }
-node ToDed_0_2 : ConstantSignal { value: 1 }
+node ToAlv_0_2 : Constant { value: 0, out_kind: "signal" }
+node ToDed_0_2 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (1,2)
 node T_1_2     : Tick           { period_ns: 200000000 }
 node SW_1_2    : Switch         { passing: 0 }
-node C1_1_2    : ConstantPacket { value: 1 }
-node C0_1_2    : ConstantPacket { value: 0 }
+node C1_1_2    : Constant { value: 1 }
+node C0_1_2    : Constant { value: 0 }
 node B_1_2     : FanOut         { }
 node A_1_2     : Aggregator     { n: 8 }
 node F3_1_2    : Filter         { match: 3 }
 node F2_1_2    : Filter         { match: 2 }
-node ToAlv_1_2 : ConstantSignal { value: 0 }
-node ToDed_1_2 : ConstantSignal { value: 1 }
+node ToAlv_1_2 : Constant { value: 0, out_kind: "signal" }
+node ToDed_1_2 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (2,2)
 node T_2_2     : Tick           { period_ns: 200000000 }
 node SW_2_2    : Switch         { passing: 1 }
-node C1_2_2    : ConstantPacket { value: 1 }
-node C0_2_2    : ConstantPacket { value: 0 }
+node C1_2_2    : Constant { value: 1 }
+node C0_2_2    : Constant { value: 0 }
 node B_2_2     : FanOut         { }
 node A_2_2     : Aggregator     { n: 8 }
 node F3_2_2    : Filter         { match: 3 }
 node F2_2_2    : Filter         { match: 2 }
-node ToAlv_2_2 : ConstantSignal { value: 0 }
-node ToDed_2_2 : ConstantSignal { value: 1 }
+node ToAlv_2_2 : Constant { value: 0, out_kind: "signal" }
+node ToDed_2_2 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (3,2)
 node T_3_2     : Tick           { period_ns: 200000000 }
 node SW_3_2    : Switch         { passing: 1 }
-node C1_3_2    : ConstantPacket { value: 1 }
-node C0_3_2    : ConstantPacket { value: 0 }
+node C1_3_2    : Constant { value: 1 }
+node C0_3_2    : Constant { value: 0 }
 node B_3_2     : FanOut         { }
 node A_3_2     : Aggregator     { n: 8 }
 node F3_3_2    : Filter         { match: 3 }
 node F2_3_2    : Filter         { match: 2 }
-node ToAlv_3_2 : ConstantSignal { value: 0 }
-node ToDed_3_2 : ConstantSignal { value: 1 }
+node ToAlv_3_2 : Constant { value: 0, out_kind: "signal" }
+node ToDed_3_2 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (4,2)
 node T_4_2     : Tick           { period_ns: 200000000 }
 node SW_4_2    : Switch         { passing: 0 }
-node C1_4_2    : ConstantPacket { value: 1 }
-node C0_4_2    : ConstantPacket { value: 0 }
+node C1_4_2    : Constant { value: 1 }
+node C0_4_2    : Constant { value: 0 }
 node B_4_2     : FanOut         { }
 node A_4_2     : Aggregator     { n: 8 }
 node F3_4_2    : Filter         { match: 3 }
 node F2_4_2    : Filter         { match: 2 }
-node ToAlv_4_2 : ConstantSignal { value: 0 }
-node ToDed_4_2 : ConstantSignal { value: 1 }
+node ToAlv_4_2 : Constant { value: 0, out_kind: "signal" }
+node ToDed_4_2 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (5,2)
 node T_5_2     : Tick           { period_ns: 200000000 }
 node SW_5_2    : Switch         { passing: 1 }
-node C1_5_2    : ConstantPacket { value: 1 }
-node C0_5_2    : ConstantPacket { value: 0 }
+node C1_5_2    : Constant { value: 1 }
+node C0_5_2    : Constant { value: 0 }
 node B_5_2     : FanOut         { }
 node A_5_2     : Aggregator     { n: 8 }
 node F3_5_2    : Filter         { match: 3 }
 node F2_5_2    : Filter         { match: 2 }
-node ToAlv_5_2 : ConstantSignal { value: 0 }
-node ToDed_5_2 : ConstantSignal { value: 1 }
+node ToAlv_5_2 : Constant { value: 0, out_kind: "signal" }
+node ToDed_5_2 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (6,2)
 node T_6_2     : Tick           { period_ns: 200000000 }
 node SW_6_2    : Switch         { passing: 1 }
-node C1_6_2    : ConstantPacket { value: 1 }
-node C0_6_2    : ConstantPacket { value: 0 }
+node C1_6_2    : Constant { value: 1 }
+node C0_6_2    : Constant { value: 0 }
 node B_6_2     : FanOut         { }
 node A_6_2     : Aggregator     { n: 8 }
 node F3_6_2    : Filter         { match: 3 }
 node F2_6_2    : Filter         { match: 2 }
-node ToAlv_6_2 : ConstantSignal { value: 0 }
-node ToDed_6_2 : ConstantSignal { value: 1 }
+node ToAlv_6_2 : Constant { value: 0, out_kind: "signal" }
+node ToDed_6_2 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (7,2)
 node T_7_2     : Tick           { period_ns: 200000000 }
 node SW_7_2    : Switch         { passing: 1 }
-node C1_7_2    : ConstantPacket { value: 1 }
-node C0_7_2    : ConstantPacket { value: 0 }
+node C1_7_2    : Constant { value: 1 }
+node C0_7_2    : Constant { value: 0 }
 node B_7_2     : FanOut         { }
 node A_7_2     : Aggregator     { n: 8 }
 node F3_7_2    : Filter         { match: 3 }
 node F2_7_2    : Filter         { match: 2 }
-node ToAlv_7_2 : ConstantSignal { value: 0 }
-node ToDed_7_2 : ConstantSignal { value: 1 }
+node ToAlv_7_2 : Constant { value: 0, out_kind: "signal" }
+node ToDed_7_2 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (8,2)
 node T_8_2     : Tick           { period_ns: 200000000 }
 node SW_8_2    : Switch         { passing: 0 }
-node C1_8_2    : ConstantPacket { value: 1 }
-node C0_8_2    : ConstantPacket { value: 0 }
+node C1_8_2    : Constant { value: 1 }
+node C0_8_2    : Constant { value: 0 }
 node B_8_2     : FanOut         { }
 node A_8_2     : Aggregator     { n: 8 }
 node F3_8_2    : Filter         { match: 3 }
 node F2_8_2    : Filter         { match: 2 }
-node ToAlv_8_2 : ConstantSignal { value: 0 }
-node ToDed_8_2 : ConstantSignal { value: 1 }
+node ToAlv_8_2 : Constant { value: 0, out_kind: "signal" }
+node ToDed_8_2 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (9,2)
 node T_9_2     : Tick           { period_ns: 200000000 }
 node SW_9_2    : Switch         { passing: 0 }
-node C1_9_2    : ConstantPacket { value: 1 }
-node C0_9_2    : ConstantPacket { value: 0 }
+node C1_9_2    : Constant { value: 1 }
+node C0_9_2    : Constant { value: 0 }
 node B_9_2     : FanOut         { }
 node A_9_2     : Aggregator     { n: 8 }
 node F3_9_2    : Filter         { match: 3 }
 node F2_9_2    : Filter         { match: 2 }
-node ToAlv_9_2 : ConstantSignal { value: 0 }
-node ToDed_9_2 : ConstantSignal { value: 1 }
+node ToAlv_9_2 : Constant { value: 0, out_kind: "signal" }
+node ToDed_9_2 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (0,3)
 node T_0_3     : Tick           { period_ns: 200000000 }
 node SW_0_3    : Switch         { passing: 0 }
-node C1_0_3    : ConstantPacket { value: 1 }
-node C0_0_3    : ConstantPacket { value: 0 }
+node C1_0_3    : Constant { value: 1 }
+node C0_0_3    : Constant { value: 0 }
 node B_0_3     : FanOut         { }
 node A_0_3     : Aggregator     { n: 8 }
 node F3_0_3    : Filter         { match: 3 }
 node F2_0_3    : Filter         { match: 2 }
-node ToAlv_0_3 : ConstantSignal { value: 0 }
-node ToDed_0_3 : ConstantSignal { value: 1 }
+node ToAlv_0_3 : Constant { value: 0, out_kind: "signal" }
+node ToDed_0_3 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (1,3)
 node T_1_3     : Tick           { period_ns: 200000000 }
 node SW_1_3    : Switch         { passing: 0 }
-node C1_1_3    : ConstantPacket { value: 1 }
-node C0_1_3    : ConstantPacket { value: 0 }
+node C1_1_3    : Constant { value: 1 }
+node C0_1_3    : Constant { value: 0 }
 node B_1_3     : FanOut         { }
 node A_1_3     : Aggregator     { n: 8 }
 node F3_1_3    : Filter         { match: 3 }
 node F2_1_3    : Filter         { match: 2 }
-node ToAlv_1_3 : ConstantSignal { value: 0 }
-node ToDed_1_3 : ConstantSignal { value: 1 }
+node ToAlv_1_3 : Constant { value: 0, out_kind: "signal" }
+node ToDed_1_3 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (2,3)
 node T_2_3     : Tick           { period_ns: 200000000 }
 node SW_2_3    : Switch         { passing: 0 }
-node C1_2_3    : ConstantPacket { value: 1 }
-node C0_2_3    : ConstantPacket { value: 0 }
+node C1_2_3    : Constant { value: 1 }
+node C0_2_3    : Constant { value: 0 }
 node B_2_3     : FanOut         { }
 node A_2_3     : Aggregator     { n: 8 }
 node F3_2_3    : Filter         { match: 3 }
 node F2_2_3    : Filter         { match: 2 }
-node ToAlv_2_3 : ConstantSignal { value: 0 }
-node ToDed_2_3 : ConstantSignal { value: 1 }
+node ToAlv_2_3 : Constant { value: 0, out_kind: "signal" }
+node ToDed_2_3 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (3,3)
 node T_3_3     : Tick           { period_ns: 200000000 }
 node SW_3_3    : Switch         { passing: 0 }
-node C1_3_3    : ConstantPacket { value: 1 }
-node C0_3_3    : ConstantPacket { value: 0 }
+node C1_3_3    : Constant { value: 1 }
+node C0_3_3    : Constant { value: 0 }
 node B_3_3     : FanOut         { }
 node A_3_3     : Aggregator     { n: 8 }
 node F3_3_3    : Filter         { match: 3 }
 node F2_3_3    : Filter         { match: 2 }
-node ToAlv_3_3 : ConstantSignal { value: 0 }
-node ToDed_3_3 : ConstantSignal { value: 1 }
+node ToAlv_3_3 : Constant { value: 0, out_kind: "signal" }
+node ToDed_3_3 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (4,3)
 node T_4_3     : Tick           { period_ns: 200000000 }
 node SW_4_3    : Switch         { passing: 0 }
-node C1_4_3    : ConstantPacket { value: 1 }
-node C0_4_3    : ConstantPacket { value: 0 }
+node C1_4_3    : Constant { value: 1 }
+node C0_4_3    : Constant { value: 0 }
 node B_4_3     : FanOut         { }
 node A_4_3     : Aggregator     { n: 8 }
 node F3_4_3    : Filter         { match: 3 }
 node F2_4_3    : Filter         { match: 2 }
-node ToAlv_4_3 : ConstantSignal { value: 0 }
-node ToDed_4_3 : ConstantSignal { value: 1 }
+node ToAlv_4_3 : Constant { value: 0, out_kind: "signal" }
+node ToDed_4_3 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (5,3)
 node T_5_3     : Tick           { period_ns: 200000000 }
 node SW_5_3    : Switch         { passing: 0 }
-node C1_5_3    : ConstantPacket { value: 1 }
-node C0_5_3    : ConstantPacket { value: 0 }
+node C1_5_3    : Constant { value: 1 }
+node C0_5_3    : Constant { value: 0 }
 node B_5_3     : FanOut         { }
 node A_5_3     : Aggregator     { n: 8 }
 node F3_5_3    : Filter         { match: 3 }
 node F2_5_3    : Filter         { match: 2 }
-node ToAlv_5_3 : ConstantSignal { value: 0 }
-node ToDed_5_3 : ConstantSignal { value: 1 }
+node ToAlv_5_3 : Constant { value: 0, out_kind: "signal" }
+node ToDed_5_3 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (6,3)
 node T_6_3     : Tick           { period_ns: 200000000 }
 node SW_6_3    : Switch         { passing: 0 }
-node C1_6_3    : ConstantPacket { value: 1 }
-node C0_6_3    : ConstantPacket { value: 0 }
+node C1_6_3    : Constant { value: 1 }
+node C0_6_3    : Constant { value: 0 }
 node B_6_3     : FanOut         { }
 node A_6_3     : Aggregator     { n: 8 }
 node F3_6_3    : Filter         { match: 3 }
 node F2_6_3    : Filter         { match: 2 }
-node ToAlv_6_3 : ConstantSignal { value: 0 }
-node ToDed_6_3 : ConstantSignal { value: 1 }
+node ToAlv_6_3 : Constant { value: 0, out_kind: "signal" }
+node ToDed_6_3 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (7,3)
 node T_7_3     : Tick           { period_ns: 200000000 }
 node SW_7_3    : Switch         { passing: 0 }
-node C1_7_3    : ConstantPacket { value: 1 }
-node C0_7_3    : ConstantPacket { value: 0 }
+node C1_7_3    : Constant { value: 1 }
+node C0_7_3    : Constant { value: 0 }
 node B_7_3     : FanOut         { }
 node A_7_3     : Aggregator     { n: 8 }
 node F3_7_3    : Filter         { match: 3 }
 node F2_7_3    : Filter         { match: 2 }
-node ToAlv_7_3 : ConstantSignal { value: 0 }
-node ToDed_7_3 : ConstantSignal { value: 1 }
+node ToAlv_7_3 : Constant { value: 0, out_kind: "signal" }
+node ToDed_7_3 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (8,3)
 node T_8_3     : Tick           { period_ns: 200000000 }
 node SW_8_3    : Switch         { passing: 0 }
-node C1_8_3    : ConstantPacket { value: 1 }
-node C0_8_3    : ConstantPacket { value: 0 }
+node C1_8_3    : Constant { value: 1 }
+node C0_8_3    : Constant { value: 0 }
 node B_8_3     : FanOut         { }
 node A_8_3     : Aggregator     { n: 8 }
 node F3_8_3    : Filter         { match: 3 }
 node F2_8_3    : Filter         { match: 2 }
-node ToAlv_8_3 : ConstantSignal { value: 0 }
-node ToDed_8_3 : ConstantSignal { value: 1 }
+node ToAlv_8_3 : Constant { value: 0, out_kind: "signal" }
+node ToDed_8_3 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (9,3)
 node T_9_3     : Tick           { period_ns: 200000000 }
 node SW_9_3    : Switch         { passing: 0 }
-node C1_9_3    : ConstantPacket { value: 1 }
-node C0_9_3    : ConstantPacket { value: 0 }
+node C1_9_3    : Constant { value: 1 }
+node C0_9_3    : Constant { value: 0 }
 node B_9_3     : FanOut         { }
 node A_9_3     : Aggregator     { n: 8 }
 node F3_9_3    : Filter         { match: 3 }
 node F2_9_3    : Filter         { match: 2 }
-node ToAlv_9_3 : ConstantSignal { value: 0 }
-node ToDed_9_3 : ConstantSignal { value: 1 }
+node ToAlv_9_3 : Constant { value: 0, out_kind: "signal" }
+node ToDed_9_3 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (0,4)
 node T_0_4     : Tick           { period_ns: 200000000 }
 node SW_0_4    : Switch         { passing: 0 }
-node C1_0_4    : ConstantPacket { value: 1 }
-node C0_0_4    : ConstantPacket { value: 0 }
+node C1_0_4    : Constant { value: 1 }
+node C0_0_4    : Constant { value: 0 }
 node B_0_4     : FanOut         { }
 node A_0_4     : Aggregator     { n: 8 }
 node F3_0_4    : Filter         { match: 3 }
 node F2_0_4    : Filter         { match: 2 }
-node ToAlv_0_4 : ConstantSignal { value: 0 }
-node ToDed_0_4 : ConstantSignal { value: 1 }
+node ToAlv_0_4 : Constant { value: 0, out_kind: "signal" }
+node ToDed_0_4 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (1,4)
 node T_1_4     : Tick           { period_ns: 200000000 }
 node SW_1_4    : Switch         { passing: 1 }
-node C1_1_4    : ConstantPacket { value: 1 }
-node C0_1_4    : ConstantPacket { value: 0 }
+node C1_1_4    : Constant { value: 1 }
+node C0_1_4    : Constant { value: 0 }
 node B_1_4     : FanOut         { }
 node A_1_4     : Aggregator     { n: 8 }
 node F3_1_4    : Filter         { match: 3 }
 node F2_1_4    : Filter         { match: 2 }
-node ToAlv_1_4 : ConstantSignal { value: 0 }
-node ToDed_1_4 : ConstantSignal { value: 1 }
+node ToAlv_1_4 : Constant { value: 0, out_kind: "signal" }
+node ToDed_1_4 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (2,4)
 node T_2_4     : Tick           { period_ns: 200000000 }
 node SW_2_4    : Switch         { passing: 1 }
-node C1_2_4    : ConstantPacket { value: 1 }
-node C0_2_4    : ConstantPacket { value: 0 }
+node C1_2_4    : Constant { value: 1 }
+node C0_2_4    : Constant { value: 0 }
 node B_2_4     : FanOut         { }
 node A_2_4     : Aggregator     { n: 8 }
 node F3_2_4    : Filter         { match: 3 }
 node F2_2_4    : Filter         { match: 2 }
-node ToAlv_2_4 : ConstantSignal { value: 0 }
-node ToDed_2_4 : ConstantSignal { value: 1 }
+node ToAlv_2_4 : Constant { value: 0, out_kind: "signal" }
+node ToDed_2_4 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (3,4)
 node T_3_4     : Tick           { period_ns: 200000000 }
 node SW_3_4    : Switch         { passing: 1 }
-node C1_3_4    : ConstantPacket { value: 1 }
-node C0_3_4    : ConstantPacket { value: 0 }
+node C1_3_4    : Constant { value: 1 }
+node C0_3_4    : Constant { value: 0 }
 node B_3_4     : FanOut         { }
 node A_3_4     : Aggregator     { n: 8 }
 node F3_3_4    : Filter         { match: 3 }
 node F2_3_4    : Filter         { match: 2 }
-node ToAlv_3_4 : ConstantSignal { value: 0 }
-node ToDed_3_4 : ConstantSignal { value: 1 }
+node ToAlv_3_4 : Constant { value: 0, out_kind: "signal" }
+node ToDed_3_4 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (4,4)
 node T_4_4     : Tick           { period_ns: 200000000 }
 node SW_4_4    : Switch         { passing: 1 }
-node C1_4_4    : ConstantPacket { value: 1 }
-node C0_4_4    : ConstantPacket { value: 0 }
+node C1_4_4    : Constant { value: 1 }
+node C0_4_4    : Constant { value: 0 }
 node B_4_4     : FanOut         { }
 node A_4_4     : Aggregator     { n: 8 }
 node F3_4_4    : Filter         { match: 3 }
 node F2_4_4    : Filter         { match: 2 }
-node ToAlv_4_4 : ConstantSignal { value: 0 }
-node ToDed_4_4 : ConstantSignal { value: 1 }
+node ToAlv_4_4 : Constant { value: 0, out_kind: "signal" }
+node ToDed_4_4 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (5,4)
 node T_5_4     : Tick           { period_ns: 200000000 }
 node SW_5_4    : Switch         { passing: 1 }
-node C1_5_4    : ConstantPacket { value: 1 }
-node C0_5_4    : ConstantPacket { value: 0 }
+node C1_5_4    : Constant { value: 1 }
+node C0_5_4    : Constant { value: 0 }
 node B_5_4     : FanOut         { }
 node A_5_4     : Aggregator     { n: 8 }
 node F3_5_4    : Filter         { match: 3 }
 node F2_5_4    : Filter         { match: 2 }
-node ToAlv_5_4 : ConstantSignal { value: 0 }
-node ToDed_5_4 : ConstantSignal { value: 1 }
+node ToAlv_5_4 : Constant { value: 0, out_kind: "signal" }
+node ToDed_5_4 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (6,4)
 node T_6_4     : Tick           { period_ns: 200000000 }
 node SW_6_4    : Switch         { passing: 1 }
-node C1_6_4    : ConstantPacket { value: 1 }
-node C0_6_4    : ConstantPacket { value: 0 }
+node C1_6_4    : Constant { value: 1 }
+node C0_6_4    : Constant { value: 0 }
 node B_6_4     : FanOut         { }
 node A_6_4     : Aggregator     { n: 8 }
 node F3_6_4    : Filter         { match: 3 }
 node F2_6_4    : Filter         { match: 2 }
-node ToAlv_6_4 : ConstantSignal { value: 0 }
-node ToDed_6_4 : ConstantSignal { value: 1 }
+node ToAlv_6_4 : Constant { value: 0, out_kind: "signal" }
+node ToDed_6_4 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (7,4)
 node T_7_4     : Tick           { period_ns: 200000000 }
 node SW_7_4    : Switch         { passing: 1 }
-node C1_7_4    : ConstantPacket { value: 1 }
-node C0_7_4    : ConstantPacket { value: 0 }
+node C1_7_4    : Constant { value: 1 }
+node C0_7_4    : Constant { value: 0 }
 node B_7_4     : FanOut         { }
 node A_7_4     : Aggregator     { n: 8 }
 node F3_7_4    : Filter         { match: 3 }
 node F2_7_4    : Filter         { match: 2 }
-node ToAlv_7_4 : ConstantSignal { value: 0 }
-node ToDed_7_4 : ConstantSignal { value: 1 }
+node ToAlv_7_4 : Constant { value: 0, out_kind: "signal" }
+node ToDed_7_4 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (8,4)
 node T_8_4     : Tick           { period_ns: 200000000 }
 node SW_8_4    : Switch         { passing: 0 }
-node C1_8_4    : ConstantPacket { value: 1 }
-node C0_8_4    : ConstantPacket { value: 0 }
+node C1_8_4    : Constant { value: 1 }
+node C0_8_4    : Constant { value: 0 }
 node B_8_4     : FanOut         { }
 node A_8_4     : Aggregator     { n: 8 }
 node F3_8_4    : Filter         { match: 3 }
 node F2_8_4    : Filter         { match: 2 }
-node ToAlv_8_4 : ConstantSignal { value: 0 }
-node ToDed_8_4 : ConstantSignal { value: 1 }
+node ToAlv_8_4 : Constant { value: 0, out_kind: "signal" }
+node ToDed_8_4 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (9,4)
 node T_9_4     : Tick           { period_ns: 200000000 }
 node SW_9_4    : Switch         { passing: 0 }
-node C1_9_4    : ConstantPacket { value: 1 }
-node C0_9_4    : ConstantPacket { value: 0 }
+node C1_9_4    : Constant { value: 1 }
+node C0_9_4    : Constant { value: 0 }
 node B_9_4     : FanOut         { }
 node A_9_4     : Aggregator     { n: 8 }
 node F3_9_4    : Filter         { match: 3 }
 node F2_9_4    : Filter         { match: 2 }
-node ToAlv_9_4 : ConstantSignal { value: 0 }
-node ToDed_9_4 : ConstantSignal { value: 1 }
+node ToAlv_9_4 : Constant { value: 0, out_kind: "signal" }
+node ToDed_9_4 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (0,5)
 node T_0_5     : Tick           { period_ns: 200000000 }
 node SW_0_5    : Switch         { passing: 0 }
-node C1_0_5    : ConstantPacket { value: 1 }
-node C0_0_5    : ConstantPacket { value: 0 }
+node C1_0_5    : Constant { value: 1 }
+node C0_0_5    : Constant { value: 0 }
 node B_0_5     : FanOut         { }
 node A_0_5     : Aggregator     { n: 8 }
 node F3_0_5    : Filter         { match: 3 }
 node F2_0_5    : Filter         { match: 2 }
-node ToAlv_0_5 : ConstantSignal { value: 0 }
-node ToDed_0_5 : ConstantSignal { value: 1 }
+node ToAlv_0_5 : Constant { value: 0, out_kind: "signal" }
+node ToDed_0_5 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (1,5)
 node T_1_5     : Tick           { period_ns: 200000000 }
 node SW_1_5    : Switch         { passing: 1 }
-node C1_1_5    : ConstantPacket { value: 1 }
-node C0_1_5    : ConstantPacket { value: 0 }
+node C1_1_5    : Constant { value: 1 }
+node C0_1_5    : Constant { value: 0 }
 node B_1_5     : FanOut         { }
 node A_1_5     : Aggregator     { n: 8 }
 node F3_1_5    : Filter         { match: 3 }
 node F2_1_5    : Filter         { match: 2 }
-node ToAlv_1_5 : ConstantSignal { value: 0 }
-node ToDed_1_5 : ConstantSignal { value: 1 }
+node ToAlv_1_5 : Constant { value: 0, out_kind: "signal" }
+node ToDed_1_5 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (2,5)
 node T_2_5     : Tick           { period_ns: 200000000 }
 node SW_2_5    : Switch         { passing: 1 }
-node C1_2_5    : ConstantPacket { value: 1 }
-node C0_2_5    : ConstantPacket { value: 0 }
+node C1_2_5    : Constant { value: 1 }
+node C0_2_5    : Constant { value: 0 }
 node B_2_5     : FanOut         { }
 node A_2_5     : Aggregator     { n: 8 }
 node F3_2_5    : Filter         { match: 3 }
 node F2_2_5    : Filter         { match: 2 }
-node ToAlv_2_5 : ConstantSignal { value: 0 }
-node ToDed_2_5 : ConstantSignal { value: 1 }
+node ToAlv_2_5 : Constant { value: 0, out_kind: "signal" }
+node ToDed_2_5 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (3,5)
 node T_3_5     : Tick           { period_ns: 200000000 }
 node SW_3_5    : Switch         { passing: 0 }
-node C1_3_5    : ConstantPacket { value: 1 }
-node C0_3_5    : ConstantPacket { value: 0 }
+node C1_3_5    : Constant { value: 1 }
+node C0_3_5    : Constant { value: 0 }
 node B_3_5     : FanOut         { }
 node A_3_5     : Aggregator     { n: 8 }
 node F3_3_5    : Filter         { match: 3 }
 node F2_3_5    : Filter         { match: 2 }
-node ToAlv_3_5 : ConstantSignal { value: 0 }
-node ToDed_3_5 : ConstantSignal { value: 1 }
+node ToAlv_3_5 : Constant { value: 0, out_kind: "signal" }
+node ToDed_3_5 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (4,5)
 node T_4_5     : Tick           { period_ns: 200000000 }
 node SW_4_5    : Switch         { passing: 0 }
-node C1_4_5    : ConstantPacket { value: 1 }
-node C0_4_5    : ConstantPacket { value: 0 }
+node C1_4_5    : Constant { value: 1 }
+node C0_4_5    : Constant { value: 0 }
 node B_4_5     : FanOut         { }
 node A_4_5     : Aggregator     { n: 8 }
 node F3_4_5    : Filter         { match: 3 }
 node F2_4_5    : Filter         { match: 2 }
-node ToAlv_4_5 : ConstantSignal { value: 0 }
-node ToDed_4_5 : ConstantSignal { value: 1 }
+node ToAlv_4_5 : Constant { value: 0, out_kind: "signal" }
+node ToDed_4_5 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (5,5)
 node T_5_5     : Tick           { period_ns: 200000000 }
 node SW_5_5    : Switch         { passing: 0 }
-node C1_5_5    : ConstantPacket { value: 1 }
-node C0_5_5    : ConstantPacket { value: 0 }
+node C1_5_5    : Constant { value: 1 }
+node C0_5_5    : Constant { value: 0 }
 node B_5_5     : FanOut         { }
 node A_5_5     : Aggregator     { n: 8 }
 node F3_5_5    : Filter         { match: 3 }
 node F2_5_5    : Filter         { match: 2 }
-node ToAlv_5_5 : ConstantSignal { value: 0 }
-node ToDed_5_5 : ConstantSignal { value: 1 }
+node ToAlv_5_5 : Constant { value: 0, out_kind: "signal" }
+node ToDed_5_5 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (6,5)
 node T_6_5     : Tick           { period_ns: 200000000 }
 node SW_6_5    : Switch         { passing: 1 }
-node C1_6_5    : ConstantPacket { value: 1 }
-node C0_6_5    : ConstantPacket { value: 0 }
+node C1_6_5    : Constant { value: 1 }
+node C0_6_5    : Constant { value: 0 }
 node B_6_5     : FanOut         { }
 node A_6_5     : Aggregator     { n: 8 }
 node F3_6_5    : Filter         { match: 3 }
 node F2_6_5    : Filter         { match: 2 }
-node ToAlv_6_5 : ConstantSignal { value: 0 }
-node ToDed_6_5 : ConstantSignal { value: 1 }
+node ToAlv_6_5 : Constant { value: 0, out_kind: "signal" }
+node ToDed_6_5 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (7,5)
 node T_7_5     : Tick           { period_ns: 200000000 }
 node SW_7_5    : Switch         { passing: 0 }
-node C1_7_5    : ConstantPacket { value: 1 }
-node C0_7_5    : ConstantPacket { value: 0 }
+node C1_7_5    : Constant { value: 1 }
+node C0_7_5    : Constant { value: 0 }
 node B_7_5     : FanOut         { }
 node A_7_5     : Aggregator     { n: 8 }
 node F3_7_5    : Filter         { match: 3 }
 node F2_7_5    : Filter         { match: 2 }
-node ToAlv_7_5 : ConstantSignal { value: 0 }
-node ToDed_7_5 : ConstantSignal { value: 1 }
+node ToAlv_7_5 : Constant { value: 0, out_kind: "signal" }
+node ToDed_7_5 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (8,5)
 node T_8_5     : Tick           { period_ns: 200000000 }
 node SW_8_5    : Switch         { passing: 1 }
-node C1_8_5    : ConstantPacket { value: 1 }
-node C0_8_5    : ConstantPacket { value: 0 }
+node C1_8_5    : Constant { value: 1 }
+node C0_8_5    : Constant { value: 0 }
 node B_8_5     : FanOut         { }
 node A_8_5     : Aggregator     { n: 8 }
 node F3_8_5    : Filter         { match: 3 }
 node F2_8_5    : Filter         { match: 2 }
-node ToAlv_8_5 : ConstantSignal { value: 0 }
-node ToDed_8_5 : ConstantSignal { value: 1 }
+node ToAlv_8_5 : Constant { value: 0, out_kind: "signal" }
+node ToDed_8_5 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (9,5)
 node T_9_5     : Tick           { period_ns: 200000000 }
 node SW_9_5    : Switch         { passing: 0 }
-node C1_9_5    : ConstantPacket { value: 1 }
-node C0_9_5    : ConstantPacket { value: 0 }
+node C1_9_5    : Constant { value: 1 }
+node C0_9_5    : Constant { value: 0 }
 node B_9_5     : FanOut         { }
 node A_9_5     : Aggregator     { n: 8 }
 node F3_9_5    : Filter         { match: 3 }
 node F2_9_5    : Filter         { match: 2 }
-node ToAlv_9_5 : ConstantSignal { value: 0 }
-node ToDed_9_5 : ConstantSignal { value: 1 }
+node ToAlv_9_5 : Constant { value: 0, out_kind: "signal" }
+node ToDed_9_5 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (0,6)
 node T_0_6     : Tick           { period_ns: 200000000 }
 node SW_0_6    : Switch         { passing: 0 }
-node C1_0_6    : ConstantPacket { value: 1 }
-node C0_0_6    : ConstantPacket { value: 0 }
+node C1_0_6    : Constant { value: 1 }
+node C0_0_6    : Constant { value: 0 }
 node B_0_6     : FanOut         { }
 node A_0_6     : Aggregator     { n: 8 }
 node F3_0_6    : Filter         { match: 3 }
 node F2_0_6    : Filter         { match: 2 }
-node ToAlv_0_6 : ConstantSignal { value: 0 }
-node ToDed_0_6 : ConstantSignal { value: 1 }
+node ToAlv_0_6 : Constant { value: 0, out_kind: "signal" }
+node ToDed_0_6 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (1,6)
 node T_1_6     : Tick           { period_ns: 200000000 }
 node SW_1_6    : Switch         { passing: 0 }
-node C1_1_6    : ConstantPacket { value: 1 }
-node C0_1_6    : ConstantPacket { value: 0 }
+node C1_1_6    : Constant { value: 1 }
+node C0_1_6    : Constant { value: 0 }
 node B_1_6     : FanOut         { }
 node A_1_6     : Aggregator     { n: 8 }
 node F3_1_6    : Filter         { match: 3 }
 node F2_1_6    : Filter         { match: 2 }
-node ToAlv_1_6 : ConstantSignal { value: 0 }
-node ToDed_1_6 : ConstantSignal { value: 1 }
+node ToAlv_1_6 : Constant { value: 0, out_kind: "signal" }
+node ToDed_1_6 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (2,6)
 node T_2_6     : Tick           { period_ns: 200000000 }
 node SW_2_6    : Switch         { passing: 0 }
-node C1_2_6    : ConstantPacket { value: 1 }
-node C0_2_6    : ConstantPacket { value: 0 }
+node C1_2_6    : Constant { value: 1 }
+node C0_2_6    : Constant { value: 0 }
 node B_2_6     : FanOut         { }
 node A_2_6     : Aggregator     { n: 8 }
 node F3_2_6    : Filter         { match: 3 }
 node F2_2_6    : Filter         { match: 2 }
-node ToAlv_2_6 : ConstantSignal { value: 0 }
-node ToDed_2_6 : ConstantSignal { value: 1 }
+node ToAlv_2_6 : Constant { value: 0, out_kind: "signal" }
+node ToDed_2_6 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (3,6)
 node T_3_6     : Tick           { period_ns: 200000000 }
 node SW_3_6    : Switch         { passing: 0 }
-node C1_3_6    : ConstantPacket { value: 1 }
-node C0_3_6    : ConstantPacket { value: 0 }
+node C1_3_6    : Constant { value: 1 }
+node C0_3_6    : Constant { value: 0 }
 node B_3_6     : FanOut         { }
 node A_3_6     : Aggregator     { n: 8 }
 node F3_3_6    : Filter         { match: 3 }
 node F2_3_6    : Filter         { match: 2 }
-node ToAlv_3_6 : ConstantSignal { value: 0 }
-node ToDed_3_6 : ConstantSignal { value: 1 }
+node ToAlv_3_6 : Constant { value: 0, out_kind: "signal" }
+node ToDed_3_6 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (4,6)
 node T_4_6     : Tick           { period_ns: 200000000 }
 node SW_4_6    : Switch         { passing: 0 }
-node C1_4_6    : ConstantPacket { value: 1 }
-node C0_4_6    : ConstantPacket { value: 0 }
+node C1_4_6    : Constant { value: 1 }
+node C0_4_6    : Constant { value: 0 }
 node B_4_6     : FanOut         { }
 node A_4_6     : Aggregator     { n: 8 }
 node F3_4_6    : Filter         { match: 3 }
 node F2_4_6    : Filter         { match: 2 }
-node ToAlv_4_6 : ConstantSignal { value: 0 }
-node ToDed_4_6 : ConstantSignal { value: 1 }
+node ToAlv_4_6 : Constant { value: 0, out_kind: "signal" }
+node ToDed_4_6 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (5,6)
 node T_5_6     : Tick           { period_ns: 200000000 }
 node SW_5_6    : Switch         { passing: 0 }
-node C1_5_6    : ConstantPacket { value: 1 }
-node C0_5_6    : ConstantPacket { value: 0 }
+node C1_5_6    : Constant { value: 1 }
+node C0_5_6    : Constant { value: 0 }
 node B_5_6     : FanOut         { }
 node A_5_6     : Aggregator     { n: 8 }
 node F3_5_6    : Filter         { match: 3 }
 node F2_5_6    : Filter         { match: 2 }
-node ToAlv_5_6 : ConstantSignal { value: 0 }
-node ToDed_5_6 : ConstantSignal { value: 1 }
+node ToAlv_5_6 : Constant { value: 0, out_kind: "signal" }
+node ToDed_5_6 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (6,6)
 node T_6_6     : Tick           { period_ns: 200000000 }
 node SW_6_6    : Switch         { passing: 1 }
-node C1_6_6    : ConstantPacket { value: 1 }
-node C0_6_6    : ConstantPacket { value: 0 }
+node C1_6_6    : Constant { value: 1 }
+node C0_6_6    : Constant { value: 0 }
 node B_6_6     : FanOut         { }
 node A_6_6     : Aggregator     { n: 8 }
 node F3_6_6    : Filter         { match: 3 }
 node F2_6_6    : Filter         { match: 2 }
-node ToAlv_6_6 : ConstantSignal { value: 0 }
-node ToDed_6_6 : ConstantSignal { value: 1 }
+node ToAlv_6_6 : Constant { value: 0, out_kind: "signal" }
+node ToDed_6_6 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (7,6)
 node T_7_6     : Tick           { period_ns: 200000000 }
 node SW_7_6    : Switch         { passing: 1 }
-node C1_7_6    : ConstantPacket { value: 1 }
-node C0_7_6    : ConstantPacket { value: 0 }
+node C1_7_6    : Constant { value: 1 }
+node C0_7_6    : Constant { value: 0 }
 node B_7_6     : FanOut         { }
 node A_7_6     : Aggregator     { n: 8 }
 node F3_7_6    : Filter         { match: 3 }
 node F2_7_6    : Filter         { match: 2 }
-node ToAlv_7_6 : ConstantSignal { value: 0 }
-node ToDed_7_6 : ConstantSignal { value: 1 }
+node ToAlv_7_6 : Constant { value: 0, out_kind: "signal" }
+node ToDed_7_6 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (8,6)
 node T_8_6     : Tick           { period_ns: 200000000 }
 node SW_8_6    : Switch         { passing: 1 }
-node C1_8_6    : ConstantPacket { value: 1 }
-node C0_8_6    : ConstantPacket { value: 0 }
+node C1_8_6    : Constant { value: 1 }
+node C0_8_6    : Constant { value: 0 }
 node B_8_6     : FanOut         { }
 node A_8_6     : Aggregator     { n: 8 }
 node F3_8_6    : Filter         { match: 3 }
 node F2_8_6    : Filter         { match: 2 }
-node ToAlv_8_6 : ConstantSignal { value: 0 }
-node ToDed_8_6 : ConstantSignal { value: 1 }
+node ToAlv_8_6 : Constant { value: 0, out_kind: "signal" }
+node ToDed_8_6 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (9,6)
 node T_9_6     : Tick           { period_ns: 200000000 }
 node SW_9_6    : Switch         { passing: 1 }
-node C1_9_6    : ConstantPacket { value: 1 }
-node C0_9_6    : ConstantPacket { value: 0 }
+node C1_9_6    : Constant { value: 1 }
+node C0_9_6    : Constant { value: 0 }
 node B_9_6     : FanOut         { }
 node A_9_6     : Aggregator     { n: 8 }
 node F3_9_6    : Filter         { match: 3 }
 node F2_9_6    : Filter         { match: 2 }
-node ToAlv_9_6 : ConstantSignal { value: 0 }
-node ToDed_9_6 : ConstantSignal { value: 1 }
+node ToAlv_9_6 : Constant { value: 0, out_kind: "signal" }
+node ToDed_9_6 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (0,7)
 node T_0_7     : Tick           { period_ns: 200000000 }
 node SW_0_7    : Switch         { passing: 1 }
-node C1_0_7    : ConstantPacket { value: 1 }
-node C0_0_7    : ConstantPacket { value: 0 }
+node C1_0_7    : Constant { value: 1 }
+node C0_0_7    : Constant { value: 0 }
 node B_0_7     : FanOut         { }
 node A_0_7     : Aggregator     { n: 8 }
 node F3_0_7    : Filter         { match: 3 }
 node F2_0_7    : Filter         { match: 2 }
-node ToAlv_0_7 : ConstantSignal { value: 0 }
-node ToDed_0_7 : ConstantSignal { value: 1 }
+node ToAlv_0_7 : Constant { value: 0, out_kind: "signal" }
+node ToDed_0_7 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (1,7)
 node T_1_7     : Tick           { period_ns: 200000000 }
 node SW_1_7    : Switch         { passing: 0 }
-node C1_1_7    : ConstantPacket { value: 1 }
-node C0_1_7    : ConstantPacket { value: 0 }
+node C1_1_7    : Constant { value: 1 }
+node C0_1_7    : Constant { value: 0 }
 node B_1_7     : FanOut         { }
 node A_1_7     : Aggregator     { n: 8 }
 node F3_1_7    : Filter         { match: 3 }
 node F2_1_7    : Filter         { match: 2 }
-node ToAlv_1_7 : ConstantSignal { value: 0 }
-node ToDed_1_7 : ConstantSignal { value: 1 }
+node ToAlv_1_7 : Constant { value: 0, out_kind: "signal" }
+node ToDed_1_7 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (2,7)
 node T_2_7     : Tick           { period_ns: 200000000 }
 node SW_2_7    : Switch         { passing: 0 }
-node C1_2_7    : ConstantPacket { value: 1 }
-node C0_2_7    : ConstantPacket { value: 0 }
+node C1_2_7    : Constant { value: 1 }
+node C0_2_7    : Constant { value: 0 }
 node B_2_7     : FanOut         { }
 node A_2_7     : Aggregator     { n: 8 }
 node F3_2_7    : Filter         { match: 3 }
 node F2_2_7    : Filter         { match: 2 }
-node ToAlv_2_7 : ConstantSignal { value: 0 }
-node ToDed_2_7 : ConstantSignal { value: 1 }
+node ToAlv_2_7 : Constant { value: 0, out_kind: "signal" }
+node ToDed_2_7 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (3,7)
 node T_3_7     : Tick           { period_ns: 200000000 }
 node SW_3_7    : Switch         { passing: 1 }
-node C1_3_7    : ConstantPacket { value: 1 }
-node C0_3_7    : ConstantPacket { value: 0 }
+node C1_3_7    : Constant { value: 1 }
+node C0_3_7    : Constant { value: 0 }
 node B_3_7     : FanOut         { }
 node A_3_7     : Aggregator     { n: 8 }
 node F3_3_7    : Filter         { match: 3 }
 node F2_3_7    : Filter         { match: 2 }
-node ToAlv_3_7 : ConstantSignal { value: 0 }
-node ToDed_3_7 : ConstantSignal { value: 1 }
+node ToAlv_3_7 : Constant { value: 0, out_kind: "signal" }
+node ToDed_3_7 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (4,7)
 node T_4_7     : Tick           { period_ns: 200000000 }
 node SW_4_7    : Switch         { passing: 0 }
-node C1_4_7    : ConstantPacket { value: 1 }
-node C0_4_7    : ConstantPacket { value: 0 }
+node C1_4_7    : Constant { value: 1 }
+node C0_4_7    : Constant { value: 0 }
 node B_4_7     : FanOut         { }
 node A_4_7     : Aggregator     { n: 8 }
 node F3_4_7    : Filter         { match: 3 }
 node F2_4_7    : Filter         { match: 2 }
-node ToAlv_4_7 : ConstantSignal { value: 0 }
-node ToDed_4_7 : ConstantSignal { value: 1 }
+node ToAlv_4_7 : Constant { value: 0, out_kind: "signal" }
+node ToDed_4_7 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (5,7)
 node T_5_7     : Tick           { period_ns: 200000000 }
 node SW_5_7    : Switch         { passing: 0 }
-node C1_5_7    : ConstantPacket { value: 1 }
-node C0_5_7    : ConstantPacket { value: 0 }
+node C1_5_7    : Constant { value: 1 }
+node C0_5_7    : Constant { value: 0 }
 node B_5_7     : FanOut         { }
 node A_5_7     : Aggregator     { n: 8 }
 node F3_5_7    : Filter         { match: 3 }
 node F2_5_7    : Filter         { match: 2 }
-node ToAlv_5_7 : ConstantSignal { value: 0 }
-node ToDed_5_7 : ConstantSignal { value: 1 }
+node ToAlv_5_7 : Constant { value: 0, out_kind: "signal" }
+node ToDed_5_7 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (6,7)
 node T_6_7     : Tick           { period_ns: 200000000 }
 node SW_6_7    : Switch         { passing: 0 }
-node C1_6_7    : ConstantPacket { value: 1 }
-node C0_6_7    : ConstantPacket { value: 0 }
+node C1_6_7    : Constant { value: 1 }
+node C0_6_7    : Constant { value: 0 }
 node B_6_7     : FanOut         { }
 node A_6_7     : Aggregator     { n: 8 }
 node F3_6_7    : Filter         { match: 3 }
 node F2_6_7    : Filter         { match: 2 }
-node ToAlv_6_7 : ConstantSignal { value: 0 }
-node ToDed_6_7 : ConstantSignal { value: 1 }
+node ToAlv_6_7 : Constant { value: 0, out_kind: "signal" }
+node ToDed_6_7 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (7,7)
 node T_7_7     : Tick           { period_ns: 200000000 }
 node SW_7_7    : Switch         { passing: 0 }
-node C1_7_7    : ConstantPacket { value: 1 }
-node C0_7_7    : ConstantPacket { value: 0 }
+node C1_7_7    : Constant { value: 1 }
+node C0_7_7    : Constant { value: 0 }
 node B_7_7     : FanOut         { }
 node A_7_7     : Aggregator     { n: 8 }
 node F3_7_7    : Filter         { match: 3 }
 node F2_7_7    : Filter         { match: 2 }
-node ToAlv_7_7 : ConstantSignal { value: 0 }
-node ToDed_7_7 : ConstantSignal { value: 1 }
+node ToAlv_7_7 : Constant { value: 0, out_kind: "signal" }
+node ToDed_7_7 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (8,7)
 node T_8_7     : Tick           { period_ns: 200000000 }
 node SW_8_7    : Switch         { passing: 1 }
-node C1_8_7    : ConstantPacket { value: 1 }
-node C0_8_7    : ConstantPacket { value: 0 }
+node C1_8_7    : Constant { value: 1 }
+node C0_8_7    : Constant { value: 0 }
 node B_8_7     : FanOut         { }
 node A_8_7     : Aggregator     { n: 8 }
 node F3_8_7    : Filter         { match: 3 }
 node F2_8_7    : Filter         { match: 2 }
-node ToAlv_8_7 : ConstantSignal { value: 0 }
-node ToDed_8_7 : ConstantSignal { value: 1 }
+node ToAlv_8_7 : Constant { value: 0, out_kind: "signal" }
+node ToDed_8_7 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (9,7)
 node T_9_7     : Tick           { period_ns: 200000000 }
 node SW_9_7    : Switch         { passing: 1 }
-node C1_9_7    : ConstantPacket { value: 1 }
-node C0_9_7    : ConstantPacket { value: 0 }
+node C1_9_7    : Constant { value: 1 }
+node C0_9_7    : Constant { value: 0 }
 node B_9_7     : FanOut         { }
 node A_9_7     : Aggregator     { n: 8 }
 node F3_9_7    : Filter         { match: 3 }
 node F2_9_7    : Filter         { match: 2 }
-node ToAlv_9_7 : ConstantSignal { value: 0 }
-node ToDed_9_7 : ConstantSignal { value: 1 }
+node ToAlv_9_7 : Constant { value: 0, out_kind: "signal" }
+node ToDed_9_7 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (0,8)
 node T_0_8     : Tick           { period_ns: 200000000 }
 node SW_0_8    : Switch         { passing: 0 }
-node C1_0_8    : ConstantPacket { value: 1 }
-node C0_0_8    : ConstantPacket { value: 0 }
+node C1_0_8    : Constant { value: 1 }
+node C0_0_8    : Constant { value: 0 }
 node B_0_8     : FanOut         { }
 node A_0_8     : Aggregator     { n: 8 }
 node F3_0_8    : Filter         { match: 3 }
 node F2_0_8    : Filter         { match: 2 }
-node ToAlv_0_8 : ConstantSignal { value: 0 }
-node ToDed_0_8 : ConstantSignal { value: 1 }
+node ToAlv_0_8 : Constant { value: 0, out_kind: "signal" }
+node ToDed_0_8 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (1,8)
 node T_1_8     : Tick           { period_ns: 200000000 }
 node SW_1_8    : Switch         { passing: 1 }
-node C1_1_8    : ConstantPacket { value: 1 }
-node C0_1_8    : ConstantPacket { value: 0 }
+node C1_1_8    : Constant { value: 1 }
+node C0_1_8    : Constant { value: 0 }
 node B_1_8     : FanOut         { }
 node A_1_8     : Aggregator     { n: 8 }
 node F3_1_8    : Filter         { match: 3 }
 node F2_1_8    : Filter         { match: 2 }
-node ToAlv_1_8 : ConstantSignal { value: 0 }
-node ToDed_1_8 : ConstantSignal { value: 1 }
+node ToAlv_1_8 : Constant { value: 0, out_kind: "signal" }
+node ToDed_1_8 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (2,8)
 node T_2_8     : Tick           { period_ns: 200000000 }
 node SW_2_8    : Switch         { passing: 0 }
-node C1_2_8    : ConstantPacket { value: 1 }
-node C0_2_8    : ConstantPacket { value: 0 }
+node C1_2_8    : Constant { value: 1 }
+node C0_2_8    : Constant { value: 0 }
 node B_2_8     : FanOut         { }
 node A_2_8     : Aggregator     { n: 8 }
 node F3_2_8    : Filter         { match: 3 }
 node F2_2_8    : Filter         { match: 2 }
-node ToAlv_2_8 : ConstantSignal { value: 0 }
-node ToDed_2_8 : ConstantSignal { value: 1 }
+node ToAlv_2_8 : Constant { value: 0, out_kind: "signal" }
+node ToDed_2_8 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (3,8)
 node T_3_8     : Tick           { period_ns: 200000000 }
 node SW_3_8    : Switch         { passing: 0 }
-node C1_3_8    : ConstantPacket { value: 1 }
-node C0_3_8    : ConstantPacket { value: 0 }
+node C1_3_8    : Constant { value: 1 }
+node C0_3_8    : Constant { value: 0 }
 node B_3_8     : FanOut         { }
 node A_3_8     : Aggregator     { n: 8 }
 node F3_3_8    : Filter         { match: 3 }
 node F2_3_8    : Filter         { match: 2 }
-node ToAlv_3_8 : ConstantSignal { value: 0 }
-node ToDed_3_8 : ConstantSignal { value: 1 }
+node ToAlv_3_8 : Constant { value: 0, out_kind: "signal" }
+node ToDed_3_8 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (4,8)
 node T_4_8     : Tick           { period_ns: 200000000 }
 node SW_4_8    : Switch         { passing: 0 }
-node C1_4_8    : ConstantPacket { value: 1 }
-node C0_4_8    : ConstantPacket { value: 0 }
+node C1_4_8    : Constant { value: 1 }
+node C0_4_8    : Constant { value: 0 }
 node B_4_8     : FanOut         { }
 node A_4_8     : Aggregator     { n: 8 }
 node F3_4_8    : Filter         { match: 3 }
 node F2_4_8    : Filter         { match: 2 }
-node ToAlv_4_8 : ConstantSignal { value: 0 }
-node ToDed_4_8 : ConstantSignal { value: 1 }
+node ToAlv_4_8 : Constant { value: 0, out_kind: "signal" }
+node ToDed_4_8 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (5,8)
 node T_5_8     : Tick           { period_ns: 200000000 }
 node SW_5_8    : Switch         { passing: 1 }
-node C1_5_8    : ConstantPacket { value: 1 }
-node C0_5_8    : ConstantPacket { value: 0 }
+node C1_5_8    : Constant { value: 1 }
+node C0_5_8    : Constant { value: 0 }
 node B_5_8     : FanOut         { }
 node A_5_8     : Aggregator     { n: 8 }
 node F3_5_8    : Filter         { match: 3 }
 node F2_5_8    : Filter         { match: 2 }
-node ToAlv_5_8 : ConstantSignal { value: 0 }
-node ToDed_5_8 : ConstantSignal { value: 1 }
+node ToAlv_5_8 : Constant { value: 0, out_kind: "signal" }
+node ToDed_5_8 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (6,8)
 node T_6_8     : Tick           { period_ns: 200000000 }
 node SW_6_8    : Switch         { passing: 0 }
-node C1_6_8    : ConstantPacket { value: 1 }
-node C0_6_8    : ConstantPacket { value: 0 }
+node C1_6_8    : Constant { value: 1 }
+node C0_6_8    : Constant { value: 0 }
 node B_6_8     : FanOut         { }
 node A_6_8     : Aggregator     { n: 8 }
 node F3_6_8    : Filter         { match: 3 }
 node F2_6_8    : Filter         { match: 2 }
-node ToAlv_6_8 : ConstantSignal { value: 0 }
-node ToDed_6_8 : ConstantSignal { value: 1 }
+node ToAlv_6_8 : Constant { value: 0, out_kind: "signal" }
+node ToDed_6_8 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (7,8)
 node T_7_8     : Tick           { period_ns: 200000000 }
 node SW_7_8    : Switch         { passing: 0 }
-node C1_7_8    : ConstantPacket { value: 1 }
-node C0_7_8    : ConstantPacket { value: 0 }
+node C1_7_8    : Constant { value: 1 }
+node C0_7_8    : Constant { value: 0 }
 node B_7_8     : FanOut         { }
 node A_7_8     : Aggregator     { n: 8 }
 node F3_7_8    : Filter         { match: 3 }
 node F2_7_8    : Filter         { match: 2 }
-node ToAlv_7_8 : ConstantSignal { value: 0 }
-node ToDed_7_8 : ConstantSignal { value: 1 }
+node ToAlv_7_8 : Constant { value: 0, out_kind: "signal" }
+node ToDed_7_8 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (8,8)
 node T_8_8     : Tick           { period_ns: 200000000 }
 node SW_8_8    : Switch         { passing: 1 }
-node C1_8_8    : ConstantPacket { value: 1 }
-node C0_8_8    : ConstantPacket { value: 0 }
+node C1_8_8    : Constant { value: 1 }
+node C0_8_8    : Constant { value: 0 }
 node B_8_8     : FanOut         { }
 node A_8_8     : Aggregator     { n: 8 }
 node F3_8_8    : Filter         { match: 3 }
 node F2_8_8    : Filter         { match: 2 }
-node ToAlv_8_8 : ConstantSignal { value: 0 }
-node ToDed_8_8 : ConstantSignal { value: 1 }
+node ToAlv_8_8 : Constant { value: 0, out_kind: "signal" }
+node ToDed_8_8 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (9,8)
 node T_9_8     : Tick           { period_ns: 200000000 }
 node SW_9_8    : Switch         { passing: 1 }
-node C1_9_8    : ConstantPacket { value: 1 }
-node C0_9_8    : ConstantPacket { value: 0 }
+node C1_9_8    : Constant { value: 1 }
+node C0_9_8    : Constant { value: 0 }
 node B_9_8     : FanOut         { }
 node A_9_8     : Aggregator     { n: 8 }
 node F3_9_8    : Filter         { match: 3 }
 node F2_9_8    : Filter         { match: 2 }
-node ToAlv_9_8 : ConstantSignal { value: 0 }
-node ToDed_9_8 : ConstantSignal { value: 1 }
+node ToAlv_9_8 : Constant { value: 0, out_kind: "signal" }
+node ToDed_9_8 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (0,9)
 node T_0_9     : Tick           { period_ns: 200000000 }
 node SW_0_9    : Switch         { passing: 1 }
-node C1_0_9    : ConstantPacket { value: 1 }
-node C0_0_9    : ConstantPacket { value: 0 }
+node C1_0_9    : Constant { value: 1 }
+node C0_0_9    : Constant { value: 0 }
 node B_0_9     : FanOut         { }
 node A_0_9     : Aggregator     { n: 8 }
 node F3_0_9    : Filter         { match: 3 }
 node F2_0_9    : Filter         { match: 2 }
-node ToAlv_0_9 : ConstantSignal { value: 0 }
-node ToDed_0_9 : ConstantSignal { value: 1 }
+node ToAlv_0_9 : Constant { value: 0, out_kind: "signal" }
+node ToDed_0_9 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (1,9)
 node T_1_9     : Tick           { period_ns: 200000000 }
 node SW_1_9    : Switch         { passing: 0 }
-node C1_1_9    : ConstantPacket { value: 1 }
-node C0_1_9    : ConstantPacket { value: 0 }
+node C1_1_9    : Constant { value: 1 }
+node C0_1_9    : Constant { value: 0 }
 node B_1_9     : FanOut         { }
 node A_1_9     : Aggregator     { n: 8 }
 node F3_1_9    : Filter         { match: 3 }
 node F2_1_9    : Filter         { match: 2 }
-node ToAlv_1_9 : ConstantSignal { value: 0 }
-node ToDed_1_9 : ConstantSignal { value: 1 }
+node ToAlv_1_9 : Constant { value: 0, out_kind: "signal" }
+node ToDed_1_9 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (2,9)
 node T_2_9     : Tick           { period_ns: 200000000 }
 node SW_2_9    : Switch         { passing: 0 }
-node C1_2_9    : ConstantPacket { value: 1 }
-node C0_2_9    : ConstantPacket { value: 0 }
+node C1_2_9    : Constant { value: 1 }
+node C0_2_9    : Constant { value: 0 }
 node B_2_9     : FanOut         { }
 node A_2_9     : Aggregator     { n: 8 }
 node F3_2_9    : Filter         { match: 3 }
 node F2_2_9    : Filter         { match: 2 }
-node ToAlv_2_9 : ConstantSignal { value: 0 }
-node ToDed_2_9 : ConstantSignal { value: 1 }
+node ToAlv_2_9 : Constant { value: 0, out_kind: "signal" }
+node ToDed_2_9 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (3,9)
 node T_3_9     : Tick           { period_ns: 200000000 }
 node SW_3_9    : Switch         { passing: 0 }
-node C1_3_9    : ConstantPacket { value: 1 }
-node C0_3_9    : ConstantPacket { value: 0 }
+node C1_3_9    : Constant { value: 1 }
+node C0_3_9    : Constant { value: 0 }
 node B_3_9     : FanOut         { }
 node A_3_9     : Aggregator     { n: 8 }
 node F3_3_9    : Filter         { match: 3 }
 node F2_3_9    : Filter         { match: 2 }
-node ToAlv_3_9 : ConstantSignal { value: 0 }
-node ToDed_3_9 : ConstantSignal { value: 1 }
+node ToAlv_3_9 : Constant { value: 0, out_kind: "signal" }
+node ToDed_3_9 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (4,9)
 node T_4_9     : Tick           { period_ns: 200000000 }
 node SW_4_9    : Switch         { passing: 1 }
-node C1_4_9    : ConstantPacket { value: 1 }
-node C0_4_9    : ConstantPacket { value: 0 }
+node C1_4_9    : Constant { value: 1 }
+node C0_4_9    : Constant { value: 0 }
 node B_4_9     : FanOut         { }
 node A_4_9     : Aggregator     { n: 8 }
 node F3_4_9    : Filter         { match: 3 }
 node F2_4_9    : Filter         { match: 2 }
-node ToAlv_4_9 : ConstantSignal { value: 0 }
-node ToDed_4_9 : ConstantSignal { value: 1 }
+node ToAlv_4_9 : Constant { value: 0, out_kind: "signal" }
+node ToDed_4_9 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (5,9)
 node T_5_9     : Tick           { period_ns: 200000000 }
 node SW_5_9    : Switch         { passing: 0 }
-node C1_5_9    : ConstantPacket { value: 1 }
-node C0_5_9    : ConstantPacket { value: 0 }
+node C1_5_9    : Constant { value: 1 }
+node C0_5_9    : Constant { value: 0 }
 node B_5_9     : FanOut         { }
 node A_5_9     : Aggregator     { n: 8 }
 node F3_5_9    : Filter         { match: 3 }
 node F2_5_9    : Filter         { match: 2 }
-node ToAlv_5_9 : ConstantSignal { value: 0 }
-node ToDed_5_9 : ConstantSignal { value: 1 }
+node ToAlv_5_9 : Constant { value: 0, out_kind: "signal" }
+node ToDed_5_9 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (6,9)
 node T_6_9     : Tick           { period_ns: 200000000 }
 node SW_6_9    : Switch         { passing: 0 }
-node C1_6_9    : ConstantPacket { value: 1 }
-node C0_6_9    : ConstantPacket { value: 0 }
+node C1_6_9    : Constant { value: 1 }
+node C0_6_9    : Constant { value: 0 }
 node B_6_9     : FanOut         { }
 node A_6_9     : Aggregator     { n: 8 }
 node F3_6_9    : Filter         { match: 3 }
 node F2_6_9    : Filter         { match: 2 }
-node ToAlv_6_9 : ConstantSignal { value: 0 }
-node ToDed_6_9 : ConstantSignal { value: 1 }
+node ToAlv_6_9 : Constant { value: 0, out_kind: "signal" }
+node ToDed_6_9 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (7,9)
 node T_7_9     : Tick           { period_ns: 200000000 }
 node SW_7_9    : Switch         { passing: 0 }
-node C1_7_9    : ConstantPacket { value: 1 }
-node C0_7_9    : ConstantPacket { value: 0 }
+node C1_7_9    : Constant { value: 1 }
+node C0_7_9    : Constant { value: 0 }
 node B_7_9     : FanOut         { }
 node A_7_9     : Aggregator     { n: 8 }
 node F3_7_9    : Filter         { match: 3 }
 node F2_7_9    : Filter         { match: 2 }
-node ToAlv_7_9 : ConstantSignal { value: 0 }
-node ToDed_7_9 : ConstantSignal { value: 1 }
+node ToAlv_7_9 : Constant { value: 0, out_kind: "signal" }
+node ToDed_7_9 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (8,9)
 node T_8_9     : Tick           { period_ns: 200000000 }
 node SW_8_9    : Switch         { passing: 0 }
-node C1_8_9    : ConstantPacket { value: 1 }
-node C0_8_9    : ConstantPacket { value: 0 }
+node C1_8_9    : Constant { value: 1 }
+node C0_8_9    : Constant { value: 0 }
 node B_8_9     : FanOut         { }
 node A_8_9     : Aggregator     { n: 8 }
 node F3_8_9    : Filter         { match: 3 }
 node F2_8_9    : Filter         { match: 2 }
-node ToAlv_8_9 : ConstantSignal { value: 0 }
-node ToDed_8_9 : ConstantSignal { value: 1 }
+node ToAlv_8_9 : Constant { value: 0, out_kind: "signal" }
+node ToDed_8_9 : Constant { value: 1, out_kind: "signal" }
 
 # Cell (9,9)
 node T_9_9     : Tick           { period_ns: 200000000 }
 node SW_9_9    : Switch         { passing: 0 }
-node C1_9_9    : ConstantPacket { value: 1 }
-node C0_9_9    : ConstantPacket { value: 0 }
+node C1_9_9    : Constant { value: 1 }
+node C0_9_9    : Constant { value: 0 }
 node B_9_9     : FanOut         { }
 node A_9_9     : Aggregator     { n: 8 }
 node F3_9_9    : Filter         { match: 3 }
 node F2_9_9    : Filter         { match: 2 }
-node ToAlv_9_9 : ConstantSignal { value: 0 }
-node ToDed_9_9 : ConstantSignal { value: 1 }
+node ToAlv_9_9 : Constant { value: 0, out_kind: "signal" }
+node ToDed_9_9 : Constant { value: 1, out_kind: "signal" }
 
 edges {
   T_0_0        -> SW_0_0    : 1ms

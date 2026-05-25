@@ -127,7 +127,7 @@ LanguageModelResponse* language_model_session_respond(LanguageModelSession* sess
                 if (response) {
                     const char* utf8Content = [content UTF8String];
                     size_t contentLength = strlen(utf8Content) + 1;
-                    
+
                     response->content = malloc(contentLength);
                     if (response->content) {
                         strcpy(response->content, utf8Content);
@@ -136,6 +136,8 @@ LanguageModelResponse* language_model_session_respond(LanguageModelSession* sess
                         response = NULL;
                     }
                 }
+            } else if (error) {
+                fprintf(stderr, "  [error] %s\n", [error UTF8String]);
             }
             completed = YES;
         }];

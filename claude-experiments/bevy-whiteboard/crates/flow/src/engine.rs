@@ -813,11 +813,18 @@ impl Sim {
         class_name: &str,
         instance_name: &str,
     ) -> Result<NodeId, String> {
-        let tid = self
-            .template_by_name
-            .get(class_name)
-            .copied()
-            .ok_or_else(|| format!("no class named `{}`", class_name))?;
+        // Leaf templates win over compound aliases. A whiteboard that
+        // defines `node Client { ... }` (a leaf class) and then loads
+        // alongside the back-compat alias `Client → ClientComposite`
+        // should get its own leaf Client, not the composite. The leaf
+        // check happens first so the explicit user-authored class
+        // takes precedence; we fall through to compound expansion only
+        // when no leaf template exists.
+        let tid = self.template_by_name.get(class_name).copied();
+        if tid.is_none() && self.compound_templates.contains_key(class_name) {
+            return self.instantiate_compound(class_name, instance_name, &Default::default());
+        }
+        let tid = tid.ok_or_else(|| format!("no class named `{}`", class_name))?;
         let t = self.templates[tid.0 as usize].clone();
         let new_id = NodeId(self.next_node_id);
         self.next_node_id += 1;
@@ -861,6 +868,62 @@ impl Sim {
             self.inject(new_id, payload);
         }
         Ok(new_id)
+    }
+
+    /// Instantiate a registered compound class under `instance_name`.
+    /// Looks up the stored `compound` AST recipe, clones+renames it to
+    /// `instance_name` (so the inner nodes get prefixed `inst::L`,
+    /// `inst::F`, etc.), runs the expansion pass with `overrides`
+    /// applied to the compound's compile-time params, and lowers the
+    /// residual into this sim.
+    ///
+    /// Overrides are keyed by param name. Any param the user didn't
+    /// override falls back to its declared default. Type mismatches
+    /// (e.g. handing an Int where the param declares Float) are
+    /// rejected with the same error `expand_compound_subtree`
+    /// produces.
+    ///
+    /// Returns the NodeId of the compound's port-shim — the addressable
+    /// "fat node" external edges connect to via `<instance_name>.<port>`.
+    /// Returns `Err` if no compound with `class_name` is registered, or
+    /// if expansion / lowering fail for any reason.
+    pub fn instantiate_compound(
+        &mut self,
+        class_name: &str,
+        instance_name: &str,
+        overrides: &std::collections::BTreeMap<String, crate::dsl::expand::CtValue>,
+    ) -> Result<NodeId, String> {
+        let decl = self
+            .compound_templates
+            .get(class_name)
+            .cloned()
+            .ok_or_else(|| format!("no compound class named `{}`", class_name))?;
+        // Rename the stored recipe to use the instance name as the
+        // compound's qualified prefix. After expansion, inner nodes get
+        // names like `<instance_name>::L`, the port shim is named
+        // `<instance_name>` itself.
+        let mut renamed = decl;
+        renamed.name = instance_name.to_string();
+        let file = crate::dsl::ast::File {
+            items: vec![crate::dsl::ast::Item::Compound(renamed)],
+        };
+        let residual = crate::dsl::expand::expand_compound_subtree(
+            &file,
+            instance_name,
+            overrides,
+        )?;
+        let residual_file = crate::dsl::ast::File { items: residual };
+        crate::dsl::lower::lower_into(self, &residual_file)
+            .map_err(|e| format!("instantiate_compound `{}` as `{}`: {}", class_name, instance_name, e))?;
+        let shim = self.node_by_name(instance_name).ok_or_else(|| format!(
+            "instantiate_compound `{}` as `{}`: expansion succeeded but port-shim node not found",
+            class_name, instance_name
+        ))?;
+        // Remember which compound class this shim came from so external
+        // code can answer "what kind of gadget is this shim?" without
+        // re-deriving from the inner-node prefix scan.
+        self.compound_class_of.insert(shim, class_name.to_string());
+        Ok(shim)
     }
 
     /// Build the `(metadata, return_path)` pair that an emitted packet

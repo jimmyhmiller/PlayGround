@@ -15,7 +15,7 @@ pub struct Frame {
     pub addr: u64,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct StackTable {
     pub frames: Vec<Frame>,
     pub frame_dedup: AHashMap<(StringId, StringId, u32, u64), FrameId>,

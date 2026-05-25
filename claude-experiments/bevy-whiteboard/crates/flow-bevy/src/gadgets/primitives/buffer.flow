@@ -1,33 +1,40 @@
-# Bounded FIFO. Incoming packets queue up to `cap`; overflow goes out
-# the `overflow` port. Pull-driven: a `pull(_)` packet on the control
-# input dispatches the head out the `head` port. Wire to a Delay or
-# Worker downstream to model a service queue with bounded backlog.
-# (`out` and `in` are reserved keywords, so the port is named `head`.)
+# Bounded FIFO. Incoming data packets queue up to `cap`; overflow goes
+# out the `overflow` port. Pull-driven: a `pull(_)` packet on the
+# control input dispatches the head out the `head` port. Wire to a
+# Delay or Worker downstream to model a service queue with bounded
+# backlog. (`out` and `in` are reserved keywords, hence `head`.)
+#
+# Discriminates control (`pull`) from data via `p.kind`; data of any
+# kind is enqueued — only its `.value` survives in the buffer (the
+# kind is rewritten to `packet` when dispatched). If you need to
+# preserve kinds across the buffer, store the whole packet instead;
+# the simple `Samples`-of-values version is enough for the standard
+# request/response patterns the existing composites rely on.
 node Buffer {
     slots {
         cap:   Int = 16
         items: Samples(64)
     }
     probes { fill: "{len(items)}" }
-    rule on_in_room {
-        on packet(p)
-        when len(items) < cap
-        do { push items <- p }
-    }
-    rule on_in_full {
-        on packet(p)
-        do { emit packet(p) to port overflow }
-    }
+    # Pull rules come first so a `pull` in the same tick as fresh data
+    # drains the buffer before the new item is queued.
     rule on_pull_ready {
-        on pull(_)
-        when len(items) > 0
+        on p when p.kind == "pull" && len(items) > 0
         do {
             pop items -> v
             emit packet(v) to port head
         }
     }
     rule on_pull_empty {
-        on pull(_)
+        on p when p.kind == "pull"
         do { }
+    }
+    rule on_in_room {
+        on p when len(items) < cap
+        do { push items <- p.value }
+    }
+    rule on_in_full {
+        on p
+        do { emit p to port overflow }
     }
 }
