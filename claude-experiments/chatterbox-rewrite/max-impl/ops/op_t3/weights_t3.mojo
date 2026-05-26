@@ -204,11 +204,12 @@ def load_t3(mut ctx: DeviceContext, base: String) raises -> T3:
     var speech_head_w = upload_fp32(ctx, base + "/speech_head_w.bin")
     var zero_d = ctx.enqueue_create_buffer[DType.float32](V_SPEECH)
     zero_d.enqueue_fill(0.0)
-    # speech_head kept in f32 even when CHATTERBOX_BF16=1: bf16 loss on the
-    # final logits produces rare off-by-one token swaps that land in mu space
-    # the CFM oscillates on (the "loud thump" bug). The f32 head adds only
-    # one extra matmul per decode step and is cheap relative to the backbone.
-    var speech_head = Linear(speech_head_w^, zero_d^, HIDDEN, V_SPEECH, False)
+    var speech_head: Linear
+    if _use_bf16():
+        var speech_head_b = upload_bf16(ctx, base + "/speech_head_w.bf16.bin")
+        speech_head = Linear(speech_head_w^, zero_d^, HIDDEN, V_SPEECH, False, speech_head_b^)
+    else:
+        speech_head = Linear(speech_head_w^, zero_d^, HIDDEN, V_SPEECH, False)
 
     var V_TEXT = 704
     var MAX_TEXT_POS = 2050

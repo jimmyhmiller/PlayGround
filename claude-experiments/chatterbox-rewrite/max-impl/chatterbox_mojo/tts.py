@@ -219,66 +219,41 @@ class ChatterboxTTS:
         text_ids_full = [255] + list(text_ids) + [0]   # START_TEXT, STOP_TEXT
         t_tok = time.perf_counter() - t_tok0
 
-        # Retry-on-thump: bf16 precision drift in T3 occasionally produces token
-        # sequences that land the CFM in an oscillating attractor (loud
-        # "microphone thump" artifacts). Detect via max-abs adjacent-sample diff
-        # and resample with a perturbed seed up to MAX_RETRIES times.
-        MAX_RETRIES = 3
-        THUMP_THRESH = 0.8
-        attempt_seed = int(rng_seed)
-        t_t3 = 0.0; t_dec = 0.0; n_raw = 0; n_speech = 0
-        wav = None
-        for attempt in range(MAX_RETRIES + 1):
-            t3_config = {
-                "emotion": float(exaggeration),
-                "cfg_weight": float(cfg_weight),
-                "temperature": float(temperature),
-                "top_p": float(top_p),
-                "rep_penalty": float(repetition_penalty),
-                "min_p": float(min_p),
-                "max_new": int(max_new_tokens),
-                "rng_seed": int(attempt_seed),
-            }
-            t_t3_0 = time.perf_counter()
-            raw_tokens = op_t3.generate(
-                self._t3_h, self.conds.speaker_emb_256, self.conds.cond_prompt_tok,
-                text_ids_full, t3_config,
-            )
-            t_t3 += time.perf_counter() - t_t3_0
-            n_raw = len(raw_tokens)
+        t3_config = {
+            "emotion": float(exaggeration),
+            "cfg_weight": float(cfg_weight),
+            "temperature": float(temperature),
+            "top_p": float(top_p),
+            "rep_penalty": float(repetition_penalty),
+            "min_p": float(min_p),
+            "max_new": int(max_new_tokens),
+            "rng_seed": int(rng_seed),
+        }
+        t_t3_0 = time.perf_counter()
+        raw_tokens = op_t3.generate(
+            self._t3_h, self.conds.speaker_emb_256, self.conds.cond_prompt_tok,
+            text_ids_full, t3_config,
+        )
+        t_t3 = time.perf_counter() - t_t3_0
 
-            speech_tokens = []
-            for tok in raw_tokens:
-                if tok == EOS:
-                    break
-                if tok < 6561:
-                    speech_tokens.append(tok)
-            if len(speech_tokens) == 0:
-                speech_tokens = [0]
-            n_speech = len(speech_tokens)
-
-            t_dec0 = time.perf_counter()
-            wav = self._s3gen_decode(speech_tokens)
-            t_dec += time.perf_counter() - t_dec0
-
-            # Detect catastrophic thumps. Loud, clustered thumps signal the
-            # CFM-attractor failure; isolated single thumps near 0.8 are usually
-            # genuine plosives — require at least 5 loud samples to call it bad.
-            diff = np.abs(np.diff(wav.astype(np.float32)))
-            n_loud = int(np.sum(diff > THUMP_THRESH))
-            if n_loud < 5:
+        # Filter EOS + invalid tokens (mirrors drop_invalid_tokens + <6561 filter).
+        speech_tokens = []
+        for tok in raw_tokens:
+            if tok == EOS:
                 break
-            if attempt < MAX_RETRIES:
-                if prof:
-                    print(f"[thump-retry] attempt {attempt+1} hit {n_loud} loud samples; resampling",
-                          flush=True)
-                attempt_seed = (attempt_seed * 2862933555777941757 + 3037000493) & ((1 << 63) - 1)
+            if tok < 6561:
+                speech_tokens.append(tok)
+        if len(speech_tokens) == 0:
+            speech_tokens = [0]
 
+        t_dec0 = time.perf_counter()
+        wav = self._s3gen_decode(speech_tokens)
+        t_dec = time.perf_counter() - t_dec0
         if prof:
             n_samples = wav.size
             audio_s = n_samples / self.sr
-            print(f"[prof] tok={t_tok*1000:.1f}ms  t3({n_raw}tok)={t_t3*1000:.1f}ms  "
-                  f"s3gen({n_speech}st)={t_dec*1000:.1f}ms  "
+            print(f"[prof] tok={t_tok*1000:.1f}ms  t3({len(raw_tokens)}tok)={t_t3*1000:.1f}ms  "
+                  f"s3gen({len(speech_tokens)}st)={t_dec*1000:.1f}ms  "
                   f"audio={audio_s:.2f}s  total={(t_tok+t_t3+t_dec)*1000:.1f}ms",
                   flush=True)
         return torch.from_numpy(wav).unsqueeze(0)
