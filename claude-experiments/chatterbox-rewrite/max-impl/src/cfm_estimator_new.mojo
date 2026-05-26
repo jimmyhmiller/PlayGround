@@ -938,6 +938,211 @@ def cfm_solve_euler(
         )
 
 
+def cfm_solve_heun(
+    mut ctx: DeviceContext,
+    mut model: CFMEstimatorReal,
+    mut x_buf: DeviceBuffer[DType.float32],
+    mut mu_buf: DeviceBuffer[DType.float32],
+    mut spks_buf: DeviceBuffer[DType.float32],
+    mut cond_buf: DeviceBuffer[DType.float32],
+    mut mask_buf: DeviceBuffer[DType.float32],
+    b: Int, t: Int, n_steps: Int, cfg_rate: Float32,
+    use_cosine_schedule: Bool = True,
+) raises:
+    """Heun's method (RK2): 2 estimator calls per step but error O(dt²)
+    instead of Euler's O(dt). Roughly: Heun-2 ≈ Euler-4 quality at the same
+    or lower cost.
+
+    Per step [t_cur, t_next] with dt = t_next - t_cur:
+        f1 = estimator(x, t_cur)
+        x_pred = x + dt * f1
+        f2 = estimator(x_pred, t_next)
+        x = x + dt/2 * (f1 + f2)
+    """
+    comptime MEL = 80
+    var B2 = 2 * b
+
+    # Scratch buffers (reused across steps).
+    var x_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL * t)
+    var mu_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL * t)
+    var spks_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL)
+    var cond_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL * t)
+    var mask_in = ctx.enqueue_create_buffer[DType.float32](B2 * t)
+    var t_scalar_in = ctx.enqueue_create_buffer[DType.float32](B2)
+    var dxdt1_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL * t)
+    var dxdt2_in = ctx.enqueue_create_buffer[DType.float32](B2 * MEL * t)
+    # x_pred holds x + dt * f1 (B, MEL, T).
+    var x_pred = ctx.enqueue_create_buffer[DType.float32](b * MEL * t)
+
+    var dt_per_step: Float32 = 1.0 / Float32(n_steps)
+    comptime PI_HALF: Float32 = 1.5707963267948966
+
+    # Build constant-across-steps inputs once.
+    var mu_ptr_h = mu_buf.unsafe_ptr()
+    var mi_ptr_h = mu_in.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(mu_ptr_h, mi_ptr_h, b, t, MEL)
+    def heun_mu_init[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // (MEL * t)
+        var rem = i - bi * MEL * t
+        if bi < b:
+            mi_ptr_h[i] = mu_ptr_h[bi * MEL * t + rem]
+        else:
+            mi_ptr_h[i] = 0.0
+    elementwise[heun_mu_init, simd_width=1, target="gpu"](
+        IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
+    )
+
+    var sp_ptr_h = spks_buf.unsafe_ptr()
+    var si_ptr_h = spks_in.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(sp_ptr_h, si_ptr_h, b)
+    def heun_spk_init[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // MEL
+        var ci = i - bi * MEL
+        if bi < b:
+            si_ptr_h[i] = sp_ptr_h[bi * MEL + ci]
+        else:
+            si_ptr_h[i] = 0.0
+    elementwise[heun_spk_init, simd_width=1, target="gpu"](
+        IndexList[1](B2 * MEL), DeviceContextPtr(ctx),
+    )
+
+    var co_ptr_h = cond_buf.unsafe_ptr()
+    var ci_ptr_h = cond_in.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(co_ptr_h, ci_ptr_h, b, t, MEL)
+    def heun_cond_init[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // (MEL * t)
+        var rem = i - bi * MEL * t
+        if bi < b:
+            ci_ptr_h[i] = co_ptr_h[bi * MEL * t + rem]
+        else:
+            ci_ptr_h[i] = 0.0
+    elementwise[heun_cond_init, simd_width=1, target="gpu"](
+        IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
+    )
+
+    var m_ptr_h = mask_buf.unsafe_ptr()
+    var mi2_ptr_h = mask_in.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(m_ptr_h, mi2_ptr_h, b, t)
+    def heun_mask_init[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var bi = i // t
+        var src_b = bi % b
+        var ti = i - bi * t
+        mi2_ptr_h[i] = m_ptr_h[src_b * t + ti]
+    elementwise[heun_mask_init, simd_width=1, target="gpu"](
+        IndexList[1](B2 * t), DeviceContextPtr(ctx),
+    )
+
+    for step in range(n_steps):
+        var lin_cur: Float32 = Float32(step) * dt_per_step
+        var lin_next: Float32 = Float32(step + 1) * dt_per_step
+        var t_cur: Float32
+        var t_next: Float32
+        if use_cosine_schedule:
+            t_cur = 1.0 - mcos(lin_cur * PI_HALF)
+            t_next = 1.0 - mcos(lin_next * PI_HALF)
+        else:
+            t_cur = lin_cur
+            t_next = lin_next
+        var dt = t_next - t_cur
+        var half_dt = dt * 0.5
+
+        # ── Stage 1: f1 = estimator(x, t_cur) ──
+        var x_ptr = x_buf.unsafe_ptr()
+        var xi_ptr = x_in.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(x_ptr, xi_ptr, b, t, MEL)
+        def heun_x_pop[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var bi = i // (MEL * t)
+            var src_b = bi % b
+            var rem = i - bi * MEL * t
+            xi_ptr[i] = x_ptr[src_b * MEL * t + rem]
+        elementwise[heun_x_pop, simd_width=1, target="gpu"](
+            IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
+        )
+        t_scalar_in.enqueue_fill(t_cur)
+        cfm_estimator_forward_real(
+            ctx, model, x_in, mu_in, spks_in, cond_in, mask_in, t_scalar_in,
+            dxdt1_in, B2, t,
+        )
+
+        # f1[b, mel, t] = (1+cfg)*cond - cfg*uncond. Combine into per-row first-B view via x_pred buf:
+        # x_pred = x + dt * f1
+        var d1_ptr = dxdt1_in.unsafe_ptr()
+        var xb_ptr = x_buf.unsafe_ptr()
+        var xp_ptr = x_pred.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(d1_ptr, xb_ptr, xp_ptr, b, t, MEL, dt, cfg_rate)
+        def heun_pred[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var cond_v = d1_ptr[i]
+            var uncond_v = d1_ptr[b * MEL * t + i]
+            var f1 = (1.0 + cfg_rate) * cond_v - cfg_rate * uncond_v
+            xp_ptr[i] = xb_ptr[i] + dt * f1
+        elementwise[heun_pred, simd_width=1, target="gpu"](
+            IndexList[1](b * MEL * t), DeviceContextPtr(ctx),
+        )
+
+        # ── Stage 2: f2 = estimator(x_pred, t_next) ──
+        var xp_ptr2 = x_pred.unsafe_ptr()
+        var xi_ptr2 = x_in.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(xp_ptr2, xi_ptr2, b, t, MEL)
+        def heun_xpred_pop[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var bi = i // (MEL * t)
+            var src_b = bi % b
+            var rem = i - bi * MEL * t
+            xi_ptr2[i] = xp_ptr2[src_b * MEL * t + rem]
+        elementwise[heun_xpred_pop, simd_width=1, target="gpu"](
+            IndexList[1](B2 * MEL * t), DeviceContextPtr(ctx),
+        )
+        t_scalar_in.enqueue_fill(t_next)
+        cfm_estimator_forward_real(
+            ctx, model, x_in, mu_in, spks_in, cond_in, mask_in, t_scalar_in,
+            dxdt2_in, B2, t,
+        )
+
+        # x = x + dt/2 * (f1 + f2)
+        var d2_ptr = dxdt2_in.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(d1_ptr, d2_ptr, xb_ptr, b, t, MEL, half_dt, cfg_rate)
+        def heun_update[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var c1 = d1_ptr[i]; var u1 = d1_ptr[b * MEL * t + i]
+            var c2 = d2_ptr[i]; var u2 = d2_ptr[b * MEL * t + i]
+            var f1 = (1.0 + cfg_rate) * c1 - cfg_rate * u1
+            var f2 = (1.0 + cfg_rate) * c2 - cfg_rate * u2
+            xb_ptr[i] = xb_ptr[i] + half_dt * (f1 + f2)
+        elementwise[heun_update, simd_width=1, target="gpu"](
+            IndexList[1](b * MEL * t), DeviceContextPtr(ctx),
+        )
+
+
 # ============================================================================
 # Deterministic Gaussian noise (Box-Muller via LCG)
 # ============================================================================

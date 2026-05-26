@@ -17,7 +17,8 @@ from std.runtime.asyncrt import DeviceContextPtr
 from std.algorithm.functional import elementwise, IndexList
 
 from upsample_encoder import UpsampleConformerEncoderReal, upsample_conformer_forward
-from cfm_estimator_new import CFMEstimatorReal, cfm_solve_euler, gaussian_noise_fill
+from cfm_estimator_new import CFMEstimatorReal, cfm_solve_euler, cfm_solve_heun, gaussian_noise_fill
+from std.os import getenv
 from weights import load_upsample_conformer_encoder, load_cfm_estimator_real
 
 
@@ -131,8 +132,17 @@ def forward(
     gaussian_noise_fill(ctx_ref, x, B * MEL * T_TOTAL_MEL, noise_seed, Float32(1.0))
     var cfm_mask = ctx_ref.enqueue_create_buffer[DType.float32](B * T_TOTAL_MEL)
     cfm_mask.enqueue_fill(1.0)
-    cfm_solve_euler(ctx_ref, state_ptr[].cfm, x, mu, spks, cond, cfm_mask,
-                     B, T_TOTAL_MEL, N_STEPS, cfg_rate)
+    var solver: String = "euler"
+    try:
+        solver = getenv("CHATTERBOX_CFM_SOLVER")
+    except:
+        solver = "euler"
+    if solver == "heun":
+        cfm_solve_heun(ctx_ref, state_ptr[].cfm, x, mu, spks, cond, cfm_mask,
+                       B, T_TOTAL_MEL, N_STEPS, cfg_rate)
+    else:
+        cfm_solve_euler(ctx_ref, state_ptr[].cfm, x, mu, spks, cond, cfm_mask,
+                        B, T_TOTAL_MEL, N_STEPS, cfg_rate)
     ctx_ref.synchronize()
 
     # 4. Trim prompt prefix: x[:, :, T_PROMPT_MEL:] → out_mel.

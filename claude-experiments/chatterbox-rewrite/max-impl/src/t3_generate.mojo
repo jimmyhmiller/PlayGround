@@ -374,22 +374,14 @@ def cfg_combine_sample(
         for k in range(v):
             logits[k] = logits[k] / temperature
 
-    # Top-p filtering: sort logits desc, compute softmax cumsum, keep first idx
-    # where cumsum > top_p (i.e., include everything up to and including the
-    # first token that pushes cumprob past top_p).
-    var idx_arr = List[Int](capacity=v)
-    for k in range(v):
-        idx_arr.append(k)
+    # Match upstream HF order: min_p first (on full vocab), then top_p (on full vocab).
+    # Both prune by setting logits to -inf, then softmax+multinomial samples from
+    # whatever survives.
 
-    # Simple sort (since V=6562 is small enough): use selection-sort O(V*K) where
-    # K is the typical top-p size (~10-50). Find top K such that sum-prob >= top_p.
-    # Faster path: just sort everything via insertion-sort? V=6562 is too big.
-    # Use partial sort: repeatedly find max until cumsum reaches top_p.
+    # Compute full-vocab softmax (for min_p threshold comparison and top_p ordering).
     var max_logit: Float32 = -1.0e30
     for k in range(v):
         if logits[k] > max_logit: max_logit = logits[k]
-
-    # Compute softmax with max-subtract for numerical stability.
     var exp_logits = List[Float32](capacity=v)
     var exp_sum: Float32 = 0.0
     for k in range(v):
@@ -401,15 +393,24 @@ def cfg_combine_sample(
         exp_sum += e
     if exp_sum <= 0.0: exp_sum = 1.0
 
-    # Partial sort: find tokens in descending probability order until cumprob >= top_p.
+    # min_p filter on FULL vocab: HF MinPLogitsWarper keeps tokens where
+    # prob >= min_p * top_prob. Always keep top-1.
+    var min_p_thresh: Float32 = 0.0
+    if min_p > 0.0:
+        # Top prob over full vocab = exp(max-max)/exp_sum = 1/exp_sum
+        min_p_thresh = min_p * (Float32(1.0) / exp_sum)
+
+    # Walk all V tokens in descending probability order, stop when cumprob > top_p
+    # (matches HF TopPLogitsWarper which keeps the first token that exceeds top_p too).
     var kept_idx = List[Int]()
     var kept_logit = List[Float32]()
     var seen = List[Bool](capacity=v)
     for k in range(v):
         seen.append(False)
     var cumprob: Float32 = 0.0
-    var safety = 0
-    while cumprob < top_p and safety < 500:
+    var top_p_done = False
+    # Safety cap: full vocab — but we break early under top_p.
+    for _i in range(v):
         var best_p: Float32 = -1.0
         var best_k: Int = -1
         for k in range(v):
@@ -420,29 +421,29 @@ def cfg_combine_sample(
                 best_k = k
         if best_k < 0: break
         seen[best_k] = True
-        kept_idx.append(best_k)
-        kept_logit.append(logits[best_k])
-        cumprob += best_p
-        safety += 1
 
-    # min_p filter (HF MinPLogitsWarper, applied after top_p):
-    # keep tokens whose full-vocab prob >= min_p * top_token_full_vocab_prob.
-    # Always keep at least the top-1.
-    if min_p > 0.0 and len(kept_idx) > 1:
-        var top_p_full = exp_logits[kept_idx[0]] / exp_sum
-        var threshold = min_p * top_p_full
-        var filtered_idx = List[Int]()
-        var filtered_logit = List[Float32]()
-        # Always keep idx 0 (the top token).
-        filtered_idx.append(kept_idx[0])
-        filtered_logit.append(kept_logit[0])
-        for k in range(1, len(kept_idx)):
-            var p_k = exp_logits[kept_idx[k]] / exp_sum
-            if p_k >= threshold:
-                filtered_idx.append(kept_idx[k])
-                filtered_logit.append(kept_logit[k])
-        kept_idx = filtered_idx^
-        kept_logit = filtered_logit^
+        # If top_p threshold already exceeded, skip remaining unless min_p forces keep.
+        # Actually HF order: min_p first, then top_p. We're doing them jointly here:
+        # always keep top-1; otherwise keep iff (NOT top_p_done) AND (p >= min_p_thresh).
+        var should_keep = False
+        if len(kept_idx) == 0:
+            should_keep = True   # always keep top-1
+        else:
+            # min_p check: must be >= threshold
+            var meets_min_p = (min_p_thresh == 0.0) or (best_p >= min_p_thresh)
+            # top_p: keep while cumprob hadn't yet exceeded (and include the first one that does)
+            should_keep = meets_min_p and (not top_p_done)
+
+        if should_keep:
+            kept_idx.append(best_k)
+            kept_logit.append(logits[best_k])
+            cumprob += best_p
+            if cumprob >= top_p:
+                top_p_done = True
+        else:
+            # Could keep going for min_p but they're already pruned by top_p — stop.
+            if top_p_done:
+                break
 
     # Renormalize over kept set: softmax(kept_logit) with new max.
     var k_max: Float32 = -1.0e30

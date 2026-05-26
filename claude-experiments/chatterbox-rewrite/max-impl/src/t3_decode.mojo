@@ -15,6 +15,7 @@ from std.math import sqrt
 from std.gpu.host import DeviceContext, DeviceBuffer
 from std.runtime.asyncrt import DeviceContextPtr
 from std.algorithm.functional import elementwise, IndexList
+from std.os import getenv
 
 from modules import (
     Linear, linear_forward, RMSNorm, rms_norm_forward, silu, residual_add,
@@ -211,20 +212,31 @@ def t3_decode_step(
     var x_norm = ctx.enqueue_create_buffer[DType.float32](b * D)
     rms_norm_forward(ctx, block.in_norm, x_buf, x_norm, b)
 
-    # 2. Q/K/V projections — separate matmuls (revert fused).
-    var q_lin = ctx.enqueue_create_buffer[DType.float32](b * D)
-    var k_lin = ctx.enqueue_create_buffer[DType.float32](b * D)
-    var v_lin = ctx.enqueue_create_buffer[DType.float32](b * D)
-    linear_forward(ctx, block.to_q, x_norm, q_lin, b)
-    linear_forward(ctx, block.to_k, x_norm, k_lin, b)
-    linear_forward(ctx, block.to_v, x_norm, v_lin, b)
-
+    # 2. Q/K/V — fused matmul (when env CHATTERBOX_T3_FUSE_QKV=1) or 3 separate.
     var q_perm = ctx.enqueue_create_buffer[DType.float32](b * H * 1 * Dh)
     var k_perm = ctx.enqueue_create_buffer[DType.float32](b * H * 1 * Dh)
     var v_perm = ctx.enqueue_create_buffer[DType.float32](b * H * 1 * Dh)
-    reshape_bsd_to_bhsd(ctx, q_lin, q_perm, b, 1, H, Dh)
-    reshape_bsd_to_bhsd(ctx, k_lin, k_perm, b, 1, H, Dh)
-    reshape_bsd_to_bhsd(ctx, v_lin, v_perm, b, 1, H, Dh)
+
+    var fuse_qkv = False
+    try:
+        fuse_qkv = getenv("CHATTERBOX_T3_FUSE_QKV") == "1"
+    except:
+        fuse_qkv = False
+
+    if fuse_qkv:
+        var qkv_out = ctx.enqueue_create_buffer[DType.float32](b * 3 * D)
+        linear_forward(ctx, block.qkv, x_norm, qkv_out, b)
+        _qkv_split_reshape(ctx, qkv_out, q_perm, k_perm, v_perm, b, H, Dh)
+    else:
+        var q_lin = ctx.enqueue_create_buffer[DType.float32](b * D)
+        var k_lin = ctx.enqueue_create_buffer[DType.float32](b * D)
+        var v_lin = ctx.enqueue_create_buffer[DType.float32](b * D)
+        linear_forward(ctx, block.to_q, x_norm, q_lin, b)
+        linear_forward(ctx, block.to_k, x_norm, k_lin, b)
+        linear_forward(ctx, block.to_v, x_norm, v_lin, b)
+        reshape_bsd_to_bhsd(ctx, q_lin, q_perm, b, 1, H, Dh)
+        reshape_bsd_to_bhsd(ctx, k_lin, k_perm, b, 1, H, Dh)
+        reshape_bsd_to_bhsd(ctx, v_lin, v_perm, b, 1, H, Dh)
 
     # 4. RoPE on Q and K (single timestep with cos/sin at cur_len position).
     var q_rope = ctx.enqueue_create_buffer[DType.float32](b * H * 1 * Dh)
@@ -253,33 +265,44 @@ def t3_decode_step(
     linear_forward(ctx, block.to_out, av_flat, attn_out, b)
     residual_add(ctx, x_buf, attn_out, b * D)
 
-    # 7. MLP (separate gate/up).
+    # 7. MLP — fused gate+up matmul (when env CHATTERBOX_T3_FUSE_MLP=1) or separate.
     var x_norm2 = ctx.enqueue_create_buffer[DType.float32](b * D)
     rms_norm_forward(ctx, block.post_norm, x_buf, x_norm2, b)
     var inter = block.mlp.intermediate
-    var gate_h = ctx.enqueue_create_buffer[DType.float32](b * inter)
-    var up_h   = ctx.enqueue_create_buffer[DType.float32](b * inter)
-    var act_h  = ctx.enqueue_create_buffer[DType.float32](b * inter)
     var prod_h = ctx.enqueue_create_buffer[DType.float32](b * inter)
-    linear_forward(ctx, block.mlp.gate, x_norm2, gate_h, b)
-    linear_forward(ctx, block.mlp.up,   x_norm2, up_h,   b)
-    silu(ctx, gate_h, act_h, b * inter)
 
-    var ap = act_h.unsafe_ptr()
-    var upp = up_h.unsafe_ptr()
-    var pp = prod_h.unsafe_ptr()
+    var fuse_mlp = False
+    try:
+        fuse_mlp = getenv("CHATTERBOX_T3_FUSE_MLP") == "1"
+    except:
+        fuse_mlp = False
 
-    @always_inline
-    @parameter
-    @__copy_capture(ap, upp, pp)
-    def mul_func[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
-        var i = idx[0]
-        var a = ap.load[width=width, alignment=alignment](i)
-        var u = upp.load[width=width, alignment=alignment](i)
-        pp.store[width=width, alignment=alignment](i, a * u)
-    elementwise[mul_func, simd_width=4, target="gpu"](
-        IndexList[1](b * inter), DeviceContextPtr(ctx),
-    )
+    if fuse_mlp:
+        var gate_up_out = ctx.enqueue_create_buffer[DType.float32](b * 2 * inter)
+        linear_forward(ctx, block.gate_up, x_norm2, gate_up_out, b)
+        _swiglu_combine(ctx, gate_up_out, prod_h, b, inter)
+    else:
+        var gate_h = ctx.enqueue_create_buffer[DType.float32](b * inter)
+        var up_h   = ctx.enqueue_create_buffer[DType.float32](b * inter)
+        var act_h  = ctx.enqueue_create_buffer[DType.float32](b * inter)
+        linear_forward(ctx, block.mlp.gate, x_norm2, gate_h, b)
+        linear_forward(ctx, block.mlp.up,   x_norm2, up_h,   b)
+        silu(ctx, gate_h, act_h, b * inter)
+        var ap = act_h.unsafe_ptr()
+        var upp = up_h.unsafe_ptr()
+        var pp = prod_h.unsafe_ptr()
+
+        @always_inline
+        @parameter
+        @__copy_capture(ap, upp, pp)
+        def mul_func[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var a = ap.load[width=width, alignment=alignment](i)
+            var u = upp.load[width=width, alignment=alignment](i)
+            pp.store[width=width, alignment=alignment](i, a * u)
+        elementwise[mul_func, simd_width=4, target="gpu"](
+            IndexList[1](b * inter), DeviceContextPtr(ctx),
+        )
 
     var mlp_out = ctx.enqueue_create_buffer[DType.float32](b * D)
     linear_forward(ctx, block.mlp.down, prod_h, mlp_out, b)
