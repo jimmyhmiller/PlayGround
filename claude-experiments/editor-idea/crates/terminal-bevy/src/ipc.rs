@@ -72,6 +72,22 @@ pub enum IpcRequest {
     /// as a single JSON object then EOF: `{"projects":[{"id":N,
     /// "name":"…","active":bool},…]}`.
     ListProjects,
+    /// `tbinbox --project NAME --sender X --body "..."` — append a
+    /// message to a project's inbox. The receiver writes the message
+    /// to `~/.terminal-bevy/inbox/<id>.jsonl`; the running app's
+    /// `InboxPane` picks it up on its next disk poll. Fire-and-forget;
+    /// no response body.
+    SendInbox {
+        /// Resolved on the GUI side against current `Projects`. May be
+        /// a name (`"editor-idea"`) or `"active"` for the current one.
+        #[serde(default)]
+        project: Option<String>,
+        #[serde(default)]
+        sender: Option<String>,
+        #[serde(default)]
+        subject: Option<String>,
+        body: String,
+    },
 }
 
 /// One accepted IPC connection: the parsed request plus the open socket,

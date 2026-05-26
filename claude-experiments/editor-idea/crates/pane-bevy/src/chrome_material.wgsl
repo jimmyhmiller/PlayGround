@@ -44,6 +44,10 @@ struct ChromeParams {
     // Title-region height in pixels. Only consulted when
     // cover_mode > 0.5.
     title_h: f32,
+    // Title-bar background fill (linear RGB + alpha). Only consulted
+    // in cover mode — that's how focus is signalled now that the body
+    // and border stay stable across focus state.
+    title_bg: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> params: ChromeParams;
@@ -91,7 +95,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // light source without being obvious unless you look for it.
     let v = in.uv.y;  // 0 at top, 1 at bottom in this mesh
     let tone = mix(1.06, 0.97, v);
-    var color = params.bg.rgb * tone;
+    // Title-cover paints its own fill color; body uses bg.
+    let fill_rgb = select(params.bg.rgb * tone, params.title_bg.rgb, params.cover_mode > 0.5);
+    var color = fill_rgb;
 
     // Border band: from the rect edge inward by border_width. d is
     // negative inside, so the band lives in (-border_width .. 0).

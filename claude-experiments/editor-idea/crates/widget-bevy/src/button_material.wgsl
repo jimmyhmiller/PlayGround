@@ -53,7 +53,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         1.0 - smoothstep(-bw - 0.5, -bw + 0.5, d),
         bw > 0.0,
     );
-    var inside_color = mix(params.bg.rgb, params.border.rgb, border_coverage);
+    // Respect the fill's own alpha so outline/ghost buttons stay
+    // transparent in the body (and only the border draws).
+    let bg_a = params.bg.a;
+    let body_a = inside_coverage * mix(bg_a, 1.0, border_coverage);
+    let inside_color = mix(params.bg.rgb, params.border.rgb, border_coverage);
 
     // Shadow outside the button. Squared smoothstep for a softer
     // gaussian-ish falloff.
@@ -62,10 +66,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let shadow_alpha = params.shadow_color.a * shadow_falloff * shadow_falloff;
 
     // Composite: button on top of shadow. Where the button is opaque,
-    // the shadow contributes nothing (we just see the button).
-    let button_a = inside_coverage;
-    let shadow_only_a = shadow_alpha * (1.0 - button_a);
-    let out_rgb = inside_color * button_a + params.shadow_color.rgb * shadow_only_a;
-    let out_a = button_a + shadow_only_a;
+    // the shadow contributes nothing.
+    let shadow_only_a = shadow_alpha * (1.0 - body_a);
+    let out_rgb = inside_color * body_a + params.shadow_color.rgb * shadow_only_a;
+    let out_a = body_a + shadow_only_a;
     return vec4<f32>(out_rgb, out_a);
 }

@@ -52,8 +52,13 @@ use serde_json::Value;
 
 pub mod atlas;
 pub mod claude_events_pane;
+pub mod context_menu;
 pub mod daemon_client;
 pub mod garden_pane;
+pub mod inference_dispatch;
+pub mod inbox;
+pub mod inferences_pane;
+pub mod issues_pane;
 pub mod osc7;
 /// Re-export of the daemon protocol from the headless crate so existing
 /// callers can continue to write `terminal_bevy::daemon_proto::*`.
@@ -224,6 +229,20 @@ pub struct BellPulse {
 #[derive(Resource)]
 pub struct MonoFont(pub Handle<Font>);
 
+/// Dedicated RenderLayer for menu overlays (radial menu, per-pane
+/// context menu) so they draw on top of every per-pane camera. Pane
+/// cameras have order `(rect.z * 100) + 1`, which can climb past 600
+/// as panes are focused — anything drawn on layer 0 ends up *under*
+/// those pane cameras inside their viewports, which made the radial
+/// vanish behind panes. The overlay camera (see [`setup_camera_and_font`])
+/// runs at order [`MENU_OVERLAY_CAMERA_ORDER`] (well above any pane)
+/// and renders only this layer, so menu items are guaranteed on top.
+pub const MENU_OVERLAY_LAYER: usize = 32;
+/// Camera order for the menu-overlay camera. Sized so it stays above
+/// any plausible pane-camera order: pane cameras max out around
+/// `(MAX_PANE_Z * 100) + 1` ≈ 50_001, so 100_000 leaves headroom.
+pub const MENU_OVERLAY_CAMERA_ORDER: isize = 100_000;
+
 #[derive(Resource, Copy, Clone)]
 pub struct MonoMetrics {
     pub cell_width: f32,
@@ -310,10 +329,15 @@ impl Plugin for TerminalPlugin {
             .add_plugins(PanePlugin)
             .add_plugins(TermMaterialPlugin)
             .add_plugins(projects::ProjectsPlugin)
+            .add_plugins(context_menu::ContextMenuPlugin)
             .add_plugins(radial::RadialPlugin)
             .add_plugins(selection::SelectionPlugin)
             .add_plugins(run_button::RunButtonPlugin)
             .add_plugins(claude_events_pane::ClaudeEventsPanePlugin)
+            .add_plugins(inferences_pane::InferencesPanePlugin)
+            .add_plugins(issues_pane::IssuesPanePlugin)
+            .add_plugins(inbox::InboxPanePlugin)
+            .add_plugins(inference_dispatch::InferenceDispatchPlugin)
             .add_plugins(garden_pane::ClaudeGardenPanePlugin)
             .add_plugins(widget_bevy::WidgetPlugin)
             .add_plugins(widget_bevy::rhai_widget::RhaiWidgetPlugin)
@@ -401,7 +425,22 @@ fn terminal_spawn_from_config(
             p.allocate_terminal_id()
         });
     let replay_bytes = scrollback_path(session_id).and_then(|p| std::fs::read(&p).ok());
-    populate_terminal_pane(world, entity, content_root, session_id, replay_bytes);
+    let initial_cwd = world
+        .get::<ProjectMembership>(entity)
+        .map(|m| m.0)
+        .and_then(|pid| {
+            world
+                .get_resource::<Projects>()
+                .and_then(|p| p.default_cwd_of(pid).map(str::to_string))
+        });
+    populate_terminal_pane(
+        world,
+        entity,
+        content_root,
+        session_id,
+        initial_cwd,
+        replay_bytes,
+    );
 }
 
 fn terminal_snapshot(world: &World, entity: Entity) -> Value {
@@ -573,6 +612,26 @@ fn drain_ipc_open_requests(
                 }
                 let _ = _stream.shutdown(std::net::Shutdown::Write);
             }
+            ipc::IpcRequest::SendInbox {
+                project,
+                sender,
+                subject,
+                body,
+            } => {
+                // Resolve project: name → id, or "active" / None → active.
+                let target = match project.as_deref() {
+                    Some("active") | None => OpenProjectTarget::Active,
+                    Some(name) => OpenProjectTarget::ByName(name.to_string()),
+                };
+                let Some(project_id) = projects::resolve_project(&target, &projects) else {
+                    eprintln!("[ipc] send_inbox: no matching project");
+                    continue;
+                };
+                let sender = sender.unwrap_or_else(|| "external".to_string());
+                if let Err(e) = inbox::append_message(project_id, sender, subject, body) {
+                    eprintln!("[ipc] send_inbox: append: {}", e);
+                }
+            }
         }
     }
 }
@@ -642,6 +701,21 @@ pub fn setup_camera_and_font(world: &mut World) {
         bevy::camera::visibility::RenderLayers::layer(0),
     ));
 
+    // Menu overlay camera — renders only `MENU_OVERLAY_LAYER` at a
+    // camera order far above any per-pane camera, so radial / context
+    // menus draw on top of every pane even when many panes are
+    // focused. `clear_color: None` keeps the underlying scene visible
+    // wherever the overlay has no geometry.
+    world.spawn((
+        Camera2d,
+        bevy::camera::Camera {
+            order: MENU_OVERLAY_CAMERA_ORDER,
+            clear_color: bevy::camera::ClearColorConfig::None,
+            ..default()
+        },
+        bevy::camera::visibility::RenderLayers::layer(MENU_OVERLAY_LAYER),
+    ));
+
     let font_bytes: &'static [u8] = load_primary_font();
 
     let font_handle = world
@@ -701,18 +775,38 @@ pub fn spawn_terminal(
         entity: terminal_entity,
         content_root,
     } = spawn_pane(world, PANE_KIND, "Terminal", rect, project_id);
-    populate_terminal_pane(world, terminal_entity, content_root, session_id, replay_bytes);
+    let initial_cwd = project_id
+        .and_then(|id| {
+            world
+                .get_resource::<Projects>()
+                .and_then(|p| p.default_cwd_of(id).map(str::to_string))
+        });
+    populate_terminal_pane(
+        world,
+        terminal_entity,
+        content_root,
+        session_id,
+        initial_cwd,
+        replay_bytes,
+    );
     terminal_entity
 }
 
 /// Insert terminal-specific components on an already-spawned pane, spawn
 /// its worker, and add the cursor child under `content_root`. Shared
 /// between `spawn_terminal` and the registry restore path.
+///
+/// `initial_cwd` overrides the daemon's default-to-$HOME behavior for
+/// this pane's shell. Used to honor a project's remembered
+/// `default_cwd` (populated by the inference layer). Only consulted
+/// when the daemon has to fork a fresh shell — attaching to an
+/// already-running daemon ignores it.
 fn populate_terminal_pane(
     world: &mut World,
     terminal_entity: Entity,
     content_root: Entity,
     session_id: u64,
+    initial_cwd: Option<String>,
     replay_bytes: Option<Vec<u8>>,
 ) {
     let cell_width = world.resource::<MonoMetrics>().cell_width;
@@ -729,6 +823,7 @@ fn populate_terminal_pane(
     let worker = WorkerHandle::spawn(
         session_id,
         default_shell_command(),
+        initial_cwd,
         PtySize {
             cols,
             rows,
@@ -1031,6 +1126,24 @@ fn handle_keyboard(
                 out.push(b);
                 continue;
             }
+        }
+
+        // Option+Left / Option+Right: send the readline word-jump
+        // bytes (ESC+b, ESC+f) instead of the regular arrow CSI. zsh,
+        // bash, fish, and friends all bind these to backward-word /
+        // forward-word, matching what macOS Terminal.app and iTerm2 do
+        // for Option+arrow. We do this *before* the named-key branch
+        // so the regular arrow encoding doesn't fire.
+        if alt
+            && matches!(ev.key_code, KeyCode::ArrowLeft | KeyCode::ArrowRight)
+        {
+            out.push(0x1b);
+            out.push(if matches!(ev.key_code, KeyCode::ArrowLeft) {
+                b'b'
+            } else {
+                b'f'
+            });
+            continue;
         }
 
         // Named keys we know the VT encoding for. Arrows / Home / End

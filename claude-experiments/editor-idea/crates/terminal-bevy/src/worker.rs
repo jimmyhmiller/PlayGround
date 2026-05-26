@@ -227,13 +227,14 @@ impl WorkerHandle {
     pub fn spawn(
         session_id: u64,
         command: Vec<String>,
+        initial_cwd: Option<String>,
         size: PtySize,
         scrollback: usize,
         scrollback_log: Option<PathBuf>,
         replay_bytes: Option<Vec<u8>>,
         wakeup: Option<EventLoopProxy<WinitUserEvent>>,
     ) -> std::io::Result<Self> {
-        let client = DaemonClient::open(session_id, size.cols, size.rows, command)?;
+        let client = DaemonClient::open(session_id, size.cols, size.rows, command, initial_cwd)?;
         let attached_existing = client.attached_existing;
 
         let snapshot = Arc::new(Mutex::new(GridSnapshot {

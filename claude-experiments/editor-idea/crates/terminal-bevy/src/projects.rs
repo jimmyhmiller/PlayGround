@@ -36,8 +36,8 @@ use bevy::text::LineHeight;
 use serde::{Deserialize, Serialize};
 
 use pane_bevy::{
-    spawn_pane_from_registry, FocusedPane, PaneKindMarker, PaneProject, PaneRect, PaneRegistry,
-    PaneSnapshot, PaneTag, PaneTitle, MIN_PANE_SIZE,
+    spawn_pane_from_registry, FocusedPane, PaneKindMarker, PanePinned, PaneProject, PaneRect,
+    PaneRegistry, PaneSnapshot, PaneTag, PaneTitle, MIN_PANE_SIZE,
 };
 
 use crate::TerminalSession;
@@ -109,6 +109,15 @@ const NEW_TERMINAL_OFFSET: f32 = 28.0;
 pub struct ProjectData {
     pub id: u64,
     pub name: String,
+    /// Remembered working directory for terminals spawned in this
+    /// project. Populated by the inference layer the first time the
+    /// user `cd`s into a plausible project root (the classifier in
+    /// [`crate::inferences_pane`]'s feed decides); used at terminal
+    /// spawn time as the initial cwd. `None` means "no remembered
+    /// default" → fall back to `$HOME` like every other terminal.
+    /// `serde(default)` keeps old projects.json files loadable.
+    #[serde(default)]
+    pub default_cwd: Option<String>,
 }
 
 /// Legacy terminal-only snapshot from before the pane unification.
@@ -267,6 +276,7 @@ impl Projects {
         self.list.push(ProjectData {
             id,
             name: format!("Project {}", id),
+            default_cwd: None,
         });
         if self.active.is_none() {
             self.active = Some(id);
@@ -311,6 +321,28 @@ impl Projects {
             .iter()
             .find(|p| p.id == id)
             .map(|p| p.name.as_str())
+    }
+    pub fn default_cwd_of(&self, id: u64) -> Option<&str> {
+        self.list
+            .iter()
+            .find(|p| p.id == id)
+            .and_then(|p| p.default_cwd.as_deref())
+    }
+    /// Set or clear a project's remembered default cwd. Marks the
+    /// projects.json dirty so it flushes to disk on the next save tick.
+    /// Returns true if the value actually changed.
+    pub fn set_default_cwd(&mut self, id: u64, cwd: Option<String>) -> bool {
+        for p in &mut self.list {
+            if p.id == id {
+                if p.default_cwd != cwd {
+                    p.default_cwd = cwd;
+                    self.dirty = true;
+                    return true;
+                }
+                return false;
+            }
+        }
+        false
     }
     /// Bump the unread bell counter for one project. Marks layout
     /// dirty so the sidebar redraws with the new badge.
@@ -475,6 +507,7 @@ impl Plugin for ProjectsPlugin {
                     refocus_on_project_change,
                     mark_terminals_dirty_on_change,
                     publish_live_terminals,
+                    apply_inference_suggestions,
                     save_if_dirty,
                 )
                     .chain(),
@@ -528,6 +561,7 @@ fn load_or_seed_projects(
             size: legacy.size,
             z: legacy.z,
             config: serde_json::json!({ "session_id": legacy.session_id }),
+            pinned: false,
         });
     }
 
@@ -1234,7 +1268,23 @@ fn restore_pane(world: &mut World, snap: PaneSnapshot) {
         size: Vec2::new(snap.size[0], snap.size[1]),
         z: snap.z,
     };
-    spawn_pane_from_registry(world, kind_static, display, rect, snap.project_id, &snap.config);
+    let entity = spawn_pane_from_registry(
+        world,
+        kind_static,
+        display,
+        rect,
+        snap.project_id,
+        &snap.config,
+    );
+    // Reapply the pin marker if this pane was pinned at save time.
+    // We don't go through PendingPaneActions.pin here because the z
+    // already round-trips through the snapshot — touching it again
+    // would clobber any pin-time z the user wants preserved.
+    if snap.pinned {
+        if let Some(e) = entity {
+            world.entity_mut(e).insert(PanePinned);
+        }
+    }
 }
 
 /// Look the kind up in the registry to get its registered `kind`
@@ -1448,6 +1498,74 @@ fn publish_live_terminals(
     }
 }
 
+// ---------- Inference consumer ----------
+
+/// Confidence below which we don't auto-write the suggestion onto a
+/// project. Picked conservatively — the model is small and the cost
+/// of a wrong default (new terminals open in a stale directory) is
+/// felt every spawn. Above the threshold we still only apply when
+/// `good_default = true`.
+const INFERENCE_AUTO_APPLY_THRESHOLD: f32 = 0.7;
+
+/// Subscribes to `inference.project_default_cwd_suggested` events
+/// from the bus and writes the verdict onto the owning project's
+/// `default_cwd`. The owning project is resolved by:
+///
+///   `terminal_session_id` → `TerminalSession` component
+///                         → `ProjectMembership` (== `PaneProject`)
+///                         → project id
+///
+/// If the matching pane has no `ProjectMembership` (standalone test
+/// pane) we drop the suggestion silently.
+///
+/// Only writes when `good_default = true` AND `confidence >=
+/// INFERENCE_AUTO_APPLY_THRESHOLD`; the inferences pane still shows
+/// every verdict so the user can see what was filtered out.
+fn apply_inference_suggestions(
+    mut events: MessageReader<claude_bus_bevy::ClaudeBusEvent>,
+    panes: Query<(&crate::TerminalSession, Option<&ProjectMembership>)>,
+    mut projects: ResMut<Projects>,
+) {
+    for ev in events.read() {
+        if ev.kind != "inference.project_default_cwd_suggested" {
+            continue;
+        }
+        let Ok(payload) = serde_json::from_str::<InferenceSuggestionPayload>(&ev.payload_json)
+        else {
+            continue;
+        };
+        if !payload.good_default || payload.confidence < INFERENCE_AUTO_APPLY_THRESHOLD {
+            continue;
+        }
+        let Ok(sid) = ev.terminal_session_id.parse::<u64>() else {
+            continue;
+        };
+        // Find the pane whose TerminalSession matches; read its project
+        // membership. There's at most one matching pane (session ids
+        // are unique).
+        let project_id = panes
+            .iter()
+            .find(|(ts, _)| ts.0 == sid)
+            .and_then(|(_, pm)| pm.map(|p| p.0));
+        let Some(project_id) = project_id else {
+            continue;
+        };
+        if projects.set_default_cwd(project_id, Some(payload.cwd.clone())) {
+            info!(
+                "[projects] project {} default_cwd ← {} (confidence {:.2})",
+                project_id, payload.cwd, payload.confidence
+            );
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct InferenceSuggestionPayload {
+    good_default: bool,
+    confidence: f32,
+    cwd: String,
+}
+
 // ---------- Persistence flush ----------
 
 fn save_if_dirty(
@@ -1486,15 +1604,21 @@ fn save_if_dirty(
 /// Walk every PaneTag entity, ask the registered kind for a snapshot,
 /// and bundle them into a Vec<PaneSnapshot>.
 fn collect_pane_snapshots(world: &mut World) -> Vec<PaneSnapshot> {
-    let entries: Vec<(Entity, String, Option<u64>, PaneRect)> = {
-        let mut q = world.query::<(Entity, &PaneKindMarker, Option<&PaneProject>, &PaneRect)>();
+    let entries: Vec<(Entity, String, Option<u64>, PaneRect, bool)> = {
+        let mut q = world.query::<(
+            Entity,
+            &PaneKindMarker,
+            Option<&PaneProject>,
+            &PaneRect,
+            Has<PanePinned>,
+        )>();
         q.iter(world)
-            .map(|(e, k, p, r)| (e, k.0.to_string(), p.map(|p| p.0), *r))
+            .map(|(e, k, p, r, pinned)| (e, k.0.to_string(), p.map(|p| p.0), *r, pinned))
             .collect()
     };
     let snapshots: Vec<PaneSnapshot> = entries
         .into_iter()
-        .filter_map(|(entity, kind, project_id, rect)| {
+        .filter_map(|(entity, kind, project_id, rect, pinned)| {
             let snap_fn = world.resource::<PaneRegistry>().get(&kind).map(|s| s.snapshot)?;
             let config = (snap_fn)(world, entity);
             Some(PaneSnapshot {
@@ -1504,6 +1628,7 @@ fn collect_pane_snapshots(world: &mut World) -> Vec<PaneSnapshot> {
                 size: [rect.size.x, rect.size.y],
                 z: rect.z,
                 config,
+                pinned,
             })
         })
         .collect();
@@ -1521,9 +1646,11 @@ fn mark_terminals_dirty_on_change(
             Or<(Changed<PaneRect>, Changed<PaneProject>)>,
         ),
     >,
+    pin_added: Query<(), Added<PanePinned>>,
+    mut pin_removed: RemovedComponents<PanePinned>,
     mut projects: ResMut<Projects>,
 ) {
-    if !rect_changed.is_empty() {
+    if !rect_changed.is_empty() || !pin_added.is_empty() || pin_removed.read().next().is_some() {
         projects.terminals_dirty = true;
     }
 }

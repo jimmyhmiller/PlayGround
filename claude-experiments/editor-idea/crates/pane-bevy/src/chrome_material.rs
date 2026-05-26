@@ -127,6 +127,12 @@ pub struct ChromeStyle {
     pub border_width_focused: f32,
     pub focus_width: f32,
     pub focus_strength: f32,
+    // --- title-bar fill (separate from body bg) ---
+    /// Title-bar background, unfocused state.
+    pub title_bg: Vec4,
+    /// Title-bar background, focused state. Different shade is the
+    /// primary visual cue for focus.
+    pub title_bg_focused: Vec4,
     // --- drop shadow (separate quad on layer 0, extends outside pane) ---
     /// Shadow color (rgb + base alpha at the rect edge).
     pub shadow_color: Vec4,
@@ -143,28 +149,23 @@ impl Default for ChromeStyle {
         let border = Color::srgb(0.18, 0.19, 0.22).to_linear();
         let border_focused = Color::srgb(0.30, 0.40, 0.55).to_linear();
         let focus_glow = Color::srgb(0.42, 0.62, 0.92).to_linear();
+        let title_bg = Color::srgb(0.085, 0.090, 0.105).to_linear();
+        let title_bg_focused = Color::srgb(0.135, 0.145, 0.170).to_linear();
         let shadow_color = Color::srgba(0.0, 0.0, 0.0, 0.45).to_linear();
+        let v4 = |c: LinearRgba| Vec4::new(c.red, c.green, c.blue, c.alpha);
         Self {
-            bg: Vec4::new(bg.red, bg.green, bg.blue, bg.alpha),
-            border: Vec4::new(border.red, border.green, border.blue, border.alpha),
-            border_focused: Vec4::new(
-                border_focused.red,
-                border_focused.green,
-                border_focused.blue,
-                border_focused.alpha,
-            ),
+            bg: v4(bg),
+            border: v4(border),
+            border_focused: v4(border_focused),
             focus_glow: Vec4::new(focus_glow.red, focus_glow.green, focus_glow.blue, 1.0),
             corner_radius: 6.0,
             border_width: 1.0,
             border_width_focused: 1.5,
             focus_width: 8.0,
             focus_strength: 0.35,
-            shadow_color: Vec4::new(
-                shadow_color.red,
-                shadow_color.green,
-                shadow_color.blue,
-                shadow_color.alpha,
-            ),
+            title_bg: v4(title_bg),
+            title_bg_focused: v4(title_bg_focused),
+            shadow_color: v4(shadow_color),
             shadow_blur: 24.0,
             shadow_offset_y: 6.0,
         }
@@ -214,6 +215,7 @@ impl ChromeStyle {
             time: 0.0,
             cover_mode: 0.0,
             title_h: 0.0,
+            title_bg: if focused { self.title_bg_focused } else { self.title_bg },
         }
     }
 
@@ -311,15 +313,18 @@ pub struct ChromeParams {
     /// the content_root to mask scrolled content out of the title
     /// region). Default 0.0 for the regular pane body. The shader
     /// returns transparent in the content area when this is set, so
-    /// the cover overpaints the title region only. Repurposes one of
-    /// the old `_pad` slots; user-installed chrome shaders that still
-    /// declare `_pad0/_pad1` keep working — they just ignore this.
+    /// the cover overpaints the title region only.
     pub cover_mode: f32,
     /// Title-region height in pixels. Used by the shader (when
     /// `cover_mode > 0`) to know where the title region ends and the
     /// content area begins. Set to `pane_bevy::TITLE_H` on the cover;
     /// 0.0 on the regular pane body.
     pub title_h: f32,
+    /// Title-bar background fill (linear RGB + alpha). Only consulted
+    /// in cover mode. Picking a different shade for the title strip is
+    /// how focus is signalled now that the body / border stay stable
+    /// across focus state.
+    pub title_bg: Vec4,
 }
 
 // Look is driven by the `ChromeStyle` resource (built from theme

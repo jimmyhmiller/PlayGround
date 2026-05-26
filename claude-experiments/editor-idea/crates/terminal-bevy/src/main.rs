@@ -61,9 +61,5 @@ fn main() {
     // running the subscriber thread just retries in the background —
     // nothing in the app blocks on it.
     app.add_plugins(claude_bus_bevy::BusEventPlugin::default());
-    // Inference layer: classifier-shaped LLM calls in response to
-    // specific bus events (currently only `terminal.cwd_changed`).
-    // Results are republished as `inference.*` events; no UI yet.
-    app.add_plugins(inference_bevy::InferencePlugin);
     app.run();
 }

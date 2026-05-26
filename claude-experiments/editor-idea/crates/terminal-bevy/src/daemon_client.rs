@@ -50,14 +50,20 @@ impl DaemonClient {
     /// Connect to (or spawn + connect to) the daemon for `session_id`,
     /// send Attach{cols,rows}, and wait for the Attached ack. Subsequent
     /// frames flow through `poll_frames`.
-    pub fn open(session_id: u64, cols: u16, rows: u16, command: Vec<String>) -> std::io::Result<Self> {
+    pub fn open(
+        session_id: u64,
+        cols: u16,
+        rows: u16,
+        command: Vec<String>,
+        initial_cwd: Option<String>,
+    ) -> std::io::Result<Self> {
         let socket_path = crate::socket_path(session_id)
             .ok_or_else(|| std::io::Error::other("no data_dir (HOME unset?)"))?;
 
         let (sock, attached_existing) = match UnixStream::connect(&socket_path) {
             Ok(s) => (s, true),
             Err(_) => {
-                spawn_daemon(session_id, command)?;
+                spawn_daemon(session_id, command, initial_cwd)?;
                 let s = wait_for_socket(&socket_path, DAEMON_BOOT_TIMEOUT)?;
                 (s, false)
             }
@@ -227,7 +233,11 @@ impl DaemonClient {
 /// to avoid a zombie. Tests can point `TERMINAL_BEVY_DAEMON_BIN` at
 /// the standalone `terminal-daemon` binary; in that mode argv is
 /// positional with no `--daemon` flag.
-fn spawn_daemon(session_id: u64, command: Vec<String>) -> std::io::Result<()> {
+fn spawn_daemon(
+    session_id: u64,
+    command: Vec<String>,
+    initial_cwd: Option<String>,
+) -> std::io::Result<()> {
     let (bin, use_flag) = daemon_invocation()?;
     let mut cmd = Command::new(bin);
     if use_flag {
@@ -235,6 +245,12 @@ fn spawn_daemon(session_id: u64, command: Vec<String>) -> std::io::Result<()> {
     }
     cmd.arg(session_id.to_string());
     cmd.args(&command);
+    // Daemon reads this env var inside spawn_in_pty and uses it as the
+    // shell child's cwd, then unsets it before exec so it doesn't leak
+    // into the user's environment.
+    if let Some(cwd) = initial_cwd {
+        cmd.env("EDITOR_IDEA_TERMINAL_INITIAL_CWD", cwd);
+    }
     let mut child = cmd.spawn()?;
     let _ = child.wait();
     Ok(())

@@ -2,9 +2,11 @@
 resolver = "2"
 members = ["crates/editor-core", "crates/editor-bevy", "crates/pane-bevy", "crates/style-bevy", "crates/terminal-bevy", "crates/terminal-daemon", "crates/widget-bevy", "crates/book-ui-experiment", "crates/book-ui-wgpu", "crates/claude-bus", "crates/claude-bus-bevy", "crates/claude-statusline-bridge", "crates/claude-context-bars", "crates/claude-event-logger", "crates/claude-queue-drain", "crates/tbinject", "crates/inference-bevy"]
 
-# Use a locally-patched libghostty-rs whose build.rs invokes
-# `zig build -Doptimize=ReleaseFast`. Upstream defaults to Debug,
-# which makes vt_write 100×+ slower than it should be.
+# Pin libghostty-rs to a git rev that includes the zig optimize-mode
+# fix (upstream 3378f0b). Without it, vendored ghostty builds default
+# to zig Debug mode, which makes vt_write 100x+ slower. Crates.io 0.1.1
+# predates the fix, so we can't use the published version yet. Drop this
+# patch once upstream cuts a release that includes the fix.
 [patch.crates-io]
-libghostty-vt = { path = "../libghostty-rs-vendored/crates/libghostty-vt" }
-libghostty-vt-sys = { path = "../libghostty-rs-vendored/crates/libghostty-vt-sys" }
+libghostty-vt = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "d9dbd94e6e3ddf304601a7e65724d6d07ef0cbd1" }
+libghostty-vt-sys = { git = "https://github.com/Uzaaft/libghostty-rs.git", rev = "d9dbd94e6e3ddf304601a7e65724d6d07ef0cbd1" }

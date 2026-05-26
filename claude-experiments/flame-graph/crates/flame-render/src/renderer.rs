@@ -287,6 +287,10 @@ pub struct Renderer {
     pub profile: Option<Arc<Profile>>,
     pub hovered: Option<u32>,
     pub status_text: String,
+    /// When `Some`, overrides `status_text` in the status bar. Used by live
+    /// mode to surface samples/rate/elapsed without competing with the
+    /// hover / selection messages that `refresh_status_for_*` writes.
+    pub live_status: Option<String>,
     pub direction: Direction,
     pub track_layouts: Vec<TrackLayout>,
     pub canvas_height_px: f32,
@@ -557,6 +561,7 @@ impl Renderer {
             profile: None,
             hovered: None,
             status_text: String::from("Drop a trace file or pass one on the CLI"),
+            live_status: None,
             direction: Direction::Icicle,
             track_layouts: Vec::new(),
             canvas_height_px: 0.0,
@@ -600,6 +605,114 @@ impl Renderer {
             text_renderer,
             text_buffers: Vec::new(),
         }
+    }
+
+    /// Replace the current profile while preserving every bit of user
+    /// interaction state we know how to re-resolve in the new one. Use this
+    /// for live-streaming snapshot refreshes; use [`Renderer::set_profile`]
+    /// for fresh trace loads where you want the viewport/selection reset.
+    ///
+    /// Identifies things by *name* rather than index so the swap survives the
+    /// fact that snapshot indices are rebuilt from scratch each tick:
+    /// - collapsed tracks → by track name
+    /// - selected slice → by (track name + root-to-leaf frame name path)
+    /// - group key / sequence lifeline key → by string, re-interned
+    /// - merge_mode and layout_mode are kept verbatim; the merged profile
+    ///   (if active) is dropped so the next access re-derives it.
+    /// - hovered is cleared; the next mouse move re-hit-tests it for free.
+    pub fn set_profile_live(&mut self, profile: Arc<Profile>) {
+        let saved = self.capture_live_state();
+        self.set_profile(profile);
+        self.restore_live_state(saved);
+    }
+
+    fn capture_live_state(&self) -> LiveState {
+        let strings_lookup = |id: StringId| -> String {
+            self.profile
+                .as_ref()
+                .map(|p| p.strings.get(id).to_string())
+                .unwrap_or_default()
+        };
+        let collapsed_track_names: Vec<String> = self
+            .profile
+            .as_ref()
+            .map(|p| {
+                self.collapsed_tracks
+                    .iter()
+                    .filter_map(|t| {
+                        p.tracks
+                            .get(t.0 as usize)
+                            .map(|tr| p.strings.get(tr.name).to_string())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let selected = self
+            .selected_slice
+            .and_then(|idx| self.profile.as_ref().map(|p| (p, idx)))
+            .and_then(|(p, idx)| slice_identity(p, idx));
+
+        LiveState {
+            viewport: self.viewport.clone(),
+            active_tab: self.active_tab,
+            sidebar_tab: self.sidebar_tab,
+            layout_mode: self.layout_mode,
+            merge_mode: self.merge_mode,
+            direction: self.direction,
+            group_key_name: self.group_key.map(strings_lookup),
+            sequence_lifeline_key_name: self.sequence_lifeline_key.map(strings_lookup),
+            collapsed_track_names,
+            selected,
+            sidebar_scroll_y_px: self.sidebar_scroll_y_px,
+            sequence_scroll_y_px: self.sequence_scroll_y_px,
+            call_tree_scroll_y_px: self.call_tree_scroll_y_px,
+        }
+    }
+
+    fn restore_live_state(&mut self, s: LiveState) {
+        // viewport: keep zoom + scroll; size_px must come from the renderer
+        // so a resize while we were ingesting still gets applied.
+        let size_px = self.viewport.size_px;
+        self.viewport = s.viewport;
+        self.viewport.size_px = size_px;
+        self.set_tab(s.active_tab);
+        self.sidebar_tab = s.sidebar_tab;
+        self.layout_mode = s.layout_mode;
+        self.direction = s.direction;
+        self.sidebar_scroll_y_px = s.sidebar_scroll_y_px;
+        self.sequence_scroll_y_px = s.sequence_scroll_y_px;
+        self.call_tree_scroll_y_px = s.call_tree_scroll_y_px;
+
+        // merge_mode: setting it via set_merge_mode would rebuild merged
+        // profile here; we let it rebuild lazily on the next access.
+        self.merge_mode = s.merge_mode;
+        self.merged_profile = None;
+        self.grouped_profiles.clear();
+
+        if let Some(p) = self.profile.clone() {
+            if let Some(name) = &s.group_key_name {
+                self.group_key = p.strings.lookup(name);
+            }
+            if let Some(name) = &s.sequence_lifeline_key_name {
+                self.sequence_lifeline_key = p.strings.lookup(name);
+            }
+            // Re-resolve collapsed track names → new TrackIds.
+            let mut wanted: AHashSet<TrackId> = AHashSet::new();
+            for (i, t) in p.tracks.iter().enumerate() {
+                let name = p.strings.get(t.name);
+                if s.collapsed_track_names.iter().any(|n| n == name) {
+                    wanted.insert(TrackId(i as u32));
+                }
+            }
+            self.collapsed_tracks = wanted;
+            // Re-resolve selected slice by name path.
+            if let Some(identity) = &s.selected {
+                self.selected_slice = find_slice_by_identity(&p, identity);
+            }
+        }
+
+        self.clamp_viewport();
     }
 
     pub fn set_profile(&mut self, profile: Arc<Profile>) {
@@ -2815,8 +2928,13 @@ impl Renderer {
         let status_y = self.viewport.size_px.1
             - STATUS_BAR_HEIGHT_PX
             + (STATUS_BAR_HEIGHT_PX - LABEL_LINE_HEIGHT) * 0.5;
+        let status_for_bar = self
+            .live_status
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| self.status_text.clone());
         labels.push((
-            self.status_text.clone(),
+            status_for_bar,
             12.0,
             status_y,
             self.viewport.size_px.0 - 24.0,
@@ -3865,6 +3983,130 @@ fn build_grouped_profile(orig: &Profile, key: StringId) -> Profile {
         attrs,
         time_range: orig.time_range,
     }
+}
+
+/// Snapshot of user state that needs to survive a live profile swap.
+struct LiveState {
+    viewport: Viewport,
+    active_tab: MainTab,
+    sidebar_tab: SidebarTab,
+    layout_mode: LayoutMode,
+    merge_mode: MergeMode,
+    direction: Direction,
+    /// Name of the attribute key the timeline is grouped by, or None.
+    group_key_name: Option<String>,
+    /// Name of the SEQUENCE lifeline key, or None.
+    sequence_lifeline_key_name: Option<String>,
+    /// Names of tracks the user has collapsed.
+    collapsed_track_names: Vec<String>,
+    /// Identity of the currently selected slice, content-keyed so we can
+    /// re-resolve it to the corresponding slice in the new profile.
+    selected: Option<SliceIdentity>,
+    sidebar_scroll_y_px: f32,
+    sequence_scroll_y_px: f32,
+    call_tree_scroll_y_px: f32,
+}
+
+/// Content-keyed identity of a slice: which track it lives on (by name) and
+/// the sequence of frame names from root to the slice itself. For the
+/// synthesized flame-graph layout this uniquely identifies a slice across
+/// snapshots because slices are nested perfectly within their parents.
+struct SliceIdentity {
+    track_name: String,
+    /// Frame names from outermost (root) to innermost (the slice itself).
+    name_path: Vec<String>,
+}
+
+/// Walk a slice up to its root, returning (track_name, name_path). Returns
+/// None if the slice index is out of bounds or the track is missing.
+fn slice_identity(p: &Profile, slice_idx: u32) -> Option<SliceIdentity> {
+    let i = slice_idx as usize;
+    if i >= p.slices.len() {
+        return None;
+    }
+    let track = p.slices.track[i];
+    let track_name = p.strings.get(p.tracks.get(track.0 as usize)?.name).to_string();
+    let depth = p.slices.depth[i];
+
+    let mut chain = Vec::with_capacity(depth as usize + 1);
+    chain.push(i as u32);
+    let mut cur_depth = depth;
+    let mut cur_start = p.slices.start_ns[i];
+    let mut cur_end = cur_start + p.slices.dur_ns[i];
+
+    while cur_depth > 0 {
+        let parent_depth = cur_depth - 1;
+        let row = p.slices.rows.get(&(track, parent_depth))?;
+        // Synthesized flame-graph layout: parents contain children exactly,
+        // so the parent's [start, end) is a superset of the child's.
+        let mut parent_idx: Option<u32> = None;
+        for j in row.clone() {
+            let ps = p.slices.start_ns[j as usize];
+            let pe = ps + p.slices.dur_ns[j as usize];
+            if ps <= cur_start && pe >= cur_end {
+                parent_idx = Some(j);
+                break;
+            }
+        }
+        let pi = parent_idx?;
+        chain.push(pi);
+        cur_depth = parent_depth;
+        cur_start = p.slices.start_ns[pi as usize];
+        cur_end = cur_start + p.slices.dur_ns[pi as usize];
+    }
+
+    chain.reverse();
+    let name_path: Vec<String> = chain
+        .iter()
+        .map(|&idx| p.strings.get(p.slices.name[idx as usize]).to_string())
+        .collect();
+    Some(SliceIdentity {
+        track_name,
+        name_path,
+    })
+}
+
+/// Inverse of `slice_identity`: in `p`, find the slice with the given track
+/// name and root-to-leaf name path. None if anything along the path is
+/// missing.
+fn find_slice_by_identity(p: &Profile, id: &SliceIdentity) -> Option<u32> {
+    let track_id = p.tracks.iter().enumerate().find_map(|(i, t)| {
+        (p.strings.get(t.name) == id.track_name).then_some(TrackId(i as u32))
+    })?;
+    if id.name_path.is_empty() {
+        return None;
+    }
+    // Walk down each depth, picking the first slice that matches the name
+    // and (for depth > 0) is contained in the current parent's range.
+    let mut parent_range: Option<(u64, u64)> = None;
+    let mut found: Option<u32> = None;
+    for (depth_idx, frame_name) in id.name_path.iter().enumerate() {
+        let depth = depth_idx as u16;
+        let row = p.slices.rows.get(&(track_id, depth))?;
+        let mut next: Option<u32> = None;
+        for j in row.clone() {
+            let n = p.strings.get(p.slices.name[j as usize]);
+            if n != frame_name {
+                continue;
+            }
+            let s = p.slices.start_ns[j as usize];
+            let e = s + p.slices.dur_ns[j as usize];
+            if let Some((ps, pe)) = parent_range {
+                if s < ps || e > pe {
+                    continue;
+                }
+            }
+            next = Some(j);
+            break;
+        }
+        let n = next?;
+        parent_range = Some((
+            p.slices.start_ns[n as usize],
+            p.slices.start_ns[n as usize] + p.slices.dur_ns[n as usize],
+        ));
+        found = Some(n);
+    }
+    found
 }
 
 fn format_duration(ns: u64) -> String {

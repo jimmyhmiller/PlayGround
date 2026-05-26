@@ -189,16 +189,30 @@ fn spawn_in_pty(
         // claude-statusline-bridge) identify which of our terminal panes
         // they are running in, so per-terminal widgets can match by id.
         //
-        // Default cwd to $HOME so new terminals don't inherit whatever
-        // the editor was launched from. The inference layer may later
-        // override this per-project once we've learned a sensible
-        // default for that project.
-        let home = std::env::var_os("HOME").unwrap_or_else(|| "/".into());
+        // Per-pane initial cwd. The editor side sets
+        // `EDITOR_IDEA_TERMINAL_INITIAL_CWD` on the daemon's spawn env
+        // when the pane belongs to a project with a remembered
+        // `default_cwd` (populated by the inference layer). When the
+        // var is absent we fall back to $HOME so new terminals don't
+        // inherit the editor binary's cwd (AppKit launches with `/`).
+        //
+        // We resolve HOME defensively the same way `default_shell_command`
+        // resolves $SHELL — some launchd contexts strip $HOME from env.
+        let home = resolve_home();
+        let initial_cwd: std::path::PathBuf = std::env::var_os("EDITOR_IDEA_TERMINAL_INITIAL_CWD")
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(|| home.clone());
         let mut cmd = Command::new(program);
         cmd.args(args)
-            .current_dir(&home)
+            .current_dir(&initial_cwd)
+            .env("HOME", &home)
             .env("TERM", "xterm-256color")
-            .env("EDITOR_IDEA_TERMINAL_SESSION_ID", session_id.to_string());
+            .env("EDITOR_IDEA_TERMINAL_SESSION_ID", session_id.to_string())
+            // Don't leak our private signalling var into the user's
+            // shell; remove_env unsets it for the spawned process.
+            .env_remove("EDITOR_IDEA_TERMINAL_INITIAL_CWD");
         // Shell-integration injection (OSC 7 emission on cd / prompt).
         // No-op for shells we don't recognise.
         for (k, v) in crate::shell_integration::env_overrides_for(Path::new(program)) {
@@ -214,6 +228,24 @@ fn spawn_in_pty(
     // explicitly via close() at shutdown.
     std::mem::forget(master);
     Ok((master_fd, Pid::from_raw(pid)))
+}
+
+/// Best-effort lookup of the current user's home directory. AppKit-
+/// launched apps reliably have `$HOME` set, but launchd / detached
+/// daemon paths sometimes strip it; fall back to passwd lookup the way
+/// `default_shell_command` does. Returns `/` only if both routes fail —
+/// at that point the user's environment is broken in a way we shouldn't
+/// silently paper over.
+fn resolve_home() -> std::path::PathBuf {
+    if let Some(h) = std::env::var_os("HOME") {
+        if !h.is_empty() {
+            return std::path::PathBuf::from(h);
+        }
+    }
+    if let Ok(Some(user)) = nix::unistd::User::from_uid(nix::unistd::getuid()) {
+        return user.dir;
+    }
+    std::path::PathBuf::from("/")
 }
 
 /// Cap on `pty_write_buf` (inbound, daemon → PTY). Pastes the size of

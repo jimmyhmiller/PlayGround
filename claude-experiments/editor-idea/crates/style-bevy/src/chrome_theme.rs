@@ -62,28 +62,28 @@ fn write_text_style(theme: &Theme, mut text_style: ResMut<ChromeTextStyle>) {
 }
 
 fn write_style(theme: &Theme, mut style: ResMut<ChromeStyle>) {
+    let v4 = |c: bevy::color::LinearRgba| Vec4::new(c.red, c.green, c.blue, c.alpha);
     let bg = theme.color(tokens::PANE_BG);
     let border = theme.color(tokens::PANE_BORDER);
     let border_focused = theme.color(tokens::PANE_BORDER_FOCUSED);
     let focus_glow = theme.color(tokens::PANE_FOCUS_GLOW);
+    let title_bg = theme.color(tokens::CHROME_TITLE_BG);
+    let title_bg_focused = theme.color(tokens::CHROME_TITLE_BG_FOCUSED);
 
-    style.bg = Vec4::new(bg.red, bg.green, bg.blue, bg.alpha);
-    style.border = Vec4::new(border.red, border.green, border.blue, border.alpha);
-    style.border_focused = Vec4::new(
-        border_focused.red,
-        border_focused.green,
-        border_focused.blue,
-        border_focused.alpha,
-    );
+    style.bg = v4(bg);
+    style.border = v4(border);
+    style.border_focused = v4(border_focused);
     style.focus_glow = Vec4::new(focus_glow.red, focus_glow.green, focus_glow.blue, 1.0);
     style.corner_radius = theme.f32(tokens::PANE_CORNER_RADIUS);
     style.border_width = theme.f32(tokens::PANE_BORDER_WIDTH);
     style.border_width_focused = theme.f32(tokens::PANE_BORDER_WIDTH_FOCUSED);
     style.focus_width = theme.f32(tokens::PANE_FOCUS_WIDTH);
     style.focus_strength = theme.f32(tokens::PANE_FOCUS_STRENGTH);
+    style.title_bg = v4(title_bg);
+    style.title_bg_focused = v4(title_bg_focused);
 
     let shadow = theme.color(tokens::PANE_SHADOW_COLOR);
-    style.shadow_color = Vec4::new(shadow.red, shadow.green, shadow.blue, shadow.alpha);
+    style.shadow_color = v4(shadow);
     style.shadow_blur = theme.f32(tokens::PANE_SHADOW_BLUR);
     style.shadow_offset_y = theme.f32(tokens::PANE_SHADOW_OFFSET_Y);
 }

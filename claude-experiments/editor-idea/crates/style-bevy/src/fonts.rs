@@ -62,14 +62,15 @@ impl FontRegistry {
 
 /// Per-family bundled bytes. New families add a row here.
 //
-// Until real serif / sans fonts are dropped into the assets dir, both
-// roles route to mono so the renderer still produces output. To add a
-// real font: place `Foo-Regular.ttf` next to JetBrainsMono and add a
-// row here (`("foo", include_bytes!("../assets/fonts/Foo-Regular.ttf"))`).
+// The three bundled families correspond to the FONT_FAMILY_HEADING /
+// BODY / MONO theme tokens. Variable-font files: weight + optical-size
+// axes are baked in; the cosmic-text shaper picks a default instance
+// for now. To add an additional family: drop a `.ttf` next to these
+// and add a row with `include_bytes!`.
 const BUNDLED_FONTS: &[(&str, &[u8])] = &[
     ("mono", include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")),
-    ("sans", include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")),
-    ("serif", include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf")),
+    ("sans", include_bytes!("../assets/fonts/Inter-VF.ttf")),
+    ("serif", include_bytes!("../assets/fonts/CrimsonPro-VF.ttf")),
 ];
 
 pub struct FontRegistryPlugin;

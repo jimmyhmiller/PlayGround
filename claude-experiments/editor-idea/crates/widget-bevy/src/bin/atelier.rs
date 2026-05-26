@@ -1,15 +1,17 @@
-//! Atelier — a showcase widget that reproduces the dark-theme design
+//! Atelier — a showcase widget that reproduces the dark Atelier
 //! mockup using every new Element variant, design token, and Style
-//! override. Verifies the style system is expressive enough end-to-end.
+//! override.
 //!
-//! Run via the host (e.g. set a widget pane's command to
-//! `target/debug/atelier`). The widget is interactive — Tabs, Toggle,
-//! and Input all round-trip through the host.
+//! Run via the host (set a widget pane's command to
+//! `target/debug/atelier`). The widget is interactive: Tabs, Toggle,
+//! Input all round-trip through the host.
 
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 
 use widget_bevy::protocol::{
-    Align, Border, ButtonKind, Element, HostEvent, Shadow, Style, TabItem, Weight, WidgetMsg,
+    Align, Border, ButtonKind, Edges, Element, HostEvent, Shadow, Style, TabItem, Weight,
+    WidgetMsg,
 };
 
 // ---- helpers ----------------------------------------------------------
@@ -17,20 +19,20 @@ use widget_bevy::protocol::{
 fn text(value: &str) -> Element {
     Element::Text {
         value: value.into(),
-        color: None,
-        size: None,
+        color: Some("fg".into()),
+        size: Some(13.0),
         weight: None,
-        family: None,
+        family: Some("font_family_body".into()),
     }
 }
 
-fn text_sized(value: &str, size: f32, color: Option<&str>) -> Element {
+fn muted(value: &str) -> Element {
     Element::Text {
         value: value.into(),
-        color: color.map(str::to_string),
-        size: Some(size),
+        color: Some("fg_muted".into()),
+        size: Some(11.0),
         weight: None,
-        family: None,
+        family: Some("font_family_body".into()),
     }
 }
 
@@ -38,19 +40,31 @@ fn heading(value: &str) -> Element {
     Element::Text {
         value: value.into(),
         color: Some("fg".into()),
-        size: Some(20.0),
+        size: Some(15.0),
         weight: Some(Weight::Bold),
         family: Some("font_family_heading".into()),
     }
 }
 
-fn label(value: &str) -> Element {
+fn eyebrow(value: &str) -> Element {
+    // All-caps section label. Spaced via uppercase characters; Inter
+    // handles tracking better than mono, but at small sizes both read.
+    Element::Text {
+        value: value.to_uppercase().chars().collect::<Vec<_>>().iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "),
+        color: Some("accent".into()),
+        size: Some(9.0),
+        weight: Some(Weight::Bold),
+        family: Some("font_family_body".into()),
+    }
+}
+
+fn mono(value: &str, color: &str) -> Element {
     Element::Text {
         value: value.into(),
-        color: Some("fg_muted".into()),
-        size: Some(11.0),
+        color: Some(color.into()),
+        size: Some(12.0),
         weight: None,
-        family: Some("font_family_body".into()),
+        family: Some("font_family_mono".into()),
     }
 }
 
@@ -76,18 +90,31 @@ fn hstack(gap: f32, children: Vec<Element>) -> Element {
     }
 }
 
-fn card(children: Vec<Element>, surface: &str) -> Element {
-    Element::Frame {
-        gap: 8.0,
-        pad: 12.0,
+fn hstack_top(gap: f32, children: Vec<Element>) -> Element {
+    Element::Hstack {
+        gap,
+        pad: 0.0,
+        align: Align::Start,
         children,
+        style: None,
+    }
+}
+
+fn card(eyebrow_text: &str, title: &str, body: Vec<Element>) -> Element {
+    let mut kids = vec![
+        eyebrow(eyebrow_text),
+        heading(title),
+        spacer(2.0),
+    ];
+    kids.extend(body);
+    Element::Frame {
+        gap: 6.0,
+        pad: 16.0,
+        children: kids,
         style: Some(Style {
-            background: Some(surface.into()),
+            background: Some("surface_2".into()),
             radius: Some("radius_md".into()),
-            border: Some(Border {
-                color: "chrome_divider".into(),
-                width: 1.0,
-            }),
+            border: Some(Border { color: "chrome_divider".into(), width: 1.0 }),
             shadow: Some(Shadow {
                 token: Some("shadow_sm".into()),
                 ..Default::default()
@@ -97,120 +124,205 @@ fn card(children: Vec<Element>, surface: &str) -> Element {
     }
 }
 
-fn swatch_row() -> Element {
-    let colors = [
-        "#c9a96a", "#5f7e9e", "#7a8e9c", "#cdb89a", "#b96a4a", "#3e6e6c", "#2a3346", "#1a1f2c",
-        "#0f1218",
+// ---- sections ---------------------------------------------------------
+
+fn palette_card() -> Element {
+    let colors: &[(&str, &str)] = &[
+        ("#c9a96a", "Gold"),
+        ("#5f7e9e", "Mist"),
+        ("#7a8e9c", "Stone"),
+        ("#cdb89a", "Bone"),
+        ("#b96a4a", "Clay"),
+        ("#3e6e6c", "Teal"),
+        ("#2a3346", "Ink"),
+        ("#1a1f2c", "Pitch"),
     ];
-    let kids: Vec<Element> = colors
+    let swatch_with_label = |hex: &str, name: &str| -> Element {
+        vstack(
+            4.0,
+            0.0,
+            vec![
+                Element::Frame {
+                    gap: 0.0,
+                    pad: 0.0,
+                    children: vec![Element::Spacer { size: 28.0 }],
+                    style: Some(Style {
+                        background: Some(hex.into()),
+                        radius: Some("radius_sm".into()),
+                        padding: Some(Edges::symmetric(14.0, 0.0)),
+                        ..Default::default()
+                    }),
+                },
+                Element::Text {
+                    value: name.into(),
+                    color: Some("fg_muted".into()),
+                    size: Some(9.0),
+                    weight: None,
+                    family: Some("font_family_body".into()),
+                },
+            ],
+        )
+    };
+    let tiles: Vec<Element> = colors
         .iter()
-        .map(|c| Element::Swatch {
-            color: (*c).into(),
-            size: 28.0,
-            id: None,
-        })
+        .map(|(hex, name)| swatch_with_label(hex, name))
         .collect();
-    hstack(6.0, kids)
+    let row1 = hstack(6.0, tiles[..4].to_vec());
+    let row2 = hstack(6.0, tiles[4..].to_vec());
+    card("color palette", "Atelier", vec![vstack(8.0, 0.0, vec![row1, row2])])
 }
 
-fn radius_row() -> Element {
-    let radii = [("xs", "radius_xs"), ("sm", "radius_sm"), ("md", "radius_md"), ("lg", "radius_lg"), ("pill", "radius_pill")];
-    let kids: Vec<Element> = radii
-        .iter()
-        .map(|(_name, token)| {
-            Element::Frame {
-                gap: 0.0,
-                pad: 0.0,
-                children: vec![],
-                style: Some(Style {
-                    background: Some("surface_3".into()),
-                    radius: Some((*token).into()),
-                    ..Default::default()
-                }),
-            }
-        })
-        .collect();
-    // Wrap each in an Hstack with a fixed-size Frame inside doesn't work
-    // since Frame measures from children — give each its own swatch
-    // sized via Spacer trick: stack the frame over a sized spacer.
-    let sized: Vec<Element> = kids
-        .into_iter()
-        .zip(radii.iter())
-        .map(|(frame, (_n, _t))| {
-            // Use a Frame whose content is a 40×40 spacer.
-            let Element::Frame { style, .. } = frame else {
-                unreachable!()
-            };
-            Element::Frame {
-                gap: 0.0,
-                pad: 0.0,
-                children: vec![Element::Spacer { size: 40.0 }],
-                style,
-            }
-        })
-        .collect();
-    hstack(10.0, sized)
-}
-
-fn shadow_row() -> Element {
-    let shadows = ["shadow_sm", "shadow_md", "shadow_lg"];
-    let kids: Vec<Element> = shadows
-        .iter()
-        .map(|token| Element::Frame {
-            gap: 0.0,
-            pad: 0.0,
-            children: vec![Element::Spacer { size: 48.0 }],
-            style: Some(Style {
-                background: Some("surface_3".into()),
-                radius: Some("radius_md".into()),
-                shadow: Some(Shadow {
-                    token: Some((*token).into()),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }),
-        })
-        .collect();
-    hstack(20.0, kids)
-}
-
-fn typography_row() -> Element {
-    let tiles = [
-        ("Aa", "font_family_heading", 28.0, "Display"),
-        ("Aa", "font_family_body", 18.0, "Body"),
-        ("Aa", "font_family_mono", 14.0, "Mono"),
-    ];
-    let kids: Vec<Element> = tiles
-        .iter()
-        .map(|(g, family, size, name)| Element::Frame {
+fn typography_card() -> Element {
+    let tile = |glyph: &str, family: &str, size: f32, name: &str| -> Element {
+        Element::Frame {
             gap: 4.0,
             pad: 10.0,
             children: vec![
                 Element::Text {
-                    value: (*g).into(),
+                    value: glyph.into(),
                     color: Some("accent".into()),
-                    size: Some(*size),
+                    size: Some(size),
                     weight: Some(Weight::Bold),
-                    family: Some((*family).into()),
+                    family: Some(family.into()),
                 },
-                label(name),
+                Element::Text {
+                    value: name.into(),
+                    color: Some("fg_muted".into()),
+                    size: Some(9.0),
+                    weight: None,
+                    family: Some("font_family_body".into()),
+                },
             ],
             style: Some(Style {
-                background: Some("surface_2".into()),
+                background: Some("surface_3".into()),
                 radius: Some("radius_sm".into()),
-                border: Some(Border {
-                    color: "chrome_divider".into(),
-                    width: 1.0,
-                }),
+                padding: Some(Edges::symmetric(12.0, 8.0)),
                 ..Default::default()
             }),
-        })
-        .collect();
-    hstack(8.0, kids)
+        }
+    };
+    card(
+        "typography",
+        "Aa",
+        vec![hstack(
+            8.0,
+            vec![
+                tile("Aa", "font_family_heading", 26.0, "DISPLAY"),
+                tile("Aa", "font_family_body", 18.0, "BODY"),
+                tile("Aa", "font_family_mono", 14.0, "MONO"),
+            ],
+        )],
+    )
 }
 
-fn button_row() -> Element {
-    hstack(
+fn radii_card() -> Element {
+    let radii = [
+        ("xs", "radius_xs"),
+        ("sm", "radius_sm"),
+        ("md", "radius_md"),
+        ("lg", "radius_lg"),
+        ("pill", "radius_pill"),
+    ];
+    let tile = |name: &str, token: &str| -> Element {
+        vstack(
+            4.0,
+            0.0,
+            vec![
+                Element::Frame {
+                    gap: 0.0,
+                    pad: 0.0,
+                    children: vec![Element::Spacer { size: 30.0 }],
+                    style: Some(Style {
+                        background: Some("accent_800".into()),
+                        radius: Some(token.into()),
+                        padding: Some(Edges::symmetric(16.0, 0.0)),
+                        ..Default::default()
+                    }),
+                },
+                Element::Text {
+                    value: name.into(),
+                    color: Some("fg_muted".into()),
+                    size: Some(9.0),
+                    weight: None,
+                    family: Some("font_family_body".into()),
+                },
+            ],
+        )
+    };
+    let tiles: Vec<Element> = radii.iter().map(|(n, t)| tile(n, t)).collect();
+    card("radii", "Corners", vec![hstack(6.0, tiles)])
+}
+
+fn shadows_card() -> Element {
+    let shadows = [("sm", "shadow_sm"), ("md", "shadow_md"), ("lg", "shadow_lg")];
+    let tile = |name: &str, token: &str| -> Element {
+        vstack(
+            6.0,
+            0.0,
+            vec![
+                Element::Frame {
+                    gap: 0.0,
+                    pad: 0.0,
+                    children: vec![Element::Spacer { size: 36.0 }],
+                    style: Some(Style {
+                        background: Some("surface_1".into()),
+                        radius: Some("radius_sm".into()),
+                        border: Some(Border { color: "chrome_divider".into(), width: 1.0 }),
+                        shadow: Some(Shadow {
+                            token: Some(token.into()),
+                            ..Default::default()
+                        }),
+                        padding: Some(Edges::symmetric(22.0, 0.0)),
+                        ..Default::default()
+                    }),
+                },
+                Element::Text {
+                    value: name.into(),
+                    color: Some("fg_muted".into()),
+                    size: Some(9.0),
+                    weight: None,
+                    family: Some("font_family_body".into()),
+                },
+            ],
+        )
+    };
+    let tiles: Vec<Element> = shadows.iter().map(|(n, t)| tile(n, t)).collect();
+    card("shadows", "Elevation", vec![hstack(14.0, tiles)])
+}
+
+fn spacing_card() -> Element {
+    let steps = [("xs", 4.0), ("sm", 8.0), ("md", 12.0), ("lg", 20.0), ("xl", 32.0)];
+    let row = |name: &str, w: f32| -> Element {
+        hstack(
+            8.0,
+            vec![
+                Element::Frame {
+                    gap: 0.0,
+                    pad: 0.0,
+                    children: vec![Element::Spacer { size: 4.0 }],
+                    style: Some(Style {
+                        background: Some("accent_600".into()),
+                        radius: Some("radius_xs".into()),
+                        padding: Some(Edges::symmetric(w * 0.5, 0.0)),
+                        ..Default::default()
+                    }),
+                },
+                Element::Text {
+                    value: name.into(),
+                    color: Some("fg_muted".into()),
+                    size: Some(10.0),
+                    weight: None,
+                    family: Some("font_family_mono".into()),
+                },
+            ],
+        )
+    };
+    let rows: Vec<Element> = steps.iter().map(|(n, w)| row(n, *w)).collect();
+    card("spacing", "Rhythm", vec![vstack(6.0, 0.0, rows)])
+}
+
+fn components_card() -> Element {
+    let buttons = hstack(
         8.0,
         vec![
             Element::Button {
@@ -232,182 +344,366 @@ fn button_row() -> Element {
                 style: None,
             },
         ],
-    )
-}
-
-fn dos_donts() -> Element {
-    let ok: Vec<&str> = vec![
-        "Use the surface ladder",
-        "Pair serif heading + sans body",
-        "Lift cards with shadow_sm",
-    ];
-    let bad: Vec<&str> = vec![
-        "Mix four accent hues",
-        "Stack three nested shadows",
-        "Trust radius_pill on tiny chips",
-    ];
-    let col = |title: &str, color: &str, items: &[&str]| -> Element {
-        let mut kids: Vec<Element> = vec![Element::Text {
-            value: title.into(),
-            color: Some(color.into()),
-            size: Some(13.0),
-            weight: Some(Weight::Bold),
-            family: Some("font_family_body".into()),
-        }];
-        for it in items {
-            kids.push(hstack(
-                6.0,
-                vec![
-                    Element::Text {
-                        value: if color.contains("success") || color.starts_with("#5") {
-                            "✓".into()
-                        } else {
-                            "✗".into()
-                        },
-                        color: Some(color.into()),
-                        size: Some(12.0),
-                        weight: Some(Weight::Bold),
-                        family: None,
-                    },
-                    text(it),
-                ],
-            ));
-        }
-        vstack(4.0, 0.0, kids)
-    };
-    hstack(
-        24.0,
+    );
+    let bars = vstack(
+        4.0,
+        0.0,
         vec![
-            col("Do", "status_success", &ok),
-            col("Don't", "status_failed", &bad),
-        ],
-    )
-}
-
-fn build_frame(active_tab: &str, dark_mode: bool, search_value: &str) -> Element {
-    let palette_card = card(
-        vec![heading("Color palette"), swatch_row()],
-        "surface_2",
-    );
-    let typography_card = card(
-        vec![heading("Typography"), typography_row()],
-        "surface_2",
-    );
-    let radius_card = card(
-        vec![heading("Radii"), radius_row()],
-        "surface_2",
-    );
-    let shadow_card = card(
-        vec![heading("Shadows"), shadow_row()],
-        "surface_2",
-    );
-    let components_card = card(
-        vec![
-            heading("Components"),
-            button_row(),
-            Element::Tabs {
-                id: "demo".into(),
-                items: vec![
-                    TabItem { id: "overview".into(), label: "Overview".into() },
-                    TabItem { id: "tokens".into(), label: "Tokens".into() },
-                    TabItem { id: "components".into(), label: "Components".into() },
-                ],
-                selected: active_tab.into(),
-                style: None,
-            },
             hstack(
-                12.0,
+                8.0,
                 vec![
-                    Element::Toggle {
-                        id: "darkmode".into(),
-                        label: "Dark mode".into(),
-                        checked: dark_mode,
-                        style: None,
-                    },
+                    muted("Progress"),
                     Element::Bar {
-                        value: 0.62,
+                        value: 0.72,
                         max: 1.0,
                         color: Some("accent".into()),
                         track: Some("surface_3".into()),
-                        width: 160.0,
-                        height: 8.0,
+                        width: 140.0,
+                        height: 6.0,
                     },
                 ],
             ),
-            Element::Input {
-                id: "search".into(),
-                value: search_value.into(),
-                placeholder: "Search components…".into(),
-                focused: false,
-                width: 280.0,
-                style: None,
-            },
-        ],
-        "surface_2",
-    );
-    let list_card = card(
-        vec![
-            heading("List"),
-            Element::ListItem {
-                id: "row-1".into(),
-                children: vec![text("Primary buttons")],
-                gap: 0.0,
-                pad: 8.0,
-                selected: true,
-                style: None,
-            },
-            Element::ListItem {
-                id: "row-2".into(),
-                children: vec![text("Secondary toggles")],
-                gap: 0.0,
-                pad: 8.0,
-                selected: false,
-                style: None,
-            },
-            Element::ListItem {
-                id: "row-3".into(),
-                children: vec![text("Input fields")],
-                gap: 0.0,
-                pad: 8.0,
-                selected: false,
-                style: None,
-            },
-        ],
-        "surface_2",
-    );
-    let dos_card = card(vec![heading("Do & Don't"), dos_donts()], "surface_2");
-
-    vstack(
-        16.0,
-        16.0,
-        vec![
-            // Title strip
             hstack(
-                12.0,
+                8.0,
                 vec![
-                    Element::Text {
-                        value: "Atelier".into(),
-                        color: Some("fg".into()),
-                        size: Some(28.0),
-                        weight: Some(Weight::Bold),
-                        family: Some("font_family_heading".into()),
+                    muted("Storage"),
+                    Element::Bar {
+                        value: 0.34,
+                        max: 1.0,
+                        color: Some("status_success".into()),
+                        track: Some("surface_3".into()),
+                        width: 140.0,
+                        height: 6.0,
                     },
-                    text_sized("Elegant & tactile", 14.0, Some("fg_muted")),
                 ],
             ),
-            divider(),
-            // Top row
-            hstack(
-                16.0,
-                vec![palette_card, typography_card, radius_card, shadow_card],
-            ),
-            spacer(4.0),
-            // Middle
-            components_card,
-            spacer(4.0),
-            hstack(16.0, vec![list_card, dos_card]),
+        ],
+    );
+    card(
+        "components",
+        "Primitives",
+        vec![
+            buttons,
+            spacer(2.0),
+            bars,
         ],
     )
+}
+
+fn code_card() -> Element {
+    // Hand-tokenized snippet so each token can carry the right
+    // SYNTAX_* color. Reads as JS-ish on purpose.
+    let line1 = hstack(
+        0.0,
+        vec![
+            mono("const ", "syntax_keyword"),
+            mono("theme ", "syntax_variable"),
+            mono("= ", "syntax_operator"),
+            mono("{", "syntax_punctuation"),
+        ],
+    );
+    let line2 = hstack(
+        0.0,
+        vec![
+            mono("  accent: ", "syntax_property"),
+            mono("\"#c9a96a\"", "syntax_string"),
+            mono(",", "syntax_punctuation"),
+        ],
+    );
+    let line3 = hstack(
+        0.0,
+        vec![
+            mono("  shadow: ", "syntax_property"),
+            mono("Shadow", "syntax_type"),
+            mono(".", "syntax_punctuation"),
+            mono("md", "syntax_function"),
+            mono("(),", "syntax_punctuation"),
+        ],
+    );
+    let line4 = hstack(
+        0.0,
+        vec![
+            mono("  fonts: ", "syntax_property"),
+            mono("[", "syntax_punctuation"),
+            mono("\"serif\"", "syntax_string"),
+            mono(", ", "syntax_punctuation"),
+            mono("\"sans\"", "syntax_string"),
+            mono("]", "syntax_punctuation"),
+            mono(",", "syntax_punctuation"),
+        ],
+    );
+    let line5 = mono("};", "syntax_punctuation");
+    let line6 = mono("// rebuild + ship", "syntax_comment");
+    let body = Element::Frame {
+        gap: 2.0,
+        pad: 12.0,
+        children: vec![line1, line2, line3, line4, line5, spacer(4.0), line6],
+        style: Some(Style {
+            background: Some("surface_1".into()),
+            radius: Some("radius_sm".into()),
+            border: Some(Border { color: "chrome_divider".into(), width: 1.0 }),
+            ..Default::default()
+        }),
+    };
+    card("code", "Tokens in use", vec![body])
+}
+
+fn list_card(selected: &str) -> Element {
+    let items = [
+        ("buttons", "Primary buttons", "12 px radius, gold fill"),
+        ("inputs", "Input fields", "Slate well, accent caret"),
+        ("toggles", "Toggle switches", "Pill track, knob slides"),
+        ("tabs", "Tab strips", "Accent underline"),
+    ];
+    let rows: Vec<Element> = items
+        .iter()
+        .map(|(id, title, sub)| Element::ListItem {
+            id: (*id).into(),
+            children: vec![
+                Element::Text {
+                    value: (*title).into(),
+                    color: Some("fg".into()),
+                    size: Some(13.0),
+                    weight: Some(Weight::Bold),
+                    family: Some("font_family_body".into()),
+                },
+                muted(sub),
+            ],
+            gap: 2.0,
+            pad: 8.0,
+            selected: *id == selected,
+            style: Some(Style {
+                radius: Some("radius_sm".into()),
+                padding: Some(Edges { top: 6.0, right: 10.0, bottom: 6.0, left: 10.0 }),
+                ..Default::default()
+            }),
+        })
+        .collect();
+    card("anatomy", "Application shell", rows)
+}
+
+fn dos_donts_card() -> Element {
+    // Single-column layout — the previous side-by-side hstack of
+    // do/don't overflowed because the inner text widths didn't
+    // intrinsically fit half a card. A vertical list reads cleanly at
+    // any card width.
+    let row = |ok: bool, msg: &str| -> Element {
+        let mark_color = if ok { "status_success" } else { "status_failed" };
+        hstack(
+            8.0,
+            vec![
+                Element::Text {
+                    value: if ok { "✓".into() } else { "✗".into() },
+                    color: Some(mark_color.into()),
+                    size: Some(12.0),
+                    weight: Some(Weight::Bold),
+                    family: Some("font_family_body".into()),
+                },
+                muted(msg),
+            ],
+        )
+    };
+    card(
+        "guidelines",
+        "Do & Don't",
+        vec![
+            row(true, "Use the surface ladder"),
+            row(true, "Pair serif heading + sans body"),
+            row(true, "Lift cards with shadow_sm"),
+            spacer(4.0),
+            row(false, "Mix four accent hues"),
+            row(false, "Stack three nested shadows"),
+            row(false, "Trust radius_pill on tiny chips"),
+        ],
+    )
+}
+
+fn textures_card(textures_dir: &str) -> Element {
+    let tile = |path: &str, label: &str| -> Element {
+        let style = Style {
+            background_image: Some(format!("{}/{}", textures_dir, path)),
+            radius: Some("radius_sm".into()),
+            border: Some(Border { color: "chrome_divider".into(), width: 1.0 }),
+            ..Default::default()
+        };
+        vstack(
+            6.0,
+            0.0,
+            vec![
+                Element::Frame {
+                    gap: 0.0,
+                    pad: 0.0,
+                    children: vec![Element::Spacer { size: 78.0 }],
+                    style: Some(Style {
+                        padding: Some(Edges::symmetric(60.0, 0.0)),
+                        ..style
+                    }),
+                },
+                muted(label),
+            ],
+        )
+    };
+    card(
+        "textures & motifs",
+        "Atmosphere",
+        vec![hstack_top(
+            10.0,
+            vec![
+                tile("fabric.png", "Linen"),
+                tile("landscape.png", "Twilight"),
+                tile("candle.png", "Embers"),
+            ],
+        )],
+    )
+}
+
+fn header() -> Element {
+    let title = Element::Text {
+        value: "Atelier".into(),
+        color: Some("fg".into()),
+        size: Some(48.0),
+        weight: Some(Weight::Bold),
+        family: Some("font_family_heading".into()),
+    };
+    let subtitle = Element::Text {
+        value: "Elegant & tactile".into(),
+        color: Some("fg_muted".into()),
+        size: Some(15.0),
+        weight: None,
+        family: Some("font_family_heading".into()),
+    };
+    let release = Element::Frame {
+        gap: 0.0,
+        pad: 0.0,
+        children: vec![Element::Text {
+            value: "THEME · 01".into(),
+            color: Some("accent".into()),
+            size: Some(10.0),
+            weight: Some(Weight::Bold),
+            family: Some("font_family_body".into()),
+        }],
+        style: Some(Style {
+            border: Some(Border { color: "accent_700".into(), width: 1.0 }),
+            radius: Some("radius_pill".into()),
+            padding: Some(Edges::symmetric(10.0, 4.0)),
+            ..Default::default()
+        }),
+    };
+    Element::Hstack {
+        gap: 16.0,
+        pad: 0.0,
+        align: Align::Center,
+        children: vec![title, subtitle, Element::Spacer { size: 220.0 }, release],
+        style: None,
+    }
+}
+
+fn intro_card(search: &str, dark_mode: bool) -> Element {
+    let blurb = Element::Text {
+        value: "A warm, tactile dark theme. Slate cards lifted on \
+                soft shadows; gold accent reserved for action; serif \
+                heading paired with a clean sans for body."
+            .into(),
+        color: Some("fg_muted".into()),
+        size: Some(12.0),
+        weight: None,
+        family: Some("font_family_body".into()),
+    };
+    let controls = hstack(
+        12.0,
+        vec![
+            Element::Toggle {
+                id: "darkmode".into(),
+                label: "Dark mode".into(),
+                checked: dark_mode,
+                style: None,
+            },
+            Element::Toggle {
+                id: "compact".into(),
+                label: "Compact".into(),
+                checked: false,
+                style: None,
+            },
+            Element::Spacer { size: 16.0 },
+            Element::Input {
+                id: "search".into(),
+                value: search.into(),
+                placeholder: "Search tokens…".into(),
+                focused: false,
+                width: 220.0,
+                style: None,
+            },
+        ],
+    );
+    Element::Frame {
+        gap: 10.0,
+        pad: 18.0,
+        children: vec![blurb, controls],
+        style: Some(Style {
+            background: Some("surface_2".into()),
+            radius: Some("radius_lg".into()),
+            border: Some(Border { color: "chrome_divider".into(), width: 1.0 }),
+            shadow: Some(Shadow {
+                token: Some("shadow_md".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
+    }
+}
+
+fn tabs_strip(active: &str) -> Element {
+    Element::Tabs {
+        id: "section".into(),
+        items: vec![
+            TabItem { id: "tokens".into(), label: "Tokens".into() },
+            TabItem { id: "components".into(), label: "Components".into() },
+            TabItem { id: "shell".into(), label: "Shell".into() },
+            TabItem { id: "atmosphere".into(), label: "Atmosphere".into() },
+        ],
+        selected: active.into(),
+        style: None,
+    }
+}
+
+fn build_frame(
+    active_tab: &str,
+    dark_mode: bool,
+    search_value: &str,
+    selected_row: &str,
+    textures_dir: &str,
+) -> Element {
+    // Two rows of small tokens cards, four cards each row at ~250 px
+    // — fits the pane width without clipping and reads as a magazine
+    // spread of design-token reference plates.
+    let tokens_row_1 = hstack_top(
+        12.0,
+        vec![palette_card(), typography_card(), spacing_card()],
+    );
+    let tokens_row_2 = hstack_top(12.0, vec![radii_card(), shadows_card()]);
+    let middle = hstack_top(14.0, vec![components_card(), code_card()]);
+    let bottom = hstack_top(14.0, vec![list_card(selected_row), dos_donts_card()]);
+    let atmosphere = textures_card(textures_dir);
+
+    Element::Vstack {
+        gap: 14.0,
+        // No outer pad — h1 sits flush with the top of the content
+        // area. The pane chrome already provides MARGIN; doubling it
+        // up reads as accidental whitespace.
+        pad: 0.0,
+        children: vec![
+            header(),
+            intro_card(search_value, dark_mode),
+            tabs_strip(active_tab),
+            divider(),
+            tokens_row_1,
+            tokens_row_2,
+            middle,
+            bottom,
+            atmosphere,
+        ],
+        style: None,
+    }
 }
 
 // ---- main loop --------------------------------------------------------
@@ -416,6 +712,12 @@ fn main() {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut out = stdout.lock();
+
+    // Resolve textures dir relative to this binary so the host can
+    // launch it from anywhere. Fall back to a CWD-relative path that
+    // works when running from the workspace root.
+    let textures_dir = textures_dir_path();
+
     let _ = writeln!(
         out,
         "{}",
@@ -424,10 +726,18 @@ fn main() {
         })
         .unwrap()
     );
-    let mut active_tab = String::from("overview");
+    let mut active_tab = String::from("tokens");
     let mut dark_mode = true;
     let mut search_value = String::new();
-    emit_frame(&mut out, &active_tab, dark_mode, &search_value);
+    let mut selected_row = String::from("buttons");
+    emit_frame(
+        &mut out,
+        &active_tab,
+        dark_mode,
+        &search_value,
+        &selected_row,
+        &textures_dir,
+    );
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
@@ -436,7 +746,7 @@ fn main() {
         };
         match evt {
             HostEvent::Close => return,
-            HostEvent::TabSelect { id: _, tab } => {
+            HostEvent::TabSelect { id, tab } if id == "section" => {
                 active_tab = tab;
             }
             HostEvent::Toggle { id, checked } if id == "darkmode" => {
@@ -445,19 +755,59 @@ fn main() {
             HostEvent::InputChange { id, value } if id == "search" => {
                 search_value = value;
             }
-            HostEvent::Click { .. }
-            | HostEvent::Init { .. }
-            | HostEvent::Resize { .. }
-            | HostEvent::Refresh => {}
+            HostEvent::Click { id } => {
+                // ListItem rows emit a plain Click.
+                selected_row = id;
+            }
             _ => continue,
         }
-        emit_frame(&mut out, &active_tab, dark_mode, &search_value);
+        emit_frame(
+            &mut out,
+            &active_tab,
+            dark_mode,
+            &search_value,
+            &selected_row,
+            &textures_dir,
+        );
     }
 }
 
-fn emit_frame<W: Write>(out: &mut W, tab: &str, dark: bool, search: &str) {
+fn textures_dir_path() -> String {
+    // 1. <bin>/../../crates/widget-bevy/assets/textures (running from target/{debug,release})
+    if let Ok(exe) = std::env::current_exe() {
+        let mut p = exe.clone();
+        for _ in 0..3 {
+            if !p.pop() { break; }
+        }
+        let candidate = p
+            .join("crates")
+            .join("widget-bevy")
+            .join("assets")
+            .join("textures");
+        if candidate.exists() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    // 2. workspace-root-relative
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let candidate = cwd
+        .join("crates")
+        .join("widget-bevy")
+        .join("assets")
+        .join("textures");
+    candidate.to_string_lossy().into_owned()
+}
+
+fn emit_frame<W: Write>(
+    out: &mut W,
+    tab: &str,
+    dark: bool,
+    search: &str,
+    selected_row: &str,
+    textures_dir: &str,
+) {
     let msg = WidgetMsg::Frame {
-        root: build_frame(tab, dark, search),
+        root: build_frame(tab, dark, search, selected_row, textures_dir),
     };
     if let Ok(s) = serde_json::to_string(&msg) {
         let _ = writeln!(out, "{}", s);

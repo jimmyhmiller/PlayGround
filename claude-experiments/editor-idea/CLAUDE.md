@@ -32,7 +32,8 @@ Same for "the editor" → `editor-bevy`.
 
 ## libghostty-vt patch
 
-`Cargo.toml` patches `libghostty-vt` / `libghostty-vt-sys` to a local
-vendored copy at `../libghostty-rs-vendored`. The vendored `build.rs`
-forces `zig build -Doptimize=ReleaseFast` — upstream defaults to Debug,
-which makes `vt_write` 100×+ slower. Don't drop the patch.
+`Cargo.toml` pins `libghostty-vt` / `libghostty-vt-sys` to a git rev of
+`Uzaaft/libghostty-rs` that includes the zig optimize-mode fix (upstream
+`3378f0b`). Without it, vendored ghostty builds default to zig Debug,
+which makes `vt_write` 100x+ slower. Crates.io 0.1.1 predates the fix,
+so the patch has to stay until upstream cuts a new release.

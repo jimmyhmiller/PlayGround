@@ -13,11 +13,17 @@ use bevy::sprite::Anchor;
 use bevy::text::{LineHeight, TextBounds};
 use pane_bevy::PaneFontMetrics;
 
-use crate::protocol::{parse_hex_color, Align, ButtonKind, Element, Style, TabItem, Weight};
+use crate::protocol::{parse_hex_color, Align, ButtonKind, Edges, Element, Style, TabItem, Weight};
 use crate::{ClickKind, ClickTarget, LinkTarget, WidgetTargets};
 
 const DEFAULT_FONT_SIZE: f32 = 13.0;
 const LINE_HEIGHT_MUL: f32 = 1.4;
+/// Threshold above which text is considered a display heading. Display
+/// type uses a tighter line height because the natural 1.4-multiplier
+/// "phone-book" line spacing leaves an obvious empty band above the
+/// glyph at 36px+ sizes.
+const DISPLAY_FONT_THRESHOLD: f32 = 28.0;
+const DISPLAY_LINE_HEIGHT_MUL: f32 = 1.05;
 
 // Colors all flow through `LayoutCtx::palette` (theme-driven). See
 // `WidgetPalette::from_theme` below.
@@ -175,33 +181,74 @@ impl WidgetPalette {
     }
 }
 
+/// Resolve a flow container's effective padding. If the Style carries
+/// an explicit `padding` (asymmetric), it wins; otherwise the
+/// element's symmetric `pad: f32` becomes Edges::all(pad).
+fn effective_padding(style: Option<&Style>, pad: f32) -> Edges {
+    style
+        .and_then(|s| s.padding.as_ref())
+        .copied()
+        .unwrap_or_else(|| Edges::all(pad))
+}
+
 /// Measure an element's intrinsic size without spawning entities. Used
 /// by stack layout (hstack pre-measure for alignment) to decide x/y of
 /// next sibling.
+/// Effective per-line height for `font_size`. Display headings use a
+/// tighter ratio so big titles don't carry an empty band above the
+/// glyph that reads as accidental top margin.
+pub fn line_height(font_size: f32) -> f32 {
+    let mul = if font_size >= DISPLAY_FONT_THRESHOLD {
+        DISPLAY_LINE_HEIGHT_MUL
+    } else {
+        LINE_HEIGHT_MUL
+    };
+    font_size * mul
+}
+
 pub fn measure(el: &Element, metrics: &PaneFontMetrics) -> Vec2 {
     match el {
         Element::Text { value, size, .. } => {
             let s = size.unwrap_or(DEFAULT_FONT_SIZE);
-            Vec2::new(metrics.measure(value, s), s * LINE_HEIGHT_MUL)
+            Vec2::new(metrics.measure(value, s), line_height(s))
         }
         Element::Vstack {
             gap,
             pad,
             children,
-            ..
-        } => measure_stack(children, *gap, *pad, true, metrics),
+            style,
+        } => measure_stack_with_padding(
+            children,
+            *gap,
+            effective_padding(style.as_ref(), *pad),
+            true,
+            metrics,
+        ),
         Element::Hstack {
             gap,
             pad,
             children,
+            style,
             ..
-        } => measure_stack(children, *gap, *pad, false, metrics),
+        } => measure_stack_with_padding(
+            children,
+            *gap,
+            effective_padding(style.as_ref(), *pad),
+            false,
+            metrics,
+        ),
         Element::Frame {
             gap,
             pad,
             children,
-            ..
-        } => measure_stack(children, *gap, *pad, true, metrics),
+            style,
+        } => measure_stack_with_padding(
+            children,
+            *gap,
+            effective_padding(style.as_ref(), *pad),
+            true,
+            metrics,
+        ),
         Element::Scroll {
             gap,
             pad,
@@ -243,8 +290,14 @@ pub fn measure(el: &Element, metrics: &PaneFontMetrics) -> Vec2 {
             Vec2::new(label_w + TOGGLE_TRACK_W, TOGGLE_TRACK_H.max(DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL))
         }
         Element::ListItem {
-            gap, pad, children, ..
-        } => measure_stack(children, *gap, *pad, true, metrics),
+            gap, pad, children, style, ..
+        } => measure_stack_with_padding(
+            children,
+            *gap,
+            effective_padding(style.as_ref(), *pad),
+            true,
+            metrics,
+        ),
         Element::Input { width, .. } => Vec2::new(*width, INPUT_HEIGHT),
         // Canvas is handled by a separate render path in
         // `widget_bevy::render_canvas_items` and never reaches the
@@ -258,6 +311,16 @@ fn measure_stack(
     children: &[Element],
     gap: f32,
     pad: f32,
+    vertical: bool,
+    metrics: &PaneFontMetrics,
+) -> Vec2 {
+    measure_stack_with_padding(children, gap, Edges::all(pad), vertical, metrics)
+}
+
+fn measure_stack_with_padding(
+    children: &[Element],
+    gap: f32,
+    padding: Edges,
     vertical: bool,
     metrics: &PaneFontMetrics,
 ) -> Vec2 {
@@ -277,9 +340,9 @@ fn measure_stack(
         }
     }
     if vertical {
-        Vec2::new(cross + pad * 2.0, main + pad * 2.0)
+        Vec2::new(cross + padding.horizontal(), main + padding.vertical())
     } else {
-        Vec2::new(main + pad * 2.0, cross + pad * 2.0)
+        Vec2::new(main + padding.horizontal(), cross + padding.vertical())
     }
 }
 
@@ -316,14 +379,36 @@ pub fn render(
             gap,
             pad,
             children,
-            ..
-        } => render_stack(commands, ctx, targets, children, origin, *gap, *pad, true, max_w, z),
+            style,
+        } => render_stack_with_padding(
+            commands,
+            ctx,
+            targets,
+            children,
+            origin,
+            *gap,
+            effective_padding(style.as_ref(), *pad),
+            true,
+            max_w,
+            z,
+        ),
         Element::Frame {
             gap,
             pad,
             children,
-            ..
-        } => render_stack(commands, ctx, targets, children, origin, *gap, *pad, true, max_w, z),
+            style,
+        } => render_stack_with_padding(
+            commands,
+            ctx,
+            targets,
+            children,
+            origin,
+            *gap,
+            effective_padding(style.as_ref(), *pad),
+            true,
+            max_w,
+            z,
+        ),
         Element::Scroll {
             gap,
             pad,
@@ -334,9 +419,18 @@ pub fn render(
             pad,
             children,
             align,
-            ..
-        } => render_hstack(
-            commands, ctx, targets, children, origin, *gap, *pad, *align, max_w, z,
+            style,
+        } => render_hstack_with_padding(
+            commands,
+            ctx,
+            targets,
+            children,
+            origin,
+            *gap,
+            effective_padding(style.as_ref(), *pad),
+            *align,
+            max_w,
+            z,
         ),
         Element::Text {
             value,
@@ -408,9 +502,19 @@ pub fn render(
             gap,
             pad,
             selected,
-            ..
+            style,
         } => render_list_item(
-            commands, ctx, targets, id, children, *gap, *pad, *selected, origin, max_w, z,
+            commands,
+            ctx,
+            targets,
+            id,
+            children,
+            *gap,
+            effective_padding(style.as_ref(), *pad),
+            *selected,
+            origin,
+            max_w,
+            z,
         ),
         Element::Input {
             id,
@@ -482,9 +586,36 @@ fn render_stack(
     max_w: f32,
     z: f32,
 ) -> Vec2 {
-    let inner_x = origin.x + pad;
-    let inner_y = origin.y + pad;
-    let inner_max = (max_w - pad * 2.0).max(0.0);
+    render_stack_with_padding(
+        commands,
+        ctx,
+        targets,
+        children,
+        origin,
+        gap,
+        Edges::all(pad),
+        vertical,
+        max_w,
+        z,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_stack_with_padding(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
+    children: &[Element],
+    origin: Vec2,
+    gap: f32,
+    padding: Edges,
+    vertical: bool,
+    max_w: f32,
+    z: f32,
+) -> Vec2 {
+    let inner_x = origin.x + padding.left;
+    let inner_y = origin.y + padding.top;
+    let inner_max = (max_w - padding.horizontal()).max(0.0);
 
     let mut cursor = if vertical { inner_y } else { inner_x };
     let mut cross: f32 = 0.0;
@@ -523,28 +654,28 @@ fn render_stack(
     }
     let main = cursor - if vertical { inner_y } else { inner_x };
     if vertical {
-        Vec2::new(cross + pad * 2.0, main + pad * 2.0)
+        Vec2::new(cross + padding.horizontal(), main + padding.vertical())
     } else {
-        Vec2::new(main + pad * 2.0, cross + pad * 2.0)
+        Vec2::new(main + padding.horizontal(), cross + padding.vertical())
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_hstack(
+fn render_hstack_with_padding(
     commands: &mut Commands,
     ctx: &LayoutCtx,
     targets: &mut WidgetTargets,
     children: &[Element],
     origin: Vec2,
     gap: f32,
-    pad: f32,
+    padding: Edges,
     align: Align,
     max_w: f32,
     z: f32,
 ) -> Vec2 {
-    let inner_x = origin.x + pad;
-    let inner_y = origin.y + pad;
-    let inner_max = (max_w - pad * 2.0).max(0.0);
+    let inner_x = origin.x + padding.left;
+    let inner_y = origin.y + padding.top;
+    let inner_max = (max_w - padding.horizontal()).max(0.0);
 
     // Pre-measure children for cross-axis alignment.
     let sizes: Vec<Vec2> = children.iter().map(|c| measure(c, &ctx.metrics)).collect();
@@ -571,7 +702,7 @@ fn render_hstack(
             cursor += gap;
         }
     }
-    Vec2::new(cursor - inner_x + pad * 2.0, row_h + pad * 2.0)
+    Vec2::new(cursor - inner_x + padding.horizontal(), row_h + padding.vertical())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -636,7 +767,7 @@ pub fn fit_single_line(
     max_w: f32,
     metrics: &PaneFontMetrics,
 ) -> (String, f32, f32) {
-    let h = font_size * LINE_HEIGHT_MUL;
+    let h = line_height(font_size);
     let intrinsic_w = metrics.measure(value, font_size);
     if intrinsic_w <= max_w || max_w <= 0.0 {
         return (value.to_string(), intrinsic_w.min(max_w.max(0.0)), h);
@@ -739,6 +870,9 @@ fn render_button(
     let accent = ctx
         .resolve_color("accent")
         .unwrap_or(Color::srgb(0.42, 0.62, 0.92));
+    let fg = ctx
+        .resolve_color("fg")
+        .unwrap_or(Color::srgb(0.91, 0.90, 0.86));
     let (default_bg, default_border, default_border_w, default_label, draw_shadow) = match kind {
         ButtonKind::Filled => (
             ctx.palette.button_bg,
@@ -751,14 +885,14 @@ fn render_button(
             Color::srgba(0.0, 0.0, 0.0, 0.0),
             accent,
             1.5,
-            accent,
+            fg,
             false,
         ),
         ButtonKind::Ghost => (
             Color::srgba(0.0, 0.0, 0.0, 0.0),
             Color::srgba(0.0, 0.0, 0.0, 0.0),
             0.0,
-            accent,
+            fg,
             false,
         ),
     };
@@ -866,12 +1000,18 @@ fn paint_rounded_panel(
         _pad0: 0.0,
         _pad1: 0.0,
     };
+    // Shift the mesh up by shadow_offset_y so the rendered button rect
+    // lands at the LOGICAL origin (the shader places the SDF rect at
+    // p_button = p_mesh - vec2(0, offset_y), which moves the rect down
+    // by offset_y within the mesh). Without this compensation, tiles
+    // with bigger shadows visually slide downward in their row even
+    // though layout puts them at the same y.
     let entity = commands
         .spawn((
             ChildOf(ctx.content_root),
             Transform::from_xyz(
                 origin.x + size.x * 0.5,
-                -(origin.y + size.y * 0.5),
+                -(origin.y + size.y * 0.5) + shadow_offset_y,
                 z,
             )
             .with_scale(Vec3::new(mesh_w, mesh_h, 1.0)),
@@ -951,12 +1091,12 @@ pub fn paint_style_background(
             z - 0.005,
         );
     }
-    // Background image — Bevy image asset by path, stretched to fit.
-    // Note: the actual image load is deferred to the rerender system
-    // via WidgetImageCache. Here we record a sprite placeholder; the
-    // image will swap in when loaded. The host code already plumbs
-    // image loading via `widget_bevy::render_canvas_items`, so we
-    // queue a similar load.
+    // Background image — load from disk through the shared
+    // WidgetImageCache so repeated references decode once. AssetServer
+    // doesn't handle absolute paths reliably (widgets often resolve
+    // textures to absolute paths because they're a separate process
+    // and can't assume any cwd), so we do the std::fs read ourselves
+    // via Commands::queue.
     if let Some(path) = style.background_image.as_deref() {
         let path = path.to_string();
         let entity = commands
@@ -971,8 +1111,31 @@ pub fn paint_style_background(
             ))
             .id();
         commands.queue(move |world: &mut World| {
-            let server = world.resource::<AssetServer>().clone();
-            let handle = server.load::<Image>(path);
+            // Cache check — borrow + lookup, drop before mutating
+            // Assets<Image>.
+            let path_buf = std::path::PathBuf::from(&path);
+            let cached = world
+                .get_resource::<crate::WidgetImageCache>()
+                .and_then(|c| c.by_path.get(&path_buf).cloned());
+            let handle = if let Some(h) = cached {
+                h
+            } else {
+                let Ok(bytes) = std::fs::read(&path_buf) else {
+                    return;
+                };
+                let Ok(decoded) = image::load_from_memory(&bytes) else {
+                    return;
+                };
+                let rgba = decoded.to_rgba8();
+                let (w, h) = (rgba.width(), rgba.height());
+                let img = crate::make_nearest_image(rgba.into_raw(), w, h);
+                let handle = world.resource_mut::<Assets<Image>>().add(img);
+                if let Some(mut cache) = world.get_resource_mut::<crate::WidgetImageCache>()
+                {
+                    cache.by_path.insert(path_buf, handle.clone());
+                }
+                handle
+            };
             if let Ok(mut ec) = world.get_entity_mut(entity) {
                 if let Some(mut sp) = ec.get_mut::<Sprite>() {
                     sp.image = handle;
@@ -1244,7 +1407,7 @@ fn render_list_item(
     id: &str,
     children: &[Element],
     gap: f32,
-    pad: f32,
+    padding: Edges,
     selected: bool,
     origin: Vec2,
     max_w: f32,
@@ -1254,21 +1417,22 @@ fn render_list_item(
     // Style overrides applied in the outer `render` block already drew
     // the user-supplied background; we layer the selected highlight
     // *above* that so the indicator wins.
-    let inner = measure_stack(children, gap, pad, true, &ctx.metrics);
-    let panel_size = Vec2::new(inner.x.max(max_w * 0.95), inner.y);
+    // The list-item lays out at its intrinsic size and the selection
+    // highlight covers that, not the parent's full width. Massive gold
+    // bars across the card read as "broken theme" — the mockup uses a
+    // quiet lighter-slate fill plus a thin accent edge on the left.
+    let inner = measure_stack_with_padding(children, gap, padding, true, &ctx.metrics);
+    let panel_size = inner;
     if selected {
-        let accent = ctx
-            .resolve_color("accent")
-            .unwrap_or(Color::srgb(0.42, 0.62, 0.92));
-        let sel_bg = accent.with_alpha(0.18);
+        let sel_bg = ctx
+            .resolve_color("surface_3")
+            .unwrap_or(Color::srgb(0.13, 0.14, 0.17));
         paint_rounded_panel(
             commands,
             ctx,
             origin,
             panel_size,
-            ctx
-                .resolve_f32("radius_sm")
-                .unwrap_or(4.0),
+            ctx.resolve_f32("radius_sm").unwrap_or(4.0),
             sel_bg,
             Color::srgba(0.0, 0.0, 0.0, 0.0),
             0.0,
@@ -1277,15 +1441,29 @@ fn render_list_item(
             0.0,
             z + 0.001,
         );
+        // Thin accent edge on the left — like a "now playing" marker.
+        let accent = ctx
+            .resolve_color("accent")
+            .unwrap_or(Color::srgb(0.79, 0.66, 0.42));
+        commands.spawn((
+            ChildOf(ctx.content_root),
+            Sprite {
+                color: accent,
+                custom_size: Some(Vec2::new(2.0, panel_size.y)),
+                ..default()
+            },
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(origin.x, -origin.y, z + 0.003),
+        ));
     }
-    let consumed = render_stack(
+    let consumed = render_stack_with_padding(
         commands,
         ctx,
         targets,
         children,
         origin,
         gap,
-        pad,
+        padding,
         true,
         max_w,
         z + 0.002,

@@ -145,7 +145,6 @@ pub struct PaneChrome {
     /// through the uncovered corner regions.
     pub title_cover: Entity,
     pub content_root: Entity,
-    pub resize_handle: Entity,
     pub close_button: Entity,
 }
 
@@ -155,6 +154,49 @@ pub struct PaneChrome {
 /// spawn panes without a project system.
 #[derive(Component, Copy, Clone, Debug)]
 pub struct PaneProject(pub u64);
+
+/// Marker: this pane is "pinned to the background". Drag/resize/focus
+/// are suppressed, `bring_to_front` never bumps its z, its chrome
+/// (title bar, close button, resize handle) is hidden, and its z is
+/// forced to 0 so it always sits below any unpinned pane. Empty-space
+/// left-clicks fall through to whatever pane (or canvas) is under it.
+///
+/// Interactive elements (buttons, links, list rows, etc.) remain
+/// clickable: each kind publishes hit rects to [`PaneHotZones`] every
+/// frame, and pinned-pane hit-testing only fires `PaneContentPressed`
+/// when the click lands inside one of those zones. Right-click still
+/// goes to the host's context menu (which handles unpinning).
+#[derive(Component, Copy, Clone, Debug, Default)]
+pub struct PanePinned;
+
+/// Per-pane list of interactive rects in **content-local visual coords**
+/// (same frame as [`PaneContentPressed::local_pt`] — i.e. with the
+/// kind's scroll offset already subtracted). Any kind that has
+/// interactive elements (buttons, links, list rows, input fields)
+/// MUST mirror those rects here each frame so pinned-pane hit-testing
+/// can route clicks through to them while letting empty space fall
+/// through.
+///
+/// Unpinned panes are unaffected by this list: the chrome hit-tester
+/// uses the full pane bounds for them. Kinds with no interactive
+/// elements (terminal, editor) can leave this absent / empty — when
+/// pinned they will simply pass all clicks through.
+#[derive(Component, Default, Debug)]
+pub struct PaneHotZones(pub Vec<Rect>);
+
+impl PaneHotZones {
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn push(&mut self, rect: Rect) {
+        self.0.push(rect);
+    }
+
+    pub fn contains(&self, pt: Vec2) -> bool {
+        self.0.iter().any(|r| r.contains(pt))
+    }
+}
 
 // ---------- Resources ----------
 
@@ -215,15 +257,46 @@ pub enum PaneMouseMode {
     },
     WindowResize {
         pane: Entity,
-        anchor_pos: Vec2,
+        /// Which edges of the rect are being dragged. Any subset of
+        /// {N, S, E, W} — corners set two adjacent edges.
+        edges: ResizeDir,
+        /// Mouse position at press time.
+        start_pt: Vec2,
+        /// Pane position at press time.
+        start_pos: Vec2,
+        /// Pane size at press time.
+        start_size: Vec2,
     },
 }
 
+/// Which edges of the pane are being dragged during a resize. Corners
+/// set two adjacent edges (e.g. SE → south + east).
+#[derive(Copy, Clone, Default, Debug)]
+pub struct ResizeDir {
+    pub north: bool,
+    pub south: bool,
+    pub east: bool,
+    pub west: bool,
+}
+
+impl ResizeDir {
+    pub fn any(&self) -> bool {
+        self.north || self.south || self.east || self.west
+    }
+}
+
 /// Side-channel for actions that need exclusive World access (close
-/// runs the kind's on_close callback then despawns the entity).
+/// runs the kind's on_close callback then despawns the entity;
+/// pin/unpin tweaks z and toggles the [`PanePinned`] marker, which
+/// needs `&mut World` so the z update and component flip land in the
+/// same frame).
 #[derive(Resource, Default)]
 pub struct PendingPaneActions {
     pub close: Vec<Entity>,
+    /// Pin to background: insert `PanePinned`, force z = 0.
+    pub pin: Vec<Entity>,
+    /// Unpin: remove `PanePinned`, bump z above all unpinned panes.
+    pub unpin: Vec<Entity>,
 }
 
 /// Optional rectangular zones in window-space the host wants pane-bevy
@@ -302,6 +375,10 @@ pub struct PaneSnapshot {
     pub z: f32,
     #[serde(default = "default_value_null")]
     pub config: Value,
+    /// True iff the pane was pinned-to-background at snapshot time.
+    /// `serde(default)` keeps old saves loadable.
+    #[serde(default)]
+    pub pinned: bool,
 }
 
 fn default_value_null() -> Value {
@@ -325,6 +402,14 @@ pub struct PaneContentPressed {
     /// True if shift was held — kinds use this to extend a selection
     /// rather than start a new one.
     pub shift: bool,
+    /// True iff this press was routed via the pinned-pane path
+    /// (i.e. the pane has [`PanePinned`] and the click landed inside
+    /// one of its [`PaneHotZones`]). When set, focus + raise + drag
+    /// have all been suppressed; kinds should ONLY handle the actual
+    /// interactive element under the cursor (button, link, list row)
+    /// and skip "empty-space" behaviors like entering edit mode or
+    /// placing a caret.
+    pub pinned: bool,
 }
 
 // ---------- Plugin ----------
@@ -349,8 +434,10 @@ impl Plugin for PanePlugin {
                     update_pane_titles,
                     position_panes,
                     apply_pending_pane_actions,
+                    sync_pinned_chrome,
                     sync_chrome_uniforms,
                     push_chrome_time,
+                    update_pane_cursor,
                 )
                     .chain(),
             )
@@ -385,6 +472,80 @@ impl Plugin for PanePlugin {
                 )
                     .chain(),
             );
+    }
+}
+
+/// Update the window cursor icon based on what's under the mouse.
+/// Resize edges + corners get the matching directional resize cursor;
+/// title bar gets the move cursor while idle; everywhere else stays
+/// default. Skips when a drag/resize is already in progress so the
+/// cursor doesn't flicker mid-gesture.
+fn update_pane_cursor(
+    mut commands: Commands,
+    mode: Res<PaneMouseMode>,
+    windows: Query<(Entity, &Window)>,
+    panes: Query<(&PaneRect, Option<&Visibility>, Has<PanePinned>), With<PaneTag>>,
+) {
+    use bevy::window::SystemCursorIcon;
+    let Ok((win_entity, window)) = windows.single() else {
+        return;
+    };
+    let icon: SystemCursorIcon = match *mode {
+        PaneMouseMode::WindowResize { edges, .. } => cursor_for_edges(edges),
+        // Drag in progress: leave the cursor alone — a grabbing cursor
+        // over the title bar was distracting.
+        PaneMouseMode::WindowDrag { .. } => {
+            commands.entity(win_entity).remove::<bevy::window::CursorIcon>();
+            return;
+        }
+        PaneMouseMode::Idle => {
+            let Some(pt) = window.cursor_position() else {
+                commands.entity(win_entity).remove::<bevy::window::CursorIcon>();
+                return;
+            };
+            let mut best: Option<(SystemCursorIcon, f32)> = None;
+            for (rect, vis, pinned) in &panes {
+                if matches!(vis, Some(Visibility::Hidden)) || pinned {
+                    continue;
+                }
+                // Only resize edges get a special cursor. The title
+                // bar stays default — no hand / grab indicator there.
+                let icon = match region_at(pt, rect) {
+                    Some(PaneRegion::ResizeEdge(e)) => Some(cursor_for_edges(e)),
+                    _ => None,
+                };
+                if let Some(i) = icon
+                    && best.map_or(true, |(_, z)| rect.z > z)
+                {
+                    best = Some((i, rect.z));
+                }
+            }
+            match best {
+                Some((i, _)) => i,
+                None => {
+                    commands.entity(win_entity).remove::<bevy::window::CursorIcon>();
+                    return;
+                }
+            }
+        }
+    };
+    commands
+        .entity(win_entity)
+        .insert(bevy::window::CursorIcon::System(icon));
+}
+
+fn cursor_for_edges(e: ResizeDir) -> bevy::window::SystemCursorIcon {
+    use bevy::window::SystemCursorIcon;
+    // macOS uses double-headed resize cursors — both edges and corners
+    // are bidirectional. Pick the bidirectional system cursors rather
+    // than the single-headed N/S/E/W variants so the cursor matches
+    // what native macOS apps draw at the same hover point.
+    match (e.north, e.south, e.east, e.west) {
+        (true, false, true, false) | (false, true, false, true) => SystemCursorIcon::NeswResize,
+        (true, false, false, true) | (false, true, true, false) => SystemCursorIcon::NwseResize,
+        (true, false, false, false) | (false, true, false, false) => SystemCursorIcon::NsResize,
+        (false, false, true, false) | (false, false, false, true) => SystemCursorIcon::EwResize,
+        _ => SystemCursorIcon::Default,
     }
 }
 
@@ -536,6 +697,7 @@ pub fn spawn_pane(
             PaneTitle(title_str.clone()),
             Transform::from_translation(initial_translation),
             Visibility::default(),
+            PaneHotZones::default(),
         ))
         .id();
     if let Some(pid) = project_id {
@@ -693,23 +855,6 @@ pub fn spawn_pane(
         ))
         .id();
 
-    let resize_handle = world
-        .spawn((
-            ChildOf(pane),
-            Sprite {
-                color: text_style.handle,
-                custom_size: Some(Vec2::splat(HANDLE_SIZE)),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(
-                rect.size.x - HANDLE_SIZE,
-                -(rect.size.y - HANDLE_SIZE),
-                0.3,
-            ),
-        ))
-        .id();
-
     let close_button = world
         .spawn((
             ChildOf(pane),
@@ -737,7 +882,6 @@ pub fn spawn_pane(
         title_text,
         title_cover,
         content_root,
-        resize_handle,
         close_button,
     });
 
@@ -753,7 +897,7 @@ pub fn spawn_pane(
         .resource_mut::<PaneLayerAllocator>()
         .allocate();
     let pane_layer_component = bevy::camera::visibility::RenderLayers::layer(layer_id);
-    for chrome_entity in [bg, title_bar, title_text, title_cover, resize_handle, close_button] {
+    for chrome_entity in [bg, title_bar, title_text, title_cover, close_button] {
         world
             .entity_mut(chrome_entity)
             .insert(pane_layer_component.clone());
@@ -807,9 +951,16 @@ pub fn next_pane_z(world: &mut World) -> f32 {
 pub enum PaneRegion {
     CloseButton,
     TitleBar,
-    ResizeHandle,
+    /// Mouse is over an edge or corner of the pane — directions tell
+    /// the caller which edges to drag. Replaces the old single-corner
+    /// `ResizeHandle` so panes can be resized from any edge / corner,
+    /// not just bottom-right.
+    ResizeEdge(ResizeDir),
     Content,
 }
+
+/// Pixel-thickness of the edge-resize hit zone (along each side).
+pub const RESIZE_EDGE_PX: f32 = 6.0;
 
 pub fn region_at(pt: Vec2, rect: &PaneRect) -> Option<PaneRegion> {
     if pt.x < rect.pos.x || pt.x > rect.pos.x + rect.size.x {
@@ -818,6 +969,8 @@ pub fn region_at(pt: Vec2, rect: &PaneRect) -> Option<PaneRegion> {
     if pt.y < rect.pos.y || pt.y > rect.pos.y + rect.size.y {
         return None;
     }
+    // Close button takes priority over the edge band so the top-right
+    // corner stays a close affordance, not a resize.
     let close_x0 = rect.pos.x + rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET;
     let close_x1 = close_x0 + CLOSE_BTN_SIZE;
     let close_y0 = rect.pos.y + CLOSE_BTN_INSET;
@@ -825,10 +978,19 @@ pub fn region_at(pt: Vec2, rect: &PaneRect) -> Option<PaneRegion> {
     if pt.x >= close_x0 && pt.x <= close_x1 && pt.y >= close_y0 && pt.y <= close_y1 {
         return Some(PaneRegion::CloseButton);
     }
-    let handle_x0 = rect.pos.x + rect.size.x - HANDLE_SIZE;
-    let handle_y0 = rect.pos.y + rect.size.y - HANDLE_SIZE;
-    if pt.x >= handle_x0 && pt.y >= handle_y0 {
-        return Some(PaneRegion::ResizeHandle);
+    // Edge-band hit test. Any of the four outer rings — plus corners
+    // (combined N+E, N+W, S+E, S+W) — become a resize gesture.
+    let near_n = pt.y - rect.pos.y < RESIZE_EDGE_PX;
+    let near_s = (rect.pos.y + rect.size.y) - pt.y < RESIZE_EDGE_PX;
+    let near_w = pt.x - rect.pos.x < RESIZE_EDGE_PX;
+    let near_e = (rect.pos.x + rect.size.x) - pt.x < RESIZE_EDGE_PX;
+    if near_n || near_s || near_w || near_e {
+        return Some(PaneRegion::ResizeEdge(ResizeDir {
+            north: near_n,
+            south: near_s,
+            east: near_e,
+            west: near_w,
+        }));
     }
     if pt.y < rect.pos.y + TITLE_H {
         return Some(PaneRegion::TitleBar);
@@ -882,7 +1044,11 @@ fn handle_pane_mouse(
     mut close_actions: ResMut<PendingPaneActions>,
     block_zones: Res<PaneInputBlockZones>,
     mut content_press: MessageWriter<PaneContentPressed>,
-    mut panes: Query<(Entity, &mut PaneRect, Option<&Visibility>), With<PaneTag>>,
+    mut panes: Query<
+        (Entity, &mut PaneRect, Option<&Visibility>, Has<PanePinned>),
+        With<PaneTag>,
+    >,
+    hot_zones: Query<&PaneHotZones>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -901,53 +1067,97 @@ fn handle_pane_mouse(
         .any(|r| pt.x >= r.min.x && pt.x <= r.max.x && pt.y >= r.min.y && pt.y <= r.max.y);
 
     if buttons.just_pressed(MouseButton::Left) && !consumed.0 && !in_block_zone {
-        let visible_rects: Vec<(Entity, PaneRect)> = panes
+        // Stage 1: unpinned panes get the normal chrome/content hit-test.
+        // They always sit above pinned panes (pinned are forced to z=0,
+        // unpinned start at z=1), so any unpinned hit wins outright.
+        let unpinned_rects: Vec<(Entity, PaneRect)> = panes
             .iter()
-            .filter(|(_, _, vis)| !matches!(vis, Some(Visibility::Hidden)))
-            .map(|(e, r, _)| (e, *r))
+            .filter(|(_, _, vis, pinned)| {
+                !matches!(vis, Some(Visibility::Hidden)) && !pinned
+            })
+            .map(|(e, r, _, _)| (e, *r))
             .collect();
-        let Some(target) = topmost_pane_at(pt, &visible_rects) else {
+        if let Some(target) = topmost_pane_at(pt, &unpinned_rects) {
+            let rect = *panes.get(target).unwrap().1;
+            match region_at(pt, &rect) {
+                Some(PaneRegion::CloseButton) => {
+                    close_actions.close.push(target);
+                    consumed.0 = true;
+                    return;
+                }
+                Some(PaneRegion::TitleBar) => {
+                    focused.0 = Some(target);
+                    consumed.0 = true;
+                    bring_to_front(target, &mut panes);
+                    *mode = PaneMouseMode::WindowDrag {
+                        pane: target,
+                        grab_offset: pt - rect.pos,
+                    };
+                }
+                Some(PaneRegion::ResizeEdge(edges)) => {
+                    focused.0 = Some(target);
+                    consumed.0 = true;
+                    bring_to_front(target, &mut panes);
+                    *mode = PaneMouseMode::WindowResize {
+                        pane: target,
+                        edges,
+                        start_pt: pt,
+                        start_pos: rect.pos,
+                        start_size: rect.size,
+                    };
+                }
+                Some(PaneRegion::Content) => {
+                    focused.0 = Some(target);
+                    consumed.0 = true;
+                    bring_to_front(target, &mut panes);
+                    let shift = mods.pressed(KeyCode::ShiftLeft)
+                        || mods.pressed(KeyCode::ShiftRight);
+                    content_press.write(PaneContentPressed {
+                        pane: target,
+                        window_pt: pt,
+                        local_pt: pt_to_content_local(pt, &rect),
+                        shift,
+                        pinned: false,
+                    });
+                }
+                None => {}
+            }
             return;
-        };
+        }
 
-        let rect = *panes.get(target).unwrap().1;
-        match region_at(pt, &rect) {
-            Some(PaneRegion::CloseButton) => {
-                close_actions.close.push(target);
-                consumed.0 = true;
-                return;
+        // Stage 2: no unpinned pane covered the click. Walk pinned panes
+        // and route the press if it lands inside a registered hot-zone.
+        // Empty space on a pinned pane is intentionally NOT consumed so
+        // it falls through to the canvas (matches the "background
+        // decoration" promise). Chrome (drag/resize/close/focus) stays
+        // suppressed for pinned panes regardless.
+        let mut best: Option<(Entity, f32, Vec2)> = None;
+        for (e, r, vis, pinned) in panes.iter() {
+            if matches!(vis, Some(Visibility::Hidden)) || !pinned {
+                continue;
             }
-            Some(PaneRegion::TitleBar) => {
-                focused.0 = Some(target);
-                consumed.0 = true;
-                bring_to_front(target, &mut panes);
-                *mode = PaneMouseMode::WindowDrag {
-                    pane: target,
-                    grab_offset: pt - rect.pos,
-                };
+            if !matches!(region_at(pt, &r), Some(PaneRegion::Content)) {
+                continue;
             }
-            Some(PaneRegion::ResizeHandle) => {
-                focused.0 = Some(target);
-                consumed.0 = true;
-                bring_to_front(target, &mut panes);
-                *mode = PaneMouseMode::WindowResize {
-                    pane: target,
-                    anchor_pos: rect.pos,
-                };
+            let local = pt_to_content_local(pt, &r);
+            let Ok(zones) = hot_zones.get(e) else { continue };
+            if !zones.contains(local) {
+                continue;
             }
-            Some(PaneRegion::Content) => {
-                focused.0 = Some(target);
-                consumed.0 = true;
-                bring_to_front(target, &mut panes);
-                let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
-                content_press.write(PaneContentPressed {
-                    pane: target,
-                    window_pt: pt,
-                    local_pt: pt_to_content_local(pt, &rect),
-                    shift,
-                });
+            if best.map_or(true, |(_, z, _)| r.z >= z) {
+                best = Some((e, r.z, local));
             }
-            None => {}
+        }
+        if let Some((target, _, local)) = best {
+            consumed.0 = true;
+            let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
+            content_press.write(PaneContentPressed {
+                pane: target,
+                window_pt: pt,
+                local_pt: local,
+                shift,
+                pinned: true,
+            });
         }
         return;
     }
@@ -958,14 +1168,46 @@ fn handle_pane_mouse(
 
     match *mode {
         PaneMouseMode::WindowDrag { pane, grab_offset } => {
-            if let Ok((_, mut rect, _)) = panes.get_mut(pane) {
+            if let Ok((_, mut rect, _, _)) = panes.get_mut(pane) {
                 rect.pos = pt - grab_offset;
             }
         }
-        PaneMouseMode::WindowResize { pane, anchor_pos } => {
-            if let Ok((_, mut rect, _)) = panes.get_mut(pane) {
-                let raw = pt - anchor_pos;
-                rect.size = Vec2::new(raw.x.max(MIN_PANE_SIZE.x), raw.y.max(MIN_PANE_SIZE.y));
+        PaneMouseMode::WindowResize {
+            pane,
+            edges,
+            start_pt,
+            start_pos,
+            start_size,
+        } => {
+            if let Ok((_, mut rect, _, _)) = panes.get_mut(pane) {
+                let delta = pt - start_pt;
+                let mut new_pos = start_pos;
+                let mut new_size = start_size;
+                if edges.east {
+                    new_size.x = (start_size.x + delta.x).max(MIN_PANE_SIZE.x);
+                }
+                if edges.west {
+                    // Dragging the west edge: position moves with the
+                    // cursor; size shrinks/grows so the east edge stays
+                    // put. Clamp so the size never goes below the min
+                    // (and accordingly the position never crosses past
+                    // the fixed east edge).
+                    let max_dx = start_size.x - MIN_PANE_SIZE.x;
+                    let dx = delta.x.min(max_dx);
+                    new_pos.x = start_pos.x + dx;
+                    new_size.x = start_size.x - dx;
+                }
+                if edges.south {
+                    new_size.y = (start_size.y + delta.y).max(MIN_PANE_SIZE.y);
+                }
+                if edges.north {
+                    let max_dy = start_size.y - MIN_PANE_SIZE.y;
+                    let dy = delta.y.min(max_dy);
+                    new_pos.y = start_pos.y + dy;
+                    new_size.y = start_size.y - dy;
+                }
+                rect.pos = new_pos;
+                rect.size = new_size;
             }
         }
         PaneMouseMode::Idle => {}
@@ -981,21 +1223,39 @@ const MAX_PANE_Z: f32 = 500.0;
 
 fn bring_to_front(
     target: Entity,
-    panes: &mut Query<(Entity, &mut PaneRect, Option<&Visibility>), With<PaneTag>>,
+    panes: &mut Query<
+        (Entity, &mut PaneRect, Option<&Visibility>, Has<PanePinned>),
+        With<PaneTag>,
+    >,
 ) {
-    let max_z = panes.iter().map(|(_, r, _)| r.z).fold(0.0_f32, f32::max);
-    if let Ok((_, mut rect, _)) = panes.get_mut(target) {
+    // Pinned panes are background decoration — never bump their z.
+    if let Ok((_, _, _, true)) = panes.get(target) {
+        return;
+    }
+    // Compute max-z over UNPINNED panes only so pinned panes (kept at
+    // z=0 by `pin_pane`) don't pull the floor up and don't get touched
+    // by renormalization.
+    let max_z = panes
+        .iter()
+        .filter(|(_, _, _, pinned)| !pinned)
+        .map(|(_, r, _, _)| r.z)
+        .fold(0.0_f32, f32::max);
+    if let Ok((_, mut rect, _, _)) = panes.get_mut(target) {
         if rect.z < max_z {
             rect.z = max_z + 1.0;
         }
     }
     // Renormalize if the stack is approaching the camera frustum.
+    // Only renumber unpinned panes; pinned panes stay at z=0.
     if max_z + 1.0 > MAX_PANE_Z {
-        let mut entries: Vec<(Entity, f32)> =
-            panes.iter().map(|(e, r, _)| (e, r.z)).collect();
+        let mut entries: Vec<(Entity, f32)> = panes
+            .iter()
+            .filter(|(_, _, _, pinned)| !pinned)
+            .map(|(e, r, _, _)| (e, r.z))
+            .collect();
         entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
         for (i, (e, _)) in entries.into_iter().enumerate() {
-            if let Ok((_, mut rect, _)) = panes.get_mut(e) {
+            if let Ok((_, mut rect, _, _)) = panes.get_mut(e) {
                 rect.z = (i as f32) + 1.0;
             }
         }
@@ -1098,19 +1358,6 @@ fn position_panes(
                 c.0 = text_style.close;
             }
         }
-        if let Ok(mut s) = sprite_q.get_mut(chrome.resize_handle) {
-            if s.color != text_style.handle {
-                s.color = text_style.handle;
-            }
-        }
-        if let Ok(mut t) = t_q.get_mut(chrome.resize_handle) {
-            let wx = rect.size.x - HANDLE_SIZE;
-            let wy = -(rect.size.y - HANDLE_SIZE);
-            if t.translation.x != wx || t.translation.y != wy {
-                t.translation.x = wx;
-                t.translation.y = wy;
-            }
-        }
         if let Ok(mut t) = t_q.get_mut(chrome.close_button) {
             let wx = rect.size.x - CLOSE_BTN_SIZE - CLOSE_BTN_INSET;
             let wy = -CLOSE_BTN_INSET;
@@ -1118,6 +1365,42 @@ fn position_panes(
                 t.translation.x = wx;
                 t.translation.y = wy;
             }
+        }
+    }
+}
+
+/// Hide chrome (title bar, title text, title cover, close button,
+/// resize handle) on pinned panes; restore visibility when unpinned.
+/// Driven by `Added<PanePinned>` and `RemovedComponents<PanePinned>`
+/// so it only walks chrome when pin state actually flips.
+fn sync_pinned_chrome(
+    added: Query<&PaneChrome, Added<PanePinned>>,
+    mut removed: RemovedComponents<PanePinned>,
+    chromes: Query<&PaneChrome>,
+    mut vis_q: Query<&mut Visibility>,
+) {
+    let set_vis = |chrome: &PaneChrome, vis: Visibility, vis_q: &mut Query<&mut Visibility>| {
+        for e in [
+            chrome.bg,
+            chrome.shadow,
+            chrome.title_bar,
+            chrome.title_text,
+            chrome.title_cover,
+            chrome.close_button,
+        ] {
+            if let Ok(mut v) = vis_q.get_mut(e) {
+                if *v != vis {
+                    *v = vis;
+                }
+            }
+        }
+    };
+    for chrome in &added {
+        set_vis(chrome, Visibility::Hidden, &mut vis_q);
+    }
+    for entity in removed.read() {
+        if let Ok(chrome) = chromes.get(entity) {
+            set_vis(chrome, Visibility::Inherited, &mut vis_q);
         }
     }
 }
@@ -1140,8 +1423,35 @@ fn update_pane_titles(
 /// Run the registered on_close (if any) for every pane queued in
 /// PendingPaneActions.close, then despawn the entity. Exclusive system
 /// because on_close may need &mut World (worker shutdown, file
-/// removal, etc.).
+/// removal, etc.). Also applies queued pin/unpin actions in the same
+/// pass.
 fn apply_pending_pane_actions(world: &mut World) {
+    // Pin / unpin first so the z update lands before any layout
+    // consumer reads `PaneRect` this frame.
+    let to_pin = std::mem::take(&mut world.resource_mut::<PendingPaneActions>().pin);
+    for entity in to_pin {
+        if world.get_entity(entity).is_err() {
+            continue;
+        }
+        if let Some(mut rect) = world.get_mut::<PaneRect>(entity) {
+            // z=0 keeps pinned panes strictly below any unpinned pane
+            // (unpinned start at z=1 via `next_pane_z`).
+            rect.z = 0.0;
+        }
+        world.entity_mut(entity).insert(PanePinned);
+    }
+    let to_unpin = std::mem::take(&mut world.resource_mut::<PendingPaneActions>().unpin);
+    for entity in to_unpin {
+        if world.get_entity(entity).is_err() {
+            continue;
+        }
+        world.entity_mut(entity).remove::<PanePinned>();
+        let new_z = next_pane_z(world);
+        if let Some(mut rect) = world.get_mut::<PaneRect>(entity) {
+            rect.z = new_z;
+        }
+    }
+
     let to_close = std::mem::take(&mut world.resource_mut::<PendingPaneActions>().close);
     if to_close.is_empty() {
         return;

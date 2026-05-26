@@ -44,8 +44,8 @@ use bevy::sprite::Anchor;
 use bevy::text::{LineHeight, TextBounds};
 use pane_bevy::{
     focus_text_input, spawn_text_input, FocusedTextInput, PaneContentNoClip, PaneContentPressed,
-    PaneKindMarker, PaneKindSpec, PaneRect, PaneRegistry, PaneTag, PaneTitle, TextInput,
-    TextInputEvent, TextInputStyle,
+    PaneHotZones, PaneKindMarker, PaneKindSpec, PaneRect, PaneRegistry, PaneTag, PaneTitle,
+    TextInput, TextInputEvent, TextInputStyle,
 };
 use serde_json::Value;
 
@@ -239,6 +239,7 @@ impl Plugin for RunButtonPlugin {
                     drain_output_streams,
                     poll_run_button_children,
                     sync_run_button_visual,
+                    update_run_button_hot_zones,
                 )
                     .chain(),
             );
@@ -678,6 +679,55 @@ fn hit_details_toggle(local: Vec2) -> bool {
     )
 }
 
+/// Publish the run-button's clickable regions to `PaneHotZones` each
+/// frame so pinned panes can still receive presses on play / save /
+/// inputs / details-toggle. Rects are in content-local coords (same
+/// frame as `PaneContentPressed.local_pt`).
+fn update_run_button_hot_zones(
+    mut q: Query<(&PaneKindMarker, &PaneRect, &RunButton, &mut PaneHotZones)>,
+) {
+    for (kind, rect, rb, mut zones) in &mut q {
+        if kind.0 != PANE_KIND {
+            continue;
+        }
+        zones.clear();
+        let content_w = (rect.size.x - 2.0 * pane_bevy::MARGIN).max(0.0);
+        let is_small = content_w < SMALL_WIDTH_THRESHOLD;
+        if rb.draft {
+            // Form mode: save button + both input rows.
+            zones.push(Rect::from_corners(
+                Vec2::new(save_btn_x(content_w), SAVE_BTN_Y),
+                Vec2::new(save_btn_x(content_w) + SAVE_BTN_W, SAVE_BTN_Y + SAVE_BTN_H),
+            ));
+            let input_x0 = FORM_PAD_X + FORM_LABEL_W;
+            let input_w = input_box_width(content_w);
+            zones.push(Rect::from_corners(
+                Vec2::new(input_x0, TITLE_INPUT_Y),
+                Vec2::new(input_x0 + input_w, TITLE_INPUT_Y + FORM_ROW_H),
+            ));
+            zones.push(Rect::from_corners(
+                Vec2::new(input_x0, COMMAND_INPUT_Y),
+                Vec2::new(input_x0 + input_w, COMMAND_INPUT_Y + FORM_ROW_H),
+            ));
+        } else {
+            // Saved mode: play button always, details toggle when wide.
+            zones.push(Rect::from_corners(
+                Vec2::new(0.0, ROW_Y),
+                Vec2::new(PLAY_X + PLAY_W, ROW_Y + ROW_H),
+            ));
+            if !is_small {
+                zones.push(Rect::from_corners(
+                    Vec2::new(DETAILS_TOGGLE_X, DETAILS_TOGGLE_Y),
+                    Vec2::new(
+                        DETAILS_TOGGLE_X + DETAILS_TOGGLE_HIT_W,
+                        DETAILS_TOGGLE_Y + DETAILS_TOGGLE_H,
+                    ),
+                ));
+            }
+        }
+    }
+}
+
 // ---------- Press dispatch ----------
 
 #[allow(clippy::too_many_arguments)]
@@ -741,6 +791,12 @@ fn handle_run_button_press(
             rb.output_expanded = !rb.output_expanded;
             focus_text_input(&mut commands, &mut focused, [], None);
             rb.last_press_time = Some(time.elapsed_secs_f64());
+            continue;
+        }
+
+        // Pinned panes don't get the double-click re-edit affordance —
+        // they're background decoration, only their hot-zones fire.
+        if ev.pinned {
             continue;
         }
 

@@ -28,9 +28,9 @@ use bevy::sprite::Anchor;
 use bevy::text::LineHeight;
 use claude_bus_bevy::ClaudeBusEvent;
 use pane_bevy::{
-    MARGIN, PaneContentPressed, PaneFont, PaneFontMetrics, PaneKindMarker, PaneKindSpec, PaneRect,
-    PaneRegistry, PaneTitle, TITLE_H, FocusedTextInput, TextInput, TextInputEvent, TextInputStyle,
-    focus_text_input, spawn_text_input,
+    MARGIN, PaneContentPressed, PaneFont, PaneFontMetrics, PaneHotZones, PaneKindMarker,
+    PaneKindSpec, PaneRect, PaneRegistry, PaneTitle, TITLE_H, FocusedTextInput, TextInput,
+    TextInputEvent, TextInputStyle, focus_text_input, spawn_text_input,
 };
 use serde_json::Value;
 
@@ -81,6 +81,18 @@ pub struct Widget {
     pub last_state: Value,
     /// Timestamp of most recent content press, for double-click detection.
     last_press_time: Option<f64>,
+}
+
+impl Widget {
+    pub fn new(command: impl Into<String>, args: Vec<String>, cwd: Option<PathBuf>) -> Self {
+        Self {
+            command: command.into(),
+            args,
+            cwd,
+            last_state: Value::Null,
+            last_press_time: None,
+        }
+    }
 }
 
 const DOUBLE_CLICK_SECS: f64 = 0.35;
@@ -244,6 +256,7 @@ impl Plugin for WidgetPlugin {
                     poll_widget_children,
                     handle_widget_wheel,
                     apply_widget_scroll,
+                    update_widget_hot_zones,
                 )
                     .chain(),
             )
@@ -587,7 +600,7 @@ fn widget_spawn(world: &mut World, entity: Entity, content_root: Entity, config:
     }
 }
 
-fn spawn_widget_process(
+pub fn spawn_widget_process(
     cmd: &str,
     args: &[String],
     cwd: Option<&Path>,
@@ -1130,7 +1143,7 @@ fn load_tile_from_disk(key: &TileKey) -> Option<Image> {
     Some(make_nearest_image(data, key.tile_w, key.tile_h))
 }
 
-fn make_nearest_image(data: Vec<u8>, w: u32, h: u32) -> Image {
+pub fn make_nearest_image(data: Vec<u8>, w: u32, h: u32) -> Image {
     use bevy::asset::RenderAssetUsages;
     use bevy::image::{ImageAddressMode, ImageFilterMode, ImageSampler, ImageSamplerDescriptor};
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
@@ -1154,6 +1167,62 @@ fn make_nearest_image(data: Vec<u8>, w: u32, h: u32) -> Image {
         ..ImageSamplerDescriptor::nearest()
     });
     img
+}
+
+/// Mirror each widget pane's `WidgetTargets` (clicks + links) into
+/// `PaneHotZones` in **visual content-local coords** (i.e. with the
+/// pane's scroll offset already subtracted and clipped to the visible
+/// content area). pane-bevy's pinned-pane hit-tester consults these so
+/// buttons / links / inputs on pinned widgets keep working while
+/// empty space falls through to whatever is underneath.
+///
+/// Covers both `widget` and `rhai_widget` kinds because they share the
+/// `WidgetTargets` component — no kind check required.
+fn update_widget_hot_zones(
+    mut q: Query<(
+        &PaneRect,
+        &WidgetTargets,
+        Option<&WidgetScroll>,
+        Option<&WidgetEditMode>,
+        &mut PaneHotZones,
+    )>,
+) {
+    for (rect, targets, scroll, edit, mut zones) in &mut q {
+        zones.clear();
+        // In edit mode the overlay covers the pane and the underlying
+        // targets are stale; leave hot-zones empty so a pinned widget
+        // in edit mode passes clicks through (the user would have to
+        // unpin to interact with the overlay anyway).
+        if edit.is_some() {
+            continue;
+        }
+        let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+        let content_size = Vec2::new(
+            (rect.size.x - 2.0 * MARGIN).max(0.0),
+            (rect.size.y - TITLE_H - 2.0 * MARGIN).max(0.0),
+        );
+        let visible = Rect::from_corners(Vec2::ZERO, content_size);
+        for c in &targets.clicks {
+            let visual = Rect::from_corners(
+                Vec2::new(c.rect.min.x, c.rect.min.y - scroll_y),
+                Vec2::new(c.rect.max.x, c.rect.max.y - scroll_y),
+            );
+            let clipped = visual.intersect(visible);
+            if !clipped.is_empty() {
+                zones.push(clipped);
+            }
+        }
+        for l in &targets.links {
+            let visual = Rect::from_corners(
+                Vec2::new(l.rect.min.x, l.rect.min.y - scroll_y),
+                Vec2::new(l.rect.max.x, l.rect.max.y - scroll_y),
+            );
+            let clipped = visual.intersect(visible);
+            if !clipped.is_empty() {
+                zones.push(clipped);
+            }
+        }
+    }
 }
 
 fn handle_widget_press(
@@ -1261,6 +1330,16 @@ fn handle_widget_press(
         if let Some(lt) = link {
             open_url(&lt.url);
             widget.last_press_time = Some(time.elapsed_secs_f64());
+            continue;
+        }
+
+        // Pinned panes are background decoration: the only way the
+        // press reached us is because pane-bevy thought we had a
+        // hot-zone hit. If a transient mismatch (e.g. scroll changed
+        // mid-frame) made click/link miss anyway, swallow it rather
+        // than entering edit mode or otherwise treating it as a
+        // first-class focus event.
+        if ev.pinned {
             continue;
         }
 

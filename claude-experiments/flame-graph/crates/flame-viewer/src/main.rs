@@ -2,6 +2,8 @@
 //! dispatches to format crates by content sniff, hands the resulting `Profile`
 //! to `flame-render`.
 
+mod live;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -12,6 +14,8 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
+
+use crate::live::{LiveFormat, LiveSession};
 
 const SOURCES: &[&dyn TraceSource] = &[
     // Firefox has the strongest "preprocessedProfileVersion" / "stackTable"
@@ -216,6 +220,34 @@ fn compute_fit_row_height(r: &Renderer) -> f32 {
     row_h.clamp(0.5, flame_render::ROW_HEIGHT_PX)
 }
 
+/// Format a non-negative integer with comma thousands separators. Pulled out
+/// so we don't depend on `num-format` for one call site.
+fn fmt_thousands(n: usize) -> String {
+    let s = n.to_string();
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len() + s.len() / 3);
+    for (i, b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(*b as char);
+    }
+    out
+}
+
+/// Look up `samply` on `$PATH`. Returns the first match, ignoring directories
+/// and non-executable hits.
+fn find_samply_on_path() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join("samply");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
 /// `Home`, `Escape`, or `0` all act as the "reset to readable defaults" key.
 fn is_reset_key(k: &Key) -> bool {
     match k {
@@ -228,6 +260,20 @@ fn is_reset_key(k: &Key) -> bool {
 struct App {
     pending_path: Option<PathBuf>,
     pending_profile: Option<Profile>,
+    live: Option<LiveSession>,
+    /// Optional self-terminate timer. Set via `--duration N` for headless
+    /// tests; the viewer exits cleanly through the same path as a window
+    /// close, so `Drop` for `LiveSession` runs.
+    exit_after: Option<(std::time::Instant, std::time::Duration)>,
+    /// Sequence number of the last live snapshot we applied. Compared with
+    /// `LiveSession::latest_snapshot()` to decide whether to swap profiles
+    /// this frame.
+    last_live_seq: u64,
+    /// Once the live stream ends in --record mode, we try to load the saved
+    /// profile.json (which has full symbols, categories, etc.) and swap it
+    /// in for the lib+RVA live view. This flag latches so we only do it
+    /// once per session.
+    final_loaded: bool,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     cursor: (f32, f32),
@@ -235,15 +281,161 @@ struct App {
 }
 
 impl App {
-    fn new(pending_path: Option<PathBuf>, pending_profile: Option<Profile>) -> Self {
+    fn new(
+        pending_path: Option<PathBuf>,
+        pending_profile: Option<Profile>,
+        live: Option<LiveSession>,
+        exit_after: Option<std::time::Duration>,
+    ) -> Self {
         Self {
             pending_path,
             pending_profile,
+            live,
+            last_live_seq: 0,
+            final_loaded: false,
+            exit_after: exit_after.map(|d| (std::time::Instant::now(), d)),
             window: None,
             renderer: None,
             cursor: (0.0, 0.0),
             drag_origin: None,
         }
+    }
+
+    /// Once samply has finished writing its profile.json (live stream EOF +
+    /// output path exists + non-empty), load it and swap in the
+    /// symbolicated, fully-formatted profile. Returns true if applied.
+    fn try_promote_to_final(&mut self) -> bool {
+        if self.final_loaded {
+            return false;
+        }
+        let Some(session) = &self.live else { return false };
+        if !session.stream_done() {
+            return false;
+        }
+        let Some(path) = session.output_profile() else {
+            // Not in --record mode; nothing to load.
+            self.final_loaded = true;
+            return false;
+        };
+        // Wait for samply to actually exit before trying to read the
+        // file — samply writes the JSON during shutdown, so loading mid-
+        // write yields a truncated-JSON parse error.
+        if !session.child_exited() {
+            return false;
+        }
+        let path = path.to_path_buf();
+        if !path.exists() {
+            return false;
+        }
+        match std::fs::metadata(&path) {
+            Ok(m) if m.len() > 0 => {}
+            _ => return false,
+        }
+
+        match load_path(&path) {
+            Ok(profile) => {
+                log::info!(
+                    "flame-live: promoted to symbolicated profile from {} ({} slices)",
+                    path.display(),
+                    profile.slices.len()
+                );
+                if let Some(r) = self.renderer.as_mut() {
+                    let saved_viewport = r.viewport.clone();
+                    let saved_tab = r.active_tab;
+                    r.set_profile(Arc::new(profile));
+                    r.viewport.start_ns = saved_viewport.start_ns;
+                    r.viewport.ns_per_pixel = saved_viewport.ns_per_pixel;
+                    r.viewport.scroll_y_px = saved_viewport.scroll_y_px;
+                    r.viewport.row_height_px = saved_viewport.row_height_px;
+                    r.set_tab(saved_tab);
+                    r.clamp_viewport();
+                    r.rebuild_instances();
+                }
+                if let Some(w) = &self.window {
+                    let title = format!("flame-viewer (symbolicated: {})", path.display());
+                    w.set_title(&title);
+                }
+                self.final_loaded = true;
+                true
+            }
+            Err(e) => {
+                log::warn!(
+                    "flame-live: failed to load final profile {}: {e}",
+                    path.display()
+                );
+                // Latch — don't keep retrying the same broken file every frame.
+                self.final_loaded = true;
+                false
+            }
+        }
+    }
+
+    /// Rewrite the renderer's status bar with current live stats. Called
+    /// every event-loop tick so the elapsed-seconds counter advances even
+    /// on frames where no new snapshot arrived. Becomes a no-op once we've
+    /// promoted to the final symbolicated profile.
+    fn refresh_live_status(&mut self) {
+        let Some(session) = &self.live else { return };
+        let Some(r) = self.renderer.as_mut() else { return };
+        if self.final_loaded {
+            r.live_status = None;
+            return;
+        }
+        if let Some((threads, samples)) = session.stats() {
+            let elapsed = session.elapsed().as_secs_f64();
+            let rate = if elapsed > 0.05 {
+                samples as f64 / elapsed
+            } else {
+                0.0
+            };
+            r.live_status = Some(format!(
+                "● LIVE · {} samples · {:.0}/s · {} threads · {:.1}s · {}",
+                fmt_thousands(samples),
+                rate,
+                threads,
+                elapsed,
+                session.label,
+            ));
+        }
+    }
+
+    /// Pull the latest live-stream snapshot (if any) and swap it into the
+    /// renderer. First snapshot does a full `set_profile` (fits the viewport,
+    /// no state to preserve); subsequent ones go through `set_profile_live`
+    /// which preserves viewport, selection (by name path), collapsed tracks
+    /// (by name), grouping/merge mode, scroll positions, etc.
+    fn apply_live_snapshot(&mut self) -> bool {
+        let Some(session) = &self.live else { return false };
+        let Some((seq, profile, freshest_event_at)) = session.latest_snapshot() else { return false };
+        if seq == self.last_live_seq {
+            return false;
+        }
+        self.last_live_seq = seq;
+        let Some(r) = self.renderer.as_mut() else { return false };
+
+        let t0 = std::time::Instant::now();
+        if r.profile.is_none() {
+            r.set_profile(profile);
+        } else {
+            r.set_profile_live(profile);
+        }
+        r.rebuild_instances();
+
+        // Re-hit-test the cursor against the new layout so the tooltip and
+        // hover highlight follow the data, not the previous frame's stale
+        // index. Without this the tooltip flickers off every snapshot.
+        let hit = r.hit_test(self.cursor.0, self.cursor.1);
+        r.set_hover(hit);
+
+        self.refresh_live_status();
+
+        let apply_dur = t0.elapsed();
+        let end_to_end = freshest_event_at.map(|t| t.elapsed());
+        log::debug!(
+            "flame-live: applied snapshot seq={seq} in {apply_dur:?}; \
+             ingest→display latency = {end_to_end:?}",
+        );
+        true
     }
 
     fn ensure_renderer(&mut self) {
@@ -275,13 +467,52 @@ impl App {
 }
 
 impl ApplicationHandler for App {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Headless test path: exit cleanly after the configured duration.
+        if let Some((start, dur)) = self.exit_after {
+            if start.elapsed() >= dur {
+                log::info!("flame-viewer: --duration elapsed, exiting cleanly");
+                event_loop.exit();
+                return;
+            }
+        }
+        // Static mode (no live, no exit timer): nothing to do, stay in Wait.
+        if self.live.is_none() && self.exit_after.is_none() {
+            return;
+        }
+        // Live mode: pull the latest snapshot (if any) and request a redraw
+        // if anything has changed. Reschedule via WaitUntil for a ~60 fps
+        // tick rate without busy-spinning the event loop.
+        let mut redraw = self.apply_live_snapshot();
+        redraw |= self.try_promote_to_final();
+        // Tick the elapsed counter even on idle frames.
+        self.refresh_live_status();
+        // Force a redraw at least once per second so the status bar's
+        // elapsed-seconds counter visibly moves. Cheap (renderer is fast).
+        if self.live.is_some() && !self.final_loaded {
+            redraw = true;
+        }
+        if redraw {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            std::time::Instant::now() + std::time::Duration::from_millis(16),
+        ));
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         log::info!("resumed: creating window");
         if self.window.is_some() {
             return;
         }
+        let title = match &self.live {
+            Some(s) => format!("flame-viewer (live: {})", s.label),
+            None => "flame-viewer".to_string(),
+        };
         let attrs = Window::default_attributes()
-            .with_title("flame-viewer")
+            .with_title(title)
             .with_inner_size(winit::dpi::LogicalSize::new(1280.0, 720.0));
         let window = Arc::new(
             event_loop
@@ -670,6 +901,16 @@ fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1).peekable();
     let mut pending_path: Option<PathBuf> = None;
     let mut pending_profile: Option<Profile> = None;
+    let mut live_socket: Option<PathBuf> = None;
+    let mut live_file: Option<PathBuf> = None;
+    let mut live_format = LiveFormat::Binary;
+    let mut record_target: Option<Vec<String>> = None;
+    let mut samply_bin: Option<PathBuf> = None;
+    let mut record_output: Option<PathBuf> = None;
+    let mut exit_after: Option<std::time::Duration> = None;
+    // High default to avoid clashing with a samply that the user is already
+    // running on the canonical 3000.
+    let mut samply_port: u16 = 51234;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--stress" => {
@@ -680,6 +921,69 @@ fn main() -> anyhow::Result<()> {
                     .ok_or_else(|| anyhow::anyhow!("--stress arg must be NxM, got {dims:?}"))?;
                 pending_profile = Some(synth_stress(tracks, depth));
             }
+            "--live-socket" => {
+                let p = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--live-socket requires a path argument"))?;
+                live_socket = Some(PathBuf::from(p));
+            }
+            "--live-file" => {
+                let p = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--live-file requires a path argument"))?;
+                live_file = Some(PathBuf::from(p));
+            }
+            "--live-format" => {
+                let fmt = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--live-format requires binary|ndjson"))?;
+                live_format = match fmt.as_str() {
+                    "binary" => LiveFormat::Binary,
+                    "ndjson" => LiveFormat::Ndjson,
+                    other => anyhow::bail!("--live-format must be binary or ndjson, got {other}"),
+                };
+            }
+            "--duration" => {
+                let secs = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--duration requires SECS"))?;
+                let n: f64 = secs.parse()?;
+                exit_after = Some(std::time::Duration::from_secs_f64(n));
+            }
+            "--samply-bin" => {
+                let p = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--samply-bin requires a path"))?;
+                samply_bin = Some(PathBuf::from(p));
+            }
+            "--samply-port" => {
+                let p = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--samply-port requires a port number"))?;
+                samply_port = p.parse()?;
+            }
+            "--record-output" => {
+                let p = args
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("--record-output requires a path"))?;
+                record_output = Some(PathBuf::from(p));
+            }
+            "--record" => {
+                // Everything after --record is the target command. We do NOT
+                // require a literal `--` separator; the user typically writes:
+                //     flame-viewer --record ./my-program arg1 arg2
+                let rest: Vec<String> = args.by_ref().collect();
+                if rest.is_empty() {
+                    anyhow::bail!("--record requires a target command");
+                }
+                // Skip a leading `--` if the user typed one (idiomatic).
+                let rest = if rest.first().map(|s| s.as_str()) == Some("--") {
+                    rest.into_iter().skip(1).collect()
+                } else {
+                    rest
+                };
+                record_target = Some(rest);
+            }
             other => {
                 if pending_path.is_some() {
                     anyhow::bail!("unexpected extra argument: {other}");
@@ -689,9 +993,46 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
+    let live_sources = [live_socket.is_some(), live_file.is_some(), record_target.is_some()]
+        .iter()
+        .filter(|x| **x)
+        .count();
+    if live_sources > 1 {
+        anyhow::bail!("--live-socket, --live-file, and --record are mutually exclusive");
+    }
+
+    let live = if let Some(path) = live_socket {
+        Some(LiveSession::connect_socket(path, live_format)?)
+    } else if let Some(path) = live_file {
+        Some(LiveSession::open_file(path, live_format)?)
+    } else if let Some(cmd) = record_target {
+        let bin = match samply_bin {
+            Some(b) => b,
+            None => find_samply_on_path()
+                .ok_or_else(|| anyhow::anyhow!(
+                    "samply not found on PATH; pass --samply-bin /path/to/samply"
+                ))?,
+        };
+        let output = record_output.unwrap_or_else(|| {
+            std::env::temp_dir().join(format!("samply-record-{}.json", std::process::id()))
+        });
+        Some(LiveSession::spawn_samply(bin, cmd, output, samply_port)?)
+    } else {
+        None
+    };
+
     let event_loop = EventLoop::new()?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-    let mut app = App::new(pending_path, pending_profile);
+    // Live mode needs periodic frame ticks even when the user isn't
+    // interacting, so the snapshot-applier in `about_to_wait` runs. Without
+    // input the viewer would freeze on its first profile. Static mode keeps
+    // the old battery-friendly Wait.
+    let control_flow = if live.is_some() {
+        ControlFlow::Poll
+    } else {
+        ControlFlow::Wait
+    };
+    event_loop.set_control_flow(control_flow);
+    let mut app = App::new(pending_path, pending_profile, live, exit_after);
     event_loop.run_app(&mut app)?;
     Ok(())
 }

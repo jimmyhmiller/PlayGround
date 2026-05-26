@@ -41,10 +41,24 @@ else
 fi
 unset TERMINAL_BEVY_USER_ZDOTDIR
 
-# 2) Source the user's real .zshrc (best-effort; missing file is fine).
+# 2) /etc/zshrc on macOS sets HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history.
+#    That line ran while $ZDOTDIR still pointed at our shim dir, so
+#    HISTFILE is currently a stray file under the shim. Re-apply the
+#    formula now that ZDOTDIR has been restored. The user's own .zshrc
+#    is sourced next and may override HISTFILE; that wins.
+HISTFILE="${ZDOTDIR:-$HOME}/.zsh_history"
+
+# 3) Source the user's real .zshrc (best-effort; missing file is fine).
 [ -f "$ZDOTDIR/.zshrc" ] && source "$ZDOTDIR/.zshrc"
 
-# 3) OSC 7 emission on every prompt and on every cd. The editor side
+# 4) zsh has already loaded history from whatever HISTFILE pointed at
+#    when the interactive-shell init read it (the wrong path). Re-read
+#    from the now-correct HISTFILE so the user's prior history shows up
+#    in this session immediately. `-I` would also read incrementally;
+#    plain `fc -R` is enough to bring the file in.
+[ -r "$HISTFILE" ] && fc -R "$HISTFILE"
+
+# 5) OSC 7 emission on every prompt and on every cd. The editor side
 #    parses these to derive the working directory of each terminal.
 _tb_emit_cwd() {
   printf '\e]7;file://%s%s\e\\' "${HOST:-localhost}" "$PWD"

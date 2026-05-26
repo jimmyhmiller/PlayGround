@@ -17,6 +17,7 @@
 use std::f32::consts::{FRAC_PI_2, PI, TAU};
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::RenderLayers;
 use bevy::input::keyboard::KeyboardInput;
 use bevy::mesh::{Indices, Mesh2d, PrimitiveTopology};
 use bevy::prelude::*;
@@ -24,7 +25,9 @@ use bevy::sprite::Anchor;
 use bevy::sprite_render::{ColorMaterial, MeshMaterial2d};
 use bevy::text::LineHeight;
 
-use pane_bevy::{InputConsumed, PaneRegistry};
+use pane_bevy::{
+    topmost_pane_at, InputConsumed, PaneRect, PaneRegistry, PaneTag,
+};
 
 use crate::projects::{NewPaneRequest, PendingActions, Projects, Sidebar};
 use crate::MonoFont;
@@ -148,7 +151,7 @@ fn hit_test(local: Vec2, n: usize) -> Option<usize> {
 
 // ---------- Input ----------
 
-fn radial_open_close(
+pub fn radial_open_close(
     windows: Query<&Window>,
     buttons: Res<ButtonInput<MouseButton>>,
     mut keys: MessageReader<KeyboardInput>,
@@ -158,6 +161,7 @@ fn radial_open_close(
     projects: Res<Projects>,
     registry: Res<PaneRegistry>,
     mut pending: ResMut<PendingActions>,
+    panes: Query<(Entity, &PaneRect, &Visibility), With<PaneTag>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -177,13 +181,35 @@ fn radial_open_close(
     }
 
     if buttons.just_pressed(MouseButton::Right) {
-        if let Some(pt) = window.cursor_position()
-            && pt.x >= sidebar.width
-        {
-            menu.center = Some(pt);
-            menu.items = collect_radial_items(&registry);
-            menu.hovered = None;
+        // If something else already claimed this right-click (the
+        // per-pane context menu runs first and sets `consumed.0` when
+        // the click lands on a pane), don't also open the radial — the
+        // user wanted to act on that pane, not spawn a new one.
+        if consumed.0 {
+            return;
         }
+        let Some(pt) = window.cursor_position() else {
+            return;
+        };
+        if pt.x < sidebar.width {
+            return;
+        }
+        // Belt + suspenders: even without the consumed flag, if the
+        // click landed inside any visible pane the user wanted to act
+        // on *that pane*, not spawn a new one. Skip opening so the
+        // context menu can handle it (or so nothing happens if context
+        // menu isn't installed).
+        let visible_rects: Vec<(Entity, PaneRect)> = panes
+            .iter()
+            .filter(|(_, _, vis)| !matches!(vis, Visibility::Hidden))
+            .map(|(e, r, _)| (e, *r))
+            .collect();
+        if topmost_pane_at(pt, &visible_rects).is_some() {
+            return;
+        }
+        menu.center = Some(pt);
+        menu.items = collect_radial_items(&registry);
+        menu.hovered = None;
         return;
     }
 
@@ -295,6 +321,8 @@ fn radial_render(
     };
     let center_world = Vec2::new(center.x - win_w * 0.5, win_h * 0.5 - center.y);
 
+    let overlay = RenderLayers::layer(crate::MENU_OVERLAY_LAYER);
+
     // Modal backdrop.
     commands.spawn((
         RadialEntity,
@@ -305,6 +333,7 @@ fn radial_render(
         },
         Anchor::TOP_LEFT,
         Transform::from_xyz(-win_w * 0.5, win_h * 0.5, RADIAL_Z - 0.5),
+        overlay.clone(),
     ));
 
     let n = menu.item_count().max(1);
@@ -333,6 +362,7 @@ fn radial_render(
                 rotation: Quat::from_rotation_z(world_angle),
                 ..default()
             },
+            overlay.clone(),
         ));
 
         // Label position: along the wedge bisector, at the wedge's
@@ -358,6 +388,7 @@ fn radial_render(
                 center_world.y + world_off.y + 7.0,
                 RADIAL_Z + 0.30,
             ),
+            overlay.clone(),
         ));
         commands.spawn((
             RadialEntity,
@@ -375,6 +406,7 @@ fn radial_render(
                 center_world.y + world_off.y - 12.0,
                 RADIAL_Z + 0.30,
             ),
+            overlay.clone(),
         ));
     }
 
@@ -386,6 +418,7 @@ fn radial_render(
         Mesh2d(disc_mesh),
         MeshMaterial2d(disc_mat),
         Transform::from_xyz(center_world.x, center_world.y, RADIAL_Z + 0.20),
+        overlay.clone(),
     ));
 
     // Hairline ring around the dead-zone — gives the cancel zone a
@@ -397,6 +430,7 @@ fn radial_render(
         Mesh2d(ring_mesh),
         MeshMaterial2d(ring_mat),
         Transform::from_xyz(center_world.x, center_world.y, RADIAL_Z + 0.21),
+        overlay,
     ));
 }
 

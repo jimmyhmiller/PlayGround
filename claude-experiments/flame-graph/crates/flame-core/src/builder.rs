@@ -279,6 +279,22 @@ impl ProfileBuilder {
     /// as a flame graph: each (thread, stack-prefix) becomes a slice whose width is the
     /// summed sample weight underneath it. The x-axis is synthetic (one unit per weight).
     pub fn synthesize_slices_from_samples(&mut self, track: TrackId, category: CategoryId) {
+        self.synthesize_slices_from_samples_with(track, category, false);
+    }
+
+    /// As `synthesize_slices_from_samples`, with control over sibling ordering.
+    ///
+    /// - `stable == false` (default): children sorted weight-desc then frame-id —
+    ///   the conventional "hot on the left" flame graph.
+    /// - `stable == true`: children sorted by frame name (lexicographic) only.
+    ///   Use this in live mode so a frame's position doesn't jump when its
+    ///   weight crosses a sibling's between snapshots.
+    pub fn synthesize_slices_from_samples_with(
+        &mut self,
+        track: TrackId,
+        category: CategoryId,
+        stable: bool,
+    ) {
         if self.samples.is_empty() {
             return;
         }
@@ -321,7 +337,20 @@ impl ProfileBuilder {
             .collect();
         let weight_of = |i: u32| -> u64 { nodes[i as usize].weight };
         let frame_of = |i: u32| -> FrameId { nodes[i as usize].frame };
-        roots.sort_by(|&a, &b| weight_of(b).cmp(&weight_of(a)).then(frame_of(a).0.cmp(&frame_of(b).0)));
+        // Sort frames by interned name string when stable; falls back to frame
+        // id as a tiebreaker so identical names still get a deterministic
+        // order. Pre-collect to avoid per-comparison string lookups.
+        let stacks_ref = &self.stacks;
+        let strings_ref = &self.strings;
+        let name_of = |i: u32| -> &str {
+            let fid = stacks_ref.frame(frame_of(i)).name;
+            strings_ref.get(fid)
+        };
+        if stable {
+            roots.sort_by(|&a, &b| name_of(a).cmp(name_of(b)).then(frame_of(a).0.cmp(&frame_of(b).0)));
+        } else {
+            roots.sort_by(|&a, &b| weight_of(b).cmp(&weight_of(a)).then(frame_of(a).0.cmp(&frame_of(b).0)));
+        }
 
         // Iterative DFS: stack of (node_idx, depth, x_offset).
         let mut x: u64 = 0;
@@ -352,11 +381,17 @@ impl ProfileBuilder {
             // is processed first (preserves left-to-right visual order regardless of
             // pop order).
             let mut kids: Vec<u32> = n.children.clone();
-            kids.sort_by(|&a, &b| {
-                weight_of(b)
-                    .cmp(&weight_of(a))
-                    .then(frame_of(a).0.cmp(&frame_of(b).0))
-            });
+            if stable {
+                kids.sort_by(|&a, &b| {
+                    name_of(a).cmp(name_of(b)).then(frame_of(a).0.cmp(&frame_of(b).0))
+                });
+            } else {
+                kids.sort_by(|&a, &b| {
+                    weight_of(b)
+                        .cmp(&weight_of(a))
+                        .then(frame_of(a).0.cmp(&frame_of(b).0))
+                });
+            }
             let mut cx = sx;
             // Compute child x positions in forward order, then push in reverse.
             let positions: Vec<(u32, u64)> = kids
