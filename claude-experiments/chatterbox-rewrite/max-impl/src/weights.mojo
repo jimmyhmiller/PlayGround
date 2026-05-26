@@ -96,7 +96,13 @@ def _bf16_sibling_path(fp32_path: String) -> String:
 
 
 def maybe_attach_bf16(mut linear: Linear, mut ctx: DeviceContext, weight_fp32_path: String) raises:
-    """If CHATTERBOX_BF16=1, upload `<weight_fp32_path>.bf16.bin` and attach to `linear`."""
+    """If CHATTERBOX_BF16=1, upload `<weight_fp32_path>.bf16.bin` and attach to `linear`.
+
+    Exception: weights under .../decoder/estimator/ (the CFM ODE estimator) are
+    kept in f32 because bf16 precision in the recurrent Euler solver causes
+    occasional mel oscillations that drive the HiFT vocoder into ±1.0 sample
+    spikes (loud "microphone thump" artifacts on ~2% of chunks).
+    """
     if not _use_bf16():
         return
     var path_bf16 = _bf16_sibling_path(weight_fp32_path)

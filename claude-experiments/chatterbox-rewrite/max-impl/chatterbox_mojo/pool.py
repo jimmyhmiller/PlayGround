@@ -123,7 +123,7 @@ class _Worker:
     """
 
     def __init__(self, tag: str, voice_ref: str, *, use_bf16: bool = True,
-                 cfm_steps: int = 5, env: Optional[dict] = None):
+                 cfm_steps: int = 10, env: Optional[dict] = None):
         script = (
             _CHILD_SCRIPT_TEMPLATE
             .replace("__ROOT__", _MAX_IMPL_ROOT)
@@ -202,7 +202,7 @@ class WorkerPool:
     """N worker processes. Round-robins requests."""
 
     def __init__(self, n_workers: int, voice_ref: str, *,
-                 use_bf16: bool = True, cfm_steps: int = 5,
+                 use_bf16: bool = True, cfm_steps: int = 10,
                  stagger_load_s: float = 2.0):
         """Stagger model loads to avoid burst memory allocation on shared GPU pools.
         On AMD Strix Halo, two instances loading simultaneously can race the GTT

@@ -33,8 +33,12 @@ S3GEN_SR = 24000
 
 T_PROMPT_TOKEN = 250
 T_PROMPT_MEL = 500
-N_CFM_STEPS = 5    # Empirically: 5 steps with bf16 weights still hits 0% WER on roundtrip;
-                   # 4 starts dropping tokens. Set via CHATTERBOX_CFM_STEPS env var.
+N_CFM_STEPS = 10   # Upstream default. Reducing below 10 with bf16 weights
+                   # causes occasional CFM Euler-integration spikes that the HiFT
+                   # vocoder amplifies into ±1.0 sample-to-sample "microphone
+                   # thump" artifacts (~2% of chunks). Don't drop below 10
+                   # unless you upgrade the solver (Heun, RK4) for stability.
+                   # Override via CHATTERBOX_CFM_STEPS env var.
 MAX_CTX = 600
 EOS = 6562
 T_COND = 34
