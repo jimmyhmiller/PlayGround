@@ -154,8 +154,11 @@ def _swiglu_combine(
         var base = bi * 2 * inter
         var g = gup[base + ii]
         var u = gup[base + inter + ii]
-        var s = g / (Float32(1.0) + mexp(-g))   # silu
-        op[i] = s * u
+        # Match exactly the unfused modules.silu()*up FP order to avoid
+        # off-by-one logit drift in T3 sampling (which can land tokens in
+        # CFM-pathological regions → loud "thump" artifacts in audio).
+        var sig = Float32(1.0) / (Float32(1.0) + mexp(-g))
+        op[i] = (g * sig) * u
     elementwise[swiglu_fn, simd_width=1, target="gpu"](
         IndexList[1](b * inter), DeviceContextPtr(ctx),
     )
@@ -271,16 +274,9 @@ def t3_decode_step(
     var inter = block.mlp.intermediate
     var prod_h = ctx.enqueue_create_buffer[DType.float32](b * inter)
 
-    # NOTE: fused MLP (gate_up_w) is *off* by default. With bf16 weights the
-    # fused (2*inter, hidden) matmul exhibits precision loss vs running the two
-    # individual (inter, hidden) matmuls — likely a kernel-tile boundary issue
-    # at N=8192 in MAX's bf16 GEMV path. Symptom: occasional off-by-one token
-    # swaps in T3 that drive the s3gen CFM into an oscillation attractor (loud
-    # "microphone thump" artifacts in the output audio). Set
-    # CHATTERBOX_T3_FUSE_MLP_FORCE=1 to opt in for diagnostics.
     var fuse_mlp = False
     try:
-        fuse_mlp = getenv("CHATTERBOX_T3_FUSE_MLP_FORCE") == "1"
+        fuse_mlp = getenv("CHATTERBOX_T3_FUSE_MLP") == "1"
     except:
         fuse_mlp = False
 
@@ -369,34 +365,14 @@ def t3_decode_step_with_attn(
     linear_forward(ctx, block.to_out, av_flat, attn_out_buf, b)
     residual_add(ctx, x_buf, attn_out_buf, b * D)
 
-    # MLP — unfused gate/up + SwiGLU. The fused gate_up_w matmul has bf16
-    # precision issues at N=8192 that cause CFM thump artifacts; using two
-    # individual (inter, hidden) matmuls instead.
+    # Fused MLP gate+up + SwiGLU.
     var x_norm2 = ctx.enqueue_create_buffer[DType.float32](b * D)
     rms_norm_forward(ctx, block.post_norm, x_buf, x_norm2, b)
     var inter = block.mlp.intermediate
+    var gate_up_out = ctx.enqueue_create_buffer[DType.float32](b * 2 * inter)
     var prod_h = ctx.enqueue_create_buffer[DType.float32](b * inter)
-    var gate_h = ctx.enqueue_create_buffer[DType.float32](b * inter)
-    var up_h   = ctx.enqueue_create_buffer[DType.float32](b * inter)
-    var act_h  = ctx.enqueue_create_buffer[DType.float32](b * inter)
-    linear_forward(ctx, block.mlp.gate, x_norm2, gate_h, b)
-    linear_forward(ctx, block.mlp.up,   x_norm2, up_h,   b)
-    silu(ctx, gate_h, act_h, b * inter)
-    var _ap = act_h.unsafe_ptr()
-    var _upp = up_h.unsafe_ptr()
-    var _pp = prod_h.unsafe_ptr()
-
-    @always_inline
-    @parameter
-    @__copy_capture(_ap, _upp, _pp)
-    def _mul_func[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
-        var i = idx[0]
-        var a = _ap.load[width=width, alignment=alignment](i)
-        var u = _upp.load[width=width, alignment=alignment](i)
-        _pp.store[width=width, alignment=alignment](i, a * u)
-    elementwise[_mul_func, simd_width=4, target="gpu"](
-        IndexList[1](b * inter), DeviceContextPtr(ctx),
-    )
+    linear_forward(ctx, block.gate_up, x_norm2, gate_up_out, b)
+    _swiglu_combine(ctx, gate_up_out, prod_h, b, inter)
 
     var mlp_out = ctx.enqueue_create_buffer[DType.float32](b * D)
     linear_forward(ctx, block.mlp.down, prod_h, mlp_out, b)

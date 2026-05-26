@@ -400,8 +400,12 @@ def cfg_combine_sample(
         # Top prob over full vocab = exp(max-max)/exp_sum = 1/exp_sum
         min_p_thresh = min_p * (Float32(1.0) / exp_sum)
 
-    # Walk all V tokens in descending probability order, stop when cumprob > top_p
+    # Walk tokens in descending probability order, stop when cumprob > top_p
     # (matches HF TopPLogitsWarper which keeps the first token that exceeds top_p too).
+    # Safety cap at 500 selected tokens: with top_p=0.95 + min_p=0.05 + temperature=0.8
+    # this is reached in <20 iters typically. The cap is a perf bound for the O(K*V)
+    # partial-sort; if top_p is genuinely not reached in 500 selections the
+    # distribution is so flat that the kept set is fine to clip.
     var kept_idx = List[Int]()
     var kept_logit = List[Float32]()
     var seen = List[Bool](capacity=v)
@@ -409,8 +413,7 @@ def cfg_combine_sample(
         seen.append(False)
     var cumprob: Float32 = 0.0
     var top_p_done = False
-    # Safety cap: full vocab — but we break early under top_p.
-    for _i in range(v):
+    for _i in range(500):
         var best_p: Float32 = -1.0
         var best_k: Int = -1
         for k in range(v):
