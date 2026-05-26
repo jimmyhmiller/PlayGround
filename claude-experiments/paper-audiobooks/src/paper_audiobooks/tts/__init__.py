@@ -172,6 +172,11 @@ def _registry() -> dict[str, type[Backend]]:
     except Exception:
         pass
     try:
+        from .backends import chatterbox_mojo as chatterbox_mojo_mod
+        reg[chatterbox_mojo_mod.ChatterboxMojoBackend.info.name] = chatterbox_mojo_mod.ChatterboxMojoBackend
+    except Exception:
+        pass
+    try:
         from .backends import f5 as f5_mod
         reg[f5_mod.F5Backend.info.name] = f5_mod.F5Backend
     except Exception:
