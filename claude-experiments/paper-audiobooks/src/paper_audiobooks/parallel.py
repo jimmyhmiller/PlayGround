@@ -58,14 +58,25 @@ def render_chapters_parallel(
     for i, (chap, text) in enumerate(chapter_texts):
         out_path = cache_dir / f"chapter-{i:04d}.npy"
 
-        # Reuse cached render if present.
+        # Reuse cached render if present (validate it's not thumpy).
         if out_path.exists():
             try:
                 audio = np.load(out_path).astype(np.float32)
-                if progress_cb is not None:
-                    progress_cb(i, chap, cached=True)
-                results.append(audio)
-                continue
+                # Per-chapter thump validation: reject if catastrophic CFM
+                # oscillation is present (huge sample-jumps in clusters).
+                diff = np.abs(np.diff(audio))
+                n_huge = int(np.sum(diff > 1.5))
+                pct_clipped = 100.0 * int(np.sum(np.abs(audio) > 0.985)) / max(audio.size, 1)
+                if n_huge >= 3 or pct_clipped > 0.02:
+                    print(f"[tts] chapter {i} cached audio has thumps "
+                          f"(n_huge={n_huge}, pct_clipped={pct_clipped:.3f}%); "
+                          f"re-rendering", file=sys.stderr, flush=True)
+                    out_path.unlink(missing_ok=True)
+                else:
+                    if progress_cb is not None:
+                        progress_cb(i, chap, cached=True)
+                    results.append(audio)
+                    continue
             except Exception:
                 # Corrupt cache entry — re-render.
                 out_path.unlink(missing_ok=True)
