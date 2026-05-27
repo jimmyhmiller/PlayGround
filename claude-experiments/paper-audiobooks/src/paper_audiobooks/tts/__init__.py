@@ -114,16 +114,14 @@ def _save_chunk_cache(cache_dir, key: str, audio: np.ndarray) -> None:
     if cache_dir is None:
         return
     cache_dir.mkdir(parents=True, exist_ok=True)
-    # Atomic-ish: write to .tmp then rename.
+    # Write atomically: np.save to a .tmp.npy path, then rename to the final
+    # .npy path. (np.save auto-appends .npy to the target — the temp filename
+    # itself must end in .npy or numpy writes to "<base>.tmp.npy" while the
+    # subsequent rename of "<base>.tmp" silently looks for a missing file.)
     p = cache_dir / f"chunk-{key}.npy"
-    tmp = cache_dir / f"chunk-{key}.npy.tmp"
-    try:
-        np.save(tmp, audio.astype(np.float32))
-        tmp.replace(p)
-    except Exception:
-        # Best-effort; don't fail synthesis just because cache write failed.
-        try: tmp.unlink(missing_ok=True)
-        except Exception: pass
+    tmp = cache_dir / f"chunk-{key}.tmp.npy"
+    np.save(tmp, audio.astype(np.float32))
+    tmp.replace(p)
 
 
 def render_audio(text: str, *, backend: Backend, voice: str,
