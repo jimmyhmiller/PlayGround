@@ -94,7 +94,11 @@ fn hstack_top(gap: f32, children: Vec<Element>) -> Element {
     Element::Hstack {
         gap,
         pad: 0.0,
-        align: Align::Start,
+        // Cards in a row stretch to the row's height — pairs with
+        // each card carrying flex_grow:1 so the row also distributes
+        // width evenly. Visually: tidy, equal rectangles, no jagged
+        // top/bottom edges where one card's content is shorter.
+        align: Align::Stretch,
         children,
         style: None,
     }
@@ -119,6 +123,12 @@ fn card(eyebrow_text: &str, title: &str, body: Vec<Element>) -> Element {
                 token: Some("shadow_sm".into()),
                 ..Default::default()
             }),
+            // Equal-distribute cards in a row + stretch to fill the
+            // row's height. The result: every card in a row is the
+            // same width AND height, the magazine-spread look.
+            flex_grow: Some(1.0),
+            flex_shrink: Some(1.0),
+            min_width: Some("0".into()),
             ..Default::default()
         }),
     }

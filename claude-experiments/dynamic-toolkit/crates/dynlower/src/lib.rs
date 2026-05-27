@@ -299,20 +299,28 @@ pub fn walk_jit_ancestor_roots(_jit_fp: *const u8, _visitor: &mut dyn FnMut(*mut
     // FP-chain walking is architecture-specific; no-op on unsupported targets.
 }
 
-/// Walk a parked thread's JIT frame chain. Same as
-/// [`walk_jit_ancestor_roots`] but **stops at the first frame whose
-/// return address is not in any registered JIT code range**, instead
-/// of relying on the thread-local `current_jit_entry_fp` fence.
+/// Walk a thread's JIT frame chain starting at `jit_fp`. Scans
+/// `SafepointRecord.root_slots` for every JIT frame found in the
+/// chain; **skips non-JIT (Rust / extern) frames** rather than
+/// stopping. Walks until `saved_fp` is null.
 ///
-/// Use this when scanning roots for a thread *other than* the
-/// caller — the thread-local fence belongs to the wrong thread, so
-/// the standard walker would overrun the parked thread's JIT region
-/// into its Rust host stack and dereference garbage.
+/// Used for two cases:
+///   1. **Cross-thread**, by the STW collector for a thread parked
+///      at a JIT safepoint. The published `parked_jit_fp` IS a JIT
+///      frame, and the chain above it is JIT-only until host Rust.
+///   2. **Alloc-triggered, same thread.** When a mutator's
+///      `gc_alloc` overflows the nursery from inside an extern, it
+///      publishes its CURRENT (Rust-frame) FP as `parked_jit_fp`.
+///      The chain looks like trigger_gc → alloc_obj_slow_path →
+///      gc_alloc_thunk → JIT frame. We need to walk past the Rust
+///      frames and scan the JIT frame's stack-map roots — without
+///      this, the JIT-frame spill slots holding live heap pointers
+///      go un-updated when the GC moves their referents.
 ///
-/// The parked thread, by construction, is parked at a JIT safepoint,
-/// so its FP-chain at the moment of parking has only JIT frames
-/// until the JIT-entry frame; the next frame above is host Rust
-/// (not in the registry). Stopping there is the right boundary.
+/// Skipping non-JIT frames is safe under the standard AArch64 /
+/// x86_64 FP convention (`[fp]` = saved FP, `[fp+8]` = saved LR)
+/// that both rustc and the JIT honor. The walk terminates when
+/// saved_fp reaches null (top of stack).
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 pub fn walk_parked_thread_jit_roots(
     jit_fp: *const u8,
@@ -335,12 +343,15 @@ pub fn walk_parked_thread_jit_roots(
             break;
         }
 
-        // CROSS-THREAD walk: stop at the first non-JIT frame. We
-        // can't rely on the thread-local entry-FP fence because that
-        // belongs to the WALKING thread, not the parked thread.
+        // Frame is JIT? Scan its roots. Otherwise (Rust / extern
+        // frame), skip to the next FP without scanning anything —
+        // the chain might contain more JIT frames above.
         let entry = match lookup_code_entry(&registry, saved_lr) {
             Some(e) => e,
-            None => break,
+            None => {
+                fp = saved_fp;
+                continue;
+            }
         };
         let return_offset = saved_lr - entry.code_start;
         match entry

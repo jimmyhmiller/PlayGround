@@ -65,7 +65,7 @@ pub mod chrome_material;
 pub mod layers;
 pub mod text_input;
 
-pub use camera::PaneCameraOf;
+pub use camera::{PaneCameraOf, PaneCanvasRegion};
 pub use chrome_material::{
     ActiveChromeShader, ChromeMaterialPlugin, ChromeParams, ChromeStyle, ChromeTextStyle,
     PaneChromeMaterial, PaneShadowMaterial, ShadowParams,
@@ -424,6 +424,7 @@ impl Plugin for PanePlugin {
             .init_resource::<PendingPaneActions>()
             .init_resource::<PaneRegistry>()
             .init_resource::<PaneInputBlockZones>()
+            .init_resource::<PaneCanvasRegion>()
             .insert_resource(PaneLayerAllocator::new())
             .add_message::<PaneContentPressed>()
             .add_plugins((TextInputPlugin, ChromeMaterialPlugin))

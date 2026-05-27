@@ -16,8 +16,8 @@ use pane_bevy::PaneFontMetrics;
 use crate::protocol::{parse_hex_color, Align, ButtonKind, Edges, Element, Style, TabItem, Weight};
 use crate::{ClickKind, ClickTarget, LinkTarget, WidgetTargets};
 
-const DEFAULT_FONT_SIZE: f32 = 13.0;
-const LINE_HEIGHT_MUL: f32 = 1.4;
+pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+pub const LINE_HEIGHT_MUL: f32 = 1.4;
 /// Threshold above which text is considered a display heading. Display
 /// type uses a tighter line height because the natural 1.4-multiplier
 /// "phone-book" line spacing leaves an obvious empty band above the
@@ -28,11 +28,11 @@ const DISPLAY_LINE_HEIGHT_MUL: f32 = 1.05;
 // Colors all flow through `LayoutCtx::palette` (theme-driven). See
 // `WidgetPalette::from_theme` below.
 
-const BUTTON_PAD_X: f32 = 8.0;
-const BUTTON_PAD_Y: f32 = 4.0;
-const BADGE_PAD_X: f32 = 6.0;
-const BADGE_PAD_Y: f32 = 2.0;
-const BADGE_FONT_SIZE: f32 = 11.0;
+pub const BUTTON_PAD_X: f32 = 8.0;
+pub const BUTTON_PAD_Y: f32 = 4.0;
+pub const BADGE_PAD_X: f32 = 6.0;
+pub const BADGE_PAD_Y: f32 = 2.0;
+pub const BADGE_FONT_SIZE: f32 = 11.0;
 
 // Toggle pill dimensions. Track height = knob diameter; the knob slides
 // across the inner length.
@@ -184,16 +184,13 @@ impl WidgetPalette {
 /// Resolve a flow container's effective padding. If the Style carries
 /// an explicit `padding` (asymmetric), it wins; otherwise the
 /// element's symmetric `pad: f32` becomes Edges::all(pad).
-fn effective_padding(style: Option<&Style>, pad: f32) -> Edges {
+pub(crate) fn effective_padding(style: Option<&Style>, pad: f32) -> Edges {
     style
         .and_then(|s| s.padding.as_ref())
         .copied()
         .unwrap_or_else(|| Edges::all(pad))
 }
 
-/// Measure an element's intrinsic size without spawning entities. Used
-/// by stack layout (hstack pre-measure for alignment) to decide x/y of
-/// next sibling.
 /// Effective per-line height for `font_size`. Display headings use a
 /// tighter ratio so big titles don't carry an empty band above the
 /// glyph that reads as accidental top margin.
@@ -206,148 +203,13 @@ pub fn line_height(font_size: f32) -> f32 {
     font_size * mul
 }
 
-pub fn measure(el: &Element, metrics: &PaneFontMetrics) -> Vec2 {
-    match el {
-        Element::Text { value, size, .. } => {
-            let s = size.unwrap_or(DEFAULT_FONT_SIZE);
-            Vec2::new(metrics.measure(value, s), line_height(s))
-        }
-        Element::Vstack {
-            gap,
-            pad,
-            children,
-            style,
-        } => measure_stack_with_padding(
-            children,
-            *gap,
-            effective_padding(style.as_ref(), *pad),
-            true,
-            metrics,
-        ),
-        Element::Hstack {
-            gap,
-            pad,
-            children,
-            style,
-            ..
-        } => measure_stack_with_padding(
-            children,
-            *gap,
-            effective_padding(style.as_ref(), *pad),
-            false,
-            metrics,
-        ),
-        Element::Frame {
-            gap,
-            pad,
-            children,
-            style,
-        } => measure_stack_with_padding(
-            children,
-            *gap,
-            effective_padding(style.as_ref(), *pad),
-            true,
-            metrics,
-        ),
-        Element::Scroll {
-            gap,
-            pad,
-            children,
-        } => measure_stack(children, *gap, *pad, true, metrics),
-        Element::Divider => Vec2::new(0.0, 1.0),
-        Element::Spacer { size } => Vec2::new(*size, *size),
-        Element::Badge { value, .. } => Vec2::new(
-            metrics.measure(value, BADGE_FONT_SIZE) + BADGE_PAD_X * 2.0,
-            BADGE_FONT_SIZE * LINE_HEIGHT_MUL + BADGE_PAD_Y * 2.0,
-        ),
-        Element::Button { label, .. } => Vec2::new(
-            metrics.measure(label, DEFAULT_FONT_SIZE) + BUTTON_PAD_X * 2.0,
-            DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL + BUTTON_PAD_Y * 2.0,
-        ),
-        Element::Link { label, .. } => Vec2::new(
-            metrics.measure(label, DEFAULT_FONT_SIZE),
-            DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL,
-        ),
-        Element::Bar { width, height, .. } => Vec2::new(*width, *height),
-        Element::Swatch { size, .. } => Vec2::new(*size, *size),
-        Element::SwatchButton { size, .. } => Vec2::new(*size, *size),
-        Element::Tabs { items, .. } => {
-            // Pre-measure each tab as bold-default text + tab padding.
-            let h = DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL + 12.0;
-            let w: f32 = items
-                .iter()
-                .map(|t| metrics.measure(&t.label, DEFAULT_FONT_SIZE) + 20.0)
-                .sum::<f32>()
-                + ((items.len().saturating_sub(1)) as f32) * 4.0;
-            Vec2::new(w, h)
-        }
-        Element::Toggle { label, .. } => {
-            let label_w = if label.is_empty() {
-                0.0
-            } else {
-                metrics.measure(label, DEFAULT_FONT_SIZE) + 8.0
-            };
-            Vec2::new(label_w + TOGGLE_TRACK_W, TOGGLE_TRACK_H.max(DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL))
-        }
-        Element::ListItem {
-            gap, pad, children, style, ..
-        } => measure_stack_with_padding(
-            children,
-            *gap,
-            effective_padding(style.as_ref(), *pad),
-            true,
-            metrics,
-        ),
-        Element::Input { width, .. } => Vec2::new(*width, INPUT_HEIGHT),
-        // Canvas is handled by a separate render path in
-        // `widget_bevy::render_canvas_items` and never reaches the
-        // flow-layout `render`. Return zero so any accidental nesting
-        // doesn't contribute to its parent's measured size.
-        Element::Canvas { .. } => Vec2::ZERO,
-    }
-}
-
-fn measure_stack(
-    children: &[Element],
-    gap: f32,
-    pad: f32,
-    vertical: bool,
-    metrics: &PaneFontMetrics,
-) -> Vec2 {
-    measure_stack_with_padding(children, gap, Edges::all(pad), vertical, metrics)
-}
-
-fn measure_stack_with_padding(
-    children: &[Element],
-    gap: f32,
-    padding: Edges,
-    vertical: bool,
-    metrics: &PaneFontMetrics,
-) -> Vec2 {
-    let mut main: f32 = 0.0;
-    let mut cross: f32 = 0.0;
-    for (i, c) in children.iter().enumerate() {
-        let cs = measure(c, metrics);
-        if vertical {
-            cross = cross.max(cs.x);
-            main += cs.y;
-        } else {
-            cross = cross.max(cs.y);
-            main += cs.x;
-        }
-        if i + 1 < children.len() {
-            main += gap;
-        }
-    }
-    if vertical {
-        Vec2::new(cross + padding.horizontal(), main + padding.vertical())
-    } else {
-        Vec2::new(main + padding.horizontal(), cross + padding.vertical())
-    }
-}
-
 /// Render `el` at `origin` (pixels-from-content-top-left, y-down).
 /// Returns the consumed size.
+///
+/// Layout is computed via [`crate::layout`] (Taffy) before any
+/// entities are spawned. The render walk then reads each node's
+/// computed `(x, y, width, height)` from Taffy rather than recomputing
+/// stack positions by hand.
 pub fn render(
     commands: &mut Commands,
     ctx: &LayoutCtx,
@@ -357,200 +219,235 @@ pub fn render(
     max_w: f32,
     z: f32,
 ) -> Vec2 {
-    // Measure container size first so background/border/shadow have
-    // dimensions to paint. For non-style containers this is the same
-    // as before; for elements with `style` we use the size to render
-    // a Style background under the children.
-    let measured = match el {
-        Element::Vstack { style, .. }
-        | Element::Hstack { style, .. }
-        | Element::Frame { style, .. }
-        | Element::ListItem { style, .. } => {
-            let outer = measure(el, &ctx.metrics);
-            paint_style_background(commands, ctx, style.as_ref(), origin, outer, z);
-            outer
+    let mut laid = crate::layout::build_tree(el);
+    crate::layout::compute(&mut laid, max_w, f32::INFINITY, &ctx.metrics);
+    let root_layout = laid.layout(laid.root);
+    let root_origin = origin
+        + Vec2::new(root_layout.location.x, root_layout.location.y);
+    render_node(
+        commands,
+        ctx,
+        targets,
+        &laid,
+        laid.root,
+        el,
+        root_origin,
+        z,
+    );
+    Vec2::new(root_layout.size.width, root_layout.size.height)
+}
+
+/// Walk the Taffy tree in lockstep with the Element tree, spawning the
+/// appropriate primitives at each node's computed position + size.
+#[allow(clippy::too_many_arguments)]
+fn render_node(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
+    laid: &crate::layout::LaidOut,
+    node_id: taffy::NodeId,
+    el: &Element,
+    origin: Vec2,
+    z: f32,
+) {
+    let layout = laid.layout(node_id);
+    let size = Vec2::new(layout.size.width, layout.size.height);
+
+    // Container helper: paint the Style background under the children
+    // (if any) and recurse, using Taffy's child-node positions for
+    // each child rather than computing them ourselves.
+    let recurse_children = |commands: &mut Commands,
+                            targets: &mut WidgetTargets,
+                            children: &[Element],
+                            style: Option<&Style>| {
+        paint_style_background(commands, ctx, style, origin, size, z);
+        let child_ids = laid.taffy.children(node_id).unwrap_or_default();
+        for (cid, child) in child_ids.iter().zip(children.iter()) {
+            let cl = laid.layout(*cid);
+            let cpos = origin + Vec2::new(cl.location.x, cl.location.y);
+            render_node(commands, ctx, targets, laid, *cid, child, cpos, z + 0.01);
         }
-        _ => Vec2::ZERO,
     };
-    let _ = measured;
 
     match el {
-        Element::Vstack {
-            gap,
-            pad,
+        Element::Vstack { children, style, .. }
+        | Element::Hstack { children, style, .. }
+        | Element::Frame { children, style, .. } => {
+            recurse_children(commands, targets, children, style.as_ref());
+        }
+        Element::Scroll { children, .. } => {
+            recurse_children(commands, targets, children, None);
+        }
+        Element::ListItem {
+            id,
             children,
+            selected,
             style,
-        } => render_stack_with_padding(
-            commands,
-            ctx,
-            targets,
-            children,
-            origin,
-            *gap,
-            effective_padding(style.as_ref(), *pad),
-            true,
-            max_w,
-            z,
-        ),
-        Element::Frame {
-            gap,
-            pad,
-            children,
-            style,
-        } => render_stack_with_padding(
-            commands,
-            ctx,
-            targets,
-            children,
-            origin,
-            *gap,
-            effective_padding(style.as_ref(), *pad),
-            true,
-            max_w,
-            z,
-        ),
-        Element::Scroll {
-            gap,
-            pad,
-            children,
-        } => render_stack(commands, ctx, targets, children, origin, *gap, *pad, true, max_w, z),
-        Element::Hstack {
-            gap,
-            pad,
-            children,
-            align,
-            style,
-        } => render_hstack_with_padding(
-            commands,
-            ctx,
-            targets,
-            children,
-            origin,
-            *gap,
-            effective_padding(style.as_ref(), *pad),
-            *align,
-            max_w,
-            z,
-        ),
+            ..
+        } => {
+            if *selected {
+                let sel_bg = ctx
+                    .resolve_color("surface_3")
+                    .unwrap_or(Color::srgb(0.13, 0.14, 0.17));
+                paint_rounded_panel(
+                    commands,
+                    ctx,
+                    origin,
+                    size,
+                    ctx.resolve_f32("radius_sm").unwrap_or(4.0),
+                    sel_bg,
+                    Color::srgba(0.0, 0.0, 0.0, 0.0),
+                    0.0,
+                    Color::srgba(0.0, 0.0, 0.0, 0.0),
+                    0.0,
+                    0.0,
+                    z + 0.001,
+                );
+                let accent = ctx
+                    .resolve_color("accent")
+                    .unwrap_or(Color::srgb(0.79, 0.66, 0.42));
+                commands.spawn((
+                    ChildOf(ctx.content_root),
+                    Sprite {
+                        color: accent,
+                        custom_size: Some(Vec2::new(2.0, size.y)),
+                        ..default()
+                    },
+                    Anchor::TOP_LEFT,
+                    Transform::from_xyz(origin.x, -origin.y, z + 0.003),
+                ));
+            }
+            recurse_children(commands, targets, children, style.as_ref());
+            targets.clicks.push(ClickTarget {
+                id: id.clone(),
+                kind: ClickKind::Button,
+                rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
+            });
+        }
         Element::Text {
             value,
             color,
-            size,
+            size: font_size,
             weight,
             family,
-        } => render_text(
+        } => render_text_at(
             commands,
             ctx,
             value,
             color.as_deref(),
-            *size,
+            font_size.unwrap_or(DEFAULT_FONT_SIZE),
             *weight,
             family.as_deref(),
             origin,
-            max_w,
+            size,
             z,
         ),
-        Element::Divider => render_divider(commands, ctx, origin, max_w, z),
-        Element::Spacer { size } => Vec2::new(*size, *size),
+        Element::Divider => render_divider_at(commands, ctx, origin, size, z),
+        Element::Spacer { .. } => {}
         Element::Badge { value, color, .. } => {
-            render_badge(commands, ctx, value, color.as_deref(), origin, z)
+            render_badge_at(commands, ctx, value, color.as_deref(), origin, size, z);
         }
-        Element::Button { id, label, kind, style } => render_button(
-            commands, ctx, targets, id, label, *kind, style.as_ref(), origin, z,
+        Element::Button {
+            id,
+            label,
+            kind,
+            style,
+        } => render_button_at(
+            commands,
+            ctx,
+            targets,
+            id,
+            label,
+            *kind,
+            style.as_ref(),
+            origin,
+            size,
+            z,
         ),
-        Element::Link { url, label } => render_link(commands, ctx, targets, url, label, origin, z),
+        Element::Link { url, label } => {
+            render_link_at(commands, ctx, targets, url, label, origin, size, z);
+        }
         Element::Bar {
             value,
             max,
             color,
             track,
-            width,
-            height,
-        } => render_bar(
+            ..
+        } => render_bar_at(
             commands,
             ctx,
             *value,
             *max,
             color.as_deref(),
             track.as_deref(),
-            *width,
-            *height,
             origin,
+            size,
             z,
         ),
-        Element::Swatch { color, size, id } => render_swatch(
-            commands, ctx, targets, color, *size, id.as_deref(), origin, z,
+        Element::Swatch { color, id, .. } => render_swatch_at(
+            commands,
+            ctx,
+            targets,
+            color,
+            id.as_deref(),
+            origin,
+            size,
+            z,
         ),
-        Element::SwatchButton { id, color, size } => render_swatch(
-            commands, ctx, targets, color, *size, Some(id), origin, z,
+        Element::SwatchButton { id, color, .. } => render_swatch_at(
+            commands,
+            ctx,
+            targets,
+            color,
+            Some(id),
+            origin,
+            size,
+            z,
         ),
         Element::Tabs {
             id,
             items,
             selected,
             ..
-        } => render_tabs(commands, ctx, targets, id, items, selected, origin, z),
+        } => render_tabs_at(commands, ctx, targets, laid, node_id, id, items, selected, origin, z),
         Element::Toggle {
             id,
             label,
             checked,
             ..
-        } => render_toggle(commands, ctx, targets, id, label, *checked, origin, z),
-        Element::ListItem {
-            id,
-            children,
-            gap,
-            pad,
-            selected,
-            style,
-        } => render_list_item(
-            commands,
-            ctx,
-            targets,
-            id,
-            children,
-            *gap,
-            effective_padding(style.as_ref(), *pad),
-            *selected,
-            origin,
-            max_w,
-            z,
-        ),
+        } => render_toggle_at(commands, ctx, targets, laid, node_id, id, label, *checked, origin, size, z),
         Element::Input {
             id,
             value,
             placeholder,
             focused,
-            width,
             ..
-        } => render_input(
-            commands, ctx, targets, id, value, placeholder, *focused, *width, origin, z,
+        } => render_input_at(
+            commands, ctx, targets, id, value, placeholder, *focused, origin, size, z,
         ),
-        // Canvas only renders at the top level — see
-        // `widget_bevy::render_canvas_items`. If we hit it nested
-        // inside a stack, silently drop it (zero size, no entities)
-        // rather than panic.
-        Element::Canvas { .. } => Vec2::ZERO,
+        // Canvas renders only at the top level via render_canvas_items.
+        // Nested Canvas inside flow layout becomes a 0-size leaf.
+        Element::Canvas { .. } => {}
     }
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_swatch(
+fn render_swatch_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
     targets: &mut WidgetTargets,
     color_str: &str,
-    size: f32,
     id: Option<&str>,
     origin: Vec2,
+    size: Vec2,
     z: f32,
-) -> Vec2 {
+) {
     let color = parse_color_or_default(color_str, ctx.palette.button_bg);
     commands.spawn((
         ChildOf(ctx.content_root),
         Sprite {
             color,
-            custom_size: Some(Vec2::new(size, size)),
+            custom_size: Some(size),
             ..default()
         },
         Anchor::TOP_LEFT,
@@ -560,10 +457,9 @@ fn render_swatch(
         targets.clicks.push(ClickTarget {
             id: id.to_string(),
             kind: ClickKind::Button,
-            rect: Rect::new(origin.x, origin.y, origin.x + size, origin.y + size),
+            rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
         });
     }
-    Vec2::new(size, size)
 }
 
 fn parse_color_or_default(s: &str, fallback: Color) -> Color {
@@ -574,151 +470,18 @@ fn parse_color_or_default(s: &str, fallback: Color) -> Color {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_stack(
-    commands: &mut Commands,
-    ctx: &LayoutCtx,
-    targets: &mut WidgetTargets,
-    children: &[Element],
-    origin: Vec2,
-    gap: f32,
-    pad: f32,
-    vertical: bool,
-    max_w: f32,
-    z: f32,
-) -> Vec2 {
-    render_stack_with_padding(
-        commands,
-        ctx,
-        targets,
-        children,
-        origin,
-        gap,
-        Edges::all(pad),
-        vertical,
-        max_w,
-        z,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_stack_with_padding(
-    commands: &mut Commands,
-    ctx: &LayoutCtx,
-    targets: &mut WidgetTargets,
-    children: &[Element],
-    origin: Vec2,
-    gap: f32,
-    padding: Edges,
-    vertical: bool,
-    max_w: f32,
-    z: f32,
-) -> Vec2 {
-    let inner_x = origin.x + padding.left;
-    let inner_y = origin.y + padding.top;
-    let inner_max = (max_w - padding.horizontal()).max(0.0);
-
-    let mut cursor = if vertical { inner_y } else { inner_x };
-    let mut cross: f32 = 0.0;
-    for (i, c) in children.iter().enumerate() {
-        let cs = if vertical {
-            render(
-                commands,
-                ctx,
-                targets,
-                c,
-                Vec2::new(inner_x, cursor),
-                inner_max,
-                z + 0.01,
-            )
-        } else {
-            render(
-                commands,
-                ctx,
-                targets,
-                c,
-                Vec2::new(cursor, inner_y),
-                inner_max,
-                z + 0.01,
-            )
-        };
-        if vertical {
-            cursor += cs.y;
-            cross = cross.max(cs.x);
-        } else {
-            cursor += cs.x;
-            cross = cross.max(cs.y);
-        }
-        if i + 1 < children.len() {
-            cursor += gap;
-        }
-    }
-    let main = cursor - if vertical { inner_y } else { inner_x };
-    if vertical {
-        Vec2::new(cross + padding.horizontal(), main + padding.vertical())
-    } else {
-        Vec2::new(main + padding.horizontal(), cross + padding.vertical())
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_hstack_with_padding(
-    commands: &mut Commands,
-    ctx: &LayoutCtx,
-    targets: &mut WidgetTargets,
-    children: &[Element],
-    origin: Vec2,
-    gap: f32,
-    padding: Edges,
-    align: Align,
-    max_w: f32,
-    z: f32,
-) -> Vec2 {
-    let inner_x = origin.x + padding.left;
-    let inner_y = origin.y + padding.top;
-    let inner_max = (max_w - padding.horizontal()).max(0.0);
-
-    // Pre-measure children for cross-axis alignment.
-    let sizes: Vec<Vec2> = children.iter().map(|c| measure(c, &ctx.metrics)).collect();
-    let row_h = sizes.iter().map(|s| s.y).fold(0.0_f32, f32::max);
-
-    let mut cursor = inner_x;
-    for (i, (c, cs)) in children.iter().zip(sizes.iter()).enumerate() {
-        let dy = match align {
-            Align::Start => 0.0,
-            Align::Center => (row_h - cs.y) * 0.5,
-            Align::End => row_h - cs.y,
-        };
-        let _ = render(
-            commands,
-            ctx,
-            targets,
-            c,
-            Vec2::new(cursor, inner_y + dy),
-            (inner_max - (cursor - inner_x)).max(0.0),
-            z + 0.01,
-        );
-        cursor += cs.x;
-        if i + 1 < children.len() {
-            cursor += gap;
-        }
-    }
-    Vec2::new(cursor - inner_x + padding.horizontal(), row_h + padding.vertical())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_text(
+fn render_text_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
     value: &str,
     color: Option<&str>,
-    size: Option<f32>,
+    font_size: f32,
     weight: Option<Weight>,
     family: Option<&str>,
     origin: Vec2,
-    max_w: f32,
+    size: Vec2,
     z: f32,
-) -> Vec2 {
-    let s = size.unwrap_or(DEFAULT_FONT_SIZE);
+) {
     let col = color
         .and_then(|c| ctx.resolve_color(c))
         .unwrap_or(ctx.palette.text);
@@ -729,102 +492,61 @@ fn render_text(
     let font = family
         .and_then(|f| ctx.font_for(f))
         .unwrap_or_else(|| ctx.font.clone());
-    let (display, w, h) = fit_single_line(value, s, max_w, &ctx.metrics);
+    // Multi-line via Bevy's text layout: let it wrap inside the
+    // TextBounds box. font_size is passed in (not inferred from
+    // size.y — that would treat multi-line height as line-height
+    // and over-scale the glyphs).
     commands.spawn((
         ChildOf(ctx.content_root),
-        Text2d::new(display),
+        Text2d::new(value.to_string()),
         TextFont {
             font,
-            font_size: s,
+            font_size,
             ..default()
         },
-        LineHeight::Px(h),
+        LineHeight::Px(line_height(font_size)),
         TextColor(col),
         Anchor::TOP_LEFT,
-        bevy::text::TextLayout::new_with_no_wrap(),
         TextBounds {
-            width: Some(max_w.max(0.0)),
-            height: Some(h),
+            width: Some(size.x.max(0.0)),
+            height: Some(size.y.max(0.0)),
         },
         Transform::from_xyz(origin.x, -origin.y, z),
     ));
-    Vec2::new(w, h)
 }
 
-/// Truncate `value` to fit in `max_w` pixels using the host-supplied
-/// `PaneFontMetrics`. Returns the display string (with `…` appended if
-/// truncated), the actual width consumed, and the single line height.
-///
-/// This is the single source of truth for "how wide is this text?" —
-/// callers that need both the rendered string and its size should go
-/// through here so the renderer's intrinsic measure matches what we
-/// actually draw on screen. Uses real per-character advance from the
-/// host font instead of approximating, so the layout stays correct as
-/// the pane resizes.
-pub fn fit_single_line(
-    value: &str,
-    font_size: f32,
-    max_w: f32,
-    metrics: &PaneFontMetrics,
-) -> (String, f32, f32) {
-    let h = line_height(font_size);
-    let intrinsic_w = metrics.measure(value, font_size);
-    if intrinsic_w <= max_w || max_w <= 0.0 {
-        return (value.to_string(), intrinsic_w.min(max_w.max(0.0)), h);
-    }
-    let char_w = metrics.char_width(font_size);
-    if char_w <= 0.0 {
-        return (String::new(), 0.0, h);
-    }
-    let ellipsis_w = char_w; // '…' is one char wide on monospace
-    let avail = (max_w - ellipsis_w).max(0.0);
-    let max_chars = (avail / char_w).floor() as usize;
-    let mut s: String = value.chars().take(max_chars).collect();
-    s.push('…');
-    let w = (max_chars as f32 + 1.0) * char_w;
-    (s, w.min(max_w), h)
-}
-
-fn render_divider(
-    commands: &mut Commands,
-    ctx: &LayoutCtx,
-    origin: Vec2,
-    max_w: f32,
-    z: f32,
-) -> Vec2 {
+fn render_divider_at(commands: &mut Commands, ctx: &LayoutCtx, origin: Vec2, size: Vec2, z: f32) {
     commands.spawn((
         ChildOf(ctx.content_root),
         Sprite {
             color: ctx.palette.divider,
-            custom_size: Some(Vec2::new(max_w.max(0.0), 1.0)),
+            custom_size: Some(Vec2::new(size.x.max(0.0), size.y.max(1.0))),
             ..default()
         },
         Anchor::TOP_LEFT,
         Transform::from_xyz(origin.x, -origin.y, z),
     ));
-    Vec2::new(max_w.max(0.0), 1.0)
 }
 
-fn render_badge(
+#[allow(clippy::too_many_arguments)]
+fn render_badge_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
     value: &str,
     color: Option<&str>,
     origin: Vec2,
+    size: Vec2,
     z: f32,
-) -> Vec2 {
+) {
     let bg = color
         .and_then(parse_hex_color)
         .map(|[r, g, b]| Color::srgb(r, g, b))
         .unwrap_or(ctx.palette.badge_bg);
-    let text_w = ctx.metrics.measure(value, BADGE_FONT_SIZE);
-    let w = text_w + BADGE_PAD_X * 2.0;
-    let h = BADGE_FONT_SIZE * LINE_HEIGHT_MUL + BADGE_PAD_Y * 2.0;
     commands.spawn((
         ChildOf(ctx.content_root),
         Sprite {
             color: bg,
-            custom_size: Some(Vec2::new(w, h)),
+            custom_size: Some(size),
             ..default()
         },
         Anchor::TOP_LEFT,
@@ -838,17 +560,16 @@ fn render_badge(
             font_size: BADGE_FONT_SIZE,
             ..default()
         },
-        LineHeight::Px(BADGE_FONT_SIZE * LINE_HEIGHT_MUL),
+        LineHeight::Px(line_height(BADGE_FONT_SIZE)),
         TextColor(ctx.palette.badge_label),
         Anchor::TOP_LEFT,
         bevy::text::TextLayout::new_with_no_wrap(),
         Transform::from_xyz(origin.x + BADGE_PAD_X, -(origin.y + BADGE_PAD_Y), z + 0.01),
     ));
-    Vec2::new(w, h)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_button(
+fn render_button_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
     targets: &mut WidgetTargets,
@@ -857,11 +578,11 @@ fn render_button(
     kind: ButtonKind,
     style: Option<&Style>,
     origin: Vec2,
+    size: Vec2,
     z: f32,
-) -> Vec2 {
-    let text_w = ctx.metrics.measure(label, DEFAULT_FONT_SIZE);
-    let w = text_w + BUTTON_PAD_X * 2.0;
-    let h = DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL + BUTTON_PAD_Y * 2.0;
+) {
+    let w = size.x;
+    let h = size.y;
 
     // Resolve visual style. Filled = palette button_bg + label. Outline
     // = transparent bg + accent border + accent label. Ghost = fully
@@ -958,7 +679,6 @@ fn render_button(
         kind: ClickKind::Button,
         rect: Rect::new(origin.x, origin.y, origin.x + w, origin.y + h),
     });
-    Vec2::new(w, h)
 }
 
 /// Spawn a rounded-rect SDF panel with optional border + drop shadow.
@@ -1151,17 +871,17 @@ fn lin_vec4(c: Color) -> Vec4 {
     Vec4::new(lin.red, lin.green, lin.blue, lin.alpha)
 }
 
-fn render_link(
+#[allow(clippy::too_many_arguments)]
+fn render_link_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
     targets: &mut WidgetTargets,
     url: &str,
     label: &str,
     origin: Vec2,
+    size: Vec2,
     z: f32,
-) -> Vec2 {
-    let w = ctx.metrics.measure(label, DEFAULT_FONT_SIZE);
-    let h = DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL;
+) {
     commands.spawn((
         ChildOf(ctx.content_root),
         Text2d::new(label.to_string()),
@@ -1170,32 +890,33 @@ fn render_link(
             font_size: DEFAULT_FONT_SIZE,
             ..default()
         },
-        LineHeight::Px(h),
+        LineHeight::Px(line_height(DEFAULT_FONT_SIZE)),
         TextColor(ctx.palette.link),
         Anchor::TOP_LEFT,
-        bevy::text::TextLayout::new_with_no_wrap(),
+        TextBounds {
+            width: Some(size.x.max(0.0)),
+            height: Some(size.y.max(0.0)),
+        },
         Transform::from_xyz(origin.x, -origin.y, z),
     ));
     targets.links.push(LinkTarget {
         url: url.to_string(),
-        rect: Rect::new(origin.x, origin.y, origin.x + w, origin.y + h),
+        rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
     });
-    Vec2::new(w, h)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_bar(
+fn render_bar_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
     value: f32,
     max: f32,
     color: Option<&str>,
     track: Option<&str>,
-    width: f32,
-    height: f32,
     origin: Vec2,
+    size: Vec2,
     z: f32,
-) -> Vec2 {
+) {
     let fill = color
         .and_then(parse_hex_color)
         .map(|[r, g, b]| Color::srgb(r, g, b))
@@ -1209,13 +930,13 @@ fn render_bar(
     } else {
         (value / max).clamp(0.0, 1.0)
     };
-    let fill_w = (width * ratio).max(0.0);
+    let fill_w = (size.x * ratio).max(0.0);
 
     commands.spawn((
         ChildOf(ctx.content_root),
         Sprite {
             color: bg,
-            custom_size: Some(Vec2::new(width, height)),
+            custom_size: Some(size),
             ..default()
         },
         Anchor::TOP_LEFT,
@@ -1226,14 +947,13 @@ fn render_bar(
             ChildOf(ctx.content_root),
             Sprite {
                 color: fill,
-                custom_size: Some(Vec2::new(fill_w, height)),
+                custom_size: Some(Vec2::new(fill_w, size.y)),
                 ..default()
             },
             Anchor::TOP_LEFT,
             Transform::from_xyz(origin.x, -origin.y, z + 0.01),
         ));
     }
-    Vec2::new(width, height)
 }
 
 fn brighten(c: Color, delta: f32) -> Color {
@@ -1245,30 +965,32 @@ fn brighten(c: Color, delta: f32) -> Color {
     )
 }
 
-fn render_tabs(
+#[allow(clippy::too_many_arguments)]
+fn render_tabs_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
     targets: &mut WidgetTargets,
+    laid: &crate::layout::LaidOut,
+    node_id: taffy::NodeId,
     id: &str,
     items: &[TabItem],
     selected: &str,
     origin: Vec2,
     z: f32,
-) -> Vec2 {
-    let row_h = DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL + TAB_PAD_Y * 2.0;
-    let mut cursor = origin.x;
+) {
+    // Walk Taffy's per-tab children — each cell got its own NodeId
+    // when the tree was built, so we can place tabs exactly where the
+    // layout solver put them rather than re-measuring labels here.
     let accent = ctx
         .resolve_color("accent")
         .unwrap_or(Color::srgb(0.42, 0.62, 0.92));
-    for (i, tab) in items.iter().enumerate() {
-        let label_w = ctx.metrics.measure(&tab.label, DEFAULT_FONT_SIZE);
-        let tab_w = label_w + TAB_PAD_X * 2.0;
+    let child_ids = laid.taffy.children(node_id).unwrap_or_default();
+    for (cid, tab) in child_ids.iter().zip(items.iter()) {
+        let cl = laid.layout(*cid);
+        let cell_pos = origin + Vec2::new(cl.location.x, cl.location.y);
+        let cell_size = Vec2::new(cl.size.width, cl.size.height);
         let is_selected = tab.id == selected;
-        let label_color = if is_selected {
-            accent
-        } else {
-            ctx.palette.text_muted
-        };
+        let label_color = if is_selected { accent } else { ctx.palette.text_muted };
         commands.spawn((
             ChildOf(ctx.content_root),
             Text2d::new(tab.label.clone()),
@@ -1277,24 +999,24 @@ fn render_tabs(
                 font_size: DEFAULT_FONT_SIZE,
                 ..default()
             },
-            LineHeight::Px(DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL),
+            LineHeight::Px(line_height(DEFAULT_FONT_SIZE)),
             TextColor(label_color),
             Anchor::TOP_LEFT,
             bevy::text::TextLayout::new_with_no_wrap(),
-            Transform::from_xyz(cursor + TAB_PAD_X, -(origin.y + TAB_PAD_Y), z + 0.01),
+            Transform::from_xyz(cell_pos.x + TAB_PAD_X, -(cell_pos.y + TAB_PAD_Y), z + 0.01),
         ));
         if is_selected {
             commands.spawn((
                 ChildOf(ctx.content_root),
                 Sprite {
                     color: accent,
-                    custom_size: Some(Vec2::new(tab_w, TAB_INDICATOR_H)),
+                    custom_size: Some(Vec2::new(cell_size.x, TAB_INDICATOR_H)),
                     ..default()
                 },
                 Anchor::TOP_LEFT,
                 Transform::from_xyz(
-                    cursor,
-                    -(origin.y + row_h - TAB_INDICATOR_H),
+                    cell_pos.x,
+                    -(cell_pos.y + cell_size.y - TAB_INDICATOR_H),
                     z + 0.02,
                 ),
             ));
@@ -1302,64 +1024,79 @@ fn render_tabs(
         targets.clicks.push(ClickTarget {
             id: id.to_string(),
             kind: ClickKind::TabSelect { tab: tab.id.clone() },
-            rect: Rect::new(cursor, origin.y, cursor + tab_w, origin.y + row_h),
+            rect: Rect::new(
+                cell_pos.x,
+                cell_pos.y,
+                cell_pos.x + cell_size.x,
+                cell_pos.y + cell_size.y,
+            ),
         });
-        cursor += tab_w;
-        if i + 1 < items.len() {
-            cursor += TAB_GAP;
-        }
     }
-    Vec2::new(cursor - origin.x, row_h)
 }
 
-fn render_toggle(
+#[allow(clippy::too_many_arguments)]
+fn render_toggle_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
     targets: &mut WidgetTargets,
+    laid: &crate::layout::LaidOut,
+    node_id: taffy::NodeId,
     id: &str,
     label: &str,
     checked: bool,
     origin: Vec2,
+    size: Vec2,
     z: f32,
-) -> Vec2 {
-    // Optional label sits to the left of the track.
-    let mut cursor_x = origin.x;
-    let row_h = TOGGLE_TRACK_H.max(DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL);
-    let label_offset_y = (row_h - DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL) * 0.5;
-    if !label.is_empty() {
-        let lw = ctx.metrics.measure(label, DEFAULT_FONT_SIZE);
-        commands.spawn((
-            ChildOf(ctx.content_root),
-            Text2d::new(label.to_string()),
-            TextFont {
-                font: ctx.font.clone(),
-                font_size: DEFAULT_FONT_SIZE,
-                ..default()
-            },
-            LineHeight::Px(DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL),
-            TextColor(ctx.palette.text),
-            Anchor::TOP_LEFT,
-            bevy::text::TextLayout::new_with_no_wrap(),
-            Transform::from_xyz(cursor_x, -(origin.y + label_offset_y), z + 0.01),
-        ));
-        cursor_x += lw + 8.0;
-    }
-
+) {
     let accent = ctx
         .resolve_color("accent")
         .unwrap_or(Color::srgb(0.42, 0.62, 0.92));
-    let track_origin = Vec2::new(cursor_x, origin.y + (row_h - TOGGLE_TRACK_H) * 0.5);
-    let track_color = if checked {
-        accent
+    // Taffy already laid out (label, track) inside the toggle row
+    // when present; iterate the child positions.
+    let (track_pos, track_size) = if label.is_empty() {
+        (origin, size)
     } else {
-        ctx.palette.bar_track
+        let kids = laid.taffy.children(node_id).unwrap_or_default();
+        // [0] = label, [1] = track. Render label first.
+        if let Some(label_id) = kids.first() {
+            let ll = laid.layout(*label_id);
+            commands.spawn((
+                ChildOf(ctx.content_root),
+                Text2d::new(label.to_string()),
+                TextFont {
+                    font: ctx.font.clone(),
+                    font_size: DEFAULT_FONT_SIZE,
+                    ..default()
+                },
+                LineHeight::Px(line_height(DEFAULT_FONT_SIZE)),
+                TextColor(ctx.palette.text),
+                Anchor::TOP_LEFT,
+                bevy::text::TextLayout::new_with_no_wrap(),
+                Transform::from_xyz(
+                    origin.x + ll.location.x,
+                    -(origin.y + ll.location.y),
+                    z + 0.01,
+                ),
+            ));
+        }
+        if let Some(track_id) = kids.get(1) {
+            let tl = laid.layout(*track_id);
+            (
+                origin + Vec2::new(tl.location.x, tl.location.y),
+                Vec2::new(tl.size.width, tl.size.height),
+            )
+        } else {
+            (origin, Vec2::new(TOGGLE_TRACK_W, TOGGLE_TRACK_H))
+        }
     };
+
+    let track_color = if checked { accent } else { ctx.palette.bar_track };
     paint_rounded_panel(
         commands,
         ctx,
-        track_origin,
-        Vec2::new(TOGGLE_TRACK_W, TOGGLE_TRACK_H),
-        TOGGLE_TRACK_H * 0.5,
+        track_pos,
+        track_size,
+        track_size.y * 0.5,
         track_color,
         Color::srgba(0.0, 0.0, 0.0, 0.0),
         0.0,
@@ -1368,17 +1105,16 @@ fn render_toggle(
         0.0,
         z,
     );
-    // Knob.
-    let knob_d = TOGGLE_TRACK_H - TOGGLE_KNOB_PAD * 2.0;
+    let knob_d = track_size.y - TOGGLE_KNOB_PAD * 2.0;
     let knob_x = if checked {
-        track_origin.x + TOGGLE_TRACK_W - knob_d - TOGGLE_KNOB_PAD
+        track_pos.x + track_size.x - knob_d - TOGGLE_KNOB_PAD
     } else {
-        track_origin.x + TOGGLE_KNOB_PAD
+        track_pos.x + TOGGLE_KNOB_PAD
     };
     paint_rounded_panel(
         commands,
         ctx,
-        Vec2::new(knob_x, track_origin.y + TOGGLE_KNOB_PAD),
+        Vec2::new(knob_x, track_pos.y + TOGGLE_KNOB_PAD),
         Vec2::new(knob_d, knob_d),
         knob_d * 0.5,
         Color::WHITE,
@@ -1390,95 +1126,15 @@ fn render_toggle(
         z + 0.01,
     );
 
-    let total_w = cursor_x + TOGGLE_TRACK_W - origin.x;
     targets.clicks.push(ClickTarget {
         id: id.to_string(),
         kind: ClickKind::Toggle { new_checked: !checked },
-        rect: Rect::new(origin.x, origin.y, origin.x + total_w, origin.y + row_h),
+        rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
     });
-    Vec2::new(total_w, row_h)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn render_list_item(
-    commands: &mut Commands,
-    ctx: &LayoutCtx,
-    targets: &mut WidgetTargets,
-    id: &str,
-    children: &[Element],
-    gap: f32,
-    padding: Edges,
-    selected: bool,
-    origin: Vec2,
-    max_w: f32,
-    z: f32,
-) -> Vec2 {
-    // Selected items get a subtle accent fill behind the children.
-    // Style overrides applied in the outer `render` block already drew
-    // the user-supplied background; we layer the selected highlight
-    // *above* that so the indicator wins.
-    // The list-item lays out at its intrinsic size and the selection
-    // highlight covers that, not the parent's full width. Massive gold
-    // bars across the card read as "broken theme" — the mockup uses a
-    // quiet lighter-slate fill plus a thin accent edge on the left.
-    let inner = measure_stack_with_padding(children, gap, padding, true, &ctx.metrics);
-    let panel_size = inner;
-    if selected {
-        let sel_bg = ctx
-            .resolve_color("surface_3")
-            .unwrap_or(Color::srgb(0.13, 0.14, 0.17));
-        paint_rounded_panel(
-            commands,
-            ctx,
-            origin,
-            panel_size,
-            ctx.resolve_f32("radius_sm").unwrap_or(4.0),
-            sel_bg,
-            Color::srgba(0.0, 0.0, 0.0, 0.0),
-            0.0,
-            Color::srgba(0.0, 0.0, 0.0, 0.0),
-            0.0,
-            0.0,
-            z + 0.001,
-        );
-        // Thin accent edge on the left — like a "now playing" marker.
-        let accent = ctx
-            .resolve_color("accent")
-            .unwrap_or(Color::srgb(0.79, 0.66, 0.42));
-        commands.spawn((
-            ChildOf(ctx.content_root),
-            Sprite {
-                color: accent,
-                custom_size: Some(Vec2::new(2.0, panel_size.y)),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(origin.x, -origin.y, z + 0.003),
-        ));
-    }
-    let consumed = render_stack_with_padding(
-        commands,
-        ctx,
-        targets,
-        children,
-        origin,
-        gap,
-        padding,
-        true,
-        max_w,
-        z + 0.002,
-    );
-    let hit_w = consumed.x.max(panel_size.x);
-    targets.clicks.push(ClickTarget {
-        id: id.to_string(),
-        kind: ClickKind::Button,
-        rect: Rect::new(origin.x, origin.y, origin.x + hit_w, origin.y + consumed.y),
-    });
-    consumed
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_input(
+fn render_input_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
     targets: &mut WidgetTargets,
@@ -1486,10 +1142,10 @@ fn render_input(
     value: &str,
     placeholder: &str,
     focused_attr: bool,
-    width: f32,
     origin: Vec2,
+    size: Vec2,
     z: f32,
-) -> Vec2 {
+) {
     // Host owns the editing state while an input is focused — so when
     // ctx.focused_input matches our id we render from that buffer
     // instead of the widget's stale value.
@@ -1521,7 +1177,7 @@ fn render_input(
         commands,
         ctx,
         origin,
-        Vec2::new(width, INPUT_HEIGHT),
+        size,
         radius,
         bg,
         border_color,
@@ -1540,7 +1196,8 @@ fn render_input(
     } else {
         (display_value.clone(), ctx.palette.text)
     };
-    let text_y = (INPUT_HEIGHT - DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL) * 0.5;
+    let line_h = line_height(DEFAULT_FONT_SIZE);
+    let text_y = (size.y - line_h) * 0.5;
     if !txt.is_empty() {
         commands.spawn((
             ChildOf(ctx.content_root),
@@ -1550,24 +1207,21 @@ fn render_input(
                 font_size: DEFAULT_FONT_SIZE,
                 ..default()
             },
-            LineHeight::Px(DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL),
+            LineHeight::Px(line_h),
             TextColor(txt_color),
             Anchor::TOP_LEFT,
             bevy::text::TextLayout::new_with_no_wrap(),
             Transform::from_xyz(origin.x + INPUT_PAD_X, -(origin.y + text_y), z + 0.01),
         ));
     }
-    // Caret.
     if show_caret {
-        // Width of value up to caret position, in chars.
         let prefix: String = display_value.chars().take(caret_pos).collect();
         let caret_x = origin.x + INPUT_PAD_X + ctx.metrics.measure(&prefix, DEFAULT_FONT_SIZE);
-        let caret_h = DEFAULT_FONT_SIZE * LINE_HEIGHT_MUL;
         commands.spawn((
             ChildOf(ctx.content_root),
             Sprite {
                 color: accent,
-                custom_size: Some(Vec2::new(1.5, caret_h)),
+                custom_size: Some(Vec2::new(1.5, line_h)),
                 ..default()
             },
             Anchor::TOP_LEFT,
@@ -1578,7 +1232,6 @@ fn render_input(
     targets.clicks.push(ClickTarget {
         id: id.to_string(),
         kind: ClickKind::InputFocus,
-        rect: Rect::new(origin.x, origin.y, origin.x + width, origin.y + INPUT_HEIGHT),
+        rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
     });
-    Vec2::new(width, INPUT_HEIGHT)
 }

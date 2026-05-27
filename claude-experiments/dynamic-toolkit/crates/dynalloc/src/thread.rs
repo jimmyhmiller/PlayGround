@@ -528,6 +528,7 @@ impl<P: PtrPolicy> MutatorThread<P> {
             }
             return;
         }
+        let _jit_fp_guard = PublishJitFp::new(&self.state);
         // Check if tenured has enough room for worst-case promotion.
         // If not, run a major GC first to reclaim tenured space.
         if self.heap.nursery_used() > self.heap.from_remaining() {
@@ -561,7 +562,64 @@ impl<P: PtrPolicy> MutatorThread<P> {
             }
             return;
         }
+        let _jit_fp_guard = PublishJitFp::new(&self.state);
         unsafe { (*self.heap).mutator_triggered_gc::<P>(&self.state) };
+    }
+}
+
+/// Publish the current native frame pointer into `state.parked_jit_fp`
+/// for the duration of an alloc-triggered GC. Restores the previous
+/// value (typically null) on drop.
+///
+/// Why this exists: `mutator_triggered_gc_with_extras` walks each
+/// thread's `parked_jit_fp` and runs the installed JIT-frame walker
+/// against it. For threads PARKED at a JIT safepoint, the safepoint
+/// handler sets `parked_jit_fp` before parking. For the TRIGGERING
+/// thread (running inside an extern when the alloc fills the nursery),
+/// nothing was setting it — so its JIT frame's stack-map roots
+/// were silently skipped and any heap pointer held in a JIT spill
+/// slot went stale across the collection.
+///
+/// The published FP is this Rust frame's FP (read via `core::arch::asm`).
+/// The walker (`walk_parked_thread_jit_roots`) tolerates intermediate
+/// non-JIT (Rust / extern) frames in the chain and finds the JIT
+/// frame(s) above them.
+struct PublishJitFp<'a> {
+    state: &'a ThreadState,
+    prev: *const u8,
+}
+
+impl<'a> PublishJitFp<'a> {
+    #[inline(always)]
+    fn new(state: &'a ThreadState) -> Self {
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        let fp: *const u8 = {
+            let fp_val: usize;
+            #[cfg(target_arch = "aarch64")]
+            unsafe {
+                core::arch::asm!("mov {}, fp", out(reg) fp_val, options(nomem, nostack, preserves_flags));
+            }
+            #[cfg(target_arch = "x86_64")]
+            unsafe {
+                core::arch::asm!("mov {}, rbp", out(reg) fp_val, options(nomem, nostack, preserves_flags));
+            }
+            fp_val as *const u8
+        };
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        let fp: *const u8 = std::ptr::null();
+
+        let prev = state.parked_jit_fp();
+        state.set_parked_jit_fp(fp);
+        Self { state, prev }
+    }
+}
+
+impl<'a> Drop for PublishJitFp<'a> {
+    #[inline(always)]
+    fn drop(&mut self) {
+        // Restore exactly what was there before — typically null, but
+        // a safepoint-handler path could in principle nest under us.
+        self.state.set_parked_jit_fp(self.prev);
     }
 }
 

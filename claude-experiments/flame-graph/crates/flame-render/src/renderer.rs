@@ -671,11 +671,6 @@ impl Renderer {
     }
 
     fn restore_live_state(&mut self, s: LiveState) {
-        // viewport: keep zoom + scroll; size_px must come from the renderer
-        // so a resize while we were ingesting still gets applied.
-        let size_px = self.viewport.size_px;
-        self.viewport = s.viewport;
-        self.viewport.size_px = size_px;
         self.set_tab(s.active_tab);
         self.sidebar_tab = s.sidebar_tab;
         self.layout_mode = s.layout_mode;
@@ -683,6 +678,18 @@ impl Renderer {
         self.sidebar_scroll_y_px = s.sidebar_scroll_y_px;
         self.sequence_scroll_y_px = s.sequence_scroll_y_px;
         self.call_tree_scroll_y_px = s.call_tree_scroll_y_px;
+        // Preserve vertical scroll and row height. Do NOT restore the
+        // horizontal viewport (start_ns / ns_per_pixel) — in live mode the
+        // trace's time range grows constantly, and pinning to the old
+        // coordinates strands the user looking at a stale window while new
+        // data goes off-screen to the right. Always re-fit horizontally to
+        // the active layout's full range.
+        self.viewport.scroll_y_px = s.viewport.scroll_y_px;
+        self.viewport.row_height_px = s.viewport.row_height_px;
+        let (rstart, rend) = self.current_time_range();
+        if rend > rstart {
+            self.viewport.fit_time(rstart, rend);
+        }
 
         // merge_mode: setting it via set_merge_mode would rebuild merged
         // profile here; we let it rebuild lazily on the next access.

@@ -35,6 +35,7 @@ use pane_bevy::{
 use serde_json::Value;
 
 pub mod button_material;
+pub mod layout;
 pub mod protocol;
 pub mod render;
 pub mod rhai_widget;
@@ -272,6 +273,7 @@ impl Plugin for WidgetPlugin {
 fn handle_widget_wheel(
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     windows: Query<&Window>,
+    keys: Res<ButtonInput<KeyCode>>,
     all_panes: Query<
         (Entity, &pane_bevy::PaneRect, Option<&Visibility>),
         With<pane_bevy::PaneTag>,
@@ -281,6 +283,11 @@ fn handle_widget_wheel(
         With<pane_bevy::PaneTag>,
     >,
 ) {
+    // Cmd+scroll is canvas pan in the host; don't double-scroll widgets.
+    if keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight) {
+        wheel.clear();
+        return;
+    }
     use bevy::input::mouse::MouseScrollUnit;
     const LINE_PX: f32 = 16.0;
     let mut dy_px = 0.0_f32;

@@ -51,6 +51,7 @@ use pane_bevy::{
 use serde_json::Value;
 
 pub mod atlas;
+pub mod canvas;
 pub mod claude_events_pane;
 pub mod context_menu;
 pub mod daemon_client;
@@ -329,6 +330,7 @@ impl Plugin for TerminalPlugin {
             .add_plugins(PanePlugin)
             .add_plugins(TermMaterialPlugin)
             .add_plugins(projects::ProjectsPlugin)
+            .add_plugins(canvas::CanvasPlugin)
             .add_plugins(context_menu::ContextMenuPlugin)
             .add_plugins(radial::RadialPlugin)
             .add_plugins(selection::SelectionPlugin)
@@ -1459,12 +1461,20 @@ fn handle_scroll(
     sidebar: Res<Sidebar>,
     projects: Res<Projects>,
     store: Res<TerminalStore>,
+    keys: Res<ButtonInput<KeyCode>>,
     all_panes: Query<(Entity, &PaneRect, Option<&Visibility>), With<PaneTag>>,
     terminals: Query<
         (Entity, Option<&ProjectMembership>, &PaneKindMarker),
         With<PaneTag>,
     >,
 ) {
+    // Cmd+scroll is reserved for canvas pan (see canvas.rs). Drain the
+    // events so they don't accumulate, but don't act on them.
+    if keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight) {
+        wheel.clear();
+        *accum = 0.0;
+        return;
+    }
     let mut delta_lines: f32 = 0.0;
     for ev in wheel.read() {
         let lines = match ev.unit {

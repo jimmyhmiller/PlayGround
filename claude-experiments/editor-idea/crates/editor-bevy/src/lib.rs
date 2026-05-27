@@ -836,12 +836,18 @@ fn handle_scroll(
     mut wheel: MessageReader<MouseWheel>,
     metrics: Res<EditorMetrics>,
     windows: Query<&Window>,
+    keys: Res<ButtonInput<KeyCode>>,
     all_panes: Query<(Entity, &PaneRect, Option<&Visibility>), With<PaneTag>>,
     mut editors: Query<
         (Entity, &PaneRect, &EditorStateComp, &mut EditorScroll, &PaneKindMarker),
         With<PaneTag>,
     >,
 ) {
+    // Cmd+scroll is the host's canvas pan gesture; don't double-scroll.
+    if keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight) {
+        wheel.clear();
+        return;
+    }
     let mut dx_px = 0.0;
     let mut dy_px = 0.0;
     for ev in wheel.read() {

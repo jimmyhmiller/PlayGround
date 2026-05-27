@@ -421,6 +421,11 @@ fn seed_default_presets() {
     // doesn't exist yet. New built-in presets show up automatically
     // for users who already had earlier ones; user edits never get
     // clobbered because we never overwrite an existing theme.rhai.
+    //
+    // `atelier` shares its bytes with `theme.rs::ATELIER_DEFAULT_THEME`
+    // — the engine's default palette and the preset are the same file,
+    // so tuning happens in one place.
+    write_seed(&dir.join("atelier"), crate::theme::ATELIER_DEFAULT_THEME);
     write_seed(&dir.join("default"), SEED_DEFAULT_THEME);
     write_seed(&dir.join("linear"), SEED_LINEAR_THEME);
     write_seed(&dir.join("paper"), SEED_PAPER_THEME);

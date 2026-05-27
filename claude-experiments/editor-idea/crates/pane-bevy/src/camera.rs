@@ -30,6 +30,22 @@ use bevy::prelude::*;
 use crate::layers::PaneLayer;
 use crate::{PaneRect, PaneTag};
 
+/// Optional rectangular sub-region of the window where pane cameras
+/// are allowed to render. The host sets this each frame so that
+/// non-pane chrome (sidebar, top menu, status bar) sits visually
+/// *on top of* the pane canvas — by clipping the per-pane camera
+/// viewports to a region that excludes the chrome, panes simply
+/// can't draw over those areas. Coordinates are window logical px,
+/// top-left origin. `None` (or the resource missing) means "full
+/// window", matching the pre-existing behavior.
+#[derive(Resource, Copy, Clone, Debug, Default)]
+pub struct PaneCanvasRegion {
+    pub min: Vec2,
+    pub max: Vec2,
+    /// If false, the region is ignored and the full window is used.
+    pub active: bool,
+}
+
 /// Marks a camera as belonging to a specific pane entity. The
 /// `apply_pending_pane_actions` close handler uses this to find and
 /// despawn the camera when the pane closes.
@@ -49,13 +65,15 @@ pub struct PaneCameraOf(pub Entity);
 pub fn spawn_pane_cameras(
     new_panes: Query<(Entity, &PaneLayer, &PaneRect), Added<PaneLayer>>,
     windows: Query<&Window>,
+    region: Option<Res<PaneCanvasRegion>>,
     mut commands: Commands,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
+    let region = region.as_deref().copied();
     for (pane_entity, layer, rect) in &new_panes {
-        let cam_setup = pane_camera_setup(rect, window);
+        let cam_setup = pane_camera_setup(rect, window, region);
         let order = pane_camera_order(rect);
         commands.spawn((
             Camera2d,
@@ -87,17 +105,19 @@ pub fn sync_pane_cameras(
     panes: Query<&PaneRect, With<PaneTag>>,
     mut cameras: Query<(&PaneCameraOf, &mut Camera, &mut Transform)>,
     windows: Query<&Window>,
+    region: Option<Res<PaneCanvasRegion>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
+    let region = region.as_deref().copied();
     for (owner, mut cam, mut xform) in &mut cameras {
         let Ok(rect) = panes.get(owner.0) else {
             // Pane is gone but the camera still exists for one frame —
             // close handler will reap it. Skip.
             continue;
         };
-        let setup = pane_camera_setup(rect, window);
+        let setup = pane_camera_setup(rect, window, region);
         let new_order = pane_camera_order(rect);
 
         let needs_viewport_update = match &cam.viewport {
@@ -152,7 +172,11 @@ struct PaneCameraSetup {
 /// at any world position maps to the same screen pixel whether
 /// drawn by the main camera or the pane camera, even when the pane
 /// extends past the window edge.
-fn pane_camera_setup(rect: &PaneRect, window: &Window) -> PaneCameraSetup {
+fn pane_camera_setup(
+    rect: &PaneRect,
+    window: &Window,
+    region: Option<PaneCanvasRegion>,
+) -> PaneCameraSetup {
     let win_w_logical = window.width();
     let win_h_logical = window.height();
     let scale = window.scale_factor();
@@ -163,13 +187,27 @@ fn pane_camera_setup(rect: &PaneRect, window: &Window) -> PaneCameraSetup {
     let pane_right = pane_left + rect.size.x;
     let pane_bottom = pane_top + rect.size.y;
 
-    // Step 2: clamp to the visible window. A pane dragged partly
-    // off-screen contributes only its on-window slice to the viewport;
-    // the off-screen portion of its content just isn't rendered.
-    let vis_left = pane_left.max(0.0).min(win_w_logical);
-    let vis_top = pane_top.max(0.0).min(win_h_logical);
-    let vis_right = pane_right.max(0.0).min(win_w_logical);
-    let vis_bottom = pane_bottom.max(0.0).min(win_h_logical);
+    // Region bounds: the host's canvas area (full window if no
+    // `PaneCanvasRegion` is set or `active == false`). Pane cameras
+    // never render outside this region, so the host's non-pane chrome
+    // (sidebar, top bar, etc.) sits visually on top of the canvas.
+    let (region_left, region_top, region_right, region_bottom) = match region {
+        Some(r) if r.active => (
+            r.min.x.max(0.0).min(win_w_logical),
+            r.min.y.max(0.0).min(win_h_logical),
+            r.max.x.max(0.0).min(win_w_logical),
+            r.max.y.max(0.0).min(win_h_logical),
+        ),
+        _ => (0.0, 0.0, win_w_logical, win_h_logical),
+    };
+
+    // Step 2: clamp to the visible region. A pane dragged partly outside
+    // the region contributes only its on-region slice to the viewport;
+    // the rest just isn't rendered.
+    let vis_left = pane_left.clamp(region_left, region_right);
+    let vis_top = pane_top.clamp(region_top, region_bottom);
+    let vis_right = pane_right.clamp(region_left, region_right);
+    let vis_bottom = pane_bottom.clamp(region_top, region_bottom);
     let vis_w = (vis_right - vis_left).max(0.0);
     let vis_h = (vis_bottom - vis_top).max(0.0);
 

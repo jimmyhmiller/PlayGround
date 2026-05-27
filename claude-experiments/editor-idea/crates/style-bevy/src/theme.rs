@@ -317,195 +317,15 @@ pub mod tokens {
     pub const FONT_FAMILY_MONO: TokenId = TokenId("font_family_mono");
 }
 
+/// Atelier dark palette, embedded so the engine has a sensible
+/// default look without depending on any on-disk preset. The same
+/// bytes are also seeded to `~/.terminal-bevy/styles/atelier/theme.rhai`
+/// at first launch so the preset picker has an entry for it.
+pub const ATELIER_DEFAULT_THEME: &str =
+    include_str!("../assets/themes/atelier.rhai");
+
 fn default_tokens() -> HashMap<String, TokenValue> {
-    use tokens::*;
-    let mut m = HashMap::new();
-    // Colors stored as linear-RGB; theme.rhai uses sRGB hex, converted
-    // on parse.
-    let srgb = |r, g, b, a| {
-        let c = Color::srgba(r, g, b, a);
-        TokenValue::Color(c.to_linear())
-    };
-    // Atelier dark palette — warm gold accent on cool slate. Picked so
-    // the bundled showcase (`crates/widget-bevy/src/bin/atelier.rs`)
-    // matches the design mockup out of the box; project theme.rhai can
-    // override individual tokens.
-    m.insert(BG.0.into(), srgb(0.063, 0.071, 0.090, 1.0));
-    m.insert(FG.0.into(), srgb(0.910, 0.895, 0.860, 1.0));
-    m.insert(FG_MUTED.0.into(), srgb(0.530, 0.540, 0.580, 1.0));
-    m.insert(ACCENT.0.into(), srgb(0.788, 0.663, 0.416, 1.0)); // warm gold #c9a96a
-    m.insert(CARET.0.into(), srgb(0.890, 0.760, 0.500, 1.0));
-    m.insert(SELECTION.0.into(), srgb(0.420, 0.345, 0.215, 0.500));
-    m.insert(WARN.0.into(), srgb(0.875, 0.690, 0.420, 1.0));
-    m.insert(ERR.0.into(), srgb(0.815, 0.420, 0.300, 1.0));
-    m.insert(FONT_SIZE.0.into(), TokenValue::F32(14.0));
-    m.insert(LINE_HEIGHT_RATIO.0.into(), TokenValue::F32(1.3));
-    // Lower default gate: natural dust starts being faintly visible
-    // around 60s of focus on the default `sqrt(hours/24)` curve. Per
-    // project: bump up in theme.rhai if you find the wipe too eager.
-    m.insert(WIPE_DUST_GATE_SECS.0.into(), TokenValue::F32(60.0));
-    m.insert(WIPE_BRUSH_RADIUS_PX.0.into(), TokenValue::F32(80.0));
-    m.insert(DUST_INTENSITY.0.into(), TokenValue::F32(1.0));
-    // Pane chrome defaults — warm-slate Atelier palette.
-    //
-    // Focus indication is **only** in the title bar text color
-    // (`CHROME_TITLE_FOCUSED`). Pane body / border / glow do not
-    // change on focus: even small differences in border color or
-    // inner glow visually shift how the body reads, and the user
-    // wants the body to stay completely stable.
-    m.insert(PANE_BG.0.into(), srgb(0.094, 0.102, 0.124, 1.0));
-    m.insert(PANE_BORDER.0.into(), srgb(0.160, 0.170, 0.196, 1.0));
-    m.insert(PANE_BORDER_FOCUSED.0.into(), srgb(0.160, 0.170, 0.196, 1.0));
-    m.insert(PANE_FOCUS_GLOW.0.into(), srgb(0.0, 0.0, 0.0, 0.0));
-    m.insert(PANE_CORNER_RADIUS.0.into(), TokenValue::F32(8.0));
-    m.insert(PANE_BORDER_WIDTH.0.into(), TokenValue::F32(1.0));
-    m.insert(PANE_BORDER_WIDTH_FOCUSED.0.into(), TokenValue::F32(1.0));
-    m.insert(PANE_FOCUS_WIDTH.0.into(), TokenValue::F32(0.0));
-    m.insert(PANE_FOCUS_STRENGTH.0.into(), TokenValue::F32(0.0));
-    // Shadows: keep cool-black so cards don't bleed warm onto each other.
-    m.insert(PANE_SHADOW_COLOR.0.into(), srgb(0.0, 0.0, 0.0, 0.45));
-    m.insert(PANE_SHADOW_BLUR.0.into(), TokenValue::F32(20.0));
-    m.insert(PANE_SHADOW_OFFSET_Y.0.into(), TokenValue::F32(6.0));
-
-    // Chrome text + title-strip fill. Title bar uses a noticeably
-    // darker shade when unfocused, and steps up to a clearly lighter
-    // slate when focused. The tonal jump needs to be obvious — too
-    // close to body color reads as see-through.
-    m.insert(CHROME_TITLE.0.into(), srgb(0.50, 0.51, 0.55, 1.0));
-    m.insert(CHROME_TITLE_FOCUSED.0.into(), srgb(0.910, 0.895, 0.860, 1.0));
-    m.insert(CHROME_TITLE_BG.0.into(), srgb(0.052, 0.060, 0.076, 1.0));
-    m.insert(CHROME_TITLE_BG_FOCUSED.0.into(), srgb(0.165, 0.180, 0.215, 1.0));
-    m.insert(CHROME_DIVIDER.0.into(), srgb(0.155, 0.165, 0.190, 1.0));
-    m.insert(CHROME_CLOSE.0.into(), srgb(0.50, 0.50, 0.52, 1.0));
-    m.insert(CHROME_HANDLE.0.into(), srgb(0.22, 0.23, 0.26, 1.0));
-
-    // Code syntax — warm Atelier palette: gold keywords, sage strings,
-    // muted comments. Tuned for the mockup's "Code" panel.
-    m.insert(SYNTAX_DEFAULT.0.into(), srgb(0.860, 0.860, 0.835, 1.0));
-    m.insert(SYNTAX_KEYWORD.0.into(), srgb(0.812, 0.690, 0.435, 1.0)); // warm gold
-    m.insert(SYNTAX_STRING.0.into(), srgb(0.580, 0.745, 0.620, 1.0)); // sage
-    m.insert(SYNTAX_COMMENT.0.into(), srgb(0.420, 0.420, 0.475, 1.0));
-    m.insert(SYNTAX_FUNCTION.0.into(), srgb(0.730, 0.825, 0.880, 1.0)); // soft sky
-    m.insert(SYNTAX_TYPE.0.into(), srgb(0.815, 0.730, 0.910, 1.0)); // lavender
-    m.insert(SYNTAX_ATTRIBUTE.0.into(), srgb(0.825, 0.665, 0.510, 1.0));
-    m.insert(SYNTAX_CONSTANT.0.into(), srgb(0.890, 0.560, 0.420, 1.0)); // terracotta
-    m.insert(SYNTAX_OPERATOR.0.into(), srgb(0.650, 0.660, 0.685, 1.0));
-    m.insert(SYNTAX_PUNCTUATION.0.into(), srgb(0.620, 0.625, 0.650, 1.0));
-    m.insert(SYNTAX_VARIABLE.0.into(), srgb(0.860, 0.860, 0.835, 1.0));
-    m.insert(SYNTAX_PROPERTY.0.into(), srgb(0.815, 0.730, 0.910, 1.0));
-    m.insert(SYNTAX_LABEL.0.into(), srgb(0.890, 0.560, 0.420, 1.0));
-    m.insert(SYNTAX_ESCAPE.0.into(), srgb(0.890, 0.760, 0.500, 1.0));
-    m.insert(SYNTAX_CONSTRUCTOR.0.into(), srgb(0.815, 0.730, 0.910, 1.0));
-
-    // Form fields.
-    m.insert(INPUT_BG.0.into(), srgb(0.078, 0.084, 0.105, 1.0));
-    m.insert(INPUT_TEXT.0.into(), srgb(0.720, 0.715, 0.700, 1.0));
-    m.insert(INPUT_TEXT_FOCUSED.0.into(), srgb(0.910, 0.895, 0.860, 1.0));
-
-    // Buttons — Filled uses warm gold accent. Outline/Ghost computed
-    // from ACCENT at render time.
-    m.insert(BUTTON_BG.0.into(), srgb(0.788, 0.663, 0.416, 1.0));
-    m.insert(BUTTON_BG_HOVER.0.into(), srgb(0.840, 0.720, 0.470, 1.0));
-    m.insert(BUTTON_LABEL.0.into(), srgb(0.094, 0.084, 0.062, 1.0));
-    m.insert(BUTTON_PRIMARY_BG.0.into(), srgb(0.420, 0.560, 0.380, 1.0));
-    m.insert(BUTTON_PRIMARY_LABEL.0.into(), srgb(0.940, 0.940, 0.910, 1.0));
-
-    // Status colors — Atelier picks sage success + terracotta failure.
-    m.insert(STATUS_IDLE.0.into(), srgb(0.620, 0.730, 0.820, 1.0));
-    m.insert(STATUS_RUNNING.0.into(), srgb(0.890, 0.760, 0.500, 1.0));
-    m.insert(STATUS_SUCCESS.0.into(), srgb(0.580, 0.745, 0.620, 1.0));
-    m.insert(STATUS_FAILED.0.into(), srgb(0.815, 0.420, 0.300, 1.0));
-
-    // Radial menu. Defaults match terminal-bevy/src/radial.rs.
-    m.insert(RADIAL_WEDGE.0.into(), srgb(0.135, 0.143, 0.162, 1.0));
-    m.insert(RADIAL_WEDGE_HOVER.0.into(), srgb(0.22, 0.36, 0.58, 1.0));
-    m.insert(RADIAL_DEADZONE.0.into(), srgb(0.082, 0.087, 0.100, 1.0));
-    m.insert(RADIAL_DEADZONE_RING.0.into(), srgb(0.235, 0.250, 0.275, 1.0));
-    m.insert(RADIAL_LABEL.0.into(), srgb(0.84, 0.86, 0.90, 1.0));
-    m.insert(RADIAL_LABEL_HOVER.0.into(), srgb(0.98, 0.98, 1.00, 1.0));
-    m.insert(RADIAL_ICON.0.into(), srgb(0.94, 0.95, 0.97, 1.0));
-    m.insert(RADIAL_BACKDROP.0.into(), srgb(0.0, 0.0, 0.0, 0.32));
-
-    // Widget protocol extras.
-    m.insert(WIDGET_BAR_TRACK.0.into(), srgb(0.130, 0.140, 0.165, 1.0));
-    m.insert(WIDGET_BAR_FILL.0.into(), srgb(0.788, 0.663, 0.416, 1.0));
-    m.insert(WIDGET_BADGE_BG.0.into(), srgb(0.155, 0.185, 0.225, 1.0));
-    m.insert(WIDGET_BADGE_LABEL.0.into(), srgb(0.870, 0.825, 0.700, 1.0));
-    m.insert(WIDGET_LINK.0.into(), srgb(0.812, 0.690, 0.435, 1.0));
-    // Widget button shape/shadow defaults — softer corner + warmer
-    // shadow that reads as tactile + crafted.
-    m.insert(WIDGET_BUTTON_CORNER_RADIUS.0.into(), TokenValue::F32(6.0));
-    m.insert(WIDGET_BUTTON_BORDER.0.into(), srgb(0.0, 0.0, 0.0, 0.0));
-    m.insert(WIDGET_BUTTON_BORDER_WIDTH.0.into(), TokenValue::F32(0.0));
-    m.insert(WIDGET_BUTTON_SHADOW_COLOR.0.into(), srgb(0.020, 0.012, 0.005, 0.42));
-    m.insert(WIDGET_BUTTON_SHADOW_BLUR.0.into(), TokenValue::F32(8.0));
-    m.insert(WIDGET_BUTTON_SHADOW_OFFSET_Y.0.into(), TokenValue::F32(2.0));
-    // Canvas + sidebar defaults.
-    m.insert(CANVAS_BG.0.into(), srgb(0.063, 0.071, 0.090, 1.0));
-    m.insert(SIDEBAR_BG.0.into(), srgb(0.078, 0.086, 0.108, 1.0));
-    m.insert(SIDEBAR_ROW_ACTIVE_BG.0.into(), srgb(0.140, 0.130, 0.105, 1.0));
-    m.insert(SIDEBAR_ROW_RENAMING_BG.0.into(), srgb(0.135, 0.142, 0.165, 1.0));
-    m.insert(SIDEBAR_TEXT_FAINT.0.into(), srgb(0.380, 0.390, 0.420, 1.0));
-
-    // --- spacing scale: roughly 4 / 8 / 12 / 20 / 32 ---
-    m.insert(SPACE_XS.0.into(), TokenValue::F32(4.0));
-    m.insert(SPACE_SM.0.into(), TokenValue::F32(8.0));
-    m.insert(SPACE_MD.0.into(), TokenValue::F32(12.0));
-    m.insert(SPACE_LG.0.into(), TokenValue::F32(20.0));
-    m.insert(SPACE_XL.0.into(), TokenValue::F32(32.0));
-
-    // --- radius scale ---
-    m.insert(RADIUS_XS.0.into(), TokenValue::F32(2.0));
-    m.insert(RADIUS_SM.0.into(), TokenValue::F32(4.0));
-    m.insert(RADIUS_MD.0.into(), TokenValue::F32(8.0));
-    m.insert(RADIUS_LG.0.into(), TokenValue::F32(14.0));
-    m.insert(RADIUS_PILL.0.into(), TokenValue::F32(9999.0));
-
-    // --- shadow ladder (cool black, tight). Warm shadows looked muddy
-    // when stacked across many cards in a dense layout; black reads
-    // crisp on slate and lets the gold accent stay the only warm note.
-    // SM: hairline drop, used for buttons / pills.
-    m.insert(SHADOW_SM_COLOR.0.into(), srgb(0.0, 0.0, 0.0, 0.20));
-    m.insert(SHADOW_SM_BLUR.0.into(), TokenValue::F32(4.0));
-    m.insert(SHADOW_SM_OFFSET_Y.0.into(), TokenValue::F32(1.0));
-    // MD: card lift.
-    m.insert(SHADOW_MD_COLOR.0.into(), srgb(0.0, 0.0, 0.0, 0.32));
-    m.insert(SHADOW_MD_BLUR.0.into(), TokenValue::F32(10.0));
-    m.insert(SHADOW_MD_OFFSET_Y.0.into(), TokenValue::F32(3.0));
-    // LG: modal/overlay.
-    m.insert(SHADOW_LG_COLOR.0.into(), srgb(0.0, 0.0, 0.0, 0.45));
-    m.insert(SHADOW_LG_BLUR.0.into(), TokenValue::F32(24.0));
-    m.insert(SHADOW_LG_OFFSET_Y.0.into(), TokenValue::F32(10.0));
-
-    // --- surface ladder (cool slate gradient) ---
-    // SURFACE_1 = page background; SURFACE_2 = cards; SURFACE_3 = inner
-    // wells inside cards. Each step has a perceptible perceptual jump
-    // so nested cards read clearly.
-    m.insert(SURFACE_1.0.into(), srgb(0.063, 0.071, 0.090, 1.0));
-    m.insert(SURFACE_2.0.into(), srgb(0.094, 0.102, 0.124, 1.0));
-    m.insert(SURFACE_3.0.into(), srgb(0.128, 0.137, 0.162, 1.0));
-
-    // --- accent ramp derived from ACCENT default (warm gold) ---
-    // 50 = near-white warm cream; 500 = base; 900 = deep brown bronze.
-    m.insert(ACCENT_50.0.into(), srgb(0.985, 0.972, 0.940, 1.0));
-    m.insert(ACCENT_100.0.into(), srgb(0.960, 0.930, 0.870, 1.0));
-    m.insert(ACCENT_200.0.into(), srgb(0.925, 0.870, 0.760, 1.0));
-    m.insert(ACCENT_300.0.into(), srgb(0.890, 0.810, 0.640, 1.0));
-    m.insert(ACCENT_400.0.into(), srgb(0.845, 0.740, 0.530, 1.0));
-    m.insert(ACCENT_500.0.into(), srgb(0.788, 0.663, 0.416, 1.0)); // base
-    m.insert(ACCENT_600.0.into(), srgb(0.680, 0.555, 0.330, 1.0));
-    m.insert(ACCENT_700.0.into(), srgb(0.540, 0.430, 0.250, 1.0));
-    m.insert(ACCENT_800.0.into(), srgb(0.400, 0.310, 0.175, 1.0));
-    m.insert(ACCENT_900.0.into(), srgb(0.270, 0.205, 0.105, 1.0));
-
-    // --- typography ---
-    // String tokens — resolved through FontRegistry. Both heading and
-    // body fall back to "mono" until real serif/sans files are dropped
-    // into crates/style-bevy/assets/fonts/.
-    m.insert(FONT_FAMILY_HEADING.0.into(), TokenValue::Str("serif".into()));
-    m.insert(FONT_FAMILY_BODY.0.into(), TokenValue::Str("sans".into()));
-    m.insert(FONT_FAMILY_MONO.0.into(), TokenValue::Str("mono".into()));
-    m
+    parse_theme_str(ATELIER_DEFAULT_THEME)
 }
 
 // ---------- Rhai loader ----------
@@ -542,6 +362,28 @@ pub fn load_theme(path: &Path) -> Result<Theme, ThemeLoadError> {
         theme.set(key, value);
     }
     Ok(theme)
+}
+
+/// Parse a rhai theme document from a string, returning the
+/// `(name, TokenValue)` pairs. Used by [`default_tokens`] to load the
+/// embedded Atelier preset at startup. Errors panic — the embedded
+/// file is shipped with the binary, so a parse failure is a build-time
+/// bug, not a runtime issue.
+fn parse_theme_str(src: &str) -> HashMap<String, TokenValue> {
+    let engine = rhai::Engine::new();
+    let result: rhai::Dynamic = engine
+        .eval::<rhai::Dynamic>(src)
+        .expect("embedded theme rhai must parse");
+    let map = result
+        .try_cast::<rhai::Map>()
+        .expect("embedded theme must return a #{} map");
+    let mut out = HashMap::with_capacity(map.len());
+    for (k, v) in map.into_iter() {
+        let key = k.to_string();
+        let value = parse_token(&key, &v).expect("embedded theme token must parse");
+        out.insert(key, value);
+    }
+    out
 }
 
 fn parse_token(key: &str, v: &rhai::Dynamic) -> Result<TokenValue, ThemeLoadError> {

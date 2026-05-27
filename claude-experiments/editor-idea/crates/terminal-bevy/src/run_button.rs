@@ -1330,9 +1330,16 @@ fn scroll_run_button_output(
     mut wheel: MessageReader<MouseWheel>,
     mut accum: Local<f32>,
     windows: Query<&Window>,
+    keys: Res<ButtonInput<KeyCode>>,
     panes_q: Query<(Entity, &PaneRect, Option<&Visibility>, &PaneKindMarker), With<PaneTag>>,
     mut rbs: Query<&mut RunButton>,
 ) {
+    // Cmd+scroll is canvas pan, not pane scroll.
+    if keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight) {
+        wheel.clear();
+        *accum = 0.0;
+        return;
+    }
     let mut delta_lines: f32 = 0.0;
     for ev in wheel.read() {
         let lines = match ev.unit {

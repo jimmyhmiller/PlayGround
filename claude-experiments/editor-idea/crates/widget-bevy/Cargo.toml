@@ -14,6 +14,15 @@ schemars = "0.8"
 clap = { version = "4", features = ["derive"] }
 # PNG/JPEG decoding for widget sprite paths.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+# Layout engine — same one bevy_ui uses. Provides flexbox + grid +
+# block layout. We feed it the Element tree, get back computed
+# (x, y, width, height) per node, and render from those.
+taffy = { version = "0.9", default-features = false, features = [
+    "std",
+    "block_layout",
+    "flexbox",
+    "grid",
+] }
 # Rhai scripting for hot-reloadable in-process widgets. `sync` makes the
 # Engine + AST Send so they can live in Bevy resources/components;
 # `serde` lets us serde_json::Value <-> rhai::Dynamic so widgets can

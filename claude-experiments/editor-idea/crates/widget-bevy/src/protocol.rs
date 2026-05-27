@@ -119,6 +119,37 @@ pub struct Style {
     /// Outer margin around the element.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub margin: Option<Edges>,
+
+    // ---------- Flex-layout knobs (consumed by Taffy) ----------
+    /// How much of the parent's remaining main-axis space this element
+    /// should grow into. `1.0` on every sibling in a row → equal
+    /// distribution. Default 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flex_grow: Option<f32>,
+    /// How much this element should shrink when there isn't enough
+    /// room. Default 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flex_shrink: Option<f32>,
+    /// Explicit width. Number → pixels. `"100%"` → percent of parent.
+    /// `"auto"` (default) → intrinsic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<String>,
+    /// Explicit height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_width: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_height: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<String>,
+    /// Override the parent's cross-axis alignment for this child only.
+    /// Useful e.g. when most cards in a row should stretch but one
+    /// should center.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub align_self: Option<Align>,
 }
 
 /// Border specification. `color` is a token name or literal; `width`
@@ -516,6 +547,10 @@ pub enum Align {
     Start,
     Center,
     End,
+    /// Make every child consume the full cross-axis size. The typical
+    /// use: cards in a row should be the same height — `Stretch` on
+    /// the row's `align` does it declaratively.
+    Stretch,
 }
 
 /// Font weight for text runs.
