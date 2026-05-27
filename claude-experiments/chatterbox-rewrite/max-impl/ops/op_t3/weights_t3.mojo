@@ -59,10 +59,25 @@ def upload_bf16_concat_rows(
 
 
 def _use_bf16() -> Bool:
-    """Returns True iff CHATTERBOX_BF16=1 is set in the environment."""
+    """T3 uses bf16 iff CHATTERBOX_BF16=1 AND CHATTERBOX_T3_BF16=1.
+
+    T3 bf16 is OFF BY DEFAULT (even when CHATTERBOX_BF16=1) because bf16
+    perturbations to the stochastic sampler produce token sequences that
+    our s3gen oscillates on (separate algorithmic bug in our CFM/HiFT
+    that has been hard to track down). Disabling T3 bf16 keeps token
+    generation in f32 — slower but correct.
+
+    Set CHATTERBOX_T3_BF16=1 explicitly to opt back in.
+    """
     try:
         var v = getenv("CHATTERBOX_BF16")
-        return v == "1"
+        if v != "1":
+            return False
+        try:
+            var t3v = getenv("CHATTERBOX_T3_BF16")
+            return t3v == "1"
+        except:
+            return False
     except:
         return False
 
