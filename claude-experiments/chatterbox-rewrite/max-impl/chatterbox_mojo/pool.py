@@ -216,9 +216,14 @@ class WorkerPool:
             w = _Worker(f"w{i}", voice_ref, use_bf16=use_bf16, cfm_steps=cfm_steps)
             self.workers.append(w)
 
-    def synthesize_many(self, texts: list[str], **kwargs) -> list[np.ndarray]:
+    def synthesize_many(self, texts: list[str], *, on_chunk_done=None,
+                        **kwargs) -> list[np.ndarray]:
         """Synthesize a batch of texts in parallel across workers. Preserves
         ordering (output[i] corresponds to texts[i]).
+
+        `on_chunk_done(idx, audio)`: optional callback invoked from the worker
+        thread immediately after a chunk completes. Use this for incremental
+        caching so a mid-batch crash doesn't lose all work.
         """
         n = len(texts)
         results: list[Optional[np.ndarray]] = [None] * n
@@ -227,7 +232,11 @@ class WorkerPool:
         def _do_one(idx: int):
             worker = self.workers[idx % len(self.workers)]
             try:
-                results[idx] = worker.synthesize(texts[idx], rng_seed=0xDEADBEEF + idx, **kwargs)
+                audio = worker.synthesize(texts[idx], rng_seed=0xDEADBEEF + idx, **kwargs)
+                results[idx] = audio
+                if on_chunk_done is not None:
+                    try: on_chunk_done(idx, audio)
+                    except Exception: pass  # never let callback failure poison the batch
             except Exception as e:
                 errors[idx] = e
 

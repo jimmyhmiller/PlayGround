@@ -21,8 +21,13 @@ def main() -> int:
 
         backend = get_backend(req.get("backend", "kokoro"))
         voice = req.get("voice") or backend.info.default_voice
-        audio = render_audio(req["text"], backend=backend, voice=voice)
         out = Path(req["out_path"])
+        # Per-chunk cache lives next to the chapter cache file.
+        chunk_cache_dir = out.parent / "chunks"
+        audio = render_audio(
+            req["text"], backend=backend, voice=voice,
+            chunk_cache_dir=chunk_cache_dir,
+        )
         out.parent.mkdir(parents=True, exist_ok=True)
         np.save(out, audio.astype(np.float32))
         print("ok")

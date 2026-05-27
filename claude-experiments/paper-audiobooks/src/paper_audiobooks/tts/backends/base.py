@@ -20,11 +20,34 @@ class Backend(ABC):
     info: BackendInfo  # subclasses set as a class attr
 
     @abstractmethod
-    def synthesize_chunk(self, text: str, *, voice: str) -> np.ndarray:
+    def synthesize_chunk(self, text: str, *, voice: str, rng_seed: int | None = None) -> np.ndarray:
         """Render a single text chunk to a float32 waveform at the package SAMPLE_RATE.
 
         Backends are responsible for resampling internally if their native rate differs.
+
+        `rng_seed`: optional. Backends with a sampling RNG should use it when
+        provided so callers can retry with a different seed on failure.
+        Backends without an RNG can ignore.
         """
+
+    def synthesize_many(self, texts: list[str], *, voice: str,
+                        on_chunk_done=None) -> list[np.ndarray]:
+        """Render N chunks. Default: sequential synthesize_chunk loop.
+
+        Backends that support cross-utterance parallelism (e.g. multi-worker
+        pools) should override this for throughput.
+
+        `on_chunk_done(idx, audio)`: optional, called immediately after each
+        chunk finishes so the caller can incrementally cache results.
+        """
+        out: list[np.ndarray] = []
+        for i, t in enumerate(texts):
+            a = self.synthesize_chunk(t, voice=voice)
+            out.append(a)
+            if on_chunk_done is not None:
+                try: on_chunk_done(i, a)
+                except Exception: pass
+        return out
 
     def list_voices(self) -> list[str]:  # pragma: no cover — optional override
         return [self.info.default_voice]
