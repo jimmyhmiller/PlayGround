@@ -1169,13 +1169,21 @@ def gaussian_noise_fill(
     @__copy_capture(out_ptr, seed, sigma)
     def gn_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
         var i = idx[0]
-        # Per-element deterministic state. 2654435761 = Knuth multiplicative hash.
-        var s: UInt64 = seed ^ (UInt64(i) * UInt64(2654435761))
+        # Per-element deterministic state via SplitMix64 hash of (seed, i).
+        # SplitMix64 is a high-quality avalanche mixer that fully decorrelates
+        # adjacent indices — a previous version used `seed XOR (i*Knuth_K)`
+        # which left adjacent samples ~5% correlated, structuring the noise
+        # enough to drive the CFM ODE into oscillation on certain inputs
+        # (loud "microphone thump" artifacts on ~1-2% of chunks).
+        var x: UInt64 = seed + UInt64(i) * UInt64(0x9E3779B97F4A7C15)
+        x = (x ^ (x >> UInt64(30))) * UInt64(0xBF58476D1CE4E5B9)
+        x = (x ^ (x >> UInt64(27))) * UInt64(0x94D049BB133111EB)
+        x = x ^ (x >> UInt64(31))
+        # x is now well-mixed; use it as the initial LCG state.
+        var s: UInt64 = x
         # Two LCG steps → two uniforms in (0, 1).
         s = s * UInt64(6364136223846793005) + UInt64(1442695040888963407)
-        # Use the top 24 bits as a uniform integer in [0, 2^24), then normalize.
         var bits1: UInt64 = (s >> UInt64(40)) & UInt64(0xFFFFFF)
-        # Add 0.5 to avoid log(0).
         var u1: Float32 = (Float32(Int(bits1)) + 0.5) / Float32(16777216.0)
         s = s * UInt64(6364136223846793005) + UInt64(1442695040888963407)
         var bits2: UInt64 = (s >> UInt64(40)) & UInt64(0xFFFFFF)
