@@ -15,6 +15,9 @@ from std.math import sqrt, exp
 from std.gpu.host import DeviceContext, DeviceBuffer
 from std.runtime.asyncrt import DeviceContextPtr
 from std.algorithm.functional import elementwise, IndexList
+from std.builtin.sort import sort
+from std.os import getenv
+from std.time import perf_counter_ns
 from layout import Idx, TileTensor, row_major
 
 from modules import (
@@ -22,7 +25,7 @@ from modules import (
 )
 from t3_block import T3Block, t3_block_forward, t3_block_prefill, t3_block_prefill_with_attn
 from t3 import T3
-from t3_decode import t3_decode_step, t3_decode_step_with_attn, cache_write_step
+from t3_decode import t3_decode_step, t3_decode_step_with_attn, cache_write_step, make_t3_decode_scratch
 from transformer_blocks import reshape_bsd_to_bhsd, apply_rope_hf_style
 from alignment_analyzer import AlignmentAnalyzer, make_alignment_analyzer, aa_step
 from std.io.file import open
@@ -266,8 +269,32 @@ def t3_generate(
     var cos_step = ctx.enqueue_create_buffer[DType.float32](b * Dh)
     var sin_step = ctx.enqueue_create_buffer[DType.float32](b * Dh)
 
+    # Pre-allocate per-step scratch ONCE — reused across all (token × layer)
+    # calls below. Eliminates ~37 enqueue_create_buffer calls per layer per
+    # token (~215K total allocations for ~200 tokens × 30 layers).
+    var scratch = make_t3_decode_scratch(
+        ctx, b, H, Dh, model.blocks[0].mlp.intermediate, max_ctx,
+    )
+
+    # Optional: per-phase profiling. Set CHATTERBOX_T3_TRACE=1 to enable
+    # synchronize-bracketed timing of each phase, printed at end of generation.
+    var prof = False
+    try:
+        prof = getenv("CHATTERBOX_T3_TRACE") == "1"
+    except:
+        pass
+
+    var t_pre: Int = 0
+    var t_layers: Int = 0
+    var t_post: Int = 0
+    var n_step_calls: Int = 0
+
     var step = 1
     while step < n_steps:
+        if prof:
+            ctx.synchronize()
+        var t0 = perf_counter_ns()
+
         embedding_forward(ctx, model.speech_emb, cur_tok_buf, step_emb_3d_buf, b, 1)
         ctx.enqueue_copy(step_emb_buf, step_emb_3d_buf)
 
@@ -290,12 +317,23 @@ def t3_generate(
         gather_cos_sin_at_pos(ctx, cos_full, sin_full, cos_step, sin_step,
                               b, Dh, cur_len)
 
+        if prof:
+            ctx.synchronize()
+        var t1 = perf_counter_ns()
+        t_pre += Int(t1 - t0)
+
         for L in range(model.n_layers):
             t3_decode_step(
                 ctx, model.blocks[L], step_emb_buf,
-                k_caches[L], v_caches[L], cos_step, sin_step,
+                k_caches[L], v_caches[L], cos_step, sin_step, scratch,
                 b, max_ctx, cur_len,
             )
+            n_step_calls += 1
+
+        if prof:
+            ctx.synchronize()
+        var t2 = perf_counter_ns()
+        t_layers += Int(t2 - t1)
 
         var tmp2 = ctx.enqueue_create_buffer[DType.float32](b * D)
         rms_norm_forward(ctx, model.final_norm, step_emb_buf, tmp2, b)
@@ -304,6 +342,9 @@ def t3_generate(
         linear_forward(ctx, model.speech_head, step_emb_buf, logits_buf, b)
         argmax_lastdim(ctx, logits_buf, argmax_buf, b, V)
         ctx.synchronize()
+
+        var t3 = perf_counter_ns()
+        t_post += t3 - t2
 
         var next_tok: Int64 = 0
         with argmax_buf.map_to_host() as h:
@@ -316,6 +357,13 @@ def t3_generate(
             h[0] = next_tok
         cur_len += 1
         step += 1
+
+    if prof:
+        print("[t3-trace] over", n_step_calls, "decode_step calls and", step - 1, "tokens (sum µs):")
+        print("  pre (embed+pos+gather):", t_pre // 1000)
+        print("  layer loop            :", t_layers // 1000)
+        print("  post (norm+head+argmax+sync+host):", t_post // 1000)
+        print("  per layer-call (layers/n_step_calls):", (t_layers // 1000) // n_step_calls if n_step_calls > 0 else 0, "µs")
 
     return generated^
 
@@ -400,41 +448,37 @@ def cfg_combine_sample(
         # Top prob over full vocab = exp(max-max)/exp_sum = 1/exp_sum
         min_p_thresh = min_p * (Float32(1.0) / exp_sum)
 
-    # Walk tokens in descending probability order, stop when cumprob > top_p
-    # (matches HF TopPLogitsWarper which keeps the first token that exceeds top_p too).
-    # Safety cap at 500 selected tokens: with top_p=0.95 + min_p=0.05 + temperature=0.8
-    # this is reached in <20 iters typically. The cap is a perf bound for the O(K*V)
-    # partial-sort; if top_p is genuinely not reached in 500 selections the
-    # distribution is so flat that the kept set is fine to clip.
+    # Sort all V indices by exp_logits descending, then walk in order applying
+    # top_p / min_p. Replaces the prior O(K·V) selection-loop with a single
+    # O(V log V) sort. For V=8194 this is ~80 µs of CPU vs the prior ~3ms/token,
+    # eliminating most of cfg_combine_sample's 578 ms/T3 wall.
+    var idx_buf = List[Int](capacity=v)
+    for k in range(v):
+        idx_buf.append(k)
+
+    var ep_ptr = exp_logits.unsafe_ptr()
+
+    @parameter
+    @__copy_capture(ep_ptr)
+    def cmp_desc(a: Int, b: Int) -> Bool:
+        # Want descending: a comes before b if exp_logits[a] > exp_logits[b].
+        return ep_ptr[a] > ep_ptr[b]
+
+    sort[cmp_desc](Span(idx_buf))
+
     var kept_idx = List[Int]()
     var kept_logit = List[Float32]()
-    var seen = List[Bool](capacity=v)
-    for k in range(v):
-        seen.append(False)
     var cumprob: Float32 = 0.0
     var top_p_done = False
-    for _i in range(500):
-        var best_p: Float32 = -1.0
-        var best_k: Int = -1
-        for k in range(v):
-            if seen[k]: continue
-            var p = exp_logits[k] / exp_sum
-            if p > best_p:
-                best_p = p
-                best_k = k
-        if best_k < 0: break
-        seen[best_k] = True
+    for i in range(v):
+        var best_k = idx_buf[i]
+        var best_p = exp_logits[best_k] / exp_sum
 
-        # If top_p threshold already exceeded, skip remaining unless min_p forces keep.
-        # Actually HF order: min_p first, then top_p. We're doing them jointly here:
-        # always keep top-1; otherwise keep iff (NOT top_p_done) AND (p >= min_p_thresh).
         var should_keep = False
         if len(kept_idx) == 0:
             should_keep = True   # always keep top-1
         else:
-            # min_p check: must be >= threshold
             var meets_min_p = (min_p_thresh == 0.0) or (best_p >= min_p_thresh)
-            # top_p: keep while cumprob hadn't yet exceeded (and include the first one that does)
             should_keep = meets_min_p and (not top_p_done)
 
         if should_keep:
@@ -444,7 +488,6 @@ def cfg_combine_sample(
             if cumprob >= top_p:
                 top_p_done = True
         else:
-            # Could keep going for min_p but they're already pruned by top_p — stop.
             if top_p_done:
                 break
 
@@ -538,28 +581,31 @@ def cfg_combine_sample_with_analyzer(
         exp_sum += e
     if exp_sum <= 0.0: exp_sum = 1.0
 
+    # Sort all V indices by exp_logits descending, then walk in order.
+    # O(V log V) replaces the prior O(K·V) selection loop.
+    var idx_buf_a = List[Int](capacity=v)
+    for k in range(v):
+        idx_buf_a.append(k)
+    var ep_ptr_a = exp_logits.unsafe_ptr()
+
+    @parameter
+    @__copy_capture(ep_ptr_a)
+    def cmp_desc_a(a: Int, b: Int) -> Bool:
+        return ep_ptr_a[a] > ep_ptr_a[b]
+
+    sort[cmp_desc_a](Span(idx_buf_a))
+
     var kept_idx = List[Int]()
     var kept_logit = List[Float32]()
-    var seen = List[Bool](capacity=v)
-    for k in range(v):
-        seen.append(False)
     var cumprob: Float32 = 0.0
-    var safety = 0
-    while cumprob < top_p and safety < 500:
-        var best_p: Float32 = -1.0
-        var best_k: Int = -1
-        for k in range(v):
-            if seen[k]: continue
-            var p = exp_logits[k] / exp_sum
-            if p > best_p:
-                best_p = p
-                best_k = k
-        if best_k < 0: break
-        seen[best_k] = True
+    for i in range(v):
+        if cumprob >= top_p:
+            break
+        var best_k = idx_buf_a[i]
+        var best_p = exp_logits[best_k] / exp_sum
         kept_idx.append(best_k)
         kept_logit.append(logits[best_k])
         cumprob += best_p
-        safety += 1
 
     # min_p
     if min_p > 0.0 and len(kept_idx) > 1:
@@ -758,6 +804,10 @@ def t3_generate_cfg(
     var cos_step = ctx.enqueue_create_buffer[DType.float32](B2 * Dh)
     var sin_step = ctx.enqueue_create_buffer[DType.float32](B2 * Dh)
 
+    var scratch = make_t3_decode_scratch(
+        ctx, B2, H, Dh, model.blocks[0].mlp.intermediate, max_ctx,
+    )
+
     var step = 1
     while step < n_steps:
         embedding_forward(ctx, model.speech_emb, cur_tok_buf, step_emb_3d_buf, B2, 1)
@@ -785,7 +835,7 @@ def t3_generate_cfg(
         for L in range(model.n_layers):
             t3_decode_step(
                 ctx, model.blocks[L], step_emb_buf,
-                k_caches[L], v_caches[L], cos_step, sin_step,
+                k_caches[L], v_caches[L], cos_step, sin_step, scratch,
                 B2, max_ctx, cur_len,
             )
 
@@ -929,8 +979,29 @@ def t3_generate_cfg_sample(
     var cos_step = ctx.enqueue_create_buffer[DType.float32](B2 * Dh)
     var sin_step = ctx.enqueue_create_buffer[DType.float32](B2 * Dh)
 
+    var scratch = make_t3_decode_scratch(
+        ctx, B2, H, Dh, model.blocks[0].mlp.intermediate, max_ctx,
+    )
+
+    # Optional per-phase profiling — set CHATTERBOX_T3_TRACE=1 to enable.
+    var prof = False
+    try:
+        prof = getenv("CHATTERBOX_T3_TRACE") == "1"
+    except:
+        pass
+
+    var t_pre: Int = 0
+    var t_layers: Int = 0
+    var t_post_norm: Int = 0
+    var t_head: Int = 0
+    var t_sample: Int = 0
+    var n_step_calls: Int = 0
+
     var step = 1
     while step < n_steps:
+        if prof: ctx.synchronize()
+        var t0 = perf_counter_ns()
+
         embedding_forward(ctx, model.speech_emb, cur_tok_buf, step_emb_3d_buf, B2, 1)
         ctx.enqueue_copy(step_emb_buf, step_emb_3d_buf)
 
@@ -953,24 +1024,42 @@ def t3_generate_cfg_sample(
         gather_cos_sin_at_pos(ctx, cos_full, sin_full, cos_step, sin_step,
                               B2, Dh, cur_len)
 
+        if prof: ctx.synchronize()
+        var t1 = perf_counter_ns()
+        t_pre += Int(t1 - t0)
+
         for L in range(model.n_layers):
             t3_decode_step(
                 ctx, model.blocks[L], step_emb_buf,
-                k_caches[L], v_caches[L], cos_step, sin_step,
+                k_caches[L], v_caches[L], cos_step, sin_step, scratch,
                 B2, max_ctx, cur_len,
             )
+            n_step_calls += 1
+
+        if prof: ctx.synchronize()
+        var t2 = perf_counter_ns()
+        t_layers += Int(t2 - t1)
 
         var tmp2 = ctx.enqueue_create_buffer[DType.float32](B2 * D)
         rms_norm_forward(ctx, model.final_norm, step_emb_buf, tmp2, B2)
         ctx.enqueue_copy(step_emb_buf, tmp2)
 
+        if prof: ctx.synchronize()
+        var t3 = perf_counter_ns()
+        t_post_norm += Int(t3 - t2)
+
         linear_forward(ctx, model.speech_head, step_emb_buf, logits_buf, B2)
         ctx.synchronize()
+        var t4 = perf_counter_ns()
+        t_head += Int(t4 - t3)
 
         var next_tok = cfg_combine_sample(
             ctx, logits_buf, generated, rng_state, b, V, cfg_weight,
             temperature, top_p, rep_penalty, min_p,
         )
+        var t5 = perf_counter_ns()
+        t_sample += Int(t5 - t4)
+
         generated.append(next_tok)
         if next_tok == Int64(eos_token):
             break
@@ -980,6 +1069,17 @@ def t3_generate_cfg_sample(
                 h[bi] = next_tok
         cur_len += 1
         step += 1
+
+    if prof:
+        print("[t3-trace] over", step - 1, "tokens,", n_step_calls, "decode_step calls (sum µs):")
+        print("  pre  (embed+pos+gather):", t_pre // 1000)
+        print("  layer-loop (30 layers) :", t_layers // 1000)
+        print("    per layer-call        :", (t_layers // 1000) // n_step_calls if n_step_calls > 0 else 0)
+        print("  final_norm + copy      :", t_post_norm // 1000)
+        print("  speech_head + sync     :", t_head // 1000)
+        print("  cfg_combine_sample     :", t_sample // 1000)
+        var total = t_pre + t_layers + t_post_norm + t_head + t_sample
+        print("  TOTAL                  :", total // 1000)
 
     return generated^
 
@@ -1184,6 +1284,10 @@ def t3_generate_cfg_sample_aligned(
     var cos_step = ctx.enqueue_create_buffer[DType.float32](B2 * Dh)
     var sin_step = ctx.enqueue_create_buffer[DType.float32](B2 * Dh)
 
+    var scratch = make_t3_decode_scratch(
+        ctx, B2, H, Dh, model.blocks[0].mlp.intermediate, max_ctx,
+    )
+
     var step = 1
     while step < n_steps:
         embedding_forward(ctx, model.speech_emb, cur_tok_buf, step_emb_3d_buf, B2, 1)
@@ -1235,7 +1339,7 @@ def t3_generate_cfg_sample_aligned(
             else:
                 t3_decode_step(
                     ctx, model.blocks[L], step_emb_buf,
-                    k_caches[L], v_caches[L], cos_step, sin_step,
+                    k_caches[L], v_caches[L], cos_step, sin_step, scratch,
                     B2, max_ctx, cur_len,
                 )
 

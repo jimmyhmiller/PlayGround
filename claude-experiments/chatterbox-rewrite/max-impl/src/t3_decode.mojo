@@ -18,7 +18,7 @@ from std.algorithm.functional import elementwise, IndexList
 from std.os import getenv
 
 from modules import (
-    Linear, linear_forward, RMSNorm, rms_norm_forward,
+    Linear, linear_forward, linear_forward_with_scratch, RMSNorm, rms_norm_forward,
     rms_norm_fused_residual_add_forward, silu, residual_add,
 )
 from attention import qk_scaled_and_masked, softmax_2d, av_matmul
@@ -26,6 +26,85 @@ from transformer_blocks import (
     reshape_bsd_to_bhsd, reshape_bhsd_to_bsd, apply_rope_hf_style,
 )
 from t3_block import T3Block
+
+
+@fieldwise_init
+struct T3DecodeScratch(Movable):
+    """All per-step scratch buffers for `t3_decode_step`, allocated once at the
+    start of the decode loop and reused across all (token × layer) calls.
+
+    Sizes are baked in for batch=b, heads=H, head_dim=Dh, model_dim=D=H*Dh,
+    mlp_inter, and the maximum K-cache prefix length max_ctx. The same scratch
+    serves every layer (weights differ per layer; activations match).
+
+    Eliminates ~37 enqueue_create_buffer calls per layer per token. At b=2,
+    H=16, Dh=64, D=1024, inter=4096 → ~256 KB total scratch per CFG-batched
+    decode step.
+    """
+    # Norms
+    var x_norm:    DeviceBuffer[DType.float32]    # (b*D,) — pre-attn rms output
+    var x_norm2:   DeviceBuffer[DType.float32]    # (b*D,) — post-attn rms output (fused with residual)
+    # Q/K/V
+    var qkv_out:   DeviceBuffer[DType.float32]    # (b*3*D,) — fused-QKV linear output
+    var q_lin:     DeviceBuffer[DType.float32]    # (b*D,) — split path only
+    var k_lin:     DeviceBuffer[DType.float32]    # (b*D,)
+    var v_lin:     DeviceBuffer[DType.float32]    # (b*D,)
+    var q_perm:    DeviceBuffer[DType.float32]    # (b*H*Dh,)
+    var k_perm:    DeviceBuffer[DType.float32]    # (b*H*Dh,)
+    var v_perm:    DeviceBuffer[DType.float32]    # (b*H*Dh,)
+    var q_rope:    DeviceBuffer[DType.float32]    # (b*H*Dh,)
+    var k_rope:    DeviceBuffer[DType.float32]    # (b*H*Dh,)
+    # Attention
+    var logits:    DeviceBuffer[DType.float32]    # (b*H*max_ctx,) — sized to max prefix
+    var probs:     DeviceBuffer[DType.float32]    # (b*H*max_ctx,)
+    var av:        DeviceBuffer[DType.float32]    # (b*H*Dh,)
+    var av_flat:   DeviceBuffer[DType.float32]    # (b*D,)
+    var attn_out:  DeviceBuffer[DType.float32]    # (b*D,)
+    # MLP
+    var gate_up_out: DeviceBuffer[DType.float32]  # (b*2*inter,)
+    var gate_h:    DeviceBuffer[DType.float32]    # (b*inter,) — split path only
+    var up_h:      DeviceBuffer[DType.float32]    # (b*inter,)
+    var act_h:     DeviceBuffer[DType.float32]    # (b*inter,)
+    var prod_h:    DeviceBuffer[DType.float32]    # (b*inter,)
+    var mlp_out:   DeviceBuffer[DType.float32]    # (b*D,)
+    # bf16 cast scratch for linear_forward. Sized to b * max(in_features) across all linears.
+    # T3 has linears with in_features ∈ {D=1024, inter=4096}, so max = b * inter.
+    var lin_x_bf16: DeviceBuffer[DType.bfloat16]
+
+
+def make_t3_decode_scratch(
+    mut ctx: DeviceContext,
+    b: Int, H: Int, Dh: Int, intermediate: Int, max_ctx: Int,
+) raises -> T3DecodeScratch:
+    """Allocate all per-step scratch buffers once. Reused across the entire
+    decode loop. Sizes match the largest needs across all layers."""
+    var D = H * Dh
+    var bf16_max_in = max(D, intermediate)
+    return T3DecodeScratch(
+        x_norm    = ctx.enqueue_create_buffer[DType.float32](b * D),
+        x_norm2   = ctx.enqueue_create_buffer[DType.float32](b * D),
+        qkv_out   = ctx.enqueue_create_buffer[DType.float32](b * 3 * D),
+        q_lin     = ctx.enqueue_create_buffer[DType.float32](b * D),
+        k_lin     = ctx.enqueue_create_buffer[DType.float32](b * D),
+        v_lin     = ctx.enqueue_create_buffer[DType.float32](b * D),
+        q_perm    = ctx.enqueue_create_buffer[DType.float32](b * H * Dh),
+        k_perm    = ctx.enqueue_create_buffer[DType.float32](b * H * Dh),
+        v_perm    = ctx.enqueue_create_buffer[DType.float32](b * H * Dh),
+        q_rope    = ctx.enqueue_create_buffer[DType.float32](b * H * Dh),
+        k_rope    = ctx.enqueue_create_buffer[DType.float32](b * H * Dh),
+        logits    = ctx.enqueue_create_buffer[DType.float32](b * H * max_ctx),
+        probs     = ctx.enqueue_create_buffer[DType.float32](b * H * max_ctx),
+        av        = ctx.enqueue_create_buffer[DType.float32](b * H * Dh),
+        av_flat   = ctx.enqueue_create_buffer[DType.float32](b * D),
+        attn_out  = ctx.enqueue_create_buffer[DType.float32](b * D),
+        gate_up_out = ctx.enqueue_create_buffer[DType.float32](b * 2 * intermediate),
+        gate_h    = ctx.enqueue_create_buffer[DType.float32](b * intermediate),
+        up_h      = ctx.enqueue_create_buffer[DType.float32](b * intermediate),
+        act_h     = ctx.enqueue_create_buffer[DType.float32](b * intermediate),
+        prod_h    = ctx.enqueue_create_buffer[DType.float32](b * intermediate),
+        mlp_out   = ctx.enqueue_create_buffer[DType.float32](b * D),
+        lin_x_bf16 = ctx.enqueue_create_buffer[DType.bfloat16](b * bf16_max_in),
+    )
 
 
 def decode_qk_against_cache(
@@ -200,27 +279,28 @@ def t3_decode_step(
     mut v_cache: DeviceBuffer[DType.float32],        # (B, H, MAX_CTX, Dh)
     mut cos_step: DeviceBuffer[DType.float32],       # (B, 1, Dh) — cos at current position
     mut sin_step: DeviceBuffer[DType.float32],
+    mut scratch: T3DecodeScratch,                    # pre-allocated per-step buffers
     b: Int, max_ctx: Int, cur_len: Int,
 ) raises:
     """One decode step for a single transformer layer with KV caching.
 
     Mutates x_buf, k_cache, v_cache. cur_len is the number of valid cache
     entries BEFORE this step (so the new token writes to slot `cur_len` and
-    attends over [0..cur_len])."""
+    attends over [0..cur_len]).
+
+    All per-step temporaries (q_perm, k_perm, x_norm, logits, etc.) come from
+    `scratch`, which is shared across every (token × layer) call. Eliminates
+    ~37 enqueue_create_buffer calls per invocation.
+    """
     var H = block.n_heads
     var Dh = block.head_dim
     var D = H * Dh
     var s_k = cur_len + 1     # K spans cache + new token
 
     # 1. RMSNorm.
-    var x_norm = ctx.enqueue_create_buffer[DType.float32](b * D)
-    rms_norm_forward(ctx, block.in_norm, x_buf, x_norm, b)
+    rms_norm_forward(ctx, block.in_norm, x_buf, scratch.x_norm, b)
 
     # 2. Q/K/V — fused matmul (when env CHATTERBOX_T3_FUSE_QKV=1) or 3 separate.
-    var q_perm = ctx.enqueue_create_buffer[DType.float32](b * H * 1 * Dh)
-    var k_perm = ctx.enqueue_create_buffer[DType.float32](b * H * 1 * Dh)
-    var v_perm = ctx.enqueue_create_buffer[DType.float32](b * H * 1 * Dh)
-
     var fuse_qkv = False
     try:
         fuse_qkv = getenv("CHATTERBOX_T3_FUSE_QKV") == "1"
@@ -228,52 +308,39 @@ def t3_decode_step(
         fuse_qkv = False
 
     if fuse_qkv:
-        var qkv_out = ctx.enqueue_create_buffer[DType.float32](b * 3 * D)
-        linear_forward(ctx, block.qkv, x_norm, qkv_out, b)
-        _qkv_split_reshape(ctx, qkv_out, q_perm, k_perm, v_perm, b, H, Dh)
+        linear_forward_with_scratch(ctx, block.qkv, scratch.x_norm, scratch.qkv_out, scratch.lin_x_bf16, b)
+        _qkv_split_reshape(ctx, scratch.qkv_out, scratch.q_perm, scratch.k_perm, scratch.v_perm, b, H, Dh)
     else:
-        var q_lin = ctx.enqueue_create_buffer[DType.float32](b * D)
-        var k_lin = ctx.enqueue_create_buffer[DType.float32](b * D)
-        var v_lin = ctx.enqueue_create_buffer[DType.float32](b * D)
-        linear_forward(ctx, block.to_q, x_norm, q_lin, b)
-        linear_forward(ctx, block.to_k, x_norm, k_lin, b)
-        linear_forward(ctx, block.to_v, x_norm, v_lin, b)
-        reshape_bsd_to_bhsd(ctx, q_lin, q_perm, b, 1, H, Dh)
-        reshape_bsd_to_bhsd(ctx, k_lin, k_perm, b, 1, H, Dh)
-        reshape_bsd_to_bhsd(ctx, v_lin, v_perm, b, 1, H, Dh)
+        linear_forward_with_scratch(ctx, block.to_q, scratch.x_norm, scratch.q_lin, scratch.lin_x_bf16, b)
+        linear_forward_with_scratch(ctx, block.to_k, scratch.x_norm, scratch.k_lin, scratch.lin_x_bf16, b)
+        linear_forward_with_scratch(ctx, block.to_v, scratch.x_norm, scratch.v_lin, scratch.lin_x_bf16, b)
+        reshape_bsd_to_bhsd(ctx, scratch.q_lin, scratch.q_perm, b, 1, H, Dh)
+        reshape_bsd_to_bhsd(ctx, scratch.k_lin, scratch.k_perm, b, 1, H, Dh)
+        reshape_bsd_to_bhsd(ctx, scratch.v_lin, scratch.v_perm, b, 1, H, Dh)
 
     # 4. RoPE on Q and K (single timestep with cos/sin at cur_len position).
-    var q_rope = ctx.enqueue_create_buffer[DType.float32](b * H * 1 * Dh)
-    var k_rope = ctx.enqueue_create_buffer[DType.float32](b * H * 1 * Dh)
-    apply_rope_hf_style(ctx, q_perm, q_rope, cos_step, sin_step, b, H, 1, Dh)
-    apply_rope_hf_style(ctx, k_perm, k_rope, cos_step, sin_step, b, H, 1, Dh)
+    apply_rope_hf_style(ctx, scratch.q_perm, scratch.q_rope, cos_step, sin_step, b, H, 1, Dh)
+    apply_rope_hf_style(ctx, scratch.k_perm, scratch.k_rope, cos_step, sin_step, b, H, 1, Dh)
 
     # 5. Append k_rope, v_perm to caches at slot cur_len.
-    cache_write_step(ctx, k_rope, k_cache, b, H, max_ctx, Dh, cur_len)
-    cache_write_step(ctx, v_perm, v_cache, b, H, max_ctx, Dh, cur_len)
+    cache_write_step(ctx, scratch.k_rope, k_cache, b, H, max_ctx, Dh, cur_len)
+    cache_write_step(ctx, scratch.v_perm, v_cache, b, H, max_ctx, Dh, cur_len)
 
     # 6. Attention directly against cache buffers — no copy. Reads the
     #    (B, H, MAX_CTX, Dh) cache buffers using only the valid prefix [0..s_k).
     var scale: Float32 = 1.0 / sqrt(Float32(Dh))
-    var logits = ctx.enqueue_create_buffer[DType.float32](b * H * s_k)
-    var probs  = ctx.enqueue_create_buffer[DType.float32](b * H * s_k)
-    var av     = ctx.enqueue_create_buffer[DType.float32](b * H * 1 * Dh)
 
-    decode_qk_against_cache(ctx, q_rope, k_cache, logits, b, H, Dh, max_ctx, s_k, scale)
-    softmax_2d(ctx, logits, probs, b * H, s_k)
-    decode_av_against_cache(ctx, probs, v_cache, av, b, H, Dh, max_ctx, s_k)
+    decode_qk_against_cache(ctx, scratch.q_rope, k_cache, scratch.logits, b, H, Dh, max_ctx, s_k, scale)
+    softmax_2d(ctx, scratch.logits, scratch.probs, b * H, s_k)
+    decode_av_against_cache(ctx, scratch.probs, v_cache, scratch.av, b, H, Dh, max_ctx, s_k)
 
-    var av_flat = ctx.enqueue_create_buffer[DType.float32](b * D)
-    reshape_bhsd_to_bsd(ctx, av, av_flat, b, H, 1, Dh)
-    var attn_out = ctx.enqueue_create_buffer[DType.float32](b * D)
-    linear_forward(ctx, block.to_out, av_flat, attn_out, b)
+    reshape_bhsd_to_bsd(ctx, scratch.av, scratch.av_flat, b, H, 1, Dh)
+    linear_forward_with_scratch(ctx, block.to_out, scratch.av_flat, scratch.attn_out, scratch.lin_x_bf16, b)
 
     # 7. MLP — fused gate+up matmul (when env CHATTERBOX_T3_FUSE_MLP=1) or separate.
     # Fused: residual_add(x, attn_out) + rms_norm(x) → single launch.
-    var x_norm2 = ctx.enqueue_create_buffer[DType.float32](b * D)
-    rms_norm_fused_residual_add_forward(ctx, block.post_norm, x_buf, attn_out, x_norm2, b)
+    rms_norm_fused_residual_add_forward(ctx, block.post_norm, x_buf, scratch.attn_out, scratch.x_norm2, b)
     var inter = block.mlp.intermediate
-    var prod_h = ctx.enqueue_create_buffer[DType.float32](b * inter)
 
     var fuse_mlp = False
     try:
@@ -282,19 +349,15 @@ def t3_decode_step(
         fuse_mlp = False
 
     if fuse_mlp:
-        var gate_up_out = ctx.enqueue_create_buffer[DType.float32](b * 2 * inter)
-        linear_forward(ctx, block.gate_up, x_norm2, gate_up_out, b)
-        _swiglu_combine(ctx, gate_up_out, prod_h, b, inter)
+        linear_forward_with_scratch(ctx, block.gate_up, scratch.x_norm2, scratch.gate_up_out, scratch.lin_x_bf16, b)
+        _swiglu_combine(ctx, scratch.gate_up_out, scratch.prod_h, b, inter)
     else:
-        var gate_h = ctx.enqueue_create_buffer[DType.float32](b * inter)
-        var up_h   = ctx.enqueue_create_buffer[DType.float32](b * inter)
-        var act_h  = ctx.enqueue_create_buffer[DType.float32](b * inter)
-        linear_forward(ctx, block.mlp.gate, x_norm2, gate_h, b)
-        linear_forward(ctx, block.mlp.up,   x_norm2, up_h,   b)
-        silu(ctx, gate_h, act_h, b * inter)
-        var ap = act_h.unsafe_ptr()
-        var upp = up_h.unsafe_ptr()
-        var pp = prod_h.unsafe_ptr()
+        linear_forward_with_scratch(ctx, block.mlp.gate, scratch.x_norm2, scratch.gate_h, scratch.lin_x_bf16, b)
+        linear_forward_with_scratch(ctx, block.mlp.up,   scratch.x_norm2, scratch.up_h,   scratch.lin_x_bf16, b)
+        silu(ctx, scratch.gate_h, scratch.act_h, b * inter)
+        var ap = scratch.act_h.unsafe_ptr()
+        var upp = scratch.up_h.unsafe_ptr()
+        var pp = scratch.prod_h.unsafe_ptr()
 
         @always_inline
         @parameter
@@ -308,9 +371,8 @@ def t3_decode_step(
             IndexList[1](b * inter), DeviceContextPtr(ctx),
         )
 
-    var mlp_out = ctx.enqueue_create_buffer[DType.float32](b * D)
-    linear_forward(ctx, block.mlp.down, prod_h, mlp_out, b)
-    residual_add(ctx, x_buf, mlp_out, b * D)
+    linear_forward_with_scratch(ctx, block.mlp.down, scratch.prod_h, scratch.mlp_out, scratch.lin_x_bf16, b)
+    residual_add(ctx, x_buf, scratch.mlp_out, b * D)
 
 
 def t3_decode_step_with_attn(

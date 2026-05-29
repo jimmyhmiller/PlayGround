@@ -103,13 +103,8 @@ def linear_forward(
 ) raises:
     """Computes out = x @ W.T (+ bias) via `linalg.matmul`.
 
-    For M > 1 on AMD f32, MAX's matmul takes ~3x longer than M=1 due to
-    falling out of the fast path. We split into M=1 calls instead — this
-    works around the GEMV-shape penalty in the current MAX dispatch.
-
-    Bias-add is fused into the matmul via `elementwise_compute_lambda_fn`
-    when has_bias is true — saves one kernel launch per Linear (significant
-    in T3 decode where Linears are launch-overhead-bound).
+    Allocates the bf16 cast scratch internally each call. For hot loops where
+    that allocation is significant overhead, use `linear_forward_with_scratch`.
     """
     var dctx = DeviceContextPtr(ctx)
     var use_bf16 = module.has_bf16()
@@ -199,6 +194,143 @@ def linear_forward(
             row_major(Idx(module.out_features), Idx(module.in_features)))
         # Empirical: at M<=4 with K/N ≥ 1024, MAX's f32 matmul is 3-5x slower
         # than M=1, but at M >= ~16 the GEMM is fully utilized. So split tiny M only.
+        if m <= 4 and module.in_features >= 256 and module.out_features >= 256:
+            for bi in range(m):
+                var x_sub = x_buf.create_sub_buffer[DType.float32](
+                    bi * module.in_features, module.in_features,
+                )
+                var out_sub = out_buf.create_sub_buffer[DType.float32](
+                    bi * module.out_features, module.out_features,
+                )
+                var x_t = TileTensor(x_sub, row_major(Idx(1), Idx(module.in_features)))
+                var out_t = TileTensor(out_sub, row_major(Idx(1), Idx(module.out_features)))
+                if module.has_bias:
+                    nn_matmul[
+                        target="gpu",
+                        transpose_b=True,
+                        elementwise_compute_lambda_fn=epilogue_some,
+                    ](out_t, x_t, w_t, dctx)
+                else:
+                    nn_matmul[
+                        target="gpu",
+                        transpose_b=True,
+                        elementwise_compute_lambda_fn=epilogue_none,
+                    ](out_t, x_t, w_t, dctx)
+        else:
+            var x_t = TileTensor(x_buf, row_major(Idx(m), Idx(module.in_features)))
+            var out_t = TileTensor(out_buf, row_major(Idx(m), Idx(module.out_features)))
+            if module.has_bias:
+                nn_matmul[
+                    target="gpu",
+                    transpose_b=True,
+                    elementwise_compute_lambda_fn=epilogue_some,
+                ](out_t, x_t, w_t, dctx)
+            else:
+                nn_matmul[
+                    target="gpu",
+                    transpose_b=True,
+                    elementwise_compute_lambda_fn=epilogue_none,
+                ](out_t, x_t, w_t, dctx)
+
+
+def linear_forward_with_scratch(
+    mut ctx: DeviceContext,
+    mut module: Linear,
+    mut x_buf: DeviceBuffer[DType.float32],
+    mut out_buf: DeviceBuffer[DType.float32],
+    mut x_bf_scratch: DeviceBuffer[DType.bfloat16],
+    m: Int,
+) raises:
+    """Same as `linear_forward` but takes a pre-allocated bf16 cast scratch
+    instead of allocating one per call. Required size: at least
+    `m * module.in_features` bf16 elements. Eliminates the per-call
+    `enqueue_create_buffer` in T3 decode hot loop (~120 saved allocs per
+    layer per token at b=2 with QKV+MLP fused linears).
+    """
+    var dctx = DeviceContextPtr(ctx)
+    var use_bf16 = module.has_bf16()
+    var bias_ptr = module.bias.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(bias_ptr)
+    def bias_epilogue[
+        _dtype: DType,
+        width: Int,
+        *,
+        alignment: Int = align_of[SIMD[_dtype, width]](),
+    ](idx: IndexList[2], val: SIMD[_dtype, width]) capturing -> SIMD[_dtype, width]:
+        var b = bias_ptr.load[width=width, alignment=alignment](idx[1])
+        return val + b.cast[_dtype]()
+
+    comptime epilogue_some = Optional[elementwise_compute_lambda_type](bias_epilogue)
+    comptime epilogue_none = Optional[elementwise_compute_lambda_type](None)
+
+    if use_bf16:
+        # Use the first `m * in_features` elements of the scratch buffer as x_bf.
+        var x_bf = x_bf_scratch.create_sub_buffer[DType.bfloat16](
+            0, m * module.in_features
+        )
+        var xfp = x_buf.unsafe_ptr()
+        var xbp = x_bf.unsafe_ptr()
+        var n_in = m * module.in_features
+
+        @always_inline
+        @parameter
+        @__copy_capture(xfp, xbp)
+        def cast_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+            var i = idx[0]
+            var v = xfp.load[width=width, alignment=alignment](i)
+            xbp.store[width=width, alignment=alignment](i, v.cast[DType.bfloat16]())
+        elementwise[cast_fn, simd_width=4, target="gpu"](
+            IndexList[1](n_in), dctx,
+        )
+
+        var w_bt = TileTensor(module.weight_bf16,
+            row_major(Idx(module.out_features), Idx(module.in_features)))
+
+        if m <= 4 and module.in_features >= 256 and module.out_features >= 256:
+            for bi in range(m):
+                var x_sub = x_bf.create_sub_buffer[DType.bfloat16](
+                    bi * module.in_features, module.in_features,
+                )
+                var out_sub = out_buf.create_sub_buffer[DType.float32](
+                    bi * module.out_features, module.out_features,
+                )
+                var x_t = TileTensor(x_sub, row_major(Idx(1), Idx(module.in_features)))
+                var out_t = TileTensor(out_sub, row_major(Idx(1), Idx(module.out_features)))
+                if module.has_bias:
+                    nn_matmul[
+                        target="gpu",
+                        transpose_b=True,
+                        elementwise_compute_lambda_fn=epilogue_some,
+                    ](out_t, x_t, w_bt, dctx)
+                else:
+                    nn_matmul[
+                        target="gpu",
+                        transpose_b=True,
+                        elementwise_compute_lambda_fn=epilogue_none,
+                    ](out_t, x_t, w_bt, dctx)
+        else:
+            var x_t = TileTensor(x_bf, row_major(Idx(m), Idx(module.in_features)))
+            var out_t = TileTensor(out_buf, row_major(Idx(m), Idx(module.out_features)))
+            if module.has_bias:
+                nn_matmul[
+                    target="gpu",
+                    transpose_b=True,
+                    elementwise_compute_lambda_fn=epilogue_some,
+                ](out_t, x_t, w_bt, dctx)
+            else:
+                nn_matmul[
+                    target="gpu",
+                    transpose_b=True,
+                    elementwise_compute_lambda_fn=epilogue_none,
+                ](out_t, x_t, w_bt, dctx)
+    else:
+        # f32 path doesn't need x_bf_scratch — fall through to the same
+        # logic as `linear_forward`.
+        var w_t = TileTensor(module.weight,
+            row_major(Idx(module.out_features), Idx(module.in_features)))
         if m <= 4 and module.in_features >= 256 and module.out_features >= 256:
             for bi in range(m):
                 var x_sub = x_buf.create_sub_buffer[DType.float32](
