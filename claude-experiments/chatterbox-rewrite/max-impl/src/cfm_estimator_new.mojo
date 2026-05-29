@@ -24,6 +24,10 @@ from conv1d import Conv1d, conv1d_forward
 from attention import qk_scaled_and_masked, softmax_2d, av_matmul
 from transformer_blocks import reshape_bsd_to_bhsd, reshape_bhsd_to_bsd
 
+from layout import TileTensor, row_major, Idx
+from nn.attention.gpu.mha import flash_attention
+from nn.attention.mha_mask import NullMask
+
 
 @fieldwise_init
 struct GroupNorm1d(Copyable, Movable):
@@ -387,13 +391,18 @@ def cfm_self_attention_forward(
     mut out_buf: DeviceBuffer[DType.float32],   # (B, T, D)
     b: Int, t: Int,
 ) raises:
-    """Standard scaled-dot-product self-attention with inner dim H*Dh."""
-    var H = module.n_heads
-    var Dh = module.head_dim
-    var inner = H * Dh
-    var D = module.to_q.in_features
+    """Standard scaled-dot-product self-attention with inner dim H*Dh.
 
-    # Q/K/V — plain Linear (B*T, D) → (B*T, inner).
+    All CFM blocks in Chatterbox use H=8, Dh=64. We assert this and pass them
+    as compile-time params so `head_depth_known` is True in flash_attention's
+    dispatch, routing to the actual flash-attn kernel rather than mha_gpu_naive.
+    """
+    comptime H = 8
+    comptime Dh = 64
+    if module.n_heads != H or module.head_dim != Dh:
+        raise Error("cfm_self_attention_forward: expected H=8, Dh=64")
+    comptime inner = H * Dh
+
     var q = ctx.enqueue_create_buffer[DType.float32](b * t * inner)
     var k = ctx.enqueue_create_buffer[DType.float32](b * t * inner)
     var v = ctx.enqueue_create_buffer[DType.float32](b * t * inner)
@@ -401,30 +410,14 @@ def cfm_self_attention_forward(
     linear_forward(ctx, module.to_k, x_buf, k, b * t)
     linear_forward(ctx, module.to_v, x_buf, v, b * t)
 
-    # Reshape (B, T, H*Dh) → (B, H, T, Dh).
-    var q_perm = ctx.enqueue_create_buffer[DType.float32](b * H * t * Dh)
-    var k_perm = ctx.enqueue_create_buffer[DType.float32](b * H * t * Dh)
-    var v_perm = ctx.enqueue_create_buffer[DType.float32](b * H * t * Dh)
-    reshape_bsd_to_bhsd(ctx, q, q_perm, b, t, H, Dh)
-    reshape_bsd_to_bhsd(ctx, k, k_perm, b, t, H, Dh)
-    reshape_bsd_to_bhsd(ctx, v, v_perm, b, t, H, Dh)
-
-    # Scaled QK + softmax + AV.
+    var attn_out = ctx.enqueue_create_buffer[DType.float32](b * t * inner)
     var scale: Float32 = 1.0 / sqrt(Float32(Dh))
-    var logits = ctx.enqueue_create_buffer[DType.float32](b * H * t * t)
-    var probs = ctx.enqueue_create_buffer[DType.float32](b * H * t * t)
-    var no_mask = ctx.enqueue_create_buffer[DType.float32](t * t)
-    no_mask.enqueue_fill(0.0)
-    qk_scaled_and_masked(ctx, q_perm, k_perm, no_mask, logits,
-                          b * H, t, t, Dh, scale, False)
-    softmax_2d(ctx, logits, probs, b * H * t, t)
-    var attn_perm = ctx.enqueue_create_buffer[DType.float32](b * H * t * Dh)
-    av_matmul(ctx, probs, v_perm, attn_perm, b * H, t, t, Dh)
-
-    # Reshape (B, H, T, Dh) → (B, T, D) and out_proj.
-    var attn_flat = ctx.enqueue_create_buffer[DType.float32](b * t * inner)
-    reshape_bhsd_to_bsd(ctx, attn_perm, attn_flat, b, H, t, Dh)
-    linear_forward(ctx, module.to_out, attn_flat, out_buf, b * t)
+    var q_t = TileTensor(q, row_major((Idx(b), Idx(t), Idx[H](), Idx[Dh]())))
+    var k_t = TileTensor(k, row_major((Idx(b), Idx(t), Idx[H](), Idx[Dh]())))
+    var v_t = TileTensor(v, row_major((Idx(b), Idx(t), Idx[H](), Idx[Dh]())))
+    var o_t = TileTensor(attn_out, row_major((Idx(b), Idx(t), Idx[H](), Idx[Dh]())))
+    flash_attention(o_t, q_t, k_t, v_t, NullMask(), scale, ctx)
+    linear_forward(ctx, module.to_out, attn_out, out_buf, b * t)
 
 
 def cfm_ff_forward(

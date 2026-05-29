@@ -18,7 +18,8 @@ from std.algorithm.functional import elementwise, IndexList
 from std.os import getenv
 
 from modules import (
-    Linear, linear_forward, RMSNorm, rms_norm_forward, silu, residual_add,
+    Linear, linear_forward, RMSNorm, rms_norm_forward,
+    rms_norm_fused_residual_add_forward, silu, residual_add,
 )
 from attention import qk_scaled_and_masked, softmax_2d, av_matmul
 from transformer_blocks import (
@@ -266,11 +267,11 @@ def t3_decode_step(
     reshape_bhsd_to_bsd(ctx, av, av_flat, b, H, 1, Dh)
     var attn_out = ctx.enqueue_create_buffer[DType.float32](b * D)
     linear_forward(ctx, block.to_out, av_flat, attn_out, b)
-    residual_add(ctx, x_buf, attn_out, b * D)
 
     # 7. MLP — fused gate+up matmul (when env CHATTERBOX_T3_FUSE_MLP=1) or separate.
+    # Fused: residual_add(x, attn_out) + rms_norm(x) → single launch.
     var x_norm2 = ctx.enqueue_create_buffer[DType.float32](b * D)
-    rms_norm_forward(ctx, block.post_norm, x_buf, x_norm2, b)
+    rms_norm_fused_residual_add_forward(ctx, block.post_norm, x_buf, attn_out, x_norm2, b)
     var inter = block.mlp.intermediate
     var prod_h = ctx.enqueue_create_buffer[DType.float32](b * inter)
 

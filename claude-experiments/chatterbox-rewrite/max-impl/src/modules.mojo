@@ -10,6 +10,7 @@ Convention: all tensors are float32 unless noted. All DeviceBuffers must
 already be GPU-allocated.
 """
 from std.sys.info import simd_width_of, has_accelerator
+from std.sys import align_of
 from std.gpu.host import DeviceContext, DeviceBuffer
 from std.runtime.asyncrt import DeviceContextPtr
 from std.algorithm.functional import elementwise, IndexList
@@ -24,6 +25,7 @@ from nn.activations import relu as nn_relu, leaky_relu as nn_leaky_relu
 # (still ASIC-friendly elementwise; just not the MAX SIMD helper).
 from nn.gather_scatter import gather as nn_gather
 from linalg.matmul import matmul as nn_matmul
+from linalg.utils import elementwise_compute_lambda_type
 
 
 # ============================================================================
@@ -105,10 +107,31 @@ def linear_forward(
     falling out of the fast path. We split into M=1 calls instead — this
     works around the GEMV-shape penalty in the current MAX dispatch.
 
-    Bias-add is dispatched as a fused `elementwise` op rather than a custom kernel.
+    Bias-add is fused into the matmul via `elementwise_compute_lambda_fn`
+    when has_bias is true — saves one kernel launch per Linear (significant
+    in T3 decode where Linears are launch-overhead-bound).
     """
     var dctx = DeviceContextPtr(ctx)
     var use_bf16 = module.has_bf16()
+    var bias_ptr = module.bias.unsafe_ptr()
+
+    # Compute-lambda epilogue that adds bias[col] to the matmul result.
+    # `idx[1]` is the N coordinate; bias is shape (N,). Fired by MAX inside
+    # the matmul kernel — saves a launch vs running a separate bias kernel.
+    @always_inline
+    @parameter
+    @__copy_capture(bias_ptr)
+    def bias_epilogue[
+        _dtype: DType,
+        width: Int,
+        *,
+        alignment: Int = align_of[SIMD[_dtype, width]](),
+    ](idx: IndexList[2], val: SIMD[_dtype, width]) capturing -> SIMD[_dtype, width]:
+        var b = bias_ptr.load[width=width, alignment=alignment](idx[1])
+        return val + b.cast[_dtype]()
+
+    comptime epilogue_some = Optional[elementwise_compute_lambda_type](bias_epilogue)
+    comptime epilogue_none = Optional[elementwise_compute_lambda_type](None)
 
     if use_bf16:
         # bf16 path: cast input to bf16, then run bf16×bf16→f32 matmul.
@@ -144,11 +167,33 @@ def linear_forward(
                 )
                 var x_t = TileTensor(x_sub, row_major(Idx(1), Idx(module.in_features)))
                 var out_t = TileTensor(out_sub, row_major(Idx(1), Idx(module.out_features)))
-                nn_matmul[target="gpu", transpose_b=True](out_t, x_t, w_bt, dctx)
+                if module.has_bias:
+                    nn_matmul[
+                        target="gpu",
+                        transpose_b=True,
+                        elementwise_compute_lambda_fn=epilogue_some,
+                    ](out_t, x_t, w_bt, dctx)
+                else:
+                    nn_matmul[
+                        target="gpu",
+                        transpose_b=True,
+                        elementwise_compute_lambda_fn=epilogue_none,
+                    ](out_t, x_t, w_bt, dctx)
         else:
             var x_t = TileTensor(x_bf, row_major(Idx(m), Idx(module.in_features)))
             var out_t = TileTensor(out_buf, row_major(Idx(m), Idx(module.out_features)))
-            nn_matmul[target="gpu", transpose_b=True](out_t, x_t, w_bt, dctx)
+            if module.has_bias:
+                nn_matmul[
+                    target="gpu",
+                    transpose_b=True,
+                    elementwise_compute_lambda_fn=epilogue_some,
+                ](out_t, x_t, w_bt, dctx)
+            else:
+                nn_matmul[
+                    target="gpu",
+                    transpose_b=True,
+                    elementwise_compute_lambda_fn=epilogue_none,
+                ](out_t, x_t, w_bt, dctx)
     else:
         var w_t = TileTensor(module.weight,
             row_major(Idx(module.out_features), Idx(module.in_features)))
@@ -164,29 +209,33 @@ def linear_forward(
                 )
                 var x_t = TileTensor(x_sub, row_major(Idx(1), Idx(module.in_features)))
                 var out_t = TileTensor(out_sub, row_major(Idx(1), Idx(module.out_features)))
-                nn_matmul[target="gpu", transpose_b=True](out_t, x_t, w_t, dctx)
+                if module.has_bias:
+                    nn_matmul[
+                        target="gpu",
+                        transpose_b=True,
+                        elementwise_compute_lambda_fn=epilogue_some,
+                    ](out_t, x_t, w_t, dctx)
+                else:
+                    nn_matmul[
+                        target="gpu",
+                        transpose_b=True,
+                        elementwise_compute_lambda_fn=epilogue_none,
+                    ](out_t, x_t, w_t, dctx)
         else:
             var x_t = TileTensor(x_buf, row_major(Idx(m), Idx(module.in_features)))
             var out_t = TileTensor(out_buf, row_major(Idx(m), Idx(module.out_features)))
-            nn_matmul[target="gpu", transpose_b=True](out_t, x_t, w_t, dctx)
-
-    if module.has_bias:
-        var out_ptr = out_buf.unsafe_ptr()
-        var bias_ptr = module.bias.unsafe_ptr()
-        var n = module.out_features
-        var total = m * n
-
-        @always_inline
-        @parameter
-        @__copy_capture(out_ptr, bias_ptr, n)
-        def bias_func[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
-            var i = idx[0]
-            var col = i % n
-            var cur = out_ptr[i]
-            out_ptr[i] = cur + bias_ptr[col]
-        elementwise[bias_func, simd_width=1, target="gpu"](
-            IndexList[1](total), DeviceContextPtr(ctx),
-        )
+            if module.has_bias:
+                nn_matmul[
+                    target="gpu",
+                    transpose_b=True,
+                    elementwise_compute_lambda_fn=epilogue_some,
+                ](out_t, x_t, w_t, dctx)
+            else:
+                nn_matmul[
+                    target="gpu",
+                    transpose_b=True,
+                    elementwise_compute_lambda_fn=epilogue_none,
+                ](out_t, x_t, w_t, dctx)
 
 
 # ============================================================================
@@ -285,6 +334,67 @@ def rms_norm_forward(
         var c = rebind[IndexList[2]](coords)
         var idx = c[0] * feature_dim + c[1]
         return in_ptr.load[width=width](idx)
+
+    @always_inline
+    @parameter
+    @__copy_capture(out_ptr, feature_dim)
+    def output_fn[width: Int, rank: Int, alignment: Int](coords: IndexList[rank], val: SIMD[DType.float32, width]):
+        var c = rebind[IndexList[2]](coords)
+        var idx = c[0] * feature_dim + c[1]
+        out_ptr.store[width=width, alignment=alignment](idx, val)
+
+    var gamma_tt = TileTensor(gamma_ptr, row_major(Idx(feature_dim)))
+    var dctx = DeviceContextPtr(ctx)
+
+    nn_rms_norm[
+        DType.float32, 2,
+        input_fn, output_fn,
+        target="gpu",
+    ](shape, gamma_tt, eps, Float32(0.0), dctx)
+
+
+def rms_norm_fused_residual_add_forward(
+    mut ctx: DeviceContext,
+    mut module: RMSNorm,
+    mut x_buf: DeviceBuffer[DType.float32],          # in/out — gets updated to x + residual
+    mut residual_buf: DeviceBuffer[DType.float32],   # read-only residual to add to x
+    mut out_buf: DeviceBuffer[DType.float32],        # normed output
+    batch_dim: Int,
+) raises:
+    """Fuses `x += residual; out = rms_norm(x)` into one kernel launch.
+
+    For D=1024 (T3) and D=256/512 (CFM), MAX's rms_norm dispatcher picks the
+    warp_tiling path which calls `input_fn` exactly once per element. We
+    exploit that: the input_fn reads x[i] + residual[i], stores the sum back
+    into x_buf as a side effect (so future residuals see the updated x), and
+    returns the sum for the rms-normalize pass.
+
+    Pre-norm transformer pattern (Llama-style):
+        x += attn_out          → fused →    rms_norm_fused_residual_add_forward(
+        x_norm = rms_norm(x)                    x_buf=x, residual_buf=attn_out, out_buf=x_norm)
+    """
+    var in_ptr = x_buf.unsafe_ptr()
+    var res_ptr = residual_buf.unsafe_ptr()
+    var out_ptr = out_buf.unsafe_ptr()
+    var gamma_ptr = module.gamma.unsafe_ptr()
+    var feature_dim = module.feature_dim
+    var eps = module.eps
+    var shape = IndexList[2](batch_dim, feature_dim)
+
+    @always_inline
+    @parameter
+    @__copy_capture(in_ptr, res_ptr, feature_dim)
+    def input_fn[width: Int, rank: Int](coords: IndexList[rank]) -> SIMD[DType.float32, width]:
+        var c = rebind[IndexList[2]](coords)
+        var idx = c[0] * feature_dim + c[1]
+        var x = in_ptr.load[width=width](idx)
+        var r = res_ptr.load[width=width](idx)
+        var sum = x + r
+        # Side effect: store the post-residual x back so subsequent layers
+        # see the updated state. MAX's warp_tiling kernel calls input_fn
+        # exactly once per element for D=1024, so this writes exactly once.
+        in_ptr.store[width=width](idx, sum)
+        return sum
 
     @always_inline
     @parameter
