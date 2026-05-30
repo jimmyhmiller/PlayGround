@@ -233,6 +233,103 @@ def linear_forward(
                 ](out_t, x_t, w_t, dctx)
 
 
+def linear_forward_bf16_shape[
+    K: Int,           # in_features
+    N: Int,           # out_features
+    has_bias: Bool,   # caller specifies at compile time
+](
+    mut ctx: DeviceContext,
+    mut module: Linear,
+    mut x_buf: DeviceBuffer[DType.float32],
+    mut out_buf: DeviceBuffer[DType.float32],
+    mut x_bf_scratch: DeviceBuffer[DType.bfloat16],
+    m: Int,
+) raises:
+    """Bf16-path linear with comptime K and N. Required: module.weight_bf16
+    populated, module.in_features == K, module.out_features == N. Caller asserts
+    these match — we don't check at runtime.
+
+    Comptime shape means MAX's matmul takes the fast WMMA path on AMD RDNA;
+    runtime shape is ~2× slower (verified by microbench: 64µs vs 124µs at
+    M=1 K=4096 N=1024). For T3 (D=1024, INTER=4096), K and N are known at
+    callsites so this is a pure win.
+
+    `has_bias` is also comptime — branch is removed entirely from each path.
+    """
+    var dctx = DeviceContextPtr(ctx)
+    var bias_ptr = module.bias.unsafe_ptr()
+
+    @always_inline
+    @parameter
+    @__copy_capture(bias_ptr)
+    def bias_epilogue[
+        _dtype: DType,
+        width: Int,
+        *,
+        alignment: Int = align_of[SIMD[_dtype, width]](),
+    ](idx: IndexList[2], val: SIMD[_dtype, width]) capturing -> SIMD[_dtype, width]:
+        var b = bias_ptr.load[width=width, alignment=alignment](idx[1])
+        return val + b.cast[_dtype]()
+
+    # Cast f32 → bf16 into scratch.
+    var x_bf = x_bf_scratch.create_sub_buffer[DType.bfloat16](0, m * K)
+    var xfp = x_buf.unsafe_ptr()
+    var xbp = x_bf.unsafe_ptr()
+    var n_in = m * K
+
+    @always_inline
+    @parameter
+    @__copy_capture(xfp, xbp)
+    def cast_fn[width: Int, rank: Int, alignment: Int = 1](idx: IndexList[rank]):
+        var i = idx[0]
+        var v = xfp.load[width=width, alignment=alignment](i)
+        xbp.store[width=width, alignment=alignment](i, v.cast[DType.bfloat16]())
+    elementwise[cast_fn, simd_width=4, target="gpu"](
+        IndexList[1](n_in), dctx,
+    )
+
+    var w_bt = TileTensor(module.weight_bf16, row_major(Idx[N](), Idx[K]()))
+
+    # M-split when M ≤ 4 (always true in T3 decode with B=2 CFG).
+    if m <= 4:
+        for bi in range(m):
+            var x_sub = x_bf.create_sub_buffer[DType.bfloat16](bi * K, K)
+            var out_sub = out_buf.create_sub_buffer[DType.float32](bi * N, N)
+            var x_t = TileTensor(x_sub, row_major(Idx(1), Idx[K]()))
+            var out_t = TileTensor(out_sub, row_major(Idx(1), Idx[N]()))
+            comptime if has_bias:
+                comptime epi = Optional[elementwise_compute_lambda_type](bias_epilogue)
+                nn_matmul[
+                    target="gpu",
+                    transpose_b=True,
+                    elementwise_compute_lambda_fn=epi,
+                ](out_t, x_t, w_bt, dctx)
+            else:
+                comptime epi = Optional[elementwise_compute_lambda_type](None)
+                nn_matmul[
+                    target="gpu",
+                    transpose_b=True,
+                    elementwise_compute_lambda_fn=epi,
+                ](out_t, x_t, w_bt, dctx)
+    else:
+        var x_t = TileTensor(x_bf, row_major(Idx(m), Idx[K]()))
+        var out_t = TileTensor(out_buf, row_major(Idx(m), Idx[N]()))
+        comptime if has_bias:
+            comptime epi = Optional[elementwise_compute_lambda_type](bias_epilogue)
+            nn_matmul[
+                target="gpu",
+                transpose_b=True,
+                elementwise_compute_lambda_fn=epi,
+            ](out_t, x_t, w_bt, dctx)
+        else:
+            comptime epi = Optional[elementwise_compute_lambda_type](None)
+            nn_matmul[
+                target="gpu",
+                transpose_b=True,
+                elementwise_compute_lambda_fn=epi,
+            ](out_t, x_t, w_bt, dctx)
+
+
 def linear_forward_with_scratch(
     mut ctx: DeviceContext,
     mut module: Linear,

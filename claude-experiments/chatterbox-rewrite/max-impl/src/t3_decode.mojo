@@ -18,9 +18,17 @@ from std.algorithm.functional import elementwise, IndexList
 from std.os import getenv
 
 from modules import (
-    Linear, linear_forward, linear_forward_with_scratch, RMSNorm, rms_norm_forward,
+    Linear, linear_forward, linear_forward_with_scratch,
+    linear_forward_bf16_shape,
+    RMSNorm, rms_norm_forward,
     rms_norm_fused_residual_add_forward, silu, residual_add,
 )
+
+
+# T3 model constants — known at compile time. Asserted against runtime values
+# in t3_decode_step so the comptime-shape linear path is safe to use.
+comptime T3_D = 1024
+comptime T3_INTER = 4096
 from attention import qk_scaled_and_masked, softmax_2d, av_matmul
 from transformer_blocks import (
     reshape_bsd_to_bhsd, reshape_bhsd_to_bsd, apply_rope_hf_style,
@@ -297,6 +305,10 @@ def t3_decode_step(
     var D = H * Dh
     var s_k = cur_len + 1     # K spans cache + new token
 
+    # Comptime-shape linears require D and INTER match T3_D/T3_INTER.
+    if D != T3_D or block.mlp.intermediate != T3_INTER:
+        raise Error("t3_decode_step: expected D=T3_D and intermediate=T3_INTER")
+
     # 1. RMSNorm.
     rms_norm_forward(ctx, block.in_norm, x_buf, scratch.x_norm, b)
 
@@ -308,12 +320,15 @@ def t3_decode_step(
         fuse_qkv = False
 
     if fuse_qkv:
-        linear_forward_with_scratch(ctx, block.qkv, scratch.x_norm, scratch.qkv_out, scratch.lin_x_bf16, b)
+        # qkv: K=T3_D, N=3*T3_D, has_bias=False (Llama-style)
+        linear_forward_bf16_shape[T3_D, 3 * T3_D, False](
+            ctx, block.qkv, scratch.x_norm, scratch.qkv_out, scratch.lin_x_bf16, b,
+        )
         _qkv_split_reshape(ctx, scratch.qkv_out, scratch.q_perm, scratch.k_perm, scratch.v_perm, b, H, Dh)
     else:
-        linear_forward_with_scratch(ctx, block.to_q, scratch.x_norm, scratch.q_lin, scratch.lin_x_bf16, b)
-        linear_forward_with_scratch(ctx, block.to_k, scratch.x_norm, scratch.k_lin, scratch.lin_x_bf16, b)
-        linear_forward_with_scratch(ctx, block.to_v, scratch.x_norm, scratch.v_lin, scratch.lin_x_bf16, b)
+        linear_forward_bf16_shape[T3_D, T3_D, False](ctx, block.to_q, scratch.x_norm, scratch.q_lin, scratch.lin_x_bf16, b)
+        linear_forward_bf16_shape[T3_D, T3_D, False](ctx, block.to_k, scratch.x_norm, scratch.k_lin, scratch.lin_x_bf16, b)
+        linear_forward_bf16_shape[T3_D, T3_D, False](ctx, block.to_v, scratch.x_norm, scratch.v_lin, scratch.lin_x_bf16, b)
         reshape_bsd_to_bhsd(ctx, scratch.q_lin, scratch.q_perm, b, 1, H, Dh)
         reshape_bsd_to_bhsd(ctx, scratch.k_lin, scratch.k_perm, b, 1, H, Dh)
         reshape_bsd_to_bhsd(ctx, scratch.v_lin, scratch.v_perm, b, 1, H, Dh)
@@ -335,7 +350,7 @@ def t3_decode_step(
     decode_av_against_cache(ctx, scratch.probs, v_cache, scratch.av, b, H, Dh, max_ctx, s_k)
 
     reshape_bhsd_to_bsd(ctx, scratch.av, scratch.av_flat, b, H, 1, Dh)
-    linear_forward_with_scratch(ctx, block.to_out, scratch.av_flat, scratch.attn_out, scratch.lin_x_bf16, b)
+    linear_forward_bf16_shape[T3_D, T3_D, False](ctx, block.to_out, scratch.av_flat, scratch.attn_out, scratch.lin_x_bf16, b)
 
     # 7. MLP — fused gate+up matmul (when env CHATTERBOX_T3_FUSE_MLP=1) or separate.
     # Fused: residual_add(x, attn_out) + rms_norm(x) → single launch.
@@ -349,11 +364,14 @@ def t3_decode_step(
         fuse_mlp = False
 
     if fuse_mlp:
-        linear_forward_with_scratch(ctx, block.gate_up, scratch.x_norm2, scratch.gate_up_out, scratch.lin_x_bf16, b)
+        # gate_up: K=T3_D, N=2*T3_INTER, has_bias=False
+        linear_forward_bf16_shape[T3_D, 2 * T3_INTER, False](
+            ctx, block.gate_up, scratch.x_norm2, scratch.gate_up_out, scratch.lin_x_bf16, b,
+        )
         _swiglu_combine(ctx, scratch.gate_up_out, scratch.prod_h, b, inter)
     else:
-        linear_forward_with_scratch(ctx, block.mlp.gate, scratch.x_norm2, scratch.gate_h, scratch.lin_x_bf16, b)
-        linear_forward_with_scratch(ctx, block.mlp.up,   scratch.x_norm2, scratch.up_h,   scratch.lin_x_bf16, b)
+        linear_forward_bf16_shape[T3_D, T3_INTER, False](ctx, block.mlp.gate, scratch.x_norm2, scratch.gate_h, scratch.lin_x_bf16, b)
+        linear_forward_bf16_shape[T3_D, T3_INTER, False](ctx, block.mlp.up,   scratch.x_norm2, scratch.up_h,   scratch.lin_x_bf16, b)
         silu(ctx, scratch.gate_h, scratch.act_h, b * inter)
         var ap = scratch.act_h.unsafe_ptr()
         var upp = scratch.up_h.unsafe_ptr()
@@ -371,7 +389,10 @@ def t3_decode_step(
             IndexList[1](b * inter), DeviceContextPtr(ctx),
         )
 
-    linear_forward_with_scratch(ctx, block.mlp.down, scratch.prod_h, scratch.mlp_out, scratch.lin_x_bf16, b)
+    # down: K=T3_INTER, N=T3_D, has_bias=False
+    linear_forward_bf16_shape[T3_INTER, T3_D, False](
+        ctx, block.mlp.down, scratch.prod_h, scratch.mlp_out, scratch.lin_x_bf16, b,
+    )
     residual_add(ctx, x_buf, scratch.mlp_out, b * D)
 
 
