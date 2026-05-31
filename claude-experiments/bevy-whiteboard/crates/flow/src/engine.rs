@@ -11,6 +11,14 @@ use crate::sim::{EdgeId, Node, NodeId, Packet, Scheduled, Sim, Time};
 use crate::template::EdgeEnd;
 use crate::value::{Bindings, Value, match_pattern};
 
+/// Reserved slot name mirrored onto a compound's port-shim, carrying the
+/// compound's `color` param value. Lets a colour-routing primitive read
+/// a downstream peer's lane colour via `slot_of(neighbour, …)` without
+/// reaching into the peer's inner nodes. Reserved (double-underscore)
+/// so it never collides with a user-authored slot or the
+/// `read_slot_resolved` / `write_slot_resolved` propagation path.
+pub const ROUTE_COLOR_SLOT: &str = "__route_color";
+
 impl Sim {
     /// Run the simulation forward until either `deadline_ns` is reached
     /// or the world becomes quiescent (no fireable rules, no in-flight
@@ -566,11 +574,17 @@ impl Sim {
     /// Walks the target's parent chain looking for any ancestor compound
     /// whose `in_ports` map a port name to `target_id` (directly or
     /// transitively via nested compounds). For each such (ancestor,
-    /// port) pair, checks if `from_nid` has an outbound edge landing on
-    /// that ancestor with a matching `to_port`. Returns the edge id and
-    /// the original target as the delivery node so the engine's normal
+    /// port) pair, checks whether `from_nid` *or any of its ancestor
+    /// compounds* has an outbound edge landing on that ancestor with a
+    /// matching `to_port`. Returns the edge id and the original target
+    /// as the delivery node so the engine's normal
     /// `resolve_in_port_chain` will re-derive the inner leaf at delivery
     /// time.
+    ///
+    /// The emitter-side walk is what lets an inner leaf emit `popping
+    /// to (head(return_path))` and have the engine pick the specific
+    /// outer reverse edge to the right peer compound — instead of
+    /// fanning across every reverse edge with `to out response`.
     fn resolve_via_compound_in_port(
         &self,
         from_nid: NodeId,
@@ -583,16 +597,20 @@ impl Sim {
             if let Some(body) = &p_node.compound {
                 for (port_name, &inner) in &body.in_ports {
                     if inner != depth_target { continue; }
-                    if let Some(eid) = self
-                        .outbound(from_nid)
-                        .iter()
-                        .copied()
-                        .find(|eid| {
-                            let e = &self.edges[eid];
-                            e.to == pid && e.to_port.as_deref() == Some(port_name.as_str())
-                        })
-                    {
-                        return Some((eid, target_id));
+                    let mut f_cur: Option<NodeId> = Some(from_nid);
+                    while let Some(fid) = f_cur {
+                        if let Some(eid) = self
+                            .outbound(fid)
+                            .iter()
+                            .copied()
+                            .find(|eid| {
+                                let e = &self.edges[eid];
+                                e.to == pid && e.to_port.as_deref() == Some(port_name.as_str())
+                            })
+                        {
+                            return Some((eid, target_id));
+                        }
+                        f_cur = self.nodes.get(&fid).and_then(|n| n.parent);
                     }
                 }
                 depth_target = pid;
@@ -904,6 +922,23 @@ impl Sim {
         // `<instance_name>` itself.
         let mut renamed = decl;
         renamed.name = instance_name.to_string();
+        // Resolve the compound's scalar params (overrides ⊕ defaults) so
+        // we can mirror the routing-relevant one onto the port-shim
+        // below — this is what lets a routing primitive read a peer
+        // compound's lane colour (`slot_of(neighbour, ROUTE_COLOR_SLOT)`)
+        // without reaching into the peer's inner nodes.
+        //
+        // Only `color` is mirrored, and under a RESERVED slot name — NOT
+        // the param's own name. Mirroring every param under its real name
+        // would shadow the inner nodes in `read_slot_resolved` /
+        // `write_slot_resolved` (which check the shim's own slots first),
+        // silently breaking `set_slot(shim, "period_ns", …)` propagation.
+        let route_color = crate::dsl::expand::resolve_compound_param_values(&renamed, overrides)
+            .get("color")
+            .and_then(|v| match v {
+                crate::dsl::expand::CtValue::Int(n) => Some(*n),
+                _ => None,
+            });
         let file = crate::dsl::ast::File {
             items: vec![crate::dsl::ast::Item::Compound(renamed)],
         };
@@ -919,6 +954,16 @@ impl Sim {
             "instantiate_compound `{}` as `{}`: expansion succeeded but port-shim node not found",
             class_name, instance_name
         ))?;
+        // Mirror the compound's lane colour onto the shim under the
+        // reserved routing slot. The shim runs no rules; this exists only
+        // so a routing neighbour can read it (a colour router selecting
+        // the downstream whose lane colour matches a packet). Reserved
+        // name keeps it out of the user-facing slot namespace.
+        if let Some(c) = route_color {
+            if let Some(node) = self.nodes.get_mut(&shim) {
+                node.slots.insert(ROUTE_COLOR_SLOT.to_string(), Value::Int(c));
+            }
+        }
         // Remember which compound class this shim came from so external
         // code can answer "what kind of gadget is this shim?" without
         // re-deriving from the inner-node prefix scan.
@@ -1123,13 +1168,31 @@ impl Sim {
                         return;
                     }
                 };
-                // Look for an outbound edge first.
-                let outs = self.outbound(from_nid);
-                if let Some(eid) = outs
-                    .iter()
-                    .copied()
-                    .find(|eid| self.edges[eid].to == target_id)
-                {
+                // Look for an outbound edge first — walk the emitter's
+                // ancestor chain so an inner leaf can reach a target
+                // via an edge attached to its enclosing compound shim
+                // (e.g. `WorkerComposite.response -> Caller`). This
+                // mirrors what `resolve_via_compound_in_port` does for
+                // compound *targets* — needed too when the target is
+                // a monolithic node.
+                let direct_match = {
+                    let mut found = None;
+                    let mut f_cur: Option<NodeId> = Some(from_nid);
+                    while let Some(fid) = f_cur {
+                        if let Some(eid) = self
+                            .outbound(fid)
+                            .iter()
+                            .copied()
+                            .find(|eid| self.edges[eid].to == target_id)
+                        {
+                            found = Some(eid);
+                            break;
+                        }
+                        f_cur = self.nodes.get(&fid).and_then(|n| n.parent);
+                    }
+                    found
+                };
+                if let Some(eid) = direct_match {
                     (eid, self.edges[&eid].to)
                 } else if let Some(eid) = self
                     .outbound(target_id)
@@ -1279,6 +1342,66 @@ impl Sim {
                     if let Some(e) = self.edges.get_mut(&eid) {
                         e.last_sent_seq = Some(seq);
                     }
+                }
+                return;
+            }
+            EmitTo::ToOutPortRotating(port_name) => {
+                // Round-robin boundary dispatch: emit to the ONE output
+                // edge used longest ago, then mark it used. The rotation
+                // state is the edges' own `last_sent_seq` (graph state) —
+                // no counter. Successive packets walk the wired
+                // destinations in turn.
+                let Some(compound_nid) = self.find_enclosing_compound_for_out_port(from_nid, &port_name) else {
+                    self.record_error(
+                        "emit_bad_port",
+                        Some(from_nid),
+                        Some(rule_name),
+                        format!("ToOutPortRotating(`{}`): no enclosing compound with that out-port mapping", port_name),
+                    );
+                    return;
+                };
+                // Pick the matching-port edge with the smallest
+                // `last_sent_seq` (never-sent = 0 sorts first). Tie-break
+                // on EdgeId for determinism.
+                let chosen = self
+                    .outbound(compound_nid)
+                    .iter()
+                    .copied()
+                    .filter(|eid| self.edges[eid].from_port.as_deref() == Some(port_name.as_str()))
+                    .min_by_key(|eid| (self.edges[eid].last_sent_seq.unwrap_or(0), eid.0));
+                let Some(eid) = chosen else {
+                    // Nothing wired to the port — silent drop.
+                    return;
+                };
+                let edge = self.edges[&eid].clone();
+                let latency = self.eval_latency_expr(&edge.latency_ns, compound_nid, edge.to, bindings, &payload);
+                let arrives_at = self.now_ns.saturating_add(latency);
+                let pid = self.next_packet_id();
+                self.log.push(Event::PacketEmitted {
+                    packet: pid,
+                    from: compound_nid,
+                    to: edge.to,
+                    at_ns: self.now_ns,
+                    arrives_at_ns: arrives_at,
+                    payload: payload.clone(),
+                });
+                self.in_flight.push(Reverse(Scheduled {
+                    arrives_at_ns: arrives_at,
+                    packet: Packet {
+                        id: pid,
+                        payload: payload.clone(),
+                        from_edge: None,
+                        metadata: metadata.clone(),
+                        return_path: return_path.clone(),
+                        emitted_at_ns: self.now_ns,
+                    },
+                    edge: eid,
+                    deliver_to: edge.to,
+                }));
+                let seq = self.next_emit_seq;
+                self.next_emit_seq += 1;
+                if let Some(e) = self.edges.get_mut(&eid) {
+                    e.last_sent_seq = Some(seq);
                 }
                 return;
             }

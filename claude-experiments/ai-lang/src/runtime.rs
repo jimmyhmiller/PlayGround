@@ -28,7 +28,7 @@
 //! time (see `const _ : () = …` blocks) so a layout change breaks
 //! the build rather than silently corrupting at runtime.
 
-use crate::codegen::ShapeMeta;
+use crate::codegen::{FieldMeta, ShapeMeta};
 use crate::gc::{Full, Heap, ObjHeader, ThreadState, TypeInfo};
 use crate::hash::Hash;
 
@@ -77,8 +77,13 @@ pub struct Thread {
     pub boxed_int_ti: *const TypeInfo,
     /// `TypeInfo` for the `String` heap shape. Layout: GC header +
     /// varlen-byte section (count + UTF-8 bytes). Used by string
-    /// literal codegen and by `ai_str_*` runtime fns.
+    /// literal codegen and by `ai_str_*` runtime fns. Also backs the
+    /// `Bytes` shape (identical layout).
     pub string_ti: *const TypeInfo,
+    /// `TypeInfo` for the `Array` heap shape. Layout: GC header +
+    /// varlen-Values section (count + N GC-traced pointer slots). Used
+    /// by `ai_array_*` runtime fns. Elements are uniform boxed pointers.
+    pub array_ti: *const TypeInfo,
 }
 
 pub mod thread_offsets {
@@ -207,6 +212,21 @@ pub mod closure_offsets {
     pub const NON_POINTER_CAPTURES: usize = 40;
 }
 
+/// Canonical content hash for the runtime-managed `BoxedInt` shape.
+///
+/// `BoxedInt` is not user-authored; it's how the uniform closure ABI
+/// represents an `Int` when it has to fit in a generic / TypeVar slot.
+/// To ship a BoxedInt across the wire we need it registered as a real
+/// shape — which means it needs a stable, content-addressable hash.
+///
+/// We synthesize one by Blake3-hashing a fixed sentinel string. Two
+/// runtimes built from any sources agree on this hash, and a real
+/// user-authored def can't collide with it (Blake3 of our sentinel is
+/// vanishingly unlikely to match Blake3 of any canonical AST encoding).
+pub fn boxed_int_shape_hash() -> Hash {
+    Hash::of_bytes(b"<runtime:BoxedInt>")
+}
+
 const _: () = {
     assert!(core::mem::offset_of!(ClosureRaw, code_hash) == closure_offsets::CODE_HASH);
     assert!(core::mem::offset_of!(ClosureRaw, n_captures) == closure_offsets::N_CAPTURES);
@@ -223,6 +243,14 @@ const _: () = {
 /// Thread-safe so multiple threads (future) can call closures concurrently.
 pub struct CodeTable {
     table: Mutex<HashMap<Hash, *const u8>>,
+    /// type_id → shape hash for closure shapes. Populated when
+    /// closure shapes are registered; consulted by indirect-call
+    /// lookups (`ai_gc_lookup_code`) which read the type_id from a
+    /// closure's header (a fixed offset) and resolve the actual
+    /// code_hash through this table. Avoids the JIT having to
+    /// compute a variable code_hash offset that depends on the
+    /// closure's pointer-capture count.
+    type_id_to_hash: Mutex<Vec<Option<Hash>>>,
 }
 
 // The raw `*const u8` is a JIT'd function pointer — process-local but
@@ -234,6 +262,7 @@ impl CodeTable {
     pub fn new() -> Self {
         CodeTable {
             table: Mutex::new(HashMap::new()),
+            type_id_to_hash: Mutex::new(Vec::new()),
         }
     }
 
@@ -243,6 +272,22 @@ impl CodeTable {
 
     pub fn lookup(&self, hash: &Hash) -> Option<*const u8> {
         self.table.lock().unwrap().get(hash).copied()
+    }
+
+    /// Record that closure shapes with `type_id` correspond to the
+    /// given content hash. Idempotent — overwrites if called again
+    /// for the same id.
+    pub fn register_type_id(&self, type_id: u16, hash: Hash) {
+        let mut tab = self.type_id_to_hash.lock().unwrap();
+        while tab.len() <= type_id as usize {
+            tab.push(None);
+        }
+        tab[type_id as usize] = Some(hash);
+    }
+
+    pub fn shape_hash_for_type_id(&self, type_id: u16) -> Option<Hash> {
+        let tab = self.type_id_to_hash.lock().unwrap();
+        tab.get(type_id as usize).copied().flatten()
     }
 }
 
@@ -339,8 +384,28 @@ pub struct Runtime {
     pub boxed_int_ti: Box<TypeInfo>,
     /// Stable storage for the heap-resident `String` shape's TypeInfo.
     /// Heap layout: header (16 B) + varlen-bytes (8 B count + raw
-    /// UTF-8 bytes).
+    /// UTF-8 bytes). Also backs `Bytes`.
     pub string_ti: Box<TypeInfo>,
+    /// Stable storage for the `Array` shape's TypeInfo. Heap layout:
+    /// header (16 B) + varlen-Values (8 B count + N×8 B pointer slots).
+    pub array_ti: Box<TypeInfo>,
+
+    /// Server-side memoization cache: `blake3(call_payload) → reply
+    /// frame body`. The key covers the closure's code hash AND its
+    /// captures (the entire encoded Call payload), so two calls with
+    /// the same code and the same captures hit the cache.
+    ///
+    /// This is the headline property of content-addressed
+    /// distributed computing — repeated work is free without any
+    /// language-level memoization annotation, because identical code
+    /// + identical inputs deterministically produce identical hashes.
+    ///
+    /// `cache_hits` / `cache_misses` count consults via
+    /// `try_cached_result` / `store_cached_result` so tests can
+    /// verify the cache is doing its job.
+    pub result_cache: Arc<Mutex<HashMap<Hash, Vec<u8>>>>,
+    pub cache_hits: Arc<std::sync::atomic::AtomicUsize>,
+    pub cache_misses: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Runtime {
@@ -369,9 +434,9 @@ impl Runtime {
     /// needs in order to walk heap values.
     pub fn new_with_metadata(
         closure_types: Vec<TypeInfo>,
-        shape_registry: HashMap<Hash, u16>,
-        shape_meta: HashMap<Hash, ShapeMeta>,
-        shape_by_type_id: Vec<Option<Hash>>,
+        mut shape_registry: HashMap<Hash, u16>,
+        mut shape_meta: HashMap<Hash, ShapeMeta>,
+        mut shape_by_type_id: Vec<Option<Hash>>,
     ) -> Self {
         // Reserve distinct type_ids for runtime-managed shapes at the
         // END of the closure-types table so they don't collide with
@@ -379,8 +444,13 @@ impl Runtime {
         //
         // BoxedInt: 0 value fields, 8 raw bytes (one i64).
         // String:   0 value fields, 0 raw bytes, varlen-bytes section.
+        // Array:    0 fixed fields, varlen-Values section (pointer slots).
+        // These three are the RUNTIME_RESERVED_SHAPES; the count MUST
+        // match `RUNTIME_RESERVED_SHAPES` in IncrementalJit so dynamic
+        // installs append after this block.
         let boxed_int_type_id = closure_types.len() as u16;
         let string_type_id = boxed_int_type_id + 1;
+        let array_type_id = string_type_id + 1;
         let boxed_int = TypeInfo::for_header(crate::gc::Full::SIZE as usize)
             .with_type_id(boxed_int_type_id)
             .with_fields(0)
@@ -389,10 +459,39 @@ impl Runtime {
             .with_type_id(string_type_id)
             .with_fields(0)
             .with_varlen_bytes(0);
+        let array_ti_val = TypeInfo::for_header(crate::gc::Full::SIZE as usize)
+            .with_type_id(array_type_id)
+            .with_varlen_values(0);
+
+        // Register BoxedInt as a synthetic wire shape so the wire
+        // encoder/decoder can ship pointers to BoxedInt across nodes.
+        // This is what makes `at(node, || some_int_returning_thunk())`
+        // work under the "always ship as heap" return path: the
+        // closure's lambda boxes its Int return into a BoxedInt
+        // (uniform ABI), we ship the BoxedInt pointer, the receiver
+        // decodes into a fresh BoxedInt on its own heap, and the
+        // user's `Ok(v)` match arm unboxes back to Int.
+        let bi_hash = boxed_int_shape_hash();
+        shape_registry.insert(bi_hash, boxed_int_type_id);
+        while shape_by_type_id.len() <= array_type_id as usize {
+            shape_by_type_id.push(None);
+        }
+        shape_by_type_id[boxed_int_type_id as usize] = Some(bi_hash);
+        shape_meta.insert(
+            bi_hash,
+            ShapeMeta::Struct {
+                struct_ref: bi_hash,
+                fields: vec![FieldMeta {
+                    offset: crate::gc::Full::SIZE as u32,
+                    is_pointer: false,
+                }],
+            },
+        );
 
         let mut all_types = closure_types.clone();
         all_types.push(boxed_int);
         all_types.push(string_ti_val);
+        all_types.push(array_ti_val);
 
         // Boxed copies for stable addresses (used by the deserializer
         // when it needs to pass a `*const TypeInfo` to `ai_gc_alloc_closure`).
@@ -403,8 +502,10 @@ impl Runtime {
             closure_types.iter().map(|t| Box::new(*t)).collect();
         let boxed_int_ti_box: Box<TypeInfo> = Box::new(boxed_int);
         let string_ti_box: Box<TypeInfo> = Box::new(string_ti_val);
+        let array_ti_box: Box<TypeInfo> = Box::new(array_ti_val);
         type_infos.push(Box::new(boxed_int));
         type_infos.push(Box::new(string_ti_val));
+        type_infos.push(Box::new(array_ti_val));
 
         // 32 MiB semi-space — plenty for tests, easily reconfigurable later.
         let heap = Arc::new(Heap::new::<Full>(32 * 1024 * 1024, all_types));
@@ -412,6 +513,16 @@ impl Runtime {
 
         let (dyna_thread, _id) = heap.register_thread();
         let code_table = Box::new(CodeTable::new());
+
+        // Mirror shape_by_type_id into the code table so
+        // `ai_gc_lookup_code` can resolve a closure's code_hash from
+        // its header type_id without traversing the closure body
+        // (whose code_hash sits at a variable offset).
+        for (type_id, hash_opt) in shape_by_type_id.iter().enumerate() {
+            if let Some(hash) = hash_opt {
+                code_table.register_type_id(type_id as u16, *hash);
+            }
+        }
 
         let mut thread = Box::new(Thread {
             state: 0,
@@ -422,6 +533,7 @@ impl Runtime {
             dyna_thread: &*dyna_thread,
             boxed_int_ti: &*boxed_int_ti_box,
             string_ti: &*string_ti_box,
+            array_ti: &*array_ti_box,
         });
 
         let _ = &mut *thread;
@@ -437,7 +549,32 @@ impl Runtime {
             shape_by_type_id,
             boxed_int_ti: boxed_int_ti_box,
             string_ti: string_ti_box,
+            array_ti: array_ti_box,
+            result_cache: Arc::new(Mutex::new(HashMap::new())),
+            cache_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            cache_misses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
+    }
+
+    /// Look up a cached result frame by the call-payload hash.
+    /// Increments `cache_hits` on hit, `cache_misses` on miss.
+    pub fn try_cached_result(&self, key: &Hash) -> Option<Vec<u8>> {
+        let guard = self.result_cache.lock().expect("result cache poisoned");
+        if let Some(bytes) = guard.get(key) {
+            self.cache_hits
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Some(bytes.clone())
+        } else {
+            self.cache_misses
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            None
+        }
+    }
+
+    /// Store a reply frame in the cache under the given key.
+    pub fn store_cached_result(&self, key: Hash, reply: Vec<u8>) {
+        let mut guard = self.result_cache.lock().expect("result cache poisoned");
+        guard.insert(key, reply);
     }
 
     /// Look up a `TypeInfo` by content hash. Returns a stable pointer
@@ -521,24 +658,43 @@ pub unsafe extern "C" fn ai_gc_alloc_closure(
 /// # Safety
 ///
 /// `thread` must be a valid `Thread*`. `hash_ptr` must point to a
-/// 32-byte hash. Panics if the hash isn't in the table — that means
-/// a closure references code that wasn't JIT'd, which is a bug.
+/// Resolve a closure's JIT'd entry point given the closure pointer.
+///
+/// Reads the `type_id` from the closure's GC header, looks up the
+/// shape hash via the thread's heap (which is also the closure's
+/// code_hash because closure shapes are content-addressed), then
+/// looks up the fn pointer in the code table.
+///
+/// Indirect calls invoke this rather than computing `closure + 16`
+/// directly: with Phase 1B pointer captures, the closure's
+/// code_hash sits at a variable offset (`Full::SIZE + ptr_count * 8`)
+/// that the JIT call site can't compute statically. type_id-based
+/// resolution sidesteps the offset entirely.
+///
+/// Panics if the closure's type_id isn't a registered shape or
+/// if the resulting hash has no code table entry.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ai_gc_lookup_code(
     thread: *mut Thread,
-    hash_ptr: *const u8,
+    closure_ptr: *const u8,
 ) -> *const u8 {
     unsafe {
         let t = &*thread;
         let table = &*t.code_table;
-        let mut h = [0u8; Hash::SIZE];
-        core::ptr::copy_nonoverlapping(hash_ptr, h.as_mut_ptr(), Hash::SIZE);
-        let hash = Hash(h);
+        // type_id at the GC header's TYPE_ID_OFFSET.
+        let type_id_off = <Full as crate::gc::ObjHeader>::TYPE_ID_OFFSET;
+        let type_id = *(closure_ptr.add(type_id_off) as *const u16);
+        let hash = table.shape_hash_for_type_id(type_id).unwrap_or_else(|| {
+            panic!(
+                "ai_gc_lookup_code: type_id {} not registered as a shape",
+                type_id
+            )
+        });
         match table.lookup(&hash) {
             Some(p) => p,
             None => panic!(
-                "ai_gc_lookup_code: hash {} not registered in code table",
-                hash
+                "ai_gc_lookup_code: hash {} (type_id {}) not registered in code table",
+                hash, type_id
             ),
         }
     }
@@ -591,6 +747,33 @@ pub unsafe extern "C" fn ai_gc_unbox_int(ptr: *const u8) -> i64 {
         let value_slot = ptr.add(<Full as crate::gc::ObjHeader>::SIZE) as *const i64;
         *value_slot
     }
+}
+
+/// Print a panic message to stderr and abort the process.
+///
+/// `msg` is a heap `String` pointer (the same shape `ai_str_new`
+/// produces). This is the single hard-error path for the language:
+/// the user-visible `panic("...")` builtin lowers to it, and codegen
+/// fallthroughs that were previously `build_unreachable` (undefined
+/// behaviour — e.g. a non-exhaustive match hitting an unhandled
+/// variant at runtime) now call it instead so the failure is a clear
+/// message rather than silent corruption.
+///
+/// Never returns: aborts via `std::process::abort()` so the process
+/// dies with a recognizable signal rather than unwinding through
+/// JIT'd frames the Rust runtime can't unwind.
+///
+/// # Safety
+/// `msg` must be null or a valid heap `String` pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_panic(_thread: *mut Thread, msg: *const u8) -> ! {
+    let text = if msg.is_null() {
+        "(no message)".to_owned()
+    } else {
+        unsafe { crate::ffi::heap_str_to_owned(msg) }
+    };
+    eprintln!("ai-lang panic: {}", text);
+    std::process::abort();
 }
 
 /// Allocate a heap String containing the bytes at `[src..src+len]`.
@@ -723,6 +906,241 @@ pub unsafe extern "C" fn ai_str_concat(
             );
         }
         ptr
+    }
+}
+
+// =============================================================================
+// Bytes runtime functions
+//
+// `Bytes` is a mutable, indexable byte buffer. It reuses the heap-resident
+// `String` shape (`Runtime.string_ti`): GC header + varlen-byte section
+// (8-byte count + raw payload). The two are byte-identical in memory; the
+// distinction is purely at the type level (the typechecker keeps `String`
+// and `Bytes` separate). Because the payload is raw bytes (no pointers),
+// in-place mutation needs no write barrier.
+// =============================================================================
+
+/// Offset of the varlen payload (raw bytes) within a String/Bytes object:
+/// past the GC header and the 8-byte varlen count word.
+#[inline]
+fn varlen_payload_offset() -> usize {
+    <Full as crate::gc::ObjHeader>::SIZE + 8
+}
+
+/// Allocate a zero-filled `Bytes` of `len` bytes.
+///
+/// # Safety
+/// `thread` must have `string_ti` initialised (it is, by
+/// `Runtime::new_with_metadata`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_bytes_new(thread: *mut Thread, len: i64) -> *mut u8 {
+    if len < 0 {
+        panic!("ai_bytes_new: negative length {}", len);
+    }
+    unsafe {
+        let t = &*thread;
+        let ti = t.string_ti;
+        if ti.is_null() {
+            panic!("ai_bytes_new: thread.string_ti is null");
+        }
+        let heap = &*t.heap;
+        let dyna = &*t.dyna_thread;
+        let varlen = len as usize;
+        dyna.set_parked_jit_fp(t.top_frame as *const u8);
+        let mut ptr = heap.alloc_obj::<Full>(&*ti, varlen);
+        if ptr.is_null() {
+            heap.collect::<crate::gc::IdentityPtrPolicy>(&[]);
+            ptr = heap.alloc_obj::<Full>(&*ti, varlen);
+            if ptr.is_null() {
+                dyna.clear_parked_jit_fp();
+                panic!("ai_bytes_new: heap exhausted after GC");
+            }
+        }
+        dyna.clear_parked_jit_fp();
+        // alloc_obj initialises the varlen count word; zero the payload
+        // so a fresh buffer reads back as all-zero bytes.
+        if varlen > 0 {
+            let payload = ptr.add(varlen_payload_offset());
+            core::ptr::write_bytes(payload, 0u8, varlen);
+        }
+        ptr
+    }
+}
+
+/// Length (in bytes) of a `Bytes`. Identical layout to `String`, so this
+/// reads the same varlen count word as `ai_str_len`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_bytes_len(b: *const u8) -> i64 {
+    unsafe { ai_str_len(b) }
+}
+
+/// Read the byte at index `i` (0..len), returned as an `Int` in 0..=255.
+/// Panics on out-of-bounds access — a clear hard error beats silent UB.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_bytes_get(b: *const u8, i: i64) -> i64 {
+    unsafe {
+        let len = ai_str_len(b);
+        if i < 0 || i >= len {
+            panic!("ai_bytes_get: index {} out of bounds (len {})", i, len);
+        }
+        let payload = b.add(varlen_payload_offset());
+        *payload.add(i as usize) as i64
+    }
+}
+
+/// Write the low 8 bits of `v` to index `i` (0..len). Returns 0.
+/// Panics on out-of-bounds access.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_bytes_set(b: *mut u8, i: i64, v: i64) -> i64 {
+    unsafe {
+        let len = ai_str_len(b);
+        if i < 0 || i >= len {
+            panic!("ai_bytes_set: index {} out of bounds (len {})", i, len);
+        }
+        let payload = b.add(varlen_payload_offset());
+        *payload.add(i as usize) = (v & 0xff) as u8;
+        0
+    }
+}
+
+/// Allocate a fresh `Bytes` containing `[start..start+len]` of `src`.
+/// Panics if the requested range is out of bounds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_bytes_slice(
+    thread: *mut Thread,
+    src: *const u8,
+    start: i64,
+    len: i64,
+) -> *mut u8 {
+    unsafe {
+        let src_len = ai_str_len(src);
+        if start < 0 || len < 0 || start + len > src_len {
+            panic!(
+                "ai_bytes_slice: range [{}, {}) out of bounds (len {})",
+                start,
+                start + len,
+                src_len
+            );
+        }
+        let src_payload = src.add(varlen_payload_offset() + start as usize);
+        // ai_str_new allocates a varlen-bytes object and copies `len`
+        // bytes from `src_payload` — exactly the slice we want.
+        ai_str_new(thread, src_payload, len)
+    }
+}
+
+/// Copy a `String`/`Bytes` into a fresh varlen-bytes object. Backs both
+/// `bytes_from_string` and `string_from_bytes`: the representations are
+/// identical, so the conversion is a defensive copy that gives the result
+/// independent mutation semantics from the source.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_bytes_copy(thread: *mut Thread, src: *const u8) -> *mut u8 {
+    unsafe {
+        let len = ai_str_len(src);
+        let src_payload = src.add(varlen_payload_offset());
+        ai_str_new(thread, src_payload, len)
+    }
+}
+
+// =============================================================================
+// Array runtime functions
+//
+// `Array<T>` is a fixed-size, O(1)-indexable vector of GC-traced pointer
+// slots (heap shape `Runtime.array_ti`, VarLenKind::Values). Elements use
+// the uniform boxed representation: an element of type Int is a BoxedInt
+// pointer (boxed/unboxed at the call site by codegen); any other element
+// is a real heap pointer. The GC scanner walks every slot as a pointer, so
+// `array_new` MUST zero-fill (IdentityPtrPolicy treats 0 as null/skip).
+//
+// No write barrier is needed: the collector is a single-space copying GC,
+// so every collection traces all live objects from roots — storing a
+// pointer into an existing array slot can't hide it from the next trace.
+// =============================================================================
+
+/// Offset of varlen Values element `i` (a pointer slot) in an Array:
+/// past the GC header and the 8-byte count word, 8 bytes per element.
+#[inline]
+fn array_element_offset(i: usize) -> usize {
+    <Full as crate::gc::ObjHeader>::SIZE + 8 + i * 8
+}
+
+/// Allocate a fixed-size `Array` of `n` null (zero) pointer slots.
+///
+/// # Safety
+/// `thread` must have `array_ti` initialised (it is, by
+/// `Runtime::new_with_metadata`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_array_new(thread: *mut Thread, n: i64) -> *mut u8 {
+    if n < 0 {
+        panic!("ai_array_new: negative length {}", n);
+    }
+    unsafe {
+        let t = &*thread;
+        let ti = t.array_ti;
+        if ti.is_null() {
+            panic!("ai_array_new: thread.array_ti is null");
+        }
+        let heap = &*t.heap;
+        let dyna = &*t.dyna_thread;
+        let count = n as usize;
+        dyna.set_parked_jit_fp(t.top_frame as *const u8);
+        let mut ptr = heap.alloc_obj::<Full>(&*ti, count);
+        if ptr.is_null() {
+            heap.collect::<crate::gc::IdentityPtrPolicy>(&[]);
+            ptr = heap.alloc_obj::<Full>(&*ti, count);
+            if ptr.is_null() {
+                dyna.clear_parked_jit_fp();
+                panic!("ai_array_new: heap exhausted after GC");
+            }
+        }
+        dyna.clear_parked_jit_fp();
+        // alloc_obj writes the varlen count word; zero the element slots
+        // so the GC sees null (skipped) until the user stores pointers.
+        if count > 0 {
+            let base = ptr.add(array_element_offset(0));
+            core::ptr::write_bytes(base, 0u8, count * 8);
+        }
+        ptr
+    }
+}
+
+/// Number of slots in an `Array`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_array_len(a: *const u8) -> i64 {
+    if a.is_null() {
+        return 0;
+    }
+    unsafe {
+        let count_off = <Full as crate::gc::ObjHeader>::SIZE;
+        *(a.add(count_off) as *const u64) as i64
+    }
+}
+
+/// Load the pointer in slot `i` (0..len). Panics on out-of-bounds.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_array_get(a: *const u8, i: i64) -> *mut u8 {
+    unsafe {
+        let len = ai_array_len(a);
+        if i < 0 || i >= len {
+            panic!("ai_array_get: index {} out of bounds (len {})", i, len);
+        }
+        let slot = a.add(array_element_offset(i as usize)) as *const *mut u8;
+        *slot
+    }
+}
+
+/// Store pointer `p` into slot `i` (0..len). Returns 0. Panics on
+/// out-of-bounds. No write barrier (single-space copying GC).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_array_set(a: *mut u8, i: i64, p: *mut u8) -> i64 {
+    unsafe {
+        let len = ai_array_len(a);
+        if i < 0 || i >= len {
+            panic!("ai_array_set: index {} out of bounds (len {})", i, len);
+        }
+        let slot = a.add(array_element_offset(i as usize)) as *mut *mut u8;
+        *slot = p;
+        0
     }
 }
 

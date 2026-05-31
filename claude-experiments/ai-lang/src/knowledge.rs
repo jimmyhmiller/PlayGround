@@ -32,7 +32,7 @@ use crate::ast::{Def, Expr, Pattern, Type};
 use crate::codec::{decode_def, decode_expr, encode_def, encode_expr};
 use crate::hash::Hash;
 use crate::net::ItemKind;
-use crate::resolve::ResolvedModule;
+use crate::resolve::{ExternSig, ResolvedModule};
 
 #[derive(Debug)]
 pub enum KbError {
@@ -62,13 +62,24 @@ impl std::error::Error for KbError {}
 /// Maps a content hash to `(item_kind, canonical_bytes)`.
 pub struct KnowledgeBase {
     items: HashMap<Hash, (ItemKind, Vec<u8>)>,
+    /// Extern signatures by surface name (e.g. `curl_easy_init`).
+    /// Externs aren't content-addressed; this lets the shipping side
+    /// attach the "requires symbol X from library Y" requirement to any
+    /// shipped code that calls an extern.
+    externs: HashMap<String, ExternSig>,
 }
 
 impl KnowledgeBase {
     pub fn new() -> Self {
         KnowledgeBase {
             items: HashMap::new(),
+            externs: HashMap::new(),
         }
+    }
+
+    /// The extern signature registered under `name`, if any.
+    pub fn extern_sig(&self, name: &str) -> Option<&ExternSig> {
+        self.externs.get(name)
     }
 
     /// Build a KB from a resolved module. Stores every def + every
@@ -95,11 +106,51 @@ impl KnowledgeBase {
                 walk_collect_lambdas(body, &mut kb);
             }
         }
+        // Remember every extern signature so shipped code that calls one
+        // can carry the requirement to the receiving node.
+        for (name, sig) in &rm.externs {
+            kb.externs.insert(name.clone(), sig.clone());
+        }
         kb
     }
 
     pub fn lookup(&self, hash: &Hash) -> Option<&(ItemKind, Vec<u8>)> {
         self.items.get(hash)
+    }
+
+    /// For the code items identified by `hashes`, collect the extern
+    /// requirements (name + signature) their bodies reference. The
+    /// shipping side attaches these as `ItemKind::Extern` items so the
+    /// receiver can declare and resolve each symbol. A referenced extern
+    /// with no registered signature is silently skipped (the receiver
+    /// will then fail clearly at "extern not declared in module").
+    pub fn extern_requirements(&self, hashes: &[Hash]) -> Vec<(String, ExternSig)> {
+        let mut names: HashSet<String> = HashSet::new();
+        for h in hashes {
+            let Some((kind, bytes)) = self.items.get(h) else {
+                continue;
+            };
+            match kind {
+                ItemKind::Def => {
+                    if let Ok(Def::Fn { body, .. }) = decode_def(bytes) {
+                        collect_ext_names(&body, &mut names);
+                    }
+                }
+                ItemKind::Lambda => {
+                    if let Ok(Expr::Lambda { body, .. }) = decode_expr(bytes) {
+                        collect_ext_names(&body, &mut names);
+                    }
+                }
+                ItemKind::Extern => {}
+            }
+        }
+        let mut out: Vec<(String, ExternSig)> = Vec::new();
+        for name in names {
+            if let Some(sig) = self.externs.get(&name) {
+                out.push((name, sig.clone()));
+            }
+        }
+        out
     }
 
     /// Iterate all (hash, kind, bytes) tuples. Used by demos / tests
@@ -202,6 +253,11 @@ impl KnowledgeBase {
                     }
                 }
             }
+            // Externs live in `self.externs`, never in `self.items`, so a
+            // hash keyed to one is never passed here. C-FFI extern
+            // signatures use only builtin scalar types (no hash deps)
+            // regardless.
+            ItemKind::Extern => {}
         }
         Ok(out)
     }
@@ -272,13 +328,80 @@ fn walk_collect_lambdas(e: &Expr, kb: &mut KnowledgeBase) {
             walk_collect_lambdas(then_branch, kb);
             walk_collect_lambdas(else_branch, kb);
         }
+        Expr::Try { expr, .. } => walk_collect_lambdas(expr, kb),
+        Expr::Defer { cleanup, body } => {
+            walk_collect_lambdas(cleanup, kb);
+            walk_collect_lambdas(body, kb);
+        }
         Expr::IntLit(_)
+        | Expr::FloatLit(_)
         | Expr::BoolLit(_)
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
         | Expr::BuiltinRef(_) => {}
+    }
+}
+
+/// Collect the bare names of every extern (`BuiltinRef("ext/<name>")`)
+/// referenced by `e`. Used to attach extern requirements to shipped code.
+fn collect_ext_names(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::BuiltinRef(name) => {
+            if let Some(ext) = name.strip_prefix("ext/") {
+                out.insert(ext.to_owned());
+            }
+        }
+        Expr::Lambda { body, .. } => collect_ext_names(body, out),
+        Expr::Call(callee, args) => {
+            collect_ext_names(callee, out);
+            for a in args {
+                collect_ext_names(a, out);
+            }
+        }
+        Expr::Let { value, body } => {
+            collect_ext_names(value, out);
+            collect_ext_names(body, out);
+        }
+        Expr::Defer { cleanup, body } => {
+            collect_ext_names(cleanup, out);
+            collect_ext_names(body, out);
+        }
+        Expr::StructNew { fields, .. } => {
+            for f in fields {
+                collect_ext_names(f, out);
+            }
+        }
+        Expr::Field { base, .. } => collect_ext_names(base, out),
+        Expr::EnumNew { payload, .. } => {
+            if let Some(p) = payload {
+                collect_ext_names(p, out);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            collect_ext_names(scrutinee, out);
+            for arm in arms {
+                collect_ext_names(&arm.body, out);
+            }
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_ext_names(cond, out);
+            collect_ext_names(then_branch, out);
+            collect_ext_names(else_branch, out);
+        }
+        Expr::Try { expr, .. } => collect_ext_names(expr, out),
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_)
+        | Expr::LocalVar(_)
+        | Expr::TopRef(_)
+        | Expr::SelfRef(_) => {}
     }
 }
 
@@ -292,7 +415,16 @@ fn record(h: Hash, out: &mut Vec<Hash>, seen: &mut HashSet<Hash>) {
     }
 }
 
-fn walk_def_deps(d: &Def, out: &mut Vec<Hash>, seen: &mut HashSet<Hash>) {
+/// Walk a `Def` collecting every content hash it references —
+/// TopRef call targets, TypeRef bases of struct/enum/Apply types,
+/// `struct_ref`/`enum_ref` constructor + accessor + pattern hashes.
+/// Each hash is appended to `out` at most once (deduped via `seen`).
+///
+/// Used by the runner to compute the transitive closure of a root
+/// def from a codebase, so we only load defs that are actually
+/// reachable from the entry point (avoids loading stale named
+/// versions that happen to share a name with the root's deps).
+pub fn walk_def_deps(d: &Def, out: &mut Vec<Hash>, seen: &mut HashSet<Hash>) {
     match d {
         Def::Fn {
             params, ret, body, ..
@@ -340,6 +472,7 @@ fn walk_type_deps(t: &Type, out: &mut Vec<Hash>, seen: &mut HashSet<Hash>) {
 fn walk_expr_deps(e: &Expr, out: &mut Vec<Hash>, seen: &mut HashSet<Hash>) {
     match e {
         Expr::IntLit(_)
+        | Expr::FloatLit(_)
         | Expr::BoolLit(_)
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
@@ -407,6 +540,14 @@ fn walk_expr_deps(e: &Expr, out: &mut Vec<Hash>, seen: &mut HashSet<Hash>) {
             walk_expr_deps(then_branch, out, seen);
             walk_expr_deps(else_branch, out, seen);
         }
+        Expr::Try { expr, enum_ref, .. } => {
+            record(*enum_ref, out, seen);
+            walk_expr_deps(expr, out, seen);
+        }
+        Expr::Defer { cleanup, body } => {
+            walk_expr_deps(cleanup, out, seen);
+            walk_expr_deps(body, out, seen);
+        }
     }
 }
 
@@ -472,6 +613,7 @@ mod tests {
             match k {
                 ItemKind::Def => def_count += 1,
                 ItemKind::Lambda => lambda_count += 1,
+                ItemKind::Extern => {}
             }
         }
         assert_eq!(def_count, 1);

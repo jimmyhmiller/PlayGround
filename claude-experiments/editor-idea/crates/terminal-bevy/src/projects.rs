@@ -976,12 +976,12 @@ fn sidebar_layout(
 
 /// Tracks click state for double-click detection on project rows.
 #[derive(Resource, Default)]
-struct ClickTracker {
+pub struct ClickTracker {
     last_project: Option<u64>,
     last_time: f64,
 }
 
-fn sidebar_input(
+pub fn sidebar_input(
     windows: Query<&Window>,
     buttons: Res<ButtonInput<MouseButton>>,
     consumed: Res<InputConsumed>,
@@ -1278,25 +1278,10 @@ fn restore_pane(world: &mut World, snap: PaneSnapshot) {
     }
     let kind_static = kind_to_static(&snap.kind);
     let display = kind_display_name(world, &snap.kind);
-    // Saved pos/size is canvas-space. Project through this project's
-    // CanvasView so the freshly-spawned pane gets a screen-space
-    // PaneRect that matches its visible-on-screen position. Inserting
-    // CanvasPos explicitly skips `init_canvas_pos_for_new_panes`'s
-    // unproject path (which would otherwise treat PaneRect.pos as
-    // screen-space and double-transform).
-    let canvas_pos = Vec2::new(snap.pos[0], snap.pos[1]);
-    let canvas_size = Vec2::new(snap.size[0], snap.size[1]);
-    let view_state = snap
-        .project_id
-        .map(|p| world.resource::<crate::canvas::CanvasView>().state_for(p))
-        .unwrap_or_default();
-    let sidebar_width = world.resource::<Sidebar>().width;
-    let origin = Vec2::new(sidebar_width, 0.0);
-    let screen_pos = (canvas_pos - view_state.pan) * view_state.zoom + origin;
-    let screen_size = canvas_size * view_state.zoom;
+    // PaneRect is canvas-space now — restore directly from the snapshot.
     let rect = PaneRect {
-        pos: screen_pos,
-        size: screen_size,
+        pos: Vec2::new(snap.pos[0], snap.pos[1]),
+        size: Vec2::new(snap.size[0], snap.size[1]),
         z: snap.z,
     };
     let entity = spawn_pane_from_registry(
@@ -1308,14 +1293,7 @@ fn restore_pane(world: &mut World, snap: PaneSnapshot) {
         &snap.config,
     );
     if let Some(e) = entity {
-        world.entity_mut(e).insert(crate::canvas::CanvasPos {
-            pos: canvas_pos,
-            size: canvas_size,
-        });
         // Reapply the pin marker if this pane was pinned at save time.
-        // We don't go through PendingPaneActions.pin here because the z
-        // already round-trips through the snapshot — touching it again
-        // would clobber any pin-time z the user wants preserved.
         if snap.pinned {
             world.entity_mut(e).insert(PanePinned);
         }
@@ -1327,7 +1305,7 @@ fn restore_pane(world: &mut World, snap: PaneSnapshot) {
 /// pane-bevy a static slice). Falls back to leaking the input if the
 /// kind isn't registered, so the spawn-from-registry call still finds
 /// it stored on the entity for diagnostics.
-fn kind_to_static(kind: &str) -> &'static str {
+pub(crate) fn kind_to_static(kind: &str) -> &'static str {
     match kind {
         "terminal" => "terminal",
         "editor" => "editor",
@@ -1370,6 +1348,30 @@ pub fn resolve_project(target: &OpenProjectTarget, projects: &Projects) -> Optio
             .find(|p| p.name.eq_ignore_ascii_case(name))
             .map(|p| p.id),
     }
+}
+
+/// Map a working directory to the project that owns it: the project
+/// whose `default_cwd` is `cwd` or a parent of it. When several match
+/// (nested roots), the longest `default_cwd` wins. `None` if no project
+/// has a `default_cwd` that contains `cwd` — callers treat that as
+/// "unscoped / global". Mirrors the "this project = cwd's project" rule.
+pub fn project_for_cwd(cwd: &std::path::Path, projects: &Projects) -> Option<u64> {
+    let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    let mut best: Option<(usize, u64)> = None;
+    for p in &projects.list {
+        let Some(dc) = p.default_cwd.as_deref() else {
+            continue;
+        };
+        let root = std::path::Path::new(dc);
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        if cwd.starts_with(&root) {
+            let depth = root.components().count();
+            if best.map_or(true, |(d, _)| depth > d) {
+                best = Some((depth, p.id));
+            }
+        }
+    }
+    best.map(|(_, id)| id)
 }
 
 // ---------- Visibility sync ----------
@@ -1644,44 +1646,33 @@ fn save_if_dirty(
 }
 
 /// Walk every PaneTag entity, ask the registered kind for a snapshot,
-/// and bundle them into a Vec<PaneSnapshot>.
-///
-/// Pos/size are written in **canvas-space** (from `CanvasPos`) so they
-/// survive the next session's pan/zoom unchanged. Panes that haven't
-/// been initialized with `CanvasPos` yet (just spawned this frame) fall
-/// back to their screen-space `PaneRect` — at zoom=1, pan=0 they match.
+/// and bundle them into a Vec<PaneSnapshot>. `PaneRect` is canvas-space
+/// in the new model, so we just write its values directly.
 fn collect_pane_snapshots(world: &mut World) -> Vec<PaneSnapshot> {
-    let entries: Vec<(Entity, String, Option<u64>, PaneRect, Option<crate::canvas::CanvasPos>, bool)> = {
+    let entries: Vec<(Entity, String, Option<u64>, PaneRect, bool)> = {
         let mut q = world.query::<(
             Entity,
             &PaneKindMarker,
             Option<&PaneProject>,
             &PaneRect,
-            Option<&crate::canvas::CanvasPos>,
             Has<PanePinned>,
         )>();
         q.iter(world)
-            .map(|(e, k, p, r, c, pinned)| {
-                (e, k.0.to_string(), p.map(|p| p.0), *r, c.copied(), pinned)
+            .map(|(e, k, p, r, pinned)| {
+                (e, k.0.to_string(), p.map(|p| p.0), *r, pinned)
             })
             .collect()
     };
     let snapshots: Vec<PaneSnapshot> = entries
         .into_iter()
-        .filter_map(|(entity, kind, project_id, rect, canvas, pinned)| {
+        .filter_map(|(entity, kind, project_id, rect, pinned)| {
             let snap_fn = world.resource::<PaneRegistry>().get(&kind).map(|s| s.snapshot)?;
             let config = (snap_fn)(world, entity);
-            // Canvas-space pos/size if we have them; otherwise the
-            // screen-space PaneRect — matches at the default view.
-            let (px, py, sx, sy) = match canvas {
-                Some(c) => (c.pos.x, c.pos.y, c.size.x, c.size.y),
-                None => (rect.pos.x, rect.pos.y, rect.size.x, rect.size.y),
-            };
             Some(PaneSnapshot {
                 kind,
                 project_id,
-                pos: [px, py],
-                size: [sx, sy],
+                pos: [rect.pos.x, rect.pos.y],
+                size: [rect.size.x, rect.size.y],
                 z: rect.z,
                 config,
                 pinned,

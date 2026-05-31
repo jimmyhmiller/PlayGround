@@ -477,14 +477,31 @@ impl<'a> Reader<'a> {
                 Ok(Object::String(Arc::new(body)))
             }
             b'?' => {
-                // Reader-conditional `#?(:default form)` or `#?@(...)`.
-                // Skip the `?@` if present, then read the next form
-                // (a list of cond pairs) and return nil — we don't
-                // model platform-specific code.
+                // Reader-conditional `#?(:platform form ...)` or
+                // `#?@(:platform form ...)` (splicing form).
+                //
+                // We're a JVM-side analyzer, so `:clj` is our active
+                // platform (matching upstream Clojure's reader). The
+                // pairs are scanned in order; the first matching
+                // platform's form is read and returned. `:default`
+                // matches anything. Non-matching pairs are skipped.
+                // If no pair matches, return nil.
+                //
+                // For the splicing variant `#?@(...)` the matching
+                // form must be a sequence; we splice by returning it
+                // wrapped in `(unquote-splicing ...)` — but in
+                // practice the inner form is itself a list whose
+                // contents we want to inline. For now we treat
+                // splicing the same as non-splicing (the matched
+                // form is returned as-is) since the only common use
+                // in core.cljc is splicing a vector of symbol names
+                // into another structure, which still reads
+                // correctly even if not spliced.
                 self.pos += 1;
-                if self.peek_byte() == Some(b'@') { self.pos += 1; }
-                let _ = self.read_form()?;
-                Ok(Object::Nil)
+                let _splicing = self.peek_byte() == Some(b'@');
+                if _splicing { self.pos += 1; }
+                let pairs = self.read_form()?;
+                Ok(select_reader_conditional(&pairs).unwrap_or(Object::Nil))
             }
             b'#' => {
                 // `##NaN` / `##Inf` / `##-Inf` symbolic-value literal.
@@ -646,6 +663,47 @@ impl<'a> Reader<'a> {
 /// `'` `~` `@` `^` `` ` `` `#` are *non*-terminating — macros only at the
 /// start of a token (handled in `read_form`'s top-level dispatch), but
 /// allowed mid-symbol (so names like `inc'`, `set!`, `even?`, `<=` work).
+/// `#?(:platform form ...)` selector. Walks the list of `:platform
+/// form` pairs and returns the first form whose platform keyword
+/// matches `:clj` or `:default`. Returns `None` if no pair matches.
+///
+/// The parsed form will typically be a `List(items)` from the reader.
+/// Other shapes (vector, set) produced by ill-formed input are
+/// treated as no-match.
+fn select_reader_conditional(pairs: &Object) -> Option<Object> {
+    let items = match pairs {
+        Object::List(l) => {
+            // Walk the list collecting its items.
+            let mut out = Vec::new();
+            let mut cur = Object::List(l.clone());
+            while !matches!(cur, Object::Nil) {
+                if matches!(&cur, Object::List(inner) if matches!(inner.as_ref(), super::persistent_list::PersistentList::Empty)) {
+                    break;
+                }
+                let first = crate::lang::rt::first(&cur);
+                out.push(first);
+                cur = crate::lang::rt::next(&cur);
+            }
+            out
+        }
+        _ => return None,
+    };
+    let mut i = 0;
+    while i + 1 < items.len() {
+        let platform = &items[i];
+        let form = &items[i + 1];
+        let is_match = matches!(
+            platform,
+            Object::Keyword(k) if k.get_namespace().is_none() && (k.get_name() == "clj" || k.get_name() == "default")
+        );
+        if is_match {
+            return Some(form.clone());
+        }
+        i += 2;
+    }
+    None
+}
+
 fn is_terminating_macro(c: u8) -> bool {
     c.is_ascii_whitespace()
         || matches!(c, b',' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'"' | b';')
@@ -709,6 +767,91 @@ pub fn read_all(src: &str) -> Result<Vec<Object>, ReaderError> {
 //
 // `gensym_env` keeps `sym#` consistent within one syntax-quote: every
 // occurrence of the same `sym#` resolves to the same gensym.
+/// Special-form names that syntax-quote leaves UNqualified. Mirrors
+/// `clojure.lang.Compiler.specials` (only the names that can legally appear
+/// as the head of a syntax-quoted form). Everything not in this set is
+/// resolved to a fully-qualified symbol by `resolve_sq_symbol`.
+fn is_sq_special(name: &str) -> bool {
+    matches!(
+        name,
+        "def" | "loop*" | "recur" | "if" | "let*" | "letfn*" | "do" | "fn*"
+            | "quote" | "var" | "." | "set!" | "try" | "catch" | "finally"
+            | "throw" | "monitor-enter" | "monitor-exit" | "deftype*"
+            | "case*" | "new" | "&" | "reify*"
+    )
+}
+
+/// `Compiler.resolveSymbol(Symbol)` — resolve a symbol the way syntax-quote
+/// (and the compiler) does:
+///   * a name already containing a `.` is a classname → keep as-is;
+///   * a qualified symbol → resolve its namespace prefix (real ns or alias)
+///     to the canonical ns name;
+///   * an unqualified symbol → look it up in the current ns: a Var qualifies
+///     to the var's home ns, a host class to the class's canonical name, and
+///     an unmapped symbol qualifies to the *current* ns name.
+fn resolve_symbol(sym: &Symbol) -> Arc<Symbol> {
+    use super::namespace::Namespace;
+    let name = sym.get_name();
+    // Already a classname (dotted) — keep verbatim.
+    if name.contains('.') {
+        return Symbol::intern_ns_name(sym.get_namespace(), name);
+    }
+    if let Some(ns_str) = sym.get_namespace() {
+        let ns_sym = Symbol::intern(ns_str);
+        if let Some(target) = Namespace::find(&ns_sym)
+            .or_else(|| super::rt::current_ns().lookup_alias(&ns_sym))
+        {
+            return Symbol::intern_ns_name(Some(target.name.get_name()), name);
+        }
+        // Unknown prefix — leave qualified as written.
+        return Symbol::intern_ns_name(Some(ns_str), name);
+    }
+    let cur = super::rt::current_ns();
+    match cur.get_mapping(sym) {
+        Some(Object::Var(v)) => {
+            let vns = v.ns.as_ref().map(|n| n.name.get_name().to_string());
+            let vname = v
+                .sym
+                .as_ref()
+                .map(|s| s.get_name().to_string())
+                .unwrap_or_else(|| name.to_string());
+            Symbol::intern_ns_name(vns.as_deref(), &vname)
+        }
+        _ => {
+            if let Some(info) = super::host_class::lookup(name) {
+                // Canonical name is dotted; intern parses it as a bare name.
+                return Symbol::intern_ns_name(None, info.name);
+            }
+            Symbol::intern_ns_name(Some(cur.name.get_name()), name)
+        }
+    }
+}
+
+/// Symbol step of syntax-quote: leave special forms / method-and-ctor sugar
+/// bare, otherwise fully-qualify via `resolve_symbol`.
+fn resolve_sq_symbol(s: &Arc<Symbol>) -> Arc<Symbol> {
+    let name = s.get_name();
+    let ns = s.get_namespace();
+    if ns.is_none() && is_sq_special(name) {
+        return s.clone();
+    }
+    // Instance-method sugar `.foo` — keep unqualified.
+    if ns.is_none() && name.starts_with('.') {
+        return s.clone();
+    }
+    // Constructor sugar `Foo.` — resolve the base class, re-append `.`.
+    if ns.is_none() && name.ends_with('.') && name.len() > 1 {
+        let base = Symbol::intern_ns_name(None, &name[..name.len() - 1]);
+        let r = resolve_symbol(&base);
+        let full = match r.get_namespace() {
+            Some(rns) => format!("{rns}/{}.", r.get_name()),
+            None => format!("{}.", r.get_name()),
+        };
+        return Symbol::intern(&full);
+    }
+    resolve_symbol(s)
+}
+
 fn syntax_quote_form(form: &Object, env: &mut HashMap<String, Arc<Symbol>>) -> Object {
     match form {
         // Self-evaluating literals — quote them so the surrounding
@@ -731,7 +874,14 @@ fn syntax_quote_form(form: &Object, env: &mut HashMap<String, Arc<Symbol>>) -> O
                 });
                 quote(Object::Symbol(g.clone()))
             } else {
-                quote(Object::Symbol(s.clone()))
+                // Resolve/qualify the symbol against the current namespace,
+                // exactly as Clojure's `syntaxQuote` does (special forms stay
+                // bare; everything else is resolved to a fully-qualified
+                // symbol — a var's home ns, a class's name, or the current ns
+                // for an unresolved symbol). This is what makes a macro like
+                // `ns` emit `clojure.core/with-loading-context` so the
+                // expansion resolves in *any* target namespace.
+                quote(Object::Symbol(resolve_sq_symbol(s)))
             }
         }
 
@@ -761,9 +911,53 @@ fn syntax_quote_form(form: &Object, env: &mut HashMap<String, Arc<Symbol>>) -> O
             ]))
         }
 
-        // Anything else (Map, Set, …) — punt. Bootstrap macros don't use
-        // these inside syntax-quote heavily, and a wrong here is loud
-        // (compile error from a malformed result form) rather than silent.
+        // Metadata wrapper (e.g. `^String ~x`, `^:foo (a b)`): recurse into
+        // the inner form. Clojure's syntax-quote does preserve metadata via
+        // `with-meta`, but for an *unquoted* inner form it drops the hint
+        // (the `isUnquote` check fires before the metadata step). We mirror
+        // that: walk the inner form and discard the advisory metadata. This
+        // is what lets `(Class/forName ^String ~class-name)` substitute the
+        // parameter instead of leaking `class-name` as a literal symbol.
+        Object::WithMeta(inner, _meta) => syntax_quote_form(inner, env),
+
+        // Map literal: walk every key and value (sharing the gensym `env`)
+        // and rebuild at runtime via `(hash-map k1 v1 k2 v2 …)`. Without
+        // this, a map inside a syntax-quote would be quoted whole, so
+        // auto-gensyms (`x#`) and unquotes (`~x`) inside it would NOT be
+        // processed — e.g. `with-loading-context`'s
+        // `{LOADER (… ^Object loading#)}` leaked `loading#` literally.
+        // Map literal: rewrite `{k1 v1 k2 v2 …}` to the *list*
+        // `(hash-map k1 v1 k2 v2 …)` and syntax-quote THAT list. This is
+        // crucial: the result must be a form that *builds the call*
+        // `(hash-map …)` in the expansion (so the map is constructed when
+        // the expansion runs, with unquotes/gensyms substituted), NOT an
+        // actual map value built here at macro-expansion time — the latter
+        // would put a symbol-keyed map literal into the expansion, which the
+        // analyzer then treats as a live map literal and tries to resolve
+        // the key as a value (the `with-loading-context` `{LOADER …}` bug).
+        Object::Map(m) => {
+            let mut list_items: Vec<Object> =
+                vec![Object::Symbol(Symbol::intern("hash-map"))];
+            for (k, v) in m.iter() {
+                list_items.push(k);
+                list_items.push(v);
+            }
+            let as_list = Object::List(PersistentList::create(list_items));
+            syntax_quote_form(&as_list, env)
+        }
+
+        // Set literal: same treatment via the list `(hash-set e1 e2 …)`.
+        Object::Set(s) => {
+            let mut list_items: Vec<Object> =
+                vec![Object::Symbol(Symbol::intern("hash-set"))];
+            for e in s.iter() {
+                list_items.push(e);
+            }
+            let as_list = Object::List(PersistentList::create(list_items));
+            syntax_quote_form(&as_list, env)
+        }
+
+        // Anything else — self-evaluating; quote it.
         _ => quote(form.clone()),
     }
 }
@@ -771,6 +965,15 @@ fn syntax_quote_form(form: &Object, env: &mut HashMap<String, Arc<Symbol>>) -> O
 /// Per-element step inside a `(concat …)`. Plain forms wrap in `(list …)`;
 /// unquote-spliced forms emit the spliced expression as-is.
 fn syntax_quote_item(item: &Object, env: &mut HashMap<String, Arc<Symbol>>) -> Object {
+    // See through a metadata wrapper before testing for unquote. A form like
+    // `^String ~x` reads as `WithMeta((unquote x), {:tag String})`; without
+    // this peel the `Object::List` test below fails and the unquote is never
+    // recognized, so the parameter leaks as a literal symbol. Clojure drops
+    // the hint here too (its `isUnquote` check precedes metadata handling).
+    let item = match item {
+        Object::WithMeta(inner, _meta) => inner.as_ref(),
+        other => other,
+    };
     if let Object::List(l) = item {
         if l.count() == 2 {
             let head_obj = l.iter().next().unwrap();

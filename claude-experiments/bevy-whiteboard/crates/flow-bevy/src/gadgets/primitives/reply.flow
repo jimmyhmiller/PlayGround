@@ -1,0 +1,47 @@
+# Reply-or-forward terminal. The standard "I just finished processing
+# this packet — does someone want a response?" decision.
+#
+# When the consumed packet's `return_path` is non-empty, emit a
+# `resp(nil) popping to head` reply (and increment `served`). When the
+# return_path is empty, treat the packet as pure forward data and
+# `emit p to default`.
+#
+# With `passthrough = 1`, the reply path ALSO forwards the packet
+# downstream (popping its own stamp off). That's the Queue pattern:
+# accept the responsibility, ack the client immediately, and let the
+# data continue down the pipeline as fresh forward traffic.
+#
+# Two parameters cover three operating modes:
+#   `passthrough = 0` (default) — Worker-style terminal: reply when
+#     a request, otherwise forward.
+#   `passthrough = 1`           — Queue-style middleman: reply AND
+#     forward when a request, otherwise just forward.
+#
+# `served` is incremented only on the reply branch — the counter
+# answers "how many requests have I taken responsibility for".
+node Reply {
+    slots {
+        served:      Int = 0
+        passthrough: Int = 0
+    }
+    probes { served: "{served}" }
+    rule reply_and_forward {
+        on p when length(return_path) > 0 && passthrough == 1
+        do {
+            served := served + 1
+            emit resp(nil) popping to (head(return_path))
+            emit p popping to default
+        }
+    }
+    rule reply_only {
+        on p when length(return_path) > 0
+        do {
+            served := served + 1
+            emit resp(nil) popping to (head(return_path))
+        }
+    }
+    rule forward {
+        on p
+        do { emit p to default }
+    }
+}

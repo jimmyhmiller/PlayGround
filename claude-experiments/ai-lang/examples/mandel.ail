@@ -1,0 +1,169 @@
+// Distributed Mandelbrot, fixed-point, ASCII output.
+//
+// Usage:
+//   ai-lang add examples/mandel.ail
+//   ai-lang run main --nodes=8
+//
+// Each worker computes a slab of the pixel grid. The client gathers
+// per-pixel escape counts and renders the whole frame to the terminal.
+//
+// The viewport, image size, and iteration limit are all bundled into
+// a `ViewParams` struct that the per-pixel kernel captures. One
+// `at()` round-trip per chunk; the chunk's whole slab runs locally on
+// the worker.
+//
+// Fixed-point: SCALE = 4096 (12 bits of fraction). All complex
+// arithmetic happens on scaled integers. Multiply uses (a * b) / SCALE
+// to keep the result in the same scale. Escape radius |z|² > 4 maps
+// to (z_re² + z_im²) > 4 * SCALE.
+
+struct ViewParams {
+    cx_q: Int, cy_q: Int,        // image center (fixed-point)
+    sx_q: Int, sy_q: Int,        // step per pixel (fixed-point)
+    width: Int, height: Int,     // image dimensions in pixels
+    max_iter: Int,               // escape iteration limit
+}
+
+// Mandelbrot iteration. Returns the iteration count when |z|² > 4,
+// or max_iter if the point is "inside" the set.
+def mandel_iter(c_re: Int, c_im: Int, max_iter: Int) -> Int =
+    mandel_iter_loop(c_re, c_im, 0, 0, 0, max_iter)
+
+def mandel_iter_loop(
+    c_re: Int, c_im: Int, z_re: Int, z_im: Int, i: Int, max_iter: Int
+) -> Int = {
+    if i >= max_iter { max_iter } else {
+        let zr2 = (z_re * z_re) / 4096;
+        let zi2 = (z_im * z_im) / 4096;
+        let mag2 = zr2 + zi2;
+        if mag2 > 16384 {
+            // 4 * SCALE = 4 * 4096 = 16384. Escaped.
+            i
+        } else {
+            let new_re = zr2 - zi2 + c_re;
+            let new_im = (2 * z_re * z_im) / 4096 + c_im;
+            mandel_iter_loop(c_re, c_im, new_re, new_im, i + 1, max_iter)
+        }
+    }
+}
+
+// Per-pixel kernel: map a flat pixel index into (px, py), compute
+// the complex coordinate from the view params, run the iteration.
+// The closure passed to `dataset_map` captures a single ViewParams
+// struct; the wire encoder ships that struct alongside the closure
+// to each worker.
+def mandel_pixel(view: ViewParams, idx: Int) -> Int = {
+    let py = idx / view.width;
+    let px = idx - py * view.width;
+    let half_w = view.width / 2;
+    let half_h = view.height / 2;
+    let c_re = view.cx_q + (px - half_w) * view.sx_q;
+    let c_im = view.cy_q + (py - half_h) * view.sy_q;
+    mandel_iter(c_re, c_im, view.max_iter)
+}
+
+// Partition [0..total) into n_chunks contiguous chunks. Builds each
+// chunk directly via int_list_range — avoids list_take/list_drop
+// over the whole range (which hit a GC-root tracking issue at a
+// downstream call site, separately filed).
+def make_pixel_chunks(total: Int, n_chunks: Int) -> List<List<Int>> = {
+    let size = (total + n_chunks - 1) / n_chunks;
+    build_chunks(0, total, size, Nil)
+}
+
+def build_chunks(start: Int, total: Int, size: Int, acc: List<List<Int>>) -> List<List<Int>> =
+    if start >= total {
+        list_reverse(acc)
+    } else {
+        let end_raw = start + size;
+        let end = if end_raw > total { total } else { end_raw };
+        build_chunks(end, total, size, Cons(ListCell {
+            head: int_list_range(start, end), tail: acc,
+        }))
+    }
+
+// Pick a glyph for a pixel's escape count. Coarser bands at the
+// boundary; inside the set we render solid.
+def glyph_for(count: Int, max_iter: Int) -> String = {
+    if count >= max_iter { "#" } else {
+        let q = count * 8 / max_iter;
+        if q >= 6 { "*" } else {
+            if q >= 4 { "+" } else {
+                if q >= 2 { "." } else { " " }
+            }
+        }
+    }
+}
+
+// Render the pixel-list as a width-wrapped ASCII frame. Tail-recursive
+// over the pixel list and a column counter.
+def render_frame(pixels: List<Int>, width: Int, max_iter: Int) -> Int =
+    render_frame_acc(pixels, width, max_iter, 0, "")
+
+def render_frame_acc(
+    pixels: List<Int>, width: Int, max_iter: Int, col: Int, line_acc: String
+) -> Int = {
+    match pixels {
+        Nil => {
+            // Flush any partial last line.
+            let _f = if col > 0 { println(line_acc) } else { 0 };
+            0
+        },
+        Cons(c) => {
+            let g = glyph_for(c.head, max_iter);
+            if col + 1 >= width {
+                let _p = println(string_concat(line_acc, g));
+                render_frame_acc(c.tail, width, max_iter, 0, "")
+            } else {
+                render_frame_acc(c.tail, width, max_iter, col + 1, string_concat(line_acc, g))
+            }
+        }
+    }
+}
+
+// Build a pool of nodes from the runner's --nodes table.
+def build_pool() -> List<Node> = list_reverse(build_pool_acc(0, Nil))
+
+def build_pool_acc(i: Int, acc: List<Node>) -> List<Node> =
+    if i >= node_count() { acc } else {
+        let p = get_node_port(i);
+        build_pool_acc(i + 1, Cons(ListCell {
+            head: tcp_node(127, 0, 0, 1, p),
+            tail: acc,
+        }))
+    }
+
+// Hard-coded interesting viewport over the canonical Mandelbrot set.
+// Centered at (-0.7, 0); width 3.0 in real, height 1.5 in imag.
+def view() -> ViewParams = ViewParams {
+    cx_q: 0 - 2867,           // -0.7  * 4096
+    cy_q: 0,                  //  0.0
+    sx_q: 102,                //  3.0 / 120 * 4096
+    sy_q: 205,                //  1.5 / 30 * 4096
+    width: 120,
+    height: 30,
+    max_iter: 32,
+}
+
+def main() -> Int = {
+    if node_count() == 0 {
+        let _m = println("no workers. run with `--nodes=N` (e.g. --nodes=8).");
+        0
+    } else {
+        let v = view();
+        let total = v.width * v.height;
+        let pool = build_pool();
+        let chunks = make_pixel_chunks(total, node_count());
+        let d = dataset_from_chunks(chunks, pool);
+        // dataset_map ships `v` and the kernel to each worker; each
+        // worker iterates its slab locally; dataset_collect gathers.
+        let pixels = dataset_collect(
+            dataset_map(d, |idx: Int| mandel_pixel(v, idx)));
+
+        let _h = println(string_concat("  distributed Mandelbrot, ",
+            string_concat(int_to_string(node_count()),
+                " workers, fixed-point fractional bits = 12")));
+        let _b = println("");
+        render_frame(pixels, v.width, v.max_iter)
+    }
+}

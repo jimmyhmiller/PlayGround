@@ -29,26 +29,35 @@ compound ClientComposite(
             emitted:   Int = 0
             completed: Int = 0
             failed:    Int = 0
+            in_flight: Int = 0
         }
         probes {
             emitted:   "{emitted}"
             completed: "{completed}"
             failed:    "{failed}"
+            in_flight: "{in_flight}"
         }
         rule on_kick {
             on packet(_)
             do {
-                emitted := emitted + 1
+                emitted   := emitted + 1
+                in_flight := in_flight + 1
                 emit req(color) pushing self to default
             }
         }
         rule on_resp {
             on resp(_)
-            do { completed := completed + 1 }
+            do {
+                completed := completed + 1
+                in_flight := in_flight - 1
+            }
         }
         rule on_resp_error {
             on resp_error(_)
-            do { failed := failed + 1 }
+            do {
+                failed    := failed + 1
+                in_flight := in_flight - 1
+            }
         }
     }
     node E : Egress { }

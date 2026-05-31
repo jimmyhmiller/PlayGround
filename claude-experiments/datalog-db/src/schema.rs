@@ -44,7 +44,7 @@ impl FieldType {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldDef {
     pub name: std::string::String,
     #[serde(rename = "type")]

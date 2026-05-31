@@ -50,6 +50,174 @@ pub fn nanbox_bool(b: bool) -> u64 { nanbox_encode(TAG_BOOL, b as u64) }
 /// The pointer's low 48 bits become the payload; tag bits go to TAG_PTR.
 pub fn nanbox_ptr(raw: u64) -> u64 { nanbox_encode(TAG_PTR, raw & PAYLOAD_MASK) }
 
+/// Allocate a boxed `clojure.lang.Long` holding `n`, returning its NanBox.
+/// Clojure integers are real longs (distinct from doubles); NaN-boxing has
+/// no inline integer tag, so we box them. The i64 lives at offset 8 (after
+/// the 8-byte Compact header), like other Raw64-cell types.
+///
+/// # Safety
+/// Must run on a registered mutator thread (the GC alloc invariant).
+pub unsafe fn box_long(n: i64) -> u64 {
+    let ids = heap_type_ids();
+    let raw = dynlang::gc::gc_alloc_thunk(ids.long as u64, 0);
+    let p = raw as *mut u8;
+    if p.is_null() {
+        panic!("clojure-jvm: box_long: gc_alloc returned null");
+    }
+    unsafe { p.add(8).cast::<i64>().write_unaligned(n) };
+    nanbox_ptr(raw)
+}
+
+/// Read the i64 out of a boxed `Long`. Precondition: `bits` is a TAG_PTR to
+/// a Long cell (type_id == `heap_type_ids().long`).
+///
+/// # Safety
+/// `bits` must point to a Long cell allocated by [`box_long`].
+pub unsafe fn unbox_long(bits: u64) -> i64 {
+    let p = nanbox_payload(bits) as *const u8;
+    unsafe { p.add(8).cast::<i64>().read_unaligned() }
+}
+
+/// Is `bits` a boxed Long?
+pub fn is_boxed_long(bits: u64) -> bool {
+    if nanbox_tag(bits) != Some(TAG_PTR) { return false; }
+    let p = nanbox_payload(bits) as *const u8;
+    if p.is_null() { return false; }
+    let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+    tid == heap_type_ids().long
+}
+
+/// Decode a numeric argument to an `i64`, accepting either a boxed Long or
+/// a native NanBox double. This is the polymorphic replacement for the bare
+/// `f64::from_bits(bits) as i64` pattern at sites that read an integer
+/// argument (indices, counts, method/type ids): once integer literals are
+/// boxed Longs, those args arrive as TAG_PTR cells rather than floats, but
+/// internally-baked ids and pre-flip integers still arrive as floats.
+pub fn arg_to_i64(bits: u64) -> i64 {
+    if is_boxed_long(bits) {
+        unsafe { unbox_long(bits) }
+    } else {
+        f64::from_bits(bits) as i64
+    }
+}
+
+/// Decode a numeric argument to an `f64`, accepting either a boxed Long or
+/// a native NanBox double. The float-side companion to [`arg_to_i64`], for
+/// sites that read a number into floating point (casts, `Math/*`, etc.).
+pub fn arg_to_f64(bits: u64) -> f64 {
+    if is_boxed_long(bits) {
+        unsafe { unbox_long(bits) as f64 }
+    } else {
+        f64::from_bits(bits)
+    }
+}
+
+/// Encode a double result as a NanBox. A raw f64 IS its own NanBox value,
+/// except when its bit pattern collides with the tag pattern (a signalling
+/// region) — then canonicalize to a quiet NaN.
+fn nanbox_double(d: f64) -> u64 {
+    let bits = d.to_bits();
+    if (bits & FULL_MASK) == TAG_PATTERN { 0x7FF8_0000_0000_0000 } else { bits }
+}
+
+// ── Numeric-tower arithmetic externs ───────────────────────────────
+//
+// clojure-jvm integers are boxed Longs and doubles are native NanBox
+// floats. These externs decode each operand to a `Num`, apply the tower
+// (see `value_repr`), and re-encode (box a Long, NanBox a double). The JIT
+// calls these from `PrimOpExpr` instead of dynlang's float-only `add`/etc.
+
+use crate::lang::value_repr::{self, Num, NumResult};
+
+/// Decode an operand into a `Num` (boxed Long → Long, else native double).
+fn decode_num(bits: u64) -> Num {
+    if is_boxed_long(bits) {
+        Num::Long(unsafe { unbox_long(bits) })
+    } else {
+        Num::Double(f64::from_bits(bits))
+    }
+}
+
+/// Encode a `Num` result. `# Safety`: boxing requires a mutator thread.
+unsafe fn encode_num(n: Num) -> u64 {
+    match n {
+        Num::Long(v) => unsafe { box_long(v) },
+        Num::Double(d) => nanbox_double(d),
+    }
+}
+
+/// On long-overflow Clojure's `+`/`-`/`*` THROW; until exceptions are wired
+/// through here we promote to double (documented deviation — the conformance
+/// corpus never overflows). `NumResult::Num` encodes normally.
+unsafe fn encode_numresult(r: NumResult, a: Num, b: Num, as_double: fn(f64, f64) -> f64) -> u64 {
+    match r {
+        NumResult::Num(n) => unsafe { encode_num(n) },
+        NumResult::Overflow => nanbox_double(as_double(a.as_f64(), b.as_f64())),
+    }
+}
+
+macro_rules! num_binop_extern {
+    ($name:ident, $tower:path, $dbl:expr) => {
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(a: u64, b: u64) -> u64 {
+            let (na, nb) = (decode_num(a), decode_num(b));
+            unsafe { encode_numresult($tower(na, nb), na, nb, $dbl) }
+        }
+    };
+}
+num_binop_extern!(cljvm_num_add, value_repr::num_add, |x, y| x + y);
+num_binop_extern!(cljvm_num_sub, value_repr::num_sub, |x, y| x - y);
+num_binop_extern!(cljvm_num_mul, value_repr::num_mul, |x, y| x * y);
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_num_div(a: u64, b: u64) -> u64 {
+    unsafe { encode_num(value_repr::num_div(decode_num(a), decode_num(b))) }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_num_quot(a: u64, b: u64) -> u64 {
+    unsafe { encode_num(value_repr::num_quot(decode_num(a), decode_num(b))) }
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_num_rem(a: u64, b: u64) -> u64 {
+    unsafe { encode_num(value_repr::num_rem(decode_num(a), decode_num(b))) }
+}
+
+/// Is `bits` a number (boxed Long or native double)?
+fn is_number_val(bits: u64) -> bool {
+    is_boxed_long(bits) || nanbox_tag(bits).is_none()
+}
+
+/// `=` (general equality). Numbers compare type-aware (`(= 1 1)` true,
+/// `(= 1 1.0)` false); everything else delegates to `equiv_impl`, which does
+/// value equality for the heap types it knows (strings, symbols, keywords,
+/// cons lists, maps, sets, namespaces, vars). nil/bool/interned refs already
+/// short-circuit on the bit-equality check.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_equals(a: u64, b: u64) -> u64 {
+    if a == b {
+        return nanbox_bool(true);
+    }
+    if is_number_val(a) && is_number_val(b) {
+        return nanbox_bool(value_repr::val_num_eq(decode_num(a), decode_num(b)));
+    }
+    nanbox_bool(unsafe { equiv_impl(a, b) })
+}
+
+macro_rules! num_cmp_extern {
+    ($name:ident, $tower:path) => {
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(a: u64, b: u64) -> u64 {
+            nanbox_bool($tower(decode_num(a), decode_num(b)))
+        }
+    };
+}
+num_cmp_extern!(cljvm_num_lt, value_repr::num_lt);
+num_cmp_extern!(cljvm_num_gt, value_repr::num_gt);
+num_cmp_extern!(cljvm_num_le, value_repr::num_le);
+num_cmp_extern!(cljvm_num_ge, value_repr::num_ge);
+/// `==` — numeric equality across long/double.
+num_cmp_extern!(cljvm_num_equiv, value_repr::num_eq);
+
 /// Marker wrapper for a heap-tagged NanBox stored opaquely in `Object::Host`.
 /// Lets Var roundtrip heap pointers (string literals, future quoted-symbol /
 /// keyword / list values) without prematurely decoding them into Rust-side
@@ -86,7 +254,11 @@ pub fn object_to_nanbox(obj: &Object) -> u64 {
     match obj {
         Object::Nil => nanbox_encode(TAG_NIL, 0),
         Object::Bool(b) => nanbox_encode(TAG_BOOL, *b as u64),
-        Object::Long(n) => (*n as f64).to_bits(),
+        // Integers are boxed Longs. `# Safety`: boxing needs an installed
+        // mutator thread; every `object_to_nanbox` caller (Var deref, heap
+        // stores) runs on one. (Early init that has no thread goes through
+        // `try_object_to_nanbox`, which returns None for Long instead.)
+        Object::Long(n) => unsafe { box_long(*n) },
         Object::Double(x) => x.to_bits(),
         Object::Host(_) => {
             if let Some(hb) = obj.host_as::<HeapBits>() {
@@ -96,9 +268,48 @@ pub fn object_to_nanbox(obj: &Object) -> u64 {
                 "clojure-jvm: object_to_nanbox: Object::Host wrapping non-HeapBits value not yet representable as NanBox"
             )
         }
+        // `clojure.lang.Namespace` / `clojure.lang.Var` — heap cells holding a
+        // leaked `Arc::as_ptr` in their Raw64 slot. Boxing requires an
+        // installed mutator thread (every `object_to_nanbox` caller runs on
+        // one); the Arc is kept alive on the Session roots.
+        Object::Namespace(ns) => unsafe {
+            alloc_arc_cell(
+                heap_type_ids().namespace,
+                ns.clone(),
+                crate::lang::compiler::with_active_session_root_namespace,
+            )
+        },
+        Object::Var(v) => unsafe {
+            alloc_arc_cell(
+                heap_type_ids().var,
+                v.clone(),
+                crate::lang::compiler::with_active_session_root_var,
+            )
+        },
         _ => panic!(
             "clojure-jvm: object_to_nanbox: variant {obj:?} not yet representable as NanBox"
         ),
+    }
+}
+
+/// Like [`object_to_nanbox`] but returns `None` for values that have no
+/// NanBox representation (e.g. `Object::Namespace`, or `Object::Host`
+/// wrapping arbitrary Rust state) instead of panicking. Used by Var root
+/// storage to decide whether a value can live in the GC-rooted slot table
+/// (NanBox-representable, including all heap pointers) or must be kept
+/// Rust-side.
+pub fn try_object_to_nanbox(obj: &Object) -> Option<u64> {
+    match obj {
+        Object::Nil => Some(nanbox_encode(TAG_NIL, 0)),
+        Object::Bool(b) => Some(nanbox_encode(TAG_BOOL, *b as u64)),
+        // A boxed Long can't be built here: this is the non-allocating
+        // representability check (runs during `Var::bind_root`, before the
+        // heap/thread exist). Keep Long roots Rust-side as `VarRoot::Object`;
+        // they get boxed lazily on deref via `object_to_nanbox`.
+        Object::Long(_) => None,
+        Object::Double(x) => Some(x.to_bits()),
+        Object::Host(_) => obj.host_as::<HeapBits>().map(|hb| hb.0),
+        _ => None,
     }
 }
 
@@ -124,11 +335,26 @@ pub struct HeapTypeIds {
     pub multi_arity_fn: usize,
     pub class: usize,
     pub var: usize,
+    /// `clojure.lang.Namespace` — a heap cell holding a leaked `Arc<Namespace>`
+    /// pointer (Raw64 at offset 8), exactly like `var`. Lets namespace
+    /// objects flow through JIT-compiled code: `*ns*`, `the-ns`, `ns-map`,
+    /// and `(. *ns* (refer …))` all pass `Namespace` values.
+    pub namespace: usize,
     pub with_meta: usize,
+    /// `clojure.lang.Long` — boxed 64-bit integer. Clojure has a real
+    /// integer type (`long`) distinct from `double`; we box it on the heap
+    /// (a Raw64 i64 cell) so `(+ 1 2)` is `3` not `3.0`. (NaN-boxing left no
+    /// inline integer tag; a future low-bit-tagging pass could inline it.)
+    pub long: usize,
     /// Shared ObjTypeId backing every `deftype`/`defrecord` instance.
     /// The actual user-type discriminator lives in the cell's Raw64
     /// `user_type_id` field and is read by `effective_type_id`.
     pub user_instance: usize,
+    /// `clojure.lang.Reduced` — the wrapper produced by `(reduced x)` to
+    /// signal early termination of `reduce`. One traced `Value` slot holds
+    /// the wrapped value; `(deref r)` / `@r` unwraps it and
+    /// `clojure.lang.RT/isReduced` tests for it.
+    pub reduced: usize,
 }
 
 /// Process-global type-id registry. `Compiler::new` calls
@@ -211,6 +437,10 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
     }
     // Compact header: type_id at offset 0, u16 little-endian.
     let type_id = unsafe { ptr.cast::<u16>().read_unaligned() } as usize;
+    if type_id == ids.long {
+        let n = unsafe { ptr.add(8).cast::<i64>().read_unaligned() };
+        return Object::Long(n);
+    }
     if type_id == ids.symbol {
         // Sanity-check the arc_ptr stored in the cell. Real Symbol cells
         // hold a pointer to a leaked Arc<Symbol> — always > 0x10000.
@@ -253,6 +483,16 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
         unsafe { std::sync::Arc::increment_strong_count(arc_ptr) };
         let arc = unsafe { std::sync::Arc::from_raw(arc_ptr) };
         return Object::Keyword(arc);
+    }
+    if type_id == ids.var {
+        // `clojure.lang.Var`: Raw64 holding `*const Var` (leaked Arc).
+        let arc = unsafe { decode_arc_cell::<crate::lang::var::Var>(ptr) };
+        return Object::Var(arc);
+    }
+    if type_id == ids.namespace {
+        // `clojure.lang.Namespace`: Raw64 holding `*const Namespace`.
+        let arc = unsafe { decode_arc_cell::<crate::lang::namespace::Namespace>(ptr) };
+        return Object::Namespace(arc);
     }
     if type_id == ids.cons {
         // `clojure.lang.Cons`: Header(8) + value-field "first"(8) +
@@ -313,6 +553,14 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
         let meta_bits = unsafe { ptr.add(16).cast::<u64>().read_unaligned() };
         let inner_obj = unsafe { decode_value_bits(inner_bits, ids) };
         return wrap_with_meta_bits(inner_obj, meta_bits, ids);
+    }
+    if type_id == ids.lazy_seq {
+        // A lazy seq appearing in host-bound data — e.g. macroexpansion
+        // output where a macro splices `map`/`filter`/`remove` results via
+        // `~@` (the `ns` macro does this). Force it to a concrete seq and
+        // decode that. `cljvm_rt_seq` fully realizes to a cons chain or nil.
+        let forced = unsafe { cljvm_rt_seq(bits) };
+        return decode_value_bits(forced, ids);
     }
     Object::Unported {
         java_class: "heap object of unrecognized type_id",
@@ -635,7 +883,14 @@ unsafe fn pack_variadic_args(self_arg: Option<u64>, fref_idx: u32, args: &[u64])
     if !info.is_variadic {
         return None;
     }
-    if args.len() <= info.fixed_arity {
+    // A variadic fn `[fixed… & rest]` is compiled to take `fixed_arity + 1`
+    // params — the final one being the rest seq. So it must be packed even
+    // when there is NO overflow (`args.len() == fixed_arity`): the rest is
+    // then `nil` (matching Clojure's `((fn [& r] r))` => nil). Bailing here
+    // would omit the rest param entirely, so the callee reads its
+    // uninitialized rest register as garbage. Only `args.len() < fixed_arity`
+    // (genuine under-arity) skips packing.
+    if args.len() < info.fixed_arity {
         return None;
     }
     // Capacity: self_arg(1) + every arg + the accumulating tail.
@@ -672,7 +927,58 @@ unsafe fn pack_variadic_args(self_arg: Option<u64>, fref_idx: u32, args: &[u64])
 /// is variadic and the caller passes `fixed_arity + 1` here (with the
 /// final arg being the packed tail list), so 20 covers fns up to
 /// `fixed_arity = 19` — well past anything in clojure.core.
+/// Call a JIT-compiled clojure fn (internal calling convention) with up to
+/// 16 args placed in X0–X15. The C-ABI `transmute` path used for ≤8 args is
+/// only correct because the AAPCS C ABI and the internal CC agree on the
+/// first 8 GP arg registers (X0–X7). For 9–16 args they diverge: the C ABI
+/// puts args 8+ on the stack, but JIT code reads them from X8–X15. This shim
+/// loads X0–X15 directly so a 9-to-16-arg call into JIT code is correct.
+///
+/// It deliberately does NOT set up an FP fence (so a GC during the callee
+/// still walks up through this Rust frame to the outer JIT frame, matching
+/// the no-fence `transmute` path) and does NOT touch X23 (the callee
+/// inherits the caller's control-context register, exactly as the transmute
+/// path does — X23 is callee-saved and preserved across `clobber_abi("C")`).
+///
+/// # Safety
+/// `ptr` must point to a JIT fn expecting `packed.len()` internal-CC args.
+#[cfg(target_arch = "aarch64")]
+unsafe fn call_jit_packed_regs(ptr: *const u8, packed: &[u64]) -> u64 {
+    debug_assert!(
+        (9..=16).contains(&packed.len()),
+        "call_jit_packed_regs: arity {} out of the 9..=16 range",
+        packed.len()
+    );
+    let mut regs = [0u64; 16];
+    regs[..packed.len()].copy_from_slice(packed);
+    let result: u64;
+    unsafe {
+        core::arch::asm!(
+            "ldp x0, x1, [x16]",
+            "ldp x2, x3, [x16, #16]",
+            "ldp x4, x5, [x16, #32]",
+            "ldp x6, x7, [x16, #48]",
+            "ldp x8, x9, [x16, #64]",
+            "ldp x10, x11, [x16, #80]",
+            "ldp x12, x13, [x16, #96]",
+            "ldp x14, x15, [x16, #112]",
+            "blr x17",
+            in("x16") regs.as_ptr(),
+            in("x17") ptr,
+            lateout("x0") result,
+            clobber_abi("C"),
+        );
+    }
+    result
+}
+
 unsafe fn call_with_packed(ptr: *const u8, packed: &[u64]) -> u64 {
+    // 9..=16 args: the C-ABI `transmute` path would mis-place args 8+ (stack
+    // vs X8–X15). Use the direct-register shim so JIT callees read them right.
+    #[cfg(target_arch = "aarch64")]
+    if (9..=16).contains(&packed.len()) {
+        return unsafe { call_jit_packed_regs(ptr, packed) };
+    }
     macro_rules! no_op_u64 { ($_:literal) => { u64 }; }
     macro_rules! call_n {
         ($n:literal, $($i:literal),*) => {{
@@ -717,11 +1023,14 @@ unsafe fn call_with_packed(ptr: *const u8, packed: &[u64]) -> u64 {
 /// `IFn.invoke()` — 0 arity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_0(fn_bits: u64) -> u64 {
-    if let Some((ptr, _self_arg, _fref)) = unsafe { try_dispatch_multi_arity(fn_bits, 0) } {
-        let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(ptr) };
-        return unsafe { f() };
+    let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 0) };
+    // A 0-arg call of a variadic fn (e.g. `(list)` / `(concat)`, both
+    // `[& xs]`) must still supply the rest param (an empty/`nil` seq).
+    // `pack_variadic_args` builds `[self?, nil]`; without this the callee
+    // reads its uninitialized rest register and returns garbage.
+    if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[]) } {
+        return unsafe { call_with_packed(ptr, &packed) };
     }
-    let (ptr, self_arg) = unsafe { dispatch_target(fn_bits) };
     match self_arg {
         None => {
             let f: unsafe extern "C" fn() -> u64 = unsafe { std::mem::transmute(ptr) };
@@ -750,7 +1059,7 @@ pub unsafe extern "C" fn cljvm_rt_invoke_1(fn_bits: u64, a: u64) -> u64 {
     if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a]) } {
         return unsafe { call_with_packed(ptr, &packed) };
     }
-    match self_arg {
+    let r = match self_arg {
         None => {
             let f: unsafe extern "C" fn(u64) -> u64 = unsafe { std::mem::transmute(ptr) };
             unsafe { f(a) }
@@ -759,7 +1068,8 @@ pub unsafe extern "C" fn cljvm_rt_invoke_1(fn_bits: u64, a: u64) -> u64 {
             let f: unsafe extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(ptr) };
             unsafe { f(s, a) }
         }
-    }
+    };
+    r
 }
 
 /// `(coll k)` shortcut for vector / map / set receivers — Clojure
@@ -776,7 +1086,7 @@ unsafe fn vector_or_map_or_set_as_fn_1(fn_bits: u64, a_bits: u64) -> Option<u64>
     if tid == ids.vector {
         if !nanbox_tag(a_bits).is_none() { return None; }
         let n = unsafe { p.add(8).cast::<u64>().read_unaligned() } as i64;
-        let idx = f64::from_bits(a_bits) as i64;
+        let idx = arg_to_i64(a_bits);
         if idx < 0 || idx >= n {
             panic!(
                 "clojure-jvm: vector-as-fn index {idx} out of range [0,{n})"
@@ -866,7 +1176,7 @@ pub unsafe extern "C" fn cljvm_rt_invoke_2(fn_bits: u64, a: u64, b: u64) -> u64 
     if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b]) } {
         return unsafe { call_with_packed(ptr, &packed) };
     }
-    match self_arg {
+    let r = match self_arg {
         None => {
             let f: unsafe extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(ptr) };
             unsafe { f(a, b) }
@@ -876,7 +1186,15 @@ pub unsafe extern "C" fn cljvm_rt_invoke_2(fn_bits: u64, a: u64, b: u64) -> u64 
                 unsafe { std::mem::transmute(ptr) };
             unsafe { f(s, a, b) }
         }
+    };
+    if r < 0x1000 && std::env::var("CLJVM_INVOKE_TRACE").is_ok() {
+        eprintln!(
+            "[invoke_2] SUSPECT result=0x{r:x} fn_bits=0x{fn_bits:x} a=0x{a:x} b=0x{b:x} \
+             ptr={ptr:p} self={}",
+            self_arg.is_some()
+        );
     }
+    r
 }
 
 /// `IFn.invoke(arg1, arg2, arg3)` — 3 arity.
@@ -1010,9 +1328,10 @@ pub unsafe extern "C" fn cljvm_rt_invoke_8(
             unsafe { i(a, b, c, d, e, f, g, h) }
         }
         Some(s) => {
-            let i: unsafe extern "C" fn(u64, u64, u64, u64, u64, u64, u64, u64, u64) -> u64 =
-                unsafe { std::mem::transmute(ptr) };
-            unsafe { i(s, a, b, c, d, e, f, g, h) }
+            // 9 args (self + 8): a C-ABI transmute would put arg 8 on the
+            // stack, but the JIT callee (internal CC) reads it from X8.
+            // Route through `call_with_packed`, which uses the X0–X15 shim.
+            unsafe { call_with_packed(ptr, &[s, a, b, c, d, e, f, g, h]) }
         }
     }
 }
@@ -1023,24 +1342,23 @@ pub unsafe extern "C" fn cljvm_rt_invoke_8(
 /// `(. clojure.lang.RT (...))` codegen path.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_inc(x_bits: u64) -> u64 {
-    // NanBox-encoded Long round-trips as f64 bits (per our object_to_nanbox).
-    let x = f64::from_bits(x_bits);
-    ((x as i64 + 1) as f64).to_bits()
+    let x = arg_to_i64(x_bits);
+    box_long(x + 1)
 }
 
 /// `clojure.lang.RT/intCast(n)` — truncate to 32-bit int. We model all
 /// integers as i64 so this is a `(i64 as i32) as i64` round-trip.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_intCast(n_bits: u64) -> u64 {
-    let n = f64::from_bits(n_bits) as i64 as i32 as i64;
-    (n as f64).to_bits()
+    let n = arg_to_i64(n_bits) as i32 as i64;
+    box_long(n)
 }
 
 /// `clojure.lang.RT/longCast(n)` — coerce to long. Already long for us.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_longCast(n_bits: u64) -> u64 {
-    let n = f64::from_bits(n_bits) as i64;
-    (n as f64).to_bits()
+    let n = arg_to_i64(n_bits);
+    box_long(n)
 }
 
 /// `clojure.lang.RT/booleanCast(x)` — Clojure truthiness: nil and false
@@ -1058,36 +1376,36 @@ pub unsafe extern "C" fn cljvm_rt_booleanCast(x_bits: u64) -> u64 {
 /// `clojure.lang.RT/doubleCast(n)` — coerce to double. f64 already.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_doubleCast(n_bits: u64) -> u64 {
-    let n = f64::from_bits(n_bits);
+    let n = arg_to_f64(n_bits);
     n.to_bits()
 }
 
 /// `clojure.lang.RT/floatCast(n)` — coerce to float (round-trip via f32).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_floatCast(n_bits: u64) -> u64 {
-    let n = f64::from_bits(n_bits) as f32 as f64;
+    let n = arg_to_f64(n_bits) as f32 as f64;
     n.to_bits()
 }
 
 /// `clojure.lang.RT/byteCast(n)` — coerce to i8.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_byteCast(n_bits: u64) -> u64 {
-    let n = f64::from_bits(n_bits) as i64 as i8 as i64;
-    (n as f64).to_bits()
+    let n = arg_to_i64(n_bits) as i8 as i64;
+    box_long(n)
 }
 
 /// `clojure.lang.RT/shortCast(n)` — coerce to i16.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_shortCast(n_bits: u64) -> u64 {
-    let n = f64::from_bits(n_bits) as i64 as i16 as i64;
-    (n as f64).to_bits()
+    let n = arg_to_i64(n_bits) as i16 as i64;
+    box_long(n)
 }
 
 /// `clojure.lang.RT/charCast(n)` — coerce to a u16 char value.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_charCast(n_bits: u64) -> u64 {
-    let n = f64::from_bits(n_bits) as i64 as u16 as i64;
-    (n as f64).to_bits()
+    let n = arg_to_i64(n_bits) as u16 as i64;
+    box_long(n)
 }
 
 // ── clojure.lang.Numbers — arithmetic + comparisons ──────────────────────
@@ -1099,36 +1417,46 @@ pub unsafe extern "C" fn cljvm_rt_charCast(n_bits: u64) -> u64 {
 // behavior diverges we can split later.
 
 fn num_to_f64(bits: u64) -> f64 {
-    f64::from_bits(bits)
+    arg_to_f64(bits)
 }
 
+// These `Numbers.*` arithmetic ops route through the same boxed-Long/double
+// tower as the `cljvm_num_*` externs, so `(. Numbers (add 1 2))` is `3` (a
+// Long), not `3.0`. (`PrimOpExpr` calls `cljvm_num_*` directly; these exist
+// for explicit `clojure.lang.Numbers` host-method calls.)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_add(a: u64, b: u64) -> u64 {
-    (num_to_f64(a) + num_to_f64(b)).to_bits()
+    let (na, nb) = (decode_num(a), decode_num(b));
+    encode_numresult(value_repr::num_add(na, nb), na, nb, |x, y| x + y)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_minus(a: u64, b: u64) -> u64 {
-    (num_to_f64(a) - num_to_f64(b)).to_bits()
+    let (na, nb) = (decode_num(a), decode_num(b));
+    encode_numresult(value_repr::num_sub(na, nb), na, nb, |x, y| x - y)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_minus_1(a: u64) -> u64 {
-    (-num_to_f64(a)).to_bits()
+    let (na, nb) = (Num::Long(0), decode_num(a));
+    encode_numresult(value_repr::num_sub(na, nb), na, nb, |x, y| x - y)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_multiply(a: u64, b: u64) -> u64 {
-    (num_to_f64(a) * num_to_f64(b)).to_bits()
+    let (na, nb) = (decode_num(a), decode_num(b));
+    encode_numresult(value_repr::num_mul(na, nb), na, nb, |x, y| x * y)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_divide(a: u64, b: u64) -> u64 {
-    (num_to_f64(a) / num_to_f64(b)).to_bits()
+    encode_num(value_repr::num_div(decode_num(a), decode_num(b)))
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_inc(a: u64) -> u64 {
-    (num_to_f64(a) + 1.0).to_bits()
+    let (na, nb) = (decode_num(a), Num::Long(1));
+    encode_numresult(value_repr::num_add(na, nb), na, nb, |x, y| x + y)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_dec(a: u64) -> u64 {
-    (num_to_f64(a) - 1.0).to_bits()
+    let (na, nb) = (decode_num(a), Num::Long(1));
+    encode_numresult(value_repr::num_sub(na, nb), na, nb, |x, y| x - y)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_lt(a: u64, b: u64) -> u64 {
@@ -1170,15 +1498,18 @@ pub unsafe extern "C" fn cljvm_numbers_min(a: u64, b: u64) -> u64 {
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_quotient(a: u64, b: u64) -> u64 {
-    ((num_to_f64(a) / num_to_f64(b)).trunc()).to_bits()
+    encode_num(value_repr::num_quot(decode_num(a), decode_num(b)))
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_remainder(a: u64, b: u64) -> u64 {
-    (num_to_f64(a) % num_to_f64(b)).to_bits()
+    encode_num(value_repr::num_rem(decode_num(a), decode_num(b)))
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_abs(a: u64) -> u64 {
-    num_to_f64(a).abs().to_bits()
+    match decode_num(a) {
+        Num::Long(v) => box_long(v.abs()),
+        Num::Double(d) => nanbox_double(d.abs()),
+    }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_identity(a: u64) -> u64 { a }
@@ -1209,57 +1540,57 @@ pub unsafe extern "C" fn cljvm_numbers_isInfinite(a: u64) -> u64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_not(a: u64) -> u64 {
     let n = num_to_f64(a) as i64;
-    ((!n) as f64).to_bits()
+    box_long(!n)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_and(a: u64, b: u64) -> u64 {
     let (x, y) = (num_to_f64(a) as i64, num_to_f64(b) as i64);
-    ((x & y) as f64).to_bits()
+    box_long(x & y)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_or(a: u64, b: u64) -> u64 {
     let (x, y) = (num_to_f64(a) as i64, num_to_f64(b) as i64);
-    ((x | y) as f64).to_bits()
+    box_long(x | y)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_xor(a: u64, b: u64) -> u64 {
     let (x, y) = (num_to_f64(a) as i64, num_to_f64(b) as i64);
-    ((x ^ y) as f64).to_bits()
+    box_long(x ^ y)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_andNot(a: u64, b: u64) -> u64 {
     let (x, y) = (num_to_f64(a) as i64, num_to_f64(b) as i64);
-    ((x & !y) as f64).to_bits()
+    box_long(x & !y)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_shiftLeft(a: u64, b: u64) -> u64 {
     let (x, y) = (num_to_f64(a) as i64, num_to_f64(b) as i64);
-    ((x << (y & 63)) as f64).to_bits()
+    box_long(x << (y & 63))
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_shiftRight(a: u64, b: u64) -> u64 {
     let (x, y) = (num_to_f64(a) as i64, num_to_f64(b) as i64);
-    ((x >> (y & 63)) as f64).to_bits()
+    box_long(x >> (y & 63))
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_unsignedShiftRight(a: u64, b: u64) -> u64 {
     let (x, y) = (num_to_f64(a) as u64, num_to_f64(b) as i64);
-    ((x >> (y & 63)) as i64 as f64).to_bits()
+    box_long((x >> (y & 63)) as i64)
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_clearBit(a: u64, b: u64) -> u64 {
     let (x, y) = (num_to_f64(a) as i64, num_to_f64(b) as i64);
-    ((x & !(1i64 << (y & 63))) as f64).to_bits()
+    box_long(x & !(1i64 << (y & 63)))
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_setBit(a: u64, b: u64) -> u64 {
     let (x, y) = (num_to_f64(a) as i64, num_to_f64(b) as i64);
-    ((x | (1i64 << (y & 63))) as f64).to_bits()
+    box_long(x | (1i64 << (y & 63)))
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_flipBit(a: u64, b: u64) -> u64 {
     let (x, y) = (num_to_f64(a) as i64, num_to_f64(b) as i64);
-    ((x ^ (1i64 << (y & 63))) as f64).to_bits()
+    box_long(x ^ (1i64 << (y & 63)))
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_testBit(a: u64, b: u64) -> u64 {
@@ -1287,7 +1618,7 @@ pub unsafe extern "C" fn cljvm_numbers_isZero(n_bits: u64) -> u64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_nth(coll_bits: u64, idx_bits: u64) -> u64 {
     let ids = heap_type_ids();
-    let idx = f64::from_bits(idx_bits) as i64;
+    let idx = arg_to_i64(idx_bits);
     if idx < 0 {
         eprintln!("[cljvm-stub] RT.nth idx={idx} negative — nil");
         return nanbox_nil();
@@ -1336,7 +1667,7 @@ pub unsafe extern "C" fn cljvm_rt_nth_3(
     coll_bits: u64, idx_bits: u64, not_found_bits: u64,
 ) -> u64 {
     let ids = heap_type_ids();
-    let idx = f64::from_bits(idx_bits) as i64;
+    let idx = arg_to_i64(idx_bits);
     if idx < 0 { return not_found_bits; }
     match nanbox_tag(coll_bits) {
         Some(TAG_NIL) => not_found_bits,
@@ -1371,7 +1702,7 @@ pub unsafe extern "C" fn cljvm_rt_nextID() -> u64 {
     use std::sync::atomic::{AtomicI64, Ordering};
     static NEXT_ID: AtomicI64 = AtomicI64::new(1);
     let n = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    (n as f64).to_bits()
+    box_long(n)
 }
 
 /// `clojure.lang.RT.cons(Object x, Object seq)` — allocate a new Cons cell
@@ -1637,32 +1968,24 @@ pub unsafe extern "C" fn cljvm_rt_count(bits: u64) -> u64 {
                 0
             } else {
                 let type_id = unsafe { ptr.cast::<u16>().read_unaligned() } as usize;
-                if type_id == ids.cons {
-                    // Walk rest-chain. Each rest is either another Cons or nil.
+                if type_id == ids.cons || type_id == ids.lazy_seq {
+                    // Generic seq walk: `seq` normalizes/forces the head and
+                    // `next` forces each subsequent step, so this counts
+                    // both plain cons chains and lazy seqs (e.g. the result
+                    // of `map`/`filter`) without assuming the rest is a cons.
                     let mut count: i64 = 0;
-                    let mut cur = bits;
+                    let mut cur = unsafe { cljvm_rt_seq(bits) };
                     loop {
                         match nanbox_tag(cur) {
                             Some(TAG_NIL) => break,
-                            Some(TAG_PTR) => {
+                            _ => {
                                 let p = nanbox_payload(cur) as *const u8;
                                 if p.is_null() {
                                     break;
                                 }
-                                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons {
-                                    panic!(
-                                        "clojure-jvm: RT.count: cons rest pointed at \
-                                         non-cons heap type_id {tid}"
-                                    );
-                                }
                                 count += 1;
-                                cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
+                                cur = unsafe { cljvm_rt_next(cur) };
                             }
-                            _ => panic!(
-                                "clojure-jvm: RT.count: cons rest is non-pointer NanBox \
-                                 (bits 0x{cur:x})"
-                            ),
                         }
                     }
                     count
@@ -1699,7 +2022,7 @@ pub unsafe extern "C" fn cljvm_rt_count(bits: u64) -> u64 {
             0
         }
     };
-    (n as f64).to_bits()
+    box_long(n)
 }
 
 /// `clojure.lang.RT.subvec(Object v, int start, int end)` — return a
@@ -1709,8 +2032,8 @@ pub unsafe extern "C" fn cljvm_rt_count(bits: u64) -> u64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_subvec(v_bits: u64, start_bits: u64, end_bits: u64) -> u64 {
     let ids = heap_type_ids();
-    let start = f64::from_bits(start_bits) as usize;
-    let end = f64::from_bits(end_bits) as usize;
+    let start = arg_to_i64(start_bits) as usize;
+    let end = arg_to_i64(end_bits) as usize;
     if end < start {
         panic!("clojure-jvm: RT.subvec — end ({end}) < start ({start})");
     }
@@ -2409,6 +2732,15 @@ pub unsafe extern "C" fn cljvm_rt_first(bits: u64) -> u64 {
                 // (first "abc") is treated as nil — Java strings ARE
                 // seqable into chars, but we don't have chars yet.
                 nanbox_nil()
+            } else if type_id == ids.lazy_seq {
+                // Force to a concrete seq (nil or cons) via RT.seq, then
+                // take its first — mirrors Java's `RT.first` calling
+                // `seq(coll)` before reading the head.
+                let s = unsafe { cljvm_rt_seq(bits) };
+                match nanbox_tag(s) {
+                    Some(TAG_NIL) => nanbox_nil(),
+                    _ => unsafe { cljvm_rt_first(s) },
+                }
             } else {
                 panic!("clojure-jvm: RT.first on unsupported heap type_id {type_id}");
             }
@@ -2523,8 +2855,24 @@ pub unsafe extern "C" fn cljvm_inst_compareAndSet(_recv: u64, _old: u64, _new: u
     eprintln!("[cljvm-stub] (.compareAndSet) not yet implemented");     return nanbox_nil();
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_inst_deref(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.deref) not yet implemented");     return nanbox_nil();
+pub unsafe extern "C" fn cljvm_inst_deref(recv: u64) -> u64 {
+    let ids = heap_type_ids();
+    if let Some(TAG_PTR) = nanbox_tag(recv) {
+        let raw = nanbox_payload(recv) as *const u8;
+        if !raw.is_null() {
+            let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            // `@(reduced x)` → x.
+            if type_id == ids.reduced {
+                return unsafe { reduced_value(recv) };
+            }
+            // `@(delay …)` → forced value.
+            if type_id == ids.delay {
+                return unsafe { cljvm_delay_force(recv) };
+            }
+        }
+    }
+    eprintln!("[cljvm-stub] (.deref) on unsupported receiver bits 0x{recv:x} — nil");
+    nanbox_nil()
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_iterator(_recv: u64) -> u64 {
@@ -2856,7 +3204,7 @@ pub unsafe extern "C" fn cljvm_rt_contains(coll_bits: u64, key_bits: u64) -> u64
             if tid == ids.vector {
                 if !nanbox_tag(key_bits).is_none() { return nanbox_bool(false); }
                 let n = unsafe { p.add(8).cast::<u64>().read_unaligned() } as i64;
-                let idx = f64::from_bits(key_bits) as i64;
+                let idx = arg_to_i64(key_bits);
                 return nanbox_bool(idx >= 0 && idx < n);
             }
             if tid == ids.set {
@@ -2903,7 +3251,7 @@ pub unsafe extern "C" fn cljvm_rt_get_3(coll_bits: u64, key_bits: u64, not_found
             if tid == ids.vector {
                 if !nanbox_tag(key_bits).is_none() { return not_found; }
                 let n = unsafe { p.add(8).cast::<u64>().read_unaligned() } as i64;
-                let idx = f64::from_bits(key_bits) as i64;
+                let idx = arg_to_i64(key_bits);
                 if idx < 0 || idx >= n { return not_found; }
                 return unsafe {
                     p.add(16 + (idx as usize) * 8).cast::<u64>().read_unaligned()
@@ -3193,6 +3541,10 @@ unsafe fn equiv_impl(a: u64, b: u64) -> bool {
     if a_type != b_type {
         return false;
     }
+    if a_type == ids.long {
+        // Two distinct boxed-Long cells are `=` iff they hold the same value.
+        return unsafe { unbox_long(a) == unbox_long(b) };
+    }
     if a_type == ids.string {
         // varlen_bytes: count at offset 8, bytes at offset 16.
         let a_count = unsafe { a_ptr.add(8).cast::<u64>().read_unaligned() } as usize;
@@ -3260,6 +3612,16 @@ unsafe fn equiv_impl(a: u64, b: u64) -> bool {
         let b_set = unsafe { &*b_arc };
         return a_set.equiv(b_set);
     }
+    if a_type == ids.namespace || a_type == ids.var {
+        // Both cells hold a leaked `Arc::as_ptr` at offset 8. Namespaces are
+        // interned in the global registry and each Var is a single Arc, so
+        // canonical instances share that raw pointer — pointer equality is
+        // value equality. This is what makes `(= ns (.ns v))` in `ns-publics`
+        // hold for two freshly-boxed cells that name the same namespace.
+        let a_arc = unsafe { a_ptr.add(8).cast::<u64>().read_unaligned() };
+        let b_arc = unsafe { b_ptr.add(8).cast::<u64>().read_unaligned() };
+        return a_arc == b_arc;
+    }
     false
 }
 
@@ -3282,7 +3644,7 @@ pub unsafe extern "C" fn cljvm_util_compare(a_bits: u64, b_bits: u64) -> u64 {
         std::cmp::Ordering::Equal => 0,
         std::cmp::Ordering::Greater => 1,
     };
-    (n as f64).to_bits()
+    box_long(n)
 }
 
 /// `clojure.lang.Util.identical(a, b)` — Java reference equality.
@@ -3358,6 +3720,61 @@ pub unsafe extern "C" fn cljvm_rt_seq(bits: u64) -> u64 {
                     }
                     cur_root.get()
                 })
+            } else if type_id == ids.map {
+                // Map → seq of `[k v]` MapEntry vectors (Java's `RT.seq`
+                // on an IPersistentMap). `(key e)`/`(val e)` read the 2-elem
+                // vector's slots. Order is the map's iteration order.
+                let arc_ptr = unsafe { ptr.add(8).cast::<u64>().read_unaligned() }
+                    as *const crate::lang::persistent_hash_map::PersistentHashMap;
+                unsafe { Arc::increment_strong_count(arc_ptr) };
+                let m = unsafe { Arc::from_raw(arc_ptr) };
+                // Snapshot the (Object, Object) pairs first: they're Rust
+                // Arcs, so they stay live across the cell allocations below
+                // even if those trigger GC.
+                let pairs: Vec<(Object, Object)> = m.iter().collect();
+                let n = pairs.len();
+                if n == 0 {
+                    return nanbox_nil();
+                }
+                dynobj::roots::with_scope(n + 1, |scope| {
+                    let tail = scope.root::<()>(nanbox_nil());
+                    for (k, v) in pairs.into_iter() {
+                        let entry = Object::Vector(
+                            crate::lang::persistent_vector::PersistentVector::create(
+                                vec![k, v],
+                            ),
+                        );
+                        let entry_bits =
+                            crate::lang::compiler::with_active_session_encode_object(&entry);
+                        let e = scope.root::<()>(entry_bits);
+                        let new_tail = unsafe { cljvm_rt_cons(e.get(), tail.get()) };
+                        tail.set(new_tail);
+                    }
+                    tail.get()
+                })
+            } else if type_id == ids.set {
+                // Set → seq of its elements (Java's `RT.seq` on an
+                // IPersistentSet). Same GC-safe snapshot-then-cons pattern.
+                let arc_ptr = unsafe { ptr.add(8).cast::<u64>().read_unaligned() }
+                    as *const crate::lang::persistent_hash_set::PersistentHashSet;
+                unsafe { Arc::increment_strong_count(arc_ptr) };
+                let s = unsafe { Arc::from_raw(arc_ptr) };
+                let elems: Vec<Object> = s.iter().collect();
+                let n = elems.len();
+                if n == 0 {
+                    return nanbox_nil();
+                }
+                dynobj::roots::with_scope(n + 1, |scope| {
+                    let tail = scope.root::<()>(nanbox_nil());
+                    for e in elems.into_iter() {
+                        let e_bits =
+                            crate::lang::compiler::with_active_session_encode_object(&e);
+                        let er = scope.root::<()>(e_bits);
+                        let new_tail = unsafe { cljvm_rt_cons(er.get(), tail.get()) };
+                        tail.set(new_tail);
+                    }
+                    tail.get()
+                })
             } else if type_id == ids.string {
                 // String → seq of Character. Bootstrap doesn't need this
                 // path yet; surface loudly so callers see what to add.
@@ -3414,7 +3831,18 @@ pub unsafe extern "C" fn cljvm_rt_next(bits: u64) -> u64 {
             }
             let type_id = unsafe { ptr.cast::<u16>().read_unaligned() } as usize;
             if type_id == ids.cons {
-                unsafe { ptr.add(16).cast::<u64>().read_unaligned() }
+                // `next` returns a *seq* (Java forces one step), so route
+                // the cons tail through RT.seq: a plain cons tail returns
+                // itself, a nil tail returns nil, and a lazy-seq tail gets
+                // forced. Without this, `(next coll)` on a one-element seq
+                // backed by a lazy rest would return a non-nil unrealized
+                // seq instead of nil.
+                let tail = unsafe { ptr.add(16).cast::<u64>().read_unaligned() };
+                unsafe { cljvm_rt_seq(tail) }
+            } else if type_id == ids.lazy_seq {
+                // Force to a concrete seq, then take its next.
+                let s = unsafe { cljvm_rt_seq(bits) };
+                unsafe { cljvm_rt_next(s) }
             } else if type_id == ids.vector {
                 // Vector → seq of items[1..count): build a cons-list so
                 // callers see a Seq, matching upstream's `RT.next` which
@@ -3462,8 +3890,10 @@ pub unsafe extern "C" fn cljvm_rt_next(bits: u64) -> u64 {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_var_bind_root(var_ptr: u64, val_bits: u64) -> u64 {
     let v: &Var = unsafe { &*(var_ptr as *const Var) };
-    let obj = nanbox_to_object(val_bits);
-    v.bind_root(obj);
+    // Store the NanBox straight into the Var's GC-rooted slot: a heap
+    // pointer here is a real root that the collector forwards, so the Var
+    // never dangles after a move.
+    v.bind_root_bits(val_bits);
     val_bits
 }
 
@@ -3471,8 +3901,7 @@ pub unsafe extern "C" fn cljvm_var_bind_root(var_ptr: u64, val_bits: u64) -> u64
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_var_deref(var_ptr: u64) -> u64 {
     let v: &Var = unsafe { &*(var_ptr as *const Var) };
-    let obj = v.deref();
-    object_to_nanbox(&obj)
+    v.deref_bits()
 }
 
 /// Resolve an `Arc<Var>` to a `u64` suitable for baking into IR. Holds onto
@@ -3784,6 +4213,19 @@ fn format_object_for_str(obj: &Object) -> String {
     }
 }
 
+/// Conformance-harness helper: render a result NanBox the way `pr-str`
+/// would, for oracle comparison against real Clojure. Host-side printer
+/// (does not depend on core's `pr-str`), so it works for any eval result.
+/// Heap pointers are decoded via `heap_bits_to_object` so collections /
+/// strings / keywords print as their real value, not `#<host>`.
+pub fn pr_str_bits(bits: u64) -> String {
+    let obj = match nanbox_tag(bits) {
+        Some(TAG_PTR) | Some(TAG_FN) => unsafe { heap_bits_to_object(bits, heap_type_ids()) },
+        _ => nanbox_to_object(bits),
+    };
+    format_object_pr(&obj)
+}
+
 /// Print-readable form (`pr`-style) — strings get wrapping quotes, etc.
 /// Used by `format_object_for_str` when rendering nested elements.
 fn format_object_pr(obj: &Object) -> String {
@@ -4089,6 +4531,156 @@ pub unsafe extern "C" fn cljvm_inst_sym(k_bits: u64) -> u64 {
     nanbox_ptr(raw)
 }
 
+// ── Namespace / Var reflective accessors (the `refer` chain) ─────────────
+//
+// These are the host primitives that `clojure.core`'s `refer` / `ns-map` /
+// `ns-publics` / `the-ns` / `find-ns` bottom out in. With them, the `ns`
+// macro's `(refer 'clojure.core)` runs end-to-end exactly as in Clojure.
+
+/// Decode a `clojure.lang.Namespace` heap cell to its `Arc<Namespace>`.
+unsafe fn namespace_from_bits(
+    bits: u64,
+    ctx: &str,
+) -> std::sync::Arc<crate::lang::namespace::Namespace> {
+    let ids = heap_type_ids();
+    let p = nanbox_payload(bits) as *const u8;
+    if p.is_null() || nanbox_tag(bits) != Some(TAG_PTR) {
+        panic!("clojure-jvm: {ctx}: receiver is not a Namespace (bits 0x{bits:x})");
+    }
+    let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+    if tid != ids.namespace {
+        panic!("clojure-jvm: {ctx}: receiver type_id {tid} is not a Namespace");
+    }
+    unsafe { decode_arc_cell(p) }
+}
+
+/// Decode a `clojure.lang.Var` heap cell to its `Arc<Var>`.
+unsafe fn var_from_bits(bits: u64, ctx: &str) -> std::sync::Arc<crate::lang::var::Var> {
+    let ids = heap_type_ids();
+    let p = nanbox_payload(bits) as *const u8;
+    if p.is_null() || nanbox_tag(bits) != Some(TAG_PTR) {
+        panic!("clojure-jvm: {ctx}: receiver is not a Var (bits 0x{bits:x})");
+    }
+    let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+    if tid != ids.var {
+        panic!("clojure-jvm: {ctx}: receiver type_id {tid} is not a Var");
+    }
+    unsafe { decode_arc_cell(p) }
+}
+
+/// `(.ns v)` — Java `Var.ns`. Returns the Var's home namespace (or nil).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_ns(v_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let var = unsafe { var_from_bits(v_bits, "(.ns v)") };
+    match &var.ns {
+        Some(ns) => unsafe {
+            alloc_arc_cell(
+                ids.namespace,
+                ns.clone(),
+                crate::lang::compiler::with_active_session_root_namespace,
+            )
+        },
+        None => nanbox_nil(),
+    }
+}
+
+/// `(.isPublic v)` — Java `Var.isPublic`. We don't track var privacy
+/// (`:private` meta) yet, so every interned var reports public. Referring a
+/// private core var is harmless: a local `def` still shadows it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_isPublic(v_bits: u64) -> u64 {
+    let _var = unsafe { var_from_bits(v_bits, "(.isPublic v)") };
+    nanbox_bool(true)
+}
+
+/// `(.getMappings ns)` — Java `Namespace.getMappings`. Returns a Clojure map
+/// (Symbol → Var) snapshot of the namespace's bindings. Backs `ns-map`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_getMappings(ns_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let ns = unsafe { namespace_from_bits(ns_bits, "(.getMappings ns)") };
+    let pairs: Vec<(Object, Object)> = ns
+        .mappings_snapshot()
+        .into_iter()
+        .map(|(k, v)| (Object::Symbol(k), v))
+        .collect();
+    let m = crate::lang::persistent_hash_map::PersistentHashMap::create_pairs(pairs);
+    let raw_arc = std::sync::Arc::as_ptr(&m) as u64;
+    crate::lang::compiler::with_active_session_root_map(m);
+    let new_raw = dynlang::gc::gc_alloc_thunk(ids.map as u64, 0);
+    let new_ptr = new_raw as *mut u8;
+    if new_ptr.is_null() {
+        panic!("clojure-jvm: (.getMappings ns): gc_alloc returned null for Map");
+    }
+    unsafe {
+        new_ptr.add(8).cast::<u64>().write_unaligned(raw_arc);
+    }
+    nanbox_encode(TAG_PTR, new_raw & PAYLOAD_MASK)
+}
+
+/// `(. ns (refer sym var))` — Java `Namespace.refer(Symbol, Var)`. Adds the
+/// mapping `sym -> var` to `ns`. Returns nil. The primitive at the bottom of
+/// `clojure.core/refer`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_refer(
+    ns_bits: u64,
+    sym_bits: u64,
+    var_bits: u64,
+) -> u64 {
+    let ids = heap_type_ids();
+    let ns = unsafe { namespace_from_bits(ns_bits, "(. ns (refer sym var))") };
+    let sym = match any_bits_to_object(sym_bits, ids) {
+        Object::Symbol(s) => s,
+        other => panic!("clojure-jvm: Namespace.refer: sym arg is not a Symbol: {other:?}"),
+    };
+    let var = unsafe { var_from_bits(var_bits, "Namespace.refer: var arg") };
+    ns.refer(sym, var);
+    nanbox_nil()
+}
+
+/// `clojure.lang.Namespace/find(Symbol)` — static. Returns the named
+/// namespace's heap cell, or nil. Backs `find-ns`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_ns_find(sym_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let sym = match any_bits_to_object(sym_bits, ids) {
+        Object::Symbol(s) => s,
+        other => panic!("clojure-jvm: Namespace/find: arg is not a Symbol: {other:?}"),
+    };
+    match crate::lang::namespace::Namespace::find(&sym) {
+        Some(ns) => unsafe {
+            alloc_arc_cell(
+                ids.namespace,
+                ns,
+                crate::lang::compiler::with_active_session_root_namespace,
+            )
+        },
+        None => nanbox_nil(),
+    }
+}
+
+/// `clojure.lang.Namespace/findOrCreate(Symbol)` — static. Returns the named
+/// namespace's heap cell, creating it if absent. Backs `create-ns`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_ns_findOrCreate(sym_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let sym = match any_bits_to_object(sym_bits, ids) {
+        Object::Symbol(s) => s,
+        other => {
+            panic!("clojure-jvm: Namespace/findOrCreate: arg is not a Symbol: {other:?}")
+        }
+    };
+    let ns = crate::lang::namespace::Namespace::find_or_create(sym);
+    unsafe {
+        alloc_arc_cell(
+            ids.namespace,
+            ns,
+            crate::lang::compiler::with_active_session_root_namespace,
+        )
+    }
+}
+
 /// `(.setMacro v)` — flag the Var `v` as a macro. `v_bits` is a
 /// `clojure.lang.Var` heap pointer; we read the `*const Var` Raw64
 /// and call `Var.set_macro()` directly. Returns nil.
@@ -4195,7 +4787,7 @@ pub unsafe extern "C" fn cljvm_inst_indexOf(s_bits: u64, sub_bits: u64) -> u64 {
         Some(i) => i as i64,
         None => -1,
     };
-    (n as f64).to_bits()
+    box_long(n)
 }
 
 // ─── clojure.lang.MultiArityFn ────────────────────────────────────────
@@ -4294,6 +4886,9 @@ pub unsafe extern "C" fn cljvm_rt_sq_concat(xss_bits: u64) -> u64 {
     // First flatten every input seq into one big Vec<u64> of items.
     // Each input is either nil, a Cons, or a Vector. Anything else
     // panics — syntax-quote should only produce these shapes.
+    if std::env::var("CLJVM_SQ_TRACE").is_ok() {
+        eprintln!("[sqConcat] xss=0x{xss_bits:x} tag={:?}", nanbox_tag(xss_bits));
+    }
     let ids = heap_type_ids();
     let mut all: Vec<u64> = Vec::new();
     let mut cur = xss_bits;
@@ -4317,7 +4912,9 @@ pub unsafe extern "C" fn cljvm_rt_sq_concat(xss_bits: u64) -> u64 {
                 cur = tail;
             }
             _ => panic!(
-                "clojure-jvm: sqConcat: outer arg must be a seq, got bits 0x{cur:x}"
+                "clojure-jvm: sqConcat: outer arg must be a seq, got bits 0x{cur:x} \
+                 (xss=0x{xss_bits:x}, items_so_far={})",
+                all.len(),
             ),
         }
     }
@@ -4466,7 +5063,7 @@ pub unsafe extern "C" fn cljvm_delay_force(x_bits: u64) -> u64 {
 pub unsafe extern "C" fn cljvm_inst_ChunkBuffer_new1(capacity_bits: u64) -> u64 {
     let ids = heap_type_ids();
     // capacity is a Long NanBox (raw f64 bits round-tripped through i64).
-    let cap = f64::from_bits(capacity_bits) as i64;
+    let cap = arg_to_i64(capacity_bits);
     if cap < 0 {
         panic!("clojure-jvm: ChunkBuffer ctor: negative capacity {cap}");
     }
@@ -4639,6 +5236,78 @@ unsafe fn read_string_heap<'a>(bits: u64, ids: HeapTypeIds, ctx: &str) -> &'a st
     std::str::from_utf8(bytes).expect("String heap bytes must be UTF-8")
 }
 
+// ── clojure.lang.Reduced ───────────────────────────────────────────────
+//
+// `(reduced x)` wraps `x` in a Reduced cell to signal early termination of
+// `reduce`. The cell has one traced Value slot at offset 8. `reduced?` /
+// `RT.isReduced` test for it; `deref` / `@` unwrap it.
+
+/// `(clojure.lang.Reduced. x)` — allocate a Reduced cell wrapping `x`.
+///
+/// # Safety
+/// Runs on a mutator thread (may trigger GC); `x_bits` is rooted across
+/// the allocation.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_Reduced_new1(x_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    dynobj::roots::with_scope(1, |scope| {
+        let x = scope.root::<()>(x_bits);
+        let raw = dynlang::gc::gc_alloc_thunk(ids.reduced as u64, 0);
+        let ptr = raw as *mut u8;
+        if ptr.is_null() {
+            panic!("clojure-jvm: Reduced ctor: gc_alloc returned null");
+        }
+        unsafe {
+            ptr.add(8).cast::<u64>().write_unaligned(x.get());
+        }
+        nanbox_encode(TAG_PTR, raw & PAYLOAD_MASK)
+    })
+}
+
+/// True iff `bits` is a `clojure.lang.Reduced` cell.
+pub fn is_reduced(bits: u64) -> bool {
+    if let Some(TAG_PTR) = nanbox_tag(bits) {
+        let raw = nanbox_payload(bits) as *const u8;
+        if raw.is_null() {
+            return false;
+        }
+        let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+        return type_id == heap_type_ids().reduced;
+    }
+    false
+}
+
+/// Unwrap a Reduced cell's wrapped value.
+///
+/// # Safety
+/// `bits` must be a Reduced cell (`is_reduced(bits)` is true).
+pub unsafe fn reduced_value(bits: u64) -> u64 {
+    let raw = nanbox_payload(bits) as *const u8;
+    unsafe { raw.add(8).cast::<u64>().read_unaligned() }
+}
+
+/// `clojure.lang.RT/isReduced` — backs `(reduced? x)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_isReduced(x_bits: u64) -> u64 {
+    nanbox_bool(is_reduced(x_bits))
+}
+
+/// `(clojure.lang.RT/load "path")` — the runtime resource loader behind
+/// `clojure.core/load`. Reads the embedded source for `path` and evaluates
+/// each form through the active Session, reentrantly (the call happens
+/// while the JIT-compiled `load` fn is on the stack — see
+/// `with_active_session_load_resource`). Returns nil.
+///
+/// # Safety
+/// Runs on a mutator thread inside `Session::eval_form`; reenters the
+/// session via the `ACTIVE_SESSION` thread-local raw pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_rt_load(path_bits: u64) -> u64 {
+    let path = unsafe { read_string_heap(path_bits, heap_type_ids(), "RT.load: path") };
+    crate::lang::compiler::with_active_session_load_resource(path);
+    nanbox_nil()
+}
+
 /// `(.withMeta x m)` — return a value structurally equal to `x` but
 /// carrying metadata `m`. Cons gets its dedicated meta slot updated
 /// (cheap path); everything else gets wrapped in a `WithMeta` heap
@@ -4739,7 +5408,7 @@ pub unsafe extern "C" fn cljvm_inst_with_meta(recv_bits: u64, meta_bits: u64) ->
 ///     (read off the cell's Raw64 discriminator slot).
 pub fn effective_type_id(bits: u64) -> crate::lang::user_types::LogicalTypeId {
     use crate::lang::user_types::{
-        BUILTIN_BOOL, BUILTIN_DOUBLE, BUILTIN_FN, BUILTIN_NIL, user_type_logical,
+        BUILTIN_BOOL, BUILTIN_DOUBLE, BUILTIN_FN, BUILTIN_LONG, BUILTIN_NIL, user_type_logical,
     };
     match nanbox_tag(bits) {
         None => BUILTIN_DOUBLE,
@@ -4756,6 +5425,12 @@ pub fn effective_type_id(bits: u64) -> crate::lang::user_types::LogicalTypeId {
             // shift into the user-type range. For everything else,
             // widen the ObjTypeId to LogicalTypeId space directly.
             let ids = heap_type_ids();
+            // A boxed Long is a TAG_PTR heap cell, but dispatch treats it as
+            // a number under the synthetic BUILTIN_LONG id (parallel to
+            // BUILTIN_DOUBLE for native floats).
+            if cell_type == ids.long {
+                return BUILTIN_LONG;
+            }
             if cell_type == ids.user_instance {
                 let layout = user_instance_layout();
                 let off = layout.user_type_id_offset as isize;
@@ -4881,9 +5556,9 @@ pub fn lookup_protocol_method(method_id: u32, this_bits: u64) -> u64 {
 // in NanBox form (our long encoding). `decode_method_id` reverses that.
 
 fn decode_method_id_bits(method_id_bits: u64) -> u32 {
-    // method_id is encoded the same way `(long N)` is — as a NanBox
-    // double whose bits are `(N as f64).to_bits()`. Reverse:
-    let v = f64::from_bits(method_id_bits) as i64;
+    // method_id is baked as an integer literal — a boxed Long once the flip
+    // lands, or a NanBox double pre-flip. `arg_to_i64` handles both.
+    let v = arg_to_i64(method_id_bits);
     if v < 0 || v > u32::MAX as i64 {
         panic!(
             "clojure-jvm: cljvm_rt_protocol_dispatch: implausible \
@@ -4956,7 +5631,7 @@ pub unsafe extern "C" fn cljvm_rt_satisfies(
     proto_id_bits: u64,
     x_bits: u64,
 ) -> u64 {
-    let pid = f64::from_bits(proto_id_bits) as i64;
+    let pid = arg_to_i64(proto_id_bits);
     if pid < 0 || pid > u32::MAX as i64 {
         panic!(
             "clojure-jvm: cljvm_rt_satisfies: implausible proto_id {pid}"
@@ -4985,7 +5660,7 @@ pub unsafe extern "C" fn cljvm_rt_satisfies(
 // here and registering them in `Compiler::new`. v1 covers 0..4 fields.
 
 fn decode_user_type_id_bits(type_id_bits: u64) -> u32 {
-    let v = f64::from_bits(type_id_bits) as i64;
+    let v = arg_to_i64(type_id_bits);
     if v < 0 || v > u32::MAX as i64 {
         panic!(
             "clojure-jvm: alloc_user_instance: implausible user_type_id {v} \
@@ -5124,7 +5799,7 @@ pub unsafe extern "C" fn cljvm_rt_install_impl(
     method_id_bits: u64,
     fn_handle_bits: u64,
 ) -> u64 {
-    let tid = f64::from_bits(type_id_bits) as i64;
+    let tid = arg_to_i64(type_id_bits);
     if tid < 0 || tid > u32::MAX as i64 {
         panic!(
             "clojure-jvm: cljvm_rt_install_impl: implausible type_id {tid}"
@@ -5132,6 +5807,36 @@ pub unsafe extern "C" fn cljvm_rt_install_impl(
     }
     let mid = decode_method_id_bits(method_id_bits);
     crate::lang::user_types::install_impl(tid as u32, mid, fn_handle_bits);
+    nanbox_nil()
+}
+
+/// `clojure.lang.Namespace/setCurrent(Symbol nsname)` — implements
+/// Clojure's `in-ns`. Returns nil (upstream returns the Namespace;
+/// we don't have a Namespace NanBox encoding yet, and the loader
+/// only cares about the side effect of switching the current ns).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_ns_set_current(sym_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let sym_arc = match nanbox_tag(sym_bits) {
+        Some(TAG_PTR) => {
+            let p = nanbox_payload(sym_bits) as *const u8;
+            let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+            if tid == ids.symbol {
+                let arc_ptr = unsafe { p.add(8).cast::<u64>().read_unaligned() }
+                    as *const crate::lang::symbol::Symbol;
+                unsafe { std::sync::Arc::increment_strong_count(arc_ptr) };
+                unsafe { std::sync::Arc::from_raw(arc_ptr) }
+            } else {
+                panic!(
+                    "clojure-jvm: in-ns: arg must be a Symbol, got type_id {tid}"
+                );
+            }
+        }
+        _ => panic!("clojure-jvm: in-ns: arg must be a Symbol"),
+    };
+    let ns = crate::lang::namespace::Namespace::find_or_create(sym_arc);
+    crate::lang::rt::CURRENT_NS
+        .bind_root(crate::lang::object::Object::Namespace(ns));
     nanbox_nil()
 }
 

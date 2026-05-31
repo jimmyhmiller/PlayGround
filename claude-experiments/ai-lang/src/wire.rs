@@ -151,19 +151,28 @@ unsafe fn encode_heap(rt: &Runtime, ptr: *const u8, out: &mut Vec<u8>) -> Result
     match meta {
         ShapeMeta::Closure {
             code_hash,
-            n_captures,
-            captures_base,
+            captures,
         } => unsafe {
             out.push(1); // kind = Closure
             out.extend_from_slice(code_hash.as_bytes());
+            let n_captures: u32 = captures.len().try_into().map_err(|_| {
+                WireError::Corrupt("closure has more captures than fit in u32")
+            })?;
             out.extend_from_slice(&n_captures.to_be_bytes());
-            for i in 0..n_captures {
-                let off = (captures_base + i * 8) as usize;
-                let slot = ptr.add(off) as *const u64;
-                // v1: all captures are Int.
-                let v = *slot;
-                out.push(0); // kind = Int
-                out.extend_from_slice(&(v as i64).to_be_bytes());
+            // Walk captures in source order. Each is either a pointer
+            // (encoded via the heap-encoder, which lands as
+            // `kind = Closure/Struct/Enum`) or a raw i64 (kind = Int).
+            // The receiver replays the same source order.
+            for cap in &captures {
+                let slot = ptr.add(cap.offset as usize);
+                if cap.is_pointer {
+                    let p = *(slot as *const *const u8);
+                    encode_heap(rt, p, out)?;
+                } else {
+                    let v = *(slot as *const u64);
+                    out.push(0); // kind = Int
+                    out.extend_from_slice(&(v as i64).to_be_bytes());
+                }
             }
             Ok(())
         },
@@ -288,53 +297,72 @@ unsafe fn decode_closure(rt: &Runtime, r: &mut Reader) -> Result<WireValue, Wire
         .type_info_for(&code_hash)
         .ok_or(WireError::MissingShape(code_hash))?;
 
-    // Allocate a fresh closure object via the runtime allocator.
-    let ptr = unsafe { ai_gc_alloc_closure(rt.thread_ptr(), ti) };
-
-    // Populate code_hash, n_captures, captures.
+    // Pull per-capture layout BEFORE allocating the closure so we
+    // can validate the count + compute the header offsets, which
+    // depend on the number of pointer captures.
     let meta = rt
         .shape_meta
         .get(&code_hash)
         .ok_or(WireError::MissingShape(code_hash))?
         .clone();
-    let (captures_base, declared_n) = match meta {
-        ShapeMeta::Closure {
-            captures_base,
-            n_captures,
-            ..
-        } => (captures_base, n_captures),
+    let captures = match meta {
+        ShapeMeta::Closure { captures, .. } => captures,
         _ => return Err(WireError::Corrupt("registered closure hash isn't a Closure shape")),
     };
-    if n_captures != declared_n {
+    if n_captures as usize != captures.len() {
         return Err(WireError::Corrupt(
             "closure wire payload captures-count disagrees with registered shape",
         ));
     }
 
+    // Closure header (code_hash + n_captures + pad) sits AFTER the
+    // value_field slots that hold pointer captures. Compute its
+    // absolute offset.
+    let ptr_count = captures.iter().filter(|c| c.is_pointer).count();
+    let header_base = Full::SIZE + ptr_count * 8;
+
+    // Allocate a fresh closure object via the runtime allocator.
+    let ptr = unsafe { ai_gc_alloc_closure(rt.thread_ptr(), ti) };
+
     unsafe {
-        // code_hash at offset Full::SIZE = 16
-        let dst_hash = ptr.add(Full::SIZE) as *mut u8;
+        let dst_hash = ptr.add(header_base) as *mut u8;
         core::ptr::copy_nonoverlapping(code_hash.as_bytes().as_ptr(), dst_hash, Hash::SIZE);
-        // n_captures at offset Full::SIZE + 32
-        let dst_n = ptr.add(Full::SIZE + 32) as *mut u32;
+        let dst_n = ptr.add(header_base + 32) as *mut u32;
         *dst_n = n_captures;
     }
 
-    // Decode each capture as an Int and store.
-    for i in 0..n_captures {
+    // Decode each capture in source order. Pointer slots get a
+    // heap-pointer (the decoder allocates sub-objects); Int slots
+    // get a raw i64.
+    for cap in &captures {
         let v = unsafe { decode_one(rt, r)? };
-        let int = match v {
-            WireValue::Int(n) => n,
-            _ => {
-                return Err(WireError::Corrupt(
-                    "v1 closure captures must be Int; received heap value",
-                ));
+        let slot_addr = unsafe { ptr.add(cap.offset as usize) };
+        if cap.is_pointer {
+            let heap_ptr = match v {
+                WireValue::Heap(p) => p,
+                WireValue::Int(_) => {
+                    return Err(WireError::Corrupt(
+                        "pointer-typed capture slot received an Int wire value",
+                    ));
+                }
+            };
+            unsafe {
+                let slot = slot_addr as *mut *const u8;
+                *slot = heap_ptr;
             }
-        };
-        let off = (captures_base + i * 8) as usize;
-        unsafe {
-            let slot = ptr.add(off) as *mut i64;
-            *slot = int;
+        } else {
+            let int = match v {
+                WireValue::Int(n) => n,
+                _ => {
+                    return Err(WireError::Corrupt(
+                        "Int-typed capture slot received a heap wire value",
+                    ));
+                }
+            };
+            unsafe {
+                let slot = slot_addr as *mut i64;
+                *slot = int;
+            }
         }
     }
 

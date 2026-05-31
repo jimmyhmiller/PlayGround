@@ -1,0 +1,24 @@
+// Fetch a JSON API and extract a field — the full story: HTTP(S) over
+// real libcurl + a JSON parser written in ai-lang + the `?` error
+// operator, none of it backed by a Rust shim.
+//
+//   ai-lang add examples/http_json_demo.ail
+//   ai-lang run main
+//
+// `http_get_with_headers(...)?` makes the request (the GitHub API needs a
+// User-Agent) and short-circuits with an Err if it fails; `json_field`
+// parses the body with the ai-lang JSON parser and pulls out a path.
+// Because both produce `Result<String, String>`, `repo_name` just threads
+// them with `?` and returns the extracted field.
+
+def repo_name() -> Result<String, String> = {
+    let body = http_get_with_headers(
+        "https://api.github.com/repos/rust-lang/rust", "User-Agent: ai-lang")?;
+    json_field(body, "full_name")
+}
+
+def main() -> Int =
+    match repo_name() {
+        Ok(name) => println(string_concat("repo full_name = ", name)),
+        Err(e) => println(string_concat("error: ", e))
+    }

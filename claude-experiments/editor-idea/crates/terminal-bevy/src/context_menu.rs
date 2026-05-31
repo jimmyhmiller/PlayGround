@@ -95,6 +95,7 @@ fn context_open_close(
     buttons: Res<ButtonInput<MouseButton>>,
     mut keys: MessageReader<KeyboardInput>,
     sidebar: Res<Sidebar>,
+    viewport: Res<pane_bevy::PaneViewport>,
     mut menu: ResMut<ContextMenu>,
     mut consumed: ResMut<InputConsumed>,
     panes: Query<(Entity, &PaneRect, &Visibility, Has<PanePinned>), With<PaneTag>>,
@@ -128,6 +129,10 @@ fn context_open_close(
         if pt.x < sidebar.width {
             return;
         }
+        // PaneRect lives in canvas-space; convert the cursor into the
+        // same frame before hit-testing, otherwise panning/zooming the
+        // canvas makes the radial menu open on top of visible panes.
+        let pt_canvas = viewport.window_to_canvas(pt);
         // Only consider visible panes; include pinned so the user can
         // right-click them to unpin.
         let visible: Vec<(Entity, PaneRect, bool)> = panes
@@ -142,13 +147,13 @@ fn context_open_close(
             .filter(|(_, _, pinned)| !pinned)
             .map(|(e, r, _)| (*e, *r))
             .collect();
-        let target = topmost_pane_at(pt, &unpinned_rects).or_else(|| {
+        let target = topmost_pane_at(pt_canvas, &unpinned_rects).or_else(|| {
             let pinned_rects: Vec<(Entity, PaneRect)> = visible
                 .iter()
                 .filter(|(_, _, pinned)| *pinned)
                 .map(|(e, r, _)| (*e, *r))
                 .collect();
-            topmost_pane_at(pt, &pinned_rects)
+            topmost_pane_at(pt_canvas, &pinned_rects)
         });
         let Some(target) = target else {
             // Miss every pane — let the radial menu handle the click.

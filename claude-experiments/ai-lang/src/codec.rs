@@ -96,6 +96,65 @@ pub fn decode_type(bytes: &[u8]) -> Result<Type, DecodeError> {
     Ok(t)
 }
 
+/// Encode an extern's wire-shippable signature: `name`, parameter
+/// types, return type, and optional library. Externs are NOT
+/// content-addressed (they bind to a host/C symbol resolved at install
+/// time), so when shipping code that calls an extern, the requirement
+/// must travel alongside the code so the receiver can declare and
+/// resolve it (or fail clearly when the library/symbol is unavailable).
+pub fn encode_extern(
+    name: &str,
+    params: &[Type],
+    ret: &Type,
+    library: Option<&str>,
+    variadic: bool,
+) -> Vec<u8> {
+    let mut buf = Vec::new();
+    write_str(&mut buf, name);
+    write_u32(&mut buf, params.len() as u32);
+    for p in params {
+        write_type(&mut buf, p);
+    }
+    write_type(&mut buf, ret);
+    match library {
+        None => buf.push(0),
+        Some(lib) => {
+            buf.push(1);
+            write_str(&mut buf, lib);
+        }
+    }
+    buf.push(if variadic { 1 } else { 0 });
+    buf
+}
+
+/// Decode an extern signature produced by [`encode_extern`]. Returns
+/// `(name, params, ret, library, variadic)`.
+pub fn decode_extern(
+    bytes: &[u8],
+) -> Result<(String, Vec<Type>, Type, Option<String>, bool), DecodeError> {
+    let mut r = Reader::new(bytes);
+    let name = r.read_str()?;
+    let n = r.read_u32()? as usize;
+    let mut params = Vec::with_capacity(n);
+    for _ in 0..n {
+        params.push(read_type(&mut r)?);
+    }
+    let ret = read_type(&mut r)?;
+    let library = match r.read_u8()? {
+        0 => None,
+        1 => Some(r.read_str()?),
+        b => {
+            return Err(DecodeError::UnknownTag {
+                kind: "extern library option",
+                tag: format!("{}", b),
+            });
+        }
+    };
+    let variadic = r.read_bool()?;
+    r.finish()?;
+    Ok((name, params, ret, library, variadic))
+}
+
 pub fn decode_expr(bytes: &[u8]) -> Result<Expr, DecodeError> {
     let mut r = Reader::new(bytes);
     let e = read_expr(&mut r)?;
@@ -219,6 +278,12 @@ fn write_expr(buf: &mut Vec<u8>, e: &Expr) {
             write_tag(buf, "IntLit");
             write_i64(buf, *n);
         }
+        Expr::FloatLit(x) => {
+            write_tag(buf, "FloatLit");
+            // Serialize the exact f64 bit-pattern (deterministic; no
+            // rounding) so the content hash is stable.
+            write_i64(buf, x.to_bits() as i64);
+        }
         Expr::BoolLit(b) => {
             write_tag(buf, "BoolLit");
             write_bool(buf, *b);
@@ -317,6 +382,23 @@ fn write_expr(buf: &mut Vec<u8>, e: &Expr) {
             write_expr(buf, then_branch);
             write_expr(buf, else_branch);
         }
+        Expr::Try {
+            expr,
+            enum_ref,
+            ok_index,
+            err_index,
+        } => {
+            write_tag(buf, "Try");
+            write_expr(buf, expr);
+            write_hash(buf, enum_ref);
+            write_u32(buf, *ok_index);
+            write_u32(buf, *err_index);
+        }
+        Expr::Defer { cleanup, body } => {
+            write_tag(buf, "Defer");
+            write_expr(buf, cleanup);
+            write_expr(buf, body);
+        }
     }
     // INVARIANT: every variant of Expr must have an arm here. Adding a new
     // variant without updating this match will fail compilation (Rust enforces
@@ -328,6 +410,7 @@ fn read_expr(r: &mut Reader) -> Result<Expr, DecodeError> {
     let tag = r.read_str()?;
     Ok(match tag.as_str() {
         "IntLit" => Expr::IntLit(r.read_i64()?),
+        "FloatLit" => Expr::FloatLit(f64::from_bits(r.read_i64()? as u64)),
         "BoolLit" => Expr::BoolLit(r.read_bool()?),
         "StringLit" => Expr::StringLit(r.read_str()?),
         "LocalVar" => Expr::LocalVar(r.read_u32()?),
@@ -411,6 +494,23 @@ fn read_expr(r: &mut Reader) -> Result<Expr, DecodeError> {
                 then_branch,
                 else_branch,
             }
+        }
+        "Try" => {
+            let expr = Box::new(read_expr(r)?);
+            let enum_ref = r.read_hash()?;
+            let ok_index = r.read_u32()?;
+            let err_index = r.read_u32()?;
+            Expr::Try {
+                expr,
+                enum_ref,
+                ok_index,
+                err_index,
+            }
+        }
+        "Defer" => {
+            let cleanup = Box::new(read_expr(r)?);
+            let body = Box::new(read_expr(r)?);
+            Expr::Defer { cleanup, body }
         }
         _ => {
             return Err(DecodeError::UnknownTag {

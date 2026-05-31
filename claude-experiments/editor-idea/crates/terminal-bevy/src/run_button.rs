@@ -44,11 +44,12 @@ use bevy::sprite::Anchor;
 use bevy::text::{LineHeight, TextBounds};
 use pane_bevy::{
     focus_text_input, spawn_text_input, FocusedTextInput, PaneContentNoClip, PaneContentPressed,
-    PaneHotZones, PaneKindMarker, PaneKindSpec, PaneRect, PaneRegistry, PaneTag, PaneTitle,
-    TextInput, TextInputEvent, TextInputStyle,
+    PaneHotZones, PaneKindMarker, PaneKindSpec, PaneProject, PaneRect, PaneRegistry, PaneTag,
+    PaneTitle, TextInput, TextInputEvent, TextInputStyle,
 };
 use serde_json::Value;
 
+use crate::projects::Projects;
 use crate::{MonoFont, MonoMetrics, FONT_SIZE};
 
 pub const PANE_KIND: &str = "run-button";
@@ -108,6 +109,9 @@ struct RunButtonChrome {
     command_label: Entity,
     command_input: Entity,
     command_input_bg: Entity,
+    cwd_label: Entity,
+    cwd_input: Entity,
+    cwd_input_bg: Entity,
     save_btn_bg: Entity,
     save_btn_text: Entity,
 
@@ -210,7 +214,9 @@ const TITLE_LABEL_Y: f32 = FORM_PAD_Y_TOP;
 const TITLE_INPUT_Y: f32 = TITLE_LABEL_Y;
 const COMMAND_LABEL_Y: f32 = TITLE_LABEL_Y + FORM_ROW_H + FORM_ROW_GAP;
 const COMMAND_INPUT_Y: f32 = COMMAND_LABEL_Y;
-const SAVE_BTN_Y: f32 = COMMAND_LABEL_Y + FORM_ROW_H + FORM_ROW_GAP;
+const CWD_LABEL_Y: f32 = COMMAND_LABEL_Y + FORM_ROW_H + FORM_ROW_GAP;
+const CWD_INPUT_Y: f32 = CWD_LABEL_Y;
+const SAVE_BTN_Y: f32 = CWD_LABEL_Y + FORM_ROW_H + FORM_ROW_GAP;
 
 const SAVE_BTN_W: f32 = 70.0;
 const SAVE_BTN_H: f32 = 24.0;
@@ -251,7 +257,7 @@ fn register_run_button_kind(mut registry: ResMut<PaneRegistry>) {
         kind: PANE_KIND,
         display_name: "Run",
         radial_icon: Some("▶"),
-        default_size: Vec2::new(380.0, 150.0),
+        default_size: Vec2::new(380.0, 188.0),
         spawn: run_button_spawn_from_config,
         snapshot: run_button_snapshot,
         on_close: Some(run_button_on_close),
@@ -291,6 +297,17 @@ fn run_button_spawn_from_config(
         .get("cwd")
         .and_then(|v| v.as_str())
         .map(PathBuf::from)
+        .or_else(|| {
+            // New (non-restore) pane in a project: default to the
+            // project's remembered root, so a Run pane drops into the
+            // same place a fresh terminal would. Restores always honor
+            // the snapshotted cwd above.
+            let pid = world.get::<PaneProject>(entity).map(|p| p.0)?;
+            world
+                .get_resource::<Projects>()?
+                .default_cwd_of(pid)
+                .map(PathBuf::from)
+        })
         .unwrap_or_else(default_cwd);
 
     let font = world
@@ -424,6 +441,68 @@ fn run_button_spawn_from_config(
     };
     world.flush();
     if let Ok(mut e) = world.get_entity_mut(command_input) {
+        e.insert(Visibility::Hidden);
+    }
+
+    // ----- Form: cwd row -----
+    let cwd_label = world
+        .spawn((
+            ChildOf(content_root),
+            Text2d::new("CWD"),
+            TextFont {
+                font: font.clone(),
+                font_size: FORM_LABEL_FONT_SIZE,
+                ..default()
+            },
+            LineHeight::Px(FORM_LABEL_FONT_SIZE * 1.4),
+            TextColor(palette.form_label),
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(FORM_PAD_X, -(CWD_LABEL_Y + FORM_INPUT_PAD_Y), 0.0),
+            Visibility::Hidden,
+        ))
+        .id();
+
+    let cwd_input_bg = world
+        .spawn((
+            ChildOf(content_root),
+            Sprite {
+                color: palette.input_bg,
+                custom_size: Some(Vec2::new(200.0, FORM_ROW_H)),
+                ..default()
+            },
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(FORM_PAD_X + FORM_LABEL_W, -CWD_INPUT_Y, 0.0),
+            Visibility::Hidden,
+        ))
+        .id();
+
+    let cwd_input = {
+        let style = TextInputStyle {
+            font: font.clone(),
+            font_size: FORM_INPUT_FONT_SIZE,
+            line_height: FORM_INPUT_FONT_SIZE * 1.4,
+            cell_width: input_cell_width(measured_cell, FORM_INPUT_FONT_SIZE),
+            color_idle: palette.input_text,
+            color_focused: palette.input_focused,
+            color_caret: palette.caret,
+            color_selection: palette.selection,
+        };
+        let mut commands_queue = world.commands();
+        spawn_text_input(
+            &mut commands_queue,
+            content_root,
+            &cwd.to_string_lossy(),
+            style,
+            200.0,
+            Transform::from_xyz(
+                FORM_PAD_X + FORM_LABEL_W + FORM_INPUT_PAD_X,
+                -(CWD_INPUT_Y + FORM_INPUT_PAD_Y),
+                0.1,
+            ),
+        )
+    };
+    world.flush();
+    if let Ok(mut e) = world.get_entity_mut(cwd_input) {
         e.insert(Visibility::Hidden);
     }
 
@@ -592,6 +671,9 @@ fn run_button_spawn_from_config(
             command_label,
             command_input,
             command_input_bg,
+            cwd_label,
+            cwd_input,
+            cwd_input_bg,
             save_btn_bg,
             save_btn_text,
             play_btn,
@@ -669,6 +751,16 @@ fn hit_command_input_row(local: Vec2, content_w: f32) -> bool {
     )
 }
 
+fn hit_cwd_input_row(local: Vec2, content_w: f32) -> bool {
+    hit_rect(
+        local,
+        FORM_PAD_X + FORM_LABEL_W,
+        CWD_INPUT_Y,
+        input_box_width(content_w),
+        FORM_ROW_H,
+    )
+}
+
 fn hit_details_toggle(local: Vec2) -> bool {
     hit_rect(
         local,
@@ -708,6 +800,10 @@ fn update_run_button_hot_zones(
             zones.push(Rect::from_corners(
                 Vec2::new(input_x0, COMMAND_INPUT_Y),
                 Vec2::new(input_x0 + input_w, COMMAND_INPUT_Y + FORM_ROW_H),
+            ));
+            zones.push(Rect::from_corners(
+                Vec2::new(input_x0, CWD_INPUT_Y),
+                Vec2::new(input_x0 + input_w, CWD_INPUT_Y + FORM_ROW_H),
             ));
         } else {
             // Saved mode: play button always, details toggle when wide.
@@ -859,6 +955,16 @@ fn handle_form_press(
         return;
     }
 
+    if hit_cwd_input_row(local, content_w) {
+        if let Ok(mut ti) = text_inputs.get_mut(chrome.cwd_input) {
+            let local_x =
+                (local.x - (FORM_PAD_X + FORM_LABEL_W + FORM_INPUT_PAD_X)).max(0.0);
+            pane_bevy::click_to_caret(&mut ti, local_x);
+        }
+        focus_text_input(commands, focused, [], Some(chrome.cwd_input));
+        return;
+    }
+
     focus_text_input(commands, focused, [], None);
 }
 
@@ -880,6 +986,9 @@ fn enter_draft(
     }
     if let Ok(mut ti) = text_inputs.get_mut(chrome.command_input) {
         ti.set_text(&rb.command);
+    }
+    if let Ok(mut ti) = text_inputs.get_mut(chrome.cwd_input) {
+        ti.set_text(&rb.cwd.to_string_lossy());
     }
     rb.draft = true;
     focus_text_input(commands, focused, [], Some(chrome.command_input));
@@ -907,8 +1016,16 @@ fn commit_form(
         .get(chrome.command_input)
         .map(|ti| ti.text())
         .unwrap_or_default();
+    let new_cwd = text_inputs
+        .get(chrome.cwd_input)
+        .map(|ti| ti.text())
+        .unwrap_or_default();
 
     rb.command = new_command;
+    let trimmed_cwd = new_cwd.trim();
+    if !trimmed_cwd.is_empty() {
+        rb.cwd = PathBuf::from(trimmed_cwd);
+    }
     rb.draft = false;
     if let Ok(mut t) = titles.get_mut(pane) {
         if t.0 != new_title {
@@ -951,6 +1068,13 @@ fn handle_text_input_events(
                         [],
                         Some(chrome.command_input),
                     );
+                } else if *entity == chrome.command_input {
+                    focus_text_input(
+                        &mut commands,
+                        &mut focused,
+                        [],
+                        Some(chrome.cwd_input),
+                    );
                 } else {
                     commit_form(
                         &mut rb,
@@ -984,6 +1108,9 @@ fn handle_text_input_events(
                 if let Ok(mut ti) = text_inputs.get_mut(chrome.command_input) {
                     ti.set_text(&rb.command);
                 }
+                if let Ok(mut ti) = text_inputs.get_mut(chrome.cwd_input) {
+                    ti.set_text(&rb.cwd.to_string_lossy());
+                }
                 rb.draft = false;
                 focus_text_input(&mut commands, &mut focused, [], None);
             }
@@ -997,7 +1124,10 @@ fn find_pane_for_input(
     input: Entity,
 ) -> Option<Entity> {
     for (pane, _, chrome) in rbs.iter() {
-        if chrome.title_input == input || chrome.command_input == input {
+        if chrome.title_input == input
+            || chrome.command_input == input
+            || chrome.cwd_input == input
+        {
             return Some(pane);
         }
     }
@@ -1175,6 +1305,9 @@ fn sync_run_button_visual(
             chrome.command_label,
             chrome.command_input,
             chrome.command_input_bg,
+            chrome.cwd_label,
+            chrome.cwd_input,
+            chrome.cwd_input_bg,
             chrome.save_btn_bg,
             chrome.save_btn_text,
         ] {
@@ -1191,11 +1324,17 @@ fn sync_run_button_visual(
         if let Ok(mut s) = sprite_q.get_mut(chrome.command_input_bg) {
             s.custom_size = Some(Vec2::new(box_w, FORM_ROW_H));
         }
+        if let Ok(mut s) = sprite_q.get_mut(chrome.cwd_input_bg) {
+            s.custom_size = Some(Vec2::new(box_w, FORM_ROW_H));
+        }
         let inner_w = (box_w - 2.0 * FORM_INPUT_PAD_X).max(20.0);
         if let Ok(mut ti) = input_q.get_mut(chrome.title_input) {
             ti.width = inner_w;
         }
         if let Ok(mut ti) = input_q.get_mut(chrome.command_input) {
+            ti.width = inner_w;
+        }
+        if let Ok(mut ti) = input_q.get_mut(chrome.cwd_input) {
             ti.width = inner_w;
         }
 
@@ -1330,6 +1469,7 @@ fn scroll_run_button_output(
     mut wheel: MessageReader<MouseWheel>,
     mut accum: Local<f32>,
     windows: Query<&Window>,
+    viewport: Res<pane_bevy::PaneViewport>,
     keys: Res<ButtonInput<KeyCode>>,
     panes_q: Query<(Entity, &PaneRect, Option<&Visibility>, &PaneKindMarker), With<PaneTag>>,
     mut rbs: Query<&mut RunButton>,
@@ -1372,7 +1512,8 @@ fn scroll_run_button_output(
         })
         .map(|(e, r, _, _)| (e, *r))
         .collect();
-    let Some(target) = pane_bevy::topmost_pane_at(pt, &visible_rects) else {
+    let Some(target) = pane_bevy::topmost_pane_at(viewport.window_to_canvas(pt), &visible_rects)
+    else {
         return;
     };
     let target_rect = visible_rects

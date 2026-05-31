@@ -1,0 +1,127 @@
+// AST:      {
+// AST-NEXT:   "type": "File",
+// AST-NEXT:   "loc": {
+// AST-NEXT:     "start": {
+// AST-NEXT:       "line": 1,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     },
+// AST-NEXT:     "end": {
+// AST-NEXT:       "line": 2,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     }
+// AST-NEXT:   },
+// AST-NEXT:   "start": 0,
+// AST-NEXT:   "end": 9,
+// AST-NEXT:   "program": {
+// AST-NEXT:     "type": "Program",
+// AST-NEXT:     "loc": {
+// AST-NEXT:       "start": {
+// AST-NEXT:         "line": 1,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       },
+// AST-NEXT:       "end": {
+// AST-NEXT:         "line": 2,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       }
+// AST-NEXT:     },
+// AST-NEXT:     "start": 0,
+// AST-NEXT:     "end": 9,
+// AST-NEXT:     "scopeUid": 0,
+// AST-NEXT:     "interpreter": null,
+// AST-NEXT:     "sourceType": "script",
+// AST-NEXT:     "body": [
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ExpressionStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 1,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 1,
+// AST-NEXT:             "column": 8
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 0,
+// AST-NEXT:         "end": 8,
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "expression": {
+// AST-NEXT:           "type": "TaggedTemplateExpression",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 1,
+// AST-NEXT:               "column": 0
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 1,
+// AST-NEXT:               "column": 7
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 0,
+// AST-NEXT:           "end": 7,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "tag": {
+// AST-NEXT:             "type": "Identifier",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 1,
+// AST-NEXT:                 "column": 0
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 1,
+// AST-NEXT:                 "column": 3
+// AST-NEXT:               },
+// AST-NEXT:               "identifierName": "raw"
+// AST-NEXT:             },
+// AST-NEXT:             "start": 0,
+// AST-NEXT:             "end": 3,
+// AST-NEXT:             "scopeUid": 0,
+// AST-NEXT:             "name": "raw"
+// AST-NEXT:           },
+// AST-NEXT:           "quasi": {
+// AST-NEXT:             "type": "TemplateLiteral",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 1,
+// AST-NEXT:                 "column": 3
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 1,
+// AST-NEXT:                 "column": 7
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             "start": 3,
+// AST-NEXT:             "end": 7,
+// AST-NEXT:             "scopeUid": 0,
+// AST-NEXT:             "quasis": [
+// AST-NEXT:               {
+// AST-NEXT:                 "type": "TemplateElement",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 1,
+// AST-NEXT:                     "column": 4
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 1,
+// AST-NEXT:                     "column": 6
+// AST-NEXT:                   }
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 4,
+// AST-NEXT:                 "end": 6,
+// AST-NEXT:                 "scopeUid": 0,
+// AST-NEXT:                 "tail": true,
+// AST-NEXT:                 "value": {
+// AST-NEXT:                   "cooked": "42",
+// AST-NEXT:                   "raw": "42"
+// AST-NEXT:                 }
+// AST-NEXT:               }
+// AST-NEXT:             ],
+// AST-NEXT:             "expressions": []
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       }
+// AST-NEXT:     ],
+// AST-NEXT:     "directives": []
+// AST-NEXT:   },
+// AST-NEXT:   "comments": []
+// AST-NEXT: }

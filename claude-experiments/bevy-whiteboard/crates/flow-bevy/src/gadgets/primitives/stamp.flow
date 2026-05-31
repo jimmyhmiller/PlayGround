@@ -1,0 +1,39 @@
+# Return-path adapter: lets a node insert itself into the return_path
+# chain so a downstream service's reply walks back through it.
+#
+# Forward (`req`): push self onto return_path, forward the packet. The
+# downstream service that eventually replies will pop and target this
+# node, giving it a chance to react before the reply continues upstream.
+#
+# Reverse (`resp` / `resp_error`): pop self off and re-target the next
+# entry in return_path. The engine's compound-aware resolver picks the
+# right edge based on the new head — internal `Stamp -> X` for inner
+# routing, or an outer reverse edge attached to the enclosing compound
+# for cross-compound replies.
+#
+# Plain `packet` traffic (forward-only data flows) passes through
+# untouched — no push, no pop. So a single Stamp can sit on the input
+# of a composite and handle both request/response peers and pure
+# data peers without branching.
+#
+# This is the only return-path-aware primitive; combined with Reply
+# below, it covers the Worker/Router/Cache/Saga family of patterns
+# that used to be hand-written `L`/`R` adapter nodes.
+node Stamp {
+    rule rev_resp {
+        on p when p.kind == "resp"
+        do { emit p popping to (head(return_path)) }
+    }
+    rule rev_resp_error {
+        on p when p.kind == "resp_error"
+        do { emit p popping to (head(return_path)) }
+    }
+    rule fwd_req {
+        on p when p.kind == "req"
+        do { emit p pushing self to default }
+    }
+    rule fwd_packet {
+        on p when p.kind == "packet"
+        do { emit p to default }
+    }
+}

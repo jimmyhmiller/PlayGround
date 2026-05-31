@@ -1,0 +1,25 @@
+// Program B: an AWS Lambda function written in ai-lang, running as a
+// custom runtime. The whole thing is ai-lang — including the runtime
+// loop that speaks the Lambda Runtime API over HTTP.
+//
+// `lambda_serve` (stdlib) reads AWS_LAMBDA_RUNTIME_API from the
+// environment (AWS sets it), then loops forever: GET the next invocation
+// (reading its request id from a response header), run `handler` on the
+// event body, and POST the result back to the per-invocation endpoint.
+//
+// Deploy sketch (custom runtime on `provided.al2`):
+//   - a `bootstrap` executable whose body is, in effect, `exec ai-lang run main`
+//   - package {bootstrap, the .ai-lang codebase} (zip or container image)
+//   - CreateFunction Runtime=provided.al2, Handler unused
+// Program A (examples/aws_lambda_demo.ail) then invokes it.
+
+// The business logic: map an event (JSON) to a response (JSON).
+def handler(event: String) -> String =
+    match json_field(event, "name") {
+        Ok(name) => str3("{\"greeting\":\"hello ", name, "\"}"),
+        Err(e) => "{\"greeting\":\"hello world\"}"
+    }
+
+// The custom-runtime entry point. A deployed worker's `main` is just
+// `lambda_serve` wrapping the handler in a closure.
+def main() -> Int = lambda_serve(|e: String| handler(e))

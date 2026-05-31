@@ -3,6 +3,9 @@
 //! to `flame-render`.
 
 mod live;
+mod surface;
+
+use crate::surface::Surface;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -275,6 +278,7 @@ struct App {
     /// once per session.
     final_loaded: bool,
     window: Option<Arc<Window>>,
+    surface: Option<Surface>,
     renderer: Option<Renderer>,
     cursor: (f32, f32),
     drag_origin: Option<(f32, f32)>,
@@ -295,6 +299,7 @@ impl App {
             final_loaded: false,
             exit_after: exit_after.map(|d| (std::time::Instant::now(), d)),
             window: None,
+            surface: None,
             renderer: None,
             cursor: (0.0, 0.0),
             drag_origin: None,
@@ -443,7 +448,15 @@ impl App {
             return;
         }
         let Some(window) = self.window.clone() else { return };
-        let mut renderer = pollster::block_on(Renderer::new(window));
+        let size = window.inner_size();
+        let surface = Surface::new(window);
+        let mut renderer = Renderer::new(
+            &surface.device,
+            &surface.queue,
+            surface.format,
+            (size.width, size.height),
+        );
+        self.surface = Some(surface);
 
         if let Some(profile) = self.pending_profile.take() {
             renderer.set_profile(Arc::new(profile));
@@ -538,6 +551,9 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::Resized(size) => {
+                if let Some(s) = &mut self.surface {
+                    s.resize(size.width, size.height);
+                }
                 if let Some(r) = &mut self.renderer {
                     r.resize(size.width, size.height);
                     r.rebuild_instances();
@@ -548,8 +564,8 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::RedrawRequested => {
-                if let Some(r) = &mut self.renderer {
-                    r.render();
+                if let (Some(s), Some(r)) = (self.surface.as_mut(), self.renderer.as_mut()) {
+                    s.present_with(|view| r.render(view));
                 }
             }
 

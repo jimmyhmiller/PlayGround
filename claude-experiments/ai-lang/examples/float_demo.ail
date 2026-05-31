@@ -1,0 +1,40 @@
+// Float demo: f64 arithmetic, Int<->Float conversion, and Float values
+// stored in a StringMap.
+//
+//   ai-lang add examples/float_demo.ail
+//   ai-lang run main
+//
+// Floats are written with a decimal point (`2.0`, `3.14`, `1.0e3`). `+`,
+// `-`, `*`, `/`, and comparisons dispatch on operand type. There's no
+// float printer yet, so we scale and `float_to_int` to show decimals.
+
+def pi() -> Float = 3.14159265
+
+def circle_area(r: Float) -> Float = pi() * r * r
+
+def main() -> Int = {
+    // Area of a circle, shown to 2 decimals (area * 100, truncated).
+    let area = circle_area(2.0);
+    let _p1 = println(string_concat(
+        "circle r=2, area*100 = ",
+        int_to_string(float_to_int(area * 100.0))));
+
+    // Average of three floats, shown to 3 decimals.
+    let avg = (1.5 + 2.5 + 4.0) / 3.0;
+    let _p2 = println(string_concat(
+        "avg(1.5,2.5,4.0)*1000 = ",
+        int_to_string(float_to_int(avg * 1000.0))));
+
+    // StringMap<Float>: a tiny price table. Float values round-trip
+    // through the generic map (boxed + unboxed automatically).
+    let prices =
+        smap_insert(smap_insert(smap_new(), "apple", 1.25), "pear", 2.50);
+    let total =
+        opt_unwrap_or(smap_get(prices, "apple"), 0.0) +
+        opt_unwrap_or(smap_get(prices, "pear"), 0.0);
+    let _p3 = println(string_concat(
+        "apple+pear total*100 = ",
+        int_to_string(float_to_int(total * 100.0))));
+
+    float_to_int(total * 100.0)
+}

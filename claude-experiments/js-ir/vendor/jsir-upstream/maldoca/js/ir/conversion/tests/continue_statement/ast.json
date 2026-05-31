@@ -1,0 +1,434 @@
+// AST:      {
+// AST-NEXT:   "type": "File",
+// AST-NEXT:   "loc": {
+// AST-NEXT:     "start": {
+// AST-NEXT:       "line": 1,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     },
+// AST-NEXT:     "end": {
+// AST-NEXT:       "line": 13,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     }
+// AST-NEXT:   },
+// AST-NEXT:   "start": 0,
+// AST-NEXT:   "end": 124,
+// AST-NEXT:   "program": {
+// AST-NEXT:     "type": "Program",
+// AST-NEXT:     "loc": {
+// AST-NEXT:       "start": {
+// AST-NEXT:         "line": 1,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       },
+// AST-NEXT:       "end": {
+// AST-NEXT:         "line": 13,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       }
+// AST-NEXT:     },
+// AST-NEXT:     "start": 0,
+// AST-NEXT:     "end": 124,
+// AST-NEXT:     "scopeUid": 0,
+// AST-NEXT:     "interpreter": null,
+// AST-NEXT:     "sourceType": "script",
+// AST-NEXT:     "body": [
+// AST-NEXT:       {
+// AST-NEXT:         "type": "WhileStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 1,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 5,
+// AST-NEXT:             "column": 1
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 0,
+// AST-NEXT:         "end": 41,
+// AST-NEXT:         "scopeUid": 1,
+// AST-NEXT:         "test": {
+// AST-NEXT:           "type": "Identifier",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 1,
+// AST-NEXT:               "column": 7
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 1,
+// AST-NEXT:               "column": 8
+// AST-NEXT:             },
+// AST-NEXT:             "identifierName": "a"
+// AST-NEXT:           },
+// AST-NEXT:           "start": 7,
+// AST-NEXT:           "end": 8,
+// AST-NEXT:           "scopeUid": 1,
+// AST-NEXT:           "name": "a"
+// AST-NEXT:         },
+// AST-NEXT:         "body": {
+// AST-NEXT:           "type": "BlockStatement",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 1,
+// AST-NEXT:               "column": 10
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 5,
+// AST-NEXT:               "column": 1
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 10,
+// AST-NEXT:           "end": 41,
+// AST-NEXT:           "scopeUid": 2,
+// AST-NEXT:           "body": [
+// AST-NEXT:             {
+// AST-NEXT:               "type": "IfStatement",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 2,
+// AST-NEXT:                   "column": 2
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 13
+// AST-NEXT:                 }
+// AST-NEXT:               },
+// AST-NEXT:               "start": 14,
+// AST-NEXT:               "end": 34,
+// AST-NEXT:               "scopeUid": 2,
+// AST-NEXT:               "test": {
+// AST-NEXT:                 "type": "Identifier",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 2,
+// AST-NEXT:                     "column": 6
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 2,
+// AST-NEXT:                     "column": 7
+// AST-NEXT:                   },
+// AST-NEXT:                   "identifierName": "b"
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 18,
+// AST-NEXT:                 "end": 19,
+// AST-NEXT:                 "scopeUid": 2,
+// AST-NEXT:                 "name": "b"
+// AST-NEXT:               },
+// AST-NEXT:               "consequent": {
+// AST-NEXT:                 "type": "ContinueStatement",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 3,
+// AST-NEXT:                     "column": 4
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 3,
+// AST-NEXT:                     "column": 13
+// AST-NEXT:                   }
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 25,
+// AST-NEXT:                 "end": 34,
+// AST-NEXT:                 "scopeUid": 2,
+// AST-NEXT:                 "label": null
+// AST-NEXT:               },
+// AST-NEXT:               "alternate": null
+// AST-NEXT:             },
+// AST-NEXT:             {
+// AST-NEXT:               "type": "ExpressionStatement",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 4,
+// AST-NEXT:                   "column": 2
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 4,
+// AST-NEXT:                   "column": 4
+// AST-NEXT:                 }
+// AST-NEXT:               },
+// AST-NEXT:               "start": 37,
+// AST-NEXT:               "end": 39,
+// AST-NEXT:               "scopeUid": 2,
+// AST-NEXT:               "expression": {
+// AST-NEXT:                 "type": "Identifier",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 4,
+// AST-NEXT:                     "column": 2
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 4,
+// AST-NEXT:                     "column": 3
+// AST-NEXT:                   },
+// AST-NEXT:                   "identifierName": "c"
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 37,
+// AST-NEXT:                 "end": 38,
+// AST-NEXT:                 "scopeUid": 2,
+// AST-NEXT:                 "name": "c"
+// AST-NEXT:               }
+// AST-NEXT:             }
+// AST-NEXT:           ],
+// AST-NEXT:           "directives": []
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "LabeledStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 7,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 12,
+// AST-NEXT:             "column": 1
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 43,
+// AST-NEXT:         "end": 123,
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "label": {
+// AST-NEXT:           "type": "Identifier",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 7,
+// AST-NEXT:               "column": 0
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 7,
+// AST-NEXT:               "column": 6
+// AST-NEXT:             },
+// AST-NEXT:             "identifierName": "label0"
+// AST-NEXT:           },
+// AST-NEXT:           "start": 43,
+// AST-NEXT:           "end": 49,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "name": "label0"
+// AST-NEXT:         },
+// AST-NEXT:         "body": {
+// AST-NEXT:           "type": "WhileStatement",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 7,
+// AST-NEXT:               "column": 8
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 12,
+// AST-NEXT:               "column": 1
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 51,
+// AST-NEXT:           "end": 123,
+// AST-NEXT:           "scopeUid": 3,
+// AST-NEXT:           "test": {
+// AST-NEXT:             "type": "Identifier",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 7,
+// AST-NEXT:                 "column": 15
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 7,
+// AST-NEXT:                 "column": 16
+// AST-NEXT:               },
+// AST-NEXT:               "identifierName": "a"
+// AST-NEXT:             },
+// AST-NEXT:             "start": 58,
+// AST-NEXT:             "end": 59,
+// AST-NEXT:             "scopeUid": 3,
+// AST-NEXT:             "name": "a"
+// AST-NEXT:           },
+// AST-NEXT:           "body": {
+// AST-NEXT:             "type": "BlockStatement",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 7,
+// AST-NEXT:                 "column": 18
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 12,
+// AST-NEXT:                 "column": 1
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             "start": 61,
+// AST-NEXT:             "end": 123,
+// AST-NEXT:             "scopeUid": 4,
+// AST-NEXT:             "body": [
+// AST-NEXT:               {
+// AST-NEXT:                 "type": "ExpressionStatement",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 8,
+// AST-NEXT:                     "column": 2
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 8,
+// AST-NEXT:                     "column": 4
+// AST-NEXT:                   }
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 65,
+// AST-NEXT:                 "end": 67,
+// AST-NEXT:                 "scopeUid": 4,
+// AST-NEXT:                 "expression": {
+// AST-NEXT:                   "type": "Identifier",
+// AST-NEXT:                   "loc": {
+// AST-NEXT:                     "start": {
+// AST-NEXT:                       "line": 8,
+// AST-NEXT:                       "column": 2
+// AST-NEXT:                     },
+// AST-NEXT:                     "end": {
+// AST-NEXT:                       "line": 8,
+// AST-NEXT:                       "column": 3
+// AST-NEXT:                     },
+// AST-NEXT:                     "identifierName": "b"
+// AST-NEXT:                   },
+// AST-NEXT:                   "start": 65,
+// AST-NEXT:                   "end": 66,
+// AST-NEXT:                   "scopeUid": 4,
+// AST-NEXT:                   "name": "b"
+// AST-NEXT:                 }
+// AST-NEXT:               },
+// AST-NEXT:               {
+// AST-NEXT:                 "type": "LabeledStatement",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 9,
+// AST-NEXT:                     "column": 2
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 11,
+// AST-NEXT:                     "column": 22
+// AST-NEXT:                   }
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 70,
+// AST-NEXT:                 "end": 121,
+// AST-NEXT:                 "scopeUid": 4,
+// AST-NEXT:                 "label": {
+// AST-NEXT:                   "type": "Identifier",
+// AST-NEXT:                   "loc": {
+// AST-NEXT:                     "start": {
+// AST-NEXT:                       "line": 9,
+// AST-NEXT:                       "column": 2
+// AST-NEXT:                     },
+// AST-NEXT:                     "end": {
+// AST-NEXT:                       "line": 9,
+// AST-NEXT:                       "column": 8
+// AST-NEXT:                     },
+// AST-NEXT:                     "identifierName": "label1"
+// AST-NEXT:                   },
+// AST-NEXT:                   "start": 70,
+// AST-NEXT:                   "end": 76,
+// AST-NEXT:                   "scopeUid": 4,
+// AST-NEXT:                   "name": "label1"
+// AST-NEXT:                 },
+// AST-NEXT:                 "body": {
+// AST-NEXT:                   "type": "WhileStatement",
+// AST-NEXT:                   "loc": {
+// AST-NEXT:                     "start": {
+// AST-NEXT:                       "line": 9,
+// AST-NEXT:                       "column": 10
+// AST-NEXT:                     },
+// AST-NEXT:                     "end": {
+// AST-NEXT:                       "line": 11,
+// AST-NEXT:                       "column": 22
+// AST-NEXT:                     }
+// AST-NEXT:                   },
+// AST-NEXT:                   "start": 78,
+// AST-NEXT:                   "end": 121,
+// AST-NEXT:                   "scopeUid": 5,
+// AST-NEXT:                   "test": {
+// AST-NEXT:                     "type": "Identifier",
+// AST-NEXT:                     "loc": {
+// AST-NEXT:                       "start": {
+// AST-NEXT:                         "line": 9,
+// AST-NEXT:                         "column": 17
+// AST-NEXT:                       },
+// AST-NEXT:                       "end": {
+// AST-NEXT:                         "line": 9,
+// AST-NEXT:                         "column": 18
+// AST-NEXT:                       },
+// AST-NEXT:                       "identifierName": "d"
+// AST-NEXT:                     },
+// AST-NEXT:                     "start": 85,
+// AST-NEXT:                     "end": 86,
+// AST-NEXT:                     "scopeUid": 5,
+// AST-NEXT:                     "name": "d"
+// AST-NEXT:                   },
+// AST-NEXT:                   "body": {
+// AST-NEXT:                     "type": "IfStatement",
+// AST-NEXT:                     "loc": {
+// AST-NEXT:                       "start": {
+// AST-NEXT:                         "line": 10,
+// AST-NEXT:                         "column": 4
+// AST-NEXT:                       },
+// AST-NEXT:                       "end": {
+// AST-NEXT:                         "line": 11,
+// AST-NEXT:                         "column": 22
+// AST-NEXT:                       }
+// AST-NEXT:                     },
+// AST-NEXT:                     "start": 92,
+// AST-NEXT:                     "end": 121,
+// AST-NEXT:                     "scopeUid": 5,
+// AST-NEXT:                     "test": {
+// AST-NEXT:                       "type": "Identifier",
+// AST-NEXT:                       "loc": {
+// AST-NEXT:                         "start": {
+// AST-NEXT:                           "line": 10,
+// AST-NEXT:                           "column": 8
+// AST-NEXT:                         },
+// AST-NEXT:                         "end": {
+// AST-NEXT:                           "line": 10,
+// AST-NEXT:                           "column": 9
+// AST-NEXT:                         },
+// AST-NEXT:                         "identifierName": "c"
+// AST-NEXT:                       },
+// AST-NEXT:                       "start": 96,
+// AST-NEXT:                       "end": 97,
+// AST-NEXT:                       "scopeUid": 5,
+// AST-NEXT:                       "name": "c"
+// AST-NEXT:                     },
+// AST-NEXT:                     "consequent": {
+// AST-NEXT:                       "type": "ContinueStatement",
+// AST-NEXT:                       "loc": {
+// AST-NEXT:                         "start": {
+// AST-NEXT:                           "line": 11,
+// AST-NEXT:                           "column": 6
+// AST-NEXT:                         },
+// AST-NEXT:                         "end": {
+// AST-NEXT:                           "line": 11,
+// AST-NEXT:                           "column": 22
+// AST-NEXT:                         }
+// AST-NEXT:                       },
+// AST-NEXT:                       "start": 105,
+// AST-NEXT:                       "end": 121,
+// AST-NEXT:                       "scopeUid": 5,
+// AST-NEXT:                       "label": {
+// AST-NEXT:                         "type": "Identifier",
+// AST-NEXT:                         "loc": {
+// AST-NEXT:                           "start": {
+// AST-NEXT:                             "line": 11,
+// AST-NEXT:                             "column": 15
+// AST-NEXT:                           },
+// AST-NEXT:                           "end": {
+// AST-NEXT:                             "line": 11,
+// AST-NEXT:                             "column": 21
+// AST-NEXT:                           },
+// AST-NEXT:                           "identifierName": "label0"
+// AST-NEXT:                         },
+// AST-NEXT:                         "start": 114,
+// AST-NEXT:                         "end": 120,
+// AST-NEXT:                         "scopeUid": 5,
+// AST-NEXT:                         "name": "label0"
+// AST-NEXT:                       }
+// AST-NEXT:                     },
+// AST-NEXT:                     "alternate": null
+// AST-NEXT:                   }
+// AST-NEXT:                 }
+// AST-NEXT:               }
+// AST-NEXT:             ],
+// AST-NEXT:             "directives": []
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       }
+// AST-NEXT:     ],
+// AST-NEXT:     "directives": []
+// AST-NEXT:   },
+// AST-NEXT:   "comments": []
+// AST-NEXT: }

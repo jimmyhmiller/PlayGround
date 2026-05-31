@@ -376,6 +376,13 @@ pub fn build_app(initial: &str) -> App {
 
 // ---------- Content-area geometry ----------
 
+/// Legacy: `PaneRect` is now canvas-space directly (the pane entity's
+/// Transform handles zoom). Zoom is ignored; kept so existing call
+/// sites compile.
+fn content_area_size_zoomed(rect: &PaneRect, _zoom: f32) -> Vec2 {
+    content_area_size(rect)
+}
+
 fn content_area_size(rect: &PaneRect) -> Vec2 {
     Vec2::new(
         (rect.size.x - 2.0 * MARGIN).max(0.0),
@@ -421,10 +428,11 @@ fn ensure_caret_visible(
     rect: &PaneRect,
     scroll: &mut EditorScroll,
     cell_width: f32,
+    zoom: f32,
 ) {
     let head = state.selection.primary_range().head;
     let (line, col) = char_to_line_col(&state.doc, head);
-    let content = content_area_size(rect);
+    let content = content_area_size_zoomed(rect, zoom);
     if content.x <= 0.0 || content.y <= 0.0 {
         return;
     }
@@ -452,6 +460,7 @@ fn sync_text(
     font: Res<EditorFont>,
     metrics: Res<EditorMetrics>,
     palette: Res<SyntaxPalette>,
+    pane_zoom: Res<pane_bevy::PaneZoom>,
     mut editors: Query<
         (
             &EditorStateComp,
@@ -468,6 +477,7 @@ fn sync_text(
     children_q: Query<&Children>,
     mut commands: Commands,
 ) {
+    let zoom = pane_zoom.0;
     for (state, rect, chrome, scroll, hl, mut pool, kind) in &mut editors {
         if kind.0 != PANE_KIND {
             continue;
@@ -485,6 +495,7 @@ fn sync_text(
             &mut line_q,
             &children_q,
             &mut commands,
+            zoom,
         );
     }
 }
@@ -502,10 +513,11 @@ fn sync_editor_lines(
     line_q: &mut Query<&mut LineRender>,
     children_q: &Query<&Children>,
     commands: &mut Commands,
+    zoom: f32,
 ) {
     let rope = &state.doc;
     let effective = effective_line_count(rope);
-    let content_size = content_area_size(rect);
+    let content_size = content_area_size_zoomed(rect, zoom);
     let (first, last) = viewport_line_range(content_size.y, scroll.y, effective);
     let cols = max_cols(content_size.x, metrics.cell_width);
     let scroll_cols = (scroll.x / metrics.cell_width).max(0.0) as usize;
@@ -682,6 +694,7 @@ fn sync_content_root(
 fn sync_caret(
     metrics: Res<EditorMetrics>,
     theme: Res<style_bevy::Theme>,
+    pane_zoom: Res<pane_bevy::PaneZoom>,
     editors: Query<
         (&EditorStateComp, &PaneRect, &EditorScroll, &PaneKindMarker),
         With<PaneTag>,
@@ -693,6 +706,7 @@ fn sync_caret(
 ) {
     let caret_color = Color::LinearRgba(theme.color(style_bevy::tokens::CARET));
     let theme_changed = theme.is_changed();
+    let zoom = pane_zoom.0;
     for (caret_entity, parent) in &carets {
         let Ok((state, rect, scroll, kind)) = editors.get(parent.0) else {
             continue;
@@ -703,7 +717,7 @@ fn sync_caret(
         let head = state.0.selection.primary_range().head;
         let (line, col) = char_to_line_col(&state.0.doc, head);
         let caret_x = caret_x_in_line(col, metrics.cell_width);
-        let content = content_area_size(rect);
+        let content = content_area_size_zoomed(rect, zoom);
 
         let x = caret_x - scroll.x;
         let y = line as f32 * LINE_HEIGHT;
@@ -745,6 +759,7 @@ pub fn char_to_line_col(doc: &ropey::Rope, char_idx: usize) -> (usize, usize) {
 fn sync_selection(
     metrics: Res<EditorMetrics>,
     theme: Res<style_bevy::Theme>,
+    pane_zoom: Res<pane_bevy::PaneZoom>,
     editors: Query<
         (
             Entity,
@@ -759,6 +774,7 @@ fn sync_selection(
     existing: Query<(Entity, &SelRect)>,
     mut commands: Commands,
 ) {
+    let zoom = pane_zoom.0;
     for (entity, _) in &existing {
         commands.entity(entity).despawn();
     }
@@ -776,7 +792,7 @@ fn sync_selection(
         let (start_line, start_col) = char_to_line_col(&state.0.doc, from);
         let (end_line, end_col) = char_to_line_col(&state.0.doc, to);
 
-        let content = content_area_size(rect);
+        let content = content_area_size_zoomed(rect, zoom);
         let rope = &state.0.doc;
         for line in start_line..=end_line {
             let line_chars = line_char_len(rope, line);
@@ -837,12 +853,15 @@ fn handle_scroll(
     metrics: Res<EditorMetrics>,
     windows: Query<&Window>,
     keys: Res<ButtonInput<KeyCode>>,
+    pane_zoom: Res<pane_bevy::PaneZoom>,
+    viewport: Res<pane_bevy::PaneViewport>,
     all_panes: Query<(Entity, &PaneRect, Option<&Visibility>), With<PaneTag>>,
     mut editors: Query<
         (Entity, &PaneRect, &EditorStateComp, &mut EditorScroll, &PaneKindMarker),
         With<PaneTag>,
     >,
 ) {
+    let zoom = pane_zoom.0;
     // Cmd+scroll is the host's canvas pan gesture; don't double-scroll.
     if keys.pressed(KeyCode::SuperLeft) || keys.pressed(KeyCode::SuperRight) {
         wheel.clear();
@@ -872,7 +891,8 @@ fn handle_scroll(
         .filter(|(_, _, vis)| !matches!(vis, Some(Visibility::Hidden)))
         .map(|(e, r, _)| (e, *r))
         .collect();
-    let Some(editor) = pane_bevy::topmost_pane_at(pt, &all_rects) else {
+    let Some(editor) = pane_bevy::topmost_pane_at(viewport.window_to_canvas(pt), &all_rects)
+    else {
         return;
     };
     let Ok((_, _, _, _, kind)) = editors.get(editor) else {
@@ -883,7 +903,7 @@ fn handle_scroll(
     }
 
     if let Ok((_, rect, state, mut scroll, _)) = editors.get_mut(editor) {
-        let content_size = content_area_size(rect);
+        let content_size = content_area_size_zoomed(rect, zoom);
         let doc_height = state.0.doc.len_lines() as f32 * LINE_HEIGHT;
         let y_max = (doc_height - content_size.y).max(0.0);
         scroll.y = (scroll.y - dy_px).clamp(0.0, y_max);
@@ -912,11 +932,13 @@ fn handle_input(
     mods: Res<ButtonInput<KeyCode>>,
     focused: Res<FocusedPane>,
     metrics: Option<Res<EditorMetrics>>,
+    pane_zoom: Res<pane_bevy::PaneZoom>,
     mut editors: Query<
         (&mut EditorStateComp, &PaneRect, &mut EditorScroll, &PaneKindMarker),
         With<PaneTag>,
     >,
 ) {
+    let zoom = pane_zoom.0;
     let Some(target) = focused.0 else {
         keys.read().for_each(|_| {});
         return;
@@ -1057,7 +1079,7 @@ fn handle_input(
 
     if state_mutated {
         if let Some(metrics) = metrics {
-            ensure_caret_visible(state, rect, &mut scroll, metrics.cell_width);
+            ensure_caret_visible(state, rect, &mut scroll, metrics.cell_width, zoom);
         }
     }
 }
@@ -1129,6 +1151,7 @@ fn handle_text_select_drag(
     windows: Query<&Window>,
     buttons: Res<ButtonInput<MouseButton>>,
     metrics: Option<Res<EditorMetrics>>,
+    viewport: Res<pane_bevy::PaneViewport>,
     mut editors: Query<
         (
             &mut EditorStateComp,
@@ -1156,13 +1179,14 @@ fn handle_text_select_drag(
     }
     let Ok(window) = windows.single() else { return };
     let Some(pt) = window.cursor_position() else { return };
+    let pt_canvas = viewport.window_to_canvas(pt);
 
     for (mut state_comp, rect, scroll, drag, kind) in &mut editors {
         if kind.0 != PANE_KIND {
             continue;
         }
         let Some(anchor) = drag.0 else { continue };
-        let local = pane_bevy::pt_to_content_local(pt, rect) + Vec2::new(scroll.x, scroll.y);
+        let local = pane_bevy::pt_to_content_local(pt_canvas, rect) + Vec2::new(scroll.x, scroll.y);
         let line = (local.y / LINE_HEIGHT).floor().max(0.0) as usize;
         let col = mouse_col_at_x(local.x, metrics.cell_width);
         let head = char_from_line_col(&state_comp.0, line, col);

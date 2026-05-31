@@ -299,39 +299,66 @@ pub fn walk_jit_ancestor_roots(_jit_fp: *const u8, _visitor: &mut dyn FnMut(*mut
     // FP-chain walking is architecture-specific; no-op on unsupported targets.
 }
 
-/// Walk a thread's JIT frame chain starting at `jit_fp`. Scans
+/// Walk a thread's JIT frame chain starting at `start_fp`. Scans
 /// `SafepointRecord.root_slots` for every JIT frame found in the
-/// chain; **skips non-JIT (Rust / extern) frames** rather than
-/// stopping. Walks until `saved_fp` is null.
+/// chain.
 ///
-/// Used for two cases:
-///   1. **Cross-thread**, by the STW collector for a thread parked
-///      at a JIT safepoint. The published `parked_jit_fp` IS a JIT
-///      frame, and the chain above it is JIT-only until host Rust.
-///   2. **Alloc-triggered, same thread.** When a mutator's
-///      `gc_alloc` overflows the nursery from inside an extern, it
-///      publishes its CURRENT (Rust-frame) FP as `parked_jit_fp`.
-///      The chain looks like trigger_gc → alloc_obj_slow_path →
-///      gc_alloc_thunk → JIT frame. We need to walk past the Rust
-///      frames and scan the JIT frame's stack-map roots — without
-///      this, the JIT-frame spill slots holding live heap pointers
-///      go un-updated when the GC moves their referents.
+/// **Tolerates two starting cases**:
+///   1. `start_fp` is itself the FP of a JIT frame (the safepoint
+///      handler's frame). Walking up immediately finds JIT-caller
+///      frames.
+///   2. `start_fp` is the FP of a Rust frame BELOW a JIT frame
+///      (`trigger_gc` inside an extern called from JIT). Walking
+///      up sees Rust frames first, then the JIT chain.
 ///
-/// Skipping non-JIT frames is safe under the standard AArch64 /
-/// x86_64 FP convention (`[fp]` = saved FP, `[fp+8]` = saved LR)
-/// that both rustc and the JIT honor. The walk terminates when
-/// saved_fp reaches null (top of stack).
+/// The walker traverses the FP chain, scanning every JIT frame it finds
+/// and *traversing through* intervening non-JIT frames. The stop
+/// condition is the JIT-entry fence (`current_jit_entry_fp`), which is
+/// the FP of the Rust frame that made the outermost `Rust → JIT` call on
+/// this thread — exactly the boundary `walk_jit_ancestor_roots` uses.
+///
+/// **Why traverse through non-JIT frames.** A JIT function can call back
+/// into the runtime (a Rust helper) which then re-enters JIT *without*
+/// pushing a new fence — e.g. `str`'s variadic path recurses
+/// `JIT → runtime helper → JIT → …`. Those runtime frames are not in the
+/// JIT code registry, so `lookup_code_entry` returns `None` for them. An
+/// earlier version *stopped* at the first such frame ("Phase B break"),
+/// which scanned only the deepest JIT frame and silently dropped every
+/// outer recursion frame's roots. When an alloc-path collection (minor
+/// GC, or `gc_every_alloc` major GC — both routed here) then relocated an
+/// object referenced only from an outer frame's spill slot, that slot was
+/// never updated and dangled. We now skip those frames and keep walking,
+/// exactly like the ancestor walker.
+///
+/// **Stop conditions** (in priority order):
+///   1. `saved_fp == fence` — reached the real JIT-entry boundary. This
+///      is authoritative for the triggering thread (whose own fence we
+///      read). It does not match when walking a *different* parked
+///      thread's frames (the fence is thread-local to the GC thread), so:
+///   2. `MAX_HOST_GAP` consecutive non-JIT frames with no fence hit —
+///      a safety bound so a cross-thread walk (or a missing fence) cannot
+///      run off into unrelated host stack. The counter resets whenever a
+///      JIT frame is found, so any number of JIT frames separated by a
+///      few runtime helpers are all scanned.
+///   3. null `fp` / null `saved_fp`.
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
 pub fn walk_parked_thread_jit_roots(
-    jit_fp: *const u8,
+    start_fp: *const u8,
     visitor: &mut dyn FnMut(*mut u64),
 ) {
+    // Generous enough for the deepest Rust prologue between the published
+    // FP and the first JIT frame (`trigger_gc → alloc_slow → gc_alloc_thunk
+    // → JIT`), and for the handful of runtime frames between interleaved
+    // JIT frames — yet small enough to bound an off-the-end walk.
+    const MAX_HOST_GAP: usize = 32;
     let registry = JIT_CODE_REGISTRY.read().unwrap();
     if registry.is_empty() {
         return;
     }
+    let fence = current_jit_entry_fp();
 
-    let mut fp = jit_fp as *const u64;
+    let mut fp = start_fp as *const u64;
+    let mut host_gap_remaining = MAX_HOST_GAP;
     loop {
         if fp.is_null() {
             break;
@@ -342,36 +369,45 @@ pub fn walk_parked_thread_jit_roots(
         if saved_fp.is_null() {
             break;
         }
+        // Reached the JIT-entry boundary (triggering thread). Above this
+        // is host stack — must not traverse it.
+        if !fence.is_null() && (saved_fp as *const u8) == fence {
+            break;
+        }
 
-        // Frame is JIT? Scan its roots. Otherwise (Rust / extern
-        // frame), skip to the next FP without scanning anything —
-        // the chain might contain more JIT frames above.
-        let entry = match lookup_code_entry(&registry, saved_lr) {
-            Some(e) => e,
-            None => {
-                fp = saved_fp;
-                continue;
-            }
-        };
-        let return_offset = saved_lr - entry.code_start;
-        match entry
-            .safepoints
-            .binary_search_by_key(&return_offset, |sp| sp.return_offset)
-        {
-            Ok(idx) => {
-                let record = &entry.safepoints[idx];
-                for &slot_offset in &record.root_slots {
-                    let slot = unsafe {
-                        (saved_fp as *mut u8).offset(slot_offset as isize) as *mut u64
-                    };
-                    visitor(slot);
+        match lookup_code_entry(&registry, saved_lr) {
+            Some(entry) => {
+                host_gap_remaining = MAX_HOST_GAP;
+                let return_offset = saved_lr - entry.code_start;
+                match entry
+                    .safepoints
+                    .binary_search_by_key(&return_offset, |sp| sp.return_offset)
+                {
+                    Ok(idx) => {
+                        let record = &entry.safepoints[idx];
+                        for &slot_offset in &record.root_slots {
+                            let slot = unsafe {
+                                (saved_fp as *mut u8).offset(slot_offset as isize) as *mut u64
+                            };
+                            visitor(slot);
+                        }
+                    }
+                    Err(_) => {
+                        // JIT frame whose return site recorded no
+                        // safepoint (e.g. an internal block branch).
+                        // No roots from it; keep walking.
+                    }
                 }
             }
-            Err(_) => {
-                // No exact safepoint match: the saved_lr came from a
-                // call site that didn't record one. Skip this frame
-                // (no roots from it) but keep walking — the caller's
-                // call site might be a recorded safepoint.
+            None => {
+                // Non-JIT (runtime/host) frame. Traverse through it —
+                // an interleaved `JIT → helper → JIT` chain re-enters
+                // JIT above — but bound the run so we never walk off
+                // into unrelated host stack when there is no fence hit.
+                if host_gap_remaining == 0 {
+                    break;
+                }
+                host_gap_remaining -= 1;
             }
         }
 
@@ -786,6 +822,7 @@ impl JitFunction {
             func,
             externs,
             None,
+            None, // call_is_extern: derived from the externs slice in single-fn mode
             None,
             None,
             safepoint_handler,
@@ -1368,6 +1405,11 @@ impl JitModule {
 
         // All false → no call is control-aware → no suspend/resume overhead
         let direct_call_is_internal: Vec<bool> = vec![false; module.func_table.len()];
+        let call_is_extern: Vec<bool> = module
+            .func_table
+            .iter()
+            .map(|d| matches!(d, FuncDef::Extern(_)))
+            .collect();
 
         let mut function_root_scan_sizes: Vec<usize> = Vec::new();
         let mut sp_offset: u64 = 0;
@@ -1376,6 +1418,7 @@ impl JitModule {
                 func_idx,
                 func,
                 &direct_call_is_internal,
+                &call_is_extern,
                 call_table_base,
                 None, // legacy batch path: no GC literal pool
                 None,
@@ -1767,6 +1810,11 @@ impl JitModule {
                 _ => false,
             })
             .collect();
+        let call_is_extern: Vec<bool> = module
+            .func_table
+            .iter()
+            .map(|d| matches!(d, FuncDef::Extern(_)))
+            .collect();
 
         // Construct the LiteralPool up front so we can thread its base
         // address into the lowerer — `Inst::GcLiteral(idx)` lowers to a load
@@ -1785,6 +1833,7 @@ impl JitModule {
                 func_idx,
                 func,
                 &direct_call_is_internal,
+                &call_is_extern,
                 call_table_base,
                 Some(literal_pool_base),
                 safepoint_handler,
@@ -1971,6 +2020,12 @@ impl JitModule {
         } else {
             vec![false; module.func_table.len()]
         };
+        // Extern targets need the C ABI for argument placement.
+        let call_is_extern: Vec<bool> = module
+            .func_table
+            .iter()
+            .map(|d| matches!(d, FuncDef::Extern(_)))
+            .collect();
 
         // 3. Compile each new function.
         let new_func_start = self.functions.len();
@@ -2023,6 +2078,7 @@ impl JitModule {
                 func_idx,
                 func,
                 &direct_call_is_internal,
+                &call_is_extern,
                 call_table_base,
                 Some(literal_pool_base),
                 self.safepoint_handler,
@@ -2914,6 +2970,12 @@ where
     current_func_idx: usize,
     externs: &'a [*const u8],
     direct_call_is_internal: Option<&'a [bool]>,
+    /// Per-`FuncRef` flag: is the target an `extern "C"` function? Calls to
+    /// such functions must use the platform C ABI for argument placement
+    /// (see `prepare_call_args_with_reg_limit`). `None` means "treat all
+    /// direct calls as internal" (the single-function compile path, which
+    /// has no module func-table).
+    call_is_extern: Option<&'a [bool]>,
     /// When Some, all calls go through an indirect call table at this
     /// address. `call_table[func_ref.index()]` holds the function pointer.
     call_table_base: Option<u64>,
@@ -2956,6 +3018,28 @@ where
         self.direct_call_is_internal
             .map(|kinds| kinds[func_ref.index()])
             .unwrap_or(false)
+    }
+
+    /// Is the direct-call target an `extern "C"` function (needing the
+    /// platform C ABI for argument placement)? In module mode this reads
+    /// the per-`FuncRef` table built from the module's func-table; in
+    /// single-function compile mode (no table) all direct calls resolve via
+    /// the `externs` slice, so any in-range `FuncRef` is a C extern.
+    fn call_target_is_extern(&self, func_ref: FuncRef) -> bool {
+        if let Some(kinds) = self.call_is_extern {
+            return kinds.get(func_ref.index()).copied().unwrap_or(false);
+        }
+        self.call_table_base.is_none() && func_ref.index() < self.externs.len()
+    }
+
+    /// GP argument-register count to use when placing args for a call to
+    /// `func_ref`: the C ABI limit for extern targets, else the internal CC.
+    fn call_reg_arg_limit(&self, func_ref: FuncRef) -> usize {
+        if self.call_target_is_extern(func_ref) {
+            B::c_abi_gp_arg_limit()
+        } else {
+            Cfg::CallingConvention::register_arg_limit()
+        }
     }
 
     fn is_gc_ptr_value(&self, val: Value) -> bool {
@@ -3305,6 +3389,7 @@ where
         current_func_idx: usize,
         func: &'a Function,
         direct_call_is_internal: &'a [bool],
+        call_is_extern: &'a [bool],
         call_table_base: u64,
         literal_pool_base: Option<u64>,
         safepoint_handler: Option<u64>,
@@ -3315,6 +3400,7 @@ where
             func,
             &[],
             Some(direct_call_is_internal),
+            Some(call_is_extern),
             Some(call_table_base),
             literal_pool_base,
             safepoint_handler,
@@ -3327,6 +3413,7 @@ where
         func: &'a Function,
         externs: &'a [*const u8],
         direct_call_is_internal: Option<&'a [bool]>,
+        call_is_extern: Option<&'a [bool]>,
         call_table_base: Option<u64>,
         literal_pool_base: Option<u64>,
         safepoint_handler: Option<u64>,
@@ -3388,6 +3475,7 @@ where
             current_func_idx,
             externs,
             direct_call_is_internal,
+            call_is_extern,
             call_table_base,
             literal_pool_base,
             safepoint_handler,
@@ -4643,6 +4731,18 @@ where
     }
 
     fn prepare_call_args(&mut self, args: &[Value]) -> i32 {
+        let reg_limit = Cfg::CallingConvention::register_arg_limit();
+        self.prepare_call_args_with_reg_limit(args, reg_limit)
+    }
+
+    /// Place call arguments using `reg_limit` GP argument registers; args
+    /// beyond it go on the outgoing stack. Internal JIT↔JIT calls use the
+    /// internal CC's `register_arg_limit`; calls to `extern "C"` functions
+    /// pass `B::c_abi_gp_arg_limit()` so args 8+ (AAPCS) / 6+ (SysV) land on
+    /// the stack where the C callee reads them. Both use the same
+    /// `call_arg_gp` register mapping for the in-register slots, so the only
+    /// thing that differs is where the overflow goes.
+    fn prepare_call_args_with_reg_limit(&mut self, args: &[Value], reg_limit: usize) -> i32 {
         // Materialize all live values before assigning ABI registers.  The
         // assignment pass is sequential, so an early argument can overwrite
         // the register holding a later argument unless that later value has a
@@ -4650,7 +4750,11 @@ where
         self.regs
             .spill_all_live::<B>(&mut self.buf, &mut self.frame);
 
-        let outgoing_size = Cfg::CallingConvention::outgoing_stack_size(args.len());
+        let stride = Cfg::CallingConvention::stack_arg_stride();
+        let align = <Cfg::CallingConvention as CallingConvention<Cfg::Layout>>::stack_align();
+        let overflow = args.len().saturating_sub(reg_limit);
+        let outgoing_size =
+            (((overflow * stride) + (align - 1)) / align * align) as i32;
         self.frame.reserve_outgoing_arg_bytes(outgoing_size);
         if outgoing_size > 0 {
             B::emit_stack_adjust(&mut self.buf, outgoing_size);
@@ -4659,10 +4763,17 @@ where
         let assignments: Vec<ValueAssignment> = args
             .iter()
             .enumerate()
-            .map(|(slot, &arg)| ValueAssignment {
-                value: arg,
-                ty: self.regs.value_type(arg),
-                target: AssignmentTarget::CallArg(Cfg::CallingConvention::arg_location(slot)),
+            .map(|(slot, &arg)| {
+                let loc = if slot < reg_limit {
+                    CallArgLocation::Register(slot)
+                } else {
+                    CallArgLocation::Stack(((slot - reg_limit) * stride) as i32)
+                };
+                ValueAssignment {
+                    value: arg,
+                    ty: self.regs.value_type(arg),
+                    target: AssignmentTarget::CallArg(loc),
+                }
             })
             .collect();
         self.emit_assignments(&assignments);
@@ -4727,7 +4838,11 @@ where
             self.emit_push_suspended_frame(record_ptr);
         }
 
-        let outgoing_size = self.prepare_call_args(args);
+        // Direct calls to `extern "C"` targets must follow the platform C ABI
+        // for argument placement (args beyond the C arg-register count go on
+        // the stack); JIT↔JIT calls keep the internal CC's wider register set.
+        let reg_limit = self.call_reg_arg_limit(func_ref);
+        let outgoing_size = self.prepare_call_args_with_reg_limit(args, reg_limit);
 
         // Load function pointer into the backend's call scratch register and call through it.
         let func_idx = func_ref.index();

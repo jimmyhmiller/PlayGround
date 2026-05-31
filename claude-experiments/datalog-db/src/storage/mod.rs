@@ -94,6 +94,17 @@ pub trait StorageBackend: Send + Sync {
         &self,
         callbacks: Vec<GroupTxnCallback>,
     ) -> Result<Vec<Result<Box<dyn std::any::Any + Send>>>>;
+
+    /// Produce a point-in-time on-disk checkpoint of the database at
+    /// `path`. The default impl returns an "unsupported" error; backends
+    /// that can checkpoint (RocksDB) override this. `path` must not yet
+    /// exist; it will be created. For RocksDB the checkpoint is hard-link
+    /// based, so `path` must be on the same filesystem as the live DB.
+    fn checkpoint(&self, _path: &std::path::Path) -> Result<()> {
+        Err(StorageError::Backend(
+            "checkpoint not supported by this storage backend".into(),
+        ))
+    }
 }
 
 // --- Pending write overlay used by all batch backends ---

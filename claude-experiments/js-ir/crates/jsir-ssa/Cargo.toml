@@ -1,0 +1,19 @@
+[package]
+name = "jsir-ssa"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# An MLIR-style control-flow-graph + SSA layer built ON TOP of the reversible
+# JSIR IR (which is deliberately NOT in variable-SSA form, matching upstream).
+# We lower jshir's structured control flow to a flat CFG of basic blocks with
+# block arguments (MLIR's phi mechanism), then run Braun et al. SSA construction
+# to promote name-based variables to SSA values. This is the substrate the
+# React-compiler-style analyses (mutable ranges, reactive scopes) need.
+
+[dependencies]
+jsir-ir = { path = "../jsir-ir" }
+jsir-swc = { path = "../jsir-swc" }
+
+[dev-dependencies]
+serde_json = "1.0.150"

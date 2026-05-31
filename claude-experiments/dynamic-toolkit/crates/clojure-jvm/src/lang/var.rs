@@ -88,12 +88,35 @@ thread_local! {
 
 // ---------- the Var itself ---------------------------------------------
 
+/// Where a Var's root value currently lives.
+///
+/// A Var is an indirection cell, and its root value must be a genuine GC
+/// root whenever it is a heap pointer. We achieve that by storing
+/// NanBox-representable values (which includes every GC-heap pointer) in the
+/// Var's slot in the global [`VAR_ROOTS`](crate::lang::var_roots::VAR_ROOTS)
+/// table, which is registered with the collector as a `RootSource`. Values
+/// with no NanBox representation (e.g. `Object::Namespace`) are never heap
+/// pointers and so cannot dangle; those stay Rust-side.
+#[derive(Debug)]
+enum VarRoot {
+    /// Value is the NanBox in `VAR_ROOTS[slot_index]`. GC-rooted: the
+    /// collector forwards it in place when the object moves.
+    Slot,
+    /// A Rust-side value with no NanBox representation. Not a heap pointer.
+    Object(Object),
+}
+
 /// `clojure.lang.Var`. Variable holding a root value, optional dynamic
 /// per-thread bindings, and metadata.
 #[derive(Debug)]
 pub struct Var {
-    /// Java: `volatile Object root;`
-    pub(crate) root: RwLock<Object>,
+    /// Java: `volatile Object root;`. See [`VarRoot`]: heap values live in
+    /// the GC-rooted slot table, Rust-only values live inline here.
+    root: RwLock<VarRoot>,
+    /// Stable index into the global `VAR_ROOTS` table, allocated once at
+    /// creation and never reused. Holds this Var's root value as a NanBox
+    /// whenever the root is [`VarRoot::Slot`]-backed.
+    slot_index: usize,
     /// Java: `volatile boolean dynamic = false;`
     pub(crate) dynamic: AtomicBool,
     /// Java: `transient final AtomicBoolean threadBound;`
@@ -124,18 +147,15 @@ impl Var {
     /// `Var.create(Object root)` — bare Var with a root value.
     pub fn create_with_root(root: Object) -> Arc<Self> {
         let v = Arc::new(Var {
-            root: RwLock::new(root.clone()),
+            root: RwLock::new(VarRoot::Object(Object::Nil)),
+            slot_index: crate::lang::var_roots::VAR_ROOTS.alloc_slot(),
             dynamic: AtomicBool::new(false),
             thread_bound: AtomicBool::new(false),
             sym: None,
             ns: None,
             is_macro: AtomicBool::new(false),
         });
-        // Java sets root via `setRoot` after construction so it can install
-        // `Unbound` when root is `null`. We mirror that — but until we have an
-        // `Unbound` install path wired up (needs IFn), we just keep the value
-        // (or Nil sentinel) we were handed.
-        let _ = root;
+        v.bind_root(root);
         v
     }
 
@@ -143,7 +163,8 @@ impl Var {
     /// a root value. Called from `Namespace::intern`.
     pub fn create_in_ns(ns: Arc<Namespace>, sym: Arc<Symbol>) -> Arc<Self> {
         Arc::new(Var {
-            root: RwLock::new(Object::Nil),
+            root: RwLock::new(VarRoot::Object(Object::Nil)),
+            slot_index: crate::lang::var_roots::VAR_ROOTS.alloc_slot(),
             dynamic: AtomicBool::new(false),
             thread_bound: AtomicBool::new(false),
             sym: Some(sym),
@@ -190,17 +211,71 @@ impl Var {
         replace_root: bool,
     ) -> Arc<Self> {
         let v = ns.intern(sym);
-        if replace_root || matches!(*v.root.read().unwrap(), Object::Nil) {
+        if replace_root || v.is_unbound() {
             v.bind_root(root);
         }
         v
     }
 
+    /// True if this Var has never been given a root value (still nil).
+    fn is_unbound(&self) -> bool {
+        match &*self.root.read().unwrap() {
+            VarRoot::Object(Object::Nil) => true,
+            VarRoot::Slot => {
+                crate::lang::var_roots::VAR_ROOTS.get(self.slot_index)
+                    == crate::runtime::nanbox_nil()
+            }
+            _ => false,
+        }
+    }
+
     /// Java: `Var.bindRoot(Object root)`. Sets the root value
     /// (`alterRoot`/`bindRoot` collapse here — we don't track watches).
+    ///
+    /// NanBox-representable values (all GC-heap pointers, plus immediates)
+    /// are stored in the Var's GC-rooted slot so the collector forwards
+    /// them. Values with no NanBox form (e.g. a Namespace) are kept
+    /// Rust-side; those are never heap pointers and cannot dangle.
     pub fn bind_root(&self, root: Object) {
-        *self.root.write().unwrap() = root;
+        match crate::runtime::try_object_to_nanbox(&root) {
+            Some(bits) => {
+                crate::lang::var_roots::VAR_ROOTS.set(self.slot_index, bits);
+                *self.root.write().unwrap() = VarRoot::Slot;
+            }
+            None => {
+                // Clear the slot so the GC never sees a stale pointer there.
+                crate::lang::var_roots::VAR_ROOTS
+                    .set(self.slot_index, crate::runtime::nanbox_nil());
+                *self.root.write().unwrap() = VarRoot::Object(root);
+            }
+        }
         REV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Bind the root directly from NanBox bits — the JIT path
+    /// (`cljvm_var_bind_root`). The bits go straight into the GC-rooted
+    /// slot, so a heap pointer is rooted with no `Object` round-trip.
+    pub fn bind_root_bits(&self, bits: u64) {
+        crate::lang::var_roots::VAR_ROOTS.set(self.slot_index, bits);
+        *self.root.write().unwrap() = VarRoot::Slot;
+        REV.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// VAR_ROOTS slot index (diagnostics).
+    pub fn slot_index(&self) -> usize { self.slot_index }
+
+    /// Read the current root value as NanBox bits — the JIT path
+    /// (`cljvm_var_deref`). Reads the live (forwarded) slot bits directly
+    /// for Slot-backed roots; falls back to encoding the Rust-side value
+    /// otherwise. Honors a dynamic thread binding if one is in scope.
+    pub fn deref_bits(&self) -> u64 {
+        if let Some(b) = self.get_thread_binding() {
+            return crate::runtime::object_to_nanbox(&b.val.lock().unwrap());
+        }
+        match &*self.root.read().unwrap() {
+            VarRoot::Slot => crate::lang::var_roots::VAR_ROOTS.get(self.slot_index),
+            VarRoot::Object(o) => crate::runtime::object_to_nanbox(o),
+        }
     }
 
     // ---- dynamic flag ---------------------------------------------------
@@ -227,7 +302,14 @@ impl Var {
         if let Some(b) = self.get_thread_binding() {
             return b.val.lock().unwrap().clone();
         }
-        self.root.read().unwrap().clone()
+        match &*self.root.read().unwrap() {
+            VarRoot::Slot => {
+                crate::runtime::nanbox_to_object(
+                    crate::lang::var_roots::VAR_ROOTS.get(self.slot_index),
+                )
+            }
+            VarRoot::Object(o) => o.clone(),
+        }
     }
 
     /// Java: `getThreadBinding()`. Walks the current thread's `Frame` chain

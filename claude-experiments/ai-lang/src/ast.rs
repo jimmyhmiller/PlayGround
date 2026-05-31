@@ -21,9 +21,10 @@
 use crate::hash::Hash;
 
 /// A canonical expression.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     IntLit(i64),
+    FloatLit(f64),
     BoolLit(bool),
     StringLit(String),
 
@@ -66,6 +67,19 @@ pub enum Expr {
     /// `let x = value in body`. The body's environment has one additional
     /// binder (the new local at index 0).
     Let { value: Box<Expr>, body: Box<Expr> },
+
+    /// `defer cleanup; body` — register a deterministic cleanup. `body`
+    /// (the rest of the enclosing block) is evaluated and its value is
+    /// the value of the whole `Defer`; `cleanup` runs for its side effect
+    /// AFTER `body` finishes, on every way out: normal completion and any
+    /// `?` early-return that unwinds through this point. Cleanups run in
+    /// LIFO order. `cleanup` does NOT add a binder; it is evaluated in the
+    /// same environment as `body` (its free variables are the locals in
+    /// scope where the `defer` appears). The deferred value is discarded,
+    /// so `cleanup` is typically a `free`/`fclose`-style call returning
+    /// Int. This is the deterministic alternative to GC finalizers for
+    /// releasing C-FFI resources.
+    Defer { cleanup: Box<Expr>, body: Box<Expr> },
 
     /// Construct a struct value: allocate on the heap, populate fields
     /// in declaration order.
@@ -119,11 +133,24 @@ pub enum Expr {
         then_branch: Box<Expr>,
         else_branch: Box<Expr>,
     },
+
+    /// `expr?` — the try operator. `expr` evaluates to a `Result<T, E>`
+    /// (the 2-variant enum identified by `enum_ref`, with `Ok` at
+    /// `ok_index` carrying `T` and `Err` at `err_index` carrying `E`).
+    /// Evaluates to the `Ok` payload (`T`) on success; on `Err` it
+    /// early-returns the whole `Result` value from the enclosing
+    /// function (whose return type must be a `Result<_, E>`).
+    Try {
+        expr: Box<Expr>,
+        enum_ref: Hash,
+        ok_index: u32,
+        err_index: u32,
+    },
 }
 
 /// A `match` arm: a pattern and the expression that runs when the
 /// pattern matches.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: Pattern,
     pub body: Expr,
@@ -176,7 +203,7 @@ pub enum Type {
 }
 
 /// A canonical top-level definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Def {
     /// Function definition. Parameter names are dropped; only types remain.
     Fn {

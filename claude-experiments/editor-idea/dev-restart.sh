@@ -3,15 +3,15 @@
 # (they persist across GUI restarts so terminal panes survive).
 #
 # Usage:
-#   ./dev-restart.sh                 # debug build, no extra flags
-#   ./dev-restart.sh --release       # release build (much faster runtime)
+#   ./dev-restart.sh                 # release build (default — much faster runtime)
+#   ./dev-restart.sh --debug         # debug build (faster compile, slower runtime)
 #   ./dev-restart.sh -- --some-arg   # pass --some-arg to the GUI binary
 
 set -e
 cd "$(dirname "$0")"
 
-PROFILE=debug
-CARGO_PROFILE_ARGS=""
+PROFILE=release
+CARGO_PROFILE_ARGS="--release"
 GUI_ARGS=""
 
 while [ $# -gt 0 ]; do
@@ -19,6 +19,11 @@ while [ $# -gt 0 ]; do
         --release)
             PROFILE=release
             CARGO_PROFILE_ARGS="--release"
+            shift
+            ;;
+        --debug)
+            PROFILE=debug
+            CARGO_PROFILE_ARGS=""
             shift
             ;;
         --)
@@ -34,7 +39,7 @@ while [ $# -gt 0 ]; do
 done
 
 echo "[dev-restart] building ($PROFILE)..."
-cargo build $CARGO_PROFILE_ARGS -p terminal_bevy --bin terminal --bin tbwidget --bin tbopen
+cargo build $CARGO_PROFILE_ARGS -p terminal_bevy --bin terminal --bin tbwidget --bin tbopen --bin tbinbox --bin tbproject --bin tbsuggest
 
 # Refresh the .app bundle so it carries the freshly-built binary and
 # libghostty-vt dylib (copied in, not symlinked into target/).

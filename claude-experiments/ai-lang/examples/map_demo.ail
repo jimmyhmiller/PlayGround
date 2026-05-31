@@ -1,0 +1,60 @@
+// Hash map demo: StringMap<V> and IntMap<V> from the stdlib.
+//
+//   ai-lang add examples/map_demo.ail
+//   ai-lang run main
+//
+// Both are open-addressing maps (linear probing, 0.7-load resize) built
+// in pure ai-lang on top of Array + Bytes. Maps are threaded
+// functionally: every insert returns the updated map.
+
+// ---- StringMap: a small named lookup table ----
+
+def names_table() -> StringMap<Int> =
+    smap_insert(
+        smap_insert(
+            smap_insert(smap_new(), "one", 1),
+            "two", 2),
+        "three", 3)
+
+def show_lookup(m: StringMap<Int>, key: String) -> Int = {
+    let v = opt_unwrap_or(smap_get(m, key), 0 - 1);
+    let _p = println(string_concat(
+        string_concat("  ", key),
+        string_concat(" = ", int_to_string(v))));
+    v
+}
+
+// ---- IntMap: a histogram of i % 5 for i in 0..20 ----
+
+def bump(m: IntMap<Int>, k: Int) -> IntMap<Int> =
+    imap_insert(m, k, opt_unwrap_or(imap_get(m, k), 0) + 1)
+
+def hist(m: IntMap<Int>, i: Int, n: Int) -> IntMap<Int> =
+    if i >= n { m } else { hist(bump(m, i % 5), i + 1, n) }
+
+def show_bucket(m: IntMap<Int>, b: Int) -> Int = {
+    let c = opt_unwrap_or(imap_get(m, b), 0);
+    let _p = println(string_concat(
+        string_concat("  bucket ", int_to_string(b)),
+        string_concat(" -> ", int_to_string(c))));
+    c
+}
+
+def main() -> Int = {
+    let _h1 = println("StringMap lookups:");
+    let m = names_table();
+    let _a = show_lookup(m, "two");
+    let _b = show_lookup(m, "three");
+    let _c = show_lookup(m, "missing");
+
+    let _h2 = println("IntMap histogram of i % 5 for i in 0..20:");
+    let counts = hist(imap_new(), 0, 20);
+    let _b0 = show_bucket(counts, 0);
+    let _b1 = show_bucket(counts, 1);
+    let _b2 = show_bucket(counts, 2);
+    let _b3 = show_bucket(counts, 3);
+    let _b4 = show_bucket(counts, 4);
+
+    // 20 items across 5 buckets = 4 each; report bucket 0's count.
+    opt_unwrap_or(imap_get(counts, 0), 0)
+}

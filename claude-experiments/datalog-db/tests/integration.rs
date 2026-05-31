@@ -1719,6 +1719,68 @@ fn test_concurrent_stress() {
     assert_eq!(result.rows.len(), 50);
 }
 
+/// Regression for the query-cache read-after-write race: a thread inserts
+/// an entity, then immediately queries it back. With a cold per-type cache,
+/// a concurrent thread's stale load could poison the cache and hide the just
+/// committed write. Each round uses a fresh DB (cold cache) since that is
+/// exactly the window the bug lived in; looping raises detection probability.
+#[test]
+fn test_concurrent_read_after_write_no_stale_cache() {
+    for round in 0..12 {
+        let (db, _dir) = test_db();
+        db.define_type(EntityTypeDef {
+            name: "Counter".to_string(),
+            fields: vec![
+                FieldDef {
+                    name: "label".to_string(),
+                    field_type: FieldType::String,
+                    required: true,
+                    unique: false,
+                    indexed: false,
+                },
+                FieldDef {
+                    name: "value".to_string(),
+                    field_type: FieldType::I64,
+                    required: true,
+                    unique: false,
+                    indexed: false,
+                },
+            ],
+        })
+        .unwrap();
+
+        let mut handles = Vec::new();
+        for i in 0..40 {
+            let db = db.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut data = HashMap::new();
+                data.insert("label".to_string(), Value::String(format!("c_{}", i).into()));
+                data.insert("value".to_string(), Value::I64(i));
+                db.transact(vec![TxOp::Assert {
+                    entity_type: "Counter".to_string(),
+                    entity: None,
+                    data,
+                }])
+                .unwrap();
+
+                let q = Query::from_json(&serde_json::json!({
+                    "find": ["?c"],
+                    "where": [{"bind": "?c", "type": "Counter", "label": format!("c_{}", i)}]
+                }))
+                .unwrap();
+                let qr = db.query(&q).unwrap();
+                assert!(
+                    !qr.rows.is_empty(),
+                    "round {round}: thread {i} could not read back its own write"
+                );
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+    }
+}
+
 // --- Unique constraint tests ---
 
 #[test]
@@ -3759,4 +3821,910 @@ mod attribute_interning {
             assert_eq!(inspector.name_of(id).as_deref(), Some(name));
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Backup / checkpoint tests
+// ---------------------------------------------------------------------------
+
+mod backups {
+    use super::*;
+    use datalog_db::backup::{
+        create_checkpoint, list_checkpoints, prune_checkpoints, spawn_backup_scheduler,
+        BackupSchedulerConfig,
+    };
+    use std::time::Duration;
+
+    fn alice_assert() -> TxOp {
+        let mut data = HashMap::new();
+        data.insert("name".into(), Value::String("Alice".into()));
+        data.insert("email".into(), Value::String("alice@x".into()));
+        TxOp::Assert {
+            entity_type: "User".into(),
+            entity: None,
+            data,
+        }
+    }
+
+    fn bob_assert() -> TxOp {
+        let mut data = HashMap::new();
+        data.insert("name".into(), Value::String("Bob".into()));
+        data.insert("email".into(), Value::String("bob@x".into()));
+        TxOp::Assert {
+            entity_type: "User".into(),
+            entity: None,
+            data,
+        }
+    }
+
+    fn count_users(db: &Database) -> usize {
+        let q = Query::from_json(&serde_json::json!({
+            "find": ["?u", "?name"],
+            "where": [{"bind": "?u", "type": "User", "name": "?name"}],
+        }))
+        .unwrap();
+        db.query(&q).unwrap().rows.len()
+    }
+
+    fn names(db: &Database) -> Vec<String> {
+        let q = Query::from_json(&serde_json::json!({
+            "find": ["?name"],
+            "where": [{"bind": "?u", "type": "User", "name": "?name"}],
+        }))
+        .unwrap();
+        let result = db.query(&q).unwrap();
+        let mut out: Vec<String> = result
+            .rows
+            .iter()
+            .filter_map(|r| match &r[0] {
+                Value::String(s) => Some(s.to_string()),
+                _ => None,
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    #[test]
+    fn checkpoint_captures_point_in_time() {
+        let parent = tempfile::tempdir().unwrap();
+        let data_dir = parent.path().join("data");
+        let backup_dir = parent.path().join("backups");
+
+        // Phase 1 — write Alice, checkpoint, write Bob, then drop the live DB.
+        let checkpoint_path = {
+            let storage = Arc::new(RocksDbStorage::open(&data_dir).unwrap());
+            let db = Arc::new(Database::open(storage).unwrap());
+            db.define_type(user_type()).unwrap();
+            db.transact(vec![alice_assert()]).unwrap();
+
+            let path = create_checkpoint(&db, &backup_dir).unwrap();
+            assert!(path.starts_with(&backup_dir));
+            assert!(path.exists());
+
+            db.transact(vec![bob_assert()]).unwrap();
+            assert_eq!(count_users(&db), 2);
+
+            path
+        };
+
+        // Phase 2 — open the checkpoint as a fresh DB. Schema and the
+        // pre-checkpoint data must be there; post-checkpoint data must not.
+        let storage = Arc::new(RocksDbStorage::open(&checkpoint_path).unwrap());
+        let restored = Database::open(storage).unwrap();
+        assert_eq!(count_users(&restored), 1);
+        assert_eq!(names(&restored), vec!["Alice".to_string()]);
+    }
+
+    #[test]
+    fn list_and_prune_oldest_first() {
+        let parent = tempfile::tempdir().unwrap();
+        let data_dir = parent.path().join("data");
+        let backup_dir = parent.path().join("backups");
+
+        let storage = Arc::new(RocksDbStorage::open(&data_dir).unwrap());
+        let db = Arc::new(Database::open(storage).unwrap());
+        db.define_type(user_type()).unwrap();
+
+        // Take three checkpoints with a small sleep so the millisecond-
+        // resolution names differ. The collision-suffix branch would
+        // make the test pass even without the sleep, but we want to
+        // exercise the timestamp-sorted path that production uses.
+        let mut taken = Vec::new();
+        for _ in 0..3 {
+            taken.push(create_checkpoint(&db, &backup_dir).unwrap());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let listed = list_checkpoints(&backup_dir).unwrap();
+        assert_eq!(listed.len(), 3);
+        // Listing is oldest-first.
+        assert_eq!(listed, taken);
+
+        // Retain 1 → two oldest removed.
+        let removed = prune_checkpoints(&backup_dir, 1).unwrap();
+        assert_eq!(removed, 2);
+        let remaining = list_checkpoints(&backup_dir).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0], taken[2]);
+    }
+
+    #[test]
+    fn scheduler_takes_periodic_checkpoints() {
+        let parent = tempfile::tempdir().unwrap();
+        let data_dir = parent.path().join("data");
+        let backup_dir = parent.path().join("backups");
+
+        let storage = Arc::new(RocksDbStorage::open(&data_dir).unwrap());
+        let db = Arc::new(Database::open(storage).unwrap());
+        db.define_type(user_type()).unwrap();
+        db.transact(vec![alice_assert()]).unwrap();
+
+        let handle = spawn_backup_scheduler(
+            db.clone(),
+            BackupSchedulerConfig {
+                root: backup_dir.clone(),
+                interval: Duration::from_millis(80),
+                retain: 2,
+            },
+        );
+
+        // Give the scheduler enough wall-time to produce >2 checkpoints so
+        // pruning has work to do.
+        std::thread::sleep(Duration::from_millis(500));
+        handle.stop();
+
+        let listed = list_checkpoints(&backup_dir).unwrap();
+        assert!(
+            !listed.is_empty(),
+            "expected at least one scheduled checkpoint, got none"
+        );
+        assert!(
+            listed.len() <= 2,
+            "retain=2 violated, got {} checkpoints",
+            listed.len()
+        );
+
+        // Each retained checkpoint should be openable and contain Alice.
+        for path in &listed {
+            let storage = Arc::new(RocksDbStorage::open(path).unwrap());
+            let restored = Database::open(storage).unwrap();
+            assert_eq!(names(&restored), vec!["Alice".to_string()]);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests for query correctness: plan-cache value sensitivity,
+// numeric type coercion, and bind+filter patterns.
+// ---------------------------------------------------------------------------
+
+/// A type with both an f64 and an i64 field for numeric-coercion tests.
+fn product_type() -> EntityTypeDef {
+    EntityTypeDef {
+        name: "Product".to_string(),
+        fields: vec![
+            FieldDef {
+                name: "name".to_string(),
+                field_type: FieldType::String,
+                required: true,
+                unique: false,
+                indexed: true,
+            },
+            FieldDef {
+                name: "price".to_string(),
+                field_type: FieldType::F64,
+                required: false,
+                unique: false,
+                indexed: false,
+            },
+            FieldDef {
+                name: "qty".to_string(),
+                field_type: FieldType::I64,
+                required: false,
+                unique: false,
+                indexed: false,
+            },
+        ],
+    }
+}
+
+fn seed_products(db: &Database) {
+    // Widget: price 9.99, qty 100 | Gadget: price 19.5, qty 5
+    for (name, price, qty) in [("Widget", 9.99_f64, 100_i64), ("Gadget", 19.5, 5)] {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(name.into()));
+        data.insert("price".to_string(), Value::F64(price));
+        data.insert("qty".to_string(), Value::I64(qty));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "Product".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+}
+
+fn names_of(result: &datalog_db::query::executor::QueryResult, col: usize) -> Vec<String> {
+    let mut out: Vec<String> = result
+        .rows
+        .iter()
+        .map(|r| match &r[col] {
+            Value::String(s) => s.to_string(),
+            other => format!("{:?}", other),
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+fn run_query(db: &Database, json: serde_json::Value) -> datalog_db::query::executor::QueryResult {
+    let query = Query::from_json(&json).unwrap();
+    db.query(&query).unwrap()
+}
+
+/// Two queries with the same shape but different predicate literals must
+/// return different results. Regression for the plan-cache key erasing
+/// literal values while the cached plan baked them in.
+#[test]
+fn test_plan_cache_is_value_sensitive() {
+    let (db, _dir) = test_db();
+    db.define_type(product_type()).unwrap();
+    seed_products(&db);
+
+    let q = |bound: i64| {
+        serde_json::json!({
+            "find": ["?name"],
+            "where": [{"bind": "?p", "type": "Product", "name": "?name", "qty": {"gt": bound}}]
+        })
+    };
+
+    // Run the small bound first to populate the plan cache.
+    assert_eq!(names_of(&run_query(&db, q(10)), 0), vec!["Widget"]);
+    // Same shape, larger bound — must NOT reuse the qty>10 result.
+    assert_eq!(names_of(&run_query(&db, q(50)), 0), vec!["Widget"]);
+    assert_eq!(names_of(&run_query(&db, q(200)), 0), Vec::<String>::new());
+    assert_eq!(names_of(&run_query(&db, q(3)), 0), vec!["Gadget", "Widget"]);
+}
+
+/// An f64 field compared against an integer literal must coerce and match,
+/// rather than silently returning nothing.
+#[test]
+fn test_numeric_coercion_f64_field_int_literal() {
+    let (db, _dir) = test_db();
+    db.define_type(product_type()).unwrap();
+    seed_products(&db);
+
+    let q = |op: &str, v: i64| {
+        serde_json::json!({
+            "find": ["?name"],
+            "where": [{"bind": "?p", "type": "Product", "name": "?name", "price": {op: v}}]
+        })
+    };
+    assert_eq!(names_of(&run_query(&db, q("gt", 10)), 0), vec!["Gadget"]);
+    assert_eq!(names_of(&run_query(&db, q("lt", 10)), 0), vec!["Widget"]);
+    assert_eq!(names_of(&run_query(&db, q("gte", 19)), 0), vec!["Gadget"]);
+}
+
+/// An i64 field compared against a fractional float literal must use the
+/// operator-preserving integer bound (e.g. `qty > 10.5` ⇔ `qty > 10`).
+#[test]
+fn test_numeric_coercion_i64_field_float_literal() {
+    let (db, _dir) = test_db();
+    db.define_type(product_type()).unwrap();
+    seed_products(&db);
+
+    let q = |op: &str, v: f64| {
+        serde_json::json!({
+            "find": ["?name"],
+            "where": [{"bind": "?p", "type": "Product", "name": "?name", "qty": {op: v}}]
+        })
+    };
+    assert_eq!(names_of(&run_query(&db, q("gt", 10.5)), 0), vec!["Widget"]);
+    assert_eq!(names_of(&run_query(&db, q("lt", 5.5)), 0), vec!["Gadget"]);
+    assert_eq!(names_of(&run_query(&db, q("lte", 5.0)), 0), vec!["Gadget"]);
+    // qty == 100.0 should match the integer 100.
+    let eq = serde_json::json!({
+        "find": ["?name"],
+        "where": [{"bind": "?p", "type": "Product", "name": "?name", "qty": 100.0}]
+    });
+    assert_eq!(names_of(&run_query(&db, eq), 0), vec!["Widget"]);
+}
+
+/// `{"var": "?x", "gt": n}` must both bind ?x and filter by the predicate.
+#[test]
+fn test_bound_predicate_binds_and_filters() {
+    let (db, _dir) = test_db();
+    db.define_type(product_type()).unwrap();
+    seed_products(&db);
+
+    let result = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?name", "?qty"],
+            "where": [{
+                "bind": "?p", "type": "Product",
+                "name": "?name", "qty": {"var": "?qty", "gt": 10}
+            }]
+        }),
+    );
+    assert_eq!(result.columns, vec!["?name", "?qty"]);
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows[0][0], Value::String("Widget".into()));
+    assert_eq!(result.rows[0][1], Value::I64(100));
+}
+
+/// Extra products for ordering tests, including a price tie (Anvil & Zeta).
+fn seed_products_for_ordering(db: &Database) {
+    for (name, price, qty) in [
+        ("Widget", 9.99_f64, 100_i64),
+        ("Gadget", 19.5, 5),
+        ("Anvil", 5.0, 50),
+        ("Zeta", 5.0, 7),
+        ("Bolt", 0.25, 1000),
+    ] {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(name.into()));
+        data.insert("price".to_string(), Value::F64(price));
+        data.insert("qty".to_string(), Value::I64(qty));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "Product".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+}
+
+fn ordered_names(result: &datalog_db::query::executor::QueryResult) -> Vec<String> {
+    // Keep result order (do NOT sort) so we verify the query's ordering.
+    result
+        .rows
+        .iter()
+        .map(|r| match &r[0] {
+            Value::String(s) => s.to_string(),
+            other => format!("{:?}", other),
+        })
+        .collect()
+}
+
+#[test]
+fn test_order_by_ascending_and_descending() {
+    let (db, _dir) = test_db();
+    db.define_type(product_type()).unwrap();
+    seed_products_for_ordering(&db);
+
+    let asc = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?name", "?price"],
+            "where": [{"bind": "?p", "type": "Product", "name": "?name", "price": "?price"}],
+            "order_by": ["?price"]
+        }),
+    );
+    // Anvil/Zeta tie at 5.0 — stable sort keeps insertion order (Anvil first).
+    assert_eq!(
+        ordered_names(&asc),
+        ["Bolt", "Anvil", "Zeta", "Widget", "Gadget"]
+            .map(String::from)
+            .to_vec()
+    );
+
+    let desc = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?name", "?price"],
+            "where": [{"bind": "?p", "type": "Product", "name": "?name", "price": "?price"}],
+            "order_by": [{"var": "?price", "desc": true}]
+        }),
+    );
+    assert_eq!(
+        ordered_names(&desc),
+        ["Gadget", "Widget", "Anvil", "Zeta", "Bolt"]
+            .map(String::from)
+            .to_vec()
+    );
+}
+
+#[test]
+fn test_order_by_multi_key() {
+    let (db, _dir) = test_db();
+    db.define_type(product_type()).unwrap();
+    seed_products_for_ordering(&db);
+
+    // price asc, then name desc — breaks the 5.0 tie as Zeta before Anvil.
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?name", "?price"],
+            "where": [{"bind": "?p", "type": "Product", "name": "?name", "price": "?price"}],
+            "order_by": ["?price", {"var": "?name", "desc": true}]
+        }),
+    );
+    assert_eq!(
+        ordered_names(&r),
+        ["Bolt", "Zeta", "Anvil", "Widget", "Gadget"]
+            .map(String::from)
+            .to_vec()
+    );
+}
+
+#[test]
+fn test_limit_and_offset() {
+    let (db, _dir) = test_db();
+    db.define_type(product_type()).unwrap();
+    seed_products_for_ordering(&db);
+
+    let base = serde_json::json!({
+        "find": ["?name", "?qty"],
+        "where": [{"bind": "?p", "type": "Product", "name": "?name", "qty": "?qty"}],
+        "order_by": [{"var": "?qty", "desc": true}]
+    });
+
+    let mut limited = base.clone();
+    limited["limit"] = serde_json::json!(2);
+    assert_eq!(
+        ordered_names(&run_query(&db, limited)),
+        ["Bolt", "Widget"].map(String::from).to_vec()
+    );
+
+    let mut paged = base.clone();
+    paged["limit"] = serde_json::json!(2);
+    paged["offset"] = serde_json::json!(1);
+    assert_eq!(
+        ordered_names(&run_query(&db, paged)),
+        ["Widget", "Anvil"].map(String::from).to_vec()
+    );
+
+    // limit 0 yields nothing.
+    let mut zero = base.clone();
+    zero["limit"] = serde_json::json!(0);
+    assert!(run_query(&db, zero).rows.is_empty());
+}
+
+fn employee_type() -> EntityTypeDef {
+    EntityTypeDef {
+        name: "Employee".to_string(),
+        fields: vec![
+            FieldDef {
+                name: "name".to_string(),
+                field_type: FieldType::String,
+                required: true,
+                unique: false,
+                indexed: true,
+            },
+            FieldDef {
+                name: "dept".to_string(),
+                field_type: FieldType::String,
+                required: false,
+                unique: false,
+                indexed: true,
+            },
+            FieldDef {
+                name: "salary".to_string(),
+                field_type: FieldType::I64,
+                required: false,
+                unique: false,
+                indexed: false,
+            },
+        ],
+    }
+}
+
+fn seed_employees(db: &Database) {
+    for (name, dept, salary) in [
+        ("Alice", "eng", 100_i64),
+        ("Bob", "eng", 120),
+        ("Carol", "sales", 90),
+        ("Dave", "sales", 95),
+        ("Eve", "sales", 80),
+    ] {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(name.into()));
+        data.insert("dept".to_string(), Value::String(dept.into()));
+        data.insert("salary".to_string(), Value::I64(salary));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "Employee".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+}
+
+fn project_type() -> EntityTypeDef {
+    EntityTypeDef {
+        name: "Project".to_string(),
+        fields: vec![
+            FieldDef {
+                name: "name".to_string(),
+                field_type: FieldType::String,
+                required: true,
+                unique: false,
+                indexed: true,
+            },
+            FieldDef {
+                name: "lead".to_string(),
+                field_type: FieldType::Ref("Employee".to_string()),
+                required: false,
+                unique: false,
+                indexed: true,
+            },
+        ],
+    }
+}
+
+/// Seed employees and return a name -> entity id map.
+fn seed_employees_with_ids(db: &Database) -> HashMap<String, u64> {
+    let mut ids = HashMap::new();
+    for (name, dept, salary) in [
+        ("Alice", "eng", 100_i64),
+        ("Bob", "eng", 120),
+        ("Carol", "sales", 90),
+        ("Dave", "sales", 95),
+        ("Eve", "sales", 80),
+    ] {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(name.into()));
+        data.insert("dept".to_string(), Value::String(dept.into()));
+        data.insert("salary".to_string(), Value::I64(salary));
+        let r = db
+            .transact(vec![TxOp::Assert {
+                entity_type: "Employee".to_string(),
+                entity: None,
+                data,
+            }])
+            .unwrap();
+        ids.insert(name.to_string(), r.entity_ids[0]);
+    }
+    ids
+}
+
+#[test]
+fn test_or_disjunction() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    seed_employees(&db);
+
+    // dept == eng OR salary < 85  => Alice, Bob (eng) + Eve (80)
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?name"],
+            "where": [
+                {"bind": "?e", "type": "Employee", "name": "?name"},
+                {"or": [
+                    {"bind": "?e", "type": "Employee", "dept": "eng"},
+                    {"bind": "?e", "type": "Employee", "salary": {"lt": 85}}
+                ]}
+            ]
+        }),
+    );
+    assert_eq!(names_of(&r, 0), vec!["Alice", "Bob", "Eve"]);
+}
+
+#[test]
+fn test_not_anti_join() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    db.define_type(project_type()).unwrap();
+    let ids = seed_employees_with_ids(&db);
+
+    // Alice and Carol lead projects.
+    for (pname, lead) in [("Apollo", "Alice"), ("Zephyr", "Carol")] {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(pname.into()));
+        data.insert("lead".to_string(), Value::Ref(ids[lead]));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "Project".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    // Employees leading no project => Bob, Dave, Eve.
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?name"],
+            "where": [
+                {"bind": "?e", "type": "Employee", "name": "?name"},
+                {"not": {"bind": "?p", "type": "Project", "lead": "?e"}}
+            ]
+        }),
+    );
+    assert_eq!(names_of(&r, 0), vec!["Bob", "Dave", "Eve"]);
+}
+
+#[test]
+fn test_or_and_not_combined() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    db.define_type(project_type()).unwrap();
+    let ids = seed_employees_with_ids(&db);
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String("Apollo".into()));
+    data.insert("lead".to_string(), Value::Ref(ids["Alice"]));
+    db.transact(vec![TxOp::Assert {
+        entity_type: "Project".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap();
+
+    // (eng OR sales) AND not-leading => everyone except Alice (who leads).
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?name"],
+            "where": [
+                {"bind": "?e", "type": "Employee", "name": "?name"},
+                {"or": [
+                    {"bind": "?e", "type": "Employee", "dept": "eng"},
+                    {"bind": "?e", "type": "Employee", "dept": "sales"}
+                ]},
+                {"not": {"bind": "?p", "type": "Project", "lead": "?e"}}
+            ]
+        }),
+    );
+    assert_eq!(names_of(&r, 0), vec!["Bob", "Carol", "Dave", "Eve"]);
+}
+
+#[test]
+fn test_redefine_type_compatibility() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+
+    // Additive: re-state existing fields unchanged, add a new one -> OK.
+    let mut additive = employee_type();
+    additive.fields.push(FieldDef {
+        name: "title".to_string(),
+        field_type: FieldType::String,
+        required: false,
+        unique: false,
+        indexed: false,
+    });
+    assert!(db.define_type(additive.clone()).is_ok());
+
+    // Idempotent: redefining identically -> OK.
+    assert!(db.define_type(additive.clone()).is_ok());
+
+    // Dropping a field -> rejected.
+    let dropped = EntityTypeDef {
+        name: "Employee".to_string(),
+        fields: vec![FieldDef {
+            name: "name".to_string(),
+            field_type: FieldType::String,
+            required: true,
+            unique: false,
+            indexed: true,
+        }],
+    };
+    let err = db.define_type(dropped).unwrap_err().to_string();
+    assert!(err.contains("missing from the new definition"), "got: {err}");
+
+    // Changing a field's type -> rejected.
+    let mut retyped = additive.clone();
+    retyped
+        .fields
+        .iter_mut()
+        .find(|f| f.name == "salary")
+        .unwrap()
+        .field_type = FieldType::String;
+    let err = db.define_type(retyped).unwrap_err().to_string();
+    assert!(err.contains("changed definition"), "got: {err}");
+
+    // Changing a modifier (indexed) -> rejected.
+    let mut remod = additive.clone();
+    remod
+        .fields
+        .iter_mut()
+        .find(|f| f.name == "dept")
+        .unwrap()
+        .indexed = false;
+    let err = db.define_type(remod).unwrap_err().to_string();
+    assert!(err.contains("changed definition"), "got: {err}");
+}
+
+#[test]
+fn test_filter_by_constant_entity_ref() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    db.define_type(project_type()).unwrap();
+    let ids = seed_employees_with_ids(&db);
+    for (pname, lead) in [("Apollo", "Alice"), ("Zephyr", "Carol")] {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(pname.into()));
+        data.insert("lead".to_string(), Value::Ref(ids[lead]));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "Project".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    // Exact ref constant: projects led by Alice -> Apollo.
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?n"],
+            "where": [{"bind": "?p", "type": "Project", "name": "?n", "lead": {"ref": ids["Alice"]}}]
+        }),
+    );
+    assert_eq!(names_of(&r, 0), vec!["Apollo"]);
+
+    // != ref constant: everything except Alice's projects -> Zephyr.
+    let r2 = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?n"],
+            "where": [{"bind": "?p", "type": "Project", "name": "?n", "lead": {"ne": {"ref": ids["Alice"]}}}]
+        }),
+    );
+    assert_eq!(names_of(&r2, 0), vec!["Zephyr"]);
+}
+
+#[test]
+fn test_double_negation_cancels() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    db.define_type(project_type()).unwrap();
+    let ids = seed_employees_with_ids(&db);
+    for (pname, lead) in [("Apollo", "Alice"), ("Zephyr", "Carol")] {
+        let mut data = HashMap::new();
+        data.insert("name".to_string(), Value::String(pname.into()));
+        data.insert("lead".to_string(), Value::Ref(ids[lead]));
+        db.transact(vec![TxOp::Assert {
+            entity_type: "Project".to_string(),
+            entity: None,
+            data,
+        }])
+        .unwrap();
+    }
+
+    // not { not { leads a project } } == leads a project => Alice, Carol.
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?name"],
+            "where": [
+                {"bind": "?e", "type": "Employee", "name": "?name"},
+                {"not": {"not": {"bind": "?p", "type": "Project", "lead": "?e"}}}
+            ]
+        }),
+    );
+    assert_eq!(names_of(&r, 0), vec!["Alice", "Carol"]);
+}
+
+#[test]
+fn test_unbound_find_variable_is_null() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    seed_employees(&db);
+
+    // ?missing never appears in the where clause -> projects as Null, not a
+    // sentinel string that would collide with real data.
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?name", "?missing"],
+            "where": [{"bind": "?e", "type": "Employee", "name": "?name"}]
+        }),
+    );
+    assert_eq!(r.rows.len(), 5);
+    assert!(
+        r.rows.iter().all(|row| row[1] == Value::Null),
+        "unbound var must be Null, got {:?}",
+        r.rows
+    );
+}
+
+#[test]
+fn test_negation_only_clause_errors() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    seed_employees(&db);
+
+    let query = Query::from_json(&serde_json::json!({
+        "find": ["?name"],
+        "where": [{"not": {"bind": "?e", "type": "Employee", "name": "?name"}}]
+    }))
+    .unwrap();
+    let err = db.query(&query).unwrap_err();
+    assert!(
+        err.to_string().contains("positive clause"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn test_aggregate_global() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    seed_employees(&db);
+
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["count(*)", "sum(?sal)", "min(?sal)", "max(?sal)", "avg(?sal)"],
+            "where": [{"bind": "?e", "type": "Employee", "salary": "?sal"}]
+        }),
+    );
+    assert_eq!(
+        r.columns,
+        vec!["count(*)", "sum(?sal)", "min(?sal)", "max(?sal)", "avg(?sal)"]
+    );
+    assert_eq!(r.rows.len(), 1);
+    let row = &r.rows[0];
+    assert_eq!(row[0], Value::I64(5)); // count
+    assert_eq!(row[1], Value::I64(485)); // sum 100+120+90+95+80
+    assert_eq!(row[2], Value::I64(80)); // min
+    assert_eq!(row[3], Value::I64(120)); // max
+    assert_eq!(row[4], Value::F64(97.0)); // avg 485/5
+}
+
+#[test]
+fn test_aggregate_group_by() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    seed_employees(&db);
+
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["?dept", "count(?e)", "max(?sal)", "sum(?sal)"],
+            "where": [{"bind": "?e", "type": "Employee", "dept": "?dept", "salary": "?sal"}],
+            "order_by": ["?dept"]
+        }),
+    );
+    assert_eq!(r.columns, vec!["?dept", "count(?e)", "max(?sal)", "sum(?sal)"]);
+    assert_eq!(r.rows.len(), 2);
+    // eng: 2 employees, max 120, sum 220
+    assert_eq!(r.rows[0][0], Value::String("eng".into()));
+    assert_eq!(r.rows[0][1], Value::I64(2));
+    assert_eq!(r.rows[0][2], Value::I64(120));
+    assert_eq!(r.rows[0][3], Value::I64(220));
+    // sales: 3 employees, max 95, sum 265
+    assert_eq!(r.rows[1][0], Value::String("sales".into()));
+    assert_eq!(r.rows[1][1], Value::I64(3));
+    assert_eq!(r.rows[1][2], Value::I64(95));
+    assert_eq!(r.rows[1][3], Value::I64(265));
+}
+
+#[test]
+fn test_aggregate_count_over_empty_is_zero() {
+    let (db, _dir) = test_db();
+    db.define_type(employee_type()).unwrap();
+    seed_employees(&db);
+
+    let r = run_query(
+        &db,
+        serde_json::json!({
+            "find": ["count(*)"],
+            "where": [{"bind": "?e", "type": "Employee", "dept": "nonexistent"}]
+        }),
+    );
+    assert_eq!(r.rows.len(), 1);
+    assert_eq!(r.rows[0][0], Value::I64(0));
+}
+
+#[test]
+fn test_order_by_unknown_variable_errors() {
+    let (db, _dir) = test_db();
+    db.define_type(product_type()).unwrap();
+    seed_products(&db);
+
+    let query = Query::from_json(&serde_json::json!({
+        "find": ["?name"],
+        "where": [{"bind": "?p", "type": "Product", "name": "?name", "price": "?price"}],
+        "order_by": ["?price"]
+    }))
+    .unwrap();
+    let err = db.query(&query).unwrap_err();
+    assert!(
+        err.to_string().contains("order_by variable '?price'"),
+        "unexpected error: {err}"
+    );
 }

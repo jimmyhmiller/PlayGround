@@ -17,7 +17,7 @@ use crate::bridge::{EntityMaps, FlowNodeRef};
 use crate::camera::{MainCamera, cursor_to_world};
 use crate::canvas::InnerLabelSpec;
 use crate::gadgets::{Kind, spawn as spawn_gadget};
-use crate::sim_driver::{NodeView, SimCommand, SimDriverRes, SimSnapshotRes};
+use crate::sim_driver::{RenderSnapshot, SimCommand, SimDriverRes, SimSnapshotRes};
 use crate::theme::Theme;
 use crate::tool::{ActiveSlot, ActiveTool, NodeColors, Tool};
 
@@ -762,8 +762,8 @@ fn sync_node_state_labels(
     crate::time_phase!(perf, "nodes.sync_node_state_labels", {
     for (label, child_of, mut bitmap) in labels.iter_mut() {
         let Ok(kind) = parent_kind_q.get(child_of.parent()) else { continue };
-        let Some(node) = snapshot.0.nodes.get(&label.0) else { continue };
-        let formatted = format_node_state(kind.0, node);
+        if !snapshot.0.nodes.contains_key(&label.0) { continue; }
+        let formatted = format_node_state(kind.0, label.0, &snapshot.0);
         // Guard with `!=` so Bevy's change-detection only fires on
         // actual content changes — `sync_bitmap_labels` then skips
         // unchanged labels entirely.
@@ -772,13 +772,20 @@ fn sync_node_state_labels(
     });
 }
 
-fn format_node_state(kind: Kind, node: &NodeView) -> String {
+fn format_node_state(kind: Kind, node_id: NodeId, snapshot: &RenderSnapshot) -> String {
+    // Stock gadgets are `*Composite`s whose live state lives on inner
+    // primitives (`count` on the inner Counter, `period_ns` on the inner
+    // Tick, …), not on the shim — so resolve into the compound rather
+    // than reading the shim's own (empty) slots, or every label reads 0.
+    let slot_int = |slot: &str| -> i64 {
+        match snapshot.resolve_slot(node_id, slot) {
+            Some(flow::Value::Int(i)) => *i,
+            _ => 0,
+        }
+    };
     match kind {
         Kind::Generator | Kind::Client | Kind::BackoffClient => {
-            let period_ns = match node.slots.get("period_ns") {
-                Some(flow::Value::Int(i)) => *i,
-                _ => 0,
-            };
+            let period_ns = slot_int("period_ns");
             if period_ns <= 0 { String::new() }
             else {
                 let rate = 1_000_000_000.0 / period_ns as f64;
@@ -786,26 +793,14 @@ fn format_node_state(kind: Kind, node: &NodeView) -> String {
             }
         }
         Kind::Queue => {
-            let len = match node.slots.get("len") {
-                Some(flow::Value::Int(i)) => *i,
-                _ => 0,
-            };
-            format!("{} queued", len)
+            format!("{} queued", slot_int("len"))
         }
         Kind::Worker => {
-            let ns = match node.slots.get("service_ns") {
-                Some(flow::Value::Int(i)) => *i,
-                _ => 0,
-            };
-            let ms = ns / 1_000_000;
+            let ms = slot_int("service_ns") / 1_000_000;
             format!("{}ms", ms)
         }
         Kind::Sink => {
-            let count = match node.slots.get("count") {
-                Some(flow::Value::Int(i)) => *i,
-                _ => 0,
-            };
-            format!("{} absorbed", count)
+            format!("{} absorbed", slot_int("count"))
         }
         Kind::Router => String::new(),
     }

@@ -307,37 +307,42 @@ fn queue_composite_buffers_then_dispatches() {
 }
 
 // ----------------------------------------------------------------------------
-// ROUTER — Filter(color) → output port; FanOut via multiple external edges.
+// ROUTER — colour demux built as a visible Filter chain. Colour `c`
+// exits the router's `lane{c}` port; a packet never travels a foreign
+// lane. Wiring names the port explicitly here (the interactive Connect
+// tool auto-picks `lane{c}` from the destination's colour, but raw DSL
+// edges spell the port out).
 // ----------------------------------------------------------------------------
 #[test]
-fn router_composite_broadcasts_color_matched_to_all_outputs() {
+fn router_composite_routes_each_color_to_matching_lane() {
     let scene = r#"
         node Src {
             slots { dummy: Int = 0 }
             rule fire {
                 on go(_) do {
                     emit packet(0) to default
-                    emit packet(7) to default
+                    emit packet(1) to default
+                    emit packet(2) to default
                 }
             }
         }
-        node A : Counter { }
-        node B : Counter { }
-        node C : Counter { }
+        node A { slots { count: Int = 0 } rule c { on p do { count := count + 1 } } }
+        node B { slots { count: Int = 0 } rule c { on p do { count := count + 1 } } }
+        node C { slots { count: Int = 0 } rule c { on p do { count := count + 1 } } }
         edges {
             Src -> RouterComposite.input : 1
-            RouterComposite.output -> A : 1
-            RouterComposite.output -> B : 1
-            RouterComposite.output -> C : 1
+            RouterComposite.lane0 -> A : 1
+            RouterComposite.lane1 -> B : 1
+            RouterComposite.lane2 -> C : 1
         }
         scenario { at 0ns: inject Src <- go() }
     "#;
     let mut sim = build_sim(ROUTER_COMPOSITE, scene);
     sim.run_until(100);
-    // color=0 packet broadcasts to all three; color=7 is filtered out.
-    assert_eq!(slot_i(&sim, "A", "count"), 1);
-    assert_eq!(slot_i(&sim, "B", "count"), 1);
-    assert_eq!(slot_i(&sim, "C", "count"), 1);
+    // Each colour exits its own lane: one packet each, never crossing.
+    assert_eq!(slot_i(&sim, "A", "count"), 1, "lane0 (colour 0)");
+    assert_eq!(slot_i(&sim, "B", "count"), 1, "lane1 (colour 1)");
+    assert_eq!(slot_i(&sim, "C", "count"), 1, "lane2 (colour 2)");
 }
 
 // ----------------------------------------------------------------------------

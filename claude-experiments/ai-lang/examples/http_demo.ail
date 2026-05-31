@@ -1,0 +1,29 @@
+// HTTP(S) GET through the generic C FFI — the "talk to the network"
+// milestone.
+//
+//   ai-lang add examples/http_demo.ail
+//   ai-lang run main
+//
+// `http_get(url)` (stdlib) performs a real request by driving libcurl
+// directly through the C FFI: the stdlib declares libcurl's symbols with
+// `extern "C" lib "curl" { ... }`, resolves them via dlopen/dlsym, and
+// calls `curl_easy_*` over the C ABI (no Rust glue). It returns a
+// `Result<String, String>`: `Ok(body)` on a 2xx response, `Err(message)`
+// otherwise. We match on it so both paths are explicit. `println`
+// returns Int, so each arm is a plain expression.
+//
+// `http_get_with_headers` shows passing request headers (newline-
+// separated "Key: Value" lines), here a User-Agent that the GitHub API
+// requires.
+
+def report(label: String, r: Result<String, String>) -> Int =
+    match r {
+        Ok(body) => println(string_concat(string_concat(label, ": "), body)),
+        Err(e) => println(string_concat(string_concat(label, " failed: "), e))
+    }
+
+def main() -> Int = {
+    let a = report("example.com", http_get("https://example.com"));
+    report("github zen",
+        http_get_with_headers("https://api.github.com/zen", "User-Agent: ai-lang"))
+}

@@ -1,0 +1,68 @@
+// Concurrent fan-out against REAL AWS: write N objects to S3, then fetch
+// all N AT ONCE (one signed request each, all in flight together via
+// libcurl's multi interface), verify every one came back correct, and
+// clean up. This is the exact mechanism `lambda_invoke_many` uses to fan
+// out N Lambda invocations in parallel.
+//
+//   ai-lang add examples/s3_parallel_demo.ail
+//   AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... S3_BUCKET=my-bucket ai-lang run main
+
+def env_or(name: String, fallback: String) -> String = {
+    let v = env_get(name);
+    if string_is_empty(v) == 1 { fallback } else { v }
+}
+
+def key_for(prefix: String, i: Int) -> String = str3(prefix, int_to_string(i), "")
+def content_for(i: Int) -> String = str3("chunk-", int_to_string(i), "-payload")
+
+def keys_n(prefix: String, i: Int, n: Int) -> List<String> =
+    if i >= n { Nil } else { Cons(ListCell { head: key_for(prefix, i), tail: keys_n(prefix, i + 1, n) }) }
+
+// Sequential setup: write the N objects.
+def put_n(region: String, bucket: String, prefix: String, i: Int, n: Int,
+          ak: String, sk: String, token: String) -> Int =
+    if i >= n {
+        0
+    } else {
+        let p = s3_put_object(region, bucket, key_for(prefix, i), content_for(i), ak, sk, token);
+        put_n(region, bucket, prefix, i + 1, n, ak, sk, token)
+    }
+
+// Sequential teardown.
+def del_n(region: String, bucket: String, prefix: String, i: Int, n: Int,
+          ak: String, sk: String, token: String) -> Int =
+    if i >= n {
+        0
+    } else {
+        let d = s3_delete_object(region, bucket, key_for(prefix, i), ak, sk, token);
+        del_n(region, bucket, prefix, i + 1, n, ak, sk, token)
+    }
+
+// Count concurrent GET responses that returned 200 with the expected body.
+def count_ok(resps: List<HttpResponse>, i: Int) -> Int =
+    match resps {
+        Nil => 0,
+        Cons(cell) => {
+            let ok = if cell.head.status == 200 {
+                if string_eq(cell.head.body, content_for(i)) { 1 } else { 0 }
+            } else { 0 };
+            ok + count_ok(cell.tail, i + 1)
+        }
+    }
+
+def main() -> Int = {
+    let region = env_or("AWS_REGION", "us-east-1");
+    let bucket = env_or("S3_BUCKET", "jimmyhmiller-bucket");
+    let prefix = env_or("S3_PREFIX", "ai-lang-parallel/obj-");
+    let ak = env_get("AWS_ACCESS_KEY_ID");
+    let sk = env_get("AWS_SECRET_ACCESS_KEY");
+    let token = env_get("AWS_SESSION_TOKEN");
+    let n = 8;
+    let setup = put_n(region, bucket, prefix, 0, n, ak, sk, token);
+    let s = println(str3("wrote ", int_to_string(n), " objects; fetching all at once..."));
+    // The fan-out: N concurrent signed GETs.
+    let resps = s3_get_many(region, bucket, keys_n(prefix, 0, n), ak, sk, token);
+    let ok = count_ok(resps, 0);
+    let teardown = del_n(region, bucket, prefix, 0, n, ak, sk, token);
+    println(str4("concurrent fetch: ", int_to_string(ok), " / ", string_concat(int_to_string(n), " correct")))
+}

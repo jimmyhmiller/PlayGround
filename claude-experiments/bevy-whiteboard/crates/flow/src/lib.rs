@@ -26,6 +26,7 @@ pub use value::{Pattern, Value, Bindings, match_pattern};
 pub use expr::{Expr, BinOp, EvalCtx};
 pub use samples::Samples;
 pub use rule::{Rule, When, Effect, EmitTo, MetaOp, ReturnPathOp};
+pub use engine::ROUTE_COLOR_SLOT;
 pub use sim::{Sim, Node, Edge, NodeId, EdgeId, Packet, PacketId, Time};
 pub use event::{Event, EventLog};
 pub use template::{Template, EdgeSpec, EdgeEnd, Probe, ProbePart};

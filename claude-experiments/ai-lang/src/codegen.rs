@@ -40,9 +40,10 @@ use crate::gc::{ObjHeader, TypeInfo, VarLenKind};
 use crate::hash::Hash;
 use crate::resolve::{ResolvedDef, ResolvedModule};
 use crate::runtime::{
-    Runtime, Thread, ai_gc_alloc_closure, ai_gc_box_int, ai_gc_force_collect, ai_gc_lookup_code,
-    ai_gc_unbox_int, ai_str_concat, ai_str_eq, ai_str_len, ai_str_new, closure_offsets,
-    thread_offsets,
+    Runtime, Thread, ai_array_get, ai_array_len, ai_array_new, ai_array_set, ai_bytes_copy,
+    ai_bytes_get, ai_bytes_new, ai_bytes_set, ai_bytes_slice, ai_gc_alloc_closure, ai_gc_box_int,
+    ai_gc_force_collect, ai_gc_lookup_code, ai_gc_unbox_int, ai_panic, ai_str_concat, ai_str_eq,
+    ai_str_len, ai_str_new, closure_offsets, thread_offsets,
 };
 
 use inkwell::OptimizationLevel;
@@ -52,8 +53,8 @@ use inkwell::execution_engine::{ExecutionEngine, JitFunction};
 use inkwell::module::{Linkage, Module};
 use inkwell::types::{BasicMetadataTypeEnum, IntType, PointerType, StructType};
 use inkwell::values::{
-    AnyValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FunctionValue, GlobalValue,
-    IntValue, PointerValue,
+    AnyValue, BasicMetadataValueEnum, BasicValue, BasicValueEnum, FloatValue, FunctionValue,
+    GlobalValue, IntValue, PointerValue,
 };
 use inkwell::{AddressSpace, IntPredicate};
 
@@ -105,6 +106,11 @@ pub fn init_native_target() -> Result<(), CodegenError> {
     // and runners call init_native_target() before constructing a JIT;
     // this ensures the stdlib's `extern fn` declarations resolve.
     crate::io_externs::register_io_externs();
+    // Everything else that used to be a host shim now runs through the
+    // generic C FFI or pure ai-lang: HTTP drives real libcurl, crypto
+    // calls OpenSSL's libcrypto, OS (env/clock/fs) calls libc, and JSON
+    // is a recursive-descent parser written in ai-lang. The only host
+    // externs left are the legitimate runtime I/O ones above.
     inkwell::targets::Target::initialize_native(&inkwell::targets::InitializationConfig::default())
         .map_err(CodegenError::JitInit)
 }
@@ -125,6 +131,70 @@ pub fn frame_origin_symbol(prefix: &str, hash: &Hash) -> String {
 /// canonical `ext/<name>` builtin name to keep things readable.
 fn user_extern_symbol(name: &str) -> String {
     format!("ext/{}", name)
+}
+
+/// Collect the bare names (without the `ext/` prefix) of every extern
+/// referenced by `e`. Used so the C FFI only resolves library symbols
+/// (via dlopen/dlsym) that the module actually calls — declaring
+/// `curl_*` in the prelude shouldn't force every program to load
+/// libcurl.
+fn collect_ext_refs(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    match e {
+        Expr::BuiltinRef(name) => {
+            if let Some(ext) = name.strip_prefix("ext/") {
+                out.insert(ext.to_owned());
+            }
+        }
+        Expr::Lambda { body, .. } => collect_ext_refs(body, out),
+        Expr::Call(callee, args) => {
+            collect_ext_refs(callee, out);
+            for a in args {
+                collect_ext_refs(a, out);
+            }
+        }
+        Expr::Let { value, body } => {
+            collect_ext_refs(value, out);
+            collect_ext_refs(body, out);
+        }
+        Expr::StructNew { fields, .. } => {
+            for f in fields {
+                collect_ext_refs(f, out);
+            }
+        }
+        Expr::Field { base, .. } => collect_ext_refs(base, out),
+        Expr::EnumNew { payload, .. } => {
+            if let Some(p) = payload {
+                collect_ext_refs(p, out);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            collect_ext_refs(scrutinee, out);
+            for arm in arms {
+                collect_ext_refs(&arm.body, out);
+            }
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_ext_refs(cond, out);
+            collect_ext_refs(then_branch, out);
+            collect_ext_refs(else_branch, out);
+        }
+        Expr::Try { expr, .. } => collect_ext_refs(expr, out),
+        Expr::Defer { cleanup, body } => {
+            collect_ext_refs(cleanup, out);
+            collect_ext_refs(body, out);
+        }
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_)
+        | Expr::LocalVar(_)
+        | Expr::TopRef(_)
+        | Expr::SelfRef(_) => {}
+    }
 }
 
 /// Walk every `ai_user_ext__*` LLVM function in `module` and link it
@@ -238,10 +308,14 @@ pub struct CompiledModule<'ctx> {
 pub enum ShapeMeta {
     Closure {
         code_hash: Hash,
-        n_captures: u32,
-        /// Byte offset of capture[0] from the object start. Subsequent
-        /// captures are at +8 each. v1 captures are all Int.
-        captures_base: u32,
+        /// Per-capture layout in **source order** (the order the
+        /// lambda's free variables appear in `LambdaSpec::captures`).
+        /// Pointer captures live in `value_field` slots before the
+        /// `code_hash` header so the GC traces them; Int captures
+        /// live in raw bytes after the `n_captures` field. Each
+        /// `CaptureMeta::offset` is the absolute byte offset within
+        /// the heap object.
+        captures: Vec<CaptureMeta>,
     },
     Struct {
         struct_ref: Hash,
@@ -253,6 +327,17 @@ pub enum ShapeMeta {
         tag_offset: u32,
         payload: Option<FieldMeta>,
     },
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct CaptureMeta {
+    /// Absolute byte offset of this capture's slot from the start
+    /// of the heap object.
+    pub offset: u32,
+    /// `true` if the slot holds a heap pointer (GC-traced
+    /// `value_field`); `false` if it holds a raw i64 (after the
+    /// closure header in the raw-bytes section).
+    pub is_pointer: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -320,25 +405,18 @@ impl<'ctx> CompiledModule<'ctx> {
         for (h, e) in extra_lambdas {
             match e {
                 Expr::Lambda { params, body } => {
-                    for p in params {
-                        if !is_int_type(p) {
-                            return Err(CodegenError::Unsupported {
-                                what: format!(
-                                    "extra lambda parameter of non-Int type {:?} (v1 restriction)",
-                                    p
-                                ),
-                            });
-                        }
-                    }
+                    // Pointer params are fine; see scan_lambdas.
                     check_no_nested_lambdas(body)?;
                     let arity = params.len() as u32;
                     let captures = collect_captures(body, arity);
+                    let n_caps = captures.len();
                     cg.lambdas.insert(
                         *h,
                         LambdaSpec {
                             params: params.clone(),
                             body: body.clone(),
                             captures,
+                            capture_is_pointer: vec![false; n_caps],
                         },
                     );
                 }
@@ -367,20 +445,43 @@ impl<'ctx> CompiledModule<'ctx> {
         // These come from surface `extern fn` decls. We emit one LLVM
         // extern declaration per declared name (`ext/<name>`); the
         // JIT-init phase wires each to its registered Rust fn pointer.
-        cg.declare_user_externs(&rm.externs)?;
+        // C-FFI externs additionally resolve their real library symbol
+        // now, but only if the module actually references them.
+        let mut referenced_externs = std::collections::HashSet::new();
+        for rd in &rm.defs {
+            if let Def::Fn { body, .. } = &rd.def {
+                collect_ext_refs(body, &mut referenced_externs);
+            }
+        }
+        cg.declare_user_externs(&rm.externs, &referenced_externs)?;
+
+        // ---- Pass 1: declare every def's prototype ----
+        //
+        // Defs are declared BEFORE lambdas because the lambda
+        // capture-pointer-inference walker (`infer_capture_pointer_flags`)
+        // consults `def_signatures`, `struct_field_types`, and
+        // `enum_variant_types`, all populated here.
+        for rd in &rm.defs {
+            cg.declare_def(rd)?;
+        }
 
         // ---- Declare lifted lambda prototypes + register their TypeInfos ----
         // We iterate in a stable order so external/non-external classification
         // and type_id assignment are deterministic.
         let mut lambda_hashes: Vec<Hash> = cg.lambdas.keys().copied().collect();
         lambda_hashes.sort();
+        // First, infer per-capture pointer-ness for every lambda — this
+        // requires `def_signatures` etc. to be populated. We do it
+        // before any `declare_lifted_lambda` call so the shape
+        // registration sees the inferred flags.
+        for h in &lambda_hashes {
+            let flags = cg.infer_capture_pointer_flags(h);
+            if let Some(spec) = cg.lambdas.get_mut(h) {
+                spec.capture_is_pointer = flags;
+            }
+        }
         for h in &lambda_hashes {
             cg.declare_lifted_lambda(h)?;
-        }
-
-        // ---- Pass 1: declare every def's prototype ----
-        for rd in &rm.defs {
-            cg.declare_def(rd)?;
         }
 
         // ---- Pass 2: compile bodies — skipping external defs/lambdas ----
@@ -485,10 +586,20 @@ struct Codegen<'ctx> {
     extern_box_int: Option<FunctionValue<'ctx>>,
     extern_unbox_int: Option<FunctionValue<'ctx>>,
     extern_force_collect: Option<FunctionValue<'ctx>>,
+    extern_panic: Option<FunctionValue<'ctx>>,
     extern_str_new: Option<FunctionValue<'ctx>>,
     extern_str_len: Option<FunctionValue<'ctx>>,
     extern_str_eq: Option<FunctionValue<'ctx>>,
     extern_str_concat: Option<FunctionValue<'ctx>>,
+    extern_bytes_new: Option<FunctionValue<'ctx>>,
+    extern_bytes_get: Option<FunctionValue<'ctx>>,
+    extern_bytes_set: Option<FunctionValue<'ctx>>,
+    extern_bytes_slice: Option<FunctionValue<'ctx>>,
+    extern_bytes_copy: Option<FunctionValue<'ctx>>,
+    extern_array_new: Option<FunctionValue<'ctx>>,
+    extern_array_len: Option<FunctionValue<'ctx>>,
+    extern_array_get: Option<FunctionValue<'ctx>>,
+    extern_array_set: Option<FunctionValue<'ctx>>,
 
     /// In-flight tail-call context: only populated while compiling a
     /// single fn body. Calls inside the body that target this fn's
@@ -512,6 +623,28 @@ struct Codegen<'ctx> {
     /// the runtime's current type_table length so new shapes don't
     /// collide with previously-installed ones.
     next_type_id: u16,
+
+    /// User `extern fn` signatures by surface name, captured at
+    /// `declare_user_externs`. Lets the call-site codegen tell a host
+    /// extern (leading `Thread*`, registry-resolved) from a C-FFI extern
+    /// (plain C ABI, dlsym-resolved) by looking up `ExternSig.library`.
+    user_externs: HashMap<String, crate::resolve::ExternSig>,
+
+    /// Stack of pending `defer` cleanups for the function/lambda body
+    /// currently being compiled. Each entry captures the cleanup
+    /// expression plus the environment snapshot (slot addresses + de
+    /// Bruijn depth) at the `defer` site, so a `?` early-return can emit
+    /// the cleanups (LIFO) before returning. Pushed on entering a `Defer`
+    /// body, popped on exit. Always empty between top-level defs.
+    deferred: Vec<DeferEntry<'ctx>>,
+}
+
+/// A registered-but-not-yet-run `defer` cleanup. See `Codegen.deferred`.
+#[derive(Clone)]
+struct DeferEntry<'ctx> {
+    cleanup: Expr,
+    env: Env<'ctx>,
+    next_root_slot: u32,
 }
 
 #[derive(Clone)]
@@ -524,12 +657,23 @@ struct LambdaSpec {
     /// E.g. if the body uses `LocalVar(arity)` and `LocalVar(arity + 2)`,
     /// captures = [0, 2].
     captures: Vec<u32>,
+    /// Per-capture pointer-ness, populated *after* `declare_def`
+    /// runs (when struct/enum/fn signatures are available for the
+    /// body walker). Same length as `captures`. `true` means the
+    /// capture slot holds a heap pointer (GC-traced).
+    capture_is_pointer: Vec<bool>,
 }
 
 #[derive(Copy, Clone)]
 struct DefInfo<'ctx> {
-    /// Number of GC root slots reserved in this function's frame.
+    /// Number of GC root slots reserved in this function's frame
+    /// (includes the one-slot `defer_scratch` reservation below).
     num_roots: u32,
+    /// Index of a dedicated scratch root slot, reserved above all the
+    /// `let`/param slots, used by `defer` to hold the body/early-return
+    /// result across a cleanup that might itself trigger a collection.
+    /// `num_roots - 1`.
+    defer_scratch: u32,
     /// Per-function `{ ptr parent, ptr origin, [N x ptr] roots }`.
     frame_ty: StructType<'ctx>,
 }
@@ -604,15 +748,27 @@ impl<'ctx> Codegen<'ctx> {
             extern_box_int: None,
             extern_unbox_int: None,
             extern_force_collect: None,
+            extern_panic: None,
             extern_str_new: None,
             extern_str_len: None,
             extern_str_eq: None,
             extern_str_concat: None,
+            extern_bytes_new: None,
+            extern_bytes_get: None,
+            extern_bytes_set: None,
+            extern_bytes_slice: None,
+            extern_bytes_copy: None,
+            extern_array_new: None,
+            extern_array_len: None,
+            extern_array_get: None,
+            extern_array_set: None,
             tail_ctx: None,
             def_signatures: HashMap::new(),
             struct_field_types: HashMap::new(),
             enum_variant_types: HashMap::new(),
             next_type_id: 0,
+            user_externs: HashMap::new(),
+            deferred: Vec::new(),
         }
     }
 
@@ -639,18 +795,9 @@ impl<'ctx> Codegen<'ctx> {
     fn scan_lambdas(&mut self, e: &Expr) -> Result<(), CodegenError> {
         match e {
             Expr::Lambda { params, body } => {
-                // Reject non-Int param types (v1: no closure-typed lambda
-                // params). When the typechecker lands we can lift this.
-                for p in params {
-                    if !is_int_type(p) {
-                        return Err(CodegenError::Unsupported {
-                            what: format!(
-                                "lambda parameter of non-Int type {:?} (v1 restriction)",
-                                p
-                            ),
-                        });
-                    }
-                }
+                // Pointer-typed lambda params are fine — the
+                // uniform closure ABI passes them as ptr and
+                // `compile_lifted_lambda` puts them in a root slot.
                 // Reject nested lambdas inside the body.
                 check_no_nested_lambdas(body)?;
 
@@ -665,12 +812,14 @@ impl<'ctx> Codegen<'ctx> {
                 if !self.lambdas.contains_key(&hash) {
                     let arity = params.len() as u32;
                     let captures = collect_captures(body, arity);
+                    let n_caps = captures.len();
                     self.lambdas.insert(
                         hash,
                         LambdaSpec {
                             params: params.clone(),
                             body: body.clone(),
                             captures,
+                            capture_is_pointer: vec![false; n_caps],
                         },
                     );
                 }
@@ -720,7 +869,15 @@ impl<'ctx> Codegen<'ctx> {
                 self.scan_lambdas(then_branch)?;
                 self.scan_lambdas(else_branch)?;
             }
+            Expr::Try { expr, .. } => {
+                self.scan_lambdas(expr)?;
+            }
+            Expr::Defer { cleanup, body } => {
+                self.scan_lambdas(cleanup)?;
+                self.scan_lambdas(body)?;
+            }
             Expr::IntLit(_)
+            | Expr::FloatLit(_)
             | Expr::BoolLit(_)
             | Expr::StringLit(_)
             | Expr::LocalVar(_)
@@ -801,6 +958,18 @@ impl<'ctx> Codegen<'ctx> {
         );
         self.extern_force_collect = Some(force_collect);
 
+        // ai_panic(thread, msg_ptr) -> ! — prints a heap String message
+        // to stderr and aborts. Declared returning void; every call site
+        // emits an `unreachable` after it so LLVM knows control stops.
+        let panic_ty = self
+            .context
+            .void_type()
+            .fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        let panic_fn = self
+            .module
+            .add_function("ai_panic", panic_ty, Some(Linkage::External));
+        self.extern_panic = Some(panic_fn);
+
         // String runtime fns. Layout: see runtime::ai_str_*.
         let str_new_ty = self.ptr_ty.fn_type(
             &[self.ptr_ty.into(), self.ptr_ty.into(), self.i64_ty.into()],
@@ -841,6 +1010,116 @@ impl<'ctx> Codegen<'ctx> {
             Some(Linkage::External),
         );
         self.extern_str_concat = Some(str_concat);
+
+        // Bytes runtime fns. Layout shares String's heap shape; see
+        // runtime::ai_bytes_*.
+        // ai_bytes_new(thread, len) -> *u8
+        let bytes_new_ty = self
+            .ptr_ty
+            .fn_type(&[self.ptr_ty.into(), self.i64_ty.into()], false);
+        let bytes_new = self.module.add_function(
+            "ai_bytes_new",
+            bytes_new_ty,
+            Some(Linkage::External),
+        );
+        self.extern_bytes_new = Some(bytes_new);
+
+        // ai_bytes_get(bytes, i) -> i64
+        let bytes_get_ty = self
+            .i64_ty
+            .fn_type(&[self.ptr_ty.into(), self.i64_ty.into()], false);
+        let bytes_get = self.module.add_function(
+            "ai_bytes_get",
+            bytes_get_ty,
+            Some(Linkage::External),
+        );
+        self.extern_bytes_get = Some(bytes_get);
+
+        // ai_bytes_set(bytes, i, v) -> i64
+        let bytes_set_ty = self.i64_ty.fn_type(
+            &[self.ptr_ty.into(), self.i64_ty.into(), self.i64_ty.into()],
+            false,
+        );
+        let bytes_set = self.module.add_function(
+            "ai_bytes_set",
+            bytes_set_ty,
+            Some(Linkage::External),
+        );
+        self.extern_bytes_set = Some(bytes_set);
+
+        // ai_bytes_slice(thread, bytes, start, len) -> *u8
+        let bytes_slice_ty = self.ptr_ty.fn_type(
+            &[
+                self.ptr_ty.into(),
+                self.ptr_ty.into(),
+                self.i64_ty.into(),
+                self.i64_ty.into(),
+            ],
+            false,
+        );
+        let bytes_slice = self.module.add_function(
+            "ai_bytes_slice",
+            bytes_slice_ty,
+            Some(Linkage::External),
+        );
+        self.extern_bytes_slice = Some(bytes_slice);
+
+        // ai_bytes_copy(thread, src) -> *u8 — backs bytes_from_string
+        // and string_from_bytes (defensive copy between identical reps).
+        let bytes_copy_ty = self
+            .ptr_ty
+            .fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        let bytes_copy = self.module.add_function(
+            "ai_bytes_copy",
+            bytes_copy_ty,
+            Some(Linkage::External),
+        );
+        self.extern_bytes_copy = Some(bytes_copy);
+
+        // Array runtime fns. Heap shape = Runtime.array_ti (varlen
+        // Values / pointer slots). See runtime::ai_array_*.
+        // ai_array_new(thread, n) -> *u8
+        let array_new_ty = self
+            .ptr_ty
+            .fn_type(&[self.ptr_ty.into(), self.i64_ty.into()], false);
+        let array_new = self.module.add_function(
+            "ai_array_new",
+            array_new_ty,
+            Some(Linkage::External),
+        );
+        self.extern_array_new = Some(array_new);
+
+        // ai_array_len(array) -> i64
+        let array_len_ty = self.i64_ty.fn_type(&[self.ptr_ty.into()], false);
+        let array_len = self.module.add_function(
+            "ai_array_len",
+            array_len_ty,
+            Some(Linkage::External),
+        );
+        self.extern_array_len = Some(array_len);
+
+        // ai_array_get(array, i) -> *u8
+        let array_get_ty = self
+            .ptr_ty
+            .fn_type(&[self.ptr_ty.into(), self.i64_ty.into()], false);
+        let array_get = self.module.add_function(
+            "ai_array_get",
+            array_get_ty,
+            Some(Linkage::External),
+        );
+        self.extern_array_get = Some(array_get);
+
+        // ai_array_set(array, i, ptr) -> i64
+        let array_set_ty = self.i64_ty.fn_type(
+            &[self.ptr_ty.into(), self.i64_ty.into(), self.ptr_ty.into()],
+            false,
+        );
+        let array_set = self.module.add_function(
+            "ai_array_set",
+            array_set_ty,
+            Some(Linkage::External),
+        );
+        self.extern_array_set = Some(array_set);
     }
 
     // -------------------------------------------------------------------------
@@ -857,8 +1136,79 @@ impl<'ctx> Codegen<'ctx> {
     fn declare_user_externs(
         &mut self,
         externs: &HashMap<String, crate::resolve::ExternSig>,
+        referenced: &std::collections::HashSet<String>,
     ) -> Result<(), CodegenError> {
+        // Keep the signatures around so the call-site codegen can tell a
+        // host extern from a C-FFI one.
+        self.user_externs = externs.clone();
         for (name, sig) in externs {
+            let symbol = user_extern_symbol(name);
+            if sig.library.is_some() {
+                // C-FFI extern: a real C symbol. Plain C ABI — no leading
+                // `Thread*`. Every arg/return is an i64-width C scalar
+                // (`Int` or `Ptr`); other types aren't marshalable here.
+                for p in &sig.params {
+                    if !is_c_scalar_type(p) {
+                        return Err(CodegenError::Unsupported {
+                            what: format!(
+                                "C extern `{}` parameter type {:?} (supported: Int, Ptr)",
+                                name, p
+                            ),
+                        });
+                    }
+                }
+                if !is_c_scalar_type(&sig.ret) {
+                    return Err(CodegenError::Unsupported {
+                        what: format!(
+                            "C extern `{}` return type {:?} (supported: Int, Ptr)",
+                            name, sig.ret
+                        ),
+                    });
+                }
+                let param_tys: Vec<BasicMetadataTypeEnum> =
+                    sig.params.iter().map(|_| self.i64_ty.into()).collect();
+                // A variadic C function (e.g. `curl_easy_setopt`) is
+                // declared with `is_var_args = true` and only the fixed
+                // params named; the arm64 / x86-64 variadic ABI then
+                // places trailing args correctly (stack vs registers).
+                let fn_ty = self.i64_ty.fn_type(&param_tys, sig.variadic);
+                self.module
+                    .add_function(&symbol, fn_ty, Some(Linkage::External));
+                // Only resolve the real library symbol if the module
+                // actually calls it. This keeps unused prelude
+                // declarations (e.g. the whole libcurl surface) from
+                // forcing every program to dlopen that library.
+                if !referenced.contains(name.as_str()) {
+                    continue;
+                }
+                // Resolve the real C symbol now (via dlopen/dlsym) and
+                // register its address in the global FFI registry under
+                // this name, so the existing `wire_user_externs` step
+                // maps `ext/<name>` to it — same as a host extern, just a
+                // different source of the address.
+                let lib = sig.library.as_deref().unwrap_or("");
+                match crate::cffi::resolve_symbol(lib, name) {
+                    Some(addr) => unsafe {
+                        crate::ffi::register_extern(
+                            name,
+                            sig.params.clone(),
+                            sig.ret.clone(),
+                            addr,
+                        );
+                    },
+                    None => {
+                        return Err(CodegenError::Unsupported {
+                            what: format!(
+                                "could not resolve C symbol `{}` from library \"{}\" \
+                                 (dlopen/dlsym failed)",
+                                name, lib
+                            ),
+                        });
+                    }
+                }
+                continue;
+            }
+            // Host (Rust) extern: leading `Thread*`, Int/String args.
             for p in &sig.params {
                 if !is_extern_supported_type(p) {
                     return Err(CodegenError::Unsupported {
@@ -886,10 +1236,9 @@ impl<'ctx> Codegen<'ctx> {
             let fn_ty = if is_int_type(&sig.ret) {
                 self.i64_ty.fn_type(&param_tys, false)
             } else {
-                // String return → ptr.
+                // String/Ptr return → ptr.
                 self.ptr_ty.fn_type(&param_tys, false)
             };
-            let symbol = user_extern_symbol(name);
             self.module
                 .add_function(&symbol, fn_ty, Some(Linkage::External));
         }
@@ -908,6 +1257,204 @@ impl<'ctx> Codegen<'ctx> {
     // -------------------------------------------------------------------------
     // Lifted lambda declaration
     // -------------------------------------------------------------------------
+
+    /// Walk a lambda's body to infer, for each capture, whether the
+    /// capture slot needs to hold a heap pointer (`true`) or a raw
+    /// i64 (`false`). The classification is based on how the body
+    /// uses `LocalVar(arity + outer_idx)`:
+    ///
+    /// - `base` of `Expr::Field` → pointer
+    /// - `scrutinee` of `Expr::Match` → pointer (enums are heap)
+    /// - Arg `j` of a `Call` whose callee has a known signature with
+    ///   pointer-typed param `j` → pointer
+    /// - Field `j` of a `StructNew` whose declared field type is
+    ///   pointer → pointer
+    /// - `EnumNew` payload whose variant's declared payload is
+    ///   pointer → pointer
+    ///
+    /// Any other context (arithmetic, raw stores, etc.) defaults
+    /// to Int. If a single capture is used both ways the pointer
+    /// classification wins (we can always box an Int into a
+    /// BoxedInt on the store side).
+    fn infer_capture_pointer_flags(&self, h: &Hash) -> Vec<bool> {
+        let spec = match self.lambdas.get(h) {
+            Some(s) => s,
+            None => return Vec::new(),
+        };
+        let arity = spec.params.len() as u32;
+        let mut flags = vec![false; spec.captures.len()];
+        self.walk_capture_uses(&spec.body, arity, &spec.captures, &mut flags);
+
+        // Pass-through detection: if a capture flows directly to the
+        // lambda's return value without any int-implying use, the
+        // capture must be pointer-shaped because the lambda's return
+        // travels through the uniform-ABI pointer slot. Without this,
+        // `|| x` in a generic context (e.g. `value_pure<T>`) would
+        // be classified Int and break at construction when T is a
+        // heap value.
+        if let Some(idx) = passthrough_capture_index(&spec.body, arity) {
+            if let Some(pos) = spec.captures.iter().position(|&o| o == idx) {
+                flags[pos] = true;
+            }
+        }
+        flags
+    }
+
+    fn walk_capture_uses(
+        &self,
+        e: &Expr,
+        arity: u32,
+        captures: &[u32],
+        flags: &mut [bool],
+    ) {
+        let mark = |idx: u32, ar: u32, flags: &mut [bool]| {
+            if idx < ar {
+                return;
+            }
+            let outer = idx - ar;
+            if let Some(pos) = captures.iter().position(|&o| o == outer) {
+                flags[pos] = true;
+            }
+        };
+        let arg_is_capture_localvar = |e: &Expr, ar: u32| -> Option<u32> {
+            if let Expr::LocalVar(i) = e {
+                if *i >= ar {
+                    return Some(*i);
+                }
+            }
+            None
+        };
+        match e {
+            Expr::LocalVar(_) | Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_)
+            | Expr::StringLit(_) | Expr::TopRef(_)
+            | Expr::BuiltinRef(_) | Expr::SelfRef(_) => {}
+            Expr::Field { base, .. } => {
+                if let Some(idx) = arg_is_capture_localvar(base, arity) {
+                    mark(idx, arity, flags);
+                }
+                self.walk_capture_uses(base, arity, captures, flags);
+            }
+            Expr::Match { scrutinee, arms } => {
+                if let Some(idx) = arg_is_capture_localvar(scrutinee, arity) {
+                    mark(idx, arity, flags);
+                }
+                self.walk_capture_uses(scrutinee, arity, captures, flags);
+                for arm in arms {
+                    let bindings = count_pattern_vars(&arm.pattern);
+                    self.walk_capture_uses(&arm.body, arity + bindings, captures, flags);
+                }
+            }
+            Expr::Call(callee, args) => {
+                // A callee that's a captured LocalVar must be a
+                // closure (only callable values are functions, and
+                // functions cross the closure boundary as heap
+                // pointers). Mark it pointer.
+                if let Some(idx) = arg_is_capture_localvar(callee, arity) {
+                    mark(idx, arity, flags);
+                }
+                // If the callee is a TopRef / BuiltinRef whose signature
+                // we know, use it to classify each arg's expected type.
+                let param_tys: Option<Vec<Type>> = match callee.as_ref() {
+                    Expr::TopRef(h) => self
+                        .def_signatures
+                        .get(h)
+                        .map(|s| s.params.clone()),
+                    Expr::BuiltinRef(name) => {
+                        if crate::resolve::parse_at_builtin_name(name).is_some() {
+                            // at(Node, fn() -> T): both args are
+                            // pointer-typed at the call boundary.
+                            Some(vec![
+                                Type::TypeRef(Hash([0; 32])),
+                                Type::FnType {
+                                    params: vec![],
+                                    ret: Box::new(Type::Builtin("Int".to_owned())),
+                                },
+                            ])
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                };
+                for (j, arg) in args.iter().enumerate() {
+                    if let Some(idx) = arg_is_capture_localvar(arg, arity) {
+                        if let Some(tys) = &param_tys {
+                            if let Some(p) = tys.get(j) {
+                                if is_pointer_type(p) {
+                                    mark(idx, arity, flags);
+                                }
+                            }
+                        }
+                    }
+                    self.walk_capture_uses(arg, arity, captures, flags);
+                }
+                self.walk_capture_uses(callee, arity, captures, flags);
+            }
+            Expr::StructNew { struct_ref, fields } => {
+                let field_tys = self.struct_field_types.get(struct_ref).cloned();
+                for (j, fexpr) in fields.iter().enumerate() {
+                    if let Some(idx) = arg_is_capture_localvar(fexpr, arity) {
+                        if let Some(tys) = &field_tys {
+                            if let Some(t) = tys.get(j) {
+                                if is_pointer_type(t) {
+                                    mark(idx, arity, flags);
+                                }
+                            }
+                        }
+                    }
+                    self.walk_capture_uses(fexpr, arity, captures, flags);
+                }
+            }
+            Expr::EnumNew {
+                enum_ref,
+                variant_index,
+                payload,
+                ..
+            } => {
+                if let Some(pexpr) = payload.as_deref() {
+                    let payload_ty = self
+                        .enum_variant_types
+                        .get(enum_ref)
+                        .and_then(|vs| vs.get(*variant_index as usize).cloned())
+                        .flatten();
+                    if let Some(idx) = arg_is_capture_localvar(pexpr, arity) {
+                        if let Some(t) = payload_ty.as_ref() {
+                            if is_pointer_type(t) {
+                                mark(idx, arity, flags);
+                            }
+                        }
+                    }
+                    self.walk_capture_uses(pexpr, arity, captures, flags);
+                }
+            }
+            Expr::Let { value, body } => {
+                self.walk_capture_uses(value, arity, captures, flags);
+                self.walk_capture_uses(body, arity + 1, captures, flags);
+            }
+            Expr::If { cond, then_branch, else_branch } => {
+                self.walk_capture_uses(cond, arity, captures, flags);
+                self.walk_capture_uses(then_branch, arity, captures, flags);
+                self.walk_capture_uses(else_branch, arity, captures, flags);
+            }
+            Expr::Try { expr, .. } => {
+                // The operand is a Result (a heap pointer); a captured
+                // LocalVar used directly as the operand must be pointer.
+                if let Some(idx) = arg_is_capture_localvar(expr, arity) {
+                    mark(idx, arity, flags);
+                }
+                self.walk_capture_uses(expr, arity, captures, flags);
+            }
+            Expr::Defer { cleanup, body } => {
+                // `defer` adds no binder; both sub-expressions see the
+                // same environment as the Defer node.
+                self.walk_capture_uses(cleanup, arity, captures, flags);
+                self.walk_capture_uses(body, arity, captures, flags);
+            }
+            Expr::Lambda { .. } => {
+                // No nested lambdas per `check_no_nested_lambdas`.
+            }
+        }
+    }
 
     fn declare_lifted_lambda(&mut self, h: &Hash) -> Result<(), CodegenError> {
         let spec = self.lambdas[h].clone();
@@ -930,14 +1477,23 @@ impl<'ctx> Codegen<'ctx> {
         let fv = self.module.add_function(&symbol, fn_ty, None);
 
         // Pre-scan: lifted body's GC-typed locals + pointer-typed
-        // params. Pointer params live in shadow-stack root slots
-        // because the body may trigger GC between alloc and use.
+        // params + pointer captures. Pointer params + captures live
+        // in shadow-stack root slots because the body may trigger
+        // GC between alloc and use.
         let mut num_roots = count_gc_locals(&spec.body);
         for p in &spec.params {
             if is_pointer_type(p) {
                 num_roots += 1;
             }
         }
+        for &is_ptr in &spec.capture_is_pointer {
+            if is_ptr {
+                num_roots += 1;
+            }
+        }
+        // Reserve a scratch slot above everything for `defer` result spill.
+        let defer_scratch = num_roots;
+        num_roots += 1;
         let roots_array_ty = self.ptr_ty.array_type(num_roots);
         let frame_ty = self.context.struct_type(
             &[self.ptr_ty.into(), self.ptr_ty.into(), roots_array_ty.into()],
@@ -961,25 +1517,54 @@ impl<'ctx> Codegen<'ctx> {
         origin_global.set_constant(true);
         origin_global.set_initializer(&origin_init);
 
-        // Register the closure shape's TypeInfo.
+        // Register the closure shape's TypeInfo + per-capture layout.
+        //
+        // Capture slot assignment (source order):
+        //   - pointer captures fill `value_field` slots starting at
+        //     `header_size`, packed in source order among pointers
+        //   - int captures fill raw-byte slots starting at
+        //     `header_size + ptr_count*8 + NON_POINTER_CAPTURES`,
+        //     packed in source order among ints
+        //
+        // `closure_offsets::NON_POINTER_CAPTURES = 40` is the size of
+        // the header prefix (code_hash 32 + n_captures 4 + pad 4)
+        // that sits between value_field slots and int slots.
         let type_id = self.next_type_id();
-        let n_caps = spec.captures.len() as u16;
-        // v1: all captures are Int (raw bytes). value_field_count = 0.
-        // raw_byte_count = 40 (code_hash + n_captures + pad) + 8 * n_caps.
-        let raw_bytes: u16 = 40 + 8 * n_caps;
+        let header_size = crate::gc::Full::SIZE as u32;
+        let ptr_count: u16 = spec
+            .capture_is_pointer
+            .iter()
+            .filter(|p| **p)
+            .count() as u16;
+        let int_count: u16 = (spec.capture_is_pointer.len() as u16) - ptr_count;
+        let raw_bytes: u16 = closure_offsets::NON_POINTER_CAPTURES as u16 + 8 * int_count;
         let ti = TypeInfo::for_header(crate::gc::Full::SIZE as usize)
             .with_type_id(type_id)
-            .with_fields(0)
+            .with_fields(ptr_count)
             .with_raw_bytes(raw_bytes);
         self.closure_type_infos.push(ti);
         self.shape_registry.insert(*h, type_id);
-        let header_size = crate::gc::Full::SIZE as u32;
+        let int_base =
+            header_size + (ptr_count as u32) * 8 + closure_offsets::NON_POINTER_CAPTURES as u32;
+        let mut captures_meta: Vec<CaptureMeta> = Vec::with_capacity(spec.capture_is_pointer.len());
+        let mut next_ptr: u32 = 0;
+        let mut next_int: u32 = 0;
+        for &is_ptr in &spec.capture_is_pointer {
+            if is_ptr {
+                let offset = header_size + next_ptr * 8;
+                captures_meta.push(CaptureMeta { offset, is_pointer: true });
+                next_ptr += 1;
+            } else {
+                let offset = int_base + next_int * 8;
+                captures_meta.push(CaptureMeta { offset, is_pointer: false });
+                next_int += 1;
+            }
+        }
         self.shape_meta.insert(
             *h,
             ShapeMeta::Closure {
                 code_hash: *h,
-                n_captures: n_caps as u32,
-                captures_base: header_size + closure_offsets::NON_POINTER_CAPTURES as u32,
+                captures: captures_meta,
             },
         );
         self.register_type_id_shape(type_id, *h);
@@ -997,6 +1582,7 @@ impl<'ctx> Codegen<'ctx> {
             *h,
             DefInfo {
                 num_roots,
+                defer_scratch,
                 frame_ty,
             },
         );
@@ -1362,6 +1948,10 @@ impl<'ctx> Codegen<'ctx> {
                 num_roots += 1;
             }
         }
+        // Reserve one extra slot above everything for `defer` to spill a
+        // pointer result across a cleanup.
+        let defer_scratch = num_roots;
+        num_roots += 1;
 
         let roots_array_ty = self.ptr_ty.array_type(num_roots);
         let frame_ty = self.context.struct_type(
@@ -1393,6 +1983,7 @@ impl<'ctx> Codegen<'ctx> {
             rd.hash,
             DefInfo {
                 num_roots,
+                defer_scratch,
                 frame_ty,
             },
         );
@@ -1405,6 +1996,9 @@ impl<'ctx> Codegen<'ctx> {
         let Def::Fn { body, params, ret, .. } = &rd.def else {
             return Ok(());
         };
+        // Defer stack is per-body; start clean (pushes/pops balance within
+        // a body, but never let one body's state leak into the next).
+        self.deferred.clear();
         let fv = self.functions[&rd.hash];
         let info = self.def_info[&rd.hash];
         let origin_sym = frame_origin_symbol("def", &rd.hash);
@@ -1508,6 +2102,20 @@ impl<'ctx> Codegen<'ctx> {
         self.tail_ctx = None;
         let result = result?;
 
+        // If the body already terminated its block (e.g. the whole body
+        // is a diverging `panic`), there is nothing to return — emitting
+        // an epilogue + return here would add instructions after the
+        // `unreachable` terminator. The process aborts before any caller
+        // resumes, so skipping the shadow-stack pop is correct.
+        if self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_terminator())
+            .is_some()
+        {
+            return Ok(());
+        }
+
         // Epilogue + return
         self.emit_epilogue(thread_param, frame_alloca)?;
         let basic = if is_pointer_type(ret) {
@@ -1542,6 +2150,7 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn compile_lifted_lambda(&mut self, h: &Hash) -> Result<(), CodegenError> {
+        self.deferred.clear();
         let spec = self.lambdas[h].clone();
         let fv = self.lifted_lambdas[h];
         let info = self.lambda_info[h];
@@ -1596,41 +2205,85 @@ impl<'ctx> Codegen<'ctx> {
         // Great. So we push captures in REVERSE order (highest first),
         // then params.
 
-        // Compute byte offsets for each capture. Offset of captures[i]
-        // (in stable ascending capture order) within the heap object:
-        //   header(16) + value_fields(0) + raw_bytes(NON_POINTER_CAPTURES=40)
-        //   + i * 8
-        let header_size = crate::gc::Full::SIZE as u64;
-        let captures_base = header_size + closure_offsets::NON_POINTER_CAPTURES as u64;
+        // Load each capture from its assigned slot. Pointer captures
+        // live in `value_field` slots; Int captures live in raw
+        // bytes after the closure header. The exact offset comes
+        // from the ShapeMeta::Closure registered at lambda-declare
+        // time. Pointer captures need a shadow-stack root slot so
+        // the GC traces them; Int captures don't.
+        //
+        // Push order (per the env scheme above): captures in REVERSE
+        // (highest outer-idx first), then params last. Within each
+        // capture entry we read from the heap and push appropriately.
+        let cap_layouts: Vec<CaptureMeta> = match self.shape_meta.get(h) {
+            Some(ShapeMeta::Closure { captures, .. }) => captures.clone(),
+            _ => Vec::new(),
+        };
+        // Count how many pointer captures the lambda has; each takes
+        // one shadow-stack root slot. We reserve slots [0..ptr_caps)
+        // for captures and start param-slot assignment after them.
+        let ptr_caps: u32 =
+            spec.capture_is_pointer.iter().filter(|p| **p).count() as u32;
+        // Build a stable mapping: source-order capture index → root
+        // slot index (only used for pointer captures). We assign
+        // root slots in source order so the first pointer capture
+        // gets slot 0, etc.
+        let mut cap_root_slot: Vec<u32> = Vec::with_capacity(spec.captures.len());
+        {
+            let mut next = 0u32;
+            for &is_ptr in &spec.capture_is_pointer {
+                if is_ptr {
+                    cap_root_slot.push(next);
+                    next += 1;
+                } else {
+                    cap_root_slot.push(u32::MAX);
+                }
+            }
+        }
 
         for (idx, _outer_idx) in spec.captures.iter().enumerate().rev() {
-            let offset = self.i64_ty.const_int(captures_base + idx as u64 * 8, false);
-            let slot = unsafe {
+            let cap = cap_layouts
+                .get(idx)
+                .copied()
+                .unwrap_or(CaptureMeta { offset: 0, is_pointer: false });
+            let offset = self.i64_ty.const_int(cap.offset as u64, false);
+            let slot_addr = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), closure_param, &[offset], "cap_slot")
                     .map_err(|e| CodegenError::JitInit(format!("gep capture: {}", e)))?
             };
-            let load = self
-                .builder
-                .build_load(self.i64_ty, slot, "cap_val")
-                .map_err(|e| CodegenError::JitInit(format!("load capture: {}", e)))?;
-            // Volatile so LLVM doesn't optimize away. Strictly speaking
-            // these loads happen at function entry only and the closure
-            // doesn't move during this call, so volatile is overkill —
-            // but it matches the pattern for root-slot reads elsewhere
-            // and keeps us safe if we add re-loads later.
-            // Note: build_load returns a LoadInst as a BasicValueEnum;
-            // there's no separate set_volatile for that path here.
-            env.push(EnvSlot::Int(load.into_int_value()), Type::Builtin("Int".to_owned()));
+            if cap.is_pointer {
+                // Pointer capture: load as ptr, write into a
+                // shadow-stack root slot so it's traced.
+                let load = self
+                    .builder
+                    .build_load(self.ptr_ty, slot_addr, "cap_ptr")
+                    .map_err(|e| CodegenError::JitInit(format!("load ptr capture: {}", e)))?
+                    .into_pointer_value();
+                let root_idx = cap_root_slot[idx];
+                let slot = self.write_root_slot(frame_alloca, info, root_idx, load)?;
+                // Type tracking: we infer the capture's effective
+                // type from how the body uses it. For now we don't
+                // have a precise type on hand — TypeVar(0) is a
+                // safe placeholder that lets pointer-shaped uses
+                // (Field, Match, Apply'd things) succeed; specific
+                // sites (compile_field / compile_match) refine via
+                // their own inference when needed.
+                env.push(EnvSlot::Closure(slot), Type::TypeVar(0));
+            } else {
+                let load = self
+                    .builder
+                    .build_load(self.i64_ty, slot_addr, "cap_val")
+                    .map_err(|e| CodegenError::JitInit(format!("load capture: {}", e)))?;
+                env.push(EnvSlot::Int(load.into_int_value()), Type::Builtin("Int".to_owned()));
+            }
         }
         // Params arrive as ptrs (uniform closure ABI). For each
-        // declared-Int param, unbox the BoxedInt back to i64. Pointer
-        // params (Apply, FnType, String, TypeVar, TypeRef) land in a
-        // root slot so GC tracks them. The captures already pushed
-        // above used `next_root_slot = 0..spec.captures.len()` worth
-        // of slots... actually no, captures use EnvSlot::Int (Int
-        // captures only in v1). So lambda params start at slot 0.
-        let mut next_root_slot = 0u32;
+        // declared-Int param, unbox the BoxedInt back to i64.
+        // Pointer params land in a root slot so GC tracks them.
+        // Captures already consumed `ptr_caps` root slots above, so
+        // params start at slot index `ptr_caps`.
+        let mut next_root_slot = ptr_caps;
         for (i, p_ty) in spec.params.iter().enumerate() {
             let pv = fv
                 .get_nth_param((2 + i) as u32)
@@ -1680,6 +2333,17 @@ impl<'ctx> Codegen<'ctx> {
                 is_tail: true,
             },
         )?;
+
+        // A diverging lambda body (e.g. one that `panic`s) already
+        // terminated its block; skip the epilogue + return.
+        if self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_terminator())
+            .is_some()
+        {
+            return Ok(());
+        }
 
         self.emit_epilogue(thread_param, frame_alloca)?;
         // Uniform closure ABI: return a pointer. If the body produced
@@ -1884,6 +2548,11 @@ impl<'ctx> Codegen<'ctx> {
     ) -> Result<Value<'ctx>, CodegenError> {
         match e {
             Expr::IntLit(n) => Ok(Value::Int(self.i64_ty.const_int(*n as u64, true))),
+            // Float is carried as the i64 bit-pattern of the f64 (see the
+            // `core/f64.*` builtins). A literal is the const f64's bits.
+            Expr::FloatLit(x) => Ok(Value::Int(
+                self.i64_ty.const_int(x.to_bits(), false),
+            )),
 
             Expr::LocalVar(idx) => {
                 let n = env.len();
@@ -1904,9 +2573,11 @@ impl<'ctx> Codegen<'ctx> {
                 })
             }
 
-            Expr::BoolLit(_) => Err(CodegenError::Unsupported {
-                what: "Bool literals (no runtime representation yet)".to_owned(),
-            }),
+            // Bool is represented as i64 0/1 throughout the runtime (the
+            // comparison builtins already return 0/1 widened to i64), so a
+            // `BoolLit` lowers to the same constant form as an `IntLit`:
+            // `false` -> 0, `true` -> 1.
+            Expr::BoolLit(b) => Ok(Value::Int(self.i64_ty.const_int(*b as u64, false))),
 
             Expr::StringLit(s) => {
                 // Emit a private constant byte array global holding
@@ -2005,6 +2676,261 @@ impl<'ctx> Codegen<'ctx> {
                 then_branch,
                 else_branch,
             } => self.compile_if(cond, then_branch, else_branch, env, ctx),
+            Expr::Try {
+                expr,
+                enum_ref,
+                ok_index,
+                err_index,
+            } => self.compile_try(expr, enum_ref, *ok_index, *err_index, env, ctx),
+            Expr::Defer { cleanup, body } => self.compile_defer(cleanup, body, env, ctx),
+        }
+    }
+
+    /// Compile `defer cleanup; body`. The cleanup runs on every way out:
+    /// normal completion of `body` (emitted here) and any `?` inside
+    /// `body` that early-returns (emitted by `compile_try`, which walks
+    /// `self.deferred`). Cleanups run in LIFO order.
+    ///
+    /// The body is compiled NOT in tail position — work (the cleanup)
+    /// happens after it, so its final call cannot be a tail call. A
+    /// pointer-valued body result is spilled to the frame's `defer_scratch`
+    /// root slot across the cleanup, so that a cleanup which itself
+    /// allocates (and triggers a collection) cannot leave the result a
+    /// stale, pre-move pointer.
+    fn compile_defer(
+        &mut self,
+        cleanup: &Expr,
+        body: &Expr,
+        env: &mut Env<'ctx>,
+        ctx: CompileCtx<'ctx>,
+    ) -> Result<Value<'ctx>, CodegenError> {
+        // Register the cleanup so a `?` inside `body` runs it. The env
+        // snapshot pins the slot addresses + de Bruijn depth at this site.
+        self.deferred.push(DeferEntry {
+            cleanup: cleanup.clone(),
+            env: env.clone(),
+            next_root_slot: ctx.next_root_slot,
+        });
+        let body_ctx = CompileCtx {
+            is_tail: false,
+            ..ctx
+        };
+        let result = self.compile_expr(body, env, body_ctx)?;
+        // Unregister before emitting the normal-path cleanup (it is not a
+        // pending cleanup for itself).
+        self.deferred.pop();
+
+        // If `body` diverged (its block is already terminated, e.g. an
+        // unconditional `panic` or a `?` on every path), there is no
+        // normal fall-through to clean up; the early-return paths already
+        // ran the cleanup.
+        let terminated = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_terminator())
+            .is_some();
+        if terminated {
+            return Ok(result);
+        }
+
+        // Spill a pointer result across the cleanup, then run the cleanup,
+        // then reload (so a collection triggered by the cleanup updates
+        // the result through the root slot). Int results need no spill.
+        let spill_slot = match result {
+            Value::Closure(p) => Some(self.write_root_slot(
+                ctx.frame_alloca,
+                ctx.info,
+                ctx.info.defer_scratch,
+                p,
+            )?),
+            Value::Int(_) => None,
+        };
+        let cctx = CompileCtx {
+            is_tail: false,
+            ..ctx
+        };
+        let _ = self.compile_expr(cleanup, env, cctx)?;
+        match spill_slot {
+            Some(slot) => Ok(Value::Closure(self.read_root_slot(slot)?)),
+            None => Ok(result),
+        }
+    }
+
+    /// Compile `expr?` (the try operator). `expr` evaluates to a heap
+    /// `Result<T, E>` pointer. We read the discriminant: on `Err` we
+    /// early-return the whole `Result` value from the enclosing function
+    /// (its return type is a `Result<_, E>`, a pointer, so the value
+    /// passes through unchanged); on `Ok` we extract and yield the `T`
+    /// payload, unboxing it from a `BoxedInt` when `T` is a scalar.
+    fn compile_try(
+        &mut self,
+        operand: &Expr,
+        enum_ref: &Hash,
+        ok_index: u32,
+        err_index: u32,
+        env: &mut Env<'ctx>,
+        ctx: CompileCtx<'ctx>,
+    ) -> Result<Value<'ctx>, CodegenError> {
+        // The operand's `Result<T, E>` instantiation drives Ok-payload
+        // box/unbox, just like a match scrutinee.
+        let instantiation: Vec<Type> = match self.infer_type(operand, env) {
+            Type::Apply(_, args) => args,
+            _ => Vec::new(),
+        };
+
+        // Compile the operand — not in tail position.
+        let op_ctx = CompileCtx {
+            is_tail: false,
+            ..ctx
+        };
+        let rv = self.compile_expr(operand, env, op_ctx)?;
+        let result_ptr = rv.as_closure().map_err(|_| CodegenError::TypeMismatch {
+            what: "`?` operand must be a Result (heap pointer)".to_owned(),
+        })?;
+
+        let einfo = self
+            .enums
+            .get(enum_ref)
+            .cloned()
+            .ok_or(CodegenError::UnknownTopRef { hash: *enum_ref })?;
+
+        // Read the discriminant tag (i32), shared offset across variants.
+        let tag_offset = einfo.variants[0].tag_offset;
+        let tag_off_const = self.i64_ty.const_int(tag_offset as u64, false);
+        let tag_ptr = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    result_ptr,
+                    &[tag_off_const],
+                    "try_tag_ptr",
+                )
+                .map_err(|e| CodegenError::JitInit(format!("gep try tag: {}", e)))?
+        };
+        let tag = self
+            .builder
+            .build_load(self.context.i32_type(), tag_ptr, "try_tag")
+            .map_err(|e| CodegenError::JitInit(format!("load try tag: {}", e)))?
+            .into_int_value();
+
+        let cur_fn = self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_parent())
+            .expect("try compile must be inside a fn");
+        let err_bb = self.context.append_basic_block(cur_fn, "try_err");
+        let ok_bb = self.context.append_basic_block(cur_fn, "try_ok");
+
+        // tag == err_index → err_bb (early return), else ok_bb.
+        let err_tag = self
+            .context
+            .i32_type()
+            .const_int(err_index as u64, false);
+        let is_err = self
+            .builder
+            .build_int_compare(IntPredicate::EQ, tag, err_tag, "try_is_err")
+            .map_err(|e| CodegenError::JitInit(format!("cmp try tag: {}", e)))?;
+        self.builder
+            .build_conditional_branch(is_err, err_bb, ok_bb)
+            .map_err(|e| CodegenError::JitInit(format!("br try: {}", e)))?;
+
+        // ---- err_bb: run pending `defer` cleanups, then early-return ----
+        self.builder.position_at_end(err_bb);
+        // Run every pending cleanup in LIFO order before unwinding out of
+        // the function. Spill the Err Result pointer to the scratch slot
+        // first so a cleanup that allocates (and collects) cannot leave it
+        // a stale pointer. Each cleanup is compiled against the env
+        // snapshot taken at its `defer` site. This rebinding is LOCAL to
+        // the err path; the original `result_ptr` (which the ok branch
+        // GEPs below) is left untouched.
+        let err_result_ptr = if self.deferred.is_empty() {
+            result_ptr
+        } else {
+            let scratch = self.write_root_slot(
+                ctx.frame_alloca,
+                ctx.info,
+                ctx.info.defer_scratch,
+                result_ptr,
+            )?;
+            let pending: Vec<DeferEntry<'ctx>> = self.deferred.clone();
+            for entry in pending.iter().rev() {
+                let mut cenv = entry.env.clone();
+                let cctx = CompileCtx {
+                    is_tail: false,
+                    next_root_slot: entry.next_root_slot,
+                    ..ctx
+                };
+                let _ = self.compile_expr(&entry.cleanup, &mut cenv, cctx)?;
+            }
+            self.read_root_slot(scratch)?
+        };
+        self.emit_epilogue(ctx.thread_param, ctx.frame_alloca)?;
+        self.builder
+            .build_return(Some(&err_result_ptr as &dyn inkwell::values::BasicValue))
+            .map_err(|e| CodegenError::JitInit(format!("build_return try err: {}", e)))?;
+
+        // ---- ok_bb: extract the Ok payload ----
+        self.builder.position_at_end(ok_bb);
+        let ok_v = einfo.variants[ok_index as usize];
+        let payload_off = ok_v.payload_offset.ok_or(CodegenError::TypeMismatch {
+            what: "`?` requires Result::Ok to carry a payload".to_owned(),
+        })?;
+        let off_const = self.i64_ty.const_int(payload_off as u64, false);
+        let payload_slot = unsafe {
+            self.builder
+                .build_in_bounds_gep(
+                    self.context.i8_type(),
+                    result_ptr,
+                    &[off_const],
+                    "try_ok_payload_ptr",
+                )
+                .map_err(|e| CodegenError::JitInit(format!("gep try ok payload: {}", e)))?
+        };
+        // Whether the Ok payload slot holds a BoxedInt (declared TypeVar
+        // instantiated to a scalar) we must unbox — mirrors match.
+        let declared_payload_ty = self
+            .enum_variant_types
+            .get(enum_ref)
+            .and_then(|vs| vs.get(ok_index as usize).cloned().flatten());
+        let needs_unbox = match &declared_payload_ty {
+            Some(Type::TypeVar(_))
+                if matches!(
+                    substitute_type(declared_payload_ty.as_ref().unwrap(), &instantiation),
+                    Type::Builtin(ref n) if is_boxed_scalar(n)
+                ) =>
+            {
+                true
+            }
+            _ => false,
+        };
+        if ok_v.payload_is_pointer && !needs_unbox {
+            let loaded = self
+                .builder
+                .build_load(self.ptr_ty, payload_slot, "try_ok_ptr")
+                .map_err(|e| CodegenError::JitInit(format!("load try ok ptr: {}", e)))?
+                .into_pointer_value();
+            Ok(Value::Closure(loaded))
+        } else if ok_v.payload_is_pointer && needs_unbox {
+            let boxed_ptr = self
+                .builder
+                .build_load(self.ptr_ty, payload_slot, "try_ok_boxed_ptr")
+                .map_err(|e| CodegenError::JitInit(format!("load try ok boxed ptr: {}", e)))?
+                .into_pointer_value();
+            let unbox_fn = self.extern_unbox_int.expect("ai_gc_unbox_int declared");
+            let call = self
+                .builder
+                .build_call(unbox_fn, &[boxed_ptr.into()], "try_ok_unboxed")
+                .map_err(|e| {
+                    CodegenError::JitInit(format!("build_call ai_gc_unbox_int (try): {}", e))
+                })?;
+            Ok(Value::Int(call.as_any_value_enum().into_int_value()))
+        } else {
+            let loaded = self
+                .builder
+                .build_load(self.i64_ty, payload_slot, "try_ok_int")
+                .map_err(|e| CodegenError::JitInit(format!("load try ok int: {}", e)))?
+                .into_int_value();
+            Ok(Value::Int(loaded))
         }
     }
 
@@ -2151,45 +3077,70 @@ impl<'ctx> Codegen<'ctx> {
             .map_err(|e| CodegenError::JitInit(format!("build_conditional_branch: {}", e)))?;
 
         // ---- then ----
+        // A branch whose body already terminated its block (e.g. it
+        // ended in a `panic(...)` lowering to `unreachable`) contributes
+        // no value or branch to the merge phi.
         self.builder.position_at_end(then_bb);
         let then_val = self.compile_expr(then_branch, env, ctx)?;
-        let then_basic = then_val.into_basic();
         let then_end = self
             .builder
             .get_insert_block()
             .expect("then branch must have a current block");
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CodegenError::JitInit(format!("br then→merge: {}", e)))?;
+        let then_incoming = if then_end.get_terminator().is_none() {
+            let b = then_val.into_basic();
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CodegenError::JitInit(format!("br then→merge: {}", e)))?;
+            Some((b, then_end))
+        } else {
+            None
+        };
 
         // ---- else ----
         self.builder.position_at_end(else_bb);
         let else_val = self.compile_expr(else_branch, env, ctx)?;
-        let else_basic = else_val.into_basic();
         let else_end = self
             .builder
             .get_insert_block()
             .expect("else branch must have a current block");
-        self.builder
-            .build_unconditional_branch(merge_bb)
-            .map_err(|e| CodegenError::JitInit(format!("br else→merge: {}", e)))?;
+        let else_incoming = if else_end.get_terminator().is_none() {
+            let b = else_val.into_basic();
+            self.builder
+                .build_unconditional_branch(merge_bb)
+                .map_err(|e| CodegenError::JitInit(format!("br else→merge: {}", e)))?;
+            Some((b, else_end))
+        } else {
+            None
+        };
 
-        // ---- merge: phi over both branches ----
+        // ---- merge: phi over the surviving branch(es) ----
         self.builder.position_at_end(merge_bb);
-        if then_basic.get_type() != else_basic.get_type() {
-            return Err(CodegenError::TypeMismatch {
-                what: format!(
-                    "if branches produce different LLVM types: then={:?}, else={:?}",
-                    then_basic.get_type(),
-                    else_basic.get_type()
-                ),
-            });
+        let incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
+            [then_incoming, else_incoming].into_iter().flatten().collect();
+        if incoming.is_empty() {
+            // Both branches diverge; merge_bb is unreachable. Return a
+            // dummy value — the block is dead and LLVM eliminates it.
+            return Ok(Value::Int(self.i64_ty.const_zero()));
+        }
+        let phi_ty = incoming[0].0.get_type();
+        for (v, _) in &incoming {
+            if v.get_type() != phi_ty {
+                return Err(CodegenError::TypeMismatch {
+                    what: format!(
+                        "if branches produce different LLVM types: {:?} vs {:?}",
+                        phi_ty,
+                        v.get_type()
+                    ),
+                });
+            }
         }
         let phi = self
             .builder
-            .build_phi(then_basic.get_type(), "if_result")
+            .build_phi(phi_ty, "if_result")
             .map_err(|e| CodegenError::JitInit(format!("build_phi if: {}", e)))?;
-        phi.add_incoming(&[(&then_basic, then_end), (&else_basic, else_end)]);
+        for (v, b) in &incoming {
+            phi.add_incoming(&[(v, *b)]);
+        }
         let result = phi.as_basic_value();
         match result {
             BasicValueEnum::IntValue(iv) => Ok(Value::Int(iv)),
@@ -2347,6 +3298,259 @@ impl<'ctx> Codegen<'ctx> {
                     ))?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
             }
+            Expr::BuiltinRef(name) if name == "core/bytes.new" => {
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let len = self.compile_expr(&args[0], env, ctx)?.as_int()?;
+                let fv = self.extern_bytes_new.expect("ai_bytes_new declared");
+                let call = self
+                    .builder
+                    .build_call(fv, &[ctx.thread_param.into(), len.into()], "bytes_new_result")
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_bytes_new: {}", e),
+                    ))?;
+                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/bytes.len" => {
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                // Bytes shares String's layout; reuse ai_str_len.
+                let b = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let fv = self.extern_str_len.expect("ai_str_len declared");
+                let call = self
+                    .builder
+                    .build_call(fv, &[b.into()], "bytes_len_result")
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_str_len (bytes.len): {}", e),
+                    ))?;
+                Ok(Value::Int(call.as_any_value_enum().into_int_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/bytes.get" => {
+                if args.len() != 2 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let b = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let i = self.compile_expr(&args[1], env, ctx)?.as_int()?;
+                let fv = self.extern_bytes_get.expect("ai_bytes_get declared");
+                let call = self
+                    .builder
+                    .build_call(fv, &[b.into(), i.into()], "bytes_get_result")
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_bytes_get: {}", e),
+                    ))?;
+                Ok(Value::Int(call.as_any_value_enum().into_int_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/bytes.set" => {
+                if args.len() != 3 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let b = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let i = self.compile_expr(&args[1], env, ctx)?.as_int()?;
+                let v = self.compile_expr(&args[2], env, ctx)?.as_int()?;
+                let fv = self.extern_bytes_set.expect("ai_bytes_set declared");
+                let call = self
+                    .builder
+                    .build_call(fv, &[b.into(), i.into(), v.into()], "bytes_set_result")
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_bytes_set: {}", e),
+                    ))?;
+                Ok(Value::Int(call.as_any_value_enum().into_int_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/bytes.slice" => {
+                if args.len() != 3 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let b = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let start = self.compile_expr(&args[1], env, ctx)?.as_int()?;
+                let len = self.compile_expr(&args[2], env, ctx)?.as_int()?;
+                let fv = self.extern_bytes_slice.expect("ai_bytes_slice declared");
+                let call = self
+                    .builder
+                    .build_call(
+                        fv,
+                        &[ctx.thread_param.into(), b.into(), start.into(), len.into()],
+                        "bytes_slice_result",
+                    )
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_bytes_slice: {}", e),
+                    ))?;
+                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/bytes.concat" => {
+                if args.len() != 2 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                // Bytes shares String's layout; reuse ai_str_concat.
+                let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let b = self.compile_expr(&args[1], env, ctx)?.as_closure()?;
+                let fv = self.extern_str_concat.expect("ai_str_concat declared");
+                let call = self
+                    .builder
+                    .build_call(
+                        fv,
+                        &[ctx.thread_param.into(), a.into(), b.into()],
+                        "bytes_concat_result",
+                    )
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_str_concat (bytes.concat): {}", e),
+                    ))?;
+                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+            }
+            Expr::BuiltinRef(name)
+                if name == "core/bytes.from_string" || name == "core/string.from_bytes" =>
+            {
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                // Both conversions are a defensive copy: String and Bytes
+                // share the heap layout but get independent mutation.
+                let src = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let fv = self.extern_bytes_copy.expect("ai_bytes_copy declared");
+                let call = self
+                    .builder
+                    .build_call(
+                        fv,
+                        &[ctx.thread_param.into(), src.into()],
+                        "bytes_copy_result",
+                    )
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_bytes_copy: {}", e),
+                    ))?;
+                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/array.new" => {
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let n = self.compile_expr(&args[0], env, ctx)?.as_int()?;
+                let fv = self.extern_array_new.expect("ai_array_new declared");
+                let call = self
+                    .builder
+                    .build_call(fv, &[ctx.thread_param.into(), n.into()], "array_new_result")
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_array_new: {}", e),
+                    ))?;
+                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/array.len" => {
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let fv = self.extern_array_len.expect("ai_array_len declared");
+                let call = self
+                    .builder
+                    .build_call(fv, &[a.into()], "array_len_result")
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_array_len: {}", e),
+                    ))?;
+                Ok(Value::Int(call.as_any_value_enum().into_int_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/array.get" => {
+                if args.len() != 2 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                // Element type: if the array's instantiation pins T to
+                // Int, the slot holds a BoxedInt we must unbox after
+                // loading (mirrors compile_field).
+                let elem_is_int = array_element_is_int(&self.infer_type(&args[0], env));
+                let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let i = self.compile_expr(&args[1], env, ctx)?.as_int()?;
+                let fv = self.extern_array_get.expect("ai_array_get declared");
+                let call = self
+                    .builder
+                    .build_call(fv, &[a.into(), i.into()], "array_get_result")
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_array_get: {}", e),
+                    ))?;
+                let elem_ptr = call.as_any_value_enum().into_pointer_value();
+                if elem_is_int {
+                    let unbox_fn = self.extern_unbox_int.expect("ai_gc_unbox_int declared");
+                    let unboxed = self
+                        .builder
+                        .build_call(unbox_fn, &[elem_ptr.into()], "array_get_unboxed")
+                        .map_err(|e| CodegenError::JitInit(
+                            format!("build_call ai_gc_unbox_int (array.get): {}", e),
+                        ))?;
+                    Ok(Value::Int(unboxed.as_any_value_enum().into_int_value()))
+                } else {
+                    Ok(Value::Closure(elem_ptr))
+                }
+            }
+            Expr::BuiltinRef(name) if name == "core/array.set" => {
+                if args.len() != 3 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let i = self.compile_expr(&args[1], env, ctx)?.as_int()?;
+                // Element value: box an Int into a BoxedInt so the slot
+                // holds a uniform pointer (mirrors compile_struct_new).
+                let v = self.compile_expr(&args[2], env, ctx)?;
+                let v_ptr = match v {
+                    Value::Int(iv) => {
+                        let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
+                        let boxed = self
+                            .builder
+                            .build_call(
+                                box_fn,
+                                &[ctx.thread_param.into(), iv.into()],
+                                "array_set_boxed",
+                            )
+                            .map_err(|e| CodegenError::JitInit(
+                                format!("build_call ai_gc_box_int (array.set): {}", e),
+                            ))?;
+                        boxed.as_any_value_enum().into_pointer_value()
+                    }
+                    Value::Closure(p) => p,
+                };
+                let fv = self.extern_array_set.expect("ai_array_set declared");
+                let call = self
+                    .builder
+                    .build_call(
+                        fv,
+                        &[a.into(), i.into(), v_ptr.into()],
+                        "array_set_result",
+                    )
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_array_set: {}", e),
+                    ))?;
+                Ok(Value::Int(call.as_any_value_enum().into_int_value()))
+            }
             Expr::BuiltinRef(name) if name == "core/gc.collect" => {
                 // No language-level args — but the runtime fn needs
                 // `thread` so it can publish parked_jit_fp + reach the
@@ -2358,6 +3562,83 @@ impl<'ctx> Codegen<'ctx> {
                     .map_err(|e| CodegenError::JitInit(
                         format!("build_call ai_gc_force_collect: {}", e),
                     ))?;
+                Ok(Value::Int(call.as_any_value_enum().into_int_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/panic" => {
+                // `panic(msg)` — hard error. Compile the message (a
+                // heap String), call ai_panic (which prints + aborts),
+                // then terminate this block with `unreachable`. The
+                // returned value is never used; callers that branch out
+                // of this block (e.g. a match arm) detect the existing
+                // terminator and skip adding a merge branch/phi value.
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let msg = self.compile_expr(&args[0], env, ctx)?;
+                let mp = msg.as_closure().map_err(|_| CodegenError::TypeMismatch {
+                    what: "core/panic: arg must be a String".to_owned(),
+                })?;
+                let panic_fn = self.extern_panic.expect("ai_panic declared");
+                self.builder
+                    .build_call(panic_fn, &[ctx.thread_param.into(), mp.into()], "")
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_panic: {}", e),
+                    ))?;
+                self.builder
+                    .build_unreachable()
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_unreachable after panic: {}", e),
+                    ))?;
+                Ok(Value::Int(self.i64_ty.const_zero()))
+            }
+            Expr::BuiltinRef(name)
+                if name.starts_with("ext/")
+                    && self
+                        .user_externs
+                        .get(&name["ext/".len()..])
+                        .map(|s| s.library.is_some())
+                        .unwrap_or(false) =>
+            {
+                // C-FFI extern call. The LLVM extern was declared with
+                // the plain C ABI (no leading `Thread*`); every arg and
+                // the return is an i64-width C scalar (Int or Ptr =
+                // address). Compile each arg to an i64 and call directly.
+                let ext_name = &name["ext/".len()..];
+                let symbol = user_extern_symbol(ext_name);
+                let fv = self
+                    .module
+                    .get_function(&symbol)
+                    .ok_or_else(|| CodegenError::UnknownBuiltin {
+                        name: format!(
+                            "C extern `{}` was called but not declared in module",
+                            ext_name
+                        ),
+                        arity: args.len(),
+                    })?;
+                let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> =
+                    Vec::with_capacity(args.len());
+                for (i, a) in args.iter().enumerate() {
+                    let v = self.compile_expr(a, env, ctx)?;
+                    let iv = v.as_int().map_err(|_| CodegenError::TypeMismatch {
+                        what: format!(
+                            "C extern `{}` arg {} must be an Int or Ptr (i64)",
+                            ext_name, i
+                        ),
+                    })?;
+                    call_args.push(iv.into());
+                }
+                let call = self
+                    .builder
+                    .build_call(fv, &call_args, "cffi_call")
+                    .map_err(|e| CodegenError::JitInit(format!(
+                        "build_call C extern {}: {}",
+                        ext_name, e
+                    )))?;
+                // The return is always declared i64 (Int or Ptr address);
+                // void C fns leave a junk value we simply ignore.
                 Ok(Value::Int(call.as_any_value_enum().into_int_value()))
             }
             Expr::BuiltinRef(name) if name.starts_with("ext/") => {
@@ -2538,7 +3819,7 @@ impl<'ctx> Codegen<'ctx> {
                 // BoxedInt pointer to recover the raw i64.
                 if matches!(ret_decl, Type::TypeVar(_)) {
                     let inst_ret = substitute_type(&ret_decl, &concrete_subst);
-                    if matches!(&inst_ret, Type::Builtin(n) if n == "Int") {
+                    if matches!(&inst_ret, Type::Builtin(n) if is_boxed_scalar(n)) {
                         if let Value::Closure(ptr) = return_value {
                             let unbox_fn = self
                                 .extern_unbox_int
@@ -2603,27 +3884,20 @@ impl<'ctx> Codegen<'ctx> {
             }
         };
 
-        // hash_ptr = &closure.code_hash (offset 16 from object start)
-        let header_size = crate::gc::Full::SIZE as u64;
-        let hash_ptr_off = self.i64_ty.const_int(header_size, false);
-        let hash_ptr = unsafe {
-            self.builder
-                .build_in_bounds_gep(
-                    self.context.i8_type(),
-                    closure_ptr,
-                    &[hash_ptr_off],
-                    "hash_ptr",
-                )
-                .map_err(|e| CodegenError::JitInit(format!("gep hash_ptr: {}", e)))?
-        };
-
-        // code_ptr = ai_gc_lookup_code(thread, hash_ptr)
+        // code_ptr = ai_gc_lookup_code(thread, closure_ptr)
+        //
+        // Pass the closure pointer; `ai_gc_lookup_code` reads the
+        // type_id from the closure's GC header (fixed offset) and
+        // resolves the code_hash through the code-table's type_id
+        // map. The code_hash itself sits at a variable offset that
+        // depends on the closure's pointer-capture count, which we
+        // can't compute statically here.
         let lookup = self.extern_lookup_code.expect("lookup declared");
         let call = self
             .builder
             .build_call(
                 lookup,
-                &[ctx.thread_param.into(), hash_ptr.into()],
+                &[ctx.thread_param.into(), closure_ptr.into()],
                 "code_ptr",
             )
             .map_err(|e| CodegenError::JitInit(format!("build_call lookup: {}", e)))?;
@@ -2747,16 +4021,26 @@ impl<'ctx> Codegen<'ctx> {
             .map_err(|e| CodegenError::JitInit(format!("build_call alloc_closure: {}", e)))?;
         let closure_ptr = call.as_any_value_enum().into_pointer_value();
 
-        // Store code_hash at offset 16 (one byte at a time as i8 constants).
-        // 32 byte memcpy from a private constant global is cleaner — emit
-        // the hash as a constant, then memcpy.
+        // Pointer captures live in `value_field` slots BEFORE the
+        // closure-header (code_hash, n_captures, pad). Their count
+        // shifts the absolute offsets of everything that follows.
+        // Pull the per-capture metadata so we know each slot's
+        // exact offset.
+        let cap_layouts: Vec<CaptureMeta> = match self.shape_meta.get(&lambda_hash) {
+            Some(ShapeMeta::Closure { captures, .. }) => captures.clone(),
+            _ => Vec::new(),
+        };
+        let ptr_count: u64 = cap_layouts.iter().filter(|c| c.is_pointer).count() as u64;
+        let header_base: u64 = crate::gc::Full::SIZE as u64 + ptr_count * 8;
+
+        // Store code_hash starting at `header_base`.
         let hash_const = self.emit_hash_constant(&lambda_hash);
         let dest_hash = unsafe {
             self.builder
                 .build_in_bounds_gep(
                     self.context.i8_type(),
                     closure_ptr,
-                    &[self.i64_ty.const_int(crate::gc::Full::SIZE as u64, false)],
+                    &[self.i64_ty.const_int(header_base, false)],
                     "dst_hash",
                 )
                 .map_err(|e| CodegenError::JitInit(format!("gep dst_hash: {}", e)))?
@@ -2771,10 +4055,10 @@ impl<'ctx> Codegen<'ctx> {
             )
             .map_err(|e| CodegenError::JitInit(format!("build_memcpy hash: {}", e)))?;
 
-        // Store n_captures (u32) at offset 16 + 32 = 48.
+        // Store n_captures (u32) at `header_base + 32`.
         let n_caps_off = self
             .i64_ty
-            .const_int((crate::gc::Full::SIZE + closure_offsets::N_CAPTURES) as u64, false);
+            .const_int(header_base + closure_offsets::N_CAPTURES as u64, false);
         let n_caps_ptr = unsafe {
             self.builder
                 .build_in_bounds_gep(
@@ -2793,13 +4077,12 @@ impl<'ctx> Codegen<'ctx> {
             .build_store(n_caps_ptr, n_caps)
             .map_err(|e| CodegenError::JitInit(format!("store n_caps: {}", e)))?;
 
-        // Store each capture at offset 16 + 40 + i*8.
-        let caps_base = crate::gc::Full::SIZE as u64 + closure_offsets::NON_POINTER_CAPTURES as u64;
+        // Store each capture at its CaptureMeta.offset. Pointer
+        // captures land in value_field slots (GC-traced); Int
+        // captures land in raw-byte slots after the closure header.
         for (i, outer_idx) in spec.captures.iter().enumerate() {
-            // Resolve outer_idx in the CURRENT env: outer_idx counts from
-            // the innermost binder *outside* the lambda. But our env IS
-            // the outer scope. So outer_idx 0 = current innermost (env
-            // last), outer_idx 1 = one out, etc.
+            // Resolve outer_idx in the CURRENT env (outer_idx counts
+            // out from the innermost binder OUTSIDE the lambda).
             let env_pos = (env.len() as i64) - 1 - (*outer_idx as i64);
             if env_pos < 0 || (env_pos as usize) >= env.len() {
                 return Err(CodegenError::JitInit(format!(
@@ -2809,18 +4092,53 @@ impl<'ctx> Codegen<'ctx> {
                 )));
             }
             let val = env.get(env_pos as usize).read(self)?;
-            let int_val = val.as_int().map_err(|_| CodegenError::Unsupported {
-                what: "non-Int capture (v1 restriction: only Int captures supported)".to_owned(),
-            })?;
-            let off = self.i64_ty.const_int(caps_base + i as u64 * 8, false);
+            let cap = cap_layouts
+                .get(i)
+                .copied()
+                .unwrap_or(CaptureMeta { offset: 0, is_pointer: false });
+            let off = self.i64_ty.const_int(cap.offset as u64, false);
             let slot = unsafe {
                 self.builder
                     .build_in_bounds_gep(self.context.i8_type(), closure_ptr, &[off], "cap_slot")
                     .map_err(|e| CodegenError::JitInit(format!("gep cap_slot: {}", e)))?
             };
-            self.builder
-                .build_store(slot, int_val)
-                .map_err(|e| CodegenError::JitInit(format!("store cap: {}", e)))?;
+            if cap.is_pointer {
+                // Store an 8-byte heap pointer.
+                let p = match val {
+                    Value::Closure(p) => p,
+                    Value::Int(iv) => {
+                        // Source value is Int but the slot was
+                        // classified as pointer-only — box the i64
+                        // into a BoxedInt so the slot still holds a
+                        // real heap pointer (the body will unbox).
+                        let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
+                        let call = self
+                            .builder
+                            .build_call(
+                                box_fn,
+                                &[ctx.thread_param.into(), iv.into()],
+                                "box_cap_int",
+                            )
+                            .map_err(|e| {
+                                CodegenError::JitInit(format!(
+                                    "build_call ai_gc_box_int (cap): {}", e
+                                ))
+                            })?;
+                        call.as_any_value_enum().into_pointer_value()
+                    }
+                };
+                self.builder
+                    .build_store(slot, p)
+                    .map_err(|e| CodegenError::JitInit(format!("store ptr cap: {}", e)))?;
+            } else {
+                // Store a raw i64.
+                let int_val = val.as_int().map_err(|_| CodegenError::TypeMismatch {
+                    what: "capture classified as Int but env holds a pointer".to_owned(),
+                })?;
+                self.builder
+                    .build_store(slot, int_val)
+                    .map_err(|e| CodegenError::JitInit(format!("store int cap: {}", e)))?;
+            }
         }
 
         Ok(Value::Closure(closure_ptr))
@@ -2995,7 +4313,7 @@ impl<'ctx> Codegen<'ctx> {
         let needs_unbox = match &declared_field_ty {
             Some(t @ Type::TypeVar(_)) if !instantiation.is_empty() => {
                 matches!(substitute_type(t, &instantiation),
-                    Type::Builtin(ref n) if n == "Int")
+                    Type::Builtin(ref n) if is_boxed_scalar(n))
             }
             _ => false,
         };
@@ -3169,6 +4487,7 @@ impl<'ctx> Codegen<'ctx> {
     fn infer_type(&self, expr: &Expr, env: &Env<'ctx>) -> Type {
         match expr {
             Expr::IntLit(_) => Type::Builtin("Int".to_owned()),
+            Expr::FloatLit(_) => Type::Builtin("Float".to_owned()),
             Expr::BoolLit(_) => Type::Builtin("Bool".to_owned()),
             Expr::StringLit(_) => Type::Builtin("String".to_owned()),
             Expr::LocalVar(i) => {
@@ -3191,18 +4510,18 @@ impl<'ctx> Codegen<'ctx> {
             }
             Expr::BuiltinRef(name) => {
                 if let Some((r, fopt)) = crate::resolve::parse_at_builtin_name(name) {
-                    // Represent at() as `fn(Node, fn() -> Int) -> Result`
-                    // so Call's handler can read the ret type. Node is
-                    // any TypeRef — we don't know the user's Node hash
-                    // here, but the Call handler doesn't unify the
-                    // params for the at builtin; only the ret matters.
+                    // Represent at() polymorphically as
+                    //   `fn(Node, fn() -> T) -> Result<T, Failure>`
+                    // — TypeVar(0) is T. Call's infer-type unifier
+                    // recovers T from the thunk's actual return type
+                    // and substitutes it through to the Result's
+                    // first type arg, so e.g. `at(node, || pair)`
+                    // gives `Apply(Result, [Pair, Failure])`.
+                    let t_var = Type::TypeVar(0);
                     let ret = match fopt {
                         Some(f) => Type::Apply(
                             Box::new(Type::TypeRef(r)),
-                            vec![
-                                Type::Builtin("Int".to_owned()),
-                                Type::TypeRef(f),
-                            ],
+                            vec![t_var.clone(), Type::TypeRef(f)],
                         ),
                         None => Type::TypeRef(r),
                     };
@@ -3211,11 +4530,18 @@ impl<'ctx> Codegen<'ctx> {
                             Type::TypeRef(Hash([0; 32])),
                             Type::FnType {
                                 params: vec![],
-                                ret: Box::new(Type::Builtin("Int".to_owned())),
+                                ret: Box::new(t_var),
                             },
                         ],
                         ret: Box::new(ret),
                     }
+                } else if let Some(sig) = array_builtin_fn_type(name) {
+                    // Generic array builtins: represented as
+                    //   array.get : fn(Array<T>, Int) -> T   (etc.)
+                    // The Call inference below unifies the array arg's
+                    // actual `Array<Concrete>` against `Array<T>` to
+                    // recover T (e.g. element type for `.field`/match).
+                    sig
                 } else {
                     // Other builtins (arithmetic, etc.) return Int.
                     Type::Builtin("Int".to_owned())
@@ -3246,14 +4572,24 @@ impl<'ctx> Codegen<'ctx> {
                     ret_ty
                 }
             }
-            Expr::Lambda { params, body: _ } => {
-                // We don't actually need the body type here — Lambda
-                // construction returns FnType { params, ret = body_ty }
-                // but for placement of let-bound lambdas we just care
-                // about pointer-ness. Return FnType with a placeholder ret.
+            Expr::Lambda { params, body } => {
+                // Infer the body's return type for the FnType wrapper.
+                // Most callers (let-bound lambdas, etc.) only care about
+                // pointer-ness, but `at(node, thunk)` reads through the
+                // FnType to recover the thunk's T for the Result<T, E>
+                // instantiation — so a hardcoded Int placeholder would
+                // strand non-Int returns.
+                //
+                // Calling infer_type on the body without pushing the
+                // lambda's params into env is conservative: any LocalVar
+                // that resolves to a param index might read the wrong
+                // type, but that only matters for paths that depend on
+                // the *param's* type (rare) — the common case (return
+                // a struct/enum/Int) doesn't.
+                let ret_ty = self.infer_type(body, env);
                 Type::FnType {
                     params: params.clone(),
-                    ret: Box::new(Type::Builtin("Int".to_owned())),
+                    ret: Box::new(ret_ty),
                 }
             }
             Expr::Let { value, body: _ } => {
@@ -3284,8 +4620,86 @@ impl<'ctx> Codegen<'ctx> {
                 }
             }
             Expr::If { then_branch, .. } => self.infer_type(then_branch, env),
+            Expr::Try {
+                expr,
+                enum_ref,
+                ok_index,
+                ..
+            } => {
+                // `expr?` evaluates to the Ok payload type `T`, with the
+                // operand's `Result<T, E>` instantiation substituted.
+                let declared = self
+                    .enum_variant_types
+                    .get(enum_ref)
+                    .and_then(|vs| vs.get(*ok_index as usize).cloned().flatten())
+                    .unwrap_or(Type::Builtin("Int".to_owned()));
+                let instantiation: Vec<Type> = match self.infer_type(expr, env) {
+                    Type::Apply(_, args) => args,
+                    _ => Vec::new(),
+                };
+                if instantiation.is_empty() {
+                    declared
+                } else {
+                    substitute_type(&declared, &instantiation)
+                }
+            }
+            // `defer cleanup; body` has the body's type (its value is the
+            // body's value; cleanup runs for effect only).
+            Expr::Defer { body, .. } => self.infer_type(body, env),
             Expr::SelfRef(_) => Type::Builtin("Int".to_owned()),
         }
+    }
+
+    /// Emit a hard panic with a static message: allocate a heap String
+    /// for `msg`, call `ai_panic`, then terminate the current block with
+    /// `unreachable`. The caller must not emit further instructions into
+    /// this block afterwards.
+    fn emit_panic(
+        &mut self,
+        msg: &str,
+        thread_param: PointerValue<'ctx>,
+    ) -> Result<(), CodegenError> {
+        let bytes = msg.as_bytes();
+        let arr_const = self.context.const_string(bytes, false);
+        let g = self.module.add_global(
+            arr_const.get_type(),
+            Some(AddressSpace::default()),
+            "panic_msg",
+        );
+        g.set_linkage(Linkage::Private);
+        g.set_constant(true);
+        g.set_initializer(&arr_const);
+        self.used_globals.push(g.as_pointer_value());
+
+        let str_new = self.extern_str_new.expect("ai_str_new declared");
+        let len_v = self.i64_ty.const_int(bytes.len() as u64, false);
+        let msg_str = self
+            .builder
+            .build_call(
+                str_new,
+                &[
+                    thread_param.into(),
+                    g.as_pointer_value().into(),
+                    len_v.into(),
+                ],
+                "panic_msg_str",
+            )
+            .map_err(|e| {
+                CodegenError::JitInit(format!("build_call ai_str_new (panic): {}", e))
+            })?
+            .as_any_value_enum()
+            .into_pointer_value();
+
+        let panic_fn = self.extern_panic.expect("ai_panic declared");
+        self.builder
+            .build_call(panic_fn, &[thread_param.into(), msg_str.into()], "")
+            .map_err(|e| CodegenError::JitInit(format!("build_call ai_panic: {}", e)))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|e| {
+                CodegenError::JitInit(format!("build_unreachable after panic: {}", e))
+            })?;
+        Ok(())
     }
 
     fn compile_match(
@@ -3431,9 +4845,14 @@ impl<'ctx> Codegen<'ctx> {
                 .build_unconditional_branch(bb)
                 .map_err(|e| CodegenError::JitInit(format!("br default: {}", e)))?;
         } else {
-            self.builder
-                .build_unreachable()
-                .map_err(|e| CodegenError::JitInit(format!("build_unreachable default: {}", e)))?;
+            // No catch-all arm: a value of an unhandled variant reaching
+            // here is a non-exhaustive match at runtime. Previously this
+            // was `build_unreachable` (undefined behaviour); now it is a
+            // clear hard error.
+            self.emit_panic(
+                "non-exhaustive match: value did not match any arm",
+                ctx.thread_param,
+            )?;
         }
 
         // Build the switch back in the entry block.
@@ -3520,7 +4939,7 @@ impl<'ctx> Codegen<'ctx> {
                                         declared_payload_ty.as_ref().unwrap(),
                                         &instantiation
                                     ),
-                                    Type::Builtin(ref n) if n == "Int"
+                                    Type::Builtin(ref n) if is_boxed_scalar(n)
                                 ) =>
                             {
                                 true
@@ -3641,20 +5060,34 @@ impl<'ctx> Codegen<'ctx> {
             for _ in 0..pushed {
                 env.pop();
             }
-            let basic = body_val.into_basic();
-            if result_ty.is_none() {
-                result_ty = Some(basic.get_type());
-            }
             let end_block = self.builder.get_insert_block().unwrap();
-            incoming.push((basic, end_block));
-            self.builder
-                .build_unconditional_branch(merge_bb)
-                .map_err(|e| CodegenError::JitInit(format!("br merge: {}", e)))?;
+            // If the arm body already terminated its block (e.g. it ended
+            // in a `panic(...)` lowering to `unreachable`), it contributes
+            // no value or branch to the merge phi.
+            if end_block.get_terminator().is_none() {
+                let basic = body_val.into_basic();
+                if result_ty.is_none() {
+                    result_ty = Some(basic.get_type());
+                }
+                incoming.push((basic, end_block));
+                self.builder
+                    .build_unconditional_branch(merge_bb)
+                    .map_err(|e| CodegenError::JitInit(format!("br merge: {}", e)))?;
+            }
         }
 
         // Build the phi in the merge block.
         self.builder.position_at_end(merge_bb);
-        let phi_ty = result_ty.expect("match must have at least one arm");
+        let phi_ty = match result_ty {
+            Some(t) => t,
+            None => {
+                // Every arm terminated its own block (e.g. all arms
+                // `panic`). merge_bb has no incoming values, so there is
+                // no phi to build — the block is unreachable. Return a
+                // dummy value; LLVM eliminates the dead block.
+                return Ok(Value::Int(self.i64_ty.const_zero()));
+            }
+        };
         let phi = self
             .builder
             .build_phi(phi_ty, "match_result")
@@ -3728,6 +5161,59 @@ impl<'ctx> Codegen<'ctx> {
                 .build_int_z_extend(cmp_bit, i64_ty, "cmp_i64")
                 .map_err(|e| CodegenError::JitInit(format!("build_int_z_extend: {}", e)))
         };
+        // Float ops. A Float value is carried as the i64 bit-pattern of
+        // its f64; we bitcast in, operate, and bitcast the result back to
+        // i64. (This reuses all the Int machinery for storage/ABI; only
+        // arithmetic/comparison/conversion know it's really a double.)
+        let f64_ty = self.context.f64_type();
+        let as_f64 = |v: IntValue<'ctx>, n: &str| -> Result<FloatValue<'ctx>, CodegenError> {
+            builder
+                .build_bit_cast(v, f64_ty, n)
+                .map(|b| b.into_float_value())
+                .map_err(|e| CodegenError::JitInit(format!("bitcast i64->f64: {}", e)))
+        };
+        let f64_bits = |v: FloatValue<'ctx>, n: &str| -> Result<IntValue<'ctx>, CodegenError> {
+            builder
+                .build_bit_cast(v, i64_ty, n)
+                .map(|b| b.into_int_value())
+                .map_err(|e| CodegenError::JitInit(format!("bitcast f64->i64: {}", e)))
+        };
+        let fbin = |op: &'static str,
+                    build: fn(
+            &Builder<'ctx>,
+            FloatValue<'ctx>,
+            FloatValue<'ctx>,
+            &str,
+        ) -> Result<FloatValue<'ctx>, String>|
+         -> Result<IntValue<'ctx>, CodegenError> {
+            if args.len() != 2 {
+                return Err(CodegenError::UnknownBuiltin {
+                    name: name.to_owned(),
+                    arity: args.len(),
+                });
+            }
+            let l = as_f64(args[0], "fl")?;
+            let r = as_f64(args[1], "fr")?;
+            let res = build(builder, l, r, op)
+                .map_err(|e| CodegenError::JitInit(format!("build f64.{}: {}", op, e)))?;
+            f64_bits(res, "fres_bits")
+        };
+        let fcmp = |pred: inkwell::FloatPredicate| -> Result<IntValue<'ctx>, CodegenError> {
+            if args.len() != 2 {
+                return Err(CodegenError::UnknownBuiltin {
+                    name: name.to_owned(),
+                    arity: args.len(),
+                });
+            }
+            let l = as_f64(args[0], "fl")?;
+            let r = as_f64(args[1], "fr")?;
+            let bit = builder
+                .build_float_compare(pred, l, r, "fcmptmp")
+                .map_err(|e| CodegenError::JitInit(format!("build_float_compare: {}", e)))?;
+            builder
+                .build_int_z_extend(bit, i64_ty, "fcmp_i64")
+                .map_err(|e| CodegenError::JitInit(format!("build_int_z_extend (f): {}", e)))
+        };
         Ok(match name {
             "core/i64.add" => bin("add", |b, l, r, n| {
                 b.build_int_add(l, r, n).map_err(|e| e.to_string())
@@ -3761,6 +5247,142 @@ impl<'ctx> Codegen<'ctx> {
                     .build_int_neg(args[0], "neg")
                     .map_err(|e| CodegenError::JitInit(format!("build_int_neg: {}", e)))?
             }
+            // Bitwise ops on i64 (used by base64 / CRC32 / zip and any bit
+            // manipulation). `shr` is a LOGICAL (zero-filling) shift.
+            "core/i64.and" => bin("and", |b, l, r, n| {
+                b.build_and(l, r, n).map_err(|e| e.to_string())
+            })?,
+            "core/i64.or" => bin("or", |b, l, r, n| {
+                b.build_or(l, r, n).map_err(|e| e.to_string())
+            })?,
+            "core/i64.xor" => bin("xor", |b, l, r, n| {
+                b.build_xor(l, r, n).map_err(|e| e.to_string())
+            })?,
+            "core/i64.shl" => bin("shl", |b, l, r, n| {
+                b.build_left_shift(l, r, n).map_err(|e| e.to_string())
+            })?,
+            "core/i64.shr" => bin("shr", |b, l, r, n| {
+                b.build_right_shift(l, r, false, n).map_err(|e| e.to_string())
+            })?,
+            "core/f64.add" => fbin("add", |b, l, r, n| {
+                b.build_float_add(l, r, n).map_err(|e| e.to_string())
+            })?,
+            "core/f64.sub" => fbin("sub", |b, l, r, n| {
+                b.build_float_sub(l, r, n).map_err(|e| e.to_string())
+            })?,
+            "core/f64.mul" => fbin("mul", |b, l, r, n| {
+                b.build_float_mul(l, r, n).map_err(|e| e.to_string())
+            })?,
+            "core/f64.div" => fbin("div", |b, l, r, n| {
+                b.build_float_div(l, r, n).map_err(|e| e.to_string())
+            })?,
+            "core/f64.rem" => fbin("rem", |b, l, r, n| {
+                b.build_float_rem(l, r, n).map_err(|e| e.to_string())
+            })?,
+            // Ordered comparisons (false if either operand is NaN).
+            "core/f64.eq" => fcmp(inkwell::FloatPredicate::OEQ)?,
+            "core/f64.ne" => fcmp(inkwell::FloatPredicate::ONE)?,
+            "core/f64.lt" => fcmp(inkwell::FloatPredicate::OLT)?,
+            "core/f64.le" => fcmp(inkwell::FloatPredicate::OLE)?,
+            "core/f64.gt" => fcmp(inkwell::FloatPredicate::OGT)?,
+            "core/f64.ge" => fcmp(inkwell::FloatPredicate::OGE)?,
+            "core/f64.of_int" => {
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.to_owned(),
+                        arity: args.len(),
+                    });
+                }
+                let f = self
+                    .builder
+                    .build_signed_int_to_float(args[0], f64_ty, "of_int")
+                    .map_err(|e| CodegenError::JitInit(format!("build_signed_int_to_float: {}", e)))?;
+                f64_bits(f, "of_int_bits")?
+            }
+            "core/f64.to_int" => {
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.to_owned(),
+                        arity: args.len(),
+                    });
+                }
+                let f = as_f64(args[0], "to_int_f")?;
+                self.builder
+                    .build_float_to_signed_int(f, i64_ty, "to_int")
+                    .map_err(|e| CodegenError::JitInit(format!("build_float_to_signed_int: {}", e)))?
+            }
+
+            // ---- raw pointer / memory intrinsics (the C FFI's hands) ----
+            // A `Ptr` is an i64 address. These are the irreducible
+            // primitives every FFI needs: read/write memory and form/test
+            // null. Everything else (cstr, malloc, libcurl) is ai-lang +
+            // dlsym'd C functions on top of these.
+            "core/ptr.null" => {
+                self.arity_check(name, args, 0)?;
+                i64_ty.const_zero()
+            }
+            "core/ptr.is_null" => {
+                self.arity_check(name, args, 1)?;
+                let bit = builder
+                    .build_int_compare(IntPredicate::EQ, args[0], i64_ty.const_zero(), "is_null")
+                    .map_err(|e| CodegenError::JitInit(format!("ptr.is_null cmp: {}", e)))?;
+                builder
+                    .build_int_z_extend(bit, i64_ty, "is_null_i64")
+                    .map_err(|e| CodegenError::JitInit(format!("ptr.is_null zext: {}", e)))?
+            }
+            "core/ptr.add" => {
+                self.arity_check(name, args, 2)?;
+                builder
+                    .build_int_add(args[0], args[1], "ptr_add")
+                    .map_err(|e| CodegenError::JitInit(format!("ptr.add: {}", e)))?
+            }
+            "core/ptr.read_u8" => {
+                self.arity_check(name, args, 2)?;
+                let p = self.addr_at(args[0], args[1], "ptr_read_u8")?;
+                let loaded = builder
+                    .build_load(self.context.i8_type(), p, "u8")
+                    .map_err(|e| CodegenError::JitInit(format!("ptr.read_u8 load: {}", e)))?
+                    .into_int_value();
+                builder
+                    .build_int_z_extend(loaded, i64_ty, "u8_i64")
+                    .map_err(|e| CodegenError::JitInit(format!("ptr.read_u8 zext: {}", e)))?
+            }
+            "core/ptr.write_u8" => {
+                self.arity_check(name, args, 3)?;
+                let p = self.addr_at(args[0], args[1], "ptr_write_u8")?;
+                let byte = builder
+                    .build_int_truncate(args[2], self.context.i8_type(), "u8_trunc")
+                    .map_err(|e| CodegenError::JitInit(format!("ptr.write_u8 trunc: {}", e)))?;
+                builder
+                    .build_store(p, byte)
+                    .map_err(|e| CodegenError::JitInit(format!("ptr.write_u8 store: {}", e)))?;
+                i64_ty.const_zero()
+            }
+            "core/ptr.read_i64" | "core/ptr.read_ptr" => {
+                self.arity_check(name, args, 2)?;
+                let p = self.addr_at(args[0], args[1], "ptr_read_i64")?;
+                builder
+                    .build_load(i64_ty, p, "i64v")
+                    .map_err(|e| CodegenError::JitInit(format!("ptr.read_i64 load: {}", e)))?
+                    .into_int_value()
+            }
+            "core/ptr.write_i64" | "core/ptr.write_ptr" => {
+                self.arity_check(name, args, 3)?;
+                let p = self.addr_at(args[0], args[1], "ptr_write_i64")?;
+                builder
+                    .build_store(p, args[2])
+                    .map_err(|e| CodegenError::JitInit(format!("ptr.write_i64 store: {}", e)))?;
+                i64_ty.const_zero()
+            }
+            // Reinterpret casts between Ptr and Int. Both are i64 at
+            // runtime, so the value passes through unchanged; only the
+            // type classification differs. This is the explicit boundary
+            // that lets an address travel as plain data (RemotePtr).
+            "core/ptr.to_int" | "core/ptr.from_int" => {
+                self.arity_check(name, args, 1)?;
+                args[0]
+            }
+
             _ => {
                 return Err(CodegenError::UnknownBuiltin {
                     name: name.to_owned(),
@@ -3768,6 +5390,38 @@ impl<'ctx> Codegen<'ctx> {
                 });
             }
         })
+    }
+
+    /// Validate a builtin's argument count, producing a clear error.
+    fn arity_check(
+        &self,
+        name: &str,
+        args: &[IntValue<'ctx>],
+        expected: usize,
+    ) -> Result<(), CodegenError> {
+        if args.len() != expected {
+            return Err(CodegenError::UnknownBuiltin {
+                name: name.to_owned(),
+                arity: args.len(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Form a pointer to `base + offset` (both i64) for a load/store.
+    fn addr_at(
+        &self,
+        base: IntValue<'ctx>,
+        offset: IntValue<'ctx>,
+        label: &str,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        let addr = self
+            .builder
+            .build_int_add(base, offset, label)
+            .map_err(|e| CodegenError::JitInit(format!("{} add: {}", label, e)))?;
+        self.builder
+            .build_int_to_ptr(addr, self.ptr_ty, label)
+            .map_err(|e| CodegenError::JitInit(format!("{} inttoptr: {}", label, e)))
     }
 
     fn emit_compiler_used(&mut self) {
@@ -3787,6 +5441,7 @@ impl<'ctx> Codegen<'ctx> {
 // Per-function env
 // =============================================================================
 
+#[derive(Clone)]
 struct Env<'ctx> {
     slots: Vec<EnvSlot<'ctx>>,
     /// Parallel to `slots`, the canonical-AST type of each binding.
@@ -4004,7 +5659,14 @@ fn unify_for_codegen(
 fn require_supported_type(t: &Type, def_name: &str, role: &str) -> Result<(), CodegenError> {
     match t {
         Type::Builtin(n) if n == "Int" => Ok(()),
+        // Bool is i64 0/1 — same ABI carrier as Int (see `is_int_type`).
+        Type::Builtin(n) if n == "Bool" => Ok(()),
+        Type::Builtin(n) if n == "Float" => Ok(()),
         Type::Builtin(n) if n == "String" => Ok(()),
+        Type::Builtin(n) if n == "Bytes" => Ok(()),
+        // Raw C pointer: an i64-represented address, non-GC. Used by the
+        // C FFI and the pointer/memory intrinsics.
+        Type::Builtin(n) if n == "Ptr" => Ok(()),
         Type::FnType { .. } => Ok(()),
         Type::TypeRef(_) => Ok(()),
         // Generic-typed values: TypeVar (declared param) and Apply
@@ -4019,30 +5681,93 @@ fn require_supported_type(t: &Type, def_name: &str, role: &str) -> Result<(), Co
 }
 
 fn is_int_type(t: &Type) -> bool {
-    matches!(t, Type::Builtin(n) if n == "Int")
+    // Bool shares the i64 representation (0/1), so it rides the same
+    // scalar-int ABI: i64 params, i64 return, no heap pointer.
+    matches!(t, Type::Builtin(n) if n == "Int" || n == "Bool")
+}
+
+/// Scalars that live boxed (as a `BoxedInt`) when stored in a generic
+/// TypeVar slot: `Int` and `Float`. Both are 8-byte values carried in
+/// the i64 representation, so the same box/unbox path serves both
+/// (`Float` is the f64 bit-pattern). Used to decide where generic code
+/// must box on the way in and unbox on the way out.
+fn is_boxed_scalar(n: &str) -> bool {
+    n == "Int" || n == "Float"
+}
+
+/// Generic `FnType` for an array builtin, or `None`. These mirror the
+/// `builtin_signature` entries in the typechecker so codegen's
+/// `infer_type` recovers the element type at call sites (e.g. so a
+/// `.field` on an `array.get` result resolves).
+fn array_builtin_fn_type(name: &str) -> Option<Type> {
+    let array_t = |t: Type| Type::Apply(Box::new(Type::Builtin("Array".to_owned())), vec![t]);
+    let tv = Type::TypeVar(0);
+    let int = || Type::Builtin("Int".to_owned());
+    match name {
+        "core/array.new" => Some(Type::FnType {
+            params: vec![int()],
+            ret: Box::new(array_t(tv)),
+        }),
+        "core/array.len" => Some(Type::FnType {
+            params: vec![array_t(tv)],
+            ret: Box::new(int()),
+        }),
+        "core/array.get" => Some(Type::FnType {
+            params: vec![array_t(tv.clone()), int()],
+            ret: Box::new(tv),
+        }),
+        "core/array.set" => Some(Type::FnType {
+            params: vec![array_t(tv.clone()), int(), tv],
+            ret: Box::new(int()),
+        }),
+        _ => None,
+    }
+}
+
+/// Whether an `Array<T>` type's element `T` is `Int` — i.e. its slots
+/// hold `BoxedInt`s that `array.get`/`array.set` must unbox/box. Any
+/// other (or unpinned/unknown) element type uses the raw pointer slot.
+fn array_element_is_int(array_ty: &Type) -> bool {
+    match array_ty {
+        Type::Apply(head, args) => {
+            matches!(head.as_ref(), Type::Builtin(n) if n == "Array")
+                && args
+                    .first()
+                    .map(|t| matches!(t, Type::Builtin(n) if is_boxed_scalar(n)))
+                    .unwrap_or(false)
+        }
+        _ => false,
+    }
 }
 
 /// Types we let cross the FFI boundary today. Int and String are
 /// supported via the Layer-1/Layer-2 ABI (i64 and heap-pointer
 /// respectively). Other types need their own marshaling story.
 fn is_extern_supported_type(t: &Type) -> bool {
-    matches!(t, Type::Builtin(n) if n == "Int" || n == "String")
+    matches!(t, Type::Builtin(n) if n == "Int" || n == "String" || n == "Ptr")
+}
+
+/// Whether a type is carried as a raw i64 at the C-FFI boundary: `Int`
+/// and `Ptr` (a pointer is an integer-width address). Used to build the
+/// LLVM signature for a `extern "C"` declaration.
+fn is_c_scalar_type(t: &Type) -> bool {
+    matches!(t, Type::Builtin(n) if n == "Int" || n == "Ptr")
 }
 
 /// Whether a value of this type is represented as a pointer at runtime.
 /// Pointer-typed values participate in GC root scanning and live in
 /// frame root slots when held as locals.
 ///
-/// `String` is pointer-typed (the heap shape Runtime registers). All
-/// other current `Type::Builtin` values (Int, Bool, Float, Bytes) are
-/// either i64 or unsupported.
+/// `String` and `Bytes` are pointer-typed (both use the heap varlen-bytes
+/// shape Runtime registers). The other current `Type::Builtin` values
+/// (Int, Bool, Float) are i64 / unsupported.
 ///
 /// `TypeVar` and `Apply` are pointer-typed because under our uniform
 /// representation, every generic-typed slot holds a heap pointer (a
 /// boxed primitive or a real heap object).
 fn is_pointer_type(t: &Type) -> bool {
     match t {
-        Type::Builtin(n) if n == "String" => true,
+        Type::Builtin(n) if n == "String" || n == "Bytes" => true,
         Type::FnType { .. } | Type::TypeRef(_) | Type::TypeVar(_) | Type::Apply(_, _) => true,
         _ => false,
     }
@@ -4103,6 +5828,25 @@ fn count_gc_locals(body: &Expr) -> u32 {
                     walk(&arm.body, n);
                 }
             }
+            // Must recurse into both branches: a `let` or match-arm
+            // binding inside an `if` introduces GC locals just like one
+            // at the top level. Missing this under-counts the frame's
+            // root array, so a pointer binding inside an `if` writes
+            // past it and corrupts adjacent memory (manifested as a
+            // bad-pointer crash when a map probe matched inside `else`).
+            Expr::If { cond, then_branch, else_branch } => {
+                walk(cond, n);
+                walk(then_branch, n);
+                walk(else_branch, n);
+            }
+            // Both sub-expressions can introduce GC locals (the body is
+            // the rest of the block, with its own `let`s; the cleanup may
+            // allocate too). Missing either under-counts the root array
+            // and corrupts adjacent slots, so recurse into both.
+            Expr::Defer { cleanup, body } => {
+                walk(cleanup, n);
+                walk(body, n);
+            }
             _ => {}
         }
     }
@@ -4117,6 +5861,45 @@ fn count_pattern_vars(p: &crate::ast::Pattern) -> u32 {
         Pattern::Wildcard => 0,
         Pattern::Var => 1,
         Pattern::Enum { payload, .. } => payload.as_deref().map(count_pattern_vars).unwrap_or(0),
+    }
+}
+
+/// If the lambda's body returns a captured outer var **directly**
+/// (as the whole expression value), return that var's outer-de-Bruijn
+/// index. Otherwise None. Recognizes the body shape `LocalVar(outer)`,
+/// `Let { body: LocalVar(outer), ... }` chains, and `Match` arms that
+/// all return the same capture.
+///
+/// Used by capture-type inference: a pass-through capture must be
+/// pointer-shaped because the lambda's return slot follows the
+/// uniform pointer ABI.
+fn passthrough_capture_index(body: &Expr, arity: u32) -> Option<u32> {
+    fn capture_of(e: &Expr, arity: u32) -> Option<u32> {
+        if let Expr::LocalVar(i) = e {
+            if *i >= arity {
+                return Some(*i - arity);
+            }
+        }
+        None
+    }
+    match body {
+        Expr::LocalVar(i) if *i >= arity => Some(*i - arity),
+        Expr::Let { body, .. } => passthrough_capture_index(body, arity + 1),
+        Expr::Match { arms, .. } => {
+            // All arms must produce the same passthrough capture.
+            let mut shared: Option<u32> = None;
+            for arm in arms {
+                let bindings = count_pattern_vars(&arm.pattern);
+                let cap = capture_of(&arm.body, arity + bindings)?;
+                match shared {
+                    None => shared = Some(cap),
+                    Some(s) if s == cap => {}
+                    _ => return None,
+                }
+            }
+            shared
+        }
+        _ => None,
     }
 }
 
@@ -4181,7 +5964,13 @@ fn walk_captures(e: &Expr, arity_so_far: u32, out: &mut BTreeSet<u32>) {
             walk_captures(then_branch, arity_so_far, out);
             walk_captures(else_branch, arity_so_far, out);
         }
+        Expr::Try { expr, .. } => walk_captures(expr, arity_so_far, out),
+        Expr::Defer { cleanup, body } => {
+            walk_captures(cleanup, arity_so_far, out);
+            walk_captures(body, arity_so_far, out);
+        }
         Expr::IntLit(_)
+        | Expr::FloatLit(_)
         | Expr::BoolLit(_)
         | Expr::StringLit(_)
         | Expr::TopRef(_)
@@ -4293,7 +6082,23 @@ fn rewrite_expr(e: &Expr, arity: u32, depth: u32, cap_pos: &HashMap<u32, u32>) -
             then_branch: Box::new(rewrite_expr(then_branch, arity, depth, cap_pos)),
             else_branch: Box::new(rewrite_expr(else_branch, arity, depth, cap_pos)),
         },
+        Expr::Try {
+            expr,
+            enum_ref,
+            ok_index,
+            err_index,
+        } => Expr::Try {
+            expr: Box::new(rewrite_expr(expr, arity, depth, cap_pos)),
+            enum_ref: *enum_ref,
+            ok_index: *ok_index,
+            err_index: *err_index,
+        },
+        Expr::Defer { cleanup, body } => Expr::Defer {
+            cleanup: Box::new(rewrite_expr(cleanup, arity, depth, cap_pos)),
+            body: Box::new(rewrite_expr(body, arity, depth, cap_pos)),
+        },
         Expr::IntLit(_)
+        | Expr::FloatLit(_)
         | Expr::BoolLit(_)
         | Expr::StringLit(_)
         | Expr::TopRef(_)
@@ -4397,6 +6202,9 @@ impl<'ctx> Jit<'ctx> {
         if let Some(fc_fn) = cm.module.get_function("ai_gc_force_collect") {
             engine.add_global_mapping(&fc_fn, ai_gc_force_collect as usize);
         }
+        if let Some(f) = cm.module.get_function("ai_panic") {
+            engine.add_global_mapping(&f, ai_panic as usize);
+        }
         if let Some(f) = cm.module.get_function("ai_str_new") {
             engine.add_global_mapping(&f, ai_str_new as usize);
         }
@@ -4408,6 +6216,33 @@ impl<'ctx> Jit<'ctx> {
         }
         if let Some(f) = cm.module.get_function("ai_str_concat") {
             engine.add_global_mapping(&f, ai_str_concat as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_bytes_new") {
+            engine.add_global_mapping(&f, ai_bytes_new as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_bytes_get") {
+            engine.add_global_mapping(&f, ai_bytes_get as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_bytes_set") {
+            engine.add_global_mapping(&f, ai_bytes_set as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_bytes_slice") {
+            engine.add_global_mapping(&f, ai_bytes_slice as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_bytes_copy") {
+            engine.add_global_mapping(&f, ai_bytes_copy as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_array_new") {
+            engine.add_global_mapping(&f, ai_array_new as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_array_len") {
+            engine.add_global_mapping(&f, ai_array_len as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_array_get") {
+            engine.add_global_mapping(&f, ai_array_get as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_array_set") {
+            engine.add_global_mapping(&f, ai_array_set as usize);
         }
 
         // User-defined `extern fn`s declared via the FFI registry.
@@ -4429,6 +6264,12 @@ impl<'ctx> Jit<'ctx> {
                 .get_function_address(&sym)
                 .map_err(|_| CodegenError::FunctionNotFound { symbol: sym.clone() })?;
             runtime.code_table.insert(*h, addr as *const u8);
+            // Mirror lambda → type_id mapping into the code table
+            // so indirect calls can resolve `closure header type_id`
+            // to the lambda's code hash.
+            if let Some(&type_id) = cm.shape_registry.get(h) {
+                runtime.code_table.register_type_id(type_id, *h);
+            }
         }
 
         Ok(Jit {
@@ -4549,6 +6390,12 @@ pub struct IncrementalJit<'ctx> {
     installed_extra_lambdas: HashMap<Hash, Expr>,
     installed_lambdas_set: HashSet<Hash>,
 
+    /// Extern requirements accumulated across installs (shipped as
+    /// `ItemKind::Extern`). Used as the union module's externs map so
+    /// `declare_user_externs` declares + resolves each referenced symbol
+    /// (or fails clearly when the library/symbol isn't on this node).
+    installed_externs: HashMap<String, crate::resolve::ExternSig>,
+
     /// Names provided per-def by the caller. Optional — purely for
     /// human-readable runtime errors. Mirrors `ResolvedDef.name` for
     /// installed defs.
@@ -4594,6 +6441,9 @@ impl<'ctx> IncrementalJit<'ctx> {
                 .get_function_address(&sym)
                 .map_err(|_| CodegenError::FunctionNotFound { symbol: sym.clone() })?;
             runtime.code_table.insert(*h, addr as *const u8);
+            if let Some(&type_id) = cm.shape_registry.get(h) {
+                runtime.code_table.register_type_id(type_id, *h);
+            }
         }
 
         // Track type_id watermark = sum of all shapes registered in the
@@ -4601,7 +6451,7 @@ impl<'ctx> IncrementalJit<'ctx> {
         // shapes (BoxedInt + String) at the trailing end of the
         // heap's type-table. Keep this in sync with
         // `Runtime::new_with_metadata`.
-        const RUNTIME_RESERVED_SHAPES: u16 = 2;
+        const RUNTIME_RESERVED_SHAPES: u16 = 3;
         let next_type_id =
             cm.closure_type_infos.len() as u16 + RUNTIME_RESERVED_SHAPES;
 
@@ -4612,6 +6462,7 @@ impl<'ctx> IncrementalJit<'ctx> {
             installed_defs_set: HashSet::new(),
             installed_extra_lambdas: HashMap::new(),
             installed_lambdas_set: HashSet::new(),
+            installed_externs: HashMap::new(),
             next_type_id,
         })
     }
@@ -4635,6 +6486,9 @@ impl<'ctx> IncrementalJit<'ctx> {
         if let Some(fc_fn) = module.get_function("ai_gc_force_collect") {
             engine.add_global_mapping(&fc_fn, ai_gc_force_collect as usize);
         }
+        if let Some(f) = module.get_function("ai_panic") {
+            engine.add_global_mapping(&f, ai_panic as usize);
+        }
         if let Some(f) = module.get_function("ai_str_new") {
             engine.add_global_mapping(&f, ai_str_new as usize);
         }
@@ -4646,6 +6500,36 @@ impl<'ctx> IncrementalJit<'ctx> {
         }
         if let Some(f) = module.get_function("ai_str_concat") {
             engine.add_global_mapping(&f, ai_str_concat as usize);
+        }
+        // Bytes + Array runtime ops (must mirror the non-incremental Jit
+        // wiring — on Linux the ORC engine resolves these eagerly at
+        // install, so a missing one aborts with "Symbol not found").
+        if let Some(f) = module.get_function("ai_bytes_new") {
+            engine.add_global_mapping(&f, ai_bytes_new as usize);
+        }
+        if let Some(f) = module.get_function("ai_bytes_get") {
+            engine.add_global_mapping(&f, ai_bytes_get as usize);
+        }
+        if let Some(f) = module.get_function("ai_bytes_set") {
+            engine.add_global_mapping(&f, ai_bytes_set as usize);
+        }
+        if let Some(f) = module.get_function("ai_bytes_slice") {
+            engine.add_global_mapping(&f, ai_bytes_slice as usize);
+        }
+        if let Some(f) = module.get_function("ai_bytes_copy") {
+            engine.add_global_mapping(&f, ai_bytes_copy as usize);
+        }
+        if let Some(f) = module.get_function("ai_array_new") {
+            engine.add_global_mapping(&f, ai_array_new as usize);
+        }
+        if let Some(f) = module.get_function("ai_array_len") {
+            engine.add_global_mapping(&f, ai_array_len as usize);
+        }
+        if let Some(f) = module.get_function("ai_array_get") {
+            engine.add_global_mapping(&f, ai_array_get as usize);
+        }
+        if let Some(f) = module.get_function("ai_array_set") {
+            engine.add_global_mapping(&f, ai_array_set as usize);
         }
 
         // ---- User-defined externs: walk every `ext/<name>` LLVM
@@ -4729,6 +6613,25 @@ impl<'ctx> IncrementalJit<'ctx> {
                     }
                     new_lambdas.push((hash, e));
                 }
+                ItemKind::Extern => {
+                    // A C/host extern requirement travelling with the
+                    // code. Decode and remember it; `declare_user_externs`
+                    // (during the union build below) resolves the real
+                    // symbol — or fails clearly if it isn't available here.
+                    let (name, params, ret, library, variadic) =
+                        crate::codec::decode_extern(&bytes).map_err(|e| {
+                            CodegenError::JitInit(format!("decode_extern: {}", e))
+                        })?;
+                    self.installed_externs.insert(
+                        name,
+                        crate::resolve::ExternSig {
+                            params,
+                            ret,
+                            library,
+                            variadic,
+                        },
+                    );
+                }
             }
         }
 
@@ -4746,7 +6649,11 @@ impl<'ctx> IncrementalJit<'ctx> {
         let mut union = ResolvedModule {
             defs: self.installed_defs.clone(),
             at_binding: None,
-            externs: std::collections::HashMap::new(),
+            // Carry every extern requirement received so far, so a def
+            // installed in an earlier batch can still resolve its extern
+            // when the union is recompiled. `declare_user_externs` only
+            // resolves the symbols actually referenced by the union.
+            externs: self.installed_externs.clone(),
         };
         union.defs.extend(new_defs.iter().cloned());
 
@@ -4830,6 +6737,9 @@ impl<'ctx> IncrementalJit<'ctx> {
                 .get_function_address(&sym)
                 .map_err(|_| CodegenError::FunctionNotFound { symbol: sym.clone() })?;
             runtime.code_table.insert(*h, addr as *const u8);
+            if let Some(&type_id) = cm.shape_registry.get(h) {
+                runtime.code_table.register_type_id(type_id, *h);
+            }
         }
 
         // 7. Push new TypeInfos into runtime + heap.
@@ -4858,13 +6768,19 @@ impl<'ctx> IncrementalJit<'ctx> {
         }
         // shape_by_type_id from this batch contains entries indexed by
         // absolute type_id (with None placeholders for the prior range).
-        // Extend the runtime's shape_by_type_id to match.
+        // Extend the runtime's shape_by_type_id to match, AND mirror
+        // each new entry into the code table's type_id_to_hash so
+        // indirect calls (`ai_gc_lookup_code`) can resolve closures
+        // by type_id alone. Without this, a closure shipped to the
+        // worker has a type_id the worker's code table doesn't know
+        // about, and the next indirect call panics.
         for (i, slot) in cm.shape_by_type_id.iter().enumerate() {
             if let Some(h) = slot {
                 while runtime.shape_by_type_id.len() <= i {
                     runtime.shape_by_type_id.push(None);
                 }
                 runtime.shape_by_type_id[i] = Some(*h);
+                runtime.code_table.register_type_id(i as u16, *h);
             }
         }
 
@@ -4936,7 +6852,13 @@ fn collect_all_lambda_hashes(e: &Expr, out: &mut HashSet<Hash>) {
             collect_all_lambda_hashes(then_branch, out);
             collect_all_lambda_hashes(else_branch, out);
         }
+        Expr::Try { expr, .. } => collect_all_lambda_hashes(expr, out),
+        Expr::Defer { cleanup, body } => {
+            collect_all_lambda_hashes(cleanup, out);
+            collect_all_lambda_hashes(body, out);
+        }
         Expr::IntLit(_)
+        | Expr::FloatLit(_)
         | Expr::BoolLit(_)
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
@@ -4963,6 +6885,17 @@ mod tests {
         INIT.call_once(|| {
             init_native_target().expect("init native target");
         });
+    }
+
+    /// Re-assert the standard extern baseline (the runtime I/O externs)
+    /// after a test that registered its own externs. Used INSTEAD of
+    /// `clear_externs()` so that concurrently-running tests which depend
+    /// on the stdlib I/O externs never observe an empty registry — we
+    /// never clear, so there is no race window at all. The test's own
+    /// uniquely-named externs are left registered, which is harmless
+    /// (`register_extern` replaces by name; nothing else uses those names).
+    fn reset_externs_to_baseline() {
+        crate::io_externs::register_io_externs();
     }
 
     fn build_for<'ctx>(
@@ -5545,21 +7478,32 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_bool_literal_errors_clearly() {
-        // Strings now have a real lowering (varlen heap shape + ai_str_new).
-        // BoolLit still doesn't — leave this test to guard that surface.
+    fn jit_bool_literal_lowers_to_zero_one() {
+        // Bool is represented as i64 0/1 at runtime, so `BoolLit` now lowers
+        // (mirroring `IntLit`): `true` -> 1, `false` -> 0. There is no surface
+        // `true`/`false` syntax yet, so inject the literal into the AST and
+        // JIT it directly. The fn is declared `-> Int` (the ABI carrier; Bool
+        // and Int share the i64 representation).
         init();
-        let m = parse_module("def x() -> Int = 1").unwrap();
-        let mut r = resolve_module(&m).unwrap();
-        let Def::Fn { body, .. } = &mut r.defs[0].def else {
-            panic!("expected Fn");
-        };
-        *body = Expr::BoolLit(true);
-
-        let ctx = Context::create();
-        match CompiledModule::build(&ctx, &r) {
-            Err(CodegenError::Unsupported { ref what }) if what.contains("Bool") => {}
-            other => panic!("wrong error: {:?}", other.as_ref().err()),
+        for (lit, expect) in [(true, 1i64), (false, 0i64)] {
+            let ctx = Context::create();
+            let mut r = resolve_module(&parse_module("def t() -> Int = 1").unwrap()).unwrap();
+            if let Def::Fn { body, .. } = &mut r.defs[0].def {
+                *body = Expr::BoolLit(lit);
+            }
+            let names: HashMap<String, Hash> =
+                r.defs.iter().map(|d| (d.name.clone(), d.hash)).collect();
+            let cm = CompiledModule::build(&ctx, &r)
+                .expect("BoolLit should lower, not error");
+            let rt = Runtime::new_with_registry(
+                cm.closure_type_infos.clone(),
+                cm.shape_registry.clone(),
+            );
+            let jit = Jit::new(cm, &rt).expect("jit");
+            unsafe {
+                let f = jit.get_fn0(&names["t"]).unwrap();
+                assert_eq!(f.call(rt.thread_ptr()), expect, "BoolLit({lit}) -> {expect}");
+            }
         }
     }
 
@@ -5756,7 +7700,7 @@ mod tests {
             assert_eq!(f.call(rt.thread_ptr(), -5), -9);
         }
 
-        crate::ffi::clear_externs();
+        reset_externs_to_baseline();
     }
 
     /// Two-arg extern + composition with another fn. Exercises arg
@@ -5795,7 +7739,7 @@ mod tests {
             // triple_sum(2, 3) = 2 + (3 + 3) = 8
             assert_eq!(f.call(rt.thread_ptr(), 2, 3), 8);
         }
-        crate::ffi::clear_externs();
+        reset_externs_to_baseline();
     }
 
     /// Zero-arg extern. The thread pointer is always passed, so the
@@ -5827,7 +7771,7 @@ mod tests {
             let f = jit.get_fn0(&names["run"]).unwrap();
             assert_eq!(f.call(rt.thread_ptr()), 42);
         }
-        crate::ffi::clear_externs();
+        reset_externs_to_baseline();
     }
 
     // ---- Layer 2 FFI: String marshaling ----
@@ -5859,7 +7803,7 @@ mod tests {
             let f = jit.get_fn0(&names["run"]).unwrap();
             assert_eq!(f.call(rt.thread_ptr()), 42);
         }
-        crate::ffi::clear_externs();
+        reset_externs_to_baseline();
     }
 
     /// Rust extern takes Int, returns a new heap String. The returned
@@ -5890,7 +7834,7 @@ mod tests {
             let f = jit.get_fn0(&names["run"]).unwrap();
             assert_eq!(f.call(rt.thread_ptr()), 5); // "12345".len()
         }
-        crate::ffi::clear_externs();
+        reset_externs_to_baseline();
     }
 
     /// String round-trip: take a String, return a derived String.
@@ -5923,7 +7867,7 @@ mod tests {
             let f = jit.get_fn0(&names["run"]).unwrap();
             assert_eq!(f.call(rt.thread_ptr()), 1);
         }
-        crate::ffi::clear_externs();
+        reset_externs_to_baseline();
     }
 
     /// The actual `print_string` we promised: Rust writes to stdout.
@@ -5969,7 +7913,7 @@ mod tests {
         }
         let log = captured().lock().unwrap().clone();
         assert_eq!(log, vec!["hello, ".to_owned(), "world".to_owned()]);
-        crate::ffi::clear_externs();
+        reset_externs_to_baseline();
     }
 
     // ---- if / else ----
@@ -6310,6 +8254,588 @@ mod tests {
         match err {
             crate::typecheck::TypeError::MatchArmsDisagree { .. } => {}
             other => panic!("expected MatchArmsDisagree, got {:?}", other),
+        }
+    }
+
+    // ---- Bytes ----
+
+    #[test]
+    fn jit_bytes_new_len() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(&ctx, "def run() -> Int = bytes_len(bytes_new(16))");
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 16);
+        }
+    }
+
+    #[test]
+    fn jit_bytes_new_is_zero_filled() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(&ctx, "def run() -> Int = bytes_get(bytes_new(8), 5)");
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 0);
+        }
+    }
+
+    #[test]
+    fn jit_bytes_set_get() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def run() -> Int = {
+                let b = bytes_new(4);
+                let _x = bytes_set(b, 2, 99);
+                bytes_get(b, 2)
+            }",
+        );
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 99);
+        }
+    }
+
+    #[test]
+    fn jit_bytes_set_truncates_to_low_byte() {
+        // 511 == 0x1FF; low byte is 0xFF == 255.
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def run() -> Int = {
+                let b = bytes_new(1);
+                let _x = bytes_set(b, 0, 511);
+                bytes_get(b, 0)
+            }",
+        );
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 255);
+        }
+    }
+
+    #[test]
+    fn jit_bytes_slice() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def run() -> Int = {
+                let b = bytes_new(5);
+                let _x = bytes_set(b, 0, 10);
+                let _x = bytes_set(b, 1, 20);
+                let _x = bytes_set(b, 2, 30);
+                let _x = bytes_set(b, 3, 40);
+                let _x = bytes_set(b, 4, 50);
+                let s = bytes_slice(b, 1, 3);
+                bytes_get(s, 0) + bytes_len(s) * 100
+            }",
+        );
+        // slice = [20, 30, 40] → 20 + 3*100 = 320
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 320);
+        }
+    }
+
+    #[test]
+    fn jit_bytes_concat() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def run() -> Int = {
+                let a = bytes_new(2);
+                let _x = bytes_set(a, 0, 1);
+                let _x = bytes_set(a, 1, 2);
+                let b = bytes_new(3);
+                let _x = bytes_set(b, 0, 3);
+                let c = bytes_concat(a, b);
+                bytes_len(c) * 100 + bytes_get(c, 2)
+            }",
+        );
+        // len 5, c[2] = b[0] = 3 → 503
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 503);
+        }
+    }
+
+    #[test]
+    fn jit_bytes_from_string_reads_ascii() {
+        // Uses a string literal (not an extern) so it doesn't touch the
+        // global FFI registry — avoids racing clear_externs with other
+        // extern tests under parallel `cargo test`.
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def run() -> Int = {
+                let b = bytes_from_string(\"ABC\");
+                bytes_get(b, 0) * 10000 + bytes_get(b, 1) * 100 + bytes_get(b, 2)
+             }",
+        );
+        // 'A'=65, 'B'=66, 'C'=67 → 656667
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 656667);
+        }
+    }
+
+    #[test]
+    fn jit_string_from_bytes_then_len() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def run() -> Int = string_len(string_from_bytes(bytes_new(7)))",
+        );
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 7);
+        }
+    }
+
+    #[test]
+    fn jit_bytes_survive_gc() {
+        // `keep` is a live root through a collection triggered by lots of
+        // garbage allocation; its bytes must survive relocation intact.
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def alloc_garbage(n: Int) -> Int =
+                if n <= 0 { 0 } else {
+                    let junk = bytes_new(64);
+                    let _x = bytes_set(junk, 0, n);
+                    alloc_garbage(n - 1)
+                }
+             def run() -> Int = {
+                let keep = bytes_new(8);
+                let _x = bytes_set(keep, 3, 123);
+                let _x = alloc_garbage(2000);
+                let _x = gc_collect();
+                bytes_get(keep, 3)
+             }",
+        );
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 123);
+        }
+    }
+
+    // ---- Array ----
+
+    #[test]
+    fn jit_array_len() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(&ctx, "def run() -> Int = array_len(array_new(7))");
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 7);
+        }
+    }
+
+    #[test]
+    fn jit_array_int_set_get() {
+        // `Array<Int>`: elements are boxed on set, unboxed on get. T is
+        // pinned via make4's `-> Array<Int>` return annotation.
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def make4() -> Array<Int> = array_new(4)
+             def run() -> Int = {
+                let a = make4();
+                let _x = array_set(a, 0, 10);
+                let _y = array_set(a, 1, 32);
+                array_get(a, 0) + array_get(a, 1)
+             }",
+        );
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 42);
+        }
+    }
+
+    #[test]
+    fn jit_array_of_structs_field_access() {
+        // Pointer elements: store a struct, read it back, project a field.
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "struct P { x: Int, y: Int }
+             def make() -> Array<P> = array_new(2)
+             def run() -> Int = {
+                let a = make();
+                let _s = array_set(a, 0, P { x: 7, y: 9 });
+                let p = array_get(a, 0);
+                p.x + p.y
+             }",
+        );
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 16);
+        }
+    }
+
+    #[test]
+    fn jit_array_int_element_survives_gc() {
+        // The array AND its boxed-Int element must survive relocation.
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def make4() -> Array<Int> = array_new(4)
+             def garbage(n: Int) -> Int =
+                if n <= 0 { 0 } else { let j = array_new(16); garbage(n - 1) }
+             def run() -> Int = {
+                let a = make4();
+                let _x = array_set(a, 0, 111);
+                let _g = garbage(2000);
+                let _c = gc_collect();
+                array_get(a, 0)
+             }",
+        );
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 111);
+        }
+    }
+
+    #[test]
+    fn jit_array_struct_element_survives_gc() {
+        // A pointer element (struct) must be relocated correctly: after
+        // GC, reading the slot yields the moved struct, whose field is
+        // still intact.
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "struct Box { v: Int }
+             def make() -> Array<Box> = array_new(4)
+             def garbage(n: Int) -> Int =
+                if n <= 0 { 0 } else { let j = array_new(16); garbage(n - 1) }
+             def run() -> Int = {
+                let a = make();
+                let _s = array_set(a, 1, Box { v: 99 });
+                let _g = garbage(2000);
+                let _c = gc_collect();
+                let b = array_get(a, 1);
+                b.v
+             }",
+        );
+        unsafe {
+            let f = jit.get_fn0(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 99);
+        }
+    }
+
+    // ---- Float ----
+    // A Float value is carried as the i64 bit-pattern of its f64. A
+    // Float-returning fn therefore returns that bit pattern through
+    // get_fn0 (i64), which we read back with f64::from_bits.
+
+    #[test]
+    fn jit_float_arithmetic() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def add() -> Float = 1.5 + 2.25
+             def mul() -> Float = 2.5 * 4.0
+             def div() -> Float = 10.0 / 4.0
+             def sub() -> Float = 1.0e3 - 0.5",
+        );
+        unsafe {
+            let bits = |n: &str| -> f64 {
+                f64::from_bits(jit.get_fn0(&names[n]).unwrap().call(rt.thread_ptr()) as u64)
+            };
+            assert_eq!(bits("add"), 3.75);
+            assert_eq!(bits("mul"), 10.0);
+            assert_eq!(bits("div"), 2.5);
+            assert_eq!(bits("sub"), 999.5);
+        }
+    }
+
+    #[test]
+    fn jit_float_comparisons() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def lt() -> Int = if 1.5 < 2.5 { 1 } else { 0 }
+             def gt() -> Int = if 3.0 > 5.0 { 1 } else { 0 }
+             def eq() -> Int = if 2.5 == 2.5 { 1 } else { 0 }",
+        );
+        unsafe {
+            assert_eq!(jit.get_fn0(&names["lt"]).unwrap().call(rt.thread_ptr()), 1);
+            assert_eq!(jit.get_fn0(&names["gt"]).unwrap().call(rt.thread_ptr()), 0);
+            assert_eq!(jit.get_fn0(&names["eq"]).unwrap().call(rt.thread_ptr()), 1);
+        }
+    }
+
+    #[test]
+    fn jit_float_int_conversions() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            // half(n) = floor(n / 2) computed in float.
+            "def half(n: Int) -> Int = float_to_int(int_to_float(n) / 2.0)
+             def trunc() -> Int = float_to_int(3.99)",
+        );
+        unsafe {
+            let f = jit.get_fn1(&names["half"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr(), 7), 3);
+            assert_eq!(f.call(rt.thread_ptr(), 10), 5);
+            assert_eq!(jit.get_fn0(&names["trunc"]).unwrap().call(rt.thread_ptr()), 3);
+        }
+    }
+
+    #[test]
+    fn jit_float_param_passthrough() {
+        init();
+        let ctx = Context::create();
+        // Float param + return: the bit pattern must survive the ABI.
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "def scale(x: Float, k: Float) -> Float = x * k
+             def run() -> Float = scale(1.25, 8.0)",
+        );
+        unsafe {
+            let r = jit.get_fn0(&names["run"]).unwrap().call(rt.thread_ptr());
+            assert_eq!(f64::from_bits(r as u64), 10.0);
+        }
+    }
+
+    #[test]
+    fn jit_float_concrete_struct_field() {
+        init();
+        let ctx = Context::create();
+        // Float fields live in the non-pointer (raw) section as 8-byte
+        // values, loaded as i64 bits then bitcast for arithmetic.
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "struct Vec2 { x: Float, y: Float }
+             def run() -> Int = {
+                let v = Vec2 { x: 1.5, y: 2.5 };
+                float_to_int((v.x + v.y) * 10.0)
+             }",
+        );
+        unsafe {
+            // (1.5 + 2.5) * 10 = 40
+            assert_eq!(jit.get_fn0(&names["run"]).unwrap().call(rt.thread_ptr()), 40);
+        }
+    }
+
+    // ---- Generic C FFI: real symbols via dlopen/dlsym ----
+
+    /// Call libc `abs` directly. The simplest possible C-FFI: one
+    /// scalar in, one scalar out, no memory. Proves dlsym resolution
+    /// and the plain-C-ABI (no Thread*) call path work end to end.
+    #[test]
+    fn cffi_libc_abs() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "
+            extern \"C\" lib \"c\" {
+                fn abs(n: Int) -> Int
+            }
+            def run(n: Int) -> Int = abs(n)
+            ",
+        );
+        unsafe {
+            let f = jit.get_fn1(&names["run"]).unwrap();
+            assert_eq!(f.call(rt.thread_ptr(), -7), 7);
+            assert_eq!(f.call(rt.thread_ptr(), 42), 42);
+        }
+    }
+
+    /// Full chain: `malloc` a buffer, write a NUL-terminated C string
+    /// into it with the `ptr_write_u8` memory intrinsic, hand the raw
+    /// pointer to libc `strlen`, then `free` it. Exercises Ptr values,
+    /// memory intrinsics, and three distinct C symbols cooperating.
+    #[test]
+    fn cffi_libc_malloc_strlen_free() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "
+            extern \"C\" lib \"c\" {
+                fn malloc(size: Int) -> Ptr
+                fn free(p: Ptr) -> Int
+                fn strlen(s: Ptr) -> Int
+            }
+            def run() -> Int = {
+                let p = malloc(8);
+                let w0 = ptr_write_u8(p, 0, 104);
+                let w1 = ptr_write_u8(p, 1, 105);
+                let w2 = ptr_write_u8(p, 2, 33);
+                let w3 = ptr_write_u8(p, 3, 0);
+                let n = strlen(p);
+                let fr = free(p);
+                fr - fr + n + w0 + w1 + w2 + w3
+            }
+            ",
+        );
+        unsafe {
+            // "hi!" → length 3.
+            assert_eq!(jit.get_fn0(&names["run"]).unwrap().call(rt.thread_ptr()), 3);
+        }
+    }
+
+    /// Round-trip bytes through libc `memcpy` using the i64 memory
+    /// intrinsics, then read the copied value back. Confirms
+    /// ptr_read_i64 / ptr_write_i64 and a Ptr-returning C fn.
+    #[test]
+    fn cffi_libc_memcpy_i64() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "
+            extern \"C\" lib \"c\" {
+                fn malloc(size: Int) -> Ptr
+                fn free(p: Ptr) -> Int
+                fn memcpy(dst: Ptr, src: Ptr, n: Int) -> Ptr
+            }
+            def run() -> Int = {
+                let src = malloc(8);
+                let dst = malloc(8);
+                let w = ptr_write_i64(src, 0, 123456789);
+                let cp = memcpy(dst, src, 8);
+                let v = ptr_read_i64(dst, 0);
+                let f1 = free(src);
+                let f2 = free(dst);
+                v + w
+            }
+            ",
+        );
+        unsafe {
+            assert_eq!(
+                jit.get_fn0(&names["run"]).unwrap().call(rt.thread_ptr()),
+                123456789
+            );
+        }
+    }
+
+    /// Variadic C FFI through libc `snprintf` — a classic variadic
+    /// function. Proves the `...` declaration drives a real varargs
+    /// call (correct on the arm64 / x86-64 variadic ABI, where a
+    /// non-variadic prototype would misplace the trailing args). We
+    /// format an integer into a buffer and read the resulting bytes
+    /// back to confirm they landed correctly.
+    #[test]
+    fn cffi_variadic_snprintf() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "
+            extern \"C\" lib \"c\" {
+                fn malloc(size: Int) -> Ptr
+                fn free(p: Ptr) -> Int
+                fn snprintf(buf: Ptr, size: Int, fmt: Ptr, ...) -> Int
+            }
+            def run() -> Int = {
+                let buf = malloc(16);
+                let fmt = malloc(8);
+                let f0 = ptr_write_u8(fmt, 0, 37);
+                let f1 = ptr_write_u8(fmt, 1, 100);
+                let f2 = ptr_write_u8(fmt, 2, 0);
+                let n = snprintf(buf, 16, fmt, 4097);
+                let b0 = ptr_read_u8(buf, 0);
+                let b1 = ptr_read_u8(buf, 1);
+                let b2 = ptr_read_u8(buf, 2);
+                let b3 = ptr_read_u8(buf, 3);
+                let fr1 = free(buf);
+                let fr2 = free(fmt);
+                n + b0 + b1 + b2 + b3
+            }
+            ",
+        );
+        unsafe {
+            // fmt = \"%d\"; snprintf(buf, 16, \"%d\", 4097) writes \"4097\".
+            // returns 4 (chars written). bytes: '4'=52 '0'=48 '9'=57 '7'=55.
+            // total = 4 + 52 + 48 + 57 + 55 = 216.
+            assert_eq!(
+                jit.get_fn0(&names["run"]).unwrap().call(rt.thread_ptr()),
+                216
+            );
+        }
+    }
+
+    /// An unresolvable C symbol fails the build with a CLEAR error that
+    /// names the symbol and library — not a silent miscompile or a later
+    /// segfault. This is the same `declare_user_externs` path the remote
+    /// install uses, so shipping FFI code to a node that lacks the library
+    /// fails this way too ("this C code is required to run").
+    #[test]
+    fn cffi_unresolvable_symbol_fails_clearly() {
+        init();
+        let src = "
+            extern \"C\" lib \"definitely_not_a_real_library_xyz\" {
+                fn nope_fn(n: Int) -> Int
+            }
+            def run(x: Int) -> Int = nope_fn(x)
+            ";
+        let ctx = Context::create();
+        let m = parse_module(src).unwrap();
+        let r = resolve_module(&m).unwrap();
+        let err = CompiledModule::build(&ctx, &r)
+            .err()
+            .expect("build must fail when the C symbol can't be resolved");
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("nope_fn") && msg.contains("definitely_not_a_real_library_xyz"),
+            "error should name the unresolved symbol + library, got: {}",
+            msg
+        );
+    }
+
+    /// Round-trip a C string through the FFI: build a buffer with the
+    /// `cstr`-style pattern inline (malloc + ptr_write_u8), hand it to
+    /// libc `strlen`, and confirm the length. The full `cstr` /
+    /// `cstr_to_string` helpers (and libcurl HTTP) are exercised against
+    /// the real stdlib in `stdlib.rs` tests.
+    #[test]
+    fn cffi_cstr_pattern_strlen() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_for(
+            &ctx,
+            "
+            extern \"C\" lib \"c\" {
+                fn malloc(size: Int) -> Ptr
+                fn free(p: Ptr) -> Int
+                fn strlen(s: Ptr) -> Int
+            }
+            def run() -> Int = {
+                let p = malloc(6);
+                let a = ptr_write_u8(p, 0, 119);
+                let b = ptr_write_u8(p, 1, 111);
+                let c = ptr_write_u8(p, 2, 114);
+                let d = ptr_write_u8(p, 3, 100);
+                let e = ptr_write_u8(p, 4, 0);
+                let n = strlen(p);
+                let fr = free(p);
+                n + a + b + c + d + e
+            }
+            ",
+        );
+        unsafe {
+            // \"word\" → strlen 4; the writes all return 0.
+            assert_eq!(jit.get_fn0(&names["run"]).unwrap().call(rt.thread_ptr()), 4);
         }
     }
 }

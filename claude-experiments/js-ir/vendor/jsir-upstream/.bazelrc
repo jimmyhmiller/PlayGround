@@ -1,0 +1,28 @@
+# Copyright 2024 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Required as otherwise testdata is not copied (i.e. linked) on Windows.
+startup --windows_enable_symlinks
+
+common --enable_bzlmod
+# required for hybrid bzlmod+workspace builds
+common --enable_workspace
+common --incompatible_disallow_empty_glob
+
+common --action_env=BAZEL_CXXOPTS=-std=c++17
+common --cxxopt='-std=c++17'
+
+try-import %workspace%/third_party/llvm-project/utils/bazel/.bazelrc
+
+build --macos_sdk_version=15.0 --host_macos_minimum_os=11.0 --repo_env=CC=clang --repo_env=CXX=clang++ --cxxopt=--std=c++17 --cxxopt=-Wno-return-type --cxxopt=-Wno-trigraphs --cxxopt=-Wno-implicit-const-int-float-conversion --cxxopt=-Wno-c++11-narrowing --@llvm_zlib//:llvm_enable_zlib=false

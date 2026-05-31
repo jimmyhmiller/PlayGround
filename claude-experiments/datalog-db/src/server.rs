@@ -1,23 +1,49 @@
 use std::net::TcpListener;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tracing::{info, warn};
 
+use crate::backup;
 use crate::db::{self, Database};
 use crate::protocol::{self, Message};
 use crate::query::Query;
 use crate::tx::TxOp;
 
+/// Per-server backup state shared with request handlers. When `None`,
+/// `backup_now` / `backup_list` return an error explaining that backups
+/// were not configured at server startup. `retain` applies to both the
+/// scheduler and on-demand `backup_now` calls so retention is a property
+/// of the root, not of who took the backup.
+#[derive(Clone)]
+pub struct BackupContext {
+    pub root: PathBuf,
+    pub retain: usize,
+}
+
 pub struct Server {
     db: Arc<Database>,
+    backup: Option<BackupContext>,
     listener: TcpListener,
 }
 
 impl Server {
     pub fn bind(addr: &str, db: Arc<Database>) -> std::io::Result<Self> {
+        Self::bind_with(addr, db, None)
+    }
+
+    pub fn bind_with(
+        addr: &str,
+        db: Arc<Database>,
+        backup: Option<BackupContext>,
+    ) -> std::io::Result<Self> {
         let listener = TcpListener::bind(addr)?;
         info!("Server listening on {}", addr);
-        Ok(Self { db, listener })
+        Ok(Self {
+            db,
+            backup,
+            listener,
+        })
     }
 
     pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
@@ -33,8 +59,9 @@ impl Server {
             let _ = stream.set_nodelay(true);
             info!("New connection from {}", addr);
             let db = self.db.clone();
+            let backup = self.backup.clone();
             std::thread::spawn(move || {
-                if let Err(e) = handle_connection(stream, db) {
+                if let Err(e) = handle_connection(stream, db, backup) {
                     warn!("Connection error from {}: {}", addr, e);
                 }
                 info!("Connection closed: {}", addr);
@@ -47,6 +74,7 @@ impl Server {
 fn handle_connection(
     mut stream: std::net::TcpStream,
     db: Arc<Database>,
+    backup: Option<BackupContext>,
 ) -> std::result::Result<(), Box<dyn std::error::Error>> {
     // Handshake
     protocol::server_handshake(&mut stream)?;
@@ -64,12 +92,12 @@ fn handle_connection(
             Err(e) => return Err(e.into()),
         };
 
-        let response = dispatch(&db, &msg);
+        let response = dispatch(&db, backup.as_ref(), &msg);
         protocol::write_message(&mut stream, msg.request_id, &response)?;
     }
 }
 
-fn dispatch(db: &Database, msg: &Message) -> serde_json::Value {
+fn dispatch(db: &Database, backup: Option<&BackupContext>, msg: &Message) -> serde_json::Value {
     let request_type = msg
         .payload
         .get("type")
@@ -84,9 +112,87 @@ fn dispatch(db: &Database, msg: &Message) -> serde_json::Value {
         "explain" => handle_explain(db, &msg.payload),
         "schema" => handle_schema(db),
         "status" => handle_status(),
+        "backup_now" => handle_backup_now(db, backup),
+        "backup_list" => handle_backup_list(backup),
         other => serde_json::json!({
             "status": "error",
             "error": format!("unknown request type: '{}'", other)
+        }),
+    }
+}
+
+fn handle_backup_now(db: &Database, backup: Option<&BackupContext>) -> serde_json::Value {
+    let ctx = match backup {
+        Some(b) => b,
+        None => {
+            return serde_json::json!({
+                "status": "error",
+                "error": "backups not configured; start server with --backup-dir"
+            })
+        }
+    };
+
+    match backup::create_checkpoint(db, &ctx.root) {
+        Ok(path) => {
+            let pruned = backup::prune_checkpoints(&ctx.root, ctx.retain).unwrap_or(0);
+            serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "path": path.display().to_string(),
+                    "pruned": pruned,
+                }
+            })
+        }
+        Err(e) => serde_json::json!({
+            "status": "error",
+            "error": format!("backup failed: {}", e)
+        }),
+    }
+}
+
+fn handle_backup_list(backup: Option<&BackupContext>) -> serde_json::Value {
+    let ctx = match backup {
+        Some(b) => b,
+        None => {
+            return serde_json::json!({
+                "status": "error",
+                "error": "backups not configured; start server with --backup-dir"
+            })
+        }
+    };
+
+    match backup::list_checkpoints(&ctx.root) {
+        Ok(paths) => {
+            let entries: Vec<serde_json::Value> = paths
+                .iter()
+                .map(|p| {
+                    let name = p
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let timestamp_ms: u64 = name
+                        .get(..13)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
+                    serde_json::json!({
+                        "path": p.display().to_string(),
+                        "name": name,
+                        "timestamp_ms": timestamp_ms,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "status": "ok",
+                "data": {
+                    "root": ctx.root.display().to_string(),
+                    "backups": entries,
+                }
+            })
+        }
+        Err(e) => serde_json::json!({
+            "status": "error",
+            "error": format!("list failed: {}", e)
         }),
     }
 }

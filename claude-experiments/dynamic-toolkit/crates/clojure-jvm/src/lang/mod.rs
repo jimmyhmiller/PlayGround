@@ -9,6 +9,10 @@
 // Lives at the package root because it's not from clojure.lang/.
 pub mod object;
 
+// Low-bit tagged value representation (replacing NaN-boxing). See the module
+// docs; the migration off NaN-boxing is in progress.
+pub mod value_repr;
+
 // Identity types.
 pub mod named;
 pub mod symbol;
@@ -16,6 +20,7 @@ pub mod keyword;
 
 // Var / Namespace.
 pub mod var;
+pub mod var_roots;
 pub mod namespace;
 
 // Metadata / meta protocols (Symbol/Var/etc. implement these).

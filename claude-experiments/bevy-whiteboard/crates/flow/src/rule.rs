@@ -55,6 +55,16 @@ pub enum EmitTo {
     /// mapped to the emitting leaf, and fans the packet onto every
     /// outgoing edge from that compound whose `from_port` matches.
     ToOutPort(String),
+    /// Like [`EmitTo::ToOutPort`], but instead of broadcasting, emit to
+    /// the SINGLE `output`-port edge that was used longest ago (smallest
+    /// `last_sent_seq`), then mark it used. Successive packets therefore
+    /// rotate across the wired destinations — round-robin — with the
+    /// rotation state living entirely on the edges (the graph's own send
+    /// history), not in a counter slot. This is how a queue feeding N
+    /// workers hands each item to one worker, fairly, with no routing
+    /// node. Never-used edges (seq 0) sort first, so fresh destinations
+    /// fill before any repeats.
+    ToOutPortRotating(String),
     /// Emit on every outbound edge of the firing node whose
     /// `from_port` matches `name`. Lets a leaf node distinguish
     /// multiple outputs (e.g. a `Switch` with `pass` and `divert`

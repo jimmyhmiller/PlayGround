@@ -1,0 +1,1 @@
+// SOURCE:      throw 1;

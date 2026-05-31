@@ -136,6 +136,9 @@ struct ExecutionContext<'a> {
     interner: &'a AttrInterner,
     slots: &'a SlotMap,
     as_of: Option<TxId>,
+    /// Cache generation sampled before `txn`'s snapshot was created. Passed
+    /// to `ensure_type_loaded` so it can reject a load that races a write.
+    cache_gen: u64,
 }
 
 /// Streaming row producer for one plan node.
@@ -207,6 +210,7 @@ impl<'a> ScanIterator<'a> {
                 self.ctx.interner,
                 &self.clause.entity_type,
                 self.ctx.schema,
+                self.ctx.cache_gen,
             )?;
             // Resolve patterns once now that we have the type_data.
             // The owned `ResolvedFP` (with Arc'd columns) means we can
@@ -269,6 +273,7 @@ impl<'a> PlanIterator<'a> for ScanIterator<'a> {
             self.ctx.slots,
             self.ctx.cache,
             self.ctx.interner,
+            self.ctx.cache_gen,
         )?;
         self.buffered = tuples.into_iter();
         Ok(())
@@ -475,6 +480,98 @@ impl<'a> PlanIterator<'a> for ProjectIterator<'a> {
     }
 }
 
+/// Union (OR): yields the deduplicated bindings produced by any branch. Every
+/// branch is re-opened with the incoming seed, so OR composes inside joins.
+struct UnionIterator<'a> {
+    branches: Vec<Box<dyn PlanIterator<'a> + 'a>>,
+    idx: usize,
+    seed: Tuple,
+    num_slots: usize,
+    seen: HashSet<Vec<Option<HashableValue>>>,
+}
+
+impl<'a> UnionIterator<'a> {
+    fn new(branches: Vec<Box<dyn PlanIterator<'a> + 'a>>, num_slots: usize) -> Self {
+        Self {
+            branches,
+            idx: 0,
+            seed: Tuple::new(num_slots),
+            num_slots,
+            seen: HashSet::new(),
+        }
+    }
+
+    fn dedup_key(&self, t: &Tuple) -> Vec<Option<HashableValue>> {
+        (0..self.num_slots)
+            .map(|i| t.get(i).cloned().map(HashableValue))
+            .collect()
+    }
+}
+
+impl<'a> PlanIterator<'a> for UnionIterator<'a> {
+    fn open(&mut self, seed: &Tuple) -> Result<(), String> {
+        self.seed = seed.clone();
+        self.idx = 0;
+        self.seen.clear();
+        if let Some(first) = self.branches.get_mut(0) {
+            first.open(seed)?;
+        }
+        Ok(())
+    }
+
+    fn next(&mut self) -> Result<Option<Tuple>, String> {
+        loop {
+            if self.idx >= self.branches.len() {
+                return Ok(None);
+            }
+            match self.branches[self.idx].next()? {
+                Some(t) => {
+                    let key = self.dedup_key(&t);
+                    if self.seen.insert(key) {
+                        return Ok(Some(t));
+                    }
+                    // duplicate binding — skip
+                }
+                None => {
+                    self.idx += 1;
+                    if self.idx < self.branches.len() {
+                        let seed = self.seed.clone();
+                        self.branches[self.idx].open(&seed)?;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Negation as failure (NOT): passes through each `input` row for which the
+/// `anti` subquery, re-opened with that row's bindings, yields no solution.
+struct NegationIterator<'a> {
+    input: Box<dyn PlanIterator<'a> + 'a>,
+    anti: Box<dyn PlanIterator<'a> + 'a>,
+}
+
+impl<'a> PlanIterator<'a> for NegationIterator<'a> {
+    fn open(&mut self, seed: &Tuple) -> Result<(), String> {
+        self.input.open(seed)
+    }
+
+    fn next(&mut self) -> Result<Option<Tuple>, String> {
+        loop {
+            match self.input.next()? {
+                None => return Ok(None),
+                Some(row) => {
+                    self.anti.open(&row)?;
+                    if self.anti.next()?.is_none() {
+                        return Ok(Some(row));
+                    }
+                    // anti has a solution → row is excluded
+                }
+            }
+        }
+    }
+}
+
 /// Build a chain of iterators from a plan tree.
 fn build_iterator<'a>(
     node: &'a PlanNode,
@@ -512,6 +609,15 @@ fn build_iterator<'a>(
             let input_iter = build_iterator(input, ctx);
             Box::new(ProjectIterator { input: input_iter })
         }
+        PlanNode::Union { branches, .. } => {
+            let iters: Vec<Box<dyn PlanIterator<'a> + 'a>> =
+                branches.iter().map(|b| build_iterator(b, ctx)).collect();
+            Box::new(UnionIterator::new(iters, ctx.slots.num_slots))
+        }
+        PlanNode::Negation { input, anti, .. } => Box::new(NegationIterator {
+            input: build_iterator(input, ctx),
+            anti: build_iterator(anti, ctx),
+        }),
     }
 }
 
@@ -527,17 +633,24 @@ pub fn execute_query(
     cache: &QueryCache,
     interner: &AttrInterner,
 ) -> Result<QueryResult, String> {
+    // No external snapshot ordering here: sample the generation up front.
+    let cache_gen = cache.generation();
     let plan = planner::plan_query(txn, query, schema, interner)?;
-    execute_plan(txn, &plan, schema, cache, interner)
+    execute_plan(txn, &plan, schema, cache, interner, cache_gen)
 }
 
 /// Execute a pre-built query plan via the volcano/iterator engine.
+///
+/// `cache_gen` MUST be the cache generation sampled before `txn`'s snapshot
+/// was created (see `QueryCache::generation`), so that a type loaded into the
+/// cache during this query cannot silently miss a concurrently committed write.
 pub fn execute_plan(
     txn: &dyn ReadOps,
     plan: &QueryPlan,
     schema: &SchemaRegistry,
     cache: &QueryCache,
     interner: &AttrInterner,
+    cache_gen: u64,
 ) -> Result<QueryResult, String> {
     let slots = &plan.slot_map;
     let ctx = ExecutionContext {
@@ -547,6 +660,7 @@ pub fn execute_plan(
         interner,
         slots,
         as_of: plan.as_of,
+        cache_gen,
     };
 
     // Specialized fast path: chains of nested-loop joins where every
@@ -580,13 +694,11 @@ pub fn execute_plan(
     let empty_seed = Tuple::new(slots.num_slots);
     root.open(&empty_seed)?;
 
-    // Hoist the "<unbound>" sentinel: previously `unwrap_or(...)`
-    // eagerly constructed a fresh `Value::String(Arc::from("<unbound>"))`
-    // per slot per row, even when it was never used. For Unfiltered
-    // Scan that was 3 unused allocs × 2000 rows × 500 queries = 3M
-    // wasted allocations. Now allocated once; the `Arc<str>` clone
-    // path makes hand-out per row a refcount bump.
-    let unbound = Value::String("<unbound>".into());
+    // An unbound find variable (no slot, or a slot left unset by this row's
+    // bindings — e.g. a var bound in only some `or` branches) projects as
+    // `Null`. Using a real `Value` sentinel string here would be
+    // indistinguishable from an actual string value of the same text.
+    let unbound = Value::Null;
     let mut rows: Vec<Vec<Value>> = Vec::new();
     while let Some(tuple) = root.next()? {
         let row: Vec<Value> = output_slots
@@ -685,7 +797,7 @@ fn try_execute_ref_chain(
         let bind_next = &scans[i + 1].clause.bind;
         let mut linked_field: Option<&str> = None;
         for (field_name, pat) in &prev.clause.field_patterns {
-            if let Pattern::Variable(var) = pat {
+            if let Some(var) = pat.bound_var() {
                 if var == bind_next {
                     linked_field = Some(field_name);
                     break;
@@ -721,7 +833,7 @@ fn try_execute_ref_chain(
     // Load the (shared) type cache once.
     let td = match ctx
         .cache
-        .ensure_type_loaded(ctx.txn, ctx.interner, &entity_type, ctx.schema)?
+        .ensure_type_loaded(ctx.txn, ctx.interner, &entity_type, ctx.schema, ctx.cache_gen)?
     {
         Some(td) => td,
         None => return Ok(None),
@@ -765,7 +877,7 @@ fn try_execute_ref_chain(
     };
     let mut outer_reads: Vec<(usize, cache::Column)> = Vec::new();
     for (field_name, pat) in &outer_clause.field_patterns {
-        if let Pattern::Variable(var) = pat {
+        if let Some(var) = pat.bound_var() {
             if let Some(slot) = slots.slot(var) {
                 if let Some(col) = td.column_arc(field_name) {
                     outer_reads.push((slot, col));
@@ -790,7 +902,7 @@ fn try_execute_ref_chain(
         .iter()
         .map(|var| slots.slot(var).unwrap_or(usize::MAX))
         .collect();
-    let unbound = Value::String("<unbound>".into());
+    let unbound = Value::Null;
 
     // Hot loop: for each outer row, follow the ref chain through the
     // type cache by binary search + column reads. Build the result
@@ -940,6 +1052,7 @@ fn evaluate_clause(
     slots: &SlotMap,
     cache: &QueryCache,
     interner: &AttrInterner,
+    cache_gen: u64,
 ) -> Result<Vec<Tuple>, String> {
     // Check if the entity variable is already bound
     let bind_slot = slots.slot(&clause.bind).unwrap();
@@ -955,7 +1068,7 @@ fn evaluate_clause(
 
     // For current-state queries, eagerly load entire type into cache
     let type_data: Option<Arc<cache::TypeData>> = if use_current {
-        cache.ensure_type_loaded(txn, interner, &clause.entity_type, schema)?
+        cache.ensure_type_loaded(txn, interner, &clause.entity_type, schema, cache_gen)?
     } else {
         None
     };
@@ -1257,8 +1370,11 @@ fn find_indexable_patterns(
                     }
                 }
             }
-            Pattern::Predicate { op, value } => {
-                // Range predicates use AVET index (Ne excluded — not worth it)
+            Pattern::Predicate { op, value }
+            | Pattern::BoundPredicate { op, value, .. } => {
+                // Range predicates use AVET index (Ne excluded — not worth it).
+                // BoundPredicate filters here too; its variable binding is
+                // applied later when the matched rows are materialized.
                 if !matches!(op, PredOp::Ne) {
                     plans.push(AttrPlan::Range(attr, op.clone(), value.clone()));
                 }
@@ -1705,6 +1821,14 @@ enum ResolvedFP {
         op: PredOp,
         value: Value,
     },
+    /// Combined bind + range predicate on a scalar field: binds `slot`
+    /// to the field value and keeps only rows passing the predicate.
+    BoundPredicate {
+        slot: usize,
+        col: Option<cache::Column>,
+        op: PredOp,
+        value: Value,
+    },
     /// Full enum match — variant-qualified columns are data-dependent
     /// (need the tag value to know which column to read), so we keep
     /// the field name and look up dynamically per row.
@@ -1771,6 +1895,15 @@ fn resolve_field_patterns(
                 op: op.clone(),
                 value: value.clone(),
             },
+            Pattern::BoundPredicate { var, op, value } => {
+                let slot = slots.slot(var)?;
+                ResolvedFP::BoundPredicate {
+                    slot,
+                    col: field_col,
+                    op: op.clone(),
+                    value: value.clone(),
+                }
+            }
             Pattern::EnumMatch {
                 variant,
                 field_patterns,
@@ -1857,6 +1990,24 @@ fn match_resolved(
                     _ => return false,
                 }
             }
+            ResolvedFP::BoundPredicate { slot, col, op, value } => {
+                // Filter first, then bind the surviving value.
+                let field_val = match col
+                    .as_ref()
+                    .and_then(|c| c.get(idx))
+                    .and_then(|v| v.as_ref())
+                {
+                    Some(fv) if op.evaluate(fv, value) => fv.clone(),
+                    _ => return false,
+                };
+                if let Some(existing) = tuple.get(*slot) {
+                    if *existing != field_val {
+                        return false;
+                    }
+                } else {
+                    tuple.set(*slot, field_val);
+                }
+            }
             ResolvedFP::EnumMatch {
                 field_name,
                 variant,
@@ -1929,6 +2080,23 @@ fn match_resolved(
                             Some(fv) if op.evaluate(fv, value) => {}
                             _ => return false,
                         },
+                        Pattern::BoundPredicate { var, op, value } => {
+                            let slot = match slots.slot(var) {
+                                Some(s) => s,
+                                None => return false,
+                            };
+                            let val = match vf_val {
+                                Some(fv) if op.evaluate(fv, value) => fv,
+                                _ => return false,
+                            };
+                            if let Some(existing) = tuple.get(slot) {
+                                if existing != val {
+                                    return false;
+                                }
+                            } else {
+                                tuple.set(slot, val.clone());
+                            }
+                        }
                         Pattern::EnumMatch { .. } => return false,
                     }
                 }
@@ -1998,6 +2166,23 @@ fn match_field_patterns(
                 match fields.get(field_name) {
                     Some(field_val) if op.evaluate(field_val, value) => {}
                     _ => return false,
+                }
+            }
+            Pattern::BoundPredicate { var, op, value } => {
+                let slot = match slots.slot(var) {
+                    Some(s) => s,
+                    None => return false,
+                };
+                let field_val = match fields.get(field_name) {
+                    Some(fv) if op.evaluate(fv, value) => fv.clone(),
+                    _ => return false,
+                };
+                if let Some(existing) = tuple.get(slot) {
+                    if *existing != field_val {
+                        return false;
+                    }
+                } else {
+                    tuple.set(slot, field_val);
                 }
             }
             Pattern::EnumMatch {
@@ -2070,6 +2255,23 @@ fn match_field_patterns(
                             match fields.get(&vf_key) {
                                 Some(vf_val) if op.evaluate(vf_val, value) => {}
                                 _ => return false,
+                            }
+                        }
+                        Pattern::BoundPredicate { var, op, value } => {
+                            let slot = match slots.slot(var) {
+                                Some(s) => s,
+                                None => return false,
+                            };
+                            let vf_val = match fields.get(&vf_key) {
+                                Some(fv) if op.evaluate(fv, value) => fv.clone(),
+                                _ => return false,
+                            };
+                            if let Some(existing) = tuple.get(slot) {
+                                if *existing != vf_val {
+                                    return false;
+                                }
+                            } else {
+                                tuple.set(slot, vf_val);
                             }
                         }
                         Pattern::EnumMatch { .. } => {

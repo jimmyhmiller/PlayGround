@@ -28,7 +28,7 @@ use bevy::camera::{ClearColorConfig, Viewport};
 use bevy::prelude::*;
 
 use crate::layers::PaneLayer;
-use crate::{PaneRect, PaneTag};
+use crate::{PaneRect, PaneTag, PaneViewport};
 
 /// Optional rectangular sub-region of the window where pane cameras
 /// are allowed to render. The host sets this each frame so that
@@ -66,14 +66,17 @@ pub fn spawn_pane_cameras(
     new_panes: Query<(Entity, &PaneLayer, &PaneRect), Added<PaneLayer>>,
     windows: Query<&Window>,
     region: Option<Res<PaneCanvasRegion>>,
+    viewport: Option<Res<PaneViewport>>,
     mut commands: Commands,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
     let region = region.as_deref().copied();
+    let viewport = viewport.as_deref().copied().unwrap_or_default();
     for (pane_entity, layer, rect) in &new_panes {
-        let cam_setup = pane_camera_setup(rect, window, region);
+        let projected = viewport.projected_rect(rect);
+        let cam_setup = pane_camera_setup(&projected, window, region);
         let order = pane_camera_order(rect);
         commands.spawn((
             Camera2d,
@@ -106,18 +109,21 @@ pub fn sync_pane_cameras(
     mut cameras: Query<(&PaneCameraOf, &mut Camera, &mut Transform)>,
     windows: Query<&Window>,
     region: Option<Res<PaneCanvasRegion>>,
+    viewport: Option<Res<PaneViewport>>,
 ) {
     let Ok(window) = windows.single() else {
         return;
     };
     let region = region.as_deref().copied();
+    let viewport = viewport.as_deref().copied().unwrap_or_default();
     for (owner, mut cam, mut xform) in &mut cameras {
         let Ok(rect) = panes.get(owner.0) else {
             // Pane is gone but the camera still exists for one frame —
             // close handler will reap it. Skip.
             continue;
         };
-        let setup = pane_camera_setup(rect, window, region);
+        let projected = viewport.projected_rect(rect);
+        let setup = pane_camera_setup(&projected, window, region);
         let new_order = pane_camera_order(rect);
 
         let needs_viewport_update = match &cam.viewport {

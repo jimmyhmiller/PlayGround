@@ -3,7 +3,7 @@ use std::fmt;
 
 use crate::datom::{TxId, Value};
 use crate::intern::AttrInterner;
-use crate::query::{Pattern, PredOp, WhereClause, Query};
+use crate::query::{Clause, Pattern, PredOp, Query, WhereClause};
 use crate::schema::SchemaRegistry;
 use crate::storage::ReadOps;
 
@@ -65,6 +65,18 @@ pub enum PlanNode {
         input: Box<PlanNode>,
         variables: Vec<String>,
     },
+    /// Disjunction: the deduplicated union of its branches' bindings.
+    Union {
+        branches: Vec<PlanNode>,
+        estimate: CostEstimate,
+    },
+    /// Negation as failure: pass through each `input` row for which `anti`
+    /// (re-opened with that row's bindings) produces no solution.
+    Negation {
+        input: Box<PlanNode>,
+        anti: Box<PlanNode>,
+        estimate: CostEstimate,
+    },
 }
 
 impl PlanNode {
@@ -73,6 +85,8 @@ impl PlanNode {
             PlanNode::Scan(s) => &s.estimate,
             PlanNode::Join { estimate, .. } => estimate,
             PlanNode::Project { input, .. } => input.estimate(),
+            PlanNode::Union { estimate, .. } => estimate,
+            PlanNode::Negation { estimate, .. } => estimate,
         }
     }
 }
@@ -95,11 +109,11 @@ impl SlotMap {
             Self::ensure_slot(var, &mut name_to_slot, &mut next_slot);
         }
 
-        // where clause variables
-        for clause in &query.where_clauses {
+        // where clause variables (across the whole And/Or/Not tree)
+        query.where_clause.for_each_pattern(&mut |clause| {
             Self::ensure_slot(&clause.bind, &mut name_to_slot, &mut next_slot);
             Self::collect_pattern_vars(&clause.field_patterns, &mut name_to_slot, &mut next_slot);
-        }
+        });
 
         SlotMap {
             name_to_slot,
@@ -133,6 +147,12 @@ impl SlotMap {
             Pattern::Variable(v) => {
                 if !map.contains_key(v) {
                     map.insert(v.clone(), *next);
+                    *next += 1;
+                }
+            }
+            Pattern::BoundPredicate { var, .. } => {
+                if !map.contains_key(var) {
+                    map.insert(var.clone(), *next);
                     *next += 1;
                 }
             }
@@ -254,6 +274,39 @@ fn fmt_node(node: &PlanNode, f: &mut fmt::Formatter<'_>, prefix: &str, is_last: 
 
             fmt_node(input, f, &child_prefix, true)?;
         }
+        PlanNode::Union { branches, estimate } => {
+            writeln!(
+                f,
+                "{}{}Union ({} branches, est. {} rows)",
+                prefix, connector, branches.len(), estimate.estimated_rows
+            )?;
+            let child_prefix = if prefix.is_empty() {
+                "".to_string()
+            } else if is_last {
+                format!("{}    ", prefix)
+            } else {
+                format!("{}│   ", prefix)
+            };
+            for (i, b) in branches.iter().enumerate() {
+                fmt_node(b, f, &child_prefix, i == branches.len() - 1)?;
+            }
+        }
+        PlanNode::Negation { input, anti, estimate } => {
+            writeln!(
+                f,
+                "{}{}Negation (est. {} rows)",
+                prefix, connector, estimate.estimated_rows
+            )?;
+            let child_prefix = if prefix.is_empty() {
+                "".to_string()
+            } else if is_last {
+                format!("{}    ", prefix)
+            } else {
+                format!("{}│   ", prefix)
+            };
+            fmt_node(input, f, &child_prefix, false)?;
+            fmt_node(anti, f, &child_prefix, true)?;
+        }
     }
     Ok(())
 }
@@ -326,6 +379,21 @@ fn node_to_json(node: &PlanNode) -> serde_json::Value {
                 "input": node_to_json(input),
             })
         }
+        PlanNode::Union { branches, estimate } => {
+            serde_json::json!({
+                "node": "Union",
+                "estimated_rows": estimate.estimated_rows,
+                "branches": branches.iter().map(node_to_json).collect::<Vec<_>>(),
+            })
+        }
+        PlanNode::Negation { input, anti, estimate } => {
+            serde_json::json!({
+                "node": "Negation",
+                "estimated_rows": estimate.estimated_rows,
+                "input": node_to_json(input),
+                "anti": node_to_json(anti),
+            })
+        }
     }
 }
 
@@ -340,27 +408,25 @@ pub fn plan_query(
     schema: &SchemaRegistry,
     interner: &AttrInterner,
 ) -> Result<QueryPlan, String> {
-    if query.where_clauses.is_empty() {
+    if query.where_clause.is_empty() {
         return Err("query must have at least one where clause".into());
     }
 
+    // Collapse double negation (`not { not { c } }` ⇒ `c`) so the inner
+    // negation isn't rejected as a non-producing clause.
+    let where_clause = query.where_clause.clone().simplified();
+
     let mut type_counts: HashMap<String, usize> = HashMap::new();
+    let root = compile_clause(
+        &where_clause,
+        txn,
+        schema,
+        interner,
+        query.as_of,
+        &mut type_counts,
+    )?;
 
-    // Step 1: Estimate cardinality for each clause
-    let mut clause_estimates: Vec<(WhereClause, ScanStrategy, CostEstimate)> = Vec::new();
-    for clause in &query.where_clauses {
-        let (strategy, estimate) =
-            estimate_clause(txn, interner, clause, schema, query.as_of, &mut type_counts);
-        clause_estimates.push((clause.clone(), strategy, estimate));
-    }
-
-    // Step 2: Reorder by selectivity (smallest estimate first)
-    clause_estimates.sort_by_key(|(_, _, est)| est.estimated_rows);
-
-    // Step 3: Build left-deep join tree
-    let root = build_join_tree(&clause_estimates, schema);
-
-    // Step 4: Wrap in Project
+    // Wrap in Project
     let root = PlanNode::Project {
         input: Box::new(root),
         variables: query.find.clone(),
@@ -373,6 +439,181 @@ pub fn plan_query(
         as_of: query.as_of,
         slot_map,
     })
+}
+
+/// Compile a where clause tree into a plan node. Flat conjunctions of
+/// patterns use the cost-based join planner; trees containing `Or`/`Not`
+/// use a general nested-loop compiler.
+fn compile_clause(
+    clause: &Clause,
+    txn: &dyn ReadOps,
+    schema: &SchemaRegistry,
+    interner: &AttrInterner,
+    as_of: Option<TxId>,
+    type_counts: &mut HashMap<String, usize>,
+) -> Result<PlanNode, String> {
+    match clause {
+        Clause::Pattern(wc) => {
+            let (strategy, estimate) =
+                estimate_clause(txn, interner, wc, schema, as_of, type_counts);
+            Ok(PlanNode::Scan(ClauseScan {
+                clause: wc.clone(),
+                strategy,
+                estimate,
+            }))
+        }
+        Clause::Or(children) => {
+            let mut branches = Vec::with_capacity(children.len());
+            let mut est = 0usize;
+            for c in children {
+                let node = compile_clause(c, txn, schema, interner, as_of, type_counts)?;
+                est += node.estimate().estimated_rows;
+                branches.push(node);
+            }
+            Ok(PlanNode::Union {
+                branches,
+                estimate: CostEstimate { estimated_rows: est.max(1) },
+            })
+        }
+        Clause::Not(_) => {
+            Err("negation (not) must appear inside a conjunction with a positive clause".into())
+        }
+        Clause::And(children) => {
+            compile_and(children, txn, schema, interner, as_of, type_counts)
+        }
+    }
+}
+
+/// Compile a conjunction. A flat And of pattern leaves keeps the existing
+/// cost-based planner. Otherwise positives are nested-loop joined and each
+/// `not` child becomes a `Negation` wrapper.
+fn compile_and(
+    children: &[Clause],
+    txn: &dyn ReadOps,
+    schema: &SchemaRegistry,
+    interner: &AttrInterner,
+    as_of: Option<TxId>,
+    type_counts: &mut HashMap<String, usize>,
+) -> Result<PlanNode, String> {
+    // Fast path: every child is a pattern leaf → cost-based join tree.
+    if children.iter().all(|c| matches!(c, Clause::Pattern(_))) {
+        let mut clause_estimates: Vec<(WhereClause, ScanStrategy, CostEstimate)> =
+            Vec::with_capacity(children.len());
+        for c in children {
+            if let Clause::Pattern(wc) = c {
+                let (strategy, estimate) =
+                    estimate_clause(txn, interner, wc, schema, as_of, type_counts);
+                clause_estimates.push((wc.clone(), strategy, estimate));
+            }
+        }
+        clause_estimates.sort_by_key(|(_, _, est)| est.estimated_rows);
+        return Ok(build_join_tree(&clause_estimates, schema));
+    }
+
+    // General path: split positives from negations.
+    let mut positives: Vec<&Clause> = Vec::new();
+    let mut negatives: Vec<&Clause> = Vec::new();
+    for c in children {
+        match c {
+            Clause::Not(inner) => negatives.push(inner),
+            other => positives.push(other),
+        }
+    }
+    if positives.is_empty() {
+        return Err("a conjunction of only negations is not allowed; add a positive clause".into());
+    }
+
+    // Compile positives, then order by estimate ascending and fold into a
+    // left-deep nested-loop chain. NestedLoop joins via seeding (the right
+    // subtree filters by the left row's bindings), so it composes with any
+    // node type.
+    let mut compiled: Vec<PlanNode> = Vec::with_capacity(positives.len());
+    for c in positives {
+        compiled.push(compile_clause(c, txn, schema, interner, as_of, type_counts)?);
+    }
+    compiled.sort_by_key(|n| n.estimate().estimated_rows);
+
+    let mut tree = compiled.remove(0);
+    for node in compiled {
+        let join_vars: Vec<String> = node_bound_vars(&tree)
+            .intersection(&node_bound_vars(&node))
+            .cloned()
+            .collect();
+        let left_est = tree.estimate().estimated_rows;
+        let right_est = node.estimate().estimated_rows;
+        let join_est = if join_vars.is_empty() {
+            left_est.saturating_mul(right_est)
+        } else {
+            left_est.min(right_est)
+        };
+        tree = PlanNode::Join {
+            left: Box::new(tree),
+            right: Box::new(node),
+            join_vars,
+            strategy: JoinStrategy::NestedLoop,
+            estimate: CostEstimate { estimated_rows: join_est.max(1) },
+        };
+    }
+
+    // Wrap with each negation. Compile the anti-subquery as its own clause.
+    for inner in negatives {
+        let anti = compile_clause(inner, txn, schema, interner, as_of, type_counts)?;
+        let est = tree.estimate().estimated_rows;
+        tree = PlanNode::Negation {
+            input: Box::new(tree),
+            anti: Box::new(anti),
+            estimate: CostEstimate { estimated_rows: est },
+        };
+    }
+
+    Ok(tree)
+}
+
+/// The set of variables a plan subtree binds. For a `Union`, only variables
+/// bound by every branch are guaranteed (intersection). `Negation` binds
+/// exactly what its positive input binds (the anti-side adds nothing).
+fn node_bound_vars(node: &PlanNode) -> std::collections::HashSet<String> {
+    use std::collections::HashSet;
+    match node {
+        PlanNode::Scan(s) => {
+            let mut set = HashSet::new();
+            set.insert(s.clause.bind.clone());
+            for (_, pat) in &s.clause.field_patterns {
+                collect_pattern_bound_vars(pat, &mut set);
+            }
+            set
+        }
+        PlanNode::Join { left, right, .. } => {
+            let mut set = node_bound_vars(left);
+            set.extend(node_bound_vars(right));
+            set
+        }
+        PlanNode::Project { input, .. } => node_bound_vars(input),
+        PlanNode::Negation { input, .. } => node_bound_vars(input),
+        PlanNode::Union { branches, .. } => {
+            let mut iter = branches.iter().map(node_bound_vars);
+            let first = iter.next().unwrap_or_default();
+            iter.fold(first, |acc, s| acc.intersection(&s).cloned().collect())
+        }
+    }
+}
+
+fn collect_pattern_bound_vars(pat: &Pattern, set: &mut std::collections::HashSet<String>) {
+    match pat {
+        Pattern::Variable(v) => {
+            set.insert(v.clone());
+        }
+        Pattern::BoundPredicate { var, .. } => {
+            set.insert(var.clone());
+        }
+        Pattern::EnumMatch { variant, field_patterns } => {
+            collect_pattern_bound_vars(variant, set);
+            for (_, p) in field_patterns {
+                collect_pattern_bound_vars(p, set);
+            }
+        }
+        Pattern::Constant(_) | Pattern::Predicate { .. } => {}
+    }
 }
 
 /// Estimate cardinality of a clause.
@@ -411,7 +652,9 @@ fn estimate_clause(
                     }
                 }
             }
-            Pattern::Predicate { op, value } if !matches!(op, PredOp::Ne) => {
+            Pattern::Predicate { op, value } | Pattern::BoundPredicate { op, value, .. }
+                if !matches!(op, PredOp::Ne) =>
+            {
                 if range_info.is_none() {
                     let attr = type_def
                         .map(|td| td.attribute_name(field_name))
@@ -518,35 +761,35 @@ pub fn find_join_vars(left: &WhereClause, right: &WhereClause) -> Vec<String> {
 
     // left.bind appears in right's field patterns
     for (_, pattern) in &right.field_patterns {
-        if let Pattern::Variable(v) = pattern {
-            if v == &left.bind && !vars.contains(v) {
-                vars.push(v.clone());
+        if let Some(v) = pattern.bound_var() {
+            if v == left.bind && !vars.iter().any(|x| x == v) {
+                vars.push(v.to_string());
             }
         }
     }
 
     // right.bind appears in left's field patterns
     for (_, pattern) in &left.field_patterns {
-        if let Pattern::Variable(v) = pattern {
-            if v == &right.bind && !vars.contains(v) {
-                vars.push(v.clone());
+        if let Some(v) = pattern.bound_var() {
+            if v == right.bind && !vars.iter().any(|x| x == v) {
+                vars.push(v.to_string());
             }
         }
     }
 
     // Variables appearing in field patterns of both
-    let left_vars: Vec<&String> = left.field_patterns.iter().filter_map(|(_, p)| {
-        if let Pattern::Variable(v) = p { Some(v) } else { None }
-    }).collect();
+    let left_vars: Vec<&str> = left.field_patterns.iter()
+        .filter_map(|(_, p)| p.bound_var())
+        .collect();
 
-    let right_vars: Vec<&String> = right.field_patterns.iter().filter_map(|(_, p)| {
-        if let Pattern::Variable(v) = p { Some(v) } else { None }
-    }).collect();
+    let right_vars: Vec<&str> = right.field_patterns.iter()
+        .filter_map(|(_, p)| p.bound_var())
+        .collect();
 
     for lv in &left_vars {
         for rv in &right_vars {
-            if lv == rv && !vars.contains(lv) {
-                vars.push((*lv).clone());
+            if lv == rv && !vars.iter().any(|x| x == lv) {
+                vars.push((*lv).to_string());
             }
         }
     }
@@ -564,6 +807,11 @@ fn collect_clauses(node: &PlanNode) -> Vec<&WhereClause> {
             v
         }
         PlanNode::Project { input, .. } => collect_clauses(input),
+        // The positive input contributes joinable clauses; the anti side does not.
+        PlanNode::Negation { input, .. } => collect_clauses(input),
+        PlanNode::Union { branches, .. } => {
+            branches.iter().flat_map(|b| collect_clauses(b)).collect()
+        }
     }
 }
 
@@ -603,7 +851,7 @@ fn choose_join_strategy(
             // the entire right side. Better when left < right.
             if let Some(type_def) = schema.get(&right_clause.entity_type) {
                 for (field_name, pattern) in &right_clause.field_patterns {
-                    if let Pattern::Variable(v) = pattern {
+                    if let Some(v) = pattern.bound_var() {
                         if v == jv {
                             if let Some(fd) = type_def.get_field(field_name) {
                                 if fd.unique || fd.indexed {

@@ -5,7 +5,7 @@ use crate::{
 };
 use dynexec::{
     AArch64CAbi, AArch64InternalCc, CallbackSafepoints, CodegenConfig,
-    FrameLayout, FrameStrategy, PreciseStackRoots, ShadowStackFrames,
+    FrameLayout, FrameStrategy, NanBoxConfig, PreciseStackRoots, ShadowStackFrames,
     ShadowStackRoots, StackFrameLayout, StackMapFrames, StackMapRoots, StackMapSafepoints,
     StackSlotFrames, X64SysVCAbi,
 };
@@ -2507,6 +2507,70 @@ fn jit_entry_fp_fence_stops_walker_at_rust_boundary() {
 }
 
 #[test]
+fn parked_walker_traverses_interleaved_host_frames() {
+    // Regression: `walk_parked_thread_jit_roots` (used by minor GC and
+    // alloc-path major GC) must scan EVERY JIT frame in the chain, even
+    // when JIT frames are separated by an intervening runtime (non-JIT)
+    // frame — e.g. clojure.core `str`'s variadic path recurses
+    // `JIT → runtime helper → JIT → …`. An earlier version stopped at the
+    // first such non-JIT frame ("Phase B break"), scanning only the
+    // deepest JIT frame and silently dropping every outer recursion
+    // frame's roots, so an alloc-path collection left those spill slots
+    // un-forwarded → dangling pointer → crash.
+    use crate::{
+        register_jit_code, unregister_jit_code, walk_parked_thread_jit_roots, SafepointRecord,
+    };
+
+    // A fake JIT code range. The walker only does address arithmetic on
+    // it (no execution), so any non-overlapping window works. Use a high
+    // base to avoid colliding with real registrations from other tests.
+    const CODE_START: usize = 0x7000_0000_0000;
+    const CODE_END: usize = CODE_START + 0x1000;
+    const RET_OFFSET: usize = 0x10; // safepoint return offset within the fn
+    let jit_lr = CODE_START + RET_OFFSET;
+    let host_lr = 0x1usize; // deliberately outside any registered range
+
+    let safepoints: std::sync::Arc<[SafepointRecord]> = std::sync::Arc::from(vec![SafepointRecord {
+        code_offset: RET_OFFSET,
+        return_offset: RET_OFFSET,
+        root_slots: vec![16], // one root at +16 in the caller frame
+    }]);
+    register_jit_code(CODE_START, CODE_END, safepoints);
+
+    // Synthetic FP chain (each frame = [saved_fp, saved_lr, root_slot]):
+    //   start → f_inner(JIT) → f_host(non-JIT) → f_outer(JIT) → f_end(null)
+    // The walker scans `saved_fp + 16` for each JIT frame it finds.
+    let mut f_end: [u64; 3] = [0, 0, 0];
+    let f_end_ptr = f_end.as_mut_ptr() as u64;
+    let mut f_outer: [u64; 3] = [f_end_ptr, jit_lr as u64, 0];
+    let f_outer_ptr = f_outer.as_mut_ptr() as u64;
+    let mut f_host: [u64; 3] = [f_outer_ptr, host_lr as u64, 0];
+    let f_host_ptr = f_host.as_mut_ptr() as u64;
+    let mut f_inner: [u64; 3] = [f_host_ptr, jit_lr as u64, 0];
+    let start_fp = f_inner.as_mut_ptr() as *const u8;
+
+    let visited = std::cell::Cell::new(0usize);
+    // No fence pushed: the chain terminates on the null saved_fp in f_end.
+    walk_parked_thread_jit_roots(start_fp, &mut |_slot| {
+        visited.set(visited.get() + 1);
+    });
+
+    unregister_jit_code(CODE_START);
+
+    // Both JIT frames (inner AND outer) must be scanned: 2 roots total.
+    // The pre-fix walker stopped at f_host and reported only 1.
+    assert_eq!(
+        visited.get(),
+        2,
+        "parked walker did not traverse through the intervening non-JIT \
+         frame to reach the outer JIT frame"
+    );
+
+    // touch the frame arrays so they stay live for the whole walk
+    std::hint::black_box((&f_inner, &f_host, &f_outer, &f_end));
+}
+
+#[test]
 fn jit_module_bench_fifty_nested() {
     let n = 50;
     let mut wat = String::from("(module\n");
@@ -3227,4 +3291,319 @@ fn nested_handlers_innermost_catches_first_jit() {
 
     let func = b.build();
     assert_eq!(run_jit(&func, &[]), 15);
+}
+
+#[test]
+fn nine_arg_call_last_arg() {
+    // The real bug shape: a call with N args where N exceeds the
+    // allocatable register count. Callee returns its LAST arg. main
+    // computes N distinct values (via id calls so they're live across the
+    // big call's arg setup), then calls the N-ary callee. Expect last arg.
+    for n in [7usize, 8, 9, 10, 11] {
+        let mut mb = ModuleBuilder::new();
+        let f_main = mb.declare_func("main", &[], Some(Type::I64));
+        let f_id = mb.declare_func("id", &[Type::I64], Some(Type::I64));
+        let params = vec![Type::I64; n];
+        let f_nary = mb.declare_func("nary", &params, Some(Type::I64));
+
+        let mut mfb = mb.define_func(f_main);
+        let _e = mfb.entry_block();
+        let mut vs = Vec::new();
+        for i in 0..n {
+            let c = mfb.iconst(Type::I64, (i as i64 + 1) * 100);
+            vs.push(mfb.call(f_id, &[c]).unwrap());
+        }
+        let r = mfb.call(f_nary, &vs).unwrap();
+        mfb.ret(r);
+        mb.finish_func(f_main, mfb);
+
+        let mut idfb = mb.define_func(f_id);
+        let _ = idfb.entry_block();
+        let p = idfb.block_param(idfb.entry_block(), 0);
+        idfb.ret(p);
+        mb.finish_func(f_id, idfb);
+
+        // nary returns its LAST param.
+        let mut nfb = mb.define_func(f_nary);
+        let eb = nfb.entry_block();
+        let last = nfb.block_param(eb, n - 1);
+        nfb.ret(last);
+        mb.finish_func(f_nary, nfb);
+
+        let module = mb.build();
+        let jit = JitModule::compile_with_regalloc::<
+            NanBoxConfig,
+            Arm64Backend,
+            crate::regalloc::LinearScanAllocator,
+        >(&module, &[], None);
+        let want = (n as u64) * 100;
+        let got = match jit.call_outcome(f_main, &[]) {
+            JitOutcome::Value(v) => v,
+            other => panic!("n={n}: {other:?}"),
+        };
+        eprintln!("n={n}: last-arg got={got} want={want} {}", if got == want { "ok" } else { "CORRUPT" });
+        assert_eq!(got, want, "n={n}");
+    }
+}
+
+#[test]
+fn eight_call_results_folded_across_calls() {
+    // Reproducer for the regalloc spill bug: N call-results held live
+    // across a fold of further calls. With 7 allocatable GP regs, N=8
+    // forces spilling; the spilled value must round-trip correctly.
+    // id(x) = x ; addfn(a,b) = a+b. main: vi = id(i) for i in 0..N,
+    // then acc = id(v0); acc = addfn(acc, vi)... ; ret acc.
+    // Expected = 0+1+...+(N-1).
+    for n in [7usize, 8, 9, 10] {
+        let mut mb = ModuleBuilder::new();
+        let f_main = mb.declare_func("main", &[], Some(Type::I64));
+        let f_id = mb.declare_func("id", &[Type::I64], Some(Type::I64));
+        let f_add = mb.declare_func("addfn", &[Type::I64, Type::I64], Some(Type::I64));
+
+        let mut mfb = mb.define_func(f_main);
+        let _e = mfb.entry_block();
+        // Compute v0..v_{n-1} via id calls.
+        let mut vs = Vec::new();
+        for i in 0..n {
+            let c = mfb.iconst(Type::I64, i as i64);
+            vs.push(mfb.call(f_id, &[c]).unwrap());
+        }
+        // Fold RIGHT-TO-LEFT (consume last-defined value first), mirroring
+        // the cons-fold in variadic packing. Start from a fresh const acc.
+        let mut acc = mfb.iconst(Type::I64, 0);
+        for i in (0..n).rev() {
+            acc = mfb.call(f_add, &[vs[i], acc]).unwrap();
+        }
+        // Trailing call consuming the folded acc (mirrors the `list` call).
+        let r = mfb.call(f_id, &[acc]).unwrap();
+        mfb.ret(r);
+        mb.finish_func(f_main, mfb);
+
+        let mut idfb = mb.define_func(f_id);
+        let _ = idfb.entry_block();
+        let p = idfb.block_param(idfb.entry_block(), 0);
+        idfb.ret(p);
+        mb.finish_func(f_id, idfb);
+
+        let mut afb = mb.define_func(f_add);
+        let _ = afb.entry_block();
+        let a = afb.block_param(afb.entry_block(), 0);
+        let b = afb.block_param(afb.entry_block(), 1);
+        let s = afb.add(a, b);
+        afb.ret(s);
+        mb.finish_func(f_add, afb);
+
+        let module = mb.build();
+        // Use the EXACT config clojure-jvm uses: NanBoxConfig (internal CC,
+        // 7 allocatable GP regs, StackMap roots) + LinearScan.
+        let jit = JitModule::compile_with_regalloc::<
+            NanBoxConfig,
+            Arm64Backend,
+            crate::regalloc::LinearScanAllocator,
+        >(&module, &[], None);
+        let want = (0..n as u64).sum::<u64>();
+        let got = match jit.call_outcome(f_main, &[]) {
+            JitOutcome::Value(v) => v,
+            other => panic!("n={n}: unexpected {other:?}"),
+        };
+        eprintln!("n={n}: got={got} want={want} {}", if got == want { "ok" } else { "CORRUPT" });
+        assert_eq!(got, want, "n={n}");
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn test_ret_9th(
+    _a: u64, _b: u64, _c: u64, _d: u64, _e: u64, _f: u64, _g: u64, _h: u64, i: u64,
+) -> u64 {
+    i
+}
+
+#[test]
+fn jit_calls_extern_c_with_nine_args() {
+    use dynir::types::Signature;
+    // The JIT (internal CC) calls an `extern "C"` fn with 9 args. The C ABI
+    // passes args 0-7 in X0-X7 and arg 8 on the stack; the internal CC would
+    // put arg 8 in X8. If the JIT doesn't switch to the C ABI for extern
+    // calls, the callee reads its 9th arg from the stack → garbage.
+    let mut mb = ModuleBuilder::new();
+    let sig9 = Signature { params: vec![Type::I64; 9], ret: Some(Type::I64) };
+    let f_ext = mb.declare_extern("test_ret_9th", sig9);
+    let f_main = mb.declare_func("main", &[], Some(Type::I64));
+
+    let mut mfb = mb.define_func(f_main);
+    let _e = mfb.entry_block();
+    let mut vs = Vec::new();
+    for i in 0..9 {
+        vs.push(mfb.iconst(Type::I64, (i as i64 + 1) * 11));
+    }
+    let r = mfb.call(f_ext, &vs).unwrap();
+    mfb.ret(r);
+    mb.finish_func(f_main, mfb);
+
+    let module = mb.build();
+    let externs: &[*const u8] = &[test_ret_9th as *const u8];
+    let jit = JitModule::compile_with_regalloc::<
+        NanBoxConfig,
+        Arm64Backend,
+        crate::regalloc::LinearScanAllocator,
+    >(&module, externs, None);
+    let got = match jit.call_outcome(f_main, &[]) {
+        JitOutcome::Value(v) => v,
+        other => panic!("{other:?}"),
+    };
+    eprintln!("9th arg: got={got} want=99 {}", if got == 99 { "ok" } else { "CORRUPT" });
+    assert_eq!(got, 99, "9th extern arg corrupted");
+}
+
+#[test]
+fn cross_block_live_values_under_pressure() {
+    // Reproducer for the LinearScan cross-block-liveness bug: values
+    // defined in the entry block are used after a branch merge, staying
+    // live across a branch arm that itself has calls + register pressure.
+    // Mirrors the `ns`/`mmin` macro IR shape.
+    for n in [6usize, 8, 10, 12] {
+        let mut mb = ModuleBuilder::new();
+        let f_main = mb.declare_func("main", &[], Some(Type::I64));
+        let f_id = mb.declare_func("id", &[Type::I64], Some(Type::I64));
+        let f_add = mb.declare_func("addfn", &[Type::I64, Type::I64], Some(Type::I64));
+
+        let mut mfb = mb.define_func(f_main);
+        let entry = mfb.entry_block();
+        // Cross-block values defined in entry.
+        let mut vs = Vec::new();
+        for i in 0..n {
+            let c = mfb.iconst(Type::I64, (i as i64 + 1) * 100);
+            vs.push(mfb.call(f_id, &[c]).unwrap());
+        }
+        let then_b = mfb.create_block(&[]);
+        let else_b = mfb.create_block(&[]);
+        let merge = mfb.create_block(&[Type::I64]);
+        let cond = mfb.iconst(Type::I8, 1);
+        mfb.br_if(cond, then_b, &[], else_b, &[]);
+
+        // then: extra calls (pressure) while vs are live across them.
+        mfb.switch_to_block(then_b);
+        let mut t = mfb.iconst(Type::I64, 0);
+        for _ in 0..3 {
+            t = mfb.call(f_id, &[t]).unwrap();
+        }
+        mfb.jump(merge, &[t]);
+
+        mfb.switch_to_block(else_b);
+        let z = mfb.iconst(Type::I64, 0);
+        mfb.jump(merge, &[z]);
+
+        // merge: sum all cross-block vs + the merge param.
+        mfb.switch_to_block(merge);
+        let p = mfb.block_param(merge, 0);
+        let mut acc = p;
+        for v in &vs {
+            acc = mfb.call(f_add, &[acc, *v]).unwrap();
+        }
+        mfb.ret(acc);
+        mb.finish_func(f_main, mfb);
+
+        let mut idfb = mb.define_func(f_id);
+        let e = idfb.entry_block();
+        let pp = idfb.block_param(e, 0);
+        idfb.ret(pp);
+        mb.finish_func(f_id, idfb);
+
+        let mut afb = mb.define_func(f_add);
+        let ae = afb.entry_block();
+        let aa = afb.block_param(ae, 0);
+        let ab = afb.block_param(ae, 1);
+        let asum = afb.add(aa, ab);
+        afb.ret(asum);
+        mb.finish_func(f_add, afb);
+
+        let module = mb.build();
+        let jit = JitModule::compile_with_regalloc::<
+            NanBoxConfig,
+            Arm64Backend,
+            crate::regalloc::LinearScanAllocator,
+        >(&module, &[], None);
+        // then-arm taken (cond=1): t = id(id(id(0))) = 0. acc = 0 + sum(vs).
+        let want: u64 = (0..n as u64).map(|i| (i + 1) * 100).sum();
+        let got = match jit.call_outcome(f_main, &[]) {
+            JitOutcome::Value(v) => v,
+            other => panic!("n={n}: {other:?}"),
+        };
+        eprintln!("n={n}: got={got} want={want} {}", if got == want { "ok" } else { "CORRUPT" });
+        assert_eq!(got, want, "n={n}");
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn test_id1(x: u64) -> u64 { x }
+#[unsafe(no_mangle)]
+pub extern "C" fn test_add2(a: u64, b: u64) -> u64 { a.wrapping_add(b) }
+
+#[test]
+fn cross_block_live_values_extern_calls() {
+    use dynir::types::Signature;
+    // Like cross_block_live_values_under_pressure but the producing and
+    // consuming calls are `extern "C"` (mirrors clojure's dynamic-invoke
+    // externs). Cross-block values held across an extern-call-heavy arm.
+    for n in [6usize, 8, 10, 12] {
+        let mut mb = ModuleBuilder::new();
+        let f_main = mb.declare_func("main", &[], Some(Type::I64));
+        let f_id = mb.declare_extern("test_id1", Signature { params: vec![Type::I64], ret: Some(Type::I64) });
+        let f_add = mb.declare_extern("test_add2", Signature { params: vec![Type::I64, Type::I64], ret: Some(Type::I64) });
+
+        let mut mfb = mb.define_func(f_main);
+        let _entry = mfb.entry_block();
+        let mut vs = Vec::new();
+        for i in 0..n {
+            let c = mfb.iconst(Type::I64, (i as i64 + 1) * 100);
+            vs.push(mfb.call(f_id, &[c]).unwrap());
+        }
+        let then_b = mfb.create_block(&[]);
+        let else_b = mfb.create_block(&[]);
+        let merge = mfb.create_block(&[Type::I64]);
+        // Mirror `when`'s cond: icmp on i64 values + or/xor producing an i8,
+        // mixed in with the live i64 cross-block values.
+        let k1 = mfb.iconst(Type::I64, 1);
+        let e1 = mfb.icmp(dynir::ir::CmpOp::Eq, vs[0], k1);
+        let e2 = mfb.icmp(dynir::ir::CmpOp::Eq, vs[1], k1);
+        let orr = mfb.or(e1, e2);
+        let one = mfb.iconst(Type::I8, 1);
+        let cond = mfb.xor(orr, one);
+        mfb.br_if(cond, then_b, &[], else_b, &[]);
+
+        mfb.switch_to_block(then_b);
+        let mut t = mfb.iconst(Type::I64, 0);
+        for _ in 0..3 {
+            t = mfb.call(f_id, &[t]).unwrap();
+        }
+        mfb.jump(merge, &[t]);
+
+        mfb.switch_to_block(else_b);
+        let z = mfb.iconst(Type::I64, 0);
+        mfb.jump(merge, &[z]);
+
+        mfb.switch_to_block(merge);
+        let p = mfb.block_param(merge, 0);
+        let mut acc = p;
+        for v in &vs {
+            acc = mfb.call(f_add, &[acc, *v]).unwrap();
+        }
+        mfb.ret(acc);
+        mb.finish_func(f_main, mfb);
+
+        let module = mb.build();
+        let externs: &[*const u8] = &[test_id1 as *const u8, test_add2 as *const u8];
+        let jit = JitModule::compile_with_regalloc::<
+            NanBoxConfig,
+            Arm64Backend,
+            crate::regalloc::LinearScanAllocator,
+        >(&module, externs, None);
+        let want: u64 = (0..n as u64).map(|i| (i + 1) * 100).sum();
+        let got = match jit.call_outcome(f_main, &[]) {
+            JitOutcome::Value(v) => v,
+            other => panic!("n={n}: {other:?}"),
+        };
+        eprintln!("n={n}: got={got} want={want} {}", if got == want { "ok" } else { "CORRUPT" });
+        assert_eq!(got, want, "n={n}");
+    }
 }

@@ -67,6 +67,7 @@ impl Plugin for CompoundPlugin {
             .init_resource::<CachedCanvasAst>()
             .init_resource::<CompoundOverrides>()
             .init_resource::<DoubleClickTracker>()
+            .init_resource::<CanvasPositions>()
             .init_resource::<crate::canvas::CurrentCanvasVisual>()
             .add_message::<RebuildCompound>()
             .add_systems(Update, (
@@ -204,6 +205,18 @@ pub fn compute_membership(sim: &Sim) -> CompoundMembership {
     }
     CompoundMembership { parent }
 }
+
+/// Last-known canvas position of every node, keyed by `NodeId`.
+///
+/// `sync_canvas_population` despawns out-of-scope node entities when the
+/// user drills into a compound, and respawns them on drill-out. The
+/// position otherwise lives only on the (now-gone) Bevy `Transform`, so
+/// without this the respawn falls back to a default grid and the layout
+/// scrambles. We snapshot each node's live position right before
+/// despawning it and restore it on respawn — which also preserves any
+/// dragging the user did, since the captured `Transform` reflects it.
+#[derive(Resource, Default, Debug, Clone)]
+pub struct CanvasPositions(pub BTreeMap<NodeId, Vec2>);
 
 /// Where the user's view is currently anchored. `None` = top-level
 /// canvas (compounds appear as a single body, their innards hidden).
@@ -397,7 +410,7 @@ pub struct GridCellPaintRef {
 /// at the top level" — they're not Hidden, they're not present.
 /// Selection, drag, packet rendering, edge drawing all naturally
 /// stop being concerns because there's no entity for them to find.
-fn sync_canvas_population(world: &mut World) {
+pub fn sync_canvas_population(world: &mut World) {
     let scope_changed = world.is_resource_changed::<CurrentScope>();
     let membership_changed = world.is_resource_changed::<CompoundMembership>();
     if !scope_changed && !membership_changed { return; }
@@ -413,7 +426,15 @@ fn sync_canvas_population(world: &mut World) {
         let mut driver = world.resource_mut::<crate::sim_driver::SimDriverRes>();
         driver.0.with_sim_mut(|sim| {
             let nodes: Vec<_> = sim.nodes.iter().map(|(id, n)| {
-                let class = sim.class_name(*id).map(|s| s.to_owned());
+                // `class_name()` follows the leaf TemplateId — None for
+                // compound shims. Fall back to `compound_class_of` so
+                // downstream visual selection can recognize a shim as
+                // a built-in gadget composite (e.g. "GeneratorComposite")
+                // and pick the gadget body shape on respawn.
+                let class = sim
+                    .class_name(*id)
+                    .map(|s| s.to_owned())
+                    .or_else(|| sim.compound_class_of.get(id).cloned());
                 let color = match n.slots.get("color") {
                     Some(flow::Value::Int(i)) => Some(*i as usize),
                     _ => None,
@@ -477,6 +498,19 @@ fn sync_canvas_population(world: &mut World) {
     // (ChildOf / Children) cleans up bidirectionally without
     // warnings. Direct world.despawn leaves dangling parent→child
     // references in the same-frame batch.
+    // Snapshot the position of every node we're about to despawn, so a
+    // later respawn (drill back out) restores it instead of falling back
+    // to a default grid slot. Captures dragged positions too.
+    {
+        let mut positions = std::mem::take(&mut world.resource_mut::<CanvasPositions>().0);
+        for (nid, e) in &node_despawns {
+            if let Some(tf) = world.entity(*e).get::<Transform>() {
+                positions.insert(*nid, tf.translation.truncate());
+            }
+        }
+        world.resource_mut::<CanvasPositions>().0 = positions;
+    }
+
     let needs_despawn = !node_despawns.is_empty() || !edge_despawns.is_empty();
     if needs_despawn {
         let mut state: bevy::ecs::system::SystemState<(
@@ -532,6 +566,9 @@ fn sync_canvas_population(world: &mut World) {
         let overrides = world.resource::<CompoundOverrides>().clone();
         crate::canvas::merged_compound_params(&registry, &overrides)
     };
+    // Restore previously-captured positions (set when these nodes were
+    // despawned on drill-in) so the layout survives a drill round-trip.
+    let saved_positions = world.resource::<CanvasPositions>().0.clone();
 
     let mut state: bevy::ecs::system::SystemState<(
         Commands,
@@ -547,10 +584,11 @@ fn sync_canvas_population(world: &mut World) {
         let (mut commands, mut cache, mut meshes, mut materials, mut maps, mut node_colors, theme, metrics) =
             state.get_mut(world);
         for (i, (nid, name, class_name, color_slot_raw, is_compound)) in to_spawn_nodes.iter().enumerate() {
-            crate::canvas::spawn_one_canvas_node(
+            crate::canvas::spawn_one_canvas_node_at(
                 &mut commands, &mut cache, &mut meshes, &mut materials,
                 &mut maps, &mut node_colors, &theme, &metrics,
                 &visual, &node_data_by_name, &compound_param_values,
+                saved_positions.get(nid).copied(),
                 *nid, name, class_name.as_deref(), *color_slot_raw, *is_compound, i,
             );
         }

@@ -1,0 +1,40 @@
+// Invoke an AWS Lambda function FROM ai-lang. The whole AWS request is
+// built in the language: SigV4 request signing (HMAC/SHA-256 via OpenSSL
+// through the FFI), UTC date formatting (libc), JSON body, and the HTTPS
+// call (libcurl). No SDK, no host glue.
+//
+//   ai-lang add examples/aws_lambda_demo.ail
+//   AWS_REGION=us-east-1 LAMBDA_FUNCTION=my-fn \
+//   AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+//   ai-lang run main
+//
+// With real credentials a successful invocation prints status 200 and the
+// function's response body. With absent/invalid credentials the request
+// still reaches AWS over real TLS and AWS replies (e.g. 403 with an
+// InvalidSignature / security-token error) — which by itself proves the
+// signing + HTTPS pipeline works end to end against the real endpoint.
+
+def env_or(name: String, fallback: String) -> String = {
+    let v = env_get(name);
+    if string_is_empty(v) == 1 { fallback } else { v }
+}
+
+def report(r: Result<HttpResponse, String>) -> Int =
+    match r {
+        Ok(resp) => {
+            let a = println(string_concat("status: ", int_to_string(resp.status)));
+            println(string_concat("body: ", resp.body))
+        },
+        Err(e) => println(string_concat("transport error: ", e))
+    }
+
+def main() -> Int = {
+    let region = env_or("AWS_REGION", "us-east-1");
+    let func = env_or("LAMBDA_FUNCTION", "ai-lang-demo");
+    let ak = env_or("AWS_ACCESS_KEY_ID", "AKIDDUMMYEXAMPLE");
+    let sk = env_or("AWS_SECRET_ACCESS_KEY", "dummysecretkeydoesnotwork");
+    let token = env_get("AWS_SESSION_TOKEN");
+    let payload = "{\"hello\":\"from ai-lang\"}";
+    let a = println(string_concat("invoking lambda: ", string_concat(func, string_concat(" in ", region))));
+    report(lambda_invoke(region, func, payload, ak, sk, token))
+}

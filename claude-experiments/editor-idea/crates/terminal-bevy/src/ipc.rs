@@ -88,6 +88,64 @@ pub enum IpcRequest {
         subject: Option<String>,
         body: String,
     },
+    /// `tbproject set-cwd [--project NAME] <path>` — write a project's
+    /// `default_cwd`. `project` accepts a name or `"active"` (default).
+    /// `cwd = None` clears the override so new terminals fall back to
+    /// `$HOME`.
+    SetProjectDefaultCwd {
+        #[serde(default)]
+        project: Option<String>,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+    },
+    /// `tbsuggest [--kind K] [--title T] [--command CMD] [--cwd D]
+    /// [--reason R] [--config JSON] [--project P]` — park a *suggested*
+    /// pane in the drawer (the Quake-style dropdown) rather than
+    /// spawning it on the canvas. The AI uses this when it infers a
+    /// pane might be useful (e.g. it just ran a command in a side
+    /// terminal) but doesn't want to clutter the canvas: the user pulls
+    /// it down later and picks it.
+    ///
+    /// The stored item is a generic `PaneSnapshot`-shaped record: any
+    /// registered pane `kind` plus its JSON `config`. As a convenience
+    /// for the common "command pane" case, passing `command` with no
+    /// explicit `kind`/`config` builds a `run-button` config
+    /// (`{title, command, cwd}`) automatically.
+    ///
+    /// `project` is a *hint*; it's resolved against the live project
+    /// list only when the user materializes the suggestion. Fire-and-
+    /// forget; no response body.
+    SuggestPane {
+        /// Registered pane kind. Defaults to `"run-button"` when
+        /// `command` is given and no kind is specified.
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        title: Option<String>,
+        /// Convenience: shell command for the default `run-button`
+        /// kind. Ignored if an explicit `config` is supplied.
+        #[serde(default)]
+        command: Option<String>,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+        /// One-line "why this might be useful", shown under the title
+        /// in the drawer.
+        #[serde(default)]
+        reason: Option<String>,
+        /// Explicit kind-specific config blob. When present it's stored
+        /// verbatim and `command`/`cwd` are ignored.
+        #[serde(default)]
+        config: Option<serde_json::Value>,
+        #[serde(default)]
+        project: Option<String>,
+        /// Invocation cwd of the CLI. When `project` is unset, the app
+        /// maps this to the owning project (by `default_cwd`) so the
+        /// suggestion is scoped to the terminal's project rather than
+        /// the GUI's active one. Falls back to unscoped (global) if no
+        /// project owns the dir.
+        #[serde(default)]
+        from_cwd: Option<PathBuf>,
+    },
 }
 
 /// One accepted IPC connection: the parsed request plus the open socket,

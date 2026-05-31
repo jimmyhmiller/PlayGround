@@ -432,6 +432,7 @@ fn lower_stmt(s: &ast::Stmt, bound: &mut HashSet<String>) -> Result<Ieff, String
                 ast::EmitTarget::Default => Iem::DefaultOut,
                 ast::EmitTarget::Self_ => Iem::ToTargetExpr(Ie::self_ref()),
                 ast::EmitTarget::OutPort(name) => Iem::ToOutPort(name.clone()),
+                ast::EmitTarget::OutPortRotating(name) => Iem::ToOutPortRotating(name.clone()),
                 ast::EmitTarget::FromPort(name) => Iem::FromPort(name.clone()),
                 ast::EmitTarget::Target(name) => {
                     let plain = name.as_plain().ok_or_else(||

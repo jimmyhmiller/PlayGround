@@ -1,0 +1,377 @@
+// AST:      {
+// AST-NEXT:   "type": "File",
+// AST-NEXT:   "loc": {
+// AST-NEXT:     "start": {
+// AST-NEXT:       "line": 1,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     },
+// AST-NEXT:     "end": {
+// AST-NEXT:       "line": 11,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     }
+// AST-NEXT:   },
+// AST-NEXT:   "start": 0,
+// AST-NEXT:   "end": 216,
+// AST-NEXT:   "program": {
+// AST-NEXT:     "type": "Program",
+// AST-NEXT:     "loc": {
+// AST-NEXT:       "start": {
+// AST-NEXT:         "line": 1,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       },
+// AST-NEXT:       "end": {
+// AST-NEXT:         "line": 11,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       }
+// AST-NEXT:     },
+// AST-NEXT:     "start": 0,
+// AST-NEXT:     "end": 216,
+// AST-NEXT:     "scopeUid": 0,
+// AST-NEXT:     "interpreter": null,
+// AST-NEXT:     "sourceType": "module",
+// AST-NEXT:     "body": [
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ExportDefaultDeclaration",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 1,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 1,
+// AST-NEXT:             "column": 36
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 0,
+// AST-NEXT:         "end": 36,
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "declaration": {
+// AST-NEXT:           "type": "Identifier",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 1,
+// AST-NEXT:               "column": 15
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 1,
+// AST-NEXT:               "column": 35
+// AST-NEXT:             },
+// AST-NEXT:             "identifierName": "arbitrary_expression"
+// AST-NEXT:           },
+// AST-NEXT:           "start": 15,
+// AST-NEXT:           "end": 35,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "name": "arbitrary_expression"
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ExportNamedDeclaration",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 3,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 3,
+// AST-NEXT:             "column": 51
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 38,
+// AST-NEXT:         "end": 89,
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "declaration": null,
+// AST-NEXT:         "specifiers": [
+// AST-NEXT:           {
+// AST-NEXT:             "type": "ExportSpecifier",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 3,
+// AST-NEXT:                 "column": 8
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 3,
+// AST-NEXT:                 "column": 20
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             "start": 46,
+// AST-NEXT:             "end": 58,
+// AST-NEXT:             "scopeUid": 0,
+// AST-NEXT:             "exported": {
+// AST-NEXT:               "type": "Identifier",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 8
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 20
+// AST-NEXT:                 },
+// AST-NEXT:                 "identifierName": "identifier_1"
+// AST-NEXT:               },
+// AST-NEXT:               "start": 46,
+// AST-NEXT:               "end": 58,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "name": "identifier_1"
+// AST-NEXT:             },
+// AST-NEXT:             "local": {
+// AST-NEXT:               "type": "Identifier",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 8
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 20
+// AST-NEXT:                 },
+// AST-NEXT:                 "identifierName": "identifier_1"
+// AST-NEXT:               },
+// AST-NEXT:               "start": 46,
+// AST-NEXT:               "end": 58,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "name": "identifier_1"
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           {
+// AST-NEXT:             "type": "ExportSpecifier",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 3,
+// AST-NEXT:                 "column": 22
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 3,
+// AST-NEXT:                 "column": 38
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             "start": 60,
+// AST-NEXT:             "end": 76,
+// AST-NEXT:             "scopeUid": 0,
+// AST-NEXT:             "exported": {
+// AST-NEXT:               "type": "StringLiteral",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 22
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 38
+// AST-NEXT:                 }
+// AST-NEXT:               },
+// AST-NEXT:               "start": 60,
+// AST-NEXT:               "end": 76,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "value": "string_literal",
+// AST-NEXT:               "extra": {
+// AST-NEXT:                 "raw": "\"string_literal\"",
+// AST-NEXT:                 "rawValue": "string_literal"
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             "local": {
+// AST-NEXT:               "type": "StringLiteral",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 22
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 38
+// AST-NEXT:                 }
+// AST-NEXT:               },
+// AST-NEXT:               "start": 60,
+// AST-NEXT:               "end": 76,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "value": "string_literal",
+// AST-NEXT:               "extra": {
+// AST-NEXT:                 "raw": "\"string_literal\"",
+// AST-NEXT:                 "rawValue": "string_literal"
+// AST-NEXT:               }
+// AST-NEXT:             }
+// AST-NEXT:           }
+// AST-NEXT:         ],
+// AST-NEXT:         "source": {
+// AST-NEXT:           "type": "StringLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 3,
+// AST-NEXT:               "column": 45
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 3,
+// AST-NEXT:               "column": 50
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 83,
+// AST-NEXT:           "end": 88,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "value": "foo",
+// AST-NEXT:           "extra": {
+// AST-NEXT:             "raw": "\"foo\"",
+// AST-NEXT:             "rawValue": "foo"
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ExportNamedDeclaration",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 5,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 5,
+// AST-NEXT:             "column": 24
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 91,
+// AST-NEXT:         "end": 115,
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "referencedSymbol": {
+// AST-NEXT:           "name": "identifier_2",
+// AST-NEXT:           "defScopeUid": 0
+// AST-NEXT:         },
+// AST-NEXT:         "declaration": {
+// AST-NEXT:           "type": "VariableDeclaration",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 5,
+// AST-NEXT:               "column": 7
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 5,
+// AST-NEXT:               "column": 24
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 98,
+// AST-NEXT:           "end": 115,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "declarations": [
+// AST-NEXT:             {
+// AST-NEXT:               "type": "VariableDeclarator",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 5,
+// AST-NEXT:                   "column": 11
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 5,
+// AST-NEXT:                   "column": 23
+// AST-NEXT:                 }
+// AST-NEXT:               },
+// AST-NEXT:               "start": 102,
+// AST-NEXT:               "end": 114,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "definedSymbols": [
+// AST-NEXT:                 {
+// AST-NEXT:                   "name": "identifier_2",
+// AST-NEXT:                   "defScopeUid": 0
+// AST-NEXT:                 }
+// AST-NEXT:               ],
+// AST-NEXT:               "id": {
+// AST-NEXT:                 "type": "Identifier",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 5,
+// AST-NEXT:                     "column": 11
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 5,
+// AST-NEXT:                     "column": 23
+// AST-NEXT:                   },
+// AST-NEXT:                   "identifierName": "identifier_2"
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 102,
+// AST-NEXT:                 "end": 114,
+// AST-NEXT:                 "scopeUid": 0,
+// AST-NEXT:                 "name": "identifier_2"
+// AST-NEXT:               },
+// AST-NEXT:               "init": null
+// AST-NEXT:             }
+// AST-NEXT:           ],
+// AST-NEXT:           "kind": "let"
+// AST-NEXT:         },
+// AST-NEXT:         "specifiers": [],
+// AST-NEXT:         "source": null
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ExportAllDeclaration",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 7,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 7,
+// AST-NEXT:             "column": 20
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 117,
+// AST-NEXT:         "end": 137,
+// AST-NEXT:         "trailingCommentUids": [
+// AST-NEXT:           0,
+// AST-NEXT:           1
+// AST-NEXT:         ],
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "source": {
+// AST-NEXT:           "type": "StringLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 7,
+// AST-NEXT:               "column": 14
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 7,
+// AST-NEXT:               "column": 19
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 131,
+// AST-NEXT:           "end": 136,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "value": "foo",
+// AST-NEXT:           "extra": {
+// AST-NEXT:             "raw": "\"foo\"",
+// AST-NEXT:             "rawValue": "foo"
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       }
+// AST-NEXT:     ],
+// AST-NEXT:     "directives": []
+// AST-NEXT:   },
+// AST-NEXT:   "comments": [
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 9,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 9,
+// AST-NEXT:           "column": 36
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " TODO(b/182441574): Fix AST error.",
+// AST-NEXT:       "start": 139,
+// AST-NEXT:       "end": 175
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 10,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 10,
+// AST-NEXT:           "column": 39
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " export * as identifier_3 from \"foo\";",
+// AST-NEXT:       "start": 176,
+// AST-NEXT:       "end": 215
+// AST-NEXT:     }
+// AST-NEXT:   ]
+// AST-NEXT: }

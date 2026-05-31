@@ -99,7 +99,16 @@ pub struct TypeCache {
     /// `BuiltinRef("ext/<name>")` look here. Externs are NOT
     /// content-addressed; the cache holds the live set declared by
     /// the module being typechecked.
-    externs: HashMap<String, (Vec<Type>, Type)>,
+    /// Value is `(fixed_params, ret, variadic)`. A variadic extern
+    /// (e.g. `curl_easy_setopt`) accepts the fixed params followed by
+    /// any number of trailing C-scalar (Int/Ptr) args.
+    externs: HashMap<String, (Vec<Type>, Type, bool)>,
+    /// The declared return type of the function whose body is currently
+    /// being checked. Set by `typecheck_def` before walking a fn body so
+    /// the `?` operator can verify the enclosing function returns a
+    /// `Result<_, E>` with the same error type `E`. Interior mutability
+    /// keeps the rest of the `&TypeCache` API immutable.
+    current_fn_ret: std::cell::RefCell<Option<Type>>,
 }
 
 impl TypeCache {
@@ -107,6 +116,7 @@ impl TypeCache {
         Self {
             schemes: HashMap::new(),
             externs: HashMap::new(),
+            current_fn_ret: std::cell::RefCell::new(None),
         }
     }
 
@@ -144,12 +154,14 @@ impl TypeCache {
         externs: &HashMap<String, crate::resolve::ExternSig>,
     ) {
         for (name, sig) in externs {
-            self.externs
-                .insert(name.clone(), (sig.params.clone(), sig.ret.clone()));
+            self.externs.insert(
+                name.clone(),
+                (sig.params.clone(), sig.ret.clone(), sig.variadic),
+            );
         }
     }
 
-    pub fn extern_signature(&self, name: &str) -> Option<&(Vec<Type>, Type)> {
+    pub fn extern_signature(&self, name: &str) -> Option<&(Vec<Type>, Type, bool)> {
         self.externs.get(name)
     }
 }
@@ -340,6 +352,118 @@ fn bool_t() -> Type {
     Type::Builtin("Bool".to_owned())
 }
 
+fn float_t() -> Type {
+    Type::Builtin("Float".to_owned())
+}
+
+/// `Ptr` — a raw, i64-represented machine address (non-GC). The scalar
+/// the C FFI passes and returns for all pointer-typed C arguments.
+fn ptr_t() -> Type {
+    Type::Builtin("Ptr".to_owned())
+}
+
+/// `Array<elem>` as `Apply(Builtin("Array"), [elem])`.
+fn array_t(elem: Type) -> Type {
+    Type::Apply(Box::new(Type::Builtin("Array".to_owned())), vec![elem])
+}
+
+/// Does `ty` contain a `Ptr` anywhere in its structure? A `Ptr` is a raw
+/// local machine address; it is meaningless in any other process, so it
+/// must never cross the `at(...)` wire boundary (as a thunk return type
+/// or as a captured value). This walks Apply/FnType so an enclosing
+/// type like `Array<Ptr>` or `fn() -> Ptr` is caught too.
+fn type_contains_ptr(ty: &Type) -> bool {
+    match ty {
+        Type::Builtin(n) => n == "Ptr",
+        Type::TypeRef(_) | Type::TypeVar(_) | Type::SelfRef(_) => false,
+        Type::FnType { params, ret } => {
+            type_contains_ptr(ret) || params.iter().any(type_contains_ptr)
+        }
+        Type::Apply(head, args) => {
+            type_contains_ptr(head) || args.iter().any(type_contains_ptr)
+        }
+    }
+}
+
+/// Number of binders a pattern introduces (mirror of codegen's
+/// `count_pattern_vars`). Used to track de Bruijn depth when walking a
+/// thunk body for captured-variable indices.
+fn pattern_binder_count(p: &Pattern) -> u32 {
+    match p {
+        Pattern::Wildcard => 0,
+        Pattern::Var => 1,
+        Pattern::Enum { payload, .. } => {
+            payload.as_deref().map(pattern_binder_count).unwrap_or(0)
+        }
+    }
+}
+
+/// Collect the *outer* de Bruijn indices that `e` captures, given that
+/// `depth` binders have been introduced inside the capturing lambda so
+/// far. A `LocalVar(i)` with `i >= depth` references the enclosing
+/// environment at outer index `i - depth`.
+fn collect_outer_captures(e: &Expr, depth: u32, out: &mut Vec<u32>) {
+    match e {
+        Expr::LocalVar(i) => {
+            if *i >= depth {
+                out.push(*i - depth);
+            }
+        }
+        Expr::Call(callee, args) => {
+            collect_outer_captures(callee, depth, out);
+            for a in args {
+                collect_outer_captures(a, depth, out);
+            }
+        }
+        Expr::Lambda { params, body } => {
+            collect_outer_captures(body, depth + params.len() as u32, out);
+        }
+        Expr::Let { value, body } => {
+            collect_outer_captures(value, depth, out);
+            collect_outer_captures(body, depth + 1, out);
+        }
+        Expr::Defer { cleanup, body } => {
+            collect_outer_captures(cleanup, depth, out);
+            collect_outer_captures(body, depth, out);
+        }
+        Expr::StructNew { fields, .. } => {
+            for f in fields {
+                collect_outer_captures(f, depth, out);
+            }
+        }
+        Expr::Field { base, .. } => collect_outer_captures(base, depth, out),
+        Expr::EnumNew { payload, .. } => {
+            if let Some(p) = payload {
+                collect_outer_captures(p, depth, out);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            collect_outer_captures(scrutinee, depth, out);
+            for arm in arms {
+                let binds = pattern_binder_count(&arm.pattern);
+                collect_outer_captures(&arm.body, depth + binds, out);
+            }
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_outer_captures(cond, depth, out);
+            collect_outer_captures(then_branch, depth, out);
+            collect_outer_captures(else_branch, depth, out);
+        }
+        Expr::Try { expr, .. } => collect_outer_captures(expr, depth, out),
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_)
+        | Expr::TopRef(_)
+        | Expr::SelfRef(_)
+        | Expr::BuiltinRef(_) => {}
+    }
+}
+
 /// Signature of a builtin by stable name. `None` indicates the builtin is
 /// either unknown OR special-cased at the call site (e.g. `core/net.at`,
 /// which is polymorphic and handled directly in `typecheck_expr`).
@@ -367,6 +491,15 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
         // effect from let bindings: `let _ = gc_collect();`.
         "core/gc.collect" => Some((vec![], int_t())),
 
+        // `panic(msg)` — prints `msg` to stderr and aborts. Diverges, so
+        // its result type is the bottom type `Never`, which is compatible
+        // with every expected type (it can appear in any match arm / if
+        // branch / function body).
+        "core/panic" => Some((
+            vec![Type::Builtin("String".to_owned())],
+            Type::Builtin("Never".to_owned()),
+        )),
+
         // String ops. Strings are pointer-typed (TypeRef-like) heap
         // values; we represent the type as Type::Builtin("String").
         "core/string.len" => Some((
@@ -387,6 +520,105 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
             ],
             Type::Builtin("String".to_owned()),
         )),
+
+        // Bytes ops. `Bytes` is a mutable, indexable byte buffer sharing
+        // the heap layout of String but kept distinct by the type system.
+        "core/bytes.new" => Some((
+            vec![int_t()],
+            Type::Builtin("Bytes".to_owned()),
+        )),
+        "core/bytes.len" => Some((
+            vec![Type::Builtin("Bytes".to_owned())],
+            int_t(),
+        )),
+        "core/bytes.get" => Some((
+            vec![Type::Builtin("Bytes".to_owned()), int_t()],
+            int_t(),
+        )),
+        "core/bytes.set" => Some((
+            vec![Type::Builtin("Bytes".to_owned()), int_t(), int_t()],
+            int_t(),
+        )),
+        "core/bytes.slice" => Some((
+            vec![Type::Builtin("Bytes".to_owned()), int_t(), int_t()],
+            Type::Builtin("Bytes".to_owned()),
+        )),
+        "core/bytes.concat" => Some((
+            vec![
+                Type::Builtin("Bytes".to_owned()),
+                Type::Builtin("Bytes".to_owned()),
+            ],
+            Type::Builtin("Bytes".to_owned()),
+        )),
+        "core/bytes.from_string" => Some((
+            vec![Type::Builtin("String".to_owned())],
+            Type::Builtin("Bytes".to_owned()),
+        )),
+        "core/string.from_bytes" => Some((
+            vec![Type::Builtin("Bytes".to_owned())],
+            Type::Builtin("String".to_owned()),
+        )),
+
+        // Array ops. `Array<T>` is a fixed-size, O(1)-indexable vector of
+        // GC-traced pointer slots. Generic over T via TypeVar(0); the
+        // general call path unifies the array arg's `Array<Concrete>`
+        // against `Array<T>` to recover T. Array type = Apply(Builtin
+        // "Array", [T]).
+        "core/array.new" => Some((
+            vec![int_t()],
+            array_t(Type::TypeVar(0)),
+        )),
+        "core/array.len" => Some((
+            vec![array_t(Type::TypeVar(0))],
+            int_t(),
+        )),
+        "core/array.get" => Some((
+            vec![array_t(Type::TypeVar(0)), int_t()],
+            Type::TypeVar(0),
+        )),
+        "core/array.set" => Some((
+            vec![array_t(Type::TypeVar(0)), int_t(), Type::TypeVar(0)],
+            int_t(),
+        )),
+
+        // Float arithmetic — operands and result are Float.
+        "core/f64.add" | "core/f64.sub" | "core/f64.mul" | "core/f64.div"
+        | "core/f64.rem" => Some((vec![float_t(), float_t()], float_t())),
+        // Float comparisons — Float operands, Int (0/1) result.
+        "core/f64.eq" | "core/f64.ne" | "core/f64.lt" | "core/f64.le"
+        | "core/f64.gt" | "core/f64.ge" => Some((vec![float_t(), float_t()], int_t())),
+        // Int <-> Float conversions.
+        "core/f64.of_int" => Some((vec![int_t()], float_t())),
+        "core/f64.to_int" => Some((vec![float_t()], int_t())),
+
+        // Raw-pointer / memory intrinsics. `Ptr` is an i64-represented
+        // raw address (non-GC). Built on by the C FFI: allocate with
+        // libc `malloc`, read/write bytes with these.
+        // ptr_null() -> Ptr
+        "core/ptr.null" => Some((vec![], ptr_t())),
+        // ptr_is_null(Ptr) -> Int (1 if null, else 0)
+        "core/ptr.is_null" => Some((vec![ptr_t()], int_t())),
+        // ptr_add(Ptr, Int) -> Ptr (byte offset)
+        "core/ptr.add" => Some((vec![ptr_t(), int_t()], ptr_t())),
+        // ptr_read_u8(Ptr, offset: Int) -> Int (zero-extended byte at base+offset)
+        "core/ptr.read_u8" => Some((vec![ptr_t(), int_t()], int_t())),
+        // ptr_write_u8(Ptr, offset: Int, value: Int) -> Int (returns 0)
+        "core/ptr.write_u8" => Some((vec![ptr_t(), int_t(), int_t()], int_t())),
+        // ptr_read_i64(Ptr, offset: Int) -> Int
+        "core/ptr.read_i64" => Some((vec![ptr_t(), int_t()], int_t())),
+        // ptr_write_i64(Ptr, offset: Int, value: Int) -> Int (returns 0)
+        "core/ptr.write_i64" => Some((vec![ptr_t(), int_t(), int_t()], int_t())),
+        // ptr_read_ptr(Ptr, offset: Int) -> Ptr
+        "core/ptr.read_ptr" => Some((vec![ptr_t(), int_t()], ptr_t())),
+        // ptr_write_ptr(Ptr, offset: Int, value: Ptr) -> Int (returns 0)
+        "core/ptr.write_ptr" => Some((vec![ptr_t(), int_t(), ptr_t()], int_t())),
+        // Explicit reinterpret casts: ptr_to_int(Ptr) -> Int (the raw
+        // address as data), int_to_ptr(Int) -> Ptr (fabricate a pointer).
+        "core/ptr.to_int" => Some((vec![ptr_t()], int_t())),
+        "core/ptr.from_int" => Some((vec![int_t()], ptr_t())),
+        // Bitwise ops on Int (a, b) -> Int.
+        "core/i64.and" | "core/i64.or" | "core/i64.xor" | "core/i64.shl"
+        | "core/i64.shr" => Some((vec![int_t(), int_t()], int_t())),
 
         // Bool and / or — operands are still Int in v1 (Bool widens to Int).
         "core/bool.and" | "core/bool.or" => Some((vec![int_t(), int_t()], int_t())),
@@ -512,7 +744,11 @@ pub fn typecheck_def(def: &Def, cache: &TypeCache) -> Result<TypeScheme, TypeErr
             // (the outermost binder), source-order param N-1 is at
             // env[N-1] (the innermost binder, i.e. LocalVar(0)).
             let mut locals: Vec<Type> = params.clone();
+            // Publish this fn's return type so any `?` in the body can
+            // check the enclosing function returns a matching Result.
+            *cache.current_fn_ret.borrow_mut() = Some(ret.clone());
             let body_ty = typecheck_expr(body, &mut locals, cache)?;
+            *cache.current_fn_ret.borrow_mut() = None;
             if !types_equiv(&body_ty, ret) {
                 return Err(TypeError::TypeMismatch {
                     context: "fn body".to_owned(),
@@ -739,12 +975,23 @@ fn unify(
 /// Apply or FnType payload), TypeVars must still match exactly — that
 /// preserves checking inside generic fn bodies (where `TypeVar(0)`
 /// means a specific declared type param).
+/// The bottom type for diverging expressions (e.g. `panic`). Represented
+/// as `Builtin("Never")` so it needs no new `Type` variant (and never
+/// reaches serialization — users can't write it; the resolver only
+/// produces it for `panic` calls).
+fn is_never(t: &Type) -> bool {
+    matches!(t, Type::Builtin(n) if n == "Never")
+}
+
 fn types_equiv(a: &Type, b: &Type) -> bool {
     types_equiv_inner(a, b, false)
 }
 
 fn types_equiv_inner(a: &Type, b: &Type, in_apply_args: bool) -> bool {
     match (a, b) {
+        // `Never` (a diverging expression's type) is compatible with any
+        // type in both directions.
+        (Type::Builtin(n), _) | (_, Type::Builtin(n)) if n == "Never" => true,
         (Type::TypeVar(_), _) | (_, Type::TypeVar(_)) if in_apply_args => true,
         (Type::TypeVar(i), Type::TypeVar(j)) => i == j,
         (Type::Builtin(x), Type::Builtin(y)) => x == y,
@@ -768,6 +1015,24 @@ fn types_equiv_inner(a: &Type, b: &Type, in_apply_args: bool) -> bool {
 // Expression typechecking
 // =============================================================================
 
+/// Infer the type of `expr` evaluated in a lexical environment whose binders
+/// (outermost first) have the types in `env` — exactly `Def::Fn`'s `params`
+/// ordering: with N binders, `env[0]` is the outermost binder and `env[N-1]`
+/// is the innermost (`LocalVar(0)`).
+///
+/// This is the edit layer's only supported way to recover the type of a
+/// sub-expression (e.g. a `let` value lifted by `extract`) without a full
+/// `Def`, since `Def::Fn` requires a declared return type up front. Returns a
+/// clean `TypeError` on ill-typed input — never a silent guess.
+pub fn infer_expr_type(
+    expr: &Expr,
+    env: &[Type],
+    cache: &TypeCache,
+) -> Result<Type, TypeError> {
+    let mut locals: Vec<Type> = env.to_vec();
+    typecheck_expr(expr, &mut locals, cache)
+}
+
 fn typecheck_expr(
     expr: &Expr,
     locals: &mut Vec<Type>,
@@ -775,6 +1040,7 @@ fn typecheck_expr(
 ) -> Result<Type, TypeError> {
     match expr {
         Expr::IntLit(_) => Ok(int_t()),
+        Expr::FloatLit(_) => Ok(Type::Builtin("Float".to_owned())),
         Expr::BoolLit(_) => Ok(bool_t()),
         Expr::StringLit(_) => Ok(Type::Builtin("String".to_owned())),
 
@@ -826,7 +1092,7 @@ fn typecheck_expr(
             None if name.starts_with("ext/") => {
                 let ext_name = &name["ext/".len()..];
                 match cache.extern_signature(ext_name) {
-                    Some((params, ret)) => Ok(Type::FnType {
+                    Some((params, ret, _variadic)) => Ok(Type::FnType {
                         params: params.clone(),
                         ret: Box::new(ret.clone()),
                     }),
@@ -863,6 +1129,14 @@ fn typecheck_expr(
             let body_ty = typecheck_expr(body, locals, cache)?;
             locals.pop();
             Ok(body_ty)
+        }
+
+        // `defer cleanup; body`: the cleanup is checked in the SAME
+        // environment as the body (it adds no binder), and its type is
+        // discarded. The whole expression has the body's type.
+        Expr::Defer { cleanup, body } => {
+            let _ = typecheck_expr(cleanup, locals, cache)?;
+            typecheck_expr(body, locals, cache)
         }
 
         Expr::StructNew { struct_ref, fields } => {
@@ -1094,17 +1368,21 @@ fn typecheck_expr(
                 for _ in 0..pushed {
                     locals.pop();
                 }
-                match &result_ty {
-                    None => result_ty = Some(arm_ty),
+                result_ty = Some(match result_ty {
+                    None => arm_ty,
                     Some(first) => {
-                        if !types_equiv(first, &arm_ty) {
+                        if !types_equiv(&first, &arm_ty) {
                             return Err(TypeError::MatchArmsDisagree {
-                                first: first.clone(),
+                                first,
                                 found: arm_ty,
                             });
                         }
+                        // Prefer a concrete type over `Never` so the match
+                        // result isn't bottom just because an earlier arm
+                        // diverged (e.g. `panic`).
+                        if is_never(&first) { arm_ty } else { first }
                     }
-                }
+                });
             }
             // Safe: arms.is_empty() was checked above.
             Ok(result_ty.expect("at least one arm checked"))
@@ -1132,7 +1410,80 @@ fn typecheck_expr(
                     found: else_ty,
                 });
             }
-            Ok(then_ty)
+            // Prefer the concrete branch type when the other diverges
+            // (e.g. `if c { compute() } else { panic("...") }`).
+            Ok(if is_never(&then_ty) { else_ty } else { then_ty })
+        }
+
+        Expr::Try {
+            expr,
+            enum_ref,
+            ok_index,
+            err_index,
+        } => {
+            let inner = typecheck_expr(expr, locals, cache)?;
+            // The operand must be the `Result` enum named by `enum_ref`,
+            // either bare (`TypeRef`) or instantiated (`Apply`).
+            let (head_hash, args): (Hash, Vec<Type>) = match &inner {
+                Type::TypeRef(h) => (*h, Vec::new()),
+                Type::Apply(head, a) => match head.as_ref() {
+                    Type::TypeRef(h) => (*h, a.clone()),
+                    _ => {
+                        return Err(TypeError::Unsupported(format!(
+                            "`?` operand is not a Result: {:?}",
+                            inner
+                        )));
+                    }
+                },
+                _ => {
+                    return Err(TypeError::Unsupported(format!(
+                        "`?` operand is not a Result: {:?}",
+                        inner
+                    )));
+                }
+            };
+            if head_hash != *enum_ref {
+                return Err(TypeError::Unsupported(
+                    "`?` operand enum does not match the resolved Result type".to_owned(),
+                ));
+            }
+            let variants = cache
+                .get(enum_ref)
+                .and_then(|s| s.as_enum())
+                .ok_or(TypeError::UnknownTypeRef(*enum_ref))?
+                .to_vec();
+            let ok_payload = variants[*ok_index as usize].1.clone().ok_or_else(|| {
+                TypeError::Unsupported("Result::Ok must carry a payload for `?`".to_owned())
+            })?;
+            let err_payload = variants[*err_index as usize].1.clone().ok_or_else(|| {
+                TypeError::Unsupported("Result::Err must carry a payload for `?`".to_owned())
+            })?;
+            let ok_ty = substitute(&ok_payload, &args);
+            let err_ty = substitute(&err_payload, &args);
+
+            // The enclosing function must return a `Result<_, E>` with the
+            // same error type `E`, since `?` early-returns the `Err` value.
+            if let Some(ret) = cache.current_fn_ret.borrow().as_ref() {
+                let ret_err: Option<Type> = match ret {
+                    Type::Apply(head, a) => match head.as_ref() {
+                        Type::TypeRef(h) if *h == *enum_ref => a.get(1).cloned(),
+                        _ => None,
+                    },
+                    Type::TypeRef(h) if *h == *enum_ref => Some(err_ty.clone()),
+                    _ => None,
+                };
+                match ret_err {
+                    Some(re) if types_equiv(&re, &err_ty) => {}
+                    _ => {
+                        return Err(TypeError::Unsupported(format!(
+                            "`?` requires the enclosing function to return a Result with error \
+                             type {:?}, but it returns {:?}",
+                            err_ty, ret
+                        )));
+                    }
+                }
+            }
+            Ok(ok_ty)
         }
     }
 }
@@ -1176,33 +1527,125 @@ fn typecheck_call(
                     });
                 }
             }
-            // Arg 1: a fn() -> Int (zero-arg thunk returning Int).
+            // Arg 1: a zero-arg thunk `fn() -> T`. T can be any
+            // type; the wire format ships the thunk's return as a
+            // heap pointer (uniform closure ABI) so the receiver
+            // doesn't care whether it's an Int (boxed), a struct, or
+            // an enum.
             let arg1_ty = typecheck_expr(&args[1], locals, cache)?;
-            let expected_thunk = Type::FnType {
-                params: vec![],
-                ret: Box::new(int_t()),
+            let thunk_ret = match &arg1_ty {
+                Type::FnType { params, ret } if params.is_empty() => (**ret).clone(),
+                _ => {
+                    return Err(TypeError::TypeMismatch {
+                        context: "core/net.at second argument (must be a zero-arg thunk)"
+                            .to_owned(),
+                        expected: Type::FnType {
+                            params: vec![],
+                            ret: Box::new(int_t()),
+                        },
+                        got: arg1_ty,
+                    });
+                }
             };
-            if arg1_ty != expected_thunk {
-                return Err(TypeError::TypeMismatch {
-                    context: "core/net.at second argument".to_owned(),
-                    expected: expected_thunk,
-                    got: arg1_ty,
-                });
+            // A `Ptr` is a raw local machine address; shipping the thunk's
+            // result back as a `Ptr` would hand the caller a garbage
+            // address into another process's memory. Reject it. (A real
+            // "remote pointer" abstraction would be the only sound way to
+            // return a foreign address, and that is not what `Ptr` is.)
+            if type_contains_ptr(&thunk_ret) {
+                return Err(TypeError::Unsupported(
+                    "core/net.at thunk may not return a `Ptr`: it is a raw local \
+                     machine address, meaningless on another node. Marshal the data \
+                     into a wire-portable value (Int/String/Bytes/struct/enum) before \
+                     returning."
+                        .to_owned(),
+                ));
             }
-            // Return type. If both Result and Failure hashes are
-            // embedded in the builtin name, the user opted into the
-            // generic `Result<T, E>` form — return the substituted
-            // `Apply(Result, [Int, Failure])`. If only Result is
-            // embedded, the monomorphic form; bare name falls back
-            // to Int.
-            return Ok(match parsed {
-                Some((r, Some(f))) => Type::Apply(
-                    Box::new(Type::TypeRef(r)),
-                    vec![int_t(), Type::TypeRef(f)],
-                ),
-                Some((r, None)) => Type::TypeRef(r),
-                None => int_t(),
-            });
+            // The thunk is shipped with its captures; a captured `Ptr`
+            // would travel as a plain Int and deref to garbage on the
+            // remote node. Reject any capture whose type contains a `Ptr`.
+            if let Expr::Lambda { params, body } = &args[1] {
+                let mut outer: Vec<u32> = Vec::new();
+                collect_outer_captures(body, params.len() as u32, &mut outer);
+                for k in outer {
+                    // Outer index `k` addresses `locals` from the top.
+                    if (k as usize) < locals.len() {
+                        let cap_ty = &locals[locals.len() - 1 - k as usize];
+                        if type_contains_ptr(cap_ty) {
+                            return Err(TypeError::Unsupported(
+                                "core/net.at thunk captures a `Ptr`: a raw local machine \
+                                 address cannot be shipped to another node. Capture only \
+                                 wire-portable values (Int/String/Bytes/struct/enum)."
+                                    .to_owned(),
+                            ));
+                        }
+                    }
+                }
+            }
+            // Return type: `Apply(Result, [thunk_ret, Failure])`.
+            // The builtin name always carries both hashes after the
+            // resolver enforced the generic `Result<T, E>` form.
+            let (result_hash, failure_hash) = match parsed {
+                Some((r, Some(f))) => (r, f),
+                _ => {
+                    return Err(TypeError::TypeMismatch {
+                        context: "core/net.at builtin name missing failure hash"
+                            .to_owned(),
+                        expected: Type::TypeRef(Hash([0u8; 32])),
+                        got: Type::Builtin(name.clone()),
+                    });
+                }
+            };
+            return Ok(Type::Apply(
+                Box::new(Type::TypeRef(result_hash)),
+                vec![thunk_ret, Type::TypeRef(failure_hash)],
+            ));
+        }
+    }
+
+    // ---- Variadic C extern ----
+    // A variadic extern (`curl_easy_setopt(h: Ptr, opt: Int, ...)`)
+    // accepts its fixed params followed by any number of trailing C
+    // scalars. Check the fixed prefix, then require each extra arg to
+    // be an Int or Ptr (the only types passable over the C ABI here).
+    if let Expr::BuiltinRef(name) = callee {
+        if let Some(ext_name) = name.strip_prefix("ext/") {
+            if let Some((params, ret, true)) = cache.extern_signature(ext_name) {
+                let params = params.clone();
+                let ret = ret.clone();
+                if args.len() < params.len() {
+                    return Err(TypeError::ArityMismatch {
+                        what: format!("call to variadic extern `{}`", ext_name),
+                        expected: params.len(),
+                        got: args.len(),
+                    });
+                }
+                for (i, (arg, expected)) in args.iter().zip(params.iter()).enumerate() {
+                    let got = typecheck_expr(arg, locals, cache)?;
+                    if !types_equiv(&got, expected) {
+                        return Err(TypeError::TypeMismatch {
+                            context: format!("variadic extern `{}` fixed arg {}", ext_name, i),
+                            expected: expected.clone(),
+                            got,
+                        });
+                    }
+                }
+                for (i, arg) in args.iter().enumerate().skip(params.len()) {
+                    let got = typecheck_expr(arg, locals, cache)?;
+                    let ok = matches!(&got, Type::Builtin(b) if b == "Int" || b == "Ptr");
+                    if !ok {
+                        return Err(TypeError::TypeMismatch {
+                            context: format!(
+                                "variadic extern `{}` variadic arg {} (must be Int or Ptr)",
+                                ext_name, i
+                            ),
+                            expected: Type::Builtin("Ptr".to_owned()),
+                            got,
+                        });
+                    }
+                }
+                return Ok(ret);
+            }
         }
     }
 
@@ -1691,6 +2134,67 @@ impl<'a> SchemeReader<'a> {
 // Tests
 // =============================================================================
 
+// =============================================================================
+// typecheck_cone — recheck only the changed hashes (edit-layer support)
+// =============================================================================
+
+/// A single unresolved item produced by an `update` whose type changed: a
+/// dependent definition that no longer typechecks against the new signature.
+/// Returned in `EditResult.todos` so an agent (or human) can resolve it with
+/// further `update`s, mirroring Unison's `todo` worklist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Todo {
+    /// The (new) hash of the dependent that failed to typecheck.
+    pub hash: Hash,
+    /// The name the failing hash resolves through, if any.
+    pub name: Option<String>,
+    /// Human-readable description of the type error.
+    pub message: String,
+}
+
+/// Typecheck only the given `changed` hashes against the cached schemes of
+/// everything else. Used by the edit layer after an `update` re-points a
+/// dependency cone: each rewritten dependent is rechecked in topological
+/// order (dependencies-before-dependents), so by the time a def is checked,
+/// the new schemes of everything it depends on are already in the cache.
+///
+/// Unlike `typecheck_module`, this never aborts the whole batch on the first
+/// error: a def that fails to typecheck is recorded as a [`Todo`] and the
+/// remaining defs are still checked (so the worklist is complete). A def that
+/// *does* typecheck has its fresh scheme inserted into `cache`, which is what
+/// makes the topological ordering correct for later defs in the same call.
+///
+/// `name_of` recovers a display name for a hash (e.g. from the codebase
+/// namespace); pass a closure that returns `None` for unnamed intermediates.
+pub fn typecheck_cone<F>(
+    cb: &crate::codebase::Codebase,
+    changed: &[Hash],
+    cache: &mut TypeCache,
+    mut name_of: F,
+) -> Result<Vec<Todo>, crate::codebase::CodebaseError>
+where
+    F: FnMut(&Hash) -> Option<String>,
+{
+    let mut todos: Vec<Todo> = Vec::new();
+    for h in changed {
+        let def = cb.load_def(h)?;
+        match typecheck_def(&def, cache) {
+            Ok(scheme) => {
+                // Insert so dependents later in `changed` see the new type.
+                cache.insert(*h, scheme);
+            }
+            Err(e) => {
+                todos.push(Todo {
+                    hash: *h,
+                    name: name_of(h),
+                    message: e.to_string(),
+                });
+            }
+        }
+    }
+    Ok(todos)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1837,7 +2341,7 @@ mod tests {
     #[test]
     fn at_special_case_typechecks() {
         // `at(node, || 42)` should typecheck — node is a struct, thunk
-        // is fn() -> Int. The result type is the user's `Result` enum.
+        // is fn() -> Int. The result type is `Result<Int, Failure>`.
         let src = "struct Node { x: Int }
                    enum Failure {
                        Unreachable(Node),
@@ -1845,15 +2349,29 @@ mod tests {
                        CodeMissing(Node),
                        Cancelled(Node),
                    }
-                   enum Result { Ok(Int), Err(Failure) }
+                   enum Result<T, E> { Ok(T), Err(E) }
                    def root() -> Node = Node { x: 0 }
-                   def run(n: Node) -> Result = at(n, || 42)";
+                   def run(n: Node) -> Result<Int, Failure> = at(n, || 42)";
         let (rm, cache, report) = tc(src);
         assert_eq!(report.newly_typed, 5);
         let run = rm.get("run").unwrap();
         assert!(cache.get(&run.hash).is_some());
 
-        // `at(n, || true)` should fail — thunk returns Bool, not Int.
+        // `at(n, || node)` returns `Result<Node, Failure>` — non-Int
+        // thunks are allowed; the wire ships the heap pointer.
+        let non_int = "struct Node { x: Int }
+                       enum Failure {
+                           Unreachable(Node),
+                           Crashed(Node),
+                           CodeMissing(Node),
+                           Cancelled(Node),
+                       }
+                       enum Result<T, E> { Ok(T), Err(E) }
+                       def root() -> Node = Node { x: 0 }
+                       def run(n: Node) -> Result<Node, Failure> = at(n, || n)";
+        let (_rm, _cache, _report) = tc(non_int);
+
+        // `at(n, foo)` where `foo` is an Int (not a thunk) must fail.
         let bad = "struct Node { x: Int }
                    enum Failure {
                        Unreachable(Node),
@@ -1861,15 +2379,19 @@ mod tests {
                        CodeMissing(Node),
                        Cancelled(Node),
                    }
-                   enum Result { Ok(Int), Err(Failure) }
-                   def run(n: Node) -> Result = at(n, || true)";
+                   enum Result<T, E> { Ok(T), Err(E) }
+                   def run(n: Node) -> Result<Int, Failure> = at(n, 42)";
         let m = parse_module(bad).unwrap();
         let rm = resolve_module(&m).unwrap();
         let mut cache = TypeCache::new();
-        let err = typecheck_module(&rm, &mut cache).expect_err("thunk Bool ret rejected");
+        let err = typecheck_module(&rm, &mut cache).expect_err("non-thunk 2nd arg rejected");
         match err {
             TypeError::TypeMismatch { context, .. } => {
-                assert!(context.contains("core/net.at second argument"), "{}", context);
+                assert!(
+                    context.contains("core/net.at second argument"),
+                    "{}",
+                    context
+                );
             }
             other => panic!("expected TypeMismatch on at thunk, got {:?}", other),
         }

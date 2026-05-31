@@ -1,0 +1,217 @@
+// Copyright 2024 Google LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto2";
+
+package maldoca;
+
+option java_multiple_files = true;
+
+// Options for the Babel parser.
+message BabelParseRequest {
+  // Enables error recovery in the parser.
+  // Note that error recovery is only available since babel_parser 7.7.0, so
+  // only v8_babel supports it, not sandboxed_nodejs_babel.
+  // https://babeljs.io/blog/2019/11/05/7.7.0
+  optional bool error_recovery = 1;
+
+  // Replaces invalid surrogate pairs with double question mark symbol (\UFFFD).
+  //
+  // JavaScript strings are represented as UTF-16. Surrogate pairs are
+  // characters represented by two 16-bit numbers.
+  //
+  // Each surrogate pair must start with a high surrogate (in [U+D800, U+DBFF]),
+  // and end with a low surrogate (in [U+DC00 to U+DFFF]).
+  //
+  // A single surrogate, or a pair that starts with a low surrogate and ends
+  // with a high surrogate is considered invalid.
+  //
+  // If the UTF-16 character sequence is invalid, then nlohmann::json fails to
+  // parse the JSON string.
+  //
+  // This flag enables the feature that converts any surrogate character that is
+  // not part of a valid surrogate pair into '�' (\UFFFD).
+  //
+  // Example:
+  //  "abc\UD834\UDF06" -> "abc𝌆" (valid surrogate pair)
+  //  "abc\UD834" -> "abc�" (lone surrogate)
+  //  "abc\UDF06\UD834" -> "abc��" (invalid surrogate pair)
+  //
+  // See b/235090893 for context.
+  //
+  // replace_invalid_surrogate_pairs == false:
+  // ```
+  // Node {
+  //   type: 'StringLiteral',
+  //   extra: { rawValue: '\udf06\ud834', raw: '"\\udf06\\ud834"' },
+  //   value: '\udf06\ud834'
+  // }
+  // ```
+  //
+  // replace_invalid_surrogate_pairs == true:
+  // ```
+  // Node {
+  //   type: 'StringLiteral',
+  //   extra: { rawValue: '\ufffd', raw: '"\\udf06\\ud834"' },
+  //   value: '\ufffd'
+  // }
+  // ```
+  optional bool replace_invalid_surrogate_pairs = 2;
+
+  // Whether string literals will be base64-encoded in the AST.
+  //
+  // base64_encode_string_literals == false:
+  // ```
+  // Node {
+  //   type: 'StringLiteral',
+  //   extra: { rawValue: 'A', raw: '"\u0041"' },
+  //   value: 'A'
+  // }
+  // ```
+  //
+  // base64_encode_string_literals == true:
+  // ```
+  // Node {
+  //   type: 'StringLiteral',
+  //   extra: { rawValue: 'YQ==', raw: '"\u0041"' },
+  //   value: 'YQ=='
+  // }
+  // ```
+  optional bool base64_encode_string_literals = 5 [default = false];
+
+  // The mode in which source code should be parsed. "unspecified" defaults to
+  // "script". "unambiguous" will make @babel/parser attempt to guess, based on
+  // the presence of ES6 import or export statements. Files with ES6 imports and
+  // exports are considered "module" and are otherwise "script".
+  enum SourceType {
+    SOURCE_TYPE_UNSPECIFIED = 0;
+    SOURCE_TYPE_SCRIPT = 1;
+    SOURCE_TYPE_MODULE = 2;
+    SOURCE_TYPE_UNAMBIGUOUS = 3;
+  }
+  optional SourceType source_type = 3 [default = SOURCE_TYPE_UNAMBIGUOUS];
+
+  // Should the parser work in strict mode (i.e. throw more errors).
+  // According to Babel's comment, if strictMode is undefined, then it depends
+  // on whether sourceType is 'module'. However, the source code has a bug such
+  // that even if strictMode is true, the parser still depends on sourceType.
+  //
+  // Implementation:
+  // +------------------------+--------------------------+
+  // |                        |        strictMode        |
+  // |                        +-----------+------+-------+
+  // |                        | undefined | true | false |
+  // +---------------+--------+-----------+------+-------+
+  // | source type   | module |        ✓         |       |
+  // | (specified    +--------+------------------+   ✗   |
+  // |  or inferred) | script |        ✗         |       |
+  // +---------------+--------+------------------+-------+
+  //
+  // Specification:
+  // +------------------------+--------------------------+
+  // |                        |        strictMode        |
+  // |                        +-----------+------+-------+
+  // |                        | undefined | true | false |
+  // +---------------+--------+-----------+------+-------+
+  // | source type   | module |     ✓     |      |       |
+  // | (specified    +--------+-----------+  ✓   |   ✗   |
+  // |  or inferred) | script |     ✗     |      |       |
+  // +---------------+--------+-----------+------+-------+
+  enum StrictMode {
+    STRICT_MODE_UNSPECIFIED = 0;
+    STRICT_MODE_YES = 1;
+    STRICT_MODE_NO = 2;
+  }
+  optional StrictMode strict_mode = 4;
+
+  // Whether to add scope information in the AST.
+  // If true:
+  // - A separate Scopes proto will be returned
+  // - Each AST node will have an additional scopeUid field, specifying which
+  //   scope it belongs to
+  optional bool compute_scopes = 6 [default = true];
+}
+
+// Babel AST in the form of JSON string.
+message BabelAstString {
+  // The actual string.
+  optional string value = 1;
+
+  // Whether string literals have been base64-encoded.
+  optional bool string_literals_base64_encoded = 2;
+
+  optional BabelScopes scopes = 3;
+}
+
+// Options for the Babel code generator.
+message BabelGenerateOptions {
+  // Whether comments are kept in the generated source.
+  optional bool include_comments = 1 [default = true];
+
+  // Whether to minify the generated source.
+  optional bool compact = 2 [default = false];
+
+  // Whether to generate source maps.
+  optional bool source_maps = 3 [default = false];
+}
+
+message PositionPb {
+  optional int64 line = 1;
+  optional int64 column = 2;
+}
+
+message BabelError {
+  optional string name = 1;
+  optional string message = 2;
+  optional PositionPb loc = 3;
+}
+
+message BabelErrors {
+  repeated BabelError errors = 1;
+}
+
+// "var" /* var declarator */
+// "let" /* let declarator, class declaration id, catch clause parameters */
+// "const" /* const/using declarator */
+// "module" /* import specifiers */
+// "hoisted" /* function declaration id */
+// "param" /* function declaration parameters */
+// "local" /* function expression id, class expression id */
+// "unknown"; /* export specifiers */
+
+message BabelBinding {
+  enum Kind {
+    KIND_UNKNOWN = 0;
+    KIND_VAR = 1;
+    KIND_LET = 2;
+    KIND_CONST = 3;
+    KIND_MODULE = 4;
+    KIND_HOISTED = 5;
+    KIND_PARAM = 6;
+    KIND_LOCAL = 7;
+  }
+
+  optional Kind kind = 1;
+  optional string name = 2;
+}
+
+message BabelScope {
+  optional int32 uid = 1;
+  optional int32 parent_uid = 2;
+  map<string, BabelBinding> bindings = 3;
+}
+
+message BabelScopes {
+  map<int32, BabelScope> scopes = 1;
+}

@@ -372,6 +372,18 @@ impl DynGcRuntime {
     /// Unsafe to use directly under a moving GC: a tagged value held in an
     /// unrooted `u64` is invalidated on the next collection. Prefer
     /// [`alloc_in`](Self::alloc_in), which returns a `Rooted`.
+    /// Diagnostic: return (from_base, from_size, to_base, to_size).
+    pub fn debug_heap_ranges(&self) -> (usize, usize, usize, usize) {
+        match &self.backend {
+            Backend::Generational(heap) => (
+                heap.from_base() as usize,
+                heap.space_size(),
+                heap.to_base() as usize,
+                heap.space_size(),
+            ),
+        }
+    }
+
     pub fn tag_ptr(&self, ptr: *mut u8) -> u64 {
         if ptr.is_null() { return 0; }
         TAG_PATTERN | ((self.tags.ptr as u64) << 48) | ((ptr as u64) & PAYLOAD_MASK)

@@ -1,0 +1,38 @@
+// The `?` operator over Result<T, E>.
+//
+//   ai-lang add examples/try_demo.ail
+//   ai-lang run main
+//
+// `expr?` unwraps an `Ok(v)` to `v` and short-circuits an `Err(e)` by
+// early-returning it from the enclosing function. The enclosing function
+// must itself return a `Result<_, E>` with the same error type. (The
+// `Result<T, E>` enum comes from the stdlib.)
+
+// A fallible division: dividing by zero yields an error code instead of
+// trapping.
+def safe_div(a: Int, b: Int) -> Result<Int, Int> =
+    if b == 0 { Err(404) } else { Ok(a / b) }
+
+// Chains two fallible steps with `?`. If either errors, `compute`
+// returns that Err immediately without running the rest.
+def compute(x: Int, d: Int) -> Result<Int, Int> = {
+    let q = safe_div(x, d)?;
+    let r = safe_div(q + 6, 2)?;
+    Ok(r + 1)
+}
+
+// Collapse the Result to an Int for printing: negate the error code so
+// the two outcomes are easy to tell apart.
+def show(x: Int, d: Int) -> Int =
+    match compute(x, d) {
+        Ok(v) => v,
+        Err(code) => 0 - code
+    }
+
+def main() -> Int = {
+    // Ok path: 20/4 = 5, (5+6)/2 = 5, +1 = 6.
+    let _p1 = println(string_concat("compute(20, 4) = ", int_to_string(show(20, 4))));
+    // Err path: 20/0 short-circuits with Err(404); show negates it.
+    let _p2 = println(string_concat("compute(20, 0) = ", int_to_string(show(20, 0))));
+    show(20, 4)
+}

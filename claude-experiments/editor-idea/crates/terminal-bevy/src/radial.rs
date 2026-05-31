@@ -156,6 +156,7 @@ pub fn radial_open_close(
     buttons: Res<ButtonInput<MouseButton>>,
     mut keys: MessageReader<KeyboardInput>,
     sidebar: Res<Sidebar>,
+    viewport: Res<pane_bevy::PaneViewport>,
     mut menu: ResMut<RadialMenu>,
     mut consumed: ResMut<InputConsumed>,
     projects: Res<Projects>,
@@ -198,13 +199,14 @@ pub fn radial_open_close(
         // click landed inside any visible pane the user wanted to act
         // on *that pane*, not spawn a new one. Skip opening so the
         // context menu can handle it (or so nothing happens if context
-        // menu isn't installed).
+        // menu isn't installed). PaneRect is canvas-space; project the
+        // cursor through the viewport before the hit-test.
         let visible_rects: Vec<(Entity, PaneRect)> = panes
             .iter()
             .filter(|(_, _, vis)| !matches!(vis, Visibility::Hidden))
             .map(|(e, r, _)| (e, *r))
             .collect();
-        if topmost_pane_at(pt, &visible_rects).is_some() {
+        if topmost_pane_at(viewport.window_to_canvas(pt), &visible_rects).is_some() {
             return;
         }
         menu.center = Some(pt);

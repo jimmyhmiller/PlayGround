@@ -1,0 +1,15 @@
+[package]
+name = "jsir-analyses"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# MLIR-free dataflow analyses over the JSIR IR. First analysis: constant
+# propagation, a port of upstream `maldoca/js/ir/analyses/constant_propagation`.
+
+[dependencies]
+jsir-ir = { path = "../jsir-ir" }
+
+[dev-dependencies]
+jsir-swc = { path = "../jsir-swc" }
+serde_json = "1.0.150"

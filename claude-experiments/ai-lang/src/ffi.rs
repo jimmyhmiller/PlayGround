@@ -145,3 +145,19 @@ pub unsafe fn heap_str_to_owned(s: *const u8) -> String {
 pub unsafe fn owned_str_to_heap(thread: *mut Thread, s: &str) -> *mut u8 {
     unsafe { ai_str_new(thread, s.as_ptr(), s.len() as i64) }
 }
+
+/// Allocate a new ai-lang `String` (a heap byte buffer) holding the raw
+/// bytes in `b`. Unlike [`owned_str_to_heap`] this does NOT require valid
+/// UTF-8 — it copies bytes verbatim, so it's the right tool for binary
+/// payloads (e.g. an intermediate HMAC digest used as the key for the
+/// next HMAC in a SigV4 chain). Reading it back with [`heap_str_bytes`]
+/// returns the same bytes; reading it with [`heap_str_to_owned`] would
+/// lossily UTF-8-convert, so only use byte-level ops on the result.
+///
+/// # Safety
+/// `thread` must be the JIT-visible Thread pointer with `string_ti`
+/// initialised. No live ai-lang pointers may be held in Rust locals
+/// across this call (it may GC).
+pub unsafe fn owned_bytes_to_heap(thread: *mut Thread, b: &[u8]) -> *mut u8 {
+    unsafe { ai_str_new(thread, b.as_ptr(), b.len() as i64) }
+}

@@ -1,0 +1,54 @@
+// Array demo: a fixed-size, O(1)-indexable vector of GC-traced slots.
+//
+//   ai-lang add examples/array_demo.ail
+//   ai-lang run main
+//
+// `Array<T>` stores uniform pointer slots; Int elements are boxed/unboxed
+// automatically. The element type T is pinned through annotated positions
+// (here, the `-> Array<Int>` / `-> Array<Point>` return types).
+//
+// Builtins: array_new, array_len, array_get, array_set.
+
+def make_ints(n: Int) -> Array<Int> = array_new(n)
+
+// a[i] = i*i for every slot.
+def fill_squares(a: Array<Int>, i: Int) -> Int =
+    if i >= array_len(a) { 0 } else {
+        let _s = array_set(a, i, i * i);
+        fill_squares(a, i + 1)
+    }
+
+def sum(a: Array<Int>, i: Int, acc: Int) -> Int =
+    if i >= array_len(a) { acc } else {
+        sum(a, i + 1, acc + array_get(a, i))
+    }
+
+// Arrays of structs: slots hold real heap pointers, traced + relocated
+// by the GC like any other pointer.
+struct Point { x: Int, y: Int }
+def make_points(n: Int) -> Array<Point> = array_new(n)
+
+def main() -> Int = {
+    let a = make_ints(10);
+    let _f = fill_squares(a, 0);
+    // squares of 0..9 sum to 285.
+    let total = sum(a, 0, 0);
+    let _p1 = println(string_concat(
+        "sum of squares 0..9 = ", int_to_string(total)));
+    let _p2 = println(string_concat("a[7] = ", int_to_string(array_get(a, 7))));
+
+    // Stress the GC, then confirm the array's contents survived.
+    let _g = make_ints(0);
+    let _c = gc_collect();
+    let _p3 = println(string_concat(
+        "after GC, a[9] = ", int_to_string(array_get(a, 9))));
+
+    // Struct elements.
+    let pts = make_points(3);
+    let _q = array_set(pts, 0, Point { x: 3, y: 4 });
+    let p = array_get(pts, 0);
+    let _p4 = println(string_concat(
+        "pts[0].x + pts[0].y = ", int_to_string(p.x + p.y)));
+
+    total
+}

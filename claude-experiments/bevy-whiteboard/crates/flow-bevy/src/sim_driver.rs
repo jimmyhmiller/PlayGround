@@ -124,6 +124,25 @@ impl RenderSnapshot {
     pub fn has_class(&self, name: &str) -> bool {
         self.class_names.contains(name)
     }
+
+    /// Read a slot for `nid`, resolving into the compound's inner nodes
+    /// when `nid` is a gadget shim. Every stock gadget is a `*Composite`
+    /// whose live state lives on inner primitives (`count` on the inner
+    /// Counter, `len` on the inner Tally, `period_ns` on the inner Tick,
+    /// …); the shim carries none of these. Checks the shim's own slots
+    /// first, then the first inner node (`<shim_name>::*`) that declares
+    /// the slot — mirrors `Sim::read_slot_resolved` against the snapshot.
+    pub fn resolve_slot(&self, nid: NodeId, slot: &str) -> Option<&Value> {
+        let shim = self.nodes.get(&nid)?;
+        if let Some(v) = shim.slots.get(slot) {
+            return Some(v);
+        }
+        let prefix = format!("{}::", shim.name);
+        self.nodes
+            .values()
+            .find(|n| n.name.starts_with(&prefix) && n.slots.contains_key(slot))
+            .and_then(|n| n.slots.get(slot))
+    }
 }
 
 /// Build a render snapshot, attaching rewind metadata. The

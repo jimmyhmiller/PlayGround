@@ -166,12 +166,23 @@ impl QueryCache {
     ///
     /// In all of those cases the caller falls back to the uncached path
     /// that reads from the storage indexes directly.
+    /// The current cache generation. Callers MUST sample this *before*
+    /// creating the storage snapshot they will load from, then pass it to
+    /// `ensure_type_loaded`. That ordering is what makes stale-load
+    /// detection sound: a write commits, then bumps the generation, so any
+    /// snapshot taken after a given generation sample reflects every write
+    /// counted in that sample.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Acquire)
+    }
+
     pub fn ensure_type_loaded(
         &self,
         txn: &dyn ReadOps,
         interner: &AttrInterner,
         type_name: &str,
         schema: &SchemaRegistry,
+        gen_before: u64,
     ) -> Result<Option<Arc<TypeData>>, String> {
         // Disabled or degenerate policies skip the load entirely.
         match self.policy {
@@ -189,10 +200,10 @@ impl QueryCache {
             }
         }
 
-        // Snapshot the generation before loading — if it changes while
-        // we're holding no lock, an invalidation happened and our work
-        // must be discarded.
-        let gen_before = self.generation.load(Ordering::Acquire);
+        // `gen_before` was sampled by the caller before the snapshot `txn`
+        // was created. If the generation changes by the time we hold the
+        // write lock, a write landed during our load and our snapshot may
+        // miss it, so we must discard the freshly loaded copy.
 
         // Expensive load without any lock held.
         let type_cache = load_type_data(txn, interner, type_name, schema)?;
@@ -291,6 +302,13 @@ impl QueryCache {
 
         let mut inner = self.inner.write();
         let Some(entry) = inner.types.get_mut(type_name) else {
+            // Not cached: this write left no trace in the cache. A concurrent
+            // cold load may be building a TypeData from a snapshot taken
+            // before this write committed. Bump the generation (while holding
+            // the write lock, so it is ordered against that load's post-load
+            // generation re-check) to force such a load to discard its result
+            // rather than cache a row set that silently omits this entity.
+            self.generation.fetch_add(1, Ordering::Release);
             return;
         };
 
@@ -469,7 +487,7 @@ mod tests {
         let schema = empty_schema();
         let interner = empty_interner();
         let result = cache
-            .ensure_type_loaded(&EmptyOps, &interner, "User", &schema)
+            .ensure_type_loaded(&EmptyOps, &interner, "User", &schema, 0)
             .unwrap();
         assert!(result.is_none(), "disabled cache must return None");
         assert_eq!(cache.cached_type_count(), 0);
@@ -482,7 +500,7 @@ mod tests {
         let interner = empty_interner();
         for name in ["A", "B", "C", "D"] {
             cache
-                .ensure_type_loaded(&EmptyOps, &interner, name, &schema)
+                .ensure_type_loaded(&EmptyOps, &interner, name, &schema, 0)
                 .unwrap();
         }
         assert_eq!(cache.cached_type_count(), 4);
@@ -494,15 +512,15 @@ mod tests {
         let schema = empty_schema();
         let interner = empty_interner();
 
-        cache.ensure_type_loaded(&EmptyOps, &interner, "A", &schema).unwrap();
-        cache.ensure_type_loaded(&EmptyOps, &interner, "B", &schema).unwrap();
+        cache.ensure_type_loaded(&EmptyOps, &interner, "A", &schema, 0).unwrap();
+        cache.ensure_type_loaded(&EmptyOps, &interner, "B", &schema, 0).unwrap();
         assert_eq!(cache.cached_type_count(), 2);
 
-        cache.ensure_type_loaded(&EmptyOps, &interner, "A", &schema).unwrap();
-        cache.ensure_type_loaded(&EmptyOps, &interner, "C", &schema).unwrap();
+        cache.ensure_type_loaded(&EmptyOps, &interner, "A", &schema, 0).unwrap();
+        cache.ensure_type_loaded(&EmptyOps, &interner, "C", &schema, 0).unwrap();
         assert_eq!(cache.cached_type_count(), 2);
 
-        cache.ensure_type_loaded(&EmptyOps, &interner, "B", &schema).unwrap();
+        cache.ensure_type_loaded(&EmptyOps, &interner, "B", &schema, 0).unwrap();
         assert_eq!(cache.cached_type_count(), 2);
     }
 
@@ -512,7 +530,7 @@ mod tests {
         let schema = empty_schema();
         let interner = empty_interner();
         let result = cache
-            .ensure_type_loaded(&EmptyOps, &interner, "User", &schema)
+            .ensure_type_loaded(&EmptyOps, &interner, "User", &schema, 0)
             .unwrap();
         assert!(result.is_none());
         assert_eq!(cache.cached_type_count(), 0);
@@ -524,7 +542,7 @@ mod tests {
         let schema = empty_schema();
         let interner = empty_interner();
         cache
-            .ensure_type_loaded(&EmptyOps, &interner, "User", &schema)
+            .ensure_type_loaded(&EmptyOps, &interner, "User", &schema, 0)
             .unwrap();
         assert_eq!(cache.cached_type_count(), 1);
         cache.invalidate_type("User");

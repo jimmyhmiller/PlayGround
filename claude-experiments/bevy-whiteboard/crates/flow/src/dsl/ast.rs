@@ -249,6 +249,10 @@ pub enum EmitTarget {
     Default,
     Self_,
     OutPort(String),
+    /// Round-robin compound out-port: `emit X to out output rotating`.
+    /// Emits to the one `output`-port edge used longest ago. See
+    /// `flow::EmitTo::ToOutPortRotating`.
+    OutPortRotating(String),
     /// Leaf-node named output port: `emit X to port pass`. Fans
     /// onto outbound edges of the firing node whose `from_port`
     /// matches. See `flow::EmitTo::FromPort`.

@@ -86,6 +86,11 @@ pub enum CodebaseError {
     MissingDef(Hash),
     /// A `types/<hex>.type` file's name wasn't a valid 64-char hex hash.
     BadTypeFilename(PathBuf),
+    /// The causal-namespace layer (`namespace.rs`) failed during an auto-commit
+    /// or migration triggered from a name-changing operation. Carries the
+    /// underlying error's description (kept as a string to avoid a cyclic
+    /// error-type dependency between the two modules).
+    Namespace(String),
 }
 
 impl core::fmt::Display for CodebaseError {
@@ -112,6 +117,7 @@ impl core::fmt::Display for CodebaseError {
             CodebaseError::BadTypeFilename(p) => {
                 write!(f, "type filename is not a 64-char hex hash: {}", p.display())
             }
+            CodebaseError::Namespace(msg) => write!(f, "namespace error: {}", msg),
         }
     }
 }
@@ -144,6 +150,14 @@ pub struct Codebase {
     root: PathBuf,
     names: HashMap<String, Hash>,
     types: TypeCache,
+    /// When `true`, every name-changing operation
+    /// (`set_name`/`remove_name`/`store_resolved_module`) auto-commits a new
+    /// causal namespace snapshot to the current branch (see `namespace.rs`).
+    /// Enabled by default at `open` so history/undo capture real edits with
+    /// per-operation granularity. Cleared internally while a causal `switch`
+    /// or `undo` rewrites `names.txt` so reloading a snapshot does not itself
+    /// create a spurious commit.
+    auto_commit: bool,
 }
 
 impl Codebase {
@@ -154,9 +168,22 @@ impl Codebase {
         let root = path.as_ref().to_path_buf();
         fs::create_dir_all(root.join("defs"))?;
         fs::create_dir_all(root.join("types"))?;
+        fs::create_dir_all(root.join("localnames"))?;
         let names = read_names_file(&root.join("names.txt"))?;
         let types = read_types_dir(&root.join("types"))?;
-        Ok(Codebase { root, names, types })
+        let mut cb = Codebase {
+            root,
+            names,
+            types,
+            auto_commit: true,
+        };
+        // Migrate / initialise the causal namespace layer: if there is no
+        // `branches/` dir yet, create branch "main" from the current
+        // `names.txt` snapshot. This is backward-compatible: an existing
+        // codebase with only a `names.txt` keeps working, and `main` is
+        // seeded from it on first open. See `namespace.rs`.
+        crate::namespace::init_or_migrate(&mut cb)?;
+        Ok(cb)
     }
 
     pub fn root(&self) -> &Path {
@@ -307,6 +334,7 @@ impl Codebase {
     pub fn set_name(&mut self, name: impl Into<String>, hash: Hash) -> Result<(), CodebaseError> {
         self.names.insert(name.into(), hash);
         self.persist_names()?;
+        self.maybe_autocommit()?;
         Ok(())
     }
 
@@ -316,6 +344,7 @@ impl Codebase {
         let existed = self.names.remove(name).is_some();
         if existed {
             self.persist_names()?;
+            self.maybe_autocommit()?;
         }
         Ok(existed)
     }
@@ -331,6 +360,135 @@ impl Codebase {
             self.names.insert(rd.name.clone(), rd.hash);
         }
         self.persist_names()?;
+        self.maybe_autocommit()?;
+        Ok(())
+    }
+
+    // ---- Local-name side-car (readable param/let/lambda/match names) ----
+    //
+    // The canonical AST is name-erased (locals are de Bruijn indices) so
+    // that two functions identical up to local renaming hash the same. To
+    // give the `printer`'s `view` output readable names we keep the
+    // author's original local names OUTSIDE the hashed bytes, in
+    // `localnames/<hash>.names`: one UTF-8 line per name, in binder-push
+    // order (fn params first, then `let`/lambda-param/match-binding names),
+    // produced by [`crate::resolve::local_names_for_module`].
+    //
+    // This directory is pure presentation metadata; it never affects a
+    // def's identity. A missing file is normal (the printer falls back to
+    // `p0/p1/...`). Names are not part of `names.txt` (the namespace) and
+    // do not trigger a causal commit.
+
+    /// Path the local-name side-car for `hash` would live at.
+    pub fn local_names_path(&self, hash: &Hash) -> PathBuf {
+        self.root
+            .join("localnames")
+            .join(format!("{}.names", hash.to_hex()))
+    }
+
+    /// Persist the author's local names for one def hash. One name per
+    /// line, in binder-push order. A name MUST NOT contain a newline (no
+    /// surface identifier can), so the line encoding is unambiguous.
+    /// Idempotent: re-writing the same names is a no-op on disk.
+    ///
+    /// An empty list still writes an (empty) file, recording that the def
+    /// genuinely has no locals as distinct from "never captured" (no
+    /// file). The printer treats both as "fall back to p0/p1".
+    pub fn store_local_names(
+        &self,
+        hash: &Hash,
+        names: &[String],
+    ) -> Result<(), CodebaseError> {
+        let mut out = String::new();
+        for n in names {
+            debug_assert!(
+                !n.contains('\n'),
+                "local name must not contain a newline"
+            );
+            out.push_str(n);
+            out.push('\n');
+        }
+        let path = self.local_names_path(hash);
+        // Always (over)write: an edit can change names while keeping the
+        // same hash only if the body is byte-identical, but a different
+        // body yields a different hash + path, so a stale file is never
+        // read for the wrong def. Writing unconditionally keeps the latest
+        // capture authoritative.
+        fs::write(&path, out)?;
+        Ok(())
+    }
+
+    /// Persist a whole batch of `hash -> names` side-cars (as produced by
+    /// [`crate::resolve::local_names_for_module`]). Returns the count
+    /// written.
+    pub fn store_local_names_batch(
+        &self,
+        map: &HashMap<Hash, Vec<String>>,
+    ) -> Result<usize, CodebaseError> {
+        for (h, names) in map {
+            self.store_local_names(h, names)?;
+        }
+        Ok(map.len())
+    }
+
+    /// Load the author's local names for `hash`, or `None` when no
+    /// side-car file exists (the printer then falls back to `p0/p1/...`).
+    /// Each non-final newline delimits one name; a trailing newline does
+    /// not create an empty trailing entry.
+    pub fn load_local_names(&self, hash: &Hash) -> Result<Option<Vec<String>>, CodebaseError> {
+        let path = self.local_names_path(hash);
+        let bytes = match fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let text = core::str::from_utf8(&bytes).map_err(|_| CodebaseError::BadNamesLine {
+            line_no: 0,
+            line: "<localnames not utf-8>".to_owned(),
+        })?;
+        // `lines()` drops a single trailing newline and yields no trailing
+        // empty entry, which is exactly the inverse of `store_local_names`.
+        let names: Vec<String> = text.lines().map(|l| l.to_owned()).collect();
+        Ok(Some(names))
+    }
+
+    // ---- Causal namespace integration (see `namespace.rs`) ----
+
+    /// Whether name-changing operations auto-commit a causal snapshot.
+    pub fn auto_commit_enabled(&self) -> bool {
+        self.auto_commit
+    }
+
+    /// Enable/disable auto-commit. The causal `switch`/`undo` paths disable it
+    /// while they rewrite `names.txt` from a target snapshot, so reloading a
+    /// historical namespace does not itself spawn a new commit.
+    pub fn set_auto_commit(&mut self, on: bool) {
+        self.auto_commit = on;
+    }
+
+    /// Replace the in-memory + on-disk name map wholesale, WITHOUT
+    /// auto-committing. Used by the causal layer (`switch`/`undo`) to project a
+    /// chosen namespace snapshot back into the backward-compatible `names.txt`
+    /// view that the existing name API reads. Auto-commit state is preserved.
+    pub fn replace_names(
+        &mut self,
+        names: HashMap<String, Hash>,
+    ) -> Result<(), CodebaseError> {
+        let prev = self.auto_commit;
+        self.auto_commit = false;
+        self.names = names;
+        self.persist_names()?;
+        self.auto_commit = prev;
+        Ok(())
+    }
+
+    /// If auto-commit is on, snapshot the current name map into a new causal
+    /// node on the active branch (no-op if the snapshot is unchanged).
+    fn maybe_autocommit(&mut self) -> Result<(), CodebaseError> {
+        if self.auto_commit {
+            crate::namespace::commit_namespace(self)
+                .map_err(|e| CodebaseError::Namespace(e.to_string()))?;
+        }
         Ok(())
     }
 
@@ -743,6 +901,55 @@ mod tests {
             Err(_) => {} // expected
             Ok(_) => panic!("type file corruption not detected"),
         }
+    }
+
+    #[test]
+    fn local_names_roundtrip_on_disk() {
+        let dir = tempdir("localnames_roundtrip");
+        let h = Hash([0x33; 32]);
+        let names = vec!["price".to_owned(), "qty".to_owned()];
+        {
+            let cb = Codebase::open(&dir).unwrap();
+            assert_eq!(cb.load_local_names(&h).unwrap(), None);
+            cb.store_local_names(&h, &names).unwrap();
+            assert_eq!(cb.load_local_names(&h).unwrap(), Some(names.clone()));
+        }
+        // Survives reopen.
+        let cb2 = Codebase::open(&dir).unwrap();
+        assert_eq!(cb2.load_local_names(&h).unwrap(), Some(names));
+    }
+
+    #[test]
+    fn local_names_empty_vs_absent() {
+        let dir = tempdir("localnames_empty");
+        let cb = Codebase::open(&dir).unwrap();
+        let h = Hash([0x44; 32]);
+        // Absent file -> None.
+        assert_eq!(cb.load_local_names(&h).unwrap(), None);
+        // Stored empty list -> Some(empty), distinct from absent.
+        cb.store_local_names(&h, &[]).unwrap();
+        assert_eq!(cb.load_local_names(&h).unwrap(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn local_names_from_module_capture() {
+        use crate::parser::parse_module;
+        use crate::resolve::local_names_for_module;
+
+        let dir = tempdir("localnames_capture");
+        let mut cb = Codebase::open(&dir).unwrap();
+        let src = "def total(price: Int, qty: Int) -> Int = price * qty";
+        let m = parse_module(src).unwrap();
+        let rm = crate::resolve::resolve_module(&m).unwrap();
+        cb.store_resolved_module(&rm).unwrap();
+        let names = local_names_for_module(&m).unwrap();
+        cb.store_local_names_batch(&names).unwrap();
+
+        let h = rm.get("total").unwrap().hash;
+        assert_eq!(
+            cb.load_local_names(&h).unwrap(),
+            Some(vec!["price".to_owned(), "qty".to_owned()])
+        );
     }
 
     #[test]

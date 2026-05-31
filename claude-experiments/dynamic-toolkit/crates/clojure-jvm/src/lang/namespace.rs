@@ -119,6 +119,52 @@ impl Namespace {
         }
         None
     }
+
+    /// `Namespace.refer(Symbol sym, Var var)`. Adds a mapping `sym -> var`
+    /// into this namespace. Backs the `(. *ns* (refer sym v))` call at the
+    /// bottom of the `refer` function (which the `ns` macro emits as
+    /// `(refer 'clojure.core)`). A genuine clash with a different existing
+    /// var is replaced (Java warns/throws depending on context; we keep it
+    /// simple), but a re-refer of the identical var is idempotent.
+    pub fn refer(self: &Arc<Self>, sym: Arc<Symbol>, var: Arc<Var>) {
+        let mut map = self.mappings.lock().unwrap();
+        // Replace any structurally-equal existing key (the HashMap hashes on
+        // Arc identity, so locate the slot by structural symbol equality).
+        let existing_key = map.iter().find(|(k, _)| ***k == *sym).map(|(k, _)| k.clone());
+        if let Some(k) = existing_key {
+            map.insert(k, Object::Var(var));
+        } else {
+            map.insert(sym, Object::Var(var));
+        }
+    }
+
+    /// Snapshot of this namespace's mappings as `(Symbol, Object)` pairs.
+    /// Backs the `Namespace.getMappings` host method (used by `ns-map` /
+    /// `ns-publics`).
+    pub fn mappings_snapshot(&self) -> Vec<(Arc<Symbol>, Object)> {
+        let map = self.mappings.lock().unwrap();
+        map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+
+    /// `Namespace.addAlias(Symbol alias, Namespace ns)`. Registers `alias`
+    /// → `ns` in this namespace's aliases map. Used by `(ns foo (:require
+    /// [bar :as b]))` and top-level `(alias 'b 'bar)`.
+    pub fn add_alias(&self, alias: Arc<Symbol>, ns: Arc<Namespace>) {
+        let mut a = self.aliases.lock().unwrap();
+        a.insert(alias, ns);
+    }
+
+    /// `Namespace.lookupAlias(Symbol alias)`. Returns the namespace that
+    /// `alias` was registered to point at, or `None`.
+    pub fn lookup_alias(&self, alias: &Symbol) -> Option<Arc<Namespace>> {
+        let a = self.aliases.lock().unwrap();
+        for (k, v) in a.iter() {
+            if **k == *alias {
+                return Some(v.clone());
+            }
+        }
+        None
+    }
 }
 
 impl std::fmt::Display for Namespace {

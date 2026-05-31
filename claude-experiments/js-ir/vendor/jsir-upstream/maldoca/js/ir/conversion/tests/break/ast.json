@@ -1,0 +1,672 @@
+// AST:      {
+// AST-NEXT:   "type": "File",
+// AST-NEXT:   "loc": {
+// AST-NEXT:     "start": {
+// AST-NEXT:       "line": 1,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     },
+// AST-NEXT:     "end": {
+// AST-NEXT:       "line": 27,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     }
+// AST-NEXT:   },
+// AST-NEXT:   "start": 0,
+// AST-NEXT:   "end": 733,
+// AST-NEXT:   "program": {
+// AST-NEXT:     "type": "Program",
+// AST-NEXT:     "loc": {
+// AST-NEXT:       "start": {
+// AST-NEXT:         "line": 1,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       },
+// AST-NEXT:       "end": {
+// AST-NEXT:         "line": 27,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       }
+// AST-NEXT:     },
+// AST-NEXT:     "start": 0,
+// AST-NEXT:     "end": 733,
+// AST-NEXT:     "scopeUid": 0,
+// AST-NEXT:     "interpreter": null,
+// AST-NEXT:     "sourceType": "script",
+// AST-NEXT:     "body": [
+// AST-NEXT:       {
+// AST-NEXT:         "type": "WhileStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 5,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 9,
+// AST-NEXT:             "column": 1
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 195,
+// AST-NEXT:         "end": 233,
+// AST-NEXT:         "leadingCommentUids": [
+// AST-NEXT:           0,
+// AST-NEXT:           1,
+// AST-NEXT:           2
+// AST-NEXT:         ],
+// AST-NEXT:         "trailingCommentUids": [
+// AST-NEXT:           3,
+// AST-NEXT:           4,
+// AST-NEXT:           5
+// AST-NEXT:         ],
+// AST-NEXT:         "scopeUid": 1,
+// AST-NEXT:         "test": {
+// AST-NEXT:           "type": "Identifier",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 5,
+// AST-NEXT:               "column": 7
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 5,
+// AST-NEXT:               "column": 8
+// AST-NEXT:             },
+// AST-NEXT:             "identifierName": "a"
+// AST-NEXT:           },
+// AST-NEXT:           "start": 202,
+// AST-NEXT:           "end": 203,
+// AST-NEXT:           "scopeUid": 1,
+// AST-NEXT:           "name": "a"
+// AST-NEXT:         },
+// AST-NEXT:         "body": {
+// AST-NEXT:           "type": "BlockStatement",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 5,
+// AST-NEXT:               "column": 10
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 9,
+// AST-NEXT:               "column": 1
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 205,
+// AST-NEXT:           "end": 233,
+// AST-NEXT:           "scopeUid": 2,
+// AST-NEXT:           "body": [
+// AST-NEXT:             {
+// AST-NEXT:               "type": "ExpressionStatement",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 6,
+// AST-NEXT:                   "column": 2
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 6,
+// AST-NEXT:                   "column": 4
+// AST-NEXT:                 }
+// AST-NEXT:               },
+// AST-NEXT:               "start": 209,
+// AST-NEXT:               "end": 211,
+// AST-NEXT:               "scopeUid": 2,
+// AST-NEXT:               "expression": {
+// AST-NEXT:                 "type": "Identifier",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 6,
+// AST-NEXT:                     "column": 2
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 6,
+// AST-NEXT:                     "column": 3
+// AST-NEXT:                   },
+// AST-NEXT:                   "identifierName": "b"
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 209,
+// AST-NEXT:                 "end": 210,
+// AST-NEXT:                 "scopeUid": 2,
+// AST-NEXT:                 "name": "b"
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             {
+// AST-NEXT:               "type": "IfStatement",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 7,
+// AST-NEXT:                   "column": 2
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 8,
+// AST-NEXT:                   "column": 10
+// AST-NEXT:                 }
+// AST-NEXT:               },
+// AST-NEXT:               "start": 214,
+// AST-NEXT:               "end": 231,
+// AST-NEXT:               "scopeUid": 2,
+// AST-NEXT:               "test": {
+// AST-NEXT:                 "type": "Identifier",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 7,
+// AST-NEXT:                     "column": 6
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 7,
+// AST-NEXT:                     "column": 7
+// AST-NEXT:                   },
+// AST-NEXT:                   "identifierName": "c"
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 218,
+// AST-NEXT:                 "end": 219,
+// AST-NEXT:                 "scopeUid": 2,
+// AST-NEXT:                 "name": "c"
+// AST-NEXT:               },
+// AST-NEXT:               "consequent": {
+// AST-NEXT:                 "type": "BreakStatement",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 8,
+// AST-NEXT:                     "column": 4
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 8,
+// AST-NEXT:                     "column": 10
+// AST-NEXT:                   }
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 225,
+// AST-NEXT:                 "end": 231,
+// AST-NEXT:                 "scopeUid": 2,
+// AST-NEXT:                 "label": null
+// AST-NEXT:               },
+// AST-NEXT:               "alternate": null
+// AST-NEXT:             }
+// AST-NEXT:           ],
+// AST-NEXT:           "directives": []
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "LabeledStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 15,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 20,
+// AST-NEXT:             "column": 1
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 435,
+// AST-NEXT:         "end": 512,
+// AST-NEXT:         "leadingCommentUids": [
+// AST-NEXT:           3,
+// AST-NEXT:           4,
+// AST-NEXT:           5
+// AST-NEXT:         ],
+// AST-NEXT:         "trailingCommentUids": [
+// AST-NEXT:           6,
+// AST-NEXT:           7,
+// AST-NEXT:           8
+// AST-NEXT:         ],
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "label": {
+// AST-NEXT:           "type": "Identifier",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 15,
+// AST-NEXT:               "column": 0
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 15,
+// AST-NEXT:               "column": 6
+// AST-NEXT:             },
+// AST-NEXT:             "identifierName": "label0"
+// AST-NEXT:           },
+// AST-NEXT:           "start": 435,
+// AST-NEXT:           "end": 441,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "name": "label0"
+// AST-NEXT:         },
+// AST-NEXT:         "body": {
+// AST-NEXT:           "type": "WhileStatement",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 15,
+// AST-NEXT:               "column": 8
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 20,
+// AST-NEXT:               "column": 1
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 443,
+// AST-NEXT:           "end": 512,
+// AST-NEXT:           "scopeUid": 3,
+// AST-NEXT:           "test": {
+// AST-NEXT:             "type": "Identifier",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 15,
+// AST-NEXT:                 "column": 15
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 15,
+// AST-NEXT:                 "column": 16
+// AST-NEXT:               },
+// AST-NEXT:               "identifierName": "a"
+// AST-NEXT:             },
+// AST-NEXT:             "start": 450,
+// AST-NEXT:             "end": 451,
+// AST-NEXT:             "scopeUid": 3,
+// AST-NEXT:             "name": "a"
+// AST-NEXT:           },
+// AST-NEXT:           "body": {
+// AST-NEXT:             "type": "BlockStatement",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 15,
+// AST-NEXT:                 "column": 18
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 20,
+// AST-NEXT:                 "column": 1
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             "start": 453,
+// AST-NEXT:             "end": 512,
+// AST-NEXT:             "scopeUid": 4,
+// AST-NEXT:             "body": [
+// AST-NEXT:               {
+// AST-NEXT:                 "type": "ExpressionStatement",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 16,
+// AST-NEXT:                     "column": 2
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 16,
+// AST-NEXT:                     "column": 4
+// AST-NEXT:                   }
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 457,
+// AST-NEXT:                 "end": 459,
+// AST-NEXT:                 "scopeUid": 4,
+// AST-NEXT:                 "expression": {
+// AST-NEXT:                   "type": "Identifier",
+// AST-NEXT:                   "loc": {
+// AST-NEXT:                     "start": {
+// AST-NEXT:                       "line": 16,
+// AST-NEXT:                       "column": 2
+// AST-NEXT:                     },
+// AST-NEXT:                     "end": {
+// AST-NEXT:                       "line": 16,
+// AST-NEXT:                       "column": 3
+// AST-NEXT:                     },
+// AST-NEXT:                     "identifierName": "b"
+// AST-NEXT:                   },
+// AST-NEXT:                   "start": 457,
+// AST-NEXT:                   "end": 458,
+// AST-NEXT:                   "scopeUid": 4,
+// AST-NEXT:                   "name": "b"
+// AST-NEXT:                 }
+// AST-NEXT:               },
+// AST-NEXT:               {
+// AST-NEXT:                 "type": "LabeledStatement",
+// AST-NEXT:                 "loc": {
+// AST-NEXT:                   "start": {
+// AST-NEXT:                     "line": 17,
+// AST-NEXT:                     "column": 2
+// AST-NEXT:                   },
+// AST-NEXT:                   "end": {
+// AST-NEXT:                     "line": 19,
+// AST-NEXT:                     "column": 19
+// AST-NEXT:                   }
+// AST-NEXT:                 },
+// AST-NEXT:                 "start": 462,
+// AST-NEXT:                 "end": 510,
+// AST-NEXT:                 "scopeUid": 4,
+// AST-NEXT:                 "label": {
+// AST-NEXT:                   "type": "Identifier",
+// AST-NEXT:                   "loc": {
+// AST-NEXT:                     "start": {
+// AST-NEXT:                       "line": 17,
+// AST-NEXT:                       "column": 2
+// AST-NEXT:                     },
+// AST-NEXT:                     "end": {
+// AST-NEXT:                       "line": 17,
+// AST-NEXT:                       "column": 8
+// AST-NEXT:                     },
+// AST-NEXT:                     "identifierName": "label1"
+// AST-NEXT:                   },
+// AST-NEXT:                   "start": 462,
+// AST-NEXT:                   "end": 468,
+// AST-NEXT:                   "scopeUid": 4,
+// AST-NEXT:                   "name": "label1"
+// AST-NEXT:                 },
+// AST-NEXT:                 "body": {
+// AST-NEXT:                   "type": "WhileStatement",
+// AST-NEXT:                   "loc": {
+// AST-NEXT:                     "start": {
+// AST-NEXT:                       "line": 17,
+// AST-NEXT:                       "column": 10
+// AST-NEXT:                     },
+// AST-NEXT:                     "end": {
+// AST-NEXT:                       "line": 19,
+// AST-NEXT:                       "column": 19
+// AST-NEXT:                     }
+// AST-NEXT:                   },
+// AST-NEXT:                   "start": 470,
+// AST-NEXT:                   "end": 510,
+// AST-NEXT:                   "scopeUid": 5,
+// AST-NEXT:                   "test": {
+// AST-NEXT:                     "type": "Identifier",
+// AST-NEXT:                     "loc": {
+// AST-NEXT:                       "start": {
+// AST-NEXT:                         "line": 17,
+// AST-NEXT:                         "column": 17
+// AST-NEXT:                       },
+// AST-NEXT:                       "end": {
+// AST-NEXT:                         "line": 17,
+// AST-NEXT:                         "column": 18
+// AST-NEXT:                       },
+// AST-NEXT:                       "identifierName": "d"
+// AST-NEXT:                     },
+// AST-NEXT:                     "start": 477,
+// AST-NEXT:                     "end": 478,
+// AST-NEXT:                     "scopeUid": 5,
+// AST-NEXT:                     "name": "d"
+// AST-NEXT:                   },
+// AST-NEXT:                   "body": {
+// AST-NEXT:                     "type": "IfStatement",
+// AST-NEXT:                     "loc": {
+// AST-NEXT:                       "start": {
+// AST-NEXT:                         "line": 18,
+// AST-NEXT:                         "column": 4
+// AST-NEXT:                       },
+// AST-NEXT:                       "end": {
+// AST-NEXT:                         "line": 19,
+// AST-NEXT:                         "column": 19
+// AST-NEXT:                       }
+// AST-NEXT:                     },
+// AST-NEXT:                     "start": 484,
+// AST-NEXT:                     "end": 510,
+// AST-NEXT:                     "scopeUid": 5,
+// AST-NEXT:                     "test": {
+// AST-NEXT:                       "type": "Identifier",
+// AST-NEXT:                       "loc": {
+// AST-NEXT:                         "start": {
+// AST-NEXT:                           "line": 18,
+// AST-NEXT:                           "column": 8
+// AST-NEXT:                         },
+// AST-NEXT:                         "end": {
+// AST-NEXT:                           "line": 18,
+// AST-NEXT:                           "column": 9
+// AST-NEXT:                         },
+// AST-NEXT:                         "identifierName": "c"
+// AST-NEXT:                       },
+// AST-NEXT:                       "start": 488,
+// AST-NEXT:                       "end": 489,
+// AST-NEXT:                       "scopeUid": 5,
+// AST-NEXT:                       "name": "c"
+// AST-NEXT:                     },
+// AST-NEXT:                     "consequent": {
+// AST-NEXT:                       "type": "BreakStatement",
+// AST-NEXT:                       "loc": {
+// AST-NEXT:                         "start": {
+// AST-NEXT:                           "line": 19,
+// AST-NEXT:                           "column": 6
+// AST-NEXT:                         },
+// AST-NEXT:                         "end": {
+// AST-NEXT:                           "line": 19,
+// AST-NEXT:                           "column": 19
+// AST-NEXT:                         }
+// AST-NEXT:                       },
+// AST-NEXT:                       "start": 497,
+// AST-NEXT:                       "end": 510,
+// AST-NEXT:                       "scopeUid": 5,
+// AST-NEXT:                       "label": {
+// AST-NEXT:                         "type": "Identifier",
+// AST-NEXT:                         "loc": {
+// AST-NEXT:                           "start": {
+// AST-NEXT:                             "line": 19,
+// AST-NEXT:                             "column": 12
+// AST-NEXT:                           },
+// AST-NEXT:                           "end": {
+// AST-NEXT:                             "line": 19,
+// AST-NEXT:                             "column": 18
+// AST-NEXT:                           },
+// AST-NEXT:                           "identifierName": "label0"
+// AST-NEXT:                         },
+// AST-NEXT:                         "start": 503,
+// AST-NEXT:                         "end": 509,
+// AST-NEXT:                         "scopeUid": 5,
+// AST-NEXT:                         "name": "label0"
+// AST-NEXT:                       }
+// AST-NEXT:                     },
+// AST-NEXT:                     "alternate": null
+// AST-NEXT:                   }
+// AST-NEXT:                 }
+// AST-NEXT:               }
+// AST-NEXT:             ],
+// AST-NEXT:             "directives": []
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "LabeledStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 26,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 26,
+// AST-NEXT:             "column": 19
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 713,
+// AST-NEXT:         "end": 732,
+// AST-NEXT:         "leadingCommentUids": [
+// AST-NEXT:           6,
+// AST-NEXT:           7,
+// AST-NEXT:           8
+// AST-NEXT:         ],
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "label": {
+// AST-NEXT:           "type": "Identifier",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 26,
+// AST-NEXT:               "column": 0
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 26,
+// AST-NEXT:               "column": 5
+// AST-NEXT:             },
+// AST-NEXT:             "identifierName": "label"
+// AST-NEXT:           },
+// AST-NEXT:           "start": 713,
+// AST-NEXT:           "end": 718,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "name": "label"
+// AST-NEXT:         },
+// AST-NEXT:         "body": {
+// AST-NEXT:           "type": "BreakStatement",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 26,
+// AST-NEXT:               "column": 7
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 26,
+// AST-NEXT:               "column": 19
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 720,
+// AST-NEXT:           "end": 732,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "label": {
+// AST-NEXT:             "type": "Identifier",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 26,
+// AST-NEXT:                 "column": 13
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 26,
+// AST-NEXT:                 "column": 18
+// AST-NEXT:               },
+// AST-NEXT:               "identifierName": "label"
+// AST-NEXT:             },
+// AST-NEXT:             "start": 726,
+// AST-NEXT:             "end": 731,
+// AST-NEXT:             "scopeUid": 0,
+// AST-NEXT:             "name": "label"
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       }
+// AST-NEXT:     ],
+// AST-NEXT:     "directives": []
+// AST-NEXT:   },
+// AST-NEXT:   "comments": [
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 1,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 1,
+// AST-NEXT:           "column": 80
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " =============================================================================",
+// AST-NEXT:       "start": 0,
+// AST-NEXT:       "end": 80
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 2,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 2,
+// AST-NEXT:           "column": 31
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " Breaking out of a while loop",
+// AST-NEXT:       "start": 81,
+// AST-NEXT:       "end": 112
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 3,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 3,
+// AST-NEXT:           "column": 80
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " =============================================================================",
+// AST-NEXT:       "start": 113,
+// AST-NEXT:       "end": 193
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 11,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 11,
+// AST-NEXT:           "column": 80
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " =============================================================================",
+// AST-NEXT:       "start": 235,
+// AST-NEXT:       "end": 315
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 12,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 12,
+// AST-NEXT:           "column": 36
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " Breaking out of second while loop",
+// AST-NEXT:       "start": 316,
+// AST-NEXT:       "end": 352
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 13,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 13,
+// AST-NEXT:           "column": 80
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " =============================================================================",
+// AST-NEXT:       "start": 353,
+// AST-NEXT:       "end": 433
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 22,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 22,
+// AST-NEXT:           "column": 80
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " =============================================================================",
+// AST-NEXT:       "start": 514,
+// AST-NEXT:       "end": 594
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 23,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 23,
+// AST-NEXT:           "column": 35
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " Breaking immediately after label",
+// AST-NEXT:       "start": 595,
+// AST-NEXT:       "end": 630
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 24,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 24,
+// AST-NEXT:           "column": 80
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " =============================================================================",
+// AST-NEXT:       "start": 631,
+// AST-NEXT:       "end": 711
+// AST-NEXT:     }
+// AST-NEXT:   ]
+// AST-NEXT: }

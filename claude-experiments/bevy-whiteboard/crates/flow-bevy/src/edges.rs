@@ -445,15 +445,43 @@ pub fn wire_flow_edge(
         let queue_id  = to_nid;
 
         let (signal_eid, data_eid) = driver.0.with_sim_mut(move |sim| {
-            let signal_eid = sim.add_edge(worker_id, queue_id, flow::Expr::int(1_000_000));
-            let data_eid   = sim.add_edge(queue_id,  worker_id, flow::Expr::int(1_000_000));
+            // Signal edge: worker emits `pull(_)` from its dedicated
+            // `pull` out-port into the queue's `pull` in-port (lands at
+            // the Buffer inner). Data edge: queue's `output` out-port
+            // back to worker's `request` forward-input. Both endpoints
+            // are compounds, so port tagging is mandatory — without it
+            // the engine drops the emit on the compound shim.
+            let signal_eid = sim.add_edge_ports(
+                worker_id,
+                Some("pull".to_string()),
+                queue_id,
+                Some("pull".to_string()),
+                flow::Expr::int(1_000_000),
+            );
+            let data_eid = sim.add_edge_ports(
+                queue_id,
+                Some("output".to_string()),
+                worker_id,
+                Some("request".to_string()),
+                flow::Expr::int(1_000_000),
+            );
             if let Some(n) = sim.nodes.get_mut(&worker_id) {
                 n.slots.insert("upstream".into(), flow::Value::NodeRef(queue_id));
             }
-            sim.inject(
-                queue_id,
-                flow::Value::variant("pull", flow::Value::NodeRef(worker_id)),
-            );
+            // Bootstrap a `pull(worker)` at the Buffer puller so the
+            // queue dispatches the first item without waiting for the
+            // worker's first tick. The shim has no rules — route the
+            // packet directly to whichever inner node owns the `pull`
+            // port (Buffer in the current QueueComposite).
+            let pull_inner = sim.nodes.get(&queue_id)
+                .and_then(|n| n.compound.as_ref())
+                .and_then(|cb| cb.in_ports.get("pull").copied());
+            if let Some(buffer) = pull_inner {
+                sim.inject(
+                    buffer,
+                    flow::Value::variant("pull", flow::Value::NodeRef(worker_id)),
+                );
+            }
             (signal_eid, data_eid)
         });
 
@@ -483,11 +511,22 @@ pub fn wire_flow_edge(
             to_kind_local,
             Some(k) if sim.compound_templates.contains_key(crate::gadgets::compound_class_name_for(k))
         );
-        let from_port = if from_is_compound {
-            from_kind_local.and_then(|k| k.default_output_port()).map(|s| s.to_string())
+        let from_port = if matches!(from_kind_local, Some(Kind::Router)) {
+            // A Router is a colour demux: its interior is a Filter chain
+            // exposing one `lane{c}` output port per colour. We don't make
+            // the user pick a port — the destination's own lane colour
+            // (mirrored on its shim as `__route_color`) selects it, so a
+            // colour-`c` queue auto-attaches to the router's `lane{c}`.
+            let dest_color = sim.nodes.get(&to_nid)
+                .and_then(|n| n.slots.get(flow::ROUTE_COLOR_SLOT))
+                .and_then(|v| if let flow::Value::Int(c) = v { Some(*c) } else { None })
+                .unwrap_or(0);
+            Some(format!("lane{}", dest_color))
+        } else if from_is_compound {
+            from_kind_local.and_then(|k| k.forward_output_port()).map(|s| s.to_string())
         } else { None };
         let to_port = if to_is_compound {
-            to_kind_local.and_then(|k| k.default_input_port()).map(|s| s.to_string())
+            to_kind_local.and_then(|k| k.forward_input_port()).map(|s| s.to_string())
         } else { None };
         let eid = sim.add_edge_ports(from_nid, from_port, to_nid, to_port, flow::Expr::int(1_000_000));
         if matches!(from_kind_local, Some(Kind::Worker)) {
@@ -504,8 +543,8 @@ pub fn wire_flow_edge(
         // `to.response_port → from.reply_port` whenever both sides are
         // compounds AND both report a reverse port.
         let response_eid = if from_is_compound && to_is_compound {
-            let resp_out = to_kind_local.and_then(|k| k.default_output_port()).map(|s| s.to_string());
-            let resp_in = from_kind_local.and_then(|k| k.default_input_port()).map(|s| s.to_string());
+            let resp_out = to_kind_local.and_then(|k| k.reverse_output_port()).map(|s| s.to_string());
+            let resp_in = from_kind_local.and_then(|k| k.reverse_input_port()).map(|s| s.to_string());
             // Only wire a response edge if BOTH sides have ports for
             // the reverse direction. A Generator (no input port) talking
             // to a Sink (no output port) gets a forward-only wire.

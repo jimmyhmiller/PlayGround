@@ -1,0 +1,35 @@
+// `defer` — deterministic cleanup for C-FFI resources, the alternative
+// to GC finalizers. A `defer expr;` statement runs `expr` when the
+// enclosing block exits, on every path (normal completion and any `?`
+// early-return), in LIFO order. It adds no binding.
+//
+//   ai-lang add examples/defer_demo.ail
+//   ai-lang run main
+//
+// `with_buffer` mallocs a libc buffer and registers its `free` with
+// `defer` right next to the allocation, so the buffer is released
+// deterministically when the function returns, with no manual cleanup
+// epilogue. A second `defer` writes a marker so we can observe that the
+// cleanup actually ran. Cleanups run LIFO: the marker write happens
+// first, then the free.
+
+// Store 42 in a freshly malloc'd cell, read it back, and let `defer`
+// release the cell (and stamp `log` to prove the cleanup ran) on return.
+def with_buffer(log: Ptr) -> Int = {
+    let buf = malloc(16);
+    defer free(buf);
+    defer ptr_write_i64(log, 0, 1);
+    let z = ptr_write_i64(buf, 0, 42);
+    ptr_read_i64(buf, 0)
+}
+
+def main() -> Int = {
+    let log = malloc(8);
+    let z = ptr_write_i64(log, 0, 0);
+    let v = with_buffer(log);
+    let ran = ptr_read_i64(log, 0);
+    let f = free(log);
+    let a = println(string_concat("returned: ", int_to_string(v)));
+    let b = println(string_concat("cleanup ran (1 = yes): ", int_to_string(ran)));
+    0
+}

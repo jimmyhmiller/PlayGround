@@ -72,6 +72,11 @@ pub struct LayoutCtx {
     pub focused_input: Option<crate::WidgetInputFocus>,
     /// Caret blink state — true when the bar is visible this frame.
     pub caret_visible: bool,
+    /// ID of the clickable currently under the mouse pointer in this
+    /// pane (`None` if no hover, or the hover is over a non-clickable
+    /// region). Render fns compare against their element id to pick
+    /// hover-state colors.
+    pub hovered_click_id: Option<String>,
 }
 
 impl LayoutCtx {
@@ -141,6 +146,7 @@ pub struct WidgetPalette {
     pub link: Color,
     pub divider: Color,
     pub button_bg: Color,
+    pub button_bg_hover: Color,
     pub button_label: Color,
     pub badge_bg: Color,
     pub badge_label: Color,
@@ -166,6 +172,7 @@ impl WidgetPalette {
             link: c(t::WIDGET_LINK),
             divider: c(t::CHROME_DIVIDER),
             button_bg: c(t::BUTTON_BG),
+            button_bg_hover: c(t::BUTTON_BG_HOVER),
             button_label: c(t::BUTTON_LABEL),
             badge_bg: c(t::WIDGET_BADGE_BG),
             badge_label: c(t::WIDGET_BADGE_LABEL),
@@ -618,10 +625,29 @@ fn render_button_at(
         ),
     };
 
-    let bg_color = style
+    let mut bg_color = style
         .and_then(|s| s.background.as_deref())
         .and_then(|c| ctx.resolve_color(c))
         .unwrap_or(default_bg);
+    let is_hovered = ctx.hovered_click_id.as_deref() == Some(id);
+    if is_hovered {
+        // Hover state: substitute the theme's hover bg for the kind's
+        // default opaque bg, or lift a transparent bg (Outline / Ghost)
+        // toward the hover color at a low alpha so the affordance is
+        // visible without filling in the entire button.
+        bg_color = match kind {
+            ButtonKind::Filled => ctx.palette.button_bg_hover,
+            ButtonKind::Outline | ButtonKind::Ghost => {
+                let hover = ctx.palette.button_bg_hover.to_linear();
+                Color::LinearRgba(LinearRgba {
+                    red: hover.red,
+                    green: hover.green,
+                    blue: hover.blue,
+                    alpha: 0.18,
+                })
+            }
+        };
+    }
     let border_color = style
         .and_then(|s| s.border.as_ref())
         .and_then(|b| ctx.resolve_color(&b.color))

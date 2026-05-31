@@ -1,0 +1,380 @@
+// AST:      {
+// AST-NEXT:   "type": "File",
+// AST-NEXT:   "loc": {
+// AST-NEXT:     "start": {
+// AST-NEXT:       "line": 1,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     },
+// AST-NEXT:     "end": {
+// AST-NEXT:       "line": 18,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     }
+// AST-NEXT:   },
+// AST-NEXT:   "start": 0,
+// AST-NEXT:   "end": 105,
+// AST-NEXT:   "program": {
+// AST-NEXT:     "type": "Program",
+// AST-NEXT:     "loc": {
+// AST-NEXT:       "start": {
+// AST-NEXT:         "line": 1,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       },
+// AST-NEXT:       "end": {
+// AST-NEXT:         "line": 18,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       }
+// AST-NEXT:     },
+// AST-NEXT:     "start": 0,
+// AST-NEXT:     "end": 105,
+// AST-NEXT:     "scopeUid": 0,
+// AST-NEXT:     "interpreter": null,
+// AST-NEXT:     "sourceType": "script",
+// AST-NEXT:     "body": [
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ExpressionStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 2,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 2,
+// AST-NEXT:             "column": 4
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 22,
+// AST-NEXT:         "end": 26,
+// AST-NEXT:         "leadingCommentUids": [
+// AST-NEXT:           0
+// AST-NEXT:         ],
+// AST-NEXT:         "trailingCommentUids": [
+// AST-NEXT:           1
+// AST-NEXT:         ],
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "expression": {
+// AST-NEXT:           "type": "RegExpLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 2,
+// AST-NEXT:               "column": 0
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 2,
+// AST-NEXT:               "column": 3
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 22,
+// AST-NEXT:           "end": 25,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "pattern": "1",
+// AST-NEXT:           "flags": "",
+// AST-NEXT:           "extra": {
+// AST-NEXT:             "raw": "/1/"
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ExpressionStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 5,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 5,
+// AST-NEXT:             "column": 4
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 36,
+// AST-NEXT:         "end": 40,
+// AST-NEXT:         "leadingCommentUids": [
+// AST-NEXT:           1
+// AST-NEXT:         ],
+// AST-NEXT:         "trailingCommentUids": [
+// AST-NEXT:           2
+// AST-NEXT:         ],
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "expression": {
+// AST-NEXT:           "type": "NullLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 5,
+// AST-NEXT:               "column": 0
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 5,
+// AST-NEXT:               "column": 4
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 36,
+// AST-NEXT:           "end": 40,
+// AST-NEXT:           "scopeUid": 0
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ExpressionStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 8,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 8,
+// AST-NEXT:             "column": 4
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 52,
+// AST-NEXT:         "end": 56,
+// AST-NEXT:         "leadingCommentUids": [
+// AST-NEXT:           2
+// AST-NEXT:         ],
+// AST-NEXT:         "trailingCommentUids": [
+// AST-NEXT:           3
+// AST-NEXT:         ],
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "expression": {
+// AST-NEXT:           "type": "StringLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 8,
+// AST-NEXT:               "column": 0
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 8,
+// AST-NEXT:               "column": 3
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 52,
+// AST-NEXT:           "end": 55,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "value": "a",
+// AST-NEXT:           "extra": {
+// AST-NEXT:             "raw": "'a'",
+// AST-NEXT:             "rawValue": "a"
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ExpressionStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 11,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 11,
+// AST-NEXT:             "column": 5
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 69,
+// AST-NEXT:         "end": 74,
+// AST-NEXT:         "leadingCommentUids": [
+// AST-NEXT:           3
+// AST-NEXT:         ],
+// AST-NEXT:         "trailingCommentUids": [
+// AST-NEXT:           4
+// AST-NEXT:         ],
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "expression": {
+// AST-NEXT:           "type": "BooleanLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 11,
+// AST-NEXT:               "column": 0
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 11,
+// AST-NEXT:               "column": 4
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 69,
+// AST-NEXT:           "end": 73,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "value": true
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ExpressionStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 14,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 14,
+// AST-NEXT:             "column": 2
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 86,
+// AST-NEXT:         "end": 88,
+// AST-NEXT:         "leadingCommentUids": [
+// AST-NEXT:           4
+// AST-NEXT:         ],
+// AST-NEXT:         "trailingCommentUids": [
+// AST-NEXT:           5
+// AST-NEXT:         ],
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "expression": {
+// AST-NEXT:           "type": "NumericLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 14,
+// AST-NEXT:               "column": 0
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 14,
+// AST-NEXT:               "column": 1
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 86,
+// AST-NEXT:           "end": 87,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "value": 1.0,
+// AST-NEXT:           "extra": {
+// AST-NEXT:             "raw": "1",
+// AST-NEXT:             "rawValue": 1.0
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ExpressionStatement",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 17,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 17,
+// AST-NEXT:             "column": 3
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 101,
+// AST-NEXT:         "end": 104,
+// AST-NEXT:         "leadingCommentUids": [
+// AST-NEXT:           5
+// AST-NEXT:         ],
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "expression": {
+// AST-NEXT:           "type": "BigIntLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 17,
+// AST-NEXT:               "column": 0
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 17,
+// AST-NEXT:               "column": 2
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 101,
+// AST-NEXT:           "end": 103,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "value": "1",
+// AST-NEXT:           "extra": {
+// AST-NEXT:             "raw": "1n",
+// AST-NEXT:             "rawValue": "1"
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       }
+// AST-NEXT:     ],
+// AST-NEXT:     "directives": []
+// AST-NEXT:   },
+// AST-NEXT:   "comments": [
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 1,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 1,
+// AST-NEXT:           "column": 21
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " regular expression",
+// AST-NEXT:       "start": 0,
+// AST-NEXT:       "end": 21
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 4,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 4,
+// AST-NEXT:           "column": 7
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " null",
+// AST-NEXT:       "start": 28,
+// AST-NEXT:       "end": 35
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 7,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 7,
+// AST-NEXT:           "column": 9
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " string",
+// AST-NEXT:       "start": 42,
+// AST-NEXT:       "end": 51
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 10,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 10,
+// AST-NEXT:           "column": 10
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " boolean",
+// AST-NEXT:       "start": 58,
+// AST-NEXT:       "end": 68
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 13,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 13,
+// AST-NEXT:           "column": 9
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " number",
+// AST-NEXT:       "start": 76,
+// AST-NEXT:       "end": 85
+// AST-NEXT:     },
+// AST-NEXT:     {
+// AST-NEXT:       "type": "CommentLine",
+// AST-NEXT:       "loc": {
+// AST-NEXT:         "start": {
+// AST-NEXT:           "line": 16,
+// AST-NEXT:           "column": 0
+// AST-NEXT:         },
+// AST-NEXT:         "end": {
+// AST-NEXT:           "line": 16,
+// AST-NEXT:           "column": 10
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       "value": " big int",
+// AST-NEXT:       "start": 90,
+// AST-NEXT:       "end": 100
+// AST-NEXT:     }
+// AST-NEXT:   ]
+// AST-NEXT: }

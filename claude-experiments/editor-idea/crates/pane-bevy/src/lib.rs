@@ -75,8 +75,9 @@ pub use layers::{PaneLayer, PaneLayerAllocator};
 use bevy::camera::CameraUpdateSystems;
 use bevy::transform::TransformSystems;
 pub use text_input::{
-    col_at_x, click_to_caret, focus_text_input, spawn_text_input, FocusedTextInput, TextInput,
-    TextInputEvent, TextInputFocused, TextInputPlugin, TextInputStyle, TextInputView,
+    col_at_x, click_to_caret, focus_text_input, spawn_text_input, spawn_text_input_multiline,
+    FocusedTextInput, TextInput, TextInputEvent, TextInputFocused, TextInputPlugin,
+    TextInputStyle, TextInputView,
 };
 
 pub const TITLE_H: f32 = 22.0;
@@ -267,6 +268,18 @@ pub enum PaneMouseMode {
         /// Pane size at press time.
         start_size: Vec2,
     },
+    /// Mouse is held after a content-area press. Drives
+    /// [`PaneContentDragged`] each frame and a [`PaneContentReleased`]
+    /// on button release. Per-kind systems own the actual drag effect
+    /// (lift a chess piece, paint a stroke, etc.); pane-bevy only
+    /// emits the events.
+    ContentDrag {
+        pane: Entity,
+        /// True iff the originating press came via the pinned-pane
+        /// path. Forwarded on every drag/release event so handlers
+        /// keep the same pinned semantics.
+        pinned: bool,
+    },
 }
 
 /// Which edges of the pane are being dragged during a resize. Corners
@@ -297,6 +310,78 @@ pub struct PendingPaneActions {
     pub pin: Vec<Entity>,
     /// Unpin: remove `PanePinned`, bump z above all unpinned panes.
     pub unpin: Vec<Entity>,
+}
+
+/// Host-published canvas viewport. `PaneRect.pos/size` lives in
+/// canvas-units (zoom + pan invariant) — this resource carries the
+/// transform pane-bevy applies to map between canvas-space and window
+/// pixels (for hit-testing, per-pane camera viewports, and the pane
+/// entity Transform's pan+zoom). The host (terminal-bevy's
+/// `publish_canvas_region`) updates it once per frame from the active
+/// project's `CanvasView`.
+///
+/// At defaults (`origin = (0,0)`, `pan = (0,0)`, `zoom = 1.0`) the
+/// transform is the identity and pane-bevy behaves exactly like the
+/// pre-canvas era.
+#[derive(Resource, Copy, Clone, Debug)]
+pub struct PaneViewport {
+    /// Where canvas (0, 0) sits on screen (in window pixels) when `pan = 0`.
+    pub origin: Vec2,
+    /// Canvas-space point that should appear at `origin` on screen.
+    pub pan: Vec2,
+    /// Canvas-units → screen-pixels multiplier.
+    pub zoom: f32,
+}
+
+impl Default for PaneViewport {
+    fn default() -> Self {
+        Self {
+            origin: Vec2::ZERO,
+            pan: Vec2::ZERO,
+            zoom: 1.0,
+        }
+    }
+}
+
+/// SystemSet covering every pane-bevy system that reads `PaneViewport`
+/// inside Update. The host's `publish_canvas_region` schedules itself
+/// `.before(PaneViewportReaders)` so that a mid-Update project switch
+/// (e.g. a sidebar click) updates `PaneViewport` before pane positions
+/// are recomputed — otherwise switching projects shows one frame of
+/// the *previous* project's pan/zoom while the panes catch up.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PaneViewportReaders;
+
+impl PaneViewport {
+    /// Window-pixel position of a canvas-space point.
+    pub fn canvas_to_window(&self, canvas: Vec2) -> Vec2 {
+        self.origin + (canvas - self.pan) * self.zoom
+    }
+    /// Canvas-space point under a window-pixel cursor position.
+    pub fn window_to_canvas(&self, window_pt: Vec2) -> Vec2 {
+        (window_pt - self.origin) / self.zoom.max(0.0001) + self.pan
+    }
+    /// Project a canvas-space [`PaneRect`] into a screen-space rect
+    /// (used by per-pane camera viewport math).
+    pub fn projected_rect(&self, rect: &PaneRect) -> PaneRect {
+        PaneRect {
+            pos: self.canvas_to_window(rect.pos),
+            size: rect.size * self.zoom,
+            z: rect.z,
+        }
+    }
+}
+
+/// Backwards-compatible alias: a few kinds still consume zoom in
+/// isolation. Reads `PaneViewport.zoom`. Newly-written code should
+/// take `Res<PaneViewport>` directly.
+#[derive(Resource, Copy, Clone, Debug)]
+pub struct PaneZoom(pub f32);
+
+impl Default for PaneZoom {
+    fn default() -> Self {
+        Self(1.0)
+    }
 }
 
 /// Optional rectangular zones in window-space the host wants pane-bevy
@@ -412,6 +497,60 @@ pub struct PaneContentPressed {
     pub pinned: bool,
 }
 
+/// Fired every frame the mouse moves while the left button is held
+/// after a content-area press. `local_pt` may be outside the content
+/// rect (and even negative) — drag handlers commonly need the cursor
+/// position past the pane edge to compute snap-back, scroll edges, etc.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct PaneContentDragged {
+    pub pane: Entity,
+    pub window_pt: Vec2,
+    /// Cursor in content-root local coords. May be outside `[0, size]`.
+    pub local_pt: Vec2,
+    pub pinned: bool,
+}
+
+/// Fired once on left-button release after a content-area press. Drag
+/// handlers use this to commit (drop a piece on the square under the
+/// cursor, finalize a brush stroke, etc.). `local_pt` may be outside
+/// the content rect — same semantics as [`PaneContentDragged`].
+#[derive(Message, Clone, Copy, Debug)]
+pub struct PaneContentReleased {
+    pub pane: Entity,
+    pub window_pt: Vec2,
+    pub local_pt: Vec2,
+    pub pinned: bool,
+}
+
+/// Fired when the cursor moves over a pane's content area with no
+/// button held. Used for hover state — canvas widgets like chess use
+/// it to light up buttons under the cursor before a click.
+///
+/// Skipped while any mouse button is down (drag/release events cover
+/// that case). Fires at most once per frame the cursor moves; sitting
+/// motionless produces no events.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct PaneContentHovered {
+    pub pane: Entity,
+    pub window_pt: Vec2,
+    pub local_pt: Vec2,
+}
+
+/// Fired on the second consecutive left press on the same pane within
+/// a short window (≤500ms, ≤8px between presses). Hit-tests against
+/// any pane region — title bar, content, resize edge — because the
+/// gesture's intent is "I want to focus on this pane", not "interact
+/// with its sub-region". Canvas viewport uses this as a quick way to
+/// jump-to-pane: pan + zoom-to-1 so the pane sits in the top-left.
+///
+/// The press that triggered the event is still emitted normally
+/// (content press, focus, raise, etc.) — the double-click is an
+/// additional signal layered on top, not a replacement.
+#[derive(Message, Clone, Copy, Debug)]
+pub struct PaneDoubleClicked {
+    pub pane: Entity,
+}
+
 // ---------- Plugin ----------
 
 pub struct PanePlugin;
@@ -425,8 +564,14 @@ impl Plugin for PanePlugin {
             .init_resource::<PaneRegistry>()
             .init_resource::<PaneInputBlockZones>()
             .init_resource::<PaneCanvasRegion>()
+            .init_resource::<PaneViewport>()
+            .init_resource::<PaneZoom>()
             .insert_resource(PaneLayerAllocator::new())
             .add_message::<PaneContentPressed>()
+            .add_message::<PaneContentDragged>()
+            .add_message::<PaneContentReleased>()
+            .add_message::<PaneContentHovered>()
+            .add_message::<PaneDoubleClicked>()
             .add_plugins((TextInputPlugin, ChromeMaterialPlugin))
             .add_systems(
                 Update,
@@ -438,9 +583,13 @@ impl Plugin for PanePlugin {
                     sync_pinned_chrome,
                     sync_chrome_uniforms,
                     push_chrome_time,
-                    update_pane_cursor,
+                    (update_pane_cursor, emit_pane_hover),
                 )
-                    .chain(),
+                    .chain()
+                    // The whole chain ends up after PaneViewportReaders'
+                    // ordering constraints — that's fine because the
+                    // only systems in the set are members of this chain.
+                    .in_set(PaneViewportReaders),
             )
             .add_systems(
                 PreUpdate,
@@ -476,6 +625,77 @@ impl Plugin for PanePlugin {
     }
 }
 
+/// Emit [`PaneContentHovered`] for the topmost pane whose content area
+/// is under the cursor, when no mouse button is held. Debounced so a
+/// stationary cursor doesn't refire every frame. Cursor-leaves-pane
+/// also emits one event with `local_pt` clamped to the last pane —
+/// canvases that show a hover indicator can clear it on receipt of an
+/// out-of-bounds local_pt.
+#[derive(Resource, Default)]
+struct LastHover {
+    pane: Option<Entity>,
+    window_pt: Vec2,
+}
+
+fn emit_pane_hover(
+    windows: Query<&Window>,
+    viewport: Res<PaneViewport>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    mode: Res<PaneMouseMode>,
+    mut last: Local<LastHover>,
+    mut writer: MessageWriter<PaneContentHovered>,
+    panes: Query<
+        (Entity, &PaneRect, Option<&Visibility>, Has<PanePinned>),
+        With<PaneTag>,
+    >,
+) {
+    // Any button held → drag/release flow owns motion. Don't double-emit.
+    if buttons.pressed(MouseButton::Left)
+        || buttons.pressed(MouseButton::Right)
+        || buttons.pressed(MouseButton::Middle)
+        || !matches!(*mode, PaneMouseMode::Idle)
+    {
+        return;
+    }
+    let Ok(window) = windows.single() else { return };
+    let Some(pt) = window.cursor_position() else { return };
+    if last.window_pt == pt {
+        return; // cursor parked — no new event.
+    }
+    last.window_pt = pt;
+    let pt_canvas = viewport.window_to_canvas(pt);
+    let rects: Vec<(Entity, PaneRect)> = panes
+        .iter()
+        .filter(|(_, _, vis, pinned)| !matches!(vis, Some(Visibility::Hidden)) && !pinned)
+        .map(|(e, r, _, _)| (e, *r))
+        .collect();
+    let target = topmost_pane_at(pt_canvas, &rects).and_then(|e| {
+        let rect = rects.iter().find(|(x, _)| *x == e).map(|(_, r)| r)?;
+        if matches!(region_at(pt_canvas, rect), Some(PaneRegion::Content)) {
+            Some((e, pt_to_content_local(pt_canvas, rect)))
+        } else {
+            None
+        }
+    });
+    if let Some((pane, local_pt)) = target {
+        writer.write(PaneContentHovered {
+            pane,
+            window_pt: pt,
+            local_pt,
+        });
+        last.pane = Some(pane);
+    } else if let Some(prev) = last.pane.take() {
+        // Cursor left the previously-hovered pane. Emit one synthetic
+        // event with a sentinel local_pt so widgets can clear their
+        // hover state.
+        writer.write(PaneContentHovered {
+            pane: prev,
+            window_pt: pt,
+            local_pt: Vec2::new(f32::INFINITY, f32::INFINITY),
+        });
+    }
+}
+
 /// Update the window cursor icon based on what's under the mouse.
 /// Resize edges + corners get the matching directional resize cursor;
 /// title bar gets the move cursor while idle; everywhere else stays
@@ -484,6 +704,7 @@ impl Plugin for PanePlugin {
 fn update_pane_cursor(
     mut commands: Commands,
     mode: Res<PaneMouseMode>,
+    viewport: Res<PaneViewport>,
     windows: Query<(Entity, &Window)>,
     panes: Query<(&PaneRect, Option<&Visibility>, Has<PanePinned>), With<PaneTag>>,
 ) {
@@ -495,7 +716,7 @@ fn update_pane_cursor(
         PaneMouseMode::WindowResize { edges, .. } => cursor_for_edges(edges),
         // Drag in progress: leave the cursor alone — a grabbing cursor
         // over the title bar was distracting.
-        PaneMouseMode::WindowDrag { .. } => {
+        PaneMouseMode::WindowDrag { .. } | PaneMouseMode::ContentDrag { .. } => {
             commands.entity(win_entity).remove::<bevy::window::CursorIcon>();
             return;
         }
@@ -504,6 +725,7 @@ fn update_pane_cursor(
                 commands.entity(win_entity).remove::<bevy::window::CursorIcon>();
                 return;
             };
+            let pt_canvas = viewport.window_to_canvas(pt);
             let mut best: Option<(SystemCursorIcon, f32)> = None;
             for (rect, vis, pinned) in &panes {
                 if matches!(vis, Some(Visibility::Hidden)) || pinned {
@@ -511,7 +733,7 @@ fn update_pane_cursor(
                 }
                 // Only resize edges get a special cursor. The title
                 // bar stays default — no hand / grab indicator there.
-                let icon = match region_at(pt, rect) {
+                let icon = match region_at(pt_canvas, rect) {
                     Some(PaneRegion::ResizeEdge(e)) => Some(cursor_for_edges(e)),
                     _ => None,
                 };
@@ -676,15 +898,17 @@ pub fn spawn_pane(
     // frame. Without this, the pane spawns at (0,0,0); children render
     // there for one frame and then jump to the real position once
     // `position_panes` runs and transform propagation catches up.
+    let viewport: PaneViewport = world.get_resource::<PaneViewport>().copied().unwrap_or_default();
     let initial_translation = world
         .query::<&Window>()
         .iter(world)
         .next()
         .map(|w| {
             let win_size = Vec2::new(w.width(), w.height());
+            let screen_pos = viewport.canvas_to_window(rect.pos);
             bevy::math::Vec3::new(
-                rect.pos.x - win_size.x * 0.5,
-                win_size.y * 0.5 - rect.pos.y,
+                screen_pos.x - win_size.x * 0.5,
+                win_size.y * 0.5 - screen_pos.y,
                 rect.z,
             )
         })
@@ -1032,19 +1256,72 @@ pub fn content_area(rect: &PaneRect) -> (Vec2, Vec2) {
     (origin, size)
 }
 
+/// Legacy alias — `PaneRect` is now canvas-space directly, so the
+/// zoom parameter is ignored. Kept so call sites compile during the
+/// transition; new code should use [`content_area`] directly.
+pub fn content_area_canvas(rect: &PaneRect, _zoom: f32) -> (Vec2, Vec2) {
+    content_area(rect)
+}
+
 // ---------- Mouse handling ----------
 
 #[allow(clippy::too_many_arguments)]
+#[derive(Default)]
+struct PressTracker {
+    pane: Option<Entity>,
+    count: u32,
+    last_time: f64,
+    last_pt: Vec2,
+}
+
+/// Bundled SystemParam for double-click detection. Kept as one param
+/// so `handle_pane_mouse` stays under Bevy's 16-tuple limit.
+#[derive(bevy::ecs::system::SystemParam)]
+struct DoublePress<'w, 's> {
+    time: Res<'w, Time>,
+    tracker: Local<'s, PressTracker>,
+    writer: MessageWriter<'w, PaneDoubleClicked>,
+}
+
+impl<'w, 's> DoublePress<'w, 's> {
+    /// Update press history. Fire a double-click when the second
+    /// consecutive press lands on the same pane within 500ms and 8px
+    /// of the prior press. Counter resets after firing so a 3rd press
+    /// starts a fresh sequence.
+    fn note(&mut self, target: Entity, pt: Vec2) {
+        let now = self.time.elapsed_secs_f64();
+        let same_pane = self.tracker.pane == Some(target);
+        let close_in_time = now - self.tracker.last_time < 0.5;
+        let close_in_space = (self.tracker.last_pt - pt).length() < 8.0;
+        if same_pane && close_in_time && close_in_space {
+            self.tracker.count += 1;
+        } else {
+            self.tracker.pane = Some(target);
+            self.tracker.count = 1;
+        }
+        self.tracker.last_time = now;
+        self.tracker.last_pt = pt;
+        if self.tracker.count >= 2 {
+            self.writer.write(PaneDoubleClicked { pane: target });
+            self.tracker.count = 0;
+        }
+    }
+}
+
 fn handle_pane_mouse(
     windows: Query<&Window>,
     buttons: Res<ButtonInput<MouseButton>>,
     mods: Res<ButtonInput<KeyCode>>,
+    viewport: Res<PaneViewport>,
     mut consumed: ResMut<InputConsumed>,
     mut mode: ResMut<PaneMouseMode>,
     mut focused: ResMut<FocusedPane>,
     mut close_actions: ResMut<PendingPaneActions>,
     block_zones: Res<PaneInputBlockZones>,
     mut content_press: MessageWriter<PaneContentPressed>,
+    mut content_drag: MessageWriter<PaneContentDragged>,
+    mut content_release: MessageWriter<PaneContentReleased>,
+    mut dbl: DoublePress,
     mut panes: Query<
         (Entity, &mut PaneRect, Option<&Visibility>, Has<PanePinned>),
         With<PaneTag>,
@@ -1057,11 +1334,26 @@ fn handle_pane_mouse(
     let Some(pt) = window.cursor_position() else {
         return;
     };
+    // PaneRect now lives in canvas-units. Convert cursor to the same
+    // frame once; every hit-test below operates in canvas-space.
+    let pt_canvas = viewport.window_to_canvas(pt);
 
     if buttons.just_released(MouseButton::Left) {
+        if let PaneMouseMode::ContentDrag { pane, pinned } = *mode {
+            if let Ok((_, rect, _, _)) = panes.get(pane) {
+                content_release.write(PaneContentReleased {
+                    pane,
+                    window_pt: pt,
+                    local_pt: pt_to_content_local(pt_canvas, &rect),
+                    pinned,
+                });
+            }
+        }
         *mode = PaneMouseMode::Idle;
     }
 
+    // Block zones (sidebar etc.) stay in window-pixel coords — they're
+    // chrome that's NOT under the canvas transform.
     let in_block_zone = block_zones
         .0
         .iter()
@@ -1078,9 +1370,22 @@ fn handle_pane_mouse(
             })
             .map(|(e, r, _, _)| (e, *r))
             .collect();
-        if let Some(target) = topmost_pane_at(pt, &unpinned_rects) {
+        if let Some(target) = topmost_pane_at(pt_canvas, &unpinned_rects) {
             let rect = *panes.get(target).unwrap().1;
-            match region_at(pt, &rect) {
+            let region = region_at(pt_canvas, &rect);
+            // Double-click on a pane is a "zoom/jump to this pane"
+            // gesture — but only when it isn't landing on an interactive
+            // element. A content click that hits one of the kind's
+            // registered hot-zones (a button, link, input) belongs to
+            // the widget, not the canvas, so don't count it.
+            let on_click_target = matches!(region, Some(PaneRegion::Content))
+                && hot_zones
+                    .get(target)
+                    .map_or(false, |z| z.contains(pt_to_content_local(pt_canvas, &rect)));
+            if region.is_some() && !on_click_target {
+                dbl.note(target, pt);
+            }
+            match region {
                 Some(PaneRegion::CloseButton) => {
                     close_actions.close.push(target);
                     consumed.0 = true;
@@ -1092,7 +1397,7 @@ fn handle_pane_mouse(
                     bring_to_front(target, &mut panes);
                     *mode = PaneMouseMode::WindowDrag {
                         pane: target,
-                        grab_offset: pt - rect.pos,
+                        grab_offset: pt_canvas - rect.pos,
                     };
                 }
                 Some(PaneRegion::ResizeEdge(edges)) => {
@@ -1102,7 +1407,7 @@ fn handle_pane_mouse(
                     *mode = PaneMouseMode::WindowResize {
                         pane: target,
                         edges,
-                        start_pt: pt,
+                        start_pt: pt_canvas,
                         start_pos: rect.pos,
                         start_size: rect.size,
                     };
@@ -1116,10 +1421,14 @@ fn handle_pane_mouse(
                     content_press.write(PaneContentPressed {
                         pane: target,
                         window_pt: pt,
-                        local_pt: pt_to_content_local(pt, &rect),
+                        local_pt: pt_to_content_local(pt_canvas, &rect),
                         shift,
                         pinned: false,
                     });
+                    *mode = PaneMouseMode::ContentDrag {
+                        pane: target,
+                        pinned: false,
+                    };
                 }
                 None => {}
             }
@@ -1137,10 +1446,10 @@ fn handle_pane_mouse(
             if matches!(vis, Some(Visibility::Hidden)) || !pinned {
                 continue;
             }
-            if !matches!(region_at(pt, &r), Some(PaneRegion::Content)) {
+            if !matches!(region_at(pt_canvas, &r), Some(PaneRegion::Content)) {
                 continue;
             }
-            let local = pt_to_content_local(pt, &r);
+            let local = pt_to_content_local(pt_canvas, &r);
             let Ok(zones) = hot_zones.get(e) else { continue };
             if !zones.contains(local) {
                 continue;
@@ -1151,6 +1460,15 @@ fn handle_pane_mouse(
         }
         if let Some((target, _, local)) = best {
             consumed.0 = true;
+            // Grant keyboard focus so hot-zone elements that edit text
+            // (issues titles/fields, inline inputs) can hold focus.
+            // Without this the pinned pane is never `FocusedPane`, so
+            // `commit_edit_on_focus_change` tears the edit down the same
+            // frame it starts. We deliberately do NOT `bring_to_front`
+            // here: z stays 0 so the pane remains background decoration.
+            focused.0 = Some(target);
+            // No double-click jump here: a pinned-pane press only routes
+            // when it lands inside a hot-zone, i.e. always a click target.
             let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
             content_press.write(PaneContentPressed {
                 pane: target,
@@ -1159,6 +1477,17 @@ fn handle_pane_mouse(
                 shift,
                 pinned: true,
             });
+            *mode = PaneMouseMode::ContentDrag {
+                pane: target,
+                pinned: true,
+            };
+        } else {
+            // Click landed on empty canvas (no unpinned pane in Stage 1,
+            // no pinned hot-zone here). Blur whatever was focused so an
+            // in-progress edit on a pinned pane commits + closes via
+            // `commit_edit_on_focus_change`, matching the "click away to
+            // deselect" expectation.
+            focused.0 = None;
         }
         return;
     }
@@ -1170,7 +1499,8 @@ fn handle_pane_mouse(
     match *mode {
         PaneMouseMode::WindowDrag { pane, grab_offset } => {
             if let Ok((_, mut rect, _, _)) = panes.get_mut(pane) {
-                rect.pos = pt - grab_offset;
+                // Both grab_offset and pt_canvas are in canvas-units.
+                rect.pos = pt_canvas - grab_offset;
             }
         }
         PaneMouseMode::WindowResize {
@@ -1181,7 +1511,7 @@ fn handle_pane_mouse(
             start_size,
         } => {
             if let Ok((_, mut rect, _, _)) = panes.get_mut(pane) {
-                let delta = pt - start_pt;
+                let delta = pt_canvas - start_pt;
                 let mut new_pos = start_pos;
                 let mut new_size = start_size;
                 if edges.east {
@@ -1209,6 +1539,16 @@ fn handle_pane_mouse(
                 }
                 rect.pos = new_pos;
                 rect.size = new_size;
+            }
+        }
+        PaneMouseMode::ContentDrag { pane, pinned } => {
+            if let Ok((_, rect, _, _)) = panes.get(pane) {
+                content_drag.write(PaneContentDragged {
+                    pane,
+                    window_pt: pt,
+                    local_pt: pt_to_content_local(pt_canvas, &rect),
+                    pinned,
+                });
             }
         }
         PaneMouseMode::Idle => {}
@@ -1270,6 +1610,7 @@ fn position_panes(
     focused: Res<FocusedPane>,
     text_style: Res<ChromeTextStyle>,
     chrome_style: Res<chrome_material::ChromeStyle>,
+    viewport: Res<PaneViewport>,
     panes: Query<(&PaneRect, &PaneChrome), With<PaneTag>>,
     mut t_q: Query<&mut Transform>,
     mut sprite_q: Query<&mut Sprite>,
@@ -1304,13 +1645,22 @@ fn position_panes(
         // several terminal/widget panes alive, the unguarded version
         // burns >300% CPU just keeping itself awake.
         if let Ok(mut t) = t_q.get_mut(entity) {
+            // PaneRect is canvas-space; project to a screen-pixel
+            // position via the canvas viewport, then convert to
+            // Bevy's world coords (centered, y-up). Pane scale = zoom
+            // makes all children (chrome + content) magnify uniformly.
+            let screen_pos = viewport.canvas_to_window(rect.pos);
             let want = bevy::math::Vec3::new(
-                rect.pos.x - win_size.x * 0.5,
-                win_size.y * 0.5 - rect.pos.y,
+                screen_pos.x - win_size.x * 0.5,
+                win_size.y * 0.5 - screen_pos.y,
                 rect.z,
             );
             if t.translation != want {
                 t.translation = want;
+            }
+            let want_scale = Vec3::new(viewport.zoom, viewport.zoom, 1.0);
+            if t.scale != want_scale {
+                t.scale = want_scale;
             }
         }
         if let Ok(mut s) = sprite_q.get_mut(chrome.bg) {
@@ -1553,6 +1903,12 @@ fn enforce_pane_content_bounds(
         return;
     }
     for (rect, chrome) in &panes {
+        // PaneRect is canvas-units. TextBounds lives in the Text2d's
+        // local frame, which is the pane's local frame (since Text2d
+        // is a descendant of content_root, child of the pane). The
+        // pane entity's Transform.scale = zoom handles the visual
+        // magnification, so TextBounds should be set in pane-local
+        // (canvas-units) — same as rect.size.
         let content_w = (rect.size.x - 2.0 * MARGIN).max(0.0);
 
         let Ok(root_children) = children_q.get(chrome.content_root) else {

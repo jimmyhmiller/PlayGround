@@ -52,8 +52,9 @@ use serde_json::Value;
 
 use claude_bus_bevy::ClaudeBusEvent;
 use pane_bevy::{
-    PaneChrome, PaneContentPressed, PaneFont, PaneKindMarker, PaneKindSpec, PaneRect,
-    PaneRegistry, PaneTitle, MARGIN, TITLE_H,
+    PaneChrome, PaneContentDragged, PaneContentHovered, PaneContentPressed,
+    PaneContentReleased, PaneFont, PaneKindMarker, PaneKindSpec, PaneRect, PaneRegistry,
+    PaneTitle, MARGIN, TITLE_H,
 };
 
 use crate::WidgetTargets;
@@ -108,12 +109,33 @@ enum HostToWorker {
         cmd: bool,
         button_id: Option<String>,
     },
+    /// Cursor moved while the left button is held after a content
+    /// press. Drives `on_drag(x, y)` in the script. Coords may sit
+    /// outside the content rect — handlers like chess use that to
+    /// know the user has dragged past the board edge.
+    Drag { local_x: f32, local_y: f32 },
+    /// Left button released after a content press. Drives
+    /// `on_release(x, y)` in the script. Drag-and-drop widgets commit
+    /// here; click-style widgets typically ignore (they've already
+    /// acted on Click at press time).
+    Release { local_x: f32, local_y: f32 },
+    /// Cursor moved over the pane content area with no button held.
+    /// Drives `on_hover(x, y)` in the script. `x = f32::INFINITY`
+    /// signals the cursor LEFT the pane — widgets should clear any
+    /// hover indicator on receipt.
+    Hover { local_x: f32, local_y: f32 },
     /// Pane size changed. Drives `on_resize(w, h)` in the script and
     /// updates `canvas_w` / `canvas_h` in scope so `render` sees the
     /// new size.
     Resize {
         canvas_w: f32,
         canvas_h: f32,
+    },
+    /// A navigation key press routed to the focused widget. Drives
+    /// `on_key(key)` in the script. `key` is a stable name like
+    /// "ArrowLeft" / "ArrowRight" / "Home" / "End".
+    Key {
+        key: String,
     },
     /// A Claude bus event. Drives `on_event(kind, payload)`.
     ClaudeEvent {
@@ -405,6 +427,11 @@ fn worker_main(
                 worker.call_handler("on_resize", (w as f64, h as f64));
                 worker.maybe_render_and_persist();
             }
+            HostToWorker::Key { key } => {
+                if !worker.ensure_initialized() { continue; }
+                worker.call_handler("on_key", (key,));
+                worker.maybe_render_and_persist();
+            }
             HostToWorker::ClaudeEvent { kind, payload } => {
                 if !worker.ensure_initialized() { continue; }
                 let payload_dyn =
@@ -425,6 +452,21 @@ fn worker_main(
                     "on_click",
                     (local_x as f64, local_y as f64, shift, cmd, id),
                 );
+                worker.maybe_render_and_persist();
+            }
+            HostToWorker::Drag { local_x, local_y } => {
+                if !worker.ensure_initialized() { continue; }
+                worker.call_handler("on_drag", (local_x as f64, local_y as f64));
+                worker.maybe_render_and_persist();
+            }
+            HostToWorker::Release { local_x, local_y } => {
+                if !worker.ensure_initialized() { continue; }
+                worker.call_handler("on_release", (local_x as f64, local_y as f64));
+                worker.maybe_render_and_persist();
+            }
+            HostToWorker::Hover { local_x, local_y } => {
+                if !worker.ensure_initialized() { continue; }
+                worker.call_handler("on_hover", (local_x as f64, local_y as f64));
                 worker.maybe_render_and_persist();
             }
             HostToWorker::Tick { dt_secs } => {
@@ -460,6 +502,18 @@ pub struct RhaiWidget {
     /// Sprite id → entity. Lets us diff frames instead of
     /// despawn+respawn.
     pub sprite_entities: HashMap<String, Entity>,
+    /// True when the script defines an `on_click` handler — i.e. it's
+    /// an interactive widget rather than ambient decoration. Used to
+    /// treat a canvas widget's whole content as a hot-zone so its
+    /// clicks route while pinned (canvas widgets self-route and publish
+    /// no per-element `WidgetTargets`, so they'd otherwise be
+    /// click-through when pinned). Recomputed on reload.
+    pub wants_clicks: bool,
+}
+
+/// Does this AST define an `on_click` handler? (Cheap metadata scan.)
+fn ast_wants_clicks(ast: &AST) -> bool {
+    ast.iter_functions().any(|f| f.name == "on_click")
 }
 
 #[derive(Resource)]
@@ -479,6 +533,10 @@ impl Plugin for RhaiWidgetPlugin {
                     poll_watcher,
                     apply_reloads,
                     forward_clicks_to_workers,
+                    forward_drags_to_workers,
+                    forward_releases_to_workers,
+                    forward_hovers_to_workers,
+                    forward_keys_to_workers,
                     forward_inputs_to_workers,
                     apply_latest_frames,
                 )
@@ -523,6 +581,10 @@ fn setup_watcher(world: &mut World) {
     let editor_path = dir.join("theme_editor.rhai");
     if !editor_path.exists() {
         let _ = std::fs::write(&editor_path, DEFAULT_THEME_EDITOR_SCRIPT);
+    }
+    let chess_path = dir.join("chess.rhai");
+    if !chess_path.exists() {
+        let _ = std::fs::write(&chess_path, DEFAULT_CHESS_SCRIPT);
     }
     // dev_panel.rhai is intentionally NOT auto-bootstrapped from an
     // embedded constant. If we shipped a Rust fallback, every edit
@@ -615,6 +677,7 @@ fn rhai_widget_spawn(world: &mut World, entity: Entity, _content_root: Entity, c
         }
     };
 
+    let wants_clicks = initial_ast.as_ref().map(ast_wants_clicks).unwrap_or(false);
     let handle = spawn_worker(initial_ast, cfg.state.clone(), cfg.script.clone());
 
     world.entity_mut(entity).insert((
@@ -629,9 +692,11 @@ fn rhai_widget_spawn(world: &mut World, entity: Entity, _content_root: Entity, c
             reload_gen: 0,
             applied_reload_gen: 0,
             sprite_entities: HashMap::new(),
+            wants_clicks,
         },
         WidgetTargets::default(),
         crate::WidgetScroll::default(),
+        crate::WidgetHover::default(),
     ));
 }
 
@@ -715,6 +780,7 @@ fn apply_reloads(mut widgets: Query<&mut RhaiWidget>) {
         engine.set_max_expr_depths(256, 128);
         match engine.compile(&body) {
             Ok(ast) => {
+                w.wants_clicks = ast_wants_clicks(&ast);
                 w.handle.send(HostToWorker::Reload { ast });
                 eprintln!("[rhai] reloaded {}", path.display());
             }
@@ -773,8 +839,88 @@ fn forward_clicks_to_workers(
     }
 }
 
+fn forward_drags_to_workers(
+    mut events: MessageReader<PaneContentDragged>,
+    widgets: Query<
+        (&PaneKindMarker, &RhaiWidget, Option<&crate::WidgetScroll>),
+    >,
+) {
+    for ev in events.read() {
+        let Ok((kind, w, scroll)) = widgets.get(ev.pane) else { continue };
+        if kind.0 != PANE_KIND { continue; }
+        let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+        let pt = ev.local_pt + Vec2::new(0.0, scroll_y);
+        w.handle.send(HostToWorker::Drag { local_x: pt.x, local_y: pt.y });
+    }
+}
+
+fn forward_releases_to_workers(
+    mut events: MessageReader<PaneContentReleased>,
+    widgets: Query<
+        (&PaneKindMarker, &RhaiWidget, Option<&crate::WidgetScroll>),
+    >,
+) {
+    for ev in events.read() {
+        let Ok((kind, w, scroll)) = widgets.get(ev.pane) else { continue };
+        if kind.0 != PANE_KIND { continue; }
+        let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+        let pt = ev.local_pt + Vec2::new(0.0, scroll_y);
+        w.handle.send(HostToWorker::Release { local_x: pt.x, local_y: pt.y });
+    }
+}
+
+fn forward_hovers_to_workers(
+    mut events: MessageReader<PaneContentHovered>,
+    widgets: Query<
+        (&PaneKindMarker, &RhaiWidget, Option<&crate::WidgetScroll>),
+    >,
+) {
+    for ev in events.read() {
+        let Ok((kind, w, scroll)) = widgets.get(ev.pane) else { continue };
+        if kind.0 != PANE_KIND { continue; }
+        // INFINITY is the "cursor left" sentinel — pass through
+        // untouched so the script can detect it.
+        let pt = if ev.local_pt.x.is_finite() {
+            let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+            ev.local_pt + Vec2::new(0.0, scroll_y)
+        } else {
+            ev.local_pt
+        };
+        w.handle.send(HostToWorker::Hover { local_x: pt.x, local_y: pt.y });
+    }
+}
+
+/// Route navigation keys (arrows / Home / End) to the focused rhai
+/// widget as `on_key`. Terminals consume these themselves when focused,
+/// so there's no conflict; we only fire when a rhai widget holds focus
+/// and isn't in text-edit mode (which owns the keyboard).
+fn forward_keys_to_workers(
+    keys: Res<ButtonInput<KeyCode>>,
+    focused: Res<pane_bevy::FocusedPane>,
+    widgets: Query<(&PaneKindMarker, &RhaiWidget, Option<&crate::WidgetEditMode>)>,
+) {
+    let Some(pane) = focused.0 else { return };
+    let Ok((kind, w, edit)) = widgets.get(pane) else { return };
+    if kind.0 != PANE_KIND || edit.is_some() {
+        return;
+    }
+    for (code, name) in [
+        (KeyCode::ArrowLeft, "ArrowLeft"),
+        (KeyCode::ArrowRight, "ArrowRight"),
+        (KeyCode::ArrowUp, "ArrowUp"),
+        (KeyCode::ArrowDown, "ArrowDown"),
+        (KeyCode::Home, "Home"),
+        (KeyCode::End, "End"),
+    ] {
+        if keys.just_pressed(code) {
+            w.handle.send(HostToWorker::Key { key: name.to_string() });
+        }
+    }
+}
+
 fn forward_inputs_to_workers(
     time: Res<Time>,
+    pane_zoom: Res<pane_bevy::PaneZoom>,
     mut events: MessageReader<ClaudeBusEvent>,
     mut widgets: Query<(&PaneKindMarker, &PaneRect, &mut RhaiWidget)>,
 ) {
@@ -792,6 +938,7 @@ fn forward_inputs_to_workers(
         if kind.0 != PANE_KIND {
             continue;
         }
+        // PaneRect is canvas-units now; pane Transform handles zoom.
         let content_size = Vec2::new(
             (rect.size.x - 2.0 * MARGIN).max(0.0),
             (rect.size.y - TITLE_H - 2.0 * MARGIN).max(0.0),
@@ -852,6 +999,7 @@ fn apply_latest_frames(
     pane_metrics: Res<pane_bevy::PaneFontMetrics>,
     theme: Res<style_bevy::Theme>,
     fonts: Res<style_bevy::FontRegistry>,
+    pane_zoom: Res<pane_bevy::PaneZoom>,
     mut q: Query<(
         &PaneKindMarker,
         &PaneChrome,
@@ -859,11 +1007,13 @@ fn apply_latest_frames(
         &mut RhaiWidget,
         &mut WidgetTargets,
         &mut crate::WidgetScroll,
+        Option<&crate::WidgetHover>,
     )>,
     children_q: Query<&Children>,
 ) {
     let theme_changed = theme.is_changed();
-    for (kind, chrome, rect, mut w, mut targets, mut scroll) in &mut q {
+    let zoom = pane_zoom.0.max(0.0001);
+    for (kind, chrome, rect, mut w, mut targets, mut scroll, hover) in &mut q {
         if kind.0 != PANE_KIND {
             continue;
         }
@@ -912,6 +1062,8 @@ fn apply_latest_frames(
                     chrome.content_root,
                     &children,
                     &mut w.sprite_entities,
+                    &pane_font.0,
+                    &fonts,
                 );
             }
             // Flow layout (vstack / hstack / text / button / divider /
@@ -947,6 +1099,7 @@ fn apply_latest_frames(
                     fonts: fonts.clone(),
                     focused_input: None,
                     caret_visible: true,
+                    hovered_click_id: hover.and_then(|h| h.click_id.clone()),
                 };
                 // Wipe last frame's click targets so a stale button
                 // rect from before a script reload doesn't keep
@@ -992,12 +1145,15 @@ fn diff_render(
     content_root: Entity,
     items: &[CanvasItem],
     sprite_entities: &mut HashMap<String, Entity>,
+    default_font: &Handle<Font>,
+    fonts: &style_bevy::FontRegistry,
 ) {
     let mut seen: HashSet<String> = HashSet::with_capacity(items.len());
     for item in items {
         let id = match item {
             CanvasItem::Sprite { id, .. } => id.clone(),
             CanvasItem::Rect { id, .. } => id.clone(),
+            CanvasItem::Text { id, .. } => id.clone(),
         };
         seen.insert(id.clone());
         let existing = sprite_entities.get(&id).copied();
@@ -1051,6 +1207,7 @@ fn diff_render(
                 color,
                 anchor,
                 z,
+                rotation,
                 ..
             } => {
                 let bevy_color =
@@ -1060,7 +1217,13 @@ fn diff_render(
                     custom_size: Some(Vec2::new(*w, *h)),
                     ..default()
                 };
-                let transform = Transform::from_xyz(*x, -*y, *z);
+                // Canvas is y-down but the world is y-up (we render at
+                // -y), so a clockwise canvas rotation is a negative
+                // world rotation about z.
+                let mut transform = Transform::from_xyz(*x, -*y, *z);
+                if *rotation != 0.0 {
+                    transform.rotation = Quat::from_rotation_z(-rotation.to_radians());
+                }
                 let anchor_cmp = canvas_anchor_to_bevy(*anchor);
                 match existing {
                     Some(e) => {
@@ -1073,6 +1236,63 @@ fn diff_render(
                                 sprite,
                                 anchor_cmp,
                                 transform,
+                                Visibility::Inherited,
+                            ))
+                            .id();
+                        sprite_entities.insert(id, e);
+                    }
+                }
+            }
+            CanvasItem::Text {
+                x,
+                y,
+                value,
+                color,
+                size,
+                family,
+                anchor,
+                z,
+                ..
+            } => {
+                let font_size = size.unwrap_or(14.0).max(1.0);
+                let col = color
+                    .as_deref()
+                    .and_then(parse_canvas_color)
+                    .unwrap_or(Color::WHITE);
+                let font = match family.as_deref() {
+                    Some(f) => fonts.resolve(f),
+                    None => default_font.clone(),
+                };
+                let anchor_cmp = canvas_anchor_to_bevy(*anchor);
+                let transform = Transform::from_xyz(*x, -*y, *z);
+                let text = Text2d::new(value.clone());
+                let text_font = TextFont {
+                    font,
+                    font_size,
+                    ..default()
+                };
+                let text_color = TextColor(col);
+                // No-wrap: short labels (button text, status lines) must
+                // never break mid-word. Without this, "New game" wraps
+                // to "New\ngame" inside a narrow canvas because Bevy's
+                // default TextLayout still inserts soft breaks.
+                let layout = bevy::text::TextLayout::new_with_no_wrap();
+                match existing {
+                    Some(e) => {
+                        commands.entity(e).insert((
+                            text, text_font, text_color, anchor_cmp, transform, layout,
+                        ));
+                    }
+                    None => {
+                        let e = commands
+                            .spawn((
+                                ChildOf(content_root),
+                                text,
+                                text_font,
+                                text_color,
+                                anchor_cmp,
+                                transform,
+                                layout,
                                 Visibility::Inherited,
                             ))
                             .id();
@@ -1181,6 +1401,19 @@ fn register_host_functions(engine: &mut Engine, slots: &WorkerSlots) {
             .unwrap_or(0.0)
     });
 
+    // `widget_asset("chess/wK.png")` → absolute path to a file under
+    // crates/widget-bevy/assets/. Resolves at build time via
+    // CARGO_MANIFEST_DIR so scripts don't hardcode the user's home.
+    // Production deploys that move the binary out of the source tree
+    // will need a runtime override (env var) before this works there;
+    // matches the existing garden-script absolute-path practice.
+    engine.register_fn("widget_asset", |rel: &str| -> String {
+        let mut path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        path.push("assets");
+        path.push(rel);
+        path.to_string_lossy().into_owned()
+    });
+
     engine.register_fn("hash_str", |s: &str| -> i64 {
         let mut h: u64 = 14695981039346656037;
         for b in s.bytes() {
@@ -1188,6 +1421,64 @@ fn register_host_functions(engine: &mut Engine, slots: &WorkerSlots) {
             h = h.wrapping_mul(1099511628211);
         }
         h as i64
+    });
+
+    // Generic subprocess bridge — lets any widget spawn a child
+    // process and pipe lines to/from it (the chess widget drives a UCI
+    // engine with it). One registry per worker, captured by these
+    // closures; when the worker's Rhai `Engine` drops at pane close,
+    // the registry drops and kills every child it owns, so panes can't
+    // leak processes. Reads are non-blocking (poll from on_frame).
+    let procs = Arc::new(Mutex::new(crate::subprocess::ProcRegistry::new()));
+    {
+        let procs = procs.clone();
+        engine.register_fn("proc_spawn", move |cmd: &str| -> i64 {
+            procs.lock().map(|mut r| r.spawn(cmd, &[])).unwrap_or(-1)
+        });
+    }
+    {
+        let procs = procs.clone();
+        engine.register_fn("proc_spawn", move |cmd: &str, args: rhai::Array| -> i64 {
+            let args: Vec<String> = args
+                .into_iter()
+                .map(|a| a.into_string().unwrap_or_default())
+                .collect();
+            procs.lock().map(|mut r| r.spawn(cmd, &args)).unwrap_or(-1)
+        });
+    }
+    {
+        let procs = procs.clone();
+        engine.register_fn("proc_write", move |id: i64, line: &str| -> bool {
+            procs.lock().map(|mut r| r.write_line(id, line)).unwrap_or(false)
+        });
+    }
+    {
+        let procs = procs.clone();
+        engine.register_fn("proc_read", move |id: i64| -> String {
+            procs.lock().map(|mut r| r.read_line(id)).unwrap_or_default()
+        });
+    }
+    {
+        let procs = procs.clone();
+        engine.register_fn("proc_alive", move |id: i64| -> bool {
+            procs.lock().map(|r| r.alive(id)).unwrap_or(false)
+        });
+    }
+    {
+        let procs = procs.clone();
+        engine.register_fn("proc_kill", move |id: i64| {
+            if let Ok(mut r) = procs.lock() {
+                r.kill(id);
+            }
+        });
+    }
+
+    engine.register_fn("host_env", |name: &str| -> String {
+        std::env::var(name).unwrap_or_default()
+    });
+
+    engine.register_fn("clipboard_set", |text: &str| -> bool {
+        crate::subprocess::clipboard_set(text)
     });
 }
 
@@ -1718,3 +2009,13 @@ fn render(canvas_w, canvas_h) {
     }
 }
 "###;
+
+// ============================================================
+// Default chess widget (written if missing). The source lives in
+// crates/widget-bevy/widgets/chess.rhai and is pulled in at build
+// time so the script is real-editable in the repo, while still
+// shipping in the binary.
+// ============================================================
+
+const DEFAULT_CHESS_SCRIPT: &str =
+    include_str!("../widgets/chess.rhai");

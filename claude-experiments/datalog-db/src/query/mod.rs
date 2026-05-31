@@ -11,6 +11,11 @@ use crate::datom::{TxId, Value};
 pub enum Pattern {
     /// A variable binding like "?name"
     Variable(String),
+    /// A variable binding that also filters: {"var": "?age", "gt": 25}.
+    /// Binds `var` to the field value AND keeps only rows where the
+    /// predicate holds. Ordered before `Predicate` so serde's untagged
+    /// deserializer prefers it when a `var` key is present.
+    BoundPredicate { var: String, op: PredOp, value: Value },
     /// A predicate like {"gt": 21}
     Predicate { op: PredOp, value: Value },
     /// A concrete constant value
@@ -56,24 +61,45 @@ impl Pattern {
                 };
             }
 
+            // Combined bind + predicate: {"var": "?age", "gt": 25}.
+            // Binds the variable to the field value and filters by the
+            // predicate in the same clause field.
+            if let Some(var) = obj.get("var").and_then(|x| x.as_str()) {
+                if var.starts_with('?') {
+                    for (key, val) in obj {
+                        if let Some(op) = PredOp::from_key(key) {
+                            return Pattern::BoundPredicate {
+                                var: var.to_string(),
+                                op,
+                                value: value_from_json(val),
+                            };
+                        }
+                    }
+                }
+            }
+
             // Check for predicate operators
             for (key, val) in obj {
-                let op = match key.as_str() {
-                    "gt" => Some(PredOp::Gt),
-                    "lt" => Some(PredOp::Lt),
-                    "gte" => Some(PredOp::Gte),
-                    "lte" => Some(PredOp::Lte),
-                    "ne" => Some(PredOp::Ne),
-                    _ => None,
-                };
-                if let Some(op) = op {
+                if let Some(op) = PredOp::from_key(key) {
                     let value = value_from_json(val);
                     return Pattern::Predicate { op, value };
                 }
             }
         }
-        // Fallback
-        Pattern::Constant(Value::String(format!("{}", v).into()))
+        // Fallback: route through value_from_json so an entity reference
+        // ({"ref": N}) becomes a `Ref` constant rather than a stringified
+        // object that can never match.
+        Pattern::Constant(value_from_json(v))
+    }
+
+    /// The variable this pattern binds into the result tuple, if any.
+    /// Both bare variables and bind+predicate patterns bind a variable.
+    pub fn bound_var(&self) -> Option<&str> {
+        match self {
+            Pattern::Variable(v) => Some(v.as_str()),
+            Pattern::BoundPredicate { var, .. } => Some(var.as_str()),
+            _ => None,
+        }
     }
 }
 
@@ -86,6 +112,11 @@ fn value_from_json(v: &serde_json::Value) -> Value {
         Value::F64(n)
     } else if let Some(b) = v.as_bool() {
         Value::Bool(b)
+    } else if let Some(r) = v.get("ref").and_then(|x| x.as_u64()) {
+        // Entity reference: {"ref": N}. Without this a ref constant in a
+        // where clause (e.g. `lead: #11`) would stringify and never match a
+        // stored `Ref`.
+        Value::Ref(r)
     } else {
         Value::String(format!("{}", v).into())
     }
@@ -101,6 +132,18 @@ pub enum PredOp {
 }
 
 impl PredOp {
+    /// Map a JSON predicate key ("gt", "lte", ...) to its operator.
+    pub fn from_key(key: &str) -> Option<PredOp> {
+        match key {
+            "gt" => Some(PredOp::Gt),
+            "lt" => Some(PredOp::Lt),
+            "gte" => Some(PredOp::Gte),
+            "lte" => Some(PredOp::Lte),
+            "ne" => Some(PredOp::Ne),
+            _ => None,
+        }
+    }
+
     pub fn evaluate(&self, actual: &Value, target: &Value) -> bool {
         match (actual, target) {
             (Value::I64(a), Value::I64(b)) => match self {
@@ -117,6 +160,31 @@ impl PredOp {
                 PredOp::Lte => a <= b,
                 PredOp::Ne => a != b,
             },
+            // Mixed numeric: compare as f64 so an integer literal and a
+            // float field (or vice versa) don't silently fail to match.
+            // Coercion normally aligns types before this, but this keeps
+            // any remaining cross-type comparison (e.g. enum sub-fields)
+            // numerically correct.
+            (Value::I64(a), Value::F64(b)) => {
+                let a = *a as f64;
+                match self {
+                    PredOp::Gt => a > *b,
+                    PredOp::Lt => a < *b,
+                    PredOp::Gte => a >= *b,
+                    PredOp::Lte => a <= *b,
+                    PredOp::Ne => a != *b,
+                }
+            }
+            (Value::F64(a), Value::I64(b)) => {
+                let b = *b as f64;
+                match self {
+                    PredOp::Gt => *a > b,
+                    PredOp::Lt => *a < b,
+                    PredOp::Gte => *a >= b,
+                    PredOp::Lte => *a <= b,
+                    PredOp::Ne => *a != b,
+                }
+            }
             (Value::String(a), Value::String(b)) => match self {
                 PredOp::Gt => a > b,
                 PredOp::Lt => a < b,
@@ -143,72 +211,427 @@ pub struct WhereClause {
     pub field_patterns: Vec<(String, Pattern)>,
 }
 
+/// A node in the where clause tree. The top-level `where` is an `And` of
+/// these. `And`/`Or`/`Not` may nest arbitrarily.
+#[derive(Debug, Clone)]
+pub enum Clause {
+    /// Leaf: match a typed entity (the classic where clause).
+    Pattern(WhereClause),
+    /// Conjunction — all children must hold.
+    And(Vec<Clause>),
+    /// Disjunction — the union of bindings satisfying any child.
+    Or(Vec<Clause>),
+    /// Negation as failure — keep bindings for which the child has no solution.
+    Not(Box<Clause>),
+}
+
+impl Clause {
+    /// Parse a clause from JSON. A clause is one of:
+    ///   {"bind": "?v", "type": "T", <field patterns>}   -> Pattern
+    ///   {"and": [clause, ...]}                            -> And
+    ///   {"or":  [clause, ...]}                            -> Or
+    ///   {"not": clause | [clause, ...]}                   -> Not (of an And)
+    /// An array is shorthand for an `And` of its elements.
+    pub fn from_json(v: &serde_json::Value) -> std::result::Result<Clause, String> {
+        if let Some(arr) = v.as_array() {
+            return Ok(Clause::And(
+                arr.iter()
+                    .map(Clause::from_json)
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            ));
+        }
+        let obj = v.as_object().ok_or("clause must be an object or array")?;
+        if let Some(children) = obj.get("or") {
+            let arr = children.as_array().ok_or("'or' must be an array of clauses")?;
+            if arr.len() < 2 {
+                return Err("'or' requires at least two branches".into());
+            }
+            return Ok(Clause::Or(
+                arr.iter()
+                    .map(Clause::from_json)
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            ));
+        }
+        if let Some(children) = obj.get("and") {
+            let arr = children.as_array().ok_or("'and' must be an array of clauses")?;
+            return Ok(Clause::And(
+                arr.iter()
+                    .map(Clause::from_json)
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            ));
+        }
+        if let Some(child) = obj.get("not") {
+            return Ok(Clause::Not(Box::new(Clause::from_json(child)?)));
+        }
+        // Otherwise it's a pattern leaf.
+        let bind = obj
+            .get("bind")
+            .and_then(|b| b.as_str())
+            .ok_or("clause missing 'bind'")?
+            .to_string();
+        let entity_type = obj
+            .get("type")
+            .and_then(|t| t.as_str())
+            .ok_or("clause missing 'type'")?
+            .to_string();
+        let mut field_patterns = Vec::new();
+        for (key, val) in obj {
+            if key == "bind" || key == "type" {
+                continue;
+            }
+            field_patterns.push((key.clone(), Pattern::from_json(val)));
+        }
+        Ok(Clause::Pattern(WhereClause {
+            bind,
+            entity_type,
+            field_patterns,
+        }))
+    }
+
+    /// True when this is a plain conjunction of pattern leaves (the common
+    /// case), in which case the optimized flat planner applies.
+    pub fn as_flat_patterns(&self) -> Option<Vec<&WhereClause>> {
+        match self {
+            Clause::Pattern(wc) => Some(vec![wc]),
+            Clause::And(children) => {
+                let mut out = Vec::with_capacity(children.len());
+                for c in children {
+                    if let Clause::Pattern(wc) = c {
+                        out.push(wc);
+                    } else {
+                        return None;
+                    }
+                }
+                Some(out)
+            }
+            _ => None,
+        }
+    }
+
+    /// Visit every `Pattern` leaf immutably.
+    pub fn for_each_pattern<F: FnMut(&WhereClause)>(&self, f: &mut F) {
+        match self {
+            Clause::Pattern(wc) => f(wc),
+            Clause::And(cs) | Clause::Or(cs) => {
+                for c in cs {
+                    c.for_each_pattern(f);
+                }
+            }
+            Clause::Not(c) => c.for_each_pattern(f),
+        }
+    }
+
+    /// Visit every `Pattern` leaf mutably (used to normalize literals).
+    pub fn for_each_pattern_mut<F: FnMut(&mut WhereClause)>(&mut self, f: &mut F) {
+        match self {
+            Clause::Pattern(wc) => f(wc),
+            Clause::And(cs) | Clause::Or(cs) => {
+                for c in cs {
+                    c.for_each_pattern_mut(f);
+                }
+            }
+            Clause::Not(c) => c.for_each_pattern_mut(f),
+        }
+    }
+
+    /// True if the tree has no pattern leaves at all.
+    pub fn is_empty(&self) -> bool {
+        let mut any = false;
+        self.for_each_pattern(&mut |_| any = true);
+        !any
+    }
+
+    /// Collapse double negation: `not { not { c } }` ⇒ `c`. Without this,
+    /// the inner `not` reaches the planner as a non-producing clause and is
+    /// rejected, even though the doubly-negated form is a valid positive.
+    pub fn simplified(self) -> Clause {
+        match self {
+            Clause::Pattern(_) => self,
+            Clause::And(cs) => Clause::And(cs.into_iter().map(Clause::simplified).collect()),
+            Clause::Or(cs) => Clause::Or(cs.into_iter().map(Clause::simplified).collect()),
+            Clause::Not(inner) => match inner.simplified() {
+                // not(not(c)) == c
+                Clause::Not(c) => *c,
+                other => Clause::Not(Box::new(other)),
+            },
+        }
+    }
+}
+
+/// One sort key for `order_by`: a find variable and a direction.
+#[derive(Debug, Clone)]
+pub struct OrderKey {
+    pub var: String,
+    pub desc: bool,
+}
+
+/// Aggregate function in a `find` clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+
+impl AggFunc {
+    pub fn from_name(name: &str) -> Option<AggFunc> {
+        match name {
+            "count" => Some(AggFunc::Count),
+            "sum" => Some(AggFunc::Sum),
+            "avg" => Some(AggFunc::Avg),
+            "min" => Some(AggFunc::Min),
+            "max" => Some(AggFunc::Max),
+            _ => None,
+        }
+    }
+    pub fn name(&self) -> &'static str {
+        match self {
+            AggFunc::Count => "count",
+            AggFunc::Sum => "sum",
+            AggFunc::Avg => "avg",
+            AggFunc::Min => "min",
+            AggFunc::Max => "max",
+        }
+    }
+}
+
+/// One element of a `find` clause: either a plain variable (which also acts
+/// as a grouping key when aggregates are present) or an aggregate over a
+/// variable. `label` is the output column name.
+#[derive(Debug, Clone)]
+pub enum FindElem {
+    Var(String),
+    Agg {
+        func: AggFunc,
+        /// Input variable, or "*" for `count(*)`.
+        var: String,
+        label: String,
+    },
+}
+
+impl FindElem {
+    /// Parse a single find token, e.g. "?name", "count(?u)", "count(*)".
+    pub fn parse(token: &str) -> std::result::Result<FindElem, String> {
+        let t = token.trim();
+        // Aggregate form: func(arg)
+        if let Some(open) = t.find('(') {
+            if !t.ends_with(')') {
+                return Err(format!("malformed aggregate in find: '{}'", token));
+            }
+            let func_name = t[..open].trim();
+            let func = AggFunc::from_name(func_name)
+                .ok_or_else(|| format!("unknown aggregate function '{}'", func_name))?;
+            let arg = t[open + 1..t.len() - 1].trim();
+            if arg != "*" && !arg.starts_with('?') {
+                return Err(format!(
+                    "aggregate argument must be a variable or '*', got '{}'",
+                    arg
+                ));
+            }
+            if func == AggFunc::Count && arg == "*" {
+                return Ok(FindElem::Agg {
+                    func,
+                    var: "*".to_string(),
+                    label: "count(*)".to_string(),
+                });
+            }
+            if arg == "*" {
+                return Err(format!("'{}' requires a variable argument", func_name));
+            }
+            return Ok(FindElem::Agg {
+                func,
+                var: arg.to_string(),
+                label: format!("{}({})", func_name, arg),
+            });
+        }
+        if t.starts_with('?') {
+            return Ok(FindElem::Var(t.to_string()));
+        }
+        Err(format!("find element must be a variable or aggregate, got '{}'", token))
+    }
+
+    /// The output column label.
+    pub fn label(&self) -> &str {
+        match self {
+            FindElem::Var(v) => v,
+            FindElem::Agg { label, .. } => label,
+        }
+    }
+}
+
 /// The top-level query.
 #[derive(Debug, Clone)]
 pub struct Query {
+    /// Effective projection: the variables the executor must bind/output.
+    /// Derived from `find_elems` (group vars + aggregate input vars, deduped).
     pub find: Vec<String>,
-    pub where_clauses: Vec<WhereClause>,
+    /// Output specification: plain vars and/or aggregates, in output order.
+    pub find_elems: Vec<FindElem>,
+    /// The where clause tree (top level is a conjunction).
+    pub where_clause: Clause,
     pub as_of: Option<TxId>,
     pub as_of_time: Option<u64>,
     /// If true, return the query plan instead of executing.
     pub explain: bool,
+    /// Sort keys applied to the result rows (each must be a find variable).
+    pub order_by: Vec<OrderKey>,
+    /// Maximum number of rows to return, applied after ordering.
+    pub limit: Option<usize>,
+    /// Number of rows to skip, applied after ordering and before `limit`.
+    pub offset: Option<usize>,
+}
+
+/// Total ordering over `Value` for sorting result rows. Numeric values
+/// compare numerically (i64/f64 mixed); other types compare within their
+/// kind, and different kinds fall back to a stable kind ranking so the sort
+/// is always total. `Null` sorts after every concrete value.
+pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
+    // Numeric cross-type comparison first.
+    let num = |v: &Value| -> Option<f64> {
+        match v {
+            Value::I64(n) => Some(*n as f64),
+            Value::F64(f) => Some(*f),
+            _ => None,
+        }
+    };
+    if let (Some(x), Some(y)) = (num(a), num(b)) {
+        // Keep i64 exact when both are integers.
+        if let (Value::I64(ai), Value::I64(bi)) = (a, b) {
+            return ai.cmp(bi);
+        }
+        return x.total_cmp(&y);
+    }
+    match (a, b) {
+        (Value::String(x), Value::String(y)) => x.cmp(y),
+        (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+        (Value::Ref(x), Value::Ref(y)) => x.cmp(y),
+        (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
+        // Mixed / unorderable kinds: order by a stable kind rank.
+        _ => value_kind_rank(a).cmp(&value_kind_rank(b)),
+    }
+}
+
+fn value_kind_rank(v: &Value) -> u8 {
+    match v {
+        Value::I64(_) | Value::F64(_) => 0,
+        Value::String(_) => 1,
+        Value::Bool(_) => 2,
+        Value::Ref(_) => 3,
+        Value::Bytes(_) => 4,
+        Value::Enum(_) => 5,
+        Value::Null => 6,
+    }
 }
 
 impl Query {
     /// Parse a query from JSON.
     pub fn from_json(v: &serde_json::Value) -> std::result::Result<Self, String> {
-        let find = v
+        // `find` entries are either strings ("?x" / "count(?u)") or objects
+        // ({"agg":"sum","var":"?p"}). Parse into output specs, then derive the
+        // effective projection (the underlying variables the executor binds).
+        let find_arr = v
             .get("find")
             .and_then(|f| f.as_array())
-            .ok_or("missing 'find' array")?
-            .iter()
-            .map(|v| v.as_str().unwrap_or("").to_string())
-            .collect();
-
-        let where_clauses = v
-            .get("where")
-            .and_then(|w| w.as_array())
-            .ok_or("missing 'where' array")?
-            .iter()
-            .map(|clause| {
-                let obj = clause.as_object().ok_or("where clause must be object")?;
-                let bind = obj
-                    .get("bind")
-                    .and_then(|b| b.as_str())
-                    .ok_or("missing 'bind'")?
-                    .to_string();
-                let entity_type = obj
-                    .get("type")
-                    .and_then(|t| t.as_str())
-                    .ok_or("missing 'type'")?
-                    .to_string();
-
-                let mut field_patterns = Vec::new();
-                for (key, val) in obj {
-                    if key == "bind" || key == "type" {
-                        continue;
-                    }
-                    field_patterns.push((key.clone(), Pattern::from_json(val)));
+            .ok_or("missing 'find' array")?;
+        let mut find_elems: Vec<FindElem> = Vec::with_capacity(find_arr.len());
+        for item in find_arr {
+            if let Some(s) = item.as_str() {
+                find_elems.push(FindElem::parse(s)?);
+            } else if let Some(obj) = item.as_object() {
+                let func = obj
+                    .get("agg")
+                    .and_then(|x| x.as_str())
+                    .ok_or("find object must have an 'agg' field")?;
+                let var = obj
+                    .get("var")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("*");
+                find_elems.push(FindElem::parse(&format!("{}({})", func, var))?);
+            } else {
+                return Err("find element must be a string or object".into());
+            }
+        }
+        // Effective projection: group vars + aggregate input vars, deduped,
+        // preserving first-seen order. `count(*)` contributes no variable.
+        let mut find: Vec<String> = Vec::new();
+        for e in &find_elems {
+            let var = match e {
+                FindElem::Var(v) => Some(v.as_str()),
+                FindElem::Agg { var, .. } if var != "*" => Some(var.as_str()),
+                _ => None,
+            };
+            if let Some(v) = var {
+                if !find.iter().any(|x| x == v) {
+                    find.push(v.to_string());
                 }
+            }
+        }
 
-                Ok(WhereClause {
-                    bind,
-                    entity_type,
-                    field_patterns,
-                })
-            })
-            .collect::<std::result::Result<Vec<_>, String>>()?;
+        // `where` is an array of clauses (implicit AND). Each clause may be a
+        // pattern leaf or an or/and/not combinator (see Clause::from_json).
+        let where_val = v.get("where").ok_or("missing 'where' array")?;
+        let where_clause = Clause::from_json(where_val)?;
 
         let as_of = v.get("as_of").and_then(|a| a.as_u64());
         let as_of_time = v.get("as_of_time").and_then(|a| a.as_u64());
         let explain = v.get("explain").and_then(|e| e.as_bool()).unwrap_or(false);
 
+        // order_by: array of either "?var" (ascending) or
+        // {"var": "?var", "desc": true}.
+        let order_by = match v.get("order_by") {
+            None => Vec::new(),
+            Some(arr) => {
+                let arr = arr.as_array().ok_or("'order_by' must be an array")?;
+                let mut keys = Vec::with_capacity(arr.len());
+                for item in arr {
+                    let key = if let Some(s) = item.as_str() {
+                        OrderKey { var: s.to_string(), desc: false }
+                    } else if let Some(obj) = item.as_object() {
+                        let var = obj
+                            .get("var")
+                            .and_then(|x| x.as_str())
+                            .ok_or("order_by entry missing 'var'")?
+                            .to_string();
+                        let desc = obj.get("desc").and_then(|d| d.as_bool()).unwrap_or(false);
+                        OrderKey { var, desc }
+                    } else {
+                        return Err("order_by entry must be a string or object".into());
+                    };
+                    keys.push(key);
+                }
+                keys
+            }
+        };
+
+        let limit = v
+            .get("limit")
+            .map(|l| {
+                l.as_u64()
+                    .map(|n| n as usize)
+                    .ok_or("'limit' must be a non-negative integer")
+            })
+            .transpose()?;
+        let offset = v
+            .get("offset")
+            .map(|o| {
+                o.as_u64()
+                    .map(|n| n as usize)
+                    .ok_or("'offset' must be a non-negative integer")
+            })
+            .transpose()?;
+
         Ok(Query {
             find,
-            where_clauses,
+            find_elems,
+            where_clause,
             as_of,
             as_of_time,
             explain,
+            order_by,
+            limit,
+            offset,
         })
     }
 }

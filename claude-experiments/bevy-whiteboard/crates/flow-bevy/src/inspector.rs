@@ -934,9 +934,7 @@ fn sync_queue_fill(
 ) {
     for (r, mut text) in q.iter_mut() {
         let len = snapshot.0
-            .nodes
-            .get(&r.node)
-            .and_then(|n| n.slots.get("len"))
+            .resolve_slot(r.node, "len")
             .and_then(|v| match v { Value::Int(i) => Some(*i as usize), _ => None })
             .unwrap_or(0);
         let label = format!("{}", len);
@@ -950,9 +948,7 @@ fn sync_sink_count(
 ) {
     for (r, mut text) in q.iter_mut() {
         let count = snapshot.0
-            .nodes
-            .get(&r.node)
-            .and_then(|n| n.slots.get("count"))
+            .resolve_slot(r.node, "count")
             .and_then(|v| match v { Value::Int(i) => Some(*i), _ => None })
             .unwrap_or(0);
         let label = format!("{}", count);

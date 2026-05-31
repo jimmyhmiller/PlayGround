@@ -18,7 +18,7 @@ use crate::intern::AttrInterner;
 use crate::query::executor::{self, QueryResult};
 use crate::query::planner;
 pub use crate::query::planner::QueryPlan;
-use crate::query::{Pattern, Query};
+use crate::query::{AggFunc, Clause, FindElem, Pattern, PredOp, Query};
 use crate::schema::{EntityTypeDef, EnumTypeDef, FieldDef, FieldType, SchemaRegistry};
 use crate::storage::{StorageBackend, StorageError, TxnOps};
 use crate::tx::{self, TxOp};
@@ -44,11 +44,80 @@ pub enum DbError {
 
 pub type Result<T> = std::result::Result<T, DbError>;
 
-/// Cache key derived from query shape, with literal values erased.
-/// Two queries that differ only in constant values share the same plan.
+/// Cache key derived from query shape AND its literal values.
+///
+/// Literal values MUST be part of the key: a cached `QueryPlan` bakes the
+/// concrete predicate/constant values into its scan strategy and execution
+/// re-uses the plan verbatim (only `as_of` is refreshed). If two queries
+/// that differ only in a literal (`qty > 10` vs `qty > 200`) shared a key,
+/// the second would silently return the first's results.
 #[derive(Clone, PartialEq, Eq)]
 struct PlanCacheKey {
     hash: u64,
+}
+
+/// Feed a `Value` into the hasher in a stable, collision-resistant way.
+/// `f64` is hashed by its raw bits so distinct floats key distinct plans.
+fn hash_value<H: Hasher>(v: &Value, h: &mut H) {
+    std::mem::discriminant(v).hash(h);
+    match v {
+        Value::String(s) => s.hash(h),
+        Value::I64(n) => n.hash(h),
+        Value::F64(f) => f.to_bits().hash(h),
+        Value::Bool(b) => b.hash(h),
+        Value::Ref(id) => id.hash(h),
+        Value::Bytes(bytes) => bytes.hash(h),
+        // Enum/Null never appear as query-pattern literals, but hash the
+        // discriminant (already done above) so the key stays well-defined.
+        Value::Enum(_) | Value::Null => {}
+    }
+}
+
+/// Feed a pattern's full shape AND values into the hasher.
+fn hash_pattern<H: Hasher>(pattern: &Pattern, h: &mut H) {
+    std::mem::discriminant(pattern).hash(h);
+    match pattern {
+        Pattern::Variable(v) => v.hash(h),
+        Pattern::Constant(value) => hash_value(value, h),
+        Pattern::Predicate { op, value } => {
+            std::mem::discriminant(op).hash(h);
+            hash_value(value, h);
+        }
+        Pattern::BoundPredicate { var, op, value } => {
+            var.hash(h);
+            std::mem::discriminant(op).hash(h);
+            hash_value(value, h);
+        }
+        Pattern::EnumMatch { variant, field_patterns } => {
+            hash_pattern(variant, h);
+            for (name, pat) in field_patterns {
+                name.hash(h);
+                hash_pattern(pat, h);
+            }
+        }
+    }
+}
+
+/// Hash a where clause tree's shape AND literal values into the plan key.
+fn hash_clause<H: Hasher>(clause: &Clause, h: &mut H) {
+    std::mem::discriminant(clause).hash(h);
+    match clause {
+        Clause::Pattern(wc) => {
+            wc.entity_type.hash(h);
+            wc.bind.hash(h);
+            for (field_name, pattern) in &wc.field_patterns {
+                field_name.hash(h);
+                hash_pattern(pattern, h);
+            }
+        }
+        Clause::And(children) | Clause::Or(children) => {
+            children.len().hash(h);
+            for c in children {
+                hash_clause(c, h);
+            }
+        }
+        Clause::Not(child) => hash_clause(child, h),
+    }
 }
 
 impl PlanCacheKey {
@@ -58,34 +127,378 @@ impl PlanCacheKey {
         query.find.hash(&mut hasher);
         // Hash whether as_of is present (not the value)
         query.as_of.is_some().hash(&mut hasher);
-        // Hash clause shapes
-        for clause in &query.where_clauses {
-            clause.entity_type.hash(&mut hasher);
-            clause.bind.hash(&mut hasher);
-            for (field_name, pattern) in &clause.field_patterns {
-                field_name.hash(&mut hasher);
-                // Hash pattern shape, not values
-                std::mem::discriminant(pattern).hash(&mut hasher);
-                match pattern {
-                    Pattern::Variable(v) => v.hash(&mut hasher),
-                    Pattern::Constant(_) => { /* value erased */ }
-                    Pattern::Predicate { op, .. } => {
-                        std::mem::discriminant(op).hash(&mut hasher);
+        // Hash clause shapes AND their literal values
+        hash_clause(&query.where_clause, &mut hasher);
+        PlanCacheKey {
+            hash: hasher.finish(),
+        }
+    }
+}
+
+/// Coerce a numeric literal so its runtime type matches a field's declared
+/// numeric type. Returns `Some((op, value))` with the adjusted operator and
+/// value, or `None` to leave the literal unchanged.
+///
+/// The AVET index keys values by their exact runtime type, so a range scan
+/// for an `I64` bound never sees `F64`-stored values (and vice versa). Worse,
+/// the cross-type post-filter would silently drop everything. We normalize the
+/// literal to the field's type up front. For an integer field compared against
+/// a fractional float, we pick the operator-preserving integer bound that is
+/// exactly equivalent over the integers (e.g. `x > 10.5` ⇔ `x > 10`).
+fn coerce_numeric_literal(
+    field_type: &FieldType,
+    op: Option<&PredOp>,
+    value: &Value,
+) -> Option<(Option<PredOp>, Value)> {
+    match (field_type, value) {
+        // Float field, integer literal → exact float.
+        (FieldType::F64, Value::I64(n)) => Some((op.cloned(), Value::F64(*n as f64))),
+
+        // Integer field, float literal.
+        (FieldType::I64, Value::F64(f)) => {
+            let f = *f;
+            match op {
+                // Equality: only an integral float can equal an integer.
+                // A fractional literal is left as-is so the exact scan finds
+                // nothing (the correct empty result).
+                None => (f.fract() == 0.0).then(|| (None, Value::I64(f as i64))),
+                // Range bounds: round toward the operator-preserving integer.
+                //   x >  f ⇔ x >  floor(f)      x >= f ⇔ x >= ceil(f)
+                //   x <  f ⇔ x <  ceil(f)       x <= f ⇔ x <= floor(f)
+                Some(PredOp::Gt) => Some((Some(PredOp::Gt), Value::I64(f.floor() as i64))),
+                Some(PredOp::Gte) => Some((Some(PredOp::Gte), Value::I64(f.ceil() as i64))),
+                Some(PredOp::Lt) => Some((Some(PredOp::Lt), Value::I64(f.ceil() as i64))),
+                Some(PredOp::Lte) => Some((Some(PredOp::Lte), Value::I64(f.floor() as i64))),
+                // `!=` against a fractional float is true for every integer;
+                // leave it for the cross-type evaluator (which returns true).
+                Some(PredOp::Ne) => {
+                    (f.fract() == 0.0).then(|| (Some(PredOp::Ne), Value::I64(f as i64)))
+                }
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Running state for one aggregate within one group.
+enum AggState {
+    Count(i64),
+    Sum { i_sum: i64, f_sum: f64, any_float: bool },
+    Avg { sum: f64, n: i64 },
+    MinMax(Option<Value>),
+}
+
+impl AggState {
+    fn new(func: AggFunc) -> Self {
+        match func {
+            AggFunc::Count => AggState::Count(0),
+            AggFunc::Sum => AggState::Sum {
+                i_sum: 0,
+                f_sum: 0.0,
+                any_float: false,
+            },
+            AggFunc::Avg => AggState::Avg { sum: 0.0, n: 0 },
+            AggFunc::Min | AggFunc::Max => AggState::MinMax(None),
+        }
+    }
+
+    /// Fold one row's contribution. `value` is `None` for `count(*)`.
+    fn update(&mut self, func: AggFunc, value: Option<&Value>) {
+        let numeric = |v: &Value| -> Option<f64> {
+            match v {
+                Value::I64(n) => Some(*n as f64),
+                Value::F64(f) => Some(*f),
+                _ => None,
+            }
+        };
+        match self {
+            AggState::Count(c) => match value {
+                // count(*) counts every row; count(?x) counts non-null x.
+                None => *c += 1,
+                Some(v) if !matches!(v, Value::Null) => *c += 1,
+                _ => {}
+            },
+            AggState::Sum {
+                i_sum,
+                f_sum,
+                any_float,
+            } => {
+                if let Some(v) = value {
+                    match v {
+                        Value::I64(n) => *i_sum += *n,
+                        Value::F64(f) => {
+                            *f_sum += *f;
+                            *any_float = true;
+                        }
+                        _ => {}
                     }
-                    Pattern::EnumMatch { variant, field_patterns } => {
-                        std::mem::discriminant(variant.as_ref()).hash(&mut hasher);
-                        for (name, pat) in field_patterns {
-                            name.hash(&mut hasher);
-                            std::mem::discriminant(pat).hash(&mut hasher);
+                }
+            }
+            AggState::Avg { sum, n } => {
+                if let Some(x) = value.and_then(numeric) {
+                    *sum += x;
+                    *n += 1;
+                }
+            }
+            AggState::MinMax(best) => {
+                if let Some(v) = value {
+                    if matches!(v, Value::Null) {
+                        return;
+                    }
+                    match best {
+                        None => *best = Some(v.clone()),
+                        Some(cur) => {
+                            let ord = crate::query::compare_values(v, cur);
+                            let take = match func {
+                                AggFunc::Min => ord == std::cmp::Ordering::Less,
+                                _ => ord == std::cmp::Ordering::Greater,
+                            };
+                            if take {
+                                *best = Some(v.clone());
+                            }
                         }
                     }
                 }
             }
         }
-        PlanCacheKey {
-            hash: hasher.finish(),
+    }
+
+    fn finalize(self) -> Value {
+        match self {
+            AggState::Count(c) => Value::I64(c),
+            AggState::Sum {
+                i_sum,
+                f_sum,
+                any_float,
+            } => {
+                if any_float {
+                    Value::F64(i_sum as f64 + f_sum)
+                } else {
+                    Value::I64(i_sum)
+                }
+            }
+            AggState::Avg { sum, n } => {
+                if n == 0 {
+                    Value::Null
+                } else {
+                    Value::F64(sum / n as f64)
+                }
+            }
+            AggState::MinMax(best) => best.unwrap_or(Value::Null),
         }
     }
+}
+
+/// Encode group-key values into a stable, collision-resistant string so rows
+/// can be grouped via a `HashMap` (Value isn't `Hash` because of `f64`).
+fn encode_group_key(vals: &[Value]) -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    for v in vals {
+        match v {
+            Value::String(x) => {
+                s.push('s');
+                s.push_str(x);
+            }
+            Value::I64(n) => {
+                let _ = write!(s, "i{}", n);
+            }
+            Value::F64(f) => {
+                let _ = write!(s, "f{}", f.to_bits());
+            }
+            Value::Bool(b) => {
+                s.push('b');
+                s.push(if *b { '1' } else { '0' });
+            }
+            Value::Ref(r) => {
+                let _ = write!(s, "r{}", r);
+            }
+            Value::Bytes(by) => {
+                s.push('y');
+                for b in by {
+                    let _ = write!(s, "{:02x}", b);
+                }
+            }
+            Value::Enum(_) => s.push('e'),
+            Value::Null => s.push('n'),
+        }
+        s.push('\u{1}'); // field separator
+    }
+    s
+}
+
+/// Collapse result rows into aggregate groups when `find` contains any
+/// aggregate. Plain find variables form the grouping key (implicit GROUP BY);
+/// with no plain variables, the whole result is one group. Output columns are
+/// the `find` element labels, in order. No-op when there are no aggregates.
+fn apply_aggregation(qr: &mut QueryResult, query: &Query) -> Result<()> {
+    let has_agg = query
+        .find_elems
+        .iter()
+        .any(|e| matches!(e, FindElem::Agg { .. }));
+    if !has_agg {
+        return Ok(());
+    }
+
+    let col_of = |var: &str| -> Result<usize> {
+        qr.columns
+            .iter()
+            .position(|c| c == var)
+            .ok_or_else(|| DbError::Query(format!("aggregate/group variable '{}' is not bound by the query", var)))
+    };
+
+    // Per output element: take the next grouping value or aggregate result.
+    enum OutSpec {
+        Group,
+        Agg,
+    }
+    let mut specs: Vec<OutSpec> = Vec::with_capacity(query.find_elems.len());
+    let mut group_cols: Vec<usize> = Vec::new();
+    let mut agg_list: Vec<(AggFunc, Option<usize>)> = Vec::new();
+    for e in &query.find_elems {
+        match e {
+            FindElem::Var(v) => {
+                group_cols.push(col_of(v)?);
+                specs.push(OutSpec::Group);
+            }
+            FindElem::Agg { func, var, .. } => {
+                let col = if var == "*" { None } else { Some(col_of(var)?) };
+                agg_list.push((*func, col));
+                specs.push(OutSpec::Agg);
+            }
+        }
+    }
+
+    // Group rows, preserving first-seen group order.
+    let mut group_index: HashMap<String, usize> = HashMap::new();
+    let mut groups: Vec<(Vec<Value>, Vec<AggState>)> = Vec::new();
+    for row in &qr.rows {
+        let key_vals: Vec<Value> = group_cols.iter().map(|&c| row[c].clone()).collect();
+        let key = encode_group_key(&key_vals);
+        let gi = *group_index.entry(key).or_insert_with(|| {
+            let states = agg_list.iter().map(|(f, _)| AggState::new(*f)).collect();
+            groups.push((key_vals, states));
+            groups.len() - 1
+        });
+        let states = &mut groups[gi].1;
+        for (i, (func, col)) in agg_list.iter().enumerate() {
+            let v = col.map(|c| &row[c]);
+            states[i].update(*func, v);
+        }
+    }
+
+    // When there are no grouping vars and zero matching rows, aggregates still
+    // produce one row (e.g. count(*) over an empty set is 0).
+    if group_cols.is_empty() && groups.is_empty() {
+        let states = agg_list.iter().map(|(f, _)| AggState::new(*f)).collect();
+        groups.push((Vec::new(), states));
+    }
+
+    // Build output.
+    qr.columns = query.find_elems.iter().map(|e| e.label().to_string()).collect();
+    let mut out_rows = Vec::with_capacity(groups.len());
+    for (key_vals, states) in groups {
+        let mut state_iter = states.into_iter();
+        let mut key_iter = key_vals.into_iter();
+        let mut row = Vec::with_capacity(specs.len());
+        for spec in &specs {
+            match spec {
+                OutSpec::Group => row.push(key_iter.next().expect("group value")),
+                OutSpec::Agg => row.push(state_iter.next().expect("agg state").finalize()),
+            }
+        }
+        out_rows.push(row);
+    }
+    qr.rows = out_rows;
+    Ok(())
+}
+
+/// Post-execution shaping: aggregate, then order, then paginate.
+fn post_process(qr: &mut QueryResult, query: &Query) -> Result<()> {
+    apply_aggregation(qr, query)?;
+    apply_ordering_and_paging(qr, query)?;
+    Ok(())
+}
+
+/// Apply `order_by`, `offset`, and `limit` to a finished result set. Ordering
+/// is post-projection, so order keys must be variables present in `find`.
+/// The sort is stable, so equal keys preserve the underlying scan order.
+fn apply_ordering_and_paging(qr: &mut QueryResult, query: &Query) -> Result<()> {
+    use std::cmp::Ordering;
+
+    if !query.order_by.is_empty() {
+        // Resolve each order variable to its output column index up front.
+        let mut keys: Vec<(usize, bool)> = Vec::with_capacity(query.order_by.len());
+        for ok in &query.order_by {
+            let col = qr.columns.iter().position(|c| c == &ok.var).ok_or_else(|| {
+                DbError::Query(format!(
+                    "order_by variable '{}' must be one of the find variables {:?}",
+                    ok.var, qr.columns
+                ))
+            })?;
+            keys.push((col, ok.desc));
+        }
+        qr.rows.sort_by(|a, b| {
+            for &(col, desc) in &keys {
+                let ord = crate::query::compare_values(&a[col], &b[col]);
+                let ord = if desc { ord.reverse() } else { ord };
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+            }
+            Ordering::Equal
+        });
+    }
+
+    // Offset then limit, both relative to the (possibly) ordered rows.
+    if let Some(offset) = query.offset {
+        if offset >= qr.rows.len() {
+            qr.rows.clear();
+        } else if offset > 0 {
+            qr.rows.drain(0..offset);
+        }
+    }
+    if let Some(limit) = query.limit {
+        qr.rows.truncate(limit);
+    }
+    Ok(())
+}
+
+/// Rewrite each clause's scalar field literals to match the declared field
+/// type, so the planner and AVET index see correctly-typed values. Runs once
+/// per query before planning; enum sub-field patterns are left untouched.
+fn normalize_query_literals(query: &mut Query, schema: &SchemaRegistry) {
+    query.where_clause.for_each_pattern_mut(&mut |clause| {
+        let Some(type_def) = schema.get(&clause.entity_type) else {
+            return;
+        };
+        for (field_name, pattern) in &mut clause.field_patterns {
+            let Some(fd) = type_def.get_field(field_name) else {
+                continue;
+            };
+            let ft = fd.field_type.clone();
+            match pattern {
+                Pattern::Constant(value) => {
+                    if let Some((_, nv)) = coerce_numeric_literal(&ft, None, value) {
+                        *value = nv;
+                    }
+                }
+                Pattern::Predicate { op, value } => {
+                    if let Some((Some(nop), nv)) = coerce_numeric_literal(&ft, Some(&*op), value) {
+                        *op = nop;
+                        *value = nv;
+                    }
+                }
+                Pattern::BoundPredicate { op, value, .. } => {
+                    if let Some((Some(nop), nv)) = coerce_numeric_literal(&ft, Some(&*op), value) {
+                        *op = nop;
+                        *value = nv;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
 }
 
 impl Hash for PlanCacheKey {
@@ -474,6 +887,35 @@ impl Database {
             }
         }
 
+        // Reject incompatible redefinition of an existing type. A redefinition
+        // may only ADD fields: removing a field would orphan its on-disk data,
+        // and changing an existing field's type or modifiers would leave stored
+        // data inconsistent with the schema. Re-stating existing fields
+        // unchanged (and adding new ones) is allowed.
+        if let Some(existing) = schema.get(&type_def.name) {
+            for old_field in &existing.fields {
+                match type_def.get_field(&old_field.name) {
+                    None => {
+                        return Err(DbError::Schema(format!(
+                            "cannot redefine type '{}': field '{}' is missing from the new \
+                             definition. Removing a field would orphan its data; redefinitions \
+                             may only add fields.",
+                            type_def.name, old_field.name
+                        )));
+                    }
+                    Some(new_field) if new_field != old_field => {
+                        return Err(DbError::Schema(format!(
+                            "cannot redefine type '{}': field '{}' changed definition. An existing \
+                             field's type and modifiers (required/unique/indexed) cannot change; \
+                             only adding new fields is allowed.",
+                            type_def.name, old_field.name
+                        )));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         let json =
             serde_json::to_string(&type_def).map_err(|e| DbError::Schema(e.to_string()))?;
         let timestamp_ms = now_millis();
@@ -640,6 +1082,12 @@ impl Database {
             }
         }
 
+        // Align literal types with the schema (e.g. integer literal against
+        // an f64 field) before planning, so the index scan and post-filter
+        // see correctly-typed values. Must run before the plan-cache key so
+        // the key and the cached plan agree on the normalized literals.
+        normalize_query_literals(&mut query, &schema);
+
         // Check plan cache
         let cache_key = PlanCacheKey::from_query(&query);
         let cached_plan = {
@@ -653,31 +1101,43 @@ impl Database {
             plan.as_of = query.as_of;
             let cache = self.query_cache.clone();
             let interner = self.attr_interner.clone();
+            // Sample the cache generation BEFORE execute_read takes its
+            // snapshot, so a write that lands during this read is detected.
+            let cache_gen = self.query_cache.generation();
             let result = self
                 .storage
                 .execute_read(Box::new(move |snap| {
-                    let qr = executor::execute_plan(snap, &plan, &schema, &cache, &interner)
-                        .map_err(|e| StorageError::Backend(e))?;
+                    let qr =
+                        executor::execute_plan(snap, &plan, &schema, &cache, &interner, cache_gen)
+                            .map_err(|e| StorageError::Backend(e))?;
                     Ok(Box::new(qr) as Box<dyn Any + Send>)
                 }))?;
-            return Ok(*result.downcast::<QueryResult>().expect("wrong type"));
+            let mut qr = *result.downcast::<QueryResult>().expect("wrong type");
+            post_process(&mut qr, &query)?;
+            return Ok(qr);
         }
 
         let cache = self.query_cache.clone();
         let interner = self.attr_interner.clone();
+        // Clone for the planning closure so the original `query` survives for
+        // post-execution ordering/paging below.
+        let query_for_plan = query.clone();
+        // Sample the cache generation BEFORE execute_read takes its snapshot.
+        let cache_gen = self.query_cache.generation();
         let result = self
             .storage
             .execute_read(Box::new(move |snap| {
-                let plan = planner::plan_query(snap, &query, &schema, &interner)
+                let plan = planner::plan_query(snap, &query_for_plan, &schema, &interner)
                     .map_err(|e| StorageError::Backend(e))?;
 
-                let qr = executor::execute_plan(snap, &plan, &schema, &cache, &interner)
-                    .map_err(|e| StorageError::Backend(e))?;
+                let qr =
+                    executor::execute_plan(snap, &plan, &schema, &cache, &interner, cache_gen)
+                        .map_err(|e| StorageError::Backend(e))?;
 
                 Ok(Box::new((plan, qr)) as Box<dyn Any + Send>)
             }))?;
 
-        let (plan, qr) = *result
+        let (plan, mut qr) = *result
             .downcast::<(QueryPlan, QueryResult)>()
             .expect("wrong type");
 
@@ -687,6 +1147,7 @@ impl Database {
             cache.insert(cache_key, Arc::new(plan));
         }
 
+        post_process(&mut qr, &query)?;
         Ok(qr)
     }
 
@@ -804,6 +1265,15 @@ impl Database {
             "types": schema.all_types(),
             "enums": schema.all_enums(),
         })
+    }
+
+    /// Take a point-in-time on-disk checkpoint of the live database at
+    /// `path`. The path must not yet exist; RocksDB creates it. Checkpoints
+    /// are hard-link based, so `path` must be on the same filesystem as
+    /// the live data-dir. Restore is "stop the server and point
+    /// `--data-dir` at the checkpoint directory".
+    pub fn create_checkpoint(&self, path: &std::path::Path) -> Result<()> {
+        self.storage.checkpoint(path).map_err(DbError::from)
     }
 
     /// Return all datoms for a specific entity in EAVT order.

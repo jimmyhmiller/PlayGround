@@ -345,10 +345,13 @@ fn handle_content_press(
         let Ok(mut pane) = panes.get_mut(ev.pane) else {
             continue;
         };
-        let Ok(rect) = pane_rects.get(ev.pane) else {
+        let Ok(_rect) = pane_rects.get(ev.pane) else {
             continue;
         };
-        let local = pt_to_content_local(ev.window_pt, rect);
+        // `ev.local_pt` is already content-local in canvas-space;
+        // recomputing from window_pt + canvas-space rect would
+        // mis-hit the moment the canvas is panned/zoomed.
+        let local = ev.local_pt;
         let mut picked: Option<InboxHit> = None;
         for (hit, size) in &hits {
             if local.x >= size.local_origin.x

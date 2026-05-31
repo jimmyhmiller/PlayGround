@@ -80,8 +80,10 @@ pub enum Expr {
     /// every routing strategy that has to look across multiple downstreams.
     OutNeighbors,
     /// Read a slot off another node by `NodeRef`. The `node` expression
-    /// must evaluate to `Value::NodeRef(_)`. Panics if the target node
-    /// doesn't exist or the slot isn't defined.
+    /// must evaluate to `Value::NodeRef(_)` (or `Value::Nil`, which reads
+    /// as `Nil`). A missing node or missing slot reads as `Value::Nil`
+    /// rather than erroring — so routing expressions can probe neighbours
+    /// that may not declare the slot.
     SlotOf { node: Box<Expr>, slot: String },
 
     // ---- List operators. ------------------------------------------------
@@ -415,18 +417,25 @@ impl Expr {
             Expr::SlotOf { node, slot } => {
                 let v = node.eval(ctx);
                 let nid = match v {
+                    // A `Nil` node ref (e.g. from `head([])` when no
+                    // neighbour matched) reads as `Nil` — not an error.
+                    // This lets routing expressions compose safely:
+                    // `slot_of(head(filter(...)), "color")` yields Nil
+                    // when the filter found nothing.
+                    Value::Nil => return Value::Nil,
                     Value::NodeRef(id) => id,
                     other => panic!(
-                        "SlotOf: first arg must yield NodeRef, got {:?}", other
+                        "SlotOf: first arg must yield NodeRef or Nil, got {:?}", other
                     ),
                 };
+                // Missing node or missing slot reads as `Nil` rather than
+                // panicking. Routing primitives (e.g. a colour router
+                // reading `slot_of(neighbour, "color")`) must tolerate
+                // neighbours that don't declare the slot — those simply
+                // don't match, they don't crash the sim.
                 ctx.nodes.get(&nid)
-                    .unwrap_or_else(|| panic!("SlotOf: no node {:?}", nid))
-                    .slots.get(slot)
-                    .cloned()
-                    .unwrap_or_else(|| panic!(
-                        "SlotOf: node {:?} has no slot `{}`", nid, slot
-                    ))
+                    .and_then(|n| n.slots.get(slot).cloned())
+                    .unwrap_or(Value::Nil)
             }
 
             // ---- List operators -----------------------------------------
@@ -444,8 +453,13 @@ impl Expr {
                     Value::List(v) => v,
                     other => panic!("Index: first arg must be a List, got {:?}", other),
                 };
+                // Empty list reads as `Nil` (not a panic) so routing
+                // expressions compose safely: `index(neighbours, rr)`
+                // with no wired neighbours yields Nil, and `emit … to
+                // (Nil)` is a silent drop — same no-panic contract as
+                // `head([])` / `argmin([])`.
                 if items.is_empty() {
-                    panic!("Index: list is empty");
+                    return Value::Nil;
                 }
                 let raw = i.eval(ctx).as_int()
                     .expect("Index: index must be Int");

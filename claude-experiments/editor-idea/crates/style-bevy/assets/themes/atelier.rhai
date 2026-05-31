@@ -90,6 +90,14 @@
     status_success: "#94be9e",
     status_failed: "#d06b4d",
 
+    // --- diff view ---
+    diff_added: "#94be9e",
+    diff_removed: "#d77a5f",
+    diff_header: "#7f93ad",
+    diff_added_bg: "#9bd6a526",
+    diff_removed_bg: "#e0795f24",
+    diff_gutter: "#6b6b79",
+
     // --- radial menu ---
     radial_wedge: "#21262e",
     radial_wedge_hover: "#383028",

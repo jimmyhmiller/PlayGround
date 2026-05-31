@@ -76,6 +76,31 @@ impl CtValue {
 
 type Env = HashMap<String, CtValue>;
 
+/// Resolve a compound declaration's compile-time params to their
+/// effective scalar values: `overrides` win, otherwise the declared
+/// default is CT-evaluated. Params whose default isn't a CT scalar (and
+/// which weren't overridden) are simply omitted.
+///
+/// Used by `Sim::instantiate_compound` to stamp these values onto the
+/// port-shim node as ordinary slots, so routing primitives can read a
+/// peer compound's params (e.g. `slot_of(neighbour, "color")`) without
+/// reaching into its inner nodes.
+pub fn resolve_compound_param_values(
+    decl: &CompoundDecl,
+    overrides: &BTreeMap<String, CtValue>,
+) -> BTreeMap<String, CtValue> {
+    let env = Env::new();
+    let mut out = BTreeMap::new();
+    for p in &decl.params {
+        if let Some(v) = overrides.get(&p.name) {
+            out.insert(p.name.clone(), v.clone());
+        } else if let Some(d) = p.default.as_ref().and_then(|e| ct_eval(e, &env).ok()) {
+            out.insert(p.name.clone(), d);
+        }
+    }
+    out
+}
+
 /// Class-name rewrite map: keys are the unqualified class names that
 /// were declared inside the *enclosing* compound; values are the
 /// fully-qualified names they got after prefixing. Lookups in nested
@@ -695,6 +720,7 @@ fn expand_emit_target(t: &EmitTarget, env: &Env, name_prefix: &str) -> Result<Em
         EmitTarget::Default => EmitTarget::Default,
         EmitTarget::Self_ => EmitTarget::Self_,
         EmitTarget::OutPort(s) => EmitTarget::OutPort(s.clone()),
+        EmitTarget::OutPortRotating(s) => EmitTarget::OutPortRotating(s.clone()),
         EmitTarget::FromPort(s) => EmitTarget::FromPort(s.clone()),
         EmitTarget::Target(name) => {
             let resolved = resolve_name(name, env, name_prefix)

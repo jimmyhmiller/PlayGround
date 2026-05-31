@@ -1,0 +1,3 @@
+label:
+if (a)
+  b;

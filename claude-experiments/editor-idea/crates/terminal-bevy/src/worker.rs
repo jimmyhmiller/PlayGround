@@ -36,7 +36,7 @@ use libghostty_vt::{
     paste,
     render::{CellIterator, Dirty, RenderState, RowIterator},
     style::RgbColor,
-    terminal::{Mode, ScrollViewport},
+    terminal::{Mode, Point, PointCoordinate, ScrollViewport},
 };
 use nix::errno::Errno;
 use nix::fcntl::{self, OFlag};
@@ -144,6 +144,13 @@ pub struct GridSnapshot {
     /// last value it consumed to skip whole frames when nothing changed.
     pub generation: u64,
     pub child_alive: bool,
+    /// libghostty's scrollbar offset — the row index at the top of the
+    /// visible viewport, measured from row 0 of the total scrollable
+    /// area (scrollback + active). Increases as new content arrives or
+    /// the viewport is scrolled toward the active area. Selection coords
+    /// are anchored against this so a selection follows its content
+    /// while the user scrolls.
+    pub viewport_offset: u64,
 }
 
 /// Messages the main (Bevy) thread sends to a worker.
@@ -170,6 +177,20 @@ pub enum WorkerMsg {
     /// `None` is interpreted as "snap to the bottom (active area)".
     ScrollDelta(isize),
     ScrollToBottom,
+    /// Extract the text of a selection that may span scrollback the
+    /// visible snapshot doesn't hold. `start`/`end` are normalised
+    /// `(col, absolute_row)` cells (absolute_row is measured from row 0
+    /// of the total scrollable area — the same space as
+    /// `GridSnapshot::viewport_offset`). The worker reads the cells
+    /// straight out of the libghostty `Terminal` (which owns the full
+    /// scrollback) and ships the joined text back on `reply`. Done on
+    /// the worker because the `!Send` `Terminal` never leaves this
+    /// thread.
+    ExtractText {
+        start: (i32, i64),
+        end: (i32, i64),
+        reply: Sender<String>,
+    },
     Shutdown,
 }
 
@@ -255,6 +276,7 @@ impl WorkerHandle {
             cursor: None,
             generation: 0,
             child_alive: true,
+            viewport_offset: 0,
         }));
         let snapshot_w = snapshot.clone();
         let bell_count = Arc::new(AtomicU64::new(0));
@@ -411,6 +433,10 @@ fn worker_loop(
     // are from prior sessions.
     let mut osc7 = crate::osc7::Osc7Watcher::default();
     let mut last_published_cwd: Option<String> = None;
+    // OSC 133 command marks → `terminal.command_executed` events that
+    // feed the command-suggestion classifier. Same byte stream, same
+    // replay suppression as OSC 7.
+    let mut cmd_watch = crate::command_watch::CommandWatcher::default();
     let session_id = client.session_id();
 
     let mut render_state = RenderState::new().expect("RenderState");
@@ -494,6 +520,14 @@ fn worker_loop(
                                         publish_cwd_changed(session_id, &cwd);
                                         last_published_cwd = Some(cwd);
                                     }
+                                });
+                                cmd_watch.feed(&bytes, |command, exit_code| {
+                                    publish_command_executed(
+                                        session_id,
+                                        &command,
+                                        exit_code,
+                                        last_published_cwd.as_deref(),
+                                    );
                                 });
                             }
                             output_bytes += bytes.len() as u64;
@@ -581,6 +615,11 @@ fn worker_loop(
                     terminal.scroll_viewport(ScrollViewport::Bottom);
                     did_anything = true;
                     force_full_publish = true;
+                }
+                Ok(WorkerMsg::ExtractText { start, end, reply }) => {
+                    // Best-effort; if the receiver is gone the main
+                    // thread already moved on.
+                    let _ = reply.send(extract_screen_selection(&terminal, start, end));
                 }
                 Ok(WorkerMsg::Shutdown) => {
                     // Explicit pane close → tell the daemon to die.
@@ -878,8 +917,91 @@ fn publish_snapshot(
         None
     };
     g.child_alive = child_alive;
+    // libghostty docs warn scrollbar() may be expensive for arbitrary
+    // pin positions; in practice the viewport sits at the bottom or
+    // close to it most of the time and the lookup is cheap. We're
+    // already inside the snapshot publish path which runs at most a
+    // few times per second under steady-state output.
+    g.viewport_offset = terminal.scrollbar().map(|s| s.offset).unwrap_or(0);
     g.generation = g.generation.wrapping_add(1);
     (cols, rows, true)
+}
+
+/// Extract the text covered by a `(col, absolute_row)` selection from
+/// the terminal's full scrollable area (scrollback + active), trimming
+/// trailing whitespace per row and joining rows with newlines.
+///
+/// `absolute_row` is in the same coordinate space as
+/// `GridSnapshot::viewport_offset` (row 0 of the total scrollable area),
+/// which is exactly libghostty's `Point::Screen` y. That's why this can
+/// reach rows that have scrolled out of the visible snapshot — the
+/// renderer's snapshot only holds the visible grid, but the `Terminal`
+/// here still owns the whole history.
+///
+/// Mirrors the per-row column-span logic in `selection.rs`: first row
+/// runs from the start col to the row end, last row from row start to
+/// the end col, middle rows span fully.
+fn extract_screen_selection(
+    terminal: &libghostty_vt::Terminal<'static, 'static>,
+    start: (i32, i64),
+    end: (i32, i64),
+) -> String {
+    let cols = terminal.cols().unwrap_or(0) as i32;
+    let total_rows = terminal.total_rows().unwrap_or(0) as i64;
+    if cols == 0 || total_rows == 0 {
+        return String::new();
+    }
+    let first = start.1.max(0);
+    let last = end.1.min(total_rows - 1);
+    if first > last {
+        return String::new();
+    }
+
+    let mut out = String::new();
+    let mut grapheme_buf = [' '; 16];
+    for row in first..=last {
+        let (col_start, col_end) = if start.1 == end.1 {
+            (start.0.min(end.0), start.0.max(end.0))
+        } else if row == start.1 {
+            (start.0, cols - 1)
+        } else if row == end.1 {
+            (0, end.0)
+        } else {
+            (0, cols - 1)
+        };
+        let col_start = col_start.max(0);
+        let col_end = col_end.min(cols - 1);
+        if col_end < col_start {
+            if row != last {
+                out.push('\n');
+            }
+            continue;
+        }
+        let mut line = String::new();
+        for col in col_start..=col_end {
+            let point = Point::Screen(PointCoordinate {
+                x: col as u16,
+                y: row as u32,
+            });
+            let ch = terminal
+                .grid_ref(point)
+                .ok()
+                .and_then(|g| {
+                    let n = g.graphemes(&mut grapheme_buf).ok()?;
+                    (n > 0).then(|| grapheme_buf[0])
+                })
+                .unwrap_or(' ');
+            line.push(ch);
+        }
+        // Trim trailing whitespace — terminals pad rows with spaces and
+        // copying a screenful of those is annoying. Leading spaces
+        // (indentation) are preserved.
+        out.push_str(line.trim_end());
+        if row != last {
+            out.push('\n');
+        }
+    }
+    out
 }
 
 /// Marker type for OwnedFd round-trip if needed elsewhere.
@@ -906,6 +1028,34 @@ fn publish_cwd_changed(session_id: u64, cwd: &str) {
     let _ = claude_bus::client::publish_oneshot(
         &socket,
         "terminal.cwd_changed",
+        ts,
+        &session_id.to_string(),
+        std::process::id(),
+        &payload,
+    );
+}
+
+/// Best-effort publish of a `terminal.command_executed` event to the
+/// bus. Called from the worker thread when an OSC 133 `D` mark pairs
+/// with its `C`. Fire-and-forget like [`publish_cwd_changed`].
+fn publish_command_executed(session_id: u64, command: &str, exit_code: i32, cwd: Option<&str>) {
+    let Some(socket) = claude_bus::socket_path() else {
+        return;
+    };
+    let payload = serde_json::json!({
+        "session_id": session_id,
+        "command": command,
+        "cwd": cwd.unwrap_or(""),
+        "exit_code": exit_code,
+    })
+    .to_string();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let _ = claude_bus::client::publish_oneshot(
+        &socket,
+        "terminal.command_executed",
         ts,
         &session_id.to_string(),
         std::process::id(),

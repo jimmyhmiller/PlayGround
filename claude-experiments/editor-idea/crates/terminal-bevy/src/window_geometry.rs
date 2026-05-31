@@ -85,6 +85,10 @@ pub fn save_on_change(
                 WindowPosition::At(p) => p,
                 _ => IVec2::ZERO,
             };
+            // Save PHYSICAL pixels — Bevy 0.18's
+            // `WindowResolution::from((u32, u32))` calls
+            // `WindowResolution::new(physical_width, physical_height)`,
+            // so the restore path treats these as physical.
             state.pending = Some(WindowGeometry {
                 x: pos.x,
                 y: pos.y,

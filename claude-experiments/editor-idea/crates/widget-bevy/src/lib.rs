@@ -39,6 +39,7 @@ pub mod layout;
 pub mod protocol;
 pub mod render;
 pub mod rhai_widget;
+pub mod subprocess;
 
 pub use button_material::{
     ButtonParams as WidgetButtonParams, WidgetButtonMaterial, WidgetButtonMaterialPlugin,
@@ -143,6 +144,20 @@ pub struct WidgetRender {
     /// Used by `forward_ticks` to rate-limit ticks to ~30Hz regardless
     /// of the host's frame rate.
     pub last_tick_secs: f32,
+    /// Set when transient render state (hover, etc.) changes so the
+    /// next pass through `rerender_widgets` redraws even if the element
+    /// tree itself didn't change. The hover system flips this.
+    pub force_render: bool,
+}
+
+/// Which clickable target (if any) the mouse is currently over inside
+/// this widget pane. Updated each frame from `WidgetTargets.clicks` and
+/// the cursor position. The id string matches the `id` carried on the
+/// element + `ClickTarget`. Cleared to `None` when the mouse leaves the
+/// pane or moves off all clickables.
+#[derive(Component, Default, Debug, Clone)]
+pub struct WidgetHover {
+    pub click_id: Option<String>,
 }
 
 /// Hit-test geometry collected while rendering the current frame.
@@ -250,6 +265,9 @@ impl Plugin for WidgetPlugin {
                     tick_widget_io,
                     forward_claude_events,
                     forward_ticks,
+                    // Hover runs BEFORE rerender so a hover-change this
+                    // frame is reflected in the same-frame redraw.
+                    update_widget_hover,
                     rerender_widgets,
                     handle_widget_press,
                     handle_widget_input_typing,
@@ -265,6 +283,92 @@ impl Plugin for WidgetPlugin {
     }
 }
 
+/// Update each widget pane's `WidgetHover` based on the cursor position
+/// + that pane's `ClickTarget` rects. Event-driven: only when the
+/// hovered id actually changes do we flip `WidgetRender.force_render`
+/// so `rerender_widgets` redraws with the new hover state. Also nudges
+/// the system cursor to a pointer when over any clickable.
+fn update_widget_hover(
+    mut commands: Commands,
+    windows: Query<(Entity, &Window)>,
+    viewport: Res<pane_bevy::PaneViewport>,
+    all_panes: Query<
+        (Entity, &pane_bevy::PaneRect, Option<&Visibility>),
+        With<pane_bevy::PaneTag>,
+    >,
+    targets: Query<&WidgetTargets>,
+    mut widgets: Query<
+        (
+            Entity,
+            &pane_bevy::PaneKindMarker,
+            &mut WidgetHover,
+            &mut WidgetRender,
+        ),
+        With<pane_bevy::PaneTag>,
+    >,
+) {
+    let Ok((win_entity, window)) = windows.single() else {
+        return;
+    };
+    let cursor = window.cursor_position();
+
+    // Topmost pane under the cursor (any kind). Hover is only valid
+    // when the topmost pane is a widget; otherwise something else
+    // (terminal, editor) is on top and the widget isn't really hovered.
+    let candidates: Vec<(Entity, pane_bevy::PaneRect)> = all_panes
+        .iter()
+        .filter(|(_, _, vis)| !matches!(vis, Some(Visibility::Hidden)))
+        .map(|(e, r, _)| (e, *r))
+        .collect();
+    // PaneRect is canvas-space; project the cursor before hit-testing.
+    let topmost = cursor.and_then(|pt| {
+        let pt_canvas = viewport.window_to_canvas(pt);
+        pane_bevy::topmost_pane_at(pt_canvas, &candidates).map(|e| (pt_canvas, e))
+    });
+
+    let mut want_pointer = false;
+    for (pane, kind, mut hover, mut render_state) in &mut widgets {
+        let is_widget_kind = kind.0 == PANE_KIND || kind.0 == rhai_widget::PANE_KIND;
+        if !is_widget_kind {
+            continue;
+        }
+        // Find this pane's rect (we already have it in `candidates`,
+        // but cheaper to re-query than threading it through).
+        let pane_rect = candidates.iter().find(|(e, _)| *e == pane).map(|(_, r)| *r);
+        let new_id: Option<String> = match (topmost, pane_rect, cursor) {
+            (Some((pt, top)), Some(rect), Some(_)) if top == pane => {
+                let local = pane_bevy::pt_to_content_local(pt, &rect);
+                targets
+                    .get(pane)
+                    .ok()
+                    .and_then(|t| {
+                        t.clicks
+                            .iter()
+                            .find(|c| c.rect.contains(local))
+                            .map(|c| c.id.clone())
+                    })
+            }
+            _ => None,
+        };
+        if new_id.is_some() && topmost.map(|(_, top)| top == pane).unwrap_or(false) {
+            want_pointer = true;
+        }
+        if hover.click_id != new_id {
+            hover.click_id = new_id;
+            render_state.force_render = true;
+        }
+    }
+    use bevy::window::{CursorIcon, SystemCursorIcon};
+    if want_pointer {
+        commands
+            .entity(win_entity)
+            .insert(CursorIcon::System(SystemCursorIcon::Pointer));
+    }
+    // Note: we don't clear the cursor here on no-hover; the pane-bevy
+    // `update_pane_cursor` system already restores the default cursor
+    // when nothing else owns it.
+}
+
 /// Read mouse wheel events, route to whichever widget pane (any kind:
 /// the protocol-driven `widget` or the `rhai_widget`) is topmost
 /// under the cursor, and update its `WidgetScroll.y` clamped to
@@ -274,6 +378,7 @@ fn handle_widget_wheel(
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     windows: Query<&Window>,
     keys: Res<ButtonInput<KeyCode>>,
+    viewport: Res<pane_bevy::PaneViewport>,
     all_panes: Query<
         (Entity, &pane_bevy::PaneRect, Option<&Visibility>),
         With<pane_bevy::PaneTag>,
@@ -312,7 +417,8 @@ fn handle_widget_wheel(
         .filter(|(_, _, vis)| !matches!(vis, Some(Visibility::Hidden)))
         .map(|(e, r, _)| (e, *r))
         .collect();
-    let Some(target) = pane_bevy::topmost_pane_at(pt, &candidates) else {
+    let Some(target) = pane_bevy::topmost_pane_at(viewport.window_to_canvas(pt), &candidates)
+    else {
         return;
     };
 
@@ -577,6 +683,7 @@ fn widget_spawn(world: &mut World, entity: Entity, content_root: Entity, config:
             targets,
             WidgetContentRoot(content_root),
             WidgetScroll::default(),
+            WidgetHover::default(),
         ));
         return;
     }
@@ -825,6 +932,7 @@ fn rerender_widgets(
     theme: Res<style_bevy::Theme>,
     fonts: Res<style_bevy::FontRegistry>,
     time: Res<Time>,
+    pane_zoom: Res<pane_bevy::PaneZoom>,
     mut clip_dirty: ResMut<WidgetClipDirty>,
     mut images: ResMut<Assets<Image>>,
     mut image_cache: ResMut<WidgetImageCache>,
@@ -838,6 +946,7 @@ fn rerender_widgets(
         &mut WidgetScroll,
         Option<&WidgetEditMode>,
         Option<&WidgetInputFocus>,
+        Option<&WidgetHover>,
     )>,
     children_q: Query<&Children>,
 ) {
@@ -856,6 +965,7 @@ fn rerender_widgets(
         mut scroll,
         edit,
         input_focus,
+        hover,
     ) in &mut q
     {
         if kind.0 != PANE_KIND {
@@ -865,6 +975,8 @@ fn rerender_widgets(
             continue;
         }
 
+        // PaneRect is now canvas-units; the pane entity Transform
+        // applies zoom. Lay out at (rect.size - chrome) canvas-units.
         let content_size = Vec2::new(
             (rect.size.x - 2.0 * MARGIN).max(0.0),
             (rect.size.y - TITLE_H - 2.0 * MARGIN).max(0.0),
@@ -875,8 +987,10 @@ fn rerender_widgets(
             render_state.current_frame = Some(p);
         }
         let size_changed = render_state.last_size != content_size;
-        let needs_render = (frame_came_in || size_changed || theme_changed)
+        let forced = render_state.force_render;
+        let needs_render = (frame_came_in || size_changed || theme_changed || forced)
             && render_state.current_frame.is_some();
+        render_state.force_render = false;
 
         if !needs_render {
             // Track size even when we don't render so we don't fire a
@@ -909,6 +1023,8 @@ fn rerender_widgets(
                 root.0,
                 children,
                 content_size,
+                &pane_font.0,
+                &fonts,
             );
         } else {
             let ctx = render::LayoutCtx {
@@ -921,6 +1037,7 @@ fn rerender_widgets(
                 fonts: fonts.clone(),
                 focused_input: input_focus.cloned(),
                 caret_visible,
+                hovered_click_id: hover.and_then(|h| h.click_id.clone()),
             };
             let consumed = render::render(
                 &mut commands,
@@ -959,6 +1076,8 @@ fn render_canvas_items(
     content_root: Entity,
     items: &[CanvasItem],
     _content_size: Vec2,
+    default_font: &Handle<Font>,
+    fonts: &style_bevy::FontRegistry,
 ) {
     for item in items {
         match item {
@@ -998,10 +1117,15 @@ fn render_canvas_items(
                 color,
                 anchor,
                 z,
+                rotation,
             } => {
                 let bevy_color = parse_canvas_color(color)
                     .unwrap_or(Color::srgb(0.20, 0.22, 0.26));
                 let anchor_cmp = canvas_anchor_to_bevy(*anchor);
+                let mut transform = Transform::from_xyz(*x, -*y, *z);
+                if *rotation != 0.0 {
+                    transform.rotation = Quat::from_rotation_z(-rotation.to_radians());
+                }
                 commands.spawn((
                     ChildOf(content_root),
                     Sprite {
@@ -1010,6 +1134,42 @@ fn render_canvas_items(
                         ..default()
                     },
                     anchor_cmp,
+                    transform,
+                    Visibility::Inherited,
+                ));
+            }
+            CanvasItem::Text {
+                id: _,
+                x,
+                y,
+                value,
+                color,
+                size,
+                family,
+                anchor,
+                z,
+            } => {
+                let font_size = size.unwrap_or(14.0).max(1.0);
+                let col = color
+                    .as_deref()
+                    .and_then(parse_canvas_color)
+                    .unwrap_or(Color::WHITE);
+                let font = match family.as_deref() {
+                    Some(f) => fonts.resolve(f),
+                    None => default_font.clone(),
+                };
+                let anchor_cmp = canvas_anchor_to_bevy(*anchor);
+                commands.spawn((
+                    ChildOf(content_root),
+                    Text2d::new(value.clone()),
+                    TextFont {
+                        font,
+                        font_size,
+                        ..default()
+                    },
+                    TextColor(col),
+                    anchor_cmp,
+                    bevy::text::TextLayout::new_with_no_wrap(),
                     Transform::from_xyz(*x, -*y, *z),
                     Visibility::Inherited,
                 ));
@@ -1191,10 +1351,11 @@ fn update_widget_hot_zones(
         &WidgetTargets,
         Option<&WidgetScroll>,
         Option<&WidgetEditMode>,
+        Option<&crate::rhai_widget::RhaiWidget>,
         &mut PaneHotZones,
     )>,
 ) {
-    for (rect, targets, scroll, edit, mut zones) in &mut q {
+    for (rect, targets, scroll, edit, rhai, mut zones) in &mut q {
         zones.clear();
         // In edit mode the overlay covers the pane and the underlying
         // targets are stale; leave hot-zones empty so a pinned widget
@@ -1228,6 +1389,16 @@ fn update_widget_hot_zones(
             if !clipped.is_empty() {
                 zones.push(clipped);
             }
+        }
+        // Canvas-based rhai widgets (e.g. chess) self-route clicks and
+        // publish no per-element targets, so the loops above leave them
+        // with no hot-zones — meaning they'd be entirely click-through
+        // when pinned. If such a widget handles clicks at all (defines
+        // `on_click`), treat its whole content area as one hot-zone so
+        // pinned clicks reach it. Decorative widgets without `on_click`
+        // (dust) stay click-through.
+        if zones.0.is_empty() && rhai.map_or(false, |r| r.wants_clicks) && !visible.is_empty() {
+            zones.push(visible);
         }
     }
 }

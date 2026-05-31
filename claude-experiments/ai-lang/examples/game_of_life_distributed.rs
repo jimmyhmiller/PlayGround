@@ -73,19 +73,9 @@ unsafe extern "C" fn ai_demo_get_port(_thread: *mut Thread, i: i64) -> i64 {
 }
 
 const USER_SRC: &str = r#"
-    struct Node { a: Int, b: Int, c: Int, d: Int, port: Int }
-    enum Failure {
-        Unreachable(Node),
-        Crashed(Node),
-        CodeMissing(Node),
-        Cancelled(Node),
-    }
-    enum Result<T, E> { Ok(T), Err(E) }
+    // Node / Failure / Result / tcp_node come from the stdlib.
 
     extern fn get_port(i: Int) -> Int
-
-    def make_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
-        Node { a: a, b: b, c: c, d: d, port: port }
 
     def build_pool(n: Int) -> List<Node> =
         list_reverse(build_pool_acc(n, 0, Nil))
@@ -95,7 +85,7 @@ const USER_SRC: &str = r#"
             let p = get_port(i);
             build_pool_acc(
                 n, i + 1,
-                Cons(ListCell { head: make_node(127, 0, 0, 1, p), tail: acc })
+                Cons(ListCell { head: tcp_node(127, 0, 0, 1, p), tail: acc })
             )
         }
 

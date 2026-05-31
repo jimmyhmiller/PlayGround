@@ -209,6 +209,71 @@ fn format_user_message(project_name: &str, facts: &CwdFacts) -> String {
     out
 }
 
+// ---------- Command-suggestion classifier ----------
+
+/// Output of [`classify_command_suggestion`]. The model decides whether
+/// a command the user just ran is worth parking as a one-click
+/// run-button on their canvas.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CommandSuggestion {
+    pub worth_suggesting: bool,
+    /// 0.0 to 1.0. Caller thresholds before surfacing.
+    pub confidence: f32,
+    /// Short imperative label for the run-button, e.g. "Run tests",
+    /// "Start dev server". Kept under ~40 chars by the prompt.
+    pub title: String,
+    /// One short sentence shown under the title in the drawer.
+    pub reason: String,
+}
+
+const COMMAND_SUGGEST_SYSTEM: &str = "\
+You decide whether a shell command the user just ran in a project \
+terminal is worth saving as a one-click 'run-button' on their canvas, \
+so they can re-run it later without retyping.
+
+Say worth_suggesting=true for repeatable, project-meaningful tasks the \
+user is likely to run again:
+- build / compile (cargo build, make, npm run build, go build, zig build)
+- test (cargo test, pytest, npm test, go test)
+- run / dev servers (cargo run, npm run dev, ./script.sh, python main.py)
+- lint / format / typecheck / benchmark / deploy
+- longer pipelines or commands with meaningful flags the user tuned
+
+Say worth_suggesting=false for one-off or navigational/inspection \
+commands that make no sense as a saved button:
+- navigation & inspection: cd, ls, pwd, cat, less, head, tail, find, \
+grep, which, man, echo, clear, env, history
+- interactive editors / pagers / REPLs: vim, nano, less, top, htop, \
+python (bare), node (bare)
+- version-control inspection: git status, git log, git diff, git branch
+- throwaway one-liners, typos, or anything that already failed for a \
+reason that won't change (note: a failing test command is still worth \
+a button; a typo'd command is not).
+
+Respond with ONLY a JSON object matching this exact shape:
+{\"worth_suggesting\": true|false, \"confidence\": 0.0..1.0, \"title\": \"<short imperative label>\", \"reason\": \"<one short sentence>\"}
+No prose outside the JSON. Keep `title` under 40 characters and \
+`reason` under 120 characters.";
+
+/// Ask the model whether `command` (run in `cwd`, project label
+/// `project_name`, finishing with `exit_code`) is worth a saved
+/// run-button. Blocking; call from a thread.
+pub fn classify_command_suggestion(
+    cfg: &LlmConfig,
+    project_name: &str,
+    command: &str,
+    cwd: &str,
+    exit_code: i32,
+) -> Result<CommandSuggestion, LlmError> {
+    let user = format!(
+        "Project name (label only): {project_name}\n\
+         cwd: {cwd}\n\
+         exit_code: {exit_code}\n\
+         command:\n  {command}\n"
+    );
+    llm::classify(cfg, COMMAND_SUGGEST_SYSTEM, &user)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

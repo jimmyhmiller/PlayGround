@@ -162,7 +162,11 @@ fn run_client(addr: &str, a: i64, b: i64) -> Result<(), NetError> {
     // sides have compiled the same source, so the server doesn't need
     // any code from us. An empty KB is sufficient.
     let kb = KnowledgeBase::new();
-    let result = unsafe { at_remote(&rt, &kb, addr, closure as *const u8)? };
+    let result_ptr = unsafe { at_remote(&rt, &kb, addr, closure as *const u8)? };
+    // The closure is `fn() -> Int`; the lambda boxes its return into
+    // a BoxedInt under the uniform ABI, so the receiver gets back a
+    // BoxedInt pointer. Unbox to recover the raw i64 for printing.
+    let result = unsafe { ai_lang::runtime::ai_gc_unbox_int(result_ptr) };
     println!("{}", result);
     let expected = 2 * a * a + 3 * b * b - 7;
     eprintln!("[client] received result: {} (expected: {})", result, expected);

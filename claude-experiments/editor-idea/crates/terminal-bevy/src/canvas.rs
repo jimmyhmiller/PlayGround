@@ -51,7 +51,7 @@ use serde::{Deserialize, Serialize};
 
 use pane_bevy::{
     InputConsumed, PaneCanvasRegion, PaneChrome, PaneInputBlockZones, PaneProject, PaneRect,
-    PaneTag,
+    PaneTag, PaneDoubleClicked,
 };
 
 use crate::projects::{Projects, Sidebar};
@@ -83,6 +83,14 @@ impl Default for CanvasViewState {
 impl CanvasViewState {
     pub fn clamp_zoom(&mut self) {
         self.zoom = self.zoom.clamp(MIN_ZOOM, MAX_ZOOM);
+    }
+    /// Stop pan at the top-left wall: canvas (0, 0) is the upper-left
+    /// extent of the viewable canvas. Since `pan` is the canvas point
+    /// at the screen origin, allowing negative values would reveal
+    /// canvas points with X<0 or Y<0 — the "off the canvas" zone.
+    pub fn clamp_pan(&mut self) {
+        self.pan.x = self.pan.x.max(0.0);
+        self.pan.y = self.pan.y.max(0.0);
     }
 }
 
@@ -180,16 +188,6 @@ impl Default for CanvasConfig {
     }
 }
 
-// ---------- Components ----------
-
-/// Source-of-truth canvas-space rect for a pane. PaneRect (screen
-/// space) is recomputed from this every PreUpdate.
-#[derive(Component, Copy, Clone, Debug)]
-pub struct CanvasPos {
-    pub pos: Vec2,
-    pub size: Vec2,
-}
-
 // ---------- Mouse drag state ----------
 
 #[derive(Resource, Default)]
@@ -216,35 +214,25 @@ impl Plugin for CanvasPlugin {
         app.insert_resource(CanvasView::default())
             .insert_resource(CanvasConfig::default())
             .insert_resource(PanDragState::default())
-            // Mouse / wheel pan + zoom. Runs in Update before pane-bevy's
-            // chrome drag handler so we can claim wheel events and
-            // (optionally) empty-canvas clicks.
             .add_systems(
                 Update,
-                (
-                    init_canvas_pos_for_new_panes,
-                    handle_pan_zoom_input,
-                    cycle_config_hotkey,
-                )
-                    .chain(),
+                (handle_pan_zoom_input, cycle_config_hotkey, jump_to_double_clicked_pane).chain(),
             )
-            // Project canvas → PaneRect in PreUpdate so all downstream
-            // chrome / camera / hit-test consumers see screen-space rects
-            // this frame. Also publish the canvas region (= window minus
-            // sidebar) so pane-bevy clips per-pane camera viewports to
-            // it; that's what makes the sidebar visually sit on top of
-            // the panes regardless of pan/zoom.
-            .add_systems(PreUpdate, (publish_canvas_region, project_canvas_to_pane).chain())
-            // After drag/resize lands in PaneRect, invert back to canvas.
-            // After all chrome/camera work, set content_root.scale.
+            // PaneViewport must be published BEFORE pane-bevy's
+            // position_panes / handle_pane_mouse / per-pane camera sync
+            // read it. PreUpdate covers steady-state frames; we *also*
+            // re-publish in Update after `sidebar_input` (which is what
+            // mutates `Projects::active`) and before any PaneViewport
+            // reader — otherwise a project switch click leaves panes at
+            // the previous project's pan/zoom for one frame.
+            .add_systems(PreUpdate, publish_canvas_region)
             .add_systems(
-                PostUpdate,
-                (
-                    write_back_pane_to_canvas,
-                    sync_content_root_scale,
-                    sync_origin_indicators,
-                ),
-            );
+                Update,
+                publish_canvas_region
+                    .after(crate::projects::sidebar_input)
+                    .before(pane_bevy::PaneViewportReaders),
+            )
+            .add_systems(PostUpdate, sync_origin_indicators);
     }
 }
 
@@ -277,46 +265,19 @@ fn screen_origin(sidebar: &Sidebar) -> Vec2 {
 
 // ---------- Systems ----------
 
-/// Any new pane that has `PaneRect` but no `CanvasPos` gets initialized
-/// with `CanvasPos = unproject(PaneRect)`. New panes spawned by the
-/// host (cascade_pos, restore) supply PaneRect in window/screen coords;
-/// at zoom=1, pan=(0,0) that equals canvas coords minus screen_origin.
-fn init_canvas_pos_for_new_panes(
-    mut commands: Commands,
-    panes: Query<(Entity, &PaneRect, Option<&PaneProject>), (With<PaneTag>, Without<CanvasPos>)>,
-    view: Res<CanvasView>,
-    sidebar: Res<Sidebar>,
-) {
-    if panes.is_empty() {
-        return;
-    }
-    let origin = screen_origin(&sidebar);
-    for (e, rect, proj) in &panes {
-        let state = proj
-            .map(|p| view.state_for(p.0))
-            .unwrap_or_default();
-        let canvas_pos = unproject_pos(rect.pos, &state, origin);
-        let canvas_size = unproject_size(rect.size, &state);
-        commands.entity(e).insert(CanvasPos {
-            pos: canvas_pos,
-            size: canvas_size,
-        });
-    }
-}
-
-/// PreUpdate: write `PaneRect = project(CanvasPos)` for every pane in
-/// the active project. Skip panes belonging to other projects — their
-/// PaneRect would jump to a stale projection that nobody renders
-/// anyway (they're Visibility::Hidden), and skipping avoids spurious
-/// Changed<PaneRect> ticks.
 /// Tell pane-bevy where the canvas is, so per-pane cameras clip their
 /// viewports to that region. Anything drawn by the main camera (the
 /// sidebar) outside this region sits visually on top of the panes.
 fn publish_canvas_region(
     windows: Query<&Window>,
     sidebar: Res<Sidebar>,
+    view: Res<CanvasView>,
+    projects: Res<Projects>,
+    config: Res<CanvasConfig>,
     mut region: ResMut<PaneCanvasRegion>,
     mut block_zones: ResMut<PaneInputBlockZones>,
+    mut pane_zoom: ResMut<pane_bevy::PaneZoom>,
+    mut viewport: ResMut<pane_bevy::PaneViewport>,
 ) {
     let Ok(window) = windows.single() else {
         return;
@@ -329,136 +290,35 @@ fn publish_canvas_region(
     if region.min != want.min || region.max != want.max || region.active != want.active {
         *region = want;
     }
-    // Also block pane-bevy's mouse hit-testing from reaching whatever
-    // PaneRect happens to extend under the sidebar after a pan — without
-    // this the sidebar would *look* on top (cameras clipped) but a click
-    // in it could still drag a hidden pane.
+    // Block pane-bevy's mouse hit-testing from reaching anything that
+    // happens to live under the sidebar in screen space.
     let sidebar_rect = Rect {
         min: Vec2::ZERO,
         max: Vec2::new(sidebar.width, window.height()),
     };
     block_zones.0.clear();
     block_zones.0.push(sidebar_rect);
-}
 
-fn project_canvas_to_pane(
-    mut panes: Query<(&CanvasPos, &mut PaneRect, Option<&PaneProject>), With<PaneTag>>,
-    view: Res<CanvasView>,
-    sidebar: Res<Sidebar>,
-    projects: Res<Projects>,
-) {
-    let Some(active) = projects.active else {
-        return;
+    // Publish active project's view as PaneViewport — pane-bevy reads
+    // it to position/scale panes and to convert cursor↔canvas.
+    let state = projects
+        .active
+        .map(|a| view.state_for(a))
+        .unwrap_or_default();
+    let zoom = if config.zoom_enabled { state.zoom } else { 1.0 };
+    let want_vp = pane_bevy::PaneViewport {
+        origin: Vec2::new(sidebar.width, 0.0),
+        pan: state.pan,
+        zoom,
     };
-    let origin = screen_origin(&sidebar);
-    let state = view.state_for(active);
-    for (cpos, mut rect, proj) in &mut panes {
-        let pid = match proj {
-            Some(p) => p.0,
-            None => continue,
-        };
-        if pid != active {
-            continue;
-        }
-        let want_pos = project_pos(cpos.pos, &state, origin);
-        let want_size = project_size(cpos.size, &state);
-        if (rect.pos - want_pos).length_squared() > 0.01
-            || (rect.size - want_size).length_squared() > 0.01
-        {
-            rect.pos = want_pos;
-            rect.size = want_size;
-        }
+    if viewport.origin != want_vp.origin
+        || viewport.pan != want_vp.pan
+        || (viewport.zoom - want_vp.zoom).abs() > 0.0001
+    {
+        *viewport = want_vp;
     }
-}
-
-/// PostUpdate: any pane whose PaneRect drifted from project(CanvasPos)
-/// got moved by pane-bevy's drag/resize handler — capture that into
-/// CanvasPos via inverse projection. Skips panes outside the active
-/// project (they can't be dragged, their PaneRect is stale anyway).
-fn write_back_pane_to_canvas(
-    mut panes: Query<(&PaneRect, &mut CanvasPos, Option<&PaneProject>), With<PaneTag>>,
-    view: Res<CanvasView>,
-    sidebar: Res<Sidebar>,
-    projects: Res<Projects>,
-) {
-    // CRITICAL: if the view changed this frame (pan/zoom input), PaneRect
-    // still reflects the OLD projection — PreUpdate ran before the input.
-    // The "drift" we'd see here isn't a user drag, it's just stale rect.
-    // Don't write back; next PreUpdate will re-project with the new view.
-    if view.is_changed() || projects.is_changed() {
-        return;
-    }
-    let Some(active) = projects.active else {
-        return;
-    };
-    let origin = screen_origin(&sidebar);
-    let state = view.state_for(active);
-    for (rect, mut cpos, proj) in &mut panes {
-        let pid = match proj {
-            Some(p) => p.0,
-            None => continue,
-        };
-        if pid != active {
-            continue;
-        }
-        let want_pos = project_pos(cpos.pos, &state, origin);
-        let want_size = project_size(cpos.size, &state);
-        let pos_drift = (rect.pos - want_pos).length_squared();
-        let size_drift = (rect.size - want_size).length_squared();
-        // Drift > 0.25 px² = user dragged/resized; inverse-project.
-        // Smaller drift is float noise from the project step.
-        if pos_drift > 0.25 {
-            cpos.pos = unproject_pos(rect.pos, &state, origin);
-        }
-        if size_drift > 0.25 {
-            cpos.size = unproject_size(rect.size, &state);
-        }
-    }
-}
-
-/// Set each pane's `content_root` Transform.scale to the active
-/// project's zoom. Content laid out at canvas-units therefore renders
-/// at `canvas_units * zoom` world units, which (with the per-pane
-/// camera's default 1:1 projection over the viewport sized to
-/// `canvas_size * zoom` pixels) means content visually scales with the
-/// pane.
-fn sync_content_root_scale(
-    panes: Query<(&PaneChrome, Option<&PaneProject>), With<PaneTag>>,
-    mut t_q: Query<&mut Transform>,
-    view: Res<CanvasView>,
-    projects: Res<Projects>,
-    config: Res<CanvasConfig>,
-) {
-    let Some(active) = projects.active else {
-        return;
-    };
-    let zoom = if config.zoom_enabled {
-        view.state_for(active).zoom
-    } else {
-        1.0
-    };
-    for (chrome, proj) in &panes {
-        // Other projects' panes are hidden; their content_root scale is
-        // a don't-care, but we'll set it to their project's zoom anyway
-        // so a future "show all projects" doesn't surprise.
-        let pid = proj.map(|p| p.0).unwrap_or(active);
-        let pane_zoom = if pid == active {
-            zoom
-        } else if config.zoom_enabled {
-            view.state_for(pid).zoom
-        } else {
-            1.0
-        };
-        if let Ok(mut t) = t_q.get_mut(chrome.content_root) {
-            if (t.scale.x - pane_zoom).abs() > 0.001 || (t.scale.y - pane_zoom).abs() > 0.001 {
-                t.scale.x = pane_zoom;
-                t.scale.y = pane_zoom;
-            }
-            // content_root's translation is (MARGIN, -(TITLE_H + MARGIN)) in
-            // pixel-space — i.e. the chrome inset. Those stay unscaled
-            // (chrome inset is constant pixels). The scale only affects
-            // descendants' positions/sizes inside the content area.
-        }
+    if (pane_zoom.0 - zoom).abs() > 0.0001 {
+        pane_zoom.0 = zoom;
     }
 }
 
@@ -524,6 +384,33 @@ fn handle_pan_zoom_input(
         wheel_total.y += ev.y * scale;
         had_wheel = true;
     }
+    // ----- Pinch: zoom around cursor (macOS trackpad) -----
+
+    let mut pinch_total = 0.0;
+    let mut had_pinch = false;
+    for ev in pinch.read() {
+        pinch_total += ev.0;
+        had_pinch = true;
+    }
+    if had_pinch
+        && !in_block_zone
+        && config.zoom_enabled
+        && config.pinch_to_zoom
+    {
+        let origin = screen_origin(&sidebar);
+        let state = view.state_mut(active);
+        // Pinch delta is per-event scale change. Amplify by `pinch_gain`
+        // and apply multiplicatively so consecutive pinch events
+        // compose cleanly.
+        let factor = (1.0 + pinch_total * config.pinch_gain).max(0.01);
+        let canvas_pt_before = unproject_pos(pt, state, origin);
+        state.zoom = (state.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+        let canvas_pt_after = unproject_pos(pt, state, origin);
+        state.pan += canvas_pt_before - canvas_pt_after;
+        state.clamp_pan();
+        consumed.0 = true;
+    }
+
     if had_wheel && cmd_held && !in_block_zone {
         if alt_held && config.zoom_enabled && config.zoom_with_cmd_scroll {
             let origin = screen_origin(&sidebar);
@@ -538,6 +425,7 @@ fn handle_pan_zoom_input(
             // Anchor zoom on cursor: keep the canvas point under the
             // cursor fixed by adjusting pan.
             state.pan += canvas_pt_before - canvas_pt_after;
+            state.clamp_pan();
             consumed.0 = true;
         } else if config.pan.trackpad_scroll {
             let state = view.state_mut(active);
@@ -548,6 +436,7 @@ fn handle_pan_zoom_input(
                 * config.trackpad_sensitivity
                 / state.zoom.max(0.0001);
             state.pan += pan_delta;
+            state.clamp_pan();
             consumed.0 = true;
         }
     }
@@ -570,14 +459,18 @@ fn handle_pan_zoom_input(
             && buttons.just_pressed(MouseButton::Left)
             && !consumed.0
         {
-            // Only when the click DIDN'T land on a visible pane. Walk
-            // the panes to check.
+            // Only when the click DIDN'T land on a visible pane. Pane
+            // rects are canvas-space — compare to cursor in canvas
+            // coords.
+            let state_for_active = view.state_for(active);
+            let origin = screen_origin(&sidebar);
+            let pt_canvas = unproject_pos(pt, &state_for_active, origin);
             let on_pane = panes.iter().any(|(r, vis)| {
                 !matches!(vis, Some(Visibility::Hidden))
-                    && pt.x >= r.pos.x
-                    && pt.x <= r.pos.x + r.size.x
-                    && pt.y >= r.pos.y
-                    && pt.y <= r.pos.y + r.size.y
+                    && pt_canvas.x >= r.pos.x
+                    && pt_canvas.x <= r.pos.x + r.size.x
+                    && pt_canvas.y >= r.pos.y
+                    && pt_canvas.y <= r.pos.y + r.size.y
             });
             if !on_pane {
                 drag.active = Some(PanDragKind::LeftEmpty);
@@ -606,6 +499,7 @@ fn handle_pan_zoom_input(
             // canvas right (pan decreases, since pan is "canvas point
             // at screen_origin").
             state.pan -= delta_screen / state.zoom.max(0.0001);
+            state.clamp_pan();
             consumed.0 = true;
         }
     }
@@ -618,6 +512,39 @@ fn handle_pan_zoom_input(
 /// - **Cmd+Shift+P** — cycle pan-gesture preset
 /// - **Cmd+Shift+Z** — toggle zoom on/off
 /// - **Cmd+Shift+0** — reset active project's view (pan=0, zoom=1)
+/// Double-click a pane → jump-to-pane. Resets zoom to 1× and pans so
+/// the pane's top-left sits at (margin, margin) in screen coords. The
+/// pan-clamp keeps the canvas wall in view when the pane is already
+/// near (0, 0); the user sees the pane move into the corner without
+/// the canvas drifting off the top-left edge.
+fn jump_to_double_clicked_pane(
+    mut events: MessageReader<PaneDoubleClicked>,
+    panes: Query<(&PaneRect, Option<&PaneProject>)>,
+    projects: Res<Projects>,
+    mut view: ResMut<CanvasView>,
+) {
+    const JUMP_MARGIN: f32 = 24.0;
+    for ev in events.read() {
+        let Ok((rect, proj)) = panes.get(ev.pane) else { continue };
+        // Pane belongs to its own project (most cases) or the active
+        // one if it's project-less.
+        let Some(pid) = proj.map(|p| p.0).or(projects.active) else { continue };
+        let state = view.state_mut(pid);
+        // Only jump when zoomed away from native. At zoom 1 the pane is
+        // already at full size, so a double-click shouldn't yank the
+        // view around — it's almost certainly meant for the pane itself.
+        if (state.zoom - 1.0).abs() < 0.001 {
+            continue;
+        }
+        state.zoom = 1.0;
+        // pan = canvas point at screen origin. To make rect.pos appear
+        // at (margin, margin) screen-space, the canvas point at the
+        // screen origin should be rect.pos - (margin, margin).
+        state.pan = rect.pos - Vec2::splat(JUMP_MARGIN);
+        state.clamp_pan();
+    }
+}
+
 fn cycle_config_hotkey(
     keys: Res<ButtonInput<KeyCode>>,
     mut config: ResMut<CanvasConfig>,

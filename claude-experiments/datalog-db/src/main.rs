@@ -1,30 +1,41 @@
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use tracing::info;
 
+use datalog_db::backup::{spawn_backup_scheduler, BackupSchedulerConfig};
 use datalog_db::db::Database;
-use datalog_db::server::Server;
+use datalog_db::server::{BackupContext, Server};
 use datalog_db::storage::rocksdb_backend::RocksDbStorage;
+
+fn arg_value(args: &[String], key: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == key)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
+}
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
 
     let args: Vec<String> = std::env::args().collect();
 
-    let data_dir = args
-        .iter()
-        .position(|a| a == "--data-dir")
-        .and_then(|i| args.get(i + 1))
+    let data_dir = arg_value(&args, "--data-dir")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("./datalog-data"));
 
-    let bind_addr = args
-        .iter()
-        .position(|a| a == "--bind")
-        .and_then(|i| args.get(i + 1))
-        .map(|s| s.as_str())
-        .unwrap_or("127.0.0.1:5557");
+    let bind_addr = arg_value(&args, "--bind").unwrap_or_else(|| "127.0.0.1:5557".to_string());
+
+    // Optional periodic-backup configuration. `--backup-dir` is the
+    // opt-in; the other two have sensible defaults.
+    let backup_dir = arg_value(&args, "--backup-dir").map(PathBuf::from);
+    let backup_interval_mins: u64 = arg_value(&args, "--backup-interval-mins")
+        .map(|v| v.parse().expect("--backup-interval-mins must be a number"))
+        .unwrap_or(60);
+    let backup_retain: usize = arg_value(&args, "--backup-retain")
+        .map(|v| v.parse().expect("--backup-retain must be a number"))
+        .unwrap_or(24);
 
     info!("Opening database at {:?}", data_dir);
     std::fs::create_dir_all(&data_dir)?;
@@ -35,8 +46,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db = Database::open(storage)?;
     let db = Arc::new(db);
 
+    // Spawn the backup scheduler before the server so the first scheduled
+    // tick is anchored to startup. The handle is held in `_scheduler` for
+    // the whole main scope so the background thread stays alive.
+    let (backup_ctx, _scheduler) = match backup_dir {
+        Some(root) => {
+            info!(
+                "Auto-backups enabled: root={:?} interval={}min retain={}",
+                root, backup_interval_mins, backup_retain
+            );
+            let handle = spawn_backup_scheduler(
+                db.clone(),
+                BackupSchedulerConfig {
+                    root: root.clone(),
+                    interval: Duration::from_secs(backup_interval_mins * 60),
+                    retain: backup_retain,
+                },
+            );
+            (
+                Some(BackupContext {
+                    root,
+                    retain: backup_retain,
+                }),
+                Some(handle),
+            )
+        }
+        None => (None, None),
+    };
+
     info!("Starting server on {}", bind_addr);
-    let server = Server::bind(bind_addr, db)?;
+    let server = Server::bind_with(&bind_addr, db, backup_ctx)?;
     server.run()?;
 
     Ok(())

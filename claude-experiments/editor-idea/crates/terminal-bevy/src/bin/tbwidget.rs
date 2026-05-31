@@ -39,6 +39,12 @@ enum IpcRequest {
         cwd: Option<PathBuf>,
         #[serde(skip_serializing_if = "Option::is_none")]
         project: Option<String>,
+        /// Optional widget kind override. Default is the subprocess
+        /// widget kind. Pass `"rhai_widget"` to spawn an in-process
+        /// Rhai-scripted widget; `command` is then the script filename
+        /// under `~/.terminal-bevy/widgets/`.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
     },
 }
 
@@ -80,6 +86,7 @@ fn main() -> ExitCode {
         title: args.title,
         cwd: args.cwd,
         project: args.project,
+        kind: args.kind,
     };
     let body = match serde_json::to_vec(&req) {
         Ok(b) => b,
@@ -102,6 +109,7 @@ struct Args {
     title: Option<String>,
     cwd: Option<PathBuf>,
     project: Option<String>,
+    kind: Option<String>,
 }
 
 impl Args {
@@ -109,6 +117,7 @@ impl Args {
         let mut title: Option<String> = None;
         let mut cwd: Option<PathBuf> = None;
         let mut project: Option<String> = None;
+        let mut kind: Option<String> = None;
         let mut positional: Vec<String> = Vec::new();
         let mut argv_mode = false;
         let mut argv_after_dash: Vec<String> = Vec::new();
@@ -138,6 +147,12 @@ impl Args {
                 }
                 "--project" | "-p" => {
                     project = Some(
+                        it.next()
+                            .ok_or_else(|| format!("{} requires a value", arg))?,
+                    );
+                }
+                "--kind" | "-k" => {
+                    kind = Some(
                         it.next()
                             .ok_or_else(|| format!("{} requires a value", arg))?,
                     );
@@ -184,20 +199,25 @@ impl Args {
             title,
             cwd,
             project,
+            kind,
         })
     }
 }
 
 fn print_usage() {
     eprintln!(
-        "tbwidget [--title T] [--cwd D] [--project P] -- <cmd> [args...]\n\
-         tbwidget [--title T] [--cwd D] [--project P] <shell-line>\n\
+        "tbwidget [--title T] [--cwd D] [--project P] [--kind K] -- <cmd> [args...]\n\
+         tbwidget [--title T] [--cwd D] [--project P] [--kind K] <shell-line>\n\
          \n\
          Spawn a new widget pane in the running terminal-bevy app. The\n\
          child speaks the widget NDJSON protocol over stdout/stdin.\n\
          \n\
          With `--`, the remaining args become argv and the child runs\n\
          directly. Without `--`, a single quoted positional is passed to\n\
-         `sh -c`."
+         `sh -c`.\n\
+         \n\
+         `--kind rhai_widget` swaps in the in-process Rhai-scripted\n\
+         widget runtime. `<cmd>` is then interpreted as a script filename\n\
+         under `~/.terminal-bevy/widgets/` and no subprocess is spawned."
     );
 }

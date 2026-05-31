@@ -1,0 +1,36 @@
+// Real S3 from ai-lang: PUT an object, GET it back, then DELETE it. Each
+// request is SigV4-signed (service "s3", so the body's SHA-256 is signed
+// and verified by S3) and sent over HTTPS via libcurl.
+//
+//   ai-lang add examples/s3_demo.ail
+//   AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+//   S3_BUCKET=my-bucket ai-lang run main
+//
+// PUT returns 200, GET returns 200 with exactly the bytes we stored, and
+// DELETE returns 204.
+
+def env_or(name: String, fallback: String) -> String = {
+    let v = env_get(name);
+    if string_is_empty(v) == 1 { fallback } else { v }
+}
+
+def show(label: String, r: Result<HttpResponse, String>) -> Int =
+    match r {
+        Ok(resp) =>
+            println(str4(label, " -> status ", int_to_string(resp.status),
+                         string_concat("  body: ", resp.body))),
+        Err(e) => println(str3(label, " transport error: ", e))
+    }
+
+def main() -> Int = {
+    let region = env_or("AWS_REGION", "us-east-1");
+    let bucket = env_or("S3_BUCKET", "jimmyhmiller-bucket");
+    let key = env_or("S3_KEY", "ai-lang-test/roundtrip.txt");
+    let ak = env_get("AWS_ACCESS_KEY_ID");
+    let sk = env_get("AWS_SECRET_ACCESS_KEY");
+    let token = env_get("AWS_SESSION_TOKEN");
+    let content = "hello from ai-lang, written to real S3";
+    let p = show("put   ", s3_put_object(region, bucket, key, content, ak, sk, token));
+    let g = show("get   ", s3_get_object(region, bucket, key, ak, sk, token));
+    show("delete", s3_delete_object(region, bucket, key, ak, sk, token))
+}

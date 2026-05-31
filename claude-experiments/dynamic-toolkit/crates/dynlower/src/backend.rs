@@ -92,6 +92,16 @@ pub trait LoweringBackend {
         }
     }
 
+    /// Number of GP argument registers in the platform C ABI (AAPCS / SysV).
+    /// Calls to `extern "C"` functions must place args beyond this count on
+    /// the stack, regardless of the internal CC's wider `register_arg_limit`.
+    /// The register mapping for slots below this limit is `call_arg_gp`,
+    /// which already matches the C ABI for the low slots on both arches.
+    /// Default is AAPCS (8 GP arg registers, X0–X7).
+    fn c_abi_gp_arg_limit() -> usize {
+        8
+    }
+
     fn emit_prologue(buf: &mut CodeBuffer<Self::Arch>) -> usize;
     fn emit_epilogue(buf: &mut CodeBuffer<Self::Arch>, patch_offsets: &mut Vec<usize>);
     fn emit_frame_size_patch(
@@ -369,7 +379,19 @@ impl Arm64Backend {
     }
 
     pub fn emit_prologue(buf: &mut CodeBuffer<Arm64>) -> usize {
-        buf.emit(Arm64Inst::mov(X28, SP));
+        // Save AAPCS callee-saved GP regs X19-X28. The body clobbers X27/X28
+        // unconditionally (GcLiteral lowering, emit_call, prologue scratch),
+        // and the batch_lower path may also assign live values to X19-X26.
+        // Save X28's caller value FIRST (via X16 scratch) so the upcoming
+        // `mov X28, SP` doesn't lose it.
+        buf.emit(Arm64Inst::mov(X16, SP));
+        buf.emit(Arm64Inst::stp(X19, X20, SP, -16, StpMode::PreIndex));
+        buf.emit(Arm64Inst::stp(X21, X22, SP, -16, StpMode::PreIndex));
+        buf.emit(Arm64Inst::stp(X23, X24, SP, -16, StpMode::PreIndex));
+        buf.emit(Arm64Inst::stp(X25, X26, SP, -16, StpMode::PreIndex));
+        buf.emit(Arm64Inst::stp(X27, X28, SP, -16, StpMode::PreIndex));
+        // X28 = caller_SP (used by emit_load_incoming_stack_arg).
+        buf.emit(Arm64Inst::mov(X28, X16));
         // Reserve 2 instructions for frame size adjustment (patched later).
         // This supports frame sizes > 4095 bytes by splitting into hi/lo parts.
         let patch_offset = buf.emit(Arm64Inst::sub_imm(SP, SP, 16));
@@ -386,6 +408,12 @@ impl Arm64Backend {
         let add_offset = buf.emit(Arm64Inst::add_imm(SP, SP, 16));
         buf.emit(Arm64Inst::add_imm(SP, SP, 0)); // placeholder for low bits
         patch_offsets.push(add_offset);
+        // Restore AAPCS callee-saved GP regs in reverse order.
+        buf.emit(Arm64Inst::ldp(X27, X28, SP, 16, LdpMode::PostIndex));
+        buf.emit(Arm64Inst::ldp(X25, X26, SP, 16, LdpMode::PostIndex));
+        buf.emit(Arm64Inst::ldp(X23, X24, SP, 16, LdpMode::PostIndex));
+        buf.emit(Arm64Inst::ldp(X21, X22, SP, 16, LdpMode::PostIndex));
+        buf.emit(Arm64Inst::ldp(X19, X20, SP, 16, LdpMode::PostIndex));
         buf.emit(Arm64Inst::ret());
     }
 
@@ -1422,6 +1450,11 @@ impl LoweringBackend for X64Backend {
 
     fn allocatable_gp() -> &'static [u8] {
         &[3, 4, 5, 6, 9, 10, 11]
+    }
+
+    fn c_abi_gp_arg_limit() -> usize {
+        // SysV x86-64: 6 GP argument registers (RDI, RSI, RDX, RCX, R8, R9).
+        6
     }
 
     fn allocatable_fp() -> &'static [u8] {

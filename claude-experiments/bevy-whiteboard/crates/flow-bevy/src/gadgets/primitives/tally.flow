@@ -1,0 +1,21 @@
+# A pass-through counter, but the slot is named `len` rather than
+# `count`. Lives alongside Counter for one reason: many gadgets want
+# to surface a "current depth / length" reading whose natural name
+# is `len`, and inspectors / tests read the slot by its name. Same
+# semantics as Counter — every packet, any kind, increments and
+# forwards verbatim — but the slot rename matters for UX.
+#
+# If/when the DSL grows slot renaming at instantiation time, this
+# can collapse back into a single Counter primitive with a renamed
+# slot. Until then, the two primitives coexist.
+node Tally {
+    slots { len: Int = 0 }
+    probes { len: "{len}" }
+    rule pass {
+        on p
+        do {
+            len := len + 1
+            emit p to default
+        }
+    }
+}

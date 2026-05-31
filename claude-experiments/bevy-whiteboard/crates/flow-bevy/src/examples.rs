@@ -31,7 +31,19 @@ pub struct ExamplesPlugin;
 impl Plugin for ExamplesPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<LoadExample>()
-            .add_systems(Update, (drain_stale_events_on_load, handle_load_example).chain());
+            .add_systems(Update, (
+                drain_stale_events_on_load,
+                // Run the loader BEFORE `sync_canvas_population` so the
+                // freshly computed `CompoundMembership` (and the spawn
+                // commands for new shim entities) reach the population
+                // syncer applied — otherwise that syncer reads stale
+                // empty membership, treats inner-of-compound nodes as
+                // top-level, and spawns a Bevy entity for every
+                // primitive inside every gadget (which then also
+                // panics on the next frame when it tries to despawn
+                // those leaked entities).
+                handle_load_example.before(crate::compound::sync_canvas_population),
+            ).chain());
     }
 }
 
@@ -212,6 +224,18 @@ fn handle_load_example(
         Example::BackoffHerd        => build_backoff_herd(&mut ctx),
     }
 
+    // Recompute compound membership from the freshly built sim. The
+    // `insert_resource` is queued via Commands; the explicit
+    // `.before(sync_canvas_population)` ordering in `ExamplesPlugin`
+    // ensures commands flush before that system runs, so it sees the
+    // up-to-date membership rather than empty defaults — without
+    // which it would treat every inner-of-compound as top-level and
+    // spawn Bevy entities for every primitive inside every gadget.
+    let new_membership = driver.0.with_sim_mut(|sim| {
+        crate::compound::compute_membership(sim)
+    });
+    commands.insert_resource(new_membership);
+
     // The snapshot ring still holds entries from the pre-load sim.
     // Drop them and re-anchor on the now-populated example so rewind
     // doesn't restore the empty pre-load canvas. Done after the build
@@ -250,14 +274,17 @@ impl BuildCtx<'_, '_, '_> {
         self.counter.0 += 1;
         let name = format!("{}_{}", kind.label(), self.counter.0);
         let name_for_sim = name.clone();
-        // `with_sim_mut` returns the freshly-allocated NodeId so we
-        // can map it to the entity below in this same call.
-        let (fid, has_color) = self.driver.0.with_sim_mut(move |sim| {
+        // `with_sim_mut` returns the freshly-allocated NodeId AND a
+        // flag for whether the spawned node is a compound shim — we
+        // need that to stamp `CompoundBodyMarker` so the drill-in
+        // double-click handler can pick it.
+        let (fid, has_color, is_compound) = self.driver.0.with_sim_mut(move |sim| {
             let fid = spawn_gadget(sim, kind, &name_for_sim, slot);
             let has_color = crate::gadgets::has_color_slot(sim, fid);
-            (fid, has_color)
+            let is_compound = sim.nodes.get(&fid).map(|n| n.is_compound()).unwrap_or(false);
+            (fid, has_color, is_compound)
         });
-        spawn_node_entity(
+        let entity = spawn_node_entity(
             self.commands,
             self.cache,
             self.meshes,
@@ -275,6 +302,19 @@ impl BuildCtx<'_, '_, '_> {
             None,
             None,
         );
+        // Every gadget Kind is now backed by a `*Composite` compound
+        // class, so `is_compound` is true for the shim. Stamp the
+        // markers the canvas-load path stamps too: `CompoundBodyMarker`
+        // lets `drill_in_on_double_click` find this entity, and
+        // `Scoped` ties it into the unified visibility system.
+        if is_compound {
+            self.commands.entity(entity).insert((
+                crate::compound::CompoundBodyMarker(fid),
+                crate::compound::Scoped(fid),
+            ));
+        } else {
+            self.commands.entity(entity).insert(crate::compound::Scoped(fid));
+        }
         if has_color {
             self.node_colors.0.insert(fid, self.theme.data[slot]);
         }

@@ -12,19 +12,19 @@
 
 use crate::lexer::Span;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Module {
     pub defs: Vec<SurfaceDef>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SurfaceDef {
     pub name: String,
     pub span: Span,
     pub kind: SurfaceDefKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SurfaceDefKind {
     Fn {
         is_local: bool,
@@ -49,18 +49,32 @@ pub enum SurfaceDefKind {
         variants: Vec<(String, Option<SurfaceType>)>,
     },
     /// `extern fn name(params) -> ret` — a declaration that binds
-    /// `name` to a runtime-provided Rust function. The body is
-    /// supplied by the host runtime via the extern registry; calls to
-    /// this name lower to a `BuiltinRef("ext/<name>")` call. Externs
-    /// are NOT part of the canonical AST and are not content-addressed
-    /// — they carry only the surface signature.
+    /// `name` to a runtime-provided function. Calls lower to a
+    /// `BuiltinRef("ext/<name>")` call. Externs are NOT part of the
+    /// canonical AST and are not content-addressed — they carry only the
+    /// surface signature.
+    ///
+    /// `library` distinguishes the two binding mechanisms:
+    /// - `None` — a host (Rust) function from the process's extern
+    ///   registry (e.g. `println`). Called with a leading `Thread*`.
+    /// - `Some(lib)` — a real C symbol resolved from the shared library
+    ///   `lib` via `dlopen`/`dlsym` (e.g. `getenv` from "c",
+    ///   `curl_easy_init` from "curl"). Called with the plain C ABI, no
+    ///   `Thread*`. Written `extern "C" lib "<lib>" { fn ... }`.
     Extern {
         params: Vec<(String, SurfaceType)>,
         ret: SurfaceType,
+        library: Option<String>,
+        /// `true` if the C declaration ended with `...` (a variadic
+        /// function such as `curl_easy_setopt`). `params` then holds only
+        /// the fixed leading parameters; each call site may pass
+        /// additional trailing C-scalar arguments. Always `false` for a
+        /// host (Rust) extern.
+        variadic: bool,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SurfaceType {
     /// A bare type name: `Int`, `Bool`, `MyStruct`, ... Resolution decides
     /// whether it's a builtin or a user type.
@@ -85,10 +99,14 @@ pub enum SurfaceType {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SurfaceExpr {
     IntLit {
         value: i64,
+        span: Span,
+    },
+    FloatLit {
+        value: f64,
         span: Span,
     },
     BoolLit {
@@ -155,6 +173,14 @@ pub enum SurfaceExpr {
         field_span: Span,
         span: Span,
     },
+    /// `expr?` — the try operator. `expr` must be a `Result<T, E>`
+    /// (a 2-variant enum `Ok(T) | Err(E)`). Evaluates to `T` when the
+    /// value is `Ok`, and early-returns the `Err` value from the
+    /// enclosing function otherwise.
+    Try {
+        expr: Box<SurfaceExpr>,
+        span: Span,
+    },
     /// `match scrutinee { pat => expr, … }`.
     Match {
         scrutinee: Box<SurfaceExpr>,
@@ -173,14 +199,14 @@ pub enum SurfaceExpr {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SurfaceMatchArm {
     pub pattern: SurfacePattern,
     pub body: SurfaceExpr,
     pub span: Span,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SurfacePattern {
     /// `_` — wildcard.
     Wildcard { span: Span },
@@ -207,7 +233,7 @@ impl SurfacePattern {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SurfaceStmt {
     /// `let ident = expr;` — type annotations not yet supported.
     Let {
@@ -215,12 +241,18 @@ pub enum SurfaceStmt {
         value: SurfaceExpr,
         span: Span,
     },
+    /// `defer expr;` — register a deterministic cleanup. `expr` runs for
+    /// its side effect when the enclosing block exits, on normal
+    /// completion and on any `?` early-return that unwinds through it,
+    /// in LIFO order. Adds no binding. See [`crate::ast::Expr::Defer`].
+    Defer { expr: SurfaceExpr, span: Span },
 }
 
 impl SurfaceExpr {
     pub fn span(&self) -> Span {
         match self {
             SurfaceExpr::IntLit { span, .. }
+            | SurfaceExpr::FloatLit { span, .. }
             | SurfaceExpr::BoolLit { span, .. }
             | SurfaceExpr::StringLit { span, .. }
             | SurfaceExpr::Var { span, .. }
@@ -231,6 +263,7 @@ impl SurfaceExpr {
             | SurfaceExpr::Lambda { span, .. }
             | SurfaceExpr::StructLit { span, .. }
             | SurfaceExpr::FieldAccess { span, .. }
+            | SurfaceExpr::Try { span, .. }
             | SurfaceExpr::Match { span, .. }
             | SurfaceExpr::If { span, .. } => *span,
         }

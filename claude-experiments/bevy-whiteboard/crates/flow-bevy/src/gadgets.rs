@@ -114,33 +114,49 @@ impl Kind {
         }
     }
 
-    /// Name of the compound's default outbound port (forward data
-    /// leaves through this). `None` for terminal kinds (Sink) and
-    /// kinds whose output is a control signal rather than packet data.
-    /// Used by `wire_flow_edge` to attach `from_port` when the source
-    /// is a compound shim — the port lookup is what routes the emit
-    /// to the right inner node.
-    pub fn default_output_port(self) -> Option<&'static str> {
+    /// Port on which this kind's compound emits *forward* data
+    /// (requests, packet pass-through). `None` for terminal kinds.
+    /// `wire_flow_edge` uses this as the `from_port` on the user-
+    /// drawn forward edge.
+    pub fn forward_output_port(self) -> Option<&'static str> {
         match self {
             Kind::Generator | Kind::Client | Kind::BackoffClient
-            | Kind::Router | Kind::Queue => Some("output"),
-            Kind::Worker => Some("response"),
+            | Kind::Router | Kind::Queue | Kind::Worker => Some("output"),
             Kind::Sink => None,
         }
     }
 
-    /// Name of the compound's default inbound port (forward data
-    /// arrives through this). `None` for kinds with no canonical
-    /// "request in" port (Generator). For Client / BackoffClient the
-    /// inbound port carries *replies* back to the originator, not
-    /// fresh requests — `wire_flow_edge` picks the right port based on
-    /// the wiring direction.
-    pub fn default_input_port(self) -> Option<&'static str> {
+    /// Port on which this kind's compound receives *forward* data.
+    /// `None` for sources that don't take input (Generator) and for
+    /// pure originators (Client / BackoffClient — those only consume
+    /// replies, not fresh requests).
+    pub fn forward_input_port(self) -> Option<&'static str> {
         match self {
             Kind::Worker => Some("request"),
             Kind::Router | Kind::Queue | Kind::Sink => Some("input"),
-            Kind::Client | Kind::BackoffClient => Some("reply"),
-            Kind::Generator => None,
+            Kind::Generator | Kind::Client | Kind::BackoffClient => None,
+        }
+    }
+
+    /// Port on which this kind's compound emits *reverse* data (resp,
+    /// resp_error) — used to attach the auto-wired reverse edge in
+    /// `wire_flow_edge` when both endpoints participate in reply
+    /// traffic. `None` for kinds that never reply.
+    pub fn reverse_output_port(self) -> Option<&'static str> {
+        match self {
+            Kind::Worker | Kind::Router | Kind::Queue => Some("response"),
+            Kind::Generator | Kind::Client | Kind::BackoffClient | Kind::Sink => None,
+        }
+    }
+
+    /// Port on which this kind's compound receives *reverse* data
+    /// (replies travelling back along the user-drawn edge). `None`
+    /// for kinds that never observe replies (Generator, Sink).
+    pub fn reverse_input_port(self) -> Option<&'static str> {
+        match self {
+            Kind::Client | Kind::BackoffClient | Kind::Router
+            | Kind::Queue | Kind::Worker => Some("reply"),
+            Kind::Generator | Kind::Sink => None,
         }
     }
 
@@ -293,14 +309,13 @@ pub fn validate_gadget_dsl() {
 // that `register_classes` consumes.
 
 pub const GADGETS_DSL: &str = concat!(
-    // Composable primitives — the irreducible set. Every higher-level
-    // gadget (Worker, Client, Cache, CircuitBreaker, Saga, TPC, Game
-    // of Life) is expressed as a compound of these 14 in
-    // `gadgets/composite/*.flow`. The former variant-adapter
-    // primitives (Stamp, Lift, Lower, Reply, Unstamp) were each 2-3
-    // rule nodes that composites now inline directly — their job is
-    // captured by `pushing self` / `popping` per-emit options plus
-    // `p.kind` discrimination on the unified record payload.
+    // Composable primitives — the irreducible set (18 primitives).
+    // Every higher-level gadget (Worker, Client, Cache, CircuitBreaker,
+    // Saga, TPC, Game of Life) is expressed as a compound of these in
+    // `gadgets/composite/*.flow`. The three return-path-aware
+    // primitives (Stamp, Reply, Pump) replace the old hand-written
+    // `L`/`R`/`Acc` adapter nodes inside composites. Tally is a
+    // counter whose slot is named `len` rather than `count`.
     include_str!("gadgets/primitives/tick.flow"),      "\n",
     include_str!("gadgets/primitives/counter.flow"),   "\n",
     include_str!("gadgets/primitives/filter.flow"),    "\n",
@@ -318,6 +333,15 @@ pub const GADGETS_DSL: &str = concat!(
     // `out_kind` slot picks which envelope kind the packet ships with
     // ("packet" by default, "signal" for control-plane pulses).
     include_str!("gadgets/primitives/constant.flow"), "\n",
+    // Return-path-aware primitives. Stamp pushes/pops self; Reply
+    // turns a serviced packet into a `resp` back to head(rp); Pump
+    // re-emits `pull(nil)` to upstream after each forward.
+    include_str!("gadgets/primitives/stamp.flow"),     "\n",
+    include_str!("gadgets/primitives/reply.flow"),     "\n",
+    include_str!("gadgets/primitives/pump.flow"),      "\n",
+    // Pass-through counter exposing a `len` slot (vs Counter's
+    // `count`) — for composites whose surface state is a "depth".
+    include_str!("gadgets/primitives/tally.flow"),     "\n",
     // Composites — each higher-level gadget redefined as a compound of
     // primitives. Registered as classes so whiteboards (and the palette)
     // can spawn them with `sim.instantiate("WorkerComposite", "w1")`.

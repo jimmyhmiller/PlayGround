@@ -557,7 +557,14 @@ impl Parser {
             Tok::Out => {
                 self.bump();
                 let p = self.ident()?;
-                Ok(EmitTarget::OutPort(p))
+                // Optional `matching` suffix: `to out <port> matching`
+                // selects the colour-matched fan-out variant.
+                if matches!(self.peek(), Tok::Ident(s) if s == "rotating") {
+                    self.bump();
+                    Ok(EmitTarget::OutPortRotating(p))
+                } else {
+                    Ok(EmitTarget::OutPort(p))
+                }
             }
             Tok::Port => {
                 self.bump();

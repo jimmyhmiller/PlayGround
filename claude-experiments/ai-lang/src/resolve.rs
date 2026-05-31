@@ -91,6 +91,9 @@ pub enum ResolveError {
     /// The user-defined `Result` / `Failure` / `Node` is in scope but
     /// doesn't have the shape `at(...)` expects.
     AtBindingShape { what: String, span: Span },
+    /// The `?` operator was applied to a value that isn't a `Result<T, E>`
+    /// (a 2-variant enum with `Ok` and `Err` variants).
+    TryOnNonResult { ty: Type, span: Span },
 }
 
 impl core::fmt::Display for ResolveError {
@@ -144,6 +147,12 @@ impl core::fmt::Display for ResolveError {
                 "`at(...)` requires the user-defined type `{}` to be in scope",
                 missing
             ),
+            ResolveError::TryOnNonResult { ty, .. } => write!(
+                f,
+                "the `?` operator requires a Result<T, E> (an enum with `Ok` and `Err` \
+                 variants), but got {:?}",
+                ty
+            ),
             ResolveError::AtBindingShape { what, .. } => {
                 write!(f, "`at(...)` binding has the wrong shape: {}", what)
             }
@@ -158,7 +167,7 @@ impl std::error::Error for ResolveError {}
 // =============================================================================
 
 /// A resolved + hashed top-level definition.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedDef {
     pub name: String,
     pub hash: Hash,
@@ -167,7 +176,7 @@ pub struct ResolvedDef {
 
 /// The result of resolving a module: defs in source order, each with its
 /// canonical form and content hash.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedModule {
     pub defs: Vec<ResolvedDef>,
     /// Set when the module uses `at(...)` — captures the hashes and
@@ -190,6 +199,15 @@ pub struct ResolvedModule {
 pub struct ExternSig {
     pub params: Vec<Type>,
     pub ret: Type,
+    /// `None` for a host (Rust) extern resolved from the process extern
+    /// registry; `Some(lib)` for a real C symbol resolved from the
+    /// shared library `lib` via dlopen/dlsym (no `Thread*` arg, plain C
+    /// ABI). See [`crate::surface::SurfaceDefKind::Extern`].
+    pub library: Option<String>,
+    /// `true` if the C function is variadic (declared with a trailing
+    /// `...`). `params` then holds only the fixed leading parameters;
+    /// call sites may pass additional trailing C-scalar args.
+    pub variadic: bool,
 }
 
 /// Per-module metadata for the `at(...)` builtin lowering.
@@ -265,7 +283,38 @@ fn hex_encode(bytes: &[u8]) -> String {
     s
 }
 
+/// Externally-supplied top-level bindings for `resolve_module_with_env`.
+///
+/// Built from an existing codebase (its namespace + type cache) so an
+/// edited definition can reference any already-stored top-level def by
+/// name. Each map is keyed by surface name. Empty by default, in which
+/// case `resolve_module_with_env` behaves identically to `resolve_module`.
+#[derive(Debug, Clone, Default)]
+pub struct ExternalEnv {
+    /// surface name -> (content hash, param types, return type)
+    pub fns: HashMap<String, (Hash, Vec<Type>, Type)>,
+    /// surface name -> (content hash, type-param names, fields)
+    pub structs: HashMap<String, (Hash, Vec<String>, Vec<(String, Type)>)>,
+    /// surface name -> (content hash, type-param names, variants)
+    pub enums: HashMap<String, (Hash, Vec<String>, Vec<(String, Option<Type>)>)>,
+}
+
+impl ExternalEnv {
+    pub fn new() -> Self {
+        ExternalEnv::default()
+    }
+}
+
+/// Resolve a module with no external environment (the original entry
+/// point). Equivalent to `resolve_module_with_env(m, &ExternalEnv::new())`.
 pub fn resolve_module(m: &Module) -> Result<ResolvedModule, ResolveError> {
+    resolve_module_with_env(m, &ExternalEnv::new())
+}
+
+pub fn resolve_module_with_env(
+    m: &Module,
+    env: &ExternalEnv,
+) -> Result<ResolvedModule, ResolveError> {
     // Detect duplicate names.
     let mut seen: HashMap<&str, Span> = HashMap::new();
     for d in &m.defs {
@@ -292,6 +341,80 @@ pub fn resolve_module(m: &Module) -> Result<ResolvedModule, ResolveError> {
     let mut variants: HashMap<String, VariantBinding> = HashMap::new();
     let mut top: HashMap<String, TopBinding> = HashMap::new();
     let mut out: Vec<ResolvedDef> = Vec::with_capacity(m.defs.len());
+
+    // ---- Pass 0 (edit layer): seed externally-provided top-level bindings ----
+    //
+    // When re-resolving a single edited definition against an existing
+    // codebase (see `edit::update`), the new source references OTHER
+    // already-stored top-level defs by name. Those names are not present
+    // in `m`, so we pre-populate the resolver's scopes from `env` (built
+    // from the codebase namespace + type cache). References then resolve to
+    // `TopRef(hash)` / `TypeRef` exactly as if the referenced defs had been
+    // earlier in source order. A name that ALSO appears in `m` is shadowed
+    // by the in-module pass (which overwrites the seeded entry).
+    for (name, (hash, params, ret)) in &env.fns {
+        structs.remove(name);
+        enums.remove(name);
+        top.insert(
+            name.clone(),
+            TopBinding {
+                hash: *hash,
+                ty: Type::FnType {
+                    params: params.clone(),
+                    ret: Box::new(ret.clone()),
+                },
+                kind: TopKind::Def,
+            },
+        );
+    }
+    for (name, (hash, type_params, fields)) in &env.structs {
+        structs.insert(
+            name.clone(),
+            StructInfo {
+                hash: *hash,
+                type_params: type_params.clone(),
+                fields: fields.clone(),
+            },
+        );
+        top.insert(
+            name.clone(),
+            TopBinding {
+                hash: *hash,
+                ty: Type::TypeRef(*hash),
+                kind: TopKind::Def,
+            },
+        );
+    }
+    for (name, (hash, type_params, vs)) in &env.enums {
+        enums.insert(
+            name.clone(),
+            EnumInfo {
+                hash: *hash,
+                type_params: type_params.clone(),
+                variants: vs.clone(),
+            },
+        );
+        top.insert(
+            name.clone(),
+            TopBinding {
+                hash: *hash,
+                ty: Type::TypeRef(*hash),
+                kind: TopKind::Def,
+            },
+        );
+        for (i, (vname, payload)) in vs.iter().enumerate() {
+            variants.insert(
+                vname.clone(),
+                VariantBinding {
+                    enum_surface_name: name.clone(),
+                    enum_ref: *hash,
+                    index: i as u32,
+                    payload: payload.clone(),
+                },
+            );
+        }
+    }
+
 
     // ---- Pass 1 (combined): struct + enum defs with SCC ----
     //
@@ -576,7 +699,7 @@ pub fn resolve_module(m: &Module) -> Result<ResolvedModule, ResolveError> {
     // travels to typecheck / codegen via `ResolvedModule.externs`.
     let mut externs: HashMap<String, ExternSig> = HashMap::new();
     for sd in &m.defs {
-        if let SurfaceDefKind::Extern { params, ret } = &sd.kind {
+        if let SurfaceDefKind::Extern { params, ret, library, variadic } = &sd.kind {
             if externs.contains_key(&sd.name) {
                 return Err(ResolveError::DuplicateDef {
                     name: sd.name.clone(),
@@ -600,6 +723,8 @@ pub fn resolve_module(m: &Module) -> Result<ResolvedModule, ResolveError> {
                 ExternSig {
                     params: params_canon.clone(),
                     ret: ret_canon.clone(),
+                    library: library.clone(),
+                    variadic: *variadic,
                 },
             );
             // Stash the surface name in `top` so the Var lookup in
@@ -813,6 +938,224 @@ pub fn resolve_module(m: &Module) -> Result<ResolvedModule, ResolveError> {
     })
 }
 
+// =============================================================================
+// Local-name side-car capture
+// =============================================================================
+
+/// The author's original local names for every `fn` def in `m`, keyed by
+/// the def's content hash, in **binder-push order**: fn parameters first,
+/// then each `let` / lambda-parameter / match-binding name in the exact
+/// pre-order the resolver pushes onto `env` (which is the same order the
+/// `printer` pushes onto its binder stack). The `printer` replays this list
+/// 1:1 against its binder stack to recover readable names.
+///
+/// This is a SIDE-CAR. It is NOT part of any canonical `Def` and never
+/// enters a content hash. Renaming a local changes only the strings in this
+/// vector; the def's hash is unaffected (the canonical AST is name-erased).
+///
+/// We resolve `m` to recover each fn's content hash, then re-derive the
+/// names from the surface body. Struct/enum defs get no entry (no locals).
+/// Returns an empty map if `m` has no fn defs.
+pub fn local_names_for_module(
+    m: &Module,
+) -> Result<HashMap<Hash, Vec<String>>, ResolveError> {
+    local_names_for_module_with_env(m, &ExternalEnv::new())
+}
+
+/// As [`local_names_for_module`] but resolving against an external env
+/// (mirrors `resolve_module_with_env`), so an edited def that references
+/// already-stored defs still hashes correctly.
+pub fn local_names_for_module_with_env(
+    m: &Module,
+    env: &ExternalEnv,
+) -> Result<HashMap<Hash, Vec<String>>, ResolveError> {
+    let rm = resolve_module_with_env(m, env)?;
+
+    // Surface metadata needed to traverse bodies in canonical order:
+    //   - which constructor names are NULLARY variants (those are NOT
+    //     match-bindings — the printer pushes no binder for them);
+    //   - each struct's declared field order (the canonical StructNew
+    //     reorders surface fields to declaration order, and the printer
+    //     prints/visits them in that order).
+    let mut nullary_variants: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut struct_field_order: HashMap<String, Vec<String>> = HashMap::new();
+    for sd in &m.defs {
+        match &sd.kind {
+            SurfaceDefKind::Enum { variants, .. } => {
+                for (vname, payload) in variants {
+                    if payload.is_none() {
+                        nullary_variants.insert(vname.clone());
+                    }
+                }
+            }
+            SurfaceDefKind::Struct { fields, .. } => {
+                struct_field_order.insert(
+                    sd.name.clone(),
+                    fields.iter().map(|(n, _)| n.clone()).collect(),
+                );
+            }
+            _ => {}
+        }
+    }
+    let meta = NameMeta {
+        nullary_variants,
+        struct_field_order,
+    };
+
+    // Map fn surface name -> hash from the resolved module.
+    let mut name_to_hash: HashMap<&str, Hash> = HashMap::new();
+    for rd in &rm.defs {
+        name_to_hash.insert(rd.name.as_str(), rd.hash);
+    }
+
+    let mut out: HashMap<Hash, Vec<String>> = HashMap::new();
+    for sd in &m.defs {
+        if let SurfaceDefKind::Fn { params, body, .. } = &sd.kind {
+            let Some(&hash) = name_to_hash.get(sd.name.as_str()) else {
+                // Resolved set didn't include this fn (shouldn't happen,
+                // but skip rather than mis-key).
+                continue;
+            };
+            let mut names: Vec<String> = Vec::new();
+            // Parameters are the outermost binders, pushed in order.
+            for (pname, _) in params {
+                names.push(pname.clone());
+            }
+            collect_body_local_names(body, &meta, &mut names);
+            out.insert(hash, names);
+        }
+    }
+    Ok(out)
+}
+
+/// Surface metadata for the canonical-order body traversal.
+struct NameMeta {
+    nullary_variants: std::collections::HashSet<String>,
+    struct_field_order: HashMap<String, Vec<String>>,
+}
+
+/// Append the binder names introduced inside `e`, in the exact pre-order
+/// the resolver pushes them onto `env` (and the `printer` pushes onto its
+/// binder stack). Free-variable occurrences introduce nothing.
+fn collect_body_local_names(e: &SurfaceExpr, meta: &NameMeta, out: &mut Vec<String>) {
+    match e {
+        SurfaceExpr::IntLit { .. }
+        | SurfaceExpr::FloatLit { .. }
+        | SurfaceExpr::BoolLit { .. }
+        | SurfaceExpr::StringLit { .. }
+        | SurfaceExpr::Var { .. } => {}
+
+        SurfaceExpr::Call { callee, args, .. } => {
+            collect_body_local_names(callee, meta, out);
+            for a in args {
+                collect_body_local_names(a, meta, out);
+            }
+        }
+        SurfaceExpr::BinOp { left, right, .. } => {
+            collect_body_local_names(left, meta, out);
+            collect_body_local_names(right, meta, out);
+        }
+        SurfaceExpr::UnaryOp { operand, .. } => {
+            collect_body_local_names(operand, meta, out);
+        }
+        SurfaceExpr::Block { stmts, tail, .. } => {
+            // `let v = e;` visits `e` (binder not yet in scope) then pushes
+            // the name; `defer e;` visits `e` and pushes nothing. The tail
+            // is visited last with every let-binder in scope.
+            for s in stmts {
+                match s {
+                    SurfaceStmt::Let { name, value, .. } => {
+                        collect_body_local_names(value, meta, out);
+                        out.push(name.clone());
+                    }
+                    SurfaceStmt::Defer { expr, .. } => {
+                        collect_body_local_names(expr, meta, out);
+                    }
+                }
+            }
+            collect_body_local_names(tail, meta, out);
+        }
+        SurfaceExpr::Lambda { params, body, .. } => {
+            for (pname, _) in params {
+                out.push(pname.clone());
+            }
+            collect_body_local_names(body, meta, out);
+        }
+        SurfaceExpr::StructLit { type_name, fields, .. } => {
+            // Canonical StructNew reorders fields to DECLARATION order; the
+            // printer visits them in that order, so we must too. If the
+            // struct's field order is unknown (e.g. an external struct),
+            // fall back to surface order — binder order only matters when a
+            // field value introduces a binder, which is rare.
+            match meta.struct_field_order.get(type_name) {
+                Some(decl_order) => {
+                    for fname in decl_order {
+                        if let Some((_, fexpr)) =
+                            fields.iter().find(|(n, _)| n == fname)
+                        {
+                            collect_body_local_names(fexpr, meta, out);
+                        }
+                    }
+                }
+                None => {
+                    for (_, fexpr) in fields {
+                        collect_body_local_names(fexpr, meta, out);
+                    }
+                }
+            }
+        }
+        SurfaceExpr::FieldAccess { base, .. } => {
+            collect_body_local_names(base, meta, out);
+        }
+        SurfaceExpr::Try { expr, .. } => {
+            collect_body_local_names(expr, meta, out);
+        }
+        SurfaceExpr::Match { scrutinee, arms, .. } => {
+            collect_body_local_names(scrutinee, meta, out);
+            for arm in arms {
+                collect_pattern_binder_names(&arm.pattern, meta, out);
+                collect_body_local_names(&arm.body, meta, out);
+            }
+        }
+        SurfaceExpr::If {
+            cond,
+            then_branch,
+            else_branch,
+            ..
+        } => {
+            collect_body_local_names(cond, meta, out);
+            collect_body_local_names(then_branch, meta, out);
+            collect_body_local_names(else_branch, meta, out);
+        }
+    }
+}
+
+/// Append the binder names a match pattern introduces, in pattern-traversal
+/// order, skipping nullary-variant idents (which are constructor patterns,
+/// not bindings) — mirrors [`walk_pattern_bindings`] / the printer's
+/// `print_pattern`.
+fn collect_pattern_binder_names(
+    p: &SurfacePattern,
+    meta: &NameMeta,
+    out: &mut Vec<String>,
+) {
+    match p {
+        SurfacePattern::Wildcard { .. } => {}
+        SurfacePattern::Ident { name, .. } => {
+            // A bare ident that names a nullary variant is a constructor
+            // pattern (no binding). Anything else binds.
+            if meta.nullary_variants.contains(name) {
+                return;
+            }
+            out.push(name.clone());
+        }
+        SurfacePattern::Ctor { payload, .. } => {
+            collect_pattern_binder_names(payload, meta, out);
+        }
+    }
+}
+
 /// Walk `e` and collect every `Expr::SelfRef(idx)` index into `out`.
 fn collect_self_refs(e: &Expr, out: &mut std::collections::BTreeSet<u32>) {
     match e {
@@ -856,7 +1199,13 @@ fn collect_self_refs(e: &Expr, out: &mut std::collections::BTreeSet<u32>) {
             collect_self_refs(then_branch, out);
             collect_self_refs(else_branch, out);
         }
+        Expr::Try { expr, .. } => collect_self_refs(expr, out),
+        Expr::Defer { cleanup, body } => {
+            collect_self_refs(cleanup, out);
+            collect_self_refs(body, out);
+        }
         Expr::IntLit(_)
+        | Expr::FloatLit(_)
         | Expr::BoolLit(_)
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
@@ -946,7 +1295,23 @@ fn rewrite_for_canonical(
             then_branch: Box::new(rewrite_for_canonical(then_branch, local_of, real_hash)),
             else_branch: Box::new(rewrite_for_canonical(else_branch, local_of, real_hash)),
         },
+        Expr::Try {
+            expr,
+            enum_ref,
+            ok_index,
+            err_index,
+        } => Expr::Try {
+            expr: Box::new(rewrite_for_canonical(expr, local_of, real_hash)),
+            enum_ref: *enum_ref,
+            ok_index: *ok_index,
+            err_index: *err_index,
+        },
+        Expr::Defer { cleanup, body } => Expr::Defer {
+            cleanup: Box::new(rewrite_for_canonical(cleanup, local_of, real_hash)),
+            body: Box::new(rewrite_for_canonical(body, local_of, real_hash)),
+        },
         Expr::IntLit(_)
+        | Expr::FloatLit(_)
         | Expr::BoolLit(_)
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
@@ -1021,7 +1386,23 @@ fn rewrite_selfref_to_topref(e: &Expr, scc_hashes: &[Hash]) -> Expr {
             then_branch: Box::new(rewrite_selfref_to_topref(then_branch, scc_hashes)),
             else_branch: Box::new(rewrite_selfref_to_topref(else_branch, scc_hashes)),
         },
+        Expr::Try {
+            expr,
+            enum_ref,
+            ok_index,
+            err_index,
+        } => Expr::Try {
+            expr: Box::new(rewrite_selfref_to_topref(expr, scc_hashes)),
+            enum_ref: *enum_ref,
+            ok_index: *ok_index,
+            err_index: *err_index,
+        },
+        Expr::Defer { cleanup, body } => Expr::Defer {
+            cleanup: Box::new(rewrite_selfref_to_topref(cleanup, scc_hashes)),
+            body: Box::new(rewrite_selfref_to_topref(body, scc_hashes)),
+        },
         Expr::IntLit(_)
+        | Expr::FloatLit(_)
         | Expr::BoolLit(_)
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
@@ -1292,11 +1673,14 @@ fn build_at_binding(
         span,
     })?;
 
-    // Validate Result shape. Two flavours are accepted:
-    //   - Monomorphic: `enum Result { Ok(Int), Err(Failure) }`
-    //   - Generic   : `enum Result<T, E> { Ok(T), Err(E) }`
-    // The generic form is preferred per the proposal; the monomorphic
-    // form is retained for back-compat with existing tests/examples.
+    // `at(...)` requires the generic form: `enum Result<T, E> { Ok(T), Err(E) }`.
+    //
+    // The wire protocol ships every closure return as a heap pointer
+    // (uniform closure ABI), so the Ok payload slot must be a pointer
+    // slot, which means a TypeVar. A monomorphic `Result { Ok(Int), ... }`
+    // would put a raw i64 in the payload slot and `build_ok` couldn't
+    // write a heap pointer into it. We used to accept both shapes
+    // back when at() returned Int only; that path is gone.
     let ok_idx = find_variant(result, "Ok").ok_or(ResolveError::AtBindingShape {
         what: "enum Result must declare variant `Ok`".to_owned(),
         span,
@@ -1305,27 +1689,28 @@ fn build_at_binding(
         what: "enum Result must declare variant `Err`".to_owned(),
         span,
     })?;
-    match (result.type_params.len(), &result.variants[ok_idx as usize].1) {
-        // Generic: Ok(TypeVar(0))
-        (2, Some(Type::TypeVar(0))) => {}
-        // Monomorphic: Ok(Int)
-        (0, Some(Type::Builtin(t))) if t == "Int" => {}
+    if result.type_params.len() != 2 {
+        return Err(ResolveError::AtBindingShape {
+            what: "Result must be generic: `enum Result<T, E> { Ok(T), Err(E) }`"
+                .to_owned(),
+            span,
+        });
+    }
+    match &result.variants[ok_idx as usize].1 {
+        Some(Type::TypeVar(0)) => {}
         _ => {
             return Err(ResolveError::AtBindingShape {
-                what: "Result::Ok must carry Int (monomorphic) or T (generic Result<T, E>)"
+                what: "Result::Ok must carry the first type param (T) of Result<T, E>"
                     .to_owned(),
                 span,
             });
         }
     }
-    match (result.type_params.len(), &result.variants[err_idx as usize].1) {
-        // Generic: Err(TypeVar(1))
-        (2, Some(Type::TypeVar(1))) => {}
-        // Monomorphic: Err(Failure)
-        (0, Some(Type::TypeRef(h))) if *h == failure.hash => {}
+    match &result.variants[err_idx as usize].1 {
+        Some(Type::TypeVar(1)) => {}
         _ => {
             return Err(ResolveError::AtBindingShape {
-                what: "Result::Err must carry Failure (monomorphic) or E (generic Result<T, E>)"
+                what: "Result::Err must carry the second type param (E) of Result<T, E>"
                     .to_owned(),
                 span,
             });
@@ -1551,7 +1936,7 @@ fn resolve_type_inner(
     };
     match t {
         SurfaceType::Named { name, span } => match name.as_str() {
-            "Int" | "Bool" | "String" | "Float" | "Bytes" => {
+            "Int" | "Bool" | "String" | "Float" | "Bytes" | "Ptr" => {
                 Ok(Type::Builtin(name.clone()))
             }
             _ => {
@@ -1570,10 +1955,16 @@ fn resolve_type_inner(
             args,
             ..
         } => {
-            let head = resolve_name_head(name).ok_or(ResolveError::UnknownType {
-                name: name.clone(),
-                span: *name_span,
-            })?;
+            // `Array<T>` is a builtin type constructor (heap shape
+            // registered by the runtime), not a user struct/enum.
+            let head = if name == "Array" {
+                Type::Builtin("Array".to_owned())
+            } else {
+                resolve_name_head(name).ok_or(ResolveError::UnknownType {
+                    name: name.clone(),
+                    span: *name_span,
+                })?
+            };
             let args_canon: Result<Vec<Type>, _> = args
                 .iter()
                 .map(|a| resolve_type_inner(a, structs, enums, type_params, pending))
@@ -1636,6 +2027,9 @@ fn resolve_expr_typed(
     match e {
         SurfaceExpr::IntLit { value, .. } => {
             Ok((Expr::IntLit(*value), Type::Builtin("Int".to_owned())))
+        }
+        SurfaceExpr::FloatLit { value, .. } => {
+            Ok((Expr::FloatLit(*value), Type::Builtin("Float".to_owned())))
         }
         SurfaceExpr::BoolLit { value, .. } => {
             Ok((Expr::BoolLit(*value), Type::Builtin("Bool".to_owned())))
@@ -1720,6 +2114,119 @@ fn resolve_expr_typed(
                         Some("core/string.concat"),
                         Some(Type::Builtin("String".to_owned())),
                     ),
+                    // Bytes ops. `Bytes` is a mutable, indexable byte
+                    // buffer; see `core/bytes.*` in the typechecker.
+                    "bytes_new" => (
+                        Some("core/bytes.new"),
+                        Some(Type::Builtin("Bytes".to_owned())),
+                    ),
+                    "bytes_len" => (
+                        Some("core/bytes.len"),
+                        Some(Type::Builtin("Int".to_owned())),
+                    ),
+                    "bytes_get" => (
+                        Some("core/bytes.get"),
+                        Some(Type::Builtin("Int".to_owned())),
+                    ),
+                    "bytes_set" => (
+                        Some("core/bytes.set"),
+                        Some(Type::Builtin("Int".to_owned())),
+                    ),
+                    "bytes_slice" => (
+                        Some("core/bytes.slice"),
+                        Some(Type::Builtin("Bytes".to_owned())),
+                    ),
+                    "bytes_concat" => (
+                        Some("core/bytes.concat"),
+                        Some(Type::Builtin("Bytes".to_owned())),
+                    ),
+                    "bytes_from_string" => (
+                        Some("core/bytes.from_string"),
+                        Some(Type::Builtin("Bytes".to_owned())),
+                    ),
+                    "string_from_bytes" => (
+                        Some("core/string.from_bytes"),
+                        Some(Type::Builtin("String".to_owned())),
+                    ),
+                    // Int <-> Float conversions.
+                    "int_to_float" => (
+                        Some("core/f64.of_int"),
+                        Some(Type::Builtin("Float".to_owned())),
+                    ),
+                    "float_to_int" => (
+                        Some("core/f64.to_int"),
+                        Some(Type::Builtin("Int".to_owned())),
+                    ),
+                    // `panic(msg)` — hard error. Diverges, so its type is
+                    // the bottom type `Never`, which unifies with any
+                    // expected type (it can sit in any match arm / branch).
+                    "panic" => (
+                        Some("core/panic"),
+                        Some(Type::Builtin("Never".to_owned())),
+                    ),
+                    // Raw-pointer / memory intrinsics. `Ptr` is an
+                    // i64-represented raw address (non-GC). These are the
+                    // irreducible primitives the C FFI is built on:
+                    // allocate via libc `malloc` through an extern, then
+                    // read/write the bytes with these.
+                    "ptr_null" => (
+                        Some("core/ptr.null"),
+                        Some(Type::Builtin("Ptr".to_owned())),
+                    ),
+                    "ptr_is_null" => (
+                        Some("core/ptr.is_null"),
+                        Some(Type::Builtin("Int".to_owned())),
+                    ),
+                    "ptr_add" => (
+                        Some("core/ptr.add"),
+                        Some(Type::Builtin("Ptr".to_owned())),
+                    ),
+                    "ptr_read_u8" => (
+                        Some("core/ptr.read_u8"),
+                        Some(Type::Builtin("Int".to_owned())),
+                    ),
+                    "ptr_write_u8" => (
+                        Some("core/ptr.write_u8"),
+                        Some(Type::Builtin("Int".to_owned())),
+                    ),
+                    "ptr_read_i64" => (
+                        Some("core/ptr.read_i64"),
+                        Some(Type::Builtin("Int".to_owned())),
+                    ),
+                    "ptr_write_i64" => (
+                        Some("core/ptr.write_i64"),
+                        Some(Type::Builtin("Int".to_owned())),
+                    ),
+                    "ptr_read_ptr" => (
+                        Some("core/ptr.read_ptr"),
+                        Some(Type::Builtin("Ptr".to_owned())),
+                    ),
+                    "ptr_write_ptr" => (
+                        Some("core/ptr.write_ptr"),
+                        Some(Type::Builtin("Int".to_owned())),
+                    ),
+                    // Explicit reinterpret casts between a `Ptr` and its
+                    // raw address as an `Int`. These are the DELIBERATE
+                    // boundary that turns a non-shippable local address
+                    // into plain data (and back) — the foundation of the
+                    // wire-portable `RemotePtr`. `int_to_ptr` is unsafe by
+                    // nature (it fabricates a pointer from an integer); use
+                    // it only on an address you know is valid on THIS node.
+                    "ptr_to_int" => (
+                        Some("core/ptr.to_int"),
+                        Some(Type::Builtin("Int".to_owned())),
+                    ),
+                    "int_to_ptr" => (
+                        Some("core/ptr.from_int"),
+                        Some(Type::Builtin("Ptr".to_owned())),
+                    ),
+                    // Bitwise ops on Int (base64 / CRC32 / zip / general
+                    // bit manipulation). `bit_shr` is a logical shift.
+                    "bit_and" => (Some("core/i64.and"), Some(Type::Builtin("Int".to_owned()))),
+                    "bit_or" => (Some("core/i64.or"), Some(Type::Builtin("Int".to_owned()))),
+                    "bit_xor" => (Some("core/i64.xor"), Some(Type::Builtin("Int".to_owned()))),
+                    "bit_shl" => (Some("core/i64.shl"), Some(Type::Builtin("Int".to_owned()))),
+                    "bit_shr" => (Some("core/i64.shr"), Some(Type::Builtin("Int".to_owned()))),
                     _ => (None, None),
                 };
                 if let (Some(b), Some(rt)) = (builtin, ret_ty) {
@@ -1738,6 +2245,59 @@ fn resolve_expr_typed(
                             args_r?,
                         ),
                         rt,
+                    ));
+                }
+            }
+
+            // Array builtins. `array_get`'s result type is the array's
+            // element type T (pulled from its `Array<T>` instantiation)
+            // so downstream `.field`/match on the result resolve. The
+            // others have fixed result types. Int box/unbox of elements
+            // is handled in codegen.
+            if let SurfaceExpr::Var { name, .. } = callee.as_ref() {
+                let array_builtin = match name.as_str() {
+                    "array_new" => Some("core/array.new"),
+                    "array_len" => Some("core/array.len"),
+                    "array_get" => Some("core/array.get"),
+                    "array_set" => Some("core/array.set"),
+                    _ => None,
+                };
+                if let Some(builtin) = array_builtin {
+                    let args_typed: Vec<(Expr, Type)> = args
+                        .iter()
+                        .map(|a| {
+                            resolve_expr_typed(
+                                a, env, top, structs, enums, variants, at_binding,
+                                type_params, self_name,
+                            )
+                        })
+                        .collect::<Result<_, _>>()?;
+                    let ret_ty = match name.as_str() {
+                        "array_len" | "array_set" => Type::Builtin("Int".to_owned()),
+                        "array_new" => Type::Apply(
+                            Box::new(Type::Builtin("Array".to_owned())),
+                            vec![Type::TypeVar(0)],
+                        ),
+                        // array_get: element type T from arg 0's Array<T>.
+                        _ => match args_typed.first().map(|(_, t)| t) {
+                            Some(Type::Apply(head, elt))
+                                if matches!(head.as_ref(), Type::Builtin(n) if n == "Array") =>
+                            {
+                                elt.first()
+                                    .cloned()
+                                    .unwrap_or(Type::Builtin("Int".to_owned()))
+                            }
+                            _ => Type::Builtin("Int".to_owned()),
+                        },
+                    };
+                    let args_canon: Vec<Expr> =
+                        args_typed.into_iter().map(|(e, _)| e).collect();
+                    return Ok((
+                        Expr::Call(
+                            Box::new(Expr::BuiltinRef(builtin.to_owned())),
+                            args_canon,
+                        ),
+                        ret_ty,
                     ));
                 }
             }
@@ -1793,41 +2353,33 @@ fn resolve_expr_typed(
                     };
                     let node_canon =
                         resolve_expr(&args[0], env, top, structs, enums, variants, at_binding, type_params, self_name)?;
-                    let thunk_canon =
-                        resolve_expr(&args[1], env, top, structs, enums, variants, at_binding, type_params, self_name)?;
-                    // If the user's Result is generic (`Result<T, E>`),
-                    // embed the Failure hash in the builtin name so the
-                    // typechecker / codegen can reconstruct the
-                    // Apply'd return type `Result<Int, Failure>`.
-                    let is_generic_result = enums
-                        .get("Result")
-                        .map(|e| e.type_params.len() == 2)
-                        .unwrap_or(false);
-                    let builtin_name = if is_generic_result {
-                        format!(
-                            "{}{}#{}",
-                            AT_BUILTIN_PREFIX,
-                            hex_encode(binding.result_hash.as_bytes()),
-                            hex_encode(binding.failure_hash.as_bytes())
-                        )
-                    } else {
-                        format!(
-                            "{}{}",
-                            AT_BUILTIN_PREFIX,
-                            hex_encode(binding.result_hash.as_bytes())
-                        )
+                    let (thunk_canon, thunk_ty) =
+                        resolve_expr_typed(&args[1], env, top, structs, enums, variants, at_binding, type_params, self_name)?;
+                    // Extract the thunk's return type so the resolver's
+                    // tracked `ret_ty` reflects the real instantiation
+                    // (downstream pattern bindings substitute against
+                    // it).  Fall back to Int if the thunk wasn't a
+                    // recognizable `fn() -> T` — the typechecker will
+                    // catch the misuse with a clearer error.
+                    let thunk_ret_ty = match &thunk_ty {
+                        Type::FnType { params, ret } if params.is_empty() => {
+                            (**ret).clone()
+                        }
+                        _ => Type::Builtin("Int".to_owned()),
                     };
-                    let ret_ty = if is_generic_result {
-                        Type::Apply(
-                            Box::new(Type::TypeRef(binding.result_hash)),
-                            vec![
-                                Type::Builtin("Int".to_owned()),
-                                Type::TypeRef(binding.failure_hash),
-                            ],
-                        )
-                    } else {
-                        Type::TypeRef(binding.result_hash)
-                    };
+                    // `build_at_binding` already enforced the generic
+                    // form `Result<T, E>`, so always embed both hashes
+                    // in the builtin name.
+                    let builtin_name = format!(
+                        "{}{}#{}",
+                        AT_BUILTIN_PREFIX,
+                        hex_encode(binding.result_hash.as_bytes()),
+                        hex_encode(binding.failure_hash.as_bytes())
+                    );
+                    let ret_ty = Type::Apply(
+                        Box::new(Type::TypeRef(binding.result_hash)),
+                        vec![thunk_ret_ty, Type::TypeRef(binding.failure_hash)],
+                    );
                     return Ok((
                         Expr::Call(
                             Box::new(Expr::BuiltinRef(builtin_name)),
@@ -1932,29 +2484,59 @@ fn resolve_expr_typed(
 
             let (callee_r, callee_ty) =
                 resolve_expr_typed(callee, env, top, structs, enums, variants, at_binding, type_params, self_name)?;
-            let args_r: Result<Vec<Expr>, _> = args
-                .iter()
-                .map(|a| resolve_expr(a, env, top, structs, enums, variants, at_binding, type_params, self_name))
-                .collect();
+            // Resolve args TYPED so a generic callee's return type can be
+            // instantiated from the actual arg types — e.g.
+            // `opt_unwrap_or(opt, 0.0)` resolves to `Float`, which a
+            // surrounding `+` needs to pick the f64 (not i64) builtin.
+            let mut arg_exprs: Vec<Expr> = Vec::with_capacity(args.len());
+            let mut arg_types: Vec<Type> = Vec::with_capacity(args.len());
+            for a in args {
+                let (ae, at) = resolve_expr_typed(
+                    a, env, top, structs, enums, variants, at_binding, type_params, self_name,
+                )?;
+                arg_exprs.push(ae);
+                arg_types.push(at);
+            }
             let ret_ty = match &callee_ty {
-                Type::FnType { ret, .. } => (**ret).clone(),
+                Type::FnType { params, ret } => {
+                    let n = max_typevar_plus1(params, ret);
+                    if n > 0 {
+                        let mut subst: Vec<Option<Type>> = vec![None; n];
+                        for (p, a) in params.iter().zip(arg_types.iter()) {
+                            unify_resolver(p, a, &mut subst);
+                        }
+                        let concrete: Vec<Type> = subst
+                            .into_iter()
+                            .enumerate()
+                            .map(|(i, o)| o.unwrap_or(Type::TypeVar(i as u32)))
+                            .collect();
+                        substitute_type_resolver(ret, &concrete)
+                    } else {
+                        (**ret).clone()
+                    }
+                }
                 _ => Type::Builtin("Int".to_owned()),
             };
-            Ok((Expr::Call(Box::new(callee_r), args_r?), ret_ty))
+            Ok((Expr::Call(Box::new(callee_r), arg_exprs), ret_ty))
         }
 
         SurfaceExpr::BinOp {
             op, left, right, ..
         } => {
-            let l = resolve_expr(left, env, top, structs, enums, variants, at_binding, type_params, self_name)?;
-            let r = resolve_expr(right, env, top, structs, enums, variants, at_binding, type_params, self_name)?;
-            // All v1 binops return Int (arithmetic) or Int (comparison widened to i64).
+            let (l, lt) = resolve_expr_typed(left, env, top, structs, enums, variants, at_binding, type_params, self_name)?;
+            let (r, rt) = resolve_expr_typed(right, env, top, structs, enums, variants, at_binding, type_params, self_name)?;
+            // Type-directed dispatch: if either operand is Float, use the
+            // f64 builtin variant (the typechecker enforces both are
+            // Float). Otherwise fall back to the i64 variants. Arithmetic
+            // ops preserve the operand type; comparisons return Int.
+            let is_float = is_float_ty(&lt) || is_float_ty(&rt);
+            let (builtin, result_ty) = binop_builtin_typed(*op, is_float);
             Ok((
                 Expr::Call(
-                    Box::new(Expr::BuiltinRef(binop_builtin(*op).to_owned())),
+                    Box::new(Expr::BuiltinRef(builtin.to_owned())),
                     vec![l, r],
                 ),
-                Type::Builtin("Int".to_owned()),
+                result_ty,
             ))
         }
 
@@ -1998,26 +2580,53 @@ fn resolve_expr_typed(
         }
 
         SurfaceExpr::Block { stmts, tail, .. } => {
-            // `{ let x = e1; let y = e2; tail }` lowers to
-            // `Let { e1, Let { e2, tail } }`. Each let extends env by 1.
-            let pushed = stmts.len();
-            let mut values_canon: Vec<Expr> = Vec::with_capacity(pushed);
+            // `{ let x = e1; defer c; let y = e2; tail }` lowers to
+            // `Let { e1, Defer { c, Let { e2, tail } } }`. A `let` extends
+            // the env by one binder; a `defer` adds none (its cleanup is
+            // resolved in the env at the defer point, and the Defer node
+            // wraps the rest of the block as its body).
+            //
+            // `lowered` records each statement as `(is_defer, canon_expr)`
+            // in source order; we wrap the tail right-to-left at the end.
+            let mut lowered: Vec<(bool, Expr)> = Vec::with_capacity(stmts.len());
+            let mut pushed = 0usize;
             for s in stmts {
-                let SurfaceStmt::Let { name, value, .. } = s;
-                let (v_canon, v_ty) =
-                    resolve_expr_typed(value, env, top, structs, enums, variants, at_binding, type_params, self_name)?;
-                values_canon.push(v_canon);
-                env.push((name.clone(), v_ty));
+                match s {
+                    SurfaceStmt::Let { name, value, .. } => {
+                        let (v_canon, v_ty) = resolve_expr_typed(
+                            value, env, top, structs, enums, variants, at_binding, type_params,
+                            self_name,
+                        )?;
+                        env.push((name.clone(), v_ty));
+                        pushed += 1;
+                        lowered.push((false, v_canon));
+                    }
+                    SurfaceStmt::Defer { expr, .. } => {
+                        // Cleanup is resolved in the current env; no binder.
+                        let (c_canon, _c_ty) = resolve_expr_typed(
+                            expr, env, top, structs, enums, variants, at_binding, type_params,
+                            self_name,
+                        )?;
+                        lowered.push((true, c_canon));
+                    }
+                }
             }
             let (mut body_canon, body_ty) =
                 resolve_expr_typed(tail, env, top, structs, enums, variants, at_binding, type_params, self_name)?;
             for _ in 0..pushed {
                 env.pop();
             }
-            for v in values_canon.into_iter().rev() {
-                body_canon = Expr::Let {
-                    value: Box::new(v),
-                    body: Box::new(body_canon),
+            for (is_defer, canon) in lowered.into_iter().rev() {
+                body_canon = if is_defer {
+                    Expr::Defer {
+                        cleanup: Box::new(canon),
+                        body: Box::new(body_canon),
+                    }
+                } else {
+                    Expr::Let {
+                        value: Box::new(canon),
+                        body: Box::new(body_canon),
+                    }
                 };
             }
             Ok((body_canon, body_ty))
@@ -2101,8 +2710,17 @@ fn resolve_expr_typed(
             arms,
             span,
         } => {
-            let (scrut_canon, _scrut_ty) =
+            let (scrut_canon, scrut_ty) =
                 resolve_expr_typed(scrutinee, env, top, structs, enums, variants, at_binding, type_params, self_name)?;
+            // If the scrutinee is `Apply(Result, [T_actual, E_actual])`
+            // (an instantiated generic enum), extract the instantiation
+            // args so we can substitute them into pattern bindings —
+            // otherwise `Ok(p)` would bind p to `TypeVar(0)` and
+            // downstream field access on p fails to find the struct.
+            let scrut_instantiation: Vec<Type> = match &scrut_ty {
+                Type::Apply(_, args) => args.clone(),
+                _ => Vec::new(),
+            };
 
             // The result type is taken from the FIRST arm; we don't
             // enforce arm-type equality here (typechecker's job).
@@ -2131,8 +2749,12 @@ fn resolve_expr_typed(
 
                 // Bind pattern variables into env so the arm body can
                 // refer to them by name. Each (name, type) pair is
-                // pushed in pattern-traversal order.
-                let bindings = collect_pattern_bindings(&arm.pattern, variants);
+                // pushed in pattern-traversal order. Pattern bindings
+                // are substituted against the scrutinee's instantiation
+                // so e.g. `Ok(p)` against `Result<Pair, Failure>`
+                // binds `p: Pair` rather than `p: TypeVar(0)`.
+                let bindings =
+                    collect_pattern_bindings(&arm.pattern, variants, &scrut_instantiation);
                 for (name, ty) in &bindings {
                     env.push((name.clone(), ty.clone()));
                 }
@@ -2269,6 +2891,79 @@ fn resolve_expr_typed(
                 ty,
             ))
         }
+
+        SurfaceExpr::Try { expr, span } => {
+            let (inner_canon, inner_ty) = resolve_expr_typed(
+                expr, env, top, structs, enums, variants, at_binding, type_params, self_name,
+            )?;
+            // The operand must be a `Result<T, E>`: either a bare
+            // `TypeRef(h)` (monomorphic) or `Apply(TypeRef(h), [T, E])`.
+            let (enum_ref, instantiation): (Hash, Vec<Type>) = match &inner_ty {
+                Type::TypeRef(h) => (*h, Vec::new()),
+                Type::Apply(head, args) => match head.as_ref() {
+                    Type::TypeRef(h) => (*h, args.clone()),
+                    _ => {
+                        return Err(ResolveError::TryOnNonResult {
+                            ty: inner_ty,
+                            span: *span,
+                        });
+                    }
+                },
+                _ => {
+                    return Err(ResolveError::TryOnNonResult {
+                        ty: inner_ty,
+                        span: *span,
+                    });
+                }
+            };
+            // The enum must declare `Ok` and `Err` variants (the
+            // `Result<T, E>` shape). We identify it structurally rather
+            // than by a hardcoded hash so any conforming user enum works.
+            let info = enums
+                .values()
+                .find(|i| i.hash == enum_ref)
+                .ok_or_else(|| ResolveError::TryOnNonResult {
+                    ty: inner_ty.clone(),
+                    span: *span,
+                })?
+                .clone();
+            let ok_index = find_variant(&info, "Ok").ok_or_else(|| {
+                ResolveError::TryOnNonResult {
+                    ty: inner_ty.clone(),
+                    span: *span,
+                }
+            })?;
+            let err_index = find_variant(&info, "Err").ok_or_else(|| {
+                ResolveError::TryOnNonResult {
+                    ty: inner_ty.clone(),
+                    span: *span,
+                }
+            })?;
+            // The value of `expr?` is the `Ok` payload type `T`, with the
+            // operand's instantiation substituted in (so `Result<Int, E>?`
+            // resolves to `Int`, not `TypeVar(0)`).
+            let ok_payload = info.variants[ok_index as usize]
+                .1
+                .clone()
+                .ok_or_else(|| ResolveError::TryOnNonResult {
+                    ty: inner_ty.clone(),
+                    span: *span,
+                })?;
+            let ty = if instantiation.is_empty() {
+                ok_payload
+            } else {
+                substitute_type_resolver(&ok_payload, &instantiation)
+            };
+            Ok((
+                Expr::Try {
+                    expr: Box::new(inner_canon),
+                    enum_ref,
+                    ok_index,
+                    err_index,
+                },
+                ty,
+            ))
+        }
     }
 }
 
@@ -2344,15 +3039,17 @@ fn resolve_pattern(
 fn collect_pattern_bindings(
     p: &SurfacePattern,
     variants: &HashMap<String, VariantBinding>,
+    instantiation: &[Type],
 ) -> Vec<(String, Type)> {
     let mut out: Vec<(String, Type)> = Vec::new();
-    walk_pattern_bindings(p, variants, None, &mut out);
+    walk_pattern_bindings(p, variants, instantiation, None, &mut out);
     out
 }
 
 fn walk_pattern_bindings(
     p: &SurfacePattern,
     variants: &HashMap<String, VariantBinding>,
+    instantiation: &[Type],
     payload_ty_hint: Option<&Type>,
     out: &mut Vec<(String, Type)>,
 ) {
@@ -2364,17 +3061,47 @@ fn walk_pattern_bindings(
                     return;
                 }
             }
-            let ty = payload_ty_hint
+            let raw = payload_ty_hint
                 .cloned()
                 .unwrap_or(Type::Builtin("Int".to_owned()));
+            let ty = substitute_typevars(&raw, instantiation);
             out.push((name.clone(), ty));
         }
         SurfacePattern::Ctor { name, payload, .. } => {
             let sub_payload_ty = variants
                 .get(name)
                 .and_then(|v| v.payload.clone());
-            walk_pattern_bindings(payload, variants, sub_payload_ty.as_ref(), out);
+            walk_pattern_bindings(
+                payload,
+                variants,
+                instantiation,
+                sub_payload_ty.as_ref(),
+                out,
+            );
         }
+    }
+}
+
+/// Replace `Type::TypeVar(i)` references with `instantiation[i]` where
+/// applicable. Used to propagate the scrutinee's instantiation into
+/// match-arm pattern bindings: matching `Ok(p)` against
+/// `Apply(Result, [Pair, Failure])` should bind `p: Pair`, not
+/// `p: TypeVar(0)`.
+fn substitute_typevars(ty: &Type, instantiation: &[Type]) -> Type {
+    match ty {
+        Type::TypeVar(i) => instantiation
+            .get(*i as usize)
+            .cloned()
+            .unwrap_or_else(|| ty.clone()),
+        Type::Apply(head, args) => Type::Apply(
+            Box::new(substitute_typevars(head, instantiation)),
+            args.iter().map(|a| substitute_typevars(a, instantiation)).collect(),
+        ),
+        Type::FnType { params, ret } => Type::FnType {
+            params: params.iter().map(|p| substitute_typevars(p, instantiation)).collect(),
+            ret: Box::new(substitute_typevars(ret, instantiation)),
+        },
+        _ => ty.clone(),
     }
 }
 
@@ -2426,17 +3153,92 @@ fn unop_builtin(op: UnaryOp) -> &'static str {
     }
 }
 
+fn is_float_ty(t: &Type) -> bool {
+    matches!(t, Type::Builtin(n) if n == "Float")
+}
+
+/// Pick the builtin + result type for a binary op given whether the
+/// operands are Float. Float arithmetic returns Float; comparisons
+/// return Int (Bool widened). `And`/`Or` stay Int-only.
+fn binop_builtin_typed(op: BinOp, is_float: bool) -> (&'static str, Type) {
+    let int_t = || Type::Builtin("Int".to_owned());
+    let float_t = || Type::Builtin("Float".to_owned());
+    if is_float {
+        match op {
+            BinOp::Add => ("core/f64.add", float_t()),
+            BinOp::Sub => ("core/f64.sub", float_t()),
+            BinOp::Mul => ("core/f64.mul", float_t()),
+            BinOp::Div => ("core/f64.div", float_t()),
+            BinOp::Rem => ("core/f64.rem", float_t()),
+            BinOp::Eq => ("core/f64.eq", int_t()),
+            BinOp::NotEq => ("core/f64.ne", int_t()),
+            BinOp::Lt => ("core/f64.lt", int_t()),
+            BinOp::LtEq => ("core/f64.le", int_t()),
+            BinOp::Gt => ("core/f64.gt", int_t()),
+            BinOp::GtEq => ("core/f64.ge", int_t()),
+            // Logical and/or aren't meaningful on Float; fall back to
+            // the int builtins (typecheck will reject Float operands).
+            BinOp::And => ("core/bool.and", int_t()),
+            BinOp::Or => ("core/bool.or", int_t()),
+        }
+    } else {
+        let b = binop_builtin(op);
+        // Comparisons and logicals are already Int; arithmetic on Int
+        // is Int — so the result is Int in every non-float case.
+        (b, int_t())
+    }
+}
+
 /// Best-effort unification used by the resolver to recover the type-arg
 /// substitution at variant / struct construction sites. Where `pattern`
 /// has a `TypeVar(i)` and `actual` is concrete, record `subst[i] = actual`.
 /// Shape mismatches are silent (caller gets a partial substitution).
 ///
 /// Returns nothing — this is bottom-up best-effort, not a strict check.
+/// Number of distinct `TypeVar(i)` slots a signature scopes (max index
+/// + 1), so callers can size a substitution vector.
+fn max_typevar_plus1(params: &[Type], ret: &Type) -> usize {
+    fn go(t: &Type, m: &mut usize) {
+        match t {
+            Type::TypeVar(i) => *m = (*m).max(*i as usize + 1),
+            Type::Apply(h, args) => {
+                go(h, m);
+                for a in args {
+                    go(a, m);
+                }
+            }
+            Type::FnType { params, ret } => {
+                for p in params {
+                    go(p, m);
+                }
+                go(ret, m);
+            }
+            _ => {}
+        }
+    }
+    let mut m = 0;
+    for p in params {
+        go(p, &mut m);
+    }
+    go(ret, &mut m);
+    m
+}
+
 fn unify_resolver(pattern: &Type, actual: &Type, subst: &mut [Option<Type>]) {
     match (pattern, actual) {
+        // A TypeVar on the actual side is "instantiation unknown" — it
+        // never constrains (matches typecheck's `unify`). Without this,
+        // an early placeholder (e.g. `smap_new(): StringMap<TypeVar(0)>`)
+        // would pin the slot and block the real binding from a later
+        // concrete arg.
+        (Type::TypeVar(_), Type::TypeVar(_)) => {}
         (Type::TypeVar(i), other) => {
             let idx = *i as usize;
-            if idx < subst.len() && subst[idx].is_none() {
+            // Bind when unset, or refine a prior TypeVar placeholder to
+            // a concrete type.
+            if idx < subst.len()
+                && (subst[idx].is_none() || matches!(subst[idx], Some(Type::TypeVar(_))))
+            {
                 subst[idx] = Some(other.clone());
             }
         }

@@ -134,6 +134,12 @@ fn is_persistent_vector(bits: u64, ids: HeapTypeIds) -> bool {
     heap_type_id(bits) == Some(ids.vector)
 }
 
+/// `(instance? clojure.lang.IDeref x)` — the deref-able heap cells we
+/// support: `Reduced` (via `@`) and `Delay`.
+fn is_ideref(bits: u64, ids: HeapTypeIds) -> bool {
+    matches!(heap_type_id(bits), Some(t) if t == ids.reduced || t == ids.delay)
+}
+
 fn is_persistent_set(bits: u64, ids: HeapTypeIds) -> bool {
     heap_type_id(bits) == Some(ids.set)
 }
@@ -169,10 +175,12 @@ fn is_imeta(bits: u64, ids: HeapTypeIds) -> bool {
     is_iobj(bits, ids)
 }
 
-fn is_number(bits: u64, _ids: HeapTypeIds) -> bool {
-    // Long: NanBox-encoded as a non-tagged f64 (round-trips integer).
-    // Double: ditto. Both have `nanbox_tag` returning None.
-    nanbox_tag(bits).is_none()
+fn is_number(bits: u64, ids: HeapTypeIds) -> bool {
+    // Double: NanBox-encoded as a non-tagged f64 (`nanbox_tag` → None).
+    // Long: a boxed heap cell (TAG_PTR with the `long` type_id). (Until the
+    // boxed-Long flip lands, integer-valued floats also satisfy this via the
+    // None branch.)
+    nanbox_tag(bits).is_none() || heap_type_id(bits) == Some(ids.long)
 }
 
 /// Integer-typed predicate: any number whose NanBox round-trips as an
@@ -180,7 +188,14 @@ fn is_number(bits: u64, _ids: HeapTypeIds) -> bool {
 /// JVM integer types (Integer / Long / Short / Byte / BigInteger /
 /// clojure.lang.BigInt) since we represent all of them as Long-shaped
 /// f64 NanBoxes.
-fn is_integer(bits: u64, _ids: HeapTypeIds) -> bool {
+fn is_integer(bits: u64, ids: HeapTypeIds) -> bool {
+    // A boxed Long is always an integer.
+    if heap_type_id(bits) == Some(ids.long) {
+        return true;
+    }
+    // PRE-FLIP: integer-valued native floats still count (ints are floats).
+    // POST-FLIP (Task A Step 2): delete this branch — a native float is a
+    // genuine `double` and `(integer? 3.0)` must be false.
     if nanbox_tag(bits).is_some() { return false; }
     let f = f64::from_bits(bits);
     f.is_finite() && f == (f as i64) as f64
@@ -202,11 +217,12 @@ fn is_character(_bits: u64, _ids: HeapTypeIds) -> bool {
     false
 }
 
-fn is_var(_bits: u64, _ids: HeapTypeIds) -> bool {
-    // Vars don't currently flow through the runtime as values (deref
-    // happens at the `cljvm_var_deref` extern; the resulting value is
-    // whatever the Var holds). Add a Var heap type to make this true.
-    false
+fn is_var(bits: u64, ids: HeapTypeIds) -> bool {
+    heap_type_id(bits) == Some(ids.var)
+}
+
+fn is_namespace(bits: u64, ids: HeapTypeIds) -> bool {
+    heap_type_id(bits) == Some(ids.namespace)
 }
 
 // ── Registration ───────────────────────────────────────────────────────
@@ -266,13 +282,13 @@ fn register_classes() -> Vec<HostClassInfo> {
     push(&mut v, "clojure.lang.Associative", &[], always_false, None);
     push(&mut v, "clojure.lang.IPending", &[], always_false, None);
     push(&mut v, "clojure.lang.IBlockingDeref", &[], always_false, None);
-    push(&mut v, "clojure.lang.IDeref", &[], always_false, None);
+    push(&mut v, "clojure.lang.IDeref", &[], is_ideref, None);
     push(&mut v, "clojure.lang.IRef", &[], always_false, None);
     push(&mut v, "clojure.lang.Ref", &[], always_false, None);
     push(&mut v, "clojure.lang.Atom", &[], always_false, None);
     push(&mut v, "clojure.lang.Agent", &[], always_false, None);
     push(&mut v, "clojure.lang.Volatile", &[], always_false, None);
-    push(&mut v, "clojure.lang.Namespace", &[], always_false, None);
+    push(&mut v, "clojure.lang.Namespace", &[], is_namespace, None);
     push(&mut v, "clojure.lang.IRecord", &[], always_false, None);
     push(&mut v, "clojure.lang.IReduce", &[], always_false, None);
     push(&mut v, "clojure.lang.IReduceInit", &[], always_false, None);
@@ -301,7 +317,7 @@ fn register_classes() -> Vec<HostClassInfo> {
     push(&mut v, "java.lang.Throwable", &["Throwable"], always_false, None);
     push(&mut v, "java.lang.Class", &["Class"], always_false, None);
     push(&mut v, "java.lang.Object", &["Object"], always_false, None);
-    push(&mut v, "clojure.lang.Reduced", &[], always_false, None);
+    push(&mut v, "clojure.lang.Reduced", &[], is_reduced_class, Some(reduced_ctor));
     push(&mut v, "clojure.lang.Reductions", &[], always_false, None);
     push(&mut v, "clojure.lang.AFn", &[], always_false, None);
     push(&mut v, "clojure.lang.AFunction", &[], always_false, None);
@@ -565,6 +581,19 @@ fn lazy_seq_ctor(args: &[u64], _ids: HeapTypeIds) -> u64 {
         panic!("clojure-jvm: LazySeq ctor expects 1 fn arg, got {}", args.len());
     }
     unsafe { crate::runtime::cljvm_inst_LazySeq_new1(args[0]) }
+}
+
+/// `(instance? clojure.lang.Reduced x)` predicate.
+fn is_reduced_class(bits: u64, _ids: HeapTypeIds) -> bool {
+    crate::runtime::is_reduced(bits)
+}
+
+/// `(clojure.lang.Reduced. x)` — wrap `x` in a Reduced cell.
+fn reduced_ctor(args: &[u64], _ids: HeapTypeIds) -> u64 {
+    if args.len() != 1 {
+        panic!("clojure-jvm: Reduced ctor expects 1 arg, got {}", args.len());
+    }
+    unsafe { crate::runtime::cljvm_inst_Reduced_new1(args[0]) }
 }
 
 fn delay_ctor(args: &[u64], _ids: HeapTypeIds) -> u64 {

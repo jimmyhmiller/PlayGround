@@ -28,4 +28,13 @@ pub mod llm;
 pub mod event_kinds {
     pub const TERMINAL_CWD_CHANGED: &str = "terminal.cwd_changed";
     pub const PROJECT_DEFAULT_CWD_SUGGESTED: &str = "inference.project_default_cwd_suggested";
+    /// A command finished in a terminal. Payload:
+    /// `{session_id, command, cwd, exit_code}`. Emitted by the worker
+    /// from OSC 133 shell-integration marks.
+    pub const TERMINAL_COMMAND_EXECUTED: &str = "terminal.command_executed";
+    /// The command classifier thinks a command is worth a saved
+    /// run-button. Payload: `{session_id, command, cwd, title,
+    /// confidence, reason, worth_suggesting}`. Consumed into the
+    /// suggestion drawer.
+    pub const COMMAND_PANE_SUGGESTED: &str = "inference.command_pane_suggested";
 }

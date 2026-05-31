@@ -5,11 +5,16 @@
 //! when the cwd changes. We don't want the user to have to edit their
 //! `.zshrc`.
 //!
+//! We also emit OSC 133 command marks (`preexec`/`precmd` hooks) so the
+//! editor knows which command ran and how it exited — the inference
+//! layer uses that to suggest run-button panes.
+//!
 //! Approach: write a small set of shim rc files under our data dir and
 //! point `ZDOTDIR` at it (zsh). Each shim sources the user's real rc
 //! from `$HOME` (or their previously-set `ZDOTDIR`, which we stash in
 //! `TERMINAL_BEVY_USER_ZDOTDIR` before launch), then appends an OSC 7
-//! emitter to `precmd_functions` + `chpwd_functions`.
+//! emitter to `precmd_functions` + `chpwd_functions` and OSC 133
+//! command marks to `preexec_functions` + `precmd_functions`.
 //!
 //! Bash has no equivalent of `ZDOTDIR` for login shells, so for now
 //! bash users don't get auto-injection — we just no-op and they'll fall
@@ -63,8 +68,28 @@ HISTFILE="${ZDOTDIR:-$HOME}/.zsh_history"
 _tb_emit_cwd() {
   printf '\e]7;file://%s%s\e\\' "${HOST:-localhost}" "$PWD"
 }
-typeset -ga precmd_functions chpwd_functions
-precmd_functions+=(_tb_emit_cwd)
+
+# 6) Command reporting via OSC 133. preexec fires just before a typed
+#    command runs ($1 = the command line as typed); precmd fires before
+#    each prompt ($? = the last command's exit status). The editor side
+#    parses these to infer which commands might be worth a run-button.
+#
+#    The command line is base64-encoded so arbitrary content (newlines,
+#    ESC, ';') can't corrupt the OSC payload or be cut short by the
+#    terminal's own C0-control handling. Exit code is plain digits.
+#      \e]133;C;<base64-command>\e\\   command starting
+#      \e]133;D;<exit-code>\e\\        command finished
+_tb_preexec() {
+  printf '\e]133;C;%s\e\\' "$(print -rn -- "$1" | base64 | tr -d '\n')"
+}
+_tb_precmd_exit() {
+  printf '\e]133;D;%s\e\\' "$?"
+}
+typeset -ga precmd_functions preexec_functions chpwd_functions
+# _tb_precmd_exit must run first in precmd so it reads $? before any
+# other precmd hook (e.g. _tb_emit_cwd's printf) clobbers it.
+precmd_functions=(_tb_precmd_exit $precmd_functions _tb_emit_cwd)
+preexec_functions+=(_tb_preexec)
 chpwd_functions+=(_tb_emit_cwd)
 # Initial emit so we surface the starting cwd before the first prompt fires.
 _tb_emit_cwd

@@ -1,0 +1,447 @@
+// AST:      {
+// AST-NEXT:   "type": "File",
+// AST-NEXT:   "loc": {
+// AST-NEXT:     "start": {
+// AST-NEXT:       "line": 1,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     },
+// AST-NEXT:     "end": {
+// AST-NEXT:       "line": 8,
+// AST-NEXT:       "column": 0
+// AST-NEXT:     }
+// AST-NEXT:   },
+// AST-NEXT:   "start": 0,
+// AST-NEXT:   "end": 159,
+// AST-NEXT:   "program": {
+// AST-NEXT:     "type": "Program",
+// AST-NEXT:     "loc": {
+// AST-NEXT:       "start": {
+// AST-NEXT:         "line": 1,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       },
+// AST-NEXT:       "end": {
+// AST-NEXT:         "line": 8,
+// AST-NEXT:         "column": 0
+// AST-NEXT:       }
+// AST-NEXT:     },
+// AST-NEXT:     "start": 0,
+// AST-NEXT:     "end": 159,
+// AST-NEXT:     "scopeUid": 0,
+// AST-NEXT:     "interpreter": null,
+// AST-NEXT:     "sourceType": "module",
+// AST-NEXT:     "body": [
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ImportDeclaration",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 1,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 1,
+// AST-NEXT:             "column": 36
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 0,
+// AST-NEXT:         "end": 36,
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "specifiers": [
+// AST-NEXT:           {
+// AST-NEXT:             "type": "ImportDefaultSpecifier",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 1,
+// AST-NEXT:                 "column": 7
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 1,
+// AST-NEXT:                 "column": 24
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             "start": 7,
+// AST-NEXT:             "end": 24,
+// AST-NEXT:             "scopeUid": 0,
+// AST-NEXT:             "definedSymbols": [
+// AST-NEXT:               {
+// AST-NEXT:                 "name": "default_specifier",
+// AST-NEXT:                 "defScopeUid": 0
+// AST-NEXT:               }
+// AST-NEXT:             ],
+// AST-NEXT:             "local": {
+// AST-NEXT:               "type": "Identifier",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 1,
+// AST-NEXT:                   "column": 7
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 1,
+// AST-NEXT:                   "column": 24
+// AST-NEXT:                 },
+// AST-NEXT:                 "identifierName": "default_specifier"
+// AST-NEXT:               },
+// AST-NEXT:               "start": 7,
+// AST-NEXT:               "end": 24,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "name": "default_specifier"
+// AST-NEXT:             }
+// AST-NEXT:           }
+// AST-NEXT:         ],
+// AST-NEXT:         "source": {
+// AST-NEXT:           "type": "StringLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 1,
+// AST-NEXT:               "column": 30
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 1,
+// AST-NEXT:               "column": 35
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 30,
+// AST-NEXT:           "end": 35,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "value": "src",
+// AST-NEXT:           "extra": {
+// AST-NEXT:             "raw": "\"src\"",
+// AST-NEXT:             "rawValue": "src"
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ImportDeclaration",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 3,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 3,
+// AST-NEXT:             "column": 30
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 38,
+// AST-NEXT:         "end": 68,
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "specifiers": [
+// AST-NEXT:           {
+// AST-NEXT:             "type": "ImportSpecifier",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 3,
+// AST-NEXT:                 "column": 8
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 3,
+// AST-NEXT:                 "column": 17
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             "start": 46,
+// AST-NEXT:             "end": 55,
+// AST-NEXT:             "scopeUid": 0,
+// AST-NEXT:             "definedSymbols": [
+// AST-NEXT:               {
+// AST-NEXT:                 "name": "specifier",
+// AST-NEXT:                 "defScopeUid": 0
+// AST-NEXT:               }
+// AST-NEXT:             ],
+// AST-NEXT:             "imported": {
+// AST-NEXT:               "type": "Identifier",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 8
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 17
+// AST-NEXT:                 },
+// AST-NEXT:                 "identifierName": "specifier"
+// AST-NEXT:               },
+// AST-NEXT:               "start": 46,
+// AST-NEXT:               "end": 55,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "name": "specifier"
+// AST-NEXT:             },
+// AST-NEXT:             "local": {
+// AST-NEXT:               "type": "Identifier",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 8
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 3,
+// AST-NEXT:                   "column": 17
+// AST-NEXT:                 },
+// AST-NEXT:                 "identifierName": "specifier"
+// AST-NEXT:               },
+// AST-NEXT:               "start": 46,
+// AST-NEXT:               "end": 55,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "name": "specifier"
+// AST-NEXT:             }
+// AST-NEXT:           }
+// AST-NEXT:         ],
+// AST-NEXT:         "source": {
+// AST-NEXT:           "type": "StringLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 3,
+// AST-NEXT:               "column": 24
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 3,
+// AST-NEXT:               "column": 29
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 62,
+// AST-NEXT:           "end": 67,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "value": "src",
+// AST-NEXT:           "extra": {
+// AST-NEXT:             "raw": "\"src\"",
+// AST-NEXT:             "rawValue": "src"
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ImportDeclaration",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 5,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 5,
+// AST-NEXT:             "column": 43
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 70,
+// AST-NEXT:         "end": 113,
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "specifiers": [
+// AST-NEXT:           {
+// AST-NEXT:             "type": "ImportSpecifier",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 5,
+// AST-NEXT:                 "column": 8
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 5,
+// AST-NEXT:                 "column": 18
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             "start": 78,
+// AST-NEXT:             "end": 88,
+// AST-NEXT:             "scopeUid": 0,
+// AST-NEXT:             "definedSymbols": [
+// AST-NEXT:               {
+// AST-NEXT:                 "name": "specifier1",
+// AST-NEXT:                 "defScopeUid": 0
+// AST-NEXT:               }
+// AST-NEXT:             ],
+// AST-NEXT:             "imported": {
+// AST-NEXT:               "type": "Identifier",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 5,
+// AST-NEXT:                   "column": 8
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 5,
+// AST-NEXT:                   "column": 18
+// AST-NEXT:                 },
+// AST-NEXT:                 "identifierName": "specifier1"
+// AST-NEXT:               },
+// AST-NEXT:               "start": 78,
+// AST-NEXT:               "end": 88,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "name": "specifier1"
+// AST-NEXT:             },
+// AST-NEXT:             "local": {
+// AST-NEXT:               "type": "Identifier",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 5,
+// AST-NEXT:                   "column": 8
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 5,
+// AST-NEXT:                   "column": 18
+// AST-NEXT:                 },
+// AST-NEXT:                 "identifierName": "specifier1"
+// AST-NEXT:               },
+// AST-NEXT:               "start": 78,
+// AST-NEXT:               "end": 88,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "name": "specifier1"
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           {
+// AST-NEXT:             "type": "ImportSpecifier",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 5,
+// AST-NEXT:                 "column": 20
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 5,
+// AST-NEXT:                 "column": 30
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             "start": 90,
+// AST-NEXT:             "end": 100,
+// AST-NEXT:             "scopeUid": 0,
+// AST-NEXT:             "definedSymbols": [
+// AST-NEXT:               {
+// AST-NEXT:                 "name": "specifier2",
+// AST-NEXT:                 "defScopeUid": 0
+// AST-NEXT:               }
+// AST-NEXT:             ],
+// AST-NEXT:             "imported": {
+// AST-NEXT:               "type": "Identifier",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 5,
+// AST-NEXT:                   "column": 20
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 5,
+// AST-NEXT:                   "column": 30
+// AST-NEXT:                 },
+// AST-NEXT:                 "identifierName": "specifier2"
+// AST-NEXT:               },
+// AST-NEXT:               "start": 90,
+// AST-NEXT:               "end": 100,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "name": "specifier2"
+// AST-NEXT:             },
+// AST-NEXT:             "local": {
+// AST-NEXT:               "type": "Identifier",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 5,
+// AST-NEXT:                   "column": 20
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 5,
+// AST-NEXT:                   "column": 30
+// AST-NEXT:                 },
+// AST-NEXT:                 "identifierName": "specifier2"
+// AST-NEXT:               },
+// AST-NEXT:               "start": 90,
+// AST-NEXT:               "end": 100,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "name": "specifier2"
+// AST-NEXT:             }
+// AST-NEXT:           }
+// AST-NEXT:         ],
+// AST-NEXT:         "source": {
+// AST-NEXT:           "type": "StringLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 5,
+// AST-NEXT:               "column": 37
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 5,
+// AST-NEXT:               "column": 42
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 107,
+// AST-NEXT:           "end": 112,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "value": "src",
+// AST-NEXT:           "extra": {
+// AST-NEXT:             "raw": "\"src\"",
+// AST-NEXT:             "rawValue": "src"
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       },
+// AST-NEXT:       {
+// AST-NEXT:         "type": "ImportDeclaration",
+// AST-NEXT:         "loc": {
+// AST-NEXT:           "start": {
+// AST-NEXT:             "line": 7,
+// AST-NEXT:             "column": 0
+// AST-NEXT:           },
+// AST-NEXT:           "end": {
+// AST-NEXT:             "line": 7,
+// AST-NEXT:             "column": 43
+// AST-NEXT:           }
+// AST-NEXT:         },
+// AST-NEXT:         "start": 115,
+// AST-NEXT:         "end": 158,
+// AST-NEXT:         "scopeUid": 0,
+// AST-NEXT:         "specifiers": [
+// AST-NEXT:           {
+// AST-NEXT:             "type": "ImportNamespaceSpecifier",
+// AST-NEXT:             "loc": {
+// AST-NEXT:               "start": {
+// AST-NEXT:                 "line": 7,
+// AST-NEXT:                 "column": 7
+// AST-NEXT:               },
+// AST-NEXT:               "end": {
+// AST-NEXT:                 "line": 7,
+// AST-NEXT:                 "column": 31
+// AST-NEXT:               }
+// AST-NEXT:             },
+// AST-NEXT:             "start": 122,
+// AST-NEXT:             "end": 146,
+// AST-NEXT:             "scopeUid": 0,
+// AST-NEXT:             "definedSymbols": [
+// AST-NEXT:               {
+// AST-NEXT:                 "name": "namespace_specifier",
+// AST-NEXT:                 "defScopeUid": 0
+// AST-NEXT:               }
+// AST-NEXT:             ],
+// AST-NEXT:             "local": {
+// AST-NEXT:               "type": "Identifier",
+// AST-NEXT:               "loc": {
+// AST-NEXT:                 "start": {
+// AST-NEXT:                   "line": 7,
+// AST-NEXT:                   "column": 12
+// AST-NEXT:                 },
+// AST-NEXT:                 "end": {
+// AST-NEXT:                   "line": 7,
+// AST-NEXT:                   "column": 31
+// AST-NEXT:                 },
+// AST-NEXT:                 "identifierName": "namespace_specifier"
+// AST-NEXT:               },
+// AST-NEXT:               "start": 127,
+// AST-NEXT:               "end": 146,
+// AST-NEXT:               "scopeUid": 0,
+// AST-NEXT:               "name": "namespace_specifier"
+// AST-NEXT:             }
+// AST-NEXT:           }
+// AST-NEXT:         ],
+// AST-NEXT:         "source": {
+// AST-NEXT:           "type": "StringLiteral",
+// AST-NEXT:           "loc": {
+// AST-NEXT:             "start": {
+// AST-NEXT:               "line": 7,
+// AST-NEXT:               "column": 37
+// AST-NEXT:             },
+// AST-NEXT:             "end": {
+// AST-NEXT:               "line": 7,
+// AST-NEXT:               "column": 42
+// AST-NEXT:             }
+// AST-NEXT:           },
+// AST-NEXT:           "start": 152,
+// AST-NEXT:           "end": 157,
+// AST-NEXT:           "scopeUid": 0,
+// AST-NEXT:           "value": "src",
+// AST-NEXT:           "extra": {
+// AST-NEXT:             "raw": "\"src\"",
+// AST-NEXT:             "rawValue": "src"
+// AST-NEXT:           }
+// AST-NEXT:         }
+// AST-NEXT:       }
+// AST-NEXT:     ],
+// AST-NEXT:     "directives": []
+// AST-NEXT:   },
+// AST-NEXT:   "comments": []
+// AST-NEXT: }

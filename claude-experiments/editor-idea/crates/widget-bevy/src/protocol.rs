@@ -500,6 +500,36 @@ pub enum CanvasItem {
         anchor: CanvasAnchor,
         #[serde(default)]
         z: f32,
+        /// Clockwise rotation in degrees about the item's anchor point,
+        /// measured in canvas (y-down) space. 0 = axis-aligned. Lets a
+        /// widget draw diagonal strokes (e.g. a move arrow) out of plain
+        /// rects without a dedicated line primitive.
+        #[serde(default)]
+        rotation: f32,
+    },
+    /// A run of text positioned absolutely in the canvas. `anchor` is
+    /// applied to the text-bounds box; e.g. `center` places (x, y) at
+    /// the text's center. Use this for on-board labels (rank/file marks,
+    /// piece counts, status overlays) without exiting Canvas mode.
+    Text {
+        id: String,
+        x: f32,
+        y: f32,
+        value: String,
+        /// `#rrggbb` or `#rrggbbaa`. Defaults to white.
+        #[serde(default)]
+        color: Option<String>,
+        /// Font size in logical pixels. Defaults to 14.
+        #[serde(default)]
+        size: Option<f32>,
+        /// Font family name resolved through the host's FontRegistry.
+        /// Unknown → mono.
+        #[serde(default)]
+        family: Option<String>,
+        #[serde(default = "default_canvas_anchor_topleft")]
+        anchor: CanvasAnchor,
+        #[serde(default)]
+        z: f32,
     },
 }
 

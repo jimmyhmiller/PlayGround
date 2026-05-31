@@ -15,10 +15,13 @@ use core::fmt;
 // Tokens
 // =============================================================================
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// NOTE: not `Eq` — `Float(f64)` only supports `PartialEq` (no NaN-eq).
+// TokenKind is never used as a hash key, so this is fine.
+#[derive(Debug, Clone, PartialEq)]
 pub enum TokenKind {
     // ---- Literals ----
     Int(i64),
+    Float(f64),
     Str(String),
     Ident(String),
 
@@ -35,6 +38,7 @@ pub enum TokenKind {
     True,
     False,
     Extern,
+    Defer,
 
     // ---- Punctuation ----
     LParen,
@@ -79,6 +83,7 @@ impl fmt::Display for TokenKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TokenKind::Int(n) => write!(f, "{}", n),
+            TokenKind::Float(x) => write!(f, "{}", x),
             TokenKind::Str(s) => write!(f, "\"{}\"", s),
             TokenKind::Ident(s) => write!(f, "{}", s),
             TokenKind::Def => f.write_str("def"),
@@ -93,6 +98,7 @@ impl fmt::Display for TokenKind {
             TokenKind::True => f.write_str("true"),
             TokenKind::False => f.write_str("false"),
             TokenKind::Extern => f.write_str("extern"),
+            TokenKind::Defer => f.write_str("defer"),
             TokenKind::LParen => f.write_str("("),
             TokenKind::RParen => f.write_str(")"),
             TokenKind::LBrace => f.write_str("{"),
@@ -135,7 +141,7 @@ pub struct Span {
     pub end: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
@@ -445,6 +451,7 @@ impl<'a> Lexer<'a> {
             "true" => TokenKind::True,
             "false" => TokenKind::False,
             "extern" => TokenKind::Extern,
+            "defer" => TokenKind::Defer,
             _ => TokenKind::Ident(text.to_owned()),
         };
         Token {
@@ -461,8 +468,53 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
+
+        // Float? A `.` immediately followed by a digit starts a
+        // fractional part (so `1.foo`/`1.` stay an Int + Dot). An
+        // exponent `[eE][+-]?digits` also makes it a Float.
+        let mut is_float = false;
+        if self.peek() == Some(b'.') && self.peek_at(1).is_some_and(|b| b.is_ascii_digit()) {
+            is_float = true;
+            self.pos += 1; // consume '.'
+            while let Some(b) = self.peek() {
+                if b.is_ascii_digit() {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        if matches!(self.peek(), Some(b'e') | Some(b'E')) {
+            // Lookahead: exponent must be `[eE][+-]?digit`.
+            let mut k = 1;
+            if matches!(self.peek_at(k), Some(b'+') | Some(b'-')) {
+                k += 1;
+            }
+            if self.peek_at(k).is_some_and(|b| b.is_ascii_digit()) {
+                is_float = true;
+                self.pos += k; // consume 'e' and optional sign
+                while let Some(b) = self.peek() {
+                    if b.is_ascii_digit() {
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
         let text = core::str::from_utf8(&self.src[start..self.pos])
-            .expect("digit run is ASCII");
+            .expect("number run is ASCII");
+        if is_float {
+            let x: f64 = text.parse().map_err(|_| LexError::IntTooLarge {
+                text: text.to_owned(),
+                span: self.span_from(start),
+            })?;
+            return Ok(Token {
+                kind: TokenKind::Float(x),
+                span: self.span_from(start),
+            });
+        }
         let n: i64 = text.parse().map_err(|_| LexError::IntTooLarge {
             text: text.to_owned(),
             span: self.span_from(start),
@@ -597,6 +649,32 @@ mod tests {
                 TokenKind::Ident("xs".to_owned()),
                 TokenKind::Ident("let_".to_owned()),
                 TokenKind::Ident("matches".to_owned()),
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn boolean_literals_are_keywords() {
+        // Exact words `true`/`false` become bool keyword tokens.
+        let toks = kinds("true false");
+        assert_eq!(
+            toks,
+            vec![TokenKind::True, TokenKind::False, TokenKind::Eof]
+        );
+    }
+
+    #[test]
+    fn boolean_keywords_vs_identifiers() {
+        // Only the exact words are keywords; lookalikes stay identifiers.
+        let toks = kinds("trueish falsey truex true_");
+        assert_eq!(
+            toks,
+            vec![
+                TokenKind::Ident("trueish".to_owned()),
+                TokenKind::Ident("falsey".to_owned()),
+                TokenKind::Ident("truex".to_owned()),
+                TokenKind::Ident("true_".to_owned()),
                 TokenKind::Eof,
             ]
         );

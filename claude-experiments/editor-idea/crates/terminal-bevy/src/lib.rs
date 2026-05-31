@@ -53,8 +53,12 @@ use serde_json::Value;
 pub mod atlas;
 pub mod canvas;
 pub mod claude_events_pane;
+pub mod command_watch;
 pub mod context_menu;
 pub mod daemon_client;
+pub mod diagnostics;
+pub mod drawer;
+pub mod fps;
 pub mod garden_pane;
 pub mod inference_dispatch;
 pub mod inbox;
@@ -266,13 +270,25 @@ impl Default for AppFocused {
     }
 }
 
-/// Per-terminal text selection. `anchor` and `head` are cell coords
-/// (col, row) in the terminal's grid — kept as `i32` so we can stash
-/// out-of-bounds drag positions without losing direction information.
+/// Per-terminal text selection.
+///
+/// `anchor` and `head` are `(col, absolute_row)`:
+/// - `col` is a grid column, `i32` so out-of-bounds drag positions
+///   don't lose direction.
+/// - `absolute_row` is `i64`, indexing into libghostty's *total*
+///   scrollable area (scrollback + active) — i.e.,
+///   `snapshot.viewport_offset + viewport_row` at the moment of the
+///   click. Anchoring against the absolute row makes a selection
+///   follow its content while the user scrolls the viewport.
+///
+/// Limitation: when libghostty's bounded scrollback wraps (oldest line
+/// pushed out), all absolute rows shift down by one. We don't
+/// compensate; selections older than the wrap point will drift. In
+/// practice selections are short-lived enough that this is fine.
 #[derive(Component, Default, Debug)]
 pub struct TerminalSelection {
-    pub anchor: Option<(i32, i32)>,
-    pub head: Option<(i32, i32)>,
+    pub anchor: Option<(i32, i64)>,
+    pub head: Option<(i32, i64)>,
     /// True while the user is mid-drag selecting. Cleared on mouse-up.
     /// Per-frame drag-update checks this instead of consulting a global
     /// mouse-mode enum.
@@ -296,7 +312,7 @@ impl TerminalSelection {
         }
     }
     /// Return (start, end) normalised so start ≤ end in line-flow order.
-    pub fn normalised(&self) -> Option<((i32, i32), (i32, i32))> {
+    pub fn normalised(&self) -> Option<((i32, i64), (i32, i64))> {
         let (a, h) = (self.anchor?, self.head?);
         let order = (a.1, a.0) <= (h.1, h.0);
         if order {
@@ -329,12 +345,15 @@ impl Plugin for TerminalPlugin {
             // mouse-driven selection inside the content area.
             .add_plugins(PanePlugin)
             .add_plugins(TermMaterialPlugin)
+            .add_plugins(diagnostics::DiagnosticsPlugin)
             .add_plugins(projects::ProjectsPlugin)
             .add_plugins(canvas::CanvasPlugin)
             .add_plugins(context_menu::ContextMenuPlugin)
             .add_plugins(radial::RadialPlugin)
+            .add_plugins(drawer::DrawerPlugin)
             .add_plugins(selection::SelectionPlugin)
             .add_plugins(run_button::RunButtonPlugin)
+            .add_plugins(fps::FpsOverlayPlugin)
             .add_plugins(claude_events_pane::ClaudeEventsPanePlugin)
             .add_plugins(inferences_pane::InferencesPanePlugin)
             .add_plugins(issues_pane::IssuesPanePlugin)
@@ -506,7 +525,8 @@ fn setup_ipc_listener(world: &mut World) {
 fn drain_ipc_open_requests(
     inbox: Option<NonSend<IpcInbox>>,
     mut pending: ResMut<PendingActions>,
-    projects: Res<Projects>,
+    mut projects: ResMut<Projects>,
+    mut drawer: ResMut<drawer::Drawer>,
 ) {
     let Some(inbox) = inbox else { return };
     while let Ok(msg) = inbox.0.try_recv() {
@@ -614,6 +634,22 @@ fn drain_ipc_open_requests(
                 }
                 let _ = _stream.shutdown(std::net::Shutdown::Write);
             }
+            ipc::IpcRequest::SetProjectDefaultCwd { project, cwd } => {
+                let target = match project.as_deref() {
+                    Some("active") | None => OpenProjectTarget::Active,
+                    Some(name) => OpenProjectTarget::ByName(name.to_string()),
+                };
+                let Some(project_id) = projects::resolve_project(&target, &projects) else {
+                    eprintln!("[ipc] set_project_default_cwd: no matching project");
+                    continue;
+                };
+                let cwd_str = cwd.map(|p| p.to_string_lossy().into_owned());
+                let changed = projects.set_default_cwd(project_id, cwd_str.clone());
+                eprintln!(
+                    "[ipc] set_project_default_cwd: project={} cwd={:?} changed={}",
+                    project_id, cwd_str, changed
+                );
+            }
             ipc::IpcRequest::SendInbox {
                 project,
                 sender,
@@ -634,20 +670,97 @@ fn drain_ipc_open_requests(
                     eprintln!("[ipc] send_inbox: append: {}", e);
                 }
             }
+            ipc::IpcRequest::SuggestPane {
+                kind,
+                title,
+                command,
+                cwd,
+                reason,
+                config,
+                project,
+                from_cwd,
+            } => {
+                // Resolve the pane kind. Explicit `kind` wins; otherwise
+                // a bare `command` implies the run-button "command pane".
+                let kind = match kind {
+                    Some(k) => k,
+                    None if command.is_some() => "run-button".to_string(),
+                    None => {
+                        eprintln!(
+                            "[ipc] suggest_pane: need --kind or --command; dropping"
+                        );
+                        continue;
+                    }
+                };
+
+                // Build the config blob. Explicit `config` is stored
+                // verbatim; otherwise synthesize a run-button config from
+                // command/title/cwd (matching `run_button_snapshot`).
+                let config = match config {
+                    Some(c) => c,
+                    None => {
+                        let mut cfg = serde_json::Map::new();
+                        if let Some(cmd) = &command {
+                            cfg.insert("command".into(), Value::String(cmd.clone()));
+                        }
+                        if let Some(t) = &title {
+                            cfg.insert("title".into(), Value::String(t.clone()));
+                        }
+                        if let Some(p) = &cwd {
+                            cfg.insert(
+                                "cwd".into(),
+                                Value::String(p.to_string_lossy().into_owned()),
+                            );
+                        }
+                        Value::Object(cfg)
+                    }
+                };
+
+                // Row title: explicit, else the command, else the kind.
+                let row_title = title
+                    .or_else(|| command.clone())
+                    .unwrap_or_else(|| kind.clone());
+
+                // Scope the suggestion to a project at arrival: an
+                // explicit name wins; otherwise map the caller's cwd to
+                // its owning project; otherwise leave it unscoped
+                // (global — shows in every project's drawer).
+                let project_id = match &project {
+                    Some(name) => {
+                        projects::resolve_project(
+                            &OpenProjectTarget::ByName(name.clone()),
+                            &projects,
+                        )
+                    }
+                    None => from_cwd
+                        .as_deref()
+                        .and_then(|c| projects::project_for_cwd(c, &projects)),
+                };
+
+                drawer.push(kind, row_title, reason, config, project_id);
+            }
         }
     }
 }
 
 /// Cmd+O opens a native file picker and queues the chosen file as a
 /// new editor pane in the active project. The picker is synchronous —
-/// it blocks the main thread until the user picks or cancels, which
+/// it blocks the calling thread until the user picks or cancels, which
 /// matches how every other macOS app handles file dialogs.
+///
+/// The `NonSendMarker` is load-bearing: `rfd::FileDialog::pick_file` on
+/// macOS does `dispatch_sync(main_queue, ...)` internally. If this system
+/// ran on a Compute Task Pool thread (Bevy's default), the worker would
+/// `dispatch_sync` to main while the main thread sat parked in the
+/// executor waiting for the worker to finish — instant deadlock. The
+/// marker pins us to the main thread so the dispatch is a no-op.
 ///
 /// We swallow Cmd+O ourselves so the focused pane (terminal or editor)
 /// never sees a stray "o" insert. Both pane keyboard handlers already
 /// skip Cmd-modified keys, but we still bail explicitly here in case
 /// that contract loosens.
 fn handle_open_file_shortcut(
+    _main_thread: bevy::ecs::system::NonSendMarker,
     mut events: MessageReader<bevy::input::keyboard::KeyboardInput>,
     mods: Res<ButtonInput<KeyCode>>,
     mut pending: ResMut<PendingActions>,
@@ -1215,6 +1328,7 @@ fn handle_keyboard(
 fn handle_file_drop(
     mut drops: MessageReader<bevy::window::FileDragAndDrop>,
     windows: Query<&Window>,
+    viewport: Res<pane_bevy::PaneViewport>,
     store: Res<TerminalStore>,
     panes: Query<(Entity, &PaneRect, &PaneKindMarker, Option<&Visibility>), With<PaneTag>>,
     mut focused: ResMut<FocusedPane>,
@@ -1245,7 +1359,8 @@ fn handle_file_drop(
             })
             .map(|(e, r, _, _)| (e, *r))
             .collect();
-        let Some(target) = pane_bevy::topmost_pane_at(pt, &visible) else {
+        let Some(target) = pane_bevy::topmost_pane_at(viewport.window_to_canvas(pt), &visible)
+        else {
             eprintln!(
                 "[file-drop] no terminal under cursor — ignoring drop of {}",
                 path_buf.display()
@@ -1390,11 +1505,31 @@ pub fn pt_to_cell(pt: Vec2, rect: &PaneRect, cell_width: f32) -> (i32, i32) {
     (col, row)
 }
 
+/// Snapshot's `viewport_offset` for `entity`'s terminal, or 0 if the
+/// store doesn't know about it (e.g. mid-spawn).
+fn viewport_offset_of(store: &TerminalStore, entity: Entity) -> u64 {
+    let Some(data) = store.map.get(&entity) else {
+        return 0;
+    };
+    let g = data.worker.snapshot.lock().expect("snapshot lock");
+    g.viewport_offset
+}
+
+/// Promote a `(col, viewport_row)` cell to a `(col, absolute_row)`
+/// selection cell using a terminal's current `viewport_offset`. Done at
+/// click/drag time so the selection stays pinned to its content while
+/// the user scrolls (see [`TerminalSelection`]).
+fn promote_to_absolute(cell: (i32, i32), viewport_offset: u64) -> (i32, i64) {
+    (cell.0, viewport_offset as i64 + cell.1 as i64)
+}
+
 /// Start a selection drag inside a terminal pane in response to a
 /// pane-bevy content press event.
 fn handle_terminal_content_press(
     mut presses: MessageReader<PaneContentPressed>,
     metrics: Res<MonoMetrics>,
+    viewport: Res<pane_bevy::PaneViewport>,
+    store: Res<TerminalStore>,
     rects: Query<&PaneRect>,
     kinds: Query<&PaneKindMarker>,
     mut selections: Query<&mut TerminalSelection>,
@@ -1411,7 +1546,9 @@ fn handle_terminal_content_press(
             sel.clear();
         }
         let Ok(rect) = rects.get(ev.pane) else { continue };
-        let cell = pt_to_cell(ev.window_pt, rect, metrics.cell_width);
+        let viewport_cell =
+            pt_to_cell(viewport.window_to_canvas(ev.window_pt), rect, metrics.cell_width);
+        let cell = promote_to_absolute(viewport_cell, viewport_offset_of(&store, ev.pane));
         if let Ok(mut sel) = selections.get_mut(ev.pane) {
             sel.anchor = Some(cell);
             sel.head = Some(cell);
@@ -1426,10 +1563,12 @@ fn handle_terminal_selection_drag(
     windows: Query<&Window>,
     buttons: Res<ButtonInput<MouseButton>>,
     metrics: Res<MonoMetrics>,
-    mut selections: Query<(&PaneRect, &PaneKindMarker, &mut TerminalSelection)>,
+    viewport: Res<pane_bevy::PaneViewport>,
+    store: Res<TerminalStore>,
+    mut selections: Query<(Entity, &PaneRect, &PaneKindMarker, &mut TerminalSelection)>,
 ) {
     if buttons.just_released(MouseButton::Left) {
-        for (_, kind, mut sel) in &mut selections {
+        for (_, _, kind, mut sel) in &mut selections {
             if kind.0 == PANE_KIND {
                 sel.dragging = false;
             }
@@ -1441,12 +1580,14 @@ fn handle_terminal_selection_drag(
     }
     let Ok(window) = windows.single() else { return };
     let Some(pt) = window.cursor_position() else { return };
+    let pt_canvas = viewport.window_to_canvas(pt);
 
-    for (rect, kind, mut sel) in &mut selections {
+    for (entity, rect, kind, mut sel) in &mut selections {
         if kind.0 != PANE_KIND || !sel.dragging {
             continue;
         }
-        let cell = pt_to_cell(pt, rect, metrics.cell_width);
+        let viewport_cell = pt_to_cell(pt_canvas, rect, metrics.cell_width);
+        let cell = promote_to_absolute(viewport_cell, viewport_offset_of(&store, entity));
         sel.head = Some(cell);
     }
 }
@@ -1459,6 +1600,7 @@ fn handle_scroll(
     mut accum: Local<f32>,
     windows: Query<&Window>,
     sidebar: Res<Sidebar>,
+    viewport: Res<pane_bevy::PaneViewport>,
     projects: Res<Projects>,
     store: Res<TerminalStore>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -1512,7 +1654,8 @@ fn handle_scroll(
         .filter(|(_, _, vis)| !matches!(vis, Some(Visibility::Hidden)))
         .map(|(e, r, _)| (e, *r))
         .collect();
-    let Some(target) = pane_bevy::topmost_pane_at(pt, &all_rects) else {
+    let Some(target) = pane_bevy::topmost_pane_at(viewport.window_to_canvas(pt), &all_rects)
+    else {
         return;
     };
     // Only consume the wheel if that topmost pane is a terminal in
@@ -2209,15 +2352,18 @@ fn sync_canvas_clear_color(
 fn maintain_winit_mode_for_animation(
     preset: Res<style_bevy::ActiveStylePreset>,
     registry: Res<style_bevy::StylePresetRegistry>,
+    drawer: Res<drawer::Drawer>,
     mut settings: ResMut<bevy::winit::WinitSettings>,
 ) {
-    let want_continuous = preset.0.as_deref().map_or(false, |name| {
+    let preset_animates = preset.0.as_deref().map_or(false, |name| {
         registry
             .presets
             .iter()
             .find(|p| p.name == name)
             .map_or(false, |p| p.chrome_animates)
     });
+    // The drawer's slide is the other source of "needs every frame".
+    let want_continuous = preset_animates || drawer.animating();
 
     let target = if want_continuous {
         bevy::winit::UpdateMode::Continuous

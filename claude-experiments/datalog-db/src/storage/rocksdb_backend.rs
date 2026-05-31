@@ -3,9 +3,8 @@ use super::{
     TxnCallback,
 };
 use rocksdb::{
-    BlockBasedOptions, Cache, DBCompressionType, Direction, IteratorMode, Options,
-    SnapshotWithThreadMode, TransactionDB, TransactionDBOptions, WriteBatchWithTransaction,
-    WriteOptions,
+    checkpoint::Checkpoint, BlockBasedOptions, Cache, DBCompressionType, Direction, IteratorMode,
+    Options, SnapshotWithThreadMode, WriteBatch, WriteOptions, DB,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -106,7 +105,7 @@ impl Default for StorageOptions {
 }
 
 pub struct RocksDbStorage {
-    db: Arc<TransactionDB>,
+    db: Arc<DB>,
     write_opts: WriteOptions,
 }
 
@@ -141,8 +140,7 @@ impl RocksDbStorage {
         }
         db_opts.set_block_based_table_factory(&block_opts);
 
-        let txn_db_opts = TransactionDBOptions::default();
-        let db = TransactionDB::open(&db_opts, &txn_db_opts, path)
+        let db = DB::open(&db_opts, path)
             .map_err(|e| StorageError::Backend(e.to_string()))?;
 
         let mut write_opts = WriteOptions::default();
@@ -179,7 +177,7 @@ impl StorageBackend for RocksDbStorage {
         // Drain pending writes into a RocksDB WriteBatch and apply
         // atomically with the configured WriteOptions (which encode the
         // Durability policy chosen at open time).
-        let mut batch = WriteBatchWithTransaction::<true>::default();
+        let mut batch = WriteBatch::default();
         for (key, value) in overlay.into_writes() {
             match value {
                 Some(v) => batch.put(&key, &v),
@@ -219,7 +217,7 @@ impl StorageBackend for RocksDbStorage {
             }
         }
 
-        let mut batch = WriteBatchWithTransaction::<true>::default();
+        let mut batch = WriteBatch::default();
         for (key, value) in overlay.into_writes() {
             match value {
                 Some(v) => batch.put(&key, &v),
@@ -234,12 +232,20 @@ impl StorageBackend for RocksDbStorage {
 
         Ok(results)
     }
+
+    fn checkpoint(&self, path: &std::path::Path) -> Result<()> {
+        let cp = Checkpoint::new(self.db.as_ref())
+            .map_err(|e| StorageError::Backend(format!("checkpoint init: {}", e)))?;
+        cp.create_checkpoint(path)
+            .map_err(|e| StorageError::Backend(format!("checkpoint create: {}", e)))?;
+        Ok(())
+    }
 }
 
 // -- Snapshot (read-only) --
 
 struct RocksDbSnapshotOps<'a> {
-    snapshot: &'a SnapshotWithThreadMode<'a, TransactionDB>,
+    snapshot: &'a SnapshotWithThreadMode<'a, DB>,
 }
 
 impl ReadOps for RocksDbSnapshotOps<'_> {

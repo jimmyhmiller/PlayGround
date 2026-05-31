@@ -9,10 +9,12 @@ fn workercomposite_can_be_instantiated() {
     let _id = sim.instantiate("WorkerComposite", "w1").expect("instantiate WorkerComposite");
     // Inner nodes should be prefixed.
     let names: Vec<&str> = sim.nodes.values().map(|n| n.name.as_str()).collect();
-    assert!(names.contains(&"w1::L"),  "names = {:?}", names);
+    assert!(names.contains(&"w1::S"),  "names = {:?}", names);
     assert!(names.contains(&"w1::F"),  "names = {:?}", names);
     assert!(names.contains(&"w1::Sv"), "names = {:?}", names);
     assert!(names.contains(&"w1::R"),  "names = {:?}", names);
+    assert!(names.contains(&"w1::P"),  "names = {:?}", names);
+    assert!(names.contains(&"w1::E"),  "names = {:?}", names);
     assert!(names.contains(&"w1"),     "port shim missing: {:?}", names);
     let _ = validate_gadget_dsl;
 }

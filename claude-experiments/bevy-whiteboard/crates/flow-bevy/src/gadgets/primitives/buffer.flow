@@ -1,23 +1,29 @@
-# Bounded FIFO. Incoming data packets queue up to `cap`; overflow goes
-# out the `overflow` port. Pull-driven: a `pull(_)` packet on the
-# control input dispatches the head out the `head` port. Wire to a
-# Delay or Worker downstream to model a service queue with bounded
-# backlog. (`out` and `in` are reserved keywords, hence `head`.)
+# Bounded FIFO with a waiting-consumer stash. Incoming data packets
+# queue in `items` up to `cap`; overflow goes out the `overflow` port.
+# `pull(_)` packets on the control input dispatch the head out the
+# `head` port — or, when no item is ready, the pull is parked in
+# `waiting`. The next data packet then flows straight through to head
+# without sitting in `items`. (`out` and `in` are reserved keywords,
+# hence `head`.)
+#
+# The stash matters when a downstream Worker is polling: its first
+# `pull` typically arrives before the upstream has produced anything,
+# so without parking the pull would just be dropped and the Worker
+# would have no way to know it should pull again. Letting it wait
+# means a single one-shot bootstrap is enough to start the loop.
 #
 # Discriminates control (`pull`) from data via `p.kind`; data of any
-# kind is enqueued — only its `.value` survives in the buffer (the
-# kind is rewritten to `packet` when dispatched). If you need to
-# preserve kinds across the buffer, store the whole packet instead;
-# the simple `Samples`-of-values version is enough for the standard
-# request/response patterns the existing composites rely on.
+# kind is enqueued — only its `.value` survives in `items` (the kind
+# is rewritten to `packet` when dispatched). `return_path` is NOT
+# preserved across the buffer; use it for forward-flow data lanes
+# only, not for `req` traffic where the reply needs to walk back.
 node Buffer {
     slots {
-        cap:   Int = 16
-        items: Samples(64)
+        cap:     Int = 16
+        items:   Samples(64)
+        waiting: Samples(16)
     }
     probes { fill: "{len(items)}" }
-    # Pull rules come first so a `pull` in the same tick as fresh data
-    # drains the buffer before the new item is queued.
     rule on_pull_ready {
         on p when p.kind == "pull" && len(items) > 0
         do {
@@ -25,9 +31,16 @@ node Buffer {
             emit packet(v) to port head
         }
     }
-    rule on_pull_empty {
+    rule on_pull_park {
         on p when p.kind == "pull"
-        do { }
+        do { push waiting <- p.value }
+    }
+    rule on_in_to_waiter {
+        on p when len(waiting) > 0
+        do {
+            pop waiting -> w
+            emit packet(p.value) to port head
+        }
     }
     rule on_in_room {
         on p when len(items) < cap

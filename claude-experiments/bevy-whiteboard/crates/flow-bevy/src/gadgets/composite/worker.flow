@@ -1,76 +1,58 @@
-# Worker reimplemented from primitives only:
+# Worker — expressed entirely from primitives.
 #
-#  request ─req(c) pushing─▶ L (entry-adapter) → Filter ─pass─▶ Service → R (terminal-reply)
-#                              ▲                                              │
-#                              └──resp(nil) popping back ────────────────────┘
-#                              │
-#  response ◀── out response ──┘  (L's reverse rule)
+#   request ─▶ S(tamp) ─▶ F(ilter) ─▶ Sv(Service) ─▶ R(eply) ─▶ P(ump) ─▶ E(gress) ─▶ out output
+#                  ▲                                     │                      └─▶ out pull
+#                  └──────────────────────────────────────┘
+#                  internal R → S edge so a `resp popping to head` from R
+#                  reaches S (which pushed itself on the way in)
 #
-# - L (formerly the Lower primitive, now inline): on `req(c)` push self
-#   and forward as `packet(c)`; on `resp`/`resp_error` pop and emit
-#   through the compound's `response` out port.
-# - Filter rejects wrong-colour traffic out the `reject` port (wired
-#   externally via `WorkerComposite.reject`).
-# - Service holds the packet for `service_ns` with a bounded backlog;
-#   overflow exits via `WorkerComposite.overflow`.
-# - R (formerly the Reply primitive, now inline): terminates the
-#   pipeline by converting the serviced packet into `resp(nil)
-#   popping`, which walks back to L (since L pushed itself), and L's
-#   reverse rule walks it one more hop back to the original caller.
+# Request/response flow:
+#   `req(c) pushing` arrives at S. S.fwd_req pushes itself, forwards.
+#   F filters by colour. Sv services for `service_ns` (and naturally
+#   queues backlog in its own inbox). The serviced `packet(v)` lands
+#   at R with `return_path = [S, …]` — R.reply_only fires, emits
+#   `resp(nil) popping`, R→S internal edge carries it to S, S pops
+#   itself, the engine routes the response out the compound boundary
+#   via the auto-wired reverse edge.
 #
-# What this composite does NOT model (vs. the monolithic Worker):
-# - up==0 crash semantics — wire a Switch upstream of L with its
-#   signal driven externally, and route Switch.divert to a Reply on
-#   the resp_error variant.
-# - the secondary `packet`/`done` packet-protocol interface — packet
-#   sources can skip L and wire straight into the Filter.
+# Forward pass-through flow (queue → worker → sink):
+#   A plain `packet(c)` (return_path empty) arrives at S. S.fwd_packet
+#   forwards untouched. F → Sv → R. R.forward fires (return_path
+#   empty), `emit p to default` → P. P forwards through E to
+#   `out output` AND emits `pull(nil) to out pull` so the upstream
+#   Queue dispatches the next item.
+#
+# `served` lives on R and counts successful replies — tests can read
+# `worker.served` via `read_slot_resolved`.
 compound WorkerComposite(
-    service_ns:  Int = 50000000,
-    color:       Int = 0,
-    backlog_cap: Int = 5,
+    service_ns: Int = 50000000,
+    color:      Int = 0,
 ) {
-    in  { request:  L }
+    in  { request:  S }
     out {
-        response: L
+        response: S
+        output:   E
+        pull:     P
         reject:   F
-        overflow: Sv
     }
 
-    # Inline entry adapter (service-side). Was the Lower primitive.
-    node L {
-        rule rev {
-            on p when p.kind == "resp" || p.kind == "resp_error"
-            do { emit p popping to out response }
-        }
-        rule fwd {
-            on p when p.kind == "req"
-            do { emit packet(p.value) pushing self to default }
-        }
-    }
-    node F  : Filter { match: color }
-    node Sv : Service { service_ns: service_ns, backlog_cap: backlog_cap }
-    # Inline terminal reply. Was the Reply primitive.
-    node R {
-        rule rev_pass {
-            on p when p.kind == "resp" || p.kind == "resp_error"
-            do { emit p popping to (head(return_path)) }
-        }
-        rule on_packet {
-            on p
-            do { emit resp(nil) popping to (head(return_path)) }
-        }
-    }
+    node S  : Stamp   { }
+    node F  : Filter  { match: color }
+    node Sv : Service { service_ns: service_ns }
+    node R  : Reply   { }
+    node P  : Pump    { }
+    node E  : Egress  { }
 
     edges {
-        L      -> F  : 1
+        S      -> F  : 1
         F.pass -> Sv : 1
         Sv     -> R  : 1
-        # Reverse edge so R's `resp popping` reaches L; the engine
-        # resolves `popping to (head(return_path))` to L (which pushed
-        # itself onto RP on the forward leg), and this direct edge is
-        # what carries the packet back. Without it, the resp would
-        # silently drop — neither a forward outbound from R to L nor a
-        # reverse-route fallback applies inside the compound.
-        R      -> L  : 1
+        # R.forward emits `to default` — the FIRST outbound carries it.
+        # Declare R→P before R→S so the data path wins.
+        R      -> P  : 1
+        # R.reply_only emits `popping to (head(return_path))` where head
+        # is S. The engine finds this direct outbound and uses it.
+        R      -> S  : 1
+        P      -> E  : 1
     }
 }

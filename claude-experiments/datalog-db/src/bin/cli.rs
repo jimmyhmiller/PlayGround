@@ -82,6 +82,15 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Peek the next identifier without consuming input. Returns "" if the
+    /// next non-whitespace token is not an identifier.
+    fn peek_ident(&mut self) -> String {
+        let saved = self.pos;
+        let ident = self.read_ident().unwrap_or_default();
+        self.pos = saved;
+        ident
+    }
+
     fn read_string_literal(&mut self) -> Result<String, String> {
         self.skip_ws();
         self.expect('"')?;
@@ -217,7 +226,16 @@ impl<'a> Parser<'a> {
             Some('?') => {
                 self.advance();
                 let name = self.read_ident()?;
-                Ok(serde_json::Value::String(format!("?{}", name)))
+                let var = format!("?{}", name);
+                // A variable may be followed by a comparison operator to both
+                // bind and filter in one clause field, e.g. `age: ?age > 25`.
+                self.skip_ws();
+                if let Some(op_key) = self.try_read_cmp_op() {
+                    let val = self.read_pattern_value()?;
+                    Ok(serde_json::json!({ "var": var, op_key: val }))
+                } else {
+                    Ok(serde_json::Value::String(var))
+                }
             }
             Some('"') => {
                 let s = self.read_string_literal()?;
@@ -274,6 +292,39 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// If the next non-whitespace token is a comparison operator, consume it
+    /// and return its JSON predicate key ("gt", "gte", "lt", "lte", "ne").
+    /// Leaves the parser untouched and returns None if no operator is present.
+    fn try_read_cmp_op(&mut self) -> Option<&'static str> {
+        self.skip_ws();
+        match self.peek() {
+            Some('>') => {
+                self.advance();
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Some("gte")
+                } else {
+                    Some("gt")
+                }
+            }
+            Some('<') => {
+                self.advance();
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Some("lte")
+                } else {
+                    Some("lt")
+                }
+            }
+            Some('!') if self.input[self.pos..].starts_with("!=") => {
+                self.advance();
+                self.advance();
+                Some("ne")
+            }
+            _ => None,
+        }
+    }
+
     /// Read a simple value for a predicate operand.
     fn read_pattern_value(&mut self) -> Result<serde_json::Value, String> {
         self.skip_ws();
@@ -310,7 +361,17 @@ impl<'a> Parser<'a> {
 
 // --- Command parsing ---
 
-fn parse_command(input: &str) -> Result<serde_json::Value, String> {
+/// A parsed command. Most commands resolve to a server payload (`Send`),
+/// but some (`List`) require client-side expansion against the schema,
+/// and a few (`Agent`, `Help`) need no server at all.
+enum Cmd {
+    Send(serde_json::Value),
+    List { type_name: String, limit: Option<usize> },
+    Agent,
+    Help,
+}
+
+fn parse_command(input: &str) -> Result<Cmd, String> {
     let input = input.trim();
     if input.is_empty() {
         return Err("empty command".into());
@@ -320,26 +381,58 @@ fn parse_command(input: &str) -> Result<serde_json::Value, String> {
     let keyword = p.read_ident()?;
 
     match keyword.as_str() {
-        "status" => Ok(serde_json::json!({"type": "status"})),
-        "schema" => Ok(serde_json::json!({"type": "schema"})),
+        "status" => Ok(Cmd::Send(serde_json::json!({"type": "status"}))),
+        "schema" => Ok(Cmd::Send(serde_json::json!({"type": "schema"}))),
         "define" => {
-            if p.try_keyword("enum") {
-                parse_define_enum(&mut p)
+            let payload = if p.try_keyword("enum") {
+                parse_define_enum(&mut p)?
             } else {
-                parse_define(&mut p)
-            }
+                parse_define(&mut p)?
+            };
+            Ok(Cmd::Send(payload))
         }
-        "assert" => parse_assert(&mut p),
-        "retract" => parse_retract(&mut p),
-        "find" => parse_find(&mut p),
+        "assert" => Ok(Cmd::Send(parse_assert(&mut p)?)),
+        "retract" => Ok(Cmd::Send(parse_retract(&mut p)?)),
+        "find" => Ok(Cmd::Send(parse_find(&mut p)?)),
+        "list" => parse_list(&mut p),
+        "backup" => parse_backup(&mut p),
+        "agent" => Ok(Cmd::Agent),
+        "help" => Ok(Cmd::Help),
         "json" => {
             let rest = p.rest().trim();
             let val: serde_json::Value = serde_json::from_str(rest)
                 .map_err(|e| format!("invalid JSON: {}", e))?;
-            Ok(val)
+            Ok(Cmd::Send(val))
         }
         other => Err(format!("unknown command: '{}'. Type 'help' for usage.", other)),
     }
+}
+
+/// backup now
+/// backup list
+fn parse_backup(p: &mut Parser) -> Result<Cmd, String> {
+    let sub = p.read_ident()?;
+    match sub.as_str() {
+        "now" => Ok(Cmd::Send(serde_json::json!({"type": "backup_now"}))),
+        "list" => Ok(Cmd::Send(serde_json::json!({"type": "backup_list"}))),
+        other => Err(format!(
+            "unknown backup subcommand: '{}'. Use 'backup now' or 'backup list'.",
+            other
+        )),
+    }
+}
+
+/// list User
+/// list User limit 50
+fn parse_list(p: &mut Parser) -> Result<Cmd, String> {
+    let type_name = p.read_ident()?;
+    let limit = if p.try_keyword("limit") {
+        let n = p.read_number()?;
+        Some(n.as_u64().ok_or("limit must be a non-negative integer")? as usize)
+    } else {
+        None
+    };
+    Ok(Cmd::List { type_name, limit })
 }
 
 /// define User { name: string required, age: i64, email: string unique indexed }
@@ -553,7 +646,8 @@ fn parse_retract(p: &mut Parser) -> Result<serde_json::Value, String> {
 /// find ?name, ?age where ?u: User { name: ?name, age: > 25 }
 /// find ?name where ?u: User { name: ?name } as_of 100
 fn parse_find(p: &mut Parser) -> Result<serde_json::Value, String> {
-    // Read find variables
+    // Read find elements: plain variables (?x) or aggregates (count(?x),
+    // sum(?p), count(*)). Stops at the `where` keyword.
     let mut find_vars = Vec::new();
     loop {
         p.skip_ws();
@@ -561,79 +655,72 @@ fn parse_find(p: &mut Parser) -> Result<serde_json::Value, String> {
             p.advance();
             let name = p.read_ident()?;
             find_vars.push(serde_json::Value::String(format!("?{}", name)));
-            p.skip_ws();
-            if p.peek() == Some(',') {
-                p.advance();
-            }
         } else {
-            // Should be "where"
             let saved = p.pos;
             let ident = p.read_ident()?;
             if ident == "where" {
                 break;
+            }
+            // Aggregate form: ident '(' (?var | '*') ')'
+            p.skip_ws();
+            if p.peek() == Some('(') {
+                p.advance();
+                p.skip_ws();
+                let arg = match p.peek() {
+                    Some('*') => {
+                        p.advance();
+                        "*".to_string()
+                    }
+                    Some('?') => {
+                        p.advance();
+                        format!("?{}", p.read_ident()?)
+                    }
+                    other => {
+                        return Err(format!(
+                            "expected variable or '*' in {}(...), got {:?}",
+                            ident, other
+                        ))
+                    }
+                };
+                p.skip_ws();
+                if p.peek() != Some(')') {
+                    return Err(format!("expected ')' to close {}(...)", ident));
+                }
+                p.advance();
+                find_vars.push(serde_json::Value::String(format!("{}({})", ident, arg)));
             } else {
                 p.pos = saved;
-                return Err(format!("expected '?' or 'where', got '{}'", ident));
+                return Err(format!("expected '?', aggregate, or 'where', got '{}'", ident));
             }
+        }
+        p.skip_ws();
+        if p.peek() == Some(',') {
+            p.advance();
         }
     }
 
     if find_vars.is_empty() {
-        return Err("find requires at least one variable".into());
+        return Err("find requires at least one variable or aggregate".into());
     }
 
-    // Parse where clauses
+    // Parse where clauses: a sequence of clause items (implicit AND). Each
+    // item is a pattern (?v: Type { ... }), an `or { } { }`, or a `not { }`.
     let mut where_clauses = Vec::new();
     loop {
         p.skip_ws();
-        if p.peek() != Some('?') {
-            return Err(format!("expected '?' to start where clause, got {:?}", p.peek()));
+        let starts_clause =
+            p.peek() == Some('?') || matches!(p.peek_ident().as_str(), "or" | "not" | "and");
+        if !starts_clause {
+            break;
         }
-        p.advance();
-        let bind_name = p.read_ident()?;
-        let bind = format!("?{}", bind_name);
-        p.expect(':')?;
-        let entity_type = p.read_ident()?;
-
-        p.expect('{')?;
-        let mut clause = serde_json::json!({
-            "bind": bind,
-            "type": entity_type,
-        });
-
-        p.skip_ws();
-        if p.peek() != Some('}') {
-            loop {
-                let field_name = p.read_ident()?;
-                p.expect(':')?;
-                let pattern = p.read_pattern()?;
-                clause[&field_name] = pattern;
-
-                p.skip_ws();
-                match p.peek() {
-                    Some(',') => { p.advance(); }
-                    Some('}') => break,
-                    other => return Err(format!("expected ',' or '}}' in where clause, got {:?}", other)),
-                }
-            }
-        }
-        p.expect('}')?;
-        where_clauses.push(clause);
-
-        // Check for more clauses (comma followed by ?) or end
+        where_clauses.push(parse_clause(p)?);
         p.skip_ws();
         if p.peek() == Some(',') {
-            // Peek ahead to see if next non-ws char is '?' (another clause)
-            let saved = p.pos;
-            p.advance(); // skip comma
-            p.skip_ws();
-            if p.peek() == Some('?') {
-                continue;
-            }
-            // Not another clause, restore
-            p.pos = saved;
+            p.advance();
         }
-        break;
+    }
+    if where_clauses.is_empty() {
+        return Err("expected at least one where clause".into());
     }
 
     let mut query = serde_json::json!({
@@ -659,7 +746,145 @@ fn parse_find(p: &mut Parser) -> Result<serde_json::Value, String> {
         query["as_of"] = tx_id;
     }
 
+    // Optional: order by ?v [asc|desc], ... | limit N | offset N
+    if p.try_keyword("order") {
+        if !p.try_keyword("by") {
+            return Err("expected 'by' after 'order'".into());
+        }
+        let mut keys = Vec::new();
+        loop {
+            p.skip_ws();
+            if p.peek() != Some('?') {
+                return Err("expected '?var' in 'order by'".into());
+            }
+            p.advance();
+            let name = p.read_ident()?;
+            let var = format!("?{}", name);
+            // Optional direction; default ascending.
+            let desc = if p.try_keyword("desc") {
+                true
+            } else {
+                p.try_keyword("asc");
+                false
+            };
+            keys.push(serde_json::json!({ "var": var, "desc": desc }));
+            p.skip_ws();
+            if p.peek() == Some(',') {
+                p.advance();
+                continue;
+            }
+            break;
+        }
+        query["order_by"] = serde_json::Value::Array(keys);
+    }
+    if p.try_keyword("limit") {
+        query["limit"] = p.read_number()?;
+    }
+    if p.try_keyword("offset") {
+        query["offset"] = p.read_number()?;
+    }
+
     Ok(query)
+}
+
+/// Parse one clause item: a pattern (`?v: Type { ... }`), an `or { } { } ...`,
+/// a `not { }`, or an `and { }`.
+fn parse_clause(p: &mut Parser) -> Result<serde_json::Value, String> {
+    p.skip_ws();
+    if p.peek() == Some('?') {
+        return parse_pattern_clause(p);
+    }
+    let ident = p.read_ident()?;
+    match ident.as_str() {
+        "or" => {
+            let mut branches = Vec::new();
+            loop {
+                p.skip_ws();
+                if p.peek() != Some('{') {
+                    break;
+                }
+                branches.push(parse_clause_group(p)?);
+            }
+            if branches.len() < 2 {
+                return Err("'or' requires at least two { ... } groups".into());
+            }
+            Ok(serde_json::json!({ "or": branches }))
+        }
+        "and" => Ok(serde_json::json!({ "and": parse_clause_group_items(p)? })),
+        "not" => Ok(serde_json::json!({ "not": parse_clause_group(p)? })),
+        other => Err(format!("expected '?', 'or', or 'not', got '{}'", other)),
+    }
+}
+
+/// A `{ ... }` group of one or more clause items (implicit AND). Returns a
+/// single clause if there's exactly one item, else a JSON array (an `And`).
+fn parse_clause_group(p: &mut Parser) -> Result<serde_json::Value, String> {
+    let mut items = parse_clause_group_items(p)?;
+    if items.len() == 1 {
+        Ok(items.remove(0))
+    } else {
+        Ok(serde_json::Value::Array(items))
+    }
+}
+
+/// Parse the items inside a `{ ... }` clause group.
+fn parse_clause_group_items(p: &mut Parser) -> Result<Vec<serde_json::Value>, String> {
+    p.expect('{')?;
+    let mut items = Vec::new();
+    loop {
+        p.skip_ws();
+        if p.peek() == Some('}') {
+            break;
+        }
+        items.push(parse_clause(p)?);
+        p.skip_ws();
+        if p.peek() == Some(',') {
+            p.advance();
+        }
+    }
+    p.expect('}')?;
+    if items.is_empty() {
+        return Err("clause group { } must contain at least one clause".into());
+    }
+    Ok(items)
+}
+
+/// Parse a single pattern clause: `?v: Type { field: pattern, ... }`.
+fn parse_pattern_clause(p: &mut Parser) -> Result<serde_json::Value, String> {
+    p.expect('?')?;
+    let bind_name = p.read_ident()?;
+    let bind = format!("?{}", bind_name);
+    p.expect(':')?;
+    let entity_type = p.read_ident()?;
+
+    p.expect('{')?;
+    let mut clause = serde_json::json!({
+        "bind": bind,
+        "type": entity_type,
+    });
+
+    p.skip_ws();
+    if p.peek() != Some('}') {
+        loop {
+            let field_name = p.read_ident()?;
+            p.expect(':')?;
+            let pattern = p.read_pattern()?;
+            clause[&field_name] = pattern;
+
+            p.skip_ws();
+            match p.peek() {
+                Some(',') => {
+                    p.advance();
+                }
+                Some('}') => break,
+                other => {
+                    return Err(format!("expected ',' or '}}' in where clause, got {:?}", other))
+                }
+            }
+        }
+    }
+    p.expect('}')?;
+    Ok(clause)
 }
 
 /// Parse a subset of ISO 8601: "YYYY-MM-DDTHH:MM:SSZ"
@@ -921,22 +1146,35 @@ fn print_help() {
     print!(r#"datalog-cli - command-line client for datalog-db
 
 USAGE:
-  datalog-cli [--host HOST:PORT]              Interactive REPL
-  datalog-cli [--host HOST:PORT] COMMAND      One-shot command
+  datalog-cli [--host HOST:PORT] [--json]              Interactive REPL
+  datalog-cli [--host HOST:PORT] [--json] COMMAND      One-shot command
+  datalog-cli agent                                    Print LLM/agent usage guide
+
+GLOBAL FLAGS:
+  --host HOST:PORT    Server address (default 127.0.0.1:5557)
+  --json              Print server responses as raw JSON (good for scripts/LLMs)
 
 ONE-SHOT COMMANDS:
   status                                      Server status
   schema                                      List current schema
   query  'find ?x where ...'                  Run a query
+  list   Type [limit N]                       List all entities of a type
   define 'Type {{ field: type, ... }}'          Define entity type
   assert 'Type {{ field: value, ... }}'         Assert entity
   retract 'Type #ID [field, ...]'             Retract fields
-  retract 'Type #ID'                         Retract entire entity
-  json   '{{...}}'                              Send raw JSON
+  retract 'Type #ID'                          Retract entire entity
+  backup now                                  Take an immediate checkpoint
+  backup list                                 List existing checkpoints
+  json   '{{...}}'                              Send raw JSON request
+  agent                                       Print LLM/agent usage guide
 
 DSL COMMANDS (REPL):
   status
   schema
+  list User
+  list User limit 50
+  backup now
+  backup list
   define User {{ name: string required, age: i64 }}
   define enum Status {{ Active, Suspended {{ reason: string }} }}
   assert User {{ name: "Alice", age: 30 }}
@@ -944,10 +1182,18 @@ DSL COMMANDS (REPL):
   retract User #42 [email, age]
   retract User #42
   find ?name, ?age where ?u: User {{ name: ?name, age: > 25 }}
+  find ?name, ?age where ?u: User {{ name: ?name, age: ?age > 25 }}
+  find ?name, ?age where ?u: User {{ name: ?name, age: ?age }} order by ?age desc
+  find ?name where ?u: User {{ name: ?name }} order by ?name limit 10 offset 20
+  find count(*), avg(?age) where ?u: User {{ age: ?age }}
+  find ?dept, count(?e), max(?sal) where ?e: Employee {{ dept: ?dept, salary: ?sal }}
+  find ?name where ?e: Employee {{ name: ?name }} or {{ ?e: Employee {{ dept: "eng" }} }} {{ ?e: Employee {{ salary: < 85 }} }}
+  find ?name where ?e: Employee {{ name: ?name }} not {{ ?p: Project {{ lead: ?e }} }}
   find ?n where ?u: User {{ name: ?n }} as_of 100
   find ?n where ?u: User {{ name: ?n }} as_of_time 1740192000000
   find ?n where ?u: User {{ name: ?n }} as_of_time "2025-02-22T02:00:00Z"
   json {{"type": "status"}}
+  agent
   help
   quit
 
@@ -956,22 +1202,270 @@ FIELD TYPES:
 
 FIELD MODIFIERS:
   required, unique, indexed
+  (note: 'unique' also requires 'required')
 
 PATTERN OPERATORS (in find):
   ?var                Variable binding
-  > N, < N, >= N      Comparisons
+  > N, < N, >= N      Comparisons (filter only)
   <= N, != N
+  ?var > N            Bind AND filter the same field (e.g. age: ?age > 25)
   "string"            Exact match
   #N                  Entity reference
+
+RESULT SHAPING (after the where clauses):
+  order by ?v [asc|desc], ...   Sort rows (vars must be in find)
+  limit N                       Cap row count (after ordering)
+  offset N                      Skip N rows (after ordering)
+
+AGGREGATES (in find):
+  count(*), count(?v), sum(?v), avg(?v), min(?v), max(?v)
+  Plain find variables become the GROUP BY key; with none, the whole
+  result is one group.
+
+DISJUNCTION / NEGATION (in where, nestable):
+  or  {{ <clauses> }} {{ <clauses> }} ...   Union of bindings from each group
+  not {{ <clauses> }}                       Keep rows the group does NOT match
+  and {{ <clauses> }}                       Explicit conjunction group
+  (a `not` must sit alongside a positive clause that binds its variables)
+"#);
+}
+
+fn print_agent_guide() {
+    print!(r#"datalog-cli — guide for LLMs and scripted agents
+==================================================
+
+This is a Datalog-style database with EAVT/AEVT/AVET/VAET indexes, history,
+and a typed schema. The CLI talks to a long-running server over TCP.
+
+QUICK START
+-----------
+1. Start the server in a separate process:
+     datalog-db --data-dir ./datalog-data --bind 127.0.0.1:5557
+2. Talk to it from the CLI:
+     datalog-cli --json status
+3. Use `--json` for every call you intend to parse. Without it, results are
+   printed as ASCII tables meant for humans.
+
+WORKFLOW
+--------
+The flow is always: define schema -> assert entities -> query / list.
+
+  # 1. Define an entity type (a "collection").
+  datalog-cli --json define 'User {{ name: string required, email: string unique required indexed, age: i64 }}'
+
+  # 2. Insert entities. The server returns the assigned entity id.
+  datalog-cli --json assert 'User {{ name: "Alice", age: 30, email: "a@b.com" }}'
+  # -> {{"status":"ok","data":{{"tx_id":2,"entity_ids":[3],...}}}}
+
+  # 3. Update by referencing the entity id with `#`.
+  datalog-cli --json assert 'User #3 {{ age: 31 }}'
+
+  # 4. List a type. Equivalent to `find` over every field.
+  datalog-cli --json list User
+  datalog-cli --json list User limit 20
+
+  # 5. Query with patterns and predicates. A bare predicate (age: > 25)
+  #    filters without binding; `age: ?age > 25` both binds ?age and filters.
+  datalog-cli --json query 'find ?u, ?name where ?u: User {{ name: ?name, age: > 25 }}'
+  datalog-cli --json query 'find ?name, ?age where ?u: User {{ name: ?name, age: ?age > 25 }}'
+
+  # Sort and paginate with order by / limit / offset (order vars must be in find).
+  datalog-cli --json query 'find ?name, ?age where ?u: User {{ name: ?name, age: ?age }} order by ?age desc limit 10'
+
+  # Aggregate. Plain find vars are the GROUP BY key; aggregates: count/sum/avg/min/max.
+  datalog-cli --json query 'find ?dept, count(?e), avg(?sal) where ?e: Employee {{ dept: ?dept, salary: ?sal }}'
+
+  # Disjunction / negation (JSON: {{"or": [clause, ...]}} and {{"not": clause}}; nestable).
+  datalog-cli --json query 'find ?name where ?e: Employee {{ name: ?name }} not {{ ?p: Project {{ lead: ?e }} }}'
+
+  # 6. Time travel: as_of <tx_id> or as_of_time <unix_ms | ISO8601>.
+  datalog-cli --json query 'find ?n where ?u: User {{ name: ?n }} as_of 2'
+
+  # 7. Retract a field or whole entity.
+  datalog-cli --json retract 'User #3 [age]'
+  datalog-cli --json retract 'User #3'
+
+RESPONSE SHAPE
+--------------
+Every `--json` response is one of:
+  {{"status":"ok","data": ...}}
+  {{"status":"error","error":"..."}}
+
+Query results have shape:
+  {{"status":"ok","data":{{"columns":["?u","?name"],"rows":[[{{"ref":2}},"Alice"], ...]}}}}
+
+GOTCHAS (these will save you trial and error)
+---------------------------------------------
+* `unique` fields must also be marked `required`.
+* `Unknown entity type: X` means a prior `define` failed silently for you;
+  call `schema` to verify what is actually defined.
+* Entity refs are `#N` in the DSL and `{{"ref": N}}` in JSON.
+* In assert, every field whose declared type is `required` must be present.
+* In one-shot mode, quote the whole command argument with single quotes so
+  the shell does not eat the braces or `?`.
+* The REPL accepts the same commands without the outer quoting.
+
+BACKUPS
+-------
+If the server was started with `--backup-dir`, automatic checkpoint
+backups run on a schedule (default hourly, keeping the last 24). You
+can also trigger and inspect them on demand:
+
+  datalog-cli --json backup now       # take an immediate checkpoint
+  datalog-cli --json backup list      # list existing checkpoints
+
+A checkpoint is a hard-link snapshot of the live DB at a point in time.
+Restore is "stop the server, point `--data-dir` at one of the listed
+backup paths, restart". Take a `backup now` before any destructive
+batch you're not 100% sure of — restore costs nothing if you don't
+need it, and seconds if you do.
+
+If `backup now` returns `backups not configured`, the server was
+started without `--backup-dir`; ask the operator to enable it.
+
+COMMAND REFERENCE
+-----------------
+  status                              Probe server is up.
+  schema                              Dump all defined types + enums.
+  list <Type> [limit N]               All entities of a type (with all fields).
+  define '<Type> {{ ... }}'             Add a type.
+  define enum '<Name> {{ ... }}'        Add an enum type.
+  assert '<Type> {{ ... }}'             New entity.
+  assert '<Type> #ID {{ ... }}'         Update existing entity.
+  retract '<Type> #ID [f1, f2]'       Retract specific fields.
+  retract '<Type> #ID'                Retract entire entity (soft delete).
+  query '<find-expr>'                 Run a find query.
+  backup now                          Take an immediate checkpoint.
+  backup list                         List existing checkpoints.
+  json '<raw-json>'                   Send a raw request payload.
+
+If you need any of the above details inline, run `datalog-cli --help`.
 "#);
 }
 
 // --- Main ---
 
+fn print_response(resp: &serde_json::Value, json_mode: bool) {
+    if json_mode {
+        match serde_json::to_string(resp) {
+            Ok(s) => println!("{}", s),
+            Err(_) => println!("{}", resp),
+        }
+    } else {
+        print!("{}", format_response(resp));
+    }
+}
+
+/// Execute a `Cmd::List <Type>` by fetching the schema, building a find
+/// query that pulls every field, and sending it. `limit`, if given, is
+/// applied client-side by truncating the result rows.
+fn execute_list(
+    client: &mut Client,
+    type_name: &str,
+    limit: Option<usize>,
+) -> Result<serde_json::Value, String> {
+    let schema_resp = client
+        .send(serde_json::json!({"type": "schema"}))
+        .map_err(|e| format!("schema lookup failed: {}", e))?;
+
+    if schema_resp.get("status").and_then(|s| s.as_str()) != Some("ok") {
+        return Ok(schema_resp);
+    }
+
+    let types = schema_resp
+        .pointer("/data/types")
+        .and_then(|t| t.as_array())
+        .ok_or_else(|| "schema response missing /data/types".to_string())?;
+
+    let entity_type = types
+        .iter()
+        .find(|t| t.get("name").and_then(|n| n.as_str()) == Some(type_name))
+        .ok_or_else(|| format!("unknown entity type: '{}'. Try `schema` to see what is defined.", type_name))?;
+
+    let fields: Vec<String> = entity_type
+        .get("fields")
+        .and_then(|f| f.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|f| f.get("name").and_then(|n| n.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut find_vars: Vec<serde_json::Value> = Vec::with_capacity(1 + fields.len());
+    find_vars.push(serde_json::Value::String("?e".to_string()));
+    for f in &fields {
+        find_vars.push(serde_json::Value::String(format!("?{}", f)));
+    }
+
+    let mut where_clause = serde_json::Map::new();
+    where_clause.insert("bind".into(), serde_json::Value::String("?e".to_string()));
+    where_clause.insert("type".into(), serde_json::Value::String(type_name.to_string()));
+    for f in &fields {
+        where_clause.insert(f.clone(), serde_json::Value::String(format!("?{}", f)));
+    }
+
+    let payload = serde_json::json!({
+        "type": "query",
+        "find": find_vars,
+        "where": [serde_json::Value::Object(where_clause)],
+    });
+
+    let mut resp = client.send(payload).map_err(|e| format!("query failed: {}", e))?;
+
+    if let Some(limit_n) = limit {
+        if let Some(rows) = resp.pointer_mut("/data/rows").and_then(|r| r.as_array_mut()) {
+            if rows.len() > limit_n {
+                rows.truncate(limit_n);
+            }
+        }
+    }
+
+    Ok(resp)
+}
+
+/// Run a single parsed command against the server. Returns Err only on
+/// fatal connection problems; protocol-level errors come back inside `resp`.
+fn execute_cmd(client: &mut Client, cmd: Cmd, json_mode: bool) -> Result<(), String> {
+    match cmd {
+        Cmd::Send(payload) => match client.send(payload) {
+            Ok(resp) => {
+                print_response(&resp, json_mode);
+                Ok(())
+            }
+            Err(e) => Err(format!("connection error: {}", e)),
+        },
+        Cmd::List { type_name, limit } => match execute_list(client, &type_name, limit) {
+            Ok(resp) => {
+                print_response(&resp, json_mode);
+                Ok(())
+            }
+            Err(e) => {
+                if json_mode {
+                    let err = serde_json::json!({"status": "error", "error": e});
+                    println!("{}", err);
+                } else {
+                    println!("ERROR: {}", e);
+                }
+                Ok(())
+            }
+        },
+        Cmd::Agent => {
+            print_agent_guide();
+            Ok(())
+        }
+        Cmd::Help => {
+            print_help();
+            Ok(())
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let mut host = "127.0.0.1:5557".to_string();
+    let mut json_mode = false;
     let mut remaining = Vec::new();
 
     let mut i = 1;
@@ -986,6 +1480,10 @@ fn main() {
                     std::process::exit(1);
                 }
             }
+            "--json" => {
+                json_mode = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 print_help();
                 return;
@@ -995,6 +1493,13 @@ fn main() {
                 i += 1;
             }
         }
+    }
+
+    // `agent` is a no-server command; handle it before opening a connection
+    // so an LLM can read the guide on a fresh machine.
+    if remaining.first().map(|s| s.as_str()) == Some("agent") {
+        print_agent_guide();
+        return;
     }
 
     let mut client = match Client::connect(&host) {
@@ -1008,12 +1513,38 @@ fn main() {
     if remaining.is_empty() {
         // REPL mode
         eprintln!("Connected to {}", host);
-        eprintln!("Type 'help' for commands, 'quit' to exit.");
-        repl(&mut client);
+        eprintln!("Type 'help' for commands, 'agent' for the LLM guide, 'quit' to exit.");
+        repl(&mut client, json_mode);
     } else {
         // One-shot mode
         let command = match remaining[0].as_str() {
             "status" | "schema" => remaining[0].clone(),
+            "list" => {
+                if remaining.len() < 2 {
+                    eprintln!("'list' requires a type name");
+                    std::process::exit(1);
+                }
+                // Re-join the rest so `list User limit 50` parses the same
+                // way the REPL would parse it.
+                let mut s = String::from("list");
+                for piece in &remaining[1..] {
+                    s.push(' ');
+                    s.push_str(piece);
+                }
+                s
+            }
+            "backup" => {
+                if remaining.len() < 2 {
+                    eprintln!("'backup' requires a subcommand: 'now' or 'list'");
+                    std::process::exit(1);
+                }
+                let mut s = String::from("backup");
+                for piece in &remaining[1..] {
+                    s.push(' ');
+                    s.push_str(piece);
+                }
+                s
+            }
             "query" => {
                 if remaining.len() < 2 {
                     eprintln!("'query' requires an argument");
@@ -1035,13 +1566,10 @@ fn main() {
         };
 
         match parse_command(&command) {
-            Ok(payload) => {
-                match client.send(payload) {
-                    Ok(response) => print!("{}", format_response(&response)),
-                    Err(e) => {
-                        eprintln!("Error: {}", e);
-                        std::process::exit(1);
-                    }
+            Ok(cmd) => {
+                if let Err(e) = execute_cmd(&mut client, cmd, json_mode) {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
                 }
             }
             Err(e) => {
@@ -1052,7 +1580,7 @@ fn main() {
     }
 }
 
-fn repl(client: &mut Client) {
+fn repl(client: &mut Client, json_mode: bool) {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
 
@@ -1073,20 +1601,15 @@ fn repl(client: &mut Client) {
         let line = line.trim();
         if line.is_empty() { continue; }
 
-        match line {
-            "quit" | "exit" => break,
-            "help" => { print_help(); continue; }
-            _ => {}
+        if line == "quit" || line == "exit" {
+            break;
         }
 
         match parse_command(line) {
-            Ok(payload) => {
-                match client.send(payload) {
-                    Ok(response) => print!("{}", format_response(&response)),
-                    Err(e) => {
-                        eprintln!("Connection error: {}", e);
-                        break;
-                    }
+            Ok(cmd) => {
+                if let Err(e) = execute_cmd(client, cmd, json_mode) {
+                    eprintln!("{}", e);
+                    break;
                 }
             }
             Err(e) => eprintln!("Parse error: {}", e),

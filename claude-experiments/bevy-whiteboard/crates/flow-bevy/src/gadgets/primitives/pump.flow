@@ -1,0 +1,20 @@
+# Pull-loop pump. Forwards the input packet to the default outbound
+# AND emits a `pull(nil) to out pull` so an upstream Buffer / Queue
+# dispatches the next item.
+#
+# Used after a consuming stage (a Service that finished a job, say)
+# to drive a polled-supply chain: "I finished one, send me another."
+# The pull goes out the enclosing compound's `pull` port, which a
+# Worker→Queue wiring connects back to the queue's `pull` in-port.
+# Unwired pull ports drop silently — same contract as any other
+# unused output, so a Pump can sit in a non-pull-driven composite
+# without misbehaving.
+node Pump {
+    rule fwd {
+        on p
+        do {
+            emit p to default
+            emit pull(nil) to out pull
+        }
+    }
+}

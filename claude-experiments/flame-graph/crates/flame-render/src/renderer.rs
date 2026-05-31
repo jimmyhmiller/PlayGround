@@ -270,8 +270,9 @@ const TAB_BAR_BG_COLOR: [f32; 4] = [0.095, 0.103, 0.122, 1.0];
 pub struct Renderer {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
-    surface: wgpu::Surface<'static>,
-    surface_config: wgpu::SurfaceConfiguration,
+    /// Color format of the texture views we'll render into. Used to recreate
+    /// pipelines (and would be needed if we ever rebuilt the glyphon atlas).
+    pub target_format: wgpu::TextureFormat,
     pipeline: wgpu::RenderPipeline,
     uniform_buffer: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -387,52 +388,28 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub async fn new(window: Arc<winit::window::Window>) -> Self {
-        let size = window.inner_size();
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("create surface");
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .expect("no compatible adapter");
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("flame-render device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                experimental_features: wgpu::ExperimentalFeatures::default(),
-                memory_hints: wgpu::MemoryHints::Performance,
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .expect("device");
-
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|f| f.is_srgb())
-            .unwrap_or(caps.formats[0]);
-
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode: wgpu::PresentMode::AutoVsync,
-            desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-        };
-        surface.configure(&device, &surface_config);
+    /// Build a renderer that draws into externally-supplied wgpu resources.
+    ///
+    /// The caller owns the swapchain (or render target). On each frame the
+    /// caller must invoke [`Renderer::render`] with a `TextureView` whose
+    /// underlying texture format matches `target_format`.
+    ///
+    /// `size_px` is the initial pixel size of the canvas the renderer will
+    /// draw into. Call [`Renderer::resize`] whenever that changes.
+    ///
+    /// `device` and `queue` are cloned (both are cheap `Arc`-backed handles in
+    /// wgpu), so the caller can keep using them too.
+    pub fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target_format: wgpu::TextureFormat,
+        size_px: (u32, u32),
+    ) -> Self {
+        let device = device.clone();
+        let queue = queue.clone();
+        let format = target_format;
+        struct Size { width: u32, height: u32 }
+        let size = Size { width: size_px.0.max(1), height: size_px.1.max(1) };
 
         // ---- Slice pipeline ----
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -547,8 +524,7 @@ impl Renderer {
         Self {
             device,
             queue,
-            surface,
-            surface_config,
+            target_format: format,
             pipeline,
             uniform_buffer,
             bind_group,
@@ -1259,10 +1235,13 @@ impl Renderer {
         self.status_text = format!("{} slices · duration {}", n, dur);
     }
 
+    /// Notify the renderer that the texture it draws into has changed size.
+    /// The caller (which owns the swapchain / RTT texture) is responsible for
+    /// reconfiguring that surface separately — the renderer just adjusts its
+    /// internal layout math and the glyphon viewport.
     pub fn resize(&mut self, w: u32, h: u32) {
-        self.surface_config.width = w.max(1);
-        self.surface_config.height = h.max(1);
-        self.surface.configure(&self.device, &self.surface_config);
+        let w = w.max(1);
+        let h = h.max(1);
         self.window_w_px = w as f32;
         let timeline_w = (w as f32 - INSPECTOR_WIDTH_PX).max(1.0);
         self.viewport.resize(timeline_w, h as f32);
@@ -3066,12 +3045,18 @@ impl Renderer {
         }
     }
 
-    pub fn render(&mut self) {
+    /// Render one frame into `view`. The caller is responsible for acquiring
+    /// the view (e.g. from a swapchain surface texture or a render-to-texture
+    /// `wgpu::Texture`) and for presenting it afterwards if applicable.
+    ///
+    /// The texture format of `view` must match the `target_format` passed to
+    /// [`Renderer::new`].
+    pub fn render(&mut self, view: &wgpu::TextureView) {
         // Update uniforms.
         let uniforms = Uniforms {
-            // Pixel-to-NDC mapping covers the *whole window*, not just the timeline.
-            // Inspector instances live in [timeline_w, window_w] and would otherwise
-            // map to NDC.x > 1 and be clipped.
+            // Pixel-to-NDC mapping covers the *whole canvas*, not just the
+            // timeline. Inspector instances live in [timeline_w, window_w] and
+            // would otherwise map to NDC.x > 1 and be clipped.
             viewport_size_px: [self.window_w_px, self.viewport.size_px.1],
             hovered: self.hovered.unwrap_or(u32::MAX),
             _pad: 0,
@@ -3081,34 +3066,17 @@ impl Renderer {
 
         self.prepare_text();
 
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(f)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.surface_config);
-                return;
-            }
-            wgpu::CurrentSurfaceTexture::Timeout
-            | wgpu::CurrentSurfaceTexture::Occluded
-            | wgpu::CurrentSurfaceTexture::Validation => {
-                return;
-            }
-        };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame"),
+                label: Some("flame-render frame"),
             });
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("main pass"),
+                label: Some("flame-render main pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -3144,7 +3112,6 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
-        frame.present();
         self.text_atlas.trim();
     }
 }

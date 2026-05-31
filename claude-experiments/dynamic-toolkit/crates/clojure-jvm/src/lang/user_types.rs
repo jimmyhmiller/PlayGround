@@ -56,12 +56,62 @@ pub const BUILTIN_FN:     LogicalTypeId = 0x0000_FF03;
 /// Wildcard / `Object` fallback. Methods installed under this id apply
 /// when no exact `(type_id, method_id)` entry exists.
 pub const BUILTIN_OBJECT: LogicalTypeId = 0x0000_FF04;
+/// Boxed `clojure.lang.Long` — Clojure's integer type, distinct from
+/// `double`. A boxed Long is a TAG_PTR heap cell, but for protocol
+/// dispatch / `extend-type` it gets this synthetic logical id (rather
+/// than its raw `ObjTypeId`) so number protocols can target it the same
+/// way `BUILTIN_DOUBLE` targets floats.
+pub const BUILTIN_LONG:   LogicalTypeId = 0x0000_FF05;
 
 #[inline]
 pub fn user_type_logical(user_type_id: u32) -> LogicalTypeId {
     USER_TYPE_BASE.checked_add(user_type_id).expect(
         "clojure-jvm: user_types: LogicalTypeId overflow — too many user types",
     )
+}
+
+/// Base for host-class LogicalTypeIds (e.g. `java.util.Date`).
+///
+/// A host class named in `(extend-type java.util.Date P …)` has no value
+/// representation in this runtime — no NanBox value's `effective_type_id`
+/// ever returns a host-class id, because we have no host (JVM) instances.
+/// So an impl registered against a host class loads correctly but only
+/// dispatches if/when a runtime value reports its id. Today that means
+/// such impls register but never fire, which is the honest state of the
+/// runtime. `java.lang.Object` is special-cased to `BUILTIN_OBJECT` (the
+/// catch-all bucket) in `resolve_extend_type_target`, so it is *not* an
+/// id from this band.
+///
+/// The band sits below the `BUILTIN_*` synthetic ids (`0xFF00`) and above
+/// any realistic heap `ObjTypeId` count.
+pub const HOST_CLASS_BASE: LogicalTypeId = 0x0000_F000;
+const HOST_CLASS_LIMIT: LogicalTypeId = BUILTIN_NIL; // 0xFF00
+
+static HOST_CLASS_BY_NAME: LazyLock<RwLock<HashMap<String, LogicalTypeId>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+static NEXT_HOST_CLASS_ID: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(HOST_CLASS_BASE);
+
+/// Intern a host-class name (e.g. `"java.util.Date"`) to a stable
+/// `LogicalTypeId`, allocating one on first sight. Idempotent per name.
+pub fn host_class_logical(name: &str) -> LogicalTypeId {
+    if let Some(id) = HOST_CLASS_BY_NAME.read().unwrap().get(name).copied() {
+        return id;
+    }
+    let mut map = HOST_CLASS_BY_NAME.write().unwrap();
+    // Re-check under the write lock — another thread may have interned it
+    // between the read above and acquiring the write lock.
+    if let Some(id) = map.get(name).copied() {
+        return id;
+    }
+    let id = NEXT_HOST_CLASS_ID
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        id < HOST_CLASS_LIMIT,
+        "clojure-jvm: host-class LogicalTypeId space exhausted at {id:#x}"
+    );
+    map.insert(name.to_string(), id);
+    id
 }
 
 /// A user-allocated `deftype`/`defrecord` shape.
@@ -179,7 +229,20 @@ pub fn protocol_info(id: u32) -> Option<ProtocolInfo> {
 }
 
 pub fn protocol_id_by_name(name: &Arc<Symbol>) -> Option<u32> {
-    PROTOCOL_BY_NAME.read().unwrap().get(name).copied()
+    let map = PROTOCOL_BY_NAME.read().unwrap();
+    // Exact match first (same ns + name).
+    if let Some(id) = map.get(name).copied() {
+        return Some(id);
+    }
+    // Namespace-tolerant fallback: a protocol defined in clojure.core as
+    // `Inst` is referenced elsewhere as `clojure.core/Inst`, and vice
+    // versa. Match on the bare name component, ignoring the namespace.
+    // Protocol bare names are effectively unique in practice (a redefine
+    // overwrites), so this can't pick the wrong one.
+    let bare = name.get_name();
+    map.iter()
+        .find(|(k, _)| k.get_name() == bare)
+        .map(|(_, id)| *id)
 }
 
 /// Find a protocol method's id by its (unqualified) method name. The

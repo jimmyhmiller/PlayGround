@@ -1,0 +1,16 @@
+[package]
+name = "jsir-ast"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+# JSIR-schema JavaScript AST with byte-exact JSON serialization matching
+# upstream jsir's `nlohmann::ordered_json::parse(serialized).dump(2)` output.
+
+[dependencies]
+# used ONLY to PARSE input JSON; output formatting is our own.
+# `preserve_order` keeps object key order so a parse->dump round-trip is faithful.
+serde_json = { version = "1", features = ["preserve_order"] }
+
+[dev-dependencies]
+jsir-oracle = { path = "../jsir-oracle" }

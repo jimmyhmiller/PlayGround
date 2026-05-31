@@ -134,6 +134,12 @@ impl<'t> Parser<'t> {
         &self.peek().kind
     }
 
+    /// Look ahead `n` tokens (0 = current). Saturates at the final Eof.
+    fn peek_nth_kind(&self, n: usize) -> &TokenKind {
+        let i = (self.pos + n).min(self.tokens.len() - 1);
+        &self.tokens[i].kind
+    }
+
     fn bump(&mut self) -> &Token {
         let t = &self.tokens[self.pos];
         if !matches!(t.kind, TokenKind::Eof) {
@@ -201,7 +207,15 @@ impl<'t> Parser<'t> {
     fn parse_module(&mut self) -> Result<Module, ParseError> {
         let mut defs = Vec::new();
         while !matches!(self.peek_kind(), TokenKind::Eof) {
-            defs.push(self.parse_def()?);
+            // `extern "C" lib "x" { fn ... }` expands to several extern
+            // defs; everything else is exactly one def.
+            if matches!(self.peek_kind(), TokenKind::Extern)
+                && matches!(self.peek_nth_kind(1), TokenKind::Str(_))
+            {
+                self.parse_extern_c_block(&mut defs)?;
+            } else {
+                defs.push(self.parse_def()?);
+            }
         }
         Ok(Module { defs })
     }
@@ -239,8 +253,80 @@ impl<'t> Parser<'t> {
         Ok(SurfaceDef {
             name,
             span: Span { start, end },
-            kind: SurfaceDefKind::Extern { params, ret },
+            kind: SurfaceDefKind::Extern {
+                params,
+                ret,
+                library: None,
+                variadic: false,
+            },
         })
+    }
+
+    /// `extern "C" lib "<libname>" { fn name(params) -> ret  ... }` — a
+    /// block of real C function declarations resolved from a shared
+    /// library at link time. Pushes one `Extern` def per `fn`, each
+    /// tagged with `library`.
+    fn parse_extern_c_block(
+        &mut self,
+        out: &mut Vec<SurfaceDef>,
+    ) -> Result<(), ParseError> {
+        self.expect(&TokenKind::Extern, "`extern`")?;
+        // The ABI string — only "C" is supported.
+        let abi_tok = self.bump().clone();
+        match &abi_tok.kind {
+            TokenKind::Str(s) if s == "C" => {}
+            other => {
+                return Err(ParseError::Unexpected {
+                    expected: "ABI string \"C\"".to_owned(),
+                    found: other.to_string(),
+                    span: abi_tok.span,
+                });
+            }
+        }
+        // `lib "<name>"`
+        let (lib_kw, lib_kw_span) = self.expect_ident("`lib`")?;
+        if lib_kw != "lib" {
+            return Err(ParseError::Unexpected {
+                expected: "`lib`".to_owned(),
+                found: lib_kw,
+                span: lib_kw_span,
+            });
+        }
+        let libname_tok = self.bump().clone();
+        let library = match &libname_tok.kind {
+            TokenKind::Str(s) => s.clone(),
+            other => {
+                return Err(ParseError::Unexpected {
+                    expected: "library name string".to_owned(),
+                    found: other.to_string(),
+                    span: libname_tok.span,
+                });
+            }
+        };
+        self.expect(&TokenKind::LBrace, "`{`")?;
+        while !matches!(self.peek_kind(), TokenKind::RBrace) {
+            let start = self.peek().span.start;
+            self.expect(&TokenKind::Fn, "`fn`")?;
+            let (name, _) = self.expect_ident("C function name")?;
+            self.expect(&TokenKind::LParen, "`(`")?;
+            let (params, variadic) = self.parse_c_params()?;
+            let close_end = self.expect(&TokenKind::RParen, "`)`")?.span.end;
+            self.expect(&TokenKind::Arrow, "`->`")?;
+            let ret = self.parse_type()?;
+            let end = ret.span().end.max(close_end);
+            out.push(SurfaceDef {
+                name,
+                span: Span { start, end },
+                kind: SurfaceDefKind::Extern {
+                    params,
+                    ret,
+                    library: Some(library.clone()),
+                    variadic,
+                },
+            });
+        }
+        self.expect(&TokenKind::RBrace, "`}`")?;
+        Ok(())
     }
 
     fn parse_enum_def(&mut self) -> Result<SurfaceDef, ParseError> {
@@ -394,6 +480,57 @@ impl<'t> Parser<'t> {
             }
         }
         Ok(params)
+    }
+
+    /// Parse a C function's parameter list, which (unlike an ordinary
+    /// param list) may end with `...` to mark the function variadic, e.g.
+    /// `curl_easy_setopt(handle: Ptr, option: Int, ...)`. Returns the
+    /// fixed params and whether `...` was present. The `...` is three
+    /// `Dot` tokens; it must be the final entry.
+    fn parse_c_params(
+        &mut self,
+    ) -> Result<(Vec<(String, SurfaceType)>, bool), ParseError> {
+        let mut params = Vec::new();
+        let mut variadic = false;
+        if matches!(self.peek_kind(), TokenKind::RParen) {
+            return Ok((params, variadic));
+        }
+        loop {
+            // A leading `...` (variadic with no fixed params) or a `...`
+            // after the last fixed param.
+            if matches!(self.peek_kind(), TokenKind::Dot) {
+                self.expect_ellipsis()?;
+                variadic = true;
+                break;
+            }
+            let (name, _) = self.expect_ident("parameter name")?;
+            self.expect(&TokenKind::Colon, "`:`")?;
+            let ty = self.parse_type()?;
+            params.push((name, ty));
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+            if matches!(self.peek_kind(), TokenKind::RParen) {
+                break;
+            }
+        }
+        Ok((params, variadic))
+    }
+
+    /// Consume exactly `...` (three consecutive `Dot` tokens).
+    fn expect_ellipsis(&mut self) -> Result<(), ParseError> {
+        for _ in 0..3 {
+            let tok = self.peek().clone();
+            if !matches!(tok.kind, TokenKind::Dot) {
+                return Err(ParseError::Unexpected {
+                    expected: "`...` (variadic marker)".to_owned(),
+                    found: tok.kind.to_string(),
+                    span: tok.span,
+                });
+            }
+            self.bump();
+        }
+        Ok(())
     }
 
     fn parse_type(&mut self) -> Result<SurfaceType, ParseError> {
@@ -657,6 +794,17 @@ impl<'t> Parser<'t> {
                         span,
                     };
                 }
+                TokenKind::Question => {
+                    let q_end = self.bump().span.end;
+                    let span = Span {
+                        start: e.span().start,
+                        end: q_end,
+                    };
+                    e = SurfaceExpr::Try {
+                        expr: Box::new(e),
+                        span,
+                    };
+                }
                 _ => return Ok(e),
             }
         }
@@ -668,6 +816,13 @@ impl<'t> Parser<'t> {
             TokenKind::Int(value) => {
                 self.bump();
                 Ok(SurfaceExpr::IntLit {
+                    value,
+                    span: t.span,
+                })
+            }
+            TokenKind::Float(value) => {
+                self.bump();
+                Ok(SurfaceExpr::FloatLit {
                     value,
                     span: t.span,
                 })
@@ -943,6 +1098,10 @@ impl<'t> Parser<'t> {
                 stmts.push(self.parse_let_stmt()?);
                 continue;
             }
+            if matches!(self.peek_kind(), TokenKind::Defer) {
+                stmts.push(self.parse_defer_stmt()?);
+                continue;
+            }
             // Tail expression — the last thing in the block.
             let tail = self.parse_expr()?;
             let close = self.expect(&TokenKind::RBrace, "`}`")?;
@@ -973,6 +1132,20 @@ impl<'t> Parser<'t> {
             },
         })
     }
+
+    fn parse_defer_stmt(&mut self) -> Result<SurfaceStmt, ParseError> {
+        let defer_tok = self.expect(&TokenKind::Defer, "`defer`")?;
+        let start = defer_tok.span.start;
+        let expr = self.parse_expr()?;
+        let semi = self.expect(&TokenKind::Semi, "`;`")?;
+        Ok(SurfaceStmt::Defer {
+            expr,
+            span: Span {
+                start,
+                end: semi.span.end,
+            },
+        })
+    }
 }
 
 // =============================================================================
@@ -993,6 +1166,32 @@ mod tests {
             SurfaceExpr::IntLit { value: 42, .. } => {}
             other => panic!("expected IntLit(42), got {:?}", other),
         }
+    }
+
+    #[test]
+    fn bool_literals() {
+        match expr("true") {
+            SurfaceExpr::BoolLit { value: true, .. } => {}
+            other => panic!("expected BoolLit(true), got {:?}", other),
+        }
+        match expr("false") {
+            SurfaceExpr::BoolLit { value: false, .. } => {}
+            other => panic!("expected BoolLit(false), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_def_returning_bool() {
+        let d = parse_def("def b() -> Bool = true").unwrap();
+        assert_eq!(d.name, "b");
+        let (_, params, ret, body) = fn_kind(&d);
+        assert!(params.is_empty());
+        assert!(matches!(ret, SurfaceType::Named { name, .. } if name == "Bool"));
+        assert!(matches!(body, SurfaceExpr::BoolLit { value: true, .. }));
+
+        let d = parse_def("def b() -> Bool = false").unwrap();
+        let (_, _, _, body) = fn_kind(&d);
+        assert!(matches!(body, SurfaceExpr::BoolLit { value: false, .. }));
     }
 
     #[test]
@@ -1216,7 +1415,9 @@ mod tests {
             panic!("expected Block");
         };
         assert_eq!(stmts.len(), 1);
-        let SurfaceStmt::Let { name, .. } = &stmts[0];
+        let SurfaceStmt::Let { name, .. } = &stmts[0] else {
+            panic!("expected Let stmt");
+        };
         assert_eq!(name, "x");
         assert!(matches!(*tail, SurfaceExpr::Var { .. }));
     }
@@ -1228,7 +1429,9 @@ mod tests {
         let SurfaceExpr::Block { stmts, .. } = e else {
             panic!("expected outer Block");
         };
-        let SurfaceStmt::Let { value, .. } = &stmts[0];
+        let SurfaceStmt::Let { value, .. } = &stmts[0] else {
+            panic!("expected Let stmt");
+        };
         assert!(matches!(value, SurfaceExpr::Block { .. }));
     }
 
@@ -1295,7 +1498,9 @@ mod tests {
         let SurfaceExpr::Block { stmts, .. } = e else {
             panic!("expected Block");
         };
-        let SurfaceStmt::Let { value, .. } = &stmts[0];
+        let SurfaceStmt::Let { value, .. } = &stmts[0] else {
+            panic!("expected Let stmt");
+        };
         assert!(matches!(value, SurfaceExpr::Lambda { .. }));
     }
 

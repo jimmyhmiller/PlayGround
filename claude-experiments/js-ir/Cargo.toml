@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/jsir-oracle",
+    "crates/jsir-ast",
+    "crates/jsir-ir",
+    "crates/jsir-convert",
+    "crates/jsir-swc",
+    "crates/jsir-analyses",
+    "crates/jsir-transforms",
+    "crates/jsir-ssa",
+]
+
+[workspace.package]
+edition = "2021"
+license = "Apache-2.0"
+rust-version = "1.80"
+
+[workspace.dependencies]
+# Internal crates are referenced by path from each member as they come online.

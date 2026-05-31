@@ -1,0 +1,53 @@
+// Bytes demo: a mutable, indexable byte buffer.
+//
+//   ai-lang add examples/bytes_demo.ail
+//   ai-lang run main
+//
+// `Bytes` shares the heap layout of `String` but is mutable and
+// indexable. Builtins: bytes_new, bytes_len, bytes_get, bytes_set,
+// bytes_slice, bytes_concat, bytes_from_string, string_from_bytes.
+
+// Fill a buffer with consecutive bytes starting at `base`, in place.
+def fill_seq(b: Bytes, i: Int, base: Int) -> Int =
+    if i >= bytes_len(b) { 0 } else {
+        let _s = bytes_set(b, i, base + i);
+        fill_seq(b, i + 1, base)
+    }
+
+// Sum every byte in the buffer (exercises read-back after writes).
+def sum_bytes(b: Bytes, i: Int, acc: Int) -> Int =
+    if i >= bytes_len(b) { acc } else {
+        sum_bytes(b, i + 1, acc + bytes_get(b, i))
+    }
+
+def main() -> Int = {
+    // Build "Hello" one byte at a time, then render it as a String.
+    let hello = bytes_new(5);
+    let _h = bytes_set(hello, 0, 72);   // 'H'
+    let _e = bytes_set(hello, 1, 101);  // 'e'
+    let _l1 = bytes_set(hello, 2, 108); // 'l'
+    let _l2 = bytes_set(hello, 3, 108); // 'l'
+    let _o = bytes_set(hello, 4, 111);  // 'o'
+    let _p1 = println(string_from_bytes(hello));
+
+    // Slicing: "ell" is bytes [1, 3) of "Hello".
+    let ell = bytes_slice(hello, 1, 3);
+    let _p2 = println(string_concat("slice [1,4) = ", string_from_bytes(ell)));
+
+    // Round-trip a String through Bytes and report its length.
+    let raw = bytes_from_string("byte buffers!");
+    let _p3 = println(string_concat(
+        "length = ", int_to_string(bytes_len(raw))));
+
+    // Concatenation produces a fresh buffer.
+    let joined = bytes_concat(hello, raw);
+    let _p4 = println(string_concat(
+        "joined length = ", int_to_string(bytes_len(joined))));
+
+    // Fill + sum: 0..15, sum = 120.
+    let counted = bytes_new(16);
+    let _f = fill_seq(counted, 0, 0);
+    let total = sum_bytes(counted, 0, 0);
+    let _p5 = println(string_concat("sum 0..15 = ", int_to_string(total)));
+    total
+}

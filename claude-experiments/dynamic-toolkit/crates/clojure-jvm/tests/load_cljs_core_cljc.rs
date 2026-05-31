@@ -32,7 +32,9 @@ fn load_cljs_core_cljc_progressively() {
         )
     });
 
-    let mut sess = Session::new();
+    // Use the forked-clojure-core constructor so cljc's references
+    // to clojure.core fns (nthnext, list*, etc.) resolve.
+    let mut sess = Session::new_with_clojure_core();
     let mut i: usize = 0;
     let mut byte_pos: usize = 0;
     loop {

@@ -593,10 +593,6 @@ pub(crate) fn spawn_one_canvas_node(
     metrics: &AtlasMetrics,
     visual: &Visual,
     node_data_by_name: &std::collections::BTreeMap<String, flow::NodeId>,
-    // Per-compound `param → current value` map. Used by Grid-shaped
-    // compounds to read `width` / `height` from the live param state
-    // (defaults overlaid with overrides) instead of hardcoding
-    // dimensions in visual.json.
     compound_param_values: &std::collections::BTreeMap<
         String,
         std::collections::BTreeMap<String, flow::dsl::expand::CtValue>,
@@ -608,13 +604,75 @@ pub(crate) fn spawn_one_canvas_node(
     is_compound: bool,
     fallback_index: usize,
 ) {
-    let pos = visual
-        .nodes
-        .get(name)
-        .map(|v| Vec2::new(v.pos[0], v.pos[1]))
+    spawn_one_canvas_node_at(
+        commands, cache, meshes, materials, maps, node_colors, theme, metrics,
+        visual, node_data_by_name, compound_param_values, None,
+        nid, name, class_name, color_slot_raw, is_compound, fallback_index,
+    );
+}
+
+/// Like [`spawn_one_canvas_node`] but with an explicit `pos_override`
+/// that wins over `visual.json` / the default grid. Used by the drill
+/// round-trip respawn to restore each node's captured position so the
+/// layout survives drilling into a compound and back out.
+pub(crate) fn spawn_one_canvas_node_at(
+    commands: &mut Commands,
+    cache: &mut NodeAssetCache,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ColorMaterial>,
+    maps: &mut EntityMaps,
+    node_colors: &mut NodeColors,
+    theme: &Theme,
+    metrics: &AtlasMetrics,
+    visual: &Visual,
+    node_data_by_name: &std::collections::BTreeMap<String, flow::NodeId>,
+    // Per-compound `param → current value` map. Used by Grid-shaped
+    // compounds to read `width` / `height` from the live param state
+    // (defaults overlaid with overrides) instead of hardcoding
+    // dimensions in visual.json.
+    compound_param_values: &std::collections::BTreeMap<
+        String,
+        std::collections::BTreeMap<String, flow::dsl::expand::CtValue>,
+    >,
+    pos_override: Option<Vec2>,
+    nid: flow::NodeId,
+    name: &str,
+    class_name: Option<&str>,
+    color_slot_raw: Option<usize>,
+    is_compound: bool,
+    fallback_index: usize,
+) {
+    let pos = pos_override
+        .or_else(|| visual.nodes.get(name).map(|v| Vec2::new(v.pos[0], v.pos[1])))
         .unwrap_or_else(|| default_grid_position(fallback_index));
 
     if is_compound {
+        // If the canvas authored a `visual.json` entry for this compound,
+        // use the LabeledBox/Grid path. Otherwise — the common case for
+        // built-in gadgets like `GeneratorComposite` — render the
+        // compound as its gadget shape (circle + glyph), the same shape
+        // the examples-builder produced on first spawn. Without this,
+        // drilling into a compound and back out replaces the gadget
+        // visual with a generic LabeledBox.
+        let gadget_kind = class_name.and_then(gadget_kind_for_class);
+        if let (None, Some(kind)) = (visual.compounds.get(name), gadget_kind) {
+            let entity = spawn_node_entity(
+                commands, cache, meshes, materials, maps, theme, metrics,
+                nid, kind, None, false, color_slot_raw.is_some(),
+                name.to_string(), pos,
+                None, None,
+            );
+            if let Some(slot_raw) = color_slot_raw {
+                let color_slot = slot_raw % theme.data.len();
+                node_colors.0.insert(nid, theme.data[color_slot]);
+            }
+            commands.entity(entity).insert((
+                crate::compound::CompoundBodyMarker(nid),
+                crate::compound::Scoped(nid),
+            ));
+            return;
+        }
+
         let empty = std::collections::BTreeMap::new();
         let params = compound_param_values.get(name).unwrap_or(&empty);
         let cv = build_compound_visual(name, visual.compounds.get(name), node_data_by_name, theme, params);
@@ -1100,6 +1158,25 @@ pub fn class_to_kind(class: &str) -> Kind {
         "Queue" => Kind::Queue,
         "Sink" => Kind::Sink,
         _ => Kind::Worker,
+    }
+}
+
+/// Same mapping as [`class_to_kind`] but for *Composite class names —
+/// the names the runtime sees on compound nodes spawned via the gadget
+/// path (`instantiate_compound("GeneratorComposite", ...)`). Returns
+/// `None` for any class that isn't one of the seven built-in gadget
+/// composites, so the caller can decide whether to fall back to a
+/// LabeledBox visual or something else.
+pub fn gadget_kind_for_class(class: &str) -> Option<Kind> {
+    match class {
+        "GeneratorComposite"    | "Generator"      => Some(Kind::Generator),
+        "ClientComposite"       | "Client"         => Some(Kind::Client),
+        "BackoffClientComposite"| "BackoffClient"  => Some(Kind::BackoffClient),
+        "WorkerComposite"       | "Worker"         => Some(Kind::Worker),
+        "RouterComposite"       | "Router"         => Some(Kind::Router),
+        "QueueComposite"        | "Queue"          => Some(Kind::Queue),
+        "SinkComposite"         | "Sink"           => Some(Kind::Sink),
+        _ => None,
     }
 }
 

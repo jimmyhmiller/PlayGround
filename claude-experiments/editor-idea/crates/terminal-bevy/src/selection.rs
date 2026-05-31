@@ -7,10 +7,15 @@
 //! between the terminal and the OS clipboard.
 //!
 //! Selection is line-flow: the highlighted region is one or more
-//! per-row strips. For copy we read the same range out of the worker's
-//! snapshot, trim trailing whitespace per row, and join with newlines.
+//! per-row strips. For copy we ask the worker to read the range out of
+//! its libghostty `Terminal` (which owns the full scrollback, not just
+//! the visible snapshot), trim trailing whitespace per row, and join
+//! with newlines — so a selection spanning content scrolled off-screen
+//! copies in full. See `WorkerMsg::ExtractText`.
 
+use std::sync::mpsc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use arboard::Clipboard;
 use bevy::input::keyboard::KeyboardInput;
@@ -19,7 +24,7 @@ use bevy::sprite::Anchor;
 
 use pane_bevy::{FocusedPane, PaneChrome, PaneKindMarker, PaneTag};
 
-use crate::worker::{SnapCell, WorkerMsg};
+use crate::worker::WorkerMsg;
 use crate::{
     MonoMetrics, TermGrid, TerminalSelection, TerminalStore, LINE_HEIGHT, PANE_KIND,
 };
@@ -58,13 +63,14 @@ fn render_selection_overlays(
     mut commands: Commands,
     metrics: Res<MonoMetrics>,
     theme: Res<style_bevy::Theme>,
+    store: Res<TerminalStore>,
     mut q: Query<
-        (&PaneChrome, &TermGrid, &mut TerminalSelection, &PaneKindMarker),
+        (Entity, &PaneChrome, &TermGrid, &mut TerminalSelection, &PaneKindMarker),
         With<PaneTag>,
     >,
 ) {
     let sel_color = Color::LinearRgba(theme.color(style_bevy::tokens::SELECTION));
-    for (chrome, grid, mut sel, kind) in &mut q {
+    for (entity, chrome, grid, mut sel, kind) in &mut q {
         if kind.0 != PANE_KIND {
             continue;
         }
@@ -89,22 +95,34 @@ fn render_selection_overlays(
             continue;
         };
 
+        // Selection rows are absolute (scrollback-anchored). Convert to
+        // the current viewport row by subtracting this terminal's
+        // viewport_offset; the rest of the math is identical to the
+        // pre-scrolling code. Rows that fell outside [0, rows-1] are
+        // simply skipped — state preserved, just not drawn.
+        let offset: i64 = store
+            .map
+            .get(&entity)
+            .map(|d| d.worker.snapshot.lock().expect("snapshot lock").viewport_offset as i64)
+            .unwrap_or(0);
+        let start_view = start.1 - offset;
+        let end_view = end.1 - offset;
+
         let cell_w = metrics.cell_width;
 
-        // Walk the visible rows of the selection range, building one
-        // strip per row. Strips for off-grid rows are skipped — the
-        // selection state still remembers them so the user can drag
-        // back into view, but we don't render anything outside the grid.
-        let visible_first = start.1.max(0);
-        let visible_last = end.1.min(rows - 1);
+        let visible_first = start_view.max(0);
+        let visible_last = end_view.min((rows - 1) as i64);
+        if visible_first > visible_last {
+            continue;
+        }
         for row in visible_first..=visible_last {
-            let (col_start, col_end) = if start.1 == end.1 {
+            let (col_start, col_end) = if start_view == end_view {
                 // Single-row selection.
                 (start.0.min(end.0), start.0.max(end.0))
-            } else if row == start.1 {
+            } else if row == start_view {
                 // First row: from start col to end of row.
                 (start.0, cols - 1)
-            } else if row == end.1 {
+            } else if row == end_view {
                 // Last row: from start of row to end col.
                 (0, end.0)
             } else {
@@ -173,10 +191,25 @@ fn copy_paste_keys(
                 if !sel.is_active() {
                     continue;
                 }
+                let Some((start, end)) = sel.normalised() else {
+                    continue;
+                };
                 let Some(data) = store.map.get(&target) else { continue };
-                let text = {
-                    let g = data.worker.snapshot.lock().expect("snapshot lock");
-                    extract_selection_text(&g.cells, g.cols as i32, g.rows as i32, sel)
+                // Read the selected text off the worker's `Terminal`,
+                // which owns the full scrollback — the visible snapshot
+                // only holds the on-screen grid, so a selection that
+                // spans content scrolled off-screen would otherwise copy
+                // truncated. Round-trip via a oneshot reply channel; the
+                // worker wakes immediately on the wake pipe, so the
+                // bounded wait is effectively instant.
+                let (reply_tx, reply_rx) = mpsc::channel();
+                data.worker.send(WorkerMsg::ExtractText {
+                    start,
+                    end,
+                    reply: reply_tx,
+                });
+                let Ok(text) = reply_rx.recv_timeout(Duration::from_millis(500)) else {
+                    continue;
                 };
                 if let Ok(mut guard) = clip.clipboard.lock()
                     && let Some(c) = guard.as_mut()
@@ -203,52 +236,3 @@ fn copy_paste_keys(
     }
 }
 
-fn extract_selection_text(
-    cells: &[SnapCell],
-    cols: i32,
-    rows: i32,
-    sel: &TerminalSelection,
-) -> String {
-    let Some((start, end)) = sel.normalised() else {
-        return String::new();
-    };
-    let mut out = String::new();
-    let visible_first = start.1.max(0);
-    let visible_last = end.1.min(rows - 1);
-    for row in visible_first..=visible_last {
-        let (col_start, col_end) = if start.1 == end.1 {
-            (start.0.min(end.0), start.0.max(end.0))
-        } else if row == start.1 {
-            (start.0, cols - 1)
-        } else if row == end.1 {
-            (0, end.0)
-        } else {
-            (0, cols - 1)
-        };
-        let col_start = col_start.max(0);
-        let col_end = col_end.min(cols - 1);
-        if col_end < col_start {
-            if row != visible_last {
-                out.push('\n');
-            }
-            continue;
-        }
-        let row_base = (row as usize) * (cols as usize);
-        let mut line = String::new();
-        for c in col_start..=col_end {
-            let idx = row_base + c as usize;
-            if let Some(cell) = cells.get(idx) {
-                line.push(cell.ch);
-            }
-        }
-        // Trim trailing whitespace — terminals pad rows with spaces and
-        // copying a screen full of those is annoying. Leading spaces
-        // (indentation) are preserved.
-        let trimmed = line.trim_end();
-        out.push_str(trimmed);
-        if row != visible_last {
-            out.push('\n');
-        }
-    }
-    out
-}

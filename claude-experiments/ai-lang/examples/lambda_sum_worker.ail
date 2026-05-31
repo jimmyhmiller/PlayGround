@@ -1,0 +1,26 @@
+// Program B for distributed map-reduce: each invocation sums one range
+// [lo, hi). Deploy this once; Program A (lambda_mapreduce_demo.ail) fans
+// out many ranges across parallel invocations and adds up the partials.
+
+def sum_range(lo: Int, hi: Int, acc: Int) -> Int =
+    if lo >= hi { acc } else { sum_range(lo + 1, hi, acc + lo) }
+
+// Read an integer field from the event JSON (json_field is for strings;
+// numbers go through parse_json + json_int).
+def field_int(event: String, key: String) -> Int =
+    match parse_json(event) {
+        Ok(j) =>
+            match json_get(j, key) {
+                Some(v) => match json_int(v) { Some(n) => n, None => 0 },
+                None => 0
+            },
+        Err(e) => 0
+    }
+
+def handler(event: String) -> String = {
+    let lo = field_int(event, "lo");
+    let hi = field_int(event, "hi");
+    str3("{\"sum\":", int_to_string(sum_range(lo, hi, 0)), "}")
+}
+
+def main() -> Int = lambda_serve(|e: String| handler(e))

@@ -1,7 +1,97 @@
 //! Typed client library for datalog-db.
 //!
-//! Connects over TCP using the datalog-db wire protocol and provides
-//! ergonomic methods for every server operation.
+//! Connects to a running `datalog-db` server over TCP, performs the
+//! version handshake, and exposes one method per server operation:
+//! [`define_type`], [`define_enum`], [`transact`], [`query`], [`explain`],
+//! [`schema`], [`status`], and an escape-hatch [`send_raw`].
+//!
+//! See `docs/rust-client.md` for a longer-form guide (transaction-op JSON
+//! shapes, query JSON shape, threading, error model).
+//!
+//! # Quick start
+//!
+//! Start a server in another process:
+//!
+//! ```sh
+//! cargo run --release --bin datalog-db -- --data-dir ./data --bind 127.0.0.1:5557
+//! ```
+//!
+//! Then in your code:
+//!
+//! ```no_run
+//! use datalog_db::client::Client;
+//! use datalog_db::schema::{EntityTypeDef, FieldDef, FieldType};
+//! use serde_json::json;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let mut client = Client::connect("127.0.0.1:5557")?;
+//!
+//! // 1. Define an entity type (a "collection").
+//! client.define_type(&EntityTypeDef {
+//!     name: "User".into(),
+//!     fields: vec![
+//!         FieldDef { name: "name".into(),  field_type: FieldType::String,
+//!                    required: true,  unique: false, indexed: false },
+//!         FieldDef { name: "email".into(), field_type: FieldType::String,
+//!                    required: true,  unique: true,  indexed: true  },
+//!         FieldDef { name: "age".into(),   field_type: FieldType::I64,
+//!                    required: false, unique: false, indexed: false },
+//!     ],
+//! })?;
+//!
+//! // 2. Insert an entity. `transact` takes raw JSON ops; one op per
+//! //    assert/retract/retract_entity. The server returns the assigned
+//! //    entity id.
+//! let tx = client.transact(vec![
+//!     json!({ "assert": "User", "data": { "name": "Alice", "email": "a@b.com", "age": 30 } }),
+//! ])?;
+//! let alice = tx.entity_ids[0];
+//!
+//! // 3. Update by including `entity` in the op.
+//! client.transact(vec![
+//!     json!({ "assert": "User", "entity": alice, "data": { "age": 31 } }),
+//! ])?;
+//!
+//! // 4. Query. `find` lists the variables to return; `where` is one
+//! //    clause per entity binding. Predicates: {"gt": N}, {"lt": N},
+//! //    {"gte": N}, {"lte": N}, {"ne": V}.
+//! let result = client.query(&json!({
+//!     "find":  ["?u", "?name"],
+//!     "where": [{ "bind": "?u", "type": "User", "name": "?name", "age": {"gt": 25} }],
+//! }))?;
+//! for row in &result.rows {
+//!     println!("{}: {}", row[0], row[1]);
+//! }
+//!
+//! // 5. Retract specific fields, or whole entities.
+//! client.transact(vec![
+//!     json!({ "retract": "User", "entity": alice, "fields": ["age"] }),
+//! ])?;
+//! # Ok(()) }
+//! ```
+//!
+//! # Errors
+//!
+//! All methods return [`Result<T>`] = `Result<T, ClientError>`. Server-side
+//! errors come back as [`ClientError::Server`] with the message from the
+//! server (e.g. `"unique field 'email' must also be required"`). Wire- or
+//! IO-level problems surface as [`ClientError::Protocol`].
+//!
+//! # Concurrency
+//!
+//! A `Client` owns one `TcpStream` and is **not** `Sync`. Use one client
+//! per thread, or share an `Arc<Mutex<Client>>`. For higher throughput
+//! spawn multiple connections — the server is multi-threaded and supports
+//! `parallel_writes` plus incremental cache appends.
+//!
+//! [`define_type`]: Client::define_type
+//! [`define_enum`]: Client::define_enum
+//! [`transact`]:    Client::transact
+//! [`query`]:       Client::query
+//! [`explain`]:     Client::explain
+//! [`schema`]:      Client::schema
+//! [`status`]:      Client::status
+//! [`send_raw`]:    Client::send_raw
 
 use std::net::TcpStream;
 use std::sync::atomic::{AtomicU64, Ordering};

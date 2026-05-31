@@ -6,3 +6,7 @@ edition = "2024"
 [dependencies]
 blake3 = "1.5"
 inkwell = { git = "https://github.com/jimmyhmiller/inkwell", features = ["llvm21-1"] }
+# The "outside world" surface (HTTP, JSON, crypto, OS) is no longer a set
+# of Rust dependencies / host shims. The ai-lang stdlib reaches it through
+# the generic C FFI (dlopen/dlsym): HTTP via libcurl, crypto via OpenSSL's
+# libcrypto, OS via libc; JSON is a parser written in ai-lang itself.

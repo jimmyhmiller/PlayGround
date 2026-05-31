@@ -1,0 +1,9 @@
+#!/bin/sh
+# AWS Lambda custom-runtime entrypoint for the GENERIC ai-lang worker.
+#
+# The function has NO baked-in code. `ai-lang lambda-worker` polls the
+# Lambda Runtime API ($AWS_LAMBDA_RUNTIME_API, set by Lambda), and on each
+# invocation compiles and runs the ai-lang source it is handed in the
+# payload. Deploy once; the work is decided per-invocation by the caller.
+set -e
+exec /opt/ai-lang/ai-lang lambda-worker

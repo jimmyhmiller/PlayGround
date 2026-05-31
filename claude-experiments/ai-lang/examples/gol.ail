@@ -8,20 +8,9 @@
 //   toroidal grid). Each cell's next state is computed by exactly one
 //   `at()` call to its dedicated worker.
 // - Two positional args after `--`: max generations and ms per frame.
-
-struct Node { a: Int, b: Int, c: Int, d: Int, port: Int }
-
-enum Failure {
-    Unreachable(Node),
-    Crashed(Node),
-    CodeMissing(Node),
-    Cancelled(Node),
-}
-
-enum Result<T, E> { Ok(T), Err(E) }
-
-def make_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
-    Node { a: a, b: b, c: c, d: d, port: port }
+//
+// `Node`, `Failure`, `Result<T, E>`, and `tcp_node` are provided by
+// the stdlib — distributed programs don't have to redeclare them.
 
 // Pool := the list of workers exposed by the runner.
 def build_pool() -> List<Node> = list_reverse(build_pool_acc(0, Nil))
@@ -30,7 +19,7 @@ def build_pool_acc(i: Int, acc: List<Node>) -> List<Node> =
     if i >= node_count() { acc } else {
         let p = get_node_port(i);
         build_pool_acc(i + 1, Cons(ListCell {
-            head: make_node(127, 0, 0, 1, p),
+            head: tcp_node(127, 0, 0, 1, p),
             tail: acc,
         }))
     }
@@ -63,8 +52,12 @@ def count_neighbours(packed: Int, x: Int, y: Int) -> Int =
     cell_at(packed, x - 1, y + 1) + cell_at(packed, x, y + 1) +
     cell_at(packed, x + 1, y + 1)
 
-// The kernel — runs on the worker for cell (x, y).
-def compute_cell(packed: Int, x: Int, y: Int) -> Int = {
+// The kernel — runs on the worker for cell index `i` (0..49 in
+// row-major order). Computes the cell's next state from the
+// captured `packed` grid.
+def compute_cell_bit(packed: Int, i: Int) -> Int = {
+    let x = i - (i / 7) * 7;
+    let y = i / 7;
     let alive = cell_at(packed, x, y);
     let n = count_neighbours(packed, x, y);
     if alive == 1 {
@@ -74,28 +67,44 @@ def compute_cell(packed: Int, x: Int, y: Int) -> Int = {
     }
 }
 
-def remote_cell(pool: List<Node>, packed: Int, x: Int, y: Int) -> Int = {
-    let i = y * 7 + x;
-    match list_at(pool, i) {
-        Some(node) => match at(node, || compute_cell(packed, x, y)) {
-            Ok(v) => v,
-            Err(_) => 0,
-        },
-        None => 0,
-    }
-}
+// Build the per-cell chunks: 49 single-element lists `[i]` for
+// i = 0..48. `dataset_from_chunks` will pair each with a worker.
+def cell_indices() -> List<List<Int>> = list_reverse(cell_indices_acc(0, Nil))
 
-def step_grid(pool: List<Node>, packed: Int) -> Int =
-    step_grid_acc(pool, packed, 0, 0)
-
-def step_grid_acc(pool: List<Node>, src: Int, i: Int, acc: Int) -> Int =
+def cell_indices_acc(i: Int, acc: List<List<Int>>) -> List<List<Int>> =
     if i >= 49 { acc } else {
-        let x = i - (i / 7) * 7;
-        let y = i / 7;
-        let bit = remote_cell(pool, src, x, y);
-        let next = if bit == 1 { set_bit_one(acc, i) } else { acc };
-        step_grid_acc(pool, src, i + 1, next)
+        cell_indices_acc(i + 1, Cons(ListCell {
+            head: Cons(ListCell { head: i, tail: Nil }),
+            tail: acc,
+        }))
     }
+
+// Walk the per-cell bits and pack them into a single Int. Bit
+// position == cell index in row-major order.
+def pack_bits(bits: List<Int>) -> Int = pack_bits_acc(bits, 0, 0)
+
+def pack_bits_acc(bits: List<Int>, i: Int, acc: Int) -> Int =
+    match bits {
+        Nil => acc,
+        Cons(c) =>
+            if c.head == 1 { pack_bits_acc(c.tail, i + 1, set_bit_one(acc, i)) }
+            else { pack_bits_acc(c.tail, i + 1, acc) },
+    }
+
+// Distributed step using stdlib combinators. Each cell index `i`
+// becomes a one-element chunk on a dedicated worker; `dataset_map`
+// applies `compute_cell_bit(packed, i)` remotely; `dataset_collect`
+// brings the 49 next-state bits back to the client; `pack_bits`
+// repacks them into a single Int.
+//
+// All the fan-out / gather logic that used to live in
+// `step_grid_acc` is gone — it's just three combinator calls.
+def step_grid(pool: List<Node>, packed: Int) -> Int = {
+    let d = dataset_from_chunks(cell_indices(), pool);
+    let bits = dataset_collect(
+        dataset_map(d, |i: Int| compute_cell_bit(packed, i)));
+    pack_bits(bits)
+}
 
 // Initial glider — south-east heading, top-left of grid.
 def initial_glider() -> Int =

@@ -22,15 +22,15 @@ use bevy::input::keyboard::KeyboardInput;
 use bevy::input::mouse::MouseButton;
 use bevy::prelude::*;
 use bevy::sprite::Anchor;
-use bevy::text::LineHeight;
+use bevy::text::{LineHeight, TextBounds};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use pane_bevy::{
-    content_area, focus_text_input, pt_to_content_local, spawn_text_input, FocusedPane,
-    FocusedTextInput, InputConsumed, PaneContentPressed, PaneFont, PaneFontMetrics, PaneHotZones,
-    PaneKindSpec, PaneRect, PaneRegistry, PaneTag, PaneTitle, TextInput, TextInputEvent,
-    TextInputStyle,
+    content_area, focus_text_input, pt_to_content_local, spawn_text_input,
+    spawn_text_input_multiline, FocusedPane, FocusedTextInput, InputConsumed, PaneContentNoClip,
+    PaneContentPressed, PaneFont, PaneFontMetrics, PaneHotZones, PaneKindSpec, PaneRect,
+    PaneRegistry, PaneTag, PaneTitle, TextInput, TextInputEvent, TextInputStyle,
 };
 
 use crate::projects::Projects;
@@ -48,6 +48,11 @@ const CHECKBOX_SIZE: f32 = 14.0;
 const TEXT_FONT_SIZE: f32 = 13.0;
 const SMALL_FONT_SIZE: f32 = 11.0;
 const ADD_BTN_H: f32 = 24.0;
+/// Line height for wrapped title / body / field-value text. Used both
+/// for the Bevy `LineHeight` component and for our local height
+/// computation, so they always agree.
+const WRAP_LINE_H: f32 = TEXT_FONT_SIZE * 1.3;
+const SMALL_WRAP_LINE_H: f32 = SMALL_FONT_SIZE * 1.3;
 
 // ---------- Data model ----------
 
@@ -178,9 +183,15 @@ pub struct IssuesPane {
     pub project_id: u64,
     /// What's currently being edited, if anything.
     pub editing: Option<EditTarget>,
-    /// Live TextInput entity when in edit mode. We despawn + recreate
-    /// it whenever `editing` changes or rows are rebuilt.
+    /// Live TextInput entity when in edit mode. Reused across re-layout
+    /// while the edit target is unchanged (so the caret/selection
+    /// survive the body box growing); despawned + recreated when the
+    /// target changes or edit mode ends.
     pub edit_input: Option<Entity>,
+    /// The `EditTarget` the live `edit_input` was built for. Lets
+    /// `rebuild_rows` tell "same field, just reflow — reuse the input"
+    /// from "different field — rebuild it".
+    pub edit_target_built: Option<EditTarget>,
     /// True when the pane content needs a full rebuild (issue list
     /// changed, expand toggled, project switched, edit mode changed).
     pub dirty_layout: bool,
@@ -226,6 +237,7 @@ impl Plugin for IssuesPanePlugin {
                 (
                     mark_dirty_on_project_change,
                     handle_content_press,
+                    commit_edit_on_focus_change,
                     handle_text_input_events,
                     rebuild_rows,
                     save_dirty_projects,
@@ -269,6 +281,7 @@ fn issues_spawn(world: &mut World, entity: Entity, _content_root: Entity, config
         project_id,
         editing: None,
         edit_input: None,
+        edit_target_built: None,
         dirty_layout: true,
     });
     // Ensure this project's issues are loaded so the first rebuild
@@ -310,6 +323,7 @@ fn handle_content_press(
     mut panes: Query<&mut IssuesPane>,
     hits: Query<(&IssueHit, &GlobalTransform, &HitSize)>,
     pane_rects: Query<&PaneRect>,
+    inputs: Query<&TextInput>,
     mut store: ResMut<IssuesStore>,
 ) {
     for ev in events.read() {
@@ -330,7 +344,10 @@ fn handle_content_press(
             // compare against the row's content-local coords stored
             // in HitSize.local_origin.
             let _ = world;
-            let local = pt_to_content_local(ev.window_pt, rect);
+            // `ev.local_pt` is already content-local in canvas-space;
+            // recomputing from window_pt + canvas-space rect would
+            // mis-hit the moment the canvas is panned/zoomed.
+            let local = ev.local_pt;
             let origin = size.local_origin;
             if local.x >= origin.x
                 && local.x <= origin.x + size.size.x
@@ -345,9 +362,21 @@ fn handle_content_press(
                 break;
             }
         }
+        // A click that leaves (or changes) the field being edited
+        // commits its current value first, so edits aren't lost. A click
+        // that lands back on the same field (self-hit) keeps editing —
+        // no commit, so an empty new-issue title isn't dropped just by
+        // clicking inside it.
+        let stays_on_same_field = picked
+            .as_ref()
+            .is_some_and(|h| hit_matches_target(h, pane.editing));
+        if !stays_on_same_field {
+            commit_active_edit(&pane, &inputs, &mut store);
+        }
+
         let Some(hit) = picked else {
             // Click inside pane but not on any row element — exit
-            // edit mode if any.
+            // edit mode if any (value already committed above).
             if pane.editing.is_some() {
                 pane.editing = None;
                 pane.dirty_layout = true;
@@ -474,7 +503,15 @@ fn handle_text_input_events(
         let (entity, commit) = match ev {
             TextInputEvent::Submit { entity } => (*entity, true),
             TextInputEvent::Cancel { entity } => (*entity, false),
-            TextInputEvent::Changed { .. } => continue,
+            // A keystroke changed the buffer. The wrapped line count may
+            // have changed, so re-flow the owning pane (rebuild reuses
+            // the live input entity, so the caret survives).
+            TextInputEvent::Changed { entity } => {
+                if let Some(mut pane) = panes.iter_mut().find(|p| p.edit_input == Some(*entity)) {
+                    pane.dirty_layout = true;
+                }
+                continue;
+            }
         };
         // Find which pane owns this input.
         let Some(mut pane) = panes
@@ -495,6 +532,7 @@ fn handle_text_input_events(
         }
         pane.editing = None;
         pane.edit_input = None;
+        pane.edit_target_built = None;
         pane.dirty_layout = true;
     }
 }
@@ -550,6 +588,78 @@ fn commit_edit(store: &mut IssuesStore, project_id: u64, target: EditTarget, val
     store.mark_dirty(project_id);
 }
 
+/// Commit the pane's current in-progress edit (if any) to the store,
+/// reading the live value out of its `TextInput`. Does NOT clear the
+/// editing state — callers decide whether the edit continues.
+fn commit_active_edit(pane: &IssuesPane, inputs: &Query<&TextInput>, store: &mut IssuesStore) {
+    if let (Some(target), Some(input)) = (pane.editing, pane.edit_input) {
+        if let Ok(ti) = inputs.get(input) {
+            commit_edit(store, pane.project_id, target, &ti.text());
+        }
+    }
+}
+
+/// Whether a clicked `IssueHit` refers to the same slot currently being
+/// edited — used to tell "clicked back into the same field" (keep
+/// editing) from "moved to a different field" (commit + switch).
+fn hit_matches_target(hit: &IssueHit, target: Option<EditTarget>) -> bool {
+    match (hit, target) {
+        (IssueHit::Title(a), Some(EditTarget::Title(b))) => *a == b,
+        (IssueHit::Body(a), Some(EditTarget::Body(b))) => *a == b,
+        (IssueHit::FieldKey(a, i), Some(EditTarget::FieldKey(b, j))) => *a == b && *i == j,
+        (IssueHit::FieldValue(a, i), Some(EditTarget::FieldValue(b, j))) => *a == b && *i == j,
+        _ => false,
+    }
+}
+
+/// The clickable `IssueHit` for an edit slot. The active edit field's
+/// background carries this so clicking inside the field re-selects it
+/// (a no-op) instead of falling through to "clicked empty space → exit
+/// edit mode".
+fn hit_for_target(target: EditTarget) -> IssueHit {
+    match target {
+        EditTarget::Title(id) => IssueHit::Title(id),
+        EditTarget::Body(id) => IssueHit::Body(id),
+        EditTarget::FieldKey(id, idx) => IssueHit::FieldKey(id, idx),
+        EditTarget::FieldValue(id, idx) => IssueHit::FieldValue(id, idx),
+    }
+}
+
+/// Commit + exit edit mode when keyboard focus leaves the pane that's
+/// editing (the user clicked another pane, or empty canvas). Without
+/// this the `TextInput` stays focused and keystrokes keep flowing into
+/// the now-hidden field.
+fn commit_edit_on_focus_change(
+    mut commands: Commands,
+    focused_pane: Res<FocusedPane>,
+    mut focused_input: ResMut<FocusedTextInput>,
+    mut panes: Query<(Entity, &mut IssuesPane)>,
+    inputs: Query<&TextInput>,
+    mut store: ResMut<IssuesStore>,
+) {
+    for (entity, mut pane) in &mut panes {
+        if pane.editing.is_none() {
+            continue;
+        }
+        // Still the focused pane → keep editing. `FocusedPane` only
+        // changes on a pane click, so between clicks this is stable and
+        // we never blur spuriously.
+        if focused_pane.0 == Some(entity) {
+            continue;
+        }
+        commit_active_edit(&pane, &inputs, &mut store);
+        if let Some(input) = pane.edit_input {
+            if focused_input.0 == Some(input) {
+                focus_text_input(&mut commands, &mut focused_input, [], None);
+            }
+        }
+        pane.editing = None;
+        pane.edit_input = None;
+        pane.edit_target_built = None;
+        pane.dirty_layout = true;
+    }
+}
+
 // ---------- Layout / render ----------
 
 /// Per-hit-target sidecar with the rectangle in pane-local content
@@ -595,13 +705,13 @@ fn rebuild_rows(
     mut commands: Commands,
     mut panes: Query<(Entity, &mut IssuesPane, &PaneRect, &pane_bevy::PaneChrome)>,
     existing_rows: Query<(Entity, &ChildOf), With<IssueRowEntity>>,
+    inputs_q: Query<&TextInput>,
     store: Res<IssuesStore>,
     font: Res<PaneFont>,
     metrics: Res<PaneFontMetrics>,
     theme: Res<style_bevy::Theme>,
     mut focused: ResMut<FocusedTextInput>,
 ) {
-    // If nothing changed and theme didn't change, fast-out.
     if !theme.is_changed() && panes.iter().all(|(_, p, _, _)| !p.dirty_layout) {
         return;
     }
@@ -619,20 +729,39 @@ fn rebuild_rows(
         if !pane.dirty_layout && !theme.is_changed() {
             continue;
         }
-        // Despawn previous rows for this pane.
+        // If we're still editing the same target as last layout, reuse
+        // the live input entity across this rebuild so the caret and
+        // selection survive (the body box grows by re-flowing the rows
+        // around a persistent input). Otherwise the input is rebuilt.
+        let reuse: Option<Entity> = match (pane.editing, pane.edit_target_built, pane.edit_input) {
+            (Some(cur), Some(built), Some(input))
+                if cur == built && inputs_q.get(input).is_ok() =>
+            {
+                Some(input)
+            }
+            _ => None,
+        };
+        // Live edit text (for the reused input) drives the editing
+        // slot's wrapped height so the box grows as you type.
+        let live_edit_text: Option<String> =
+            reuse.and_then(|e| inputs_q.get(e).ok()).map(|ti| ti.text());
+
+        // Despawn previous rows for this pane — except the reused input
+        // (and its text/caret children, which hang off it, not off
+        // content_root, so the parent walk leaves them alone).
         for (row, child_of) in &existing_rows {
-            if child_of.0 == chrome.content_root {
+            if child_of.0 == chrome.content_root && Some(row) != reuse {
                 commands.entity(row).despawn();
             }
         }
-        // Drop the previous edit input if any (the despawn above
-        // already removed it since it was a child of content_root).
-        if let Some(_old) = pane.edit_input.take() {
-            // Don't double-despawn; it's gone with the parent walk
-            // above. Clearing edit_input is enough.
-            if focused.0 == pane.edit_input {
-                focused.0 = None;
+        if reuse.is_none() {
+            // Not reusing: the old input (if any) was despawned above.
+            if let Some(old) = pane.edit_input.take() {
+                if focused.0 == Some(old) {
+                    focused.0 = None;
+                }
             }
+            pane.edit_target_built = None;
         }
         pane.dirty_layout = false;
 
@@ -715,6 +844,7 @@ fn rebuild_rows(
                 content_w,
                 y,
                 &font,
+                &metrics,
                 &style,
                 fg,
                 fg_muted,
@@ -725,9 +855,83 @@ fn rebuild_rows(
                 pane_entity,
                 &mut focused,
                 &mut pane,
+                reuse,
+                live_edit_text.as_deref(),
             );
         }
     }
+}
+
+/// Count the wrapped lines `text` will occupy if rendered into a slot
+/// `wrap_px` wide, given a monospace advance of `char_px` per char.
+/// Mirrors Bevy/cosmic-text's word-wrap behavior closely enough for
+/// the host's monospace fonts: greedy word fill, char-break for words
+/// that exceed the wrap width on their own. Preserves explicit `\n`.
+fn wrap_line_count(text: &str, wrap_px: f32, char_px: f32) -> usize {
+    if text.is_empty() {
+        return 1;
+    }
+    if char_px <= 0.0 || wrap_px <= char_px {
+        // Degenerate width — fall back to explicit-newline count so we
+        // never report zero lines.
+        return text.lines().count().max(1);
+    }
+    let max_chars = (wrap_px / char_px).floor() as usize;
+    if max_chars == 0 {
+        return text.lines().count().max(1);
+    }
+    let mut total = 0usize;
+    for hard_line in text.split('\n') {
+        if hard_line.is_empty() {
+            total += 1;
+            continue;
+        }
+        let mut col = 0usize;
+        let mut line_count = 1usize;
+        let mut first_word = true;
+        for word in hard_line.split(' ') {
+            let wlen = word.chars().count();
+            if wlen == 0 {
+                // Run of spaces — counts as one char's worth of column.
+                if !first_word {
+                    if col + 1 > max_chars {
+                        line_count += 1;
+                        col = 0;
+                    } else {
+                        col += 1;
+                    }
+                }
+                first_word = false;
+                continue;
+            }
+            // Width needed to place this word on the current line
+            // (including the joining space, except for the first word).
+            let needed = if first_word { wlen } else { wlen + 1 };
+            if col + needed <= max_chars {
+                col += needed;
+            } else if wlen <= max_chars {
+                // Wrap word onto a fresh line.
+                line_count += 1;
+                col = wlen;
+            } else {
+                // Word longer than the wrap width — char-break it.
+                // Start on a fresh line if the current one isn't empty.
+                if col > 0 {
+                    line_count += 1;
+                    col = 0;
+                }
+                let mut remaining = wlen;
+                while remaining > max_chars {
+                    line_count += 1;
+                    remaining -= max_chars;
+                }
+                col = remaining;
+            }
+            first_word = false;
+        }
+        total += line_count;
+    }
+    total.max(1)
 }
 
 fn text_input_style(
@@ -739,7 +943,10 @@ fn text_input_style(
     TextInputStyle {
         font,
         font_size: TEXT_FONT_SIZE,
-        line_height: TEXT_FONT_SIZE * 1.4,
+        // Match WRAP_LINE_H so a multiline input's rendered line
+        // spacing, caret row stepping, and the height the layout
+        // reserves per wrapped line all agree.
+        line_height: WRAP_LINE_H,
         cell_width: metrics.char_width(TEXT_FONT_SIZE),
         color_idle: fg,
         color_focused: fg,
@@ -756,6 +963,7 @@ fn spawn_issue_block(
     content_w: f32,
     mut y: f32,
     font: &Res<PaneFont>,
+    metrics: &PaneFontMetrics,
     input_style: &TextInputStyle,
     fg: Color,
     fg_muted: Color,
@@ -766,11 +974,43 @@ fn spawn_issue_block(
     _pane_entity: Entity,
     focused: &mut ResMut<FocusedTextInput>,
     pane: &mut IssuesPane,
+    reuse: Option<Entity>,
+    live_edit_text: Option<&str>,
 ) -> f32 {
     let row_top = y;
 
+    // Compute the title row's actual height first — once the title
+    // wraps to multiple lines, the entire top row needs to grow so the
+    // body / next issue don't overlap. We measure wrap up front because
+    // every offset below (delete button y, expansion start y) is keyed
+    // off the row's bottom edge.
+    let title_char_w = metrics.char_width(TEXT_FONT_SIZE);
+    let chev_w = 14.0_f32;
+    let title_x = ROW_PAD_X + CHECKBOX_SIZE + 6.0 + chev_w + 4.0;
+    let delete_w = 18.0_f32;
+    let title_w = (content_w - title_x - delete_w - ROW_PAD_X).max(20.0);
+    let title_display: String = if issue.title.is_empty() {
+        "(untitled)".to_string()
+    } else {
+        issue.title.clone()
+    };
+    let editing_title = editing == Some(EditTarget::Title(issue.id));
+    let title_lines = if editing_title {
+        // While editing, size from the live wrapped text at the input's
+        // own wrap width (its content width) so the edit box keeps the
+        // same multi-line shape the display had.
+        let live = live_edit_text.unwrap_or(&issue.title);
+        wrap_line_count(live, (title_w - 4.0).max(20.0), title_char_w)
+    } else {
+        wrap_line_count(&title_display, title_w, title_char_w)
+    };
+    let title_text_h = title_lines as f32 * WRAP_LINE_H;
+    let row_h = (title_text_h + 9.0).max(ROW_H);
+
     // Checkbox.
     let cb_x = ROW_PAD_X;
+    // Checkbox and chevron stay pinned to the first text line so they
+    // don't drift downward when the title wraps to more lines.
     let cb_y = y + (ROW_H - CHECKBOX_SIZE) * 0.5;
     let cb_color = if issue.done { accent } else { fg_muted };
     commands.spawn((
@@ -812,7 +1052,6 @@ fn spawn_issue_block(
     // Chevron toggle (▸ / ▾) — clickable region next to the checkbox.
     let chev_x = cb_x + CHECKBOX_SIZE + 6.0;
     let chev_y = y + (ROW_H - CHECKBOX_SIZE) * 0.5;
-    let chev_w = 14.0;
     commands.spawn((
         IssueRowEntity,
         ChildOf(parent),
@@ -833,44 +1072,51 @@ fn spawn_issue_block(
         },
     ));
 
-    // Title.
-    let title_x = chev_x + chev_w + 4.0;
-    let delete_w = 18.0;
-    let title_w = (content_w - title_x - delete_w - ROW_PAD_X).max(20.0);
-    let title_y = y + 2.0;
-    let title_h = ROW_H - 4.0;
-    if editing == Some(EditTarget::Title(issue.id)) {
+    // Title. Position the first line of text so it sits on the same
+    // baseline as the (fixed-size) checkbox/chevron, then let wrapped
+    // lines extend downward and grow `row_h`.
+    let title_y = y + (ROW_H - WRAP_LINE_H) * 0.5;
+    let title_h = title_text_h.max(ROW_H - 4.0);
+    if editing_title {
+        let title_box_h = (title_text_h + 4.0).max(ROW_H - 4.0);
         spawn_inline_input(
             commands,
             parent,
             Vec2::new(title_x, title_y),
-            Vec2::new(title_w, title_h),
+            Vec2::new(title_w, title_box_h),
             input_bg,
             &issue.title,
             input_style.clone(),
             focused,
             pane,
+            EditTarget::Title(issue.id),
+            reuse,
+            true,
         );
     } else {
         let title_color = if issue.done { fg_muted } else { fg };
-        let display = if issue.title.is_empty() {
-            "(untitled)".to_string()
-        } else {
-            issue.title.clone()
-        };
         commands.spawn((
             IssueRowEntity,
             ChildOf(parent),
-            Text2d::new(display),
+            Text2d::new(title_display),
             TextFont {
                 font: font.0.clone(),
                 font_size: TEXT_FONT_SIZE,
                 ..default()
             },
-            LineHeight::Px(ROW_H),
+            LineHeight::Px(WRAP_LINE_H),
             TextColor(title_color),
             Anchor::TOP_LEFT,
             Transform::from_xyz(title_x, -title_y, 0.1),
+            // Use our measured wrap width (which reserves the delete
+            // column) instead of letting pane-bevy's enforcer pick a
+            // wider one — otherwise our line count under-reports and
+            // the row clips.
+            TextBounds {
+                width: Some(title_w),
+                height: None,
+            },
+            PaneContentNoClip,
             IssueHit::Title(issue.id),
             HitSize {
                 local_origin: Vec2::new(title_x, title_y),
@@ -879,7 +1125,7 @@ fn spawn_issue_block(
         ));
     }
 
-    // Delete (×) button.
+    // Delete (×) button. Pinned to the first line of the title.
     let del_x = content_w - ROW_PAD_X - delete_w;
     let del_y = y + (ROW_H - 16.0) * 0.5;
     commands.spawn((
@@ -902,16 +1148,34 @@ fn spawn_issue_block(
         },
     ));
 
-    y += ROW_H;
+    y += row_h;
 
     // Expanded section.
     if issue.expanded {
         let indent_x = title_x;
         let inner_w = (content_w - indent_x - ROW_PAD_X).max(20.0);
 
-        // Body block.
+        // Body block. Wraps in the available column; height grows with
+        // line count.
+        let body_text = if issue.body.is_empty() {
+            "(no description — click to add)".to_string()
+        } else {
+            issue.body.clone()
+        };
+        let body_wrap_w = (inner_w - 12.0).max(20.0); // 4px frame + 6px text indent on each side margin
+        let body_lines = if editing == Some(EditTarget::Body(issue.id)) {
+            // While editing, the box grows to fit the wrapped live text
+            // at the input's own wrap width (its content width), so what
+            // we render lines up with the height we reserve.
+            let live = live_edit_text.unwrap_or(&issue.body);
+            let edit_wrap_w = (inner_w - 4.0).max(20.0);
+            wrap_line_count(live, edit_wrap_w, title_char_w)
+        } else {
+            wrap_line_count(&body_text, body_wrap_w, title_char_w)
+        };
+        let body_text_h = body_lines as f32 * WRAP_LINE_H;
         let body_y = y + 4.0;
-        let body_h = BODY_ROW_H;
+        let body_h = (body_text_h + 8.0).max(BODY_ROW_H);
         if editing == Some(EditTarget::Body(issue.id)) {
             spawn_inline_input(
                 commands,
@@ -923,6 +1187,9 @@ fn spawn_issue_block(
                 input_style.clone(),
                 focused,
                 pane,
+                EditTarget::Body(issue.id),
+                reuse,
+                true,
             );
         } else {
             // Body bg so the click target reads as a slot.
@@ -942,48 +1209,76 @@ fn spawn_issue_block(
                     size: Vec2::new(inner_w, body_h - 4.0),
                 },
             ));
-            let display = if issue.body.is_empty() {
-                "(no description — click to add)".to_string()
-            } else {
-                issue.body.clone()
-            };
             let body_color = if issue.body.is_empty() { fg_muted } else { fg };
             commands.spawn((
                 IssueRowEntity,
                 ChildOf(parent),
-                Text2d::new(display),
+                Text2d::new(body_text),
                 TextFont {
                     font: font.0.clone(),
                     font_size: TEXT_FONT_SIZE,
                     ..default()
                 },
-                LineHeight::Px(TEXT_FONT_SIZE * 1.3),
+                LineHeight::Px(WRAP_LINE_H),
                 TextColor(body_color),
                 Anchor::TOP_LEFT,
                 Transform::from_xyz(indent_x + 6.0, -(body_y + 4.0), 0.1),
+                TextBounds {
+                    width: Some(body_wrap_w),
+                    height: None,
+                },
+                PaneContentNoClip,
             ));
         }
-        y += BODY_ROW_H;
+        y += body_h;
 
         // Field rows.
         let key_col_w = (inner_w * 0.32).clamp(60.0, 140.0);
         let value_col_w = inner_w - key_col_w - delete_w - 8.0;
+        let small_char_w = metrics.char_width(SMALL_FONT_SIZE);
         for (idx, (key, value)) in issue.fields.iter().enumerate() {
+            let value_display = if value.is_empty() {
+                "(empty)".to_string()
+            } else {
+                value.clone()
+            };
+            let editing_this_key = editing == Some(EditTarget::FieldKey(issue.id, idx));
+            let editing_this_val = editing == Some(EditTarget::FieldValue(issue.id, idx));
+            // The value editor uses the regular (TEXT_FONT_SIZE) input
+            // font, so while editing we size from the live wrapped text
+            // at that font's metrics; the display uses the smaller font.
+            let (value_lines, value_line_h) = if editing_this_val {
+                let live = live_edit_text.unwrap_or(value.as_str());
+                (
+                    wrap_line_count(live, (value_col_w - 4.0).max(20.0), title_char_w),
+                    WRAP_LINE_H,
+                )
+            } else {
+                (
+                    wrap_line_count(&value_display, value_col_w, small_char_w),
+                    SMALL_WRAP_LINE_H,
+                )
+            };
+            let value_text_h = value_lines as f32 * value_line_h;
+            let field_h = (value_text_h).max(FIELD_ROW_H - 4.0);
             let row_y = y + 2.0;
-            let row_h = FIELD_ROW_H - 4.0;
 
-            // Key
-            if editing == Some(EditTarget::FieldKey(issue.id, idx)) {
+            // Key — always single line in practice; pin to first line.
+            let key_line_h = (FIELD_ROW_H - 4.0).min(field_h);
+            if editing_this_key {
                 spawn_inline_input(
                     commands,
                     parent,
                     Vec2::new(indent_x, row_y),
-                    Vec2::new(key_col_w, row_h),
+                    Vec2::new(key_col_w, key_line_h),
                     input_bg,
                     key,
                     input_style.clone(),
                     focused,
                     pane,
+                    EditTarget::FieldKey(issue.id, idx),
+                    reuse,
+                    false,
                 );
             } else {
                 commands.spawn((
@@ -995,61 +1290,64 @@ fn spawn_issue_block(
                         font_size: SMALL_FONT_SIZE,
                         ..default()
                     },
-                    LineHeight::Px(row_h),
+                    LineHeight::Px(key_line_h),
                     TextColor(fg_muted),
                     Anchor::TOP_LEFT,
                     Transform::from_xyz(indent_x, -row_y, 0.1),
                     IssueHit::FieldKey(issue.id, idx),
                     HitSize {
                         local_origin: Vec2::new(indent_x, row_y),
-                        size: Vec2::new(key_col_w, row_h),
+                        size: Vec2::new(key_col_w, key_line_h),
                     },
                 ));
             }
 
-            // Value
+            // Value — wraps to value_col_w; height grows with line count.
             let value_x = indent_x + key_col_w + 4.0;
-            if editing == Some(EditTarget::FieldValue(issue.id, idx)) {
+            if editing_this_val {
                 spawn_inline_input(
                     commands,
                     parent,
                     Vec2::new(value_x, row_y),
-                    Vec2::new(value_col_w, row_h),
+                    Vec2::new(value_col_w, field_h),
                     input_bg,
                     value,
                     input_style.clone(),
                     focused,
                     pane,
+                    EditTarget::FieldValue(issue.id, idx),
+                    reuse,
+                    true,
                 );
             } else {
-                let display = if value.is_empty() {
-                    "(empty)".to_string()
-                } else {
-                    value.clone()
-                };
                 let val_color = if value.is_empty() { fg_muted } else { fg };
                 commands.spawn((
                     IssueRowEntity,
                     ChildOf(parent),
-                    Text2d::new(display),
+                    Text2d::new(value_display),
                     TextFont {
                         font: font.0.clone(),
                         font_size: SMALL_FONT_SIZE,
                         ..default()
                     },
-                    LineHeight::Px(row_h),
+                    LineHeight::Px(SMALL_WRAP_LINE_H),
                     TextColor(val_color),
                     Anchor::TOP_LEFT,
                     Transform::from_xyz(value_x, -row_y, 0.1),
+                    TextBounds {
+                        width: Some(value_col_w),
+                        height: None,
+                    },
+                    PaneContentNoClip,
                     IssueHit::FieldValue(issue.id, idx),
                     HitSize {
                         local_origin: Vec2::new(value_x, row_y),
-                        size: Vec2::new(value_col_w, row_h),
+                        size: Vec2::new(value_col_w, field_h),
                     },
                 ));
             }
 
-            // Field delete (×).
+            // Field delete (×) — pinned to first line.
             let fdel_x = value_x + value_col_w + 4.0;
             commands.spawn((
                 IssueRowEntity,
@@ -1060,18 +1358,18 @@ fn spawn_issue_block(
                     font_size: 12.0,
                     ..default()
                 },
-                LineHeight::Px(row_h),
+                LineHeight::Px(key_line_h),
                 TextColor(fg_muted),
                 Anchor::TOP_LEFT,
                 Transform::from_xyz(fdel_x, -row_y, 0.2),
                 IssueHit::DeleteField(issue.id, idx),
                 HitSize {
                     local_origin: Vec2::new(fdel_x, row_y),
-                    size: Vec2::new(delete_w, row_h),
+                    size: Vec2::new(delete_w, key_line_h),
                 },
             ));
 
-            y += FIELD_ROW_H;
+            y += (field_h + 4.0).max(FIELD_ROW_H);
         }
 
         // "+ Add Field" button.
@@ -1218,8 +1516,13 @@ fn spawn_inline_input(
     style: TextInputStyle,
     focused: &mut ResMut<FocusedTextInput>,
     pane: &mut IssuesPane,
+    target: EditTarget,
+    reuse: Option<Entity>,
+    multiline: bool,
 ) {
-    // Background frame so the active edit slot reads as an input.
+    // Background frame so the active edit slot reads as an input. It
+    // carries the slot's own hit so clicking inside the field re-selects
+    // it (a no-op) rather than dropping out of edit mode.
     commands.spawn((
         IssueRowEntity,
         ChildOf(parent),
@@ -1230,18 +1533,36 @@ fn spawn_inline_input(
         },
         Anchor::TOP_LEFT,
         Transform::from_xyz(origin.x, -origin.y, 0.05),
+        hit_for_target(target),
+        HitSize {
+            local_origin: origin,
+            size,
+        },
     ));
 
-    let input = spawn_text_input(
-        commands,
-        parent,
-        initial,
-        style,
-        size.x - 4.0,
-        Transform::from_xyz(origin.x + 4.0, -(origin.y + 2.0), 0.2),
-    );
+    if let Some(existing) = reuse {
+        // Re-flow only: keep the live input (and its caret/selection).
+        // Reposition it in case rows above shifted; the fresh bg above
+        // already grew to the new wrapped height. The input's own wrap
+        // width is fixed at spawn — a pane resize mid-edit won't re-wrap
+        // until the edit ends, which is acceptable.
+        commands
+            .entity(existing)
+            .insert(Transform::from_xyz(origin.x + 4.0, -(origin.y + 2.0), 0.2));
+        pane.edit_input = Some(existing);
+        pane.edit_target_built = Some(target);
+        return;
+    }
+
+    let transform = Transform::from_xyz(origin.x + 4.0, -(origin.y + 2.0), 0.2);
+    let input = if multiline {
+        spawn_text_input_multiline(commands, parent, initial, style, size.x - 4.0, transform)
+    } else {
+        spawn_text_input(commands, parent, initial, style, size.x - 4.0, transform)
+    };
     commands.entity(input).insert(IssueRowEntity);
     pane.edit_input = Some(input);
+    pane.edit_target_built = Some(target);
     focus_text_input(commands, focused, [], Some(input));
 }
 
