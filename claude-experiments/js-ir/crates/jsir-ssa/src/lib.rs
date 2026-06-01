@@ -8,6 +8,7 @@
 
 pub mod cfg;
 pub mod codegen;
+pub mod constfold;
 pub mod interp;
 pub mod lower;
 pub mod memoize_plan;
@@ -60,6 +61,7 @@ pub struct MemoPlan {
 pub fn plan(file_fn: &jsir_ir::Op) -> Result<MemoPlan, String> {
     let mut cfg = lower::lower_function(file_fn)?;
     ssa::construct(&mut cfg);
+    constfold::fold_constants(&mut cfg);
     let fn_name = cfg.fn_name.clone().unwrap_or_default();
     let ranges = mutability::analyze(&cfg);
     let infos = scopes::analyze(&cfg, &ranges);

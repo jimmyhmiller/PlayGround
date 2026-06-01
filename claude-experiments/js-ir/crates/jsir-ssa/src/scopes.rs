@@ -85,7 +85,16 @@ fn allocations(cfg: &Cfg) -> std::collections::HashSet<Value> {
     for b in &cfg.blocks {
         for ins in &b.instrs {
             if let Some(r) = ins.result {
-                if matches!(ins.op, crate::cfg::Op::MakeObject(_) | crate::cfg::Op::MakeArray(_) | crate::cfg::Op::Call { .. }) {
+                let is_alloc = match &ins.op {
+                    crate::cfg::Op::MakeObject(_) | crate::cfg::Op::MakeArray(_) => true,
+                    // A value-hook call (useState/useRef/useContext/custom) is not
+                    // a fresh memoizable allocation; useMemo/useCallback still are.
+                    crate::cfg::Op::Call { callee, .. } => {
+                        !(is_hook_callee(cfg, *callee) && !is_memo_hook_callee(cfg, *callee))
+                    }
+                    _ => false,
+                };
+                if is_alloc {
                     s.insert(r);
                 }
             }
@@ -97,9 +106,22 @@ fn allocations(cfg: &Cfg) -> std::collections::HashSet<Value> {
 /// Values that derive (transitively) from a parameter — the *reactive* values.
 /// Globals and constants are non-reactive (stable across renders) and never
 /// become dependencies.
-fn reactive_values(cfg: &Cfg) -> std::collections::HashSet<Value> {
+fn reactive_values(cfg: &Cfg, stable: &std::collections::HashSet<Value>) -> std::collections::HashSet<Value> {
     let mut reactive: std::collections::HashSet<Value> = cfg.params.iter().copied().collect();
-    // Block params (phis) and any op whose operand is reactive become reactive.
+    // Hook results are reactive roots, like props/state — a `useState` value, a
+    // `useContext` value, a custom hook's return all change across renders. The
+    // stable hooks (`useRef`) and the setter element are excluded via `stable`.
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if let (Some(res), crate::cfg::Op::Call { callee, .. }) = (ins.result, &ins.op) {
+                if is_hook_callee(cfg, *callee) && !stable.contains(&res) {
+                    reactive.insert(res);
+                }
+            }
+        }
+    }
+    // Block params (phis) and any op whose operand is reactive become reactive —
+    // but a stable value never becomes reactive.
     let mut changed = true;
     while changed {
         changed = false;
@@ -111,7 +133,10 @@ fn reactive_values(cfg: &Cfg) -> std::collections::HashSet<Value> {
             }
             for ins in &b.instrs {
                 if let Some(res) = ins.result {
-                    if !reactive.contains(&res) && ins.op.operands().iter().any(|o| reactive.contains(o)) {
+                    if !reactive.contains(&res)
+                        && !stable.contains(&res)
+                        && ins.op.operands().iter().any(|o| reactive.contains(o))
+                    {
                         reactive.insert(res);
                         changed = true;
                     }
@@ -128,7 +153,7 @@ fn reactive_values(cfg: &Cfg) -> std::collections::HashSet<Value> {
             for (succ, args) in edges {
                 let params = cfg.block(succ).params.clone();
                 for (param, a) in params.iter().zip(args) {
-                    if reactive.contains(&a) && !reactive.contains(param) {
+                    if reactive.contains(&a) && !reactive.contains(param) && !stable.contains(param) {
                         reactive.insert(*param);
                         changed = true;
                     }
@@ -224,10 +249,16 @@ fn join_levels(a: MemoLevel, b: MemoLevel) -> MemoLevel {
 /// [1, 2]` / `return foo()` (no deps, sentinel-guarded) all memoize. Only
 /// member/computed loads are `Conditional` (memoize iff their base is memoized),
 /// and scalars (`const`/global/binary/unary) are `Never`.
-fn op_level(op: &crate::cfg::Op, is_jsx: bool, is_hook: bool) -> MemoLevel {
+fn op_level(op: &crate::cfg::Op, is_jsx: bool, is_value_hook: bool) -> MemoLevel {
     use crate::cfg::Op;
-    let _ = (is_jsx, is_hook); // all calls memoize regardless; kept for callers
+    let _ = is_jsx; // jsx calls memoize like any allocation; kept for callers
     match op {
+        // A "value hook" call (`useState`/`useReducer`/`useContext`/`useRef`/a
+        // custom hook) is NOT itself a memoized scope — React executes it inline
+        // each render and caches the values *derived* from its result, not the
+        // call. (`useMemo`/`useCallback` are the exception: their result IS a
+        // cached value, so they fall through to `Memoized`.)
+        Op::Call { .. } if is_value_hook => MemoLevel::Never,
         // Allocations (literals, `new`, calls) escaping a function are always
         // memoized — this is the core of what the React Compiler caches.
         Op::MakeObject(_) | Op::MakeArray(_) | Op::Call { .. } => MemoLevel::Memoized,
@@ -282,6 +313,91 @@ fn is_hook_callee(cfg: &Cfg, callee: Value) -> bool {
         }
     }
     false
+}
+
+/// Is the call value `callee` a hook that returns a STABLE value React never
+/// memoizes or treats as a dependency? `useRef` (the `{current}` box) is the
+/// canonical one; its identity is guaranteed stable across renders.
+fn is_stable_hook_callee(cfg: &Cfg, callee: Value) -> bool {
+    use crate::cfg::{MemberKey, Op};
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if ins.result == Some(callee) {
+                return matches!(
+                    &ins.op,
+                    Op::Global(name) | Op::Member { prop: MemberKey::Static(name), .. }
+                        if name == "useRef"
+                );
+            }
+        }
+    }
+    false
+}
+
+/// Is `callee` a `useMemo`/`useCallback` call? These hooks produce a *cached*
+/// value (React keeps the memoization), unlike other hooks whose call result is
+/// not itself a scope.
+fn is_memo_hook_callee(cfg: &Cfg, callee: Value) -> bool {
+    use crate::cfg::{MemberKey, Op};
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if ins.result == Some(callee) {
+                return matches!(
+                    &ins.op,
+                    Op::Global(name) | Op::Member { prop: MemberKey::Static(name), .. }
+                        if name == "useMemo" || name == "useCallback"
+                );
+            }
+        }
+    }
+    false
+}
+
+/// The set of STABLE values React never treats as dependencies: `useRef`
+/// results, and the setter/dispatch element (`[1]`) of a `useState`/`useReducer`
+/// destructure (`const [x, setX] = useState()` — `setX` is stable). The setter
+/// is recognised structurally as the computed `[1]` member of a state-hook call
+/// result (how our array-pattern lowering binds it).
+fn stable_values(cfg: &Cfg) -> std::collections::HashSet<Value> {
+    use crate::cfg::{Const, MemberKey, Op};
+    use std::collections::{HashMap, HashSet};
+    let mut def_op: HashMap<Value, &Op> = HashMap::new();
+    let mut one_vals: HashSet<Value> = HashSet::new();
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if let Some(r) = ins.result {
+                def_op.insert(r, &ins.op);
+                if let Op::Const(Const::Num(bits)) = &ins.op {
+                    if f64::from_bits(*bits) == 1.0 {
+                        one_vals.insert(r);
+                    }
+                }
+            }
+        }
+    }
+    let is_state_hook = |callee: Value| -> bool {
+        matches!(def_op.get(&callee),
+            Some(Op::Global(n)) | Some(Op::Member { prop: MemberKey::Static(n), .. })
+                if n == "useState" || n == "useReducer")
+    };
+    let mut stable = HashSet::new();
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            let Some(r) = ins.result else { continue };
+            match &ins.op {
+                Op::Call { callee, .. } if is_stable_hook_callee(cfg, *callee) => {
+                    stable.insert(r);
+                }
+                Op::Member { obj, prop: MemberKey::Computed(c) } if one_vals.contains(c) => {
+                    if matches!(def_op.get(obj), Some(Op::Call { callee, .. }) if is_state_hook(*callee)) {
+                        stable.insert(r);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    stable
 }
 
 /// Is `name` a React hook name? React keys on `use[A-Z]`-style naming for
@@ -370,8 +486,11 @@ pub fn prune_non_escaping(
             if let Some(res) = ins.result {
                 ensure(&mut nodes, res);
                 let is_jsx = matches!(&ins.op, crate::cfg::Op::Call { callee, .. } if is_jsx_callee(cfg, *callee));
-                let is_hook = matches!(&ins.op, crate::cfg::Op::Call { callee, .. } if is_hook_callee(cfg, *callee));
-                let lvl = op_level(&ins.op, is_jsx, is_hook);
+                // A "value hook" call is a hook other than useMemo/useCallback
+                // (which produce cached values): its result is not its own scope.
+                let is_value_hook = matches!(&ins.op, crate::cfg::Op::Call { callee, .. }
+                    if is_hook_callee(cfg, *callee) && !is_memo_hook_callee(cfg, *callee));
+                let lvl = op_level(&ins.op, is_jsx, is_value_hook);
                 {
                     let n = nodes.get_mut(&res).unwrap();
                     n.level = join_levels(n.level, lvl);
@@ -418,7 +537,7 @@ pub fn prune_non_escaping(
                             continue;
                         }
                         let bump = is_jsx
-                            || is_hook
+                            || is_hook_callee(cfg, *callee)
                             || (callee_is_local && is_alloc.contains(o));
                         if bump {
                             ensure(&mut nodes, *o);
@@ -614,7 +733,8 @@ fn instr_global_name(cfg: &Cfg, v: Value) -> Option<String> {
 pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
     use std::collections::{HashMap, HashSet};
     let scopes = infer(cfg, r);
-    let reactive = reactive_values(cfg);
+    let stable = stable_values(cfg);
+    let reactive = reactive_values(cfg, &stable);
 
     // Per-value: defining-op operands, and use sites (Some(user) or None=external
     // i.e. terminator/return). Also the const-defined values.
@@ -818,6 +938,68 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
                 changed = true;
                 break 'scan;
             }
+        }
+    }
+
+    // MergeConsecutiveScopes (React's `mergeReactiveScopesThatInvalidateTogether`,
+    // the equal-dependency case): consecutive reactive scopes in the same block
+    // whose dependency sets are EQUAL invalidate together, so React merges them
+    // into one. The classic case is two adjacent no-dependency allocations
+    // (`return {session_id: getNumber()}` — the call scope and the object scope
+    // both have empty deps → one cache slot, not two). We walk surviving scopes in
+    // program order, folding a pure scope into the immediately preceding pure
+    // scope of the same block with the same deps; a mutable scope is a barrier
+    // that resets the run (its guard must stay its own).
+    let value_block: HashMap<Value, crate::cfg::BlockId> = {
+        let mut m = HashMap::new();
+        for b in &cfg.blocks {
+            for ins in &b.instrs {
+                if let Some(res) = ins.result {
+                    m.insert(res, b.id);
+                }
+            }
+        }
+        m
+    };
+    let scope_block = |w: &Work| -> Option<crate::cfg::BlockId> {
+        w.values
+            .iter()
+            .min_by_key(|v| r.def.get(v).copied().unwrap_or(0))
+            .and_then(|v| value_block.get(v).copied())
+    };
+    let mut order: Vec<usize> = (0..work.len()).filter(|&i| work[i].is_some()).collect();
+    order.sort_by_key(|&i| work[i].as_ref().map(|w| (w.start, w.end)).unwrap_or((0, 0)));
+    let mut prev: Option<usize> = None;
+    for idx in order {
+        let (mutable, block, deps) = match &work[idx] {
+            Some(w) => (w.mutable, scope_block(w), scope_deps(&w.values)),
+            None => continue,
+        };
+        if mutable {
+            prev = None; // barrier: a forced scope keeps its own guard
+            continue;
+        }
+        match prev {
+            Some(p) => {
+                let (pblock, pdeps) = {
+                    let w = work[p].as_ref().unwrap();
+                    (scope_block(w), scope_deps(&w.values))
+                };
+                if pblock == block && pdeps == deps {
+                    // Merge `idx` into `p`; `p` remains the run head.
+                    let from = work[idx].take().unwrap();
+                    let to = work[p].as_mut().unwrap();
+                    for v in &from.values {
+                        owner.insert(*v, p);
+                    }
+                    to.values.extend(from.values);
+                    to.start = to.start.min(from.start);
+                    to.end = to.end.max(from.end);
+                } else {
+                    prev = Some(idx);
+                }
+            }
+            None => prev = Some(idx),
         }
     }
 

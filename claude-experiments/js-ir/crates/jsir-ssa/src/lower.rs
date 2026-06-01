@@ -367,10 +367,37 @@ impl Lower {
                     .collect::<Result<Vec<_>, _>>()?;
                 self.def(op, *cur, Op::Call { callee, args });
             }
-            "jsir.member_expression" => {
+            "jsir.arrow_function_expression" | "jsir.function_expression" => {
+                // A closure is an allocation that captures its free variables. We
+                // do NOT lower the body into the CFG; for the memoization analysis
+                // it suffices to model the closure as an allocation whose operands
+                // are reads of the outer variables it references (its reactive
+                // captures become the scope's dependencies, exactly as React
+                // memoizes `useCallback`-style closures). The reversible JSIR keeps
+                // the real function, so the IR-rewrite codegen reprints it verbatim
+                // — no variable renaming, so this is sound (unlike the retired
+                // string-codegen closure path). Represented as `MakeArray` of the
+                // captures so every allocation/aliasing site treats it uniformly.
+                let caps = self.collect_captures(op, *cur);
+                self.def(op, *cur, Op::MakeArray(caps));
+            }
+            "jsir.member_expression" | "jsir.optional_member_expression" => {
+                // `a.b` and `a?.b` read the same way for the analysis; the `?.`
+                // short-circuit does not change the memoization structure.
                 let obj = self.val(op.operands[0])?;
                 let key = self.member_key(op)?;
                 self.def(op, *cur, Op::Member { obj, prop: key });
+            }
+            "jsir.tagged_template_expression" => {
+                // `` tag`…` `` is a call `tag(strings, ...exprs)`; model it as a
+                // call of the tag with the template value (which carries the
+                // embedded expressions as its dependencies).
+                let callee = self.val(op.operands[0])?;
+                let args = op.operands[1..]
+                    .iter()
+                    .map(|v| self.val(*v))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.def(op, *cur, Op::Call { callee, args });
             }
             "jsir.member_expression_ref" => {
                 // A member l-value (`obj.p = ...`). Record the target.
@@ -397,6 +424,24 @@ impl Lower {
                             let value = self.val(p.operands[0])?;
                             props.push((key, value));
                         }
+                        "jsir.spread_element" => {
+                            // `{...x}` captures `x` into the new object. We record
+                            // it as a captured value (synthetic key) so the object
+                            // aliases and depends on `x`; the reversible IR keeps
+                            // the real spread for codegen, so the key is never
+                            // emitted.
+                            let value = self.val(p.operands[0])?;
+                            props.push((PropKey::Ident("...".into()), value));
+                        }
+                        "jsir.object_method" => {
+                            // `{ m() {…} }` — a method is a closure-valued property.
+                            // Capture its free variables (like an arrow) and record
+                            // it as the property's value.
+                            let caps = self.collect_captures(p, *cur);
+                            let closure = self.cfg.push(*cur, Op::MakeArray(caps));
+                            let key = self.obj_prop_key(p)?;
+                            props.push((key, closure));
+                        }
                         "jsir.exprs_region_end" | "jsir.expr_region_end" => {}
                         _ => self.lower_op(p, cur)?,
                     }
@@ -404,6 +449,19 @@ impl Lower {
                 self.def(op, *cur, Op::MakeObject(props));
             }
             "jsir.parenthesized_expression" => {
+                let inner = self.val(op.operands[0])?;
+                if let Some(r) = op.results.first() {
+                    self.vmap.insert(*r, inner);
+                }
+            }
+            "jsir.spread_element" => {
+                // `...x` in an array/call (object spread is handled inside
+                // `object_expression`). For the analysis, a spread captures its
+                // source into the container — modelling the spread's result *as*
+                // its inner value makes the container alias and depend on the
+                // source (`[...a]` invalidates when `a` does), which is what the
+                // memoization analysis needs. The reversible IR keeps the real
+                // spread, so emitted code is unaffected.
                 let inner = self.val(op.operands[0])?;
                 if let Some(r) = op.results.first() {
                     self.vmap.insert(*r, inner);
@@ -527,6 +585,78 @@ impl Lower {
                 }
             }
         }
+    }
+
+    /// Collect a closure's free-variable captures: emit a `ReadVar` for each
+    /// distinct outer variable its body references, returning those values. An
+    /// identifier is a capture iff its resolved symbol `(name, def_scope)` is one
+    /// we have already interned (i.e. declared in an enclosing function we are
+    /// lowering); the closure's own params/locals live in a different scope and so
+    /// are not matched. We over-approximate at property granularity (`props.a`
+    /// captures `props`), which preserves the *number* of dependencies React uses.
+    fn collect_captures(&mut self, op: &IrOp, cur: BlockId) -> Vec<Value> {
+        // Flatten every op in the closure body.
+        let mut ops: Vec<&IrOp> = Vec::new();
+        let mut stack: Vec<&IrOp> = Vec::new();
+        for r in &op.regions {
+            for b in &r.blocks {
+                for o in &b.ops {
+                    stack.push(o);
+                }
+            }
+        }
+        while let Some(o) = stack.pop() {
+            ops.push(o);
+            for r in &o.regions {
+                for b in &r.blocks {
+                    for c in &b.ops {
+                        stack.push(c);
+                    }
+                }
+            }
+        }
+        // Map each identifier value that is the base of a static member access to
+        // the property name, so we capture at property-path granularity (React's
+        // dependency granularity: `() => p.a + p.b` depends on `p.a` and `p.b`,
+        // two deps — not on `p`). First-level only (`p.a.b` captures `p.a`), which
+        // matches React's dependency *count* in the common cases.
+        let mut member_prop: HashMap<IrValue, String> = HashMap::new();
+        for o in &ops {
+            if o.name == "jsir.member_expression" {
+                if let (Some(&base), Some(prop)) = (o.operands.first(), member_prop_name(o)) {
+                    member_prop.entry(base).or_insert(prop);
+                }
+            }
+        }
+        // For each identifier resolving to an already-interned OUTER variable,
+        // capture the (var, optional property) path it is read through. Deduped.
+        let mut keys: Vec<(VarId, Option<String>)> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for o in &ops {
+            if o.name != "jsir.identifier" {
+                continue;
+            }
+            let Some(sym) = o.trivia.as_ref().and_then(|t| t.referenced_symbol.as_ref()) else {
+                continue;
+            };
+            let vkey = (sym.name.clone(), sym.def_scope_uid);
+            let Some(&var) = self.vars.get(&vkey) else { continue };
+            let prop = o.results.first().and_then(|r| member_prop.get(r)).cloned();
+            if seen.insert((var, prop.clone())) {
+                keys.push((var, prop));
+            }
+        }
+        // Synthesize the capturing reads in the outer block.
+        let mut caps = Vec::new();
+        for (var, prop) in keys {
+            let base = self.cfg.push(cur, Op::ReadVar(var));
+            let v = match prop {
+                Some(p) => self.cfg.push(cur, Op::Member { obj: base, prop: MemberKey::Static(p) }),
+                None => base,
+            };
+            caps.push(v);
+        }
+        caps
     }
 
     /// Define an instruction with a result and map the jsir result to it.

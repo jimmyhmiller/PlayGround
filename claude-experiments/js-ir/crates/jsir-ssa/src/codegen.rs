@@ -266,6 +266,7 @@ pub fn compile(src: &str) -> Result<String, String> {
     let ir = jsir_swc::source_to_ir(src)?;
     let mut cfg = crate::lower::lower_function(&ir)?;
     crate::ssa::construct(&mut cfg);
+    crate::constfold::fold_constants(&mut cfg);
     // We compile every function, matching React's test harness
     // (`compilationMode: 'all'`) rather than the production `'infer'` gate (which
     // only compiles components/hooks). The analysis is name-agnostic, so a
