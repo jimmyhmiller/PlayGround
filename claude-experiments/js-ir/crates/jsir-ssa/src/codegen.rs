@@ -252,18 +252,35 @@ pub fn is_component_or_hook(name: &str) -> bool {
 }
 
 /// Compile a source snippet's function the way the React Compiler would: if it
-/// is a component/hook, emit the memoized version prefixed with the
-/// `react/compiler-runtime` import; otherwise return the source unchanged.
+/// is a component/hook, emit the memoized version (the `react/compiler-runtime`
+/// import is prepended by the IR-rewrite pass); otherwise return the source
+/// unchanged.
+///
+/// MEMOIZED branch: the production path is now a JSIR -> JSIR transform
+/// ([`crate::memoize_plan::build_layout`] + [`jsir_transforms::memoize`]),
+/// printed through the reversible IR path. The frozen string emitter
+/// ([`emit_memoized`]) is retained only as the parity reference (and is still
+/// exercised by the `tests/codegen.rs` node-semantic tests, which call it
+/// directly).
 pub fn compile(src: &str) -> Result<String, String> {
-    let mut cfg = crate::lower(src)?;
+    let ir = jsir_swc::source_to_ir(src)?;
+    let mut cfg = crate::lower::lower_function(&ir)?;
     crate::ssa::construct(&mut cfg);
     let name = cfg.fn_name.clone().unwrap_or_default();
     if !is_component_or_hook(&name) {
         // Not a component/hook: pass through (round-tripped from the IR).
-        return jsir_swc::ir_to_source(&jsir_swc::source_to_ir(src)?);
+        return jsir_swc::ir_to_source(&ir);
     }
     let r = crate::mutability::analyze(&cfg);
     let infos = crate::scopes::analyze(&cfg, &r);
-    let body = emit_memoized(&cfg, &infos, &name)?;
-    Ok(format!("{REACT_IMPORT}{body}"))
+    let layout = crate::memoize_plan::build_layout(&cfg, &infos, &r)?;
+    // Nothing actually memoized (no surviving escaping scope): emit the function
+    // unchanged rather than a degenerate `const $ = _c(0)` scaffold + runtime
+    // import. React leaves such functions un-memoized, so emitting the empty
+    // cache shell is a pure over-memoization (it shows up as `ours_only`).
+    if layout.cache_size == 0 {
+        return jsir_swc::ir_to_source(&ir);
+    }
+    let result = jsir_transforms::memoize::memoize_file(&ir, &layout)?;
+    jsir_swc::ir_to_source(&result.file)
 }

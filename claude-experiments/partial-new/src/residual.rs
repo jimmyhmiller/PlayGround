@@ -38,6 +38,99 @@ impl<Op, Cond> Program<Op, Cond> {
     }
 }
 
+/// A generic post-pass: thread jumps through empty forwarding blocks and drop
+/// unreachable blocks, then renumber. Online specialization of static loops
+/// leaves chains of empty `br` blocks (one per unrolled iteration); this
+/// collapses them. It only inspects `ops.is_empty()` and terminator targets, so
+/// it is fully generic over the client payloads.
+pub fn simplify<Op, Cond>(prog: &mut Program<Op, Cond>) {
+    let n = prog.blocks.len();
+
+    // A block is a pure forwarder if it has no ops and an unconditional Br.
+    let immediate: Vec<Option<BlockId>> = prog
+        .blocks
+        .iter()
+        .map(|b| match (&b.term, b.ops.is_empty()) {
+            (Terminator::Br(t), true) => Some(*t),
+            _ => None,
+        })
+        .collect();
+
+    // Resolve each block to its ultimate non-forwarding target, guarding the
+    // empty-self-loop case (`while 1 {}`) so we don't spin.
+    let resolve = |start: BlockId| -> BlockId {
+        let mut cur = start;
+        let mut seen = vec![false; n];
+        while let Some(next) = immediate[cur.0] {
+            if next == cur || seen[cur.0] {
+                break;
+            }
+            seen[cur.0] = true;
+            cur = next;
+        }
+        cur
+    };
+
+    for b in &mut prog.blocks {
+        match &mut b.term {
+            Terminator::Br(t) => *t = resolve(*t),
+            Terminator::Cond { t, f, .. } => {
+                *t = resolve(*t);
+                *f = resolve(*f);
+            }
+            _ => {}
+        }
+    }
+    prog.entry = resolve(prog.entry);
+
+    // Mark reachable blocks from the (resolved) entry.
+    let mut reachable = vec![false; n];
+    let mut stack = vec![prog.entry];
+    while let Some(b) = stack.pop() {
+        if reachable[b.0] {
+            continue;
+        }
+        reachable[b.0] = true;
+        match &prog.blocks[b.0].term {
+            Terminator::Br(t) => stack.push(*t),
+            Terminator::Cond { t, f, .. } => {
+                stack.push(*t);
+                stack.push(*f);
+            }
+            _ => {}
+        }
+    }
+
+    // Renumber, keeping only reachable blocks.
+    let mut remap = vec![BlockId(0); n];
+    let mut next = 0usize;
+    for (i, r) in reachable.iter().enumerate() {
+        if *r {
+            remap[i] = BlockId(next);
+            next += 1;
+        }
+    }
+    let mut old = std::mem::take(&mut prog.blocks);
+    let mut kept = Vec::with_capacity(next);
+    for (i, b) in old.drain(..).enumerate() {
+        if reachable[i] {
+            kept.push(b);
+        }
+    }
+    for b in &mut kept {
+        match &mut b.term {
+            Terminator::Br(t) => *t = remap[t.0],
+            Terminator::Cond { t, f, .. } => {
+                *t = remap[t.0];
+                *f = remap[f.0];
+            }
+            _ => {}
+        }
+    }
+    prog.entry = remap[prog.entry.0];
+    prog.blocks = kept;
+}
+
 impl<Op: fmt::Display, Cond: fmt::Display> fmt::Display for Program<Op, Cond> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, b) in self.blocks.iter().enumerate() {

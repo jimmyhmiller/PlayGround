@@ -60,17 +60,28 @@
 //! - `Apply(TypeRef, [..])` (a generic struct/enum instantiation) ← handled by
 //!   the same struct/enum path; the head's declared type drives the layout.
 //!
+//! - **`String` / `Bytes`** ← JSON string. These are runtime-reserved varlen
+//!   shapes with no wire value kind, so they do NOT go through the wire format.
+//!   Instead we allocate the heap object directly in the eval runtime's heap via
+//!   [`crate::runtime::ai_str_new`] (header + count + memcpy'd UTF-8 bytes) and
+//!   pass the pointer as the arg. `Bytes` shares the String shape, same call.
+//! - **`Array<T>`** ← JSON array. Also a runtime-reserved varlen-Values shape;
+//!   built directly via [`crate::runtime::ai_array_new`] + per-element
+//!   [`crate::runtime::ai_array_set`]. Each element is built recursively *by the
+//!   element type* (so struct/enum/String/nested-Array elements all work). Array
+//!   slots are uniform boxed pointers: a SCALAR element (`Int`/`Float`/`Bool`)
+//!   is boxed via [`crate::runtime::ai_gc_box_int`] — a type-agnostic 8-byte box
+//!   — and re-interpreted per the element type on the way out, so `Array<Int>`,
+//!   `Array<Float>`, and `Array<Bool>` ALL round-trip. Pointer-shaped elements
+//!   are stored as-is. (A `List<T>` can ALSO be passed — it's a cons-cell enum.)
+//! - **structs / enums** are built field-by-field directly in the heap, so ANY
+//!   field/payload type composes: a struct with a `String` field, an enum
+//!   carrying an `Array`, a nested struct, etc. all work.
+//!
 //! ### Argument types that remain Unsupported (and why)
 //!
-//! - **`String` / `Bytes`** — the wire format ([`crate::wire`]) has exactly four
-//!   value kinds (Int/Closure/Struct/Enum); there is no `String` kind, and
-//!   `decode_value` cannot build a heap varlen-bytes object from data. (Strings
-//!   are a runtime-reserved shape, not a content-addressed struct/enum.) Until
-//!   the wire format grows a String kind, String *args* are refused honestly.
-//! - **`Array<T>`** — likewise a varlen-Values runtime shape with no wire kind;
-//!   `decode_value` cannot build one. (Note: a `List<T>` *can* be passed — it's
-//!   a cons-cell enum, which goes through the enum wire path.)
 //! - **`fn(..)` / closures** — a closure can't be constructed from JSON data.
+//! - **bare `TypeVar` / `SelfRef`** — no concrete shape to build against.
 //!
 //! ### Arity
 //!
@@ -100,9 +111,10 @@ use crate::net::{
 };
 use crate::parser::parse_module;
 use crate::resolve::{AtBinding, ExternSig, ResolvedDef, ResolvedModule, resolve_module};
-use crate::runtime::{Runtime, Thread};
+use crate::runtime::{
+    Runtime, Thread, ai_array_new, ai_array_set, ai_gc_box_int, ai_str_new,
+};
 use crate::stdlib::SOURCE as STDLIB;
-use crate::wire::{WireValue, decode_value};
 use inkwell::context::Context;
 
 /// A structured failure from [`eval`]. Each variant maps to a stable `kind`
@@ -159,8 +171,28 @@ pub struct Evaluated {
 }
 
 /// `true` iff `t` is exactly the `Int` builtin.
-fn is_int(t: &Type) -> bool {
-    matches!(t, Type::Builtin(b) if b == "Int")
+/// A scalar that, when stored in a boxed slot (an `Array<T>` element or a
+/// generic `TypeVar` field), is carried as an 8-byte value inside a `BoxedInt`
+/// heap box. `Int`, `Float` (the f64 bit-pattern), and `Bool` (0/1) are all
+/// 8-byte scalars and share the SAME box/unbox machinery (`ai_gc_box_int` /
+/// `ai_gc_unbox_int`) — the box is type-agnostic, only the interpretation of
+/// the unboxed i64 differs. This is why an `Array<Float>` or `Array<Bool>` is
+/// just as buildable/renderable as an `Array<Int>`: same bytes, different lens.
+fn is_boxed_scalar(t: &Type) -> bool {
+    matches!(t, Type::Builtin(b) if b == "Int" || b == "Float" || b == "Bool")
+}
+
+/// Interpret an already-unboxed 8-byte scalar `bits` as JSON per its type.
+fn render_scalar_bits(t: &Type, bits: i64) -> Option<Json> {
+    match t {
+        Type::Builtin(b) => match b.as_str() {
+            "Int" => Some(Json::Int(bits)),
+            "Float" => Some(Json::Float(f64::from_bits(bits as u64))),
+            "Bool" => Some(Json::Bool(bits != 0)),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Re-resolve the stdlib to recover its extern signatures. Externs aren't
@@ -509,12 +541,15 @@ impl<'a> RenderCtx<'a> {
         is_pointer: bool,
         bits: i64,
     ) -> Result<Json, EvalError> {
-        // A concrete `Int` stored in a generic (TypeVar) slot is a *boxed*
-        // pointer at the ABI level: the shape says pointer, the type says Int.
-        // Unbox honestly.
-        if is_int(ty) && is_pointer {
+        // A concrete scalar (`Int`/`Float`/`Bool`) stored in a boxed slot is a
+        // *boxed* pointer at the ABI level: the shape says pointer, the type
+        // says scalar. All three share the same 8-byte box; unbox the bits and
+        // interpret them per the declared type. (Float = f64 bit-pattern,
+        // Bool = 0/1.)
+        if is_boxed_scalar(ty) && is_pointer {
             let unboxed = unsafe { crate::runtime::ai_gc_unbox_int(bits as *const u8) };
-            return Ok(Json::Int(unboxed));
+            return render_scalar_bits(ty, unboxed)
+                .ok_or_else(|| EvalError::Unsupported("unreachable: boxed scalar".to_string()));
         }
         unsafe { self.render(ty, bits) }
     }
@@ -602,106 +637,134 @@ fn name_of(cb: &Codebase, h: &Hash) -> Option<String> {
 // =============================================================================
 // Argument building
 //
-// Each JSON argument is converted to wire bytes per the corresponding
-// parameter's *declared* type, then `wire::decode_value` allocates a real
-// heap object of that type in the eval runtime's heap. The wire format
-// (see `wire.rs`) has four kinds:
-//   0 = Int     [kind][i64 BE]
-//   1 = Closure (not built from JSON — Unsupported)
-//   2 = Struct  [kind][32-byte struct_ref][u32 n_fields][field values…]
-//   3 = Enum    [kind][32-byte enum_ref][u32 variant_index][u8 has_payload][payload?]
-// Float is an Int kind carrying the f64 bit-pattern; Bool is Int 0/1.
+// Each JSON argument is built DIRECTLY as a real heap object (or raw scalar) of
+// its declared parameter type in the eval runtime's heap — see `build_arg`.
+// We deliberately do NOT route through the wire format (`wire::encode_value` /
+// `decode_value`): the wire format has no value kind for `String`/`Bytes`/
+// `Array`, so a struct or enum *containing* one of those couldn't be built that
+// way. Direct construction (`ai_str_new`, `ai_array_new`, `ai_gc_alloc_closure`
+// + per-field recursion) composes uniformly: any field/element/payload type is
+// built by its own declared type, so `Array<Float>`, a struct with a `String`
+// field, an enum carrying an `Array`, etc. all work. A shape/type mismatch is a
+// structured error; we never emit garbage.
 // =============================================================================
 
-/// Recursively encode a single JSON `json` to wire bytes in `out`, validating
-/// it against the declared parameter `ty`. The codebase `cb` resolves
-/// `TypeRef` hashes to their struct/enum `Def`s so we know field/variant
-/// layout. On a shape/type mismatch we return a structured error and emit no
-/// garbage. The produced bytes are the exact inverse of `wire::encode_value`,
-/// so a subsequent `decode_value` builds a real heap object.
-fn json_arg_to_wire(
+/// A short human name for a JSON value's shape, for error messages.
+fn json_shape(j: &Json) -> &'static str {
+    match j {
+        Json::Null => "null",
+        Json::Bool(_) => "a boolean",
+        Json::Int(_) => "an integer",
+        Json::Float(_) => "a float",
+        Json::Str(_) => "a string",
+        Json::Array(_) => "an array",
+        Json::Object(_) => "an object",
+    }
+}
+
+/// Build a single call argument as a raw `i64` (scalar or heap pointer) in the
+/// eval runtime's heap, validating it against the declared parameter `ty`.
+///
+/// This is the single entry point the call loop uses. Every type is built
+/// DIRECTLY (no wire format), recursively by its declared type:
+///
+/// - scalars (`Int`/`Float`/`Bool`) return a raw 8-byte value (Float = f64
+///   bit-pattern, Bool = 0/1).
+/// - `String` / `Bytes` / `Array<T>` are runtime-reserved varlen shapes,
+///   allocated via the runtime constructors (`ai_str_new`, `ai_array_new` +
+///   `ai_array_set`) and returned as heap pointers.
+/// - user struct / enum (and generic instantiations) are allocated via
+///   `ai_gc_alloc_closure` and each field/payload built by recursing through
+///   `build_arg` on its declared type (see `build_named_arg`), so any
+///   composition (a String field, an Array payload, ...) works.
+///
+/// All are REAL heap objects / honest scalars of the correct shape — never
+/// fabricated values. A JSON shape that doesn't match the declared type is a
+/// structured error.
+///
+/// # Safety
+/// `rt` must be installed (so its `Thread` has `string_ti`/`array_ti`/
+/// `boxed_int_ti` initialised) and freshly allocated objects must stay alive
+/// across the subsequent call (no GC between build and call — the eval-heap
+/// assumption documented at the call site).
+unsafe fn build_arg(
     cb: &Codebase,
+    rt: &Runtime,
     ty: &Type,
     json: &Json,
-    out: &mut Vec<u8>,
-) -> Result<(), EvalError> {
+) -> Result<i64, EvalError> {
+    let thread = rt.thread_ptr();
     match ty {
-        Type::Builtin(b) => match b.as_str() {
-            "Int" => {
-                let n = json.as_i64().ok_or_else(|| {
-                    EvalError::BadParams(format!(
-                        "expected an integer for an `Int` parameter, got {}",
+        // --- Scalars: a raw 8-byte value (Int / Float-bits / Bool). ---
+        Type::Builtin(b) if b == "Int" => {
+            let n = json.as_i64().ok_or_else(|| {
+                EvalError::BadParams(format!(
+                    "expected an integer for an `Int` parameter, got {}",
+                    json_shape(json)
+                ))
+            })?;
+            Ok(n)
+        }
+        Type::Builtin(b) if b == "Float" => {
+            let f = match json {
+                Json::Float(f) => *f,
+                Json::Int(i) => *i as f64,
+                _ => {
+                    return Err(EvalError::BadParams(format!(
+                        "expected a number for a `Float` parameter, got {}",
                         json_shape(json)
-                    ))
-                })?;
-                push_wire_int(out, n);
-                Ok(())
-            }
-            "Float" => {
-                let f = match json {
-                    Json::Float(f) => *f,
-                    Json::Int(i) => *i as f64,
-                    _ => {
-                        return Err(EvalError::BadParams(format!(
-                            "expected a number for a `Float` parameter, got {}",
-                            json_shape(json)
-                        )));
-                    }
-                };
-                // Float crosses the ABI as the i64 bit-pattern of the f64.
-                push_wire_int(out, f.to_bits() as i64);
-                Ok(())
-            }
-            "Bool" => {
-                let v = json.as_bool().ok_or_else(|| {
-                    EvalError::BadParams(format!(
-                        "expected a boolean for a `Bool` parameter, got {}",
-                        json_shape(json)
-                    ))
-                })?;
-                push_wire_int(out, if v { 1 } else { 0 });
-                Ok(())
-            }
-            "String" | "Bytes" => Err(EvalError::Unsupported(format!(
-                "`{}` arguments are not supported: the wire format has no String/Bytes value \
-                 kind, so a heap string can't be built from JSON data. (Strings are a \
-                 runtime-reserved shape, not a content-addressed struct/enum.)",
-                b
-            ))),
-            other => Err(EvalError::Unsupported(format!(
-                "cannot build an argument of builtin type `{}`",
-                other
-            ))),
-        },
-        Type::TypeRef(h) => json_arg_ref_to_wire(cb, *h, json, out),
-        Type::Apply(head, _args) => {
-            // A generic instantiation. `Array<T>` is a runtime varlen shape with
-            // no wire kind — Unsupported. A `TypeRef`-headed Apply (a generic
-            // struct/enum like `List<Int>` or `Option<Int>`) is built by the
-            // same struct/enum path keyed on the head hash; the wire format
-            // stores no type arguments (the heap layout is uniform/boxed), so we
-            // encode against the head's declared fields/variants directly.
-            if let Type::Builtin(b) = head.as_ref() {
-                if b == "Array" {
-                    return Err(EvalError::Unsupported(
-                        "`Array<...>` arguments are not supported: an Array is a runtime \
-                         varlen-Values shape with no wire value kind, so it can't be built from \
-                         JSON. (A cons-cell `List<...>` CAN be passed — it's an enum.)"
-                            .to_string(),
-                    ));
+                    )));
                 }
-                return Err(EvalError::Unsupported(format!(
-                    "cannot build an argument of applied builtin type `{}<...>`",
-                    b
-                )));
-            }
+            };
+            Ok(f.to_bits() as i64)
+        }
+        Type::Builtin(b) if b == "Bool" => {
+            let v = json.as_bool().ok_or_else(|| {
+                EvalError::BadParams(format!(
+                    "expected a boolean for a `Bool` parameter, got {}",
+                    json_shape(json)
+                ))
+            })?;
+            Ok(if v { 1 } else { 0 })
+        }
+        // --- Runtime-reserved varlen shapes: built directly in the heap. ---
+        Type::Builtin(b) if b == "String" || b == "Bytes" => {
+            let s = match json {
+                Json::Str(s) => s,
+                _ => {
+                    return Err(EvalError::BadParams(format!(
+                        "expected a string for a `{}` parameter, got {}",
+                        b,
+                        json_shape(json)
+                    )));
+                }
+            };
+            let bytes = s.as_bytes();
+            let ptr = unsafe { ai_str_new(thread, bytes.as_ptr(), bytes.len() as i64) };
+            Ok(ptr as i64)
+        }
+        Type::Apply(head, args) if matches!(head.as_ref(), Type::Builtin(b) if b == "Array") => {
+            let elem_ty = args.first().ok_or_else(|| {
+                EvalError::Unsupported("`Array<...>` argument with no element type".to_string())
+            })?;
+            unsafe { build_array_arg(cb, rt, elem_ty, json) }
+        }
+        // --- User struct / enum (incl. generic instantiations): built field-
+        //     by-field directly in the heap so ANY field type composes
+        //     (a struct with a String field, an enum carrying an Array, etc.).
+        //     This is why we do NOT route these through the wire format — the
+        //     wire format has no String/Array value kind, so a struct
+        //     *containing* one couldn't be built that way.
+        Type::TypeRef(h) => unsafe { build_named_arg(cb, rt, *h, &[], json) },
+        Type::Apply(head, type_args) => {
             if let Type::TypeRef(h) = head.as_ref() {
-                return json_arg_ref_to_wire(cb, *h, json, out);
+                unsafe { build_named_arg(cb, rt, *h, type_args, json) }
+            } else {
+                Err(EvalError::Unsupported(format!(
+                    "cannot build an argument of applied type with head `{}`",
+                    render_ret_type(cb, head)
+                )))
             }
-            Err(EvalError::Unsupported(format!(
-                "cannot build an argument of applied type with head `{}`",
-                render_ret_type(cb, head)
-            )))
         }
         Type::TypeVar(_) => Err(EvalError::Unsupported(
             "parameter has a generic (TypeVar) type with no concrete shape to build against"
@@ -713,16 +776,30 @@ fn json_arg_to_wire(
         Type::FnType { .. } => Err(EvalError::Unsupported(
             "function/closure arguments can't be built from JSON data".to_string(),
         )),
+        Type::Builtin(other) => Err(EvalError::Unsupported(format!(
+            "cannot build an argument of builtin type `{}`",
+            other
+        ))),
     }
 }
 
-/// Encode a JSON value against a named struct/enum `TypeRef(h)`.
-fn json_arg_ref_to_wire(
+/// Build a user `struct`/`enum` argument (named by content hash `h`, with
+/// `type_args` substituted for its type parameters) directly in `rt`'s heap.
+///
+/// We mirror `wire::decode_struct`/`decode_enum`'s allocation (`ai_gc_alloc_closure`
+/// + the shape's field offsets) but build each field/payload by recursing
+/// through [`build_arg`] on its DECLARED type — so a `String`/`Array`/nested
+/// struct field is constructed by its own direct-heap path. Scalar fields are
+/// stored raw at their slot; pointer fields store the built pointer; a boxed
+/// scalar in a generic (`TypeVar`) field is boxed via `ai_gc_box_int`.
+unsafe fn build_named_arg(
     cb: &Codebase,
+    rt: &Runtime,
     h: Hash,
+    type_args: &[Type],
     json: &Json,
-    out: &mut Vec<u8>,
-) -> Result<(), EvalError> {
+) -> Result<i64, EvalError> {
+    let thread = rt.thread_ptr();
     let def = cb
         .load_def(&h)
         .map_err(|e| EvalError::Codebase(format!("load_def {}: {:?}", h, e)))?;
@@ -738,8 +815,6 @@ fn json_arg_ref_to_wire(
                     )));
                 }
             };
-            // Reject extra keys so a typo surfaces instead of being silently
-            // dropped.
             for key in obj.keys() {
                 if !fields.iter().any(|(fname, _)| fname == key) {
                     return Err(EvalError::BadParams(format!(
@@ -749,14 +824,29 @@ fn json_arg_ref_to_wire(
                     )));
                 }
             }
-            out.push(2); // kind = Struct
-            out.extend_from_slice(h.as_bytes());
-            let n: u32 = fields.len().try_into().map_err(|_| {
-                EvalError::Unsupported("struct has more fields than fit in u32".to_string())
+            // Pull the runtime shape (field offsets + pointer-ness).
+            let ti = rt.type_info_for(&h).ok_or_else(|| {
+                EvalError::Unsupported(format!("no runtime shape for struct {}", h))
             })?;
-            out.extend_from_slice(&n.to_be_bytes());
-            // Fields in DECLARED order (the decoder replays the same order).
-            for (fname, fty) in &fields {
+            let metas = match rt.shape_meta.get(&h) {
+                Some(ShapeMeta::Struct { fields: fm, .. }) => fm.clone(),
+                _ => {
+                    return Err(EvalError::Unsupported(format!(
+                        "runtime shape for {} is not a struct",
+                        h
+                    )));
+                }
+            };
+            if metas.len() != fields.len() {
+                return Err(EvalError::Unsupported(format!(
+                    "struct `{}` shape/def field-count disagree ({} vs {})",
+                    h,
+                    metas.len(),
+                    fields.len()
+                )));
+            }
+            let ptr = unsafe { crate::runtime::ai_gc_alloc_closure(thread, ti) };
+            for (idx, (fname, fty)) in fields.iter().enumerate() {
                 let fval = obj.get(fname).ok_or_else(|| {
                     EvalError::BadParams(format!(
                         "struct `{}` is missing field `{}`",
@@ -764,93 +854,178 @@ fn json_arg_ref_to_wire(
                         fname
                     ))
                 })?;
-                json_arg_to_wire(cb, fty, fval, out)?;
+                let concrete = subst(fty, type_args);
+                unsafe { store_built_field(cb, rt, ptr, &metas[idx], &concrete, fval)? };
             }
-            Ok(())
+            Ok(ptr as i64)
         }
         Def::Enum { variants, .. } => {
-            // Two accepted JSON shapes:
-            //   "VariantName"            — a nullary variant.
-            //   {"VariantName": payload} — a variant with a payload.
-            let (vname, payload): (&str, Option<&Json>) = match json {
+            // `{"Variant": payload}` (one key) or bare `"Variant"` (nullary).
+            let (vname, payload_json): (&str, Option<&Json>) = match json {
                 Json::Str(s) => (s.as_str(), None),
                 Json::Object(m) if m.len() == 1 => {
                     let (k, v) = m.iter().next().unwrap();
                     (k.as_str(), Some(v))
                 }
-                Json::Object(_) => {
-                    return Err(EvalError::BadParams(format!(
-                        "enum `{}` value must be a single-key object {{\"Variant\": payload}} \
-                         or a bare \"Variant\" string",
-                        name_of(cb, &h).unwrap_or_else(|| h.to_hex()[..8].to_string())
-                    )));
-                }
                 _ => {
                     return Err(EvalError::BadParams(format!(
-                        "expected a string or single-key object for enum `{}`, got {}",
+                        "expected `\"Variant\"` or `{{\"Variant\": payload}}` for enum `{}`, got {}",
                         name_of(cb, &h).unwrap_or_else(|| h.to_hex()[..8].to_string()),
                         json_shape(json)
                     )));
                 }
             };
-            let idx = variants.iter().position(|(n, _)| n == vname).ok_or_else(|| {
-                EvalError::BadParams(format!(
-                    "enum `{}` has no variant `{}`",
-                    name_of(cb, &h).unwrap_or_else(|| h.to_hex()[..8].to_string()),
-                    vname
-                ))
+            let variant_index = variants
+                .iter()
+                .position(|(n, _)| n == vname)
+                .ok_or_else(|| {
+                    EvalError::BadParams(format!(
+                        "enum `{}` has no variant `{}`",
+                        name_of(cb, &h).unwrap_or_else(|| h.to_hex()[..8].to_string()),
+                        vname
+                    ))
+                })?;
+            let payload_ty = &variants[variant_index].1;
+            let variant_hash = crate::codegen::derive_variant_hash(&h, vname);
+            let ti = rt.type_info_for(&variant_hash).ok_or_else(|| {
+                EvalError::Unsupported(format!("no runtime shape for variant {}::{}", h, vname))
             })?;
-            let (_, decl_payload) = &variants[idx];
-            out.push(3); // kind = Enum
-            out.extend_from_slice(h.as_bytes());
-            out.extend_from_slice(&(idx as u32).to_be_bytes());
-            match (decl_payload, payload) {
-                (None, None) => {
-                    out.push(0); // has_payload = 0
-                    Ok(())
+            let (tag_offset, payload_meta) = match rt.shape_meta.get(&variant_hash) {
+                Some(ShapeMeta::EnumVariant {
+                    tag_offset,
+                    payload,
+                    ..
+                }) => (*tag_offset, payload.clone()),
+                _ => {
+                    return Err(EvalError::Unsupported(format!(
+                        "runtime shape for variant {}::{} is not an EnumVariant",
+                        h, vname
+                    )));
                 }
-                (Some(pty), Some(pjson)) => {
-                    out.push(1); // has_payload = 1
-                    json_arg_to_wire(cb, pty, pjson, out)
+            };
+            let ptr = unsafe { crate::runtime::ai_gc_alloc_closure(thread, ti) };
+            unsafe {
+                *(ptr.add(tag_offset as usize) as *mut u32) = variant_index as u32;
+            }
+            match (payload_ty, payload_meta, payload_json) {
+                (None, None, None) => Ok(ptr as i64),
+                (Some(pty), Some(meta), Some(pj)) => {
+                    let concrete = subst(pty, type_args);
+                    unsafe { store_built_field(cb, rt, ptr, &meta, &concrete, pj)? };
+                    Ok(ptr as i64)
                 }
-                (Some(_), None) => Err(EvalError::BadParams(format!(
-                    "enum variant `{}::{}` takes a payload; pass {{\"{}\": <payload>}}",
+                (Some(_), _, None) => Err(EvalError::BadParams(format!(
+                    "enum variant `{}::{}` carries a payload; supply `{{\"{}\": payload}}`",
                     name_of(cb, &h).unwrap_or_else(|| h.to_hex()[..8].to_string()),
                     vname,
                     vname
                 ))),
-                (None, Some(_)) => Err(EvalError::BadParams(format!(
-                    "enum variant `{}::{}` is nullary; pass the bare string \"{}\"",
+                (None, _, Some(_)) => Err(EvalError::BadParams(format!(
+                    "enum variant `{}::{}` is nullary; supply the bare string `\"{}\"`",
                     name_of(cb, &h).unwrap_or_else(|| h.to_hex()[..8].to_string()),
                     vname,
                     vname
+                ))),
+                _ => Err(EvalError::Unsupported(format!(
+                    "variant `{}::{}` shape/def payload disagree",
+                    h, vname
                 ))),
             }
         }
         Def::Fn { .. } => Err(EvalError::Unsupported(format!(
-            "TypeRef {} resolves to a function, not a struct/enum, so it can't be an argument",
-            h
+            "`{}` is a function, not a constructible value",
+            name_of(cb, &h).unwrap_or_else(|| h.to_hex()[..8].to_string())
         ))),
     }
 }
 
-/// Push a wire Int value (`kind=0` + i64 big-endian).
-fn push_wire_int(out: &mut Vec<u8>, n: i64) {
-    out.push(0);
-    out.extend_from_slice(&n.to_be_bytes());
+/// Build `fval` per its declared `fty` and store it into the heap object `ptr`
+/// at the field's `meta` slot. A pointer-shaped slot stores the built pointer;
+/// a boxed scalar in a generic (pointer) slot is boxed; a raw scalar slot
+/// stores the raw 8 bytes.
+unsafe fn store_built_field(
+    cb: &Codebase,
+    rt: &Runtime,
+    ptr: *mut u8,
+    meta: &crate::codegen::FieldMeta,
+    fty: &Type,
+    fval: &Json,
+) -> Result<(), EvalError> {
+    let thread = rt.thread_ptr();
+    let raw = unsafe { build_arg(cb, rt, fty, fval)? };
+    let slot = unsafe { ptr.add(meta.offset as usize) };
+    if meta.is_pointer {
+        // A scalar declared type in a pointer slot means a generic (TypeVar)
+        // field carrying a boxed scalar; box it. Otherwise `raw` is already a
+        // heap pointer (String/Array/struct/enum).
+        let p: *mut u8 = if is_boxed_scalar(fty) {
+            unsafe { crate::runtime::ai_gc_box_int(thread, raw) }
+        } else {
+            raw as *mut u8
+        };
+        unsafe {
+            *(slot as *mut *mut u8) = p;
+        }
+    } else {
+        unsafe {
+            *(slot as *mut i64) = raw;
+        }
+    }
+    Ok(())
 }
 
-/// A short human name for a JSON value's shape, for error messages.
-fn json_shape(j: &Json) -> &'static str {
-    match j {
-        Json::Null => "null",
-        Json::Bool(_) => "a boolean",
-        Json::Int(_) => "an integer",
-        Json::Float(_) => "a float",
-        Json::Str(_) => "a string",
-        Json::Array(_) => "an array",
-        Json::Object(_) => "an object",
+/// Build an `Array<elem_ty>` arg directly in `rt`'s heap from a JSON array.
+///
+/// `ai_array_new(thread, n)` allocates `n` null GC slots; each element is built
+/// recursively by its declared `elem_ty` (reusing [`build_arg`], so struct /
+/// enum / String / nested-Array elements all work) and stored via `ai_array_set`.
+///
+/// Array slots are **uniform boxed pointers**. The renderer (`render_array`)
+/// treats every slot as a pointer and unboxes an `Int` element via
+/// `ai_gc_unbox_int`. To round-trip correctly we must therefore BOX an `Int`
+/// element on the way in via `ai_gc_box_int` (its symmetric inverse), and store
+/// the box pointer. Pointer-shaped element types (struct/enum/String/Array) are
+/// stored as-is. `Float`/`Bool` elements would also need boxing but the renderer
+/// can't distinguish them from `Int` on the way out, so we refuse them honestly
+/// rather than mis-render.
+///
+/// # Safety
+/// Same contract as [`build_arg`]: `rt` installed, no GC between build and call.
+unsafe fn build_array_arg(
+    cb: &Codebase,
+    rt: &Runtime,
+    elem_ty: &Type,
+    json: &Json,
+) -> Result<i64, EvalError> {
+    let thread = rt.thread_ptr();
+    let items = match json {
+        Json::Array(v) => v,
+        _ => {
+            return Err(EvalError::BadParams(format!(
+                "expected a JSON array for an `Array<...>` parameter, got {}",
+                json_shape(json)
+            )));
+        }
+    };
+    let n = items.len() as i64;
+    let arr = unsafe { ai_array_new(thread, n) };
+    for (i, item) in items.iter().enumerate() {
+        // Build the element by its declared type. A scalar element
+        // (`Int`/`Float`/`Bool`) comes back as a raw 8-byte value from the wire
+        // path; box it so the slot holds a real pointer the renderer can unbox
+        // and re-interpret per the element type. Pointer-shaped elements
+        // (struct/enum/String/Array) are stored as-is.
+        let raw = unsafe { build_arg(cb, rt, elem_ty, item)? };
+        let slot_ptr: *mut u8 = if is_boxed_scalar(elem_ty) {
+            unsafe { ai_gc_box_int(thread, raw) }
+        } else {
+            raw as *mut u8
+        };
+        unsafe {
+            ai_array_set(arr, i as i64, slot_ptr);
+        }
     }
+    Ok(arr as i64)
 }
 
 // =============================================================================
@@ -933,33 +1108,19 @@ pub fn eval(
     let decode_result: Result<Vec<i64>, EvalError> = (|| {
         let mut av: Vec<i64> = Vec::with_capacity(args.len());
         for (i, (pty, json)) in params.iter().zip(args.iter()).enumerate() {
-            // Fast path: a plain `Int`/`Float`/`Bool` could go straight to an
-            // i64, but routing everything through wire bytes + `decode_value`
-            // keeps one honest code path (and `decode_value` returns the scalar
-            // for Int kinds without allocating).
-            let mut bytes = Vec::new();
-            json_arg_to_wire(cb, pty, json, &mut bytes).map_err(|e| match e {
-                // Preserve the kind, but prefix which arg failed.
-                EvalError::BadParams(m) => EvalError::BadParams(format!("arg {}: {}", i, m)),
-                EvalError::Unsupported(m) => EvalError::Unsupported(format!("arg {}: {}", i, m)),
-                other => other,
-            })?;
-            let (wv, consumed) = unsafe {
-                decode_value(&rt, &bytes).map_err(|e| {
-                    EvalError::Unsupported(format!("arg {}: decode failed: {}", i, e))
+            // `build_arg` either allocates a heap object directly (String /
+            // Bytes / Array — runtime-reserved shapes) or routes through the
+            // honest wire path (`Int`/`Float`/`Bool`/struct/enum). All against
+            // THIS `rt`'s heap, so the resulting pointers are valid for the
+            // call below. (`decode_value` returns the scalar for Int kinds
+            // without allocating.)
+            let v = unsafe {
+                build_arg(cb, &rt, pty, json).map_err(|e| match e {
+                    // Preserve the kind, but prefix which arg failed.
+                    EvalError::BadParams(m) => EvalError::BadParams(format!("arg {}: {}", i, m)),
+                    EvalError::Unsupported(m) => EvalError::Unsupported(format!("arg {}: {}", i, m)),
+                    other => other,
                 })?
-            };
-            if consumed != bytes.len() {
-                return Err(EvalError::Unsupported(format!(
-                    "arg {}: wire bytes not fully consumed ({} of {})",
-                    i,
-                    consumed,
-                    bytes.len()
-                )));
-            }
-            let v = match wv {
-                WireValue::Int(n) => n,
-                WireValue::Heap(p) => p as i64,
             };
             av.push(v);
         }
@@ -1501,29 +1662,17 @@ mod tests {
     }
 
     #[test]
-    fn bool_arg_builds_to_wire_int() {
+    fn bool_arg_flows_through_and_renders() {
         init();
-        // In this language version a `Bool` is never equivalent to `Int`, so no
-        // typecheckable/codegen-able body can OBSERVE a `Bool` parameter (`if`
-        // wants Int; `-> Bool` is rejected by codegen). What we CAN verify is
-        // the honest arg-building contract: a JSON bool encodes to a wire Int
-        // 0/1 (the kernel ABI), so when a Bool param eventually becomes usable
-        // the value is already correct. (No coercion, no garbage.)
+        // Bool is a first-class scalar now (i64 0/1 ABI), so a `Bool` param
+        // flows through to a `Bool` return and renders as a JSON bool.
         let cb = cb_with("def id(b: Bool) -> Bool = b");
-        let hash = cb.get_name("id").unwrap();
-        let bool_ty = match cb.types().get(&hash).unwrap() {
-            TypeScheme::Fn { params, .. } => params[0].clone(),
-            _ => panic!(),
-        };
-        let mut t = Vec::new();
-        json_arg_to_wire(&cb, &bool_ty, &Json::Bool(true), &mut t).unwrap();
-        assert_eq!(t, vec![0, 0, 0, 0, 0, 0, 0, 0, 1]); // kind=0 + i64 BE 1
-        let mut f = Vec::new();
-        json_arg_to_wire(&cb, &bool_ty, &Json::Bool(false), &mut f).unwrap();
-        assert_eq!(f, vec![0, 0, 0, 0, 0, 0, 0, 0, 0]); // kind=0 + i64 BE 0
+        let r = run_json(&cb, "id", &[Json::Bool(true)]).unwrap();
+        assert_eq!(r.value, Json::Bool(true));
+        let r2 = run_json(&cb, "id", &[Json::Bool(false)]).unwrap();
+        assert_eq!(r2.value, Json::Bool(false));
         // A non-bool for a Bool param is a structured error, not a coercion.
-        let mut bad = Vec::new();
-        let e = json_arg_to_wire(&cb, &bool_ty, &Json::Int(1), &mut bad).unwrap_err();
+        let e = run_json(&cb, "id", &[Json::Int(1)]).unwrap_err();
         assert_eq!(e.kind(), "BadParams");
     }
 
@@ -1545,12 +1694,112 @@ mod tests {
     }
 
     #[test]
-    fn string_arg_is_unsupported() {
+    fn string_arg_builds_real_heap_string() {
         init();
-        // String args genuinely can't be built (no wire String kind).
-        let cb = cb_with("def len(s: String) -> Int = string_len(s)");
-        let e = run_json(&cb, "len", &[Json::Str("hi".to_string())]).unwrap_err();
-        assert_eq!(e.kind(), "Unsupported");
-        assert!(e.message().contains("String"));
+        // String args are now built directly via `ai_str_new`: a real heap
+        // varlen-bytes object. `string_len("hello") + 3 = 8` proves the bytes +
+        // length crossed the ABI correctly (not a garbage pointer).
+        let cb = cb_with("def strlen_plus(s: String, k: Int) -> Int = string_len(s) + k");
+        let r = run_json(
+            &cb,
+            "strlen_plus",
+            &[Json::Str("hello".to_string()), Json::Int(3)],
+        )
+        .unwrap();
+        assert_eq!(r.value, Json::Int(8));
+    }
+
+    #[test]
+    fn array_int_arg_sums_correctly() {
+        init();
+        // `Array<Int>` args are built directly via `ai_array_new` + per-element
+        // `ai_gc_box_int` + `ai_array_set`. Summing the array proves the boxed
+        // Int elements are CORRECT (round-trips with the renderer's unbox).
+        let cb = cb_with(
+            "def sum(a: Array<Int>) -> Int = { \
+                let n = array_len(a); \
+                let s0 = 0; \
+                let s1 = if n > 0 { s0 + array_get(a, 0) } else { s0 }; \
+                let s2 = if n > 1 { s1 + array_get(a, 1) } else { s1 }; \
+                let s3 = if n > 2 { s2 + array_get(a, 2) } else { s2 }; \
+                s3 }",
+        );
+        let arr = Json::Array(vec![Json::Int(10), Json::Int(20), Json::Int(30)]);
+        let r = run_json(&cb, "sum", &[arr]).unwrap();
+        assert_eq!(r.value, Json::Int(60));
+    }
+
+    #[test]
+    fn array_int_arg_roundtrips_through_identity() {
+        init();
+        // Pass an Array<Int> in, return it out: the renderer must unbox the same
+        // boxed Ints we put in. Tightest possible round-trip.
+        let cb = cb_with("def id(a: Array<Int>) -> Array<Int> = a");
+        let arr = Json::Array(vec![Json::Int(1), Json::Int(2), Json::Int(3)]);
+        let r = run_json(&cb, "id", &[arr]).unwrap();
+        assert_eq!(
+            r.value,
+            Json::Array(vec![Json::Int(1), Json::Int(2), Json::Int(3)])
+        );
+    }
+
+    #[test]
+    fn array_float_arg_round_trips() {
+        init();
+        // `Array<Float>` works: a boxed slot holds a type-agnostic 8-byte value,
+        // and the renderer interprets it per the declared element type (here
+        // f64 bit-pattern). Pass in floats, get the same floats back.
+        let cb = cb_with("def fid(a: Array<Float>) -> Array<Float> = a");
+        let r = run_json(
+            &cb,
+            "fid",
+            &[Json::Array(vec![Json::Float(1.5), Json::Float(2.5)])],
+        )
+        .unwrap();
+        assert_eq!(r.value, Json::Array(vec![Json::Float(1.5), Json::Float(2.5)]));
+    }
+
+    #[test]
+    fn array_bool_arg_round_trips() {
+        init();
+        let cb = cb_with("def bid(a: Array<Bool>) -> Array<Bool> = a");
+        let r = run_json(
+            &cb,
+            "bid",
+            &[Json::Array(vec![Json::Bool(true), Json::Bool(false)])],
+        )
+        .unwrap();
+        assert_eq!(r.value, Json::Array(vec![Json::Bool(true), Json::Bool(false)]));
+    }
+
+    #[test]
+    fn string_field_in_struct_arg_works() {
+        init();
+        // The deepest former limitation: a String INSIDE a struct field. The
+        // direct-construction arg builder composes, so this now works.
+        let cb = cb_with(
+            "struct Person { name: String, age: Int }\n\
+             def name_len(p: Person) -> Int = string_len(p.name)",
+        );
+        let mut obj = std::collections::BTreeMap::new();
+        obj.insert("name".to_string(), Json::Str("Alice".to_string()));
+        obj.insert("age".to_string(), Json::Int(30));
+        let r = run_json(&cb, "name_len", &[Json::Object(obj)]).unwrap();
+        assert_eq!(r.value, Json::Int(5));
+    }
+
+    #[test]
+    fn string_payload_in_enum_arg_works() {
+        init();
+        let cb = cb_with(
+            "enum Msg { Text(String), Empty }\n\
+             def msg_len(m: Msg) -> Int = match m { Text(s) => string_len(s), Empty => 0 }",
+        );
+        let mut obj = std::collections::BTreeMap::new();
+        obj.insert("Text".to_string(), Json::Str("hello world".to_string()));
+        let r = run_json(&cb, "msg_len", &[Json::Object(obj)]).unwrap();
+        assert_eq!(r.value, Json::Int(11));
+        let r2 = run_json(&cb, "msg_len", &[Json::Str("Empty".to_string())]).unwrap();
+        assert_eq!(r2.value, Json::Int(0));
     }
 }

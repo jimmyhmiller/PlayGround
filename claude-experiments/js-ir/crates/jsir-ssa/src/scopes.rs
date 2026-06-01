@@ -169,6 +169,453 @@ pub struct ScopeInfo {
     pub outputs: Vec<Value>,
 }
 
+// =============================================================================
+// PruneNonEscapingScopes (port of React's prune_non_escaping_scopes.rs)
+// =============================================================================
+//
+// React's escape analysis: a reactive scope is only worth memoizing if one of
+// its values transitively escapes — i.e. flows into a `return` value or a hook
+// argument. Our previous predicate ("used by any later instruction or *any*
+// terminator", where terminator operands include the CondBr condition and every
+// branch argument) over-approximated escape massively and kept ~86 scopes React
+// prunes. This port computes React's actual memoized set and uses it to (a)
+// decide which scopes survive and (b) restrict each surviving scope's outputs to
+// the values that genuinely escape (escaping ∩ memoized).
+//
+// Port notes / divergences (documented, sound):
+//  - We operate over SSA `Value`s rather than React's `DeclarationId`s. SSA has
+//    no `LoadLocal` indirection (every value is its own definition), so the
+//    `definitions`/`resolve` map collapses to identity here.
+//  - We have no function-signature DB, so we never apply React's `noAlias`
+//    optimization — every call/allocation is assumed to alias its operands
+//    (over-memoize, never under-memoize), matching the spec's mandate.
+//  - Block arguments (SSA phis) are treated as `Conditional` values whose
+//    dependencies are the incoming branch arguments from every predecessor.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MemoLevel {
+    Memoized,
+    Conditional,
+    Unmemoized,
+    Never,
+}
+
+fn join_levels(a: MemoLevel, b: MemoLevel) -> MemoLevel {
+    use MemoLevel::*;
+    if a == Memoized || b == Memoized {
+        Memoized
+    } else if a == Conditional || b == Conditional {
+        Conditional
+    } else if a == Unmemoized || b == Unmemoized {
+        Unmemoized
+    } else {
+        Never
+    }
+}
+
+/// The base memoization level a defining `Op` assigns to its result value.
+///
+/// `is_jsx` is true when this op is a JSX-element-creating call
+/// (`createElement`/`jsx`/`jsxs`/`jsxDEV`). React's `memoize_jsx_elements`
+/// config gives JSX elements the unconditional `Memoized` level, while plain
+/// object/array literals and ordinary calls are only `Memoized` as *aliasing
+/// lvalues* of their operands — for the result-identity escape level they
+/// behave `Conditional` (memoize only if a dependency is memoized or forced).
+/// This is the empirical React behavior: `return <div a={p.a}/>` memoizes but
+/// `return [p.a]` / `return foo(p.a)` do not.
+fn op_level(op: &crate::cfg::Op, is_jsx: bool, is_hook: bool) -> MemoLevel {
+    use crate::cfg::Op;
+    match op {
+        // JSX elements and hook results are unconditionally `Memoized`: a JSX
+        // element escaping via `return` memoizes (verified against React), and a
+        // hook result (`useFoo(x)`) is a stable reactive value that downstream
+        // scopes key on. Plain allocations/calls are only `Conditional`.
+        Op::Call { .. } if is_jsx => MemoLevel::Memoized,
+        Op::Call { .. } if is_hook => MemoLevel::Memoized,
+        // Non-JSX/non-hook allocations / calls: conditional. Their own result
+        // identity only escapes-and-memoizes if a dependency is memoized. This is
+        // why `return [props.a]` / `return foo(props.a)` are NOT memoized by React
+        // (their only deps are non-memoized prop loads) while `return <div.../>`
+        // is, and `[x, useFoo(x)]` is (its hook-result dep is memoized).
+        Op::MakeObject(_) | Op::MakeArray(_) | Op::Call { .. } => MemoLevel::Conditional,
+        // Member reads / loads are conditional: memoize only if a dep is memoized.
+        Op::Member { .. } => MemoLevel::Conditional,
+        // Cheaply comparable scalars never need memoization on their own.
+        Op::Const(_) | Op::Global(_) | Op::Bin(..) | Op::Un(..) => MemoLevel::Never,
+        // Stores have no escaping result identity; treat as Never (no result
+        // value is consumed downstream as a memoized identity).
+        Op::StoreMember { .. } => MemoLevel::Never,
+        // Pre-SSA forms must have been eliminated before scope analysis.
+        Op::ReadVar(_) | Op::WriteVar(..) => MemoLevel::Unmemoized,
+    }
+}
+
+/// Is the call value `callee` a JSX-element constructor
+/// (`createElement`/`jsx`/`jsxs`/`jsxDEV`)? Mirrors `mutability.rs`'s
+/// `is_pure_call`.
+fn is_jsx_callee(cfg: &Cfg, callee: Value) -> bool {
+    use crate::cfg::{MemberKey, Op};
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if ins.result == Some(callee) {
+                return match &ins.op {
+                    Op::Member { prop: MemberKey::Static(name), .. } => {
+                        matches!(name.as_str(), "createElement" | "jsx" | "jsxs" | "jsxDEV")
+                    }
+                    Op::Global(name) => {
+                        matches!(name.as_str(), "jsx" | "jsxs" | "_jsx" | "_jsxs")
+                    }
+                    _ => false,
+                };
+            }
+        }
+    }
+    false
+}
+
+/// Is the call value `callee` a React hook? The callee resolves to a global or
+/// member named `use[A-Z]…` (`useState`, `useMemo`, `useFoo`, `React.useFoo`).
+fn is_hook_callee(cfg: &Cfg, callee: Value) -> bool {
+    use crate::cfg::{MemberKey, Op};
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if ins.result == Some(callee) {
+                return match &ins.op {
+                    Op::Global(name) => is_hook_name(name),
+                    Op::Member { prop: MemberKey::Static(name), .. } => is_hook_name(name),
+                    _ => false,
+                };
+            }
+        }
+    }
+    false
+}
+
+/// Is `name` a React hook name? React keys on `use[A-Z]`-style naming for
+/// non-builtin hooks; we have no hook registry, so we mirror that lexical rule.
+fn is_hook_name(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    if bytes.len() >= 4 && &name[..3] == "use" {
+        // `use` followed by an uppercase letter (useState, useMemo, useFoo…).
+        bytes[3].is_ascii_uppercase()
+    } else {
+        false
+    }
+}
+
+/// A node in the escape/memoization graph for one SSA value.
+struct EscapeNode {
+    level: MemoLevel,
+    deps: std::collections::HashSet<Value>,
+    scopes: std::collections::HashSet<usize>,
+    seen: bool,
+    memoized: bool,
+}
+
+/// Result of the escape analysis: the set of values that React would memoize,
+/// and the set of values that escape (flow into a return or a hook arg).
+pub struct EscapeResult {
+    pub memoized: std::collections::HashSet<Value>,
+    pub escaping: std::collections::HashSet<Value>,
+}
+
+/// Port of `PruneNonEscapingScopes`: build the value-level memoization graph,
+/// seed escape roots from returns + hook args, run the memoized-set DFS
+/// (`compute_memoized_identifiers` + `force_memoize_scope_dependencies`), and
+/// return the memoized + escaping sets. `scope_values` / `scope_deps` describe
+/// the raw inferred scopes (value-set + reactive dependency-set) so that
+/// `force_memoize_scope_dependencies` can walk a memoized value's scopes' deps.
+pub fn prune_non_escaping(
+    cfg: &Cfg,
+    scope_values: &[Vec<Value>],
+    scope_deps: &[std::collections::HashSet<Value>],
+) -> EscapeResult {
+    use std::collections::{HashMap, HashSet};
+
+    let mut nodes: HashMap<Value, EscapeNode> = HashMap::new();
+    let ensure = |nodes: &mut HashMap<Value, EscapeNode>, v: Value| {
+        nodes.entry(v).or_insert_with(|| EscapeNode {
+            level: MemoLevel::Never,
+            deps: HashSet::new(),
+            scopes: HashSet::new(),
+            seen: false,
+            memoized: false,
+        });
+    };
+
+    // Params are inputs (Never, no deps).
+    for p in &cfg.params {
+        ensure(&mut nodes, *p);
+    }
+
+    // Locally-allocated reference values (object/array literal or call result):
+    // the values a callee can capture/freeze. Used to decide which ordinary-call
+    // arguments to promote to `Memoized` (see the aliasing note below).
+    let mut is_alloc: HashSet<Value> = HashSet::new();
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if let Some(res) = ins.result {
+                if matches!(
+                    ins.op,
+                    crate::cfg::Op::MakeObject(_)
+                        | crate::cfg::Op::MakeArray(_)
+                        | crate::cfg::Op::Call { .. }
+                ) {
+                    is_alloc.insert(res);
+                }
+            }
+        }
+    }
+
+    // Build nodes from instructions: result value gets the op's level + its
+    // operands as dependencies. Mirror React's aliasing rule: operands captured
+    // into an allocation/call are themselves bumped to `Memoized` (their identity
+    // is captured into the escaping value).
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            let operands = ins.op.operands();
+            if let Some(res) = ins.result {
+                ensure(&mut nodes, res);
+                let is_jsx = matches!(&ins.op, crate::cfg::Op::Call { callee, .. } if is_jsx_callee(cfg, *callee));
+                let is_hook = matches!(&ins.op, crate::cfg::Op::Call { callee, .. } if is_hook_callee(cfg, *callee));
+                let lvl = op_level(&ins.op, is_jsx, is_hook);
+                {
+                    let n = nodes.get_mut(&res).unwrap();
+                    n.level = join_levels(n.level, lvl);
+                    for o in &operands {
+                        if *o != res {
+                            n.deps.insert(*o);
+                        }
+                    }
+                }
+                // Aliasing (React: bump operands to `Memoized` when *mutably*
+                // captured, `op.effect.is_mutable()`). We have no per-operand
+                // effect info, so we approximate by op kind:
+                //  - A *call* may mutate/capture its arguments (and a JSX call's
+                //    props object must propagate its memoization to the element),
+                //    so we bump call arguments. This is React's behaviour for the
+                //    mutable-effect operands of `CallExpression`.
+                //  - An array/object *literal* merely reads its elements (a frozen
+                //    capture, e.g. `[x[0]]`), so its operands are NOT bumped —
+                //    bumping them over-memoizes returned bare literals that React
+                //    leaves alone.
+                if let crate::cfg::Op::Call { callee, args } = &ins.op {
+                    // React bumps a call/JSX operand to `Memoized` exactly when it
+                    // is *mutably* captured (`op.effect.is_mutable()`): the callee
+                    // freezes / holds onto the argument. We approximate which calls
+                    // freeze their args:
+                    //  - JSX / hook calls always capture their operands.
+                    //  - A call to a *locally-defined* function — whose callee
+                    //    lowers to `Const(Undef)` (the hoisted local binding,
+                    //    distinct from an imported/undeclared `Global(name)`) — is
+                    //    treated as possibly-freezing: per the escape-analysis
+                    //    mandate we assume aliasing where unknown and never
+                    //    under-memoize. We bump only its *locally-allocated* args
+                    //    (object/array literal or call result), the values a callee
+                    //    can capture and that React memoizes when subsequently
+                    //    returned (the `useFreeze(a)` / `frozen-after-alias` shape).
+                    //    A call to an imported/global function (`bar(a)`) is NOT
+                    //    bumped: React leaves `bar(a); return a` un-memoized.
+                    let callee_is_local = matches!(
+                        def_op_of(cfg, *callee),
+                        Some(crate::cfg::Op::Const(crate::cfg::Const::Undef))
+                    );
+                    for o in args {
+                        if *o == res || *o == *callee {
+                            continue;
+                        }
+                        let bump = is_jsx
+                            || is_hook
+                            || (callee_is_local && is_alloc.contains(o));
+                        if bump {
+                            ensure(&mut nodes, *o);
+                            let n = nodes.get_mut(o).unwrap();
+                            n.level = join_levels(n.level, MemoLevel::Memoized);
+                        }
+                    }
+                }
+            } else {
+                // No result (e.g. StoreMember used for effect): still register
+                // operands so the graph is total.
+                for o in &operands {
+                    ensure(&mut nodes, *o);
+                }
+            }
+        }
+    }
+
+    // Block-args (phis): Conditional, with dependencies = incoming branch args.
+    for b in &cfg.blocks {
+        for (i, param) in b.params.iter().enumerate() {
+            ensure(&mut nodes, *param);
+            let n = nodes.get_mut(param).unwrap();
+            n.level = join_levels(n.level, MemoLevel::Conditional);
+            // collect after releasing borrow
+            let _ = i;
+        }
+    }
+    // Wire phi dependencies from each predecessor's branch args.
+    for b in &cfg.blocks {
+        let edges: Vec<(crate::cfg::BlockId, Vec<Value>)> = match &b.term {
+            crate::cfg::Term::Br(t, a) => vec![(*t, a.clone())],
+            crate::cfg::Term::CondBr {
+                then_block,
+                then_args,
+                else_block,
+                else_args,
+                ..
+            } => vec![(*then_block, then_args.clone()), (*else_block, else_args.clone())],
+            _ => vec![],
+        };
+        for (succ, args) in edges {
+            let params = cfg.block(succ).params.clone();
+            for (param, a) in params.iter().zip(args) {
+                if *param != a {
+                    ensure(&mut nodes, *param);
+                    nodes.get_mut(param).unwrap().deps.insert(a);
+                }
+            }
+        }
+    }
+
+    // Associate each value with the scope(s) it belongs to.
+    for (si, vals) in scope_values.iter().enumerate() {
+        for v in vals {
+            ensure(&mut nodes, *v);
+            nodes.get_mut(v).unwrap().scopes.insert(si);
+        }
+    }
+
+    // Seed escape roots.
+    let mut escaping: HashSet<Value> = HashSet::new();
+    for b in &cfg.blocks {
+        // (a) returned values.
+        if let crate::cfg::Term::Ret(Some(v)) = &b.term {
+            escaping.insert(*v);
+        }
+        // (b) hook-call arguments: callee is a global named `use[A-Z]`.
+        for ins in &b.instrs {
+            if let crate::cfg::Op::Call { callee, args } = &ins.op {
+                let is_hook = matches!(
+                    instr_global_name(cfg, *callee),
+                    Some(name) if is_hook_name(&name)
+                );
+                if is_hook {
+                    for a in args {
+                        escaping.insert(*a);
+                    }
+                }
+            }
+        }
+    }
+    for v in &escaping {
+        ensure(&mut nodes, *v);
+    }
+
+    // ---- compute_memoized_identifiers DFS ----
+    let mut memoized: HashSet<Value> = HashSet::new();
+    // scope_seen mirrors React's ScopeNode.seen flag.
+    let mut scope_seen = vec![false; scope_values.len()];
+
+    fn visit(
+        v: Value,
+        force: bool,
+        nodes: &mut HashMap<Value, EscapeNode>,
+        scope_seen: &mut [bool],
+        scope_deps: &[HashSet<Value>],
+        memoized: &mut HashSet<Value>,
+    ) -> bool {
+        let (level, seen) = match nodes.get(&v) {
+            Some(n) => (n.level, n.seen),
+            None => return false,
+        };
+        if seen {
+            return nodes.get(&v).unwrap().memoized;
+        }
+        nodes.get_mut(&v).unwrap().seen = true;
+        nodes.get_mut(&v).unwrap().memoized = false;
+
+        let deps: Vec<Value> = nodes.get(&v).unwrap().deps.iter().copied().collect();
+        let mut has_memoized_dep = false;
+        for d in deps {
+            let m = visit(d, false, nodes, scope_seen, scope_deps, memoized);
+            has_memoized_dep |= m;
+        }
+
+        let should = level == MemoLevel::Memoized
+            || (level == MemoLevel::Conditional && (has_memoized_dep || force))
+            || (level == MemoLevel::Unmemoized && force);
+        if should {
+            nodes.get_mut(&v).unwrap().memoized = true;
+            memoized.insert(v);
+            let scopes: Vec<usize> = nodes.get(&v).unwrap().scopes.iter().copied().collect();
+            for s in scopes {
+                force_memoize_scope(s, nodes, scope_seen, scope_deps, memoized);
+            }
+        }
+        nodes.get(&v).unwrap().memoized
+    }
+
+    fn force_memoize_scope(
+        s: usize,
+        nodes: &mut HashMap<Value, EscapeNode>,
+        scope_seen: &mut [bool],
+        scope_deps: &[HashSet<Value>],
+        memoized: &mut HashSet<Value>,
+    ) {
+        if scope_seen[s] {
+            return;
+        }
+        scope_seen[s] = true;
+        let deps: Vec<Value> = scope_deps[s].iter().copied().collect();
+        for d in deps {
+            visit(d, true, nodes, scope_seen, scope_deps, memoized);
+        }
+    }
+
+    let roots: Vec<Value> = escaping.iter().copied().collect();
+    for v in roots {
+        visit(
+            v,
+            false,
+            &mut nodes,
+            &mut scope_seen,
+            scope_deps,
+            &mut memoized,
+        );
+    }
+
+    EscapeResult { memoized, escaping }
+}
+
+/// The defining `Op` of value `v`, if any (None for params/block-args).
+fn def_op_of(cfg: &Cfg, v: Value) -> Option<&crate::cfg::Op> {
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if ins.result == Some(v) {
+                return Some(&ins.op);
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the global/free-identifier name a callee value refers to, if its
+/// defining op is `Op::Global`. Used to recognize hook calls.
+fn instr_global_name(cfg: &Cfg, v: Value) -> Option<String> {
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if ins.result == Some(v) {
+                if let crate::cfg::Op::Global(name) = &ins.op {
+                    return Some(name.clone());
+                }
+                return None;
+            }
+        }
+    }
+    None
+}
+
 /// Infer each scope's dependencies and outputs — the shape of the memo cache
 /// block React would emit (`const [outputs] = useMemo(() => {…}, [deps])`).
 pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
@@ -198,6 +645,29 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
         }
     }
 
+    // --- PruneNonEscapingScopes (run BEFORE the merge fold) ---------------
+    // Compute React's memoized + escaping sets over the raw inferred scopes.
+    // A raw scope's reactive dependency-set = reactive, non-const operands of
+    // its values that are defined outside the scope.
+    let raw_values: Vec<Vec<Value>> =
+        scopes.iter().map(|sc| sc.values.clone()).collect();
+    let raw_deps: Vec<HashSet<Value>> = scopes
+        .iter()
+        .map(|sc| {
+            let set: HashSet<Value> = sc.values.iter().copied().collect();
+            let mut d = HashSet::new();
+            for v in &sc.values {
+                for o in operands.get(v).map(|x| x.as_slice()).unwrap_or(&[]) {
+                    if !set.contains(o) && reactive.contains(o) && !const_vals.contains(o) {
+                        d.insert(*o);
+                    }
+                }
+            }
+            d
+        })
+        .collect();
+    let escape = prune_non_escaping(cfg, &raw_values, &raw_deps);
+
     // Transient values: the props object of a `createElement`/`jsx` call. Its
     // identity is never observed except through the element, which rebuilds
     // whenever any attribute changes — so it can always merge into the element
@@ -213,12 +683,22 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
         }
     }
     let mut transient: HashSet<Value> = HashSet::new();
+    // Structural props->element edges: (props operand P, element call result E)
+    // for each `createElement`/`jsx`/`jsxs`/`jsxDEV` call. The props object is
+    // args[1]; it has no observable identity apart from the element it feeds, so
+    // it always belongs in the element's scope — even when neither has reactive
+    // deps (constant JSX). This is the structural counterpart to the reactive
+    // dependency-based fold below, which never fires for constant inputs.
+    let mut props_to_element: Vec<(Value, Value)> = Vec::new();
     for b in &cfg.blocks {
         for ins in &b.instrs {
             if let crate::cfg::Op::Call { callee, args } = &ins.op {
                 if create_member.contains(callee) {
                     if let Some(props) = args.get(1) {
                         transient.insert(*props);
+                        if let Some(elem) = ins.result {
+                            props_to_element.push((*props, elem));
+                        }
                     }
                 }
             }
@@ -238,6 +718,53 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
                 owner.insert(*v, i);
             }
         }
+    }
+
+    // Structural transient fold: fold a JSX props object into the element that
+    // consumes it, keyed only on the `call.args[1] == props` edge — independent
+    // of any reactive dependency. React always memoizes a constant element as a
+    // single sentinel-guarded scope (cache=1), so the props transient and the
+    // element must share one scope even when both have empty deps.
+    for &(props, elem) in &props_to_element {
+        // The props value must be a transient (a props object literal we own),
+        // and observed *only* through this element call. If it is read anywhere
+        // else, its identity escapes and we cannot soundly merge it away.
+        if !transient.contains(&props) {
+            continue;
+        }
+        let escapes = users
+            .get(&props)
+            .map(|us| us.iter().any(|u| *u != Some(elem)))
+            .unwrap_or(false);
+        if escapes {
+            continue;
+        }
+        let cp = match owner.get(&props) {
+            Some(&cp) => cp,
+            None => continue,
+        };
+        let ce = match owner.get(&elem) {
+            Some(&ce) if ce != cp => ce,
+            _ => continue,
+        };
+        // Never merge into a mutable scope (that is a forced boundary), and never
+        // fold a transient into its own producer (the producer is `cp` itself).
+        if work[ce].as_ref().map(|w| w.mutable).unwrap_or(true) {
+            continue;
+        }
+        // Merge producer scope `cp` (the props object) into consumer `ce` (the
+        // element), reusing the standard merge body.
+        let from = match work[cp].take() {
+            Some(f) => f,
+            None => continue,
+        };
+        let to = work[ce].as_mut().unwrap();
+        for v in &from.values {
+            owner.insert(*v, ce);
+        }
+        to.values.extend(from.values);
+        to.start = to.start.min(from.start);
+        to.end = to.end.max(from.end);
     }
 
     // MergeScopesThatInvalidateTogether (matching the React Compiler): fold a
@@ -316,15 +843,29 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
                 }
             }
         }
-        // Output = a scope value used by something outside the scope.
+        // Output = a scope value that escapes the scope (used outside it) AND is
+        // in React's `memoized` set (transitively reachable from a return value
+        // or a hook argument). The structural "used outside" predicate alone is
+        // the over-approximation that kept the ~86 spurious scopes (it counted a
+        // value flowing as a CondBr condition or branch argument as escaping);
+        // intersecting with `memoized` restricts outputs to the values React
+        // actually caches. A scope whose values are none of these produces empty
+        // outputs and is therefore pruned by the `!outputs.is_empty()` emission
+        // filter — matching React's "keep iff declares a memoized value" rule.
         let outputs: Vec<Value> = sorted_vals
             .iter()
             .copied()
             .filter(|v| {
-                users.get(v).map(|us| us.iter().any(|u| match u {
-                    None => true,
-                    Some(uv) => !values.contains(uv),
-                })).unwrap_or(false)
+                let used_outside = users
+                    .get(v)
+                    .map(|us| {
+                        us.iter().any(|u| match u {
+                            None => true,
+                            Some(uv) => !values.contains(uv),
+                        })
+                    })
+                    .unwrap_or(false);
+                used_outside && escape.memoized.contains(v)
             })
             .collect();
         deps.sort();

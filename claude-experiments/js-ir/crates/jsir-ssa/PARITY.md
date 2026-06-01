@@ -22,17 +22,18 @@ coverage (fixtures we attempt) to ~100%," with the oracle as the gate.
 
 Over React's `__tests__/fixtures/compiler` (.js fixtures):
 
+Universe = 341.
+
 | bucket | count | meaning |
 |---|---:|---|
-| comparable (both memoize) | ~46 | our compilable subset |
-| → **agree with React** | ~21 (**46%**) | structure matches |
-| react-only | ~300 | React compiles, we bail (control flow / hooks) |
-| ours-only | ~87 | we memoize, React skips (often non-components) |
-| neither | ~690 | error fixtures / non-components / TS-only |
-| panics in ours | ~70 | real lowering bugs |
+| → **agree with React** | 31 | structure matches |
+| mismatch | 36 | both memoize, structure differs |
+| react-only | 274 | React compiles, we bail (control flow / hooks) |
+| ours-only | 124 | we memoize, React skips (often non-components) |
+| panics in ours | 0 | real lowering bugs |
 
-So two axes to close: **coverage** (the ~300 react-only + ~70 panics we can't
-attempt) and **fidelity** (the ~25 comparable mismatches).
+So two axes to close: **coverage** (the 274 react-only) and **fidelity** (the
+41 comparable mismatches).
 
 Perf context: on the straight-line subset we are ~20x faster wall-clock, but
 that is mostly because we do less (no type inference, no validation, string

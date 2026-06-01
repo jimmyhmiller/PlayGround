@@ -110,30 +110,74 @@ fn probe_inst_args() {
 }
 
 #[test]
+#[ignore = "String .startsWith / .substring host methods (load-chain prerequisites)"]
+fn probe_string_starts_with_substring() {
+    // `clojure.core/load` does `(.startsWith path "/")` and
+    // `(.substring path 1)`; without these host instance methods the load
+    // fn threw before ever reaching `clojure.lang.RT/load`, so embedded
+    // sub-files (e.g. core/protocols → IKVReduce) never registered.
+    // Verified against real Clojure: see the per-assertion expectations.
+    let mut sess = load_core_prefix();
+    // (.startsWith "/foo" "/") => true
+    assert_eq!(
+        sess.eval_str("(.startsWith \"/foo\" \"/\")"),
+        0x7ffd_0000_0000_0001,
+        "(.startsWith \"/foo\" \"/\") must be true"
+    );
+    // (.startsWith "foo" "/") => false
+    assert_eq!(
+        sess.eval_str("(.startsWith \"foo\" \"/\")"),
+        0x7ffd_0000_0000_0000,
+        "(.startsWith \"foo\" \"/\") must be false"
+    );
+    // (.substring "/core/protocols" 1) => "core/protocols"
+    let sub = clojure_jvm::runtime::pr_str_bits(
+        sess.eval_str("(.substring \"/core/protocols\" 1)"),
+    );
+    assert_eq!(sub, "\"core/protocols\"", "(.substring \"/core/protocols\" 1)");
+    // (.substring "abc" 3) => "" (start == len is legal)
+    let empty = clojure_jvm::runtime::pr_str_bits(sess.eval_str("(.substring \"abc\" 3)"));
+    assert_eq!(empty, "\"\"", "(.substring \"abc\" 3) is empty string");
+}
+
+#[test]
 #[ignore = "reentrant refer-chain isolation"]
 fn probe_reentrant_refer() {
-    // Isolation of the reentrant-load blocker behind `reduce`. The
+    // Regression guard for the qualified-head-symbol invoke bug. The
     // "reentrant-refer-probe" resource is loaded via `RT/load` (nested
-    // run_jit, exactly like protocols.clj). Findings (read each marker via a
-    // direct VarExpr, NOT `(deref (var …))` which doesn't read the root):
-    //   rr-lit   (literal def)             → 4242  ✓
-    //   rr-fnval (var deref of a fn)        → fn handle ✓
-    //   rr-call  ((inc 41), a fn call)      → nil   ✗  return value lost
-    //   rr-findns((find-ns …), a fn call)   → nil   ✗  (callee runs: cljvm_ns_find
-    //                                                   gets 'clojure.core and finds it,
-    //                                                   but the DIRECT JIT→JIT call return
-    //                                                   is nil in the nested run_jit)
-    //   rr-done  (literal def)              → 1     ✓
-    // So reentrant (nested run_jit) direct call RETURN values are lost
-    // (deterministic, not GC-timing); literals + var derefs survive. This is
-    // the executor bug blocking `refer` (hence `reduce`) under reentrant load.
+    // run_jit, exactly like protocols.clj) and contains forms that invoke
+    // `clojure.core/inc` and `clojure.core/find-ns` (namespace-QUALIFIED
+    // head symbols).
+    //
+    // The old failure looked like "reentrant fn-call return values are
+    // lost", but the real cause had nothing to do with reentrancy or the
+    // JIT executor: `analyze_seq`'s static-call sugar treated ANY
+    // dotted-namespace head (`clojure.core/inc`) as a `(. clojure.core
+    // (inc …))` static method call because `clojure.core` contains a dot.
+    // That resolved to no host method → runtime throw → nil. Bare `(inc
+    // 41)` worked because it took the var-invoke path. The fix:
+    // `analyze_seq` no longer treats a known namespace (or a var-resolvable
+    // qualified symbol) as a class. See compiler.rs analyze_seq.
+    //   rr-lit   (literal def)                       → 4242  ✓
+    //   rr-fnval (var deref of a fn)                  → fn handle ✓
+    //   rr-call  ((clojure.core/inc 41), a fn call)   → 42    ✓ (was nil)
+    //   rr-findns((clojure.core/find-ns …), fn call)  → ns    ✓ (was nil)
+    //   rr-done  (literal def)                        → 1     ✓
     let mut sess = load_core_prefix();
     sess.eval_str("(clojure.lang.RT/load \"reentrant-refer-probe\")");
     let lit = sess.eval_str("clojure.core/rr-lit");
     let done = sess.eval_str("clojure.core/rr-done");
-    eprintln!("  reentrant rr-lit=0x{lit:x} rr-done=0x{done:x}");
-    // Literal reentrant defs must persist (the parts that DO work).
-    assert_ne!(lit, 0x7ffc_0000_0000_0000, "reentrant literal def must persist");
+    let call = sess.eval_str("clojure.core/rr-call");
+    let findns = sess.eval_str("clojure.core/rr-findns");
+    eprintln!("  reentrant rr-lit=0x{lit:x} rr-done=0x{done:x} rr-call=0x{call:x} rr-findns=0x{findns:x}");
+    let call_i = clojure_jvm::runtime::arg_to_i64(call);
+    eprintln!("  rr-call as i64 = {call_i}");
+    const NIL_BITS: u64 = 0x7ffc_0000_0000_0000;
+    // Literal reentrant defs must persist (the parts that always worked).
+    assert_ne!(lit, NIL_BITS, "reentrant literal def must persist");
+    // The qualified-head fn-call must now return the real value, not nil.
+    assert_eq!(call_i, 42, "(clojure.core/inc 41) must return 42, not nil");
+    assert_ne!(findns, NIL_BITS, "(clojure.core/find-ns …) must return the ns, not nil");
 }
 
 #[test]

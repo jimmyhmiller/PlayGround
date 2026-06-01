@@ -1143,12 +1143,12 @@ fn format_summary_value(v: &serde_json::Value) -> String {
 // --- Help ---
 
 fn print_help() {
-    print!(r#"datalog-cli - command-line client for datalog-db
+    print!(r#"datalog - command-line client for datalog-db
 
 USAGE:
-  datalog-cli [--host HOST:PORT] [--json]              Interactive REPL
-  datalog-cli [--host HOST:PORT] [--json] COMMAND      One-shot command
-  datalog-cli agent                                    Print LLM/agent usage guide
+  datalog [--host HOST:PORT] [--json]              Interactive REPL
+  datalog [--host HOST:PORT] [--json] COMMAND      One-shot command
+  datalog agent                                    Print LLM/agent usage guide
 
 GLOBAL FLAGS:
   --host HOST:PORT    Server address (default 127.0.0.1:5557)
@@ -1231,7 +1231,7 @@ DISJUNCTION / NEGATION (in where, nestable):
 }
 
 fn print_agent_guide() {
-    print!(r#"datalog-cli — guide for LLMs and scripted agents
+    print!(r#"datalog — guide for LLMs and scripted agents
 ==================================================
 
 This is a Datalog-style database with EAVT/AEVT/AVET/VAET indexes, history,
@@ -1242,7 +1242,7 @@ QUICK START
 1. Start the server in a separate process:
      datalog-db --data-dir ./datalog-data --bind 127.0.0.1:5557
 2. Talk to it from the CLI:
-     datalog-cli --json status
+     datalog --json status
 3. Use `--json` for every call you intend to parse. Without it, results are
    printed as ASCII tables meant for humans.
 
@@ -1251,39 +1251,39 @@ WORKFLOW
 The flow is always: define schema -> assert entities -> query / list.
 
   # 1. Define an entity type (a "collection").
-  datalog-cli --json define 'User {{ name: string required, email: string unique required indexed, age: i64 }}'
+  datalog --json define 'User {{ name: string required, email: string unique required indexed, age: i64 }}'
 
   # 2. Insert entities. The server returns the assigned entity id.
-  datalog-cli --json assert 'User {{ name: "Alice", age: 30, email: "a@b.com" }}'
+  datalog --json assert 'User {{ name: "Alice", age: 30, email: "a@b.com" }}'
   # -> {{"status":"ok","data":{{"tx_id":2,"entity_ids":[3],...}}}}
 
   # 3. Update by referencing the entity id with `#`.
-  datalog-cli --json assert 'User #3 {{ age: 31 }}'
+  datalog --json assert 'User #3 {{ age: 31 }}'
 
   # 4. List a type. Equivalent to `find` over every field.
-  datalog-cli --json list User
-  datalog-cli --json list User limit 20
+  datalog --json list User
+  datalog --json list User limit 20
 
   # 5. Query with patterns and predicates. A bare predicate (age: > 25)
   #    filters without binding; `age: ?age > 25` both binds ?age and filters.
-  datalog-cli --json query 'find ?u, ?name where ?u: User {{ name: ?name, age: > 25 }}'
-  datalog-cli --json query 'find ?name, ?age where ?u: User {{ name: ?name, age: ?age > 25 }}'
+  datalog --json query 'find ?u, ?name where ?u: User {{ name: ?name, age: > 25 }}'
+  datalog --json query 'find ?name, ?age where ?u: User {{ name: ?name, age: ?age > 25 }}'
 
   # Sort and paginate with order by / limit / offset (order vars must be in find).
-  datalog-cli --json query 'find ?name, ?age where ?u: User {{ name: ?name, age: ?age }} order by ?age desc limit 10'
+  datalog --json query 'find ?name, ?age where ?u: User {{ name: ?name, age: ?age }} order by ?age desc limit 10'
 
   # Aggregate. Plain find vars are the GROUP BY key; aggregates: count/sum/avg/min/max.
-  datalog-cli --json query 'find ?dept, count(?e), avg(?sal) where ?e: Employee {{ dept: ?dept, salary: ?sal }}'
+  datalog --json query 'find ?dept, count(?e), avg(?sal) where ?e: Employee {{ dept: ?dept, salary: ?sal }}'
 
   # Disjunction / negation (JSON: {{"or": [clause, ...]}} and {{"not": clause}}; nestable).
-  datalog-cli --json query 'find ?name where ?e: Employee {{ name: ?name }} not {{ ?p: Project {{ lead: ?e }} }}'
+  datalog --json query 'find ?name where ?e: Employee {{ name: ?name }} not {{ ?p: Project {{ lead: ?e }} }}'
 
   # 6. Time travel: as_of <tx_id> or as_of_time <unix_ms | ISO8601>.
-  datalog-cli --json query 'find ?n where ?u: User {{ name: ?n }} as_of 2'
+  datalog --json query 'find ?n where ?u: User {{ name: ?n }} as_of 2'
 
   # 7. Retract a field or whole entity.
-  datalog-cli --json retract 'User #3 [age]'
-  datalog-cli --json retract 'User #3'
+  datalog --json retract 'User #3 [age]'
+  datalog --json retract 'User #3'
 
 RESPONSE SHAPE
 --------------
@@ -1311,8 +1311,8 @@ If the server was started with `--backup-dir`, automatic checkpoint
 backups run on a schedule (default hourly, keeping the last 24). You
 can also trigger and inspect them on demand:
 
-  datalog-cli --json backup now       # take an immediate checkpoint
-  datalog-cli --json backup list      # list existing checkpoints
+  datalog --json backup now       # take an immediate checkpoint
+  datalog --json backup list      # list existing checkpoints
 
 A checkpoint is a hard-link snapshot of the live DB at a point in time.
 Restore is "stop the server, point `--data-dir` at one of the listed
@@ -1339,7 +1339,7 @@ COMMAND REFERENCE
   backup list                         List existing checkpoints.
   json '<raw-json>'                   Send a raw request payload.
 
-If you need any of the above details inline, run `datalog-cli --help`.
+If you need any of the above details inline, run `datalog --help`.
 "#);
 }
 

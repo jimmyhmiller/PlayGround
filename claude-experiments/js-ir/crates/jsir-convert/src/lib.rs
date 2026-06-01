@@ -58,6 +58,7 @@ pub fn ast2hir(file: &dyn AstNode) -> LowerResult<Op> {
     let prog_op = lower_program(&mut b, program)?;
 
     let mut file_op = node_op("jsir.file", file)?;
+    // (node_id assignment happens after the whole tree is built; see below.)
     // Comments: the `File.comments` list becomes a `comment_line`/`comment_block`
     // attribute array (empty when absent).
     let mut comment_attrs = Vec::new();
@@ -75,7 +76,31 @@ pub fn ast2hir(file: &dyn AstNode) -> LowerResult<Op> {
         args: vec![],
         ops: vec![prog_op],
     }));
+
+    // STEP 0 (Phase B): assign a stable, monotonically-increasing `node_id` to
+    // every op in the built tree. We piggyback the same Builder counter used for
+    // ValueIds (`b.next`) so the seed advances past the last value id; the walk
+    // itself is a deterministic pre-order traversal (root, then each region's
+    // blocks' ops in order, recursing). This is pure provenance: the textual
+    // printer and `hir2ast` ignore `node_id`, so byte-exactness/round-trip are
+    // unaffected.
+    assign_node_ids(&mut file_op, &mut b);
+
     Ok(file_op)
+}
+
+/// Pre-order, deterministic assignment of `node_id` to every op in the tree,
+/// drawing ids from the Builder's monotonic counter.
+fn assign_node_ids(op: &mut Op, b: &mut Builder) {
+    op.node_id = Some(b.next);
+    b.next += 1;
+    for region in &mut op.regions {
+        for block in &mut region.blocks {
+            for child in &mut block.ops {
+                assign_node_ids(child, b);
+            }
+        }
+    }
 }
 
 fn lower_program(b: &mut Builder, prog: &dyn AstNode) -> LowerResult<Op> {

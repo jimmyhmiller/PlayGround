@@ -41,10 +41,16 @@ pub enum TypeScheme {
         wire: bool,
     },
     Struct {
+        /// Declared generic arity. Stored explicitly (rather than
+        /// derived from the fields) so a phantom type param — one that
+        /// appears in no field, like `Atom<T>` — is still reported as
+        /// arity 1 by `scheme_type_params`.
+        type_params: u32,
         fields: Vec<(String, Type)>,
         wire: bool,
     },
     Enum {
+        type_params: u32,
         variants: Vec<(String, Option<Type>)>,
         wire: bool,
     },
@@ -708,6 +714,7 @@ pub fn typecheck_def(def: &Def, cache: &TypeCache) -> Result<TypeScheme, TypeErr
             // now — Wire-ness depends on the concrete instantiation.
             let wire = *type_params == 0 && fields.iter().all(|(_, t)| is_wire(t, cache));
             Ok(TypeScheme::Struct {
+                type_params: *type_params,
                 fields: fields.clone(),
                 wire,
             })
@@ -723,6 +730,7 @@ pub fn typecheck_def(def: &Def, cache: &TypeCache) -> Result<TypeScheme, TypeErr
                     .iter()
                     .all(|(_, p)| p.as_ref().map(|t| is_wire(t, cache)).unwrap_or(true));
             Ok(TypeScheme::Enum {
+                type_params: *type_params,
                 variants: variants.clone(),
                 wire,
             })
@@ -837,15 +845,25 @@ fn check_type_well_formed(
 fn scheme_type_params(scheme: &TypeScheme) -> u32 {
     match scheme {
         TypeScheme::Fn { params, ret, .. } => max_type_var(params, ret),
-        TypeScheme::Struct { fields, .. } => {
-            let mut m = 0;
+        // Use the declared arity, not the field-derived one, so a
+        // phantom type param (appears in no field) still counts.
+        TypeScheme::Struct {
+            type_params,
+            fields,
+            ..
+        } => {
+            let mut m = *type_params;
             for (_, t) in fields {
                 m = m.max(max_typevar_in(t));
             }
             m
         }
-        TypeScheme::Enum { variants, .. } => {
-            let mut m = 0;
+        TypeScheme::Enum {
+            type_params,
+            variants,
+            ..
+        } => {
+            let mut m = *type_params;
             for (_, p) in variants {
                 if let Some(t) = p {
                     m = m.max(max_typevar_in(t));
@@ -1143,6 +1161,11 @@ fn typecheck_expr(
             let scheme = cache
                 .get(struct_ref)
                 .ok_or(TypeError::UnknownStruct(*struct_ref))?;
+            // Declared generic arity — includes phantom params (those
+            // that appear in no field, like `Atom<T>`), so the result is
+            // `Apply(head, [..])` and can unify against an annotation
+            // that pins the phantom.
+            let declared_params = scheme_type_params(scheme);
             let decl_fields = scheme
                 .as_struct()
                 .ok_or(TypeError::UnknownStruct(*struct_ref))?;
@@ -1162,11 +1185,13 @@ fn typecheck_expr(
             // to recover the instantiation. The result type is
             // `Apply(TypeRef(h), [...])` with inferred type-args; if
             // the struct is monomorphic, this stays bare `TypeRef`.
-            let n_params: u32 = expected_tys
-                .iter()
-                .map(max_typevar_in)
-                .max()
-                .unwrap_or(0);
+            let n_params: u32 = declared_params.max(
+                expected_tys
+                    .iter()
+                    .map(max_typevar_in)
+                    .max()
+                    .unwrap_or(0),
+            );
             let mut subst: Vec<Option<Type>> = vec![None; n_params as usize];
             for (i, (e, expected)) in fields.iter().zip(expected_tys.iter()).enumerate() {
                 let got = typecheck_expr(e, locals, cache)?;
@@ -1603,6 +1628,73 @@ fn typecheck_call(
         }
     }
 
+    // ---- core/atom.<op>#<result>#<failure> located-state ops ----
+    if let Expr::BuiltinRef(name) = callee {
+        if let Some((op, result_hash, failure_hash)) =
+            crate::resolve::parse_atom_builtin_name(name)
+        {
+            use crate::resolve::AtomOp;
+            let want = if op == AtomOp::Deref { 1 } else { 2 };
+            if args.len() != want {
+                return Err(TypeError::ArityMismatch {
+                    what: format!("call to {}", name),
+                    expected: want,
+                    got: args.len(),
+                });
+            }
+            // Arg 0 is always the atom handle (a struct pointer).
+            let handle_ty = typecheck_expr(&args[0], locals, cache)?;
+            // Element type T: from the handle's instantiation for deref,
+            // from the value arg for set/init, from the updater's return
+            // for swap.
+            let elem_ty = match op {
+                AtomOp::Deref => match &handle_ty {
+                    Type::Apply(_, a) if !a.is_empty() => a[0].clone(),
+                    _ => {
+                        return Err(TypeError::TypeMismatch {
+                            context: "atom_deref handle (need Atom<T> with known T)"
+                                .to_owned(),
+                            expected: Type::Apply(
+                                Box::new(Type::TypeRef(Hash([0u8; 32]))),
+                                vec![int_t()],
+                            ),
+                            got: handle_ty.clone(),
+                        });
+                    }
+                },
+                AtomOp::Set | AtomOp::Init => typecheck_expr(&args[1], locals, cache)?,
+                AtomOp::Swap => {
+                    let f_ty = typecheck_expr(&args[1], locals, cache)?;
+                    match &f_ty {
+                        Type::FnType { ret, .. } => (**ret).clone(),
+                        _ => {
+                            return Err(TypeError::TypeMismatch {
+                                context: "atom_swap updater (must be fn(T) -> T)".to_owned(),
+                                expected: Type::FnType {
+                                    params: vec![int_t()],
+                                    ret: Box::new(int_t()),
+                                },
+                                got: f_ty,
+                            });
+                        }
+                    }
+                }
+            };
+            if type_contains_ptr(&elem_ty) {
+                return Err(TypeError::Unsupported(
+                    "atom element type may not contain a `Ptr`: a raw local machine \
+                     address is meaningless on another node. Use a wire-portable type \
+                     (Int/String/Bytes/struct/enum)."
+                        .to_owned(),
+                ));
+            }
+            return Ok(Type::Apply(
+                Box::new(Type::TypeRef(result_hash)),
+                vec![elem_ty, Type::TypeRef(failure_hash)],
+            ));
+        }
+    }
+
     // ---- Variadic C extern ----
     // A variadic extern (`curl_easy_setopt(h: Ptr, opt: Int, ...)`)
     // accepts its fixed params followed by any number of trailing C
@@ -1861,19 +1953,27 @@ pub fn typecheck_module(
                     },
                 );
             }
-            crate::ast::Def::Struct { fields, .. } => {
+            crate::ast::Def::Struct {
+                type_params,
+                fields,
+            } => {
                 cache.insert(
                     rdef.hash,
                     TypeScheme::Struct {
+                        type_params: *type_params,
                         fields: fields.clone(),
                         wire: false,
                     },
                 );
             }
-            crate::ast::Def::Enum { variants, .. } => {
+            crate::ast::Def::Enum {
+                type_params,
+                variants,
+            } => {
                 cache.insert(
                     rdef.hash,
                     TypeScheme::Enum {
+                        type_params: *type_params,
                         variants: variants.clone(),
                         wire: false,
                     },
@@ -1982,9 +2082,14 @@ pub fn encode_scheme(s: &TypeScheme) -> Vec<u8> {
             }
             write_blob(&mut buf, &crate::codec::encode_type(ret));
         }
-        TypeScheme::Struct { fields, wire } => {
+        TypeScheme::Struct {
+            type_params,
+            fields,
+            wire,
+        } => {
             write_str(&mut buf, "Struct");
             buf.push(*wire as u8);
+            buf.extend_from_slice(&type_params.to_be_bytes());
             let n: u32 = fields.len().try_into().expect("too many fields");
             buf.extend_from_slice(&n.to_be_bytes());
             for (name, ty) in fields {
@@ -1992,9 +2097,14 @@ pub fn encode_scheme(s: &TypeScheme) -> Vec<u8> {
                 write_blob(&mut buf, &crate::codec::encode_type(ty));
             }
         }
-        TypeScheme::Enum { variants, wire } => {
+        TypeScheme::Enum {
+            type_params,
+            variants,
+            wire,
+        } => {
             write_str(&mut buf, "Enum");
             buf.push(*wire as u8);
+            buf.extend_from_slice(&type_params.to_be_bytes());
             let n: u32 = variants.len().try_into().expect("too many variants");
             buf.extend_from_slice(&n.to_be_bytes());
             for (name, payload) in variants {
@@ -2034,6 +2144,7 @@ pub fn decode_scheme(bytes: &[u8]) -> Result<TypeScheme, SchemeCodecError> {
             TypeScheme::Fn { params, ret, wire }
         }
         "Struct" => {
+            let type_params = r.read_u32()?;
             let n = r.read_u32()? as usize;
             let mut fields = Vec::with_capacity(n);
             for _ in 0..n {
@@ -2041,9 +2152,14 @@ pub fn decode_scheme(bytes: &[u8]) -> Result<TypeScheme, SchemeCodecError> {
                 let blob = r.read_blob()?;
                 fields.push((name, crate::codec::decode_type(blob)?));
             }
-            TypeScheme::Struct { fields, wire }
+            TypeScheme::Struct {
+                type_params,
+                fields,
+                wire,
+            }
         }
         "Enum" => {
+            let type_params = r.read_u32()?;
             let n = r.read_u32()? as usize;
             let mut variants = Vec::with_capacity(n);
             for _ in 0..n {
@@ -2059,7 +2175,11 @@ pub fn decode_scheme(bytes: &[u8]) -> Result<TypeScheme, SchemeCodecError> {
                 };
                 variants.push((name, payload));
             }
-            TypeScheme::Enum { variants, wire }
+            TypeScheme::Enum {
+                type_params,
+                variants,
+                wire,
+            }
         }
         _ => {
             return Err(SchemeCodecError::UnknownTag {

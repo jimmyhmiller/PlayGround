@@ -20,8 +20,12 @@ fn load_subset() -> Session {
 
 const TAG_NIL_BITS: u64 = 0x7FFC_0000_0000_0000;
 
+// Integer literals are now boxed `Long` heap cells (TAG_PTR), so a result that
+// holds an integer no longer decodes via bare `f64::from_bits` (that yields NaN
+// on a pointer). Use the runtime's boxed-Long-aware decoder, matching how
+// `load_reentrancy.rs` reads numeric results.
 fn nb_to_f64(bits: u64) -> f64 {
-    f64::from_bits(bits)
+    clojure_jvm::runtime::arg_to_f64(bits)
 }
 
 fn nb_to_bool(bits: u64) -> bool {

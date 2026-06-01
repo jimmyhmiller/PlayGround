@@ -56,10 +56,12 @@ pub mod claude_events_pane;
 pub mod command_watch;
 pub mod context_menu;
 pub mod daemon_client;
+pub mod debug_bar;
 pub mod diagnostics;
 pub mod drawer;
 pub mod fps;
 pub mod garden_pane;
+pub mod graph_view;
 pub mod inference_dispatch;
 pub mod inbox;
 pub mod inferences_pane;
@@ -78,6 +80,7 @@ pub mod term_material;
 pub mod vt;
 pub mod window_geometry;
 pub mod worker;
+pub mod workflow_graph;
 use atlas::GlyphAtlas;
 use term_material::{
     make_cells_image, pack_rgb, GpuCell, TermMaterial, TermMaterialPlugin, TermParams,
@@ -353,7 +356,9 @@ impl Plugin for TerminalPlugin {
             .add_plugins(drawer::DrawerPlugin)
             .add_plugins(selection::SelectionPlugin)
             .add_plugins(run_button::RunButtonPlugin)
+            .add_plugins(workflow_graph::WorkflowGraphPlugin)
             .add_plugins(fps::FpsOverlayPlugin)
+            .add_plugins(debug_bar::DebugBarPlugin)
             .add_plugins(claude_events_pane::ClaudeEventsPanePlugin)
             .add_plugins(inferences_pane::InferencesPanePlugin)
             .add_plugins(issues_pane::IssuesPanePlugin)

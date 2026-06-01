@@ -2731,6 +2731,266 @@ def imap_place<V>(m: IntMap<V>, idx: Int, key: Int, val: V) -> IntMap<V> =
         },
     }
 
+
+// ---- PMap<V>: a PERSISTENT (immutable, structurally-shared) HAMT ----
+//
+// String keys, GENERIC values. `pmap_assoc` never mutates an existing
+// version: it returns a new map sharing all untouched subtrees. The
+// structure an atom holds so `swap` is a true CAS over an immutable
+// value. 32-way bitmap nodes; a collision bucket handles full-hash
+// clashes. Ships over the wire (Array + String + struct/enum portable).
+
+struct HLeaf<V> { kh: Int, hkey: String, val: V }
+struct HBitmap<V> { bitmap: Int, kids: Array<HNode<V>> }
+struct HColl<V> { kh: Int, items: Array<HNode<V>> }
+enum HNode<V> { HEmpty, HL(HLeaf<V>), HB(HBitmap<V>), HC(HColl<V>) }
+struct PMap<V> { root: HNode<V>, size: Int }
+struct AssocOut<V> { node: HNode<V>, added: Int }
+
+def hash_key(s: String) -> Int = {
+    let b = bytes_from_string(s);
+    fnv(b, 0, bytes_len(b), 2166136261)
+}
+def fnv(b: Bytes, i: Int, n: Int, acc: Int) -> Int =
+    if i == n { acc }
+    else { fnv(b, i + 1, n, bit_xor(acc, bytes_get(b, i)) * 16777619) }
+
+def popcount(x: Int) -> Int =
+    if x == 0 { 0 } else { bit_and(x, 1) + popcount(bit_shr(x, 1)) }
+def frag(h: Int, shift: Int) -> Int = bit_and(bit_shr(h, shift), 31)
+def bitpos(h: Int, shift: Int) -> Int = bit_shl(1, frag(h, shift))
+def index_of(bitmap: Int, bit: Int) -> Int = popcount(bit_and(bitmap, bit - 1))
+
+def arr1<V>(x: HNode<V>) -> Array<HNode<V>> = {
+    let a = array_new(1);
+    let _s = array_set(a, 0, x);
+    a
+}
+def arr2<V>(a: HNode<V>, b: HNode<V>) -> Array<HNode<V>> = {
+    let arr = array_new(2);
+    let _s0 = array_set(arr, 0, a);
+    let _s1 = array_set(arr, 1, b);
+    arr
+}
+def arr_set_copy<V>(a: Array<HNode<V>>, idx: Int, v: HNode<V>) -> Array<HNode<V>> = {
+    let n = array_len(a);
+    let out = array_new(n);
+    arr_copy_set(a, out, 0, n, idx, v)
+}
+def arr_copy_set<V>(src: Array<HNode<V>>, dst: Array<HNode<V>>, i: Int, n: Int, idx: Int, v: HNode<V>) -> Array<HNode<V>> =
+    if i == n { let _s = array_set(dst, idx, v); dst }
+    else {
+        let _s = array_set(dst, i, array_get(src, i));
+        arr_copy_set(src, dst, i + 1, n, idx, v)
+    }
+def arr_insert_copy<V>(a: Array<HNode<V>>, idx: Int, v: HNode<V>) -> Array<HNode<V>> = {
+    let n = array_len(a);
+    let out = array_new(n + 1);
+    arr_ins_fill(a, out, 0, n, idx, v)
+}
+def arr_ins_fill<V>(src: Array<HNode<V>>, dst: Array<HNode<V>>, j: Int, n: Int, idx: Int, v: HNode<V>) -> Array<HNode<V>> =
+    if j == n + 1 { dst }
+    else {
+        let chosen = if j < idx { array_get(src, j) }
+            else { if j == idx { v } else { array_get(src, j - 1) } };
+        let _s = array_set(dst, j, chosen);
+        arr_ins_fill(src, dst, j + 1, n, idx, v)
+    }
+
+def pmap_empty<V>() -> PMap<V> = PMap { root: HEmpty, size: 0 }
+def pmap_size<V>(m: PMap<V>) -> Int = m.size
+
+def pmap_get<V>(m: PMap<V>, key: String) -> Option<V> =
+    node_get(m.root, hash_key(key), 0, key)
+def node_get<V>(node: HNode<V>, h: Int, shift: Int, key: String) -> Option<V> =
+    match node {
+        HEmpty => None,
+        HL(leaf) =>
+            if string_eq(leaf.hkey, key) { Some(leaf.val) } else { None },
+        HC(coll) => coll_get(coll.items, 0, array_len(coll.items), key),
+        HB(bm) => {
+            let bit = bitpos(h, shift);
+            if bit_and(bm.bitmap, bit) == 0 { None }
+            else {
+                node_get(array_get(bm.kids, index_of(bm.bitmap, bit)), h, shift + 5, key)
+            }
+        },
+    }
+def coll_get<V>(items: Array<HNode<V>>, i: Int, n: Int, key: String) -> Option<V> =
+    if i == n { None }
+    else {
+        match array_get(items, i) {
+            HL(leaf) =>
+                if string_eq(leaf.hkey, key) { Some(leaf.val) }
+                else { coll_get(items, i + 1, n, key) },
+            HEmpty => coll_get(items, i + 1, n, key),
+            HB(b) => coll_get(items, i + 1, n, key),
+            HC(c) => coll_get(items, i + 1, n, key),
+        }
+    }
+
+def pmap_assoc<V>(m: PMap<V>, key: String, val: V) -> PMap<V> = {
+    let out = node_assoc(m.root, hash_key(key), 0, key, val);
+    PMap { root: out.node, size: m.size + out.added }
+}
+def node_assoc<V>(node: HNode<V>, h: Int, shift: Int, key: String, val: V) -> AssocOut<V> =
+    match node {
+        HEmpty => AssocOut { node: HL(HLeaf { kh: h, hkey: key, val: val }), added: 1 },
+        HL(leaf) =>
+            if string_eq(leaf.hkey, key) {
+                AssocOut { node: HL(HLeaf { kh: h, hkey: key, val: val }), added: 0 }
+            } else {
+                if leaf.kh == h {
+                    AssocOut { node: make_coll(leaf, h, key, val), added: 1 }
+                } else {
+                    AssocOut { node: split_leaf(leaf, h, key, val, shift), added: 1 }
+                }
+            },
+        HC(coll) => coll_assoc(coll, key, val),
+        HB(bm) => {
+            let bit = bitpos(h, shift);
+            let idx = index_of(bm.bitmap, bit);
+            if bit_and(bm.bitmap, bit) == 0 {
+                let nk = arr_insert_copy(bm.kids, idx, HL(HLeaf { kh: h, hkey: key, val: val }));
+                AssocOut { node: HB(HBitmap { bitmap: bit_or(bm.bitmap, bit), kids: nk }), added: 1 }
+            } else {
+                let sub = node_assoc(array_get(bm.kids, idx), h, shift + 5, key, val);
+                let nk = arr_set_copy(bm.kids, idx, sub.node);
+                AssocOut { node: HB(HBitmap { bitmap: bm.bitmap, kids: nk }), added: sub.added }
+            }
+        },
+    }
+def split_leaf<V>(leaf: HLeaf<V>, h: Int, key: String, val: V, shift: Int) -> HNode<V> = {
+    let f1 = frag(leaf.kh, shift);
+    let f2 = frag(h, shift);
+    if f1 == f2 {
+        let child = split_leaf(leaf, h, key, val, shift + 5);
+        HB(HBitmap { bitmap: bit_shl(1, f1), kids: arr1(child) })
+    } else {
+        let n1 = HL(leaf);
+        let n2 = HL(HLeaf { kh: h, hkey: key, val: val });
+        let kids = if f1 < f2 { arr2(n1, n2) } else { arr2(n2, n1) };
+        HB(HBitmap { bitmap: bit_or(bit_shl(1, f1), bit_shl(1, f2)), kids: kids })
+    }
+}
+def make_coll<V>(leaf: HLeaf<V>, h: Int, key: String, val: V) -> HNode<V> = {
+    let items = arr2(HL(leaf), HL(HLeaf { kh: h, hkey: key, val: val }));
+    HC(HColl { kh: h, items: items })
+}
+def coll_assoc<V>(coll: HColl<V>, key: String, val: V) -> AssocOut<V> = {
+    let found = coll_find(coll.items, 0, array_len(coll.items), key);
+    let leaf = HL(HLeaf { kh: coll.kh, hkey: key, val: val });
+    if found < 0 {
+        let nk = arr_insert_copy(coll.items, array_len(coll.items), leaf);
+        AssocOut { node: HC(HColl { kh: coll.kh, items: nk }), added: 1 }
+    } else {
+        let nk = arr_set_copy(coll.items, found, leaf);
+        AssocOut { node: HC(HColl { kh: coll.kh, items: nk }), added: 0 }
+    }
+}
+def coll_find<V>(items: Array<HNode<V>>, i: Int, n: Int, key: String) -> Int =
+    if i == n { 0 - 1 }
+    else {
+        match array_get(items, i) {
+            HL(leaf) => if string_eq(leaf.hkey, key) { i } else { coll_find(items, i + 1, n, key) },
+            HEmpty => coll_find(items, i + 1, n, key),
+            HB(b) => coll_find(items, i + 1, n, key),
+            HC(c) => coll_find(items, i + 1, n, key),
+        }
+    }
+
+// ---- PMap<V> operations: remove, fold, keys, contains ----
+
+def pmap_fold<V, A>(m: PMap<V>, init: A, f: fn(A, String, V) -> A) -> A =
+    node_fold(m.root, init, f)
+def node_fold<V, A>(node: HNode<V>, acc: A, f: fn(A, String, V) -> A) -> A =
+    match node {
+        HEmpty => acc,
+        HL(leaf) => f(acc, leaf.hkey, leaf.val),
+        HC(coll) => arr_fold(coll.items, 0, array_len(coll.items), acc, f),
+        HB(bm) => arr_fold(bm.kids, 0, array_len(bm.kids), acc, f),
+    }
+def arr_fold<V, A>(a: Array<HNode<V>>, i: Int, n: Int, acc: A, f: fn(A, String, V) -> A) -> A =
+    if i == n { acc }
+    else { arr_fold(a, i + 1, n, node_fold(array_get(a, i), acc, f), f) }
+
+// size via fold (sanity that fold visits each entry once)
+struct RemoveOut<V> { rnode: HNode<V>, removed: Int }
+def arr_remove_at<V>(a: Array<HNode<V>>, idx: Int) -> Array<HNode<V>> = {
+    let n = array_len(a);
+    let out = array_new(n - 1);
+    arr_rm_fill(a, out, 0, n, idx)
+}
+def arr_rm_fill<V>(src: Array<HNode<V>>, dst: Array<HNode<V>>, j: Int, n: Int, idx: Int) -> Array<HNode<V>> =
+    if j == n { dst }
+    else {
+        let _w = if j < idx { array_set(dst, j, array_get(src, j)) }
+            else { if j == idx { 0 } else { array_set(dst, j - 1, array_get(src, j)) } };
+        arr_rm_fill(src, dst, j + 1, n, idx)
+    }
+def pmap_remove<V>(m: PMap<V>, key: String) -> PMap<V> = {
+    let out = node_remove(m.root, hash_key(key), 0, key);
+    PMap { root: out.rnode, size: m.size - out.removed }
+}
+def node_remove<V>(node: HNode<V>, h: Int, shift: Int, key: String) -> RemoveOut<V> =
+    match node {
+        HEmpty => RemoveOut { rnode: HEmpty, removed: 0 },
+        HL(leaf) =>
+            if string_eq(leaf.hkey, key) { RemoveOut { rnode: HEmpty, removed: 1 } }
+            else { RemoveOut { rnode: HL(leaf), removed: 0 } },
+        HC(coll) => coll_remove(coll, key),
+        HB(bm) => {
+            let bit = bitpos(h, shift);
+            if bit_and(bm.bitmap, bit) == 0 { RemoveOut { rnode: HB(bm), removed: 0 } }
+            else {
+                let idx = index_of(bm.bitmap, bit);
+                let sub = node_remove(array_get(bm.kids, idx), h, shift + 5, key);
+                match sub.rnode {
+                    HEmpty => {
+                        let nk = arr_remove_at(bm.kids, idx);
+                        let nbm = bit_xor(bm.bitmap, bit);
+                        if nbm == 0 { RemoveOut { rnode: HEmpty, removed: sub.removed } }
+                        else { RemoveOut { rnode: HB(HBitmap { bitmap: nbm, kids: nk }), removed: sub.removed } }
+                    },
+                    HL(l) => {
+                        let nk = arr_set_copy(bm.kids, idx, HL(l));
+                        RemoveOut { rnode: HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed }
+                    },
+                    HB(b2) => {
+                        let nk = arr_set_copy(bm.kids, idx, HB(b2));
+                        RemoveOut { rnode: HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed }
+                    },
+                    HC(c2) => {
+                        let nk = arr_set_copy(bm.kids, idx, HC(c2));
+                        RemoveOut { rnode: HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed }
+                    },
+                }
+            }
+        },
+    }
+def coll_remove<V>(coll: HColl<V>, key: String) -> RemoveOut<V> = {
+    let found = coll_find(coll.items, 0, array_len(coll.items), key);
+    if found < 0 { RemoveOut { rnode: HC(coll), removed: 0 } }
+    else {
+        let n = array_len(coll.items);
+        if n - 1 == 1 {
+            let keep_idx = if found == 0 { 1 } else { 0 };
+            RemoveOut { rnode: array_get(coll.items, keep_idx), removed: 1 }
+        } else {
+            let nk = arr_remove_at(coll.items, found);
+            RemoveOut { rnode: HC(HColl { kh: coll.kh, items: nk }), removed: 1 }
+        }
+    }
+}
+
+// pmap_contains: is the key present?
+def pmap_contains<V>(m: PMap<V>, key: String) -> Int =
+    match pmap_get(m, key) { Some(v) => 1, None => 0 }
+
+// pmap_keys: all keys as a List<String> (fold collecting into a list).
+def pmap_keys<V>(m: PMap<V>) -> List<String> =
+    pmap_fold(m, Nil, |acc: List<String>, k: String, v: V| Cons(ListCell { head: k, tail: acc }))
+
 "#;
 
 // =============================================================================
@@ -2791,6 +3051,244 @@ mod tests {
         init();
         let m = parse_module(SOURCE).expect("stdlib must parse");
         resolve_module(&m).expect("stdlib must resolve");
+    }
+
+    #[test]
+    fn hamt_basic_assoc_get() {
+        init();
+        let ctx = Context::create();
+        let driver = "
+            def get_or(m: PMap<Int>, k: String, d: Int) -> Int =
+                match pmap_get(m, k) { Some(v) => v, None => d }
+            def build3() -> PMap<Int> =
+                pmap_assoc(pmap_assoc(pmap_assoc(pmap_empty(), \"apple\", 1), \"banana\", 2), \"cherry\", 3)
+            def t_a() -> Int = get_or(build3(), \"apple\", 0 - 1)
+            def t_b() -> Int = get_or(build3(), \"banana\", 0 - 1)
+            def t_c() -> Int = get_or(build3(), \"cherry\", 0 - 1)
+            def t_missing() -> Int = get_or(build3(), \"zebra\", 0 - 1)
+            def t_size() -> Int = pmap_size(build3())
+            def t_replace() -> Int = {
+                let m = pmap_assoc(build3(), \"apple\", 100);
+                get_or(m, \"apple\", 0 - 1)
+            }
+            def t_replace_size() -> Int = pmap_size(pmap_assoc(build3(), \"apple\", 100))
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(
+                        &names[n],
+                    ))
+                    .unwrap()
+                    .call(rt.thread_ptr())
+            };
+            assert_eq!(f("t_a"), 1);
+            assert_eq!(f("t_b"), 2);
+            assert_eq!(f("t_c"), 3);
+            assert_eq!(f("t_missing"), -1);
+            assert_eq!(f("t_size"), 3);
+            assert_eq!(f("t_replace"), 100);
+            assert_eq!(f("t_replace_size"), 3, "replace must not grow size");
+        }
+    }
+
+    #[test]
+    fn hamt_immutability_and_sharing() {
+        init();
+        let ctx = Context::create();
+        // assoc on a derived map must NOT mutate the original.
+        let driver = "
+            def get_or(m: PMap<Int>, k: String, d: Int) -> Int =
+                match pmap_get(m, k) { Some(v) => v, None => d }
+            def k10() -> PMap<Int> =
+                pmap_assoc(pmap_assoc(pmap_assoc(pmap_assoc(pmap_assoc(
+                pmap_assoc(pmap_assoc(pmap_assoc(pmap_assoc(pmap_assoc(
+                    pmap_empty(),
+                    \"alpha\", 1), \"beta\", 2), \"gamma\", 3), \"delta\", 4), \"epsilon\", 5),
+                    \"zeta\", 6), \"eta\", 7), \"theta\", 8), \"iota\", 9), \"kappa\", 10)
+            def old_beta() -> Int = get_or(k10(), \"beta\", 0 - 1)
+            def new_beta() -> Int = {
+                let m11 = pmap_assoc(k10(), \"beta\", 999);
+                get_or(m11, \"beta\", 0 - 1)
+            }
+            def old_after_new() -> Int = {
+                let m10 = k10();
+                let m11 = pmap_assoc(m10, \"beta\", 999);
+                get_or(m10, \"beta\", 0 - 1)
+            }
+            def shared_kappa() -> Int = {
+                let m11 = pmap_assoc(k10(), \"beta\", 999);
+                get_or(m11, \"kappa\", 0 - 1)
+            }
+            def size10() -> Int = pmap_size(k10())
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(
+                        &names[n],
+                    ))
+                    .unwrap()
+                    .call(rt.thread_ptr())
+            };
+            assert_eq!(f("size10"), 10, "all ten distinct keys present");
+            assert_eq!(f("old_beta"), 2);
+            assert_eq!(f("new_beta"), 999);
+            assert_eq!(
+                f("old_after_new"),
+                2,
+                "assoc on a derived map must NOT mutate the original (immutability)"
+            );
+            assert_eq!(f("shared_kappa"), 10, "untouched keys survive in the new version");
+        }
+    }
+
+    #[test]
+    fn pmap_wire_roundtrip() {
+        init();
+        let ctx = Context::create();
+        let driver = "
+            def get_or(m: PMap<Int>, k: String, d: Int) -> Int =
+                match pmap_get(m, k) { Some(v) => v, None => d }
+            def build3() -> PMap<Int> =
+                pmap_assoc(pmap_assoc(pmap_assoc(pmap_empty(), \"apple\", 1), \"banana\", 2), \"cherry\", 3)
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            // Build a 3-entry persistent map (contains String keys and,
+            // once it branches, Array<HNode> nodes).
+            let build3 = jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> *mut u8>(&def_symbol(
+                    &names["build3"],
+                ))
+                .unwrap();
+            let m = build3.call(rt.thread_ptr());
+
+            // Encode to wire bytes, then decode into a FRESH map on the
+            // same runtime — the exact path atoms use.
+            let mut buf = Vec::new();
+            crate::wire::encode_value(&rt, crate::wire::WireValue::Heap(m as *const u8), &mut buf)
+                .expect("encode PMap");
+            let (decoded, consumed) =
+                crate::wire::decode_value(&rt, &buf).expect("decode PMap");
+            assert_eq!(consumed, buf.len(), "decoder must consume exactly all bytes");
+            let dm = match decoded {
+                crate::wire::WireValue::Heap(p) => p as *mut u8,
+                _ => panic!("decoded PMap should be a heap value"),
+            };
+
+            // Look up every key in the DECODED map.
+            let get_or = jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, *mut u8, *mut u8, i64) -> i64>(
+                    &def_symbol(&names["get_or"]),
+                )
+                .unwrap();
+            let k_apple = crate::ffi::owned_str_to_heap(rt.thread_ptr(), "apple");
+            let k_banana = crate::ffi::owned_str_to_heap(rt.thread_ptr(), "banana");
+            let k_cherry = crate::ffi::owned_str_to_heap(rt.thread_ptr(), "cherry");
+            let k_missing = crate::ffi::owned_str_to_heap(rt.thread_ptr(), "zebra");
+            assert_eq!(get_or.call(rt.thread_ptr(), dm, k_apple, -1), 1);
+            assert_eq!(get_or.call(rt.thread_ptr(), dm, k_banana, -1), 2);
+            assert_eq!(get_or.call(rt.thread_ptr(), dm, k_cherry, -1), 3);
+            assert_eq!(get_or.call(rt.thread_ptr(), dm, k_missing, -1), -1);
+        }
+    }
+
+    #[test]
+    fn pmap_generic_string_values() {
+        init();
+        let ctx = Context::create();
+        // The point of generics: a PMap<String> (string -> string) works
+        // with the SAME pmap_* defs as PMap<Int>. Also a PMap<Pair> to
+        // prove struct values ride too.
+        let driver = "
+            struct Pair { a: Int, b: Int }
+            def get_or_str(m: PMap<String>, k: String, d: String) -> String =
+                match pmap_get(m, k) { Some(v) => v, None => d }
+            def build_strs() -> PMap<String> =
+                pmap_assoc(pmap_assoc(pmap_assoc(pmap_empty(),
+                    \"name\", \"ada\"), \"lang\", \"ai-lang\"), \"x\", \"y\")
+            def t_lang_len() -> Int = string_len(get_or_str(build_strs(), \"lang\", \"?\"))
+            def t_name_len() -> Int = string_len(get_or_str(build_strs(), \"name\", \"?\"))
+            def t_str_miss() -> Int = string_len(get_or_str(build_strs(), \"nope\", \"MISS\"))
+            def t_str_size() -> Int = pmap_size(build_strs())
+
+            def build_pairs() -> PMap<Pair> =
+                pmap_assoc(pmap_assoc(pmap_empty(), \"p\", Pair { a: 3, b: 4 }), \"q\", Pair { a: 10, b: 20 })
+            def t_pair_sum() -> Int =
+                match pmap_get(build_pairs(), \"q\") { Some(p) => p.a + p.b, None => 0 - 1 }
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(
+                        &names[n],
+                    ))
+                    .unwrap()
+                    .call(rt.thread_ptr())
+            };
+            assert_eq!(f("t_lang_len"), 7, "PMap<String> value \"ai-lang\"");
+            assert_eq!(f("t_name_len"), 3, "PMap<String> value \"ada\"");
+            assert_eq!(f("t_str_miss"), 4, "missing key returns default \"MISS\"");
+            assert_eq!(f("t_str_size"), 3);
+            assert_eq!(f("t_pair_sum"), 30, "PMap<Pair> struct value (10+20)");
+        }
+    }
+
+    #[test]
+    fn tmp_probe_pmap_ops() {
+        init();
+        let ctx = Context::create();
+        let driver = include_str!("probe_ops.ail.txt");
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names[n]))
+                    .unwrap().call(rt.thread_ptr())
+            };
+            assert_eq!(f("t_3arg"), 106, "3-arg closure: 100+5+1");
+            assert_eq!(f("t_fold_count"), 3);
+            assert_eq!(f("t_fold_sum"), 6);
+            assert_eq!(f("t_rm_basic"), 2, "after removing b, size 2 and b gone");
+            assert_eq!(f("t_rm_survivors"), 4, "a(1)+c(3) survive remove of b");
+            assert_eq!(f("t_rm_immutable"), 1, "remove returns new map; original keeps a");
+            assert_eq!(f("t_rm_missing"), 1, "removing absent key leaves size unchanged");
+        }
+    }
+
+    #[test]
+    fn bit_ops_work() {
+        init();
+        let ctx = Context::create();
+        let (rt, jit, names) = build_with_stdlib(
+            &ctx,
+            "def t_and(a: Int, b: Int) -> Int = bit_and(a, b)
+             def t_or(a: Int, b: Int) -> Int = bit_or(a, b)
+             def t_xor(a: Int, b: Int) -> Int = bit_xor(a, b)
+             def t_shl(a: Int, b: Int) -> Int = bit_shl(a, b)
+             def t_shr(a: Int, b: Int) -> Int = bit_shr(a, b)
+             def t_pop(a: Int) -> Int = popcount(a)",
+        );
+        unsafe {
+            let f2 = |n: &str, a: i64, b: i64| {
+                jit.get_fn2(&names[n]).unwrap().call(rt.thread_ptr(), a, b)
+            };
+            let f1 =
+                |n: &str, a: i64| jit.get_fn1(&names[n]).unwrap().call(rt.thread_ptr(), a);
+            assert_eq!(f2("t_and", 6, 3), 2);
+            assert_eq!(f2("t_or", 1, 2), 3);
+            assert_eq!(f2("t_xor", 5, 3), 6);
+            assert_eq!(f2("t_shl", 1, 5), 32);
+            assert_eq!(f2("t_shr", 256, 4), 16);
+            assert_eq!(f1("t_pop", 255), 8);
+            assert_eq!(f1("t_pop", 0), 0);
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use crate::cfg::{Cfg, Op, Value};
+use crate::cfg::{BlockId, Cfg, Op, Value};
 use crate::ssa::reverse_postorder;
 
 /// A linear program point (instruction index in RPO order).
@@ -31,6 +31,11 @@ pub struct Ranges {
     pub def: HashMap<Value, Point>,
     /// Alias-set representative per value (union-find roots).
     pub alias_root: HashMap<Value, Value>,
+    /// Program point of each block's terminator (the point *after* the block's
+    /// last instruction). React's reactive-scope alignment compares scope ranges
+    /// against `terminal.id`; this gives each terminator a slot in the same
+    /// linear point space so a value's def Point precedes its terminal-use Point.
+    pub term_point: HashMap<BlockId, Point>,
 }
 
 impl Ranges {
@@ -87,8 +92,18 @@ pub fn analyze(cfg: &Cfg) -> Ranges {
     // Pre-walk to assign points and defs. Block arguments (phis) start as
     // primitive and gain ref-ness from their incoming operands below, so a loop
     // index phi isn't misclassified as a reference.
+    //
+    // The linear numbering interleaves terminators: each block's instructions are
+    // numbered in order, then the block's terminator takes the next point (it sits
+    // *after* the block's last instruction), and the counter advances into the
+    // next block. This keeps a single total order consistent with RPO in which a
+    // value's def Point is strictly less than its block-terminal-use Point, while
+    // `block_start_point` is recorded directly rather than recomputed.
+    let mut block_start: HashMap<BlockId, Point> = HashMap::new();
+    let mut term_point: HashMap<BlockId, Point> = HashMap::new();
     for &b in &order {
         let block = cfg.block(b);
+        block_start.insert(b, point);
         for bp in &block.params {
             def.insert(*bp, point);
             is_ref.insert(*bp, false);
@@ -100,6 +115,9 @@ pub fn analyze(cfg: &Cfg) -> Ranges {
             }
             point += 1;
         }
+        // The terminator's point is the slot immediately after the last instr.
+        term_point.insert(b, point);
+        point += 1;
     }
     // Fixpoint: a block argument is a reference if any operand passed to it is.
     let mut changed = true;
@@ -158,7 +176,7 @@ pub fn analyze(cfg: &Cfg) -> Ranges {
 
     for &b in &order {
         let block = cfg.block(b);
-        let mut p = block_start_point(&order, cfg, b);
+        let mut p = *block_start.get(&b).expect("block start point recorded in pre-walk");
         for ins in &block.instrs {
             match &ins.op {
                 Op::MakeObject(props) => {
@@ -237,7 +255,7 @@ pub fn analyze(cfg: &Cfg) -> Ranges {
         range.insert(*v, (start, end));
     }
 
-    Ranges { range, is_ref, def, alias_root }
+    Ranges { range, is_ref, def, alias_root, term_point }
 }
 
 /// Whether an op's result is a reference (object/array/unknown) vs a primitive.
@@ -249,17 +267,6 @@ fn op_is_reference(op: &Op) -> bool {
         // Member reads, calls, globals, var reads: unknown -> assume reference.
         _ => true,
     }
-}
-
-fn block_start_point(order: &[crate::cfg::BlockId], cfg: &Cfg, target: crate::cfg::BlockId) -> Point {
-    let mut p = 0u32;
-    for &b in order {
-        if b == target {
-            return p;
-        }
-        p += cfg.block(b).instrs.len() as u32;
-    }
-    p
 }
 
 /// A debug rendering of the ranges (for golden tests): one line per value with a

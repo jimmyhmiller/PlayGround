@@ -1,0 +1,120 @@
+
+// 3-arg closure probe (no precedent in stdlib):
+def apply3<A, V>(acc: A, k: String, v: V, f: fn(A, String, V) -> A) -> A = f(acc, k, v)
+def t_3arg() -> Int = apply3(100, "x", 5, |a: Int, k: String, v: Int| a + v + string_len(k))
+
+// ---- new ops, written against SOURCE's PMap<V> ----
+// fold over all entries (drives an accumulator through the tree)
+def g_fold<V, A>(m: PMap<V>, init: A, f: fn(A, String, V) -> A) -> A =
+    g_node_fold(m.root, init, f)
+def g_node_fold<V, A>(node: HNode<V>, acc: A, f: fn(A, String, V) -> A) -> A =
+    match node {
+        HEmpty => acc,
+        HL(leaf) => f(acc, leaf.hkey, leaf.val),
+        HC(coll) => g_arr_fold(coll.items, 0, array_len(coll.items), acc, f),
+        HB(bm) => g_arr_fold(bm.kids, 0, array_len(bm.kids), acc, f),
+    }
+def g_arr_fold<V, A>(a: Array<HNode<V>>, i: Int, n: Int, acc: A, f: fn(A, String, V) -> A) -> A =
+    if i == n { acc }
+    else { g_arr_fold(a, i + 1, n, g_node_fold(array_get(a, i), acc, f), f) }
+
+// size via fold (sanity that fold visits each entry once)
+def t_fold_count() -> Int = {
+    let m = pmap_assoc(pmap_assoc(pmap_assoc(pmap_empty(), "a", 1), "b", 2), "c", 3);
+    g_fold(m, 0, |acc: Int, k: String, v: Int| acc + 1)
+}
+def t_fold_sum() -> Int = {
+    let m = pmap_assoc(pmap_assoc(pmap_assoc(pmap_empty(), "a", 1), "b", 2), "c", 3);
+    g_fold(m, 0, |acc: Int, k: String, v: Int| acc + v)
+}
+
+
+struct GRemOut<V> { rnode: HNode<V>, removed: Int }
+
+def g_arr_remove_at<V>(a: Array<HNode<V>>, idx: Int) -> Array<HNode<V>> = {
+    let n = array_len(a);
+    let out = array_new(n - 1);
+    g_arr_rm_fill(a, out, 0, n, idx)
+}
+def g_arr_rm_fill<V>(src: Array<HNode<V>>, dst: Array<HNode<V>>, j: Int, n: Int, idx: Int) -> Array<HNode<V>> =
+    if j == n { dst }
+    else {
+        let _w = if j < idx { array_set(dst, j, array_get(src, j)) }
+            else { if j == idx { 0 } else { array_set(dst, j - 1, array_get(src, j)) } };
+        g_arr_rm_fill(src, dst, j + 1, n, idx)
+    }
+
+def g_remove<V>(m: PMap<V>, key: String) -> PMap<V> = {
+    let out = g_node_remove(m.root, hash_key(key), 0, key);
+    PMap { root: out.rnode, size: m.size - out.removed }
+}
+def g_node_remove<V>(node: HNode<V>, h: Int, shift: Int, key: String) -> GRemOut<V> =
+    match node {
+        HEmpty => GRemOut { rnode: HEmpty, removed: 0 },
+        HL(leaf) =>
+            if string_eq(leaf.hkey, key) { GRemOut { rnode: HEmpty, removed: 1 } }
+            else { GRemOut { rnode: HL(leaf), removed: 0 } },
+        HC(coll) => g_coll_remove(coll, key),
+        HB(bm) => {
+            let bit = bitpos(h, shift);
+            if bit_and(bm.bitmap, bit) == 0 { GRemOut { rnode: HB(bm), removed: 0 } }
+            else {
+                let idx = index_of(bm.bitmap, bit);
+                let sub = g_node_remove(array_get(bm.kids, idx), h, shift + 5, key);
+                match sub.rnode {
+                    HEmpty => {
+                        let nk = g_arr_remove_at(bm.kids, idx);
+                        let nbm = bit_xor(bm.bitmap, bit);
+                        if nbm == 0 { GRemOut { rnode: HEmpty, removed: sub.removed } }
+                        else { GRemOut { rnode: HB(HBitmap { bitmap: nbm, kids: nk }), removed: sub.removed } }
+                    },
+                    HL(l) => {
+                        let nk = arr_set_copy(bm.kids, idx, HL(l));
+                        GRemOut { rnode: HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed }
+                    },
+                    HB(b2) => {
+                        let nk = arr_set_copy(bm.kids, idx, HB(b2));
+                        GRemOut { rnode: HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed }
+                    },
+                    HC(c2) => {
+                        let nk = arr_set_copy(bm.kids, idx, HC(c2));
+                        GRemOut { rnode: HB(HBitmap { bitmap: bm.bitmap, kids: nk }), removed: sub.removed }
+                    },
+                }
+            }
+        },
+    }
+def g_coll_remove<V>(coll: HColl<V>, key: String) -> GRemOut<V> = {
+    let found = coll_find(coll.items, 0, array_len(coll.items), key);
+    if found < 0 { GRemOut { rnode: HC(coll), removed: 0 } }
+    else {
+        let n = array_len(coll.items);
+        if n - 1 == 1 {
+            let keep_idx = if found == 0 { 1 } else { 0 };
+            GRemOut { rnode: array_get(coll.items, keep_idx), removed: 1 }
+        } else {
+            let nk = g_arr_remove_at(coll.items, found);
+            GRemOut { rnode: HC(HColl { kh: coll.kh, items: nk }), removed: 1 }
+        }
+    }
+}
+
+def t_rm_basic() -> Int = {
+    let m = pmap_assoc(pmap_assoc(pmap_assoc(pmap_empty(), "a", 1), "b", 2), "c", 3);
+    let m2 = g_remove(m, "b");
+    match pmap_get(m2, "b") { Some(v) => 0 - 100, None => pmap_size(m2) }
+}
+def t_rm_survivors() -> Int = {
+    let m = pmap_assoc(pmap_assoc(pmap_assoc(pmap_empty(), "a", 1), "b", 2), "c", 3);
+    let m2 = g_remove(m, "b");
+    match pmap_get(m2, "a") { Some(va) => match pmap_get(m2, "c") { Some(vc) => va + vc, None => 0 - 1 }, None => 0 - 2 }
+}
+def t_rm_immutable() -> Int = {
+    let m = pmap_assoc(pmap_assoc(pmap_empty(), "a", 1), "b", 2);
+    let m2 = g_remove(m, "a");
+    match pmap_get(m, "a") { Some(v) => v, None => 0 - 9 }
+}
+def t_rm_missing() -> Int = {
+    let m = pmap_assoc(pmap_empty(), "a", 1);
+    pmap_size(g_remove(m, "zzz"))
+}

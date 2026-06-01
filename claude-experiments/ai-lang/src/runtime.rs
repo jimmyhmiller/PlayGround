@@ -33,7 +33,30 @@ use crate::gc::{Full, Heap, ObjHeader, ThreadState, TypeInfo};
 use crate::hash::Hash;
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+/// One located-state cell: its current wire-encoded value plus a
+/// monotonic generation that powers `atom_swap`'s compare-and-set.
+#[derive(Clone, Debug)]
+pub struct CellEntry {
+    pub generation: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// Parse a 64-char hex string into a 32-byte `Hash`, or `None` if it
+/// isn't well-formed. Used to recover cell keys from `<keyhex>.cell`
+/// filenames when loading a durable cell store.
+fn parse_hex_hash(s: &str) -> Option<Hash> {
+    if s.len() != Hash::SIZE * 2 {
+        return None;
+    }
+    let mut out = [0u8; Hash::SIZE];
+    for (i, b) in out.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+    }
+    Some(Hash(out))
+}
 
 // =============================================================================
 // Thread
@@ -227,6 +250,19 @@ pub fn boxed_int_shape_hash() -> Hash {
     Hash::of_bytes(b"<runtime:BoxedInt>")
 }
 
+/// Canonical wire-shape hash for the heap `String` (varlen-bytes) shape.
+/// Lets the wire codec recognize a String pointer and ship it. Part of
+/// the wire format.
+pub fn string_shape_hash() -> Hash {
+    Hash::of_bytes(b"<runtime:String>")
+}
+
+/// Canonical wire-shape hash for the heap `Array` (varlen pointer slots)
+/// shape. Part of the wire format.
+pub fn array_shape_hash() -> Hash {
+    Hash::of_bytes(b"<runtime:Array>")
+}
+
 const _: () = {
     assert!(core::mem::offset_of!(ClosureRaw, code_hash) == closure_offsets::CODE_HASH);
     assert!(core::mem::offset_of!(ClosureRaw, n_captures) == closure_offsets::N_CAPTURES);
@@ -406,6 +442,37 @@ pub struct Runtime {
     pub result_cache: Arc<Mutex<HashMap<Hash, Vec<u8>>>>,
     pub cache_hits: Arc<std::sync::atomic::AtomicUsize>,
     pub cache_misses: Arc<std::sync::atomic::AtomicUsize>,
+
+    /// Located mutable state — the cell store backing distributed
+    /// atoms. Maps a cell identity (`blake3(name)`) to the **wire
+    /// encoding** of its current value (the same bytes `encode_value`
+    /// produces). Holding the encoded form, not a live heap pointer,
+    /// means cell values survive GC trivially and ship back to a reader
+    /// without re-encoding. A cell is a mutable identity over a
+    /// succession of immutable, content-addressed values — Clojure's
+    /// atom model, made durable-able and shippable by construction.
+    ///
+    /// Each cell carries a monotonic **generation** counter alongside
+    /// its bytes. `atom_swap` is a lock-free CAS loop (like Clojure
+    /// `swap!`): it snapshots `(generation, bytes)`, runs the shipped
+    /// updater with NO lock held, then commits only if the generation
+    /// is unchanged (`cell_compare_and_set`); a concurrent writer that
+    /// moved the cell forces a retry. The Mutex is held only for the
+    /// commit compare-and-swap, never across the (arbitrary, shipped)
+    /// updater — so a slow or re-entrant updater can't block or
+    /// deadlock other swaps. The updater is pure by the swap contract,
+    /// so re-running it on conflict is sound.
+    pub cells: Arc<Mutex<HashMap<Hash, CellEntry>>>,
+
+    /// When set, the cell store is durable: every `cell_set`/`cell_init`
+    /// write-throughs the value's bytes to `<dir>/<keyhex>.cell`, and
+    /// [`Runtime::enable_cell_persistence`] loads any existing cells
+    /// from that directory on startup. This is the "disk" form of
+    /// located state — a node pointed at a directory keeps its atoms
+    /// across restarts. Durability is nearly free here: a cell's value
+    /// is already the wire-encoded bytes, so persisting it is a write,
+    /// not a serialization step. `None` = volatile, in-memory only.
+    pub cell_dir: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl Runtime {
@@ -477,6 +544,14 @@ impl Runtime {
             shape_by_type_id.push(None);
         }
         shape_by_type_id[boxed_int_type_id as usize] = Some(bi_hash);
+        // Register the String and Array shapes so the wire codec can ship
+        // them. They have no `shape_meta` entry — the encoder special-cases
+        // these two canonical hashes and reads the varlen heap layout
+        // directly; the decoder reconstructs from the kind tag. Immutable
+        // container values (e.g. a persistent HAMT, which holds
+        // `Array<HNode>` and `String` keys) must all be wire-portable.
+        shape_by_type_id[string_type_id as usize] = Some(string_shape_hash());
+        shape_by_type_id[array_type_id as usize] = Some(array_shape_hash());
         shape_meta.insert(
             bi_hash,
             ShapeMeta::Struct {
@@ -553,7 +628,149 @@ impl Runtime {
             result_cache: Arc::new(Mutex::new(HashMap::new())),
             cache_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            cells: Arc::new(Mutex::new(HashMap::new())),
+            cell_dir: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// Make this runtime's cell store durable, backed by `dir`. Creates
+    /// the directory if needed, then loads every `<keyhex>.cell` file
+    /// already present into the in-memory map (so a restarted node sees
+    /// its prior atoms). Subsequent `cell_set`/`cell_init` write through
+    /// to disk. Returns the number of cells loaded.
+    pub fn enable_cell_persistence(
+        &self,
+        dir: impl Into<PathBuf>,
+    ) -> std::io::Result<usize> {
+        let dir = dir.into();
+        std::fs::create_dir_all(&dir)?;
+        let mut loaded = 0usize;
+        {
+            let mut cells = self.cells.lock().expect("cell store poisoned");
+            for entry in std::fs::read_dir(&dir)? {
+                let path = entry?.path();
+                let is_cell = path.extension().and_then(|e| e.to_str()) == Some("cell");
+                if !is_cell {
+                    continue;
+                }
+                let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if let Some(key) = parse_hex_hash(stem) {
+                    let bytes = std::fs::read(&path)?;
+                    // Reloaded cells start at generation 0; the generation
+                    // is only meaningful within one process's lifetime for
+                    // CAS, not across restarts.
+                    cells.insert(key, CellEntry { generation: 0, bytes });
+                    loaded += 1;
+                }
+            }
+        }
+        *self.cell_dir.lock().expect("cell dir poisoned") = Some(dir);
+        Ok(loaded)
+    }
+
+    /// Path a cell key persists to, if persistence is enabled.
+    fn cell_path(&self, key: &Hash) -> Option<PathBuf> {
+        let guard = self.cell_dir.lock().expect("cell dir poisoned");
+        guard.as_ref().map(|dir| dir.join(format!("{}.cell", key.to_hex())))
+    }
+
+    /// Write a cell's bytes to disk atomically (temp file + rename), if
+    /// persistence is enabled. A torn write would corrupt a cell, so we
+    /// never write the final path in place.
+    fn persist_cell(&self, key: &Hash, value: &[u8]) {
+        if let Some(path) = self.cell_path(key) {
+            let tmp = path.with_extension("cell.tmp");
+            if std::fs::write(&tmp, value).is_ok() {
+                let _ = std::fs::rename(&tmp, &path);
+            }
+        }
+    }
+
+    /// Read a cell's current wire-encoded value, if it exists.
+    pub fn cell_get(&self, key: &Hash) -> Option<Vec<u8>> {
+        let guard = self.cells.lock().expect("cell store poisoned");
+        guard.get(key).map(|e| e.bytes.clone())
+    }
+
+    /// Read a cell's `(generation, bytes)` snapshot — the read half of
+    /// the `atom_swap` CAS loop. The generation pins this exact value;
+    /// `cell_compare_and_set` commits only if it hasn't advanced.
+    pub fn cell_get_versioned(&self, key: &Hash) -> Option<(u64, Vec<u8>)> {
+        let guard = self.cells.lock().expect("cell store poisoned");
+        guard.get(key).map(|e| (e.generation, e.bytes.clone()))
+    }
+
+    /// Set a cell's value unconditionally (a plain `reset`), bumping its
+    /// generation so any in-flight CAS swap against the old value retries.
+    pub fn cell_set(&self, key: Hash, value: Vec<u8>) {
+        {
+            let mut guard = self.cells.lock().expect("cell store poisoned");
+            let entry = guard.entry(key).or_insert_with(|| CellEntry {
+                generation: 0,
+                bytes: Vec::new(),
+            });
+            entry.generation = entry.generation.wrapping_add(1);
+            entry.bytes = value.clone();
+        }
+        self.persist_cell(&key, &value);
+    }
+
+    /// Commit a swap: if the cell's generation still equals
+    /// `expected_generation`, install `new` (bumping the generation) and
+    /// return `true`. Otherwise a concurrent writer moved the cell —
+    /// return `false` and let the caller re-snapshot and retry. The lock
+    /// is held only for this compare-and-swap, never across the updater.
+    pub fn cell_compare_and_set(
+        &self,
+        key: &Hash,
+        expected_generation: u64,
+        new: Vec<u8>,
+    ) -> bool {
+        let committed = {
+            let mut guard = self.cells.lock().expect("cell store poisoned");
+            match guard.get_mut(key) {
+                Some(entry) if entry.generation == expected_generation => {
+                    entry.generation = entry.generation.wrapping_add(1);
+                    entry.bytes = new.clone();
+                    true
+                }
+                _ => false,
+            }
+        };
+        if committed {
+            self.persist_cell(key, &new);
+        }
+        committed
+    }
+
+    /// Initialize a cell only if absent (like Clojure `(atom init)`
+    /// addressed by name — idempotent). Returns the resulting current
+    /// value, whether freshly stored or pre-existing.
+    pub fn cell_init(&self, key: Hash, init: Vec<u8>) -> Vec<u8> {
+        let (current, wrote) = {
+            let mut guard = self.cells.lock().expect("cell store poisoned");
+            match guard.entry(key) {
+                std::collections::hash_map::Entry::Occupied(o) => {
+                    (o.get().bytes.clone(), false)
+                }
+                std::collections::hash_map::Entry::Vacant(v) => (
+                    v.insert(CellEntry {
+                        generation: 0,
+                        bytes: init,
+                    })
+                    .bytes
+                    .clone(),
+                    true,
+                ),
+            }
+        };
+        if wrote {
+            self.persist_cell(&key, &current);
+        }
+        current
     }
 
     /// Look up a cached result frame by the call-payload hash.
@@ -1205,6 +1422,41 @@ pub unsafe extern "C" fn ai_gc_pollcheck_slow(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A durable cell store survives a "restart": values written on one
+    /// Runtime are reloaded by a fresh Runtime pointed at the same dir.
+    #[test]
+    fn durable_cells_survive_restart() {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("ai-lang-cells-{}", nanos));
+
+        let key_a = Hash::of_bytes(b"alpha");
+        let key_b = Hash::of_bytes(b"beta");
+        {
+            let rt = Runtime::new(vec![]);
+            assert_eq!(rt.enable_cell_persistence(&dir).unwrap(), 0);
+            rt.cell_set(key_a, b"first".to_vec());
+            // init-if-absent persists; a second init must NOT overwrite.
+            assert_eq!(rt.cell_init(key_b, b"orig".to_vec()), b"orig".to_vec());
+            assert_eq!(rt.cell_init(key_b, b"ignored".to_vec()), b"orig".to_vec());
+            rt.cell_set(key_a, b"second".to_vec()); // last write wins
+        }
+        {
+            // Fresh runtime, same dir — simulates a process restart.
+            let rt = Runtime::new(vec![]);
+            assert_eq!(rt.enable_cell_persistence(&dir).unwrap(), 2);
+            assert_eq!(rt.cell_get(&key_a), Some(b"second".to_vec()));
+            assert_eq!(rt.cell_get(&key_b), Some(b"orig".to_vec()));
+        }
+        // A volatile runtime (no persistence) sees nothing.
+        let volatile = Runtime::new(vec![]);
+        assert_eq!(volatile.cell_get(&key_a), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn thread_layout_matches_offsets() {

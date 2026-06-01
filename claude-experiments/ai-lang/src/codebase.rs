@@ -881,6 +881,7 @@ mod tests {
         let dir = tempdir("corrupt_type");
         let mut cb = Codebase::open(&dir).unwrap();
         let scheme = TypeScheme::Struct {
+            type_params: 0,
             fields: vec![],
             wire: true,
         };
@@ -958,6 +959,7 @@ mod tests {
         let mut cb = Codebase::open(&dir).unwrap();
         let h = Hash([0x11; 32]);
         let scheme = TypeScheme::Struct {
+            type_params: 0,
             fields: vec![],
             wire: true,
         };

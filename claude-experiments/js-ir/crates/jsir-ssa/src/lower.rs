@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use jsir_ir::{Attr, Op as IrOp, ValueId as IrValue};
 
-use crate::cfg::{BinOp, BlockId, Cfg, Const, MemberKey, Op, PropKey, Term, UnOp, VarId, Value};
+use crate::cfg::{BinOp, BlockId, BlockKind, Cfg, Const, MemberKey, Op, PropKey, SrcRef, Term, UnOp, VarId, Value};
 
 /// Lower the first function declaration in `file` (or the whole program body if
 /// there is none) into a CFG. Returns the CFG and the parameter names.
@@ -76,6 +76,11 @@ pub fn lower_function(file: &IrOp) -> Result<Cfg, String> {
 
 struct Lower {
     cfg: Cfg,
+    /// The `node_id` of the statement-root JSIR op currently being lowered.
+    /// Threaded onto each emitted [`crate::cfg::Instr`] via `Cfg::cur_src` so an
+    /// IR-rewrite memoizer can map analysis `Value`s back to the JSIR statement
+    /// that produced them. `None` when no statement context is established.
+    cur_stmt_node_id: Option<u32>,
     /// jsir value id -> CFG value (lowered expression results).
     vmap: HashMap<IrValue, Value>,
     /// jsir value id -> variable slot, for `identifier_ref` l-values.
@@ -98,6 +103,7 @@ impl Lower {
     fn new() -> Lower {
         Lower {
             cfg: Cfg::new(),
+            cur_stmt_node_id: None,
             vmap: HashMap::new(),
             lval: HashMap::new(),
             vars: HashMap::new(),
@@ -133,8 +139,22 @@ impl Lower {
 
     /// Lower a sequence of statement ops into `cur` (which may change as control
     /// flow splits the block).
+    ///
+    /// A statements region is a flat post-order list: a run of 1-result operand
+    /// ops followed by their 0-result statement-root op. Every instruction
+    /// emitted while lowering that run (operands *and* root) is stamped with the
+    /// statement root's `node_id` so analysis results can be mapped back to the
+    /// originating JSIR statement.
     fn lower_stmts(&mut self, ops: &[IrOp], cur: &mut BlockId) -> Result<(), String> {
-        for op in ops {
+        let owners = stmt_owner_node_ids(ops);
+        let saved = self.cur_stmt_node_id;
+        for (op, owner) in ops.iter().zip(owners.iter()) {
+            // Establish statement provenance for this op (operands inherit the
+            // following statement root's id; the root keeps its own).
+            if let Some(id) = owner {
+                self.cur_stmt_node_id = Some(*id);
+            }
+            self.cfg.cur_src = self.cur_stmt_node_id.map(|stmt_node_id| SrcRef { stmt_node_id });
             self.lower_op(op, cur)?;
             // Once a block is terminated (return/throw), the rest is unreachable
             // for the current block; stop emitting into it.
@@ -142,6 +162,8 @@ impl Lower {
                 break;
             }
         }
+        self.cur_stmt_node_id = saved;
+        self.cfg.cur_src = saved.map(|stmt_node_id| SrcRef { stmt_node_id });
         Ok(())
     }
 
@@ -325,9 +347,11 @@ impl Lower {
 
     fn lower_if(&mut self, op: &IrOp, cur: &mut BlockId) -> Result<(), String> {
         let cond = self.val(op.operands[0])?;
+        let head = *cur;
         let then_b = self.cfg.new_block();
         let else_b = self.cfg.new_block();
         let join_b = self.cfg.new_block();
+        self.cfg.record_join(head, join_b, BlockKind::Block)?;
         self.cfg.block_mut(*cur).term = Term::CondBr {
             cond,
             then_block: then_b,
@@ -355,8 +379,10 @@ impl Lower {
     /// SSA construction turns the synthetic var into a block-argument phi.
     fn lower_conditional(&mut self, op: &IrOp, cur: &mut BlockId) -> Result<(), String> {
         let cond = self.val(op.operands[0])?;
+        let head = *cur;
         let tmp = self.fresh_synth_var();
         let (then_b, else_b, join_b) = (self.cfg.new_block(), self.cfg.new_block(), self.cfg.new_block());
+        self.cfg.record_join(head, join_b, BlockKind::Block)?;
         self.cfg.block_mut(*cur).term = Term::CondBr {
             cond,
             then_block: then_b,
@@ -385,6 +411,7 @@ impl Lower {
     /// `a && b` / `a || b` / `a ?? b`: short-circuit via a synthetic variable.
     fn lower_logical(&mut self, op: &IrOp, cur: &mut BlockId) -> Result<(), String> {
         let left = self.val(op.operands[0])?;
+        let head = *cur;
         let oper = str_attr(op, "operator_").unwrap_or_default();
         let tmp = self.fresh_synth_var();
         self.cfg.push_effect(*cur, Op::WriteVar(tmp, left));
@@ -399,6 +426,7 @@ impl Lower {
             other => return Err(format!("unsupported logical op {other}")),
         };
         let (rhs_b, join_b) = (self.cfg.new_block(), self.cfg.new_block());
+        self.cfg.record_join(head, join_b, BlockKind::Block)?;
         self.cfg.block_mut(*cur).term = Term::CondBr {
             cond: take_rhs,
             then_block: rhs_b,
@@ -460,6 +488,15 @@ impl Lower {
         // header: evaluate the test (region 0 is an expr region)
         let mut h = header;
         let cond = self.lower_expr_region(op, 0, &mut h)?;
+        // The loop header is the test block whose terminator is the CondBr; its
+        // join is the loop-exit block. `lower_expr_region` cannot split a block
+        // (an expr region has no statement-level control flow), so `h == header`.
+        if h != header {
+            return Err(format!(
+                "lower: while header split across blocks ({header:?} -> {h:?}); cannot record loop join"
+            ));
+        }
+        self.cfg.record_join(header, exit, BlockKind::Loop)?;
         self.cfg.block_mut(h).term = Term::CondBr {
             cond,
             then_block: body,
@@ -487,6 +524,29 @@ impl Lower {
             .ok_or("expr region has no terminator")?;
         self.val(end.operands[0])
     }
+}
+
+/// For each op in a flat statements region, the `node_id` of the statement root
+/// that owns it. A statements region is a post-order list: a run of 1-result
+/// operand ops followed by their 0-result statement root (the same grouping
+/// `hir2ast`'s `stmts` uses: 0-result ops are statement roots). Every operand op
+/// in a run inherits the `node_id` of the statement root that closes the run.
+/// Trailing operand ops with no following statement root (and roots without a
+/// `node_id`) map to `None`.
+fn stmt_owner_node_ids(ops: &[IrOp]) -> Vec<Option<u32>> {
+    let mut owners: Vec<Option<u32>> = vec![None; ops.len()];
+    let mut run_start = 0usize;
+    for (i, op) in ops.iter().enumerate() {
+        if op.results.is_empty() {
+            // Statement root: it and every operand op since the last root share
+            // its node_id.
+            for slot in owners.iter_mut().take(i + 1).skip(run_start) {
+                *slot = op.node_id;
+            }
+            run_start = i + 1;
+        }
+    }
+    owners
 }
 
 /// The first `function_declaration` in `op`, descending one level into export

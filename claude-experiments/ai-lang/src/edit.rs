@@ -29,7 +29,7 @@ use crate::codec::encode_def;
 use crate::depindex::DependencyIndex;
 use crate::hash::Hash;
 use crate::resolve::{parse_at_builtin_name, ExternalEnv, AT_BUILTIN_PREFIX};
-use crate::typecheck::{typecheck_cone, typecheck_def, TypeScheme};
+use crate::typecheck::{typecheck_cone, typecheck_def, typecheck_module, TypeScheme};
 use std::collections::HashMap;
 
 // =============================================================================
@@ -447,14 +447,17 @@ pub fn add(cb: &mut Codebase, source: &str) -> Result<Vec<DefRef>, EditError> {
     let env = build_external_env(cb);
     let rm = crate::resolve::resolve_module_with_env(&module, &env)?;
 
-    // Typecheck every newly-resolved def against the codebase's cached schemes
-    // plus the new ones (seed a working cache from the codebase's types). A
-    // user type error is a hard, typed error here (not a silent partial add).
+    // Typecheck the whole new module against the codebase's cached schemes,
+    // seeded from the codebase's types. We use `typecheck_module` (not a manual
+    // per-def loop) precisely because it runs a PROVISIONAL pre-pass: it inserts
+    // each new def's declared signature into the cache BEFORE checking any body,
+    // so a self-recursive body (`fact` calling `TopRef(fact_hash)`) or a
+    // mutually-recursive group (`even`/`odd`) — and recursive type defs — all
+    // resolve their own/peer references. A manual one-at-a-time loop fails these
+    // with "unknown top-level ref". A user type error is still a hard, typed
+    // error here (not a silent partial add).
     let mut work_cache = cb.types().clone();
-    for rd in &rm.defs {
-        let scheme = typecheck_def(&rd.def, &work_cache)?;
-        work_cache.insert(rd.hash, scheme);
-    }
+    typecheck_module(&rm, &mut work_cache)?;
 
     // Commit: store defs + names + types. `store_resolved_module` writes the
     // resolver-canonical hashes (honouring recursive-type SelfRef forms).

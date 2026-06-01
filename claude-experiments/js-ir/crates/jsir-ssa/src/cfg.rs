@@ -41,6 +41,37 @@ pub struct Cfg {
     /// Interned variable names, indexed by `VarId`.
     pub var_names: Vec<String>,
     next_value: u32,
+    /// The statement provenance stamped onto instructions created by `push` /
+    /// `push_effect`. The lowering pass sets this when it enters a
+    /// statement-root JSIR op (see [`crate::lower`]); reset to `None` for
+    /// synthetic instructions.
+    pub cur_src: Option<SrcRef>,
+    /// Structured-construct join points, reconstructed during lowering
+    /// (see [`crate::lower`]). Maps a control-flow *head* block (the block whose
+    /// terminator is the `CondBr`/loop entry of a structured construct) to its
+    /// *join* (merge) block — the single block where the construct's control
+    /// paths reconverge. This is the analogue of React's `terminal.fallthrough`,
+    /// reconstructed from the front-end rather than recovered by dominance, and
+    /// drives block-scope alignment in later phases. The join post-dominates the
+    /// head. Block ids are stable across SSA construction
+    /// ([`crate::ssa::construct`] rewrites in place; it never renumbers blocks),
+    /// so this map stays valid after SSA.
+    pub joins: HashMap<BlockId, BlockId>,
+    /// The structural role of each construct head recorded in [`Cfg::joins`].
+    /// Only head blocks (keys of `joins`) appear here. `Block` for forward
+    /// (non-looping) constructs (`if`/ternary/logical); `Loop` for loop headers
+    /// (`while`), whose join is the loop-exit block and which has an incoming
+    /// back-edge.
+    pub block_kinds: HashMap<BlockId, BlockKind>,
+}
+
+/// The structural role of a control-flow head block (see [`Cfg::block_kinds`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockKind {
+    /// A forward (non-looping) construct head: `if`, ternary, logical `&&`/`||`/`??`.
+    Block,
+    /// A loop header (`while`), reached by a back-edge; its join is the loop exit.
+    Loop,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +88,19 @@ pub struct Block {
 pub struct Instr {
     pub result: Option<Value>,
     pub op: Op,
+    /// Provenance: which JSIR *statement* op this instruction was lowered from.
+    /// `None` for synthetic instructions (SSA undef, phi-introduced values).
+    pub src: Option<SrcRef>,
+}
+
+/// A back-reference from a CFG instruction to the JSIR op-tree statement that
+/// produced it. Threaded JSIR -> CFG by [`crate::lower`] and preserved through
+/// SSA construction; lets an IR-rewrite memoizer map analysis results (which
+/// speak in `Value`s) back to the statement ops it must relocate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SrcRef {
+    /// `node_id` of the enclosing statement-root JSIR op.
+    pub stmt_node_id: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -215,7 +259,27 @@ impl Cfg {
             entry: BlockId(0),
             var_names: Vec::new(),
             next_value: 0,
+            cur_src: None,
+            joins: HashMap::new(),
+            block_kinds: HashMap::new(),
         }
+    }
+
+    /// Record a structured construct: its `head` block (whose terminator is the
+    /// construct's branch) reconverges at `join`. Hard-errors if a different
+    /// join was already recorded for this head (would indicate a lowering bug —
+    /// every head must have exactly one recoverable join).
+    pub fn record_join(&mut self, head: BlockId, join: BlockId, kind: BlockKind) -> Result<(), String> {
+        if let Some(prev) = self.joins.get(&head) {
+            if *prev != join {
+                return Err(format!(
+                    "lower: conflicting join for head {head:?}: {prev:?} vs {join:?}"
+                ));
+            }
+        }
+        self.joins.insert(head, join);
+        self.block_kinds.insert(head, kind);
+        Ok(())
     }
 
     pub fn fresh_value(&mut self) -> Value {
@@ -249,15 +313,20 @@ impl Cfg {
     }
 
     /// Append an instruction with a fresh result to a block; returns the result.
+    /// The instruction is stamped with the current statement provenance
+    /// (`self.cur_src`).
     pub fn push(&mut self, block: BlockId, op: Op) -> Value {
         let v = self.fresh_value();
-        self.block_mut(block).instrs.push(Instr { result: Some(v), op });
+        let src = self.cur_src;
+        self.block_mut(block).instrs.push(Instr { result: Some(v), op, src });
         v
     }
 
-    /// Append an instruction with no result (e.g. `WriteVar`).
+    /// Append an instruction with no result (e.g. `WriteVar`). Stamped with the
+    /// current statement provenance (`self.cur_src`).
     pub fn push_effect(&mut self, block: BlockId, op: Op) {
-        self.block_mut(block).instrs.push(Instr { result: None, op });
+        let src = self.cur_src;
+        self.block_mut(block).instrs.push(Instr { result: None, op, src });
     }
 }
 

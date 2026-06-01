@@ -40,6 +40,15 @@ pub struct Op {
     /// default printer too), so it does not affect `ast2hir` byte-exactness; it
     /// exists so `hir2ast` can reconstruct each AST node's base fields.
     pub trivia: Option<Trivia>,
+    /// A stable, monotonically-assigned origin id, minted during `ast2hir`
+    /// (`None` for ops the textual builder constructs without a node and for
+    /// any synthetically-created op). This is PURE INFRASTRUCTURE: the textual
+    /// printer (`print.rs`) and the inverse `hir2ast` lowering MUST ignore it
+    /// entirely — it never participates in byte-exactness or any structural
+    /// decision. It exists so later IR->IR transforms can map an analyzed
+    /// instruction back to the JSIR op (and the enclosing statement) it came
+    /// from.
+    pub node_id: Option<u32>,
 }
 
 /// A source position (1-based line, 0-based column), mirroring the JSIR `loc`.
@@ -101,6 +110,7 @@ impl Op {
             regions: Vec::new(),
             results: Vec::new(),
             trivia: None,
+            node_id: None,
         }
     }
 

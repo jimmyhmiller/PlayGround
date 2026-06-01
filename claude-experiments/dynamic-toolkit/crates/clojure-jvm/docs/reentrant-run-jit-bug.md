@@ -1,6 +1,54 @@
-# Reentrant `run_jit` loses direct-call return values
+# RESOLVED — was: "Reentrant `run_jit` loses direct-call return values"
 
-## Summary
+## ✅ RESOLVED 2026-05-31 — it was NOT reentrancy, NOT the JIT executor
+
+> **TL;DR of the actual fix.** The bug had nothing to do with reentrancy,
+> nested `run_jit`, `x23`, the ControlAware outcome protocol, the call table,
+> or GC. It was a plain analyzer logic error in `analyze_seq` (clojure-jvm
+> only — no shared crate touched):
+>
+> A namespace-QUALIFIED head symbol whose namespace part contained a `.`
+> (e.g. `clojure.core/inc`) was unconditionally rewritten as a *static method
+> call* `(. clojure.core (inc 41))`, because the `looks_like_class` heuristic
+> was `ns.contains('.')`. `clojure.core` is a NAMESPACE, not a class, so the
+> rewrite found no host method → emitted a runtime `ThrowExpr` → the top-level
+> caught it and returned `nil`. Bare `(inc 41)` worked because it took the
+> normal var-invoke path. The var value was identical in both cases; only the
+> qualified call path was broken.
+>
+> **Why it looked like a reentrancy bug.** The probe only exercised qualified
+> calls (`clojure.core/inc`, `clojure.core/find-ns`) from inside a reentrant
+> `RT/load`. The exact same `nil` reproduces **non-reentrantly**:
+> `(clojure.core/inc 41)` returns `nil` at a bare top-level eval after core
+> loads, while `(inc 41)` returns `42`. Reentrancy was a red herring; the
+> minimal reentrant fn-call (`(myinc 41)` where `myinc` is a user var) always
+> returned the correct value.
+>
+> **The fix.** In `analyze_seq`, the static-call sugar now skips the rewrite
+> when the namespace part is a known namespace (directly or via an alias in
+> the current ns) or when the qualified symbol resolves to a Var — those are
+> ordinary fn invocations. Only true class names (`Math/ceil`,
+> `clojure.lang.RT/load`) still take the static path.
+>
+> A second, latent issue surfaced once qualified calls reached the invoke
+> path: `InvokeExpr::emit` panicked when its head expression *diverged*
+> (a `ThrowExpr` for an unmodeled host-class reference in a macro body that
+> only fires on a bad call, e.g. `defn`'s `(throw (IllegalArgumentException.
+> …))`). It now returns `None` for a diverging head, mirroring the existing
+> diverging-arg handling — the call is unreachable, the block already
+> terminated.
+>
+> **Result.** `tests/interesting_features::probe_reentrant_refer` now asserts
+> `(clojure.core/inc 41) == 42` and a non-nil `find-ns`. The upstream-core
+> loader frontier moved from form **215** to form **430** (a different,
+> unrelated blocker: a corrupt/unmodeled heap value reaches `RT.first`,
+> `runtime.rs` panic — separate work).
+>
+> Everything below is the ORIGINAL (wrong) investigation, kept for the record.
+
+---
+
+## Summary (ORIGINAL — disproven)
 
 When a JIT-compiled form is evaluated **inside** another running JIT frame
 (a nested `run_jit`), the **return value of a direct JIT→JIT function call is
@@ -59,6 +107,31 @@ timing issue. The *same compiled thunk* works when run non-reentrantly
 nested **execution context**, not codegen.
 
 ## Root cause (mechanism)
+
+> **UPDATE 2026-05-31 — the x23 theory below is DISPROVEN. Read this first.**
+>
+> A parity iteration implemented the proposed x23 save/restore in
+> `cljvm_rt_load` and **measured no effect**: `rr-call` still returns
+> `nanbox_nil` with and without it. The mechanism cannot exist, because **`x23`
+> is only saved/restored in the JIT prologue/epilogue** (`dynlower/src/backend.rs:390`
+> stp, `:414` ldp) and is **never read or written in any lowered function body**;
+> `batch_lower.rs` never consumes it. The `JitControlContext` is consumed by Rust
+> handlers via the `ctx` Rust pointer (`dynlower/src/lib.rs:2379/2467`), not via
+> `x23` at runtime — so `x23` cannot influence a JIT body's return value.
+>
+> **Where the bug actually lives:** the shared JIT execution machinery, not
+> `clojure-jvm`. Under a nested `run_jit` (`RT/load` → `with_active_session_load_resource`
+> → `eval_form` → `gc.run_jit` while the outer load's `run_jit` is live), a JIT
+> call's **return value** is dropped (`nil`), deterministically, while literal
+> defs and var-derefs survive. Suspect the nested session / suspended-frame
+> interaction in `dynruntime/src/jit.rs` (`JitSafepointSession::with_installed`),
+> `dynlang/src/gc.rs` (`run_jit`), and the call-table / `call_outcome` plumbing
+> in `dynlower` under nested entry. **Fixing this touches SHARED crates
+> (dynlang/dynruntime/dynlower) that beagle/lox also use — needs sign-off and
+> careful investigation, not a blind edit.**
+>
+> The original (now-disproven) ControlAware/x23 hypothesis is preserved below for
+> the historical record only.
 
 The Session's JIT uses `CallMode::ControlAware` (`compiler.rs`, ~line 10780 and
 ~11470) — needed for the continuation/prompt machinery behind exceptions.

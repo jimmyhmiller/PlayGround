@@ -4790,6 +4790,53 @@ pub unsafe extern "C" fn cljvm_inst_indexOf(s_bits: u64, sub_bits: u64) -> u64 {
     box_long(n)
 }
 
+/// `(.startsWith s prefix)` — true iff String `s` begins with String
+/// `prefix`. Both args must be `clojure.lang.String` heap values. An empty
+/// `prefix` returns true (Java semantics). Used by `clojure.core`'s load to
+/// test path prefixes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_startsWith(s_bits: u64, prefix_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = read_string_heap(s_bits, ids, "(.startsWith s prefix) — receiver");
+    let prefix = read_string_heap(prefix_bits, ids, "(.startsWith s prefix) — prefix");
+    nanbox_bool(s.starts_with(prefix))
+}
+
+/// `(.substring s start)` — the suffix of String `s` from byte index
+/// `start` to the end. `start` is a boxed Long. Matches Java's
+/// `String.substring(int)`: a `start` past the end yields the empty string;
+/// a negative `start` is treated as an error (empty string). Used by
+/// `clojure.core`'s load to strip a leading slash.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_substring(s_bits: u64, start_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = read_string_heap(s_bits, ids, "(.substring s start) — receiver");
+    if !is_boxed_long(start_bits) {
+        eprintln!(
+            "[cljvm-stub] (.substring s start) — start 0x{start_bits:x} is not a \
+             boxed Long, returning empty string"
+        );
+        return alloc_string_heap("", ids);
+    }
+    let start = unbox_long(start_bits);
+    if start < 0 {
+        eprintln!(
+            "[cljvm-stub] (.substring s start) — negative start {start}, returning \
+             empty string"
+        );
+        return alloc_string_heap("", ids);
+    }
+    let start = start as usize;
+    let out: String = if start >= s.len() {
+        String::new()
+    } else {
+        // Byte-index semantics (Java String is char-indexed, but clojure.core's
+        // usage here only strips a leading ASCII '/'; byte == char index there).
+        s[start..].to_string()
+    };
+    alloc_string_heap(&out, ids)
+}
+
 // ─── clojure.lang.MultiArityFn ────────────────────────────────────────
 //
 // Dispatcher cell for defns / defmacros with multiple clauses. Used by

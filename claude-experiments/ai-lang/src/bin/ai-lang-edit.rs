@@ -471,7 +471,7 @@ const OP_TABLE: &[(&str, &str, &[&str], &str)] = &[
     ("todo", "read", &["branch?"], "Outstanding todos (broken dependents) for the active or given branch; persisted, auto-clears when fixed."),
     ("history", "read", &["branch?"], "The causal commit history of a branch."),
     ("branches", "read", &[], "List branches and the current one."),
-    ("eval", "read", &["target", "args?"], "JIT-run a definition and return its real value as JSON. Args: Int/Float/Bool/struct/enum (String/Array args unsupported)."),
+    ("eval", "read", &["target", "args?"], "JIT-run a definition and return its real value as JSON. Returns any type; args may be any type (Int/Float/Bool/String/Array<T>/struct/enum, nested freely) except closures."),
     // ---- writes ----
     ("add", "write", &["source"], "Add new definition(s) from surface source."),
     ("update", "write", &["name", "source", "dry_run?", "expect_hash?", "expect_root?"], "Replace a definition's body; auto-propagates the new hash up the dependency cone."),

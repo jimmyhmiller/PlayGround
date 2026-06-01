@@ -77,22 +77,20 @@ fn memoization_actually_caches() {
     if !node_available() {
         return;
     }
-    let src = "function C(a, b){ let style={color:a}; let el={size:b, props:style}; return el; }";
+    // A JSX element keyed on a reactive dep IS memoized (escapes via `return`,
+    // JSX is React's `Memoized` level). The cached element must be reused across
+    // renders with equal deps and recomputed when the dep changes.
+    let src = "function C(props){ let el = <div size={props.b} />; return el; }";
     let memo = memoize(src);
-    // Persistent cache across calls (simulating React's per-instance useMemoCache).
-    let persistent = "const _e = Symbol('e'); let __c=null; function _c(n){ if(!__c) __c=new Array(n).fill(_e); return __c; }\n";
+    let persistent = "const __id = (()=>{let i=0;return()=>i++})();\nconst React = { createElement: (type, props) => ({ __k:'el', id: __id(), type, props }) };\nconst _e = Symbol('e'); let __c=null; function _c(n){ if(!__c) __c=new Array(n).fill(_e); return __c; }\n";
     let driver = format!(
         "{persistent}{memo}\n\
-         const r1 = C(1, 2);\n\
-         const r2 = C(1, 2);\n\
-         const r3 = C(1, 5);\n\
-         const r4 = C(9, 5);\n\
-         console.log([r1===r2, r1.props===r3.props, r1!==r3, r3.props!==r4.props].join(','));\n"
+         const r1 = C({{b: 2}});\n\
+         const r2 = C({{b: 2}});\n\
+         const r3 = C({{b: 5}});\n\
+         console.log([r1===r2, r1!==r3].join(','));\n"
     );
     let got = run_node(&driver).expect("run");
-    // r1===r2: same deps -> el reused.
-    // r1.props===r3.props: `a` unchanged -> style reused even though b changed.
-    // r1!==r3: b changed -> el recomputed.
-    // r3.props!==r4.props: `a` changed -> style recomputed.
-    assert_eq!(got, "true,true,true,true", "memoization stability\n{memo}");
+    // r1===r2: same dep -> element reused. r1!==r3: dep changed -> recomputed.
+    assert_eq!(got, "true,true", "memoization stability\n{memo}");
 }

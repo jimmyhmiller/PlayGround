@@ -299,6 +299,95 @@ pub fn walk_jit_ancestor_roots(_jit_fp: *const u8, _visitor: &mut dyn FnMut(*mut
     // FP-chain walking is architecture-specific; no-op on unsupported targets.
 }
 
+/// GC-VERIFICATION GUARDRAIL (debug / stress only — NOT part of the collector's
+/// precise rooting; the GC stays precise, this only ASSERTS that precision held).
+///
+/// After a collection, the caller scans the JIT stack with `check`: given a
+/// stack word, `check` returns `Some(to_addr)` iff that word points at an object
+/// the collector relocated (FORWARDING_BIT set) but whose slot was NOT updated —
+/// i.e. a MISSED GC ROOT. On the first such word this PANICS with the offending
+/// stack address and the containing frame (JIT code range / return offset, or a
+/// non-JIT/Rust frame note). This converts silently-corrupted moved-object reads
+/// (which otherwise surface much later as a bogus "type_id", a SIGBUS, or wrong
+/// results) into an immediate, localized failure right at the GC that caused it.
+///
+/// Scans `[jit_fp - 8KiB .. current_jit_entry_fp]`, covering the innermost JIT
+/// frame's spill slots, all caller JIT frames, and the safepoint handler's
+/// callee-saved-register save area (where a GC pointer left in X19–X28 / D8–D15
+/// across the safepoint would be stashed). 8KiB below `jit_fp` is the empirically
+/// sufficient window and is well within mapped stack.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+pub fn verify_jit_stack_no_dangling(jit_fp: *const u8, check: &dyn Fn(u64) -> Option<u64>) {
+    let fence = current_jit_entry_fp();
+    if jit_fp.is_null() || fence.is_null() {
+        return;
+    }
+    let lo = (jit_fp as usize).saturating_sub(8 * 1024) & !7usize;
+    let hi = fence as usize;
+    if hi <= lo {
+        return;
+    }
+    let mut p = lo;
+    while p < hi {
+        let word = unsafe { *(p as *const u64) };
+        if let Some(to) = check(word) {
+            let frame = describe_frame_for_addr(jit_fp, fence, p);
+            panic!(
+                "GC VERIFY (MISSED GC ROOT): stack slot {p:#018x} holds a pointer to an \
+                 object the collector relocated to {to:#018x} but never updated. A heap \
+                 value was live across a safepoint and the precise stackmap failed to \
+                 record it. Containing frame: {frame}."
+            );
+        }
+        p += 8;
+    }
+}
+
+#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+pub fn verify_jit_stack_no_dangling(_jit_fp: *const u8, _check: &dyn Fn(u64) -> Option<u64>) {}
+
+/// Identify which JIT frame contains stack address `addr` by walking the FP
+/// chain, for the guardrail's panic message. Reports the JIT code range +
+/// return offset, or flags a non-JIT (Rust/handler) frame.
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn describe_frame_for_addr(jit_fp: *const u8, fence: *const u8, addr: usize) -> String {
+    let registry = JIT_CODE_REGISTRY.read().unwrap();
+    let off = addr as isize - jit_fp as isize;
+    let mut fp = jit_fp as *const u64;
+    loop {
+        if fp.is_null() {
+            break;
+        }
+        let saved_fp = unsafe { *fp } as *const u64;
+        let saved_lr = unsafe { *fp.add(1) } as usize;
+        let lo = fp as usize;
+        let hi = saved_fp as usize;
+        if addr >= lo && hi > lo && addr < hi {
+            return match lookup_code_entry(&registry, saved_lr) {
+                Some(entry) => format!(
+                    "JIT fn code[{:#x}..{:#x}) return_offset={:#x} (slot is {off:+} from safepoint FP)",
+                    entry.code_start,
+                    entry.code_end,
+                    saved_lr - entry.code_start
+                ),
+                None => format!(
+                    "non-JIT/Rust frame, return_addr={saved_lr:#x} (likely a callee-saved-register \
+                     save area holding an unrooted JIT pointer; slot is {off:+} from safepoint FP)"
+                ),
+            };
+        }
+        if saved_fp.is_null() || (!fence.is_null() && saved_fp as *const u8 == fence) {
+            break;
+        }
+        fp = saved_fp;
+    }
+    format!(
+        "innermost frame or handler region (slot is {off:+} bytes from the safepoint FP {jit_fp:?}); \
+         a negative offset is the current JIT frame's own spill area or the safepoint handler's \
+         saved registers"
+    )
+}
+
 /// Walk a thread's JIT frame chain starting at `start_fp`. Scans
 /// `SafepointRecord.root_slots` for every JIT frame found in the
 /// chain.

@@ -4258,7 +4258,7 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
         // pointing at reused memory. (Symptom: `defn` macroexpansion
         // returns a list whose head is a heap pointer with garbage
         // type_id, e.g. form 202's `get-thread-bindings` failure.)
-        let arg_bits_vec: Vec<u64> = dynobj::roots::with_scope(
+        let result_bits = dynobj::roots::with_scope(
             fixed_arity + 2,
             |scope| {
                 let mut roots: Vec<dynobj::roots::Rooted<()>> =
@@ -4301,21 +4301,34 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
                         items.len()
                     );
                 }
-                // Read each Rooted's current value AFTER all allocations
-                // — a final GC-move during the last alloc would have
-                // updated each slot in place. The Vec<u64> we hand to
-                // run_jit is a snapshot at that moment (run_jit itself
-                // re-roots through the call-frame stack maps).
-                roots.iter().map(|r| r.get()).collect()
-            },
-        );
+                // Snapshot the rooted slots' current bits and hand them to
+                // run_jit while the enclosing `scope` is STILL alive. The
+                // Vec<u64> snapshot itself is not a root source, but because
+                // the `Rooted` slots remain in scope across the run_jit call,
+                // a GC triggered during macro-body execution updates those
+                // slots in place. run_jit re-roots through its own call-frame
+                // stack maps, but the rooted scope here guarantees the arg
+                // cells survive the transition into the JIT frame even if a
+                // GC fires before the JIT prologue establishes its stack map.
+                // (Symptom of the bug this guards against: form 430's variadic
+                // `import` macro reading type_id 136 garbage from a relocated
+                // rest-arg cell.)
+                let arg_bits_vec: Vec<u64> =
+                    roots.iter().map(|r| r.get()).collect();
 
-        let result_bits = match sess.gc.run_jit(
-            &sess.jit,
-            fref,
-            &arg_bits_vec,
-            GcPolicy::EveryPoint,
-        ) {
+                // GC policy for the macro body: EveryPoint, the strict
+                // precise-rooting correctness oracle. Macroexpansion is the
+                // most rooting-sensitive path (it runs JIT'd higher-order core
+                // fns over closures); keeping EveryPoint hardcoded here is the
+                // canary that surfaces any stackmap/liveness rooting bug in the
+                // shared lowerer immediately. Do NOT downgrade this to
+                // OnPressure to dodge a crash — that masks the bug (LAW #3).
+                match sess.gc.run_jit(
+                    &sess.jit,
+                    fref,
+                    &arg_bits_vec,
+                    GcPolicy::EveryPoint,
+                ) {
             JitOutcome::Value(v) => v,
             other => {
                 if let JitOutcome::Exception(e) = other {
@@ -4355,7 +4368,9 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
                     head_sym.get_name(),
                 );
             }
-        };
+                }
+            },
+        );
 
         // Decode the result back to a form Object. Handles both heap
         // pointers (the typical case — Cons / Symbol / Keyword / String)
@@ -4723,17 +4738,36 @@ fn analyze_seq(context: C, form: Object) -> Box<dyn Expr> {
         }
         // Qualified static-call sugar: `(Class/method args...)` →
         // `(. Class (method args...))`. Java's reader rule is "if the
-        // head's namespace looks like a class (contains `.`), treat the
-        // whole form as a static method call." We rewrite into the
-        // dot-form so `parse_dot_form` handles dispatch + args uniformly.
+        // head's namespace names a CLASS, treat the whole form as a
+        // static method call." We rewrite into the dot-form so
+        // `parse_dot_form` handles dispatch + args uniformly.
+        //
+        // Crucially, the namespace part must name a *class*, NOT a
+        // *namespace*. `clojure.core/inc` contains a `.` but `clojure.core`
+        // is a namespace, so `(clojure.core/inc 41)` is an ordinary fn
+        // invoke, not a static call. Java distinguishes these in
+        // `maybeResolveIn`/`isMacro`: a namespace is never a class. If we
+        // skip this distinction, any `ns.with.dots/fn` call gets rewritten
+        // to a bogus `(. ns.with.dots (fn …))` static call that resolves to
+        // no host method → a runtime throw → nil. (This was the real bug
+        // behind `(clojure.core/inc 41)` returning nil while `(inc 41)`
+        // worked — both resolve to the same Var, but only the bare form
+        // took the invoke path.)
         if let Some(ns) = sym.get_namespace() {
-            // Treat `Class/method` as a static call when the
-            // namespace looks like a class name. Java convention:
-            // class names contain dots OR start with uppercase
-            // (e.g. `Math/ceil`, `Long/parseLong`).
+            let ns_sym = Symbol::intern(ns);
+            // A real namespace (directly or via an alias in the current ns)
+            // is never a class — fall through to the normal invoke path.
+            let is_namespace = super::namespace::Namespace::find(&ns_sym).is_some()
+                || super::rt::current_ns().lookup_alias(&ns_sym).is_some();
+            // A symbol that resolves to a Var is an ordinary invoke too,
+            // regardless of how its namespace part is spelled.
+            let resolves_to_var = resolve_var(sym).is_some();
+            // Otherwise apply the structural class heuristic: class names
+            // contain dots OR start with uppercase (`Math/ceil`,
+            // `Long/parseLong`, `clojure.lang.RT/load`).
             let looks_like_class = ns.contains('.')
                 || ns.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-            if looks_like_class {
+            if looks_like_class && !is_namespace && !resolves_to_var {
                 return parse_qualified_static_call(context, ns, sym.get_name(), &form);
             }
         }
@@ -7142,10 +7176,18 @@ impl Expr for InvokeExpr {
         // those externs decode the handle's FuncRef index, load the entry
         // pointer from the thread-local call table base, and dispatch.
         // Mirrors Java's `IFn.invoke(args)` virtual call.
-        let head_val = self
-            .fexpr
-            .emit(C::Expression, objx, ir)
-            .expect("InvokeExpr head must produce a value");
+        let head_val = match self.fexpr.emit(C::Expression, objx, ir) {
+            Some(v) => v,
+            None => {
+                // The head expression diverged (a `throw` / `recur` in head
+                // position — e.g. a macro body whose fn head analyzes to a
+                // `ThrowExpr` for an unmodeled host-class reference that
+                // only fires on a bad call). The call is unreachable; the
+                // diverging head already terminated the block. Return None,
+                // mirroring the arg-divergence handling below.
+                return None;
+            }
+        };
 
         let mut arg_vals: Vec<Value> = Vec::with_capacity(self.args.len() + 1);
         arg_vals.push(head_val);
@@ -9253,6 +9295,10 @@ impl Compiler {
         instance_methods.insert(("concat".to_string(), 2), inst_concat);
         let inst_index_of = dm.declare_extern("cljvm_inst_indexOf", sig_2i64.clone());
         instance_methods.insert(("indexOf".to_string(), 2), inst_index_of);
+        let inst_starts_with = dm.declare_extern("cljvm_inst_startsWith", sig_2i64.clone());
+        instance_methods.insert(("startsWith".to_string(), 2), inst_starts_with);
+        let inst_substring = dm.declare_extern("cljvm_inst_substring", sig_2i64.clone());
+        instance_methods.insert(("substring".to_string(), 2), inst_substring);
         let inst_set_macro = dm.declare_extern("cljvm_inst_setMacro", sig_1i64.clone());
         instance_methods.insert(("setMacro".to_string(), 1), inst_set_macro);
         let inst_cast = dm.declare_extern("cljvm_inst_cast", sig_2i64.clone());
@@ -10670,6 +10716,8 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_inst_getName" => Some(crate::runtime::cljvm_inst_getName as *const u8),
         "cljvm_inst_concat" => Some(crate::runtime::cljvm_inst_concat as *const u8),
         "cljvm_inst_indexOf" => Some(crate::runtime::cljvm_inst_indexOf as *const u8),
+        "cljvm_inst_startsWith" => Some(crate::runtime::cljvm_inst_startsWith as *const u8),
+        "cljvm_inst_substring" => Some(crate::runtime::cljvm_inst_substring as *const u8),
         "cljvm_inst_setMacro" => Some(crate::runtime::cljvm_inst_setMacro as *const u8),
         "cljvm_inst_cast" => Some(crate::runtime::cljvm_inst_cast as *const u8),
         "cljvm_inst_toString" => Some(crate::runtime::cljvm_inst_toString as *const u8),
@@ -11863,7 +11911,7 @@ impl Session {
                         "[cljvm-threw] form `{name}` threw: {obj:?} (payload bits 0x{payload:016x})"
                     );
                 }
-                eprintln!("[cljvm] top-level form threw: {obj:?}");
+                eprintln!("[cljvm] top-level form threw: {obj:?} :: pr-str={}", crate::runtime::pr_str_bits(payload));
                 crate::runtime::nanbox_nil()
             }
             other => panic!("clojure-jvm: Session::eval_form: unexpected JIT outcome: {other:?}"),

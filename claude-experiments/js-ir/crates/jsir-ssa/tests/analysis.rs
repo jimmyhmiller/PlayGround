@@ -83,18 +83,21 @@ fn mutation_forms_single_scope() {
 
 #[test]
 fn dependency_inference_matches_memo_shape() {
-    // `style` (keyed on `a`) and `el` (keyed on `b` + style) have *distinct*
-    // dependencies, so they stay independently memoized — `style`'s identity must
-    // remain stable when only `b` changes. This is exactly what React keeps
-    // separate (the merge guard requires producer deps ⊆ consumer deps).
+    // `function f(a,b){ let style={color:a}; let el={size:b,props:style}; return el; }`
+    // After porting React's PruneNonEscapingScopes (escape analysis), a returned
+    // *bare object* whose only escape is the `return` and whose dependencies are
+    // all non-memoized is NOT memoized — verified against the React compiler,
+    // which emits this function unchanged (no `_c` cache). Neither `style` nor
+    // `el` reaches React's `memoized` set (no JSX/hook captures them), so both
+    // scopes are pruned to empty outputs. The pre-escape predicate over-memoized
+    // here (the bug this step fixes); the analysis now produces no caching output.
     let (cfg, r) = analyzed("function f(a,b){ let style={color:a}; let el={size:b,props:style}; return el; }");
     let infos = scopes::analyze(&cfg, &r);
-    let mut pure: Vec<_> = infos.iter().filter(|i| !i.scope.mutable).collect();
-    pure.sort_by_key(|i| i.scope.start);
-    assert_eq!(pure.len(), 2, "two independent scopes: {infos:?}");
-    assert_eq!(pure[0].deps.len(), 1, "style keyed on one input (a): {:?}", pure[0]);
-    assert_eq!(pure[1].deps.len(), 2, "el keyed on two inputs (b, style): {:?}", pure[1]);
-    assert!(pure[1].deps.contains(&pure[0].outputs[0]), "el depends on style's output");
+    let emitted: Vec<_> = infos.iter().filter(|i| !i.outputs.is_empty()).collect();
+    assert!(
+        emitted.is_empty(),
+        "returned bare object with no memoized dep is not memoized (matches React): {infos:?}"
+    );
 }
 
 #[test]

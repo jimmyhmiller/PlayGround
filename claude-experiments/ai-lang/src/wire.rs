@@ -37,7 +37,7 @@
 use crate::codegen::{FieldMeta, ShapeMeta};
 use crate::gc::{Full, ObjHeader};
 use crate::hash::Hash;
-use crate::runtime::{Runtime, ai_gc_alloc_closure};
+use crate::runtime::{Runtime, ai_array_new, ai_array_set, ai_gc_alloc_closure, ai_str_new};
 
 // =============================================================================
 // Errors
@@ -142,6 +142,17 @@ unsafe fn encode_heap(rt: &Runtime, ptr: *const u8, out: &mut Vec<u8>) -> Result
         .copied()
         .flatten()
         .ok_or(WireError::UnknownTypeId(type_id))?;
+    // String and Array are varlen shapes with no `shape_meta` entry;
+    // recognize them by their canonical hash and read the heap layout
+    // directly. This is what makes immutable container values (e.g. a
+    // persistent HAMT, which holds Array<HNode> and String keys)
+    // wire-portable.
+    if shape_hash == crate::runtime::array_shape_hash() {
+        return unsafe { encode_array(rt, ptr, out) };
+    }
+    if shape_hash == crate::runtime::string_shape_hash() {
+        return unsafe { encode_string(ptr, out) };
+    }
     let meta = rt
         .shape_meta
         .get(&shape_hash)
@@ -232,6 +243,40 @@ unsafe fn read_type_id_from_header(ptr: *const u8) -> u16 {
     unsafe { *(ptr.add(off) as *const u16) }
 }
 
+/// Encode an `Array` heap object (kind = 4). Layout: GC header, then an
+/// 8-byte element count, then `count` pointer slots. Every slot is a GC
+/// pointer (Int elements are boxed), so each is encoded via `encode_heap`.
+unsafe fn encode_array(rt: &Runtime, ptr: *const u8, out: &mut Vec<u8>) -> Result<(), WireError> {
+    let header = <Full as ObjHeader>::SIZE;
+    let count = unsafe { *(ptr.add(header) as *const u64) };
+    let n: u32 = count
+        .try_into()
+        .map_err(|_| WireError::Corrupt("array longer than u32"))?;
+    out.push(4); // kind = Array
+    out.extend_from_slice(&n.to_be_bytes());
+    for i in 0..count as usize {
+        let slot = unsafe { ptr.add(header + 8 + i * 8) as *const *const u8 };
+        let elem = unsafe { *slot };
+        unsafe { encode_heap(rt, elem, out)? };
+    }
+    Ok(())
+}
+
+/// Encode a `String`/`Bytes` heap object (kind = 5). Layout: GC header,
+/// then an 8-byte byte count, then the raw bytes.
+unsafe fn encode_string(ptr: *const u8, out: &mut Vec<u8>) -> Result<(), WireError> {
+    let header = <Full as ObjHeader>::SIZE;
+    let len = unsafe { *(ptr.add(header) as *const u64) };
+    let n: u32 = len
+        .try_into()
+        .map_err(|_| WireError::Corrupt("string longer than u32"))?;
+    let bytes = unsafe { std::slice::from_raw_parts(ptr.add(header + 8), len as usize) };
+    out.push(5); // kind = String
+    out.extend_from_slice(&n.to_be_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
 // =============================================================================
 // Decoding
 // =============================================================================
@@ -286,8 +331,39 @@ unsafe fn decode_one(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireErro
         1 => unsafe { decode_closure(rt, r) },
         2 => unsafe { decode_struct(rt, r) },
         3 => unsafe { decode_enum(rt, r) },
+        4 => unsafe { decode_array(rt, r) },
+        5 => unsafe { decode_string(rt, r) },
         other => Err(WireError::BadKind(other)),
     }
+}
+
+/// Decode an `Array` (kind 4): element count, then each pointer slot.
+/// Mirrors the encoder's layout; rebuilds via the runtime allocator.
+unsafe fn decode_array(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
+    let n = r.read_u32()? as i64;
+    let arr = unsafe { ai_array_new(rt.thread_ptr(), n) };
+    for i in 0..n {
+        let elem = unsafe { decode_one(rt, r)? };
+        let p = match elem {
+            WireValue::Heap(p) => p,
+            WireValue::Int(_) => {
+                return Err(WireError::Corrupt(
+                    "array element decoded as Int; array slots are GC pointers",
+                ));
+            }
+        };
+        unsafe { ai_array_set(arr, i, p as *mut u8) };
+    }
+    Ok(WireValue::Heap(arr as *const u8))
+}
+
+/// Decode a `String`/`Bytes` (kind 5): byte count, then raw bytes copied
+/// into a fresh heap String.
+unsafe fn decode_string(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
+    let n = r.read_u32()? as usize;
+    let bytes = r.take(n)?;
+    let s = unsafe { ai_str_new(rt.thread_ptr(), bytes.as_ptr(), n as i64) };
+    Ok(WireValue::Heap(s as *const u8))
 }
 
 unsafe fn decode_closure(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {

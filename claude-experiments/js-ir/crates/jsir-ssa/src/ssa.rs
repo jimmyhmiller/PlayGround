@@ -101,18 +101,24 @@ impl<'a> Builder<'a> {
     /// Process a block's `ReadVar`/`WriteVar` ops, recording defs and resolving
     /// reads. The ops themselves are removed later in `materialize`.
     fn fill(&mut self, block: BlockId) {
-        let instrs: Vec<(usize, Op)> = self
+        // Snapshot the relevant ops together with each `ReadVar`'s result `Value`
+        // up front. Capturing the result here (rather than re-reading the block
+        // by index in the loop below) keeps `fill` immune to any mutation of the
+        // block during processing — e.g. `undef_value()` inserting an undef
+        // instruction at index 0 of the entry block, which would otherwise shift
+        // every subsequent index and make a stale-index re-read read the wrong
+        // instruction.
+        let instrs: Vec<(Option<Value>, Op)> = self
             .cfg
             .block(block)
             .instrs
             .iter()
-            .enumerate()
-            .filter_map(|(i, ins)| match &ins.op {
-                Op::ReadVar(_) | Op::WriteVar(_, _) => Some((i, ins.op.clone())),
+            .filter_map(|ins| match &ins.op {
+                Op::ReadVar(_) | Op::WriteVar(_, _) => Some((ins.result, ins.op.clone())),
                 _ => None,
             })
             .collect();
-        for (i, op) in instrs {
+        for (result, op) in instrs {
             match op {
                 Op::WriteVar(var, val) => {
                     // The stored value may itself be a `ReadVar` result that is
@@ -123,7 +129,7 @@ impl<'a> Builder<'a> {
                 }
                 Op::ReadVar(var) => {
                     let r = self.read_variable(var, block);
-                    let result = self.cfg.block(block).instrs[i].result.expect("ReadVar has result");
+                    let result = result.expect("ReadVar has result");
                     self.read_subst.insert(result, r);
                 }
                 _ => unreachable!(),
@@ -250,6 +256,7 @@ impl<'a> Builder<'a> {
         self.cfg.block_mut(entry).instrs.insert(0, crate::cfg::Instr {
             result: Some(v),
             op: Op::Const(Const::Undef),
+            src: None, // synthetic: no JSIR statement of origin
         });
         self.undef = Some(v);
         v

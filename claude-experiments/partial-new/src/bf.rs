@@ -142,6 +142,7 @@ impl Bf {
 impl Client for Bf {
     type State = State;
     type Key = usize; // the program counter alone; keyed states are always flushed
+    type Point = usize;
     type Op = Op;
     type Cond = Cond;
 
@@ -152,6 +153,12 @@ impl Client for Bf {
             s.offset,
             s.cells.len()
         );
+        s.pc
+    }
+
+    // BF's key space is finite (one key per program counter), so it never needs
+    // generalization: the default `whistle`/`generalize` (no-ops) are correct.
+    fn point(&self, s: &State) -> usize {
         s.pc
     }
 
