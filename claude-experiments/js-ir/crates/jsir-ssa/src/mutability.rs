@@ -162,6 +162,22 @@ pub fn analyze(cfg: &Cfg) -> Ranges {
             _ => false,
         }
     };
+    // The container a value names, following `Member` loads to the root object:
+    // `x.y.z` -> `x`. Mutating a member load (or storing through one) mutates the
+    // container, so the mutation must be attributed to the base object — member
+    // loads are fresh values the union-find aliasing does not connect to the base,
+    // so without this a scope's mutable range stops short of `mutate(x.y.z)`.
+    let base_object = |mut v: Value| -> Value {
+        let mut guard = 0;
+        while let Some(Op::Member { obj, .. }) = def_op.get(&v) {
+            v = *obj;
+            guard += 1;
+            if guard > def_op.len() + 1 {
+                break;
+            }
+        }
+        v
+    };
 
     // 2. Aliasing + mutation points.
     let mut uf = Uf::new();
@@ -198,8 +214,9 @@ pub fn analyze(cfg: &Cfg) -> Ranges {
                     }
                 }
                 Op::StoreMember { obj, value, .. } => {
-                    // Mutates `obj`; captures `value` into `obj`.
-                    note_mut(*obj, p, &mut last_mut);
+                    // Mutates `obj` (and its container if `obj` is itself a member
+                    // load: `x.y.z = v` mutates `x`); captures `value` into `obj`.
+                    note_mut(base_object(*obj), p, &mut last_mut);
                     if *is_ref.get(value).unwrap_or(&true) {
                         uf.union(*obj, *value);
                     }
@@ -220,7 +237,10 @@ pub fn analyze(cfg: &Cfg) -> Ranges {
                     if !pure {
                         for a in args {
                             if *is_ref.get(a).unwrap_or(&true) {
-                                note_mut(*a, p, &mut last_mut);
+                                // A mutation of `x.y.z` passed to a call mutates the
+                                // container `x`; attribute it to the base object so
+                                // the scope's range covers the call.
+                                note_mut(base_object(*a), p, &mut last_mut);
                             }
                         }
                     }
