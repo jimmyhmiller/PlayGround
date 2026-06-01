@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let data_dir = arg_value(&args, "--data-dir")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("./datalog-data"));
+        .unwrap_or_else(default_data_dir);
 
     let bind_addr = arg_value(&args, "--bind").unwrap_or_else(|| "127.0.0.1:5557".to_string());
 
@@ -79,4 +79,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     server.run()?;
 
     Ok(())
+}
+
+fn default_data_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".datalog-data"))
+        .unwrap_or_else(|| PathBuf::from(".datalog-data"))
 }

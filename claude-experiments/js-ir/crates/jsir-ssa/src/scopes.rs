@@ -215,29 +215,22 @@ fn join_levels(a: MemoLevel, b: MemoLevel) -> MemoLevel {
 
 /// The base memoization level a defining `Op` assigns to its result value.
 ///
-/// `is_jsx` is true when this op is a JSX-element-creating call
-/// (`createElement`/`jsx`/`jsxs`/`jsxDEV`). React's `memoize_jsx_elements`
-/// config gives JSX elements the unconditional `Memoized` level, while plain
-/// object/array literals and ordinary calls are only `Memoized` as *aliasing
-/// lvalues* of their operands — for the result-identity escape level they
-/// behave `Conditional` (memoize only if a dependency is memoized or forced).
-/// This is the empirical React behavior: `return <div a={p.a}/>` memoizes but
-/// `return [p.a]` / `return foo(p.a)` do not.
+/// `is_jsx`/`is_hook` distinguish JSX-element and hook calls, but in React's
+/// `getMemoizationLevel` *every* allocating instruction — object/array literals,
+/// `new`, and any call (JSX, hook, or plain) — gets the unconditional `Memoized`
+/// level: an escaping allocation is always cached so its identity is stable
+/// across renders. Verified against the official compiler: `return foo(p.a)`,
+/// `return [p.a]`, `return {x: p.a}`, `return new Foo(p.a)`, and even `return
+/// [1, 2]` / `return foo()` (no deps, sentinel-guarded) all memoize. Only
+/// member/computed loads are `Conditional` (memoize iff their base is memoized),
+/// and scalars (`const`/global/binary/unary) are `Never`.
 fn op_level(op: &crate::cfg::Op, is_jsx: bool, is_hook: bool) -> MemoLevel {
     use crate::cfg::Op;
+    let _ = (is_jsx, is_hook); // all calls memoize regardless; kept for callers
     match op {
-        // JSX elements and hook results are unconditionally `Memoized`: a JSX
-        // element escaping via `return` memoizes (verified against React), and a
-        // hook result (`useFoo(x)`) is a stable reactive value that downstream
-        // scopes key on. Plain allocations/calls are only `Conditional`.
-        Op::Call { .. } if is_jsx => MemoLevel::Memoized,
-        Op::Call { .. } if is_hook => MemoLevel::Memoized,
-        // Non-JSX/non-hook allocations / calls: conditional. Their own result
-        // identity only escapes-and-memoizes if a dependency is memoized. This is
-        // why `return [props.a]` / `return foo(props.a)` are NOT memoized by React
-        // (their only deps are non-memoized prop loads) while `return <div.../>`
-        // is, and `[x, useFoo(x)]` is (its hook-result dep is memoized).
-        Op::MakeObject(_) | Op::MakeArray(_) | Op::Call { .. } => MemoLevel::Conditional,
+        // Allocations (literals, `new`, calls) escaping a function are always
+        // memoized — this is the core of what the React Compiler caches.
+        Op::MakeObject(_) | Op::MakeArray(_) | Op::Call { .. } => MemoLevel::Memoized,
         // Member reads / loads are conditional: memoize only if a dep is memoized.
         Op::Member { .. } => MemoLevel::Conditional,
         // Cheaply comparable scalars never need memoization on their own.

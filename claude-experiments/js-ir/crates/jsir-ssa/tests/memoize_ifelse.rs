@@ -198,14 +198,22 @@ fn jsx_in_each_branch_memoizes_per_branch() {
 }
 
 #[test]
-fn obj_literal_in_each_branch_is_not_memoized() {
-    // `o = {x: props.a}` / `o = {y: props.b}` then `return o` — a returned *bare
-    // object*. After the escape-analysis port this is NOT memoized: verified
-    // against the React compiler, which emits the function unchanged (no `_c`),
-    // because the returned object never reaches React's `memoized` set (no JSX or
-    // hook captures it). The pre-escape predicate over-memoized this shape.
-    assert_bails(
+fn obj_literal_in_each_branch_is_memoized_per_branch() {
+    // `o = {x: props.a}` / `o = {y: props.b}` then `return o`. An escaping
+    // allocation is always memoized (like the JSX case above), so each branch
+    // gets its own per-branch object scope: cache=4, 2 blocks. Verified against
+    // the official compiler (`_c(4)`), and behaviorally under Node. (An earlier
+    // port mis-modeled bare objects as un-memoized; this asserts the corrected,
+    // oracle-matching shape.)
+    check_memoized_vs_original(
         "function Component(props) {\n  let o;\n  if (props.cond) {\n    o = {x: props.a};\n  } else {\n    o = {y: props.b};\n  }\n  return o;\n}",
+        (4, 2),
+        &[
+            "{cond:true, a:1, b:2}",
+            "{cond:false, a:1, b:2}",
+            "{cond:true, a:9, b:2}",
+            "{cond:false, a:9, b:5}",
+        ],
     );
 }
 

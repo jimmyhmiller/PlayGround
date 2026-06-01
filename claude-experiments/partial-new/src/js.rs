@@ -124,12 +124,27 @@ pub fn call(callee: Expr, args: Vec<Expr>) -> Expr {
 pub enum Stmt {
     Let(usize, Expr),
     Set(usize, Expr),
-    SetProp(Expr, String, Expr), // o.k = v
-    Push(Expr, Expr),            // arr.push(v)
+    SetProp(Expr, String, Expr),  // o.k = v
+    SetIndex(Expr, Expr, Expr),   // arr[i] = v
+    Push(Expr, Expr),             // arr.push(v)
     Return(Expr),
     If(Expr, Vec<Stmt>, Vec<Stmt>),
     While(Expr, Vec<Stmt>),
+    /// `switch (disc) { clauses }`. Real JS semantics: the discriminant is
+    /// evaluated once, the first `case` strictly-equal (`===`) to it becomes the
+    /// entry point, and execution falls through subsequent clauses until a
+    /// `break` or the end. `default` may appear in any position.
+    Switch(Expr, Vec<Clause>),
+    /// Exit the innermost enclosing `switch` (or `while`).
+    Break,
     ExprStmt(Expr),
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+pub enum Clause {
+    Case(Expr, Vec<Stmt>),
+    Default(Vec<Stmt>),
 }
 
 pub struct FuncDef {
@@ -162,6 +177,7 @@ enum Instr {
     NewArray(usize),
     GetProp(String),
     SetPropOp(String),
+    SetIndexOp,
     PushArr,
     GetIndex,
     PushFunc(usize),
@@ -185,6 +201,8 @@ pub enum RExpr {
     Undef,
     Var(usize),
     Bin(Bop, Box<RExpr>, Box<RExpr>),
+    /// Read element `index` of a residual (escaped) array variable.
+    Index(Box<RExpr>, Box<RExpr>),
 }
 
 #[derive(Debug)]
@@ -196,6 +214,8 @@ pub enum Op {
     NewArray { dst: usize, elems: Vec<RExpr> },
     /// Append to a residual (runtime) array variable.
     PushOp { arr: usize, val: RExpr },
+    /// Write `val` to element `index` of a residual (runtime) array variable.
+    SetIndex { arr: usize, index: RExpr, val: RExpr },
 }
 
 #[derive(Debug)]
@@ -284,12 +304,25 @@ impl State {
 // Compiler
 // ---------------------------------------------------------------------------
 
-fn compile_stmts(
-    stmts: &[Stmt],
-    code: &mut Vec<Instr>,
-    ifs: &mut Vec<(usize, usize)>,
-    heap_mods: &mut Vec<(usize, Vec<usize>)>,
-) {
+/// Threaded compiler state. `ifs`/`heap_mods`/`switch_ends` accumulate across
+/// the whole program (global pcs); `next_slot`/`max_slot` are reset per function
+/// and `breaks` is a stack of unpatched `break` jumps for enclosing constructs.
+#[derive(Default)]
+struct CompileAux {
+    ifs: Vec<(usize, usize)>,
+    heap_mods: Vec<(usize, Vec<usize>)>,
+    /// pcs that are the join after a `switch`; marked leaders so the arms of a
+    /// dynamic-discriminant switch merge there instead of path-splitting.
+    switch_ends: Vec<usize>,
+    /// stack of pending `break` jumps, one Vec per enclosing switch/loop.
+    breaks: Vec<Vec<usize>>,
+    /// next free local slot for switch-discriminant scratch (per function).
+    next_slot: usize,
+    /// high-water mark of slots used (becomes the function's nslots).
+    max_slot: usize,
+}
+
+fn compile_stmts(stmts: &[Stmt], code: &mut Vec<Instr>, aux: &mut CompileAux) {
     for s in stmts {
         match s {
             Stmt::Let(slot, e) | Stmt::Set(slot, e) => {
@@ -300,6 +333,12 @@ fn compile_stmts(
                 compile_expr(o, code);
                 compile_expr(v, code);
                 code.push(Instr::SetPropOp(k.clone()));
+            }
+            Stmt::SetIndex(a, i, v) => {
+                compile_expr(a, code);
+                compile_expr(i, code);
+                compile_expr(v, code);
+                code.push(Instr::SetIndexOp);
             }
             Stmt::Push(a, v) => {
                 compile_expr(a, code);
@@ -314,19 +353,27 @@ fn compile_stmts(
                 compile_expr(e, code);
                 code.push(Instr::Pop);
             }
+            Stmt::Break => {
+                let j = code.len();
+                code.push(Instr::Jmp(0));
+                aux.breaks
+                    .last_mut()
+                    .expect("`break` outside of a switch or loop")
+                    .push(j);
+            }
             Stmt::If(c, t, e) => {
                 compile_expr(c, code);
                 let jz = code.len();
                 code.push(Instr::JmpIfFalsy(0));
-                compile_stmts(t, code, ifs, heap_mods);
+                compile_stmts(t, code, aux);
                 let jmp = code.len();
                 code.push(Instr::Jmp(0));
                 let else_pc = code.len();
-                compile_stmts(e, code, ifs, heap_mods);
+                compile_stmts(e, code, aux);
                 let end = code.len();
                 patch(&mut code[jz], else_pc);
                 patch(&mut code[jmp], end);
-                ifs.push((jz, end));
+                aux.ifs.push((jz, end));
                 // Which slots hold arrays/objects mutated in either arm? They
                 // must escape *before* the branch so conditional mutations
                 // residualize and the arms merge at the join.
@@ -335,19 +382,103 @@ fn compile_stmts(
                 collect_heap_mods(e, &mut hm);
                 hm.sort_unstable();
                 hm.dedup();
-                heap_mods.push((jz, hm));
+                aux.heap_mods.push((jz, hm));
             }
             Stmt::While(c, body) => {
                 let head = code.len();
                 compile_expr(c, code);
                 let jz = code.len();
                 code.push(Instr::JmpIfFalsy(0));
-                compile_stmts(body, code, ifs, heap_mods);
+                aux.breaks.push(Vec::new());
+                compile_stmts(body, code, aux);
                 code.push(Instr::Jmp(head));
                 let end = code.len();
                 patch(&mut code[jz], end);
+                for b in aux.breaks.pop().unwrap() {
+                    patch(&mut code[b], end);
+                }
+            }
+            Stmt::Switch(disc, clauses) => compile_switch(disc, clauses, code, aux),
+        }
+    }
+}
+
+fn compile_switch(disc: &Expr, clauses: &[Clause], code: &mut Vec<Instr>, aux: &mut CompileAux) {
+    // The discriminant is evaluated once into a fresh scratch slot, so it is not
+    // recomputed per case test (JS evaluates it exactly once).
+    let sd = aux.next_slot;
+    aux.next_slot += 1;
+    aux.max_slot = aux.max_slot.max(aux.next_slot);
+    compile_expr(disc, code);
+    code.push(Instr::Store(sd));
+
+    // Dispatch: test each `case` in order; the first strict-equal match jumps
+    // into that clause's body. Bodies are laid out in source order, so reaching
+    // the end of one falls through into the next (JS fall-through); a `break`
+    // jumps past the whole switch.
+    let mut match_jmps: Vec<usize> = Vec::new(); // Jmp-into-body, one per Case (in order)
+    let mut dispatch_jzs: Vec<usize> = Vec::new();
+    for clause in clauses {
+        if let Clause::Case(test, _) = clause {
+            code.push(Instr::Load(sd));
+            compile_expr(test, code);
+            code.push(Instr::Bin(Bop::Eq));
+            let jz = code.len();
+            code.push(Instr::JmpIfFalsy(0)); // not equal -> next test
+            dispatch_jzs.push(jz);
+            match_jmps.push(code.len());
+            code.push(Instr::Jmp(0)); // equal -> this clause body
+            let next = code.len();
+            patch(&mut code[jz], next);
+        }
+    }
+    // No case matched: jump to `default` (wherever it is) if present, else past
+    // the switch.
+    let fallthrough = code.len();
+    code.push(Instr::Jmp(0));
+
+    // Clause bodies, in source order.
+    aux.breaks.push(Vec::new());
+    let mut default_label: Option<usize> = None;
+    let mut case_i = 0;
+    for clause in clauses {
+        let label = code.len();
+        match clause {
+            Clause::Case(_, body) => {
+                patch(&mut code[match_jmps[case_i]], label);
+                case_i += 1;
+                compile_stmts(body, code, aux);
+            }
+            Clause::Default(body) => {
+                default_label = Some(label);
+                compile_stmts(body, code, aux);
             }
         }
+    }
+    let end = code.len();
+    patch(&mut code[fallthrough], default_label.unwrap_or(end));
+    for b in aux.breaks.pop().unwrap() {
+        patch(&mut code[b], end);
+    }
+
+    // The join after the switch must be a leader so the arms of a dynamic
+    // discriminant merge there rather than path-splitting.
+    aux.switch_ends.push(end);
+
+    // For a dynamic discriminant, treat each dispatch test like an `if` whose
+    // join is the switch end: slots/heap mutated in any clause escape before the
+    // branch and the arms merge, keeping the residual linear (as with `filter`).
+    let mut hm = Vec::new();
+    for clause in clauses {
+        match clause {
+            Clause::Case(_, body) | Clause::Default(body) => collect_heap_mods(body, &mut hm),
+        }
+    }
+    hm.sort_unstable();
+    hm.dedup();
+    for jz in dispatch_jzs {
+        aux.ifs.push((jz, end));
+        aux.heap_mods.push((jz, hm.clone()));
     }
 }
 
@@ -356,12 +487,21 @@ fn compile_stmts(
 fn collect_heap_mods(stmts: &[Stmt], out: &mut Vec<usize>) {
     for s in stmts {
         match s {
-            Stmt::Push(Expr::Var(slot), _) | Stmt::SetProp(Expr::Var(slot), _, _) => out.push(*slot),
+            Stmt::Push(Expr::Var(slot), _)
+            | Stmt::SetProp(Expr::Var(slot), _, _)
+            | Stmt::SetIndex(Expr::Var(slot), _, _) => out.push(*slot),
             Stmt::If(_, t, e) => {
                 collect_heap_mods(t, out);
                 collect_heap_mods(e, out);
             }
             Stmt::While(_, b) => collect_heap_mods(b, out),
+            Stmt::Switch(_, clauses) => {
+                for clause in clauses {
+                    match clause {
+                        Clause::Case(_, b) | Clause::Default(b) => collect_heap_mods(b, out),
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -457,15 +597,18 @@ impl Js {
         let mut nslots = vec![0; program.len()];
         let mut ncaptured = vec![0; program.len()];
         let mut nparams = vec![0; program.len()];
-        let mut ifs: Vec<(usize, usize)> = Vec::new();
-        let mut heap_mods: Vec<(usize, Vec<usize>)> = Vec::new();
+        let mut aux = CompileAux::default();
 
         for (fid, f) in program.iter().enumerate() {
             entries[fid] = code.len();
-            nslots[fid] = f.nslots;
             ncaptured[fid] = f.ncaptured;
             nparams[fid] = f.nparams;
-            compile_stmts(&f.body, &mut code, &mut ifs, &mut heap_mods);
+            // Scratch slots for switch discriminants are appended after the
+            // declared locals; the high-water mark becomes the real slot count.
+            aux.next_slot = f.nslots;
+            aux.max_slot = f.nslots;
+            compile_stmts(&f.body, &mut code, &mut aux);
+            nslots[fid] = aux.max_slot;
             code.push(Instr::PushUndef);
             code.push(Instr::Ret);
         }
@@ -495,9 +638,16 @@ impl Js {
                 _ => {}
             }
         }
+        // A switch join is reached by fall-through (no jump targets it), so mark
+        // it a leader explicitly; otherwise dynamic-switch arms would not merge.
+        for &e in &aux.switch_ends {
+            if e < leaders.len() {
+                leaders[e] = true;
+            }
+        }
 
         let mut if_join: Vec<Option<(usize, Vec<usize>)>> = vec![None; code.len()];
-        for (jz, end) in ifs {
+        for (jz, end) in aux.ifs {
             let mut m: Vec<usize> = code[jz + 1..end]
                 .iter()
                 .filter_map(|ins| match ins {
@@ -511,7 +661,7 @@ impl Js {
         }
 
         let mut if_heap_modified: Vec<Vec<usize>> = vec![Vec::new(); code.len()];
-        for (jz, mods) in heap_mods {
+        for (jz, mods) in aux.heap_mods {
             if_heap_modified[jz] = mods;
         }
 
@@ -709,6 +859,33 @@ impl Client for Js {
                 }
                 self.advance(s)
             }
+            Instr::SetIndexOp => {
+                let v = s.top_mut().ostack.pop().unwrap();
+                let i = s.top_mut().ostack.pop().unwrap();
+                let a = s.top_mut().ostack.pop().unwrap();
+                match a {
+                    // Static array with a static index: mutate the abstract heap
+                    // in place (the array stays scalar-replaced). Grow with
+                    // `undefined` holes if the write is past the current end.
+                    Abs::Ref(addr) => match (&mut s.heap[addr], &i) {
+                        (HeapObj::Array(elems), Abs::Num(n)) => {
+                            let n = *n as usize;
+                            if n >= elems.len() {
+                                elems.resize(n + 1, Abs::Undef);
+                            }
+                            elems[n] = v;
+                        }
+                        _ => panic!("indexed write on non-array or dynamic index of a static array"),
+                    },
+                    // Dynamic (escaped) array: residualize the indexed write.
+                    Abs::Dyn(RExpr::Var(id)) => {
+                        let r = self.materialize_value(&v, &s.heap, out);
+                        out.push(Op::SetIndex { arr: id, index: i.to_rexpr(), val: r });
+                    }
+                    _ => panic!("indexed write on a non-array value"),
+                }
+                self.advance(s)
+            }
             Instr::PushArr => {
                 let v = s.top_mut().ostack.pop().unwrap();
                 let a = s.top_mut().ostack.pop().unwrap();
@@ -856,7 +1033,13 @@ impl Js {
     fn get_index(&self, s: &State, a: &Abs, i: &Abs) -> Abs {
         let addr = match a {
             Abs::Ref(addr) => *addr,
-            _ => panic!("index on a dynamic value (unsupported)"),
+            // A dynamic (escaped) array still supports element reads: the read
+            // residualizes to an indexed load. The element value is a runtime
+            // value, so the result is dynamic.
+            Abs::Dyn(r) => {
+                return Abs::Dyn(RExpr::Index(Box::new(r.clone()), Box::new(i.to_rexpr())));
+            }
+            _ => panic!("index on a non-array value (unsupported)"),
         };
         match (&s.heap[addr], i) {
             (HeapObj::Array(elems), Abs::Num(n)) => {
@@ -867,7 +1050,9 @@ impl Js {
                 .find(|(fk, _)| fk == k)
                 .map(|(_, v)| v.clone())
                 .unwrap_or(Abs::Undef),
-            (_, Abs::Dyn(_)) => panic!("dynamic index/key (unsupported: must be static)"),
+            // A static array indexed by a dynamic value cannot pick a static
+            // element; that case is unsupported (the array would need to escape).
+            (_, Abs::Dyn(_)) => panic!("dynamic index into a static array (unsupported: must be static)"),
             _ => panic!("bad index/key types"),
         }
     }
@@ -1192,6 +1377,25 @@ impl Js {
                         }
                     }
                 }
+                Instr::SetIndexOp => {
+                    let v = ostack.pop().unwrap();
+                    let i = ostack.pop().unwrap();
+                    let a = ostack.pop().unwrap();
+                    match (a, i) {
+                        (JsVal::Ref(ad), JsVal::Num(n)) => {
+                            if let CHeap::Array(e) = &mut heap[ad] {
+                                let n = n as usize;
+                                if n >= e.len() {
+                                    e.resize(n + 1, JsVal::Undef);
+                                }
+                                e[n] = v;
+                            } else {
+                                panic!("indexed write on non-array");
+                            }
+                        }
+                        _ => panic!("indexed write needs a ref array and numeric index"),
+                    }
+                }
                 Instr::PushArr => {
                     let v = ostack.pop().unwrap();
                     let a = ostack.pop().unwrap();
@@ -1295,33 +1499,53 @@ impl Js {
             for op in &block.ops {
                 match op {
                     Op::Assign { var, expr } => {
-                        let v = eval_rexpr(expr, &store);
+                        let v = eval_rexpr(expr, &store, &heap);
                         store.insert(*var, v);
                     }
-                    Op::Return(e) => ret = eval_rexpr(e, &store),
+                    Op::Return(e) => ret = eval_rexpr(e, &store, &heap),
                     Op::NewObject { dst, fields } => {
                         let f = fields
                             .iter()
-                            .map(|(k, e)| (k.clone(), eval_rexpr(e, &store)))
+                            .map(|(k, e)| (k.clone(), eval_rexpr(e, &store, &heap)))
                             .collect();
                         let addr = heap.len();
                         heap.push(CHeap::Object(f));
                         store.insert(*dst, JsVal::Ref(addr));
                     }
                     Op::NewArray { dst, elems } => {
-                        let e = elems.iter().map(|e| eval_rexpr(e, &store)).collect();
+                        let e = elems.iter().map(|e| eval_rexpr(e, &store, &heap)).collect();
                         let addr = heap.len();
                         heap.push(CHeap::Array(e));
                         store.insert(*dst, JsVal::Ref(addr));
                     }
                     Op::PushOp { arr, val } => {
-                        let v = eval_rexpr(val, &store);
+                        let v = eval_rexpr(val, &store, &heap);
                         match store.get(arr).cloned() {
                             Some(JsVal::Ref(addr)) => match &mut heap[addr] {
                                 CHeap::Array(e) => e.push(v),
                                 _ => panic!("push on non-array"),
                             },
                             _ => panic!("push on undefined array var"),
+                        }
+                    }
+                    Op::SetIndex { arr, index, val } => {
+                        let i = eval_rexpr(index, &store, &heap);
+                        let v = eval_rexpr(val, &store, &heap);
+                        let n = match i {
+                            JsVal::Num(n) => n as usize,
+                            _ => panic!("indexed write needs a numeric index"),
+                        };
+                        match store.get(arr).cloned() {
+                            Some(JsVal::Ref(addr)) => match &mut heap[addr] {
+                                CHeap::Array(e) => {
+                                    if n >= e.len() {
+                                        e.resize(n + 1, JsVal::Undef);
+                                    }
+                                    e[n] = v;
+                                }
+                                _ => panic!("indexed write on non-array"),
+                            },
+                            _ => panic!("indexed write on undefined array var"),
                         }
                     }
                 }
@@ -1334,7 +1558,7 @@ impl Js {
                     t,
                     f,
                 } => {
-                    bid = if !Js::ctruthy(&eval_rexpr(e, &store)) {
+                    bid = if !Js::ctruthy(&eval_rexpr(e, &store, &heap)) {
                         *t
                     } else {
                         *f
@@ -1376,6 +1600,13 @@ impl Js {
                     Op::PushOp { arr, val } => {
                         writeln!(s, "    v{arr}.push({})", fmt_rexpr(val)).unwrap()
                     }
+                    Op::SetIndex { arr, index, val } => writeln!(
+                        s,
+                        "    v{arr}[{}] := {}",
+                        fmt_rexpr(index),
+                        fmt_rexpr(val)
+                    )
+                    .unwrap(),
                 }
             }
             match &b.term {
@@ -1393,14 +1624,27 @@ impl Js {
     }
 }
 
-fn eval_rexpr(e: &RExpr, store: &HashMap<usize, JsVal>) -> JsVal {
+fn eval_rexpr(e: &RExpr, store: &HashMap<usize, JsVal>, heap: &[CHeap]) -> JsVal {
     match e {
         RExpr::Num(n) => JsVal::Num(*n),
         RExpr::Str(s) => JsVal::Str(s.clone()),
         RExpr::Bool(b) => JsVal::Bool(*b),
         RExpr::Undef => JsVal::Undef,
         RExpr::Var(v) => store.get(v).cloned().unwrap_or(JsVal::Undef),
-        RExpr::Bin(op, a, b) => Js::cbin(*op, &eval_rexpr(a, store), &eval_rexpr(b, store)),
+        RExpr::Bin(op, a, b) => {
+            Js::cbin(*op, &eval_rexpr(a, store, heap), &eval_rexpr(b, store, heap))
+        }
+        RExpr::Index(a, i) => {
+            let arr = eval_rexpr(a, store, heap);
+            let idx = eval_rexpr(i, store, heap);
+            match (arr, idx) {
+                (JsVal::Ref(addr), JsVal::Num(n)) => match &heap[addr] {
+                    CHeap::Array(e) => e.get(n as usize).cloned().unwrap_or(JsVal::Undef),
+                    _ => panic!("indexed read on non-array"),
+                },
+                _ => panic!("indexed read needs a ref array and numeric index"),
+            }
+        }
     }
 }
 
@@ -1412,6 +1656,7 @@ fn fmt_rexpr(e: &RExpr) -> String {
         RExpr::Undef => "undefined".to_string(),
         RExpr::Var(v) => format!("v{v}"),
         RExpr::Bin(op, a, b) => format!("({} {} {})", fmt_rexpr(a), op.sym(), fmt_rexpr(b)),
+        RExpr::Index(a, i) => format!("{}[{}]", fmt_rexpr(a), fmt_rexpr(i)),
     }
 }
 
@@ -1541,6 +1786,150 @@ mod tests {
                 "residual diverged from reference at x={x}"
             );
         }
+    }
+
+    /// The Futamura projection on JS, written with `switch`: the same expression
+    /// interpreter as `interpreter_specializes_away`, but dispatching on
+    /// `node.op` with a `switch` instead of a nested `if`-chain. Because the
+    /// discriminant is static (it comes from the static AST), the entire switch
+    /// dispatch folds away, leaving the same straight-line residual.
+    #[test]
+    fn switch_interpreter_specializes_away() {
+        let eval = FuncDef {
+            name: "eval",
+            nslots: 2,
+            ncaptured: 0,
+            nparams: 2,
+            slot_names: vec!["node", "env"],
+            body: vec![Stmt::Switch(
+                get(var(0), "op"),
+                vec![
+                    Clause::Case(str_("lit"), vec![Stmt::Return(get(var(0), "val"))]),
+                    Clause::Case(
+                        str_("var"),
+                        vec![Stmt::Return(index(var(1), get(var(0), "name")))],
+                    ),
+                    Clause::Case(
+                        str_("add"),
+                        vec![Stmt::Return(bin(
+                            Bop::Add,
+                            call(func(0), vec![get(var(0), "l"), var(1)]),
+                            call(func(0), vec![get(var(0), "r"), var(1)]),
+                        ))],
+                    ),
+                    Clause::Case(
+                        str_("mul"),
+                        vec![Stmt::Return(bin(
+                            Bop::Mul,
+                            call(func(0), vec![get(var(0), "l"), var(1)]),
+                            call(func(0), vec![get(var(0), "r"), var(1)]),
+                        ))],
+                    ),
+                    Clause::Default(vec![Stmt::Return(num(0))]),
+                ],
+            )],
+        };
+        // ast = (x + 3) * (x + x), env = { x: input }
+        let ast = node(
+            "mul",
+            vec![
+                (
+                    "l",
+                    node(
+                        "add",
+                        vec![
+                            ("l", node("var", vec![("name", str_("x"))])),
+                            ("r", node("lit", vec![("val", num(3))])),
+                        ],
+                    ),
+                ),
+                (
+                    "r",
+                    node(
+                        "add",
+                        vec![
+                            ("l", node("var", vec![("name", str_("x"))])),
+                            ("r", node("var", vec![("name", str_("x"))])),
+                        ],
+                    ),
+                ),
+            ],
+        );
+        let main = FuncDef {
+            name: "main",
+            nslots: 1,
+            ncaptured: 0,
+            nparams: 1,
+            slot_names: vec!["input"],
+            body: vec![Stmt::Return(call(func(0), vec![ast, obj(vec![("x", var(0))])]))],
+        };
+        let program = [eval, main];
+        let vm = Js::new(&program);
+        let mut prog = engine::specialize(&vm, vm.start());
+        crate::residual::simplify(&mut prog);
+
+        assert_eq!(
+            prog.blocks.len(),
+            1,
+            "switch-based interpreter did not fully specialize away"
+        );
+        for x in [-3, 0, 1, 7, 42] {
+            assert_eq!(
+                vm.run_reference(x),
+                vm.run_residual(&prog, x),
+                "residual diverged from reference at x={x}"
+            );
+        }
+    }
+
+    /// Real JS switch semantics over a *dynamic* discriminant: fall-through
+    /// (empty `case 1` falls into `case 2`), `break`, and `default` all behave
+    /// like JS, verified against the reference interpreter across inputs.
+    #[test]
+    fn switch_fallthrough_break_default() {
+        // main(x) {
+        //   let r;
+        //   switch (x) {
+        //     case 0: r = 10; break;
+        //     case 1:               // falls through
+        //     case 2: r = 20; break;
+        //     default: r = 99;
+        //   }
+        //   return r;
+        // }
+        let main = FuncDef {
+            name: "main",
+            nslots: 2, // slot 0 = x (input), slot 1 = r
+            ncaptured: 0,
+            nparams: 1,
+            slot_names: vec!["x", "r"],
+            body: vec![
+                Stmt::Switch(
+                    var(0),
+                    vec![
+                        Clause::Case(num(0), vec![Stmt::Set(1, num(10)), Stmt::Break]),
+                        Clause::Case(num(1), vec![]), // fall-through into case 2
+                        Clause::Case(num(2), vec![Stmt::Set(1, num(20)), Stmt::Break]),
+                        Clause::Default(vec![Stmt::Set(1, num(99))]),
+                    ],
+                ),
+                Stmt::Return(var(1)),
+            ],
+        };
+        let vm = Js::new(&[main]);
+        let prog = engine::specialize(&vm, vm.start());
+        for x in [-1, 0, 1, 2, 3, 5, 100] {
+            assert_eq!(
+                vm.run_reference(x),
+                vm.run_residual(&prog, x),
+                "switch diverged from reference at x={x}"
+            );
+        }
+        // Spot-check the actual JS semantics we expect.
+        assert_eq!(vm.run_residual(&prog, 0), DeepVal::Num(10));
+        assert_eq!(vm.run_residual(&prog, 1), DeepVal::Num(20)); // fell through
+        assert_eq!(vm.run_residual(&prog, 2), DeepVal::Num(20));
+        assert_eq!(vm.run_residual(&prog, 7), DeepVal::Num(99)); // default
     }
 
     /// Partial escape analysis: an object that becomes the program's result is
@@ -1766,6 +2155,248 @@ mod tests {
                 .map(DeepVal::Num)
                 .collect();
             assert_eq!(got, DeepVal::Array(expected));
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // A Brainfuck interpreter, written in the JS subset, specialized away.
+    // -----------------------------------------------------------------------
+
+    /// Parse Brainfuck source into a nested AST of JS-subset objects:
+    ///   {op:"seq",  body:[...]}     a sequence of instructions
+    ///   {op:"add",  n}              `+`/`-` runs, folded to a delta
+    ///   {op:"move", n}              `>`/`<` runs, folded to a delta
+    ///   {op:"out"}                  `.`
+    ///   {op:"in"}                   `,`
+    ///   {op:"loop", seq:{op:"seq"}} `[ ... ]`
+    /// This is real BF source going in (not a hand-built AST), the way the
+    /// expression-interpreter demo feeds a static AST.
+    fn parse_bf(src: &str) -> Expr {
+        let chars: Vec<char> = src.chars().collect();
+        let mut pos = 0;
+        let body = parse_bf_seq(&chars, &mut pos, false);
+        seq_node(body)
+    }
+
+    fn seq_node(body: Vec<Expr>) -> Expr {
+        obj(vec![("op", str_("seq")), ("body", arr(body))])
+    }
+
+    fn parse_bf_seq(chars: &[char], pos: &mut usize, nested: bool) -> Vec<Expr> {
+        let mut out = Vec::new();
+        while *pos < chars.len() {
+            match chars[*pos] {
+                '+' | '-' => {
+                    let mut n = 0i64;
+                    while *pos < chars.len() && (chars[*pos] == '+' || chars[*pos] == '-') {
+                        n += if chars[*pos] == '+' { 1 } else { -1 };
+                        *pos += 1;
+                    }
+                    out.push(node("add", vec![("n", num(n))]));
+                }
+                '>' | '<' => {
+                    let mut n = 0i64;
+                    while *pos < chars.len() && (chars[*pos] == '>' || chars[*pos] == '<') {
+                        n += if chars[*pos] == '>' { 1 } else { -1 };
+                        *pos += 1;
+                    }
+                    out.push(node("move", vec![("n", num(n))]));
+                }
+                '.' => {
+                    out.push(node("out", vec![]));
+                    *pos += 1;
+                }
+                ',' => {
+                    out.push(node("in", vec![]));
+                    *pos += 1;
+                }
+                '[' => {
+                    *pos += 1; // consume '['
+                    let inner = parse_bf_seq(chars, pos, true);
+                    assert_eq!(chars.get(*pos), Some(&']'), "unmatched '[' in BF source");
+                    *pos += 1; // consume ']'
+                    out.push(node("loop", vec![("seq", seq_node(inner))]));
+                }
+                ']' => {
+                    assert!(nested, "unmatched ']' in BF source");
+                    break; // caller consumes ']'
+                }
+                _ => *pos += 1, // ignore comments / whitespace
+            }
+        }
+        out
+    }
+
+    /// `exec(node, tape, ptr, out, input, inptr)` interprets one BF AST node,
+    /// returning `[ptr, inptr]` (the mutated cursor + input position). `tape` and
+    /// `out` are arrays mutated in place; `ptr`/`inptr` are threaded as values.
+    fn bf_exec() -> FuncDef {
+        // slots: 0 node, 1 tape, 2 ptr, 3 out, 4 input, 5 inptr, 6 i, 7 r
+        let tape_at_ptr = || index(var(1), var(2));
+        // r = exec(child, tape, ptr, out, input, inptr); ptr = r[0]; inptr = r[1];
+        let call_child = |child: Expr| {
+            vec![
+                Stmt::Set(7, call(func(0), vec![child, var(1), var(2), var(3), var(4), var(5)])),
+                Stmt::Set(2, index(var(7), num(0))),
+                Stmt::Set(5, index(var(7), num(1))),
+            ]
+        };
+        let mut seq_body = vec![Stmt::Set(6, num(0))];
+        let mut seq_loop = vec![];
+        seq_loop.extend(call_child(index(get(var(0), "body"), var(6))));
+        seq_loop.push(Stmt::Set(6, bin(Bop::Add, var(6), num(1))));
+        seq_body.push(Stmt::While(
+            bin(Bop::Lt, var(6), get(get(var(0), "body"), "length")),
+            seq_loop,
+        ));
+
+        FuncDef {
+            name: "exec",
+            nslots: 8,
+            ncaptured: 0,
+            nparams: 6,
+            slot_names: vec!["node", "tape", "ptr", "out", "input", "inptr", "i", "r"],
+            body: vec![
+                Stmt::Switch(
+                    get(var(0), "op"),
+                    vec![
+                        // tape[ptr] += node.n
+                        Clause::Case(
+                            str_("add"),
+                            vec![
+                                Stmt::SetIndex(
+                                    var(1),
+                                    var(2),
+                                    bin(Bop::Add, tape_at_ptr(), get(var(0), "n")),
+                                ),
+                                Stmt::Break,
+                            ],
+                        ),
+                        // ptr += node.n
+                        Clause::Case(
+                            str_("move"),
+                            vec![
+                                Stmt::Set(2, bin(Bop::Add, var(2), get(var(0), "n"))),
+                                Stmt::Break,
+                            ],
+                        ),
+                        // out.push(tape[ptr])
+                        Clause::Case(
+                            str_("out"),
+                            vec![Stmt::Push(var(3), tape_at_ptr()), Stmt::Break],
+                        ),
+                        // tape[ptr] = input[inptr]; inptr += 1
+                        Clause::Case(
+                            str_("in"),
+                            vec![
+                                Stmt::SetIndex(var(1), var(2), index(var(4), var(5))),
+                                Stmt::Set(5, bin(Bop::Add, var(5), num(1))),
+                                Stmt::Break,
+                            ],
+                        ),
+                        // while (tape[ptr] !== 0) exec(node.seq, ...)
+                        Clause::Case(
+                            str_("loop"),
+                            vec![
+                                Stmt::While(
+                                    bin(Bop::Ne, tape_at_ptr(), num(0)),
+                                    call_child(get(var(0), "seq")),
+                                ),
+                                Stmt::Break,
+                            ],
+                        ),
+                        // run each node in node.body
+                        Clause::Case(str_("seq"), {
+                            seq_body.push(Stmt::Break);
+                            seq_body
+                        }),
+                    ],
+                ),
+                Stmt::Return(arr(vec![var(2), var(5)])),
+            ],
+        }
+    }
+
+    /// `main(input)`: set up an 8-cell tape, feed `input` to the BF `,`, run the
+    /// program, return the output array.
+    fn bf_main(program: Expr) -> FuncDef {
+        // slots: 0 input, 1 tape, 2 out, 3 input_arr, 4 r
+        FuncDef {
+            name: "main",
+            nslots: 5,
+            ncaptured: 0,
+            nparams: 1,
+            slot_names: vec!["input", "tape", "out", "input_arr", "r"],
+            body: vec![
+                Stmt::Let(1, arr(vec![num(0); 8])),
+                Stmt::Let(2, arr(vec![])),
+                Stmt::Let(3, arr(vec![var(0)])),
+                Stmt::Let(
+                    4,
+                    call(func(0), vec![program, var(1), num(0), var(2), var(3), num(0)]),
+                ),
+                Stmt::Return(var(2)),
+            ],
+        }
+    }
+
+    /// The Futamura projection on a *Brainfuck* interpreter. The BF program reads
+    /// the input into cell 0, adds 6, prints it; then computes 65 (= 13 * 5) with
+    /// a static-count loop and prints that. Because every loop count is static
+    /// (only the cell *value* is dynamic), the whole interpreter, the AST, the
+    /// dispatch `switch`, the tape, and all loops specialize away, leaving a
+    /// single residual block that builds `[input + 6, 65]`.
+    #[test]
+    fn brainfuck_interpreter_specializes_away() {
+        let src = ",++++++.>+++++++++++++[->+++++<]>.";
+        let program = parse_bf(src);
+        let vm = Js::new(&[bf_exec(), bf_main(program)]);
+
+        let mut prog = engine::specialize(&vm, vm.start());
+        crate::residual::simplify(&mut prog);
+
+        // The interpreter, AST, tape, switch dispatch and loops are all gone:
+        // straight-line residual with no branches.
+        assert_eq!(
+            prog.blocks.len(),
+            1,
+            "BF interpreter did not fully specialize away:\n{}",
+            vm.dump(&prog)
+        );
+        let has_newarray = prog
+            .blocks
+            .iter()
+            .flat_map(|b| &b.ops)
+            .any(|op| matches!(op, Op::NewArray { .. }));
+        assert!(has_newarray, "the output array should be materialized");
+
+        // The residual matches the reference BF interpreter for every input, and
+        // really does depend on the input (cell 0 = input + 6).
+        for input in [0, 1, 5, 65, 200] {
+            let got = vm.run_residual(&prog, input);
+            assert_eq!(vm.run_reference(input), got, "BF residual diverged at input={input}");
+            assert_eq!(got, DeepVal::Array(vec![DeepVal::Num(input + 6), DeepVal::Num(65)]));
+        }
+    }
+
+    /// A second BF program with a static loop and pointer motion, to show the
+    /// interpreter handles real BF control flow (not just a straight line).
+    /// Computes 6 * 7 = 42 into a cell and prints it; no input, fully constant.
+    #[test]
+    fn brainfuck_constant_program() {
+        // cell0 = 6; [ while cell0: cell1 += 7; cell0-- ]  => cell1 = 42; print cell1
+        let src = "++++++[->+++++++<]>.";
+        let program = parse_bf(src);
+        let vm = Js::new(&[bf_exec(), bf_main(program)]);
+
+        let mut prog = engine::specialize(&vm, vm.start());
+        crate::residual::simplify(&mut prog);
+
+        assert_eq!(prog.blocks.len(), 1, "constant BF program left control flow:\n{}", vm.dump(&prog));
+        for input in [0, 9, 100] {
+            let got = vm.run_residual(&prog, input);
+            assert_eq!(vm.run_reference(input), got, "diverged at input={input}");
+            assert_eq!(got, DeepVal::Array(vec![DeepVal::Num(42)]));
         }
     }
 }

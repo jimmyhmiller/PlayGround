@@ -92,11 +92,16 @@ struct Lower {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)] // Member l-values land in a later phase.
 enum LvalTarget {
     Var(VarId),
     /// A member l-value `obj.p = ...` (not yet stored as SSA; kept for effects).
     Member { obj: Value, key: MemberKey },
+    /// An object destructuring pattern `{a, b: c} = init`: each entry binds the
+    /// member `init[key]` to a variable. (Flat identifier targets only.)
+    ObjectPattern(Vec<(MemberKey, VarId)>),
+    /// An array destructuring pattern `[x, , y] = init`: each slot binds
+    /// `init[index]` to a variable (`None` for an elision hole).
+    ArrayPattern(Vec<Option<VarId>>),
 }
 
 impl Lower {
@@ -214,6 +219,108 @@ impl Lower {
                     .ok_or_else(|| format!("unsupported unop {:?}", str_attr(op, "operator_")))?;
                 self.def(op, *cur, Op::Un(uop, a));
             }
+            "jsir.new_expression" => {
+                // `new Callee(args)` — an allocation. For the analysis it behaves
+                // like a (non-pure) call: the result is a fresh reference that may
+                // capture/mutate its arguments. The reversible IR keeps the `new`.
+                let callee = self.val(op.operands[0])?;
+                let args = op.operands[1..]
+                    .iter()
+                    .map(|v| self.val(*v))
+                    .collect::<Result<Vec<_>, _>>()?;
+                self.def(op, *cur, Op::Call { callee, args });
+            }
+            "jsir.sequence_expression" => {
+                // `(a, b, c)` — operands' side effects are already emitted in
+                // order; the expression's value is the last operand.
+                let last = *op.operands.last().ok_or("empty sequence expression")?;
+                let v = self.val(last)?;
+                if let Some(r) = op.results.first() {
+                    self.vmap.insert(*r, v);
+                }
+            }
+            "jsir.update_expression" => {
+                // `x++` / `--x` / `obj.p++`. Desugar to read, ±1, write-back; the
+                // expression's value is the new value (prefix) or old (postfix).
+                let opname = str_attr(op, "operator_").unwrap_or_default();
+                let prefix = bool_attr(op, "prefix").unwrap_or(false);
+                let bop = match opname.as_str() {
+                    "++" => BinOp::Add,
+                    "--" => BinOp::Sub,
+                    _ => return Err(format!("unsupported update operator {opname:?}")),
+                };
+                let target = self
+                    .lval
+                    .get(&op.operands[0])
+                    .cloned()
+                    .ok_or("update of unknown l-value")?;
+                let one = self.cfg.push(*cur, Op::Const(Const::num(1.0)));
+                let (old, newv) = match &target {
+                    LvalTarget::Var(var) => {
+                        let cur_v = self.cfg.push(*cur, Op::ReadVar(*var));
+                        let nv = self.cfg.push(*cur, Op::Bin(bop, cur_v, one));
+                        self.cfg.push_effect(*cur, Op::WriteVar(*var, nv));
+                        (cur_v, nv)
+                    }
+                    LvalTarget::Member { obj, key } => {
+                        let cur_v = self.cfg.push(*cur, Op::Member { obj: *obj, prop: key.clone() });
+                        let nv = self.cfg.push(*cur, Op::Bin(bop, cur_v, one));
+                        self.cfg.push_effect(
+                            *cur,
+                            Op::StoreMember { obj: *obj, prop: key.clone(), value: nv },
+                        );
+                        (cur_v, nv)
+                    }
+                    _ => return Err("update expression on a destructuring pattern".into()),
+                };
+                if let Some(r) = op.results.first() {
+                    self.vmap.insert(*r, if prefix { newv } else { old });
+                }
+            }
+            "jsir.template_element_value" => {
+                // The cooked text of one template quasi (a string primitive).
+                let s = str_attr(op, "cooked").unwrap_or_default();
+                self.def(op, *cur, Op::Const(Const::Str(s)));
+            }
+            "jsir.template_element" => {
+                // Wraps a `template_element_value`; pass its value through.
+                let v = self.val(op.operands[0])?;
+                if let Some(r) = op.results.first() {
+                    self.vmap.insert(*r, v);
+                }
+            }
+            "jsir.template_literal" => {
+                // `` `q0${e0}q1${e1}…` `` — operands are the quasis then the
+                // expressions (`operandSegmentSizes = [num_quasis, num_exprs]`).
+                // Desugar to string concatenation q0 + e0 + q1 + e1 + …; the
+                // result is a primitive that depends on the embedded expressions.
+                let n_quasi = op
+                    .attrs
+                    .iter()
+                    .find_map(|(k, v)| match v {
+                        Attr::I32Array(a) if k == "operandSegmentSizes" => a.first().copied(),
+                        _ => None,
+                    })
+                    .unwrap_or(0) as usize;
+                let quasis: Vec<Value> = op.operands[..n_quasi]
+                    .iter()
+                    .map(|v| self.val(*v))
+                    .collect::<Result<_, _>>()?;
+                let exprs: Vec<Value> = op.operands[n_quasi..]
+                    .iter()
+                    .map(|v| self.val(*v))
+                    .collect::<Result<_, _>>()?;
+                let mut acc = *quasis.first().ok_or("template literal without quasis")?;
+                for (i, e) in exprs.iter().enumerate() {
+                    acc = self.cfg.push(*cur, Op::Bin(BinOp::Add, acc, *e));
+                    if let Some(q) = quasis.get(i + 1) {
+                        acc = self.cfg.push(*cur, Op::Bin(BinOp::Add, acc, *q));
+                    }
+                }
+                if let Some(r) = op.results.first() {
+                    self.vmap.insert(*r, acc);
+                }
+            }
             "jsir.assignment_expression" => {
                 let opname = str_attr(op, "operator_").unwrap_or_default();
                 let rhs = self.val(op.operands[1])?;
@@ -231,14 +338,11 @@ impl Lower {
                             self.cfg.push(*cur, Op::Bin(bop, cur_v, rhs))
                         }
                         LvalTarget::Member { .. } => return Err("compound member assign unsupported".into()),
+                        // `{a} op= x` / `[a] op= x` are not valid JS.
+                        _ => return Err("compound assignment to a destructuring pattern".into()),
                     }
                 };
-                match target {
-                    LvalTarget::Var(var) => self.cfg.push_effect(*cur, Op::WriteVar(var, stored)),
-                    LvalTarget::Member { obj, key } => {
-                        self.cfg.push_effect(*cur, Op::StoreMember { obj, prop: key, value: stored })
-                    }
-                }
+                self.bind_target(&target, stored, *cur);
                 // The assignment expression evaluates to the stored value.
                 if let Some(r) = op.results.first() {
                     self.vmap.insert(*r, stored);
@@ -251,8 +355,8 @@ impl Lower {
                 } else {
                     self.cfg.push(*cur, Op::Const(Const::Undef))
                 };
-                if let Some(LvalTarget::Var(var)) = target {
-                    self.cfg.push_effect(*cur, Op::WriteVar(var, init));
+                if let Some(t) = target {
+                    self.bind_target(&t, init, *cur);
                 }
             }
             "jsir.call_expression" => {
@@ -326,6 +430,60 @@ impl Lower {
                 self.cfg.block_mut(*cur).term = Term::Ret(v);
             }
 
+            // --- destructuring l-value patterns ---
+            "jsir.object_pattern_ref" => {
+                // The pattern's region holds `identifier_ref` (binding targets)
+                // and `object_property_ref` (key + target) ops. Lower the nested
+                // identifier-refs so their `LvalTarget::Var` entries exist, then
+                // pair each property key with its target var.
+                let region: Vec<IrOp> = region_ops(op, 0).to_vec();
+                let mut binds: Vec<(MemberKey, VarId)> = Vec::new();
+                for p in &region {
+                    match p.name.as_str() {
+                        "jsir.identifier_ref" => self.lower_op(p, cur)?,
+                        "jsir.object_property_ref" => {
+                            let key = match self.obj_prop_key(p)? {
+                                PropKey::Ident(n) => MemberKey::Static(n),
+                                PropKey::Computed(c) => MemberKey::Computed(c),
+                            };
+                            match self.lval.get(&p.operands[0]).cloned() {
+                                Some(LvalTarget::Var(var)) => binds.push((key, var)),
+                                _ => return Err(
+                                    "object pattern: only flat identifier bindings supported \
+                                     (nested patterns / defaults / rest not yet lowered)"
+                                        .into(),
+                                ),
+                            }
+                        }
+                        "jsir.exprs_region_end" | "jsir.expr_region_end" => {}
+                        other => {
+                            return Err(format!("object pattern: unsupported element {other}"))
+                        }
+                    }
+                }
+                if let Some(r) = op.results.first() {
+                    self.lval.insert(*r, LvalTarget::ObjectPattern(binds));
+                }
+            }
+            "jsir.array_pattern_ref" => {
+                // Operands are the element l-value results in order (lowered as
+                // preceding sibling ops). A missing operand slot is an elision.
+                let mut slots: Vec<Option<VarId>> = Vec::new();
+                for o in &op.operands {
+                    match self.lval.get(o).cloned() {
+                        Some(LvalTarget::Var(var)) => slots.push(Some(var)),
+                        _ => return Err(
+                            "array pattern: only flat identifier bindings supported \
+                             (nested patterns / defaults / rest not yet lowered)"
+                                .into(),
+                        ),
+                    }
+                }
+                if let Some(r) = op.results.first() {
+                    self.lval.insert(*r, LvalTarget::ArrayPattern(slots));
+                }
+            }
+
             // --- structured control flow -> blocks ---
             "jshir.if_statement" => self.lower_if(op, cur)?,
             "jshir.while_statement" => self.lower_while(op, cur)?,
@@ -335,6 +493,40 @@ impl Lower {
             other => return Err(format!("lower: unsupported op {other}")),
         }
         Ok(())
+    }
+
+    /// Store `init` into an l-value target, expanding destructuring patterns
+    /// into the member reads + variable writes React's lowering also produces
+    /// (`const {a} = props` => `a = props.a`).
+    fn bind_target(&mut self, target: &LvalTarget, init: Value, block: BlockId) {
+        match target {
+            LvalTarget::Var(var) => {
+                self.cfg.push_effect(block, Op::WriteVar(*var, init));
+            }
+            LvalTarget::Member { obj, key } => {
+                self.cfg.push_effect(
+                    block,
+                    Op::StoreMember { obj: *obj, prop: key.clone(), value: init },
+                );
+            }
+            LvalTarget::ObjectPattern(binds) => {
+                for (key, var) in binds {
+                    let m = self.cfg.push(block, Op::Member { obj: init, prop: key.clone() });
+                    self.cfg.push_effect(block, Op::WriteVar(*var, m));
+                }
+            }
+            LvalTarget::ArrayPattern(slots) => {
+                for (i, slot) in slots.iter().enumerate() {
+                    if let Some(var) = slot {
+                        let idx = self.cfg.push(block, Op::Const(Const::num(i as f64)));
+                        let m = self
+                            .cfg
+                            .push(block, Op::Member { obj: init, prop: MemberKey::Computed(idx) });
+                        self.cfg.push_effect(block, Op::WriteVar(*var, m));
+                    }
+                }
+            }
+        }
     }
 
     /// Define an instruction with a result and map the jsir result to it.

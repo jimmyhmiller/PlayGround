@@ -84,20 +84,18 @@ fn mutation_forms_single_scope() {
 #[test]
 fn dependency_inference_matches_memo_shape() {
     // `function f(a,b){ let style={color:a}; let el={size:b,props:style}; return el; }`
-    // After porting React's PruneNonEscapingScopes (escape analysis), a returned
-    // *bare object* whose only escape is the `return` and whose dependencies are
-    // all non-memoized is NOT memoized — verified against the React compiler,
-    // which emits this function unchanged (no `_c` cache). Neither `style` nor
-    // `el` reaches React's `memoized` set (no JSX/hook captures them), so both
-    // scopes are pruned to empty outputs. The pre-escape predicate over-memoized
-    // here (the bug this step fixes); the analysis now produces no caching output.
+    // An escaping allocation is always memoized (React's `getMemoizationLevel`),
+    // so this produces TWO scopes — `style` (dep `a`) and `el` (deps `b`,
+    // `style`) — for a cache of 5 slots. Verified byte-for-byte against the
+    // official compiler, which emits exactly `const $ = _c(5)` with these two
+    // memo blocks. (An earlier port mis-modeled bare allocations as not memoized;
+    // this asserts the corrected, oracle-matching shape.)
     let (cfg, r) = analyzed("function f(a,b){ let style={color:a}; let el={size:b,props:style}; return el; }");
     let infos = scopes::analyze(&cfg, &r);
     let emitted: Vec<_> = infos.iter().filter(|i| !i.outputs.is_empty()).collect();
-    assert!(
-        emitted.is_empty(),
-        "returned bare object with no memoized dep is not memoized (matches React): {infos:?}"
-    );
+    assert_eq!(emitted.len(), 2, "two memoized scopes (style, el): {infos:?}");
+    let cache: usize = emitted.iter().map(|i| i.deps.len() + i.outputs.len()).sum();
+    assert_eq!(cache, 5, "cache size matches React's _c(5): {infos:?}");
 }
 
 #[test]

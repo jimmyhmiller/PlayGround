@@ -266,11 +266,12 @@ pub fn compile(src: &str) -> Result<String, String> {
     let ir = jsir_swc::source_to_ir(src)?;
     let mut cfg = crate::lower::lower_function(&ir)?;
     crate::ssa::construct(&mut cfg);
-    let name = cfg.fn_name.clone().unwrap_or_default();
-    if !is_component_or_hook(&name) {
-        // Not a component/hook: pass through (round-tripped from the IR).
-        return jsir_swc::ir_to_source(&ir);
-    }
+    // We compile every function, matching React's test harness
+    // (`compilationMode: 'all'`) rather than the production `'infer'` gate (which
+    // only compiles components/hooks). The analysis is name-agnostic, so a
+    // helper that memoizes nothing still falls through to the `cache_size == 0`
+    // pass-through below. `is_component_or_hook` is retained for callers that
+    // want the production policy.
     let r = crate::mutability::analyze(&cfg);
     let infos = crate::scopes::analyze(&cfg, &r);
     let layout = crate::memoize_plan::build_layout(&cfg, &infos, &r)?;

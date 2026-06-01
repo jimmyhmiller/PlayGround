@@ -1,0 +1,12 @@
+{
+  "name": "jsir-react-oracle",
+  "version": "1.0.0",
+  "private": true,
+  "description": "In-repo React Compiler oracle for the jsir-ssa parity corpus. Wraps the official babel-plugin-react-compiler, mirroring React's snap test transform (parseConfigPragmaForTests). Replaces the lost /tmp/react-rust Rust port.",
+  "type": "commonjs",
+  "bin": { "react-cc": "./react-cc.js" },
+  "dependencies": {
+    "@babel/core": "^7.26.0",
+    "babel-plugin-react-compiler": "^1.0.0"
+  }
+}
