@@ -21,7 +21,7 @@ use std::collections::HashSet;
 use jsir_ir::{Attr, Block, IdentifierAttr, Op as IrOp, Region, ValueId};
 use jsir_transforms::memoize::MemoLayout;
 
-use crate::cfg::{BinOp, BlockId, Cfg, Const, Instr, MemberKey, Op, PropKey, Term, UnOp, Value};
+use crate::cfg::{BinOp, BlockId, BlockKind, Cfg, Const, Instr, MemberKey, Op, PropKey, Term, UnOp, Value};
 use crate::mutability::Ranges;
 use crate::scopes::ScopeInfo;
 
@@ -35,7 +35,23 @@ enum Node {
     /// a branch arm) the phi assignments for its single `Br` successor.
     Straight(BlockId),
     /// `if (cond) { then } else { else }` whose arms both fall through to `join`.
-    If { cond: Value, then: Vec<Node>, els: Vec<Node>, join: BlockId },
+    ///
+    /// `then_phi`/`els_phi` carry phi assignments for an arm that jumps *straight
+    /// to the join* on the `CondBr` edge itself (the short-circuit shape the
+    /// logical operators `&&`/`||`/`??` and a value-producing ternary lower to:
+    /// the operand is already computed, so the arm is empty and the value is
+    /// passed as a block argument on the conditional edge rather than through an
+    /// intermediate block). Each `(param, arg)` becomes `param = arg;` emitted at
+    /// the end of that branch. Empty for the ordinary diamond where both arms are
+    /// real blocks that carry their phi args on their own `Br` to the join.
+    If {
+        cond: Value,
+        then: Vec<Node>,
+        els: Vec<Node>,
+        join: BlockId,
+        then_phi: Vec<(Value, Value)>,
+        els_phi: Vec<(Value, Value)>,
+    },
 }
 
 /// Build the memoized body op list for the function described by `infos`/`cfg`.
@@ -131,14 +147,22 @@ impl<'a> EmitCtx<'a> {
     fn emit_node(&self, node: &Node, out: &mut Vec<IrOp>, slot: &mut usize) -> Result<(), String> {
         match node {
             Node::Straight(b) => self.emit_block(*b, out, slot),
-            Node::If { cond, then, els, join } => {
+            Node::If { cond, then, els, join, then_phi, els_phi } => {
                 let mut then_ops: Vec<IrOp> = Vec::new();
                 for n in then {
                     self.emit_node(n, &mut then_ops, slot)?;
                 }
+                // Phi assignments for a then-arm that jumps straight to the join
+                // (short-circuit): `join.param = arg;` at the end of the branch.
+                for (p, a) in then_phi {
+                    then_ops.push(self.em.phi_assign(*p, *a));
+                }
                 let mut else_ops: Vec<IrOp> = Vec::new();
                 for n in els {
                     self.emit_node(n, &mut else_ops, slot)?;
+                }
+                for (p, a) in els_phi {
+                    else_ops.push(self.em.phi_assign(*p, *a));
                 }
                 // `if (cond) { then } else { else }` — cond referenced by name (it
                 // is a value defined before the branch).
@@ -270,28 +294,76 @@ fn build_region(
                 cur = *next;
             }
             Term::CondBr { cond, then_block, else_block, then_args, else_args } => {
-                if !then_args.is_empty() || !else_args.is_empty() {
-                    // The lowering passes phi args only on plain `Br` edges; a
-                    // CondBr carrying args is an unexpected shape.
-                    return Err("memoize_plan: conditional branch with arguments (unsupported)".into());
-                }
                 let cond = *cond;
                 let (tb, eb) = (*then_block, *else_block);
+                let (ta, ea) = (then_args.clone(), else_args.clone());
                 // Emit the cond block's own straight-line instructions first (the
                 // condition value and any preceding computations live here), then
                 // the `if`.
                 nodes.push(Node::Straight(cur));
-                // The join is the single block both arms fall through to.
-                let join = find_join(cfg, cur, tb, eb)?;
-                let then = build_region(cfg, tb, Some(join), ret)?;
-                let els = build_region(cfg, eb, Some(join), ret)?;
-                nodes.push(Node::If { cond, then, els, join });
+                // The join is the single block both arms reconverge at — taken
+                // from the authoritative `joins` map the lowering recorded, not a
+                // dominance heuristic. (A reachability guess mis-identifies the
+                // join when one arm jumps straight to it: the post-join tail is
+                // then common to both arms and may carry a smaller block id than
+                // the real join.) Loop headers are a different construct entirely.
+                let join = join_of(cfg, cur, tb, eb)?;
+                let (then, then_phi) = build_arm(cfg, tb, &ta, join, ret)?;
+                let (els, els_phi) = build_arm(cfg, eb, &ea, join, ret)?;
+                nodes.push(Node::If { cond, then, els, join, then_phi, els_phi });
                 cur = join;
             }
             Term::Unreachable => {
                 return Err("memoize_plan: unreachable terminator (unsupported)".into());
             }
         }
+    }
+}
+
+/// The join (merge) block of the forward conditional whose head is `cond_block`.
+/// Prefers the lowering's recorded `joins` map (authoritative — it mirrors the
+/// front-end's structured fallthrough); falls back to the dominance heuristic
+/// only for a head the map didn't record. A loop header is rejected outright:
+/// its "join" is the loop exit and treating it as an `if` would silently
+/// miscompile the loop body (loops are deferred to a later step).
+fn join_of(cfg: &Cfg, cond_block: BlockId, then_b: BlockId, else_b: BlockId) -> Result<BlockId, String> {
+    if matches!(cfg.block_kinds.get(&cond_block), Some(BlockKind::Loop)) {
+        return Err("memoize_plan: loop header (loops unsupported)".into());
+    }
+    match cfg.joins.get(&cond_block) {
+        Some(j) => Ok(*j),
+        None => find_join(cfg, cond_block, then_b, else_b),
+    }
+}
+
+/// Build one arm of a conditional. An arm that targets a block *other* than the
+/// join is a real region (recursed, stopping before the join); its own `Br` to
+/// the join carries any phi args. An arm whose target *is* the join is empty —
+/// the short-circuit shape — and the `CondBr` edge's args become phi assignments
+/// (`join.param = arg;`) emitted at the end of that branch.
+fn build_arm(
+    cfg: &Cfg,
+    arm: BlockId,
+    edge_args: &[Value],
+    join: BlockId,
+    ret: &mut Option<Value>,
+) -> Result<(Vec<Node>, Vec<(Value, Value)>), String> {
+    if arm == join {
+        let params = &cfg.block(join).params;
+        let phi: Vec<(Value, Value)> = params
+            .iter()
+            .copied()
+            .zip(edge_args.iter().copied())
+            .filter(|(p, a)| p != a)
+            .collect();
+        Ok((Vec::new(), phi))
+    } else {
+        if !edge_args.is_empty() {
+            // A non-join arm with block args is not a shape the structured
+            // lowering produces (the arm's single predecessor needs no phi).
+            return Err("memoize_plan: conditional edge args to a non-join arm (unsupported)".into());
+        }
+        Ok((build_region(cfg, arm, Some(join), ret)?, Vec::new()))
     }
 }
 
