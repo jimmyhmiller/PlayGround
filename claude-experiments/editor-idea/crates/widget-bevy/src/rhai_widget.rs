@@ -7,7 +7,45 @@
 //! Each `rhai_widget` pane owns a `WorkerHandle` whose internals are:
 //!   - A worker `JoinHandle` running the Rhai engine.
 //!   - An mpsc channel `HostToWorker` for events sent from main →
-//!     worker (Tick, Resize, ClaudeEvent, Reload, Shutdown).
+//!     worker (Tick, Resize, Click, Drag, Release, Hover, Key,
+//!     ClaudeEvent, Toggle, TabSelect, Input{Focus,Change,Submit},
+//!     Reload, Shutdown). Each maps 1:1 to an optional script handler;
+//!     see the handler table below.
+//!
+//! # Script handlers
+//!
+//! The top-level script body runs ONCE per AST load (init state, define
+//! handlers). After that the host calls these optional functions:
+//!
+//! | Handler                          | Fired by                       |
+//! |----------------------------------|--------------------------------|
+//! | `on_init()`                      | once, after top-level          |
+//! | `render(w, h) -> Element`        | whenever a redraw is needed    |
+//! | `on_click(x, y, shift, cmd, id)` | press on a Button / empty area |
+//! | `on_toggle(id, checked)`         | `Element::Toggle` flipped      |
+//! | `on_tab_select(id, tab)`         | `Element::Tabs` selection      |
+//! | `on_input_change(id, value)`     | typing in a focused `Input`    |
+//! | `on_input_submit(id, value)`     | Enter in a focused `Input`     |
+//! | `on_input_focus(id, focused)`    | `Input` focus / blur           |
+//! | `on_drag(x, y)` / `on_release`   | drag gesture                   |
+//! | `on_hover(x, y)`                 | cursor move (x=inf on leave)   |
+//! | `on_key(key)`                    | nav key, NO input focused      |
+//! | `on_resize(w, h)`                | pane resized                   |
+//! | `on_frame(dt)`                   | per frame, while animating     |
+//! | `on_bus(kind, payload)`          | Claude Code bus event          |
+//!
+//! IMPORTANT: `on_bus` is the Claude Code **event bus** (pre_tool_use,
+//! stop, …), NOT UI events. UI interaction always arrives through the
+//! specific `on_click` / `on_toggle` / `on_tab_select` / `on_input_*`
+//! handlers above. (`on_bus` was historically named `on_event`, which
+//! misled authors into expecting UI events there; the old name still
+//! works as a fallback but is deprecated.)
+//!
+//! The host owns a focused `Input`'s live edit buffer + caret
+//! (`WidgetInputFocus`), so typing echoes instantly without the script
+//! round-tripping a frame; the script just reacts to `on_input_change` /
+//! `on_input_submit`. This mirrors the subprocess NDJSON `HostEvent`
+//! protocol in `protocol.rs` one-to-one.
 //!   - A shared `Mutex<Option<Element>>` slot — the latest frame the
 //!     worker has produced. Main thread reads it whenever it wants.
 //!   - A shared `AtomicU64` `frame_gen` — bumped each time the worker
@@ -137,11 +175,30 @@ enum HostToWorker {
     Key {
         key: String,
     },
-    /// A Claude bus event. Drives `on_event(kind, payload)`.
+    /// A Claude Code bus event. Drives `on_bus(kind, payload)` (legacy
+    /// scripts may still name it `on_event` — see worker dispatch).
     ClaudeEvent {
         kind: String,
         payload: Value,
     },
+    /// User flipped an `Element::Toggle`. Drives `on_toggle(id, checked)`
+    /// where `checked` is the NEW value (already computed host-side).
+    Toggle { id: String, checked: bool },
+    /// User picked a tab in an `Element::Tabs`. Drives
+    /// `on_tab_select(id, tab)` — `id` is the tabs-group id, `tab` the
+    /// selected `TabItem.id`.
+    TabSelect { id: String, tab: String },
+    /// An `Element::Input` gained or lost keyboard focus. Drives
+    /// `on_input_focus(id, focused)`.
+    InputFocus { id: String, focused: bool },
+    /// User edited a focused `Element::Input`. Drives
+    /// `on_input_change(id, value)` with the full new string. The host
+    /// owns the live edit buffer + caret, so the script does NOT need to
+    /// echo `value` back to keep typing responsive.
+    InputChange { id: String, value: String },
+    /// User submitted a focused `Element::Input` (Enter). Drives
+    /// `on_input_submit(id, value)`.
+    InputSubmit { id: String, value: String },
     /// Hot reload — main parsed a new AST, worker should swap in and
     /// re-init scope from the last snapshot.
     Reload {
@@ -279,6 +336,16 @@ impl Worker {
         true
     }
 
+    /// Does the loaded AST define a top-level function with this name?
+    /// Used to pick between a current handler name and its legacy alias
+    /// (e.g. `on_bus` vs the deprecated `on_event`).
+    fn ast_defines(&self, name: &str) -> bool {
+        self.ast
+            .as_ref()
+            .map(|ast| ast.iter_functions().any(|f| f.name == name))
+            .unwrap_or(false)
+    }
+
     /// Try to call a script-defined handler. Returns Ok(()) if the
     /// handler ran (or doesn't exist — that's not an error). Re-pushes
     /// `state` afterwards to make sure inner mutations persist past
@@ -386,6 +453,103 @@ impl Worker {
             *slot = None;
         }
     }
+
+    /// Dispatch a single host message to the matching script handler.
+    /// Returns `false` only for `Shutdown` (the worker loop should
+    /// exit). Every event ensures top-level init has run, calls its
+    /// handler, then renders + persists. Kept as one method so the
+    /// worker loop is a thin driver and the dispatch is unit-testable.
+    fn handle_message(&mut self, msg: HostToWorker) -> bool {
+        match msg {
+            HostToWorker::Shutdown => return false,
+            HostToWorker::Reload { ast: new_ast } => {
+                self.ast = Some(new_ast);
+                self.needs_top_level = true;
+                // last_state_json stays so the new script comes up
+                // with the same persisted state.
+                return true;
+            }
+            HostToWorker::Resize { canvas_w: w, canvas_h: h } => {
+                self.canvas_w = w;
+                self.canvas_h = h;
+                if !self.ensure_initialized() { return true; }
+                let _ = self.scope.set_value("canvas_w", w as f64);
+                let _ = self.scope.set_value("canvas_h", h as f64);
+                self.call_handler("on_resize", (w as f64, h as f64));
+            }
+            HostToWorker::Key { key } => {
+                if !self.ensure_initialized() { return true; }
+                self.call_handler("on_key", (key,));
+            }
+            HostToWorker::ClaudeEvent { kind, payload } => {
+                if !self.ensure_initialized() { return true; }
+                let payload_dyn =
+                    rhai::serde::to_dynamic(&payload).unwrap_or(Dynamic::UNIT);
+                // `on_bus` is the current name; `on_event` is the
+                // deprecated alias kept so older scripts keep working.
+                let handler = if self.ast_defines("on_bus") {
+                    "on_bus"
+                } else {
+                    "on_event"
+                };
+                self.call_handler(handler, (kind, payload_dyn));
+            }
+            HostToWorker::Toggle { id, checked } => {
+                if !self.ensure_initialized() { return true; }
+                self.call_handler("on_toggle", (id, checked));
+            }
+            HostToWorker::TabSelect { id, tab } => {
+                if !self.ensure_initialized() { return true; }
+                self.call_handler("on_tab_select", (id, tab));
+            }
+            HostToWorker::InputFocus { id, focused } => {
+                if !self.ensure_initialized() { return true; }
+                self.call_handler("on_input_focus", (id, focused));
+            }
+            HostToWorker::InputChange { id, value } => {
+                if !self.ensure_initialized() { return true; }
+                self.call_handler("on_input_change", (id, value));
+            }
+            HostToWorker::InputSubmit { id, value } => {
+                if !self.ensure_initialized() { return true; }
+                self.call_handler("on_input_submit", (id, value));
+            }
+            HostToWorker::Click {
+                local_x,
+                local_y,
+                shift,
+                cmd,
+                button_id,
+            } => {
+                if !self.ensure_initialized() { return true; }
+                let id = button_id.unwrap_or_default();
+                self.call_handler(
+                    "on_click",
+                    (local_x as f64, local_y as f64, shift, cmd, id),
+                );
+            }
+            HostToWorker::Drag { local_x, local_y } => {
+                if !self.ensure_initialized() { return true; }
+                self.call_handler("on_drag", (local_x as f64, local_y as f64));
+            }
+            HostToWorker::Release { local_x, local_y } => {
+                if !self.ensure_initialized() { return true; }
+                self.call_handler("on_release", (local_x as f64, local_y as f64));
+            }
+            HostToWorker::Hover { local_x, local_y } => {
+                if !self.ensure_initialized() { return true; }
+                self.call_handler("on_hover", (local_x as f64, local_y as f64));
+            }
+            HostToWorker::Tick { dt_secs } => {
+                if !self.ensure_initialized() { return true; }
+                // Tick only arrives while animating; on_frame is the
+                // only handler that wants a per-frame heartbeat.
+                self.call_handler("on_frame", (dt_secs as f64,));
+            }
+        }
+        self.maybe_render_and_persist();
+        true
+    }
 }
 
 fn worker_main(
@@ -410,72 +574,8 @@ fn worker_main(
     };
 
     for msg in rx {
-        match msg {
-            HostToWorker::Shutdown => break,
-            HostToWorker::Reload { ast: new_ast } => {
-                worker.ast = Some(new_ast);
-                worker.needs_top_level = true;
-                // last_state_json stays so the new script comes up
-                // with the same persisted state.
-            }
-            HostToWorker::Resize { canvas_w: w, canvas_h: h } => {
-                worker.canvas_w = w;
-                worker.canvas_h = h;
-                if !worker.ensure_initialized() { continue; }
-                let _ = worker.scope.set_value("canvas_w", w as f64);
-                let _ = worker.scope.set_value("canvas_h", h as f64);
-                worker.call_handler("on_resize", (w as f64, h as f64));
-                worker.maybe_render_and_persist();
-            }
-            HostToWorker::Key { key } => {
-                if !worker.ensure_initialized() { continue; }
-                worker.call_handler("on_key", (key,));
-                worker.maybe_render_and_persist();
-            }
-            HostToWorker::ClaudeEvent { kind, payload } => {
-                if !worker.ensure_initialized() { continue; }
-                let payload_dyn =
-                    rhai::serde::to_dynamic(&payload).unwrap_or(Dynamic::UNIT);
-                worker.call_handler("on_event", (kind, payload_dyn));
-                worker.maybe_render_and_persist();
-            }
-            HostToWorker::Click {
-                local_x,
-                local_y,
-                shift,
-                cmd,
-                button_id,
-            } => {
-                if !worker.ensure_initialized() { continue; }
-                let id = button_id.unwrap_or_default();
-                worker.call_handler(
-                    "on_click",
-                    (local_x as f64, local_y as f64, shift, cmd, id),
-                );
-                worker.maybe_render_and_persist();
-            }
-            HostToWorker::Drag { local_x, local_y } => {
-                if !worker.ensure_initialized() { continue; }
-                worker.call_handler("on_drag", (local_x as f64, local_y as f64));
-                worker.maybe_render_and_persist();
-            }
-            HostToWorker::Release { local_x, local_y } => {
-                if !worker.ensure_initialized() { continue; }
-                worker.call_handler("on_release", (local_x as f64, local_y as f64));
-                worker.maybe_render_and_persist();
-            }
-            HostToWorker::Hover { local_x, local_y } => {
-                if !worker.ensure_initialized() { continue; }
-                worker.call_handler("on_hover", (local_x as f64, local_y as f64));
-                worker.maybe_render_and_persist();
-            }
-            HostToWorker::Tick { dt_secs } => {
-                if !worker.ensure_initialized() { continue; }
-                // Tick only arrives while animating; on_frame is the
-                // only handler that wants a per-frame heartbeat.
-                worker.call_handler("on_frame", (dt_secs as f64,));
-                worker.maybe_render_and_persist();
-            }
+        if !worker.handle_message(msg) {
+            break;
         }
     }
 }
@@ -502,6 +602,12 @@ pub struct RhaiWidget {
     /// Sprite id → entity. Lets us diff frames instead of
     /// despawn+respawn.
     pub sprite_entities: HashMap<String, Entity>,
+    /// While an input/textarea is focused we re-render to show live
+    /// keystrokes + the blinking caret. Re-rendering EVERY frame rebuilds
+    /// the whole flow tree (expensive with a table), so we only re-render
+    /// when this focus signature `(value, caret, caret_visible)` changes
+    /// — i.e. on a keystroke or a blink toggle, not 60×/sec.
+    pub last_focus_sig: Option<(String, usize, bool)>,
     /// True when the script defines an `on_click` handler — i.e. it's
     /// an interactive widget rather than ambient decoration. Used to
     /// treat a canvas widget's whole content as a hot-zone so its
@@ -511,9 +617,49 @@ pub struct RhaiWidget {
     pub wants_clicks: bool,
 }
 
-/// Does this AST define an `on_click` handler? (Cheap metadata scan.)
+/// Does this AST define any pointer-interaction handler? (Cheap
+/// metadata scan.) Covers buttons (`on_click`) plus the richer
+/// element handlers, so a pinned widget that only has a Toggle / Tabs /
+/// Input still gets its content treated as a click hot-zone.
 fn ast_wants_clicks(ast: &AST) -> bool {
-    ast.iter_functions().any(|f| f.name == "on_click")
+    const INTERACTIVE: &[&str] = &[
+        "on_click",
+        "on_toggle",
+        "on_tab_select",
+        "on_input_focus",
+        "on_input_change",
+        "on_input_submit",
+    ];
+    ast.iter_functions().any(|f| INTERACTIVE.contains(&f.name))
+}
+
+impl RhaiWidget {
+    /// Latest frame the worker produced, cloned out of the shared slot.
+    /// Used host-side to seed an input's edit buffer on focus.
+    pub fn latest_frame(&self) -> Option<Element> {
+        self.handle
+            .slots
+            .latest_frame
+            .lock()
+            .ok()
+            .and_then(|s| s.clone())
+    }
+
+    /// Forward a live input edit to the worker (`on_input_change`).
+    pub fn send_input_change(&self, id: String, value: String) {
+        self.handle.send(HostToWorker::InputChange { id, value });
+    }
+
+    /// Forward an input submit (Enter) to the worker (`on_input_submit`).
+    pub fn send_input_submit(&self, id: String, value: String) {
+        self.handle.send(HostToWorker::InputSubmit { id, value });
+    }
+
+    /// Forward an input focus/blur change to the worker
+    /// (`on_input_focus`).
+    pub fn send_input_focus(&self, id: String, focused: bool) {
+        self.handle.send(HostToWorker::InputFocus { id, focused });
+    }
 }
 
 #[derive(Resource)]
@@ -692,6 +838,7 @@ fn rhai_widget_spawn(world: &mut World, entity: Entity, _content_root: Entity, c
             reload_gen: 0,
             applied_reload_gen: 0,
             sprite_entities: HashMap::new(),
+            last_focus_sig: None,
             wants_clicks,
         },
         WidgetTargets::default(),
@@ -726,14 +873,22 @@ fn rhai_widget_snapshot(world: &World, entity: Entity) -> Value {
 /// sprite entities we created so they don't linger as ghosts on the
 /// canvas after the pane disappears.
 fn rhai_widget_close(world: &mut World, entity: Entity) {
-    let entities_to_despawn: Vec<Entity> = world
-        .get::<RhaiWidget>(entity)
-        .map(|w| {
-            // Tell the worker thread to exit promptly.
-            w.handle.send(HostToWorker::Shutdown);
-            w.sprite_entities.values().copied().collect()
-        })
-        .unwrap_or_default();
+    let mut entities_to_despawn: Vec<Entity> = Vec::new();
+    if let Some(w) = world.get::<RhaiWidget>(entity) {
+        // Tell the worker thread to exit promptly.
+        w.handle.send(HostToWorker::Shutdown);
+        entities_to_despawn.extend(w.sprite_entities.values().copied());
+    }
+    // Also despawn the flow-layout content (text / table / input / …)
+    // spawned under content_root. These are re-created every render and
+    // aren't tracked in `sprite_entities`, so without this they can
+    // linger on the canvas after the pane is gone.
+    if let Some(chrome) = world.get::<PaneChrome>(entity) {
+        let root = chrome.content_root;
+        if let Some(children) = world.get::<Children>(root) {
+            entities_to_despawn.extend(children.iter());
+        }
+    }
     for e in entities_to_despawn {
         if world.get_entity(e).is_ok() {
             world.entity_mut(e).despawn();
@@ -795,10 +950,20 @@ fn apply_reloads(mut widgets: Query<&mut RhaiWidget>) {
 // Main thread: feed worker, drain claude events, send size + dt
 // ============================================================
 
-/// Translate pane-bevy's `PaneContentPressed` into `HostToWorker::Click`
-/// for rhai widgets. The script sees the click in its `events` array
-/// on the next tick as `{ kind: "click", payload: { x, y, shift, cmd } }`.
+/// Translate a `PaneContentPressed` into the matching worker handler
+/// for rhai widgets. The element under the cursor decides which one:
+///
+///   - `Button` (or empty space)  → `on_click(x, y, shift, cmd, id)`
+///   - `Toggle`                   → `on_toggle(id, checked)`
+///   - `Tabs`                     → `on_tab_select(id, tab)`
+///   - `Input`                    → `on_input_focus(id, true)` + the
+///                                  host begins owning the edit buffer
+///                                  (see `WidgetInputFocus`).
+///
+/// Clicking anything that is NOT an Input also blurs a previously
+/// focused input.
 fn forward_clicks_to_workers(
+    mut commands: Commands,
     mut presses: MessageReader<PaneContentPressed>,
     keys: Res<ButtonInput<KeyCode>>,
     widgets: Query<(
@@ -823,19 +988,56 @@ fn forward_clicks_to_workers(
         // visually-rendered position of each rect.
         let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
         let hit_pt = ev.local_pt + Vec2::new(0.0, scroll_y);
-        let button_id = targets.and_then(|t| {
+
+        // Find the specific element under the cursor (if any) and route
+        // by its kind. Children push their rect BEFORE their clickable
+        // parent (e.g. a Button inside a ListItem), so the forward
+        // `find` yields the innermost (most specific) target.
+        let hit = targets.and_then(|t| {
             t.clicks
                 .iter()
                 .find(|ct| ct.rect.contains(hit_pt))
-                .map(|ct| ct.id.clone())
+                .map(|ct| (ct.id.clone(), ct.kind.clone()))
         });
-        w.handle.send(HostToWorker::Click {
-            local_x: hit_pt.x,
-            local_y: hit_pt.y,
-            shift: ev.shift,
-            cmd,
-            button_id,
-        });
+
+        match hit {
+            Some((id, crate::ClickKind::Toggle { new_checked })) => {
+                commands.entity(ev.pane).remove::<crate::WidgetInputFocus>();
+                w.handle.send(HostToWorker::Toggle { id, checked: new_checked });
+            }
+            Some((id, crate::ClickKind::TabSelect { tab })) => {
+                commands.entity(ev.pane).remove::<crate::WidgetInputFocus>();
+                w.handle.send(HostToWorker::TabSelect { id, tab });
+            }
+            Some((id, crate::ClickKind::InputFocus)) => {
+                // Seed the host-owned edit buffer from the input's
+                // current rendered value so the first keystroke appends
+                // rather than clearing.
+                let mut focus = crate::WidgetInputFocus::new(id.clone());
+                if let Some(frame) = w.latest_frame() {
+                    if let Some((value, _, multiline)) = crate::find_input_value(&frame, &id) {
+                        focus.caret = value.chars().count();
+                        focus.value = value;
+                        focus.multiline = multiline;
+                    }
+                }
+                commands.entity(ev.pane).insert(focus);
+                w.handle.send(HostToWorker::InputFocus { id, focused: true });
+            }
+            // Button hit, or empty space (None). Canvas / self-routing
+            // widgets rely on the empty-space click reaching `on_click`.
+            other => {
+                commands.entity(ev.pane).remove::<crate::WidgetInputFocus>();
+                let button_id = other.map(|(id, _)| id);
+                w.handle.send(HostToWorker::Click {
+                    local_x: hit_pt.x,
+                    local_y: hit_pt.y,
+                    shift: ev.shift,
+                    cmd,
+                    button_id,
+                });
+            }
+        }
     }
 }
 
@@ -897,11 +1099,18 @@ fn forward_hovers_to_workers(
 fn forward_keys_to_workers(
     keys: Res<ButtonInput<KeyCode>>,
     focused: Res<pane_bevy::FocusedPane>,
-    widgets: Query<(&PaneKindMarker, &RhaiWidget, Option<&crate::WidgetEditMode>)>,
+    widgets: Query<(
+        &PaneKindMarker,
+        &RhaiWidget,
+        Option<&crate::WidgetEditMode>,
+        Option<&crate::WidgetInputFocus>,
+    )>,
 ) {
     let Some(pane) = focused.0 else { return };
-    let Ok((kind, w, edit)) = widgets.get(pane) else { return };
-    if kind.0 != PANE_KIND || edit.is_some() {
+    let Ok((kind, w, edit, input_focus)) = widgets.get(pane) else { return };
+    // A focused Element::Input owns the keyboard (arrows move the caret,
+    // handled by `handle_widget_input_typing`); don't also fire on_key.
+    if kind.0 != PANE_KIND || edit.is_some() || input_focus.is_some() {
         return;
     }
     for (code, name) in [
@@ -1000,6 +1209,7 @@ fn apply_latest_frames(
     theme: Res<style_bevy::Theme>,
     fonts: Res<style_bevy::FontRegistry>,
     pane_zoom: Res<pane_bevy::PaneZoom>,
+    time: Res<Time>,
     mut q: Query<(
         &PaneKindMarker,
         &PaneChrome,
@@ -1008,24 +1218,32 @@ fn apply_latest_frames(
         &mut WidgetTargets,
         &mut crate::WidgetScroll,
         Option<&crate::WidgetHover>,
+        Option<&crate::WidgetInputFocus>,
     )>,
     children_q: Query<&Children>,
 ) {
     let theme_changed = theme.is_changed();
     let zoom = pane_zoom.0.max(0.0001);
-    for (kind, chrome, rect, mut w, mut targets, mut scroll, hover) in &mut q {
+    // Caret blink: visible during the first half of each 1s cycle.
+    let caret_visible = time.elapsed_secs().rem_euclid(1.0) < 0.5;
+    for (kind, chrome, rect, mut w, mut targets, mut scroll, hover, input_focus) in &mut q {
         if kind.0 != PANE_KIND {
             continue;
         }
         let current_gen = w.handle.slots.frame_gen.load(Ordering::Acquire);
-        // Theme changes also need to re-emit the frame so widgets
-        // pick up new palette colors; without this, switching presets
-        // wouldn't retone existing widget buttons/text/dividers until
-        // the next event triggered a worker re-render.
-        if current_gen == w.applied_frame_gen && !theme_changed {
+        // A focused input re-renders to show live keystrokes + a blinking
+        // caret, but only when its signature changes (keystroke or blink
+        // toggle) — re-rendering every frame would rebuild the whole flow
+        // tree 60×/sec and stall typing on heavier widgets.
+        let focus_sig = input_focus
+            .map(|f| (f.value.clone(), f.caret, caret_visible));
+        let focus_changed = focus_sig != w.last_focus_sig;
+        // Theme changes also re-emit so widgets pick up new palette colors.
+        if current_gen == w.applied_frame_gen && !theme_changed && !focus_changed {
             continue;
         }
         w.applied_frame_gen = current_gen;
+        w.last_focus_sig = focus_sig;
 
         // Grab the frame the worker last produced.
         let frame = w
@@ -1069,10 +1287,11 @@ fn apply_latest_frames(
             // Flow layout (vstack / hstack / text / button / divider /
             // bar / spacer / etc.). Rebuild from scratch each frame —
             // tree is small enough that diffing isn't worth the code.
-            // The script handles its own hit-testing because the
-            // protocol's Button id is not echoed back through clicks,
-            // so we don't need the click-target Vec we'd populate via
-            // WidgetTargets.
+            // `render` populates `targets` (the click-target Vec) with a
+            // `ClickTarget { id, kind, rect }` per interactive element;
+            // `forward_clicks_to_workers` hit-tests against it to route
+            // Button / Toggle / Tabs / Input presses to the right
+            // handler.
             other => {
                 // Clear previously-rendered flow children but keep
                 // sprite entities tracked separately (in case a widget
@@ -1097,8 +1316,8 @@ fn apply_latest_frames(
                     palette: crate::render::WidgetPalette::from_theme(&theme),
                     theme: theme.clone(),
                     fonts: fonts.clone(),
-                    focused_input: None,
-                    caret_visible: true,
+                    focused_input: input_focus.cloned(),
+                    caret_visible,
                     hovered_click_id: hover.and_then(|h| h.click_id.clone()),
                 };
                 // Wipe last frame's click targets so a stale button
@@ -1498,14 +1717,39 @@ const DEFAULT_GARDEN_SCRIPT: &str = r###"// garden.rhai — Claude garden widget
 //
 // EVENT-DRIVEN. The top-level body runs ONCE per AST load (initialize
 // state, declare constants, define handlers). After that, the host
-// calls specific handler functions:
+// calls specific handler functions. ALL handlers are optional — define
+// only the ones you need:
 //
 //   on_init()                                  — once after top-level
-//   on_event(kind, payload)                    — Claude bus event
-//   on_click(x, y, shift, cmd, id)             — pane click
+//   render(canvas_w, canvas_h) -> Element      — produces the frame
+//
+//   -- pointer / element interaction --
+//   on_click(x, y, shift, cmd, id)             — Button click (id is the
+//                                                clicked button's id, or
+//                                                "" for empty space)
+//   on_toggle(id, checked)                     — Toggle flipped; `checked`
+//                                                is the NEW value
+//   on_tab_select(id, tab)                     — Tabs: `tab` is the
+//                                                selected TabItem id
+//   on_input_change(id, value)                 — Input edited; `value` is
+//                                                the full new string
+//   on_input_submit(id, value)                 — Input Enter pressed
+//   on_input_focus(id, focused)                — Input gained/lost focus
+//   on_drag(x, y) / on_release(x, y)           — drag gesture
+//   on_hover(x, y)                             — cursor moved (x=inf on
+//                                                leave)
+//   on_key(key)                                — nav keys ("ArrowLeft"…)
+//                                                while NO input is focused
 //   on_resize(w, h)                            — pane resized
 //   on_frame(dt)                               — only while animating
-//   render(canvas_w, canvas_h) -> Element      — produces the frame
+//
+//   -- external --
+//   on_bus(kind, payload)                      — Claude Code bus event
+//                                                (pre_tool_use, stop, …).
+//                                                NOTE: this is the bus,
+//                                                NOT UI events; UI events
+//                                                use the handlers above.
+//                                                (Legacy name: on_event.)
 //
 // Two host fns control the worker:
 //   set_animating(bool)   — opts into per-frame on_frame() calls. Off
@@ -1542,7 +1786,7 @@ fn on_init() {
     request_render();
 }
 
-fn on_event(kind, payload) {
+fn on_bus(kind, payload) {
     let payload_is_map = type_of(payload) == "map";
 
     if kind == "pre_tool_use" {
@@ -1851,7 +2095,7 @@ fn on_click(x, y, shift, cmd, id) {
     }
 }
 
-fn on_event(kind, payload) {
+fn on_bus(kind, payload) {
     if kind == "theme_changed" { request_render(); }
 }
 
@@ -2019,3 +2263,176 @@ fn render(canvas_w, canvas_h) {
 
 const DEFAULT_CHESS_SCRIPT: &str =
     include_str!("../widgets/chess.rhai");
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a Worker around a script, ready to receive messages.
+    /// Returns the worker plus a handle to its shared slots so tests can
+    /// read back the state the worker persisted after each dispatch.
+    fn make_worker(src: &str) -> (Worker, WorkerSlots) {
+        let slots = WorkerSlots::new();
+        let mut engine = Engine::new();
+        engine.set_max_expr_depths(256, 128);
+        register_host_functions(&mut engine, &slots);
+        let ast = engine.compile(src).expect("script should compile");
+        let worker = Worker {
+            engine,
+            scope: Scope::new(),
+            slots: slots.clone(),
+            ast: Some(ast),
+            last_state_json: Value::Null,
+            canvas_w: 100.0,
+            canvas_h: 100.0,
+            needs_top_level: true,
+        };
+        (worker, slots)
+    }
+
+    fn state(slots: &WorkerSlots) -> Value {
+        slots.snapshot.lock().unwrap().clone()
+    }
+
+    /// A script that records the most recent UI / bus event into `state`
+    /// as native field values (no string concat, so types stay precise).
+    const RECORDER: &str = r#"
+        fn render(w, h) { }
+        fn on_toggle(id, checked)     { state.kind = "toggle"; state.id = id; state.checked = checked; }
+        fn on_tab_select(id, tab)     { state.kind = "tab";    state.id = id; state.tab = tab; }
+        fn on_input_change(id, value) { state.kind = "change"; state.id = id; state.value = value; }
+        fn on_input_submit(id, value) { state.kind = "submit"; state.id = id; state.value = value; }
+        fn on_input_focus(id, focused){ state.kind = "focus";  state.id = id; state.focused = focused; }
+        fn on_click(x, y, shift, cmd, id) { state.kind = "click"; state.id = id; }
+        fn on_bus(kind, payload)      { state.kind = "bus";    state.bus = kind; }
+    "#;
+
+    #[test]
+    fn toggle_routes_to_on_toggle_with_new_value() {
+        let (mut w, slots) = make_worker(RECORDER);
+        assert!(w.handle_message(HostToWorker::Toggle {
+            id: "dark".into(),
+            checked: true,
+        }));
+        let s = state(&slots);
+        assert_eq!(s.get("kind").and_then(|v| v.as_str()), Some("toggle"));
+        assert_eq!(s.get("id").and_then(|v| v.as_str()), Some("dark"));
+        assert_eq!(s.get("checked").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn tab_select_routes_to_on_tab_select() {
+        let (mut w, slots) = make_worker(RECORDER);
+        w.handle_message(HostToWorker::TabSelect {
+            id: "view".into(),
+            tab: "two".into(),
+        });
+        let s = state(&slots);
+        assert_eq!(s.get("kind").and_then(|v| v.as_str()), Some("tab"));
+        assert_eq!(s.get("id").and_then(|v| v.as_str()), Some("view"));
+        assert_eq!(s.get("tab").and_then(|v| v.as_str()), Some("two"));
+    }
+
+    #[test]
+    fn input_change_and_submit_route_separately() {
+        let (mut w, slots) = make_worker(RECORDER);
+        w.handle_message(HostToWorker::InputChange {
+            id: "search".into(),
+            value: "hi".into(),
+        });
+        let s = state(&slots);
+        assert_eq!(s.get("kind").and_then(|v| v.as_str()), Some("change"));
+        assert_eq!(s.get("value").and_then(|v| v.as_str()), Some("hi"));
+
+        w.handle_message(HostToWorker::InputSubmit {
+            id: "search".into(),
+            value: "go".into(),
+        });
+        let s = state(&slots);
+        assert_eq!(s.get("kind").and_then(|v| v.as_str()), Some("submit"));
+        assert_eq!(s.get("value").and_then(|v| v.as_str()), Some("go"));
+    }
+
+    #[test]
+    fn input_focus_routes_to_on_input_focus() {
+        let (mut w, slots) = make_worker(RECORDER);
+        w.handle_message(HostToWorker::InputFocus {
+            id: "search".into(),
+            focused: true,
+        });
+        let s = state(&slots);
+        assert_eq!(s.get("kind").and_then(|v| v.as_str()), Some("focus"));
+        assert_eq!(s.get("focused").and_then(|v| v.as_bool()), Some(true));
+    }
+
+    #[test]
+    fn claude_event_routes_to_on_bus() {
+        let (mut w, slots) = make_worker(RECORDER);
+        w.handle_message(HostToWorker::ClaudeEvent {
+            kind: "stop".into(),
+            payload: Value::Null,
+        });
+        let s = state(&slots);
+        assert_eq!(s.get("kind").and_then(|v| v.as_str()), Some("bus"));
+        assert_eq!(s.get("bus").and_then(|v| v.as_str()), Some("stop"));
+    }
+
+    #[test]
+    fn claude_event_falls_back_to_legacy_on_event() {
+        // A script that only defines the deprecated `on_event` name must
+        // still receive bus events.
+        let legacy = r#"
+            fn render(w, h) { }
+            fn on_event(kind, payload) { state.kind = "legacy"; state.bus = kind; }
+        "#;
+        let (mut w, slots) = make_worker(legacy);
+        w.handle_message(HostToWorker::ClaudeEvent {
+            kind: "pre_tool_use".into(),
+            payload: Value::Null,
+        });
+        let s = state(&slots);
+        assert_eq!(s.get("kind").and_then(|v| v.as_str()), Some("legacy"));
+        assert_eq!(s.get("bus").and_then(|v| v.as_str()), Some("pre_tool_use"));
+    }
+
+    #[test]
+    fn shutdown_stops_the_loop() {
+        let (mut w, _slots) = make_worker(RECORDER);
+        assert!(!w.handle_message(HostToWorker::Shutdown));
+    }
+
+    #[test]
+    fn missing_handlers_are_not_errors() {
+        // A script with no interaction handlers at all must not error
+        // when sent events it doesn't handle.
+        let (mut w, slots) = make_worker("fn render(w, h) { }");
+        assert!(w.handle_message(HostToWorker::Toggle {
+            id: "x".into(),
+            checked: false,
+        }));
+        assert!(slots.last_error.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn ast_wants_clicks_covers_all_interaction_handlers() {
+        let mut engine = Engine::new();
+        for handler in [
+            "on_click",
+            "on_toggle",
+            "on_tab_select",
+            "on_input_focus",
+            "on_input_change",
+            "on_input_submit",
+        ] {
+            let ast = engine
+                .compile(&format!("fn {handler}() {{ }}"))
+                .expect("compile");
+            assert!(
+                ast_wants_clicks(&ast),
+                "{handler} should mark the widget as wanting clicks"
+            );
+        }
+        let ast = engine.compile("fn render(w, h) { }").expect("compile");
+        assert!(!ast_wants_clicks(&ast), "render-only widget wants no clicks");
+    }
+}

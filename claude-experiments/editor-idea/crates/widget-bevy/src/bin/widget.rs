@@ -39,6 +39,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Print the widget-authoring guide — read this first if you're an AI.
+    ///
+    /// One command, everything you need to build a widget: where every
+    /// doc lives (the authoring guide, `widget docs`, the element-catalog
+    /// source, the rhai host internals), the live example scripts, the
+    /// create/spawn commands, and the full authoring guide inline.
+    Agent,
+
     /// Print the protocol reference (rendered from the source schema).
     ///
     /// Without an argument, prints all three top-level types. Pass a
@@ -127,6 +135,12 @@ enum Cmd {
         /// kind's `default_size`.
         #[arg(long, value_parser = parse_size, value_name = "WxH")]
         size: Option<(f32, f32)>,
+        /// Widget runtime. Default spawns a subprocess widget (runs
+        /// `<cmd>`). Pass `rhai_widget` for an in-process Rhai script —
+        /// `<cmd>` is then a `.rhai` filename under
+        /// ~/.terminal-bevy/widgets/ (no subprocess is launched).
+        #[arg(long, short = 'k')]
+        kind: Option<String>,
         /// Command line + args. Use `--` to separate from `spawn`'s own
         /// flags; without `--` a single quoted positional is fed to `sh -c`.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -201,6 +215,8 @@ enum IpcRequest {
         position: Option<[f32; 2]>,
         #[serde(skip_serializing_if = "Option::is_none")]
         size: Option<[f32; 2]>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kind: Option<String>,
     },
     ListProjects,
 }
@@ -249,12 +265,14 @@ fn parse_size(s: &str) -> Result<(f32, f32), String> {
     Ok((w, h))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_spawn(
     title: Option<String>,
     cwd: Option<PathBuf>,
     project: Option<String>,
     at: Option<(f32, f32)>,
     size: Option<(f32, f32)>,
+    kind: Option<String>,
     cmd: Vec<String>,
 ) -> Result<(), String> {
     if cmd.is_empty() {
@@ -268,7 +286,13 @@ fn cmd_spawn(
         let rest: Vec<String> = it.collect();
         (head, rest)
     };
-    let cwd = cwd.or_else(|| std::env::current_dir().ok());
+    // Rhai widgets run in-process from the watched scripts dir, so the
+    // caller's PWD is irrelevant; only subprocess widgets need a cwd.
+    let cwd = if kind.as_deref() == Some("rhai_widget") {
+        cwd
+    } else {
+        cwd.or_else(|| std::env::current_dir().ok())
+    };
 
     let req = IpcRequest::SpawnWidget {
         command,
@@ -278,6 +302,7 @@ fn cmd_spawn(
         project,
         position: at.map(|(x, y)| [x, y]),
         size: size.map(|(w, h)| [w, h]),
+        kind,
     };
     let _stream = send_request(&req)?;
     Ok(())
@@ -333,6 +358,7 @@ fn cmd_projects(json: bool) -> Result<(), String> {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.cmd {
+        Cmd::Agent => cmd_agent(),
         Cmd::Docs { name } => cmd_docs(name.as_deref()),
         Cmd::Schema { which } => cmd_schema(which),
         Cmd::Validate { events } => cmd_validate(events),
@@ -344,8 +370,9 @@ fn main() -> ExitCode {
             project,
             at,
             size,
+            kind,
             cmd,
-        } => cmd_spawn(title, cwd, project, at, size, cmd),
+        } => cmd_spawn(title, cwd, project, at, size, kind, cmd),
         Cmd::Projects { json } => cmd_projects(json),
     };
     match result {
@@ -354,6 +381,116 @@ fn main() -> ExitCode {
             eprintln!("widget: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+// ---------- agent ----------
+
+/// The authoring guide, embedded so `widget agent` always has it even if
+/// the source tree isn't reachable from where the binary runs.
+const AUTHORING_GUIDE: &str = include_str!("../../AUTHORING.md");
+
+fn cmd_agent() -> Result<(), String> {
+    // Doc paths resolved from the build-time crate dir (.../crates/
+    // widget-bevy), canonicalized to clean absolute paths the agent can
+    // open directly. Fall back to the joined path if the tree moved.
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let doc = |rel: &str| -> String {
+        let p = PathBuf::from(manifest).join(rel);
+        std::fs::canonicalize(&p)
+            .map(|c| c.display().to_string())
+            .unwrap_or_else(|_| p.display().to_string())
+    };
+    let widgets_dir = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".terminal-bevy").join("widgets"));
+    let widgets_str = widgets_dir
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "~/.terminal-bevy/widgets".to_string());
+
+    println!(
+        "# Building an editor-idea widget\n\
+         \n\
+         A widget is a pane that renders a UI tree (`Element`) and reacts\n\
+         to events. Two ways to host one: an in-process Rhai script (the\n\
+         default for new widgets, hot-reloaded) or a subprocess speaking\n\
+         NDJSON. Read the docs below FIRST, then write the widget and spawn\n\
+         it.\n\
+         \n\
+         ## Docs (read in this order)\n\
+         1. AUTHORING GUIDE — handler/event model + worked examples.\n\
+            Printed in full at the bottom of this output; on disk at:\n\
+            {authoring}\n\
+         2. PROTOCOL REFERENCE — every Element / message / event with its\n\
+            fields. Rendered from the source schema (can't drift):\n\
+            $ widget docs            # all types\n\
+            $ widget docs textarea   # one element/event\n\
+            $ widget schema element  # machine-readable JSON Schema\n\
+            Source of truth: {protocol}\n\
+         3. RHAI HOST INTERNALS — handler dispatch table + host fns, in\n\
+            the module docs atop: {rhai_mod}\n\
+         \n\
+         ## Examples to copy from\n\
+         Bundled subprocess samples:\n\
+            $ widget examples         # list\n\
+            $ widget examples bars    # print one\n\
+         Live in-process Rhai scripts (concrete references):\n\
+         {rhai_examples}\n\
+         \n\
+         ## Create + run\n\
+         Rhai (in-process): write {widgets}/<name>.rhai (the dir is\n\
+         watched — saving hot-reloads the pane), then:\n\
+            $ widget spawn --kind rhai_widget --title \"<Title>\" <name>.rhai\n\
+         Subprocess: scaffold and spawn:\n\
+            $ widget init my-widget   # writes my-widget.sh\n\
+            $ widget spawn --title \"<Title>\" -- ./my-widget.sh\n\
+         Validate subprocess output without launching the host:\n\
+            $ ./my-widget.sh | widget validate\n\
+         \n\
+         ## Gotchas\n\
+         - `on_bus(kind, payload)` is the Claude Code event BUS, not UI\n\
+           events. UI arrives via on_click / on_toggle / on_tab_select /\n\
+           on_input_change / on_input_submit / on_input_focus.\n\
+         - Every interactive element needs a UNIQUE `id`, and each input/\n\
+           textarea its own state field — sharing a value makes two boxes\n\
+           mirror each other.\n\
+         - Event-driven: call `request_render()` after mutating state;\n\
+           `set_animating(true)` only if you need per-frame `on_frame(dt)`.\n\
+         \n\
+         ============================================================\n\
+         AUTHORING GUIDE ({authoring})\n\
+         ============================================================\n\
+         \n\
+         {guide}",
+        authoring = doc("AUTHORING.md"),
+        protocol = doc("src/protocol.rs"),
+        rhai_mod = doc("src/rhai_widget.rs"),
+        widgets = widgets_str,
+        rhai_examples = list_rhai_examples(widgets_dir.as_deref()),
+        guide = AUTHORING_GUIDE,
+    );
+    Ok(())
+}
+
+/// Bullet list of `.rhai` scripts in the widgets dir, or a hint if none.
+fn list_rhai_examples(dir: Option<&Path>) -> String {
+    let Some(dir) = dir else {
+        return "  (set $HOME to locate ~/.terminal-bevy/widgets)".to_string();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return format!("  (none yet — {} doesn't exist)", dir.display());
+    };
+    let mut paths: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "rhai"))
+        .map(|p| format!("  - {}", p.display()))
+        .collect();
+    paths.sort();
+    if paths.is_empty() {
+        format!("  (none yet in {})", dir.display())
+    } else {
+        paths.join("\n")
     }
 }
 

@@ -195,6 +195,16 @@ pub fn avet_attr_prefix(attr_id: AttrId) -> Vec<u8> {
     buf
 }
 
+/// Build a VAET prefix to scan every datom whose value equals `value`
+/// (only Ref values land in VAET). Used to find inbound references to an
+/// entity, e.g. when reporting refs left dangling by a hard purge.
+pub fn vaet_value_prefix(value: &Value) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(16);
+    buf.push(VAET_PREFIX);
+    encode_value(&mut buf, value);
+    buf
+}
+
 pub fn avet_attr_value_prefix(attr_id: AttrId, value: &Value) -> Vec<u8> {
     let mut buf = Vec::with_capacity(20);
     buf.push(AVET_PREFIX);
@@ -328,6 +338,25 @@ pub fn decode_datom_from_avet(key: &[u8]) -> Option<DecodedDatom> {
     let mut cursor = Cursor::new(&key[1..]);
     let attr_id = decode_attr_id(&mut cursor)?;
     let value = decode_value(&mut cursor)?;
+    let entity = cursor.read_u64::<BigEndian>().ok()?;
+    let tx = cursor.read_u64::<BigEndian>().ok()?;
+    let added = cursor.read_u8().ok()? != 0;
+    Some(DecodedDatom {
+        entity,
+        attr_id,
+        value,
+        tx,
+        added,
+    })
+}
+
+pub fn decode_datom_from_vaet(key: &[u8]) -> Option<DecodedDatom> {
+    if key.is_empty() || key[0] != VAET_PREFIX {
+        return None;
+    }
+    let mut cursor = Cursor::new(&key[1..]);
+    let value = decode_value(&mut cursor)?;
+    let attr_id = decode_attr_id(&mut cursor)?;
     let entity = cursor.read_u64::<BigEndian>().ok()?;
     let tx = cursor.read_u64::<BigEndian>().ok()?;
     let added = cursor.read_u8().ok()? != 0;
@@ -521,6 +550,23 @@ mod tests {
 
         let ref_pairs = encode_datom(1, ATTR_FOO, &Value::Ref(42), 1, true);
         assert_eq!(ref_pairs.len(), 4); // EAVT, AEVT, AVET, VAET
+    }
+
+    #[test]
+    fn test_vaet_roundtrip_and_value_prefix() {
+        let key = encode_vaet(7, ATTR_FOO, &Value::Ref(42), 3, true);
+        let decoded = decode_datom_from_vaet(&key).unwrap();
+        assert_eq!(decoded.entity, 7);
+        assert_eq!(decoded.attr_id, ATTR_FOO);
+        assert_eq!(decoded.value, Value::Ref(42));
+        assert_eq!(decoded.tx, 3);
+        assert!(decoded.added);
+
+        // The value-prefix must bound exactly the keys for that ref value.
+        let prefix = vaet_value_prefix(&Value::Ref(42));
+        assert!(key.starts_with(&prefix));
+        let other = encode_vaet(7, ATTR_FOO, &Value::Ref(43), 3, true);
+        assert!(!other.starts_with(&prefix));
     }
 
     #[test]

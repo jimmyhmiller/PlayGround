@@ -45,6 +45,16 @@ pub const TOGGLE_KNOB_PAD: f32 = 2.0;
 pub const INPUT_HEIGHT: f32 = 26.0;
 pub const INPUT_PAD_X: f32 = 8.0;
 
+// TextArea: symmetric vertical padding around the text block. Total box
+// height = rows * line_height + 2 * TEXTAREA_PAD_Y (see layout.rs).
+pub const TEXTAREA_PAD_Y: f32 = 6.0;
+
+// Table cell padding (inside each grid cell).
+pub const TABLE_CELL_PAD_X: f32 = 8.0;
+pub const TABLE_CELL_PAD_Y: f32 = 5.0;
+// Gap between table columns.
+pub const TABLE_COL_GAP: f32 = 12.0;
+
 // Tabs row.
 pub const TAB_PAD_X: f32 = 10.0;
 pub const TAB_PAD_Y: f32 = 6.0;
@@ -226,7 +236,7 @@ pub fn render(
     max_w: f32,
     z: f32,
 ) -> Vec2 {
-    let mut laid = crate::layout::build_tree(el);
+    let mut laid = crate::layout::build_tree(el, &ctx.metrics);
     crate::layout::compute(&mut laid, max_w, f32::INFINITY, &ctx.metrics);
     let root_layout = laid.layout(laid.root);
     let root_origin = origin
@@ -431,6 +441,23 @@ fn render_node(
             ..
         } => render_input_at(
             commands, ctx, targets, id, value, placeholder, *focused, origin, size, z,
+        ),
+        Element::TextArea {
+            id,
+            value,
+            placeholder,
+            focused,
+            ..
+        } => render_textarea_at(
+            commands, ctx, targets, id, value, placeholder, *focused, origin, size, z,
+        ),
+        Element::Table {
+            columns,
+            rows,
+            zebra,
+            ..
+        } => render_table_at(
+            commands, ctx, laid, node_id, columns, rows, *zebra, origin, size, z,
         ),
         // Canvas renders only at the top level via render_canvas_items.
         // Nested Canvas inside flow layout becomes a 0-size leaf.
@@ -1214,45 +1241,73 @@ fn render_input_at(
         z,
     );
 
-    // Text or placeholder.
-    let (txt, txt_color) = if display_value.is_empty() && !is_focused {
-        (placeholder.to_string(), ctx.palette.text_muted)
-    } else if display_value.is_empty() {
-        (String::new(), ctx.palette.text)
-    } else {
-        (display_value.clone(), ctx.palette.text)
-    };
     let line_h = line_height(DEFAULT_FONT_SIZE);
     let text_y = (size.y - line_h) * 0.5;
-    if !txt.is_empty() {
-        commands.spawn((
-            ChildOf(ctx.content_root),
-            Text2d::new(txt),
-            TextFont {
-                font: ctx.font.clone(),
-                font_size: DEFAULT_FONT_SIZE,
-                ..default()
-            },
-            LineHeight::Px(line_h),
-            TextColor(txt_color),
-            Anchor::TOP_LEFT,
-            bevy::text::TextLayout::new_with_no_wrap(),
-            Transform::from_xyz(origin.x + INPUT_PAD_X, -(origin.y + text_y), z + 0.01),
-        ));
-    }
-    if show_caret {
-        let prefix: String = display_value.chars().take(caret_pos).collect();
-        let caret_x = origin.x + INPUT_PAD_X + ctx.metrics.measure(&prefix, DEFAULT_FONT_SIZE);
-        commands.spawn((
-            ChildOf(ctx.content_root),
-            Sprite {
-                color: accent,
-                custom_size: Some(Vec2::new(1.5, line_h)),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(caret_x, -(origin.y + text_y), z + 0.02),
-        ));
+    let content_w = (size.x - 2.0 * INPUT_PAD_X).max(0.0);
+
+    if display_value.is_empty() && !is_focused {
+        // Placeholder (muted), shown only when empty and unfocused.
+        if !placeholder.is_empty() {
+            commands.spawn((
+                ChildOf(ctx.content_root),
+                Text2d::new(placeholder.to_string()),
+                TextFont {
+                    font: ctx.font.clone(),
+                    font_size: DEFAULT_FONT_SIZE,
+                    ..default()
+                },
+                LineHeight::Px(line_h),
+                TextColor(ctx.palette.text_muted),
+                Anchor::TOP_LEFT,
+                bevy::text::TextLayout::new_with_no_wrap(),
+                bevy::text::TextBounds { width: Some(content_w), height: None },
+                pane_bevy::PaneContentNoClip,
+                Transform::from_xyz(origin.x + INPUT_PAD_X, -(origin.y + text_y), z + 0.01),
+            ));
+        }
+    } else {
+        // Single line: render only the character window that fits the box
+        // (scrolled to keep the caret visible) so a long value never
+        // overflows into sibling elements. Monospace widget font, so a
+        // fixed char width maps chars↔pixels exactly.
+        let char_w = ctx.metrics.char_width(DEFAULT_FONT_SIZE).max(1.0);
+        let max_chars = (content_w / char_w).floor().max(1.0) as usize;
+        let chars: Vec<char> = display_value.chars().collect();
+        let caret_pos = caret_pos.min(chars.len());
+        let start = caret_pos.saturating_sub(max_chars);
+        let end = (start + max_chars).min(chars.len());
+        let visible: String = chars[start..end].iter().collect();
+        if !visible.is_empty() {
+            commands.spawn((
+                ChildOf(ctx.content_root),
+                Text2d::new(visible),
+                TextFont {
+                    font: ctx.font.clone(),
+                    font_size: DEFAULT_FONT_SIZE,
+                    ..default()
+                },
+                LineHeight::Px(line_h),
+                TextColor(ctx.palette.text),
+                Anchor::TOP_LEFT,
+                bevy::text::TextLayout::new_with_no_wrap(),
+                bevy::text::TextBounds { width: Some(content_w), height: None },
+                pane_bevy::PaneContentNoClip,
+                Transform::from_xyz(origin.x + INPUT_PAD_X, -(origin.y + text_y), z + 0.01),
+            ));
+        }
+        if show_caret {
+            let caret_x = origin.x + INPUT_PAD_X + (caret_pos - start) as f32 * char_w;
+            commands.spawn((
+                ChildOf(ctx.content_root),
+                Sprite {
+                    color: accent,
+                    custom_size: Some(Vec2::new(1.5, line_h)),
+                    ..default()
+                },
+                Anchor::TOP_LEFT,
+                Transform::from_xyz(caret_x, -(origin.y + text_y), z + 0.02),
+            ));
+        }
     }
 
     targets.clicks.push(ClickTarget {
@@ -1260,4 +1315,378 @@ fn render_input_at(
         kind: ClickKind::InputFocus,
         rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
     });
+}
+
+/// Multi-line variant of [`render_input_at`]. Renders the value with
+/// hard newlines (no soft wrap), top-aligned, with a line-aware caret.
+/// Like `Input`, while the host owns focus (`ctx.focused_input`) the
+/// displayed text and caret come from that live buffer.
+#[allow(clippy::too_many_arguments)]
+fn render_textarea_at(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
+    id: &str,
+    value: &str,
+    placeholder: &str,
+    focused_attr: bool,
+    origin: Vec2,
+    size: Vec2,
+    z: f32,
+) {
+    let focus_match = ctx.focused_input.as_ref().filter(|f| f.id == id);
+    let is_focused = focus_match.is_some() || focused_attr;
+    let display_value = match focus_match {
+        Some(f) => f.value.clone(),
+        None => value.to_string(),
+    };
+    let caret_pos = focus_match.map(|f| f.caret).unwrap_or(0);
+    let show_caret = focus_match.is_some() && ctx.caret_visible;
+
+    let radius = ctx.resolve_f32("radius_sm").unwrap_or(4.0);
+    let bg = ctx
+        .resolve_color("input_bg")
+        .unwrap_or(Color::srgb(0.10, 0.11, 0.13));
+    let accent = ctx
+        .resolve_color("accent")
+        .unwrap_or(Color::srgb(0.42, 0.62, 0.92));
+    let border_color = if is_focused {
+        accent
+    } else {
+        ctx.palette.divider
+    };
+    paint_rounded_panel(
+        commands,
+        ctx,
+        origin,
+        size,
+        radius,
+        bg,
+        border_color,
+        1.0,
+        Color::srgba(0.0, 0.0, 0.0, 0.0),
+        0.0,
+        0.0,
+        z,
+    );
+
+    let line_h = line_height(DEFAULT_FONT_SIZE);
+    let avail = (size.x - 2.0 * INPUT_PAD_X).max(1.0);
+
+    if display_value.is_empty() && !is_focused {
+        // Placeholder: short, render as-is on the first line.
+        if !placeholder.is_empty() {
+            commands.spawn((
+                ChildOf(ctx.content_root),
+                Text2d::new(placeholder.to_string()),
+                TextFont {
+                    font: ctx.font.clone(),
+                    font_size: DEFAULT_FONT_SIZE,
+                    ..default()
+                },
+                LineHeight::Px(line_h),
+                TextColor(ctx.palette.text_muted),
+                Anchor::TOP_LEFT,
+                bevy::text::TextLayout::new_with_no_wrap(),
+                Transform::from_xyz(
+                    origin.x + INPUT_PAD_X,
+                    -(origin.y + TEXTAREA_PAD_Y),
+                    z + 0.01,
+                ),
+            ));
+        }
+    } else {
+        // Word-wrap to the box width (honoring hard newlines), then we
+        // can render the wrapped text and place the caret against the
+        // same visual layout. We pre-wrap ourselves (rather than letting
+        // the text engine wrap) so the caret math matches exactly.
+        let chars: Vec<char> = display_value.chars().collect();
+        let visual = wrap_visual_lines(&chars, &ctx.metrics, avail);
+        let display: String = visual
+            .iter()
+            .map(|&(s, e)| chars[s..e].iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !display.is_empty() {
+            commands.spawn((
+                ChildOf(ctx.content_root),
+                Text2d::new(display),
+                TextFont {
+                    font: ctx.font.clone(),
+                    font_size: DEFAULT_FONT_SIZE,
+                    ..default()
+                },
+                LineHeight::Px(line_h),
+                TextColor(ctx.palette.text),
+                Anchor::TOP_LEFT,
+                bevy::text::TextLayout::new_with_no_wrap(),
+                Transform::from_xyz(
+                    origin.x + INPUT_PAD_X,
+                    -(origin.y + TEXTAREA_PAD_Y),
+                    z + 0.01,
+                ),
+            ));
+        }
+
+        if show_caret {
+            let caret_pos = caret_pos.min(chars.len());
+            // Locate the visual line holding the caret. When the caret
+            // sits exactly at a soft-wrap boundary, it belongs at the
+            // start of the next visual line.
+            let mut cl = 0usize;
+            let mut col_start = 0usize;
+            for (li, &(s, e)) in visual.iter().enumerate() {
+                cl = li;
+                col_start = s;
+                let is_last = li + 1 == visual.len();
+                let next_soft = visual.get(li + 1).map(|&(ns, _)| ns == e).unwrap_or(false);
+                if caret_pos < e || (caret_pos == e && (is_last || !next_soft)) {
+                    break;
+                }
+            }
+            let prefix: String = chars[col_start..caret_pos].iter().collect();
+            let caret_x = origin.x + INPUT_PAD_X + ctx.metrics.measure(&prefix, DEFAULT_FONT_SIZE);
+            let caret_y = origin.y + TEXTAREA_PAD_Y + cl as f32 * line_h;
+            commands.spawn((
+                ChildOf(ctx.content_root),
+                Sprite {
+                    color: accent,
+                    custom_size: Some(Vec2::new(1.5, line_h)),
+                    ..default()
+                },
+                Anchor::TOP_LEFT,
+                Transform::from_xyz(caret_x, -caret_y, z + 0.02),
+            ));
+        }
+    }
+
+    targets.clicks.push(ClickTarget {
+        id: id.to_string(),
+        kind: ClickKind::InputFocus,
+        rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
+    });
+}
+
+/// Word-wrap `chars` into visual lines that each fit within `avail`
+/// pixels, honoring hard newlines. Greedy: breaks at the last space that
+/// fits; for a single word longer than the line, breaks mid-word.
+/// Returns each visual line's char range `[start, end)`. Shared by the
+/// textarea renderer and the layout pass so the laid-out box height
+/// matches the rendered wrap exactly.
+pub(crate) fn wrap_visual_lines(
+    chars: &[char],
+    metrics: &PaneFontMetrics,
+    avail: f32,
+) -> Vec<(usize, usize)> {
+    let n = chars.len();
+    let mut lines: Vec<(usize, usize)> = Vec::new();
+    let mut para_start = 0usize;
+    loop {
+        // End of the current hard-newline paragraph.
+        let mut para_end = para_start;
+        while para_end < n && chars[para_end] != '\n' {
+            para_end += 1;
+        }
+        // Greedy word-wrap within [para_start, para_end).
+        let mut line_start = para_start;
+        let mut last_space: Option<usize> = None;
+        let mut k = para_start;
+        while k < para_end {
+            if chars[k] == ' ' {
+                last_space = Some(k + 1);
+            }
+            let seg: String = chars[line_start..=k].iter().collect();
+            if k > line_start && metrics.measure(&seg, DEFAULT_FONT_SIZE) > avail {
+                let brk = match last_space {
+                    Some(b) if b > line_start && b <= k => b,
+                    _ => k,
+                };
+                lines.push((line_start, brk));
+                line_start = brk;
+                last_space = None;
+                k = brk;
+                continue;
+            }
+            k += 1;
+        }
+        lines.push((line_start, para_end));
+
+        if para_end < n {
+            para_start = para_end + 1;
+            // Trailing newline → one empty final line.
+            if para_start == n {
+                lines.push((n, n));
+                break;
+            }
+        } else {
+            break;
+        }
+    }
+    if lines.is_empty() {
+        lines.push((0, 0));
+    }
+    lines
+}
+
+/// Render an `Element::Table`. The grid cells were laid out as children
+/// of `node_id` in row-major order (header row, then data rows); we read
+/// their computed positions and draw each cell's text, plus a header
+/// tint + divider and optional zebra striping. Cell text wraps within
+/// its column and aligns per the column's `align`.
+#[allow(clippy::too_many_arguments)]
+fn render_table_at(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    laid: &crate::layout::LaidOut,
+    node_id: taffy::NodeId,
+    columns: &[crate::protocol::TableColumn],
+    rows: &[Vec<String>],
+    zebra: bool,
+    origin: Vec2,
+    size: Vec2,
+    z: f32,
+) {
+    if columns.is_empty() {
+        return;
+    }
+    let ncols = columns.len();
+    let cells = laid.taffy.children(node_id).unwrap_or_default();
+    if cells.is_empty() {
+        return;
+    }
+
+    // Outer panel: subtle surface + border.
+    let radius = ctx.resolve_f32("radius_sm").unwrap_or(4.0);
+    let panel_bg = ctx
+        .resolve_color("surface_2")
+        .unwrap_or(Color::srgb(0.10, 0.11, 0.13));
+    paint_rounded_panel(
+        commands,
+        ctx,
+        origin,
+        size,
+        radius,
+        panel_bg,
+        ctx.palette.divider,
+        1.0,
+        Color::srgba(0.0, 0.0, 0.0, 0.0),
+        0.0,
+        0.0,
+        z,
+    );
+
+    let line_h = line_height(DEFAULT_FONT_SIZE);
+    let nrows_total = cells.len() / ncols; // header + data rows
+    let header_bg = ctx
+        .resolve_color("surface_3")
+        .unwrap_or(Color::srgb(0.13, 0.14, 0.17));
+    let zebra_bg = {
+        let l = header_bg.to_linear();
+        Color::LinearRgba(LinearRgba { alpha: 0.4, ..l })
+    };
+
+    // Row backgrounds: header tint + optional zebra on alternate data
+    // rows. Row geometry comes from the first cell in each row (grid
+    // tracks give every cell in a row the same top + height).
+    for r in 0..nrows_total {
+        let Some(&first) = cells.get(r * ncols) else {
+            continue;
+        };
+        let cl = laid.layout(first);
+        let row_top = origin.y + cl.location.y;
+        let row_h = cl.size.height;
+        let fill = if r == 0 {
+            Some(header_bg)
+        } else if zebra && r % 2 == 0 {
+            Some(zebra_bg)
+        } else {
+            None
+        };
+        if let Some(color) = fill {
+            commands.spawn((
+                ChildOf(ctx.content_root),
+                Sprite {
+                    color,
+                    custom_size: Some(Vec2::new(size.x, row_h)),
+                    ..default()
+                },
+                Anchor::TOP_LEFT,
+                Transform::from_xyz(origin.x, -row_top, z + 0.001),
+            ));
+        }
+    }
+
+    // Divider under the header row.
+    {
+        let cl = laid.layout(cells[0]);
+        let y = origin.y + cl.location.y + cl.size.height;
+        commands.spawn((
+            ChildOf(ctx.content_root),
+            Sprite {
+                color: ctx.palette.divider,
+                custom_size: Some(Vec2::new(size.x, 1.0)),
+                ..default()
+            },
+            Anchor::TOP_LEFT,
+            Transform::from_xyz(origin.x, -y, z + 0.002),
+        ));
+    }
+
+    // Cell text.
+    for (k, &cell) in cells.iter().enumerate() {
+        let r = k / ncols;
+        let ci = k % ncols;
+        let text = if r == 0 {
+            columns[ci].header.clone()
+        } else {
+            rows.get(r - 1)
+                .and_then(|row| row.get(ci))
+                .cloned()
+                .unwrap_or_default()
+        };
+        if text.is_empty() {
+            continue;
+        }
+        let cl = laid.layout(cell);
+        let cell_origin = origin + Vec2::new(cl.location.x, cl.location.y);
+        let content_w = (cl.size.width - 2.0 * TABLE_CELL_PAD_X).max(0.0);
+        let left = cell_origin.x + TABLE_CELL_PAD_X;
+        let top = cell_origin.y + TABLE_CELL_PAD_Y;
+        // Alignment by explicit positioning. Left-aligned cells wrap
+        // within the column (TextBounds width); End/Center are measured
+        // single-line and offset — this avoids a Justify+TextBounds
+        // interaction that mis-places the text.
+        let (text_x, bounds_w) = match columns[ci].align {
+            Align::End => {
+                let tw = ctx.metrics.measure(&text, DEFAULT_FONT_SIZE);
+                (left + (content_w - tw).max(0.0), None)
+            }
+            Align::Center => {
+                let tw = ctx.metrics.measure(&text, DEFAULT_FONT_SIZE);
+                (left + ((content_w - tw) * 0.5).max(0.0), None)
+            }
+            _ => (left, Some(content_w)),
+        };
+        commands.spawn((
+            ChildOf(ctx.content_root),
+            Text2d::new(text),
+            TextFont {
+                font: ctx.font.clone(),
+                font_size: DEFAULT_FONT_SIZE,
+                ..default()
+            },
+            LineHeight::Px(line_h),
+            TextColor(ctx.palette.text),
+            Anchor::TOP_LEFT,
+            TextBounds {
+                width: bounds_w,
+                height: None,
+            },
+            // Keep our per-column wrap width: opt out of the pane-wide
+            // TextBounds enforcement that would otherwise rewrap cells to
+            // the full pane width.
+            pane_bevy::PaneContentNoClip,
+            Transform::from_xyz(text_x, -top, z + 0.01),
+        ));
+    }
 }

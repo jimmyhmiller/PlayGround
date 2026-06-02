@@ -218,6 +218,8 @@ fn print_usage() {
          \n\
          `--kind rhai_widget` swaps in the in-process Rhai-scripted\n\
          widget runtime. `<cmd>` is then interpreted as a script filename\n\
-         under `~/.terminal-bevy/widgets/` and no subprocess is spawned."
+         under `~/.terminal-bevy/widgets/` and no subprocess is spawned.\n\
+         \n\
+         For the authoring guide, run `widget agent`."
     );
 }

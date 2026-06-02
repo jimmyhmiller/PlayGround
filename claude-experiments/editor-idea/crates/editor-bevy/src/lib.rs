@@ -238,6 +238,19 @@ pub fn setup_editor_font(
         cell_width: measure_cell_width(measure_bytes, FONT_SIZE),
     });
     commands.insert_resource(PaneFont(font));
+    // `PaneFont` is what pane-bevy and every cosmic-text-backed pane
+    // (Issues, text inputs) actually *render* with, so `PaneFontMetrics`
+    // — which those panes use to place carets/selection on a
+    // `col * cell_width` grid and to compute word-wrap — must describe
+    // THIS font. We set both here (overwriting any host default) so the
+    // measured advance always matches the rendered glyphs; otherwise the
+    // caret drifts right of the text by the per-glyph advance difference,
+    // growing with column. Measured at `FONT_SIZE`; callers scale linearly
+    // for other sizes (the mono family is fixed-pitch).
+    commands.insert_resource(pane_bevy::PaneFontMetrics {
+        cell_width: measure_cell_width(measure_bytes, FONT_SIZE),
+        font_size: FONT_SIZE,
+    });
 }
 
 // ---------- Spawn ----------

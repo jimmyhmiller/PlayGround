@@ -132,6 +132,76 @@ impl SchemaRegistry {
         self.enums.contains_key(name)
     }
 
+    /// Remove an entity type from the registry, returning its definition
+    /// if it was present. Used by drop/purge; the caller is responsible
+    /// for any persisted retraction or datom deletion.
+    pub fn remove(&mut self, name: &str) -> Option<EntityTypeDef> {
+        self.types.remove(name)
+    }
+
+    /// Remove an enum type from the registry, returning its definition
+    /// if it was present.
+    pub fn remove_enum(&mut self, name: &str) -> Option<EnumTypeDef> {
+        self.enums.remove(name)
+    }
+
+    /// Human-readable descriptions of every *other* live type or enum
+    /// whose schema references entity type `name` via a `ref` field.
+    /// A self-reference (`Type.field: ref(Type)`) is not reported.
+    /// Used to block a hard purge that would leave the schema dangling.
+    pub fn referrers_of_type(&self, name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for t in self.types.values() {
+            if t.name == name {
+                continue;
+            }
+            for f in &t.fields {
+                if matches!(&f.field_type, FieldType::Ref(target) if target == name) {
+                    out.push(format!("type {}.{}", t.name, f.name));
+                }
+            }
+        }
+        for e in self.enums.values() {
+            for v in &e.variants {
+                for f in &v.fields {
+                    if matches!(&f.field_type, FieldType::Ref(target) if target == name) {
+                        out.push(format!("enum {}::{}.{}", e.name, v.name, f.name));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// Human-readable descriptions of every live type or enum whose schema
+    /// references enum `name` via an `enum` field. A self-reference inside
+    /// the same enum is not reported.
+    pub fn referrers_of_enum(&self, name: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for t in self.types.values() {
+            for f in &t.fields {
+                if matches!(&f.field_type, FieldType::Enum(target) if target == name) {
+                    out.push(format!("type {}.{}", t.name, f.name));
+                }
+            }
+        }
+        for e in self.enums.values() {
+            if e.name == name {
+                continue;
+            }
+            for v in &e.variants {
+                for f in &v.fields {
+                    if matches!(&f.field_type, FieldType::Enum(target) if target == name) {
+                        out.push(format!("enum {}::{}.{}", e.name, v.name, f.name));
+                    }
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
     pub fn all_types(&self) -> Vec<&EntityTypeDef> {
         let mut types: Vec<_> = self.types.values().collect();
         types.sort_by_key(|t| &t.name);

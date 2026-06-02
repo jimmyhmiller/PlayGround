@@ -273,46 +273,6 @@ pub fn parse_at_builtin_name(name: &str) -> Option<(Hash, Option<Hash>)> {
     }
 }
 
-/// Prefix for the located-state (distributed atom) builtins. The op
-/// name and the user's `Result` / `Failure` hashes are stamped in, the
-/// same trick as [`AT_BUILTIN_PREFIX`], so typecheck + codegen recover
-/// the return type without threading a binding through every visitor.
-pub const ATOM_BUILTIN_PREFIX: &str = "core/atom.";
-
-/// Which atom operation a `core/atom.*` builtin denotes.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum AtomOp {
-    Deref,
-    Set,
-    Init,
-    Swap,
-}
-
-/// Parse `core/atom.<op>#<result_hex>#<failure_hex>`.
-pub fn parse_atom_builtin_name(name: &str) -> Option<(AtomOp, Hash, Hash)> {
-    let body = name.strip_prefix(ATOM_BUILTIN_PREFIX)?;
-    let (op_str, rest) = body.split_once('#')?;
-    let op = match op_str {
-        "deref" => AtomOp::Deref,
-        "set" => AtomOp::Set,
-        "init" => AtomOp::Init,
-        "swap" => AtomOp::Swap,
-        _ => return None,
-    };
-    let (rhex, fhex) = rest.split_once('#')?;
-    let parse_hex = |s: &str| -> Option<Hash> {
-        if s.len() != Hash::SIZE * 2 {
-            return None;
-        }
-        let mut out = [0u8; Hash::SIZE];
-        for (i, b) in out.iter_mut().enumerate() {
-            *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
-        }
-        Some(Hash(out))
-    };
-    Some((op, parse_hex(rhex)?, parse_hex(fhex)?))
-}
-
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -2300,6 +2260,9 @@ fn resolve_expr_typed(
                     "array_len" => Some("core/array.len"),
                     "array_get" => Some("core/array.get"),
                     "array_set" => Some("core/array.set"),
+                    // The lock-free atom primitive (the ONLY one):
+                    //   atom_swap(cell, i, f) -> T   (CAS retry loop)
+                    "atom_swap_slot" => Some("core/atom.swap"),
                     _ => None,
                 };
                 if let Some(builtin) = array_builtin {
@@ -2314,6 +2277,17 @@ fn resolve_expr_typed(
                         .collect::<Result<_, _>>()?;
                     let ret_ty = match name.as_str() {
                         "array_len" | "array_set" => Type::Builtin("Int".to_owned()),
+                        // atom_swap_slot: element type T from arg 0's Array<T>.
+                        "atom_swap_slot" => match args_typed.first().map(|(_, t)| t) {
+                            Some(Type::Apply(head, elt))
+                                if matches!(head.as_ref(), Type::Builtin(n) if n == "Array") =>
+                            {
+                                elt.first()
+                                    .cloned()
+                                    .unwrap_or(Type::Builtin("Int".to_owned()))
+                            }
+                            _ => Type::Builtin("Int".to_owned()),
+                        },
                         "array_new" => Type::Apply(
                             Box::new(Type::Builtin("Array".to_owned())),
                             vec![Type::TypeVar(0)],
@@ -2425,108 +2399,6 @@ fn resolve_expr_typed(
                             Box::new(Expr::BuiltinRef(builtin_name)),
                             vec![node_canon, thunk_canon],
                         ),
-                        ret_ty,
-                    ));
-                }
-            }
-
-            // Located-state (distributed atom) ops. Each lowers to a
-            // `core/atom.<op>#<result>#<failure>` builtin returning the
-            // user's `Result<T, Failure>` — exactly like `at(...)`. The
-            // element type `T` is recovered from: the handle's
-            // `Atom<T>` instantiation (deref), the value arg (set/init),
-            // or the updater's return type (swap).
-            if let SurfaceExpr::Var { name, .. } = callee.as_ref() {
-                let atom_op = match name.as_str() {
-                    "atom_deref" => Some(AtomOp::Deref),
-                    "atom_set" => Some(AtomOp::Set),
-                    "atom_init" => Some(AtomOp::Init),
-                    "atom_swap" => Some(AtomOp::Swap),
-                    _ => None,
-                };
-                if let Some(op) = atom_op {
-                    let want_args = if op == AtomOp::Deref { 1 } else { 2 };
-                    if args.len() != want_args {
-                        return Err(ResolveError::UnknownName {
-                            name: format!(
-                                "{} expects {} args, got {}",
-                                name,
-                                want_args,
-                                args.len()
-                            ),
-                            span: *span,
-                        });
-                    }
-                    let binding = match at_binding.as_ref() {
-                        Some(b) => b.clone(),
-                        None => {
-                            let b = build_at_binding(structs, enums, *span)?;
-                            *at_binding = Some(b.clone());
-                            b
-                        }
-                    };
-                    // Resolve the handle (arg 0) and recover its type.
-                    let (handle_canon, handle_ty) = resolve_expr_typed(
-                        &args[0], env, top, structs, enums, variants, at_binding,
-                        type_params, self_name,
-                    )?;
-                    // Determine the element type T and resolve the
-                    // remaining arg (value / updater closure).
-                    let (elem_ty, rest_args): (Type, Vec<Expr>) = match op {
-                        AtomOp::Deref => {
-                            let t = match &handle_ty {
-                                Type::Apply(_, a) if !a.is_empty() => a[0].clone(),
-                                _ => {
-                                    return Err(ResolveError::UnknownName {
-                                        name: "atom_deref: handle's element type is \
-                                               unknown; annotate it as Atom<T>"
-                                            .to_owned(),
-                                        span: *span,
-                                    });
-                                }
-                            };
-                            (t, vec![])
-                        }
-                        AtomOp::Set | AtomOp::Init => {
-                            let (v_canon, v_ty) = resolve_expr_typed(
-                                &args[1], env, top, structs, enums, variants,
-                                at_binding, type_params, self_name,
-                            )?;
-                            (v_ty, vec![v_canon])
-                        }
-                        AtomOp::Swap => {
-                            let (f_canon, f_ty) = resolve_expr_typed(
-                                &args[1], env, top, structs, enums, variants,
-                                at_binding, type_params, self_name,
-                            )?;
-                            let t = match &f_ty {
-                                Type::FnType { ret, .. } => (**ret).clone(),
-                                _ => Type::Builtin("Int".to_owned()),
-                            };
-                            (t, vec![f_canon])
-                        }
-                    };
-                    let op_str = match op {
-                        AtomOp::Deref => "deref",
-                        AtomOp::Set => "set",
-                        AtomOp::Init => "init",
-                        AtomOp::Swap => "swap",
-                    };
-                    let builtin_name = format!(
-                        "{}{}#{}#{}",
-                        ATOM_BUILTIN_PREFIX,
-                        op_str,
-                        hex_encode(binding.result_hash.as_bytes()),
-                        hex_encode(binding.failure_hash.as_bytes())
-                    );
-                    let ret_ty = Type::Apply(
-                        Box::new(Type::TypeRef(binding.result_hash)),
-                        vec![elem_ty, Type::TypeRef(binding.failure_hash)],
-                    );
-                    let mut call_args = vec![handle_canon];
-                    call_args.extend(rest_args);
-                    return Ok((
-                        Expr::Call(Box::new(Expr::BuiltinRef(builtin_name)), call_args),
                         ret_ty,
                     ));
                 }

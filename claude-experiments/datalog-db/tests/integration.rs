@@ -4728,3 +4728,253 @@ fn test_order_by_unknown_variable_errors() {
         "unexpected error: {err}"
     );
 }
+
+// --- Drop / purge (soft + hard) -----------------------------------------
+
+/// Insert one User, returning its entity id.
+fn insert_one_user(db: &Database, name: &str, age: i64, email: &str) -> u64 {
+    let mut data = HashMap::new();
+    data.insert("name".to_string(), Value::String(name.into()));
+    data.insert("age".to_string(), Value::I64(age));
+    data.insert("email".to_string(), Value::String(email.into()));
+    db.transact(vec![TxOp::Assert {
+        entity_type: "User".to_string(),
+        entity: None,
+        data,
+    }])
+    .unwrap()
+    .entity_ids[0]
+}
+
+fn query_all_users(db: &Database) -> datalog_db::query::executor::QueryResult {
+    let query = Query::from_json(&serde_json::json!({
+        "find": ["?name"],
+        "where": [{"bind": "?u", "type": "User", "name": "?name"}]
+    }))
+    .unwrap();
+    db.query(&query).unwrap()
+}
+
+fn schema_has_type(db: &Database, name: &str) -> bool {
+    db.schema_json()["types"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|t| t["name"] == name)
+}
+
+fn schema_has_enum(db: &Database, name: &str) -> bool {
+    db.schema_json()["enums"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|e| e["name"] == name)
+}
+
+#[test]
+fn test_soft_drop_hides_type_but_keeps_data() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    insert_one_user(&db, "Alice", 30, "alice@example.com");
+
+    let datoms_before = db.all_datoms().unwrap().len();
+
+    let r = db.drop_type("User", false).unwrap();
+    assert!(!r.hard);
+    assert!(r.tx_id.is_some());
+
+    // Gone from schema and no longer queryable.
+    assert!(!schema_has_type(&db, "User"));
+    let q = Query::from_json(&serde_json::json!({
+        "find": ["?name"],
+        "where": [{"bind": "?u", "type": "User", "name": "?name"}]
+    }))
+    .unwrap();
+    assert!(db.query(&q).is_err(), "dropped type must not be queryable");
+
+    // But every data datom is still on disk (soft drop adds a schema
+    // retraction datom, so the count only grows).
+    assert!(db.all_datoms().unwrap().len() >= datoms_before);
+
+    // Re-defining the exact type makes the old data visible again.
+    db.define_type(user_type()).unwrap();
+    assert!(schema_has_type(&db, "User"));
+    let res = query_all_users(&db);
+    assert_eq!(res.rows.len(), 1);
+    assert_eq!(res.rows[0][0], Value::String("Alice".into()));
+}
+
+#[test]
+fn test_soft_drop_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+        let db = Database::open(storage).unwrap();
+        db.define_type(user_type()).unwrap();
+        insert_one_user(&db, "Alice", 30, "alice@example.com");
+        db.drop_type("User", false).unwrap();
+        assert!(!schema_has_type(&db, "User"));
+    }
+    // The retraction must win on reload — not be resurrected by the
+    // still-present `added` definition datom.
+    {
+        let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+        let db = Database::open(storage).unwrap();
+        assert!(!schema_has_type(&db, "User"), "soft drop must survive reopen");
+
+        // Re-define and confirm the data is intact.
+        db.define_type(user_type()).unwrap();
+        assert_eq!(query_all_users(&db).rows.len(), 1);
+    }
+}
+
+#[test]
+fn test_hard_purge_deletes_all_datoms() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    insert_one_user(&db, "Alice", 30, "alice@example.com");
+    insert_one_user(&db, "Bob", 25, "bob@example.com");
+
+    let r = db.drop_type("User", true).unwrap();
+    assert!(r.hard);
+    assert!(r.tx_id.is_none());
+    assert_eq!(r.entities_purged, 2);
+    assert!(r.datoms_deleted > 0);
+
+    assert!(!schema_has_type(&db, "User"));
+
+    // No User datom of any kind survives in any index.
+    let remaining = db.all_datoms().unwrap();
+    assert!(
+        remaining
+            .iter()
+            .all(|d| !d.attribute.starts_with("User/")
+                && !(d.attribute == "__type" && d.value == Value::String("User".into()))),
+        "hard purge left User datoms behind: {:?}",
+        remaining
+    );
+
+    // Re-define from scratch: the old rows are truly gone.
+    db.define_type(user_type()).unwrap();
+    assert_eq!(query_all_users(&db).rows.len(), 0);
+}
+
+#[test]
+fn test_hard_purge_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+        let db = Database::open(storage).unwrap();
+        db.define_type(user_type()).unwrap();
+        insert_one_user(&db, "Alice", 30, "alice@example.com");
+        db.drop_type("User", true).unwrap();
+    }
+    {
+        let storage = Arc::new(RocksDbStorage::open(dir.path()).unwrap());
+        let db = Database::open(storage).unwrap();
+        assert!(!schema_has_type(&db, "User"));
+        db.define_type(user_type()).unwrap();
+        assert_eq!(query_all_users(&db).rows.len(), 0);
+    }
+}
+
+#[test]
+fn test_hard_purge_refused_when_referenced() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.define_type(post_type()).unwrap(); // Post.author: ref(User)
+
+    let err = db.drop_type("User", true).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("still referenced"), "unexpected: {msg}");
+    assert!(msg.contains("Post.author"), "should name referrer: {msg}");
+
+    // Soft drop is allowed even when referenced, but warns.
+    let r = db.drop_type("User", false).unwrap();
+    assert!(!r.warnings.is_empty(), "soft drop should warn about referrers");
+    assert!(r.warnings[0].contains("Post.author"));
+}
+
+#[test]
+fn test_hard_purge_reports_dangling_refs() {
+    let (db, _dir) = test_db();
+    db.define_type(user_type()).unwrap();
+    db.define_type(post_type()).unwrap();
+
+    let uid = insert_one_user(&db, "Alice", 30, "alice@example.com");
+    let mut post = HashMap::new();
+    post.insert("title".to_string(), Value::String("Hello".into()));
+    post.insert("author".to_string(), Value::Ref(uid));
+    db.transact(vec![TxOp::Assert {
+        entity_type: "Post".to_string(),
+        entity: None,
+        data: post,
+    }])
+    .unwrap();
+
+    // Soft-drop Post so it stops being a *live* schema referrer (its data,
+    // incl. the author ref, stays on disk), then hard purge User.
+    db.drop_type("Post", false).unwrap();
+    let r = db.drop_type("User", true).unwrap();
+    assert_eq!(r.entities_purged, 1);
+    assert_eq!(r.dangling_refs, 1, "the post still refs the purged user");
+}
+
+#[test]
+fn test_soft_then_hard_enum() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+    assert!(schema_has_enum(&db, "Shape"));
+
+    // Soft drop, reopen-equivalent in-memory check, then re-define.
+    let r = db.drop_enum("Shape", false).unwrap();
+    assert!(!r.hard && r.tx_id.is_some());
+    assert!(!schema_has_enum(&db, "Shape"));
+    db.define_enum(shape_enum()).unwrap();
+    assert!(schema_has_enum(&db, "Shape"));
+
+    // Hard purge removes the definition datoms entirely.
+    let r = db.drop_enum("Shape", true).unwrap();
+    assert!(r.hard);
+    assert_eq!(r.entities_purged, 0, "an enum owns no data entities");
+    assert!(r.datoms_deleted >= 1, "schema-def datoms should be deleted");
+    assert!(!schema_has_enum(&db, "Shape"));
+}
+
+#[test]
+fn test_hard_purge_enum_refused_when_used() {
+    let (db, _dir) = test_db();
+    db.define_enum(shape_enum()).unwrap();
+
+    // A type with a field of the enum.
+    let widget = EntityTypeDef {
+        name: "Widget".to_string(),
+        fields: vec![FieldDef {
+            name: "shape".to_string(),
+            field_type: FieldType::Enum("Shape".to_string()),
+            required: false,
+            unique: false,
+            indexed: false,
+        }],
+    };
+    db.define_type(widget).unwrap();
+
+    let err = db.drop_enum("Shape", true).unwrap_err();
+    assert!(err.to_string().contains("still referenced"), "{err}");
+    assert!(err.to_string().contains("Widget.shape"));
+}
+
+#[test]
+fn test_drop_unknown_type_errors() {
+    let (db, _dir) = test_db();
+    assert!(db.drop_type("Nope", false).is_err());
+    assert!(db.drop_type("Nope", true).is_err());
+    assert!(db.drop_enum("Nope", false).is_err());
+}
+
+#[test]
+fn test_cannot_drop_reserved() {
+    let (db, _dir) = test_db();
+    assert!(db.drop_type("__type", false).is_err());
+    assert!(db.drop_type("__schema_type", true).is_err());
+}

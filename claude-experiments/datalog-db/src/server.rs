@@ -107,6 +107,8 @@ fn dispatch(db: &Database, backup: Option<&BackupContext>, msg: &Message) -> ser
     match request_type {
         "define" => handle_define(db, &msg.payload),
         "define_enum" => handle_define_enum(db, &msg.payload),
+        "drop_type" => handle_drop(db, &msg.payload, false),
+        "drop_enum" => handle_drop(db, &msg.payload, true),
         "transact" => handle_transact(db, &msg.payload),
         "query" => handle_query(db, &msg.payload),
         "explain" => handle_explain(db, &msg.payload),
@@ -243,6 +245,48 @@ fn handle_define_enum(db: &Database, payload: &serde_json::Value) -> serde_json:
         Err(e) => serde_json::json!({
             "status": "error",
             "error": e
+        }),
+    }
+}
+
+/// Drop (soft) or purge (hard) a type or enum. `is_enum` selects which.
+/// The request carries `{"name": "<Name>", "hard": <bool>}`; `hard`
+/// defaults to false (soft drop).
+fn handle_drop(db: &Database, payload: &serde_json::Value, is_enum: bool) -> serde_json::Value {
+    let name = match payload.get("name").and_then(|n| n.as_str()) {
+        Some(n) => n,
+        None => {
+            return serde_json::json!({
+                "status": "error",
+                "error": "missing 'name'"
+            })
+        }
+    };
+    let hard = payload.get("hard").and_then(|h| h.as_bool()).unwrap_or(false);
+
+    let outcome = if is_enum {
+        db.drop_enum(name, hard)
+    } else {
+        db.drop_type(name, hard)
+    };
+
+    match outcome {
+        Ok(r) => serde_json::json!({
+            "status": "ok",
+            "data": {
+                "dropped": r.name,
+                "kind": r.kind,
+                "mode": if r.hard { "hard" } else { "soft" },
+                "tx_id": r.tx_id,
+                "entities_purged": r.entities_purged,
+                "datoms_deleted": r.datoms_deleted,
+                "dangling_refs": r.dangling_refs,
+                "warnings": r.warnings,
+            }
+        }),
+        Err(e) => serde_json::json!({
+            "status": "error",
+            "error": e.to_string()
         }),
     }
 }

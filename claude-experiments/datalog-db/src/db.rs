@@ -464,6 +464,28 @@ fn apply_ordering_and_paging(qr: &mut QueryResult, query: &Query) -> Result<()> 
     Ok(())
 }
 
+/// Reject a query that references an entity type not in the schema. The
+/// executor derives index keys from the type+field names in the query, so
+/// a dropped (or never-defined) type would otherwise read its leftover
+/// datoms straight from the indexes. Validating here is what makes a soft
+/// `drop` actually hide a type from reads, and turns a typo'd type name
+/// into a clear error instead of a silently-empty result.
+fn validate_query_types(query: &Query, schema: &SchemaRegistry) -> Result<()> {
+    let mut missing: Option<String> = None;
+    query.where_clause.for_each_pattern(&mut |clause| {
+        if missing.is_none() && !schema.contains(&clause.entity_type) {
+            missing = Some(clause.entity_type.clone());
+        }
+    });
+    match missing {
+        Some(name) => Err(DbError::Query(format!(
+            "unknown entity type '{}' (not defined, or dropped)",
+            name
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// Rewrite each clause's scalar field literals to match the declared field
 /// type, so the planner and AVET index see correctly-typed values. Runs once
 /// per query before planning; enum sub-field patterns are left untouched.
@@ -718,30 +740,26 @@ impl Database {
 
         let mut schema = self.schema.write();
 
-        for (key, _) in &enum_entries {
-            if let Some(datom) = index::decode_datom_from_aevt(key) {
-                if !datom.added {
-                    continue;
-                }
-                if let Value::String(json) = &datom.value {
-                    if let Ok(enum_def) = serde_json::from_str::<EnumTypeDef>(json) {
-                        schema.register_enum(enum_def);
-                    }
-                }
+        // A schema definition is just a datom: its current state has to be
+        // replayed (assert/retract) per schema entity, exactly like any
+        // other attribute. A soft drop retracts the definition datom; if we
+        // blindly registered every `added` datom we'd resurrect dropped
+        // types on every restart. Only definitions that are *currently
+        // asserted* get registered. When two live entities carry the same
+        // name (a redefinition writes a fresh entity), the higher entity id
+        // — i.e. the later definition — wins, matching insert order here.
+        for (entity, json) in current_schema_defs(&enum_entries) {
+            if let Ok(enum_def) = serde_json::from_str::<EnumTypeDef>(&json) {
+                schema.register_enum(enum_def);
             }
+            let _ = entity;
         }
 
-        for (key, _) in &type_entries {
-            if let Some(datom) = index::decode_datom_from_aevt(key) {
-                if !datom.added {
-                    continue;
-                }
-                if let Value::String(json) = &datom.value {
-                    if let Ok(type_def) = serde_json::from_str::<EntityTypeDef>(json) {
-                        schema.register(type_def);
-                    }
-                }
+        for (entity, json) in current_schema_defs(&type_entries) {
+            if let Ok(type_def) = serde_json::from_str::<EntityTypeDef>(&json) {
+                schema.register(type_def);
             }
+            let _ = entity;
         }
 
         Ok(())
@@ -955,6 +973,327 @@ impl Database {
         Ok(tx_id)
     }
 
+    /// Drop an entity type.
+    ///
+    /// A **soft** drop (`hard == false`) retracts the type's schema
+    /// definition as an ordinary transaction: it disappears from `schema`
+    /// and can no longer be queried, but every datom, index entry and
+    /// history record is preserved untouched. The drop itself is recorded
+    /// in history, and re-`define`-ing the type makes all the old data
+    /// visible and queryable again.
+    ///
+    /// A **hard** purge (`hard == true`) deletes the type's schema
+    /// definition AND every datom of every entity of that type from all
+    /// indexes (EAVT/AEVT/AVET/VAET plus the current-state mirrors). It is
+    /// irreversible and destroys history for those entities. A hard purge
+    /// is refused if another live type or enum still references this type
+    /// via a `ref` field, so the schema is never left dangling.
+    pub fn drop_type(&self, name: &str, hard: bool) -> Result<DropResult> {
+        if name.starts_with("__") {
+            return Err(DbError::Schema("cannot drop reserved type".into()));
+        }
+        let mut schema = self.schema.write();
+        if !schema.contains(name) {
+            return Err(DbError::Schema(format!("unknown entity type '{}'", name)));
+        }
+        let referrers = schema.referrers_of_type(name);
+        self.drop_named(&mut schema, name, "type", SCHEMA_TYPE_ATTR, false, hard, referrers)
+    }
+
+    /// Drop an enum type. Soft/hard semantics mirror [`drop_type`]. An enum
+    /// owns no entities of its own — its values live inline on the types
+    /// that use it — so a hard purge of an enum only deletes the enum's
+    /// schema-definition datoms (the inline values are purged when their
+    /// owning type is purged). A hard purge is refused while any live type
+    /// or enum still has a field of this enum type.
+    pub fn drop_enum(&self, name: &str, hard: bool) -> Result<DropResult> {
+        if name.starts_with("__") {
+            return Err(DbError::Schema("cannot drop reserved enum".into()));
+        }
+        let mut schema = self.schema.write();
+        if !schema.contains_enum(name) {
+            return Err(DbError::Schema(format!("unknown enum type '{}'", name)));
+        }
+        let referrers = schema.referrers_of_enum(name);
+        self.drop_named(&mut schema, name, "enum", SCHEMA_ENUM_ATTR, true, hard, referrers)
+    }
+
+    /// Shared body for `drop_type` / `drop_enum`. `schema` is the held
+    /// write guard; `schema_attr` is the reserved attribute the definition
+    /// is stored under; `parse_enum` selects how the stored JSON is parsed
+    /// to recover its declared name; `referrers` is the precomputed list of
+    /// live schema references to `name`.
+    fn drop_named(
+        &self,
+        schema: &mut SchemaRegistry,
+        name: &str,
+        kind: &'static str,
+        schema_attr: &'static str,
+        parse_enum: bool,
+        hard: bool,
+        referrers: Vec<String>,
+    ) -> Result<DropResult> {
+        let mut warnings = Vec::new();
+
+        let result = if hard {
+            if !referrers.is_empty() {
+                return Err(DbError::Schema(format!(
+                    "cannot hard-purge {} '{}': still referenced by {}. \
+                     Drop or redefine those first.",
+                    kind,
+                    name,
+                    referrers.join(", ")
+                )));
+            }
+            let (entities_purged, datoms_deleted, dangling_refs) =
+                self.hard_purge(name, schema_attr, parse_enum)?;
+            DropResult {
+                name: name.to_string(),
+                kind,
+                hard: true,
+                tx_id: None,
+                entities_purged,
+                datoms_deleted,
+                dangling_refs,
+                warnings,
+            }
+        } else {
+            if !referrers.is_empty() {
+                warnings.push(format!(
+                    "{} '{}' is still referenced by {}; those definitions now point at \
+                     a dropped {}. Re-define '{}' to restore.",
+                    kind,
+                    name,
+                    referrers.join(", "),
+                    kind,
+                    name
+                ));
+            }
+            let tx_id = self.soft_retract_schema_defs(name, schema_attr, parse_enum)?;
+            DropResult {
+                name: name.to_string(),
+                kind,
+                hard: false,
+                tx_id: Some(tx_id),
+                entities_purged: 0,
+                datoms_deleted: 0,
+                dangling_refs: 0,
+                warnings,
+            }
+        };
+
+        if parse_enum {
+            schema.remove_enum(name);
+        } else {
+            schema.remove(name);
+        }
+        self.plan_cache.write().clear();
+        self.query_cache.invalidate_all();
+        Ok(result)
+    }
+
+    /// Soft drop: retract every currently-asserted schema-definition datom
+    /// whose declared name matches `name`, as one transaction. Returns the
+    /// retraction's tx_id. Mirrors the locking/counter discipline of
+    /// `define_type`.
+    fn soft_retract_schema_defs(
+        &self,
+        name: &str,
+        schema_attr: &'static str,
+        parse_enum: bool,
+    ) -> Result<TxId> {
+        let attr_id = self.attr_interner.lookup(schema_attr).ok_or_else(|| {
+            DbError::Schema(format!("no schema definitions exist for '{}'", name))
+        })?;
+        let timestamp_ms = now_millis();
+        let name_owned = name.to_string();
+
+        let _guard = self.write_lock.lock();
+        let tx_id = self.tx_counter.load(Ordering::Acquire) + 1;
+
+        self.storage.execute_batch(Box::new(move |txn| {
+            // Scan the definition attribute and replay each schema entity to
+            // its current value, then retract those whose declared name
+            // matches. Retraction value must equal the asserted JSON so the
+            // replay on the next load sees it as a clearing retract.
+            let prefix = index::aevt_attr_prefix(attr_id);
+            let end = index::prefix_end(&prefix);
+            let entries = txn.scan(&prefix, &end)?;
+
+            let mut retracted = 0usize;
+            for (entity, json) in current_schema_defs(&entries) {
+                if schema_def_name(&json, parse_enum).as_deref() != Some(name_owned.as_str()) {
+                    continue;
+                }
+                let value = Value::String(json.into());
+                for (key, val) in index::encode_datom(entity, attr_id, &value, tx_id, false) {
+                    txn.put(key, val)?;
+                }
+                retracted += 1;
+            }
+
+            if retracted == 0 {
+                return Err(StorageError::Backend(format!(
+                    "no live schema definition found for '{}'",
+                    name_owned
+                )));
+            }
+
+            txn.put(index::meta_key(TX_COUNTER_KEY), encode_u64(tx_id))?;
+            store_tx_timestamp(txn, tx_id, timestamp_ms)?;
+            Ok(Box::new(()) as Box<dyn Any + Send>)
+        }))?;
+
+        self.tx_counter.store(tx_id, Ordering::Release);
+        drop(_guard);
+        Ok(tx_id)
+    }
+
+    /// Hard purge: delete the schema definition AND all datoms of all
+    /// entities of `name` from every index, atomically in one batch.
+    /// Returns `(entities_purged, datoms_deleted, dangling_inbound_refs)`.
+    fn hard_purge(
+        &self,
+        name: &str,
+        schema_attr: &'static str,
+        parse_enum: bool,
+    ) -> Result<(u64, u64, u64)> {
+        use std::collections::HashSet;
+        use crate::intern::AttrId;
+
+        let type_marker_id = self.attr_interner.lookup("__type");
+        let schema_attr_id = self.attr_interner.lookup(schema_attr);
+        let name_owned = name.to_string();
+
+        let _guard = self.write_lock.lock();
+
+        let result = self.storage.execute_batch(Box::new(move |txn| {
+            let mut data_entities: HashSet<EntityId> = HashSet::new();
+            let mut schema_entities: HashSet<EntityId> = HashSet::new();
+
+            // Entities of this type, by their __type marker (history-complete:
+            // AVET holds every assert/retract of __type == name).
+            if let Some(tid) = type_marker_id {
+                let prefix =
+                    index::avet_attr_value_prefix(tid, &Value::String(name_owned.as_str().into()));
+                let end = index::prefix_end(&prefix);
+                for (k, _) in txn.scan(&prefix, &end)? {
+                    if let Some(d) = index::decode_datom_from_avet(&k) {
+                        data_entities.insert(d.entity);
+                    }
+                }
+            }
+
+            // Schema-definition entities for this name (all of them, live or
+            // already retracted — a hard purge wipes history too).
+            if let Some(sid) = schema_attr_id {
+                let prefix = index::aevt_attr_prefix(sid);
+                let end = index::prefix_end(&prefix);
+                for (k, _) in txn.scan(&prefix, &end)? {
+                    if let Some(d) = index::decode_datom_from_aevt(&k) {
+                        if let Value::String(json) = &d.value {
+                            if schema_def_name(json, parse_enum).as_deref()
+                                == Some(name_owned.as_str())
+                            {
+                                schema_entities.insert(d.entity);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut purge_set: HashSet<EntityId> = HashSet::new();
+            purge_set.extend(&data_entities);
+            purge_set.extend(&schema_entities);
+
+            // Delete every datom of every purged entity from all indexes.
+            let mut datoms_deleted: u64 = 0;
+            for &eid in &purge_set {
+                let prefix = index::eavt_entity_prefix(eid);
+                let end = index::prefix_end(&prefix);
+                let entries = txn.scan(&prefix, &end)?;
+                for (k, _) in &entries {
+                    let Some(d) = index::decode_datom_from_eavt(k) else {
+                        continue;
+                    };
+                    txn.delete(&index::encode_eavt(d.entity, d.attr_id, &d.value, d.tx, d.added))?;
+                    txn.delete(&index::encode_aevt(d.entity, d.attr_id, &d.value, d.tx, d.added))?;
+                    txn.delete(&index::encode_avet(d.entity, d.attr_id, &d.value, d.tx, d.added))?;
+                    if matches!(d.value, Value::Ref(_)) {
+                        txn.delete(&index::encode_vaet(
+                            d.entity, d.attr_id, &d.value, d.tx, d.added,
+                        ))?;
+                    }
+                    // Current-state mirrors. CURRENT_AEVT is one key per
+                    // (attr,entity); CURRENT_AVET keys the current value —
+                    // deleting a stale historical value's key is a harmless
+                    // no-op, the live one is hit when its datom is reached.
+                    let mut caevt = index::current_aevt_attr_prefix(d.attr_id);
+                    caevt.extend_from_slice(&d.entity.to_be_bytes());
+                    txn.delete(&caevt)?;
+                    txn.delete(&index::encode_current_avet(d.attr_id, &d.value, d.entity))?;
+                    datoms_deleted += 1;
+                }
+            }
+
+            // The per-type entity counter meta key (no-op for enums).
+            txn.delete(&index::meta_key(&format!("type_count:{}", name_owned)))?;
+
+            // Report inbound refs from *other* entities that now dangle.
+            // Read after the deletes above (the overlay reflects them), so
+            // refs internal to the purged set don't show up. Replay each
+            // (referrer, attr) to its current target to avoid counting
+            // refs that were later retracted or repointed.
+            let mut ref_hist: HashMap<(EntityId, AttrId), Vec<(EntityId, TxId, bool)>> =
+                HashMap::new();
+            for &eid in &data_entities {
+                let prefix = index::vaet_value_prefix(&Value::Ref(eid));
+                let end = index::prefix_end(&prefix);
+                for (k, _) in txn.scan(&prefix, &end)? {
+                    if let Some(d) = index::decode_datom_from_vaet(&k) {
+                        ref_hist
+                            .entry((d.entity, d.attr_id))
+                            .or_default()
+                            .push((eid, d.tx, d.added));
+                    }
+                }
+            }
+            let mut dangling_entities: HashSet<EntityId> = HashSet::new();
+            for ((referrer, _attr), mut hist) in ref_hist {
+                if purge_set.contains(&referrer) {
+                    continue;
+                }
+                hist.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
+                let mut current: Option<EntityId> = None;
+                for (target, _tx, added) in hist {
+                    if added {
+                        current = Some(target);
+                    } else if current == Some(target) {
+                        current = None;
+                    }
+                }
+                if let Some(t) = current {
+                    if data_entities.contains(&t) {
+                        dangling_entities.insert(referrer);
+                    }
+                }
+            }
+
+            // Report data entities only; the internal schema-definition
+            // entity is an implementation detail (its datoms still count
+            // toward datoms_deleted).
+            let stats = (
+                data_entities.len() as u64,
+                datoms_deleted,
+                dangling_entities.len() as u64,
+            );
+            Ok(Box::new(stats) as Box<dyn Any + Send>)
+        }))?;
+
+        drop(_guard);
+        Ok(*result.downcast::<(u64, u64, u64)>().expect("wrong type"))
+    }
+
     /// Execute a transaction.
     ///
     /// When `DatabaseOptions::group_commit` is enabled, the request is
@@ -1069,6 +1408,7 @@ impl Database {
     /// Execute a query.
     pub fn query(&self, query: &Query) -> Result<QueryResult> {
         let schema = self.schema.read().clone();
+        validate_query_types(query, &schema)?;
         let mut query = query.clone();
 
         // Convert as_of_time to as_of if needed
@@ -1154,6 +1494,7 @@ impl Database {
     /// Generate a query plan without executing.
     pub fn explain(&self, query: &Query) -> Result<QueryPlan> {
         let schema = self.schema.read().clone();
+        validate_query_types(query, &schema)?;
         let mut query = query.clone();
 
         // Convert as_of_time to as_of if needed
@@ -1693,6 +2034,81 @@ pub fn resolve_current_values(
     }
 
     result
+}
+
+/// Given the raw AEVT entries for a schema attribute (`__schema_type` or
+/// `__schema_enum`), replay each schema entity's assert/retract history and
+/// return the currently-asserted JSON definition for each live entity,
+/// ordered by entity id ascending. A soft drop retracts the definition, so
+/// a dropped type yields nothing here; a redefinition writes a new entity,
+/// so later (higher-id) definitions sort last and win on registration.
+fn current_schema_defs(entries: &[(Vec<u8>, Vec<u8>)]) -> Vec<(EntityId, String)> {
+    let mut by_entity: HashMap<EntityId, Vec<index::DecodedDatom>> = HashMap::new();
+    for (key, _) in entries {
+        if let Some(datom) = index::decode_datom_from_aevt(key) {
+            by_entity.entry(datom.entity).or_default().push(datom);
+        }
+    }
+
+    let mut out: Vec<(EntityId, String)> = Vec::new();
+    for (entity, mut datoms) in by_entity {
+        datoms.sort_by(|a, b| a.tx.cmp(&b.tx).then_with(|| a.added.cmp(&b.added)));
+        let mut current: Option<String> = None;
+        for d in datoms {
+            match (&d.value, d.added) {
+                (Value::String(json), true) => current = Some(json.to_string()),
+                (Value::String(json), false) if current.as_deref() == Some(json.as_ref()) => {
+                    current = None
+                }
+                _ => {}
+            }
+        }
+        if let Some(json) = current {
+            out.push((entity, json));
+        }
+    }
+    out.sort_by_key(|(e, _)| *e);
+    out
+}
+
+/// Recover the declared name from a stored schema-definition JSON blob.
+/// `parse_enum` selects the `EnumTypeDef` shape over `EntityTypeDef`.
+/// Both carry a top-level `name`, so a cheap untyped parse suffices and
+/// stays correct even if the two shapes diverge later.
+fn schema_def_name(json: &str, parse_enum: bool) -> Option<String> {
+    let _ = parse_enum;
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()?
+        .get("name")?
+        .as_str()
+        .map(|s| s.to_string())
+}
+
+/// Outcome of a `drop_type` / `drop_enum` call.
+#[derive(Debug, Clone)]
+pub struct DropResult {
+    /// The type or enum name that was dropped.
+    pub name: String,
+    /// `"type"` or `"enum"`.
+    pub kind: &'static str,
+    /// True for a hard purge (datoms deleted), false for a soft drop
+    /// (definition retracted, history and data preserved).
+    pub hard: bool,
+    /// Transaction id of the retraction. Present only for a soft drop;
+    /// a hard purge deletes datoms outside the transaction log.
+    pub tx_id: Option<TxId>,
+    /// Hard purge only: number of entities whose datoms were deleted
+    /// (data entities of the type plus its schema-definition entities).
+    pub entities_purged: u64,
+    /// Hard purge only: total index-key-bearing datoms deleted.
+    pub datoms_deleted: u64,
+    /// Hard purge only: number of *other* entities still holding a ref
+    /// to a purged entity (now dangling). Informational; these are left
+    /// untouched so unrelated types are never silently mutated.
+    pub dangling_refs: u64,
+    /// Non-fatal advisories (e.g. soft-dropping a type still referenced
+    /// by another live type).
+    pub warnings: Vec<String>,
 }
 
 /// Parse a "define" request (entity type) from JSON.

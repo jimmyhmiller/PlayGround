@@ -1,5 +1,11 @@
 //! Newline-delimited JSON protocol between the host and a widget process.
 //!
+//! This file is the single source of truth for the widget UI vocabulary:
+//! `Element` (the UI tree), `Style`, `HostEvent` (host → widget), and
+//! `WidgetMsg` (widget → host). Both hosting paths (in-process Rhai and
+//! subprocess) speak this vocabulary. For the authoring guide — handlers,
+//! the event model, examples — see `crates/widget-bevy/AUTHORING.md`.
+//!
 //! Widget → host (`{"type": …, …}`):
 //!   - `frame` : full retained UI tree to render
 //!   - `state` : opaque blob host persists in `PaneSnapshot.config`
@@ -230,6 +236,20 @@ pub struct TabItem {
     pub label: String,
 }
 
+/// One column definition in an Element::Table.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct TableColumn {
+    /// Header label shown in the top row.
+    pub header: String,
+    /// Fixed column width in px. `None` shares the remaining width
+    /// equally with other auto columns (CSS grid `1fr`).
+    #[serde(default)]
+    pub width: Option<f32>,
+    /// Horizontal text alignment for this column's cells (and header).
+    #[serde(default)]
+    pub align: Align,
+}
+
 /// One node in the widget's UI tree. Every frame is a single root
 /// `Element` that the host walks top-down to spawn Bevy entities.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -365,6 +385,48 @@ pub enum Element {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<Style>,
     },
+    /// Multi-line text input — like `Input`, but `Enter` inserts a
+    /// newline and the box is `rows` text-lines tall. Submit (the
+    /// `input-submit` event) is **Cmd/Ctrl+Enter**, not plain Enter, so
+    /// authors can write multi-line queries. Click to focus; emits the
+    /// same `input-change` / `input-submit` / `input-focus` events as
+    /// `Input`, carrying the full multi-line `value`. Hard newlines only
+    /// (no soft wrap). Caret supports arrows (incl. up/down across
+    /// lines), Home/End (line-aware), backspace, delete. No IME.
+    #[serde(rename = "textarea", alias = "text-area")]
+    TextArea {
+        id: String,
+        #[serde(default)]
+        value: String,
+        #[serde(default)]
+        placeholder: String,
+        /// Mirrored from the widget; set to drive focus programmatically.
+        #[serde(default)]
+        focused: bool,
+        /// Visible height in text lines. Defaults to 4.
+        #[serde(default = "default_textarea_rows")]
+        rows: u32,
+        #[serde(default = "default_input_width")]
+        width: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
+    },
+    /// Data table: a header row plus data rows laid out on a CSS grid.
+    /// `columns` defines the header text, per-column width (fixed px, or
+    /// `null` to share remaining space equally), and text alignment.
+    /// `rows` is row-major; each inner vector is one row's cells (missing
+    /// cells render empty, extras are ignored). Long cell text wraps
+    /// within its column. Set `zebra` for alternating row backgrounds.
+    Table {
+        #[serde(default)]
+        columns: Vec<TableColumn>,
+        #[serde(default)]
+        rows: Vec<Vec<String>>,
+        #[serde(default)]
+        zebra: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<Style>,
+    },
     /// Hyperlink. Click opens `url` in the system browser; no event is
     /// delivered back to the widget.
     Link { url: String, label: String },
@@ -450,6 +512,10 @@ fn default_swatch_size() -> f32 {
 
 fn default_input_width() -> f32 {
     160.0
+}
+
+fn default_textarea_rows() -> u32 {
+    4
 }
 
 /// One item inside an absolute-positioned `Canvas`. Position is
@@ -571,9 +637,10 @@ pub enum ImageRef {
 }
 
 /// Cross-axis alignment for hstack children.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Align {
+    #[default]
     Start,
     Center,
     End,

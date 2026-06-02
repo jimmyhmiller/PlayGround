@@ -375,7 +375,13 @@ impl Plugin for TerminalPlugin {
                 (
                     setup_camera_and_font,
                     register_terminal_kind,
-                    editor_bevy::setup_editor_font,
+                    // Runs after `setup_camera_and_font` so its `PaneFont` /
+                    // `PaneFontMetrics` (the themed JetBrains mono used by
+                    // every cosmic-text pane) deterministically replace the
+                    // terminal's SF Mono defaults as a matched pair. Without
+                    // the ordering, only one of the two resources might win
+                    // and the caret grid would drift from the rendered text.
+                    editor_bevy::setup_editor_font.after(setup_camera_and_font),
                     setup_ipc_listener,
                 ),
             )

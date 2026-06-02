@@ -1,10 +1,30 @@
-//! Widget panes: external processes that emit a UI-as-data stream.
+//! Widget panes: a UI-as-data tree (`Element`) rendered by the host,
+//! driven by events.
 //!
-//! Each pane spawns a subprocess and pipes NDJSON between it and the
-//! host. The widget owns the UI tree; the host owns layout, rendering,
-//! and input dispatch. See `protocol.rs` for the message shapes.
+//! ## Read this first: `../AUTHORING.md`
 //!
-//! Config keys consumed by `spawn`:
+//! `crates/widget-bevy/AUTHORING.md` is the authoring guide — the two
+//! hosting paths, the full handler / event model, and worked examples.
+//! Start there if you're writing a widget. Common gotcha it heads off:
+//! **UI events and the Claude Code bus are separate channels** (the bus
+//! handler is `on_bus`, *not* UI events).
+//!
+//! ## Two hosting paths
+//!
+//! - **In-process Rhai** — `rhai_widget.rs`. A `.rhai` script runs on a
+//!   worker thread and the host calls named handlers (`on_click`,
+//!   `on_toggle`, `on_input_change`, `on_bus`, …). Hot-reloaded from
+//!   `~/.terminal-bevy/widgets/`. This is the default for new widgets.
+//! - **Subprocess** — *this file*. Each pane spawns a child process and
+//!   pipes NDJSON: the host sends one `HostEvent` per line, the child
+//!   replies with `frame` / `state` / `title` messages. See
+//!   `protocol.rs` for the message shapes.
+//!
+//! Both paths share the same `Element` vocabulary (`protocol.rs`) and
+//! the same rendering / hit-testing / scroll / focused-input typing,
+//! which live in this file and `render.rs` / `layout.rs`.
+//!
+//! Config keys consumed by the subprocess `spawn`:
 //!   - `command` (string)  — shell command line to run; falls back to
 //!                            `WIDGET_BEVY_DEFAULT_CMD` env var, then a
 //!                            placeholder frame if neither is set.
@@ -210,11 +230,15 @@ pub struct WidgetInputFocus {
     /// Per-pane time accumulator for the caret blink. Reset to 0 every
     /// keystroke so the caret stays solid while typing.
     pub blink: f32,
+    /// True when the focused element is an `Element::TextArea`. Changes
+    /// keyboard handling: Enter inserts a newline (submit is
+    /// Cmd/Ctrl+Enter) and up/down arrows move between lines.
+    pub multiline: bool,
 }
 
 impl WidgetInputFocus {
     pub fn new(id: String) -> Self {
-        Self { id, value: String::new(), caret: 0, blink: 0.0 }
+        Self { id, value: String::new(), caret: 0, blink: 0.0, multiline: false }
     }
 }
 
@@ -269,6 +293,7 @@ impl Plugin for WidgetPlugin {
                     // frame is reflected in the same-frame redraw.
                     update_widget_hover,
                     rerender_widgets,
+                    blur_inputs_on_focus_change,
                     handle_widget_press,
                     handle_widget_input_typing,
                     handle_widget_edit_events,
@@ -1493,9 +1518,10 @@ fn handle_widget_press(
                 // of clearing.
                 let mut focus = WidgetInputFocus::new(ct.id.clone());
                 if let Some(frame) = render_state.current_frame.as_ref() {
-                    if let Some((value, _)) = find_input_value(frame, &ct.id) {
+                    if let Some((value, _, multiline)) = find_input_value(frame, &ct.id) {
                         focus.caret = value.chars().count();
                         focus.value = value;
+                        focus.multiline = multiline;
                     }
                 }
                 commands.entity(ev.pane).insert(focus);
@@ -1844,14 +1870,56 @@ fn open_url(url: &str) {
 /// Find the first `Element::Input` with id == `target` anywhere in the
 /// tree. Returns `(value, placeholder)`. Used to seed
 /// [`WidgetInputFocus`] when a click first focuses the input.
-fn find_input_value(el: &Element, target: &str) -> Option<(String, String)> {
+/// Char index of the first character of each line (line N starts at
+/// `starts[N]`). Always has at least one entry (`0`).
+fn line_starts(chars: &[char]) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (i, &c) in chars.iter().enumerate() {
+        if c == '\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
+/// `(line, column)` of a caret char-index within `chars`.
+fn caret_line_col(chars: &[char], caret: usize) -> (usize, usize) {
+    let mut line = 0;
+    let mut col = 0;
+    for &c in chars.iter().take(caret) {
+        if c == '\n' {
+            line += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}
+
+/// Number of characters on `line` (excluding its trailing newline).
+fn line_len(chars: &[char], starts: &[usize], line: usize) -> usize {
+    let start = starts[line];
+    let end = starts.get(line + 1).map(|n| n - 1).unwrap_or(chars.len());
+    end.saturating_sub(start)
+}
+
+/// Seed info for a focusable text element: `(value, placeholder,
+/// multiline)`. Returns the matching `Input` or `TextArea` by id.
+pub(crate) fn find_input_value(el: &Element, target: &str) -> Option<(String, String, bool)> {
     match el {
         Element::Input {
             id,
             value,
             placeholder,
             ..
-        } if id == target => Some((value.clone(), placeholder.clone())),
+        } if id == target => Some((value.clone(), placeholder.clone(), false)),
+        Element::TextArea {
+            id,
+            value,
+            placeholder,
+            ..
+        } if id == target => Some((value.clone(), placeholder.clone(), true)),
         Element::Vstack { children, .. }
         | Element::Hstack { children, .. }
         | Element::Frame { children, .. }
@@ -1863,6 +1931,50 @@ fn find_input_value(el: &Element, target: &str) -> Option<(String, String)> {
     }
 }
 
+/// Blur a widget's focused input when keyboard focus moves to another
+/// pane — clicking a different pane, switching projects, focusing the
+/// terminal, etc. Without this an `Input` / `TextArea` would keep its
+/// caret and keep capturing keystrokes after its pane lost focus.
+///
+/// Keyed on `FocusedPane` changing: we only ever blur the *previously*
+/// focused pane, so this never races with the same-frame click that
+/// focuses a new input.
+fn blur_inputs_on_focus_change(
+    mut commands: Commands,
+    focused: Res<pane_bevy::FocusedPane>,
+    mut prev: Local<Option<Entity>>,
+    q: Query<(
+        &WidgetInputFocus,
+        Option<&WidgetIO>,
+        Option<&crate::rhai_widget::RhaiWidget>,
+    )>,
+) {
+    if !focused.is_changed() {
+        return;
+    }
+    let now = focused.0;
+    if let Some(old) = *prev {
+        if Some(old) != now {
+            if let Ok((focus, io, rhai)) = q.get(old) {
+                if let Some(io) = io {
+                    let evt = HostEvent::InputFocus {
+                        id: focus.id.clone(),
+                        focused: false,
+                    };
+                    if let Ok(json) = serde_json::to_string(&evt) {
+                        let _ = io.tx.send(json);
+                    }
+                }
+                if let Some(rhai) = rhai {
+                    rhai.send_input_focus(focus.id.clone(), false);
+                }
+                commands.entity(old).remove::<WidgetInputFocus>();
+            }
+        }
+    }
+    *prev = now;
+}
+
 /// Process keyboard events for whichever widget pane currently has an
 /// `Element::Input` focused. Mutates the pane's [`WidgetInputFocus`]
 /// in place and forwards [`HostEvent::InputChange`] / [`HostEvent::
@@ -1870,10 +1982,20 @@ fn find_input_value(el: &Element, target: &str) -> Option<(String, String)> {
 fn handle_widget_input_typing(
     mut commands: Commands,
     mut keys: MessageReader<bevy::input::keyboard::KeyboardInput>,
-    mut q: Query<(Entity, &mut WidgetInputFocus, Option<&WidgetIO>)>,
+    modifiers: Res<ButtonInput<KeyCode>>,
+    mut q: Query<(
+        Entity,
+        &mut WidgetInputFocus,
+        Option<&WidgetIO>,
+        Option<&crate::rhai_widget::RhaiWidget>,
+    )>,
 ) {
     use bevy::input::keyboard::Key;
-    for (pane, mut focus, io) in &mut q {
+    let submit_modifier = modifiers.pressed(KeyCode::SuperLeft)
+        || modifiers.pressed(KeyCode::SuperRight)
+        || modifiers.pressed(KeyCode::ControlLeft)
+        || modifiers.pressed(KeyCode::ControlRight);
+    for (pane, mut focus, io, rhai) in &mut q {
         let mut value_changed = false;
         let mut submitted = false;
         let mut blurred = false;
@@ -1927,16 +2049,59 @@ fn handle_widget_input_typing(
                     focus.caret = (focus.caret + 1).min(n);
                     focus.blink = 0.0;
                 }
+                Key::ArrowUp => {
+                    let chars: Vec<char> = focus.value.chars().collect();
+                    let starts = line_starts(&chars);
+                    let (line, col) = caret_line_col(&chars, focus.caret);
+                    if line > 0 {
+                        let target = line - 1;
+                        let c = col.min(line_len(&chars, &starts, target));
+                        focus.caret = starts[target] + c;
+                    }
+                    focus.blink = 0.0;
+                }
+                Key::ArrowDown => {
+                    let chars: Vec<char> = focus.value.chars().collect();
+                    let starts = line_starts(&chars);
+                    let (line, col) = caret_line_col(&chars, focus.caret);
+                    if line + 1 < starts.len() {
+                        let target = line + 1;
+                        let c = col.min(line_len(&chars, &starts, target));
+                        focus.caret = starts[target] + c;
+                    }
+                    focus.blink = 0.0;
+                }
                 Key::Home => {
-                    focus.caret = 0;
+                    // Line-aware: jump to the start of the current line
+                    // (same as start-of-value for single-line inputs).
+                    let chars: Vec<char> = focus.value.chars().collect();
+                    let starts = line_starts(&chars);
+                    let (line, _) = caret_line_col(&chars, focus.caret);
+                    focus.caret = starts[line];
                     focus.blink = 0.0;
                 }
                 Key::End => {
-                    focus.caret = focus.value.chars().count();
+                    // Line-aware: jump to the end of the current line.
+                    let chars: Vec<char> = focus.value.chars().collect();
+                    let starts = line_starts(&chars);
+                    let (line, _) = caret_line_col(&chars, focus.caret);
+                    focus.caret = starts[line] + line_len(&chars, &starts, line);
                     focus.blink = 0.0;
                 }
                 Key::Enter => {
-                    submitted = true;
+                    // In a TextArea, plain Enter inserts a newline and
+                    // submit is Cmd/Ctrl+Enter. Single-line inputs submit
+                    // on plain Enter.
+                    if focus.multiline && !submit_modifier {
+                        let prev: String = focus.value.chars().take(focus.caret).collect();
+                        let after: String = focus.value.chars().skip(focus.caret).collect();
+                        focus.value = format!("{}\n{}", prev, after);
+                        focus.caret += 1;
+                        focus.blink = 0.0;
+                        value_changed = true;
+                    } else {
+                        submitted = true;
+                    }
                 }
                 Key::Escape => {
                     blurred = true;
@@ -1944,22 +2109,32 @@ fn handle_widget_input_typing(
                 _ => {}
             }
         }
-        if value_changed && let Some(io) = io {
-            let evt = HostEvent::InputChange {
-                id: focus.id.clone(),
-                value: focus.value.clone(),
-            };
-            if let Ok(json) = serde_json::to_string(&evt) {
-                let _ = io.tx.send(json);
+        if value_changed {
+            if let Some(io) = io {
+                let evt = HostEvent::InputChange {
+                    id: focus.id.clone(),
+                    value: focus.value.clone(),
+                };
+                if let Ok(json) = serde_json::to_string(&evt) {
+                    let _ = io.tx.send(json);
+                }
+            }
+            if let Some(rhai) = rhai {
+                rhai.send_input_change(focus.id.clone(), focus.value.clone());
             }
         }
-        if submitted && let Some(io) = io {
-            let evt = HostEvent::InputSubmit {
-                id: focus.id.clone(),
-                value: focus.value.clone(),
-            };
-            if let Ok(json) = serde_json::to_string(&evt) {
-                let _ = io.tx.send(json);
+        if submitted {
+            if let Some(io) = io {
+                let evt = HostEvent::InputSubmit {
+                    id: focus.id.clone(),
+                    value: focus.value.clone(),
+                };
+                if let Ok(json) = serde_json::to_string(&evt) {
+                    let _ = io.tx.send(json);
+                }
+            }
+            if let Some(rhai) = rhai {
+                rhai.send_input_submit(focus.id.clone(), focus.value.clone());
             }
         }
         if blurred {
@@ -1972,8 +2147,69 @@ fn handle_widget_input_typing(
                     let _ = io.tx.send(json);
                 }
             }
+            if let Some(rhai) = rhai {
+                rhai.send_input_focus(focus.id.clone(), false);
+            }
             commands.entity(pane).remove::<WidgetInputFocus>();
         }
+    }
+}
+
+#[cfg(test)]
+mod line_math_tests {
+    use super::*;
+
+    #[test]
+    fn line_col_and_lens() {
+        let chars: Vec<char> = "ab\ncde\nf".chars().collect();
+        let starts = line_starts(&chars);
+        assert_eq!(starts, vec![0, 3, 7]);
+        // caret after "ab\ncd" → line 1, col 2
+        assert_eq!(caret_line_col(&chars, 5), (1, 2));
+        // caret at very start
+        assert_eq!(caret_line_col(&chars, 0), (0, 0));
+        assert_eq!(line_len(&chars, &starts, 0), 2); // "ab"
+        assert_eq!(line_len(&chars, &starts, 1), 3); // "cde"
+        assert_eq!(line_len(&chars, &starts, 2), 1); // "f"
+    }
+
+    #[test]
+    fn single_line_is_one_line() {
+        let chars: Vec<char> = "hello".chars().collect();
+        let starts = line_starts(&chars);
+        assert_eq!(starts, vec![0]);
+        assert_eq!(caret_line_col(&chars, 3), (0, 3));
+        assert_eq!(line_len(&chars, &starts, 0), 5);
+    }
+
+    #[test]
+    fn finds_textarea_as_multiline() {
+        let frame = Element::TextArea {
+            id: "q".into(),
+            value: "x".into(),
+            placeholder: String::new(),
+            focused: false,
+            rows: 4,
+            width: 200.0,
+            style: None,
+        };
+        let (value, _, multiline) = find_input_value(&frame, "q").unwrap();
+        assert_eq!(value, "x");
+        assert!(multiline);
+    }
+
+    #[test]
+    fn finds_input_as_single_line() {
+        let frame = Element::Input {
+            id: "q".into(),
+            value: "y".into(),
+            placeholder: String::new(),
+            focused: false,
+            width: 160.0,
+            style: None,
+        };
+        let (_, _, multiline) = find_input_value(&frame, "q").unwrap();
+        assert!(!multiline);
     }
 }
 

@@ -258,6 +258,35 @@ impl Client {
         Ok(DefineResult { tx_id })
     }
 
+    /// Drop an entity type. `hard == false` is a soft drop (definition
+    /// retracted, data and history preserved); `hard == true` purges the
+    /// type and all its datoms. Returns the raw `data` object so callers
+    /// can inspect `mode`, `entities_purged`, `dangling_refs`, etc.
+    pub fn drop_type(&mut self, name: &str, hard: bool) -> Result<serde_json::Value> {
+        let payload = serde_json::json!({
+            "type": "drop_type",
+            "name": name,
+            "hard": hard,
+        });
+        let resp = self.send_and_check(payload)?;
+        resp.get("data")
+            .cloned()
+            .ok_or_else(|| ClientError::UnexpectedResponse("missing 'data'".into()))
+    }
+
+    /// Drop an enum type. Soft/hard semantics mirror [`Client::drop_type`].
+    pub fn drop_enum(&mut self, name: &str, hard: bool) -> Result<serde_json::Value> {
+        let payload = serde_json::json!({
+            "type": "drop_enum",
+            "name": name,
+            "hard": hard,
+        });
+        let resp = self.send_and_check(payload)?;
+        resp.get("data")
+            .cloned()
+            .ok_or_else(|| ClientError::UnexpectedResponse("missing 'data'".into()))
+    }
+
     /// Execute a transaction with a list of operation JSON values.
     ///
     /// Each element should be an assert / retract / retract_entity object,

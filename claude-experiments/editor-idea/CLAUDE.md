@@ -22,6 +22,14 @@ Same for "the editor" → `editor-bevy`.
   content_root, owns caret/selection visuals, scroll, keyboard input,
   syntax highlight. Provides `EditorPlugin` (standalone) and
   `EditorEmbedPlugin` (for hosts that already own camera/font).
+- `crates/widget-bevy` — retained-UI widget panes. Two hosting paths
+  sharing one `Element` vocabulary (`src/protocol.rs`): **in-process
+  Rhai** scripts (`src/rhai_widget.rs`, worker thread + named handlers
+  like `on_click`/`on_toggle`/`on_input_change`/`on_bus`, hot reload from
+  `~/.terminal-bevy/widgets/`) and **subprocess** widgets (`src/lib.rs`,
+  NDJSON `HostEvent`/`WidgetMsg` over stdio). UI events and the Claude
+  Code bus are SEPARATE channels — `on_bus` is the bus, not UI. See
+  `crates/widget-bevy/AUTHORING.md` for the full handler/event model.
 - `crates/terminal-bevy` — terminal-emulator pane on top of
   `libghostty-vt`. Each terminal is an Entity; the `!Send` VT runtime
   lives in a `NonSend<TerminalStore>` keyed by entity. Per-cell

@@ -40,7 +40,7 @@ use crate::gc::{ObjHeader, TypeInfo, VarLenKind};
 use crate::hash::Hash;
 use crate::resolve::{ResolvedDef, ResolvedModule};
 use crate::runtime::{
-    Runtime, Thread, ai_array_get, ai_array_len, ai_array_new, ai_array_set, ai_bytes_copy,
+    Runtime, Thread, ai_array_get, ai_atom_swap_local, ai_array_len, ai_array_new, ai_array_set, ai_bytes_copy,
     ai_bytes_get, ai_bytes_new, ai_bytes_set, ai_bytes_slice, ai_gc_alloc_closure, ai_gc_box_int,
     ai_gc_force_collect, ai_gc_lookup_code, ai_gc_unbox_int, ai_panic, ai_str_concat, ai_str_eq,
     ai_str_len, ai_str_new, closure_offsets, thread_offsets,
@@ -585,10 +585,6 @@ struct Codegen<'ctx> {
     extern_net_at: Option<FunctionValue<'ctx>>,
     /// Located-state (distributed atom) runtime fns. Each returns a
     /// heap `Result<T, Failure>` pointer, like `ai_net_at`.
-    extern_atom_deref: Option<FunctionValue<'ctx>>,
-    extern_atom_set: Option<FunctionValue<'ctx>>,
-    extern_atom_init: Option<FunctionValue<'ctx>>,
-    extern_atom_swap: Option<FunctionValue<'ctx>>,
     extern_box_int: Option<FunctionValue<'ctx>>,
     extern_unbox_int: Option<FunctionValue<'ctx>>,
     extern_force_collect: Option<FunctionValue<'ctx>>,
@@ -606,6 +602,7 @@ struct Codegen<'ctx> {
     extern_array_len: Option<FunctionValue<'ctx>>,
     extern_array_get: Option<FunctionValue<'ctx>>,
     extern_array_set: Option<FunctionValue<'ctx>>,
+    extern_atom_swap_local: Option<FunctionValue<'ctx>>,
 
     /// In-flight tail-call context: only populated while compiling a
     /// single fn body. Calls inside the body that target this fn's
@@ -751,10 +748,6 @@ impl<'ctx> Codegen<'ctx> {
             extern_alloc_closure: None,
             extern_lookup_code: None,
             extern_net_at: None,
-            extern_atom_deref: None,
-            extern_atom_set: None,
-            extern_atom_init: None,
-            extern_atom_swap: None,
             extern_box_int: None,
             extern_unbox_int: None,
             extern_force_collect: None,
@@ -772,6 +765,7 @@ impl<'ctx> Codegen<'ctx> {
             extern_array_len: None,
             extern_array_get: None,
             extern_array_set: None,
+            extern_atom_swap_local: None,
             tail_ctx: None,
             def_signatures: HashMap::new(),
             struct_field_types: HashMap::new(),
@@ -938,40 +932,6 @@ impl<'ctx> Codegen<'ctx> {
             self.module
                 .add_function("ai_net_at", net_at_ty, Some(Linkage::External));
         self.extern_net_at = Some(net_at);
-
-        // Located-state atom ops. Signatures (all return a heap
-        // `Result` pointer):
-        //   ai_atom_deref(thread, atom_ptr)
-        //   ai_atom_set  (thread, atom_ptr, value_ptr)
-        //   ai_atom_init (thread, atom_ptr, value_ptr)
-        //   ai_atom_swap (thread, atom_ptr, closure_ptr)
-        let atom2_ty = self
-            .ptr_ty
-            .fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
-        let atom3_ty = self.ptr_ty.fn_type(
-            &[self.ptr_ty.into(), self.ptr_ty.into(), self.ptr_ty.into()],
-            false,
-        );
-        self.extern_atom_deref = Some(self.module.add_function(
-            "ai_atom_deref",
-            atom2_ty,
-            Some(Linkage::External),
-        ));
-        self.extern_atom_set = Some(self.module.add_function(
-            "ai_atom_set",
-            atom3_ty,
-            Some(Linkage::External),
-        ));
-        self.extern_atom_init = Some(self.module.add_function(
-            "ai_atom_init",
-            atom3_ty,
-            Some(Linkage::External),
-        ));
-        self.extern_atom_swap = Some(self.module.add_function(
-            "ai_atom_swap",
-            atom3_ty,
-            Some(Linkage::External),
-        ));
 
         // ai_gc_box_int(thread, i64) -> *u8 — boxes an Int into a
         // BoxedInt heap object so generic-typed slots can store it.
@@ -1164,6 +1124,23 @@ impl<'ctx> Codegen<'ctx> {
             Some(Linkage::External),
         );
         self.extern_array_set = Some(array_set);
+
+        // ai_atom_swap(thread, cell_array, i, updater_closure) -> *u8
+        // The lock-free atom primitive: load slot, run closure, CAS,
+        // retry. Returns the installed value pointer.
+        let atom_swap_ty = self.ptr_ty.fn_type(
+            &[
+                self.ptr_ty.into(),
+                self.ptr_ty.into(),
+                self.i64_ty.into(),
+                self.ptr_ty.into(),
+            ],
+            false,
+        );
+        let atom_swap =
+            self.module
+                .add_function("ai_atom_swap_local", atom_swap_ty, Some(Linkage::External));
+        self.extern_atom_swap_local = Some(atom_swap);
     }
 
     // -------------------------------------------------------------------------
@@ -3270,81 +3247,6 @@ impl<'ctx> Codegen<'ctx> {
                     .map_err(|e| CodegenError::JitInit(format!("build_call ai_net_at: {}", e)))?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
             }
-            Expr::BuiltinRef(name)
-                if crate::resolve::parse_atom_builtin_name(name).is_some() =>
-            {
-                use crate::resolve::AtomOp;
-                let (op, _r, _f) = crate::resolve::parse_atom_builtin_name(name).unwrap();
-                let want = if op == AtomOp::Deref { 1 } else { 2 };
-                if args.len() != want {
-                    return Err(CodegenError::UnknownBuiltin {
-                        name: name.clone(),
-                        arity: args.len(),
-                    });
-                }
-                // Arg 0: the atom handle (struct pointer).
-                let handle_v = self.compile_expr(&args[0], env, ctx)?;
-                let handle_ptr = handle_v.as_closure().map_err(|_| {
-                    CodegenError::TypeMismatch {
-                        what: "atom op: handle must be an Atom struct pointer".to_owned(),
-                    }
-                })?;
-                // Pick the runtime fn and assemble args. set/init/swap
-                // take a second pointer; a bare-Int value is boxed first
-                // (the cell value travels as a heap object).
-                let (fv, call_args): (FunctionValue, Vec<_>) = match op {
-                    AtomOp::Deref => (
-                        self.extern_atom_deref.expect("ai_atom_deref declared"),
-                        vec![ctx.thread_param.into(), handle_ptr.into()],
-                    ),
-                    AtomOp::Set | AtomOp::Init | AtomOp::Swap => {
-                        let arg_v = self.compile_expr(&args[1], env, ctx)?;
-                        let arg_ptr = match arg_v {
-                            Value::Closure(p) => p,
-                            Value::Int(iv) => {
-                                let box_fn =
-                                    self.extern_box_int.expect("ai_gc_box_int declared");
-                                self.builder
-                                    .build_call(
-                                        box_fn,
-                                        &[ctx.thread_param.into(), iv.into()],
-                                        "box_atom_val",
-                                    )
-                                    .map_err(|e| CodegenError::JitInit(format!(
-                                        "build_call ai_gc_box_int (atom val): {}", e
-                                    )))?
-                                    .as_any_value_enum()
-                                    .into_pointer_value()
-                            }
-                        };
-                        let fv = match op {
-                            AtomOp::Set => self.extern_atom_set.expect("ai_atom_set declared"),
-                            AtomOp::Init => {
-                                self.extern_atom_init.expect("ai_atom_init declared")
-                            }
-                            AtomOp::Swap => {
-                                self.extern_atom_swap.expect("ai_atom_swap declared")
-                            }
-                            AtomOp::Deref => unreachable!(),
-                        };
-                        (
-                            fv,
-                            vec![
-                                ctx.thread_param.into(),
-                                handle_ptr.into(),
-                                arg_ptr.into(),
-                            ],
-                        )
-                    }
-                };
-                let call = self
-                    .builder
-                    .build_call(fv, &call_args, "atom_result")
-                    .map_err(|e| {
-                        CodegenError::JitInit(format!("build_call atom op: {}", e))
-                    })?;
-                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
-            }
             Expr::BuiltinRef(name) if name == "core/string.len" => {
                 if args.len() != 1 {
                     return Err(CodegenError::UnknownBuiltin {
@@ -3669,6 +3571,49 @@ impl<'ctx> Codegen<'ctx> {
                         format!("build_call ai_array_set: {}", e),
                     ))?;
                 Ok(Value::Int(call.as_any_value_enum().into_int_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/atom.swap" => {
+                // The ONE atom primitive: lock-free swap. Args:
+                //   (cell_array, slot_index, updater_closure)
+                // The runtime fn runs the full CAS retry loop — load the
+                // slot pointer, invoke the closure to produce a new
+                // object, compare-exchange the real pointers, retry on
+                // failure. Works for ANY value type because it operates
+                // on raw object identity (the closure does its own
+                // box/unbox via the uniform ABI). Returns the installed
+                // value pointer.
+                if args.len() != 3 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let elem_is_int = array_element_is_int(&self.infer_type(&args[0], env));
+                let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let i = self.compile_expr(&args[1], env, ctx)?.as_int()?;
+                let f = self.compile_expr(&args[2], env, ctx)?.as_closure()?;
+                let fv = self.extern_atom_swap_local.expect("ai_atom_swap declared");
+                let call = self
+                    .builder
+                    .build_call(
+                        fv,
+                        &[ctx.thread_param.into(), a.into(), i.into(), f.into()],
+                        "atom_swap_result",
+                    )
+                    .map_err(|e| CodegenError::JitInit(format!("build_call ai_atom_swap: {}", e)))?;
+                let res_ptr = call.as_any_value_enum().into_pointer_value();
+                if elem_is_int {
+                    let unbox_fn = self.extern_unbox_int.expect("ai_gc_unbox_int declared");
+                    let unboxed = self
+                        .builder
+                        .build_call(unbox_fn, &[res_ptr.into()], "atom_swap_unboxed")
+                        .map_err(|e| CodegenError::JitInit(format!(
+                            "build_call ai_gc_unbox_int (atom.swap): {}", e
+                        )))?;
+                    Ok(Value::Int(unboxed.as_any_value_enum().into_int_value()))
+                } else {
+                    Ok(Value::Closure(res_ptr))
+                }
             }
             Expr::BuiltinRef(name) if name == "core/gc.collect" => {
                 // No language-level args — but the runtime fn needs
@@ -4653,38 +4598,6 @@ impl<'ctx> Codegen<'ctx> {
                             },
                         ],
                         ret: Box::new(ret),
-                    }
-                } else if let Some((op, r, f)) =
-                    crate::resolve::parse_atom_builtin_name(name)
-                {
-                    use crate::resolve::AtomOp;
-                    // Polymorphic shapes so the Call unifier recovers the
-                    // element type T (= TypeVar(0)) and substitutes it
-                    // into `Result<T, Failure>`. The handle's own head is
-                    // a throwaway TypeVar so `Apply` heads unify.
-                    let t = Type::TypeVar(0);
-                    let result = Type::Apply(
-                        Box::new(Type::TypeRef(r)),
-                        vec![t.clone(), Type::TypeRef(f)],
-                    );
-                    let handle = Type::Apply(Box::new(Type::TypeVar(1)), vec![t.clone()]);
-                    let params = match op {
-                        // deref(a: Atom<T>) -> Result<T, F>
-                        AtomOp::Deref => vec![handle],
-                        // set/init(a, v: T) -> Result<T, F>
-                        AtomOp::Set | AtomOp::Init => vec![Type::TypeVar(1), t.clone()],
-                        // swap(a, f: fn(T) -> T) -> Result<T, F>
-                        AtomOp::Swap => vec![
-                            Type::TypeVar(1),
-                            Type::FnType {
-                                params: vec![t.clone()],
-                                ret: Box::new(t.clone()),
-                            },
-                        ],
-                    };
-                    Type::FnType {
-                        params,
-                        ret: Box::new(result),
                     }
                 } else if let Some(sig) = array_builtin_fn_type(name) {
                     // Generic array builtins: represented as
@@ -5868,8 +5781,20 @@ fn array_builtin_fn_type(name: &str) -> Option<Type> {
             ret: Box::new(tv),
         }),
         "core/array.set" => Some(Type::FnType {
-            params: vec![array_t(tv.clone()), int(), tv],
+            params: vec![array_t(tv.clone()), int(), tv.clone()],
             ret: Box::new(int()),
+        }),
+        // atom_swap_slot(cell: Array<T>, i: Int, f: fn(T)->T) -> T
+        "core/atom.swap" => Some(Type::FnType {
+            params: vec![
+                array_t(tv.clone()),
+                int(),
+                Type::FnType {
+                    params: vec![tv.clone()],
+                    ret: Box::new(tv.clone()),
+                },
+            ],
+            ret: Box::new(tv),
         }),
         _ => None,
     }
@@ -6344,18 +6269,6 @@ impl<'ctx> Jit<'ctx> {
         if let Some(net_at_fn) = cm.module.get_function("ai_net_at") {
             engine.add_global_mapping(&net_at_fn, crate::net::ai_net_at as usize);
         }
-        if let Some(f) = cm.module.get_function("ai_atom_deref") {
-            engine.add_global_mapping(&f, crate::net::ai_atom_deref as usize);
-        }
-        if let Some(f) = cm.module.get_function("ai_atom_set") {
-            engine.add_global_mapping(&f, crate::net::ai_atom_set as usize);
-        }
-        if let Some(f) = cm.module.get_function("ai_atom_init") {
-            engine.add_global_mapping(&f, crate::net::ai_atom_init as usize);
-        }
-        if let Some(f) = cm.module.get_function("ai_atom_swap") {
-            engine.add_global_mapping(&f, crate::net::ai_atom_swap as usize);
-        }
         if let Some(box_fn) = cm.module.get_function("ai_gc_box_int") {
             engine.add_global_mapping(&box_fn, ai_gc_box_int as usize);
         }
@@ -6406,6 +6319,9 @@ impl<'ctx> Jit<'ctx> {
         }
         if let Some(f) = cm.module.get_function("ai_array_set") {
             engine.add_global_mapping(&f, ai_array_set as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_atom_swap_local") {
+            engine.add_global_mapping(&f, ai_atom_swap_local as usize);
         }
 
         // User-defined `extern fn`s declared via the FFI registry.
@@ -6640,18 +6556,6 @@ impl<'ctx> IncrementalJit<'ctx> {
         if let Some(net_at_fn) = module.get_function("ai_net_at") {
             engine.add_global_mapping(&net_at_fn, crate::net::ai_net_at as usize);
         }
-        if let Some(f) = module.get_function("ai_atom_deref") {
-            engine.add_global_mapping(&f, crate::net::ai_atom_deref as usize);
-        }
-        if let Some(f) = module.get_function("ai_atom_set") {
-            engine.add_global_mapping(&f, crate::net::ai_atom_set as usize);
-        }
-        if let Some(f) = module.get_function("ai_atom_init") {
-            engine.add_global_mapping(&f, crate::net::ai_atom_init as usize);
-        }
-        if let Some(f) = module.get_function("ai_atom_swap") {
-            engine.add_global_mapping(&f, crate::net::ai_atom_swap as usize);
-        }
         if let Some(box_fn) = module.get_function("ai_gc_box_int") {
             engine.add_global_mapping(&box_fn, ai_gc_box_int as usize);
         }
@@ -6705,6 +6609,9 @@ impl<'ctx> IncrementalJit<'ctx> {
         }
         if let Some(f) = module.get_function("ai_array_set") {
             engine.add_global_mapping(&f, ai_array_set as usize);
+        }
+        if let Some(f) = module.get_function("ai_atom_swap_local") {
+            engine.add_global_mapping(&f, ai_atom_swap_local as usize);
         }
 
         // ---- User-defined externs: walk every `ext/<name>` LLVM

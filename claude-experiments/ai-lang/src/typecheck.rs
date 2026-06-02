@@ -586,6 +586,19 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
             vec![array_t(Type::TypeVar(0)), int_t(), Type::TypeVar(0)],
             int_t(),
         )),
+        // The atom primitive: atom_swap_slot(cell: Array<T>, i: Int,
+        // f: fn(T) -> T) -> T. Runs the lock-free CAS retry loop.
+        "core/atom.swap" => Some((
+            vec![
+                array_t(Type::TypeVar(0)),
+                int_t(),
+                Type::FnType {
+                    params: vec![Type::TypeVar(0)],
+                    ret: Box::new(Type::TypeVar(0)),
+                },
+            ],
+            Type::TypeVar(0),
+        )),
 
         // Float arithmetic — operands and result are Float.
         "core/f64.add" | "core/f64.sub" | "core/f64.mul" | "core/f64.div"
@@ -1624,73 +1637,6 @@ fn typecheck_call(
             return Ok(Type::Apply(
                 Box::new(Type::TypeRef(result_hash)),
                 vec![thunk_ret, Type::TypeRef(failure_hash)],
-            ));
-        }
-    }
-
-    // ---- core/atom.<op>#<result>#<failure> located-state ops ----
-    if let Expr::BuiltinRef(name) = callee {
-        if let Some((op, result_hash, failure_hash)) =
-            crate::resolve::parse_atom_builtin_name(name)
-        {
-            use crate::resolve::AtomOp;
-            let want = if op == AtomOp::Deref { 1 } else { 2 };
-            if args.len() != want {
-                return Err(TypeError::ArityMismatch {
-                    what: format!("call to {}", name),
-                    expected: want,
-                    got: args.len(),
-                });
-            }
-            // Arg 0 is always the atom handle (a struct pointer).
-            let handle_ty = typecheck_expr(&args[0], locals, cache)?;
-            // Element type T: from the handle's instantiation for deref,
-            // from the value arg for set/init, from the updater's return
-            // for swap.
-            let elem_ty = match op {
-                AtomOp::Deref => match &handle_ty {
-                    Type::Apply(_, a) if !a.is_empty() => a[0].clone(),
-                    _ => {
-                        return Err(TypeError::TypeMismatch {
-                            context: "atom_deref handle (need Atom<T> with known T)"
-                                .to_owned(),
-                            expected: Type::Apply(
-                                Box::new(Type::TypeRef(Hash([0u8; 32]))),
-                                vec![int_t()],
-                            ),
-                            got: handle_ty.clone(),
-                        });
-                    }
-                },
-                AtomOp::Set | AtomOp::Init => typecheck_expr(&args[1], locals, cache)?,
-                AtomOp::Swap => {
-                    let f_ty = typecheck_expr(&args[1], locals, cache)?;
-                    match &f_ty {
-                        Type::FnType { ret, .. } => (**ret).clone(),
-                        _ => {
-                            return Err(TypeError::TypeMismatch {
-                                context: "atom_swap updater (must be fn(T) -> T)".to_owned(),
-                                expected: Type::FnType {
-                                    params: vec![int_t()],
-                                    ret: Box::new(int_t()),
-                                },
-                                got: f_ty,
-                            });
-                        }
-                    }
-                }
-            };
-            if type_contains_ptr(&elem_ty) {
-                return Err(TypeError::Unsupported(
-                    "atom element type may not contain a `Ptr`: a raw local machine \
-                     address is meaningless on another node. Use a wire-portable type \
-                     (Int/String/Bytes/struct/enum)."
-                        .to_owned(),
-                ));
-            }
-            return Ok(Type::Apply(
-                Box::new(Type::TypeRef(result_hash)),
-                vec![elem_ty, Type::TypeRef(failure_hash)],
             ));
         }
     }

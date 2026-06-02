@@ -46,11 +46,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Inside the button: coverage = 1, AA at the edge.
     let inside_coverage = 1.0 - smoothstep(-0.5, 0.5, d);
 
-    // Body fill + inner border.
+    // Body fill + inner border. The border is the ring within `bw`
+    // pixels of the edge: coverage rises to 1 as d approaches 0 (the
+    // edge) and falls to 0 once deeper than `bw` into the interior.
     let bw = params.border_width;
     let border_coverage = select(
         0.0,
-        1.0 - smoothstep(-bw - 0.5, -bw + 0.5, d),
+        smoothstep(-bw - 0.5, -bw + 0.5, d),
         bw > 0.0,
     );
     // Respect the fill's own alpha so outline/ghost buttons stay

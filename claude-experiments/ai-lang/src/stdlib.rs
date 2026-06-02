@@ -2991,6 +2991,36 @@ def pmap_contains<V>(m: PMap<V>, key: String) -> Int =
 def pmap_keys<V>(m: PMap<V>) -> List<String> =
     pmap_fold(m, Nil, |acc: List<String>, k: String, v: V| Cons(ListCell { head: k, tail: acc }))
 
+// ---- Atom<T>: a local, lock-free atomic reference (Clojure-style) ----
+//
+// An atom is a mutable identity over an immutable value. Purely LOCAL,
+// nothing to do with the network. The escape hatch for shared mutable
+// state. Storage is a 1-slot array; the slot holds a pointer to the
+// current immutable value.
+//
+// `swap(a, f)` is the Clojure move and the heart of it: read the current
+// value, apply the PURE function f, and lock-free compare-and-set the
+// result in, retrying if another writer beat us. NO locks: it is one
+// hardware compare-exchange (the `atom_swap_slot` primitive). Correct
+// because values are immutable, so identity-CAS on the slot pointer is
+// enough. f may run more than once under contention, hence must be pure.
+//
+// Works for ANY value type with zero user thought (Int, String, PMap,
+// structs, ...): the primitive moves raw object pointers; the closure
+// handles its own boxing via the uniform ABI.
+struct Atom<T> { cell: Array<T> }
+
+def atom<T>(init: T) -> Atom<T> = {
+    let c = array_new(1);
+    let _s = array_set(c, 0, init);
+    Atom { cell: c }
+}
+def deref<T>(a: Atom<T>) -> T = array_get(a.cell, 0)
+// swap = the lock-free CAS retry loop, in the runtime primitive.
+def swap<T>(a: Atom<T>, f: fn(T) -> T) -> T = atom_swap_slot(a.cell, 0, f)
+// reset = a swap that ignores the old value.
+def reset<T>(a: Atom<T>, v: T) -> T = swap(a, |_old: T| v)
+
 "#;
 
 // =============================================================================
@@ -3241,24 +3271,160 @@ mod tests {
     }
 
     #[test]
-    fn tmp_probe_pmap_ops() {
+    fn pmap_remove_fold_keys() {
         init();
         let ctx = Context::create();
-        let driver = include_str!("probe_ops.ail.txt");
+        let driver = "
+            def build4() -> PMap<Int> =
+                pmap_assoc(pmap_assoc(pmap_assoc(pmap_assoc(
+                    pmap_empty(), \"a\", 1), \"b\", 2), \"c\", 3), \"d\", 4)
+
+            // remove: size shrinks, key gone, others survive, original intact
+            def t_rm_size() -> Int = pmap_size(pmap_remove(build4(), \"b\"))
+            def t_rm_gone() -> Int =
+                match pmap_get(pmap_remove(build4(), \"b\"), \"b\") { Some(v) => 0 - 100, None => 0 }
+            def t_rm_survivors() -> Int = {
+                let m2 = pmap_remove(build4(), \"b\");
+                match pmap_get(m2, \"a\") {
+                    Some(va) => match pmap_get(m2, \"d\") { Some(vd) => va + vd, None => 0 - 1 },
+                    None => 0 - 2
+                }
+            }
+            def t_rm_immutable() -> Int =
+                match pmap_get(build4(), \"b\") { Some(v) => v, None => 0 - 9 }
+            def t_rm_missing_size() -> Int = pmap_size(pmap_remove(build4(), \"zzz\"))
+            def t_rm_then_readd() -> Int = {
+                let m2 = pmap_assoc(pmap_remove(build4(), \"b\"), \"b\", 99);
+                match pmap_get(m2, \"b\") { Some(v) => v, None => 0 - 1 }
+            }
+
+            // contains
+            def t_has() -> Int = pmap_contains(build4(), \"c\")
+            def t_hasnt() -> Int = pmap_contains(build4(), \"nope\")
+
+            // fold: sum of all values
+            def t_fold_sum() -> Int =
+                pmap_fold(build4(), 0, |acc: Int, k: String, v: Int| acc + v)
+            // fold: total key-length (string V-agnostic over keys)
+            def t_fold_keylen() -> Int =
+                pmap_fold(build4(), 0, |acc: Int, k: String, v: Int| acc + string_len(k))
+
+            // keys: count via list length
+            def t_key_count() -> Int = list_length(pmap_keys(build4()))
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(
+                        &names[n],
+                    ))
+                    .unwrap()
+                    .call(rt.thread_ptr())
+            };
+            assert_eq!(f("t_rm_size"), 3, "remove shrinks size 4->3");
+            assert_eq!(f("t_rm_gone"), 0, "removed key absent");
+            assert_eq!(f("t_rm_survivors"), 5, "a(1)+d(4) survive");
+            assert_eq!(f("t_rm_immutable"), 2, "remove returns new map; original keeps b");
+            assert_eq!(f("t_rm_missing_size"), 4, "removing absent key keeps size");
+            assert_eq!(f("t_rm_then_readd"), 99, "can re-add after remove");
+            assert_eq!(f("t_has"), 1);
+            assert_eq!(f("t_hasnt"), 0);
+            assert_eq!(f("t_fold_sum"), 10, "1+2+3+4");
+            assert_eq!(f("t_fold_keylen"), 4, "four 1-char keys");
+            assert_eq!(f("t_key_count"), 4, "pmap_keys returns all 4");
+        }
+    }
+
+    #[test]
+    fn atom_basic_deref_swap_reset() {
+        init();
+        let ctx = Context::create();
+        // The real local atom: deref / swap / reset over various value
+        // types, all through the SAME generic Atom<T> + lock-free swap.
+        let driver = "
+            def t_int() -> Int = {
+                let a = atom(0);
+                let _1 = swap(a, |x: Int| x + 5);
+                let _2 = swap(a, |x: Int| x * 3);   // (0+5)*3 = 15
+                deref(a)
+            }
+            def t_reset() -> Int = {
+                let a = atom(100);
+                let _1 = reset(a, 42);
+                deref(a)
+            }
+            def t_swap_returns_new() -> Int = {
+                let a = atom(10);
+                swap(a, |x: Int| x + 1)             // returns 11
+            }
+            def empty_int_map() -> PMap<Int> = pmap_empty()
+            def t_pmap() -> Int = {
+                let a = atom(empty_int_map());
+                let _1 = swap(a, |m: PMap<Int>| pmap_assoc(m, \"k\", 7));
+                let _2 = swap(a, |m: PMap<Int>| pmap_assoc(m, \"k\", 9));
+                let m = deref(a);
+                match pmap_get(m, \"k\") { Some(v) => v, None => 0 - 1 }
+            }
+            def t_string() -> Int = {
+                let a = atom(\"hi\");
+                let _1 = swap(a, |s: String| string_concat(s, \"!!!\"));
+                string_len(deref(a))               // \"hi!!!\" = 5
+            }
+        ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
             let f = |n: &str| {
                 jit.engine
                     .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names[n]))
-                    .unwrap().call(rt.thread_ptr())
+                    .unwrap()
+                    .call(rt.thread_ptr())
             };
-            assert_eq!(f("t_3arg"), 106, "3-arg closure: 100+5+1");
-            assert_eq!(f("t_fold_count"), 3);
-            assert_eq!(f("t_fold_sum"), 6);
-            assert_eq!(f("t_rm_basic"), 2, "after removing b, size 2 and b gone");
-            assert_eq!(f("t_rm_survivors"), 4, "a(1)+c(3) survive remove of b");
-            assert_eq!(f("t_rm_immutable"), 1, "remove returns new map; original keeps a");
-            assert_eq!(f("t_rm_missing"), 1, "removing absent key leaves size unchanged");
+            assert_eq!(f("t_int"), 15, "Int atom swaps compose");
+            assert_eq!(f("t_reset"), 42, "reset overwrites");
+            assert_eq!(f("t_swap_returns_new"), 11, "swap returns the installed value");
+            assert_eq!(f("t_pmap"), 9, "PMap atom (reference value) swaps");
+            assert_eq!(f("t_string"), 5, "String atom swaps");
+        }
+    }
+
+    #[test]
+    fn atom_enum_op_local() {
+        init();
+        let ctx = Context::create();
+        // The stdlib Atom<T> (local atomic ref) + a typechecked enum
+        // "protocol" + `op` as a plain match function. No bytes, no net.
+        let driver = "
+            enum Op { OGet(String), OPut(Pair), OBump(String) }
+            struct Pair { pk: String, pv: Int }
+            def op(store: Atom<PMap<Int>>, msg: Op) -> Int =
+                match msg {
+                    OGet(k) => match pmap_get(deref(store), k) { Some(v) => v, None => 0 - 1 },
+                    OPut(p) => { let _s = swap(store, |m: PMap<Int>| pmap_assoc(m, p.pk, p.pv)); p.pv },
+                    OBump(k) => {
+                        let cur = match pmap_get(deref(store), k) { Some(v) => v, None => 0 };
+                        let _s = swap(store, |m: PMap<Int>| pmap_assoc(m, k, cur + 1));
+                        cur + 1
+                    },
+                }
+            def demo() -> Int = {
+                let store = atom(pmap_empty());
+                let _1 = op(store, OPut(Pair { pk: \"x\", pv: 10 }));
+                let _2 = op(store, OPut(Pair { pk: \"y\", pv: 20 }));
+                let _3 = op(store, OBump(\"x\"));
+                let gx = op(store, OGet(\"x\"));
+                let gy = op(store, OGet(\"y\"));
+                let gz = op(store, OGet(\"missing\"));
+                gx * 100 + gy + (gz + 1)
+            }
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let demo = jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names["demo"]))
+                .unwrap();
+            assert_eq!(demo.call(rt.thread_ptr()), 1120);
         }
     }
 

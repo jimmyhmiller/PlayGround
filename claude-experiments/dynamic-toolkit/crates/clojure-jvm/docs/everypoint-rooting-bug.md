@@ -148,21 +148,29 @@ oracle for the fix but is NOT itself an acceptable fix (it scans non-precisely).
   path (a genuinely-live GcPtr/I64 vreg not present in a safepoint's stackmap). Pin the exact
   vreg/safepoint by instrumenting `build_stackmaps`.
 
-### Two deliverables
-1. **Fix** the missed root at its source (register-alloc liveness/stackmap) so a GcPtr/I64
-   vreg live across a safepoint is always recorded.
-2. **Permanent guardrail (stop-it-forever):** a PRECISE missed-root *verification* at GC time,
-   gated to `CLJVM_GC=every` / debug builds (NOT in production, NOT part of the collector's
-   real rooting — the GC stays precise). After a collection, scan the triggering thread's JIT
-   stack extent; if any aligned word points at an object carrying the FORWARDING_BIT (i.e. a
-   relocated-but-un-updated slot), PANIC with the slot address + containing frame (JIT fn via
-   return-addr lookup, or "Rust frame"). This converts the whole missed-root class from silent
-   far-away corruption (`type_id 136`) into an immediate, localized failure at the offending
-   GC — caught in CI under the EveryPoint oracle every time.
+### CORRECTION (2026-05-31): do NOT use a conservative stack scan.
+An earlier draft of this doc proposed a GC-time guardrail that scans the JIT stack and flags any
+word pointing at a FORWARDING_BIT object. That was IMPLEMENTED and then REMOVED: it is a
+**conservative scan**, which this GC forbids. Our collector is PRECISE — it consults only the
+KNOWN root slots (the JIT stackmaps / shadow stack) and tag-decodes each slot (values are
+NaN-boxed, so a slot may hold a pointer or a raw int); it NEVER over-estimates by sweeping raw
+stack memory. A conservative scan also cannot distinguish a dead spill from a missed live root,
+so it both violates the precise-GC contract and gives ambiguous results. (Diagnostic experiments
+that conservatively forwarded `[jit_fp-8192 .. fence]` and reached form 611 are NOT a fix and
+must not ship.)
 
-Validation oracle (already proven): conservatively forwarding every from-space pointer in
-`[jit_fp-8192 .. fence]` makes form 430 pass and advances to form 611. The real fix must make
-`CLJVM_GC=every` reach ≥611 WITHOUT any conservative forwarding in the live collector.
+### Two deliverables — both PRECISE
+1. **Fix** the missed root at its source: register-alloc liveness/stackmap, so a GcPtr/I64 vreg
+   live across a call-return safepoint (per correct dataflow) is ALWAYS in that safepoint's stackmap.
+2. **Permanent guardrail (stop-it-forever), PRECISE:** a debug assertion INSIDE
+   `register-alloc/src/linear_scan.rs build_stackmaps` that, at each safepoint, compares the
+   stackmap's recorded vregs against the dataflow `live_in`/`live_out` sets — any GcPtr/I64 vreg
+   that is live across the safepoint but NOT recorded is the bug, asserted at allocation time
+   (deterministic, no GC needed), naming the vreg. This stays entirely within the precise model;
+   no stack scanning, no FORWARDING_BIT sweeping.
+
+Success bar unchanged: `CLJVM_GC=every` reaches ≥611 with the precise fix — and the build_stackmaps
+assertion stays silent.
 
 ## Success criterion (how the fix is judged)
 

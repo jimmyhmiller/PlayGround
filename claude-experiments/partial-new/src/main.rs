@@ -4,14 +4,9 @@
 //! `engine.rs` is the entire generic specializer. `bf.rs` is one client. The
 //! engine never mentions Brainfuck; a second client would reuse it verbatim.
 
-mod bf;
-mod engine;
-mod fun;
-mod imp;
-mod js;
-mod residual;
+use partial::{bf, engine, fun, imp, js, residual};
 
-use imp::{bin, int, var, BinOp::*, Stmt::*};
+use partial::imp::{bin, int, var, BinOp::*, Stmt::*};
 
 fn demo(name: &str, src: &str, input: &[u8], show_residual: bool) {
     println!("================================================================");
@@ -99,8 +94,8 @@ fn js_demo(name: &str, program: &[js::FuncDef], inputs: &[i64]) {
 }
 
 fn js_demos() {
-    use js::{arr, bin, call, closure, func, get, index, num, obj, str_, var, Bop::*, FuncDef};
-    use js::Stmt::*;
+    use partial::js::{arr, bin, call, closure, func, get, index, num, obj, str_, var, Bop::*, FuncDef};
+    use partial::js::Stmt::*;
 
     // 1. A static object is scalar-replaced away: property access folds.
     //    main(_) = { let p = {x:3, y:4}; return p.x + p.y; }  ->  return 7
@@ -655,7 +650,7 @@ fn js_demos() {
 }
 
 fn fun_demo(name: &str, program: &[fun::FunDef], inputs: &[i64]) {
-    use fun::Fun;
+    use partial::fun::Fun;
     println!("================================================================");
     println!("  FUN (interpreter specialization): {name}");
     println!("================================================================");
@@ -681,9 +676,9 @@ fn fun_demo(name: &str, program: &[fun::FunDef], inputs: &[i64]) {
 }
 
 fn fun_demos() {
-    use fun::Stmt::*;
-    use fun::{bin, call, int, var, FunDef};
-    use imp::BinOp::*;
+    use partial::fun::Stmt::*;
+    use partial::fun::{bin, call, int, var, FunDef};
+    use partial::imp::BinOp::*;
 
     // 1. Non-recursive calls inline: the VM dispatch loop AND the call machinery
     //    disappear, leaving straight-line residual arithmetic over the input.

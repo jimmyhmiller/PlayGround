@@ -391,6 +391,8 @@ fn parse_command(input: &str) -> Result<Cmd, String> {
             };
             Ok(Cmd::Send(payload))
         }
+        "drop" => parse_drop(&mut p, false),
+        "purge" => parse_drop(&mut p, true),
         "assert" => Ok(Cmd::Send(parse_assert(&mut p)?)),
         "retract" => Ok(Cmd::Send(parse_retract(&mut p)?)),
         "find" => Ok(Cmd::Send(parse_find(&mut p)?)),
@@ -406,6 +408,21 @@ fn parse_command(input: &str) -> Result<Cmd, String> {
         }
         other => Err(format!("unknown command: '{}'. Type 'help' for usage.", other)),
     }
+}
+
+/// drop User           — soft-drop a type (definition retracted, data kept)
+/// drop enum Status    — soft-drop an enum
+/// purge User          — hard-purge a type (definition + all datoms deleted)
+/// purge enum Status   — hard-purge an enum
+fn parse_drop(p: &mut Parser, hard: bool) -> Result<Cmd, String> {
+    let is_enum = p.try_keyword("enum");
+    let name = p.read_ident()?;
+    let req_type = if is_enum { "drop_enum" } else { "drop_type" };
+    Ok(Cmd::Send(serde_json::json!({
+        "type": req_type,
+        "name": name,
+        "hard": hard,
+    })))
 }
 
 /// backup now
@@ -1160,6 +1177,10 @@ ONE-SHOT COMMANDS:
   query  'find ?x where ...'                  Run a query
   list   Type [limit N]                       List all entities of a type
   define 'Type {{ field: type, ... }}'          Define entity type
+  drop   Type                                 Soft-drop type (keep data + history)
+  drop   enum Name                            Soft-drop enum
+  purge  Type                                 Hard-purge type (delete all datoms)
+  purge  enum Name                            Hard-purge enum
   assert 'Type {{ field: value, ... }}'         Assert entity
   retract 'Type #ID [field, ...]'             Retract fields
   retract 'Type #ID'                          Retract entire entity
@@ -1177,6 +1198,10 @@ DSL COMMANDS (REPL):
   backup list
   define User {{ name: string required, age: i64 }}
   define enum Status {{ Active, Suspended {{ reason: string }} }}
+  drop User
+  drop enum Status
+  purge User
+  purge enum Status
   assert User {{ name: "Alice", age: 30 }}
   assert User #42 {{ age: 31 }}
   retract User #42 [email, age]
@@ -1285,6 +1310,36 @@ The flow is always: define schema -> assert entities -> query / list.
   datalog --json retract 'User #3 [age]'
   datalog --json retract 'User #3'
 
+  # 8. Drop a whole type/enum. `drop` is soft, `purge` is hard (see below).
+  datalog --json drop User           # soft: hide the type, keep data + history
+  datalog --json purge User          # hard: delete the type and all its datoms
+  datalog --json drop enum Status
+  datalog --json purge enum Status
+
+DROPPING TYPES (soft vs hard)
+-----------------------------
+Two ways to remove a type or enum from the schema:
+
+* `drop` (soft) retracts the schema definition as a normal transaction. The
+  type vanishes from `schema` and can no longer be queried, but every datom,
+  index entry and history record is kept untouched. The drop is itself
+  recorded in history, and re-`define`-ing the exact type makes all the old
+  data visible and queryable again. Reversible. Use this by default.
+
+* `purge` (hard) deletes the schema definition AND every datom of every
+  entity of that type from all indexes (EAVT/AEVT/AVET/VAET + current
+  mirrors). Irreversible; it destroys history for those entities. Take a
+  `backup now` first if unsure.
+
+  Send `{{"type":"drop_type","name":"User","hard":true}}` for a JSON purge;
+  `drop_enum` for enums. `hard` defaults to false.
+
+A hard purge is refused (error) while another live type/enum still
+references the target via a `ref`/`enum` field — drop or redefine those
+first. A purge response reports `entities_purged`, `datoms_deleted`, and
+`dangling_refs` (other entities that still point at a purged entity; those
+are left untouched, never silently rewritten).
+
 RESPONSE SHAPE
 --------------
 Every `--json` response is one of:
@@ -1330,6 +1385,8 @@ COMMAND REFERENCE
   list <Type> [limit N]               All entities of a type (with all fields).
   define '<Type> {{ ... }}'             Add a type.
   define enum '<Name> {{ ... }}'        Add an enum type.
+  drop <Type> | drop enum <Name>      Soft-drop (retract def, keep data+history).
+  purge <Type> | purge enum <Name>    Hard-purge (delete def + all datoms).
   assert '<Type> {{ ... }}'             New entity.
   assert '<Type> #ID {{ ... }}'         Update existing entity.
   retract '<Type> #ID [f1, f2]'       Retract specific fields.
@@ -1544,6 +1601,15 @@ fn main() {
                     s.push_str(piece);
                 }
                 s
+            }
+            // `drop`/`purge` take bare, possibly multi-word args
+            // (`drop User`, `purge enum Status`) so re-join like backup/list.
+            "drop" | "purge" => {
+                if remaining.len() < 2 {
+                    eprintln!("'{}' requires a type or enum name", remaining[0]);
+                    std::process::exit(1);
+                }
+                remaining.join(" ")
             }
             "query" => {
                 if remaining.len() < 2 {

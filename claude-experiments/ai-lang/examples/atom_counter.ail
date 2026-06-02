@@ -1,0 +1,36 @@
+// A basic atom counter.
+//
+// An `Atom<T>` is a mutable identity over an immutable value, the
+// escape hatch for shared mutable state (Clojure-style). The three
+// moves:
+//   atom(init)   create an atom holding `init`
+//   deref(a)     read the current value
+//   swap(a, f)   apply the PURE function f to the current value and
+//                lock-free compare-and-set the result back in
+//
+//   ai-lang add examples/atom_counter.ail
+//   ai-lang run main
+//
+// Here we make a counter starting at 0 and bump it a few times.
+
+def main() -> Int = {
+    let counter = atom(0);
+
+    let a = println(string_concat("start:    ", int_to_string(deref(counter))));
+
+    let _1 = swap(counter, |n: Int| n + 1);
+    let _2 = swap(counter, |n: Int| n + 1);
+    let _3 = swap(counter, |n: Int| n + 1);
+
+    let b = println(string_concat("after 3:  ", int_to_string(deref(counter))));
+
+    // swap returns the new value directly, too.
+    let now = swap(counter, |n: Int| n + 10);
+    let c = println(string_concat("swap +10: ", int_to_string(now)));
+
+    // reset ignores the old value.
+    let _r = reset(counter, 0);
+    let d = println(string_concat("reset:    ", int_to_string(deref(counter))));
+
+    deref(counter)
+}

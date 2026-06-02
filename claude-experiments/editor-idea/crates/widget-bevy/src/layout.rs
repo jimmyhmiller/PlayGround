@@ -56,13 +56,15 @@ impl LaidOut {
 }
 
 /// Build the Taffy tree mirroring `el`. Returns the root NodeId.
-pub fn build_tree(el: &Element) -> LaidOut {
+/// `metrics` is used to pre-size leaves whose height depends on wrapped
+/// text (currently `TextArea`).
+pub fn build_tree(el: &Element, metrics: &PaneFontMetrics) -> LaidOut {
     let mut taffy = TaffyTree::new();
-    let root = build_node(&mut taffy, el);
+    let root = build_node(&mut taffy, el, metrics);
     LaidOut { taffy, root }
 }
 
-fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element) -> NodeId {
+fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element, metrics: &PaneFontMetrics) -> NodeId {
     match el {
         Element::Vstack {
             gap,
@@ -71,7 +73,7 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element) -> NodeId {
             style,
         } => {
             let st = stack_style(*gap, *pad, style.as_ref(), FlexDirection::Column);
-            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c)).collect();
+            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c, metrics)).collect();
             taffy.new_with_children(st, &kids).unwrap()
         }
         Element::Hstack {
@@ -83,7 +85,7 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element) -> NodeId {
         } => {
             let mut st = stack_style(*gap, *pad, style.as_ref(), FlexDirection::Row);
             st.align_items = Some(align_to_taffy(*align));
-            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c)).collect();
+            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c, metrics)).collect();
             taffy.new_with_children(st, &kids).unwrap()
         }
         Element::Frame {
@@ -93,7 +95,7 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element) -> NodeId {
             style,
         } => {
             let st = stack_style(*gap, *pad, style.as_ref(), FlexDirection::Column);
-            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c)).collect();
+            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c, metrics)).collect();
             taffy.new_with_children(st, &kids).unwrap()
         }
         Element::Scroll {
@@ -102,7 +104,7 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element) -> NodeId {
             children,
         } => {
             let st = stack_style(*gap, *pad, None, FlexDirection::Column);
-            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c)).collect();
+            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c, metrics)).collect();
             taffy.new_with_children(st, &kids).unwrap()
         }
         Element::ListItem {
@@ -113,7 +115,7 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element) -> NodeId {
             ..
         } => {
             let st = stack_style(*gap, *pad, style.as_ref(), FlexDirection::Column);
-            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c)).collect();
+            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c, metrics)).collect();
             taffy.new_with_children(st, &kids).unwrap()
         }
         Element::Text { value, size, .. } => {
@@ -316,8 +318,115 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element) -> NodeId {
                 ..taffy::Style::DEFAULT
             })
             .unwrap(),
+        Element::TextArea { width, rows, value, .. } => {
+            // Auto-grow: height fits the wrapped content, with `rows` as
+            // the minimum. Wrapping here uses the same routine + width as
+            // the renderer, so the box height matches the drawn text.
+            // (While typing, this tracks the element's `value`, which a
+            // widget refreshes from `on_input_change`.)
+            let line_h = crate::render::line_height(crate::render::DEFAULT_FONT_SIZE);
+            let avail = (*width - 2.0 * crate::render::INPUT_PAD_X).max(1.0);
+            let chars: Vec<char> = value.chars().collect();
+            let wrapped = crate::render::wrap_visual_lines(&chars, metrics, avail).len() as u32;
+            let lines = wrapped.max((*rows).max(1));
+            let height = lines as f32 * line_h + 2.0 * crate::render::TEXTAREA_PAD_Y;
+            taffy
+                .new_leaf(taffy::Style {
+                    size: Size {
+                        width: Dimension::length(*width),
+                        height: Dimension::length(height),
+                    },
+                    ..taffy::Style::DEFAULT
+                })
+                .unwrap()
+        }
+        Element::Table { columns, rows, .. } => {
+            use taffy::style::{GridTemplateComponent, MaxTrackSizingFunction, MinTrackSizingFunction};
+            // Max width an auto (unsized) column grows to before its text
+            // wraps. Keeps a long cell from ballooning the whole table.
+            const COL_CAP: f32 = 260.0;
+            let ncols = columns.len().max(1);
+            // One grid track per column. A fixed `width` becomes a rigid
+            // track; otherwise the column fits its content, capped at
+            // COL_CAP (longer text wraps). We avoid `fr` here because the
+            // widget layout root is content-sized, so `fr` has no
+            // definite width to distribute and one column would balloon.
+            let mut tracks: Vec<GridTemplateComponent<_>> = columns
+                .iter()
+                .map(|c| {
+                    let track = match c.width {
+                        Some(w) => minmax(
+                            MinTrackSizingFunction::length(w),
+                            MaxTrackSizingFunction::length(w),
+                        ),
+                        // Grow to content, but cap at COL_CAP so a long
+                        // cell wraps instead of stretching the table. A
+                        // fixed-length max caps even when the grid has no
+                        // definite outer width (unlike `fit-content`).
+                        None => minmax(
+                            MinTrackSizingFunction::auto(),
+                            MaxTrackSizingFunction::length(COL_CAP),
+                        ),
+                    };
+                    GridTemplateComponent::Single(track)
+                })
+                .collect();
+            if tracks.is_empty() {
+                tracks.push(GridTemplateComponent::Single(minmax(
+                    MinTrackSizingFunction::auto(),
+                    MaxTrackSizingFunction::length(COL_CAP),
+                )));
+            }
+            let st = taffy::Style {
+                display: Display::Grid,
+                grid_template_columns: tracks,
+                // Column gap so adjacent cells (esp. a wrapped cell next
+                // to a right-aligned one) don't visually touch.
+                gap: Size {
+                    width: LengthPercentage::length(crate::render::TABLE_COL_GAP),
+                    height: LengthPercentage::length(0.0),
+                },
+                ..taffy::Style::DEFAULT
+            };
+            // Cells in row-major order: header row first, then data rows.
+            // Each is a measured text leaf so it wraps within its column
+            // and the row track grows to the tallest cell.
+            let mut cells: Vec<NodeId> = Vec::with_capacity(ncols * (rows.len() + 1));
+            for c in columns {
+                cells.push(table_cell_leaf(taffy, &c.header));
+            }
+            for row in rows {
+                for ci in 0..ncols {
+                    let txt = row.get(ci).map(|s| s.as_str()).unwrap_or("");
+                    cells.push(table_cell_leaf(taffy, txt));
+                }
+            }
+            taffy.new_with_children(st, &cells).unwrap()
+        }
         Element::Canvas { .. } => taffy.new_leaf(taffy::Style::DEFAULT).unwrap(),
     }
+}
+
+/// One table cell: a measured text leaf with cell padding, so it wraps
+/// to its column width and contributes its height to the row track.
+fn table_cell_leaf(taffy: &mut TaffyTree<MeasureCtx>, text: &str) -> NodeId {
+    taffy
+        .new_leaf_with_context(
+            taffy::Style {
+                padding: Rect {
+                    left: LengthPercentage::length(crate::render::TABLE_CELL_PAD_X),
+                    right: LengthPercentage::length(crate::render::TABLE_CELL_PAD_X),
+                    top: LengthPercentage::length(crate::render::TABLE_CELL_PAD_Y),
+                    bottom: LengthPercentage::length(crate::render::TABLE_CELL_PAD_Y),
+                },
+                ..taffy::Style::DEFAULT
+            },
+            MeasureCtx {
+                value: text.to_string(),
+                font_size: crate::render::DEFAULT_FONT_SIZE,
+            },
+        )
+        .unwrap()
 }
 
 /// Build a Taffy style for a flex stack (vstack / hstack / frame /
