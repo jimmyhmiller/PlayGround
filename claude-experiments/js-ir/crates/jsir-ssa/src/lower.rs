@@ -877,6 +877,77 @@ fn stmt_owner_node_ids(ops: &[IrOp]) -> Vec<Option<u32>> {
 
 /// The first `function_declaration` in `op`, descending one level into export
 /// wrappers (`export function` / `export default function`).
+/// True if the function we compile (the first declaration in `file`) — or the
+/// module itself — opts out of compilation via a `'use no memo'` directive
+/// prologue. React leaves such functions un-memoized, so we must pass the source
+/// through unchanged rather than memoize it (otherwise it shows up as `ours_only`
+/// over-memoization). Nested closures' directives (e.g. a `'worklet'` on an inner
+/// arrow) are deliberately NOT consulted — only the directives of the function
+/// being compiled and the module top level.
+pub fn opts_out_of_compilation(file: &IrOp) -> bool {
+    fn ops_have_optout(ops: &[IrOp]) -> bool {
+        for op in ops {
+            // Only `'use no memo'` — the stable, always-honored opt-out. `'use no
+            // forget'` is the older name and is config-gated (some fixtures, e.g.
+            // `ignore-use-no-forget`, assert React ignores it), so honoring it
+            // unconditionally mis-skips functions React still compiles.
+            if op.name == "jsir.directive_literal"
+                && str_attr(op, "value").as_deref() == Some("use no memo")
+            {
+                return true;
+            }
+            // Descend into structural regions (block_statement, directive, ...) but
+            // never into a nested function — its directives govern only itself.
+            if !matches!(
+                op.name.as_str(),
+                "jsir.function_declaration"
+                    | "jsir.function_expression"
+                    | "jsir.arrow_function_expression"
+            ) {
+                for r in &op.regions {
+                    for b in &r.blocks {
+                        if ops_have_optout(&b.ops) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    let program = file
+        .regions
+        .first()
+        .and_then(|r| r.blocks.first())
+        .and_then(|b| b.ops.first());
+    let stmts = program.map(|p| region_ops(p, 0)).unwrap_or(&[]);
+    // Module-level directive (top-level `'use no memo';`): an unambiguous
+    // whole-module opt-out (React compiles nothing). The program keeps its
+    // directive prologue in a SEPARATE region (region 1), distinct from the
+    // statements (region 0), so check it explicitly.
+    let module_directives = program.map(|p| region_ops(p, 1)).unwrap_or(&[]);
+    if ops_have_optout(module_directives) {
+        return true;
+    }
+    // A function-body directive opts out only THAT function. Our pipeline compiles
+    // the first function declaration, so honoring the directive is sound only when
+    // it is the file's *only* function — otherwise React still compiles a later
+    // one (e.g. `useFoo` opts out but `Test` is compiled) and passing the whole
+    // file through would drop that function's memoization (a `react_only` miss).
+    let funcs: Vec<&IrOp> = stmts.iter().filter_map(find_function).collect();
+    if funcs.len() == 1 {
+        for r in &funcs[0].regions {
+            for b in &r.blocks {
+                if ops_have_optout(&b.ops) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn find_function(op: &IrOp) -> Option<&IrOp> {
     if op.name == "jsir.function_declaration" {
         return Some(op);

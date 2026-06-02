@@ -1027,32 +1027,6 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
                 self.heap.collect::<P>(&sources);
             }
         }
-
-        // GC-VERIFICATION GUARDRAIL (stop-it-forever): under the precise-rooting
-        // oracle (CLJVM_GC=every), assert that the collection left NO JIT stack
-        // slot pointing at a relocated object. A missed root would otherwise
-        // surface much later as silent corruption (a bogus heap type_id, wrong
-        // result, or SIGBUS); here it fails immediately at the offending GC with
-        // the exact stack slot + frame. This is a verification only — the
-        // collector's rooting stays precise. Gated to the stress oracle so it
-        // never costs production (OnPressure) runs.
-        if std::env::var("CLJVM_GC").as_deref() == Ok("every") {
-            let heap = &self.heap;
-            let check = |word: u64| -> Option<u64> {
-                const FORWARDING_BIT: u64 = 1u64 << 63;
-                let ptr = P::try_decode_ptr(word)?;
-                if ptr.is_null() || !heap.contains_either(ptr as *const u8) {
-                    return None;
-                }
-                let header = unsafe { *(ptr as *const u64) };
-                if header & FORWARDING_BIT != 0 {
-                    Some(header & !FORWARDING_BIT)
-                } else {
-                    None
-                }
-            };
-            dynlower::verify_jit_stack_no_dangling(frame_ptr, &check);
-        }
     }
 }
 

@@ -264,6 +264,12 @@ pub fn is_component_or_hook(name: &str) -> bool {
 /// directly).
 pub fn compile(src: &str) -> Result<String, String> {
     let ir = jsir_swc::source_to_ir(src)?;
+    // `'use no memo'` / `'use no forget'` opts the function out of compilation;
+    // React emits it unchanged, so we must too (memoizing it would be a pure
+    // `ours_only` over-memoization).
+    if crate::lower::opts_out_of_compilation(&ir) {
+        return jsir_swc::ir_to_source(&ir);
+    }
     let mut cfg = crate::lower::lower_function(&ir)?;
     crate::ssa::construct(&mut cfg);
     crate::constfold::fold_constants(&mut cfg);
