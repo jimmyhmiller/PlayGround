@@ -581,6 +581,21 @@ fn lower_expr(b: &mut Builder, ops: &mut Vec<Op>, node: &dyn AstNode) -> LowerRe
         }
         "CallExpression" => lower_call(b, ops, node, "jsir.call_expression"),
         "NewExpression" => lower_call(b, ops, node, "jsir.new_expression"),
+        "OptionalCallExpression" => {
+            // `a?.(args)` — like a call, plus the `optional` flag the reversible
+            // IR needs to reprint the `?.`. The short-circuit does not change the
+            // memoization structure (the analysis treats it as a plain call), so
+            // jsir-ssa lowers it the same as `jsir.call_expression`.
+            let callee = lower_expr(b, ops, node_of(field(node, "callee")?)?)?;
+            let mut op = node_op("jsir.optional_call_expression", node)?;
+            op.operands.push(callee);
+            for el in list_of(field(node, "arguments")?)? {
+                op.operands.push(lower_expr(b, ops, node_of(el)?)?);
+            }
+            op.attrs
+                .push(("optional".into(), Attr::Bool(bool_of(field(node, "optional")?)?)));
+            emit(ops, b, op)
+        }
         "MemberExpression" => lower_member(b, ops, node, "jsir.member_expression"),
         "OptionalMemberExpression" => {
             let object = lower_expr(b, ops, node_of(field(node, "object")?)?)?;

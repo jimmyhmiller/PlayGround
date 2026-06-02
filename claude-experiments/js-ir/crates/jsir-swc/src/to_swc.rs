@@ -467,6 +467,17 @@ fn expr(n: &Node) -> Conv<ast::Expr> {
             optional: bool_field(n, "optional")?,
             base: Box::new(ast::OptChainBase::Member(member_expr(n)?)),
         }),
+        "OptionalCallExpression" => ast::Expr::OptChain(ast::OptChainExpr {
+            span: DUMMY_SP,
+            optional: bool_field(n, "optional")?,
+            base: Box::new(ast::OptChainBase::Call(ast::OptCall {
+                span: DUMMY_SP,
+                ctxt: Default::default(),
+                callee: Box::new(expr(nfield(n, "callee")?)?),
+                args: args(n)?,
+                type_args: None,
+            })),
+        }),
         other => return Err(format!("to_swc expr: unsupported {other}")),
     })
 }

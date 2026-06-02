@@ -430,6 +430,22 @@ impl<'a, B: AstBuilder> Lifter<'a, B> {
             }
             "jsir.call_expression" => self.call(op, "CallExpression"),
             "jsir.new_expression" => self.call(op, "NewExpression"),
+            "jsir.optional_call_expression" => {
+                let callee = self.expr(op.operands[0])?;
+                let mut args = Vec::new();
+                for v in &op.operands[1..] {
+                    args.push(self.expr(*v)?);
+                }
+                self.b.node(
+                    "OptionalCallExpression",
+                    t,
+                    vec![
+                        ("callee", callee),
+                        ("arguments", self.b.list(args)),
+                        ("optional", self.b.boolean(bool_attr(op, "optional")?)),
+                    ],
+                )
+            }
             "jsir.member_expression" => self.member(op, "MemberExpression"),
             "jsir.spread_element" => {
                 let arg = self.expr(op.operands[0])?;

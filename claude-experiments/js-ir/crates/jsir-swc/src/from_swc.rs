@@ -1527,7 +1527,15 @@ impl<'a> W<'a> {
                         self.member_field(m, key)
                     }
                 }
-                ast::OptChainBase::Call(_) => Field::Absent,
+                // `a?.(args)` — an OptionalCallExpression with callee/arguments
+                // (the callee is a plain expression here, not a `Callee` enum) and
+                // the chain's `optional` flag.
+                ast::OptChainBase::Call(c) => match key {
+                    "callee" => self.expr(&c.callee),
+                    "arguments" => Field::List(c.args.iter().map(|a| self.arg(a)).collect()),
+                    "optional" => Field::Bool(o.optional),
+                    _ => Field::Absent,
+                },
             },
             ast::Expr::MetaProp(m) => self.meta_prop_field(m, key),
             ast::Expr::Object(o) if key == "properties" => Field::List(

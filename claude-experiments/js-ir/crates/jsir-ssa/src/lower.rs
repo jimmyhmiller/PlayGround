@@ -359,7 +359,11 @@ impl Lower {
                     self.bind_target(&t, init, *cur);
                 }
             }
-            "jsir.call_expression" => {
+            "jsir.call_expression" | "jsir.optional_call_expression" => {
+                // `a(args)` and `a?.(args)` analyze identically: the `?.`
+                // short-circuit does not change the memoization structure (mirrors
+                // `optional_member_expression` above). The reversible IR keeps the
+                // `optional` flag so codegen reprints the `?.`.
                 let callee = self.val(op.operands[0])?;
                 let args = op.operands[1..]
                     .iter()
