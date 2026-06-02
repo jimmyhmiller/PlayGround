@@ -561,6 +561,136 @@ mod tests {
         }
     }
 
+    /// Capture-by-reference: a closure that MUTATES a captured variable shares
+    /// the binding. Here it folds — `inc` mutates the boxed cell, `main` sees 2.
+    #[test]
+    fn capture_by_reference_mutation_visible() {
+        let src = "function main(x) {
+            var c = 0;
+            var inc = function () { c = c + 1; };
+            inc(); inc();
+            return c;   // 2 (by-reference); would be 0 if captured by value
+        }";
+        let (_, prog) = specialize(src).unwrap();
+        assert_eq!(prog.blocks.len(), 1, "should fold:\n{}", to_js(src).unwrap());
+        assert_node_equiv(src, &[0, 9, -4]); // always 2
+    }
+
+    /// A counter closure that escapes: the shared cell is captured by reference,
+    /// so repeated calls keep incrementing the same state.
+    #[test]
+    fn capture_by_reference_escaping_counter() {
+        let src = "
+            function makeCounter(start) {
+                var n = start;
+                return function () { n = n + 1; return n; };
+            }
+            function main(x) { return makeCounter(x); }
+        ";
+        let js = to_js(src).unwrap();
+        assert!(js.contains("function __rf"), "counter should be a residual fn:\n{js}");
+        // call the returned closure several times; the captured cell is shared.
+        for x in [0, 5, -2] {
+            match (
+                node_eval_expr(src, &format!("(function(){{ var c = main({x}); return [c(), c(), c()]; }})()")),
+                node_eval_expr(&js, &format!("(function(){{ var c = main({x}); return [c(), c(), c()]; }})()")),
+            ) {
+                (Some(o), Some(s)) => assert_eq!(o, s, "counter diverged at x={x}\n{js}"),
+                _ => return,
+            }
+        }
+    }
+
+    /// Nested `function` declarations that share mutable outer state via
+    /// capture-by-reference, plus one calling another (the simple.js shape).
+    #[test]
+    fn nested_fn_decls_share_state() {
+        let src = "function main(x) {
+            var total = 0;
+            function add(n) { total = total + n; }
+            function addTwice(n) { add(n); add(n); }
+            addTwice(x);
+            add(1);
+            return total;   // x + x + 1
+        }";
+        assert_node_equiv(src, &[0, 4, -3, 10]);
+    }
+
+    /// A modeled built-in: `new TextDecoder().decode(new Uint8Array(staticBytes))`
+    /// folds to a string literal (Node validates against the real built-in).
+    #[test]
+    fn builtin_text_decoder_folds() {
+        let src = "function main(input) {
+            var bytes = [72, 105, 33];  // \"Hi!\"
+            return new TextDecoder().decode(new Uint8Array(bytes));
+        }";
+        let (_, prog) = specialize(src).unwrap();
+        assert_eq!(prog.blocks.len(), 1, "should fold to one block:\n{}", to_js(src).unwrap());
+        let js = to_js(src).unwrap();
+        assert!(js.contains("\"Hi!\""), "decode should fold to a string literal:\n{js}");
+        assert_node_equiv(src, &[0]);
+    }
+
+    /// `String.fromCharCode(...)` over static numbers folds to a string literal.
+    #[test]
+    fn builtin_string_from_char_code_folds() {
+        let src = "function main(input) { return String.fromCharCode(65, 66, 67); }";
+        let js = to_js(src).unwrap();
+        assert!(js.contains("\"ABC\""), "should fold to \"ABC\":\n{js}");
+        assert_node_equiv(src, &[0]);
+    }
+
+    /// A Uint8Array built from static bytes supports element and length reads,
+    /// folding a hand loop over it.
+    #[test]
+    fn builtin_uint8array_indexing_folds() {
+        let src = "function main(input) {
+            var a = new Uint8Array([10, 20, 30]);
+            return a[0] + a[1] + a[2] + a.length;   // 63
+        }";
+        let (_, prog) = specialize(src).unwrap();
+        assert_eq!(prog.blocks.len(), 1, "should fold:\n{}", to_js(src).unwrap());
+        assert_node_equiv(src, &[0]);
+    }
+
+    /// Postfix/prefix increment used for its *value* (not just as a statement),
+    /// including reading an array through a moving index (`arr[i++]`), the
+    /// simple.js byte-reader shape.
+    #[test]
+    fn update_as_expression() {
+        // postfix yields old, prefix yields new; both mutate.
+        let post = "function main(x) { var i = x; var a = i++; return a * 100 + i; }";
+        assert_node_equiv(post, &[0, 5, -3]);
+        let pre = "function main(x) { var i = x; var a = ++i; return a * 100 + i; }";
+        assert_node_equiv(pre, &[0, 5, -3]);
+        // read through a moving index into a static array (folds completely).
+        let reader = "function main(x) {
+            var data = [10, 20, 30, 40];
+            var p = 0;
+            var sum = data[p++] + data[p++] + data[p++];
+            return sum + x;   // 60 + x
+        }";
+        let (_, prog) = specialize(reader).unwrap();
+        assert_eq!(prog.blocks.len(), 1, "should fold:\n{}", to_js(reader).unwrap());
+        assert_node_equiv(reader, &[0, 7, -1]);
+    }
+
+    /// A nested function declaration that *forward-references* a sibling declared
+    /// later (`a` calls `b` before `b`'s textual definition). Function-declaration
+    /// hoisting + the capture-by-reference cell make the forward reference resolve;
+    /// it folds to `(x * 2) + 1`.
+    #[test]
+    fn nested_fn_decls_forward_reference() {
+        let src = "function main(x) {
+            function a(n) { return b(n) + 1; }
+            function b(n) { return n * 2; }
+            return a(x);
+        }";
+        let js = to_js(src).unwrap();
+        assert!(js.contains("(v0 * 2) + 1"), "should fold to (x*2)+1:\n{js}");
+        assert_node_equiv(src, &[0, 1, 2, 7, -3]);
+    }
+
     /// A closure stored in an object that escapes also becomes a residual fn.
     #[test]
     fn closure_in_escaped_object() {

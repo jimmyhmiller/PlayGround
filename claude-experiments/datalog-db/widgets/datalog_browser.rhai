@@ -25,7 +25,8 @@ if !("schema" in state)  { state.schema = []; }
 if !("types" in state)   { state.types = []; }
 if !("enums" in state)   { state.enums = []; }
 if !("selected" in state){ state.selected = ""; }
-if !("rows" in state)    { state.rows = []; }
+if !("rcols" in state)   { state.rcols = []; }   // browsed-rows table columns
+if !("rrows" in state)   { state.rrows = []; }   // browsed-rows table rows
 if !("rows_for" in state){ state.rows_for = ""; }
 if !("msg" in state)     { state.msg = ""; }
 if !("confirm" in state) { state.confirm = ""; }
@@ -109,6 +110,42 @@ fn last_line(arr) {
     if arr.len() == 0 { "" } else { arr[arr.len() - 1] }
 }
 
+// Rhai's `trim()` mutates in place + returns (); use this for a copy.
+fn trimmed(s) { s.trim(); s }
+
+// `list` output is an ASCII table: header, a `---+---` rule, rows, then
+// a `(N rows)` footer. Detect by the rule on line 2; parse cells on " | ".
+fn is_table(lines) {
+    lines.len() >= 2 && lines[1].starts_with("-")
+}
+
+fn split_cells(line) {
+    let out = [];
+    for c in line.split(" | ") { out.push(trimmed(c)); }
+    out
+}
+
+fn parse_table(lines) {
+    let cols = split_cells(lines[0]);
+    let rows = [];
+    let i = 2;
+    while i < lines.len() {
+        let line = lines[i];
+        i += 1;
+        if line == "" { continue; }
+        if line.starts_with("(") { break; }
+        rows.push(split_cells(line));
+    }
+    #{ cols: cols, rows: rows }
+}
+
+// Split a field line "name: string required" into ["name", "string required"].
+fn field_pair(fieldline) {
+    let i = fieldline.index_of(":");
+    if i < 0 { [fieldline, ""] }
+    else { [trimmed(fieldline.sub_string(0, i)), trimmed(fieldline.sub_string(i + 1))] }
+}
+
 // =========================== handlers ============================
 
 fn on_init() {
@@ -140,11 +177,16 @@ fn on_frame(dt) {
             host_log("[datalog_browser] schema: " + state.types.len() +
                      " types, " + state.enums.len() + " enums");
         } else if job == "list" {
-            state.rows = out;
+            if is_table(out) {
+                let t = parse_table(out);
+                state.rcols = t.cols; state.rrows = t.rows;
+            } else {
+                state.rcols = []; state.rrows = [];
+            }
             state.rows_for = state.selected;
         } else if job == "drop" || job == "purge" {
             state.msg = last_line(out);
-            state.selected = ""; state.rows = []; state.rows_for = "";
+            state.selected = ""; state.rcols = []; state.rrows = []; state.rows_for = "";
             // Re-pull the schema so the dropped type disappears.
             state.proc = spawn_job(state.host, ["schema"]);
             if state.proc != -1 {
@@ -172,7 +214,7 @@ fn on_click(x, y, shift, cmd, id) {
     if id.starts_with("t:") {
         state.selected = id.sub_string(2);
         state.confirm = ""; state.msg = "";
-        state.rows = []; state.rows_for = "";
+        state.rcols = []; state.rrows = []; state.rows_for = "";
         request_render();
         return;
     }
@@ -245,9 +287,9 @@ fn render(w, h) {
 
     if state.enums.len() > 0 {
         rows.push(#{ type: "text", value: "Enums", size: 12.0, color: "#9aa0b0" });
-        for e in state.enums {
-            rows.push(#{ type: "text", value: "  " + e, size: 11.0, color: "#aeb4c4" });
-        }
+        let pills = [];
+        for e in state.enums { pills.push(#{ type: "badge", value: e }); }
+        rows.push(#{ type: "hstack", gap: 4.0, children: pills });
     }
 
     // --- selected type detail ---
@@ -255,8 +297,17 @@ fn render(w, h) {
         rows.push(#{ type: "divider" });
         rows.push(#{ type: "text", value: state.selected, size: 13.0, color: "#e6e9f0", weight: "bold" });
 
+        // fields as a 2-col table
+        let frows = [];
         for f in fields_of(state.schema, state.selected) {
-            rows.push(#{ type: "text", value: "  " + f, size: 11.0, color: "#aeb4c4", family: "mono" });
+            let p = field_pair(f);
+            frows.push([p[0], p[1]]);
+        }
+        if frows.len() > 0 {
+            rows.push(#{ type: "table", columns: [
+                #{ header: "field", width: 120.0 },
+                #{ header: "type" },
+            ], rows: frows });
         }
 
         let actions = [
@@ -276,12 +327,13 @@ fn render(w, h) {
             ]});
         }
 
-        if state.rows_for == state.selected && state.rows.len() > 0 {
-            let body = [];
-            for line in state.rows {
-                body.push(#{ type: "text", value: line, size: 10.0, color: "#cfd3dd", family: "mono" });
-            }
-            rows.push(#{ type: "scroll", pad: 4.0, gap: 1.0, children: body });
+        // browsed rows as a table
+        if state.rows_for == state.selected && state.rrows.len() > 0 {
+            rows.push(#{ type: "divider" });
+            let cols = [];
+            for c in state.rcols { cols.push(#{ header: c }); }
+            rows.push(#{ type: "table", zebra: true, columns: cols, rows: state.rrows });
+            rows.push(#{ type: "text", value: state.rrows.len() + " row(s)", size: 10.0, color: "#7f8794" });
         }
     }
 

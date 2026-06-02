@@ -11559,6 +11559,19 @@ impl Session {
             );
         }
 
+        // Register the LazySeq/Delay root source. A `LazyState` caches the
+        // deferred thunk and (once realized) the produced value as NaN-boxed
+        // GC-heap pointers in a Rust-side `Arc<RefCell<…>>`. Keeping the Arc
+        // alive doesn't make those pointers GC roots, so a collection would
+        // relocate the thunk/value and leave the cached bits dangling — a
+        // stale seq then reaches `RT.first` (the form-430 loader crash under
+        // `CLJVM_GC=every`). This source forwards those cached pointers in
+        // place on every collection. The source is `'static`; the thread-local
+        // registry it scans is populated by `register_lazy_state`.
+        unsafe {
+            gc.register_extra_root_source(crate::runtime::lazy_root_source());
+        }
+
         let mut sess = Session {
             compiler,
             gc,

@@ -10,6 +10,7 @@ pub mod cfg;
 pub mod codegen;
 pub mod constfold;
 pub mod detect;
+pub mod infer_types;
 pub mod interp;
 pub mod lower;
 pub mod memoize_plan;
@@ -17,6 +18,7 @@ pub mod mutability;
 pub mod print;
 pub mod scopes;
 pub mod ssa;
+pub mod types;
 pub mod verify;
 
 pub use cfg::Cfg;

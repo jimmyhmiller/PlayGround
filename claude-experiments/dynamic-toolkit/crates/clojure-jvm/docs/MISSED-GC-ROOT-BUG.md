@@ -3,8 +3,114 @@
 **Status:** open, unfixed. Tree is healthy and the bug is honestly *unmasked*
 (it reproduces under the precise-rooting stress oracle, see Repro).
 
-**Audience:** whoever owns the register allocator (`register-alloc`) and the
-JIT GC-rooting path (`dynlower` / `dynruntime` / `dynalloc`).
+> ## ⚠️ 2026-06-01 UPDATE — the "Root cause (working theory)" section below is WRONG. Read this first.
+>
+> A fresh investigation **refuted** the theory that the bug is a coverage gap in
+> the `register-alloc` crate's single-`[min,max]`-interval liveness. Two
+> independent proofs:
+>
+> 1. **The interval test cannot drop a live root.** `register-alloc`'s
+>    `liveness.rs` step 3 grows each vreg's `[start,end]` to the bounding box of
+>    *every* block where it is `live_in`/`live_out` (plus its def/use positions).
+>    So for any vreg genuinely live across a safepoint at position `P`,
+>    `start ≤ P ≤ end` *always* holds (live-before ⟹ `start ≤ P`; live-after ⟹
+>    `P ≤ end`). The single interval is an **over**-approximation — it can only add
+>    dead roots, never drop a live one. A debug assertion added to
+>    `build_stackmaps` (assert every dataflow-live-across `GcPtr`/`I64` vreg is in
+>    the stackmap) **never fired**, yet the crash reproduced.
+>
+> 2. **clojure-jvm does not even use that allocator.** Its JIT path is
+>    `compile_form_to_jit` → `JitModule::new_empty` + `extend` (`dynlower/src/lib.rs`),
+>    which lowers via the in-tree **`Lowerer` + `GreedyRegState`** allocator
+>    (`dynlower/src/regalloc.rs`), **not** `register-alloc`'s `LinearScanAllocator`
+>    / `batch_lower.rs`. The doc's "single-interval projection (suspected root)"
+>    pointer is to dead-for-this-path code. The "spill-all-types had no effect ⟹
+>    coverage gap" argument is also unsound: `DynIRFunction::safepoint_action`
+>    *already* returns `SpillAndRecord` for every pointer-eligible type, so forcing
+>    it on the rest (F64/I8/I32) is a no-op by construction.
+>
+> ### What is actually true (proven 2026-06-01)
+>
+> - The crash is a real dangling pointer to a relocated semi-space object reaching
+>   `cljvm_rt_first` as a live JIT argument (header bit 63 set, `to`-space target,
+>   16 MiB flip — all confirmed by instrumenting `cljvm_rt_first`).
+> - **The real root-recording lives in `dynlower/src/lib.rs`**:
+>   `Lowerer::collect_live_root_slots` / `record_call_return_safepoint` /
+>   `emit_safepoint`. They record a stack slot for a value only when it is
+>   (a) root-eligible (`is_gc()`/`I64`), (b) deemed live by the **use-count**
+>   model (`GreedyRegState::remaining_uses(v) > 0`), and (c) has a regalloc spill
+>   slot (`value_spill_slot(v).is_some()`), plus all `is_gc_root` stack slots.
+> - A post-collection conservative stack scan (diagnostic only) confirms the
+>   relocating GC leaves the live value in a JIT-frame stack slot at an offset that
+>   is **not in any recorded root set** (every stale word found is at an
+>   UNRECORDED offset — recorded roots are visited and updated, so are never stale).
+> - The missed slot is **not** caught by any tracked category. Verified by
+>   experiment (each tried independently and in union, crash persists):
+>   removing the `remaining_uses == 0` filter, recording *all* values with a spill
+>   slot, recording *all* block-param canonical slots, and `is_gc_root` slots.
+>   So the live pointer is preserved in a frame location the `GreedyRegState`
+>   root model does not enumerate at all, on the loopy `map`/`reduce1`-over-closures
+>   path (`closure.rs` arg-list reader + `recur` loop headers).
+> - **Refuted along the way:** nested-`run_jit` fence skipping
+>   (`fence_depth == 1`, `outer_jit_frames_skipped == 0` at every walk during
+>   form 430); stale global safepoint index (`extend` computes the flat-array base
+>   correctly).
+>
+> ### Update 2 (2026-06-01, later) — JIT recording is NOT the gap; trigger still open
+>
+> Pursued the "use-count liveness" theory above and **it is not the cause**:
+>
+> - Added a sound backward-dataflow live-out pass in the `dynlower` `Lowerer`
+>   and a compile-time check asserting every heap value live-across each
+>   safepoint (call-return AND explicit `Inst::Safepoint`) is in the recorded
+>   `root_slots`. The check **never fired** — every live JIT root IS recorded.
+> - Replacing the use-count filter with the live-out set, recording all
+>   block-param canonical slots, and recording all spilled values: **none**
+>   changed the form-430 crash.
+> - Form 430 is `max-key` (variadic + `loop`/`recur`). A Rust backtrace shows
+>   the dangling value reaches `cljvm_rt_first` **directly from JIT** as its
+>   argument — i.e. the JIT handed `rt_first` an already-stale pointer.
+> - Making `walk_jit_ancestor_roots` traverse past the innermost `run_jit`
+>   fence (scan outer JIT frames too, like `walk_parked_thread_jit_roots`)
+>   did **not** fix it either.
+>
+> So the value is stale *when the JIT loads it*, despite the JIT having recorded
+> it as a root — pointing to either (a) the JIT re-reading the value from a
+> stale register/location after the recorded slot was updated, or (b) the value
+> being produced stale by a runtime extern that holds a heap pointer in an
+> unrooted Rust local/cache across an allocating sub-call. The exact producer is
+> not yet isolated. (The single-forwarding-follow trick is unreliable here:
+> `CLJVM_GC=every` flips the semi-space many times, so a long-stale pointer's
+> forwarding word now lands in reused space.)
+>
+> ### Fixes actually landed (real, but NOT sufficient for form 430)
+>
+> Several genuine unrooted-heap-pointer caches were found by inspection and
+> fixed (they violated the codebase's own "root heap pointers across allocs"
+> contract; all pass forms 1-429 under `CLJVM_GC=every`):
+>
+> - **LazySeq/Delay cache** (`runtime.rs`): `LazyState.thunk_bits`/`value_bits`
+>   are NaN-boxed heap pointers in a Rust `Arc<RefCell>`; the Arc was kept alive
+>   but the inner pointers were never GC roots. Added a `LazyRootSource`
+>   (`register_lazy_state` + thread-local registry), registered as a permanent
+>   extra root source in `Session::new`, mirroring `var_roots::VarRoots`.
+> - **ChunkBuffer/IChunk** (`runtime.rs`): `Arc<RefCell<Vec<u64>>>` of element
+>   pointers, same hazard — now scanned by the same root source
+>   (`register_chunk_buffer`).
+> - **`cljvm_inst_reduce_3`** (`reduce1`'s chunked fold): rooted the folded
+>   items + running accumulator across each `cljvm_rt_invoke_2` via `with_scope`.
+>
+> These are correct hardening but do not resolve form 430, so the trigger above
+> remains open. Next step: instrument to catch the *producer* of the stale value
+> (e.g. a post-GC conservative stack scan that records each stale slot's value,
+> looked up when `rt_first` receives the dangling arg) and identify whether it is
+> a JIT register read-after-update or a specific unrooted runtime extern local.
+>
+> Everything below this box is the ORIGINAL (disproven) report, kept for the record.
+
+**Audience:** whoever owns the JIT GC-rooting path
+(`dynlower` `Lowerer`/`GreedyRegState` — see update box above; the
+`register-alloc` pointers below are a wrong turn).
 
 This is a clean standalone report. The full (messy) investigation trail, including
 two wrong turns (a disproven "write-barrier" theory and a *conservative stack scan*

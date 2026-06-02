@@ -97,6 +97,13 @@ pub enum Expr {
     /// `parseInt`, `console`). It is treated as an opaque runtime global and
     /// passes through into the residual verbatim.
     Global(String),
+    /// `place++` / `++place` / `place--` / `--place` used for its *value*. The
+    /// place is read, written back as `place ± 1`, and the expression yields the
+    /// old value (postfix) or the new value (prefix). The place (and any index)
+    /// must be a *pure*, re-evaluable expression (a `Var`, or a `Get`/`Index`
+    /// chain over pure bases): it is evaluated more than once, so a call/`new`/
+    /// closure inside it is rejected at compile time.
+    Update { place: Box<Expr>, op: Bop, prefix: bool },
 }
 
 pub fn num(n: i64) -> Expr {
@@ -142,6 +149,7 @@ pub enum Stmt {
     SetIndex(Expr, Expr, Expr),   // arr[i] = v
     DeleteProp(Expr, String),     // delete o.k
     DeleteIndex(Expr, Expr),      // delete arr[i]
+    SetGlobal(String, Expr),      // name = v  (assignment to an undeclared/global name)
     Push(Expr, Expr),             // arr.push(v)
     Return(Expr),
     If(Expr, Vec<Stmt>, Vec<Stmt>),
@@ -211,6 +219,7 @@ enum Instr {
     SetIndexOp,
     DeletePropOp(String),
     DeleteIndexOp,
+    SetGlobalOp(String),
     PushArr,
     GetIndex,
     PushFunc(usize),
@@ -288,6 +297,8 @@ pub enum Op {
     DeleteIndex { arr: RExpr, index: RExpr },
     /// `throw expr` that escaped all handlers (an uncaught exception on this path).
     Throw(RExpr),
+    /// `name = expr` — write to a runtime global (an undeclared assignment).
+    AssignGlobal { name: String, expr: RExpr },
 }
 
 #[derive(Debug)]
@@ -349,7 +360,19 @@ enum HeapObj {
     Object(Vec<(String, Abs)>),
     Array(Vec<Abs>),
     Closure { fid: usize, captured: Vec<Abs> },
+    /// A modeled built-in value (e.g. a `TextDecoder` instance, or a bound
+    /// method like `TextDecoder.decode`). `kind` selects the Rust model and
+    /// `data` carries any captured static state. Built-ins fold at
+    /// specialization time when their inputs are static; they have no residual
+    /// form, so one reaching a runtime (escape) context is a hard error.
+    Builtin { kind: String, data: Vec<Abs> },
 }
+
+/// The abstract heap. A *persistent* vector so that cloning a `State` (which
+/// happens at every branch, jump, loop probe, and memo insert) shares structure
+/// with its parent instead of deep-copying every object: clone is O(1) and an
+/// update is O(log n). Addresses are dense indices, append-only via `push_back`.
+type Heap = im::Vector<HeapObj>;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct Frame {
@@ -373,7 +396,7 @@ struct Handler {
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct State {
     frames: Vec<Frame>,
-    heap: Vec<HeapObj>,
+    heap: Heap,
     pending_joins: Vec<(usize, Vec<usize>)>,
     /// Stack of active `try` handlers (innermost last).
     handlers: Vec<Handler>,
@@ -442,6 +465,10 @@ fn compile_stmts(stmts: &[Stmt], code: &mut Vec<Instr>, aux: &mut CompileAux) {
                 compile_expr(a, code);
                 compile_expr(i, code);
                 code.push(Instr::DeleteIndexOp);
+            }
+            Stmt::SetGlobal(name, v) => {
+                compile_expr(v, code);
+                code.push(Instr::SetGlobalOp(name.clone()));
             }
             Stmt::Push(a, v) => {
                 compile_expr(a, code);
@@ -739,6 +766,68 @@ fn compile_expr(e: &Expr, code: &mut Vec<Instr>) {
             code.push(Instr::OpaqueOp { op: op.clone(), arity: args.len() });
         }
         Expr::Global(name) => code.push(Instr::PushGlobal(name.clone())),
+        Expr::Update { place, op, prefix } => compile_update(place, *op, *prefix, code),
+    }
+}
+
+/// Is `e` safe to evaluate more than once (no observable side effect, same value
+/// each time)? Used to guard the re-evaluation in `compile_update`.
+fn is_pure(e: &Expr) -> bool {
+    match e {
+        Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Undefined | Expr::Null
+        | Expr::This | Expr::Var(_) | Expr::Func(_) | Expr::Global(_) => true,
+        Expr::Bin(_, a, b) => is_pure(a) && is_pure(b),
+        Expr::Get(o, _) => is_pure(o),
+        Expr::Index(a, i) => is_pure(a) && is_pure(i),
+        Expr::Opaque(_, args) => args.iter().all(is_pure),
+        // Calls, `new`, closures, and object/array literals are not re-evaluable
+        // (effects / fresh identity).
+        _ => false,
+    }
+}
+
+/// Compile `place++` / `++place` (and the `--` forms) used for its value. The
+/// place is read once for the result, and the increment re-evaluates the (pure)
+/// place to write back `place ± 1`, so no extra stack-shuffling instructions are
+/// needed. Pre-increment re-reads after the store to yield the new value.
+fn compile_update(place: &Expr, op: Bop, prefix: bool, code: &mut Vec<Instr>) {
+    // Emit `place = place ± 1` (consumes nothing, leaves nothing).
+    let emit_store = |code: &mut Vec<Instr>| match place {
+        Expr::Var(slot) => {
+            code.push(Instr::Load(*slot));
+            code.push(Instr::PushNum(1));
+            code.push(Instr::Bin(op));
+            code.push(Instr::Store(*slot));
+        }
+        Expr::Get(o, k) => {
+            assert!(is_pure(o), "update of a property on a non-pure base");
+            compile_expr(o, code); // obj (for the write)
+            compile_expr(o, code); // obj (for the read)
+            code.push(Instr::GetProp(k.clone()));
+            code.push(Instr::PushNum(1));
+            code.push(Instr::Bin(op));
+            code.push(Instr::SetPropOp(k.clone()));
+        }
+        Expr::Index(a, i) => {
+            assert!(is_pure(a) && is_pure(i), "update of an index on a non-pure base");
+            compile_expr(a, code); // arr (for the write)
+            compile_expr(i, code); // index (for the write)
+            compile_expr(a, code); // arr (for the read)
+            compile_expr(i, code); // index (for the read)
+            code.push(Instr::GetIndex);
+            code.push(Instr::PushNum(1));
+            code.push(Instr::Bin(op));
+            code.push(Instr::SetIndexOp);
+        }
+        _ => unreachable!("compile_update place must be Var/Get/Index"),
+    };
+
+    if prefix {
+        emit_store(code);
+        compile_expr(place, code); // read the new value
+    } else {
+        compile_expr(place, code); // read the old value (the result)
+        emit_store(code);
     }
 }
 
@@ -770,6 +859,9 @@ pub struct Js {
     ncaptured: Vec<usize>,
     nparams: Vec<usize>,
     is_recursive: Vec<bool>,
+    /// Source name of each function (for recognizing built-ins overridden by a
+    /// user definition, e.g. a hand-rolled `TextDecoder`).
+    names: Vec<String>,
     main: usize,
     /// Residual functions emitted for closures that ESCAPE into the residual
     /// (returned, stored, passed to unmodeled code) instead of inlining. Built
@@ -873,6 +965,7 @@ impl Js {
 
         let is_recursive = compute_recursive(&entries, &code, program.len());
         let main = program.iter().position(|f| f.name == "main").expect("need main");
+        let names = program.iter().map(|f| f.name.to_string()).collect();
 
         Js {
             code,
@@ -886,6 +979,7 @@ impl Js {
             ncaptured,
             nparams,
             is_recursive,
+            names,
             main,
             residual_fns: std::cell::RefCell::new(Vec::new()),
             fn_memo: std::cell::RefCell::new(HashMap::new()),
@@ -934,7 +1028,7 @@ impl Js {
         }
         let start = State {
             frames: vec![Frame { pc: self.entries[fid], func: fid, locals, ostack: Vec::new() }],
-            heap: Vec::new(),
+            heap: Heap::new(),
             pending_joins: Vec::new(),
             handlers: Vec::new(),
         };
@@ -956,7 +1050,7 @@ impl Js {
                 locals,
                 ostack: Vec::new(),
             }],
-            heap: Vec::new(),
+            heap: Heap::new(),
             pending_joins: Vec::new(),
             handlers: Vec::new(),
         }
@@ -1067,6 +1161,19 @@ impl Client for Js {
 
     fn step(&self, s: &mut State, out: &mut Vec<Op>, at_entry: bool) -> Step<Self> {
         let pc = s.top().pc;
+        if std::env::var("JS_TRACE").is_ok() {
+            use std::sync::atomic::{AtomicU64, Ordering};
+            static N: AtomicU64 = AtomicU64::new(0);
+            let n = N.fetch_add(1, Ordering::Relaxed);
+            if n % 100_000 == 0 {
+                eprintln!(
+                    "step {n}: pc={pc} depth={} heap={} ostack={}",
+                    s.frames.len(),
+                    s.heap.len(),
+                    s.top().ostack.len()
+                );
+            }
+        }
         if !at_entry && self.leaders[pc] {
             return self.jump_to(pc, s, out);
         }
@@ -1147,18 +1254,47 @@ impl Client for Js {
                     fields.push((k.clone(), v));
                 }
                 let addr = s.heap.len();
-                s.heap.push(HeapObj::Object(fields));
+                s.heap.push_back(HeapObj::Object(fields));
                 self.push(s, Abs::Ref(addr))
             }
             Instr::NewArray(n) => {
                 let base = s.top().ostack.len() - *n;
                 let vals: Vec<Abs> = s.top_mut().ostack.split_off(base);
                 let addr = s.heap.len();
-                s.heap.push(HeapObj::Array(vals));
+                s.heap.push_back(HeapObj::Array(vals));
                 self.push(s, Abs::Ref(addr))
             }
             Instr::GetProp(k) => {
                 let o = s.top_mut().ostack.pop().unwrap();
+                // A property the abstract heap can't serve (an array method like
+                // `.slice`, or anything on a function value such as `.prototype`)
+                // makes the value escape to a residual variable; the access then
+                // passes through as `base.key`. Object fields and array `.length`
+                // stay modeled. A modeled built-in instance yields a bound method
+                // (itself a built-in value) so the following call can fold.
+                if let Abs::Ref(addr) = &o {
+                    let addr = *addr;
+                    let needs_escape = match &s.heap[addr] {
+                        HeapObj::Object(_) => false,
+                        HeapObj::Array(_) => k != "length",
+                        HeapObj::Closure { .. } => true,
+                        HeapObj::Builtin { kind, data } => {
+                            let bound = HeapObj::Builtin {
+                                kind: format!("{kind}.{k}"),
+                                data: data.clone(),
+                            };
+                            let baddr = s.heap.len();
+                            s.heap.push_back(bound);
+                            return self.push(s, Abs::Ref(baddr));
+                        }
+                    };
+                    if needs_escape {
+                        let mut escaped = std::collections::HashSet::new();
+                        let base_r = self.escape(s, addr, &mut escaped, out);
+                        let v = Abs::Dyn(RExpr::Get(Box::new(base_r), k.clone()));
+                        return self.push(s, v);
+                    }
+                }
                 let v = self.get_prop(s, &o, k);
                 self.push(s, v)
             }
@@ -1237,6 +1373,14 @@ impl Client for Js {
                 }
                 self.advance(s)
             }
+            Instr::SetGlobalOp(name) => {
+                forbid_residual_in_try(s, "a global assignment");
+                let v = s.top_mut().ostack.pop().unwrap();
+                let mut escaped = std::collections::HashSet::new();
+                let expr = self.operand_rexpr(s, &v, &mut escaped, out);
+                out.push(Op::AssignGlobal { name: name.clone(), expr });
+                self.advance(s)
+            }
             Instr::DeleteIndexOp => {
                 let i = s.top_mut().ostack.pop().unwrap();
                 let a = s.top_mut().ostack.pop().unwrap();
@@ -1290,7 +1434,7 @@ impl Client for Js {
             }
             Instr::PushFunc(fid) => {
                 let addr = s.heap.len();
-                s.heap.push(HeapObj::Closure {
+                s.heap.push_back(HeapObj::Closure {
                     fid: *fid,
                     captured: Vec::new(),
                 });
@@ -1300,7 +1444,7 @@ impl Client for Js {
                 let base = s.top().ostack.len() - *ncap;
                 let captured: Vec<Abs> = s.top_mut().ostack.split_off(base);
                 let addr = s.heap.len();
-                s.heap.push(HeapObj::Closure {
+                s.heap.push_back(HeapObj::Closure {
                     fid: *fid,
                     captured,
                 });
@@ -1314,6 +1458,16 @@ impl Client for Js {
                 let base = s.top().ostack.len() - *nargs;
                 let args: Vec<Abs> = s.top_mut().ostack.split_off(base);
                 let callee = s.top_mut().ostack.pop().unwrap();
+                // A modeled built-in constructor (e.g. `new TextDecoder()`,
+                // `new Uint8Array(staticBytes)`): fold to a modeled value when
+                // inputs are static, instead of residualizing a `new` call.
+                if let Some(name) = self.builtin_ctor_name(&callee, s) {
+                    if let Some(v) = self.try_builtin_new(name, &args, s) {
+                        s.top_mut().pc += 1;
+                        s.top_mut().ostack.push(v);
+                        return Step::Continue;
+                    }
+                }
                 forbid_residual_in_try(s, "a `new` expression");
                 let callee_r = match callee {
                     Abs::Dyn(r) => r,
@@ -1443,20 +1597,30 @@ impl Js {
     }
 
     fn get_prop(&self, s: &State, o: &Abs, k: &str) -> Abs {
+        self.get_prop_opt(s, o, k)
+            .unwrap_or_else(|| panic!("property {k} on {o:?} (unsupported)"))
+    }
+
+    /// Resolve a property read that the abstract heap can serve, or `None` for an
+    /// unmodeled case (e.g. an array method, a property on a primitive) that the
+    /// caller must residualize (or, in the loop probe, treat as dynamic).
+    fn get_prop_opt(&self, s: &State, o: &Abs, k: &str) -> Option<Abs> {
         match o {
             Abs::Ref(addr) => match &s.heap[*addr] {
-                HeapObj::Object(fields) => fields
-                    .iter()
-                    .find(|(fk, _)| fk == k)
-                    .map(|(_, v)| v.clone())
-                    .unwrap_or(Abs::Undef),
-                HeapObj::Array(elems) if k == "length" => Abs::Num(elems.len() as i64),
-                _ => panic!("property {k} on non-object"),
+                HeapObj::Object(fields) => Some(
+                    fields
+                        .iter()
+                        .find(|(fk, _)| fk == k)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(Abs::Undef),
+                ),
+                HeapObj::Array(elems) if k == "length" => Some(Abs::Num(elems.len() as i64)),
+                _ => None,
             },
             // A property read on a dynamic value (a runtime global, a string,
             // an escaped object) passes through as an opaque `base.key` read.
-            Abs::Dyn(r) => Abs::Dyn(RExpr::Get(Box::new(r.clone()), k.to_string())),
-            _ => panic!("property access on {o:?} (unsupported)"),
+            Abs::Dyn(r) => Some(Abs::Dyn(RExpr::Get(Box::new(r.clone()), k.to_string()))),
+            _ => None,
         }
     }
 
@@ -1487,10 +1651,163 @@ impl Js {
         }
     }
 
+    // -- Built-in modeling -------------------------------------------------
+    //
+    // A small registry of standard library values the evaluator understands
+    // semantically. When such a value is constructed or called with *static*
+    // inputs, the evaluator computes the result directly (folding it to a
+    // constant) instead of residualizing an opaque call. This is what lets,
+    // e.g., `new TextDecoder().decode(staticBytes)` collapse to a string
+    // literal. Adding a built-in is local: extend the match arms below.
+
+    /// If `callee` names a modeled built-in constructor (whether a free global
+    /// like `Uint8Array` or a user function shadowing one like a hand-rolled
+    /// `TextDecoder`), return its canonical name.
+    fn builtin_ctor_name(&self, callee: &Abs, s: &State) -> Option<&'static str> {
+        let raw = match callee {
+            Abs::Dyn(RExpr::Global(name)) => name.as_str(),
+            Abs::Ref(addr) => match &s.heap[*addr] {
+                HeapObj::Closure { fid, .. } => self.names.get(*fid)?.as_str(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        match raw {
+            "TextDecoder" => Some("TextDecoder"),
+            "Uint8Array" => Some("Uint8Array"),
+            _ => None,
+        }
+    }
+
+    /// Construct a modeled built-in (`new Name(args)`). Returns `None` (so the
+    /// caller residualizes) when the inputs are not static enough to fold.
+    fn try_builtin_new(&self, name: &str, args: &[Abs], s: &mut State) -> Option<Abs> {
+        match name {
+            "TextDecoder" => {
+                let addr = s.heap.len();
+                s.heap.push_back(HeapObj::Builtin { kind: "TextDecoder".into(), data: vec![] });
+                Some(Abs::Ref(addr))
+            }
+            // `new Uint8Array(arr | length)` -> a static byte array (modeled as a
+            // plain array of numbers so element/length reads work as usual).
+            "Uint8Array" => {
+                let bytes = self.uint8_init(args.first(), s)?;
+                let addr = s.heap.len();
+                s.heap.push_back(HeapObj::Array(bytes));
+                Some(Abs::Ref(addr))
+            }
+            _ => None,
+        }
+    }
+
+    /// The element list for `new Uint8Array(arg)`: a copy of a static numeric
+    /// array (byte-masked), a zero-filled array for a numeric length, or empty.
+    fn uint8_init(&self, arg: Option<&Abs>, s: &State) -> Option<Vec<Abs>> {
+        match arg {
+            None | Some(Abs::Undef) => Some(vec![]),
+            Some(Abs::Num(n)) => Some(vec![Abs::Num(0); (*n).max(0) as usize]),
+            Some(Abs::Ref(addr)) => match &s.heap[*addr] {
+                HeapObj::Array(elems) => {
+                    let mut out = Vec::with_capacity(elems.len());
+                    for e in elems {
+                        match e {
+                            Abs::Num(n) => out.push(Abs::Num(n & 0xff)),
+                            _ => return None, // a non-static element: can't fold
+                        }
+                    }
+                    Some(out)
+                }
+                _ => None,
+            },
+            _ => None, // dynamic argument
+        }
+    }
+
+    /// Evaluate a modeled bound method (e.g. `TextDecoder.decode`). Returns
+    /// `None` when arguments are not static.
+    fn try_builtin_method(&self, kind: &str, _data: &[Abs], args: &[Abs], s: &State) -> Option<Abs> {
+        match kind {
+            "TextDecoder.decode" => {
+                let bytes = self.static_bytes(args.first(), s)?;
+                Some(Abs::Str(String::from_utf8_lossy(&bytes).into_owned()))
+            }
+            _ => None,
+        }
+    }
+
+    /// Evaluate a modeled static method on a global (e.g. `String.fromCharCode`).
+    fn try_builtin_static(&self, obj: &str, method: &str, args: &[Abs]) -> Option<Abs> {
+        match (obj, method) {
+            ("String", "fromCharCode") => {
+                let mut st = String::new();
+                for a in args {
+                    match a {
+                        Abs::Num(n) => st.push(char::from_u32((*n as u32) & 0xffff)?),
+                        _ => return None,
+                    }
+                }
+                Some(Abs::Str(st))
+            }
+            _ => None,
+        }
+    }
+
+    /// A static byte vector from a numeric array (or a string's bytes); `None`
+    /// when the value is dynamic or not byte-like.
+    fn static_bytes(&self, arg: Option<&Abs>, s: &State) -> Option<Vec<u8>> {
+        match arg {
+            Some(Abs::Ref(addr)) => match &s.heap[*addr] {
+                HeapObj::Array(elems) => {
+                    let mut out = Vec::with_capacity(elems.len());
+                    for e in elems {
+                        match e {
+                            Abs::Num(n) => out.push((n & 0xff) as u8),
+                            _ => return None,
+                        }
+                    }
+                    Some(out)
+                }
+                _ => None,
+            },
+            Some(Abs::Str(st)) => Some(st.clone().into_bytes()),
+            _ => None,
+        }
+    }
+
     fn do_call(&self, s: &mut State, nargs: usize, pc: usize, out: &mut Vec<Op>) -> Step<Js> {
         let base = s.top().ostack.len() - nargs;
         let args: Vec<Abs> = s.top_mut().ostack.split_off(base);
         let callee = s.top_mut().ostack.pop().unwrap();
+
+        // A modeled built-in bound method (e.g. `TextDecoder.decode`): fold to a
+        // constant when its arguments are static.
+        if let Abs::Ref(addr) = &callee {
+            if let HeapObj::Builtin { kind, data } = &s.heap[*addr] {
+                let (kind, data) = (kind.clone(), data.clone());
+                return match self.try_builtin_method(&kind, &data, &args, s) {
+                    Some(v) => {
+                        s.top_mut().pc += 1;
+                        s.top_mut().ostack.push(v);
+                        Step::Continue
+                    }
+                    None => panic!(
+                        "built-in `{kind}` called with non-static arguments; it can \
+                         only be folded when its inputs are constant"
+                    ),
+                };
+            }
+        }
+        // A modeled static method on a global (e.g. `String.fromCharCode`): fold
+        // when static, otherwise fall through to a pass-through call.
+        if let Abs::Dyn(RExpr::Get(obj, method)) = &callee {
+            if let RExpr::Global(g) = &**obj {
+                if let Some(v) = self.try_builtin_static(g, method, &args) {
+                    s.top_mut().pc += 1;
+                    s.top_mut().ostack.push(v);
+                    return Step::Continue;
+                }
+            }
+        }
 
         let (fid, captured) = match callee {
             Abs::Ref(addr) => match &s.heap[addr] {
@@ -1554,7 +1871,7 @@ impl Js {
     /// scalar-replaced (because they become runtime values) are reconstructed in
     /// the residual. Nested objects materialize depth-first so each is defined
     /// before it is referenced.
-    fn materialize_value(&self, v: &Abs, heap: &[HeapObj], out: &mut Vec<Op>) -> RExpr {
+    fn materialize_value(&self, v: &Abs, heap: &Heap, out: &mut Vec<Op>) -> RExpr {
         match v {
             Abs::Ref(addr) => {
                 let dst = Js::escape_var(*addr);
@@ -1567,7 +1884,7 @@ impl Js {
 
     /// Materialize `v` into the residual variable `dst`. For a heap reference,
     /// emits the construction op (recursively materializing nested values).
-    fn materialize_into(&self, dst: usize, v: &Abs, heap: &[HeapObj], out: &mut Vec<Op>) {
+    fn materialize_into(&self, dst: usize, v: &Abs, heap: &Heap, out: &mut Vec<Op>) {
         match v {
             Abs::Ref(addr) => match &heap[*addr] {
                 HeapObj::Object(fields) => {
@@ -1590,6 +1907,14 @@ impl Js {
                     let rfid = self.residual_fn_for(*fid);
                     out.push(Op::Assign { var: dst, expr: RExpr::FnRef { rfid, caps } });
                 }
+                // A modeled built-in (e.g. a `TextDecoder` instance or a bound
+                // method) has no residual representation: reaching here means it
+                // flowed into runtime code (e.g. returned, or a method called
+                // with non-static arguments).
+                HeapObj::Builtin { kind, .. } => panic!(
+                    "built-in `{kind}` escaped into runtime code; it can only be \
+                     folded when used with static inputs"
+                ),
             },
             _ => out.push(Op::Assign { var: dst, expr: v.to_rexpr() }),
         }
@@ -1631,12 +1956,15 @@ impl Js {
                 invalidate_abs(o, &reach);
             }
         }
-        for h in &mut s.heap {
+        for h in s.heap.iter_mut() {
             match h {
                 HeapObj::Object(fs) => fs.iter_mut().for_each(|(_, v)| invalidate_abs(v, &reach)),
                 HeapObj::Array(es) => es.iter_mut().for_each(|v| invalidate_abs(v, &reach)),
                 HeapObj::Closure { captured, .. } => {
                     captured.iter_mut().for_each(|v| invalidate_abs(v, &reach))
+                }
+                HeapObj::Builtin { data, .. } => {
+                    data.iter_mut().for_each(|v| invalidate_abs(v, &reach))
                 }
             }
         }
@@ -1646,7 +1974,7 @@ impl Js {
 
     /// Heap addresses transitively reachable from `addr` (terminates on shared
     /// or cyclic graphs via the visited set).
-    fn reachable(heap: &[HeapObj], addr: usize, out: &mut std::collections::HashSet<usize>) {
+    fn reachable(heap: &Heap, addr: usize, out: &mut std::collections::HashSet<usize>) {
         if !out.insert(addr) {
             return;
         }
@@ -1654,6 +1982,7 @@ impl Js {
             HeapObj::Object(fs) => fs.iter().filter_map(|(_, v)| as_ref_addr(v)).collect(),
             HeapObj::Array(es) => es.iter().filter_map(as_ref_addr).collect(),
             HeapObj::Closure { captured, .. } => captured.iter().filter_map(as_ref_addr).collect(),
+            HeapObj::Builtin { data, .. } => data.iter().filter_map(as_ref_addr).collect(),
         };
         for c in kids {
             Js::reachable(heap, c, out);
@@ -1708,8 +2037,10 @@ impl Js {
                 }
                 Instr::GetProp(k) => {
                     let o = probe.top_mut().ostack.pop().unwrap();
-                    let v = self.get_prop(&probe, &o, k);
-                    probe.top_mut().ostack.push(v);
+                    match self.get_prop_opt(&probe, &o, k) {
+                        Some(v) => probe.top_mut().ostack.push(v),
+                        None => return true, // unmodeled: conservatively dynamic
+                    }
                 }
                 Instr::GetIndex => {
                     let i = probe.top_mut().ostack.pop().unwrap();
@@ -1983,6 +2314,10 @@ impl Js {
                         panic!("delete property on non-ref");
                     }
                 }
+                Instr::SetGlobalOp(name) => panic!(
+                    "the Rust reference interpreter cannot assign the global `{name}`; \
+                     validate with the Node oracle"
+                ),
                 Instr::DeleteIndexOp => {
                     let i = ostack.pop().unwrap();
                     let a = ostack.pop().unwrap();
@@ -2219,6 +2554,10 @@ impl Js {
                         let v = eval_rexpr(e, &store, &heap);
                         panic!("uncaught residual throw: {v:?}");
                     }
+                    Op::AssignGlobal { name, .. } => panic!(
+                        "the Rust residual interpreter cannot assign the global `{name}`; \
+                         validate with the Node oracle"
+                    ),
                 }
             }
             match &block.term {
@@ -2292,6 +2631,9 @@ impl Js {
                         writeln!(s, "    delete {}[{}]", fmt_rexpr(arr), fmt_rexpr(index)).unwrap()
                     }
                     Op::Throw(e) => writeln!(s, "    throw {}", fmt_rexpr(e)).unwrap(),
+                    Op::AssignGlobal { name, expr } => {
+                        writeln!(s, "    {name} := {}", fmt_rexpr(expr)).unwrap()
+                    }
                 }
             }
             match &b.term {

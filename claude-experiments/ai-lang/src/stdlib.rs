@@ -3389,6 +3389,138 @@ mod tests {
     }
 
     #[test]
+    fn named_function_as_first_class_value() {
+        init();
+        let ctx = Context::create();
+        // A bare reference to a named top-level function used as a VALUE
+        // (not as a direct-call callee) is eta-expanded into an adapter
+        // closure. This is the `swap(counter, inc)` case: passing `inc`
+        // where a `fn(T) -> T` is expected.
+        let driver = "
+            def inc(n: Int) -> Int = n + 1
+            def dbl(n: Int) -> Int = n * 2
+
+            // Passed to the generic higher-order list_map (Int -> Int).
+            def t_map() -> Int = {
+                let xs = Cons(ListCell { head: 1, tail:
+                          Cons(ListCell { head: 2, tail:
+                          Cons(ListCell { head: 3, tail: Nil }) }) });
+                list_foldl(list_map(xs, inc), 0, |acc: Int, x: Int| acc + x)
+            }
+
+            // Passed by name to atom swap — the original reported case.
+            def t_swap_named() -> Int = {
+                let a = atom(0);
+                let _1 = swap(a, inc);
+                let _2 = swap(a, inc);
+                let _3 = swap(a, dbl);   // (0+1+1)*2 = 4
+                deref(a)
+            }
+
+            // A named function used BOTH directly and as a value in the
+            // same body still works (direct call path is unaffected).
+            def t_mixed() -> Int = {
+                let a = atom(inc(10));   // direct call: 11
+                let _1 = swap(a, inc);   // value:        12
+                deref(a)
+            }
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names[n]))
+                    .unwrap()
+                    .call(rt.thread_ptr())
+            };
+            assert_eq!(f("t_map"), 9, "map inc over [1,2,3] then sum = 2+3+4");
+            assert_eq!(f("t_swap_named"), 4, "named fns passed to swap");
+            assert_eq!(f("t_mixed"), 12, "named fn used both directly and as a value");
+        }
+    }
+
+    #[test]
+    fn concrete_builtin_as_first_class_value() {
+        init();
+        let ctx = Context::create();
+        // A concrete core builtin (here `string_len`, a `fn(String) -> Int`)
+        // used as a bare VALUE — resolved to a `core/*` BuiltinRef and
+        // eta-expanded into an adapter closure, so it can flow through a
+        // higher-order fn. (Generic builtins like `array_get` also work as
+        // values — see `generic_builtin_as_first_class_value`. Only call-
+        // site-special ones like `at` stay unusable as bare values.)
+        let driver = "
+            def t_map_strlen() -> Int = {
+                let xs = Cons(ListCell { head: \"a\", tail:
+                          Cons(ListCell { head: \"bcd\", tail:
+                          Cons(ListCell { head: \"ef\", tail: Nil }) }) });
+                // map string_len over [\"a\",\"bcd\",\"ef\"] = [1,3,2], sum = 6
+                list_foldl(list_map(xs, string_len), 0, |acc: Int, n: Int| acc + n)
+            }
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names[n]))
+                    .unwrap()
+                    .call(rt.thread_ptr())
+            };
+            assert_eq!(f("t_map_strlen"), 6, "builtin string_len passed by value to map");
+        }
+    }
+
+    #[test]
+    fn generic_builtin_as_first_class_value() {
+        init();
+        let ctx = Context::create();
+        // Generic core builtins (`array_get`, `atom_swap_slot`) used as bare
+        // VALUES. Their signatures carry a `TypeVar`, so the adapter closure
+        // is polymorphic and composes through the uniform closure ABI; the
+        // concrete (un)boxing is settled at the call site that pins the
+        // TypeVars — for an indirect call that's `compile_indirect_call`'s
+        // instantiation-aware unboxing, for a direct call the `TopRef` path.
+        let driver = "
+            // array_get passed into a monomorphic higher-order fn.
+            def first_int(a: Array<Int>, g: fn(Array<Int>, Int) -> Int) -> Int = g(a, 0)
+            def t_hof() -> Int = {
+                let arr = array_new(2);
+                let _1 = array_set(arr, 0, 42);
+                first_int(arr, array_get)
+            }
+            // array_get let-bound, then called where the array type pins T=Int.
+            def get0(a: Array<Int>) -> Int = {
+                let g = array_get;
+                g(a, 0)
+            }
+            def t_letbound() -> Int = {
+                let arr = array_new(1);
+                let _1 = array_set(arr, 0, 7);
+                get0(arr)
+            }
+            // atom_swap_slot passed by value (the lock-free CAS primitive).
+            def do_swap(c: Array<Int>, f: fn(Array<Int>, Int, fn(Int) -> Int) -> Int) -> Int =
+                f(c, 0, |x: Int| x + 100)
+            def t_atom() -> Int = {
+                let a = atom(5);
+                do_swap(a.cell, atom_swap_slot)
+            }
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names[n]))
+                    .unwrap()
+                    .call(rt.thread_ptr())
+            };
+            assert_eq!(f("t_hof"), 42, "array_get passed by value to a monomorphic HOF");
+            assert_eq!(f("t_letbound"), 7, "let-bound array_get called where T pins to Int");
+            assert_eq!(f("t_atom"), 105, "atom_swap_slot passed by value (5 + 100)");
+        }
+    }
+
+    #[test]
     fn atom_enum_op_local() {
         init();
         let ctx = Context::create();

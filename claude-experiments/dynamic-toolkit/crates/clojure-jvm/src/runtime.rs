@@ -2742,6 +2742,17 @@ pub unsafe extern "C" fn cljvm_rt_first(bits: u64) -> u64 {
                     _ => unsafe { cljvm_rt_first(s) },
                 }
             } else {
+                if std::env::var("CLJVM_POSTGC_SCAN").is_ok() {
+                    let hdr = unsafe { ptr.cast::<u64>().read_unaligned() };
+                    if let Ok(cap) = dynlower::STALE_CAPTURE.lock() {
+                        if let Some(map) = cap.as_ref() {
+                            match map.get(&bits) {
+                                Some(loc) => eprintln!("[rt_first] DANGLING bits={bits:#x} hdr={hdr:#x}: producer @ {loc}"),
+                                None => eprintln!("[rt_first] DANGLING bits={bits:#x} hdr={hdr:#x}: not in stale-capture"),
+                            }
+                        }
+                    }
+                }
                 panic!("clojure-jvm: RT.first on unsupported heap type_id {type_id}");
             }
         }
@@ -5030,6 +5041,82 @@ pub struct LazyState {
     pub value_bits: u64,        // valid only when realized
 }
 
+// ─── LazySeq/Delay GC roots ───────────────────────────────────────────
+//
+// `LazyState` lives in a Rust `Arc<RefCell<…>>` (kept alive by
+// `CompileRoots._lazy_states`). Its `thunk_bits` (the deferred fn) and,
+// once realized, `value_bits` (the cached result) are NaN-boxed GC-heap
+// pointers. Keeping the Arc alive only protects the Rust allocation — it
+// does NOT make those heap pointers GC roots, so a moving collection
+// relocates the thunk/value without updating the cached bits. The cached
+// pointer then dangles, and a later force returns a stale address (under
+// `CLJVM_GC=every` this surfaces as `RT.first` on a forwarded/garbage
+// object — the form-430 loader crash).
+//
+// Fix: register every live `LazyState` as a GC root, exactly like
+// `var_roots::VarRoots` does for Var root values. On each collection the
+// GC scans `thunk_bits` (always — the thunk must survive until realized)
+// and `value_bits` (once realized) and rewrites moved pointers in place.
+thread_local! {
+    static LAZY_REGISTRY: std::cell::RefCell<Vec<std::sync::Arc<std::cell::RefCell<LazyState>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+    /// `ChunkBuffer`/`IChunk` cells: a Rust `Vec<u64>` of NaN-boxed element
+    /// pointers. Same unrooted-cache hazard as `LazyState`.
+    static CHUNK_REGISTRY: std::cell::RefCell<Vec<std::sync::Arc<std::cell::RefCell<Vec<u64>>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Register a freshly-created `LazyState` so its cached heap pointers are
+/// scanned/forwarded by the GC. Must be called for every LazySeq/Delay cell.
+pub fn register_lazy_state(arc: &std::sync::Arc<std::cell::RefCell<LazyState>>) {
+    LAZY_REGISTRY.with(|r| r.borrow_mut().push(arc.clone()));
+}
+
+/// Register a `ChunkBuffer`/`IChunk` element buffer so its NaN-boxed element
+/// pointers are scanned/forwarded by the GC.
+pub fn register_chunk_buffer(arc: &std::sync::Arc<std::cell::RefCell<Vec<u64>>>) {
+    CHUNK_REGISTRY.with(|r| r.borrow_mut().push(arc.clone()));
+}
+
+/// `RootSource` over all live `LazyState`s and chunk buffers on this thread.
+pub struct LazyRootSource;
+
+impl dynobj::RootSource for LazyRootSource {
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
+        // No cell is mutably borrowed at a GC safepoint (forcing / `.add`
+        // have completed), so `as_ptr` access is sound here.
+        LAZY_REGISTRY.with(|r| {
+            for arc in r.borrow().iter() {
+                let p = arc.as_ptr();
+                unsafe {
+                    visitor(std::ptr::addr_of_mut!((*p).thunk_bits));
+                    if (*p).realized {
+                        visitor(std::ptr::addr_of_mut!((*p).value_bits));
+                    }
+                }
+            }
+        });
+        CHUNK_REGISTRY.with(|r| {
+            for arc in r.borrow().iter() {
+                let p = arc.as_ptr();
+                unsafe {
+                    let v = &mut *p;
+                    for i in 0..v.len() {
+                        visitor(std::ptr::addr_of_mut!(v[i]));
+                    }
+                }
+            }
+        });
+    }
+}
+
+static LAZY_ROOT_SOURCE: LazyRootSource = LazyRootSource;
+
+/// A `'static` `RootSource` handle for `register_extra_root_source`.
+pub fn lazy_root_source() -> *const dyn dynobj::RootSource {
+    &LAZY_ROOT_SOURCE as *const dyn dynobj::RootSource
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_LazySeq_new1(thunk_bits: u64) -> u64 {
     let ids = heap_type_ids();
@@ -5038,6 +5125,7 @@ pub unsafe extern "C" fn cljvm_inst_LazySeq_new1(thunk_bits: u64) -> u64 {
         realized: false,
         value_bits: nanbox_nil(),
     }));
+    register_lazy_state(&arc);
     unsafe {
         alloc_arc_cell(
             ids.lazy_seq,
@@ -5055,6 +5143,7 @@ pub unsafe extern "C" fn cljvm_inst_Delay_new1(thunk_bits: u64) -> u64 {
         realized: false,
         value_bits: nanbox_nil(),
     }));
+    register_lazy_state(&arc);
     unsafe {
         alloc_arc_cell(
             ids.delay,
@@ -5117,6 +5206,7 @@ pub unsafe extern "C" fn cljvm_inst_ChunkBuffer_new1(capacity_bits: u64) -> u64 
     let arc = std::sync::Arc::new(std::cell::RefCell::new(
         Vec::<u64>::with_capacity(cap as usize),
     ));
+    register_chunk_buffer(&arc);
     unsafe {
         alloc_arc_cell(
             ids.chunk_buffer,
@@ -5146,11 +5236,24 @@ pub unsafe extern "C" fn cljvm_inst_reduce_3(
     let arc: std::sync::Arc<std::cell::RefCell<Vec<u64>>> =
         unsafe { decode_arc_cell(p) };
     let items: Vec<u64> = arc.borrow().clone();
-    let mut acc = init_bits;
-    for item in items {
-        acc = unsafe { cljvm_rt_invoke_2(f_bits, acc, item) };
+    if items.is_empty() {
+        return init_bits;
     }
-    acc
+    // Each `cljvm_rt_invoke_2` runs the user fn, which may allocate and
+    // trigger a moving GC. The folded items and the running accumulator are
+    // NaN-boxed heap pointers held only in this Rust frame, so they must be
+    // rooted across every call or a relocation leaves them dangling (the
+    // form-430 `reduce1`-over-chunked-seq crash under `CLJVM_GC=every`).
+    dynobj::roots::with_scope(items.len() + 1, |scope| {
+        let item_roots: Vec<dynobj::roots::Rooted<()>> =
+            items.iter().map(|&b| scope.root::<()>(b)).collect();
+        let acc = scope.root::<()>(init_bits);
+        for ir in &item_roots {
+            let next = unsafe { cljvm_rt_invoke_2(f_bits, acc.get(), ir.get()) };
+            acc.set(next);
+        }
+        acc.get()
+    })
 }
 
 /// `(.chunkedFirst s)` — return the first chunk of an IChunkedSeq.

@@ -274,7 +274,18 @@ impl DynGcRuntime {
             core::mem::transmute::<*const (dyn RootSource + 'a), *const dyn RootSource>(source)
         };
         self.extra_root_sources.lock().unwrap().push(erased);
-        ExtraRootGuard { gc: self }
+        // Mirror to the underlying Heap's `permanent_extras` for the guard's
+        // lifetime so ALLOC-triggered GC (`mutator_triggered_gc`, which takes
+        // no per-call extras) also scans this source. Without this, a
+        // stack-scoped `FrameChain` (e.g. the per-`run_jit`/macroexpand chain
+        // holding `with_scope` roots) is invisible to a collection that fires
+        // inside an allocating runtime extern (`cljvm_rt_cons`, …), so its
+        // roots are relocated without being updated and dangle. The guard's
+        // `Drop` removes it again (LIFO).
+        match &self.backend {
+            Backend::Generational(heap) => unsafe { heap.register_permanent_extra(erased) },
+        }
+        ExtraRootGuard { gc: self, mirrored: erased }
     }
 
     /// Install the auto-bound extern map (typically
@@ -550,12 +561,20 @@ impl DynGcRuntime {
 /// Returned by [`DynGcRuntime::push_extra_root_source`].
 pub struct ExtraRootGuard<'a> {
     gc: &'a DynGcRuntime,
+    /// The erased pointer mirrored into the Heap's `permanent_extras`; removed
+    /// on drop so the heap stops scanning a no-longer-valid stack chain.
+    mirrored: *const dyn RootSource,
 }
 
 impl Drop for ExtraRootGuard<'_> {
     fn drop(&mut self) {
         let popped = self.gc.extra_root_sources.lock().unwrap().pop();
         debug_assert!(popped.is_some(), "ExtraRootGuard: pop on empty stack");
+        match &self.gc.backend {
+            Backend::Generational(heap) => unsafe {
+                heap.unregister_permanent_extra(self.mirrored)
+            },
+        }
     }
 }
 

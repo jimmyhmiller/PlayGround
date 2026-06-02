@@ -252,6 +252,61 @@ pub const AT_BUILTIN_PREFIX: &str = "core/net.at#";
 /// Parse a `core/net.at#<result_hex>[#<failure_hex>]` builtin name.
 /// Returns the `Result` hash plus, for the generic form, the
 /// `Failure` hash too. `None` if the name doesn't have that shape.
+/// Map a surface builtin name to its `core/*` name when it may be used as
+/// a first-class VALUE (a bare reference, not a call). These mirror the
+/// entries handled in call position inside `resolve_expr`. Both concrete
+/// builtins (string/bytes/ptr/...) AND generic ones (`array_*`, `atom_swap`,
+/// whose signatures carry a `TypeVar`) qualify: a generic value reference
+/// resolves to a polymorphic `fn(...)` type and is eta-expanded into an
+/// adapter closure that composes through the uniform closure ABI, with the
+/// concrete (un)boxing settled at the instantiation boundary.
+///
+/// Call-site-special builtins (`at`) and ones whose value form is pointless
+/// (`panic` returns `Never`, `gc_collect` is a nullary side-effect) are
+/// absent, so a bare reference to them stays an `UnknownName`. The actual
+/// signature is read from [`crate::typecheck::builtin_signature`], keeping
+/// types single-sourced.
+fn value_position_builtin(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "string_len" => "core/string.len",
+        "string_eq" => "core/string.eq",
+        "string_concat" => "core/string.concat",
+        "bytes_new" => "core/bytes.new",
+        "bytes_len" => "core/bytes.len",
+        "bytes_get" => "core/bytes.get",
+        "bytes_set" => "core/bytes.set",
+        "bytes_slice" => "core/bytes.slice",
+        "bytes_concat" => "core/bytes.concat",
+        "bytes_from_string" => "core/bytes.from_string",
+        "string_from_bytes" => "core/string.from_bytes",
+        "int_to_float" => "core/f64.of_int",
+        "float_to_int" => "core/f64.to_int",
+        "ptr_null" => "core/ptr.null",
+        "ptr_is_null" => "core/ptr.is_null",
+        "ptr_add" => "core/ptr.add",
+        "ptr_read_u8" => "core/ptr.read_u8",
+        "ptr_write_u8" => "core/ptr.write_u8",
+        "ptr_read_i64" => "core/ptr.read_i64",
+        "ptr_write_i64" => "core/ptr.write_i64",
+        "ptr_read_ptr" => "core/ptr.read_ptr",
+        "ptr_write_ptr" => "core/ptr.write_ptr",
+        "ptr_to_int" => "core/ptr.to_int",
+        "int_to_ptr" => "core/ptr.from_int",
+        "bit_and" => "core/i64.and",
+        "bit_or" => "core/i64.or",
+        "bit_xor" => "core/i64.xor",
+        "bit_shl" => "core/i64.shl",
+        "bit_shr" => "core/i64.shr",
+        // Generic builtins (signatures carry `TypeVar(0)`).
+        "array_new" => "core/array.new",
+        "array_len" => "core/array.len",
+        "array_get" => "core/array.get",
+        "array_set" => "core/array.set",
+        "atom_swap_slot" => "core/atom.swap",
+        _ => return None,
+    })
+}
+
 pub fn parse_at_builtin_name(name: &str) -> Option<(Hash, Option<Hash>)> {
     let body = name.strip_prefix(AT_BUILTIN_PREFIX)?;
     let parts: Vec<&str> = body.split('#').collect();
@@ -2089,6 +2144,26 @@ fn resolve_expr_typed(
                     name: name.clone(),
                     span: *span,
                 });
+            }
+            // A bare reference to a concrete core builtin (e.g. passing
+            // `string_len` to a higher-order fn). These names are mapped
+            // to `core/*` BuiltinRefs in call position above; here we
+            // mirror that for VALUE position. The type is the builtin's
+            // `fn(...) -> ...` signature. Only concrete builtins qualify —
+            // generic ones (`array_get`, `atom_swap`) and call-site-special
+            // ones (`at`) deliberately stay unresolved as bare values.
+            if let Some(core) = value_position_builtin(name) {
+                if let Some((params, ret)) =
+                    crate::typecheck::builtin_signature(core)
+                {
+                    return Ok((
+                        Expr::BuiltinRef(core.to_owned()),
+                        Type::FnType {
+                            params,
+                            ret: Box::new(ret),
+                        },
+                    ));
+                }
             }
             Err(ResolveError::UnknownName {
                 name: name.clone(),

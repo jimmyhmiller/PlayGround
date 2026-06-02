@@ -423,6 +423,7 @@ impl Plugin for TerminalPlugin {
                     handle_file_drop,
                     sync_grid,
                     apply_bell_pulse,
+                    apply_claude_notification_pulse,
                     clear_active_unread,
                     sync_dock_badge,
                 )
@@ -1859,6 +1860,64 @@ fn apply_bell_pulse(
         }
         eprintln!(
             "[bell] bumped pid={} → {} (total {})",
+            pid,
+            projects.unread_bells.get(&pid).copied().unwrap_or(0),
+            projects.unread_total()
+        );
+    }
+}
+
+/// Bumps the per-project unread counter when Claude's Notification hook
+/// fires ("Claude is waiting for your input" / "needs your permission").
+///
+/// This is the *authoritative* "Claude wants attention" signal. It
+/// arrives on the bus (via `claude-event-logger notification`) every
+/// time, independent of whether Claude emits a terminal BEL — recent
+/// Claude builds frequently don't, which is why the BEL-only
+/// `apply_bell_pulse` path stopped lighting up project badges. We route
+/// the event to a project by `terminal_session_id` → the pane's
+/// `TerminalSession` → its `ProjectMembership`, then apply the same
+/// visibility gate as the bell path: skip when the user is already
+/// looking at that project.
+fn apply_claude_notification_pulse(
+    mut events: MessageReader<claude_bus_bevy::ClaudeBusEvent>,
+    app_focused: Res<AppFocused>,
+    mut projects: ResMut<Projects>,
+    panes: Query<(&TerminalSession, Option<&ProjectMembership>)>,
+) {
+    let window_focused = app_focused.0;
+    let active_project = projects.active;
+    for ev in events.read() {
+        if ev.kind != "notification" {
+            continue;
+        }
+        // Standalone Claude sessions (not running inside one of our
+        // panes) carry an empty / non-numeric session id — ignore them.
+        let Ok(sid) = ev.terminal_session_id.parse::<u64>() else {
+            continue;
+        };
+        let pid = panes
+            .iter()
+            .find(|(ts, _)| ts.0 == sid)
+            .and_then(|(_, pm)| pm.map(|p| p.0));
+        let Some(pid) = pid else {
+            eprintln!(
+                "[notify] notification for session {} but no project pane — skipping",
+                sid
+            );
+            continue;
+        };
+        let visible = window_focused && active_project == Some(pid);
+        eprintln!(
+            "[notify] notification sid={} pid={} window_focused={} active={:?} visible={}",
+            sid, pid, window_focused, active_project, visible
+        );
+        if visible {
+            continue;
+        }
+        projects.bump_unread(pid);
+        eprintln!(
+            "[notify] bumped pid={} → {} (total {})",
             pid,
             projects.unread_bells.get(&pid).copied().unwrap_or(0),
             projects.unread_total()

@@ -13,14 +13,18 @@
 //
 // Here we make a counter starting at 0 and bump it a few times.
 
+// A named top-level function, passed by name as a first-class value to
+// `swap` below. (Lambdas like `|n: Int| n + 1` work here too.)
+def inc(n: Int) -> Int = n + 1
+
 def main() -> Int = {
     let counter = atom(0);
 
     let a = println(string_concat("start:    ", int_to_string(deref(counter))));
 
-    let _1 = swap(counter, |n: Int| n + 1);
-    let _2 = swap(counter, |n: Int| n + 1);
-    let _3 = swap(counter, |n: Int| n + 1);
+    let _1 = swap(counter, inc);
+    let _2 = swap(counter, inc);
+    let _3 = swap(counter, inc);
 
     let b = println(string_concat("after 3:  ", int_to_string(deref(counter))));
 

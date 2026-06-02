@@ -202,6 +202,24 @@ pub enum Type {
     SelfRef(u32),
 }
 
+impl Type {
+    /// True if a `TypeVar` appears anywhere in this type (including nested
+    /// in `Apply`/`FnType`). Used to distinguish concrete signatures from
+    /// generic ones.
+    pub fn contains_type_var(&self) -> bool {
+        match self {
+            Type::TypeVar(_) => true,
+            Type::Builtin(_) | Type::TypeRef(_) | Type::SelfRef(_) => false,
+            Type::Apply(base, args) => {
+                base.contains_type_var() || args.iter().any(|a| a.contains_type_var())
+            }
+            Type::FnType { params, ret } => {
+                ret.contains_type_var() || params.iter().any(|p| p.contains_type_var())
+            }
+        }
+    }
+}
+
 /// A canonical top-level definition.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Def {

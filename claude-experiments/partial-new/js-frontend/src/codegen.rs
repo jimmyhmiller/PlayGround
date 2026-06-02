@@ -62,6 +62,7 @@ fn render_function(name: &str, params: &[usize], prog: &Program<Op, Cond>) -> St
                 | Op::SetProp { .. }
                 | Op::DeleteProp { .. }
                 | Op::DeleteIndex { .. }
+                | Op::AssignGlobal { .. }
                 | Op::Return(_)
                 | Op::Throw(_) => {}
             }
@@ -161,6 +162,7 @@ fn op_to_js(op: &Op) -> String {
             format!("delete {}[{}];", base_js(arr), rexpr_to_js(index))
         }
         Op::Throw(e) => format!("throw {};", rexpr_to_js(e)),
+        Op::AssignGlobal { name, expr } => format!("{name} = {};", rexpr_to_js(expr)),
     }
 }
 

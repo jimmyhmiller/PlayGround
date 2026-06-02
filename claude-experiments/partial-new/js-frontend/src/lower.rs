@@ -65,9 +65,17 @@ struct DeclFn {
     module_body: Option<Vec<ast::Stmt>>,
 }
 
-/// Per-function lowering state: a lexical stack of name→slot scopes.
+/// A bound name's residual slot plus whether it is BOXED (a `{value}` cell, for
+/// capture-by-reference).
+#[derive(Clone, Copy)]
+struct Binding {
+    slot: usize,
+    boxed: bool,
+}
+
+/// Per-function lowering state: a lexical stack of name→binding scopes.
 struct FnCtx {
-    scopes: Vec<HashMap<String, usize>>,
+    scopes: Vec<HashMap<String, Binding>>,
     next_slot: usize,
     max_slot: usize,
     /// nesting depth of enclosing `switch`/loop, to validate `break`.
@@ -79,6 +87,12 @@ struct FnCtx {
     /// from a lifted arrow is a clear "capturing closure" error; a name in
     /// neither the local scopes nor here is treated as a runtime global.
     outer_names: HashSet<String>,
+    /// Names that must be boxed in THIS function (captured + mutated `var`s).
+    boxed_set: HashSet<String>,
+    /// Names of nested `function` declarations hoisted to the top of THIS
+    /// function body (so `lower_stmt` skips them at their textual position; a
+    /// `function` declaration anywhere else is rejected).
+    hoisted_fns: HashSet<String>,
 }
 
 impl FnCtx {
@@ -90,6 +104,8 @@ impl FnCtx {
             break_depth: 0,
             loop_depth: 0,
             outer_names,
+            boxed_set: HashSet::new(),
+            hoisted_fns: HashSet::new(),
         }
     }
     fn push(&mut self) {
@@ -99,26 +115,33 @@ impl FnCtx {
         self.scopes.pop();
     }
     fn declare(&mut self, name: &str) -> usize {
+        self.declare_boxed(name, self.boxed_set.contains(name))
+    }
+    fn declare_boxed(&mut self, name: &str, boxed: bool) -> usize {
         let slot = self.next_slot;
         self.next_slot += 1;
         self.max_slot = self.max_slot.max(self.next_slot);
-        self.scopes.last_mut().unwrap().insert(name.to_string(), slot);
+        self.scopes.last_mut().unwrap().insert(name.to_string(), Binding { slot, boxed });
         slot
     }
     /// Declare (or reuse) a `var` in the *function* scope. `var` is
     /// function-scoped and hoisted, so it survives inner blocks and a
     /// redeclaration refers to the same binding.
     fn declare_var(&mut self, name: &str) -> usize {
-        if let Some(&slot) = self.scopes[0].get(name) {
-            return slot;
+        if let Some(b) = self.scopes[0].get(name) {
+            return b.slot;
         }
+        let boxed = self.boxed_set.contains(name);
         let slot = self.next_slot;
         self.next_slot += 1;
         self.max_slot = self.max_slot.max(self.next_slot);
-        self.scopes[0].insert(name.to_string(), slot);
+        self.scopes[0].insert(name.to_string(), Binding { slot, boxed });
         slot
     }
     fn resolve(&self, name: &str) -> Option<usize> {
+        self.scopes.iter().rev().find_map(|s| s.get(name).map(|b| b.slot))
+    }
+    fn resolve_binding(&self, name: &str) -> Option<Binding> {
         self.scopes.iter().rev().find_map(|s| s.get(name).copied())
     }
     /// All names visible here (local scopes + already-inherited outer names),
@@ -194,9 +217,13 @@ impl Compiler {
     /// top-level `var`s and code run in order.
     fn lower_module_main(&mut self, stmts: &[ast::Stmt]) -> R<(usize, usize, Vec<Stmt>)> {
         let mut ctx = FnCtx::new(HashSet::new());
+        ctx.boxed_set = boxed_locals(stmts);
         ctx.declare("input");
         hoist_vars(stmts, &mut ctx);
-        let body = self.lower_stmts(stmts, &mut ctx)?;
+        self.hoist_fn_decls(stmts, &mut ctx);
+        let mut body = self.boxed_cell_stmts(&ctx);
+        body.extend(self.lower_fn_decls(stmts, &mut ctx)?);
+        body.extend(self.lower_stmts(stmts, &mut ctx)?);
         Ok((ctx.max_slot.max(1), 1, body))
     }
 
@@ -205,21 +232,87 @@ impl Compiler {
         self.declared
     }
 
+    /// Create the `{value: undefined}` cells for this function's own boxed vars,
+    /// at the top of its body (so capture-by-reference cells exist before use).
+    fn boxed_cell_stmts(&self, ctx: &FnCtx) -> Vec<Stmt> {
+        let mut names: Vec<&String> = ctx.boxed_set.iter().collect();
+        names.sort();
+        names
+            .into_iter()
+            .filter_map(|name| ctx.resolve(name))
+            .map(|slot| Stmt::Let(slot, Expr::Object(vec![("value".to_string(), Expr::Undefined)])))
+            .collect()
+    }
+
+    /// Declare a slot (function-scoped, hoisted) for each direct-child
+    /// `function` declaration of `stmts`, and record the names so `lower_stmt`
+    /// skips them at their textual position. Must run after `hoist_vars` and
+    /// after `ctx.boxed_set` is set (so the slot picks up the boxed flag).
+    fn hoist_fn_decls(&self, stmts: &[ast::Stmt], ctx: &mut FnCtx) {
+        for name in fn_decl_names(stmts) {
+            ctx.declare_var(&name);
+            ctx.hoisted_fns.insert(name);
+        }
+    }
+
+    /// Lower the direct-child `function` declarations of `stmts` into assignment
+    /// statements, emitted at the top of the body (JS function-declaration
+    /// hoisting). Each becomes a closure assigned to its hoisted slot (or its
+    /// `{value}` cell when boxed for capture-by-reference).
+    fn lower_fn_decls(&mut self, stmts: &[ast::Stmt], ctx: &mut FnCtx) -> R<Vec<Stmt>> {
+        let mut out = Vec::new();
+        for s in stmts {
+            let ast::Stmt::Decl(ast::Decl::Fn(f)) = s else {
+                continue;
+            };
+            let name = f.ident.sym.to_string();
+            let params: Vec<ast::Pat> =
+                f.function.params.iter().map(|p| p.pat.clone()).collect();
+            let body = match &f.function.body {
+                Some(b) => b.stmts.clone(),
+                None => return Err(format!("function `{name}` without a body")),
+            };
+            let (fid, captures) =
+                self.lift_arrow(&params, ArrowBody::BlockOwned(body), ctx)?;
+            let caps = self.capture_exprs(&captures, ctx)?;
+            let closure = Expr::Closure(fid, caps);
+            let b = ctx
+                .resolve_binding(&name)
+                .expect("fn-decl slot declared by hoist_fn_decls");
+            if b.boxed {
+                out.push(Stmt::SetProp(Expr::Var(b.slot), "value".to_string(), closure));
+            } else {
+                out.push(Stmt::Set(b.slot, closure));
+            }
+        }
+        Ok(out)
+    }
+
     /// Lower a function (declaration or lifted expression). Returns
     /// (nslots, nparams, body).
     fn lower_fn(&mut self, function: &ast::Function) -> R<(usize, usize, Vec<Stmt>)> {
-        let mut ctx = FnCtx::new(HashSet::new());
-        for p in &function.params {
-            ctx.declare(pat_ident(&p.pat)?);
-        }
-        let nparams = function.params.len();
-        let body = match &function.body {
-            Some(block) => {
-                hoist_vars(&block.stmts, &mut ctx);
-                self.lower_stmts(&block.stmts, &mut ctx)?
-            }
+        let block = match &function.body {
+            Some(b) => b,
             None => return Err("function without a body".into()),
         };
+        let mut ctx = FnCtx::new(HashSet::new());
+        ctx.boxed_set = boxed_locals(&block.stmts);
+        for p in &function.params {
+            let name = pat_ident(&p.pat)?;
+            if ctx.boxed_set.contains(name) {
+                return Err(format!(
+                    "parameter `{name}` is captured and mutated; capture-by-reference \
+                     of parameters is not supported"
+                ));
+            }
+            ctx.declare(name);
+        }
+        let nparams = function.params.len();
+        hoist_vars(&block.stmts, &mut ctx);
+        self.hoist_fn_decls(&block.stmts, &mut ctx);
+        let mut body = self.boxed_cell_stmts(&ctx);
+        body.extend(self.lower_fn_decls(&block.stmts, &mut ctx)?);
+        body.extend(self.lower_stmts(&block.stmts, &mut ctx)?);
         Ok((ctx.max_slot.max(nparams), nparams, body))
     }
 
@@ -237,9 +330,10 @@ impl Compiler {
         &mut self,
         params: &[ast::Pat],
         body: ArrowBody,
-        enclosing_visible: HashSet<String>,
-    ) -> R<(usize, Vec<String>)> {
-        // free variables visible outside become captures (deterministic order)
+        enclosing: &FnCtx,
+    ) -> R<(usize, Vec<(String, bool)>)> {
+        // free variables visible outside become captures (deterministic order),
+        // each tagged with whether it is a boxed cell in the enclosing scope.
         let free = match &body {
             ArrowBody::Block(s) => free_vars(params, s),
             ArrowBody::BlockOwned(s) => free_vars(params, s),
@@ -255,26 +349,53 @@ impl Compiler {
                 f
             }
         };
-        let captures: Vec<String> =
-            free.into_iter().filter(|n| enclosing_visible.contains(n)).collect();
+        let visible = enclosing.visible_names();
+        let captures: Vec<(String, bool)> = free
+            .into_iter()
+            .filter(|n| visible.contains(n))
+            .map(|n| {
+                let boxed = enclosing.resolve_binding(&n).map_or(false, |b| b.boxed);
+                (n, boxed)
+            })
+            .collect();
 
+        let own_body: Vec<ast::Stmt> = match &body {
+            ArrowBody::Block(s) => s.to_vec(),
+            ArrowBody::BlockOwned(s) => s.clone(),
+            ArrowBody::Expr(_) => Vec::new(),
+        };
         let mut ctx = FnCtx::new(HashSet::new());
-        for c in &captures {
-            ctx.declare(c); // captured slots first
+        ctx.boxed_set = boxed_locals(&own_body);
+        for (name, boxed) in &captures {
+            ctx.declare_boxed(name, *boxed); // captured slots first; cell from enclosing
         }
         for p in params {
-            ctx.declare(pat_ident(p)?);
+            let name = pat_ident(p)?;
+            if ctx.boxed_set.contains(name) {
+                return Err(format!(
+                    "parameter `{name}` is captured and mutated; not supported"
+                ));
+            }
+            ctx.declare(name);
         }
         let ncaptured = captures.len();
         let nparams = params.len();
         let stmts = match body {
             ArrowBody::Block(stmts) => {
                 hoist_vars(stmts, &mut ctx);
-                self.lower_stmts(stmts, &mut ctx)?
+                self.hoist_fn_decls(stmts, &mut ctx);
+                let mut b = self.boxed_cell_stmts(&ctx);
+                b.extend(self.lower_fn_decls(stmts, &mut ctx)?);
+                b.extend(self.lower_stmts(stmts, &mut ctx)?);
+                b
             }
             ArrowBody::BlockOwned(stmts) => {
                 hoist_vars(&stmts, &mut ctx);
-                self.lower_stmts(&stmts, &mut ctx)?
+                self.hoist_fn_decls(&stmts, &mut ctx);
+                let mut b = self.boxed_cell_stmts(&ctx);
+                b.extend(self.lower_fn_decls(&stmts, &mut ctx)?);
+                b.extend(self.lower_stmts(&stmts, &mut ctx)?);
+                b
             }
             ArrowBody::Expr(e) => {
                 let r = self.lower_expr(e, &mut ctx)?;
@@ -293,11 +414,15 @@ impl Compiler {
         Ok((fid, captures))
     }
 
-    /// Lower the capture values (in the enclosing scope) for a lifted closure.
-    fn capture_exprs(&self, captures: &[String], ctx: &FnCtx) -> R<Vec<Expr>> {
+    /// Lower the capture values for a lifted closure: the enclosing slot's
+    /// content (the cell itself if boxed, else the value).
+    fn capture_exprs(&self, captures: &[(String, bool)], ctx: &FnCtx) -> R<Vec<Expr>> {
         let mut caps = Vec::with_capacity(captures.len());
-        for name in captures {
-            caps.push(self.lower_ident(name, ctx)?);
+        for (name, _boxed) in captures {
+            let slot = ctx
+                .resolve(name)
+                .ok_or_else(|| format!("capture of unbound `{name}`"))?;
+            caps.push(Expr::Var(slot));
         }
         Ok(caps)
     }
@@ -331,10 +456,18 @@ impl Compiler {
     fn lower_stmt(&mut self, s: &ast::Stmt, ctx: &mut FnCtx, out: &mut Vec<Stmt>) -> R<()> {
         match s {
             ast::Stmt::Decl(ast::Decl::Var(v)) => self.lower_var_decl(v, ctx, out)?,
-            ast::Stmt::Decl(ast::Decl::Fn(_)) => {
-                return Err("nested `function` declarations are not supported; \
-                            use a top-level function or a non-capturing arrow"
-                    .into());
+            ast::Stmt::Decl(ast::Decl::Fn(f)) => {
+                // Direct-child function declarations were hoisted+assigned at the
+                // top of the body (see lower_fn_decls); skip them here. A
+                // function declaration nested inside a block is not hoisted by
+                // this subset.
+                let name = f.ident.sym.to_string();
+                if !ctx.hoisted_fns.contains(&name) {
+                    return Err(format!(
+                        "`function {name}` declared inside a block is not supported; \
+                         move it to the top level of the function body"
+                    ));
+                }
             }
             ast::Stmt::Decl(_) => return Err("unsupported declaration (class/using/etc.)".into()),
             ast::Stmt::Expr(e) => self.lower_expr_stmt(&e.expr, ctx, out)?,
@@ -414,9 +547,11 @@ impl Compiler {
             Some(ast::VarDeclOrExpr::Expr(e)) => self.lower_expr_stmt(e, ctx, out)?,
             None => {}
         }
+        // An absent test means `true`: `for (;;)` is an infinite loop, exited via
+        // `break`/`return`.
         let cond = match &f.test {
             Some(e) => self.lower_expr(e, ctx)?,
-            None => return Err("`for` without a test condition is not supported".into()),
+            None => Expr::Bool(true),
         };
         ctx.break_depth += 1;
         ctx.loop_depth += 1;
@@ -470,13 +605,25 @@ impl Compiler {
                 None => None,
             };
             if is_var {
-                // Hoisted: the slot already holds `undefined`; only an explicit
+                // Hoisted: the slot already holds `undefined` (or a `{value}` cell
+                // if boxed), created at function entry; only an explicit
                 // initializer assigns (a bare `var x;` after a write is a no-op).
                 let slot = ctx.declare_var(name);
+                let boxed = ctx.boxed_set.contains(name);
                 if let Some(e) = init {
-                    out.push(Stmt::Set(slot, e));
+                    if boxed {
+                        out.push(Stmt::SetProp(Expr::Var(slot), "value".to_string(), e));
+                    } else {
+                        out.push(Stmt::Set(slot, e));
+                    }
                 }
             } else {
+                if ctx.boxed_set.contains(name) {
+                    return Err(format!(
+                        "`let`/`const` `{name}` is captured and mutated; only `var` \
+                         supports capture-by-reference in this subset"
+                    ));
+                }
                 let slot = ctx.declare(name);
                 out.push(Stmt::Let(slot, init.unwrap_or(Expr::Undefined)));
             }
@@ -530,13 +677,22 @@ impl Compiler {
                 match &*u.arg {
                     ast::Expr::Ident(id) => {
                         let name = id.sym.as_str();
-                        let slot = ctx
-                            .resolve(name)
+                        let b = ctx
+                            .resolve_binding(name)
                             .ok_or_else(|| format!("update of unbound variable `{name}`"))?;
-                        out.push(Stmt::Set(
-                            slot,
-                            Expr::Bin(op, Box::new(Expr::Var(slot)), one),
-                        ));
+                        if b.boxed {
+                            let cur = Expr::Get(Box::new(Expr::Var(b.slot)), "value".to_string());
+                            out.push(Stmt::SetProp(
+                                Expr::Var(b.slot),
+                                "value".to_string(),
+                                Expr::Bin(op, Box::new(cur), one),
+                            ));
+                        } else {
+                            out.push(Stmt::Set(
+                                b.slot,
+                                Expr::Bin(op, Box::new(Expr::Var(b.slot)), one),
+                            ));
+                        }
                     }
                     ast::Expr::Member(m) => {
                         let obj = self.lower_expr(&m.obj, ctx)?;
@@ -562,54 +718,69 @@ impl Compiler {
             }
             ast::Expr::Assign(a) => {
                 let rhs = self.lower_expr(&a.right, ctx)?;
-                let op_combine: Option<Bop> = match a.op {
+                // A compound assignment `t <op>= r` desugars to `t = t <op> r`.
+                // Modeled arithmetic uses a folding `Bin`; everything else pure
+                // (`/`, `%`, bitwise, shifts, `**`) passes through as `Opaque`.
+                let op_combine: Option<Combine> = match a.op {
                     ast::AssignOp::Assign => None,
-                    ast::AssignOp::AddAssign => Some(Bop::Add),
-                    ast::AssignOp::SubAssign => Some(Bop::Sub),
-                    ast::AssignOp::MulAssign => Some(Bop::Mul),
+                    ast::AssignOp::AddAssign => Some(Combine::Bin(Bop::Add)),
+                    ast::AssignOp::SubAssign => Some(Combine::Bin(Bop::Sub)),
+                    ast::AssignOp::MulAssign => Some(Combine::Bin(Bop::Mul)),
+                    ast::AssignOp::DivAssign => Some(Combine::Opaque("/")),
+                    ast::AssignOp::ModAssign => Some(Combine::Opaque("%")),
+                    ast::AssignOp::ExpAssign => Some(Combine::Opaque("**")),
+                    ast::AssignOp::BitAndAssign => Some(Combine::Opaque("&")),
+                    ast::AssignOp::BitOrAssign => Some(Combine::Opaque("|")),
+                    ast::AssignOp::BitXorAssign => Some(Combine::Opaque("^")),
+                    ast::AssignOp::LShiftAssign => Some(Combine::Opaque("<<")),
+                    ast::AssignOp::RShiftAssign => Some(Combine::Opaque(">>")),
+                    ast::AssignOp::ZeroFillRShiftAssign => Some(Combine::Opaque(">>>")),
+                    // `&&=` / `||=` / `??=` are short-circuiting (conditional
+                    // assignment); their control flow is not modeled here.
                     other => return Err(format!("unsupported assignment operator {:?}", other)),
                 };
                 // resolve the target
                 match &a.left {
                     ast::AssignTarget::Simple(ast::SimpleAssignTarget::Ident(bi)) => {
                         let name = bi.id.sym.as_str();
-                        let slot = ctx
-                            .resolve(name)
-                            .ok_or_else(|| format!("assignment to unbound variable `{name}`"))?;
-                        let value = match op_combine {
-                            None => rhs,
-                            Some(op) => Expr::Bin(op, Box::new(Expr::Var(slot)), Box::new(rhs)),
-                        };
-                        out.push(Stmt::Set(slot, value));
+                        match ctx.resolve_binding(name) {
+                            // boxed: write through the `{value}` cell
+                            Some(b) if b.boxed => {
+                                let value = combine_assign(&op_combine, rhs, || {
+                                    Expr::Get(Box::new(Expr::Var(b.slot)), "value".to_string())
+                                });
+                                out.push(Stmt::SetProp(Expr::Var(b.slot), "value".to_string(), value));
+                            }
+                            Some(b) => {
+                                let value =
+                                    combine_assign(&op_combine, rhs, || Expr::Var(b.slot));
+                                out.push(Stmt::Set(b.slot, value));
+                            }
+                            // Assignment to an undeclared name = an implicit global
+                            // write; passes through to the residual.
+                            None => {
+                                let value = combine_assign(&op_combine, rhs, || {
+                                    Expr::Global(name.to_string())
+                                });
+                                out.push(Stmt::SetGlobal(name.to_string(), value));
+                            }
+                        }
                     }
                     ast::AssignTarget::Simple(ast::SimpleAssignTarget::Member(m)) => {
                         let obj = self.lower_expr(&m.obj, ctx)?;
                         match &m.prop {
                             ast::MemberProp::Ident(id) => {
                                 let key = id.sym.to_string();
-                                let value = match op_combine {
-                                    None => rhs,
-                                    Some(op) => Expr::Bin(
-                                        op,
-                                        Box::new(Expr::Get(Box::new(obj.clone()), key.clone())),
-                                        Box::new(rhs),
-                                    ),
-                                };
+                                let value = combine_assign(&op_combine, rhs, || {
+                                    Expr::Get(Box::new(obj.clone()), key.clone())
+                                });
                                 out.push(Stmt::SetProp(obj, key, value));
                             }
                             ast::MemberProp::Computed(c) => {
                                 let idx = self.lower_expr(&c.expr, ctx)?;
-                                let value = match op_combine {
-                                    None => rhs,
-                                    Some(op) => Expr::Bin(
-                                        op,
-                                        Box::new(Expr::Index(
-                                            Box::new(obj.clone()),
-                                            Box::new(idx.clone()),
-                                        )),
-                                        Box::new(rhs),
-                                    ),
-                                };
+                                let value = combine_assign(&op_combine, rhs, || {
+                                    Expr::Index(Box::new(obj.clone()), Box::new(idx.clone()))
+                                });
                                 out.push(Stmt::SetIndex(obj, idx, value));
                             }
                             ast::MemberProp::PrivateName(_) => {
@@ -795,22 +966,32 @@ impl Compiler {
                     ast::BlockStmtOrExpr::BlockStmt(b) => ArrowBody::Block(&b.stmts),
                     ast::BlockStmtOrExpr::Expr(e) => ArrowBody::Expr(e),
                 };
-                let (fid, captures) = self.lift_arrow(&a.params, body, ctx.visible_names())?;
+                let (fid, captures) = self.lift_arrow(&a.params, body, ctx)?;
                 let caps = self.capture_exprs(&captures, ctx)?;
                 Ok(Expr::Closure(fid, caps))
             }
             ast::Expr::Fn(f) => {
-                if f.ident.is_some() {
-                    return Err("named function expressions are not supported; use a declaration".into());
-                }
                 let params: Vec<ast::Pat> =
                     f.function.params.iter().map(|p| p.pat.clone()).collect();
                 let body_stmts = match &f.function.body {
                     Some(b) => b.stmts.clone(),
                     None => return Err("function expression without a body".into()),
                 };
+                // A named function expression's name is in scope only inside its
+                // own body (for self-reference). If the body doesn't actually use
+                // it as a free variable, the name is cosmetic and we lift it as
+                // anonymous; if it does, that is self-recursion (out of scope).
+                if let Some(id) = &f.ident {
+                    let name = id.sym.to_string();
+                    if free_vars(&params, &body_stmts).contains(&name) {
+                        return Err(format!(
+                            "self-referential named function expression `{name}` is not \
+                             supported (recursion); use a top-level declaration"
+                        ));
+                    }
+                }
                 let (fid, captures) =
-                    self.lift_arrow(&params, ArrowBody::BlockOwned(body_stmts), ctx.visible_names())?;
+                    self.lift_arrow(&params, ArrowBody::BlockOwned(body_stmts), ctx)?;
                 let caps = self.capture_exprs(&captures, ctx)?;
                 Ok(Expr::Closure(fid, caps))
             }
@@ -836,14 +1017,56 @@ impl Compiler {
                 Ok(Expr::New(Box::new(callee), args))
             }
             ast::Expr::This(_) => Ok(Expr::This),
+            ast::Expr::Update(u) => {
+                // `place++` / `++place` used for its value.
+                let op = match u.op {
+                    ast::UpdateOp::PlusPlus => Bop::Add,
+                    ast::UpdateOp::MinusMinus => Bop::Sub,
+                };
+                let place = match &*u.arg {
+                    ast::Expr::Ident(id) => {
+                        let name = id.sym.as_str();
+                        let b = ctx
+                            .resolve_binding(name)
+                            .ok_or_else(|| format!("update of unbound variable `{name}`"))?;
+                        if b.boxed {
+                            Expr::Get(Box::new(Expr::Var(b.slot)), "value".to_string())
+                        } else {
+                            Expr::Var(b.slot)
+                        }
+                    }
+                    ast::Expr::Member(m) => {
+                        let obj = self.lower_expr(&m.obj, ctx)?;
+                        match &m.prop {
+                            ast::MemberProp::Ident(id) => {
+                                Expr::Get(Box::new(obj), id.sym.to_string())
+                            }
+                            ast::MemberProp::Computed(c) => {
+                                let idx = self.lower_expr(&c.expr, ctx)?;
+                                Expr::Index(Box::new(obj), Box::new(idx))
+                            }
+                            ast::MemberProp::PrivateName(_) => {
+                                return Err("private fields are not supported".into())
+                            }
+                        }
+                    }
+                    _ => return Err("`++`/`--` on an unsupported target".into()),
+                };
+                Ok(Expr::Update { place: Box::new(place), op, prefix: u.prefix })
+            }
             ast::Expr::Assign(_) => Err("assignment as an expression is not supported (use a statement)".into()),
-            other => Err(format!("unsupported expression: {:?}", std::mem::discriminant(other))),
+            other => Err(format!("unsupported expression: {:?}", other)),
         }
     }
 
     fn lower_ident(&self, name: &str, ctx: &FnCtx) -> R<Expr> {
-        if let Some(slot) = ctx.resolve(name) {
-            Ok(Expr::Var(slot))
+        if let Some(b) = ctx.resolve_binding(name) {
+            // A boxed variable lives in a `{value}` cell; read through it.
+            Ok(if b.boxed {
+                Expr::Get(Box::new(Expr::Var(b.slot)), "value".to_string())
+            } else {
+                Expr::Var(b.slot)
+            })
         } else if let Some(&fid) = self.name_to_fid.get(name) {
             Ok(Expr::Func(fid))
         } else if name == "undefined" {
@@ -913,6 +1136,24 @@ enum ArrowBody<'a> {
 /// its parameters nor by any declaration inside it. (Used to compute closure
 /// captures. Over-approximating `bound` only over-captures, which is harmless;
 /// the result is later intersected with the names actually visible outside.)
+/// How a compound assignment combines the current value with the rhs.
+enum Combine {
+    /// A modeled, constant-foldable binary op (`+`, `-`, `*`).
+    Bin(Bop),
+    /// An unmodeled-but-pure op passed through verbatim (`/`, `%`, bitwise, ...).
+    Opaque(&'static str),
+}
+
+/// Build the value for `target <op>= rhs`. `cur` lazily constructs the read of
+/// the target (only needed for a compound op, not a plain `=`).
+fn combine_assign(op: &Option<Combine>, rhs: Expr, cur: impl FnOnce() -> Expr) -> Expr {
+    match op {
+        None => rhs,
+        Some(Combine::Bin(op)) => Expr::Bin(*op, Box::new(cur()), Box::new(rhs)),
+        Some(Combine::Opaque(tok)) => Expr::Opaque(tok.to_string(), vec![cur(), rhs]),
+    }
+}
+
 fn free_vars(params: &[ast::Pat], body: &[ast::Stmt]) -> Vec<String> {
     let mut used = HashSet::new();
     let mut bound = HashSet::new();
@@ -1208,6 +1449,344 @@ fn used_in_expr(e: &ast::Expr, out: &mut HashSet<String>) {
                 b.stmts.iter().for_each(|s| used_in_stmt(s, out));
             }
         }
+        _ => {}
+    }
+}
+
+/// Variables of a function that must be BOXED for capture-by-reference: a `var`
+/// that is both used inside a nested function (captured) AND assigned somewhere
+/// (mutated). Boxing makes them shared `{value: ...}` cells so a closure's
+/// mutation is visible to everyone. (Only `var`s are boxed; a captured+mutated
+/// `let`/`const` is rejected at lowering.)
+fn boxed_locals(body: &[ast::Stmt]) -> HashSet<String> {
+    let mut vars = Vec::new();
+    for s in body {
+        collect_vars(s, &mut vars);
+    }
+    let vars: HashSet<String> = vars.into_iter().collect();
+    let mut used_nested = HashSet::new();
+    for s in body {
+        nested_used_stmt(s, &mut used_nested);
+    }
+    let mut assigned = HashSet::new();
+    for s in body {
+        assigned_stmt(s, &mut assigned);
+    }
+    let mut boxed: HashSet<String> = vars
+        .into_iter()
+        .filter(|n| used_nested.contains(n) && assigned.contains(n))
+        .collect();
+    // A nested `function` declaration whose name is referenced by another nested
+    // function (e.g. mutual recursion) must also be a shared cell: its value is
+    // assigned after the capturing closures are created, so by-value capture
+    // would snapshot `undefined`. Boxing makes the later assignment visible.
+    for name in fn_decl_names(body) {
+        if used_nested.contains(&name) {
+            boxed.insert(name);
+        }
+    }
+    boxed
+}
+
+/// Names of `function` declarations that are direct children of `stmts` (the top
+/// level of a function body). Block-nested function declarations are not hoisted
+/// here and are rejected at lowering.
+fn fn_decl_names(stmts: &[ast::Stmt]) -> Vec<String> {
+    stmts
+        .iter()
+        .filter_map(|s| match s {
+            ast::Stmt::Decl(ast::Decl::Fn(f)) => Some(f.ident.sym.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Identifiers used *inside nested functions* of the current function (so we can
+/// tell which of our locals are captured). At each nested function we collect
+/// all of its used identifiers and stop descending (it handles its own nesting).
+fn nested_used_stmt(s: &ast::Stmt, out: &mut HashSet<String>) {
+    match s {
+        ast::Stmt::Decl(ast::Decl::Fn(f)) => {
+            if let Some(b) = &f.function.body {
+                b.stmts.iter().for_each(|s| used_in_stmt(s, out));
+            }
+        }
+        ast::Stmt::Decl(ast::Decl::Var(v)) => {
+            for d in &v.decls {
+                if let Some(e) = &d.init {
+                    nested_used_expr(e, out);
+                }
+            }
+        }
+        ast::Stmt::Expr(e) => nested_used_expr(&e.expr, out),
+        ast::Stmt::Return(r) => {
+            if let Some(e) = &r.arg {
+                nested_used_expr(e, out);
+            }
+        }
+        ast::Stmt::Throw(t) => nested_used_expr(&t.arg, out),
+        ast::Stmt::Block(b) => b.stmts.iter().for_each(|s| nested_used_stmt(s, out)),
+        ast::Stmt::If(i) => {
+            nested_used_expr(&i.test, out);
+            nested_used_stmt(&i.cons, out);
+            if let Some(a) = &i.alt {
+                nested_used_stmt(a, out);
+            }
+        }
+        ast::Stmt::For(f) => {
+            if let Some(ast::VarDeclOrExpr::VarDecl(v)) = &f.init {
+                for d in &v.decls {
+                    if let Some(e) = &d.init {
+                        nested_used_expr(e, out);
+                    }
+                }
+            } else if let Some(ast::VarDeclOrExpr::Expr(e)) = &f.init {
+                nested_used_expr(e, out);
+            }
+            if let Some(t) = &f.test {
+                nested_used_expr(t, out);
+            }
+            if let Some(u) = &f.update {
+                nested_used_expr(u, out);
+            }
+            nested_used_stmt(&f.body, out);
+        }
+        ast::Stmt::While(w) => {
+            nested_used_expr(&w.test, out);
+            nested_used_stmt(&w.body, out);
+        }
+        ast::Stmt::DoWhile(d) => {
+            nested_used_expr(&d.test, out);
+            nested_used_stmt(&d.body, out);
+        }
+        ast::Stmt::Switch(sw) => {
+            nested_used_expr(&sw.discriminant, out);
+            for c in &sw.cases {
+                if let Some(t) = &c.test {
+                    nested_used_expr(t, out);
+                }
+                c.cons.iter().for_each(|s| nested_used_stmt(s, out));
+            }
+        }
+        ast::Stmt::Try(t) => {
+            t.block.stmts.iter().for_each(|s| nested_used_stmt(s, out));
+            if let Some(h) = &t.handler {
+                h.body.stmts.iter().for_each(|s| nested_used_stmt(s, out));
+            }
+            if let Some(f) = &t.finalizer {
+                f.stmts.iter().for_each(|s| nested_used_stmt(s, out));
+            }
+        }
+        ast::Stmt::Labeled(l) => nested_used_stmt(&l.body, out),
+        _ => {}
+    }
+}
+
+fn nested_used_expr(e: &ast::Expr, out: &mut HashSet<String>) {
+    match e {
+        // a nested function: collect everything it uses, then stop
+        ast::Expr::Fn(f) => {
+            if let Some(b) = &f.function.body {
+                b.stmts.iter().for_each(|s| used_in_stmt(s, out));
+            }
+        }
+        ast::Expr::Arrow(a) => match &*a.body {
+            ast::BlockStmtOrExpr::BlockStmt(b) => {
+                b.stmts.iter().for_each(|s| used_in_stmt(s, out))
+            }
+            ast::BlockStmtOrExpr::Expr(e) => used_in_expr(e, out),
+        },
+        ast::Expr::Bin(b) => {
+            nested_used_expr(&b.left, out);
+            nested_used_expr(&b.right, out);
+        }
+        ast::Expr::Unary(u) => nested_used_expr(&u.arg, out),
+        ast::Expr::Update(u) => nested_used_expr(&u.arg, out),
+        ast::Expr::Cond(c) => {
+            nested_used_expr(&c.test, out);
+            nested_used_expr(&c.cons, out);
+            nested_used_expr(&c.alt, out);
+        }
+        ast::Expr::Member(m) => {
+            nested_used_expr(&m.obj, out);
+            if let ast::MemberProp::Computed(c) = &m.prop {
+                nested_used_expr(&c.expr, out);
+            }
+        }
+        ast::Expr::Call(c) => {
+            if let ast::Callee::Expr(e) = &c.callee {
+                nested_used_expr(e, out);
+            }
+            for a in &c.args {
+                nested_used_expr(&a.expr, out);
+            }
+        }
+        ast::Expr::New(n) => {
+            nested_used_expr(&n.callee, out);
+            if let Some(args) = &n.args {
+                for a in args {
+                    nested_used_expr(&a.expr, out);
+                }
+            }
+        }
+        ast::Expr::Array(a) => {
+            for el in a.elems.iter().flatten() {
+                nested_used_expr(&el.expr, out);
+            }
+        }
+        ast::Expr::Object(o) => {
+            for p in &o.props {
+                if let ast::PropOrSpread::Prop(prop) = p {
+                    if let ast::Prop::KeyValue(kv) = &**prop {
+                        nested_used_expr(&kv.value, out);
+                    }
+                }
+            }
+        }
+        ast::Expr::Paren(p) => nested_used_expr(&p.expr, out),
+        ast::Expr::Assign(a) => nested_used_expr(&a.right, out),
+        _ => {}
+    }
+}
+
+/// Names that are assignment / update targets anywhere (descending into nested
+/// functions, since a closure may mutate an enclosing variable).
+fn assigned_stmt(s: &ast::Stmt, out: &mut HashSet<String>) {
+    match s {
+        ast::Stmt::Expr(e) => assigned_expr(&e.expr, out),
+        ast::Stmt::Decl(ast::Decl::Var(v)) => {
+            for d in &v.decls {
+                if let Some(e) = &d.init {
+                    assigned_expr(e, out);
+                }
+            }
+        }
+        ast::Stmt::Decl(ast::Decl::Fn(f)) => {
+            if let Some(b) = &f.function.body {
+                b.stmts.iter().for_each(|s| assigned_stmt(s, out));
+            }
+        }
+        ast::Stmt::Return(r) => {
+            if let Some(e) = &r.arg {
+                assigned_expr(e, out);
+            }
+        }
+        ast::Stmt::Throw(t) => assigned_expr(&t.arg, out),
+        ast::Stmt::Block(b) => b.stmts.iter().for_each(|s| assigned_stmt(s, out)),
+        ast::Stmt::If(i) => {
+            assigned_expr(&i.test, out);
+            assigned_stmt(&i.cons, out);
+            if let Some(a) = &i.alt {
+                assigned_stmt(a, out);
+            }
+        }
+        ast::Stmt::For(f) => {
+            match &f.init {
+                Some(ast::VarDeclOrExpr::VarDecl(v)) => {
+                    for d in &v.decls {
+                        if let Some(e) = &d.init {
+                            assigned_expr(e, out);
+                        }
+                    }
+                }
+                Some(ast::VarDeclOrExpr::Expr(e)) => assigned_expr(e, out),
+                None => {}
+            }
+            if let Some(u) = &f.update {
+                assigned_expr(u, out);
+            }
+            assigned_stmt(&f.body, out);
+        }
+        ast::Stmt::While(w) => {
+            assigned_expr(&w.test, out);
+            assigned_stmt(&w.body, out);
+        }
+        ast::Stmt::DoWhile(d) => assigned_stmt(&d.body, out),
+        ast::Stmt::Switch(sw) => {
+            for c in &sw.cases {
+                c.cons.iter().for_each(|s| assigned_stmt(s, out));
+            }
+        }
+        ast::Stmt::Try(t) => {
+            t.block.stmts.iter().for_each(|s| assigned_stmt(s, out));
+            if let Some(h) = &t.handler {
+                h.body.stmts.iter().for_each(|s| assigned_stmt(s, out));
+            }
+            if let Some(f) = &t.finalizer {
+                f.stmts.iter().for_each(|s| assigned_stmt(s, out));
+            }
+        }
+        ast::Stmt::Labeled(l) => assigned_stmt(&l.body, out),
+        _ => {}
+    }
+}
+
+fn assigned_expr(e: &ast::Expr, out: &mut HashSet<String>) {
+    match e {
+        ast::Expr::Assign(a) => {
+            if let ast::AssignTarget::Simple(ast::SimpleAssignTarget::Ident(bi)) = &a.left {
+                out.insert(bi.id.sym.to_string());
+            }
+            assigned_expr(&a.right, out);
+        }
+        ast::Expr::Update(u) => {
+            if let ast::Expr::Ident(id) = &*u.arg {
+                out.insert(id.sym.to_string());
+            }
+        }
+        ast::Expr::Bin(b) => {
+            assigned_expr(&b.left, out);
+            assigned_expr(&b.right, out);
+        }
+        ast::Expr::Unary(u) => assigned_expr(&u.arg, out),
+        ast::Expr::Cond(c) => {
+            assigned_expr(&c.test, out);
+            assigned_expr(&c.cons, out);
+            assigned_expr(&c.alt, out);
+        }
+        ast::Expr::Member(m) => assigned_expr(&m.obj, out),
+        ast::Expr::Call(c) => {
+            if let ast::Callee::Expr(e) = &c.callee {
+                assigned_expr(e, out);
+            }
+            for a in &c.args {
+                assigned_expr(&a.expr, out);
+            }
+        }
+        ast::Expr::New(n) => {
+            if let Some(args) = &n.args {
+                for a in args {
+                    assigned_expr(&a.expr, out);
+                }
+            }
+        }
+        ast::Expr::Array(a) => {
+            for el in a.elems.iter().flatten() {
+                assigned_expr(&el.expr, out);
+            }
+        }
+        ast::Expr::Object(o) => {
+            for p in &o.props {
+                if let ast::PropOrSpread::Prop(prop) = p {
+                    if let ast::Prop::KeyValue(kv) = &**prop {
+                        assigned_expr(&kv.value, out);
+                    }
+                }
+            }
+        }
+        ast::Expr::Paren(p) => assigned_expr(&p.expr, out),
+        // descend into nested functions: they may mutate our variables
+        ast::Expr::Fn(f) => {
+            if let Some(b) = &f.function.body {
+                b.stmts.iter().for_each(|s| assigned_stmt(s, out));
+            }
+        }
+        ast::Expr::Arrow(a) => match &*a.body {
+            ast::BlockStmtOrExpr::BlockStmt(b) => {
+                b.stmts.iter().for_each(|s| assigned_stmt(s, out))
+            }
+            ast::BlockStmtOrExpr::Expr(e) => assigned_expr(e, out),
+        },
         _ => {}
     }
 }

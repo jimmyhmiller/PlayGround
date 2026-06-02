@@ -388,6 +388,20 @@ impl Heap {
         self.permanent_extras.lock().unwrap().push(source);
     }
 
+    /// Remove a previously-registered extra root source (by pointer identity).
+    /// Used by the runtime's *temporary* (guarded) extra-root mechanism so a
+    /// stack-scoped `RootSource` (e.g. a per-`run_jit` `FrameChain`) is scanned
+    /// by alloc-triggered GC for its lifetime and then dropped — without it,
+    /// an alloc-path collection (e.g. `gc_every_alloc`) never scans that chain
+    /// and relocates its roots without updating them. Removes the last matching
+    /// entry (LIFO), mirroring the guard's stack discipline.
+    pub unsafe fn unregister_permanent_extra(&self, source: *const dyn RootSource) {
+        let mut perm = self.permanent_extras.lock().unwrap();
+        if let Some(pos) = perm.iter().rposition(|&p| std::ptr::eq(p as *const u8, source as *const u8)) {
+            perm.remove(pos);
+        }
+    }
+
     // ─── Generational helpers ────────────────────────────────────
 
     /// Check if this heap has a nursery (generational mode).

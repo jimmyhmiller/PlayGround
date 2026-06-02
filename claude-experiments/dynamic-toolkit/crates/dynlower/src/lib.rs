@@ -299,6 +299,64 @@ pub fn walk_jit_ancestor_roots(_jit_fp: *const u8, _visitor: &mut dyn FnMut(*mut
     // FP-chain walking is architecture-specific; no-op on unsupported targets.
 }
 
+// ─── DIAGNOSTIC: stale-root producer capture ──────────────────────────
+/// Maps a stale NaN-boxed word (found post-GC still pointing at a forwarded
+/// object) to a human description of where on the stack it lived and which
+/// frame (JIT vs host) owns that slot. Populated by the post-GC scan in
+/// `dynruntime`, consumed by `cljvm_rt_first` when it receives a dangling arg.
+pub static STALE_CAPTURE: std::sync::Mutex<Option<std::collections::HashMap<u64, String>>> =
+    std::sync::Mutex::new(None);
+
+/// Classify stack address `target` against the FP chain from `start_fp`:
+/// which JIT frame's region contains it and whether it is a recorded
+/// root-slot offset of that frame (vs an unrecorded slot / a host frame).
+#[cfg(target_arch = "aarch64")]
+pub fn classify_stack_addr(start_fp: *const u8, target: usize) -> String {
+    let registry = JIT_CODE_REGISTRY.read().unwrap();
+    if registry.is_empty() {
+        return "no-registry".into();
+    }
+    // Collect (base = saved_fp, saved_lr) walking up, following only sane
+    // upward links so a garbage word can't fault us.
+    let mut frames: Vec<(usize, usize)> = Vec::new();
+    let mut fp = start_fp as usize;
+    let mut hops = 0;
+    while fp != 0 && hops < 256 {
+        let saved_fp = unsafe { *(fp as *const u64) } as usize;
+        let saved_lr = unsafe { *((fp + 8) as *const u64) } as usize;
+        if saved_fp <= fp || saved_fp & 0xf != 0 || saved_fp - fp > 0x100000 {
+            break;
+        }
+        frames.push((saved_fp, saved_lr));
+        fp = saved_fp;
+        hops += 1;
+    }
+    for k in 0..frames.len() {
+        let (base, saved_lr) = frames[k];
+        let upper = if k + 1 < frames.len() { frames[k + 1].0 } else { usize::MAX };
+        if target >= base && target < upper {
+            if let Some(entry) = lookup_code_entry(&registry, saved_lr) {
+                let ro = saved_lr - entry.code_start;
+                let off = target as isize - base as isize;
+                let recorded = match entry.safepoints.binary_search_by_key(&ro, |sp| sp.return_offset) {
+                    Ok(i) => entry.safepoints[i].root_slots.iter().any(|&o| o as isize == off),
+                    Err(_) => false,
+                };
+                return format!("JIT frame code_start={:#x} ret_off={:#x} slot=fp+{:#x} recorded={}", entry.code_start, ro, off, recorded);
+            }
+            // Report this host frame's return address (an address in the
+            // host fn's code) AND its caller's, so the Rust producer can be
+            // symbolized with `atos`/`addr2line`.
+            let caller_lr = if k + 1 < frames.len() { frames[k + 1].1 } else { 0 };
+            return format!("HOST frame base={:#x} +{:#x} ret_lr={:#x} caller_lr={:#x}", base, target - base, saved_lr, caller_lr);
+        }
+    }
+    "outside-fp-chain".into()
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn classify_stack_addr(_start_fp: *const u8, _target: usize) -> String { "unsupported".into() }
+
 /// Walk a thread's JIT frame chain starting at `start_fp`. Scans
 /// `SafepointRecord.root_slots` for every JIT frame found in the
 /// chain.

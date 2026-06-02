@@ -532,8 +532,26 @@ fn read_types_dir(path: &Path) -> Result<TypeCache, CodebaseError> {
             CodebaseError::BadTypeFilename(entry.path())
         })?;
         let bytes = fs::read(entry.path())?;
-        let scheme = decode_scheme(&bytes)?;
-        cache.insert(hash, scheme);
+        // The types/ dir is a PURE CACHE of typeschemes, rebuildable by
+        // typechecking the defs (see `store_typecache`). A `.type` file
+        // written by an older build whose scheme codec has since changed
+        // (e.g. a new field added to `TypeScheme`) will fail to decode.
+        // That must NOT brick `open()` for the whole codebase: treat an
+        // undecodable cache entry as a cache miss and skip it. The next
+        // `add` re-derives and overwrites it in the current format.
+        match decode_scheme(&bytes) {
+            Ok(scheme) => {
+                cache.insert(hash, scheme);
+            }
+            Err(e) => {
+                eprintln!(
+                    "warning: ignoring stale/undecodable typescheme cache {} ({}); \
+                     it will be rebuilt on next `add`",
+                    entry.path().display(),
+                    e,
+                );
+            }
+        }
     }
     Ok(cache)
 }
@@ -877,7 +895,11 @@ mod tests {
     }
 
     #[test]
-    fn corrupted_type_file_detected() {
+    fn corrupted_type_file_is_skipped_not_fatal() {
+        // The types/ dir is a PURE, rebuildable cache. An undecodable
+        // entry (e.g. a `.type` written by an older scheme codec) must
+        // NOT brick `open()` for the whole codebase — it is dropped and
+        // treated as a cache miss, to be re-derived on the next `add`.
         let dir = tempdir("corrupt_type");
         let mut cb = Codebase::open(&dir).unwrap();
         let scheme = TypeScheme::Struct {
@@ -887,7 +909,7 @@ mod tests {
         };
         let h = Hash([0x77; 32]);
         cb.store_typescheme(h, scheme).unwrap();
-        // Tamper with the bytes.
+        // Tamper with the bytes so the entry no longer decodes.
         let path = cb.type_path(&h);
         let mut bytes = fs::read(&path).unwrap();
         let last = bytes.len() - 1;
@@ -898,10 +920,13 @@ mod tests {
         let mut bytes2 = fs::read(&path).unwrap();
         bytes2[0] ^= 0xff;
         fs::write(&path, &bytes2).unwrap();
-        match Codebase::open(&dir) {
-            Err(_) => {} // expected
-            Ok(_) => panic!("type file corruption not detected"),
-        }
+        // open() now SUCCEEDS, and the undecodable entry is absent from
+        // the loaded (in-memory) type cache (a miss, not a hard failure).
+        let reopened = Codebase::open(&dir).expect("open must tolerate a bad cache entry");
+        assert!(
+            !reopened.types().contains(&h),
+            "tampered typescheme should be dropped from the loaded cache"
+        );
     }
 
     #[test]

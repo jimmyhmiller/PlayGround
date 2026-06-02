@@ -1027,6 +1027,45 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
                 self.heap.collect::<P>(&sources);
             }
         }
+
+        // DIAGNOSTIC: after the collection, scan the polling frame's stack
+        // window for words that still decode to a pointer whose object header
+        // has the FORWARDING bit set (a stale slot the precise walk missed),
+        // classify it against the FP chain, and stash it keyed by the stale
+        // word so `cljvm_rt_first` can report where the dangling value lived.
+        #[cfg(target_arch = "aarch64")]
+        if std::env::var("CLJVM_POSTGC_SCAN").is_ok() {
+            const FWD: u64 = 1 << 63;
+            let base = frame_ptr as usize;
+            let mut p = base.saturating_sub(0x200);
+            let end = base + 0x8000; // 32 KiB up the stack (mapped; reached form 430)
+            let mut cap = dynlower::STALE_CAPTURE.lock().unwrap();
+            if cap.is_none() { *cap = Some(std::collections::HashMap::new()); }
+            let map = cap.as_mut().unwrap();
+            while p < end {
+                let w = unsafe { (p as *const u64).read() };
+                if let Some(ptr) = P::try_decode_ptr(w) {
+                    if !ptr.is_null() && self.heap.contains_either(ptr as *const u8) {
+                        let hdr = unsafe { (ptr as *const u64).read() };
+                        if hdr & FWD != 0 {
+                            let cls = dynlower::classify_stack_addr(frame_ptr as *const u8, p);
+                            if cls.contains("HOST")
+                                && std::env::var("CLJVM_POSTGC_BT").is_ok()
+                            {
+                                use std::sync::atomic::{AtomicUsize, Ordering};
+                                static N: AtomicUsize = AtomicUsize::new(0);
+                                if N.fetch_add(1, Ordering::Relaxed) < 6 {
+                                    eprintln!("[postgc-host] {} REF active_jit_safepoint_handler={:#x}",
+                                        cls, active_jit_safepoint_handler as usize);
+                                }
+                            }
+                            map.insert(w, format!("stack={:#x} {}", p, cls));
+                        }
+                    }
+                }
+                p += 8;
+            }
+        }
     }
 }
 

@@ -465,6 +465,17 @@ impl<'ctx> CompiledModule<'ctx> {
             cg.declare_def(rd)?;
         }
 
+        // ---- Eta-expand first-class function references ----
+        // A named top-level function used as a value (not as a direct
+        // call callee) needs an adapter closure. Register those adapter
+        // lambdas now — AFTER `declare_def` (we need `def_signatures`)
+        // and BEFORE the lambda passes below pick up `cg.lambdas`.
+        for rd in &rm.defs {
+            if let Def::Fn { body, .. } = &rd.def {
+                cg.scan_fn_value_refs(body)?;
+            }
+        }
+
         // ---- Declare lifted lambda prototypes + register their TypeInfos ----
         // We iterate in a stable order so external/non-external classification
         // and type_id assignment are deterministic.
@@ -888,6 +899,175 @@ impl<'ctx> Codegen<'ctx> {
             | Expr::TopRef(_)
             | Expr::SelfRef(_)
             | Expr::BuiltinRef(_) => {}
+        }
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------------
+    // First-class function references (eta-expansion)
+    // -------------------------------------------------------------------------
+    //
+    // A bare reference to a function used as a VALUE — a named top-level
+    // `def` (`Expr::TopRef`, e.g. `swap(counter, inc)`) or a core builtin
+    // (`Expr::BuiltinRef`, e.g. `list_map(strs, string_len)`) — has no
+    // closure object to call indirectly. We lower it by eta-expanding the
+    // reference into an adapter closure: a lifted lambda with the uniform
+    // closure ABI whose body just forwards its params to a direct call of
+    // the referenced function/builtin. The adapter has no captures (it
+    // references only its own params + the global ref), so it reuses the
+    // entire existing lambda machinery unchanged.
+    //
+    // This is purely a codegen lowering detail: it does not touch the
+    // stored AST or content hashes. `def_signatures` must already be
+    // populated (i.e. run this AFTER `declare_def`).
+
+    /// Build the `(params, body)` of the adapter lambda for a value-position
+    /// reference `callee` (a `TopRef` or `BuiltinRef`). `None` if we can't
+    /// form an adapter:
+    ///   - `TopRef` to an unknown hash (not a function def),
+    ///   - `BuiltinRef` with no signature (call-site-special, e.g.
+    ///     `core/net.at`).
+    ///
+    /// Generic builtins (a `TypeVar` in the signature, e.g.
+    /// `core/array.get`) ARE supported: the adapter carries the generic
+    /// `FnType` and composes through the uniform closure ABI exactly like a
+    /// generic named function used as a value — everything is a boxed
+    /// pointer in the generic context, and the concrete (un)boxing happens
+    /// at the instantiation boundary (the direct call that pins the
+    /// TypeVars; see the `TopRef` arm of `compile_call`).
+    fn value_ref_adapter_parts(&self, callee: &Expr) -> Option<(Vec<Type>, Expr)> {
+        let params: Vec<Type> = match callee {
+            Expr::TopRef(h) => self.def_signatures.get(h)?.params.clone(),
+            Expr::BuiltinRef(name) => crate::typecheck::builtin_signature(name)?.0,
+            _ => return None,
+        };
+        let arity = params.len() as u32;
+        // Forward params in declared order. The lifted env lays out
+        // params as LocalVar(arity-1-j) for declared param `j` (param 0
+        // is the outermost binder, hence the highest de Bruijn index).
+        let args: Vec<Expr> = (0..arity)
+            .map(|j| Expr::LocalVar(arity - 1 - j))
+            .collect();
+        let body = Expr::Call(Box::new(callee.clone()), args);
+        Some((params, body))
+    }
+
+    /// Error describing why a value-position reference can't be eta-expanded.
+    fn value_ref_unsupported(callee: &Expr) -> CodegenError {
+        let what = match callee {
+            Expr::TopRef(h) => format!(
+                "first-class reference to unknown function {} \
+                 (no signature available)",
+                h
+            ),
+            Expr::BuiltinRef(name) => format!(
+                "first-class reference to builtin `{}` — it is either \
+                 call-site-special (e.g. `at`) or generic, and cannot be \
+                 used as a bare value; wrap it in a lambda instead, e.g. \
+                 `|x| {}(x)`",
+                name, name
+            ),
+            Expr::SelfRef(_) => "first-class self-reference — the resolver \
+                 rewrites self-references to top-level references before \
+                 codegen, so this should be unreachable"
+                .to_owned(),
+            other => format!("first-class reference to non-reference expr {:?}", other),
+        };
+        CodegenError::Unsupported { what }
+    }
+
+    /// Register the adapter lambda for a value-position reference, if not
+    /// already present, so the normal lambda passes (pointer-flag
+    /// inference, declare, compile) emit it.
+    ///
+    /// A reference we can't adapt (generic/special builtin, unknown fn) is
+    /// silently skipped here rather than rejected: it may live in an
+    /// external def that is never compiled. If it IS compiled, `compile_expr`
+    /// hits `value_ref_adapter_parts` → `None` and emits a precise error at
+    /// the real use site.
+    fn register_value_ref_adapter(&mut self, callee: &Expr) -> Result<(), CodegenError> {
+        let Some((params, body)) = self.value_ref_adapter_parts(callee) else {
+            return Ok(());
+        };
+        let lambda_expr = Expr::Lambda {
+            params: params.clone(),
+            body: Box::new(body.clone()),
+        };
+        let hash = Hash::of_bytes(&encode_expr(&lambda_expr));
+        self.lambdas.entry(hash).or_insert(LambdaSpec {
+            params,
+            body: Box::new(body),
+            captures: Vec::new(),
+            capture_is_pointer: Vec::new(),
+        });
+        Ok(())
+    }
+
+    /// Walk an expression and register an adapter lambda for every
+    /// function/builtin reference that appears in VALUE position (anywhere
+    /// except as the immediate callee of a `Call`, which is a direct call).
+    fn scan_fn_value_refs(&mut self, e: &Expr) -> Result<(), CodegenError> {
+        match e {
+            Expr::TopRef(_) | Expr::BuiltinRef(_) => self.register_value_ref_adapter(e)?,
+            Expr::Call(callee, args) => {
+                // A bare ref callee is a DIRECT call, not a value — skip it.
+                // Anything else in callee position (an indirect call through
+                // a computed closure) is scanned normally.
+                if !matches!(
+                    callee.as_ref(),
+                    Expr::TopRef(_) | Expr::SelfRef(_) | Expr::BuiltinRef(_)
+                ) {
+                    self.scan_fn_value_refs(callee)?;
+                }
+                for a in args {
+                    self.scan_fn_value_refs(a)?;
+                }
+            }
+            Expr::Lambda { body, .. } => self.scan_fn_value_refs(body)?,
+            Expr::Let { value, body } => {
+                self.scan_fn_value_refs(value)?;
+                self.scan_fn_value_refs(body)?;
+            }
+            Expr::StructNew { fields, .. } => {
+                for f in fields {
+                    self.scan_fn_value_refs(f)?;
+                }
+            }
+            Expr::Field { base, .. } => self.scan_fn_value_refs(base)?,
+            Expr::EnumNew { payload, .. } => {
+                if let Some(p) = payload {
+                    self.scan_fn_value_refs(p)?;
+                }
+            }
+            Expr::Match { scrutinee, arms } => {
+                self.scan_fn_value_refs(scrutinee)?;
+                for arm in arms {
+                    self.scan_fn_value_refs(&arm.body)?;
+                }
+            }
+            Expr::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                self.scan_fn_value_refs(cond)?;
+                self.scan_fn_value_refs(then_branch)?;
+                self.scan_fn_value_refs(else_branch)?;
+            }
+            Expr::Try { expr, .. } => self.scan_fn_value_refs(expr)?,
+            Expr::Defer { cleanup, body } => {
+                self.scan_fn_value_refs(cleanup)?;
+                self.scan_fn_value_refs(body)?;
+            }
+            Expr::IntLit(_)
+            | Expr::FloatLit(_)
+            | Expr::BoolLit(_)
+            | Expr::StringLit(_)
+            | Expr::LocalVar(_)
+            // SelfRef is rewritten to TopRef by the resolver before
+            // codegen; if one ever reaches here it's a value-position
+            // self-reference, errored on by compile_expr.
+            | Expr::SelfRef(_) => {}
         }
         Ok(())
     }
@@ -2588,11 +2768,19 @@ impl<'ctx> Codegen<'ctx> {
 
             Expr::Call(callee, args) => self.compile_call(callee, args, env, ctx),
 
-            Expr::TopRef(_) | Expr::BuiltinRef(_) | Expr::SelfRef(_) => {
-                Err(CodegenError::Unsupported {
-                    what: "first-class function reference (without an immediate call)".to_owned(),
-                })
+            // A named top-level function or concrete builtin used as a
+            // value: eta-expand it into its adapter closure (registered
+            // during the pre-scan). SelfRef / generic-or-special builtins
+            // fall through to a clear error.
+            Expr::TopRef(_) | Expr::BuiltinRef(_) => {
+                match self.value_ref_adapter_parts(e) {
+                    Some((params, body)) => {
+                        self.compile_lambda_construction(&params, &body, env, ctx)
+                    }
+                    None => Err(Self::value_ref_unsupported(e)),
+                }
             }
+            Expr::SelfRef(_) => Err(Self::value_ref_unsupported(e)),
 
             // Bool is represented as i64 0/1 throughout the runtime (the
             // comparison builtins already return 0/1 widened to i64), so a
@@ -3948,6 +4136,27 @@ impl<'ctx> Codegen<'ctx> {
             }
         };
 
+        // If the closure is generic (a `TypeVar` in its declared type),
+        // recover this call's instantiation by unifying the declared
+        // params against the actual arg types — exactly as the direct
+        // `TopRef` call path does. This lets us unbox a `TypeVar` return
+        // that THIS call site pins to a boxed scalar (e.g. `array_get`
+        // passed as a value, then called on an `Array<Int>`), which the
+        // closure's own generic declared return can't tell us.
+        let n_vars = max_typevar_in_types(&decl_param_tys, &decl_ret_ty);
+        let mut subst: Vec<Option<Type>> = vec![None; n_vars as usize];
+        if n_vars > 0 {
+            for (decl, arg_expr) in decl_param_tys.iter().zip(args.iter()) {
+                let actual = self.infer_type(arg_expr, env);
+                let _ = unify_for_codegen(decl, &actual, &mut subst);
+            }
+        }
+        let concrete_subst: Vec<Type> = subst
+            .into_iter()
+            .enumerate()
+            .map(|(i, o)| o.unwrap_or(Type::TypeVar(i as u32)))
+            .collect();
+
         // code_ptr = ai_gc_lookup_code(thread, closure_ptr)
         //
         // Pass the closure pointer; `ai_gc_lookup_code` reads the
@@ -4025,8 +4234,17 @@ impl<'ctx> Codegen<'ctx> {
             .map_err(|e| CodegenError::JitInit(format!("build_indirect_call: {}", e)))?;
         let ret_ptr = icall.as_any_value_enum().into_pointer_value();
 
-        // Unbox return if the closure's declared ret is Int.
-        if is_int_type(&decl_ret_ty) {
+        // Unbox return if the closure's declared ret is Int, OR if it's a
+        // TypeVar that this call's instantiation pins to a boxed scalar
+        // (Int/Float). The latter handles a generic function/builtin value
+        // (`fn(Array<T>,Int)->T`) invoked at a site that makes T concrete.
+        let ret_is_unboxable = is_int_type(&decl_ret_ty)
+            || (matches!(decl_ret_ty, Type::TypeVar(_))
+                && matches!(
+                    substitute_type(&decl_ret_ty, &concrete_subst),
+                    Type::Builtin(ref n) if is_boxed_scalar(n)
+                ));
+        if ret_is_unboxable {
             let unbox_fn = self.extern_unbox_int.expect("ai_gc_unbox_int declared");
             let call = self
                 .builder
@@ -4644,13 +4862,23 @@ impl<'ctx> Codegen<'ctx> {
                 // instantiation — so a hardcoded Int placeholder would
                 // strand non-Int returns.
                 //
-                // Calling infer_type on the body without pushing the
-                // lambda's params into env is conservative: any LocalVar
-                // that resolves to a param index might read the wrong
-                // type, but that only matters for paths that depend on
-                // the *param's* type (rare) — the common case (return
-                // a struct/enum/Int) doesn't.
-                let ret_ty = self.infer_type(body, env);
+                // Push the lambda's params into a scratch env before
+                // inferring the body, so a body whose return type depends
+                // on a param (e.g. `|a: Array<Int>, i| array_get(a, i)`,
+                // whose element type comes from `a`) infers correctly.
+                // The slot values are never read by `infer_type` (it only
+                // consults the recorded TYPES), so undef placeholders are
+                // safe.
+                let mut body_env = env.clone();
+                for p in params {
+                    let slot = if is_int_type(p) {
+                        EnvSlot::Int(self.i64_ty.get_undef())
+                    } else {
+                        EnvSlot::Closure(self.ptr_ty.const_null())
+                    };
+                    body_env.push(slot, p.clone());
+                }
+                let ret_ty = self.infer_type(body, &body_env);
                 Type::FnType {
                     params: params.clone(),
                     ret: Box::new(ret_ty),
