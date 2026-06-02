@@ -262,69 +262,6 @@ pub fn is_component_or_hook(name: &str) -> bool {
 /// ([`emit_memoized`]) is retained only as the parity reference (and is still
 /// exercised by the `tests/codegen.rs` node-semantic tests, which call it
 /// directly).
-/// True if the fixture requests React's production `'infer'` compilation gate.
-fn infer_mode(src: &str) -> bool {
-    src.contains("@compilationMode:\"infer\"") || src.contains("@compilationMode(infer)")
-}
-
-/// True if `name` is a hook name (`use` + an uppercase letter: `useState`,
-/// `useFoo`, …).
-fn is_hook_name(name: &str) -> bool {
-    name.len() >= 4 && name.starts_with("use") && name.as_bytes()[3].is_ascii_uppercase()
-}
-
-/// Does the function body create JSX (a `createElement`/`jsx*` call) or call a
-/// hook? React's infer gate compiles a Capitalized function only if it does one
-/// of these (a component must render or use hooks).
-fn uses_jsx_or_hooks(cfg: &Cfg) -> bool {
-    use crate::cfg::{MemberKey, Op};
-    // value -> defining op (results only)
-    let mut def: std::collections::HashMap<crate::cfg::Value, &Op> = std::collections::HashMap::new();
-    for b in &cfg.blocks {
-        for ins in &b.instrs {
-            if let Some(rv) = ins.result {
-                def.insert(rv, &ins.op);
-            }
-        }
-    }
-    for b in &cfg.blocks {
-        for ins in &b.instrs {
-            if let Op::Call { callee, .. } = &ins.op {
-                match def.get(callee) {
-                    Some(Op::Member { prop: MemberKey::Static(n), .. }) => {
-                        if matches!(n.as_str(), "createElement" | "jsx" | "jsxs" | "jsxDEV")
-                            || is_hook_name(n)
-                        {
-                            return true;
-                        }
-                    }
-                    Some(Op::Global(n)) => {
-                        if matches!(n.as_str(), "jsx" | "jsxs" | "_jsx" | "_jsxs" | "jsxDEV")
-                            || is_hook_name(n)
-                        {
-                            return true;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-    false
-}
-
-/// React's infer-mode component/hook test: a hook (`use[A-Z]…`), or a component
-/// (Capitalized name, at most one param — props — that renders JSX or calls a
-/// hook). Anything else is not compiled in infer mode.
-fn infer_compilable(cfg: &Cfg) -> bool {
-    let name = cfg.fn_name.as_deref().unwrap_or("");
-    if is_hook_name(name) {
-        return true;
-    }
-    let capitalized = name.chars().next().map(|c| c.is_uppercase()).unwrap_or(false);
-    capitalized && cfg.params.len() <= 1 && uses_jsx_or_hooks(cfg)
-}
-
 pub fn compile(src: &str) -> Result<String, String> {
     let ir = jsir_swc::source_to_ir(src)?;
     // `'use no memo'` / `'use no forget'` opts the function out of compilation;
@@ -333,22 +270,20 @@ pub fn compile(src: &str) -> Result<String, String> {
     if crate::lower::opts_out_of_compilation(&ir) {
         return jsir_swc::ir_to_source(&ir);
     }
+    // `@compilationMode:"infer"`: React compiles only proven components/hooks.
+    // Pass a non-component/hook through rather than over-memoize it.
+    if crate::detect::infer_mode_skips(&ir, src) {
+        return jsir_swc::ir_to_source(&ir);
+    }
     let mut cfg = crate::lower::lower_function(&ir)?;
     crate::ssa::construct(&mut cfg);
     crate::constfold::fold_constants(&mut cfg);
-    // We compile every function, matching React's test harness default
-    // (`compilationMode: 'all'`). A fixture can opt into the production `'infer'`
-    // gate with `@compilationMode:"infer"`, where React compiles ONLY functions
-    // it proves are components or hooks; a non-component/hook is left untouched.
-    // Honor that pragma so we don't over-memoize where infer-mode React skips.
-    // (Gated on the pragma, so the common 'all'-mode corpus is unaffected.)
-    // Only judge a NAMED function declaration: an anonymous/assigned function
-    // expression component (`const C = props => <div/>`, `React.memo(props =>
-    // …)`) is a component React compiles but our name-based test can't classify,
-    // so leave those to the normal path rather than wrongly skipping them.
-    if infer_mode(src) && cfg.fn_name.is_some() && !infer_compilable(&cfg) {
-        return jsir_swc::ir_to_source(&ir);
-    }
+    // We compile every function, matching React's test harness
+    // (`compilationMode: 'all'`) rather than the production `'infer'` gate (which
+    // only compiles components/hooks). The analysis is name-agnostic, so a
+    // helper that memoizes nothing still falls through to the `cache_size == 0`
+    // pass-through below. `is_component_or_hook` is retained for callers that
+    // want the production policy.
     let r = crate::mutability::analyze(&cfg);
     let infos = crate::scopes::analyze(&cfg, &r);
     let layout = crate::memoize_plan::build_layout(&cfg, &infos, &r)?;

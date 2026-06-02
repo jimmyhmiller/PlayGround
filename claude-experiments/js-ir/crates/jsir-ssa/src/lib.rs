@@ -9,6 +9,7 @@
 pub mod cfg;
 pub mod codegen;
 pub mod constfold;
+pub mod detect;
 pub mod interp;
 pub mod lower;
 pub mod memoize_plan;
