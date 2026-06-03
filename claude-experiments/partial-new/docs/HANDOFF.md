@@ -154,28 +154,40 @@ the eval core (not caused by the recursion code). Each has a regression test in
   ~2000x in bytes/weight — so the budget is tuned per-workload, not universal; a
   truly robust guard would be subprocess `RLIMIT_AS`.
 
-## Remaining issue: throw preservation in dead/discarded positions (SOUNDNESS)
+## Remaining issue: throw preservation in dead positions + the undeclared-var artifact
 
-The dominant remaining divergence class (14 of 15 across seeds 1–2000): the residual
-silently skips an exception the original raises. The PE correctly residualizes a
-may-throw access when its value is **used** (`return undefined.length` → throws at
-runtime) and now when it is **`Pop`-discarded** (fix #4). It still drops it when the
-value flows into a **dead position**:
-- **dead store**: `var x = undefined.length; return 0;` (x never read) → `return 0`.
-- **dead array/object element**: seed 539 — `input = [{b: a8.length}, …]` where
-  `input` is then unused.
-- **residual-function body**: seed 228 — `function f3(){ return a3(true); }` (a3
-  undefined → TypeError) residualizes to an **empty** `__rf0` body; the throwing
-  call is dropped.
+The residual can silently skip an exception the original raises when a may-throw
+expression sits in a position whose value is dropped. Progress this session:
+- **used** value: already correct (`return undefined.length` throws at runtime).
+- **`Pop`-discarded** statement (`undefined.length;`): FIXED (fix #4 — `may_throw` +
+  `Op::Eval` at the `Pop` site).
+- **dead store / dead array-or-object element with a null/undefined base** (`var x =
+  undefined.length; …`, `[{b: null[3]}]`): FIXED — `Instr::GetProp`/`GetIndex` on a
+  statically null/undefined base now emit the (always-throwing) access eagerly in
+  program order and bind a temp, so it survives regardless of how the value is used.
+  Tests: `dead_store_of_nullish_access_still_throws`. simple.js byte-unchanged (it
+  never reads a statically-nullish base).
 
-The unifying fix is to treat a may-throw operation as an effect that must be emitted
-in program order regardless of how (or whether) its value is consumed — extend the
-`may_throw`-emit logic from the `Pop` site to dead-store elimination, escaped
-array/object element construction, and residual-function-body specialization. Gate
-on the full test suite + the Node fuzzer; simple.js must stay unchanged. The two
-non-throw-class stragglers: seed 22 (deeply contrived nested case) and the lone
-function-stringification value mismatch (likely a fuzzer-oracle artifact — comparing
-`[native code]` reps).
+What's left is dominated by a **fuzzer artifact**, not a fixable PE soundness bug:
+the generator/shrinker emits reads of **undeclared variables** (`a1`, `a8`, a free
+`input` inside a top-level function). In JS an undeclared read throws ReferenceError;
+the PE models every unresolved identifier as a (non-throwing) `Global`. When such a
+read is *used*, the residual reproduces it (`return (input + 1)` with `input`
+unbound also throws → match). It only diverges when the read is in a **dead position**
+(e.g. `void a1` inside an object that is a truthy ternary condition — seed 231) where
+the residual drops it. This is NOT cleanly fixable: the PE cannot distinguish an
+undeclared identifier from a real runtime global (`Math`, `String`), and emitting all
+dead global reads eagerly to be safe would both bloat real code and is moot for real
+inputs (valid code like simple.js never reads undeclared vars). The right fix is at
+the fuzzer: stop the generator/shrinker producing undeclared-variable references
+(the generator hardcodes `Expr::Var("input")` in `atom()` even where `input` is out
+of scope; the shrinker removes declarations and leaves references dangling).
+
+True remaining PE bug (narrow path, not the artifact): **residual-function body
+dropping a throwing call** — seed 228, `function f3(){ return a3(true); }` (a3
+undefined → TypeError) residualizes to an empty `__rf0`. Worth fixing in the
+residual-fn-body specialization. The lone non-throw straggler (seed 22) is a deeply
+contrived nested case.
 
 ## The fuzzer (`js-frontend/src/bin/fuzz.rs` + `tools/fuzzcmp.js`)
 

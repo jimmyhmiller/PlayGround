@@ -2036,6 +2036,20 @@ impl Client for Js {
                         return self.push(s, v);
                     }
                 }
+                // A property read on a null/undefined base *always* throws a
+                // TypeError. Emit it in program order so the throw is preserved
+                // even when the value is discarded (a dead store or dead array
+                // element, which would otherwise drop the access). The temp it
+                // binds is never reached at runtime — the access throws first.
+                if matches!(o, Abs::Null | Abs::Undef) {
+                    self.forbid_residual_in_try(s, "a throwing property read");
+                    let dst = Js::discard_var(pc);
+                    out.push(Op::Eval {
+                        dst,
+                        expr: RExpr::Get(Box::new(o.to_rexpr()), k.clone()),
+                    });
+                    return self.push(s, Abs::Dyn(RExpr::Var(dst)));
+                }
                 let v = self.get_prop(s, &o, k);
                 self.push(s, v)
             }
@@ -2260,6 +2274,19 @@ impl Client for Js {
             Instr::GetIndex => {
                 let i = s.top_mut().ostack.pop().unwrap();
                 let a = s.top_mut().ostack.pop().unwrap();
+                // An indexed read on a null/undefined base *always* throws a
+                // TypeError; emit it in program order so the throw survives even
+                // a discarded result (see the `Instr::GetProp` note).
+                if matches!(a, Abs::Null | Abs::Undef) {
+                    self.forbid_residual_in_try(s, "a throwing indexed read");
+                    let ir = self.escape_if_ref(s, i, out).to_rexpr();
+                    let dst = Js::discard_var(pc);
+                    out.push(Op::Eval {
+                        dst,
+                        expr: RExpr::Index(Box::new(a.to_rexpr()), Box::new(ir)),
+                    });
+                    return self.push(s, Abs::Dyn(RExpr::Var(dst)));
+                }
                 // If the abstract heap can't serve this index statically (a
                 // dynamic index, or a type-mismatched key like `arr["x"]` /
                 // `obj[5]`), the container and the index escape and the read

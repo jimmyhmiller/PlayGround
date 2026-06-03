@@ -305,6 +305,19 @@ mod tests {
     }
 
     #[test]
+    fn dead_store_of_nullish_access_still_throws() {
+        // `var x = undefined.length;` with `x` unused: a member read on a
+        // null/undefined base always throws, so the access must survive even
+        // when its value flows into a dead store. (Node-verified; the residual
+        // performs the throwing access.)
+        let src = "function main(input) { var x = undefined.length; return 0; }";
+        let js = to_js(src).unwrap();
+        assert!(js.contains(".length"), "dead-store may-throw access dropped:\n{js}");
+        let src2 = "function main(input) { var a = [{ b: null[3] }]; return 0; }";
+        assert!(to_js(src2).unwrap().contains("[3]"), "dead nullish element dropped");
+    }
+
+    #[test]
     fn discarded_pure_expression_is_still_dropped() {
         // A discarded expression that cannot throw stays eliminated.
         let src = "function main(input) { (input + 1); (2 >= 3); return 0; }";
