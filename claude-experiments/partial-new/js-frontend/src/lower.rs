@@ -692,6 +692,12 @@ impl Compiler {
                     ast::UpdateOp::MinusMinus => Bop::Sub,
                 };
                 let one = Box::new(Expr::Num(1));
+                // `t++` is `t = ToNumber(t) + 1`, not `t = t + 1` (which would
+                // *concatenate* for a string/object `t`: `"3"++` is 4, not "31";
+                // `obj++` is NaN, not "[object Object]1"). `x - 0` is ToNumber(x)
+                // and folds to nothing when `x` is already numeric. (The `--`/Sub
+                // form already coerces, but applying it uniformly is harmless.)
+                let to_num = |e: Expr| Expr::Bin(Bop::Sub, Box::new(e), Box::new(Expr::Num(0)));
                 match &*u.arg {
                     ast::Expr::Ident(id) => {
                         let name = id.sym.as_str();
@@ -703,12 +709,12 @@ impl Compiler {
                             out.push(Stmt::SetProp(
                                 Expr::Var(b.slot),
                                 "value".to_string(),
-                                Expr::Bin(op, Box::new(cur), one),
+                                Expr::Bin(op, Box::new(to_num(cur)), one),
                             ));
                         } else {
                             out.push(Stmt::Set(
                                 b.slot,
-                                Expr::Bin(op, Box::new(Expr::Var(b.slot)), one),
+                                Expr::Bin(op, Box::new(to_num(Expr::Var(b.slot))), one),
                             ));
                         }
                     }
@@ -718,13 +724,13 @@ impl Compiler {
                             ast::MemberProp::Ident(id) => {
                                 let key = id.sym.to_string();
                                 let cur = Expr::Get(Box::new(obj.clone()), key.clone());
-                                out.push(Stmt::SetProp(obj, key, Expr::Bin(op, Box::new(cur), one)));
+                                out.push(Stmt::SetProp(obj, key, Expr::Bin(op, Box::new(to_num(cur)), one)));
                             }
                             ast::MemberProp::Computed(c) => {
                                 let idx = self.lower_expr(&c.expr, ctx)?;
                                 let cur =
                                     Expr::Index(Box::new(obj.clone()), Box::new(idx.clone()));
-                                out.push(Stmt::SetIndex(obj, idx, Expr::Bin(op, Box::new(cur), one)));
+                                out.push(Stmt::SetIndex(obj, idx, Expr::Bin(op, Box::new(to_num(cur)), one)));
                             }
                             ast::MemberProp::PrivateName(_) => {
                                 return Err("private fields are not supported".into())

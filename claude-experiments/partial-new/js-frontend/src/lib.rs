@@ -19,6 +19,14 @@ pub fn to_js(src: &str) -> Result<String, String> {
     let funcs = compile(src)?;
     let vm = Js::new(&funcs);
     let mut prog = partial::engine::specialize(&vm, vm.start());
+    if std::env::var_os("SPEC_STEPS").is_some() {
+        eprintln!(
+            "spec_steps={} spec_blocks={} spec_weight={}",
+            vm.spec_steps_used(),
+            vm.spec_blocks_used(),
+            vm.spec_weight_used()
+        );
+    }
     partial::residual::simplify(&mut prog);
     Ok(codegen::program_to_js(&vm, &prog, vm.input_var()))
 }
@@ -123,6 +131,186 @@ mod tests {
         // x*3 + (x+1)
         let prog = check(src, &[0, 4, 9]);
         assert_eq!(prog.blocks.len(), 1, "static switch kinds should fold away");
+    }
+
+    #[test]
+    fn static_depth_recursion_folds_to_constant() {
+        // A recursive function called with a static counter is fully unrolled.
+        let src = "
+            function fact(n) {
+                if (n <= 0) { return 1; }
+                return n * fact(n - 1);
+            }
+            function main(input) { return fact(4) + input; }";
+        let prog = check(src, &[0, 5, -3]);
+        assert_eq!(prog.blocks.len(), 1, "static-depth recursion should fully unroll");
+        assert_eq!(run_residual(src, 5).unwrap(), DeepVal::Num(29)); // 24 + 5
+    }
+
+    #[test]
+    fn recursion_mutating_shared_array_threads_through_frames() {
+        // The recursion analog of the self-modifying-array effect-ordering class:
+        // every frame mutates the SAME array, and a later read must observe those
+        // mutations in order. The counter is static (so it unrolls); the data is
+        // dynamic and escapes through the recursive frames.
+        let src = "
+            function fill(n, arr) {
+                if (n <= 0) { return 0; }
+                arr[n] = arr[n] ^ (n * 3);
+                fill(n - 1, arr);
+                return arr[n];
+            }
+            function main(input) {
+                var a = [input, input + 1, input + 2, input + 3, input + 4];
+                var last = fill(4, a);
+                return a[1] + a[2] + a[3] + last;
+            }";
+        let prog = check(src, &[0, 5, 10, -2]);
+        assert_eq!(prog.blocks.len(), 1, "static recursion over a shared array should unroll");
+    }
+
+    #[test]
+    fn tail_recursion_with_dynamic_accumulator_unrolls() {
+        let src = "
+            function sum(n, acc) {
+                if (n <= 0) { return acc; }
+                return sum(n - 1, acc + n);
+            }
+            function main(input) { return sum(5, input); }";
+        let prog = check(src, &[0, 1, 100, -7]);
+        assert_eq!(run_residual(src, 0).unwrap(), DeepVal::Num(15)); // 5+4+3+2+1
+        assert_eq!(prog.blocks.len(), 1);
+    }
+
+    #[test]
+    fn tree_recursion_static_depth_unrolls() {
+        let src = "
+            function fib(n) {
+                if (n <= 1) { return n; }
+                return fib(n - 1) + fib(n - 2);
+            }
+            function main(input) { return fib(7) + input; }";
+        let prog = check(src, &[0, 4]);
+        assert_eq!(run_residual(src, 0).unwrap(), DeepVal::Num(13)); // fib(7)
+        assert_eq!(prog.blocks.len(), 1);
+    }
+
+    #[test]
+    fn try_containing_recursive_function_residualizes() {
+        // A `try`-containing recursive function is residualized (not inlined) into
+        // a real recursive residual function. The Rust reference interpreter can't
+        // run a residual self-call, so this checks the path produces a recursive
+        // residual at all (correctness is validated against Node by the fuzzer).
+        let src = "
+            function sum(n, acc) {
+                try {
+                    if (n <= 0) { return acc; }
+                    return sum(n - 1, acc + n);
+                } catch (e) { return -1; }
+            }
+            function main(input) { return sum(5, input); }";
+        let js = to_js(src).expect("to_js should succeed for residualized recursion");
+        assert!(js.contains("__rf"), "expected a residual recursive function, got:\n{js}");
+    }
+
+    #[test]
+    fn short_circuit_and_does_not_apply_skipped_side_effect() {
+        // `input && (++input)`: when `input` is falsy the `&&` short-circuits, so
+        // `++input` must NOT run. (Regression: the PE used to apply the increment
+        // unconditionally, returning 1 instead of 0 at input=0.)
+        let src = "function main(input) { var x = input && (++input); return input; }";
+        check(src, &[0, 1, 2, -1, 3, 7]);
+        assert_eq!(run_residual(src, 0).unwrap(), DeepVal::Num(0)); // skipped
+        assert_eq!(run_residual(src, 1).unwrap(), DeepVal::Num(2)); // taken
+    }
+
+    #[test]
+    fn short_circuit_or_does_not_apply_skipped_side_effect() {
+        // `input || (++input)`: when `input` is truthy the `||` short-circuits.
+        let src = "function main(input) { var x = input || (++input); return input; }";
+        check(src, &[0, 1, 2, -1, 3, 7]);
+        assert_eq!(run_residual(src, 1).unwrap(), DeepVal::Num(1)); // skipped
+        assert_eq!(run_residual(src, 0).unwrap(), DeepVal::Num(1)); // taken
+    }
+
+    #[test]
+    fn ternary_only_runs_the_taken_branch_side_effect() {
+        let src = "function main(input) { var x = input ? (++input) : (input - 1); return input; }";
+        check(src, &[0, 1, 2, -1, 3, 7]);
+        assert_eq!(run_residual(src, 0).unwrap(), DeepVal::Num(0)); // else: no ++
+        assert_eq!(run_residual(src, 5).unwrap(), DeepVal::Num(6)); // then: ++
+    }
+
+    #[test]
+    fn short_circuit_keeps_compact_form_when_operands_are_pure() {
+        // The common case (pure operands) must stay a single compact pass-through
+        // expression, not branch — this is what real inputs rely on for size.
+        let src = "function main(input) { return (input && (input + 1)); }";
+        let prog = specialize(src).unwrap().1;
+        assert_eq!(prog.blocks.len(), 1, "pure `&&` should not introduce a branch");
+    }
+
+    #[test]
+    fn short_circuit_call_in_rhs_is_only_invoked_when_taken() {
+        // A side-effecting call in the short-circuited position must not run when
+        // the operator short-circuits past it.
+        let src = "
+            function main(input) {
+                var n = 0;
+                var bump = function () { n = n + 1; return 1; };
+                var y = input && bump();
+                return n;
+            }";
+        check(src, &[0, 1, 2, -1]);
+        assert_eq!(run_residual(src, 0).unwrap(), DeepVal::Num(0)); // bump skipped
+        assert_eq!(run_residual(src, 1).unwrap(), DeepVal::Num(1)); // bump called
+    }
+
+    #[test]
+    fn postfix_update_coerces_result_to_number() {
+        // `x--`/`x++` yield `ToNumber(old)`, not the raw old value: `false--` is 0
+        // (Node-verified). The PE folds the coercion, so the residual is `0`.
+        // (Regression: the PE returned the boolean `false` instead of 0. Not
+        // `check`-able: the reference interpreter can't coerce `false - 0`.)
+        let src = "function main(input) { var x = false; return (x--); }";
+        assert_eq!(run_residual(src, 0).unwrap(), DeepVal::Num(0));
+    }
+
+    #[test]
+    fn postfix_update_on_number_is_unchanged() {
+        // The coercion must be a no-op for an already-numeric place: 5;x++ -> 11.
+        let src = "function main(input) { var x = 5; var y = x++; return y + x; }";
+        assert_eq!(run_residual(src, 0).unwrap(), DeepVal::Num(11));
+    }
+
+    #[test]
+    fn statement_position_increment_coerces_to_number() {
+        // `s++;` in statement position is `s = ToNumber(s) + 1`, not `s = s + 1`
+        // (which would concatenate): `"3"++` is 4, not "31". (Regression: the
+        // statement-position lowering dropped the coercion.)
+        let src = "function main(input) { var s = \"3\"; s++; return s; }";
+        assert_eq!(run_residual(src, 0).unwrap(), DeepVal::Num(4));
+    }
+
+    #[test]
+    fn discarded_may_throw_expression_is_not_dropped() {
+        // `undefined.length;` as a statement throws (TypeError); discarding its
+        // value must not drop the access. (Regression: the PE eliminated the
+        // statement, so the residual returned 0 without throwing. Node-verified;
+        // the reference interpreter can't evaluate the access, so we assert the
+        // residual still performs it.)
+        let src = "function main(input) { undefined.length; return 0; }";
+        let js = to_js(src).unwrap();
+        assert!(js.contains(".length"), "discarded may-throw access was dropped:\n{js}");
+    }
+
+    #[test]
+    fn discarded_pure_expression_is_still_dropped() {
+        // A discarded expression that cannot throw stays eliminated.
+        let src = "function main(input) { (input + 1); (2 >= 3); return 0; }";
+        let prog = specialize(src).unwrap().1;
+        assert_eq!(prog.blocks.len(), 1);
+        assert_eq!(run_residual(src, 5).unwrap(), DeepVal::Num(0));
     }
 
     #[test]

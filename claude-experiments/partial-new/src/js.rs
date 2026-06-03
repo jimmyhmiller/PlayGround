@@ -231,6 +231,11 @@ enum Instr {
     PushThis,
     Load(usize),
     Store(usize),
+    /// Duplicate the top of the operand stack. Used to compile short-circuit
+    /// `&&`/`||`: the left value is both tested and (on the short-circuit path)
+    /// kept as the result. Duplicating copies the abstract *value* (an effectful
+    /// operand has already run and been bound to a temp), so no effect repeats.
+    Dup,
     /// Bind the top-of-stack value to a fresh residual temp if it is dynamic, so
     /// it is stable across a following effect. Used for the result of a *postfix*
     /// `x++` whose place residualizes: the old value must be captured before the
@@ -508,6 +513,75 @@ impl State {
                 .map(|(k, v)| (*k, v.clone()))
                 .collect();
         }
+    }
+
+    /// A cheap proxy for this state's memory footprint: the total number of
+    /// residual-expression nodes held across all live abstract values (frame
+    /// locals/operand stacks plus heap objects). Residualized abstract values
+    /// (`Abs::Dyn`) carry `RExpr` trees that can grow without bound when a
+    /// program branch-explodes (e.g. each `x++` wraps the prior tree), so this is
+    /// what actually blows up — block and live-object counts stay small while the
+    /// trees, cloned into every memoized state, dominate memory. Used only to
+    /// enforce `SPEC_WEIGHT_BUDGET`.
+    fn weight(&self) -> u64 {
+        let mut w = 0u64;
+        for f in &self.frames {
+            for v in f.locals.iter().chain(f.ostack.iter()) {
+                w += abs_weight(v);
+            }
+        }
+        for (_, o) in self.heap.iter() {
+            w += match o {
+                HeapObj::Object(fs) => fs.iter().map(|(_, a)| abs_weight(a)).sum::<u64>(),
+                HeapObj::Array(xs) | HeapObj::Builtin { data: xs, .. } => {
+                    xs.iter().map(abs_weight).sum::<u64>()
+                }
+                HeapObj::Closure { captured, .. } => {
+                    captured.iter().map(abs_weight).sum::<u64>()
+                }
+            };
+        }
+        w
+    }
+}
+
+/// Number of `RExpr` nodes an abstract value carries (1 for any non-residual
+/// value; the full tree size for `Abs::Dyn`). See `State::weight`.
+fn abs_weight(a: &Abs) -> u64 {
+    match a {
+        Abs::Dyn(e) => rexpr_weight(e),
+        _ => 1,
+    }
+}
+
+/// Can evaluating this residual expression throw at runtime? A member/index read
+/// throws when its base is null/undefined; a call/`new` can throw; `in` and
+/// `instanceof` throw on a non-object operand. Used so a *discarded* expression
+/// that can throw is still emitted for effect (a discarded one that cannot throw
+/// is dropped). Conservative over-approximation is safe: emitting a discarded
+/// expression that turns out not to throw is a harmless extra read.
+fn may_throw(e: &RExpr) -> bool {
+    match e {
+        RExpr::Get(..) | RExpr::Index(..) | RExpr::Call(..) | RExpr::New(..) => true,
+        RExpr::Bin(_, a, b) => may_throw(a) || may_throw(b),
+        RExpr::Opaque(op, args) => {
+            op == "in" || op == "instanceof" || args.iter().any(may_throw)
+        }
+        RExpr::FnRef { caps, .. } => caps.iter().any(may_throw),
+        _ => false,
+    }
+}
+
+fn rexpr_weight(e: &RExpr) -> u64 {
+    match e {
+        RExpr::Bin(_, a, b) | RExpr::Index(a, b) => 1 + rexpr_weight(a) + rexpr_weight(b),
+        RExpr::Get(a, _) => 1 + rexpr_weight(a),
+        RExpr::Opaque(_, xs) => 1 + xs.iter().map(rexpr_weight).sum::<u64>(),
+        RExpr::Call(c, xs) | RExpr::New(c, xs) => {
+            1 + rexpr_weight(c) + xs.iter().map(rexpr_weight).sum::<u64>()
+        }
+        RExpr::FnRef { caps, .. } => 1 + caps.iter().map(rexpr_weight).sum::<u64>(),
+        _ => 1,
     }
 }
 
@@ -870,13 +944,96 @@ fn compile_expr(e: &Expr, code: &mut Vec<Instr>) {
             code.push(Instr::NewOp(args.len()));
         }
         Expr::Opaque(op, args) => {
-            for a in args {
-                compile_expr(a, code);
+            // `&&`, `||`, `??`, and `?:` short-circuit: an operand that is only
+            // *conditionally* evaluated must not have its side effects applied on
+            // the path where it is skipped. When that operand is pure, the compact
+            // pass-through `Opaque` is correct (and is what real inputs rely on for
+            // a small residual); when it has side effects, compile real
+            // short-circuit control flow so only the operand actually taken runs.
+            let needs_branch = match op.as_str() {
+                "&&" | "||" | "??" => args.len() == 2 && !is_pure(&args[1]),
+                "?:" => args.len() == 3 && (!is_pure(&args[1]) || !is_pure(&args[2])),
+                _ => false,
+            };
+            if needs_branch {
+                compile_short_circuit(op, args, code);
+            } else {
+                for a in args {
+                    compile_expr(a, code);
+                }
+                code.push(Instr::OpaqueOp { op: op.clone(), arity: args.len() });
             }
-            code.push(Instr::OpaqueOp { op: op.clone(), arity: args.len() });
         }
         Expr::Global(name) => code.push(Instr::PushGlobal(name.clone())),
         Expr::Update { place, op, prefix } => compile_update(place, *op, *prefix, code),
+    }
+}
+
+/// Compile a short-circuiting `&&`/`||`/`??`/`?:` whose conditionally-evaluated
+/// operand has side effects, as real control flow so the skipped operand never
+/// runs (and never applies its effects). Leaves the operator's value on the
+/// stack. Used only when the compact pass-through `Opaque` form would be unsound;
+/// see `compile_expr`.
+fn compile_short_circuit(op: &str, args: &[Expr], code: &mut Vec<Instr>) {
+    match op {
+        // a && b  ≡  let t = a; t ? b : t
+        "&&" => {
+            compile_expr(&args[0], code);
+            code.push(Instr::Dup);
+            let jz = code.len();
+            code.push(Instr::JmpIfFalsy(0)); // a falsy: keep a as the result
+            code.push(Instr::Pop); // a truthy: drop the kept a, value is b
+            compile_expr(&args[1], code);
+            let end = code.len();
+            patch(&mut code[jz], end);
+        }
+        // a || b  ≡  let t = a; t ? t : b
+        "||" => {
+            compile_expr(&args[0], code);
+            code.push(Instr::Dup);
+            let jz = code.len();
+            code.push(Instr::JmpIfFalsy(0)); // a falsy: evaluate b
+            let jend = code.len();
+            code.push(Instr::Jmp(0)); // a truthy: keep a, skip b
+            let els = code.len();
+            code.push(Instr::Pop); // drop the kept a
+            compile_expr(&args[1], code);
+            let end = code.len();
+            patch(&mut code[jz], els);
+            patch(&mut code[jend], end);
+        }
+        // a ?? b  ≡  let t = a; (t == null) ? b : t   (`== null` is true iff
+        // `t` is null or undefined — exactly the nullish test).
+        "??" => {
+            compile_expr(&args[0], code);
+            code.push(Instr::Dup);
+            code.push(Instr::PushNull);
+            code.push(Instr::OpaqueOp { op: "==".to_string(), arity: 2 });
+            let jz = code.len();
+            code.push(Instr::JmpIfFalsy(0)); // (a == null) falsy: a not nullish, keep a
+            code.push(Instr::Pop); // nullish: drop a, value is b
+            compile_expr(&args[1], code);
+            let jend = code.len();
+            code.push(Instr::Jmp(0));
+            let end = code.len();
+            patch(&mut code[jz], end); // falsy lands here with a still on the stack
+            patch(&mut code[jend], end);
+        }
+        // a ? b : c
+        "?:" => {
+            compile_expr(&args[0], code);
+            let jz = code.len();
+            code.push(Instr::JmpIfFalsy(0));
+            compile_expr(&args[1], code); // then
+            let jend = code.len();
+            code.push(Instr::Jmp(0));
+            let els = code.len();
+            compile_expr(&args[2], code); // else
+            let end = code.len();
+            patch(&mut code[jz], els);
+            patch(&mut code[jend], end);
+        }
+        _ => unreachable!("compile_short_circuit on {op}"),
     }
 }
 
@@ -905,6 +1062,11 @@ fn compile_update(place: &Expr, op: Bop, prefix: bool, code: &mut Vec<Instr>) {
     let emit_store = |code: &mut Vec<Instr>| match place {
         Expr::Var(slot) => {
             code.push(Instr::Load(*slot));
+            // `++`/`--` coerce the place to a number first: `obj++` stores
+            // `ToNumber(obj) + 1` (NaN), not `obj + 1` (string concat). `x - 0`
+            // is `ToNumber(x)` and folds to nothing when `x` is already numeric.
+            code.push(Instr::PushNum(0));
+            code.push(Instr::Bin(Bop::Sub));
             code.push(Instr::PushNum(1));
             code.push(Instr::Bin(op));
             code.push(Instr::Store(*slot));
@@ -914,6 +1076,11 @@ fn compile_update(place: &Expr, op: Bop, prefix: bool, code: &mut Vec<Instr>) {
             compile_expr(o, code); // obj (for the write)
             compile_expr(o, code); // obj (for the read)
             code.push(Instr::GetProp(k.clone()));
+            // `++`/`--` coerce the place to a number first: `obj++` stores
+            // `ToNumber(obj) + 1` (NaN), not `obj + 1` (string concat). `x - 0`
+            // is `ToNumber(x)` and folds to nothing when `x` is already numeric.
+            code.push(Instr::PushNum(0));
+            code.push(Instr::Bin(Bop::Sub));
             code.push(Instr::PushNum(1));
             code.push(Instr::Bin(op));
             code.push(Instr::SetPropOp(k.clone()));
@@ -925,6 +1092,11 @@ fn compile_update(place: &Expr, op: Bop, prefix: bool, code: &mut Vec<Instr>) {
             compile_expr(a, code); // arr (for the read)
             compile_expr(i, code); // index (for the read)
             code.push(Instr::GetIndex);
+            // `++`/`--` coerce the place to a number first: `obj++` stores
+            // `ToNumber(obj) + 1` (NaN), not `obj + 1` (string concat). `x - 0`
+            // is `ToNumber(x)` and folds to nothing when `x` is already numeric.
+            code.push(Instr::PushNum(0));
+            code.push(Instr::Bin(Bop::Sub));
             code.push(Instr::PushNum(1));
             code.push(Instr::Bin(op));
             code.push(Instr::SetIndexOp);
@@ -937,6 +1109,13 @@ fn compile_update(place: &Expr, op: Bop, prefix: bool, code: &mut Vec<Instr>) {
         compile_expr(place, code); // read the new value
     } else {
         compile_expr(place, code); // read the old value (the result)
+        // The result of a *postfix* `x++`/`x--` is `ToNumber(old)`, not the raw
+        // old value: `false--` yields 0 and `"3"--` yields 3, not `false`/`"3"`.
+        // `x - 0` is exactly `ToNumber(x)` (and folds to a no-op when `x` is
+        // already a number). The prefix form needs no coercion: its result is the
+        // stored `place ± 1`, which the `Bin` already coerces.
+        code.push(Instr::PushNum(0));
+        code.push(Instr::Bin(Bop::Sub));
         // Capture it before the store: if the place residualizes, the store
         // mutates it, and an un-snapshotted dynamic old value would re-read the
         // new value at runtime.
@@ -957,6 +1136,23 @@ fn patch(i: &mut Instr, target: usize) {
 // ---------------------------------------------------------------------------
 
 const MAX_DEPTH: usize = 512;
+
+/// Upper bound on accumulated `State::weight` (residual-expression nodes summed
+/// over residual block entries) in one specialization. This is the
+/// memory-proportional bound: each memoized block clones its state, and the
+/// abstract values' `RExpr` trees are what grow without bound in a
+/// branch-exploding program.
+///
+/// The default suits direct CLI use on real inputs: the simple.js deobfuscation,
+/// the hardest real input, accumulates ~141M and peaks under 700 MB, so 300M
+/// clears it with headroom. The fuzzer only ever specializes small generated
+/// programs (the largest observed weight is ~1.4k), so it lowers this to ~1M via
+/// the `SPEC_WEIGHT_BUDGET` env var; a generated branch-exploder then refuses at
+/// a few hundred MB instead of exhausting memory. (A blowup and simple.js are
+/// within ~1.4x on every cheap count metric — steps, blocks, live heap — so only
+/// a budget tuned to the workload separates them; there is no single threshold
+/// that fits both, hence the env knob.)
+const SPEC_WEIGHT_BUDGET: u64 = 300_000_000;
 
 pub struct Js {
     code: Vec<Instr>,
@@ -1020,6 +1216,43 @@ pub struct Js {
     /// the body leaves the same partial state as the original. (Inlined callees,
     /// at greater frame depth, still fold normally.)
     eager_stores: std::cell::Cell<bool>,
+    /// Total `step` calls during this specialization. A program whose driving
+    /// branch-explodes (e.g. a depth-bounded recursion whose body forks on
+    /// dynamic values inside a loop) can produce a finite but astronomically
+    /// large residual, exhausting memory before any depth/loop bound trips. When
+    /// the count crosses `SPEC_STEP_BUDGET` we stop with a clear, catchable
+    /// refusal rather than OOM. This is a resource bound, not a soundness
+    /// mechanism: it lives in the JS client, never the generic engine.
+    spec_steps: std::cell::Cell<u64>,
+    /// Count of *block entries* (a `step` with `at_entry`), i.e. residual blocks
+    /// created (diagnostic).
+    spec_blocks: std::cell::Cell<u64>,
+    /// Accumulated `State::weight` (residual-expression nodes) across all block
+    /// entries. Each memoized block holds a clone of its state, so total memory
+    /// tracks the sum of per-state weights. A branch-exploding program grows its
+    /// abstract values' `RExpr` trees without bound, so this sum dwarfs the
+    /// largest legitimate program's even when block, step, and live-object counts
+    /// look comparable. This is the budgeted metric.
+    spec_weight: std::cell::Cell<u64>,
+    /// The weight budget (defaults to `SPEC_WEIGHT_BUDGET`, override with the
+    /// `SPEC_WEIGHT_BUDGET` env var for calibration).
+    spec_budget: u64,
+}
+
+impl Js {
+    /// Total `step` calls consumed by the last `specialize` over this client
+    /// (diagnostic; used to calibrate the budgets).
+    pub fn spec_steps_used(&self) -> u64 {
+        self.spec_steps.get()
+    }
+    /// Residual blocks created by the last `specialize` (diagnostic).
+    pub fn spec_blocks_used(&self) -> u64 {
+        self.spec_blocks.get()
+    }
+    /// Accumulated state weight over the last `specialize` (the budgeted metric).
+    pub fn spec_weight_used(&self) -> u64 {
+        self.spec_weight.get()
+    }
 }
 
 /// A generated residual function: `function __rf{id}(cap.., param..) { body }`.
@@ -1146,6 +1379,13 @@ impl Js {
             residual_try_stack: std::cell::RefCell::new(Vec::new()),
             probing: std::cell::Cell::new(false),
             try_taint: std::cell::Cell::new(false),
+            spec_steps: std::cell::Cell::new(0),
+            spec_blocks: std::cell::Cell::new(0),
+            spec_weight: std::cell::Cell::new(0),
+            spec_budget: std::env::var("SPEC_WEIGHT_BUDGET")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(SPEC_WEIGHT_BUDGET),
             eager_stores: std::cell::Cell::new(false),
         }
     }
@@ -1555,6 +1795,26 @@ impl Client for Js {
     }
 
     fn step(&self, s: &mut State, out: &mut Vec<Op>, at_entry: bool) -> Step<Self> {
+        // Resource guard: bound the number of residual blocks so a
+        // branch-exploding program fails with a clear refusal instead of
+        // exhausting memory. Block count (not raw step count) is the bound,
+        // because each block memoizes a full `State`/heap snapshot — that is
+        // where the memory goes. (Not a soundness mechanism; see
+        // `SPEC_BLOCK_BUDGET`.)
+        self.spec_steps.set(self.spec_steps.get() + 1);
+        if at_entry {
+            self.spec_blocks.set(self.spec_blocks.get() + 1);
+            let accum = self.spec_weight.get() + s.weight();
+            self.spec_weight.set(accum);
+            if accum > self.spec_budget {
+                let budget = self.spec_budget;
+                panic!(
+                    "specialization budget exceeded ({budget} residual-expression nodes): the \
+                     program drives the partial evaluator into runaway (branch-exploding) \
+                     residual growth"
+                );
+            }
+        }
         let pc = s.top().pc;
         // The foldability probe only needs to learn *whether* the region taints;
         // once it has, stop immediately instead of specializing the rest.
@@ -1685,8 +1945,23 @@ impl Client for Js {
                 self.push(s, v)
             }
             Instr::Pop => {
-                s.top_mut().ostack.pop();
+                let v = s.top_mut().ostack.pop().unwrap();
+                // A discarded expression that can throw (e.g. `undefined.length;`
+                // as a statement) must still run for effect, in program order, or
+                // the residual would silently skip the exception the original
+                // raises. A discarded value that cannot throw is dropped as before.
+                if let Abs::Dyn(rexpr) = &v {
+                    if may_throw(rexpr) {
+                        self.forbid_residual_in_try(s, "a discarded may-throw expression");
+                        let dst = Js::discard_var(pc);
+                        out.push(Op::Eval { dst, expr: rexpr.clone() });
+                    }
+                }
                 self.advance(s)
+            }
+            Instr::Dup => {
+                let v = s.top().ostack.last().cloned().expect("Dup on empty stack");
+                self.push(s, v)
             }
             Instr::Bin(op) => {
                 let b = s.top_mut().ostack.pop().unwrap();
@@ -3206,6 +3481,12 @@ impl Js {
         600_000 + pc
     }
 
+    /// Stable residual temp for a discarded-but-may-throw expression statement
+    /// (`Instr::Pop`). Keyed by pc so a discard in a loop reuses one temp.
+    fn discard_var(pc: usize) -> usize {
+        700_000 + pc
+    }
+
     /// Stable residual temp for freezing a stale reader at a mutation site.
     /// Keyed by (pc, idx) where idx identifies the local slot or operand-stack
     /// position, so it is deterministic and distinct per frozen value.
@@ -3636,6 +3917,10 @@ impl Js {
                 Instr::Store(slot) => locals[*slot] = ostack.pop().unwrap(),
                 Instr::Pop => {
                     ostack.pop();
+                }
+                Instr::Dup => {
+                    let v = ostack.last().cloned().unwrap();
+                    ostack.push(v);
                 }
                 Instr::Bin(op) => {
                     let b = ostack.pop().unwrap();

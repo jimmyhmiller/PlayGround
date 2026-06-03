@@ -859,6 +859,7 @@ fn is_refusal(msg: &str) -> bool {
     msg.contains("dynamic-depth recursion")
         || msg.contains("non-terminating static recursion")
         || msg.contains("out of a residualized `try`")
+        || msg.contains("specialization budget exceeded")
 }
 
 fn residual_of(src: &str) -> Residual {
@@ -1466,6 +1467,17 @@ fn shrink(mut p: Prog, repo: &str) -> Prog {
 }
 
 fn main() {
+    // Generated programs are tiny (the largest observed specialization weight is
+    // ~1.4k), so cap the partial evaluator's per-program weight budget far below
+    // its CLI default. A generated branch-exploder then refuses cleanly at a few
+    // hundred MB instead of driving the evaluator into a multi-GB blowup that
+    // would OOM the fuzzer. 100k keeps ~70x headroom over any legitimate program
+    // while bounding even the heaviest blowups (whose memory-per-weight is far
+    // above normal) to well under a gigabyte. Respect an explicit override.
+    if std::env::var_os("SPEC_WEIGHT_BUDGET").is_none() {
+        std::env::set_var("SPEC_WEIGHT_BUDGET", "100000");
+    }
+
     // Worker mode: specialize one JS file. Used by the overflow shrinker, which
     // runs this in a subprocess so an uncatchable stack overflow / OOM (which
     // `catch_unwind` cannot trap) shows up as the child dying by signal rather
