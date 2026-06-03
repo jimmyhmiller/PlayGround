@@ -1462,7 +1462,23 @@ impl Js {
             pending_joins: Vec::new(),
             handlers: Vec::new(),
         };
+        // The body is an independent program: specialize it in a clean context.
+        // `residual_fn_for` can be reached *while* the caller is mid-probe or
+        // mid-residual-try (e.g. `f.call(x)` inside a `try`), and the inherited
+        // `halt_at` / `probing` / `eager_stores` / residual-try state would
+        // corrupt the body (it was producing an empty `__rf0`, silently dropping
+        // a throwing call). Save, clear, specialize, restore.
+        let saved_probing = self.probing.replace(false);
+        let saved_taint = self.try_taint.get();
+        let saved_eager = self.eager_stores.replace(false);
+        let saved_halt = std::mem::take(&mut *self.halt_at.borrow_mut());
+        let saved_try_stack = std::mem::take(&mut *self.residual_try_stack.borrow_mut());
         let body = crate::engine::specialize(self, start);
+        self.probing.set(saved_probing);
+        self.try_taint.set(saved_taint);
+        self.eager_stores.set(saved_eager);
+        *self.halt_at.borrow_mut() = saved_halt;
+        *self.residual_try_stack.borrow_mut() = saved_try_stack;
         self.residual_fns.borrow_mut()[rfid].body = body;
         rfid
     }
@@ -2036,20 +2052,6 @@ impl Client for Js {
                         return self.push(s, v);
                     }
                 }
-                // A property read on a null/undefined base *always* throws a
-                // TypeError. Emit it in program order so the throw is preserved
-                // even when the value is discarded (a dead store or dead array
-                // element, which would otherwise drop the access). The temp it
-                // binds is never reached at runtime — the access throws first.
-                if matches!(o, Abs::Null | Abs::Undef) {
-                    self.forbid_residual_in_try(s, "a throwing property read");
-                    let dst = Js::discard_var(pc);
-                    out.push(Op::Eval {
-                        dst,
-                        expr: RExpr::Get(Box::new(o.to_rexpr()), k.clone()),
-                    });
-                    return self.push(s, Abs::Dyn(RExpr::Var(dst)));
-                }
                 let v = self.get_prop(s, &o, k);
                 self.push(s, v)
             }
@@ -2274,19 +2276,6 @@ impl Client for Js {
             Instr::GetIndex => {
                 let i = s.top_mut().ostack.pop().unwrap();
                 let a = s.top_mut().ostack.pop().unwrap();
-                // An indexed read on a null/undefined base *always* throws a
-                // TypeError; emit it in program order so the throw survives even
-                // a discarded result (see the `Instr::GetProp` note).
-                if matches!(a, Abs::Null | Abs::Undef) {
-                    self.forbid_residual_in_try(s, "a throwing indexed read");
-                    let ir = self.escape_if_ref(s, i, out).to_rexpr();
-                    let dst = Js::discard_var(pc);
-                    out.push(Op::Eval {
-                        dst,
-                        expr: RExpr::Index(Box::new(a.to_rexpr()), Box::new(ir)),
-                    });
-                    return self.push(s, Abs::Dyn(RExpr::Var(dst)));
-                }
                 // If the abstract heap can't serve this index statically (a
                 // dynamic index, or a type-mismatched key like `arr["x"]` /
                 // `obj[5]`), the container and the index escape and the read

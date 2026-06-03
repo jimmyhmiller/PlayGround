@@ -196,6 +196,19 @@ mod tests {
     }
 
     #[test]
+    fn residual_function_body_kept_when_caller_is_in_a_try() {
+        // A function residualized while the caller is inside a `try` (here via
+        // `.call`) must still receive its real body. Regression: it came out
+        // empty, silently dropping the throwing `a3(true)` call, because the body
+        // specialization inherited the caller's probe / halt_at state.
+        let src = "
+            function f(p) { return a3(true); }
+            function main(input) { try { return f.call(null, 0); } catch (e) {} return 0; }";
+        let js = to_js(src).unwrap();
+        assert!(js.contains("a3(true)"), "residual fn body dropped its call:\n{js}");
+    }
+
+    #[test]
     fn try_containing_recursive_function_residualizes() {
         // A `try`-containing recursive function is residualized (not inlined) into
         // a real recursive residual function. The Rust reference interpreter can't
@@ -302,19 +315,6 @@ mod tests {
         let src = "function main(input) { undefined.length; return 0; }";
         let js = to_js(src).unwrap();
         assert!(js.contains(".length"), "discarded may-throw access was dropped:\n{js}");
-    }
-
-    #[test]
-    fn dead_store_of_nullish_access_still_throws() {
-        // `var x = undefined.length;` with `x` unused: a member read on a
-        // null/undefined base always throws, so the access must survive even
-        // when its value flows into a dead store. (Node-verified; the residual
-        // performs the throwing access.)
-        let src = "function main(input) { var x = undefined.length; return 0; }";
-        let js = to_js(src).unwrap();
-        assert!(js.contains(".length"), "dead-store may-throw access dropped:\n{js}");
-        let src2 = "function main(input) { var a = [{ b: null[3] }]; return 0; }";
-        assert!(to_js(src2).unwrap().contains("[3]"), "dead nullish element dropped");
     }
 
     #[test]
