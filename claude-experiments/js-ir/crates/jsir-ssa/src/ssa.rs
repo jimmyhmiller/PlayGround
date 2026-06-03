@@ -279,9 +279,13 @@ impl<'a> Builder<'a> {
             }
         }
 
-        // Install block params.
+        // Install block params, recording each phi value's source variable so the
+        // memoizer can render a phi dependency by its real name.
         for (&block, ids) in &phis_by_block {
             let params: Vec<Value> = ids.iter().map(|&p| self.phis[p].param).collect();
+            for &p in ids {
+                self.cfg.phi_var.insert(self.phis[p].param, self.phis[p].var);
+            }
             self.cfg.block_mut(block).params = params;
         }
 
@@ -324,6 +328,34 @@ impl<'a> Builder<'a> {
                 None => v,
             }
         };
+        // Record each variable's final SSA value -> its var, so the memoizer can
+        // render a dependency that is a variable by its source name. A read of a
+        // source variable (e.g. `a`) wins over a synthetic temp (`$t…`) that the
+        // same value may also represent (logical/ternary lowering aliases them).
+        let mut reads: Vec<(Value, VarId)> = Vec::new();
+        for block in &self.cfg.blocks {
+            for ins in &block.instrs {
+                if let Op::ReadVar(var) = ins.op {
+                    if let Some(r) = ins.result {
+                        reads.push((subst(r), var));
+                    }
+                }
+            }
+        }
+        let is_source = |cfg: &Cfg, var: VarId| {
+            cfg.var_names.get(var.0 as usize).map_or(false, |n| !n.starts_with('$'))
+        };
+        for (fv, var) in reads {
+            let occupied_source = self
+                .cfg
+                .phi_var
+                .get(&fv)
+                .map_or(false, |&v| is_source(&self.cfg, v));
+            if is_source(&self.cfg, var) || !occupied_source {
+                self.cfg.phi_var.insert(fv, var);
+            }
+        }
+
         for block in &mut self.cfg.blocks {
             block.instrs.retain(|ins| !matches!(ins.op, Op::ReadVar(_) | Op::WriteVar(_, _)));
             for ins in &mut block.instrs {

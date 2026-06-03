@@ -1663,6 +1663,23 @@ mod tests {
         assert_node_equiv(src, &[0, 1, 4, 9]);
     }
 
+    /// A negative number constant used as a computed-member base must be
+    /// parenthesized in the residual: `-1[i]` parses as `-(1[i])` (member access
+    /// binds tighter than unary minus), so the un-parenthesized form changes the
+    /// value (`(-1)[i]` is `undefined`; `-(1[i])` is `NaN`). Found by the fuzzer
+    /// (seed 1865) after the undeclared-var artifact was cleared.
+    #[test]
+    fn negative_num_index_base_is_parenthesized() {
+        // `String(...)` keeps the result JSON-stringifiable while still
+        // distinguishing the two parses: `String((-1)[i])` is "undefined",
+        // `String(-(1[i]))` is "NaN".
+        let src = "function main(input) { var x = 0 - 1; return String(x[input]); }";
+        let js = to_js(src).unwrap();
+        assert!(js.contains("(-1)["), "negative index base must be parenthesized:\n{js}");
+        assert!(!js.contains("-1[v"), "must not emit a bare `-1[...]`:\n{js}");
+        assert_node_equiv(src, &[0, 1, 2]);
+    }
+
     /// The synthesized `main` runs top-level code; a module that computes a value
     /// folds. (Uses a global so we can return something defined.)
     #[test]

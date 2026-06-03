@@ -576,6 +576,23 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
             vec![Type::Builtin("Bytes".to_owned())],
             Type::Builtin("Bytes".to_owned()),
         )),
+        // Encode ANY value to a wire frame; decode an Int / shipped fn back.
+        // `wire_encode(value: T) -> Bytes`.
+        "core/wire.encode" => Some((
+            vec![Type::TypeVar(0)],
+            Type::Builtin("Bytes".to_owned()),
+        )),
+        "core/wire.decode_int" => Some((
+            vec![Type::Builtin("Bytes".to_owned())],
+            int_t(),
+        )),
+        "core/wire.decode_fn1" => Some((
+            vec![Type::Builtin("Bytes".to_owned())],
+            Type::FnType {
+                params: vec![int_t()],
+                ret: Box::new(int_t()),
+            },
+        )),
         // Structural hash / equality of ANY value (generic key support for
         // HashMap). `hash_value(k) -> Int`, `value_eq(a, b) -> Int` (0/1).
         "core/hash.value" => Some((vec![Type::TypeVar(0)], int_t())),
@@ -1742,6 +1759,39 @@ fn typecheck_call(
         }
     }
 
+    // ---- core/wire.decode#<...> special case ----
+    // `decode::<T>(bytes) -> Result<T, DecodeError>`. The runtime does the
+    // shape check on `T`; the typechecker only needs the enum shape, so `T`
+    // is left as a wildcard TypeVar (the call site's match recovers it).
+    if let Expr::BuiltinRef(name) = callee {
+        if let Some((result_hash, decode_error_hash)) =
+            crate::resolve::parse_decode_builtin_name(name)
+        {
+            if args.len() != 1 {
+                return Err(TypeError::ArityMismatch {
+                    what: "call to decode::<T>".to_owned(),
+                    expected: 1,
+                    got: args.len(),
+                });
+            }
+            let arg0 = typecheck_expr(&args[0], locals, cache)?;
+            match &arg0 {
+                Type::Builtin(b) if b == "Bytes" => {}
+                _ => {
+                    return Err(TypeError::TypeMismatch {
+                        context: "decode::<T> argument (must be Bytes)".to_owned(),
+                        expected: Type::Builtin("Bytes".to_owned()),
+                        got: arg0,
+                    });
+                }
+            }
+            return Ok(Type::Apply(
+                Box::new(Type::TypeRef(result_hash)),
+                vec![Type::TypeVar(0), Type::TypeRef(decode_error_hash)],
+            ));
+        }
+    }
+
     // ---- Variadic C extern ----
     // A variadic extern (`curl_easy_setopt(h: Ptr, opt: Int, ...)`)
     // accepts its fixed params followed by any number of trailing C
@@ -2492,8 +2542,8 @@ mod tests {
         // resolver picks the result type from the first arm.
         let src = "enum Shape { Circle(Int), Square(Int) }
                    def area(s: Shape) -> Int = match s {
-                       Circle(r) => r * r,
-                       Square(s) => s * s,
+                       Shape::Circle(r) => r * r,
+                       Shape::Square(s) => s * s,
                    }";
         let (rm, cache, _) = tc(src);
         // First, ensure it typechecks fine.
@@ -2655,8 +2705,8 @@ mod tests {
                    enum Shape { Circle(Int), Square(Int) }
                    def make() -> Point = Point { x: 1, y: 2 }
                    def kind(s: Shape) -> Int = match s {
-                       Circle(r) => r,
-                       Square(s) => s,
+                       Shape::Circle(r) => r,
+                       Shape::Square(s) => s,
                    }";
         let (rm, cache, _) = tc(src);
         for d in &rm.defs {
@@ -2770,7 +2820,7 @@ mod tests {
         // bottom-up inference from the payload arg.
         let (rm, cache, _) = tc(
             "enum Option<T> { Some(T), None }
-             def t() -> Int = match Some(42) { Some(v) => v, None => 0 }",
+             def t() -> Int = match Option::Some(42) { Option::Some(v) => v, Option::None => 0 }",
         );
         let h = rm.defs.iter().find(|d| d.name == "t").unwrap().hash;
         let scheme = cache.get(&h).unwrap();
@@ -2798,7 +2848,7 @@ mod tests {
             "struct Cell { head: Int, tail: LL }
              enum LL { Cons(Cell), Nil }
              def len(xs: LL) -> Int =
-                 match xs { Cons(c) => 1 + len(c.tail), Nil => 0 }",
+                 match xs { LL::Cons(c) => 1 + len(c.tail), LL::Nil => 0 }",
         );
         assert_eq!(report.newly_typed, 3);
     }
@@ -2812,7 +2862,7 @@ mod tests {
         let _ = tc(
             "enum Option<T> { Some(T), None }
              def opt_or<T>(a: Option<T>, b: Option<T>) -> Option<T> =
-                 match a { Some(v) => Some(v), None => b }",
+                 match a { Option::Some(v) => Option::Some(v), Option::None => b }",
         );
     }
 
@@ -2825,7 +2875,7 @@ mod tests {
             "struct LCell<T> { head: T, tail: List<T> }
              enum List<T> { LCons(LCell<T>), LNil }
              def make_one(x: Int) -> List<Int> =
-                 LCons(LCell { head: x, tail: LNil })",
+                 List::LCons(LCell { head: x, tail: List::LNil })",
         );
     }
 
@@ -2849,7 +2899,7 @@ mod tests {
         // payload is String, not Int.
         let err = tc_err(
             "enum Option<T> { Some(T), None }
-             def t() -> Option<Int> = Some(\"oops\")",
+             def t() -> Option<Int> = Option::Some(\"oops\")",
         );
         match err {
             TypeError::TypeMismatch { .. } => {}

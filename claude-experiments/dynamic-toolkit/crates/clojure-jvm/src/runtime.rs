@@ -6392,15 +6392,12 @@ mod user_type_runtime_tests {
         Symbol::intern_ns_name(None, n)
     }
 
-    // These tests share the user_types global registries with each
-    // other; serialize via a Mutex so allocator state doesn't
-    // interleave.
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    // These tests share the user_types global registries with the
+    // registry-touching tests in `compiler.rs` and `user_types.rs`. They
+    // MUST serialize via the one crate-level lock (not a local one), or a
+    // reset here wipes a compiler test's protocols mid-run.
     fn guard() -> std::sync::MutexGuard<'static, ()> {
-        let g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ut::_reset_for_tests();
-        g
+        crate::lang::user_types::registry_test_guard()
     }
 
     #[test]

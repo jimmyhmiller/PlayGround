@@ -7892,12 +7892,15 @@ fn parse_ns_form(_context: C, form: Object) -> Box<dyn Expr> {
         ),
     };
     let ns = super::namespace::Namespace::find_or_create(ns_sym);
-    // Swap CURRENT_NS to the new namespace. We modify the Var's root
-    // directly (Java's `in-ns` does the same, ultimately calling
-    // `Namespace.findOrCreate` and `Var.intern(... *ns*)`). `in-ns` does
+    // Switch `*ns*` to the new namespace by mutating the CURRENT THREAD's
+    // dynamic binding (Clojure's `in-ns` calls `RT.CURRENT_NS.set(ns)`,
+    // which sets the thread binding established by the loader/REPL — it does
+    // NOT change the global root). `Session::eval_form` establishes that
+    // binding around every form, so `set_value` always has one to mutate,
+    // and the change stays local to this thread of evaluation. `in-ns` does
     // NOT refer clojure.core — that's the `ns` macro's job, via its
     // expansion's `(clojure.core/refer 'clojure.core)` call.
-    super::rt::CURRENT_NS.bind_root(Object::Namespace(ns.clone()));
+    super::rt::CURRENT_NS.set_value(Object::Namespace(ns.clone()));
 
     // Walk the remaining clauses after the ns name and process the
     // ones we understand. Anything we don't recognize is skipped
@@ -11943,13 +11946,23 @@ pub fn with_active_session_load_resource(path: &str) {
             return;
         }
     };
-    let saved_ns = super::rt::CURRENT_NS.deref();
     // Interleave read and eval, one form at a time — exactly as Clojure's
     // `load` does. This matters because syntax-quote resolves symbols against
     // the *current* namespace at read time: a file's `(ns …)` form must be
     // evaluated (switching `*ns*`) before the following forms are read, or
     // their syntax-quoted symbols would qualify to the wrong namespace.
     with_active_session_ref(|sess| {
+        // Clojure's `load` runs inside `(binding [*ns* *ns*] …)`. Establish
+        // ONE thread-local `*ns*` binding spanning the whole read+eval loop,
+        // seeded from the caller's current ns: (a) a sub-file's `(ns …)` is
+        // local to this load and restored when it returns, and (b) reads
+        // between forms see the up-to-date current namespace (eval_form
+        // reuses this binding rather than stacking its own). Popped on exit.
+        Var::push_thread_bindings(vec![(
+            super::rt::CURRENT_NS.clone(),
+            Object::Namespace(sess.current_ns.clone()),
+        )]);
+        let _ns_restore = DropFn(|| Var::pop_thread_bindings());
         let mut byte_pos: usize = 0;
         loop {
             let slice = &source[byte_pos..];
@@ -11967,8 +11980,6 @@ pub fn with_active_session_load_resource(path: &str) {
         }
     })
     .unwrap_or_else(|| panic!("clojure-jvm: RT/load(\"{path}\") called without an active Session"));
-    // Restore the caller's namespace.
-    super::rt::CURRENT_NS.bind_root(saved_ns);
 }
 
 /// Map a `load` path (as passed to `clojure.lang.RT/load`, i.e. the
@@ -12138,6 +12149,15 @@ pub struct Session {
     /// singleton variadic-identity IFn produced by compiling
     /// `(fn* [& xs] xs)` once at session init. Read by `cljvm_pl_creator`.
     pub pl_creator_handle: u64,
+    /// This session's current namespace (`*ns*`), carried across forms.
+    ///
+    /// Clojure's `*ns*` is a thread-local dynamic binding, NOT a global
+    /// root: `(ns …)`/`in-ns` change the *current thread's* namespace, so
+    /// concurrent evaluations don't clobber each other. We honor that by
+    /// having `eval_form` push a `CURRENT_NS` thread binding seeded from
+    /// this field (spanning analyze + run) and read it back afterward.
+    /// Two Sessions on two threads are therefore isolated.
+    current_ns: Arc<crate::lang::namespace::Namespace>,
 }
 
 impl Session {
@@ -12251,6 +12271,9 @@ impl Session {
             next_form_id: 0,
             _extern_count_seen: 0,
             pl_creator_handle: 0,
+            // Seed from the current effective `*ns*` (a thread binding if a
+            // caller established one, else the `clojure.core` root default).
+            current_ns: super::rt::current_ns(),
         };
         sess.init_static_singletons();
         sess
@@ -12394,6 +12417,36 @@ impl Session {
             DropFn(move || {
                 ACTIVE_SESSION.with(|c| c.set(prev));
             })
+        });
+
+        // Ensure a thread-local `*ns*` binding is active for this form.
+        // Clojure's current namespace is a per-thread dynamic binding, not a
+        // global root: `(ns …)`/`in-ns` (which run at analyze time via
+        // `parse_ns_form` → `Var::set_value`) mutate *this thread's* binding,
+        // so concurrent evaluations never clobber each other.
+        //
+        // If a caller already established a binding (e.g. `load`'s
+        // `(binding [*ns* *ns*] …)` around a sub-file, or a test's
+        // `with_fresh_ns`), reuse it — `(ns …)` updates that binding directly
+        // and the owner manages restoration. Otherwise this form owns a fresh
+        // binding seeded from the session's tracked `current_ns`; the guard
+        // reads the (possibly `(ns)`-changed) value back so it carries to the
+        // next form, then pops.
+        let owns_ns_binding = super::rt::CURRENT_NS.get_thread_binding().is_none();
+        if owns_ns_binding {
+            Var::push_thread_bindings(vec![(
+                super::rt::CURRENT_NS.clone(),
+                Object::Namespace(self.current_ns.clone()),
+            )]);
+        }
+        let _ns_guard = DropFn(move || {
+            if owns_ns_binding {
+                // SAFETY: `self_ptr` is this Session, live for the call.
+                unsafe {
+                    (*self_ptr).current_ns = super::rt::current_ns();
+                }
+                Var::pop_thread_bindings();
+            }
         });
 
         use dynir::dynexec::NanBoxConfig;
@@ -13003,6 +13056,9 @@ mod tests {
 
     #[test]
     fn obj_expr_starts_empty() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         let o = ObjExpr::placeholder();
         assert!(o.name().is_none());
         assert!(o.internal_name().is_none());
@@ -13049,6 +13105,9 @@ mod tests {
 
     #[test]
     fn obj_expr_is_deftype_flips_when_fields_set() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         let o = ObjExpr::placeholder();
         assert!(!o.is_deftype());
         assert!(o.supports_meta());
@@ -17193,6 +17252,9 @@ mod tests {
 
     #[test]
     fn defprotocol_dispatches_to_installed_impl_on_nil() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types::{
             self as ut, BUILTIN_NIL, install_impl, protocol_id_by_name, protocol_method_id,
         };
@@ -17227,6 +17289,9 @@ mod tests {
 
     #[test]
     fn deftype_factory_and_field_access() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.deftype.fields", || super::Session::new());
         ut::_reset_for_tests();
@@ -17242,6 +17307,9 @@ mod tests {
 
     #[test]
     fn extend_protocol_multiple_types() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.extend.protocol", || super::Session::new());
         ut::_reset_for_tests();
@@ -17261,6 +17329,9 @@ mod tests {
 
     #[test]
     fn satisfies_query_true_after_extend() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.satisfies.true", || super::Session::new());
         ut::_reset_for_tests();
@@ -17273,6 +17344,9 @@ mod tests {
 
     #[test]
     fn satisfies_false_when_not_extended() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.satisfies.false", || super::Session::new());
         ut::_reset_for_tests();
@@ -17285,6 +17359,9 @@ mod tests {
 
     #[test]
     fn satisfies_object_fallback_does_not_count() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.satisfies.object", || super::Session::new());
         ut::_reset_for_tests();
@@ -17301,6 +17378,9 @@ mod tests {
 
     #[test]
     fn deftype_with_inline_protocol_impl() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.deftype.inline", || super::Session::new());
         ut::_reset_for_tests();
@@ -17318,6 +17398,9 @@ mod tests {
 
     #[test]
     fn extend_type_on_user_deftype_dispatches() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.extend.user", || super::Session::new());
         ut::_reset_for_tests();
@@ -17331,6 +17414,9 @@ mod tests {
 
     #[test]
     fn extend_type_on_nil_dispatches() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.extend.nil", || super::Session::new());
         ut::_reset_for_tests();
@@ -17342,6 +17428,9 @@ mod tests {
 
     #[test]
     fn extend_type_object_is_fallback() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.extend.object", || super::Session::new());
         ut::_reset_for_tests();
@@ -17356,6 +17445,9 @@ mod tests {
 
     #[test]
     fn deftype_via_direct_factory_call() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.deftype.fncall", || super::Session::new());
         ut::_reset_for_tests();
@@ -17368,6 +17460,9 @@ mod tests {
 
     #[test]
     fn defprotocol_arity_2_method_dispatches() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types::{
             self as ut, BUILTIN_NIL, install_impl, protocol_id_by_name, protocol_method_id,
         };

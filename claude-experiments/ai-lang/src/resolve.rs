@@ -336,6 +336,32 @@ pub fn parse_at_builtin_name(name: &str) -> Option<(Hash, Option<Hash>)> {
     }
 }
 
+/// Parse a `core/wire.decode#<expected>#<result>#<okint>#<decode_error>`
+/// builtin name, returning `(result_enum_hash, decode_error_hash)`. Lets the
+/// typechecker rebuild the call's `Result<T, DecodeError>` type (with `T` left
+/// as a wildcard — the runtime does the real shape check). Returns `None` for
+/// any name that is not a decode builtin or is malformed.
+pub fn parse_decode_builtin_name(name: &str) -> Option<(Hash, Hash)> {
+    let body = name.strip_prefix("core/wire.decode#")?;
+    let parts: Vec<&str> = body.split('#').collect();
+    let parse_hex = |s: &str| -> Option<Hash> {
+        if s.len() != Hash::SIZE * 2 {
+            return None;
+        }
+        let mut out = [0u8; Hash::SIZE];
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+        }
+        Some(Hash(out))
+    };
+    match parts.as_slice() {
+        [_expected, result, _okint, decode_error] => {
+            Some((parse_hex(result)?, parse_hex(decode_error)?))
+        }
+        _ => None,
+    }
+}
+
 fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -465,14 +491,11 @@ pub fn resolve_module_with_env(
                 kind: TopKind::Def,
             },
         );
-        for (i, (vname, payload)) in vs.iter().enumerate() {
+        for (vname, _payload) in vs.iter() {
             variants.insert(
                 vname.clone(),
                 VariantBinding {
                     enum_surface_name: name.clone(),
-                    enum_ref: *hash,
-                    index: i as u32,
-                    payload: payload.clone(),
                 },
             );
         }
@@ -708,7 +731,7 @@ pub fn resolve_module_with_env(
                         },
                     );
                     // Register each variant for constructor lookup.
-                    for (i, (vname, payload_ty)) in vs.iter().enumerate() {
+                    for (vname, _payload_ty) in vs.iter() {
                         if let Some(existing) = variants.get(vname) {
                             return Err(ResolveError::DuplicateDef {
                                 name: vname.clone(),
@@ -725,9 +748,6 @@ pub fn resolve_module_with_env(
                             vname.clone(),
                             VariantBinding {
                                 enum_surface_name: sd.name.clone(),
-                                enum_ref: hash,
-                                index: i as u32,
-                                payload: payload_ty.clone(),
                             },
                         );
                     }
@@ -1185,7 +1205,8 @@ fn collect_body_local_names(e: &SurfaceExpr, meta: &NameMeta, out: &mut Vec<Stri
         | SurfaceExpr::FloatLit { .. }
         | SurfaceExpr::BoolLit { .. }
         | SurfaceExpr::StringLit { .. }
-        | SurfaceExpr::Var { .. } => {}
+        | SurfaceExpr::Var { .. }
+        | SurfaceExpr::VariantRef { .. } => {}
 
         SurfaceExpr::Call { callee, args, .. } => {
             collect_body_local_names(callee, meta, out);
@@ -1291,8 +1312,12 @@ fn collect_pattern_binder_names(
             }
             out.push(name.clone());
         }
-        SurfacePattern::Ctor { payload, .. } => {
-            collect_pattern_binder_names(payload, meta, out);
+        // Bare ctor patterns are rejected by resolve_pattern; no binders.
+        SurfacePattern::Ctor { .. } => {}
+        SurfacePattern::QualifiedCtor { payload, .. } => {
+            if let Some(sub) = payload {
+                collect_pattern_binder_names(sub, meta, out);
+            }
         }
     }
 }
@@ -1930,6 +1955,49 @@ fn find_variant(info: &EnumInfo, name: &str) -> Option<u32> {
         .map(|i| i as u32)
 }
 
+/// Resolve a qualified variant `Enum::Variant` to its enum content hash,
+/// variant index, and declared payload type. Looking up by enum name (not by
+/// the flat variant map) makes it robust to two enums sharing a variant name —
+/// which is exactly why qualification is required.
+fn lookup_qualified_variant(
+    enums: &HashMap<String, EnumInfo>,
+    enum_name: &str,
+    variant_name: &str,
+    span: Span,
+) -> Result<(Hash, u32, Option<Type>), ResolveError> {
+    let info = enums.get(enum_name).ok_or_else(|| ResolveError::UnknownType {
+        name: enum_name.to_owned(),
+        span,
+    })?;
+    match info.variants.iter().position(|(n, _)| n == variant_name) {
+        Some(idx) => Ok((info.hash, idx as u32, info.variants[idx].1.clone())),
+        None => Err(ResolveError::UnknownVariant {
+            name: format!("{}::{}", enum_name, variant_name),
+            span,
+        }),
+    }
+}
+
+/// Build the "bare variant must be qualified" error, suggesting the qualified
+/// spelling using one enum that declares the variant.
+fn bare_variant_error(
+    variants: &HashMap<String, VariantBinding>,
+    name: &str,
+    span: Span,
+) -> ResolveError {
+    let hint = variants
+        .get(name)
+        .map(|v| format!("{}::{}", v.enum_surface_name, name))
+        .unwrap_or_else(|| format!("Enum::{}", name));
+    ResolveError::UnknownName {
+        name: format!(
+            "`{}` is an enum variant and must be qualified — write `{}`",
+            name, hint
+        ),
+        span,
+    }
+}
+
 #[derive(Clone)]
 struct EnumInfo {
     hash: Hash,
@@ -1939,16 +2007,14 @@ struct EnumInfo {
     variants: Vec<(String, Option<Type>)>,
 }
 
+/// Records that a name is an enum variant. Now that variant construction must
+/// be qualified, the resolver looks variants up by enum name (via the `enums`
+/// map); this table only answers "is this bare name a variant?" and, if so,
+/// which enum to suggest in the must-qualify error.
 #[derive(Clone)]
 struct VariantBinding {
-    /// The surface name of the enclosing enum (for error messages).
+    /// The surface name of the enclosing enum (for the must-qualify hint).
     enum_surface_name: String,
-    /// Content hash of the enum this variant belongs to.
-    enum_ref: Hash,
-    /// Position of this variant within the enum's `variants` list.
-    index: u32,
-    /// Payload type, if any.
-    payload: Option<Type>,
 }
 
 /// Top-level binding metadata: hash for `TopRef`, plus the canonical
@@ -2333,23 +2399,11 @@ fn resolve_expr_typed(
             if let Some((idx, ty)) = lookup_local(env, name) {
                 return Ok((Expr::LocalVar(idx), ty));
             }
-            // Nullary variant in expression position: `None`, `Empty`, etc.
-            if let Some(v) = variants.get(name) {
-                if v.payload.is_some() {
-                    return Err(ResolveError::VariantArityMismatch {
-                        variant: name.clone(),
-                        expected_payload: true,
-                        span: *span,
-                    });
-                }
-                return Ok((
-                    Expr::EnumNew {
-                        enum_ref: v.enum_ref,
-                        variant_index: v.index,
-                        payload: None,
-                    },
-                    Type::TypeRef(v.enum_ref),
-                ));
+            // A bare name that is an enum variant must be qualified:
+            // `Option::None`, not `None`. (Variant construction is always
+            // qualified in this language.)
+            if variants.contains_key(name) {
+                return Err(bare_variant_error(variants, name, *span));
             }
             if let Some(b) = top.get(name) {
                 match b.kind {
@@ -2415,6 +2469,28 @@ fn resolve_expr_typed(
                 name: name.clone(),
                 span: *span,
             })
+        }
+
+        // `Enum::Variant` in value position — a nullary variant constructor.
+        // (Payload variants appear as the callee of a `Call`, handled below.)
+        SurfaceExpr::VariantRef { enum_name, variant_name, span } => {
+            let (enum_ref, index, payload_ty) =
+                lookup_qualified_variant(enums, enum_name, variant_name, *span)?;
+            if payload_ty.is_some() {
+                return Err(ResolveError::VariantArityMismatch {
+                    variant: format!("{}::{}", enum_name, variant_name),
+                    expected_payload: true,
+                    span: *span,
+                });
+            }
+            Ok((
+                Expr::EnumNew {
+                    enum_ref,
+                    variant_index: index,
+                    payload: None,
+                },
+                Type::TypeRef(enum_ref),
+            ))
         }
 
         SurfaceExpr::Call { callee, args, type_args, span } => {
@@ -2826,65 +2902,71 @@ fn resolve_expr_typed(
                 }
             }
 
-            // Detect variant-constructor calls: `Some(x)`, `Circle(r)`.
-            // The callee is a bare `Var` whose name is a registered
-            // variant. Rewrite to `EnumNew { ..., payload: Some(arg) }`.
-            if let SurfaceExpr::Var {
-                name,
+            // A bare `Var` callee that names a variant is an unqualified
+            // variant construction (`Some(x)`); reject it — variants must be
+            // qualified (`Option::Some(x)`).
+            if let SurfaceExpr::Var { name, span: var_span } = callee.as_ref() {
+                if variants.contains_key(name) {
+                    return Err(bare_variant_error(variants, name, *var_span));
+                }
+            }
+
+            // Qualified variant-constructor calls: `Option::Some(x)`,
+            // `Val::VInt(n)`. Rewrite to `EnumNew { ..., payload: Some(arg) }`.
+            if let SurfaceExpr::VariantRef {
+                enum_name,
+                variant_name,
                 span: var_span,
             } = callee.as_ref()
             {
-                if let Some(v) = variants.get(name) {
-                    if v.payload.is_none() {
-                        return Err(ResolveError::VariantArityMismatch {
-                            variant: name.clone(),
-                            expected_payload: false,
-                            span: *var_span,
-                        });
-                    }
-                    if args.len() != 1 {
-                        return Err(ResolveError::VariantArityMismatch {
-                            variant: name.clone(),
-                            expected_payload: true,
-                            span: *span,
-                        });
-                    }
-                    let v = v.clone();
-                    let (payload, payload_ty) = resolve_expr_typed(
-                        &args[0], env, top, structs, enums, variants, at_binding,
-                        type_params, self_name,
-                    )?;
-                    // Bottom-up infer the enum's type-arg substitution by
-                    // unifying the variant's declared payload type
-                    // against the actual arg's resolved type. If the
-                    // enum is non-generic this is a no-op and the
-                    // result type stays bare TypeRef.
-                    let n_params = enums
-                        .get(&v.enum_surface_name)
-                        .map(|e| e.type_params.len())
-                        .unwrap_or(0);
-                    let result_ty = if n_params > 0 {
-                        let mut subst: Vec<Option<Type>> = vec![None; n_params];
-                        if let Some(decl) = v.payload.as_ref() {
-                            unify_resolver(decl, &payload_ty, &mut subst);
-                        }
-                        if subst.iter().any(|s| s.is_some()) {
-                            build_instantiated(v.enum_ref, n_params, &subst)
-                        } else {
-                            Type::TypeRef(v.enum_ref)
-                        }
-                    } else {
-                        Type::TypeRef(v.enum_ref)
-                    };
-                    return Ok((
-                        Expr::EnumNew {
-                            enum_ref: v.enum_ref,
-                            variant_index: v.index,
-                            payload: Some(Box::new(payload)),
-                        },
-                        result_ty,
-                    ));
+                let (enum_ref, index, payload_decl) =
+                    lookup_qualified_variant(enums, enum_name, variant_name, *var_span)?;
+                if payload_decl.is_none() {
+                    return Err(ResolveError::VariantArityMismatch {
+                        variant: format!("{}::{}", enum_name, variant_name),
+                        expected_payload: false,
+                        span: *var_span,
+                    });
                 }
+                if args.len() != 1 {
+                    return Err(ResolveError::VariantArityMismatch {
+                        variant: format!("{}::{}", enum_name, variant_name),
+                        expected_payload: true,
+                        span: *span,
+                    });
+                }
+                let (payload, payload_ty) = resolve_expr_typed(
+                    &args[0], env, top, structs, enums, variants, at_binding,
+                    type_params, self_name,
+                )?;
+                // Bottom-up infer the enum's type-arg substitution by
+                // unifying the variant's declared payload type against the
+                // actual arg's resolved type. Non-generic enums: no-op.
+                let n_params = enums
+                    .get(enum_name)
+                    .map(|e| e.type_params.len())
+                    .unwrap_or(0);
+                let result_ty = if n_params > 0 {
+                    let mut subst: Vec<Option<Type>> = vec![None; n_params];
+                    if let Some(decl) = payload_decl.as_ref() {
+                        unify_resolver(decl, &payload_ty, &mut subst);
+                    }
+                    if subst.iter().any(|s| s.is_some()) {
+                        build_instantiated(enum_ref, n_params, &subst)
+                    } else {
+                        Type::TypeRef(enum_ref)
+                    }
+                } else {
+                    Type::TypeRef(enum_ref)
+                };
+                return Ok((
+                    Expr::EnumNew {
+                        enum_ref,
+                        variant_index: index,
+                        payload: Some(Box::new(payload)),
+                    },
+                    result_ty,
+                ));
             }
 
             let (callee_r, callee_ty) =
@@ -3134,9 +3216,10 @@ fn resolve_expr_typed(
             let mut result_ty: Option<Type> = None;
 
             for arm in arms {
-                let (pattern_canon, bind_count, pat_enum) = resolve_pattern(
+                let (pattern_canon, _bind_count, pat_enum) = resolve_pattern(
                     &arm.pattern,
                     variants,
+                    enums,
                 )?;
                 if let Some(eh) = pat_enum {
                     if let Some(existing) = shared_enum {
@@ -3159,7 +3242,7 @@ fn resolve_expr_typed(
                 // so e.g. `Ok(p)` against `Result<Pair, Failure>`
                 // binds `p: Pair` rather than `p: TypeVar(0)`.
                 let bindings =
-                    collect_pattern_bindings(&arm.pattern, variants, &scrut_instantiation);
+                    collect_pattern_bindings(&arm.pattern, variants, enums, &scrut_instantiation);
                 for (name, ty) in &bindings {
                     env.push((name.clone(), ty.clone()));
                 }
@@ -3379,55 +3462,65 @@ fn resolve_expr_typed(
 fn resolve_pattern(
     p: &SurfacePattern,
     variants: &HashMap<String, VariantBinding>,
+    enums: &HashMap<String, EnumInfo>,
 ) -> Result<(Pattern, u32, Option<Hash>), ResolveError> {
     match p {
         SurfacePattern::Wildcard { .. } => Ok((Pattern::Wildcard, 0, None)),
         SurfacePattern::Ident { name, span } => {
-            // Could be a nullary variant pattern (`None`, `Empty`),
-            // or a binding pattern.
-            if let Some(v) = variants.get(name) {
-                if v.payload.is_some() {
-                    return Err(ResolveError::VariantArityMismatch {
-                        variant: name.clone(),
-                        expected_payload: true,
-                        span: *span,
-                    });
-                }
-                return Ok((
-                    Pattern::Enum {
-                        enum_ref: v.enum_ref,
-                        variant_index: v.index,
-                        payload: None,
-                    },
-                    0,
-                    Some(v.enum_ref),
-                ));
+            // A bare ident that names a variant must be qualified — silently
+            // treating `None` as a catch-all binding would be a footgun.
+            if variants.contains_key(name) {
+                return Err(bare_variant_error(variants, name, *span));
             }
             // Otherwise it's a binding.
             Ok((Pattern::Var, 1, None))
         }
-        SurfacePattern::Ctor { name, payload, span } => {
-            let v = variants.get(name).ok_or_else(|| ResolveError::UnknownVariant {
-                name: name.clone(),
-                span: *span,
-            })?;
-            if v.payload.is_none() {
-                return Err(ResolveError::VariantArityMismatch {
-                    variant: name.clone(),
+        // `Some(x)` in pattern position — bare ctor must be qualified.
+        SurfacePattern::Ctor { name, span, .. } => {
+            Err(bare_variant_error(variants, name, *span))
+        }
+        SurfacePattern::QualifiedCtor {
+            enum_name,
+            variant_name,
+            payload,
+            span,
+        } => {
+            let (enum_ref, index, payload_decl) =
+                lookup_qualified_variant(enums, enum_name, variant_name, *span)?;
+            match (payload, payload_decl) {
+                (None, None) => Ok((
+                    Pattern::Enum {
+                        enum_ref,
+                        variant_index: index,
+                        payload: None,
+                    },
+                    0,
+                    Some(enum_ref),
+                )),
+                (Some(sub), Some(_)) => {
+                    let (sub_canon, sub_bindings, _sub_enum) =
+                        resolve_pattern(sub, variants, enums)?;
+                    Ok((
+                        Pattern::Enum {
+                            enum_ref,
+                            variant_index: index,
+                            payload: Some(Box::new(sub_canon)),
+                        },
+                        sub_bindings,
+                        Some(enum_ref),
+                    ))
+                }
+                (Some(_), None) => Err(ResolveError::VariantArityMismatch {
+                    variant: format!("{}::{}", enum_name, variant_name),
                     expected_payload: false,
                     span: *span,
-                });
+                }),
+                (None, Some(_)) => Err(ResolveError::VariantArityMismatch {
+                    variant: format!("{}::{}", enum_name, variant_name),
+                    expected_payload: true,
+                    span: *span,
+                }),
             }
-            let (sub_canon, sub_bindings, _sub_enum) = resolve_pattern(payload, variants)?;
-            Ok((
-                Pattern::Enum {
-                    enum_ref: v.enum_ref,
-                    variant_index: v.index,
-                    payload: Some(Box::new(sub_canon)),
-                },
-                sub_bindings,
-                Some(v.enum_ref),
-            ))
         }
     }
 }
@@ -3444,16 +3537,18 @@ fn resolve_pattern(
 fn collect_pattern_bindings(
     p: &SurfacePattern,
     variants: &HashMap<String, VariantBinding>,
+    enums: &HashMap<String, EnumInfo>,
     instantiation: &[Type],
 ) -> Vec<(String, Type)> {
     let mut out: Vec<(String, Type)> = Vec::new();
-    walk_pattern_bindings(p, variants, instantiation, None, &mut out);
+    walk_pattern_bindings(p, variants, enums, instantiation, None, &mut out);
     out
 }
 
 fn walk_pattern_bindings(
     p: &SurfacePattern,
     variants: &HashMap<String, VariantBinding>,
+    enums: &HashMap<String, EnumInfo>,
     instantiation: &[Type],
     payload_ty_hint: Option<&Type>,
     out: &mut Vec<(String, Type)>,
@@ -3461,28 +3556,38 @@ fn walk_pattern_bindings(
     match p {
         SurfacePattern::Wildcard { .. } => {}
         SurfacePattern::Ident { name, .. } => {
-            if let Some(v) = variants.get(name) {
-                if v.payload.is_none() {
-                    return;
-                }
-            }
+            // Bare variant idents are rejected in resolve_pattern, so a bare
+            // ident reaching here is always a binding.
             let raw = payload_ty_hint
                 .cloned()
                 .unwrap_or(Type::Builtin("Int".to_owned()));
             let ty = substitute_typevars(&raw, instantiation);
             out.push((name.clone(), ty));
         }
-        SurfacePattern::Ctor { name, payload, .. } => {
-            let sub_payload_ty = variants
-                .get(name)
-                .and_then(|v| v.payload.clone());
-            walk_pattern_bindings(
-                payload,
-                variants,
-                instantiation,
-                sub_payload_ty.as_ref(),
-                out,
-            );
+        // Bare ctor patterns are rejected in resolve_pattern; nothing to bind.
+        SurfacePattern::Ctor { .. } => {}
+        SurfacePattern::QualifiedCtor {
+            enum_name,
+            variant_name,
+            payload,
+            ..
+        } => {
+            if let Some(sub) = payload {
+                let sub_payload_ty = enums.get(enum_name).and_then(|e| {
+                    e.variants
+                        .iter()
+                        .find(|(n, _)| n == variant_name)
+                        .and_then(|(_, ty)| ty.clone())
+                });
+                walk_pattern_bindings(
+                    sub,
+                    variants,
+                    enums,
+                    instantiation,
+                    sub_payload_ty.as_ref(),
+                    out,
+                );
+            }
         }
     }
 }
@@ -3726,6 +3831,62 @@ mod tests {
         let d = resolve_one("def f(x: Int) -> Int = x");
         let Def::Fn { body, .. } = d else { panic!("expected Fn") };
         assert_eq!(body, Expr::LocalVar(0));
+    }
+
+    fn resolve_mod_src(src: &str) -> Result<(), ResolveError> {
+        let m = parse_module(src).unwrap();
+        resolve_module(&m).map(|_| ())
+    }
+
+    #[test]
+    fn qualified_variant_construction_and_match_resolve() {
+        // Qualified construction (nullary + payload) and qualified patterns
+        // are the legal form and must resolve cleanly.
+        resolve_mod_src(
+            "enum Color { Red, Pair(Int) }\n\
+             def mk() -> Color = Color::Pair(7)\n\
+             def nul() -> Color = Color::Red\n\
+             def rd(c: Color) -> Int = match c { Color::Red => 0, Color::Pair(n) => n }",
+        )
+        .expect("qualified variants must resolve");
+    }
+
+    #[test]
+    fn bare_variant_construction_is_rejected() {
+        let err = resolve_mod_src(
+            "enum Color { Red, Pair(Int) }\n\
+             def mk() -> Color = Pair(7)",
+        )
+        .unwrap_err();
+        match err {
+            ResolveError::UnknownName { name, .. } => {
+                assert!(name.contains("must be qualified"), "got: {name}");
+                assert!(name.contains("Color::Pair"), "should suggest qualified form: {name}");
+            }
+            other => panic!("expected must-qualify UnknownName, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_nullary_variant_construction_is_rejected() {
+        let err = resolve_mod_src(
+            "enum Color { Red, Pair(Int) }\n\
+             def mk() -> Color = Red",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ResolveError::UnknownName { ref name, .. } if name.contains("Color::Red")));
+    }
+
+    #[test]
+    fn bare_variant_pattern_is_rejected() {
+        // A bare ctor pattern must be qualified — and must NOT silently become
+        // a binding, which would be a correctness footgun.
+        let err = resolve_mod_src(
+            "enum Color { Red, Pair(Int) }\n\
+             def rd(c: Color) -> Int = match c { Pair(n) => n, Color::Red => 0 }",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ResolveError::UnknownName { ref name, .. } if name.contains("must be qualified")));
     }
 
     #[test]

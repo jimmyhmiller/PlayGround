@@ -18,7 +18,10 @@
 
 use std::collections::HashSet;
 
-use jsir_ir::{Attr, Block, IdentifierAttr, Op as IrOp, Region, ValueId};
+use jsir_ir::{
+    Attr, Block, IdentifierAttr, ImportSpecKind, ImportSpecifierAttr, Op as IrOp, Region,
+    StringLiteralKeyAttr, ValueId,
+};
 use jsir_transforms::memoize::MemoLayout;
 
 use crate::cfg::{BinOp, BlockId, BlockKind, Cfg, Const, Instr, MemberKey, Op, PropKey, Term, UnOp, Value};
@@ -98,7 +101,7 @@ pub fn build_layout(cfg: &Cfg, infos: &[ScopeInfo], ranges: &Ranges) -> Result<M
         }
     }
 
-    let em = Emitter { cfg, scope_outputs: &scope_outputs, ids: std::cell::Cell::new(0) };
+    let em = Emitter { cfg, scope_outputs: &scope_outputs, ids: std::cell::Cell::new(0), names: std::collections::HashMap::new() };
 
     let cache_size: usize = emitted.iter().map(|i| i.deps.len() + i.outputs.len()).sum();
 
@@ -691,6 +694,9 @@ struct Emitter<'a> {
     /// synthesized op result is unique across all statement runs and nested
     /// blocks (the transform then shifts them past the file's max in one pass).
     ids: std::cell::Cell<u32>,
+    /// value -> source name, recovered from declarations (in-place path only;
+    /// empty for the structured `build_layout` path which renders `_vN`).
+    names: std::collections::HashMap<Value, String>,
 }
 
 impl<'a> Emitter<'a> {
@@ -701,6 +707,12 @@ impl<'a> Emitter<'a> {
 
     /// The source-level name we render a CFG value as (param name, or `_v{id}`).
     fn name(&self, v: Value) -> String {
+        // A recovered source name (declared local or assigned temp) wins, so
+        // resynthesized expressions reference real names; falls back to params
+        // then a synthesized `_vN`.
+        if let Some(n) = self.names.get(&v) {
+            return n.clone();
+        }
         if let Some(idx) = self.cfg.params.iter().position(|p| *p == v) {
             if let Some(n) = self.cfg.param_names.get(idx) {
                 return n.clone();
@@ -1121,6 +1133,371 @@ impl<'a> Emitter<'a> {
         call.operands.push(arg);
         eb.push(call)
     }
+
+    // === in-place memoization (PROTOTYPE) ================================
+    // These reuse the guard machinery above but render dependencies and the
+    // recomputed value from the ORIGINAL source (names + initializer op), so the
+    // surrounding statements (loops, etc.) can be kept verbatim.
+
+    /// Reconstruct a source expression for `v` from the CFG: a parameter renders
+    /// as its source name, a member chain recurses, a constant/global renders
+    /// directly. Errors on anything else (the prototype's bound).
+    fn emit_real_expr(&self, v: Value, eb: &mut ExprBuilder) -> Result<ValueId, String> {
+        // A recovered source name (a parameter or a declared local) renders as the
+        // bare identifier — this is what lets a dependency like `x` or `props`
+        // print correctly instead of a synthesized temp.
+        if let Some(name) = self.names.get(&v) {
+            return Ok(eb.push(ident_op(name)));
+        }
+        if let Some(idx) = self.cfg.params.iter().position(|p| *p == v) {
+            let name = self.cfg.param_names.get(idx).cloned().unwrap_or_else(|| format!("_p{}", v.0));
+            return Ok(eb.push(ident_op(&name)));
+        }
+        let op = self.def_op_of(v).ok_or_else(|| format!("inplace: dep %{} is not a param and has no def", v.0))?;
+        match op {
+            Op::Member { obj, prop } => {
+                let ov = self.emit_real_expr(*obj, eb)?;
+                match prop {
+                    MemberKey::Static(name) => {
+                        let mut m = IrOp::new("jsir.member_expression");
+                        m.operands.push(ov);
+                        m.attrs.push(("literal_property".into(), Attr::Identifier(Box::new(ident_attr(name)))));
+                        Ok(eb.push(m))
+                    }
+                    MemberKey::Computed(c) => {
+                        let cv = self.emit_real_expr(*c, eb)?;
+                        let mut m = IrOp::new("jsir.member_expression");
+                        m.operands.push(ov);
+                        m.operands.push(cv);
+                        Ok(eb.push(m))
+                    }
+                }
+            }
+            Op::Const(c) => Ok(eb.push(const_op(c)?)),
+            Op::Global(g) => Ok(eb.push(ident_op(g))),
+            Op::Bin(b, x, y) => {
+                let xv = self.emit_real_expr(*x, eb)?;
+                let yv = self.emit_real_expr(*y, eb)?;
+                Ok(bin(eb, bin_str(*b), xv, yv))
+            }
+            Op::Un(u, x) => {
+                let xv = self.emit_real_expr(*x, eb)?;
+                let mut e = IrOp::new("jsir.unary_expression");
+                e.operands.push(xv);
+                e.attrs.push(("operator_".into(), Attr::Str(un_str(*u).into())));
+                e.attrs.push(("prefix".into(), Attr::Bool(true)));
+                Ok(eb.push(e))
+            }
+            Op::MakeArray(elems) => {
+                let mut e = IrOp::new("jsir.array_expression");
+                for el in elems {
+                    let ev = self.emit_real_expr(*el, eb)?;
+                    e.operands.push(ev);
+                }
+                Ok(eb.push(e))
+            }
+            Op::MakeObject(props) => {
+                let mut sub = self.eb();
+                let mut prop_vs = Vec::new();
+                for (k, val) in props {
+                    let vv = self.emit_real_expr(*val, &mut sub)?;
+                    let mut pop = IrOp::new("jsir.object_property");
+                    pop.operands.push(vv);
+                    match k {
+                        PropKey::Ident(s) => {
+                            pop.attrs.push(("literal_key".into(), Attr::Identifier(Box::new(ident_attr(s)))));
+                            pop.attrs.push(("shorthand".into(), Attr::Bool(false)));
+                        }
+                        PropKey::Computed(c) => {
+                            let cv = self.emit_real_expr(*c, &mut sub)?;
+                            pop.operands.insert(0, cv);
+                            pop.attrs.push(("computed".into(), Attr::Bool(true)));
+                            pop.attrs.push(("shorthand".into(), Attr::Bool(false)));
+                        }
+                    }
+                    prop_vs.push(sub.push(pop));
+                }
+                let mut end = IrOp::new("jsir.exprs_region_end");
+                end.operands = prop_vs;
+                sub.ops.push(end);
+                let mut obj = IrOp::new("jsir.object_expression");
+                obj.regions.push(Region::with_block(Block { args: vec![], ops: sub.ops }));
+                Ok(eb.push(obj))
+            }
+            Op::Call { callee, args } => {
+                // Method call (`recv.m(args)`) keeps its receiver bound; a plain
+                // call renders the callee inline.
+                let cv = match self.def_op_of(*callee) {
+                    Some(Op::Member { obj, prop }) => {
+                        let ov = self.emit_real_expr(*obj, eb)?;
+                        match prop {
+                            MemberKey::Static(name) => {
+                                let mut m = IrOp::new("jsir.member_expression");
+                                m.operands.push(ov);
+                                m.attrs.push(("literal_property".into(), Attr::Identifier(Box::new(ident_attr(name)))));
+                                eb.push(m)
+                            }
+                            MemberKey::Computed(c) => {
+                                let cvk = self.emit_real_expr(*c, eb)?;
+                                let mut m = IrOp::new("jsir.member_expression");
+                                m.operands.push(ov);
+                                m.operands.push(cvk);
+                                eb.push(m)
+                            }
+                        }
+                    }
+                    _ => self.emit_real_expr(*callee, eb)?,
+                };
+                let mut e = IrOp::new("jsir.call_expression");
+                e.operands.push(cv);
+                for a in args {
+                    let av = self.emit_real_expr(*a, eb)?;
+                    e.operands.push(av);
+                }
+                Ok(eb.push(e))
+            }
+            other => Err(format!("inplace: value %{} is {} (cannot reconstruct expression)", v.0, op_kind(other))),
+        }
+    }
+
+    /// `$[slot] = <expr(v)>;` — store a reconstructed dependency expression.
+    fn slot_store_real(&self, slot: usize, v: Value) -> Result<IrOp, String> {
+        let mut eb = self.eb();
+        let target = self.cache_ref(slot, &mut eb);
+        let val = self.emit_real_expr(v, &mut eb)?;
+        let mut assign = IrOp::new("jsir.assignment_expression");
+        assign.operands.push(target);
+        assign.operands.push(val);
+        assign.attrs.push(("operator_".into(), Attr::Str("=".into())));
+        let av = eb.push(assign);
+        let mut stmt = IrOp::new("jsir.expression_statement");
+        stmt.operands.push(av);
+        let mut block_ops = eb.ops;
+        block_ops.push(stmt);
+        Ok(wrap_stmt_run(block_ops))
+    }
+
+    /// Turn `const X = <init>;` into `X = <init>;` (assignment to the hoisted
+    /// `let`), reusing the original initializer op verbatim (so its structure,
+    /// formatting, and any closure body are preserved — no resynthesis).
+    fn convert_decl_to_assign(&self, decl: IrOp) -> Result<IrOp, String> {
+        let name = decl_name(&decl)?;
+        let init = decl_init(&decl)?;
+        let init_id = *init.results.first().ok_or("inplace: initializer op has no result value")?;
+        let mut eb = self.eb();
+        let lhs = eb.push(ident_ref_op(&name));
+        eb.ops.push(init);
+        let mut assign = IrOp::new("jsir.assignment_expression");
+        assign.operands.push(lhs);
+        assign.operands.push(init_id);
+        assign.attrs.push(("operator_".into(), Attr::Str("=".into())));
+        let av = eb.push(assign);
+        let mut stmt = IrOp::new("jsir.expression_statement");
+        stmt.operands.push(av);
+        let mut block_ops = eb.ops;
+        block_ops.push(stmt);
+        Ok(wrap_stmt_run(block_ops))
+    }
+
+    /// The guarded form of an in-place scope: `if (deps) { recompute } else {…}`.
+    /// Recursively rewrite a statement list: each reactive scope's contiguous run
+    /// of statements becomes a guard; control-flow statements are kept verbatim
+    /// but their nested bodies are rewritten (so scopes inside loops/branches are
+    /// guarded in place — this is what replaces the relooper).
+    fn rewrite_run(
+        &self,
+        ops: Vec<IrOp>,
+        plans: &[InplaceScope<'a>],
+        scope_node: &std::collections::HashMap<u32, usize>,
+        emitted: &mut HashSet<usize>,
+    ) -> Result<Vec<IrOp>, String> {
+        // A block is a flat op list interleaving statement-roots (0-result) with
+        // their operand-defs (1-result). Group into logical statements first:
+        // each group is [operand-defs…, root].
+        let groups = group_into_statements(ops);
+        let mut out: Vec<IrOp> = Vec::new();
+        let mut iter = groups.into_iter().peekable();
+        while let Some(group) = iter.next() {
+            let root = group.last().cloned().unwrap_or_else(|| IrOp::new("jsir.__empty"));
+
+            // 1. Anonymous scopes consumed by this statement.
+            for (pi, p) in plans.iter().enumerate() {
+                if p.anon_expr.is_some() && !emitted.contains(&pi) && stmt_owns(&root, p.stmt_node) {
+                    emitted.insert(pi);
+                    flatten_run_into(self.emit_anon_guard(p)?, &mut out);
+                }
+            }
+
+            // 2. A named scope owned here: wrap its contiguous run of statements.
+            if let Some(pi) = self.scope_of_named(&root, scope_node) {
+                if !emitted.insert(pi) {
+                    return Err("inplace: a scope's statements are not contiguous".into());
+                }
+                let mut run: Vec<IrOp> = group;
+                while let Some(next) = iter.peek() {
+                    let next_root = next.last().cloned().unwrap_or_else(|| IrOp::new("jsir.__empty"));
+                    if self.scope_of_named(&next_root, scope_node) == Some(pi) {
+                        run.extend(iter.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                flatten_run_into(self.emit_named_guard(&plans[pi], run)?, &mut out);
+            } else if is_control_flow(&root.name) {
+                // Keep the operand-defs (e.g. the condition) before the construct,
+                // and recurse into its nested bodies.
+                let mut group = group;
+                let mut root = group.pop().unwrap();
+                for region in &mut root.regions {
+                    for block in &mut region.blocks {
+                        let inner = std::mem::take(&mut block.ops);
+                        block.ops = self.rewrite_run(inner, plans, scope_node, emitted)?;
+                    }
+                }
+                out.extend(group);
+                out.push(root);
+            } else {
+                out.extend(group);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The named scope (plan index) a statement *root* op is owned by, or `None`.
+    fn scope_of_named(&self, root: &IrOp, scope_node: &std::collections::HashMap<u32, usize>) -> Option<usize> {
+        if is_control_flow(&root.name) {
+            return None;
+        }
+        for (&node, &pi) in scope_node {
+            if stmt_owns(root, node) {
+                return Some(pi);
+            }
+        }
+        None
+    }
+
+    /// Build `if (deps changed) { dep-stores; recompute; out-store } else
+    /// { out-restore }` for one scope. `recompute` is the supplied ops.
+    fn emit_guard(&self, plan: &InplaceScope<'a>, recompute: Vec<IrOp>) -> Result<IrOp, String> {
+        let info = plan.info;
+        let (dep_base, out_base) = (plan.dep_base, plan.out_base);
+
+        let mut test_eb = self.eb();
+        let test_val = if info.deps.is_empty() {
+            let read = self.cache_read(out_base, &mut test_eb);
+            let sentinel = self.sentinel(&mut test_eb);
+            bin(&mut test_eb, "===", read, sentinel)
+        } else {
+            let mut acc: Option<ValueId> = None;
+            for (i, d) in info.deps.iter().enumerate() {
+                let read = self.cache_read(dep_base + i, &mut test_eb);
+                let dep = self.emit_real_expr(*d, &mut test_eb)?;
+                let ne = bin(&mut test_eb, "!==", read, dep);
+                acc = Some(match acc { None => ne, Some(prev) => bin(&mut test_eb, "||", prev, ne) });
+            }
+            acc.expect("non-empty deps")
+        };
+
+        let mut then_ops: Vec<IrOp> = Vec::new();
+        for (i, d) in info.deps.iter().enumerate() {
+            then_ops.push(self.slot_store_real(dep_base + i, *d)?);
+        }
+        then_ops.extend(recompute);
+        for (j, (_, name)) in plan.outs.iter().enumerate() {
+            then_ops.push(self.slot_store(out_base + j, name));
+        }
+
+        let else_ops: Vec<IrOp> = plan
+            .outs
+            .iter()
+            .enumerate()
+            .map(|(j, (_, name))| self.restore_stmt(name, out_base + j))
+            .collect();
+
+        let consequent = block_statement(then_ops);
+        let alternate = block_statement(else_ops);
+        let mut if_op = IrOp::new("jshir.if_statement");
+        if_op.operands.push(test_val);
+        if_op.regions.push(Region::with_block(Block { args: vec![], ops: vec![consequent] }));
+        if_op.regions.push(Region::with_block(Block { args: vec![], ops: vec![alternate] }));
+
+        let mut block_ops = test_eb.ops;
+        block_ops.push(if_op);
+        Ok(wrap_stmt_run(block_ops))
+    }
+
+    /// A named scope: recompute = the scope's original statements verbatim, with
+    /// the output `const X = E` turned into `X = E` (assignment to the hoisted
+    /// `let`); intermediates and stores are kept as-is.
+    fn emit_named_guard(&self, plan: &InplaceScope<'a>, run: Vec<IrOp>) -> Result<IrOp, String> {
+        let mut recompute = Vec::new();
+        for stmt in run {
+            recompute.push(self.convert_owned_stmt(stmt)?);
+        }
+        self.emit_guard(plan, recompute)
+    }
+
+    /// An anonymous scope: recompute = `temp = <resynthesized expression>`. The
+    /// original embedding was already patched to reference `temp`.
+    fn emit_anon_guard(&self, plan: &InplaceScope<'a>) -> Result<IrOp, String> {
+        let (out_value, out_name) = &plan.outs[0];
+        let mut eb = self.eb();
+        let rhs = self.emit_real_expr(*out_value, &mut eb)?;
+        let lhs = eb.push(ident_ref_op(out_name));
+        let mut assign = IrOp::new("jsir.assignment_expression");
+        assign.operands.push(lhs);
+        assign.operands.push(rhs);
+        assign.attrs.push(("operator_".into(), Attr::Str("=".into())));
+        let av = eb.push(assign);
+        let mut stmt = IrOp::new("jsir.expression_statement");
+        stmt.operands.push(av);
+        let mut block_ops = eb.ops;
+        block_ops.push(stmt);
+        let recompute = vec![wrap_stmt_run(block_ops)];
+        self.emit_guard(plan, recompute)
+    }
+
+    /// Inside a named scope guard, a `const X = E` declaring the scope OUTPUT
+    /// becomes `X = E`; intermediate declarations and other statements stay.
+    fn convert_owned_stmt(&self, stmt: IrOp) -> Result<IrOp, String> {
+        if stmt.name == "jsir.variable_declaration" {
+            if let Some(bound) = self.bound_value_of(&stmt) {
+                if self.scope_outputs.contains(&bound) {
+                    return self.convert_decl_to_assign(stmt);
+                }
+            }
+        }
+        Ok(stmt)
+    }
+
+    /// The value a single-declarator `variable_declaration` binds: the value with
+    /// this statement's SrcRef and the latest def point (the initializer result).
+    fn bound_value_of(&self, stmt: &IrOp) -> Option<Value> {
+        let name = decl_name(stmt).ok()?;
+        // Reverse the names map: the bound value is the one we recorded this name
+        // for (built the same way, by latest def point).
+        self.names.iter().find(|(_, n)| **n == name).map(|(v, _)| *v)
+    }
+
+    fn def_op_of(&self, v: Value) -> Option<&'a Op> {
+        for b in &self.cfg.blocks {
+            for ins in &b.instrs {
+                if ins.result == Some(v) {
+                    return Some(&ins.op);
+                }
+            }
+        }
+        None
+    }
+}
+
+fn op_kind(op: &Op) -> &'static str {
+    match op {
+        Op::Const(_) => "Const", Op::ReadVar(_) => "ReadVar", Op::WriteVar(_, _) => "WriteVar",
+        Op::Bin(_, _, _) => "Bin", Op::Un(_, _) => "Un", Op::Global(_) => "Global",
+        Op::Call { .. } => "Call", Op::Member { .. } => "Member", Op::StoreMember { .. } => "StoreMember",
+        Op::MakeObject(_) => "MakeObject", Op::MakeArray(_) => "MakeArray",
+    }
 }
 
 /// A flat JSIR expression-op builder drawing globally-unique value ids from the
@@ -1261,5 +1638,590 @@ fn un_str(u: UnOp) -> &'static str {
     use UnOp::*;
     match u {
         Neg => "-", Pos => "+", Not => "!", BitNot => "~", TypeOf => "typeof", Void => "void",
+    }
+}
+
+// =============================================================================
+// In-place memoization (PROTOTYPE) — edit the original JSIR tree rather than
+// re-synthesizing the body from the CFG. Loops / try / switch and every other
+// non-scope statement are kept verbatim; only the scope-producing variable
+// declarations are rewritten into cache guards. See the module-level note in the
+// design doc; this exists to validate the approach end to end.
+// =============================================================================
+
+/// Memoize `file` by rewriting reactive-scope declarations in place. Supports
+/// the prototype shape (each escaping scope is a single `const X = <expr>;` with
+/// param/member/const dependencies) and returns a clear `Err` on anything else.
+pub fn memoize_inplace(
+    cfg: &Cfg,
+    infos: &[ScopeInfo],
+    ranges: &Ranges,
+    file: &IrOp,
+) -> Result<IrOp, String> {
+    let emitted: Vec<&ScopeInfo> = infos.iter().filter(|i| !i.outputs.is_empty()).collect();
+    if emitted.is_empty() {
+        return Err("inplace: nothing escapes (cache_size 0)".into());
+    }
+
+    // SOUNDNESS: reuse the same check `build_layout` runs — a mutation crossing a
+    // scope boundary, a scope whose owned statements span blocks, or a branch
+    // condition reading a mutated allocation all bail here exactly as before, so
+    // the in-place path never memoizes something the structured path rejects as
+    // unsound. (It also rejects the multi-block scopes the single-statement
+    // prototype cannot yet rewrite.)
+    let value_set: Vec<HashSet<Value>> =
+        emitted.iter().map(|i| i.scope.values.iter().copied().collect()).collect();
+    let all_value_sets: Vec<HashSet<Value>> =
+        infos.iter().map(|i| i.scope.values.iter().copied().collect()).collect();
+    check_soundness(cfg, ranges, &emitted, &value_set, &all_value_sets)?;
+
+    // value -> originating source statement node_id, via the CFG SrcRefs.
+    let mut val_stmt: std::collections::HashMap<Value, u32> = std::collections::HashMap::new();
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if let (Some(res), Some(sr)) = (ins.result, ins.src) {
+                val_stmt.entry(res).or_insert(sr.stmt_node_id);
+            }
+        }
+    }
+
+    // value -> expression node_id (expression-granular provenance).
+    let mut val_expr: std::collections::HashMap<Value, u32> = std::collections::HashMap::new();
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if let (Some(res), Some(sr)) = (ins.result, ins.src) {
+                if let Some(e) = sr.expr_node_id {
+                    val_expr.entry(res).or_insert(e);
+                }
+            }
+        }
+    }
+
+    // value -> source name: parameters, plus every declared local. A declaration
+    // `const X = E` binds X to the value E evaluates to — recovered as the value
+    // with this statement's SrcRef and the latest def point (the initializer's
+    // result is computed last). This is what lets a dependency that is a local
+    // variable render as its real name instead of a synthesized temp.
+    let mut names: std::collections::HashMap<Value, String> = std::collections::HashMap::new();
+    for (i, p) in cfg.params.iter().enumerate() {
+        if let Some(n) = cfg.param_names.get(i) {
+            names.insert(*p, n.clone());
+        }
+    }
+    let mut decls: Vec<&IrOp> = Vec::new();
+    collect_decls(function_body_stmts(file)?, &mut decls);
+    for decl in decls {
+        let name = match decl_name(decl) {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let mut best: Option<(Value, crate::mutability::Point)> = None;
+        for (v, node) in &val_stmt {
+            if stmt_owns(decl, *node) {
+                let d = ranges.def.get(v).copied().unwrap_or(0);
+                if best.map_or(true, |(_, bd)| d >= bd) {
+                    best = Some((*v, d));
+                }
+            }
+        }
+        if let Some((v, _)) = best {
+            names.insert(v, name);
+        }
+    }
+    // A value that represents a source variable (a phi, or a read of a `let`
+    // assigned across `&&`/`||`/`if` branches) renders as that variable's name.
+    // Synthetic temps (`$t…`) are skipped — they are not real identifiers, so
+    // such a value is reconstructed inline instead.
+    for (&phi, &var) in &cfg.phi_var {
+        if let Some(n) = cfg.var_names.get(var.0 as usize) {
+            if !n.starts_with('$') {
+                names.entry(phi).or_insert_with(|| n.clone());
+            }
+        }
+    }
+
+    // Build the per-scope plan: classify each output as a declared local (wrap
+    // its declaration in place) or an anonymous sub-expression (synthesize a
+    // temp, resynthesize the expression, patch the embedding to use the temp).
+    let mut plans: Vec<InplaceScope> = Vec::new();
+    let mut slot = 0usize;
+    let mut temp_counter = 0usize;
+    for info in &emitted {
+        // Multi-output scopes need the scope-alignment the structured path did;
+        // the in-place emitter currently gets their cache structure wrong, so
+        // bail (leave un-memoized) until that lands. Single-output is the common
+        // shape and the only one handled here.
+        if info.outputs.len() != 1 {
+            return Err("inplace: multi-output scope (deferred)".into());
+        }
+        let dep_base = slot;
+        let out_base = dep_base + info.deps.len();
+        slot = out_base + info.outputs.len();
+        let stmt_node = *val_stmt
+            .get(&info.outputs[0])
+            .ok_or("inplace: output has no source statement")?;
+        let mut outs: Vec<(Value, String)> = Vec::new();
+        let mut anon_expr: Option<u32> = None;
+        for o in &info.outputs {
+            match names.get(o) {
+                Some(n) => outs.push((*o, n.clone())),
+                None => {
+                    // Only a single anonymous output is supported (it is extracted
+                    // into a temp); a multi-output scope must be all-named.
+                    if info.outputs.len() != 1 {
+                        return Err("inplace: multi-output scope with an anonymous output".into());
+                    }
+                    let e = *val_expr
+                        .get(o)
+                        .ok_or("inplace: anonymous output has no expression provenance")?;
+                    let t = format!("_t{temp_counter}");
+                    temp_counter += 1;
+                    anon_expr = Some(e);
+                    outs.push((*o, t));
+                }
+            }
+        }
+        plans.push(InplaceScope { info, dep_base, out_base, outs, anon_expr, stmt_node });
+    }
+    let cache_size = slot;
+
+    let scope_outputs: HashSet<Value> =
+        emitted.iter().flat_map(|i| i.outputs.iter().copied()).collect();
+
+    let mut new_file = file.clone();
+    set_module(&mut new_file);
+    let base_id = file_max_value_id(&new_file);
+    let em = Emitter {
+        cfg,
+        scope_outputs: &scope_outputs,
+        ids: std::cell::Cell::new(base_id),
+        names,
+    };
+
+    // Patch each anonymous output's embedding: replace the op producing it with
+    // an identifier referencing the synthesized temp (keeping the result
+    // value-id so consumers still resolve). The standalone guard recomputes the
+    // temp; the consuming statement now reads it.
+    for p in &plans {
+        if let Some(expr_node) = p.anon_expr {
+            if !patch_expr_to_ident(&mut new_file, expr_node, &p.outs[0].1) {
+                return Err("inplace: could not locate anonymous output expression to patch".into());
+            }
+        }
+    }
+
+    // Map each statement-root node owned by a NAMED scope to its plan index. A
+    // statement is owned if it DEFINES a scope value or MUTATES one (a member
+    // store on a scope value, e.g. `y.z = …` between `let y` and `let x` when y
+    // and x are aliased into one scope) — so the scope's run is the full
+    // contiguous span, not just its declarations. (Anonymous scopes are handled
+    // via their consuming statement in the walk.)
+    let mut def_op: std::collections::HashMap<Value, &Op> = std::collections::HashMap::new();
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if let Some(r) = ins.result {
+                def_op.insert(r, &ins.op);
+            }
+        }
+    }
+    let base_object = |mut v: Value| -> Value {
+        let mut guard = 0;
+        while let Some(Op::Member { obj, .. }) = def_op.get(&v) {
+            v = *obj;
+            guard += 1;
+            if guard > def_op.len() + 1 {
+                break;
+            }
+        }
+        v
+    };
+    let mut scope_node: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+    for (pi, p) in plans.iter().enumerate() {
+        if p.anon_expr.is_some() {
+            continue;
+        }
+        let vals: HashSet<Value> = p.info.scope.values.iter().copied().collect();
+        for b in &cfg.blocks {
+            for ins in &b.instrs {
+                let owns = match (&ins.result, &ins.op) {
+                    (Some(r), _) if vals.contains(r) => true,
+                    (_, Op::StoreMember { obj, .. }) if vals.contains(&base_object(*obj)) => true,
+                    _ => false,
+                };
+                if owns {
+                    if let Some(sr) = ins.src {
+                        scope_node.insert(sr.stmt_node_id, pi);
+                    }
+                }
+            }
+        }
+    }
+
+    // Hoisted `let`s: every scope output name (recovered or temp), stable order.
+    let mut let_names: Vec<String> = Vec::new();
+    for p in &plans {
+        for (_, name) in &p.outs {
+            if !let_names.contains(name) {
+                let_names.push(name.clone());
+            }
+        }
+    }
+
+    let body = function_body_stmts_mut(&mut new_file)?;
+    let stmts = std::mem::take(body);
+
+    // Recursively rewrite the statement tree: each scope's guard is placed in
+    // position (named scopes wrap their declaration run; anonymous scopes emit a
+    // standalone guard before the statement that consumes them), and control-flow
+    // bodies are descended into verbatim.
+    let mut emitted_scopes: HashSet<usize> = HashSet::new();
+    let rewritten = em.rewrite_run(stmts, &plans, &scope_node, &mut emitted_scopes)?;
+
+    let mut out_ops: Vec<IrOp> = Vec::new();
+    for op in em.cache_decl(cache_size) {
+        flatten_run_into(op, &mut out_ops);
+    }
+    if !let_names.is_empty() {
+        flatten_run_into(em.let_decl(&let_names), &mut out_ops);
+    }
+    out_ops.extend(rewritten);
+    *function_body_stmts_mut(&mut new_file)? = out_ops;
+
+    prepend_import(&mut new_file)?;
+    Ok(new_file)
+}
+
+/// Replace the op with `node_id == expr_node` with an `identifier(name)` that
+/// keeps the original's result value-id (so consumers still resolve). Used to
+/// redirect an anonymous scope output's embedding to its synthesized temp.
+fn patch_expr_to_ident(op: &mut IrOp, expr_node: u32, name: &str) -> bool {
+    for region in &mut op.regions {
+        for block in &mut region.blocks {
+            for child in &mut block.ops {
+                if child.node_id == Some(expr_node) {
+                    let mut id = ident_op(name);
+                    id.results = child.results.clone();
+                    id.node_id = child.node_id;
+                    *child = id;
+                    return true;
+                }
+                if patch_expr_to_ident(child, expr_node, name) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// A reactive scope's cache-slot layout for the in-place emitter.
+struct InplaceScope<'a> {
+    info: &'a ScopeInfo,
+    dep_base: usize,
+    out_base: usize,
+    /// Each output value with its source name (a declared local) or, for the
+    /// single-output anonymous case, a synthesized temp.
+    outs: Vec<(Value, String)>,
+    /// `Some(expr_node)` for a single anonymous-output scope: the emitter
+    /// resynthesizes it into `outs[0].1` and patches the embedding (op with this
+    /// node_id) to reference the temp. `None` for named scopes (any arity).
+    anon_expr: Option<u32>,
+    /// The statement owning the output(s): their declaration (named) or the
+    /// statement that embeds the anonymous output.
+    stmt_node: u32,
+}
+
+/// Statement kinds whose nested bodies the in-place walk recurses into (rather
+/// than treating the statement itself as a scope leaf).
+fn is_control_flow(name: &str) -> bool {
+    matches!(
+        name,
+        "jshir.if_statement"
+            | "jshir.while_statement"
+            | "jshir.do_while_statement"
+            | "jshir.for_statement"
+            | "jshir.for_of_statement"
+            | "jshir.for_in_statement"
+            | "jshir.switch_statement"
+            | "jshir.try_statement"
+            | "jshir.block_statement"
+            | "jshir.labeled_statement"
+    )
+}
+
+/// Group a block's flat op list into logical statements. The block interleaves
+/// statement-root ops (0 results) with their operand-def ops (1 result, in
+/// evaluation order before the root that consumes them); each returned group is
+/// the run of operand-defs ending in their statement root.
+fn group_into_statements(ops: Vec<IrOp>) -> Vec<Vec<IrOp>> {
+    let mut groups: Vec<Vec<IrOp>> = Vec::new();
+    let mut cur: Vec<IrOp> = Vec::new();
+    for op in ops {
+        let is_root = op.results.is_empty();
+        cur.push(op);
+        if is_root {
+            groups.push(std::mem::take(&mut cur));
+        }
+    }
+    if !cur.is_empty() {
+        groups.push(cur);
+    }
+    groups
+}
+
+/// Expand a `jsir.__stmt_run` holder into its flat op list (recursively).
+fn flatten_run_into(op: IrOp, out: &mut Vec<IrOp>) {
+    if op.name == "jsir.__stmt_run" {
+        if let Some(block) = op.regions.into_iter().next().and_then(|r| r.blocks.into_iter().next()) {
+            for inner in block.ops {
+                flatten_run_into(inner, out);
+            }
+        }
+        return;
+    }
+    out.push(op);
+}
+
+/// The largest result/operand value id in `file`, +1 (so synthesized ids never
+/// collide with the original tree's).
+fn file_max_value_id(file: &IrOp) -> u32 {
+    let mut max = 0u32;
+    fn scan(op: &IrOp, max: &mut u32) {
+        for r in &op.results {
+            *max = (*max).max(r.0 + 1);
+        }
+        for o in &op.operands {
+            *max = (*max).max(o.0 + 1);
+        }
+        for r in &op.regions {
+            for b in &r.blocks {
+                for inner in &b.ops {
+                    scan(inner, max);
+                }
+            }
+        }
+    }
+    scan(file, &mut max);
+    max
+}
+
+fn set_module(file: &mut IrOp) {
+    if let Some(prog) = first_op_mut(file, "jsir.program") {
+        if let Some((_, a)) = prog.attrs.iter_mut().find(|(k, _)| k == "source_type") {
+            *a = Attr::Str("module".into());
+        } else {
+            prog.attrs.push(("source_type".into(), Attr::Str("module".into())));
+        }
+    }
+}
+
+fn first_op_mut<'a>(op: &'a mut IrOp, name: &str) -> Option<&'a mut IrOp> {
+    if op.name == name {
+        return Some(op);
+    }
+    for r in &mut op.regions {
+        for b in &mut r.blocks {
+            for o in &mut b.ops {
+                if let Some(found) = first_op_mut(o, name) {
+                    return Some(found);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn find_function_mut(op: &mut IrOp) -> Option<&mut IrOp> {
+    if op.name == "jsir.function_declaration" {
+        return Some(op);
+    }
+    if op.name == "jsir.export_named_declaration" || op.name == "jsir.export_default_declaration" {
+        return op
+            .regions
+            .first_mut()
+            .and_then(|r| r.blocks.first_mut())
+            .and_then(|b| b.ops.iter_mut().find(|o| o.name == "jsir.function_declaration"));
+    }
+    for r in &mut op.regions {
+        for b in &mut r.blocks {
+            for o in &mut b.ops {
+                if let Some(f) = find_function_mut(o) {
+                    return Some(f);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn function_body_stmts_mut(file: &mut IrOp) -> Result<&mut Vec<IrOp>, String> {
+    let func = find_function_mut(file).ok_or("inplace: no function declaration")?;
+    let body_block = func
+        .regions
+        .get_mut(1)
+        .and_then(|r| r.blocks.first_mut())
+        .and_then(|b| b.ops.first_mut())
+        .ok_or("inplace: function has no body block_statement")?;
+    if body_block.name != "jshir.block_statement" {
+        return Err(format!("inplace: expected body block_statement, got {}", body_block.name));
+    }
+    body_block
+        .regions
+        .first_mut()
+        .and_then(|r| r.blocks.first_mut())
+        .map(|b| &mut b.ops)
+        .ok_or_else(|| "inplace: body has no statements block".to_string())
+}
+
+fn prepend_import(file: &mut IrOp) -> Result<(), String> {
+    let prog = first_op_mut(file, "jsir.program").ok_or("inplace: no program op")?;
+    let block = prog
+        .regions
+        .first_mut()
+        .and_then(|r| r.blocks.first_mut())
+        .ok_or("inplace: program has no block")?;
+    block.ops.insert(0, import_c_inplace());
+    Ok(())
+}
+
+/// `import { c as _c } from "react/compiler-runtime";`
+fn import_c_inplace() -> IrOp {
+    let mut op = IrOp::new("jsir.import_declaration");
+    op.attrs.push((
+        "source".into(),
+        Attr::StringLiteralKey(Box::new(StringLiteralKeyAttr {
+            start_line: 0, start_col: 0, end_line: 0, end_col: 0, start_index: 0, end_index: 0,
+            scope_uid: 0,
+            value: "react/compiler-runtime".into(),
+            raw: "\"react/compiler-runtime\"".into(),
+            raw_value: "react/compiler-runtime".into(),
+        })),
+    ));
+    op.attrs.push((
+        "specifiers".into(),
+        Attr::Array(vec![Attr::ImportSpecifier(Box::new(ImportSpecifierAttr {
+            kind: ImportSpecKind::Named,
+            start_line: 0, start_col: 0, end_line: 0, end_col: 0, start_index: 0, end_index: 0,
+            scope_uid: 0,
+            sym_name: "_c".into(),
+            sym_scope: 0,
+            imported: Some(Attr::Identifier(Box::new(ident_attr("c")))),
+            local: ident_attr("_c"),
+        }))]),
+    ));
+    op
+}
+
+/// Does statement `stmt` own SrcRef `node` (it is, or its subtree contains, the
+/// statement-root node the SrcRef points at)?
+fn stmt_owns(stmt: &IrOp, node: u32) -> bool {
+    stmt.node_id == Some(node) || contains_node(stmt, node)
+}
+
+fn contains_node(op: &IrOp, node: u32) -> bool {
+    if op.node_id == Some(node) {
+        return true;
+    }
+    op.regions.iter().any(|r| r.blocks.iter().any(|b| b.ops.iter().any(|o| contains_node(o, node))))
+}
+
+/// The declared identifier name of a single-declarator `variable_declaration`.
+fn decl_name(stmt: &IrOp) -> Result<String, String> {
+    if stmt.name != "jsir.variable_declaration" {
+        return Err(format!("inplace: scope statement is {}, expected variable_declaration", stmt.name));
+    }
+    let ops = stmt
+        .regions
+        .first()
+        .and_then(|r| r.blocks.first())
+        .map(|b| &b.ops)
+        .ok_or("inplace: empty declaration")?;
+    for o in ops {
+        if o.name == "jsir.identifier_ref" {
+            if let Some((_, Attr::Str(n))) = o.attrs.iter().find(|(k, _)| k == "name") {
+                return Ok(n.clone());
+            }
+        }
+    }
+    Err("inplace: declaration has no identifier_ref".into())
+}
+
+/// The initializer expression op of a single-declarator `variable_declaration`
+/// (the op between the identifier_ref and the declarator/region-end markers).
+fn decl_init(stmt: &IrOp) -> Result<IrOp, String> {
+    let ops = stmt
+        .regions
+        .first()
+        .and_then(|r| r.blocks.first())
+        .map(|b| &b.ops)
+        .ok_or("inplace: empty declaration")?;
+    let mut seen_id = false;
+    for o in ops {
+        if o.name == "jsir.identifier_ref" {
+            seen_id = true;
+            continue;
+        }
+        if o.name == "jsir.variable_declarator" || o.name == "jsir.exprs_region_end" {
+            break;
+        }
+        if seen_id {
+            return Ok(o.clone());
+        }
+    }
+    Err("inplace: single-declarator initializer not found".into())
+}
+
+/// Immutable view of the function body statement op-list (mirrors
+/// `function_body_stmts_mut`).
+fn function_body_stmts(file: &IrOp) -> Result<&Vec<IrOp>, String> {
+    fn find_function(op: &IrOp) -> Option<&IrOp> {
+        if op.name == "jsir.function_declaration" {
+            return Some(op);
+        }
+        if op.name == "jsir.export_named_declaration" || op.name == "jsir.export_default_declaration" {
+            return op
+                .regions
+                .first()
+                .and_then(|r| r.blocks.first())
+                .and_then(|b| b.ops.iter().find(|o| o.name == "jsir.function_declaration"));
+        }
+        for r in &op.regions {
+            for b in &r.blocks {
+                for o in &b.ops {
+                    if let Some(f) = find_function(o) {
+                        return Some(f);
+                    }
+                }
+            }
+        }
+        None
+    }
+    let func = find_function(file).ok_or("inplace: no function declaration")?;
+    let body_block = func
+        .regions
+        .get(1)
+        .and_then(|r| r.blocks.first())
+        .and_then(|b| b.ops.first())
+        .ok_or("inplace: function has no body block_statement")?;
+    body_block
+        .regions
+        .first()
+        .and_then(|r| r.blocks.first())
+        .map(|b| &b.ops)
+        .ok_or_else(|| "inplace: body has no statements block".to_string())
+}
+
+/// Collect every `variable_declaration` statement op reachable from `stmts`,
+/// descending into nested control-flow bodies (if/while/for/…).
+fn collect_decls<'a>(stmts: &'a [IrOp], out: &mut Vec<&'a IrOp>) {
+    for op in stmts {
+        if op.name == "jsir.variable_declaration" {
+            out.push(op);
+        }
+        for r in &op.regions {
+            for b in &r.blocks {
+                collect_decls(&b.ops, out);
+            }
+        }
     }
 }

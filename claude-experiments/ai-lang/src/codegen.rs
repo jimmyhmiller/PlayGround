@@ -5706,10 +5706,6 @@ impl<'ctx> Codegen<'ctx> {
         // binders need this to know whether to unbox an extracted
         // payload from a `BoxedInt` to a raw `i64`.
         let scrut_ty = self.infer_type(scrutinee, env);
-        let instantiation: Vec<Type> = match &scrut_ty {
-            Type::Apply(_, args) => args.clone(),
-            _ => Vec::new(),
-        };
 
         // Compile the scrutinee. We expect an enum value (heap pointer)
         // for variant patterns. Var/Wildcard patterns work on Int too,
@@ -5726,318 +5722,62 @@ impl<'ctx> Codegen<'ctx> {
             what: "match scrutinee must be an enum (heap pointer) in v1".to_owned(),
         })?;
 
-        // All arms must reference the same enum (the typechecker would
-        // enforce this; for v1 we read it off the first variant pattern
-        // and trust the rest match).
-        let enum_ref = arms
-            .iter()
-            .find_map(|a| match &a.pattern {
-                Pattern::Enum { enum_ref, .. } => Some(*enum_ref),
-                _ => None,
-            })
-            .ok_or(CodegenError::Unsupported {
-                what: "match with no variant patterns (catch-all only) — v1 restriction"
-                    .to_owned(),
-            })?;
-        let einfo = self
-            .enums
-            .get(&enum_ref)
-            .cloned()
-            .ok_or(CodegenError::UnknownTopRef { hash: enum_ref })?;
-
-        // We need to read the tag, but variants store the tag at
-        // different offsets (pointer-payload variants have the pointer
-        // at offset 16, tag at 24). For LOOKUP we use the first
-        // variant's tag offset — that's wrong in general, but v1's
-        // codegen places the tag at the same offset for ALL variants
-        // of an enum that have the same payload-kind. If an enum mixes
-        // pointer-payload variants and non-pointer variants, we'd hit
-        // a tag-offset disagreement.
-        //
-        // Safer: ensure all variants of an enum share the same tag
-        // offset. We achieve this by always putting the tag at the
-        // same fixed location: just-after-header, BEFORE value_fields.
-        //
-        // For v1, sidestep this by reading the tag from a canonical
-        // location: the FIRST 4 bytes after the header. This requires
-        // changing the layout — let me adjust declare_enum.
-        //
-        // (Workaround for now: read from einfo.variants[0].tag_offset
-        // and ASSUME all variants agree on it. We enforce that in
-        // declare_enum.)
-        let tag_offset = einfo.variants[0].tag_offset;
-        for v in &einfo.variants {
-            debug_assert_eq!(
-                v.tag_offset, tag_offset,
-                "all variants of an enum must share the same tag offset"
-            );
-        }
-
-        let tag_off_const = self.i64_ty.const_int(tag_offset as u64, false);
-        let tag_ptr = unsafe {
-            self.builder
-                .build_in_bounds_gep(
-                    self.context.i8_type(),
-                    scrut_ptr,
-                    &[tag_off_const],
-                    "tag_ptr",
-                )
-                .map_err(|e| CodegenError::JitInit(format!("gep tag for match: {}", e)))?
-        };
-        let tag = self
-            .builder
-            .build_load(self.context.i32_type(), tag_ptr, "tag")
-            .map_err(|e| CodegenError::JitInit(format!("load tag: {}", e)))?
-            .into_int_value();
-
-        // Remember where we are — this is the block that will hold the
-        // switch terminator. After we go off and build arm bodies we
-        // come back here.
+        // Dispatch is a BACKTRACKING CHAIN: each arm gets a "test" block
+        // that checks its (possibly nested) pattern against the scrutinee
+        // and, on any tag mismatch, falls through to the next arm's test.
+        // This handles nested patterns and multiple arms sharing an outer
+        // variant (e.g. `Ok(VInt(n))` and `Ok(VStr(_))`), which a single
+        // flat switch on the outer tag cannot express.
         let entry_block = self.builder.get_insert_block().unwrap();
         let parent = entry_block.get_parent().unwrap();
         let merge_bb = self.context.append_basic_block(parent, "match_end");
-        let default_bb = self.context.append_basic_block(parent, "match_default");
-        let mut arm_blocks: Vec<inkwell::basic_block::BasicBlock<'ctx>> =
-            Vec::with_capacity(arms.len());
+        let fail_bb = self.context.append_basic_block(parent, "match_fail");
 
-        // Per-arm switch cases. We collect (tag_value, basic_block) pairs.
-        let mut cases: Vec<(IntValue<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
-            Vec::with_capacity(arms.len());
-        let mut catch_all_block: Option<inkwell::basic_block::BasicBlock<'ctx>> = None;
-        for (i, arm) in arms.iter().enumerate() {
-            let bb = self
-                .context
-                .append_basic_block(parent, &format!("match_arm_{}", i));
-            arm_blocks.push(bb);
-            match &arm.pattern {
-                Pattern::Enum { variant_index, .. } => {
-                    cases.push((
-                        self.context
-                            .i32_type()
-                            .const_int(*variant_index as u64, false),
-                        bb,
-                    ));
-                }
-                Pattern::Wildcard | Pattern::Var => {
-                    // Catch-all: the default block branches here. We
-                    // record the first catch-all arm; later catch-alls
-                    // (if any) become unreachable.
-                    if catch_all_block.is_none() {
-                        catch_all_block = Some(bb);
-                    }
-                }
-            }
-        }
+        let test_blocks: Vec<inkwell::basic_block::BasicBlock<'ctx>> = (0..arms.len())
+            .map(|i| {
+                self.context
+                    .append_basic_block(parent, &format!("match_test_{}", i))
+            })
+            .collect();
 
-        // Wire the default block.
-        self.builder.position_at_end(default_bb);
-        if let Some(bb) = catch_all_block {
-            self.builder
-                .build_unconditional_branch(bb)
-                .map_err(|e| CodegenError::JitInit(format!("br default: {}", e)))?;
-        } else {
-            // No catch-all arm: a value of an unhandled variant reaching
-            // here is a non-exhaustive match at runtime. Previously this
-            // was `build_unreachable` (undefined behaviour); now it is a
-            // clear hard error.
-            self.emit_panic(
-                "non-exhaustive match: value did not match any arm",
-                ctx.thread_param,
-            )?;
-        }
+        // Falling off the end of the chain is a non-exhaustive match — a
+        // clear hard error (only reachable if no arm matched).
+        self.builder.position_at_end(fail_bb);
+        self.emit_panic(
+            "non-exhaustive match: value did not match any arm",
+            ctx.thread_param,
+        )?;
 
-        // Build the switch back in the entry block.
+        // Enter the chain at the first arm's test.
         self.builder.position_at_end(entry_block);
+        let first = test_blocks.first().copied().unwrap_or(fail_bb);
         self.builder
-            .build_switch(tag, default_bb, &cases)
-            .map_err(|e| CodegenError::JitInit(format!("build_switch: {}", e)))?;
+            .build_unconditional_branch(first)
+            .map_err(|e| CodegenError::JitInit(format!("br match chain: {}", e)))?;
 
-        // Emit each arm's body. Collect (value, end_block) for the phi.
-        //
-        // The "end_block" in the phi must be the block where the
-        // branch to `merge_bb` was issued — that might differ from the
-        // arm_block if the body itself contains control flow. Tracked
-        // via builder's current insert block after the body compile.
+        // Emit each arm: test its pattern, then (on full match) bind its
+        // single variable and run the body. Collect (value, end_block) for
+        // the result phi.
         let mut incoming: Vec<(BasicValueEnum<'ctx>, inkwell::basic_block::BasicBlock<'ctx>)> =
             Vec::with_capacity(arms.len());
         let mut result_ty: Option<inkwell::types::BasicTypeEnum<'ctx>> = None;
 
         for (i, arm) in arms.iter().enumerate() {
-            self.builder.position_at_end(arm_blocks[i]);
+            self.builder.position_at_end(test_blocks[i]);
+            let arm_fail = test_blocks.get(i + 1).copied().unwrap_or(fail_bb);
+            // Emits the (possibly nested) tag tests; on mismatch branches to
+            // `arm_fail`, on full match leaves the builder positioned in the
+            // matched block with `pushed` bindings on `env`.
+            let pushed = self.emit_pattern_match(
+                scrut_ptr,
+                &scrut_ty,
+                &arm.pattern,
+                arm_fail,
+                env,
+                ctx,
+                0,
+            )?;
 
-            // Bind the pattern's variables, if any.
-            let pushed = match &arm.pattern {
-                Pattern::Wildcard => 0,
-                Pattern::Var => {
-                    // Bind the SCRUTINEE itself. Treat it as a Closure
-                    // (heap pointer) — that's what scrut_ptr is.
-                    let slot_idx = ctx.next_root_slot;
-                    let slot = self.write_root_slot(
-                        ctx.frame_alloca,
-                        ctx.info,
-                        slot_idx,
-                        scrut_ptr,
-                    )?;
-                    env.push(EnvSlot::Closure(slot), scrut_ty.clone());
-                    1
-                }
-                Pattern::Enum {
-                    variant_index,
-                    payload,
-                    ..
-                } => {
-                    if let Some(sub) = payload {
-                        let v = einfo.variants[*variant_index as usize];
-                        let payload_off = v.payload_offset.ok_or(
-                            CodegenError::TypeMismatch {
-                                what: format!(
-                                    "match arm pattern has payload but variant {} is nullary",
-                                    variant_index
-                                ),
-                            },
-                        )?;
-                        let off_const =
-                            self.i64_ty.const_int(payload_off as u64, false);
-                        let payload_slot = unsafe {
-                            self.builder
-                                .build_in_bounds_gep(
-                                    self.context.i8_type(),
-                                    scrut_ptr,
-                                    &[off_const],
-                                    "match_payload_ptr",
-                                )
-                                .map_err(|e| {
-                                    CodegenError::JitInit(format!(
-                                        "gep match payload: {}",
-                                        e
-                                    ))
-                                })?
-                        };
-                        // Determine the variant's declared payload type
-                        // and substitute the scrutinee's instantiation.
-                        // If the declared type is a TypeVar and the
-                        // substituted type is Int, the heap slot holds
-                        // a BoxedInt pointer that we must unbox to use
-                        // as an i64 in the arm body.
-                        let declared_payload_ty = self
-                            .enum_variant_types
-                            .get(&enum_ref)
-                            .and_then(|vs| vs.get(*variant_index as usize).cloned().flatten());
-                        let needs_unbox = match &declared_payload_ty {
-                            Some(Type::TypeVar(_))
-                                if matches!(
-                                    substitute_type(
-                                        declared_payload_ty.as_ref().unwrap(),
-                                        &instantiation
-                                    ),
-                                    Type::Builtin(ref n) if is_boxed_scalar(n)
-                                ) =>
-                            {
-                                true
-                            }
-                            _ => false,
-                        };
-                        let inst_payload_ty = declared_payload_ty
-                            .as_ref()
-                            .map(|t| substitute_type(t, &instantiation))
-                            .unwrap_or(Type::Builtin("Int".to_owned()));
-                        match sub.as_ref() {
-                            Pattern::Wildcard => 0,
-                            Pattern::Var => {
-                                if v.payload_is_pointer && !needs_unbox {
-                                    let loaded = self
-                                        .builder
-                                        .build_load(
-                                            self.ptr_ty,
-                                            payload_slot,
-                                            "match_payload_ptr_val",
-                                        )
-                                        .map_err(|e| {
-                                            CodegenError::JitInit(format!(
-                                                "load match payload ptr: {}",
-                                                e
-                                            ))
-                                        })?
-                                        .into_pointer_value();
-                                    let slot_idx = ctx.next_root_slot;
-                                    let slot = self.write_root_slot(
-                                        ctx.frame_alloca,
-                                        ctx.info,
-                                        slot_idx,
-                                        loaded,
-                                    )?;
-                                    env.push(EnvSlot::Closure(slot), inst_payload_ty);
-                                } else if v.payload_is_pointer && needs_unbox {
-                                    // Load the BoxedInt pointer, then
-                                    // call ai_gc_unbox_int to recover
-                                    // the raw i64 — bind that as Int.
-                                    let boxed_ptr = self
-                                        .builder
-                                        .build_load(
-                                            self.ptr_ty,
-                                            payload_slot,
-                                            "match_boxed_int_ptr",
-                                        )
-                                        .map_err(|e| {
-                                            CodegenError::JitInit(format!(
-                                                "load boxed int ptr: {}",
-                                                e
-                                            ))
-                                        })?
-                                        .into_pointer_value();
-                                    let unbox_fn = self
-                                        .extern_unbox_int
-                                        .expect("ai_gc_unbox_int declared");
-                                    let call = self
-                                        .builder
-                                        .build_call(
-                                            unbox_fn,
-                                            &[boxed_ptr.into()],
-                                            "match_unboxed_int",
-                                        )
-                                        .map_err(|e| {
-                                            CodegenError::JitInit(format!(
-                                                "build_call ai_gc_unbox_int: {}",
-                                                e
-                                            ))
-                                        })?;
-                                    let iv = call
-                                        .as_any_value_enum()
-                                        .into_int_value();
-                                    env.push(EnvSlot::Int(iv), inst_payload_ty);
-                                } else {
-                                    let loaded = self
-                                        .builder
-                                        .build_load(
-                                            self.i64_ty,
-                                            payload_slot,
-                                            "match_payload_int",
-                                        )
-                                        .map_err(|e| {
-                                            CodegenError::JitInit(format!(
-                                                "load match payload int: {}",
-                                                e
-                                            ))
-                                        })?
-                                        .into_int_value();
-                                    env.push(EnvSlot::Int(loaded), inst_payload_ty);
-                                }
-                                1
-                            }
-                            Pattern::Enum { .. } => {
-                                return Err(CodegenError::Unsupported {
-                                    what: "nested enum patterns — v1 restriction".to_owned(),
-                                });
-                            }
-                        }
-                    } else {
-                        0
-                    }
-                }
-            };
-
-            // The arm body's context: bump next_root_slot if a Var binding
-            // consumed a slot.
             let arm_ctx = if pushed > 0 {
                 CompileCtx {
                     next_root_slot: ctx.next_root_slot + pushed as u32,
@@ -6093,6 +5833,208 @@ impl<'ctx> Codegen<'ctx> {
             other => Err(CodegenError::TypeMismatch {
                 what: format!("unexpected match-result type: {:?}", other),
             }),
+        }
+    }
+
+    /// Emit a refutable test of `pattern` against `value_ptr` (a heap
+    /// pointer to an enum value, or — for a top-level `Var` — the scrutinee).
+    /// On any tag mismatch the builder branches to `fail_bb`. On full match it
+    /// writes the pattern's single binding (if any), pushes it onto `env`, and
+    /// leaves the builder positioned in the matched block. Returns the number
+    /// of bindings pushed (0 or 1 — patterns are linear chains).
+    ///
+    /// `value_ty` is the static type of `value_ptr` (the scrutinee type at the
+    /// top level, the substituted payload type when recursing); it supplies the
+    /// inner enum's generic instantiation and the unbox decision. `pushed` is
+    /// the number of bindings already placed in this arm, for slot indexing.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_pattern_match(
+        &mut self,
+        value_ptr: inkwell::values::PointerValue<'ctx>,
+        value_ty: &Type,
+        pattern: &Pattern,
+        fail_bb: inkwell::basic_block::BasicBlock<'ctx>,
+        env: &mut Env<'ctx>,
+        ctx: CompileCtx<'ctx>,
+        pushed: usize,
+    ) -> Result<usize, CodegenError> {
+        match pattern {
+            // Top-level catch-all: matches unconditionally, binds nothing.
+            Pattern::Wildcard => Ok(0),
+            // Top-level catch-all binding: bind the whole value pointer.
+            Pattern::Var => {
+                let slot_idx = ctx.next_root_slot + pushed as u32;
+                let slot =
+                    self.write_root_slot(ctx.frame_alloca, ctx.info, slot_idx, value_ptr)?;
+                env.push(EnvSlot::Closure(slot), value_ty.clone());
+                Ok(1)
+            }
+            Pattern::Enum {
+                enum_ref,
+                variant_index,
+                payload,
+            } => {
+                let einfo = self
+                    .enums
+                    .get(enum_ref)
+                    .cloned()
+                    .ok_or(CodegenError::UnknownTopRef { hash: *enum_ref })?;
+                let instantiation: Vec<Type> = match value_ty {
+                    Type::Apply(_, args) => args.clone(),
+                    _ => Vec::new(),
+                };
+
+                // Load the tag and branch on tag == variant_index.
+                let tag_offset = einfo.variants[0].tag_offset;
+                let tag_off_const = self.i64_ty.const_int(tag_offset as u64, false);
+                let tag_ptr = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            value_ptr,
+                            &[tag_off_const],
+                            "tag_ptr",
+                        )
+                        .map_err(|e| CodegenError::JitInit(format!("gep tag for match: {}", e)))?
+                };
+                let tag = self
+                    .builder
+                    .build_load(self.context.i32_type(), tag_ptr, "tag")
+                    .map_err(|e| CodegenError::JitInit(format!("load tag: {}", e)))?
+                    .into_int_value();
+                let want = self
+                    .context
+                    .i32_type()
+                    .const_int(*variant_index as u64, false);
+                let cond = self
+                    .builder
+                    .build_int_compare(inkwell::IntPredicate::EQ, tag, want, "tag_eq")
+                    .map_err(|e| CodegenError::JitInit(format!("cmp tag: {}", e)))?;
+                let parent = self
+                    .builder
+                    .get_insert_block()
+                    .unwrap()
+                    .get_parent()
+                    .unwrap();
+                let matched_bb = self.context.append_basic_block(parent, "match_tag_ok");
+                self.builder
+                    .build_conditional_branch(cond, matched_bb, fail_bb)
+                    .map_err(|e| CodegenError::JitInit(format!("br tag test: {}", e)))?;
+                self.builder.position_at_end(matched_bb);
+
+                let sub = match payload {
+                    Some(sub) => sub,
+                    None => return Ok(0), // nullary variant: nothing to bind
+                };
+
+                let v = einfo.variants[*variant_index as usize];
+                let payload_off =
+                    v.payload_offset.ok_or(CodegenError::TypeMismatch {
+                        what: format!(
+                            "match arm pattern has payload but variant {} is nullary",
+                            variant_index
+                        ),
+                    })?;
+                let off_const = self.i64_ty.const_int(payload_off as u64, false);
+                let payload_slot = unsafe {
+                    self.builder
+                        .build_in_bounds_gep(
+                            self.context.i8_type(),
+                            value_ptr,
+                            &[off_const],
+                            "match_payload_ptr",
+                        )
+                        .map_err(|e| {
+                            CodegenError::JitInit(format!("gep match payload: {}", e))
+                        })?
+                };
+                let declared_payload_ty = self
+                    .enum_variant_types
+                    .get(enum_ref)
+                    .and_then(|vs| vs.get(*variant_index as usize).cloned().flatten());
+                let inst_payload_ty = declared_payload_ty
+                    .as_ref()
+                    .map(|t| substitute_type(t, &instantiation))
+                    .unwrap_or(Type::Builtin("Int".to_owned()));
+                let needs_unbox = matches!(&declared_payload_ty, Some(Type::TypeVar(_)))
+                    && matches!(&inst_payload_ty, Type::Builtin(n) if is_boxed_scalar(n));
+
+                match sub.as_ref() {
+                    Pattern::Wildcard => Ok(0),
+                    Pattern::Var => {
+                        if v.payload_is_pointer && !needs_unbox {
+                            let loaded = self
+                                .builder
+                                .build_load(self.ptr_ty, payload_slot, "match_payload_ptr_val")
+                                .map_err(|e| {
+                                    CodegenError::JitInit(format!("load match payload ptr: {}", e))
+                                })?
+                                .into_pointer_value();
+                            let slot_idx = ctx.next_root_slot + pushed as u32;
+                            let slot = self.write_root_slot(
+                                ctx.frame_alloca,
+                                ctx.info,
+                                slot_idx,
+                                loaded,
+                            )?;
+                            env.push(EnvSlot::Closure(slot), inst_payload_ty);
+                        } else if v.payload_is_pointer && needs_unbox {
+                            let boxed_ptr = self
+                                .builder
+                                .build_load(self.ptr_ty, payload_slot, "match_boxed_int_ptr")
+                                .map_err(|e| {
+                                    CodegenError::JitInit(format!("load boxed int ptr: {}", e))
+                                })?
+                                .into_pointer_value();
+                            let unbox_fn =
+                                self.extern_unbox_int.expect("ai_gc_unbox_int declared");
+                            let call = self
+                                .builder
+                                .build_call(unbox_fn, &[boxed_ptr.into()], "match_unboxed_int")
+                                .map_err(|e| {
+                                    CodegenError::JitInit(format!(
+                                        "build_call ai_gc_unbox_int: {}",
+                                        e
+                                    ))
+                                })?;
+                            let iv = call.as_any_value_enum().into_int_value();
+                            env.push(EnvSlot::Int(iv), inst_payload_ty);
+                        } else {
+                            let loaded = self
+                                .builder
+                                .build_load(self.i64_ty, payload_slot, "match_payload_int")
+                                .map_err(|e| {
+                                    CodegenError::JitInit(format!("load match payload int: {}", e))
+                                })?
+                                .into_int_value();
+                            env.push(EnvSlot::Int(loaded), inst_payload_ty);
+                        }
+                        Ok(1)
+                    }
+                    // Nested enum pattern: the payload is a heap pointer to the
+                    // inner enum value. Load it and recurse — the inner tag
+                    // test shares the same `fail_bb`, so any mismatch at any
+                    // depth backtracks to the next arm.
+                    Pattern::Enum { .. } => {
+                        let inner_ptr = self
+                            .builder
+                            .build_load(self.ptr_ty, payload_slot, "match_inner_ptr")
+                            .map_err(|e| {
+                                CodegenError::JitInit(format!("load nested payload ptr: {}", e))
+                            })?
+                            .into_pointer_value();
+                        self.emit_pattern_match(
+                            inner_ptr,
+                            &inst_payload_ty,
+                            sub,
+                            fail_bb,
+                            env,
+                            ctx,
+                            pushed,
+                        )
+                    }
+                }
+            }
         }
     }
 
@@ -8486,15 +8428,15 @@ mod tests {
         let src = "
             enum IntOpt { Some(Int), None }
             def get_or(o: IntOpt, default: Int) -> Int = match o {
-                Some(x) => x,
-                None => default,
+                IntOpt::Some(x) => x,
+                IntOpt::None => default,
             }
             def use_some(v: Int, default: Int) -> Int = {
-                let o = Some(v);
+                let o = IntOpt::Some(v);
                 get_or(o, default)
             }
             def use_none(default: Int) -> Int = {
-                let o = None;
+                let o = IntOpt::None;
                 get_or(o, default)
             }
         ";
@@ -8517,12 +8459,12 @@ mod tests {
             struct Point { x: Int, y: Int }
             enum Located { Here(Point), Nowhere }
             def x_or(l: Located, default: Int) -> Int = match l {
-                Here(p) => p.x,
-                Nowhere => default,
+                Located::Here(p) => p.x,
+                Located::Nowhere => default,
             }
             def make_here(a: Int, b: Int, default: Int) -> Int = {
                 let p = Point { x: a, y: b };
-                let l = Here(p);
+                let l = Located::Here(p);
                 x_or(l, default)
             }
         ";
@@ -8550,13 +8492,13 @@ mod tests {
         let src = "
             enum Color { Red, Green, Blue }
             def code(c: Color) -> Int = match c {
-                Red => 1,
-                Green => 2,
-                Blue => 3,
+                Color::Red => 1,
+                Color::Green => 2,
+                Color::Blue => 3,
             }
-            def red() -> Int = code(Red)
-            def green() -> Int = code(Green)
-            def blue() -> Int = code(Blue)
+            def red() -> Int = code(Color::Red)
+            def green() -> Int = code(Color::Green)
+            def blue() -> Int = code(Color::Blue)
         ";
         let (rt, jit, names) = build_for(&ctx, src);
         unsafe {
@@ -8573,12 +8515,12 @@ mod tests {
         let src = "
             enum Choice { A(Int), B(Int), C(Int) }
             def is_b(c: Choice) -> Int = match c {
-                B(_) => 1,
+                Choice::B(_) => 1,
                 _ => 0,
             }
-            def test_a() -> Int = is_b(A(10))
-            def test_b() -> Int = is_b(B(20))
-            def test_c() -> Int = is_b(C(30))
+            def test_a() -> Int = is_b(Choice::A(10))
+            def test_b() -> Int = is_b(Choice::B(20))
+            def test_c() -> Int = is_b(Choice::C(30))
         ";
         let (rt, jit, names) = build_for(&ctx, src);
         unsafe {
@@ -8598,10 +8540,10 @@ mod tests {
         let src = "
             struct P { v: Int }
             enum Maybe { Some(P), None }
-            def make_some(v: Int) -> Maybe = Some(P { v: v })
+            def make_some(v: Int) -> Maybe = Maybe::Some(P { v: v })
             def unwrap_or(m: Maybe, default: Int) -> Int = match m {
-                Some(p) => p.v,
-                None => default,
+                Maybe::Some(p) => p.v,
+                Maybe::None => default,
             }
             def run(v: Int) -> Int = {
                 let m = make_some(v);
@@ -8623,6 +8565,49 @@ mod tests {
     }
 
     #[test]
+    fn jit_nested_enum_patterns() {
+        // Nested enum patterns: match through two enum layers in one arm, and
+        // let multiple arms share an outer variant (`A(I)` vs `A(J)`). A flat
+        // switch on the outer tag can't express this; the backtracking matcher
+        // can. Run under GC pressure so the heap-pointer payloads are traced.
+        init();
+        let ctx = Context::create();
+        let src = "
+            enum Inner { I(Int), J }
+            enum Outer { A(Inner), B(Inner), C }
+            def classify(o: Outer) -> Int = match o {
+                Outer::A(Inner::I(n)) => n,
+                Outer::A(Inner::J) => 0 - 7,
+                Outer::B(Inner::I(n)) => n + 100,
+                Outer::B(Inner::J) => 0 - 8,
+                Outer::C => 0 - 9,
+            }
+            def run_ai(n: Int) -> Int = classify(Outer::A(Inner::I(n)))
+            def run_aj() -> Int = classify(Outer::A(Inner::J))
+            def run_bi(n: Int) -> Int = classify(Outer::B(Inner::I(n)))
+            def run_c() -> Int = classify(Outer::C)
+        ";
+        let m = parse_module(src).unwrap();
+        let r = resolve_module(&m).unwrap();
+        let names: HashMap<String, Hash> =
+            r.defs.iter().map(|d| (d.name.clone(), d.hash)).collect();
+        let cm = CompiledModule::build(&ctx, &r).unwrap();
+        let rt = Runtime::new_with_registry(cm.closure_type_infos.clone(), cm.shape_registry.clone());
+        let jit = Jit::new(cm, &rt).unwrap();
+        rt.heap.set_gc_every_alloc(true);
+        unsafe {
+            let ai = jit.get_fn1(&names["run_ai"]).unwrap();
+            let aj = jit.get_fn0(&names["run_aj"]).unwrap();
+            let bi = jit.get_fn1(&names["run_bi"]).unwrap();
+            let c = jit.get_fn0(&names["run_c"]).unwrap();
+            assert_eq!(ai.call(rt.thread_ptr(), 5), 5, "A(I(5)) -> 5");
+            assert_eq!(aj.call(rt.thread_ptr()), -7, "A(J) -> -7 (shares outer A)");
+            assert_eq!(bi.call(rt.thread_ptr(), 3), 103, "B(I(3)) -> 103");
+            assert_eq!(c.call(rt.thread_ptr()), -9, "C -> -9");
+        }
+    }
+
+    #[test]
     fn lower_case_ident_pattern_is_a_binding_not_a_variant() {
         // `notAVariant` doesn't match any registered variant, so the
         // resolver treats it as a catch-all Var binding. The module
@@ -8630,7 +8615,7 @@ mod tests {
         let src = "
             enum E { A }
             def f(e: E) -> Int = match e {
-                A => 1,
+                E::A => 1,
                 catch_all => 2,
             }
         ";
@@ -8808,10 +8793,10 @@ mod tests {
             &ctx,
             "
             enum Tag { Some(Int), None }
-            def make() -> Tag = Some(7)
+            def make() -> Tag = Tag::Some(7)
             def run() -> Int = match make() {
-                Some(n) => n + 1,
-                None => 0,
+                Tag::Some(n) => n + 1,
+                Tag::None => 0,
             }
             ",
         );

@@ -135,6 +135,15 @@ pub enum SurfaceExpr {
         name: String,
         span: Span,
     },
+    /// `Enum::Variant` — a qualified enum-variant reference. Variant
+    /// construction MUST be qualified (bare `Variant` is rejected by the
+    /// resolver). In nullary position this stands alone; with a payload it
+    /// is the callee of a `Call`.
+    VariantRef {
+        enum_name: String,
+        variant_name: String,
+        span: Span,
+    },
     /// `callee(arg1, arg2, ...)` or `callee::<T, ...>(arg1, ...)`.
     /// `type_args` holds explicit type arguments (turbofish); empty when
     /// none were written.
@@ -236,6 +245,15 @@ pub enum SurfacePattern {
         payload: Box<SurfacePattern>,
         span: Span,
     },
+    /// `Enum::Variant` or `Enum::Variant(pat)` — a qualified variant
+    /// pattern. Variant patterns MUST be qualified; bare ones are rejected
+    /// by the resolver (a bare ident is always a binding now).
+    QualifiedCtor {
+        enum_name: String,
+        variant_name: String,
+        payload: Option<Box<SurfacePattern>>,
+        span: Span,
+    },
 }
 
 impl SurfacePattern {
@@ -243,7 +261,8 @@ impl SurfacePattern {
         match self {
             SurfacePattern::Wildcard { span }
             | SurfacePattern::Ident { span, .. }
-            | SurfacePattern::Ctor { span, .. } => *span,
+            | SurfacePattern::Ctor { span, .. }
+            | SurfacePattern::QualifiedCtor { span, .. } => *span,
         }
     }
 }
@@ -271,6 +290,7 @@ impl SurfaceExpr {
             | SurfaceExpr::BoolLit { span, .. }
             | SurfaceExpr::StringLit { span, .. }
             | SurfaceExpr::Var { span, .. }
+            | SurfaceExpr::VariantRef { span, .. }
             | SurfaceExpr::Call { span, .. }
             | SurfaceExpr::BinOp { span, .. }
             | SurfaceExpr::UnaryOp { span, .. }

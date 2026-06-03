@@ -756,9 +756,15 @@ pub fn clear_at_conn_cache() {
 }
 
 /// `at_remote` variant that reuses (or opens) a cached TCP stream for
-/// the given address. Pairs with [`serve_persistent_in_thread`] on the
-/// server side. On error, evicts the cached entry so the next call
-/// reopens cleanly.
+/// the given address, amortising the TCP handshake across many `at()`
+/// calls. Works with EITHER a persistent server ([`serve_persistent_in_thread`],
+/// where the cache is a pure win) OR a one-shot server (the stdlib `serve`
+/// loop, which closes the connection after each reply): if a *reused* cached
+/// connection turns out to be dead — the common case against a one-shot
+/// server — we evict it and retry ONCE on a guaranteed-fresh connection.
+/// Without that retry, the second call to a one-shot node would fail (and a
+/// counting server would then deadlock waiting for a connection the client
+/// never opens).
 ///
 /// # Safety
 /// Same as [`at_remote`].
@@ -768,28 +774,51 @@ pub unsafe fn at_remote_cached(
     addr: &str,
     closure_ptr: *const u8,
 ) -> Result<*const u8, NetError> {
-    // Two-phase to keep the RefCell borrow short and to allow eviction
-    // on error without re-borrowing inside the call path.
-    let result: Result<*const u8, NetError> = AT_CONN_CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        let stream = match cache.entry(addr.to_owned()) {
-            std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
-            std::collections::hash_map::Entry::Vacant(v) => {
-                let s = TcpStream::connect(addr)?;
-                // Disable Nagle to keep per-cell latency low; the
-                // protocol is request/response and we never batch.
-                s.set_nodelay(true).ok();
-                v.insert(s)
-            }
-        };
-        unsafe { at_remote_on_channel(runtime, knowledge_base, stream, closure_ptr) }
+    // Did we already have an open connection to this addr? If so, the first
+    // attempt reuses it and a failure is most likely a stale (server-closed)
+    // socket worth retrying; if not, the first attempt is already fresh and a
+    // failure is a genuine error (no retry).
+    let reused = AT_CONN_CACHE.with(|c| c.borrow().contains_key(addr));
+
+    // First attempt: reuse the cached connection, or open one if absent.
+    let attempt = |runtime: &Runtime, kb: &KnowledgeBase| -> Result<*const u8, NetError> {
+        AT_CONN_CACHE.with(|c| {
+            let mut cache = c.borrow_mut();
+            let stream = match cache.entry(addr.to_owned()) {
+                std::collections::hash_map::Entry::Occupied(o) => o.into_mut(),
+                std::collections::hash_map::Entry::Vacant(v) => {
+                    let s = TcpStream::connect(addr)?;
+                    // Disable Nagle to keep per-cell latency low; the
+                    // protocol is request/response and we never batch.
+                    s.set_nodelay(true).ok();
+                    v.insert(s)
+                }
+            };
+            unsafe { at_remote_on_channel(runtime, kb, stream, closure_ptr) }
+        })
+    };
+
+    let first = attempt(runtime, knowledge_base);
+    if first.is_ok() {
+        return first;
+    }
+    // Evict the (now-suspect) connection.
+    AT_CONN_CACHE.with(|c| {
+        c.borrow_mut().remove(addr);
     });
-    if result.is_err() {
+    // Only the reused-connection case is worth retrying: the previous attempt
+    // was already on a fresh socket otherwise, so a second one would just fail
+    // the same way.
+    if !reused {
+        return first;
+    }
+    let second = attempt(runtime, knowledge_base);
+    if second.is_err() {
         AT_CONN_CACHE.with(|c| {
             c.borrow_mut().remove(addr);
         });
     }
-    result
+    second
 }
 
 /// Same as [`at_remote`] but uses an already-connected stream. Lets
@@ -1502,6 +1531,209 @@ mod tests {
         l.local_addr().unwrap().port()
     }
 
+    /// The full function-driven KV store source (examples/kvstore.ail).
+    const KVSTORE_SRC: &str = include_str!("../examples/kvstore.ail");
+
+    /// The explicit-TCP KV store, driven purely by calling functions
+    /// (`kv_set_tcp` / `kv_get_tcp` / `kv_del_tcp`) — the client never builds a
+    /// command enum or touches a frame. set 41 -> get 41 -> del 1 -> get
+    /// missing (-404). Proves the function-driven TCP path end to end over real
+    /// loopback, mutating the node's own `db` state.
+    #[test]
+    fn kvstore_tcp_function_driven() {
+        init();
+        let port = free_port();
+        // Nested enum patterns: unwrap Result/Option/Val in one match, and
+        // multiple arms share the outer `Ok` variant.
+        let drivers = r#"
+            def kv_listen(p: Int) -> Int =
+                match tcp_listen(p) { Result::Ok(fd) => fd, Result::Err(_e) => 0 - 1 }
+            def kv_run(fd: Int) -> Int = serve_turns(fd, 4)
+
+            def t_set(p: Int, d: Int) -> Int =
+                match kv_set_tcp(tcp_node(127, 0, 0, 1, p), "x", Val::VInt(d)) {
+                    Result::Ok(Val::VInt(n)) => n,
+                    Result::Ok(Val::VStr(_s)) => 0 - 2,
+                    Result::Err(_e) => 0 - 1,
+                }
+            def t_get(p: Int) -> Int =
+                match kv_get_tcp(tcp_node(127, 0, 0, 1, p), "x") {
+                    Result::Ok(Option::Some(Val::VInt(n))) => n,
+                    Result::Ok(Option::Some(Val::VStr(_s))) => 0 - 2,
+                    Result::Ok(Option::None) => 0 - 404,
+                    Result::Err(_e) => 0 - 1,
+                }
+            def t_del(p: Int) -> Int =
+                match kv_del_tcp(tcp_node(127, 0, 0, 1, p), "x") {
+                    Result::Ok(n) => n,
+                    Result::Err(_e) => 0 - 1,
+                }
+        "#;
+        let src = format!("{}\n{}", KVSTORE_SRC, drivers);
+
+        let server_ctx = Context::create();
+        let (server_rt, server_jit, names) = make_stdlib_runtime(&server_ctx, &src);
+        install_current_runtime(&server_rt);
+        let listen = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["kv_listen"]),
+                )
+                .unwrap()
+        };
+        let fd = unsafe { listen.call(server_rt.thread_ptr(), port as i64) };
+        assert!(fd >= 0, "listen failed: {}", fd);
+
+        let src_for_client = src.clone();
+        let client = std::thread::spawn(move || -> Vec<i64> {
+            let client_ctx = Context::create();
+            let (client_rt, client_jit, names) =
+                make_stdlib_runtime(&client_ctx, &src_for_client);
+            install_current_runtime(&client_rt);
+            // `decode::<T>` reuses the Result/DecodeError binding, so the
+            // client needs the at() runtime binding installed even though this
+            // path drives the socket explicitly.
+            let full = format!("{}\n{}", crate::stdlib::SOURCE, src_for_client);
+            let m = parse_module(&full).unwrap();
+            let r = resolve_module(&m).unwrap();
+            let rb = r.at_binding.as_ref().expect("at_binding");
+            let rt_binding = build_at_runtime_binding(&client_rt, rb).expect("rt binding");
+            install_current_at_binding(&rt_binding);
+            let set = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, i64, i64) -> i64>(
+                        &crate::codegen::def_symbol(&names["t_set"]),
+                    )
+                    .unwrap()
+            };
+            let getf = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                        &crate::codegen::def_symbol(&names["t_get"]),
+                    )
+                    .unwrap()
+            };
+            let del = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                        &crate::codegen::def_symbol(&names["t_del"]),
+                    )
+                    .unwrap()
+            };
+            let p = port as i64;
+            let r1 = unsafe { set.call(client_rt.thread_ptr(), p, 41) };
+            let r2 = unsafe { getf.call(client_rt.thread_ptr(), p) };
+            let r3 = unsafe { del.call(client_rt.thread_ptr(), p) };
+            let r4 = unsafe { getf.call(client_rt.thread_ptr(), p) };
+            clear_current_at_binding();
+            clear_current_runtime();
+            vec![r1, r2, r3, r4]
+        });
+
+        let _ = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["kv_run"]),
+                )
+                .unwrap()
+                .call(server_rt.thread_ptr(), fd)
+        };
+
+        let results = client.join().unwrap();
+        clear_current_runtime();
+        assert_eq!(
+            results,
+            vec![41, 41, 1, 0 - 404],
+            "function-driven TCP KV: set/get/del/get-missing"
+        );
+    }
+
+    /// The same KV store via `at()` — the client calls `kv_set_at` then
+    /// `kv_get_at` and the runtime handles connect/encode/serve/decode. set 7
+    /// -> get 7, mutating and then reading the node's own `db` across TWO
+    /// at() calls. The server is a one-shot counting loop (`serve_n`), which
+    /// closes each connection after replying; the cached at() client must
+    /// reconnect for the second call rather than hang on the stale socket.
+    #[test]
+    fn kvstore_at_function_driven() {
+        init();
+        clear_at_conn_cache();
+        let drivers = r#"
+            def a_set(p: Int, d: Int) -> Int =
+                match kv_set_at(tcp_node(127, 0, 0, 1, p), "y", Val::VInt(d)) {
+                    Result::Ok(Val::VInt(n)) => n,
+                    Result::Ok(Val::VStr(_s)) => 0 - 2,
+                    Result::Err(_e) => 0 - 1,
+                }
+            def a_get(p: Int) -> Int =
+                match kv_get_at(tcp_node(127, 0, 0, 1, p), "y") {
+                    Result::Ok(Option::Some(Val::VInt(n))) => n,
+                    Result::Ok(Option::Some(Val::VStr(_s))) => 0 - 2,
+                    Result::Ok(Option::None) => 0 - 404,
+                    Result::Err(_e) => 0 - 1,
+                }
+        "#;
+        let src = format!("{}\n{}", KVSTORE_SRC, drivers);
+        let full = format!("{}\n{}", crate::stdlib::SOURCE, src);
+
+        // Server: a one-shot loop that serves exactly two at() invocations
+        // (set, get) on two separate connections, then exits.
+        let server_ctx = Context::create();
+        let (server_rt, server_jit, _) = make_stdlib_runtime(&server_ctx, &src);
+        let _keep_server_jit = server_jit;
+        let listener = bind("127.0.0.1:0").unwrap();
+        let server_port = listener.local_addr().unwrap().port() as i64;
+        let server_handle =
+            unsafe { serve_n_in_thread(Arc::new(RuntimeHandle(server_rt)), listener, 2) };
+
+        // Client: install the at() runtime binding, then just call functions.
+        let client_ctx = Context::create();
+        let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, &src);
+        install_current_runtime(&client_rt);
+        let kb = KnowledgeBase::new();
+        install_current_knowledge_base(&kb);
+        let m = parse_module(&full).unwrap();
+        let r = resolve_module(&m).unwrap();
+        let rb = r.at_binding.as_ref().expect("at_binding");
+        let rt_binding = build_at_runtime_binding(&client_rt, rb).expect("rt binding");
+        install_current_at_binding(&rt_binding);
+
+        let set = unsafe {
+            client_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["a_set"]),
+                )
+                .unwrap()
+        };
+        let getf = unsafe {
+            client_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["a_get"]),
+                )
+                .unwrap()
+        };
+        let r1 = unsafe { set.call(client_rt.thread_ptr(), server_port, 7) };
+        let r2 = unsafe { getf.call(client_rt.thread_ptr(), server_port) };
+
+        server_handle.join().unwrap().expect("server ok");
+        clear_at_conn_cache();
+        clear_current_runtime();
+        clear_current_knowledge_base();
+        clear_current_at_binding();
+        assert_eq!(
+            (r1, r2),
+            (7, 7),
+            "function-driven at(): set then get across two one-shot connections"
+        );
+    }
+
     /// The ai-lang transport stack (sockets + framing) works end to end
     /// over real loopback TCP, with NO Rust networking code in the path:
     /// the server (listen/accept/recv/echo) and client (connect/send/recv)
@@ -1533,40 +1765,40 @@ mod tests {
             // Bind+listen; return the listener fd (or negative on error).
             def server_listen() -> Int =
                 match tcp_listen({port}) {{
-                    Ok(fd) => fd,
-                    Err(_e) => 0 - 1,
+                    Result::Ok(fd) => fd,
+                    Result::Err(_e) => 0 - 1,
                 }}
 
             // Accept one conn, echo one frame back, return bytes received.
             def server_accept_echo(listener: Int) -> Int =
                 match tcp_accept(listener) {{
-                    Ok(conn) => match recv_frame(conn) {{
-                        Ok(b) => {{
+                    Result::Ok(conn) => match recv_frame(conn) {{
+                        Result::Ok(b) => {{
                             let n = bytes_len(b);
                             let _s = send_frame(conn, b);
                             let _c = conn_close(conn);
                             n
                         }},
-                        Err(_e) => 0 - 2,
+                        Result::Err(_e) => 0 - 2,
                     }},
-                    Err(_e) => 0 - 3,
+                    Result::Err(_e) => 0 - 3,
                 }}
 
             // Connect, send a frame, read the echo, return the byte sum.
             def client_roundtrip() -> Int =
                 match tcp_connect(127, 0, 0, 1, {port}) {{
-                    Ok(conn) => match send_frame(conn, make_msg()) {{
-                        Ok(_w) => match recv_frame(conn) {{
-                            Ok(echo) => {{
+                    Result::Ok(conn) => match send_frame(conn, make_msg()) {{
+                        Result::Ok(_w) => match recv_frame(conn) {{
+                            Result::Ok(echo) => {{
                                 let s = bytes_sum(echo, 0, bytes_len(echo), 0);
                                 let _c = conn_close(conn);
                                 s
                             }},
-                            Err(_e) => 0 - 5,
+                            Result::Err(_e) => 0 - 5,
                         }},
-                        Err(_e) => 0 - 6,
+                        Result::Err(_e) => 0 - 6,
                     }},
-                    Err(_e) => 0 - 4,
+                    Result::Err(_e) => 0 - 4,
                 }}
             "#,
             port = port
@@ -1647,39 +1879,39 @@ mod tests {
             def make_thunk(n: Int) -> fn() -> Int = || n + 100
 
             def server_listen() -> Int =
-                match tcp_listen({port}) {{ Ok(fd) => fd, Err(_e) => 0 - 1 }}
+                match tcp_listen({port}) {{ Result::Ok(fd) => fd, Result::Err(_e) => 0 - 1 }}
 
             // One turn of an ai-lang node: accept, decode+invoke the
             // shipped closure via wire_invoke, ship the encoded result.
             def server_node_once(listener: Int) -> Int =
                 match tcp_accept(listener) {{
-                    Ok(conn) => match recv_frame(conn) {{
-                        Ok(req) => {{
+                    Result::Ok(conn) => match recv_frame(conn) {{
+                        Result::Ok(req) => {{
                             let resp = wire_invoke(req);
                             let _s = send_frame(conn, resp);
                             let _c = conn_close(conn);
                             0
                         }},
-                        Err(_e) => 0 - 2,
+                        Result::Err(_e) => 0 - 2,
                     }},
-                    Err(_e) => 0 - 3,
+                    Result::Err(_e) => 0 - 3,
                 }}
 
             // Client: ship make_thunk(42), decode the Int reply.
             def client_call() -> Int =
                 match tcp_connect(127, 0, 0, 1, {port}) {{
-                    Ok(conn) => match send_frame(conn, wire_encode(make_thunk(42))) {{
-                        Ok(_w) => match recv_frame(conn) {{
-                            Ok(resp) => {{
+                    Result::Ok(conn) => match send_frame(conn, wire_encode(make_thunk(42))) {{
+                        Result::Ok(_w) => match recv_frame(conn) {{
+                            Result::Ok(resp) => {{
                                 let v = wire_decode_int(resp);
                                 let _c = conn_close(conn);
                                 v
                             }},
-                            Err(_e) => 0 - 5,
+                            Result::Err(_e) => 0 - 5,
                         }},
-                        Err(_e) => 0 - 6,
+                        Result::Err(_e) => 0 - 6,
                     }},
-                    Err(_e) => 0 - 4,
+                    Result::Err(_e) => 0 - 4,
                 }}
             "#,
             port = port
@@ -1752,23 +1984,23 @@ mod tests {
             def make_inc(d: Int) -> fn(Int) -> Int = |n: Int| n + d
 
             def server_listen() -> Int =
-                match tcp_listen({port}) {{ Ok(fd) => fd, Err(_e) => 0 - 1 }}
+                match tcp_listen({port}) {{ Result::Ok(fd) => fd, Result::Err(_e) => 0 - 1 }}
 
             // One turn: accept, decode the shipped updater, swap the
             // server's atom, ship back the new value.
             def server_atom_turn(listener: Int, a: Atom<Int>) -> Int =
                 match tcp_accept(listener) {{
-                    Ok(conn) => match recv_frame(conn) {{
-                        Ok(req) => {{
+                    Result::Ok(conn) => match recv_frame(conn) {{
+                        Result::Ok(req) => {{
                             let updater = wire_decode_fn1(req);
                             let now = swap(a, updater);
                             let _s = send_frame(conn, wire_encode(now));
                             let _c = conn_close(conn);
                             now
                         }},
-                        Err(_e) => 0 - 2,
+                        Result::Err(_e) => 0 - 2,
                     }},
-                    Err(_e) => 0 - 3,
+                    Result::Err(_e) => 0 - 3,
                 }}
 
             def server_atom_loop(listener: Int, a: Atom<Int>, turns: Int) -> Int =
@@ -1786,18 +2018,18 @@ mod tests {
             // Client: ship `|n| n + d`, get the new server-side value.
             def client_inc(d: Int) -> Int =
                 match tcp_connect(127, 0, 0, 1, {port}) {{
-                    Ok(conn) => match send_frame(conn, wire_encode(make_inc(d))) {{
-                        Ok(_w) => match recv_frame(conn) {{
-                            Ok(resp) => {{
+                    Result::Ok(conn) => match send_frame(conn, wire_encode(make_inc(d))) {{
+                        Result::Ok(_w) => match recv_frame(conn) {{
+                            Result::Ok(resp) => {{
                                 let v = wire_decode_int(resp);
                                 let _c = conn_close(conn);
                                 v
                             }},
-                            Err(_e) => 0 - 5,
+                            Result::Err(_e) => 0 - 5,
                         }},
-                        Err(_e) => 0 - 6,
+                        Result::Err(_e) => 0 - 6,
                     }},
-                    Err(_e) => 0 - 4,
+                    Result::Err(_e) => 0 - 4,
                 }}
             "#,
             port = port
@@ -1873,32 +2105,32 @@ mod tests {
             state tcp_counter: Atom<Int> = atom(0)
             def tcp_handle(c: Cmd) -> Int =
                 match c {{
-                    Bump(d) => swap(tcp_counter, |n: Int| n + d),
-                    Get => deref(tcp_counter),
+                    Cmd::Bump(d) => swap(tcp_counter, |n: Int| n + d),
+                    Cmd::Get => deref(tcp_counter),
                 }}
 
             // Node: bind + serve 3 requests via the GENERIC stdlib loop.
             def tcp_listen_node() -> Int =
-                match tcp_listen({port}) {{ Ok(fd) => fd, Err(_e) => 0 - 1 }}
+                match tcp_listen({port}) {{ Result::Ok(fd) => fd, Result::Err(_e) => 0 - 1 }}
             def tcp_node_main(fd: Int) -> Int = serve_turns(fd, 3)
 
             // Client: ship `|| tcp_handle(msg)` and read the Int reply.
-            def tcp_bump_thunk(d: Int) -> fn() -> Int = || tcp_handle(Bump(d))
-            def tcp_get_thunk() -> fn() -> Int = || tcp_handle(Get)
+            def tcp_bump_thunk(d: Int) -> fn() -> Int = || tcp_handle(Cmd::Bump(d))
+            def tcp_get_thunk() -> fn() -> Int = || tcp_handle(Cmd::Get)
             def tcp_send(payload: Bytes) -> Int =
                 match tcp_connect(127, 0, 0, 1, {port}) {{
-                    Ok(conn) => match send_frame(conn, payload) {{
-                        Ok(_w) => match recv_frame(conn) {{
-                            Ok(resp) => {{
+                    Result::Ok(conn) => match send_frame(conn, payload) {{
+                        Result::Ok(_w) => match recv_frame(conn) {{
+                            Result::Ok(resp) => {{
                                 let v = wire_decode_int(resp);
                                 let _c = conn_close(conn);
                                 v
                             }},
-                            Err(_e) => 0 - 5,
+                            Result::Err(_e) => 0 - 5,
                         }},
-                        Err(_e) => 0 - 6,
+                        Result::Err(_e) => 0 - 6,
                     }},
-                    Err(_e) => 0 - 4,
+                    Result::Err(_e) => 0 - 4,
                 }}
             def tcp_client_bump(d: Int) -> Int = tcp_send(wire_encode(tcp_bump_thunk(d)))
             def tcp_client_get() -> Int = tcp_send(wire_encode(tcp_get_thunk()))
@@ -1980,20 +2212,20 @@ mod tests {
 
             def enc_int() -> Bytes = wire_encode(7)
             def dec_int(b: Bytes) -> Int =
-                match decode::<Int>(b) { Ok(v) => v, Err(_e) => 0 - 1 }
+                match decode::<Int>(b) { Result::Ok(v) => v, Result::Err(_e) => 0 - 1 }
 
             def enc_pair() -> Bytes = wire_encode(Pair { a: 3, b: 4 })
             def dec_pair_sum(b: Bytes) -> Int =
-                match decode::<Pair>(b) { Ok(p) => p.a + p.b, Err(_e) => 0 - 1 }
+                match decode::<Pair>(b) { Result::Ok(p) => p.a + p.b, Result::Err(_e) => 0 - 1 }
 
             // Decoding Pair bytes as Int must be a typed DecodeError, not a
             // crash. Match on the actual enum variants.
             def dec_mismatch(b: Bytes) -> Int =
                 match decode::<Int>(b) {
-                    Ok(_v) => 0 - 99,
-                    Err(e) => match e {
-                        TypeMismatch => 1,
-                        Malformed => 2,
+                    Result::Ok(_v) => 0 - 99,
+                    Result::Err(e) => match e {
+                        DecodeError::TypeMismatch => 1,
+                        DecodeError::Malformed => 2,
                     },
                 }
         ";
@@ -2365,12 +2597,12 @@ mod tests {
             state rh_counter: Atom<Int> = atom(0)
             def rh_handle(c: Cmd) -> Int =
                 match c {
-                    Bump(d) => swap(rh_counter, |n: Int| n + d),
-                    Get => deref(rh_counter),
+                    Cmd::Bump(d) => swap(rh_counter, |n: Int| n + d),
+                    Cmd::Get => deref(rh_counter),
                 }
             // Client-side thunk builders: ship `|| rh_handle(msg)`.
-            def rh_call_bump(d: Int) -> fn() -> Int = || rh_handle(Bump(d))
-            def rh_call_get() -> fn() -> Int = || rh_handle(Get)
+            def rh_call_bump(d: Int) -> fn() -> Int = || rh_handle(Cmd::Bump(d))
+            def rh_call_get() -> fn() -> Int = || rh_handle(Cmd::Get)
         ";
 
         // Server: full source, so it has `rh_handle` + an installed
@@ -2449,10 +2681,10 @@ mod tests {
             state cc_counter: Atom<Int> = atom(0)
             def cc_handle(c: Cmd) -> Int =
                 match c {
-                    Bump(d) => swap(cc_counter, |n: Int| n + d),
-                    Get => deref(cc_counter),
+                    Cmd::Bump(d) => swap(cc_counter, |n: Int| n + d),
+                    Cmd::Get => deref(cc_counter),
                 }
-            def cc_call_bump(d: Int) -> fn() -> Int = || cc_handle(Bump(d))
+            def cc_call_bump(d: Int) -> fn() -> Int = || cc_handle(Cmd::Bump(d))
         ";
         let server_ctx = Context::create();
         let (server_rt, server_jit, _) = make_stdlib_runtime(&server_ctx, extra);
@@ -2693,8 +2925,8 @@ mod tests {
 
             def run(node: Node, x: Int) -> Int =
                 match at(node, || work(x)) {
-                    Ok(n) => n,
-                    Err(_) => 0 - 1,
+                    Result::Ok(n) => n,
+                    Result::Err(_) => 0 - 1,
                 }
         ";
 
@@ -2774,8 +3006,8 @@ mod tests {
 
             def run(node: Node) -> Int =
                 match at(node, || 42) {
-                    Ok(n) => n,
-                    Err(_) => 0 - 1,
+                    Result::Ok(n) => n,
+                    Result::Err(_) => 0 - 1,
                 }
         ";
 
@@ -2868,8 +3100,8 @@ mod tests {
 
             def run(node: Node, n: Int) -> Int =
                 match at(node, || compute(n)) {
-                    Ok(v) => v,
-                    Err(_) => 0 - 1,
+                    Result::Ok(v) => v,
+                    Result::Err(_) => 0 - 1,
                 }
         ";
 
@@ -2977,8 +3209,8 @@ mod tests {
 
             def run(b: Box, node: Node) -> Int =
                 match at(node, b.f) {
-                    Ok(v) => v,
-                    Err(_) => 0 - 1,
+                    Result::Ok(v) => v,
+                    Result::Err(_) => 0 - 1,
                 }
         ";
         let src = format!("{}\n{}", crate::stdlib::SOURCE, user_src);
@@ -3211,9 +3443,9 @@ mod tests {
             // [9,10,11,12] *2 → [18,20,22,24] filter → [20,22]     sum 42
             // grand sum = 96.
             def chunks() -> List<List<Int>> =
-                Cons(ListCell { head: int_list_range(1, 5), tail:
-                Cons(ListCell { head: int_list_range(5, 9), tail:
-                Cons(ListCell { head: int_list_range(9, 13), tail: Nil })
+                List::Cons(ListCell { head: int_list_range(1, 5), tail:
+                List::Cons(ListCell { head: int_list_range(5, 9), tail:
+                List::Cons(ListCell { head: int_list_range(9, 13), tail: List::Nil })
                 })
                 })
 
@@ -3229,9 +3461,9 @@ mod tests {
             // Build a List<Node> of three identical nodes pointing
             // at the same worker (port supplied by the test driver).
             def make_pool(port: Int) -> List<Node> =
-                Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail:
-                Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail:
-                Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail: Nil })
+                List::Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail:
+                List::Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail:
+                List::Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail: List::Nil })
                 })
                 })
 
@@ -3300,24 +3532,24 @@ mod tests {
         let user_src = "
             def run_free(rp: RemotePtr, v: Int) -> Int =
                 match remote_free(rp) {
-                    Ok(f) => v,
-                    Err(e) => 0 - 3
+                    Result::Ok(f) => v,
+                    Result::Err(e) => 0 - 3
                 }
             def run_read(rp: RemotePtr) -> Int =
                 match remote_read_i64(rp) {
-                    Ok(v) => run_free(rp, v),
-                    Err(e) => 0 - 2
+                    Result::Ok(v) => run_free(rp, v),
+                    Result::Err(e) => 0 - 2
                 }
             def run_write(rp: RemotePtr) -> Int =
                 match remote_write_i64(rp, 12345) {
-                    Ok(w) => run_read(rp),
-                    Err(e) => 0 - 1
+                    Result::Ok(w) => run_read(rp),
+                    Result::Err(e) => 0 - 1
                 }
             def run(port: Int) -> Int = {
                 let node = tcp_node(127, 0, 0, 1, port);
                 match remote_alloc(node, 8) {
-                    Ok(rp) => run_write(rp),
-                    Err(e) => 0 - 4
+                    Result::Ok(rp) => run_write(rp),
+                    Result::Err(e) => 0 - 4
                 }
             }
         ";
@@ -3381,22 +3613,22 @@ mod tests {
             def compute(captured: Int, i: Int) -> Int = captured * i + i
 
             def indices(n: Int) -> List<List<Int>> =
-                list_reverse(indices_acc(n, 0, Nil))
+                list_reverse(indices_acc(n, 0, List::Nil))
 
             def indices_acc(n: Int, i: Int, acc: List<List<Int>>) -> List<List<Int>> =
                 if i >= n { acc } else {
-                    indices_acc(n, i + 1, Cons(ListCell {
-                        head: Cons(ListCell { head: i, tail: Nil }),
+                    indices_acc(n, i + 1, List::Cons(ListCell {
+                        head: List::Cons(ListCell { head: i, tail: List::Nil }),
                         tail: acc,
                     }))
                 }
 
             def make_pool(port: Int, n: Int) -> List<Node> =
-                make_pool_acc(port, n, Nil)
+                make_pool_acc(port, n, List::Nil)
 
             def make_pool_acc(port: Int, n: Int, acc: List<Node>) -> List<Node> =
                 if n <= 0 { acc } else {
-                    make_pool_acc(port, n - 1, Cons(ListCell {
+                    make_pool_acc(port, n - 1, List::Cons(ListCell {
                         head: tcp_node(127, 0, 0, 1, port), tail: acc,
                     }))
                 }
@@ -3465,16 +3697,16 @@ mod tests {
 
             // Single-element chunks: [[10], [20], [30]] on one node.
             def chunks() -> List<List<Int>> =
-                Cons(ListCell { head: Cons(ListCell { head: 10, tail: Nil }), tail:
-                Cons(ListCell { head: Cons(ListCell { head: 20, tail: Nil }), tail:
-                Cons(ListCell { head: Cons(ListCell { head: 30, tail: Nil }), tail: Nil })
+                List::Cons(ListCell { head: List::Cons(ListCell { head: 10, tail: List::Nil }), tail:
+                List::Cons(ListCell { head: List::Cons(ListCell { head: 20, tail: List::Nil }), tail:
+                List::Cons(ListCell { head: List::Cons(ListCell { head: 30, tail: List::Nil }), tail: List::Nil })
                 })
                 })
 
             def make_pool(port: Int) -> List<Node> =
-                Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail:
-                Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail:
-                Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail: Nil })
+                List::Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail:
+                List::Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail:
+                List::Cons(ListCell { head: tcp_node(127, 0, 0, 1, port), tail: List::Nil })
                 })
                 })
 
@@ -3560,8 +3792,8 @@ mod tests {
 
             def run(node: Node, x: Int, y: Int) -> Int =
                 match at(node, || make_pair(x, y)) {
-                    Ok(p) => p.a + p.b,
-                    Err(_) => 0 - 1,
+                    Result::Ok(p) => p.a + p.b,
+                    Result::Err(_) => 0 - 1,
                 }
         ";
 
@@ -3629,16 +3861,16 @@ mod tests {
         init();
         let user_src = "
             // Server builds [1, 2, 3, 4, 5] tail-rec.
-            def build(n: Int) -> List<Int> = build_acc(n, Nil)
+            def build(n: Int) -> List<Int> = build_acc(n, List::Nil)
             def build_acc(n: Int, acc: List<Int>) -> List<Int> =
                 if n <= 0 { acc } else {
-                    build_acc(n - 1, Cons(ListCell { head: n, tail: acc }))
+                    build_acc(n - 1, List::Cons(ListCell { head: n, tail: acc }))
                 }
 
             def run(node: Node, n: Int) -> Int =
                 match at(node, || build(n)) {
-                    Ok(xs) => list_foldl(xs, 0, |acc: Int, x: Int| acc + x),
-                    Err(_) => 0 - 1,
+                    Result::Ok(xs) => list_foldl(xs, 0, |acc: Int, x: Int| acc + x),
+                    Result::Err(_) => 0 - 1,
                 }
         ";
 
@@ -3709,10 +3941,10 @@ mod tests {
     fn at_with_heap_capture() {
         init();
         let user_src = "
-            def build(n: Int) -> List<Int> = build_acc(n, Nil)
+            def build(n: Int) -> List<Int> = build_acc(n, List::Nil)
             def build_acc(n: Int, acc: List<Int>) -> List<Int> =
                 if n <= 0 { acc } else {
-                    build_acc(n - 1, Cons(ListCell { head: n, tail: acc }))
+                    build_acc(n - 1, List::Cons(ListCell { head: n, tail: acc }))
                 }
 
             // sum_list lives on both sides; the closure captures
@@ -3724,8 +3956,8 @@ mod tests {
             def run(node: Node, n: Int) -> Int = {
                 let xs = build(n);
                 match at(node, || sum_list(xs)) {
-                    Ok(v) => v,
-                    Err(_) => 0 - 1,
+                    Result::Ok(v) => v,
+                    Result::Err(_) => 0 - 1,
                 }
             }
         ";
@@ -3862,8 +4094,8 @@ mod tests {
             // server's JIT re-runs the same `compute_cell` def.
             def remote_cell(node: Node, packed: Int, x: Int, y: Int) -> Int =
                 match at(node, || compute_cell(packed, x, y)) {
-                    Ok(v) => v,
-                    Err(_) => 0,
+                    Result::Ok(v) => v,
+                    Result::Err(_) => 0,
                 }
 
             // Compute one generation by issuing 25 independent `at()`
@@ -4039,8 +4271,8 @@ mod tests {
             "{}
              def run(node: Node) -> Int =
                 match at(node, || ptr_null()) {{
-                    Ok(p) => 0,
-                    Err(e) => 0 - 1
+                    Result::Ok(p) => 0,
+                    Result::Err(e) => 0 - 1
                 }}",
             AT_PRELUDE
         );
@@ -4063,8 +4295,8 @@ mod tests {
              def run(node: Node) -> Int = {{
                 let p = ptr_null();
                 match at(node, || ptr_is_null(p)) {{
-                    Ok(n) => n,
-                    Err(e) => 0 - 1
+                    Result::Ok(n) => n,
+                    Result::Err(e) => 0 - 1
                 }}
              }}",
             AT_PRELUDE
@@ -4089,8 +4321,8 @@ mod tests {
              def run(node: Node) -> Int = {{
                 let a = atom_new(0);
                 match at(node, || atom_load(a)) {{
-                    Ok(n) => n,
-                    Err(e) => 0 - 1
+                    Result::Ok(n) => n,
+                    Result::Err(e) => 0 - 1
                 }}
              }}",
             AT_PRELUDE
@@ -4112,8 +4344,8 @@ mod tests {
             "{}
              def run(node: Node) -> Int =
                 match at(node, || atom_new(0)) {{
-                    Ok(a) => 0,
-                    Err(e) => 0 - 1
+                    Result::Ok(a) => 0,
+                    Result::Err(e) => 0 - 1
                 }}",
             AT_PRELUDE
         );
@@ -4136,8 +4368,8 @@ mod tests {
              def work(x: Int) -> Int = x + 1
              def run(node: Node, x: Int) -> Int =
                 match at(node, || work(x)) {{
-                    Ok(n) => n,
-                    Err(e) => 0 - 1
+                    Result::Ok(n) => n,
+                    Result::Err(e) => 0 - 1
                 }}",
             AT_PRELUDE
         );

@@ -11,7 +11,7 @@ Standing facts you need:
   shares the evaluator's semantics — always confirm soundness with the fuzzer / a
   hand `node -e`, not just `check`.
 - Test gate (keep green): `cargo test -p partial --release` (12) and
-  `cargo test -p js-frontend --release` (102).
+  `cargo test -p js-frontend --release` (103).
 - Fuzzer: `cargo run -p js-frontend --release --bin fuzz -- --seed 1 --count 2000
   --batch 250 --no-shrink`. It sets `SPEC_WEIGHT_BUDGET=100000` itself. A full 2000
   run completes at ~620 MB. `--repro SEED` prints one program + residual + findings;
@@ -23,47 +23,117 @@ Standing facts you need:
 
 ---
 
-## Track A — Fuzzer / shrinker hygiene (so the divergence count means something)
+## Track A — Fuzzer / shrinker hygiene — DONE (2026-06-03)
 
-**Why.** After this session's fixes, a full 1–2000 run reports ~14 divergences, but
-they are dominated by an **artifact, not a PE bug**: programs that READ AN UNDECLARED
-VARIABLE. In JS that throws ReferenceError; the PE models every unresolved identifier
-as a (non-throwing) `Global`, which is the *correct* choice for real globals (`Math`,
-`String`) that real code and simple.js depend on. The PE cannot distinguish `a1` from
-`Math`, and valid code never reads undeclared vars — so this is not a soundness bug to
-fix in the evaluator. It just drowns out real bugs in the fuzzer output. Two sources:
+**Status: complete.** The undeclared-variable artifact is gone; every remaining
+divergence is now a genuine PE soundness gap (see Tracks A2 + C1). Three fixes
+landed in `js-frontend/src/bin/fuzz.rs` (+ one codegen bug in
+`js-frontend/src/codegen.rs` that Track A immediately surfaced):
 
-1. **Generator emits out-of-scope references.** `js-frontend/src/bin/fuzz.rs`,
-   `Gen::atom()` hardcodes `Expr::Var("input")` (the `_ =>` arm: "Always include
-   `input` so programs actually depend on it"). Inside a top-level `func`/`rec_func`,
-   `self.vars` holds only the params (`std::mem::take(&mut self.vars)`), so `input`
-   there is undeclared. **Fix:** only emit `Expr::Var("input")` when `input` is in
-   scope, i.e. `self.vars.iter().any(|(n,_)| n == "input")`. (For `main` it always is;
-   inside functions it usually isn't.) That removes the only out-of-scope identifier
-   the *generator* itself produces — all other identifiers come from `vars_of`/
-   `assignable_vars`, which are in-scope by construction.
+1. **Generator no longer emits out-of-scope `input`.** `Gen::atom()` now emits
+   `Expr::Var("input")` only when `input` is in scope
+   (`self.vars.iter().any(|(n,_)| n == "input")`). Inside a top-level
+   `func`/`rec_func` (`std::mem::take(&mut self.vars)`) it falls back to a literal.
 
-2. **Shrinker drifts to a different failure.** `shrink()` / `reduce_*` in
-   `fuzz.rs` reduce to *any* still-failing program. A very common reduction is
-   "delete a `var` declaration", which leaves its references dangling → the reduced
-   program "still fails" via ReferenceError on the now-undeclared variable, which is a
-   *different bug* than the original. So shrunk minimals over-represent the artifact
-   and mislead diagnosis (this bit me repeatedly this session — seeds 231/539 shrank
-   to undeclared-var programs whose original cause was elsewhere). **Options:**
-   - Cheapest: in `still_fails`, reject a reduction whose residual references an
-     identifier that the program never declares (i.e. would be a ReferenceError) — or
-     more simply, reject reductions that turn a previously-declared name undeclared.
-   - More general: record the *kind+site* of the original divergence and only accept a
-     reduction that still fails the same way. Harder; the comparator currently returns
-     value/throw-mismatch/etc. but not a stable "site".
+2. **Generator scopes the `catch` binding.** The try/catch arm pushed the catch
+   parameter onto `self.vars` and never removed it, so statements *after* the
+   try/catch could read it out of scope (a ReferenceError the PE models as a
+   non-throwing `Global`). It now `self.vars.retain(|(n,_)| n != &cv)` after the
+   catch clause — body/catch `var`s stay (function-scoped), only the block-scoped
+   catch binding is dropped.
 
-**Verify.** After the generator fix, re-run the 2000 fuzz; the divergence count should
-drop toward the genuinely-real bugs (e.g. the contrived seed 22). After the shrinker
-fix, the shrunk minimals should stop collapsing to `void a1` / `a8.length`-style
-undeclared-var programs.
+3. **Shrinker rejects reductions that read an undeclared name.** `still_fails`
+   now calls `reads_undeclared(p)` first: it collects every bound name
+   (`declared_names` — params, `var`s, loop vars, `while` guards, catch bindings,
+   function names) and every *read* reference (bare `Var`, `Update` target, `Push`
+   target, and a `Call` callee that isn't a `SAFE_CALLS` builtin), and rejects the
+   reduction if any read is undeclared. This stops the shrinker drifting a real
+   divergence down to a `void a1` / `a8.length` / `r0(...)`-undefined artifact.
+   (A plain `AssignVar` LHS is intentionally NOT a read — `undeclared = v` is a
+   silent global in non-strict JS, which the PE's `Global` model already matches.)
+   Caveat: `declared_names` is a *global* set, not lexically scoped, so an
+   out-of-scope-but-declared read (e.g. a catch binding read elsewhere) isn't
+   rejected by the shrinker — fix #2 prevents the generator from producing those,
+   so it hasn't mattered. If a future generator change reintroduces block scoping,
+   make the shrinker check scope-aware.
 
-**Note:** there is also a real-but-hard PE under-throw hiding behind the artifact —
-see Track C (dead-store may-throw). Track A makes it visible; it does not fix it.
+**Result.** seed-base 1/2001/5000 (6000 programs) report 7/13/7 divergences, all
+real: ~20 under-throws + 1 termination outlier (dead-store may-throw, Track C1) and
+6 over-throws (method-callee detach, Track A2). Re-verify with
+`./target/release/fuzz --seed 1 --count 2000 --batch 250` and classify a seed with
+`--seed N --count 1 --batch 1`.
+
+**Codegen bug found + fixed en route (seed 1865).** A negative number literal used
+as a computed-member base rendered as `-1[i]`, which JS parses as `-(1[i])` (member
+access binds tighter than unary minus): `(-1)[i]` is `undefined`, `-(1[i])` is `NaN`.
+Fixed with `index_base_js` in `codegen.rs` (parenthesize a negative `Num` Index base;
+`render_get`/`Bin`/`Opaque` were already safe). Regression test
+`negative_num_index_base_is_parenthesized`. simple.js has zero such bases, so it is
+byte-unchanged.
+
+---
+
+## Track A2 — Method-callee detached by freeze → over-throw (NEW, real, higher priority)
+
+**Why it matters.** This is an OVER-throw (the residual raises an exception the
+original never does) and, for non-`.call`/`.apply` methods, a silent `this`-corruption
+(a wrong *answer*) — strictly worse than the under-throws of Track C1. Six fuzzer
+divergences (seeds 661, 1374, 1763, 2368, 2737, 5563) are all this one class.
+
+**Minimal repro (seed 661).**
+```js
+function f0(p0) { return (null ? Math.floor(1) : (-("k" ?? 3))); }
+function main(input) { input = f0.call(null, (Math.floor(false) * null)); return 0; }
+// main(0): original returns 0; residual throws TypeError.
+```
+Residual `main`:
+```js
+v100000  = __rf0;
+v2176128 = v100000.call;                 // <-- method callee hoisted to a temp
+v500021  = Math.floor(false);
+v500024  = v2176128(null, v500021 * null); // <-- called BARE: this === undefined
+```
+`f0.call(null, arg)` was lowered into `tmp = f0.call; tmp(null, arg)`. Calling the
+detached `.call` with `this = undefined` throws `TypeError`. The same shape hits any
+method whose receiver matters (1374 `"ab".toUpperCase(... opaque ...)`, 1763
+`[...].concat(a2(...))`).
+
+**Root cause (traced).** In `do_call` the callee is popped *before*
+`freeze_before_opaque_call`, so the freeze never touches the *current* call's callee.
+But when an **argument** expression contains its own opaque call (`Math.floor(false)`,
+`a2(...)`, `input.toString(...)`), evaluating that inner call runs
+`freeze_before_opaque_call` while the *outer* method callee `Get(obj, "call")` is still
+sitting on the operand stack. `freeze_readers` hoists any ostack/local `Abs::Dyn(e)`
+whose `e` contains a `Get`/`Index`/`Global` to a temp — so it collapses the pending
+`Get(__rf0, "call")` to `Var(v2176128)`, discarding the receiver. The eventual outer
+`do_call` then emits `Call(Var(v2176128), args)` = a bare call: `this` is lost.
+
+**Why the obvious fixes are wrong.**
+- *Make `freeze_readers` preserve `Get` structure* (`tmp = obj; ... tmp.m(args)`):
+  weakens the freeze's property-snapshot guarantee. The whole point of freezing
+  `obj.m` (fix #4, `freeze_before_opaque_call`) is that an intervening opaque call
+  must not change the value read; re-reading `tmp.m` after the call would see a
+  mutated property. Do NOT do this.
+- *Skip freezing callees*: not knowable at freeze time (freeze can't tell which
+  ostack entry becomes a callee).
+
+**Proposed fix (bound-method desugaring).** Freeze a method access destined for a
+call by snapshotting BOTH halves and preserving `this`:
+```
+t_recv = obj;          // snapshot receiver
+t_fn   = t_recv.m;     // snapshot the method (property read, before the inner call)
+...                    // intervening opaque call
+t_fn.call(t_recv, args)   // or  t_recv.m(args) if t_recv is still pinned
+```
+This keeps the property-snapshot guarantee (`t_fn` captured pre-call) AND the correct
+`this`. Carrying the receiver requires either a new `Abs`/`RExpr` "bound method"
+shape, or detecting at the freeze of a `Get(obj,m)` that it is a method-access and
+emitting `Get(freeze(obj), m)` into a temp paired with a frozen `freeze(obj)` so the
+call site can rebuild `t_fn.call(t_recv, ...)`. Touches the load-bearing freeze /
+`do_call` path — **gate on the full test suite AND a simple.js byte-diff** (simple.js
+makes heavy method calls; any freeze change risks its 14k-line residual). Build a
+hand `node -e` over-throw test first, then the bound-method shape, then verify
+simple.js is byte-unchanged.
 
 ---
 
@@ -120,12 +190,19 @@ unchanged after each.
    because its value is never materialized. FIXED for the `Pop`-discard case
    (`Instr::Pop` + `may_throw` in `src/js.rs`). The dead-*store* case is unfixed.
    DO NOT re-try the naive "eager-emit the access at `GetProp`/`GetIndex`" — it was
-   tried and reverted this session because it hoists the throw out of the compact
-   `&&`/`||`/`?:` short-circuit (pure operands evaluate eagerly), causing OVER-throws.
-   A correct fix needs either (a) liveness to know a store is dead, or (b) a may-throw
-   *effect* model that emits at the discard/materialization boundary without breaking
-   short-circuiting. Note this overlaps heavily with the undeclared-var artifact
-   (Track A) — do Track A first so you can see how many dead-store cases are real.
+   tried and reverted in an earlier session because it hoists the throw out of the
+   compact `&&`/`||`/`?:` short-circuit (pure operands evaluate eagerly), causing
+   OVER-throws. A correct fix needs either (a) liveness to know a store is dead, or
+   (b) a may-throw *effect* model that emits at the discard/materialization boundary
+   without breaking short-circuiting.
+   **Now the dominant visible class (Track A is done).** ~20 of the 27 fuzzer
+   divergences are this, with clean minimals — e.g. seed 533
+   `input = null; input = input.b; return 0;` (`null.b` throws, the dead store to the
+   unread `input` is dropped) and seed 2037 `input = null; a5 = input[5]; return 0;`.
+   One outlier (seed 3024) is the same root cause with a *termination* symptom:
+   `orig=throw, spec=timeout` — the dropped throw was what terminated a loop, so the
+   residual spins. Use these as the repro set; pick the cleanest (533) to build the
+   liveness-or-effect fix against.
 
 2. **continue/break out of a residualized `try`/`catch`** — still a deliberate,
    catchable refusal (`residual_try_stack` in `src/js.rs`, ~line 1009 / the panic in
@@ -153,9 +230,15 @@ unchanged after each.
   `Instr::Pop` (discard throws), `residual_fn_for` (residual fn bodies, now
   clean-context), `SPEC_WEIGHT_BUDGET` (budget). The generic engine in `src/engine.rs`
   is NEVER changed for JS-specific work.
+- `js-frontend/src/codegen.rs` — residual IR → JS. `index_base_js` parenthesizes a
+  negative-`Num` computed-member base (Track A codegen fix); `rexpr_to_js` is the
+  per-node emitter.
 - `js-frontend/src/lower.rs` — SWC → `partial::js` AST. Statement-position `++`/`--`
   coercion lives here (`lower_expr_stmt`).
-- `js-frontend/src/bin/fuzz.rs` — generator + shrinker (Track A).
+- `js-frontend/src/bin/fuzz.rs` — generator + shrinker (Track A, done). Artifact
+  guards: `Gen::atom` (in-scope `input`), the try/catch arm (`vars.retain` to scope
+  the catch binding), and `reads_undeclared`/`declared_names`/`collect_reads_*`/
+  `collect_decls_*` feeding `still_fails`.
 - `js-frontend/src/lib.rs` — public API + the test suite (102 tests). `SPEC_STEPS`
   env prints spec_steps/blocks/weight (calibration).
 - `tools/fuzzcmp.js`, `tools/difftrace.js` — the Node oracles.

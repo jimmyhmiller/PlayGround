@@ -1,0 +1,120 @@
+// A small Redis-like key/value store, built two ways on the same core.
+//
+// The design choice that makes this pleasant: there is NO command enum the
+// caller has to build. The KV operations are plain functions that close over
+// the node's `state` cell, and the client just calls a function:
+//
+//     let node = tcp_node(127, 0, 0, 1, 7000)  // stdlib node-address ctor
+//     kv_set_at(node, "x", Val::VInt(41))       // at() transport
+//     kv_set_tcp(node, "x", Val::VInt(41))      // explicit TCP transport
+//
+// Under the hood both transports ship the closure `|| do_set("x", v)` to the
+// node, where it runs against that node's own `db`. The generic wire codec
+// (encode / decode::<T>) serializes any value — Val, Option<Val>, Int — so no
+// per-message marshaling code exists. `Node`, `Result`, `Failure`, and
+// `DecodeError` come from the stdlib.
+
+// ---- Values --------------------------------------------------------------
+// One sum type so a key can hold an Int or a String. The tag (VInt / VStr) is
+// what the reader matches on; it is the value's type, not ceremony.
+enum Val { VInt(Int), VStr(String) }
+
+// ---- The store -----------------------------------------------------------
+// A node-resident singleton: one persistent map behind a lock-free atom.
+// Reads are `deref`, writes are a `swap` over a pure `hashmap_assoc`.
+state db: Atom<HashMap<String, Val>> = atom(hashmap_empty())
+
+// ---- Handlers (run ON the node, mutate its own db) -----------------------
+// These are the whole "engine". Each is one function; there is no dispatcher.
+def do_set(k: String, v: Val) -> Val = {
+    let _u = swap(db, |m: HashMap<String, Val>| hashmap_assoc(m, k, v));
+    v
+}
+
+def do_get(k: String) -> Option<Val> = hashmap_get(deref(db), k)
+
+def do_del(k: String) -> Int = {
+    let had = hashmap_contains(deref(db), k);
+    let _u = swap(db, |m: HashMap<String, Val>| hashmap_remove(m, k));
+    had
+}
+
+// A node address is built with the stdlib's `tcp_node(a, b, c, d, port)`,
+// e.g. `tcp_node(127, 0, 0, 1, 7000)` for a loopback node.
+
+// =========================================================================
+// Transport A — at(): the runtime does connect/encode/serve/decode for you.
+// The client calls a function; the closure carries the work to the node.
+// Returns the stdlib's Result<T, Failure> (Err on an unreachable/crashed node).
+// =========================================================================
+def kv_set_at(node: Node, k: String, v: Val) -> Result<Val, Failure> =
+    at(node, || do_set(k, v))
+
+def kv_get_at(node: Node, k: String) -> Result<Option<Val>, Failure> =
+    at(node, || do_get(k))
+
+def kv_del_at(node: Node, k: String) -> Result<Int, Failure> =
+    at(node, || do_del(k))
+
+// =========================================================================
+// Transport B — explicit TCP: same closures, but we drive the socket and the
+// frame codec ourselves. Still function-driven: the caller never sees a frame.
+// =========================================================================
+
+// A unified client error so a caller gets one Result, not nested ones.
+enum KvErr { Net(NetErr), Decode(DecodeError) }
+
+// Connect, ship the encoded thunk in one length-prefixed frame, read the reply
+// frame back. Fresh connection per call (the stdlib `serve_turn` closes after
+// each request). Network faults surface as KvErr::Net.
+def kv_call_tcp(node: Node, payload: Bytes) -> Result<Bytes, KvErr> =
+    match tcp_connect(node.a, node.b, node.c, node.d, node.port) {
+        Result::Ok(conn) => match send_frame(conn, payload) {
+            Result::Ok(_w) => match recv_frame(conn) {
+                Result::Ok(resp) => {
+                    let _c = conn_close(conn);
+                    Result::Ok(resp)
+                },
+                Result::Err(e) => Result::Err(KvErr::Net(e)),
+            },
+            Result::Err(e) => Result::Err(KvErr::Net(e)),
+        },
+        Result::Err(e) => Result::Err(KvErr::Net(e)),
+    }
+
+def kv_set_tcp(node: Node, k: String, v: Val) -> Result<Val, KvErr> =
+    match kv_call_tcp(node, wire_encode(|| do_set(k, v))) {
+        Result::Ok(b) => match decode::<Val>(b) {
+            Result::Ok(val) => Result::Ok(val),
+            Result::Err(de) => Result::Err(KvErr::Decode(de)),
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+
+def kv_get_tcp(node: Node, k: String) -> Result<Option<Val>, KvErr> =
+    match kv_call_tcp(node, wire_encode(|| do_get(k))) {
+        Result::Ok(b) => match decode::<Option<Val>>(b) {
+            Result::Ok(ov) => Result::Ok(ov),
+            Result::Err(de) => Result::Err(KvErr::Decode(de)),
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+
+def kv_del_tcp(node: Node, k: String) -> Result<Int, KvErr> =
+    match kv_call_tcp(node, wire_encode(|| do_del(k))) {
+        Result::Ok(b) => match decode::<Int>(b) {
+            Result::Ok(n) => Result::Ok(n),
+            Result::Err(de) => Result::Err(KvErr::Decode(de)),
+        },
+        Result::Err(e) => Result::Err(e),
+    }
+
+// ---- Server entry (TCP) --------------------------------------------------
+// Bind a port and serve `n` requests via the GENERIC stdlib loop. Each turn
+// `wire_invoke`s the shipped closure against this node's db. Use `serve` (not
+// shown) to run forever.
+def kv_serve(port: Int, n: Int) -> Int =
+    match tcp_listen(port) {
+        Result::Ok(fd) => serve_turns(fd, n),
+        Result::Err(_e) => 0 - 1,
+    }

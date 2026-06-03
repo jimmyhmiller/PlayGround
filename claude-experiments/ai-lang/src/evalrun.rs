@@ -1535,8 +1535,8 @@ mod tests {
         init();
         let cb = cb_with(
             "enum Opt { Some(Int), None }\n\
-             def s() -> Opt = Some(5)\n\
-             def n() -> Opt = None",
+             def s() -> Opt = Opt::Some(5)\n\
+             def n() -> Opt = Opt::None",
         );
         let s = run(&cb, "s", &[]).unwrap();
         assert_eq!(s.value, Json::obj([("Some".to_string(), Json::Int(5))]));
@@ -1637,7 +1637,7 @@ mod tests {
         init();
         let cb = cb_with(
             "enum Opt { Some(Int), None }\n\
-             def unwrap_or(o: Opt, d: Int) -> Int = match o { Some(x) => x, None => d }",
+             def unwrap_or(o: Opt, d: Int) -> Int = match o { Opt::Some(x) => x, Opt::None => d }",
         );
         // {"Some": 5} -> 5
         let some = Json::obj([("Some".to_string(), Json::Int(5))]);
@@ -1816,7 +1816,7 @@ mod tests {
         init();
         let cb = cb_with(
             "enum Msg { Text(String), Empty }\n\
-             def msg_len(m: Msg) -> Int = match m { Text(s) => string_len(s), Empty => 0 }",
+             def msg_len(m: Msg) -> Int = match m { Msg::Text(s) => string_len(s), Msg::Empty => 0 }",
         );
         let mut obj = std::collections::BTreeMap::new();
         obj.insert("Text".to_string(), Json::Str("hello world".to_string()));

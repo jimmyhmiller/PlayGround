@@ -13,15 +13,16 @@
 //!
 //! ## How it works (the Compiz trick, per-pane)
 //!
-//! One live render-target texture per *pane*: the pane's existing
-//! per-pane camera (already render-layer isolated, see `pane-bevy`'s
-//! `camera.rs`) is retargeted from the window to its own image and framed
-//! at natural scale, while every pane's world transform is pinned to the
-//! origin (`override_pane_transforms`) so a shared origin renders fine
-//! regardless of the live pan/zoom. Each pane becomes a 3D quad on its
-//! project's face, pushed out along the face normal. A `Camera3d` views
-//! the prism; the flat 2D cameras are switched off and keyboard focus is
-//! parked so nothing leaks into terminals while the overview is up.
+//! One live render-target texture per *pane*: a DEDICATED `Camera2d` per
+//! pane (separate from the pane's own window camera) renders that pane's
+//! render layer into its own image, aimed at the pane's ACTUAL flat
+//! position (derived from the live `PaneViewport`). The panes themselves
+//! are never moved or hidden — they stay exactly where the flat editor
+//! has them, harmlessly behind the cube — so opening/closing the overview
+//! involves no pane reposition and therefore no one-frame "jump". Each
+//! pane becomes a 3D quad on its project's face, pushed out along the face
+//! normal. A `Camera3d` (order 1,000,000) draws the prism over everything;
+//! keyboard focus is parked so nothing leaks into terminals while up.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -36,9 +37,10 @@ use bevy::pbr::{Material, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, TextureFormat};
 use bevy::shader::ShaderRef;
-use bevy::transform::TransformSystems;
 
-use pane_bevy::{FocusedPane, PaneCameraOf, PaneLayer, PanePinned, PaneProject, PaneRect, PaneTag};
+use pane_bevy::{
+    FocusedPane, InputConsumed, PaneCameraOf, PaneLayer, PanePinned, PaneProject, PaneRect, PaneTag,
+};
 
 use crate::projects::Projects;
 
@@ -70,6 +72,11 @@ const PIN_LIFT: f32 = 0.01;
 /// face exactly fills the window) is derived from it.
 const FOV_DEG: f32 = 45.0;
 
+/// Longest-side pixel cap for per-pane render-target textures. Panes are
+/// small in the overview, so we don't need full native resolution — this
+/// is the dominant lever on the overview's memory footprint.
+const MAX_FACE_TEX: f32 = 1280.0;
+
 const BACKDROP: Color = Color::srgb(0.04, 0.05, 0.07);
 
 // ---------- Procedural sky shader ----------
@@ -97,6 +104,24 @@ fn skybox_mode(name: &str) -> f32 {
     }
 }
 
+/// Reflective shiny-floor material. `params.xyz` = floor color, `params.w`
+/// = reflection strength. See `floor.wgsl`.
+#[derive(Asset, TypePath, AsBindGroup, Clone)]
+pub struct FloorMaterial {
+    #[uniform(0)]
+    pub params: Vec4,
+}
+
+impl Material for FloorMaterial {
+    fn fragment_shader() -> ShaderRef {
+        ShaderRef::Path(AssetPath::from_path_buf(embedded_path!("floor.wgsl")).with_source("embedded"))
+    }
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+}
+
+
 // ---------- Runtime-tunable params (hot-reloaded from Rhai) ----------
 
 /// Live-tunable overview parameters, driven by `~/.terminal-bevy/cube.rhai`.
@@ -116,6 +141,8 @@ pub struct CubeParams {
     pub skybox: String,
     /// Floor reflection strength, 0 = off. ~0.4 is a subtle wet-floor look.
     pub reflection: f32,
+    /// Floor surface color (linear rgb).
+    pub floor_color: Vec3,
 }
 
 impl Default for CubeParams {
@@ -131,6 +158,7 @@ impl Default for CubeParams {
             dive_dur: 0.55,
             skybox: "dusk".to_string(),
             reflection: 0.25,
+            floor_color: Vec3::new(0.05, 0.06, 0.09),
         }
     }
 }
@@ -150,6 +178,7 @@ const CUBE_RHAI_TEMPLATE: &str = "\
     dive_dur: 0.55,         // dive animation seconds
     skybox: \"dusk\",         // dusk | nebula | space | aurora
     reflection: 0.25,       // floor reflection strength (0 = off)
+    floor_color: [0.05, 0.06, 0.09], // floor surface color, linear [r,g,b]
 }
 ";
 
@@ -166,6 +195,24 @@ fn rhai_f32(map: &rhai::Map, key: &str, default: f32) -> f32 {
                 .or_else(|| d.as_int().ok().map(|v| v as f32))
         })
         .unwrap_or(default)
+}
+
+/// Read a 3-element rhai array (e.g. `[0.1, 0.2, 0.3]`) into a Vec3.
+fn rhai_vec3(map: &rhai::Map, key: &str, default: Vec3) -> Vec3 {
+    let Some(arr) = map.get(key).and_then(|d| d.clone().try_cast::<rhai::Array>()) else {
+        return default;
+    };
+    let f = |i: usize, d: f32| {
+        arr.get(i)
+            .and_then(|x| {
+                x.as_float()
+                    .ok()
+                    .map(|v| v as f32)
+                    .or_else(|| x.as_int().ok().map(|v| v as f32))
+            })
+            .unwrap_or(d)
+    };
+    Vec3::new(f(0, default.x), f(1, default.y), f(2, default.z))
 }
 
 /// Poll `cube.rhai` for changes; re-evaluate and update `CubeParams` on
@@ -212,6 +259,7 @@ fn load_cube_params(
                         .and_then(|v| v.clone().into_string().ok())
                         .unwrap_or(d.skybox),
                     reflection: rhai_f32(&map, "reflection", d.reflection),
+                    floor_color: rhai_vec3(&map, "floor_color", d.floor_color),
                 };
                 eprintln!("[cube] params reloaded: {:?}", *params);
             }
@@ -290,6 +338,9 @@ pub struct Prism {
     floor: Option<Entity>,
     floor_y: f32,
     disabled_cams: Vec<Entity>,
+    /// Menu-overlay camera whose order we bump above the cube so the FPS
+    /// meter / status bar stay visible over the overview; restored on exit.
+    overlay_cam: Option<Entity>,
     prev_focus: Option<Entity>,
 
     yaw: f32,
@@ -330,9 +381,18 @@ pub struct CubePlugin;
 impl Plugin for CubePlugin {
     fn build(&self, app: &mut App) {
         bevy::asset::embedded_asset!(app, "sky.wgsl");
+        bevy::asset::embedded_asset!(app, "floor.wgsl");
         app.add_plugins(MaterialPlugin::<SkyMaterial>::default());
+        app.add_plugins(MaterialPlugin::<FloorMaterial>::default());
         app.init_resource::<Prism>()
             .init_resource::<CubeParams>()
+            // While the overview covers the window, mouse input belongs to
+            // the prism, not the panes/sidebar underneath. Consume it in
+            // PreUpdate, before pane-bevy's `handle_pane_mouse` (Update)
+            // reads the flag, so a rotate-drag never leaks into terminal
+            // text selection. `InputConsumed` resets in PostUpdate, so this
+            // re-arms every frame.
+            .add_systems(PreUpdate, consume_input_during_overview)
             .add_systems(Update, (load_cube_params, animate_sky))
             // MUST run after `overview_apply`: that system despawns the cube
             // (root -> None) on the exit frame, and the cube camera is gone
@@ -352,17 +412,25 @@ impl Plugin for CubePlugin {
                 Update,
                 force_overview_state.after(crate::projects::sync_visibility),
             )
-            .add_systems(
-                PostUpdate,
-                // Pin pane transforms to natural scale at the origin BEFORE
-                // propagation, so the dedicated face cameras render them
-                // correctly.
-                override_pane_transforms.before(TransformSystems::Propagate),
-            );
+            // After `overview_apply` so the window cameras come back on the
+            // same frame the cube despawns (no one-frame blank reveal).
+            .add_systems(Update, suppress_window_pane_cams.after(overview_apply));
     }
 }
 
 // ---------- Input + picking ----------
+
+/// While the overview is up (any phase but `Off`) the cube camera covers
+/// the whole window, so the panes and sidebar behind it must not see the
+/// mouse. Marking input consumed here gates every `!consumed` reader
+/// (pane content press → terminal selection, pane drag/focus, sidebar
+/// clicks) without each having to know about the cube. The prism's own
+/// rotate/dive input reads the mouse buttons directly, so it's unaffected.
+fn consume_input_during_overview(prism: Res<Prism>, mut consumed: ResMut<InputConsumed>) {
+    if prism.phase != Phase::Off {
+        consumed.0 = true;
+    }
+}
 
 /// Detect the toggle / Escape / click-to-dive. Sets `pending_*` flags for
 /// `overview_apply` to act on. Kept separate from `overview_apply` so the
@@ -474,14 +542,20 @@ fn overview_apply(
     mut projects: ResMut<Projects>,
     mut focus: ResMut<FocusedPane>,
     params: Res<CubeParams>,
-    canvas_view: Res<crate::canvas::CanvasView>,
-    sidebar: Res<crate::projects::Sidebar>,
+    (canvas_view, pane_viewport, sidebar): (
+        Res<crate::canvas::CanvasView>,
+        Res<pane_bevy::PaneViewport>,
+        Res<crate::projects::Sidebar>,
+    ),
     windows: Query<&Window>,
     panes: Query<(Entity, &PaneRect, Option<&PaneProject>, Has<PanePinned>, &PaneLayer), With<PaneTag>>,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    mut sky_materials: ResMut<Assets<SkyMaterial>>,
+    (mut sky_materials, mut floor_materials): (
+        ResMut<Assets<SkyMaterial>>,
+        ResMut<Assets<FloorMaterial>>,
+    ),
     mut commands: Commands,
     mut winit: ResMut<bevy::winit::WinitSettings>,
     mut flat_cams: FlatCams,
@@ -500,9 +574,10 @@ fn overview_apply(
                     // owns reverting this when the overview closes.
                     winit.focused_mode = bevy::winit::UpdateMode::Continuous;
                     build(
-                        &mut prism, &projects, &mut focus, &params, &canvas_view, sidebar.width,
+                        &mut prism, &projects, &mut focus, &params, &canvas_view, &pane_viewport,
+                        sidebar.width,
                         window, &panes, &mut images, &mut meshes, &mut materials,
-                        &mut sky_materials, &mut commands, &mut flat_cams,
+                        &mut sky_materials, &mut floor_materials, &mut commands, &mut flat_cams,
                     );
                 }
             }
@@ -596,6 +671,7 @@ fn build(
     focus: &mut FocusedPane,
     params: &CubeParams,
     canvas_view: &crate::canvas::CanvasView,
+    viewport: &pane_bevy::PaneViewport,
     sidebar_width: f32,
     window: &Window,
     panes: &Query<(Entity, &PaneRect, Option<&PaneProject>, Has<PanePinned>, &PaneLayer), With<PaneTag>>,
@@ -603,6 +679,7 @@ fn build(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     sky_materials: &mut Assets<SkyMaterial>,
+    floor_materials: &mut Assets<FloorMaterial>,
     commands: &mut Commands,
     flat_cams: &mut FlatCams,
 ) {
@@ -610,12 +687,20 @@ fn build(
     prism.prev_focus = focus.0;
     focus.0 = None;
 
-    // Switch off the flat window cameras (main + overlay).
+    // NOTE: we no longer deactivate the flat cameras. The cube camera
+    // (order 1_000_000) clears and draws over the whole window, so they're
+    // hidden anyway — and keeping them continuously active avoids the
+    // one-frame stale-projection "jump" a just-reactivated camera renders
+    // on exit.
     prism.disabled_cams.clear();
+
+    // Lift the menu-overlay camera ABOVE the cube so the FPS meter / status
+    // bar (which render on its layer) stay visible over the overview.
+    prism.overlay_cam = None;
     for (e, mut cam) in flat_cams.iter_mut() {
-        if cam.is_active {
-            cam.is_active = false;
-            prism.disabled_cams.push(e);
+        if cam.order == crate::MENU_OVERLAY_CAMERA_ORDER {
+            cam.order = CUBE_CAM_ORDER + 1000;
+            prism.overlay_cam = Some(e);
         }
     }
 
@@ -633,10 +718,19 @@ fn build(
         }
     }
 
-    let mut ids: Vec<u64> = projects.list.iter().map(|p| p.id).collect();
+    // Only switchable (non-parked) projects get a face — the prism is a
+    // project switcher, and hidden projects are excluded from every
+    // switcher by contract (see `Projects::switchable`).
+    let mut ids: Vec<u64> = projects.switchable_ids();
     ids.sort_unstable();
     if ids.is_empty() {
-        ids = by_project.keys().copied().collect();
+        // No catalog entries — fall back to projects that have live panes,
+        // still skipping any that are parked.
+        ids = by_project
+            .keys()
+            .copied()
+            .filter(|id| !projects.is_hidden(*id))
+            .collect();
     }
     let n = ids.len().max(1);
 
@@ -674,14 +768,8 @@ fn build(
     prism.reflect_root = reflect_root;
     prism.floor = if reflect_on {
         let floor_mesh = meshes.add(Mesh::from(Rectangle::new(80.0, 80.0)));
-        let alpha = (1.0 - params.reflection).clamp(0.15, 0.95);
-        let floor_mat = materials.add(StandardMaterial {
-            base_color: Color::srgba(0.015, 0.018, 0.03, alpha),
-            unlit: true,
-            alpha_mode: AlphaMode::Blend,
-            cull_mode: None,
-            double_sided: true,
-            ..default()
+        let floor_mat = floor_materials.add(FloorMaterial {
+            params: params.floor_color.extend(params.reflection.clamp(0.0, 1.0)),
         });
         Some(
             commands
@@ -719,8 +807,12 @@ fn build(
             double_sided: true,
             ..default()
         });
+        // Initial pose only — `apply_prism_transform` overwrites this every
+        // frame (incl. the first) with the rigid recede + recess. Keep it on
+        // the apothem here so it's a clean n-gon even if never updated; the
+        // inward recess is applied rigidly, never per-normal (see below).
         let board_pose = Transform {
-            translation: face_center - dir * BOARD_RECESS,
+            translation: face_center,
             rotation: face_rot,
             ..default()
         };
@@ -824,20 +916,36 @@ fn build(
                 ..default()
             };
 
-            let iw = (rect.size.x * sf).max(1.0) as u32;
-            let ih = (rect.size.y * sf).max(1.0) as u32;
-            let image = images.add(Image::new_target_texture(
-                iw,
-                ih,
-                TextureFormat::Bgra8UnormSrgb,
-                None,
-            ));
+            // Cap the texture resolution: panes are shown small in the
+            // overview, so full native-res images are wasted memory. We
+            // shrink the LONGEST side to MAX_FACE_TEX and fold the
+            // reduction into the render-target scale factor so the face
+            // camera still frames the WHOLE pane (just at lower res).
+            let raw_w = (rect.size.x * sf).max(1.0);
+            let raw_h = (rect.size.y * sf).max(1.0);
+            let cap = (MAX_FACE_TEX / raw_w.max(raw_h)).min(1.0);
+            let iw = (raw_w * cap).max(1.0) as u32;
+            let ih = (raw_h * cap).max(1.0) as u32;
+            let tex_sf = sf * cap;
+            let mut img = Image::new_target_texture(iw, ih, TextureFormat::Bgra8UnormSrgb, None);
+            // Render target: never read on the CPU, so don't keep a CPU copy
+            // (halves the per-image footprint).
+            img.asset_usage = bevy::asset::RenderAssetUsages::RENDER_WORLD;
+            let image = images.add(img);
 
-            // Dedicated camera that renders this pane's content (its
-            // render layer) into `image`. The pane is pinned to the world
-            // origin (`override_pane_transforms`), so framing [0..size]
-            // captures it at natural scale. This camera's target never
-            // changes, which is what keeps wgpu happy across enter/exit.
+            // Dedicated camera that renders this pane's content (its render
+            // layer) into `image`. We frame the pane WHERE IT ACTUALLY IS
+            // (its flat world rect) rather than pinning it to the origin —
+            // so the panes never move when the cube opens/closes, which is
+            // what eliminates the one-frame "jump" at the exit. The camera
+            // only ever targets `image`, so wgpu stays happy across toggles.
+            let screen_tl = viewport.canvas_to_window(rect.pos);
+            let world_tl = Vec2::new(screen_tl.x - win_w * 0.5, win_h * 0.5 - screen_tl.y);
+            let pane_world_size = rect.size * viewport.zoom;
+            let cam_center = Vec2::new(
+                world_tl.x + pane_world_size.x * 0.5,
+                world_tl.y - pane_world_size.y * 0.5,
+            );
             let face_cam = commands
                 .spawn((
                     Camera2d,
@@ -850,9 +958,19 @@ fn build(
                         clear_color: ClearColorConfig::Custom(Color::NONE),
                         ..default()
                     },
-                    image_target(&image, sf),
-                    Transform::from_xyz(rect.size.x * 0.5, -rect.size.y * 0.5, 0.0),
+                    // Match the live zoom so the framed world rect == the
+                    // pane's actual on-screen rect.
+                    Projection::from(OrthographicProjection {
+                        scale: viewport.zoom.max(1e-4),
+                        ..OrthographicProjection::default_2d()
+                    }),
+                    image_target(&image, tex_sf),
+                    Transform::from_xyz(cam_center.x, cam_center.y, 0.0),
                     RenderLayers::layer(*layer),
+                    // No MSAA: text/terminal content is already antialiased,
+                    // and a 4x MSAA buffer per pane image is ~4x the texture
+                    // memory (the bulk of the overview's footprint).
+                    bevy::render::view::Msaa::Off,
                     Name::new(format!("face_cam:{pid}")),
                 ))
                 .id();
@@ -1009,6 +1127,12 @@ fn reset_to_flat(prism: &mut Prism, flat_cams: &mut FlatCams, focus: &mut Focuse
             cam.is_active = true;
         }
     }
+    // Restore the menu-overlay camera's normal order.
+    if let Some(e) = prism.overlay_cam.take() {
+        if let Ok((_, mut cam)) = flat_cams.get_mut(e) {
+            cam.order = crate::MENU_OVERLAY_CAMERA_ORDER;
+        }
+    }
     // Restore focus only on a plain close; a dive changed the active
     // project, so let the project-change refocus pick the new target.
     if prism.dive_target.is_none() {
@@ -1053,29 +1177,24 @@ fn despawn_cube(prism: &mut Prism, commands: &mut Commands, images: &mut Assets<
 
 // ---------- Per-frame drivers ----------
 
-fn override_pane_transforms(prism: Res<Prism>, mut panes: Query<&mut Transform, With<PaneTag>>) {
-    if !prism.active {
-        return;
-    }
-    for pane in prism.faces.keys() {
-        if let Ok(mut t) = panes.get_mut(*pane) {
-            if t.translation != Vec3::ZERO {
-                t.translation = Vec3::ZERO;
-            }
-            if t.scale != Vec3::ONE {
-                t.scale = Vec3::ONE;
-            }
+/// Switch the panes' OWN window cameras off while the cube is up — they'd
+/// render the same pane content to the window (just hidden under the cube),
+/// doubling the per-pane render-to-texture cost. The dedicated face cameras
+/// handle the cube. We turn them back on the instant the cube fully
+/// despawns (root == None). Safe now that panes never move (no origin
+/// pinning) — the reveal lands on the correct, unchanged layout.
+///
+/// MUST run after `overview_apply` (see registration): that's the system
+/// that despawns the cube; if we ran first we'd leave them off for one
+/// frame at the reveal and the panes would vanish.
+fn suppress_window_pane_cams(prism: Res<Prism>, mut cams: Query<&mut Camera, With<PaneCameraOf>>) {
+    let want_active = prism.root.is_none();
+    for mut cam in &mut cams {
+        if cam.is_active != want_active {
+            cam.is_active = want_active;
         }
     }
 }
-
-// NOTE: we deliberately do NOT deactivate the panes' window cameras
-// during cube mode. The cube camera (order 1_000_000) clears and draws
-// over the whole window, so the window cameras are harmlessly hidden,
-// and — crucially — keeping them continuously active means Bevy keeps
-// their projection up to date, so the flat view reveals a CORRECT frame
-// on exit instead of one stale, jumped frame from a just-reactivated
-// camera. (Pinned to the origin, they render nothing visible anyway.)
 
 /// Advance the sky shader's time uniform so the nebula drifts and stars
 /// twinkle. Cheap; only touches the one material while the prism is up.
@@ -1256,10 +1375,19 @@ fn apply_prism_transform(
         // root's yaw rotation the net shift is straight back from the
         // camera, so the n-gon keeps its clean shape and just sits behind
         // the (un-shifted) panes.
+        // Recede straight back from the camera (world -Z after the root
+        // yaw). BOTH the animated recede AND the constant board offset go
+        // in here. Applying the constant offset per-board-normal instead
+        // (`- dir * BOARD_RECESS`) pulls each board toward the axis, which
+        // shrinks its effective radius below the apothem and makes adjacent
+        // boards interpenetrate — the same "collapse into an X" noted above,
+        // just small enough to only show when the animated recede is near
+        // zero (mid open/dive/morph). Folding it into the rigid shift keeps
+        // the n-gon a clean prism at every animation frame.
         let back = Quat::from_rotation_y(-prism.yaw)
-            * Vec3::new(0.0, 0.0, -params.board_recede * frac);
+            * Vec3::new(0.0, 0.0, -(params.board_recede * frac + BOARD_RECESS));
         let pose = Transform {
-            translation: face_center - dir * BOARD_RECESS + back,
+            translation: face_center + back,
             rotation: Quat::from_rotation_y(theta),
             ..default()
         };

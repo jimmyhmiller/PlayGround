@@ -276,7 +276,7 @@ impl Lower {
             if let Some(id) = owner {
                 self.cur_stmt_node_id = Some(*id);
             }
-            self.cfg.cur_src = self.cur_stmt_node_id.map(|stmt_node_id| SrcRef { stmt_node_id });
+            self.cfg.cur_src = self.cur_stmt_node_id.map(|stmt_node_id| SrcRef { stmt_node_id, expr_node_id: None });
             self.lower_op(op, cur)?;
             // Once a block is terminated (return/throw), the rest is unreachable
             // for the current block; stop emitting into it.
@@ -285,11 +285,27 @@ impl Lower {
             }
         }
         self.cur_stmt_node_id = saved;
-        self.cfg.cur_src = saved.map(|stmt_node_id| SrcRef { stmt_node_id });
+        self.cfg.cur_src = saved.map(|stmt_node_id| SrcRef { stmt_node_id, expr_node_id: None });
         Ok(())
     }
 
     fn lower_op(&mut self, op: &IrOp, cur: &mut BlockId) -> Result<(), String> {
+        // Expression-granular provenance: while lowering this op, stamp its
+        // node_id as the current expression node, so every instruction it emits
+        // (whether via `def` or a direct `cfg.push`) records which JSIR expression
+        // it came from. Restore afterward so siblings get their own.
+        let saved = self.cfg.cur_src;
+        if let Some(nid) = op.node_id {
+            let mut s = self.cfg.cur_src.unwrap_or(SrcRef { stmt_node_id: nid, expr_node_id: None });
+            s.expr_node_id = Some(nid);
+            self.cfg.cur_src = Some(s);
+        }
+        let result = self.lower_op_dispatch(op, cur);
+        self.cfg.cur_src = saved;
+        result
+    }
+
+    fn lower_op_dispatch(&mut self, op: &IrOp, cur: &mut BlockId) -> Result<(), String> {
         match op.name.as_str() {
             // --- expression value ops (already SSA) ---
             "jsir.numeric_literal" => {
@@ -1038,6 +1054,8 @@ impl Lower {
 
     /// Define an instruction with a result and map the jsir result to it.
     fn def(&mut self, op: &IrOp, block: BlockId, cfg_op: Op) {
+        // Expression provenance is stamped centrally by `lower_op`; here we just
+        // push and bind the result.
         let v = self.cfg.push(block, cfg_op);
         if let Some(r) = op.results.first() {
             self.vmap.insert(*r, v);

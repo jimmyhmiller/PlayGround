@@ -330,14 +330,12 @@ pub fn compile(src: &str) -> Result<String, String> {
     // want the production policy.
     let r = crate::aliasing_ranges::analyze(&cfg);
     let infos = crate::scopes::analyze(&cfg, &r);
-    let layout = crate::memoize_plan::build_layout(&cfg, &infos, &r)?;
-    // Nothing actually memoized (no surviving escaping scope): emit the function
-    // unchanged rather than a degenerate `const $ = _c(0)` scaffold + runtime
-    // import. React leaves such functions un-memoized, so emitting the empty
-    // cache shell is a pure over-memoization (it shows up as `ours_only`).
-    if layout.cache_size == 0 {
-        return jsir_swc::ir_to_source(&ir);
+    // The single emitter: rewrite the original JSIR tree in place, guarding each
+    // reactive scope where it lives (control flow kept verbatim, no relooper). A
+    // clean `Err` (nothing escapes, or a shape it cannot yet rewrite) means leave
+    // the function un-memoized — never a miscompile.
+    match crate::memoize_plan::memoize_inplace(&cfg, &infos, &r, &ir) {
+        Ok(memo) => jsir_swc::ir_to_source(&memo),
+        Err(_) => jsir_swc::ir_to_source(&ir),
     }
-    let result = jsir_transforms::memoize::memoize_file(&ir, &layout)?;
-    jsir_swc::ir_to_source(&result.file)
 }

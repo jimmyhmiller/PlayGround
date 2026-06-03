@@ -21,11 +21,11 @@ def env_or(name: String, fallback: String) -> String = {
 
 def report(r: Result<HttpResponse, String>) -> Int =
     match r {
-        Ok(resp) => {
+        Result::Ok(resp) => {
             let a = println(string_concat("status: ", int_to_string(resp.status)));
             println(string_concat("body: ", resp.body))
         },
-        Err(e) => println(string_concat("transport error: ", e))
+        Result::Err(e) => println(string_concat("transport error: ", e))
     }
 
 def main() -> Int = {

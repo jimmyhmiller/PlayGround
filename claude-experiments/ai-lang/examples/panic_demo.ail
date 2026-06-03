@@ -21,10 +21,10 @@ def checked_get(idx: Int) -> Int =
 // `panic` inside a match arm. The reached arm returns Int; the
 // unreached arm diverges.
 def must_be_positive(x: Int) -> Int =
-    match Some(x) {
-        Some(_) =>
+    match Option::Some(x) {
+        Option::Some(_) =>
             if x > 0 { x } else { panic("expected a positive number") },
-        None => panic("impossible: Some is always Some")
+        Option::None => panic("impossible: Some is always Some")
     }
 
 def main() -> Int = {

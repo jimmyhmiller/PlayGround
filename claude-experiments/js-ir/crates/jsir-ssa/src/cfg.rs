@@ -87,6 +87,11 @@ pub struct Cfg {
     /// stable across SSA construction (it substitutes values in place, never
     /// reorders), so this survives untouched.
     pub spread_positions: HashMap<Value, Vec<usize>>,
+    /// Maps each phi (block-argument) value to the source variable it represents
+    /// (populated by SSA construction). Lets an IR-rewrite memoizer render a
+    /// dependency that is a phi (e.g. a `let x` assigned across `&&`/`||`/`if`
+    /// branches) as its real name `x` rather than a synthesized temp.
+    pub phi_var: HashMap<Value, VarId>,
 }
 
 /// The behavioral representation of a closure value (see [`Cfg::closures`]).
@@ -135,6 +140,12 @@ pub struct Instr {
 pub struct SrcRef {
     /// `node_id` of the enclosing statement-root JSIR op.
     pub stmt_node_id: u32,
+    /// `node_id` of the specific JSIR *expression* op this instruction lowered
+    /// (when known) — expression-granular provenance, so an IR-rewrite memoizer
+    /// can locate and extract a sub-expression (e.g. the anonymous `[a, b]` in
+    /// `return [a, b]`), not just the enclosing statement. `None` for synthetic
+    /// instructions and statement-level ops with no distinct expression node.
+    pub expr_node_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -292,6 +303,7 @@ impl Cfg {
             blocks: Vec::new(),
             entry: BlockId(0),
             var_names: Vec::new(),
+            phi_var: HashMap::new(),
             next_value: 0,
             cur_src: None,
             joins: HashMap::new(),

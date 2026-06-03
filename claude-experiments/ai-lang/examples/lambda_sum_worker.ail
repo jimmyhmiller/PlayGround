@@ -9,12 +9,12 @@ def sum_range(lo: Int, hi: Int, acc: Int) -> Int =
 // numbers go through parse_json + json_int).
 def field_int(event: String, key: String) -> Int =
     match parse_json(event) {
-        Ok(j) =>
+        Result::Ok(j) =>
             match json_get(j, key) {
-                Some(v) => match json_int(v) { Some(n) => n, None => 0 },
-                None => 0
+                Option::Some(v) => match json_int(v) { Option::Some(n) => n, Option::None => 0 },
+                Option::None => 0
             },
-        Err(e) => 0
+        Result::Err(e) => 0
     }
 
 def handler(event: String) -> String = {

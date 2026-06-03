@@ -773,6 +773,32 @@ impl<'t> Parser<'t> {
         let mut e = self.parse_atom()?;
         loop {
             match self.peek_kind() {
+                // `Enum::Variant` — qualified variant reference. Distinguished
+                // from turbofish (`callee::<T>(...)`) by a following identifier
+                // rather than `<`. The left side must be a bare enum name.
+                TokenKind::ColonColon if matches!(self.peek_nth_kind(1), TokenKind::Ident(_)) => {
+                    self.bump(); // `::`
+                    let (variant_name, var_span) = self.expect_ident("variant name after `::`")?;
+                    let enum_name = match &e {
+                        SurfaceExpr::Var { name, .. } => name.clone(),
+                        _ => {
+                            return Err(ParseError::Unexpected {
+                                expected: "an enum name before `::Variant`".to_owned(),
+                                found: "a non-identifier expression".to_owned(),
+                                span: e.span(),
+                            });
+                        }
+                    };
+                    let span = Span {
+                        start: e.span().start,
+                        end: var_span.end,
+                    };
+                    e = SurfaceExpr::VariantRef {
+                        enum_name,
+                        variant_name,
+                        span,
+                    };
+                }
                 // Turbofish: `callee::<T, ...>(args)`. The `::<...>` MUST be
                 // immediately followed by a call — it names explicit type
                 // arguments for that call.
@@ -1110,6 +1136,38 @@ impl<'t> Parser<'t> {
             }
             TokenKind::Ident(name) => {
                 self.bump();
+                // `Enum::Variant` or `Enum::Variant(pat)` — qualified variant
+                // pattern. Variant patterns must be qualified; a bare ident is
+                // always a binding (or rejected by the resolver if it shadows a
+                // variant name).
+                if matches!(self.peek_kind(), TokenKind::ColonColon) {
+                    self.bump(); // `::`
+                    let (variant_name, var_span) = self.expect_ident("variant name after `::`")?;
+                    let (payload, end) = if self.eat(&TokenKind::LParen) {
+                        let inner = self.parse_pattern()?;
+                        if matches!(self.peek_kind(), TokenKind::Comma) {
+                            let span = self.peek().span;
+                            return Err(ParseError::Unexpected {
+                                expected: "`)` (v1 constructor patterns have at most one sub-pattern)".to_owned(),
+                                found: ",".to_owned(),
+                                span,
+                            });
+                        }
+                        let close = self.expect(&TokenKind::RParen, "`)`")?;
+                        (Some(Box::new(inner)), close.span.end)
+                    } else {
+                        (None, var_span.end)
+                    };
+                    return Ok(SurfacePattern::QualifiedCtor {
+                        enum_name: name,
+                        variant_name,
+                        payload,
+                        span: Span {
+                            start: t.span.start,
+                            end,
+                        },
+                    });
+                }
                 if self.eat(&TokenKind::LParen) {
                     let inner = self.parse_pattern()?;
                     if matches!(self.peek_kind(), TokenKind::Comma) {

@@ -30,7 +30,7 @@ def chunks(start: Int, total: Int, per: Int, acc: List<String>) -> List<String> 
         list_reverse(acc)
     } else {
         let hi = if start + per > total { total } else { start + per };
-        chunks(hi, total, per, Cons(ListCell { head: chunk_input(start, hi), tail: acc }))
+        chunks(hi, total, per, List::Cons(ListCell { head: chunk_input(start, hi), tail: acc }))
     }
 
 // Each worker returns its partial sum as a decimal string in the body.
@@ -41,8 +41,8 @@ def partial(resp: HttpResponse) -> Int =
 
 def reduce_sum(resps: List<HttpResponse>, acc: Int) -> Int =
     match resps {
-        Nil => acc,
-        Cons(cell) => reduce_sum(cell.tail, acc + partial(cell.head))
+        List::Nil => acc,
+        List::Cons(cell) => reduce_sum(cell.tail, acc + partial(cell.head))
     }
 
 def main() -> Int = {
@@ -53,7 +53,7 @@ def main() -> Int = {
     let token = env_get("AWS_SESSION_TOKEN");
     let total = 2000;
     let per = 100;                       // 20 chunks -> 20 parallel invocations
-    let inputs = chunks(0, total, per, Nil);
+    let inputs = chunks(0, total, per, List::Nil);
     let a = println(str3("shipping code to ", int_to_string(list_length(inputs)), " parallel generic-worker invocations..."));
     let resps = lambda_run_code_many(region, name, task_source(), inputs, ak, sk, token);
     let result = reduce_sum(resps, 0);
