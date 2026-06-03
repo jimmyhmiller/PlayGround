@@ -741,10 +741,12 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
     let mut operands: HashMap<Value, Vec<Value>> = HashMap::new();
     let mut users: HashMap<Value, Vec<Option<Value>>> = HashMap::new();
     let mut const_vals: HashSet<Value> = HashSet::new();
+    let mut def_op: HashMap<Value, &crate::cfg::Op> = HashMap::new();
     for b in &cfg.blocks {
         for ins in &b.instrs {
             if let Some(res) = ins.result {
                 operands.insert(res, ins.op.operands());
+                def_op.insert(res, &ins.op);
                 if matches!(ins.op, crate::cfg::Op::Const(_)) {
                     const_vals.insert(res);
                 }
@@ -1008,12 +1010,19 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
     for w in work.into_iter().flatten() {
         let values = &w.values;
         let mut deps: Vec<Value> = Vec::new();
-        let mut seen: HashSet<Value> = HashSet::new();
+        // Dedup dependencies by reactive ACCESS PATH, not SSA value: two reads of
+        // `props.router.location` are one dependency (React's rule), so the cache
+        // key count matches React's.
+        let mut seen: HashSet<(Value, Vec<String>)> = HashSet::new();
         let mut sorted_vals: Vec<Value> = values.iter().copied().collect();
         sorted_vals.sort_by_key(|v| r.def.get(v).copied().unwrap_or(0));
         for v in &sorted_vals {
             for o in operands.get(v).map(|x| x.as_slice()).unwrap_or(&[]) {
-                if !values.contains(o) && reactive.contains(o) && !const_vals.contains(o) && seen.insert(*o) {
+                if !values.contains(o)
+                    && reactive.contains(o)
+                    && !const_vals.contains(o)
+                    && seen.insert(access_path_key(&def_op, *o))
+                {
                     deps.push(*o);
                 }
             }
@@ -1049,6 +1058,34 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
     }
     out.sort_by_key(|i| (i.scope.start, i.scope.end));
     out
+}
+
+/// The reactive **access path** of a value: its root value plus the chain of
+/// static member names it is read through. `props.router.location` (a chain of
+/// `Member` loads from the `props` param) has key `(props, ["router","location"])`.
+/// Two different SSA values that read the same path share a key, so a scope that
+/// depends on the same path twice (e.g. once in a closure body, once in a
+/// `useCallback` dep array) counts it as ONE dependency — React keys cache
+/// dependencies by access path, not by SSA value. A value that is not a static
+/// member chain is its own atomic path (`(v, [])`).
+fn access_path_key(
+    def_op: &std::collections::HashMap<Value, &crate::cfg::Op>,
+    v: Value,
+) -> (Value, Vec<String>) {
+    use crate::cfg::{MemberKey, Op};
+    let mut props: Vec<String> = Vec::new();
+    let mut cur = v;
+    let mut guard = 0;
+    while let Some(Op::Member { obj, prop: MemberKey::Static(name) }) = def_op.get(&cur).copied() {
+        props.push(name.clone());
+        cur = *obj;
+        guard += 1;
+        if guard > def_op.len() + 1 {
+            break;
+        }
+    }
+    props.reverse();
+    (cur, props)
 }
 
 fn term_operands(cfg: &Cfg, b: crate::cfg::BlockId) -> Vec<Value> {

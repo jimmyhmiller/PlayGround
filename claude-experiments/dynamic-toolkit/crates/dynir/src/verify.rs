@@ -305,7 +305,13 @@ fn check_value_use(
     }
 }
 
-fn check_inst_types(func: &Function, inst: &Inst, _block: BlockId, options: VerifyOptions, errors: &mut Vec<VerifyError>) {
+fn check_inst_types(
+    func: &Function,
+    inst: &Inst,
+    _block: BlockId,
+    options: VerifyOptions,
+    errors: &mut Vec<VerifyError>,
+) {
     let vt = |v: Value| func.value_type(v);
     match inst {
         Inst::Add(a, b)
@@ -531,7 +537,11 @@ fn check_terminator(
                 check_invoke_exception_args(func, block, *exception, exception_args, errors);
             }
         }
-        Terminator::CaptureSlice { prompt, handler_block, resume_block } => {
+        Terminator::CaptureSlice {
+            prompt,
+            handler_block,
+            resume_block,
+        } => {
             if !options.allow_continuations {
                 errors.push(VerifyError::ContinuationsNotAllowed {
                     context: "capture_slice".into(),
@@ -574,7 +584,12 @@ fn check_terminator(
                 }
             }
         }
-        Terminator::ResumeSlice { slice, return_block, return_args, .. } => {
+        Terminator::ResumeSlice {
+            slice,
+            return_block,
+            return_args,
+            ..
+        } => {
             if !options.allow_continuations {
                 errors.push(VerifyError::ContinuationsNotAllowed {
                     context: "resume_slice".into(),

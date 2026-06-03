@@ -164,7 +164,9 @@ impl<'a> FuncLowerer<'a> {
                     return self.enter_dead_block();
                 }
 
-                let func_ref = *self.func_refs.get(name.as_str())
+                let func_ref = *self
+                    .func_refs
+                    .get(name.as_str())
                     .unwrap_or_else(|| panic!("undefined function: {}", name));
                 let arg_vals: Vec<Value> = args.iter().map(|a| self.lower_expr(a)).collect();
                 // Void calls (e.g. `bytes_set`) return None from
@@ -255,8 +257,7 @@ impl<'a> FuncLowerer<'a> {
                 let exit_bb = self.fb.create_block(&[]);
 
                 // Jump from current block to header with initial values.
-                let initial_args: Vec<Value> =
-                    snapshot.iter().map(|(_, v)| *v).collect();
+                let initial_args: Vec<Value> = snapshot.iter().map(|(_, v)| *v).collect();
                 self.fb.jump(header_bb, &initial_args);
 
                 // Header: replace scope mappings with the block params.
@@ -367,7 +368,9 @@ impl<'a> FuncLowerer<'a> {
             }
             Expr::Capture => {
                 let prompt = self.current_prompt();
-                let live_vals: Vec<Value> = self.vars.iter()
+                let live_vals: Vec<Value> = self
+                    .vars
+                    .iter()
                     .flat_map(|scope| scope.values().copied())
                     .collect();
                 self.fb.capture_slice(prompt, &live_vals)
@@ -514,25 +517,37 @@ pub fn lower_program(program: &Program) -> LoweredProgram {
     // interpreter setup time (see the contlang test harness).
     let f_alloc = mb.declare_extern(
         BYTES_ALLOC,
-        Signature { params: vec![Type::I64], ret: Some(Type::GcPtr) },
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::GcPtr),
+        },
     );
     func_refs.insert(BYTES_ALLOC.to_string(), f_alloc);
 
     let f_get = mb.declare_extern(
         BYTES_GET,
-        Signature { params: vec![Type::GcPtr, Type::I64], ret: Some(Type::I64) },
+        Signature {
+            params: vec![Type::GcPtr, Type::I64],
+            ret: Some(Type::I64),
+        },
     );
     func_refs.insert(BYTES_GET.to_string(), f_get);
 
     let f_set = mb.declare_extern(
         BYTES_SET,
-        Signature { params: vec![Type::GcPtr, Type::I64, Type::I64], ret: None },
+        Signature {
+            params: vec![Type::GcPtr, Type::I64, Type::I64],
+            ret: None,
+        },
     );
     func_refs.insert(BYTES_SET.to_string(), f_set);
 
     let f_len = mb.declare_extern(
         BYTES_LEN,
-        Signature { params: vec![Type::GcPtr], ret: Some(Type::I64) },
+        Signature {
+            params: vec![Type::GcPtr],
+            ret: Some(Type::I64),
+        },
     );
     func_refs.insert(BYTES_LEN.to_string(), f_len);
 
@@ -576,8 +591,13 @@ pub fn lower_program(program: &Program) -> LoweredProgram {
     }
 
     let module = mb.build();
-    let entry = *func_refs.get(&program.decls.last().unwrap().name)
+    let entry = *func_refs
+        .get(&program.decls.last().unwrap().name)
         .expect("no functions in program");
 
-    LoweredProgram { module, entry, func_refs }
+    LoweredProgram {
+        module,
+        entry,
+        func_refs,
+    }
 }

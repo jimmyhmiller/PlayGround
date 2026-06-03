@@ -102,7 +102,10 @@ impl<'a> Compiler<'a> {
             // function form
             let name_sym = car(target);
             let params_list = cdr(target);
-            assert!(is_symbol(name_sym), "define: function name must be a symbol");
+            assert!(
+                is_symbol(name_sym),
+                "define: function name must be a symbol"
+            );
             let name = self.sym.name(as_symbol_id(name_sym)).to_string();
             let mut params: Vec<u32> = Vec::new();
             for p in list_iter(params_list) {
@@ -120,7 +123,10 @@ impl<'a> Compiler<'a> {
             // Variable form — represent as a 0-arg getter for v0. (We don't
             // have first-class globals; this lets `(define x 5)` followed by
             // `(x)` work.)
-            assert!(is_symbol(target), "define: target must be symbol or function form");
+            assert!(
+                is_symbol(target),
+                "define: target must be symbol or function form"
+            );
             let name = self.sym.name(as_symbol_id(target)).to_string();
             let init = car(body_forms);
             let fref = self.mb.declare_func(&name, &[], Some(Type::I64));
@@ -144,7 +150,9 @@ impl<'a> Compiler<'a> {
 
         // Unique internal name so the macro fn can't collide with a regular fn.
         let internal = format!("__macro__{name}");
-        let fref = self.mb.declare_func(&internal, &[Type::I64], Some(Type::I64));
+        let fref = self
+            .mb
+            .declare_func(&internal, &[Type::I64], Some(Type::I64));
         self.func_refs.insert(internal.clone(), fref);
 
         // Synthesize a body that destructures `args` according to `pattern`.
@@ -161,7 +169,10 @@ impl<'a> Compiler<'a> {
             let raw_body = wrap_body(body_forms, self.sym);
             wrap_destructure(pattern, args_id, raw_body, self.sym)
         } else {
-            panic!("defmacro: pattern must be a symbol or list, got 0x{:016x}", pattern);
+            panic!(
+                "defmacro: pattern must be a symbol or list, got 0x{:016x}",
+                pattern
+            );
         };
 
         self.compile_function_body(fref, &[args_id], body);
@@ -238,7 +249,11 @@ impl<'a> Compiler<'a> {
     fn lower_if(&mut self, fb: &mut FunctionBuilder, env: &mut Env, args: u64) -> Value {
         let cond_form = car(args);
         let then_form = car(cdr(args));
-        let else_form = if is_cons(cdr(cdr(args))) { car(cdr(cdr(args))) } else { v::NIL };
+        let else_form = if is_cons(cdr(cdr(args))) {
+            car(cdr(cdr(args)))
+        } else {
+            v::NIL
+        };
 
         let cond = self.lower_expr(fb, env, cond_form);
         // Truthy = !nil && !#false. Build a boolean by comparing against both.
@@ -328,14 +343,20 @@ impl<'a> Compiler<'a> {
         }
         // Pop tail and all item_vals.
         self.live_stack.pop(); // tail
-        for _ in 0..item_vals.len() { self.live_stack.pop(); }
+        for _ in 0..item_vals.len() {
+            self.live_stack.pop();
+        }
         tail
     }
 
     fn lower_call(&mut self, fb: &mut FunctionBuilder, env: &mut Env, form: u64) -> Value {
         let head = car(form);
         let args = cdr(form);
-        assert!(is_symbol(head), "call head must be a symbol; got 0x{:016x}", head);
+        assert!(
+            is_symbol(head),
+            "call head must be a symbol; got 0x{:016x}",
+            head
+        );
         let head_name = self.sym.name(as_symbol_id(head)).to_string();
         // Evaluate args left-to-right; push each onto live_stack so a
         // safepoint emitted by a nested allocator call sees this arg as
@@ -348,9 +369,10 @@ impl<'a> Compiler<'a> {
             self.live_stack.push(v);
             arg_vals.push(v);
         }
-        let fref = *self.func_refs.get(&head_name).unwrap_or_else(|| {
-            panic!("undefined function: {}", head_name)
-        });
+        let fref = *self
+            .func_refs
+            .get(&head_name)
+            .unwrap_or_else(|| panic!("undefined function: {}", head_name));
         // Allocator calls require a preceding safepoint listing every
         // live IR value: env bindings + the entire live_stack (which
         // covers our args plus any partially-evaluated parent call's args).
@@ -365,7 +387,9 @@ impl<'a> Compiler<'a> {
             fb.iconst(Type::I64, v::NIL as i64)
         });
         // Pop our args from the live stack (they're consumed by the call).
-        for _ in 0..arg_vals.len() { self.live_stack.pop(); }
+        for _ in 0..arg_vals.len() {
+            self.live_stack.pop();
+        }
         result
     }
 }
@@ -447,7 +471,9 @@ fn wrap_destructure(pattern: u64, args_sym: u32, body: u64, sym: &mut SymbolTabl
     let mut p = pattern;
     let mut cursor_idx = 0u32;
     loop {
-        if is_nil(p) { break; }
+        if is_nil(p) {
+            break;
+        }
         if is_symbol(p) {
             let pat_id = as_symbol_id(p);
             bindings.push((pat_id, encode_sym(current_cursor)));
@@ -457,15 +483,26 @@ fn wrap_destructure(pattern: u64, args_sym: u32, body: u64, sym: &mut SymbolTabl
             panic!("destructure pattern must be cons / symbol / nil");
         }
         let elem = car(p);
-        assert!(is_symbol(elem), "destructure: each pattern element must be a symbol");
+        assert!(
+            is_symbol(elem),
+            "destructure: each pattern element must be a symbol"
+        );
         let elem_id = as_symbol_id(elem);
-        let car_call = cons2(encode_sym(car_sym), cons2(encode_sym(current_cursor), v::NIL));
+        let car_call = cons2(
+            encode_sym(car_sym),
+            cons2(encode_sym(current_cursor), v::NIL),
+        );
         bindings.push((elem_id, car_call));
         let next_p = cdr(p);
-        if is_nil(next_p) { break; }
+        if is_nil(next_p) {
+            break;
+        }
         cursor_idx += 1;
         let next_cursor_id = sym.intern(&format!("__cursor_{cursor_idx}__"));
-        let cdr_call = cons2(encode_sym(cdr_sym), cons2(encode_sym(current_cursor), v::NIL));
+        let cdr_call = cons2(
+            encode_sym(cdr_sym),
+            cons2(encode_sym(current_cursor), v::NIL),
+        );
         bindings.push((next_cursor_id, cdr_call));
         current_cursor = next_cursor_id;
         p = next_p;
@@ -489,9 +526,7 @@ fn wrap_destructure(pattern: u64, args_sym: u32, body: u64, sym: &mut SymbolTabl
 /// auto-collection behaviour from silently breaking these helpers.
 fn cons2(car: u64, cdr: u64) -> u64 {
     // 3 slots: alloc_cons_from_raw needs car + cdr + result.
-    dynobj::roots::with_scope(3, |scope| {
-        alloc_cons_from_raw(scope, car, cdr).get()
-    })
+    dynobj::roots::with_scope(3, |scope| alloc_cons_from_raw(scope, car, cdr).get())
 }
 
 /// Truthy = (val != NIL) && (val != FALSE).
@@ -512,16 +547,24 @@ pub struct Env {
 
 impl Env {
     pub fn new() -> Self {
-        Env { scopes: vec![HashMap::new()] }
+        Env {
+            scopes: vec![HashMap::new()],
+        }
     }
-    pub fn push(&mut self) { self.scopes.push(HashMap::new()); }
-    pub fn pop(&mut self) { self.scopes.pop(); }
+    pub fn push(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+    pub fn pop(&mut self) {
+        self.scopes.pop();
+    }
     pub fn bind(&mut self, id: u32, v: Value) {
         self.scopes.last_mut().unwrap().insert(id, v);
     }
     pub fn lookup(&self, id: u32) -> Option<Value> {
         for s in self.scopes.iter().rev() {
-            if let Some(&v) = s.get(&id) { return Some(v); }
+            if let Some(&v) = s.get(&id) {
+                return Some(v);
+            }
         }
         None
     }
@@ -559,14 +602,17 @@ pub fn declare_primitives(
     mb: &mut ModuleBuilder,
     func_refs: &mut HashMap<String, FuncRef>,
 ) -> Vec<*const u8> {
-    use crate::prims::{all_prims, PrimSig};
+    use crate::prims::{PrimSig, all_prims};
     let mut externs: Vec<*const u8> = Vec::new();
     for prim in all_prims() {
         let params = match prim.sig {
             PrimSig::Unary => vec![Type::I64],
             PrimSig::Binary => vec![Type::I64, Type::I64],
         };
-        let sig = Signature { params, ret: Some(Type::I64) };
+        let sig = Signature {
+            params,
+            ret: Some(Type::I64),
+        };
         let fref = mb.declare_extern(prim.name, sig);
         func_refs.insert(prim.name.to_string(), fref);
         externs.push(prim.ptr);

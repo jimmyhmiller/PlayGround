@@ -37,8 +37,10 @@ mod tests {
     fn odd_type_id_not_misread_as_forwarding() {
         // Type table with 2 types. Type 1 has an odd type_id.
         static TYPES: [TypeInfo; 2] = [
-            TypeInfo::for_header(Compact::SIZE).with_type_id(0),                // type 0 (even)
-            TypeInfo::for_header(Compact::SIZE).with_fields(2).with_type_id(1), // type 1 (odd)
+            TypeInfo::for_header(Compact::SIZE).with_type_id(0), // type 0 (even)
+            TypeInfo::for_header(Compact::SIZE)
+                .with_fields(2)
+                .with_type_id(1), // type 1 (odd)
         ];
 
         let mut gc = SemiSpace::new::<Compact>(4096);
@@ -55,7 +57,12 @@ mod tests {
         let child = gc.alloc_obj::<Compact>(&TYPES[0], 0);
         assert!(!child.is_null());
         unsafe {
-            write_value_field(obj, &TYPES[1], 0, Value::<NanBox>::from_bits(NanBoxTag0::encode_ptr(child)));
+            write_value_field(
+                obj,
+                &TYPES[1],
+                0,
+                Value::<NanBox>::from_bits(NanBoxTag0::encode_ptr(child)),
+            );
         }
 
         // Root the odd-type object
@@ -78,7 +85,8 @@ mod tests {
         assert!(
             gc.contains(new_obj as *const u8),
             "root should point into the new from-space, got {:?} (payload {:#x})",
-            new_obj, new_obj as u64,
+            new_obj,
+            new_obj as u64,
         );
     }
 }

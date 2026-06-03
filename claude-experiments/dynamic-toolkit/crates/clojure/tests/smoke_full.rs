@@ -7,8 +7,7 @@
 
 use clojure::Engine;
 
-const CORE_PATH: &str =
-    "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/quick-clojure-poc/src/clojure/core.clj";
+const CORE_PATH: &str = "/Users/jimmyhmiller/Documents/Code/PlayGround/claude-experiments/quick-clojure-poc/src/clojure/core.clj";
 
 fn smoke(src: &str) -> String {
     let e = Engine::new();
@@ -169,7 +168,11 @@ smoke_eq!(map_p_f, "(map? [])", "false");
 smoke_eq!(map_kw_call, "(:a {:a 1 :b 2})", "1"); // keyword as fn
 smoke_eq!(map_call_kw, "({:a 1 :b 2} :b)", "2"); // map as fn
 smoke_eq!(map_merge, "(get (merge {:a 1} {:b 2}) :b)", "2");
-smoke_eq!(map_select_keys, "(count (select-keys {:a 1 :b 2 :c 3} [:a :b]))", "2");
+smoke_eq!(
+    map_select_keys,
+    "(count (select-keys {:a 1 :b 2 :c 3} [:a :b]))",
+    "2"
+);
 smoke_eq!(map_update, "(get (update {:a 1} :a inc) :a)", "2");
 
 // ============================================================================
@@ -192,7 +195,11 @@ smoke_eq!(seq_map, "(first (map inc [1 2 3]))", "2");
 smoke_eq!(seq_map_count, "(count (map inc [1 2 3 4]))", "4");
 smoke_eq!(seq_map_2coll, "(first (map + [1 2 3] [10 20 30]))", "11");
 smoke_eq!(seq_filter, "(first (filter even? [1 2 3 4]))", "2");
-smoke_eq!(seq_filter_count, "(count (filter even? [1 2 3 4 5 6]))", "3");
+smoke_eq!(
+    seq_filter_count,
+    "(count (filter even? [1 2 3 4 5 6]))",
+    "3"
+);
 smoke_eq!(seq_remove, "(first (remove even? [1 2 3 4]))", "1");
 smoke_eq!(seq_reduce, "(reduce + 0 [1 2 3 4 5])", "15");
 smoke_eq!(seq_reduce_no_init, "(reduce + [1 2 3 4 5])", "15");
@@ -201,7 +208,11 @@ smoke_eq!(seq_take, "(count (take 3 [1 2 3 4 5]))", "3");
 smoke_eq!(seq_take_overflow, "(count (take 10 [1 2 3]))", "3");
 smoke_eq!(seq_drop, "(first (drop 2 [1 2 3 4 5]))", "3");
 smoke_eq!(seq_drop_count, "(count (drop 2 [1 2 3 4 5]))", "3");
-smoke_eq!(seq_take_while, "(count (take-while pos? [1 2 3 -1 4]))", "3");
+smoke_eq!(
+    seq_take_while,
+    "(count (take-while pos? [1 2 3 -1 4]))",
+    "3"
+);
 smoke_eq!(seq_drop_while, "(first (drop-while pos? [1 2 -3 4]))", "-3");
 smoke_eq!(seq_concat, "(count (concat [1 2] [3 4 5]))", "5");
 smoke_eq!(seq_concat_three, "(count (concat [1] [2 3] [4]))", "4");
@@ -216,9 +227,17 @@ smoke_eq!(seq_range_step, "(count (range 0 10 2))", "5");
 smoke_eq!(seq_iterate, "(first (drop 3 (iterate inc 0)))", "3");
 smoke_eq!(seq_partition, "(count (partition 2 [1 2 3 4 5 6]))", "3");
 smoke_eq!(seq_partition_step, "(count (partition 2 1 [1 2 3 4]))", "3");
-smoke_eq!(seq_interleave, "(count (interleave [1 2 3] [:a :b :c]))", "6");
+smoke_eq!(
+    seq_interleave,
+    "(count (interleave [1 2 3] [:a :b :c]))",
+    "6"
+);
 smoke_eq!(seq_interpose, "(count (interpose 0 [1 2 3]))", "5");
-smoke_eq!(seq_mapcat, "(count (mapcat reverse [[3 2 1] [6 5 4]]))", "6");
+smoke_eq!(
+    seq_mapcat,
+    "(count (mapcat reverse [[3 2 1] [6 5 4]]))",
+    "6"
+);
 smoke_eq!(seq_apply_str, "(apply str [\"a\" \"b\" \"c\"])", "\"abc\"");
 smoke_eq!(seq_apply_plus, "(apply + [1 2 3 4 5])", "15");
 smoke_eq!(seq_some, "(some even? [1 3 5 4])", "true");
@@ -250,7 +269,11 @@ smoke_eq!(str_subs_2, "(subs \"hello\" 2)", "\"llo\"");
 smoke_eq!(str_subs_3, "(subs \"hello\" 1 4)", "\"ell\"");
 smoke_eq!(str_upper, "(clojure.string/upper-case \"hi\")", "\"HI\"");
 smoke_eq!(str_lower, "(clojure.string/lower-case \"HI\")", "\"hi\"");
-smoke_eq!(str_includes, "(clojure.string/includes? \"hello\" \"ell\")", "true");
+smoke_eq!(
+    str_includes,
+    "(clojure.string/includes? \"hello\" \"ell\")",
+    "true"
+);
 
 // ============================================================================
 // Keywords / Symbols
@@ -274,17 +297,41 @@ smoke_eq!(atom_swap_args, "(let [a (atom 10)] (swap! a + 5) @a)", "15");
 // ============================================================================
 // Loop / recur
 // ============================================================================
-smoke_eq!(loop_simple, "(loop [i 0] (if (< i 5) (recur (inc i)) i))", "5");
-smoke_eq!(loop_acc, "(loop [i 0 acc 0] (if (< i 10) (recur (inc i) (+ acc i)) acc))", "45");
-smoke_eq!(loop_dotimes, "(let [a (atom 0)] (dotimes [i 5] (swap! a + i)) @a)", "10");
-smoke_eq!(loop_while, "(let [a (atom 0)] (while (< @a 5) (swap! a inc)) @a)", "5");
+smoke_eq!(
+    loop_simple,
+    "(loop [i 0] (if (< i 5) (recur (inc i)) i))",
+    "5"
+);
+smoke_eq!(
+    loop_acc,
+    "(loop [i 0 acc 0] (if (< i 10) (recur (inc i) (+ acc i)) acc))",
+    "45"
+);
+smoke_eq!(
+    loop_dotimes,
+    "(let [a (atom 0)] (dotimes [i 5] (swap! a + i)) @a)",
+    "10"
+);
+smoke_eq!(
+    loop_while,
+    "(let [a (atom 0)] (while (< @a 5) (swap! a inc)) @a)",
+    "5"
+);
 
 // ============================================================================
 // Try / catch / throw
 // ============================================================================
 smoke_eq!(try_no_throw, "(try 1 (catch :x e e))", "1");
-smoke_eq!(try_catch, "(try (throw :boom) (catch :x e :handled))", ":handled");
-smoke_eq!(try_finally, "(let [a (atom 0)] (try 1 (finally (reset! a 9))) @a)", "9");
+smoke_eq!(
+    try_catch,
+    "(try (throw :boom) (catch :x e :handled))",
+    ":handled"
+);
+smoke_eq!(
+    try_finally,
+    "(let [a (atom 0)] (try 1 (finally (reset! a 9))) @a)",
+    "9"
+);
 
 // ============================================================================
 // fn / multi-arity / variadic / closure
@@ -295,7 +342,11 @@ smoke_eq!(fn_multi_arity_a, "((fn ([x] x) ([x y] (+ x y))) 7)", "7");
 smoke_eq!(fn_multi_arity_b, "((fn ([x] x) ([x y] (+ x y))) 7 8)", "15");
 smoke_eq!(fn_variadic, "((fn [& args] (count args)) 1 2 3)", "3");
 smoke_eq!(fn_closure, "(let [f (let [x 5] (fn [] x))] (f))", "5");
-smoke_eq!(fn_recur_self, "(letfn [(f [n] (if (zero? n) 0 (+ n (f (dec n)))))] (f 5))", "15");
+smoke_eq!(
+    fn_recur_self,
+    "(letfn [(f [n] (if (zero? n) 0 (+ n (f (dec n)))))] (f 5))",
+    "15"
+);
 
 // ============================================================================
 // let / when / cond / case / condp
@@ -304,8 +355,16 @@ smoke_eq!(let_basic, "(let [x 5] x)", "5");
 smoke_eq!(let_seq, "(let [x 5 y 7] (+ x y))", "12");
 smoke_eq!(let_nested, "(let [x 5] (let [y (* x 2)] y))", "10");
 smoke_eq!(let_destructure_vec, "(let [[a b] [1 2]] (+ a b))", "3");
-smoke_eq!(let_destructure_map, "(let [{:keys [a b]} {:a 1 :b 2}] (+ a b))", "3");
-smoke_eq!(let_destructure_amp, "(let [[a & rs] [1 2 3 4]] (count rs))", "3");
+smoke_eq!(
+    let_destructure_map,
+    "(let [{:keys [a b]} {:a 1 :b 2}] (+ a b))",
+    "3"
+);
+smoke_eq!(
+    let_destructure_amp,
+    "(let [[a & rs] [1 2 3 4]] (count rs))",
+    "3"
+);
 smoke_eq!(when_t, "(when true 42)", "42");
 smoke_eq!(when_f, "(when false 42)", "nil");
 smoke_eq!(when_not_t, "(when-not false 42)", "42");
@@ -339,7 +398,11 @@ smoke_eq!(not_f, "(not 1)", "false");
 // ============================================================================
 smoke_eq!(thread_first, "(-> 1 inc inc inc)", "4");
 smoke_eq!(thread_first_form, "(-> 5 (- 1) (* 2))", "8");
-smoke_eq!(thread_last, "(->> [1 2 3 4 5] (filter even?) (reduce +))", "6");
+smoke_eq!(
+    thread_last,
+    "(->> [1 2 3 4 5] (filter even?) (reduce +))",
+    "6"
+);
 smoke_eq!(thread_some, "(some-> 1 inc inc)", "3");
 smoke_eq!(thread_some_nil, "(some-> nil inc)", "nil");
 smoke_eq!(thread_cond, "(cond-> 1 true inc false dec)", "2");
@@ -369,11 +432,7 @@ smoke_eq!(
      (greet (Hi. \"world\"))",
     "\"hi world\""
 );
-smoke_eq!(
-    proto_field,
-    "(deftype P [x y]) (.-x (P. 3 4))",
-    "3"
-);
+smoke_eq!(proto_field, "(deftype P [x y]) (.-x (P. 3 4))", "3");
 smoke_eq!(
     proto_extend_existing,
     "(defprotocol IFoo (foo [this])) \
@@ -424,7 +483,11 @@ smoke_eq!(meta_with_meta, "(meta (with-meta [1 2] {:a 1}))", "{:a 1}");
 // ============================================================================
 smoke_eq!(lazy_take, "(count (take 3 (iterate inc 0)))", "3");
 smoke_eq!(lazy_first, "(first (iterate inc 100))", "100");
-smoke_eq!(lazy_realized_three, "(reduce + (take 5 (iterate inc 1)))", "15");
+smoke_eq!(
+    lazy_realized_three,
+    "(reduce + (take 5 (iterate inc 1)))",
+    "15"
+);
 smoke_eq!(lazy_seq_macro, "(first (lazy-seq [42]))", "42");
 
 // ============================================================================
@@ -446,11 +509,19 @@ smoke_eq!(getin_2, "(get-in {:a {:b 5}} [:a :b])", "5");
 smoke_eq!(getin_missing, "(get-in {:a {:b 5}} [:a :c])", "nil");
 smoke_eq!(getin_default, "(get-in {:a {:b 5}} [:a :c] :no)", ":no");
 smoke_eq!(associn, "(get-in (assoc-in {} [:a :b] 99) [:a :b])", "99");
-smoke_eq!(updatein, "(get-in (update-in {:a {:b 1}} [:a :b] inc) [:a :b])", "2");
+smoke_eq!(
+    updatein,
+    "(get-in (update-in {:a {:b 1}} [:a :b] inc) [:a :b])",
+    "2"
+);
 
 // ============================================================================
 // First-class fns / higher order
 // ============================================================================
 smoke_eq!(hof_pass_inc, "(let [f inc] (f 5))", "6");
-smoke_eq!(hof_returned_fn, "((let [f (fn [n] (fn [x] (+ x n)))] (f 10)) 5)", "15");
+smoke_eq!(
+    hof_returned_fn,
+    "((let [f (fn [n] (fn [x] (+ x n)))] (f 10)) 5)",
+    "15"
+);
 smoke_eq!(hof_map_anon, "(first (map (fn [x] (* x x)) [3 4 5]))", "9");

@@ -2,7 +2,8 @@
 //! reactive scopes). These assert the *shape* of the analysis (which values are
 //! mutable, how scopes group) rather than runtime values.
 
-use jsir_ssa::mutability::{analyze, Ranges};
+use jsir_ssa::aliasing_ranges::analyze;
+use jsir_ssa::mutability::Ranges;
 use jsir_ssa::scopes::{self, Scope};
 use jsir_ssa::{cfg::Value, lower, ssa};
 

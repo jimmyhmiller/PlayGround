@@ -14,9 +14,7 @@ use crate::type_info::{TypeInfo, VarLenKind};
 ///   (i.e. `H::TYPE_ID_OFFSET` for the header type used).
 #[inline(always)]
 pub unsafe fn read_type_id(obj: *const u8, type_id_offset: usize) -> u16 {
-    unsafe {
-        core::ptr::read(obj.add(type_id_offset) as *const u16)
-    }
+    unsafe { core::ptr::read(obj.add(type_id_offset) as *const u16) }
 }
 
 /// Look up TypeInfo from a type_id using the runtime's type table.

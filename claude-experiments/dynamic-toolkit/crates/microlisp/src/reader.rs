@@ -22,7 +22,9 @@ impl std::fmt::Display for ReadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ReadError::UnexpectedEof => write!(f, "unexpected end of input"),
-            ReadError::UnexpectedChar(c, p) => write!(f, "unexpected character {:?} at byte {}", c, p),
+            ReadError::UnexpectedChar(c, p) => {
+                write!(f, "unexpected character {:?} at byte {}", c, p)
+            }
             ReadError::BadNumber(s, p) => write!(f, "bad number {:?} at byte {}", s, p),
         }
     }
@@ -30,10 +32,16 @@ impl std::fmt::Display for ReadError {
 
 impl<'a> Reader<'a> {
     pub fn new(src: &'a str, sym: &'a mut SymbolTable) -> Self {
-        Reader { src: src.as_bytes(), pos: 0, sym }
+        Reader {
+            src: src.as_bytes(),
+            pos: 0,
+            sym,
+        }
     }
 
-    pub fn pos(&self) -> usize { self.pos }
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
     pub fn at_eof(&mut self) -> bool {
         self.skip_ws_and_comments();
         self.pos >= self.src.len()
@@ -52,7 +60,12 @@ impl<'a> Reader<'a> {
     fn skip_ws_and_comments(&mut self) {
         loop {
             while let Some(c) = self.peek() {
-                if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' || c == b',' && self.next_is_comma_only() {
+                if c == b' '
+                    || c == b'\t'
+                    || c == b'\n'
+                    || c == b'\r'
+                    || c == b',' && self.next_is_comma_only()
+                {
                     self.pos += 1;
                 } else {
                     break;
@@ -61,7 +74,9 @@ impl<'a> Reader<'a> {
             if self.peek() == Some(b';') {
                 while let Some(c) = self.peek() {
                     self.pos += 1;
-                    if c == b'\n' { break; }
+                    if c == b'\n' {
+                        break;
+                    }
                 }
                 continue;
             }
@@ -78,10 +93,19 @@ impl<'a> Reader<'a> {
         self.skip_ws_and_comments();
         let c = self.peek().ok_or(ReadError::UnexpectedEof)?;
         match c {
-            b'(' | b'[' => { self.bump(); self.read_list(c) }
+            b'(' | b'[' => {
+                self.bump();
+                self.read_list(c)
+            }
             b')' | b']' => Err(ReadError::UnexpectedChar(c as char, self.pos)),
-            b'\'' => { self.bump(); self.read_quoted("quote") }
-            b'`' => { self.bump(); self.read_quoted("quasiquote") }
+            b'\'' => {
+                self.bump();
+                self.read_quoted("quote")
+            }
+            b'`' => {
+                self.bump();
+                self.read_quoted("quasiquote")
+            }
             b',' => {
                 self.bump();
                 if self.peek() == Some(b'@') {
@@ -91,7 +115,10 @@ impl<'a> Reader<'a> {
                     self.read_quoted("unquote")
                 }
             }
-            b'"' => { self.bump(); Err(ReadError::UnexpectedChar('"', self.pos - 1)) } // strings deferred
+            b'"' => {
+                self.bump();
+                Err(ReadError::UnexpectedChar('"', self.pos - 1))
+            } // strings deferred
             b'#' => self.read_hash(),
             b'-' | b'+' => {
                 // could be a sign-only atom (e.g., the operator) or a signed number
@@ -119,12 +146,18 @@ impl<'a> Reader<'a> {
             self.skip_ws_and_comments();
             match self.peek() {
                 None => return Err(ReadError::UnexpectedEof),
-                Some(c) if c == close => { self.bump(); break; }
+                Some(c) if c == close => {
+                    self.bump();
+                    break;
+                }
                 Some(b'.') => {
                     // Dotted-pair: only at this level if surrounded by whitespace.
                     let pos0 = self.pos;
                     self.bump();
-                    if matches!(self.peek(), Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')) {
+                    if matches!(
+                        self.peek(),
+                        Some(b' ') | Some(b'\t') | Some(b'\n') | Some(b'\r')
+                    ) {
                         let after = self.read()?;
                         tail = after;
                         have_dot = true;
@@ -143,7 +176,9 @@ impl<'a> Reader<'a> {
                 Some(_) => items.push(self.read()?),
             }
         }
-        if !have_dot { tail = NIL; }
+        if !have_dot {
+            tail = NIL;
+        }
         let _ = have_dot;
         // Use the outer scope for the running tail; each iteration's
         // alloc gets its own fresh scope so we don't exhaust slots on
@@ -151,9 +186,8 @@ impl<'a> Reader<'a> {
         let result = with_scope(2, |scope| {
             let acc = scope.root::<NanBoxTag>(tail);
             for x in items.into_iter().rev() {
-                let new_bits = with_scope(3, |inner| {
-                    alloc_cons_from_raw(inner, x, acc.get()).get()
-                });
+                let new_bits =
+                    with_scope(3, |inner| alloc_cons_from_raw(inner, x, acc.get()).get());
                 acc.set(new_bits);
             }
             acc.get()
@@ -168,9 +202,7 @@ impl<'a> Reader<'a> {
         // Per-step scopes: each `alloc_cons_from_raw` needs 3 slots, so
         // chaining two cons calls uses 6 transiently. Sequential nested
         // scopes keeps each one lean.
-        let inner_cons_bits = with_scope(3, |s| {
-            alloc_cons_from_raw(s, inner_bits, NIL).get()
-        });
+        let inner_cons_bits = with_scope(3, |s| alloc_cons_from_raw(s, inner_bits, NIL).get());
         let result = with_scope(3, |s| {
             alloc_cons_from_raw(s, head_val, inner_cons_bits).get()
         });
@@ -181,8 +213,14 @@ impl<'a> Reader<'a> {
         let p = self.pos;
         self.bump(); // '#'
         match self.peek() {
-            Some(b't') => { self.bump(); Ok(TRUE) }
-            Some(b'f') => { self.bump(); Ok(FALSE) }
+            Some(b't') => {
+                self.bump();
+                Ok(TRUE)
+            }
+            Some(b'f') => {
+                self.bump();
+                Ok(FALSE)
+            }
             Some(c) => Err(ReadError::UnexpectedChar(c as char, p)),
             None => Err(ReadError::UnexpectedEof),
         }
@@ -192,36 +230,62 @@ impl<'a> Reader<'a> {
         // already at start, consume digits/sign/decimal/exponent
         self.pos = start;
         let begin = self.pos;
-        if matches!(self.peek(), Some(b'+') | Some(b'-')) { self.bump(); }
-        while matches!(self.peek(), Some(c) if c.is_ascii_digit()) { self.bump(); }
+        if matches!(self.peek(), Some(b'+') | Some(b'-')) {
+            self.bump();
+        }
+        while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+            self.bump();
+        }
         if self.peek() == Some(b'.') {
             self.bump();
-            while matches!(self.peek(), Some(c) if c.is_ascii_digit()) { self.bump(); }
+            while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+                self.bump();
+            }
         }
         if matches!(self.peek(), Some(b'e') | Some(b'E')) {
             self.bump();
-            if matches!(self.peek(), Some(b'+') | Some(b'-')) { self.bump(); }
-            while matches!(self.peek(), Some(c) if c.is_ascii_digit()) { self.bump(); }
+            if matches!(self.peek(), Some(b'+') | Some(b'-')) {
+                self.bump();
+            }
+            while matches!(self.peek(), Some(c) if c.is_ascii_digit()) {
+                self.bump();
+            }
         }
         let txt = std::str::from_utf8(&self.src[begin..self.pos]).unwrap();
-        let n: f64 = txt.parse().map_err(|_| ReadError::BadNumber(txt.to_string(), begin))?;
+        let n: f64 = txt
+            .parse()
+            .map_err(|_| ReadError::BadNumber(txt.to_string(), begin))?;
         Ok(encode_num(n))
     }
 
     fn read_symbol(&mut self) -> Result<u64, ReadError> {
         let begin = self.pos;
         while let Some(c) = self.peek() {
-            if c.is_ascii_whitespace() || c == b'(' || c == b')' || c == b'[' || c == b']'
-                || c == b'\'' || c == b'`' || c == b',' || c == b';' || c == b'"' {
+            if c.is_ascii_whitespace()
+                || c == b'('
+                || c == b')'
+                || c == b'['
+                || c == b']'
+                || c == b'\''
+                || c == b'`'
+                || c == b','
+                || c == b';'
+                || c == b'"'
+            {
                 break;
             }
             self.bump();
         }
         if begin == self.pos {
-            return Err(ReadError::UnexpectedChar(self.peek().unwrap_or(b' ') as char, self.pos));
+            return Err(ReadError::UnexpectedChar(
+                self.peek().unwrap_or(b' ') as char,
+                self.pos,
+            ));
         }
         let name = std::str::from_utf8(&self.src[begin..self.pos]).unwrap();
-        if name == "nil" { return Ok(NIL); }
+        if name == "nil" {
+            return Ok(NIL);
+        }
         let id = self.sym.intern(name);
         Ok(encode_sym(id))
     }

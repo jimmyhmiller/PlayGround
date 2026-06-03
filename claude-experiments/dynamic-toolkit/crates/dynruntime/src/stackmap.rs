@@ -68,11 +68,7 @@ impl<P: PtrPolicy> MutatorRootManager<P> {
     }
 
     /// Allocate a heap object with a custom header type.
-    pub fn alloc_with_header<H: ObjHeader>(
-        &self,
-        info: &TypeInfo,
-        varlen_len: usize,
-    ) -> *mut u8 {
+    pub fn alloc_with_header<H: ObjHeader>(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         self.heap.alloc_obj::<H>(info, varlen_len)
     }
 
@@ -150,4 +146,3 @@ where
         }
     }
 }
-

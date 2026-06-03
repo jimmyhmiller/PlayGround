@@ -49,29 +49,53 @@ pub extern "C" fn ml_cons(a: u64, b: u64) -> u64 {
     // contract permits it) sees them as live; the result is freshly
     // returned to JIT where the next safepoint's stack map roots it.
     // Three slots: car + cdr + result.
-    dynobj::roots::with_scope(3, |scope| {
-        alloc_cons_from_raw(scope, a, b).get()
-    })
+    dynobj::roots::with_scope(3, |scope| alloc_cons_from_raw(scope, a, b).get())
 }
-pub extern "C" fn ml_car(v: u64) -> u64 { car(v) }
-pub extern "C" fn ml_cdr(v: u64) -> u64 { cdr(v) }
-pub extern "C" fn ml_set_car(v: u64, x: u64) -> u64 { set_car(v, x); NIL }
-pub extern "C" fn ml_set_cdr(v: u64, x: u64) -> u64 { set_cdr(v, x); NIL }
+pub extern "C" fn ml_car(v: u64) -> u64 {
+    car(v)
+}
+pub extern "C" fn ml_cdr(v: u64) -> u64 {
+    cdr(v)
+}
+pub extern "C" fn ml_set_car(v: u64, x: u64) -> u64 {
+    set_car(v, x);
+    NIL
+}
+pub extern "C" fn ml_set_cdr(v: u64, x: u64) -> u64 {
+    set_cdr(v, x);
+    NIL
+}
 
-pub extern "C" fn ml_null_p(v: u64) -> u64 { bool_(is_nil(v)) }
-pub extern "C" fn ml_pair_p(v: u64) -> u64 { bool_(is_cons(v)) }
-pub extern "C" fn ml_symbol_p(v: u64) -> u64 { bool_(is_symbol(v)) }
-pub extern "C" fn ml_number_p(v: u64) -> u64 { bool_(is_number(v)) }
+pub extern "C" fn ml_null_p(v: u64) -> u64 {
+    bool_(is_nil(v))
+}
+pub extern "C" fn ml_pair_p(v: u64) -> u64 {
+    bool_(is_cons(v))
+}
+pub extern "C" fn ml_symbol_p(v: u64) -> u64 {
+    bool_(is_symbol(v))
+}
+pub extern "C" fn ml_number_p(v: u64) -> u64 {
+    bool_(is_number(v))
+}
 
-pub extern "C" fn ml_eq_p(a: u64, b: u64) -> u64 { bool_(a == b) }
-pub extern "C" fn ml_equal_p(a: u64, b: u64) -> u64 { bool_(equal(a, b)) }
-pub extern "C" fn ml_not(v: u64) -> u64 { bool_(!is_true_value(v)) }
+pub extern "C" fn ml_eq_p(a: u64, b: u64) -> u64 {
+    bool_(a == b)
+}
+pub extern "C" fn ml_equal_p(a: u64, b: u64) -> u64 {
+    bool_(equal(a, b))
+}
+pub extern "C" fn ml_not(v: u64) -> u64 {
+    bool_(!is_true_value(v))
+}
 
 /// `append` — copy the spine of `a`, then connect to `b`. Allocates one
 /// cons per element of `a`; each allocation gets its own fresh scope so
 /// we don't grow the outer scope unbounded for long lists.
 pub extern "C" fn ml_append(a: u64, b: u64) -> u64 {
-    if is_nil(a) { return b; }
+    if is_nil(a) {
+        return b;
+    }
     dynobj::roots::with_scope(2, |scope| {
         let a_root = scope.root::<NanBoxTag>(a);
         let elems: Vec<u64> = list_iter(a_root.get()).collect();
@@ -112,8 +136,16 @@ pub extern "C" fn ml_gensym(tag: u64) -> u64 {
 pub extern "C" fn ml_symbol_append(a: u64, b: u64) -> u64 {
     with_host(|h| {
         let mut sym = h.sym.borrow_mut();
-        let an = if is_symbol(a) { sym.name(as_symbol_id(a)).to_string() } else { String::new() };
-        let bn = if is_symbol(b) { sym.name(as_symbol_id(b)).to_string() } else { String::new() };
+        let an = if is_symbol(a) {
+            sym.name(as_symbol_id(a)).to_string()
+        } else {
+            String::new()
+        };
+        let bn = if is_symbol(b) {
+            sym.name(as_symbol_id(b)).to_string()
+        } else {
+            String::new()
+        };
         let id = sym.intern(&format!("{an}{bn}"));
         encode_sym(id)
     })
@@ -170,34 +202,146 @@ unsafe impl Sync for Prim {}
 
 pub fn all_prims() -> &'static [Prim] {
     static PRIMS: &[Prim] = &[
-        Prim { name: "+", ptr: ml_add as *const u8, sig: PrimSig::Binary },
-        Prim { name: "-", ptr: ml_sub as *const u8, sig: PrimSig::Binary },
-        Prim { name: "*", ptr: ml_mul as *const u8, sig: PrimSig::Binary },
-        Prim { name: "/", ptr: ml_div as *const u8, sig: PrimSig::Binary },
-        Prim { name: "neg", ptr: ml_neg as *const u8, sig: PrimSig::Unary },
-        Prim { name: "=", ptr: ml_num_eq as *const u8, sig: PrimSig::Binary },
-        Prim { name: "<", ptr: ml_lt as *const u8, sig: PrimSig::Binary },
-        Prim { name: ">", ptr: ml_gt as *const u8, sig: PrimSig::Binary },
-        Prim { name: "<=", ptr: ml_le as *const u8, sig: PrimSig::Binary },
-        Prim { name: ">=", ptr: ml_ge as *const u8, sig: PrimSig::Binary },
-        Prim { name: "cons", ptr: ml_cons as *const u8, sig: PrimSig::Binary },
-        Prim { name: "car", ptr: ml_car as *const u8, sig: PrimSig::Unary },
-        Prim { name: "cdr", ptr: ml_cdr as *const u8, sig: PrimSig::Unary },
-        Prim { name: "set-car!", ptr: ml_set_car as *const u8, sig: PrimSig::Binary },
-        Prim { name: "set-cdr!", ptr: ml_set_cdr as *const u8, sig: PrimSig::Binary },
-        Prim { name: "null?", ptr: ml_null_p as *const u8, sig: PrimSig::Unary },
-        Prim { name: "pair?", ptr: ml_pair_p as *const u8, sig: PrimSig::Unary },
-        Prim { name: "symbol?", ptr: ml_symbol_p as *const u8, sig: PrimSig::Unary },
-        Prim { name: "number?", ptr: ml_number_p as *const u8, sig: PrimSig::Unary },
-        Prim { name: "eq?", ptr: ml_eq_p as *const u8, sig: PrimSig::Binary },
-        Prim { name: "equal?", ptr: ml_equal_p as *const u8, sig: PrimSig::Binary },
-        Prim { name: "not", ptr: ml_not as *const u8, sig: PrimSig::Unary },
-        Prim { name: "append", ptr: ml_append as *const u8, sig: PrimSig::Binary },
-        Prim { name: "length", ptr: ml_length as *const u8, sig: PrimSig::Unary },
-        Prim { name: "gensym", ptr: ml_gensym as *const u8, sig: PrimSig::Unary },
-        Prim { name: "symbol-append", ptr: ml_symbol_append as *const u8, sig: PrimSig::Binary },
-        Prim { name: "print", ptr: ml_print as *const u8, sig: PrimSig::Unary },
-        Prim { name: "error", ptr: ml_error as *const u8, sig: PrimSig::Unary },
+        Prim {
+            name: "+",
+            ptr: ml_add as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "-",
+            ptr: ml_sub as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "*",
+            ptr: ml_mul as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "/",
+            ptr: ml_div as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "neg",
+            ptr: ml_neg as *const u8,
+            sig: PrimSig::Unary,
+        },
+        Prim {
+            name: "=",
+            ptr: ml_num_eq as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "<",
+            ptr: ml_lt as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: ">",
+            ptr: ml_gt as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "<=",
+            ptr: ml_le as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: ">=",
+            ptr: ml_ge as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "cons",
+            ptr: ml_cons as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "car",
+            ptr: ml_car as *const u8,
+            sig: PrimSig::Unary,
+        },
+        Prim {
+            name: "cdr",
+            ptr: ml_cdr as *const u8,
+            sig: PrimSig::Unary,
+        },
+        Prim {
+            name: "set-car!",
+            ptr: ml_set_car as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "set-cdr!",
+            ptr: ml_set_cdr as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "null?",
+            ptr: ml_null_p as *const u8,
+            sig: PrimSig::Unary,
+        },
+        Prim {
+            name: "pair?",
+            ptr: ml_pair_p as *const u8,
+            sig: PrimSig::Unary,
+        },
+        Prim {
+            name: "symbol?",
+            ptr: ml_symbol_p as *const u8,
+            sig: PrimSig::Unary,
+        },
+        Prim {
+            name: "number?",
+            ptr: ml_number_p as *const u8,
+            sig: PrimSig::Unary,
+        },
+        Prim {
+            name: "eq?",
+            ptr: ml_eq_p as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "equal?",
+            ptr: ml_equal_p as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "not",
+            ptr: ml_not as *const u8,
+            sig: PrimSig::Unary,
+        },
+        Prim {
+            name: "append",
+            ptr: ml_append as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "length",
+            ptr: ml_length as *const u8,
+            sig: PrimSig::Unary,
+        },
+        Prim {
+            name: "gensym",
+            ptr: ml_gensym as *const u8,
+            sig: PrimSig::Unary,
+        },
+        Prim {
+            name: "symbol-append",
+            ptr: ml_symbol_append as *const u8,
+            sig: PrimSig::Binary,
+        },
+        Prim {
+            name: "print",
+            ptr: ml_print as *const u8,
+            sig: PrimSig::Unary,
+        },
+        Prim {
+            name: "error",
+            ptr: ml_error as *const u8,
+            sig: PrimSig::Unary,
+        },
     ];
     PRIMS
 }

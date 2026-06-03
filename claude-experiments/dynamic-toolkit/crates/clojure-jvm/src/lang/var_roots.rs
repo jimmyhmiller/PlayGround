@@ -45,7 +45,10 @@ unsafe impl Send for VarRoots {}
 
 impl VarRoots {
     fn new() -> Self {
-        VarRoots { chunks: RwLock::new(Vec::new()), len: AtomicUsize::new(0) }
+        VarRoots {
+            chunks: RwLock::new(Vec::new()),
+            len: AtomicUsize::new(0),
+        }
     }
 
     /// Reserve a fresh slot, growing the table by a chunk if needed. The
@@ -66,8 +69,7 @@ impl VarRoots {
         // the write lock (only append chunks that don't exist yet).
         let mut chunks = self.chunks.write().unwrap();
         while chunks.len() <= chunk {
-            let c: Box<[AtomicU64]> =
-                (0..CHUNK).map(|_| AtomicU64::new(0)).collect();
+            let c: Box<[AtomicU64]> = (0..CHUNK).map(|_| AtomicU64::new(0)).collect();
             chunks.push(c);
         }
         idx

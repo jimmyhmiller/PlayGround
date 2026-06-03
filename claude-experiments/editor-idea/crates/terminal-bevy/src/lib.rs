@@ -55,6 +55,7 @@ pub mod canvas;
 pub mod claude_events_pane;
 pub mod command_watch;
 pub mod context_menu;
+pub mod cube;
 pub mod daemon_client;
 pub mod debug_bar;
 pub mod diagnostics;
@@ -352,6 +353,7 @@ impl Plugin for TerminalPlugin {
             .add_plugins(projects::ProjectsPlugin)
             .add_plugins(canvas::CanvasPlugin)
             .add_plugins(context_menu::ContextMenuPlugin)
+            .add_plugins(cube::CubePlugin)
             .add_plugins(radial::RadialPlugin)
             .add_plugins(drawer::DrawerPlugin)
             .add_plugins(selection::SelectionPlugin)
@@ -539,6 +541,7 @@ fn drain_ipc_open_requests(
     mut pending: ResMut<PendingActions>,
     mut projects: ResMut<Projects>,
     mut drawer: ResMut<drawer::Drawer>,
+    mut prism: ResMut<cube::Prism>,
 ) {
     let Some(inbox) = inbox else { return };
     while let Ok(msg) = inbox.0.try_recv() {
@@ -618,6 +621,9 @@ fn drain_ipc_open_requests(
                     size: size.map(|[w, h]| Vec2::new(w, h)),
                     config: Value::Object(cfg),
                 });
+            }
+            ipc::IpcRequest::ToggleCube => {
+                prism.pending_toggle = true;
             }
             ipc::IpcRequest::ListProjects => {
                 use std::io::Write as _;
@@ -2423,6 +2429,7 @@ fn maintain_winit_mode_for_animation(
     preset: Res<style_bevy::ActiveStylePreset>,
     registry: Res<style_bevy::StylePresetRegistry>,
     drawer: Res<drawer::Drawer>,
+    prism: Res<cube::Prism>,
     mut settings: ResMut<bevy::winit::WinitSettings>,
 ) {
     let preset_animates = preset.0.as_deref().map_or(false, |name| {
@@ -2432,8 +2439,12 @@ fn maintain_winit_mode_for_animation(
             .find(|p| p.name == name)
             .map_or(false, |p| p.chrome_animates)
     });
-    // The drawer's slide is the other source of "needs every frame".
-    let want_continuous = preset_animates || drawer.animating();
+    // The drawer's slide and the 3D project prism (live textures + camera
+    // animation) are the other sources of "needs every frame". The cooldown
+    // keeps redrawing briefly after the prism closes so the flat panes
+    // repaint instead of staying black.
+    let want_continuous =
+        preset_animates || drawer.animating() || prism.active || prism.continuous_cooldown > 0;
 
     let target = if want_continuous {
         bevy::winit::UpdateMode::Continuous

@@ -83,11 +83,12 @@ fn probe_refer_chain() {
     // (An arity-1 instance method, e.g. `.getMappings`, in the same loop body
     // DOES run — verified.)
     let mut sess = load_core_prefix();
-    let np = clojure_jvm::runtime::arg_to_i64(
-        sess.eval_str("(count (ns-publics 'clojure.core))"),
-    );
+    let np = clojure_jvm::runtime::arg_to_i64(sess.eval_str("(count (ns-publics 'clojure.core))"));
     eprintln!("ns-publics count = {np}");
-    assert!(np > 0, "ns-publics non-empty (Namespace heap repr + structural =)");
+    assert!(
+        np > 0,
+        "ns-publics non-empty (Namespace heap repr + structural =)"
+    );
 }
 
 #[test]
@@ -131,10 +132,12 @@ fn probe_string_starts_with_substring() {
         "(.startsWith \"foo\" \"/\") must be false"
     );
     // (.substring "/core/protocols" 1) => "core/protocols"
-    let sub = clojure_jvm::runtime::pr_str_bits(
-        sess.eval_str("(.substring \"/core/protocols\" 1)"),
+    let sub =
+        clojure_jvm::runtime::pr_str_bits(sess.eval_str("(.substring \"/core/protocols\" 1)"));
+    assert_eq!(
+        sub, "\"core/protocols\"",
+        "(.substring \"/core/protocols\" 1)"
     );
-    assert_eq!(sub, "\"core/protocols\"", "(.substring \"/core/protocols\" 1)");
     // (.substring "abc" 3) => "" (start == len is legal)
     let empty = clojure_jvm::runtime::pr_str_bits(sess.eval_str("(.substring \"abc\" 3)"));
     assert_eq!(empty, "\"\"", "(.substring \"abc\" 3) is empty string");
@@ -169,7 +172,9 @@ fn probe_reentrant_refer() {
     let done = sess.eval_str("clojure.core/rr-done");
     let call = sess.eval_str("clojure.core/rr-call");
     let findns = sess.eval_str("clojure.core/rr-findns");
-    eprintln!("  reentrant rr-lit=0x{lit:x} rr-done=0x{done:x} rr-call=0x{call:x} rr-findns=0x{findns:x}");
+    eprintln!(
+        "  reentrant rr-lit=0x{lit:x} rr-done=0x{done:x} rr-call=0x{call:x} rr-findns=0x{findns:x}"
+    );
     let call_i = clojure_jvm::runtime::arg_to_i64(call);
     eprintln!("  rr-call as i64 = {call_i}");
     const NIL_BITS: u64 = 0x7ffc_0000_0000_0000;
@@ -177,7 +182,10 @@ fn probe_reentrant_refer() {
     assert_ne!(lit, NIL_BITS, "reentrant literal def must persist");
     // The qualified-head fn-call must now return the real value, not nil.
     assert_eq!(call_i, 42, "(clojure.core/inc 41) must return 42, not nil");
-    assert_ne!(findns, NIL_BITS, "(clojure.core/find-ns …) must return the ns, not nil");
+    assert_ne!(
+        findns, NIL_BITS,
+        "(clojure.core/find-ns …) must return the ns, not nil"
+    );
 }
 
 #[test]
@@ -411,13 +419,29 @@ fn reduce_via_protocols() {
     sess.eval_str("(clojure.lang.RT/load \"core/protocols\")");
     eprintln!("=== coll-reduce (protocol dispatch) ===");
     // Arity 2 (no init): (f) seeded reduce over a cons list.
-    check_int(&mut sess, "(clojure.core.protocols/coll-reduce (list 1 2 3 4) +)", 10);
+    check_int(
+        &mut sess,
+        "(clojure.core.protocols/coll-reduce (list 1 2 3 4) +)",
+        10,
+    );
     // Arity 3 (with init).
-    check_int(&mut sess, "(clojure.core.protocols/coll-reduce (list 1 2 3 4) + 100)", 110);
+    check_int(
+        &mut sess,
+        "(clojure.core.protocols/coll-reduce (list 1 2 3 4) + 100)",
+        110,
+    );
     // nil collection.
-    check_int(&mut sess, "(clojure.core.protocols/coll-reduce nil + 42)", 42);
+    check_int(
+        &mut sess,
+        "(clojure.core.protocols/coll-reduce nil + 42)",
+        42,
+    );
     // Over a lazy seq (map result).
-    check_int(&mut sess, "(clojure.core.protocols/coll-reduce (map inc (list 1 2 3)) + 0)", 9);
+    check_int(
+        &mut sess,
+        "(clojure.core.protocols/coll-reduce (map inc (list 1 2 3)) + 0)",
+        9,
+    );
     // Early termination via reduced.
     check_int(
         &mut sess,
@@ -440,7 +464,10 @@ fn probe_reduce_deps() {
     probe(&mut sess, "(class (list 1 2))");
     probe(&mut sess, "(instance? clojure.lang.ISeq (list 1 2))");
     probe(&mut sess, "(if-let [x (seq (list 1 2))] (first x) :none)");
-    probe(&mut sess, "(loop [i 0 acc 0] (if (< i 3) (recur (inc i) (+ acc i)) acc))");
+    probe(
+        &mut sess,
+        "(loop [i 0 acc 0] (if (< i 3) (recur (inc i) (+ acc i)) acc))",
+    );
 }
 
 #[test]
@@ -460,6 +487,14 @@ fn probe_interesting_features() {
     check_int(&mut sess, "(count (map inc (list 1 2 3)))", 3);
     check_int(&mut sess, "(count (filter odd? (list 1 2 3 4 5)))", 3);
     eprintln!("=== composed ===");
-    check_int(&mut sess, "(reduce1 + (map inc (filter odd? (list 1 2 3 4 5))))", 12);
-    check_int(&mut sess, "(->> (list 1 2 3 4 5) (filter odd?) (map inc) (reduce1 +))", 12);
+    check_int(
+        &mut sess,
+        "(reduce1 + (map inc (filter odd? (list 1 2 3 4 5))))",
+        12,
+    );
+    check_int(
+        &mut sess,
+        "(->> (list 1 2 3 4 5) (filter odd?) (map inc) (reduce1 +))",
+        12,
+    );
 }

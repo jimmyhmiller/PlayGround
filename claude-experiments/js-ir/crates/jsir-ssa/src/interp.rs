@@ -21,13 +21,29 @@ pub enum Val {
     Str(String),
     Obj(Rc<RefCell<BTreeMap<String, Val>>>),
     Arr(Rc<RefCell<Vec<Val>>>),
+    /// A closure: its lowered body (a nested CFG) plus the captured values, in
+    /// the body's leading-capture-parameter order. Captured objects/arrays share
+    /// their `Rc`, so a closure that mutates a captured object is observable
+    /// after the call (the whole point of lowering closure bodies — see
+    /// `CFG_FIDELITY.md`).
+    Closure { body: Rc<Cfg>, captures: Vec<Val> },
 }
 
 const STEP_LIMIT: usize = 1_000_000;
 
-/// Run the CFG with the given argument values. Host globals (e.g. `Math`) can be
-/// supplied via `globals` for member/call support.
+const CALL_DEPTH_LIMIT: usize = 256;
+
+/// Run the CFG with the given argument values.
 pub fn run(cfg: &Cfg, args: &[Val]) -> Result<Val, String> {
+    run_cfg(cfg, args, 0)
+}
+
+/// Run a CFG (the top function or a lowered closure body) with `args` bound to
+/// its parameters. `depth` bounds closure-call recursion.
+fn run_cfg(cfg: &Cfg, args: &[Val], depth: usize) -> Result<Val, String> {
+    if depth > CALL_DEPTH_LIMIT {
+        return Err("interp: call depth limit exceeded".into());
+    }
     let mut vals: HashMap<Value, Val> = HashMap::new();
     let mut env: HashMap<u32, Val> = HashMap::new();
 
@@ -45,7 +61,7 @@ pub fn run(cfg: &Cfg, args: &[Val]) -> Result<Val, String> {
             if steps > STEP_LIMIT {
                 return Err("step limit exceeded".into());
             }
-            let v = eval_op(&instr.op, &vals, &mut env)?;
+            let v = eval_instr(cfg, &instr.op, instr.result, &vals, &mut env, depth)?;
             if let Some(r) = instr.result {
                 vals.insert(r, v);
             }
@@ -90,6 +106,92 @@ fn pass_args(cfg: &Cfg, target: BlockId, args: &[Value], vals: &mut HashMap<Valu
         }
     }
     Ok(())
+}
+
+/// Evaluate one instruction, with the two cases that need the whole `cfg`
+/// (closure creation and calls) handled here and everything else delegated to
+/// the pure [`eval_op`].
+fn eval_instr(
+    cfg: &Cfg,
+    op: &Op,
+    result: Option<Value>,
+    vals: &HashMap<Value, Val>,
+    env: &mut HashMap<u32, Val>,
+    depth: usize,
+) -> Result<Val, String> {
+    // Closure creation: the analysis emits a `MakeArray` for the closure, but if
+    // this value has a behavioral body recorded, build a callable closure whose
+    // captures are the current values of the captured SSA values.
+    if let Some(r) = result {
+        if let Some(repr) = cfg.closures.get(&r) {
+            let captures = repr
+                .captures
+                .iter()
+                .map(|c| vals.get(c).cloned().unwrap_or(Val::Undef))
+                .collect();
+            let body = cfg.nested.get(repr.body).ok_or("interp: closure body index out of range")?;
+            return Ok(Val::Closure { body: Rc::new(body.clone()), captures });
+        }
+    }
+    let get = |v: &Value| vals.get(v).cloned().unwrap_or(Val::Undef);
+    let spreads = result.and_then(|r| cfg.spread_positions.get(&r));
+    match op {
+        Op::Call { callee, args } => {
+            // Flatten spread args (`f(...xs)`) per the recorded positions.
+            let mut a = Vec::new();
+            for (i, arg) in args.iter().enumerate() {
+                let v = get(arg);
+                match (spreads.map_or(false, |s| s.contains(&i)), &v) {
+                    (true, Val::Arr(arr)) => a.extend(arr.borrow().iter().cloned()),
+                    _ => a.push(v),
+                }
+            }
+            let c = get(callee);
+            match c {
+                Val::Closure { body, captures } => {
+                    // Nested body params are [captures..., own params...].
+                    let mut full = captures;
+                    full.extend(a);
+                    run_cfg(&body, &full, depth + 1)
+                }
+                _ => Err("interp: call unsupported".into()),
+            }
+        }
+        Op::MakeArray(elems) if spreads.is_some() => {
+            let spreads = spreads.unwrap();
+            let mut out = Vec::new();
+            for (i, e) in elems.iter().enumerate() {
+                let v = get(e);
+                match (spreads.contains(&i), &v) {
+                    (true, Val::Arr(arr)) => out.extend(arr.borrow().iter().cloned()),
+                    _ => out.push(v),
+                }
+            }
+            Ok(Val::Arr(Rc::new(RefCell::new(out))))
+        }
+        Op::MakeObject(props) if spreads.is_some() => {
+            let spreads = spreads.unwrap();
+            let mut m = BTreeMap::new();
+            for (i, (k, val)) in props.iter().enumerate() {
+                let v = get(val);
+                if spreads.contains(&i) {
+                    if let Val::Obj(o) = &v {
+                        for (kk, vv) in o.borrow().iter() {
+                            m.insert(kk.clone(), vv.clone());
+                        }
+                    }
+                } else {
+                    let key = match k {
+                        PropKey::Ident(s) => s.clone(),
+                        PropKey::Computed(c) => to_js_string(&get(c)),
+                    };
+                    m.insert(key, v);
+                }
+            }
+            Ok(Val::Obj(Rc::new(RefCell::new(m))))
+        }
+        _ => eval_op(op, vals, env),
+    }
 }
 
 fn eval_op(op: &Op, vals: &HashMap<Value, Val>, env: &mut HashMap<u32, Val>) -> Result<Val, String> {
@@ -184,7 +286,7 @@ pub fn truthy(v: &Val) -> bool {
         Val::Bool(b) => *b,
         Val::Num(n) => *n != 0.0 && !n.is_nan(),
         Val::Str(s) => !s.is_empty(),
-        Val::Obj(_) | Val::Arr(_) => true,
+        Val::Obj(_) | Val::Arr(_) | Val::Closure { .. } => true,
     }
 }
 
@@ -221,6 +323,7 @@ pub fn to_js_string(v: &Val) -> String {
         Val::Str(s) => s.clone(),
         Val::Arr(a) => a.borrow().iter().map(to_js_string).collect::<Vec<_>>().join(","),
         Val::Obj(_) => "[object Object]".into(),
+        Val::Closure { .. } => "function".into(),
     }
 }
 
@@ -272,6 +375,7 @@ fn un(u: UnOp, x: &Val) -> Result<Val, String> {
                 Val::Num(_) => "number",
                 Val::Str(_) => "string",
                 Val::Obj(_) | Val::Arr(_) => "object",
+                Val::Closure { .. } => "function",
             }
             .into(),
         ),
@@ -369,5 +473,7 @@ pub fn tag(v: &Val) -> String {
             "o:{{{}}}",
             m.borrow().iter().map(|(k, v)| format!("{k}={}", tag(v))).collect::<Vec<_>>().join(",")
         ),
+        // Matches Node's `__tag` fallback for a function value (`?:`+typeof).
+        Val::Closure { .. } => "?:function".into(),
     }
 }

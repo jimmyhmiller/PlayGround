@@ -47,11 +47,11 @@ pub struct LoxGcTypes {
     // Class offsets
     pub class_name_off: i32,
     pub class_super_off: i32,
-    pub class_methods_off: i32,  // Value: pointer to Table GC object
+    pub class_methods_off: i32, // Value: pointer to Table GC object
 
     // Instance offsets
     pub instance_class_off: i32,
-    pub instance_fields_off: i32,  // Value: pointer to Table GC object
+    pub instance_fields_off: i32, // Value: pointer to Table GC object
 
     // BoundMethod offsets
     pub bound_receiver_off: i32,
@@ -89,10 +89,15 @@ struct StringPool {
 
 impl StringPool {
     fn new() -> Self {
-        StringPool { strings: Vec::new(), map: HashMap::new() }
+        StringPool {
+            strings: Vec::new(),
+            map: HashMap::new(),
+        }
     }
     fn intern(&mut self, s: &str) -> u32 {
-        if let Some(&id) = self.map.get(s) { return id; }
+        if let Some(&id) = self.map.get(s) {
+            return id;
+        }
         let id = self.strings.len() as u32;
         self.map.insert(s.to_string(), id);
         self.strings.push(s.to_string());
@@ -134,7 +139,7 @@ struct Externs {
     // Property ops
     get_property: FuncRef,
     set_property: FuncRef,
-    get_field: FuncRef,     // fast field-only lookup (returns nil if not found)
+    get_field: FuncRef, // fast field-only lookup (returns nil if not found)
     // Super
     get_super: FuncRef,
     // Bound method
@@ -153,7 +158,7 @@ struct Externs {
     call_table_base: FuncRef, // () -> base_ptr
     // Combined fast-path invoke: (obj, name_id, num_args) -> func_ptr or 0
     invoke_fast: FuncRef,
-    invoke_closure: FuncRef,  // () -> closure from last invoke_fast
+    invoke_closure: FuncRef, // () -> closure from last invoke_fast
     // Combined instantiate: (class) -> instance; also sets init info globals
     instantiate: FuncRef,
     last_init_arity: FuncRef,
@@ -161,7 +166,10 @@ struct Externs {
 }
 
 fn sig(params: &[Type], ret: Option<Type>) -> Signature {
-    Signature { params: params.to_vec(), ret }
+    Signature {
+        params: params.to_vec(),
+        ret,
+    }
 }
 
 fn declare_externs(dm: &mut DynModule) -> Externs {
@@ -257,7 +265,9 @@ struct Ctx<'a> {
 
 fn collect_funs(stmts: &[Stmt]) -> Vec<&FunDecl> {
     let mut out = Vec::new();
-    for stmt in stmts { collect_funs_stmt(stmt, &mut out); }
+    for stmt in stmts {
+        collect_funs_stmt(stmt, &mut out);
+    }
     out
 }
 
@@ -265,18 +275,28 @@ fn collect_funs_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<&'a FunDecl>) {
     match stmt {
         Stmt::Fun(decl) => {
             out.push(decl);
-            for s in &decl.body { collect_funs_stmt(s, out); }
+            for s in &decl.body {
+                collect_funs_stmt(s, out);
+            }
         }
-        Stmt::Block(stmts) => { for s in stmts { collect_funs_stmt(s, out); } }
+        Stmt::Block(stmts) => {
+            for s in stmts {
+                collect_funs_stmt(s, out);
+            }
+        }
         Stmt::If(_, t, e) => {
             collect_funs_stmt(t, out);
-            if let Some(e) = e { collect_funs_stmt(e, out); }
+            if let Some(e) = e {
+                collect_funs_stmt(e, out);
+            }
         }
         Stmt::While(_, b) => collect_funs_stmt(b, out),
         Stmt::Class(decl) => {
             // Collect nested functions inside method bodies
             for method in &decl.methods {
-                for s in &method.body { collect_funs_stmt(s, out); }
+                for s in &method.body {
+                    collect_funs_stmt(s, out);
+                }
             }
         }
         _ => {}
@@ -284,7 +304,8 @@ fn collect_funs_stmt<'a>(stmt: &'a Stmt, out: &mut Vec<&'a FunDecl>) {
 }
 
 fn collect_method_funs<'a>(decl: &'a ClassDecl) -> Vec<(&'a FunDecl, String)> {
-    decl.methods.iter()
+    decl.methods
+        .iter()
         .map(|m| (m, format!("{}.{}", decl.name, m.name)))
         .collect()
 }
@@ -292,52 +313,61 @@ fn collect_method_funs<'a>(decl: &'a ClassDecl) -> Vec<(&'a FunDecl, String)> {
 // ── Main lowering entry point ─────────────────────────────────────
 
 fn extract_offset(ty: &ObjType, field: &str) -> i32 {
-    ty.field_offsets.get(field)
+    ty.field_offsets
+        .get(field)
         .unwrap_or_else(|| panic!("unknown field '{}' on type '{}'", field, ty.name))
         .0
 }
 
 fn declare_gc_types(dm: &mut DynModule) -> (LoxGcTypes, TypeHandles) {
-    let string_ty = dm.obj_type("String")
+    let string_ty = dm
+        .obj_type("String")
         .field("len", FieldKind::Raw64)
         .varlen_bytes()
         .build();
 
-    let closure_ty = dm.obj_type("Closure")
+    let closure_ty = dm
+        .obj_type("Closure")
         .field("name_ptr", FieldKind::Value)
         .field("func_table_idx", FieldKind::Raw64)
         .field("arity", FieldKind::Raw64)
         .varlen_values()
         .build();
 
-    let upvalue_ty = dm.obj_type("Upvalue")
+    let upvalue_ty = dm
+        .obj_type("Upvalue")
         .field("value", FieldKind::Value)
         .build();
 
-    let class_ty = dm.obj_type("Class")
+    let class_ty = dm
+        .obj_type("Class")
         .field("name_ptr", FieldKind::Value)
         .field("superclass", FieldKind::Value)
-        .field("methods", FieldKind::Value)  // GC pointer to Table object
+        .field("methods", FieldKind::Value) // GC pointer to Table object
         .build();
 
-    let instance_ty = dm.obj_type("Instance")
+    let instance_ty = dm
+        .obj_type("Instance")
         .field("class_ptr", FieldKind::Value)
-        .field("fields", FieldKind::Value)  // GC pointer to Table object
+        .field("fields", FieldKind::Value) // GC pointer to Table object
         .build();
 
     // Table: used for class methods and instance fields
     // Stores [key, value, key, value, ...] as varlen values
-    let table_ty = dm.obj_type("Table")
-        .field("count", FieldKind::Raw64)  // number of key-value pairs
+    let table_ty = dm
+        .obj_type("Table")
+        .field("count", FieldKind::Raw64) // number of key-value pairs
         .varlen_values()
         .build();
 
-    let bound_method_ty = dm.obj_type("BoundMethod")
+    let bound_method_ty = dm
+        .obj_type("BoundMethod")
         .field("receiver", FieldKind::Value)
         .field("method", FieldKind::Value)
         .build();
 
-    let native_fn_ty = dm.obj_type("NativeFn")
+    let native_fn_ty = dm
+        .obj_type("NativeFn")
         .field("name_ptr", FieldKind::Value)
         .field("func_ptr", FieldKind::Raw64)
         .build();
@@ -352,9 +382,7 @@ fn declare_gc_types(dm: &mut DynModule) -> (LoxGcTypes, TypeHandles) {
     let nf = dm.get_obj_type(native_fn_ty);
     let tb = dm.get_obj_type(table_ty);
 
-    let type_infos: Vec<TypeInfo> = dm.obj_types.iter()
-        .map(|t| *t.type_info)
-        .collect();
+    let type_infos: Vec<TypeInfo> = dm.obj_types.iter().map(|t| *t.type_info).collect();
 
     let gc_types = LoxGcTypes {
         type_infos,
@@ -411,7 +439,11 @@ fn declare_gc_types(dm: &mut DynModule) -> (LoxGcTypes, TypeHandles) {
 pub fn lower(program: &Program) -> LoweredProgram {
     let mut dm = DynModule::new(
         GcConfig::generational(64 * 1024),
-        NanBoxTags { nil: TAG_NIL, bool_tag: TAG_BOOL, ptr: TAG_OBJ },
+        NanBoxTags {
+            nil: TAG_NIL,
+            bool_tag: TAG_BOOL,
+            ptr: TAG_OBJ,
+        },
     );
     dm.register_slow_paths("lox");
 
@@ -426,7 +458,9 @@ pub fn lower(program: &Program) -> LoweredProgram {
     let mut func_names: HashMap<String, FuncRef> = HashMap::new();
     let mut func_arities: HashMap<String, usize> = HashMap::new();
     for decl in &fun_decls {
-        if func_names.contains_key(&decl.name) { continue; }
+        if func_names.contains_key(&decl.name) {
+            continue;
+        }
         let captures = resolved.functions.get(&decl.name);
         let is_method = captures.map_or(false, |c| c.is_method);
         let extra = if is_method { 2 } else { 1 }; // closure + maybe this
@@ -439,24 +473,40 @@ pub fn lower(program: &Program) -> LoweredProgram {
             Stmt::Class(decl) => {
                 out.push(decl);
                 for method in &decl.methods {
-                    for s in &method.body { collect_all_classes_stmt(s, out); }
+                    for s in &method.body {
+                        collect_all_classes_stmt(s, out);
+                    }
                 }
             }
-            Stmt::Block(stmts) => { for s in stmts { collect_all_classes_stmt(s, out); } }
+            Stmt::Block(stmts) => {
+                for s in stmts {
+                    collect_all_classes_stmt(s, out);
+                }
+            }
             Stmt::If(_, t, e) => {
                 collect_all_classes_stmt(t, out);
-                if let Some(e) = e { collect_all_classes_stmt(e, out); }
+                if let Some(e) = e {
+                    collect_all_classes_stmt(e, out);
+                }
             }
             Stmt::While(_, b) => collect_all_classes_stmt(b, out),
-            Stmt::Fun(decl) => { for s in &decl.body { collect_all_classes_stmt(s, out); } }
+            Stmt::Fun(decl) => {
+                for s in &decl.body {
+                    collect_all_classes_stmt(s, out);
+                }
+            }
             _ => {}
         }
     }
     let mut all_classes = Vec::new();
-    for stmt in &program.stmts { collect_all_classes_stmt(stmt, &mut all_classes); }
+    for stmt in &program.stmts {
+        collect_all_classes_stmt(stmt, &mut all_classes);
+    }
     for class_decl in &all_classes {
         for (method, key) in collect_method_funs(class_decl) {
-            if func_names.contains_key(&key) { continue; }
+            if func_names.contains_key(&key) {
+                continue;
+            }
             let extra = 2; // closure + this
             let fref = dm.declare_func(&key, method.params.len() + extra);
             func_names.insert(key.clone(), fref);
@@ -486,7 +536,11 @@ pub fn lower(program: &Program) -> LoweredProgram {
             cached_call_table_base: None,
             upvalue_cells: HashMap::new(),
             next_cache_id: 0,
-            captured_locals: if captured.is_empty() { &empty_captured } else { captured },
+            captured_locals: if captured.is_empty() {
+                &empty_captured
+            } else {
+                captured
+            },
             current_class: None,
         };
         // Cache call_table_base once at script entry
@@ -500,14 +554,18 @@ pub fn lower(program: &Program) -> LoweredProgram {
             // Make a closure with func_ptr=0, arity=0, name="clock" -- but we need a special NativeFn.
             // Instead, use lox_make_native_fn extern.
             f.fb.safepoint(&[]);
-            let native_fn = f.fb.call(ctx.externs.make_native_fn, &[clock_name_val]).unwrap();
+            let native_fn =
+                f.fb.call(ctx.externs.make_native_fn, &[clock_name_val])
+                    .unwrap();
             f.fb.call(ctx.externs.define_global, &[clock_name_val, native_fn]);
             f.def_var("clock", native_fn);
         }
 
         // Execute all statements in source order.
         for stmt in &program.stmts {
-            if ctx.dead { break; }
+            if ctx.dead {
+                break;
+            }
             lower_stmt(&mut f, &mut ctx, stmt);
         }
         if !ctx.dead {
@@ -522,30 +580,61 @@ pub fn lower(program: &Program) -> LoweredProgram {
     // ── Define each function ──────────────────────────────────
     for decl in &fun_decls {
         let key = &decl.name;
-        let Some(&fref) = func_names.get(key) else { continue };
+        let Some(&fref) = func_names.get(key) else {
+            continue;
+        };
         let captures = resolved.functions.get(key);
         let is_method = captures.map_or(false, |c| c.is_method);
         let empty_set = std::collections::HashSet::new();
         let captured_locals = captures.map_or(&empty_set, |c| &c.captured_locals);
         let upvalue_names = captures.map(|c| c.upvalues.as_slice()).unwrap_or(&[]);
 
-        lower_function(&mut dm, fref, decl, key, is_method, upvalue_names, captured_locals,
-                        &externs, &type_handles, &func_names, &func_arities, &resolved, &mut strings, None);
+        lower_function(
+            &mut dm,
+            fref,
+            decl,
+            key,
+            is_method,
+            upvalue_names,
+            captured_locals,
+            &externs,
+            &type_handles,
+            &func_names,
+            &func_arities,
+            &resolved,
+            &mut strings,
+            None,
+        );
     }
 
     // ── Define methods ────────────────────────────────────────
     for class_decl in &all_classes {
         {
             for (method, key) in collect_method_funs(class_decl) {
-                let Some(&fref) = func_names.get(&key) else { continue };
+                let Some(&fref) = func_names.get(&key) else {
+                    continue;
+                };
                 let captures = resolved.functions.get(&key);
                 let empty_set = std::collections::HashSet::new();
                 let captured_locals = captures.map_or(&empty_set, |c| &c.captured_locals);
                 let upvalue_names = captures.map(|c| c.upvalues.as_slice()).unwrap_or(&[]);
 
-                lower_function(&mut dm, fref, method, &key, true, upvalue_names, captured_locals,
-                                &externs, &type_handles, &func_names, &func_arities, &resolved, &mut strings,
-                                Some(class_decl.name.clone()));
+                lower_function(
+                    &mut dm,
+                    fref,
+                    method,
+                    &key,
+                    true,
+                    upvalue_names,
+                    captured_locals,
+                    &externs,
+                    &type_handles,
+                    &func_names,
+                    &func_arities,
+                    &resolved,
+                    &mut strings,
+                    Some(class_decl.name.clone()),
+                );
             }
         }
     }
@@ -599,7 +688,7 @@ fn lower_function(
         dead: false,
         cached_call_table_base: None,
         upvalue_cells: HashMap::new(),
-            next_cache_id: 0,
+        next_cache_id: 0,
         captured_locals,
         current_class,
     };
@@ -619,7 +708,9 @@ fn lower_function(
     // Load upvalues from closure
     for (i, uv_name) in upvalue_names.iter().enumerate() {
         let idx_val = f.fb.iconst(Type::I64, i as i64);
-        let cell = f.fb.call(ctx.externs.closure_upvalue, &[closure_val, idx_val]).unwrap();
+        let cell =
+            f.fb.call(ctx.externs.closure_upvalue, &[closure_val, idx_val])
+                .unwrap();
         let cell_var = format!("__upval_{}__", uv_name);
         f.def_var(&cell_var, cell);
         ctx.upvalue_cells.insert(uv_name.clone(), cell_var);
@@ -649,7 +740,9 @@ fn lower_function(
     }
 
     for stmt in &decl.body {
-        if ctx.dead { break; }
+        if ctx.dead {
+            break;
+        }
         lower_stmt(&mut f, &mut ctx, stmt);
     }
 
@@ -671,10 +764,14 @@ fn lower_function(
 // ── Statement lowering ────────────────────────────────────────────
 
 fn lower_stmt(f: &mut DynFunc, ctx: &mut Ctx, stmt: &Stmt) {
-    if ctx.dead { return; }
+    if ctx.dead {
+        return;
+    }
 
     match stmt {
-        Stmt::Expr(e) => { lower_expr(f, ctx, e); }
+        Stmt::Expr(e) => {
+            lower_expr(f, ctx, e);
+        }
 
         Stmt::Print(e) => {
             let v = lower_expr(f, ctx, e);
@@ -716,7 +813,9 @@ fn lower_stmt(f: &mut DynFunc, ctx: &mut Ctx, stmt: &Stmt) {
         Stmt::Block(stmts) => {
             f.push_scope();
             for s in stmts {
-                if ctx.dead { break; }
+                if ctx.dead {
+                    break;
+                }
                 lower_stmt(f, ctx, s);
             }
             f.pop_scope();
@@ -733,19 +832,31 @@ fn lower_stmt(f: &mut DynFunc, ctx: &mut Ctx, stmt: &Stmt) {
             ctx.dead = false;
             lower_stmt(f, ctx, then_branch);
             let then_dead = ctx.dead;
-            if !then_dead { f.fb.jump(merge_bb, &[]); }
-            else { f.fb.unreachable(); }
+            if !then_dead {
+                f.fb.jump(merge_bb, &[]);
+            } else {
+                f.fb.unreachable();
+            }
 
             f.fb.switch_to_block(else_bb);
             ctx.dead = false;
-            if let Some(eb) = else_branch { lower_stmt(f, ctx, eb); }
+            if let Some(eb) = else_branch {
+                lower_stmt(f, ctx, eb);
+            }
             let else_dead = ctx.dead;
-            if !else_dead { f.fb.jump(merge_bb, &[]); }
-            else { f.fb.unreachable(); }
+            if !else_dead {
+                f.fb.jump(merge_bb, &[]);
+            } else {
+                f.fb.unreachable();
+            }
 
             ctx.dead = then_dead && else_dead;
-            if !ctx.dead { f.fb.switch_to_block(merge_bb); }
-            else { let d = f.fb.create_block(&[]); f.fb.switch_to_block(d); }
+            if !ctx.dead {
+                f.fb.switch_to_block(merge_bb);
+            } else {
+                let d = f.fb.create_block(&[]);
+                f.fb.switch_to_block(d);
+            }
         }
 
         Stmt::While(cond, body) => {
@@ -763,8 +874,9 @@ fn lower_stmt(f: &mut DynFunc, ctx: &mut Ctx, stmt: &Stmt) {
                 // dead objects accumulated during the loop body.
                 f.fb.safepoint(&[]);
                 f.fb.jump(header, &[]);
+            } else {
+                f.fb.unreachable();
             }
-            else { f.fb.unreachable(); }
             ctx.dead = false;
             f.fb.switch_to_block(exit);
         }
@@ -794,7 +906,9 @@ fn lower_stmt(f: &mut DynFunc, ctx: &mut Ctx, stmt: &Stmt) {
                 let id_val = f.fb.iconst(Type::I64, name_id as i64);
                 f.fb.call(ctx.externs.define_global, &[id_val, nil]);
             }
-            if ctx.captured_locals.contains(&decl.name) && !ctx.upvalue_cells.contains_key(&decl.name) {
+            if ctx.captured_locals.contains(&decl.name)
+                && !ctx.upvalue_cells.contains_key(&decl.name)
+            {
                 f.fb.safepoint(&[]);
                 let cell = f.fb.call(ctx.externs.alloc_upvalue, &[nil]).unwrap();
                 let cell_var = format!("__upval_{}__", decl.name);
@@ -914,9 +1028,7 @@ fn lower_expr(f: &mut DynFunc, ctx: &mut Ctx, expr: &Expr) -> Value {
             f.fb.block_param(merge_bb, 0)
         }
 
-        Expr::Call(callee, args) => {
-            lower_call(f, ctx, callee, args)
-        }
+        Expr::Call(callee, args) => lower_call(f, ctx, callee, args),
 
         Expr::Get(obj_expr, name) => {
             let obj = lower_expr(f, ctx, obj_expr);
@@ -932,7 +1044,9 @@ fn lower_expr(f: &mut DynFunc, ctx: &mut Ctx, expr: &Expr) -> Value {
 
             // Slow path: full property lookup (methods, BoundMethod, errors)
             f.fb.switch_to_block(slow_bb);
-            let full_val = f.fb.call(ctx.externs.get_property, &[obj, name_val]).unwrap();
+            let full_val =
+                f.fb.call(ctx.externs.get_property, &[obj, name_val])
+                    .unwrap();
             f.fb.jump(merge_bb, &[full_val]);
 
             f.fb.switch_to_block(merge_bb);
@@ -944,7 +1058,8 @@ fn lower_expr(f: &mut DynFunc, ctx: &mut Ctx, expr: &Expr) -> Value {
             let val = lower_expr(f, ctx, val_expr);
             let name_id = ctx.strings.intern(name);
             let name_val = f.fb.iconst(Type::I64, name_id as i64);
-            f.fb.call(ctx.externs.set_property, &[obj, name_val, val]).unwrap()
+            f.fb.call(ctx.externs.set_property, &[obj, name_val, val])
+                .unwrap()
         }
 
         Expr::This => load_variable(f, ctx, "this"),
@@ -955,14 +1070,18 @@ fn lower_expr(f: &mut DynFunc, ctx: &mut Ctx, expr: &Expr) -> Value {
             let class_val = if ctx.upvalue_cells.contains_key("super") || f.has_var("super") {
                 load_variable(f, ctx, "super")
             } else {
-                let class_name = ctx.current_class.as_ref()
-                    .expect("'super' outside of class").clone();
+                let class_name = ctx
+                    .current_class
+                    .as_ref()
+                    .expect("'super' outside of class")
+                    .clone();
                 load_variable(f, ctx, &class_name)
             };
             let method_id = ctx.strings.intern(method_name);
             let method_val = f.fb.iconst(Type::I64, method_id as i64);
             // lox_get_super(this, class_val, method_name_id) -> bound method
-            f.fb.call(ctx.externs.get_super, &[this, class_val, method_val]).unwrap()
+            f.fb.call(ctx.externs.get_super, &[this, class_val, method_val])
+                .unwrap()
         }
     }
 }
@@ -970,9 +1089,7 @@ fn lower_expr(f: &mut DynFunc, ctx: &mut Ctx, expr: &Expr) -> Value {
 // ── Function call lowering ────────────────────────────────────────
 
 fn lower_call(f: &mut DynFunc, ctx: &mut Ctx, callee: &Expr, args: &[Expr]) -> Value {
-    let arg_vals: Vec<Value> = args.iter()
-        .map(|a| lower_expr(f, ctx, a))
-        .collect();
+    let arg_vals: Vec<Value> = args.iter().map(|a| lower_expr(f, ctx, a)).collect();
 
     // Special cases: known direct calls
     match callee {
@@ -1071,7 +1188,9 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
         let mut all_args = vec![callee];
         all_args.extend_from_slice(args);
         f.fb.safepoint(&[]);
-        let result = f.fb.call_indirect(func_ptr, &all_args, Some(Type::I64)).unwrap();
+        let result =
+            f.fb.call_indirect(func_ptr, &all_args, Some(Type::I64))
+                .unwrap();
         f.fb.jump(merge_bb, &[result]);
     }
 
@@ -1146,17 +1265,24 @@ fn emit_indirect_call(f: &mut DynFunc, ctx: &mut Ctx, callee: Value, args: &[Val
         f.fb.br_if(bound_ok, bound_call_bb, &[], bound_err_bb, &[]);
 
         f.fb.switch_to_block(bound_err_bb);
-        f.fb.call(ctx.externs.check_arity, &[callee, bound_arity, num_args_val]);
+        f.fb.call(
+            ctx.externs.check_arity,
+            &[callee, bound_arity, num_args_val],
+        );
         let nil = f.nil();
         f.fb.jump(merge_bb, &[nil]);
 
         f.fb.switch_to_block(bound_call_bb);
         // bound_closure_func_ptr still extern (JIT call_table lookup)
-        let func_ptr = f.fb.call(ctx.externs.bound_closure_func_ptr, &[callee]).unwrap();
+        let func_ptr =
+            f.fb.call(ctx.externs.bound_closure_func_ptr, &[callee])
+                .unwrap();
         let mut method_args = vec![method_val, receiver];
         method_args.extend_from_slice(args);
         f.fb.safepoint(&[]);
-        let result = f.fb.call_indirect(func_ptr, &method_args, Some(Type::I64)).unwrap();
+        let result =
+            f.fb.call_indirect(func_ptr, &method_args, Some(Type::I64))
+                .unwrap();
         f.fb.jump(merge_bb, &[result]);
     }
 
@@ -1275,7 +1401,13 @@ fn emit_resolve_func_ptr(
 /// Optimized method invoke: obj.method(args) without BoundMethod allocation.
 /// Uses invoke_fast for the common case (1 call does lookup+arity+func_ptr),
 /// falls back to slow path for field/not_found/arity_mismatch.
-fn emit_invoke(f: &mut DynFunc, ctx: &mut Ctx, obj: Value, method_name: &str, args: &[Value]) -> Value {
+fn emit_invoke(
+    f: &mut DynFunc,
+    ctx: &mut Ctx,
+    obj: Value,
+    method_name: &str,
+    args: &[Value],
+) -> Value {
     let sym = dynsym::Symbol::from_raw(ctx.strings.intern(method_name));
     let cache_id = ctx.next_cache_id;
     ctx.next_cache_id += 1;
@@ -1329,7 +1461,10 @@ fn lower_class(f: &mut DynFunc, ctx: &mut Ctx, decl: &ClassDecl) {
         let method_closure = make_closure(f, ctx, &key, &key);
         let method_name_id = ctx.strings.intern(&method.name);
         let method_name_val = f.fb.iconst(Type::I64, method_name_id as i64);
-        f.fb.call(ctx.externs.class_add_method, &[class_val, method_name_val, method_closure]);
+        f.fb.call(
+            ctx.externs.class_add_method,
+            &[class_val, method_name_val, method_closure],
+        );
     }
 }
 
@@ -1356,7 +1491,12 @@ fn make_closure(f: &mut DynFunc, ctx: &mut Ctx, func_key: &str, decl_name: &str)
     let arity_val = f.fb.iconst(Type::I64, arity as i64);
     let name_id_val = f.fb.iconst(Type::I64, name_id as i64);
     f.fb.safepoint(&[]);
-    let closure_val = f.fb.call(ctx.externs.make_closure, &[func_idx, num_upvalues, arity_val, name_id_val]).unwrap();
+    let closure_val =
+        f.fb.call(
+            ctx.externs.make_closure,
+            &[func_idx, num_upvalues, arity_val, name_id_val],
+        )
+        .unwrap();
 
     // Set each upvalue
     for (i, uv_name) in upvalue_names.iter().enumerate() {
@@ -1390,12 +1530,18 @@ fn make_closure(f: &mut DynFunc, ctx: &mut Ctx, func_key: &str, decl_name: &str)
 // ── Helpers ───────────────────────────────────────────────────────
 
 fn lower_branch(
-    f: &mut DynFunc, ctx: &mut Ctx, cond: &Expr,
-    then_bb: BlockId, then_args: &[Value],
-    else_bb: BlockId, else_args: &[Value],
+    f: &mut DynFunc,
+    ctx: &mut Ctx,
+    cond: &Expr,
+    then_bb: BlockId,
+    then_args: &[Value],
+    else_bb: BlockId,
+    else_args: &[Value],
 ) {
     if let Some(cmp_op) = as_num_cmp(cond) {
-        let Expr::Binary(lhs, _, rhs) = cond else { unreachable!() };
+        let Expr::Binary(lhs, _, rhs) = cond else {
+            unreachable!()
+        };
         let l = lower_expr(f, ctx, lhs);
         let r = lower_expr(f, ctx, rhs);
         let fa = f.fb.bitcast(l, Type::F64);

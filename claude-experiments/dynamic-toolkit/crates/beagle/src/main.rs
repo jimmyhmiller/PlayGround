@@ -1,4 +1,4 @@
-use beagle::lower::{lower_program, StringPool, STRING_TAG};
+use beagle::lower::{STRING_TAG, StringPool, lower_program};
 use beagle::parser::Parser;
 
 use dynexec::NanBoxConfig;

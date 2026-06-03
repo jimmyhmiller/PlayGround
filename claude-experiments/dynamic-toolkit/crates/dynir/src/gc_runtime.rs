@@ -23,12 +23,11 @@ use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
 
 use dynalloc::{Alloc, PtrPolicy, SemiSpace};
-use dynobj::{ObjHeader, RootSource, TypeInfo};
 use dynexec::{
     capture_continuation, read_continuation, CapturedStackBuilder, ContinuationContext,
-    ContinuationTypes, ContinuationView, RootStrategy, RootTransport,
-    ValueLayout,
+    ContinuationTypes, ContinuationView, RootStrategy, RootTransport, ValueLayout,
 };
+use dynobj::{ObjHeader, RootSource, TypeInfo};
 
 use crate::interp::InterpRootManager;
 
@@ -101,11 +100,7 @@ impl<H: ObjHeader, P: PtrPolicy> GcInterpCtx<H, P> {
     /// the returned `cont_types` here alongside the augmented table.
     /// The `heap` should have been constructed with header type `H`
     /// matching what the interpreter uses.
-    pub fn new(
-        heap: SemiSpace,
-        type_table: Vec<TypeInfo>,
-        cont_types: ContinuationTypes,
-    ) -> Self {
+    pub fn new(heap: SemiSpace, type_table: Vec<TypeInfo>, cont_types: ContinuationTypes) -> Self {
         GcInterpCtx {
             heap: RefCell::new(heap),
             type_table,
@@ -166,9 +161,7 @@ impl<H: ObjHeader, P: PtrPolicy> GcInterpCtx<H, P> {
     /// `needs_gc()` at instruction boundaries — the only safe points
     /// for collection.
     pub fn should_auto_collect(&self) -> bool {
-        self.gc_policy
-            .get()
-            .should_collect(self.alloc_count.get())
+        self.gc_policy.get().should_collect(self.alloc_count.get())
     }
 
     pub fn cont_types(&self) -> &ContinuationTypes {
@@ -232,7 +225,9 @@ impl<H: ObjHeader, P: PtrPolicy> GcInterpCtx<H, P> {
     /// `scan_object` rules.
     pub fn collect(&self) {
         let frames_guard = self.root_frames.borrow();
-        let src = AllFramesRootSource { frames: &*frames_guard };
+        let src = AllFramesRootSource {
+            frames: &*frames_guard,
+        };
 
         // Build a root-source list: interpreter frame roots plus
         // any extra root sources registered by the embedding (e.g.,
@@ -336,8 +331,7 @@ impl<'a> RootSource for AllFramesRootSource<'a> {
 mod tests {
     use super::*;
     use dynexec::{
-        capture_continuation, read_continuation, BuilderFrame, FrameResume,
-        CapturedStackBuilder,
+        capture_continuation, read_continuation, BuilderFrame, CapturedStackBuilder, FrameResume,
     };
     use dynobj::{init_header, write_varlen_count, Compact, ObjHeader};
 
@@ -426,12 +420,9 @@ mod tests {
                 caller_resume: FrameResume::TopLevel,
             }],
         };
-        let handle_before = capture_continuation::<Compact, _, TestPolicy>(
-            &ctx,
-            ctx.cont_types(),
-            &builder,
-        )
-        .expect("capture OOM");
+        let handle_before =
+            capture_continuation::<Compact, _, TestPolicy>(&ctx, ctx.cont_types(), &builder)
+                .expect("capture OOM");
 
         // Store the handle in a root frame.
         let handle_frame = ctx.push_root_frame(1);
@@ -472,36 +463,43 @@ mod tests {
     /// through the reference interpreter.
     #[test]
     fn externs_straight_line_alloc_write_read() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicPtr, Ordering};
-        use dynvalue::LowBit;
         use crate::builder::ModuleBuilder;
         use crate::interp::{ExternCallResult, InterpResult, ModuleInterpreter};
         use crate::types::{Signature, Type};
+        use dynvalue::LowBit;
+        use std::sync::atomic::{AtomicPtr, Ordering};
+        use std::sync::Arc;
 
         let user_type_id: u16 = 0;
         let user_type = TypeInfo::for_header(Compact::SIZE)
             .with_varlen_bytes(0)
             .with_type_id(user_type_id);
         let mut type_table: Vec<TypeInfo> = vec![user_type];
-        let cont_types =
-            ContinuationTypes::register_into::<Compact>(&mut type_table);
+        let cont_types = ContinuationTypes::register_into::<Compact>(&mut type_table);
         let heap = SemiSpace::new::<Compact>(64 * 1024);
-        let ctx: GcInterpCtx<Compact, TestPolicy> =
-            GcInterpCtx::new(heap, type_table, cont_types);
+        let ctx: GcInterpCtx<Compact, TestPolicy> = GcInterpCtx::new(heap, type_table, cont_types);
 
         let mut mb = ModuleBuilder::new();
         let f_alloc = mb.declare_extern(
             "alloc_bytes",
-            Signature { params: vec![Type::I64], ret: Some(Type::GcPtr) },
+            Signature {
+                params: vec![Type::I64],
+                ret: Some(Type::GcPtr),
+            },
         );
         let f_write = mb.declare_extern(
             "write_byte",
-            Signature { params: vec![Type::GcPtr, Type::I64, Type::I64], ret: None },
+            Signature {
+                params: vec![Type::GcPtr, Type::I64, Type::I64],
+                ret: None,
+            },
         );
         let f_read = mb.declare_extern(
             "read_byte",
-            Signature { params: vec![Type::GcPtr, Type::I64], ret: Some(Type::I64) },
+            Signature {
+                params: vec![Type::GcPtr, Type::I64],
+                ret: Some(Type::I64),
+            },
         );
         let f_main = mb.declare_func("main", &[], Some(Type::I64));
 
@@ -522,8 +520,7 @@ mod tests {
         let ctx_ptr: Arc<AtomicPtr<GcInterpCtx<Compact, TestPolicy>>> =
             Arc::new(AtomicPtr::new(ctx_ptr as *mut _));
 
-        let mut interp =
-            ModuleInterpreter::<LowBit<3>, _>::new(&module, &ctx);
+        let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &ctx);
         interp.set_cont_ctx(&ctx);
 
         let ctx_a = ctx_ptr.clone();
@@ -544,7 +541,9 @@ mod tests {
             let idx = args[1] as usize;
             let byte = args[2] as u8;
             let base = ut_write.varlen_count_offset() + 8;
-            unsafe { *ptr.add(base + idx) = byte; }
+            unsafe {
+                *ptr.add(base + idx) = byte;
+            }
             ExternCallResult::Value(None)
         });
         let ut_read = user_type;
@@ -570,12 +569,12 @@ mod tests {
     /// we exercise the whole dispatch path.
     #[test]
     fn auto_gc_triggers_from_allocation_threshold() {
-        use std::sync::Arc;
-        use std::sync::atomic::{AtomicPtr, Ordering};
-        use dynvalue::LowBit;
         use crate::builder::ModuleBuilder;
         use crate::interp::{ExternCallResult, InterpResult, ModuleInterpreter};
         use crate::types::{Signature, Type};
+        use dynvalue::LowBit;
+        use std::sync::atomic::{AtomicPtr, Ordering};
+        use std::sync::Arc;
 
         // Byte-buffer user type.
         let user_type_id: u16 = 0;
@@ -583,11 +582,9 @@ mod tests {
             .with_varlen_bytes(0)
             .with_type_id(user_type_id);
         let mut type_table: Vec<TypeInfo> = vec![user_type];
-        let cont_types =
-            ContinuationTypes::register_into::<Compact>(&mut type_table);
+        let cont_types = ContinuationTypes::register_into::<Compact>(&mut type_table);
         let heap = SemiSpace::new::<Compact>(64 * 1024);
-        let ctx: GcInterpCtx<Compact, TestPolicy> =
-            GcInterpCtx::new(heap, type_table, cont_types);
+        let ctx: GcInterpCtx<Compact, TestPolicy> = GcInterpCtx::new(heap, type_table, cont_types);
 
         // Low threshold: auto-gc every 10 allocations.
         ctx.set_gc_policy(GcInterpPolicy::EveryNAllocs(10));
@@ -602,7 +599,10 @@ mod tests {
         let mut mb = ModuleBuilder::new();
         let f_alloc = mb.declare_extern(
             "alloc_bytes",
-            Signature { params: vec![Type::I64], ret: Some(Type::GcPtr) },
+            Signature {
+                params: vec![Type::I64],
+                ret: Some(Type::GcPtr),
+            },
         );
         let f_main = mb.declare_func("main", &[], Some(Type::I64));
 
@@ -623,8 +623,7 @@ mod tests {
         let ctx_ptr: Arc<AtomicPtr<GcInterpCtx<Compact, TestPolicy>>> =
             Arc::new(AtomicPtr::new(ctx_ptr as *mut _));
 
-        let mut interp =
-            ModuleInterpreter::<LowBit<3>, _>::new(&module, &ctx);
+        let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &ctx);
         interp.set_cont_ctx(&ctx);
 
         let ctx_a = ctx_ptr.clone();
@@ -698,8 +697,8 @@ mod tests {
     /// either panics in the GC or reads garbage.
     #[test]
     fn end_to_end_gc_during_dormant_continuation() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicPtr, Ordering};
+        use std::sync::Arc;
 
         use dynvalue::LowBit;
 
@@ -714,11 +713,9 @@ mod tests {
             .with_varlen_bytes(0)
             .with_type_id(user_type_id);
         let mut type_table: Vec<TypeInfo> = vec![user_type];
-        let cont_types =
-            ContinuationTypes::register_into::<Compact>(&mut type_table);
+        let cont_types = ContinuationTypes::register_into::<Compact>(&mut type_table);
         let heap = SemiSpace::new::<Compact>(64 * 1024);
-        let ctx: GcInterpCtx<Compact, TestPolicy> =
-            GcInterpCtx::new(heap, type_table, cont_types);
+        let ctx: GcInterpCtx<Compact, TestPolicy> = GcInterpCtx::new(heap, type_table, cont_types);
         // Aggressive auto-gc: trigger on every single alloc. Exercises
         // the "GC mid-capture is suppressed" invariant — if the GC
         // fired between ContMeta and ContObj allocations inside
@@ -734,19 +731,31 @@ mod tests {
         let mut mb = ModuleBuilder::new();
         let f_alloc = mb.declare_extern(
             "alloc_bytes",
-            Signature { params: vec![Type::I64], ret: Some(Type::GcPtr) },
+            Signature {
+                params: vec![Type::I64],
+                ret: Some(Type::GcPtr),
+            },
         );
         let f_write = mb.declare_extern(
             "write_byte",
-            Signature { params: vec![Type::GcPtr, Type::I64, Type::I64], ret: None },
+            Signature {
+                params: vec![Type::GcPtr, Type::I64, Type::I64],
+                ret: None,
+            },
         );
         let f_read = mb.declare_extern(
             "read_byte",
-            Signature { params: vec![Type::GcPtr, Type::I64], ret: Some(Type::I64) },
+            Signature {
+                params: vec![Type::GcPtr, Type::I64],
+                ret: Some(Type::I64),
+            },
         );
         let f_gc = mb.declare_extern(
             "force_gc",
-            Signature { params: vec![], ret: None },
+            Signature {
+                params: vec![],
+                ret: None,
+            },
         );
         let f_main = mb.declare_func("main", &[], Some(Type::I64));
 
@@ -811,8 +820,7 @@ mod tests {
         let ctx_ptr: Arc<AtomicPtr<GcInterpCtx<Compact, TestPolicy>>> =
             Arc::new(AtomicPtr::new(ctx_ptr as *mut _));
 
-        let mut interp =
-            ModuleInterpreter::<LowBit<3>, _>::new(&module, &ctx);
+        let mut interp = ModuleInterpreter::<LowBit<3>, _>::new(&module, &ctx);
         interp.set_cont_ctx(&ctx);
 
         let ctx_for_alloc = ctx_ptr.clone();

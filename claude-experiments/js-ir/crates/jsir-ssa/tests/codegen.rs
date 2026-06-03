@@ -2,7 +2,7 @@
 //! the same result as the original for every input, and (2) actually memoize —
 //! reuse cached object references when dependencies are unchanged.
 
-use jsir_ssa::{codegen, lower, mutability, scopes, ssa};
+use jsir_ssa::{aliasing_ranges, codegen, lower, scopes, ssa};
 
 fn node_available() -> bool {
     std::process::Command::new("node").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
@@ -39,7 +39,7 @@ fn run_node(program: &str) -> Option<String> {
 fn memoize(src: &str) -> String {
     let mut cfg = lower(src).expect("lower");
     ssa::construct(&mut cfg);
-    let r = mutability::analyze(&cfg);
+    let r = aliasing_ranges::analyze(&cfg);
     let infos = scopes::analyze(&cfg, &r);
     codegen::emit_memoized(&cfg, &infos, "C").expect("emit")
 }

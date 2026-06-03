@@ -162,7 +162,9 @@ fn alloc_inside_branch_used_after_bails() {
 #[test]
 fn aliased_mutation_through_property_load_after_branch_bails() {
     // `x.y = y; x.y.push(...)` mutates the cached `{}` via a member load off it,
-    // outside any guard. Must not memoize `x`.
+    // then the branch condition `x.y[0]` reads that mutated allocation. The value
+    // selected by the branch (`z`) is therefore control-dependent on mutable state
+    // we don't surface as a dependency, so memoizing it would be unsound. Must bail.
     assert_bails(
         "function Component(props){ const x={}; const y=[]; x.y=y; x.y.push(props.input); let z=0; if(x.y[0]){z=1;} return [z]; }",
     );

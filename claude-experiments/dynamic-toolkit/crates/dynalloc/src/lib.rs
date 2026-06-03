@@ -13,6 +13,7 @@ pub use alloc::{Alloc, AtomicBumpAllocator, BumpAllocator, HeapWalker, alloc_obj
 pub use barrier::{SATBBuffer, SATBQueue, read_barrier, read_barrier_atomic};
 pub use card_table::CardTable;
 pub use heap::Heap;
+pub use heap::{max_visit_gen, slot_last_visit_gen};
 pub use mutator::{GcRef, Mutator, Root, RootScope};
 pub use ptr_policy::{LowBitPtrPolicy, NanBoxPtrPolicy};
 pub use semi_space::{FORWARDING_BIT, PtrPolicy, SemiSpace, follow_forwarding};

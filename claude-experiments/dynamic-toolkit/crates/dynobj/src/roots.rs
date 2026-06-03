@@ -373,6 +373,130 @@ impl DynRootFrame {
 
 use std::marker::PhantomData;
 
+// ─── GC capability token + bare-reference type ─────────────────────
+//
+// These two types turn "I held a raw GC pointer across an allocation"
+// from a silent moving-GC corruption into a borrow-check error.
+//
+// The rule, enforced entirely by the borrow checker:
+//
+//   * Every operation that can trigger a moving collection — allocation,
+//     or re-entry into managed (JIT) code — takes `&mut Heap`.
+//   * A bare, unrooted GC reference is a `Raw<'h>`, which borrows `&Heap`
+//     for `'h`.
+//
+// A shared `&Heap` borrow (held by a live `Raw`) and a `&mut Heap` borrow
+// (required to allocate) are mutually exclusive. So you physically cannot
+// call an allocating function while a `Raw` is live. To carry a reference
+// across an allocation you must first `Raw::root` it into a `RootScope`
+// slot, producing a `Rooted` that the collector scans and rewrites in
+// place. The only way to read a `Rooted` back is `Rooted::get(&Heap)`,
+// which re-borrows the heap and re-reads the (possibly relocated) slot —
+// so a stale value can never be observed.
+
+/// Per-thread capability token proving the holder may perform GC-causing
+/// operations. It carries no state: the heap itself lives in the runtime's
+/// thread-locals. `Heap` exists purely so the borrow checker can gate
+/// allocation (`&mut Heap`) against live bare references (`&Heap`).
+///
+/// # Soundness contract
+/// At most one `Heap` may be live per native call-tree rooted at a
+/// managed→native boundary. The only sanctioned constructor is
+/// [`gc_enter`] (which an FFI/extern entry point calls once). Minting a
+/// second `Heap` mid-logic via [`Heap::new_unchecked`] to dodge a borrow
+/// conflict reintroduces exactly the bug this prevents — don't.
+///
+/// `Heap` is `!Send`/`!Sync`: GC roots are per-thread.
+pub struct Heap {
+    _not_send: PhantomData<*const ()>,
+}
+
+impl Heap {
+    /// Mint a `Heap` token without checking the one-per-call-tree contract.
+    ///
+    /// # Safety
+    /// The caller must guarantee this is the unique live `Heap` for the
+    /// current native call-tree — i.e. it is called only at a
+    /// managed→native boundary (an extern entry), not in the middle of
+    /// logic that already holds a `Heap`. Prefer [`gc_enter`].
+    #[inline]
+    pub unsafe fn new_unchecked() -> Self {
+        Heap {
+            _not_send: PhantomData,
+        }
+    }
+}
+
+/// A bare, **unrooted** GC reference (NanBox bits), valid only until the
+/// next GC-causing operation. It borrows `&Heap` for `'h`, so it cannot be
+/// held across a `&mut Heap` allocation — that conflict is the
+/// stale-pointer bug made uncompilable.
+///
+/// To survive a collection, [`root`](Raw::root) it into a [`RootScope`].
+#[derive(Clone, Copy)]
+#[must_use = "a Raw is invalidated by the next allocation; root it or use its bits now"]
+pub struct Raw<'h> {
+    bits: u64,
+    _heap: PhantomData<&'h Heap>,
+}
+
+impl<'h> Raw<'h> {
+    /// Wrap freshly produced bits as a `Raw` tied to an existing heap
+    /// borrow. This is how allocating-primitive wrappers (e.g. a
+    /// `&mut Heap` alloc helper) return their result: the caller's heap
+    /// borrow keeps the new reference's lifetime honest, so the produced
+    /// `Raw` still cannot survive a subsequent allocation.
+    #[inline]
+    pub fn from_bits(_heap: &'h Heap, bits: u64) -> Self {
+        Raw {
+            bits,
+            _heap: PhantomData,
+        }
+    }
+
+    /// Extract the underlying NanBox bits. This severs the heap borrow, so
+    /// the result is a plain `u64` the borrow checker no longer protects:
+    /// use it immediately (write into a freshly-rooted cell, or return it
+    /// from the extern). Prefer passing `Raw`/`Rooted` directly where a
+    /// helper accepts them.
+    #[inline]
+    pub fn bits(self) -> u64 {
+        self.bits
+    }
+
+    /// Anchor this reference into `scope`, producing a `Rooted` the GC will
+    /// keep up to date. Use this before any allocation that must not
+    /// invalidate the reference.
+    #[inline]
+    pub fn root<'r>(self, scope: &'r RootScope) -> Rooted<'r, ()> {
+        scope.root::<()>(self.bits)
+    }
+}
+
+/// Run `f` at a managed→native boundary with a freshly minted [`Heap`]
+/// token and a `RootScope` of `capacity` slots attached to the thread's
+/// active `FrameChain`. This is the one sanctioned place a `Heap` is born.
+///
+/// Typical extern shape:
+/// ```ignore
+/// pub unsafe extern "C" fn cljvm_rt_cons(x_bits: u64, seq_bits: u64) -> u64 {
+///     dynobj::roots::gc_enter(2, |heap, scope| {
+///         let x = scope.root::<()>(x_bits);
+///         let seq = scope.root::<()>(seq_bits);
+///         cons_inner(heap, scope, x, seq).bits()
+///     })
+/// }
+/// ```
+pub fn gc_enter<R>(capacity: usize, f: impl FnOnce(&mut Heap, &RootScope<'_>) -> R) -> R {
+    with_scope(capacity, |scope| {
+        // SAFETY: `with_scope` establishes the managed→native boundary
+        // (a fresh root frame on the active chain). We mint the unique
+        // `Heap` token for this native call-tree here, per the contract.
+        let mut heap = unsafe { Heap::new_unchecked() };
+        f(&mut heap, scope)
+    })
+}
+
 /// A heap value pinned for the GC. Holding `Rooted<'scope, T>` keeps the
 /// underlying slot scannable: the GC sees the slot as a root and rewrites
 /// it in place across moving collections. Reading via `.get()` always
@@ -401,23 +525,58 @@ pub struct Rooted<'scope, T: ?Sized> {
 // same root to multiple callees.
 impl<T: ?Sized> Copy for Rooted<'_, T> {}
 impl<T: ?Sized> Clone for Rooted<'_, T> {
-    fn clone(&self) -> Self { *self }
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 
 impl<'scope, T: ?Sized> Rooted<'scope, T> {
-    /// Read the current value through the slot. Re-loads each call: a
-    /// moving GC that ran since the last read will have already written
-    /// the relocated address into the slot.
+    /// Read the current value as bare bits, untied to any [`Heap`] borrow.
+    ///
+    /// This is the footgun behind the form-430 stale-pointer bug class:
+    /// the returned `u64` is a plain integer the borrow checker no longer
+    /// protects, so holding it across an allocation observes a stale
+    /// (pre-relocation) value. Prefer [`get_raw`](Rooted::get_raw), whose
+    /// result borrows the `Heap` and therefore cannot survive an alloc.
+    #[deprecated(
+        note = "bare bits across an allocation is the form-430 stale-pointer bug; \
+                use `get_raw(&Heap)` (heap-tied) instead"
+    )]
     #[inline]
     pub fn get(&self) -> u64 {
         self.slot.get()
     }
 
-    /// Update the rooted value. The GC will see the new value at the next
-    /// collection.
+    /// Update the rooted value from bare bits. Deprecated alongside
+    /// [`get`](Rooted::get); use [`set_raw`](Rooted::set_raw).
+    #[deprecated(note = "use `set_raw(Raw)` instead of bare bits")]
     #[inline]
     pub fn set(&self, value: u64) {
         self.slot.set(value);
+    }
+
+    /// Re-read the current (possibly relocated) value as a fresh [`Raw`]
+    /// that re-borrows `heap`. This is the type-safe replacement for the
+    /// bare [`get`](Rooted::get): the returned reference borrows `&Heap`,
+    /// so the borrow checker forbids holding it across a `&mut Heap`
+    /// allocation. A moving GC that rewrote the slot is observed here.
+    #[inline]
+    pub fn get_raw<'h>(&self, _heap: &'h Heap) -> Raw<'h> {
+        Raw {
+            bits: self.slot.get(),
+            _heap: PhantomData,
+        }
+    }
+
+    /// Store a [`Raw`] back into this rooted slot.
+    #[inline]
+    pub fn set_raw(&self, value: Raw<'_>) {
+        self.slot.set(value.bits);
+    }
+
+    /// Diagnostic: raw address of the underlying root slot.
+    pub fn slot_addr(&self) -> usize {
+        self.slot.as_ptr() as usize
     }
 }
 
@@ -522,6 +681,23 @@ impl Drop for InstallChainGuard<'_> {
     fn drop(&mut self) {
         ACTIVE_CHAIN.with(|c| c.set(self.prev));
     }
+}
+
+/// Return the currently installed thread-local frame chain as a root source.
+///
+/// This is for GC integration layers that need to make allocation-triggered
+/// collections see the same `FrameChain` that [`with_scope`] will push onto.
+/// The returned pointer is valid only while the corresponding
+/// [`InstallChainGuard`] is alive.
+pub fn active_chain_root_source() -> Option<*const dyn RootSource> {
+    ACTIVE_CHAIN.with(|c| {
+        let chain = c.get();
+        if chain.is_null() {
+            None
+        } else {
+            Some(chain as *const dyn RootSource)
+        }
+    })
 }
 
 /// Run `f` within a fresh `RootScope` of `capacity` slots, attached to
@@ -775,11 +951,9 @@ mod atomic_root_set_tests {
         rs.add(200);
 
         // Simulate GC forwarding: double every root value
-        rs.scan_roots(&mut |slot_ptr| {
-            unsafe {
-                let old = *slot_ptr;
-                *slot_ptr = old * 2;
-            }
+        rs.scan_roots(&mut |slot_ptr| unsafe {
+            let old = *slot_ptr;
+            *slot_ptr = old * 2;
         });
 
         assert_eq!(rs.get(0), 200);
@@ -896,10 +1070,7 @@ mod atomic_root_set_tests {
 
         writer.join().unwrap();
         let total_reads: u64 = readers.into_iter().map(|h| h.join().unwrap()).sum();
-        assert!(
-            total_reads > 0,
-            "readers should have done work"
-        );
+        assert!(total_reads > 0, "readers should have done work");
     }
 
     #[test]
@@ -1084,6 +1255,7 @@ mod atomic_root_set_tests {
 }
 
 #[cfg(test)]
+#[allow(deprecated)] // exercises the legacy get()/set() accessors on purpose
 mod rooted_tests {
     use super::*;
 
@@ -1117,8 +1289,11 @@ mod rooted_tests {
             *slot = bits | 0xBBBB_0000;
         });
 
-        assert_eq!(r.get(), 0xAAAA | 0xBBBB_0000,
-            "Rooted::get must see the GC's in-place update");
+        assert_eq!(
+            r.get(),
+            0xAAAA | 0xBBBB_0000,
+            "Rooted::get must see the GC's in-place update"
+        );
     }
 
     #[test]
@@ -1129,8 +1304,11 @@ mod rooted_tests {
             let _scope = RootScope::new(&chain, 4);
             assert_eq!(chain.depth(), 1);
         }
-        assert_eq!(chain.depth(), 0,
-            "RootScope drop must pop its frame from the chain");
+        assert_eq!(
+            chain.depth(),
+            0,
+            "RootScope drop must pop its frame from the chain"
+        );
     }
 
     #[test]
@@ -1177,6 +1355,41 @@ mod rooted_tests {
     }
 
     #[test]
+    fn heap_token_root_and_reread_observes_relocation() {
+        // gc_enter mints the Heap; a Raw rooted into the scope survives a
+        // simulated moving GC because get_raw re-reads the slot.
+        let chain = FrameChain::new();
+        let _g = install_chain(&chain);
+        let observed = gc_enter(2, |heap, scope| {
+            // Pretend an incoming ABI arg; root it.
+            let r: Rooted<'_, ()> = scope.root(0xCAFE);
+            // Simulate the collector rewriting the slot in place.
+            unsafe {
+                let slot = &*(r.slot_addr() as *const Cell<u64>);
+                slot.set(0xF00D);
+            }
+            // get_raw must observe the relocated value, not the stale 0xCAFE.
+            r.get_raw(heap).bits()
+        });
+        assert_eq!(observed, 0xF00D);
+    }
+
+    #[test]
+    fn raw_root_round_trips_through_scope() {
+        let chain = FrameChain::new();
+        let _g = install_chain(&chain);
+        let out = gc_enter(2, |heap, scope| {
+            let a: Rooted<'_, ()> = scope.root(0x11);
+            // Read it as a Raw, root that Raw into a fresh slot, set-back.
+            let raw = a.get_raw(heap);
+            let b = raw.root(scope);
+            b.set_raw(a.get_raw(heap));
+            b.get_raw(heap).bits()
+        });
+        assert_eq!(out, 0x11);
+    }
+
+    #[test]
     fn with_scope_uses_thread_local_chain() {
         let chain = FrameChain::new();
         let _g = install_chain(&chain);
@@ -1212,8 +1425,11 @@ mod rooted_tests {
             with_scope(1, |s| {
                 let _r: Rooted<'_, TestVal> = s.root(20);
                 assert_eq!(inner_chain.depth(), 1);
-                assert_eq!(outer_chain.depth(), 0,
-                    "inner install must hide outer chain");
+                assert_eq!(
+                    outer_chain.depth(),
+                    0,
+                    "inner install must hide outer chain"
+                );
             });
         }
 

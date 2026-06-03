@@ -21,18 +21,28 @@ pub enum Expr {
 
 #[derive(Debug, Clone, Copy)]
 pub enum BinOp {
-    Add, Sub, Mul, Div,
-    Eq, Ne, Lt, Le, Gt, Ge,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum UnaryOp {
-    Neg, Not,
+    Neg,
+    Not,
 }
 
 #[derive(Debug, Clone, Copy)]
 pub enum LogicalOp {
-    And, Or,
+    And,
+    Or,
 }
 
 #[derive(Debug, Clone)]

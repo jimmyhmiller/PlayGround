@@ -82,13 +82,19 @@ impl PersistentList {
             PersistentList::Empty => 1,
             PersistentList::Cons { count, .. } => count + 1,
         };
-        Arc::new(PersistentList::Cons { first: o, rest: self, count })
+        Arc::new(PersistentList::Cons {
+            first: o,
+            rest: self,
+            count,
+        })
     }
 
     /// Iterator over the list's `Object` elements. Convenience helper —
     /// matches Clojure's "seq is iterable" but skips going through ISeq.
     pub fn iter(self: &Arc<Self>) -> ListIter {
-        ListIter { node: Some(self.clone()) }
+        ListIter {
+            node: Some(self.clone()),
+        }
     }
 
     /// Java: `int count()`. O(1).
@@ -112,18 +118,14 @@ impl ISeq for PersistentList {
         match self {
             PersistentList::Empty => None,
             PersistentList::Cons { count: 1, .. } => None,
-            PersistentList::Cons { rest, .. } => {
-                Some(rest.clone() as Arc<dyn ISeq>)
-            }
+            PersistentList::Cons { rest, .. } => Some(rest.clone() as Arc<dyn ISeq>),
         }
     }
 
     fn more(&self) -> Arc<dyn ISeq> {
         match self {
             PersistentList::Empty => PersistentList::empty() as Arc<dyn ISeq>,
-            PersistentList::Cons { count: 1, .. } => {
-                PersistentList::empty() as Arc<dyn ISeq>
-            }
+            PersistentList::Cons { count: 1, .. } => PersistentList::empty() as Arc<dyn ISeq>,
             PersistentList::Cons { rest, .. } => rest.clone() as Arc<dyn ISeq>,
         }
     }
@@ -137,22 +139,26 @@ impl ISeq for PersistentList {
             // we wrap the borrowed shape into a fresh Arc holding a structural
             // copy. (Persistent lists are immutable, so two Arcs over the same
             // structural contents are observationally identical.)
-            PersistentList::Cons { first, rest, count } => {
-                Arc::new(PersistentList::Cons {
-                    first: first.clone(),
-                    rest: rest.clone(),
-                    count: *count,
-                })
-            }
+            PersistentList::Cons { first, rest, count } => Arc::new(PersistentList::Cons {
+                first: first.clone(),
+                rest: rest.clone(),
+                count: *count,
+            }),
         };
         let count = match &*rest {
             PersistentList::Empty => 1,
             PersistentList::Cons { count, .. } => count + 1,
         };
-        Arc::new(PersistentList::Cons { first: o, rest, count }) as Arc<dyn ISeq>
+        Arc::new(PersistentList::Cons {
+            first: o,
+            rest,
+            count,
+        }) as Arc<dyn ISeq>
     }
 
-    fn count(&self) -> i32 { PersistentList::count(self) }
+    fn count(&self) -> i32 {
+        PersistentList::count(self)
+    }
 }
 
 /// Iterator over a `PersistentList`. `Cons` values stay live via the Arc chain
@@ -191,11 +197,7 @@ mod tests {
 
     #[test]
     fn create_preserves_order() {
-        let l = PersistentList::create(vec![
-            Object::Long(1),
-            Object::Long(2),
-            Object::Long(3),
-        ]);
+        let l = PersistentList::create(vec![Object::Long(1), Object::Long(2), Object::Long(3)]);
         assert_eq!(ISeq::count(&*l), 3);
         let got: Vec<i64> = l
             .iter()
@@ -218,11 +220,7 @@ mod tests {
 
     #[test]
     fn iter_walks_three_element_list() {
-        let l = PersistentList::create(vec![
-            Object::Long(10),
-            Object::Long(20),
-            Object::Long(30),
-        ]);
+        let l = PersistentList::create(vec![Object::Long(10), Object::Long(20), Object::Long(30)]);
         let collected: Vec<_> = l.iter().collect();
         assert_eq!(collected.len(), 3);
         assert!(matches!(collected[0], Object::Long(10)));

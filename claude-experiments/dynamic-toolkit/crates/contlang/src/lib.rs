@@ -1,10 +1,10 @@
 mod lexer;
-mod parser;
 pub mod lower;
+mod parser;
 
-pub use lexer::{lex, Token, TokenKind};
-pub use parser::{parse, Expr, Decl, Param, Program, ValType};
+pub use lexer::{Token, TokenKind, lex};
 pub use lower::lower_program;
+pub use parser::{Decl, Expr, Param, Program, ValType, parse};
 
 #[cfg(test)]
 mod tests;

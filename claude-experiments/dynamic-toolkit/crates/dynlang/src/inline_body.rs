@@ -85,7 +85,10 @@ impl InlineBody {
     ) -> Self {
         let total = n_captures + n_extras;
         let params: Vec<Type> = vec![Type::I64; total];
-        let sig = Signature { params: params.clone(), ret: Some(Type::I64) };
+        let sig = Signature {
+            params: params.clone(),
+            ret: Some(Type::I64),
+        };
         let fref = module_builder.declare_func(name, &params, Some(Type::I64));
         InlineBody {
             fref,
@@ -104,7 +107,10 @@ impl InlineBody {
     /// After the caller has emitted the body and terminated with
     /// `fb.ret(...)` (or `fb.unreachable()`), call [`InlineBody::finish`]
     /// to install it back into the module.
-    pub fn open(&self, module_builder: &ModuleBuilder) -> (FunctionBuilder, Vec<Value>, Vec<Value>) {
+    pub fn open(
+        &self,
+        module_builder: &ModuleBuilder,
+    ) -> (FunctionBuilder, Vec<Value>, Vec<Value>) {
         let fb = module_builder.define_func(self.fref);
         let entry = fb.entry_block();
         let captures: Vec<Value> = (0..self.n_captures)
@@ -205,12 +211,7 @@ impl InlineBody {
 impl DynModule {
     /// Convenience: declare an inline body on this module's builder.
     /// See [`InlineBody::declare`] for semantics.
-    pub fn inline_body(
-        &mut self,
-        name: &str,
-        n_captures: usize,
-        n_extras: usize,
-    ) -> InlineBody {
+    pub fn inline_body(&mut self, name: &str, n_captures: usize, n_extras: usize) -> InlineBody {
         InlineBody::declare(&mut self.module_builder, name, n_captures, n_extras)
     }
 }
@@ -226,7 +227,8 @@ mod tests {
 
     #[test]
     fn declare_then_open_returns_block_params() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let body = dyn_module.inline_body("helper", 2, 1);
         assert_eq!(body.n_captures, 2);
         assert_eq!(body.n_extras, 1);
@@ -243,7 +245,8 @@ mod tests {
 
     #[test]
     fn zero_captures_zero_extras_is_just_a_thunk() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let body = dyn_module.inline_body("thunk", 0, 0);
         let (mut fb, captures, extras) = body.open(&dyn_module.module_builder);
         assert!(captures.is_empty());
@@ -256,7 +259,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "expected 2 captures, got 1")]
     fn invoke_with_wrong_capture_count_panics() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let body = dyn_module.inline_body("helper", 2, 0);
         let (mut bfb, _, _) = body.open(&dyn_module.module_builder);
         let nil = bfb.iconst(Type::I64, 0);
@@ -277,7 +281,8 @@ mod tests {
         // We can't easily inspect the emitted IR without going through
         // the verifier, but we can at least exercise the API end-to-end
         // and trust the builder's own validation.
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let body = dyn_module.inline_body("helper", 1, 0);
         let (mut bfb, caps, _) = body.open(&dyn_module.module_builder);
         bfb.ret(caps[0]);

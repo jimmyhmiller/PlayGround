@@ -21,23 +21,28 @@ pub struct PersistentHashSet {
 impl PersistentHashSet {
     /// Java: `PersistentHashSet.EMPTY`.
     pub fn empty() -> Arc<Self> {
-        Arc::new(PersistentHashSet { map: PersistentHashMap::empty() })
+        Arc::new(PersistentHashSet {
+            map: PersistentHashMap::empty(),
+        })
     }
 
     /// Java: `PersistentHashSet.create(Object... init)`.
     pub fn create(items: Vec<Object>) -> Arc<Self> {
-        let pairs: Vec<(Object, Object)> =
-            items.into_iter().map(|x| (x, Object::Nil)).collect();
+        let pairs: Vec<(Object, Object)> = items.into_iter().map(|x| (x, Object::Nil)).collect();
         Arc::new(PersistentHashSet {
             map: PersistentHashMap::create_pairs(pairs),
         })
     }
 
     /// Java: `int count()`.
-    pub fn count(&self) -> i32 { self.map.count() }
+    pub fn count(&self) -> i32 {
+        self.map.count()
+    }
 
     /// Java: `boolean contains(Object x)`.
-    pub fn contains(&self, x: &Object) -> bool { self.map.contains_key(x) }
+    pub fn contains(&self, x: &Object) -> bool {
+        self.map.contains_key(x)
+    }
 
     /// Java: `IPersistentSet cons(Object x)`. Adding an element already
     /// present is a no-op (returns an equivalent set).
@@ -45,7 +50,9 @@ impl PersistentHashSet {
         if self.contains(&x) {
             return self.clone();
         }
-        Arc::new(PersistentHashSet { map: self.map.assoc(x, Object::Nil) })
+        Arc::new(PersistentHashSet {
+            map: self.map.assoc(x, Object::Nil),
+        })
     }
 
     /// Java: `IPersistentSet disjoin(Object x)`.
@@ -53,7 +60,9 @@ impl PersistentHashSet {
         if !self.contains(x) {
             return self.clone();
         }
-        Arc::new(PersistentHashSet { map: self.map.without(x) })
+        Arc::new(PersistentHashSet {
+            map: self.map.without(x),
+        })
     }
 
     /// Iterator over elements in insertion order (delegates to the
@@ -78,7 +87,9 @@ impl PersistentHashSet {
 
     /// Access the underlying map. Useful for heap-encoding paths that
     /// want to walk the (k, nil) pairs.
-    pub fn as_map(&self) -> &Arc<PersistentHashMap> { &self.map }
+    pub fn as_map(&self) -> &Arc<PersistentHashMap> {
+        &self.map
+    }
 }
 
 #[cfg(test)]

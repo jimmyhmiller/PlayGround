@@ -65,7 +65,9 @@ pub mod chrome_material;
 pub mod layers;
 pub mod text_input;
 
-pub use camera::{PaneCameraOf, PaneCanvasRegion};
+pub use camera::{
+    pane_camera_setup_for, PaneCameraOf, PaneCameraSetup, PaneCanvasRegion,
+};
 pub use chrome_material::{
     ActiveChromeShader, ChromeMaterialPlugin, ChromeParams, ChromeStyle, ChromeTextStyle,
     PaneChromeMaterial, PaneShadowMaterial, ShadowParams,

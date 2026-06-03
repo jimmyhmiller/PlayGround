@@ -2,7 +2,6 @@
 //!
 //! Original Java: `~/Documents/Code/open-source/clojure/src/jvm/clojure/lang/IMeta.java`
 
-
 #[allow(unused_imports)]
 use super::object::Object;
 

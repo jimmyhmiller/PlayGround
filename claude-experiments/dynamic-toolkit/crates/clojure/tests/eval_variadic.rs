@@ -23,10 +23,7 @@ fn variadic_only_rest_empty() {
     // `()`) in this implementation. core.clj will distinguish
     // EmptyList from nil at the user-visible layer; the runtime
     // primitive treats them as equivalent.
-    assert_eq!(
-        eval_str("(def list (fn [& xs] xs)) (list)"),
-        "nil"
-    );
+    assert_eq!(eval_str("(def list (fn [& xs] xs)) (list)"), "nil");
 }
 
 #[test]
@@ -41,19 +38,13 @@ fn variadic_with_fixed() {
 fn variadic_with_fixed_only_min() {
     // Calling with exactly min_arity → rest is the empty list,
     // represented as nil (see comment on variadic_only_rest_empty).
-    assert_eq!(
-        eval_str("(def f (fn [a & rs] rs)) (f 99)"),
-        "nil"
-    );
+    assert_eq!(eval_str("(def f (fn [a & rs] rs)) (f 99)"), "nil");
 }
 
 #[test]
 fn variadic_fixed_value_returned() {
     // First fixed arg returned correctly.
-    assert_eq!(
-        eval_str("(def f (fn [a & rs] a)) (f 7 8 9)"),
-        "7"
-    );
+    assert_eq!(eval_str("(def f (fn [a & rs] a)) (f 7 8 9)"), "7");
 }
 
 #[test]

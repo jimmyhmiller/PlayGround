@@ -304,6 +304,14 @@ fn write_expr(buf: &mut Vec<u8>, e: &Expr) {
             write_tag(buf, "SelfRef");
             write_u32(buf, *idx);
         }
+        Expr::StateRef(h) => {
+            write_tag(buf, "StateRef");
+            write_hash(buf, h);
+        }
+        Expr::StateSelfRef(idx) => {
+            write_tag(buf, "StateSelfRef");
+            write_u32(buf, *idx);
+        }
         Expr::BuiltinRef(name) => {
             write_tag(buf, "BuiltinRef");
             write_str(buf, name);
@@ -416,6 +424,8 @@ fn read_expr(r: &mut Reader) -> Result<Expr, DecodeError> {
         "LocalVar" => Expr::LocalVar(r.read_u32()?),
         "TopRef" => Expr::TopRef(r.read_hash()?),
         "SelfRef" => Expr::SelfRef(r.read_u32()?),
+        "StateRef" => Expr::StateRef(r.read_hash()?),
+        "StateSelfRef" => Expr::StateSelfRef(r.read_u32()?),
         "BuiltinRef" => Expr::BuiltinRef(r.read_str()?),
         "Call" => {
             let callee = Box::new(read_expr(r)?);
@@ -710,6 +720,11 @@ fn write_def(buf: &mut Vec<u8>, d: &Def) {
                 }
             }
         }
+        Def::State { ty, init } => {
+            write_tag(buf, "State");
+            write_type(buf, ty);
+            write_expr(buf, init);
+        }
     }
 }
 
@@ -766,6 +781,11 @@ fn read_def(r: &mut Reader) -> Result<Def, DecodeError> {
                 type_params,
                 variants,
             }
+        }
+        "State" => {
+            let ty = read_type(r)?;
+            let init = read_expr(r)?;
+            Def::State { ty, init }
         }
         _ => return Err(DecodeError::UnknownTag { kind: "Def", tag }),
     })

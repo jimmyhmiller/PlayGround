@@ -11,7 +11,7 @@
 //! `DynGcRuntime::alloc` via the active microlisp `Host`, which holds a
 //! pointer to the engine's `DynGcRuntime`.
 
-use dynobj::roots::{Rooted, RootScope};
+use dynobj::roots::{RootScope, Rooted};
 use dynobj::{Compact, ObjHeader};
 use dynvalue::{NanBox, TagScheme};
 
@@ -96,9 +96,13 @@ pub fn as_symbol_id(v: u64) -> u32 {
 pub const CONS_TYPE_ID: usize = 0;
 
 /// Byte offset of `car` within a cons object (after the Compact header).
-pub fn car_offset() -> usize { Compact::SIZE }
+pub fn car_offset() -> usize {
+    Compact::SIZE
+}
 /// Byte offset of `cdr` within a cons object.
-pub fn cdr_offset() -> usize { Compact::SIZE + 8 }
+pub fn cdr_offset() -> usize {
+    Compact::SIZE + 8
+}
 
 /// Decode the raw heap pointer from a cons NanBox.
 pub fn as_cons_ptr(v: u64) -> *mut u8 {
@@ -172,9 +176,7 @@ pub fn alloc_cons_from_raw<'scope>(
 pub fn cons_compile_time(car: u64, cdr: u64) -> u64 {
     // Each call uses a fresh 3-slot scope (car + cdr + result) — the
     // minimum that `alloc_cons_from_raw` needs internally.
-    dynobj::roots::with_scope(3, |scope| {
-        alloc_cons_from_raw(scope, car, cdr).get()
-    })
+    dynobj::roots::with_scope(3, |scope| alloc_cons_from_raw(scope, car, cdr).get())
 }
 
 pub fn car(v: u64) -> u64 {

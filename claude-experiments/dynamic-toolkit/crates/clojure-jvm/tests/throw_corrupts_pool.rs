@@ -43,17 +43,25 @@ fn top_level_throw_does_not_corrupt_pool() {
     let mut sess = Session::new();
     check_pool_aligned(&sess, "init");
     eprintln!("[ranges before] {}", sess.dump_memory_ranges());
-    eprintln!("[pool before] len={} [0]=0x{:016x} [1]=0x{:016x} [2]=0x{:016x} [3]=0x{:016x}",
+    eprintln!(
+        "[pool before] len={} [0]=0x{:016x} [1]=0x{:016x} [2]=0x{:016x} [3]=0x{:016x}",
         sess.literal_pool_len(),
-        sess.literal_pool_get(0), sess.literal_pool_get(1),
-        sess.literal_pool_get(2), sess.literal_pool_get(3));
+        sess.literal_pool_get(0),
+        sess.literal_pool_get(1),
+        sess.literal_pool_get(2),
+        sess.literal_pool_get(3)
+    );
     let form = read_str("(throw \"boom\")").expect("read");
     sess.eval_form(form);
     eprintln!("[ranges after]  {}", sess.dump_memory_ranges());
-    eprintln!("[pool after]  len={} [0]=0x{:016x} [1]=0x{:016x} [2]=0x{:016x} [3]=0x{:016x}",
+    eprintln!(
+        "[pool after]  len={} [0]=0x{:016x} [1]=0x{:016x} [2]=0x{:016x} [3]=0x{:016x}",
         sess.literal_pool_len(),
-        sess.literal_pool_get(0), sess.literal_pool_get(1),
-        sess.literal_pool_get(2), sess.literal_pool_get(3));
+        sess.literal_pool_get(0),
+        sess.literal_pool_get(1),
+        sess.literal_pool_get(2),
+        sess.literal_pool_get(3)
+    );
     check_pool_aligned(&sess, "after top-level throw");
 }
 
@@ -101,9 +109,7 @@ fn def_with_unregistered_static_method_does_not_corrupt_pool_slots() {
     // whose body is an unregistered static method call (now rewritten
     // to throw at runtime).
     for i in 0..5 {
-        let src = format!(
-            "(def y{i} (System/getProperty \"some.prop\"))"
-        );
+        let src = format!("(def y{i} (System/getProperty \"some.prop\"))");
         let form = read_str(&src).expect("read");
         sess.eval_form(form);
         check_pool_aligned(&sess, &format!("after def y{i}"));

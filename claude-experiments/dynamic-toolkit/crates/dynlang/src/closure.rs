@@ -276,7 +276,13 @@ impl MultiArityDispatch {
         let args_list = fb.block_param(entry.block, 1);
         // Skip arity check — the dispatcher already selected this
         // clause based on a count match.
-        kit.emit_args_list_prologue(fb, entry.shape, self_fn, args_list, /*do_arity_check=*/ false)
+        kit.emit_args_list_prologue(
+            fb,
+            entry.shape,
+            self_fn,
+            args_list,
+            /*do_arity_check=*/ false,
+        )
     }
 
     pub fn self_fn(&self) -> Value {
@@ -326,13 +332,7 @@ impl DynModule {
         body_ref_field: &str,
         arity_field: &str,
     ) -> ClosureKit {
-        ClosureKit::from_existing(
-            self,
-            obj_type,
-            config,
-            body_ref_field,
-            arity_field,
-        )
+        ClosureKit::from_existing(self, obj_type, config, body_ref_field, arity_field)
     }
 }
 
@@ -512,8 +512,10 @@ impl ClosureKit {
 
         // Allocate one block per clause; each takes (self_fn, args_list)
         // as block params so the dispatcher can forward them in.
-        let clause_blocks: Vec<BlockId> =
-            clauses.iter().map(|_| fb.create_block(&[Type::I64, Type::I64])).collect();
+        let clause_blocks: Vec<BlockId> = clauses
+            .iter()
+            .map(|_| fb.create_block(&[Type::I64, Type::I64]))
+            .collect();
 
         // Build the test order: fixed clauses sorted by min_arity, then
         // (at most one) variadic clause last so it acts as a catch-all
@@ -544,7 +546,11 @@ impl ClosureKit {
             next_miss = test_blk;
         }
         tests.reverse();
-        let first_test = if tests.is_empty() { dispatch_panic } else { tests[0].1 };
+        let first_test = if tests.is_empty() {
+            dispatch_panic
+        } else {
+            tests[0].1
+        };
         fb.jump(first_test, &[]);
 
         // Emit each test:
@@ -630,9 +636,7 @@ impl ClosureKit {
 
         // Live set for the pre-alloc safepoint: everything that might
         // be a heap pointer and needs to survive the GC.
-        let mut roots: Vec<Value> = Vec::with_capacity(
-            extra_roots.len() + n_caps + m.extras.len(),
-        );
+        let mut roots: Vec<Value> = Vec::with_capacity(extra_roots.len() + n_caps + m.extras.len());
         roots.extend_from_slice(extra_roots);
         roots.extend_from_slice(m.captures);
         roots.extend_from_slice(m.extras);
@@ -710,9 +714,9 @@ impl ClosureKit {
                 self_fn_raw,
                 self.captures_base_offset + (i as i32) * 8,
             ),
-            CaptureShape::MutableCells { .. } => panic!(
-                "ClosureKit: MutableCells capture shape not implemented"
-            ),
+            CaptureShape::MutableCells { .. } => {
+                panic!("ClosureKit: MutableCells capture shape not implemented")
+            }
         }
     }
 
@@ -874,9 +878,9 @@ impl ClosureKit {
                     )
                 })
                 .collect(),
-            CaptureShape::MutableCells { .. } => panic!(
-                "ClosureKit: MutableCells capture shape not implemented"
-            ),
+            CaptureShape::MutableCells { .. } => {
+                panic!("ClosureKit: MutableCells capture shape not implemented")
+            }
         }
     }
 
@@ -936,31 +940,50 @@ mod tests {
     /// with the right field layout.
     #[test]
     fn declare_closure_type_args_list() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         // Stub externs — never invoked in this test; just need FuncRefs.
         let first = dyn_module.declare_extern(
             "first",
-            crate::Signature { params: vec![Type::I64], ret: Some(Type::I64) },
+            crate::Signature {
+                params: vec![Type::I64],
+                ret: Some(Type::I64),
+            },
         );
         let rest = dyn_module.declare_extern(
             "rest",
-            crate::Signature { params: vec![Type::I64], ret: Some(Type::I64) },
+            crate::Signature {
+                params: vec![Type::I64],
+                ret: Some(Type::I64),
+            },
         );
         let count = dyn_module.declare_extern(
             "count",
-            crate::Signature { params: vec![Type::I64], ret: Some(Type::I64) },
+            crate::Signature {
+                params: vec![Type::I64],
+                ret: Some(Type::I64),
+            },
         );
         let check_arity = dyn_module.declare_extern(
             "check_arity",
-            crate::Signature { params: vec![Type::I64, Type::I64], ret: Some(Type::I64) },
+            crate::Signature {
+                params: vec![Type::I64, Type::I64],
+                ret: Some(Type::I64),
+            },
         );
         let no_matching = dyn_module.declare_extern(
             "no_matching",
-            crate::Signature { params: vec![Type::I64], ret: Some(Type::I64) },
+            crate::Signature {
+                params: vec![Type::I64],
+                ret: Some(Type::I64),
+            },
         );
         let raise = dyn_module.declare_extern(
             "raise",
-            crate::Signature { params: vec![Type::I64], ret: None },
+            crate::Signature {
+                params: vec![Type::I64],
+                ret: None,
+            },
         );
         let readers = ArgsListReaders {
             first,
@@ -981,7 +1004,8 @@ mod tests {
 
     #[test]
     fn declare_closure_type_positional() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let kit = dyn_module.closures(ClosureConfig::new(CallConv::Positional));
         assert!(kit.body_ref_offset() < kit.arity_offset());
         assert!(kit.arity_offset() < kit.captures_base_offset());
@@ -989,9 +1013,10 @@ mod tests {
 
     #[test]
     fn extra_fields_get_offsets() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
-        let cfg = ClosureConfig::new(CallConv::Positional)
-            .with_extra_field("name", FieldKind::Value);
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let cfg =
+            ClosureConfig::new(CallConv::Positional).with_extra_field("name", FieldKind::Value);
         let kit = dyn_module.closures(cfg);
         assert_eq!(kit.extra_field_offsets.len(), 1);
         // Name field sits after body_ref/arity (Raw64) — Value fields
@@ -1002,12 +1027,17 @@ mod tests {
 
     #[test]
     fn positional_body_signature_matches_shape() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let kit = dyn_module.closures(ClosureConfig::new(CallConv::Positional));
         let _ = kit.declare_body(
             &mut dyn_module.module_builder,
             "fn_two_args",
-            BodyShape { fixed: 2, variadic: false, n_captures: 0 },
+            BodyShape {
+                fixed: 2,
+                variadic: false,
+                n_captures: 0,
+            },
         );
         // Signature is (self_fn, p0, p1) -> I64 → 3 I64 params.
         // We can't inspect signatures directly here without exposing
@@ -1017,14 +1047,21 @@ mod tests {
 
     #[test]
     fn args_list_body_signature_is_always_two() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let dummy = dyn_module.declare_extern(
             "dummy",
-            crate::Signature { params: vec![Type::I64], ret: Some(Type::I64) },
+            crate::Signature {
+                params: vec![Type::I64],
+                ret: Some(Type::I64),
+            },
         );
         let raise = dyn_module.declare_extern(
             "raise",
-            crate::Signature { params: vec![Type::I64], ret: None },
+            crate::Signature {
+                params: vec![Type::I64],
+                ret: None,
+            },
         );
         let readers = ArgsListReaders {
             first: dummy,
@@ -1041,7 +1078,11 @@ mod tests {
         let _ = kit.declare_body(
             &mut dyn_module.module_builder,
             "fn_anything",
-            BodyShape { fixed: 7, variadic: true, n_captures: 3 },
+            BodyShape {
+                fixed: 7,
+                variadic: true,
+                n_captures: 3,
+            },
         );
         // Whatever the shape, ArgsList declares (self_fn, args_list).
     }
@@ -1049,24 +1090,34 @@ mod tests {
     #[test]
     #[should_panic(expected = "Positional convention does not support multi-arity")]
     fn positional_multi_arity_panics() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let kit = dyn_module.closures(ClosureConfig::new(CallConv::Positional));
         let body_ref = kit.declare_body(
             &mut dyn_module.module_builder,
             "multi",
-            BodyShape { fixed: 0, variadic: false, n_captures: 0 },
+            BodyShape {
+                fixed: 0,
+                variadic: false,
+                n_captures: 0,
+            },
         );
         let mut fb = dyn_module.module_builder.define_func(body_ref);
         let _ = kit.begin_multi_arity_body(
             &mut fb,
-            &[BodyShape { fixed: 0, variadic: false, n_captures: 0 }],
+            &[BodyShape {
+                fixed: 0,
+                variadic: false,
+                n_captures: 0,
+            }],
         );
     }
 
     #[test]
     #[should_panic(expected = "MutableCells capture shape not implemented")]
     fn mutable_cells_make_panics() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         // Declare a fake cell type just to satisfy the ObjTypeId field.
         let cell = dyn_module
             .obj_type("Cell")
@@ -1084,7 +1135,11 @@ mod tests {
         let body_ref = kit.declare_body(
             &mut dyn_module.module_builder,
             "lam",
-            BodyShape { fixed: 0, variadic: false, n_captures: 0 },
+            BodyShape {
+                fixed: 0,
+                variadic: false,
+                n_captures: 0,
+            },
         );
         let host_ref = dyn_module.declare_func("host", 0);
         let mut f = dyn_module.start_func(host_ref);

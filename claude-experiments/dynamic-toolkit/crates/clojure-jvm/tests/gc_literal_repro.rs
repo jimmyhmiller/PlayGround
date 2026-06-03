@@ -20,20 +20,17 @@ fn many_quoted_calls_under_gc_pressure() {
     // Bind cons to its host implementation, mirroring the def at line 29
     // of upstream core.clj. Done before make-pair so make-pair's body's
     // `(cons ...)` resolves to a real fn handle.
-    let cons_def = read_str(
-        "(def cons (fn* ^:static cons [x seq] (. clojure.lang.RT (cons x seq))))",
-    )
-    .expect("read cons def");
+    let cons_def =
+        read_str("(def cons (fn* ^:static cons [x seq] (. clojure.lang.RT (cons x seq))))")
+            .expect("read cons def");
     sess.eval_form(cons_def);
 
     // Define a fn that loads two quoted symbols and threads them
     // through `cons` to build (a b). The outer `cons` call sits
     // between the two `gc_literal` loads — perfect spot for the
     // bug to surface if it relates to register state across calls.
-    let setup = read_str(
-        "(def make-pair (fn* [] (cons (quote a) (cons (quote b) nil))))",
-    )
-    .expect("read setup");
+    let setup = read_str("(def make-pair (fn* [] (cons (quote a) (cons (quote b) nil))))")
+        .expect("read setup");
     sess.eval_form(setup);
 
     // Drive the fn many times. Each invocation triggers EveryPoint
@@ -77,10 +74,9 @@ fn nested_macroexpand_under_gc_pressure() {
     }
     // when: returns (if test (do . body)). Define via host-defn defmacro path.
     eprintln!("[setup] defmacro when");
-    let when_def = read_str(
-        "(defmacro when [test & body] (list (quote if) test (cons (quote do) body)))",
-    )
-    .expect("read when");
+    let when_def =
+        read_str("(defmacro when [test & body] (list (quote if) test (cons (quote do) body)))")
+            .expect("read when");
     sess.eval_form(when_def);
     eprintln!("[setup] when defined");
 
@@ -88,10 +84,8 @@ fn nested_macroexpand_under_gc_pressure() {
     // Each call to outer-mac triggers when's macroexpansion as part of
     // analyzing outer-mac's result.
     eprintln!("[setup] defmacro outer-mac");
-    let outer = read_str(
-        "(defmacro outer-mac [x] (when x (list (quote quote) x)))",
-    )
-    .expect("read outer");
+    let outer =
+        read_str("(defmacro outer-mac [x] (when x (list (quote quote) x)))").expect("read outer");
     sess.eval_form(outer);
     eprintln!("[setup] outer-mac defined");
 
@@ -139,10 +133,9 @@ fn when_macro_body_under_gc_pressure() {
     }
 
     // when's body literally: (list 'if test (cons 'do body))
-    let setup = read_str(
-        "(def when-body (fn* [test body] (list (quote if) test (cons (quote do) body))))",
-    )
-    .expect("read when-body");
+    let setup =
+        read_str("(def when-body (fn* [test body] (list (quote if) test (cons (quote do) body))))")
+            .expect("read when-body");
     sess.eval_form(setup);
 
     // Drive many invocations. test arg is a constant, body is nil so cons
@@ -236,9 +229,7 @@ fn check_head_is_symbol(bits: u64, expected: &str) -> bool {
     // (offset 8) holds a TAG_PTR to a Symbol whose name matches.
     let head_bits = unsafe { p.add(8).cast::<u64>().read_unaligned() };
     if !matches!(nanbox_tag(head_bits), Some(TAG_PTR)) {
-        eprintln!(
-            "  head field is not TAG_PTR (bits 0x{head_bits:x}); cons tid={tid}"
-        );
+        eprintln!("  head field is not TAG_PTR (bits 0x{head_bits:x}); cons tid={tid}");
         return false;
     }
     let head_p = nanbox_payload(head_bits) as *const u8;
@@ -249,9 +240,7 @@ fn check_head_is_symbol(bits: u64, expected: &str) -> bool {
     let head_tid = unsafe { head_p.cast::<u16>().read_unaligned() } as usize;
     // Sanity: head_tid should equal symbol type_id (small int < 100).
     if head_tid > 100 {
-        eprintln!(
-            "  head field type_id={head_tid} (out of range — corruption!)"
-        );
+        eprintln!("  head field type_id={head_tid} (out of range — corruption!)");
         return false;
     }
     // Read the Arc<Symbol> pointer at offset 8 and pull the name.
@@ -264,10 +253,7 @@ fn check_head_is_symbol(bits: u64, expected: &str) -> bool {
     unsafe { std::sync::Arc::increment_strong_count(arc_ptr) };
     let s = unsafe { std::sync::Arc::from_raw(arc_ptr) };
     if s.get_name() != expected {
-        eprintln!(
-            "  symbol name {:?} != expected {expected}",
-            s.get_name()
-        );
+        eprintln!("  symbol name {:?} != expected {expected}", s.get_name());
         return false;
     }
     true

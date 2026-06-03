@@ -25,16 +25,22 @@ pub struct PersistentVector {
 impl PersistentVector {
     /// Java: `PersistentVector.EMPTY`.
     pub fn empty() -> Arc<Self> {
-        Arc::new(PersistentVector { items: Arc::new(Vec::new()) })
+        Arc::new(PersistentVector {
+            items: Arc::new(Vec::new()),
+        })
     }
 
     /// Java: `PersistentVector.create(Object... items)`.
     pub fn create(items: Vec<Object>) -> Arc<Self> {
-        Arc::new(PersistentVector { items: Arc::new(items) })
+        Arc::new(PersistentVector {
+            items: Arc::new(items),
+        })
     }
 
     /// Java: `int count()`. O(1).
-    pub fn count(&self) -> i32 { self.items.len() as i32 }
+    pub fn count(&self) -> i32 {
+        self.items.len() as i32
+    }
 
     /// Java: `Object nth(int i)`. Panics on out-of-bounds (Java throws
     /// `IndexOutOfBoundsException`).
@@ -55,7 +61,9 @@ impl PersistentVector {
     pub fn cons(self: &Arc<Self>, o: Object) -> Arc<Self> {
         let mut new_items: Vec<Object> = (*self.items).clone();
         new_items.push(o);
-        Arc::new(PersistentVector { items: Arc::new(new_items) })
+        Arc::new(PersistentVector {
+            items: Arc::new(new_items),
+        })
     }
 
     /// Java: `IPersistentVector assocN(int i, Object val)`.
@@ -74,7 +82,9 @@ impl PersistentVector {
                 new_items.len()
             );
         }
-        Arc::new(PersistentVector { items: Arc::new(new_items) })
+        Arc::new(PersistentVector {
+            items: Arc::new(new_items),
+        })
     }
 
     /// Iterator over the vector's items. Compiler.java iterates with
@@ -96,11 +106,8 @@ mod tests {
 
     #[test]
     fn nth_returns_element_at_index() {
-        let v = PersistentVector::create(vec![
-            Object::Long(10),
-            Object::Long(20),
-            Object::Long(30),
-        ]);
+        let v =
+            PersistentVector::create(vec![Object::Long(10), Object::Long(20), Object::Long(30)]);
         assert!(matches!(v.nth(0), Object::Long(10)));
         assert!(matches!(v.nth(2), Object::Long(30)));
         assert_eq!(v.count(), 3);
@@ -117,10 +124,7 @@ mod tests {
 
     #[test]
     fn assoc_n_replaces_at_index() {
-        let v0 = PersistentVector::create(vec![
-            Object::Long(1),
-            Object::Long(2),
-        ]);
+        let v0 = PersistentVector::create(vec![Object::Long(1), Object::Long(2)]);
         let v1 = v0.assoc_n(1, Object::Long(99));
         assert!(matches!(v0.nth(1), Object::Long(2)));
         assert!(matches!(v1.nth(1), Object::Long(99)));

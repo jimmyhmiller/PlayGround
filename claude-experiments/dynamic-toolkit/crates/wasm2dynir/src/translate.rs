@@ -503,10 +503,7 @@ impl ControlFrame {
 
 /// Create or return the exit block for a control frame.
 /// Exit block params = under_stack_types + result_types (no locals — they use stack slots).
-fn get_or_create_exit(
-    frame: &mut ControlFrame,
-    builder: &mut FunctionBuilder,
-) -> BlockId {
+fn get_or_create_exit(frame: &mut ControlFrame, builder: &mut FunctionBuilder) -> BlockId {
     let (exit_slot, under_stack_types, result_types) = match frame {
         ControlFrame::Block {
             exit_block,

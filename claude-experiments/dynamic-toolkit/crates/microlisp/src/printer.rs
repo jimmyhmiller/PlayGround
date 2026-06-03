@@ -37,7 +37,9 @@ fn write(out: &mut String, v: u64, sym: &SymbolTable) {
 fn write_list_body(out: &mut String, mut v: u64, sym: &SymbolTable) {
     let mut first = true;
     while is_cons(v) {
-        if !first { out.push(' '); }
+        if !first {
+            out.push(' ');
+        }
         write(out, car(v), sym);
         first = false;
         v = cdr(v);

@@ -93,6 +93,10 @@ struct FnCtx {
     /// function body (so `lower_stmt` skips them at their textual position; a
     /// `function` declaration anywhere else is rejected).
     hoisted_fns: HashSet<String>,
+    /// Slot reserved (lazily, on first reference) for this function's
+    /// `arguments` object. The engine fills it with the actual call args on the
+    /// inline path.
+    arguments_slot: Option<usize>,
 }
 
 impl FnCtx {
@@ -106,7 +110,19 @@ impl FnCtx {
             outer_names,
             boxed_set: HashSet::new(),
             hoisted_fns: HashSet::new(),
+            arguments_slot: None,
         }
+    }
+    /// The slot for this function's `arguments`, reserving one on first use.
+    fn arguments_slot_or_reserve(&mut self) -> usize {
+        if let Some(slot) = self.arguments_slot {
+            return slot;
+        }
+        let slot = self.next_slot;
+        self.next_slot += 1;
+        self.max_slot = self.max_slot.max(self.next_slot);
+        self.arguments_slot = Some(slot);
+        slot
     }
     fn push(&mut self) {
         self.scopes.push(HashMap::new());
@@ -193,7 +209,7 @@ impl Compiler {
     fn lower_declared(&mut self) -> R<()> {
         for i in 0..self.decls.len() {
             let name = self.decls[i].name.clone();
-            let (nslots, nparams, body) = match self.decls[i].function.clone() {
+            let (nslots, nparams, arguments_slot, body) = match self.decls[i].function.clone() {
                 Some(func) => self.lower_fn(&func)?,
                 None => {
                     let stmts = self.decls[i].module_body.clone().unwrap();
@@ -206,6 +222,7 @@ impl Compiler {
                 ncaptured: 0,
                 nparams,
                 slot_names: vec![],
+                arguments_slot,
                 body,
             });
         }
@@ -215,7 +232,7 @@ impl Compiler {
     /// Lower the program's top-level statements as the body of a synthetic
     /// `main(input)` (the engine entry). `input` is the one dynamic value; the
     /// top-level `var`s and code run in order.
-    fn lower_module_main(&mut self, stmts: &[ast::Stmt]) -> R<(usize, usize, Vec<Stmt>)> {
+    fn lower_module_main(&mut self, stmts: &[ast::Stmt]) -> R<(usize, usize, Option<usize>, Vec<Stmt>)> {
         let mut ctx = FnCtx::new(HashSet::new());
         ctx.boxed_set = boxed_locals(stmts);
         ctx.declare("input");
@@ -224,7 +241,7 @@ impl Compiler {
         let mut body = self.boxed_cell_stmts(&ctx);
         body.extend(self.lower_fn_decls(stmts, &mut ctx)?);
         body.extend(self.lower_stmts(stmts, &mut ctx)?);
-        Ok((ctx.max_slot.max(1), 1, body))
+        Ok((ctx.max_slot.max(1), 1, ctx.arguments_slot, body))
     }
 
     fn finish(mut self) -> Vec<FuncDef> {
@@ -289,8 +306,8 @@ impl Compiler {
     }
 
     /// Lower a function (declaration or lifted expression). Returns
-    /// (nslots, nparams, body).
-    fn lower_fn(&mut self, function: &ast::Function) -> R<(usize, usize, Vec<Stmt>)> {
+    /// (nslots, nparams, arguments_slot, body).
+    fn lower_fn(&mut self, function: &ast::Function) -> R<(usize, usize, Option<usize>, Vec<Stmt>)> {
         let block = match &function.body {
             Some(b) => b,
             None => return Err("function without a body".into()),
@@ -313,7 +330,7 @@ impl Compiler {
         let mut body = self.boxed_cell_stmts(&ctx);
         body.extend(self.lower_fn_decls(&block.stmts, &mut ctx)?);
         body.extend(self.lower_stmts(&block.stmts, &mut ctx)?);
-        Ok((ctx.max_slot.max(nparams), nparams, body))
+        Ok((ctx.max_slot.max(nparams), nparams, ctx.arguments_slot, body))
     }
 
     /// Lift an arrow / function expression to a top-level function via closure
@@ -409,6 +426,7 @@ impl Compiler {
             ncaptured,
             nparams,
             slot_names: vec![],
+            arguments_slot: ctx.arguments_slot,
             body: stmts,
         });
         Ok((fid, captures))
@@ -729,12 +747,14 @@ impl Compiler {
                     ast::AssignOp::DivAssign => Some(Combine::Opaque("/")),
                     ast::AssignOp::ModAssign => Some(Combine::Opaque("%")),
                     ast::AssignOp::ExpAssign => Some(Combine::Opaque("**")),
-                    ast::AssignOp::BitAndAssign => Some(Combine::Opaque("&")),
-                    ast::AssignOp::BitOrAssign => Some(Combine::Opaque("|")),
-                    ast::AssignOp::BitXorAssign => Some(Combine::Opaque("^")),
-                    ast::AssignOp::LShiftAssign => Some(Combine::Opaque("<<")),
-                    ast::AssignOp::RShiftAssign => Some(Combine::Opaque(">>")),
-                    ast::AssignOp::ZeroFillRShiftAssign => Some(Combine::Opaque(">>>")),
+                    // Bitwise / shift compound assignments fold like their binary
+                    // forms (modeled `Bop`s), not opaque.
+                    ast::AssignOp::BitAndAssign => Some(Combine::Bin(Bop::BitAnd)),
+                    ast::AssignOp::BitOrAssign => Some(Combine::Bin(Bop::BitOr)),
+                    ast::AssignOp::BitXorAssign => Some(Combine::Bin(Bop::BitXor)),
+                    ast::AssignOp::LShiftAssign => Some(Combine::Bin(Bop::Shl)),
+                    ast::AssignOp::RShiftAssign => Some(Combine::Bin(Bop::Shr)),
+                    ast::AssignOp::ZeroFillRShiftAssign => Some(Combine::Bin(Bop::UShr)),
                     // `&&=` / `||=` / `??=` are short-circuiting (conditional
                     // assignment); their control flow is not modeled here.
                     other => return Err(format!("unsupported assignment operator {:?}", other)),
@@ -852,6 +872,14 @@ impl Compiler {
                     ast::BinaryOp::GtEq => Some(Bop::Ge),
                     ast::BinaryOp::EqEqEq => Some(Bop::Eq),
                     ast::BinaryOp::NotEqEq => Some(Bop::Ne),
+                    // Bitwise / shift: modeled so they fold on static integers
+                    // (JS 32-bit semantics) and residualize when dynamic.
+                    ast::BinaryOp::BitAnd => Some(Bop::BitAnd),
+                    ast::BinaryOp::BitOr => Some(Bop::BitOr),
+                    ast::BinaryOp::BitXor => Some(Bop::BitXor),
+                    ast::BinaryOp::LShift => Some(Bop::Shl),
+                    ast::BinaryOp::RShift => Some(Bop::Shr),
+                    ast::BinaryOp::ZeroFillRShift => Some(Bop::UShr),
                     _ => None,
                 };
                 let l = self.lower_expr(&b.left, ctx)?;
@@ -865,12 +893,6 @@ impl Compiler {
                     ast::BinaryOp::Div => "/",
                     ast::BinaryOp::Mod => "%",
                     ast::BinaryOp::Exp => "**",
-                    ast::BinaryOp::BitAnd => "&",
-                    ast::BinaryOp::BitOr => "|",
-                    ast::BinaryOp::BitXor => "^",
-                    ast::BinaryOp::LShift => "<<",
-                    ast::BinaryOp::RShift => ">>",
-                    ast::BinaryOp::ZeroFillRShift => ">>>",
                     ast::BinaryOp::LogicalAnd => "&&",
                     ast::BinaryOp::LogicalOr => "||",
                     ast::BinaryOp::NullishCoalescing => "??",
@@ -889,7 +911,14 @@ impl Compiler {
                     let arg = self.lower_expr(&u.arg, ctx)?;
                     Ok(Expr::Bin(Bop::Sub, Box::new(Expr::Num(0)), Box::new(arg)))
                 }
-                ast::UnaryOp::Plus => self.lower_expr(&u.arg, ctx),
+                // Unary `+x` is `ToNumber(x)`, exactly `x - 0` (unary `-` is
+                // `0 - x`). Lowering it this way means the coercion is real (the
+                // old identity lowering silently dropped it) and folds through the
+                // same numeric-coercion path as subtraction.
+                ast::UnaryOp::Plus => {
+                    let arg = self.lower_expr(&u.arg, ctx)?;
+                    Ok(Expr::Bin(Bop::Sub, Box::new(arg), Box::new(Expr::Num(0))))
+                }
                 // Pure unary operators pass through. (`void e` evaluates `e` and
                 // yields undefined; emitting `(void e)` preserves both.)
                 ast::UnaryOp::Bang
@@ -1059,7 +1088,7 @@ impl Compiler {
         }
     }
 
-    fn lower_ident(&self, name: &str, ctx: &FnCtx) -> R<Expr> {
+    fn lower_ident(&self, name: &str, ctx: &mut FnCtx) -> R<Expr> {
         if let Some(b) = ctx.resolve_binding(name) {
             // A boxed variable lives in a `{value}` cell; read through it.
             Ok(if b.boxed {
@@ -1071,6 +1100,11 @@ impl Compiler {
             Ok(Expr::Func(fid))
         } else if name == "undefined" {
             Ok(Expr::Undefined)
+        } else if name == "arguments" {
+            // `arguments` reads from a per-function slot the engine fills with
+            // the actual call args (see `FuncDef::arguments_slot`). Reserved
+            // lazily so only functions that use it pay for it.
+            Ok(Expr::Var(ctx.arguments_slot_or_reserve()))
         } else if ctx.outer_names.contains(name) {
             Err(format!(
                 "identifier `{name}` is captured from an enclosing scope; closures \
@@ -1744,7 +1778,15 @@ fn assigned_expr(e: &ast::Expr, out: &mut HashSet<String>) {
             assigned_expr(&c.cons, out);
             assigned_expr(&c.alt, out);
         }
-        ast::Expr::Member(m) => assigned_expr(&m.obj, out),
+        ast::Expr::Member(m) => {
+            assigned_expr(&m.obj, out);
+            // A computed property can itself contain an assignment/update, e.g.
+            // `arr[i++]` mutates `i`; missing this would leave `i` un-boxed and
+            // captured by value, dropping the increment.
+            if let ast::MemberProp::Computed(c) = &m.prop {
+                assigned_expr(&c.expr, out);
+            }
+        }
         ast::Expr::Call(c) => {
             if let ast::Callee::Expr(e) = &c.callee {
                 assigned_expr(e, out);

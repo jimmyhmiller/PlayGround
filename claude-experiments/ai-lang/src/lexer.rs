@@ -39,6 +39,7 @@ pub enum TokenKind {
     False,
     Extern,
     Defer,
+    State,
 
     // ---- Punctuation ----
     LParen,
@@ -99,6 +100,7 @@ impl fmt::Display for TokenKind {
             TokenKind::False => f.write_str("false"),
             TokenKind::Extern => f.write_str("extern"),
             TokenKind::Defer => f.write_str("defer"),
+            TokenKind::State => f.write_str("state"),
             TokenKind::LParen => f.write_str("("),
             TokenKind::RParen => f.write_str(")"),
             TokenKind::LBrace => f.write_str("{"),
@@ -452,6 +454,7 @@ impl<'a> Lexer<'a> {
             "false" => TokenKind::False,
             "extern" => TokenKind::Extern,
             "defer" => TokenKind::Defer,
+            "state" => TokenKind::State,
             _ => TokenKind::Ident(text.to_owned()),
         };
         Token {

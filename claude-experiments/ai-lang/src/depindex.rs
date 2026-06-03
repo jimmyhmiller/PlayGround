@@ -162,7 +162,9 @@ fn collect_at_builtin_deps(expr: &Expr, acc: &mut BTreeSet<Hash>) {
         | Expr::FloatLit(_)
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
-        | Expr::SelfRef(_) => {}
+        | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_) => {}
     }
 }
 

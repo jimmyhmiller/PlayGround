@@ -9,8 +9,8 @@
 //! many threads — some compiling, some running — proceed in parallel.
 
 use clojure::Engine;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -55,9 +55,7 @@ fn extend_proceeds_during_long_run() {
     let h_a = thread::spawn(move || {
         let mut iters = 0u64;
         while iters < 50 {
-            let src = format!(
-                "(def helper_{iters} (fn [x] (+ x {iters}))) (helper_{iters} 5)"
-            );
+            let src = format!("(def helper_{iters} (fn [x] (+ x {iters}))) (helper_{iters} 5)");
             e_a.eval(&src);
             iters += 1;
         }
@@ -65,9 +63,7 @@ fn extend_proceeds_during_long_run() {
     });
 
     let e_b = engine.clone();
-    let h_b = thread::spawn(move || {
-        e_b.call_compiled("fib", &[f64::to_bits(22.0)])
-    });
+    let h_b = thread::spawn(move || e_b.call_compiled("fib", &[f64::to_bits(22.0)]));
 
     let a_iters = h_a.join().unwrap();
     let r_b = h_b.join().unwrap();

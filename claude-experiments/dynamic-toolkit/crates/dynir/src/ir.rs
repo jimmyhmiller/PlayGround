@@ -103,9 +103,15 @@ impl FuncRef {
 pub struct LiteralRef(pub u32);
 
 impl LiteralRef {
-    pub fn index(self) -> usize { self.0 as usize }
-    pub fn as_u32(self) -> u32 { self.0 }
-    pub fn from_u32(idx: u32) -> Self { LiteralRef(idx) }
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+    pub fn as_u32(self) -> u32 {
+        self.0
+    }
+    pub fn from_u32(idx: u32) -> Self {
+        LiteralRef(idx)
+    }
 }
 
 /// Reference to deoptimization metadata.
@@ -630,7 +636,12 @@ impl Terminator {
             Terminator::CaptureSlice { .. } => {}
             Terminator::AbortToPrompt { args, .. } => args.iter().for_each(|v| f(*v)),
             Terminator::Raise(v) => f(*v),
-            Terminator::ResumeSlice { slice, args, return_args, .. } => {
+            Terminator::ResumeSlice {
+                slice,
+                args,
+                return_args,
+                ..
+            } => {
                 f(*slice);
                 args.iter().for_each(|v| f(*v));
                 return_args.iter().for_each(|v| f(*v));
@@ -690,7 +701,12 @@ impl Terminator {
             Terminator::CaptureSlice { .. } => {}
             Terminator::AbortToPrompt { args, .. } => args.iter_mut().for_each(|v| f(v)),
             Terminator::Raise(v) => f(v),
-            Terminator::ResumeSlice { slice, args, return_args, .. } => {
+            Terminator::ResumeSlice {
+                slice,
+                args,
+                return_args,
+                ..
+            } => {
                 f(slice);
                 args.iter_mut().for_each(|v| f(v));
                 return_args.iter_mut().for_each(|v| f(v));
@@ -758,7 +774,11 @@ impl Terminator {
             | Terminator::Raise(_)
             | Terminator::Unreachable
             | Terminator::CaptureSlice { .. } => {}
-            Terminator::ResumeSlice { return_block, return_args, .. } => f(*return_block, return_args),
+            Terminator::ResumeSlice {
+                return_block,
+                return_args,
+                ..
+            } => f(*return_block, return_args),
             Terminator::Jump(target, args) => f(*target, args),
             Terminator::BrIf {
                 then_block,
@@ -812,11 +832,19 @@ impl Terminator {
             | Terminator::AbortToPrompt { .. }
             | Terminator::Raise(_)
             | Terminator::Unreachable => {}
-            Terminator::CaptureSlice { handler_block, resume_block, .. } => {
+            Terminator::CaptureSlice {
+                handler_block,
+                resume_block,
+                ..
+            } => {
                 f(*handler_block, &[]);
                 f(*resume_block, &[]);
             }
-            Terminator::ResumeSlice { return_block, return_args, .. } => f(*return_block, return_args),
+            Terminator::ResumeSlice {
+                return_block,
+                return_args,
+                ..
+            } => f(*return_block, return_args),
             Terminator::Jump(target, args) => f(*target, args),
             Terminator::BrIf {
                 then_block,
@@ -869,7 +897,11 @@ impl Terminator {
             | Terminator::AbortToPrompt { .. }
             | Terminator::Raise(_)
             | Terminator::Unreachable => vec![],
-            Terminator::CaptureSlice { handler_block, resume_block, .. } => vec![*handler_block, *resume_block],
+            Terminator::CaptureSlice {
+                handler_block,
+                resume_block,
+                ..
+            } => vec![*handler_block, *resume_block],
             Terminator::ResumeSlice { return_block, .. } => vec![*return_block],
             Terminator::Jump(target, _) => vec![*target],
             Terminator::BrIf {
@@ -1008,7 +1040,9 @@ impl Function {
             .blocks
             .iter()
             .enumerate()
-            .filter_map(|(i, b)| matches!(b.terminator, Terminator::Raise(_)).then_some(BlockId(i as u32)))
+            .filter_map(|(i, b)| {
+                matches!(b.terminator, Terminator::Raise(_)).then_some(BlockId(i as u32))
+            })
             .collect();
         for block in &self.blocks {
             for node in &block.insts {

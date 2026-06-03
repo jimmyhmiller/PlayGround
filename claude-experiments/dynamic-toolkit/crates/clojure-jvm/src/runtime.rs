@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use crate::lang::object::Object;
 use crate::lang::var::Var;
+use dynobj::roots::{Heap, Raw, RootScope, Rooted};
 
 // ── NanBox layout (matches dynlang's default NanBoxTags) ────────────────
 
@@ -40,15 +41,23 @@ pub fn nanbox_tag(bits: u64) -> Option<u32> {
     Some(((bits & TAG_MASK) >> 48) as u32)
 }
 
-pub fn nanbox_payload(bits: u64) -> u64 { bits & PAYLOAD_MASK }
+pub fn nanbox_payload(bits: u64) -> u64 {
+    bits & PAYLOAD_MASK
+}
 
 /// Public NanBox constructors callable from heap-population code that
 /// stores Object fields (`alloc_object_as_nanbox` in compiler.rs).
-pub fn nanbox_nil() -> u64 { nanbox_encode(TAG_NIL, 0) }
-pub fn nanbox_bool(b: bool) -> u64 { nanbox_encode(TAG_BOOL, b as u64) }
+pub fn nanbox_nil() -> u64 {
+    nanbox_encode(TAG_NIL, 0)
+}
+pub fn nanbox_bool(b: bool) -> u64 {
+    nanbox_encode(TAG_BOOL, b as u64)
+}
 /// NanBox-encode a heap pointer (returned by `gc.alloc`/`gc_alloc_thunk`).
 /// The pointer's low 48 bits become the payload; tag bits go to TAG_PTR.
-pub fn nanbox_ptr(raw: u64) -> u64 { nanbox_encode(TAG_PTR, raw & PAYLOAD_MASK) }
+pub fn nanbox_ptr(raw: u64) -> u64 {
+    nanbox_encode(TAG_PTR, raw & PAYLOAD_MASK)
+}
 
 /// Allocate a boxed `clojure.lang.Long` holding `n`, returning its NanBox.
 /// Clojure integers are real longs (distinct from doubles); NaN-boxing has
@@ -80,9 +89,13 @@ pub unsafe fn unbox_long(bits: u64) -> i64 {
 
 /// Is `bits` a boxed Long?
 pub fn is_boxed_long(bits: u64) -> bool {
-    if nanbox_tag(bits) != Some(TAG_PTR) { return false; }
+    if nanbox_tag(bits) != Some(TAG_PTR) {
+        return false;
+    }
     let p = nanbox_payload(bits) as *const u8;
-    if p.is_null() { return false; }
+    if p.is_null() {
+        return false;
+    }
     let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
     tid == heap_type_ids().long
 }
@@ -117,7 +130,11 @@ pub fn arg_to_f64(bits: u64) -> f64 {
 /// region) — then canonicalize to a quiet NaN.
 fn nanbox_double(d: f64) -> u64 {
     let bits = d.to_bits();
-    if (bits & FULL_MASK) == TAG_PATTERN { 0x7FF8_0000_0000_0000 } else { bits }
+    if (bits & FULL_MASK) == TAG_PATTERN {
+        0x7FF8_0000_0000_0000
+    } else {
+        bits
+    }
 }
 
 // ── Numeric-tower arithmetic externs ───────────────────────────────
@@ -286,9 +303,9 @@ pub fn object_to_nanbox(obj: &Object) -> u64 {
                 crate::lang::compiler::with_active_session_root_var,
             )
         },
-        _ => panic!(
-            "clojure-jvm: object_to_nanbox: variant {obj:?} not yet representable as NanBox"
-        ),
+        _ => {
+            panic!("clojure-jvm: object_to_nanbox: variant {obj:?} not yet representable as NanBox")
+        }
     }
 }
 
@@ -392,17 +409,16 @@ pub struct UserInstanceLayout {
     pub varlen_base: i64,
 }
 
-static USER_INSTANCE_LAYOUT: std::sync::OnceLock<UserInstanceLayout> =
-    std::sync::OnceLock::new();
+static USER_INSTANCE_LAYOUT: std::sync::OnceLock<UserInstanceLayout> = std::sync::OnceLock::new();
 
 pub fn set_user_instance_layout(layout: UserInstanceLayout) {
     let _ = USER_INSTANCE_LAYOUT.set(layout);
 }
 
 pub fn user_instance_layout() -> UserInstanceLayout {
-    *USER_INSTANCE_LAYOUT.get().expect(
-        "clojure-jvm: user_instance_layout() called before Compiler::new ran",
-    )
+    *USER_INSTANCE_LAYOUT
+        .get()
+        .expect("clojure-jvm: user_instance_layout() called before Compiler::new ran")
 }
 
 /// Decode an arbitrary NanBox into an `Object`. Handles immediates
@@ -414,7 +430,9 @@ pub fn any_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
         Some(TAG_NIL) => Object::Nil,
         Some(TAG_BOOL) => Object::Bool(nanbox_payload(bits) != 0),
         Some(TAG_PTR) => unsafe { heap_bits_to_object(bits, ids) },
-        _ => Object::Unported { java_class: "unknown NanBox tag" },
+        _ => Object::Unported {
+            java_class: "unknown NanBox tag",
+        },
     }
 }
 
@@ -429,7 +447,11 @@ pub fn any_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
 /// section is sound under the moving-GC-safepoint contract as long as
 /// the caller is on a registered mutator thread.
 pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
-    debug_assert_eq!(nanbox_tag(bits), Some(TAG_PTR), "heap_bits_to_object: not a TAG_PTR");
+    debug_assert_eq!(
+        nanbox_tag(bits),
+        Some(TAG_PTR),
+        "heap_bits_to_object: not a TAG_PTR"
+    );
     let payload = nanbox_payload(bits);
     let ptr = payload as *const u8;
     if ptr.is_null() {
@@ -479,7 +501,8 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
     }
     if type_id == ids.keyword {
         // `clojure.lang.Keyword`: same layout as Symbol.
-        let arc_ptr = unsafe { ptr.add(8).cast::<u64>().read_unaligned() } as *const crate::lang::keyword::Keyword;
+        let arc_ptr = unsafe { ptr.add(8).cast::<u64>().read_unaligned() }
+            as *const crate::lang::keyword::Keyword;
         unsafe { std::sync::Arc::increment_strong_count(arc_ptr) };
         let arc = unsafe { std::sync::Arc::from_raw(arc_ptr) };
         return Object::Keyword(arc);
@@ -506,11 +529,13 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
         let meta_bits = unsafe { ptr.add(24).cast::<u64>().read_unaligned() };
         let first_obj = decode_value_bits(first_bits, ids);
         let rest_list = decode_rest_to_list(rest_bits, ids);
-        let list_obj = Object::List(std::sync::Arc::new(crate::lang::persistent_list::PersistentList::Cons {
-            first: first_obj,
-            rest: rest_list,
-            count: 1 + count_list(&rest_bits, ids),
-        }));
+        let list_obj = Object::List(std::sync::Arc::new(
+            crate::lang::persistent_list::PersistentList::Cons {
+                first: first_obj,
+                rest: rest_list,
+                count: 1 + count_list(&rest_bits, ids),
+            },
+        ));
         return wrap_with_meta_bits(list_obj, meta_bits, ids);
     }
     if type_id == ids.vector {
@@ -614,9 +639,7 @@ pub unsafe fn alloc_arc_cell<T: 'static>(
     let raw = dynlang::gc::gc_alloc_thunk(type_id as u64, 0);
     let p = raw as *mut u8;
     if p.is_null() {
-        panic!(
-            "clojure-jvm: alloc_arc_cell: gc_alloc returned null for type_id {type_id}"
-        );
+        panic!("clojure-jvm: alloc_arc_cell: gc_alloc returned null for type_id {type_id}");
     }
     unsafe {
         p.add(8).cast::<u64>().write_unaligned(raw_arc);
@@ -647,13 +670,18 @@ fn decode_value_bits(bits: u64, ids: HeapTypeIds) -> Object {
         Some(TAG_NIL) => Object::Nil,
         Some(TAG_BOOL) => Object::Bool(nanbox_payload(bits) != 0),
         Some(TAG_PTR) => unsafe { heap_bits_to_object(bits, ids) },
-        _ => Object::Unported { java_class: "unknown NanBox tag in value field" },
+        _ => Object::Unported {
+            java_class: "unknown NanBox tag in value field",
+        },
     }
 }
 
 /// Decode a Cons `rest` field into an `Arc<PersistentList>`. Nil terminates;
 /// a Cons pointer continues the chain.
-fn decode_rest_to_list(bits: u64, ids: HeapTypeIds) -> std::sync::Arc<crate::lang::persistent_list::PersistentList> {
+fn decode_rest_to_list(
+    bits: u64,
+    ids: HeapTypeIds,
+) -> std::sync::Arc<crate::lang::persistent_list::PersistentList> {
     use crate::lang::persistent_list::PersistentList;
     match nanbox_tag(bits) {
         Some(TAG_NIL) => PersistentList::empty(),
@@ -661,9 +689,7 @@ fn decode_rest_to_list(bits: u64, ids: HeapTypeIds) -> std::sync::Arc<crate::lan
             let obj = unsafe { heap_bits_to_object(bits, ids) };
             match obj {
                 Object::List(l) => l,
-                other => panic!(
-                    "clojure-jvm: Cons.rest expected nil or list, got {other:?}"
-                ),
+                other => panic!("clojure-jvm: Cons.rest expected nil or list, got {other:?}"),
             }
         }
         _ => panic!("clojure-jvm: Cons.rest must be nil or a Cons pointer"),
@@ -674,11 +700,17 @@ fn decode_rest_to_list(bits: u64, ids: HeapTypeIds) -> std::sync::Arc<crate::lan
 /// reconstructed `PersistentList::Cons`). O(n) walk through the chain.
 fn count_list(bits: &u64, ids: HeapTypeIds) -> i32 {
     let payload = nanbox_payload(*bits);
-    if nanbox_tag(*bits) != Some(TAG_PTR) { return 0; }
+    if nanbox_tag(*bits) != Some(TAG_PTR) {
+        return 0;
+    }
     let ptr = payload as *const u8;
-    if ptr.is_null() { return 0; }
+    if ptr.is_null() {
+        return 0;
+    }
     let type_id = unsafe { ptr.cast::<u16>().read_unaligned() } as usize;
-    if type_id != ids.cons { return 0; }
+    if type_id != ids.cons {
+        return 0;
+    }
     let next_bits = unsafe { ptr.add(16).cast::<u64>().read_unaligned() };
     1 + count_list(&next_bits, ids)
 }
@@ -878,7 +910,11 @@ unsafe fn dispatch_target(handle_bits: u64) -> (*const u8, Option<u64>) {
 /// other args' heap cells — leaving stale `u64` NanBoxes in our slice
 /// and producing a list with garbage heads. This was the root cause
 /// of form 35's mysterious `Vector{[a,b]}` instead of `Symbol(def)`.
-unsafe fn pack_variadic_args(self_arg: Option<u64>, fref_idx: u32, args: &[u64]) -> Option<Vec<u64>> {
+unsafe fn pack_variadic_args(
+    self_arg: Option<u64>,
+    fref_idx: u32,
+    args: &[u64],
+) -> Option<Vec<u64>> {
     let info = crate::lang::compiler::with_active_compiler_arity(fref_idx)?;
     if !info.is_variadic {
         return None;
@@ -895,26 +931,25 @@ unsafe fn pack_variadic_args(self_arg: Option<u64>, fref_idx: u32, args: &[u64])
     }
     // Capacity: self_arg(1) + every arg + the accumulating tail.
     let cap = args.len() + 2;
-    Some(dynobj::roots::with_scope(cap, |scope| {
+    Some(dynobj::roots::gc_enter(cap, |heap, scope| {
         let self_root = self_arg.map(|s| scope.root::<()>(s));
         let arg_roots: Vec<_> = args.iter().map(|v| scope.root::<()>(*v)).collect();
         let tail_root = scope.root::<()>(nanbox_nil());
-        // Fold overflow into a cons-list, right-to-left. Every read of
-        // the args goes through `arg_roots[i].get()` so a GC during
-        // a `cljvm_rt_cons` call relocates the slot in place.
+        // Fold overflow into a cons-list, right-to-left. `heap_cons` takes
+        // `&mut Heap`, so the borrow checker forbids holding any un-rooted
+        // reference across it — every value here is rooted.
         for i in (info.fixed_arity..args.len()).rev() {
-            let v = arg_roots[i].get();
-            let new_tail = unsafe { cljvm_rt_cons(v, tail_root.get()) };
-            tail_root.set(new_tail);
+            let new_tail = heap_cons(heap, arg_roots[i], tail_root);
+            tail_root.set_raw(new_tail);
         }
         let mut packed: Vec<u64> = Vec::with_capacity(cap);
         if let Some(r) = &self_root {
-            packed.push(r.get());
+            packed.push(r.get_raw(&*heap).bits());
         }
         for i in 0..info.fixed_arity {
-            packed.push(arg_roots[i].get());
+            packed.push(arg_roots[i].get_raw(&*heap).bits());
         }
-        packed.push(tail_root.get());
+        packed.push(tail_root.get_raw(&*heap).bits());
         packed
     }))
 }
@@ -979,7 +1014,11 @@ unsafe fn call_with_packed(ptr: *const u8, packed: &[u64]) -> u64 {
     if (9..=16).contains(&packed.len()) {
         return unsafe { call_jit_packed_regs(ptr, packed) };
     }
-    macro_rules! no_op_u64 { ($_:literal) => { u64 }; }
+    macro_rules! no_op_u64 {
+        ($_:literal) => {
+            u64
+        };
+    }
     macro_rules! call_n {
         ($n:literal, $($i:literal),*) => {{
             let f: unsafe extern "C" fn($(no_op_u64!($i)),*) -> u64 =
@@ -1009,9 +1048,15 @@ unsafe fn call_with_packed(ptr: *const u8, packed: &[u64]) -> u64 {
         15 => call_n!(15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14),
         16 => call_n!(16, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15),
         17 => call_n!(17, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16),
-        18 => call_n!(18, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17),
-        19 => call_n!(19, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18),
-        20 => call_n!(20, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19),
+        18 => call_n!(
+            18, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17
+        ),
+        19 => call_n!(
+            19, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+        ),
+        20 => call_n!(
+            20, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
+        ),
         n => panic!(
             "clojure-jvm: call_with_packed: arity {n} > 20; extend the match arms \
              (matches IFn.invoke's overload count). A variadic fn with fixed_arity \
@@ -1079,21 +1124,27 @@ pub unsafe extern "C" fn cljvm_rt_invoke_1(fn_bits: u64, a: u64) -> u64 {
 /// `None` to fall through to regular fn dispatch.
 unsafe fn vector_or_map_or_set_as_fn_1(fn_bits: u64, a_bits: u64) -> Option<u64> {
     let ids = heap_type_ids();
-    if !matches!(nanbox_tag(fn_bits), Some(TAG_PTR)) { return None; }
+    if !matches!(nanbox_tag(fn_bits), Some(TAG_PTR)) {
+        return None;
+    }
     let p = nanbox_payload(fn_bits) as *const u8;
-    if p.is_null() { return None; }
+    if p.is_null() {
+        return None;
+    }
     let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
     if tid == ids.vector {
-        if !nanbox_tag(a_bits).is_none() { return None; }
+        if !nanbox_tag(a_bits).is_none() {
+            return None;
+        }
         let n = unsafe { p.add(8).cast::<u64>().read_unaligned() } as i64;
         let idx = arg_to_i64(a_bits);
         if idx < 0 || idx >= n {
-            panic!(
-                "clojure-jvm: vector-as-fn index {idx} out of range [0,{n})"
-            );
+            panic!("clojure-jvm: vector-as-fn index {idx} out of range [0,{n})");
         }
         return Some(unsafe {
-            p.add(16 + (idx as usize) * 8).cast::<u64>().read_unaligned()
+            p.add(16 + (idx as usize) * 8)
+                .cast::<u64>()
+                .read_unaligned()
         });
     }
     if tid == ids.map {
@@ -1105,7 +1156,11 @@ unsafe fn vector_or_map_or_set_as_fn_1(fn_bits: u64, a_bits: u64) -> Option<u64>
         unsafe { Arc::increment_strong_count(arc_ptr) };
         let s = unsafe { Arc::from_raw(arc_ptr) };
         let key = any_bits_to_object(a_bits, ids);
-        return Some(if s.contains(&key) { a_bits } else { nanbox_nil() });
+        return Some(if s.contains(&key) {
+            a_bits
+        } else {
+            nanbox_nil()
+        });
     }
     None
 }
@@ -1159,7 +1214,9 @@ unsafe fn keyword_as_fn_lookup(fn_bits: u64, m_bits: u64, not_found: u64) -> Opt
             // use object_to_nanbox; for heap-resident Objects, the bits
             // are still live on the source map so we can fetch them via
             // alloc-style round-trip. Easiest: ask the active session.
-            Some(crate::lang::compiler::with_active_session_encode_object(&v_obj))
+            Some(crate::lang::compiler::with_active_session_encode_object(
+                &v_obj,
+            ))
         }
         _ => Some(not_found),
     }
@@ -1182,8 +1239,7 @@ pub unsafe extern "C" fn cljvm_rt_invoke_2(fn_bits: u64, a: u64, b: u64) -> u64 
             unsafe { f(a, b) }
         }
         Some(s) => {
-            let f: unsafe extern "C" fn(u64, u64, u64) -> u64 =
-                unsafe { std::mem::transmute(ptr) };
+            let f: unsafe extern "C" fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(ptr) };
             unsafe { f(s, a, b) }
         }
     };
@@ -1206,8 +1262,7 @@ pub unsafe extern "C" fn cljvm_rt_invoke_3(fn_bits: u64, a: u64, b: u64, c: u64)
     }
     match self_arg {
         None => {
-            let f: unsafe extern "C" fn(u64, u64, u64) -> u64 =
-                unsafe { std::mem::transmute(ptr) };
+            let f: unsafe extern "C" fn(u64, u64, u64) -> u64 = unsafe { std::mem::transmute(ptr) };
             unsafe { f(a, b, c) }
         }
         Some(s) => {
@@ -1220,9 +1275,7 @@ pub unsafe extern "C" fn cljvm_rt_invoke_3(fn_bits: u64, a: u64, b: u64, c: u64)
 
 /// `IFn.invoke(a..d)` — 4 arity. See `cljvm_rt_invoke_3`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_rt_invoke_4(
-    fn_bits: u64, a: u64, b: u64, c: u64, d: u64,
-) -> u64 {
+pub unsafe extern "C" fn cljvm_rt_invoke_4(fn_bits: u64, a: u64, b: u64, c: u64, d: u64) -> u64 {
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 4) };
     if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d]) } {
         return unsafe { call_with_packed(ptr, &packed) };
@@ -1244,7 +1297,12 @@ pub unsafe extern "C" fn cljvm_rt_invoke_4(
 /// `IFn.invoke(a..e)` — 5 arity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_5(
-    fn_bits: u64, a: u64, b: u64, c: u64, d: u64, e: u64,
+    fn_bits: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
 ) -> u64 {
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 5) };
     if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e]) } {
@@ -1267,7 +1325,13 @@ pub unsafe extern "C" fn cljvm_rt_invoke_5(
 /// `IFn.invoke(a..f)` — 6 arity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_6(
-    fn_bits: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64,
+    fn_bits: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+    f: u64,
 ) -> u64 {
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 6) };
     if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e, f]) } {
@@ -1290,10 +1354,18 @@ pub unsafe extern "C" fn cljvm_rt_invoke_6(
 /// `IFn.invoke(a..g)` — 7 arity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_7(
-    fn_bits: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64,
+    fn_bits: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+    f: u64,
+    g: u64,
 ) -> u64 {
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 7) };
-    if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e, f, g]) } {
+    if let Some(packed) = unsafe { pack_variadic_args(self_arg, fref_idx, &[a, b, c, d, e, f, g]) }
+    {
         return unsafe { call_with_packed(ptr, &packed) };
     }
     match self_arg {
@@ -1313,7 +1385,15 @@ pub unsafe extern "C" fn cljvm_rt_invoke_7(
 /// `IFn.invoke(a..h)` — 8 arity.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_invoke_8(
-    fn_bits: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64, g: u64, h: u64,
+    fn_bits: u64,
+    a: u64,
+    b: u64,
+    c: u64,
+    d: u64,
+    e: u64,
+    f: u64,
+    g: u64,
+    h: u64,
 ) -> u64 {
     let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, 8) };
     if let Some(packed) =
@@ -1512,7 +1592,9 @@ pub unsafe extern "C" fn cljvm_numbers_abs(a: u64) -> u64 {
     }
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_numbers_identity(a: u64) -> u64 { a }
+pub unsafe extern "C" fn cljvm_numbers_identity(a: u64) -> u64 {
+    a
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_isInteger(a: u64) -> u64 {
     let f = num_to_f64(a);
@@ -1605,9 +1687,7 @@ pub unsafe extern "C" fn cljvm_numbers_isZero(n_bits: u64) -> u64 {
     let is_zero = match obj {
         Object::Long(n) => n == 0,
         Object::Double(d) => d == 0.0,
-        other => panic!(
-            "clojure-jvm: Numbers/isZero requires a Number, got {other:?}"
-        ),
+        other => panic!("clojure-jvm: Numbers/isZero requires a Number, got {other:?}"),
     };
     nanbox_bool(is_zero)
 }
@@ -1637,7 +1717,11 @@ pub unsafe extern "C" fn cljvm_rt_nth(coll_bits: u64, idx_bits: u64) -> u64 {
                     eprintln!("[cljvm-stub] RT.nth idx={idx} >= count={n} — nil");
                     return nanbox_nil();
                 }
-                unsafe { p.add(16 + (idx as usize) * 8).cast::<u64>().read_unaligned() }
+                unsafe {
+                    p.add(16 + (idx as usize) * 8)
+                        .cast::<u64>()
+                        .read_unaligned()
+                }
             } else if tid == ids.cons {
                 let mut cur = coll_bits;
                 for _ in 0..idx {
@@ -1663,12 +1747,12 @@ pub unsafe extern "C" fn cljvm_rt_nth(coll_bits: u64, idx_bits: u64) -> u64 {
 /// `clojure.lang.RT.nth(coll, idx, not-found)` — like nth/2 but returns
 /// `not-found` instead of throwing on out-of-range.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_rt_nth_3(
-    coll_bits: u64, idx_bits: u64, not_found_bits: u64,
-) -> u64 {
+pub unsafe extern "C" fn cljvm_rt_nth_3(coll_bits: u64, idx_bits: u64, not_found_bits: u64) -> u64 {
     let ids = heap_type_ids();
     let idx = arg_to_i64(idx_bits);
-    if idx < 0 { return not_found_bits; }
+    if idx < 0 {
+        return not_found_bits;
+    }
     match nanbox_tag(coll_bits) {
         Some(TAG_NIL) => not_found_bits,
         Some(TAG_PTR) => {
@@ -1676,8 +1760,14 @@ pub unsafe extern "C" fn cljvm_rt_nth_3(
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid == ids.vector {
                 let n = unsafe { p.add(8).cast::<u64>().read_unaligned() } as i64;
-                if idx >= n { return not_found_bits; }
-                unsafe { p.add(16 + (idx as usize) * 8).cast::<u64>().read_unaligned() }
+                if idx >= n {
+                    return not_found_bits;
+                }
+                unsafe {
+                    p.add(16 + (idx as usize) * 8)
+                        .cast::<u64>()
+                        .read_unaligned()
+                }
             } else if tid == ids.cons {
                 let mut cur = coll_bits;
                 for _ in 0..idx {
@@ -1716,43 +1806,116 @@ pub unsafe extern "C" fn cljvm_rt_nextID() -> u64 {
 /// single element, and `test`/`body` would never become fn params).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_cons(x_bits: u64, seq_bits: u64) -> u64 {
+    // The whole body runs under the `Heap` capability so the borrow checker
+    // can enforce the GC contract: `x` and `seq` are rooted up front, and
+    // every allocation (`heap_seq`, `heap_alloc`) takes `&mut Heap`, which
+    // makes holding an un-rooted `Raw` across it a compile error. This is
+    // the type-level version of the old form-430 stale-pointer fix.
+    // 3 slots: x, seq, and the freshly allocated Cons cell.
+    dynobj::roots::gc_enter(3, |heap, scope| {
+        let x = scope.root::<()>(x_bits);
+        let seq = scope.root::<()>(seq_bits);
+        cons_inner(heap, scope, x, seq).bits()
+    })
+}
+
+/// Allocate a fixed-size GC object of `type_id` under the heap capability,
+/// returning the boxed owner reference as a `Raw` tied to `heap`. Because
+/// it takes `&mut Heap`, callers cannot hold an un-rooted `Raw` across it.
+#[inline]
+fn heap_alloc<'h>(heap: &'h mut Heap, type_id: u64, varlen_len: u64) -> Raw<'h> {
+    let raw = dynlang::gc::gc_alloc_thunk(type_id, varlen_len);
+    assert!(raw != 0, "clojure-jvm: gc_alloc returned null");
+    Raw::from_bits(&*heap, nanbox_encode(TAG_PTR, raw & PAYLOAD_MASK))
+}
+
+/// `clojure.lang.RT.seq` as a GC-causing primitive. Takes `&mut Heap`
+/// (it can allocate) and a *rooted* argument (so the value survives the
+/// collection), returning a fresh `Raw` for the coerced seq.
+#[inline]
+fn heap_seq<'h>(heap: &'h mut Heap, v: Rooted<'_, ()>) -> Raw<'h> {
+    // Reading the rooted bits to feed the primitive is safe: no GC happens
+    // between the read and the call, and `cljvm_rt_seq` re-roots internally.
+    let in_bits = v.get_raw(&*heap).bits();
+    let out = unsafe { cljvm_rt_seq(in_bits) };
+    Raw::from_bits(&*heap, out)
+}
+
+/// `RT.cons` as a GC-causing primitive. `&mut Heap` (it allocates) plus
+/// rooted `x`/`tail` (so they survive). Returns a `Raw` for the new cell.
+#[inline]
+fn heap_cons<'h>(heap: &'h mut Heap, x: Rooted<'_, ()>, tail: Rooted<'_, ()>) -> Raw<'h> {
+    let x_bits = x.get_raw(&*heap).bits();
+    let tail_bits = tail.get_raw(&*heap).bits();
+    let out = unsafe { cljvm_rt_cons(x_bits, tail_bits) };
+    Raw::from_bits(&*heap, out)
+}
+
+/// `(f acc x)` as a GC-causing primitive. The user fn behind `f_bits` may
+/// allocate, so `acc`/`x` arrive rooted and the result is returned as a
+/// fresh `Raw` (the caller re-roots it).
+#[inline]
+fn heap_invoke_2<'h>(heap: &'h mut Heap, f_bits: u64, acc: Rooted<'_, ()>, x: Rooted<'_, ()>) -> Raw<'h> {
+    let acc_bits = acc.get_raw(&*heap).bits();
+    let x_bits = x.get_raw(&*heap).bits();
+    let out = unsafe { cljvm_rt_invoke_2(f_bits, acc_bits, x_bits) };
+    Raw::from_bits(&*heap, out)
+}
+
+/// Type-safe core of `RT.cons`. Mirrors Java's `RT.cons`: if `seq` isn't
+/// already an ISeq (Cons or nil), coerce it via `RT.seq` first, then
+/// allocate the Cons cell. `x` and `seq` arrive rooted; the moving GC that
+/// `heap_seq`/`heap_alloc` may trigger updates their slots in place.
+fn cons_inner<'h>(
+    heap: &'h mut Heap,
+    scope: &RootScope<'_>,
+    x: Rooted<'_, ()>,
+    seq: Rooted<'_, ()>,
+) -> Raw<'h> {
     let ids = heap_type_ids();
-    let coerced_seq = match nanbox_tag(seq_bits) {
-        Some(TAG_NIL) => seq_bits,
+
+    let needs_coerce = match nanbox_tag(seq.get_raw(&*heap).bits()) {
+        Some(TAG_NIL) => false,
         Some(TAG_PTR) => {
-            let p = nanbox_payload(seq_bits) as *const u8;
+            let p = nanbox_payload(seq.get_raw(&*heap).bits()) as *const u8;
             if p.is_null() {
-                seq_bits
+                false
             } else {
                 let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                if tid == ids.cons {
-                    seq_bits
-                } else {
-                    unsafe { cljvm_rt_seq(seq_bits) }
-                }
+                tid != ids.cons
             }
         }
         _ => panic!(
             "clojure-jvm: cljvm_rt_cons: second arg must be a collection or nil, \
-             got bits 0x{seq_bits:x}"
+             got bits 0x{:x}",
+            seq.get_raw(&*heap).bits()
         ),
     };
-    dynobj::roots::with_scope(2, |scope| {
-        let x = scope.root::<()>(x_bits);
-        let seq = scope.root::<()>(coerced_seq);
-        let raw = dynlang::gc::gc_alloc_thunk(ids.cons as u64, 0);
-        let ptr = raw as *mut u8;
-        if ptr.is_null() {
-            panic!("clojure-jvm: cljvm_rt_cons: gc_alloc returned null");
-        }
-        let nil_bits = nanbox_nil();
-        unsafe {
-            ptr.add(8).cast::<u64>().write_unaligned(x.get());
-            ptr.add(16).cast::<u64>().write_unaligned(seq.get());
-            ptr.add(24).cast::<u64>().write_unaligned(nil_bits);
-        }
-        nanbox_encode(TAG_PTR, raw & PAYLOAD_MASK)
-    })
+    if needs_coerce {
+        // `x` stays valid across this allocation because it is rooted; the
+        // borrow checker would reject the call otherwise.
+        let coerced = heap_seq(heap, seq);
+        seq.set_raw(coerced);
+    }
+
+    // Allocate the Cons cell; `x` and `seq` are rooted across it.
+    let cell = heap_alloc(heap, ids.cons as u64, 0).root(scope);
+
+    // Field writes are plain stores, not GC points. Re-read the rooted
+    // values through `heap` so any relocation that happened above is seen.
+    let nil_bits = nanbox_nil();
+    let cell_bits = cell.get_raw(&*heap).bits();
+    let x_bits = x.get_raw(&*heap).bits();
+    let seq_bits = seq.get_raw(&*heap).bits();
+    trap_forwarded_first_result("cons.write.x", cell_bits, x_bits);
+    trap_forwarded_first_result("cons.write.seq", cell_bits, seq_bits);
+    let ptr = nanbox_payload(cell_bits) as *mut u8;
+    unsafe {
+        ptr.add(8).cast::<u64>().write_unaligned(x_bits);
+        ptr.add(16).cast::<u64>().write_unaligned(seq_bits);
+        ptr.add(24).cast::<u64>().write_unaligned(nil_bits);
+    }
+    cell.get_raw(&*heap)
 }
 
 /// `clojure.lang.RT.conj(Object coll, Object x)` — add `x` to `coll`.
@@ -1790,39 +1953,33 @@ pub unsafe extern "C" fn cljvm_rt_conj(coll_bits: u64, x_bits: u64) -> u64 {
                 // bits into the new cell. (This is the same class of
                 // bug as the original vector→seq SIGBUS at form 46.)
                 let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
-                return dynobj::roots::with_scope(n + 1, |scope| {
+                return dynobj::roots::gc_enter(n + 2, |heap, scope| {
                     let item_roots: Vec<dynobj::roots::Rooted<()>> = (0..n)
                         .map(|i| {
-                            let bits = unsafe {
-                                raw.add(16 + i * 8).cast::<u64>().read_unaligned()
-                            };
+                            let bits =
+                                unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() };
                             scope.root::<()>(bits)
                         })
                         .collect();
                     let x_root = scope.root::<()>(x_bits);
-                    let new_raw = dynlang::gc::gc_alloc_thunk(
-                        ids.vector as u64,
-                        (n + 1) as u64,
-                    );
-                    let new_ptr = new_raw as *mut u8;
-                    if new_ptr.is_null() {
-                        panic!("clojure-jvm: RT.conj: gc_alloc returned null for Vector");
-                    }
+                    let cell = heap_alloc(heap, ids.vector as u64, (n + 1) as u64).root(scope);
+                    let cell_bits = cell.get_raw(&*heap).bits();
+                    let new_ptr = nanbox_payload(cell_bits) as *mut u8;
                     for i in 0..n {
                         unsafe {
                             new_ptr
                                 .add(16 + i * 8)
                                 .cast::<u64>()
-                                .write_unaligned(item_roots[i].get());
+                                .write_unaligned(item_roots[i].get_raw(&*heap).bits());
                         }
                     }
                     unsafe {
                         new_ptr
                             .add(16 + n * 8)
                             .cast::<u64>()
-                            .write_unaligned(x_root.get());
+                            .write_unaligned(x_root.get_raw(&*heap).bits());
                     }
-                    nanbox_ptr(new_raw)
+                    cell_bits
                 });
             }
             if type_id == ids.map {
@@ -1905,11 +2062,9 @@ pub unsafe extern "C" fn cljvm_rt_assoc(coll_bits: u64, key_bits: u64, val_bits:
 
     let new_map: Arc<crate::lang::persistent_hash_map::PersistentHashMap> =
         match nanbox_tag(coll_bits) {
-            Some(TAG_NIL) => {
-                crate::lang::persistent_hash_map::PersistentHashMap::create_pairs(vec![(
-                    key_obj, val_obj,
-                )])
-            }
+            Some(TAG_NIL) => crate::lang::persistent_hash_map::PersistentHashMap::create_pairs(
+                vec![(key_obj, val_obj)],
+            ),
             Some(TAG_PTR) => {
                 let raw = nanbox_payload(coll_bits) as *const u8;
                 if raw.is_null() {
@@ -2047,31 +2202,36 @@ pub unsafe extern "C" fn cljvm_rt_subvec(v_bits: u64, start_bits: u64, end_bits:
     }
     let src_type = unsafe { src_raw.cast::<u16>().read_unaligned() } as usize;
     if src_type != ids.vector {
-        panic!(
-            "clojure-jvm: RT.subvec — first arg type_id {src_type} is not a Vector"
-        );
+        panic!("clojure-jvm: RT.subvec — first arg type_id {src_type} is not a Vector");
     }
     let src_count = unsafe { src_raw.add(8).cast::<u64>().read_unaligned() } as usize;
     if end > src_count {
-        panic!(
-            "clojure-jvm: RT.subvec — end ({end}) > count ({src_count})"
-        );
+        panic!("clojure-jvm: RT.subvec — end ({end}) > count ({src_count})");
     }
 
     let n = end - start;
-    let new_raw = dynlang::gc::gc_alloc_thunk(ids.vector as u64, n as u64);
-    let new_ptr = new_raw as *mut u8;
-    if new_ptr.is_null() {
-        panic!("clojure-jvm: RT.subvec: gc_alloc returned null");
-    }
-    for i in 0..n {
-        let src_off = 16 + (start + i) * 8;
-        let bits = unsafe { src_raw.add(src_off).cast::<u64>().read_unaligned() };
-        unsafe {
-            new_ptr.add(16 + i * 8).cast::<u64>().write_unaligned(bits);
+    // Snapshot the source slice BEFORE allocating — the alloc can relocate
+    // both the source vector (`src_raw` would dangle) and the element
+    // targets. Root the snapshot, then write the relocated values back.
+    let slice: Vec<u64> = (0..n)
+        .map(|i| unsafe { src_raw.add(16 + (start + i) * 8).cast::<u64>().read_unaligned() })
+        .collect();
+    dynobj::roots::gc_enter(n + 1, |heap, scope| {
+        let roots: Vec<dynobj::roots::Rooted<()>> =
+            slice.iter().map(|&b| scope.root::<()>(b)).collect();
+        let cell = heap_alloc(heap, ids.vector as u64, n as u64).root(scope);
+        let cell_bits = cell.get_raw(&*heap).bits();
+        let new_ptr = nanbox_payload(cell_bits) as *mut u8;
+        for (i, r) in roots.iter().enumerate() {
+            unsafe {
+                new_ptr
+                    .add(16 + i * 8)
+                    .cast::<u64>()
+                    .write_unaligned(r.get_raw(&*heap).bits());
+            }
         }
-    }
-    nanbox_ptr(new_raw)
+        cell_bits
+    })
 }
 
 /// `clojure.lang.PersistentHashSet.create(Object coll)` — build a set
@@ -2094,9 +2254,13 @@ pub unsafe extern "C" fn cljvm_phs_create(coll_bits: u64) -> u64 {
                             Some(TAG_NIL) => break,
                             Some(TAG_PTR) => {
                                 let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() { break; }
+                                if p.is_null() {
+                                    break;
+                                }
                                 let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons { break; }
+                                if tid != ids.cons {
+                                    break;
+                                }
                                 item_bits.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
                                 cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
                             }
@@ -2107,7 +2271,8 @@ pub unsafe extern "C" fn cljvm_phs_create(coll_bits: u64) -> u64 {
                     let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
                     item_bits.reserve(n);
                     for i in 0..n {
-                        item_bits.push(unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() });
+                        item_bits
+                            .push(unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() });
                     }
                 } else {
                     panic!(
@@ -2164,9 +2329,13 @@ pub unsafe extern "C" fn cljvm_ptm_create(coll_bits: u64) -> u64 {
                             Some(TAG_NIL) => break,
                             Some(TAG_PTR) => {
                                 let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() { break; }
+                                if p.is_null() {
+                                    break;
+                                }
                                 let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons { break; }
+                                if tid != ids.cons {
+                                    break;
+                                }
                                 items.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
                                 cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
                             }
@@ -2257,8 +2426,14 @@ pub unsafe extern "C" fn cljvm_pts_create_cmp(cmp_bits: u64, coll_bits: u64) -> 
         for i in 0..sorted_bits.len() {
             let cmp_ret = unsafe { cljvm_rt_invoke_2(cmp_bits, kb, sorted_bits[i]) };
             match decode_cmp_ret(cmp_ret) {
-                Ordering::Equal => { placed = true; break; }
-                Ordering::Less => { idx = i; break; }
+                Ordering::Equal => {
+                    placed = true;
+                    break;
+                }
+                Ordering::Less => {
+                    idx = i;
+                    break;
+                }
                 Ordering::Greater => {}
             }
         }
@@ -2304,9 +2479,13 @@ unsafe fn walk_coll_to_bits(coll_bits: u64, ids: HeapTypeIds, caller: &'static s
                             Some(TAG_NIL) => break,
                             Some(TAG_PTR) => {
                                 let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() { break; }
+                                if p.is_null() {
+                                    break;
+                                }
                                 let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons { break; }
+                                if tid != ids.cons {
+                                    break;
+                                }
                                 out.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
                                 cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
                             }
@@ -2320,9 +2499,7 @@ unsafe fn walk_coll_to_bits(coll_bits: u64, ids: HeapTypeIds, caller: &'static s
                         out.push(unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() });
                     }
                 } else {
-                    panic!(
-                        "clojure-jvm: {caller} — receiver type_id {type_id} not yet supported"
-                    );
+                    panic!("clojure-jvm: {caller} — receiver type_id {type_id} not yet supported");
                 }
             }
         }
@@ -2354,9 +2531,13 @@ pub unsafe extern "C" fn cljvm_ptm_create_cmp(cmp_bits: u64, coll_bits: u64) -> 
                             Some(TAG_NIL) => break,
                             Some(TAG_PTR) => {
                                 let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() { break; }
+                                if p.is_null() {
+                                    break;
+                                }
                                 let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons { break; }
+                                if tid != ids.cons {
+                                    break;
+                                }
                                 items.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
                                 cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
                             }
@@ -2406,9 +2587,7 @@ pub unsafe extern "C" fn cljvm_ptm_create_cmp(cmp_bits: u64, coll_bits: u64) -> 
         let mut placed = false;
         let mut idx = sorted.len();
         for i in 0..sorted.len() {
-            let cmp_ret = unsafe {
-                cljvm_rt_invoke_2(cmp_bits, kb, sorted[i].0)
-            };
+            let cmp_ret = unsafe { cljvm_rt_invoke_2(cmp_bits, kb, sorted[i].0) };
             let ord = decode_cmp_ret(cmp_ret);
             match ord {
                 Ordering::Equal => {
@@ -2495,9 +2674,13 @@ pub unsafe extern "C" fn cljvm_phm_create(coll_bits: u64) -> u64 {
                             Some(TAG_NIL) => break,
                             Some(TAG_PTR) => {
                                 let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() { break; }
+                                if p.is_null() {
+                                    break;
+                                }
                                 let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons { break; }
+                                if tid != ids.cons {
+                                    break;
+                                }
                                 items.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
                                 cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
                             }
@@ -2575,8 +2758,7 @@ pub unsafe extern "C" fn cljvm_lpv_create(coll_bits: u64) -> u64 {
                     let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
                     items.reserve(n);
                     for i in 0..n {
-                        let bits =
-                            unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() };
+                        let bits = unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() };
                         items.push(bits);
                     }
                 } else if type_id == ids.cons {
@@ -2586,9 +2768,13 @@ pub unsafe extern "C" fn cljvm_lpv_create(coll_bits: u64) -> u64 {
                             Some(TAG_NIL) => break,
                             Some(TAG_PTR) => {
                                 let p = nanbox_payload(cur) as *const u8;
-                                if p.is_null() { break; }
+                                if p.is_null() {
+                                    break;
+                                }
                                 let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                                if tid != ids.cons { break; }
+                                if tid != ids.cons {
+                                    break;
+                                }
                                 let f = unsafe { p.add(8).cast::<u64>().read_unaligned() };
                                 items.push(f);
                                 cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
@@ -2613,18 +2799,27 @@ pub unsafe extern "C" fn cljvm_lpv_create(coll_bits: u64) -> u64 {
              be a collection or nil, got NanBox bits 0x{coll_bits:x}"
         ),
     }
+    // `items` holds source element NanBoxes (GC pointers). Root them all
+    // before allocating the result Vector, then write the (possibly
+    // relocated) values read back through the heap. heap_alloc's `&mut Heap`
+    // makes holding an un-rooted element across the alloc a compile error.
     let n = items.len();
-    let new_raw = dynlang::gc::gc_alloc_thunk(ids.vector as u64, n as u64);
-    let new_ptr = new_raw as *mut u8;
-    if new_ptr.is_null() {
-        panic!("clojure-jvm: LazilyPersistentVector/create: gc_alloc returned null");
-    }
-    for (i, bits) in items.iter().enumerate() {
-        unsafe {
-            new_ptr.add(16 + i * 8).cast::<u64>().write_unaligned(*bits);
+    dynobj::roots::gc_enter(n + 1, |heap, scope| {
+        let roots: Vec<dynobj::roots::Rooted<()>> =
+            items.iter().map(|&b| scope.root::<()>(b)).collect();
+        let cell = heap_alloc(heap, ids.vector as u64, n as u64).root(scope);
+        let cell_bits = cell.get_raw(&*heap).bits();
+        let new_ptr = nanbox_payload(cell_bits) as *mut u8;
+        for (i, r) in roots.iter().enumerate() {
+            unsafe {
+                new_ptr
+                    .add(16 + i * 8)
+                    .cast::<u64>()
+                    .write_unaligned(r.get_raw(&*heap).bits());
+            }
         }
-    }
-    nanbox_ptr(new_raw)
+        cell_bits
+    })
 }
 
 /// `clojure.lang.RT.toArray(Object coll)` — copy `coll` into a fresh
@@ -2649,8 +2844,7 @@ pub unsafe extern "C" fn cljvm_rt_toArray(coll_bits: u64) -> u64 {
                     let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
                     items.reserve(n);
                     for i in 0..n {
-                        let bits =
-                            unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() };
+                        let bits = unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() };
                         items.push(bits);
                     }
                 } else if type_id == ids.cons {
@@ -2663,16 +2857,13 @@ pub unsafe extern "C" fn cljvm_rt_toArray(coll_bits: u64) -> u64 {
                                 if p.is_null() {
                                     break;
                                 }
-                                let tid =
-                                    unsafe { p.cast::<u16>().read_unaligned() } as usize;
+                                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
                                 if tid != ids.cons {
                                     break;
                                 }
-                                let f =
-                                    unsafe { p.add(8).cast::<u64>().read_unaligned() };
+                                let f = unsafe { p.add(8).cast::<u64>().read_unaligned() };
                                 items.push(f);
-                                cur =
-                                    unsafe { p.add(16).cast::<u64>().read_unaligned() };
+                                cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
                             }
                             _ => break,
                         }
@@ -2690,23 +2881,84 @@ pub unsafe extern "C" fn cljvm_rt_toArray(coll_bits: u64) -> u64 {
              got NanBox bits 0x{coll_bits:x}"
         ),
     }
+    // Root every collected element before allocating the result Vector
+    // (the alloc can relocate their target objects), then write the values
+    // read back through the heap.
     let n = items.len();
-    let new_raw = dynlang::gc::gc_alloc_thunk(ids.vector as u64, n as u64);
-    let new_ptr = new_raw as *mut u8;
-    if new_ptr.is_null() {
-        panic!("clojure-jvm: RT.toArray: gc_alloc returned null for Vector");
-    }
-    for (i, bits) in items.iter().enumerate() {
-        unsafe {
-            new_ptr.add(16 + i * 8).cast::<u64>().write_unaligned(*bits);
+    dynobj::roots::gc_enter(n + 1, |heap, scope| {
+        let roots: Vec<dynobj::roots::Rooted<()>> =
+            items.iter().map(|&b| scope.root::<()>(b)).collect();
+        let cell = heap_alloc(heap, ids.vector as u64, n as u64).root(scope);
+        let cell_bits = cell.get_raw(&*heap).bits();
+        let new_ptr = nanbox_payload(cell_bits) as *mut u8;
+        for (i, r) in roots.iter().enumerate() {
+            unsafe {
+                new_ptr
+                    .add(16 + i * 8)
+                    .cast::<u64>()
+                    .write_unaligned(r.get_raw(&*heap).bits());
+            }
         }
-    }
-    nanbox_ptr(new_raw)
+        cell_bits
+    })
 }
 
 /// `clojure.lang.RT.first(Object coll)` — return the first item or nil.
 /// Java: handles ISeq, Seqable, nil. We cover nil/Cons/Vector now;
 /// Map iteration goes through `seq` first (Java does the same).
+pub(crate) fn trap_forwarded_first_result(source: &str, owner_bits: u64, result_bits: u64) {
+    if std::env::var("CLJVM_TRAP").is_err() || nanbox_tag(result_bits) != Some(TAG_PTR) {
+        return;
+    }
+    let ptr = nanbox_payload(result_bits) as *const u8;
+    if ptr.is_null() {
+        return;
+    }
+    let hdr = unsafe { ptr.cast::<u64>().read_unaligned() };
+    if hdr & dynalloc::FORWARDING_BIT == 0 {
+        return;
+    }
+    let owner_ptr = if nanbox_tag(owner_bits) == Some(TAG_PTR) {
+        nanbox_payload(owner_bits) as *const u8
+    } else {
+        core::ptr::null()
+    };
+    let fwd_ptr = (hdr & !dynalloc::FORWARDING_BIT) as *const u8;
+    let owner_region = dynlang::gc::debug_current_ptr_region(owner_ptr).unwrap_or("no-runtime");
+    let result_region = dynlang::gc::debug_current_ptr_region(ptr).unwrap_or("no-runtime");
+    let fwd_region = dynlang::gc::debug_current_ptr_region(fwd_ptr).unwrap_or("no-runtime");
+    eprintln!(
+        "[first-ret] {source} owner={owner_bits:#x}/{owner_region} result={result_bits:#x}/{result_region} hdr={hdr:#x} fwd={:#x}/{fwd_region} max_gen={}",
+        hdr & !dynalloc::FORWARDING_BIT,
+        dynalloc::max_visit_gen()
+    );
+    if std::env::var("CLJVM_BACKTRACE").is_ok() {
+        eprintln!(
+            "[first-ret] backtrace:\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let mut fp: usize;
+        unsafe {
+            core::arch::asm!("mov {}, fp", out(reg) fp, options(nomem, nostack, preserves_flags));
+        }
+        for (addr, line) in dynlower::trap_find_value(fp as *const u8, owner_bits) {
+            eprintln!(
+                "[first-ret]   owner {line} last_visit_gen={:?}",
+                dynalloc::slot_last_visit_gen(addr)
+            );
+        }
+        for (addr, line) in dynlower::trap_find_value(fp as *const u8, result_bits) {
+            eprintln!(
+                "[first-ret]   result {line} last_visit_gen={:?}",
+                dynalloc::slot_last_visit_gen(addr)
+            );
+        }
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_first(bits: u64) -> u64 {
     let ids = heap_type_ids();
@@ -2719,14 +2971,18 @@ pub unsafe extern "C" fn cljvm_rt_first(bits: u64) -> u64 {
             }
             let type_id = unsafe { ptr.cast::<u16>().read_unaligned() } as usize;
             if type_id == ids.cons {
-                unsafe { ptr.add(8).cast::<u64>().read_unaligned() }
+                let result = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
+                trap_forwarded_first_result("cons.first", bits, result);
+                result
             } else if type_id == ids.vector {
                 // Vector: header(8) + count(8) + items at offset 16.
                 let n = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
                 if n == 0 {
                     nanbox_nil()
                 } else {
-                    unsafe { ptr.add(16).cast::<u64>().read_unaligned() }
+                    let result = unsafe { ptr.add(16).cast::<u64>().read_unaligned() };
+                    trap_forwarded_first_result("vector.0", bits, result);
+                    result
                 }
             } else if type_id == ids.string {
                 // (first "abc") is treated as nil — Java strings ARE
@@ -2742,13 +2998,39 @@ pub unsafe extern "C" fn cljvm_rt_first(bits: u64) -> u64 {
                     _ => unsafe { cljvm_rt_first(s) },
                 }
             } else {
-                if std::env::var("CLJVM_POSTGC_SCAN").is_ok() {
+                if std::env::var("CLJVM_TRAP").is_ok() {
                     let hdr = unsafe { ptr.cast::<u64>().read_unaligned() };
-                    if let Ok(cap) = dynlower::STALE_CAPTURE.lock() {
-                        if let Some(map) = cap.as_ref() {
-                            match map.get(&bits) {
-                                Some(loc) => eprintln!("[rt_first] DANGLING bits={bits:#x} hdr={hdr:#x}: producer @ {loc}"),
-                                None => eprintln!("[rt_first] DANGLING bits={bits:#x} hdr={hdr:#x}: not in stale-capture"),
+                    #[cfg(target_arch = "aarch64")]
+                    {
+                        let mut fp: usize;
+                        unsafe {
+                            core::arch::asm!("mov {}, fp", out(reg) fp, options(nomem, nostack, preserves_flags));
+                        }
+                        eprintln!(
+                            "[trap] rt_first bits={bits:#x} hdr={hdr:#x} type_id={type_id} fp={fp:#x} max_gen={}",
+                            dynalloc::max_visit_gen()
+                        );
+                        for (addr, line) in dynlower::trap_find_value(fp as *const u8, bits) {
+                            eprintln!(
+                                "[trap]   {line} last_visit_gen={:?}",
+                                dynalloc::slot_last_visit_gen(addr)
+                            );
+                        }
+                        // Dump the machine code preceding each JIT frame's
+                        // current call site, so the slot/register feeding the
+                        // outgoing argument can be disassembled.
+                        for (i, ret_lr) in dynlower::frame_return_addrs(fp as *const u8)
+                            .into_iter()
+                            .enumerate()
+                            .take(4)
+                        {
+                            if let Some((cs, ro, bytes)) = dynlower::jit_code_window(ret_lr, 0x400)
+                            {
+                                let hex: String =
+                                    bytes.iter().map(|b| format!("{b:02x}")).collect();
+                                eprintln!(
+                                    "[trap]   code frame#{i} code_start={cs:#x} call_off={ro:#x} bytes_before_call={hex}"
+                                );
                             }
                         }
                     }
@@ -2775,27 +3057,33 @@ pub unsafe extern "C" fn cljvm_var_pushThreadBindings(_m: u64) -> u64 {
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_var_popThreadBindings() -> u64 {
-    eprintln!("[cljvm-stub] Var/popThreadBindings not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] Var/popThreadBindings not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_var_getThreadBindingFrame() -> u64 {
-    eprintln!("[cljvm-stub] Var/getThreadBindingFrame not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] Var/getThreadBindingFrame not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_var_getThreadBindings() -> u64 {
-    eprintln!("[cljvm-stub] Var/getThreadBindings not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] Var/getThreadBindings not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_var_find(_sym: u64) -> u64 {
-    eprintln!("[cljvm-stub] Var/find not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] Var/find not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_var_intern_2(_ns: u64, _sym: u64) -> u64 {
-    eprintln!("[cljvm-stub] Var/intern (2-arg) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] Var/intern (2-arg) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_var_intern_3(_ns: u64, _sym: u64, _val: u64) -> u64 {
-    eprintln!("[cljvm-stub] Var/intern (3-arg) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] Var/intern (3-arg) not yet implemented");
+    return nanbox_nil();
 }
 
 /// `(.resetMeta v m)` — replaces a Var's metadata. Stub; no-op return.
@@ -2808,25 +3096,31 @@ pub unsafe extern "C" fn cljvm_inst_resetMeta(_recv: u64, m: u64) -> u64 {
 /// `(.alterMeta v f & args)` — apply f to var's meta. Stub.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_alterMeta(_recv: u64, _f: u64, _args: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.alterMeta) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.alterMeta) not yet implemented");
+    return nanbox_nil();
 }
 
 /// `(.bindRoot v val)` — set a Var's root binding.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_bindRoot(_recv: u64, _val: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.bindRoot) not yet implemented — defn handles binding via the def special form");     return nanbox_nil();
+    eprintln!(
+        "[cljvm-stub] (.bindRoot) not yet implemented — defn handles binding via the def special form"
+    );
+    return nanbox_nil();
 }
 
 /// `(.hasRoot v)` — does this Var have a root binding?
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_hasRoot(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.hasRoot) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.hasRoot) not yet implemented");
+    return nanbox_nil();
 }
 
 /// `(.getRawRoot v)` — read Var's root without dynamic-binding lookup.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_getRawRoot(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.getRawRoot) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.getRawRoot) not yet implemented");
+    return nanbox_nil();
 }
 
 // IRef validators / watches / state — stub instance methods.
@@ -2835,35 +3129,43 @@ pub unsafe extern "C" fn cljvm_inst_getRawRoot(_recv: u64) -> u64 {
 // them analyze, even though calling them would panic.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_setValidator(_recv: u64, _v: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.setValidator) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.setValidator) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_getValidator(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.getValidator) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.getValidator) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_getWatches(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.getWatches) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.getWatches) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_addWatch(_recv: u64, _key: u64, _f: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.addWatch) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.addWatch) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_removeWatch(_recv: u64, _key: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.removeWatch) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.removeWatch) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_swap(_recv: u64, _f: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.swap) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.swap) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_reset(_recv: u64, _new: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.reset) on IAtom not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.reset) on IAtom not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_compareAndSet(_recv: u64, _old: u64, _new: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.compareAndSet) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.compareAndSet) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_deref(recv: u64) -> u64 {
@@ -2887,79 +3189,97 @@ pub unsafe extern "C" fn cljvm_inst_deref(recv: u64) -> u64 {
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_iterator(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.iterator) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.iterator) not yet implemented");
+    return nanbox_nil();
 }
 
 // Agent error-handling stubs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_setErrorHandler(_recv: u64, _h: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.setErrorHandler) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.setErrorHandler) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_getErrorHandler(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.getErrorHandler) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.getErrorHandler) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_setErrorMode(_recv: u64, _m: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.setErrorMode) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.setErrorMode) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_getErrorMode(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.getErrorMode) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.getErrorMode) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_getError(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.getError) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.getError) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_dispatch(_recv: u64, _f: u64, _args: u64, _exec: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.dispatch) on Agent not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.dispatch) on Agent not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_restart(_recv: u64, _new: u64, _clear: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.restart) on Agent not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.restart) on Agent not yet implemented");
+    return nanbox_nil();
 }
 
 // Ref stubs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_set(_recv: u64, _val: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.set) on Ref not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.set) on Ref not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_alter(_recv: u64, _f: u64, _args: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.alter) on Ref not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.alter) on Ref not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_commute(_recv: u64, _f: u64, _args: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.commute) on Ref not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.commute) on Ref not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_ensure(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.ensure) on Ref not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.ensure) on Ref not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_setMinHistory(_recv: u64, _n: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.setMinHistory) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.setMinHistory) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_setMaxHistory(_recv: u64, _n: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.setMaxHistory) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.setMaxHistory) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_getMinHistory(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.getMinHistory) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.getMinHistory) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_getMaxHistory(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.getMaxHistory) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.getMaxHistory) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_getHistoryCount(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.getHistoryCount) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.getHistoryCount) not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_trimHistory(_recv: u64) -> u64 {
-    eprintln!("[cljvm-stub] (.trimHistory) not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.trimHistory) not yet implemented");
+    return nanbox_nil();
 }
 
 // Generic "unimplemented host call" stubs. Used by the analyzer's
@@ -2999,22 +3319,37 @@ pub unsafe extern "C" fn cljvm_unimpl_host_call_4(_a: u64, _b: u64, _c: u64, _d:
     nanbox_nil()
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_unimpl_host_call_5(_a: u64, _b: u64, _c: u64, _d: u64, _e: u64) -> u64 {
+pub unsafe extern "C" fn cljvm_unimpl_host_call_5(
+    _a: u64,
+    _b: u64,
+    _c: u64,
+    _d: u64,
+    _e: u64,
+) -> u64 {
     eprintln!("[cljvm-unimpl-host-call] arity 5 — returning nil");
     nanbox_nil()
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_unimpl_host_call_6(_a: u64, _b: u64, _c: u64, _d: u64, _e: u64, _f: u64) -> u64 {
+pub unsafe extern "C" fn cljvm_unimpl_host_call_6(
+    _a: u64,
+    _b: u64,
+    _c: u64,
+    _d: u64,
+    _e: u64,
+    _f: u64,
+) -> u64 {
     eprintln!("[cljvm-unimpl-host-call] arity 6 — returning nil");
     nanbox_nil()
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_var_resetThreadBindingFrame(_f: u64) -> u64 {
-    eprintln!("[cljvm-stub] Var/resetThreadBindingFrame not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] Var/resetThreadBindingFrame not yet implemented");
+    return nanbox_nil();
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_var_cloneThreadBindingFrame() -> u64 {
-    eprintln!("[cljvm-stub] Var/cloneThreadBindingFrame not yet implemented");     return nanbox_nil();
+    eprintln!("[cljvm-stub] Var/cloneThreadBindingFrame not yet implemented");
+    return nanbox_nil();
 }
 
 /// `(.reset multifn)` — `clojure.lang.MultiFn.reset()`. We don't model
@@ -3085,9 +3420,7 @@ pub unsafe extern "C" fn cljvm_inst_getNamespace(x_bits: u64) -> u64 {
             }
         }
     }
-    panic!(
-        "clojure-jvm: (.getNamespace) on non-Named receiver bits 0x{x_bits:x}"
-    );
+    panic!("clojure-jvm: (.getNamespace) on non-Named receiver bits 0x{x_bits:x}");
 }
 
 /// `(.rseq rev)` — Reversible.rseq. For a Vector, return a cons-seq of
@@ -3101,25 +3434,28 @@ pub unsafe extern "C" fn cljvm_inst_rseq(rev_bits: u64) -> u64 {
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid == ids.vector {
                 let n = unsafe { p.add(8).cast::<u64>().read_unaligned() } as usize;
-                if n == 0 { return nanbox_nil(); }
+                if n == 0 {
+                    return nanbox_nil();
+                }
                 let items: Vec<u64> = (0..n)
                     .map(|i| unsafe { p.add(16 + i * 8).cast::<u64>().read_unaligned() })
                     .collect();
-                return dynobj::roots::with_scope(items.len() + 1, |scope| {
+                return dynobj::roots::gc_enter(items.len() + 1, |heap, scope| {
                     let roots: Vec<_> = items.iter().map(|v| scope.root::<()>(*v)).collect();
                     let tail = scope.root::<()>(nanbox_nil());
                     // Forward iteration (NOT reversed) since we want reverse-order seq:
                     // walk left→right and prepend so the last item ends up at head.
                     for r in roots.iter() {
-                        let new_tail = unsafe { cljvm_rt_cons(r.get(), tail.get()) };
-                        tail.set(new_tail);
+                        let new_tail = heap_cons(heap, *r, tail);
+                        tail.set_raw(new_tail);
                     }
-                    tail.get()
+                    tail.get_raw(&*heap).bits()
                 });
             }
         }
     }
-    eprintln!("[cljvm-stub] (.rseq) on unsupported receiver bits 0x{rev_bits:x}");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.rseq) on unsupported receiver bits 0x{rev_bits:x}");
+    return nanbox_nil();
 }
 
 /// `(.getKey entry)` — `Map.Entry.getKey()`. We model map entries as
@@ -3139,7 +3475,8 @@ pub unsafe extern "C" fn cljvm_inst_getKey(e_bits: u64) -> u64 {
             }
         }
     }
-    eprintln!("[cljvm-stub] (.getKey) on non-MapEntry receiver bits 0x{e_bits:x}");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.getKey) on non-MapEntry receiver bits 0x{e_bits:x}");
+    return nanbox_nil();
 }
 
 /// `(.getValue entry)` — `Map.Entry.getValue()`. `(nth e 1)`.
@@ -3158,7 +3495,8 @@ pub unsafe extern "C" fn cljvm_inst_getValue(e_bits: u64) -> u64 {
             }
         }
     }
-    eprintln!("[cljvm-stub] (.getValue) on non-MapEntry receiver bits 0x{e_bits:x}");     return nanbox_nil();
+    eprintln!("[cljvm-stub] (.getValue) on non-MapEntry receiver bits 0x{e_bits:x}");
+    return nanbox_nil();
 }
 
 /// `(.disjoin set key)` — return a new set without `key`. Receiver
@@ -3170,10 +3508,13 @@ pub unsafe extern "C" fn cljvm_inst_disjoin(set_bits: u64, key_bits: u64) -> u64
         Some(TAG_NIL) => nanbox_nil(),
         Some(TAG_PTR) => {
             let p = nanbox_payload(set_bits) as *const u8;
-            if p.is_null() { return nanbox_nil(); }
+            if p.is_null() {
+                return nanbox_nil();
+            }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid != ids.set {
-                eprintln!("[cljvm-stub] (.disjoin) on non-set type_id {tid}");                 return nanbox_nil();
+                eprintln!("[cljvm-stub] (.disjoin) on non-set type_id {tid}");
+                return nanbox_nil();
             }
             let arc_ptr = unsafe { p.add(8).cast::<u64>().read_unaligned() }
                 as *const crate::lang::persistent_hash_set::PersistentHashSet;
@@ -3185,8 +3526,12 @@ pub unsafe extern "C" fn cljvm_inst_disjoin(set_bits: u64, key_bits: u64) -> u64
             crate::lang::compiler::with_active_session_root_set(new_s);
             let raw = dynlang::gc::gc_alloc_thunk(ids.set as u64, 0);
             let np = raw as *mut u8;
-            if np.is_null() { panic!("clojure-jvm: (.disjoin) alloc null"); }
-            unsafe { np.add(8).cast::<u64>().write_unaligned(raw_arc); }
+            if np.is_null() {
+                panic!("clojure-jvm: (.disjoin) alloc null");
+            }
+            unsafe {
+                np.add(8).cast::<u64>().write_unaligned(raw_arc);
+            }
             nanbox_encode(TAG_PTR, raw & PAYLOAD_MASK)
         }
         _ => panic!("clojure-jvm: (.disjoin) on non-set non-nil receiver"),
@@ -3202,7 +3547,9 @@ pub unsafe extern "C" fn cljvm_rt_contains(coll_bits: u64, key_bits: u64) -> u64
         Some(TAG_NIL) => nanbox_bool(false),
         Some(TAG_PTR) => {
             let p = nanbox_payload(coll_bits) as *const u8;
-            if p.is_null() { return nanbox_bool(false); }
+            if p.is_null() {
+                return nanbox_bool(false);
+            }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid == ids.map {
                 let arc_ptr = unsafe { p.add(8).cast::<u64>().read_unaligned() }
@@ -3213,7 +3560,9 @@ pub unsafe extern "C" fn cljvm_rt_contains(coll_bits: u64, key_bits: u64) -> u64
                 return nanbox_bool(m.contains_key(&key));
             }
             if tid == ids.vector {
-                if !nanbox_tag(key_bits).is_none() { return nanbox_bool(false); }
+                if !nanbox_tag(key_bits).is_none() {
+                    return nanbox_bool(false);
+                }
                 let n = unsafe { p.add(8).cast::<u64>().read_unaligned() } as i64;
                 let idx = arg_to_i64(key_bits);
                 return nanbox_bool(idx >= 0 && idx < n);
@@ -3245,7 +3594,9 @@ pub unsafe extern "C" fn cljvm_rt_get_3(coll_bits: u64, key_bits: u64, not_found
         Some(TAG_NIL) => not_found,
         Some(TAG_PTR) => {
             let p = nanbox_payload(coll_bits) as *const u8;
-            if p.is_null() { return not_found; }
+            if p.is_null() {
+                return not_found;
+            }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid == ids.map {
                 let arc_ptr = unsafe { p.add(8).cast::<u64>().read_unaligned() }
@@ -3255,17 +3606,25 @@ pub unsafe extern "C" fn cljvm_rt_get_3(coll_bits: u64, key_bits: u64, not_found
                 let key = any_bits_to_object(key_bits, ids);
                 let v = m.val_at(&key);
                 if matches!(v, Object::Nil) {
-                    if !m.contains_key(&key) { return not_found; }
+                    if !m.contains_key(&key) {
+                        return not_found;
+                    }
                 }
                 return crate::lang::compiler::with_active_session_encode_object(&v);
             }
             if tid == ids.vector {
-                if !nanbox_tag(key_bits).is_none() { return not_found; }
+                if !nanbox_tag(key_bits).is_none() {
+                    return not_found;
+                }
                 let n = unsafe { p.add(8).cast::<u64>().read_unaligned() } as i64;
                 let idx = arg_to_i64(key_bits);
-                if idx < 0 || idx >= n { return not_found; }
+                if idx < 0 || idx >= n {
+                    return not_found;
+                }
                 return unsafe {
-                    p.add(16 + (idx as usize) * 8).cast::<u64>().read_unaligned()
+                    p.add(16 + (idx as usize) * 8)
+                        .cast::<u64>()
+                        .read_unaligned()
                 };
             }
             if tid == ids.set {
@@ -3274,7 +3633,11 @@ pub unsafe extern "C" fn cljvm_rt_get_3(coll_bits: u64, key_bits: u64, not_found
                 unsafe { Arc::increment_strong_count(arc_ptr) };
                 let s = unsafe { Arc::from_raw(arc_ptr) };
                 let key = any_bits_to_object(key_bits, ids);
-                if s.contains(&key) { key_bits } else { not_found }
+                if s.contains(&key) {
+                    key_bits
+                } else {
+                    not_found
+                }
             } else {
                 not_found
             }
@@ -3292,7 +3655,9 @@ pub unsafe extern "C" fn cljvm_rt_find(coll_bits: u64, key_bits: u64) -> u64 {
         Some(TAG_NIL) => nanbox_nil(),
         Some(TAG_PTR) => {
             let p = nanbox_payload(coll_bits) as *const u8;
-            if p.is_null() { return nanbox_nil(); }
+            if p.is_null() {
+                return nanbox_nil();
+            }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid != ids.map {
                 panic!("clojure-jvm: RT.find on non-map type_id {tid}");
@@ -3308,17 +3673,18 @@ pub unsafe extern "C" fn cljvm_rt_find(coll_bits: u64, key_bits: u64) -> u64 {
                     let kbits = crate::lang::compiler::with_active_session_encode_object(&k);
                     let vbits = crate::lang::compiler::with_active_session_encode_object(&v);
                     // Build [k v] vector.
-                    dynobj::roots::with_scope(2, |scope| {
+                    dynobj::roots::gc_enter(3, |heap, scope| {
                         let kr = scope.root::<()>(kbits);
                         let vr = scope.root::<()>(vbits);
-                        let raw = dynlang::gc::gc_alloc_thunk(ids.vector as u64, 2);
-                        let np = raw as *mut u8;
+                        let cell = heap_alloc(heap, ids.vector as u64, 2).root(scope);
+                        let cell_bits = cell.get_raw(&*heap).bits();
+                        let np = nanbox_payload(cell_bits) as *mut u8;
                         unsafe {
                             np.add(8).cast::<u64>().write_unaligned(2);
-                            np.add(16).cast::<u64>().write_unaligned(kr.get());
-                            np.add(24).cast::<u64>().write_unaligned(vr.get());
+                            np.add(16).cast::<u64>().write_unaligned(kr.get_raw(&*heap).bits());
+                            np.add(24).cast::<u64>().write_unaligned(vr.get_raw(&*heap).bits());
                         }
-                        nanbox_encode(TAG_PTR, raw & PAYLOAD_MASK)
+                        cell_bits
                     })
                 }
             }
@@ -3335,7 +3701,9 @@ pub unsafe extern "C" fn cljvm_rt_dissoc(coll_bits: u64, key_bits: u64) -> u64 {
         Some(TAG_NIL) => nanbox_nil(),
         Some(TAG_PTR) => {
             let p = nanbox_payload(coll_bits) as *const u8;
-            if p.is_null() { return nanbox_nil(); }
+            if p.is_null() {
+                return nanbox_nil();
+            }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid != ids.map {
                 panic!("clojure-jvm: RT.dissoc on non-map type_id {tid}");
@@ -3350,7 +3718,9 @@ pub unsafe extern "C" fn cljvm_rt_dissoc(coll_bits: u64, key_bits: u64) -> u64 {
             crate::lang::compiler::with_active_session_root_map(new_m);
             let raw = dynlang::gc::gc_alloc_thunk(ids.map as u64, 0);
             let np = raw as *mut u8;
-            if np.is_null() { panic!("clojure-jvm: RT.dissoc alloc null"); }
+            if np.is_null() {
+                panic!("clojure-jvm: RT.dissoc alloc null");
+            }
             unsafe {
                 np.add(8).cast::<u64>().write_unaligned(raw_arc);
             }
@@ -3368,7 +3738,9 @@ pub unsafe extern "C" fn cljvm_rt_keys(coll_bits: u64) -> u64 {
         Some(TAG_NIL) => nanbox_nil(),
         Some(TAG_PTR) => {
             let p = nanbox_payload(coll_bits) as *const u8;
-            if p.is_null() { return nanbox_nil(); }
+            if p.is_null() {
+                return nanbox_nil();
+            }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid != ids.map {
                 panic!("clojure-jvm: RT.keys on non-map type_id {tid}");
@@ -3377,18 +3749,21 @@ pub unsafe extern "C" fn cljvm_rt_keys(coll_bits: u64) -> u64 {
                 as *const crate::lang::persistent_hash_map::PersistentHashMap;
             unsafe { Arc::increment_strong_count(arc_ptr) };
             let m = unsafe { Arc::from_raw(arc_ptr) };
-            let keys: Vec<u64> = m.iter()
+            let keys: Vec<u64> = m
+                .iter()
                 .map(|(k, _)| crate::lang::compiler::with_active_session_encode_object(&k))
                 .collect();
-            if keys.is_empty() { return nanbox_nil(); }
-            dynobj::roots::with_scope(keys.len() + 1, |scope| {
+            if keys.is_empty() {
+                return nanbox_nil();
+            }
+            dynobj::roots::gc_enter(keys.len() + 1, |heap, scope| {
                 let roots: Vec<_> = keys.iter().map(|v| scope.root::<()>(*v)).collect();
                 let tail = scope.root::<()>(nanbox_nil());
                 for r in roots.iter().rev() {
-                    let new_tail = unsafe { cljvm_rt_cons(r.get(), tail.get()) };
-                    tail.set(new_tail);
+                    let new_tail = heap_cons(heap, *r, tail);
+                    tail.set_raw(new_tail);
                 }
-                tail.get()
+                tail.get_raw(&*heap).bits()
             })
         }
         _ => panic!("clojure-jvm: RT.keys on unsupported NanBox"),
@@ -3403,7 +3778,9 @@ pub unsafe extern "C" fn cljvm_rt_vals(coll_bits: u64) -> u64 {
         Some(TAG_NIL) => nanbox_nil(),
         Some(TAG_PTR) => {
             let p = nanbox_payload(coll_bits) as *const u8;
-            if p.is_null() { return nanbox_nil(); }
+            if p.is_null() {
+                return nanbox_nil();
+            }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid != ids.map {
                 panic!("clojure-jvm: RT.vals on non-map type_id {tid}");
@@ -3412,18 +3789,21 @@ pub unsafe extern "C" fn cljvm_rt_vals(coll_bits: u64) -> u64 {
                 as *const crate::lang::persistent_hash_map::PersistentHashMap;
             unsafe { Arc::increment_strong_count(arc_ptr) };
             let m = unsafe { Arc::from_raw(arc_ptr) };
-            let vals: Vec<u64> = m.iter()
+            let vals: Vec<u64> = m
+                .iter()
                 .map(|(_, v)| crate::lang::compiler::with_active_session_encode_object(&v))
                 .collect();
-            if vals.is_empty() { return nanbox_nil(); }
-            dynobj::roots::with_scope(vals.len() + 1, |scope| {
+            if vals.is_empty() {
+                return nanbox_nil();
+            }
+            dynobj::roots::gc_enter(vals.len() + 1, |heap, scope| {
                 let roots: Vec<_> = vals.iter().map(|v| scope.root::<()>(*v)).collect();
                 let tail = scope.root::<()>(nanbox_nil());
                 for r in roots.iter().rev() {
-                    let new_tail = unsafe { cljvm_rt_cons(r.get(), tail.get()) };
-                    tail.set(new_tail);
+                    let new_tail = heap_cons(heap, *r, tail);
+                    tail.set_raw(new_tail);
                 }
-                tail.get()
+                tail.get_raw(&*heap).bits()
             })
         }
         _ => panic!("clojure-jvm: RT.vals on unsupported NanBox"),
@@ -3440,13 +3820,17 @@ pub unsafe extern "C" fn cljvm_rt_peek(bits: u64) -> u64 {
         Some(TAG_NIL) => nanbox_nil(),
         Some(TAG_PTR) => {
             let p = nanbox_payload(bits) as *const u8;
-            if p.is_null() { return nanbox_nil(); }
+            if p.is_null() {
+                return nanbox_nil();
+            }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid == ids.cons {
                 unsafe { p.add(8).cast::<u64>().read_unaligned() }
             } else if tid == ids.vector {
                 let n = unsafe { p.add(8).cast::<u64>().read_unaligned() } as usize;
-                if n == 0 { nanbox_nil() } else {
+                if n == 0 {
+                    nanbox_nil()
+                } else {
                     unsafe { p.add(16 + (n - 1) * 8).cast::<u64>().read_unaligned() }
                 }
             } else {
@@ -3466,7 +3850,9 @@ pub unsafe extern "C" fn cljvm_rt_pop(bits: u64) -> u64 {
         Some(TAG_NIL) => nanbox_nil(),
         Some(TAG_PTR) => {
             let p = nanbox_payload(bits) as *const u8;
-            if p.is_null() { return nanbox_nil(); }
+            if p.is_null() {
+                return nanbox_nil();
+            }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid == ids.cons {
                 unsafe { p.add(16).cast::<u64>().read_unaligned() }
@@ -3476,27 +3862,23 @@ pub unsafe extern "C" fn cljvm_rt_pop(bits: u64) -> u64 {
                     panic!("clojure-jvm: RT.pop on empty vector");
                 }
                 let new_n = n - 1;
-                dynobj::roots::with_scope(new_n + 1, |scope| {
+                dynobj::roots::gc_enter(new_n + 2, |heap, scope| {
                     let item_roots: Vec<_> = (0..new_n)
                         .map(|i| {
-                            let v = unsafe {
-                                p.add(16 + i * 8).cast::<u64>().read_unaligned()
-                            };
+                            let v = unsafe { p.add(16 + i * 8).cast::<u64>().read_unaligned() };
                             scope.root::<()>(v)
                         })
                         .collect();
-                    let new_raw = dynlang::gc::gc_alloc_thunk(ids.vector as u64, new_n as u64);
-                    let nptr = new_raw as *mut u8;
-                    if nptr.is_null() {
-                        panic!("clojure-jvm: RT.pop alloc returned null");
-                    }
+                    let cell = heap_alloc(heap, ids.vector as u64, new_n as u64).root(scope);
+                    let cell_bits = cell.get_raw(&*heap).bits();
+                    let nptr = nanbox_payload(cell_bits) as *mut u8;
                     unsafe {
                         nptr.add(8).cast::<u64>().write_unaligned(new_n as u64);
                         for (i, r) in item_roots.iter().enumerate() {
-                            nptr.add(16 + i * 8).cast::<u64>().write_unaligned(r.get());
+                            nptr.add(16 + i * 8).cast::<u64>().write_unaligned(r.get_raw(&*heap).bits());
                         }
                     }
-                    nanbox_encode(TAG_PTR, new_raw & PAYLOAD_MASK)
+                    cell_bits
                 })
             } else {
                 panic!("clojure-jvm: RT.pop on unsupported heap type_id {tid}");
@@ -3568,8 +3950,10 @@ unsafe fn equiv_impl(a: u64, b: u64) -> bool {
         return a_bytes == b_bytes;
     }
     if a_type == ids.symbol {
-        let a_arc = unsafe { a_ptr.add(8).cast::<u64>().read_unaligned() } as *const crate::lang::symbol::Symbol;
-        let b_arc = unsafe { b_ptr.add(8).cast::<u64>().read_unaligned() } as *const crate::lang::symbol::Symbol;
+        let a_arc = unsafe { a_ptr.add(8).cast::<u64>().read_unaligned() }
+            as *const crate::lang::symbol::Symbol;
+        let b_arc = unsafe { b_ptr.add(8).cast::<u64>().read_unaligned() }
+            as *const crate::lang::symbol::Symbol;
         if a_arc == b_arc {
             return true;
         }
@@ -3713,23 +4097,21 @@ pub unsafe extern "C" fn cljvm_rt_seq(bits: u64) -> u64 {
                 if n == 0 {
                     return nanbox_nil();
                 }
-                dynobj::roots::with_scope(n + 1, |scope| {
+                dynobj::roots::gc_enter(n + 1, |heap, scope| {
                     let item_roots: Vec<dynobj::roots::Rooted<()>> = (0..n)
                         .map(|i| {
-                            let bits = unsafe {
-                                ptr.add(16 + i * 8).cast::<u64>().read_unaligned()
-                            };
+                            let bits =
+                                unsafe { ptr.add(16 + i * 8).cast::<u64>().read_unaligned() };
                             scope.root::<()>(bits)
                         })
                         .collect();
                     // Root `cur` so it survives each cons-call's GC.
                     let cur_root = scope.root::<()>(nanbox_nil());
                     for i in (0..n).rev() {
-                        let item = item_roots[i].get();
-                        let new_cur = unsafe { cljvm_rt_cons(item, cur_root.get()) };
-                        cur_root.set(new_cur);
+                        let new_cur = heap_cons(heap, item_roots[i], cur_root);
+                        cur_root.set_raw(new_cur);
                     }
-                    cur_root.get()
+                    cur_root.get_raw(&*heap).bits()
                 })
             } else if type_id == ids.map {
                 // Map → seq of `[k v]` MapEntry vectors (Java's `RT.seq`
@@ -3747,21 +4129,19 @@ pub unsafe extern "C" fn cljvm_rt_seq(bits: u64) -> u64 {
                 if n == 0 {
                     return nanbox_nil();
                 }
-                dynobj::roots::with_scope(n + 1, |scope| {
+                dynobj::roots::gc_enter(n + 1, |heap, scope| {
                     let tail = scope.root::<()>(nanbox_nil());
                     for (k, v) in pairs.into_iter() {
                         let entry = Object::Vector(
-                            crate::lang::persistent_vector::PersistentVector::create(
-                                vec![k, v],
-                            ),
+                            crate::lang::persistent_vector::PersistentVector::create(vec![k, v]),
                         );
                         let entry_bits =
                             crate::lang::compiler::with_active_session_encode_object(&entry);
                         let e = scope.root::<()>(entry_bits);
-                        let new_tail = unsafe { cljvm_rt_cons(e.get(), tail.get()) };
-                        tail.set(new_tail);
+                        let new_tail = heap_cons(heap, e, tail);
+                        tail.set_raw(new_tail);
                     }
-                    tail.get()
+                    tail.get_raw(&*heap).bits()
                 })
             } else if type_id == ids.set {
                 // Set → seq of its elements (Java's `RT.seq` on an
@@ -3775,30 +4155,31 @@ pub unsafe extern "C" fn cljvm_rt_seq(bits: u64) -> u64 {
                 if n == 0 {
                     return nanbox_nil();
                 }
-                dynobj::roots::with_scope(n + 1, |scope| {
+                dynobj::roots::gc_enter(n + 1, |heap, scope| {
                     let tail = scope.root::<()>(nanbox_nil());
                     for e in elems.into_iter() {
-                        let e_bits =
-                            crate::lang::compiler::with_active_session_encode_object(&e);
+                        let e_bits = crate::lang::compiler::with_active_session_encode_object(&e);
                         let er = scope.root::<()>(e_bits);
-                        let new_tail = unsafe { cljvm_rt_cons(er.get(), tail.get()) };
-                        tail.set(new_tail);
+                        let new_tail = heap_cons(heap, er, tail);
+                        tail.set_raw(new_tail);
                     }
-                    tail.get()
+                    tail.get_raw(&*heap).bits()
                 })
             } else if type_id == ids.string {
                 // String → seq of Character. Bootstrap doesn't need this
                 // path yet; surface loudly so callers see what to add.
-                panic!(
-                    "clojure-jvm: RT.seq on String — needs Character heap type"
-                );
+                panic!("clojure-jvm: RT.seq on String — needs Character heap type");
             } else if type_id == ids.lazy_seq {
                 // Force the thunk; recurse on the realized value.
                 let arc: std::sync::Arc<std::cell::RefCell<LazyState>> =
                     unsafe { decode_arc_cell(ptr) };
                 let cached = {
                     let st = arc.borrow();
-                    if st.realized { Some(st.value_bits) } else { None }
+                    if st.realized {
+                        Some(st.value_bits)
+                    } else {
+                        None
+                    }
                 };
                 let realized = match cached {
                     Some(v) => v,
@@ -3869,16 +4250,14 @@ pub unsafe extern "C" fn cljvm_rt_next(bits: u64) -> u64 {
                 for i in 1..n {
                     items.push(unsafe { ptr.add(16 + i * 8).cast::<u64>().read_unaligned() });
                 }
-                dynobj::roots::with_scope(items.len() + 1, |scope| {
-                    let roots: Vec<_> =
-                        items.iter().map(|v| scope.root::<()>(*v)).collect();
-                    let mut acc = nanbox_nil();
-                    let acc_root = scope.root::<()>(acc);
+                dynobj::roots::gc_enter(items.len() + 1, |heap, scope| {
+                    let roots: Vec<_> = items.iter().map(|v| scope.root::<()>(*v)).collect();
+                    let acc_root = scope.root::<()>(nanbox_nil());
                     for r in roots.iter().rev() {
-                        acc = unsafe { cljvm_rt_cons(r.get(), acc_root.get()) };
-                        acc_root.set(acc);
+                        let acc = heap_cons(heap, *r, acc_root);
+                        acc_root.set_raw(acc);
                     }
-                    acc_root.get()
+                    acc_root.get_raw(&*heap).bits()
                 })
             } else {
                 eprintln!("[cljvm-stub] RT.next on unsupported heap type_id {type_id} — nil");
@@ -4002,9 +4381,8 @@ unsafe fn dispatch_new(class_bits: u64, args: &[u64]) -> u64 {
                 );
             }
             let raw_id = unsafe { raw.add(8).cast::<u64>().read_unaligned() };
-            let info = crate::lang::host_class::by_id(
-                crate::lang::host_class::ClassId(raw_id as u16),
-            );
+            let info =
+                crate::lang::host_class::by_id(crate::lang::host_class::ClassId(raw_id as u16));
             match info.ctor {
                 Some(c) => c(args, ids),
                 None => {
@@ -4088,9 +4466,7 @@ pub unsafe extern "C" fn cljvm_inst_applyTo(fn_bits: u64, args_bits: u64) -> u64
                 }
             }
         }
-        _ => panic!(
-            "clojure-jvm: applyTo: args must be a seqable, got bits 0x{args_bits:x}"
-        ),
+        _ => panic!("clojure-jvm: applyTo: args must be a seqable, got bits 0x{args_bits:x}"),
     };
     // Walk all args from the cons-chain.
     let mut walked: Vec<u64> = Vec::new();
@@ -4100,9 +4476,13 @@ pub unsafe extern "C" fn cljvm_inst_applyTo(fn_bits: u64, args_bits: u64) -> u64
             Some(TAG_NIL) => break,
             Some(TAG_PTR) => {
                 let p = nanbox_payload(cur) as *const u8;
-                if p.is_null() { break; }
+                if p.is_null() {
+                    break;
+                }
                 let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                if tid != ids.cons { break; }
+                if tid != ids.cons {
+                    break;
+                }
                 walked.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
                 cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
             }
@@ -4110,23 +4490,30 @@ pub unsafe extern "C" fn cljvm_inst_applyTo(fn_bits: u64, args_bits: u64) -> u64
         }
     }
 
-    let (ptr, self_arg, fref_idx) =
-        unsafe { dispatch_with_arity(fn_bits, walked.len()) };
+    let (ptr, self_arg, fref_idx) = unsafe { dispatch_with_arity(fn_bits, walked.len()) };
     let info = crate::lang::compiler::with_active_compiler_arity(fref_idx);
 
     // Build the final arg vector that gets passed to the native fn.
     // Must be rooted because cons-folding the variadic tail can trigger GC.
-    let final_args = dynobj::roots::with_scope(walked.len() + 2, |scope| {
+    let final_args = dynobj::roots::gc_enter(walked.len() + 2, |heap, scope| {
         let arg_roots: Vec<_> = walked.iter().map(|v| scope.root::<()>(*v)).collect();
-        let mut packed: Vec<u64> = Vec::with_capacity(walked.len() + 2);
-        if let Some(s) = self_arg {
-            packed.push(s);
-        }
         match info {
             Some(i) if i.is_variadic => {
-                // Take fixed_arity args directly, fold the rest into a cons-list tail.
+                // Fold the variadic rest into a cons-list tail FIRST (this
+                // is what triggers GC), then read every rooted value via
+                // `get_raw` to assemble `packed` from post-GC addresses.
+                let tail_root = scope.root::<()>(nanbox_nil());
+                for j in (i.fixed_arity..arg_roots.len()).rev() {
+                    let new_tail = heap_cons(heap, arg_roots[j], tail_root);
+                    tail_root.set_raw(new_tail);
+                }
+                let mut packed: Vec<u64> = Vec::with_capacity(walked.len() + 2);
+                if let Some(s) = self_arg {
+                    packed.push(s);
+                }
+                // Take fixed_arity args directly.
                 for j in 0..i.fixed_arity.min(arg_roots.len()) {
-                    packed.push(arg_roots[j].get());
+                    packed.push(arg_roots[j].get_raw(&*heap).bits());
                 }
                 // Pad missing fixed args with nil (matches Clojure's
                 // arity behavior for too-few args to a variadic fn —
@@ -4136,24 +4523,24 @@ pub unsafe extern "C" fn cljvm_inst_applyTo(fn_bits: u64, args_bits: u64) -> u64
                 while packed.len() - self_offset < i.fixed_arity {
                     packed.push(nanbox_nil());
                 }
-                let tail_root = scope.root::<()>(nanbox_nil());
-                for j in (i.fixed_arity..arg_roots.len()).rev() {
-                    let v = arg_roots[j].get();
-                    let new_tail = unsafe { cljvm_rt_cons(v, tail_root.get()) };
-                    tail_root.set(new_tail);
-                }
-                packed.push(tail_root.get());
+                packed.push(tail_root.get_raw(&*heap).bits());
+                packed
             }
             _ => {
                 // Non-variadic (or unknown arity — assume fixed).
                 // Pass args through 1:1; arity mismatch surfaces as a
-                // wrong-shape native call at the C ABI boundary.
-                for r in &arg_roots {
-                    packed.push(r.get());
+                // wrong-shape native call at the C ABI boundary. No
+                // allocation happens here.
+                let mut packed: Vec<u64> = Vec::with_capacity(walked.len() + 2);
+                if let Some(s) = self_arg {
+                    packed.push(s);
                 }
+                for r in &arg_roots {
+                    packed.push(r.get_raw(&*heap).bits());
+                }
+                packed
             }
         }
-        packed
     });
     unsafe { call_with_packed(ptr, &final_args) }
 }
@@ -4208,8 +4595,7 @@ fn format_object_for_str(obj: &Object) -> String {
             None => format!(":{}", k.get_name()),
         },
         Object::List(l) => {
-            let items: Vec<String> =
-                l.iter().map(|o| format_object_pr(&o)).collect();
+            let items: Vec<String> = l.iter().map(|o| format_object_pr(&o)).collect();
             format!("({})", items.join(" "))
         }
         Object::Vector(v) => {
@@ -4393,7 +4779,9 @@ pub unsafe extern "C" fn cljvm_keyword_find_1(name_bits: u64) -> u64 {
                 let s = unsafe { read_string_heap(name_bits, ids, "Keyword/find: name arg") };
                 crate::lang::symbol::Symbol::intern(s)
             } else {
-                panic!("clojure-jvm: Keyword/find arity-1: receiver type_id {tid} not Symbol or String");
+                panic!(
+                    "clojure-jvm: Keyword/find arity-1: receiver type_id {tid} not Symbol or String"
+                );
             }
         }
         _ => panic!("clojure-jvm: Keyword/find arity-1 needs a Symbol or String"),
@@ -4501,8 +4889,8 @@ pub unsafe extern "C" fn cljvm_inst_toSymbol(v_bits: u64) -> u64 {
     if tid != ids.var {
         panic!("clojure-jvm: (.toSymbol v): receiver type_id {tid} is not a Var");
     }
-    let var_ptr = unsafe { p.add(8).cast::<u64>().read_unaligned() }
-        as *const crate::lang::var::Var;
+    let var_ptr =
+        unsafe { p.add(8).cast::<u64>().read_unaligned() } as *const crate::lang::var::Var;
     let v: &crate::lang::var::Var = unsafe { &*var_ptr };
     let sym = v.sym.as_ref().expect("Var.sym is None").clone();
     crate::lang::compiler::with_active_session_root_symbol(sym.clone());
@@ -4527,8 +4915,8 @@ pub unsafe extern "C" fn cljvm_inst_sym(k_bits: u64) -> u64 {
     if tid != ids.keyword {
         panic!("clojure-jvm: (.sym k): receiver type_id {tid} is not a Keyword");
     }
-    let arc_ptr = unsafe { p.add(8).cast::<u64>().read_unaligned() }
-        as *const crate::lang::keyword::Keyword;
+    let arc_ptr =
+        unsafe { p.add(8).cast::<u64>().read_unaligned() } as *const crate::lang::keyword::Keyword;
     unsafe { std::sync::Arc::increment_strong_count(arc_ptr) };
     let kw = unsafe { std::sync::Arc::from_raw(arc_ptr) };
     let sym = kw.sym.clone();
@@ -4634,11 +5022,7 @@ pub unsafe extern "C" fn cljvm_inst_getMappings(ns_bits: u64) -> u64 {
 /// mapping `sym -> var` to `ns`. Returns nil. The primitive at the bottom of
 /// `clojure.core/refer`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_inst_refer(
-    ns_bits: u64,
-    sym_bits: u64,
-    var_bits: u64,
-) -> u64 {
+pub unsafe extern "C" fn cljvm_inst_refer(ns_bits: u64, sym_bits: u64, var_bits: u64) -> u64 {
     let ids = heap_type_ids();
     let ns = unsafe { namespace_from_bits(ns_bits, "(. ns (refer sym var))") };
     let sym = match any_bits_to_object(sym_bits, ids) {
@@ -4707,12 +5091,10 @@ pub unsafe extern "C" fn cljvm_inst_setMacro(v_bits: u64) -> u64 {
     }
     let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
     if type_id != ids.var {
-        panic!(
-            "clojure-jvm: (.setMacro v) — receiver type_id {type_id} is not a Var"
-        );
+        panic!("clojure-jvm: (.setMacro v) — receiver type_id {type_id} is not a Var");
     }
-    let var_ptr = unsafe { raw.add(8).cast::<u64>().read_unaligned() }
-        as *const crate::lang::var::Var;
+    let var_ptr =
+        unsafe { raw.add(8).cast::<u64>().read_unaligned() } as *const crate::lang::var::Var;
     let v: &crate::lang::var::Var = unsafe { &*var_ptr };
     v.set_macro();
     nanbox_nil()
@@ -4767,7 +5149,8 @@ unsafe fn alloc_string_heap(s: &str, ids: HeapTypeIds) -> u64 {
     }
     // String layout: header(8) + count word(8) + bytes.
     unsafe {
-        ptr.add(16).copy_from_nonoverlapping(bytes.as_ptr(), bytes.len());
+        ptr.add(16)
+            .copy_from_nonoverlapping(bytes.as_ptr(), bytes.len());
     }
     nanbox_ptr(raw)
 }
@@ -4867,10 +5250,15 @@ pub struct MultiArityEntry {
 /// non-variadic; variadic catches anything ≥ its fixed_arity.
 pub fn pick_multi_arity(table: &[MultiArityEntry], n: usize) -> Option<&MultiArityEntry> {
     // Try exact non-variadic first, then variadic catch-all.
-    if let Some(e) = table.iter().find(|e| !e.is_variadic && e.fixed_arity as usize == n) {
+    if let Some(e) = table
+        .iter()
+        .find(|e| !e.is_variadic && e.fixed_arity as usize == n)
+    {
         return Some(e);
     }
-    table.iter().find(|e| e.is_variadic && (e.fixed_arity as usize) <= n)
+    table
+        .iter()
+        .find(|e| e.is_variadic && (e.fixed_arity as usize) <= n)
 }
 
 #[unsafe(no_mangle)]
@@ -4919,9 +5307,7 @@ pub unsafe fn try_dispatch_multi_arity(
     }
     let arc: std::sync::Arc<Vec<MultiArityEntry>> = unsafe { decode_arc_cell(p) };
     let entry = pick_multi_arity(&arc, n).copied().unwrap_or_else(|| {
-        panic!(
-            "clojure-jvm: MultiArityFn dispatch — no clause matches {n} args"
-        )
+        panic!("clojure-jvm: MultiArityFn dispatch — no clause matches {n} args")
     });
     let slot_addr = call_table_base() + (entry.fref_idx as u64) * 8;
     let ptr = unsafe { *(slot_addr as *const *const u8) };
@@ -4941,90 +5327,129 @@ pub unsafe fn try_dispatch_multi_arity(
 /// multi-arity Var lookup entirely.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_sq_concat(xss_bits: u64) -> u64 {
-    // First flatten every input seq into one big Vec<u64> of items.
-    // Each input is either nil, a Cons, or a Vector. Anything else
-    // panics — syntax-quote should only produce these shapes.
+    // First flatten every input seq into one list of rooted items. Each input
+    // is either nil, a Cons, or a Vector. Anything else is coerced through
+    // RT.seq; that path can allocate, so raw `u64` item snapshots would go
+    // stale before the final cons-building pass.
     if std::env::var("CLJVM_SQ_TRACE").is_ok() {
-        eprintln!("[sqConcat] xss=0x{xss_bits:x} tag={:?}", nanbox_tag(xss_bits));
+        eprintln!(
+            "[sqConcat] xss=0x{xss_bits:x} tag={:?}",
+            nanbox_tag(xss_bits)
+        );
     }
     let ids = heap_type_ids();
-    let mut all: Vec<u64> = Vec::new();
-    let mut cur = xss_bits;
-    loop {
-        match nanbox_tag(cur) {
-            Some(TAG_NIL) => break,
-            Some(TAG_PTR) => {
-                let p = nanbox_payload(cur) as *const u8;
-                if p.is_null() { break; }
-                let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                if tid != ids.cons {
-                    panic!(
-                        "clojure-jvm: sqConcat: outer container must be a cons-list \
-                         (the syntax-quote walker emits (list …)); got tid={tid}"
-                    );
-                }
-                let head = unsafe { p.add(8).cast::<u64>().read_unaligned() };
-                let tail = unsafe { p.add(16).cast::<u64>().read_unaligned() };
-                // Walk `head` (a single seq) and append its items.
-                walk_seq_into(head, &ids, &mut all);
-                cur = tail;
-            }
-            _ => panic!(
-                "clojure-jvm: sqConcat: outer arg must be a seq, got bits 0x{cur:x} \
-                 (xss=0x{xss_bits:x}, items_so_far={})",
-                all.len(),
-            ),
-        }
-    }
-    // Build the result as a cons-chain right-to-left, rooting accumulators
-    // so allocations don't strand earlier nodes.
-    dynobj::roots::with_scope(all.len() + 1, |scope| {
-        let item_roots: Vec<_> = all.iter().map(|v| scope.root::<()>(*v)).collect();
+    const SQ_CONCAT_ROOT_CAP: usize = 8192;
+    dynobj::roots::gc_enter(SQ_CONCAT_ROOT_CAP, |heap, scope| {
+        let mut all: Vec<dynobj::roots::Rooted<'_, ()>> = Vec::new();
+        let cur_root = scope.root::<()>(xss_bits);
+        let head_root = scope.root::<()>(nanbox_nil());
         let tail_root = scope.root::<()>(nanbox_nil());
-        for r in item_roots.iter().rev() {
-            let new_tail = unsafe { cljvm_rt_cons(r.get(), tail_root.get()) };
-            tail_root.set(new_tail);
+        loop {
+            let cur = cur_root.get_raw(&*heap).bits();
+            match nanbox_tag(cur) {
+                Some(TAG_NIL) => break,
+                Some(TAG_PTR) => {
+                    let p = nanbox_payload(cur) as *const u8;
+                    if p.is_null() {
+                        break;
+                    }
+                    let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+                    if tid != ids.cons {
+                        panic!(
+                            "clojure-jvm: sqConcat: outer container must be a cons-list \
+                             (the syntax-quote walker emits (list …)); got tid={tid}"
+                        );
+                    }
+                    head_root.set_raw(Raw::from_bits(
+                        &*heap,
+                        unsafe { p.add(8).cast::<u64>().read_unaligned() },
+                    ));
+                    tail_root.set_raw(Raw::from_bits(
+                        &*heap,
+                        unsafe { p.add(16).cast::<u64>().read_unaligned() },
+                    ));
+                    let head_bits = head_root.get_raw(&*heap).bits();
+                    walk_seq_into_roots(head_bits, &ids, heap, scope, &mut all);
+                    let next = tail_root.get_raw(&*heap);
+                    cur_root.set_raw(next);
+                }
+                _ => panic!(
+                    "clojure-jvm: sqConcat: outer arg must be a seq, got bits 0x{cur:x} \
+                     (xss=0x{xss_bits:x}, items_so_far={})",
+                    all.len(),
+                ),
+            }
         }
-        tail_root.get()
+        // Build the result as a cons-chain right-to-left, rooting the
+        // accumulator so allocations don't strand earlier nodes.
+        let acc_root = scope.root::<()>(nanbox_nil());
+        for r in all.iter().rev() {
+            let new_tail = heap_cons(heap, *r, acc_root);
+            acc_root.set_raw(new_tail);
+        }
+        acc_root.get_raw(&*heap).bits()
     })
 }
 
 /// Append every element of `seq_bits` (a Cons / Vector / nil) to `out`.
 /// Anything else is appended as a single element (matches Clojure's
 /// concat behavior on non-seq args, modulo lazy-seq).
-fn walk_seq_into(seq_bits: u64, ids: &HeapTypeIds, out: &mut Vec<u64>) {
-    match nanbox_tag(seq_bits) {
+fn walk_seq_into_roots<'scope>(
+    seq_bits: u64,
+    ids: &HeapTypeIds,
+    heap: &mut Heap,
+    scope: &'scope dynobj::roots::RootScope<'_>,
+    out: &mut Vec<dynobj::roots::Rooted<'scope, ()>>,
+) {
+    let seq_root = scope.root::<()>(seq_bits);
+    match nanbox_tag(seq_root.get_raw(&*heap).bits()) {
         Some(TAG_NIL) => {}
         Some(TAG_PTR) => {
-            let p = nanbox_payload(seq_bits) as *const u8;
-            if p.is_null() { return; }
+            let p = nanbox_payload(seq_root.get_raw(&*heap).bits()) as *const u8;
+            if p.is_null() {
+                return;
+            }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
             if tid == ids.cons {
-                let mut cur = seq_bits;
-                while let Some(TAG_PTR) = nanbox_tag(cur) {
-                    let p = nanbox_payload(cur) as *const u8;
-                    if p.is_null() { break; }
+                let cur_root = scope.root::<()>(seq_root.get_raw(&*heap).bits());
+                while let Some(TAG_PTR) = nanbox_tag(cur_root.get_raw(&*heap).bits()) {
+                    let p = nanbox_payload(cur_root.get_raw(&*heap).bits()) as *const u8;
+                    if p.is_null() {
+                        break;
+                    }
                     let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-                    if tid != ids.cons { break; }
-                    out.push(unsafe { p.add(8).cast::<u64>().read_unaligned() });
-                    cur = unsafe { p.add(16).cast::<u64>().read_unaligned() };
+                    if tid != ids.cons {
+                        break;
+                    }
+                    out.push(scope.root::<()>(unsafe { p.add(8).cast::<u64>().read_unaligned() }));
+                    cur_root.set_raw(Raw::from_bits(
+                        &*heap,
+                        unsafe { p.add(16).cast::<u64>().read_unaligned() },
+                    ));
                 }
             } else if tid == ids.vector {
                 let n = unsafe { p.add(8).cast::<u64>().read_unaligned() } as usize;
                 for i in 0..n {
-                    out.push(unsafe { p.add(16 + i * 8).cast::<u64>().read_unaligned() });
+                    out.push(
+                        scope.root::<()>(unsafe {
+                            p.add(16 + i * 8).cast::<u64>().read_unaligned()
+                        }),
+                    );
                 }
             } else {
                 // Coerce via cljvm_rt_seq, then walk the result.
-                let s = unsafe { cljvm_rt_seq(seq_bits) };
-                if !matches!(nanbox_tag(s), Some(TAG_NIL)) && s != seq_bits {
-                    walk_seq_into(s, ids, out);
+                let coerced = heap_seq(heap, seq_root);
+                let s_root = coerced.root(scope);
+                if !matches!(nanbox_tag(s_root.get_raw(&*heap).bits()), Some(TAG_NIL))
+                    && s_root.get_raw(&*heap).bits() != seq_root.get_raw(&*heap).bits()
+                {
+                    walk_seq_into_roots(s_root.get_raw(&*heap).bits(), ids, heap, scope, out);
                 } else {
-                    out.push(seq_bits);
+                    out.push(scope.root::<()>(seq_root.get_raw(&*heap).bits()));
                 }
             }
         }
-        _ => out.push(seq_bits),
+        _ => out.push(scope.root::<()>(seq_root.get_raw(&*heap).bits())),
     }
 }
 
@@ -5036,9 +5461,9 @@ fn walk_seq_into(seq_bits: u64, ids: &HeapTypeIds, out: &mut Vec<u64>) {
 
 #[derive(Debug)]
 pub struct LazyState {
-    pub thunk_bits: u64,        // TAG_FN handle of the deferred fn
+    pub thunk_bits: u64, // TAG_FN handle of the deferred fn
     pub realized: bool,
-    pub value_bits: u64,        // valid only when realized
+    pub value_bits: u64, // valid only when realized
 }
 
 // ─── LazySeq/Delay GC roots ───────────────────────────────────────────
@@ -5167,7 +5592,11 @@ pub unsafe extern "C" fn cljvm_delay_force(x_bits: u64) -> u64 {
                     unsafe { decode_arc_cell(p) };
                 let cached = {
                     let st = arc.borrow();
-                    if st.realized { Some(st.value_bits) } else { None }
+                    if st.realized {
+                        Some(st.value_bits)
+                    } else {
+                        None
+                    }
                 };
                 if let Some(v) = cached {
                     return v;
@@ -5203,9 +5632,9 @@ pub unsafe extern "C" fn cljvm_inst_ChunkBuffer_new1(capacity_bits: u64) -> u64 
     if cap < 0 {
         panic!("clojure-jvm: ChunkBuffer ctor: negative capacity {cap}");
     }
-    let arc = std::sync::Arc::new(std::cell::RefCell::new(
-        Vec::<u64>::with_capacity(cap as usize),
-    ));
+    let arc = std::sync::Arc::new(std::cell::RefCell::new(Vec::<u64>::with_capacity(
+        cap as usize,
+    )));
     register_chunk_buffer(&arc);
     unsafe {
         alloc_arc_cell(
@@ -5220,8 +5649,7 @@ pub unsafe extern "C" fn cljvm_inst_ChunkBuffer_new1(capacity_bits: u64) -> u64 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_ChunkBuffer_add(recv_bits: u64, x_bits: u64) -> u64 {
     let p = nanbox_payload(recv_bits) as *const u8;
-    let recv: std::sync::Arc<std::cell::RefCell<Vec<u64>>> =
-        unsafe { decode_arc_cell(p) };
+    let recv: std::sync::Arc<std::cell::RefCell<Vec<u64>>> = unsafe { decode_arc_cell(p) };
     recv.borrow_mut().push(x_bits);
     nanbox_nil()
 }
@@ -5229,12 +5657,9 @@ pub unsafe extern "C" fn cljvm_inst_ChunkBuffer_add(recv_bits: u64, x_bits: u64)
 /// `(.reduce chunk f init)` — Java's IChunk.reduce. Folds f over items
 /// starting with init. Used by `reduce1`'s chunked-seq fast path.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_inst_reduce_3(
-    recv_bits: u64, f_bits: u64, init_bits: u64,
-) -> u64 {
+pub unsafe extern "C" fn cljvm_inst_reduce_3(recv_bits: u64, f_bits: u64, init_bits: u64) -> u64 {
     let p = nanbox_payload(recv_bits) as *const u8;
-    let arc: std::sync::Arc<std::cell::RefCell<Vec<u64>>> =
-        unsafe { decode_arc_cell(p) };
+    let arc: std::sync::Arc<std::cell::RefCell<Vec<u64>>> = unsafe { decode_arc_cell(p) };
     let items: Vec<u64> = arc.borrow().clone();
     if items.is_empty() {
         return init_bits;
@@ -5244,15 +5669,15 @@ pub unsafe extern "C" fn cljvm_inst_reduce_3(
     // NaN-boxed heap pointers held only in this Rust frame, so they must be
     // rooted across every call or a relocation leaves them dangling (the
     // form-430 `reduce1`-over-chunked-seq crash under `CLJVM_GC=every`).
-    dynobj::roots::with_scope(items.len() + 1, |scope| {
+    dynobj::roots::gc_enter(items.len() + 1, |heap, scope| {
         let item_roots: Vec<dynobj::roots::Rooted<()>> =
             items.iter().map(|&b| scope.root::<()>(b)).collect();
         let acc = scope.root::<()>(init_bits);
         for ir in &item_roots {
-            let next = unsafe { cljvm_rt_invoke_2(f_bits, acc.get(), ir.get()) };
-            acc.set(next);
+            let next = heap_invoke_2(heap, f_bits, acc, *ir);
+            acc.set_raw(next);
         }
-        acc.get()
+        acc.get_raw(&*heap).bits()
     })
 }
 
@@ -5297,8 +5722,7 @@ pub unsafe extern "C" fn cljvm_inst_chunkedNext(recv_bits: u64) -> u64 {
 pub unsafe extern "C" fn cljvm_inst_ChunkBuffer_chunk(recv_bits: u64) -> u64 {
     let ids = heap_type_ids();
     let p = nanbox_payload(recv_bits) as *const u8;
-    let recv: std::sync::Arc<std::cell::RefCell<Vec<u64>>> =
-        unsafe { decode_arc_cell(p) };
+    let recv: std::sync::Arc<std::cell::RefCell<Vec<u64>>> = unsafe { decode_arc_cell(p) };
     let snapshot: Vec<u64> = std::mem::take(&mut *recv.borrow_mut());
     let arc = std::sync::Arc::new(std::cell::RefCell::new(snapshot));
     unsafe {
@@ -5336,14 +5760,10 @@ pub unsafe extern "C" fn cljvm_inst_StringBuilder_new1(s_bits: u64) -> u64 {
 /// `(.append sb x)` — append `x.toString()` to the builder, return the
 /// builder. Java returns `this`; we return the receiver bits unchanged.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_inst_StringBuilder_append(
-    recv_bits: u64,
-    x_bits: u64,
-) -> u64 {
+pub unsafe extern "C" fn cljvm_inst_StringBuilder_append(recv_bits: u64, x_bits: u64) -> u64 {
     let ids = heap_type_ids();
     let p = nanbox_payload(recv_bits) as *const u8;
-    let recv: std::sync::Arc<std::cell::RefCell<String>> =
-        unsafe { decode_arc_cell(p) };
+    let recv: std::sync::Arc<std::cell::RefCell<String>> = unsafe { decode_arc_cell(p) };
     let x_obj = any_bits_to_object(x_bits, ids);
     recv.borrow_mut().push_str(&format_object_for_str(&x_obj));
     recv_bits
@@ -5354,8 +5774,7 @@ pub unsafe extern "C" fn cljvm_inst_StringBuilder_append(
 pub unsafe extern "C" fn cljvm_inst_StringBuilder_toString(recv_bits: u64) -> u64 {
     let ids = heap_type_ids();
     let p = nanbox_payload(recv_bits) as *const u8;
-    let recv: std::sync::Arc<std::cell::RefCell<String>> =
-        unsafe { decode_arc_cell(p) };
+    let recv: std::sync::Arc<std::cell::RefCell<String>> = unsafe { decode_arc_cell(p) };
     let snapshot = recv.borrow().clone();
     unsafe { alloc_string_heap(&snapshot, ids) }
 }
@@ -5364,9 +5783,7 @@ unsafe fn read_string_heap<'a>(bits: u64, ids: HeapTypeIds, ctx: &str) -> &'a st
     let raw = match nanbox_tag(bits) {
         Some(TAG_PTR) => nanbox_payload(bits) as *const u8,
         _ => {
-            eprintln!(
-                "[cljvm-stub] {ctx} — non-heap NanBox 0x{bits:x}, treating as empty string"
-            );
+            eprintln!("[cljvm-stub] {ctx} — non-heap NanBox 0x{bits:x}, treating as empty string");
             return "";
         }
     };
@@ -5376,9 +5793,7 @@ unsafe fn read_string_heap<'a>(bits: u64, ids: HeapTypeIds, ctx: &str) -> &'a st
     }
     let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
     if type_id != ids.string {
-        eprintln!(
-            "[cljvm-stub] {ctx} — type_id {type_id} not a String, treating as empty"
-        );
+        eprintln!("[cljvm-stub] {ctx} — type_id {type_id} not a String, treating as empty");
         return "";
     }
     let count = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
@@ -5400,17 +5815,15 @@ unsafe fn read_string_heap<'a>(bits: u64, ids: HeapTypeIds, ctx: &str) -> &'a st
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_Reduced_new1(x_bits: u64) -> u64 {
     let ids = heap_type_ids();
-    dynobj::roots::with_scope(1, |scope| {
+    dynobj::roots::gc_enter(2, |heap, scope| {
         let x = scope.root::<()>(x_bits);
-        let raw = dynlang::gc::gc_alloc_thunk(ids.reduced as u64, 0);
-        let ptr = raw as *mut u8;
-        if ptr.is_null() {
-            panic!("clojure-jvm: Reduced ctor: gc_alloc returned null");
-        }
+        let cell = heap_alloc(heap, ids.reduced as u64, 0).root(scope);
+        let cell_bits = cell.get_raw(&*heap).bits();
+        let ptr = nanbox_payload(cell_bits) as *mut u8;
         unsafe {
-            ptr.add(8).cast::<u64>().write_unaligned(x.get());
+            ptr.add(8).cast::<u64>().write_unaligned(x.get_raw(&*heap).bits());
         }
-        nanbox_encode(TAG_PTR, raw & PAYLOAD_MASK)
+        cell_bits
     })
 }
 
@@ -5478,57 +5891,54 @@ pub unsafe extern "C" fn cljvm_inst_with_meta(recv_bits: u64, meta_bits: u64) ->
              is an immediate that does not carry metadata"
         );
     }
-    dynobj::roots::with_scope(2, |scope| {
+    dynobj::roots::gc_enter(3, |heap, scope| {
         let recv = scope.root::<()>(recv_bits);
         let meta = scope.root::<()>(meta_bits);
 
         // Read receiver type once. `gc_alloc` may move things, so
         // read header / first / rest fresh after each alloc by going
-        // back through `recv.get()`.
-        let raw = nanbox_payload(recv.get()) as *const u8;
+        // back through `recv.get_raw(&*heap).bits()`.
+        let raw = nanbox_payload(recv.get_raw(&*heap).bits()) as *const u8;
         if raw.is_null() {
             panic!("clojure-jvm: (.withMeta nil m) — null receiver");
         }
         let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
         if type_id == ids.cons {
-            let new_raw = dynlang::gc::gc_alloc_thunk(ids.cons as u64, 0);
-            let new_ptr = new_raw as *mut u8;
-            if new_ptr.is_null() {
-                panic!("clojure-jvm: (.withMeta cons): gc_alloc returned null");
-            }
+            let cell = heap_alloc(heap, ids.cons as u64, 0).root(scope);
+            let owner_bits = cell.get_raw(&*heap).bits();
+            let new_ptr = nanbox_payload(owner_bits) as *mut u8;
             // Re-read the receiver pointer AFTER alloc; root may have
             // been forwarded.
-            let raw = nanbox_payload(recv.get()) as *const u8;
+            let raw = nanbox_payload(recv.get_raw(&*heap).bits()) as *const u8;
             let first_bits = unsafe { raw.add(8).cast::<u64>().read_unaligned() };
             let rest_bits = unsafe { raw.add(16).cast::<u64>().read_unaligned() };
+            trap_forwarded_first_result("withMeta.cons.first", owner_bits, first_bits);
             unsafe {
                 new_ptr.add(8).cast::<u64>().write_unaligned(first_bits);
                 new_ptr.add(16).cast::<u64>().write_unaligned(rest_bits);
-                new_ptr.add(24).cast::<u64>().write_unaligned(meta.get());
+                new_ptr.add(24).cast::<u64>().write_unaligned(meta.get_raw(&*heap).bits());
             }
-            return nanbox_ptr(new_raw);
+            return owner_bits;
         }
         // Generic path: wrap in `clojure.lang.WithMeta`. Layout:
         // header(8) + inner(8) + meta(8). Collapse nested wrappers so
         // the inner is always a "bare" value.
-        let new_raw = dynlang::gc::gc_alloc_thunk(ids.with_meta as u64, 0);
-        let new_ptr = new_raw as *mut u8;
-        if new_ptr.is_null() {
-            panic!("clojure-jvm: (.withMeta x m): gc_alloc returned null for WithMeta");
-        }
+        let cell = heap_alloc(heap, ids.with_meta as u64, 0).root(scope);
+        let owner_bits = cell.get_raw(&*heap).bits();
+        let new_ptr = nanbox_payload(owner_bits) as *mut u8;
         // Re-read AFTER alloc.
-        let raw = nanbox_payload(recv.get()) as *const u8;
+        let raw = nanbox_payload(recv.get_raw(&*heap).bits()) as *const u8;
         let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
         let inner_bits = if type_id == ids.with_meta {
             unsafe { raw.add(8).cast::<u64>().read_unaligned() }
         } else {
-            recv.get()
+            recv.get_raw(&*heap).bits()
         };
         unsafe {
             new_ptr.add(8).cast::<u64>().write_unaligned(inner_bits);
-            new_ptr.add(16).cast::<u64>().write_unaligned(meta.get());
+            new_ptr.add(16).cast::<u64>().write_unaligned(meta.get_raw(&*heap).bits());
         }
-        nanbox_ptr(new_raw)
+        owner_bits
     })
 }
 
@@ -5584,9 +5994,7 @@ pub fn effective_type_id(bits: u64) -> crate::lang::user_types::LogicalTypeId {
             if cell_type == ids.user_instance {
                 let layout = user_instance_layout();
                 let off = layout.user_type_id_offset as isize;
-                let user_tid =
-                    unsafe { raw.offset(off).cast::<u64>().read_unaligned() }
-                        as u32;
+                let user_tid = unsafe { raw.offset(off).cast::<u64>().read_unaligned() } as u32;
                 user_type_logical(user_tid)
             } else {
                 cell_type as u32
@@ -5608,9 +6016,7 @@ pub fn user_instance_field_get(bits: u64, i: usize) -> u64 {
         Some(TAG_PTR) => {
             let p = nanbox_payload(bits) as *const u8;
             if p.is_null() {
-                panic!(
-                    "clojure-jvm: user_instance_field_get: null TAG_PTR payload"
-                );
+                panic!("clojure-jvm: user_instance_field_get: null TAG_PTR payload");
             }
             p
         }
@@ -5651,24 +6057,34 @@ pub fn user_instance_field_get(bits: u64, i: usize) -> u64 {
 /// # Safety
 /// See above — runs on a mutator thread, may trigger GC.
 pub unsafe fn alloc_user_instance(user_type_id: u32, fields: &[u64]) -> u64 {
-    let ids = heap_type_ids();
-    let layout = user_instance_layout();
-    let raw = dynlang::gc::gc_alloc_thunk(ids.user_instance as u64, fields.len() as u64);
-    let ptr = raw as *mut u8;
-    if ptr.is_null() {
-        panic!("clojure-jvm: alloc_user_instance: gc_alloc returned null");
-    }
-    let off = layout.user_type_id_offset as isize;
-    unsafe {
-        ptr.offset(off).cast::<u64>().write_unaligned(user_type_id as u64);
-        for (i, bits) in fields.iter().enumerate() {
-            let slot_off = layout.varlen_base + (i as i64) * 8;
-            ptr.offset(slot_off as isize)
+    // Previously a latent form-430: `fields` are heap pointers held in a
+    // Rust slice across `gc_alloc_thunk`; a moving GC would relocate them
+    // and the writes below would store stale pointers. Now every field is
+    // rooted before the allocation, and the writes re-read the rooted
+    // (relocated) values. The `&mut Heap` on `heap_alloc` makes the old
+    // un-rooted version a compile error.
+    dynobj::roots::gc_enter(fields.len() + 1, |heap, scope| {
+        let ids = heap_type_ids();
+        let layout = user_instance_layout();
+        let rooted: Vec<Rooted<'_, ()>> =
+            fields.iter().map(|&bits| scope.root::<()>(bits)).collect();
+        let cell = heap_alloc(heap, ids.user_instance as u64, fields.len() as u64).root(scope);
+        let cell_bits = cell.get_raw(&*heap).bits();
+        let ptr = nanbox_payload(cell_bits) as *mut u8;
+        let off = layout.user_type_id_offset as isize;
+        unsafe {
+            ptr.offset(off)
                 .cast::<u64>()
-                .write_unaligned(*bits);
+                .write_unaligned(user_type_id as u64);
+            for (i, r) in rooted.iter().enumerate() {
+                let slot_off = layout.varlen_base + (i as i64) * 8;
+                ptr.offset(slot_off as isize)
+                    .cast::<u64>()
+                    .write_unaligned(r.get_raw(&*heap).bits());
+            }
         }
-    }
-    nanbox_encode(TAG_PTR, raw & PAYLOAD_MASK)
+        cell_bits
+    })
 }
 
 /// Dispatch a protocol method call. `method_id` identifies the
@@ -5681,7 +6097,7 @@ pub unsafe fn alloc_user_instance(user_type_id: u32, fields: &[u64]) -> u64 {
 /// when no entry exists (matching the runtime behavior of
 /// `clojure.core/-cache-protocol-fn`'s miss path).
 pub fn lookup_protocol_method(method_id: u32, this_bits: u64) -> u64 {
-    use crate::lang::user_types::{lookup_impl, BUILTIN_OBJECT};
+    use crate::lang::user_types::{BUILTIN_OBJECT, lookup_impl};
     let tid = effective_type_id(this_bits);
     if let Some(handle) = lookup_impl(tid, method_id) {
         return handle;
@@ -5720,10 +6136,7 @@ fn decode_method_id_bits(method_id_bits: u64) -> u32 {
 
 /// Arity 1: `(m this)` — a no-extra-args protocol method.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_rt_protocol_dispatch_1(
-    method_id_bits: u64,
-    this: u64,
-) -> u64 {
+pub unsafe extern "C" fn cljvm_rt_protocol_dispatch_1(method_id_bits: u64, this: u64) -> u64 {
     let mid = decode_method_id_bits(method_id_bits);
     let handle = lookup_protocol_method(mid, this);
     unsafe { cljvm_rt_invoke_1(handle, this) }
@@ -5777,22 +6190,14 @@ pub unsafe extern "C" fn cljvm_rt_protocol_dispatch_4(
 /// excluded; otherwise every receiver would "satisfy" every protocol
 /// that has an `Object` default.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_rt_satisfies(
-    proto_id_bits: u64,
-    x_bits: u64,
-) -> u64 {
+pub unsafe extern "C" fn cljvm_rt_satisfies(proto_id_bits: u64, x_bits: u64) -> u64 {
     let pid = arg_to_i64(proto_id_bits);
     if pid < 0 || pid > u32::MAX as i64 {
-        panic!(
-            "clojure-jvm: cljvm_rt_satisfies: implausible proto_id {pid}"
-        );
+        panic!("clojure-jvm: cljvm_rt_satisfies: implausible proto_id {pid}");
     }
-    let info = crate::lang::user_types::protocol_info(pid as u32)
-        .unwrap_or_else(|| {
-            panic!(
-                "clojure-jvm: cljvm_rt_satisfies: protocol id {pid} not registered"
-            )
-        });
+    let info = crate::lang::user_types::protocol_info(pid as u32).unwrap_or_else(|| {
+        panic!("clojure-jvm: cljvm_rt_satisfies: protocol id {pid} not registered")
+    });
     let tid = effective_type_id(x_bits);
     for m in &info.methods {
         if crate::lang::user_types::lookup_impl(tid, m.id).is_some() {
@@ -5827,20 +6232,13 @@ pub unsafe extern "C" fn cljvm_rt_alloc_user_instance_0(type_id_bits: u64) -> u6
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_rt_alloc_user_instance_1(
-    type_id_bits: u64,
-    a: u64,
-) -> u64 {
+pub unsafe extern "C" fn cljvm_rt_alloc_user_instance_1(type_id_bits: u64, a: u64) -> u64 {
     let tid = decode_user_type_id_bits(type_id_bits);
     unsafe { alloc_user_instance(tid, &[a]) }
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_rt_alloc_user_instance_2(
-    type_id_bits: u64,
-    a: u64,
-    b: u64,
-) -> u64 {
+pub unsafe extern "C" fn cljvm_rt_alloc_user_instance_2(type_id_bits: u64, a: u64, b: u64) -> u64 {
     let tid = decode_user_type_id_bits(type_id_bits);
     unsafe { alloc_user_instance(tid, &[a, b]) }
 }
@@ -5889,9 +6287,7 @@ pub unsafe extern "C" fn cljvm_rt_user_field_get_by_name(
         Some(TAG_PTR) => {
             let p = nanbox_payload(inst_bits) as *const u8;
             if p.is_null() {
-                panic!(
-                    "clojure-jvm: user_field_get_by_name: null receiver"
-                );
+                panic!("clojure-jvm: user_field_get_by_name: null receiver");
             }
             p
         }
@@ -5920,21 +6316,18 @@ pub unsafe extern "C" fn cljvm_rt_user_field_get_by_name(
              to a Symbol, got {other:?}",
         ),
     };
-    let idx = crate::lang::user_types::user_type_field_index(
-        user_tid,
-        &field_sym,
-    )
-    .unwrap_or_else(|| {
-        let info = crate::lang::user_types::user_type_info(user_tid);
-        let known: Vec<String> = info
-            .map(|t| t.fields.iter().map(|s| s.get_name().to_string()).collect())
-            .unwrap_or_default();
-        panic!(
-            "clojure-jvm: user_field_get_by_name: field `{}` not found on \
+    let idx =
+        crate::lang::user_types::user_type_field_index(user_tid, &field_sym).unwrap_or_else(|| {
+            let info = crate::lang::user_types::user_type_info(user_tid);
+            let known: Vec<String> = info
+                .map(|t| t.fields.iter().map(|s| s.get_name().to_string()).collect())
+                .unwrap_or_default();
+            panic!(
+                "clojure-jvm: user_field_get_by_name: field `{}` not found on \
              user type id {user_tid}; known fields: {known:?}",
-            field_sym.get_name(),
-        )
-    });
+                field_sym.get_name(),
+            )
+        });
     user_instance_field_get(inst_bits, idx)
 }
 
@@ -5951,9 +6344,7 @@ pub unsafe extern "C" fn cljvm_rt_install_impl(
 ) -> u64 {
     let tid = arg_to_i64(type_id_bits);
     if tid < 0 || tid > u32::MAX as i64 {
-        panic!(
-            "clojure-jvm: cljvm_rt_install_impl: implausible type_id {tid}"
-        );
+        panic!("clojure-jvm: cljvm_rt_install_impl: implausible type_id {tid}");
     }
     let mid = decode_method_id_bits(method_id_bits);
     crate::lang::user_types::install_impl(tid as u32, mid, fn_handle_bits);
@@ -5977,28 +6368,24 @@ pub unsafe extern "C" fn cljvm_ns_set_current(sym_bits: u64) -> u64 {
                 unsafe { std::sync::Arc::increment_strong_count(arc_ptr) };
                 unsafe { std::sync::Arc::from_raw(arc_ptr) }
             } else {
-                panic!(
-                    "clojure-jvm: in-ns: arg must be a Symbol, got type_id {tid}"
-                );
+                panic!("clojure-jvm: in-ns: arg must be a Symbol, got type_id {tid}");
             }
         }
         _ => panic!("clojure-jvm: in-ns: arg must be a Symbol"),
     };
     let ns = crate::lang::namespace::Namespace::find_or_create(sym_arc);
-    crate::lang::rt::CURRENT_NS
-        .bind_root(crate::lang::object::Object::Namespace(ns));
+    crate::lang::rt::CURRENT_NS.bind_root(crate::lang::object::Object::Namespace(ns));
     nanbox_nil()
 }
 
 #[cfg(test)]
 mod user_type_runtime_tests {
     use super::*;
-    use crate::lang::user_types::{
-        self as ut, install_impl, register_protocol, register_user_type,
-        user_type_logical, BUILTIN_DOUBLE, BUILTIN_NIL, BUILTIN_OBJECT,
-        USER_TYPE_BASE,
-    };
     use crate::lang::symbol::Symbol;
+    use crate::lang::user_types::{
+        self as ut, BUILTIN_DOUBLE, BUILTIN_NIL, BUILTIN_OBJECT, USER_TYPE_BASE, install_impl,
+        register_protocol, register_user_type, user_type_logical,
+    };
     use std::sync::Arc;
 
     fn sym(n: &str) -> Arc<Symbol> {
@@ -6030,10 +6417,7 @@ mod user_type_runtime_tests {
     #[test]
     fn dispatch_falls_back_to_object_when_no_exact_impl() {
         let _g = guard();
-        let (_pid, mids) = register_protocol(
-            sym("ICountable"),
-            vec![(sym("-count"), vec![1])],
-        );
+        let (_pid, mids) = register_protocol(sym("ICountable"), vec![(sym("-count"), vec![1])]);
         // Install on Object only.
         install_impl(BUILTIN_OBJECT, mids[0], 0xABCDABCD);
         // Nil should still hit the Object fallback (no Nil-specific entry).
@@ -6045,10 +6429,7 @@ mod user_type_runtime_tests {
     #[should_panic(expected = "no impl for method_id")]
     fn dispatch_panics_with_no_impl() {
         let _g = guard();
-        let (_pid, mids) = register_protocol(
-            sym("IUnknown"),
-            vec![(sym("-mystery"), vec![1])],
-        );
+        let (_pid, mids) = register_protocol(sym("IUnknown"), vec![(sym("-mystery"), vec![1])]);
         let _ = lookup_protocol_method(mids[0], nanbox_nil());
     }
 
@@ -6058,5 +6439,108 @@ mod user_type_runtime_tests {
         let uid = register_user_type(sym("Foo"), vec![]);
         let logical = user_type_logical(uid);
         assert!(logical >= USER_TYPE_BASE);
+    }
+}
+
+/// GC alloc-side lock-in. The borrow-checked `Heap`/`Raw` discipline only
+/// bites when allocation goes through `heap_alloc(&mut Heap)`: a direct
+/// `dynlang::gc::gc_alloc_thunk` call lets you hold a bare NanBox GC pointer
+/// across the allocation (the form-430 stale-pointer bug) with no compile
+/// error, because raw bits don't borrow the `Heap`.
+///
+/// This test freezes the set of functions allowed to call `gc_alloc_thunk`
+/// directly. Each one was audited to be safe: it either *is* `heap_alloc`,
+/// stores only a numeric immediate, or decodes its heap-pointer args into
+/// Rust-owned data (`Arc`/`Object`/`String`) BEFORE allocating and stores
+/// only stable Rust pointers — so no NanBox GC pointer is live across the
+/// alloc. Any NEW direct call fails this test, forcing the author to either
+/// route the allocation through `heap_alloc` (the rooted, borrow-checked
+/// path) or audit the new site and add it here with the same justification.
+#[cfg(test)]
+mod gc_alloc_lockin {
+    /// Functions audited safe to call `gc_alloc_thunk` directly. See the
+    /// module doc for the safety criterion.
+    const ALLOWLIST: &[&str] = &[
+        "heap_alloc",        // the sanctioned rooted allocator
+        "box_long",          // boxes an i64 immediate
+        "alloc_arc_cell",    // takes a Rust value, stores its Arc ptr
+        "alloc_string_heap", // copies a Rust-owned &str
+        // Arc-backed persistent collections: decode to Arc before alloc,
+        // store only the stable Rust Arc pointer.
+        "cljvm_rt_assoc",
+        "cljvm_rt_conj",
+        "cljvm_rt_dissoc",
+        "cljvm_inst_disjoin",
+        "cljvm_inst_getMappings",
+        "cljvm_phm_create",
+        "cljvm_phs_create",
+        "cljvm_ptm_create",
+        "cljvm_ptm_create_cmp",
+        "cljvm_pts_create",
+        "cljvm_pts_create_cmp",
+        // Symbol/Keyword/Class interning: decode arg to a Rust String/Arc
+        // before alloc, store the interned Rust Arc pointer.
+        "cljvm_keyword_intern_1",
+        "cljvm_keyword_intern_2",
+        "cljvm_keyword_find_1",
+        "cljvm_keyword_find_2",
+        "cljvm_symbol_intern_1",
+        "cljvm_symbol_intern_2",
+        "cljvm_inst_toSymbol",
+        "cljvm_inst_sym",
+        "cljvm_compiler_hostexpr_maybeClass",
+    ];
+
+    #[test]
+    fn no_unreviewed_direct_gc_alloc() {
+        let src = include_str!("runtime.rs");
+        let fn_re = |line: &str| -> Option<String> {
+            let t = line.trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            let t = t.strip_prefix("unsafe ").unwrap_or(t);
+            let t = t.strip_prefix("extern \"C\" ").unwrap_or(t);
+            let t = t.strip_prefix("fn ")?;
+            let name: String = t
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        };
+
+        let mut current = String::new();
+        let mut offenders: Vec<(String, usize)> = Vec::new();
+        for (i, line) in src.lines().enumerate() {
+            // Stop before this guard module so its own mention of the call
+            // string (in the .contains check) isn't counted as a call site.
+            if line.contains("mod gc_alloc_lockin") {
+                break;
+            }
+            if let Some(name) = fn_re(line) {
+                current = name;
+            }
+            let code = line.trim_start();
+            if code.contains("dynlang::gc::gc_alloc_thunk(")
+                && !code.starts_with("//")
+                && !code.starts_with("///")
+                && !ALLOWLIST.contains(&current.as_str())
+            {
+                offenders.push((current.clone(), i + 1));
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "New direct `gc_alloc_thunk` call(s) outside the audited allowlist:\n{}\n\n\
+             A direct alloc lets a bare NanBox GC pointer go stale across it \
+             (the form-430 bug). Route the allocation through `heap_alloc(&mut Heap)` \
+             (which roots and borrow-checks), or — if the site provably holds no NanBox \
+             GC pointer across the alloc — audit it and add the function to ALLOWLIST \
+             in this module with a justification.",
+            offenders
+                .iter()
+                .map(|(f, ln)| format!("  - {f} (runtime.rs:{ln})"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
     }
 }

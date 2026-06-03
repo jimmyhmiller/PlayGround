@@ -607,6 +607,10 @@ impl StackFrameLayout {
             .unwrap_or(0)
     }
 
+    pub fn root_slots(&self) -> &[i32] {
+        &self.root_slots
+    }
+
     pub fn shadow_root_slots(&self) -> &[i32] {
         &self.shadow_root_slots
     }
@@ -623,6 +627,7 @@ pub trait FrameLayout {
     fn add_block_param_slot(&mut self, block_idx: usize, offset: i32);
     fn block_param_slots(&self, block_idx: usize) -> &[i32];
     fn root_scan_size(&self) -> i32;
+    fn root_slots(&self) -> &[i32];
     fn shadow_root_slots(&self) -> &[i32];
     fn slot_access(&self, slot: i32) -> FrameSlotAccess;
 }
@@ -666,6 +671,10 @@ impl FrameLayout for StackFrameLayout {
 
     fn root_scan_size(&self) -> i32 {
         Self::root_scan_size(self)
+    }
+
+    fn root_slots(&self) -> &[i32] {
+        Self::root_slots(self)
     }
 
     fn shadow_root_slots(&self) -> &[i32] {
@@ -755,7 +764,9 @@ pub trait SoundRoots<L: ValueLayout>: RootStrategy<L> + sound::Sealed {}
 
 /// Marker trait: `Self` is a sound root transport for `(L, R)`.
 pub trait SoundTransport<L: ValueLayout, R: RootStrategy<L>>:
-    RootTransport<L, R> + sound::Sealed {}
+    RootTransport<L, R> + sound::Sealed
+{
+}
 
 impl sound::Sealed for PreciseStackRoots {}
 impl sound::Sealed for StackMapRoots {}
@@ -786,8 +797,7 @@ where
 pub trait CodegenConfig {
     type Layout: ValueLayout;
     type Roots: RootStrategy<Self::Layout> + SoundRoots<Self::Layout>;
-    type RootTransport:
-        RootTransport<Self::Layout, Self::Roots>
+    type RootTransport: RootTransport<Self::Layout, Self::Roots>
         + SoundTransport<Self::Layout, Self::Roots>;
     type CallingConvention: CallingConvention<Self::Layout>;
     type Frames: FrameStrategy<Self::Layout, Self::Roots, Self::CallingConvention>;

@@ -12,6 +12,68 @@ use jsir_ir::{Attr, Op as IrOp, ValueId as IrValue};
 
 use crate::cfg::{BinOp, BlockId, BlockKind, Cfg, Const, MemberKey, Op, PropKey, SrcRef, Term, UnOp, VarId, Value};
 
+/// The base-IR op-kinds the lowering **recognizes** (matches in [`Lower::lower_op`]
+/// or consumes inside one of its operand/sub-construct helpers). Any reachable
+/// op-kind NOT in this list and not a program wrapper (`jsir.file`/`jsir.program`)
+/// falls through `lower_op`'s catch-all and makes the whole function bail with a
+/// hard `Err` — a *loud* incompleteness, never a silent one.
+///
+/// This is the authoritative input to the static fidelity audit
+/// ([`crate::fidelity`]). **It must mirror the match arms below.** A test
+/// (`tests/fidelity.rs`) cross-checks it against the op-kinds actually reachable
+/// in the corpus, so drift between this list and reality is caught, but the list
+/// and the `match` are hand-kept in sync: add an arm, add its string here.
+pub const HANDLED_OP_KINDS: &[&str] = &[
+    "jshir.block_statement",
+    "jshir.conditional_expression",
+    "jshir.if_statement",
+    "jshir.logical_expression",
+    "jshir.while_statement",
+    "jsir.array_expression",
+    "jsir.array_pattern_ref",
+    "jsir.arrow_function_expression",
+    "jsir.assignment_expression",
+    "jsir.binary_expression",
+    "jsir.boolean_literal",
+    "jsir.call_expression",
+    "jsir.directive_literal",
+    "jsir.empty_statement",
+    "jsir.export_default_declaration",
+    "jsir.export_named_declaration",
+    "jsir.expr_region_end",
+    "jsir.expression_statement",
+    "jsir.exprs_region_end",
+    "jsir.function_declaration",
+    "jsir.function_expression",
+    "jsir.identifier",
+    "jsir.identifier_ref",
+    "jsir.member_expression",
+    "jsir.member_expression_ref",
+    "jsir.new_expression",
+    "jsir.null_literal",
+    "jsir.numeric_literal",
+    "jsir.object_expression",
+    "jsir.object_method",
+    "jsir.object_pattern_ref",
+    "jsir.object_property",
+    "jsir.object_property_ref",
+    "jsir.optional_call_expression",
+    "jsir.optional_member_expression",
+    "jsir.parenthesized_expression",
+    "jsir.return_statement",
+    "jsir.sequence_expression",
+    "jsir.spread_element",
+    "jsir.string_literal",
+    "jsir.tagged_template_expression",
+    "jsir.template_element",
+    "jsir.template_element_value",
+    "jsir.template_literal",
+    "jsir.unary_expression",
+    "jsir.update_expression",
+    "jsir.variable_declaration",
+    "jsir.variable_declarator",
+];
+
 /// Lower the first function declaration in `file` (or the whole program body if
 /// there is none) into a CFG. Returns the CFG and the parameter names.
 pub fn lower_function(file: &IrOp) -> Result<Cfg, String> {
@@ -40,18 +102,27 @@ pub fn lower_function(file: &IrOp) -> Result<Cfg, String> {
     let body_ops: &[IrOp] = match func {
         Some(f) => {
             lc.cfg.fn_name = f.attrs.iter().find_map(|(k,v)| match v { jsir_ir::Attr::Identifier(i) if k=="id" => Some(i.name.clone()), _=>None });
-            // region[0] = params, region[1] = body block_statement
+            // region[0] = params, region[1] = body block_statement.
+            //
+            // The params region is a flat post-order op list terminated by an
+            // `exprs_region_end` whose operands are the param ROOTS in source
+            // order (a root is a simple `identifier_ref` or a destructuring
+            // pattern op; object patterns carry their bindings in a sub-region,
+            // array patterns via flat-sibling element refs). We lower every op
+            // so each root's `LvalTarget` is built, then bind each root to a
+            // fresh positional parameter value, expanding destructuring through
+            // `bind_target` exactly as `const {a} = props` lowers
+            // (`function f({a}) {}` => `a = $arg0.a`).
+            //
+            // Param shapes we cannot lower faithfully yet (defaults `{a=1}`,
+            // rest `...a`, nested patterns) BAIL LOUDLY inside their `lower_op`
+            // arms rather than silently miscompile. (The old code silently
+            // skipped every non-`identifier_ref` param while still counting the
+            // pattern's nested identifier refs as positional params, so
+            // `function f({a=1})` became a zero-param function returning
+            // `undefined`. Surfaced by the fidelity audit.)
             if let Some(params) = f.regions.first().and_then(|r| r.blocks.first()) {
-                for p in &params.ops {
-                    if p.name == "jsir.identifier_ref" {
-                        let var = lc.var_of(p);
-                        let v = lc.cfg.fresh_value();
-                        lc.cfg.params.push(v);
-                        lc.param_names.push(lc.cfg.var_names[var.0 as usize].clone());
-                        // Seed the param's variable slot with its incoming value.
-                        lc.cfg.push_effect(cur, Op::WriteVar(var, v));
-                    }
-                }
+                lc.bind_params(params, cur)?;
             }
             f.regions
                 .get(1)
@@ -89,6 +160,10 @@ struct Lower {
     vars: HashMap<(String, Option<i64>), VarId>,
     var_names_out: Vec<String>,
     param_names: Vec<String>,
+    /// jsir value ids that are the result of a `spread_element` (`...x`). Used to
+    /// record spread operand positions on the containing array/object/call so the
+    /// interpreter can splat them (see [`crate::cfg::Cfg::spread_positions`]).
+    spread_ir: std::collections::HashSet<IrValue>,
 }
 
 #[derive(Clone)]
@@ -114,6 +189,7 @@ impl Lower {
             vars: HashMap::new(),
             var_names_out: Vec::new(),
             param_names: Vec::new(),
+            spread_ir: std::collections::HashSet::new(),
         }
     }
 
@@ -124,6 +200,47 @@ impl Lower {
             Some(s) => (s.name.clone(), s.def_scope_uid),
             None => (str_attr(op, "name").unwrap_or_default(), op.trivia.as_ref().and_then(|t| t.scope_uid)),
         };
+        self.intern_var(key)
+    }
+
+    /// Re-key an l-value target from this (enclosing) lowering's var slots into a
+    /// nested lowering's slots, by each var's `(name, def_scope)` key. Used to
+    /// bind an arrow's parameters (whose targets were built out here) inside the
+    /// nested closure body.
+    fn rekey_target(&self, target: &LvalTarget, nl: &mut Lower) -> LvalTarget {
+        match target {
+            LvalTarget::Var(pv) => LvalTarget::Var(nl.intern_var(self.key_of_var(*pv))),
+            LvalTarget::ObjectPattern(binds) => LvalTarget::ObjectPattern(
+                binds
+                    .iter()
+                    .map(|(k, pv)| (k.clone(), nl.intern_var(self.key_of_var(*pv))))
+                    .collect(),
+            ),
+            LvalTarget::ArrayPattern(slots) => LvalTarget::ArrayPattern(
+                slots.iter().map(|o| o.map(|pv| nl.intern_var(self.key_of_var(pv)))).collect(),
+            ),
+            // A member l-value is not a valid parameter binding shape.
+            LvalTarget::Member { obj, key } => LvalTarget::Member { obj: *obj, key: key.clone() },
+        }
+    }
+
+    /// Reverse of the interner: the `(name, def_scope)` key for an interned var.
+    /// Used to re-intern an arrow parameter (resolved in the enclosing lowering)
+    /// by the same key inside the nested closure body.
+    fn key_of_var(&self, var: VarId) -> (String, Option<i64>) {
+        self.vars
+            .iter()
+            .find(|(_, v)| **v == var)
+            .map(|(k, _)| k.clone())
+            .unwrap_or_else(|| {
+                (self.cfg.var_names.get(var.0 as usize).cloned().unwrap_or_default(), None)
+            })
+    }
+
+    /// Intern a variable by its resolved `(name, def_scope)` key, returning the
+    /// existing slot if present. Factored out of [`Lower::var_of`] so closure
+    /// captures can be re-interned in a nested lowering by the same key.
+    fn intern_var(&mut self, key: (String, Option<i64>)) -> VarId {
         if let Some(v) = self.vars.get(&key) {
             return *v;
         }
@@ -369,7 +486,19 @@ impl Lower {
                     .iter()
                     .map(|v| self.val(*v))
                     .collect::<Result<Vec<_>, _>>()?;
-                self.def(op, *cur, Op::Call { callee, args });
+                let spreads: Vec<usize> = op.operands[1..]
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| self.spread_ir.contains(v))
+                    .map(|(i, _)| i)
+                    .collect();
+                let r = self.cfg.push(*cur, Op::Call { callee, args });
+                if !spreads.is_empty() {
+                    self.cfg.spread_positions.insert(r, spreads);
+                }
+                if let Some(res) = op.results.first() {
+                    self.vmap.insert(*res, r);
+                }
             }
             "jsir.arrow_function_expression" | "jsir.function_expression" => {
                 // A closure is an allocation that captures its free variables. We
@@ -383,7 +512,16 @@ impl Lower {
                 // string-codegen closure path). Represented as `MakeArray` of the
                 // captures so every allocation/aliasing site treats it uniformly.
                 let caps = self.collect_captures(op, *cur);
-                self.def(op, *cur, Op::MakeArray(caps));
+                let result = self.cfg.push(*cur, Op::MakeArray(caps));
+                // Lowered body: the interpreter executes it and mutability infers
+                // the closure's per-capture mutation effects from it. A body we
+                // cannot lower is left opaque (interpreter refuses to call it).
+                if let Ok((body, captures)) = self.lower_nested_closure(op, *cur) {
+                    self.cfg.closures.insert(result, crate::cfg::ClosureRepr { body, captures });
+                }
+                if let Some(r) = op.results.first() {
+                    self.vmap.insert(*r, result);
+                }
             }
             "jsir.member_expression" | "jsir.optional_member_expression" => {
                 // `a.b` and `a?.b` read the same way for the analysis; the `?.`
@@ -413,7 +551,15 @@ impl Lower {
             }
             "jsir.array_expression" => {
                 let elems = op.operands.iter().map(|v| self.val(*v)).collect::<Result<Vec<_>, _>>()?;
-                self.def(op, *cur, Op::MakeArray(elems));
+                let spreads: Vec<usize> =
+                    op.operands.iter().enumerate().filter(|(_, v)| self.spread_ir.contains(v)).map(|(i, _)| i).collect();
+                let r = self.cfg.push(*cur, Op::MakeArray(elems));
+                if !spreads.is_empty() {
+                    self.cfg.spread_positions.insert(r, spreads);
+                }
+                if let Some(res) = op.results.first() {
+                    self.vmap.insert(*res, r);
+                }
             }
             "jsir.object_expression" => {
                 // The region holds the property value ops (post-order) followed
@@ -421,6 +567,7 @@ impl Lower {
                 // ops, then collect (key, value) pairs.
                 let region: Vec<IrOp> = region_ops(op, 0).to_vec();
                 let mut props = Vec::new();
+                let mut spreads: Vec<usize> = Vec::new();
                 for p in &region {
                     match p.name.as_str() {
                         "jsir.object_property" => {
@@ -429,12 +576,12 @@ impl Lower {
                             props.push((key, value));
                         }
                         "jsir.spread_element" => {
-                            // `{...x}` captures `x` into the new object. We record
-                            // it as a captured value (synthetic key) so the object
-                            // aliases and depends on `x`; the reversible IR keeps
-                            // the real spread for codegen, so the key is never
-                            // emitted.
+                            // `{...x}` merges `x`'s own properties into the new
+                            // object. The analysis aliases the object with `x` via
+                            // the captured value (synthetic key); the interpreter
+                            // does the real merge using the recorded spread index.
                             let value = self.val(p.operands[0])?;
+                            spreads.push(props.len());
                             props.push((PropKey::Ident("...".into()), value));
                         }
                         "jsir.object_method" => {
@@ -443,6 +590,9 @@ impl Lower {
                             // it as the property's value.
                             let caps = self.collect_captures(p, *cur);
                             let closure = self.cfg.push(*cur, Op::MakeArray(caps));
+                            if let Ok((body, captures)) = self.lower_nested_closure(p, *cur) {
+                                self.cfg.closures.insert(closure, crate::cfg::ClosureRepr { body, captures });
+                            }
                             let key = self.obj_prop_key(p)?;
                             props.push((key, closure));
                         }
@@ -450,7 +600,13 @@ impl Lower {
                         _ => self.lower_op(p, cur)?,
                     }
                 }
-                self.def(op, *cur, Op::MakeObject(props));
+                let r = self.cfg.push(*cur, Op::MakeObject(props));
+                if !spreads.is_empty() {
+                    self.cfg.spread_positions.insert(r, spreads);
+                }
+                if let Some(res) = op.results.first() {
+                    self.vmap.insert(*res, r);
+                }
             }
             "jsir.parenthesized_expression" => {
                 let inner = self.val(op.operands[0])?;
@@ -469,6 +625,9 @@ impl Lower {
                 let inner = self.val(op.operands[0])?;
                 if let Some(r) = op.results.first() {
                     self.vmap.insert(*r, inner);
+                    // Remember this is a spread so the containing array/call can
+                    // record the position for the interpreter to splat.
+                    self.spread_ir.insert(*r);
                 }
             }
             "jsir.expression_statement" => {} // side effects already emitted
@@ -591,6 +750,200 @@ impl Lower {
         }
     }
 
+    /// Bind a function/closure parameter region into `cur`. The region is a flat
+    /// post-order op list terminated by an `exprs_region_end` whose operands are
+    /// the param roots in source order (see [`lower_function`] for the full
+    /// rationale). Each root binds a fresh positional parameter value, expanding
+    /// destructuring through [`Lower::bind_target`]. Used for both the top-level
+    /// function and lowered closure bodies.
+    fn bind_params(&mut self, params: &jsir_ir::Block, cur: BlockId) -> Result<(), String> {
+        let mut roots: Vec<IrValue> = Vec::new();
+        for p in &params.ops {
+            if p.name == "jsir.exprs_region_end" || p.name == "jsir.expr_region_end" {
+                roots = p.operands.clone();
+            }
+            let mut c = cur;
+            self.lower_op(p, &mut c)?;
+        }
+        for (i, root) in roots.iter().enumerate() {
+            let target = self
+                .lval
+                .get(root)
+                .cloned()
+                .ok_or_else(|| format!("param {i}: l-value target was not lowered"))?;
+            let v = self.cfg.fresh_value();
+            self.cfg.params.push(v);
+            let name = match &target {
+                LvalTarget::Var(var) => self.cfg.var_names[var.0 as usize].clone(),
+                _ => format!("$arg{i}"),
+            };
+            self.param_names.push(name);
+            self.bind_target(&target, v, cur);
+        }
+        Ok(())
+    }
+
+    /// The distinct **whole** outer variables a closure body references, in
+    /// first-encounter order. These become the nested body's leading capture
+    /// parameters (the analysis-side property-granular caps in
+    /// [`Lower::collect_captures`] are a separate concern; the body references
+    /// whole vars like `p`, then reads `p.a` itself). A key is a capture iff it
+    /// resolves to a variable already interned in this (enclosing) lowering.
+    fn closure_capture_keys(&self, op: &IrOp) -> Vec<(String, Option<i64>)> {
+        // Flatten every op in the closure (body, and for function expressions the
+        // param region too — harmless, those are `identifier_ref` binding sites).
+        let mut ops: Vec<&IrOp> = Vec::new();
+        let mut stack: Vec<&IrOp> = Vec::new();
+        for r in &op.regions {
+            for b in &r.blocks {
+                for o in &b.ops {
+                    stack.push(o);
+                }
+            }
+        }
+        while let Some(o) = stack.pop() {
+            ops.push(o);
+            for r in &o.regions {
+                for b in &r.blocks {
+                    for c in &b.ops {
+                        stack.push(c);
+                    }
+                }
+            }
+        }
+        let mut keys = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for o in &ops {
+            // Only identifier *reads* (not `identifier_ref` binding sites).
+            if o.name != "jsir.identifier" {
+                continue;
+            }
+            let Some(t) = o.trivia.as_ref() else { continue };
+            let Some(sym) = t.referenced_symbol.as_ref() else { continue };
+            // A capture is a variable defined in an ENCLOSING scope: its
+            // `def_scope` differs from the scope the read sits in (`scope_uid`).
+            // The closure's own params and locals have `def_scope == scope_uid`,
+            // so this excludes them even though arrow params leak their binding
+            // into the parent var table (where `self.vars.contains_key` would
+            // otherwise match). It must also already be interned in this
+            // (enclosing) lowering to be a real outer var.
+            if sym.def_scope_uid == t.scope_uid {
+                continue;
+            }
+            let key = (sym.name.clone(), sym.def_scope_uid);
+            if self.vars.contains_key(&key) && seen.insert(key.clone()) {
+                keys.push(key);
+            }
+        }
+        keys
+    }
+
+    /// Lower a closure's body into a nested CFG **for the interpreter** (the
+    /// analyses keep using the opaque `MakeArray` view). The nested CFG's leading
+    /// params are the closure's captured outer vars (so a body reference to `z`
+    /// resolves to a seeded param, and a captured object mutated via `z.a = …`
+    /// aliases the same heap value the caller holds), followed by the closure's
+    /// own declared params. Returns the nested-body index plus the parent SSA
+    /// values of the captures, to store in [`crate::cfg::Cfg::closures`]. Returns
+    /// `Err` for any closure body we cannot lower (the caller leaves the closure
+    /// as a known loss: the interpreter will refuse to call it).
+    fn lower_nested_closure(&mut self, op: &IrOp, cur: BlockId) -> Result<(usize, Vec<Value>), String> {
+        let cap_keys = self.closure_capture_keys(op);
+
+        // Lower the nested body first; if anything is unsupported we bail before
+        // touching the parent block.
+        let mut nl = Lower::new();
+        let entry = nl.cfg.new_block();
+        nl.cfg.entry = entry;
+        for key in &cap_keys {
+            let var = nl.intern_var(key.clone());
+            let v = nl.cfg.fresh_value();
+            nl.cfg.params.push(v);
+            nl.param_names.push(nl.cfg.var_names[var.0 as usize].clone());
+            nl.cfg.push_effect(entry, Op::WriteVar(var, v));
+        }
+        // Region layout differs by closure kind:
+        //  - function expression / object method: `[params, body]`. Params live
+        //    in region[0]; bind them with `bind_params`.
+        //  - arrow function: `[body]`. Its params are hoisted into the enclosing
+        //    region and referenced as the arrow op's OPERANDS (already lowered as
+        //    sibling `identifier_ref` l-values). Re-seed each by its resolved key
+        //    so the body's reads bind to a nested param. Order is captures first,
+        //    then own params, matching the call site (captures ++ call args).
+        let is_arrow = op.name == "jsir.arrow_function_expression";
+        let body_region = if is_arrow { 0 } else { 1 };
+        if is_arrow {
+            for operand in &op.operands {
+                let Some(target) = self.lval.get(operand).cloned() else { continue };
+                // The l-value target was built in the enclosing lowering, so its
+                // VarIds are parent slots; re-key each into the nested var table
+                // so the body's reads bind to it, then bind a fresh param value
+                // (expanding destructuring through `bind_target`, same as a
+                // `function`-expression param or `const {a} = arg`).
+                let nested = self.rekey_target(&target, &mut nl);
+                let v = nl.cfg.fresh_value();
+                nl.cfg.params.push(v);
+                let name = match &nested {
+                    LvalTarget::Var(var) => nl.cfg.var_names[var.0 as usize].clone(),
+                    _ => format!("$arg{}", nl.cfg.params.len()),
+                };
+                nl.param_names.push(name);
+                nl.bind_target(&nested, v, entry);
+            }
+        } else if let Some(pblock) = op.regions.first().and_then(|r| r.blocks.first()) {
+            nl.bind_params(pblock, entry)?;
+        }
+        let body_ops: &[IrOp] = op
+            .regions
+            .get(body_region)
+            .and_then(|r| r.blocks.first())
+            .map(|b| b.ops.as_slice())
+            .unwrap_or(&[]);
+        let mut c = entry;
+        nl.lower_stmts(body_ops, &mut c)?;
+        if matches!(nl.cfg.block(c).term, Term::Unreachable) {
+            nl.cfg.block_mut(c).term = Term::Ret(None);
+        }
+        let mut ncfg = nl.cfg;
+        ncfg.var_names = nl.var_names_out;
+        ncfg.param_names = nl.param_names;
+
+        // Soundness: every variable the body reads must be bound (a capture, a
+        // param, or a local that is written before use). A `ReadVar` of a var
+        // that is never `WriteVar`-d anywhere is a free variable we failed to
+        // resolve (e.g. an arrow's hoisted parameter, or an unseen outer var):
+        // executing it would silently produce `undefined`, so bail to a known
+        // loss instead of miscompiling.
+        let mut written: std::collections::HashSet<VarId> = std::collections::HashSet::new();
+        let mut read: std::collections::HashSet<VarId> = std::collections::HashSet::new();
+        for b in &ncfg.blocks {
+            for ins in &b.instrs {
+                match &ins.op {
+                    Op::WriteVar(v, _) => {
+                        written.insert(*v);
+                    }
+                    Op::ReadVar(v) => {
+                        read.insert(*v);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if read.iter().any(|v| !written.contains(v)) {
+            return Err("closure body has unbound free variables (e.g. arrow params not visible here)".into());
+        }
+
+        // Success: emit the parent-side capture reads and register the body.
+        let mut cap_vals = Vec::new();
+        for key in &cap_keys {
+            let var = self.intern_var(key.clone());
+            cap_vals.push(self.cfg.push(cur, Op::ReadVar(var)));
+        }
+        let idx = self.cfg.nested.len();
+        self.cfg.nested.push(ncfg);
+        Ok((idx, cap_vals))
+    }
+
     /// Collect a closure's free-variable captures: emit a `ReadVar` for each
     /// distinct outer variable its body references, returning those values. An
     /// identifier is a capture iff its resolved symbol `(name, def_scope)` is one
@@ -619,22 +972,28 @@ impl Lower {
                 }
             }
         }
-        // Map each identifier value that is the base of a static member access to
-        // the property name, so we capture at property-path granularity (React's
-        // dependency granularity: `() => p.a + p.b` depends on `p.a` and `p.b`,
-        // two deps — not on `p`). First-level only (`p.a.b` captures `p.a`), which
-        // matches React's dependency *count* in the common cases.
-        let mut member_prop: HashMap<IrValue, String> = HashMap::new();
+        // For each value that is the base of a static member access, record the
+        // (property name, member result) so we can follow a full member chain.
+        // We capture at React's dependency granularity: the FULL access path a
+        // value is read through (`() => p.a.b` depends on `p.a.b`, not `p.a`), so
+        // a closure's dependency matches the same path read elsewhere (e.g. a
+        // `useCallback` dep array) and dedups to one. First chain wins when a base
+        // feeds several members.
+        let mut chain_step: HashMap<IrValue, (String, IrValue)> = HashMap::new();
         for o in &ops {
             if o.name == "jsir.member_expression" {
-                if let (Some(&base), Some(prop)) = (o.operands.first(), member_prop_name(o)) {
-                    member_prop.entry(base).or_insert(prop);
+                if let (Some(&base), Some(prop), Some(&res)) =
+                    (o.operands.first(), member_prop_name(o), o.results.first())
+                {
+                    chain_step.entry(base).or_insert((prop, res));
                 }
             }
         }
         // For each identifier resolving to an already-interned OUTER variable,
-        // capture the (var, optional property) path it is read through. Deduped.
-        let mut keys: Vec<(VarId, Option<String>)> = Vec::new();
+        // capture the full property path it is read through. Deduped.
+        // (Which captures the body *mutates* is no longer scanned here: mutability
+        // analysis derives that precisely from the lowered nested body.)
+        let mut keys: Vec<(VarId, Vec<String>)> = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for o in &ops {
             if o.name != "jsir.identifier" {
@@ -645,19 +1004,33 @@ impl Lower {
             };
             let vkey = (sym.name.clone(), sym.def_scope_uid);
             let Some(&var) = self.vars.get(&vkey) else { continue };
-            let prop = o.results.first().and_then(|r| member_prop.get(r)).cloned();
-            if seen.insert((var, prop.clone())) {
-                keys.push((var, prop));
+            // Walk the longest member chain rooted at this identifier read.
+            let mut path = Vec::new();
+            let mut cur_ir = match o.results.first() {
+                Some(r) => *r,
+                None => continue,
+            };
+            let mut guard = 0;
+            while let Some((prop, next)) = chain_step.get(&cur_ir) {
+                path.push(prop.clone());
+                cur_ir = *next;
+                guard += 1;
+                if guard > ops.len() + 1 {
+                    break;
+                }
+            }
+            if seen.insert((var, path.clone())) {
+                keys.push((var, path));
             }
         }
-        // Synthesize the capturing reads in the outer block.
+        // Synthesize the capturing reads in the outer block: `ReadVar` then one
+        // `Member` per path segment.
         let mut caps = Vec::new();
-        for (var, prop) in keys {
-            let base = self.cfg.push(cur, Op::ReadVar(var));
-            let v = match prop {
-                Some(p) => self.cfg.push(cur, Op::Member { obj: base, prop: MemberKey::Static(p) }),
-                None => base,
-            };
+        for (var, path) in keys {
+            let mut v = self.cfg.push(cur, Op::ReadVar(var));
+            for prop in path {
+                v = self.cfg.push(cur, Op::Member { obj: v, prop: MemberKey::Static(prop) });
+            }
             caps.push(v);
         }
         caps

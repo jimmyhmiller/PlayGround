@@ -229,6 +229,12 @@ pub struct AtBinding {
     pub crashed_variant_index: u32,
     pub code_missing_variant_index: u32,
     pub cancelled_variant_index: u32,
+    /// `enum DecodeError { TypeMismatch, Malformed }` — used by the
+    /// checked `decode::<T>` to build its `Err`. Optional: `at()`-only
+    /// modules need not declare it.
+    pub decode_error_hash: Option<Hash>,
+    pub decode_type_mismatch_index: u32,
+    pub decode_malformed_index: u32,
 }
 
 impl ResolvedModule {
@@ -302,7 +308,9 @@ fn value_position_builtin(name: &str) -> Option<&'static str> {
         "array_len" => "core/array.len",
         "array_get" => "core/array.get",
         "array_set" => "core/array.set",
-        "atom_swap_slot" => "core/atom.swap",
+        "atom_new" => "core/atom.new",
+        "atom_load" => "core/atom.load",
+        "atom_swap" => "core/atom.swap",
         _ => return None,
     })
 }
@@ -827,79 +835,137 @@ pub fn resolve_module_with_env(
     //         hashing.
     let mut at_binding: Option<AtBinding> = None;
 
-    struct FnPending {
+    // A pending hashable code item. Fns and `state` bindings share one
+    // index space so a fn that references a state (and a state init that
+    // references a fn) hash together in one SCC, in dependency order.
+    enum PendingKind {
+        Fn {
+            type_params: Vec<String>,
+            params_canon: Vec<Type>,
+            ret_canon: Type,
+            is_local: bool,
+        },
+        State {
+            ty: Type,
+        },
+    }
+    struct Pending {
         sd_idx: usize,
-        type_params: Vec<String>,
-        params_canon: Vec<Type>,
-        ret_canon: Type,
-        is_local: bool,
+        kind: PendingKind,
     }
 
-    // 2a.
-    let mut pendings: Vec<FnPending> = Vec::new();
+    // 2a. Register every fn + state under a placeholder binding so body
+    //     resolution can emit SelfRef / StateSelfRef for forward refs.
+    let mut pendings: Vec<Pending> = Vec::new();
     for (sd_idx, sd) in m.defs.iter().enumerate() {
-        if let SurfaceDefKind::Fn {
-            type_params,
-            params,
-            ret,
-            is_local,
-            ..
-        } = &sd.kind
-        {
-            let params_canon: Result<Vec<Type>, _> = params
-                .iter()
-                .map(|(_, t)| resolve_type(t, &structs, &enums, type_params))
-                .collect();
-            let params_canon = params_canon?;
-            let ret_canon = resolve_type(ret, &structs, &enums, type_params)?;
-            let idx = pendings.len() as u32;
-            top.insert(
-                sd.name.clone(),
-                TopBinding {
-                    hash: Hash([0; 32]), // placeholder
-                    ty: Type::FnType {
-                        params: params_canon.clone(),
-                        ret: Box::new(ret_canon.clone()),
+        match &sd.kind {
+            SurfaceDefKind::Fn {
+                type_params,
+                params,
+                ret,
+                is_local,
+                ..
+            } => {
+                let params_canon: Result<Vec<Type>, _> = params
+                    .iter()
+                    .map(|(_, t)| resolve_type(t, &structs, &enums, type_params))
+                    .collect();
+                let params_canon = params_canon?;
+                let ret_canon = resolve_type(ret, &structs, &enums, type_params)?;
+                let idx = pendings.len() as u32;
+                top.insert(
+                    sd.name.clone(),
+                    TopBinding {
+                        hash: Hash([0; 32]), // placeholder
+                        ty: Type::FnType {
+                            params: params_canon.clone(),
+                            ret: Box::new(ret_canon.clone()),
+                        },
+                        kind: TopKind::PendingFn { idx },
                     },
-                    kind: TopKind::PendingFn { idx },
-                },
-            );
-            pendings.push(FnPending {
-                sd_idx,
-                type_params: type_params.clone(),
-                params_canon,
-                ret_canon,
-                is_local: *is_local,
-            });
+                );
+                pendings.push(Pending {
+                    sd_idx,
+                    kind: PendingKind::Fn {
+                        type_params: type_params.clone(),
+                        params_canon,
+                        ret_canon,
+                        is_local: *is_local,
+                    },
+                });
+            }
+            SurfaceDefKind::State { ty, .. } => {
+                let ty_canon = resolve_type(ty, &structs, &enums, &[])?;
+                let idx = pendings.len() as u32;
+                top.insert(
+                    sd.name.clone(),
+                    TopBinding {
+                        hash: Hash([0; 32]), // placeholder
+                        ty: ty_canon.clone(),
+                        kind: TopKind::PendingState { idx },
+                    },
+                );
+                pendings.push(Pending {
+                    sd_idx,
+                    kind: PendingKind::State { ty: ty_canon },
+                });
+            }
+            _ => {}
         }
     }
 
-    // 2b.
+    // 2b. Resolve each item's body. A fn body resolves with its params
+    //     in scope; a state init resolves with an empty environment
+    //     (state initializers take no parameters).
     let mut bodies: Vec<Expr> = Vec::with_capacity(pendings.len());
     for p in &pendings {
         let sd = &m.defs[p.sd_idx];
-        let SurfaceDefKind::Fn {
-            params, body: src_body, ..
-        } = &sd.kind
-        else {
-            unreachable!("only Fn defs are in pendings")
+        let body_canon = match (&p.kind, &sd.kind) {
+            (
+                PendingKind::Fn {
+                    type_params,
+                    params_canon,
+                    ..
+                },
+                SurfaceDefKind::Fn {
+                    params,
+                    body: src_body,
+                    ..
+                },
+            ) => {
+                let mut env: Vec<(String, Type)> = params
+                    .iter()
+                    .zip(params_canon.iter())
+                    .map(|((n, _), t)| (n.clone(), t.clone()))
+                    .collect();
+                resolve_expr(
+                    src_body,
+                    &mut env,
+                    &top,
+                    &structs,
+                    &enums,
+                    &variants,
+                    &mut at_binding,
+                    type_params,
+                    &sd.name,
+                )?
+            }
+            (PendingKind::State { .. }, SurfaceDefKind::State { init, .. }) => {
+                let mut env: Vec<(String, Type)> = Vec::new();
+                resolve_expr(
+                    init,
+                    &mut env,
+                    &top,
+                    &structs,
+                    &enums,
+                    &variants,
+                    &mut at_binding,
+                    &[],
+                    &sd.name,
+                )?
+            }
+            _ => unreachable!("pending kind must match its surface def kind"),
         };
-        let mut env: Vec<(String, Type)> = params
-            .iter()
-            .zip(p.params_canon.iter())
-            .map(|((n, _), t)| (n.clone(), t.clone()))
-            .collect();
-        let body_canon = resolve_expr(
-            src_body,
-            &mut env,
-            &top,
-            &structs,
-            &enums,
-            &variants,
-            &mut at_binding,
-            &p.type_params,
-            &sd.name,
-        )?;
         bodies.push(body_canon);
     }
 
@@ -937,17 +1003,33 @@ pub fn resolve_module_with_env(
             canonical_bodies.push(canon);
         }
 
+        // Helper: build the canonical `Def` for a member from its body.
+        let def_of = |p: &Pending, body: Expr| -> Def {
+            match &p.kind {
+                PendingKind::Fn {
+                    type_params,
+                    params_canon,
+                    ret_canon,
+                    is_local,
+                } => Def::Fn {
+                    is_local: *is_local,
+                    type_params: type_params.len() as u32,
+                    params: params_canon.clone(),
+                    ret: ret_canon.clone(),
+                    body,
+                },
+                PendingKind::State { ty } => Def::State {
+                    ty: ty.clone(),
+                    init: body,
+                },
+            }
+        };
+
         // Phase 2: compute the content hash of each member.
         let mut scc_hashes: Vec<Hash> = Vec::with_capacity(scc_sorted.len());
         for (local, &global_idx) in scc_sorted.iter().enumerate() {
             let p = &pendings[global_idx as usize];
-            let def = Def::Fn {
-                is_local: p.is_local,
-                type_params: p.type_params.len() as u32,
-                params: p.params_canon.clone(),
-                ret: p.ret_canon.clone(),
-                body: canonical_bodies[local].clone(),
-            };
+            let def = def_of(p, canonical_bodies[local].clone());
             scc_hashes.push(Hash::of_bytes(&encode_def(&def)));
         }
 
@@ -957,25 +1039,29 @@ pub fn resolve_module_with_env(
                 rewrite_selfref_to_topref(&canonical_bodies[local], &scc_hashes);
             let p = &pendings[global_idx as usize];
             let sd = &m.defs[p.sd_idx];
-            let def = Def::Fn {
-                is_local: p.is_local,
-                type_params: p.type_params.len() as u32,
-                params: p.params_canon.clone(),
-                ret: p.ret_canon.clone(),
-                body: stored_body,
-            };
+            let def = def_of(p, stored_body);
             let hash = scc_hashes[local];
             real_hash[global_idx as usize] = Some(hash);
-            let ty = Type::FnType {
-                params: p.params_canon.clone(),
-                ret: Box::new(p.ret_canon.clone()),
+            let (ty, kind) = match &p.kind {
+                PendingKind::Fn {
+                    params_canon,
+                    ret_canon,
+                    ..
+                } => (
+                    Type::FnType {
+                        params: params_canon.clone(),
+                        ret: Box::new(ret_canon.clone()),
+                    },
+                    TopKind::Def,
+                ),
+                PendingKind::State { ty } => (ty.clone(), TopKind::State),
             };
             top.insert(
                 sd.name.clone(),
                 TopBinding {
                     hash,
                     ty,
-                    kind: TopKind::Def,
+                    kind,
                 },
             );
             out.push(ResolvedDef {
@@ -1214,7 +1300,7 @@ fn collect_pattern_binder_names(
 /// Walk `e` and collect every `Expr::SelfRef(idx)` index into `out`.
 fn collect_self_refs(e: &Expr, out: &mut std::collections::BTreeSet<u32>) {
     match e {
-        Expr::SelfRef(i) => {
+        Expr::SelfRef(i) | Expr::StateSelfRef(i) => {
             out.insert(*i);
         }
         Expr::Call(callee, args) => {
@@ -1265,6 +1351,7 @@ fn collect_self_refs(e: &Expr, out: &mut std::collections::BTreeSet<u32>) {
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
+        | Expr::StateRef(_)
         | Expr::BuiltinRef(_) => {}
     }
 }
@@ -1288,6 +1375,15 @@ fn rewrite_for_canonical(
                 let h = real_hash[*global as usize]
                     .expect("dependency SCC must be processed before referent");
                 Expr::TopRef(h)
+            }
+        }
+        Expr::StateSelfRef(global) => {
+            if let Some(&local) = local_of.get(global) {
+                Expr::StateSelfRef(local)
+            } else {
+                let h = real_hash[*global as usize]
+                    .expect("dependency SCC must be processed before referent");
+                Expr::StateRef(h)
             }
         }
         Expr::Call(callee, args) => Expr::Call(
@@ -1371,16 +1467,19 @@ fn rewrite_for_canonical(
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
+        | Expr::StateRef(_)
         | Expr::BuiltinRef(_) => e.clone(),
     }
 }
 
 /// Rewrite any remaining `SelfRef(local_idx)` in `e` to
-/// `TopRef(scc_hashes[local_idx])`. Used to produce the STORED form
-/// of an SCC member's body (the form codegen + typecheck consume).
+/// `TopRef(scc_hashes[local_idx])` (and `StateSelfRef` to `StateRef`).
+/// Used to produce the STORED form of an SCC member's body (the form
+/// codegen + typecheck consume).
 fn rewrite_selfref_to_topref(e: &Expr, scc_hashes: &[Hash]) -> Expr {
     match e {
         Expr::SelfRef(local) => Expr::TopRef(scc_hashes[*local as usize]),
+        Expr::StateSelfRef(local) => Expr::StateRef(scc_hashes[*local as usize]),
         Expr::Call(callee, args) => Expr::Call(
             Box::new(rewrite_selfref_to_topref(callee, scc_hashes)),
             args.iter()
@@ -1462,6 +1561,7 @@ fn rewrite_selfref_to_topref(e: &Expr, scc_hashes: &[Hash]) -> Expr {
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
+        | Expr::StateRef(_)
         | Expr::BuiltinRef(_) => e.clone(),
     }
 }
@@ -1795,6 +1895,18 @@ fn build_at_binding(
     let code_missing_idx = variant_idx("CodeMissing")?;
     let cancelled_idx = variant_idx("Cancelled")?;
 
+    // DecodeError is optional (only `decode::<T>` needs it). Discover it
+    // opportunistically so the runtime can build `Err(TypeMismatch)` /
+    // `Err(Malformed)` without a separate binding path.
+    let (decode_error_hash, decode_tm_idx, decode_mf_idx) = match enums.get("DecodeError") {
+        Some(de) => (
+            Some(de.hash),
+            find_variant(de, "TypeMismatch").unwrap_or(0),
+            find_variant(de, "Malformed").unwrap_or(0),
+        ),
+        None => (None, 0, 0),
+    };
+
     Ok(AtBinding {
         result_hash: result.hash,
         failure_hash: failure.hash,
@@ -1805,6 +1917,9 @@ fn build_at_binding(
         crashed_variant_index: crashed_idx,
         code_missing_variant_index: code_missing_idx,
         cancelled_variant_index: cancelled_idx,
+        decode_error_hash,
+        decode_type_mismatch_index: decode_tm_idx,
+        decode_malformed_index: decode_mf_idx,
     })
 }
 
@@ -1862,6 +1977,14 @@ enum TopKind {
     /// and SCC analysis later substitutes the right hashes.
     /// `idx` is a per-module index over fn defs in source order.
     PendingFn { idx: u32 },
+    /// A fully-resolved node `state` binding: `hash` is its content hash.
+    /// Var references emit `Expr::StateRef(hash)` (load the live cell).
+    State,
+    /// An in-flight `state` binding in the current module (pass-2 SCC).
+    /// References emit `Expr::StateSelfRef(idx)`; the SCC pass rewrites
+    /// to `StateRef` after hashing. `idx` is the shared pending index
+    /// (states and fns share one index space so they can hash in one SCC).
+    PendingState { idx: u32 },
 }
 
 /// Resolver-side info about a struct in scope: its content hash and
@@ -2010,10 +2133,10 @@ fn resolve_type_inner(
             args,
             ..
         } => {
-            // `Array<T>` is a builtin type constructor (heap shape
-            // registered by the runtime), not a user struct/enum.
-            let head = if name == "Array" {
-                Type::Builtin("Array".to_owned())
+            // `Array<T>` and `Atom<T>` are builtin type constructors (heap
+            // shapes registered by the runtime), not user structs/enums.
+            let head = if name == "Array" || name == "Atom" {
+                Type::Builtin(name.clone())
             } else {
                 resolve_name_head(name).ok_or(ResolveError::UnknownType {
                     name: name.clone(),
@@ -2063,6 +2186,118 @@ fn resolve_expr(
         self_name,
     )?
     .0)
+}
+
+/// Compute the runtime *identity hash* a decoded value of type `t` must
+/// have, for the checked `decode::<T>` to accept it. This must match what
+/// the runtime reads back from a decoded value's shape (see
+/// `identity_hash_of` in `net.rs`): structs/enums by their content hash,
+/// scalars/strings/arrays by their canonical shape hash. Closures and
+/// type variables are rejected (a closure is identified by its code hash,
+/// not a type, so it can't be checked structurally).
+fn decode_expected_hash(t: &Type, span: Span) -> Result<Hash, ResolveError> {
+    let unsupported = || ResolveError::UnknownName {
+        name: "decode::<T>: T must be a concrete data type (Int / Bool / Float / \
+               String / Bytes / Array / a struct / an enum). Closures and type \
+               variables cannot be decoded by type."
+            .to_owned(),
+        span,
+    };
+    match t {
+        Type::Builtin(n) if n == "Int" || n == "Bool" || n == "Float" => {
+            Ok(crate::runtime::boxed_int_shape_hash())
+        }
+        Type::Builtin(n) if n == "String" || n == "Bytes" => {
+            Ok(crate::runtime::string_shape_hash())
+        }
+        Type::Builtin(n) if n == "Array" => Ok(crate::runtime::array_shape_hash()),
+        Type::TypeRef(h) => Ok(*h),
+        Type::Apply(head, _) => match head.as_ref() {
+            Type::Builtin(n) if n == "Array" => Ok(crate::runtime::array_shape_hash()),
+            Type::TypeRef(h) => Ok(*h),
+            _ => Err(unsupported()),
+        },
+        _ => Err(unsupported()),
+    }
+}
+
+/// Resolve `decode::<T>(bytes) -> Result<T, Int>`. `T` is named explicitly
+/// (turbofish) because it cannot be inferred from a `Bytes`-only call. We
+/// bake `T`'s expected identity hash into the builtin name; the runtime
+/// (`ai_wire_decode_checked`) decodes, verifies the shape matches, and
+/// builds the user's `Result` (`Ok(value)` / `Err(code)` where code 1 =
+/// type mismatch, 2 = malformed). The `Result` enum is reused from the
+/// `at()` binding.
+#[allow(clippy::too_many_arguments)]
+fn resolve_checked_decode(
+    args: &[SurfaceExpr],
+    type_args: &[SurfaceType],
+    span: Span,
+    env: &mut Vec<(String, Type)>,
+    top: &HashMap<String, TopBinding>,
+    structs: &HashMap<String, StructInfo>,
+    enums: &HashMap<String, EnumInfo>,
+    variants: &HashMap<String, VariantBinding>,
+    at_binding: &mut Option<AtBinding>,
+    type_params: &[String],
+    self_name: &str,
+) -> Result<(Expr, Type), ResolveError> {
+    if args.len() != 1 {
+        return Err(ResolveError::UnknownName {
+            name: format!("decode expects 1 argument (Bytes), got {}", args.len()),
+            span,
+        });
+    }
+    if type_args.len() != 1 {
+        return Err(ResolveError::UnknownName {
+            name: format!(
+                "decode::<T> expects exactly one explicit type argument, got {}",
+                type_args.len()
+            ),
+            span,
+        });
+    }
+    let t = resolve_type(&type_args[0], structs, enums, type_params)?;
+    let expected = decode_expected_hash(&t, span)?;
+    // Ensure the Result/Failure binding exists so the runtime can build
+    // the Result and the runtime-side binding gets installed at startup.
+    let binding = match at_binding.as_ref() {
+        Some(b) => b.clone(),
+        None => {
+            let b = build_at_binding(structs, enums, span)?;
+            *at_binding = Some(b.clone());
+            b
+        }
+    };
+    let bytes_canon = resolve_expr(
+        &args[0], env, top, structs, enums, variants, at_binding, type_params, self_name,
+    )?;
+    let decode_error_hash = binding.decode_error_hash.ok_or(ResolveError::AtRequiresBinding {
+        missing: "enum DecodeError { TypeMismatch, Malformed }".to_owned(),
+        span,
+    })?;
+    // Name layout:
+    //   core/wire.decode#<expected>#<result_hash>#<okint>#<decode_error_hash>
+    // expected: what the runtime checks against. result_hash + okint +
+    // decode_error_hash: let codegen's infer_type rebuild
+    // `Result<T, DecodeError>` (okint=1 when T is a boxed scalar, so the
+    // Ok-arm binding unboxes; the Err payload is the DecodeError enum).
+    let ok_scalar = matches!(&t, Type::Builtin(n) if n == "Int" || n == "Bool" || n == "Float");
+    let builtin_name = format!(
+        "core/wire.decode#{}#{}#{}#{}",
+        hex_encode(expected.as_bytes()),
+        hex_encode(binding.result_hash.as_bytes()),
+        if ok_scalar { 1 } else { 0 },
+        hex_encode(decode_error_hash.as_bytes()),
+    );
+    let ret_ty = Type::Apply(
+        Box::new(Type::TypeRef(binding.result_hash)),
+        vec![t, Type::TypeRef(decode_error_hash)],
+    );
+    Ok((
+        Expr::Call(Box::new(Expr::BuiltinRef(builtin_name)), vec![bytes_canon]),
+        ret_ty,
+    ))
 }
 
 /// Resolve an expression, returning both the canonical form and its
@@ -2134,6 +2369,17 @@ fn resolve_expr_typed(
                         // pass rewrite to TopRef after hashing.
                         return Ok((Expr::SelfRef(idx), b.ty.clone()));
                     }
+                    TopKind::PendingState { idx } => {
+                        // Reference to an in-flight `state` binding.
+                        // Hash not known yet; emit `StateSelfRef(idx)`
+                        // and let the SCC pass rewrite to StateRef.
+                        return Ok((Expr::StateSelfRef(idx), b.ty.clone()));
+                    }
+                    TopKind::State => {
+                        // Reference to an already-hashed node `state`:
+                        // load the live cell on the executing node.
+                        return Ok((Expr::StateRef(b.hash), b.ty.clone()));
+                    }
                     TopKind::Def => {
                         return Ok((Expr::TopRef(b.hash), b.ty.clone()));
                     }
@@ -2171,7 +2417,20 @@ fn resolve_expr_typed(
             })
         }
 
-        SurfaceExpr::Call { callee, args, span } => {
+        SurfaceExpr::Call { callee, args, type_args, span } => {
+            // Generic checked decode: `decode::<T>(bytes) -> Result<T, Int>`.
+            // T is named explicitly (turbofish) because it can't be
+            // inferred from a Bytes-only argument. We bake T's expected
+            // runtime identity-hash + an is-Int flag into the builtin name
+            // (the same trick `at()` uses) so codegen can emit the check.
+            if let SurfaceExpr::Var { name, .. } = callee.as_ref() {
+                if name == "decode" {
+                    return resolve_checked_decode(
+                        args, type_args, *span, env, top, structs, enums, variants,
+                        at_binding, type_params, self_name,
+                    );
+                }
+            }
             // Built-in string ops mapped to `core/string.*` so users
             // can write `string_len(s)`, `string_eq(a, b)`,
             // `string_concat(a, b)` without an FFI registry.
@@ -2302,6 +2561,13 @@ fn resolve_expr_typed(
                     "bit_xor" => (Some("core/i64.xor"), Some(Type::Builtin("Int".to_owned()))),
                     "bit_shl" => (Some("core/i64.shl"), Some(Type::Builtin("Int".to_owned()))),
                     "bit_shr" => (Some("core/i64.shr"), Some(Type::Builtin("Int".to_owned()))),
+                    // Structural hash / equality of ANY value. The whole
+                    // point of the language: every value has a canonical
+                    // form, so every value is hashable. Generic in the arg
+                    // type; result is always Int (`value_eq` returns 0/1).
+                    // These are what let `HashMap<K, V>` key on any type.
+                    "value_hash" => (Some("core/hash.value"), Some(Type::Builtin("Int".to_owned()))),
+                    "value_eq" => (Some("core/value.eq"), Some(Type::Builtin("Int".to_owned()))),
                     _ => (None, None),
                 };
                 if let (Some(b), Some(rt)) = (builtin, ret_ty) {
@@ -2330,14 +2596,60 @@ fn resolve_expr_typed(
             // others have fixed result types. Int box/unbox of elements
             // is handled in codegen.
             if let SurfaceExpr::Var { name, .. } = callee.as_ref() {
+                // Value-boundary builtins (the wire codec exposed to
+                // ai-lang so a node loop can live in the language).
+                let wire_builtin: Option<(&str, Type)> = match name.as_str() {
+                    "wire_encode" => {
+                        Some(("core/wire.encode", Type::Builtin("Bytes".to_owned())))
+                    }
+                    "wire_decode_int" => {
+                        Some(("core/wire.decode_int", Type::Builtin("Int".to_owned())))
+                    }
+                    // Decode a shipped `fn(Int)->Int` updater (for a remote
+                    // atom: the node `swap`s its own atom with it).
+                    "wire_decode_fn1" => Some((
+                        "core/wire.decode_fn1",
+                        Type::FnType {
+                            params: vec![Type::Builtin("Int".to_owned())],
+                            ret: Box::new(Type::Builtin("Int".to_owned())),
+                        },
+                    )),
+                    "wire_invoke" => {
+                        Some(("core/wire.invoke", Type::Builtin("Bytes".to_owned())))
+                    }
+                    _ => None,
+                };
+                if let Some((builtin, ret_ty)) = wire_builtin {
+                    let args_canon: Vec<Expr> = args
+                        .iter()
+                        .map(|a| {
+                            resolve_expr_typed(
+                                a, env, top, structs, enums, variants, at_binding,
+                                type_params, self_name,
+                            )
+                            .map(|(e, _)| e)
+                        })
+                        .collect::<Result<_, _>>()?;
+                    return Ok((
+                        Expr::Call(
+                            Box::new(Expr::BuiltinRef(builtin.to_owned())),
+                            args_canon,
+                        ),
+                        ret_ty,
+                    ));
+                }
                 let array_builtin = match name.as_str() {
                     "array_new" => Some("core/array.new"),
                     "array_len" => Some("core/array.len"),
                     "array_get" => Some("core/array.get"),
                     "array_set" => Some("core/array.set"),
-                    // The lock-free atom primitive (the ONLY one):
-                    //   atom_swap(cell, i, f) -> T   (CAS retry loop)
-                    "atom_swap_slot" => Some("core/atom.swap"),
+                    // The atom primitives over the dedicated `Atom` cell:
+                    //   atom_new(init) -> Atom<T>
+                    //   atom_load(a) -> T
+                    //   atom_swap(a, f) -> T   (lock-free CAS retry loop)
+                    "atom_new" => Some("core/atom.new"),
+                    "atom_load" => Some("core/atom.load"),
+                    "atom_swap" => Some("core/atom.swap"),
                     _ => None,
                 };
                 if let Some(builtin) = array_builtin {
@@ -2350,34 +2662,38 @@ fn resolve_expr_typed(
                             )
                         })
                         .collect::<Result<_, _>>()?;
+                    // Extract `T` from an `Apply(Builtin(container), [T])`
+                    // argument type (used to type the element-returning
+                    // builtins). Falls back to Int when unpinned.
+                    let elem_of = |container: &str, args_typed: &[(Expr, Type)]| match args_typed
+                        .first()
+                        .map(|(_, t)| t)
+                    {
+                        Some(Type::Apply(head, elt))
+                            if matches!(head.as_ref(), Type::Builtin(n) if n == container) =>
+                        {
+                            elt.first().cloned().unwrap_or(Type::Builtin("Int".to_owned()))
+                        }
+                        _ => Type::Builtin("Int".to_owned()),
+                    };
                     let ret_ty = match name.as_str() {
                         "array_len" | "array_set" => Type::Builtin("Int".to_owned()),
-                        // atom_swap_slot: element type T from arg 0's Array<T>.
-                        "atom_swap_slot" => match args_typed.first().map(|(_, t)| t) {
-                            Some(Type::Apply(head, elt))
-                                if matches!(head.as_ref(), Type::Builtin(n) if n == "Array") =>
-                            {
-                                elt.first()
-                                    .cloned()
-                                    .unwrap_or(Type::Builtin("Int".to_owned()))
-                            }
-                            _ => Type::Builtin("Int".to_owned()),
-                        },
+                        // atom_load / atom_swap: value type T from arg 0's Atom<T>.
+                        "atom_load" | "atom_swap" => elem_of("Atom", &args_typed),
+                        // atom_new: Atom<typeof init>.
+                        "atom_new" => Type::Apply(
+                            Box::new(Type::Builtin("Atom".to_owned())),
+                            vec![args_typed
+                                .first()
+                                .map(|(_, t)| t.clone())
+                                .unwrap_or(Type::TypeVar(0))],
+                        ),
                         "array_new" => Type::Apply(
                             Box::new(Type::Builtin("Array".to_owned())),
                             vec![Type::TypeVar(0)],
                         ),
                         // array_get: element type T from arg 0's Array<T>.
-                        _ => match args_typed.first().map(|(_, t)| t) {
-                            Some(Type::Apply(head, elt))
-                                if matches!(head.as_ref(), Type::Builtin(n) if n == "Array") =>
-                            {
-                                elt.first()
-                                    .cloned()
-                                    .unwrap_or(Type::Builtin("Int".to_owned()))
-                            }
-                            _ => Type::Builtin("Int".to_owned()),
-                        },
+                        _ => elem_of("Array", &args_typed),
                     };
                     let args_canon: Vec<Expr> =
                         args_typed.into_iter().map(|(e, _)| e).collect();

@@ -22,6 +22,9 @@ rfd = "0.15"
 nix = { version = "0.31", features = ["term", "fs", "signal", "process", "user", "ioctl", "poll"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Hot-reloadable runtime tuning for the project-prism (cube.rs):
+# ~/.terminal-bevy/cube.rhai is evaluated to a params map.
+rhai = { version = "1.21", features = ["sync"] }
 bincode = { version = "2", features = ["serde"] }
 libc = "0.2"
 # File-watching for garden sprite hot reload — picks up edits to text
@@ -38,6 +41,10 @@ skrifa = "0.39"
 swash = "0.2"
 bevy = { version = "0.18", default-features = false, features = [
     "2d",
+    # Real perspective 3D (Camera3d + PBR meshes + StandardMaterial),
+    # used by the project-prism "cube" mode (src/cube.rs) to texture each
+    # project's live render target onto a face of a rotating N-gon prism.
+    "3d",
     "x11",
     "wayland",
     # Hot-reload shaders / textures / any asset when their source file

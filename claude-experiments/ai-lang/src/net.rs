@@ -456,15 +456,32 @@ pub unsafe fn serve_one(
     match kind {
         KIND_CALL => {
             let payload = &body[1..];
-            // Cache key: blake3 of the encoded Call payload (closure
-            // code hash + all captures). Identical bytes → identical
-            // hash → identical computation, by the content-addressed
-            // property. If we've handled this exact call before, the
-            // cached reply frame is the answer.
+            // The Call payload is an encoded closure: `[1 (Closure kind)]
+            // [code_hash 32B] [n_captures] [captures...]`. Read the lambda
+            // code hash from that prefix (no decode needed) to decide
+            // cacheability.
+            //
+            // Cache key: blake3 of the whole payload (code hash + all
+            // captures). Identical bytes → identical computation, by the
+            // content-addressed property — SO LONG AS the thunk is pure. A
+            // thunk that transitively touches node `state` is NOT pure:
+            // caching it would skip its mutation on a repeated identical
+            // call. Such thunks bypass the cache entirely.
+            let cacheable = if payload.len() >= 33 && payload[0] == 1 {
+                let mut h = [0u8; 32];
+                h.copy_from_slice(&payload[1..33]);
+                !runtime.is_stateful(&Hash(h))
+            } else {
+                // Non-closure payload: leave it to decode_value to reject;
+                // don't cache something we can't classify.
+                false
+            };
             let cache_key = Hash::of_bytes(payload);
-            if let Some(cached_reply) = runtime.try_cached_result(&cache_key) {
-                channel.write_frame(&cached_reply)?;
-                return Ok(());
+            if cacheable {
+                if let Some(cached_reply) = runtime.try_cached_result(&cache_key) {
+                    channel.write_frame(&cached_reply)?;
+                    return Ok(());
+                }
             }
             let (value, _) = unsafe { decode_value(runtime, payload)? };
             let closure_ptr = match value {
@@ -479,7 +496,9 @@ pub unsafe fn serve_one(
             let mut reply = Vec::with_capacity(64);
             reply.push(KIND_RESULT);
             unsafe { encode_value(runtime, WireValue::Heap(result_ptr), &mut reply)? };
-            runtime.store_cached_result(cache_key, reply.clone());
+            if cacheable {
+                runtime.store_cached_result(cache_key, reply.clone());
+            }
             channel.write_frame(&reply)?;
             Ok(())
         }
@@ -915,6 +934,10 @@ pub struct AtRuntimeBinding {
     pub crashed: AtVariantLayout,
     pub code_missing: AtVariantLayout,
     pub cancelled: AtVariantLayout,
+    /// `DecodeError::TypeMismatch` / `DecodeError::Malformed` (nullary).
+    /// Present only when the module declares `enum DecodeError`.
+    pub decode_type_mismatch: Option<AtVariantLayout>,
+    pub decode_malformed: Option<AtVariantLayout>,
 }
 
 unsafe impl Send for AtRuntimeBinding {}
@@ -959,6 +982,14 @@ pub fn build_at_runtime_binding(
         None
     }
 
+    // DecodeError is optional — only present when the module declared it.
+    let (decode_type_mismatch, decode_malformed) = match rb.decode_error_hash {
+        Some(deh) => (
+            lookup(rt, deh, rb.decode_type_mismatch_index),
+            lookup(rt, deh, rb.decode_malformed_index),
+        ),
+        None => (None, None),
+    };
     Some(AtRuntimeBinding {
         ok: lookup(rt, rb.result_hash, rb.ok_variant_index)?,
         err: lookup(rt, rb.result_hash, rb.err_variant_index)?,
@@ -966,6 +997,8 @@ pub fn build_at_runtime_binding(
         crashed: lookup(rt, rb.failure_hash, rb.crashed_variant_index)?,
         code_missing: lookup(rt, rb.failure_hash, rb.code_missing_variant_index)?,
         cancelled: lookup(rt, rb.failure_hash, rb.cancelled_variant_index)?,
+        decode_type_mismatch,
+        decode_malformed,
     })
 }
 
@@ -1232,6 +1265,195 @@ unsafe fn invoke_zero_arg_closure(
 }
 
 // =============================================================================
+// Value boundary: encode / decode / invoke, exposed to ai-lang
+// =============================================================================
+//
+// These three runtime fns expose the wire codec (and closure invocation)
+// to ai-lang code so that a *node* — the accept/recv/dispatch/respond
+// loop — can be written in the language itself, instead of the hardcoded
+// Rust `serve_with_install`. They all require `install_current_runtime`
+// on the calling thread (same contract as `ai_net_at`), because the codec
+// reads the runtime's shape metadata and the invoker reads its code table.
+//
+// v1 deliberately does NOT do the open-world `Any` + reflection layer: the
+// node is assumed to already have the shipped code (both ends compiled the
+// same source), so decode never needs to fetch a missing shape. Malformed
+// input is a LOUD panic, not a silent wrong value — proper value-level
+// `Result<_, DecodeError>` is the next increment.
+
+/// Encode any heap value to a fresh ai-lang `Bytes` (same heap layout as
+/// `String`). Reuses `encode_value`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_wire_encode(
+    thread: *mut Thread,
+    value_ptr: *const u8,
+) -> *const u8 {
+    let rt = current_runtime()
+        .expect("ai_wire_encode: install_current_runtime must be called first");
+    let mut buf = Vec::with_capacity(256);
+    if let Err(e) = unsafe { encode_value(rt, WireValue::Heap(value_ptr), &mut buf) } {
+        panic!("ai_wire_encode: encode failed: {:?}", e);
+    }
+    unsafe { crate::runtime::ai_str_new(thread, buf.as_ptr(), buf.len() as i64) as *const u8 }
+}
+
+/// Decode a `Bytes` produced by `ai_wire_encode` whose value is an `Int`,
+/// returning the raw i64. (v1 Int-only decode; the generic/open-world
+/// decode comes later.) Panics loudly on malformed input or a non-Int.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_wire_decode_int(
+    _thread: *mut Thread,
+    bytes_ptr: *const u8,
+) -> i64 {
+    let rt = current_runtime()
+        .expect("ai_wire_decode_int: install_current_runtime must be called first");
+    let bytes = unsafe { crate::ffi::heap_str_bytes(bytes_ptr) };
+    match unsafe { decode_value(rt, bytes) } {
+        Ok((WireValue::Int(n), _)) => n,
+        Ok((WireValue::Heap(p), _)) => unsafe { crate::runtime::ai_gc_unbox_int(p) },
+        Err(e) => panic!("ai_wire_decode_int: decode failed: {:?}", e),
+    }
+}
+
+/// Decode a `Bytes` whose value is a heap object (e.g. a closure) and
+/// return the reconstructed heap pointer. Used to decode a shipped
+/// updater closure into a callable value on the node, so the node can
+/// `swap` its own atom with it. Panics loudly on malformed input or an
+/// unexpected Int.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_wire_decode_ptr(
+    _thread: *mut Thread,
+    bytes_ptr: *const u8,
+) -> *const u8 {
+    let rt = current_runtime()
+        .expect("ai_wire_decode_ptr: install_current_runtime must be called first");
+    let bytes = unsafe { crate::ffi::heap_str_bytes(bytes_ptr) };
+    match unsafe { decode_value(rt, bytes) } {
+        Ok((WireValue::Heap(p), _)) => p,
+        Ok((WireValue::Int(_), _)) => {
+            panic!("ai_wire_decode_ptr: expected a heap value (closure), got Int")
+        }
+        Err(e) => panic!("ai_wire_decode_ptr: decode failed: {:?}", e),
+    }
+}
+
+/// The heart of an ai-lang node: take the wire bytes of a shipped zero-arg
+/// closure, decode it onto the local heap, invoke it, and encode the
+/// result back to `Bytes`. This is exactly `serve_one`'s body with the
+/// socket removed — so the socket/accept/loop can live in ai-lang.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_wire_invoke(
+    thread: *mut Thread,
+    closure_bytes_ptr: *const u8,
+) -> *const u8 {
+    let rt = current_runtime()
+        .expect("ai_wire_invoke: install_current_runtime must be called first");
+    let bytes = unsafe { crate::ffi::heap_str_bytes(closure_bytes_ptr) };
+    let (value, _) = match unsafe { decode_value(rt, bytes) } {
+        Ok(v) => v,
+        Err(e) => panic!("ai_wire_invoke: decode failed: {:?}", e),
+    };
+    let closure_ptr = match value {
+        WireValue::Heap(p) => p,
+        WireValue::Int(_) => panic!("ai_wire_invoke: payload must be a closure, got Int"),
+    };
+    let result_ptr = match unsafe { invoke_zero_arg_closure(rt, closure_ptr) } {
+        Ok(p) => p,
+        Err(e) => panic!("ai_wire_invoke: closure invocation failed: {}", e),
+    };
+    let mut buf = Vec::with_capacity(256);
+    if let Err(e) = unsafe { encode_value(rt, WireValue::Heap(result_ptr), &mut buf) } {
+        panic!("ai_wire_invoke: encode of result failed: {:?}", e);
+    }
+    unsafe { crate::runtime::ai_str_new(thread, buf.as_ptr(), buf.len() as i64) as *const u8 }
+}
+
+/// The runtime *identity hash* of a decoded heap value, matching what
+/// `resolve::decode_expected_hash` computes for a type: an enum value
+/// reports its ENUM hash (not the per-variant hash); everything else
+/// reports its shape hash (a struct's content hash, the BoxedInt shape,
+/// the String/Array canonical shape).
+unsafe fn identity_hash_of(rt: &Runtime, p: *const u8) -> Hash {
+    let type_id_off = <crate::gc::Full as crate::gc::ObjHeader>::TYPE_ID_OFFSET;
+    let type_id = unsafe { *(p.add(type_id_off) as *const u16) };
+    let shape_hash = rt
+        .shape_by_type_id
+        .get(type_id as usize)
+        .copied()
+        .flatten()
+        .unwrap_or(Hash([0u8; 32]));
+    if let Some(ShapeMeta::EnumVariant { enum_ref, .. }) = rt.shape_meta.get(&shape_hash) {
+        *enum_ref
+    } else {
+        shape_hash
+    }
+}
+
+/// Build `Result::Err(DecodeError::<variant>)` for a nullary DecodeError
+/// variant. Reuses the `at()` Result `Err` layout. Panics with a clear
+/// message if the module didn't declare `enum DecodeError` (the resolver
+/// already rejects `decode::<T>` in that case, so this is unreachable in
+/// practice).
+unsafe fn build_decode_err(
+    thread: *mut Thread,
+    b: &AtRuntimeBinding,
+    variant: &Option<AtVariantLayout>,
+) -> *const u8 {
+    let v = variant.as_ref().expect(
+        "ai_wire_decode_checked: DecodeError variant layout missing \
+         (module must declare `enum DecodeError { TypeMismatch, Malformed }`)",
+    );
+    let de = unsafe { alloc_variant(thread, v, None, None) };
+    unsafe { alloc_variant(thread, &b.err, None, Some(de)) }
+}
+
+/// Generic CHECKED decode, exposed to ai-lang as `decode::<T>(bytes)`.
+/// The 32-byte expected identity hash for `T` arrives as four i64 words
+/// (`h0..h3`, little-endian), baked in by the resolver. Decodes the
+/// bytes, verifies the decoded value's identity matches `T`, and returns
+/// the user's `Result<T, Int>`: `Ok(value)` on match, `Err(1)` on type
+/// mismatch, `Err(2)` on malformed input. Requires `install_current_runtime`
+/// and `install_current_at_binding` (same contract as `at()`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_wire_decode_checked(
+    thread: *mut Thread,
+    bytes_ptr: *const u8,
+    h0: i64,
+    h1: i64,
+    h2: i64,
+    h3: i64,
+) -> *const u8 {
+    let rt = current_runtime()
+        .expect("ai_wire_decode_checked: install_current_runtime must be called first");
+    let binding = current_at_binding()
+        .expect("ai_wire_decode_checked: install_current_at_binding must be called first");
+
+    let mut hb = [0u8; 32];
+    hb[0..8].copy_from_slice(&(h0 as u64).to_le_bytes());
+    hb[8..16].copy_from_slice(&(h1 as u64).to_le_bytes());
+    hb[16..24].copy_from_slice(&(h2 as u64).to_le_bytes());
+    hb[24..32].copy_from_slice(&(h3 as u64).to_le_bytes());
+    let expected = Hash(hb);
+
+    let bytes = unsafe { crate::ffi::heap_str_bytes(bytes_ptr) };
+    let decoded = match unsafe { decode_value(rt, bytes) } {
+        Ok((v, _)) => v,
+        Err(_) => return unsafe { build_decode_err(thread, binding, &binding.decode_malformed) },
+    };
+    let (value_ptr, identity) = match decoded {
+        WireValue::Int(n) => {
+            let boxed = unsafe { crate::runtime::ai_gc_box_int(thread, n) };
+            (boxed as *const u8, crate::runtime::boxed_int_shape_hash())
+        }
+        WireValue::Heap(p) => (p, unsafe { identity_hash_of(rt, p) }),
+    };
+    if identity != expected {
+        return unsafe { build_decode_err(thread, binding, &binding.decode_type_mismatch) };
+    }
+    unsafe { build_ok(thread, binding, value_ptr) }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -1249,6 +1471,582 @@ mod tests {
         INIT.call_once(|| {
             init_native_target().expect("init native target");
         });
+    }
+
+    /// Build a Runtime + Jit from the full stdlib SOURCE plus `extra`
+    /// (so stdlib defs — including the ai-lang socket/framing layer — are
+    /// in scope). Returns the names table too.
+    fn make_stdlib_runtime<'ctx>(
+        ctx: &'ctx Context,
+        extra: &str,
+    ) -> (Runtime, Jit<'ctx>, std::collections::HashMap<String, Hash>) {
+        let full = format!("{}\n{}", crate::stdlib::SOURCE, extra);
+        let m = parse_module(&full).unwrap();
+        let r = resolve_module(&m).unwrap();
+        let names: std::collections::HashMap<String, Hash> =
+            r.defs.iter().map(|d| (d.name.clone(), d.hash)).collect();
+        let cm = CompiledModule::build(ctx, &r).unwrap();
+        let rt = Runtime::new_with_metadata(
+            cm.closure_type_infos.clone(),
+            cm.shape_registry.clone(),
+            cm.shape_meta.clone(),
+            cm.shape_by_type_id.clone(),
+        );
+        let jit = Jit::new(cm, &rt).unwrap();
+        (rt, jit, names)
+    }
+
+    /// Pick a free TCP port by binding :0 and dropping the listener.
+    fn free_port() -> u16 {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    }
+
+    /// The ai-lang transport stack (sockets + framing) works end to end
+    /// over real loopback TCP, with NO Rust networking code in the path:
+    /// the server (listen/accept/recv/echo) and client (connect/send/recv)
+    /// are both ordinary ai-lang functions from the stdlib.
+    #[test]
+    fn ail_socket_frame_roundtrip() {
+        init();
+        let port = free_port();
+        // Entries are () -> Int so they use the known main()-style ABI.
+        // The port is baked in as a literal.
+        let src = format!(
+            r#"
+            // Probe the (Int)->Int / ()->Int top-level ABI up front.
+            def probe_abi() -> Int = 41 + 1
+
+            def make_msg() -> Bytes = {{
+                let b = bytes_new(5);
+                let _0 = bytes_set(b, 0, 10);
+                let _1 = bytes_set(b, 1, 20);
+                let _2 = bytes_set(b, 2, 30);
+                let _3 = bytes_set(b, 3, 40);
+                let _4 = bytes_set(b, 4, 50);
+                b
+            }}
+
+            def bytes_sum(b: Bytes, i: Int, n: Int, acc: Int) -> Int =
+                if i >= n {{ acc }} else {{ bytes_sum(b, i + 1, n, acc + bytes_get(b, i)) }}
+
+            // Bind+listen; return the listener fd (or negative on error).
+            def server_listen() -> Int =
+                match tcp_listen({port}) {{
+                    Ok(fd) => fd,
+                    Err(_e) => 0 - 1,
+                }}
+
+            // Accept one conn, echo one frame back, return bytes received.
+            def server_accept_echo(listener: Int) -> Int =
+                match tcp_accept(listener) {{
+                    Ok(conn) => match recv_frame(conn) {{
+                        Ok(b) => {{
+                            let n = bytes_len(b);
+                            let _s = send_frame(conn, b);
+                            let _c = conn_close(conn);
+                            n
+                        }},
+                        Err(_e) => 0 - 2,
+                    }},
+                    Err(_e) => 0 - 3,
+                }}
+
+            // Connect, send a frame, read the echo, return the byte sum.
+            def client_roundtrip() -> Int =
+                match tcp_connect(127, 0, 0, 1, {port}) {{
+                    Ok(conn) => match send_frame(conn, make_msg()) {{
+                        Ok(_w) => match recv_frame(conn) {{
+                            Ok(echo) => {{
+                                let s = bytes_sum(echo, 0, bytes_len(echo), 0);
+                                let _c = conn_close(conn);
+                                s
+                            }},
+                            Err(_e) => 0 - 5,
+                        }},
+                        Err(_e) => 0 - 6,
+                    }},
+                    Err(_e) => 0 - 4,
+                }}
+            "#,
+            port = port
+        );
+
+        // SERVER side runs inline on the test thread (it blocks in accept);
+        // CLIENT runs in a spawned thread (builds its own Runtime to avoid
+        // moving the non-Send Runtime across threads).
+        let server_ctx = Context::create();
+        let (server_rt, server_jit, names) = make_stdlib_runtime(&server_ctx, &src);
+
+        // ABI probe: a top-level () -> Int returns a raw i64.
+        let probe = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(
+                    &crate::codegen::def_symbol(&names["probe_abi"]),
+                )
+                .unwrap()
+        };
+        assert_eq!(unsafe { probe.call(server_rt.thread_ptr()) }, 42, "()->Int ABI");
+
+        let listen_fn = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(
+                    &crate::codegen::def_symbol(&names["server_listen"]),
+                )
+                .unwrap()
+        };
+        let fd = unsafe { listen_fn.call(server_rt.thread_ptr()) };
+        assert!(fd >= 0, "server_listen failed: {}", fd);
+
+        // Client connects from a separate thread / Runtime, same source.
+        let src_for_client = src.clone();
+        let client_handle = std::thread::spawn(move || -> i64 {
+            let client_ctx = Context::create();
+            let (client_rt, client_jit, names) =
+                make_stdlib_runtime(&client_ctx, &src_for_client);
+            let f = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(
+                        &crate::codegen::def_symbol(&names["client_roundtrip"]),
+                    )
+                    .unwrap()
+            };
+            unsafe { f.call(client_rt.thread_ptr()) }
+        });
+
+        // Server accepts + echoes inline.
+        let accept_fn = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["server_accept_echo"]),
+                )
+                .unwrap()
+        };
+        let recvd = unsafe { accept_fn.call(server_rt.thread_ptr(), fd) };
+
+        let client_sum = client_handle.join().unwrap();
+        assert_eq!(recvd, 5, "server should receive 5 bytes");
+        assert_eq!(client_sum, 150, "client should get echo back (10+20+30+40+50)");
+    }
+
+    /// The headline: a *node loop written in ai-lang* (accept / recv /
+    /// invoke / respond) runs a closure shipped by an ai-lang client over
+    /// real TCP. The only Rust in the value path is the `wire_invoke`
+    /// primitive (decode+invoke+encode); the loop, framing, and transport
+    /// are all ai-lang. Replaces the hardcoded Rust `serve_with_install`.
+    #[test]
+    fn ail_node_loop_runs_shipped_closure() {
+        init();
+        let port = free_port();
+        let src = format!(
+            r#"
+            def make_thunk(n: Int) -> fn() -> Int = || n + 100
+
+            def server_listen() -> Int =
+                match tcp_listen({port}) {{ Ok(fd) => fd, Err(_e) => 0 - 1 }}
+
+            // One turn of an ai-lang node: accept, decode+invoke the
+            // shipped closure via wire_invoke, ship the encoded result.
+            def server_node_once(listener: Int) -> Int =
+                match tcp_accept(listener) {{
+                    Ok(conn) => match recv_frame(conn) {{
+                        Ok(req) => {{
+                            let resp = wire_invoke(req);
+                            let _s = send_frame(conn, resp);
+                            let _c = conn_close(conn);
+                            0
+                        }},
+                        Err(_e) => 0 - 2,
+                    }},
+                    Err(_e) => 0 - 3,
+                }}
+
+            // Client: ship make_thunk(42), decode the Int reply.
+            def client_call() -> Int =
+                match tcp_connect(127, 0, 0, 1, {port}) {{
+                    Ok(conn) => match send_frame(conn, wire_encode(make_thunk(42))) {{
+                        Ok(_w) => match recv_frame(conn) {{
+                            Ok(resp) => {{
+                                let v = wire_decode_int(resp);
+                                let _c = conn_close(conn);
+                                v
+                            }},
+                            Err(_e) => 0 - 5,
+                        }},
+                        Err(_e) => 0 - 6,
+                    }},
+                    Err(_e) => 0 - 4,
+                }}
+            "#,
+            port = port
+        );
+
+        let server_ctx = Context::create();
+        let (server_rt, server_jit, names) = make_stdlib_runtime(&server_ctx, &src);
+        // wire_invoke reads shape metadata + the code table from the
+        // installed current runtime (same contract as at()).
+        install_current_runtime(&server_rt);
+
+        let fd = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(
+                    &crate::codegen::def_symbol(&names["server_listen"]),
+                )
+                .unwrap()
+                .call(server_rt.thread_ptr())
+        };
+        assert!(fd >= 0, "server_listen failed: {}", fd);
+
+        let src_for_client = src.clone();
+        let client_handle = std::thread::spawn(move || -> i64 {
+            let client_ctx = Context::create();
+            let (client_rt, client_jit, names) =
+                make_stdlib_runtime(&client_ctx, &src_for_client);
+            install_current_runtime(&client_rt);
+            let v = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(
+                        &crate::codegen::def_symbol(&names["client_call"]),
+                    )
+                    .unwrap()
+                    .call(client_rt.thread_ptr())
+            };
+            clear_current_runtime();
+            v
+        });
+
+        let server_rc = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["server_node_once"]),
+                )
+                .unwrap()
+                .call(server_rt.thread_ptr(), fd)
+        };
+
+        let client_result = client_handle.join().unwrap();
+        clear_current_runtime();
+        assert_eq!(server_rc, 0, "server node turn should succeed");
+        assert_eq!(client_result, 142, "shipped || 42+100 should evaluate to 142");
+    }
+
+    /// A REMOTE ATOM, built entirely as ai-lang over the node loop: the
+    /// server holds a local `Atom<Int>` and, each turn, decodes a shipped
+    /// `fn(Int)->Int` updater and `swap`s its own atom with it (the real
+    /// Clojure-atom move, now distributed). State persists across separate
+    /// client connections. No new wire kinds, no Rust atom protocol — the
+    /// semantics are visible ai-lang.
+    #[test]
+    fn ail_remote_atom_counter() {
+        init();
+        let port = free_port();
+        let src = format!(
+            r#"
+            def make_inc(d: Int) -> fn(Int) -> Int = |n: Int| n + d
+
+            def server_listen() -> Int =
+                match tcp_listen({port}) {{ Ok(fd) => fd, Err(_e) => 0 - 1 }}
+
+            // One turn: accept, decode the shipped updater, swap the
+            // server's atom, ship back the new value.
+            def server_atom_turn(listener: Int, a: Atom<Int>) -> Int =
+                match tcp_accept(listener) {{
+                    Ok(conn) => match recv_frame(conn) {{
+                        Ok(req) => {{
+                            let updater = wire_decode_fn1(req);
+                            let now = swap(a, updater);
+                            let _s = send_frame(conn, wire_encode(now));
+                            let _c = conn_close(conn);
+                            now
+                        }},
+                        Err(_e) => 0 - 2,
+                    }},
+                    Err(_e) => 0 - 3,
+                }}
+
+            def server_atom_loop(listener: Int, a: Atom<Int>, turns: Int) -> Int =
+                if turns <= 0 {{ deref(a) }} else {{
+                    let _t = server_atom_turn(listener, a);
+                    server_atom_loop(listener, a, turns - 1)
+                }}
+
+            // The node owns the atom; the loop threads it. Runs 3 turns.
+            def server_main(listener: Int) -> Int = {{
+                let a = atom_new(0);
+                server_atom_loop(listener, a, 3)
+            }}
+
+            // Client: ship `|n| n + d`, get the new server-side value.
+            def client_inc(d: Int) -> Int =
+                match tcp_connect(127, 0, 0, 1, {port}) {{
+                    Ok(conn) => match send_frame(conn, wire_encode(make_inc(d))) {{
+                        Ok(_w) => match recv_frame(conn) {{
+                            Ok(resp) => {{
+                                let v = wire_decode_int(resp);
+                                let _c = conn_close(conn);
+                                v
+                            }},
+                            Err(_e) => 0 - 5,
+                        }},
+                        Err(_e) => 0 - 6,
+                    }},
+                    Err(_e) => 0 - 4,
+                }}
+            "#,
+            port = port
+        );
+
+        let server_ctx = Context::create();
+        let (server_rt, server_jit, names) = make_stdlib_runtime(&server_ctx, &src);
+        install_current_runtime(&server_rt);
+
+        let fd = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(
+                    &crate::codegen::def_symbol(&names["server_listen"]),
+                )
+                .unwrap()
+                .call(server_rt.thread_ptr())
+        };
+        assert!(fd >= 0, "server_listen failed: {}", fd);
+
+        let src_for_client = src.clone();
+        let client_handle = std::thread::spawn(move || -> Vec<i64> {
+            let client_ctx = Context::create();
+            let (client_rt, client_jit, names) =
+                make_stdlib_runtime(&client_ctx, &src_for_client);
+            install_current_runtime(&client_rt);
+            let inc = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                        &crate::codegen::def_symbol(&names["client_inc"]),
+                    )
+                    .unwrap()
+            };
+            // Three separate connections: +1, +10, +100.
+            let r1 = unsafe { inc.call(client_rt.thread_ptr(), 1) };
+            let r2 = unsafe { inc.call(client_rt.thread_ptr(), 10) };
+            let r3 = unsafe { inc.call(client_rt.thread_ptr(), 100) };
+            clear_current_runtime();
+            vec![r1, r2, r3]
+        });
+
+        let final_val = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["server_main"]),
+                )
+                .unwrap()
+                .call(server_rt.thread_ptr(), fd)
+        };
+
+        let client_results = client_handle.join().unwrap();
+        clear_current_runtime();
+        // The atom accumulates across connections: 0 -> 1 -> 11 -> 111.
+        assert_eq!(client_results, vec![1, 11, 111], "client sees accumulating state");
+        assert_eq!(final_val, 111, "server atom holds the final accumulated value");
+    }
+
+    /// The node-`state` remote-handler model over REAL loopback TCP, with
+    /// the node loop written entirely in ail via the generic stdlib
+    /// `serve_turns`. The server `serve`s; remote participants ship
+    /// `|| handle(msg)` closures that run on the node and mutate its OWN
+    /// `state` cell. Proves the model end-to-end on the real transport
+    /// (not just the in-process channel) and exercises the stdlib `serve`.
+    #[test]
+    fn ail_tcp_node_state_remote_handlers() {
+        init();
+        let port = free_port();
+        let src = format!(
+            r#"
+            enum Cmd {{ Bump(Int), Get }}
+            state tcp_counter: Atom<Int> = atom(0)
+            def tcp_handle(c: Cmd) -> Int =
+                match c {{
+                    Bump(d) => swap(tcp_counter, |n: Int| n + d),
+                    Get => deref(tcp_counter),
+                }}
+
+            // Node: bind + serve 3 requests via the GENERIC stdlib loop.
+            def tcp_listen_node() -> Int =
+                match tcp_listen({port}) {{ Ok(fd) => fd, Err(_e) => 0 - 1 }}
+            def tcp_node_main(fd: Int) -> Int = serve_turns(fd, 3)
+
+            // Client: ship `|| tcp_handle(msg)` and read the Int reply.
+            def tcp_bump_thunk(d: Int) -> fn() -> Int = || tcp_handle(Bump(d))
+            def tcp_get_thunk() -> fn() -> Int = || tcp_handle(Get)
+            def tcp_send(payload: Bytes) -> Int =
+                match tcp_connect(127, 0, 0, 1, {port}) {{
+                    Ok(conn) => match send_frame(conn, payload) {{
+                        Ok(_w) => match recv_frame(conn) {{
+                            Ok(resp) => {{
+                                let v = wire_decode_int(resp);
+                                let _c = conn_close(conn);
+                                v
+                            }},
+                            Err(_e) => 0 - 5,
+                        }},
+                        Err(_e) => 0 - 6,
+                    }},
+                    Err(_e) => 0 - 4,
+                }}
+            def tcp_client_bump(d: Int) -> Int = tcp_send(wire_encode(tcp_bump_thunk(d)))
+            def tcp_client_get() -> Int = tcp_send(wire_encode(tcp_get_thunk()))
+            "#,
+            port = port
+        );
+
+        let server_ctx = Context::create();
+        let (server_rt, server_jit, names) = make_stdlib_runtime(&server_ctx, &src);
+        install_current_runtime(&server_rt);
+        let fd = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(
+                    &crate::codegen::def_symbol(&names["tcp_listen_node"]),
+                )
+                .unwrap()
+                .call(server_rt.thread_ptr())
+        };
+        assert!(fd >= 0, "listen failed: {}", fd);
+
+        let src_for_client = src.clone();
+        let client = std::thread::spawn(move || -> Vec<i64> {
+            let client_ctx = Context::create();
+            let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, &src_for_client);
+            install_current_runtime(&client_rt);
+            let bump = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                        &crate::codegen::def_symbol(&names["tcp_client_bump"]),
+                    )
+                    .unwrap()
+            };
+            let get = unsafe {
+                client_jit
+                    .engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(
+                        &crate::codegen::def_symbol(&names["tcp_client_get"]),
+                    )
+                    .unwrap()
+            };
+            let r1 = unsafe { bump.call(client_rt.thread_ptr(), 5) };
+            let r2 = unsafe { bump.call(client_rt.thread_ptr(), 10) };
+            let r3 = unsafe { get.call(client_rt.thread_ptr()) };
+            clear_current_runtime();
+            vec![r1, r2, r3]
+        });
+
+        let _ = unsafe {
+            server_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(
+                    &crate::codegen::def_symbol(&names["tcp_node_main"]),
+                )
+                .unwrap()
+                .call(server_rt.thread_ptr(), fd)
+        };
+
+        let results = client.join().unwrap();
+        clear_current_runtime();
+        assert_eq!(
+            results,
+            vec![5, 15, 15],
+            "remote handlers mutate the node's own state over TCP"
+        );
+    }
+
+    /// Generic, CHECKED, open-world decode: one `decode::<T>(bytes)`
+    /// works for any data type the caller names, returns a `Result`, and
+    /// rejects a type mismatch as a value (not a crash). Round-trips an
+    /// Int and a struct, and catches decoding struct-bytes as the wrong
+    /// type.
+    #[test]
+    fn ail_generic_checked_decode() {
+        init();
+        let src = "
+            struct Pair { a: Int, b: Int }
+
+            def enc_int() -> Bytes = wire_encode(7)
+            def dec_int(b: Bytes) -> Int =
+                match decode::<Int>(b) { Ok(v) => v, Err(_e) => 0 - 1 }
+
+            def enc_pair() -> Bytes = wire_encode(Pair { a: 3, b: 4 })
+            def dec_pair_sum(b: Bytes) -> Int =
+                match decode::<Pair>(b) { Ok(p) => p.a + p.b, Err(_e) => 0 - 1 }
+
+            // Decoding Pair bytes as Int must be a typed DecodeError, not a
+            // crash. Match on the actual enum variants.
+            def dec_mismatch(b: Bytes) -> Int =
+                match decode::<Int>(b) {
+                    Ok(_v) => 0 - 99,
+                    Err(e) => match e {
+                        TypeMismatch => 1,
+                        Malformed => 2,
+                    },
+                }
+        ";
+
+        let ctx = Context::create();
+        let full = format!("{}\n{}", crate::stdlib::SOURCE, src);
+        let m = parse_module(&full).unwrap();
+        let r = resolve_module(&m).unwrap();
+        let names: std::collections::HashMap<String, Hash> =
+            r.defs.iter().map(|d| (d.name.clone(), d.hash)).collect();
+        let cm = CompiledModule::build(&ctx, &r).unwrap();
+        let rt = Runtime::new_with_metadata(
+            cm.closure_type_infos.clone(),
+            cm.shape_registry.clone(),
+            cm.shape_meta.clone(),
+            cm.shape_by_type_id.clone(),
+        );
+        let jit = Jit::new(cm, &rt).unwrap();
+
+        // decode builds the user Result, so it needs the at() runtime
+        // binding (Result/Failure layouts) and the current runtime.
+        install_current_runtime(&rt);
+        let rb = r.at_binding.as_ref().expect("stdlib uses at(), so binding exists");
+        let binding = build_at_runtime_binding(&rt, rb).expect("build at runtime binding");
+        install_current_at_binding(&binding);
+
+        let fn0 = |n: &str| unsafe {
+            jit.engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> *mut u8>(
+                    &crate::codegen::def_symbol(&names[n]),
+                )
+                .unwrap()
+        };
+        let fn1i = |n: &str| unsafe {
+            jit.engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, *mut u8) -> i64>(
+                    &crate::codegen::def_symbol(&names[n]),
+                )
+                .unwrap()
+        };
+
+        let int_bytes = unsafe { fn0("enc_int").call(rt.thread_ptr()) };
+        assert_eq!(unsafe { fn1i("dec_int").call(rt.thread_ptr(), int_bytes) }, 7);
+
+        let pair_bytes = unsafe { fn0("enc_pair").call(rt.thread_ptr()) };
+        assert_eq!(unsafe { fn1i("dec_pair_sum").call(rt.thread_ptr(), pair_bytes) }, 7);
+
+        // Same pair bytes, decoded as Int -> type-mismatch error code 1.
+        let pair_bytes2 = unsafe { fn0("enc_pair").call(rt.thread_ptr()) };
+        assert_eq!(unsafe { fn1i("dec_mismatch").call(rt.thread_ptr(), pair_bytes2) }, 1);
+
+        clear_current_runtime();
+        clear_current_at_binding();
     }
 
     #[test]
@@ -1549,6 +2347,163 @@ mod tests {
         assert_eq!(hits, 1, "second identical call should hit the cache");
     }
 
+    /// The node-`state` remote-handler model: a node owns a `state`
+    /// (`counter`) and handler defs that close over it; remote participants
+    /// ship `|| handle(msg)` closures, which run ON the node and mutate the
+    /// node's OWN cell. Distinct participants see each other's writes.
+    ///
+    /// The atom never crosses the wire: only the closure travels; `counter`
+    /// resolves by identity on the server via `ai_state_get`. The shipped
+    /// lambda captures only `d: Int` and references `handle` (TopRef) +
+    /// `counter` (StateRef, not a capture), so the bare-atom guardrail does
+    /// not fire.
+    #[test]
+    fn node_state_remote_handler_shared() {
+        init();
+        let extra = "
+            enum Cmd { Bump(Int), Get }
+            state rh_counter: Atom<Int> = atom(0)
+            def rh_handle(c: Cmd) -> Int =
+                match c {
+                    Bump(d) => swap(rh_counter, |n: Int| n + d),
+                    Get => deref(rh_counter),
+                }
+            // Client-side thunk builders: ship `|| rh_handle(msg)`.
+            def rh_call_bump(d: Int) -> fn() -> Int = || rh_handle(Bump(d))
+            def rh_call_get() -> fn() -> Int = || rh_handle(Get)
+        ";
+
+        // Server: full source, so it has `rh_handle` + an installed
+        // `rh_counter` cell (the Jit::new install pass ran).
+        let server_ctx = Context::create();
+        let (server_rt, server_jit, _) = make_stdlib_runtime(&server_ctx, extra);
+        let _ = server_jit;
+        let server_runtime = Arc::new(RuntimeHandle(server_rt));
+
+        let (mut client_chan, mut server_chan) = InProcessChannel::pair();
+        let runtime_for_thread = server_runtime.clone();
+        let server_handle = std::thread::spawn(move || {
+            loop {
+                match unsafe { serve_one(&runtime_for_thread.0, &mut server_chan) } {
+                    Ok(()) => continue,
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // Client: builds closures and ships them. Same source => the
+        // shipped lambda's code hash + `rh_handle`'s hash already exist on
+        // the server, so nothing is fetched; the server resolves both
+        // locally and the swap hits the server's own counter.
+        let client_ctx = Context::create();
+        let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, extra);
+        let kb = KnowledgeBase::new();
+
+        let bump = unsafe {
+            client_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> *mut u8>(
+                    &crate::codegen::def_symbol(&names["rh_call_bump"]),
+                )
+                .unwrap()
+        };
+        let get = unsafe {
+            client_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> *mut u8>(
+                    &crate::codegen::def_symbol(&names["rh_call_get"]),
+                )
+                .unwrap()
+        };
+
+        let ship = |closure: *mut u8, chan: &mut InProcessChannel| -> i64 {
+            let r = unsafe {
+                at_remote_on_channel(&client_rt, &kb, chan, closure as *const u8).unwrap()
+            };
+            unsafe { crate::runtime::ai_gc_unbox_int(r) }
+        };
+
+        // Two participants bump (+5, +10); a third reads the shared total.
+        let c1 = unsafe { bump.call(client_rt.thread_ptr(), 5) };
+        assert_eq!(ship(c1, &mut client_chan), 5, "first remote bump");
+        let c2 = unsafe { bump.call(client_rt.thread_ptr(), 10) };
+        assert_eq!(ship(c2, &mut client_chan), 15, "second bump sees the first");
+        let c3 = unsafe { get.call(client_rt.thread_ptr()) };
+        assert_eq!(ship(c3, &mut client_chan), 15, "remote read sees shared node state");
+
+        drop(client_chan);
+        server_handle.join().unwrap();
+    }
+
+    /// The cache fix: two BYTE-IDENTICAL stateful Calls must each run the
+    /// mutation. `|| rh_handle(Bump(5))` shipped twice has an identical
+    /// payload (same lambda hash + same capture 5), so the pure-thunk cache
+    /// would short-circuit the second call and skip its swap. Because the
+    /// thunk transitively touches `rh_counter`, it's marked stateful and
+    /// bypasses the cache: counter goes 5 then 10.
+    #[test]
+    fn node_state_stateful_calls_bypass_cache() {
+        init();
+        let extra = "
+            enum Cmd { Bump(Int), Get }
+            state cc_counter: Atom<Int> = atom(0)
+            def cc_handle(c: Cmd) -> Int =
+                match c {
+                    Bump(d) => swap(cc_counter, |n: Int| n + d),
+                    Get => deref(cc_counter),
+                }
+            def cc_call_bump(d: Int) -> fn() -> Int = || cc_handle(Bump(d))
+        ";
+        let server_ctx = Context::create();
+        let (server_rt, server_jit, _) = make_stdlib_runtime(&server_ctx, extra);
+        let _ = server_jit;
+        let server_runtime = Arc::new(RuntimeHandle(server_rt));
+        let misses_handle = server_runtime.0.cache_misses.clone();
+
+        let (mut client_chan, mut server_chan) = InProcessChannel::pair();
+        let runtime_for_thread = server_runtime.clone();
+        let server_handle = std::thread::spawn(move || loop {
+            match unsafe { serve_one(&runtime_for_thread.0, &mut server_chan) } {
+                Ok(()) => continue,
+                Err(_) => break,
+            }
+        });
+
+        let client_ctx = Context::create();
+        let (client_rt, client_jit, names) = make_stdlib_runtime(&client_ctx, extra);
+        let kb = KnowledgeBase::new();
+        let bump = unsafe {
+            client_jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> *mut u8>(
+                    &crate::codegen::def_symbol(&names["cc_call_bump"]),
+                )
+                .unwrap()
+        };
+        let ship = |c: *mut u8, ch: &mut InProcessChannel| -> i64 {
+            let r =
+                unsafe { at_remote_on_channel(&client_rt, &kb, ch, c as *const u8).unwrap() };
+            unsafe { crate::runtime::ai_gc_unbox_int(r) }
+        };
+
+        // Two identical Bump(5) calls. Distinct closures, identical bytes.
+        let a = unsafe { bump.call(client_rt.thread_ptr(), 5) };
+        assert_eq!(ship(a, &mut client_chan), 5, "first stateful bump");
+        let b = unsafe { bump.call(client_rt.thread_ptr(), 5) };
+        assert_eq!(
+            ship(b, &mut client_chan),
+            10,
+            "identical stateful call must re-run the swap, not hit the cache"
+        );
+
+        drop(client_chan);
+        server_handle.join().unwrap();
+
+        // Both calls missed (the cache was bypassed, not consulted-and-hit).
+        let misses = misses_handle.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(misses, 0, "stateful calls never consult the cache");
+    }
+
     /// End-to-end code-fetch: server starts with empty program, client
     /// ships a closure; server fetches code, installs it, runs it.
     ///
@@ -1579,8 +2534,9 @@ mod tests {
         let mut server_jit =
             crate::codegen::IncrementalJit::new(empty_cm, &server_rt).unwrap();
         // The empty module has no user-defined shapes; the runtime
-        // reserves the three trailing slots for BoxedInt + String + Array.
-        assert_eq!(server_rt.shape_by_type_id.len(), 3);
+        // reserves the four trailing slots for BoxedInt + String + Array
+        // + Atom.
+        assert_eq!(server_rt.shape_by_type_id.len(), 4);
 
         let listener = bind("127.0.0.1:0").unwrap();
         let server_addr = listener.local_addr().unwrap();
@@ -3118,6 +4074,54 @@ mod tests {
         assert!(
             msg.contains("Ptr") && msg.to_lowercase().contains("captur"),
             "error should explain the Ptr capture ban, got: {}",
+            msg
+        );
+    }
+
+    /// A thunk may not CAPTURE a bare `Atom`: a node-resident mutable cell
+    /// shipped by value would fork. Shared node state must be a `state`
+    /// binding reached by reference on the owning node.
+    #[test]
+    fn at_thunk_capturing_atom_is_rejected() {
+        init();
+        let src = format!(
+            "{}
+             def run(node: Node) -> Int = {{
+                let a = atom_new(0);
+                match at(node, || atom_load(a)) {{
+                    Ok(n) => n,
+                    Err(e) => 0 - 1
+                }}
+             }}",
+            AT_PRELUDE
+        );
+        let err = typecheck_src(&src).expect_err("Atom-capturing thunk must be rejected");
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("Atom") && msg.to_lowercase().contains("captur"),
+            "error should explain the Atom capture ban, got: {}",
+            msg
+        );
+    }
+
+    /// A thunk may not RETURN a bare `Atom` either.
+    #[test]
+    fn at_thunk_returning_atom_is_rejected() {
+        init();
+        let src = format!(
+            "{}
+             def run(node: Node) -> Int =
+                match at(node, || atom_new(0)) {{
+                    Ok(a) => 0,
+                    Err(e) => 0 - 1
+                }}",
+            AT_PRELUDE
+        );
+        let err = typecheck_src(&src).expect_err("Atom-returning thunk must be rejected");
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("Atom") && msg.to_lowercase().contains("return"),
+            "error should explain the Atom return ban, got: {}",
             msg
         );
     }

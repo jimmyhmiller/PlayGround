@@ -42,8 +42,8 @@
 //!   slot storage is owned by the bucket.
 //! - Multiple `push` and multiple `get` may proceed in parallel.
 
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 const NUM_BUCKETS: usize = 64;
 
@@ -125,8 +125,7 @@ impl<T> GrowableTable<T> {
         // (k = 0 → 1 slot, k = 63 → 2^63 slots — though no real
         // workload reaches that).
         let bucket_size: usize = 1 << b_idx;
-        let slots: Box<[OnceLock<T>]> =
-            (0..bucket_size).map(|_| OnceLock::new()).collect();
+        let slots: Box<[OnceLock<T>]> = (0..bucket_size).map(|_| OnceLock::new()).collect();
         let new_bucket = Box::into_raw(Box::new(Bucket { slots }));
         match self.buckets[b_idx].compare_exchange(
             std::ptr::null_mut(),

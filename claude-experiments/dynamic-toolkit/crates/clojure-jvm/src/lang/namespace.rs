@@ -130,7 +130,10 @@ impl Namespace {
         let mut map = self.mappings.lock().unwrap();
         // Replace any structurally-equal existing key (the HashMap hashes on
         // Arc identity, so locate the slot by structural symbol equality).
-        let existing_key = map.iter().find(|(k, _)| ***k == *sym).map(|(k, _)| k.clone());
+        let existing_key = map
+            .iter()
+            .find(|(k, _)| ***k == *sym)
+            .map(|(k, _)| k.clone());
         if let Some(k) = existing_key {
             map.insert(k, Object::Var(var));
         } else {

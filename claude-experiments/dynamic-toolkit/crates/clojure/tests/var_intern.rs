@@ -1,11 +1,11 @@
 //! Checkpoint 4: `def` interns a Var in the `clojure.core`
 //! namespace heap object.
 
+use clojure::Engine;
 use clojure::namespace::{
     fn_func_ref, ns_lookup, ns_name, registry_find_ns, registry_namespaces, var_root, var_sym,
 };
 use clojure::value::{self as v};
-use clojure::Engine;
 
 #[test]
 fn engine_has_clojure_core() {

@@ -49,10 +49,10 @@ pub const USER_TYPE_BASE: u32 = 0x0001_0000;
 // don't correspond to any ObjTypeId — they exist so the dispatch table
 // can hold entries like `(BUILTIN_DOUBLE, ISeq.first.method_id) → fn`.
 // Picked above ObjTypeId range but below USER_TYPE_BASE.
-pub const BUILTIN_NIL:    LogicalTypeId = 0x0000_FF00;
-pub const BUILTIN_BOOL:   LogicalTypeId = 0x0000_FF01;
+pub const BUILTIN_NIL: LogicalTypeId = 0x0000_FF00;
+pub const BUILTIN_BOOL: LogicalTypeId = 0x0000_FF01;
 pub const BUILTIN_DOUBLE: LogicalTypeId = 0x0000_FF02;
-pub const BUILTIN_FN:     LogicalTypeId = 0x0000_FF03;
+pub const BUILTIN_FN: LogicalTypeId = 0x0000_FF03;
 /// Wildcard / `Object` fallback. Methods installed under this id apply
 /// when no exact `(type_id, method_id)` entry exists.
 pub const BUILTIN_OBJECT: LogicalTypeId = 0x0000_FF04;
@@ -61,13 +61,13 @@ pub const BUILTIN_OBJECT: LogicalTypeId = 0x0000_FF04;
 /// dispatch / `extend-type` it gets this synthetic logical id (rather
 /// than its raw `ObjTypeId`) so number protocols can target it the same
 /// way `BUILTIN_DOUBLE` targets floats.
-pub const BUILTIN_LONG:   LogicalTypeId = 0x0000_FF05;
+pub const BUILTIN_LONG: LogicalTypeId = 0x0000_FF05;
 
 #[inline]
 pub fn user_type_logical(user_type_id: u32) -> LogicalTypeId {
-    USER_TYPE_BASE.checked_add(user_type_id).expect(
-        "clojure-jvm: user_types: LogicalTypeId overflow — too many user types",
-    )
+    USER_TYPE_BASE
+        .checked_add(user_type_id)
+        .expect("clojure-jvm: user_types: LogicalTypeId overflow — too many user types")
 }
 
 /// Base for host-class LogicalTypeIds (e.g. `java.util.Date`).
@@ -104,8 +104,7 @@ pub fn host_class_logical(name: &str) -> LogicalTypeId {
     if let Some(id) = map.get(name).copied() {
         return id;
     }
-    let id = NEXT_HOST_CLASS_ID
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let id = NEXT_HOST_CLASS_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     assert!(
         id < HOST_CLASS_LIMIT,
         "clojure-jvm: host-class LogicalTypeId space exhausted at {id:#x}"
@@ -166,8 +165,7 @@ static DISPATCH: LazyLock<RwLock<HashMap<(LogicalTypeId, u32), u64>>> =
 
 /// Process-global allocator state. Counter values, not registry indices,
 /// to keep ProtoMethodId allocation independent of ProtocolId ordering.
-static NEXT_PROTO_METHOD_ID: std::sync::atomic::AtomicU32 =
-    std::sync::atomic::AtomicU32::new(1); // 0 reserved as "invalid"
+static NEXT_PROTO_METHOD_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1); // 0 reserved as "invalid"
 
 // ── User-type API ──────────────────────────────────────────────────────
 
@@ -178,7 +176,11 @@ static NEXT_PROTO_METHOD_ID: std::sync::atomic::AtomicU32 =
 pub fn register_user_type(name: Arc<Symbol>, fields: Vec<Arc<Symbol>>) -> u32 {
     let mut types = USER_TYPES.write().unwrap();
     let id = types.len() as u32;
-    let info = UserTypeInfo { id, name: name.clone(), fields };
+    let info = UserTypeInfo {
+        id,
+        name: name.clone(),
+        fields,
+    };
     types.push(info);
     USER_TYPE_BY_NAME.write().unwrap().insert(name, id);
     id
@@ -195,9 +197,9 @@ pub fn user_type_id_by_name(name: &Arc<Symbol>) -> Option<u32> {
 /// Look up `(field_name)` → field index for a user type, or `None`.
 pub fn user_type_field_index(id: u32, field_name: &Symbol) -> Option<usize> {
     let types = USER_TYPES.read().unwrap();
-    types.get(id as usize).and_then(|t| {
-        t.fields.iter().position(|f| *f.as_ref() == *field_name)
-    })
+    types
+        .get(id as usize)
+        .and_then(|t| t.fields.iter().position(|f| *f.as_ref() == *field_name))
 }
 
 // ── Protocol API ───────────────────────────────────────────────────────
@@ -212,13 +214,20 @@ pub fn register_protocol(
     let methods: Vec<ProtoMethod> = method_specs
         .into_iter()
         .map(|(mname, arities)| {
-            let mid = NEXT_PROTO_METHOD_ID
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mid = NEXT_PROTO_METHOD_ID.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             method_ids.push(mid);
-            ProtoMethod { id: mid, name: mname, arities }
+            ProtoMethod {
+                id: mid,
+                name: mname,
+                arities,
+            }
         })
         .collect();
-    let info = ProtocolInfo { id, name: name.clone(), methods };
+    let info = ProtocolInfo {
+        id,
+        name: name.clone(),
+        methods,
+    };
     protos.push(info);
     PROTOCOL_BY_NAME.write().unwrap().insert(name, id);
     (id, method_ids)
@@ -253,7 +262,8 @@ pub fn protocol_id_by_name(name: &Arc<Symbol>) -> Option<u32> {
 pub fn protocol_method_id(proto_id: u32, method_name: &Symbol) -> Option<u32> {
     let protos = PROTOCOLS.read().unwrap();
     protos.get(proto_id as usize).and_then(|p| {
-        p.methods.iter()
+        p.methods
+            .iter()
             .find(|m| *m.name.as_ref() == *method_name)
             .map(|m| m.id)
     })
@@ -264,7 +274,10 @@ pub fn protocol_method_id(proto_id: u32, method_name: &Symbol) -> Option<u32> {
 /// Install an impl. Overwrites any existing entry for `(type_id,
 /// method_id)`. Matches Clojure's semantics: later `extend-type` wins.
 pub fn install_impl(type_id: LogicalTypeId, method_id: u32, fn_bits: u64) {
-    DISPATCH.write().unwrap().insert((type_id, method_id), fn_bits);
+    DISPATCH
+        .write()
+        .unwrap()
+        .insert((type_id, method_id), fn_bits);
 }
 
 /// Look up an impl. Returns `None` if no entry exists for the exact
@@ -345,18 +358,14 @@ mod tests {
         );
         let (p2, m2) = register_protocol(
             sym_ns("cljs.core", "ISeq"),
-            vec![
-                (sym("-first"), vec![1]),
-                (sym("-rest"),  vec![1]),
-            ],
+            vec![(sym("-first"), vec![1]), (sym("-rest"), vec![1])],
         );
         assert_eq!(p1, 0);
         assert_eq!(p2, 1);
         assert_eq!(m1.len(), 1);
         assert_eq!(m2.len(), 2);
         // Method ids are globally unique (flat namespace across protocols).
-        let all: std::collections::HashSet<u32> =
-            m1.iter().chain(m2.iter()).copied().collect();
+        let all: std::collections::HashSet<u32> = m1.iter().chain(m2.iter()).copied().collect();
         assert_eq!(all.len(), 3);
     }
 
@@ -367,24 +376,15 @@ mod tests {
             sym_ns("cljs.core", "ISeq"),
             vec![(sym("-first"), vec![1]), (sym("-rest"), vec![1])],
         );
-        assert_eq!(
-            protocol_method_id(pid, &sym("-first")),
-            Some(mids[0])
-        );
-        assert_eq!(
-            protocol_method_id(pid, &sym("-rest")),
-            Some(mids[1])
-        );
+        assert_eq!(protocol_method_id(pid, &sym("-first")), Some(mids[0]));
+        assert_eq!(protocol_method_id(pid, &sym("-rest")), Some(mids[1]));
         assert_eq!(protocol_method_id(pid, &sym("missing")), None);
     }
 
     #[test]
     fn dispatch_install_and_lookup() {
         let _g = guard();
-        let (_pid, mids) = register_protocol(
-            sym("P"),
-            vec![(sym("m"), vec![1])],
-        );
+        let (_pid, mids) = register_protocol(sym("P"), vec![(sym("m"), vec![1])]);
         let uid = register_user_type(sym("Foo"), vec![]);
         let tid = user_type_logical(uid);
         // Initially absent.

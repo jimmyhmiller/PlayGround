@@ -208,7 +208,10 @@ impl Parser {
             None
         };
         self.define_in_scope(&name);
-        self.consume(TokenType::Semicolon, "Expect ';' after variable declaration.")?;
+        self.consume(
+            TokenType::Semicolon,
+            "Expect ';' after variable declaration.",
+        )?;
         Some(Stmt::Var(name, initializer))
     }
 
@@ -563,9 +566,10 @@ impl Parser {
     }
 
     fn declare_in_scope(&mut self, name: &str) {
-        if self.scope_depth == 0 { return; } // global scope
-        let already_exists = self.scopes.last()
-            .map_or(false, |s| s.contains_key(name));
+        if self.scope_depth == 0 {
+            return;
+        } // global scope
+        let already_exists = self.scopes.last().map_or(false, |s| s.contains_key(name));
         if already_exists {
             self.semantic_error("Already a variable with this name in this scope.");
         }
@@ -576,7 +580,9 @@ impl Parser {
     }
 
     fn define_in_scope(&mut self, name: &str) {
-        if self.scope_depth == 0 { return; }
+        if self.scope_depth == 0 {
+            return;
+        }
         if let Some(scope) = self.scopes.last_mut() {
             if let Some(entry) = scope.get_mut(name) {
                 entry.0 = true;

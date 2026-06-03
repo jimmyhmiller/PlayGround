@@ -54,27 +54,32 @@ pub enum TypeScheme {
         variants: Vec<(String, Option<Type>)>,
         wire: bool,
     },
+    /// A node-resident `state` binding. `ty` is its declared type
+    /// (typically `Atom<T>`). A `StateRef(hash)` has type `ty`.
+    State {
+        ty: Type,
+    },
 }
 
 impl TypeScheme {
     pub fn as_fn(&self) -> Option<(&[Type], &Type)> {
         match self {
             TypeScheme::Fn { params, ret, .. } => Some((params.as_slice(), ret)),
-            TypeScheme::Struct { .. } | TypeScheme::Enum { .. } => None,
+            TypeScheme::Struct { .. } | TypeScheme::Enum { .. } | TypeScheme::State { .. } => None,
         }
     }
 
     pub fn as_struct(&self) -> Option<&[(String, Type)]> {
         match self {
             TypeScheme::Struct { fields, .. } => Some(fields.as_slice()),
-            TypeScheme::Fn { .. } | TypeScheme::Enum { .. } => None,
+            TypeScheme::Fn { .. } | TypeScheme::Enum { .. } | TypeScheme::State { .. } => None,
         }
     }
 
     pub fn as_enum(&self) -> Option<&[(String, Option<Type>)]> {
         match self {
             TypeScheme::Enum { variants, .. } => Some(variants.as_slice()),
-            TypeScheme::Fn { .. } | TypeScheme::Struct { .. } => None,
+            TypeScheme::Fn { .. } | TypeScheme::Struct { .. } | TypeScheme::State { .. } => None,
         }
     }
 
@@ -83,6 +88,8 @@ impl TypeScheme {
             TypeScheme::Fn { wire, .. }
             | TypeScheme::Struct { wire, .. }
             | TypeScheme::Enum { wire, .. } => *wire,
+            // A node-resident state cell never crosses the wire by value.
+            TypeScheme::State { .. } => false,
         }
     }
 }
@@ -373,6 +380,12 @@ fn array_t(elem: Type) -> Type {
     Type::Apply(Box::new(Type::Builtin("Array".to_owned())), vec![elem])
 }
 
+/// `Atom<elem>` as `Apply(Builtin("Atom"), [elem])` — the dedicated
+/// single-cell mutable shape, distinct from `Array`.
+fn atom_t(elem: Type) -> Type {
+    Type::Apply(Box::new(Type::Builtin("Atom".to_owned())), vec![elem])
+}
+
 /// Does `ty` contain a `Ptr` anywhere in its structure? A `Ptr` is a raw
 /// local machine address; it is meaningless in any other process, so it
 /// must never cross the `at(...)` wire boundary (as a thunk return type
@@ -387,6 +400,27 @@ fn type_contains_ptr(ty: &Type) -> bool {
         }
         Type::Apply(head, args) => {
             type_contains_ptr(head) || args.iter().any(type_contains_ptr)
+        }
+    }
+}
+
+/// Does `ty` contain an `Atom<_>` anywhere in its structure? An `Atom` is a
+/// node-resident mutable cell with node identity; shipping one by value
+/// across `at(...)` would silently fork it (the remote would mutate a dead
+/// copy). Shared mutable state belongs to a `state` binding, reached by
+/// reference on the owning node, never captured or returned by value. This
+/// walks `Apply`/`FnType` so `Array<Atom<Int>>` or `fn() -> Atom<Int>` is
+/// caught too.
+fn type_contains_atom(ty: &Type) -> bool {
+    match ty {
+        Type::Builtin(_) | Type::TypeRef(_) | Type::TypeVar(_) | Type::SelfRef(_) => false,
+        Type::FnType { params, ret } => {
+            type_contains_atom(ret) || params.iter().any(type_contains_atom)
+        }
+        Type::Apply(head, args) => {
+            matches!(head.as_ref(), Type::Builtin(n) if n == "Atom")
+                || type_contains_atom(head)
+                || args.iter().any(type_contains_atom)
         }
     }
 }
@@ -466,6 +500,8 @@ fn collect_outer_captures(e: &Expr, depth: u32, out: &mut Vec<u32>) {
         | Expr::StringLit(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => {}
     }
 }
@@ -533,6 +569,17 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
             vec![int_t()],
             Type::Builtin("Bytes".to_owned()),
         )),
+        // Decode a Call-payload frame (an encoded zero-arg closure), invoke
+        // the closure on this node, and return the encoded result frame.
+        // The handler-agnostic core of an ail `serve` loop. No memoization.
+        "core/wire.invoke" => Some((
+            vec![Type::Builtin("Bytes".to_owned())],
+            Type::Builtin("Bytes".to_owned()),
+        )),
+        // Structural hash / equality of ANY value (generic key support for
+        // HashMap). `hash_value(k) -> Int`, `value_eq(a, b) -> Int` (0/1).
+        "core/hash.value" => Some((vec![Type::TypeVar(0)], int_t())),
+        "core/value.eq" => Some((vec![Type::TypeVar(0), Type::TypeVar(0)], int_t())),
         "core/bytes.len" => Some((
             vec![Type::Builtin("Bytes".to_owned())],
             int_t(),
@@ -586,12 +633,21 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
             vec![array_t(Type::TypeVar(0)), int_t(), Type::TypeVar(0)],
             int_t(),
         )),
-        // The atom primitive: atom_swap_slot(cell: Array<T>, i: Int,
-        // f: fn(T) -> T) -> T. Runs the lock-free CAS retry loop.
+        // Atom primitives over the dedicated `Atom<T>` cell shape.
+        //   atom_new(init: T) -> Atom<T>
+        "core/atom.new" => Some((
+            vec![Type::TypeVar(0)],
+            atom_t(Type::TypeVar(0)),
+        )),
+        //   atom_load(a: Atom<T>) -> T
+        "core/atom.load" => Some((
+            vec![atom_t(Type::TypeVar(0))],
+            Type::TypeVar(0),
+        )),
+        //   atom_swap(a: Atom<T>, f: fn(T) -> T) -> T  (lock-free CAS loop)
         "core/atom.swap" => Some((
             vec![
-                array_t(Type::TypeVar(0)),
-                int_t(),
+                atom_t(Type::TypeVar(0)),
                 Type::FnType {
                     params: vec![Type::TypeVar(0)],
                     ret: Box::new(Type::TypeVar(0)),
@@ -786,6 +842,22 @@ pub fn typecheck_def(def: &Def, cache: &TypeCache) -> Result<TypeScheme, TypeErr
                 wire,
             })
         }
+        Def::State { ty, init } => {
+            check_type_well_formed(ty, cache, 0)?;
+            // The initializer is a zero-parameter expression; it must
+            // produce a value of the declared type. No enclosing fn return
+            // type is published, so `?` in a state initializer is rejected.
+            let mut locals: Vec<Type> = Vec::new();
+            let init_ty = typecheck_expr(init, &mut locals, cache)?;
+            if !types_equiv(&init_ty, ty) {
+                return Err(TypeError::TypeMismatch {
+                    context: "state initializer".to_owned(),
+                    expected: ty.clone(),
+                    got: init_ty,
+                });
+            }
+            Ok(TypeScheme::State { ty: ty.clone() })
+        }
     }
 }
 
@@ -884,6 +956,8 @@ fn scheme_type_params(scheme: &TypeScheme) -> u32 {
             }
             m
         }
+        // A `state` binding is not a type constructor; arity 0.
+        TypeScheme::State { .. } => 0,
     }
 }
 
@@ -1097,9 +1171,16 @@ fn typecheck_expr(
             Some(TypeScheme::Struct { .. }) | Some(TypeScheme::Enum { .. }) => {
                 Ok(Type::TypeRef(*h))
             }
+            Some(TypeScheme::State { .. }) => Err(TypeError::UnknownTopRef(*h)),
         },
 
-        Expr::SelfRef(idx) => Err(TypeError::SelfRefInTypecheck {
+        // A reference to a node `state` binding: its declared type.
+        Expr::StateRef(h) => match cache.get(h) {
+            Some(TypeScheme::State { ty }) => Ok(ty.clone()),
+            _ => Err(TypeError::UnknownTopRef(*h)),
+        },
+
+        Expr::SelfRef(idx) | Expr::StateSelfRef(idx) => Err(TypeError::SelfRefInTypecheck {
             component_index: *idx,
         }),
 
@@ -1599,6 +1680,16 @@ fn typecheck_call(
                         .to_owned(),
                 ));
             }
+            if type_contains_atom(&thunk_ret) {
+                return Err(TypeError::Unsupported(
+                    "core/net.at thunk may not return an `Atom`: a node-resident \
+                     mutable cell has node identity and cannot be shipped by value \
+                     (it would fork). Return a snapshot via `deref`, or keep the cell \
+                     as a node `state` binding and have the remote call a handler that \
+                     mutates it in place."
+                        .to_owned(),
+                ));
+            }
             // The thunk is shipped with its captures; a captured `Ptr`
             // would travel as a plain Int and deref to garbage on the
             // remote node. Reject any capture whose type contains a `Ptr`.
@@ -1614,6 +1705,16 @@ fn typecheck_call(
                                 "core/net.at thunk captures a `Ptr`: a raw local machine \
                                  address cannot be shipped to another node. Capture only \
                                  wire-portable values (Int/String/Bytes/struct/enum)."
+                                    .to_owned(),
+                            ));
+                        }
+                        if type_contains_atom(cap_ty) {
+                            return Err(TypeError::Unsupported(
+                                "core/net.at thunk captures an `Atom`: a node-resident \
+                                 mutable cell cannot be shipped by value (it would fork). \
+                                 To share node state, make it a `state` binding and call a \
+                                 handler that reads/swaps it on the owning node; to ship a \
+                                 value, capture `deref(atom)` instead."
                                     .to_owned(),
                             ));
                         }
@@ -1925,6 +2026,9 @@ pub fn typecheck_module(
                     },
                 );
             }
+            crate::ast::Def::State { ty, .. } => {
+                cache.insert(rdef.hash, TypeScheme::State { ty: ty.clone() });
+            }
         }
         needs_check.push(rdef);
     }
@@ -2064,6 +2168,13 @@ pub fn encode_scheme(s: &TypeScheme) -> Vec<u8> {
                 }
             }
         }
+        TypeScheme::State { ty } => {
+            write_str(&mut buf, "State");
+            // Uniform layout: a wire byte follows every tag. A state cell
+            // never crosses the wire by value, so it is always 0.
+            buf.push(0);
+            write_blob(&mut buf, &crate::codec::encode_type(ty));
+        }
     }
     buf
 }
@@ -2125,6 +2236,13 @@ pub fn decode_scheme(bytes: &[u8]) -> Result<TypeScheme, SchemeCodecError> {
                 type_params,
                 variants,
                 wire,
+            }
+        }
+        "State" => {
+            // The wire byte was already consumed above (and ignored).
+            let blob = r.read_blob()?;
+            TypeScheme::State {
+                ty: crate::codec::decode_type(blob)?,
             }
         }
         _ => {

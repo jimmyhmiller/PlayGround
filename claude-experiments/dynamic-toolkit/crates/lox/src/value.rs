@@ -90,44 +90,56 @@ pub fn format_number(n: f64) -> String {
 /// Read a u64 field from a GC object at the given byte offset.
 /// `ptr` is the raw object pointer (NOT NanBox-tagged).
 #[inline]
-pub unsafe fn gc_read_field(ptr: *mut u8, offset: i32) -> u64 { unsafe {
-    let field_ptr = ptr.offset(offset as isize) as *const u64;
-    field_ptr.read()
-}}
+pub unsafe fn gc_read_field(ptr: *mut u8, offset: i32) -> u64 {
+    unsafe {
+        let field_ptr = ptr.offset(offset as isize) as *const u64;
+        field_ptr.read()
+    }
+}
 
 /// Write a u64 field to a GC object at the given byte offset.
 #[inline]
-pub unsafe fn gc_write_field(ptr: *mut u8, offset: i32, val: u64) { unsafe {
-    let field_ptr = ptr.offset(offset as isize) as *mut u64;
-    field_ptr.write(val);
-}}
+pub unsafe fn gc_write_field(ptr: *mut u8, offset: i32, val: u64) {
+    unsafe {
+        let field_ptr = ptr.offset(offset as isize) as *mut u64;
+        field_ptr.write(val);
+    }
+}
 
 /// Read a varlen element at the given index from a GC object.
 /// `base_offset` is the byte offset of the first varlen element.
 #[inline]
-pub unsafe fn gc_read_elem(ptr: *mut u8, base_offset: i32, index: usize) -> u64 { unsafe {
-    let elem_ptr = ptr.offset(base_offset as isize + (index * 8) as isize) as *const u64;
-    elem_ptr.read()
-}}
+pub unsafe fn gc_read_elem(ptr: *mut u8, base_offset: i32, index: usize) -> u64 {
+    unsafe {
+        let elem_ptr = ptr.offset(base_offset as isize + (index * 8) as isize) as *const u64;
+        elem_ptr.read()
+    }
+}
 
 /// Write a varlen element at the given index to a GC object.
 #[inline]
-pub unsafe fn gc_write_elem(ptr: *mut u8, base_offset: i32, index: usize, val: u64) { unsafe {
-    let elem_ptr = ptr.offset(base_offset as isize + (index * 8) as isize) as *mut u64;
-    elem_ptr.write(val);
-}}
+pub unsafe fn gc_write_elem(ptr: *mut u8, base_offset: i32, index: usize, val: u64) {
+    unsafe {
+        let elem_ptr = ptr.offset(base_offset as isize + (index * 8) as isize) as *mut u64;
+        elem_ptr.write(val);
+    }
+}
 
 /// Read the varlen byte data from a GC string object.
 /// Returns a slice of bytes.
 #[inline]
-pub unsafe fn gc_read_bytes(ptr: *mut u8, base_offset: i32, len: usize) -> &'static [u8] { unsafe {
-    let data_ptr = ptr.offset(base_offset as isize);
-    std::slice::from_raw_parts(data_ptr, len)
-}}
+pub unsafe fn gc_read_bytes(ptr: *mut u8, base_offset: i32, len: usize) -> &'static [u8] {
+    unsafe {
+        let data_ptr = ptr.offset(base_offset as isize);
+        std::slice::from_raw_parts(data_ptr, len)
+    }
+}
 
 /// Write bytes to the varlen section of a GC string object.
 #[inline]
-pub unsafe fn gc_write_bytes(ptr: *mut u8, base_offset: i32, data: &[u8]) { unsafe {
-    let dest = ptr.offset(base_offset as isize);
-    std::ptr::copy_nonoverlapping(data.as_ptr(), dest, data.len());
-}}
+pub unsafe fn gc_write_bytes(ptr: *mut u8, base_offset: i32, data: &[u8]) {
+    unsafe {
+        let dest = ptr.offset(base_offset as isize);
+        std::ptr::copy_nonoverlapping(data.as_ptr(), dest, data.len());
+    }
+}

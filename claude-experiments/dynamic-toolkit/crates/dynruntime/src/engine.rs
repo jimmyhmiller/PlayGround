@@ -163,10 +163,7 @@ static ENGINE_NO_CONTS: dynexec::NoContinuations = dynexec::NoContinuations;
 /// The caller owns the `GcInterpCtx`; in most tests
 /// `GcInterpCtx::new_unallocating()` is enough since the IR they run
 /// doesn't allocate.
-pub fn default_engine<'a>(
-    module: &'a Module,
-    roots: &'a DefaultRoots,
-) -> ExecutionEngine<'a> {
+pub fn default_engine<'a>(module: &'a Module, roots: &'a DefaultRoots) -> ExecutionEngine<'a> {
     ExecutionEngine::with_tier_policy(module, roots, &ENGINE_NO_CONTS, Box::new(NeverCompile))
 }
 
@@ -174,16 +171,17 @@ impl<'a, Cfg, R> ExecutionEngine<'a, Cfg, R>
 where
     Cfg: CodegenConfig,
     Cfg::Layout: LayoutConfigDefaults,
-    <Cfg::Layout as LayoutConfigDefaults>::DefaultRoots:
-        SoundRoots<Cfg::Layout>,
-    <Cfg::Layout as LayoutConfigDefaults>::DefaultRootTransport: SoundTransport<
-        Cfg::Layout,
-        <Cfg::Layout as LayoutConfigDefaults>::DefaultRoots,
-    >,
+    <Cfg::Layout as LayoutConfigDefaults>::DefaultRoots: SoundRoots<Cfg::Layout>,
+    <Cfg::Layout as LayoutConfigDefaults>::DefaultRootTransport:
+        SoundTransport<Cfg::Layout, <Cfg::Layout as LayoutConfigDefaults>::DefaultRoots>,
     R: InterpRootManager<Cfg::Layout, Cfg::Roots, Cfg::RootTransport>,
 {
     /// Create an interpreter-only engine.
-    pub fn new(module: &'a Module, roots: &'a R, cont_ctx: &'a dyn dynexec::ContinuationContext) -> Self {
+    pub fn new(
+        module: &'a Module,
+        roots: &'a R,
+        cont_ctx: &'a dyn dynexec::ContinuationContext,
+    ) -> Self {
         Self::with_tier_policy(module, roots, cont_ctx, Box::new(NeverCompile))
     }
 
@@ -231,11 +229,7 @@ where
     ///
     /// If a JIT module is available, dispatches to native code.
     /// Otherwise interprets. Handles deopt by falling back to interpreter.
-    pub fn run(
-        &mut self,
-        entry: FuncRef,
-        args: &[u64],
-    ) -> Result<ExecutionResult, ExecutionError> {
+    pub fn run(&mut self, entry: FuncRef, args: &[u64]) -> Result<ExecutionResult, ExecutionError> {
         // If we have a JIT module, use it
         if let Some(jit) = &self.jit {
             let result =
@@ -249,19 +243,15 @@ where
             FuncDef::Extern(_) => {
                 return Err(ExecutionError::CompilationFailed(
                     "cannot run extern function as entry".into(),
-                ))
+                ));
             }
         };
 
         if self.tier_policy.should_compile(entry_idx) {
             // Try to JIT compile the module
             if let Some(jit) = self.try_compile() {
-                let result = execute_jit_module_function_to_terminal(
-                    &jit,
-                    entry,
-                    args,
-                    &self.jit_conts,
-                )?;
+                let result =
+                    execute_jit_module_function_to_terminal(&jit, entry, args, &self.jit_conts)?;
                 self.jit = Some(jit);
                 return self.handle_jit_result(result);
             }
@@ -311,21 +301,15 @@ where
                     "deopt recovery not yet implemented in ExecutionEngine".into(),
                 ))
             }
-            JitExecutionResult::CaptureSlice { handle, .. } => {
-                Ok(ExecutionResult::Value(handle))
-            }
-            JitExecutionResult::CloneSlice { handle, .. } => {
-                Ok(ExecutionResult::Value(handle))
-            }
+            JitExecutionResult::CaptureSlice { handle, .. } => Ok(ExecutionResult::Value(handle)),
+            JitExecutionResult::CloneSlice { handle, .. } => Ok(ExecutionResult::Value(handle)),
             JitExecutionResult::ResumeSlice { handle, args, .. } => {
                 // Cross-mode: JIT captured, interpreter resumes.
                 let view = self
                     .jit_conts
                     .read(handle)
                     .map_err(|e| ExecutionError::Jit(JitFrameControlError::FrameSlice(e)))?;
-                let result = self
-                    .interpreter
-                    .resume_view(&view, &args)?;
+                let result = self.interpreter.resume_view(&view, &args)?;
                 Ok(interp_to_result(result))
             }
             JitExecutionResult::AbortToPrompt { .. } => Err(ExecutionError::CompilationFailed(
@@ -391,7 +375,8 @@ mod tests {
             let v = b.iconst(Type::I64, 42);
             b.ret(v);
         });
-        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
+        let mut engine = default_engine(&module, &roots);
         assert_eq!(engine.run(entry, &[]).unwrap(), ExecutionResult::Value(42));
     }
 
@@ -404,7 +389,8 @@ mod tests {
             let sum = b.add(a, bv);
             b.ret(sum);
         });
-        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
+        let mut engine = default_engine(&module, &roots);
         assert_eq!(
             engine.run(entry, &[10, 32]).unwrap(),
             ExecutionResult::Value(42)
@@ -430,7 +416,8 @@ mod tests {
         mb.finish_func(f_main, fb);
         let module = mb.build();
 
-        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
+        let mut engine = default_engine(&module, &roots);
         engine.bind("double", |args| ExternCallResult::Value(Some(args[0] * 2)));
         assert_eq!(
             engine.run(f_main, &[21]).unwrap(),
@@ -465,7 +452,8 @@ mod tests {
         }
 
         let module = mb.build();
-        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
+        let mut engine = default_engine(&module, &roots);
         assert_eq!(
             engine.run(f_main, &[10]).unwrap(),
             ExecutionResult::Value(21)
@@ -479,7 +467,8 @@ mod tests {
             b.ret(v);
         });
         let jit = JitModule::compile::<dynvalue::LowBit<3>>(&module, &[]);
-        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
+        let mut engine = default_engine(&module, &roots);
         engine.set_jit(jit);
         assert_eq!(engine.run(entry, &[]).unwrap(), ExecutionResult::Value(99));
     }
@@ -512,7 +501,8 @@ mod tests {
 
         let module = mb.build();
         let jit = JitModule::compile::<dynvalue::LowBit<3>>(&module, &[]);
-        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
+        let mut engine = default_engine(&module, &roots);
         engine.set_jit(jit);
         assert_eq!(
             engine.run(f_main, &[10]).unwrap(),
@@ -558,7 +548,8 @@ mod tests {
 
         let module = mb.build();
         let jit = JitModule::compile::<dynvalue::LowBit<3>>(&module, &[]);
-        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
+        let mut engine = default_engine(&module, &roots);
         engine.set_jit(jit);
         assert_eq!(
             engine.run(main_fn, &[5]).unwrap(),
@@ -573,8 +564,12 @@ mod tests {
             b.ret(v);
         });
         let roots: DefaultRoots = GcInterpCtx::new_unallocating();
-        let mut engine: ExecutionEngine =
-            ExecutionEngine::with_tier_policy(&module, &roots, &ENGINE_NO_CONTS, Box::new(AlwaysCompile::new()));
+        let mut engine: ExecutionEngine = ExecutionEngine::with_tier_policy(
+            &module,
+            &roots,
+            &ENGINE_NO_CONTS,
+            Box::new(AlwaysCompile::new()),
+        );
         // First call triggers compilation
         assert_eq!(engine.run(entry, &[]).unwrap(), ExecutionResult::Value(77));
         // JIT module should now be set
@@ -613,7 +608,8 @@ mod tests {
         let (module, entry) = one_func("main", &[], None, |b| {
             b.ret_void();
         });
-        let roots: DefaultRoots = GcInterpCtx::new_unallocating(); let mut engine = default_engine(&module, &roots);
+        let roots: DefaultRoots = GcInterpCtx::new_unallocating();
+        let mut engine = default_engine(&module, &roots);
         assert_eq!(engine.run(entry, &[]).unwrap(), ExecutionResult::Void);
     }
 }

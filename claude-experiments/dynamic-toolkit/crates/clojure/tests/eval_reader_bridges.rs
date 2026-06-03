@@ -136,9 +136,7 @@ fn map_assoc_overwrites() {
 #[test]
 fn map_assoc_extends() {
     assert_eq!(
-        eval_str(
-            "(__reader_map_count (__reader_map_assoc {:a 1} :b 2))"
-        ),
+        eval_str("(__reader_map_count (__reader_map_assoc {:a 1} :b 2))"),
         "2"
     );
 }

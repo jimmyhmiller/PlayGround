@@ -109,11 +109,17 @@ pub fn lower_program(program: &Ast) -> Lowered {
 
     let print_ref = dm.declare_extern(
         "beagle_print",
-        Signature { params: vec![Type::I64], ret: None },
+        Signature {
+            params: vec![Type::I64],
+            ret: None,
+        },
     );
     let println_ref = dm.declare_extern(
         "beagle_println",
-        Signature { params: vec![Type::I64], ret: None },
+        Signature {
+            params: vec![Type::I64],
+            ret: None,
+        },
     );
 
     // Stub stdlib externs for binary_trees: length(v), get(v,i), to-number(v).
@@ -122,29 +128,47 @@ pub fn lower_program(program: &Ast) -> Lowered {
     // reads their `len` field directly.
     let length_ref = dm.declare_extern(
         "beagle_length",
-        Signature { params: vec![Type::I64], ret: Some(Type::I64) },
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
     );
     let get_ref = dm.declare_extern(
         "beagle_get",
-        Signature { params: vec![Type::I64, Type::I64], ret: Some(Type::I64) },
+        Signature {
+            params: vec![Type::I64, Type::I64],
+            ret: Some(Type::I64),
+        },
     );
     let to_number_ref = dm.declare_extern(
         "beagle_to_number",
-        Signature { params: vec![Type::I64], ret: Some(Type::I64) },
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
     );
 
     // Math + clock externs used by ray_cast_bench.
     let cos_ref = dm.declare_extern(
         "beagle_cos",
-        Signature { params: vec![Type::I64], ret: Some(Type::I64) },
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
     );
     let sin_ref = dm.declare_extern(
         "beagle_sin",
-        Signature { params: vec![Type::I64], ret: Some(Type::I64) },
+        Signature {
+            params: vec![Type::I64],
+            ret: Some(Type::I64),
+        },
     );
     let time_now_ref = dm.declare_extern(
         "beagle_time_now",
-        Signature { params: vec![], ret: Some(Type::I64) },
+        Signature {
+            params: vec![],
+            ret: Some(Type::I64),
+        },
     );
 
     // Property-access inline cache. dynlang owns the slow-path extern,
@@ -184,7 +208,10 @@ pub fn lower_program(program: &Ast) -> Lowered {
 
             structs.insert(
                 name.clone(),
-                StructInfo { type_id: id, field_offsets: offsets },
+                StructInfo {
+                    type_id: id,
+                    field_offsets: offsets,
+                },
             );
         }
     }
@@ -198,7 +225,10 @@ pub fn lower_program(program: &Ast) -> Lowered {
         if let Ast::Let { pattern, value, .. } = el {
             let name = match pattern {
                 Pattern::Identifier { name, .. } => name.clone(),
-                _ => panic!("top-level let must bind a single identifier, got {:?}", pattern),
+                _ => panic!(
+                    "top-level let must bind a single identifier, got {:?}",
+                    pattern
+                ),
             };
             assert!(
                 is_const_literal(value),
@@ -247,7 +277,10 @@ pub fn lower_program(program: &Ast) -> Lowered {
 
     let mut inlinable: HashMap<String, InlineableFn> = HashMap::new();
     for el in elements {
-        if let Ast::Function { name, args, body, .. } = el {
+        if let Ast::Function {
+            name, args, body, ..
+        } = el
+        {
             let fname = match name {
                 Some(n) => n.clone(),
                 None => continue,
@@ -276,7 +309,10 @@ pub fn lower_program(program: &Ast) -> Lowered {
             }
             inlinable.insert(
                 fname,
-                InlineableFn { params, body: body.clone() },
+                InlineableFn {
+                    params,
+                    body: body.clone(),
+                },
             );
         }
     }
@@ -314,7 +350,10 @@ pub fn lower_program(program: &Ast) -> Lowered {
     // PropertyIc mints cache slot ids during emit_load; finalize allocates
     // the array once we know the total count. No pre-walk needed.
     for el in elements {
-        if let Ast::Function { name, args, body, .. } = el {
+        if let Ast::Function {
+            name, args, body, ..
+        } = el
+        {
             let fname = name.as_ref().unwrap();
             let fref = *func_refs.get(fname).unwrap();
             let mut f = dm.start_func(fref);
@@ -459,7 +498,10 @@ impl<'a> Lowerer<'a> {
             Ast::Let { pattern, value, .. } => {
                 let vname = match pattern {
                     Pattern::Identifier { name, .. } => name.clone(),
-                    _ => panic!("only simple `let <name> = ...` supported, got {:?}", pattern),
+                    _ => panic!(
+                        "only simple `let <name> = ...` supported, got {:?}",
+                        pattern
+                    ),
                 };
                 let ty = self.types.type_of(value);
                 let v = self.lower_expr(f, value);
@@ -470,7 +512,10 @@ impl<'a> Lowerer<'a> {
             Ast::LetMut { pattern, value, .. } => {
                 let vname = match pattern {
                     Pattern::Identifier { name, .. } => name.clone(),
-                    _ => panic!("only simple `let mut <name> = ...` supported, got {:?}", pattern),
+                    _ => panic!(
+                        "only simple `let mut <name> = ...` supported, got {:?}",
+                        pattern
+                    ),
                 };
                 // The pre-pass walked the entire enclosing function body
                 // and computed the LUB of (init ∪ every assignment) for
@@ -531,7 +576,12 @@ impl<'a> Lowerer<'a> {
             }
 
             // ── Comparison ──────────────────────────────────────────
-            Ast::Condition { operator, left, right, .. } => {
+            Ast::Condition {
+                operator,
+                left,
+                right,
+                ..
+            } => {
                 let (lh, rh) = (self.types.type_of(left), self.types.type_of(right));
                 let (lhint, rhint) = ((&lh).into(), (&rh).into());
                 let l = self.lower_expr(f, left);
@@ -583,7 +633,12 @@ impl<'a> Lowerer<'a> {
             }
 
             // ── Control flow ────────────────────────────────────────
-            Ast::If { condition, then, else_, .. } => {
+            Ast::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
                 let c = self.lower_expr(f, condition);
                 let then_bb = f.fb.create_block(&[]);
                 let else_bb = f.fb.create_block(&[]);
@@ -607,7 +662,9 @@ impl<'a> Lowerer<'a> {
                 f.fb.block_param(merge_bb, 0)
             }
 
-            Ast::While { condition, body, .. } => {
+            Ast::While {
+                condition, body, ..
+            } => {
                 // ── LICM for `length(x)` ────────────────────────────
                 // Find every Identifier `x` such that the loop has at
                 // least one `length(x)` call AND `x` is not reassigned
@@ -684,7 +741,12 @@ impl<'a> Lowerer<'a> {
             Ast::Call { name, args, .. } => self.lower_call(f, name, args),
 
             // ── Struct construction ─────────────────────────────────
-            Ast::StructCreation { name, fields, spread: None, .. } => {
+            Ast::StructCreation {
+                name,
+                fields,
+                spread: None,
+                ..
+            } => {
                 let info = self
                     .structs
                     .get(name)
@@ -739,7 +801,9 @@ impl<'a> Lowerer<'a> {
             }
 
             // ── Property access ─────────────────────────────────────
-            Ast::PropertyAccess { object, property, .. } => {
+            Ast::PropertyAccess {
+                object, property, ..
+            } => {
                 let obj_val = self.lower_expr(f, object);
                 let fname = match property.as_ref() {
                     Ast::Identifier(n, _) => n.as_str(),
@@ -849,7 +913,10 @@ impl<'a> Lowerer<'a> {
                 }
 
                 let fref = *self.func_refs.get(other).unwrap_or_else(|| {
-                    panic!("unknown function `{other}` called from `{}`", self.types.current_fn)
+                    panic!(
+                        "unknown function `{other}` called from `{}`",
+                        self.types.current_fn
+                    )
                 });
                 f.fb.call(fref, &arg_vals).unwrap()
             }
@@ -862,8 +929,7 @@ impl<'a> Lowerer<'a> {
     /// during alloc preserves it (the slots are GC roots and the moving
     /// collector updates them in place).
     fn lower_array_literal(&mut self, f: &mut DynFunc, elems: &[Ast]) -> Value {
-        let elem_vals: Vec<Value> =
-            elems.iter().map(|e| self.lower_expr(f, e)).collect();
+        let elem_vals: Vec<Value> = elems.iter().map(|e| self.lower_expr(f, e)).collect();
         self.array_seq.emit_literal(f, &elem_vals)
     }
 
@@ -909,7 +975,12 @@ fn collect_mutated_in(ast: &Ast, out: &mut std::collections::HashSet<String>) {
                 collect_mutated_in(x, out);
             }
         }
-        Ast::If { condition, then, else_, .. } => {
+        Ast::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             collect_mutated_in(condition, out);
             for x in then {
                 collect_mutated_in(x, out);
@@ -918,13 +989,17 @@ fn collect_mutated_in(ast: &Ast, out: &mut std::collections::HashSet<String>) {
                 collect_mutated_in(x, out);
             }
         }
-        Ast::While { condition, body, .. } => {
+        Ast::While {
+            condition, body, ..
+        } => {
             collect_mutated_in(condition, out);
             for x in body {
                 collect_mutated_in(x, out);
             }
         }
-        Ast::For { collection, body, .. } => {
+        Ast::For {
+            collection, body, ..
+        } => {
             collect_mutated_in(collection, out);
             for x in body {
                 collect_mutated_in(x, out);
@@ -959,14 +1034,18 @@ fn collect_mutated_in(ast: &Ast, out: &mut std::collections::HashSet<String>) {
             }
         }
         Ast::LetDynamic { value, .. } => collect_mutated_in(value, out),
-        Ast::Binding { value_expr, body, .. } => {
+        Ast::Binding {
+            value_expr, body, ..
+        } => {
             collect_mutated_in(value_expr, out);
             for x in body {
                 collect_mutated_in(x, out);
             }
         }
         Ast::Not { expr, .. } => collect_mutated_in(expr, out),
-        Ast::PropertyAccess { object, property, .. } => {
+        Ast::PropertyAccess {
+            object, property, ..
+        } => {
             collect_mutated_in(object, out);
             collect_mutated_in(property, out);
         }
@@ -1013,7 +1092,9 @@ fn collect_mutated_in(ast: &Ast, out: &mut std::collections::HashSet<String>) {
                 }
             }
         }
-        Ast::Try { body, catch_body, .. } => {
+        Ast::Try {
+            body, catch_body, ..
+        } => {
             for x in body {
                 collect_mutated_in(x, out);
             }
@@ -1040,7 +1121,11 @@ fn collect_mutated_in(ast: &Ast, out: &mut std::collections::HashSet<String>) {
             }
         }
         Ast::Perform { value, .. } => collect_mutated_in(value, out),
-        Ast::Handle { handler_instance, body, .. } => {
+        Ast::Handle {
+            handler_instance,
+            body,
+            ..
+        } => {
             collect_mutated_in(handler_instance, out);
             for x in body {
                 collect_mutated_in(x, out);
@@ -1110,7 +1195,12 @@ fn find_length_of_ident(ast: &Ast, out: &mut std::collections::HashSet<String>) 
                 find_length_of_ident(x, out);
             }
         }
-        Ast::If { condition, then, else_, .. } => {
+        Ast::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             find_length_of_ident(condition, out);
             for x in then {
                 find_length_of_ident(x, out);
@@ -1119,13 +1209,17 @@ fn find_length_of_ident(ast: &Ast, out: &mut std::collections::HashSet<String>) 
                 find_length_of_ident(x, out);
             }
         }
-        Ast::While { condition, body, .. } => {
+        Ast::While {
+            condition, body, ..
+        } => {
             find_length_of_ident(condition, out);
             for x in body {
                 find_length_of_ident(x, out);
             }
         }
-        Ast::For { collection, body, .. } => {
+        Ast::For {
+            collection, body, ..
+        } => {
             find_length_of_ident(collection, out);
             for x in body {
                 find_length_of_ident(x, out);
@@ -1148,10 +1242,12 @@ fn find_length_of_ident(ast: &Ast, out: &mut std::collections::HashSet<String>) 
             find_length_of_ident(left, out);
             find_length_of_ident(right, out);
         }
-        Ast::Let { value, .. }
-        | Ast::LetMut { value, .. }
-        | Ast::LetDynamic { value, .. } => find_length_of_ident(value, out),
-        Ast::Binding { value_expr, body, .. } => {
+        Ast::Let { value, .. } | Ast::LetMut { value, .. } | Ast::LetDynamic { value, .. } => {
+            find_length_of_ident(value, out)
+        }
+        Ast::Binding {
+            value_expr, body, ..
+        } => {
             find_length_of_ident(value_expr, out);
             for x in body {
                 find_length_of_ident(x, out);
@@ -1162,7 +1258,9 @@ fn find_length_of_ident(ast: &Ast, out: &mut std::collections::HashSet<String>) 
             find_length_of_ident(value, out);
         }
         Ast::Not { expr, .. } => find_length_of_ident(expr, out),
-        Ast::PropertyAccess { object, property, .. } => {
+        Ast::PropertyAccess {
+            object, property, ..
+        } => {
             find_length_of_ident(object, out);
             find_length_of_ident(property, out);
         }
@@ -1209,7 +1307,9 @@ fn find_length_of_ident(ast: &Ast, out: &mut std::collections::HashSet<String>) 
                 }
             }
         }
-        Ast::Try { body, catch_body, .. } => {
+        Ast::Try {
+            body, catch_body, ..
+        } => {
             for x in body {
                 find_length_of_ident(x, out);
             }
@@ -1236,7 +1336,11 @@ fn find_length_of_ident(ast: &Ast, out: &mut std::collections::HashSet<String>) 
             }
         }
         Ast::Perform { value, .. } => find_length_of_ident(value, out),
-        Ast::Handle { handler_instance, body, .. } => {
+        Ast::Handle {
+            handler_instance,
+            body,
+            ..
+        } => {
             find_length_of_ident(handler_instance, out);
             for x in body {
                 find_length_of_ident(x, out);
@@ -1294,7 +1398,10 @@ fn nc(ast: &Ast, n: &mut usize) {
                 nc(x, n);
             }
         }
-        Ast::Struct { fields, .. } | Ast::Enum { variants: fields, .. } => {
+        Ast::Struct { fields, .. }
+        | Ast::Enum {
+            variants: fields, ..
+        } => {
             for x in fields {
                 nc(x, n);
             }
@@ -1314,7 +1421,12 @@ fn nc(ast: &Ast, n: &mut usize) {
                 nc(v, n);
             }
         }
-        Ast::If { condition, then, else_, .. } => {
+        Ast::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             nc(condition, n);
             for x in then {
                 nc(x, n);
@@ -1323,13 +1435,17 @@ fn nc(ast: &Ast, n: &mut usize) {
                 nc(x, n);
             }
         }
-        Ast::While { condition, body, .. } => {
+        Ast::While {
+            condition, body, ..
+        } => {
             nc(condition, n);
             for x in body {
                 nc(x, n);
             }
         }
-        Ast::For { collection, body, .. } => {
+        Ast::For {
+            collection, body, ..
+        } => {
             nc(collection, n);
             for x in body {
                 nc(x, n);
@@ -1363,10 +1479,12 @@ fn nc(ast: &Ast, n: &mut usize) {
                 nc(a, n);
             }
         }
-        Ast::Let { value, .. }
-        | Ast::LetMut { value, .. }
-        | Ast::LetDynamic { value, .. } => nc(value, n),
-        Ast::Binding { value_expr, body, .. } => {
+        Ast::Let { value, .. } | Ast::LetMut { value, .. } | Ast::LetDynamic { value, .. } => {
+            nc(value, n)
+        }
+        Ast::Binding {
+            value_expr, body, ..
+        } => {
             nc(value_expr, n);
             for x in body {
                 nc(x, n);
@@ -1377,7 +1495,9 @@ fn nc(ast: &Ast, n: &mut usize) {
             nc(value, n);
         }
         Ast::Not { expr, .. } => nc(expr, n),
-        Ast::PropertyAccess { object, property, .. } => {
+        Ast::PropertyAccess {
+            object, property, ..
+        } => {
             nc(object, n);
             nc(property, n);
         }
@@ -1425,7 +1545,9 @@ fn nc(ast: &Ast, n: &mut usize) {
                 }
             }
         }
-        Ast::Try { body, catch_body, .. } => {
+        Ast::Try {
+            body, catch_body, ..
+        } => {
             for x in body {
                 nc(x, n);
             }
@@ -1452,7 +1574,11 @@ fn nc(ast: &Ast, n: &mut usize) {
             }
         }
         Ast::Perform { value, .. } => nc(value, n),
-        Ast::Handle { handler_instance, body, .. } => {
+        Ast::Handle {
+            handler_instance,
+            body,
+            ..
+        } => {
             nc(handler_instance, n);
             for x in body {
                 nc(x, n);
@@ -1510,7 +1636,12 @@ fn calls_in(ast: &Ast, name: &str, hit: &mut bool) {
             // These are forms of self-call by definition.
             *hit = true;
         }
-        Ast::If { condition, then, else_, .. } => {
+        Ast::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             calls_in(condition, name, hit);
             for s in then {
                 calls_in(s, name, hit);
@@ -1519,7 +1650,9 @@ fn calls_in(ast: &Ast, name: &str, hit: &mut bool) {
                 calls_in(s, name, hit);
             }
         }
-        Ast::While { condition, body, .. } => {
+        Ast::While {
+            condition, body, ..
+        } => {
             calls_in(condition, name, hit);
             for s in body {
                 calls_in(s, name, hit);
@@ -1530,22 +1663,28 @@ fn calls_in(ast: &Ast, name: &str, hit: &mut bool) {
                 calls_in(s, name, hit);
             }
         }
-        Ast::For { collection, body, .. } => {
+        Ast::For {
+            collection, body, ..
+        } => {
             calls_in(collection, name, hit);
             for s in body {
                 calls_in(s, name, hit);
             }
         }
-        Ast::Let { value, .. }
-        | Ast::LetMut { value, .. }
-        | Ast::LetDynamic { value, .. } => calls_in(value, name, hit),
-        Ast::Binding { value_expr, body, .. } => {
+        Ast::Let { value, .. } | Ast::LetMut { value, .. } | Ast::LetDynamic { value, .. } => {
+            calls_in(value, name, hit)
+        }
+        Ast::Binding {
+            value_expr, body, ..
+        } => {
             calls_in(value_expr, name, hit);
             for s in body {
                 calls_in(s, name, hit);
             }
         }
-        Ast::Assignment { name: lhs, value, .. } => {
+        Ast::Assignment {
+            name: lhs, value, ..
+        } => {
             calls_in(lhs, name, hit);
             calls_in(value, name, hit);
         }
@@ -1567,7 +1706,9 @@ fn calls_in(ast: &Ast, name: &str, hit: &mut bool) {
             calls_in(right, name, hit);
         }
         Ast::Not { expr, .. } => calls_in(expr, name, hit),
-        Ast::PropertyAccess { object, property, .. } => {
+        Ast::PropertyAccess {
+            object, property, ..
+        } => {
             calls_in(object, name, hit);
             calls_in(property, name, hit);
         }
@@ -1614,7 +1755,9 @@ fn calls_in(ast: &Ast, name: &str, hit: &mut bool) {
                 }
             }
         }
-        Ast::Try { body, catch_body, .. } => {
+        Ast::Try {
+            body, catch_body, ..
+        } => {
             for s in body {
                 calls_in(s, name, hit);
             }
@@ -1678,4 +1821,3 @@ fn is_const_literal(ast: &Ast) -> bool {
             | Ast::Null(..)
     )
 }
-

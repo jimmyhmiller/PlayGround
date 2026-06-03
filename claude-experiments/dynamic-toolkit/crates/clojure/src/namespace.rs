@@ -17,7 +17,7 @@
 //! and root any pointer-typed inputs internally for the duration of
 //! the allocation.
 
-use dynobj::roots::{Rooted, RootScope};
+use dynobj::roots::{RootScope, Rooted};
 
 use crate::host::{layouts, with_host};
 use crate::value::{self as v, NanBoxTag};
@@ -330,7 +330,12 @@ pub fn registry_create_ns<'scope>(
         return scope.root::<NanBoxTag>(existing);
     }
     let ns = alloc_namespace(scope, sym_r.get());
-    let new_map = map_assoc(scope, registry_namespaces(reg_r.get()), sym_r.get(), ns.get());
+    let new_map = map_assoc(
+        scope,
+        registry_namespaces(reg_r.get()),
+        sym_r.get(),
+        ns.get(),
+    );
     registry_set_namespaces(reg_r.get(), new_map.get());
     ns
 }
@@ -371,7 +376,10 @@ pub fn alloc_fn_with_captures<'scope>(
         let gc = unsafe { &*h.gc };
         let type_id = h.types.fn_obj.0;
         let raw = gc.alloc(type_id, captures.len());
-        assert!(!raw.is_null(), "alloc_fn_with_captures: GC alloc returned null");
+        assert!(
+            !raw.is_null(),
+            "alloc_fn_with_captures: GC alloc returned null"
+        );
         let l = h.layouts;
         unsafe {
             (raw.add(l.fn_func_ref) as *mut u64).write(func_ref as u64);

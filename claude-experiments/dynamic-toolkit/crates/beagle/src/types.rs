@@ -115,11 +115,7 @@ impl<'a> TypeEnv<'a> {
     /// Build a fresh env for one function's body. Params start as
     /// `Unknown` — sound under open-world (we don't get to assume
     /// anything about what callers pass).
-    pub fn new(
-        info: &'a TypeInfo,
-        globals: &'a HashMap<String, Ast>,
-        fname: String,
-    ) -> Self {
+    pub fn new(info: &'a TypeInfo, globals: &'a HashMap<String, Ast>, fname: String) -> Self {
         Self {
             info,
             globals,
@@ -189,11 +185,7 @@ pub fn analyze_types(elements: &[Ast], globals: &HashMap<String, Ast>) -> TypeIn
 /// field, type of an unknown identifier) returns `Unknown`. Builtins
 /// have hard-coded return types because the runtime owns their
 /// implementation.
-fn expr_type(
-    ast: &Ast,
-    env: &Vec<HashMap<String, Ty>>,
-    globals: &HashMap<String, Ast>,
-) -> Ty {
+fn expr_type(ast: &Ast, env: &Vec<HashMap<String, Ty>>, globals: &HashMap<String, Ast>) -> Ty {
     match ast {
         Ast::IntegerLiteral(..) | Ast::FloatLiteral(..) => Ty::Number,
         Ast::True(..) | Ast::False(..) | Ast::Null(..) | Ast::String(..) => Ty::Unknown,
@@ -224,9 +216,7 @@ fn expr_type(
             }
         }
 
-        Ast::Condition { .. } | Ast::And { .. } | Ast::Or { .. } | Ast::Not { .. } => {
-            Ty::Unknown
-        }
+        Ast::Condition { .. } | Ast::And { .. } | Ast::Or { .. } | Ast::Not { .. } => Ty::Unknown,
 
         Ast::If { then, else_, .. } => {
             // Each branch is a Vec<Ast> with its own `let` chain. We
@@ -271,9 +261,7 @@ fn expr_type(
             // Builtins have hard-coded return types — the runtime owns
             // their implementation, so this is sound under open-world.
             match name.as_str() {
-                "cos" | "sin" | "to-float" | "to-number" | "length" | "core/time-now" => {
-                    Ty::Number
-                }
+                "cos" | "sin" | "to-float" | "to-number" | "length" | "core/time-now" => Ty::Number,
                 "push" => {
                     // `push(arr, x)` returns Array<LUB(prior_elem, type_of(x))>.
                     if args.len() == 2 {
@@ -399,7 +387,9 @@ fn forward_let_mut(
                 }
             }
         }
-        Ast::While { condition, body, .. } => {
+        Ast::While {
+            condition, body, ..
+        } => {
             forward_let_mut(condition, env, globals, out);
             // Loops can iterate, so a let-mut written inside the body
             // can be read back at the top of the body. Two passes
@@ -413,7 +403,9 @@ fn forward_let_mut(
                 env.pop();
             }
         }
-        Ast::For { collection, body, .. } => {
+        Ast::For {
+            collection, body, ..
+        } => {
             forward_let_mut(collection, env, globals, out);
             for _ in 0..2 {
                 env.push(HashMap::new());
@@ -432,7 +424,12 @@ fn forward_let_mut(
                 env.pop();
             }
         }
-        Ast::If { condition, then, else_, .. } => {
+        Ast::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             forward_let_mut(condition, env, globals, out);
             env.push(HashMap::new());
             for s in then {
@@ -458,7 +455,12 @@ fn forward_let_mut(
 /// program level.
 fn walk_children(ast: &Ast, mut f: impl FnMut(&Ast)) {
     match ast {
-        Ast::If { condition, then, else_, .. } => {
+        Ast::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             f(condition);
             for x in then {
                 f(x);
@@ -467,13 +469,17 @@ fn walk_children(ast: &Ast, mut f: impl FnMut(&Ast)) {
                 f(x);
             }
         }
-        Ast::While { condition, body, .. } => {
+        Ast::While {
+            condition, body, ..
+        } => {
             f(condition);
             for x in body {
                 f(x);
             }
         }
-        Ast::For { collection, body, .. } => {
+        Ast::For {
+            collection, body, ..
+        } => {
             f(collection);
             for x in body {
                 f(x);
@@ -518,7 +524,9 @@ fn walk_children(ast: &Ast, mut f: impl FnMut(&Ast)) {
         Ast::Let { value, .. } | Ast::LetMut { value, .. } | Ast::LetDynamic { value, .. } => {
             f(value);
         }
-        Ast::Binding { value_expr, body, .. } => {
+        Ast::Binding {
+            value_expr, body, ..
+        } => {
             f(value_expr);
             for s in body {
                 f(s);
@@ -529,7 +537,9 @@ fn walk_children(ast: &Ast, mut f: impl FnMut(&Ast)) {
             f(value);
         }
         Ast::Not { expr, .. } => f(expr),
-        Ast::PropertyAccess { object, property, .. } => {
+        Ast::PropertyAccess {
+            object, property, ..
+        } => {
             f(object);
             f(property);
         }
@@ -576,7 +586,9 @@ fn walk_children(ast: &Ast, mut f: impl FnMut(&Ast)) {
                 }
             }
         }
-        Ast::Try { body, catch_body, .. } => {
+        Ast::Try {
+            body, catch_body, ..
+        } => {
             for x in body {
                 f(x);
             }
@@ -603,7 +615,11 @@ fn walk_children(ast: &Ast, mut f: impl FnMut(&Ast)) {
             }
         }
         Ast::Perform { value, .. } => f(value),
-        Ast::Handle { handler_instance, body, .. } => {
+        Ast::Handle {
+            handler_instance,
+            body,
+            ..
+        } => {
             f(handler_instance);
             for x in body {
                 f(x);

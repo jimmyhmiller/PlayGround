@@ -40,9 +40,10 @@ use crate::gc::{ObjHeader, TypeInfo, VarLenKind};
 use crate::hash::Hash;
 use crate::resolve::{ResolvedDef, ResolvedModule};
 use crate::runtime::{
-    Runtime, Thread, ai_array_get, ai_atom_swap_local, ai_array_len, ai_array_new, ai_array_set, ai_bytes_copy,
+    Runtime, Thread, ai_array_get, ai_atom_load, ai_atom_new, ai_atom_swap_local, ai_array_len, ai_array_new, ai_array_set, ai_bytes_copy,
     ai_bytes_get, ai_bytes_new, ai_bytes_set, ai_bytes_slice, ai_gc_alloc_closure, ai_gc_box_int,
-    ai_gc_force_collect, ai_gc_lookup_code, ai_gc_unbox_int, ai_panic, ai_str_concat, ai_str_eq,
+    ai_gc_force_collect, ai_gc_lookup_code, ai_gc_unbox_int, ai_panic, ai_state_get,
+    ai_state_present, ai_state_set, ai_value_eq, ai_value_hash, ai_str_concat, ai_str_eq,
     ai_str_len, ai_str_new, closure_offsets, thread_offsets,
 };
 
@@ -123,6 +124,13 @@ pub fn lambda_symbol(hash: &Hash) -> String {
     format!("lambda_{}", hash.to_hex())
 }
 
+/// Symbol of a node `state` binding's installer function. Run once per
+/// node (idempotently) to evaluate the initializer and populate the
+/// state table.
+pub fn state_init_symbol(hash: &Hash) -> String {
+    format!("state_init_{}", hash.to_hex())
+}
+
 pub fn frame_origin_symbol(prefix: &str, hash: &Hash) -> String {
     format!("__frame_origin_{}_{}", prefix, hash.to_hex())
 }
@@ -193,7 +201,9 @@ fn collect_ext_refs(e: &Expr, out: &mut std::collections::HashSet<String>) {
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
-        | Expr::SelfRef(_) => {}
+        | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_) => {}
     }
 }
 
@@ -301,6 +311,16 @@ pub struct CompiledModule<'ctx> {
     /// type_id → shape hash. Encoder reads `type_id` from the heap
     /// header and looks up the shape here.
     pub shape_by_type_id: Vec<Option<Hash>>,
+
+    /// Content hashes of node `state` bindings in this module, in
+    /// dependency order. Their installer functions (`state_init_<hash>`)
+    /// must run once at node startup to populate the state table.
+    pub state_hashes: Vec<Hash>,
+
+    /// Def/lambda hashes whose thunks transitively touch a node `state`
+    /// cell and so must bypass the `at()` result cache. Copied into
+    /// `Runtime.stateful_hashes` at JIT install.
+    pub stateful_hashes: Vec<Hash>,
 }
 
 /// Layout metadata for one heap shape, used by the wire encoder/decoder.
@@ -433,8 +453,10 @@ impl<'ctx> CompiledModule<'ctx> {
 
         // ---- Pre-scan: collect every unique Lambda expression ----
         for rd in &rm.defs {
-            if let Def::Fn { body, .. } = &rd.def {
-                cg.scan_lambdas(body)?;
+            match &rd.def {
+                Def::Fn { body, .. } => cg.scan_lambdas(body)?,
+                Def::State { init, .. } => cg.scan_lambdas(init)?,
+                _ => {}
             }
         }
 
@@ -449,8 +471,10 @@ impl<'ctx> CompiledModule<'ctx> {
         // now, but only if the module actually references them.
         let mut referenced_externs = std::collections::HashSet::new();
         for rd in &rm.defs {
-            if let Def::Fn { body, .. } = &rd.def {
-                collect_ext_refs(body, &mut referenced_externs);
+            match &rd.def {
+                Def::Fn { body, .. } => collect_ext_refs(body, &mut referenced_externs),
+                Def::State { init, .. } => collect_ext_refs(init, &mut referenced_externs),
+                _ => {}
             }
         }
         cg.declare_user_externs(&rm.externs, &referenced_externs)?;
@@ -471,8 +495,10 @@ impl<'ctx> CompiledModule<'ctx> {
         // lambdas now — AFTER `declare_def` (we need `def_signatures`)
         // and BEFORE the lambda passes below pick up `cg.lambdas`.
         for rd in &rm.defs {
-            if let Def::Fn { body, .. } = &rd.def {
-                cg.scan_fn_value_refs(body)?;
+            match &rd.def {
+                Def::Fn { body, .. } => cg.scan_fn_value_refs(body)?,
+                Def::State { init, .. } => cg.scan_fn_value_refs(init)?,
+                _ => {}
             }
         }
 
@@ -523,6 +549,22 @@ impl<'ctx> CompiledModule<'ctx> {
         let shape_registry = cg.shape_registry.clone();
         let shape_meta = cg.shape_meta.clone();
         let shape_by_type_id = cg.shape_by_type_id.clone();
+        // State installers to run once at node startup, in dependency order
+        // (rm.defs is dependency-first, so a state init referencing another
+        // state installs after it).
+        let state_hashes: Vec<Hash> = rm
+            .defs
+            .iter()
+            .filter(|rd| matches!(rd.def, Def::State { .. }))
+            .map(|rd| rd.hash)
+            .collect();
+        // Thunks that transitively touch node state are cache-unsafe.
+        // Include standalone (code-fetch) lambdas so a shipped entry
+        // closure that calls a stateful def is itself marked.
+        let stateful_hashes: Vec<Hash> =
+            crate::knowledge::stateful_hashes(&rm.defs, extra_lambdas)
+                .into_iter()
+                .collect();
 
         Ok(CompiledModule {
             context,
@@ -533,6 +575,8 @@ impl<'ctx> CompiledModule<'ctx> {
             shape_registry,
             shape_meta,
             shape_by_type_id,
+            state_hashes,
+            stateful_hashes,
         })
     }
 
@@ -554,6 +598,9 @@ struct Codegen<'ctx> {
     frame_origin_ty: StructType<'ctx>,
 
     functions: HashMap<Hash, FunctionValue<'ctx>>,
+    /// Node `state` installer functions, keyed by the state's content hash.
+    /// Run once per node to populate the state table.
+    state_installers: HashMap<Hash, FunctionValue<'ctx>>,
     lifted_lambdas: HashMap<Hash, FunctionValue<'ctx>>,
     frame_origins: HashMap<String, GlobalValue<'ctx>>,
     used_globals: Vec<PointerValue<'ctx>>,
@@ -599,6 +646,11 @@ struct Codegen<'ctx> {
     extern_box_int: Option<FunctionValue<'ctx>>,
     extern_unbox_int: Option<FunctionValue<'ctx>>,
     extern_force_collect: Option<FunctionValue<'ctx>>,
+    extern_state_get: Option<FunctionValue<'ctx>>,
+    extern_state_present: Option<FunctionValue<'ctx>>,
+    extern_state_set: Option<FunctionValue<'ctx>>,
+    extern_value_hash: Option<FunctionValue<'ctx>>,
+    extern_value_eq: Option<FunctionValue<'ctx>>,
     extern_panic: Option<FunctionValue<'ctx>>,
     extern_str_new: Option<FunctionValue<'ctx>>,
     extern_str_len: Option<FunctionValue<'ctx>>,
@@ -614,6 +666,15 @@ struct Codegen<'ctx> {
     extern_array_get: Option<FunctionValue<'ctx>>,
     extern_array_set: Option<FunctionValue<'ctx>>,
     extern_atom_swap_local: Option<FunctionValue<'ctx>>,
+    extern_atom_new: Option<FunctionValue<'ctx>>,
+    extern_atom_load: Option<FunctionValue<'ctx>>,
+    /// Value-boundary fns exposing the wire codec + closure invocation to
+    /// ai-lang, so a node loop can be written in the language.
+    extern_wire_encode: Option<FunctionValue<'ctx>>,
+    extern_wire_decode_int: Option<FunctionValue<'ctx>>,
+    extern_wire_decode_ptr: Option<FunctionValue<'ctx>>,
+    extern_wire_decode_checked: Option<FunctionValue<'ctx>>,
+    extern_wire_invoke: Option<FunctionValue<'ctx>>,
 
     /// In-flight tail-call context: only populated while compiling a
     /// single fn body. Calls inside the body that target this fn's
@@ -626,6 +687,10 @@ struct Codegen<'ctx> {
     /// `infer_type` when crossing generic call boundaries to decide
     /// where to box/unbox.
     def_signatures: HashMap<Hash, FnSigSimple>,
+    /// Declared type of each node `state` binding, keyed by content hash.
+    /// `infer_type` consults this so `StateRef`-based boxing decisions
+    /// (e.g. `deref`/`swap` over `Atom<Int>`) are correct.
+    state_types: HashMap<Hash, Type>,
     /// Per-struct field types in declaration order, for `Field`
     /// projection's inferred type.
     struct_field_types: HashMap<Hash, Vec<Type>>,
@@ -743,6 +808,7 @@ impl<'ctx> Codegen<'ctx> {
             ptr_ty,
             frame_origin_ty,
             functions: HashMap::new(),
+            state_installers: HashMap::new(),
             lifted_lambdas: HashMap::new(),
             frame_origins: HashMap::new(),
             used_globals: Vec::new(),
@@ -762,6 +828,11 @@ impl<'ctx> Codegen<'ctx> {
             extern_box_int: None,
             extern_unbox_int: None,
             extern_force_collect: None,
+            extern_state_get: None,
+            extern_state_present: None,
+            extern_state_set: None,
+            extern_value_hash: None,
+            extern_value_eq: None,
             extern_panic: None,
             extern_str_new: None,
             extern_str_len: None,
@@ -777,8 +848,16 @@ impl<'ctx> Codegen<'ctx> {
             extern_array_get: None,
             extern_array_set: None,
             extern_atom_swap_local: None,
+            extern_atom_new: None,
+            extern_atom_load: None,
+            extern_wire_encode: None,
+            extern_wire_decode_int: None,
+            extern_wire_decode_ptr: None,
+            extern_wire_decode_checked: None,
+            extern_wire_invoke: None,
             tail_ctx: None,
             def_signatures: HashMap::new(),
+            state_types: HashMap::new(),
             struct_field_types: HashMap::new(),
             enum_variant_types: HashMap::new(),
             next_type_id: 0,
@@ -898,6 +977,8 @@ impl<'ctx> Codegen<'ctx> {
             | Expr::LocalVar(_)
             | Expr::TopRef(_)
             | Expr::SelfRef(_)
+            | Expr::StateRef(_)
+            | Expr::StateSelfRef(_)
             | Expr::BuiltinRef(_) => {}
         }
         Ok(())
@@ -1066,8 +1147,12 @@ impl<'ctx> Codegen<'ctx> {
             | Expr::LocalVar(_)
             // SelfRef is rewritten to TopRef by the resolver before
             // codegen; if one ever reaches here it's a value-position
-            // self-reference, errored on by compile_expr.
-            | Expr::SelfRef(_) => {}
+            // self-reference, errored on by compile_expr. A StateRef is a
+            // value (the live cell), not a fn reference, so it needs no
+            // adapter.
+            | Expr::SelfRef(_)
+            | Expr::StateRef(_)
+            | Expr::StateSelfRef(_) => {}
         }
         Ok(())
     }
@@ -1113,6 +1198,56 @@ impl<'ctx> Codegen<'ctx> {
                 .add_function("ai_net_at", net_at_ty, Some(Linkage::External));
         self.extern_net_at = Some(net_at);
 
+        // ai_wire_encode(thread, value_ptr) -> *u8 (Bytes)
+        let wire_encode_ty =
+            self.ptr_ty.fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        self.extern_wire_encode = Some(self.module.add_function(
+            "ai_wire_encode",
+            wire_encode_ty,
+            Some(Linkage::External),
+        ));
+        // ai_wire_decode_int(thread, bytes_ptr) -> i64
+        let wire_decode_int_ty =
+            self.i64_ty.fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        self.extern_wire_decode_int = Some(self.module.add_function(
+            "ai_wire_decode_int",
+            wire_decode_int_ty,
+            Some(Linkage::External),
+        ));
+        // ai_wire_decode_ptr(thread, bytes_ptr) -> *u8 (decoded heap value)
+        let wire_decode_ptr_ty =
+            self.ptr_ty.fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        self.extern_wire_decode_ptr = Some(self.module.add_function(
+            "ai_wire_decode_ptr",
+            wire_decode_ptr_ty,
+            Some(Linkage::External),
+        ));
+        // ai_wire_decode_checked(thread, bytes, h0, h1, h2, h3) -> *u8 (Result)
+        let wire_decode_checked_ty = self.ptr_ty.fn_type(
+            &[
+                self.ptr_ty.into(),
+                self.ptr_ty.into(),
+                self.i64_ty.into(),
+                self.i64_ty.into(),
+                self.i64_ty.into(),
+                self.i64_ty.into(),
+            ],
+            false,
+        );
+        self.extern_wire_decode_checked = Some(self.module.add_function(
+            "ai_wire_decode_checked",
+            wire_decode_checked_ty,
+            Some(Linkage::External),
+        ));
+        // ai_wire_invoke(thread, closure_bytes_ptr) -> *u8 (Bytes)
+        let wire_invoke_ty =
+            self.ptr_ty.fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        self.extern_wire_invoke = Some(self.module.add_function(
+            "ai_wire_invoke",
+            wire_invoke_ty,
+            Some(Linkage::External),
+        ));
+
         // ai_gc_box_int(thread, i64) -> *u8 — boxes an Int into a
         // BoxedInt heap object so generic-typed slots can store it.
         let box_int_ty = self
@@ -1141,6 +1276,55 @@ impl<'ctx> Codegen<'ctx> {
             Some(Linkage::External),
         );
         self.extern_force_collect = Some(force_collect);
+
+        // Node `state` primitives. Each takes a pointer to 32 content-hash
+        // bytes (a private module constant emitted at the reference / install
+        // site).
+        // ai_state_get(thread, hash_ptr) -> ptr (the live cell)
+        let state_get_ty = self
+            .ptr_ty
+            .fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        let state_get =
+            self.module
+                .add_function("ai_state_get", state_get_ty, Some(Linkage::External));
+        self.extern_state_get = Some(state_get);
+        // ai_state_present(thread, hash_ptr) -> i64
+        let state_present_ty = self
+            .i64_ty
+            .fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        let state_present = self.module.add_function(
+            "ai_state_present",
+            state_present_ty,
+            Some(Linkage::External),
+        );
+        self.extern_state_present = Some(state_present);
+        // ai_state_set(thread, hash_ptr, val) -> i64
+        let state_set_ty = self.i64_ty.fn_type(
+            &[self.ptr_ty.into(), self.ptr_ty.into(), self.ptr_ty.into()],
+            false,
+        );
+        let state_set =
+            self.module
+                .add_function("ai_state_set", state_set_ty, Some(Linkage::External));
+        self.extern_state_set = Some(state_set);
+
+        // ai_value_hash(thread, v_ptr) -> i64 — structural hash of any value.
+        let value_hash_ty = self
+            .i64_ty
+            .fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        let value_hash =
+            self.module
+                .add_function("ai_value_hash", value_hash_ty, Some(Linkage::External));
+        self.extern_value_hash = Some(value_hash);
+        // ai_value_eq(thread, a_ptr, b_ptr) -> i64 — structural equality.
+        let value_eq_ty = self.i64_ty.fn_type(
+            &[self.ptr_ty.into(), self.ptr_ty.into(), self.ptr_ty.into()],
+            false,
+        );
+        let value_eq =
+            self.module
+                .add_function("ai_value_eq", value_eq_ty, Some(Linkage::External));
+        self.extern_value_eq = Some(value_eq);
 
         // ai_panic(thread, msg_ptr) -> ! — prints a heap String message
         // to stderr and aborts. Declared returning void; every call site
@@ -1305,14 +1489,30 @@ impl<'ctx> Codegen<'ctx> {
         );
         self.extern_array_set = Some(array_set);
 
-        // ai_atom_swap(thread, cell_array, i, updater_closure) -> *u8
+        // ai_atom_new(thread, init_ptr) -> *u8
+        // Allocate a fresh dedicated `Atom` cell holding `init`.
+        let atom_new_ty = self
+            .ptr_ty
+            .fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        let atom_new =
+            self.module
+                .add_function("ai_atom_new", atom_new_ty, Some(Linkage::External));
+        self.extern_atom_new = Some(atom_new);
+
+        // ai_atom_load(atom) -> *u8 — acquiring read of the cell's value.
+        let atom_load_ty = self.ptr_ty.fn_type(&[self.ptr_ty.into()], false);
+        let atom_load =
+            self.module
+                .add_function("ai_atom_load", atom_load_ty, Some(Linkage::External));
+        self.extern_atom_load = Some(atom_load);
+
+        // ai_atom_swap(thread, atom, updater_closure) -> *u8
         // The lock-free atom primitive: load slot, run closure, CAS,
         // retry. Returns the installed value pointer.
         let atom_swap_ty = self.ptr_ty.fn_type(
             &[
                 self.ptr_ty.into(),
                 self.ptr_ty.into(),
-                self.i64_ty.into(),
                 self.ptr_ty.into(),
             ],
             false,
@@ -1528,7 +1728,8 @@ impl<'ctx> Codegen<'ctx> {
         match e {
             Expr::LocalVar(_) | Expr::IntLit(_) | Expr::FloatLit(_) | Expr::BoolLit(_)
             | Expr::StringLit(_) | Expr::TopRef(_)
-            | Expr::BuiltinRef(_) | Expr::SelfRef(_) => {}
+            | Expr::BuiltinRef(_) | Expr::SelfRef(_)
+            | Expr::StateRef(_) | Expr::StateSelfRef(_) => {}
             Expr::Field { base, .. } => {
                 if let Some(idx) = arg_is_capture_localvar(base, arity) {
                     mark(idx, arity, flags);
@@ -2097,6 +2298,55 @@ impl<'ctx> Codegen<'ctx> {
                 );
                 return self.declare_enum(&rd.hash, &rd.name, variants);
             }
+            Def::State { ty, init } => {
+                // Record the declared type so `infer_type(StateRef)` can
+                // drive box/unbox at `deref`/`swap` sites.
+                self.state_types.insert(rd.hash, ty.clone());
+                // Declare the installer: `state_init_<hash>(thread) -> i64`.
+                // Its body (emitted in `compile_def`) idempotently runs the
+                // initializer once and stores the result in the node table.
+                // It carries a GC frame because the initializer allocates.
+                let symbol = state_init_symbol(&rd.hash);
+                let fn_ty = self.i64_ty.fn_type(&[self.ptr_ty.into()], false);
+                let fv = self.module.add_function(&symbol, fn_ty, None);
+
+                let mut num_roots = count_gc_locals(init);
+                let defer_scratch = num_roots;
+                num_roots += 1;
+                let roots_array_ty = self.ptr_ty.array_type(num_roots);
+                let frame_ty = self.context.struct_type(
+                    &[self.ptr_ty.into(), self.ptr_ty.into(), roots_array_ty.into()],
+                    false,
+                );
+                let name_global = self.emit_name_string(&symbol, &rd.hash, "state");
+                let origin_init = self.frame_origin_ty.const_named_struct(&[
+                    self.context.i32_type().const_int(num_roots as u64, false).into(),
+                    self.context.i32_type().const_zero().into(),
+                    name_global.as_pointer_value().into(),
+                ]);
+                let origin_sym = frame_origin_symbol("state", &rd.hash);
+                let origin_global = self.module.add_global(
+                    self.frame_origin_ty,
+                    Some(AddressSpace::default()),
+                    &origin_sym,
+                );
+                origin_global.set_linkage(Linkage::Private);
+                origin_global.set_constant(true);
+                origin_global.set_initializer(&origin_init);
+
+                self.state_installers.insert(rd.hash, fv);
+                self.frame_origins.insert(origin_sym, origin_global);
+                self.used_globals.push(origin_global.as_pointer_value());
+                self.def_info.insert(
+                    rd.hash,
+                    DefInfo {
+                        num_roots,
+                        defer_scratch,
+                        frame_ty,
+                    },
+                );
+                return Ok(());
+            }
             Def::Fn { .. } => {}
         }
         let Def::Fn {
@@ -2192,6 +2442,10 @@ impl<'ctx> Codegen<'ctx> {
     }
 
     fn compile_def(&mut self, rd: &ResolvedDef) -> Result<(), CodegenError> {
+        // Node `state` binding: emit its installer body.
+        if let Def::State { init, .. } = &rd.def {
+            return self.compile_state_installer(rd, init);
+        }
         // Struct defs have no body to compile — only TypeInfo registration
         // (already done in declare_def). Skip.
         let Def::Fn { body, params, ret, .. } = &rd.def else {
@@ -2347,6 +2601,106 @@ impl<'ctx> Codegen<'ctx> {
         self.builder
             .build_return(basic.as_ref().map(|b| b as &dyn inkwell::values::BasicValue))
             .map_err(|e| CodegenError::JitInit(format!("build_return: {}", e)))?;
+        Ok(())
+    }
+
+    /// Emit the body of a node `state` installer:
+    /// `if !ai_state_present(hash) { ai_state_set(hash, <init>) }; ret 0`.
+    /// Idempotent by hash (the runtime no-ops a re-install), so the
+    /// initializer runs at most once per node. The init allocates, so this
+    /// fn carries a GC frame (prologue/epilogue) like any def body.
+    fn compile_state_installer(
+        &mut self,
+        rd: &ResolvedDef,
+        init: &Expr,
+    ) -> Result<(), CodegenError> {
+        self.deferred.clear();
+        let fv = self.state_installers[&rd.hash];
+        let info = self.def_info[&rd.hash];
+        let origin_sym = frame_origin_symbol("state", &rd.hash);
+
+        let entry = self.context.append_basic_block(fv, "entry");
+        self.builder.position_at_end(entry);
+        let thread_param = fv.get_nth_param(0).unwrap().into_pointer_value();
+        let frame_alloca = self.emit_prologue(thread_param, info, &origin_sym)?;
+
+        let hash_ptr = self.emit_hash_constant(&rd.hash).as_pointer_value();
+        let present_fn = self.extern_state_present.expect("ai_state_present declared");
+        let present = self
+            .builder
+            .build_call(present_fn, &[thread_param.into(), hash_ptr.into()], "state_present")
+            .map_err(|e| CodegenError::JitInit(format!("build_call ai_state_present: {}", e)))?
+            .as_any_value_enum()
+            .into_int_value();
+        let is_absent = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                present,
+                self.i64_ty.const_zero(),
+                "state_absent",
+            )
+            .map_err(|e| CodegenError::JitInit(format!("icmp state_absent: {}", e)))?;
+        let do_init = self.context.append_basic_block(fv, "do_init");
+        let done = self.context.append_basic_block(fv, "done");
+        self.builder
+            .build_conditional_branch(is_absent, do_init, done)
+            .map_err(|e| CodegenError::JitInit(format!("br state install: {}", e)))?;
+
+        // do_init: evaluate the initializer (rooted by the frame) and store.
+        self.builder.position_at_end(do_init);
+        let mut env = Env::new();
+        let v = self.compile_expr(
+            init,
+            &mut env,
+            CompileCtx {
+                thread_param,
+                frame_alloca,
+                info,
+                next_root_slot: 0,
+                is_tail: false,
+            },
+        )?;
+        // Box an Int initializer so the cell holds a uniform pointer.
+        let v_ptr = match v {
+            Value::Closure(p) => p,
+            Value::Int(iv) => {
+                let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
+                self.builder
+                    .build_call(box_fn, &[thread_param.into(), iv.into()], "state_init_boxed")
+                    .map_err(|e| CodegenError::JitInit(format!(
+                        "build_call ai_gc_box_int (state init): {}", e
+                    )))?
+                    .as_any_value_enum()
+                    .into_pointer_value()
+            }
+        };
+        let set_fn = self.extern_state_set.expect("ai_state_set declared");
+        self.builder
+            .build_call(
+                set_fn,
+                &[thread_param.into(), hash_ptr.into(), v_ptr.into()],
+                "state_set",
+            )
+            .map_err(|e| CodegenError::JitInit(format!("build_call ai_state_set: {}", e)))?;
+        // The init block may have been split (e.g. by a match); branch from
+        // wherever the builder now sits.
+        if self
+            .builder
+            .get_insert_block()
+            .and_then(|b| b.get_terminator())
+            .is_none()
+        {
+            self.builder
+                .build_unconditional_branch(done)
+                .map_err(|e| CodegenError::JitInit(format!("br do_init→done: {}", e)))?;
+        }
+
+        self.builder.position_at_end(done);
+        self.emit_epilogue(thread_param, frame_alloca)?;
+        self.builder
+            .build_return(Some(&self.i64_ty.const_zero()))
+            .map_err(|e| CodegenError::JitInit(format!("build_return state installer: {}", e)))?;
         Ok(())
     }
 
@@ -2741,6 +3095,30 @@ impl<'ctx> Codegen<'ctx> {
     // Expressions
     // -------------------------------------------------------------------------
 
+    /// Coerce a compiled value to a uniform heap pointer: box an `Int` into
+    /// a `BoxedInt`, pass a pointer through unchanged. Used where a runtime
+    /// primitive needs a heap object regardless of static type (e.g. the
+    /// structural `value_hash`/`value_eq`).
+    fn value_as_ptr(
+        &self,
+        v: Value<'ctx>,
+        ctx: CompileCtx<'ctx>,
+    ) -> Result<PointerValue<'ctx>, CodegenError> {
+        match v {
+            Value::Closure(p) => Ok(p),
+            Value::Int(iv) => {
+                let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
+                let boxed = self
+                    .builder
+                    .build_call(box_fn, &[ctx.thread_param.into(), iv.into()], "as_ptr_boxed")
+                    .map_err(|e| CodegenError::JitInit(format!(
+                        "build_call ai_gc_box_int (value_as_ptr): {}", e
+                    )))?;
+                Ok(boxed.as_any_value_enum().into_pointer_value())
+            }
+        }
+    }
+
     fn compile_expr(
         &mut self,
         e: &Expr,
@@ -2754,6 +3132,28 @@ impl<'ctx> Codegen<'ctx> {
             Expr::FloatLit(x) => Ok(Value::Int(
                 self.i64_ty.const_int(x.to_bits(), false),
             )),
+
+            // A node `state` reference: resolve the live cell on the
+            // executing node via `ai_state_get(thread, &hash)`. The cell
+            // is a heap pointer (typically an `Atom`), never an Int.
+            Expr::StateRef(h) => {
+                let hp = self.emit_hash_constant(h).as_pointer_value();
+                let f = self.extern_state_get.expect("ai_state_get declared");
+                let call = self
+                    .builder
+                    .build_call(f, &[ctx.thread_param.into(), hp.into()], "state_get")
+                    .map_err(|e| CodegenError::JitInit(format!(
+                        "build_call ai_state_get: {}", e
+                    )))?;
+                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+            }
+            // StateSelfRef only appears in hashing bytes; the resolver
+            // rewrites it to StateRef before storing, so reaching codegen
+            // is a bug, not a user error.
+            Expr::StateSelfRef(_) => Err(CodegenError::Unsupported {
+                what: "StateSelfRef reached codegen (resolver should have \
+                       rewritten it to StateRef)".to_owned(),
+            }),
 
             Expr::LocalVar(idx) => {
                 let n = env.len();
@@ -3435,6 +3835,146 @@ impl<'ctx> Codegen<'ctx> {
                     .map_err(|e| CodegenError::JitInit(format!("build_call ai_net_at: {}", e)))?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
             }
+            Expr::BuiltinRef(name) if name == "core/wire.encode" => {
+                // wire_encode(x) -> Bytes. x is any value; an Int is boxed
+                // first so the codec always sees a heap pointer.
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let arg_v = self.compile_expr(&args[0], env, ctx)?;
+                let val_ptr = match arg_v {
+                    Value::Closure(p) => p,
+                    Value::Int(iv) => {
+                        let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
+                        self.builder
+                            .build_call(
+                                box_fn,
+                                &[ctx.thread_param.into(), iv.into()],
+                                "box_for_encode",
+                            )
+                            .map_err(|e| CodegenError::JitInit(format!(
+                                "build_call ai_gc_box_int (wire.encode): {}", e
+                            )))?
+                            .as_any_value_enum()
+                            .into_pointer_value()
+                    }
+                };
+                let f = self.extern_wire_encode.expect("ai_wire_encode declared");
+                let call = self
+                    .builder
+                    .build_call(f, &[ctx.thread_param.into(), val_ptr.into()], "wire_encode")
+                    .map_err(|e| CodegenError::JitInit(format!("build_call ai_wire_encode: {}", e)))?;
+                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/wire.decode_int" => {
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let bytes = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let f = self.extern_wire_decode_int.expect("ai_wire_decode_int declared");
+                let call = self
+                    .builder
+                    .build_call(f, &[ctx.thread_param.into(), bytes.into()], "wire_decode_int")
+                    .map_err(|e| CodegenError::JitInit(format!("build_call ai_wire_decode_int: {}", e)))?;
+                Ok(Value::Int(call.as_any_value_enum().into_int_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/wire.decode_fn1" => {
+                // Decode a shipped closure into a callable value (a heap
+                // pointer under the uniform ABI). The resolver typed the
+                // result as `fn(Int)->Int` so it can be passed to `swap`.
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let bytes = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let f = self.extern_wire_decode_ptr.expect("ai_wire_decode_ptr declared");
+                let call = self
+                    .builder
+                    .build_call(f, &[ctx.thread_param.into(), bytes.into()], "wire_decode_fn1")
+                    .map_err(|e| CodegenError::JitInit(format!("build_call ai_wire_decode_ptr: {}", e)))?;
+                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/wire.invoke" => {
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let bytes = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let f = self.extern_wire_invoke.expect("ai_wire_invoke declared");
+                let call = self
+                    .builder
+                    .build_call(f, &[ctx.thread_param.into(), bytes.into()], "wire_invoke")
+                    .map_err(|e| CodegenError::JitInit(format!("build_call ai_wire_invoke: {}", e)))?;
+                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+            }
+            Expr::BuiltinRef(name) if name.starts_with("core/wire.decode#") => {
+                // decode::<T>(bytes) -> Result<T, Int>. The 32-byte expected
+                // identity hash for T is baked into the name as 64 hex chars;
+                // pass it to the runtime as four little-endian i64 words.
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                // Name: core/wire.decode#<expected>#<result_hash>#<okint>.
+                // The runtime check only needs the first hash.
+                let hex = name
+                    .strip_prefix("core/wire.decode#")
+                    .and_then(|rest| rest.split('#').next())
+                    .unwrap_or("");
+                if hex.len() != 64 {
+                    return Err(CodegenError::JitInit(format!(
+                        "core/wire.decode: malformed hash in builtin name: {}",
+                        name
+                    )));
+                }
+                let mut hb = [0u8; 32];
+                for i in 0..32 {
+                    hb[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16).map_err(|e| {
+                        CodegenError::JitInit(format!("core/wire.decode: bad hash hex: {}", e))
+                    })?;
+                }
+                let word = |lo: usize| -> u64 {
+                    let mut w = [0u8; 8];
+                    w.copy_from_slice(&hb[lo..lo + 8]);
+                    u64::from_le_bytes(w)
+                };
+                let bytes = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let f = self
+                    .extern_wire_decode_checked
+                    .expect("ai_wire_decode_checked declared");
+                let h0 = self.i64_ty.const_int(word(0), false);
+                let h1 = self.i64_ty.const_int(word(8), false);
+                let h2 = self.i64_ty.const_int(word(16), false);
+                let h3 = self.i64_ty.const_int(word(24), false);
+                let call = self
+                    .builder
+                    .build_call(
+                        f,
+                        &[
+                            ctx.thread_param.into(),
+                            bytes.into(),
+                            h0.into(),
+                            h1.into(),
+                            h2.into(),
+                            h3.into(),
+                        ],
+                        "wire_decode_checked",
+                    )
+                    .map_err(|e| CodegenError::JitInit(format!("build_call ai_wire_decode_checked: {}", e)))?;
+                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+            }
             Expr::BuiltinRef(name) if name == "core/string.len" => {
                 if args.len() != 1 {
                     return Err(CodegenError::UnknownBuiltin {
@@ -3760,9 +4300,82 @@ impl<'ctx> Codegen<'ctx> {
                     ))?;
                 Ok(Value::Int(call.as_any_value_enum().into_int_value()))
             }
+            Expr::BuiltinRef(name) if name == "core/atom.new" => {
+                // atom_new(init) -> Atom<T>. Allocate a dedicated `Atom`
+                // cell (NOT a 1-slot Array) holding `init`. Box an Int
+                // init so the slot holds a uniform pointer.
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let v = self.compile_expr(&args[0], env, ctx)?;
+                let init_ptr = match v {
+                    Value::Int(iv) => {
+                        let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
+                        let boxed = self
+                            .builder
+                            .build_call(
+                                box_fn,
+                                &[ctx.thread_param.into(), iv.into()],
+                                "atom_new_boxed",
+                            )
+                            .map_err(|e| CodegenError::JitInit(
+                                format!("build_call ai_gc_box_int (atom.new): {}", e),
+                            ))?;
+                        boxed.as_any_value_enum().into_pointer_value()
+                    }
+                    Value::Closure(p) => p,
+                };
+                let fv = self.extern_atom_new.expect("ai_atom_new declared");
+                let call = self
+                    .builder
+                    .build_call(
+                        fv,
+                        &[ctx.thread_param.into(), init_ptr.into()],
+                        "atom_new_result",
+                    )
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_atom_new: {}", e),
+                    ))?;
+                Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/atom.load" => {
+                // atom_load(a) -> T. Acquiring read of the cell's value.
+                // Unbox if the atom's instantiation pins T to Int.
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let elem_is_int = atom_element_is_int(&self.infer_type(&args[0], env));
+                let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
+                let fv = self.extern_atom_load.expect("ai_atom_load declared");
+                let call = self
+                    .builder
+                    .build_call(fv, &[a.into()], "atom_load_result")
+                    .map_err(|e| CodegenError::JitInit(
+                        format!("build_call ai_atom_load: {}", e),
+                    ))?;
+                let res_ptr = call.as_any_value_enum().into_pointer_value();
+                if elem_is_int {
+                    let unbox_fn = self.extern_unbox_int.expect("ai_gc_unbox_int declared");
+                    let unboxed = self
+                        .builder
+                        .build_call(unbox_fn, &[res_ptr.into()], "atom_load_unboxed")
+                        .map_err(|e| CodegenError::JitInit(format!(
+                            "build_call ai_gc_unbox_int (atom.load): {}", e
+                        )))?;
+                    Ok(Value::Int(unboxed.as_any_value_enum().into_int_value()))
+                } else {
+                    Ok(Value::Closure(res_ptr))
+                }
+            }
             Expr::BuiltinRef(name) if name == "core/atom.swap" => {
                 // The ONE atom primitive: lock-free swap. Args:
-                //   (cell_array, slot_index, updater_closure)
+                //   (atom_cell, updater_closure)
                 // The runtime fn runs the full CAS retry loop — load the
                 // slot pointer, invoke the closure to produce a new
                 // object, compare-exchange the real pointers, retry on
@@ -3770,22 +4383,21 @@ impl<'ctx> Codegen<'ctx> {
                 // on raw object identity (the closure does its own
                 // box/unbox via the uniform ABI). Returns the installed
                 // value pointer.
-                if args.len() != 3 {
+                if args.len() != 2 {
                     return Err(CodegenError::UnknownBuiltin {
                         name: name.clone(),
                         arity: args.len(),
                     });
                 }
-                let elem_is_int = array_element_is_int(&self.infer_type(&args[0], env));
+                let elem_is_int = atom_element_is_int(&self.infer_type(&args[0], env));
                 let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
-                let i = self.compile_expr(&args[1], env, ctx)?.as_int()?;
-                let f = self.compile_expr(&args[2], env, ctx)?.as_closure()?;
+                let f = self.compile_expr(&args[1], env, ctx)?.as_closure()?;
                 let fv = self.extern_atom_swap_local.expect("ai_atom_swap declared");
                 let call = self
                     .builder
                     .build_call(
                         fv,
-                        &[ctx.thread_param.into(), a.into(), i.into(), f.into()],
+                        &[ctx.thread_param.into(), a.into(), f.into()],
                         "atom_swap_result",
                     )
                     .map_err(|e| CodegenError::JitInit(format!("build_call ai_atom_swap: {}", e)))?;
@@ -3802,6 +4414,47 @@ impl<'ctx> Codegen<'ctx> {
                 } else {
                     Ok(Value::Closure(res_ptr))
                 }
+            }
+            // Structural hash / equality of ANY value. Args are boxed to a
+            // uniform pointer (an Int key is boxed; a pointer key passes
+            // through) so the runtime walker always gets a heap object.
+            Expr::BuiltinRef(name) if name == "core/hash.value" => {
+                if args.len() != 1 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let v = self.compile_expr(&args[0], env, ctx)?;
+                let p = self.value_as_ptr(v, ctx)?;
+                let f = self.extern_value_hash.expect("ai_value_hash declared");
+                let call = self
+                    .builder
+                    .build_call(f, &[ctx.thread_param.into(), p.into()], "value_hash")
+                    .map_err(|e| CodegenError::JitInit(format!(
+                        "build_call ai_value_hash: {}", e
+                    )))?;
+                Ok(Value::Int(call.as_any_value_enum().into_int_value()))
+            }
+            Expr::BuiltinRef(name) if name == "core/value.eq" => {
+                if args.len() != 2 {
+                    return Err(CodegenError::UnknownBuiltin {
+                        name: name.clone(),
+                        arity: args.len(),
+                    });
+                }
+                let av = self.compile_expr(&args[0], env, ctx)?;
+                let ap = self.value_as_ptr(av, ctx)?;
+                let bv = self.compile_expr(&args[1], env, ctx)?;
+                let bp = self.value_as_ptr(bv, ctx)?;
+                let f = self.extern_value_eq.expect("ai_value_eq declared");
+                let call = self
+                    .builder
+                    .build_call(f, &[ctx.thread_param.into(), ap.into(), bp.into()], "value_eq")
+                    .map_err(|e| CodegenError::JitInit(format!(
+                        "build_call ai_value_eq: {}", e
+                    )))?;
+                Ok(Value::Int(call.as_any_value_enum().into_int_value()))
             }
             Expr::BuiltinRef(name) if name == "core/gc.collect" => {
                 // No language-level args — but the runtime fn needs
@@ -4780,6 +5433,11 @@ impl<'ctx> Codegen<'ctx> {
                 }
                 env.type_at(n - 1 - idx).clone()
             }
+            Expr::StateRef(h) => self
+                .state_types
+                .get(h)
+                .cloned()
+                .unwrap_or_else(|| Type::Builtin("Int".to_owned())),
             Expr::TopRef(h) => {
                 if let Some(spec) = self.def_signatures.get(h) {
                     Type::FnType {
@@ -4817,6 +5475,46 @@ impl<'ctx> Codegen<'ctx> {
                         ],
                         ret: Box::new(ret),
                     }
+                } else if let Some(rest) = name.strip_prefix("core/wire.decode#") {
+                    // decode : fn(Bytes) -> Result<okty, Int>. Rebuilt from
+                    // the baked `#<expected>#<result_hash>#<okint>` so the
+                    // match below knows to unbox an Int Ok payload and the
+                    // Int Err payload (the error code).
+                    // rest = <expected>#<result_hash>#<okint>#<decode_error_hash>
+                    let parts: Vec<&str> = rest.split('#').collect();
+                    let hex32 = |s: &str| -> Option<Hash> {
+                        if s.len() != 64 {
+                            return None;
+                        }
+                        let mut hb = [0u8; 32];
+                        for i in 0..32 {
+                            hb[i] = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).ok()?;
+                        }
+                        Some(Hash(hb))
+                    };
+                    let parsed = if parts.len() >= 4 {
+                        match (hex32(parts[1]), hex32(parts[3])) {
+                            (Some(result_h), Some(decode_err_h)) => {
+                                let okint = parts[2] == "1";
+                                let ok_ty = if okint {
+                                    Type::Builtin("Int".to_owned())
+                                } else {
+                                    Type::Builtin("Ptr".to_owned())
+                                };
+                                Some(Type::FnType {
+                                    params: vec![Type::Builtin("Bytes".to_owned())],
+                                    ret: Box::new(Type::Apply(
+                                        Box::new(Type::TypeRef(result_h)),
+                                        vec![ok_ty, Type::TypeRef(decode_err_h)],
+                                    )),
+                                })
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+                    parsed.unwrap_or(Type::Builtin("Int".to_owned()))
                 } else if let Some(sig) = array_builtin_fn_type(name) {
                     // Generic array builtins: represented as
                     //   array.get : fn(Array<T>, Int) -> T   (etc.)
@@ -4938,7 +5636,8 @@ impl<'ctx> Codegen<'ctx> {
             // `defer cleanup; body` has the body's type (its value is the
             // body's value; cleanup runs for effect only).
             Expr::Defer { body, .. } => self.infer_type(body, env),
-            Expr::SelfRef(_) => Type::Builtin("Int".to_owned()),
+            Expr::SelfRef(_) | Expr::StateSelfRef(_) => Type::Builtin("Int".to_owned()),
+            // `StateRef` is handled near the top of this match.
         }
     }
 
@@ -5993,6 +6692,7 @@ fn is_boxed_scalar(n: &str) -> bool {
 /// `.field` on an `array.get` result resolves).
 fn array_builtin_fn_type(name: &str) -> Option<Type> {
     let array_t = |t: Type| Type::Apply(Box::new(Type::Builtin("Array".to_owned())), vec![t]);
+    let atom_t = |t: Type| Type::Apply(Box::new(Type::Builtin("Atom".to_owned())), vec![t]);
     let tv = Type::TypeVar(0);
     let int = || Type::Builtin("Int".to_owned());
     match name {
@@ -6012,11 +6712,20 @@ fn array_builtin_fn_type(name: &str) -> Option<Type> {
             params: vec![array_t(tv.clone()), int(), tv.clone()],
             ret: Box::new(int()),
         }),
-        // atom_swap_slot(cell: Array<T>, i: Int, f: fn(T)->T) -> T
+        // atom_new(init: T) -> Atom<T>
+        "core/atom.new" => Some(Type::FnType {
+            params: vec![tv.clone()],
+            ret: Box::new(atom_t(tv)),
+        }),
+        // atom_load(a: Atom<T>) -> T
+        "core/atom.load" => Some(Type::FnType {
+            params: vec![atom_t(tv.clone())],
+            ret: Box::new(tv),
+        }),
+        // atom_swap(a: Atom<T>, f: fn(T)->T) -> T
         "core/atom.swap" => Some(Type::FnType {
             params: vec![
-                array_t(tv.clone()),
-                int(),
+                atom_t(tv.clone()),
                 Type::FnType {
                     params: vec![tv.clone()],
                     ret: Box::new(tv.clone()),
@@ -6025,6 +6734,21 @@ fn array_builtin_fn_type(name: &str) -> Option<Type> {
             ret: Box::new(tv),
         }),
         _ => None,
+    }
+}
+
+/// Whether an `Atom<T>` type's value `T` is `Int` — i.e. the cell holds a
+/// `BoxedInt` that `atom.new`/`atom.load`/`atom.swap` must box/unbox.
+fn atom_element_is_int(atom_ty: &Type) -> bool {
+    match atom_ty {
+        Type::Apply(head, args) => {
+            matches!(head.as_ref(), Type::Builtin(n) if n == "Atom")
+                && args
+                    .first()
+                    .map(|t| matches!(t, Type::Builtin(n) if is_boxed_scalar(n)))
+                    .unwrap_or(false)
+        }
+        _ => false,
     }
 }
 
@@ -6279,6 +7003,8 @@ fn walk_captures(e: &Expr, arity_so_far: u32, out: &mut BTreeSet<u32>) {
         | Expr::StringLit(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => {}
     }
 }
@@ -6407,6 +7133,8 @@ fn rewrite_expr(e: &Expr, arity: u32, depth: u32, cap_pos: &HashMap<u32, u32>) -
         | Expr::StringLit(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => e.clone(),
     }
 }
@@ -6497,6 +7225,21 @@ impl<'ctx> Jit<'ctx> {
         if let Some(net_at_fn) = cm.module.get_function("ai_net_at") {
             engine.add_global_mapping(&net_at_fn, crate::net::ai_net_at as usize);
         }
+        if let Some(f) = cm.module.get_function("ai_wire_encode") {
+            engine.add_global_mapping(&f, crate::net::ai_wire_encode as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_wire_decode_int") {
+            engine.add_global_mapping(&f, crate::net::ai_wire_decode_int as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_wire_decode_ptr") {
+            engine.add_global_mapping(&f, crate::net::ai_wire_decode_ptr as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_wire_decode_checked") {
+            engine.add_global_mapping(&f, crate::net::ai_wire_decode_checked as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_wire_invoke") {
+            engine.add_global_mapping(&f, crate::net::ai_wire_invoke as usize);
+        }
         if let Some(box_fn) = cm.module.get_function("ai_gc_box_int") {
             engine.add_global_mapping(&box_fn, ai_gc_box_int as usize);
         }
@@ -6505,6 +7248,21 @@ impl<'ctx> Jit<'ctx> {
         }
         if let Some(fc_fn) = cm.module.get_function("ai_gc_force_collect") {
             engine.add_global_mapping(&fc_fn, ai_gc_force_collect as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_state_get") {
+            engine.add_global_mapping(&f, ai_state_get as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_state_present") {
+            engine.add_global_mapping(&f, ai_state_present as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_state_set") {
+            engine.add_global_mapping(&f, ai_state_set as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_value_hash") {
+            engine.add_global_mapping(&f, ai_value_hash as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_value_eq") {
+            engine.add_global_mapping(&f, ai_value_eq as usize);
         }
         if let Some(f) = cm.module.get_function("ai_panic") {
             engine.add_global_mapping(&f, ai_panic as usize);
@@ -6551,6 +7309,12 @@ impl<'ctx> Jit<'ctx> {
         if let Some(f) = cm.module.get_function("ai_atom_swap_local") {
             engine.add_global_mapping(&f, ai_atom_swap_local as usize);
         }
+        if let Some(f) = cm.module.get_function("ai_atom_new") {
+            engine.add_global_mapping(&f, ai_atom_new as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_atom_load") {
+            engine.add_global_mapping(&f, ai_atom_load as usize);
+        }
 
         // User-defined `extern fn`s declared via the FFI registry.
         wire_user_externs_into(&engine, &cm.module);
@@ -6577,6 +7341,24 @@ impl<'ctx> Jit<'ctx> {
             if let Some(&type_id) = cm.shape_registry.get(h) {
                 runtime.code_table.register_type_id(type_id, *h);
             }
+        }
+
+        // ---- Mark cache-unsafe (stateful) thunks ----
+        for h in &cm.stateful_hashes {
+            runtime.mark_stateful(*h);
+        }
+
+        // ---- Run node `state` installers once, in dependency order ----
+        // Externs are mapped and the code table is populated, so each
+        // initializer's calls resolve. Installation is idempotent by hash.
+        for h in &cm.state_hashes {
+            let sym = state_init_symbol(h);
+            let installer: JitFunction<'ctx, unsafe extern "C" fn(*mut Thread) -> i64> = unsafe {
+                engine
+                    .get_function(&sym)
+                    .map_err(|_| CodegenError::FunctionNotFound { symbol: sym.clone() })?
+            };
+            unsafe { installer.call(runtime.thread_ptr()) };
         }
 
         Ok(Jit {
@@ -6755,10 +7537,10 @@ impl<'ctx> IncrementalJit<'ctx> {
 
         // Track type_id watermark = sum of all shapes registered in the
         // initial module PLUS reserved slots for the runtime-managed
-        // shapes (BoxedInt + String) at the trailing end of the
-        // heap's type-table. Keep this in sync with
+        // shapes (BoxedInt + String + Array + Atom) at the trailing end
+        // of the heap's type-table. Keep this in sync with
         // `Runtime::new_with_metadata`.
-        const RUNTIME_RESERVED_SHAPES: u16 = 3;
+        const RUNTIME_RESERVED_SHAPES: u16 = 4;
         let next_type_id =
             cm.closure_type_infos.len() as u16 + RUNTIME_RESERVED_SHAPES;
 
@@ -6784,6 +7566,21 @@ impl<'ctx> IncrementalJit<'ctx> {
         if let Some(net_at_fn) = module.get_function("ai_net_at") {
             engine.add_global_mapping(&net_at_fn, crate::net::ai_net_at as usize);
         }
+        if let Some(f) = module.get_function("ai_wire_encode") {
+            engine.add_global_mapping(&f, crate::net::ai_wire_encode as usize);
+        }
+        if let Some(f) = module.get_function("ai_wire_decode_int") {
+            engine.add_global_mapping(&f, crate::net::ai_wire_decode_int as usize);
+        }
+        if let Some(f) = module.get_function("ai_wire_decode_ptr") {
+            engine.add_global_mapping(&f, crate::net::ai_wire_decode_ptr as usize);
+        }
+        if let Some(f) = module.get_function("ai_wire_decode_checked") {
+            engine.add_global_mapping(&f, crate::net::ai_wire_decode_checked as usize);
+        }
+        if let Some(f) = module.get_function("ai_wire_invoke") {
+            engine.add_global_mapping(&f, crate::net::ai_wire_invoke as usize);
+        }
         if let Some(box_fn) = module.get_function("ai_gc_box_int") {
             engine.add_global_mapping(&box_fn, ai_gc_box_int as usize);
         }
@@ -6792,6 +7589,21 @@ impl<'ctx> IncrementalJit<'ctx> {
         }
         if let Some(fc_fn) = module.get_function("ai_gc_force_collect") {
             engine.add_global_mapping(&fc_fn, ai_gc_force_collect as usize);
+        }
+        if let Some(f) = module.get_function("ai_state_get") {
+            engine.add_global_mapping(&f, ai_state_get as usize);
+        }
+        if let Some(f) = module.get_function("ai_state_present") {
+            engine.add_global_mapping(&f, ai_state_present as usize);
+        }
+        if let Some(f) = module.get_function("ai_state_set") {
+            engine.add_global_mapping(&f, ai_state_set as usize);
+        }
+        if let Some(f) = module.get_function("ai_value_hash") {
+            engine.add_global_mapping(&f, ai_value_hash as usize);
+        }
+        if let Some(f) = module.get_function("ai_value_eq") {
+            engine.add_global_mapping(&f, ai_value_eq as usize);
         }
         if let Some(f) = module.get_function("ai_panic") {
             engine.add_global_mapping(&f, ai_panic as usize);
@@ -6840,6 +7652,12 @@ impl<'ctx> IncrementalJit<'ctx> {
         }
         if let Some(f) = module.get_function("ai_atom_swap_local") {
             engine.add_global_mapping(&f, ai_atom_swap_local as usize);
+        }
+        if let Some(f) = module.get_function("ai_atom_new") {
+            engine.add_global_mapping(&f, ai_atom_new as usize);
+        }
+        if let Some(f) = module.get_function("ai_atom_load") {
+            engine.add_global_mapping(&f, ai_atom_load as usize);
         }
 
         // ---- User-defined externs: walk every `ext/<name>` LLVM
@@ -6994,8 +7812,10 @@ impl<'ctx> IncrementalJit<'ctx> {
         // Walk every previously installed def's body to find embedded
         // lambdas; those are already JIT'd.
         for rd in &self.installed_defs {
-            if let Def::Fn { body, .. } = &rd.def {
-                collect_all_lambda_hashes(body, &mut external_lambdas);
+            match &rd.def {
+                Def::Fn { body, .. } => collect_all_lambda_hashes(body, &mut external_lambdas),
+                Def::State { init, .. } => collect_all_lambda_hashes(init, &mut external_lambdas),
+                _ => {}
             }
         }
 
@@ -7029,8 +7849,12 @@ impl<'ctx> IncrementalJit<'ctx> {
 
         // 6. Register new function addresses in code_table.
         for rd in &new_defs {
-            if matches!(rd.def, Def::Struct { .. } | Def::Enum { .. }) {
-                // Structs/enums have no fn symbol.
+            if matches!(
+                rd.def,
+                Def::Struct { .. } | Def::Enum { .. } | Def::State { .. }
+            ) {
+                // Structs/enums have no fn symbol; states use a separate
+                // `state_init_<hex>` installer symbol, run in step 6.5.
                 continue;
             }
             let sym = def_symbol(&rd.hash);
@@ -7039,6 +7863,32 @@ impl<'ctx> IncrementalJit<'ctx> {
                 .get_function_address(&sym)
                 .map_err(|_| CodegenError::FunctionNotFound { symbol: sym.clone() })?;
             runtime.code_table.insert(rd.hash, addr as *const u8);
+        }
+
+        // 6.4. Mark cache-unsafe (stateful) thunks. Recomputed over the
+        //      union so transitive `TopRef` chains across batches resolve;
+        //      marking is idempotent.
+        for h in &cm.stateful_hashes {
+            runtime.mark_stateful(*h);
+        }
+
+        // 6.5. Run node `state` installers for freshly-installed states,
+        //      in batch order (dependency-first). Idempotent by hash: a
+        //      state the node already has is a no-op, so a shipped handler
+        //      never clobbers the node's existing cell. This is what makes
+        //      `at(node, || handler(msg))` mutate the node's OWN state.
+        for rd in &new_defs {
+            if !matches!(rd.def, Def::State { .. }) {
+                continue;
+            }
+            let sym = state_init_symbol(&rd.hash);
+            let addr = self
+                .engine
+                .get_function_address(&sym)
+                .map_err(|_| CodegenError::FunctionNotFound { symbol: sym.clone() })?;
+            let installer: unsafe extern "C" fn(*mut Thread) -> i64 =
+                unsafe { core::mem::transmute(addr) };
+            unsafe { installer(runtime.thread_ptr()) };
         }
         for (h, _) in &new_lambdas {
             let sym = lambda_symbol(h);
@@ -7174,6 +8024,8 @@ fn collect_all_lambda_hashes(e: &Expr, out: &mut HashSet<Hash>) {
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => {}
     }
 }
@@ -7197,14 +8049,13 @@ mod tests {
         });
     }
 
-    /// Re-assert the standard extern baseline (the runtime I/O externs)
-    /// after a test that registered its own externs. Used INSTEAD of
-    /// `clear_externs()` so that concurrently-running tests which depend
-    /// on the stdlib I/O externs never observe an empty registry — we
-    /// never clear, so there is no race window at all. The test's own
-    /// uniquely-named externs are left registered, which is harmless
-    /// (`register_extern` replaces by name; nothing else uses those names).
+    /// Restore the extern baseline after a test that registered its own
+    /// externs. The I/O externs live in a process-global write-once table
+    /// (always present, never cleared), so "baseline" just means dropping
+    /// this thread's dynamic overrides. No cross-test race is possible:
+    /// clearing only touches the calling thread's thread-local registry.
     fn reset_externs_to_baseline() {
+        crate::ffi::clear_externs();
         crate::io_externs::register_io_externs();
     }
 

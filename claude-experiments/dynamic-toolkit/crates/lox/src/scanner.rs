@@ -225,8 +225,7 @@ impl Scanner {
                     self.advance();
                 }
                 b'/' => {
-                    if self.current + 1 < self.source.len()
-                        && self.source[self.current + 1] == b'/'
+                    if self.current + 1 < self.source.len() && self.source[self.current + 1] == b'/'
                     {
                         while !self.is_at_end() && self.peek() != b'\n' {
                             self.advance();

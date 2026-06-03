@@ -296,6 +296,9 @@ fn count_binders_in_def(def: &Def) -> usize {
         Def::Fn { params, body, .. } => params.len() + count_binders_in_expr(body),
         // Struct/enum have no locals.
         Def::Struct { .. } | Def::Enum { .. } => 0,
+        // A state initializer is a zero-param expression; count any
+        // binders it introduces (e.g. lambdas inside the init).
+        Def::State { init, .. } => count_binders_in_expr(init),
     }
 }
 
@@ -308,6 +311,8 @@ fn count_binders_in_expr(e: &Expr) -> usize {
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => 0,
         Expr::Call(callee, args) => {
             count_binders_in_expr(callee)
@@ -407,7 +412,27 @@ impl<'a> Printer<'a> {
                 type_params,
                 variants,
             } => self.print_enum(self_name, *type_params, variants),
+            Def::State { ty, init } => self.print_state(self_name, ty, init),
         }
+    }
+
+    /// `state NAME: TYPE = INIT`. A node-resident singleton binding; the
+    /// initializer is a zero-parameter expression.
+    fn print_state(
+        &self,
+        self_name: &str,
+        ty: &Type,
+        init: &Expr,
+    ) -> Result<String, PrinterError> {
+        let mut out = String::new();
+        let mut binders = Binders::new();
+        out.push_str("state ");
+        out.push_str(self_name);
+        out.push_str(": ");
+        out.push_str(&self.print_type(ty, 0, &[])?);
+        out.push_str(" = ");
+        out.push_str(&self.print_expr(init, &mut binders, 0, &[])?);
+        Ok(out)
     }
 
     fn print_fn(
@@ -594,7 +619,10 @@ impl<'a> Printer<'a> {
 
             Expr::TopRef(h) => Ok(self.names.term_name(h)),
 
-            Expr::SelfRef(_) => Err(PrinterError::UnexpectedSelfRef),
+            // A node `state` reference prints as the binding's name.
+            Expr::StateRef(h) => Ok(self.names.term_name(h)),
+
+            Expr::SelfRef(_) | Expr::StateSelfRef(_) => Err(PrinterError::UnexpectedSelfRef),
 
             // A bare `BuiltinRef` in non-call position has no surface form: the
             // resolver only ever mints builtins as call callees (operators,
@@ -1246,6 +1274,8 @@ fn needs_parens_as_atom(e: &Expr) -> bool {
         | Expr::TopRef(_)
         | Expr::BuiltinRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::Field { .. }
         | Expr::Try { .. }
         | Expr::EnumNew { .. }

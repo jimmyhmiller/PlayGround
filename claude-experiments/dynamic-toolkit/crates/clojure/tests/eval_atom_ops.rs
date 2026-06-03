@@ -29,10 +29,7 @@ fn atom_reset_changes_value() {
 
 #[test]
 fn atom_reset_returns_new_value() {
-    assert_eq!(
-        eval_str("(let [a (atom 0)] (reset! a 7))"),
-        "7"
-    );
+    assert_eq!(eval_str("(let [a (atom 0)] (reset! a 7))"), "7");
 }
 
 #[test]

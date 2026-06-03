@@ -121,7 +121,10 @@ impl SymbolTable {
 
     /// Iterate all (Symbol, name) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (Symbol, &str)> {
-        self.names.iter().enumerate().map(|(i, s)| (Symbol(i as u32), s.as_str()))
+        self.names
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (Symbol(i as u32), s.as_str()))
     }
 
     /// Get all interned strings as a slice (indexed by Symbol.as_u32()).
@@ -156,12 +159,16 @@ pub const DISPATCH_EMPTY: u64 = 0;
 impl DispatchTable {
     /// Create an empty dispatch table.
     pub fn new() -> Self {
-        DispatchTable { entries: Vec::new() }
+        DispatchTable {
+            entries: Vec::new(),
+        }
     }
 
     /// Create a table pre-sized for `n` symbols.
     pub fn with_capacity(n: usize) -> Self {
-        DispatchTable { entries: vec![DISPATCH_EMPTY; n] }
+        DispatchTable {
+            entries: vec![DISPATCH_EMPTY; n],
+        }
     }
 
     /// Look up a symbol. Returns None if the symbol has no entry or
@@ -171,7 +178,11 @@ impl DispatchTable {
         let idx = sym.0 as usize;
         if idx < self.entries.len() {
             let val = self.entries[idx];
-            if val != DISPATCH_EMPTY { Some(val) } else { None }
+            if val != DISPATCH_EMPTY {
+                Some(val)
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -221,7 +232,10 @@ impl DispatchTable {
 
     /// Number of non-empty entries.
     pub fn count(&self) -> usize {
-        self.entries.iter().filter(|&&v| v != DISPATCH_EMPTY).count()
+        self.entries
+            .iter()
+            .filter(|&&v| v != DISPATCH_EMPTY)
+            .count()
     }
 
     /// Raw slice access for the JIT (can be loaded by base + offset).
@@ -236,7 +250,9 @@ impl DispatchTable {
 
     /// Iterate non-empty (Symbol, value) pairs.
     pub fn iter(&self) -> impl Iterator<Item = (Symbol, u64)> + '_ {
-        self.entries.iter().enumerate()
+        self.entries
+            .iter()
+            .enumerate()
             .filter(|(_, v)| **v != DISPATCH_EMPTY)
             .map(|(i, v)| (Symbol(i as u32), *v))
     }
@@ -365,7 +381,11 @@ impl InlineCacheArray {
     /// them across operations that could grow or drop the array.
     pub fn cached_value_slots(&self) -> CachedValueSlots<'_> {
         CachedValueSlots {
-            entries: if self.value_is_ptr { &self.entries[..] } else { &[] },
+            entries: if self.value_is_ptr {
+                &self.entries[..]
+            } else {
+                &[]
+            },
             i: 0,
         }
     }

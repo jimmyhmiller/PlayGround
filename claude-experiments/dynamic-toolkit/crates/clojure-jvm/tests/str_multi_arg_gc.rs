@@ -36,9 +36,8 @@ fn str_multi_arg_under_gc() {
     // safepoint under pressure). The variadic StringBuilder path is what
     // the loader exercised when it crashed.
     for i in 0..200 {
-        let src = format!(
-            "(str \"alpha-{i}\" \"beta-{i}\" \"gamma-{i}\" \"delta-{i}\" \"epsilon-{i}\")"
-        );
+        let src =
+            format!("(str \"alpha-{i}\" \"beta-{i}\" \"gamma-{i}\" \"delta-{i}\" \"epsilon-{i}\")");
         let form = read_str(&src).expect("read");
         sess.eval_form(form);
     }

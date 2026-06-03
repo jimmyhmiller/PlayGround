@@ -1199,6 +1199,17 @@ fn at_binding_from_codebase(cb: &Codebase) -> Option<AtBinding> {
     let find = |vs: &[(String, _)], n: &str| -> Option<u32> {
         vs.iter().position(|(name, _)| name == n).map(|i| i as u32)
     };
+    let (decode_error_hash, decode_tm_idx, decode_mf_idx) = match cb.get_name("DecodeError") {
+        Some(h) => match cb.load_def(&h) {
+            Ok(Def::Enum { variants, .. }) => (
+                Some(h),
+                find(&variants, "TypeMismatch").unwrap_or(0),
+                find(&variants, "Malformed").unwrap_or(0),
+            ),
+            _ => (None, 0, 0),
+        },
+        None => (None, 0, 0),
+    };
     Some(AtBinding {
         result_hash,
         failure_hash,
@@ -1209,6 +1220,9 @@ fn at_binding_from_codebase(cb: &Codebase) -> Option<AtBinding> {
         crashed_variant_index: find(&failure_variants, "Crashed")?,
         code_missing_variant_index: find(&failure_variants, "CodeMissing")?,
         cancelled_variant_index: find(&failure_variants, "Cancelled")?,
+        decode_error_hash,
+        decode_type_mismatch_index: decode_tm_idx,
+        decode_malformed_index: decode_mf_idx,
     })
 }
 

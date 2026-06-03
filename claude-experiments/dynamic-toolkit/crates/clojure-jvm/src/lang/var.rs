@@ -25,7 +25,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Mutex, RwLock};
 
-
 use super::namespace::Namespace;
 use super::object::Object;
 use super::symbol::Symbol;
@@ -41,7 +40,10 @@ pub struct TBox {
 
 impl TBox {
     pub fn new(val: Object) -> Self {
-        TBox { val: Mutex::new(val), thread_id: std::thread::current().id() }
+        TBox {
+            val: Mutex::new(val),
+            thread_id: std::thread::current().id(),
+        }
     }
 }
 
@@ -53,7 +55,9 @@ pub struct Unbound {
 }
 
 impl Unbound {
-    pub fn to_string(&self) -> String { format!("Unbound: {}", self.v) }
+    pub fn to_string(&self) -> String {
+        format!("Unbound: {}", self.v)
+    }
 
     pub fn throw_arity(&self, _n: i32) -> ! {
         panic!(
@@ -76,7 +80,10 @@ pub struct Frame {
 
 impl Frame {
     pub fn top() -> Arc<Frame> {
-        Arc::new(Frame { bindings: Vec::new(), prev: None })
+        Arc::new(Frame {
+            bindings: Vec::new(),
+            prev: None,
+        })
     }
 }
 
@@ -142,7 +149,9 @@ impl Var {
 
     /// `Var.create()` — `create((Object) null)` for a bare unbound Var with no
     /// namespace.
-    pub fn create() -> Arc<Self> { Self::create_with_root(Object::Nil) }
+    pub fn create() -> Arc<Self> {
+        Self::create_with_root(Object::Nil)
+    }
 
     /// `Var.create(Object root)` — bare Var with a root value.
     pub fn create_with_root(root: Object) -> Arc<Self> {
@@ -191,11 +200,7 @@ impl Var {
     }
 
     /// `Var.intern(Namespace, Symbol, Object)` — interns and sets the root.
-    pub fn intern_sym_root(
-        ns: Arc<Namespace>,
-        sym: Arc<Symbol>,
-        root: Object,
-    ) -> Arc<Self> {
+    pub fn intern_sym_root(ns: Arc<Namespace>, sym: Arc<Symbol>, root: Object) -> Arc<Self> {
         let v = ns.intern(sym);
         v.bind_root(root);
         v
@@ -262,7 +267,9 @@ impl Var {
     }
 
     /// VAR_ROOTS slot index (diagnostics).
-    pub fn slot_index(&self) -> usize { self.slot_index }
+    pub fn slot_index(&self) -> usize {
+        self.slot_index
+    }
 
     /// Read the current root value as NanBox bits — the JIT path
     /// (`cljvm_var_deref`). Reads the live (forwarded) slot bits directly
@@ -282,7 +289,8 @@ impl Var {
 
     /// `setDynamic()` — fluent setter, returns `this` (we return the `Rc`).
     pub fn set_dynamic(self: Arc<Self>) -> Arc<Self> {
-        self.dynamic.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.dynamic
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self
     }
 
@@ -303,11 +311,9 @@ impl Var {
             return b.val.lock().unwrap().clone();
         }
         match &*self.root.read().unwrap() {
-            VarRoot::Slot => {
-                crate::runtime::nanbox_to_object(
-                    crate::lang::var_roots::VAR_ROOTS.get(self.slot_index),
-                )
-            }
+            VarRoot::Slot => crate::runtime::nanbox_to_object(
+                crate::lang::var_roots::VAR_ROOTS.get(self.slot_index),
+            ),
             VarRoot::Object(o) => o.clone(),
         }
     }
@@ -357,11 +363,15 @@ impl Var {
                 .map(|(v, val)| {
                     // Mirror Java: setting threadBound flag so readers know
                     // to consult the frame chain.
-                    v.thread_bound.store(true, std::sync::atomic::Ordering::Relaxed);
+                    v.thread_bound
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     (v, Arc::new(TBox::new(val)))
                 })
                 .collect();
-            let new_frame = Arc::new(Frame { bindings: tboxes, prev: Some(prev) });
+            let new_frame = Arc::new(Frame {
+                bindings: tboxes,
+                prev: Some(prev),
+            });
             *cell.borrow_mut() = new_frame;
         });
     }

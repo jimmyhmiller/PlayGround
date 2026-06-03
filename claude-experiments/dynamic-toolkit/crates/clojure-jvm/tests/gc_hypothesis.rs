@@ -29,7 +29,9 @@ fn load_core_prefix() -> Session {
         byte_pos += after - before;
         match read {
             Ok(Some(form)) => {
-                if is_top_level_load(&form) { break; }
+                if is_top_level_load(&form) {
+                    break;
+                }
                 sess.eval_form(form);
             }
             Ok(None) => break,
@@ -86,11 +88,17 @@ fn passing_variant_under_stress() {
 fn regalloc_threshold() {
     let mut sess = load_core_prefix();
     for n in [2usize, 3, 4, 5, 6, 7, 8] {
-        let args: String = (1..=n).map(|i| format!("(+ {i} {i})")).collect::<Vec<_>>().join(" ");
+        let args: String = (1..=n)
+            .map(|i| format!("(+ {i} {i})"))
+            .collect::<Vec<_>>()
+            .join(" ");
         let want: i64 = (1..=n as i64).map(|i| 2 * i).sum();
         let src = format!("(reduce1 + (list {args}))");
         let got = clojure_jvm::runtime::arg_to_i64(sess.eval_str(&src));
-        eprintln!("n={n}: got={got} want={want} {}", if got == want { "ok" } else { "CORRUPT" });
+        eprintln!(
+            "n={n}: got={got} want={want} {}",
+            if got == want { "ok" } else { "CORRUPT" }
+        );
     }
 }
 
@@ -106,7 +114,10 @@ fn dump_list_elements() {
         let src = format!("(first {rests}{list}{close})");
         let got = clojure_jvm::runtime::arg_to_i64(sess.eval_str(&src));
         let want = 2 * (i as i64 + 1);
-        eprintln!("elem[{i}] = {got} (want {want}) {}", if got == want { "ok" } else { "WRONG" });
+        eprintln!(
+            "elem[{i}] = {got} (want {want}) {}",
+            if got == want { "ok" } else { "WRONG" }
+        );
     }
 }
 
@@ -115,7 +126,8 @@ fn dump_list_elements() {
 fn dump_list_ir() {
     let mut sess = load_core_prefix();
     // Single form that builds the 8-element list (the corrupting one).
-    let _ = sess.eval_str("(count (list (+ 1 1) (+ 2 2) (+ 3 3) (+ 4 4) (+ 5 5) (+ 6 6) (+ 7 7) (+ 8 8)))");
+    let _ = sess
+        .eval_str("(count (list (+ 1 1) (+ 2 2) (+ 3 3) (+ 4 4) (+ 5 5) (+ 6 6) (+ 7 7) (+ 8 8)))");
 }
 
 #[test]
@@ -124,7 +136,9 @@ fn dump_mmin_ir() {
     let mut sess = load_core_prefix();
     // Define some drift macros first (mirrors replicate_ns state).
     for i in 0..3 {
-        sess.eval_str(&format!("(defmacro d{i} [a] `(do (list ~a) (vector ~a) [~a]))"));
+        sess.eval_str(&format!(
+            "(defmacro d{i} [a] `(do (list ~a) (vector ~a) [~a]))"
+        ));
     }
     // The failing macro.
     sess.eval_str("(defmacro mmin [] `(do (foo ~@(when true `((list 1)))) (list 2)))");
@@ -136,7 +150,9 @@ fn variadic_eight_fixed_dynamic_invoke() {
     let mut sess = load_core_prefix();
     // 8 fixed params + variadic. Bound to a var and called dynamically with
     // 8 args → invoke_8 → pack_variadic_args → 9-element call_with_packed.
-    sess.eval_str("(def vf (fn [a b c d e f g h & r] (+ a (+ b (+ c (+ d (+ e (+ f (+ g h)))))))))");
+    sess.eval_str(
+        "(def vf (fn [a b c d e f g h & r] (+ a (+ b (+ c (+ d (+ e (+ f (+ g h)))))))))",
+    );
     let bits = sess.eval_str("(vf 1 2 3 4 5 6 7 8)");
     let got = clojure_jvm::runtime::arg_to_i64(bits);
     eprintln!("vf sum = {got} (want 36)");
@@ -151,10 +167,18 @@ fn test_wlc_and_map_sq() {
     sess.eval_str("(defmacro mm [] `(identity {:a 1 :b 2}))");
     eprintln!("mm count:");
     let bits = sess.eval_str("(count (mm))");
-    eprintln!("(count (mm)) = {} (want 2)", clojure_jvm::runtime::arg_to_i64(bits));
+    eprintln!(
+        "(count (mm)) = {} (want 2)",
+        clojure_jvm::runtime::arg_to_i64(bits)
+    );
     eprintln!("calling with-loading-context:");
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sess.eval_str("(with-loading-context (+ 1 2))")));
-    eprintln!("wlc result: {:?}", r.map(|b| clojure_jvm::runtime::arg_to_i64(b)));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sess.eval_str("(with-loading-context (+ 1 2))")
+    }));
+    eprintln!(
+        "wlc result: {:?}",
+        r.map(|b| clojure_jvm::runtime::arg_to_i64(b))
+    );
 }
 
 #[test]
@@ -162,15 +186,26 @@ fn test_wlc_and_map_sq() {
 fn bisect_wlc_map() {
     let mut sess = load_core_prefix();
     for (name, src) in [
-        ("m_symkey", "(defmacro m_symkey [] `(identity {clojure.lang.Compiler/LOADER 1}))"),
-        ("m_methodval", "(defmacro m_methodval [] `(identity {:k (.getClassLoader (.getClass ^Object x#))}))"),
-        ("m_gensymkey", "(defmacro m_gensymkey [] `(fn foo# [] {:k foo#}))"),
+        (
+            "m_symkey",
+            "(defmacro m_symkey [] `(identity {clojure.lang.Compiler/LOADER 1}))",
+        ),
+        (
+            "m_methodval",
+            "(defmacro m_methodval [] `(identity {:k (.getClassLoader (.getClass ^Object x#))}))",
+        ),
+        (
+            "m_gensymkey",
+            "(defmacro m_gensymkey [] `(fn foo# [] {:k foo#}))",
+        ),
     ] {
         sess.eval_str(src);
         let call = format!("({})", name.trim_start_matches("m_").to_string());
         // just expand+analyze by calling; catch panic
         let mname = src.split_whitespace().nth(1).unwrap();
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sess.eval_str(&format!("({mname})"))));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            sess.eval_str(&format!("({mname})"))
+        }));
         eprintln!("{mname}: {}", if r.is_ok() { "OK" } else { "CRASH" });
         let _ = call;
     }
@@ -186,7 +221,13 @@ fn direct_hashmap_symkey() {
         "(count (hash-map clojure.lang.Compiler/LOADER 1))",
     ] {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sess.eval_str(src)));
-        eprintln!("{src} => {}", match r { Ok(b) => format!("{}", clojure_jvm::runtime::arg_to_i64(b)), Err(_) => "CRASH".into() });
+        eprintln!(
+            "{src} => {}",
+            match r {
+                Ok(b) => format!("{}", clojure_jvm::runtime::arg_to_i64(b)),
+                Err(_) => "CRASH".into(),
+            }
+        );
     }
 }
 
@@ -195,16 +236,20 @@ fn direct_hashmap_symkey() {
 fn exact_wlc_body() {
     let mut sess = load_core_prefix();
     eprintln!("defining wlc2 (exact body)");
-    sess.eval_str(r#"(defmacro wlc2 [& body]
+    sess.eval_str(
+        r#"(defmacro wlc2 [& body]
   `((fn loading# []
         (. clojure.lang.Var (pushThreadBindings {clojure.lang.Compiler/LOADER
                                                  (.getClassLoader (.getClass ^Object loading#))}))
         (try
          ~@body
          (finally
-          (. clojure.lang.Var (popThreadBindings)))))))"#);
+          (. clojure.lang.Var (popThreadBindings)))))))"#,
+    );
     eprintln!("calling wlc2");
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sess.eval_str("(wlc2 (+ 1 2))")));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        sess.eval_str("(wlc2 (+ 1 2))")
+    }));
     eprintln!("wlc2 => {}", if r.is_ok() { "OK" } else { "CRASH" });
 }
 
@@ -216,15 +261,30 @@ fn diagnose_reduce() {
     let report = |s: &mut Session, src: &str| {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.eval_str(src)));
         match r {
-            Ok(b) => eprintln!("  {src} => {} (bits 0x{b:016x})", clojure_jvm::runtime::arg_to_i64(b)),
+            Ok(b) => eprintln!(
+                "  {src} => {} (bits 0x{b:016x})",
+                clojure_jvm::runtime::arg_to_i64(b)
+            ),
             Err(_) => eprintln!("  {src} => PANIC"),
         }
     };
-    report(&mut sess, "(clojure.core.protocols/internal-reduce (list 2 3 4) + 1)");
-    report(&mut sess, "(clojure.core.protocols/coll-reduce (list 1 2 3 4) + 100)");
-    report(&mut sess, "(clojure.core.protocols/coll-reduce (list 1 2 3 4) +)");
+    report(
+        &mut sess,
+        "(clojure.core.protocols/internal-reduce (list 2 3 4) + 1)",
+    );
+    report(
+        &mut sess,
+        "(clojure.core.protocols/coll-reduce (list 1 2 3 4) + 100)",
+    );
+    report(
+        &mut sess,
+        "(clojure.core.protocols/coll-reduce (list 1 2 3 4) +)",
+    );
     report(&mut sess, "(clojure.core.protocols/coll-reduce nil + 42)");
-    report(&mut sess, "(satisfies? clojure.core.protocols/CollReduce (list 1))");
+    report(
+        &mut sess,
+        "(satisfies? clojure.core.protocols/CollReduce (list 1))",
+    );
 }
 
 #[test]
@@ -235,13 +295,28 @@ fn probe_protocol_registration() {
     let report = |s: &mut Session, label: &str, src: &str| {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.eval_str(src)));
         match r {
-            Ok(b) => eprintln!("  {label}: {src} => 0x{b:016x} (int {})", clojure_jvm::runtime::arg_to_i64(b)),
+            Ok(b) => eprintln!(
+                "  {label}: {src} => 0x{b:016x} (int {})",
+                clojure_jvm::runtime::arg_to_i64(b)
+            ),
             Err(_) => eprintln!("  {label}: {src} => PANIC"),
         }
     };
-    report(&mut sess, "bound?", "(if clojure.core.protocols/coll-reduce 1 0)");
-    report(&mut sess, "sat-nil", "(satisfies? clojure.core.protocols/CollReduce nil)");
-    report(&mut sess, "sat-obj", "(satisfies? clojure.core.protocols/CollReduce (list 1))");
+    report(
+        &mut sess,
+        "bound?",
+        "(if clojure.core.protocols/coll-reduce 1 0)",
+    );
+    report(
+        &mut sess,
+        "sat-nil",
+        "(satisfies? clojure.core.protocols/CollReduce nil)",
+    );
+    report(
+        &mut sess,
+        "sat-obj",
+        "(satisfies? clojure.core.protocols/CollReduce (list 1))",
+    );
     // Define a fresh multi-arity protocol + extend in current ns as a control.
     sess.eval_str("(defprotocol PCtl (pc [c f] [c f v]))");
     sess.eval_str("(extend-protocol PCtl nil (pc ([c f] :two) ([c f v] v)) java.lang.Object (pc ([c f] :obj2) ([c f v] :obj3)))");
@@ -256,12 +331,22 @@ fn probe_coll_reduce_in_ns() {
     sess.eval_str("(clojure.lang.RT/load \"core/protocols\")");
     let report = |s: &mut Session, label: &str, src: &str| {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.eval_str(src)));
-        eprintln!("  {label}: {}", match r { Ok(b) => format!("0x{b:016x} int {}", clojure_jvm::runtime::arg_to_i64(b)), Err(_) => "PANIC".into() });
+        eprintln!(
+            "  {label}: {}",
+            match r {
+                Ok(b) => format!("0x{b:016x} int {}", clojure_jvm::runtime::arg_to_i64(b)),
+                Err(_) => "PANIC".into(),
+            }
+        );
     };
     // Switch into the protocols ns and check the unqualified var.
     sess.eval_str("(in-ns 'clojure.core.protocols)");
     report(&mut sess, "in-ns bound?", "(if coll-reduce 1 0)");
-    report(&mut sess, "in-ns nil-reduce", "(coll-reduce nil (fn [& a] 0) 42)");
+    report(
+        &mut sess,
+        "in-ns nil-reduce",
+        "(coll-reduce nil (fn [& a] 0) 42)",
+    );
 }
 
 #[test]
@@ -270,7 +355,13 @@ fn qualified_in_ns() {
     let mut sess = load_core_prefix();
     let report = |s: &mut Session, label: &str, src: &str| {
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.eval_str(src)));
-        eprintln!("  {label}: {}", match r { Ok(b) => format!("0x{b:016x}"), Err(_) => "PANIC".into() });
+        eprintln!(
+            "  {label}: {}",
+            match r {
+                Ok(b) => format!("0x{b:016x}"),
+                Err(_) => "PANIC".into(),
+            }
+        );
     };
     // unqualified in-ns then define + read back in that ns
     report(&mut sess, "unqual in-ns", "(in-ns 'aa.bb)");

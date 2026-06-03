@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use super::object::{object_equiv, Object};
+use super::object::{Object, object_equiv};
 
 /// `clojure.lang.PersistentHashMap`. Insertion-order-preserving for now —
 /// real Clojure doesn't preserve order for `PersistentHashMap`, but it does
@@ -36,7 +36,9 @@ pub struct PersistentHashMap {
 impl PersistentHashMap {
     /// Java: `PersistentHashMap.EMPTY`.
     pub fn empty() -> Arc<Self> {
-        Arc::new(PersistentHashMap { pairs: Arc::new(Vec::new()) })
+        Arc::new(PersistentHashMap {
+            pairs: Arc::new(Vec::new()),
+        })
     }
 
     /// Java: `PersistentHashMap.create(Object... init)` — build a map from
@@ -52,7 +54,9 @@ impl PersistentHashMap {
                 out.push((k, v));
             }
         }
-        Arc::new(PersistentHashMap { pairs: Arc::new(out) })
+        Arc::new(PersistentHashMap {
+            pairs: Arc::new(out),
+        })
     }
 
     /// Java: `PersistentHashMap.create(Object... init)` flat form.
@@ -74,7 +78,9 @@ impl PersistentHashMap {
     }
 
     /// Java: `int count()`.
-    pub fn count(&self) -> i32 { self.pairs.len() as i32 }
+    pub fn count(&self) -> i32 {
+        self.pairs.len() as i32
+    }
 
     /// Java: `IMapEntry entryAt(Object key)`. Returns the matching `(k, v)`
     /// pair, or `None` if the key isn't present.
@@ -105,14 +111,18 @@ impl PersistentHashMap {
         } else {
             new_pairs.push((key, val));
         }
-        Arc::new(PersistentHashMap { pairs: Arc::new(new_pairs) })
+        Arc::new(PersistentHashMap {
+            pairs: Arc::new(new_pairs),
+        })
     }
 
     /// Java: `IPersistentMap without(Object key)`.
     pub fn without(self: &Arc<Self>, key: &Object) -> Arc<Self> {
         let mut new_pairs: Vec<(Object, Object)> = (*self.pairs).clone();
         new_pairs.retain(|(k, _)| !object_equiv(k, key));
-        Arc::new(PersistentHashMap { pairs: Arc::new(new_pairs) })
+        Arc::new(PersistentHashMap {
+            pairs: Arc::new(new_pairs),
+        })
     }
 
     /// Java: `boolean containsKey(Object key)`.
@@ -161,8 +171,10 @@ mod tests {
     #[test]
     fn create_flat_pairs_round_trip() {
         let m = PersistentHashMap::create_flat(vec![
-            kw("a"), Object::Long(1),
-            kw("b"), Object::Long(2),
+            kw("a"),
+            Object::Long(1),
+            kw("b"),
+            Object::Long(2),
         ]);
         assert_eq!(m.count(), 2);
         assert!(matches!(m.val_at(&kw("a")), Object::Long(1)));
@@ -173,8 +185,10 @@ mod tests {
     #[test]
     fn duplicate_keys_keep_last_value() {
         let m = PersistentHashMap::create_flat(vec![
-            kw("a"), Object::Long(1),
-            kw("a"), Object::Long(99),
+            kw("a"),
+            Object::Long(1),
+            kw("a"),
+            Object::Long(99),
         ]);
         assert_eq!(m.count(), 1);
         assert!(matches!(m.val_at(&kw("a")), Object::Long(99)));
@@ -207,12 +221,16 @@ mod tests {
     #[test]
     fn equiv_matches_regardless_of_insertion_order() {
         let a = PersistentHashMap::create_flat(vec![
-            kw("a"), Object::Long(1),
-            kw("b"), Object::Long(2),
+            kw("a"),
+            Object::Long(1),
+            kw("b"),
+            Object::Long(2),
         ]);
         let b = PersistentHashMap::create_flat(vec![
-            kw("b"), Object::Long(2),
-            kw("a"), Object::Long(1),
+            kw("b"),
+            Object::Long(2),
+            kw("a"),
+            Object::Long(1),
         ]);
         assert!(a.equiv(&b));
     }

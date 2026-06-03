@@ -80,8 +80,7 @@ pub fn invoke_method_1(method_sym: u32, receiver: u64, arg1: u64) -> u64 {
         return NIL;
     }
     let args_list = dynobj::roots::with_scope(6, |scope| {
-        let tail =
-            v::alloc_list_cell_from_raw(scope, arg1, NIL).get();
+        let tail = v::alloc_list_cell_from_raw(scope, arg1, NIL).get();
         v::alloc_list_cell_from_raw(scope, receiver, tail).get()
     });
     jit_call_method(fn_obj, args_list)
@@ -107,9 +106,7 @@ fn jit_call_method(fn_obj: u64, args_list: u64) -> u64 {
         ) {
             dynlower::JitOutcome::Value(v) => v,
             dynlower::JitOutcome::Void => crate::value::NIL,
-            other => panic!(
-                "protocol: unexpected JIT outcome from method call: {other:?}"
-            ),
+            other => panic!("protocol: unexpected JIT outcome from method call: {other:?}"),
         }
     })
 }
@@ -159,11 +156,5 @@ pub fn value_type_name_sym(x: u64) -> Option<u32> {
         return None;
     }
     let type_id = unsafe { v::read_type_id(v::as_ptr(x)) } as usize;
-    with_host(|h| {
-        h.builtin_type_names
-            .lock()
-            .unwrap()
-            .get(&type_id)
-            .copied()
-    })
+    with_host(|h| h.builtin_type_names.lock().unwrap().get(&type_id).copied())
 }

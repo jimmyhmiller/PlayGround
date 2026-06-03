@@ -510,6 +510,13 @@ fn build_external_env(cb: &Codebase) -> ExternalEnv {
                 env.enums
                     .insert(name.clone(), (*hash, Vec::new(), variants.clone()));
             }
+            Some(TypeScheme::State { .. }) => {
+                // Node `state` bindings are not yet seeded into the edit
+                // layer's external env; an edited def referencing a state
+                // gets a clean resolver "unknown name" error rather than a
+                // silently wrong result. (Edit-layer state support is a
+                // follow-up; node-state semantics themselves don't need it.)
+            }
             None => {
                 // No cached type: an edited def referencing this name will get
                 // a clean resolver "unknown name" error rather than a silently
@@ -550,6 +557,10 @@ fn remap_def(def: &Def, remap: &HashMap<Hash, Hash>) -> Def {
                 .iter()
                 .map(|(n, t)| (n.clone(), remap_type(t, remap)))
                 .collect(),
+        },
+        Def::State { ty, init } => Def::State {
+            ty: remap_type(ty, remap),
+            init: remap_expr(init, remap),
         },
         Def::Enum {
             type_params,
@@ -606,6 +617,8 @@ fn remap_at_builtin_name(name: &str, remap: &HashMap<Hash, Hash>) -> String {
 fn remap_expr(e: &Expr, remap: &HashMap<Hash, Hash>) -> Expr {
     match e {
         Expr::TopRef(h) => Expr::TopRef(remap_hash(h, remap)),
+        Expr::StateRef(h) => Expr::StateRef(remap_hash(h, remap)),
+        Expr::StateSelfRef(_) => e.clone(),
         Expr::BuiltinRef(name) if name.starts_with(AT_BUILTIN_PREFIX) => {
             Expr::BuiltinRef(remap_at_builtin_name(name, remap))
         }
@@ -1045,6 +1058,8 @@ fn shift_expr(e: &Expr, delta: i64, cutoff: u32) -> Expr {
         | Expr::StringLit(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => e.clone(),
     }
 }
@@ -1147,6 +1162,8 @@ fn subst_params(body: &Expr, args: &[Expr], depth: u32) -> Result<Expr, EditErro
         | Expr::StringLit(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => body.clone(),
     })
 }
@@ -1207,6 +1224,8 @@ fn free_locals(e: &Expr, cutoff: u32, out: &mut std::collections::BTreeSet<u32>)
         | Expr::StringLit(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => {}
     }
 }
@@ -1307,6 +1326,8 @@ fn remap_locals(
         | Expr::StringLit(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => e.clone(),
     })
 }
@@ -1695,6 +1716,8 @@ fn inline_in_expr(
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => Ok(e.clone()),
     }
 }
@@ -2060,6 +2083,8 @@ fn permute_calls_to_expr(e: &Expr, callee: &Hash, perm: &[usize]) -> Result<Expr
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => Ok(e.clone()),
     }
 }

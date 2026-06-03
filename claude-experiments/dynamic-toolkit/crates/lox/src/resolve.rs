@@ -184,7 +184,9 @@ impl Resolver {
                     }
                     let super_captures = self.pop_scope();
                     // Store super scope captures (not used directly but threads upvalues)
-                    self.result.functions.insert(format!("{}__super", decl.name), super_captures);
+                    self.result
+                        .functions
+                        .insert(format!("{}__super", decl.name), super_captures);
                 } else {
                     for method in &decl.methods {
                         let key = format!("{}.{}", decl.name, method.name);

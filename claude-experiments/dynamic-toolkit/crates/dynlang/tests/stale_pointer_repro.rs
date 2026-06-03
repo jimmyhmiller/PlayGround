@@ -27,7 +27,7 @@ use std::sync::Arc;
 use dynir::builder::ModuleBuilder;
 use dynir::ir::LiteralRef;
 use dynir::types::{Signature, Type};
-use dynlang::gc::{DynGcRuntime, gc_alloc_thunk};
+use dynlang::gc::{gc_alloc_thunk, DynGcRuntime};
 use dynlang::{GcConfig, GcPolicy, NanBoxTags};
 use dynlower::{Arm64Backend, CallMode, JitModule, JitOutcome};
 use dynobj::{Compact, ObjHeader, RootSource, TypeInfo};

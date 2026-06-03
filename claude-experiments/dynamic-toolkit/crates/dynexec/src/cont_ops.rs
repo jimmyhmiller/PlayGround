@@ -15,8 +15,8 @@
 //! The interpreter implements these traits on `InterpStackRuntime`.
 //! The JIT implements them on its own frame state types.
 
-use crate::cont_heap::{CapturedStackBuilder, ContinuationContext, ContinuationView};
 use crate::FrameResume;
+use crate::cont_heap::{CapturedStackBuilder, ContinuationContext, ContinuationView};
 
 // ─── Traits ────────────────────────────────────────────────────────
 
@@ -103,9 +103,7 @@ pub fn do_clone(handle: u64) -> u64 {
 pub enum PromptBoundaryAction {
     /// The prompt-owning frame is a normal live frame. Run the
     /// handler block with the aborted value.
-    RunHandler {
-        value: Option<u64>,
-    },
+    RunHandler { value: Option<u64> },
     /// The prompt-owning frame is a spliced captured copy (its resume
     /// is `FromResume`). Trampoline back to the resumer — pop the
     /// captured frame and deliver the value to the resumer's
@@ -123,10 +121,7 @@ pub enum PromptBoundaryAction {
 /// Both the interpreter's `AbortToPrompt` handler and the JIT's
 /// abort handler call this to make the shared decision; each then
 /// executes the action in its own backend-specific way.
-pub fn resolve_prompt_boundary(
-    resume: &FrameResume,
-    value: Option<u64>,
-) -> PromptBoundaryAction {
+pub fn resolve_prompt_boundary(resume: &FrameResume, value: Option<u64>) -> PromptBoundaryAction {
     match resume {
         FrameResume::FromResume {
             return_block,

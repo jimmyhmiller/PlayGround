@@ -1,9 +1,9 @@
 //! Value → text. Used by the REPL and by tests.
 
 use crate::collections::{
-    array_count, array_get, is_array, is_keyword, is_list, is_map, is_record, is_set,
-    is_string, is_var, is_vector, keyword_sym_id, record_field, record_field_count,
-    record_type_name, set_backing, string_bytes, vector_iter,
+    array_count, array_get, is_array, is_keyword, is_list, is_map, is_record, is_set, is_string,
+    is_var, is_vector, keyword_sym_id, record_field, record_field_count, record_type_name,
+    set_backing, string_bytes, vector_iter,
 };
 use crate::namespace::{map_count, map_entry, var_sym};
 use crate::symbols::SymbolTable;
@@ -32,14 +32,14 @@ fn write_record(out: &mut String, v: u64, sym: &SymbolTable) {
         out.push_str(&format!("#<record 0x{:016x}>", v));
         return;
     }
-    let (ivector, imap, iseq) = crate::host::with_host(|h| {
-        (h.ivector_sym, h.imap_sym, h.iseq_sym)
-    });
+    let (ivector, imap, iseq) = crate::host::with_host(|h| (h.ivector_sym, h.imap_sym, h.iseq_sym));
     if crate::protocol::type_satisfies(ivector, v) {
         out.push('[');
         let mut first = true;
         for x in crate::collections::seq_iter(v) {
-            if !first { out.push(' '); }
+            if !first {
+                out.push(' ');
+            }
             first = false;
             write(out, x, sym);
         }
@@ -53,7 +53,9 @@ fn write_record(out: &mut String, v: u64, sym: &SymbolTable) {
         out.push('{');
         let mut first = true;
         for entry in crate::collections::seq_iter(v) {
-            if !first { out.push_str(", "); }
+            if !first {
+                out.push_str(", ");
+            }
             first = false;
             let mut iter = crate::collections::seq_iter(entry);
             let k = iter.next().unwrap_or(NIL);
@@ -69,7 +71,9 @@ fn write_record(out: &mut String, v: u64, sym: &SymbolTable) {
         out.push('(');
         let mut first = true;
         for x in crate::collections::seq_iter(v) {
-            if !first { out.push(' '); }
+            if !first {
+                out.push(' ');
+            }
             first = false;
             write(out, x, sym);
         }
@@ -92,7 +96,9 @@ fn write_record_debug(out: &mut String, v: u64, sym: &SymbolTable, name: &str) {
         map.get(&type_id).cloned()
     });
     for i in 0..n {
-        if i > 0 { out.push(' '); }
+        if i > 0 {
+            out.push(' ');
+        }
         if let Some(ref fs) = fields {
             if let Some(&fid) = fs.get(i) {
                 out.push(':');
@@ -208,7 +214,9 @@ fn write(out: &mut String, v: u64, sym: &SymbolTable) {
             out.push_str("#array[");
             let n = array_count(v);
             for i in 0..n {
-                if i > 0 { out.push(' '); }
+                if i > 0 {
+                    out.push(' ');
+                }
                 write(out, array_get(v, i), sym);
             }
             out.push(']');

@@ -84,6 +84,11 @@ pub struct Thread {
     /// varlen-Values section (count + N GC-traced pointer slots). Used
     /// by `ai_array_*` runtime fns. Elements are uniform boxed pointers.
     pub array_ti: *const TypeInfo,
+    /// `TypeInfo` for the `Atom` heap shape. Layout: GC header + exactly
+    /// one GC-traced pointer slot (the current value). A *distinct* shape
+    /// from `Array` so the runtime, GC, and reflection can tell a shared
+    /// mutable cell apart from immutable data. `ai_atom_new` reads this.
+    pub atom_ti: *const TypeInfo,
 }
 
 pub mod thread_offsets {
@@ -238,6 +243,14 @@ pub fn string_shape_hash() -> Hash {
 /// shape. Part of the wire format.
 pub fn array_shape_hash() -> Hash {
     Hash::of_bytes(b"<runtime:Array>")
+}
+
+/// Canonical shape hash for the heap `Atom` shape: a single GC-traced
+/// pointer cell, atomically updated. Distinct from `Array` so a shared
+/// mutable cell is recognizable as such (by the GC, reflection, and any
+/// wire/`Any` boundary) rather than masquerading as a 1-element array.
+pub fn atom_shape_hash() -> Hash {
+    Hash::of_bytes(b"<runtime:Atom>")
 }
 
 const _: () = {
@@ -402,6 +415,11 @@ pub struct Runtime {
     /// Stable storage for the `Array` shape's TypeInfo. Heap layout:
     /// header (16 B) + varlen-Values (8 B count + N×8 B pointer slots).
     pub array_ti: Box<TypeInfo>,
+    /// Stable storage for the `Atom` shape's TypeInfo. Heap layout:
+    /// header (16 B) + one GC-traced pointer slot (8 B). A distinct shape
+    /// from `Array`; `ai_atom_new` allocates it and the CAS in
+    /// `ai_atom_swap_local` runs on that single slot.
+    pub atom_ti: Box<TypeInfo>,
 
     /// Server-side memoization cache: `blake3(call_payload) → reply
     /// frame body`. The key covers the closure's code hash AND its
@@ -419,6 +437,14 @@ pub struct Runtime {
     pub result_cache: Arc<Mutex<HashMap<Hash, Vec<u8>>>>,
     pub cache_hits: Arc<std::sync::atomic::AtomicUsize>,
     pub cache_misses: Arc<std::sync::atomic::AtomicUsize>,
+
+    /// Lambda/def hashes whose bodies transitively touch a node `state`
+    /// cell. The `at()` result cache memoizes by payload bytes, which is
+    /// sound only for pure thunks; a stateful thunk must bypass the cache
+    /// (else a repeated identical call would skip its mutation). Populated
+    /// at JIT install (`Jit::new` / `IncrementalJit::install`) from
+    /// `knowledge::stateful_hashes`; consulted by `serve_one`.
+    pub stateful_hashes: Arc<Mutex<std::collections::HashSet<Hash>>>,
 }
 
 impl Runtime {
@@ -458,12 +484,14 @@ impl Runtime {
         // BoxedInt: 0 value fields, 8 raw bytes (one i64).
         // String:   0 value fields, 0 raw bytes, varlen-bytes section.
         // Array:    0 fixed fields, varlen-Values section (pointer slots).
-        // These three are the RUNTIME_RESERVED_SHAPES; the count MUST
+        // Atom:     1 fixed GC-traced pointer field (the mutable cell).
+        // These four are the RUNTIME_RESERVED_SHAPES; the count MUST
         // match `RUNTIME_RESERVED_SHAPES` in IncrementalJit so dynamic
         // installs append after this block.
         let boxed_int_type_id = closure_types.len() as u16;
         let string_type_id = boxed_int_type_id + 1;
         let array_type_id = string_type_id + 1;
+        let atom_type_id = array_type_id + 1;
         let boxed_int = TypeInfo::for_header(crate::gc::Full::SIZE as usize)
             .with_type_id(boxed_int_type_id)
             .with_fields(0)
@@ -475,6 +503,12 @@ impl Runtime {
         let array_ti_val = TypeInfo::for_header(crate::gc::Full::SIZE as usize)
             .with_type_id(array_type_id)
             .with_varlen_values(0);
+        // Atom: exactly one GC-traced pointer slot (the current value).
+        // A dedicated shape, NOT a 1-slot Array, so the runtime/GC/wire
+        // layer can recognize a shared mutable cell as such.
+        let atom_ti_val = TypeInfo::for_header(crate::gc::Full::SIZE as usize)
+            .with_type_id(atom_type_id)
+            .with_fields(1);
 
         // Register BoxedInt as a synthetic wire shape so the wire
         // encoder/decoder can ship pointers to BoxedInt across nodes.
@@ -486,7 +520,7 @@ impl Runtime {
         // user's `Ok(v)` match arm unboxes back to Int.
         let bi_hash = boxed_int_shape_hash();
         shape_registry.insert(bi_hash, boxed_int_type_id);
-        while shape_by_type_id.len() <= array_type_id as usize {
+        while shape_by_type_id.len() <= atom_type_id as usize {
             shape_by_type_id.push(None);
         }
         shape_by_type_id[boxed_int_type_id as usize] = Some(bi_hash);
@@ -498,6 +532,7 @@ impl Runtime {
         // `Array<HNode>` and `String` keys) must all be wire-portable.
         shape_by_type_id[string_type_id as usize] = Some(string_shape_hash());
         shape_by_type_id[array_type_id as usize] = Some(array_shape_hash());
+        shape_by_type_id[atom_type_id as usize] = Some(atom_shape_hash());
         shape_meta.insert(
             bi_hash,
             ShapeMeta::Struct {
@@ -513,6 +548,7 @@ impl Runtime {
         all_types.push(boxed_int);
         all_types.push(string_ti_val);
         all_types.push(array_ti_val);
+        all_types.push(atom_ti_val);
 
         // Boxed copies for stable addresses (used by the deserializer
         // when it needs to pass a `*const TypeInfo` to `ai_gc_alloc_closure`).
@@ -524,9 +560,11 @@ impl Runtime {
         let boxed_int_ti_box: Box<TypeInfo> = Box::new(boxed_int);
         let string_ti_box: Box<TypeInfo> = Box::new(string_ti_val);
         let array_ti_box: Box<TypeInfo> = Box::new(array_ti_val);
+        let atom_ti_box: Box<TypeInfo> = Box::new(atom_ti_val);
         type_infos.push(Box::new(boxed_int));
         type_infos.push(Box::new(string_ti_val));
         type_infos.push(Box::new(array_ti_val));
+        type_infos.push(Box::new(atom_ti_val));
 
         // 32 MiB semi-space — plenty for tests, easily reconfigurable later.
         let heap = Arc::new(Heap::new::<Full>(32 * 1024 * 1024, all_types));
@@ -555,6 +593,7 @@ impl Runtime {
             boxed_int_ti: &*boxed_int_ti_box,
             string_ti: &*string_ti_box,
             array_ti: &*array_ti_box,
+            atom_ti: &*atom_ti_box,
         });
 
         let _ = &mut *thread;
@@ -571,10 +610,29 @@ impl Runtime {
             boxed_int_ti: boxed_int_ti_box,
             string_ti: string_ti_box,
             array_ti: array_ti_box,
+            atom_ti: atom_ti_box,
             result_cache: Arc::new(Mutex::new(HashMap::new())),
             cache_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            stateful_hashes: Arc::new(Mutex::new(std::collections::HashSet::new())),
         }
+    }
+
+    /// Mark a def/lambda hash as stateful (its thunk must bypass the
+    /// `at()` result cache). Idempotent.
+    pub fn mark_stateful(&self, hash: Hash) {
+        self.stateful_hashes
+            .lock()
+            .expect("stateful_hashes poisoned")
+            .insert(hash);
+    }
+
+    /// Whether a shipped closure's lambda hash is stateful (cache-unsafe).
+    pub fn is_stateful(&self, hash: &Hash) -> bool {
+        self.stateful_hashes
+            .lock()
+            .expect("stateful_hashes poisoned")
+            .contains(hash)
     }
 
     /// Look up a cached result frame by the call-payload hash.
@@ -1165,13 +1223,68 @@ pub unsafe extern "C" fn ai_array_set(a: *mut u8, i: i64, p: *mut u8) -> i64 {
     }
 }
 
+/// Byte offset of an `Atom`'s single value slot. The cell has no count
+/// word (unlike `Array`), so the value sits immediately after the header.
+fn atom_value_offset() -> usize {
+    <Full as crate::gc::ObjHeader>::SIZE
+}
+
+/// Allocate a fresh `Atom` cell holding `init`. The cell is a dedicated
+/// heap shape (one GC-traced pointer slot), NOT a 1-element `Array`.
+///
+/// # Safety
+/// `thread` must have `atom_ti` initialised (it is, by
+/// `Runtime::new_with_metadata`). `init` must be a live heap pointer
+/// (Int values are boxed by codegen before reaching here).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_atom_new(thread: *mut Thread, init: *mut u8) -> *mut u8 {
+    unsafe {
+        let t = &*thread;
+        let ti = t.atom_ti;
+        if ti.is_null() {
+            panic!("ai_atom_new: thread.atom_ti is null");
+        }
+        let heap = &*t.heap;
+        let dyna = &*t.dyna_thread;
+        dyna.set_parked_jit_fp(t.top_frame as *const u8);
+        let mut ptr = heap.alloc_obj::<Full>(&*ti, 0);
+        if ptr.is_null() {
+            heap.collect::<crate::gc::IdentityPtrPolicy>(&[]);
+            ptr = heap.alloc_obj::<Full>(&*ti, 0);
+            if ptr.is_null() {
+                dyna.clear_parked_jit_fp();
+                panic!("ai_atom_new: heap exhausted after GC");
+            }
+        }
+        dyna.clear_parked_jit_fp();
+        // Store the initial value with Release so a subsequent acquiring
+        // reader (deref / swap) sees a fully-constructed cell.
+        let slot = ptr.add(atom_value_offset()) as *const core::sync::atomic::AtomicPtr<u8>;
+        (*slot).store(init, core::sync::atomic::Ordering::Release);
+        ptr
+    }
+}
+
+/// Read an `Atom`'s current value with `Acquire` ordering, establishing
+/// happens-before with the `Release` swap that installed it.
+///
+/// # Safety
+/// `atom` must be a live `Atom` cell (as produced by `ai_atom_new`).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_atom_load(atom: *const u8) -> *mut u8 {
+    unsafe {
+        let slot = atom.add(atom_value_offset()) as *const core::sync::atomic::AtomicPtr<u8>;
+        (*slot).load(core::sync::atomic::Ordering::Acquire)
+    }
+}
+
 /// The atom primitive: a lock-free swap. This is the ONE irreducible
 /// piece a real Clojure-style atom needs; everything else (`atom`,
 /// `deref`, `reset`) is plain ai-lang.
 ///
-/// `cell` is a 1-slot `Array` (the atom's storage); slot `i` holds a
-/// pointer to the current immutable value. `updater` is a closure
-/// `fn(T) -> T`. The loop:
+/// `atom` is a dedicated `Atom` cell whose single slot holds a pointer to
+/// the current immutable value. `updater` is a closure `fn(T) -> T`. The
+/// loop:
 ///   1. atomically load the slot's current pointer
 ///   2. invoke `updater(current)` — runs WITHOUT any lock — to build a
 ///      brand-new value object
@@ -1186,27 +1299,22 @@ pub unsafe extern "C" fn ai_array_set(a: *mut u8, i: i64, p: *mut u8) -> i64 {
 ///
 /// Works for ANY value type with no user thought: the closure does its
 /// own Int box/unbox via the uniform ABI, so the loop only ever moves raw
-/// object pointers. The slot is a GC-traced array element, so both the
-/// old and newly-installed values stay rooted and the GC scans them.
+/// object pointers. The slot is a GC-traced field, so both the old and
+/// newly-installed values stay rooted and the GC scans them.
 ///
 /// # Safety
-/// `cell` must be a live 1+-slot `Array` with `i` in bounds; `updater`
-/// must be a live closure of LLVM signature
+/// `atom` must be a live `Atom` cell; `updater` must be a live closure of
+/// LLVM signature
 /// `unsafe extern "C" fn(*mut Thread, *const u8, *const u8) -> *mut u8`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ai_atom_swap_local(
     thread: *mut Thread,
-    cell: *mut u8,
-    i: i64,
+    atom: *mut u8,
     updater: *const u8,
 ) -> *mut u8 {
     unsafe {
-        let len = ai_array_len(cell);
-        if i < 0 || i >= len {
-            panic!("ai_atom_swap: index {} out of bounds (len {})", i, len);
-        }
         let slot =
-            cell.add(array_element_offset(i as usize)) as *const core::sync::atomic::AtomicPtr<u8>;
+            atom.add(atom_value_offset()) as *const core::sync::atomic::AtomicPtr<u8>;
 
         // Resolve the closure's code pointer once (it doesn't change
         // across retries).
@@ -1230,6 +1338,268 @@ pub unsafe extern "C" fn ai_atom_swap_local(
                 Err(_) => continue, // lost the race; recompute on the new value
             }
         }
+    }
+}
+
+/// Read the 32-byte content hash a node-`state` primitive was given.
+unsafe fn read_state_key(hash_ptr: *const u8) -> [u8; 32] {
+    let mut key = [0u8; 32];
+    unsafe { core::ptr::copy_nonoverlapping(hash_ptr, key.as_mut_ptr(), 32) };
+    key
+}
+
+/// `1` if a node `state` binding identified by `hash_ptr` (a pointer to
+/// 32 content-hash bytes) is already installed on this node's heap, else
+/// `0`. The installer thunk uses this to make installation idempotent:
+/// the initializer runs exactly once per node per hash.
+///
+/// # Safety
+/// `thread.heap` must be valid; `hash_ptr` must point to 32 readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_state_present(thread: *mut Thread, hash_ptr: *const u8) -> i64 {
+    unsafe {
+        let heap = &*(*thread).heap;
+        let key = read_state_key(hash_ptr);
+        let slots = heap.state_slots.lock().expect("state_slots poisoned");
+        if slots.contains_key(&key) { 1 } else { 0 }
+    }
+}
+
+/// Install a node `state` binding: store `val` (the initializer's result,
+/// typically an `Atom` pointer) in a fresh GC-root slot and record
+/// `hash -> slot`. Idempotent by hash: if the hash is already live this is
+/// a no-op and the existing cell is preserved (so a shipped handler that
+/// re-installs a state the node already has never clobbers it). Returns 0.
+///
+/// # Safety
+/// `thread.heap` must be valid; `hash_ptr` must point to 32 readable bytes;
+/// `val` must be a live heap pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_state_set(
+    thread: *mut Thread,
+    hash_ptr: *const u8,
+    val: *mut u8,
+) -> i64 {
+    unsafe {
+        let heap = &*(*thread).heap;
+        let key = read_state_key(hash_ptr);
+        let mut slots = heap.state_slots.lock().expect("state_slots poisoned");
+        if slots.contains_key(&key) {
+            return 0; // already live — keep the node's existing cell
+        }
+        let idx = heap.globals.add(val as u64);
+        slots.insert(key, idx);
+        0
+    }
+}
+
+/// Resolve a node `state` reference to its single live cell on this node.
+/// Reads the value through the GC-root slot, so the pointer reflects any
+/// relocation since install. Panics with a clear message if the state was
+/// never installed (a hard error, never a silent null).
+///
+/// # Safety
+/// `thread.heap` must be valid; `hash_ptr` must point to 32 readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_state_get(thread: *mut Thread, hash_ptr: *const u8) -> *mut u8 {
+    unsafe {
+        let heap = &*(*thread).heap;
+        let key = read_state_key(hash_ptr);
+        let slots = heap.state_slots.lock().expect("state_slots poisoned");
+        match slots.get(&key) {
+            Some(&idx) => heap.globals.get(idx) as *mut u8,
+            None => panic!(
+                "ai_state_get: node `state` {} not installed on this node \
+                 (its install thunk must run before any reference)",
+                hex_of(&key),
+            ),
+        }
+    }
+}
+
+/// Lowercase hex of a 32-byte hash, for diagnostics.
+fn hex_of(bytes: &[u8; 32]) -> String {
+    let mut s = String::with_capacity(64);
+    for b in bytes {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+// =============================================================================
+// Structural value hashing + equality
+// =============================================================================
+//
+// The premise of the language is that any value has a canonical form, so any
+// value is hashable. These walk a heap value by its shape (the same
+// `TypeInfo` the GC walks) and produce a stable structural hash / decide
+// structural equality. Stable across GC relocation (content-based, not
+// address-based) and across nodes (same structure → same hash). This is what
+// lets `HashMap<K, V>` key on ANY type, not just `String`.
+//
+// Values are immutable and acyclic (built bottom-up), so the recursion
+// terminates. The ONE mutable shape is `Atom`: hashing/comparing it by its
+// current contents would be unstable (a later `swap` changes the hash), and a
+// cycle can only form THROUGH an atom. So both walkers hard-error if they
+// reach an `Atom` (identified by its reserved `type_id`), rather than return a
+// silently-wrong-and-unstable answer. Key on `deref(atom)` or a stable id.
+
+const FNV64_OFFSET: u64 = 14695981039346656037;
+const FNV64_PRIME: u64 = 1099511628211;
+
+#[inline]
+fn fnv_byte(acc: u64, b: u8) -> u64 {
+    (acc ^ b as u64).wrapping_mul(FNV64_PRIME)
+}
+#[inline]
+fn fnv_u64(acc: u64, v: u64) -> u64 {
+    let mut a = acc;
+    for b in v.to_le_bytes() {
+        a = fnv_byte(a, b);
+    }
+    a
+}
+
+/// Structurally hash the heap object at `obj`, folding into `acc`.
+/// `atom_tid` is the reserved `Atom` type_id; reaching one is a hard error
+/// (a mutable cell has no stable structural hash).
+unsafe fn hash_obj(heap: &Heap, obj: *const u8, acc: u64, atom_tid: u16) -> u64 {
+    unsafe {
+        if obj.is_null() {
+            return fnv_u64(acc, 0x4e_55_4c_4c); // "NULL"
+        }
+        let tid = heap.obj_type_id(obj);
+        if tid == atom_tid {
+            panic!(
+                "value_hash: cannot hash an `Atom` (a mutable cell has no \
+                 stable hash). Key on `deref(atom)` or a stable id instead."
+            );
+        }
+        let info = heap.type_info_by_id(tid);
+        // Fold the shape id so values of different shapes don't collide.
+        let mut a = fnv_u64(acc, tid as u64);
+        // Fixed GC-traced pointer fields: recurse.
+        for i in 0..info.value_field_count {
+            let off = info.value_field_offset(i);
+            let p = *(obj.add(off) as *const *const u8);
+            a = hash_obj(heap, p, a, atom_tid);
+        }
+        // Untraced raw bytes (e.g. a BoxedInt's i64, an enum tag).
+        for &b in crate::gc::read_raw_bytes(obj, info) {
+            a = fnv_byte(a, b);
+        }
+        // Variable-length tail.
+        match info.varlen {
+            crate::gc::VarLenKind::None => {}
+            crate::gc::VarLenKind::Bytes => {
+                let bytes = crate::gc::read_varlen_bytes(obj, info);
+                a = fnv_u64(a, bytes.len() as u64);
+                for &b in bytes {
+                    a = fnv_byte(a, b);
+                }
+            }
+            crate::gc::VarLenKind::Values => {
+                let n = crate::gc::read_varlen_count(obj, info);
+                a = fnv_u64(a, n as u64);
+                for j in 0..n {
+                    let off = info.varlen_element_offset(j);
+                    let p = *(obj.add(off) as *const *const u8);
+                    a = hash_obj(heap, p, a, atom_tid);
+                }
+            }
+        }
+        a
+    }
+}
+
+/// Structural equality of two heap objects (same shape + same contents).
+/// Reaching an `Atom` (reserved `atom_tid`) is a hard error.
+unsafe fn eq_obj(heap: &Heap, a: *const u8, b: *const u8, atom_tid: u16) -> bool {
+    unsafe {
+        if a == b {
+            return true; // same object (incl. both null)
+        }
+        if a.is_null() || b.is_null() {
+            return false;
+        }
+        let ta = heap.obj_type_id(a);
+        let tb = heap.obj_type_id(b);
+        if ta == atom_tid || tb == atom_tid {
+            panic!(
+                "value_eq: cannot compare an `Atom` by value (a mutable cell \
+                 has no stable structural equality). Compare `deref(atom)` or \
+                 a stable id instead."
+            );
+        }
+        if ta != tb {
+            return false;
+        }
+        let info = heap.type_info_by_id(ta);
+        for i in 0..info.value_field_count {
+            let off = info.value_field_offset(i);
+            let pa = *(a.add(off) as *const *const u8);
+            let pb = *(b.add(off) as *const *const u8);
+            if !eq_obj(heap, pa, pb, atom_tid) {
+                return false;
+            }
+        }
+        if crate::gc::read_raw_bytes(a, info) != crate::gc::read_raw_bytes(b, info) {
+            return false;
+        }
+        match info.varlen {
+            crate::gc::VarLenKind::None => {}
+            crate::gc::VarLenKind::Bytes => {
+                if crate::gc::read_varlen_bytes(a, info) != crate::gc::read_varlen_bytes(b, info) {
+                    return false;
+                }
+            }
+            crate::gc::VarLenKind::Values => {
+                let na = crate::gc::read_varlen_count(a, info);
+                let nb = crate::gc::read_varlen_count(b, info);
+                if na != nb {
+                    return false;
+                }
+                for j in 0..na {
+                    let off = info.varlen_element_offset(j);
+                    let pa = *(a.add(off) as *const *const u8);
+                    let pb = *(b.add(off) as *const *const u8);
+                    if !eq_obj(heap, pa, pb, atom_tid) {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+}
+
+/// Stable structural hash of any value (i64). Lets `HashMap<K, V>` key on
+/// any type. `v` is a heap pointer (Int/Float keys arrive boxed under the
+/// uniform ABI; codegen boxes a bare Int before the call).
+///
+/// # Safety
+/// `thread.heap` valid; `v` a live heap object (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_value_hash(thread: *mut Thread, v: *const u8) -> i64 {
+    unsafe {
+        let t = &*thread;
+        let heap = &*t.heap;
+        let atom_tid = (*t.atom_ti).type_id;
+        hash_obj(heap, v, FNV64_OFFSET, atom_tid) as i64
+    }
+}
+
+/// Structural equality of two values: `1` if equal, `0` otherwise.
+///
+/// # Safety
+/// `thread.heap` valid; `a`/`b` live heap objects (or null).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_value_eq(thread: *mut Thread, a: *const u8, b: *const u8) -> i64 {
+    unsafe {
+        let t = &*thread;
+        let heap = &*t.heap;
+        let atom_tid = (*t.atom_ti).type_id;
+        if eq_obj(heap, a, b, atom_tid) { 1 } else { 0 }
     }
 }
 

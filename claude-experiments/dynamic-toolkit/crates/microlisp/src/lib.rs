@@ -6,8 +6,8 @@
 pub mod compile;
 pub mod expand;
 pub mod host;
-pub mod printer;
 pub mod prims;
+pub mod printer;
 pub mod reader;
 pub mod symbols;
 pub mod value;
@@ -19,8 +19,8 @@ use dynir::builder::ModuleBuilder;
 use dynir::ir::FuncRef;
 use dynlang::gc::DynGcRuntime;
 use dynlang::{GcConfig, GcPolicy, NanBoxTags, ObjType};
-use dynobj::roots::{FrameChain, RootScope, RootSet};
 use dynlower::{CallMode, JitModule};
+use dynobj::roots::{FrameChain, RootScope, RootSet};
 use dynobj::{Compact, ObjHeader, TypeInfo, VarLenKind};
 use dynruntime::active_jit_safepoint_handler;
 
@@ -96,7 +96,11 @@ impl Engine {
         // every `JitModule::extend`.
         let obj_types = vec![cons_obj_type()];
         let gc_config = GcConfig::generational(HEAP_SIZE);
-        let tags = NanBoxTags { nil: 0, bool_tag: 0, ptr: 2 };
+        let tags = NanBoxTags {
+            nil: 0,
+            bool_tag: 0,
+            ptr: 2,
+        };
         let gc = Box::new(DynGcRuntime::new(&gc_config, &tags, &obj_types));
         let gc_ptr: *const DynGcRuntime = &*gc;
 
@@ -137,9 +141,13 @@ impl Engine {
         // need stable addresses for the lifetime of the engine —
         // recording before the move would leave a dangling pointer.
         let pool_ptr: *const dyn dynobj::RootSource = engine.jit.literal_pool();
-        unsafe { engine.gc.register_extra_root_source(pool_ptr); }
+        unsafe {
+            engine.gc.register_extra_root_source(pool_ptr);
+        }
         let chain_ptr: *const dyn dynobj::RootSource = &*engine.chain;
-        unsafe { engine.gc.register_extra_root_source(chain_ptr); }
+        unsafe {
+            engine.gc.register_extra_root_source(chain_ptr);
+        }
 
         engine
     }
@@ -206,7 +214,18 @@ impl Engine {
             // Re-read each iteration: a previous between-form collection
             // may have rewritten this slot to a relocated address.
             let form = pending.get(i);
-            last = process_form_inner(form, mb, func_refs, jit, externs, gc, chain, host, anon_counter, *jit_gc_policy);
+            last = process_form_inner(
+                form,
+                mb,
+                func_refs,
+                jit,
+                externs,
+                gc,
+                chain,
+                host,
+                anon_counter,
+                *jit_gc_policy,
+            );
             if *gc_stress && i + 1 < n_forms {
                 gc.collect();
             }
@@ -288,7 +307,9 @@ impl Engine {
 }
 
 impl Default for Engine {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 // Convenience: install a HostGuard while running a function on `self`.
@@ -349,11 +370,9 @@ fn process_form_inner(
     let snap = mb.snapshot();
     let allocator_frefs = compile::allocator_frefs(func_refs);
     snap.validate_safepoints(&allocator_frefs);
-    jit.extend::<
-        NanBoxConfig,
-        dynlower::Arm64Backend,
-        dynlower::regalloc::LinearScanAllocator,
-    >(&snap, externs);
+    jit.extend::<NanBoxConfig, dynlower::Arm64Backend, dynlower::regalloc::LinearScanAllocator>(
+        &snap, externs,
+    );
 
     match result {
         compile::TopResult::Define { .. } => value::NIL,
@@ -364,13 +383,11 @@ fn process_form_inner(
             host.macro_env.borrow_mut().insert(id, fref);
             value::NIL
         }
-        compile::TopResult::Expr(fref) => {
-            match gc.run_jit(jit, fref, &[], jit_gc_policy) {
-                dynlower::JitOutcome::Value(v) => v,
-                dynlower::JitOutcome::Void => value::NIL,
-                other => panic!("unexpected outcome from top-level form: {other:?}"),
-            }
-        }
+        compile::TopResult::Expr(fref) => match gc.run_jit(jit, fref, &[], jit_gc_policy) {
+            dynlower::JitOutcome::Value(v) => v,
+            dynlower::JitOutcome::Void => value::NIL,
+            other => panic!("unexpected outcome from top-level form: {other:?}"),
+        },
         compile::TopResult::None => value::NIL,
     }
 }

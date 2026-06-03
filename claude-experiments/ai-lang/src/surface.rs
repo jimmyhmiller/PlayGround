@@ -72,6 +72,18 @@ pub enum SurfaceDefKind {
         /// host (Rust) extern.
         variadic: bool,
     },
+
+    /// `state NAME: TYPE = INIT` — a node-resident singleton binding.
+    /// `INIT` is evaluated exactly once per node (at boot / first install)
+    /// and its result is stored in the node's state table keyed by the
+    /// binding's content hash; every reference resolves to that one live
+    /// cell. Distinct from a `def`: a `def` is re-runnable; a `state` has
+    /// node identity and is never re-evaluated. Typically `TYPE` is an
+    /// `Atom<T>`, making the cell a shared mutable reference.
+    State {
+        ty: SurfaceType,
+        init: SurfaceExpr,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -123,10 +135,13 @@ pub enum SurfaceExpr {
         name: String,
         span: Span,
     },
-    /// `callee(arg1, arg2, ...)`
+    /// `callee(arg1, arg2, ...)` or `callee::<T, ...>(arg1, ...)`.
+    /// `type_args` holds explicit type arguments (turbofish); empty when
+    /// none were written.
     Call {
         callee: Box<SurfaceExpr>,
         args: Vec<SurfaceExpr>,
+        type_args: Vec<SurfaceType>,
         span: Span,
     },
     BinOp {

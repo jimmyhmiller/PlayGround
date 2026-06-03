@@ -116,16 +116,16 @@ fn check_deriv_x_times_x(r: u64) {
     // d(x*x)/dx unsimplified = (+ (* x 1) (* 1 x))
     assert!(is_cons(r));
     assert!(is_symbol(car(r))); // '+
-    let term1 = car(cdr(r));    // (* x 1)
+    let term1 = car(cdr(r)); // (* x 1)
     let term2 = car(cdr(cdr(r))); // (* 1 x)
     assert!(is_cons(term1));
     assert!(is_cons(term2));
     // (* x 1)
-    assert!(is_symbol(car(term1)));         // '*
-    assert!(is_symbol(car(cdr(term1))));    // 'x
+    assert!(is_symbol(car(term1))); // '*
+    assert!(is_symbol(car(cdr(term1)))); // 'x
     assert_eq!(as_number(car(cdr(cdr(term1)))), 1.0);
     // (* 1 x)
-    assert!(is_symbol(car(term2)));         // '*
+    assert!(is_symbol(car(term2))); // '*
     assert_eq!(as_number(car(cdr(term2))), 1.0);
     assert!(is_symbol(car(cdr(cdr(term2))))); // 'x
 }

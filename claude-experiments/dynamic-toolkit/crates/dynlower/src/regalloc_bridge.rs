@@ -79,7 +79,12 @@ impl<'a> DynIRFunction<'a> {
         let block_param_vregs: Vec<Vec<VReg>> = func
             .blocks
             .iter()
-            .map(|b| b.params.iter().map(|(v, _)| VReg(v.index() as u32)).collect())
+            .map(|b| {
+                b.params
+                    .iter()
+                    .map(|(v, _)| VReg(v.index() as u32))
+                    .collect()
+            })
             .collect();
 
         // Cache branch args
@@ -450,11 +455,26 @@ impl<'a> DynIRFunction<'a> {
 // ── Function trait impl ───────────────────────────────────────────
 
 impl<'a> Function for DynIRFunction<'a> {
-    type BlockIter<'b> = std::iter::Map<std::ops::Range<u32>, fn(u32) -> BlockId> where Self: 'b;
-    type InstIter<'b> = std::iter::Map<std::ops::Range<u32>, fn(u32) -> InstId> where Self: 'b;
-    type OperandIter<'b> = std::vec::IntoIter<Operand> where Self: 'b;
-    type SuccIter<'b> = std::vec::IntoIter<BlockId> where Self: 'b;
-    type PredIter<'b> = std::vec::IntoIter<BlockId> where Self: 'b;
+    type BlockIter<'b>
+        = std::iter::Map<std::ops::Range<u32>, fn(u32) -> BlockId>
+    where
+        Self: 'b;
+    type InstIter<'b>
+        = std::iter::Map<std::ops::Range<u32>, fn(u32) -> InstId>
+    where
+        Self: 'b;
+    type OperandIter<'b>
+        = std::vec::IntoIter<Operand>
+    where
+        Self: 'b;
+    type SuccIter<'b>
+        = std::vec::IntoIter<BlockId>
+    where
+        Self: 'b;
+    type PredIter<'b>
+        = std::vec::IntoIter<BlockId>
+    where
+        Self: 'b;
 
     fn num_vregs(&self) -> usize {
         self.func.value_types.len()
@@ -532,8 +552,7 @@ impl<'a> Function for DynIRFunction<'a> {
     /// `Inst::Safepoint` is also a safepoint, in addition to all calls.
     /// The default `is_safepoint = is_call`, so we extend it explicitly.
     fn is_safepoint(&self, inst: InstId) -> bool {
-        self.is_call(inst)
-            || matches!(self.get_inst(inst), Some(Inst::Safepoint(_)))
+        self.is_call(inst) || matches!(self.get_inst(inst), Some(Inst::Safepoint(_)))
     }
 
     /// Every live *heap-pointer-eligible* value at a safepoint is a root:
@@ -614,63 +633,182 @@ impl<'a> Function for DynIRFunction<'a> {
 pub struct AArch64Target;
 
 static GP_REGS: &[PReg] = &[
-    PReg(0), PReg(1), PReg(2), PReg(3), PReg(4), PReg(5), PReg(6), PReg(7),
-    PReg(8), PReg(9), PReg(10), PReg(11), PReg(12), PReg(13), PReg(14), PReg(15),
-    PReg(17), PReg(18), PReg(19), PReg(20), PReg(21), PReg(22), PReg(23),
-    PReg(24), PReg(25), PReg(26), PReg(27),
+    PReg(0),
+    PReg(1),
+    PReg(2),
+    PReg(3),
+    PReg(4),
+    PReg(5),
+    PReg(6),
+    PReg(7),
+    PReg(8),
+    PReg(9),
+    PReg(10),
+    PReg(11),
+    PReg(12),
+    PReg(13),
+    PReg(14),
+    PReg(15),
+    PReg(17),
+    PReg(18),
+    PReg(19),
+    PReg(20),
+    PReg(21),
+    PReg(22),
+    PReg(23),
+    PReg(24),
+    PReg(25),
+    PReg(26),
+    PReg(27),
 ];
 
 static FP_REGS: &[PReg] = &[
-    PReg(32), PReg(33), PReg(34), PReg(35), PReg(36), PReg(37), PReg(38), PReg(39),
-    PReg(40), PReg(41), PReg(42), PReg(43), PReg(44), PReg(45), PReg(46), PReg(47),
-    PReg(48), PReg(49), PReg(50), PReg(51), PReg(52), PReg(53), PReg(54), PReg(55),
-    PReg(56), PReg(57), PReg(58), PReg(59), PReg(60), PReg(61), PReg(62), PReg(63),
+    PReg(32),
+    PReg(33),
+    PReg(34),
+    PReg(35),
+    PReg(36),
+    PReg(37),
+    PReg(38),
+    PReg(39),
+    PReg(40),
+    PReg(41),
+    PReg(42),
+    PReg(43),
+    PReg(44),
+    PReg(45),
+    PReg(46),
+    PReg(47),
+    PReg(48),
+    PReg(49),
+    PReg(50),
+    PReg(51),
+    PReg(52),
+    PReg(53),
+    PReg(54),
+    PReg(55),
+    PReg(56),
+    PReg(57),
+    PReg(58),
+    PReg(59),
+    PReg(60),
+    PReg(61),
+    PReg(62),
+    PReg(63),
 ];
 
 // Caller-saved: X0-X15, X17-X18, D0-D7, D16-D31  (X16 is reserved as secondary scratch)
 static CALLER_SAVED: &[PReg] = &[
     // GP: X0-X15, X17-X18 (X16 = IP0 reserved as secondary scratch, X18 = platform register)
-    PReg(0), PReg(1), PReg(2), PReg(3), PReg(4), PReg(5), PReg(6), PReg(7),
-    PReg(8), PReg(9), PReg(10), PReg(11), PReg(12), PReg(13), PReg(14), PReg(15),
-    PReg(17), PReg(18),
+    PReg(0),
+    PReg(1),
+    PReg(2),
+    PReg(3),
+    PReg(4),
+    PReg(5),
+    PReg(6),
+    PReg(7),
+    PReg(8),
+    PReg(9),
+    PReg(10),
+    PReg(11),
+    PReg(12),
+    PReg(13),
+    PReg(14),
+    PReg(15),
+    PReg(17),
+    PReg(18),
     // FP: D0-D7
-    PReg(32), PReg(33), PReg(34), PReg(35), PReg(36), PReg(37), PReg(38), PReg(39),
+    PReg(32),
+    PReg(33),
+    PReg(34),
+    PReg(35),
+    PReg(36),
+    PReg(37),
+    PReg(38),
+    PReg(39),
     // FP: D16-D31
-    PReg(48), PReg(49), PReg(50), PReg(51), PReg(52), PReg(53), PReg(54), PReg(55),
-    PReg(56), PReg(57), PReg(58), PReg(59), PReg(60), PReg(61), PReg(62), PReg(63),
+    PReg(48),
+    PReg(49),
+    PReg(50),
+    PReg(51),
+    PReg(52),
+    PReg(53),
+    PReg(54),
+    PReg(55),
+    PReg(56),
+    PReg(57),
+    PReg(58),
+    PReg(59),
+    PReg(60),
+    PReg(61),
+    PReg(62),
+    PReg(63),
 ];
 
 // Callee-saved: X19-X28, D8-D15
 static CALLEE_SAVED: &[PReg] = &[
-    PReg(19), PReg(20), PReg(21), PReg(22), PReg(23), PReg(24), PReg(25), PReg(26),
+    PReg(19),
+    PReg(20),
+    PReg(21),
+    PReg(22),
+    PReg(23),
+    PReg(24),
+    PReg(25),
+    PReg(26),
     PReg(27),
     // FP: D8-D15
-    PReg(40), PReg(41), PReg(42), PReg(43), PReg(44), PReg(45), PReg(46), PReg(47),
+    PReg(40),
+    PReg(41),
+    PReg(42),
+    PReg(43),
+    PReg(44),
+    PReg(45),
+    PReg(46),
+    PReg(47),
 ];
 
 // Reserved: X16 (secondary scratch / IP0), X28 (primary scratch), X29 (FP), X30 (LR), SP
-static RESERVED: &[PReg] = &[
-    PReg(16), PReg(28), PReg(29), PReg(30),
-];
+static RESERVED: &[PReg] = &[PReg(16), PReg(28), PReg(29), PReg(30)];
 
 static GP_ARG_REGS: &[PReg] = &[
-    PReg(0), PReg(1), PReg(2), PReg(3), PReg(4), PReg(5), PReg(6), PReg(7),
-    PReg(8), PReg(9), PReg(10), PReg(11), PReg(12), PReg(13), PReg(14), PReg(15),
+    PReg(0),
+    PReg(1),
+    PReg(2),
+    PReg(3),
+    PReg(4),
+    PReg(5),
+    PReg(6),
+    PReg(7),
+    PReg(8),
+    PReg(9),
+    PReg(10),
+    PReg(11),
+    PReg(12),
+    PReg(13),
+    PReg(14),
+    PReg(15),
 ];
 
 static GP_RET_REGS: &[PReg] = &[PReg(0)];
 static FP_ARG_REGS: &[PReg] = &[
-    PReg(32), PReg(33), PReg(34), PReg(35), PReg(36), PReg(37), PReg(38), PReg(39),
+    PReg(32),
+    PReg(33),
+    PReg(34),
+    PReg(35),
+    PReg(36),
+    PReg(37),
+    PReg(38),
+    PReg(39),
 ];
 static FP_RET_REGS: &[PReg] = &[PReg(32)]; // D0
 
 static REG_CLASSES: &[RegClass] = &[GP, FP];
 
 static GP_REG_NAMES: &[&str] = &[
-    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7",
-    "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
-    "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23",
-    "x24", "x25", "x26", "x27", "x28", "x29", "x30",
+    "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14",
+    "x15", "x16", "x17", "x18", "x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26", "x27",
+    "x28", "x29", "x30",
 ];
 
 impl RegInfo for AArch64Target {
@@ -730,11 +868,19 @@ impl CallingConvention for AArch64Target {
     }
 
     fn arg_regs(&self, class: RegClass) -> &[PReg] {
-        if class == GP { GP_ARG_REGS } else { FP_ARG_REGS }
+        if class == GP {
+            GP_ARG_REGS
+        } else {
+            FP_ARG_REGS
+        }
     }
 
     fn ret_regs(&self, class: RegClass) -> &[PReg] {
-        if class == GP { GP_RET_REGS } else { FP_RET_REGS }
+        if class == GP {
+            GP_RET_REGS
+        } else {
+            FP_RET_REGS
+        }
     }
 
     fn stack_pointer(&self) -> Option<PReg> {

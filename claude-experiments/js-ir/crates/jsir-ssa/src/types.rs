@@ -61,7 +61,7 @@ pub enum ValueKind {
 }
 
 /// Mirrors upstream `ValueReason`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ValueReason {
     KnownReturnSignature,
     State,
@@ -334,7 +334,21 @@ fn build_array_shape(shapes: &mut ShapeRegistry) {
     let index_of = pure_primitive_fn(shapes);
     let includes = pure_primitive_fn(shapes);
     let join = pure_primitive_fn(shapes);
-    let push = simple_function(shapes, Vec::new(), Some(Effect::Capture), Type::Primitive, ValueKind::Primitive);
+    // `push` mutates the array (receiver) and captures its arguments into it.
+    // Faithful to upstream Array.push (callee_effect Store, rest_param Capture).
+    let push = add_function(
+        shapes,
+        Vec::new(),
+        FunctionSignature {
+            rest_param: Some(Effect::Capture),
+            callee_effect: Effect::Store,
+            return_type: Type::Primitive,
+            return_value_kind: ValueKind::Primitive,
+            ..Default::default()
+        },
+        None,
+        false,
+    );
     let map = simple_function(shapes, Vec::new(), Some(Effect::ConditionallyMutate), obj(BUILT_IN_ARRAY_ID), ValueKind::Mutable);
     let filter = simple_function(shapes, Vec::new(), Some(Effect::ConditionallyMutate), obj(BUILT_IN_ARRAY_ID), ValueKind::Mutable);
     let slice = simple_function(shapes, vec![Effect::Read], Some(Effect::Read), obj(BUILT_IN_ARRAY_ID), ValueKind::Mutable);
@@ -437,9 +451,17 @@ impl GlobalRegistry {
 /// `build_default_globals`/`build_react_apis` for the hooks currently modeled.
 pub fn build_default_globals(shapes: &mut ShapeRegistry) -> GlobalRegistry {
     let mut globals = GlobalRegistry::new();
-    let react_apis = build_react_apis(shapes);
+    let mut react_apis = build_react_apis(shapes);
 
-    // React namespace object carries the same API types as properties.
+    // The JSX factory functions. Our front-end desugars JSX to
+    // `React.createElement(...)` / `jsx(...)` calls, so these stand in for
+    // upstream's `JsxExpression` instruction: they FREEZE every argument
+    // (props/children/tag) and return a frozen JSX element. This is the
+    // mechanism that makes values passed into JSX non-mutable.
+    let create_element = jsx_factory(shapes);
+    react_apis.push(("createElement".to_string(), create_element.clone()));
+
+    // React namespace object carries the API types (hooks + createElement).
     let react_obj = add_object(shapes, Some("React"), react_apis.clone());
     globals.insert("React".to_string(), react_obj);
 
@@ -447,7 +469,32 @@ pub fn build_default_globals(shapes: &mut ShapeRegistry) -> GlobalRegistry {
         globals.insert(name, ty);
     }
 
+    // Bare automatic-runtime JSX globals.
+    for name in ["jsx", "jsxs", "jsxDEV", "_jsx", "_jsxs"] {
+        globals.insert(name.to_string(), jsx_factory(shapes));
+    }
+
     globals
+}
+
+/// A JSX factory function: freezes its arguments (reason JsxCaptured) and
+/// returns a frozen JSX object. Mirrors upstream `JsxExpression` freeze
+/// semantics, expressed as a call signature for our desugared form.
+fn jsx_factory(shapes: &mut ShapeRegistry) -> Type {
+    add_function(
+        shapes,
+        Vec::new(),
+        FunctionSignature {
+            rest_param: Some(Effect::Freeze),
+            callee_effect: Effect::Read,
+            return_type: obj(BUILT_IN_JSX_ID),
+            return_value_kind: ValueKind::Frozen,
+            return_value_reason: Some(ValueReason::JsxCaptured),
+            ..Default::default()
+        },
+        None,
+        false,
+    )
 }
 
 fn build_react_apis(shapes: &mut ShapeRegistry) -> Vec<(String, Type)> {

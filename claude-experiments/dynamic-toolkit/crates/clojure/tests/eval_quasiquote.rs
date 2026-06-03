@@ -35,26 +35,17 @@ fn quasiquote_unquote_evaluates_subexpr() {
 fn quasiquote_unquote_splicing() {
     // ~@xs splices the elements of xs into the surrounding list.
     // Build xs as a literal list via quote.
-    assert_eq!(
-        eval_str("(let [xs '(1 2 3)] `(a ~@xs b))"),
-        "(a 1 2 3 b)"
-    );
+    assert_eq!(eval_str("(let [xs '(1 2 3)] `(a ~@xs b))"), "(a 1 2 3 b)");
 }
 
 #[test]
 fn quasiquote_splice_at_head() {
-    assert_eq!(
-        eval_str("(let [xs '(1 2)] `(~@xs 3))"),
-        "(1 2 3)"
-    );
+    assert_eq!(eval_str("(let [xs '(1 2)] `(~@xs 3))"), "(1 2 3)");
 }
 
 #[test]
 fn quasiquote_splice_at_tail() {
-    assert_eq!(
-        eval_str("(let [xs '(2 3)] `(1 ~@xs))"),
-        "(1 2 3)"
-    );
+    assert_eq!(eval_str("(let [xs '(2 3)] `(1 ~@xs))"), "(1 2 3)");
 }
 
 #[test]

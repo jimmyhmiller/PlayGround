@@ -485,11 +485,7 @@ impl<P: PtrPolicy> MutatorThread<P> {
     }
 
     #[cold]
-    fn alloc_obj_slow_path<H: ObjHeader>(
-        &self,
-        info: &TypeInfo,
-        varlen_len: usize,
-    ) -> *mut u8 {
+    fn alloc_obj_slow_path<H: ObjHeader>(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         if self.heap.has_nursery() {
             // Try minor GC first → retry nursery
             self.trigger_minor_gc();

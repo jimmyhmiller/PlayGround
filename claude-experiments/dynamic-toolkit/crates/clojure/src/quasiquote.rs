@@ -24,7 +24,7 @@
 //! returned as raw `u64`, a moving GC fired during a later allocation
 //! would invalidate them.
 
-use dynobj::roots::{Rooted, RootScope};
+use dynobj::roots::{RootScope, Rooted};
 
 use crate::collections::is_list;
 use crate::symbols::SymbolTable;
@@ -133,14 +133,15 @@ impl<'a> QqCtx<'a> {
         // Build right-to-left.
         let mut acc = self.quote(scope, v::NIL);
         for e in elems.iter().rev() {
-            let piece: Rooted<'s, NanBoxTag> = if let Some(inner_bits) = self.match_splice(e.get(), level) {
-                // ~@inner: contribute inner directly. Must be a list at runtime.
-                scope.root::<NanBoxTag>(inner_bits)
-            } else {
-                let expanded = self.expand(scope, e, level);
-                let nil_quote = self.quote(scope, v::NIL);
-                self.cons_call(scope, expanded.get(), nil_quote.get())
-            };
+            let piece: Rooted<'s, NanBoxTag> =
+                if let Some(inner_bits) = self.match_splice(e.get(), level) {
+                    // ~@inner: contribute inner directly. Must be a list at runtime.
+                    scope.root::<NanBoxTag>(inner_bits)
+                } else {
+                    let expanded = self.expand(scope, e, level);
+                    let nil_quote = self.quote(scope, v::NIL);
+                    self.cons_call(scope, expanded.get(), nil_quote.get())
+                };
             acc = self.concat_call(scope, piece.get(), acc.get());
         }
         acc
@@ -185,12 +186,7 @@ impl<'a> QqCtx<'a> {
         self.list3_bits(scope, head, a, b)
     }
 
-    fn cons_call<'s>(
-        &mut self,
-        scope: &'s RootScope<'_>,
-        a: u64,
-        b: u64,
-    ) -> Rooted<'s, NanBoxTag> {
+    fn cons_call<'s>(&mut self, scope: &'s RootScope<'_>, a: u64, b: u64) -> Rooted<'s, NanBoxTag> {
         let head = self.intern_sym("cons");
         self.list3_bits(scope, head, a, b)
     }

@@ -40,8 +40,17 @@ pub enum Expr {
 
 #[derive(Debug, Clone)]
 pub enum BinOp {
-    Add, Sub, Mul, Div, Mod,
-    Eq, Ne, Lt, Le, Gt, Ge,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
 }
 
 #[derive(Debug, Clone)]
@@ -173,7 +182,12 @@ impl Parser {
             ValType::Int
         };
         let body = self.parse_block_expr();
-        Decl { name, params, ret_ty, body }
+        Decl {
+            name,
+            params,
+            ret_ty,
+            body,
+        }
     }
 
     fn parse_block_expr(&mut self) -> Expr {
@@ -388,7 +402,10 @@ impl Parser {
                     self.advance();
                     self.expect(&TokenKind::Pipe);
                     let handler = self.parse_block_expr();
-                    Expr::ShiftBind { binder, handler: Box::new(handler) }
+                    Expr::ShiftBind {
+                        binder,
+                        handler: Box::new(handler),
+                    }
                 } else {
                     self.expect(&TokenKind::LParen);
                     self.expect(&TokenKind::RParen);

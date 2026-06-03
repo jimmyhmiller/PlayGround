@@ -854,12 +854,61 @@ mod tests {
         assert!(js.contains("throw (v0 + 1);"), "got:\n{js}");
     }
 
-    /// Soundness boundary: an operation that may throw at runtime (an unmodeled
-    /// call) inside a `try` is a hard error in this version.
+    /// A `try` whose body has a may-throw residual op (an unmodeled call) can't
+    /// fold its exceptions into control flow, so it residualizes a real
+    /// `try`/`catch`. `Math.floor` doesn't throw, so the catch never runs.
     #[test]
-    #[should_panic(expected = "try/catch")]
-    fn opaque_call_in_try_is_an_error() {
-        let _ = specialize("function main(x) { try { return Math.floor(x); } catch (e) { return 0; } }");
+    fn residual_try_passthrough_call() {
+        let src = "function main(x) { try { return Math.floor(x); } catch (e) { return 0; } }";
+        let js = to_js(src).unwrap();
+        assert!(
+            js.contains("try {") && js.contains("} catch ("),
+            "should emit a residual try/catch:\n{js}"
+        );
+        assert_node_equiv(src, &[0, 5, -3, 42]);
+    }
+
+    /// A variable mutated only via `++` inside a *computed member* (`arr[i++]`)
+    /// in a closure must still be captured by reference (boxed). Missing the
+    /// computed-property write would capture `i` by value and drop the
+    /// increment. Here it residualizes (the `try` forces it), so the bug would
+    /// surface in the residual; `main` returns `10*100 + 20 = 1020`.
+    #[test]
+    fn boxed_increment_in_computed_index() {
+        let src = "function main(x) {
+            var arr = [10, 20, 30];
+            var i = 0;
+            var read = function () { return arr[i++]; };
+            var a = 0, b = 0;
+            try { a = read(); b = read(); notDefined(); } catch (e) {}
+            return a * 100 + b + (x - x);
+        }";
+        assert_node_equiv(src, &[0, 7]);
+    }
+
+    /// A residual `try` whose body modifies a variable *before* a may-throw op:
+    /// the modification must commit in source order, so the value is observable
+    /// after the (caught) throw. `main(x)` returns `x + 1`.
+    #[test]
+    fn residual_try_body_mutation_ordered() {
+        let src = "function main(x) {
+            var n = x;
+            try { n = n + 1; notDefined(); } catch (e) {}
+            return n;
+        }";
+        let js = to_js(src).unwrap();
+        assert!(js.contains("try {") && js.contains("} catch ("), "got:\n{js}");
+        assert_node_equiv(src, &[0, 5, -3, 41]);
+    }
+
+    /// A residual `try` where the catch actually fires at runtime: calling an
+    /// undefined global throws, and the catch handles it.
+    #[test]
+    fn residual_try_catch_runs() {
+        let src = "function main(x) { try { return notDefined(x); } catch (e) { return x - 1; } }";
+        let js = to_js(src).unwrap();
+        assert!(js.contains("try {") && js.contains("} catch ("), "got:\n{js}");
+        assert_node_equiv(src, &[0, 5, -3]);
     }
 
     // ---- `var` (function-scoped, hoisted) ----
@@ -1089,6 +1138,300 @@ mod tests {
         let funcs = compile(src).unwrap();
         // there is a `main`
         assert!(funcs.iter().any(|f| f.name == "main"));
+    }
+
+    // ---- coercion / wrong-type totality (found by the differential fuzzer) ----
+    //
+    // The partial evaluator must never crash on well-defined JS: any operation it
+    // can't fold statically (a coerced mixed-type operator, a property/index on
+    // the "wrong" type, a heap object in a primitive context) must residualize
+    // and stay observationally equivalent. Each of these used to panic.
+
+    /// Mixed-type arithmetic and comparison coerce per JS and residualize.
+    #[test]
+    fn coercion_mixed_type_arith_is_total() {
+        assert_node_equiv("function main(x) { return (x - \"y\"); }", &[0, 5, -3]); // NaN
+        assert_node_equiv("function main(x) { return (x + null); }", &[0, 5, -3]); // x
+        assert_node_equiv("function main(x) { return (undefined + x); }", &[0, 7]); // NaN
+        assert_node_equiv("function main(x) { return (x > null); }", &[-2, 0, 5]); // x > 0
+        assert_node_equiv("function main(x) { return (\"a\" < \"b\") === true; }", &[0]);
+        assert_node_equiv("function main(x) { return (true + x); }", &[0, 4]); // 1 + x
+    }
+
+    /// A heap object reaching a primitive operator coerces (ToPrimitive) and
+    /// escapes into the residual rather than crashing.
+    #[test]
+    fn coercion_heap_ref_in_primitive_context_is_total() {
+        assert_node_equiv("function main(x) { var o = { a: x }; return (o & 1); }", &[0, 3]); // 0
+        assert_node_equiv("function main(x) { var o = { a: x }; return (o + 1); }", &[0, 3]); // "[object Object]1"
+        // an object used as an index coerces to a string key (wrap the
+        // `undefined` result in an array so the node harness can serialize it)
+        assert_node_equiv("function main(x) { var o = { a: x }; return [o[{}]]; }", &[0, 5]); // [null]
+        assert_node_equiv("function main(x) { return [x[{ c: null }]]; }", &[0, 5]); // [null]
+    }
+
+    /// Property / index reads on the "wrong" type residualize.
+    #[test]
+    fn coercion_wrong_type_member_access_is_total() {
+        assert_node_equiv("function main(x) { return (5).toString(); }", &[0]); // "5"
+        assert_node_equiv("function main(x) { return \"ab\"[0]; }", &[0]); // "a"
+        assert_node_equiv("function main(x) { var a = [1, 2, 3]; return [a[\"x\"]]; }", &[0]); // [null]
+        assert_node_equiv("function main(x) { var o = { a: x }; return [o[5]]; }", &[0, 9]); // [null]
+    }
+
+    /// A negative array index is a named property, not an element: the write
+    /// escapes the array instead of overflowing the element vector.
+    #[test]
+    fn coercion_negative_array_index_is_total() {
+        let src = "function main(x) {
+            var a = [x, x + 1];
+            a[-1] = 9;
+            return [a.length, a[-1], a[0]];   // [2, 9, x]
+        }";
+        assert_node_equiv(src, &[0, 5, -3]);
+    }
+
+    /// A method inherited from `Object.prototype` (`toString`, `hasOwnProperty`,
+    /// ...) read off a static object resolves to the real function: the object
+    /// escapes and the call residualizes, rather than folding the read to
+    /// `undefined` and then failing to call it.
+    #[test]
+    fn coercion_object_prototype_method_resolves() {
+        assert_node_equiv("function main(x) { var o = { a: x }; return o.toString(); }", &[0, 5]);
+        assert_node_equiv("function main(x) { return ({ b: x }).toString(); }", &[0, 5]);
+        assert_node_equiv(
+            "function main(x) { var o = { a: x }; return o.hasOwnProperty(\"a\"); }",
+            &[0, 7],
+        );
+        // an own field shadows the prototype member and still folds
+        assert_node_equiv(
+            "function main(x) { var o = { toString: 0, a: x }; return [o.toString]; }",
+            &[0, 3],
+        );
+    }
+
+    /// Calling a non-callable value (`undefined()`, `(5)()`, `({})()`) throws a
+    /// `TypeError` at runtime; the residual must throw identically (here caught
+    /// and turned into a sentinel) rather than crashing the partial evaluator.
+    #[test]
+    fn coercion_call_of_non_callable_is_total() {
+        let miss = "function main(x) {
+            var o = { a: x };
+            var r;
+            try { r = o.b(); } catch (e) { r = \"caught\"; }
+            return r;
+        }";
+        assert_node_equiv(miss, &[0, 5]); // o.b is undefined -> undefined() throws -> "caught"
+        let num = "function main(x) {
+            var r;
+            try { r = (5)(x); } catch (e) { r = \"caught\"; }
+            return r;
+        }";
+        assert_node_equiv(num, &[0, 9]);
+    }
+
+    /// A dynamic index into a static object escapes it and residualizes.
+    #[test]
+    fn coercion_dynamic_index_escapes_container() {
+        let src = "function main(x) {
+            var o = { a: 1 };
+            o[x] = 7;
+            return [o.a, o[x]];
+        }";
+        assert_node_equiv(src, &[0, 2, 5]);
+    }
+
+    // ---- JSFuck decoding (partial evaluation of `[]()!+` coercion soup) ----
+    //
+    // JSFuck encodes programs using only six characters via JS coercion:
+    // `+[]` is 0, `![]` is false, `[]+[]` is "", `!![]+[]` is "true", and longer
+    // values are built by indexing into those strings. The partial evaluator
+    // folds all of that to the decoded literal. Every case is also validated for
+    // observational equivalence against the original under Node.
+
+    /// A residual that fully decodes is a single `return <literal>;`.
+    fn assert_folds_to(src: &str, expected_literal: &str) {
+        let js = to_js(src).unwrap();
+        assert!(
+            js.contains(expected_literal),
+            "expected residual to fold to {expected_literal}, got:\n{js}"
+        );
+        assert_node_equiv(src, &[0]);
+    }
+
+    #[test]
+    fn jsfuck_primitive_constants_fold() {
+        assert_folds_to("function main(input) { return +[]; }", "return 0;");
+        assert_folds_to("function main(input) { return +!![]; }", "return 1;");
+        assert_folds_to("function main(input) { return ![]; }", "return false;");
+        assert_folds_to("function main(input) { return []+[]; }", "return \"\";");
+        assert_folds_to("function main(input) { return ![]+[]; }", "return \"false\";");
+        assert_folds_to("function main(input) { return !![]+[]; }", "return \"true\";");
+        assert_folds_to("function main(input) { return []+{}; }", "return \"[object Object]\";");
+        assert_folds_to("function main(input) { return [][+[]]+[]; }", "return \"undefined\";");
+    }
+
+    #[test]
+    fn jsfuck_char_indexing_folds() {
+        // (![]+[])[+!![]] === "false"[1] === "a"
+        assert_folds_to("function main(input) { return (![]+[])[+!![]]; }", "return \"a\";");
+        // (!![]+[])[+[]] === "true"[0] === "t"
+        assert_folds_to("function main(input) { return (!![]+[])[+[]]; }", "return \"t\";");
+        // ([]+{})[+!![]+!![]+!![]+!![]+!![]+!![]] === "[object Object]"[6] === " "? -> "t" idx?
+        assert_folds_to("function main(input) { return ([]+{})[+!![]]; }", "return \"o\";");
+    }
+
+    #[test]
+    fn jsfuck_numbers_and_words_fold() {
+        // digit composition: seven 1s
+        assert_folds_to(
+            "function main(input) { return +!![]+!![]+!![]+!![]+!![]+!![]+!![]; }",
+            "return 7;",
+        );
+        // multi-digit number as string concat: "1" + "0" === "10"
+        assert_folds_to("function main(input) { return (+!![]+[])+(+[]+[]); }", "return \"10\";");
+        // rebuild the word "true" character by character out of the "true" string
+        let true_word = "function main(input) { return (!![]+[])[+[]]\
+            +(!![]+[])[+!![]]\
+            +(!![]+[])[!![]+!![]]\
+            +(!![]+[])[!![]+!![]+!![]]; }";
+        assert_folds_to(true_word, "return \"true\";");
+    }
+
+    /// JSFuck leans on coerced *string* keys for member access; here a coerced
+    /// "a" indexes a static object and folds to the field value.
+    #[test]
+    fn jsfuck_coerced_object_key_folds() {
+        assert_folds_to(
+            "function main(input) { var o = { a: 7 }; return o[(![]+[])[+!![]]]; }",
+            "return 7;",
+        );
+    }
+
+    // ---- deterministic String.prototype method folding ----
+    //
+    // Static string methods fold to constants (helps deobfuscation and JSFuck
+    // string pipelines). Restricted to ASCII so the fold provably matches the JS
+    // runtime; non-ASCII / dynamic args residualize. All validated under Node.
+
+    #[test]
+    fn string_methods_fold() {
+        assert_folds_to("function main(input) { return \"abc\".charAt(1); }", "return \"b\";");
+        assert_folds_to("function main(input) { return \"abc\".charCodeAt(0); }", "return 97;");
+        assert_folds_to("function main(input) { return \"hello\".slice(1, 3); }", "return \"el\";");
+        assert_folds_to("function main(input) { return \"hello\".slice(-2); }", "return \"lo\";");
+        assert_folds_to("function main(input) { return \"FoO\".toUpperCase(); }", "return \"FOO\";");
+        assert_folds_to("function main(input) { return \"  hi  \".trim(); }", "return \"hi\";");
+        assert_folds_to("function main(input) { return \"ab\".repeat(3); }", "return \"ababab\";");
+        assert_folds_to("function main(input) { return \"hello\".indexOf(\"ll\"); }", "return 2;");
+        assert_folds_to("function main(input) { return \"hello\".includes(\"ell\"); }", "return true;");
+        assert_folds_to("function main(input) { return \"hi\".at(-1); }", "return \"i\";");
+    }
+
+    #[test]
+    fn string_split_folds_to_array() {
+        let src = "function main(input) { return \"a,b,c\".split(\",\")[1]; }";
+        assert_folds_to(src, "return \"b\";");
+        assert_node_equiv("function main(input) { return \"a,b,c\".split(\",\").length; }", &[0]);
+        // split("") -> characters
+        assert_node_equiv("function main(input) { return \"abc\".split(\"\").length; }", &[0]);
+    }
+
+    /// `arguments` is modeled: a variadic function reading `arguments.length`
+    /// and `arguments[i]` folds against the actual call arguments (it used to
+    /// lower to an undefined global, which silently dropped values).
+    #[test]
+    fn arguments_object_is_modeled() {
+        // variadic sum: arguments.length and arguments[i] over the real args
+        let sum = "
+            function sum() {
+                var s = 0;
+                for (var i = 0; i < arguments.length; i = i + 1) { s = s + arguments[i]; }
+                return s;
+            }
+            function main(input) { return sum(1, 2, 3, input); }";
+        let js = to_js(sum).unwrap();
+        assert!(js.contains("6 + v0") || js.contains("v0 + 6"), "variadic sum should fold to 6+x:\n{js}");
+        assert_node_equiv(sum, &[0, 5, -3]);
+        // declared param + extra arg via arguments (extra must not clobber the param)
+        let mixed = "
+            function f(a) { return a + arguments[1]; }
+            function main(input) { return f(input, 5); }";
+        assert_folds_to(mixed, "v0 + 5");
+        assert_node_equiv(mixed, &[0, 7, -2]);
+        // arguments.length is the count actually passed, not the arity
+        let count = "
+            function f(a, b) { return arguments.length; }
+            function main(input) { return f(1, 2, 3, 4); }";
+        assert_folds_to(count, "return 4;");
+    }
+
+    /// A *residualized capturing closure* that reads `arguments` must see only
+    /// the real call args, not the captures the residual binds as leading
+    /// parameters. (Naively reading native `arguments` counted the captures:
+    /// `7 + arguments.length` returned 11 instead of 10.) The residual slices the
+    /// bound captures off: `Array.prototype.slice.call(arguments, ncaptured)`.
+    #[test]
+    fn arguments_in_residualized_capturing_closure() {
+        let src = "
+            function make() {
+                var cap = 7;
+                return function () { return cap + arguments.length; };
+            }
+            function main(input) {
+                var f = make();
+                return f.apply(null, [1, 2, input]);
+            }";
+        let js = to_js(src).unwrap();
+        assert!(
+            js.contains("slice.call(arguments, 1)"),
+            "captures must be sliced off arguments:\n{js}"
+        );
+        assert_node_equiv(src, &[0, 5, -3]); // always 7 + 3 = 10
+    }
+
+    /// A residualized closure (one containing `try`) that captures an object and
+    /// MUTATES it through the capture must invalidate the caller's view of that
+    /// object: a later read has to see the mutation, not a re-materialized
+    /// pre-call copy. (This was a real divergence: the closure set
+    /// `data[1][1] ^= 5`, but `main` re-emitted `data[1]` as the stale literal
+    /// `[40,50,60]` and read `50` instead of `55`. It is the self-modifying-array
+    /// pattern simple.js's bytecode loader uses.)
+    #[test]
+    fn residual_closure_mutating_capture_invalidates_caller() {
+        let src = "function main(input) {
+            var data = [[10, 20, 30], [40, 50, 60]];
+            var dec = function () { try { data[1][1] = data[1][1] ^ 5; } catch (e) {} };
+            dec();
+            return data[1][input];
+        }";
+        assert_node_equiv(src, &[0, 1, 2]); // [40, 55, 60]
+    }
+
+    /// A cyclic array reaching a coercion must not make the folder recurse
+    /// forever: it bails to residualization (the runtime's `Array.join` cycle
+    /// handling then yields the right answer). `a` references itself, so
+    /// `a + "X"` is `"" + "X"` === `"X"`.
+    #[test]
+    fn cyclic_array_coercion_is_total() {
+        let src = "function main(input) {
+            var a = [];
+            a[0] = a;
+            return a + \"X\";
+        }";
+        let js = to_js(src).unwrap();
+        assert!(js.contains("+ \"X\""), "cyclic coercion should residualize:\n{js}");
+        assert_node_equiv(src, &[0]);
+    }
+
+    /// A method call with a dynamic argument residualizes (single-eval) rather
+    /// than folding, and stays equivalent.
+    #[test]
+    fn string_method_dynamic_arg_residualizes() {
+        let src = "function main(input) { return \"abcde\".charAt(input); }";
+        let js = to_js(src).unwrap();
+        assert!(js.contains(".charAt("), "dynamic arg should residualize:\n{js}");
+        assert_node_equiv(src, &[0, 1, 4, 9]);
     }
 
     /// The synthesized `main` runs top-level code; a module that computes a value

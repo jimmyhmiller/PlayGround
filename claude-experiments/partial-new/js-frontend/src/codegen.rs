@@ -39,24 +39,26 @@ pub fn program_to_js(vm: &Js, main_prog: &Program<Op, Cond>, input_var: usize) -
     s
 }
 
-/// Render one residual program as `function {name}(params...) { body }`.
-fn render_function(name: &str, params: &[usize], prog: &Program<Op, Cond>) -> String {
-    let mut decls: BTreeSet<usize> = BTreeSet::new();
+/// Collect every residual variable that needs a `let` declaration, recursing
+/// into nested `try`/`catch` programs (their locals are hoisted to the enclosing
+/// function; the catch's exception binding is a `catch` parameter, not a `let`).
+fn collect_decls(prog: &Program<Op, Cond>, decls: &mut BTreeSet<usize>) {
     for b in &prog.blocks {
         for op in &b.ops {
             match op {
                 Op::Assign { var, .. } => {
                     decls.insert(*var);
                 }
-                Op::NewObject { dst, .. } | Op::NewArray { dst, .. } => {
+                Op::NewObject { dst, .. } | Op::NewArray { dst, .. } | Op::Eval { dst, .. } => {
                     decls.insert(*dst);
                 }
-                Op::Eval { dst, .. } => {
-                    decls.insert(*dst);
+                Op::Try { body, catch_slot, catch_body } => {
+                    collect_decls(body, decls);
+                    collect_decls(catch_body, decls);
+                    if let Some(cs) = catch_slot {
+                        decls.remove(cs); // bound by `catch (vN)`, not `let`
+                    }
                 }
-                // These mutate an existing object/array value (an escaped var
-                // declared by its NewObject/NewArray, or a global); nothing new
-                // to declare.
                 Op::PushOp { .. }
                 | Op::SetIndex { .. }
                 | Op::SetProp { .. }
@@ -68,6 +70,91 @@ fn render_function(name: &str, params: &[usize], prog: &Program<Op, Cond>) -> St
             }
         }
     }
+}
+
+/// Fresh trampoline labels so a `try`/`catch` sub-program can break out of its
+/// own loop without colliding with an enclosing one.
+static LABEL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Render a residual program's blocks (no function wrapper, no declarations):
+/// a single-block `Halt` program emits straight-line statements, anything with
+/// control flow emits a `switch`-on-program-counter trampoline. Used for the
+/// function body and, recursively, for `try`/`catch` bodies. `ind` is the
+/// leading indentation.
+///
+/// `in_try` distinguishes the two uses on a normal-completion (`Halt`)
+/// terminator: a function body returns from the function (`return undefined`),
+/// but a `try`/`catch` sub-program must merely *end the block* (break out of its
+/// trampoline) so control continues after the `try`. Rendering the latter as a
+/// `return` would return from the enclosing function instead of finishing the
+/// handler, e.g. a `catch` that should fall through and loop again.
+fn render_blocks(prog: &Program<Op, Cond>, ind: &str, in_try: bool) -> String {
+    let mut s = String::new();
+    let straight_line =
+        prog.blocks.len() == 1 && matches!(prog.blocks[0].term, Terminator::Halt);
+    if straight_line {
+        // A single Halt block: emit the ops and fall through (the block ends
+        // naturally; a function then returns undefined, a try block continues).
+        for op in &prog.blocks[0].ops {
+            let _ = writeln!(s, "{ind}{}", op_to_js(op, ind));
+        }
+        return s;
+    }
+    let label = if in_try {
+        Some(format!("__t{}", LABEL.fetch_add(1, std::sync::atomic::Ordering::Relaxed)))
+    } else {
+        None
+    };
+    let halt_stmt = match &label {
+        Some(l) => format!("break {l};"),
+        None => "return undefined;".to_string(),
+    };
+    let _ = writeln!(s, "{ind}let __pc = {};", prog.entry.0);
+    if let Some(l) = &label {
+        let _ = writeln!(s, "{ind}{l}: for (;;) {{");
+    } else {
+        let _ = writeln!(s, "{ind}for (;;) {{");
+    }
+    let _ = writeln!(s, "{ind}  switch (__pc) {{");
+    let inner = format!("{ind}      ");
+    for (i, b) in prog.blocks.iter().enumerate() {
+        let _ = writeln!(s, "{ind}    case {i}: {{");
+        for op in &b.ops {
+            let _ = writeln!(s, "{inner}{}", op_to_js(op, &inner));
+        }
+        match &b.term {
+            Terminator::Halt => {
+                if !ends_with_return(b) {
+                    let _ = writeln!(s, "{inner}{halt_stmt}");
+                }
+            }
+            Terminator::Br(t) => {
+                let _ = writeln!(s, "{inner}__pc = {}; break;", t.0);
+            }
+            Terminator::Cond { cond: Cond::Falsy(e), t, f } => {
+                let _ = writeln!(
+                    s,
+                    "{inner}if (!({})) {{ __pc = {}; }} else {{ __pc = {}; }} break;",
+                    rexpr_to_js(e),
+                    t.0,
+                    f.0
+                );
+            }
+            Terminator::Unset => {
+                let _ = writeln!(s, "{inner}throw new Error(\"unset terminator\");");
+            }
+        }
+        let _ = writeln!(s, "{ind}    }}");
+    }
+    let _ = writeln!(s, "{ind}  }}");
+    let _ = writeln!(s, "{ind}}}");
+    s
+}
+
+/// Render one residual program as `function {name}(params...) { body }`.
+fn render_function(name: &str, params: &[usize], prog: &Program<Op, Cond>) -> String {
+    let mut decls: BTreeSet<usize> = BTreeSet::new();
+    collect_decls(prog, &mut decls);
     for p in params {
         decls.remove(p); // parameters are not `let`-declared locals
     }
@@ -79,51 +166,7 @@ fn render_function(name: &str, params: &[usize], prog: &Program<Op, Cond>) -> St
         let names: Vec<String> = decls.iter().map(|v| format!("v{v}")).collect();
         let _ = writeln!(s, "  let {};", names.join(", "));
     }
-
-    let straight_line =
-        prog.blocks.len() == 1 && matches!(prog.blocks[0].term, Terminator::Halt);
-
-    if straight_line {
-        for op in &prog.blocks[0].ops {
-            let _ = writeln!(s, "  {}", op_to_js(op));
-        }
-    } else {
-        let _ = writeln!(s, "  let __pc = {};", prog.entry.0);
-        let _ = writeln!(s, "  for (;;) {{");
-        let _ = writeln!(s, "    switch (__pc) {{");
-        for (i, b) in prog.blocks.iter().enumerate() {
-            let _ = writeln!(s, "      case {i}: {{");
-            for op in &b.ops {
-                let _ = writeln!(s, "        {}", op_to_js(op));
-            }
-            match &b.term {
-                Terminator::Halt => {
-                    if !ends_with_return(b) {
-                        let _ = writeln!(s, "        return undefined;");
-                    }
-                }
-                Terminator::Br(t) => {
-                    let _ = writeln!(s, "        __pc = {}; break;", t.0);
-                }
-                Terminator::Cond { cond: Cond::Falsy(e), t, f } => {
-                    // The `t` edge is taken when the value is falsy.
-                    let _ = writeln!(
-                        s,
-                        "        if (!({})) {{ __pc = {}; }} else {{ __pc = {}; }} break;",
-                        rexpr_to_js(e),
-                        t.0,
-                        f.0
-                    );
-                }
-                Terminator::Unset => {
-                    let _ = writeln!(s, "        throw new Error(\"unset terminator\");");
-                }
-            }
-            let _ = writeln!(s, "      }}");
-        }
-        let _ = writeln!(s, "    }}");
-        let _ = writeln!(s, "  }}");
-    }
+    s.push_str(&render_blocks(prog, "  ", false));
     let _ = writeln!(s, "}}");
     s
 }
@@ -132,7 +175,7 @@ fn ends_with_return(b: &partial::residual::Block<Op, Cond>) -> bool {
     matches!(b.ops.last(), Some(Op::Return(_) | Op::Throw(_)))
 }
 
-fn op_to_js(op: &Op) -> String {
+fn op_to_js(op: &Op, ind: &str) -> String {
     match op {
         Op::Assign { var, expr } => format!("v{var} = {};", rexpr_to_js(expr)),
         Op::Return(e) => format!("return {};", rexpr_to_js(e)),
@@ -163,6 +206,15 @@ fn op_to_js(op: &Op) -> String {
         }
         Op::Throw(e) => format!("throw {};", rexpr_to_js(e)),
         Op::AssignGlobal { name, expr } => format!("{name} = {};", rexpr_to_js(expr)),
+        Op::Try { body, catch_slot, catch_body } => {
+            let cs = catch_slot.map(|v| format!("v{v}")).unwrap_or_else(|| "__e".to_string());
+            let inner = format!("{ind}  ");
+            format!(
+                "try {{\n{}{ind}}} catch ({cs}) {{\n{}{ind}}}",
+                render_blocks(body, &inner, true),
+                render_blocks(catch_body, &inner, true),
+            )
+        }
     }
 }
 
@@ -174,6 +226,7 @@ fn rexpr_to_js(e: &RExpr) -> String {
         RExpr::Undef => "undefined".to_string(),
         RExpr::Null => "null".to_string(),
         RExpr::This => "this".to_string(),
+        RExpr::Var(v) if *v == partial::js::ARGUMENTS_VAR_ID => "arguments".to_string(),
         RExpr::Var(v) => format!("v{v}"),
         RExpr::Bin(op, a, b) => {
             format!("({} {} {})", rexpr_to_js(a), bop(*op), rexpr_to_js(b))
@@ -211,6 +264,12 @@ fn bop(op: Bop) -> &'static str {
         Bop::Ge => ">=",
         Bop::Eq => "===",
         Bop::Ne => "!==",
+        Bop::BitAnd => "&",
+        Bop::BitOr => "|",
+        Bop::BitXor => "^",
+        Bop::Shl => "<<",
+        Bop::Shr => ">>",
+        Bop::UShr => ">>>",
     }
 }
 

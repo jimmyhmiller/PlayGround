@@ -10,7 +10,7 @@
 //!
 //! Floats are stored directly (NanBox encodes ordinary IEEE 754 bits).
 
-use dynobj::roots::{Rooted, RootScope};
+use dynobj::roots::{RootScope, Rooted};
 use dynvalue::{NanBox, TagScheme};
 
 use crate::host::{layouts, with_host};

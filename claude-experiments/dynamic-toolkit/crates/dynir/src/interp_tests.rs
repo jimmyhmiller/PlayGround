@@ -678,7 +678,7 @@ fn invoke_exception_path() {
     b.switch_to_block(exception);
     let thrown = b.block_param(exception, 0); // exception value
     let passed = b.block_param(exception, 1); // user exception_arg
-    // Return thrown + passed + 999 = 7 + 1 + 999 = 1007
+                                              // Return thrown + passed + 999 = 7 + 1 + 999 = 1007
     let sentinel = b.iconst(Type::I64, 999);
     let t1 = b.add(thrown, passed);
     let result = b.add(t1, sentinel);
@@ -1142,8 +1142,14 @@ fn module_frame_slice_clone_and_resume_is_multi_shot() {
     struct Pol;
     impl PtrPolicy for Pol {
         fn try_decode_ptr(bits: u64) -> Option<*mut u8> {
-            if bits == 0 { return None; }
-            if bits & 0b111 == 0 { Some(bits as *mut u8) } else { None }
+            if bits == 0 {
+                return None;
+            }
+            if bits & 0b111 == 0 {
+                Some(bits as *mut u8)
+            } else {
+                None
+            }
         }
         fn encode_ptr(ptr: *mut u8) -> u64 {
             debug_assert_eq!((ptr as u64) & 0b111, 0);

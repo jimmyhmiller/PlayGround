@@ -54,11 +54,7 @@ impl<P: PtrPolicy> FrameChainRootManager<P> {
     }
 
     /// Allocate a heap object with a custom header type.
-    pub fn alloc_with_header<H: ObjHeader>(
-        &self,
-        info: &TypeInfo,
-        varlen_len: usize,
-    ) -> *mut u8 {
+    pub fn alloc_with_header<H: ObjHeader>(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         self.heap.alloc_obj::<H>(info, varlen_len)
     }
 
@@ -73,7 +69,8 @@ impl<P: PtrPolicy> FrameChainRootManager<P> {
     }
 }
 
-impl<P, L, Transport> InterpRootManager<L, PreciseStackRoots, Transport> for FrameChainRootManager<P>
+impl<P, L, Transport> InterpRootManager<L, PreciseStackRoots, Transport>
+    for FrameChainRootManager<P>
 where
     P: PtrPolicy,
     L: ValueLayout,
@@ -119,4 +116,3 @@ where
         }
     }
 }
-

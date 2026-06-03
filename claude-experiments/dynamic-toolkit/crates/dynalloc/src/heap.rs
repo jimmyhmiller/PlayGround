@@ -8,8 +8,8 @@ use dynobj::{
 
 use crate::alloc::{Alloc, AtomicBumpAllocator, HeapWalker};
 use crate::barrier::SATBQueue;
-use crate::semi_space::FORWARDING_BIT;
 use crate::card_table::CardTable;
+use crate::semi_space::FORWARDING_BIT;
 use crate::semi_space::PtrPolicy;
 use crate::statemap::{StatemapTracer, TraceState};
 use crate::thread::ThreadState;
@@ -140,7 +140,11 @@ impl Heap {
     /// New allocations go to the nursery. When the nursery fills, a minor
     /// GC promotes survivors to tenured from-space. When tenured space fills,
     /// a major GC (STW or concurrent) collects the old generation.
-    pub fn new_generational<H: ObjHeader>(nursery_size: usize, tenured_size: usize, type_table: Vec<TypeInfo>) -> Self {
+    pub fn new_generational<H: ObjHeader>(
+        nursery_size: usize,
+        tenured_size: usize,
+        type_table: Vec<TypeInfo>,
+    ) -> Self {
         let spaces = [
             AtomicBumpAllocator::new::<H>(tenured_size),
             AtomicBumpAllocator::new::<H>(tenured_size),
@@ -183,10 +187,7 @@ impl Heap {
     /// The walker must remain valid for the lifetime of the Heap.
     /// The supplied `*mut u64` slots must be live for the duration of
     /// the visitor call (they are, by the safepoint contract).
-    pub fn set_jit_frame_walker(
-        &self,
-        walker: unsafe fn(*const u8, &mut dyn FnMut(*mut u64)),
-    ) {
+    pub fn set_jit_frame_walker(&self, walker: unsafe fn(*const u8, &mut dyn FnMut(*mut u64))) {
         let p = walker as *mut ();
         self.jit_frame_walker
             .store(p, std::sync::atomic::Ordering::Release);
@@ -242,7 +243,11 @@ impl Heap {
     }
 
     /// Create a new heap with statemap tracing enabled.
-    pub fn new_with_tracer<H: ObjHeader>(space_size: usize, type_table: Vec<TypeInfo>, tracer: Arc<StatemapTracer>) -> Self {
+    pub fn new_with_tracer<H: ObjHeader>(
+        space_size: usize,
+        type_table: Vec<TypeInfo>,
+        tracer: Arc<StatemapTracer>,
+    ) -> Self {
         let mut heap = Self::new::<H>(space_size, type_table);
         heap.tracer = Some(tracer);
         heap
@@ -397,7 +402,10 @@ impl Heap {
     /// entry (LIFO), mirroring the guard's stack discipline.
     pub unsafe fn unregister_permanent_extra(&self, source: *const dyn RootSource) {
         let mut perm = self.permanent_extras.lock().unwrap();
-        if let Some(pos) = perm.iter().rposition(|&p| std::ptr::eq(p as *const u8, source as *const u8)) {
+        if let Some(pos) = perm
+            .iter()
+            .rposition(|&p| std::ptr::eq(p as *const u8, source as *const u8))
+        {
             perm.remove(pos);
         }
     }
@@ -434,11 +442,7 @@ impl Heap {
     }
 
     /// Allocate and init header in the nursery if generational, otherwise from-space.
-    pub fn alloc_nursery_obj<H: ObjHeader>(
-        &self,
-        info: &TypeInfo,
-        varlen_len: usize,
-    ) -> *mut u8 {
+    pub fn alloc_nursery_obj<H: ObjHeader>(&self, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
         match &self.nursery_state {
             Some(ns) => unsafe { crate::alloc::alloc_obj::<H>(&ns.nursery, info, varlen_len) },
             None => unsafe { crate::alloc::alloc_obj::<H>(self.from_space(), info, varlen_len) },
@@ -520,6 +524,19 @@ impl Heap {
     /// Check if a pointer is in either tenured space or nursery.
     pub fn contains_either(&self, ptr: *const u8) -> bool {
         self.from_space().contains(ptr) || self.to_space().contains(ptr) || self.is_nursery(ptr)
+    }
+
+    /// Diagnostic: identify which heap region owns `ptr`.
+    pub fn debug_region_of(&self, ptr: *const u8) -> &'static str {
+        if self.from_space().contains(ptr) {
+            "from"
+        } else if self.to_space().contains(ptr) {
+            "to"
+        } else if self.is_nursery(ptr) {
+            "nursery"
+        } else {
+            "outside"
+        }
     }
 
     /// Total size of each space.
@@ -623,8 +640,13 @@ impl Heap {
             scan_offset = (scan_offset + obj_size + align - 1) & !(align - 1);
         }
 
+        unsafe { self.verify_no_forwarded_fields::<P>("collect_inner") };
+
         // Phase 3: swap spaces (flip atomic index — no UB, no ptr::swap)
         self.swap_spaces();
+        unsafe {
+            self.verify_no_forwarded_fields_in_active_space::<P>("collect_inner_post_swap", true)
+        };
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
 
@@ -836,8 +858,16 @@ impl Heap {
             scan_offset = (scan_offset + obj_size + align - 1) & !(align - 1);
         }
 
+        unsafe { self.verify_no_forwarded_fields::<P>("mutator_triggered_gc") };
+
         // Phase 3: swap spaces
         self.swap_spaces();
+        unsafe {
+            self.verify_no_forwarded_fields_in_active_space::<P>(
+                "mutator_triggered_gc_post_swap",
+                true,
+            )
+        };
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
 
@@ -1179,6 +1209,9 @@ impl Heap {
 
         // Swap spaces
         self.swap_spaces();
+        unsafe {
+            self.verify_no_forwarded_fields_in_active_space::<P>("concurrent_gc_post_swap", true)
+        };
         self.to_space().reset();
         self.collections.fetch_add(1, Ordering::Relaxed);
 
@@ -1240,7 +1273,89 @@ impl Heap {
 
     // ─── Internal GC machinery ──────────────────────────────────
 
+    /// Diagnostic: before a major-GC swap, every traced heap value in
+    /// to-space must already point to the current to-space or to the nursery.
+    /// A decoded pointer to a forwarded object in either semispace is a missed
+    /// field update that will become stale immediately after `swap_spaces`.
+    unsafe fn verify_no_forwarded_fields<P: PtrPolicy>(&self, context: &str) {
+        unsafe { self.verify_no_forwarded_fields_in_active_space::<P>(context, false) };
+    }
+
+    unsafe fn verify_no_forwarded_fields_in_active_space<P: PtrPolicy>(
+        &self,
+        context: &str,
+        scan_from_space: bool,
+    ) {
+        if !slot_visit_tracking_enabled() {
+            return;
+        }
+
+        let mut bad = 0usize;
+        let mut so = 0usize;
+        let space = if scan_from_space {
+            self.from_space()
+        } else {
+            self.to_space()
+        };
+        while so < space.used() {
+            let obj = unsafe { space.base().add(so) };
+            let type_id = unsafe { read_type_id(obj, self.type_id_offset) };
+            let info = &self.type_table[type_id as usize];
+            let varlen_len = match info.varlen {
+                VarLenKind::None => 0,
+                _ => unsafe { read_varlen_count(obj, info) },
+            };
+            let obj_size = info.allocation_size(varlen_len);
+            let mut w = 0usize;
+            while w + 8 <= obj_size {
+                let word = unsafe { (obj.add(w) as *const u64).read() };
+                if let Some(p) = P::try_decode_ptr(word) {
+                    if !p.is_null()
+                        && (self.from_space().contains(p) || self.to_space().contains(p))
+                    {
+                        let hdr = unsafe { (p as *const u64).read() };
+                        if hdr & FORWARDING_BIT != 0 {
+                            bad += 1;
+                            if bad <= 12 {
+                                let region = if self.from_space().contains(p) {
+                                    "from"
+                                } else {
+                                    "to"
+                                };
+                                eprintln!(
+                                    "[heapverify:{context}] forwarded field: obj type_id={} @ {:p} +{:#x} word={:#x}/{region} -> fwd {:#x}",
+                                    type_id,
+                                    obj,
+                                    w,
+                                    word,
+                                    hdr & !FORWARDING_BIT
+                                );
+                            }
+                        }
+                    }
+                }
+                w += 8;
+            }
+            let align = 1usize << info.align_log2;
+            so = (so + obj_size + align - 1) & !(align - 1);
+        }
+        if bad > 0 {
+            eprintln!(
+                "[heapverify:{context}] ^ {bad} forwarded heap field(s) at gen {}",
+                self.collections.load(Ordering::Relaxed)
+            );
+        }
+    }
+
     unsafe fn process_slot<P: PtrPolicy>(&self, slot: *mut u64) {
+        // DIAGNOSTIC: record the generation at which each slot ADDRESS was
+        // last visited by the precise root walk, so a stale-root trap can tell
+        // whether the slot stopped being visited (frame no longer walked) or
+        // was visited recently (staleness written after a visit).
+        if slot_visit_tracking_enabled() {
+            let cur_gen = self.collections.load(Ordering::Relaxed) as u64;
+            record_slot_visit(slot as usize, cur_gen);
+        }
         // Use atomic loads/stores even in STW: the slot was last written by
         // a mutator thread via Cell::set (non-atomic write). Even though the
         // mutator is parked at a safepoint with a Release/Acquire edge,
@@ -1251,6 +1366,17 @@ impl Heap {
         };
         if let Some(ptr) = P::try_decode_ptr(bits) {
             if self.is_nursery(ptr) {
+                if let Some(new_ptr) = unsafe { self.check_forwarded(ptr) } {
+                    let new_ptr = if self.from_space().contains(new_ptr) {
+                        unsafe { self.copy_or_forward::<P>(new_ptr) }
+                    } else {
+                        new_ptr
+                    };
+                    unsafe {
+                        let atomic = &*(slot as *const std::sync::atomic::AtomicU64);
+                        atomic.store(P::encode_ptr(new_ptr), Ordering::Relaxed);
+                    };
+                }
                 return;
             }
             if self.from_space().contains(ptr) {
@@ -1259,6 +1385,18 @@ impl Heap {
                     let atomic = &*(slot as *const std::sync::atomic::AtomicU64);
                     atomic.store(P::encode_ptr(new_ptr), Ordering::Relaxed);
                 };
+            } else if self.to_space().contains(ptr) {
+                if let Some(new_ptr) = unsafe { self.check_forwarded(ptr) } {
+                    let new_ptr = if self.from_space().contains(new_ptr) {
+                        unsafe { self.copy_or_forward::<P>(new_ptr) }
+                    } else {
+                        new_ptr
+                    };
+                    unsafe {
+                        let atomic = &*(slot as *const std::sync::atomic::AtomicU64);
+                        atomic.store(P::encode_ptr(new_ptr), Ordering::Relaxed);
+                    };
+                }
             }
         }
     }
@@ -1281,12 +1419,26 @@ impl Heap {
         if let Some(ptr) = P::try_decode_ptr(bits) {
             // Skip nursery pointers during major GC
             if self.is_nursery(ptr) {
+                if let Some(new_ptr) = unsafe { self.check_forwarded_atomic(ptr) } {
+                    if self.from_space().contains(new_ptr) {
+                        // The parent slot will be rewritten during the final
+                        // STW re-scan. This concurrent pass only guarantees
+                        // the forwarded tenured target has a to-space copy.
+                        unsafe { self.copy_or_forward_atomic::<P>(new_ptr) };
+                    }
+                }
                 return;
             }
             if self.from_space().contains(ptr) {
                 // Copy the object (installs forwarding pointer) but
                 // don't write the new address back to the parent slot.
                 unsafe { self.copy_or_forward_atomic::<P>(ptr) };
+            } else if self.to_space().contains(ptr) {
+                if let Some(new_ptr) = unsafe { self.check_forwarded_atomic(ptr) } {
+                    if self.from_space().contains(new_ptr) {
+                        unsafe { self.copy_or_forward_atomic::<P>(new_ptr) };
+                    }
+                }
             }
         }
     }
@@ -1342,7 +1494,10 @@ impl Heap {
             Ok(_) => new, // We won — our copy is the canonical one
             Err(current) => {
                 // Someone else already installed a forwarding pointer
-                debug_assert!(current & FORWARDING_BIT != 0, "CAS failed but not forwarded?");
+                debug_assert!(
+                    current & FORWARDING_BIT != 0,
+                    "CAS failed but not forwarded?"
+                );
                 (current & !FORWARDING_BIT) as *mut u8
             }
         }
@@ -1482,6 +1637,13 @@ impl Heap {
                     let atomic = &*(slot as *const std::sync::atomic::AtomicU64);
                     atomic.store(P::encode_ptr(new_ptr), Ordering::Relaxed);
                 };
+            } else if self.to_space().contains(ptr) {
+                if let Some(new_ptr) = unsafe { self.check_forwarded(ptr) } {
+                    unsafe {
+                        let atomic = &*(slot as *const std::sync::atomic::AtomicU64);
+                        atomic.store(P::encode_ptr(new_ptr), Ordering::Relaxed);
+                    };
+                }
             }
         }
     }
@@ -1598,9 +1760,37 @@ impl Heap {
         }
         drop(perm);
 
-        // Phase 2: Scan dirty cards in tenured from-space
+        // Phase 2: Scan pre-existing tenured from-space.
+        //
+        // The card table is only sound if every old-object field write uses
+        // the generational barrier. Some embedders still initialize/mutate
+        // heap fields through raw stores, so scan the precise pointer map for
+        // all pre-existing tenured objects during minor GC. This keeps the
+        // collector correct while preserving the card-table machinery for a
+        // future fast path once those write sites are audited.
+        let mut scan_offset = 0usize;
+        while scan_offset < promotion_start {
+            let obj = unsafe { self.from_space().base().add(scan_offset) };
+            let type_id = unsafe { read_type_id(obj, self.type_id_offset) };
+            let info = &self.type_table[type_id as usize];
+
+            unsafe {
+                scan_object(obj, info, |slot| {
+                    self.promote_slot::<P>(slot);
+                });
+            }
+
+            let varlen_len = match info.varlen {
+                VarLenKind::None => 0,
+                _ => unsafe { read_varlen_count(obj, info) },
+            };
+            let obj_size = info.allocation_size(varlen_len);
+            let align = 1usize << info.align_log2;
+            scan_offset = (scan_offset + obj_size + align - 1) & !(align - 1);
+        }
+
         let from_idx = self.from_idx.load(Ordering::Acquire);
-        {
+        if false {
             let card_table = &ns.card_tables[from_idx];
             let tenured = &self.spaces[from_idx];
             let tenured_used = promotion_start; // only scan pre-existing tenured objects
@@ -1653,6 +1843,8 @@ impl Heap {
             let align = 1usize << info.align_log2;
             scan_offset = (scan_offset + obj_size + align - 1) & !(align - 1);
         }
+
+        unsafe { self.verify_no_forwarded_fields_in_active_space::<P>("minor_gc_post_scan", true) };
 
         // Phase 4: Reset nursery and clear card table
         ns.nursery.reset();
@@ -1779,4 +1971,49 @@ impl Heap {
             offset = (offset + obj_size + align - 1) & !(align - 1);
         }
     }
+}
+
+// ─── DIAGNOSTIC: per-slot visit-generation tracking ───────────────────
+//
+// Records the GC generation (collection count) at which each root slot
+// ADDRESS was last visited by the precise walk. A stale-root trap can then
+// ask "when was this slot last updated?" to distinguish a slot that stopped
+// being walked (frame no longer reachable by the walker) from one visited
+// recently (staleness introduced after the visit). Gated by `CLJVM_TRAP`.
+use std::sync::OnceLock;
+
+fn slot_visit_tracking_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("CLJVM_TRAP").is_ok())
+}
+
+thread_local! {
+    static SLOT_VISIT_GEN: std::cell::RefCell<std::collections::HashMap<usize, u64>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+fn record_slot_visit(addr: usize, generation: u64) {
+    SLOT_VISIT_GEN.with(|m| {
+        m.borrow_mut().insert(addr, generation);
+    });
+    MAX_VISIT_GEN.with(|c| {
+        if generation > c.get() {
+            c.set(generation);
+        }
+    });
+}
+
+/// The generation at which slot `addr` was last visited by the GC walk, or
+/// `None` if it was never visited.
+pub fn slot_last_visit_gen(addr: usize) -> Option<u64> {
+    SLOT_VISIT_GEN.with(|m| m.borrow().get(&addr).copied())
+}
+
+thread_local! {
+    static MAX_VISIT_GEN: std::cell::Cell<u64> = std::cell::Cell::new(0);
+}
+
+/// Highest generation any slot has been recorded at (≈ current collection).
+pub fn max_visit_gen() -> u64 {
+    MAX_VISIT_GEN.with(|c| c.get())
 }

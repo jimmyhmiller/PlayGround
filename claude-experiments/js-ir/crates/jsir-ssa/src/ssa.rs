@@ -80,6 +80,12 @@ pub fn construct(cfg: &mut Cfg) {
     }
 
     b.materialize(&order);
+    drop(b);
+
+    // Lowered closure bodies are ordinary CFGs; construct SSA for each.
+    for nested in &mut cfg.nested {
+        construct(nested);
+    }
 }
 
 impl<'a> Builder<'a> {
@@ -324,6 +330,14 @@ impl<'a> Builder<'a> {
                 rewrite_operands(&mut ins.op, &subst);
             }
             rewrite_term(&mut block.term, &subst);
+        }
+        // The closure capture side-table holds SSA values (parent-side reads of
+        // captured vars); rewrite them through the same substitution so they
+        // survive ReadVar elimination, exactly like instruction operands.
+        for repr in self.cfg.closures.values_mut() {
+            for v in &mut repr.captures {
+                *v = subst(*v);
+            }
         }
     }
 

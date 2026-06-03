@@ -156,16 +156,16 @@ fn pane_camera_order(rect: &PaneRect) -> isize {
     ((rect.z.max(0.0) * 100.0) as isize) + 1
 }
 
-/// What the pane camera needs derived from PaneRect + window.
-struct PaneCameraSetup {
-    viewport: Viewport,
+/// What the pane camera needs derived from PaneRect + render target.
+pub struct PaneCameraSetup {
+    pub viewport: Viewport,
     /// World-space center of the (possibly clamped) viewport. The
     /// camera transform must sit here so the camera's view (a
     /// `viewport_logical × viewport_logical` window centered on this
     /// point) lines up with the screen pixels covered by the viewport
     /// — including the case where the viewport had to be clamped
     /// because the pane runs off the right or bottom of the window.
-    cam_center: Vec2,
+    pub cam_center: Vec2,
 }
 
 /// Compute the viewport AND camera-center together so they describe
@@ -183,9 +183,31 @@ fn pane_camera_setup(
     window: &Window,
     region: Option<PaneCanvasRegion>,
 ) -> PaneCameraSetup {
-    let win_w_logical = window.width();
-    let win_h_logical = window.height();
-    let scale = window.scale_factor();
+    pane_camera_setup_for(
+        rect,
+        Vec2::new(window.width(), window.height()),
+        window.scale_factor(),
+        region,
+    )
+}
+
+/// Target-agnostic version of [`pane_camera_setup`]: identical math, but
+/// the render target's logical size and scale factor are passed in
+/// rather than read from the window. The window path is the special
+/// case `target_logical = window.size()`, `target_scale =
+/// window.scale_factor()`. The 3D project-prism ("cube") mode reuses
+/// this to drive each pane camera into a per-project render-target image
+/// the same size as the window, so pane clipping works identically
+/// whether a pane renders to the window or to a face texture.
+pub fn pane_camera_setup_for(
+    rect: &PaneRect,
+    target_logical: Vec2,
+    target_scale: f32,
+    region: Option<PaneCanvasRegion>,
+) -> PaneCameraSetup {
+    let win_w_logical = target_logical.x;
+    let win_h_logical = target_logical.y;
+    let scale = target_scale;
 
     // Step 1: pane rect in window logical pixels (top-left origin).
     let pane_left = rect.pos.x;

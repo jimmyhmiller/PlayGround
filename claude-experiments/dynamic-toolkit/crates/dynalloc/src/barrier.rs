@@ -121,9 +121,8 @@ pub unsafe fn read_barrier(ptr: *mut u8, type_info_offset: usize) -> *mut u8 {
     }
     let slot = unsafe { ptr.add(type_info_offset) as *const u64 };
     let word = unsafe { *slot };
-    if word & 1 == 1 {
-        // Forwarding pointer — bit 0 is set. Clear it to get the real address.
-        (word & !1) as *mut u8
+    if word & crate::semi_space::FORWARDING_BIT != 0 {
+        (word & !crate::semi_space::FORWARDING_BIT) as *mut u8
     } else {
         // No forwarding — object is in place.
         ptr
@@ -145,8 +144,8 @@ pub unsafe fn read_barrier_atomic(ptr: *mut u8, type_info_offset: usize) -> *mut
     }
     let slot = unsafe { ptr.add(type_info_offset) as *const std::sync::atomic::AtomicU64 };
     let word = unsafe { (*slot).load(std::sync::atomic::Ordering::Acquire) };
-    if word & 1 == 1 {
-        (word & !1) as *mut u8
+    if word & crate::semi_space::FORWARDING_BIT != 0 {
+        (word & !crate::semi_space::FORWARDING_BIT) as *mut u8
     } else {
         ptr
     }

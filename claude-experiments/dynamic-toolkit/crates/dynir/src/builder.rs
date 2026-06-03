@@ -331,7 +331,10 @@ impl FunctionBuilder {
     pub fn import_module_func(&mut self, fref: FuncRef, name: &str, sig: Signature) {
         let placeholder = || ExternFunc {
             name: String::new(),
-            sig: Signature { params: Vec::new(), ret: None },
+            sig: Signature {
+                params: Vec::new(),
+                ret: None,
+            },
         };
         while self.extern_funcs.len() < fref.index() {
             self.extern_funcs.push(placeholder());
@@ -370,8 +373,7 @@ impl FunctionBuilder {
     pub fn safepoint(&mut self, live: &[Value]) {
         for &v in live {
             let ty = self.value_type(v);
-            let acceptable =
-                ty.is_gc() || matches!(ty, Type::I64 | Type::Ptr);
+            let acceptable = ty.is_gc() || matches!(ty, Type::I64 | Type::Ptr);
             assert!(
                 acceptable,
                 "safepoint live value {} has type {} — only GcPtr, I64, \
@@ -670,17 +672,26 @@ impl FunctionBuilder {
     }
 
     pub fn push_prompt(&mut self, prompt: PromptId, handler_block: BlockId) {
-        assert!(prompt.index() < self.next_prompt as usize, "invalid prompt id");
+        assert!(
+            prompt.index() < self.next_prompt as usize,
+            "invalid prompt id"
+        );
         self.push_void_inst(Inst::PushPrompt(prompt, handler_block));
     }
 
     pub fn pop_prompt(&mut self, prompt: PromptId) {
-        assert!(prompt.index() < self.next_prompt as usize, "invalid prompt id");
+        assert!(
+            prompt.index() < self.next_prompt as usize,
+            "invalid prompt id"
+        );
         self.push_void_inst(Inst::PopPrompt(prompt));
     }
 
     pub fn capture_slice(&mut self, prompt: PromptId, live: &[Value]) -> Value {
-        assert!(prompt.index() < self.next_prompt as usize, "invalid prompt id");
+        assert!(
+            prompt.index() < self.next_prompt as usize,
+            "invalid prompt id"
+        );
         self.push_inst(Type::FrameSlice, Inst::CaptureSlice(prompt, live.to_vec()))
     }
 
@@ -978,7 +989,10 @@ impl FunctionBuilder {
         handler_block: BlockId,
         resume_block: BlockId,
     ) {
-        assert!(prompt.index() < self.next_prompt as usize, "invalid prompt id");
+        assert!(
+            prompt.index() < self.next_prompt as usize,
+            "invalid prompt id"
+        );
         self.set_terminator(Terminator::CaptureSlice {
             prompt,
             handler_block,
@@ -987,7 +1001,10 @@ impl FunctionBuilder {
     }
 
     pub fn abort_to_prompt(&mut self, prompt: PromptId, args: &[Value]) {
-        assert!(prompt.index() < self.next_prompt as usize, "invalid prompt id");
+        assert!(
+            prompt.index() < self.next_prompt as usize,
+            "invalid prompt id"
+        );
         self.set_terminator(Terminator::AbortToPrompt {
             prompt,
             args: args.to_vec(),
@@ -1158,7 +1175,8 @@ impl FunctionBuilder {
         {
             let at = self.value_type(arg);
             assert_eq!(
-                at, pty,
+                at,
+                pty,
                 "invoke exception bb{} arg {} type mismatch: expected {pty}, got {at}",
                 target.index(),
                 i + exc_param_count

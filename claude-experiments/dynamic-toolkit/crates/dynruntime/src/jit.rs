@@ -3,8 +3,7 @@ use std::marker::PhantomData;
 
 use dynalloc::{Heap, PtrPolicy};
 use dynexec::{
-    BuilderFrame, FrameResume, CapturedStackBuilder,
-    ContinuationContext, FrameSliceError,
+    BuilderFrame, CapturedStackBuilder, ContinuationContext, FrameResume, FrameSliceError,
 };
 use dynir::interp::{ConfiguredModuleInterpreter, InterpError, InterpResult, InterpRootManager};
 use dynlower::{
@@ -42,10 +41,11 @@ impl<'a> JitFrameSliceRuntime<'a> {
 
     /// Read a previously-captured continuation as a zero-copy view
     /// into the heap object. The view's lifetime is tied to `&self`.
-    pub fn read<'s>(&'s self, handle: u64) -> Result<dynexec::ContinuationView<'s>, FrameSliceError> {
-        self.ctx
-            .read(handle)
-            .ok_or(FrameSliceError::MissingSlice)
+    pub fn read<'s>(
+        &'s self,
+        handle: u64,
+    ) -> Result<dynexec::ContinuationView<'s>, FrameSliceError> {
+        self.ctx.read(handle).ok_or(FrameSliceError::MissingSlice)
     }
 
     /// Clone a continuation handle. Since the heap representation is
@@ -151,7 +151,9 @@ pub fn decode_frame_control_outcome(
     records: &[FrameReifyRecord],
 ) -> Result<Option<JitFrameControl>, JitFrameControlError> {
     match outcome {
-        JitOutcome::CaptureSlice { record_idx, values, .. } => {
+        JitOutcome::CaptureSlice {
+            record_idx, values, ..
+        } => {
             let record = records
                 .get(record_idx)
                 .cloned()
@@ -164,7 +166,9 @@ pub fn decode_frame_control_outcome(
             }
             Ok(Some(JitFrameControl::CaptureSlice { record, values }))
         }
-        JitOutcome::CloneSlice { record_idx, values, .. } => {
+        JitOutcome::CloneSlice {
+            record_idx, values, ..
+        } => {
             let record = records
                 .get(record_idx)
                 .cloned()
@@ -177,7 +181,9 @@ pub fn decode_frame_control_outcome(
             }
             Ok(Some(JitFrameControl::CloneSlice { record, values }))
         }
-        JitOutcome::ResumeSlice { record_idx, values, .. } => {
+        JitOutcome::ResumeSlice {
+            record_idx, values, ..
+        } => {
             let record = records
                 .get(record_idx)
                 .cloned()
@@ -190,7 +196,9 @@ pub fn decode_frame_control_outcome(
             }
             Ok(Some(JitFrameControl::ResumeSlice { record, values }))
         }
-        JitOutcome::AbortToPrompt { record_idx, values, .. } => {
+        JitOutcome::AbortToPrompt {
+            record_idx, values, ..
+        } => {
             let record = records
                 .get(record_idx)
                 .cloned()
@@ -234,9 +242,7 @@ fn build_capture_builder(
     let root_indices: Vec<u16> = record
         .root_payload_indices
         .iter()
-        .filter_map(|&payload_idx| {
-            record.value_indices.get(payload_idx).map(|&vi| vi as u16)
-        })
+        .filter_map(|&payload_idx| record.value_indices.get(payload_idx).map(|&vi| vi as u16))
         .collect();
     let resume_arg_slot = record.return_dest.map(|d| d as u32);
 
@@ -251,7 +257,11 @@ fn build_capture_builder(
         block_idx: record.resume.block_idx as u32,
         inst_idx: record.resume.inst_idx as u32,
         values: frame_values,
-        active_prompts: record.active_prompts.iter().map(|p| p.index() as u32).collect(),
+        active_prompts: record
+            .active_prompts
+            .iter()
+            .map(|p| p.index() as u32)
+            .collect(),
         root_indices,
         resume_arg_slot,
         caller_resume: top_caller_resume,
@@ -320,7 +330,9 @@ pub fn resume_stored_slice_with_jit(
         .read(handle)
         .map_err(ResumeWithInterpreterError::FrameSlice)?;
     if view.frame_count() == 0 {
-        return Err(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice));
+        return Err(ResumeWithInterpreterError::FrameSlice(
+            FrameSliceError::MissingSlice,
+        ));
     }
     let frame = view.frame(view.frame_count() - 1);
     let resume_point = dynexec::FrameResumePoint {
@@ -336,7 +348,9 @@ pub fn resume_stored_slice_with_jit(
                 && record.native_resume_offset.is_some()
                 && record.resume == resume_point
         })
-        .ok_or(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice))?;
+        .ok_or(ResumeWithInterpreterError::FrameSlice(
+            FrameSliceError::MissingSlice,
+        ))?;
     Ok(jit.call_resume_outcome(capture_record, frame.values.as_ptr(), args))
 }
 
@@ -350,10 +364,12 @@ pub fn resume_stored_slice_with_jit_module(
     let view = store
         .read(handle)
         .map_err(ResumeWithInterpreterError::FrameSlice)?;
-    let mut frame_idx = view
-        .frame_count()
-        .checked_sub(1)
-        .ok_or(ResumeWithInterpreterError::FrameSlice(FrameSliceError::MissingSlice))?;
+    let mut frame_idx =
+        view.frame_count()
+            .checked_sub(1)
+            .ok_or(ResumeWithInterpreterError::FrameSlice(
+                FrameSliceError::MissingSlice,
+            ))?;
 
     let frame_resume_point = |i: usize| {
         let f = view.frame(i);
@@ -433,7 +449,8 @@ fn continue_outcome_with_function(
     outcome: JitOutcome,
     store: &JitFrameSliceRuntime,
 ) -> Result<JitExecutionResult, JitFrameControlError> {
-    if let Some(control) = decode_frame_control_outcome(outcome.clone(), jit.frame_reify_records())? {
+    if let Some(control) = decode_frame_control_outcome(outcome.clone(), jit.frame_reify_records())?
+    {
         return match control {
             JitFrameControl::CaptureSlice { record, values } => {
                 let builder = build_capture_builder(&record, &values, take_suspended_frames())?;
@@ -471,28 +488,29 @@ fn continue_outcome_with_function(
                 let handle = *slice_bits;
                 return continue_outcome_with_function(
                     jit,
-                    resume_stored_slice_with_jit(jit, &record, store, handle, args)
-                        .map_err(|err| match err {
+                    resume_stored_slice_with_jit(jit, &record, store, handle, args).map_err(
+                        |err| match err {
                             ResumeWithInterpreterError::FrameSlice(err) => {
                                 JitFrameControlError::FrameSlice(err)
                             }
                             ResumeWithInterpreterError::Interp(_) => {
                                 JitFrameControlError::UnsupportedOutcome
                             }
-                        })?,
+                        },
+                    )?,
                     store,
                 );
             }
-            JitFrameControl::AbortToPrompt { record, values } => Ok(
-                {
-                    let _ = take_suspended_frames();
-                    JitExecutionResult::AbortToPrompt {
-                        prompt: record.prompt.expect("abort_to_prompt record missing prompt"),
-                        values,
-                        record,
-                    }
-                },
-            ),
+            JitFrameControl::AbortToPrompt { record, values } => Ok({
+                let _ = take_suspended_frames();
+                JitExecutionResult::AbortToPrompt {
+                    prompt: record
+                        .prompt
+                        .expect("abort_to_prompt record missing prompt"),
+                    values,
+                    record,
+                }
+            }),
         };
     }
 
@@ -607,13 +625,13 @@ fn continue_outcome_with_module(
                 let handle = *slice_bits;
                 let next = resume_stored_slice_with_jit_module(jit, &record, store, handle, args)
                     .map_err(|err| match err {
-                        ResumeWithInterpreterError::FrameSlice(err) => {
-                            JitFrameControlError::FrameSlice(err)
-                        }
-                        ResumeWithInterpreterError::Interp(_) => {
-                            JitFrameControlError::UnsupportedOutcome
-                        }
-                    })?;
+                    ResumeWithInterpreterError::FrameSlice(err) => {
+                        JitFrameControlError::FrameSlice(err)
+                    }
+                    ResumeWithInterpreterError::Interp(_) => {
+                        JitFrameControlError::UnsupportedOutcome
+                    }
+                })?;
                 continue_outcome_with_module(
                     jit,
                     jit.frame_reify_records_for_function(record.resume.func_idx),
@@ -621,13 +639,15 @@ fn continue_outcome_with_module(
                     store,
                 )
             }
-            JitFrameControl::AbortToPrompt { record, values } => Ok(
-                JitExecutionResult::AbortToPrompt {
-                    prompt: record.prompt.expect("abort_to_prompt record missing prompt"),
+            JitFrameControl::AbortToPrompt { record, values } => {
+                Ok(JitExecutionResult::AbortToPrompt {
+                    prompt: record
+                        .prompt
+                        .expect("abort_to_prompt record missing prompt"),
                     values,
                     record,
-                },
-            ),
+                })
+            }
         };
     }
 
@@ -677,9 +697,9 @@ fn execute_outcome(
                 Ok(JitExecutionResult::CaptureSlice { handle, record })
             }
             JitFrameControl::CloneSlice { record, values } => {
-                let handle = *values.first().ok_or(
-                    JitFrameControlError::UnsupportedOutcome,
-                )?;
+                let handle = *values
+                    .first()
+                    .ok_or(JitFrameControlError::UnsupportedOutcome)?;
                 let cloned = store.clone_handle(handle);
                 Ok(JitExecutionResult::CloneSlice {
                     handle: cloned,
@@ -697,13 +717,15 @@ fn execute_outcome(
                     record,
                 })
             }
-            JitFrameControl::AbortToPrompt { record, values } => Ok(
-                JitExecutionResult::AbortToPrompt {
-                    prompt: record.prompt.expect("abort_to_prompt record missing prompt"),
+            JitFrameControl::AbortToPrompt { record, values } => {
+                Ok(JitExecutionResult::AbortToPrompt {
+                    prompt: record
+                        .prompt
+                        .expect("abort_to_prompt record missing prompt"),
                     values,
                     record,
-                },
-            ),
+                })
+            }
         };
     }
 
@@ -892,10 +914,7 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
     /// `Heap::collect` directly, which assumes all threads are
     /// already at safepoints (true only for single-threaded
     /// frontends).
-    pub fn with_triggering_thread(
-        mut self,
-        thread: std::sync::Arc<dynalloc::ThreadState>,
-    ) -> Self {
+    pub fn with_triggering_thread(mut self, thread: std::sync::Arc<dynalloc::ThreadState>) -> Self {
         self.triggering_thread = Some(thread);
         self
     }
@@ -990,13 +1009,29 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
             payload,
             safepoints: self.safepoints,
         };
+        if std::env::var("CLJVM_CURROOT").is_ok() {
+            let roots = self
+                .safepoints
+                .get(payload)
+                .map(|record| record.root_slots.as_slice())
+                .unwrap_or(&[]);
+            eprintln!(
+                "[curroot] gen={} fp={:p} payload={} roots={:?}",
+                self.heap.collections(),
+                frame_ptr,
+                payload,
+                roots,
+            );
+        }
         // Walk ancestor JIT frames via the native FP chain. The current
         // frame is already scanned by root_source above; the FP walker
         // scans all callers whose return addresses fall in registered
         // JIT code ranges.
         let ancestor_roots = dynlower::JitFrameRoots { jit_fp: frame_ptr };
+        let suspended_roots = unsafe { &*dynlower::suspended_jit_frames_root_source() };
         let extra_roots = self.extra_roots.borrow();
-        let mut sources: Vec<&dyn RootSource> = vec![&root_source, &ancestor_roots];
+        let mut sources: Vec<&dyn RootSource> =
+            vec![&root_source, &ancestor_roots, suspended_roots];
         for &ptr in extra_roots.iter() {
             sources.push(unsafe { &*ptr });
         }
@@ -1028,42 +1063,40 @@ impl<'a, P: PtrPolicy, T: JitRootTransportRuntime> JitSafepointSession<'a, P, T>
             }
         }
 
-        // DIAGNOSTIC: after the collection, scan the polling frame's stack
-        // window for words that still decode to a pointer whose object header
-        // has the FORWARDING bit set (a stale slot the precise walk missed),
-        // classify it against the FP chain, and stash it keyed by the stale
-        // word so `cljvm_rt_first` can report where the dangling value lived.
+        // DIAGNOSTIC: post-collection root verification. Re-scan exactly the
+        // recorded roots we just handed the collector and check whether any
+        // still points to a forwarded (relocated) object. A hit means a
+        // RECORDED root that the collection failed to update — caught at the
+        // exact collection, naming the slot. If this NEVER fires yet a stale
+        // root later reaches `rt_first`, the holding frame was not among the
+        // scanned roots at all (e.g. a suspended continuation slice off the
+        // live FP chain), pointing the investigation elsewhere.
         #[cfg(target_arch = "aarch64")]
-        if std::env::var("CLJVM_POSTGC_SCAN").is_ok() {
+        if std::env::var("CLJVM_VERIFY").is_ok() {
             const FWD: u64 = 1 << 63;
-            let base = frame_ptr as usize;
-            let mut p = base.saturating_sub(0x200);
-            let end = base + 0x8000; // 32 KiB up the stack (mapped; reached form 430)
-            let mut cap = dynlower::STALE_CAPTURE.lock().unwrap();
-            if cap.is_none() { *cap = Some(std::collections::HashMap::new()); }
-            let map = cap.as_mut().unwrap();
-            while p < end {
-                let w = unsafe { (p as *const u64).read() };
+            let mut bad = 0usize;
+            let mut check = |slot: *mut u64| {
+                let w = unsafe { *slot };
                 if let Some(ptr) = P::try_decode_ptr(w) {
                     if !ptr.is_null() && self.heap.contains_either(ptr as *const u8) {
                         let hdr = unsafe { (ptr as *const u64).read() };
-                        if hdr & FWD != 0 {
-                            let cls = dynlower::classify_stack_addr(frame_ptr as *const u8, p);
-                            if cls.contains("HOST")
-                                && std::env::var("CLJVM_POSTGC_BT").is_ok()
-                            {
-                                use std::sync::atomic::{AtomicUsize, Ordering};
-                                static N: AtomicUsize = AtomicUsize::new(0);
-                                if N.fetch_add(1, Ordering::Relaxed) < 6 {
-                                    eprintln!("[postgc-host] {} REF active_jit_safepoint_handler={:#x}",
-                                        cls, active_jit_safepoint_handler as usize);
-                                }
-                            }
-                            map.insert(w, format!("stack={:#x} {}", p, cls));
+                        if hdr & FWD != 0 && bad < 8 {
+                            bad += 1;
+                            eprintln!(
+                                "[verify] MISSED recorded root @ slot={:p} word={:#x} -> fwd {:#x}",
+                                slot,
+                                w,
+                                hdr & !FWD
+                            );
                         }
                     }
                 }
-                p += 8;
+            };
+            for source in sources.iter() {
+                source.scan_roots(&mut check);
+            }
+            if bad > 0 {
+                eprintln!("[verify] ^ {bad} recorded root(s) left stale by this collection");
             }
         }
     }
@@ -1094,7 +1127,9 @@ pub struct ScopedJitRoots {
 
 impl ScopedJitRoots {
     pub fn new() -> Self {
-        Self { roots: RootSet::new() }
+        Self {
+            roots: RootSet::new(),
+        }
     }
 
     pub fn push(&mut self, bits: u64) -> ScopedJitRoot {
@@ -1122,10 +1157,7 @@ impl Drop for ActiveRootSourceGuard {
     }
 }
 
-pub fn with_registered_active_jit_roots<R>(
-    source: &dyn RootSource,
-    f: impl FnOnce() -> R,
-) -> R {
+pub fn with_registered_active_jit_roots<R>(source: &dyn RootSource, f: impl FnOnce() -> R) -> R {
     ACTIVE_JIT_SAFEPOINT_SESSION.with(|cell| {
         let maybe_session = *cell.borrow();
         let Some(session) = maybe_session else {
@@ -1154,9 +1186,9 @@ mod tests {
 
     use dynalloc::Heap;
     use dynexec::FrameResumePoint;
+    use dynir::Module;
     use dynir::builder::{FunctionBuilder, ModuleBuilder};
     use dynir::interp::ModuleInterpreter;
-    use dynir::Module;
     use dynir::types::Type;
     use dynlower::FrameReifyKind;
     use dynobj::Compact;
@@ -1171,16 +1203,26 @@ mod tests {
         let mut type_table = Vec::new();
         let cont_types = ContinuationTypes::register_into::<dynobj::Compact>(&mut type_table);
         let heap = SemiSpace::new::<dynobj::Compact>(64 * 1024);
-        dynir::gc_runtime::GcInterpCtx::<dynobj::Compact, TestPol>::new(heap, type_table, cont_types)
+        dynir::gc_runtime::GcInterpCtx::<dynobj::Compact, TestPol>::new(
+            heap, type_table, cont_types,
+        )
     }
 
     struct TestPol;
     impl dynalloc::PtrPolicy for TestPol {
         fn try_decode_ptr(bits: u64) -> Option<*mut u8> {
-            if bits == 0 { return None; }
-            if bits & 0b111 == 0 { Some(bits as *mut u8) } else { None }
+            if bits == 0 {
+                return None;
+            }
+            if bits & 0b111 == 0 {
+                Some(bits as *mut u8)
+            } else {
+                None
+            }
         }
-        fn encode_ptr(ptr: *mut u8) -> u64 { ptr as u64 }
+        fn encode_ptr(ptr: *mut u8) -> u64 {
+            ptr as u64
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -1225,7 +1267,10 @@ mod tests {
         let record = FrameReifyRecord {
             kind: FrameReifyKind::CaptureSlice,
             prompt: Some(dynir::PromptId::from_index(3)),
-            active_prompts: vec![dynir::PromptId::from_index(1), dynir::PromptId::from_index(3)],
+            active_prompts: vec![
+                dynir::PromptId::from_index(1),
+                dynir::PromptId::from_index(3),
+            ],
             resume: FrameResumePoint {
                 func_idx: 4,
                 block_idx: 5,
@@ -1266,7 +1311,10 @@ mod tests {
         let record = FrameReifyRecord {
             kind: FrameReifyKind::CaptureSlice,
             prompt: Some(dynir::PromptId::from_index(1)),
-            active_prompts: vec![dynir::PromptId::from_index(0), dynir::PromptId::from_index(1)],
+            active_prompts: vec![
+                dynir::PromptId::from_index(0),
+                dynir::PromptId::from_index(1),
+            ],
             resume: FrameResumePoint {
                 func_idx: 2,
                 block_idx: 3,
@@ -1349,7 +1397,11 @@ mod tests {
         let result = execute_jit_module_function(&jit, f_main, &[77], &store).unwrap();
 
         match result {
-            JitExecutionResult::AbortToPrompt { prompt, values, record } => {
+            JitExecutionResult::AbortToPrompt {
+                prompt,
+                values,
+                record,
+            } => {
                 assert_eq!(Some(prompt), record.prompt);
                 assert_eq!(values, vec![77]);
             }
@@ -1373,7 +1425,9 @@ mod tests {
         let handler_bb = main.create_block(&[Type::FrameSlice]);
         let prompt = main.create_prompt();
         main.push_prompt(prompt, handler_bb);
-        let slice = main.call(f_inner, &[]).expect("call should produce a slice");
+        let slice = main
+            .call(f_inner, &[])
+            .expect("call should produce a slice");
         main.pop_prompt(prompt);
         main.jump(handler_bb, &[slice]);
         main.switch_to_block(handler_bb);
@@ -1553,12 +1607,8 @@ mod tests {
 
         match resume_result {
             JitExecutionResult::ResumeSlice { handle, args, .. } => {
-                assert_eq!(
-                    handle,
-                    cloned_handle
-                );
+                assert_eq!(handle, cloned_handle);
                 assert_eq!(args, vec![99]);
-
             }
             other => panic!("expected resume result, got {other:?}"),
         }
@@ -1633,8 +1683,7 @@ mod tests {
     fn jit_module_clone_and_resume_runs_to_terminal_natively() {
         let mut mb = ModuleBuilder::new();
         let f_capture = mb.declare_func("capture", &[], Some(Type::I64));
-        let f_clone_resume =
-            mb.declare_func("clone_resume", &[Type::FrameSlice], Some(Type::I64));
+        let f_clone_resume = mb.declare_func("clone_resume", &[Type::FrameSlice], Some(Type::I64));
 
         let mut capture = mb.define_func(f_capture);
         let handler_bb = capture.create_block(&[Type::I64]);
@@ -1670,13 +1719,8 @@ mod tests {
             other => panic!("expected capture result, got {other:?}"),
         };
 
-        match execute_jit_module_function_to_terminal(
-            &jit,
-            f_clone_resume,
-            &[handle],
-            &store,
-        )
-        .unwrap()
+        match execute_jit_module_function_to_terminal(&jit, f_clone_resume, &[handle], &store)
+            .unwrap()
         {
             JitExecutionResult::Value(v) => assert_eq!(v, 77),
             other => panic!("expected terminal native value, got {other:?}"),
@@ -1700,7 +1744,9 @@ mod tests {
         let handler_bb = main.create_block(&[Type::I64]);
         let prompt = main.create_prompt();
         main.push_prompt(prompt, handler_bb);
-        let ret = main.call(f_inner, &[]).expect("inner call should return i64");
+        let ret = main
+            .call(f_inner, &[])
+            .expect("inner call should return i64");
         main.pop_prompt(prompt);
         main.jump(handler_bb, &[ret]);
         main.switch_to_block(handler_bb);
@@ -1713,7 +1759,8 @@ mod tests {
         let ctx = make_cont_ctx();
         let store = JitFrameSliceRuntime::new(&ctx);
 
-        let (handle, record) = match execute_jit_module_function(&jit, f_main, &[], &store).unwrap() {
+        let (handle, record) = match execute_jit_module_function(&jit, f_main, &[], &store).unwrap()
+        {
             JitExecutionResult::CaptureSlice { handle, record } => (handle, record),
             other => panic!("expected capture result, got {other:?}"),
         };
@@ -1762,7 +1809,8 @@ mod tests {
         let ctx = make_cont_ctx();
         let store = JitFrameSliceRuntime::new(&ctx);
 
-        let (handle, record) = match execute_jit_module_function(&jit, f_main, &[], &store).unwrap() {
+        let (handle, record) = match execute_jit_module_function(&jit, f_main, &[], &store).unwrap()
+        {
             JitExecutionResult::CaptureSlice { handle, record } => (handle, record),
             other => panic!("expected capture result, got {other:?}"),
         };
@@ -1973,7 +2021,15 @@ mod tests {
         let normal = main.create_block(&[Type::I64]);
         let exception = main.create_block(&[]);
         main.push_prompt(prompt, handler_bb);
-        main.invoke_indirect(callee, &[throw_ptr], Some(Type::I64), normal, &[], exception, &[]);
+        main.invoke_indirect(
+            callee,
+            &[throw_ptr],
+            Some(Type::I64),
+            normal,
+            &[],
+            exception,
+            &[],
+        );
         main.switch_to_block(normal);
         let ret = main.block_param(normal, 0);
         main.pop_prompt(prompt);
@@ -1994,16 +2050,18 @@ mod tests {
         let throw_stub_ptr = dynruntime_test_throw_exception_stub as usize as u64;
 
         let (handle, record) =
-            match execute_jit_module_function(&jit, f_main, &[inner_ptr, throw_stub_ptr], &store).unwrap() {
+            match execute_jit_module_function(&jit, f_main, &[inner_ptr, throw_stub_ptr], &store)
+                .unwrap()
+            {
                 JitExecutionResult::CaptureSlice { handle, record } => (handle, record),
                 other => panic!("expected capture result, got {other:?}"),
             };
 
         match resume_stored_slice_with_jit_module(&jit, &record, &store, handle, &[]).unwrap() {
             JitOutcome::Value(v) => assert_eq!(v, 616),
-            other => panic!(
-                "expected native resumed invoke-indirect exception value, got {other:?}"
-            ),
+            other => {
+                panic!("expected native resumed invoke-indirect exception value, got {other:?}")
+            }
         }
     }
 
@@ -2036,10 +2094,11 @@ mod tests {
         let transport = CountingTransport {
             last_payload: &last_payload,
         };
-        let session = JitSafepointSession::<
-            crate::ptr_policy::LowBitPtrPolicy<3>,
-            _,
-        >::new(&heap, transport, &[])
+        let session = JitSafepointSession::<crate::ptr_policy::LowBitPtrPolicy<3>, _>::new(
+            &heap,
+            transport,
+            &[],
+        )
         .with_gc_policy(GcPolicy::EveryPoint);
         let mut frame = [0u64; 2];
 

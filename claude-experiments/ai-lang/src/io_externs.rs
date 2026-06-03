@@ -19,7 +19,7 @@
 //! a safepoint at every extern call site.
 
 use crate::ast::Type;
-use crate::ffi::{heap_str_to_owned, owned_str_to_heap, register_extern};
+use crate::ffi::{heap_str_to_owned, owned_str_to_heap};
 use crate::runtime::Thread;
 use std::io::{BufRead, Write};
 use std::sync::{Mutex, OnceLock};
@@ -182,83 +182,32 @@ unsafe extern "C" fn ai_io_get_node_port(_thread: *mut Thread, i: i64) -> i64 {
 // Registration
 // =============================================================================
 
-/// Register the standard I/O externs in the global FFI registry. Safe
-/// to call multiple times — `register_extern` replaces. Re-registers
-/// on every call so that test ordering with `clear_externs()` can't
-/// leave the I/O externs in a torn-down state.
+/// Install the standard I/O externs into the process-global, write-once
+/// table. Safe and cheap to call any number of times from any thread:
+/// the first call wins and every later call is a no-op (the I/O externs
+/// are static, so there is nothing to update or tear down). This is what
+/// makes the stdlib's `extern fn print_int(...)` etc. resolve on every
+/// build thread without any cross-test races.
 pub fn register_io_externs() {
-    unsafe {
-        register_extern(
-            "print_int",
-            vec![int_t()],
-            int_t(),
-            ai_io_print_int as usize,
-        );
-        register_extern(
-            "print_string",
-            vec![string_t()],
-            int_t(),
-            ai_io_print_string as usize,
-        );
-        register_extern(
-            "println",
-            vec![string_t()],
-            int_t(),
-            ai_io_println as usize,
-        );
-        register_extern(
-            "read_line",
-            vec![],
-            string_t(),
-            ai_io_read_line as usize,
-        );
-        register_extern(
-            "int_to_string",
-            vec![int_t()],
-            string_t(),
-            ai_io_int_to_string as usize,
-        );
-        register_extern(
-            "string_to_int",
-            vec![string_t()],
-            int_t(),
-            ai_io_string_to_int as usize,
-        );
-        register_extern(
-            "string_is_int",
-            vec![string_t()],
-            int_t(),
-            ai_io_string_is_int as usize,
-        );
-        register_extern(
-            "sleep_ms",
-            vec![int_t()],
-            int_t(),
-            ai_io_sleep_ms as usize,
-        );
-        register_extern(
-            "arg_count",
-            vec![],
-            int_t(),
-            ai_io_arg_count as usize,
-        );
-        register_extern(
-            "get_arg",
-            vec![int_t()],
-            string_t(),
-            ai_io_get_arg as usize,
-        );
-        register_extern(
-            "node_count",
-            vec![],
-            int_t(),
-            ai_io_node_count as usize,
-        );
-        register_extern(
-            "get_node_port",
-            vec![int_t()],
-            int_t(),
-            ai_io_get_node_port as usize,
-        );
+    crate::ffi::install_io_externs(io_extern_entries());
+}
+
+fn io_extern_entries() -> Vec<(String, crate::ffi::ExternEntry)> {
+    fn e(name: &str, params: Vec<Type>, ret: Type, fn_ptr: usize) -> (String, crate::ffi::ExternEntry) {
+        (name.to_owned(), crate::ffi::ExternEntry { params, ret, fn_ptr })
     }
+    vec![
+        e("print_int", vec![int_t()], int_t(), ai_io_print_int as usize),
+        e("print_string", vec![string_t()], int_t(), ai_io_print_string as usize),
+        e("println", vec![string_t()], int_t(), ai_io_println as usize),
+        e("read_line", vec![], string_t(), ai_io_read_line as usize),
+        e("int_to_string", vec![int_t()], string_t(), ai_io_int_to_string as usize),
+        e("string_to_int", vec![string_t()], int_t(), ai_io_string_to_int as usize),
+        e("string_is_int", vec![string_t()], int_t(), ai_io_string_is_int as usize),
+        e("sleep_ms", vec![int_t()], int_t(), ai_io_sleep_ms as usize),
+        e("arg_count", vec![], int_t(), ai_io_arg_count as usize),
+        e("get_arg", vec![int_t()], string_t(), ai_io_get_arg as usize),
+        e("node_count", vec![], int_t(), ai_io_node_count as usize),
+        e("get_node_port", vec![int_t()], int_t(), ai_io_get_node_port as usize),
+    ]
 }

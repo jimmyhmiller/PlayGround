@@ -25,9 +25,7 @@ use std::sync::{Mutex, RwLock};
 use dynexec::NanBoxConfig;
 use dynir::ir::FuncRef;
 use dynir::types::{Signature, Type};
-use dynlang::closure::{
-    ArgsListReaders, CallConv, CaptureShape, ClosureConfig, ClosureKit,
-};
+use dynlang::closure::{ArgsListReaders, CallConv, CaptureShape, ClosureConfig, ClosureKit};
 use dynlang::gc::DynGcRuntime;
 use dynlang::{DynModule, GcConfig, GcPolicy, NanBoxTags};
 use dynlower::{CallMode, JitModule};
@@ -36,7 +34,7 @@ use dynruntime::active_jit_safepoint_handler;
 
 use crate::host::Host;
 use crate::symbols::SymbolTable;
-use crate::types::{declare_types, Layouts};
+use crate::types::{Layouts, declare_types};
 
 const JIT_CALL_TABLE_CAPACITY: usize = 64 * 1024;
 const JIT_LITERAL_POOL_CAPACITY: usize = 64 * 1024;
@@ -199,7 +197,10 @@ impl Engine {
             let fref = dyn_module.module_builder.declare_extern(prim.name, sig);
             func_refs.insert(
                 prim.name.to_string(),
-                compile::FnEntry::Extern { fref, arity: prim.arity },
+                compile::FnEntry::Extern {
+                    fref,
+                    arity: prim.arity,
+                },
             );
             extern_ptrs.push(prim.ptr);
         }
@@ -470,8 +471,7 @@ impl Engine {
         let _host_g = host::install(&self.host);
         let local_chain = dynobj::roots::FrameChain::new();
         let chain_src: *const dyn dynobj::RootSource = &local_chain;
-        let _chain_root_guard =
-            unsafe { self.gc.push_extra_root_source(chain_src) };
+        let _chain_root_guard = unsafe { self.gc.push_extra_root_source(chain_src) };
         let _chain_g = dynobj::roots::install_chain(&local_chain);
 
         // User-defined fns use the unified `(self_fn, args_list)`
@@ -530,8 +530,7 @@ impl Engine {
         // deregister is safe.
         let local_chain = dynobj::roots::FrameChain::new();
         let chain_root: &dyn dynobj::RootSource = &local_chain;
-        let _chain_root_guard =
-            unsafe { self.gc.push_extra_root_source(chain_root as *const _) };
+        let _chain_root_guard = unsafe { self.gc.push_extra_root_source(chain_root as *const _) };
         let _chain_g = dynobj::roots::install_chain(&local_chain);
 
         let jit_g = self.jit.read().expect("jit RwLock poisoned");
@@ -545,8 +544,7 @@ impl Engine {
         // back from the reader.
         let mut pending = dynobj::roots::RootSet::new();
         let pending_src: *const dyn dynobj::RootSource = &pending;
-        let _root_guard =
-            unsafe { self.gc.push_extra_root_source(pending_src) };
+        let _root_guard = unsafe { self.gc.push_extra_root_source(pending_src) };
         {
             let mut r = reader::Reader::new(src, &self.host.sym);
             while !r.at_eof() {
@@ -663,12 +661,7 @@ impl Engine {
                 compile::TopResult::DefineValue { name, value_thunk } => {
                     // Run the thunk to compute the value, then
                     // intern it as a Var in clojure.core.
-                    let value = match self.gc.run_jit(
-                        jit,
-                        value_thunk,
-                        &[],
-                        self.jit_gc_policy,
-                    ) {
+                    let value = match self.gc.run_jit(jit, value_thunk, &[], self.jit_gc_policy) {
                         dynlower::JitOutcome::Value(v) => v,
                         dynlower::JitOutcome::Void => value::NIL,
                         dynlower::JitOutcome::Exception(exc) => {

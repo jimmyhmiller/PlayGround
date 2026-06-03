@@ -17,9 +17,9 @@ pub enum TokenKind {
     Return,
     True,
     False,
-    Cont,   // cont type annotation
-    Arrow,  // ->
-    Colon,  // :
+    Cont,  // cont type annotation
+    Arrow, // ->
+    Colon, // :
 
     // Punctuation
     LParen,
@@ -28,21 +28,21 @@ pub enum TokenKind {
     RBrace,
     Comma,
     Semicolon,
-    Eq,       // =
-    EqEq,     // ==
-    BangEq,   // !=
-    Lt,       // <
-    LtEq,     // <=
-    Gt,       // >
-    GtEq,     // >=
+    Eq,     // =
+    EqEq,   // ==
+    BangEq, // !=
+    Lt,     // <
+    LtEq,   // <=
+    Gt,     // >
+    GtEq,   // >=
     Plus,
     Minus,
     Star,
     Slash,
     Percent,
-    Pipe,     // |
-    Amp,      // &
-    Bang,     // !
+    Pipe, // |
+    Amp,  // &
+    Bang, // !
 
     Eof,
 }
@@ -82,7 +82,10 @@ pub fn lex(src: &str) -> Vec<Token> {
                 i += 1;
             }
             let n: i64 = src[start..i].parse().unwrap();
-            tokens.push(Token { kind: TokenKind::Int(n), pos });
+            tokens.push(Token {
+                kind: TokenKind::Int(n),
+                pos,
+            });
             continue;
         }
 
@@ -157,6 +160,9 @@ pub fn lex(src: &str) -> Vec<Token> {
         i += 1;
     }
 
-    tokens.push(Token { kind: TokenKind::Eof, pos: i });
+    tokens.push(Token {
+        kind: TokenKind::Eof,
+        pos: i,
+    });
     tokens
 }

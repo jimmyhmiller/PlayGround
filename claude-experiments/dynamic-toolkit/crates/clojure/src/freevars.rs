@@ -19,9 +19,21 @@ use crate::value as v;
 /// The walker special-cases these — every other list head is treated
 /// as a function call (head + args, all of which need to be walked).
 const SPECIAL_HEADS: &[&str] = &[
-    "let", "fn", "loop", "do", "if", "quote", "def", "defmacro",
-    "recur", "quasiquote", "unquote", "unquote-splicing",
-    "try", "throw", "catch",
+    "let",
+    "fn",
+    "loop",
+    "do",
+    "if",
+    "quote",
+    "def",
+    "defmacro",
+    "recur",
+    "quasiquote",
+    "unquote",
+    "unquote-splicing",
+    "try",
+    "throw",
+    "catch",
 ];
 
 /// Compute free symbol-ids in `body` given that `bound` is initially

@@ -112,9 +112,13 @@ fn load_upstream_core_progressively() {
         if let (Some(name), true) = (&defined_name, eval_outcome.is_ok()) {
             eprintln!("[upstream] form {i} DEFINED {name}");
         }
-        eprintln!("[upstream] form {i} eval completed (outcome: {})", if eval_outcome.is_ok() { "Ok" } else { "Err" });
+        eprintln!(
+            "[upstream] form {i} eval completed (outcome: {})",
+            if eval_outcome.is_ok() { "Ok" } else { "Err" }
+        );
         if let Err(err) = eval_outcome {
-            let msg = LAST_PANIC.with(|p| p.borrow().clone())
+            let msg = LAST_PANIC
+                .with(|p| p.borrow().clone())
                 .unwrap_or_else(|| panic_msg(&*err));
             eprintln!("[upstream] form {i} EVAL PANIC: {msg}");
             if std::env::var("CLJVM_LOADER_SKIP_PANICS").is_ok() {

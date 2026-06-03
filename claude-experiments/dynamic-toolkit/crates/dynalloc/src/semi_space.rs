@@ -163,7 +163,11 @@ impl SemiSpace {
         unsafe { core::slice::from_raw_parts(self.type_table_ptr, self.type_table_len) }
     }
 
-    pub unsafe fn collect<P: PtrPolicy>(&mut self, type_table: &[TypeInfo], roots: &mut [&dyn RootSource]) {
+    pub unsafe fn collect<P: PtrPolicy>(
+        &mut self,
+        type_table: &[TypeInfo],
+        roots: &mut [&dyn RootSource],
+    ) {
         // Store type_table reference for use by copy_or_forward
         self.type_table_ptr = type_table.as_ptr();
         self.type_table_len = type_table.len();

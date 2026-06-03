@@ -40,41 +40,65 @@ pub const FIXNUM_MAX: i64 = (1 << 60) - 1;
 pub const FIXNUM_MIN: i64 = -(1 << 60);
 
 #[inline]
-pub fn is_ptr(bits: u64) -> bool { bits & TAG_MASK == TAG_PTR && bits != 0 }
+pub fn is_ptr(bits: u64) -> bool {
+    bits & TAG_MASK == TAG_PTR && bits != 0
+}
 
 #[inline]
-pub fn fits_fixnum(n: i64) -> bool { (FIXNUM_MIN..=FIXNUM_MAX).contains(&n) }
+pub fn fits_fixnum(n: i64) -> bool {
+    (FIXNUM_MIN..=FIXNUM_MAX).contains(&n)
+}
 
 #[inline]
-pub fn encode_fixnum(n: i64) -> u64 { ((n << TAG_BITS) as u64) | TAG_FIXNUM }
+pub fn encode_fixnum(n: i64) -> u64 {
+    ((n << TAG_BITS) as u64) | TAG_FIXNUM
+}
 
 #[inline]
-pub fn is_fixnum(bits: u64) -> bool { bits & TAG_MASK == TAG_FIXNUM }
+pub fn is_fixnum(bits: u64) -> bool {
+    bits & TAG_MASK == TAG_FIXNUM
+}
 
 /// Arithmetic shift recovers the sign. Precondition: `is_fixnum(bits)`.
 #[inline]
-pub fn decode_fixnum(bits: u64) -> i64 { (bits as i64) >> TAG_BITS }
+pub fn decode_fixnum(bits: u64) -> i64 {
+    (bits as i64) >> TAG_BITS
+}
 
 #[inline]
-pub fn is_nil(bits: u64) -> bool { bits == NIL }
+pub fn is_nil(bits: u64) -> bool {
+    bits == NIL
+}
 
 #[inline]
-pub fn encode_bool(b: bool) -> u64 { if b { TRUE } else { FALSE } }
+pub fn encode_bool(b: bool) -> u64 {
+    if b { TRUE } else { FALSE }
+}
 
 #[inline]
-pub fn is_bool(bits: u64) -> bool { bits & TAG_MASK == TAG_BOOL }
+pub fn is_bool(bits: u64) -> bool {
+    bits & TAG_MASK == TAG_BOOL
+}
 
 #[inline]
-pub fn decode_bool(bits: u64) -> bool { (bits >> TAG_BITS) & 1 != 0 }
+pub fn decode_bool(bits: u64) -> bool {
+    (bits >> TAG_BITS) & 1 != 0
+}
 
 #[inline]
-pub fn encode_char(cp: u32) -> u64 { ((cp as u64) << TAG_BITS) | TAG_CHAR }
+pub fn encode_char(cp: u32) -> u64 {
+    ((cp as u64) << TAG_BITS) | TAG_CHAR
+}
 
 #[inline]
-pub fn is_char(bits: u64) -> bool { bits & TAG_MASK == TAG_CHAR }
+pub fn is_char(bits: u64) -> bool {
+    bits & TAG_MASK == TAG_CHAR
+}
 
 #[inline]
-pub fn decode_char(bits: u64) -> u32 { (bits >> TAG_BITS) as u32 }
+pub fn decode_char(bits: u64) -> u32 {
+    (bits >> TAG_BITS) as u32
+}
 
 /// A heap pointer is already tag-000 (8-aligned); encoding is identity.
 #[inline]
@@ -186,23 +210,40 @@ pub fn num_rem(a: Num, b: Num) -> Num {
     }
 }
 
-pub fn num_inc(a: Num) -> NumResult { num_add(a, Num::Long(1)) }
-pub fn num_dec(a: Num) -> NumResult { num_sub(a, Num::Long(1)) }
+pub fn num_inc(a: Num) -> NumResult {
+    num_add(a, Num::Long(1))
+}
+pub fn num_dec(a: Num) -> NumResult {
+    num_sub(a, Num::Long(1))
+}
 
 /// Numeric ordering, type-agnostic (used by `<` `>` `<=` `>=` and `==`).
 fn num_cmp(a: Num, b: Num) -> std::cmp::Ordering {
     match Num::both_long(a, b) {
         Some((x, y)) => x.cmp(&y),
-        None => a.as_f64().partial_cmp(&b.as_f64()).unwrap_or(std::cmp::Ordering::Less),
+        None => a
+            .as_f64()
+            .partial_cmp(&b.as_f64())
+            .unwrap_or(std::cmp::Ordering::Less),
     }
 }
-pub fn num_lt(a: Num, b: Num) -> bool { num_cmp(a, b) == std::cmp::Ordering::Less }
-pub fn num_gt(a: Num, b: Num) -> bool { num_cmp(a, b) == std::cmp::Ordering::Greater }
-pub fn num_le(a: Num, b: Num) -> bool { num_cmp(a, b) != std::cmp::Ordering::Greater }
-pub fn num_ge(a: Num, b: Num) -> bool { num_cmp(a, b) != std::cmp::Ordering::Less }
+pub fn num_lt(a: Num, b: Num) -> bool {
+    num_cmp(a, b) == std::cmp::Ordering::Less
+}
+pub fn num_gt(a: Num, b: Num) -> bool {
+    num_cmp(a, b) == std::cmp::Ordering::Greater
+}
+pub fn num_le(a: Num, b: Num) -> bool {
+    num_cmp(a, b) != std::cmp::Ordering::Greater
+}
+pub fn num_ge(a: Num, b: Num) -> bool {
+    num_cmp(a, b) != std::cmp::Ordering::Less
+}
 
 /// `==` — numeric equality across types (`(== 1 1.0)` → true).
-pub fn num_eq(a: Num, b: Num) -> bool { num_cmp(a, b) == std::cmp::Ordering::Equal }
+pub fn num_eq(a: Num, b: Num) -> bool {
+    num_cmp(a, b) == std::cmp::Ordering::Equal
+}
 
 /// `=` on numbers — type-aware: a long and a double are never `=`, even if
 /// numerically equal (`(= 1 1.0)` → false). Two longs / two doubles compare
@@ -219,34 +260,41 @@ pub fn val_num_eq(a: Num, b: Num) -> bool {
 mod tests {
     use super::*;
 
-    fn long(n: i64) -> Num { Num::Long(n) }
-    fn dbl(d: f64) -> Num { Num::Double(d) }
+    fn long(n: i64) -> Num {
+        Num::Long(n)
+    }
+    fn dbl(d: f64) -> Num {
+        Num::Double(d)
+    }
 
     #[test]
     fn numeric_tower_matches_clojure() {
         // From the 1.11 oracle (/tmp/numtower.clj):
-        assert_eq!(num_add(long(1), long(2)), NumResult::Num(Num::Long(3)));      // (+ 1 2) => 3 Long
+        assert_eq!(num_add(long(1), long(2)), NumResult::Num(Num::Long(3))); // (+ 1 2) => 3 Long
         assert_eq!(num_add(long(1), dbl(2.0)), NumResult::Num(Num::Double(3.0))); // (+ 1 2.0) => 3.0 Double
-        assert_eq!(num_add(dbl(1.0), dbl(2.0)), NumResult::Num(Num::Double(3.0)));
-        assert_eq!(num_mul(long(3), long(4)), NumResult::Num(Num::Long(12)));     // (* 3 4) => 12 Long
+        assert_eq!(
+            num_add(dbl(1.0), dbl(2.0)),
+            NumResult::Num(Num::Double(3.0))
+        );
+        assert_eq!(num_mul(long(3), long(4)), NumResult::Num(Num::Long(12))); // (* 3 4) => 12 Long
         assert_eq!(num_sub(long(7), dbl(2.0)), NumResult::Num(Num::Double(5.0))); // (- 7 2.0) => 5.0
-        assert_eq!(num_quot(long(17), long(5)), Num::Long(3));                    // (quot 17 5) => 3
-        assert_eq!(num_rem(long(17), long(5)), Num::Long(2));                     // (rem 17 5) => 2
+        assert_eq!(num_quot(long(17), long(5)), Num::Long(3)); // (quot 17 5) => 3
+        assert_eq!(num_rem(long(17), long(5)), Num::Long(2)); // (rem 17 5) => 2
         assert!(num_lt(long(1), long(2)));
         assert!(num_lt(long(1), dbl(2.0)));
-        assert!(num_lt(dbl(1.5), long(2)));                                       // (< 1.5 2) => true
-        assert_eq!(num_div(long(6), long(2)), Num::Long(3));                      // (/ 6 2) => 3 Long
-        assert_eq!(num_div(long(7), long(2)), Num::Double(3.5));                  // (/ 7 2) => 3.5 (deviation: not 7/2)
-        assert_eq!(num_div(dbl(7.0), long(2)), Num::Double(3.5));                 // (/ 7.0 2) => 3.5
-        assert_eq!(num_inc(long(5)), NumResult::Num(Num::Long(6)));              // (inc 5) => 6
-        assert_eq!(num_inc(dbl(5.0)), NumResult::Num(Num::Double(6.0)));         // (inc 5.0) => 6.0
+        assert!(num_lt(dbl(1.5), long(2))); // (< 1.5 2) => true
+        assert_eq!(num_div(long(6), long(2)), Num::Long(3)); // (/ 6 2) => 3 Long
+        assert_eq!(num_div(long(7), long(2)), Num::Double(3.5)); // (/ 7 2) => 3.5 (deviation: not 7/2)
+        assert_eq!(num_div(dbl(7.0), long(2)), Num::Double(3.5)); // (/ 7.0 2) => 3.5
+        assert_eq!(num_inc(long(5)), NumResult::Num(Num::Long(6))); // (inc 5) => 6
+        assert_eq!(num_inc(dbl(5.0)), NumResult::Num(Num::Double(6.0))); // (inc 5.0) => 6.0
     }
 
     #[test]
     fn equality_semantics() {
-        assert!(val_num_eq(long(1), long(1)));   // (= 1 1) => true
+        assert!(val_num_eq(long(1), long(1))); // (= 1 1) => true
         assert!(!val_num_eq(long(1), dbl(1.0))); // (= 1 1.0) => false (type-aware)
-        assert!(num_eq(long(1), dbl(1.0)));      // (== 1 1.0) => true (numeric)
+        assert!(num_eq(long(1), dbl(1.0))); // (== 1 1.0) => true (numeric)
         assert!(!val_num_eq(long(1), long(2)));
     }
 
@@ -258,7 +306,9 @@ mod tests {
 
     #[test]
     fn fixnum_roundtrip() {
-        for n in [0i64, 1, -1, 42, -42, 1_000_000, -1_000_000, FIXNUM_MAX, FIXNUM_MIN] {
+        for n in [
+            0i64, 1, -1, 42, -42, 1_000_000, -1_000_000, FIXNUM_MAX, FIXNUM_MIN,
+        ] {
             assert!(fits_fixnum(n));
             let b = encode_fixnum(n);
             assert!(is_fixnum(b), "{n} not tagged fixnum: {b:#x}");

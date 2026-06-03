@@ -15,9 +15,7 @@ pub use backend::Arm64Backend;
 
 #[cfg(target_arch = "x86_64")]
 use backend::X64Backend;
-use backend::{
-    LoweringBackend, MachineFpBinOp, MachineGpBinOp, MachineLocation, MachineWordSize,
-};
+use backend::{LoweringBackend, MachineFpBinOp, MachineGpBinOp, MachineLocation, MachineWordSize};
 use dynasm::buffer::{CodeBuffer, Label};
 use dynasm::code_memory::{CodeMemory, PagedCodeMemory};
 use dynexec::{
@@ -198,6 +196,19 @@ fn current_jit_entry_fp() -> *const u8 {
     })
 }
 
+/// The OUTERMOST JIT-entry fence (the FP of the Rust frame that made the
+/// first `Rust → JIT` call still on this thread's stack). Under nested
+/// `run_jit` (e.g. a macro body re-entering the JIT through the
+/// compiler/runtime), `current_jit_entry_fp` returns only the *innermost*
+/// boundary — a collection triggered inside the inner run that stops there
+/// never scans the OUTER run's JIT frames, so heap roots they hold (a seq
+/// being reduced, etc.) are relocated without being updated and dangle. The
+/// frame walkers stop here instead so every nested run's JIT frames are
+/// scanned; everything above this is genuine host stack.
+fn outermost_jit_entry_fp() -> *const u8 {
+    JIT_ENTRY_FP_STACK.with(|c| unsafe { (*c.get()).first().copied().unwrap_or(std::ptr::null()) })
+}
+
 /// RAII guard that pushes a fence on construction and pops on drop.
 pub struct JitEntryFpGuard {
     _phantom: PhantomData<*const ()>, // !Send + !Sync; thread-local
@@ -208,7 +219,9 @@ impl JitEntryFpGuard {
     /// See `push_jit_entry_fp`.
     pub unsafe fn new(fp: *const u8) -> Self {
         unsafe { push_jit_entry_fp(fp) };
-        JitEntryFpGuard { _phantom: PhantomData }
+        JitEntryFpGuard {
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -238,22 +251,33 @@ pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u
     if registry.is_empty() {
         return;
     }
-    let fence = current_jit_entry_fp();
+    let trace_walk = std::env::var("CLJVM_WALK").is_ok();
+    // Stop at the OUTERMOST JIT-entry fence, not the innermost: under a
+    // nested `run_jit` (a macro body re-entering the JIT through the
+    // compiler/runtime), the outer run's JIT frames sit above the inner
+    // run's entry, separated by Rust machinery. A collection triggered in
+    // the inner run must still forward the heap roots those outer frames
+    // hold. We traverse *through* the intervening non-JIT frames (their own
+    // roots live in registered `FrameChain`s) and scan every JIT frame up to
+    // the outermost boundary; above that is genuine host stack.
+    let fence = outermost_jit_entry_fp();
+    // Bound the walk so a missing/!corrupt fence can't run off the stack.
+    let mut hops = 0usize;
 
     let mut fp = jit_fp as *const u64;
     loop {
-        if fp.is_null() {
+        if fp.is_null() || hops > 4096 {
             break;
         }
+        hops += 1;
         let saved_fp = unsafe { *fp } as *const u64;
         let saved_lr = unsafe { *fp.add(1) } as usize;
 
         if saved_fp.is_null() {
             break;
         }
-        // Stop at the JIT-entry boundary: `saved_fp` here is the FP of
-        // the Rust frame that called `call_jit_outcome`. Above it is
-        // host code, not JIT.
+        // Stop only at the outermost JIT-entry boundary. Above it is host
+        // stack, not JIT.
         if !fence.is_null() && (saved_fp as *const u8) == fence {
             break;
         }
@@ -267,6 +291,12 @@ pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u
             {
                 Ok(idx) => {
                     let record = &entry.safepoints[idx];
+                    if trace_walk {
+                        eprintln!(
+                            "[walk-anc] start_fp={:p} frame_fp={:p} code_start={:#x} ret_off={:#x} roots={:?}",
+                            jit_fp, saved_fp, entry.code_start, return_offset, record.root_slots,
+                        );
+                    }
                     for &slot_offset in &record.root_slots {
                         let slot = unsafe {
                             (saved_fp as *mut u8).offset(slot_offset as isize) as *mut u64
@@ -275,17 +305,16 @@ pub fn walk_jit_ancestor_roots(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u
                     }
                 }
                 Err(_) => {
-                    // No exact match: the saved_lr came from code we
-                    // didn't register as a safepoint (e.g. an
-                    // internal block branch). That can't happen under
-                    // the soundness invariant — calls and explicit
-                    // safepoints always record here — so flag it.
-                    debug_assert!(
-                        false,
-                        "no SafepointRecord for return_offset={:#x} in JIT function \
-                         [{:#x}..{:#x})",
-                        return_offset, entry.code_start, entry.code_end,
-                    );
+                    if trace_walk {
+                        eprintln!(
+                            "[walk-anc] start_fp={:p} frame_fp={:p} code_start={:#x} ret_off={:#x} roots=<none>",
+                            jit_fp, saved_fp, entry.code_start, return_offset,
+                        );
+                    }
+                    // JIT frame whose return site recorded no safepoint
+                    // (e.g. an internal block branch, or a Rust frame whose
+                    // return addr happens to fall in a JIT range while
+                    // traversing between nested runs). No roots from it.
                 }
             }
         }
@@ -299,31 +328,25 @@ pub fn walk_jit_ancestor_roots(_jit_fp: *const u8, _visitor: &mut dyn FnMut(*mut
     // FP-chain walking is architecture-specific; no-op on unsupported targets.
 }
 
-// ─── DIAGNOSTIC: stale-root producer capture ──────────────────────────
-/// Maps a stale NaN-boxed word (found post-GC still pointing at a forwarded
-/// object) to a human description of where on the stack it lived and which
-/// frame (JIT vs host) owns that slot. Populated by the post-GC scan in
-/// `dynruntime`, consumed by `cljvm_rt_first` when it receives a dangling arg.
-pub static STALE_CAPTURE: std::sync::Mutex<Option<std::collections::HashMap<u64, String>>> =
-    std::sync::Mutex::new(None);
-
-/// Classify stack address `target` against the FP chain from `start_fp`:
-/// which JIT frame's region contains it and whether it is a recorded
-/// root-slot offset of that frame (vs an unrecorded slot / a host frame).
+/// DIAGNOSTIC: precise stale-root trap. Walk the LIVE FP chain from `start_fp`
+/// and, for every frame, scan that frame's stack region for the exact word
+/// `target`. For each hit, report which frame owns it (JIT function code-start
+/// + return-offset, or a host frame's return address) and — for JIT frames —
+/// whether the hit offset is one of that frame's RECORDED GC root slots at its
+/// current PC. Unlike a blind value scan, this is confined to the active call
+/// stack, so a hit is in a genuinely-live frame; the per-hit `recorded=` flag
+/// then distinguishes "the GC failed to update a recorded slot" (walk/record
+/// bug) from "the value lives in an unrooted slot / a host Rust local".
 #[cfg(target_arch = "aarch64")]
-pub fn classify_stack_addr(start_fp: *const u8, target: usize) -> String {
+pub fn trap_find_value(start_fp: *const u8, target: u64) -> Vec<(usize, String)> {
     let registry = JIT_CODE_REGISTRY.read().unwrap();
-    if registry.is_empty() {
-        return "no-registry".into();
-    }
-    // Collect (base = saved_fp, saved_lr) walking up, following only sane
-    // upward links so a garbage word can't fault us.
     let mut frames: Vec<(usize, usize)> = Vec::new();
     let mut fp = start_fp as usize;
     let mut hops = 0;
     while fp != 0 && hops < 256 {
         let saved_fp = unsafe { *(fp as *const u64) } as usize;
         let saved_lr = unsafe { *((fp + 8) as *const u64) } as usize;
+        // Only follow sane upward links so a garbage word can't fault us.
         if saved_fp <= fp || saved_fp & 0xf != 0 || saved_fp - fp > 0x100000 {
             break;
         }
@@ -331,31 +354,129 @@ pub fn classify_stack_addr(start_fp: *const u8, target: usize) -> String {
         fp = saved_fp;
         hops += 1;
     }
+    let mut out = Vec::new();
     for k in 0..frames.len() {
         let (base, saved_lr) = frames[k];
-        let upper = if k + 1 < frames.len() { frames[k + 1].0 } else { usize::MAX };
-        if target >= base && target < upper {
-            if let Some(entry) = lookup_code_entry(&registry, saved_lr) {
-                let ro = saved_lr - entry.code_start;
-                let off = target as isize - base as isize;
-                let recorded = match entry.safepoints.binary_search_by_key(&ro, |sp| sp.return_offset) {
-                    Ok(i) => entry.safepoints[i].root_slots.iter().any(|&o| o as isize == off),
-                    Err(_) => false,
+        // The frame's stack region runs up to the next frame's base (or a
+        // bounded window for the topmost frame).
+        let upper = if k + 1 < frames.len() {
+            frames[k + 1].0
+        } else {
+            base + 0x800
+        };
+        // Identify the function running in this frame and its recorded roots
+        // at this PC. `saved_lr` is a return address INTO this frame's code.
+        let entry = lookup_code_entry(&registry, saved_lr);
+        let (is_jit, code_start, ro, recorded_offsets): (bool, usize, usize, Vec<i32>) = match entry
+        {
+            Some(e) => {
+                let ro = saved_lr - e.code_start;
+                let recs = match e
+                    .safepoints
+                    .binary_search_by_key(&ro, |sp| sp.return_offset)
+                {
+                    Ok(i) => e.safepoints[i].root_slots.clone(),
+                    Err(_) => Vec::new(),
                 };
-                return format!("JIT frame code_start={:#x} ret_off={:#x} slot=fp+{:#x} recorded={}", entry.code_start, ro, off, recorded);
+                (true, e.code_start, ro, recs)
             }
-            // Report this host frame's return address (an address in the
-            // host fn's code) AND its caller's, so the Rust producer can be
-            // symbolized with `atos`/`addr2line`.
-            let caller_lr = if k + 1 < frames.len() { frames[k + 1].1 } else { 0 };
-            return format!("HOST frame base={:#x} +{:#x} ret_lr={:#x} caller_lr={:#x}", base, target - base, saved_lr, caller_lr);
+            None => (false, 0, 0, Vec::new()),
+        };
+        let mut p = base;
+        while p < upper {
+            let w = unsafe { *(p as *const u64) };
+            if w == target {
+                let off = (p - base) as i32;
+                if is_jit {
+                    let recorded = recorded_offsets.iter().any(|&o| o == off);
+                    // How many of this function's safepoints record this slot
+                    // offset? If it's recorded at the CURRENT PC but at only a
+                    // fraction of all safepoints, a GC at a non-recording PC
+                    // left it stale — a per-PC root-recording gap.
+                    let (rec_count, total) = match entry {
+                        Some(e) => (
+                            e.safepoints
+                                .iter()
+                                .filter(|sp| sp.root_slots.iter().any(|&o| o == off))
+                                .count(),
+                            e.safepoints.len(),
+                        ),
+                        None => (0, 0),
+                    };
+                    out.push((p, format!(
+                        "frame#{k} JIT fp={:#x} code_start={:#x} ret_off={:#x} slot=fp+{:#x} recorded={} (recorded at {}/{} safepoints)",
+                        base, code_start, ro, off, recorded, rec_count, total
+                    )));
+                } else {
+                    out.push((
+                        p,
+                        format!(
+                            "frame#{k} HOST fp={:#x} ret_lr={:#x} slot=fp+{:#x}",
+                            base, saved_lr, off
+                        ),
+                    ));
+                }
+            }
+            p += 8;
         }
     }
-    "outside-fp-chain".into()
+    out
 }
 
 #[cfg(not(target_arch = "aarch64"))]
-pub fn classify_stack_addr(_start_fp: *const u8, _target: usize) -> String { "unsupported".into() }
+pub fn trap_find_value(_start_fp: *const u8, _target: u64) -> Vec<(usize, String)> {
+    Vec::new()
+}
+
+/// DIAGNOSTIC: given a return address `ret_lr` into a JIT function, return
+/// `(code_start, ret_off, bytes)` where `bytes` is the `window` bytes of
+/// machine code immediately preceding `ret_lr` (the call site). Lets the
+/// trap dump the instructions that set up a call's argument register so the
+/// exact slot the value is loaded from can be disassembled.
+#[cfg(target_arch = "aarch64")]
+pub fn jit_code_window(ret_lr: usize, window: usize) -> Option<(usize, usize, Vec<u8>)> {
+    let registry = JIT_CODE_REGISTRY.read().unwrap();
+    let entry = lookup_code_entry(&registry, ret_lr)?;
+    let start = ret_lr.saturating_sub(window).max(entry.code_start);
+    let len = ret_lr - start;
+    let bytes = unsafe { std::slice::from_raw_parts(start as *const u8, len) }.to_vec();
+    Some((entry.code_start, ret_lr - entry.code_start, bytes))
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn jit_code_window(_ret_lr: usize, _window: usize) -> Option<(usize, usize, Vec<u8>)> {
+    None
+}
+
+/// DIAGNOSTIC: the saved_lr of each JIT frame on the chain from `start_fp`
+/// (i.e. each frame's return address into its own code = the call site it is
+/// currently blocked at). Pairs with `jit_code_window` to disassemble each
+/// frame's outgoing-call argument setup.
+#[cfg(target_arch = "aarch64")]
+pub fn frame_return_addrs(start_fp: *const u8) -> Vec<usize> {
+    let registry = JIT_CODE_REGISTRY.read().unwrap();
+    let mut out = Vec::new();
+    let mut fp = start_fp as usize;
+    let mut hops = 0;
+    while fp != 0 && hops < 64 {
+        let saved_fp = unsafe { *(fp as *const u64) } as usize;
+        let saved_lr = unsafe { *((fp + 8) as *const u64) } as usize;
+        if saved_fp <= fp || saved_fp & 0xf != 0 || saved_fp - fp > 0x100000 {
+            break;
+        }
+        if lookup_code_entry(&registry, saved_lr).is_some() {
+            out.push(saved_lr);
+        }
+        fp = saved_fp;
+        hops += 1;
+    }
+    out
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn frame_return_addrs(_start_fp: *const u8) -> Vec<usize> {
+    Vec::new()
+}
 
 /// Walk a thread's JIT frame chain starting at `start_fp`. Scans
 /// `SafepointRecord.root_slots` for every JIT frame found in the
@@ -400,20 +521,27 @@ pub fn classify_stack_addr(_start_fp: *const u8, _target: usize) -> String { "un
 ///      few runtime helpers are all scanned.
 ///   3. null `fp` / null `saved_fp`.
 #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
-pub fn walk_parked_thread_jit_roots(
-    start_fp: *const u8,
-    visitor: &mut dyn FnMut(*mut u64),
-) {
+pub fn walk_parked_thread_jit_roots(start_fp: *const u8, visitor: &mut dyn FnMut(*mut u64)) {
     // Generous enough for the deepest Rust prologue between the published
     // FP and the first JIT frame (`trigger_gc → alloc_slow → gc_alloc_thunk
     // → JIT`), and for the handful of runtime frames between interleaved
     // JIT frames — yet small enough to bound an off-the-end walk.
-    const MAX_HOST_GAP: usize = 32;
+    // Larger gap: under nested `run_jit`, consecutive non-JIT frames between
+    // the inner run and the outer run's JIT frames include the whole
+    // compiler/runtime/macroexpand machinery, which can exceed a few dozen
+    // frames. We stop at the OUTERMOST fence (below), so the gap only guards
+    // against a missing/corrupt fence.
+    const MAX_HOST_GAP: usize = 512;
     let registry = JIT_CODE_REGISTRY.read().unwrap();
     if registry.is_empty() {
         return;
     }
-    let fence = current_jit_entry_fp();
+    let trace_walk = std::env::var("CLJVM_WALK").is_ok();
+    // Stop at the OUTERMOST JIT-entry fence, not the innermost — see
+    // `outermost_jit_entry_fp`: nested `run_jit` puts the outer run's JIT
+    // frames above the inner run's entry, and a collection in the inner run
+    // must still forward the roots they hold.
+    let fence = outermost_jit_entry_fp();
 
     let mut fp = start_fp as *const u64;
     let mut host_gap_remaining = MAX_HOST_GAP;
@@ -427,8 +555,8 @@ pub fn walk_parked_thread_jit_roots(
         if saved_fp.is_null() {
             break;
         }
-        // Reached the JIT-entry boundary (triggering thread). Above this
-        // is host stack — must not traverse it.
+        // Reached the outermost JIT-entry boundary (triggering thread). Above
+        // this is host stack — must not traverse it.
         if !fence.is_null() && (saved_fp as *const u8) == fence {
             break;
         }
@@ -443,6 +571,16 @@ pub fn walk_parked_thread_jit_roots(
                 {
                     Ok(idx) => {
                         let record = &entry.safepoints[idx];
+                        if trace_walk {
+                            eprintln!(
+                                "[walk-parked] start_fp={:p} frame_fp={:p} code_start={:#x} ret_off={:#x} roots={:?}",
+                                start_fp,
+                                saved_fp,
+                                entry.code_start,
+                                return_offset,
+                                record.root_slots,
+                            );
+                        }
                         for &slot_offset in &record.root_slots {
                             let slot = unsafe {
                                 (saved_fp as *mut u8).offset(slot_offset as isize) as *mut u64
@@ -451,6 +589,12 @@ pub fn walk_parked_thread_jit_roots(
                         }
                     }
                     Err(_) => {
+                        if trace_walk {
+                            eprintln!(
+                                "[walk-parked] start_fp={:p} frame_fp={:p} code_start={:#x} ret_off={:#x} roots=<none>",
+                                start_fp, saved_fp, entry.code_start, return_offset,
+                            );
+                        }
                         // JIT frame whose return site recorded no
                         // safepoint (e.g. an internal block branch).
                         // No roots from it; keep walking.
@@ -474,11 +618,7 @@ pub fn walk_parked_thread_jit_roots(
 }
 
 #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
-pub fn walk_parked_thread_jit_roots(
-    _jit_fp: *const u8,
-    _visitor: &mut dyn FnMut(*mut u64),
-) {
-}
+pub fn walk_parked_thread_jit_roots(_jit_fp: *const u8, _visitor: &mut dyn FnMut(*mut u64)) {}
 
 /// Root source that walks all ancestor JIT frames via the FP chain.
 /// Construct with the frame pointer of the JIT frame at the safepoint.
@@ -495,6 +635,10 @@ impl dynobj::RootSource for JitFrameRoots {
     fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
         walk_jit_ancestor_roots(self.jit_fp, visitor);
     }
+}
+
+fn jit_value_type_may_contain_gc_pointer(ty: Type) -> bool {
+    ty.is_gc() || matches!(ty, Type::I64)
 }
 
 // ─── Public API ────────────────────────────────────────────────────
@@ -664,6 +808,48 @@ thread_local! {
 
 pub fn take_suspended_frames() -> Vec<SuspendedJitFrame> {
     ACTIVE_SUSPENDED_JIT_FRAMES.with(|cell| std::mem::take(&mut *cell.borrow_mut()))
+}
+
+pub struct SuspendedJitFramesRootSource;
+
+fn scan_frame_resume_roots(resume: &mut FrameResume, visitor: &mut dyn FnMut(*mut u64)) {
+    if let FrameResume::FromInvoke {
+        normal_args_vals,
+        exception_args_vals,
+        ..
+    } = resume
+    {
+        for slot in normal_args_vals {
+            visitor(slot as *mut u64);
+        }
+        for slot in exception_args_vals {
+            visitor(slot as *mut u64);
+        }
+    }
+}
+
+impl dynobj::RootSource for SuspendedJitFramesRootSource {
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
+        ACTIVE_SUSPENDED_JIT_FRAMES.with(|cell| {
+            let mut frames = cell.borrow_mut();
+            for suspended in frames.iter_mut() {
+                for &idx in &suspended.frame.root_indices {
+                    if let Some(slot) = suspended.frame.values.get_mut(idx as usize) {
+                        visitor(slot as *mut u64);
+                    }
+                }
+                scan_frame_resume_roots(&mut suspended.frame.caller_resume, visitor);
+                scan_frame_resume_roots(&mut suspended.callee_caller_resume, visitor);
+            }
+        });
+    }
+}
+
+static SUSPENDED_JIT_FRAMES_ROOT_SOURCE: SuspendedJitFramesRootSource =
+    SuspendedJitFramesRootSource;
+
+pub fn suspended_jit_frames_root_source() -> *const dyn dynobj::RootSource {
+    &SUSPENDED_JIT_FRAMES_ROOT_SOURCE as *const dyn dynobj::RootSource
 }
 
 extern "C" fn jit_push_suspended_frame(
@@ -864,7 +1050,11 @@ impl JitFunction {
     where
         Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
     {
-        Self::compile_with_regalloc::<Cfg, B, regalloc::LinearScanAllocator>(func, externs, safepoint_handler)
+        Self::compile_with_regalloc::<Cfg, B, regalloc::LinearScanAllocator>(
+            func,
+            externs,
+            safepoint_handler,
+        )
     }
 
     pub fn compile_with_regalloc<Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator>(
@@ -1044,9 +1234,8 @@ unsafe impl Send for CallTable {}
 
 impl CallTable {
     pub fn new(capacity: usize) -> Self {
-        let slots: Box<[Cell<*const u8>]> = (0..capacity)
-            .map(|_| Cell::new(std::ptr::null()))
-            .collect();
+        let slots: Box<[Cell<*const u8>]> =
+            (0..capacity).map(|_| Cell::new(std::ptr::null())).collect();
         Self {
             slots,
             len: AtomicUsize::new(0),
@@ -1138,19 +1327,32 @@ unsafe impl Send for LiteralPool {}
 impl LiteralPool {
     pub fn new(capacity: usize) -> Self {
         let slots: Box<[Cell<u64>]> = (0..capacity).map(|_| Cell::new(0)).collect();
-        Self { slots, len: AtomicUsize::new(0) }
+        Self {
+            slots,
+            len: AtomicUsize::new(0),
+        }
     }
 
-    pub fn capacity(&self) -> usize { self.slots.len() }
+    pub fn capacity(&self) -> usize {
+        self.slots.len()
+    }
 
-    pub fn len(&self) -> usize { self.len.load(Ordering::Acquire) }
+    pub fn len(&self) -> usize {
+        self.len.load(Ordering::Acquire)
+    }
 
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     /// Stable base address baked into emitted `GcLiteral` loads.
-    pub fn base(&self) -> *const Cell<u64> { self.slots.as_ptr() }
+    pub fn base(&self) -> *const Cell<u64> {
+        self.slots.as_ptr()
+    }
 
-    pub fn base_addr(&self) -> u64 { self.base() as u64 }
+    pub fn base_addr(&self) -> u64 {
+        self.base() as u64
+    }
 
     /// Append a slot, return its index. Panics if capacity exhausted.
     pub fn push(&self, value: u64) -> usize {
@@ -1165,13 +1367,23 @@ impl LiteralPool {
     }
 
     pub fn get(&self, idx: usize) -> u64 {
-        assert!(idx < self.len(), "LiteralPool: get({}) past len {}", idx, self.len());
+        assert!(
+            idx < self.len(),
+            "LiteralPool: get({}) past len {}",
+            idx,
+            self.len()
+        );
         self.slots[idx].get()
     }
 
     /// Update an existing slot. Used by the GC after relocating an object.
     pub fn set(&self, idx: usize, value: u64) {
-        assert!(idx < self.len(), "LiteralPool: set({}) past len {}", idx, self.len());
+        assert!(
+            idx < self.len(),
+            "LiteralPool: set({}) past len {}",
+            idx,
+            self.len()
+        );
         self.slots[idx].set(value);
     }
 
@@ -1543,7 +1755,8 @@ impl JitModule {
                 .func_table
                 .iter()
                 .filter(|d| matches!(d, FuncDef::Extern(_)))
-                .count().into(),
+                .count()
+                .into(),
             extend_lock: std::sync::Mutex::new(()),
         }
     }
@@ -1697,7 +1910,9 @@ impl JitModule {
         }
 
         let call_mode = match safepoint_handler {
-            Some(h) => CallMode::ControlAware { safepoint_handler: h },
+            Some(h) => CallMode::ControlAware {
+                safepoint_handler: h,
+            },
             None => CallMode::FastCall,
         };
         let mut empty_suspend: Vec<Vec<Box<CallSuspendRecord>>> =
@@ -1723,7 +1938,8 @@ impl JitModule {
                 .func_table
                 .iter()
                 .filter(|d| matches!(d, FuncDef::Extern(_)))
-                .count().into(),
+                .count()
+                .into(),
             extend_lock: std::sync::Mutex::new(()),
         }
     }
@@ -1848,9 +2064,9 @@ impl JitModule {
         let uses_exceptions = module.functions.iter().any(|f| {
             f.blocks.iter().any(|b| {
                 matches!(b.terminator, Terminator::Raise(_))
-                    || b.insts.iter().any(|n| {
-                        matches!(n.inst, Inst::PushHandler(_) | Inst::PopHandler)
-                    })
+                    || b.insts
+                        .iter()
+                        .any(|n| matches!(n.inst, Inst::PushHandler(_) | Inst::PopHandler))
             })
         });
 
@@ -1940,7 +2156,9 @@ impl JitModule {
         }
 
         let call_mode = match safepoint_handler {
-            Some(h) => CallMode::ControlAware { safepoint_handler: h },
+            Some(h) => CallMode::ControlAware {
+                safepoint_handler: h,
+            },
             None => CallMode::FastCall,
         };
         let functions = build_functions_table(
@@ -1962,7 +2180,8 @@ impl JitModule {
                 .func_table
                 .iter()
                 .filter(|d| matches!(d, FuncDef::Extern(_)))
-                .count().into(),
+                .count()
+                .into(),
             extend_lock: std::sync::Mutex::new(()),
         }
     }
@@ -2144,8 +2363,10 @@ impl JitModule {
             );
             lowerer.run();
             sp_offset += lowerer.safepoints.len() as u64;
-            self.max_deopt_live_values
-                .fetch_max(lowerer.max_deopt_live_values, std::sync::atomic::Ordering::AcqRel);
+            self.max_deopt_live_values.fetch_max(
+                lowerer.max_deopt_live_values,
+                std::sync::atomic::Ordering::AcqRel,
+            );
             let code = lowerer.buf.into_code();
             let offset = self.memory.lock().unwrap().push(&code);
             self.functions.push(FunctionMetadata {
@@ -2183,8 +2404,7 @@ impl JitModule {
                 .unwrap_or(total_len);
             let code_start = base_addr + meta.entry_offset;
             let code_end = base_addr + next_offset;
-            let safepoints_arc: std::sync::Arc<[SafepointRecord]> =
-                meta.safepoints.clone().into();
+            let safepoints_arc: std::sync::Arc<[SafepointRecord]> = meta.safepoints.clone().into();
             register_jit_code(code_start, code_end, safepoints_arc);
             perf_entries.push((
                 code_start,
@@ -2229,7 +2449,14 @@ impl JitModule {
     pub fn call_outcome(&self, func_ref: FuncRef, args: &[u64]) -> JitOutcome {
         let ptr = self.call_table.get(func_ref.index());
         assert!(!ptr.is_null(), "call to unresolved function");
-        unsafe { call_jit_outcome(ptr, args, self.max_deopt_live_values.load(std::sync::atomic::Ordering::Acquire)) }
+        unsafe {
+            call_jit_outcome(
+                ptr,
+                args,
+                self.max_deopt_live_values
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+        }
     }
 
     /// Snapshot the call table (func_table_index → code pointer).
@@ -2309,7 +2536,11 @@ impl JitModule {
             .expect("native_resume_ptr: unknown idx")
             .entry_offset;
         record.native_resume_offset.map(|offset| unsafe {
-            self.memory.lock().unwrap().base_ptr().add(entry_offset + offset)
+            self.memory
+                .lock()
+                .unwrap()
+                .base_ptr()
+                .add(entry_offset + offset)
         })
     }
 
@@ -2333,7 +2564,14 @@ impl JitModule {
             args_ptr as u64,
             resume_args.len() as u64,
         ];
-        unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values.load(std::sync::atomic::Ordering::Acquire)) }
+        unsafe {
+            call_jit_outcome(
+                ptr,
+                &args,
+                self.max_deopt_live_values
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+        }
     }
 
     /// View-based resume entry point. Takes the resume point and frame
@@ -2378,7 +2616,14 @@ impl JitModule {
             args_ptr as u64,
             resume_args.len() as u64,
         ];
-        Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values.load(std::sync::atomic::Ordering::Acquire)) })
+        Some(unsafe {
+            call_jit_outcome(
+                ptr,
+                &args,
+                self.max_deopt_live_values
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
     }
 
     /// View-based invoke-resume entry point.
@@ -2403,7 +2648,13 @@ impl JitModule {
         } else {
             suspend.native_resume_offset?
         };
-        let ptr = unsafe { self.memory.lock().unwrap().base_ptr().add(meta.entry_offset + offset) };
+        let ptr = unsafe {
+            self.memory
+                .lock()
+                .unwrap()
+                .base_ptr()
+                .add(meta.entry_offset + offset)
+        };
         let args_ptr = if resume_args.is_empty() {
             std::ptr::null()
         } else {
@@ -2414,7 +2665,14 @@ impl JitModule {
             args_ptr as u64,
             resume_args.len() as u64,
         ];
-        Some(unsafe { call_jit_outcome(ptr, &args, self.max_deopt_live_values.load(std::sync::atomic::Ordering::Acquire)) })
+        Some(unsafe {
+            call_jit_outcome(
+                ptr,
+                &args,
+                self.max_deopt_live_values
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+        })
     }
 
     pub fn handler_payload_kind(&self) -> SafepointHandlerPayloadKind {
@@ -2975,8 +3233,7 @@ fn assign_block_handler_stacks(func: &Function, block_meta: &mut [BlockMeta]) {
             .expect("queued block missing handler stack");
         // Seed handler blocks reached via implicit Raise/Call routes
         // from PushHandler sites in this block.
-        let seeds =
-            collect_block_handler_seeds(&func.blocks[block_idx], &entry_handlers);
+        let seeds = collect_block_handler_seeds(&func.blocks[block_idx], &entry_handlers);
         for (handler_bb, handler_entry_stack) in seeds {
             let h_idx = handler_bb.index();
             match &incoming[h_idx] {
@@ -2993,8 +3250,7 @@ fn assign_block_handler_stacks(func: &Function, block_meta: &mut [BlockMeta]) {
                 }
             }
         }
-        let exit_handlers =
-            simulate_block_handler_stack(&func.blocks[block_idx], &entry_handlers);
+        let exit_handlers = simulate_block_handler_stack(&func.blocks[block_idx], &entry_handlers);
         for succ in terminator_successors(&func.blocks[block_idx].terminator) {
             let succ_idx = succ.index();
             match &incoming[succ_idx] {
@@ -3020,8 +3276,12 @@ fn assign_block_handler_stacks(func: &Function, block_meta: &mut [BlockMeta]) {
 
 // ─── Lowerer ───────────────────────────────────────────────────────
 
-struct Lowerer<'a, Cfg: CodegenConfig, B: LoweringBackend, R: RegisterAllocator = regalloc::LinearScanAllocator>
-where
+struct Lowerer<
+    'a,
+    Cfg: CodegenConfig,
+    B: LoweringBackend,
+    R: RegisterAllocator = regalloc::LinearScanAllocator,
+> where
     Cfg::Frames: FrameStrategy<Cfg::Layout, Cfg::Roots, Cfg::CallingConvention>,
 {
     func: &'a Function,
@@ -3064,6 +3324,15 @@ where
     epilogue_ldp_offsets: Vec<usize>, // offsets of LDP instructions to patch
     /// Pre-allocated frame offsets for each StackSlot declared by the function.
     stack_slot_offsets: Vec<i32>,
+    /// Per-block live-OUT sets (values live at block exit), by sound backward
+    /// dataflow. Used to compute the true live set at each safepoint for the
+    /// GC-root completeness check (`assert_safepoint_roots_complete`).
+    block_live_out: Vec<std::collections::HashSet<Value>>,
+    /// Index of the block currently being lowered.
+    cur_block: usize,
+    /// Index of the instruction currently being lowered within `cur_block`
+    /// (`== insts.len()` while lowering the terminator).
+    cur_inst: usize,
     _config: PhantomData<Cfg>,
     _backend: PhantomData<B>,
 }
@@ -3352,7 +3621,7 @@ where
             .iter()
             .enumerate()
             .filter_map(|(idx, ty)| {
-                (ty.is_gc()
+                (jit_value_type_may_contain_gc_pointer(*ty)
                     && self.regs.value_loc(Value::from_index(value_indices[idx]))
                         != ValueLoc::Unassigned)
                     .then_some(idx)
@@ -3405,7 +3674,7 @@ where
             .iter()
             .enumerate()
             .filter_map(|(idx, (spill_slot, ty))| {
-                (ty.is_gc() && spill_slot.is_some()).then_some(idx)
+                (jit_value_type_may_contain_gc_pointer(*ty) && spill_slot.is_some()).then_some(idx)
             })
             .collect::<Vec<_>>();
         let record = Box::new(CallSuspendRecord {
@@ -3528,6 +3797,68 @@ where
             }
         }
 
+        // Sound backward-dataflow liveness (per-block live-out). Used only by
+        // the GC-root completeness check; standard def/use dataflow with block
+        // params as defs and branch args as terminator uses.
+        let block_live_out = {
+            use std::collections::HashSet;
+            let nb = func.blocks.len();
+            let mut use_set: Vec<HashSet<Value>> = vec![HashSet::new(); nb];
+            let mut def_set: Vec<HashSet<Value>> = vec![HashSet::new(); nb];
+            for (bi, block) in func.blocks.iter().enumerate() {
+                let mut defined: HashSet<Value> = HashSet::new();
+                for &(p, _) in &block.params {
+                    defined.insert(p);
+                    def_set[bi].insert(p);
+                }
+                for node in &block.insts {
+                    node.inst.for_each_value(|v| {
+                        if !defined.contains(&v) {
+                            use_set[bi].insert(v);
+                        }
+                    });
+                    if let Some(d) = node.value {
+                        defined.insert(d);
+                        def_set[bi].insert(d);
+                    }
+                }
+                block.terminator.for_each_value(|v| {
+                    if !defined.contains(&v) {
+                        use_set[bi].insert(v);
+                    }
+                });
+            }
+            let mut live_in: Vec<HashSet<Value>> = vec![HashSet::new(); nb];
+            let mut live_out: Vec<HashSet<Value>> = vec![HashSet::new(); nb];
+            let mut changed = true;
+            while changed {
+                changed = false;
+                for bi in (0..nb).rev() {
+                    let mut new_out = HashSet::new();
+                    for succ in func.blocks[bi].terminator.successors() {
+                        for &v in &live_in[succ.index()] {
+                            new_out.insert(v);
+                        }
+                    }
+                    let mut new_in = use_set[bi].clone();
+                    for &v in &new_out {
+                        if !def_set[bi].contains(&v) {
+                            new_in.insert(v);
+                        }
+                    }
+                    if new_out != live_out[bi] {
+                        live_out[bi] = new_out;
+                        changed = true;
+                    }
+                    if new_in != live_in[bi] {
+                        live_in[bi] = new_in;
+                        changed = true;
+                    }
+                }
+            }
+            live_out
+        };
+
         Lowerer {
             func,
             current_func_idx,
@@ -3571,6 +3902,9 @@ where
             prologue_stp_offset: 0,
             epilogue_ldp_offsets: Vec::new(),
             stack_slot_offsets: Vec::new(),
+            block_live_out,
+            cur_block: 0,
+            cur_inst: 0,
             _config: PhantomData,
             _backend: PhantomData,
         }
@@ -3591,6 +3925,22 @@ where
                 }
             })
             .collect();
+
+        if std::env::var("CLJVM_STACKSLOTS").is_ok() {
+            let detail: Vec<String> = self
+                .func
+                .stack_slots
+                .iter()
+                .enumerate()
+                .map(|(idx, slot)| {
+                    format!(
+                        "ss{}:fp+0x{:x}:size={}:root={}",
+                        idx, self.stack_slot_offsets[idx], slot.size, slot.is_gc_root
+                    )
+                })
+                .collect();
+            eprintln!("[stackslots] fn='{}' {}", self.func.name, detail.join(" "));
+        }
 
         self.emit_prologue();
 
@@ -3739,6 +4089,8 @@ where
         }
 
         for (inst_idx, inst_node) in block.insts.iter().enumerate() {
+            self.cur_block = block_idx;
+            self.cur_inst = inst_idx;
             self.lower_inst(
                 block_idx,
                 inst_idx,
@@ -3748,7 +4100,9 @@ where
             );
         }
 
-        // Lower terminator
+        // Lower terminator (position == insts.len()).
+        self.cur_block = block_idx;
+        self.cur_inst = block.insts.len();
         self.lower_terminator(block_idx, &active_prompts, &active_handlers);
     }
 
@@ -4378,11 +4732,9 @@ where
             }
 
             Inst::PopHandler => {
-                active_handlers
-                    .pop()
-                    .unwrap_or_else(|| {
-                        panic!("pop_handler without active handler in JIT lowering")
-                    });
+                active_handlers.pop().unwrap_or_else(|| {
+                    panic!("pop_handler without active handler in JIT lowering")
+                });
             }
 
             Inst::CloneSlice(slice) => {
@@ -4685,11 +5037,30 @@ where
         };
         match machine_location {
             MachineLocation::Reg(dst) => {
-                if matches!(
-                    target,
-                    AssignmentTarget::CallArg(CallArgLocation::Register(_))
-                ) {
-                    if let Some(slot) = self.regs.value_spill_slot(arg) {
+                if !is_float_type(ty)
+                    && matches!(
+                        target,
+                        AssignmentTarget::CallArg(CallArgLocation::Register(_))
+                    )
+                {
+                    if let ValueLoc::Spill(slot) = self.regs.value_loc(arg) {
+                        if std::env::var("CLJVM_ARGLOAD").is_ok() {
+                            let ty = self.func.value_types[arg.index()];
+                            if jit_value_type_may_contain_gc_pointer(ty) {
+                                let in_live = self.heap_roots_live_across().contains(&arg);
+                                eprintln!(
+                                    "[argload] fn='{}' blk={} inst={} arg=v{} slot={} loc={:?} ty={:?} in_live_across={}",
+                                    self.func.name,
+                                    self.cur_block,
+                                    self.cur_inst,
+                                    arg.index(),
+                                    slot,
+                                    self.regs.value_loc(arg),
+                                    ty,
+                                    in_live
+                                );
+                            }
+                        }
                         B::emit_load_gp_from_frame(
                             &mut self.buf,
                             dst,
@@ -4811,8 +5182,7 @@ where
         let stride = Cfg::CallingConvention::stack_arg_stride();
         let align = <Cfg::CallingConvention as CallingConvention<Cfg::Layout>>::stack_align();
         let overflow = args.len().saturating_sub(reg_limit);
-        let outgoing_size =
-            (((overflow * stride) + (align - 1)) / align * align) as i32;
+        let outgoing_size = (((overflow * stride) + (align - 1)) / align * align) as i32;
         self.frame.reserve_outgoing_arg_bytes(outgoing_size);
         if outgoing_size > 0 {
             B::emit_stack_adjust(&mut self.buf, outgoing_size);
@@ -4926,7 +5296,7 @@ where
         // Any GC inside the callee will walk our frame via the FP
         // chain; the ancestor walker looks up a SafepointRecord keyed
         // by the saved LR (== current buffer offset after the BLR).
-        self.record_call_return_safepoint();
+        self.record_call_return_safepoint(args);
 
         if control_aware {
             let continue_label = self.buf.create_label();
@@ -4969,10 +5339,7 @@ where
                 // only its implicit value param (no user args), so
                 // pass an empty extra-args list with param_offset=1.
                 self.store_block_args_to_canonical_with_param_offset(handler_bb, &[], 1);
-                B::emit_branch_to_label(
-                    &mut self.buf,
-                    self.block_meta[handler_bb.index()].label,
-                );
+                B::emit_branch_to_label(&mut self.buf, self.block_meta[handler_bb.index()].label);
             } else {
                 self.emit_return_current_outcome();
             }
@@ -5027,7 +5394,7 @@ where
         let outgoing_size = self.prepare_call_args(args);
 
         B::emit_call_reg(&mut self.buf, machine_gp(28));
-        self.record_call_return_safepoint();
+        self.record_call_return_safepoint(args);
 
         let continue_label = self.buf.create_label();
         let expected_kind = if result_val.is_some() {
@@ -5053,10 +5420,7 @@ where
             self.emit_return_current_outcome();
             B::bind_label(&mut self.buf, route_label);
             self.write_invoke_return_to_target(handler_bb);
-            B::emit_branch_to_label(
-                &mut self.buf,
-                self.block_meta[handler_bb.index()].label,
-            );
+            B::emit_branch_to_label(&mut self.buf, self.block_meta[handler_bb.index()].label);
         } else {
             self.emit_return_current_outcome();
         }
@@ -5381,6 +5745,7 @@ where
                     B::emit_mov_imm(&mut self.buf, machine_gp(28), 0);
                 }
                 B::emit_call_reg(&mut self.buf, machine_gp(28));
+                self.record_call_return_safepoint(args);
 
                 let has_ret_param = !self.func.blocks[normal.index()].params.is_empty();
                 self.lower_invoke_common(
@@ -5448,6 +5813,7 @@ where
                 }
                 self.regs.dec_use(*callee);
                 B::emit_call_reg(&mut self.buf, machine_gp(28));
+                self.record_call_return_safepoint(args);
 
                 self.lower_invoke_common(
                     args,
@@ -5491,11 +5857,9 @@ where
                     // preserves x0 across the suspended-frame pop, so
                     // both registers carrying the value is the safe
                     // convention.
-                    let vreg = self.regs.ensure_in_gp_reg::<B>(
-                        &mut self.buf,
-                        &mut self.frame,
-                        *value,
-                    );
+                    let vreg =
+                        self.regs
+                            .ensure_in_gp_reg::<B>(&mut self.buf, &mut self.frame, *value);
                     // x2 = payload0 = value
                     B::emit_gp_move(&mut self.buf, machine_gp(2), machine_gp(vreg));
                     // x0 = result = value (for the exception-block
@@ -5608,6 +5972,116 @@ where
         }
     }
 
+    /// Heap-pointer values that are live ACROSS the safepoint currently being
+    /// lowered (live entering `self.cur_inst` of `self.cur_block`), by sound
+    /// backward-dataflow liveness. This is the ground-truth GC root set — it
+    /// catches loop-carried values the use-count model drops.
+    fn heap_roots_live_across(&self) -> Vec<Value> {
+        let block = match self.func.blocks.get(self.cur_block) {
+            Some(b) => b,
+            None => return Vec::new(),
+        };
+        let mut live = self.block_live_out[self.cur_block].clone();
+        block.terminator.for_each_value(|v| {
+            live.insert(v);
+        });
+        for i in (self.cur_inst..block.insts.len()).rev() {
+            let node = &block.insts[i];
+            if let Some(d) = node.value {
+                live.remove(&d);
+            }
+            node.inst.for_each_value(|v| {
+                live.insert(v);
+            });
+        }
+        let value_types = &self.func.value_types;
+        live.into_iter()
+            .filter(|&v| {
+                let ty = value_types[v.index()];
+                jit_value_type_may_contain_gc_pointer(ty)
+            })
+            .collect()
+    }
+
+    /// PERMANENT GC-root completeness guard. For every heap-pointer value live
+    /// across the current safepoint (sound liveness), assert it is covered by
+    /// `root_slots` (via its spill slot). A failure means a live GC pointer is
+    /// NOT a root at this safepoint — exactly the class of bug that left a
+    /// relocated seq dangling at `RT.first` (form 430). Panicking at compile
+    /// time makes that class impossible to reintroduce silently.
+    ///
+    /// Only meaningful for `StackMap` transport (slot offsets). `ShadowStack`
+    /// uses per-value shadow slots and is checked by its own path.
+    fn assert_safepoint_roots_complete(&mut self, root_slots: &[i32]) {
+        if Cfg::RootTransport::kind() != RootTransportKind::StackMap {
+            return;
+        }
+        // PERMANENT guard (debug builds): a live heap value with no recorded
+        // root slot at a safepoint is the missed-root bug class. Panic at
+        // compile time so it can never silently ship. (Value-level: this
+        // catches use-count-vs-true-liveness recording gaps. It does NOT catch
+        // a value that is correctly recorded via its home slot but physically
+        // *also* copied into an untracked frame slot the codegen later reads —
+        // see MISSED-GC-ROOT-BUG.md Update 5.)
+        let la = self.heap_roots_live_across();
+        if std::env::var("CLJVM_SLOTMAP").is_ok() {
+            let detail: Vec<String> = la
+                .iter()
+                .map(|&v| {
+                    format!(
+                        "v{}:{:?}({:?})@{:?}",
+                        v.index(),
+                        self.func.value_types[v.index()],
+                        self.regs.value_spill_slot(v),
+                        self.regs.value_loc(v),
+                    )
+                })
+                .collect();
+            eprintln!(
+                "[slotmap] fn='{}' blk={} inst={} roots={:?} live_across=[{}]",
+                self.func.name,
+                self.cur_block,
+                self.cur_inst,
+                root_slots,
+                detail.join(" ")
+            );
+        }
+        for v in la {
+            let covered =
+                matches!(self.regs.value_spill_slot(v), Some(slot) if root_slots.contains(&slot));
+            if !covered {
+                let msg = format!(
+                    "GC-ROOT GAP: value {} (type {:?}) is live across a safepoint in fn '{}' \
+                     (block {} inst {}) but has no recorded root (spill_slot={:?}, loc={:?}). \
+                     A moving GC here would dangle it. See MISSED-GC-ROOT-BUG.md.",
+                    v.index(),
+                    self.func.value_types[v.index()],
+                    self.func.name,
+                    self.cur_block,
+                    self.cur_inst,
+                    self.regs.value_spill_slot(v),
+                    self.regs.value_loc(v),
+                );
+                if std::env::var("CLJVM_ROOTCHECK").is_ok() {
+                    eprintln!("[rootcheck] {msg}");
+                }
+                debug_assert!(covered, "{msg}");
+            }
+        }
+    }
+
+    fn record_materialized_gc_spill_slots(&self, root_slots: &mut Vec<i32>) {
+        for i in 0..self.regs.num_values() {
+            let v = Value::from_index(i);
+            if !jit_value_type_may_contain_gc_pointer(self.func.value_types[i]) {
+                continue;
+            }
+            if let Some(slot) = self.regs.value_spill_slot(v) {
+                root_slots.push(slot);
+            }
+        }
+    }
+
     fn collect_live_root_slots(&mut self, live: &[Value]) -> Vec<i32> {
         // Record the spill slot of every value the regalloc currently
         // considers live (use-def precise: `remaining_uses > 0`) AND
@@ -5630,25 +6104,23 @@ where
         let value_types = &self.func.value_types;
         let is_root_eligible = |v: Value| {
             let ty = value_types[v.index()];
-            ty.is_gc() || matches!(ty, Type::I64)
+            jit_value_type_may_contain_gc_pointer(ty)
         };
         let mut root_slots: Vec<i32> = match Cfg::RootTransport::kind() {
-            RootTransportKind::StackMap => {
-                (0..self.regs.num_values())
-                    .filter_map(|i| {
-                        let v = Value::from_index(i);
-                        if self.regs.remaining_uses(v) == 0 || !is_root_eligible(v) {
-                            return None;
-                        }
-                        self.regs.value_spill_slot(v)
-                    })
-                    .chain(
-                        live.iter()
-                            .filter(|&&v| is_root_eligible(v))
-                            .filter_map(|&v| self.regs.value_spill_slot(v)),
-                    )
-                    .collect()
-            }
+            RootTransportKind::StackMap => (0..self.regs.num_values())
+                .filter_map(|i| {
+                    let v = Value::from_index(i);
+                    if self.regs.remaining_uses(v) == 0 || !is_root_eligible(v) {
+                        return None;
+                    }
+                    self.regs.value_spill_slot(v)
+                })
+                .chain(
+                    live.iter()
+                        .filter(|&&v| is_root_eligible(v))
+                        .filter_map(|&v| self.regs.value_spill_slot(v)),
+                )
+                .collect(),
             RootTransportKind::ShadowStack => live
                 .iter()
                 .filter(|&&v| is_root_eligible(v))
@@ -5665,8 +6137,25 @@ where
                 .enumerate()
                 .filter_map(|(idx, slot)| slot.is_gc_root.then_some(self.stack_slot_offsets[idx])),
         );
+        // Sound-liveness completion: also record the spill slot of every value
+        // live ACROSS this safepoint (catches loop-carried values the use-count
+        // model drops). Then assert completeness.
+        if Cfg::RootTransport::kind() == RootTransportKind::StackMap {
+            // Physical-copy safety: the streaming allocator can leave an old
+            // heap value in a spill slot after SSA liveness has moved on, and
+            // later code can still materialize from that slot. Keep every
+            // typed, materialized GC-capable spill slot fresh for the lifetime
+            // of this frame.
+            self.record_materialized_gc_spill_slots(&mut root_slots);
+            for v in self.heap_roots_live_across() {
+                if let Some(slot) = self.regs.value_spill_slot(v) {
+                    root_slots.push(slot);
+                }
+            }
+        }
         root_slots.sort_unstable();
         root_slots.dedup();
+        self.assert_safepoint_roots_complete(&root_slots);
         root_slots
     }
 
@@ -5675,13 +6164,17 @@ where
     /// ancestor-frame walker will see if a GC fires inside the callee.
     ///
     /// The record's `root_slots` covers (a) the spill slots of every
-    /// still-live value (spilled into root slots by the regalloc) and
-    /// (b) every `is_gc_root = true` stack slot (the user-visible
-    /// variables emitted by the frontend's `def_var`). Under the
-    /// `SoundRoots` / `SoundTransport` contract nothing else in the
-    /// frame can contain a heap reference while the callee is running.
+    /// still-live value (spilled into root slots by the regalloc), (b)
+    /// root-eligible outgoing call arguments for the dynamic duration of
+    /// the call, and (c) every `is_gc_root = true` stack slot (the
+    /// user-visible variables emitted by the frontend's `def_var`).
     ///
-    fn record_call_return_safepoint(&mut self) {
+    /// Outgoing arguments matter even when the caller will not use the value
+    /// after the call returns: extern/Rust callees can allocate or re-enter
+    /// JIT code before they have copied their arguments into another rooted
+    /// location, so the caller's frame is the authoritative root while the
+    /// BLR is active.
+    fn record_call_return_safepoint(&mut self, call_args: &[Value]) {
         let return_offset = self.buf.current_offset();
         let code_offset = return_offset;
 
@@ -5703,23 +6196,37 @@ where
                     return None;
                 }
                 let ty = value_types[v.index()];
-                if !(ty.is_gc() || matches!(ty, Type::I64)) {
+                if !jit_value_type_may_contain_gc_pointer(ty) {
                     return None;
                 }
                 self.regs.value_spill_slot(v)
             })
             .collect();
+        root_slots.extend(call_args.iter().filter_map(|&v| {
+            let ty = value_types[v.index()];
+            if !jit_value_type_may_contain_gc_pointer(ty) {
+                return None;
+            }
+            self.regs.value_spill_slot(v)
+        }));
         root_slots.extend(
             self.func
                 .stack_slots
                 .iter()
                 .enumerate()
-                .filter_map(|(idx, slot)| {
-                    slot.is_gc_root.then_some(self.stack_slot_offsets[idx])
-                }),
+                .filter_map(|(idx, slot)| slot.is_gc_root.then_some(self.stack_slot_offsets[idx])),
         );
+        // Sound-liveness completion + completeness assertion (see
+        // `collect_live_root_slots`).
+        self.record_materialized_gc_spill_slots(&mut root_slots);
+        for v in self.heap_roots_live_across() {
+            if let Some(slot) = self.regs.value_spill_slot(v) {
+                root_slots.push(slot);
+            }
+        }
         root_slots.sort_unstable();
         root_slots.dedup();
+        self.assert_safepoint_roots_complete(&root_slots);
 
         self.safepoints.push(SafepointRecord {
             code_offset,
@@ -5740,8 +6247,7 @@ where
                 // (`jit.all_safepoints()`) and indexes it directly with this
                 // payload, so the per-function index alone would resolve to
                 // a different function's record.
-                let safepoint_index =
-                    self.safepoint_global_offset + self.safepoints.len() as u64;
+                let safepoint_index = self.safepoint_global_offset + self.safepoints.len() as u64;
                 if let Some(handler) = self.safepoint_handler {
                     B::emit_call_safepoint_handler(&mut self.buf, handler, safepoint_index);
                 }
@@ -5758,8 +6264,7 @@ where
                     .spill_all_live::<B>(&mut self.buf, &mut self.frame);
                 let code_offset = self.buf.current_offset();
                 let root_slots = self.collect_live_root_slots(live);
-                let safepoint_index =
-                    self.safepoint_global_offset + self.safepoints.len() as u64;
+                let safepoint_index = self.safepoint_global_offset + self.safepoints.len() as u64;
                 if let Some(handler) = self.safepoint_handler {
                     B::emit_call_safepoint_handler(&mut self.buf, handler, safepoint_index);
                 }

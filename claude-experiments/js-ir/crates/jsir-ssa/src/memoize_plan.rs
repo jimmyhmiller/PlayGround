@@ -427,7 +427,8 @@ fn check_soundness(
     value_set: &[HashSet<Value>],
     all_value_sets: &[HashSet<Value>],
 ) -> Result<Vec<BlockId>, String> {
-    let _ = ranges; // alias roots are intentionally NOT used (see note below).
+    // `ranges` is consulted for the control-dependence bail below; alias roots are
+    // intentionally NOT used (the precise model groups by range overlap).
     // Map each emitted scope value to the scope index that DIRECTLY owns it (it is
     // a member of that scope's value-set). We attribute a mutation to the scope
     // that *allocated* the mutated value, not to downstream consumers that merely
@@ -595,21 +596,21 @@ fn check_soundness(
         None
     };
 
+    // When the two-phase aliasing model is enabled, derive per-instruction
+    // mutations from the SAME effect stream the ranges use (the single source of
+    // truth) instead of the coarse any-non-pure-call-mutates-all-args heuristic.
+    // This keeps the branch-boundary check consistent with the freeze-aware
+    // ranges (e.g. `useMemo`/`useCallback` freeze their args, so the hook call is
+    // not a mutation of them). The legacy heuristic stays the default.
+    let effect_muts = crate::aliasing_ranges::mutations_by_instr(cfg);
+    let _ = (&pure_call, &receiver_of); // superseded by effect-derived mutations
     for b in &cfg.blocks {
-        for (ix, ins) in b.instrs.iter().enumerate() {
-            // The set of values this instruction may mutate.
+        for (ix, _ins) in b.instrs.iter().enumerate() {
+            // The set of values this instruction may mutate, from the same effect
+            // stream the ranges use (single source of truth).
             let mut mutates: Vec<Value> = Vec::new();
-            match &ins.op {
-                Op::StoreMember { obj, .. } => mutates.push(*obj),
-                Op::Call { callee, args } => {
-                    if !pure_call(*callee) {
-                        mutates.extend(args.iter().copied());
-                        if let Some(recv) = receiver_of(*callee) {
-                            mutates.push(recv);
-                        }
-                    }
-                }
-                _ => {}
+            if let Some(vs) = effect_muts.get(&(b.id, ix)) {
+                mutates.extend(vs.iter().copied());
             }
             if mutates.is_empty() {
                 continue;
@@ -633,6 +634,30 @@ fn check_soundness(
                     return Err(
                         "memoize_plan: a reactive scope's allocation is mutated outside its memo \
                          guard (mutation crosses a branch boundary); deferred to scope-alignment step"
+                            .into(),
+                    );
+                }
+            }
+        }
+    }
+
+    // Control-dependence soundness: a branch whose condition transitively reads a
+    // *mutated* allocation makes every value selected by that branch (the join
+    // phis, and any scope depending on them) control-dependent on mutable state we
+    // don't surface as a reactive dependency. Memoizing such a scope as a
+    // once-cache would return a stale value when the mutation's inputs change. The
+    // over-approximating union-find caught this by conflating the mutated object
+    // with the branch's values; the precise model does not, so we bail explicitly.
+    // (Only matters when there is something to memoize; a no-scope function is a
+    // pass-through regardless.)
+    if !emitted.is_empty() {
+        for b in &cfg.blocks {
+            if let crate::cfg::Term::CondBr { cond, .. } = &b.term {
+                if reachable_values(*cond).iter().any(|v| ranges.is_mutable_after_def(*v)) {
+                    return Err(
+                        "memoize_plan: a branch condition reads a mutated allocation \
+                         (control-dependent on untracked mutable state); deferred to \
+                         scope-alignment step"
                             .into(),
                     );
                 }
@@ -766,6 +791,38 @@ impl<'a> Emitter<'a> {
     /// Emit the JSIR value that `op` (an instruction op) computes, by NAME for
     /// its operands (operands are referenced by their `_v{id}`/param names, which
     /// were emitted earlier as `const`s), matching `emit_memoized`'s flat `expr`.
+    /// The defining op of a CFG value, if it is produced by an instruction.
+    fn def_op(&self, v: Value) -> Option<&'a Op> {
+        for b in &self.cfg.blocks {
+            for ins in &b.instrs {
+                if ins.result == Some(v) {
+                    return Some(&ins.op);
+                }
+            }
+        }
+        None
+    }
+
+    /// Emit a `recv.prop` / `recv[expr]` member expression value.
+    fn emit_member_value(&self, obj: Value, prop: &MemberKey, eb: &mut ExprBuilder) -> Result<ValueId, String> {
+        let ov = eb.push(ident_op(&self.name(obj)));
+        match prop {
+            MemberKey::Static(name) => {
+                let mut m = IrOp::new("jsir.member_expression");
+                m.operands.push(ov);
+                m.attrs.push(("literal_property".into(), Attr::Identifier(Box::new(ident_attr(name)))));
+                Ok(eb.push(m))
+            }
+            MemberKey::Computed(c) => {
+                let cv = eb.push(ident_op(&self.name(*c)));
+                let mut m = IrOp::new("jsir.member_expression");
+                m.operands.push(ov);
+                m.operands.push(cv);
+                Ok(eb.push(m))
+            }
+        }
+    }
+
     fn emit_op_value(&self, op: &Op, eb: &mut ExprBuilder) -> Result<ValueId, String> {
         match op {
             Op::Const(c) => Ok(eb.push(const_op(c)?)),
@@ -787,27 +844,7 @@ impl<'a> Emitter<'a> {
                 e.attrs.push(("prefix".into(), Attr::Bool(true)));
                 Ok(eb.push(e))
             }
-            Op::Member { obj, prop } => {
-                let ov = eb.push(ident_op(&self.name(*obj)));
-                match prop {
-                    MemberKey::Static(name) => {
-                        let mut m = IrOp::new("jsir.member_expression");
-                        m.operands.push(ov);
-                        m.attrs.push((
-                            "literal_property".into(),
-                            Attr::Identifier(Box::new(ident_attr(name))),
-                        ));
-                        Ok(eb.push(m))
-                    }
-                    MemberKey::Computed(c) => {
-                        let cv = eb.push(ident_op(&self.name(*c)));
-                        let mut m = IrOp::new("jsir.member_expression");
-                        m.operands.push(ov);
-                        m.operands.push(cv);
-                        Ok(eb.push(m))
-                    }
-                }
-            }
+            Op::Member { obj, prop } => self.emit_member_value(*obj, prop, eb),
             Op::StoreMember { obj, prop, value } => {
                 let ov = eb.push(ident_op(&self.name(*obj)));
                 let target = match prop {
@@ -836,7 +873,15 @@ impl<'a> Emitter<'a> {
                 Ok(eb.push(assign))
             }
             Op::Call { callee, args } => {
-                let cv = eb.push(ident_op(&self.name(*callee)));
+                // If the callee is a method member load (`recv.m`), emit a bound
+                // method call `recv.m(args)` rather than detaching it through a
+                // temp (`const m = recv.m; m(args)` loses the `this` receiver).
+                // The member's own temp (if it is also used as a dep key) is still
+                // emitted separately; this only changes the call's callee.
+                let cv = match self.def_op(*callee) {
+                    Some(Op::Member { obj, prop }) => self.emit_member_value(*obj, prop, eb)?,
+                    _ => eb.push(ident_op(&self.name(*callee))),
+                };
                 let mut e = IrOp::new("jsir.call_expression");
                 e.operands.push(cv);
                 for a in args {

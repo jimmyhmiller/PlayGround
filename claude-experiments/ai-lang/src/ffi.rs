@@ -17,14 +17,30 @@
 //! Layer 2 (heap-resident String / Bytes pass-through) and Layer 3
 //! (opaque Rust handles) will extend this; for now keep it simple.
 //!
-//! ## Process-global by design
+//! ## Two-tier, race-free by design
 //!
-//! The registry is a `Mutex<HashMap<String, ExternEntry>>` shared
-//! across all `Runtime` instances in the same process. Tests can
-//! register / clear via `register_extern` / `clear_externs`. This
-//! matches how the existing `core/net.at`, `core/gc.collect` etc.
-//! work — they're process-wide function pointers that get mapped
-//! by name during JIT init.
+//! Extern resolution happens only at build time: the codegen reads this
+//! registry to `add_global_mapping` each `ext/<name>` to a fn pointer,
+//! and once mapped the JIT'd code calls the address directly and never
+//! consults the registry again. So the registry only needs to be correct
+//! at the moment of a build, on the thread doing that build. Two kinds of
+//! extern live here, in two tiers:
+//!
+//! - **The fixed runtime I/O externs** (`print_int`, `print_string`, ...)
+//!   have static fn pointers, are identical for every `Runtime`, and must
+//!   be visible from every thread that builds a module. They live in a
+//!   process-global, **write-once** table (`install_io_externs`): set
+//!   exactly once, never mutated or cleared, so nothing can ever race on
+//!   them.
+//! - **Dynamic externs** — C symbols resolved during a build (the codegen
+//!   registers them moments before JIT-init, on the build thread) and
+//!   test-registered overrides — live in a **thread-local** registry.
+//!   Because build + JIT-init happen on the same thread, this is always
+//!   correct, and parallel tests (or concurrent builds on different
+//!   threads) can never stomp on each other's externs.
+//!
+//! Resolution checks the thread-local tier first, so a build's C externs
+//! and a test's override win over the global I/O defaults.
 //!
 //! ## Safety
 //!
@@ -32,8 +48,9 @@
 //! Mismatch is a soundness hole — the JIT will happily call with
 //! the wrong number of args and corrupt the stack.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use crate::ast::Type;
 use crate::gc::Full;
@@ -53,13 +70,29 @@ pub struct ExternEntry {
     pub fn_ptr: usize,
 }
 
-static REGISTRY: OnceLock<Mutex<HashMap<String, ExternEntry>>> = OnceLock::new();
+/// Process-global, write-once table of the fixed runtime I/O externs.
+/// Visible from every thread; never mutated or cleared after init.
+static IO_REGISTRY: OnceLock<HashMap<String, ExternEntry>> = OnceLock::new();
 
-fn registry() -> &'static Mutex<HashMap<String, ExternEntry>> {
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+thread_local! {
+    /// Per-thread registry for dynamic externs (build-time C symbols and
+    /// test overrides). Build + JIT-init run on the same thread, so this
+    /// is always correct, and parallel work never collides.
+    static DYNAMIC: RefCell<HashMap<String, ExternEntry>> = RefCell::new(HashMap::new());
 }
 
-/// Register an extern under `name`. Replaces any prior entry.
+/// Install the fixed runtime I/O externs exactly once. Idempotent and
+/// race-free: the first caller wins, every later call is a no-op, and the
+/// table is never overwritten or cleared. (The I/O externs never change,
+/// so there is nothing to update.)
+pub fn install_io_externs(entries: Vec<(String, ExternEntry)>) {
+    IO_REGISTRY.get_or_init(move || entries.into_iter().collect());
+}
+
+/// Register a dynamic extern under `name` in the calling thread's
+/// registry, replacing any prior thread-local entry. Used by the C-FFI
+/// build path (a resolved C symbol, registered just before JIT-init on
+/// the build thread) and by tests that override an extern.
 ///
 /// # Safety
 /// `fn_ptr` must be a valid `extern "C"` function pointer whose
@@ -67,28 +100,43 @@ fn registry() -> &'static Mutex<HashMap<String, ExternEntry>> {
 /// `unsafe extern "C" fn(*mut Thread, i64 × params.len()) -> i64`.
 /// (Layer 1 only handles Int params / Int return.)
 pub unsafe fn register_extern(name: &str, params: Vec<Type>, ret: Type, fn_ptr: usize) {
-    registry()
-        .lock()
-        .unwrap()
-        .insert(name.to_owned(), ExternEntry { params, ret, fn_ptr });
+    DYNAMIC.with(|r| {
+        r.borrow_mut()
+            .insert(name.to_owned(), ExternEntry { params, ret, fn_ptr });
+    });
 }
 
-/// Look up a previously-registered extern.
+/// Look up an extern: thread-local dynamic registry first (so build-time
+/// C externs and test overrides win), then the global I/O table.
 pub fn lookup_extern(name: &str) -> Option<ExternEntry> {
-    registry().lock().unwrap().get(name).cloned()
+    if let Some(e) = DYNAMIC.with(|r| r.borrow().get(name).cloned()) {
+        return Some(e);
+    }
+    IO_REGISTRY.get().and_then(|m| m.get(name).cloned())
 }
 
-/// Remove all registered externs. Useful for test isolation.
+/// Remove the calling thread's dynamic externs. Does NOT touch the
+/// global I/O table or any other thread's registry. Useful for test
+/// isolation.
 pub fn clear_externs() {
-    registry().lock().unwrap().clear();
+    DYNAMIC.with(|r| r.borrow_mut().clear());
 }
 
-/// Snapshot the current registry. Useful for diagnostic logging.
+/// Snapshot of all currently-resolvable extern names (dynamic + I/O), for
+/// diagnostic logging.
 pub fn registered_extern_names() -> Vec<String> {
-    let g = registry().lock().unwrap();
-    let mut v: Vec<String> = g.keys().cloned().collect();
-    v.sort();
-    v
+    let mut set: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    DYNAMIC.with(|r| {
+        for k in r.borrow().keys() {
+            set.insert(k.clone());
+        }
+    });
+    if let Some(m) = IO_REGISTRY.get() {
+        for k in m.keys() {
+            set.insert(k.clone());
+        }
+    }
+    set.into_iter().collect()
 }
 
 // =============================================================================

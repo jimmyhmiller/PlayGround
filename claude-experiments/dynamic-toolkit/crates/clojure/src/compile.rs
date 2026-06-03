@@ -410,7 +410,10 @@ impl<'a> Compiler<'a> {
         // Otherwise: anonymous top-level expression.
         *self.anon_counter += 1;
         let name = format!("__top_{}", *self.anon_counter);
-        let fref = self.dyn_module.module_builder.declare_func(&name, &[], Some(Type::I64));
+        let fref = self
+            .dyn_module
+            .module_builder
+            .declare_func(&name, &[], Some(Type::I64));
         // Top-level exprs aren't callable by name — they're invoked
         // directly by `Engine::eval` via `run_jit(fref, &[], …)`.
         // No `func_refs` entry needed.
@@ -440,12 +443,7 @@ impl<'a> Compiler<'a> {
                 continue;
             }
             dynobj::roots::with_scope(64, |scope| {
-                let _ = crate::namespace::ns_intern(
-                    scope,
-                    self.core_ns,
-                    sym_value,
-                    v::NIL,
-                );
+                let _ = crate::namespace::ns_intern(scope, self.core_ns, sym_value, v::NIL);
             });
         }
         TopResult::None
@@ -486,7 +484,10 @@ impl<'a> Compiler<'a> {
         // Non-fn def. Compile a 0-arg thunk that evaluates `expr`.
         *self.anon_counter += 1;
         let thunk_name = format!("__def_value_thunk_{}", *self.anon_counter);
-        let thunk_fref = self.dyn_module.module_builder.declare_func(&thunk_name, &[], Some(Type::I64));
+        let thunk_fref =
+            self.dyn_module
+                .module_builder
+                .declare_func(&thunk_name, &[], Some(Type::I64));
         let mut fb = self.dyn_module.module_builder.define_func(thunk_fref);
         let mut env = Env::new();
         let result = self.lower_expr(&mut fb, &mut env, expr);
@@ -643,10 +644,11 @@ impl<'a> Compiler<'a> {
         };
 
         *self.anon_counter += 1;
-        let combined_name =
-            format!("__deftype_combined_{}", *self.anon_counter);
+        let combined_name = format!("__deftype_combined_{}", *self.anon_counter);
         let combined_fref =
-            self.dyn_module.module_builder.declare_func(&combined_name, &[], Some(Type::I64));
+            self.dyn_module
+                .module_builder
+                .declare_func(&combined_name, &[], Some(Type::I64));
         {
             let mut fb = self.dyn_module.module_builder.define_func(combined_fref);
             fb.safepoint(&[]);
@@ -655,7 +657,9 @@ impl<'a> Compiler<'a> {
             fb.call(ext_fref, &[]);
             let nil_v = fb.iconst(Type::I64, v::NIL as i64);
             fb.ret(nil_v);
-            self.dyn_module.module_builder.finish_func(combined_fref, fb);
+            self.dyn_module
+                .module_builder
+                .finish_func(combined_fref, fb);
         }
         TopResult::Expr(combined_fref)
     }
@@ -703,11 +707,9 @@ impl<'a> Compiler<'a> {
             variadic: false,
             n_captures: 0,
         };
-        let ctor_fref = self.closures.declare_body(
-            &mut self.dyn_module.module_builder,
-            &ctor_name,
-            ctor_shape,
-        );
+        let ctor_fref =
+            self.closures
+                .declare_body(&mut self.dyn_module.module_builder, &ctor_name, ctor_shape);
         self.func_refs
             .insert(ctor_name, FnEntry::DefFn { fref: ctor_fref });
 
@@ -733,7 +735,10 @@ impl<'a> Compiler<'a> {
             live.push(buf_addr_i64);
             fb.safepoint(&live);
             let result = fb
-                .call(self.externs.alloc_record, &[type_name_const, n_const, buf_addr_i64])
+                .call(
+                    self.externs.alloc_record,
+                    &[type_name_const, n_const, buf_addr_i64],
+                )
                 .expect("__alloc_record returns a value");
             fb.ret(result);
             self.dyn_module.module_builder.finish_func(ctor_fref, fb);
@@ -743,11 +748,15 @@ impl<'a> Compiler<'a> {
         // the type-name and field-name list.
         *self.anon_counter += 1;
         let reg_name = format!("__register_deftype_{}", *self.anon_counter);
-        let reg_fref = self.dyn_module.module_builder.declare_func(&reg_name, &[], Some(Type::I64));
+        let reg_fref = self
+            .dyn_module
+            .module_builder
+            .declare_func(&reg_name, &[], Some(Type::I64));
         {
             let mut fb = self.dyn_module.module_builder.define_func(reg_fref);
             // Spill field-name sym values to a buffer.
-            let buf_slot = fb.create_stack_slot((n_fields.max(1) * 8) as u32, /*is_gc_root=*/ false);
+            let buf_slot =
+                fb.create_stack_slot((n_fields.max(1) * 8) as u32, /*is_gc_root=*/ false);
             let buf_addr = fb.stack_addr(buf_slot);
             for (i, &fid) in field_ids.iter().enumerate() {
                 let fv = fb.iconst(Type::I64, v::encode_sym_id(fid) as i64);
@@ -757,7 +766,10 @@ impl<'a> Compiler<'a> {
             let type_name_const = fb.iconst(Type::I64, v::encode_sym_id(name_id) as i64);
             let n_const = fb.iconst(Type::I64, n_fields as i64);
             fb.safepoint(&[]);
-            fb.call(self.externs.register_deftype, &[type_name_const, n_const, buf_addr_i64]);
+            fb.call(
+                self.externs.register_deftype,
+                &[type_name_const, n_const, buf_addr_i64],
+            );
 
             // Also bind a Var `Name` whose root is the symbol
             // `'Name` so bare references to the type name (e.g.
@@ -829,7 +841,10 @@ impl<'a> Compiler<'a> {
         // `(satisfies? ProtoName x)` resolves.
         *self.anon_counter += 1;
         let thunk_name = format!("__defprotocol_bind_{}", *self.anon_counter);
-        let thunk_fref = self.dyn_module.module_builder.declare_func(&thunk_name, &[], Some(Type::I64));
+        let thunk_fref =
+            self.dyn_module
+                .module_builder
+                .declare_func(&thunk_name, &[], Some(Type::I64));
         {
             let mut fb = self.dyn_module.module_builder.define_func(thunk_fref);
             let proto_const = fb.iconst(Type::I64, v::encode_sym_id(proto_sym_id) as i64);
@@ -852,12 +867,12 @@ impl<'a> Compiler<'a> {
         if self.func_refs.contains_key(&method_name) {
             return;
         }
-        let fref = self
-            .dyn_module
-            .module_builder
-            .declare_func(&method_name, &[Type::I64, Type::I64], Some(Type::I64));
-        self.func_refs
-            .insert(method_name, FnEntry::DefFn { fref });
+        let fref = self.dyn_module.module_builder.declare_func(
+            &method_name,
+            &[Type::I64, Type::I64],
+            Some(Type::I64),
+        );
+        self.func_refs.insert(method_name, FnEntry::DefFn { fref });
 
         let mut fb = self.dyn_module.module_builder.define_func(fref);
         let entry = fb.entry_block();
@@ -925,21 +940,12 @@ impl<'a> Compiler<'a> {
             for (i, &fid) in fields.iter().enumerate() {
                 let field_sym_val = v::encode_sym_id(fid);
                 let dot_field_sym = v::encode_sym_id(dot_syms[i]);
-                let inner_tail = v::alloc_list_cell_from_raw(
-                    scope,
-                    self_sym_value,
-                    v::NIL,
-                );
-                let dot_call = v::alloc_list_cell_from_raw(
-                    scope,
-                    dot_field_sym,
-                    inner_tail.get(),
-                );
+                let inner_tail = v::alloc_list_cell_from_raw(scope, self_sym_value, v::NIL);
+                let dot_call = v::alloc_list_cell_from_raw(scope, dot_field_sym, inner_tail.get());
                 binding_items.push(field_sym_val);
                 binding_items.push(dot_call.get());
             }
-            let bindings_vec =
-                crate::collections::alloc_vector(scope, &binding_items).get();
+            let bindings_vec = crate::collections::alloc_vector(scope, &binding_items).get();
 
             // Body of the let: a `do` block over the original body
             // forms. Using `do` keeps multiple body forms working
@@ -947,18 +953,10 @@ impl<'a> Compiler<'a> {
             let do_form = v::alloc_list_cell_from_raw(scope, do_sym, body_forms);
 
             // (let [bindings] (do body…))
-            let let_tail =
-                v::alloc_list_cell_from_raw(scope, do_form.get(), v::NIL);
-            let let_after_bindings = v::alloc_list_cell_from_raw(
-                scope,
-                bindings_vec,
-                let_tail.get(),
-            );
-            let let_form = v::alloc_list_cell_from_raw(
-                scope,
-                let_sym,
-                let_after_bindings.get(),
-            );
+            let let_tail = v::alloc_list_cell_from_raw(scope, do_form.get(), v::NIL);
+            let let_after_bindings =
+                v::alloc_list_cell_from_raw(scope, bindings_vec, let_tail.get());
+            let let_form = v::alloc_list_cell_from_raw(scope, let_sym, let_after_bindings.get());
 
             // Wrap as a single-element body forms list.
             v::alloc_list_cell_from_raw(scope, let_form.get(), v::NIL).get()
@@ -997,7 +995,10 @@ impl<'a> Compiler<'a> {
         // wraps it in an Fn, and calls __register_method.
         *self.anon_counter += 1;
         let reg_name = format!("__extend_type_{}", *self.anon_counter);
-        let reg_fref = self.dyn_module.module_builder.declare_func(&reg_name, &[], Some(Type::I64));
+        let reg_fref = self
+            .dyn_module
+            .module_builder
+            .declare_func(&reg_name, &[], Some(Type::I64));
 
         // Group impls by method name first — protocols can declare
         // multiple arities of the same method, and we need them all
@@ -1022,8 +1023,7 @@ impl<'a> Compiler<'a> {
             // user deftype, wrap the body in
             //   (let [field0 (.-field0 self) …] body…)
             // so method bodies can refer to fields by bare name.
-            let body_with_fields = if let Some(fields) =
-                self.deftype_fields.get(&type_sym).cloned()
+            let body_with_fields = if let Some(fields) = self.deftype_fields.get(&type_sym).cloned()
                 && !params.fixed.is_empty()
             {
                 let self_id = params.fixed[0];
@@ -1035,10 +1035,10 @@ impl<'a> Compiler<'a> {
             if !method_clauses.contains_key(&method_sym) {
                 method_order.push(method_sym);
             }
-            method_clauses
-                .entry(method_sym)
-                .or_default()
-                .push(Clause { params, body: body_with_fields });
+            method_clauses.entry(method_sym).or_default().push(Clause {
+                params,
+                body: body_with_fields,
+            });
         }
 
         // Compile one Fn per method name, multi-arity bodies use the
@@ -1086,7 +1086,10 @@ impl<'a> Compiler<'a> {
                 let m_sym_const = fb.iconst(Type::I64, v::encode_sym_id(*method_sym) as i64);
                 let t_sym_const = fb.iconst(Type::I64, v::encode_sym_id(type_sym) as i64);
                 fb.safepoint(&[fn_val]);
-                fb.call(self.externs.register_method, &[m_sym_const, t_sym_const, fn_val]);
+                fb.call(
+                    self.externs.register_method,
+                    &[m_sym_const, t_sym_const, fn_val],
+                );
             }
             // Register protocol-membership for every protocol named in
             // this extend-type, including marker protocols with no
@@ -1094,12 +1097,13 @@ impl<'a> Compiler<'a> {
             // the type only "claims" IList without implementing
             // anything.
             for proto_sym in &protocol_syms {
-                let p_sym_const =
-                    fb.iconst(Type::I64, v::encode_sym_id(*proto_sym) as i64);
-                let t_sym_const =
-                    fb.iconst(Type::I64, v::encode_sym_id(type_sym) as i64);
+                let p_sym_const = fb.iconst(Type::I64, v::encode_sym_id(*proto_sym) as i64);
+                let t_sym_const = fb.iconst(Type::I64, v::encode_sym_id(type_sym) as i64);
                 fb.safepoint(&[]);
-                fb.call(self.externs.register_protocol_member, &[t_sym_const, p_sym_const]);
+                fb.call(
+                    self.externs.register_protocol_member,
+                    &[t_sym_const, p_sym_const],
+                );
             }
             let nil_v = fb.iconst(Type::I64, v::NIL as i64);
             fb.ret(nil_v);
@@ -1108,12 +1112,7 @@ impl<'a> Compiler<'a> {
         TopResult::Expr(reg_fref)
     }
 
-    fn compile_def_like(
-        &mut self,
-        form: u64,
-        kw: &str,
-        expect_fn: bool,
-    ) -> (String, FuncRef, u64) {
+    fn compile_def_like(&mut self, form: u64, kw: &str, expect_fn: bool) -> (String, FuncRef, u64) {
         let rest = v::rest(form);
         let name_v = v::first(rest);
         if !v::is_sym_id(name_v) {
@@ -1171,21 +1170,18 @@ impl<'a> Compiler<'a> {
     /// heap `Fn` driver stores `encode_arity(min, is_variadic)` in
     /// the Fn's arity field for runtime arity-check purposes
     /// (variadic flag is set if ANY clause is variadic).
-    fn compile_def_fn(
-        &mut self,
-        name: &str,
-        clauses: Vec<Clause>,
-    ) -> (FuncRef, usize, bool) {
+    fn compile_def_fn(&mut self, name: &str, clauses: Vec<Clause>) -> (FuncRef, usize, bool) {
         // Unified ABI: every user-defined fn — def-fn or closure —
         // takes `(self_fn, args_list)`. For def-fns there's no
         // closure receiver, but having the same shape as closures
         // means a def-fn can be passed as a value (#18) and called
         // through the same indirect path that calls closures.
         // Static call sites pass NIL as `self_fn`.
-        let fref = self
-            .dyn_module
-            .module_builder
-            .declare_func(name, &[Type::I64, Type::I64], Some(Type::I64));
+        let fref = self.dyn_module.module_builder.declare_func(
+            name,
+            &[Type::I64, Type::I64],
+            Some(Type::I64),
+        );
         self.func_refs
             .insert(name.to_string(), FnEntry::DefFn { fref });
 
@@ -1217,12 +1213,7 @@ impl<'a> Compiler<'a> {
     /// inside a def-fn body re-enters the kit's loop_header with
     /// `(self_fn, args_list_repacked)` just like a closure recur;
     /// self_fn passes through unused but maintains shape.
-    fn compile_clauses_body(
-        &mut self,
-        fref: FuncRef,
-        clauses: &[Clause],
-        has_self_fn: bool,
-    ) {
+    fn compile_clauses_body(&mut self, fref: FuncRef, clauses: &[Clause], has_self_fn: bool) {
         debug_assert!(!has_self_fn, "def-fn path");
         // The closure-body path handles 0 captures correctly — same IR,
         // no capture-load loop. Reuse it verbatim.
@@ -1275,7 +1266,12 @@ impl<'a> Compiler<'a> {
     fn emit_raise(&mut self, fb: &mut FunctionBuilder, exc_value: Value) {
         let fr_value = fb.iconst(Type::I64, self.externs.raise_exception.as_u32() as i64);
         fb.safepoint(&[exc_value]);
-        fb.call_via_func_ref(self.call_table_base, fr_value, &[exc_value], Some(Type::I64));
+        fb.call_via_func_ref(
+            self.call_table_base,
+            fr_value,
+            &[exc_value],
+            Some(Type::I64),
+        );
         fb.unreachable();
     }
 
@@ -1366,8 +1362,7 @@ impl<'a> Compiler<'a> {
                 let mut live = env.live_values();
                 live.extend_from_slice(&arg_vals);
                 fb.safepoint(&live);
-                fb.call(fref, &arg_vals)
-                    .expect("extern returns a value")
+                fb.call(fref, &arg_vals).expect("extern returns a value")
             }
             FnEntry::DefFn { fref } => {
                 // Unified ABI: def-fn takes `(self_fn, args_list)`.
@@ -1457,9 +1452,7 @@ impl<'a> Compiler<'a> {
         // nested all-literal vectors, …) can we pin to the literal
         // pool. Otherwise, lower each element and build at runtime.
         if !crate::collections::is_list(form) {
-            if crate::collections::is_vector(form)
-                && vector_needs_runtime_eval(form)
-            {
+            if crate::collections::is_vector(form) && vector_needs_runtime_eval(form) {
                 return self.lower_vector_literal(fb, env, form);
             }
             // TODO: same treatment for maps with live elements; today
@@ -1494,12 +1487,7 @@ impl<'a> Compiler<'a> {
     /// `(.-name receiver)` form whose head we destructure to get the
     /// field name. Returns the stored value (matches Clojure's
     /// expression semantics).
-    fn lower_set_bang(
-        &mut self,
-        fb: &mut FunctionBuilder,
-        env: &mut Env,
-        rest: u64,
-    ) -> Value {
+    fn lower_set_bang(&mut self, fb: &mut FunctionBuilder, env: &mut Env, rest: u64) -> Value {
         let place = v::first(rest);
         let val_form = v::first(v::rest(rest));
         if !v::is_ptr(place) || !crate::collections::is_list(place) {
@@ -1631,9 +1619,7 @@ impl<'a> Compiler<'a> {
                 seen_catch_or_finally = true;
             } else {
                 if seen_catch_or_finally {
-                    panic!(
-                        "try: body form after a catch/finally is not allowed"
-                    );
+                    panic!("try: body form after a catch/finally is not allowed");
                 }
                 body_forms.push(form);
             }
@@ -1675,9 +1661,7 @@ impl<'a> Compiler<'a> {
         for &form in body_forms {
             let raw = {
                 let sym_ref = &*self.sym;
-                crate::freevars::free_vars_in_form(form, &[], &|id| {
-                    sym_ref.name(id).to_string()
-                })
+                crate::freevars::free_vars_in_form(form, &[], &|id| sym_ref.name(id).to_string())
             };
             for id in raw {
                 if env.lookup(id).is_some() && !captures.contains(&id) {
@@ -1688,7 +1672,12 @@ impl<'a> Compiler<'a> {
 
         *self.anon_counter += 1;
         let name = format!("__try_body_{}", *self.anon_counter);
-        let body = InlineBody::declare(&mut self.dyn_module.module_builder, &name, captures.len(), 0);
+        let body = InlineBody::declare(
+            &mut self.dyn_module.module_builder,
+            &name,
+            captures.len(),
+            0,
+        );
 
         // Open + lower the body. The kit doesn't hold a borrow on
         // `&mut self.dyn_module.module_builder` between `open` and `finish`, so recursive
@@ -1718,8 +1707,8 @@ impl<'a> Compiler<'a> {
 
         // Invoke from outer `fb`; dispatch + arms emitted here.
         let dispatch_bb = fb.create_block(&[Type::I64]); // thrown
-        let normal_bb = fb.create_block(&[Type::I64]);   // body return
-        let merge_bb = fb.create_block(&[Type::I64]);    // unified result
+        let normal_bb = fb.create_block(&[Type::I64]); // body return
+        let merge_bb = fb.create_block(&[Type::I64]); // unified result
 
         let cap_values: Vec<Value> = captures
             .iter()
@@ -1766,9 +1755,7 @@ impl<'a> Compiler<'a> {
         for &form in body_forms {
             let raw = {
                 let sym_ref = &*self.sym;
-                crate::freevars::free_vars_in_form(form, &[], &|id| {
-                    sym_ref.name(id).to_string()
-                })
+                crate::freevars::free_vars_in_form(form, &[], &|id| sym_ref.name(id).to_string())
             };
             for id in raw {
                 if env.lookup(id).is_some() {
@@ -1783,11 +1770,9 @@ impl<'a> Compiler<'a> {
             for elem in v::list_iter(arm.body) {
                 let raw = {
                     let sym_ref = &*self.sym;
-                    crate::freevars::free_vars_in_form(
-                        elem,
-                        &[arm.bind_sym],
-                        &|id| sym_ref.name(id).to_string(),
-                    )
+                    crate::freevars::free_vars_in_form(elem, &[arm.bind_sym], &|id| {
+                        sym_ref.name(id).to_string()
+                    })
                 };
                 for id in raw {
                     if env.lookup(id).is_some() {
@@ -1799,12 +1784,18 @@ impl<'a> Compiler<'a> {
 
         *self.anon_counter += 1;
         let name = format!("__try_wrapper_{}", *self.anon_counter);
-        let wrapper = InlineBody::declare(&mut self.dyn_module.module_builder, &name, captures.len(), 0);
+        let wrapper = InlineBody::declare(
+            &mut self.dyn_module.module_builder,
+            &name,
+            captures.len(),
+            0,
+        );
 
         // Compile wrapper: contains the try-catch (no finally), which
         // itself synthesizes another inline body via `lower_try_no_finally`.
         {
-            let (mut wrapper_fb, cap_vals, _extras) = wrapper.open(&mut self.dyn_module.module_builder);
+            let (mut wrapper_fb, cap_vals, _extras) =
+                wrapper.open(&mut self.dyn_module.module_builder);
             let mut wrapper_env = Env::new();
             for (i, &cap_id) in captures.iter().enumerate() {
                 wrapper_env.bind(cap_id, cap_vals[i]);
@@ -1829,9 +1820,9 @@ impl<'a> Compiler<'a> {
             .map(|&id| env.lookup(id).expect("capture missing in env"))
             .collect();
 
-        let normal_bb = fb.create_block(&[Type::I64]);    // wrapper result
+        let normal_bb = fb.create_block(&[Type::I64]); // wrapper result
         let exception_bb = fb.create_block(&[Type::I64]); // thrown
-        let merge_bb = fb.create_block(&[Type::I64]);     // unified result
+        let merge_bb = fb.create_block(&[Type::I64]); // unified result
 
         let mut live = env.live_values();
         live.extend_from_slice(&cap_values);
@@ -1895,8 +1886,7 @@ impl<'a> Compiler<'a> {
         let type_match_fref = self.externs.exception_type_matches;
 
         // Pre-create per-arm body blocks + the no-match terminal.
-        let arm_blocks: Vec<BlockId> =
-            (0..arms.len()).map(|_| fb.create_block(&[])).collect();
+        let arm_blocks: Vec<BlockId> = (0..arms.len()).map(|_| fb.create_block(&[])).collect();
         let no_match_bb = fb.create_block(&[]);
 
         // `try` with a `(finally ...)` but no catch arms: the
@@ -1997,17 +1987,15 @@ impl<'a> Compiler<'a> {
         let type_sym = if v::is_sym_id(type_form) {
             let id = v::as_sym_id(type_form);
             let name = sym.name(id);
-            if name == "_" {
-                None
-            } else {
-                Some(id)
-            }
+            if name == "_" { None } else { Some(id) }
         } else if v::is_ptr(type_form) && crate::collections::is_keyword(type_form) {
             // `:default` keyword catch-all (matches Clojure ClojureScript
             // convention for non-JVM platforms).
             let kw_sym = crate::collections::keyword_sym_id(type_form);
             let name = sym.name(kw_sym);
-            if name == "default" { None } else {
+            if name == "default" {
+                None
+            } else {
                 panic!(
                     "try/catch: keyword type filter must be :default, got :{}",
                     name
@@ -2104,8 +2092,7 @@ impl<'a> Compiler<'a> {
         form: u64,
     ) -> Value {
         let elems: Vec<u64> = crate::collections::vector_iter(form).collect();
-        let element_vals: Vec<Value> =
-            elems.iter().map(|e| self.lower_expr(fb, env, *e)).collect();
+        let element_vals: Vec<Value> = elems.iter().map(|e| self.lower_expr(fb, env, *e)).collect();
         let list = self.build_args_list(fb, env, &element_vals);
         let mut live = env.live_values();
         live.push(list);
@@ -2261,12 +2248,7 @@ impl<'a> Compiler<'a> {
     ///    and the capture-load loop; we lower the user code on top.
     /// 4. Allocate via `ClosureKit::make` — inline GC alloc IR, no
     ///    extern thunk required.
-    fn lower_fn_expr(
-        &mut self,
-        fb: &mut FunctionBuilder,
-        env: &mut Env,
-        rest: u64,
-    ) -> Value {
+    fn lower_fn_expr(&mut self, fb: &mut FunctionBuilder, env: &mut Env, rest: u64) -> Value {
         let clauses = parse_clauses(rest, self.sym);
 
         // Union of free vars across all clauses (filtered by each
@@ -2281,9 +2263,7 @@ impl<'a> Compiler<'a> {
             }
             let raw = {
                 let sym_ref = &*self.sym;
-                crate::freevars::free_vars(c.body, &param_ids, &|id| {
-                    sym_ref.name(id).to_string()
-                })
+                crate::freevars::free_vars(c.body, &param_ids, &|id| sym_ref.name(id).to_string())
             };
             for id in raw {
                 if env.lookup(id).is_some() && !captures.contains(&id) {
@@ -2301,16 +2281,23 @@ impl<'a> Compiler<'a> {
         let inner_fref = self.closures.declare_body(
             &mut self.dyn_module.module_builder,
             &name,
-            BodyShape { fixed: 0, variadic: false, n_captures: captures.len() },
+            BodyShape {
+                fixed: 0,
+                variadic: false,
+                n_captures: captures.len(),
+            },
         );
         self.compile_closure_body_clauses(inner_fref, &clauses, &captures);
 
         // Arity word: min(arities), variadic if any clause is or if
         // multi-arity (so indirect callers accept any n ≥ min and
         // delegate exact matching to the inner dispatcher).
-        let min_arity = clauses.iter().map(|c| c.params.min_arity()).min().unwrap_or(0);
-        let any_variadic =
-            clauses.iter().any(|c| c.params.is_variadic()) || clauses.len() > 1;
+        let min_arity = clauses
+            .iter()
+            .map(|c| c.params.min_arity())
+            .min()
+            .unwrap_or(0);
+        let any_variadic = clauses.iter().any(|c| c.params.is_variadic()) || clauses.len() > 1;
         let arity_word = encode_arity(min_arity, any_variadic) as i64;
 
         // Resolve captures from the outer env. Order matches what the

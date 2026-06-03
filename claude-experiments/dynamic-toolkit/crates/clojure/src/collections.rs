@@ -5,7 +5,7 @@
 //! `types::Layouts`). No `const FOO_OFFSET` constants here — that
 //! data lives in one place and one place only.
 
-use dynobj::roots::{Rooted, RootScope};
+use dynobj::roots::{RootScope, Rooted};
 
 use crate::host::{layouts, with_host};
 use crate::value::{self as v, NanBoxTag};
@@ -159,10 +159,7 @@ pub fn is_vector(v: u64) -> bool {
 // v1 layout: backing is a Vector of items. Linear scan. We'll swap to
 // a hash-based representation when usage demands it.
 
-pub fn alloc_set<'scope>(
-    scope: &'scope RootScope<'_>,
-    items: &[u64],
-) -> Rooted<'scope, NanBoxTag> {
+pub fn alloc_set<'scope>(scope: &'scope RootScope<'_>, items: &[u64]) -> Rooted<'scope, NanBoxTag> {
     // De-dup by bitwise equality (sufficient for nil/bool/sym-id/int;
     // bigger story when strings/keywords are interned).
     let mut deduped: Vec<u64> = Vec::with_capacity(items.len());
@@ -262,10 +259,7 @@ pub fn is_record(v: u64) -> bool {
 // existing Relaxed atomic load/store. The cell value is GC-traced
 // because `Value` fields are scanned automatically.
 
-pub fn alloc_atom<'scope>(
-    scope: &'scope RootScope<'_>,
-    initial: u64,
-) -> Rooted<'scope, NanBoxTag> {
+pub fn alloc_atom<'scope>(scope: &'scope RootScope<'_>, initial: u64) -> Rooted<'scope, NanBoxTag> {
     with_host(|h| {
         let gc = unsafe { &*h.gc };
         let type_id = h.types.atom.0;
@@ -479,8 +473,7 @@ impl Iterator for SeqCursor {
                     self.0 = SeqState::Empty;
                     return None;
                 }
-                let (first_sym, next_sym) =
-                    with_host(|h| (h.first_method_sym, h.next_method_sym));
+                let (first_sym, next_sym) = with_host(|h| (h.first_method_sym, h.next_method_sym));
                 let head = crate::protocol::invoke_method_0(first_sym, cur);
                 let tail = crate::protocol::invoke_method_0(next_sym, cur);
                 self.0 = SeqState::Protocol(tail);

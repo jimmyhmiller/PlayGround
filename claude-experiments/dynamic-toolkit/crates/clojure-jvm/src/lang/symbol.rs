@@ -16,7 +16,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
-
 /// `clojure.lang.Symbol`.
 #[derive(Debug)]
 pub struct Symbol {
@@ -53,7 +52,9 @@ impl Symbol {
     }
 
     /// `Symbol.create(String nsname)`.
-    pub fn create(nsname: &str) -> Arc<Self> { Self::intern(nsname) }
+    pub fn create(nsname: &str) -> Arc<Self> {
+        Self::intern(nsname)
+    }
 
     /// `Symbol.intern(String ns, String name)`.
     pub fn intern_ns_name(ns: Option<&str>, name: &str) -> Arc<Self> {
@@ -86,9 +87,7 @@ impl Symbol {
         match nsname.find('/') {
             None => Self::intern_ns_name(None, nsname),
             Some(_) if nsname == "/" => Self::intern_ns_name(None, nsname),
-            Some(i) => {
-                Self::intern_ns_name(Some(&nsname[..i]), &nsname[i + 1..])
-            }
+            Some(i) => Self::intern_ns_name(Some(&nsname[..i]), &nsname[i + 1..]),
         }
     }
 
@@ -98,7 +97,9 @@ impl Symbol {
         self.ns.as_deref().map(|s| s.as_str())
     }
 
-    pub fn get_name(&self) -> &str { &self.name }
+    pub fn get_name(&self) -> &str {
+        &self.name
+    }
 
     // ---- toString --------------------------------------------------------
 
@@ -125,7 +126,9 @@ impl Symbol {
         crate::unimplemented_port!("Symbol.withMeta", "needs IPersistentMap")
     }
 
-    pub fn meta(&self) -> Option<()> { self._meta }
+    pub fn meta(&self) -> Option<()> {
+        self._meta
+    }
 
     // ---- AFn invoke arity-1 / arity-2 (stub — needs RT.get) --------------
 
@@ -145,8 +148,7 @@ impl Symbol {
 // Java `equals`: structural over (ns, name).
 impl PartialEq for Symbol {
     fn eq(&self, other: &Self) -> bool {
-        self.ns.as_deref().map(|s| s.as_str())
-            == other.ns.as_deref().map(|s| s.as_str())
+        self.ns.as_deref().map(|s| s.as_str()) == other.ns.as_deref().map(|s| s.as_str())
             && *self.name == *other.name
     }
 }

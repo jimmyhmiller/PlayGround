@@ -30,6 +30,12 @@ pub struct Types {
 }
 
 impl Types {
+    /// An empty type table (every value resolves to `Poly`). Used by the effect
+    /// system in contexts where types are not (yet) available.
+    pub fn empty() -> Types {
+        Types { types: Vec::new(), slot: HashMap::new() }
+    }
+
     /// The resolved type of `v` (defaults to `Poly` for values never constrained).
     pub fn get(&self, v: Value) -> &Type {
         match self.slot.get(&v) {
@@ -51,6 +57,22 @@ impl Types {
     /// Whether `v` is a `useRef()` container object.
     pub fn is_use_ref(&self, v: Value) -> bool {
         self.is_object_shape(v, BUILT_IN_USE_REF_ID)
+    }
+
+    /// Whether `v` is a useRef container or a ref value (`is_ref_or_ref_value`).
+    pub fn is_ref_or_ref_value(&self, v: Value) -> bool {
+        self.is_use_ref(v) || self.is_ref_value(v)
+    }
+
+    /// Whether `v` is a `useState`/`useReducer` setter (the stable dispatch
+    /// function). Faithful to upstream `is_set_state_type` (extended to the
+    /// reducer dispatch, which shares the freeze-arg setter shape).
+    pub fn is_set_state(&self, v: Value) -> bool {
+        matches!(
+            self.get(v),
+            Type::Function { shape_id: Some(s), .. }
+                if s == crate::types::BUILT_IN_SET_STATE_ID || s == crate::types::BUILT_IN_DISPATCH_ID
+        )
     }
 }
 
@@ -89,14 +111,42 @@ struct Ctx {
     /// params and globals (upstream propagates more through LoadLocal copies,
     /// which our SSA form has already eliminated).
     names: HashMap<Value, String>,
+    /// Constant index values (for computed member keys). Our array-destructure
+    /// lowering emits `obj[Const(N)]`; upstream models destructuring with a
+    /// *literal* string index (`"0"`/`"1"`), which is how shape properties like
+    /// `useState`'s `0`/`1` resolve. We recover that by folding a constant
+    /// computed key to a literal index.
+    const_index: HashMap<Value, String>,
 }
 
 impl Ctx {
     fn new(cfg: &Cfg, _config: InferConfig) -> Ctx {
-        let mut ctx = Ctx { types: Vec::new(), slot: HashMap::new(), names: HashMap::new() };
+        let mut ctx = Ctx { types: Vec::new(), slot: HashMap::new(), names: HashMap::new(), const_index: HashMap::new() };
         // Seed param names.
         for (p, name) in cfg.params.iter().zip(&cfg.param_names) {
             ctx.names.insert(*p, name.clone());
+        }
+        // Seed constant index strings from constant numeric/string literals.
+        for b in &cfg.blocks {
+            for ins in &b.instrs {
+                if let (Some(r), Op::Const(c)) = (ins.result, &ins.op) {
+                    let s = match c {
+                        crate::cfg::Const::Num(bits) => {
+                            let f = f64::from_bits(*bits);
+                            if f.is_finite() && f.fract() == 0.0 && f >= 0.0 {
+                                Some((f as u64).to_string())
+                            } else {
+                                None
+                            }
+                        }
+                        crate::cfg::Const::Str(s) => Some(s.clone()),
+                        _ => None,
+                    };
+                    if let Some(s) = s {
+                        ctx.const_index.insert(r, s);
+                    }
+                }
+            }
         }
         ctx
     }
@@ -271,8 +321,15 @@ impl Ctx {
                             PropertyNameKind::Literal { value: PropertyLiteral::String(name.clone()) }
                         }
                         MemberKey::Computed(c) => {
-                            let prop_type = self.get_type(*c);
-                            PropertyNameKind::Computed { value: Box::new(prop_type) }
+                            // A constant index (e.g. array-destructure `obj[1]`)
+                            // resolves like a literal property, matching upstream's
+                            // string-indexed destructuring.
+                            if let Some(idx) = self.const_index.get(c).cloned() {
+                                PropertyNameKind::Literal { value: PropertyLiteral::String(idx) }
+                            } else {
+                                let prop_type = self.get_type(*c);
+                                PropertyNameKind::Computed { value: Box::new(prop_type) }
+                            }
                         }
                     };
                     let left = self.get_type(r);

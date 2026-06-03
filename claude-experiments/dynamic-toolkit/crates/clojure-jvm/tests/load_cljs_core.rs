@@ -78,7 +78,8 @@ fn load_cljs_core_progressively() {
             if eval_outcome.is_ok() { "Ok" } else { "Err" }
         );
         if let Err(err) = eval_outcome {
-            let msg = LAST_PANIC.with(|p| p.borrow().clone())
+            let msg = LAST_PANIC
+                .with(|p| p.borrow().clone())
                 .unwrap_or_else(|| panic_msg(&*err));
             eprintln!("[cljs] form {i} EVAL PANIC: {msg}");
             if std::env::var("CLJVM_LOADER_SKIP_PANICS").is_ok() {

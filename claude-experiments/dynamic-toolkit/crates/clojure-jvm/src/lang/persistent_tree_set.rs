@@ -22,7 +22,9 @@ pub struct PersistentTreeSet {
 impl PersistentTreeSet {
     /// Java: `PersistentTreeSet.EMPTY`.
     pub fn empty() -> Arc<Self> {
-        Arc::new(PersistentTreeSet { map: PersistentTreeMap::empty() })
+        Arc::new(PersistentTreeSet {
+            map: PersistentTreeMap::empty(),
+        })
     }
 
     /// Java: `PersistentTreeSet.create(ISeq init)` — natural ordering.
@@ -52,21 +54,29 @@ impl PersistentTreeSet {
         })
     }
 
-    pub fn count(&self) -> i32 { self.map.count() }
-    pub fn contains(&self, x: &Object) -> bool { self.map.contains_key(x) }
+    pub fn count(&self) -> i32 {
+        self.map.count()
+    }
+    pub fn contains(&self, x: &Object) -> bool {
+        self.map.contains_key(x)
+    }
 
     pub fn cons(self: &Arc<Self>, x: Object) -> Arc<Self> {
         if self.contains(&x) {
             return self.clone();
         }
-        Arc::new(PersistentTreeSet { map: self.map.assoc(x, Object::Nil) })
+        Arc::new(PersistentTreeSet {
+            map: self.map.assoc(x, Object::Nil),
+        })
     }
 
     pub fn disjoin(self: &Arc<Self>, x: &Object) -> Arc<Self> {
         if !self.contains(x) {
             return self.clone();
         }
-        Arc::new(PersistentTreeSet { map: self.map.without(x) })
+        Arc::new(PersistentTreeSet {
+            map: self.map.without(x),
+        })
     }
 
     pub fn iter(&self) -> impl Iterator<Item = Object> + '_ {

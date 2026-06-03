@@ -226,15 +226,33 @@ impl<'t> Parser<'t> {
             TokenKind::Struct => self.parse_struct_def(),
             TokenKind::Enum => self.parse_enum_def(),
             TokenKind::Extern => self.parse_extern_def(),
+            TokenKind::State => self.parse_state_def(),
             _ => {
                 let t = self.peek();
                 Err(ParseError::Unexpected {
-                    expected: "`def`, `struct`, `enum`, or `extern`".to_owned(),
+                    expected: "`def`, `struct`, `enum`, `extern`, or `state`".to_owned(),
                     found: t.kind.to_string(),
                     span: t.span,
                 })
             }
         }
+    }
+
+    /// `state name: type = init` — a node-resident singleton binding.
+    fn parse_state_def(&mut self) -> Result<SurfaceDef, ParseError> {
+        let start = self.peek().span.start;
+        self.expect(&TokenKind::State, "`state`")?;
+        let (name, _) = self.expect_ident("state binding name")?;
+        self.expect(&TokenKind::Colon, "`:`")?;
+        let ty = self.parse_type()?;
+        self.expect(&TokenKind::Eq, "`=`")?;
+        let init = self.parse_expr()?;
+        let end = init.span().end;
+        Ok(SurfaceDef {
+            name,
+            span: Span { start, end },
+            kind: SurfaceDefKind::State { ty, init },
+        })
     }
 
     /// `extern fn name(params) -> ret` — no body. Declares a
@@ -755,8 +773,31 @@ impl<'t> Parser<'t> {
         let mut e = self.parse_atom()?;
         loop {
             match self.peek_kind() {
-                TokenKind::LParen => {
+                // Turbofish: `callee::<T, ...>(args)`. The `::<...>` MUST be
+                // immediately followed by a call — it names explicit type
+                // arguments for that call.
+                TokenKind::ColonColon => {
                     self.bump();
+                    self.expect(&TokenKind::Lt, "`<` after `::`")?;
+                    let mut type_args = Vec::new();
+                    if !matches!(self.peek_kind(), TokenKind::Gt) {
+                        loop {
+                            type_args.push(self.parse_type()?);
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                            if matches!(self.peek_kind(), TokenKind::Gt) {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect(&TokenKind::Gt, "`>`")?;
+                    self.expect(&TokenKind::LParen, "`(` (turbofish must be followed by a call)")?;
+                    // Inside the `(...)`, struct literals are unambiguous (the
+                    // `)` delimits them), so re-enable them even if we're in a
+                    // struct-lit-suppressed context (an `if`/`match` head).
+                    let prev_sl = self.allow_struct_lit;
+                    self.allow_struct_lit = true;
                     let mut args = Vec::new();
                     if !matches!(self.peek_kind(), TokenKind::RParen) {
                         loop {
@@ -769,6 +810,7 @@ impl<'t> Parser<'t> {
                             }
                         }
                     }
+                    self.allow_struct_lit = prev_sl;
                     let end_tok = self.expect(&TokenKind::RParen, "`)`")?;
                     let span = Span {
                         start: e.span().start,
@@ -777,6 +819,38 @@ impl<'t> Parser<'t> {
                     e = SurfaceExpr::Call {
                         callee: Box::new(e),
                         args,
+                        type_args,
+                        span,
+                    };
+                }
+                TokenKind::LParen => {
+                    self.bump();
+                    // Re-enable struct literals inside the argument list — the
+                    // `)` disambiguates, even in an `if`/`match` head.
+                    let prev_sl = self.allow_struct_lit;
+                    self.allow_struct_lit = true;
+                    let mut args = Vec::new();
+                    if !matches!(self.peek_kind(), TokenKind::RParen) {
+                        loop {
+                            args.push(self.parse_expr()?);
+                            if !self.eat(&TokenKind::Comma) {
+                                break;
+                            }
+                            if matches!(self.peek_kind(), TokenKind::RParen) {
+                                break;
+                            }
+                        }
+                    }
+                    self.allow_struct_lit = prev_sl;
+                    let end_tok = self.expect(&TokenKind::RParen, "`)`")?;
+                    let span = Span {
+                        start: e.span().start,
+                        end: end_tok.span.end,
+                    };
+                    e = SurfaceExpr::Call {
+                        callee: Box::new(e),
+                        args,
+                        type_args: Vec::new(),
                         span,
                     };
                 }
@@ -861,7 +935,13 @@ impl<'t> Parser<'t> {
             }
             TokenKind::LParen => {
                 self.bump();
+                // A parenthesized expression: struct literals are unambiguous
+                // here (the `)` delimits), so re-enable them even inside an
+                // `if`/`match` head.
+                let prev_sl = self.allow_struct_lit;
+                self.allow_struct_lit = true;
                 let inner = self.parse_expr()?;
+                self.allow_struct_lit = prev_sl;
                 self.expect(&TokenKind::RParen, "`)`")?;
                 Ok(inner)
             }
@@ -1388,6 +1468,41 @@ mod tests {
     fn missing_arrow_error() {
         let err = parse_def("def f(x: Int) Int = x").unwrap_err();
         assert!(matches!(err, ParseError::Unexpected { ref expected, .. } if expected == "`->`"));
+    }
+
+    #[test]
+    fn struct_literal_in_call_args_and_match_head() {
+        // A struct literal is unambiguous inside a call's parens, so it must
+        // parse as a non-last argument AND inside an `if`/`match` head (where
+        // a bare `Ident { … }` would otherwise be a suppressed struct lit).
+        let src = "
+            struct P { x: Int, y: Int }
+            def f(a: P, b: Int) -> Int = b
+            def mid() -> Int = f(P { x: 1, y: 2 }, 7)
+            def in_match() -> Int =
+                match f(P { x: 1, y: 2 }, 7) { _ => 0 }
+            def in_if() -> Int =
+                if f(P { x: 1, y: 2 }, 7) == 7 { 1 } else { 0 }
+        ";
+        let m = parse_module(src).unwrap();
+        assert_eq!(m.defs.len(), 5);
+    }
+
+    #[test]
+    fn parses_state_binding() {
+        let src = "
+            state counter: Atom<Int> = atom(0)
+            def handle(d: Int) -> Int = swap(counter, |n: Int| n + d)
+        ";
+        let m = parse_module(src).unwrap();
+        assert_eq!(m.defs.len(), 2);
+        assert_eq!(m.defs[0].name, "counter");
+        match &m.defs[0].kind {
+            SurfaceDefKind::State { ty, .. } => {
+                assert!(matches!(ty, SurfaceType::Applied { name, .. } if name == "Atom"));
+            }
+            other => panic!("expected State, got {:?}", other),
+        }
     }
 
     #[test]

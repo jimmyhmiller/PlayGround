@@ -79,10 +79,7 @@ fn quoted_keyword_unchanged() {
 #[test]
 fn vector_inside_function_body() {
     // Vectors should be self-evaluating inside a function body.
-    assert_eq!(
-        eval_str("(def f (fn [] [1 2 3])) (f)"),
-        "[1 2 3]"
-    );
+    assert_eq!(eval_str("(def f (fn [] [1 2 3])) (f)"), "[1 2 3]");
 }
 
 #[test]
@@ -123,10 +120,7 @@ fn keyword_equality() {
 fn keyword_equality_via_let_binding() {
     // First binding holds a keyword; comparing against a fresh
     // literal of the same name must still hit the interned object.
-    assert_eq!(
-        eval_str("(let [k :marker] (= k :marker))"),
-        "true"
-    );
+    assert_eq!(eval_str("(let [k :marker] (= k :marker))"), "true");
 }
 
 #[test]
@@ -145,7 +139,9 @@ fn many_strings_in_one_vector() {
     // the printed output is garbled (or the process crashes).
     let mut src = String::from("[");
     for i in 0..200 {
-        if i > 0 { src.push(' '); }
+        if i > 0 {
+            src.push(' ');
+        }
         src.push_str(&format!("\"s{}\"", i));
     }
     src.push(']');
@@ -159,7 +155,9 @@ fn many_strings_in_one_vector() {
 fn many_keywords_in_one_set() {
     let mut src = String::from("#{");
     for i in 0..200 {
-        if i > 0 { src.push(' '); }
+        if i > 0 {
+            src.push(' ');
+        }
         src.push_str(&format!(":k{}", i));
     }
     src.push('}');
@@ -170,8 +168,5 @@ fn many_keywords_in_one_set() {
 
 #[test]
 fn quoted_list_inside_function_body() {
-    assert_eq!(
-        eval_str("(def f (fn [] '(a b))) (f)"),
-        "(a b)"
-    );
+    assert_eq!(eval_str("(def f (fn [] '(a b))) (f)"), "(a b)");
 }

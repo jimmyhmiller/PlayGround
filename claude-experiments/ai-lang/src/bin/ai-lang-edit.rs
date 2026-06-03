@@ -260,6 +260,7 @@ fn render_scheme(s: &TypeScheme) -> String {
                 .collect();
             format!("enum {{ {} }}", vs.join(" | "))
         }
+        TypeScheme::State { ty } => format!("state {}", render_type(ty)),
     }
 }
 

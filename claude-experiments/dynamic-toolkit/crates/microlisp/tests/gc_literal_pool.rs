@@ -13,7 +13,10 @@ fn cons_quote_literal_routes_through_pool() {
     // Define a function whose body returns the cons quote-literal '(1 2 3).
     e.run_source("(define (lit) '(1 2 3))");
     // Pool should now have at least one entry — the cons cell.
-    assert!(e.literal_pool().len() >= 1, "expected at least one literal in pool");
+    assert!(
+        e.literal_pool().len() >= 1,
+        "expected at least one literal in pool"
+    );
 
     // Calling the function should return a cons whose car/cdr unwrap to 1, 2, 3.
     let r = e.run_source("(lit)");
@@ -119,7 +122,10 @@ fn non_pointer_literals_stay_inline() {
          (define (z) nil)",
     );
     let pool_after = e.literal_pool().len();
-    assert_eq!(pool_after, pool_before, "non-pointer quote literals should not enter the pool");
+    assert_eq!(
+        pool_after, pool_before,
+        "non-pointer quote literals should not enter the pool"
+    );
 
     assert_eq!(as_number(e.run_source("(n)")), 42.0);
     assert!(is_symbol(e.run_source("(s)")));

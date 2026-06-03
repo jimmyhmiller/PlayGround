@@ -278,13 +278,57 @@ pub fn compile(src: &str) -> Result<String, String> {
     let mut cfg = crate::lower::lower_function(&ir)?;
     crate::ssa::construct(&mut cfg);
     crate::constfold::fold_constants(&mut cfg);
+    // Effect-based validation bail: React errors (and emits the source
+    // unchanged, no memoization) when render mutates a frozen value (props /
+    // state / hook-frozen), reassigns/mutates a global, or calls an impure
+    // function. The effect system surfaces these as `Error` effects; if any
+    // fired, pass through rather than memoize an `error.*` fixture.
+    {
+        let is_comp = crate::types::is_react_like_name(cfg.fn_name.as_deref().unwrap_or(""));
+        let mut shapes = crate::types::build_builtin_shapes();
+        let globals = crate::types::build_default_globals(&mut shapes);
+        let types = crate::infer_types::infer(&cfg, &shapes, &globals, is_comp, Default::default());
+        // Rules-of-Hooks: a conditional hook call or a hook used as a value is
+        // always an error.
+        if crate::validate::invalid_hook_usage(&cfg, &types, &shapes) {
+            return jsir_swc::ir_to_source(&ir);
+        }
+        // `@validateNoSetStateInRender`: calling a state setter during render.
+        if crate::validate::has_pragma(src, "validateNoSetStateInRender")
+            && crate::validate::calls_set_state_in_render(&cfg, &types)
+        {
+            return jsir_swc::ir_to_source(&ir);
+        }
+        // `@validateNoCapitalizedCalls`: invoking a capitalized (component-like)
+        // identifier as a plain function.
+        if crate::validate::has_pragma(src, "validateNoCapitalizedCalls")
+            && crate::validate::calls_capitalized(&cfg)
+        {
+            return jsir_swc::ir_to_source(&ir);
+        }
+        // `eval` is unanalyzable — always a bail.
+        if crate::validate::calls_eval(&cfg) {
+            return jsir_swc::ir_to_source(&ir);
+        }
+        // `@validateNoImpureFunctionsInRender`: Date.now / Math.random / etc.
+        if crate::validate::has_pragma(src, "validateNoImpureFunctionsInRender")
+            && crate::validate::calls_impure_in_render(&cfg)
+        {
+            return jsir_swc::ir_to_source(&ir);
+        }
+        // Mutation/freeze/global validation via the effect system.
+        let eff = crate::infer_effects::infer(&cfg, &types, &shapes, is_comp);
+        if !eff.errors().is_empty() {
+            return jsir_swc::ir_to_source(&ir);
+        }
+    }
     // We compile every function, matching React's test harness
     // (`compilationMode: 'all'`) rather than the production `'infer'` gate (which
     // only compiles components/hooks). The analysis is name-agnostic, so a
     // helper that memoizes nothing still falls through to the `cache_size == 0`
     // pass-through below. `is_component_or_hook` is retained for callers that
     // want the production policy.
-    let r = crate::mutability::analyze(&cfg);
+    let r = crate::aliasing_ranges::analyze(&cfg);
     let infos = crate::scopes::analyze(&cfg, &r);
     let layout = crate::memoize_plan::build_layout(&cfg, &infos, &r)?;
     // Nothing actually memoized (no surviving escaping scope): emit the function

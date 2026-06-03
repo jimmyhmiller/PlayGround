@@ -42,6 +42,19 @@ pub enum Expr {
     /// appear during hashing.
     SelfRef(u32),
 
+    /// Reference to a node-resident `state` binding by its content hash.
+    /// Evaluates to the binding's single live cell on the executing node
+    /// (a load from the node state table), NOT to a re-run of its
+    /// initializer. The state-analogue of `TopRef`; a leaf with no
+    /// children. Travels over the wire and is stored in the knowledge base.
+    StateRef(Hash),
+
+    /// Reference to a `state` member of the currently-being-hashed
+    /// mutually-recursive component, by member index. The state-analogue
+    /// of `SelfRef`: the resolver rewrites it to `StateRef(real_hash)` in
+    /// stored copies, so it only ever appears in the bytes that get hashed.
+    StateSelfRef(u32),
+
     /// Reference to a builtin by stable string id.
     BuiltinRef(String),
 
@@ -254,5 +267,17 @@ pub enum Def {
     Enum {
         type_params: u32,
         variants: Vec<(String, Option<Type>)>,
+    },
+
+    /// Node-resident `state NAME: ty = init` singleton binding. `init` is
+    /// an arbitrary expression of type `ty`, resolved like a (zero-param)
+    /// def body; it may reference defs, builtins, and other states. The
+    /// content hash over `(ty, init)` is the binding's node identity:
+    /// installing the same hash twice on a node is a no-op, so the
+    /// initializer runs exactly once per node. References compile to
+    /// `Expr::StateRef(hash)`.
+    State {
+        ty: Type,
+        init: Expr,
     },
 }

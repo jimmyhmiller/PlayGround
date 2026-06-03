@@ -52,9 +52,7 @@ fn catch_handler_runs_with_thrown_value() {
 #[test]
 fn try_body_with_multiple_forms() {
     let e = Engine::new();
-    let v = e.eval(
-        "(try (+ 1 2) (+ 3 4) (throw :late) (catch _ e e))",
-    );
+    let v = e.eval("(try (+ 1 2) (+ 3 4) (throw :late) (catch _ e e))");
     assert_eq!(e.print(v), ":late");
 }
 
@@ -269,9 +267,7 @@ fn finally_value_ignored_normal_exit() {
 #[test]
 fn finally_value_ignored_caught_exit() {
     let e = Engine::new();
-    let v = e.eval(
-        "(try (throw :boom) (catch _ e :caught) (finally :ignored))",
-    );
+    let v = e.eval("(try (throw :boom) (catch _ e :caught) (finally :ignored))");
     assert_eq!(e.print(v), ":caught");
 }
 
@@ -279,9 +275,7 @@ fn finally_value_ignored_caught_exit() {
 fn finally_side_effect_normal_exit() {
     let e = Engine::new();
     e.eval("(def log (atom :before))");
-    let v = e.eval(
-        "(try 99 (catch _ e :u) (finally (reset! log :after)))",
-    );
+    let v = e.eval("(try 99 (catch _ e :u) (finally (reset! log :after)))");
     assert_eq!(e.print(v), "99");
     let log = e.eval("@log");
     assert_eq!(e.print(log), ":after");

@@ -370,7 +370,7 @@ pub fn mem2reg(func: &mut Function) {
                 if let Some(&slot_idx) = addr_to_slot.get(&v) {
                     // This value is a StackAddr result. Check if this usage is valid.
                     match &inst_node.inst {
-                        Inst::Load(_, addr, 0) if *addr == v => {} // OK
+                        Inst::Load(_, addr, 0) if *addr == v => {}  // OK
                         Inst::Store(_, addr, 0) if *addr == v => {} // OK
                         _ => {
                             // Used in non-promotable context
@@ -402,13 +402,7 @@ pub fn mem2reg(func: &mut Function) {
     let promote_slots: Vec<SlotInfo> = slot_infos
         .into_iter()
         .enumerate()
-        .filter_map(|(i, info)| {
-            if promotable[i] {
-                info
-            } else {
-                None
-            }
-        })
+        .filter_map(|(i, info)| if promotable[i] { info } else { None })
         .collect();
 
     if promote_slots.is_empty() {
@@ -532,8 +526,7 @@ pub fn mem2reg(func: &mut Function) {
                             let current = *state.stacks[local_idx].last().unwrap();
                             let load_val = func.blocks[block_idx].insts[inst_idx].value.unwrap();
                             replace_all_uses(func, load_val, current);
-                            func.blocks[block_idx].insts[inst_idx].inst =
-                                Inst::Iconst(Type::I8, 0);
+                            func.blocks[block_idx].insts[inst_idx].inst = Inst::Iconst(Type::I8, 0);
                             func.blocks[block_idx].insts[inst_idx].value = None;
                         }
                     }
@@ -544,8 +537,7 @@ pub fn mem2reg(func: &mut Function) {
                             // Store to promoted slot → update current definition
                             let stored_val = *val;
                             state.stacks[local_idx].push(stored_val);
-                            func.blocks[block_idx].insts[inst_idx].inst =
-                                Inst::Iconst(Type::I8, 0);
+                            func.blocks[block_idx].insts[inst_idx].inst = Inst::Iconst(Type::I8, 0);
                             func.blocks[block_idx].insts[inst_idx].value = None;
                         }
                     }
@@ -637,7 +629,9 @@ pub fn mem2reg(func: &mut Function) {
 
     // Remove all no-op instructions (value = None and inst is a dummy)
     for block in &mut func.blocks {
-        block.insts.retain(|node| node.value.is_some() || !is_pure(&node.inst));
+        block
+            .insts
+            .retain(|node| node.value.is_some() || !is_pure(&node.inst));
     }
 }
 
@@ -857,7 +851,11 @@ fn eliminate_unreachable_blocks(func: &mut Function) {
             Terminator::ResumeSlice { return_block, .. } => {
                 *return_block = remap(*return_block);
             }
-            Terminator::CaptureSlice { handler_block, resume_block, .. } => {
+            Terminator::CaptureSlice {
+                handler_block,
+                resume_block,
+                ..
+            } => {
                 *handler_block = remap(*handler_block);
                 *resume_block = remap(*resume_block);
             }
@@ -922,13 +920,9 @@ pub fn dead_block_param_elim(func: &mut Function) {
                         // loop phis like `jump bb1(v8)` where v8 is bb1's param
                         // are trivial only if there's another predecessor that
                         // provides a concrete value and they all agree).
-                        let non_self: Vec<Value> = inc.iter()
-                            .copied()
-                            .filter(|&v| v != *val)
-                            .collect();
-                        if !non_self.is_empty()
-                            && non_self.iter().all(|&v| v == non_self[0])
-                        {
+                        let non_self: Vec<Value> =
+                            inc.iter().copied().filter(|&v| v != *val).collect();
+                        if !non_self.is_empty() && non_self.iter().all(|&v| v == non_self[0]) {
                             elim_indices[block_idx].push(param_idx);
                             replacements.push((*val, non_self[0]));
                             any_elim = true;
@@ -1223,23 +1217,17 @@ pub fn constant_fold(func: &mut Function) {
                         fconsts.insert(val, *c);
                     }
                     Inst::Add(a, b) => {
-                        if let (Some((ty, ca)), Some((_, cb))) =
-                            (iconsts.get(a), iconsts.get(b))
-                        {
+                        if let (Some((ty, ca)), Some((_, cb))) = (iconsts.get(a), iconsts.get(b)) {
                             replacements.push((val, Inst::Iconst(*ty, ca.wrapping_add(*cb))));
                         }
                     }
                     Inst::Sub(a, b) => {
-                        if let (Some((ty, ca)), Some((_, cb))) =
-                            (iconsts.get(a), iconsts.get(b))
-                        {
+                        if let (Some((ty, ca)), Some((_, cb))) = (iconsts.get(a), iconsts.get(b)) {
                             replacements.push((val, Inst::Iconst(*ty, ca.wrapping_sub(*cb))));
                         }
                     }
                     Inst::Mul(a, b) => {
-                        if let (Some((ty, ca)), Some((_, cb))) =
-                            (iconsts.get(a), iconsts.get(b))
-                        {
+                        if let (Some((ty, ca)), Some((_, cb))) = (iconsts.get(a), iconsts.get(b)) {
                             replacements.push((val, Inst::Iconst(*ty, ca.wrapping_mul(*cb))));
                         }
                     }
@@ -1264,40 +1252,28 @@ pub fn constant_fold(func: &mut Function) {
                         }
                     }
                     Inst::And(a, b) => {
-                        if let (Some((ty, ca)), Some((_, cb))) =
-                            (iconsts.get(a), iconsts.get(b))
-                        {
+                        if let (Some((ty, ca)), Some((_, cb))) = (iconsts.get(a), iconsts.get(b)) {
                             replacements.push((val, Inst::Iconst(*ty, ca & cb)));
                         }
                     }
                     Inst::Or(a, b) => {
-                        if let (Some((ty, ca)), Some((_, cb))) =
-                            (iconsts.get(a), iconsts.get(b))
-                        {
+                        if let (Some((ty, ca)), Some((_, cb))) = (iconsts.get(a), iconsts.get(b)) {
                             replacements.push((val, Inst::Iconst(*ty, ca | cb)));
                         }
                     }
                     Inst::Xor(a, b) => {
-                        if let (Some((ty, ca)), Some((_, cb))) =
-                            (iconsts.get(a), iconsts.get(b))
-                        {
+                        if let (Some((ty, ca)), Some((_, cb))) = (iconsts.get(a), iconsts.get(b)) {
                             replacements.push((val, Inst::Iconst(*ty, ca ^ cb)));
                         }
                     }
                     Inst::Shl(a, b) => {
-                        if let (Some((ty, ca)), Some((_, cb))) =
-                            (iconsts.get(a), iconsts.get(b))
-                        {
-                            replacements.push((
-                                val,
-                                Inst::Iconst(*ty, ca.wrapping_shl(*cb as u32)),
-                            ));
+                        if let (Some((ty, ca)), Some((_, cb))) = (iconsts.get(a), iconsts.get(b)) {
+                            replacements
+                                .push((val, Inst::Iconst(*ty, ca.wrapping_shl(*cb as u32))));
                         }
                     }
                     Inst::Icmp(op, a, b) => {
-                        if let (Some((_, ca)), Some((_, cb))) =
-                            (iconsts.get(a), iconsts.get(b))
-                        {
+                        if let (Some((_, ca)), Some((_, cb))) = (iconsts.get(a), iconsts.get(b)) {
                             let result = match op {
                                 CmpOp::Eq => ca == cb,
                                 CmpOp::Ne => ca != cb,
@@ -1324,8 +1300,7 @@ pub fn constant_fold(func: &mut Function) {
                             }
                         } else if let Some(&c) = fconsts.get(v) {
                             if *to_ty != Type::F64 {
-                                replacements
-                                    .push((val, Inst::Iconst(*to_ty, c.to_bits() as i64)));
+                                replacements.push((val, Inst::Iconst(*to_ty, c.to_bits() as i64)));
                                 iconsts.insert(val, (*to_ty, c.to_bits() as i64));
                             }
                         }
@@ -1371,13 +1346,13 @@ pub fn constant_fold(func: &mut Function) {
 enum GvnKey {
     Iconst(u8, i64),       // (type discriminant, value)
     F64Const(u64),         // bits
-    BinOp(u8, u32, u32),  // (opcode, left_value_idx, right_value_idx)
-    UnOp(u8, u32),        // (opcode, operand_value_idx)
+    BinOp(u8, u32, u32),   // (opcode, left_value_idx, right_value_idx)
+    UnOp(u8, u32),         // (opcode, operand_value_idx)
     Cmp(u8, u8, u32, u32), // (inst_kind, cmp_op, a, b)
-    Conv(u8, u32, u8),    // (opcode, operand, target_type)
-    TagOp(u8, u32),       // (opcode, operand)
-    MakeTagged(u32, u32), // (tag, payload_value_idx)
-    IsTag(u32, u32),      // (value_idx, tag)
+    Conv(u8, u32, u8),     // (opcode, operand, target_type)
+    TagOp(u8, u32),        // (opcode, operand)
+    MakeTagged(u32, u32),  // (tag, payload_value_idx)
+    IsTag(u32, u32),       // (value_idx, tag)
     StackAddr(u32),        // slot index
 }
 
@@ -1674,9 +1649,7 @@ fn reorder_blocks_with_order(func: &mut Function, order: &[usize]) {
     func.blocks = new_blocks.into_iter().map(|b| b.unwrap()).collect();
 
     // Update all BlockId references
-    let remap = |bid: BlockId| -> BlockId {
-        BlockId::from_index(new_index[bid.index()])
-    };
+    let remap = |bid: BlockId| -> BlockId { BlockId::from_index(new_index[bid.index()]) };
 
     for block in &mut func.blocks {
         match &mut block.terminator {
@@ -1712,7 +1685,11 @@ fn reorder_blocks_with_order(func: &mut Function, order: &[usize]) {
             Terminator::ResumeSlice { return_block, .. } => {
                 *return_block = remap(*return_block);
             }
-            Terminator::CaptureSlice { handler_block, resume_block, .. } => {
+            Terminator::CaptureSlice {
+                handler_block,
+                resume_block,
+                ..
+            } => {
                 *handler_block = remap(*handler_block);
                 *resume_block = remap(*resume_block);
             }

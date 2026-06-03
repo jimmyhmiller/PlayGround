@@ -45,6 +45,16 @@ pub enum Bop {
     Ge,
     Eq,  // ===
     Ne,  // !==
+    // Bitwise / shift. JS evaluates these with 32-bit integer semantics
+    // (`ToInt32`/`ToUint32`), so they fold to constants on static integers,
+    // which is essential for specializing bytecode interpreters whose dispatch
+    // is `switch (pc & mask)`.
+    BitAnd, // &
+    BitOr,  // |
+    BitXor, // ^
+    Shl,    // <<
+    Shr,    // >>  (arithmetic / sign-propagating)
+    UShr,   // >>> (logical / zero-fill)
 }
 
 impl Bop {
@@ -59,6 +69,12 @@ impl Bop {
             Bop::Ge => ">=",
             Bop::Eq => "===",
             Bop::Ne => "!==",
+            Bop::BitAnd => "&",
+            Bop::BitOr => "|",
+            Bop::BitXor => "^",
+            Bop::Shl => "<<",
+            Bop::Shr => ">>",
+            Bop::UShr => ">>>",
         }
     }
 }
@@ -194,6 +210,10 @@ pub struct FuncDef {
     pub nparams: usize,
     #[allow(dead_code)] // documentation for demo readers
     pub slot_names: Vec<&'static str>,
+    /// If this function references `arguments`, the slot the lowerer reserved
+    /// for it. The engine fills it with an array of the actual call arguments on
+    /// the inline path (`arguments.length` / `arguments[i]` then read it).
+    pub arguments_slot: Option<usize>,
     pub body: Vec<Stmt>,
 }
 
@@ -211,6 +231,11 @@ enum Instr {
     PushThis,
     Load(usize),
     Store(usize),
+    /// Bind the top-of-stack value to a fresh residual temp if it is dynamic, so
+    /// it is stable across a following effect. Used for the result of a *postfix*
+    /// `x++` whose place residualizes: the old value must be captured before the
+    /// write, otherwise the residual re-reads the (already-incremented) place.
+    Snapshot,
     Bin(Bop),
     NewObject(Vec<String>),
     NewArray(usize),
@@ -226,7 +251,11 @@ enum Instr {
     MakeClosure(usize, usize), // fid, ncaptures
     Call(usize),               // nargs
     NewOp(usize),              // new callee(args), nargs — pops args then callee
-    PushHandler { catch_pc: usize, exc_slot: Option<usize> }, // begin a try region
+    /// Begin a try region. `catch_pc` is where the catch starts, `body_end` is
+    /// the `PopHandler` pc (normal-completion boundary of the body), and `end` is
+    /// the pc just past the catch (the join after the whole try). The latter two
+    /// bound the body/catch sub-programs when a try must residualize.
+    PushHandler { catch_pc: usize, exc_slot: Option<usize>, body_end: usize, end: usize },
     PopHandler,                // end a try region (normal completion)
     Throw,                     // pop a value and unwind to the nearest handler
     PushGlobal(String),        // push an opaque runtime global by name
@@ -299,6 +328,15 @@ pub enum Op {
     Throw(RExpr),
     /// `name = expr` — write to a runtime global (an undeclared assignment).
     AssignGlobal { name: String, expr: RExpr },
+    /// A residual `try { body } catch (vN?) { catch_body }`. Emitted when a `try`
+    /// body cannot fully specialize (it contains an operation that may throw at
+    /// runtime), so the catch must run at runtime. `body`/`catch_body` are nested
+    /// residual programs; the exception binds to slot `catch_slot`.
+    Try {
+        body: Program<Op, Cond>,
+        catch_slot: Option<usize>,
+        catch_body: Program<Op, Cond>,
+    },
 }
 
 #[derive(Debug)]
@@ -368,11 +406,16 @@ enum HeapObj {
     Builtin { kind: String, data: Vec<Abs> },
 }
 
-/// The abstract heap. A *persistent* vector so that cloning a `State` (which
-/// happens at every branch, jump, loop probe, and memo insert) shares structure
-/// with its parent instead of deep-copying every object: clone is O(1) and an
-/// update is O(log n). Addresses are dense indices, append-only via `push_back`.
-type Heap = im::Vector<HeapObj>;
+/// The abstract heap: a *persistent* map from address to object. Persistent so
+/// that cloning a `State` (at every branch, jump, loop probe, and memo insert)
+/// shares structure instead of deep-copying (clone O(1), update O(log n)).
+///
+/// A *map* rather than a vector because the heap is garbage-collected: dead
+/// objects are reclaimed (see `State::gc`) so it stays bounded by the live set.
+/// Addresses come from a monotonic counter and are NEVER reused, so reclaiming
+/// an object can never alias its address (and hence its `escape_var` residual
+/// name) to a later, different object.
+type Heap = im::OrdMap<usize, HeapObj>;
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 struct Frame {
@@ -393,13 +436,37 @@ struct Handler {
     ostack_depth: usize,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Clone, Debug)]
 pub struct State {
     frames: Vec<Frame>,
     heap: Heap,
+    /// Next heap address to hand out. Monotonic: never reset, never reused, so a
+    /// reclaimed address is gone for good and its `escape_var` name is unique.
+    /// NOT part of the state's identity (see `PartialEq`/`Hash` below): it is an
+    /// allocation-numbering detail, so two otherwise-equal states must memoize to
+    /// the same residual block regardless of how many addresses they have spent.
+    next_addr: usize,
     pending_joins: Vec<(usize, Vec<usize>)>,
     /// Stack of active `try` handlers (innermost last).
     handlers: Vec<Handler>,
+}
+
+impl PartialEq for State {
+    fn eq(&self, o: &Self) -> bool {
+        self.frames == o.frames
+            && self.heap == o.heap
+            && self.pending_joins == o.pending_joins
+            && self.handlers == o.handlers
+    }
+}
+impl Eq for State {}
+impl std::hash::Hash for State {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        self.frames.hash(h);
+        self.heap.hash(h);
+        self.pending_joins.hash(h);
+        self.handlers.hash(h);
+    }
 }
 
 impl State {
@@ -408,6 +475,39 @@ impl State {
     }
     fn top_mut(&mut self) -> &mut Frame {
         self.frames.last_mut().unwrap()
+    }
+
+    /// Allocate `obj` at a fresh, never-reused address.
+    fn alloc(&mut self, obj: HeapObj) -> usize {
+        let addr = self.next_addr;
+        self.next_addr += 1;
+        self.heap.insert(addr, obj);
+        addr
+    }
+
+    /// Reclaim heap objects unreachable from the frames so the abstract heap
+    /// stays bounded by the live set (the append-only growth is what made
+    /// specializing long static computations quadratic). Addresses are not
+    /// renumbered: survivors keep their address, so no residual variable name
+    /// shifts. Roots are every `Ref` in the frames' locals and operand stacks;
+    /// reachability follows object/array/closure/built-in children.
+    fn gc(&mut self) {
+        let mut live = std::collections::HashSet::new();
+        for f in &self.frames {
+            for v in f.locals.iter().chain(f.ostack.iter()) {
+                if let Abs::Ref(addr) = v {
+                    Js::reachable(&self.heap, *addr, &mut live);
+                }
+            }
+        }
+        if live.len() != self.heap.len() {
+            self.heap = self
+                .heap
+                .iter()
+                .filter(|(addr, _)| live.contains(*addr))
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+        }
     }
 }
 
@@ -569,19 +669,29 @@ fn compile_stmts(stmts: &[Stmt], code: &mut Vec<Instr>, aux: &mut CompileAux) {
             }
             Stmt::Try { body, catch_slot, catch_body } => {
                 let ph = code.len();
-                code.push(Instr::PushHandler { catch_pc: 0, exc_slot: *catch_slot });
+                code.push(Instr::PushHandler {
+                    catch_pc: 0,
+                    exc_slot: *catch_slot,
+                    body_end: 0,
+                    end: 0,
+                });
                 compile_stmts(body, code, aux);
+                let body_end = code.len();
                 code.push(Instr::PopHandler);
                 let jmp = code.len();
                 code.push(Instr::Jmp(0)); // normal completion skips the catch
                 let catch_pc = code.len();
-                if let Instr::PushHandler { catch_pc: cp, .. } = &mut code[ph] {
-                    *cp = catch_pc;
-                }
                 aux.catch_pcs.push(catch_pc);
                 compile_stmts(catch_body, code, aux);
                 let end = code.len();
                 patch(&mut code[jmp], end);
+                if let Instr::PushHandler { catch_pc: cp, body_end: be, end: en, .. } =
+                    &mut code[ph]
+                {
+                    *cp = catch_pc;
+                    *be = body_end;
+                    *en = end;
+                }
             }
         }
     }
@@ -827,6 +937,10 @@ fn compile_update(place: &Expr, op: Bop, prefix: bool, code: &mut Vec<Instr>) {
         compile_expr(place, code); // read the new value
     } else {
         compile_expr(place, code); // read the old value (the result)
+        // Capture it before the store: if the place residualizes, the store
+        // mutates it, and an un-snapshotted dynamic old value would re-read the
+        // new value at runtime.
+        code.push(Instr::Snapshot);
         emit_store(code);
     }
 }
@@ -858,7 +972,15 @@ pub struct Js {
     nslots: Vec<usize>,
     ncaptured: Vec<usize>,
     nparams: Vec<usize>,
+    /// Per function, the slot to fill with an `arguments` array on inline (if the
+    /// function references `arguments`).
+    arguments_slot: Vec<Option<usize>>,
     is_recursive: Vec<bool>,
+    /// Whether each function contains a `try`. Such a function is never inlined:
+    /// it is residualized as a function so a `return` in its body is a real
+    /// function return, not a `return` from whatever inlined it (which would, for
+    /// a residual `try`, exit the caller early).
+    has_try: Vec<bool>,
     /// Source name of each function (for recognizing built-ins overridden by a
     /// user definition, e.g. a hand-rolled `TextDecoder`).
     names: Vec<String>,
@@ -872,6 +994,32 @@ pub struct Js {
     /// Memo: source fid -> residual fid (captures are passed as runtime args, so
     /// one residual function per source function).
     fn_memo: std::cell::RefCell<HashMap<usize, usize>>,
+    /// Stack of `pc`s at which the current (sub-)specialization must stop (treat
+    /// as `Halt`). Used to bound a residual `try`'s body/catch sub-programs and
+    /// the foldability probe to their region. Empty for the main run.
+    halt_at: std::cell::RefCell<Vec<usize>>,
+    /// Catch-`pc`s of residual `try`s currently being specialized (innermost
+    /// last). A residual `try`'s `catch`/`body` is specialized as a fresh nested
+    /// `specialize` call; if a `continue`/`break` inside it jumps back to an
+    /// enclosing loop head, that nested call re-enters the *same* residual `try`,
+    /// which would recurse forever (each nested call has its own memo, so it
+    /// never converges). We detect the re-entry and raise a clear, bounded error
+    /// instead of overflowing the stack. (Properly threading the non-local exit
+    /// out of the residual sub-program is future work.)
+    residual_try_stack: std::cell::RefCell<Vec<usize>>,
+    /// True while running the foldability probe for a `try`: a would-be
+    /// `forbid_residual_in_try` records taint instead of aborting.
+    probing: std::cell::Cell<bool>,
+    /// Set by the probe when the try body would emit a may-throw residual op, so
+    /// the engine knows the try must residualize instead of fold inline.
+    try_taint: std::cell::Cell<bool>,
+    /// True while specializing a residual `try`'s body/catch: a write to a
+    /// *top-frame* local emits a residual assignment immediately (in source
+    /// order) rather than only updating the abstract local. This keeps effects
+    /// ordered with respect to may-throw residual ops, so a throw partway through
+    /// the body leaves the same partial state as the original. (Inlined callees,
+    /// at greater frame depth, still fold normally.)
+    eager_stores: std::cell::Cell<bool>,
 }
 
 /// A generated residual function: `function __rf{id}(cap.., param..) { body }`.
@@ -888,6 +1036,7 @@ impl Js {
         let mut nslots = vec![0; program.len()];
         let mut ncaptured = vec![0; program.len()];
         let mut nparams = vec![0; program.len()];
+        let arguments_slot: Vec<Option<usize>> = program.iter().map(|f| f.arguments_slot).collect();
         let mut aux = CompileAux::default();
 
         for (fid, f) in program.iter().enumerate() {
@@ -966,6 +1115,14 @@ impl Js {
         let is_recursive = compute_recursive(&entries, &code, program.len());
         let main = program.iter().position(|f| f.name == "main").expect("need main");
         let names = program.iter().map(|f| f.name.to_string()).collect();
+        // A function "has a try" if its own code (not callees) contains a handler.
+        let has_try: Vec<bool> = (0..program.len())
+            .map(|fid| {
+                let lo = entries[fid];
+                let hi = entries.get(fid + 1).copied().unwrap_or(code.len());
+                code[lo..hi].iter().any(|i| matches!(i, Instr::PushHandler { .. }))
+            })
+            .collect();
 
         Js {
             code,
@@ -978,11 +1135,18 @@ impl Js {
             nslots,
             ncaptured,
             nparams,
+            arguments_slot,
             is_recursive,
+            has_try,
             names,
             main,
             residual_fns: std::cell::RefCell::new(Vec::new()),
             fn_memo: std::cell::RefCell::new(HashMap::new()),
+            halt_at: std::cell::RefCell::new(Vec::new()),
+            residual_try_stack: std::cell::RefCell::new(Vec::new()),
+            probing: std::cell::Cell::new(false),
+            try_taint: std::cell::Cell::new(false),
+            eager_stores: std::cell::Cell::new(false),
         }
     }
 
@@ -1026,9 +1190,35 @@ impl Js {
         for j in 0..nparams {
             locals[ncap + j] = Abs::Dyn(RExpr::Var(Js::residual_param_var(rfid, j)));
         }
+        // A residualized function runs as a real JS function, so its `arguments`
+        // reads the native `arguments`. But the residual binds the closure's
+        // captures as *leading* parameters (`__rfN.bind(null, cap0, ...)`), so
+        // native `arguments` also contains those captures. The real call args are
+        // everything after them: `Array.prototype.slice.call(arguments, ncap)`.
+        // (For a capture-free function `ncap == 0`, this is just the args.) The
+        // expression is pure, so reading it per use is sound.
+        if let Some(aslot) = self.arguments_slot[fid] {
+            if aslot < locals.len() {
+                let slice_call = RExpr::Get(
+                    Box::new(RExpr::Get(
+                        Box::new(RExpr::Get(
+                            Box::new(RExpr::Global("Array".to_string())),
+                            "prototype".to_string(),
+                        )),
+                        "slice".to_string(),
+                    )),
+                    "call".to_string(),
+                );
+                locals[aslot] = Abs::Dyn(RExpr::Call(
+                    Box::new(slice_call),
+                    vec![RExpr::Var(ARGUMENTS_VAR_ID), RExpr::Num(ncap as i64)],
+                ));
+            }
+        }
         let start = State {
             frames: vec![Frame { pc: self.entries[fid], func: fid, locals, ostack: Vec::new() }],
             heap: Heap::new(),
+            next_addr: 0,
             pending_joins: Vec::new(),
             handlers: Vec::new(),
         };
@@ -1051,6 +1241,7 @@ impl Js {
                 ostack: Vec::new(),
             }],
             heap: Heap::new(),
+            next_addr: 0,
             pending_joins: Vec::new(),
             handlers: Vec::new(),
         }
@@ -1060,6 +1251,13 @@ impl Js {
         0
     }
 
+    /// Fold a binary operator over abstract operands. Total: any combination it
+    /// cannot fold to a static value (mixed/coerced primitive types, a dynamic
+    /// operand, an unsupported operator on a known type) **residualizes** to a
+    /// runtime `Bin`, so Node evaluates the real JS coercion semantics and the
+    /// residual stays observationally equivalent. Heap references must be escaped
+    /// to `Dyn` by the caller before reaching here (`to_rexpr` cannot serialize a
+    /// live object); see `Instr::Bin`.
     fn eval_bin(op: Bop, a: &Abs, b: &Abs) -> Abs {
         use Abs::*;
         match (a, b) {
@@ -1073,29 +1271,46 @@ impl Js {
                 Bop::Ge => Bool(x >= y),
                 Bop::Eq => Bool(x == y),
                 Bop::Ne => Bool(x != y),
+                // 32-bit integer semantics, matching JS: operands are truncated
+                // to int32 (shift count masked to 5 bits); `>>>` is unsigned.
+                Bop::BitAnd => Num(((*x as i32) & (*y as i32)) as i64),
+                Bop::BitOr => Num(((*x as i32) | (*y as i32)) as i64),
+                Bop::BitXor => Num(((*x as i32) ^ (*y as i32)) as i64),
+                Bop::Shl => Num(((*x as i32) << ((*y as u32) & 31)) as i64),
+                Bop::Shr => Num(((*x as i32) >> ((*y as u32) & 31)) as i64),
+                Bop::UShr => Num(((*x as u32) >> ((*y as u32) & 31)) as i64),
             },
-            (Str(x), Str(y)) => match op {
-                Bop::Add => Str(format!("{x}{y}")),
-                Bop::Eq => Bool(x == y),
-                Bop::Ne => Bool(x != y),
-                _ => panic!("unsupported string operator {:?}", op),
-            },
-            (Bool(x), Bool(y)) => match op {
-                Bop::Eq => Bool(x == y),
-                Bop::Ne => Bool(x != y),
-                _ => panic!("unsupported bool operator {:?}", op),
-            },
+            (Str(x), Str(y)) if op == Bop::Add => Str(format!("{x}{y}")),
+            (Str(x), Str(y)) if op == Bop::Eq => Bool(x == y),
+            (Str(x), Str(y)) if op == Bop::Ne => Bool(x != y),
+            (Bool(x), Bool(y)) if op == Bop::Eq => Bool(x == y),
+            (Bool(x), Bool(y)) if op == Bop::Ne => Bool(x != y),
             // Any dynamic operand: residualize. (Static prims convert to literals.)
             _ if a.is_dynamic() || b.is_dynamic() => {
                 Dyn(RExpr::Bin(op, Box::new(a.to_rexpr()), Box::new(b.to_rexpr())))
             }
+            // Bitwise/shift over mixed static primitive types: JS `ToInt32`-coerces
+            // both operands (e.g. the `x | 0` idiom, where a non-numeric string
+            // coerces to 0). This is common in interpreter dispatch and keeps the
+            // result static.
+            _ if is_bitwise(op) => match (to_int32(a), to_int32(b)) {
+                (Some(x), Some(y)) => Num(int32_bitwise(op, x, y)),
+                // a non-coercible operand (a `Dyn` is already handled above):
+                // fall through to residualize.
+                _ => Dyn(RExpr::Bin(op, Box::new(a.to_rexpr()), Box::new(b.to_rexpr()))),
+            },
             // Strict equality involving statically-known null/undefined/other
             // primitives: decide by type+value identity.
             (_, _) if matches!(op, Bop::Eq | Bop::Ne) => {
                 let eq = static_strict_eq(a, b);
                 Bool(if op == Bop::Eq { eq } else { !eq })
             }
-            _ => panic!("unsupported operand types for {:?}: {:?} {:?}", op, a, b),
+            // Any other mixed-primitive combination (e.g. `1 - "y"` → NaN,
+            // `1 + null` → 1, `"a" < "b"`, `undefined + 1` → NaN): JS resolves it
+            // by coercion. We do not model every coercion statically (the number
+            // model is integer-only), so residualize and let the runtime decide.
+            // Always sound; a fold for the common cases can come later.
+            _ => Dyn(RExpr::Bin(op, Box::new(a.to_rexpr()), Box::new(b.to_rexpr()))),
         }
     }
 }
@@ -1110,6 +1325,186 @@ fn static_strict_eq(a: &Abs, b: &Abs) -> bool {
         (Abs::Bool(x), Abs::Bool(y)) => x == y,
         (Abs::Ref(x), Abs::Ref(y)) => x == y,
         _ => false,
+    }
+}
+
+/// An atom needs no freezing: a residual variable or literal denotes a stable
+/// value at a program point (a write elsewhere cannot change it).
+fn rexpr_is_atom(e: &RExpr) -> bool {
+    matches!(
+        e,
+        RExpr::Var(_)
+            | RExpr::Num(_)
+            | RExpr::Str(_)
+            | RExpr::Bool(_)
+            | RExpr::Undef
+            | RExpr::Null
+            | RExpr::This
+    )
+}
+
+/// Does `e` read array `arr` in a way a write/push to it could change: an
+/// element (`arr[_]`) or its `.length`?
+fn reads_array(e: &RExpr, arr: &RExpr) -> bool {
+    match e {
+        RExpr::Index(b, _) => **b == *arr,
+        RExpr::Get(b, k) => **b == *arr && k == "length",
+        _ => false,
+    }
+}
+
+/// Does `e` contain a subexpression satisfying `pred` (e.g. a read of a location
+/// that is about to be written)?
+fn rexpr_contains(e: &RExpr, pred: &dyn Fn(&RExpr) -> bool) -> bool {
+    if pred(e) {
+        return true;
+    }
+    match e {
+        RExpr::Bin(_, a, b) => rexpr_contains(a, pred) || rexpr_contains(b, pred),
+        RExpr::Index(a, b) => rexpr_contains(a, pred) || rexpr_contains(b, pred),
+        RExpr::Get(o, _) => rexpr_contains(o, pred),
+        RExpr::Opaque(_, args) | RExpr::Call(_, args) | RExpr::New(_, args) => {
+            args.iter().any(|a| rexpr_contains(a, pred))
+        }
+        RExpr::FnRef { caps, .. } => caps.iter().any(|c| rexpr_contains(c, pred)),
+        _ => false,
+    }
+}
+
+/// Names inherited from `Object.prototype` that resolve to functions on any
+/// plain object. Reading one off a static object (when it is not shadowed by an
+/// own field) must residualize, since the abstract object models only own data
+/// fields. Also includes `__proto__` (an accessor) and `constructor`.
+/// JS `ToNumber` applied to a string, restricted to integers this model can
+/// hold. JS trims whitespace, treats the empty/blank string as `0`, and parses a
+/// numeric literal (else `NaN`). We fold only the integer cases (decimal); a
+/// blank string is `0`, a fractional / non-numeric string yields `None` (it
+/// would be `NaN` or a float, which stays residualized).
+/// The ASCII members of JS's `trim` whitespace set (note `\v` = U+000B, which
+/// Rust's `char::is_ascii_whitespace` omits but JS trims).
+fn is_js_ascii_ws(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | ' ')
+}
+
+fn parse_js_int(s: &str) -> Option<i64> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Some(0);
+    }
+    t.parse::<i64>().ok()
+}
+
+fn is_object_proto_member(k: &str) -> bool {
+    matches!(
+        k,
+        "toString"
+            | "toLocaleString"
+            | "valueOf"
+            | "hasOwnProperty"
+            | "isPrototypeOf"
+            | "propertyIsEnumerable"
+            | "constructor"
+            | "__proto__"
+            | "__defineGetter__"
+            | "__defineSetter__"
+            | "__lookupGetter__"
+            | "__lookupSetter__"
+    )
+}
+
+fn is_bitwise(op: Bop) -> bool {
+    matches!(
+        op,
+        Bop::BitAnd | Bop::BitOr | Bop::BitXor | Bop::Shl | Bop::Shr | Bop::UShr
+    )
+}
+
+fn int32_bitwise(op: Bop, x: i32, y: i32) -> i64 {
+    match op {
+        Bop::BitAnd => (x & y) as i64,
+        Bop::BitOr => (x | y) as i64,
+        Bop::BitXor => (x ^ y) as i64,
+        Bop::Shl => (x << ((y as u32) & 31)) as i64,
+        Bop::Shr => (x >> ((y as u32) & 31)) as i64,
+        Bop::UShr => ((x as u32) >> ((y as u32) & 31)) as i64,
+        _ => unreachable!("not a bitwise op: {op:?}"),
+    }
+}
+
+/// JS `ToInt32` for static primitives: numbers truncate, booleans are 0/1,
+/// null/undefined are 0, and a string is parsed as a number (non-numeric → 0).
+/// `None` for a heap reference (object coercion is not modeled).
+fn to_int32(a: &Abs) -> Option<i32> {
+    match a {
+        Abs::Num(n) => Some(*n as i32),
+        Abs::Bool(b) => Some(*b as i32),
+        Abs::Undef | Abs::Null => Some(0),
+        Abs::Str(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                Some(0)
+            } else {
+                Some(t.parse::<f64>().ok().filter(|f| f.is_finite()).map_or(0, |f| f as i32))
+            }
+        }
+        Abs::Ref(_) | Abs::Dyn(_) => None,
+    }
+}
+
+/// JS loose equality (`==`) restricted to cases we can decide statically and
+/// soundly: same-type primitives (then `==` matches `===`), object identity, and
+/// the null/undefined rule (they are loosely equal only to each other). Mixed
+/// primitive types invoke coercion (`5 == "5"`), which we don't model, so those
+/// return `None` and stay residual.
+fn loose_eq_static(a: &Abs, b: &Abs) -> Option<bool> {
+    use Abs::*;
+    match (a, b) {
+        (Dyn(_), _) | (_, Dyn(_)) => None,
+        (Num(x), Num(y)) => Some(x == y),
+        (Str(x), Str(y)) => Some(x == y),
+        (Bool(x), Bool(y)) => Some(x == y),
+        (Ref(x), Ref(y)) => Some(x == y),
+        (Null | Undef, Null | Undef) => Some(true),
+        // null/undefined are loosely equal only to each other.
+        (Null | Undef, _) | (_, Null | Undef) => Some(false),
+        // mixed primitive types (or object-vs-primitive) coerce: don't fold.
+        _ => None,
+    }
+}
+
+/// Fold an otherwise pass-through operator when its operands are static, so a
+/// static computation stays static (essential for interpreter dispatch built
+/// from `!`, `~`, `?:`, `&&`, `||`, `??`). Returns `None` to residualize.
+fn fold_opaque(op: &str, xs: &[Abs]) -> Option<Abs> {
+    use Abs::*;
+    match (op, xs) {
+        ("?:", [c, a, b]) => c.truthy().map(|t| if t { a.clone() } else { b.clone() }),
+        ("!", [x]) => x.truthy().map(|t| Bool(!t)),
+        ("~", [Num(n)]) => Some(Num((!(*n as i32)) as i64)),
+        // `void e` yields undefined; fold only a static operand (a dynamic one
+        // may have a side effect that must be preserved in the residual).
+        ("void", [x]) if !x.is_dynamic() => Some(Undef),
+        ("typeof", [x]) => match x {
+            Num(_) => Some(Str("number".to_string())),
+            Str(_) => Some(Str("string".to_string())),
+            Bool(_) => Some(Str("boolean".to_string())),
+            Undef => Some(Str("undefined".to_string())),
+            Null => Some(Str("object".to_string())),
+            _ => None, // object/function need the heap; dynamic is unknown
+        },
+        // Short-circuit operators yield one operand (both are already evaluated
+        // here, so this matches JS only for side-effect-free branches, which is
+        // the existing pass-through behavior; we just fold the result).
+        ("&&", [a, b]) => a.truthy().map(|t| if t { b.clone() } else { a.clone() }),
+        ("||", [a, b]) => a.truthy().map(|t| if t { a.clone() } else { b.clone() }),
+        ("??", [a, b]) => match a {
+            Null | Undef => Some(b.clone()),
+            Dyn(_) => None,
+            _ => Some(a.clone()),
+        },
+        ("==", [a, b]) => loose_eq_static(a, b).map(Bool),
+        ("!=", [a, b]) => loose_eq_static(a, b).map(|e| Bool(!e)),
+        _ => None,
     }
 }
 
@@ -1161,16 +1556,35 @@ impl Client for Js {
 
     fn step(&self, s: &mut State, out: &mut Vec<Op>, at_entry: bool) -> Step<Self> {
         let pc = s.top().pc;
+        // The foldability probe only needs to learn *whether* the region taints;
+        // once it has, stop immediately instead of specializing the rest.
+        if self.probing.get() && self.try_taint.get() {
+            return Step::Halt;
+        }
+        // A bounded sub-specialization (a residual `try`'s body/catch, or the
+        // foldability probe) stops when it reaches its region's end pc.
+        if s.frames.len() == 1 {
+            if self.halt_at.borrow().last() == Some(&pc) {
+                // For a real residual-try sub-program (not the throwaway probe),
+                // write any locals the body/catch modified back to their stable
+                // variables so the continuation after the `try` observes them.
+                if !self.probing.get() {
+                    let slots: Vec<usize> = (0..s.top().locals.len()).collect();
+                    self.materialize(s, &slots, out);
+                }
+                return Step::Halt;
+            }
+        }
         if std::env::var("JS_TRACE").is_ok() {
             use std::sync::atomic::{AtomicU64, Ordering};
             static N: AtomicU64 = AtomicU64::new(0);
             let n = N.fetch_add(1, Ordering::Relaxed);
-            if n % 100_000 == 0 {
+            if n % 1_000_000 == 0 {
                 eprintln!(
-                    "step {n}: pc={pc} depth={} heap={} ostack={}",
+                    "step {n}: pc={pc} func={} depth={} heap={}",
+                    s.top().func,
                     s.frames.len(),
-                    s.heap.len(),
-                    s.top().ostack.len()
+                    s.heap.len()
                 );
             }
         }
@@ -1186,16 +1600,26 @@ impl Client for Js {
             Instr::PushNull => self.push(s, Abs::Null),
             Instr::PushThis => self.push(s, Abs::Dyn(RExpr::This)),
             Instr::PushGlobal(name) => self.push(s, Abs::Dyn(RExpr::Global(name.clone()))),
-            Instr::PushHandler { catch_pc, exc_slot } => {
+            Instr::PushHandler { catch_pc, exc_slot, body_end, end } => {
                 let frame_depth = s.frames.len();
                 let ostack_depth = s.top().ostack.len();
-                s.handlers.push(Handler {
+                let handler = Handler {
                     catch_pc: *catch_pc,
                     exc_slot: *exc_slot,
                     frame_depth,
                     ostack_depth,
-                });
-                self.advance(s)
+                };
+                // Decide whether the try body fully specializes (model `throw` as
+                // control flow, exceptions vanish) or must residualize a runtime
+                // `try`/`catch` (the body has a may-throw residual op). The probe
+                // re-specializes the region; if it would trip the soundness guard,
+                // residualize. (Already inside a probe: just push and continue.)
+                if self.probing.get() || self.try_folds(s, &handler, *body_end, *end) {
+                    s.handlers.push(handler);
+                    self.advance(s)
+                } else {
+                    self.residualize_try(s, *catch_pc, *exc_slot, *body_end, *end, out)
+                }
             }
             Instr::PopHandler => {
                 s.handlers.pop();
@@ -1232,8 +1656,33 @@ impl Client for Js {
             }
             Instr::Store(slot) => {
                 let v = s.top_mut().ostack.pop().unwrap();
-                s.top_mut().locals[*slot] = v;
+                // In a residual `try` body/catch, a top-frame local write emits a
+                // residual assignment in program order (so it commits before any
+                // following may-throw op), then the slot reads back as that var.
+                if self.eager_stores.get() && s.frames.len() == 1 {
+                    let func = s.top().func;
+                    let id = self.stable_id(func, *slot);
+                    let heap = s.heap.clone();
+                    let expr = self.materialize_value(&v, &heap, out);
+                    out.push(Op::Assign { var: id, expr });
+                    s.top_mut().locals[*slot] = Abs::Dyn(RExpr::Var(id));
+                } else {
+                    s.top_mut().locals[*slot] = v;
+                }
                 self.advance(s)
+            }
+            Instr::Snapshot => {
+                let v = s.top_mut().ostack.pop().unwrap();
+                // A dynamic value is bound to a stable temp so it survives a
+                // following store unchanged; a static value needs no snapshot.
+                let v = if let Abs::Dyn(expr) = v {
+                    let dst = Js::snapshot_var(pc);
+                    out.push(Op::Eval { dst, expr });
+                    Abs::Dyn(RExpr::Var(dst))
+                } else {
+                    v
+                };
+                self.push(s, v)
             }
             Instr::Pop => {
                 s.top_mut().ostack.pop();
@@ -1242,6 +1691,17 @@ impl Client for Js {
             Instr::Bin(op) => {
                 let b = s.top_mut().ostack.pop().unwrap();
                 let a = s.top_mut().ostack.pop().unwrap();
+                // First try to fold with full JS coercion over static operands
+                // (`ToPrimitive`/`ToNumber`/`ToString`): this collapses the
+                // coercion soup that obfuscators like JSFuck are built from
+                // (`+[]` → 0, `[]+[]` → "", `![]+[]` → "false", ...).
+                if let Some(folded) = self.try_fold_bin_coerced(s, *op, &a, &b) {
+                    return self.push(s, folded);
+                }
+                // Otherwise a heap object reaching a primitive context escapes to
+                // a residual reference and the operator residualizes.
+                let a = self.escape_if_ref(s, a, out);
+                let b = self.escape_if_ref(s, b, out);
                 let r = Js::eval_bin(*op, &a, &b);
                 self.push(s, r)
             }
@@ -1253,15 +1713,13 @@ impl Client for Js {
                 for (k, v) in keys.iter().zip(vals) {
                     fields.push((k.clone(), v));
                 }
-                let addr = s.heap.len();
-                s.heap.push_back(HeapObj::Object(fields));
+                let addr = s.alloc(HeapObj::Object(fields));
                 self.push(s, Abs::Ref(addr))
             }
             Instr::NewArray(n) => {
                 let base = s.top().ostack.len() - *n;
                 let vals: Vec<Abs> = s.top_mut().ostack.split_off(base);
-                let addr = s.heap.len();
-                s.heap.push_back(HeapObj::Array(vals));
+                let addr = s.alloc(HeapObj::Array(vals));
                 self.push(s, Abs::Ref(addr))
             }
             Instr::GetProp(k) => {
@@ -1274,8 +1732,17 @@ impl Client for Js {
                 // (itself a built-in value) so the following call can fold.
                 if let Abs::Ref(addr) = &o {
                     let addr = *addr;
-                    let needs_escape = match &s.heap[addr] {
-                        HeapObj::Object(_) => false,
+                    let needs_escape = match &s.heap[&addr] {
+                        // An own data field stays modeled (folds). A non-own key
+                        // that names an `Object.prototype` member (`toString`,
+                        // `valueOf`, `hasOwnProperty`, `constructor`, ...)
+                        // resolves to an inherited function in real JS, which the
+                        // own-fields-only model can't represent: escape so the
+                        // read residualizes. A non-own, non-prototype key is a
+                        // genuine miss (reads as `undefined`) and keeps folding.
+                        HeapObj::Object(fields) => {
+                            !fields.iter().any(|(fk, _)| fk == k) && is_object_proto_member(k)
+                        }
                         HeapObj::Array(_) => k != "length",
                         HeapObj::Closure { .. } => true,
                         HeapObj::Builtin { kind, data } => {
@@ -1283,8 +1750,7 @@ impl Client for Js {
                                 kind: format!("{kind}.{k}"),
                                 data: data.clone(),
                             };
-                            let baddr = s.heap.len();
-                            s.heap.push_back(bound);
+                            let baddr = s.alloc(bound);
                             return self.push(s, Abs::Ref(baddr));
                         }
                     };
@@ -1302,26 +1768,46 @@ impl Client for Js {
                 let v = s.top_mut().ostack.pop().unwrap();
                 let o = s.top_mut().ostack.pop().unwrap();
                 match o {
-                    Abs::Ref(addr) => {
-                        if let HeapObj::Object(fields) = &mut s.heap[addr] {
+                    // Static object: update or append the field in the abstract
+                    // heap (stays scalar-replaced).
+                    Abs::Ref(addr) if matches!(&s.heap[&addr], HeapObj::Object(_)) => {
+                        if let HeapObj::Object(fields) = s.heap.get_mut(&addr).unwrap() {
                             if let Some(slot) = fields.iter_mut().find(|(fk, _)| fk == k) {
                                 slot.1 = v;
                             } else {
                                 fields.push((k.clone(), v));
                             }
-                        } else {
-                            panic!("SetProp on non-object");
                         }
                     }
-                    // A write to a dynamic object residualizes (the value, if it
-                    // is itself an object, escapes too).
-                    Abs::Dyn(obj_r) => {
-                        forbid_residual_in_try(s, "a property write");
+                    // A named-property write on a non-object ref (e.g. `arr.foo =
+                    // v`, `arr.length = n`): the abstract heap doesn't model it,
+                    // so the container escapes and the write residualizes.
+                    Abs::Ref(addr) => {
+                        let obj_r = self.escape(s, addr, &mut std::collections::HashSet::new(), out);
+                        self.forbid_residual_in_try(s, "a property write");
                         let mut escaped = std::collections::HashSet::new();
                         let val = self.operand_rexpr(s, &v, &mut escaped, out);
+                        let (o2, key) = (obj_r.clone(), k.clone());
+                        self.freeze_readers(s, pc, out, &|e| {
+                            matches!(e, RExpr::Get(b, kk) if **b == o2 && *kk == key)
+                        });
                         out.push(Op::SetProp { obj: obj_r, key: k.clone(), val });
                     }
-                    _ => panic!("SetProp on a non-object value (unsupported)"),
+                    // A write to a dynamic object — or a primitive base, where JS
+                    // either silently ignores the write (`(5).a = v`) or throws
+                    // (`null.a = v`) — residualizes. The value, if itself an
+                    // object, escapes too.
+                    other => {
+                        let obj_r = other.to_rexpr();
+                        self.forbid_residual_in_try(s, "a property write");
+                        let mut escaped = std::collections::HashSet::new();
+                        let val = self.operand_rexpr(s, &v, &mut escaped, out);
+                        let (o, key) = (obj_r.clone(), k.clone());
+                        self.freeze_readers(s, pc, out, &|e| {
+                            matches!(e, RExpr::Get(b, kk) if **b == o && *kk == key)
+                        });
+                        out.push(Op::SetProp { obj: obj_r, key: k.clone(), val });
+                    }
                 }
                 self.advance(s)
             }
@@ -1329,27 +1815,56 @@ impl Client for Js {
                 let v = s.top_mut().ostack.pop().unwrap();
                 let i = s.top_mut().ostack.pop().unwrap();
                 let a = s.top_mut().ostack.pop().unwrap();
+                let served = matches!(&a, Abs::Ref(_)) && self.index_is_static(s, &a, &i);
                 match a {
-                    // Static array with a static index: mutate the abstract heap
-                    // in place (the array stays scalar-replaced). Grow with
-                    // `undefined` holes if the write is past the current end.
-                    Abs::Ref(addr) => match (&mut s.heap[addr], &i) {
-                        (HeapObj::Array(elems), Abs::Num(n)) => {
-                            let n = *n as usize;
-                            if n >= elems.len() {
-                                elems.resize(n + 1, Abs::Undef);
+                    // Static container with a static, type-matched index: mutate
+                    // the abstract heap in place (it stays scalar-replaced). An
+                    // array grows with `undefined` holes past its end; an object
+                    // key write updates or appends a field (the `obj["k"] = v`
+                    // form, equivalent to `obj.k = v`).
+                    Abs::Ref(addr) if served => {
+                        match (s.heap.get_mut(&addr).unwrap(), &i) {
+                            (HeapObj::Array(elems), Abs::Num(n)) => {
+                                let n = *n as usize;
+                                if n >= elems.len() {
+                                    elems.resize(n + 1, Abs::Undef);
+                                }
+                                elems[n] = v;
                             }
-                            elems[n] = v;
+                            (HeapObj::Object(fields), Abs::Str(k)) => {
+                                if let Some(slot) = fields.iter_mut().find(|(fk, _)| fk == k) {
+                                    slot.1 = v;
+                                } else {
+                                    fields.push((k.clone(), v));
+                                }
+                            }
+                            _ => unreachable!(),
                         }
-                        _ => panic!("indexed write on non-array or dynamic index of a static array"),
-                    },
-                    // Dynamic array/object: residualize the indexed write.
-                    Abs::Dyn(arr_r) => {
-                        forbid_residual_in_try(s, "an indexed write");
-                        let r = self.materialize_value(&v, &s.heap.clone(), out);
-                        out.push(Op::SetIndex { arr: arr_r, index: i.to_rexpr(), val: r });
                     }
-                    _ => panic!("indexed write on a non-array value"),
+                    // Static container with a dynamic index or a type-mismatched
+                    // key (`arr[dyn] = v`, `arr["x"] = v`, `obj[5] = v`): the
+                    // container escapes and the write residualizes.
+                    Abs::Ref(addr) => {
+                        let arr_r = self.escape(s, addr, &mut std::collections::HashSet::new(), out);
+                        self.forbid_residual_in_try(s, "an indexed write");
+                        let r = self.materialize_value(&v, &s.heap.clone(), out);
+                        let idx = self.escape_if_ref(s, i, out);
+                        let a = arr_r.clone();
+                        self.freeze_readers(s, pc, out, &|e| reads_array(e, &a));
+                        out.push(Op::SetIndex { arr: arr_r, index: idx.to_rexpr(), val: r });
+                    }
+                    // Dynamic array/object, or a primitive base (`(5)[0] = v` is
+                    // a silent no-op, `null[0] = v` throws): residualize the
+                    // indexed write. An object index escapes to a string key.
+                    other => {
+                        let arr_r = other.to_rexpr();
+                        self.forbid_residual_in_try(s, "an indexed write");
+                        let r = self.materialize_value(&v, &s.heap.clone(), out);
+                        let idx = self.escape_if_ref(s, i, out);
+                        let a = arr_r.clone();
+                        self.freeze_readers(s, pc, out, &|e| reads_array(e, &a));
+                        out.push(Op::SetIndex { arr: arr_r, index: idx.to_rexpr(), val: r });
+                    }
                 }
                 self.advance(s)
             }
@@ -1358,52 +1873,78 @@ impl Client for Js {
                 match o {
                     // Static object: drop the field from the abstract heap.
                     Abs::Ref(addr) => {
-                        if let HeapObj::Object(fields) = &mut s.heap[addr] {
+                        if let HeapObj::Object(fields) = s.heap.get_mut(&addr).unwrap() {
                             fields.retain(|(fk, _)| fk != k);
                         } else {
                             panic!("delete of a property on a non-object");
                         }
                     }
-                    // Dynamic object: residualize the delete.
-                    Abs::Dyn(obj_r) => {
-                        forbid_residual_in_try(s, "a property delete");
+                    // Dynamic object, or a primitive base (`delete (5).a` → true,
+                    // a no-op): residualize the delete.
+                    other => {
+                        let obj_r = other.to_rexpr();
+                        self.forbid_residual_in_try(s, "a property delete");
+                        let (o, key) = (obj_r.clone(), k.clone());
+                        self.freeze_readers(s, pc, out, &|e| {
+                            matches!(e, RExpr::Get(b, kk) if **b == o && *kk == key)
+                        });
                         out.push(Op::DeleteProp { obj: obj_r, key: k.clone() });
                     }
-                    _ => panic!("delete of a property on a non-object value"),
                 }
                 self.advance(s)
             }
             Instr::SetGlobalOp(name) => {
-                forbid_residual_in_try(s, "a global assignment");
+                self.forbid_residual_in_try(s, "a global assignment");
                 let v = s.top_mut().ostack.pop().unwrap();
                 let mut escaped = std::collections::HashSet::new();
                 let expr = self.operand_rexpr(s, &v, &mut escaped, out);
+                let nm = name.clone();
+                self.freeze_readers(s, pc, out, &|e| matches!(e, RExpr::Global(n) if *n == nm));
                 out.push(Op::AssignGlobal { name: name.clone(), expr });
                 self.advance(s)
             }
             Instr::DeleteIndexOp => {
                 let i = s.top_mut().ostack.pop().unwrap();
                 let a = s.top_mut().ostack.pop().unwrap();
+                let served = matches!(&a, Abs::Ref(_)) && self.index_is_static(s, &a, &i);
                 match a {
-                    // Static array/object: a deleted element becomes a hole
-                    // (reads as `undefined`), matching JS `delete arr[i]`.
-                    Abs::Ref(addr) => match (&mut s.heap[addr], &i) {
-                        (HeapObj::Array(elems), Abs::Num(n)) => {
-                            let n = *n as usize;
-                            if n < elems.len() {
-                                elems[n] = Abs::Undef;
+                    // Static array/object with a static, type-matched index: a
+                    // deleted element becomes a hole (reads as `undefined`),
+                    // matching JS `delete arr[i]`.
+                    Abs::Ref(addr) if served => {
+                        match (s.heap.get_mut(&addr).unwrap(), &i) {
+                            (HeapObj::Array(elems), Abs::Num(n)) => {
+                                let n = *n as usize;
+                                if n < elems.len() {
+                                    elems[n] = Abs::Undef;
+                                }
                             }
+                            (HeapObj::Object(fields), Abs::Str(k)) => {
+                                fields.retain(|(fk, _)| fk != k);
+                            }
+                            _ => unreachable!(),
                         }
-                        (HeapObj::Object(fields), Abs::Str(k)) => {
-                            fields.retain(|(fk, _)| fk != k);
-                        }
-                        _ => panic!("delete of a dynamic index on a static container"),
-                    },
-                    Abs::Dyn(arr_r) => {
-                        forbid_residual_in_try(s, "an indexed delete");
-                        out.push(Op::DeleteIndex { arr: arr_r, index: i.to_rexpr() });
                     }
-                    _ => panic!("delete of an index on a non-container value"),
+                    // Static container with a dynamic / mismatched index: it
+                    // escapes and the delete residualizes.
+                    Abs::Ref(addr) => {
+                        let arr_r = self.escape(s, addr, &mut std::collections::HashSet::new(), out);
+                        self.forbid_residual_in_try(s, "an indexed delete");
+                        let idx = self.escape_if_ref(s, i, out);
+                        let a = arr_r.clone();
+                        self.freeze_readers(s, pc, out, &|e| reads_array(e, &a));
+                        out.push(Op::DeleteIndex { arr: arr_r, index: idx.to_rexpr() });
+                    }
+                    // Dynamic array, or a primitive base (`delete (5)[0]` → true,
+                    // a no-op): residualize the delete.
+                    other => {
+                        let arr_r = other.to_rexpr();
+                        self.forbid_residual_in_try(s, "an indexed delete");
+                        let idx = self.escape_if_ref(s, i, out);
+                        let a = arr_r.clone();
+                        self.freeze_readers(s, pc, out, &|e| reads_array(e, &a));
+                        out.push(Op::DeleteIndex { arr: arr_r, index: idx.to_rexpr() });
+                    }
                 }
                 self.advance(s)
             }
@@ -1412,29 +1953,55 @@ impl Client for Js {
                 let a = s.top_mut().ostack.pop().unwrap();
                 match a {
                     // Static array: mutate the abstract heap (still scalar).
-                    Abs::Ref(addr) => match &mut s.heap[addr] {
-                        HeapObj::Array(elems) => elems.push(v),
-                        _ => panic!("push on non-array"),
-                    },
-                    // Dynamic array: residualize the push.
-                    Abs::Dyn(arr_r) => {
-                        forbid_residual_in_try(s, "an array push");
+                    Abs::Ref(addr) if matches!(&s.heap[&addr], HeapObj::Array(_)) => {
+                        if let HeapObj::Array(elems) = s.heap.get_mut(&addr).unwrap() {
+                            elems.push(v);
+                        }
+                    }
+                    // A non-array static object reaching `.push` (`{}.push(v)`
+                    // throws at runtime): escape and residualize so the runtime
+                    // throws identically.
+                    Abs::Ref(addr) => {
+                        let arr_r = self.escape(s, addr, &mut std::collections::HashSet::new(), out);
+                        self.forbid_residual_in_try(s, "an array push");
                         let r = self.materialize_value(&v, &s.heap.clone(), out);
+                        let a = arr_r.clone();
+                        self.freeze_readers(s, pc, out, &|e| reads_array(e, &a));
                         out.push(Op::PushOp { arr: arr_r, val: r });
                     }
-                    _ => panic!("push on a non-array value"),
+                    // Dynamic array, or a primitive base (`(5).push(v)` throws):
+                    // residualize the push.
+                    other => {
+                        let arr_r = other.to_rexpr();
+                        self.forbid_residual_in_try(s, "an array push");
+                        let r = self.materialize_value(&v, &s.heap.clone(), out);
+                        let a = arr_r.clone();
+                        self.freeze_readers(s, pc, out, &|e| reads_array(e, &a));
+                        out.push(Op::PushOp { arr: arr_r, val: r });
+                    }
                 }
                 self.advance(s)
             }
             Instr::GetIndex => {
                 let i = s.top_mut().ostack.pop().unwrap();
                 let a = s.top_mut().ostack.pop().unwrap();
+                // If the abstract heap can't serve this index statically (a
+                // dynamic index, or a type-mismatched key like `arr["x"]` /
+                // `obj[5]`), the container and the index escape and the read
+                // residualizes. An object used as an index coerces to a string
+                // key at runtime, so it escapes too.
+                let (a, i) = if self.index_is_static(s, &a, &i) {
+                    (a, i)
+                } else {
+                    let a = self.escape_if_ref(s, a, out);
+                    let i = self.escape_if_ref(s, i, out);
+                    (a, i)
+                };
                 let v = self.get_index(s, &a, &i);
                 self.push(s, v)
             }
             Instr::PushFunc(fid) => {
-                let addr = s.heap.len();
-                s.heap.push_back(HeapObj::Closure {
+                let addr = s.alloc(HeapObj::Closure {
                     fid: *fid,
                     captured: Vec::new(),
                 });
@@ -1443,8 +2010,7 @@ impl Client for Js {
             Instr::MakeClosure(fid, ncap) => {
                 let base = s.top().ostack.len() - *ncap;
                 let captured: Vec<Abs> = s.top_mut().ostack.split_off(base);
-                let addr = s.heap.len();
-                s.heap.push_back(HeapObj::Closure {
+                let addr = s.alloc(HeapObj::Closure {
                     fid: *fid,
                     captured,
                 });
@@ -1468,12 +2034,12 @@ impl Client for Js {
                         return Step::Continue;
                     }
                 }
-                forbid_residual_in_try(s, "a `new` expression");
+                self.forbid_residual_in_try(s, "a `new` expression");
                 let callee_r = match callee {
                     Abs::Dyn(r) => r,
                     // `new` of a known function/closure: it becomes a residual
                     // function (constructors use `this`, so they must not inline).
-                    Abs::Ref(addr) => match &s.heap[addr] {
+                    Abs::Ref(addr) => match &s.heap[&addr] {
                         HeapObj::Closure { fid, captured } => {
                             let caps: Vec<RExpr> = captured
                                 .clone()
@@ -1501,8 +2067,17 @@ impl Client for Js {
             Instr::OpaqueOp { op, arity } => {
                 let base = s.top().ostack.len() - *arity;
                 let operands: Vec<Abs> = s.top_mut().ostack.split_off(base);
-                // The operation is unmodeled, so the result is always dynamic. A
-                // heap object operand escapes (it could be mutated by the op).
+                // Operators we pass through verbatim but can still *fold* when
+                // their operands are static (`!`, `~`, `?:`, `&&`, `||`, `??`,
+                // loose `==`/`!=`). This keeps a static computation static: an
+                // interpreter's `pc = !flag ? L1 : L2` must not go dynamic just
+                // because `!`/`?:` aren't arithmetic, or the dispatch loop
+                // residualizes and unrolls forever.
+                if let Some(folded) = fold_opaque(op, &operands) {
+                    return self.push(s, folded);
+                }
+                // Otherwise the operation is unmodeled, so the result is dynamic.
+                // A heap object operand escapes (it could be mutated by the op).
                 let mut escaped = std::collections::HashSet::new();
                 let mut args = Vec::with_capacity(operands.len());
                 for a in operands {
@@ -1543,6 +2118,9 @@ impl Client for Js {
                                 fstate.pending_joins.push((*end, mods.clone()));
                             }
                         }
+                        // Block boundary: reclaim heap garbage in each successor.
+                        tstate.gc();
+                        fstate.gc();
                         Step::Branch {
                             cond: Cond::Falsy(r),
                             t: tstate,
@@ -1597,8 +2175,14 @@ impl Js {
     }
 
     fn get_prop(&self, s: &State, o: &Abs, k: &str) -> Abs {
-        self.get_prop_opt(s, o, k)
-            .unwrap_or_else(|| panic!("property {k} on {o:?} (unsupported)"))
+        self.get_prop_opt(s, o, k).unwrap_or_else(|| {
+            // An unmodeled property read on a static primitive (`(5).toString`,
+            // `"".length`, `undefined.x`): residualize as an opaque `base.key`
+            // read. Node then applies real JS semantics, including throwing for
+            // `null`/`undefined` bases, so the residual stays equivalent. (Heap
+            // refs are intercepted and escaped by `Instr::GetProp` before here.)
+            Abs::Dyn(RExpr::Get(Box::new(o.to_rexpr()), k.to_string()))
+        })
     }
 
     /// Resolve a property read that the abstract heap can serve, or `None` for an
@@ -1606,7 +2190,7 @@ impl Js {
     /// caller must residualize (or, in the loop probe, treat as dynamic).
     fn get_prop_opt(&self, s: &State, o: &Abs, k: &str) -> Option<Abs> {
         match o {
-            Abs::Ref(addr) => match &s.heap[*addr] {
+            Abs::Ref(addr) => match &s.heap[addr] {
                 HeapObj::Object(fields) => Some(
                     fields
                         .iter()
@@ -1617,6 +2201,8 @@ impl Js {
                 HeapObj::Array(elems) if k == "length" => Some(Abs::Num(elems.len() as i64)),
                 _ => None,
             },
+            // A static string's `.length` folds (JSFuck uses it for digits).
+            Abs::Str(st) if k == "length" => Some(Abs::Num(st.chars().count() as i64)),
             // A property read on a dynamic value (a runtime global, a string,
             // an escaped object) passes through as an opaque `base.key` read.
             Abs::Dyn(r) => Some(Abs::Dyn(RExpr::Get(Box::new(r.clone()), k.to_string()))),
@@ -1625,6 +2211,17 @@ impl Js {
     }
 
     fn get_index(&self, s: &State, a: &Abs, i: &Abs) -> Abs {
+        // String character access (`"false"[1]` → "a") folds to a one-character
+        // string, or `undefined` out of range — this is how JSFuck harvests
+        // letters out of coerced primitive strings.
+        if let (Abs::Str(st), Abs::Num(n)) = (a, i) {
+            if *n >= 0 {
+                return match st.chars().nth(*n as usize) {
+                    Some(c) => Abs::Str(c.to_string()),
+                    None => Abs::Undef,
+                };
+            }
+        }
         let addr = match a {
             Abs::Ref(addr) => *addr,
             // A dynamic (escaped) array still supports element reads: the read
@@ -1633,9 +2230,11 @@ impl Js {
             Abs::Dyn(r) => {
                 return Abs::Dyn(RExpr::Index(Box::new(r.clone()), Box::new(i.to_rexpr())));
             }
-            _ => panic!("index on a non-array value (unsupported)"),
+            // Indexing a primitive (`(5)[0]` → undefined, `"ab"[0]` → "a",
+            // `null[0]` throws): residualize and let the runtime decide.
+            _ => return Abs::Dyn(RExpr::Index(Box::new(a.to_rexpr()), Box::new(i.to_rexpr()))),
         };
-        match (&s.heap[addr], i) {
+        match (&s.heap[&addr], i) {
             (HeapObj::Array(elems), Abs::Num(n)) => {
                 elems.get(*n as usize).cloned().unwrap_or(Abs::Undef)
             }
@@ -1644,10 +2243,167 @@ impl Js {
                 .find(|(fk, _)| fk == k)
                 .map(|(_, v)| v.clone())
                 .unwrap_or(Abs::Undef),
-            // A static array indexed by a dynamic value cannot pick a static
-            // element; that case is unsupported (the array would need to escape).
-            (_, Abs::Dyn(_)) => panic!("dynamic index into a static array (unsupported: must be static)"),
-            _ => panic!("bad index/key types"),
+            // A static container indexed by a value it can't serve statically (a
+            // dynamic index, or a type-mismatched key such as `arr["x"]` /
+            // `obj[5]`): the caller (`Instr::GetIndex`) escapes the container
+            // first so the read residualizes. Reaching here means a ref slipped
+            // through unescaped, which is a bug.
+            _ => unreachable!("get_index: unescaped static container with unservable index"),
+        }
+    }
+
+    /// JS `ToString` for a statically-known value (recursive for arrays). `None`
+    /// if it would touch a dynamic value or a function (which we don't statically
+    /// stringify). This is what lets JSFuck-style coercion soup fold to literals.
+    fn to_string_static(&self, s: &State, v: &Abs) -> Option<String> {
+        self.to_string_rec(s, v, &mut std::collections::HashSet::new())
+    }
+
+    fn to_string_rec(
+        &self,
+        s: &State,
+        v: &Abs,
+        on_stack: &mut std::collections::HashSet<usize>,
+    ) -> Option<String> {
+        Some(match v {
+            Abs::Num(n) => n.to_string(),
+            Abs::Str(st) => st.clone(),
+            Abs::Bool(b) => b.to_string(),
+            Abs::Null => "null".to_string(),
+            Abs::Undef => "undefined".to_string(),
+            Abs::Ref(addr) => {
+                // A cycle (an array reachable from itself) makes `toString`
+                // non-trivial in JS (`Array.join` emits "" for the revisited
+                // entry). Rather than model that, bail so the `+`/coercion
+                // residualizes and the runtime computes it. Always sound.
+                if !on_stack.insert(*addr) {
+                    return None;
+                }
+                let out = match &s.heap[addr] {
+                    // `Array.prototype.toString` is `join(",")`, where `null` and
+                    // `undefined` elements stringify to the empty string.
+                    HeapObj::Array(elems) => {
+                        let parts: Option<Vec<String>> = elems
+                            .iter()
+                            .map(|e| match e {
+                                Abs::Null | Abs::Undef => Some(String::new()),
+                                _ => self.to_string_rec(s, e, on_stack),
+                            })
+                            .collect();
+                        parts?.join(",")
+                    }
+                    HeapObj::Object(_) => "[object Object]".to_string(),
+                    _ => {
+                        on_stack.remove(addr);
+                        return None; // closure / builtin
+                    }
+                };
+                on_stack.remove(addr);
+                out
+            }
+            Abs::Dyn(_) => return None,
+        })
+    }
+
+    /// JS `ToNumber` for a statically-known value, as an `i64`. `None` if dynamic,
+    /// a function, or the result is not an integer this model can hold (e.g.
+    /// `NaN` from `+undefined` or `+"x"`, or a fractional value) — those stay
+    /// residualized, which is sound; folding them needs a richer number model.
+    fn to_number_static(&self, s: &State, v: &Abs) -> Option<i64> {
+        match v {
+            Abs::Num(n) => Some(*n),
+            Abs::Bool(b) => Some(if *b { 1 } else { 0 }),
+            Abs::Null => Some(0),
+            Abs::Undef => None, // NaN
+            Abs::Str(st) => parse_js_int(st),
+            Abs::Ref(_) => parse_js_int(&self.to_string_static(s, v)?),
+            Abs::Dyn(_) => None,
+        }
+    }
+
+    /// `ToPrimitive` (default hint, as used by `+`): a heap array/object becomes
+    /// its string form; a primitive is itself. `None` if dynamic / a function.
+    fn to_primitive_static(&self, s: &State, v: &Abs) -> Option<Abs> {
+        match v {
+            Abs::Ref(_) => Some(Abs::Str(self.to_string_static(s, v)?)),
+            Abs::Dyn(_) => None,
+            prim => Some(prim.clone()),
+        }
+    }
+
+    /// Fold a binary operator that requires JS coercion over *static* operands
+    /// (the cases `eval_bin` leaves alone): `+` with `ToPrimitive`/string-concat,
+    /// numeric `-`/`*`, and relational comparisons. Returns `None` when an
+    /// operand is dynamic or the numeric result isn't representable (so the
+    /// caller residualizes). This is the core of JSFuck decoding.
+    fn try_fold_bin_coerced(&self, s: &State, op: Bop, a: &Abs, b: &Abs) -> Option<Abs> {
+        use Bop::*;
+        if a.is_dynamic() || b.is_dynamic() {
+            return None;
+        }
+        match op {
+            Add => {
+                let pa = self.to_primitive_static(s, a)?;
+                let pb = self.to_primitive_static(s, b)?;
+                // If either primitive is a string, `+` is string concatenation;
+                // otherwise it is numeric addition.
+                if matches!(pa, Abs::Str(_)) || matches!(pb, Abs::Str(_)) {
+                    let sa = self.to_string_static(s, &pa)?;
+                    let sb = self.to_string_static(s, &pb)?;
+                    Some(Abs::Str(format!("{sa}{sb}")))
+                } else {
+                    Some(Abs::Num(self.to_number_static(s, &pa)?.wrapping_add(self.to_number_static(s, &pb)?)))
+                }
+            }
+            Sub => Some(Abs::Num(
+                self.to_number_static(s, a)?.wrapping_sub(self.to_number_static(s, b)?),
+            )),
+            Mul => Some(Abs::Num(
+                self.to_number_static(s, a)?.wrapping_mul(self.to_number_static(s, b)?),
+            )),
+            Lt | Le | Gt | Ge => {
+                let pa = self.to_primitive_static(s, a)?;
+                let pb = self.to_primitive_static(s, b)?;
+                if matches!(pa, Abs::Str(_)) && matches!(pb, Abs::Str(_)) {
+                    let (sa, sb) = (self.to_string_static(s, &pa)?, self.to_string_static(s, &pb)?);
+                    Some(Abs::Bool(match op {
+                        Lt => sa < sb,
+                        Le => sa <= sb,
+                        Gt => sa > sb,
+                        _ => sa >= sb,
+                    }))
+                } else {
+                    let (na, nb) = (self.to_number_static(s, &pa)?, self.to_number_static(s, &pb)?);
+                    Some(Abs::Bool(match op {
+                        Lt => na < nb,
+                        Le => na <= nb,
+                        Gt => na > nb,
+                        _ => na >= nb,
+                    }))
+                }
+            }
+            // Bitwise/shift already coerce via `to_int32` in `eval_bin`; strict
+            // equality is decided there too.
+            _ => None,
+        }
+    }
+
+    /// Can `get_index` serve this `(container, index)` from the abstract heap
+    /// without escaping? Used to decide when to escape before residualizing. An
+    /// object used as an index coerces to a string key at runtime, so it always
+    /// forces escape. A negative array index is a named property (not an
+    /// element), which the element-list model can't serve.
+    fn index_is_static(&self, s: &State, a: &Abs, i: &Abs) -> bool {
+        if matches!(i, Abs::Ref(_)) {
+            return false;
+        }
+        match a {
+            Abs::Ref(addr) => match (&s.heap[addr], i) {
+                (HeapObj::Array(_), Abs::Num(n)) => *n >= 0,
+                (HeapObj::Object(_), Abs::Str(_)) => true,
+                _ => false,
+            },
+            _ => true, // primitive/dynamic bases residualize purely
         }
     }
 
@@ -1666,7 +2422,7 @@ impl Js {
     fn builtin_ctor_name(&self, callee: &Abs, s: &State) -> Option<&'static str> {
         let raw = match callee {
             Abs::Dyn(RExpr::Global(name)) => name.as_str(),
-            Abs::Ref(addr) => match &s.heap[*addr] {
+            Abs::Ref(addr) => match &s.heap[addr] {
                 HeapObj::Closure { fid, .. } => self.names.get(*fid)?.as_str(),
                 _ => return None,
             },
@@ -1684,16 +2440,14 @@ impl Js {
     fn try_builtin_new(&self, name: &str, args: &[Abs], s: &mut State) -> Option<Abs> {
         match name {
             "TextDecoder" => {
-                let addr = s.heap.len();
-                s.heap.push_back(HeapObj::Builtin { kind: "TextDecoder".into(), data: vec![] });
+                let addr = s.alloc(HeapObj::Builtin { kind: "TextDecoder".into(), data: vec![] });
                 Some(Abs::Ref(addr))
             }
             // `new Uint8Array(arr | length)` -> a static byte array (modeled as a
             // plain array of numbers so element/length reads work as usual).
             "Uint8Array" => {
                 let bytes = self.uint8_init(args.first(), s)?;
-                let addr = s.heap.len();
-                s.heap.push_back(HeapObj::Array(bytes));
+                let addr = s.alloc(HeapObj::Array(bytes));
                 Some(Abs::Ref(addr))
             }
             _ => None,
@@ -1706,7 +2460,7 @@ impl Js {
         match arg {
             None | Some(Abs::Undef) => Some(vec![]),
             Some(Abs::Num(n)) => Some(vec![Abs::Num(0); (*n).max(0) as usize]),
-            Some(Abs::Ref(addr)) => match &s.heap[*addr] {
+            Some(Abs::Ref(addr)) => match &s.heap[addr] {
                 HeapObj::Array(elems) => {
                     let mut out = Vec::with_capacity(elems.len());
                     for e in elems {
@@ -1752,11 +2506,148 @@ impl Js {
         }
     }
 
+    /// Fold a deterministic `String.prototype` method called on a *static* ASCII
+    /// string with static arguments. Returns the folded value, or `None` to
+    /// residualize (dynamic args, non-ASCII, or a result this model can't hold).
+    ///
+    /// Restricting to ASCII makes the fold provably match the JS runtime: char
+    /// indices then equal UTF-16 code-unit indices, ASCII case mapping equals
+    /// JS's, and the ASCII whitespace set is exactly JS's minus characters the
+    /// guard already excludes. `split` (which builds an array) is handled by the
+    /// caller, which has `&mut State` to allocate. Validated by the Node oracle.
+    fn try_string_method(&self, recv: &str, method: &str, args: &[Abs], s: &State) -> Option<Abs> {
+        if !recv.is_ascii() {
+            return None;
+        }
+        let chars: Vec<char> = recv.chars().collect();
+        let n = chars.len() as i64;
+        // JS `ToInteger` of argument `i`, or `default` if absent.
+        let int_arg = |i: usize, default: i64| -> Option<i64> {
+            match args.get(i) {
+                None => Some(default),
+                Some(a) => self.to_number_static(s, a),
+            }
+        };
+        // A static ASCII string argument `i`.
+        let str_arg = |i: usize| -> Option<String> {
+            let st = self.to_string_static(s, args.get(i)?)?;
+            st.is_ascii().then_some(st)
+        };
+        // JS `slice` clamp: negative counts from the end, then bound to [0, n].
+        let slice_idx = |x: i64| -> usize {
+            if x < 0 { (n + x).max(0) as usize } else { x.min(n) as usize }
+        };
+        // JS `substring`/clamp to [0, n].
+        let clamp0 = |x: i64| -> usize { x.max(0).min(n) as usize };
+
+        Some(match method {
+            "charAt" => {
+                let p = int_arg(0, 0)?;
+                Abs::Str(if p >= 0 && p < n { chars[p as usize].to_string() } else { String::new() })
+            }
+            "at" => {
+                let mut p = int_arg(0, 0)?;
+                if p < 0 {
+                    p += n;
+                }
+                if p >= 0 && p < n {
+                    Abs::Str(chars[p as usize].to_string())
+                } else {
+                    Abs::Undef
+                }
+            }
+            "charCodeAt" | "codePointAt" => {
+                let p = int_arg(0, 0)?;
+                if p >= 0 && p < n {
+                    Abs::Num(chars[p as usize] as i64)
+                } else {
+                    return None; // out of range -> NaN / undefined: residualize
+                }
+            }
+            "slice" => {
+                let from = slice_idx(int_arg(0, 0)?);
+                let to = slice_idx(int_arg(1, n)?);
+                Abs::Str(if to > from { chars[from..to].iter().collect() } else { String::new() })
+            }
+            "substring" => {
+                let a = clamp0(int_arg(0, 0)?);
+                let b = clamp0(int_arg(1, n)?);
+                let (from, to) = (a.min(b), a.max(b));
+                Abs::Str(chars[from..to].iter().collect())
+            }
+            "toUpperCase" | "toLocaleUpperCase" => Abs::Str(recv.to_ascii_uppercase()),
+            "toLowerCase" | "toLocaleLowerCase" => Abs::Str(recv.to_ascii_lowercase()),
+            "trim" => Abs::Str(recv.trim_matches(is_js_ascii_ws).to_string()),
+            "trimStart" => Abs::Str(recv.trim_start_matches(is_js_ascii_ws).to_string()),
+            "trimEnd" => Abs::Str(recv.trim_end_matches(is_js_ascii_ws).to_string()),
+            "indexOf" => {
+                let needle = str_arg(0)?;
+                let from = int_arg(1, 0)?.max(0).min(n) as usize;
+                let hay: String = chars[from..].iter().collect();
+                Abs::Num(match hay.find(&needle) {
+                    // `find` is a byte offset; ASCII byte offset == char offset.
+                    Some(b) => (from + b) as i64,
+                    None => -1,
+                })
+            }
+            "lastIndexOf" => {
+                let needle = str_arg(0)?;
+                Abs::Num(recv.rfind(&needle).map(|b| b as i64).unwrap_or(-1))
+            }
+            "includes" => Abs::Bool(recv.contains(&str_arg(0)?)),
+            "startsWith" => Abs::Bool(recv.starts_with(&str_arg(0)?)),
+            "endsWith" => Abs::Bool(recv.ends_with(&str_arg(0)?)),
+            "repeat" => {
+                let c = int_arg(0, 0)?;
+                if c < 0 {
+                    return None; // RangeError at runtime: residualize so it throws
+                }
+                Abs::Str(recv.repeat(c as usize))
+            }
+            "concat" => {
+                let mut out = recv.to_string();
+                for a in args {
+                    out.push_str(&self.to_string_static(s, a)?);
+                }
+                Abs::Str(out)
+            }
+            _ => return None,
+        })
+    }
+
+    /// Fold `"...".split(sep)` on a static ASCII string into a freshly allocated
+    /// static array of substrings. `None` for dynamic/non-ASCII args (residualize).
+    /// Matches JS: a string separator splits; `""` splits into characters; an
+    /// absent separator yields a one-element array of the whole string.
+    fn try_string_split(&self, recv: &str, args: &[Abs], s: &mut State) -> Option<Abs> {
+        if !recv.is_ascii() {
+            return None;
+        }
+        let parts: Vec<String> = match args.first() {
+            // `"x".split()` -> ["x"] (separator undefined)
+            None | Some(Abs::Undef) => vec![recv.to_string()],
+            Some(a) => {
+                let sep = self.to_string_static(s, a)?;
+                if !sep.is_ascii() {
+                    return None;
+                }
+                if sep.is_empty() {
+                    recv.chars().map(|c| c.to_string()).collect()
+                } else {
+                    recv.split(&sep).map(|p| p.to_string()).collect()
+                }
+            }
+        };
+        let elems: Vec<Abs> = parts.into_iter().map(Abs::Str).collect();
+        let addr = s.alloc(HeapObj::Array(elems));
+        Some(Abs::Ref(addr))
+    }
+
     /// A static byte vector from a numeric array (or a string's bytes); `None`
     /// when the value is dynamic or not byte-like.
     fn static_bytes(&self, arg: Option<&Abs>, s: &State) -> Option<Vec<u8>> {
         match arg {
-            Some(Abs::Ref(addr)) => match &s.heap[*addr] {
+            Some(Abs::Ref(addr)) => match &s.heap[addr] {
                 HeapObj::Array(elems) => {
                     let mut out = Vec::with_capacity(elems.len());
                     for e in elems {
@@ -1782,19 +2673,36 @@ impl Js {
         // A modeled built-in bound method (e.g. `TextDecoder.decode`): fold to a
         // constant when its arguments are static.
         if let Abs::Ref(addr) = &callee {
-            if let HeapObj::Builtin { kind, data } = &s.heap[*addr] {
+            if let HeapObj::Builtin { kind, data } = &s.heap[addr] {
                 let (kind, data) = (kind.clone(), data.clone());
-                return match self.try_builtin_method(&kind, &data, &args, s) {
-                    Some(v) => {
-                        s.top_mut().pc += 1;
-                        s.top_mut().ostack.push(v);
-                        Step::Continue
-                    }
-                    None => panic!(
-                        "built-in `{kind}` called with non-static arguments; it can \
-                         only be folded when its inputs are constant"
+                // Static inputs: fold to a constant. Otherwise residualize the
+                // built-in as a runtime call (e.g. `new TextDecoder().decode(x)`),
+                // so a dynamic argument is handled rather than rejected.
+                if let Some(v) = self.try_builtin_method(&kind, &data, &args, s) {
+                    s.top_mut().pc += 1;
+                    s.top_mut().ostack.push(v);
+                    return Step::Continue;
+                }
+                let (base, method) = kind
+                    .split_once('.')
+                    .unwrap_or_else(|| panic!("built-in method without a receiver: {kind}"));
+                self.forbid_residual_in_try(s, "a built-in call");
+                self.freeze_before_opaque_call(s, pc, out);
+                let mut escaped = std::collections::HashSet::new();
+                let arg_rs: Vec<RExpr> =
+                    args.iter().map(|a| self.operand_rexpr(s, a, &mut escaped, out)).collect();
+                let recv = RExpr::New(Box::new(RExpr::Global(base.to_string())), vec![]);
+                let dst = Js::opaque_call_var(pc);
+                out.push(Op::Eval {
+                    dst,
+                    expr: RExpr::Call(
+                        Box::new(RExpr::Get(Box::new(recv), method.to_string())),
+                        arg_rs,
                     ),
-                };
+                });
+                s.top_mut().pc += 1;
+                s.top_mut().ostack.push(Abs::Dyn(RExpr::Var(dst)));
+                return Step::Continue;
             }
         }
         // A modeled static method on a global (e.g. `String.fromCharCode`): fold
@@ -1807,19 +2715,48 @@ impl Js {
                     return Step::Continue;
                 }
             }
+            // A `String.prototype` method on a static string literal receiver
+            // (`"abc".charAt(0)`, `"a,b".split(",")`, ...): the receiver survives
+            // as `RExpr::Str` because `get_prop` residualizes primitive reads to
+            // `base.key`. Fold deterministic methods so deobfuscated/JSFuck string
+            // pipelines collapse to literals.
+            if let RExpr::Str(recv) = &**obj {
+                let recv = recv.clone();
+                let method = method.clone();
+                if method == "split" {
+                    if let Some(v) = self.try_string_split(&recv, &args, s) {
+                        s.top_mut().pc += 1;
+                        s.top_mut().ostack.push(v);
+                        return Step::Continue;
+                    }
+                } else if let Some(v) = self.try_string_method(&recv, &method, &args, s) {
+                    s.top_mut().pc += 1;
+                    s.top_mut().ostack.push(v);
+                    return Step::Continue;
+                }
+            }
         }
 
-        let (fid, captured) = match callee {
-            Abs::Ref(addr) => match &s.heap[addr] {
-                HeapObj::Closure { fid, captured } => (*fid, captured.clone()),
-                _ => panic!("call of a non-function"),
-            },
-            // A dynamic (unmodeled) callee: pass the call through. It may be
-            // effectful, so bind it to a temp once, in program order, and use
-            // the temp downstream (never duplicating the call). A heap object
-            // argument escapes (the callee may read or mutate it).
-            Abs::Dyn(callee_r) => {
-                forbid_residual_in_try(s, "an unmodeled call");
+        let (fid, captured) = match &callee {
+            Abs::Ref(addr) if matches!(&s.heap[addr], HeapObj::Closure { .. }) => {
+                match &s.heap[addr] {
+                    HeapObj::Closure { fid, captured } => (*fid, captured.clone()),
+                    _ => unreachable!(),
+                }
+            }
+            // Any other callee passes the call through to the residual:
+            //   - a dynamic (unmodeled) callee — an opaque, possibly effectful
+            //     call;
+            //   - a non-callable value (a non-closure heap object like `({})()`,
+            //     or a primitive like `(5)()` / `undefined()`), which throws
+            //     `TypeError` at runtime — the residual throws identically.
+            // The call is bound to a temp once, in program order, so it is never
+            // duplicated; the callee and any heap-object arguments escape (the
+            // callee may read or mutate them).
+            _ => {
+                self.forbid_residual_in_try(s, "an unmodeled call");
+                self.freeze_before_opaque_call(s, pc, out);
+                let callee_r = self.escape_if_ref(s, callee, out).to_rexpr();
                 let mut escaped = std::collections::HashSet::new();
                 let mut arg_rs = Vec::with_capacity(args.len());
                 for a in args {
@@ -1831,8 +2768,40 @@ impl Js {
                 s.top_mut().ostack.push(Abs::Dyn(RExpr::Var(dst)));
                 return Step::Continue;
             }
-            _ => panic!("call of a non-callable value"),
         };
+
+        // A function that contains a `try` is never inlined: it becomes a
+        // residual function and is called at runtime, so a `return` in its body
+        // returns from *it*, not from whatever inlined it. (Inlining it and
+        // residualizing the inner `try` would turn its `return` into a return
+        // from the caller, exiting the caller early.)
+        if self.has_try[fid] {
+            self.forbid_residual_in_try(s, "a call to a try-containing function");
+            self.freeze_before_opaque_call(s, pc, out);
+            let mut escaped = std::collections::HashSet::new();
+            // The residual function holds its captures *by reference* and may
+            // mutate them when called, so each captured heap object ESCAPES (its
+            // references throughout the caller's state are invalidated). Using
+            // `materialize_value` here instead would leave the caller's abstract
+            // copy live, so a later read would re-materialize the stale,
+            // pre-call value — dropping mutations the callee made through the
+            // capture. (This is the self-modifying-bytecode bug in simple.js: a
+            // loader closure decrypts the captured byte array, but the reader
+            // re-materialized the undecrypted literal.)
+            let caps: Vec<RExpr> =
+                captured.iter().map(|c| self.operand_rexpr(s, c, &mut escaped, out)).collect();
+            let rfid = self.residual_fn_for(fid);
+            let arg_rs: Vec<RExpr> =
+                args.iter().map(|a| self.operand_rexpr(s, a, &mut escaped, out)).collect();
+            let dst = Js::opaque_call_var(pc);
+            out.push(Op::Eval {
+                dst,
+                expr: RExpr::Call(Box::new(RExpr::FnRef { rfid, caps }), arg_rs),
+            });
+            s.top_mut().pc += 1;
+            s.top_mut().ostack.push(Abs::Dyn(RExpr::Var(dst)));
+            return Step::Continue;
+        }
 
         // Dynamic-depth recursion is out of scope for this subset.
         if self.is_recursive[fid] && args.iter().all(|a| a.is_dynamic()) && !args.is_empty() {
@@ -1849,7 +2818,19 @@ impl Js {
         for (i, c) in captured.into_iter().enumerate() {
             locals[i] = c;
         }
-        for (i, a) in args.into_iter().enumerate() {
+        // If the callee references `arguments`, build it from the actual args
+        // (an array-like the body reads via `.length` / `[i]`) before the args
+        // are moved into the param slots.
+        if let Some(aslot) = self.arguments_slot[fid] {
+            let addr = s.alloc(HeapObj::Array(args.clone()));
+            if aslot < locals.len() {
+                locals[aslot] = Abs::Ref(addr);
+            }
+        }
+        // Only the declared parameters bind to slots; any extra arguments are
+        // reachable solely through `arguments` (and must not clobber locals or
+        // the `arguments` slot).
+        for (i, a) in args.into_iter().enumerate().take(self.nparams[fid]) {
             let slot = self.ncaptured[fid] + i;
             if slot < locals.len() {
                 locals[slot] = a;
@@ -1869,60 +2850,261 @@ impl Js {
     /// construction ops for any heap object/array it references (escape). This
     /// is the second half of partial escape analysis: objects that cannot be
     /// scalar-replaced (because they become runtime values) are reconstructed in
-    /// the residual. Nested objects materialize depth-first so each is defined
-    /// before it is referenced.
+    /// the residual.
+    ///
+    /// Construction is *two-phase* so that cyclic object graphs are sound: every
+    /// object/array is first created as an empty **shell**, then its
+    /// fields/elements/captures are **filled** in. Because the shells all exist
+    /// before any fill runs, a closure can capture a cell that is filled later
+    /// (objects are shared by reference), which is exactly the capture-by-
+    /// reference boxing pattern (`var c = {value: ...}` captured by a closure
+    /// whose own value is stored back into `c`).
     fn materialize_value(&self, v: &Abs, heap: &Heap, out: &mut Vec<Op>) -> RExpr {
+        let mut seen = HashMap::new();
+        // Acyclic graphs use the compact inline form (`{a: 1}`, `[1, 2]`); only a
+        // genuinely cyclic graph needs the verbose two-phase shell+fill form.
+        if matches!(v, Abs::Ref(a) if Self::graph_cyclic(heap, *a)) {
+            let mut shells = Vec::new();
+            let mut fills = Vec::new();
+            let r = self.mat_value(v, heap, &mut shells, &mut fills, &mut seen);
+            out.append(&mut shells);
+            out.append(&mut fills);
+            r
+        } else {
+            self.mat_inline(v, heap, out, &mut seen)
+        }
+    }
+
+    /// Materialize `v` into the residual variable `dst`.
+    fn materialize_into(&self, dst: usize, v: &Abs, heap: &Heap, out: &mut Vec<Op>) {
+        let mut seen = HashMap::new();
+        match v {
+            Abs::Ref(addr) if Self::graph_cyclic(heap, *addr) => {
+                seen.insert(*addr, dst); // a cycle back to this object reuses `dst`
+                let mut shells = Vec::new();
+                let mut fills = Vec::new();
+                self.mat_obj(dst, *addr, heap, &mut shells, &mut fills, &mut seen);
+                out.append(&mut shells);
+                out.append(&mut fills);
+            }
+            Abs::Ref(addr) => {
+                seen.insert(*addr, dst);
+                self.mat_inline_obj(dst, *addr, heap, out, &mut seen);
+            }
+            _ => out.push(Op::Assign { var: dst, expr: v.to_rexpr() }),
+        }
+    }
+
+    /// Is the heap graph rooted at `start` cyclic? (Then materialization must be
+    /// two-phase so a closure can capture a cell whose value is filled later.)
+    fn graph_cyclic(heap: &Heap, start: usize) -> bool {
+        fn dfs(
+            heap: &Heap,
+            addr: usize,
+            on_path: &mut std::collections::HashSet<usize>,
+            done: &mut std::collections::HashSet<usize>,
+        ) -> bool {
+            if on_path.contains(&addr) {
+                return true;
+            }
+            if !done.insert(addr) {
+                return false;
+            }
+            on_path.insert(addr);
+            let kids: Vec<usize> = match &heap[&addr] {
+                HeapObj::Object(fs) => fs.iter().filter_map(|(_, v)| as_ref_addr(v)).collect(),
+                HeapObj::Array(es) => es.iter().filter_map(as_ref_addr).collect(),
+                HeapObj::Closure { captured, .. } => {
+                    captured.iter().filter_map(as_ref_addr).collect()
+                }
+                HeapObj::Builtin { data, .. } => data.iter().filter_map(as_ref_addr).collect(),
+            };
+            for k in kids {
+                if dfs(heap, k, on_path, done) {
+                    return true;
+                }
+            }
+            on_path.remove(&addr);
+            false
+        }
+        let mut on_path = std::collections::HashSet::new();
+        let mut done = std::collections::HashSet::new();
+        dfs(heap, start, &mut on_path, &mut done)
+    }
+
+    /// Inline (compact) materialization for an acyclic graph: nested objects are
+    /// constructed depth-first as object/array literals.
+    fn mat_inline(
+        &self,
+        v: &Abs,
+        heap: &Heap,
+        out: &mut Vec<Op>,
+        seen: &mut HashMap<usize, usize>,
+    ) -> RExpr {
         match v {
             Abs::Ref(addr) => {
+                if let Some(&var) = seen.get(addr) {
+                    return RExpr::Var(var);
+                }
                 let dst = Js::escape_var(*addr);
-                self.materialize_into(dst, v, heap, out);
+                seen.insert(*addr, dst);
+                self.mat_inline_obj(dst, *addr, heap, out, seen);
                 RExpr::Var(dst)
             }
             _ => v.to_rexpr(),
         }
     }
 
-    /// Materialize `v` into the residual variable `dst`. For a heap reference,
-    /// emits the construction op (recursively materializing nested values).
-    fn materialize_into(&self, dst: usize, v: &Abs, heap: &Heap, out: &mut Vec<Op>) {
+    fn mat_inline_obj(
+        &self,
+        dst: usize,
+        addr: usize,
+        heap: &Heap,
+        out: &mut Vec<Op>,
+        seen: &mut HashMap<usize, usize>,
+    ) {
+        match &heap[&addr] {
+            HeapObj::Object(fields) => {
+                let rf: Vec<(String, RExpr)> = fields
+                    .clone()
+                    .into_iter()
+                    .map(|(k, fv)| (k, self.mat_inline(&fv, heap, out, seen)))
+                    .collect();
+                out.push(Op::NewObject { dst, fields: rf });
+            }
+            HeapObj::Array(elems) => {
+                let re: Vec<RExpr> = elems
+                    .clone()
+                    .into_iter()
+                    .map(|e| self.mat_inline(&e, heap, out, seen))
+                    .collect();
+                out.push(Op::NewArray { dst, elems: re });
+            }
+            HeapObj::Closure { fid, captured } => {
+                let (fid, captured) = (*fid, captured.clone());
+                let caps: Vec<RExpr> =
+                    captured.iter().map(|c| self.mat_inline(c, heap, out, seen)).collect();
+                let rfid = self.residual_fn_for(fid);
+                out.push(Op::Assign { var: dst, expr: RExpr::FnRef { rfid, caps } });
+            }
+            HeapObj::Builtin { kind, data } => {
+                let expr = if let Some((base, method)) = kind.split_once('.') {
+                    RExpr::Get(
+                        Box::new(RExpr::New(Box::new(RExpr::Global(base.to_string())), vec![])),
+                        method.to_string(),
+                    )
+                } else if data.is_empty() {
+                    RExpr::New(Box::new(RExpr::Global(kind.clone())), vec![])
+                } else {
+                    panic!("cannot residualize built-in `{kind}` with captured state");
+                };
+                out.push(Op::Assign { var: dst, expr });
+            }
+        }
+    }
+
+    /// Convert an abstract value to a residual expression. `seen` maps each
+    /// already-created heap address to the residual variable holding its shell,
+    /// so a cyclic or shared graph references the existing variable.
+    fn mat_value(
+        &self,
+        v: &Abs,
+        heap: &Heap,
+        shells: &mut Vec<Op>,
+        fills: &mut Vec<Op>,
+        seen: &mut HashMap<usize, usize>,
+    ) -> RExpr {
         match v {
-            Abs::Ref(addr) => match &heap[*addr] {
-                HeapObj::Object(fields) => {
-                    let rf: Vec<(String, RExpr)> = fields
-                        .iter()
-                        .map(|(k, fv)| (k.clone(), self.materialize_value(fv, heap, out)))
-                        .collect();
-                    out.push(Op::NewObject { dst, fields: rf });
+            Abs::Ref(addr) => {
+                if let Some(&var) = seen.get(addr) {
+                    return RExpr::Var(var);
                 }
-                HeapObj::Array(elems) => {
-                    let re: Vec<RExpr> =
-                        elems.iter().map(|e| self.materialize_value(e, heap, out)).collect();
-                    out.push(Op::NewArray { dst, elems: re });
+                let dst = Js::escape_var(*addr);
+                seen.insert(*addr, dst);
+                self.mat_obj(dst, *addr, heap, shells, fills, seen);
+                RExpr::Var(dst)
+            }
+            _ => v.to_rexpr(),
+        }
+    }
+
+    /// Emit the shell (into `shells`) and fill ops (into `fills`) for the heap
+    /// object at `addr`, bound to residual variable `dst`.
+    fn mat_obj(
+        &self,
+        dst: usize,
+        addr: usize,
+        heap: &Heap,
+        shells: &mut Vec<Op>,
+        fills: &mut Vec<Op>,
+        seen: &mut HashMap<usize, usize>,
+    ) {
+        match &heap[&addr] {
+            HeapObj::Object(fields) => {
+                shells.push(Op::NewObject { dst, fields: vec![] });
+                for (k, fv) in fields.clone() {
+                    let rv = self.mat_value(&fv, heap, shells, fills, seen);
+                    fills.push(Op::SetProp { obj: RExpr::Var(dst), key: k, val: rv });
                 }
-                // A closure that escapes into the residual becomes a generated
-                // residual function, referenced with its captured values bound.
-                HeapObj::Closure { fid, captured } => {
-                    let caps: Vec<RExpr> =
-                        captured.iter().map(|c| self.materialize_value(c, heap, out)).collect();
-                    let rfid = self.residual_fn_for(*fid);
-                    out.push(Op::Assign { var: dst, expr: RExpr::FnRef { rfid, caps } });
+            }
+            HeapObj::Array(elems) => {
+                shells.push(Op::NewArray { dst, elems: vec![] });
+                for (i, e) in elems.clone().into_iter().enumerate() {
+                    let rv = self.mat_value(&e, heap, shells, fills, seen);
+                    fills.push(Op::SetIndex {
+                        arr: RExpr::Var(dst),
+                        index: RExpr::Num(i as i64),
+                        val: rv,
+                    });
                 }
-                // A modeled built-in (e.g. a `TextDecoder` instance or a bound
-                // method) has no residual representation: reaching here means it
-                // flowed into runtime code (e.g. returned, or a method called
-                // with non-static arguments).
-                HeapObj::Builtin { kind, .. } => panic!(
-                    "built-in `{kind}` escaped into runtime code; it can only be \
-                     folded when used with static inputs"
-                ),
-            },
-            _ => out.push(Op::Assign { var: dst, expr: v.to_rexpr() }),
+            }
+            // A closure that escapes becomes a generated residual function,
+            // referenced with its captured values bound. Emitted in the fill
+            // phase so the cells it captures already exist as shells.
+            HeapObj::Closure { fid, captured } => {
+                let (fid, captured) = (*fid, captured.clone());
+                let caps: Vec<RExpr> = captured
+                    .iter()
+                    .map(|c| self.mat_value(c, heap, shells, fills, seen))
+                    .collect();
+                let rfid = self.residual_fn_for(fid);
+                fills.push(Op::Assign { var: dst, expr: RExpr::FnRef { rfid, caps } });
+            }
+            // A modeled built-in escaping into runtime code is reconstructed as
+            // its runtime form (`new TextDecoder()`, a bound method, ...).
+            HeapObj::Builtin { kind, data } => {
+                let expr = if let Some((base, method)) = kind.split_once('.') {
+                    RExpr::Get(
+                        Box::new(RExpr::New(Box::new(RExpr::Global(base.to_string())), vec![])),
+                        method.to_string(),
+                    )
+                } else if data.is_empty() {
+                    RExpr::New(Box::new(RExpr::Global(kind.clone())), vec![])
+                } else {
+                    panic!("cannot residualize built-in `{kind}` with captured state");
+                };
+                fills.push(Op::Assign { var: dst, expr });
+            }
         }
     }
 
     fn escape_var(addr: usize) -> usize {
         // Disjoint from the input var (0) and the loop/if materialization band.
         100_000 + addr
+    }
+
+    /// If `v` is a live heap reference, escape it into the residual and return
+    /// the resulting `Dyn` reference; otherwise return `v` unchanged. Used where
+    /// an object reaches a context we don't model statically (a primitive
+    /// operator operand, a mismatched index) and must become a runtime value.
+    fn escape_if_ref(&self, s: &mut State, v: Abs, out: &mut Vec<Op>) -> Abs {
+        if let Abs::Ref(addr) = v {
+            let mut escaped = std::collections::HashSet::new();
+            let r = self.escape(s, addr, &mut escaped, out);
+            Abs::Dyn(r)
+        } else {
+            v
+        }
     }
 
     /// Escape a heap object into the residual because it flows into unmodeled
@@ -1940,7 +3122,7 @@ impl Js {
         escaped: &mut std::collections::HashSet<usize>,
         out: &mut Vec<Op>,
     ) -> RExpr {
-        forbid_residual_in_try(s, "an object escaping into unmodeled code");
+        self.forbid_residual_in_try(s, "an object escaping into unmodeled code");
         if escaped.contains(&addr) {
             return RExpr::Var(Js::escape_var(addr));
         }
@@ -1956,18 +3138,24 @@ impl Js {
                 invalidate_abs(o, &reach);
             }
         }
-        for h in s.heap.iter_mut() {
-            match h {
-                HeapObj::Object(fs) => fs.iter_mut().for_each(|(_, v)| invalidate_abs(v, &reach)),
-                HeapObj::Array(es) => es.iter_mut().for_each(|v| invalidate_abs(v, &reach)),
-                HeapObj::Closure { captured, .. } => {
-                    captured.iter_mut().for_each(|v| invalidate_abs(v, &reach))
+        s.heap = s
+            .heap
+            .iter()
+            .map(|(addr, h)| {
+                let mut h = h.clone();
+                match &mut h {
+                    HeapObj::Object(fs) => fs.iter_mut().for_each(|(_, v)| invalidate_abs(v, &reach)),
+                    HeapObj::Array(es) => es.iter_mut().for_each(|v| invalidate_abs(v, &reach)),
+                    HeapObj::Closure { captured, .. } => {
+                        captured.iter_mut().for_each(|v| invalidate_abs(v, &reach))
+                    }
+                    HeapObj::Builtin { data, .. } => {
+                        data.iter_mut().for_each(|v| invalidate_abs(v, &reach))
+                    }
                 }
-                HeapObj::Builtin { data, .. } => {
-                    data.iter_mut().for_each(|v| invalidate_abs(v, &reach))
-                }
-            }
-        }
+                (*addr, h)
+            })
+            .collect();
         escaped.extend(reach);
         root
     }
@@ -1978,7 +3166,7 @@ impl Js {
         if !out.insert(addr) {
             return;
         }
-        let kids: Vec<usize> = match &heap[addr] {
+        let kids: Vec<usize> = match &heap[&addr] {
             HeapObj::Object(fs) => fs.iter().filter_map(|(_, v)| as_ref_addr(v)).collect(),
             HeapObj::Array(es) => es.iter().filter_map(as_ref_addr).collect(),
             HeapObj::Closure { captured, .. } => captured.iter().filter_map(as_ref_addr).collect(),
@@ -2012,6 +3200,62 @@ impl Js {
         500_000 + pc
     }
 
+    /// Stable residual temp for a postfix-update snapshot (`Instr::Snapshot`).
+    /// Keyed by pc so a snapshot in a loop reuses one temp and converges.
+    fn snapshot_var(pc: usize) -> usize {
+        600_000 + pc
+    }
+
+    /// Stable residual temp for freezing a stale reader at a mutation site.
+    /// Keyed by (pc, idx) where idx identifies the local slot or operand-stack
+    /// position, so it is deterministic and distinct per frozen value.
+    fn freeze_var(pc: usize, idx: usize) -> usize {
+        2_000_000 + pc * 8192 + idx
+    }
+
+    /// Before a residual write to some location, freeze every live value (in the
+    /// frame's locals and operand stack) whose residual expression *reads* that
+    /// location, binding it to a temp holding the pre-write value. Without this,
+    /// such a value would re-read the mutated location at runtime and observe the
+    /// new value (a single-evaluation/ordering bug), e.g. `t = a[i]; i--; use t`
+    /// or `arr[i-2].push(arr[--i])`.
+    /// Before an opaque call (which may mutate any heap location), snapshot every
+    /// live frame value whose residual expression *reads* mutable state
+    /// (`obj.k`, `arr[i]`, a global) into a temp holding the pre-call value. A
+    /// `Dyn` value left as such an expression would otherwise be re-read after
+    /// the call and see post-call state — the single-evaluation bug, e.g. a VM
+    /// operand `stack[sp]` read once, then used after intervening calls moved
+    /// `sp` or mutated `stack`.
+    fn freeze_before_opaque_call(&self, s: &mut State, pc: usize, out: &mut Vec<Op>) {
+        self.freeze_readers(s, pc, out, &|e| {
+            matches!(e, RExpr::Get(..) | RExpr::Index(..) | RExpr::Global(..))
+        });
+    }
+
+    fn freeze_readers(&self, s: &mut State, pc: usize, out: &mut Vec<Op>, reads: &dyn Fn(&RExpr) -> bool) {
+        let fi = s.frames.len() - 1;
+        for slot in 0..s.frames[fi].locals.len() {
+            if let Abs::Dyn(e) = &s.frames[fi].locals[slot] {
+                if !rexpr_is_atom(e) && rexpr_contains(e, reads) {
+                    let expr = e.clone();
+                    let dst = Js::freeze_var(pc, slot);
+                    out.push(Op::Eval { dst, expr });
+                    s.frames[fi].locals[slot] = Abs::Dyn(RExpr::Var(dst));
+                }
+            }
+        }
+        for i in 0..s.frames[fi].ostack.len() {
+            if let Abs::Dyn(e) = &s.frames[fi].ostack[i] {
+                if !rexpr_is_atom(e) && rexpr_contains(e, reads) {
+                    let expr = e.clone();
+                    let dst = Js::freeze_var(pc, 4096 + i);
+                    out.push(Op::Eval { dst, expr });
+                    s.frames[fi].ostack[i] = Abs::Dyn(RExpr::Var(dst));
+                }
+            }
+        }
+    }
+
     fn dynamically_controlled(&self, s: &State) -> bool {
         if !self.loop_head[s.top().pc] {
             return false;
@@ -2033,6 +3277,12 @@ impl Js {
                 Instr::Bin(op) => {
                     let b = probe.top_mut().ostack.pop().unwrap();
                     let a = probe.top_mut().ostack.pop().unwrap();
+                    // A heap ref as an operand would have to escape (which a
+                    // read-only probe cannot do); treat the condition as
+                    // dynamically controlled.
+                    if matches!(a, Abs::Ref(_)) || matches!(b, Abs::Ref(_)) {
+                        return true;
+                    }
                     probe.top_mut().ostack.push(Js::eval_bin(*op, &a, &b));
                 }
                 Instr::GetProp(k) => {
@@ -2045,6 +3295,12 @@ impl Js {
                 Instr::GetIndex => {
                     let i = probe.top_mut().ostack.pop().unwrap();
                     let a = probe.top_mut().ostack.pop().unwrap();
+                    // A read the abstract heap can't serve statically would need
+                    // to escape (impossible in a read-only probe): treat the
+                    // loop as dynamically controlled.
+                    if !self.index_is_static(&probe, &a, &i) {
+                        return true;
+                    }
                     let v = self.get_index(&probe, &a, &i);
                     probe.top_mut().ostack.push(v);
                 }
@@ -2079,12 +3335,16 @@ impl Js {
             let (_, m) = ns.pending_joins.pop().unwrap();
             self.materialize(&mut ns, &m, out);
         }
+        // Block boundary: reclaim heap garbage so the abstract heap stays bounded
+        // by the live set (otherwise long static unrolling accumulates dead
+        // objects forever, which is what made `simple.js` blow up).
+        ns.gc();
         Step::Jump(ns)
     }
 
     fn materialize(&self, ns: &mut State, slots: &[usize], out: &mut Vec<Op>) {
         if !slots.is_empty() {
-            forbid_residual_in_try(ns, "a value materializing (a dynamic loop/branch)");
+            self.forbid_residual_in_try(ns, "a value materializing (a dynamic loop/branch)");
         }
         let fi = ns.frames.len() - 1;
         let func = ns.frames[fi].func;
@@ -2114,6 +3374,142 @@ impl Js {
         for (id, tmp) in copies {
             out.push(Op::Assign { var: id, expr: RExpr::Var(tmp) });
         }
+    }
+
+    /// A residual operation inside an active `try` would, at runtime, be able to
+    /// throw past our goto-based catch. The body must therefore residualize a
+    /// real `try`/`catch`. During the foldability probe we only *record* that
+    /// this happened (`try_taint`); the real run never reaches here on the fold
+    /// path (the probe already steered it to `residualize_try`).
+    fn forbid_residual_in_try(&self, s: &State, _what: &str) {
+        if !s.handlers.is_empty() {
+            if self.probing.get() {
+                self.try_taint.set(true);
+                return;
+            }
+            panic!(
+                "residual operation inside an active try/catch reached the inline \
+                 path; this should have been residualized (probe bug)"
+            );
+        }
+    }
+
+    /// The residual variable an emitted `catch` binds its exception to.
+    fn exc_var(catch_pc: usize) -> usize {
+        800_000 + catch_pc
+    }
+
+    /// Carve a single-frame state out of the top frame at `pc`, for bounded
+    /// sub-specialization of a try region (the region only touches this frame,
+    /// its callees, the shared heap, and globals). A `return` empties the frame
+    /// and ends the sub-program; `halt_at` ends it at the region boundary.
+    fn sole_frame_state(&self, s: &State, pc: usize) -> State {
+        let mut f = s.top().clone();
+        f.pc = pc;
+        f.ostack.clear();
+        State {
+            frames: vec![f],
+            heap: s.heap.clone(),
+            next_addr: s.next_addr,
+            pending_joins: Vec::new(),
+            handlers: Vec::new(),
+        }
+    }
+
+    /// Foldability probe: re-specialize the try region (body with throws modeled
+    /// to the catch) on a clone, bounded at `end`. If a may-throw residual op
+    /// would be emitted, `try_taint` is set. Returns true when the region folds
+    /// (no runtime `try` needed).
+    fn try_folds(&self, s: &State, handler: &Handler, _body_end: usize, end: usize) -> bool {
+        let body_pc = s.top().pc + 1;
+        let mut probe = self.sole_frame_state(s, body_pc);
+        probe.handlers.push(Handler {
+            catch_pc: handler.catch_pc,
+            exc_slot: handler.exc_slot,
+            frame_depth: 1,
+            ostack_depth: 0,
+        });
+        self.probing.set(true);
+        self.try_taint.set(false);
+        self.halt_at.borrow_mut().push(end);
+        let _ = crate::engine::specialize(self, probe);
+        self.halt_at.borrow_mut().pop();
+        self.probing.set(false);
+        !self.try_taint.get()
+    }
+
+    /// Emit a residual `try`/`catch` for a body that can't fully fold. Everything
+    /// the region can touch is first materialized to residual variables so the
+    /// continuation sees the (now runtime) state; the body and catch are then
+    /// specialized as nested programs over that fully-residual state.
+    fn residualize_try(
+        &self,
+        s: &mut State,
+        catch_pc: usize,
+        exc_slot: Option<usize>,
+        body_end: usize,
+        end: usize,
+        out: &mut Vec<Op>,
+    ) -> Step<Js> {
+        // A `continue`/`break` inside this residual `try` that targets an
+        // enclosing loop makes the nested specialization below jump back to the
+        // loop head and re-enter this same `try`, recursing without bound. Detect
+        // that re-entry and fail with a clear, catchable error rather than
+        // overflowing the stack. (The sound complete fix is to thread the
+        // non-local exit out of the residual sub-program; not yet done.)
+        if self.residual_try_stack.borrow().contains(&catch_pc) {
+            panic!(
+                "`continue`/`break` out of a residualized `try`/`catch` back into an \
+                 enclosing loop is not yet supported (would not terminate)"
+            );
+        }
+        self.residual_try_stack.borrow_mut().push(catch_pc);
+
+        self.materialize_all(s, out);
+        // Body/catch run with eager top-frame stores so their effects residualize
+        // in source order (sound under may-throw ops).
+        let prev_eager = self.eager_stores.replace(true);
+        // Body: no handler (a runtime throw is caught by the emitted `catch`),
+        // bounded at the `PopHandler` (normal completion).
+        let body_pc = s.top().pc + 1;
+        let body_state = self.sole_frame_state(s, body_pc);
+        self.halt_at.borrow_mut().push(body_end);
+        let body = crate::engine::specialize(self, body_state);
+        self.halt_at.borrow_mut().pop();
+        // Catch: the exception is a runtime value bound to a residual variable.
+        let ev = Js::exc_var(catch_pc);
+        let mut catch_state = self.sole_frame_state(s, catch_pc);
+        if let Some(slot) = exc_slot {
+            catch_state.frames[0].locals[slot] = Abs::Dyn(RExpr::Var(ev));
+        }
+        self.halt_at.borrow_mut().push(end);
+        let catch_body = crate::engine::specialize(self, catch_state);
+        self.halt_at.borrow_mut().pop();
+        self.eager_stores.set(prev_eager);
+        self.residual_try_stack.borrow_mut().pop();
+        out.push(Op::Try { body, catch_slot: exc_slot.map(|_| ev), catch_body });
+        s.top_mut().pc = end;
+        Step::Continue
+    }
+
+    /// Materialize the whole top frame to its *stable* residual variables: escape
+    /// every heap object it can reach (so aliases collapse to one residual var),
+    /// then lift EVERY slot (not just static ones) to its `stable_id`. Lifting
+    /// every slot — including already-dynamic ones — is what makes a residual
+    /// `try` sound: the body/catch sub-programs and the continuation then all name
+    /// a given slot the same way, so a modification the body writes back at its
+    /// boundary (see the `halt_at` materialize in `step`) is read by the
+    /// continuation. After this the frame is entirely dynamic.
+    fn materialize_all(&self, s: &mut State, out: &mut Vec<Op>) {
+        let fi = s.frames.len() - 1;
+        let mut escaped = std::collections::HashSet::new();
+        for slot in 0..s.frames[fi].locals.len() {
+            if let Abs::Ref(addr) = s.frames[fi].locals[slot] {
+                let _ = self.escape(s, addr, &mut escaped, out);
+            }
+        }
+        let slots: Vec<usize> = (0..s.frames[fi].locals.len()).collect();
+        self.materialize(s, &slots, out);
     }
 
     fn stable_id(&self, func: usize, slot: usize) -> usize {
@@ -2162,6 +3558,12 @@ impl Js {
                 Bop::Ge => JsVal::Bool(x >= y),
                 Bop::Eq => JsVal::Bool(x == y),
                 Bop::Ne => JsVal::Bool(x != y),
+                Bop::BitAnd => JsVal::Num(((*x as i32) & (*y as i32)) as i64),
+                Bop::BitOr => JsVal::Num(((*x as i32) | (*y as i32)) as i64),
+                Bop::BitXor => JsVal::Num(((*x as i32) ^ (*y as i32)) as i64),
+                Bop::Shl => JsVal::Num(((*x as i32) << ((*y as u32) & 31)) as i64),
+                Bop::Shr => JsVal::Num(((*x as i32) >> ((*y as u32) & 31)) as i64),
+                Bop::UShr => JsVal::Num(((*x as u32) >> ((*y as u32) & 31)) as i64),
             },
             (JsVal::Str(x), JsVal::Str(y)) => match op {
                 Bop::Add => JsVal::Str(format!("{x}{y}")),
@@ -2230,6 +3632,7 @@ impl Js {
                      with the Node oracle"
                 ),
                 Instr::Load(slot) => ostack.push(locals[*slot].clone()),
+                Instr::Snapshot => {} // identity for concrete execution
                 Instr::Store(slot) => locals[*slot] = ostack.pop().unwrap(),
                 Instr::Pop => {
                     ostack.pop();
@@ -2558,6 +3961,10 @@ impl Js {
                         "the Rust residual interpreter cannot assign the global `{name}`; \
                          validate with the Node oracle"
                     ),
+                    Op::Try { .. } => panic!(
+                        "the Rust residual interpreter does not execute `try`/`catch`; \
+                         validate residual exceptions with the Node oracle"
+                    ),
                 }
             }
             match &block.term {
@@ -2634,6 +4041,11 @@ impl Js {
                     Op::AssignGlobal { name, expr } => {
                         writeln!(s, "    {name} := {}", fmt_rexpr(expr)).unwrap()
                     }
+                    Op::Try { body, catch_slot, catch_body } => {
+                        let cs = catch_slot.map(|v| format!("v{v}")).unwrap_or_default();
+                        writeln!(s, "    try {{ {} blocks }} catch ({cs}) {{ {} blocks }}",
+                            body.blocks.len(), catch_body.blocks.len()).unwrap()
+                    }
                 }
             }
             match &b.term {
@@ -2655,15 +4067,6 @@ impl Js {
 /// handled when it fully specializes (modeled `throw` becomes control flow). A
 /// residual operation that could throw at runtime would escape the goto-based
 /// catch, so emitting one while a handler is active is a hard error for now.
-fn forbid_residual_in_try(s: &State, what: &str) {
-    if !s.handlers.is_empty() {
-        panic!(
-            "{what} inside an active try/catch is not yet supported; only a try \
-             body that fully specializes (with modeled `throw`) is handled"
-        );
-    }
-}
-
 fn as_ref_addr(v: &Abs) -> Option<usize> {
     if let Abs::Ref(a) = v {
         Some(*a)
@@ -2814,6 +4217,13 @@ pub fn residual_param_var_id(rfid: usize, j: usize) -> usize {
     800_000 + rfid * 64 + j
 }
 
+/// Sentinel residual-variable id for a residualized function's `arguments`.
+/// A residual function is emitted as a real JS function, so its body can read
+/// the native `arguments` object: the codegen renders this id as `arguments`
+/// rather than `v<id>`. (Correct for capture-free functions, where the emitted
+/// params are exactly the original call args.)
+pub const ARGUMENTS_VAR_ID: usize = usize::MAX;
+
 /// A fully-expanded value, for structural comparison of objects/arrays returned
 /// by the reference interpreter and the residual (whose heap addresses differ).
 #[derive(Clone, Debug, PartialEq)]
@@ -2868,6 +4278,7 @@ mod tests {
             ncaptured: 0,
             nparams: 2,
             slot_names: vec!["node", "env"],
+            arguments_slot: None,
             body: vec![Stmt::If(
                 bin(Bop::Eq, get(var(0), "op"), str_("lit")),
                 vec![Stmt::Return(get(var(0), "val"))],
@@ -2922,6 +4333,7 @@ mod tests {
             ncaptured: 0,
             nparams: 1,
             slot_names: vec!["input"],
+            arguments_slot: None,
             body: vec![Stmt::Return(call(
                 func(0),
                 vec![ast, obj(vec![("x", var(0))])],
@@ -2957,6 +4369,7 @@ mod tests {
             ncaptured: 0,
             nparams: 2,
             slot_names: vec!["node", "env"],
+            arguments_slot: None,
             body: vec![Stmt::Switch(
                 get(var(0), "op"),
                 vec![
@@ -3017,6 +4430,7 @@ mod tests {
             ncaptured: 0,
             nparams: 1,
             slot_names: vec!["input"],
+            arguments_slot: None,
             body: vec![Stmt::Return(call(func(0), vec![ast, obj(vec![("x", var(0))])]))],
         };
         let program = [eval, main];
@@ -3059,6 +4473,7 @@ mod tests {
             ncaptured: 0,
             nparams: 1,
             slot_names: vec!["x", "r"],
+            arguments_slot: None,
             body: vec![
                 Stmt::Switch(
                     var(0),
@@ -3099,6 +4514,7 @@ mod tests {
             ncaptured: 0,
             nparams: 1,
             slot_names: vec!["a"],
+            arguments_slot: None,
             body: vec![Stmt::Return(obj(vec![
                 ("pair", arr(vec![var(0), bin(Bop::Mul, var(0), var(0))])),
                 (
@@ -3136,6 +4552,7 @@ mod tests {
             ncaptured: 0,
             nparams: 1,
             slot_names: vec!["x"],
+            arguments_slot: None,
             body: vec![Stmt::Return(bin(Bop::Mul, var(0), num(2)))],
         };
         let map = FuncDef {
@@ -3144,6 +4561,7 @@ mod tests {
             ncaptured: 0,
             nparams: 2,
             slot_names: vec!["xs", "f", "result", "i"],
+            arguments_slot: None,
             body: vec![
                 Stmt::Let(2, arr(vec![])),
                 Stmt::Let(3, num(0)),
@@ -3163,6 +4581,7 @@ mod tests {
             ncaptured: 0,
             nparams: 1,
             slot_names: vec!["a"],
+            arguments_slot: None,
             body: vec![Stmt::Return(call(
                 func(1),
                 vec![
@@ -3201,6 +4620,7 @@ mod tests {
             ncaptured: 0,
             nparams: 1,
             slot_names: vec!["n", "r", "i"],
+            arguments_slot: None,
             body: vec![
                 Stmt::Let(1, arr(vec![])),
                 Stmt::Let(2, num(0)),
@@ -3246,6 +4666,7 @@ mod tests {
             ncaptured: 0,
             nparams: 1,
             slot_names: vec!["x"],
+            arguments_slot: None,
             body: vec![Stmt::Return(bin(Bop::Gt, var(0), num(0)))],
         };
         let filter = FuncDef {
@@ -3254,6 +4675,7 @@ mod tests {
             ncaptured: 0,
             nparams: 2,
             slot_names: vec!["xs", "pred", "result", "i"],
+            arguments_slot: None,
             body: vec![
                 Stmt::Let(2, arr(vec![])),
                 Stmt::Let(3, num(0)),
@@ -3278,6 +4700,7 @@ mod tests {
             ncaptured: 0,
             nparams: 1,
             slot_names: vec!["a"],
+            arguments_slot: None,
             body: vec![Stmt::Return(call(
                 func(1),
                 vec![
@@ -3412,6 +4835,7 @@ mod tests {
             ncaptured: 0,
             nparams: 6,
             slot_names: vec!["node", "tape", "ptr", "out", "input", "inptr", "i", "r"],
+            arguments_slot: None,
             body: vec![
                 Stmt::Switch(
                     get(var(0), "op"),
@@ -3483,6 +4907,7 @@ mod tests {
             ncaptured: 0,
             nparams: 1,
             slot_names: vec!["input", "tape", "out", "input_arr", "r"],
+            arguments_slot: None,
             body: vec![
                 Stmt::Let(1, arr(vec![num(0); 8])),
                 Stmt::Let(2, arr(vec![])),

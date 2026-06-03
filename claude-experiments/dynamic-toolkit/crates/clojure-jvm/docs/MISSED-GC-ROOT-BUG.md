@@ -99,12 +99,153 @@
 >   (`register_chunk_buffer`).
 > - **`cljvm_inst_reduce_3`** (`reduce1`'s chunked fold): rooted the folded
 >   items + running accumulator across each `cljvm_rt_invoke_2` via `with_scope`.
+> - **Alloc-triggered GC didn't scan stack-scoped extra roots** (the most
+>   significant find). `DynGcRuntime::register_extra_root_source` mirrors a
+>   `RootSource` into the Heap's `permanent_extras` (so alloc-path GC scans it),
+>   but the *temporary* guarded variant `push_extra_root_source` — used by
+>   `eval_form` and `macroexpand_once` for their per-call `FrameChain` (which
+>   holds every `with_scope` root in runtime externs like `cljvm_rt_cons`/
+>   `cljvm_rt_seq`) — did **not** mirror to the heap. So a collection triggered
+>   inside an allocating extern during macroexpansion never scanned that chain,
+>   relocating its roots without updating them. Fixed by mirroring the pushed
+>   source into `permanent_extras` for the guard's lifetime + a matching
+>   `Heap::unregister_permanent_extra` on `ExtraRootGuard::drop`.
 >
-> These are correct hardening but do not resolve form 430, so the trigger above
-> remains open. Next step: instrument to catch the *producer* of the stale value
-> (e.g. a post-GC conservative stack scan that records each stale slot's value,
-> looked up when `rt_first` receives the dangling arg) and identify whether it is
-> a JIT register read-after-update or a specific unrooted runtime extern local.
+ ### Update 5 (2026-06-02) — disassembly + a permanent compile-time guard
+
+> **Disassembly of the crashing frames** (via `CLJVM_TRAP=1`, `jit_code_window`)
+> confirmed the mechanism precisely. The frame that calls `RT.first` (frame#0) is
+> a tiny wrapper: it just stores its incoming argument and passes it on. So `coll`
+> arrives **already stale** from its caller (frame#1, the closure args-list
+> reader / `loop`). In frame#1, `coll` lives in `fp+0x20` (recorded at **9/9**
+> safepoints — always rooted and updated) AND in `fp+0x80` (recorded at **1/9**).
+> The codegen loads the argument for the `RT.first`-wrapper call **from `fp+0x80`**
+> (`ldr x0, [x29, #0x80]`), not from the rooted `fp+0x20`. A GC at one of the
+> 8 safepoints where `fp+0x80` is unrecorded relocates `coll`, updates `fp+0x20`,
+> leaves `fp+0x80` stale → the wrapper gets the dangling pointer.
+>
+> **So the precise root cause is a register-allocator (`GreedyRegState`) defect:**
+> one value is materialized into multiple stack slots, only its `value_spill_slot`
+> home is recorded as a root, and a *read site* uses a different (un-rooted, hence
+> un-updated) copy. This is NOT a recording-liveness gap (the value IS rooted via
+> its home) — it's "the codegen reads a value from a slot that isn't the rooted
+> one." The fix belongs in the allocator: a value must have a single authoritative
+> rooted home that every read uses (or every live copy must be rooted).
+>
+> ### Permanent guard added (covers the recording-completeness class)
+>
+> `Lowerer::assert_safepoint_roots_complete` (in `dynlower/src/lib.rs`) now runs at
+> EVERY safepoint emission: using sound backward-dataflow liveness
+> (`block_live_out` + `heap_roots_live_across`), it `debug_assert!`s that every
+> heap value live across the safepoint has a recorded root slot. This makes the
+> *use-count-vs-true-liveness* recording-gap class impossible to ship silently
+> (it panics at compile time). Verified it does not false-fire across forms
+> 1-429 under `CLJVM_GC=every`. It does NOT catch the physical-copy read above
+> (the value IS recorded via its home), so that remains the open item.
+>
+> ### Sound fixes landed this round (kept)
+> - `assert_safepoint_roots_complete` permanent guard + sound liveness.
+> - Real-liveness root recording (union live-across values' slots) + part-D
+>   (block-param canonical slots registered as the param's `value_spill_slot`).
+> - (Earlier rounds: outermost-fence frame walking, alloc-GC scoped-chain
+>   mirroring, LazySeq/ChunkBuffer/`reduce1` rooting.)
+>
+> **Still open:** the `GreedyRegState` physical-copy read. Next step: make the
+> allocator read a value from its single rooted home (eliminate the un-rooted
+> copy at the call-argument materialization), verifiable with `CLJVM_TRAP=1`
+> (the slot feeding `RT.first` must report `recorded at 9/9`).
+
+ ### Update 4 (2026-06-02) — ROOT CAUSE: one value, multiple slots, stale sibling read
+
+> Two post-collection verifications (both gated by `CLJVM_TRAP`) ran clean:
+> - **Stack-root verify** (`dynruntime/jit.rs`, after every collection): re-scan
+>   the exact recorded roots — NONE was ever left pointing at a forwarded object.
+>   So no recorded root on the live FP chain is missed.
+> - **Heap verify** (`dynalloc/heap.rs`, post-Cheney conservative full-object
+>   walk): NO live heap object had a word still pointing at a forwarded object.
+>   So there is no untraced heap field.
+>
+> clojure-jvm also doesn't surface `CaptureSlice`/`ResumeSlice` (only
+> `Value`/`Exception`), so continuation slices are not the path either.
+>
+> The precise trap (`trap_find_value`, now reporting "recorded at N/total
+> safepoints" per slot) then nailed it. `coll`'s bits occur in **five** slots of
+> the relevant JIT frame:
+>
+> ```
+> frame#1 ... slot=fp+0x20  recorded=true  (recorded at 9/9 safepoints)   <- correctly rooted, updated every GC
+> frame#1 ... slot=fp+0x80  recorded=true  (recorded at 1/9 safepoints)   <- STALE leftover copy
+> frame#1 ... slot=fp+0x38  recorded=false (recorded at 1/9 safepoints)
+> frame#1 ... slot=fp+0x190 recorded=false (recorded at 0/9 safepoints)   <- never rooted
+> frame#1 ... slot=fp+0x208 recorded=false (recorded at 0/9 safepoints)
+> ```
+>
+> **Root cause:** one SSA value (the seq, a `loop`/`recur` carried value in
+> `max-key`) is materialized into MULTIPLE stack slots over the function. The
+> allocator keeps ONE of them (`fp+0x20`) rooted at every safepoint (9/9) and the
+> collector dutifully updates it — but the value also lingers in sibling slots
+> (`fp+0x80` etc.) that are recorded at 0–1/9 safepoints. A GC at a non-recording
+> PC relocates the object and updates only `fp+0x20`; the sibling copies go
+> stale. The codegen then **reads `coll` from a stale sibling slot** (not the
+> rooted `fp+0x20`) when passing it down to the frame that calls `RT.first` →
+> dangling pointer → crash.
+>
+> This is a `dynlower` `GreedyRegState` correctness bug: a value with multiple
+> live stack homes must have ALL of them rooted at every safepoint where the
+> value is live (or be coalesced to a single home / always read from the rooted
+> home). The use-count liveness + single-`value_spill_slot` recording models
+> can't express "this value is currently in N places." The fix lives in the
+> allocator's spill/slot bookkeeping and safepoint root emission; it is precisely
+> verifiable now — re-run with `CLJVM_TRAP=1` and confirm the slot that feeds
+> `RT.first` reports `recorded at 9/9` (and that `[verify]`/`[heapverify]` stay
+> silent).
+
+ ### Update 3 (2026-06-01) — precise trap result: a RECORDED root not updated
+>
+> Built the precise trap (`dynlower::trap_find_value`, gated by `CLJVM_TRAP`):
+> at the `rt_first` crash it FP-walks the LIVE stack and, for each frame, reports
+> where the dangling `coll` sits and whether that offset is a RECORDED GC-root
+> slot of that frame at its current PC. Result:
+>
+> ```
+> frame#0 JIT ... slot=fp+0x10 recorded=true
+> frame#0 JIT ... slot=fp+0x20 recorded=true
+> frame#1 JIT ... slot=fp+0x20 recorded=true   (+ fp+0x80 recorded=true)
+> ```
+>
+> So `coll` lives in **recorded GC-root slots** of the live JIT frames that
+> called `rt_first` — it is NOT an unrooted location and NOT a recording gap.
+> The collector relocated `coll`'s object but **did not update these recorded
+> slots**: a walk/update *coverage* failure (the frames holding `coll` were not
+> walked at the relocating collection).
+>
+> Form 430 is `max-key` (variadic + `loop`/`recur`), evaluated through
+> `macroexpand_once` (nested `run_jit`). I extended BOTH frame walkers
+> (`walk_jit_ancestor_roots`, `walk_parked_thread_jit_roots`) to traverse to the
+> **outermost** `run_jit` fence instead of the innermost (so a collection in the
+> inner/macro run still scans the outer run's JIT frames — `outermost_jit_entry_fp`).
+> This is a real fix for nested-run roots, but it did NOT fix form 430, which
+> means the frames holding `coll` are **not on the live FP chain** at the
+> relocating collection — consistent with a **suspended continuation slice**
+> (ControlAware `CaptureSlice`/`FrameSlice`): the macro's control machinery
+> captures/suspends the frame, so an FP-chain walk can't reach it, and its
+> recorded roots must be scanned via the slice-root mechanism instead. That
+> subsystem is the next place to look.
+>
+> A per-slot visit-generation probe (also in the trap) is unreliable here
+> because stack slot ADDRESSES are reused across frames, so its `last_visit_gen`
+> can reflect a prior occupant. The `recorded=true` finding above is reliable
+> (read from the frame's current PC record).
+>
+> ### Fixes landed in this round (real, NOT sufficient for form 430)
+> - **Outermost-fence frame walking** (`dynlower/src/lib.rs`): both walkers stop
+>   at the outermost `run_jit` fence, scanning every nested run's JIT frames.
+> - (plus the alloc-GC scoped-chain mirroring + LazySeq/ChunkBuffer/`reduce_3`
+>   rooting from Update 2.)
+>
+> ---
+>
+> _(Original Update-2 note below, superseded by the recorded-root finding above.)_
 >
 > Everything below this box is the ORIGINAL (disproven) report, kept for the record.
 

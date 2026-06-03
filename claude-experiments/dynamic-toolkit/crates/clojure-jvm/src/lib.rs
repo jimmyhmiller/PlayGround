@@ -43,4 +43,10 @@ macro_rules! unimplemented_port {
 }
 
 pub mod lang;
+// GC lock-in: the bare `Rooted::get()/set()` accessors are the form-430
+// stale-pointer footgun. Denying their (deprecated) use in the runtime
+// makes "hold a rooted/arg value as bare bits across an allocation" a
+// compile error here. Reads must go through `get_raw(&Heap)`, which the
+// borrow checker cannot let outlive an allocation.
+#[deny(deprecated)]
 pub mod runtime;

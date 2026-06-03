@@ -6,9 +6,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use dynalloc::{Heap, PtrPolicy};
 use dynexec::{PreciseStackRoots, RootTransport, ValueLayout};
+use dynir::InterpRootManager;
 use dynir::interp::{ExternCallResult, InterpResult, ModuleInterpreter};
 use dynir::ir::{FuncDef, Module};
-use dynir::InterpRootManager;
 use dynir::opt;
 use dynlower::{JitModule, JitOutcome};
 use dynobj::{Compact, DynRootFrame, FrameChain, ObjHeader, RootFrame, TypeInfo};
@@ -95,7 +95,12 @@ pub struct GlobalRoots {
 }
 
 impl GlobalRoots {
-    fn new() -> Self { GlobalRoots { slot_indices: Vec::new(), defined: std::collections::HashSet::new() } }
+    fn new() -> Self {
+        GlobalRoots {
+            slot_indices: Vec::new(),
+            defined: std::collections::HashSet::new(),
+        }
+    }
 
     fn ensure(&mut self, heap: &Heap, id: usize) {
         if id >= self.slot_indices.len() {
@@ -115,9 +120,13 @@ impl GlobalRoots {
         heap.globals.set(self.slot_indices[id].unwrap(), val);
     }
 
-    fn define(&mut self, id: usize) { self.defined.insert(id); }
+    fn define(&mut self, id: usize) {
+        self.defined.insert(id);
+    }
     fn is_defined(&self, id: usize) -> bool {
-        id < self.slot_indices.len() && self.defined.contains(&id) && self.slot_indices[id].is_some()
+        id < self.slot_indices.len()
+            && self.defined.contains(&id)
+            && self.slot_indices[id].is_some()
     }
 }
 
@@ -130,7 +139,12 @@ pub struct StringRoots {
 }
 
 impl StringRoots {
-    fn new() -> Self { StringRoots { table: Vec::new(), intern_map: HashMap::new() } }
+    fn new() -> Self {
+        StringRoots {
+            table: Vec::new(),
+            intern_map: HashMap::new(),
+        }
+    }
 
     fn get(&self, heap: &Heap, idx: usize) -> u64 {
         heap.globals.get(self.table[idx])
@@ -144,7 +158,9 @@ impl StringRoots {
     }
 
     fn lookup(&self, heap: &Heap, text: &str) -> Option<u64> {
-        self.intern_map.get(text).map(|&idx| heap.globals.get(self.table[idx]))
+        self.intern_map
+            .get(text)
+            .map(|&idx| heap.globals.get(self.table[idx]))
     }
 
     fn insert(&mut self, heap: &Heap, text: &str, val: u64) -> u64 {
@@ -156,7 +172,9 @@ impl StringRoots {
         val
     }
 
-    fn len(&self) -> usize { self.table.len() }
+    fn len(&self) -> usize {
+        self.table.len()
+    }
 }
 
 impl LoxGcRuntime {
@@ -214,7 +232,8 @@ impl LoxGcRuntime {
             jit_fp: frame_pointer() as *const u8,
         };
         unsafe {
-            self.heap.collect::<LoxPtrPolicy>(&[&self.chain, &jit_roots]);
+            self.heap
+                .collect::<LoxPtrPolicy>(&[&self.chain, &jit_roots]);
         }
 
         // Reload interpreter frame values ← root slots (pointers may have moved).
@@ -232,13 +251,17 @@ where
         let mut frames = self.frames.borrow_mut();
         let idx = frames.len();
         let frame = DynRootFrame::new(gc_slot_count);
-        unsafe { self.chain.push_raw_unguarded(frame.header_ptr()); }
+        unsafe {
+            self.chain.push_raw_unguarded(frame.header_ptr());
+        }
         frames.push(frame);
         idx
     }
 
     fn pop_frame(&self) {
-        unsafe { self.chain.pop_raw(); }
+        unsafe {
+            self.chain.pop_raw();
+        }
         self.frames.borrow_mut().pop().expect("no frame to pop");
     }
 
@@ -307,7 +330,9 @@ fn with_vm<R>(f: impl FnOnce(&mut VM) -> R) -> R {
 
 impl VM {
     fn rt(&self) -> &LoxGcRuntime {
-        self.gc_runtime.as_ref().expect("GC runtime not initialized")
+        self.gc_runtime
+            .as_ref()
+            .expect("GC runtime not initialized")
     }
 
     fn types(&self) -> &LoxGcTypes {
@@ -335,9 +360,13 @@ impl VM {
     /// Returns: 0=String, 1=Closure, 2=Upvalue, 3=Class, 4=Instance, 5=BoundMethod, 6=NativeFn, etc.
     #[inline(always)]
     fn obj_type_tag(&self, val: u64) -> u64 {
-        if !is_obj(val) { return 255; }
+        if !is_obj(val) {
+            return 255;
+        }
         let ptr = obj_ptr(val);
-        if ptr.is_null() { return 255; }
+        if ptr.is_null() {
+            return 255;
+        }
         unsafe { dynobj::read_type_id(ptr, dynobj::Compact::TYPE_ID_OFFSET) as u64 }
     }
 
@@ -346,9 +375,15 @@ impl VM {
         tag == 1 || tag == 6 // Closure or NativeFn
     }
 
-    fn is_class(&self, val: u64) -> bool { self.obj_type_tag(val) == 3 }
-    fn is_instance(&self, val: u64) -> bool { self.obj_type_tag(val) == 4 }
-    fn is_bound_method(&self, val: u64) -> bool { self.obj_type_tag(val) == 5 }
+    fn is_class(&self, val: u64) -> bool {
+        self.obj_type_tag(val) == 3
+    }
+    fn is_instance(&self, val: u64) -> bool {
+        self.obj_type_tag(val) == 4
+    }
+    fn is_bound_method(&self, val: u64) -> bool {
+        self.obj_type_tag(val) == 5
+    }
 
     // ── String helpers ───────────────────────────────────────────
 
@@ -372,12 +407,18 @@ impl VM {
     /// After GC, the pointer inside the root slot may be updated,
     /// so we always read from the root slot, not from a cached value.
     fn intern_string(&mut self, s: &str) -> u64 {
-        let rt = self.gc_runtime.as_mut().expect("GC runtime not initialized");
+        let rt = self
+            .gc_runtime
+            .as_mut()
+            .expect("GC runtime not initialized");
         if let Some(val) = rt.string_roots.lookup(&rt.heap, s) {
             return val;
         }
         let val = self.alloc_string(s);
-        let rt = self.gc_runtime.as_mut().expect("GC runtime not initialized");
+        let rt = self
+            .gc_runtime
+            .as_mut()
+            .expect("GC runtime not initialized");
         rt.string_roots.insert(&rt.heap, s, val)
     }
 
@@ -395,7 +436,10 @@ impl VM {
     /// Resolve a compile-time string ID to a NanBox GC string value.
     /// Reads from the root slot so we get the GC-updated pointer.
     fn resolve_string(&mut self, id: usize) -> u64 {
-        let rt = self.gc_runtime.as_ref().expect("GC runtime not initialized");
+        let rt = self
+            .gc_runtime
+            .as_ref()
+            .expect("GC runtime not initialized");
         if id < rt.string_roots.len() {
             return rt.string_roots.get(&rt.heap, id);
         }
@@ -405,7 +449,10 @@ impl VM {
     /// Look up a compile-time string's integer ID by name.
     /// Used for runtime lookups of known strings like "init".
     fn compile_string_id(&self, name: &str) -> u64 {
-        self.compile_strings.iter().position(|s| s == name).unwrap_or(u64::MAX as usize) as u64
+        self.compile_strings
+            .iter()
+            .position(|s| s == name)
+            .unwrap_or(u64::MAX as usize) as u64
     }
 
     /// Get the text for a compile-time string ID (for error messages).
@@ -421,7 +468,11 @@ impl VM {
 
     fn alloc_upvalue(&mut self, init: u64) -> u64 {
         let frame = RootFrame::<1>::new();
-        unsafe { self.rt().chain.push_raw_unguarded(&frame.header as *const _ as *mut _) };
+        unsafe {
+            self.rt()
+                .chain
+                .push_raw_unguarded(&frame.header as *const _ as *mut _)
+        };
         frame.slots[0].set(init);
 
         let types = self.types();
@@ -443,15 +494,27 @@ impl VM {
 
     fn set_upvalue(&self, cell: u64, val: u64) {
         let ptr = obj_ptr(cell);
-        unsafe { gc_write_field(ptr, self.types().upvalue_value_off, val); }
+        unsafe {
+            gc_write_field(ptr, self.types().upvalue_value_off, val);
+        }
     }
 
     // ── Closure helpers ──────────────────────────────────────────
 
-    fn alloc_closure(&mut self, func_idx: u64, num_upvalues: usize, arity: u64, name_val: u64) -> u64 {
+    fn alloc_closure(
+        &mut self,
+        func_idx: u64,
+        num_upvalues: usize,
+        arity: u64,
+        name_val: u64,
+    ) -> u64 {
         // Root name_val (GC string) across the allocation.
         let frame = RootFrame::<1>::new();
-        unsafe { self.rt().chain.push_raw_unguarded(&frame.header as *const _ as *mut _) };
+        unsafe {
+            self.rt()
+                .chain
+                .push_raw_unguarded(&frame.header as *const _ as *mut _)
+        };
         frame.slots[0].set(name_val);
 
         let types = self.types();
@@ -498,7 +561,9 @@ impl VM {
 
     fn set_closure_upvalue(&self, closure: u64, idx: usize, cell: u64) {
         let ptr = obj_ptr(closure);
-        unsafe { gc_write_elem(ptr, self.types().closure_upval_base_off, idx, cell); }
+        unsafe {
+            gc_write_elem(ptr, self.types().closure_upval_base_off, idx, cell);
+        }
     }
 
     // ── GC Table helpers ─────────────────────────────────────────
@@ -547,7 +612,7 @@ impl VM {
             let vc_off = types.type_infos[types.table_id].varlen_count_offset();
             gc_read_field(ptr, vc_off as i32) as usize
         };
-        varlen_count / 2  // varlen has 2 slots per entry (key + value)
+        varlen_count / 2 // varlen has 2 slots per entry (key + value)
     }
 
     /// Read the count (number of key-value pairs) from a table.
@@ -583,8 +648,10 @@ impl VM {
     /// Used during table growth. No allocation happens here.
     unsafe fn table_rehash(
         &self,
-        old_ptr: *mut u8, old_capacity: usize,
-        new_ptr: *mut u8, new_capacity: usize,
+        old_ptr: *mut u8,
+        old_capacity: usize,
+        new_ptr: *mut u8,
+        new_capacity: usize,
     ) {
         let base = self.types().table_data_base_off;
         let new_mask = new_capacity - 1;
@@ -629,7 +696,9 @@ impl VM {
             let k = unsafe { gc_read_elem(ptr, base, idx * 2) };
             if k == key {
                 // Key exists — update in place
-                unsafe { gc_write_elem(ptr, base, idx * 2 + 1, value); }
+                unsafe {
+                    gc_write_elem(ptr, base, idx * 2 + 1, value);
+                }
                 return table;
             }
             if is_nil(k) {
@@ -653,10 +722,18 @@ impl VM {
 
     /// Grow the table and insert the new key-value pair.
     fn table_set_grow(&mut self, table: u64, old_capacity: usize, key: u64, value: u64) -> u64 {
-        let new_cap = if old_capacity == 0 { 8 } else { old_capacity * 2 };
+        let new_cap = if old_capacity == 0 {
+            8
+        } else {
+            old_capacity * 2
+        };
 
         let frame = RootFrame::<3>::new();
-        unsafe { self.rt().chain.push_raw_unguarded(&frame.header as *const _ as *mut _) };
+        unsafe {
+            self.rt()
+                .chain
+                .push_raw_unguarded(&frame.header as *const _ as *mut _)
+        };
         frame.slots[0].set(table);
         frame.slots[1].set(key);
         frame.slots[2].set(value);
@@ -673,7 +750,9 @@ impl VM {
 
         // Rehash old entries into new table
         if old_capacity > 0 {
-            unsafe { self.table_rehash(old_ptr, old_capacity, new_ptr, new_cap); }
+            unsafe {
+                self.table_rehash(old_ptr, old_capacity, new_ptr, new_cap);
+            }
         }
 
         // Now insert the new key-value pair
@@ -706,7 +785,11 @@ impl VM {
     /// Returns the (possibly grown) dst table.
     fn table_merge(&mut self, dst: u64, src: u64) -> u64 {
         let frame = RootFrame::<2>::new();
-        unsafe { self.rt().chain.push_raw_unguarded(&frame.header as *const _ as *mut _) };
+        unsafe {
+            self.rt()
+                .chain
+                .push_raw_unguarded(&frame.header as *const _ as *mut _)
+        };
         frame.slots[0].set(src);
         frame.slots[1].set(dst);
 
@@ -738,11 +821,15 @@ impl VM {
     fn alloc_class(&mut self, name_val: u64) -> u64 {
         // Root `name_val` and `empty_table` across allocations.
         let frame = RootFrame::<2>::new();
-        unsafe { self.rt().chain.push_raw_unguarded(&frame.header as *const _ as *mut _) };
-        frame.slots[0].set(name_val);  // slot 0 = name
+        unsafe {
+            self.rt()
+                .chain
+                .push_raw_unguarded(&frame.header as *const _ as *mut _)
+        };
+        frame.slots[0].set(name_val); // slot 0 = name
 
         let empty_table = self.alloc_table(0);
-        frame.slots[1].set(empty_table);  // slot 1 = methods table
+        frame.slots[1].set(empty_table); // slot 1 = methods table
 
         let types = self.types();
         let class_id = types.class_id;
@@ -779,7 +866,9 @@ impl VM {
 
     fn set_class_methods_table(&self, class: u64, table: u64) {
         let ptr = obj_ptr(class);
-        unsafe { gc_write_field(ptr, self.types().class_methods_off, table); }
+        unsafe {
+            gc_write_field(ptr, self.types().class_methods_off, table);
+        }
     }
 
     fn class_get_method(&self, class: u64, key: u64) -> Option<u64> {
@@ -789,7 +878,11 @@ impl VM {
 
     fn class_set_method(&mut self, class: u64, key: u64, value: u64) {
         let frame = RootFrame::<1>::new();
-        unsafe { self.rt().chain.push_raw_unguarded(&frame.header as *const _ as *mut _) };
+        unsafe {
+            self.rt()
+                .chain
+                .push_raw_unguarded(&frame.header as *const _ as *mut _)
+        };
         frame.slots[0].set(class);
 
         let table = self.class_methods_table(class);
@@ -804,7 +897,9 @@ impl VM {
 
     fn set_class_superclass(&mut self, class: u64, super_val: u64) {
         let ptr = obj_ptr(class);
-        unsafe { gc_write_field(ptr, self.types().class_super_off, super_val); }
+        unsafe {
+            gc_write_field(ptr, self.types().class_super_off, super_val);
+        }
     }
 
     // ── Instance helpers ─────────────────────────────────────────
@@ -812,11 +907,15 @@ impl VM {
     fn alloc_instance(&mut self, class: u64) -> u64 {
         // Root `class` and `empty_table` across allocations.
         let frame = RootFrame::<2>::new();
-        unsafe { self.rt().chain.push_raw_unguarded(&frame.header as *const _ as *mut _) };
-        frame.slots[0].set(class);  // slot 0 = class
+        unsafe {
+            self.rt()
+                .chain
+                .push_raw_unguarded(&frame.header as *const _ as *mut _)
+        };
+        frame.slots[0].set(class); // slot 0 = class
 
         let empty_table = self.alloc_table(0);
-        frame.slots[1].set(empty_table);  // slot 1 = table
+        frame.slots[1].set(empty_table); // slot 1 = table
 
         let types = self.types();
         let instance_id = types.instance_id;
@@ -847,7 +946,9 @@ impl VM {
 
     fn set_instance_fields_table(&self, inst: u64, table: u64) {
         let ptr = obj_ptr(inst);
-        unsafe { gc_write_field(ptr, self.types().instance_fields_off, table); }
+        unsafe {
+            gc_write_field(ptr, self.types().instance_fields_off, table);
+        }
     }
 
     fn instance_get_field(&self, inst: u64, key: u64) -> Option<u64> {
@@ -857,7 +958,11 @@ impl VM {
 
     fn instance_set_field(&mut self, inst: u64, key: u64, value: u64) {
         let frame = RootFrame::<1>::new();
-        unsafe { self.rt().chain.push_raw_unguarded(&frame.header as *const _ as *mut _) };
+        unsafe {
+            self.rt()
+                .chain
+                .push_raw_unguarded(&frame.header as *const _ as *mut _)
+        };
         frame.slots[0].set(inst);
 
         let table = self.instance_fields_table(inst);
@@ -874,7 +979,11 @@ impl VM {
 
     fn alloc_bound_method(&mut self, receiver: u64, method: u64) -> u64 {
         let frame = RootFrame::<2>::new();
-        unsafe { self.rt().chain.push_raw_unguarded(&frame.header as *const _ as *mut _) };
+        unsafe {
+            self.rt()
+                .chain
+                .push_raw_unguarded(&frame.header as *const _ as *mut _)
+        };
         frame.slots[0].set(receiver);
         frame.slots[1].set(method);
 
@@ -908,7 +1017,11 @@ impl VM {
 
     fn alloc_native_fn(&mut self, name_val: u64, func_ptr: u64) -> u64 {
         let frame = RootFrame::<1>::new();
-        unsafe { self.rt().chain.push_raw_unguarded(&frame.header as *const _ as *mut _) };
+        unsafe {
+            self.rt()
+                .chain
+                .push_raw_unguarded(&frame.header as *const _ as *mut _)
+        };
         frame.slots[0].set(name_val);
 
         let types = self.types();
@@ -937,14 +1050,19 @@ impl VM {
         if is_nil(v) {
             "nil".to_string()
         } else if is_bool(v) {
-            if as_bool(v) { "true".to_string() } else { "false".to_string() }
+            if as_bool(v) {
+                "true".to_string()
+            } else {
+                "false".to_string()
+            }
         } else if is_number(v) {
             format_number(as_number(v))
         } else if is_obj(v) {
             let tag = self.obj_type_tag(v);
             match tag {
                 0 => self.read_string(v), // String
-                1 => { // Closure
+                1 => {
+                    // Closure
                     let name_val = self.closure_name(v);
                     if is_obj(name_val) {
                         format!("<fn {}>", self.read_string(name_val))
@@ -953,7 +1071,8 @@ impl VM {
                     }
                 }
                 2 => "<upvalue>".to_string(), // Upvalue
-                3 => { // Class
+                3 => {
+                    // Class
                     let name_val = self.class_name(v);
                     if is_obj(name_val) {
                         self.read_string(name_val)
@@ -961,7 +1080,8 @@ impl VM {
                         "<class>".to_string()
                     }
                 }
-                4 => { // Instance
+                4 => {
+                    // Instance
                     let class = self.instance_class(v);
                     let name_val = self.class_name(class);
                     if is_obj(name_val) {
@@ -970,7 +1090,8 @@ impl VM {
                         "<instance>".to_string()
                     }
                 }
-                5 => { // BoundMethod
+                5 => {
+                    // BoundMethod
                     let method = self.bound_method_closure(v);
                     let name_val = self.closure_name(method);
                     if is_obj(name_val) {
@@ -992,7 +1113,9 @@ impl VM {
 
 extern "C" fn jit_lox_print(v: u64) {
     with_vm(|vm| {
-        if vm.had_error { return; }
+        if vm.had_error {
+            return;
+        }
         let s = vm.value_to_string(v);
         println!("{}", s);
     });
@@ -1047,17 +1170,54 @@ extern "C" fn jit_lox_add(a: u64, b: u64) -> u64 {
     })
 }
 
-extern "C" fn jit_lox_sub(_: u64, _: u64) -> u64 { with_vm(|vm| { vm.runtime_error("Operands must be numbers."); nil_val() }) }
-extern "C" fn jit_lox_mul(_: u64, _: u64) -> u64 { with_vm(|vm| { vm.runtime_error("Operands must be numbers."); nil_val() }) }
-extern "C" fn jit_lox_div(_: u64, _: u64) -> u64 { with_vm(|vm| { vm.runtime_error("Operands must be numbers."); nil_val() }) }
-extern "C" fn jit_lox_neg(_: u64) -> u64 { with_vm(|vm| { vm.runtime_error("Operand must be a number."); nil_val() }) }
-extern "C" fn jit_lox_eq(a: u64, b: u64) -> u64 { bool_val(values_equal(a, b)) }
-extern "C" fn jit_lox_lt(_: u64, _: u64) -> u64 { with_vm(|vm| { vm.runtime_error("Operands must be numbers."); nil_val() }) }
-extern "C" fn jit_lox_gt(_: u64, _: u64) -> u64 { with_vm(|vm| { vm.runtime_error("Operands must be numbers."); nil_val() }) }
-extern "C" fn jit_lox_not(v: u64) -> u64 { bool_val(is_falsey(v)) }
+extern "C" fn jit_lox_sub(_: u64, _: u64) -> u64 {
+    with_vm(|vm| {
+        vm.runtime_error("Operands must be numbers.");
+        nil_val()
+    })
+}
+extern "C" fn jit_lox_mul(_: u64, _: u64) -> u64 {
+    with_vm(|vm| {
+        vm.runtime_error("Operands must be numbers.");
+        nil_val()
+    })
+}
+extern "C" fn jit_lox_div(_: u64, _: u64) -> u64 {
+    with_vm(|vm| {
+        vm.runtime_error("Operands must be numbers.");
+        nil_val()
+    })
+}
+extern "C" fn jit_lox_neg(_: u64) -> u64 {
+    with_vm(|vm| {
+        vm.runtime_error("Operand must be a number.");
+        nil_val()
+    })
+}
+extern "C" fn jit_lox_eq(a: u64, b: u64) -> u64 {
+    bool_val(values_equal(a, b))
+}
+extern "C" fn jit_lox_lt(_: u64, _: u64) -> u64 {
+    with_vm(|vm| {
+        vm.runtime_error("Operands must be numbers.");
+        nil_val()
+    })
+}
+extern "C" fn jit_lox_gt(_: u64, _: u64) -> u64 {
+    with_vm(|vm| {
+        vm.runtime_error("Operands must be numbers.");
+        nil_val()
+    })
+}
+extern "C" fn jit_lox_not(v: u64) -> u64 {
+    bool_val(is_falsey(v))
+}
 
 extern "C" fn jit_lox_clock() -> u64 {
-    let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+    let t = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
     number_val(t)
 }
 
@@ -1075,7 +1235,12 @@ extern "C" fn jit_lox_set_upvalue(cell: u64, val: u64) {
     with_vm(|vm| vm.set_upvalue(cell, val));
 }
 
-extern "C" fn jit_lox_make_closure(func_idx: u64, num_upvalues: u64, arity: u64, name_id: u64) -> u64 {
+extern "C" fn jit_lox_make_closure(
+    func_idx: u64,
+    num_upvalues: u64,
+    arity: u64,
+    name_id: u64,
+) -> u64 {
     with_vm(|vm| {
         let name_val = name_id;
         vm.alloc_closure(func_idx, num_upvalues as usize, arity, name_val)
@@ -1094,7 +1259,8 @@ extern "C" fn jit_lox_closure_func_ptr(closure: u64) -> u64 {
     with_vm(|vm| {
         let tag = vm.obj_type_tag(closure);
         match tag {
-            1 => { // Closure
+            1 => {
+                // Closure
                 let idx = vm.closure_func_idx(closure) as usize;
                 if idx < vm.jit_call_table.len() {
                     vm.jit_call_table[idx] as u64
@@ -1102,7 +1268,8 @@ extern "C" fn jit_lox_closure_func_ptr(closure: u64) -> u64 {
                     idx as u64
                 }
             }
-            6 => { // NativeFn
+            6 => {
+                // NativeFn
                 vm.native_func_ptr(closure)
             }
             _ => 0,
@@ -1147,11 +1314,13 @@ extern "C" fn jit_lox_call_non_callable() {
 
 extern "C" fn jit_lox_get_closure_arity(callee: u64) -> u64 {
     with_vm(|vm| {
-        if !is_obj(callee) { return 0; }
+        if !is_obj(callee) {
+            return 0;
+        }
         let tag = vm.obj_type_tag(callee);
         match tag {
             1 => vm.closure_arity(callee), // Closure
-            6 => 0, // NativeFn (clock takes 0 args)
+            6 => 0,                        // NativeFn (clock takes 0 args)
             _ => 0,
         }
     })
@@ -1310,7 +1479,11 @@ extern "C" fn jit_lox_invoke_kind() -> u64 {
 
 extern "C" fn jit_lox_call_table_base() -> u64 {
     with_vm(|vm| {
-        if vm.jit_call_table.is_empty() { 0 } else { vm.jit_call_table.as_ptr() as u64 }
+        if vm.jit_call_table.is_empty() {
+            0
+        } else {
+            vm.jit_call_table.as_ptr() as u64
+        }
     })
 }
 
@@ -1409,7 +1582,9 @@ extern "C" fn jit_lox_get_super(this: u64, class_val: u64, method_name_id: u64) 
         let method_name = method_name_id;
 
         let superclass = vm.class_superclass(class_val);
-        if is_nil(superclass) { return nil_val(); }
+        if is_nil(superclass) {
+            return nil_val();
+        }
 
         if let Some(method_closure) = vm.class_get_method(superclass, method_name) {
             return vm.alloc_bound_method(this, method_closure);
@@ -1609,15 +1784,20 @@ impl VM {
     fn run_interp(&mut self, module: &Module, entry: dynlang::FuncRef) -> InterpretResult {
         // Safety: gc_runtime outlives the interpreter. We use a raw pointer to
         // avoid borrowing self, since bind_runtime needs &mut self.
-        unsafe { RAW_VM = self as *mut VM; }
+        unsafe {
+            RAW_VM = self as *mut VM;
+        }
         let rt: &LoxGcRuntime = unsafe { &*(self.gc_runtime.as_ref().unwrap() as *const _) };
         let mut interp = ModuleInterpreter::<NanBox, _>::new(module, rt);
         self.bind_runtime(&mut interp);
 
         match interp.run(entry, &[nil_val()]) {
             Ok(InterpResult::Value(_)) | Ok(InterpResult::Void) => {
-                if self.had_error { InterpretResult::RuntimeError }
-                else { InterpretResult::Ok }
+                if self.had_error {
+                    InterpretResult::RuntimeError
+                } else {
+                    InterpretResult::Ok
+                }
             }
             Ok(InterpResult::Deopt { .. }) => InterpretResult::RuntimeError,
             Err(e) => {
@@ -1628,12 +1808,16 @@ impl VM {
     }
 
     fn run_jit(&mut self, module: &Module, entry: dynlang::FuncRef) -> InterpretResult {
-        use dynruntime::{GcPolicy, StackMapJitTransport, JitSafepointSession, active_jit_safepoint_handler};
+        use dynruntime::{
+            GcPolicy, JitSafepointSession, StackMapJitTransport, active_jit_safepoint_handler,
+        };
 
         let externs = build_jit_externs(module);
 
         let jit = JitModule::compile_batch::<NanBox>(
-            module, &externs, Some(active_jit_safepoint_handler as u64),
+            module,
+            &externs,
+            Some(active_jit_safepoint_handler as u64),
         );
 
         self.jit_call_table = jit.call_table();
@@ -1650,15 +1834,17 @@ impl VM {
             Ok("every") => GcPolicy::EveryPoint,
             _ => GcPolicy::OnPressure { threshold: 0.75 },
         };
-        let session = JitSafepointSession::<LoxPtrPolicy, _>::new(
-            heap, StackMapJitTransport, &safepoints,
-        ).with_gc_policy(policy);
+        let session =
+            JitSafepointSession::<LoxPtrPolicy, _>::new(heap, StackMapJitTransport, &safepoints)
+                .with_gc_policy(policy);
 
-        unsafe { RAW_VM = self as *mut VM; }
-        let result = session.with_installed(|| {
-            jit.call_outcome(entry, &[nil_val()])
-        });
-        unsafe { RAW_VM = std::ptr::null_mut(); }
+        unsafe {
+            RAW_VM = self as *mut VM;
+        }
+        let result = session.with_installed(|| jit.call_outcome(entry, &[nil_val()]));
+        unsafe {
+            RAW_VM = std::ptr::null_mut();
+        }
         if std::env::var("LOX_GC_STATS").is_ok() {
             eprintln!("GC collections: {}", heap.collections());
         }
@@ -1666,10 +1852,16 @@ impl VM {
 
         match result {
             JitOutcome::Value(_) | JitOutcome::Void => {
-                if self.had_error { InterpretResult::RuntimeError }
-                else { InterpretResult::Ok }
+                if self.had_error {
+                    InterpretResult::RuntimeError
+                } else {
+                    InterpretResult::Ok
+                }
             }
-            _ => { eprintln!("JIT error: {:?}", result); InterpretResult::RuntimeError }
+            _ => {
+                eprintln!("JIT error: {:?}", result);
+                InterpretResult::RuntimeError
+            }
         }
     }
 
@@ -1738,60 +1930,91 @@ impl VM {
             vm.runtime_error("Operands must be two numbers or two strings.");
             ExternCallResult::Value(Some(nil_val()))
         });
-        interp.bind_by_name("lox_sub", move |_| { let vm = unsafe{&mut*rt}; vm.runtime_error("Operands must be numbers."); ExternCallResult::Value(Some(nil_val())) });
-        interp.bind_by_name("lox_mul", move |_| { let vm = unsafe{&mut*rt}; vm.runtime_error("Operands must be numbers."); ExternCallResult::Value(Some(nil_val())) });
-        interp.bind_by_name("lox_div", move |_| { let vm = unsafe{&mut*rt}; vm.runtime_error("Operands must be numbers."); ExternCallResult::Value(Some(nil_val())) });
-        interp.bind_by_name("lox_neg", move |_| { let vm = unsafe{&mut*rt}; vm.runtime_error("Operand must be a number."); ExternCallResult::Value(Some(nil_val())) });
-        interp.bind_by_name("lox_eq", |args| { ExternCallResult::Value(Some(bool_val(values_equal(args[0], args[1])))) });
-        interp.bind_by_name("lox_lt", move |_| { let vm = unsafe{&mut*rt}; vm.runtime_error("Operands must be numbers."); ExternCallResult::Value(Some(nil_val())) });
-        interp.bind_by_name("lox_gt", move |_| { let vm = unsafe{&mut*rt}; vm.runtime_error("Operands must be numbers."); ExternCallResult::Value(Some(nil_val())) });
-        interp.bind_by_name("lox_not", |args| { ExternCallResult::Value(Some(bool_val(is_falsey(args[0])))) });
+        interp.bind_by_name("lox_sub", move |_| {
+            let vm = unsafe { &mut *rt };
+            vm.runtime_error("Operands must be numbers.");
+            ExternCallResult::Value(Some(nil_val()))
+        });
+        interp.bind_by_name("lox_mul", move |_| {
+            let vm = unsafe { &mut *rt };
+            vm.runtime_error("Operands must be numbers.");
+            ExternCallResult::Value(Some(nil_val()))
+        });
+        interp.bind_by_name("lox_div", move |_| {
+            let vm = unsafe { &mut *rt };
+            vm.runtime_error("Operands must be numbers.");
+            ExternCallResult::Value(Some(nil_val()))
+        });
+        interp.bind_by_name("lox_neg", move |_| {
+            let vm = unsafe { &mut *rt };
+            vm.runtime_error("Operand must be a number.");
+            ExternCallResult::Value(Some(nil_val()))
+        });
+        interp.bind_by_name("lox_eq", |args| {
+            ExternCallResult::Value(Some(bool_val(values_equal(args[0], args[1]))))
+        });
+        interp.bind_by_name("lox_lt", move |_| {
+            let vm = unsafe { &mut *rt };
+            vm.runtime_error("Operands must be numbers.");
+            ExternCallResult::Value(Some(nil_val()))
+        });
+        interp.bind_by_name("lox_gt", move |_| {
+            let vm = unsafe { &mut *rt };
+            vm.runtime_error("Operands must be numbers.");
+            ExternCallResult::Value(Some(nil_val()))
+        });
+        interp.bind_by_name("lox_not", |args| {
+            ExternCallResult::Value(Some(bool_val(is_falsey(args[0]))))
+        });
         interp.bind_by_name("lox_clock", |_| {
-            let t = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64();
+            let t = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_secs_f64();
             ExternCallResult::Value(Some(number_val(t)))
         });
 
         // Upvalue / closure
         interp.bind_by_name("lox_alloc_upvalue", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.alloc_upvalue(args[0])))
         });
         interp.bind_by_name("lox_get_upvalue", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.get_upvalue(args[0])))
         });
         interp.bind_by_name("lox_set_upvalue", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             vm.set_upvalue(args[0], args[1]);
             ExternCallResult::Value(None)
         });
         interp.bind_by_name("lox_make_closure", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let name_val = vm.resolve_string(args[3] as usize);
             let v = vm.alloc_closure(args[0], args[1] as usize, args[2], name_val);
             ExternCallResult::Value(Some(v))
         });
         interp.bind_by_name("lox_closure_upvalue", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.closure_upvalue(args[0], args[1] as usize)))
         });
         interp.bind_by_name("lox_set_closure_upvalue", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             vm.set_closure_upvalue(args[0], args[1] as usize, args[2]);
             ExternCallResult::Value(None)
         });
         interp.bind_by_name("lox_closure_func_ptr", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let tag = vm.obj_type_tag(args[0]);
             let v = match tag {
                 1 => vm.closure_func_idx(args[0]), // Closure: return func_table_idx for interp
-                6 => 0, // NativeFn: not used in interp mode
+                6 => 0,                            // NativeFn: not used in interp mode
                 _ => 0,
             };
             ExternCallResult::Value(Some(v))
         });
         interp.bind_by_name("lox_check_arity", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let expected = args[1];
             let got = args[2];
             if expected != got {
@@ -1800,13 +2023,15 @@ impl VM {
             ExternCallResult::Value(None)
         });
         interp.bind_by_name("lox_call_non_callable", move |_args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             vm.runtime_error("Can only call functions and classes.");
             ExternCallResult::Value(None)
         });
         interp.bind_by_name("lox_get_closure_arity", move |args| {
-            let vm = unsafe{&mut*rt};
-            if !is_obj(args[0]) { return ExternCallResult::Value(Some(0)); }
+            let vm = unsafe { &mut *rt };
+            if !is_obj(args[0]) {
+                return ExternCallResult::Value(Some(0));
+            }
             let tag = vm.obj_type_tag(args[0]);
             let v = match tag {
                 1 => vm.closure_arity(args[0]),
@@ -1816,31 +2041,33 @@ impl VM {
             ExternCallResult::Value(Some(v))
         });
         interp.bind_by_name("lox_get_class_init_arity", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let init_name = vm.compile_string_id("init");
             let v = if let Some(closure_val) = vm.class_get_method(args[0], init_name) {
                 vm.closure_arity(closure_val)
-            } else { 255 };
+            } else {
+                255
+            };
             ExternCallResult::Value(Some(v))
         });
         interp.bind_by_name("lox_get_bound_arity", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let method = vm.bound_method_closure(args[0]);
             ExternCallResult::Value(Some(vm.closure_arity(method)))
         });
         interp.bind_by_name("lox_obj_type", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.obj_type_tag(args[0])))
         });
 
         // Class
         interp.bind_by_name("lox_make_class", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let name_val = vm.resolve_string(args[0] as usize);
             ExternCallResult::Value(Some(vm.alloc_class(name_val)))
         });
         interp.bind_by_name("lox_class_inherit", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             if !is_obj(args[1]) || !vm.is_class(args[1]) {
                 vm.runtime_error("Superclass must be a class.");
                 return ExternCallResult::Value(None);
@@ -1853,24 +2080,26 @@ impl VM {
             ExternCallResult::Value(None)
         });
         interp.bind_by_name("lox_class_add_method", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             vm.class_set_method(args[0], args[1], args[2]);
             ExternCallResult::Value(None)
         });
         interp.bind_by_name("lox_construct_instance", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.alloc_instance(args[0])))
         });
         interp.bind_by_name("lox_class_init_ptr", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let init_name = vm.compile_string_id("init");
             let v = if let Some(c) = vm.class_get_method(args[0], init_name) {
                 vm.closure_func_idx(c)
-            } else { 0 };
+            } else {
+                0
+            };
             ExternCallResult::Value(Some(v))
         });
         interp.bind_by_name("lox_class_init_closure", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let init_name = vm.compile_string_id("init");
             let v = vm.class_get_method(args[0], init_name).unwrap_or(nil_val());
             ExternCallResult::Value(Some(v))
@@ -1878,7 +2107,7 @@ impl VM {
 
         // Combined instantiate
         interp.bind_by_name("lox_instantiate", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let instance = vm.alloc_instance(args[0]);
             let init_name = vm.compile_string_id("init");
             if let Some(closure_val) = vm.class_get_method(args[0], init_name) {
@@ -1893,25 +2122,27 @@ impl VM {
             ExternCallResult::Value(Some(instance))
         });
         interp.bind_by_name("lox_last_init_arity", move |_args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.last_init_arity))
         });
         interp.bind_by_name("lox_last_init_func_ptr", move |_args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.last_init_func_ptr))
         });
 
         // Properties
         interp.bind_by_name("lox_get_field", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             if !is_obj(args[0]) || !vm.is_instance(args[0]) {
                 return ExternCallResult::Value(Some(nil_val()));
             }
-            let val = vm.instance_get_field(args[0], args[1]).unwrap_or_else(nil_val);
+            let val = vm
+                .instance_get_field(args[0], args[1])
+                .unwrap_or_else(nil_val);
             ExternCallResult::Value(Some(val))
         });
         interp.bind_by_name("lox_get_property", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let name_id = args[1] as usize;
             let prop_name = vm.string_text(name_id);
 
@@ -1931,7 +2162,7 @@ impl VM {
             ExternCallResult::Value(Some(nil_val()))
         });
         interp.bind_by_name("lox_set_property", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
 
             if !is_obj(args[0]) || !vm.is_instance(args[0]) {
                 vm.runtime_error("Only instances have fields.");
@@ -1943,11 +2174,13 @@ impl VM {
 
         // Super
         interp.bind_by_name("lox_get_super", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let method_name_str = vm.string_text(args[2] as usize);
 
             let superclass = vm.class_superclass(args[1]);
-            if is_nil(superclass) { return ExternCallResult::Value(Some(nil_val())); }
+            if is_nil(superclass) {
+                return ExternCallResult::Value(Some(nil_val()));
+            }
 
             if let Some(mc) = vm.class_get_method(superclass, args[2]) {
                 let bm = vm.alloc_bound_method(args[0], mc);
@@ -1959,7 +2192,7 @@ impl VM {
 
         // Native fn
         interp.bind_by_name("lox_make_native_fn", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let name_val = vm.resolve_string(args[0] as usize);
             let v = vm.alloc_native_fn(name_val, 0);
             ExternCallResult::Value(Some(v))
@@ -1967,22 +2200,22 @@ impl VM {
 
         // Bound methods
         interp.bind_by_name("lox_bound_receiver", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.bound_receiver(args[0])))
         });
         interp.bind_by_name("lox_bound_method_closure", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.bound_method_closure(args[0])))
         });
         interp.bind_by_name("lox_bound_closure_func_ptr", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let method = vm.bound_method_closure(args[0]);
             ExternCallResult::Value(Some(vm.closure_func_idx(method)))
         });
 
         // Invoke (optimized method call)
         interp.bind_by_name("lox_invoke_lookup", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             if !is_obj(args[0]) || !vm.is_instance(args[0]) {
                 return ExternCallResult::Value(Some(nil_val()));
             }
@@ -1996,11 +2229,11 @@ impl VM {
             ExternCallResult::Value(Some(nil_val()))
         });
         interp.bind_by_name("lox_invoke_func_ptr", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.closure_func_idx(args[0])))
         });
         interp.bind_by_name("lox_invoke_kind", move |_args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.last_invoke_kind))
         });
         interp.bind_by_name("lox_call_table_base", move |_args| {
@@ -2012,7 +2245,7 @@ impl VM {
 
         // Combined fast-path invoke
         interp.bind_by_name("lox_invoke_fast", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let num_args = args[2];
             if !is_obj(args[0]) || !vm.is_instance(args[0]) {
                 vm.last_invoke_kind = 2;
@@ -2037,22 +2270,21 @@ impl VM {
             ExternCallResult::Value(Some(nil_val()))
         });
         interp.bind_by_name("lox_invoke_closure", move |_args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.last_invoke_closure))
         });
 
         // String resolution
         interp.bind_by_name("lox_resolve_string", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             ExternCallResult::Value(Some(vm.resolve_string(args[0] as usize)))
         });
 
         // GC alloc — safe to trigger GC here, interpreter roots are synced before extern calls
         interp.bind_by_name("__gc_alloc__", move |args| {
-            let vm = unsafe{&mut*rt};
+            let vm = unsafe { &mut *rt };
             let ptr = vm.rt().alloc_with_gc(args[0] as usize, args[1] as usize);
             ExternCallResult::Value(Some(ptr as u64))
         });
     }
 }
-

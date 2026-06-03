@@ -13,14 +13,16 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use dynalloc::{Heap, MutatorThread, PtrPolicy, ThreadState};
-use std::sync::Arc;
+use dynexec::{CodegenConfig, FrameStrategy};
 use dynir::interp::ExternCallResult;
 use dynir::{FuncDef, FuncRef, Module};
-use dynexec::{CodegenConfig, FrameStrategy};
-use dynlower::{JitModule, JitOutcome, backend::LoweringBackend, regalloc::RegisterAllocator};
-use dynobj::roots::{Rooted, RootScope, RootSource};
+use dynlower::{backend::LoweringBackend, regalloc::RegisterAllocator, JitModule, JitOutcome};
+use dynobj::roots::{RootScope, RootSource, Rooted};
 use dynobj::{Compact, TypeInfo};
-use dynruntime::{GcPolicy, JitSafepointSession, StackMapJitTransport, active_jit_safepoint_handler};
+use dynruntime::{
+    active_jit_safepoint_handler, GcPolicy, JitSafepointSession, StackMapJitTransport,
+};
+use std::sync::Arc;
 
 use crate::{GcConfig, NanBoxTags, ObjType};
 
@@ -72,10 +74,10 @@ fn ensure_mutator_registered(gc: &DynGcRuntime) {
 fn with_mutator<R>(f: impl FnOnce(&MutatorThread<NanBoxPolicy>) -> R) -> R {
     MUTATOR.with(|cell| {
         let slot = cell.borrow();
-        let mt = slot
-            .as_ref()
-            .expect("with_mutator: no MutatorThread registered on this thread \
-                     (call DynGcRuntime::install_thread first)");
+        let mt = slot.as_ref().expect(
+            "with_mutator: no MutatorThread registered on this thread \
+                     (call DynGcRuntime::install_thread first)",
+        );
         f(mt)
     })
 }
@@ -92,10 +94,7 @@ fn current_thread_state() -> Option<Arc<ThreadState>> {
 /// variant stops at the first non-JIT frame (instead of using the
 /// caller's thread-local JIT-entry fence), which is required for
 /// cross-thread walks.
-unsafe fn jit_frame_walker_thunk(
-    jit_fp: *const u8,
-    visitor: &mut dyn FnMut(*mut u64),
-) {
+unsafe fn jit_frame_walker_thunk(jit_fp: *const u8, visitor: &mut dyn FnMut(*mut u64)) {
     dynlower::walk_parked_thread_jit_roots(jit_fp, visitor)
 }
 
@@ -106,18 +105,30 @@ pub struct NanBoxPolicy;
 impl PtrPolicy for NanBoxPolicy {
     fn try_decode_ptr(bits: u64) -> Option<*mut u8> {
         let tag = PTR_TAG.with(|c| c.get());
-        debug_assert_ne!(tag, u32::MAX, "NanBoxPolicy used without DynGcRuntime::install_thread");
+        debug_assert_ne!(
+            tag,
+            u32::MAX,
+            "NanBoxPolicy used without DynGcRuntime::install_thread"
+        );
         let expected = TAG_PATTERN | ((tag as u64) << 48);
         if (bits & (FULL_MASK | TAG_FIELD_MASK)) != expected {
             return None;
         }
         let payload = bits & PAYLOAD_MASK;
-        if payload == 0 { None } else { Some(payload as *mut u8) }
+        if payload == 0 {
+            None
+        } else {
+            Some(payload as *mut u8)
+        }
     }
 
     fn encode_ptr(ptr: *mut u8) -> u64 {
         let tag = PTR_TAG.with(|c| c.get());
-        debug_assert_ne!(tag, u32::MAX, "NanBoxPolicy used without DynGcRuntime::install_thread");
+        debug_assert_ne!(
+            tag,
+            u32::MAX,
+            "NanBoxPolicy used without DynGcRuntime::install_thread"
+        );
         TAG_PATTERN | ((tag as u64) << 48) | ((ptr as u64) & PAYLOAD_MASK)
     }
 }
@@ -131,19 +142,33 @@ pub struct RootSet {
 }
 
 impl RootSet {
-    pub fn new() -> Self { RootSet { slots: RefCell::new(Vec::new()) } }
+    pub fn new() -> Self {
+        RootSet {
+            slots: RefCell::new(Vec::new()),
+        }
+    }
     pub fn add(&self, val: u64) -> usize {
         let mut s = self.slots.borrow_mut();
         let idx = s.len();
         s.push(Cell::new(val));
         idx
     }
-    pub fn set(&self, idx: usize, val: u64) { self.slots.borrow()[idx].set(val); }
-    pub fn get(&self, idx: usize) -> u64 { self.slots.borrow()[idx].get() }
-    pub fn clear(&self) { self.slots.borrow_mut().clear(); }
+    pub fn set(&self, idx: usize, val: u64) {
+        self.slots.borrow()[idx].set(val);
+    }
+    pub fn get(&self, idx: usize) -> u64 {
+        self.slots.borrow()[idx].get()
+    }
+    pub fn clear(&self) {
+        self.slots.borrow_mut().clear();
+    }
 }
 
-impl Default for RootSet { fn default() -> Self { Self::new() } }
+impl Default for RootSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl RootSource for RootSet {
     fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
@@ -194,17 +219,18 @@ pub const GC_ALLOC_EXTERN: &str = "__gc_alloc__";
 
 impl DynGcRuntime {
     /// Create a runtime for a built module.
-    pub fn new(
-        config: &GcConfig,
-        tags: &NanBoxTags,
-        obj_types: &[ObjType],
-    ) -> Self {
+    pub fn new(config: &GcConfig, tags: &NanBoxTags, obj_types: &[ObjType]) -> Self {
         let type_infos: Vec<TypeInfo> = obj_types.iter().map(|t| *t.type_info).collect();
 
         let backend = match config {
-            GcConfig::Generational { heap_size, nursery_size } => {
+            GcConfig::Generational {
+                heap_size,
+                nursery_size,
+            } => {
                 let heap = match nursery_size {
-                    Some(nsize) => Heap::new_generational::<Compact>(*nsize, *heap_size, type_infos.clone()),
+                    Some(nsize) => {
+                        Heap::new_generational::<Compact>(*nsize, *heap_size, type_infos.clone())
+                    }
                     None => Heap::new::<Compact>(*heap_size, type_infos.clone()),
                 };
                 // Install the JIT-frame walker so the heap can scan
@@ -248,9 +274,7 @@ impl DynGcRuntime {
         // here would silently lose its slots during a nursery-fill GC
         // that fires while the host is between `run_jit` calls.
         match &self.backend {
-            Backend::Generational(heap) => unsafe {
-                heap.register_permanent_extra(source)
-            },
+            Backend::Generational(heap) => unsafe { heap.register_permanent_extra(source) },
         }
     }
 
@@ -285,7 +309,10 @@ impl DynGcRuntime {
         match &self.backend {
             Backend::Generational(heap) => unsafe { heap.register_permanent_extra(erased) },
         }
-        ExtraRootGuard { gc: self, mirrored: erased }
+        ExtraRootGuard {
+            gc: self,
+            mirrored: erased,
+        }
     }
 
     /// Install the auto-bound extern map (typically
@@ -297,10 +324,18 @@ impl DynGcRuntime {
         self.auto_externs = map;
     }
 
-    pub fn tags(&self) -> &NanBoxTags { &self.tags }
-    pub fn roots(&self) -> &RootSet { &self.roots }
-    pub fn type_info(&self, type_id: usize) -> &TypeInfo { &self.type_infos[type_id] }
-    pub fn type_count(&self) -> usize { self.type_infos.len() }
+    pub fn tags(&self) -> &NanBoxTags {
+        &self.tags
+    }
+    pub fn roots(&self) -> &RootSet {
+        &self.roots
+    }
+    pub fn type_info(&self, type_id: usize) -> &TypeInfo {
+        &self.type_infos[type_id]
+    }
+    pub fn type_count(&self) -> usize {
+        self.type_infos.len()
+    }
 
     /// Install this runtime as the current thread's active runtime. All
     /// `__gc_alloc__` thunks and `NanBoxPolicy` lookups read this. The
@@ -316,7 +351,11 @@ impl DynGcRuntime {
         let prev_rt = RUNTIME.with(|c| c.replace(self as *const _));
         let prev_tag = PTR_TAG.with(|c| c.replace(self.tags.ptr));
         ensure_mutator_registered(self);
-        ThreadGuard { prev_rt, prev_tag, _phantom: std::marker::PhantomData }
+        ThreadGuard {
+            prev_rt,
+            prev_tag,
+            _phantom: std::marker::PhantomData,
+        }
     }
 
     /// Allocate an object. Returns a raw, untagged heap pointer.
@@ -336,7 +375,13 @@ impl DynGcRuntime {
     pub fn alloc(&self, type_id: usize, varlen_len: usize) -> *mut u8 {
         let info = &self.type_infos[type_id];
         match &self.backend {
-            Backend::Generational(_) => {
+            Backend::Generational(heap) => {
+                let _active_chain_root = dynobj::roots::active_chain_root_source().map(|source| {
+                    // If this allocation triggers a collection, it must scan
+                    // the same thread-local FrameChain that runtime externs
+                    // use for `with_scope` roots.
+                    unsafe { ScopedHeapExtraRoot::new(heap.as_ref(), source) }
+                });
                 // Route through the per-thread MutatorThread. This is
                 // critical for multi-thread safety: the MutatorThread's
                 // alloc auto-triggers GC under pressure via
@@ -395,8 +440,17 @@ impl DynGcRuntime {
         }
     }
 
+    /// Diagnostic: identify which heap region owns `ptr`.
+    pub fn debug_ptr_region(&self, ptr: *const u8) -> &'static str {
+        match &self.backend {
+            Backend::Generational(heap) => heap.debug_region_of(ptr),
+        }
+    }
+
     pub fn tag_ptr(&self, ptr: *mut u8) -> u64 {
-        if ptr.is_null() { return 0; }
+        if ptr.is_null() {
+            return 0;
+        }
         TAG_PATTERN | ((self.tags.ptr as u64) << 48) | ((ptr as u64) & PAYLOAD_MASK)
     }
 
@@ -418,7 +472,9 @@ impl DynGcRuntime {
                 for &p in extras.iter() {
                     sources.push(unsafe { &*p });
                 }
-                unsafe { heap.collect::<NanBoxPolicy>(&sources); }
+                unsafe {
+                    heap.collect::<NanBoxPolicy>(&sources);
+                }
             }
         }
     }
@@ -475,7 +531,9 @@ impl DynGcRuntime {
             Backend::Generational(heap) => {
                 let safepoints = jit.all_safepoints();
                 let mut session = JitSafepointSession::<NanBoxPolicy, _>::new(
-                    heap, StackMapJitTransport, &safepoints,
+                    heap,
+                    StackMapJitTransport,
+                    &safepoints,
                 )
                 .with_gc_policy(policy);
                 // Bind to the calling thread's MutatorThread state so
@@ -489,7 +547,9 @@ impl DynGcRuntime {
                 // Safety: `jit` outlives this call, so `&jit.literal_pool()`
                 // is valid for the session's lifetime.
                 let pool_ptr: *const dyn RootSource = jit.literal_pool();
-                unsafe { session.register_extra_root(pool_ptr); }
+                unsafe {
+                    session.register_extra_root(pool_ptr);
+                }
                 // Mirror the runtime's permanent extra root sources onto
                 // the session — those are typically per-thread frame
                 // chains and similar host-side root sets that must also
@@ -499,7 +559,9 @@ impl DynGcRuntime {
                 // see them collected when the JIT triggers a GC.
                 let extras = self.extra_root_sources.lock().unwrap();
                 for &ptr in extras.iter() {
-                    unsafe { session.register_extra_root(ptr); }
+                    unsafe {
+                        session.register_extra_root(ptr);
+                    }
                 }
                 drop(extras);
                 session.with_installed(|| jit.call_outcome(entry, args))
@@ -556,6 +618,37 @@ impl DynGcRuntime {
     }
 }
 
+struct ScopedHeapExtraRoot<'a> {
+    heap: &'a Heap,
+    source: *const dyn RootSource,
+}
+
+impl<'a> ScopedHeapExtraRoot<'a> {
+    unsafe fn new(heap: &'a Heap, source: *const dyn RootSource) -> Self {
+        unsafe { heap.register_permanent_extra(source) };
+        Self { heap, source }
+    }
+}
+
+impl Drop for ScopedHeapExtraRoot<'_> {
+    fn drop(&mut self) {
+        unsafe { self.heap.unregister_permanent_extra(self.source) };
+    }
+}
+
+/// Diagnostic: classify a pointer against the current thread's installed
+/// runtime, if one is active.
+pub fn debug_current_ptr_region(ptr: *const u8) -> Option<&'static str> {
+    RUNTIME.with(|cell| {
+        let rt = cell.get();
+        if rt.is_null() {
+            None
+        } else {
+            Some(unsafe { (&*rt).debug_ptr_region(ptr) })
+        }
+    })
+}
+
 /// Guard returned by `install_thread`. On drop, restores the previous
 /// RAII guard that pops the most-recently-pushed extra root source on drop.
 /// Returned by [`DynGcRuntime::push_extra_root_source`].
@@ -605,9 +698,15 @@ impl Drop for ThreadGuard<'_> {
 /// thunk lands at `externs[0]`.
 pub extern "C" fn gc_alloc_thunk(type_id: u64, varlen_len: u64) -> u64 {
     let rt_ptr = RUNTIME.with(|c| c.get());
-    assert!(!rt_ptr.is_null(), "dynlang: __gc_alloc__ called without DynGcRuntime installed");
+    assert!(
+        !rt_ptr.is_null(),
+        "dynlang: __gc_alloc__ called without DynGcRuntime installed"
+    );
     let rt = unsafe { &*rt_ptr };
     let ptr = rt.alloc(type_id as usize, varlen_len as usize);
-    assert!(!ptr.is_null(), "dynlang: gc_alloc returned null (OOM after GC)");
+    assert!(
+        !ptr.is_null(),
+        "dynlang: gc_alloc returned null (OOM after GC)"
+    );
     ptr as u64
 }

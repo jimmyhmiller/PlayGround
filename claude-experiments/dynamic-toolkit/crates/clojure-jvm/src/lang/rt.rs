@@ -8,7 +8,6 @@
 
 use std::sync::{Arc, LazyLock};
 
-
 use super::keyword::Keyword;
 use super::namespace::Namespace;
 use super::object::Object;
@@ -24,11 +23,7 @@ pub static CLOJURE_NS: LazyLock<Arc<Namespace>> =
 /// Dynamic Var holding the current namespace. Default: `clojure.core`.
 pub static CURRENT_NS: LazyLock<Arc<Var>> = LazyLock::new(|| {
     let ns = CLOJURE_NS.clone();
-    let v = Var::intern_sym_root(
-        ns.clone(),
-        Symbol::intern("*ns*"),
-        Object::Namespace(ns),
-    );
+    let v = Var::intern_sym_root(ns.clone(), Symbol::intern("*ns*"), Object::Namespace(ns));
     v.clone().set_dynamic()
 });
 
@@ -36,16 +31,18 @@ pub static CURRENT_NS: LazyLock<Arc<Var>> = LazyLock::new(|| {
 pub fn current_ns() -> Arc<Namespace> {
     match CURRENT_NS.deref() {
         Object::Namespace(ns) => ns,
-        other => panic!(
-            "clojure-jvm: *ns* must hold a Namespace, found {other:?}"
-        ),
+        other => panic!("clojure-jvm: *ns* must hold a Namespace, found {other:?}"),
     }
 }
 
 /// Booleans `true` / `false` are used as plain `Object::Bool` everywhere in
 /// Clojure. These constants match Java's `RT.T` / `RT.F`.
-pub fn T() -> Object { Object::Bool(true) }
-pub fn F() -> Object { Object::Bool(false) }
+pub fn T() -> Object {
+    Object::Bool(true)
+}
+pub fn F() -> Object {
+    Object::Bool(false)
+}
 
 /// `RT.map(Object... init)` — build a small map. Compiler.java uses this to
 /// attach :once meta to `FNONCE`, among other things. Stubbed until
@@ -103,10 +100,7 @@ pub fn next(x: &Object) -> Object {
             PersistentList::Cons { count: 1, .. } => Object::Nil,
             PersistentList::Cons { rest, .. } => Object::List(rest.clone()),
         },
-        _ => crate::unimplemented_port!(
-            "RT.next",
-            "non-list seq sources not ported yet"
-        ),
+        _ => crate::unimplemented_port!("RT.next", "non-list seq sources not ported yet"),
     }
 }
 
@@ -139,10 +133,7 @@ pub fn seq(coll: &Object) -> Object {
         Object::Nil => Object::Nil,
         Object::List(l) if l.count() == 0 => Object::Nil,
         Object::List(_) => coll.clone(),
-        _ => crate::unimplemented_port!(
-            "RT.seq",
-            "non-list seq sources not ported yet"
-        ),
+        _ => crate::unimplemented_port!("RT.seq", "non-list seq sources not ported yet"),
     }
 }
 
@@ -152,10 +143,7 @@ pub fn count(coll: &Object) -> i32 {
     match coll {
         Object::Nil => 0,
         Object::List(l) => l.count(),
-        _ => crate::unimplemented_port!(
-            "RT.count",
-            "non-list seq sources not ported yet"
-        ),
+        _ => crate::unimplemented_port!("RT.count", "non-list seq sources not ported yet"),
     }
 }
 
@@ -170,4 +158,6 @@ pub fn var(_ns: &str, _name: &str) -> Object {
 }
 
 /// Sentinel used by `intern` factories: namespace `"clojure.core"`.
-pub fn clojure_core_sym() -> Arc<Symbol> { Symbol::intern("clojure.core") }
+pub fn clojure_core_sym() -> Arc<Symbol> {
+    Symbol::intern("clojure.core")
+}

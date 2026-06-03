@@ -68,11 +68,15 @@ impl<'a> Reader<'a> {
 
     fn read_form(&mut self) -> Result<Object, ReaderError> {
         self.skip_ws_and_comments();
-        let c = self.peek_byte().ok_or_else(|| self.err("EOF while reading"))?;
+        let c = self
+            .peek_byte()
+            .ok_or_else(|| self.err("EOF while reading"))?;
         match c {
             b'(' => self.read_list(),
             b'[' => self.read_vector(),
-            b')' | b']' | b'}' => Err(self.err_with(format!("Unmatched delimiter `{}`", c as char))),
+            b')' | b']' | b'}' => {
+                Err(self.err_with(format!("Unmatched delimiter `{}`", c as char)))
+            }
             b'"' => self.read_string(),
             b'\'' => self.read_quote(),
             b':' => self.read_keyword(),
@@ -123,16 +127,13 @@ impl<'a> Reader<'a> {
                     "return" => 13,
                     "formfeed" => 12,
                     "backspace" => 8,
-                    s if s.starts_with('u') && s.len() == 5 => {
-                        i64::from_str_radix(&s[1..], 16).map_err(|_| {
-                            self.err_with(format!("invalid unicode escape `\\{s}`"))
-                        })?
-                    }
+                    s if s.starts_with('u') && s.len() == 5 => i64::from_str_radix(&s[1..], 16)
+                        .map_err(|_| self.err_with(format!("invalid unicode escape `\\{s}`")))?,
                     s if s.chars().count() == 1 => s.chars().next().unwrap() as i64,
                     other => {
-                        return Err(self.err_with(format!(
-                            "unsupported character literal `\\{other}`"
-                        )));
+                        return Err(
+                            self.err_with(format!("unsupported character literal `\\{other}`"))
+                        );
                     }
                 };
                 Ok(Object::Long(code))
@@ -289,10 +290,9 @@ impl<'a> Reader<'a> {
             self.skip_ws_and_comments();
             match self.peek_byte() {
                 None => {
-                    return Err(self.err_with(format!(
-                        "EOF while reading, expecting `{}`",
-                        close as char
-                    )))
+                    return Err(
+                        self.err_with(format!("EOF while reading, expecting `{}`", close as char))
+                    );
                 }
                 Some(c) if c == close => {
                     self.pos += 1;
@@ -325,9 +325,11 @@ impl<'a> Reader<'a> {
                 let kw_obj = self.read_form()?;
                 let key = match kw_obj {
                     Object::Keyword(k) => Object::Keyword(k),
-                    other => return Err(self.err(&format!(
-                        "Metadata `:` reader expects a keyword, got {other:?}"
-                    ))),
+                    other => {
+                        return Err(self.err(&format!(
+                            "Metadata `:` reader expects a keyword, got {other:?}"
+                        )));
+                    }
                 };
                 PersistentHashMap::create_flat(vec![key, Object::Bool(true)])
             }
@@ -346,9 +348,11 @@ impl<'a> Reader<'a> {
                 let map_obj = self.read_form()?;
                 match map_obj {
                     Object::Map(m) => m,
-                    other => return Err(self.err(&format!(
-                        "Metadata `^{{...}}` did not read as a map, got {other:?}"
-                    ))),
+                    other => {
+                        return Err(self.err(&format!(
+                            "Metadata `^{{...}}` did not read as a map, got {other:?}"
+                        )));
+                    }
                 }
             }
             Some(_) => {
@@ -389,7 +393,9 @@ impl<'a> Reader<'a> {
     ///   not yet handled and will panic with `unimplemented_port!`.
     fn read_dispatch_placeholder(&mut self) -> Result<Object, ReaderError> {
         self.pos += 1; // consume '#'
-        let c = self.peek_byte().ok_or_else(|| self.err("EOF after `#` dispatch"))?;
+        let c = self
+            .peek_byte()
+            .ok_or_else(|| self.err("EOF after `#` dispatch"))?;
         match c {
             b'{' => {
                 self.pos += 1;
@@ -429,7 +435,10 @@ impl<'a> Reader<'a> {
                 loop {
                     self.skip_ws_and_comments();
                     match self.peek_byte() {
-                        Some(b')') => { self.pos += 1; break; }
+                        Some(b')') => {
+                            self.pos += 1;
+                            break;
+                        }
                         None => return Err(self.err("EOF inside #()")),
                         Some(_) => {}
                     }
@@ -450,7 +459,9 @@ impl<'a> Reader<'a> {
                 let renamed = rename_anon_fn_params(&body);
                 Ok(Object::List(PersistentList::create(vec![
                     Object::Symbol(Symbol::intern("fn*")),
-                    Object::Vector(crate::lang::persistent_vector::PersistentVector::create(params)),
+                    Object::Vector(crate::lang::persistent_vector::PersistentVector::create(
+                        params,
+                    )),
                     renamed,
                 ])))
             }
@@ -499,7 +510,9 @@ impl<'a> Reader<'a> {
                 // correctly even if not spliced.
                 self.pos += 1;
                 let _splicing = self.peek_byte() == Some(b'@');
-                if _splicing { self.pos += 1; }
+                if _splicing {
+                    self.pos += 1;
+                }
                 let pairs = self.read_form()?;
                 Ok(select_reader_conditional(&pairs).unwrap_or(Object::Nil))
             }
@@ -523,9 +536,13 @@ impl<'a> Reader<'a> {
                 // the map unmodified (we don't auto-qualify keys).
                 self.pos += 1;
                 // Skip optional second `:` for auto-resolved.
-                if self.peek_byte() == Some(b':') { self.pos += 1; }
+                if self.peek_byte() == Some(b':') {
+                    self.pos += 1;
+                }
                 while let Some(c) = self.peek_byte() {
-                    if c.is_ascii_whitespace() || c == b'{' { break; }
+                    if c.is_ascii_whitespace() || c == b'{' {
+                        break;
+                    }
                     self.pos += 1;
                 }
                 self.skip_ws_and_comments();
@@ -606,9 +623,7 @@ impl<'a> Reader<'a> {
             let k = self.read_form()?;
             self.skip_ws_and_comments();
             if matches!(self.peek_byte(), Some(b'}') | None) {
-                return Err(self.err(
-                    "Map literal must have an even number of forms",
-                ));
+                return Err(self.err("Map literal must have an even number of forms"));
             }
             let v = self.read_form()?;
             pairs.push((k, v));
@@ -650,7 +665,10 @@ impl<'a> Reader<'a> {
     }
 
     fn err(&self, msg: &str) -> ReaderError {
-        ReaderError { msg: msg.to_string(), pos: self.pos }
+        ReaderError {
+            msg: msg.to_string(),
+            pos: self.pos,
+        }
     }
 
     fn err_with(&self, msg: String) -> ReaderError {
@@ -677,7 +695,8 @@ fn select_reader_conditional(pairs: &Object) -> Option<Object> {
             let mut out = Vec::new();
             let mut cur = Object::List(l.clone());
             while !matches!(cur, Object::Nil) {
-                if matches!(&cur, Object::List(inner) if matches!(inner.as_ref(), super::persistent_list::PersistentList::Empty)) {
+                if matches!(&cur, Object::List(inner) if matches!(inner.as_ref(), super::persistent_list::PersistentList::Empty))
+                {
                     break;
                 }
                 let first = crate::lang::rt::first(&cur);
@@ -706,7 +725,10 @@ fn select_reader_conditional(pairs: &Object) -> Option<Object> {
 
 fn is_terminating_macro(c: u8) -> bool {
     c.is_ascii_whitespace()
-        || matches!(c, b',' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'"' | b';')
+        || matches!(
+            c,
+            b',' | b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'"' | b';'
+        )
 }
 
 #[derive(Debug)]
@@ -727,9 +749,10 @@ impl std::error::Error for ReaderError {}
 /// is empty (no form) or has trailing forms.
 pub fn read_str(src: &str) -> Result<Object, ReaderError> {
     let mut r = Reader::new(src);
-    let form = r
-        .read()?
-        .ok_or_else(|| ReaderError { msg: "EOF: expected a form".to_string(), pos: 0 })?;
+    let form = r.read()?.ok_or_else(|| ReaderError {
+        msg: "EOF: expected a form".to_string(),
+        pos: 0,
+    })?;
     // Don't error on trailing whitespace.
     r.skip_ws_and_comments();
     if r.pos < src.len() {
@@ -774,10 +797,29 @@ pub fn read_all(src: &str) -> Result<Vec<Object>, ReaderError> {
 fn is_sq_special(name: &str) -> bool {
     matches!(
         name,
-        "def" | "loop*" | "recur" | "if" | "let*" | "letfn*" | "do" | "fn*"
-            | "quote" | "var" | "." | "set!" | "try" | "catch" | "finally"
-            | "throw" | "monitor-enter" | "monitor-exit" | "deftype*"
-            | "case*" | "new" | "&" | "reify*"
+        "def"
+            | "loop*"
+            | "recur"
+            | "if"
+            | "let*"
+            | "letfn*"
+            | "do"
+            | "fn*"
+            | "quote"
+            | "var"
+            | "."
+            | "set!"
+            | "try"
+            | "catch"
+            | "finally"
+            | "throw"
+            | "monitor-enter"
+            | "monitor-exit"
+            | "deftype*"
+            | "case*"
+            | "new"
+            | "&"
+            | "reify*"
     )
 }
 
@@ -798,8 +840,8 @@ fn resolve_symbol(sym: &Symbol) -> Arc<Symbol> {
     }
     if let Some(ns_str) = sym.get_namespace() {
         let ns_sym = Symbol::intern(ns_str);
-        if let Some(target) = Namespace::find(&ns_sym)
-            .or_else(|| super::rt::current_ns().lookup_alias(&ns_sym))
+        if let Some(target) =
+            Namespace::find(&ns_sym).or_else(|| super::rt::current_ns().lookup_alias(&ns_sym))
         {
             return Symbol::intern_ns_name(Some(target.name.get_name()), name);
         }
@@ -894,16 +936,16 @@ fn syntax_quote_form(form: &Object, env: &mut HashMap<String, Arc<Symbol>>) -> O
             // see `cljvm_rt_sq_concat` for why we route through the
             // RT host-method instead of `clojure.core/concat` (which
             // is multi-arity and binds its Var to nil currently).
-            let items: Vec<Object> =
-                l.iter().map(|item| syntax_quote_item(&item, env)).collect();
+            let items: Vec<Object> = l.iter().map(|item| syntax_quote_item(&item, env)).collect();
             sq_concat_call(items)
         }
 
         Object::Vector(v) => {
             // `(vec (. RT sqConcat …))` — same RT routing as the list case,
             // then convert the resulting seq to a Vector.
-            let items: Vec<Object> =
-                (0..v.count()).map(|i| syntax_quote_item(&v.nth(i), env)).collect();
+            let items: Vec<Object> = (0..v.count())
+                .map(|i| syntax_quote_item(&v.nth(i), env))
+                .collect();
             let inner = sq_concat_call(items);
             Object::List(PersistentList::create(vec![
                 Object::Symbol(Symbol::intern("vec")),
@@ -936,8 +978,7 @@ fn syntax_quote_form(form: &Object, env: &mut HashMap<String, Arc<Symbol>>) -> O
         // analyzer then treats as a live map literal and tries to resolve
         // the key as a value (the `with-loading-context` `{LOADER …}` bug).
         Object::Map(m) => {
-            let mut list_items: Vec<Object> =
-                vec![Object::Symbol(Symbol::intern("hash-map"))];
+            let mut list_items: Vec<Object> = vec![Object::Symbol(Symbol::intern("hash-map"))];
             for (k, v) in m.iter() {
                 list_items.push(k);
                 list_items.push(v);
@@ -948,8 +989,7 @@ fn syntax_quote_form(form: &Object, env: &mut HashMap<String, Arc<Symbol>>) -> O
 
         // Set literal: same treatment via the list `(hash-set e1 e2 …)`.
         Object::Set(s) => {
-            let mut list_items: Vec<Object> =
-                vec![Object::Symbol(Symbol::intern("hash-set"))];
+            let mut list_items: Vec<Object> = vec![Object::Symbol(Symbol::intern("hash-set"))];
             for e in s.iter() {
                 list_items.push(e);
             }
@@ -981,7 +1021,10 @@ fn syntax_quote_item(item: &Object, env: &mut HashMap<String, Arc<Symbol>>) -> O
                 let name = head.get_name();
                 if (name == "clojure.core/unquote"
                     || (name == "unquote" && head.get_namespace().is_none()))
-                    && head.get_namespace().map(|ns| ns == "clojure.core").unwrap_or(true)
+                    && head
+                        .get_namespace()
+                        .map(|ns| ns == "clojure.core")
+                        .unwrap_or(true)
                 {
                     let inner = l.iter().nth(1).unwrap();
                     return Object::List(PersistentList::create(vec![
@@ -1028,12 +1071,16 @@ fn scan_anon_fn_params(form: &Object, max_n: &mut usize, has_rest: &mut bool) {
         Object::Symbol(s) if s.get_namespace().is_none() => {
             let name = s.get_name();
             if name == "%" {
-                if *max_n < 1 { *max_n = 1; }
+                if *max_n < 1 {
+                    *max_n = 1;
+                }
             } else if name == "%&" {
                 *has_rest = true;
             } else if let Some(rest) = name.strip_prefix('%') {
                 if let Ok(n) = rest.parse::<usize>() {
-                    if n > *max_n { *max_n = n; }
+                    if n > *max_n {
+                        *max_n = n;
+                    }
                 }
             }
         }
@@ -1074,8 +1121,7 @@ fn rename_anon_fn_params(form: &Object) -> Object {
             form.clone()
         }
         Object::List(l) => {
-            let new_items: Vec<Object> =
-                l.iter().map(|i| rename_anon_fn_params(&i)).collect();
+            let new_items: Vec<Object> = l.iter().map(|i| rename_anon_fn_params(&i)).collect();
             Object::List(PersistentList::create(new_items))
         }
         Object::WithMeta(inner, _meta) => {
@@ -1088,7 +1134,9 @@ fn rename_anon_fn_params(form: &Object) -> Object {
             let new_items: Vec<Object> = (0..v.count())
                 .map(|i| rename_anon_fn_params(&v.nth(i)))
                 .collect();
-            Object::Vector(crate::lang::persistent_vector::PersistentVector::create(new_items))
+            Object::Vector(crate::lang::persistent_vector::PersistentVector::create(
+                new_items,
+            ))
         }
         _ => form.clone(),
     }

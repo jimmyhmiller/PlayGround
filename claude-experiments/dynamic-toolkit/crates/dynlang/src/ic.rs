@@ -279,11 +279,7 @@ impl Drop for IcThreadGuard<'_> {
 /// returns the loaded field value.
 ///
 /// `pub(crate)` so `gc.rs` can register it; not part of the public API.
-pub(crate) extern "C" fn prop_slow_thunk(
-    obj_bits: u64,
-    sym_id: u64,
-    cache_id: u64,
-) -> u64 {
+pub(crate) extern "C" fn prop_slow_thunk(obj_bits: u64, sym_id: u64, cache_id: u64) -> u64 {
     let ic_ptr = ACTIVE_IC.with(|c| c.get());
     assert!(
         !ic_ptr.is_null(),
@@ -399,8 +395,7 @@ pub enum CachePolicy {
 /// Custom strategies can switch on receiver shape — e.g. Clojure's records
 /// all share one `type_id`, so the strategy reads the instance-side
 /// `type_name` symbol instead.
-pub type ClassKeyStrategy =
-    Box<dyn Fn(&mut crate::DynFunc, Value) -> Value + Send + Sync>;
+pub type ClassKeyStrategy = Box<dyn Fn(&mut crate::DynFunc, Value) -> Value + Send + Sync>;
 
 /// Cell baked into IR call sites. Address is heap-stable (Box'd) so it can
 /// be reused across module finalize / JIT runs. Holds the array data pointer
@@ -565,12 +560,7 @@ impl TypeDispatchIc {
 
     /// Emit IR for `lookup(receiver, key)`. Returns the loaded value
     /// (LoadOffset) or the cached value (Direct). Mints a fresh cache slot.
-    pub fn emit_lookup(
-        &mut self,
-        f: &mut crate::DynFunc,
-        receiver: Value,
-        key: &str,
-    ) -> Value {
+    pub fn emit_lookup(&mut self, f: &mut crate::DynFunc, receiver: Value, key: &str) -> Value {
         let sym = self.symbols.intern(key);
         let cache_id = self.next_site_id;
         self.next_site_id += 1;
@@ -624,9 +614,8 @@ impl TypeDispatchIc {
         // at most once per miss anyway).
         let class_key_in_miss = (self.class_key_strategy)(f, receiver);
         f.fb.safepoint(&[receiver]);
-        let slow = f
-            .fb
-            .call(
+        let slow =
+            f.fb.call(
                 self.slow_ref,
                 &[cell_const, receiver, class_key_in_miss, sym_v, cid_v],
             )
@@ -648,9 +637,7 @@ impl TypeDispatchIc {
     /// moves the handle around.
     pub fn finalize(self) -> Box<TypeDispatchIcRuntime> {
         let array = match self.policy {
-            CachePolicy::LoadOffset => {
-                InlineCacheArray::new(self.next_site_id as usize)
-            }
+            CachePolicy::LoadOffset => InlineCacheArray::new(self.next_site_id as usize),
             CachePolicy::Direct => {
                 InlineCacheArray::new_with_pointer_values(self.next_site_id as usize)
             }
@@ -671,8 +658,7 @@ impl TypeDispatchIc {
         // into the cell so the slow path can find it. The cell is owned
         // by the runtime; the Box won't move once we return it because
         // its address is what every IR call site uses.
-        let rt_ptr = &*runtime as *const TypeDispatchIcRuntime
-            as *mut TypeDispatchIcRuntime;
+        let rt_ptr = &*runtime as *const TypeDispatchIcRuntime as *mut TypeDispatchIcRuntime;
         runtime.cell.runtime_ptr.store(rt_ptr, Ordering::Release);
         runtime
     }
@@ -862,7 +848,8 @@ mod tests {
 
     #[test]
     fn build_and_finalize_empty() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let ic = PropertyIc::new(&mut dyn_module);
         let rt = ic.finalize();
         assert_eq!(rt.site_count(), 0);
@@ -870,7 +857,8 @@ mod tests {
 
     #[test]
     fn register_type_populates_table() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let id = dyn_module
             .obj_type("Point")
             .field("x", FieldKind::Value)
@@ -886,7 +874,8 @@ mod tests {
 
     #[test]
     fn install_guard_restores() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let ic = PropertyIc::new(&mut dyn_module);
         let rt = ic.finalize();
         ACTIVE_IC.with(|c| assert!(c.get().is_null()));
@@ -918,10 +907,8 @@ mod tests {
         use dynvalue::NanBox;
         type TestRoots = GcInterpCtx<Compact, LowBitPtrPolicy<3>>;
 
-        let mut dyn_module = DynModule::new(
-            GcConfig::generational(64 * 1024),
-            NanBoxTags::default(),
-        );
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
 
         // First, a sanity-check function: take one arg and return it.
         // If the interpreter can't echo our arg, the test setup is wrong.
@@ -937,8 +924,7 @@ mod tests {
         // Custom class-key strategy: identity on receiver bits. The
         // class_key passed to `set` will equal the receiver value the
         // test invokes the function with.
-        let identity_strategy: ClassKeyStrategy =
-            Box::new(|_f, recv| recv);
+        let identity_strategy: ClassKeyStrategy = Box::new(|_f, recv| recv);
         let mut ic = TypeDispatchIc::new(&mut dyn_module, "test_methods", CachePolicy::Direct)
             .with_class_key_strategy(identity_strategy);
 
@@ -1003,14 +989,11 @@ mod tests {
             args: &[u64],
             _runtime: &TypeDispatchIcRuntime,
         ) -> u64 {
-            let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> =
-                GcInterpCtx::new_unallocating();
+            let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
             let mut interp = ModuleInterpreter::<NanBox, _>::new(module, &roots);
             interp.bind_by_name(DISPATCH_SLOW_EXTERN, |args| {
                 eprintln!("[binding closure] received args: {:?}", args);
-                let v = dispatch_slow_thunk(
-                    args[0], args[1], args[2], args[3], args[4],
-                );
+                let v = dispatch_slow_thunk(args[0], args[1], args[2], args[3], args[4]);
                 ExternCallResult::Value(Some(v))
             });
             match interp.run(entry, args) {
@@ -1041,8 +1024,8 @@ mod tests {
     #[test]
     fn pointer_mode_cache_slot_survives_moving_gc() {
         use crate::NanBoxTags;
-        use std::cell::UnsafeCell;
         use dynsym::InlineCacheArray;
+        use std::cell::UnsafeCell;
 
         // Test-only wrapper: a `RootSource` over an `InlineCacheArray`
         // whose `cached_value` slots are scanned. Future `TypeDispatchIc`
@@ -1064,10 +1047,7 @@ mod tests {
             }
         }
 
-        let mut dyn_module = DynModule::new(
-            GcConfig::generational(8192),
-            NanBoxTags::default(),
-        );
+        let mut dyn_module = DynModule::new(GcConfig::generational(8192), NanBoxTags::default());
         let pair_ty = dyn_module
             .obj_type("Pair")
             .field("value", FieldKind::Value)
@@ -1086,21 +1066,24 @@ mod tests {
         const MAGIC: u64 = 0xDECAFC0FFEE_u64;
         let raw = gc.alloc(pair_ty.0, 0);
         assert!(!raw.is_null());
-        let value_offset: usize = dyn_module
-            .obj_types[pair_ty.0]
+        let value_offset: usize = dyn_module.obj_types[pair_ty.0]
             .field_offsets
             .iter()
             .find(|(name, _)| *name == "value")
             .map(|(_, (off, _))| *off as usize)
             .expect("Pair has 'value' field");
-        unsafe { (raw.add(value_offset) as *mut u64).write(MAGIC); }
+        unsafe {
+            (raw.add(value_offset) as *mut u64).write(MAGIC);
+        }
         let nanbox_before = gc.tag_ptr(raw);
 
         // Build the IC array and write the NanBox into slot 0.
         let mut array = InlineCacheArray::new_with_pointer_values(1);
         array.get_mut(0).cached_class_id = (pair_ty.0 as u64) + 1;
         array.get_mut(0).cached_value = nanbox_before;
-        let root_src = PtrIcRootSource { array: UnsafeCell::new(array) };
+        let root_src = PtrIcRootSource {
+            array: UnsafeCell::new(array),
+        };
 
         // Register the wrapper. Safety: `root_src` outlives the
         // `gc.collect()` call below — both live in this stack frame.
@@ -1110,7 +1093,10 @@ mod tests {
 
         let before_collections = gc.collection_count();
         gc.collect();
-        assert!(gc.collection_count() > before_collections, "expected a collection");
+        assert!(
+            gc.collection_count() > before_collections,
+            "expected a collection"
+        );
 
         // After collection: the NanBox in the slot should have been
         // rewritten to point to the new heap location, AND the object

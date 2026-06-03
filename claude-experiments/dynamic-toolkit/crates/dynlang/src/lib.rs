@@ -49,7 +49,7 @@ use std::collections::HashMap;
 pub use dynir::builder::{FunctionBuilder, ModuleBuilder};
 pub use dynir::ir::{BlockId, CmpOp, FuncRef, Module, StackSlot, Value};
 pub use dynir::types::{Signature, Type};
-pub use dynobj::{TypeInfo, VarLenKind, Compact, ObjHeader};
+pub use dynobj::{Compact, ObjHeader, TypeInfo, VarLenKind};
 pub use dynruntime::GcPolicy;
 
 // ── GC Configuration ──────────────────────────────────────────────
@@ -79,10 +79,16 @@ pub enum GcConfig {
 
 impl GcConfig {
     pub fn generational(heap_size: usize) -> Self {
-        GcConfig::Generational { heap_size, nursery_size: None }
+        GcConfig::Generational {
+            heap_size,
+            nursery_size: None,
+        }
     }
     pub fn generational_with_nursery(heap_size: usize, nursery_size: usize) -> Self {
-        GcConfig::Generational { heap_size, nursery_size: Some(nursery_size) }
+        GcConfig::Generational {
+            heap_size,
+            nursery_size: Some(nursery_size),
+        }
     }
 }
 
@@ -204,7 +210,9 @@ impl ObjTypeHandle {
 
     /// Load a field from a raw GC object pointer. Returns I64.
     pub fn load(&self, f: &mut DynFunc, obj_ptr: Value, field: &str) -> Value {
-        let (offset, _kind) = self.field_offsets.get(field)
+        let (offset, _kind) = self
+            .field_offsets
+            .get(field)
             .unwrap_or_else(|| panic!("unknown field '{}' on ObjTypeHandle", field));
         f.fb.load(Type::I64, obj_ptr, *offset)
     }
@@ -216,7 +224,9 @@ impl ObjTypeHandle {
 
     /// Store a field to a raw GC object pointer.
     pub fn store(&self, f: &mut DynFunc, obj_ptr: Value, field: &str, val: Value) {
-        let (offset, _kind) = self.field_offsets.get(field)
+        let (offset, _kind) = self
+            .field_offsets
+            .get(field)
             .unwrap_or_else(|| panic!("unknown field '{}' on ObjTypeHandle", field));
         f.fb.store(val, obj_ptr, *offset);
     }
@@ -307,10 +317,7 @@ impl ObjType {
                 "ObjType {:?}: field {:?} is {:?}, not Value",
                 self.name, name, k
             ),
-            None => panic!(
-                "ObjType {:?}: no field named {:?}",
-                self.name, name
-            ),
+            None => panic!("ObjType {:?}: no field named {:?}", self.name, name),
         }
     }
 
@@ -323,10 +330,7 @@ impl ObjType {
                 "ObjType {:?}: field {:?} is {:?}, not Raw64",
                 self.name, name, k
             ),
-            None => panic!(
-                "ObjType {:?}: no field named {:?}",
-                self.name, name
-            ),
+            None => panic!("ObjType {:?}: no field named {:?}", self.name, name),
         }
     }
 }
@@ -368,8 +372,7 @@ impl<'a> ObjTypeBuilder<'a> {
         let value_count = self.value_fields.len() as u16;
         let raw_count = (self.raw64_fields.len() * 8) as u16;
 
-        let mut info = TypeInfo::for_header(header_size)
-            .with_fields(value_count);
+        let mut info = TypeInfo::for_header(header_size).with_fields(value_count);
 
         if raw_count > 0 {
             info = info.with_raw_bytes(raw_count);
@@ -544,8 +547,8 @@ impl DynModule {
         // Ensure the gc_alloc extern is declared (once)
         if self.gc_alloc_extern.is_none() {
             let sig = Signature {
-                params: vec![Type::I64, Type::I64],  // type_id, varlen_len
-                ret: Some(Type::GcPtr),               // returns raw GC pointer
+                params: vec![Type::I64, Type::I64], // type_id, varlen_len
+                ret: Some(Type::GcPtr),             // returns raw GC pointer
             };
             self.gc_alloc_extern = Some(self.module_builder.declare_extern("__gc_alloc__", sig));
         }
@@ -630,15 +633,42 @@ impl DynModule {
         let i64_2 = sig(&[Type::I64, Type::I64], Some(Type::I64));
         let i64_1 = sig(&[Type::I64], Some(Type::I64));
 
-        self.slow.add = Some(self.module_builder.declare_extern(&format!("{prefix}_add"), i64_2.clone()));
-        self.slow.sub = Some(self.module_builder.declare_extern(&format!("{prefix}_sub"), i64_2.clone()));
-        self.slow.mul = Some(self.module_builder.declare_extern(&format!("{prefix}_mul"), i64_2.clone()));
-        self.slow.div = Some(self.module_builder.declare_extern(&format!("{prefix}_div"), i64_2.clone()));
-        self.slow.neg = Some(self.module_builder.declare_extern(&format!("{prefix}_neg"), i64_1.clone()));
-        self.slow.eq = Some(self.module_builder.declare_extern(&format!("{prefix}_eq"), i64_2.clone()));
-        self.slow.lt = Some(self.module_builder.declare_extern(&format!("{prefix}_lt"), i64_2.clone()));
-        self.slow.gt = Some(self.module_builder.declare_extern(&format!("{prefix}_gt"), i64_2.clone()));
-        self.slow.not = Some(self.module_builder.declare_extern(&format!("{prefix}_not"), i64_1));
+        self.slow.add = Some(
+            self.module_builder
+                .declare_extern(&format!("{prefix}_add"), i64_2.clone()),
+        );
+        self.slow.sub = Some(
+            self.module_builder
+                .declare_extern(&format!("{prefix}_sub"), i64_2.clone()),
+        );
+        self.slow.mul = Some(
+            self.module_builder
+                .declare_extern(&format!("{prefix}_mul"), i64_2.clone()),
+        );
+        self.slow.div = Some(
+            self.module_builder
+                .declare_extern(&format!("{prefix}_div"), i64_2.clone()),
+        );
+        self.slow.neg = Some(
+            self.module_builder
+                .declare_extern(&format!("{prefix}_neg"), i64_1.clone()),
+        );
+        self.slow.eq = Some(
+            self.module_builder
+                .declare_extern(&format!("{prefix}_eq"), i64_2.clone()),
+        );
+        self.slow.lt = Some(
+            self.module_builder
+                .declare_extern(&format!("{prefix}_lt"), i64_2.clone()),
+        );
+        self.slow.gt = Some(
+            self.module_builder
+                .declare_extern(&format!("{prefix}_gt"), i64_2.clone()),
+        );
+        self.slow.not = Some(
+            self.module_builder
+                .declare_extern(&format!("{prefix}_not"), i64_1),
+        );
     }
 
     /// Like [`register_slow_paths`](Self::register_slow_paths), but also
@@ -682,15 +712,51 @@ impl DynModule {
         let i64_2 = sig(&[Type::I64, Type::I64], Some(Type::I64));
         let i64_1 = sig(&[Type::I64], Some(Type::I64));
         let fref = match op {
-            DynOp::Add => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.add = Some(f); f }
-            DynOp::Sub => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.sub = Some(f); f }
-            DynOp::Mul => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.mul = Some(f); f }
-            DynOp::Div => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.div = Some(f); f }
-            DynOp::Neg => { let f = self.module_builder.declare_extern(name, i64_1); self.slow.neg = Some(f); f }
-            DynOp::Eq  => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.eq = Some(f); f }
-            DynOp::Lt  => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.lt = Some(f); f }
-            DynOp::Gt  => { let f = self.module_builder.declare_extern(name, i64_2); self.slow.gt = Some(f); f }
-            DynOp::Not => { let f = self.module_builder.declare_extern(name, i64_1); self.slow.not = Some(f); f }
+            DynOp::Add => {
+                let f = self.module_builder.declare_extern(name, i64_2);
+                self.slow.add = Some(f);
+                f
+            }
+            DynOp::Sub => {
+                let f = self.module_builder.declare_extern(name, i64_2);
+                self.slow.sub = Some(f);
+                f
+            }
+            DynOp::Mul => {
+                let f = self.module_builder.declare_extern(name, i64_2);
+                self.slow.mul = Some(f);
+                f
+            }
+            DynOp::Div => {
+                let f = self.module_builder.declare_extern(name, i64_2);
+                self.slow.div = Some(f);
+                f
+            }
+            DynOp::Neg => {
+                let f = self.module_builder.declare_extern(name, i64_1);
+                self.slow.neg = Some(f);
+                f
+            }
+            DynOp::Eq => {
+                let f = self.module_builder.declare_extern(name, i64_2);
+                self.slow.eq = Some(f);
+                f
+            }
+            DynOp::Lt => {
+                let f = self.module_builder.declare_extern(name, i64_2);
+                self.slow.lt = Some(f);
+                f
+            }
+            DynOp::Gt => {
+                let f = self.module_builder.declare_extern(name, i64_2);
+                self.slow.gt = Some(f);
+                f
+            }
+            DynOp::Not => {
+                let f = self.module_builder.declare_extern(name, i64_1);
+                self.slow.not = Some(f);
+                f
+            }
         };
         fref
     }
@@ -700,7 +766,9 @@ impl DynModule {
     /// Declare a language function. All params and return are I64 (NanBox values).
     pub fn declare_func(&mut self, name: &str, arity: usize) -> FuncRef {
         let params = vec![Type::I64; arity];
-        let fref = self.module_builder.declare_func(name, &params, Some(Type::I64));
+        let fref = self
+            .module_builder
+            .declare_func(name, &params, Some(Type::I64));
         self.func_refs.insert(name.to_string(), fref);
         fref
     }
@@ -715,7 +783,8 @@ impl DynModule {
 
     /// Look up a previously declared function by name.
     pub fn func_ref(&self, name: &str) -> FuncRef {
-        *self.func_refs
+        *self
+            .func_refs
             .get(name)
             .unwrap_or_else(|| panic!("unknown function: {name}"))
     }
@@ -746,8 +815,7 @@ impl DynModule {
 
     /// Build the final module.
     pub fn build(self) -> BuiltModule {
-        let allocator_frefs: Vec<FuncRef> =
-            self.gc_alloc_extern.into_iter().collect();
+        let allocator_frefs: Vec<FuncRef> = self.gc_alloc_extern.into_iter().collect();
         BuiltModule {
             module: self.module_builder.build(),
             strings: self.strings,
@@ -777,7 +845,6 @@ impl DynModule {
         self.module_builder.internal_func_count()
     }
 }
-
 
 // ── DynOp ─────────────────────────────────────────────────────────
 
@@ -879,10 +946,7 @@ impl DynFunc {
         let slot = self.fb.create_stack_slot(8, true);
         let addr = self.fb.stack_addr(slot);
         self.fb.store(init, addr, 0);
-        self.vars
-            .last_mut()
-            .unwrap()
-            .insert(name.to_string(), slot);
+        self.vars.last_mut().unwrap().insert(name.to_string(), slot);
     }
 
     /// Read a variable's current value.
@@ -978,13 +1042,16 @@ impl DynFunc {
 
     /// The nil constant.
     pub fn nil(&mut self) -> Value {
-        self.fb.iconst(Type::I64, nanbox_encode(self.tags.nil, 0) as i64)
+        self.fb
+            .iconst(Type::I64, nanbox_encode(self.tags.nil, 0) as i64)
     }
 
     /// A boolean constant.
     pub fn bool_val(&mut self, b: bool) -> Value {
-        self.fb
-            .iconst(Type::I64, nanbox_encode(self.tags.bool_tag, b as u64) as i64)
+        self.fb.iconst(
+            Type::I64,
+            nanbox_encode(self.tags.bool_tag, b as u64) as i64,
+        )
     }
 
     /// A tagged constant with an arbitrary tag and payload.
@@ -1034,7 +1101,9 @@ impl DynFunc {
     }
 
     pub fn obj_unwrap_ref(&mut self, v: Value) -> ObjRef {
-        ObjRef { value: self.obj_unwrap(v) }
+        ObjRef {
+            value: self.obj_unwrap(v),
+        }
     }
 
     pub fn obj_wrap_ref(&mut self, ptr: ObjRef) -> Value {
@@ -1091,7 +1160,8 @@ impl DynFunc {
         let bit = self.fb.and(v, one_i64);
         let zero = self.fb.iconst(Type::I64, 0);
         let is_true = self.fb.icmp(CmpOp::Ne, bit, zero);
-        self.fb.br_if(is_true, then_bb, then_args, else_bb, else_args);
+        self.fb
+            .br_if(is_true, then_bb, then_args, else_bb, else_args);
     }
 
     /// Branch on truthiness: if `v` is truthy → then_bb, else → else_bb.
@@ -1106,7 +1176,8 @@ impl DynFunc {
         else_args: &[Value],
     ) {
         let truthy = self.is_truthy(v);
-        self.fb.br_if(truthy, then_bb, then_args, else_bb, else_args);
+        self.fb
+            .br_if(truthy, then_bb, then_args, else_bb, else_args);
     }
 
     // ── Unbox / Box ───────────────────────────────────────────
@@ -1339,22 +1410,46 @@ impl DynFunc {
     /// Hinted addition. Emits `num_add` when both operands are `Number`,
     /// else `dyn_add`.
     pub fn add(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
-        if lh.is_number() && rh.is_number() { self.num_add(l, r) } else { self.dyn_add(l, r) }
+        if lh.is_number() && rh.is_number() {
+            self.num_add(l, r)
+        } else {
+            self.dyn_add(l, r)
+        }
     }
     pub fn sub(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
-        if lh.is_number() && rh.is_number() { self.num_sub(l, r) } else { self.dyn_sub(l, r) }
+        if lh.is_number() && rh.is_number() {
+            self.num_sub(l, r)
+        } else {
+            self.dyn_sub(l, r)
+        }
     }
     pub fn mul(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
-        if lh.is_number() && rh.is_number() { self.num_mul(l, r) } else { self.dyn_mul(l, r) }
+        if lh.is_number() && rh.is_number() {
+            self.num_mul(l, r)
+        } else {
+            self.dyn_mul(l, r)
+        }
     }
     pub fn div(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
-        if lh.is_number() && rh.is_number() { self.num_div(l, r) } else { self.dyn_div(l, r) }
+        if lh.is_number() && rh.is_number() {
+            self.num_div(l, r)
+        } else {
+            self.dyn_div(l, r)
+        }
     }
     pub fn lt(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
-        if lh.is_number() && rh.is_number() { self.num_lt(l, r) } else { self.dyn_lt(l, r) }
+        if lh.is_number() && rh.is_number() {
+            self.num_lt(l, r)
+        } else {
+            self.dyn_lt(l, r)
+        }
     }
     pub fn gt(&mut self, l: Value, lh: TypeHint, r: Value, rh: TypeHint) -> Value {
-        if lh.is_number() && rh.is_number() { self.num_gt(l, r) } else { self.dyn_gt(l, r) }
+        if lh.is_number() && rh.is_number() {
+            self.num_gt(l, r)
+        } else {
+            self.dyn_gt(l, r)
+        }
     }
     /// Less-than-or-equal. No `dyn_le` primitive exists — synthesize as
     /// `!gt` when operands aren't both numbers.
@@ -1470,9 +1565,7 @@ impl DynFunc {
             DynOp::Gt => self.slow.gt,
             _ => unreachable!(),
         };
-        let slow_fn = slow_fn.unwrap_or_else(|| {
-            panic!("dyn_{:?}: no slow path registered", op)
-        });
+        let slow_fn = slow_fn.unwrap_or_else(|| panic!("dyn_{:?}: no slow path registered", op));
         let result_slow = self.fb.call(slow_fn, &[a, b]).unwrap();
         self.fb.jump(merge_bb, &[result_slow]);
 
@@ -1513,7 +1606,8 @@ impl DynFunc {
         varlen_len: Value,
         live_roots: &[Value],
     ) -> Value {
-        let alloc_fn = self.gc_alloc_extern
+        let alloc_fn = self
+            .gc_alloc_extern
             .expect("gc_alloc: no object types declared on this module");
         let type_id_val = self.fb.iconst(Type::I64, type_id.0 as i64);
         // Always emit a safepoint immediately before the alloc call, so
@@ -1542,14 +1636,18 @@ impl DynFunc {
     /// Load a value field from a GC object. Offset is computed at build
     /// time from the TypeInfo. `obj` is a raw pointer (I64).
     pub fn gc_load_field(&mut self, obj: Value, type_info: &ObjType, field: &str) -> Value {
-        let (offset, _kind) = type_info.field_offsets.get(field)
+        let (offset, _kind) = type_info
+            .field_offsets
+            .get(field)
             .unwrap_or_else(|| panic!("unknown field '{}' on type '{}'", field, type_info.name));
         self.fb.load(Type::I64, obj, *offset)
     }
 
     /// Store a value field to a GC object. Offset is computed at build time.
     pub fn gc_store_field(&mut self, obj: Value, type_info: &ObjType, field: &str, val: Value) {
-        let (offset, _kind) = type_info.field_offsets.get(field)
+        let (offset, _kind) = type_info
+            .field_offsets
+            .get(field)
             .unwrap_or_else(|| panic!("unknown field '{}' on type '{}'", field, type_info.name));
         self.fb.store(val, obj, *offset);
     }
@@ -1582,7 +1680,7 @@ impl DynFunc {
 
 /// A per-call-site monomorphic inline cache.
 ///
-/// Stores `(guard_key, cached_value)` in a 16-byte stack slot.
+/// Stores `(guard_key, cached_value)` in separate stack slots.
 /// On the fast path: load guard, compare with runtime key, return cached value.
 /// On miss: call a slow path to compute the value, update the cache.
 ///
@@ -1602,22 +1700,27 @@ impl DynFunc {
 /// Subsequent calls with the same guard key hit the cache — one load + one compare.
 #[derive(Clone, Copy)]
 pub struct InlineCache {
-    slot: StackSlot,
+    guard_slot: StackSlot,
+    value_slot: StackSlot,
 }
 
 impl DynFunc {
     /// Allocate a new inline cache for this call site.
     /// Each call to `inline_cache()` creates a separate cache.
     pub fn inline_cache(&mut self) -> InlineCache {
-        // 16 bytes: [guard_key: u64, cached_value: u64]
-        let slot = self.fb.create_stack_slot(16, false);
-        // Initialize guard to 0 (guaranteed miss on first access since
-        // no valid guard key is 0 for heap pointers or NanBox values)
-        let addr = self.fb.stack_addr(slot);
+        // The guard is a raw stable key. The cached value may be a heap
+        // NanBox, so it must be a GC root independently of the guard.
+        let guard_slot = self.fb.create_stack_slot(8, false);
+        let value_slot = self.fb.create_stack_slot(8, true);
+        let guard_addr = self.fb.stack_addr(guard_slot);
+        let value_addr = self.fb.stack_addr(value_slot);
         let zero = self.fb.iconst(Type::I64, 0);
-        self.fb.store(zero, addr, 0);
-        self.fb.store(zero, addr, 8);
-        InlineCache { slot }
+        self.fb.store(zero, guard_addr, 0);
+        self.fb.store(zero, value_addr, 0);
+        InlineCache {
+            guard_slot,
+            value_slot,
+        }
     }
 }
 
@@ -1640,24 +1743,26 @@ impl InlineCache {
         let miss_bb = f.fb.create_block(&[]);
 
         // Fast path: load cached guard, compare
-        let addr = f.fb.stack_addr(self.slot);
-        let cached_guard = f.fb.load(Type::I64, addr, 0);
+        let guard_addr = f.fb.stack_addr(self.guard_slot);
+        let cached_guard = f.fb.load(Type::I64, guard_addr, 0);
         let hit = f.fb.icmp(CmpOp::Eq, cached_guard, guard_key);
         let hit_bb = f.fb.create_block(&[]);
         f.fb.br_if(hit, hit_bb, &[], miss_bb, &[]);
 
         // Cache hit: return cached value
         f.fb.switch_to_block(hit_bb);
-        let cached_val = f.fb.load(Type::I64, addr, 8);
+        let value_addr = f.fb.stack_addr(self.value_slot);
+        let cached_val = f.fb.load(Type::I64, value_addr, 0);
         f.fb.jump(merge_bb, &[cached_val]);
 
         // Cache miss: call slow path, update cache
         f.fb.switch_to_block(miss_bb);
         let computed = slow_path(f);
         // Update cache: store guard + value
-        let addr2 = f.fb.stack_addr(self.slot);
-        f.fb.store(guard_key, addr2, 0);
-        f.fb.store(computed, addr2, 8);
+        let guard_addr = f.fb.stack_addr(self.guard_slot);
+        let value_addr = f.fb.stack_addr(self.value_slot);
+        f.fb.store(guard_key, guard_addr, 0);
+        f.fb.store(computed, value_addr, 0);
         f.fb.jump(merge_bb, &[computed]);
 
         f.fb.switch_to_block(merge_bb);
@@ -1678,9 +1783,9 @@ enum FloatBinOp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynalloc::{PtrPolicy, SemiSpace, alloc_obj};
-    use dynir::dynexec::ContinuationTypes;
     use dynalloc::LowBitPtrPolicy;
+    use dynalloc::{alloc_obj, PtrPolicy, SemiSpace};
+    use dynir::dynexec::ContinuationTypes;
     use dynir::gc_runtime::{GcInterpCtx, GcInterpPolicy};
     use dynir::interp::{ExternCallResult, InterpResult, ModuleInterpreter};
     use dynobj::{Compact, TypeInfo};
@@ -1706,7 +1811,10 @@ mod tests {
         }
     }
 
-    fn make_gc_ctx(obj_types: &[ObjType], heap_size: usize) -> GcInterpCtx<Compact, TestNanBoxPolicy> {
+    fn make_gc_ctx(
+        obj_types: &[ObjType],
+        heap_size: usize,
+    ) -> GcInterpCtx<Compact, TestNanBoxPolicy> {
         let mut type_table: Vec<TypeInfo> = obj_types.iter().map(|obj| *obj.type_info).collect();
         let cont_types = ContinuationTypes::register_into::<Compact>(&mut type_table);
         let heap = SemiSpace::new::<Compact>(heap_size);
@@ -1907,14 +2015,13 @@ mod tests {
         let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
 
         // Declare an object type with two value fields and a varlen values section
-        let pair_ty = dm.obj_type("Pair")
+        let pair_ty = dm
+            .obj_type("Pair")
             .field("car", FieldKind::Value)
             .field("cdr", FieldKind::Value)
             .build();
 
-        let array_ty = dm.obj_type("Array")
-            .varlen_values()
-            .build();
+        let array_ty = dm.obj_type("Array").varlen_values().build();
 
         // Verify TypeInfo was generated correctly
         let pair = dm.get_obj_type(pair_ty);
@@ -1932,7 +2039,8 @@ mod tests {
     fn test_gc_alloc_and_field_access() {
         let mut dm = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
 
-        let upval_ty = dm.obj_type("Upvalue")
+        let upval_ty = dm
+            .obj_type("Upvalue")
             .field("value", FieldKind::Value)
             .build();
 
@@ -1979,9 +2087,7 @@ mod tests {
     fn test_gc_alloc_with_roots_survives_moving_gc() {
         let mut dm = DynModule::new(GcConfig::generational(8192), NanBoxTags::default());
 
-        let pair_ty = dm.obj_type("Pair")
-            .field("value", FieldKind::Value)
-            .build();
+        let pair_ty = dm.obj_type("Pair").field("value", FieldKind::Value).build();
 
         let main = dm.declare_func("main", 0);
 
@@ -2032,9 +2138,7 @@ mod tests {
     fn test_boxed_object_round_trip_after_rooted_gc_alloc() {
         let mut dm = DynModule::new(GcConfig::generational(8192), NanBoxTags::default());
 
-        let pair_ty = dm.obj_type("Pair")
-            .field("value", FieldKind::Value)
-            .build();
+        let pair_ty = dm.obj_type("Pair").field("value", FieldKind::Value).build();
 
         let main = dm.declare_func("main", 0);
 
@@ -2086,9 +2190,7 @@ mod tests {
     fn test_obj_ref_api_survives_rooted_allocation() {
         let mut dm = DynModule::new(GcConfig::generational(8192), NanBoxTags::default());
 
-        let pair_ty = dm.obj_type("Pair")
-            .field("value", FieldKind::Value)
-            .build();
+        let pair_ty = dm.obj_type("Pair").field("value", FieldKind::Value).build();
         let pair = dm.obj_handle(pair_ty);
 
         let main = dm.declare_func("main", 0);

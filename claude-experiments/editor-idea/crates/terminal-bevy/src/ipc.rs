@@ -72,6 +72,10 @@ pub enum IpcRequest {
     /// as a single JSON object then EOF: `{"projects":[{"id":N,
     /// "name":"…","active":bool},…]}`.
     ListProjects,
+    /// Toggle the 3D project-prism ("cube") overview on/off. Unit
+    /// variant, so the wire form is the bare JSON string `"ToggleCube"`.
+    /// Primarily a dev/scripting hook mirroring the Cmd+Shift+C keybind.
+    ToggleCube,
     /// `tbinbox --project NAME --sender X --body "..."` — append a
     /// message to a project's inbox. The receiver writes the message
     /// to `~/.terminal-bevy/inbox/<id>.jsonl`; the running app's

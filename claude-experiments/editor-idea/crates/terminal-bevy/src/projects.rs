@@ -1377,7 +1377,7 @@ pub fn project_for_cwd(cwd: &std::path::Path, projects: &Projects) -> Option<u64
 // ---------- Visibility sync ----------
 
 /// Hide panes whose project is not the active one.
-fn sync_visibility(
+pub fn sync_visibility(
     projects: Res<Projects>,
     mut panes: Query<(&PaneProject, &mut Visibility), With<PaneTag>>,
 ) {

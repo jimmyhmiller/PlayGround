@@ -2,9 +2,9 @@
 //! every pair of top-level forms — and that the resulting program produces
 //! the same output as the non-stressed run.
 
+use dynlang::GcPolicy;
 use microlisp::Engine;
 use microlisp::value::*;
-use dynlang::GcPolicy;
 
 const PROGRAM: &str = r#"
 (defmacro cond clauses
@@ -88,10 +88,7 @@ fn stress_mode_collects_between_every_form() {
     // Sanity: program produced the right derivative for the last form,
     // (deriv '(+ (* x x) (* 3 x)) 'x) = (+ (+ (* x 1) (* 1 x)) (+ (* 3 1) (* 0 x)))
     let pretty = e.print(result);
-    assert_eq!(
-        pretty,
-        "(+ (+ (* x 1) (* 1 x)) (+ (* 3 1) (* 0 x)))"
-    );
+    assert_eq!(pretty, "(+ (+ (* x 1) (* 1 x)) (+ (* 3 1) (* 0 x)))");
 }
 
 #[test]

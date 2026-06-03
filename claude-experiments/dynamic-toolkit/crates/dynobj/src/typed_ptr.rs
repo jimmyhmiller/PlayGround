@@ -69,7 +69,9 @@ pub struct TypedPtr<T> {
 
 // Manual impls — derive would require T: Clone/Copy.
 impl<T> Clone for TypedPtr<T> {
-    fn clone(&self) -> Self { *self }
+    fn clone(&self) -> Self {
+        *self
+    }
 }
 impl<T> Copy for TypedPtr<T> {}
 
@@ -89,7 +91,10 @@ impl<T> TypedPtr<T> {
         }
         let actual = unsafe { read_type_id(ptr, 0) };
         if actual == expected_type_id {
-            Some(Self { ptr, _marker: PhantomData })
+            Some(Self {
+                ptr,
+                _marker: PhantomData,
+            })
         } else {
             None
         }
@@ -107,7 +112,10 @@ impl<T> TypedPtr<T> {
     /// `T` is undefined behavior.
     #[inline]
     pub unsafe fn cast_unchecked(ptr: *const u8) -> Self {
-        Self { ptr, _marker: PhantomData }
+        Self {
+            ptr,
+            _marker: PhantomData,
+        }
     }
 
     /// The underlying raw pointer.

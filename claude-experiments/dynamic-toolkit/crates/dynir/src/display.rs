@@ -108,7 +108,9 @@ impl fmt::Display for Inst {
                 }
                 Ok(())
             }
-            Inst::PushPrompt(prompt, handler) => write!(f, "push_prompt prompt#{} -> {handler}", prompt.0),
+            Inst::PushPrompt(prompt, handler) => {
+                write!(f, "push_prompt prompt#{} -> {handler}", prompt.0)
+            }
             Inst::PopPrompt(prompt) => write!(f, "pop_prompt prompt#{}", prompt.0),
             Inst::PushHandler(handler) => write!(f, "push_handler -> {handler}"),
             Inst::PopHandler => write!(f, "pop_handler"),
@@ -133,8 +135,18 @@ impl fmt::Display for Inst {
             Inst::CallIndirect(callee, args, _) => {
                 write!(f, "call_indirect {callee}({})", fmt_args(args))
             }
-            Inst::InvokeDynamic { receiver, symbol, args, cache_id } => {
-                write!(f, "invoke_dynamic {receiver}.{symbol}({}) [cache={}]", fmt_args(args), cache_id)
+            Inst::InvokeDynamic {
+                receiver,
+                symbol,
+                args,
+                cache_id,
+            } => {
+                write!(
+                    f,
+                    "invoke_dynamic {receiver}.{symbol}({}) [cache={}]",
+                    fmt_args(args),
+                    cache_id
+                )
             }
         }
     }
@@ -225,7 +237,12 @@ impl fmt::Display for Terminator {
                 }
                 Ok(())
             }
-            Terminator::ResumeSlice { slice, args, return_block, return_args } => {
+            Terminator::ResumeSlice {
+                slice,
+                args,
+                return_block,
+                return_args,
+            } => {
                 write!(f, "resume_slice {slice}")?;
                 if !args.is_empty() {
                     write!(f, "({})", fmt_args(args))?;
@@ -245,7 +262,11 @@ impl fmt::Display for Terminator {
             }
             Terminator::Raise(v) => write!(f, "raise {v}"),
             Terminator::Unreachable => write!(f, "unreachable"),
-            Terminator::CaptureSlice { prompt, handler_block, resume_block } => {
+            Terminator::CaptureSlice {
+                prompt,
+                handler_block,
+                resume_block,
+            } => {
                 write!(
                     f,
                     "capture_slice prompt#{} -> handler {handler_block}, resume {resume_block}",

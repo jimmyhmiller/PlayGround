@@ -55,6 +55,15 @@ pub struct Heap {
     /// Global roots (interned symbols, module-level constants, etc.)
     pub globals: AtomicRootSet,
 
+    /// Node-resident `state` bindings: content hash -> index into
+    /// `globals`. Each entry's value (typically an `Atom` pointer) is a GC
+    /// root, kept live and relocated by `globals`'s scan. The map gives
+    /// the language-level `state` primitive its by-identity lookup: a
+    /// hash is installed at most once per heap (idempotent), and every
+    /// `StateRef` resolves through here to the one live cell. Per-heap (not
+    /// process-global) so distinct nodes in one process don't collide.
+    pub state_slots: Mutex<std::collections::HashMap<[u8; 32], usize>>,
+
     /// Permanent extra `RootSource`s registered by the embedder. Scanned
     /// during EVERY collection — including mutator-triggered (alloc-driven)
     /// GC paths that don't take per-call extras. Use this for root sets
@@ -120,6 +129,7 @@ impl Heap {
             from_idx: AtomicUsize::new(0),
             threads: Mutex::new(Vec::new()),
             globals: AtomicRootSet::new(),
+            state_slots: Mutex::new(std::collections::HashMap::new()),
             permanent_extras: Mutex::new(Vec::new()),
             gc_requested: AtomicBool::new(false),
             gc_lock: Mutex::new(()),
@@ -155,6 +165,7 @@ impl Heap {
             from_idx: AtomicUsize::new(0),
             threads: Mutex::new(Vec::new()),
             globals: AtomicRootSet::new(),
+            state_slots: Mutex::new(std::collections::HashMap::new()),
             permanent_extras: Mutex::new(Vec::new()),
             gc_requested: AtomicBool::new(false),
             gc_lock: Mutex::new(()),
@@ -253,6 +264,22 @@ impl Heap {
     /// for verifying `dynamic_add_type` worked.
     pub fn type_table_len(&self) -> usize {
         self.type_table.len()
+    }
+
+    /// Read a heap object's `type_id` from its header. Lets the runtime
+    /// walk a value's shape the same way the GC does (e.g. structural
+    /// hashing/equality of arbitrary values).
+    ///
+    /// # Safety
+    /// `obj` must point to a valid heap object with an initialized header.
+    pub unsafe fn obj_type_id(&self, obj: *const u8) -> u16 {
+        unsafe { read_type_id(obj, self.type_id_offset) }
+    }
+
+    /// `TypeInfo` (layout) for a `type_id`. Pairs with [`obj_type_id`] to
+    /// walk an object's fields by shape.
+    pub fn type_info_by_id(&self, type_id: u16) -> &TypeInfo {
+        &self.type_table[type_id as usize]
     }
 
     /// Check if GC should be triggered on every allocation.

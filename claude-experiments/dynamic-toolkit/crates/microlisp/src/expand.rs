@@ -58,7 +58,9 @@ impl<'a> ExpandCtx<'a> {
             for _ in 0..self.max_iters {
                 let (next, did) = self.expand_one(form.get());
                 form.set(next);
-                if !did { break; }
+                if !did {
+                    break;
+                }
             }
             // Walk subforms (may also trigger GC).
             self.walk_subforms(form.get())
@@ -66,9 +68,13 @@ impl<'a> ExpandCtx<'a> {
     }
 
     fn expand_one(&mut self, form_bits: u64) -> (u64, bool) {
-        if !is_cons(form_bits) { return (form_bits, false); }
+        if !is_cons(form_bits) {
+            return (form_bits, false);
+        }
         let head = car(form_bits);
-        if !is_symbol(head) { return (form_bits, false); }
+        if !is_symbol(head) {
+            return (form_bits, false);
+        }
         let id = as_symbol_id(head);
         let Some(&fref) = self.macro_env.get(&id) else {
             return (form_bits, false);
@@ -78,7 +84,10 @@ impl<'a> ExpandCtx<'a> {
         // hold across the JIT call → must be rooted.
         with_scope(1, |scope| {
             let args = scope.root::<NanBoxTag>(cdr(form_bits));
-            let result = match self.gc.run_jit(self.jit, fref, &[args.get()], self.jit_gc_policy) {
+            let result = match self
+                .gc
+                .run_jit(self.jit, fref, &[args.get()], self.jit_gc_policy)
+            {
                 JitOutcome::Value(v) => v,
                 JitOutcome::Void => NIL,
                 other => panic!("macro fn returned non-value outcome: {other:?}"),
@@ -88,7 +97,9 @@ impl<'a> ExpandCtx<'a> {
     }
 
     fn walk_subforms(&mut self, form_bits: u64) -> u64 {
-        if !is_cons(form_bits) { return form_bits; }
+        if !is_cons(form_bits) {
+            return form_bits;
+        }
         // Snapshot head info BEFORE any GC point.
         let head = car(form_bits);
         let head_name = if is_symbol(head) {
@@ -110,8 +121,12 @@ impl<'a> ExpandCtx<'a> {
     }
 
     fn walk_each(&mut self, form_bits: u64) -> u64 {
-        if is_nil(form_bits) { return form_bits; }
-        if !is_cons(form_bits) { return form_bits; }
+        if is_nil(form_bits) {
+            return form_bits;
+        }
+        if !is_cons(form_bits) {
+            return form_bits;
+        }
         with_scope(4, |scope| {
             let form = scope.root::<NanBoxTag>(form_bits);
             let head_bits = self.expand_walk(car(form.get()));
@@ -186,7 +201,9 @@ impl<'a> ExpandCtx<'a> {
             let mut count: usize = 0;
             loop {
                 let cur = cursor.get();
-                if !is_cons(cur) { break; }
+                if !is_cons(cur) {
+                    break;
+                }
                 let b = car(cur);
                 // Capture name + val form into rooted slots BEFORE the
                 // GC-firing `expand_walk` so they survive the move.
@@ -234,13 +251,20 @@ pub fn quasiquote_rewrite(form: u64, sym: &mut SymbolTable) -> u64 {
     let quote_id = sym.intern("quote");
     let cons_id = sym.intern("cons");
     let append_id = sym.intern("append");
-    rewrite_walk(form, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id)
+    rewrite_walk(
+        form, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id,
+    )
 }
 
 fn rewrite_walk(
-    form: u64, sym: &mut SymbolTable,
-    qq_id: u32, uq_id: u32, uqs_id: u32,
-    quote_id: u32, cons_id: u32, append_id: u32,
+    form: u64,
+    sym: &mut SymbolTable,
+    qq_id: u32,
+    uq_id: u32,
+    uqs_id: u32,
+    quote_id: u32,
+    cons_id: u32,
+    append_id: u32,
 ) -> u64 {
     if !is_cons(form) {
         return form;
@@ -251,14 +275,25 @@ fn rewrite_walk(
         if h == qq_id {
             // `expr — rewrite expr at quasiquote depth 1.
             let inner = car(cdr(form));
-            return rewrite_qq(inner, 1, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id);
+            return rewrite_qq(
+                inner, 1, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id,
+            );
         }
     }
     // Walk children
     let mut out: Vec<u64> = Vec::new();
     let mut p = form;
     while is_cons(p) {
-        out.push(rewrite_walk(car(p), sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id));
+        out.push(rewrite_walk(
+            car(p),
+            sym,
+            qq_id,
+            uq_id,
+            uqs_id,
+            quote_id,
+            cons_id,
+            append_id,
+        ));
         p = cdr(p);
     }
     let tail = if is_nil(p) {
@@ -275,9 +310,15 @@ fn rewrite_walk(
 
 /// Rewrite a quasiquote template at depth `depth` (1 = top-level quasiquote).
 fn rewrite_qq(
-    form: u64, depth: u32, sym: &mut SymbolTable,
-    qq_id: u32, uq_id: u32, uqs_id: u32,
-    quote_id: u32, cons_id: u32, append_id: u32,
+    form: u64,
+    depth: u32,
+    sym: &mut SymbolTable,
+    qq_id: u32,
+    uq_id: u32,
+    uqs_id: u32,
+    quote_id: u32,
+    cons_id: u32,
+    append_id: u32,
 ) -> u64 {
     // Atoms: `(quote atom)
     if !is_cons(form) {
@@ -291,28 +332,68 @@ fn rewrite_qq(
         }
         if h == uq_id {
             let inner = car(cdr(form));
-            let r = rewrite_qq(inner, depth - 1, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id);
-            return list_call(sym, &[
-                cons_compile_time(encode_sym(quote_id), cons_compile_time(encode_sym(uq_id), NIL)),
-                r,
-            ]);
+            let r = rewrite_qq(
+                inner,
+                depth - 1,
+                sym,
+                qq_id,
+                uq_id,
+                uqs_id,
+                quote_id,
+                cons_id,
+                append_id,
+            );
+            return list_call(
+                sym,
+                &[
+                    cons_compile_time(
+                        encode_sym(quote_id),
+                        cons_compile_time(encode_sym(uq_id), NIL),
+                    ),
+                    r,
+                ],
+            );
         }
         if h == qq_id {
             let inner = car(cdr(form));
-            let r = rewrite_qq(inner, depth + 1, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id);
-            return list_call(sym, &[
-                cons_compile_time(encode_sym(quote_id), cons_compile_time(encode_sym(qq_id), NIL)),
-                r,
-            ]);
+            let r = rewrite_qq(
+                inner,
+                depth + 1,
+                sym,
+                qq_id,
+                uq_id,
+                uqs_id,
+                quote_id,
+                cons_id,
+                append_id,
+            );
+            return list_call(
+                sym,
+                &[
+                    cons_compile_time(
+                        encode_sym(quote_id),
+                        cons_compile_time(encode_sym(qq_id), NIL),
+                    ),
+                    r,
+                ],
+            );
         }
     }
-    rewrite_qq_list(form, depth, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id)
+    rewrite_qq_list(
+        form, depth, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id,
+    )
 }
 
 fn rewrite_qq_list(
-    form: u64, depth: u32, sym: &mut SymbolTable,
-    qq_id: u32, uq_id: u32, uqs_id: u32,
-    quote_id: u32, cons_id: u32, append_id: u32,
+    form: u64,
+    depth: u32,
+    sym: &mut SymbolTable,
+    qq_id: u32,
+    uq_id: u32,
+    uqs_id: u32,
+    quote_id: u32,
+    cons_id: u32,
+    append_id: u32,
 ) -> u64 {
     let mut items: Vec<u64> = Vec::new();
     let mut p = form;
@@ -325,7 +406,9 @@ fn rewrite_qq_list(
     let mut result: u64 = if is_nil(raw_tail) {
         cons_compile_time(encode_sym(quote_id), cons_compile_time(NIL, NIL))
     } else {
-        rewrite_qq(raw_tail, depth, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id)
+        rewrite_qq(
+            raw_tail, depth, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id,
+        )
     };
 
     for elem in items.into_iter().rev() {
@@ -343,7 +426,9 @@ fn rewrite_qq_list(
                 }
             }
         }
-        let r = rewrite_qq(elem, depth, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id);
+        let r = rewrite_qq(
+            elem, depth, sym, qq_id, uq_id, uqs_id, quote_id, cons_id, append_id,
+        );
         result = cons_compile_time(
             encode_sym(cons_id),
             cons_compile_time(r, cons_compile_time(result, NIL)),

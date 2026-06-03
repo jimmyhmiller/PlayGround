@@ -340,6 +340,8 @@ fn walk_collect_lambdas(e: &Expr, kb: &mut KnowledgeBase) {
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
         | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => {}
     }
 }
@@ -401,7 +403,9 @@ fn collect_ext_names(e: &Expr, out: &mut HashSet<String>) {
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
         | Expr::TopRef(_)
-        | Expr::SelfRef(_) => {}
+        | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_) => {}
     }
 }
 
@@ -412,6 +416,156 @@ fn collect_ext_names(e: &Expr, out: &mut HashSet<String>) {
 fn record(h: Hash, out: &mut Vec<Hash>, seen: &mut HashSet<Hash>) {
     if seen.insert(h) {
         out.push(h);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Stateful-hash analysis (at() cache soundness)
+// ---------------------------------------------------------------------
+
+/// Compute the set of def + lambda content hashes that, when invoked,
+/// transitively touch a node `state` cell (contain an `Expr::StateRef`
+/// directly, or call a `TopRef` to another stateful hash).
+///
+/// The `at()` server memoizes Call replies by payload bytes, which is
+/// sound ONLY for pure thunks. A thunk whose body reaches a `StateRef`
+/// reads/writes node state and must NOT be cached (else a repeated
+/// identical call would skip its mutation). `serve_one` looks up the
+/// shipped closure's lambda hash in this set and bypasses the cache when
+/// present. Computed over the whole module so transitive `TopRef` chains
+/// resolve; a fixpoint handles recursion cycles.
+pub fn stateful_hashes(
+    defs: &[crate::resolve::ResolvedDef],
+    extra_lambdas: &[(Hash, Expr)],
+) -> HashSet<Hash> {
+    // (hash, body-to-walk) for every def AND every nested lambda.
+    let mut entries: Vec<(Hash, Expr)> = Vec::new();
+    for rd in defs {
+        match &rd.def {
+            Def::Fn { body, .. } => {
+                entries.push((rd.hash, body.clone()));
+                collect_lambda_entries(body, &mut entries);
+            }
+            Def::State { init, .. } => {
+                entries.push((rd.hash, init.clone()));
+                collect_lambda_entries(init, &mut entries);
+            }
+            Def::Struct { .. } | Def::Enum { .. } => {}
+        }
+    }
+    // Standalone lambdas (the code-fetch path ships the entry closure as
+    // an `ItemKind::Lambda`, not embedded in any installed def body).
+    for (h, e) in extra_lambdas {
+        entries.push((*h, e.clone()));
+        if let Expr::Lambda { body, .. } = e {
+            collect_lambda_entries(body, &mut entries);
+        }
+    }
+    let mut set: HashSet<Hash> = HashSet::new();
+    loop {
+        let mut changed = false;
+        for (h, body) in &entries {
+            if !set.contains(h) && expr_is_stateful(body, &set) {
+                set.insert(*h);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    set
+}
+
+/// Gather `(hash, Expr::Lambda)` for every lambda nested anywhere in `e`.
+/// The hash matches the one the lifter/knowledge base assigns
+/// (`Hash::of_bytes(encode_expr(&Expr::Lambda { .. }))`), so it equals the
+/// `code_hash` a shipped closure carries.
+fn collect_lambda_entries(e: &Expr, out: &mut Vec<(Hash, Expr)>) {
+    if let Expr::Lambda { params, body } = e {
+        let lam = Expr::Lambda {
+            params: params.clone(),
+            body: body.clone(),
+        };
+        out.push((Hash::of_bytes(&encode_expr(&lam)), lam));
+    }
+    walk_children(e, &mut |c| collect_lambda_entries(c, out));
+}
+
+/// `true` if `e` reaches a `StateRef` directly or via a `TopRef` already
+/// known to be stateful (per `set`). Recurses into all children including
+/// lambda bodies.
+fn expr_is_stateful(e: &Expr, set: &HashSet<Hash>) -> bool {
+    match e {
+        Expr::StateRef(_) | Expr::StateSelfRef(_) => true,
+        Expr::TopRef(h) => set.contains(h),
+        _ => {
+            let mut found = false;
+            walk_children(e, &mut |c| {
+                if expr_is_stateful(c, set) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
+
+/// Apply `f` to each immediate child expression of `e`.
+fn walk_children(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    match e {
+        Expr::Call(callee, args) => {
+            f(callee);
+            for a in args {
+                f(a);
+            }
+        }
+        Expr::Lambda { body, .. } => f(body),
+        Expr::Let { value, body } => {
+            f(value);
+            f(body);
+        }
+        Expr::Defer { cleanup, body } => {
+            f(cleanup);
+            f(body);
+        }
+        Expr::StructNew { fields, .. } => {
+            for fd in fields {
+                f(fd);
+            }
+        }
+        Expr::Field { base, .. } => f(base),
+        Expr::EnumNew { payload, .. } => {
+            if let Some(p) = payload {
+                f(p);
+            }
+        }
+        Expr::Match { scrutinee, arms } => {
+            f(scrutinee);
+            for arm in arms {
+                f(&arm.body);
+            }
+        }
+        Expr::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            f(cond);
+            f(then_branch);
+            f(else_branch);
+        }
+        Expr::Try { expr, .. } => f(expr),
+        Expr::IntLit(_)
+        | Expr::FloatLit(_)
+        | Expr::BoolLit(_)
+        | Expr::StringLit(_)
+        | Expr::LocalVar(_)
+        | Expr::TopRef(_)
+        | Expr::SelfRef(_)
+        | Expr::StateRef(_)
+        | Expr::StateSelfRef(_)
+        | Expr::BuiltinRef(_) => {}
     }
 }
 
@@ -447,6 +601,10 @@ pub fn walk_def_deps(d: &Def, out: &mut Vec<Hash>, seen: &mut HashSet<Hash>) {
                 }
             }
         }
+        Def::State { ty, init } => {
+            walk_type_deps(ty, out, seen);
+            walk_expr_deps(init, out, seen);
+        }
     }
 }
 
@@ -477,8 +635,11 @@ fn walk_expr_deps(e: &Expr, out: &mut Vec<Hash>, seen: &mut HashSet<Hash>) {
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
         | Expr::SelfRef(_)
+        | Expr::StateSelfRef(_)
         | Expr::BuiltinRef(_) => {}
-        Expr::TopRef(h) => record(*h, out, seen),
+        // A node `state` reference is a dependency: shipping a handler
+        // that reads/swaps a state must also ship the state definition.
+        Expr::TopRef(h) | Expr::StateRef(h) => record(*h, out, seen),
         Expr::Call(callee, args) => {
             walk_expr_deps(callee, out, seen);
             for a in args {

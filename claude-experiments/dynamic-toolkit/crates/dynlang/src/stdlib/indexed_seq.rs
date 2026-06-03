@@ -275,7 +275,8 @@ mod tests {
 
     #[test]
     fn register_captures_layout() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let seq = IndexedSeq::register(&mut dyn_module, "Array");
         let ty = dyn_module.get_obj_type(seq.type_id());
         // type_id matches what the obj_types table assigned.
@@ -293,7 +294,8 @@ mod tests {
 
     #[test]
     fn view_rejects_non_pointer_nanbox() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let seq = IndexedSeq::register(&mut dyn_module, "Array");
         // A raw float NanBox shouldn't match.
         let f_bits = (1.5_f64).to_bits();
@@ -313,7 +315,8 @@ mod tests {
     /// returns the array's NanBox, then read it back via SeqView.
     #[test]
     fn emit_literal_then_view() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let seq = IndexedSeq::register(&mut dyn_module, "Array");
         let main = dyn_module.declare_func("main", 0);
 
@@ -354,7 +357,8 @@ mod tests {
     /// Build a function that returns `length(arr)` as a raw I64.
     #[test]
     fn emit_length_unboxed_returns_raw_i64() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let seq = IndexedSeq::register(&mut dyn_module, "Array");
         let main = dyn_module.declare_func("main", 0);
 
@@ -386,7 +390,8 @@ mod tests {
     /// Build a function that does `arr[1]` and returns the element.
     #[test]
     fn emit_get_returns_element_at_index() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let seq = IndexedSeq::register(&mut dyn_module, "Array");
         let main = dyn_module.declare_func("main", 0);
 
@@ -423,7 +428,8 @@ mod tests {
     /// `length(pushed)` — should be 3.
     #[test]
     fn emit_push_extends_by_one() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         let seq = IndexedSeq::register(&mut dyn_module, "Array");
         let main = dyn_module.declare_func("main", 0);
 

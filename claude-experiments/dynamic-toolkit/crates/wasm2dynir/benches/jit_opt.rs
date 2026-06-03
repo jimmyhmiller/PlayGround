@@ -159,7 +159,10 @@ const NESTED_LOOP_WAT: &str = r#"(module
 
 // ─── Helpers ───────────────────────────────────────────────────────
 
-fn compile_single(wat: &str, config: Option<&OptConfig>) -> (dynlower::JitModule, dynir::ir::FuncRef) {
+fn compile_single(
+    wat: &str,
+    config: Option<&OptConfig>,
+) -> (dynlower::JitModule, dynir::ir::FuncRef) {
     let wasm = wat::parse_str(wat).expect("parse WAT");
     let (mut func, _) = translate_wasm(&wasm).expect("translate");
     if let Some(cfg) = config {
@@ -170,7 +173,10 @@ fn compile_single(wat: &str, config: Option<&OptConfig>) -> (dynlower::JitModule
     (jit, entry)
 }
 
-fn compile_module(wat: &str, config: Option<&OptConfig>) -> (dynlower::JitModule, dynir::ir::FuncRef) {
+fn compile_module(
+    wat: &str,
+    config: Option<&OptConfig>,
+) -> (dynlower::JitModule, dynir::ir::FuncRef) {
     let wasm = wat::parse_str(wat).expect("parse WAT");
     let (mut module, entry) = translate_wasm_module(&wasm).expect("translate");
     if let Some(cfg) = config {
@@ -296,7 +302,10 @@ fn bench_compile_time(c: &mut Criterion) {
     group.finish();
 }
 
-fn compile_single_linear_scan(wat: &str, config: Option<&OptConfig>) -> (dynlower::JitModule, dynir::ir::FuncRef) {
+fn compile_single_linear_scan(
+    wat: &str,
+    config: Option<&OptConfig>,
+) -> (dynlower::JitModule, dynir::ir::FuncRef) {
     let wasm = wat::parse_str(wat).expect("parse WAT");
     let (mut func, _) = translate_wasm(&wasm).expect("translate");
     if let Some(cfg) = config {

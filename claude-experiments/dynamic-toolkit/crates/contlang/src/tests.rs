@@ -71,7 +71,6 @@ fn run_interp_with(
         });
     }
 
-
     // Build the type table. Register the byte-buffer user type first
     // (type_id 0), then the continuation types.
     let byte_type_id: u16 = 0;
@@ -79,17 +78,13 @@ fn run_interp_with(
         .with_varlen_bytes(0)
         .with_type_id(byte_type_id);
     let mut type_table: Vec<TypeInfo> = vec![byte_type];
-    let cont_types =
-        dynexec::ContinuationTypes::register_into::<Compact>(&mut type_table);
+    let cont_types = dynexec::ContinuationTypes::register_into::<Compact>(&mut type_table);
     let heap = dynalloc::SemiSpace::new::<Compact>(heap_size);
     let ctx = GcInterpCtx::<Compact, ContlangPolicy>::new(heap, type_table, cont_types);
     ctx.set_gc_policy(gc_policy);
 
     let entry = lowered.func_refs[entry_name];
-    let mut interp = dynir::interp::ModuleInterpreter::<NanBox, _>::new(
-        &lowered.module,
-        &ctx,
-    );
+    let mut interp = dynir::interp::ModuleInterpreter::<NanBox, _>::new(&lowered.module, &ctx);
     interp.set_cont_ctx(&ctx);
 
     // Bind contlang's built-in heap externs.
@@ -123,16 +118,14 @@ fn run_interp_with(
     });
 
     interp.bind(f_get, move |args| {
-        let p = ContlangPolicy::try_decode_ptr(args[0])
-            .expect("bytes_get: not a heap pointer");
+        let p = ContlangPolicy::try_decode_ptr(args[0]).expect("bytes_get: not a heap pointer");
         let idx = args[1] as usize;
         let byte = unsafe { *p.add(base_offset + idx) };
         ExternCallResult::Value(Some(byte as u64))
     });
 
     interp.bind(f_set, move |args| {
-        let p = ContlangPolicy::try_decode_ptr(args[0])
-            .expect("bytes_set: not a heap pointer");
+        let p = ContlangPolicy::try_decode_ptr(args[0]).expect("bytes_set: not a heap pointer");
         let idx = args[1] as usize;
         let byte = args[2] as u8;
         unsafe {
@@ -142,8 +135,7 @@ fn run_interp_with(
     });
 
     interp.bind(f_len, move |args| {
-        let p = ContlangPolicy::try_decode_ptr(args[0])
-            .expect("bytes_len: not a heap pointer");
+        let p = ContlangPolicy::try_decode_ptr(args[0]).expect("bytes_len: not a heap pointer");
         let len = unsafe { dynobj::read_varlen_count(p, &byte_type) };
         ExternCallResult::Value(Some(len as u64))
     });
@@ -337,7 +329,11 @@ fn multi_frame_capture_gc_forwards_non_top_frame_pointer() {
     let (result, collections) =
         run_interp_with(src, "main", &[], GcInterpPolicy::EveryNAllocs(3), 16 * 1024);
 
-    assert_eq!(result, 77 + 88, "bytes must survive GC across a multi-frame capture");
+    assert_eq!(
+        result,
+        77 + 88,
+        "bytes must survive GC across a multi-frame capture"
+    );
     assert!(
         collections >= 3,
         "GC should have fired during do_capture_after_gc; got {}",
@@ -716,7 +712,11 @@ fn bytes_pointer_survives_gc_through_captured_continuation() {
     let (result, collections) =
         run_interp_with(src, "main", &[], GcInterpPolicy::EveryNAllocs(5), 16 * 1024);
 
-    assert_eq!(result, 77 + 88 + 99 + 11, "bytes must survive GC via the captured continuation");
+    assert_eq!(
+        result,
+        77 + 88 + 99 + 11,
+        "bytes must survive GC via the captured continuation"
+    );
     assert!(
         collections >= 2,
         "auto-gc should have fired during allocate_many; got {}",
@@ -905,7 +905,6 @@ fn capture_abort_resume() {
     assert_eq!(run_interp(src, "main", &[]), 42);
 }
 
-
 #[test]
 fn multi_shot_with_clone() {
     let src = r#"
@@ -1084,18 +1083,14 @@ fn heap_backed_path_actually_allocates() {
     }
 
     let mut type_table: Vec<dynobj::TypeInfo> = Vec::new();
-    let cont_types =
-        dynexec::ContinuationTypes::register_into::<Compact>(&mut type_table);
+    let cont_types = dynexec::ContinuationTypes::register_into::<Compact>(&mut type_table);
     let heap = dynalloc::SemiSpace::new::<Compact>(256 * 1024);
     let ctx = GcInterpCtx::<Compact, ContlangPolicy>::new(heap, type_table, cont_types);
 
     assert_eq!(ctx.from_used(), 0, "heap should start empty");
 
     let entry = lowered.func_refs["main"];
-    let mut interp = dynir::interp::ModuleInterpreter::<NanBox, _>::new(
-        &lowered.module,
-        &ctx,
-    );
+    let mut interp = dynir::interp::ModuleInterpreter::<NanBox, _>::new(&lowered.module, &ctx);
     interp.set_cont_ctx(&ctx);
     let result = interp.run(entry, &[]).unwrap();
     let value = match result {

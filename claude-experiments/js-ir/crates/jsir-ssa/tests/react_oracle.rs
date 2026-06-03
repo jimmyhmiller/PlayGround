@@ -60,23 +60,10 @@ const COMPONENTS: &[&str] = &[
     "function E(props) { const arr = [props.x]; const wrap = {arr: arr, x: props.x}; return <span data={wrap}>{arr}</span>; }",
     "function F(props) { return <div id={props.id} className={props.cls} />; }",
     "function G(props) { const inner = {v: props.v}; const outer = {inner: inner}; return <div d={outer} />; }",
-];
-
-/// Components where React memoizes an *intermediate* object/array whose only
-/// downstream use is a member read or `children` slot of a JSX element (e.g.
-/// `const x = {a: props.a}; return <div>{x.a}</div>` — React caches `x` AND the
-/// `<div>`). After porting PruneNonEscapingScopes (Step 1, escape analysis), we
-/// correctly stop over-memoizing returned bare objects, but we do not yet
-/// re-memoize these intermediate objects: in our lowered IR JSX becomes
-/// `createElement(tag, {…}, children)`, so the intermediate value reaches the
-/// element only through a separate props-object / member-read indirection, and
-/// React's `forceMemoizeScopeDependencies` propagation does not yet thread
-/// through that indirection here. The property-path dependency port + nesting-
-/// aware scope merge (later steps of PHASE_B_REDESIGN) close this. Until then we
-/// under-memoize these (they land in the corpus `react_only` coverage bucket, not
-/// `ours_only`), which is sound — never a miscompile. Tracked here so the gap is
-/// explicit and a regression in the matched set above is still caught.
-const KNOWN_INTERMEDIATE_OBJECT_GAPS: &[&str] = &[
+    // Formerly KNOWN_INTERMEDIATE_OBJECT_GAPS: intermediate objects/arrays whose
+    // only downstream use is a member read or JSX `children` slot. Now matched
+    // exactly (the property-path dependency / intermediate-object memoization
+    // landed), so promoted into the matched set.
     "function A(props) { const x = {a: props.a}; return <div>{x.a}</div>; }",
     "function Foo(props) { const style = {color: props.color}; const data = [props.a, props.b]; return <div style={style}>{data}</div>; }",
     "function B(props) { const a = {x: props.p}; const b = {y: props.p, z: a}; return <li>{b}</li>; }",
@@ -117,19 +104,4 @@ fn matches_react_compiler_structure() {
     eprintln!("react-oracle: {agree}/{total} components matched React's (cache size, scope count)");
     assert!(diffs.is_empty(), "{}", diffs.join("\n\n"));
     assert!(total > 0, "no components were compared");
-
-    // The known-gap set must (a) still compile without panic and (b) still NOT
-    // match React (we under-memoize). If a later step makes one of these match,
-    // this assertion fires so the case is promoted into COMPONENTS rather than
-    // silently lingering in the gap list.
-    for src in KNOWN_INTERMEDIATE_OBJECT_GAPS {
-        let ours = codegen::compile(src)
-            .unwrap_or_else(|e| panic!("known-gap component failed to compile: {e}\n  {src}"));
-        let Some(react) = react_compile(&cli, src) else { continue };
-        assert_ne!(
-            structure(&ours),
-            structure(&react),
-            "known intermediate-object gap now MATCHES React — promote it into COMPONENTS:\n  {src}"
-        );
-    }
 }

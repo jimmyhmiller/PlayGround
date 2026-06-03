@@ -17,7 +17,7 @@ use crate::backend::{
     Arm64Backend, LoweringBackend, MachineFpBinOp, MachineGpBinOp, MachineReg, MachineWordSize,
 };
 use crate::regalloc::{machine_fp, machine_gp};
-use crate::regalloc_bridge::{AArch64Target, DynIRFunction, GP, FP, gp_preg, fp_preg};
+use crate::regalloc_bridge::{AArch64Target, DynIRFunction, FP, GP, fp_preg, gp_preg};
 
 use dynasm::arm64::reloc::Arm64;
 
@@ -150,16 +150,24 @@ impl<'a> BatchEmitter<'a> {
     /// Determine which callee-saved GP registers are used by the allocation.
     fn used_callee_saved(&self) -> Vec<PReg> {
         let callee_saved: &[PReg] = &[
-            PReg(19), PReg(20), PReg(21), PReg(22), PReg(23),
-            PReg(24), PReg(25), PReg(26), PReg(27),
+            PReg(19),
+            PReg(20),
+            PReg(21),
+            PReg(22),
+            PReg(23),
+            PReg(24),
+            PReg(25),
+            PReg(26),
+            PReg(27),
         ];
         let mut used = Vec::new();
         for &preg in callee_saved {
             // Check if any instruction operand or move uses this register
-            let is_used = self.alloc.inst_allocs.values().any(|&p| p == preg)
-                || self.alloc.moves.iter().any(|m| {
-                    m.from == MoveOperand::Reg(preg) || m.to == MoveOperand::Reg(preg)
-                });
+            let is_used =
+                self.alloc.inst_allocs.values().any(|&p| p == preg)
+                    || self.alloc.moves.iter().any(|m| {
+                        m.from == MoveOperand::Reg(preg) || m.to == MoveOperand::Reg(preg)
+                    });
             if is_used {
                 used.push(preg);
             }
@@ -184,7 +192,10 @@ impl<'a> BatchEmitter<'a> {
         for (i, &preg) in callee_saved.iter().enumerate() {
             let offset = callee_save_base + (i as i32) * 8;
             Arm64Backend::emit_store_gp(
-                &mut self.buf, preg_to_machine(preg), machine_gp(29), offset,
+                &mut self.buf,
+                preg_to_machine(preg),
+                machine_gp(29),
+                offset,
                 MachineWordSize::W64,
             );
         }
@@ -204,7 +215,9 @@ impl<'a> BatchEmitter<'a> {
         let num_spills = self.alloc.num_spill_slots;
         let stack_slot_bytes: u32 = self.func.stack_slots.iter().map(|s| s.size).sum();
         let has_invoke_dynamic = self.func.blocks.iter().any(|b| {
-            b.insts.iter().any(|n| matches!(&n.inst, Inst::InvokeDynamic { .. }))
+            b.insts
+                .iter()
+                .any(|n| matches!(&n.inst, Inst::InvokeDynamic { .. }))
         });
         let invoke_scratch_bytes: u32 = if has_invoke_dynamic { 16 } else { 0 };
         let raw_frame = 16 /* FP+LR */ + callee_save_bytes + safepoint_callee_save_bytes
@@ -255,7 +268,10 @@ impl<'a> BatchEmitter<'a> {
     // ── Move emission ─────────────────────────────────────────
 
     fn emit_before_moves(&mut self, inst: InstId) {
-        let moves: Vec<_> = self.alloc.moves.iter()
+        let moves: Vec<_> = self
+            .alloc
+            .moves
+            .iter()
             .filter(|m| m.at == MovePosition::Before(inst))
             .cloned()
             .collect();
@@ -263,7 +279,10 @@ impl<'a> BatchEmitter<'a> {
     }
 
     fn emit_after_moves(&mut self, inst: InstId) {
-        let moves: Vec<_> = self.alloc.moves.iter()
+        let moves: Vec<_> = self
+            .alloc
+            .moves
+            .iter()
             .filter(|m| m.at == MovePosition::After(inst))
             .cloned()
             .collect();
@@ -272,7 +291,10 @@ impl<'a> BatchEmitter<'a> {
 
     fn emit_edge_moves_from(&mut self, from_block: usize) {
         let from = BlockId(from_block as u32);
-        let moves: Vec<_> = self.alloc.moves.iter()
+        let moves: Vec<_> = self
+            .alloc
+            .moves
+            .iter()
             .filter(|m| matches!(&m.at, MovePosition::BlockEdge { from: f, .. } if *f == from))
             .cloned()
             .collect();
@@ -285,7 +307,9 @@ impl<'a> BatchEmitter<'a> {
     /// of another move first, then handle remaining (cycles) via X28 as scratch.
     fn emit_parallel_moves(&mut self, moves: &[InsertedMove]) {
         if moves.len() <= 1 {
-            for m in moves { self.emit_move(m); }
+            for m in moves {
+                self.emit_move(m);
+            }
             return;
         }
 
@@ -298,10 +322,13 @@ impl<'a> BatchEmitter<'a> {
         while progress {
             progress = false;
             for i in 0..moves.len() {
-                if emitted[i] { continue; }
-                let dst_is_source = sources.iter().enumerate().any(|(j, src)| {
-                    !emitted[j] && i != j && *src == moves[i].to
-                });
+                if emitted[i] {
+                    continue;
+                }
+                let dst_is_source = sources
+                    .iter()
+                    .enumerate()
+                    .any(|(j, src)| !emitted[j] && i != j && *src == moves[i].to);
                 if !dst_is_source {
                     self.emit_move(&moves[i]);
                     emitted[i] = true;
@@ -312,7 +339,9 @@ impl<'a> BatchEmitter<'a> {
 
         // Remaining moves form cycles — break with scratch register X28
         for i in 0..moves.len() {
-            if emitted[i] { continue; }
+            if emitted[i] {
+                continue;
+            }
             // Save dst to scratch, emit move, restore from scratch
             // For simplicity, use X28 as scratch (it's reserved)
             let scratch = MoveOperand::Reg(gp_preg(28));
@@ -327,7 +356,9 @@ impl<'a> BatchEmitter<'a> {
             emitted[i] = true;
             // Now emit any move that sources from the original dst
             for j in 0..moves.len() {
-                if emitted[j] { continue; }
+                if emitted[j] {
+                    continue;
+                }
                 if moves[j].from == moves[i].to {
                     // This move's source was clobbered — use scratch instead
                     self.emit_move(&InsertedMove {
@@ -406,17 +437,31 @@ impl<'a> BatchEmitter<'a> {
                 let dst_off = self.spill_offset(*dst_slot);
                 if m.class == GP {
                     Arm64Backend::emit_load_gp(
-                        &mut self.buf, machine_gp(28), machine_gp(29), src_off, MachineWordSize::W64,
+                        &mut self.buf,
+                        machine_gp(28),
+                        machine_gp(29),
+                        src_off,
+                        MachineWordSize::W64,
                     );
                     Arm64Backend::emit_store_gp(
-                        &mut self.buf, machine_gp(28), machine_gp(29), dst_off, MachineWordSize::W64,
+                        &mut self.buf,
+                        machine_gp(28),
+                        machine_gp(29),
+                        dst_off,
+                        MachineWordSize::W64,
                     );
                 } else {
                     Arm64Backend::emit_load_fp(
-                        &mut self.buf, preg_to_machine(fp_preg(0)), machine_gp(29), src_off,
+                        &mut self.buf,
+                        preg_to_machine(fp_preg(0)),
+                        machine_gp(29),
+                        src_off,
                     );
                     Arm64Backend::emit_store_fp(
-                        &mut self.buf, preg_to_machine(fp_preg(0)), machine_gp(29), dst_off,
+                        &mut self.buf,
+                        preg_to_machine(fp_preg(0)),
+                        machine_gp(29),
+                        dst_off,
                     );
                 }
             }
@@ -429,7 +474,11 @@ impl<'a> BatchEmitter<'a> {
                 let offset = self.spill_offset(*slot);
                 Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), *imm);
                 Arm64Backend::emit_store_gp(
-                    &mut self.buf, machine_gp(28), machine_gp(29), offset, MachineWordSize::W64,
+                    &mut self.buf,
+                    machine_gp(28),
+                    machine_gp(29),
+                    offset,
+                    MachineWordSize::W64,
                 );
             }
             (_, MoveOperand::Remat(_)) => {
@@ -444,7 +493,10 @@ impl<'a> BatchEmitter<'a> {
         for (i, &preg) in self.callee_saved_used.iter().enumerate() {
             let offset = callee_save_base + (i as i32) * 8;
             Arm64Backend::emit_load_gp(
-                &mut self.buf, preg_to_machine(preg), machine_gp(29), offset,
+                &mut self.buf,
+                preg_to_machine(preg),
+                machine_gp(29),
+                offset,
                 MachineWordSize::W64,
             );
         }
@@ -520,9 +572,8 @@ impl<'a> BatchEmitter<'a> {
     fn emit_inst(&mut self, inst_id: InstId, node: &InstNode, _block_idx: usize) {
         // Operand 0 is always the def (result) if present.
         // Operands 1+ are uses, in the order defined by compute_inst_operands.
-        let get_def = |alloc: &Allocation| -> PReg {
-            alloc.get(inst_id, 0).expect("missing def allocation")
-        };
+        let get_def =
+            |alloc: &Allocation| -> PReg { alloc.get(inst_id, 0).expect("missing def allocation") };
         let get_use = |alloc: &Allocation, idx: usize| -> PReg {
             alloc.get(inst_id, idx).expect("missing use allocation")
         };
@@ -561,14 +612,24 @@ impl<'a> BatchEmitter<'a> {
                 );
             }
 
-            Inst::Add(_, _) | Inst::Sub(_, _) | Inst::Mul(_, _) |
-            Inst::SDiv(_, _) | Inst::UDiv(_, _) |
-            Inst::And(_, _) | Inst::Or(_, _) | Inst::Xor(_, _) |
-            Inst::Shl(_, _) | Inst::LShr(_, _) | Inst::AShr(_, _) => {
+            Inst::Add(_, _)
+            | Inst::Sub(_, _)
+            | Inst::Mul(_, _)
+            | Inst::SDiv(_, _)
+            | Inst::UDiv(_, _)
+            | Inst::And(_, _)
+            | Inst::Or(_, _)
+            | Inst::Xor(_, _)
+            | Inst::Shl(_, _)
+            | Inst::LShr(_, _)
+            | Inst::AShr(_, _) => {
                 let dst = get_def(&self.alloc);
                 let lhs = get_use(&self.alloc, 1);
                 let rhs = get_use(&self.alloc, 2);
-                let ty = node.value.map(|v| self.func.value_type(v)).unwrap_or(Type::I64);
+                let ty = node
+                    .value
+                    .map(|v| self.func.value_type(v))
+                    .unwrap_or(Type::I64);
                 let size = type_to_word_size(ty);
                 let op = match &node.inst {
                     Inst::Add(_, _) => MachineGpBinOp::Add,
@@ -585,8 +646,11 @@ impl<'a> BatchEmitter<'a> {
                     _ => unreachable!(),
                 };
                 Arm64Backend::emit_gp_binop(
-                    &mut self.buf, op,
-                    preg_to_machine(dst), preg_to_machine(lhs), preg_to_machine(rhs),
+                    &mut self.buf,
+                    op,
+                    preg_to_machine(dst),
+                    preg_to_machine(lhs),
+                    preg_to_machine(rhs),
                     size,
                 );
             }
@@ -603,27 +667,50 @@ impl<'a> BatchEmitter<'a> {
                     _ => unreachable!(),
                 };
                 Arm64Backend::emit_fp_binop(
-                    &mut self.buf, op,
-                    preg_to_machine(dst), preg_to_machine(lhs), preg_to_machine(rhs),
+                    &mut self.buf,
+                    op,
+                    preg_to_machine(dst),
+                    preg_to_machine(lhs),
+                    preg_to_machine(rhs),
                 );
             }
 
             Inst::Neg(_) => {
                 let dst = get_def(&self.alloc);
                 let src = get_use(&self.alloc, 1);
-                let ty = node.value.map(|v| self.func.value_type(v)).unwrap_or(Type::I64);
-                Arm64Backend::emit_gp_neg(&mut self.buf, preg_to_machine(dst), preg_to_machine(src), type_to_word_size(ty));
+                let ty = node
+                    .value
+                    .map(|v| self.func.value_type(v))
+                    .unwrap_or(Type::I64);
+                Arm64Backend::emit_gp_neg(
+                    &mut self.buf,
+                    preg_to_machine(dst),
+                    preg_to_machine(src),
+                    type_to_word_size(ty),
+                );
             }
             Inst::Not(_) => {
                 let dst = get_def(&self.alloc);
                 let src = get_use(&self.alloc, 1);
-                let ty = node.value.map(|v| self.func.value_type(v)).unwrap_or(Type::I64);
-                Arm64Backend::emit_gp_not(&mut self.buf, preg_to_machine(dst), preg_to_machine(src), type_to_word_size(ty));
+                let ty = node
+                    .value
+                    .map(|v| self.func.value_type(v))
+                    .unwrap_or(Type::I64);
+                Arm64Backend::emit_gp_not(
+                    &mut self.buf,
+                    preg_to_machine(dst),
+                    preg_to_machine(src),
+                    type_to_word_size(ty),
+                );
             }
             Inst::FNeg(_) => {
                 let dst = get_def(&self.alloc);
                 let src = get_use(&self.alloc, 1);
-                Arm64Backend::emit_fp_neg(&mut self.buf, preg_to_machine(dst), preg_to_machine(src));
+                Arm64Backend::emit_fp_neg(
+                    &mut self.buf,
+                    preg_to_machine(dst),
+                    preg_to_machine(src),
+                );
             }
 
             Inst::Icmp(op, _, _) => {
@@ -631,8 +718,11 @@ impl<'a> BatchEmitter<'a> {
                 let lhs = get_use(&self.alloc, 1);
                 let rhs = get_use(&self.alloc, 2);
                 Arm64Backend::emit_icmp_set(
-                    &mut self.buf, *op,
-                    preg_to_machine(dst), preg_to_machine(lhs), preg_to_machine(rhs),
+                    &mut self.buf,
+                    *op,
+                    preg_to_machine(dst),
+                    preg_to_machine(lhs),
+                    preg_to_machine(rhs),
                     MachineWordSize::W64,
                 );
             }
@@ -642,8 +732,11 @@ impl<'a> BatchEmitter<'a> {
                 let lhs = get_use(&self.alloc, 1);
                 let rhs = get_use(&self.alloc, 2);
                 Arm64Backend::emit_fcmp_set(
-                    &mut self.buf, *op,
-                    preg_to_machine(dst), preg_to_machine(lhs), preg_to_machine(rhs),
+                    &mut self.buf,
+                    *op,
+                    preg_to_machine(dst),
+                    preg_to_machine(lhs),
+                    preg_to_machine(rhs),
                 );
             }
 
@@ -653,12 +746,16 @@ impl<'a> BatchEmitter<'a> {
                 if *ty == Type::F64 {
                     Arm64Backend::emit_load_fp(
                         &mut self.buf,
-                        preg_to_machine(dst), preg_to_machine(base), *offset,
+                        preg_to_machine(dst),
+                        preg_to_machine(base),
+                        *offset,
                     );
                 } else {
                     Arm64Backend::emit_load_gp(
                         &mut self.buf,
-                        preg_to_machine(dst), preg_to_machine(base), *offset,
+                        preg_to_machine(dst),
+                        preg_to_machine(base),
+                        *offset,
                         type_to_word_size(*ty),
                     );
                 }
@@ -671,7 +768,9 @@ impl<'a> BatchEmitter<'a> {
                 // Determine if float store by checking value type
                 Arm64Backend::emit_store_gp(
                     &mut self.buf,
-                    preg_to_machine(val), preg_to_machine(addr), *offset,
+                    preg_to_machine(val),
+                    preg_to_machine(addr),
+                    *offset,
                     MachineWordSize::W64,
                 );
             }
@@ -683,23 +782,39 @@ impl<'a> BatchEmitter<'a> {
                 // Use ADD/SUB depending on sign
                 if slot_offset >= 0 {
                     Arm64Backend::emit_gp_binop(
-                        &mut self.buf, MachineGpBinOp::Add,
-                        preg_to_machine(dst), machine_gp(29),
+                        &mut self.buf,
+                        MachineGpBinOp::Add,
+                        preg_to_machine(dst),
+                        machine_gp(29),
                         machine_gp(29), // will be overridden by immediate
                         MachineWordSize::W64,
                     );
                     // Actually, we need add-immediate. Use mov_imm + add for now.
-                    Arm64Backend::emit_mov_imm(&mut self.buf, preg_to_machine(dst), slot_offset as u64);
+                    Arm64Backend::emit_mov_imm(
+                        &mut self.buf,
+                        preg_to_machine(dst),
+                        slot_offset as u64,
+                    );
                     Arm64Backend::emit_gp_binop(
-                        &mut self.buf, MachineGpBinOp::Add,
-                        preg_to_machine(dst), machine_gp(29), preg_to_machine(dst),
+                        &mut self.buf,
+                        MachineGpBinOp::Add,
+                        preg_to_machine(dst),
+                        machine_gp(29),
+                        preg_to_machine(dst),
                         MachineWordSize::W64,
                     );
                 } else {
-                    Arm64Backend::emit_mov_imm(&mut self.buf, preg_to_machine(dst), (-slot_offset) as u64);
+                    Arm64Backend::emit_mov_imm(
+                        &mut self.buf,
+                        preg_to_machine(dst),
+                        (-slot_offset) as u64,
+                    );
                     Arm64Backend::emit_gp_binop(
-                        &mut self.buf, MachineGpBinOp::Sub,
-                        preg_to_machine(dst), machine_gp(29), preg_to_machine(dst),
+                        &mut self.buf,
+                        MachineGpBinOp::Sub,
+                        preg_to_machine(dst),
+                        machine_gp(29),
+                        preg_to_machine(dst),
                         MachineWordSize::W64,
                     );
                 }
@@ -708,16 +823,28 @@ impl<'a> BatchEmitter<'a> {
             Inst::Bitcast(src_v, _) => {
                 let dst = get_def(&self.alloc);
                 let src = get_use(&self.alloc, 1);
-                let dst_ty = node.value.map(|v| self.func.value_type(v)).unwrap_or(Type::I64);
+                let dst_ty = node
+                    .value
+                    .map(|v| self.func.value_type(v))
+                    .unwrap_or(Type::I64);
                 let src_ty = self.func.value_type(*src_v);
                 match (src_ty == Type::F64, dst_ty == Type::F64) {
                     (false, true) => Arm64Backend::emit_gp_to_fp_move(
-                        &mut self.buf, preg_to_machine(dst), preg_to_machine(src)),
+                        &mut self.buf,
+                        preg_to_machine(dst),
+                        preg_to_machine(src),
+                    ),
                     (true, false) => Arm64Backend::emit_fp_to_gp_move(
-                        &mut self.buf, preg_to_machine(dst), preg_to_machine(src)),
+                        &mut self.buf,
+                        preg_to_machine(dst),
+                        preg_to_machine(src),
+                    ),
                     // Same register class (GP→GP for I64↔GcPtr↔Ptr, or FP→FP) — just a move.
                     _ => Arm64Backend::emit_gp_move(
-                        &mut self.buf, preg_to_machine(dst), preg_to_machine(src)),
+                        &mut self.buf,
+                        preg_to_machine(dst),
+                        preg_to_machine(src),
+                    ),
                 }
             }
 
@@ -725,7 +852,11 @@ impl<'a> BatchEmitter<'a> {
                 let dst = get_def(&self.alloc);
                 let src = get_use(&self.alloc, 1);
                 // For now, just mov (most conversions between i8/i32/i64 are trivial on arm64)
-                Arm64Backend::emit_gp_move(&mut self.buf, preg_to_machine(dst), preg_to_machine(src));
+                Arm64Backend::emit_gp_move(
+                    &mut self.buf,
+                    preg_to_machine(dst),
+                    preg_to_machine(src),
+                );
             }
 
             Inst::Select(_, _, _) => {
@@ -735,8 +866,10 @@ impl<'a> BatchEmitter<'a> {
                 let if_false = get_use(&self.alloc, 3);
                 Arm64Backend::emit_gp_select(
                     &mut self.buf,
-                    preg_to_machine(dst), preg_to_machine(cond),
-                    preg_to_machine(if_true), preg_to_machine(if_false),
+                    preg_to_machine(dst),
+                    preg_to_machine(cond),
+                    preg_to_machine(if_true),
+                    preg_to_machine(if_false),
                     MachineWordSize::W64,
                 );
             }
@@ -746,8 +879,10 @@ impl<'a> BatchEmitter<'a> {
                 let src = get_use(&self.alloc, 1);
                 <Arm64Backend as LoweringBackend>::emit_extract_payload(
                     &mut self.buf,
-                    preg_to_machine(dst), preg_to_machine(src),
-                    self.tags.has_unboxed_float, self.tags.payload_bits,
+                    preg_to_machine(dst),
+                    preg_to_machine(src),
+                    self.tags.has_unboxed_float,
+                    self.tags.payload_bits,
                 );
             }
 
@@ -761,9 +896,12 @@ impl<'a> BatchEmitter<'a> {
                 };
                 <Arm64Backend as LoweringBackend>::emit_is_tag(
                     &mut self.buf,
-                    preg_to_machine(dst), preg_to_machine(src),
-                    self.tags.has_unboxed_float, self.tags.payload_bits,
-                    self.tags.tag_count as u64 - 1, expected,
+                    preg_to_machine(dst),
+                    preg_to_machine(src),
+                    self.tags.has_unboxed_float,
+                    self.tags.payload_bits,
+                    self.tags.tag_count as u64 - 1,
+                    expected,
                 );
             }
 
@@ -772,9 +910,12 @@ impl<'a> BatchEmitter<'a> {
                 let payload = get_use(&self.alloc, 1);
                 <Arm64Backend as LoweringBackend>::emit_make_tagged(
                     &mut self.buf,
-                    preg_to_machine(dst), preg_to_machine(payload),
-                    self.tags.has_unboxed_float, self.tags.payload_bits,
-                    (self.tags.encode_tagged)(*tag, 0), *tag as u64,
+                    preg_to_machine(dst),
+                    preg_to_machine(payload),
+                    self.tags.has_unboxed_float,
+                    self.tags.payload_bits,
+                    (self.tags.encode_tagged)(*tag, 0),
+                    *tag as u64,
                 );
             }
 
@@ -783,8 +924,10 @@ impl<'a> BatchEmitter<'a> {
                 let src = get_use(&self.alloc, 1);
                 <Arm64Backend as LoweringBackend>::emit_tag_of(
                     &mut self.buf,
-                    preg_to_machine(dst), preg_to_machine(src),
-                    self.tags.has_unboxed_float, self.tags.payload_bits,
+                    preg_to_machine(dst),
+                    preg_to_machine(src),
+                    self.tags.has_unboxed_float,
+                    self.tags.payload_bits,
                     self.tags.tag_count as u64 - 1,
                 );
             }
@@ -807,8 +950,16 @@ impl<'a> BatchEmitter<'a> {
                 todo!("Overflow/Guard in batch lowerer");
             }
 
-            Inst::InvokeDynamic { receiver, symbol, args, cache_id } => {
-                let def_preg = self.alloc.get(inst_id, 0).expect("missing InvokeDynamic def");
+            Inst::InvokeDynamic {
+                receiver,
+                symbol,
+                args,
+                cache_id,
+            } => {
+                let def_preg = self
+                    .alloc
+                    .get(inst_id, 0)
+                    .expect("missing InvokeDynamic def");
                 let recv_preg = self.alloc.get(inst_id, 1).expect("missing receiver alloc");
 
                 if self.ic_base == 0 || self.slow_invoke == 0 {
@@ -822,26 +973,54 @@ impl<'a> BatchEmitter<'a> {
 
                     // Scratch stack area: use frame space past all spill slots + stack slots.
                     // Two scratch slots for saving receiver and closure across calls.
-                    let stack_slots_bytes: i32 = self.func.stack_slots.iter().map(|s| s.size as i32).sum();
-                    let scratch_base = self.spill_base_offset + (self.alloc.num_spill_slots as i32) * 8 + stack_slots_bytes;
-                    let recv_save = scratch_base;        // FP + scratch_base
-                    let closure_save = scratch_base + 8;  // FP + scratch_base + 8
+                    let stack_slots_bytes: i32 =
+                        self.func.stack_slots.iter().map(|s| s.size as i32).sum();
+                    let scratch_base = self.spill_base_offset
+                        + (self.alloc.num_spill_slots as i32) * 8
+                        + stack_slots_bytes;
+                    let recv_save = scratch_base; // FP + scratch_base
+                    let closure_save = scratch_base + 8; // FP + scratch_base + 8
 
                     // Save receiver to stack (it will be clobbered by calls)
                     Arm64Backend::emit_store_gp(
-                        &mut self.buf, preg_to_machine(recv_preg), machine_gp(29), recv_save, MachineWordSize::W64,
+                        &mut self.buf,
+                        preg_to_machine(recv_preg),
+                        machine_gp(29),
+                        recv_save,
+                        MachineWordSize::W64,
                     );
 
                     // Call invoke_fast(receiver, symbol_id, num_args)
                     // receiver is already in recv_preg. The Before moves put it in X0 (FixedReg).
                     // But we also need to set X1 and X2.
-                    Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(0), preg_to_machine(recv_preg));
-                    Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(1), symbol.as_u32() as u64);
+                    Arm64Backend::emit_gp_move(
+                        &mut self.buf,
+                        machine_gp(0),
+                        preg_to_machine(recv_preg),
+                    );
+                    Arm64Backend::emit_mov_imm(
+                        &mut self.buf,
+                        machine_gp(1),
+                        symbol.as_u32() as u64,
+                    );
                     Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(2), args.len() as u64);
-                    if let Some(idx) = self.func.extern_funcs.iter().position(|ef| ef.name == "lox_invoke_fast") {
-                        Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(27), self.call_table_base);
+                    if let Some(idx) = self
+                        .func
+                        .extern_funcs
+                        .iter()
+                        .position(|ef| ef.name == "lox_invoke_fast")
+                    {
+                        Arm64Backend::emit_mov_imm(
+                            &mut self.buf,
+                            machine_gp(27),
+                            self.call_table_base,
+                        );
                         Arm64Backend::emit_load_gp(
-                            &mut self.buf, machine_gp(28), machine_gp(27), (idx * 8) as i32, MachineWordSize::W64,
+                            &mut self.buf,
+                            machine_gp(28),
+                            machine_gp(27),
+                            (idx * 8) as i32,
+                            MachineWordSize::W64,
                         );
                         Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
                         // Post-BLR safepoint record: GC could fire inside
@@ -851,14 +1030,31 @@ impl<'a> BatchEmitter<'a> {
                     }
                     // X0 = closure. Save it.
                     Arm64Backend::emit_store_gp(
-                        &mut self.buf, machine_gp(0), machine_gp(29), closure_save, MachineWordSize::W64,
+                        &mut self.buf,
+                        machine_gp(0),
+                        machine_gp(29),
+                        closure_save,
+                        MachineWordSize::W64,
                     );
 
                     // Call invoke_func_ptr(closure) — X0 still has closure
-                    if let Some(idx) = self.func.extern_funcs.iter().position(|ef| ef.name == "lox_invoke_func_ptr") {
-                        Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(27), self.call_table_base);
+                    if let Some(idx) = self
+                        .func
+                        .extern_funcs
+                        .iter()
+                        .position(|ef| ef.name == "lox_invoke_func_ptr")
+                    {
+                        Arm64Backend::emit_mov_imm(
+                            &mut self.buf,
+                            machine_gp(27),
+                            self.call_table_base,
+                        );
                         Arm64Backend::emit_load_gp(
-                            &mut self.buf, machine_gp(28), machine_gp(27), (idx * 8) as i32, MachineWordSize::W64,
+                            &mut self.buf,
+                            machine_gp(28),
+                            machine_gp(27),
+                            (idx * 8) as i32,
+                            MachineWordSize::W64,
                         );
                         Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
                         // Pure load on closure object — shouldn't allocate
@@ -870,17 +1066,27 @@ impl<'a> BatchEmitter<'a> {
                     Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(28), machine_gp(0));
                     // Reload closure → X0
                     Arm64Backend::emit_load_gp(
-                        &mut self.buf, machine_gp(0), machine_gp(29), closure_save, MachineWordSize::W64,
+                        &mut self.buf,
+                        machine_gp(0),
+                        machine_gp(29),
+                        closure_save,
+                        MachineWordSize::W64,
                     );
                     // Reload receiver → X1
                     Arm64Backend::emit_load_gp(
-                        &mut self.buf, machine_gp(1), machine_gp(29), recv_save, MachineWordSize::W64,
+                        &mut self.buf,
+                        machine_gp(1),
+                        machine_gp(29),
+                        recv_save,
+                        MachineWordSize::W64,
                     );
                     // User args → X2+
                     for (i, &_arg) in args.iter().enumerate() {
                         let arg_preg = self.alloc.get(inst_id, 2 + i).unwrap_or(gp_preg(0));
                         Arm64Backend::emit_gp_move(
-                            &mut self.buf, machine_gp((i + 2) as u8), preg_to_machine(arg_preg),
+                            &mut self.buf,
+                            machine_gp((i + 2) as u8),
+                            preg_to_machine(arg_preg),
                         );
                     }
                     // Call the resolved func_ptr
@@ -890,160 +1096,215 @@ impl<'a> BatchEmitter<'a> {
                     self.record_call_return_safepoint(inst_id);
                     // Result in X0
                     if def_preg != gp_preg(0) {
-                        Arm64Backend::emit_gp_move(&mut self.buf, preg_to_machine(def_preg), machine_gp(0));
+                        Arm64Backend::emit_gp_move(
+                            &mut self.buf,
+                            preg_to_machine(def_preg),
+                            machine_gp(0),
+                        );
                     }
                 } else {
-                // Inline-cached dynamic dispatch.
-                //
-                // Fast path (~7 instructions):
-                //   1. Load receiver's class from instance header
-                //   2. Compare against cached class_id in IC entry
-                //   3. On match: load cached closure + func_ptr, call directly
-                //
-                // Slow path:
-                //   Call extern to do full lookup, update IC, then call result
+                    // Inline-cached dynamic dispatch.
+                    //
+                    // Fast path (~7 instructions):
+                    //   1. Load receiver's class from instance header
+                    //   2. Compare against cached class_id in IC entry
+                    //   3. On match: load cached closure + func_ptr, call directly
+                    //
+                    // Slow path:
+                    //   Call extern to do full lookup, update IC, then call result
 
-                // IC entry is 24 bytes: [cached_class_id: u64, cached_value: u64, cached_func_ptr: u64]
-                let ic_offset = (*cache_id as i64) * 24;
+                    // IC entry is 24 bytes: [cached_class_id: u64, cached_value: u64, cached_func_ptr: u64]
+                    let ic_offset = (*cache_id as i64) * 24;
 
-                let hit_label = self.buf.create_label();
-                let miss_label = self.buf.create_label();
-                let done_label = self.buf.create_label();
+                    let hit_label = self.buf.create_label();
+                    let miss_label = self.buf.create_label();
+                    let done_label = self.buf.create_label();
 
-                // ── Fast path: check inline cache ──
+                    // ── Fast path: check inline cache ──
 
-                // Load receiver's class: extract pointer, load class field
-                // receiver is NaN-boxed, extract payload (lower 48 bits)
-                Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), 0x0000_FFFF_FFFF_FFFF);
-                Arm64Backend::emit_gp_binop(
-                    &mut self.buf, MachineGpBinOp::And,
-                    machine_gp(28), preg_to_machine(recv_preg), machine_gp(28),
-                    MachineWordSize::W64,
-                );
-                // X28 = raw pointer to instance object
-                // Load class field (a NaN-boxed value at known offset)
-                Arm64Backend::emit_load_gp(
-                    &mut self.buf, machine_gp(0), machine_gp(28),
-                    self.instance_class_offset,
-                    MachineWordSize::W64,
-                );
-                // X0 = instance's class (NaN-boxed)
-
-                // Load IC entry's cached_class_id
-                Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), self.ic_base);
-                if ic_offset != 0 {
-                    Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(1), ic_offset as u64);
+                    // Load receiver's class: extract pointer, load class field
+                    // receiver is NaN-boxed, extract payload (lower 48 bits)
+                    Arm64Backend::emit_mov_imm(
+                        &mut self.buf,
+                        machine_gp(28),
+                        0x0000_FFFF_FFFF_FFFF,
+                    );
                     Arm64Backend::emit_gp_binop(
-                        &mut self.buf, MachineGpBinOp::Add,
-                        machine_gp(28), machine_gp(28), machine_gp(1),
+                        &mut self.buf,
+                        MachineGpBinOp::And,
+                        machine_gp(28),
+                        preg_to_machine(recv_preg),
+                        machine_gp(28),
                         MachineWordSize::W64,
                     );
-                }
-                // X28 = pointer to IC entry
-                Arm64Backend::emit_load_gp(
-                    &mut self.buf, machine_gp(1), machine_gp(28), 0,
-                    MachineWordSize::W64,
-                );
-                // X1 = cached_class_id
+                    // X28 = raw pointer to instance object
+                    // Load class field (a NaN-boxed value at known offset)
+                    Arm64Backend::emit_load_gp(
+                        &mut self.buf,
+                        machine_gp(0),
+                        machine_gp(28),
+                        self.instance_class_offset,
+                        MachineWordSize::W64,
+                    );
+                    // X0 = instance's class (NaN-boxed)
 
-                // Compare class with cached
-                Arm64Backend::emit_icmp_set(
-                    &mut self.buf, dynir::ir::CmpOp::Eq,
-                    machine_gp(2), machine_gp(0), machine_gp(1),
-                    MachineWordSize::W64,
-                );
-                Arm64Backend::emit_cbnz_to_label(&mut self.buf, machine_gp(2), hit_label);
-                Arm64Backend::emit_branch_to_label(&mut self.buf, miss_label);
-
-                // ── Cache hit: load closure + func_ptr, call directly ──
-                self.buf.bind_label(hit_label);
-                // Load cached_value (closure) at IC+8
-                Arm64Backend::emit_load_gp(
-                    &mut self.buf, machine_gp(0), machine_gp(28), 8,
-                    MachineWordSize::W64,
-                );
-                // Load cached_func_ptr at IC+16
-                Arm64Backend::emit_load_gp(
-                    &mut self.buf, machine_gp(28), machine_gp(28), 16,
-                    MachineWordSize::W64,
-                );
-                // Set up call args: X0=closure (already), X1=receiver, X2..=args
-                // Move receiver to X1
-                Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(1), preg_to_machine(recv_preg));
-                // Move user args to X2+
-                for (i, &arg) in args.iter().enumerate() {
-                    let arg_preg = self.alloc.get(inst_id, 2 + i).unwrap_or(gp_preg(0));
-                    if arg_preg != gp_preg((i + 2) as u8) {
-                        Arm64Backend::emit_gp_move(
+                    // Load IC entry's cached_class_id
+                    Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), self.ic_base);
+                    if ic_offset != 0 {
+                        Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(1), ic_offset as u64);
+                        Arm64Backend::emit_gp_binop(
                             &mut self.buf,
-                            machine_gp((i + 2) as u8),
-                            preg_to_machine(arg_preg),
+                            MachineGpBinOp::Add,
+                            machine_gp(28),
+                            machine_gp(28),
+                            machine_gp(1),
+                            MachineWordSize::W64,
                         );
                     }
-                }
-                // Call cached func_ptr
-                Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
-                // Post-BLR safepoint record: cached method body can
-                // allocate freely; GC may fire deep inside.
-                self.record_call_return_safepoint(inst_id);
-                // Result in X0
-                Arm64Backend::emit_branch_to_label(&mut self.buf, done_label);
+                    // X28 = pointer to IC entry
+                    Arm64Backend::emit_load_gp(
+                        &mut self.buf,
+                        machine_gp(1),
+                        machine_gp(28),
+                        0,
+                        MachineWordSize::W64,
+                    );
+                    // X1 = cached_class_id
 
-                // ── Cache miss: call slow path extern ──
-                self.buf.bind_label(miss_label);
-                // slow_invoke(receiver, symbol_id, num_args, ic_entry_ptr)
-                // X0 = receiver (already preg_to_machine(recv_preg))
-                Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(0), preg_to_machine(recv_preg));
-                Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(1), symbol.as_u32() as u64);
-                Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(2), args.len() as u64);
-                // IC entry ptr = ic_base + cache_id * 24
-                Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(3), self.ic_base.wrapping_add(ic_offset as u64));
-                // Call slow lookup
-                Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), self.slow_invoke);
-                Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
-                // Post-BLR safepoint record: slow_invoke may allocate
-                // (e.g. promoting a method to a bound closure when filling
-                // the IC entry).
-                self.record_call_return_safepoint(inst_id);
-                // slow_invoke returned func_ptr in X0, closure is in IC entry (already updated)
-                // Reload closure from IC entry
-                Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), self.ic_base.wrapping_add(ic_offset as u64));
-                let func_ptr_reg = machine_gp(3);
-                Arm64Backend::emit_gp_move(&mut self.buf, func_ptr_reg, machine_gp(0));
-                // Load closure
-                Arm64Backend::emit_load_gp(
-                    &mut self.buf, machine_gp(0), machine_gp(28), 8,
-                    MachineWordSize::W64,
-                );
-                // Set up args: X0=closure, X1=receiver, X2..=user args
-                Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(1), preg_to_machine(recv_preg));
-                for (i, &arg) in args.iter().enumerate() {
-                    let arg_preg = self.alloc.get(inst_id, 2 + i).unwrap_or(gp_preg(0));
-                    if arg_preg != gp_preg((i + 2) as u8) {
-                        Arm64Backend::emit_gp_move(
-                            &mut self.buf,
-                            machine_gp((i + 2) as u8),
-                            preg_to_machine(arg_preg),
-                        );
-                    }
-                }
-                // Call the resolved func_ptr
-                Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(28), func_ptr_reg);
-                Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
-                // Post-BLR safepoint record: user closure body can
-                // allocate freely; GC may fire deep inside.
-                self.record_call_return_safepoint(inst_id);
+                    // Compare class with cached
+                    Arm64Backend::emit_icmp_set(
+                        &mut self.buf,
+                        dynir::ir::CmpOp::Eq,
+                        machine_gp(2),
+                        machine_gp(0),
+                        machine_gp(1),
+                        MachineWordSize::W64,
+                    );
+                    Arm64Backend::emit_cbnz_to_label(&mut self.buf, machine_gp(2), hit_label);
+                    Arm64Backend::emit_branch_to_label(&mut self.buf, miss_label);
 
-                // ── Done ──
-                self.buf.bind_label(done_label);
-                // Result is in X0 → move to def register
-                if def_preg != gp_preg(0) {
+                    // ── Cache hit: load closure + func_ptr, call directly ──
+                    self.buf.bind_label(hit_label);
+                    // Load cached_value (closure) at IC+8
+                    Arm64Backend::emit_load_gp(
+                        &mut self.buf,
+                        machine_gp(0),
+                        machine_gp(28),
+                        8,
+                        MachineWordSize::W64,
+                    );
+                    // Load cached_func_ptr at IC+16
+                    Arm64Backend::emit_load_gp(
+                        &mut self.buf,
+                        machine_gp(28),
+                        machine_gp(28),
+                        16,
+                        MachineWordSize::W64,
+                    );
+                    // Set up call args: X0=closure (already), X1=receiver, X2..=args
+                    // Move receiver to X1
                     Arm64Backend::emit_gp_move(
                         &mut self.buf,
-                        preg_to_machine(def_preg),
-                        machine_gp(0),
+                        machine_gp(1),
+                        preg_to_machine(recv_preg),
                     );
-                }
+                    // Move user args to X2+
+                    for (i, &arg) in args.iter().enumerate() {
+                        let arg_preg = self.alloc.get(inst_id, 2 + i).unwrap_or(gp_preg(0));
+                        if arg_preg != gp_preg((i + 2) as u8) {
+                            Arm64Backend::emit_gp_move(
+                                &mut self.buf,
+                                machine_gp((i + 2) as u8),
+                                preg_to_machine(arg_preg),
+                            );
+                        }
+                    }
+                    // Call cached func_ptr
+                    Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
+                    // Post-BLR safepoint record: cached method body can
+                    // allocate freely; GC may fire deep inside.
+                    self.record_call_return_safepoint(inst_id);
+                    // Result in X0
+                    Arm64Backend::emit_branch_to_label(&mut self.buf, done_label);
+
+                    // ── Cache miss: call slow path extern ──
+                    self.buf.bind_label(miss_label);
+                    // slow_invoke(receiver, symbol_id, num_args, ic_entry_ptr)
+                    // X0 = receiver (already preg_to_machine(recv_preg))
+                    Arm64Backend::emit_gp_move(
+                        &mut self.buf,
+                        machine_gp(0),
+                        preg_to_machine(recv_preg),
+                    );
+                    Arm64Backend::emit_mov_imm(
+                        &mut self.buf,
+                        machine_gp(1),
+                        symbol.as_u32() as u64,
+                    );
+                    Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(2), args.len() as u64);
+                    // IC entry ptr = ic_base + cache_id * 24
+                    Arm64Backend::emit_mov_imm(
+                        &mut self.buf,
+                        machine_gp(3),
+                        self.ic_base.wrapping_add(ic_offset as u64),
+                    );
+                    // Call slow lookup
+                    Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), self.slow_invoke);
+                    Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
+                    // Post-BLR safepoint record: slow_invoke may allocate
+                    // (e.g. promoting a method to a bound closure when filling
+                    // the IC entry).
+                    self.record_call_return_safepoint(inst_id);
+                    // slow_invoke returned func_ptr in X0, closure is in IC entry (already updated)
+                    // Reload closure from IC entry
+                    Arm64Backend::emit_mov_imm(
+                        &mut self.buf,
+                        machine_gp(28),
+                        self.ic_base.wrapping_add(ic_offset as u64),
+                    );
+                    let func_ptr_reg = machine_gp(3);
+                    Arm64Backend::emit_gp_move(&mut self.buf, func_ptr_reg, machine_gp(0));
+                    // Load closure
+                    Arm64Backend::emit_load_gp(
+                        &mut self.buf,
+                        machine_gp(0),
+                        machine_gp(28),
+                        8,
+                        MachineWordSize::W64,
+                    );
+                    // Set up args: X0=closure, X1=receiver, X2..=user args
+                    Arm64Backend::emit_gp_move(
+                        &mut self.buf,
+                        machine_gp(1),
+                        preg_to_machine(recv_preg),
+                    );
+                    for (i, &arg) in args.iter().enumerate() {
+                        let arg_preg = self.alloc.get(inst_id, 2 + i).unwrap_or(gp_preg(0));
+                        if arg_preg != gp_preg((i + 2) as u8) {
+                            Arm64Backend::emit_gp_move(
+                                &mut self.buf,
+                                machine_gp((i + 2) as u8),
+                                preg_to_machine(arg_preg),
+                            );
+                        }
+                    }
+                    // Call the resolved func_ptr
+                    Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(28), func_ptr_reg);
+                    Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
+                    // Post-BLR safepoint record: user closure body can
+                    // allocate freely; GC may fire deep inside.
+                    self.record_call_return_safepoint(inst_id);
+
+                    // ── Done ──
+                    self.buf.bind_label(done_label);
+                    // Result is in X0 → move to def register
+                    if def_preg != gp_preg(0) {
+                        Arm64Backend::emit_gp_move(
+                            &mut self.buf,
+                            preg_to_machine(def_preg),
+                            machine_gp(0),
+                        );
+                    }
                 } // end else (IC enabled)
                 // Each inner BLR inside this InvokeDynamic body has its
                 // own post-call SafepointRecord above (one per BLR), so
@@ -1052,9 +1313,12 @@ impl<'a> BatchEmitter<'a> {
                 // here — the saved_lr never lands at this point.
             }
 
-            Inst::PushPrompt(_, _) | Inst::PopPrompt(_) |
-            Inst::PushHandler(_) | Inst::PopHandler |
-            Inst::CaptureSlice(_, _) | Inst::CloneSlice(_) => {
+            Inst::PushPrompt(_, _)
+            | Inst::PopPrompt(_)
+            | Inst::PushHandler(_)
+            | Inst::PopHandler
+            | Inst::CaptureSlice(_, _)
+            | Inst::CloneSlice(_) => {
                 todo!("Prompt/Slice/Handler operations in batch lowerer");
             }
 
@@ -1078,7 +1342,11 @@ impl<'a> BatchEmitter<'a> {
 
                     // Call handler: X0 = FP, X1 = safepoint_index
                     Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(0), machine_gp(29));
-                    Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(1), safepoint_index as u64);
+                    Arm64Backend::emit_mov_imm(
+                        &mut self.buf,
+                        machine_gp(1),
+                        safepoint_index as u64,
+                    );
                     Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(28), handler);
                     Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
 
@@ -1093,7 +1361,13 @@ impl<'a> BatchEmitter<'a> {
         }
     }
 
-    fn emit_call(&mut self, _inst_id: InstId, fref: FuncRef, _args: &[Value], _result: Option<Value>) {
+    fn emit_call(
+        &mut self,
+        _inst_id: InstId,
+        fref: FuncRef,
+        _args: &[Value],
+        _result: Option<Value>,
+    ) {
         // Arguments are already in their fixed registers thanks to the allocation.
         // Load function pointer from call table and BLR.
         let func_idx = fref.index();
@@ -1103,7 +1377,11 @@ impl<'a> BatchEmitter<'a> {
         Arm64Backend::emit_mov_imm(&mut self.buf, machine_gp(27), self.call_table_base);
         let offset = (func_idx * 8) as i32;
         Arm64Backend::emit_load_gp(
-            &mut self.buf, machine_gp(28), machine_gp(27), offset, MachineWordSize::W64,
+            &mut self.buf,
+            machine_gp(28),
+            machine_gp(27),
+            offset,
+            MachineWordSize::W64,
         );
         Arm64Backend::emit_call_reg(&mut self.buf, machine_gp(28));
         // Result is in X0 (the allocation already assigned it there via FixedReg constraint)
@@ -1112,7 +1390,10 @@ impl<'a> BatchEmitter<'a> {
     fn emit_call_indirect(&mut self, inst_id: InstId, args: &[Value], result: Option<Value>) {
         // Callee pointer is in operand 1 (after def). The allocation put it in some register.
         // We need to move it to X28 for BLR.
-        let callee_preg = self.alloc.get(inst_id, 1).expect("missing callee allocation");
+        let callee_preg = self
+            .alloc
+            .get(inst_id, 1)
+            .expect("missing callee allocation");
         if callee_preg != gp_preg(28) {
             Arm64Backend::emit_gp_move(&mut self.buf, machine_gp(28), preg_to_machine(callee_preg));
         }
@@ -1141,18 +1422,30 @@ impl<'a> BatchEmitter<'a> {
                 let label = self.block_labels[target.index()];
                 Arm64Backend::emit_branch_to_label(&mut self.buf, label);
             }
-            Terminator::BrIf { cond, then_block, else_block, .. } => {
+            Terminator::BrIf {
+                cond,
+                then_block,
+                else_block,
+                ..
+            } => {
                 // Cond is operand 0 of the terminator
                 let cond_preg = self.alloc.get(inst_id, 0).expect("missing cond allocation");
                 let then_label = self.block_labels[then_block.index()];
                 let else_label = self.block_labels[else_block.index()];
                 // CBZ = branch if zero → else, fall through to then
                 // CBNZ = branch if nonzero → then
-                Arm64Backend::emit_cbnz_to_label(&mut self.buf, preg_to_machine(cond_preg), then_label);
+                Arm64Backend::emit_cbnz_to_label(
+                    &mut self.buf,
+                    preg_to_machine(cond_preg),
+                    then_label,
+                );
                 Arm64Backend::emit_branch_to_label(&mut self.buf, else_label);
             }
             _ => {
-                todo!("Terminator {:?} in batch lowerer", std::mem::discriminant(term));
+                todo!(
+                    "Terminator {:?} in batch lowerer",
+                    std::mem::discriminant(term)
+                );
             }
         }
     }
@@ -1207,7 +1500,11 @@ pub fn compile_function_batch(
 
     if std::env::var("BATCH_DEBUG").is_ok() {
         eprintln!("=== Allocation for {} ===", func.name);
-        eprintln!("  {} moves, {} spill slots", allocation.moves.len(), allocation.num_spill_slots);
+        eprintln!(
+            "  {} moves, {} spill slots",
+            allocation.moves.len(),
+            allocation.num_spill_slots
+        );
         for (i, m) in allocation.moves.iter().enumerate() {
             eprintln!("  move[{i}]: {:?}", m);
         }
@@ -1219,27 +1516,58 @@ pub fn compile_function_batch(
             for (li, node) in block.insts.iter().enumerate() {
                 let iid = InstId(base + li as u32);
                 let ops: Vec<_> = adapted.inst_operands(iid).collect();
-                let allocs: Vec<_> = ops.iter().enumerate()
+                let allocs: Vec<_> = ops
+                    .iter()
+                    .enumerate()
                     .map(|(oi, op)| {
-                        let a = allocation.get(iid, oi).map(|p| format!("{:?}", p)).unwrap_or("NONE".into());
+                        let a = allocation
+                            .get(iid, oi)
+                            .map(|p| format!("{:?}", p))
+                            .unwrap_or("NONE".into());
                         format!("{:?}:{:?}={}", op.kind, op.constraint, a)
-                    }).collect();
+                    })
+                    .collect();
                 let inst_name = match &node.inst {
                     Inst::Iconst(_, v) => format!("Iconst({})", v),
-                    Inst::Call(fref, args) => format!("Call(f{}, args={:?})", fref.index(), args.iter().map(|v| v.index()).collect::<Vec<_>>()),
-                    Inst::CallIndirect(c, args, _) => format!("CallIndirect(c={}, args={:?})", c.index(), args.iter().map(|v| v.index()).collect::<Vec<_>>()),
+                    Inst::Call(fref, args) => format!(
+                        "Call(f{}, args={:?})",
+                        fref.index(),
+                        args.iter().map(|v| v.index()).collect::<Vec<_>>()
+                    ),
+                    Inst::CallIndirect(c, args, _) => format!(
+                        "CallIndirect(c={}, args={:?})",
+                        c.index(),
+                        args.iter().map(|v| v.index()).collect::<Vec<_>>()
+                    ),
                     other => format!("{:?}", std::mem::discriminant(other)),
                 };
-                eprintln!("    inst({}) {} val={:?} → [{}]", iid.0, inst_name, node.value.map(|v| v.index()), allocs.join(", "));
+                eprintln!(
+                    "    inst({}) {} val={:?} → [{}]",
+                    iid.0,
+                    inst_name,
+                    node.value.map(|v| v.index()),
+                    allocs.join(", ")
+                );
             }
             let tid = InstId(base + block.insts.len() as u32);
             let tops: Vec<_> = adapted.inst_operands(tid).collect();
-            let tallocs: Vec<_> = tops.iter().enumerate()
+            let tallocs: Vec<_> = tops
+                .iter()
+                .enumerate()
                 .map(|(oi, op)| {
-                    let a = allocation.get(tid, oi).map(|p| format!("{:?}", p)).unwrap_or("NONE".into());
+                    let a = allocation
+                        .get(tid, oi)
+                        .map(|p| format!("{:?}", p))
+                        .unwrap_or("NONE".into());
                     format!("{:?}:{:?}={}", op.kind, op.constraint, a)
-                }).collect();
-            eprintln!("    term({}) {:?} → [{}]", tid.0, std::mem::discriminant(&block.terminator), tallocs.join(", "));
+                })
+                .collect();
+            eprintln!(
+                "    term({}) {:?} → [{}]",
+                tid.0,
+                std::mem::discriminant(&block.terminator),
+                tallocs.join(", ")
+            );
         }
     }
 
@@ -1257,7 +1585,12 @@ pub fn compile_function_batch(
                 let from = MoveOperand::Reg(arg_preg);
                 if from != *home {
                     if std::env::var("BATCH_DEBUG").is_ok() {
-                        eprintln!("  entry_param[{i}]: val={} {:?} → {:?}", val.index(), from, home);
+                        eprintln!(
+                            "  entry_param[{i}]: val={} {:?} → {:?}",
+                            val.index(),
+                            from,
+                            home
+                        );
                     }
                     allocation.moves.push(InsertedMove {
                         at: MovePosition::Before(first_inst),
@@ -1272,8 +1605,16 @@ pub fn compile_function_batch(
 
     // Phase 3: Emit machine code
     let emitter = BatchEmitter::new(
-        func, &adapted, &allocation, externs, call_table_base, tags,
-        safepoint_handler, 0, 0, 0, // IC not yet wired — no InvokeDynamic in IR yet
+        func,
+        &adapted,
+        &allocation,
+        externs,
+        call_table_base,
+        tags,
+        safepoint_handler,
+        0,
+        0,
+        0, // IC not yet wired — no InvokeDynamic in IR yet
         safepoint_index_base,
     );
     let (mut buf, frame_size, safepoints) = emitter.emit();

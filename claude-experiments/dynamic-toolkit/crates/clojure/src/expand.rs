@@ -11,22 +11,34 @@
 //! (`def`, `defmacro`, `if`, `let`, `do`, `fn`, `quote`) are NOT
 //! expanded as macros even if a homonymous macro exists.
 
+use dynir::ir::FuncRef;
 use dynlang::{GcPolicy, gc::DynGcRuntime};
 use dynlower::JitModule;
-use dynir::ir::FuncRef;
 
-use crate::namespace::{
-    fn_func_ref, ns_lookup, var_is_macro, var_root,
-};
+use crate::namespace::{fn_func_ref, ns_lookup, var_is_macro, var_root};
 use crate::symbols::SymbolTable;
 use crate::value as v;
 
 /// Special form heads that the expander must NOT treat as macros.
 const SPECIAL_FORMS: &[&str] = &[
-    "def", "defmacro", "fn", "if", "let", "loop", "recur", "do", "quote",
-    "quasiquote", "unquote", "unquote-splicing",
-    "deftype*", "defprotocol", "extend-type",
-    "try", "throw", "catch",
+    "def",
+    "defmacro",
+    "fn",
+    "if",
+    "let",
+    "loop",
+    "recur",
+    "do",
+    "quote",
+    "quasiquote",
+    "unquote",
+    "unquote-splicing",
+    "deftype*",
+    "defprotocol",
+    "extend-type",
+    "try",
+    "throw",
+    "catch",
 ];
 
 pub struct ExpandCtx<'a> {
@@ -148,7 +160,10 @@ impl<'a> ExpandCtx<'a> {
             acc.set(form_cell);
             acc.get()
         });
-        match self.gc.run_jit(self.jit, fref, &[fn_obj, args_list], self.jit_gc_policy) {
+        match self
+            .gc
+            .run_jit(self.jit, fref, &[fn_obj, args_list], self.jit_gc_policy)
+        {
             dynlower::JitOutcome::Value(result) => {
                 if std::env::var("CLJ_DEBUG_MACRO").is_ok() {
                     let s = crate::printer::print(result, self.sym);
@@ -328,7 +343,6 @@ impl<'a> ExpandCtx<'a> {
         let expanded: Vec<u64> = items.into_iter().map(|f| self.expand_all(f)).collect();
         list_from_vec(&expanded)
     }
-
 }
 
 /// Build `(head . tail-list)` where tail-list is already a list.

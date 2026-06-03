@@ -53,10 +53,8 @@ fn user_define_and_call() {
 
 #[test]
 fn recursive_factorial() {
-    let (_e, r) = run(
-        "(define (fact n) (if (<= n 1) 1 (* n (fact (- n 1)))))
-         (fact 10)",
-    );
+    let (_e, r) = run("(define (fact n) (if (<= n 1) 1 (* n (fact (- n 1)))))
+         (fact 10)");
     assert_eq!(as_number(r), 3628800.0);
 }
 
@@ -83,31 +81,25 @@ fn equal_predicate() {
 
 #[test]
 fn macro_when() {
-    let (_e, r) = run(
-        "(defmacro when (cond . body)
+    let (_e, r) = run("(defmacro when (cond . body)
            `(if ,cond (begin ,@body) nil))
-         (when #t 42)",
-    );
+         (when #t 42)");
     assert_eq!(as_number(r), 42.0);
 }
 
 #[test]
 fn macro_when_skips_when_false() {
-    let (_e, r) = run(
-        "(defmacro when (cond . body)
+    let (_e, r) = run("(defmacro when (cond . body)
            `(if ,cond (begin ,@body) nil))
-         (when #f 42)",
-    );
+         (when #f 42)");
     assert_eq!(r, NIL);
 }
 
 #[test]
 fn macro_unless() {
-    let (_e, r) = run(
-        "(defmacro unless (cond . body)
+    let (_e, r) = run("(defmacro unless (cond . body)
            `(if ,cond nil (begin ,@body)))
-         (unless #f 7)",
-    );
+         (unless #f 7)");
     assert_eq!(as_number(r), 7.0);
 }
 
@@ -115,26 +107,22 @@ fn macro_unless() {
 fn macro_calls_macro_when_uses_if_directly() {
     // Here `when` expands to (if ...). After expansion the `when` macro
     // sees `(when (...))` already gone. This proves the recursive walk.
-    let (_e, r) = run(
-        "(defmacro when (cond . body)
+    let (_e, r) = run("(defmacro when (cond . body)
            `(if ,cond (begin ,@body) nil))
          (define (positive? x) (when (> x 0) #t))
-         (if (positive? 5) 1 0)",
-    );
+         (if (positive? 5) 1 0)");
     assert_eq!(as_number(r), 1.0);
 }
 
 #[test]
 fn macro_recursive_let_star() {
     // let* expands to nested let. Recursive macro that re-emits a use of itself.
-    let (_e, r) = run(
-        "(defmacro let* (bindings . body)
+    let (_e, r) = run("(defmacro let* (bindings . body)
            (if (null? bindings)
                `(begin ,@body)
                `(let (,(car bindings))
                   (let* ,(cdr bindings) ,@body))))
-         (let* ((a 1) (b (+ a 1)) (c (* b 3))) c)",
-    );
+         (let* ((a 1) (b (+ a 1)) (c (* b 3))) c)");
     assert_eq!(as_number(r), 6.0);
 }
 
@@ -143,13 +131,11 @@ fn macro_twice_doubles_evaluation() {
     // (twice e) expands to (begin e e). Calling it with a side-effecting
     // expression should evaluate it twice; we test that the *value* of the
     // begin is the second occurrence by using a let-bound counter.
-    let (_e, r) = run(
-        "(defmacro twice (e)
+    let (_e, r) = run("(defmacro twice (e)
            `(begin ,e ,e))
          (let ((n 0))
            (twice (set! n (+ n 1)))
-           n)",
-    );
+           n)");
     assert_eq!(as_number(r), 2.0);
 }
 
@@ -158,11 +144,9 @@ fn macro_helper_compute_at_expansion_time() {
     // Macro calls a helper function during expansion — the helper computes
     // a literal value baked into the result. Genuine compile-time execution
     // of user code through the JIT.
-    let (_e, r) = run(
-        "(define (square n) (* n n))
+    let (_e, r) = run("(define (square n) (* n n))
          (defmacro static-square (n)
            `(quote ,(square n)))
-         (static-square 7)",
-    );
+         (static-square 7)");
     assert_eq!(as_number(r), 49.0);
 }

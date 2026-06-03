@@ -59,8 +59,7 @@ use core::marker::PhantomData;
 
 use dynalloc::{Alloc, PtrPolicy};
 use dynobj::{
-    ObjHeader, TypeInfo,
-    init_header, read_varlen_bytes, read_varlen_count, write_value_field,
+    ObjHeader, TypeInfo, init_header, read_varlen_bytes, read_varlen_count, write_value_field,
     write_varlen_count,
 };
 
@@ -98,7 +97,10 @@ impl ContinuationTypes {
             .with_type_id(cont_obj_id);
         type_table.push(cont_obj);
 
-        ContinuationTypes { cont_obj, cont_meta }
+        ContinuationTypes {
+            cont_obj,
+            cont_meta,
+        }
     }
 }
 
@@ -194,11 +196,10 @@ impl<'h> ContinuationView<'h> {
         // Values slice out of ContObj's varlen Values tail.
         let base_offset = self.cont_obj_info.varlen_count_offset() + 8;
         let vals_ptr = unsafe {
-            self.cont_obj.add(base_offset + preamble.val_offset as usize * 8) as *const u64
+            self.cont_obj
+                .add(base_offset + preamble.val_offset as usize * 8) as *const u64
         };
-        let values = unsafe {
-            core::slice::from_raw_parts(vals_ptr, preamble.val_count as usize)
-        };
+        let values = unsafe { core::slice::from_raw_parts(vals_ptr, preamble.val_count as usize) };
 
         let mut caller_resume = decode_caller_resume(
             preamble.resume_kind,
@@ -212,12 +213,12 @@ impl<'h> ContinuationView<'h> {
             let invoke_off = root_indices_off + ((root_idx_bytes + 3) & !3);
             let normal_count = unsafe {
                 u32::from_le_bytes(core::ptr::read(
-                    self.meta_bytes.add(invoke_off) as *const [u8; 4],
+                    self.meta_bytes.add(invoke_off) as *const [u8; 4]
                 )) as usize
             };
             let exception_count = unsafe {
                 u32::from_le_bytes(core::ptr::read(
-                    self.meta_bytes.add(invoke_off + 4) as *const [u8; 4],
+                    self.meta_bytes.add(invoke_off + 4) as *const [u8; 4]
                 )) as usize
             };
             let data_off = invoke_off + 8;
@@ -229,9 +230,7 @@ impl<'h> ContinuationView<'h> {
             let exception_args: Vec<u64> = (0..exception_count)
                 .map(|j| unsafe {
                     core::ptr::read(
-                        self.meta_bytes
-                            .add(data_off + normal_count * 8 + j * 8)
-                            as *const u64,
+                        self.meta_bytes.add(data_off + normal_count * 8 + j * 8) as *const u64
                     )
                 })
                 .collect();
@@ -304,7 +303,10 @@ fn encode_caller_resume(r: &FrameResume) -> (u32, u32, u32) {
             return_dest.map(|d| d as u32).unwrap_or(u32::MAX),
             u32::MAX,
         ),
-        FrameResume::FromResume { return_block, return_param_dest } => (
+        FrameResume::FromResume {
+            return_block,
+            return_param_dest,
+        } => (
             RESUME_KIND_FROM_RESUME,
             *return_block as u32,
             return_param_dest.map(|d| d as u32).unwrap_or(u32::MAX),
@@ -326,11 +328,19 @@ fn decode_caller_resume(kind: u32, a: u32, b: u32) -> FrameResume {
     match kind {
         RESUME_KIND_TOP_LEVEL => FrameResume::TopLevel,
         RESUME_KIND_FROM_CALL => FrameResume::FromCall {
-            return_dest: if a == u32::MAX { None } else { Some(a as usize) },
+            return_dest: if a == u32::MAX {
+                None
+            } else {
+                Some(a as usize)
+            },
         },
         RESUME_KIND_FROM_RESUME => FrameResume::FromResume {
             return_block: a as usize,
-            return_param_dest: if b == u32::MAX { None } else { Some(b as usize) },
+            return_param_dest: if b == u32::MAX {
+                None
+            } else {
+                Some(b as usize)
+            },
         },
         RESUME_KIND_FROM_INVOKE => FrameResume::FromInvoke {
             normal_block: a as usize,
@@ -362,9 +372,7 @@ struct FramePreamble {
 
 fn decode_frame_preamble(bytes: &[u8], off: usize) -> (FramePreamble, &[u8]) {
     let p = &bytes[off..off + FRAME_PREAMBLE_SIZE];
-    let read_u32 = |i: usize| -> u32 {
-        u32::from_le_bytes([p[i], p[i + 1], p[i + 2], p[i + 3]])
-    };
+    let read_u32 = |i: usize| -> u32 { u32::from_le_bytes([p[i], p[i + 1], p[i + 2], p[i + 3]]) };
     let array_word = read_u32(36);
     let preamble = FramePreamble {
         func_idx: read_u32(0),
@@ -410,11 +418,7 @@ fn encoded_meta_len(builder: &CapturedStackBuilder) -> usize {
 /// Encode metadata into `out`, returning per-frame byte offsets into
 /// `out` (for caching later in `ContinuationView`).
 fn encode_meta(builder: &CapturedStackBuilder, out: &mut [u8]) -> Vec<usize> {
-    let total_value_count: u32 = builder
-        .frames
-        .iter()
-        .map(|f| f.values.len() as u32)
-        .sum();
+    let total_value_count: u32 = builder.frames.iter().map(|f| f.values.len() as u32).sum();
 
     // Header.
     out[0..4].copy_from_slice(&(builder.frames.len() as u32).to_le_bytes());
@@ -469,8 +473,7 @@ fn encode_meta(builder: &CapturedStackBuilder, out: &mut [u8]) -> Vec<usize> {
             ..
         } = &f.caller_resume
         {
-            out[cursor..cursor + 4]
-                .copy_from_slice(&(normal_args_vals.len() as u32).to_le_bytes());
+            out[cursor..cursor + 4].copy_from_slice(&(normal_args_vals.len() as u32).to_le_bytes());
             cursor += 4;
             out[cursor..cursor + 4]
                 .copy_from_slice(&(exception_args_vals.len() as u32).to_le_bytes());
@@ -530,20 +533,12 @@ pub fn capture_continuation<H: ObjHeader, A: Alloc, P: PtrPolicy>(
         init_header::<H>(meta_ptr, types.cont_meta.type_id);
         write_varlen_count(meta_ptr, &types.cont_meta, meta_len);
         let base = types.cont_meta.varlen_count_offset() + 8;
-        core::ptr::copy_nonoverlapping(
-            meta_bytes.as_ptr(),
-            meta_ptr.add(base),
-            meta_len,
-        );
+        core::ptr::copy_nonoverlapping(meta_bytes.as_ptr(), meta_ptr.add(base), meta_len);
     }
 
     // Step 3: allocate the ContObj with a varlen Values tail large
     // enough for all frames' values, flattened.
-    let total_values: usize = builder
-        .frames
-        .iter()
-        .map(|f| f.values.len())
-        .sum();
+    let total_values: usize = builder.frames.iter().map(|f| f.values.len()).sum();
     let obj_ptr = heap.alloc(&types.cont_obj, total_values);
     if obj_ptr.is_null() {
         // We've leaked the meta allocation into from-space, but it's
@@ -617,8 +612,7 @@ pub fn read_continuation<'h, A: Alloc, P: PtrPolicy>(
     }
     let hdr = meta_bytes_slice;
     let frame_count = u32::from_le_bytes([hdr[0], hdr[1], hdr[2], hdr[3]]) as usize;
-    let total_value_count =
-        u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
+    let total_value_count = u32::from_le_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
     let prompt_id = u32::from_le_bytes([hdr[8], hdr[9], hdr[10], hdr[11]]);
 
     // Linear-scan to compute per-frame byte offsets.
@@ -733,7 +727,9 @@ mod tests {
     struct TestPolicy;
     impl PtrPolicy for TestPolicy {
         fn try_decode_ptr(bits: u64) -> Option<*mut u8> {
-            if bits == 0 { return None; }
+            if bits == 0 {
+                return None;
+            }
             // tag 0 = pointer in LowBit<3>
             if bits & 0b111 == 0 {
                 Some(bits as *mut u8)
@@ -777,14 +773,15 @@ mod tests {
                 active_prompts: vec![7],
                 root_indices: vec![],
                 resume_arg_slot: Some(2),
-                caller_resume: FrameResume::FromCall { return_dest: Some(9) },
+                caller_resume: FrameResume::FromCall {
+                    return_dest: Some(9),
+                },
             }],
         };
 
         let handle = capture_continuation::<Compact, _, TestPolicy>(&heap, &types, &builder)
             .expect("capture OOM");
-        let view = read_continuation::<_, TestPolicy>(&heap, &types, handle)
-            .expect("read failed");
+        let view = read_continuation::<_, TestPolicy>(&heap, &types, handle).expect("read failed");
 
         assert_eq!(view.frame_count(), 1);
         assert_eq!(view.prompt_id(), 7);
@@ -798,7 +795,12 @@ mod tests {
         assert_eq!(f.active_prompts, &[7u32]);
         assert_eq!(f.root_indices.len(), 0);
         assert_eq!(f.resume_arg_slot, Some(2));
-        assert_eq!(f.caller_resume, FrameResume::FromCall { return_dest: Some(9) });
+        assert_eq!(
+            f.caller_resume,
+            FrameResume::FromCall {
+                return_dest: Some(9)
+            }
+        );
     }
 
     #[test]
@@ -825,7 +827,9 @@ mod tests {
                     active_prompts: vec![12, 99],
                     root_indices: vec![1, 2],
                     resume_arg_slot: None,
-                    caller_resume: FrameResume::FromCall { return_dest: Some(5) },
+                    caller_resume: FrameResume::FromCall {
+                        return_dest: Some(5),
+                    },
                 },
                 BuilderFrame {
                     func_idx: 2,
@@ -845,8 +849,7 @@ mod tests {
 
         let handle = capture_continuation::<Compact, _, TestPolicy>(&heap, &types, &builder)
             .expect("capture OOM");
-        let view = read_continuation::<_, TestPolicy>(&heap, &types, handle)
-            .expect("read failed");
+        let view = read_continuation::<_, TestPolicy>(&heap, &types, handle).expect("read failed");
 
         assert_eq!(view.frame_count(), 3);
         assert_eq!(view.prompt_id(), 12);
@@ -856,7 +859,10 @@ mod tests {
         assert_eq!(f0.values, &[100u64, 200]);
         assert_eq!(f0.root_indices, &[0u16]);
         assert_eq!(f0.active_prompts, &[12u32]);
-        assert_eq!(f0.caller_resume, FrameResume::FromCall { return_dest: None });
+        assert_eq!(
+            f0.caller_resume,
+            FrameResume::FromCall { return_dest: None }
+        );
 
         let f1 = view.frame(1);
         assert_eq!(f1.func_idx, 1);
@@ -865,7 +871,12 @@ mod tests {
         assert_eq!(f1.values, &[1u64, 2, 3]);
         assert_eq!(f1.active_prompts, &[12u32, 99]);
         assert_eq!(f1.root_indices, &[1u16, 2]);
-        assert_eq!(f1.caller_resume, FrameResume::FromCall { return_dest: Some(5) });
+        assert_eq!(
+            f1.caller_resume,
+            FrameResume::FromCall {
+                return_dest: Some(5)
+            }
+        );
 
         let f2 = view.frame(2);
         assert_eq!(f2.func_idx, 2);
@@ -873,7 +884,10 @@ mod tests {
         assert_eq!(f2.resume_arg_slot, Some(0));
         assert_eq!(
             f2.caller_resume,
-            FrameResume::FromResume { return_block: 4, return_param_dest: Some(6) }
+            FrameResume::FromResume {
+                return_block: 4,
+                return_param_dest: Some(6)
+            }
         );
     }
 
@@ -887,7 +901,10 @@ mod tests {
     #[test]
     fn gc_forwards_pointers_captured_inside_continuation() {
         use core::cell::Cell;
-        use dynobj::{init_header as dyn_init_header, write_varlen_count as dyn_write_varlen_count, RootSource, VarLenKind};
+        use dynobj::{
+            RootSource, VarLenKind, init_header as dyn_init_header,
+            write_varlen_count as dyn_write_varlen_count,
+        };
 
         // ── Set up heap + type table ──────────────────────────────
         // We need a user type to allocate (so the continuation has
@@ -937,10 +954,8 @@ mod tests {
         };
 
         // Need a separate scope because alloc() on SemiSpace takes &self.
-        let handle_before = capture_continuation::<Compact, _, TestPolicy>(
-            &ss, &types, &builder,
-        )
-        .expect("capture OOM");
+        let handle_before = capture_continuation::<Compact, _, TestPolicy>(&ss, &types, &builder)
+            .expect("capture OOM");
 
         // ── Set up a root source for the handle and collect ──────
         struct HandleRoot(Cell<u64>);
@@ -956,7 +971,10 @@ mod tests {
         }
 
         let handle_after = root.0.get();
-        assert_ne!(handle_after, handle_before, "handle should have been forwarded");
+        assert_ne!(
+            handle_after, handle_before,
+            "handle should have been forwarded"
+        );
 
         // ── Read the continuation via the new handle ──────────────
         let view = read_continuation::<_, TestPolicy>(&ss, &types, handle_after)
@@ -964,8 +982,10 @@ mod tests {
         assert_eq!(view.frame_count(), 1);
         let f = view.frame(0);
         let captured_user = f.values[0];
-        assert_ne!(captured_user, user_tagged_before,
-            "captured user pointer should have been forwarded by GC");
+        assert_ne!(
+            captured_user, user_tagged_before,
+            "captured user pointer should have been forwarded by GC"
+        );
         assert_eq!(f.values[1], 0b001);
         assert_eq!(f.values[2], 0b001);
 
@@ -1093,8 +1113,8 @@ mod tests {
             .expect("capture OOM");
 
         for _ in 0..3 {
-            let view = read_continuation::<_, TestPolicy>(&heap, &types, handle)
-                .expect("read failed");
+            let view =
+                read_continuation::<_, TestPolicy>(&heap, &types, handle).expect("read failed");
             assert_eq!(view.frame_count(), 1);
             let f = view.frame(0);
             assert_eq!(f.func_idx, 11);

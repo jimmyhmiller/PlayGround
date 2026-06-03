@@ -13,7 +13,10 @@ fn main() -> ExitCode {
         println!("{}", engine.print(result));
         ExitCode::SUCCESS
     } else {
-        eprintln!("usage: {} -e EXPR", args.first().map(String::as_str).unwrap_or("clojure"));
+        eprintln!(
+            "usage: {} -e EXPR",
+            args.first().map(String::as_str).unwrap_or("clojure")
+        );
         ExitCode::FAILURE
     }
 }

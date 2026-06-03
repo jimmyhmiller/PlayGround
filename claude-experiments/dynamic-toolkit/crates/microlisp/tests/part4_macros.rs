@@ -6,7 +6,9 @@
 use microlisp::Engine;
 use microlisp::value::*;
 
-fn fresh() -> Engine { Engine::new() }
+fn fresh() -> Engine {
+    Engine::new()
+}
 
 fn n_of(v: u64) -> f64 {
     assert!(is_number(v), "expected number, got 0x{:016x}", v);
@@ -122,10 +124,7 @@ fn p410_anaphoric_if() {
               (if it ,then ,else)))",
     );
     // `it` is bound by the macro and visible in `then`.
-    assert_eq!(
-        n_of(e.run_source("(aif (+ 10 5) (* it 2) 0)")),
-        30.0
-    );
+    assert_eq!(n_of(e.run_source("(aif (+ 10 5) (* it 2) 0)")), 30.0);
     assert_eq!(n_of(e.run_source("(aif #f 99 -1)")), -1.0);
 }
 

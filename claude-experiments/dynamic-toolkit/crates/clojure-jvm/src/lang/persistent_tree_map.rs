@@ -17,7 +17,7 @@
 use std::cmp::Ordering;
 use std::sync::Arc;
 
-use super::object::{object_equiv, Object};
+use super::object::{Object, object_equiv};
 
 /// `clojure.lang.PersistentTreeMap` — sorted by [`compare_objects`].
 #[derive(Debug)]
@@ -29,7 +29,9 @@ pub struct PersistentTreeMap {
 impl PersistentTreeMap {
     /// Java: `PersistentTreeMap.EMPTY`.
     pub fn empty() -> Arc<Self> {
-        Arc::new(PersistentTreeMap { pairs: Arc::new(Vec::new()) })
+        Arc::new(PersistentTreeMap {
+            pairs: Arc::new(Vec::new()),
+        })
     }
 
     /// Java: `PersistentTreeMap create(Comparator c, ISeq items)` —
@@ -51,7 +53,9 @@ impl PersistentTreeMap {
         while let (Some(k), Some(v)) = (it.next(), it.next()) {
             insert_sorted_with(&mut out, k, v, &mut cmp);
         }
-        Arc::new(PersistentTreeMap { pairs: Arc::new(out) })
+        Arc::new(PersistentTreeMap {
+            pairs: Arc::new(out),
+        })
     }
 
     /// Java: `PersistentTreeMap create(ISeq items)` — flat alternating
@@ -69,10 +73,14 @@ impl PersistentTreeMap {
         while let (Some(k), Some(v)) = (it.next(), it.next()) {
             insert_sorted(&mut out, k, v);
         }
-        Arc::new(PersistentTreeMap { pairs: Arc::new(out) })
+        Arc::new(PersistentTreeMap {
+            pairs: Arc::new(out),
+        })
     }
 
-    pub fn count(&self) -> i32 { self.pairs.len() as i32 }
+    pub fn count(&self) -> i32 {
+        self.pairs.len() as i32
+    }
 
     pub fn entry_at(&self, key: &Object) -> Option<(Object, Object)> {
         self.pairs
@@ -92,13 +100,17 @@ impl PersistentTreeMap {
     pub fn assoc(self: &Arc<Self>, key: Object, val: Object) -> Arc<Self> {
         let mut new_pairs: Vec<(Object, Object)> = (*self.pairs).clone();
         insert_sorted(&mut new_pairs, key, val);
-        Arc::new(PersistentTreeMap { pairs: Arc::new(new_pairs) })
+        Arc::new(PersistentTreeMap {
+            pairs: Arc::new(new_pairs),
+        })
     }
 
     pub fn without(self: &Arc<Self>, key: &Object) -> Arc<Self> {
         let mut new_pairs: Vec<(Object, Object)> = (*self.pairs).clone();
         new_pairs.retain(|(k, _)| !object_equiv(k, key));
-        Arc::new(PersistentTreeMap { pairs: Arc::new(new_pairs) })
+        Arc::new(PersistentTreeMap {
+            pairs: Arc::new(new_pairs),
+        })
     }
 
     pub fn contains_key(&self, key: &Object) -> bool {
@@ -115,12 +127,8 @@ fn insert_sorted(pairs: &mut Vec<(Object, Object)>, key: Object, val: Object) {
     insert_sorted_with(pairs, key, val, &mut compare_objects)
 }
 
-fn insert_sorted_with<F>(
-    pairs: &mut Vec<(Object, Object)>,
-    key: Object,
-    val: Object,
-    cmp: &mut F,
-) where
+fn insert_sorted_with<F>(pairs: &mut Vec<(Object, Object)>, key: Object, val: Object, cmp: &mut F)
+where
     F: FnMut(&Object, &Object) -> Ordering,
 {
     let mut insert_idx = pairs.len();
@@ -159,29 +167,13 @@ pub fn compare_objects(a: &Object, b: &Object) -> Ordering {
         (String(x), String(y)) => x.cmp(y),
 
         (Keyword(x), Keyword(y)) => {
-            let xs = format!(
-                "{}/{}",
-                x.get_namespace().unwrap_or(""),
-                x.get_name()
-            );
-            let ys = format!(
-                "{}/{}",
-                y.get_namespace().unwrap_or(""),
-                y.get_name()
-            );
+            let xs = format!("{}/{}", x.get_namespace().unwrap_or(""), x.get_name());
+            let ys = format!("{}/{}", y.get_namespace().unwrap_or(""), y.get_name());
             xs.cmp(&ys)
         }
         (Symbol(x), Symbol(y)) => {
-            let xs = format!(
-                "{}/{}",
-                x.get_namespace().unwrap_or(""),
-                x.get_name()
-            );
-            let ys = format!(
-                "{}/{}",
-                y.get_namespace().unwrap_or(""),
-                y.get_name()
-            );
+            let xs = format!("{}/{}", x.get_namespace().unwrap_or(""), x.get_name());
+            let ys = format!("{}/{}", y.get_namespace().unwrap_or(""), y.get_name());
             xs.cmp(&ys)
         }
 

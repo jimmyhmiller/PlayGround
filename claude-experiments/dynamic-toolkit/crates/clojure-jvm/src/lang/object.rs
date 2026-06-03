@@ -102,22 +102,36 @@ pub enum Object {
 impl Object {
     /// Returns `true` if this is `Object::Nil` (Java `null`).
     #[inline]
-    pub fn is_nil(&self) -> bool { matches!(self.peel_meta_ref(), Object::Nil) }
+    pub fn is_nil(&self) -> bool {
+        matches!(self.peel_meta_ref(), Object::Nil)
+    }
 
     /// Java-style `instanceof Symbol`.
     #[inline]
     pub fn as_symbol(&self) -> Option<&Arc<Symbol>> {
-        if let Object::Symbol(s) = self.peel_meta_ref() { Some(s) } else { None }
+        if let Object::Symbol(s) = self.peel_meta_ref() {
+            Some(s)
+        } else {
+            None
+        }
     }
 
     #[inline]
     pub fn as_keyword(&self) -> Option<&Arc<Keyword>> {
-        if let Object::Keyword(k) = self.peel_meta_ref() { Some(k) } else { None }
+        if let Object::Keyword(k) = self.peel_meta_ref() {
+            Some(k)
+        } else {
+            None
+        }
     }
 
     #[inline]
     pub fn as_var(&self) -> Option<&Arc<Var>> {
-        if let Object::Var(v) = self.peel_meta_ref() { Some(v) } else { None }
+        if let Object::Var(v) = self.peel_meta_ref() {
+            Some(v)
+        } else {
+            None
+        }
     }
 
     /// View through any `WithMeta` wrapper to the underlying value.
@@ -244,8 +258,16 @@ fn list_equiv(a: &Arc<PersistentList>, b: &Arc<PersistentList>) -> bool {
         match (ca, cb) {
             (PersistentList::Empty, PersistentList::Empty) => return true,
             (
-                PersistentList::Cons { first: fa, rest: ra, .. },
-                PersistentList::Cons { first: fb, rest: rb, .. },
+                PersistentList::Cons {
+                    first: fa,
+                    rest: ra,
+                    ..
+                },
+                PersistentList::Cons {
+                    first: fb,
+                    rest: rb,
+                    ..
+                },
             ) => {
                 if !object_equiv(fa, fb) {
                     return false;

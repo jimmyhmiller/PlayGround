@@ -1,11 +1,10 @@
 use std::marker::PhantomData;
 
 use dynexec::{
-    BuilderFrame, CapturedStackBuilder, CodegenConfig,
-    ContinuationView, DefaultCodegenConfig, FrameCapture, FrameResume,
-    FrameRestorable, FrameSliceError, InterpFrameStore,
-    LayoutConfigDefaults, PromptBoundaryAction, RootStrategy, RootTransport,
-    RootTransportKind, ValueLayout,
+    BuilderFrame, CapturedStackBuilder, CodegenConfig, ContinuationView, DefaultCodegenConfig,
+    FrameCapture, FrameRestorable, FrameResume, FrameSliceError, InterpFrameStore,
+    LayoutConfigDefaults, PromptBoundaryAction, RootStrategy, RootTransport, RootTransportKind,
+    ValueLayout,
 };
 use dynvalue::Decoded;
 
@@ -57,7 +56,8 @@ pub trait InterpRootManager<
     L: ValueLayout,
     Roots: RootStrategy<L>,
     Transport: RootTransport<L, Roots>,
-> {
+>
+{
     /// Push a new root frame with `gc_slot_count` slots. Returns a frame handle.
     fn push_frame(&self, gc_slot_count: usize) -> usize;
     /// Pop the most recent root frame.
@@ -95,7 +95,6 @@ pub trait InterpRootManager<
     }
 }
 
-
 // ─── InterpStackRuntime ───────────────────────────────────────────
 
 /// Internal frame for InterpStackRuntime.
@@ -116,16 +115,28 @@ struct InterpFrame {
     val_to_slot: Vec<Option<usize>>,
 }
 
-
 /// An `InterpFrameStore` backed by `Vec<InterpFrame>` with GC root management.
-pub struct InterpStackRuntime<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>> {
+pub struct InterpStackRuntime<
+    'a,
+    L: ValueLayout,
+    Roots: RootStrategy<L>,
+    Transport: RootTransport<L, Roots>,
+    R: InterpRootManager<L, Roots, Transport>,
+> {
     stack: Vec<InterpFrame>,
     roots: &'a R,
     functions: &'a [Function],
     _phantom: PhantomData<(L, Roots, Transport)>,
 }
 
-impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>> InterpStackRuntime<'a, L, Roots, Transport, R> {
+impl<
+        'a,
+        L: ValueLayout,
+        Roots: RootStrategy<L>,
+        Transport: RootTransport<L, Roots>,
+        R: InterpRootManager<L, Roots, Transport>,
+    > InterpStackRuntime<'a, L, Roots, Transport, R>
+{
     pub fn new(roots: &'a R, functions: &'a [Function]) -> Self {
         InterpStackRuntime {
             stack: Vec::new(),
@@ -198,15 +209,16 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
                 values: vals,
                 active_prompts: f.active_prompts.clone(),
                 root_indices,
-                resume_arg_slot: if is_top { Some(resume_dest as u32) } else { None },
+                resume_arg_slot: if is_top {
+                    Some(resume_dest as u32)
+                } else {
+                    None
+                },
                 caller_resume: f.resume.clone(),
             });
         }
 
-        CapturedStackBuilder {
-            prompt_id,
-            frames,
-        }
+        CapturedStackBuilder { prompt_id, frames }
     }
 
     /// Splice frames from a heap-backed `ContinuationView` on top of
@@ -278,13 +290,27 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
 // trait boundary lets the shared continuation operations in
 // dynexec::cont_ops work with both the interpreter and the JIT.
 
-impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>> FrameCapture for InterpStackRuntime<'a, L, Roots, Transport, R> {
+impl<
+        'a,
+        L: ValueLayout,
+        Roots: RootStrategy<L>,
+        Transport: RootTransport<L, Roots>,
+        R: InterpRootManager<L, Roots, Transport>,
+    > FrameCapture for InterpStackRuntime<'a, L, Roots, Transport, R>
+{
     fn extract_capture(&self, prompt_id: u32, resume_dest: usize) -> CapturedStackBuilder {
         self.build_captured_stack_impl(prompt_id, resume_dest)
     }
 }
 
-impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>> FrameRestorable for InterpStackRuntime<'a, L, Roots, Transport, R> {
+impl<
+        'a,
+        L: ValueLayout,
+        Roots: RootStrategy<L>,
+        Transport: RootTransport<L, Roots>,
+        R: InterpRootManager<L, Roots, Transport>,
+    > FrameRestorable for InterpStackRuntime<'a, L, Roots, Transport, R>
+{
     fn splice_restore(
         &mut self,
         view: &ContinuationView<'_>,
@@ -295,7 +321,15 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
     }
 }
 
-fn sync_frame_to_roots<L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>>(frame: &InterpFrame, roots: &R) {
+fn sync_frame_to_roots<
+    L: ValueLayout,
+    Roots: RootStrategy<L>,
+    Transport: RootTransport<L, Roots>,
+    R: InterpRootManager<L, Roots, Transport>,
+>(
+    frame: &InterpFrame,
+    roots: &R,
+) {
     roots.clear_frame(frame.root_frame);
     for (i, slot_opt) in frame.val_to_slot.iter().enumerate() {
         if let Some(slot) = slot_opt {
@@ -304,7 +338,15 @@ fn sync_frame_to_roots<L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTr
     }
 }
 
-fn sync_frame_from_roots<L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>>(frame: &mut InterpFrame, roots: &R) {
+fn sync_frame_from_roots<
+    L: ValueLayout,
+    Roots: RootStrategy<L>,
+    Transport: RootTransport<L, Roots>,
+    R: InterpRootManager<L, Roots, Transport>,
+>(
+    frame: &mut InterpFrame,
+    roots: &R,
+) {
     for (i, slot_opt) in frame.val_to_slot.iter().enumerate() {
         if let Some(slot) = slot_opt {
             frame.vals[i] = roots.get_root(frame.root_frame, *slot);
@@ -312,7 +354,14 @@ fn sync_frame_from_roots<L: ValueLayout, Roots: RootStrategy<L>, Transport: Root
     }
 }
 
-impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roots>, R: InterpRootManager<L, Roots, Transport>> InterpFrameStore for InterpStackRuntime<'a, L, Roots, Transport, R> {
+impl<
+        'a,
+        L: ValueLayout,
+        Roots: RootStrategy<L>,
+        Transport: RootTransport<L, Roots>,
+        R: InterpRootManager<L, Roots, Transport>,
+    > InterpFrameStore for InterpStackRuntime<'a, L, Roots, Transport, R>
+{
     fn push_frame(
         &mut self,
         func_idx: usize,
@@ -452,7 +501,9 @@ impl<'a, L: ValueLayout, Roots: RootStrategy<L>, Transport: RootTransport<L, Roo
     /// Return the topmost active exception handler block in the current
     /// frame, or `None` if no handler is pushed.
     fn top_handler(&self) -> Option<usize> {
-        self.stack.last().and_then(|f| f.active_handlers.last().copied())
+        self.stack
+            .last()
+            .and_then(|f| f.active_handlers.last().copied())
     }
 
     fn pop_frames_above(&mut self, depth: usize) {
@@ -550,9 +601,7 @@ pub struct ConfiguredModuleInterpreter<
 /// install a real context via `set_cont_ctx`.
 static NO_CONT_CTX: dynexec::NoContinuations = dynexec::NoContinuations;
 
-
-pub type ModuleInterpreter<'a, S, R> =
-    ConfiguredModuleInterpreter<'a, DefaultCodegenConfig<S>, R>;
+pub type ModuleInterpreter<'a, S, R> = ConfiguredModuleInterpreter<'a, DefaultCodegenConfig<S>, R>;
 
 impl<'a, Cfg: CodegenConfig, R> ConfiguredModuleInterpreter<'a, Cfg, R>
 where
@@ -653,7 +702,10 @@ where
         self.run_loop(&mut sr)
     }
 
-    fn run_loop(&self, sr: &mut (impl InterpFrameStore + FrameCapture + FrameRestorable)) -> Result<InterpResult, InterpError> {
+    fn run_loop(
+        &self,
+        sr: &mut (impl InterpFrameStore + FrameCapture + FrameRestorable),
+    ) -> Result<InterpResult, InterpError> {
         loop {
             // Auto-GC poll: at each outer-loop iteration (between
             // FrameActions), no raw heap pointers are held in
@@ -725,7 +777,10 @@ where
                             sr.set_inst(0);
                         }
                         FrameResume::TopLevel => unreachable!(),
-                        FrameResume::FromResume { return_block, return_param_dest } => {
+                        FrameResume::FromResume {
+                            return_block,
+                            return_param_dest,
+                        } => {
                             // The popped frame was the bottom of a
                             // captured slice that was spliced on top of
                             // the resumer's stack. Deliver the return
@@ -765,34 +820,26 @@ where
                                     param_idx = 1;
                                 }
                                 for (i, val) in exception_args_vals.iter().enumerate() {
-                                    sr.set(
-                                        target_block.params[param_idx + i].0.index(),
-                                        *val,
-                                    );
+                                    sr.set(target_block.params[param_idx + i].0.index(), *val);
                                 }
                                 sr.set_block(exception_block);
                                 sr.set_inst(0);
                                 break;
                             }
-                            FrameResume::FromCall { .. }
-                            | FrameResume::FromResume { .. } => {
+                            FrameResume::FromCall { .. } | FrameResume::FromResume { .. } => {
                                 // We just popped a callee frame. If
                                 // the caller (now top) has an active
                                 // `push_handler`, route to it — this
                                 // is what turns plain `Call`s inside
                                 // a try region into implicit invokes.
                                 if let Some(handler_bb) = sr.top_handler() {
-                                    let func =
-                                        &self.module.functions[sr.func_idx()];
+                                    let func = &self.module.functions[sr.func_idx()];
                                     let target = &func.blocks[handler_bb];
                                     assert!(
                                         !target.params.is_empty(),
                                         "push_handler target block must have a value param",
                                     );
-                                    sr.set(
-                                        target.params[0].0.index(),
-                                        exc,
-                                    );
+                                    sr.set(target.params[0].0.index(), exc);
                                     sr.set_block(handler_bb);
                                     sr.set_inst(0);
                                     break;
@@ -829,10 +876,7 @@ where
                     // Use the shared decision function to determine
                     // whether to trampoline back to the resumer or
                     // run the handler block.
-                    match dynexec::resolve_prompt_boundary(
-                        &sr.peek_top_resume(),
-                        ret_val,
-                    ) {
+                    match dynexec::resolve_prompt_boundary(&sr.peek_top_resume(), ret_val) {
                         PromptBoundaryAction::TrampolineToResumer {
                             return_block,
                             return_param_dest,
@@ -847,9 +891,7 @@ where
                                     None => InterpResult::Void,
                                 });
                             }
-                            if let (Some(dest), Some(val)) =
-                                (return_param_dest, value)
-                            {
+                            if let (Some(dest), Some(val)) = (return_param_dest, value) {
                                 sr.set(dest, val);
                             }
                             sr.set_block(return_block);
@@ -876,7 +918,10 @@ where
     }
 
     /// Execute the current frame until it needs to transfer control.
-    fn execute_frame(&self, sr: &mut (impl InterpFrameStore + FrameCapture + FrameRestorable)) -> Result<FrameAction, InterpError> {
+    fn execute_frame(
+        &self,
+        sr: &mut (impl InterpFrameStore + FrameCapture + FrameRestorable),
+    ) -> Result<FrameAction, InterpError> {
         let func_idx = sr.func_idx();
         let func = &self.module.functions[func_idx];
 
@@ -925,7 +970,10 @@ where
                         let dest = node.value.expect("capture_slice must produce a value");
                         sr.advance_inst();
                         let handle = dynexec::do_capture(
-                            sr, self.cont_ctx, prompt.index_u32(), dest.index(),
+                            sr,
+                            self.cont_ctx,
+                            prompt.index_u32(),
+                            dest.index(),
                         );
                         sr.set(dest.index(), handle);
                         continue;
@@ -1142,10 +1190,8 @@ where
                         let callee_sig = &self.module.functions[callee_idx].sig;
                         let normal_args_vals: Vec<u64> =
                             normal_args.iter().map(|v| sr.get(v.index())).collect();
-                        let exception_args_vals: Vec<u64> = exception_args
-                            .iter()
-                            .map(|v| sr.get(v.index()))
-                            .collect();
+                        let exception_args_vals: Vec<u64> =
+                            exception_args.iter().map(|v| sr.get(v.index())).collect();
                         return Ok(FrameAction::InternalCall {
                             callee_idx,
                             args: arg_vals,
@@ -1174,10 +1220,7 @@ where
                                 let extra: Vec<u64> =
                                     normal_args.iter().map(|v| sr.get(v.index())).collect();
                                 for (i, val) in extra.iter().enumerate() {
-                                    sr.set(
-                                        target_block.params[param_idx + i].0.index(),
-                                        *val,
-                                    );
+                                    sr.set(target_block.params[param_idx + i].0.index(), *val);
                                 }
                                 sr.set_block(normal.index());
                                 sr.set_inst(0);
@@ -1195,15 +1238,10 @@ where
                                     sr.set(target_block.params[0].0.index(), exc);
                                     param_idx = 1;
                                 }
-                                let extra: Vec<u64> = exception_args
-                                    .iter()
-                                    .map(|v| sr.get(v.index()))
-                                    .collect();
+                                let extra: Vec<u64> =
+                                    exception_args.iter().map(|v| sr.get(v.index())).collect();
                                 for (i, val) in extra.iter().enumerate() {
-                                    sr.set(
-                                        target_block.params[param_idx + i].0.index(),
-                                        *val,
-                                    );
+                                    sr.set(target_block.params[param_idx + i].0.index(), *val);
                                 }
                                 sr.set_block(exception.index());
                                 sr.set_inst(0);
@@ -1222,8 +1260,7 @@ where
                     exception_args,
                 } => {
                     let callee_val = sr.get(callee.index());
-                    let arg_vals: Vec<u64> =
-                        call_args.iter().map(|v| sr.get(v.index())).collect();
+                    let arg_vals: Vec<u64> = call_args.iter().map(|v| sr.get(v.index())).collect();
                     let handler = self
                         .indirect_handler
                         .as_ref()
@@ -1241,10 +1278,7 @@ where
                             let extra: Vec<u64> =
                                 normal_args.iter().map(|v| sr.get(v.index())).collect();
                             for (i, val) in extra.iter().enumerate() {
-                                sr.set(
-                                    target_block.params[param_idx + i].0.index(),
-                                    *val,
-                                );
+                                sr.set(target_block.params[param_idx + i].0.index(), *val);
                             }
                             sr.set_block(normal.index());
                             sr.set_inst(0);
@@ -1258,15 +1292,10 @@ where
                                 sr.set(target_block.params[0].0.index(), exc);
                                 param_idx = 1;
                             }
-                            let extra: Vec<u64> = exception_args
-                                .iter()
-                                .map(|v| sr.get(v.index()))
-                                .collect();
+                            let extra: Vec<u64> =
+                                exception_args.iter().map(|v| sr.get(v.index())).collect();
                             for (i, val) in extra.iter().enumerate() {
-                                sr.set(
-                                    target_block.params[param_idx + i].0.index(),
-                                    *val,
-                                );
+                                sr.set(target_block.params[param_idx + i].0.index(), *val);
                             }
                             sr.set_block(exception.index());
                             sr.set_inst(0);
@@ -1274,7 +1303,12 @@ where
                     }
                 }
 
-                Terminator::ResumeSlice { slice, args, return_block, return_args: _ } => {
+                Terminator::ResumeSlice {
+                    slice,
+                    args,
+                    return_block,
+                    return_args: _,
+                } => {
                     // Splice the captured frames on top of the current
                     // stack. When the delimited computation eventually
                     // completes, its Ret will see `FromResume` and
@@ -1284,7 +1318,9 @@ where
                     let arg_vals: Vec<u64> = args.iter().map(|v| sr.get(v.index())).collect();
                     let resumer_func = &self.module.functions[sr.func_idx()];
                     let return_param_dest = resumer_func.blocks[return_block.index()]
-                        .params.first().map(|(v, _)| v.index());
+                        .params
+                        .first()
+                        .map(|(v, _)| v.index());
                     dynexec::do_resume(
                         sr,
                         self.cont_ctx,
@@ -1329,7 +1365,11 @@ where
                 Terminator::Unreachable => {
                     return Err(InterpError::Unreachable);
                 }
-                Terminator::CaptureSlice { prompt, handler_block, resume_block } => {
+                Terminator::CaptureSlice {
+                    prompt,
+                    handler_block,
+                    resume_block,
+                } => {
                     // Racket-style `shift k in body`. Prime the top
                     // frame's PC at `resume_block` (so the snapshot
                     // records it as the resume target), capture the
@@ -1337,17 +1377,24 @@ where
                     // `handler_block` with the fresh handle.
                     let func_ref = &self.module.functions[sr.func_idx()];
                     let resume_param_idx = func_ref.blocks[resume_block.index()]
-                        .params.first().map(|(v, _)| v.index())
+                        .params
+                        .first()
+                        .map(|(v, _)| v.index())
                         .expect("capture_slice: resume_block must have one I64 param");
                     let handler_param_idx = func_ref.blocks[handler_block.index()]
-                        .params.first().map(|(v, _)| v.index())
+                        .params
+                        .first()
+                        .map(|(v, _)| v.index())
                         .expect("capture_slice: handler_block must have one FrameSlice param");
 
                     sr.set_block(resume_block.index());
                     sr.set_inst(0);
 
                     let handle = dynexec::do_capture(
-                        sr, self.cont_ctx, prompt.index_u32(), resume_param_idx,
+                        sr,
+                        self.cont_ctx,
+                        prompt.index_u32(),
+                        resume_param_idx,
                     );
 
                     // Jump to handler_block with the handle.
@@ -1687,8 +1734,7 @@ fn build_gc_slot_map(func: &Function) -> Vec<Option<usize>> {
     let mut map = vec![None; func.value_types.len()];
     let mut slot = 0;
     for (i, ty) in func.value_types.iter().enumerate() {
-        let eligible =
-            (ty.is_gc() || matches!(ty, Type::I64 | Type::Ptr)) && !derived[i];
+        let eligible = (ty.is_gc() || matches!(ty, Type::I64 | Type::Ptr)) && !derived[i];
         if eligible {
             map[i] = Some(slot);
             slot += 1;
@@ -1703,7 +1749,6 @@ fn count_gc_slots_from_map(map: &[Option<usize>]) -> usize {
 
 // ─── Snapshot helpers ─────────────────────────────────────────────
 
-
 // ─── Helpers ──────────────────────────────────────────────────────
 
 /// Find the handler block for a given prompt in a function.
@@ -1717,9 +1762,7 @@ fn find_handler(func: &Function, prompt: PromptId) -> BlockId {
             }
         }
     }
-    panic!(
-        "abort_to_prompt: could not find PushPrompt instruction for prompt in owning frame"
-    );
+    panic!("abort_to_prompt: could not find PushPrompt instruction for prompt in owning frame");
 }
 
 /// Transfer block arguments via an InterpFrameStore.

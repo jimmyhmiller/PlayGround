@@ -6,10 +6,14 @@
 //! oracle ([`interp`]) diffed against Node, and a dominance-based SSA verifier
 //! ([`verify`]).
 
+pub mod aliasing_ranges;
 pub mod cfg;
 pub mod codegen;
 pub mod constfold;
 pub mod detect;
+pub mod effects;
+pub mod fidelity;
+pub mod infer_effects;
 pub mod infer_types;
 pub mod interp;
 pub mod lower;
@@ -19,6 +23,7 @@ pub mod print;
 pub mod scopes;
 pub mod ssa;
 pub mod types;
+pub mod validate;
 pub mod verify;
 
 pub use cfg::Cfg;
@@ -41,7 +46,7 @@ pub fn compile_ssa(src: &str) -> Result<Cfg, String> {
 ///
 /// This is the façade the `jsir-transforms` memoize pass calls into: it runs the
 /// same analysis chain as [`codegen::compile`]'s memoized branch
-/// (`lower_function` -> `ssa::construct` -> `mutability::analyze` ->
+/// (`lower_function` -> `ssa::construct` -> `aliasing_ranges::analyze` ->
 /// `scopes::analyze`) and hands back the reactive-scope infos plus the SSA CFG.
 /// The CFG's instructions carry [`cfg::SrcRef`] provenance (see [`lower`]), which
 /// is what lets the transform map scope `Value`s back to the JSIR statements it
@@ -66,7 +71,7 @@ pub fn plan(file_fn: &jsir_ir::Op) -> Result<MemoPlan, String> {
     ssa::construct(&mut cfg);
     constfold::fold_constants(&mut cfg);
     let fn_name = cfg.fn_name.clone().unwrap_or_default();
-    let ranges = mutability::analyze(&cfg);
+    let ranges = aliasing_ranges::analyze(&cfg);
     let infos = scopes::analyze(&cfg, &ranges);
     let single_block = cfg.blocks.len() == 1 && matches!(cfg.blocks[0].term, cfg::Term::Ret(_));
     Ok(MemoPlan { fn_name, infos, cfg, single_block })

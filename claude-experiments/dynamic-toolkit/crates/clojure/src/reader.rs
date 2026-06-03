@@ -9,7 +9,7 @@
 //! and the reader macros `'`, `` ` ``, `~`, `~@` which expand to
 //! `(quote …)`, `(quasiquote …)`, `(unquote …)`, `(unquote-splicing …)`.
 
-use dynobj::roots::{with_scope, RootSet};
+use dynobj::roots::{RootSet, with_scope};
 
 use crate::collections::{alloc_set, alloc_string, alloc_vector};
 use crate::host::with_host;
@@ -43,7 +43,9 @@ impl std::fmt::Display for ReadError {
             ReadError::BadEscape(c, p) => {
                 write!(f, "bad escape \\{} at byte {}", c, p)
             }
-            ReadError::OddMapEntries(p) => write!(f, "map literal at byte {} has an odd number of forms", p),
+            ReadError::OddMapEntries(p) => {
+                write!(f, "map literal at byte {} has an odd number of forms", p)
+            }
         }
     }
 }
@@ -218,10 +220,7 @@ impl<'a> Reader<'a> {
         let start = self.pos;
         self.read_collection(close, move |scope, items| {
             if items.len() % 2 != 0 {
-                panic!(
-                    "map literal at byte {} has an odd number of forms",
-                    start
-                );
+                panic!("map literal at byte {} has an odd number of forms", start);
             }
             let pairs: Vec<(u64, u64)> = (0..items.len() / 2)
                 .map(|i| (items.get(2 * i), items.get(2 * i + 1)))
@@ -255,8 +254,7 @@ impl<'a> Reader<'a> {
         let mut items = RootSet::new();
         let host_gc = with_host(|h| h.gc);
         let items_src: *const dyn dynobj::RootSource = &items;
-        let _root_guard =
-            unsafe { (*host_gc).push_extra_root_source(items_src) };
+        let _root_guard = unsafe { (*host_gc).push_extra_root_source(items_src) };
 
         loop {
             self.skip_ws_and_comments();
@@ -349,9 +347,7 @@ impl<'a> Reader<'a> {
             self.bump();
         }
         // Hex literal: 0x... or 0X...
-        if self.peek() == Some(b'0')
-            && matches!(self.peek_at(1), Some(b'x') | Some(b'X'))
-        {
+        if self.peek() == Some(b'0') && matches!(self.peek_at(1), Some(b'x') | Some(b'X')) {
             self.bump(); // '0'
             self.bump(); // 'x'
             let hex_start = self.pos;
@@ -462,8 +458,18 @@ fn is_token_break(c: u8) -> bool {
     c.is_ascii_whitespace()
         || matches!(
             c,
-            b'(' | b')' | b'[' | b']' | b'{' | b'}' | b'\'' | b'`' | b','
-                | b';' | b'"' | b'^' | b'@' | b'~'
+            b'(' | b')'
+                | b'['
+                | b']'
+                | b'{'
+                | b'}'
+                | b'\''
+                | b'`'
+                | b','
+                | b';'
+                | b'"'
+                | b'^'
+                | b'@'
+                | b'~'
         )
 }
-

@@ -124,10 +124,7 @@ pub fn declare_types(dyn_module: &mut DynModule) -> Types {
     // and the reader's transient Vector storage — same layout, same
     // type-id. core.clj treats it as the primitive backing store for
     // its PersistentVector / PersistentHashMap implementations.
-    let array = dyn_module
-        .obj_type("Array")
-        .varlen_values()
-        .build();
+    let array = dyn_module.obj_type("Array").varlen_values().build();
 
     // ── Map: v1 is a flat array of [k0, v0, k1, v1, …] entries.
     // `count` stores the entry count (= varlen_count / 2). HAMT

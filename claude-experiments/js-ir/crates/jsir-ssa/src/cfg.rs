@@ -63,6 +63,40 @@ pub struct Cfg {
     /// (`while`), whose join is the loop-exit block and which has an incoming
     /// back-edge.
     pub block_kinds: HashMap<BlockId, BlockKind>,
+    /// **Lowered closure bodies.** Each is an ordinary `Cfg` whose leading params
+    /// are the closure's captured outer variables (in `ClosureRepr::captures`
+    /// order) followed by the closure's own declared params. Indexed by
+    /// [`ClosureRepr::body`].
+    pub nested: Vec<Cfg>,
+    /// Maps a closure value (the `MakeArray` result that represents the closure)
+    /// to the nested-body index and the SSA values of its captured outer
+    /// variables. Two consumers: the **interpreter** calls the closure (runs
+    /// [`Cfg::nested`]`[body]` with the captures as leading args, so captured-object
+    /// mutation is observable), and **mutability analysis** infers which captures
+    /// the body mutates by analysing the nested body, propagating that to call
+    /// sites (replacing the old coarse `closure_mutates` scan). SSA construction
+    /// rewrites the capture values in place (see [`crate::ssa`]).
+    pub closures: HashMap<Value, ClosureRepr>,
+    /// **Spread element positions, for the interpreter only.** Maps a
+    /// `MakeArray` / `MakeObject` / `Call` result to the operand indices that are
+    /// spreads (`[...a, 9]`, `f(...args)`, `{...o, b}`). The analyses keep
+    /// modelling a spread by aliasing the source into the container (the
+    /// dependency relation they need), so their view is unchanged; the
+    /// interpreter consults this to actually splat the source's elements/props
+    /// (array/call) or merge its properties (object). Operand positions are
+    /// stable across SSA construction (it substitutes values in place, never
+    /// reorders), so this survives untouched.
+    pub spread_positions: HashMap<Value, Vec<usize>>,
+}
+
+/// The behavioral representation of a closure value (see [`Cfg::closures`]).
+#[derive(Debug, Clone)]
+pub struct ClosureRepr {
+    /// Index into [`Cfg::nested`] of the lowered closure body.
+    pub body: usize,
+    /// SSA values of the closure's captured outer variables, in the same order
+    /// as the nested body's leading capture parameters.
+    pub captures: Vec<Value>,
 }
 
 /// The structural role of a control-flow head block (see [`Cfg::block_kinds`]).
@@ -262,6 +296,9 @@ impl Cfg {
             cur_src: None,
             joins: HashMap::new(),
             block_kinds: HashMap::new(),
+            nested: Vec::new(),
+            closures: HashMap::new(),
+            spread_positions: HashMap::new(),
         }
     }
 

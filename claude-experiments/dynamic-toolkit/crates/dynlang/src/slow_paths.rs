@@ -52,7 +52,8 @@ mod tests {
 
     #[test]
     fn register_with_defaults_populates_auto_externs() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         dyn_module.register_slow_paths_with_defaults("rt");
 
         for op in [
@@ -72,7 +73,8 @@ mod tests {
             0xDEADBEEF
         }
 
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         dyn_module.register_slow_paths_with_defaults("rt");
         let default_add = dyn_module.auto_externs["rt_add"];
 
@@ -92,7 +94,8 @@ mod tests {
 
     #[test]
     fn register_without_defaults_leaves_auto_externs_empty() {
-        let mut dyn_module = DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
+        let mut dyn_module =
+            DynModule::new(GcConfig::generational(64 * 1024), NanBoxTags::default());
         dyn_module.register_slow_paths("rt"); // declare-only form
         assert!(dyn_module.auto_externs.is_empty());
     }

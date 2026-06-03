@@ -2348,6 +2348,11 @@ enum Failure {
 
 enum Result<T, E> { Ok(T), Err(E) }
 
+// Error returned by the checked, generic `decode::<T>(bytes)`:
+// `TypeMismatch` = the bytes held a value of a different type than `T`;
+// `Malformed` = the bytes were truncated or otherwise un-decodable.
+enum DecodeError { TypeMismatch, Malformed }
+
 def tcp_node(a: Int, b: Int, c: Int, d: Int, port: Int) -> Node =
     Node { a: a, b: b, c: c, d: d, port: port }
 
@@ -2732,28 +2737,29 @@ def imap_place<V>(m: IntMap<V>, idx: Int, key: Int, val: V) -> IntMap<V> =
     }
 
 
-// ---- PMap<V>: a PERSISTENT (immutable, structurally-shared) HAMT ----
+// ---- HashMap<K, V>: a PERSISTENT (immutable, structurally-shared) HAMT ----
 //
-// String keys, GENERIC values. `pmap_assoc` never mutates an existing
-// version: it returns a new map sharing all untouched subtrees. The
-// structure an atom holds so `swap` is a true CAS over an immutable
-// value. 32-way bitmap nodes; a collision bucket handles full-hash
+// GENERIC keys AND values: keys are hashed and compared STRUCTURALLY via
+// `value_hash` / `value_eq` (the language's universal hashability), so any
+// type can be a key. `hashmap_assoc` never mutates an existing version: it
+// returns a new map sharing all untouched subtrees. The immutable value an
+// atom holds so `swap` is a true CAS. 32-way bitmap nodes; a collision
+// bucket handles full-hash
 // clashes. Ships over the wire (Array + String + struct/enum portable).
 
-struct HLeaf<V> { kh: Int, hkey: String, val: V }
-struct HBitmap<V> { bitmap: Int, kids: Array<HNode<V>> }
-struct HColl<V> { kh: Int, items: Array<HNode<V>> }
-enum HNode<V> { HEmpty, HL(HLeaf<V>), HB(HBitmap<V>), HC(HColl<V>) }
-struct PMap<V> { root: HNode<V>, size: Int }
-struct AssocOut<V> { node: HNode<V>, added: Int }
-
-def hash_key(s: String) -> Int = {
-    let b = bytes_from_string(s);
-    fnv(b, 0, bytes_len(b), 2166136261)
-}
-def fnv(b: Bytes, i: Int, n: Int, acc: Int) -> Int =
-    if i == n { acc }
-    else { fnv(b, i + 1, n, bit_xor(acc, bytes_get(b, i)) * 16777619) }
+// A persistent HAMT keyed by ANY value type `K`. Keys are hashed and
+// compared STRUCTURALLY via `value_hash` / `value_eq` (the language's
+// universal hashability), so `HashMap<Int, V>`, `HashMap<String, V>`,
+// `HashMap<MyStruct, V>` all work with one implementation. 32-way bitmap
+// nodes; a collision bucket handles full-hash clashes. Immutable, so it is
+// exactly the value an `Atom` holds for lock-free CAS, and it ships over
+// the wire (Array + struct/enum portable).
+struct HLeaf<K, V> { kh: Int, hkey: K, val: V }
+struct HBitmap<K, V> { bitmap: Int, kids: Array<HNode<K, V>> }
+struct HColl<K, V> { kh: Int, items: Array<HNode<K, V>> }
+enum HNode<K, V> { HEmpty, HL(HLeaf<K, V>), HB(HBitmap<K, V>), HC(HColl<K, V>) }
+struct HashMap<K, V> { root: HNode<K, V>, size: Int }
+struct AssocOut<K, V> { node: HNode<K, V>, added: Int }
 
 def popcount(x: Int) -> Int =
     if x == 0 { 0 } else { bit_and(x, 1) + popcount(bit_shr(x, 1)) }
@@ -2761,34 +2767,34 @@ def frag(h: Int, shift: Int) -> Int = bit_and(bit_shr(h, shift), 31)
 def bitpos(h: Int, shift: Int) -> Int = bit_shl(1, frag(h, shift))
 def index_of(bitmap: Int, bit: Int) -> Int = popcount(bit_and(bitmap, bit - 1))
 
-def arr1<V>(x: HNode<V>) -> Array<HNode<V>> = {
+def arr1<K, V>(x: HNode<K, V>) -> Array<HNode<K, V>> = {
     let a = array_new(1);
     let _s = array_set(a, 0, x);
     a
 }
-def arr2<V>(a: HNode<V>, b: HNode<V>) -> Array<HNode<V>> = {
+def arr2<K, V>(a: HNode<K, V>, b: HNode<K, V>) -> Array<HNode<K, V>> = {
     let arr = array_new(2);
     let _s0 = array_set(arr, 0, a);
     let _s1 = array_set(arr, 1, b);
     arr
 }
-def arr_set_copy<V>(a: Array<HNode<V>>, idx: Int, v: HNode<V>) -> Array<HNode<V>> = {
+def arr_set_copy<K, V>(a: Array<HNode<K, V>>, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> = {
     let n = array_len(a);
     let out = array_new(n);
     arr_copy_set(a, out, 0, n, idx, v)
 }
-def arr_copy_set<V>(src: Array<HNode<V>>, dst: Array<HNode<V>>, i: Int, n: Int, idx: Int, v: HNode<V>) -> Array<HNode<V>> =
+def arr_copy_set<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, i: Int, n: Int, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> =
     if i == n { let _s = array_set(dst, idx, v); dst }
     else {
         let _s = array_set(dst, i, array_get(src, i));
         arr_copy_set(src, dst, i + 1, n, idx, v)
     }
-def arr_insert_copy<V>(a: Array<HNode<V>>, idx: Int, v: HNode<V>) -> Array<HNode<V>> = {
+def arr_insert_copy<K, V>(a: Array<HNode<K, V>>, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> = {
     let n = array_len(a);
     let out = array_new(n + 1);
     arr_ins_fill(a, out, 0, n, idx, v)
 }
-def arr_ins_fill<V>(src: Array<HNode<V>>, dst: Array<HNode<V>>, j: Int, n: Int, idx: Int, v: HNode<V>) -> Array<HNode<V>> =
+def arr_ins_fill<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, j: Int, n: Int, idx: Int, v: HNode<K, V>) -> Array<HNode<K, V>> =
     if j == n + 1 { dst }
     else {
         let chosen = if j < idx { array_get(src, j) }
@@ -2797,16 +2803,16 @@ def arr_ins_fill<V>(src: Array<HNode<V>>, dst: Array<HNode<V>>, j: Int, n: Int, 
         arr_ins_fill(src, dst, j + 1, n, idx, v)
     }
 
-def pmap_empty<V>() -> PMap<V> = PMap { root: HEmpty, size: 0 }
-def pmap_size<V>(m: PMap<V>) -> Int = m.size
+def hashmap_empty<K, V>() -> HashMap<K, V> = HashMap { root: HEmpty, size: 0 }
+def hashmap_size<K, V>(m: HashMap<K, V>) -> Int = m.size
 
-def pmap_get<V>(m: PMap<V>, key: String) -> Option<V> =
-    node_get(m.root, hash_key(key), 0, key)
-def node_get<V>(node: HNode<V>, h: Int, shift: Int, key: String) -> Option<V> =
+def hashmap_get<K, V>(m: HashMap<K, V>, key: K) -> Option<V> =
+    node_get(m.root, value_hash(key), 0, key)
+def node_get<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K) -> Option<V> =
     match node {
         HEmpty => None,
         HL(leaf) =>
-            if string_eq(leaf.hkey, key) { Some(leaf.val) } else { None },
+            if value_eq(leaf.hkey, key) { Some(leaf.val) } else { None },
         HC(coll) => coll_get(coll.items, 0, array_len(coll.items), key),
         HB(bm) => {
             let bit = bitpos(h, shift);
@@ -2816,12 +2822,12 @@ def node_get<V>(node: HNode<V>, h: Int, shift: Int, key: String) -> Option<V> =
             }
         },
     }
-def coll_get<V>(items: Array<HNode<V>>, i: Int, n: Int, key: String) -> Option<V> =
+def coll_get<K, V>(items: Array<HNode<K, V>>, i: Int, n: Int, key: K) -> Option<V> =
     if i == n { None }
     else {
         match array_get(items, i) {
             HL(leaf) =>
-                if string_eq(leaf.hkey, key) { Some(leaf.val) }
+                if value_eq(leaf.hkey, key) { Some(leaf.val) }
                 else { coll_get(items, i + 1, n, key) },
             HEmpty => coll_get(items, i + 1, n, key),
             HB(b) => coll_get(items, i + 1, n, key),
@@ -2829,15 +2835,15 @@ def coll_get<V>(items: Array<HNode<V>>, i: Int, n: Int, key: String) -> Option<V
         }
     }
 
-def pmap_assoc<V>(m: PMap<V>, key: String, val: V) -> PMap<V> = {
-    let out = node_assoc(m.root, hash_key(key), 0, key, val);
-    PMap { root: out.node, size: m.size + out.added }
+def hashmap_assoc<K, V>(m: HashMap<K, V>, key: K, val: V) -> HashMap<K, V> = {
+    let out = node_assoc(m.root, value_hash(key), 0, key, val);
+    HashMap { root: out.node, size: m.size + out.added }
 }
-def node_assoc<V>(node: HNode<V>, h: Int, shift: Int, key: String, val: V) -> AssocOut<V> =
+def node_assoc<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K, val: V) -> AssocOut<K, V> =
     match node {
         HEmpty => AssocOut { node: HL(HLeaf { kh: h, hkey: key, val: val }), added: 1 },
         HL(leaf) =>
-            if string_eq(leaf.hkey, key) {
+            if value_eq(leaf.hkey, key) {
                 AssocOut { node: HL(HLeaf { kh: h, hkey: key, val: val }), added: 0 }
             } else {
                 if leaf.kh == h {
@@ -2860,7 +2866,7 @@ def node_assoc<V>(node: HNode<V>, h: Int, shift: Int, key: String, val: V) -> As
             }
         },
     }
-def split_leaf<V>(leaf: HLeaf<V>, h: Int, key: String, val: V, shift: Int) -> HNode<V> = {
+def split_leaf<K, V>(leaf: HLeaf<K, V>, h: Int, key: K, val: V, shift: Int) -> HNode<K, V> = {
     let f1 = frag(leaf.kh, shift);
     let f2 = frag(h, shift);
     if f1 == f2 {
@@ -2873,11 +2879,11 @@ def split_leaf<V>(leaf: HLeaf<V>, h: Int, key: String, val: V, shift: Int) -> HN
         HB(HBitmap { bitmap: bit_or(bit_shl(1, f1), bit_shl(1, f2)), kids: kids })
     }
 }
-def make_coll<V>(leaf: HLeaf<V>, h: Int, key: String, val: V) -> HNode<V> = {
+def make_coll<K, V>(leaf: HLeaf<K, V>, h: Int, key: K, val: V) -> HNode<K, V> = {
     let items = arr2(HL(leaf), HL(HLeaf { kh: h, hkey: key, val: val }));
     HC(HColl { kh: h, items: items })
 }
-def coll_assoc<V>(coll: HColl<V>, key: String, val: V) -> AssocOut<V> = {
+def coll_assoc<K, V>(coll: HColl<K, V>, key: K, val: V) -> AssocOut<K, V> = {
     let found = coll_find(coll.items, 0, array_len(coll.items), key);
     let leaf = HL(HLeaf { kh: coll.kh, hkey: key, val: val });
     if found < 0 {
@@ -2888,55 +2894,54 @@ def coll_assoc<V>(coll: HColl<V>, key: String, val: V) -> AssocOut<V> = {
         AssocOut { node: HC(HColl { kh: coll.kh, items: nk }), added: 0 }
     }
 }
-def coll_find<V>(items: Array<HNode<V>>, i: Int, n: Int, key: String) -> Int =
+def coll_find<K, V>(items: Array<HNode<K, V>>, i: Int, n: Int, key: K) -> Int =
     if i == n { 0 - 1 }
     else {
         match array_get(items, i) {
-            HL(leaf) => if string_eq(leaf.hkey, key) { i } else { coll_find(items, i + 1, n, key) },
+            HL(leaf) => if value_eq(leaf.hkey, key) { i } else { coll_find(items, i + 1, n, key) },
             HEmpty => coll_find(items, i + 1, n, key),
             HB(b) => coll_find(items, i + 1, n, key),
             HC(c) => coll_find(items, i + 1, n, key),
         }
     }
 
-// ---- PMap<V> operations: remove, fold, keys, contains ----
+// ---- HashMap<K, V> operations: remove, fold, keys, contains ----
 
-def pmap_fold<V, A>(m: PMap<V>, init: A, f: fn(A, String, V) -> A) -> A =
+def hashmap_fold<K, V, A>(m: HashMap<K, V>, init: A, f: fn(A, K, V) -> A) -> A =
     node_fold(m.root, init, f)
-def node_fold<V, A>(node: HNode<V>, acc: A, f: fn(A, String, V) -> A) -> A =
+def node_fold<K, V, A>(node: HNode<K, V>, acc: A, f: fn(A, K, V) -> A) -> A =
     match node {
         HEmpty => acc,
         HL(leaf) => f(acc, leaf.hkey, leaf.val),
         HC(coll) => arr_fold(coll.items, 0, array_len(coll.items), acc, f),
         HB(bm) => arr_fold(bm.kids, 0, array_len(bm.kids), acc, f),
     }
-def arr_fold<V, A>(a: Array<HNode<V>>, i: Int, n: Int, acc: A, f: fn(A, String, V) -> A) -> A =
+def arr_fold<K, V, A>(a: Array<HNode<K, V>>, i: Int, n: Int, acc: A, f: fn(A, K, V) -> A) -> A =
     if i == n { acc }
     else { arr_fold(a, i + 1, n, node_fold(array_get(a, i), acc, f), f) }
 
-// size via fold (sanity that fold visits each entry once)
-struct RemoveOut<V> { rnode: HNode<V>, removed: Int }
-def arr_remove_at<V>(a: Array<HNode<V>>, idx: Int) -> Array<HNode<V>> = {
+struct RemoveOut<K, V> { rnode: HNode<K, V>, removed: Int }
+def arr_remove_at<K, V>(a: Array<HNode<K, V>>, idx: Int) -> Array<HNode<K, V>> = {
     let n = array_len(a);
     let out = array_new(n - 1);
     arr_rm_fill(a, out, 0, n, idx)
 }
-def arr_rm_fill<V>(src: Array<HNode<V>>, dst: Array<HNode<V>>, j: Int, n: Int, idx: Int) -> Array<HNode<V>> =
+def arr_rm_fill<K, V>(src: Array<HNode<K, V>>, dst: Array<HNode<K, V>>, j: Int, n: Int, idx: Int) -> Array<HNode<K, V>> =
     if j == n { dst }
     else {
         let _w = if j < idx { array_set(dst, j, array_get(src, j)) }
             else { if j == idx { 0 } else { array_set(dst, j - 1, array_get(src, j)) } };
         arr_rm_fill(src, dst, j + 1, n, idx)
     }
-def pmap_remove<V>(m: PMap<V>, key: String) -> PMap<V> = {
-    let out = node_remove(m.root, hash_key(key), 0, key);
-    PMap { root: out.rnode, size: m.size - out.removed }
+def hashmap_remove<K, V>(m: HashMap<K, V>, key: K) -> HashMap<K, V> = {
+    let out = node_remove(m.root, value_hash(key), 0, key);
+    HashMap { root: out.rnode, size: m.size - out.removed }
 }
-def node_remove<V>(node: HNode<V>, h: Int, shift: Int, key: String) -> RemoveOut<V> =
+def node_remove<K, V>(node: HNode<K, V>, h: Int, shift: Int, key: K) -> RemoveOut<K, V> =
     match node {
         HEmpty => RemoveOut { rnode: HEmpty, removed: 0 },
         HL(leaf) =>
-            if string_eq(leaf.hkey, key) { RemoveOut { rnode: HEmpty, removed: 1 } }
+            if value_eq(leaf.hkey, key) { RemoveOut { rnode: HEmpty, removed: 1 } }
             else { RemoveOut { rnode: HL(leaf), removed: 0 } },
         HC(coll) => coll_remove(coll, key),
         HB(bm) => {
@@ -2968,7 +2973,7 @@ def node_remove<V>(node: HNode<V>, h: Int, shift: Int, key: String) -> RemoveOut
             }
         },
     }
-def coll_remove<V>(coll: HColl<V>, key: String) -> RemoveOut<V> = {
+def coll_remove<K, V>(coll: HColl<K, V>, key: K) -> RemoveOut<K, V> = {
     let found = coll_find(coll.items, 0, array_len(coll.items), key);
     if found < 0 { RemoveOut { rnode: HC(coll), removed: 0 } }
     else {
@@ -2983,13 +2988,13 @@ def coll_remove<V>(coll: HColl<V>, key: String) -> RemoveOut<V> = {
     }
 }
 
-// pmap_contains: is the key present?
-def pmap_contains<V>(m: PMap<V>, key: String) -> Int =
-    match pmap_get(m, key) { Some(v) => 1, None => 0 }
+// hashmap_contains: is the key present?
+def hashmap_contains<K, V>(m: HashMap<K, V>, key: K) -> Int =
+    match hashmap_get(m, key) { Some(v) => 1, None => 0 }
 
-// pmap_keys: all keys as a List<String> (fold collecting into a list).
-def pmap_keys<V>(m: PMap<V>) -> List<String> =
-    pmap_fold(m, Nil, |acc: List<String>, k: String, v: V| Cons(ListCell { head: k, tail: acc }))
+// hashmap_keys: all keys as a List<K> (fold collecting into a list).
+def hashmap_keys<K, V>(m: HashMap<K, V>) -> List<K> =
+    hashmap_fold(m, Nil, |acc: List<K>, k: K, v: V| Cons(ListCell { head: k, tail: acc }))
 
 // ---- Atom<T>: a local, lock-free atomic reference (Clojure-style) ----
 //
@@ -3001,25 +3006,263 @@ def pmap_keys<V>(m: PMap<V>) -> List<String> =
 // `swap(a, f)` is the Clojure move and the heart of it: read the current
 // value, apply the PURE function f, and lock-free compare-and-set the
 // result in, retrying if another writer beat us. NO locks: it is one
-// hardware compare-exchange (the `atom_swap_slot` primitive). Correct
+// hardware compare-exchange (the `atom_swap` primitive). Correct
 // because values are immutable, so identity-CAS on the slot pointer is
 // enough. f may run more than once under contention, hence must be pure.
 //
 // Works for ANY value type with zero user thought (Int, String, PMap,
 // structs, ...): the primitive moves raw object pointers; the closure
 // handles its own boxing via the uniform ABI.
-struct Atom<T> { cell: Array<T> }
-
-def atom<T>(init: T) -> Atom<T> = {
-    let c = array_new(1);
-    let _s = array_set(c, 0, init);
-    Atom { cell: c }
-}
-def deref<T>(a: Atom<T>) -> T = array_get(a.cell, 0)
+//
+// `Atom<T>` is a dedicated runtime shape (one GC-traced, atomically
+// updated pointer cell), NOT a struct wrapping an Array. That makes a
+// shared mutable cell recognizable as such to the GC and reflection,
+// instead of masquerading as a 1-element immutable array.
+def atom<T>(init: T) -> Atom<T> = atom_new(init)
+def deref<T>(a: Atom<T>) -> T = atom_load(a)
 // swap = the lock-free CAS retry loop, in the runtime primitive.
-def swap<T>(a: Atom<T>, f: fn(T) -> T) -> T = atom_swap_slot(a.cell, 0, f)
+def swap<T>(a: Atom<T>, f: fn(T) -> T) -> T = atom_swap(a, f)
 // reset = a swap that ignores the old value.
 def reset<T>(a: Atom<T>, v: T) -> T = swap(a, |_old: T| v)
+
+// ---- Networking: POSIX sockets + length-prefixed framing ----
+//
+// The ENTIRE transport is written here in ai-lang. The only primitives
+// are libc socket syscalls (declared as C externs) plus the existing
+// `Ptr` memory intrinsics. There is NO Rust networking code behind this:
+// bind/accept/recv/send and the frame protocol are all ordinary ai-lang.
+//
+// This is the foundation for writing a *node* (a server loop) in the
+// language itself, rather than relying on a hardcoded Rust serve loop.
+//
+// File descriptors (listeners and connections) are plain `Int`s, exactly
+// as the kernel hands them back. Every fallible op returns
+// `Result<_, NetErr>`.
+
+extern "C" lib "c" {
+    fn socket(domain: Int, ty: Int, protocol: Int) -> Int
+    fn bind(fd: Int, addr: Ptr, addrlen: Int) -> Int
+    fn listen(fd: Int, backlog: Int) -> Int
+    fn accept(fd: Int, addr: Ptr, addrlen: Ptr) -> Int
+    fn connect(fd: Int, addr: Ptr, addrlen: Int) -> Int
+    fn read(fd: Int, buf: Ptr, count: Int) -> Int
+    fn write(fd: Int, buf: Ptr, count: Int) -> Int
+    fn close(fd: Int) -> Int
+    fn setsockopt(fd: Int, level: Int, optname: Int, optval: Ptr, optlen: Int) -> Int
+}
+
+enum NetErr {
+    SocketFailed,
+    BindFailed,
+    ListenFailed,
+    AcceptFailed,
+    ConnectFailed,
+    ConnClosed,
+    WriteFailed,
+    FrameTooLarge,
+}
+
+// Largest frame we will read, to bound a corrupt/hostile length prefix.
+def net_max_frame() -> Int = 67108864   // 64 MiB
+
+// Zero `n` bytes starting at `p`. (malloc does not zero.)
+def net_zero(p: Ptr, i: Int, n: Int) -> Int =
+    if i >= n { 0 } else { let _w = ptr_write_u8(p, i, 0); net_zero(p, i + 1, n) }
+
+// Build a `sockaddr_in` (16 bytes) for a.b.c.d:port in a fresh malloc'd
+// buffer. macOS layout: sin_len@0, sin_family@1; port + addr are stored
+// in network byte order (big-endian) by hand, so no htons is needed.
+def net_sockaddr_in(a: Int, b: Int, c: Int, d: Int, port: Int) -> Ptr = {
+    let sa = malloc(16);
+    let _z = net_zero(sa, 0, 16);
+    let _l = ptr_write_u8(sa, 0, 16);                  // sin_len
+    let _f = ptr_write_u8(sa, 1, 2);                   // AF_INET
+    let _ph = ptr_write_u8(sa, 2, (port / 256) % 256); // port hi
+    let _pl = ptr_write_u8(sa, 3, port % 256);         // port lo
+    let _a = ptr_write_u8(sa, 4, a);
+    let _b = ptr_write_u8(sa, 5, b);
+    let _c = ptr_write_u8(sa, 6, c);
+    let _d = ptr_write_u8(sa, 7, d);
+    sa
+}
+
+// SO_REUSEADDR so a server can rebind a recently-used port. (macOS
+// SOL_SOCKET = 0xffff, SO_REUSEADDR = 0x0004.)
+def net_set_reuseaddr(fd: Int) -> Int = {
+    let one = malloc(8);
+    let _z = ptr_write_i64(one, 0, 0);
+    let _o = ptr_write_u8(one, 0, 1);
+    let r = setsockopt(fd, 65535, 4, one, 4);
+    let _free = free(one);
+    r
+}
+
+// Open a listening socket bound to 0.0.0.0:port. Returns the listener fd.
+def tcp_listen(port: Int) -> Result<Int, NetErr> = {
+    let fd = socket(2, 1, 0);   // AF_INET, SOCK_STREAM, default proto
+    if fd < 0 { Err(SocketFailed) } else {
+        let _r = net_set_reuseaddr(fd);
+        let sa = net_sockaddr_in(0, 0, 0, 0, port);
+        defer free(sa);
+        let br = bind(fd, sa, 16);
+        if br < 0 {
+            let _c = close(fd);
+            Err(BindFailed)
+        } else {
+            let lr = listen(fd, 16);
+            if lr < 0 {
+                let _c = close(fd);
+                Err(ListenFailed)
+            } else {
+                Ok(fd)
+            }
+        }
+    }
+}
+
+// Accept one connection. Blocks until a client connects. Returns the
+// connection fd. (NULL addr/addrlen: we don't need the peer address.)
+def tcp_accept(listener: Int) -> Result<Int, NetErr> = {
+    let c = accept(listener, ptr_null(), ptr_null());
+    if c < 0 { Err(AcceptFailed) } else { Ok(c) }
+}
+
+// Connect to a.b.c.d:port. Returns the connection fd.
+def tcp_connect(a: Int, b: Int, c: Int, d: Int, port: Int) -> Result<Int, NetErr> = {
+    let fd = socket(2, 1, 0);
+    if fd < 0 { Err(SocketFailed) } else {
+        let sa = net_sockaddr_in(a, b, c, d, port);
+        defer free(sa);
+        let r = connect(fd, sa, 16);
+        if r < 0 {
+            let _c = close(fd);
+            Err(ConnectFailed)
+        } else {
+            Ok(fd)
+        }
+    }
+}
+
+def conn_close(fd: Int) -> Int = close(fd)
+
+// --- Length-prefixed framing (4-byte big-endian length + payload) ---
+
+// Read exactly `n` bytes from `fd` into `buf` starting at `got`,
+// retrying on short reads. ConnClosed on EOF (read returns 0) or error.
+def net_read_into(fd: Int, buf: Ptr, got: Int, n: Int) -> Result<Int, NetErr> =
+    if got >= n { Ok(got) } else {
+        let r = read(fd, ptr_add(buf, got), n - got);
+        if r <= 0 { Err(ConnClosed) } else { net_read_into(fd, buf, got + r, n) }
+    }
+
+// Copy `n` raw bytes from `buf` into Bytes `b`.
+def net_buf_to_bytes(buf: Ptr, b: Bytes, i: Int, n: Int) -> Bytes =
+    if i >= n { b } else {
+        let _s = bytes_set(b, i, ptr_read_u8(buf, i));
+        net_buf_to_bytes(buf, b, i + 1, n)
+    }
+
+// Receive exactly `n` bytes as a Bytes.
+def net_recv_exact(fd: Int, n: Int) -> Result<Bytes, NetErr> = {
+    let buf = malloc(n);
+    defer free(buf);
+    let _got = net_read_into(fd, buf, 0, n)?;
+    let b = bytes_new(n);
+    Ok(net_buf_to_bytes(buf, b, 0, n))
+}
+
+// Decode a 4-byte big-endian length.
+def net_be32(b: Bytes) -> Int =
+    bytes_get(b, 0) * 16777216 + bytes_get(b, 1) * 65536
+        + bytes_get(b, 2) * 256 + bytes_get(b, 3)
+
+// Receive one length-prefixed frame.
+def recv_frame(fd: Int) -> Result<Bytes, NetErr> = {
+    let hdr = net_recv_exact(fd, 4)?;
+    let len = net_be32(hdr);
+    if len > net_max_frame() { Err(FrameTooLarge) } else { net_recv_exact(fd, len) }
+}
+
+// Copy Bytes `b` into raw buffer `buf`.
+def net_bytes_to_buf(b: Bytes, buf: Ptr, i: Int, n: Int) -> Int =
+    if i >= n { 0 } else {
+        let _w = ptr_write_u8(buf, i, bytes_get(b, i));
+        net_bytes_to_buf(b, buf, i + 1, n)
+    }
+
+// Write exactly `n` bytes from `buf` (starting at `sent`), retrying on
+// short writes.
+def net_write_all(fd: Int, buf: Ptr, sent: Int, n: Int) -> Result<Int, NetErr> =
+    if sent >= n { Ok(sent) } else {
+        let w = write(fd, ptr_add(buf, sent), n - sent);
+        if w <= 0 { Err(WriteFailed) } else { net_write_all(fd, buf, sent + w, n) }
+    }
+
+// Send all bytes of `b` over `fd`.
+def net_send_bytes(fd: Int, b: Bytes) -> Result<Int, NetErr> = {
+    let n = bytes_len(b);
+    let buf = malloc(n);
+    defer free(buf);
+    let _c = net_bytes_to_buf(b, buf, 0, n);
+    net_write_all(fd, buf, 0, n)
+}
+
+// Encode a 4-byte big-endian length header.
+def net_be32_bytes(n: Int) -> Bytes = {
+    let h = bytes_new(4);
+    let _0 = bytes_set(h, 0, (n / 16777216) % 256);
+    let _1 = bytes_set(h, 1, (n / 65536) % 256);
+    let _2 = bytes_set(h, 2, (n / 256) % 256);
+    let _3 = bytes_set(h, 3, n % 256);
+    h
+}
+
+// Send one length-prefixed frame.
+def send_frame(fd: Int, payload: Bytes) -> Result<Int, NetErr> = {
+    let hdr = net_be32_bytes(bytes_len(payload));
+    net_send_bytes(fd, bytes_concat(hdr, payload))
+}
+
+// ---- Generic at() handler server ----
+//
+// `serve` runs node-resident at() handlers. One turn: accept a connection,
+// read the shipped closure frame, run it ON THIS NODE (`wire_invoke`
+// decodes the closure, invokes it, and encodes the result), ship the result
+// back. Handler-agnostic: the closure carries its own code, so `serve`
+// never names a handler or a `state` — a node author just `serve`s and
+// remote participants ship `|| handler(msg)`. `wire_invoke` does NOT
+// memoize, so a stateful handler (one that touches a node `state`) runs
+// every time, which is exactly what mutation requires.
+//
+// Requires the host to have installed the current runtime (so `wire_invoke`
+// can reach the node's code table + state). Returns 0 on a handled request,
+// negative on accept/recv failure (the loop variants keep going regardless).
+def serve_turn(listener: Int) -> Int =
+    match tcp_accept(listener) {
+        Ok(conn) => match recv_frame(conn) {
+            Ok(req) => {
+                let resp = wire_invoke(req);
+                let _s = send_frame(conn, resp);
+                let _c = conn_close(conn);
+                0
+            },
+            Err(_e) => 0 - 1,
+        },
+        Err(_e) => 0 - 2,
+    }
+
+// Handle exactly `n` requests then return (testable; bounded).
+def serve_turns(listener: Int, n: Int) -> Int =
+    if n <= 0 { 0 } else {
+        let _t = serve_turn(listener);
+        serve_turns(listener, n - 1)
+    }
+
+// Serve forever (tail-recursive loop, no stack growth). The node's main.
+def serve(listener: Int) -> Int = {
+    let _t = serve_turn(listener);
+    serve(listener)
+}
 
 "#;
 
@@ -3088,20 +3331,20 @@ mod tests {
         init();
         let ctx = Context::create();
         let driver = "
-            def get_or(m: PMap<Int>, k: String, d: Int) -> Int =
-                match pmap_get(m, k) { Some(v) => v, None => d }
-            def build3() -> PMap<Int> =
-                pmap_assoc(pmap_assoc(pmap_assoc(pmap_empty(), \"apple\", 1), \"banana\", 2), \"cherry\", 3)
+            def get_or(m: HashMap<String, Int>, k: String, d: Int) -> Int =
+                match hashmap_get(m, k) { Some(v) => v, None => d }
+            def build3() -> HashMap<String, Int> =
+                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_empty(), \"apple\", 1), \"banana\", 2), \"cherry\", 3)
             def t_a() -> Int = get_or(build3(), \"apple\", 0 - 1)
             def t_b() -> Int = get_or(build3(), \"banana\", 0 - 1)
             def t_c() -> Int = get_or(build3(), \"cherry\", 0 - 1)
             def t_missing() -> Int = get_or(build3(), \"zebra\", 0 - 1)
-            def t_size() -> Int = pmap_size(build3())
+            def t_size() -> Int = hashmap_size(build3())
             def t_replace() -> Int = {
-                let m = pmap_assoc(build3(), \"apple\", 100);
+                let m = hashmap_assoc(build3(), \"apple\", 100);
                 get_or(m, \"apple\", 0 - 1)
             }
-            def t_replace_size() -> Int = pmap_size(pmap_assoc(build3(), \"apple\", 100))
+            def t_replace_size() -> Int = hashmap_size(hashmap_assoc(build3(), \"apple\", 100))
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -3129,29 +3372,29 @@ mod tests {
         let ctx = Context::create();
         // assoc on a derived map must NOT mutate the original.
         let driver = "
-            def get_or(m: PMap<Int>, k: String, d: Int) -> Int =
-                match pmap_get(m, k) { Some(v) => v, None => d }
-            def k10() -> PMap<Int> =
-                pmap_assoc(pmap_assoc(pmap_assoc(pmap_assoc(pmap_assoc(
-                pmap_assoc(pmap_assoc(pmap_assoc(pmap_assoc(pmap_assoc(
-                    pmap_empty(),
+            def get_or(m: HashMap<String, Int>, k: String, d: Int) -> Int =
+                match hashmap_get(m, k) { Some(v) => v, None => d }
+            def k10() -> HashMap<String, Int> =
+                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_assoc(
+                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_assoc(
+                    hashmap_empty(),
                     \"alpha\", 1), \"beta\", 2), \"gamma\", 3), \"delta\", 4), \"epsilon\", 5),
                     \"zeta\", 6), \"eta\", 7), \"theta\", 8), \"iota\", 9), \"kappa\", 10)
             def old_beta() -> Int = get_or(k10(), \"beta\", 0 - 1)
             def new_beta() -> Int = {
-                let m11 = pmap_assoc(k10(), \"beta\", 999);
+                let m11 = hashmap_assoc(k10(), \"beta\", 999);
                 get_or(m11, \"beta\", 0 - 1)
             }
             def old_after_new() -> Int = {
                 let m10 = k10();
-                let m11 = pmap_assoc(m10, \"beta\", 999);
+                let m11 = hashmap_assoc(m10, \"beta\", 999);
                 get_or(m10, \"beta\", 0 - 1)
             }
             def shared_kappa() -> Int = {
-                let m11 = pmap_assoc(k10(), \"beta\", 999);
+                let m11 = hashmap_assoc(k10(), \"beta\", 999);
                 get_or(m11, \"kappa\", 0 - 1)
             }
-            def size10() -> Int = pmap_size(k10())
+            def size10() -> Int = hashmap_size(k10())
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -3176,14 +3419,14 @@ mod tests {
     }
 
     #[test]
-    fn pmap_wire_roundtrip() {
+    fn hashmap_wire_roundtrip() {
         init();
         let ctx = Context::create();
         let driver = "
-            def get_or(m: PMap<Int>, k: String, d: Int) -> Int =
-                match pmap_get(m, k) { Some(v) => v, None => d }
-            def build3() -> PMap<Int> =
-                pmap_assoc(pmap_assoc(pmap_assoc(pmap_empty(), \"apple\", 1), \"banana\", 2), \"cherry\", 3)
+            def get_or(m: HashMap<String, Int>, k: String, d: Int) -> Int =
+                match hashmap_get(m, k) { Some(v) => v, None => d }
+            def build3() -> HashMap<String, Int> =
+                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_empty(), \"apple\", 1), \"banana\", 2), \"cherry\", 3)
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -3228,29 +3471,78 @@ mod tests {
         }
     }
 
+    /// The whole point: `HashMap<K, V>` keys on ANY type, hashed + compared
+    /// STRUCTURALLY via `value_hash`/`value_eq`. Int keys, and STRUCT keys
+    /// where a freshly-rebuilt structurally-equal key still hits.
     #[test]
-    fn pmap_generic_string_values() {
+    fn hashmap_nonstring_keys() {
         init();
         let ctx = Context::create();
-        // The point of generics: a PMap<String> (string -> string) works
-        // with the SAME pmap_* defs as PMap<Int>. Also a PMap<Pair> to
+        let driver = "
+            struct Point { x: Int, y: Int }
+
+            // Int keys (boxed Ints hashed/compared by content).
+            def hm_int() -> Int = {
+                let m = hashmap_assoc(hashmap_assoc(hashmap_empty(), 10, 100), 20, 200);
+                match hashmap_get(m, 20) { Some(v) => v, None => 0 - 1 }
+            }
+            def hm_int_overwrite() -> Int = {
+                let m = hashmap_assoc(hashmap_assoc(hashmap_empty(), 7, 1), 7, 2);
+                hashmap_size(m) * 1000 + match hashmap_get(m, 7) { Some(v) => v, None => 0 - 1 }
+            }
+
+            // Struct keys: a DIFFERENT Point object that is structurally
+            // equal must resolve to the same entry (value equality, not
+            // pointer identity).
+            // Struct literals appear as a MID call arg and inside a `match`
+            // head — both unambiguous inside the call's parens.
+            def hm_struct_hit() -> Int = {
+                let m = hashmap_assoc(hashmap_empty(), Point { x: 1, y: 2 }, 42);
+                match hashmap_get(m, Point { x: 1, y: 2 }) { Some(v) => v, None => 0 - 1 }
+            }
+            def hm_struct_miss() -> Int = {
+                let m = hashmap_assoc(hashmap_empty(), Point { x: 1, y: 2 }, 42);
+                match hashmap_get(m, Point { x: 1, y: 9 }) { Some(v) => v, None => 0 - 1 }
+            }
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names[n]))
+                    .unwrap()
+                    .call(rt.thread_ptr())
+            };
+            assert_eq!(f("hm_int"), 200, "Int keys work");
+            assert_eq!(f("hm_int_overwrite"), 1002, "same Int key overwrites (size 1, val 2)");
+            assert_eq!(f("hm_struct_hit"), 42, "structurally-equal struct key hits");
+            assert_eq!(f("hm_struct_miss"), 0 - 1, "different struct key misses");
+        }
+    }
+
+    #[test]
+    fn hashmap_generic_string_values() {
+        init();
+        let ctx = Context::create();
+        // The point of generics: a HashMap<String, String> (string -> string) works
+        // with the SAME hashmap_* defs as HashMap<String, Int>. Also a HashMap<String, Pair> to
         // prove struct values ride too.
         let driver = "
             struct Pair { a: Int, b: Int }
-            def get_or_str(m: PMap<String>, k: String, d: String) -> String =
-                match pmap_get(m, k) { Some(v) => v, None => d }
-            def build_strs() -> PMap<String> =
-                pmap_assoc(pmap_assoc(pmap_assoc(pmap_empty(),
+            def get_or_str(m: HashMap<String, String>, k: String, d: String) -> String =
+                match hashmap_get(m, k) { Some(v) => v, None => d }
+            def build_strs() -> HashMap<String, String> =
+                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_empty(),
                     \"name\", \"ada\"), \"lang\", \"ai-lang\"), \"x\", \"y\")
             def t_lang_len() -> Int = string_len(get_or_str(build_strs(), \"lang\", \"?\"))
             def t_name_len() -> Int = string_len(get_or_str(build_strs(), \"name\", \"?\"))
             def t_str_miss() -> Int = string_len(get_or_str(build_strs(), \"nope\", \"MISS\"))
-            def t_str_size() -> Int = pmap_size(build_strs())
+            def t_str_size() -> Int = hashmap_size(build_strs())
 
-            def build_pairs() -> PMap<Pair> =
-                pmap_assoc(pmap_assoc(pmap_empty(), \"p\", Pair { a: 3, b: 4 }), \"q\", Pair { a: 10, b: 20 })
+            def build_pairs() -> HashMap<String, Pair> =
+                hashmap_assoc(hashmap_assoc(hashmap_empty(), \"p\", Pair { a: 3, b: 4 }), \"q\", Pair { a: 10, b: 20 })
             def t_pair_sum() -> Int =
-                match pmap_get(build_pairs(), \"q\") { Some(p) => p.a + p.b, None => 0 - 1 }
+                match hashmap_get(build_pairs(), \"q\") { Some(p) => p.a + p.b, None => 0 - 1 }
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -3262,55 +3554,55 @@ mod tests {
                     .unwrap()
                     .call(rt.thread_ptr())
             };
-            assert_eq!(f("t_lang_len"), 7, "PMap<String> value \"ai-lang\"");
-            assert_eq!(f("t_name_len"), 3, "PMap<String> value \"ada\"");
+            assert_eq!(f("t_lang_len"), 7, "HashMap<String, String> value \"ai-lang\"");
+            assert_eq!(f("t_name_len"), 3, "HashMap<String, String> value \"ada\"");
             assert_eq!(f("t_str_miss"), 4, "missing key returns default \"MISS\"");
             assert_eq!(f("t_str_size"), 3);
-            assert_eq!(f("t_pair_sum"), 30, "PMap<Pair> struct value (10+20)");
+            assert_eq!(f("t_pair_sum"), 30, "HashMap<String, Pair> struct value (10+20)");
         }
     }
 
     #[test]
-    fn pmap_remove_fold_keys() {
+    fn hashmap_remove_fold_keys() {
         init();
         let ctx = Context::create();
         let driver = "
-            def build4() -> PMap<Int> =
-                pmap_assoc(pmap_assoc(pmap_assoc(pmap_assoc(
-                    pmap_empty(), \"a\", 1), \"b\", 2), \"c\", 3), \"d\", 4)
+            def build4() -> HashMap<String, Int> =
+                hashmap_assoc(hashmap_assoc(hashmap_assoc(hashmap_assoc(
+                    hashmap_empty(), \"a\", 1), \"b\", 2), \"c\", 3), \"d\", 4)
 
             // remove: size shrinks, key gone, others survive, original intact
-            def t_rm_size() -> Int = pmap_size(pmap_remove(build4(), \"b\"))
+            def t_rm_size() -> Int = hashmap_size(hashmap_remove(build4(), \"b\"))
             def t_rm_gone() -> Int =
-                match pmap_get(pmap_remove(build4(), \"b\"), \"b\") { Some(v) => 0 - 100, None => 0 }
+                match hashmap_get(hashmap_remove(build4(), \"b\"), \"b\") { Some(v) => 0 - 100, None => 0 }
             def t_rm_survivors() -> Int = {
-                let m2 = pmap_remove(build4(), \"b\");
-                match pmap_get(m2, \"a\") {
-                    Some(va) => match pmap_get(m2, \"d\") { Some(vd) => va + vd, None => 0 - 1 },
+                let m2 = hashmap_remove(build4(), \"b\");
+                match hashmap_get(m2, \"a\") {
+                    Some(va) => match hashmap_get(m2, \"d\") { Some(vd) => va + vd, None => 0 - 1 },
                     None => 0 - 2
                 }
             }
             def t_rm_immutable() -> Int =
-                match pmap_get(build4(), \"b\") { Some(v) => v, None => 0 - 9 }
-            def t_rm_missing_size() -> Int = pmap_size(pmap_remove(build4(), \"zzz\"))
+                match hashmap_get(build4(), \"b\") { Some(v) => v, None => 0 - 9 }
+            def t_rm_missing_size() -> Int = hashmap_size(hashmap_remove(build4(), \"zzz\"))
             def t_rm_then_readd() -> Int = {
-                let m2 = pmap_assoc(pmap_remove(build4(), \"b\"), \"b\", 99);
-                match pmap_get(m2, \"b\") { Some(v) => v, None => 0 - 1 }
+                let m2 = hashmap_assoc(hashmap_remove(build4(), \"b\"), \"b\", 99);
+                match hashmap_get(m2, \"b\") { Some(v) => v, None => 0 - 1 }
             }
 
             // contains
-            def t_has() -> Int = pmap_contains(build4(), \"c\")
-            def t_hasnt() -> Int = pmap_contains(build4(), \"nope\")
+            def t_has() -> Int = hashmap_contains(build4(), \"c\")
+            def t_hasnt() -> Int = hashmap_contains(build4(), \"nope\")
 
             // fold: sum of all values
             def t_fold_sum() -> Int =
-                pmap_fold(build4(), 0, |acc: Int, k: String, v: Int| acc + v)
+                hashmap_fold(build4(), 0, |acc: Int, k: String, v: Int| acc + v)
             // fold: total key-length (string V-agnostic over keys)
             def t_fold_keylen() -> Int =
-                pmap_fold(build4(), 0, |acc: Int, k: String, v: Int| acc + string_len(k))
+                hashmap_fold(build4(), 0, |acc: Int, k: String, v: Int| acc + string_len(k))
 
             // keys: count via list length
-            def t_key_count() -> Int = list_length(pmap_keys(build4()))
+            def t_key_count() -> Int = list_length(hashmap_keys(build4()))
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
         unsafe {
@@ -3332,7 +3624,63 @@ mod tests {
             assert_eq!(f("t_hasnt"), 0);
             assert_eq!(f("t_fold_sum"), 10, "1+2+3+4");
             assert_eq!(f("t_fold_keylen"), 4, "four 1-char keys");
-            assert_eq!(f("t_key_count"), 4, "pmap_keys returns all 4");
+            assert_eq!(f("t_key_count"), 4, "hashmap_keys returns all 4");
+        }
+    }
+
+    /// Node-resident `state`: a top-level singleton `Atom` that handler
+    /// `def`s close over. The installer runs once at JIT startup; separate
+    /// handler calls share the one live cell (not per-call copies). This is
+    /// the local half of the remote-handler model.
+    #[test]
+    fn node_state_shared_singleton() {
+        init();
+        let ctx = Context::create();
+        let driver = "
+            state ncounter: Atom<Int> = atom(0)
+            def ns_bump(d: Int) -> Int = swap(ncounter, |n: Int| n + d)
+            def ns_read() -> Int = deref(ncounter)
+            // A second handler proves DIFFERENT defs reach the SAME cell.
+            def ns_reset_to(v: Int) -> Int = reset(ncounter, v)
+
+            // A PMap-valued state, to show it's not Int-specific. Driven
+            // entirely inside ail so the test calls a plain `() -> Int`.
+            state nstore: Atom<HashMap<String, Int>> = atom(hashmap_empty())
+            def ns_put(k: String, v: Int) -> Int = {
+                let _s = swap(nstore, |m: HashMap<String, Int>| hashmap_assoc(m, k, v));
+                v
+            }
+            def ns_get(k: String) -> Int =
+                match hashmap_get(deref(nstore), k) { Some(v) => v, None => 0 - 1 }
+            def ns_t_store() -> Int = {
+                let _a = ns_put(\"x\", 41);
+                let _b = ns_put(\"y\", 1);
+                ns_get(\"x\") + ns_get(\"y\")    // 42, both from the shared store
+            }
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f0 = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names[n]))
+                    .unwrap()
+                    .call(rt.thread_ptr())
+            };
+            let f1 = |n: &str, a: i64| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread, i64) -> i64>(&def_symbol(&names[n]))
+                    .unwrap()
+                    .call(rt.thread_ptr(), a)
+            };
+            // Shared counter: two bumps + a read see the accumulated state.
+            assert_eq!(f1("ns_bump", 5), 5, "first bump returns new value");
+            assert_eq!(f1("ns_bump", 10), 15, "second bump sees the first");
+            assert_eq!(f0("ns_read"), 15, "read sees the shared cell");
+            assert_eq!(f1("ns_reset_to", 100), 100, "a different handler hits the same cell");
+            assert_eq!(f0("ns_read"), 100, "reset is visible through read");
+
+            // PMap-valued state: puts/gets share one map across calls.
+            assert_eq!(f0("ns_t_store"), 42, "PMap state shared across put/get");
         }
     }
 
@@ -3358,13 +3706,13 @@ mod tests {
                 let a = atom(10);
                 swap(a, |x: Int| x + 1)             // returns 11
             }
-            def empty_int_map() -> PMap<Int> = pmap_empty()
+            def empty_int_map() -> HashMap<String, Int> = hashmap_empty()
             def t_pmap() -> Int = {
                 let a = atom(empty_int_map());
-                let _1 = swap(a, |m: PMap<Int>| pmap_assoc(m, \"k\", 7));
-                let _2 = swap(a, |m: PMap<Int>| pmap_assoc(m, \"k\", 9));
+                let _1 = swap(a, |m: HashMap<String, Int>| hashmap_assoc(m, \"k\", 7));
+                let _2 = swap(a, |m: HashMap<String, Int>| hashmap_assoc(m, \"k\", 9));
                 let m = deref(a);
-                match pmap_get(m, \"k\") { Some(v) => v, None => 0 - 1 }
+                match hashmap_get(m, \"k\") { Some(v) => v, None => 0 - 1 }
             }
             def t_string() -> Int = {
                 let a = atom(\"hi\");
@@ -3386,6 +3734,59 @@ mod tests {
             assert_eq!(f("t_pmap"), 9, "PMap atom (reference value) swaps");
             assert_eq!(f("t_string"), 5, "String atom swaps");
         }
+    }
+
+    /// The dedicated `Atom` shape has exactly one GC-traced pointer
+    /// field; a forced collection must scan it so the held value
+    /// survives and the cell's slot is rewritten to the relocated copy.
+    /// Allocate garbage after the atom to make relocation observable,
+    /// then deref/swap across the collect.
+    #[test]
+    fn atom_value_survives_forced_gc() {
+        init();
+        let ctx = Context::create();
+        let driver = "
+            def churn(n: Int) -> Int =
+                if n == 0 { 0 } else { let _g = atom(n); churn(n - 1) }
+            // Hold a String atom across a GC that relocates everything,
+            // then keep mutating it. If the single cell field weren't
+            // traced, deref would read stale from-space bits.
+            def t_str_gc() -> Int = {
+                let a = atom(\"hi\");
+                let _c = churn(200);
+                let _t = gc_collect();
+                let _1 = swap(a, |s: String| string_concat(s, \"!!!\"));
+                let _t2 = gc_collect();
+                string_len(deref(a))               // \"hi!!!\" = 5
+            }
+            // Same for a PMap (deep reference value) carried through GC.
+            def empty_im() -> HashMap<String, Int> = hashmap_empty()
+            def t_hashmap_gc() -> Int = {
+                let a = atom(empty_im());
+                let _1 = swap(a, |m: HashMap<String, Int>| hashmap_assoc(m, \"k\", 41));
+                let _c = churn(200);
+                let _t = gc_collect();
+                let _2 = swap(a, |m: HashMap<String, Int>| hashmap_assoc(m, \"k\", 9));
+                let m = deref(a);
+                match hashmap_get(m, \"k\") { Some(v) => v, None => 0 - 1 }
+            }
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        let before = rt.heap.collections();
+        unsafe {
+            let f = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names[n]))
+                    .unwrap()
+                    .call(rt.thread_ptr())
+            };
+            assert_eq!(f("t_str_gc"), 5, "String atom value survives GC relocation");
+            assert_eq!(f("t_hashmap_gc"), 9, "PMap atom value survives GC relocation");
+        }
+        assert!(
+            rt.heap.collections() > before,
+            "gc_collect() should have actually run collections",
+        );
     }
 
     #[test]
@@ -3474,7 +3875,7 @@ mod tests {
     fn generic_builtin_as_first_class_value() {
         init();
         let ctx = Context::create();
-        // Generic core builtins (`array_get`, `atom_swap_slot`) used as bare
+        // Generic core builtins (`array_get`, `atom_swap`) used as bare
         // VALUES. Their signatures carry a `TypeVar`, so the adapter closure
         // is polymorphic and composes through the uniform closure ABI; the
         // concrete (un)boxing is settled at the call site that pins the
@@ -3498,12 +3899,12 @@ mod tests {
                 let _1 = array_set(arr, 0, 7);
                 get0(arr)
             }
-            // atom_swap_slot passed by value (the lock-free CAS primitive).
-            def do_swap(c: Array<Int>, f: fn(Array<Int>, Int, fn(Int) -> Int) -> Int) -> Int =
-                f(c, 0, |x: Int| x + 100)
+            // atom_swap passed by value (the lock-free CAS primitive).
+            def do_swap(a: Atom<Int>, f: fn(Atom<Int>, fn(Int) -> Int) -> Int) -> Int =
+                f(a, |x: Int| x + 100)
             def t_atom() -> Int = {
                 let a = atom(5);
-                do_swap(a.cell, atom_swap_slot)
+                do_swap(a, atom_swap)
             }
         ";
         let (rt, jit, names) = build_with_stdlib(&ctx, driver);
@@ -3516,7 +3917,7 @@ mod tests {
             };
             assert_eq!(f("t_hof"), 42, "array_get passed by value to a monomorphic HOF");
             assert_eq!(f("t_letbound"), 7, "let-bound array_get called where T pins to Int");
-            assert_eq!(f("t_atom"), 105, "atom_swap_slot passed by value (5 + 100)");
+            assert_eq!(f("t_atom"), 105, "atom_swap passed by value (5 + 100)");
         }
     }
 
@@ -3529,18 +3930,18 @@ mod tests {
         let driver = "
             enum Op { OGet(String), OPut(Pair), OBump(String) }
             struct Pair { pk: String, pv: Int }
-            def op(store: Atom<PMap<Int>>, msg: Op) -> Int =
+            def op(store: Atom<HashMap<String, Int>>, msg: Op) -> Int =
                 match msg {
-                    OGet(k) => match pmap_get(deref(store), k) { Some(v) => v, None => 0 - 1 },
-                    OPut(p) => { let _s = swap(store, |m: PMap<Int>| pmap_assoc(m, p.pk, p.pv)); p.pv },
+                    OGet(k) => match hashmap_get(deref(store), k) { Some(v) => v, None => 0 - 1 },
+                    OPut(p) => { let _s = swap(store, |m: HashMap<String, Int>| hashmap_assoc(m, p.pk, p.pv)); p.pv },
                     OBump(k) => {
-                        let cur = match pmap_get(deref(store), k) { Some(v) => v, None => 0 };
-                        let _s = swap(store, |m: PMap<Int>| pmap_assoc(m, k, cur + 1));
+                        let cur = match hashmap_get(deref(store), k) { Some(v) => v, None => 0 };
+                        let _s = swap(store, |m: HashMap<String, Int>| hashmap_assoc(m, k, cur + 1));
                         cur + 1
                     },
                 }
             def demo() -> Int = {
-                let store = atom(pmap_empty());
+                let store = atom(hashmap_empty());
                 let _1 = op(store, OPut(Pair { pk: \"x\", pv: 10 }));
                 let _2 = op(store, OPut(Pair { pk: \"y\", pv: 20 }));
                 let _3 = op(store, OBump(\"x\"));

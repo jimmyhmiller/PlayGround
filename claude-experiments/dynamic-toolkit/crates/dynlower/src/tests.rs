@@ -4,10 +4,9 @@ use crate::{
     SafepointHandlerPayloadKind, call_jit, call_jit_with_reg_limit,
 };
 use dynexec::{
-    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, CodegenConfig,
-    FrameLayout, FrameStrategy, NanBoxConfig, PreciseStackRoots, ShadowStackFrames,
-    ShadowStackRoots, StackFrameLayout, StackMapFrames, StackMapRoots, StackMapSafepoints,
-    StackSlotFrames, X64SysVCAbi,
+    AArch64CAbi, AArch64InternalCc, CallbackSafepoints, CodegenConfig, FrameLayout, FrameStrategy,
+    NanBoxConfig, PreciseStackRoots, ShadowStackFrames, ShadowStackRoots, StackFrameLayout,
+    StackMapFrames, StackMapRoots, StackMapSafepoints, StackSlotFrames, X64SysVCAbi,
 };
 use dynir::builder::{FunctionBuilder, ModuleBuilder};
 use dynir::ir::*;
@@ -372,6 +371,10 @@ impl FrameLayout for WrappedFrameLayout {
 
     fn root_scan_size(&self) -> i32 {
         self.0.root_scan_size()
+    }
+
+    fn root_slots(&self) -> &[i32] {
+        self.0.root_slots()
     }
 
     fn shadow_root_slots(&self) -> &[i32] {
@@ -783,7 +786,7 @@ fn invoke_internal_declared_late_with_safepoint_inst_and_linscan() {
     let _f_callee_check = f_callee;
     let mut callee_fb = mb.define_func(f_callee);
     let _e = callee_fb.entry_block();
-    let body = callee_fb.iconst(Type::I64, 0x4045000000000000_i64);  // 42.0 NaN-boxed
+    let body = callee_fb.iconst(Type::I64, 0x4045000000000000_i64); // 42.0 NaN-boxed
     callee_fb.ret(body);
     mb.finish_func(f_callee, callee_fb);
 
@@ -806,7 +809,10 @@ fn invoke_internal_declared_late_with_safepoint_inst_and_linscan() {
         crate::backend::Arm64Backend,
         crate::regalloc::GreedyRegState,
     >(&module, &[], None);
-    assert_eq!(jit.call_outcome(f_main, &[]), JitOutcome::Value(0x4045000000000000));
+    assert_eq!(
+        jit.call_outcome(f_main, &[]),
+        JitOutcome::Value(0x4045000000000000)
+    );
 }
 
 #[test]
@@ -1839,8 +1845,8 @@ fn bench_primes() {
     use dynalloc::LowBitPtrPolicy;
     use dynir::gc_runtime::GcInterpCtx;
     use dynir::interp::*;
-    use dynobj::Compact;
     use dynir::ir::Module;
+    use dynobj::Compact;
     use dynvalue::LowBit;
     let (module, entry) = Module::from_function(func.clone());
     let roots: GcInterpCtx<Compact, LowBitPtrPolicy<3>> = GcInterpCtx::new_unallocating();
@@ -2474,9 +2480,7 @@ fn jit_module_safepoint_with_handler() {
 
 #[test]
 fn jit_entry_fp_fence_stops_walker_at_rust_boundary() {
-    use crate::{
-        push_jit_entry_fp, pop_jit_entry_fp, walk_jit_ancestor_roots,
-    };
+    use crate::{pop_jit_entry_fp, push_jit_entry_fp, walk_jit_ancestor_roots};
     // Without a fence, the walker would try to crawl arbitrarily far up
     // the FP chain. Establish a fence and verify that walking from a
     // synthetic JIT-frame FP stops at the fence (zero ancestor visits).
@@ -2499,11 +2503,7 @@ fn jit_entry_fp_fence_stops_walker_at_rust_boundary() {
 
     // The first hop walks: saved_fp = 0xDEAD_BEEF == fence → stop
     // before visiting any roots.
-    assert_eq!(
-        visited.get(),
-        0,
-        "walker visited a root past the fence"
-    );
+    assert_eq!(visited.get(), 0, "walker visited a root past the fence");
 }
 
 #[test]
@@ -2518,7 +2518,7 @@ fn parked_walker_traverses_interleaved_host_frames() {
     // frame's roots, so an alloc-path collection left those spill slots
     // un-forwarded → dangling pointer → crash.
     use crate::{
-        register_jit_code, unregister_jit_code, walk_parked_thread_jit_roots, SafepointRecord,
+        SafepointRecord, register_jit_code, unregister_jit_code, walk_parked_thread_jit_roots,
     };
 
     // A fake JIT code range. The walker only does address arithmetic on
@@ -2530,11 +2530,12 @@ fn parked_walker_traverses_interleaved_host_frames() {
     let jit_lr = CODE_START + RET_OFFSET;
     let host_lr = 0x1usize; // deliberately outside any registered range
 
-    let safepoints: std::sync::Arc<[SafepointRecord]> = std::sync::Arc::from(vec![SafepointRecord {
-        code_offset: RET_OFFSET,
-        return_offset: RET_OFFSET,
-        root_slots: vec![16], // one root at +16 in the caller frame
-    }]);
+    let safepoints: std::sync::Arc<[SafepointRecord]> =
+        std::sync::Arc::from(vec![SafepointRecord {
+            code_offset: RET_OFFSET,
+            return_offset: RET_OFFSET,
+            root_slots: vec![16], // one root at +16 in the caller frame
+        }]);
     register_jit_code(CODE_START, CODE_END, safepoints);
 
     // Synthetic FP chain (each frame = [saved_fp, saved_lr, root_slot]):
@@ -3341,7 +3342,10 @@ fn nine_arg_call_last_arg() {
             JitOutcome::Value(v) => v,
             other => panic!("n={n}: {other:?}"),
         };
-        eprintln!("n={n}: last-arg got={got} want={want} {}", if got == want { "ok" } else { "CORRUPT" });
+        eprintln!(
+            "n={n}: last-arg got={got} want={want} {}",
+            if got == want { "ok" } else { "CORRUPT" }
+        );
         assert_eq!(got, want, "n={n}");
     }
 }
@@ -3406,14 +3410,25 @@ fn eight_call_results_folded_across_calls() {
             JitOutcome::Value(v) => v,
             other => panic!("n={n}: unexpected {other:?}"),
         };
-        eprintln!("n={n}: got={got} want={want} {}", if got == want { "ok" } else { "CORRUPT" });
+        eprintln!(
+            "n={n}: got={got} want={want} {}",
+            if got == want { "ok" } else { "CORRUPT" }
+        );
         assert_eq!(got, want, "n={n}");
     }
 }
 
 #[unsafe(no_mangle)]
 pub extern "C" fn test_ret_9th(
-    _a: u64, _b: u64, _c: u64, _d: u64, _e: u64, _f: u64, _g: u64, _h: u64, i: u64,
+    _a: u64,
+    _b: u64,
+    _c: u64,
+    _d: u64,
+    _e: u64,
+    _f: u64,
+    _g: u64,
+    _h: u64,
+    i: u64,
 ) -> u64 {
     i
 }
@@ -3426,7 +3441,10 @@ fn jit_calls_extern_c_with_nine_args() {
     // put arg 8 in X8. If the JIT doesn't switch to the C ABI for extern
     // calls, the callee reads its 9th arg from the stack → garbage.
     let mut mb = ModuleBuilder::new();
-    let sig9 = Signature { params: vec![Type::I64; 9], ret: Some(Type::I64) };
+    let sig9 = Signature {
+        params: vec![Type::I64; 9],
+        ret: Some(Type::I64),
+    };
     let f_ext = mb.declare_extern("test_ret_9th", sig9);
     let f_main = mb.declare_func("main", &[], Some(Type::I64));
 
@@ -3451,7 +3469,10 @@ fn jit_calls_extern_c_with_nine_args() {
         JitOutcome::Value(v) => v,
         other => panic!("{other:?}"),
     };
-    eprintln!("9th arg: got={got} want=99 {}", if got == 99 { "ok" } else { "CORRUPT" });
+    eprintln!(
+        "9th arg: got={got} want=99 {}",
+        if got == 99 { "ok" } else { "CORRUPT" }
+    );
     assert_eq!(got, 99, "9th extern arg corrupted");
 }
 
@@ -3529,15 +3550,22 @@ fn cross_block_live_values_under_pressure() {
             JitOutcome::Value(v) => v,
             other => panic!("n={n}: {other:?}"),
         };
-        eprintln!("n={n}: got={got} want={want} {}", if got == want { "ok" } else { "CORRUPT" });
+        eprintln!(
+            "n={n}: got={got} want={want} {}",
+            if got == want { "ok" } else { "CORRUPT" }
+        );
         assert_eq!(got, want, "n={n}");
     }
 }
 
 #[unsafe(no_mangle)]
-pub extern "C" fn test_id1(x: u64) -> u64 { x }
+pub extern "C" fn test_id1(x: u64) -> u64 {
+    x
+}
 #[unsafe(no_mangle)]
-pub extern "C" fn test_add2(a: u64, b: u64) -> u64 { a.wrapping_add(b) }
+pub extern "C" fn test_add2(a: u64, b: u64) -> u64 {
+    a.wrapping_add(b)
+}
 
 #[test]
 fn cross_block_live_values_extern_calls() {
@@ -3548,8 +3576,20 @@ fn cross_block_live_values_extern_calls() {
     for n in [6usize, 8, 10, 12] {
         let mut mb = ModuleBuilder::new();
         let f_main = mb.declare_func("main", &[], Some(Type::I64));
-        let f_id = mb.declare_extern("test_id1", Signature { params: vec![Type::I64], ret: Some(Type::I64) });
-        let f_add = mb.declare_extern("test_add2", Signature { params: vec![Type::I64, Type::I64], ret: Some(Type::I64) });
+        let f_id = mb.declare_extern(
+            "test_id1",
+            Signature {
+                params: vec![Type::I64],
+                ret: Some(Type::I64),
+            },
+        );
+        let f_add = mb.declare_extern(
+            "test_add2",
+            Signature {
+                params: vec![Type::I64, Type::I64],
+                ret: Some(Type::I64),
+            },
+        );
 
         let mut mfb = mb.define_func(f_main);
         let _entry = mfb.entry_block();
@@ -3603,7 +3643,10 @@ fn cross_block_live_values_extern_calls() {
             JitOutcome::Value(v) => v,
             other => panic!("n={n}: {other:?}"),
         };
-        eprintln!("n={n}: got={got} want={want} {}", if got == want { "ok" } else { "CORRUPT" });
+        eprintln!(
+            "n={n}: got={got} want={want} {}",
+            if got == want { "ok" } else { "CORRUPT" }
+        );
         assert_eq!(got, want, "n={n}");
     }
 }

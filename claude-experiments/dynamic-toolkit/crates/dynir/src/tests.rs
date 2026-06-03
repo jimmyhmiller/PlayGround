@@ -946,9 +946,13 @@ fn verify_rejects_push_prompt_when_continuations_disabled() {
     verify(&func).unwrap();
 
     // Rejected with continuations disabled
-    let opts = VerifyOptions { allow_continuations: false };
+    let opts = VerifyOptions {
+        allow_continuations: false,
+    };
     let errs = verify_with(&func, opts).unwrap_err();
-    assert!(errs.iter().any(|e| matches!(e, VerifyError::ContinuationsNotAllowed { .. })));
+    assert!(errs
+        .iter()
+        .any(|e| matches!(e, VerifyError::ContinuationsNotAllowed { .. })));
 }
 
 #[test]
@@ -970,9 +974,13 @@ fn verify_rejects_capture_slice_when_continuations_disabled() {
 
     verify(&func).unwrap();
 
-    let opts = VerifyOptions { allow_continuations: false };
+    let opts = VerifyOptions {
+        allow_continuations: false,
+    };
     let errs = verify_with(&func, opts).unwrap_err();
-    assert!(errs.iter().any(|e| matches!(e, VerifyError::ContinuationsNotAllowed { .. })));
+    assert!(errs
+        .iter()
+        .any(|e| matches!(e, VerifyError::ContinuationsNotAllowed { .. })));
 }
 
 #[test]
@@ -982,6 +990,8 @@ fn verify_allows_no_continuation_instructions_when_disabled() {
     b.ret(v);
     let func = b.build();
 
-    let opts = VerifyOptions { allow_continuations: false };
+    let opts = VerifyOptions {
+        allow_continuations: false,
+    };
     verify_with(&func, opts).unwrap();
 }

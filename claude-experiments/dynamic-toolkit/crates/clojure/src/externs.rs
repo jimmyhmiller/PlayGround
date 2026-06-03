@@ -128,8 +128,8 @@ pub extern "C" fn clj_exception_type_matches(e: u64, expected_type_sym_id: u64) 
 core::arch::global_asm!(
     ".globl _clj_raise_exception",
     "_clj_raise_exception:",
-    "mov x2, x0",   // payload0 = arg
-    "mov x1, #2",   // kind = Exception
+    "mov x2, x0", // payload0 = arg
+    "mov x1, #2", // kind = Exception
     "ret",
 );
 
@@ -264,9 +264,7 @@ pub extern "C" fn clj_eq(a: u64, b: u64) -> u64 {
 /// would carry stale pointers.
 #[unsafe(no_mangle)]
 pub extern "C" fn clj_cons(head: u64, tail: u64) -> u64 {
-    dynobj::roots::with_scope(3, |scope| {
-        alloc_list_cell_from_raw(scope, head, tail).get()
-    })
+    dynobj::roots::with_scope(3, |scope| alloc_list_cell_from_raw(scope, head, tail).get())
 }
 
 // ── Binary concat (used by the quasiquote rewriter) ────────────────
@@ -323,9 +321,7 @@ pub extern "C" fn clj_vector_from_list(list: u64) -> u64 {
     } else if crate::collections::is_list(list) {
         crate::value::list_iter(list).collect()
     } else {
-        panic!(
-            "__vector_from_list: expected a list, got 0x{list:016x}"
-        );
+        panic!("__vector_from_list: expected a list, got 0x{list:016x}");
     };
     dynobj::roots::with_scope(items.len() + 4, |scope| {
         crate::collections::alloc_vector(scope, &items).get()
@@ -395,7 +391,9 @@ pub extern "C" fn clj_aclone(arr: u64) -> u64 {
     // resolved into a slice first. With_scope + a re-rooted source
     // would be more general; for an O(n) clone it's simpler to
     // collect into a Vec on the side and copy back.
-    let src: Vec<u64> = (0..n).map(|i| crate::collections::array_get(arr, i)).collect();
+    let src: Vec<u64> = (0..n)
+        .map(|i| crate::collections::array_get(arr, i))
+        .collect();
     dynobj::roots::with_scope(2, |scope| {
         crate::collections::alloc_array(scope, &src).get()
     })
@@ -852,9 +850,7 @@ pub extern "C" fn clj_resolve_var(name_sym: u64) -> u64 {
     }
     let var = crate::namespace::ns_lookup(core_ns, name_sym);
     if !is_ptr(var) {
-        let name = crate::host::with_host(|h| {
-            h.sym.name(as_sym_id(name_sym)).to_string()
-        });
+        let name = crate::host::with_host(|h| h.sym.name(as_sym_id(name_sym)).to_string());
         panic!("undefined variable (runtime): {}", name);
     }
     crate::namespace::var_root(var)
@@ -902,8 +898,7 @@ pub extern "C" fn clj_apply(f: u64, args_list: u64) -> u64 {
         jit.function_ptr(FuncRef::from_u32(fr))
     });
     // Single-list ABI: (self_fn, args_list).
-    let typed: extern "C" fn(u64, u64) -> u64 =
-        unsafe { std::mem::transmute(code_ptr) };
+    let typed: extern "C" fn(u64, u64) -> u64 = unsafe { std::mem::transmute(code_ptr) };
     typed(f, reader_list)
 }
 
@@ -936,11 +931,7 @@ pub extern "C" fn clj_def_value(name_sym: u64, value: u64) -> u64 {
 /// fresh Record is rooted in a one-shot scope and returned as a raw
 /// tagged pointer.
 #[unsafe(no_mangle)]
-pub extern "C" fn clj_alloc_record(
-    type_name: u64,
-    n_fields: u64,
-    fields_ptr: *const u64,
-) -> u64 {
+pub extern "C" fn clj_alloc_record(type_name: u64, n_fields: u64, fields_ptr: *const u64) -> u64 {
     let n = n_fields as usize;
     let fields: Vec<u64> = unsafe { std::slice::from_raw_parts(fields_ptr, n).to_vec() };
     dynobj::roots::with_scope(n + 4, |scope| {
@@ -970,9 +961,12 @@ pub extern "C" fn clj_record_get_field(rec: u64, field_name: u64) -> u64 {
         let fields = map.get(&type_sym).unwrap_or_else(|| {
             panic!("field access: type-name not registered in deftype_fields");
         });
-        fields.iter().position(|&f| f == field_sym).unwrap_or_else(|| {
-            panic!("field access: no such field on this type");
-        })
+        fields
+            .iter()
+            .position(|&f| f == field_sym)
+            .unwrap_or_else(|| {
+                panic!("field access: no such field on this type");
+            })
     });
     crate::collections::record_field(rec, idx)
 }
@@ -1052,13 +1046,7 @@ fn value_type_name_sym(x: u64) -> Option<u32> {
         return None;
     }
     let type_id = unsafe { crate::value::read_type_id(crate::value::as_ptr(x)) } as usize;
-    crate::host::with_host(|h| {
-        h.builtin_type_names
-            .lock()
-            .unwrap()
-            .get(&type_id)
-            .copied()
-    })
+    crate::host::with_host(|h| h.builtin_type_names.lock().unwrap().get(&type_id).copied())
 }
 
 /// `(.method-name receiver args…)` — dispatch by reading the
@@ -1138,7 +1126,11 @@ pub extern "C" fn clj_register_protocol_member(type_name: u64, proto_name: u64) 
 /// `(deftype* Name [fields…])` so the runtime field-name → index
 /// lookup in `clj_record_get_field` works.
 #[unsafe(no_mangle)]
-pub extern "C" fn clj_register_deftype(type_name: u64, fields_count: u64, fields_ptr: *const u64) -> u64 {
+pub extern "C" fn clj_register_deftype(
+    type_name: u64,
+    fields_count: u64,
+    fields_ptr: *const u64,
+) -> u64 {
     if !is_sym_id(type_name) {
         panic!("register-deftype: type-name must be a symbol");
     }
@@ -1278,7 +1270,9 @@ pub extern "C" fn clj_reader_vector_rest(vec: u64) -> u64 {
     }
     // Snapshot the source elements before allocating: alloc may move
     // `vec`, so resolve to raw bits first.
-    let items: Vec<u64> = (1..len).map(|i| crate::collections::vector_get(vec, i)).collect();
+    let items: Vec<u64> = (1..len)
+        .map(|i| crate::collections::vector_get(vec, i))
+        .collect();
     dynobj::roots::with_scope(items.len() + 4, |scope| {
         crate::collections::alloc_vector(scope, &items).get()
     })
@@ -1342,7 +1336,9 @@ pub extern "C" fn clj_reader_set_conj(set: u64, val: u64) -> u64 {
     }
     let backing = crate::collections::set_backing(set);
     let n = crate::collections::vector_count(backing);
-    let mut items: Vec<u64> = (0..n).map(|i| crate::collections::vector_get(backing, i)).collect();
+    let mut items: Vec<u64> = (0..n)
+        .map(|i| crate::collections::vector_get(backing, i))
+        .collect();
     items.push(val);
     dynobj::roots::with_scope(items.len() + 4, |scope| {
         crate::collections::alloc_set(scope, &items).get()
@@ -1412,7 +1408,9 @@ pub extern "C" fn clj_reader_map_keys(map: u64) -> u64 {
         panic!("__reader_map_keys: expected a Map, got 0x{map:016x}");
     }
     let n = crate::namespace::map_count(map) as usize;
-    let keys: Vec<u64> = (0..n).map(|i| crate::namespace::map_entry(map, i).0).collect();
+    let keys: Vec<u64> = (0..n)
+        .map(|i| crate::namespace::map_entry(map, i).0)
+        .collect();
     dynobj::roots::with_scope(keys.len() + 4, |scope| {
         let acc = scope.root::<crate::value::NanBoxTag>(NIL);
         for k in keys.into_iter().rev() {
@@ -1482,9 +1480,7 @@ pub extern "C" fn clj_check_args_list(args_list: u64, arity_word: u64) -> u64 {
         0
     } else if !crate::collections::is_list(args_list) {
         let type_sym = crate::host::with_host(|h| h.sym.intern("ArityException"));
-        let msg = make_string_value(
-            "callee body expected a list of args".to_string(),
-        );
+        let msg = make_string_value("callee body expected a list of args".to_string());
         return build_exception_record(type_sym, msg, NIL, NIL);
     } else {
         crate::value::list_count(args_list) as usize
@@ -1522,9 +1518,7 @@ pub extern "C" fn clj_make_no_matching_arity_exception(args_list: u64) -> u64 {
         crate::value::list_count(args_list) as usize
     };
     let type_sym = crate::host::with_host(|h| h.sym.intern("ArityException"));
-    let msg = make_string_value(format!(
-        "no matching arity for call with {n} arg(s)"
-    ));
+    let msg = make_string_value(format!("no matching arity for call with {n} arg(s)"));
     build_exception_record(type_sym, msg, NIL, NIL)
 }
 
@@ -1603,170 +1597,686 @@ unsafe impl Sync for Prim {}
 
 pub fn all_prims() -> &'static [Prim] {
     static PRIMS: &[Prim] = &[
-        Prim { name: "+",  ptr: clj_add as *const u8,    arity: 2 },
-        Prim { name: "-",  ptr: clj_sub as *const u8,    arity: 2 },
-        Prim { name: "*",  ptr: clj_mul as *const u8,    arity: 2 },
-        Prim { name: "/",  ptr: clj_div as *const u8,    arity: 2 },
-        Prim { name: "quot", ptr: clj_quot as *const u8, arity: 2 },
-        Prim { name: "rem",  ptr: clj_rem as *const u8,  arity: 2 },
+        Prim {
+            name: "+",
+            ptr: clj_add as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "-",
+            ptr: clj_sub as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "*",
+            ptr: clj_mul as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "/",
+            ptr: clj_div as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "quot",
+            ptr: clj_quot as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "rem",
+            ptr: clj_rem as *const u8,
+            arity: 2,
+        },
         // Private aliases so core.clj's `(defn quot …)` etc. (which
         // shadow the externs in func_refs) can still reach the
         // underlying primitives. Same trick as `__cons` for the
         // arg-list builder.
-        Prim { name: "__quot", ptr: clj_quot as *const u8, arity: 2 },
-        Prim { name: "__rem",  ptr: clj_rem as *const u8,  arity: 2 },
+        Prim {
+            name: "__quot",
+            ptr: clj_quot as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__rem",
+            ptr: clj_rem as *const u8,
+            arity: 2,
+        },
         // core.clj uses these "prim-*" names for the binary
         // primitives, then layers a variadic `+` / `-` / etc. on
         // top in user code.
-        Prim { name: "prim-add", ptr: clj_add as *const u8, arity: 2 },
-        Prim { name: "prim-sub", ptr: clj_sub as *const u8, arity: 2 },
-        Prim { name: "prim-mul", ptr: clj_mul as *const u8, arity: 2 },
-        Prim { name: "prim-div", ptr: clj_div as *const u8, arity: 2 },
-        Prim { name: "prim-lt", ptr: clj_lt as *const u8, arity: 2 },
-        Prim { name: "prim-gt", ptr: clj_gt as *const u8, arity: 2 },
-        Prim { name: "prim-le", ptr: clj_le as *const u8, arity: 2 },
-        Prim { name: "prim-ge", ptr: clj_ge as *const u8, arity: 2 },
-        Prim { name: "prim-eq", ptr: clj_eq as *const u8, arity: 2 },
+        Prim {
+            name: "prim-add",
+            ptr: clj_add as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "prim-sub",
+            ptr: clj_sub as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "prim-mul",
+            ptr: clj_mul as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "prim-div",
+            ptr: clj_div as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "prim-lt",
+            ptr: clj_lt as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "prim-gt",
+            ptr: clj_gt as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "prim-le",
+            ptr: clj_le as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "prim-ge",
+            ptr: clj_ge as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "prim-eq",
+            ptr: clj_eq as *const u8,
+            arity: 2,
+        },
         // `__value_eq` in core.clj is the value-equality fallback
         // for strings, numbers, etc. Our `clj_eq` already does
         // structural compare for those, so aliasing is correct.
-        Prim { name: "__value_eq", ptr: clj_eq as *const u8, arity: 2 },
-        Prim { name: "<",  ptr: clj_lt as *const u8,     arity: 2 },
-        Prim { name: ">",  ptr: clj_gt as *const u8,     arity: 2 },
-        Prim { name: "<=", ptr: clj_le as *const u8,     arity: 2 },
-        Prim { name: ">=", ptr: clj_ge as *const u8,     arity: 2 },
-        Prim { name: "=",  ptr: clj_eq as *const u8,     arity: 2 },
-        Prim { name: "==", ptr: clj_eq as *const u8,     arity: 2 },
-        Prim { name: "nil?",    ptr: clj_nil_p as *const u8,    arity: 1 },
-        Prim { name: "number?", ptr: clj_number_p as *const u8, arity: 1 },
-        Prim { name: "not",     ptr: clj_not as *const u8,      arity: 1 },
-        Prim { name: "cons",    ptr: clj_cons as *const u8,     arity: 2 },
+        Prim {
+            name: "__value_eq",
+            ptr: clj_eq as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "<",
+            ptr: clj_lt as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: ">",
+            ptr: clj_gt as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "<=",
+            ptr: clj_le as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: ">=",
+            ptr: clj_ge as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "=",
+            ptr: clj_eq as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "==",
+            ptr: clj_eq as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "nil?",
+            ptr: clj_nil_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "number?",
+            ptr: clj_number_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "not",
+            ptr: clj_not as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "cons",
+            ptr: clj_cons as *const u8,
+            arity: 2,
+        },
         // Private alias the compiler uses internally (e.g. when packing
         // call-site args into a list for the unified closure ABI). User
         // code redefines `cons` in core.clj as a seq-aware fn — that
         // would shadow the raw extern in `func_refs` and break the
         // arg-list builder. Keep a reserved name that user code can't
         // accidentally collide with.
-        Prim { name: "__cons",  ptr: clj_cons as *const u8,     arity: 2 },
-        Prim { name: "__concat", ptr: clj_concat as *const u8,   arity: 2 },
-        Prim { name: "make-array", ptr: clj_make_array as *const u8, arity: 1 },
-        Prim { name: "__vector_from_list", ptr: clj_vector_from_list as *const u8, arity: 1 },
-        Prim { name: "aget",       ptr: clj_aget as *const u8,       arity: 2 },
-        Prim { name: "aset",       ptr: clj_aset as *const u8,       arity: 3 },
-        Prim { name: "alength",    ptr: clj_alength as *const u8,    arity: 1 },
-        Prim { name: "aclone",     ptr: clj_aclone as *const u8,     arity: 1 },
+        Prim {
+            name: "__cons",
+            ptr: clj_cons as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__concat",
+            ptr: clj_concat as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "make-array",
+            ptr: clj_make_array as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__vector_from_list",
+            ptr: clj_vector_from_list as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "aget",
+            ptr: clj_aget as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "aset",
+            ptr: clj_aset as *const u8,
+            arity: 3,
+        },
+        Prim {
+            name: "alength",
+            ptr: clj_alength as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "aclone",
+            ptr: clj_aclone as *const u8,
+            arity: 1,
+        },
         // ── Reader-collection bridges (called by core.clj's
         //    extend-type __ReaderXxx blocks) ────────────────────────
-        Prim { name: "__reader_list_first",  ptr: clj_reader_list_first as *const u8, arity: 1 },
-        Prim { name: "__reader_list_rest",   ptr: clj_reader_list_rest as *const u8,  arity: 1 },
-        Prim { name: "__reader_list_count",  ptr: clj_reader_list_count as *const u8, arity: 1 },
-        Prim { name: "__reader_list_nth",    ptr: clj_reader_list_nth as *const u8,   arity: 2 },
-        Prim { name: "__reader_vector_count", ptr: clj_reader_vector_count as *const u8, arity: 1 },
-        Prim { name: "__reader_vector_nth",   ptr: clj_reader_vector_nth as *const u8,   arity: 2 },
-        Prim { name: "__reader_vector_first", ptr: clj_reader_vector_first as *const u8, arity: 1 },
-        Prim { name: "__reader_vector_rest",  ptr: clj_reader_vector_rest as *const u8,  arity: 1 },
-        Prim { name: "__reader_set_count",    ptr: clj_reader_set_count as *const u8,    arity: 1 },
-        Prim { name: "__reader_set_get",      ptr: clj_reader_set_get as *const u8,      arity: 2 },
-        Prim { name: "__reader_set_contains", ptr: clj_reader_set_contains as *const u8, arity: 2 },
-        Prim { name: "__reader_set_conj",     ptr: clj_reader_set_conj as *const u8,     arity: 2 },
-        Prim { name: "__reader_map_count",    ptr: clj_reader_map_count as *const u8,    arity: 1 },
-        Prim { name: "__reader_map_lookup",   ptr: clj_reader_map_lookup as *const u8,   arity: 3 },
-        Prim { name: "get",                   ptr: clj_get_2 as *const u8,               arity: 2 },
-        Prim { name: "__get_3",               ptr: clj_get_3 as *const u8,               arity: 3 },
-        Prim { name: "__reader_map_keys",     ptr: clj_reader_map_keys as *const u8,     arity: 1 },
-        Prim { name: "__reader_map_assoc",    ptr: clj_reader_map_assoc as *const u8,    arity: 3 },
+        Prim {
+            name: "__reader_list_first",
+            ptr: clj_reader_list_first as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__reader_list_rest",
+            ptr: clj_reader_list_rest as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__reader_list_count",
+            ptr: clj_reader_list_count as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__reader_list_nth",
+            ptr: clj_reader_list_nth as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__reader_vector_count",
+            ptr: clj_reader_vector_count as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__reader_vector_nth",
+            ptr: clj_reader_vector_nth as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__reader_vector_first",
+            ptr: clj_reader_vector_first as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__reader_vector_rest",
+            ptr: clj_reader_vector_rest as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__reader_set_count",
+            ptr: clj_reader_set_count as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__reader_set_get",
+            ptr: clj_reader_set_get as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__reader_set_contains",
+            ptr: clj_reader_set_contains as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__reader_set_conj",
+            ptr: clj_reader_set_conj as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__reader_map_count",
+            ptr: clj_reader_map_count as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__reader_map_lookup",
+            ptr: clj_reader_map_lookup as *const u8,
+            arity: 3,
+        },
+        Prim {
+            name: "get",
+            ptr: clj_get_2 as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__get_3",
+            ptr: clj_get_3 as *const u8,
+            arity: 3,
+        },
+        Prim {
+            name: "__reader_map_keys",
+            ptr: clj_reader_map_keys as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__reader_map_assoc",
+            ptr: clj_reader_map_assoc as *const u8,
+            arity: 3,
+        },
         // ── deftype / extend-type / .method ────────────────────────
-        Prim { name: "__alloc_record",     ptr: clj_alloc_record as *const u8, arity: 3 },
-        Prim { name: "__record_get_field", ptr: clj_record_get_field as *const u8, arity: 2 },
-        Prim { name: "__record_set_field", ptr: clj_record_set_field as *const u8, arity: 3 },
-        Prim { name: "instance?",          ptr: clj_instance_p as *const u8, arity: 2 },
-        Prim { name: "satisfies?",         ptr: clj_satisfies_p as *const u8, arity: 2 },
-        Prim { name: "__method_lookup",    ptr: clj_method_lookup as *const u8, arity: 2 },
-        Prim { name: "__register_method",  ptr: clj_register_method as *const u8, arity: 3 },
-        Prim { name: "__register_protocol_member", ptr: clj_register_protocol_member as *const u8, arity: 2 },
-        Prim { name: "__register_deftype", ptr: clj_register_deftype as *const u8, arity: 3 },
-        Prim { name: "__def_value",        ptr: clj_def_value as *const u8, arity: 2 },
-        Prim { name: "__apply",            ptr: clj_apply as *const u8, arity: 2 },
-        Prim { name: "__resolve_var",      ptr: clj_resolve_var as *const u8, arity: 1 },
+        Prim {
+            name: "__alloc_record",
+            ptr: clj_alloc_record as *const u8,
+            arity: 3,
+        },
+        Prim {
+            name: "__record_get_field",
+            ptr: clj_record_get_field as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__record_set_field",
+            ptr: clj_record_set_field as *const u8,
+            arity: 3,
+        },
+        Prim {
+            name: "instance?",
+            ptr: clj_instance_p as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "satisfies?",
+            ptr: clj_satisfies_p as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__method_lookup",
+            ptr: clj_method_lookup as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__register_method",
+            ptr: clj_register_method as *const u8,
+            arity: 3,
+        },
+        Prim {
+            name: "__register_protocol_member",
+            ptr: clj_register_protocol_member as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__register_deftype",
+            ptr: clj_register_deftype as *const u8,
+            arity: 3,
+        },
+        Prim {
+            name: "__def_value",
+            ptr: clj_def_value as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__apply",
+            ptr: clj_apply as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__resolve_var",
+            ptr: clj_resolve_var as *const u8,
+            arity: 1,
+        },
         // ── Atoms ──────────────────────────────────────────────────
-        Prim { name: "throw",  ptr: clj_throw as *const u8,  arity: 1 },
+        Prim {
+            name: "throw",
+            ptr: clj_throw as *const u8,
+            arity: 1,
+        },
         // Real raise: returns JitOutcome::Exception, propagated by
         // every call site (and caught by Invoke sites). Use this from
         // compiled code; `clj_throw` above is only the
         // legacy/uncaught panic path.
-        Prim { name: "__raise_exception", ptr: clj_raise_exception as *const u8, arity: 1 },
+        Prim {
+            name: "__raise_exception",
+            ptr: clj_raise_exception as *const u8,
+            arity: 1,
+        },
         // Exception construction & accessors.
-        Prim { name: "__ex_info_2", ptr: clj_ex_info_2 as *const u8, arity: 2 },
+        Prim {
+            name: "__ex_info_2",
+            ptr: clj_ex_info_2 as *const u8,
+            arity: 2,
+        },
         // User-facing arity-2 `ex-info` (most common). Arity-3 form
         // is `__ex_info_3` — wrap in a Clojure-side defn if needed.
-        Prim { name: "ex-info", ptr: clj_ex_info_2 as *const u8, arity: 2 },
-        Prim { name: "__ex_info_3", ptr: clj_ex_info_3 as *const u8, arity: 3 },
-        Prim { name: "ex-message", ptr: clj_ex_message as *const u8, arity: 1 },
-        Prim { name: "ex-data", ptr: clj_ex_data as *const u8, arity: 1 },
-        Prim { name: "ex-cause", ptr: clj_ex_cause as *const u8, arity: 1 },
-        Prim { name: "__exception_type_matches", ptr: clj_exception_type_matches as *const u8, arity: 2 },
+        Prim {
+            name: "ex-info",
+            ptr: clj_ex_info_2 as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__ex_info_3",
+            ptr: clj_ex_info_3 as *const u8,
+            arity: 3,
+        },
+        Prim {
+            name: "ex-message",
+            ptr: clj_ex_message as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "ex-data",
+            ptr: clj_ex_data as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "ex-cause",
+            ptr: clj_ex_cause as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__exception_type_matches",
+            ptr: clj_exception_type_matches as *const u8,
+            arity: 2,
+        },
         // ── Bit ops (used by core.clj's hashing and persistent
         //    collection internals) ────────────────────────────────
-        Prim { name: "bit-and", ptr: clj_bit_and as *const u8, arity: 2 },
-        Prim { name: "bit-or",  ptr: clj_bit_or as *const u8,  arity: 2 },
-        Prim { name: "bit-xor", ptr: clj_bit_xor as *const u8, arity: 2 },
-        Prim { name: "bit-not", ptr: clj_bit_not as *const u8, arity: 1 },
-        Prim { name: "bit-shift-left",  ptr: clj_bit_shift_left as *const u8,  arity: 2 },
-        Prim { name: "bit-shift-right", ptr: clj_bit_shift_right as *const u8, arity: 2 },
-        Prim { name: "unsigned-bit-shift-right", ptr: clj_unsigned_bit_shift_right as *const u8, arity: 2 },
-        Prim { name: "bit-shift-right-zero-fill", ptr: clj_unsigned_bit_shift_right as *const u8, arity: 2 },
+        Prim {
+            name: "bit-and",
+            ptr: clj_bit_and as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "bit-or",
+            ptr: clj_bit_or as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "bit-xor",
+            ptr: clj_bit_xor as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "bit-not",
+            ptr: clj_bit_not as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "bit-shift-left",
+            ptr: clj_bit_shift_left as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "bit-shift-right",
+            ptr: clj_bit_shift_right as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "unsigned-bit-shift-right",
+            ptr: clj_unsigned_bit_shift_right as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "bit-shift-right-zero-fill",
+            ptr: clj_unsigned_bit_shift_right as *const u8,
+            arity: 2,
+        },
         // ── Type predicates ───────────────────────────────────────
-        Prim { name: "integer?", ptr: clj_integer_p as *const u8, arity: 1 },
-        Prim { name: "int?",     ptr: clj_integer_p as *const u8, arity: 1 },
-        Prim { name: "float?",   ptr: clj_float_p as *const u8,   arity: 1 },
-        Prim { name: "string?",  ptr: clj_string_p as *const u8,  arity: 1 },
-        Prim { name: "keyword?", ptr: clj_keyword_p as *const u8, arity: 1 },
-        Prim { name: "symbol?",  ptr: clj_symbol_p as *const u8,  arity: 1 },
+        Prim {
+            name: "integer?",
+            ptr: clj_integer_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "int?",
+            ptr: clj_integer_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "float?",
+            ptr: clj_float_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "string?",
+            ptr: clj_string_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "keyword?",
+            ptr: clj_keyword_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "symbol?",
+            ptr: clj_symbol_p as *const u8,
+            arity: 1,
+        },
         // POC-era aliases used by core.clj's `(defn string? [x] (__is_string x))` etc.
-        Prim { name: "__is_string",  ptr: clj_string_p as *const u8,  arity: 1 },
-        Prim { name: "__is_symbol",  ptr: clj_symbol_p as *const u8,  arity: 1 },
-        Prim { name: "__is_keyword", ptr: clj_keyword_p as *const u8, arity: 1 },
-        Prim { name: "__reader_symbol_name",      ptr: clj_reader_symbol_name as *const u8,      arity: 1 },
-        Prim { name: "__reader_symbol_namespace", ptr: clj_reader_symbol_namespace as *const u8, arity: 1 },
-        Prim { name: "fn?",      ptr: clj_fn_p as *const u8,      arity: 1 },
-        Prim { name: "identical?", ptr: clj_identical_p as *const u8, arity: 2 },
+        Prim {
+            name: "__is_string",
+            ptr: clj_string_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__is_symbol",
+            ptr: clj_symbol_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__is_keyword",
+            ptr: clj_keyword_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__reader_symbol_name",
+            ptr: clj_reader_symbol_name as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__reader_symbol_namespace",
+            ptr: clj_reader_symbol_namespace as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "fn?",
+            ptr: clj_fn_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "identical?",
+            ptr: clj_identical_p as *const u8,
+            arity: 2,
+        },
         // ── List/cons primitives ──────────────────────────────────
-        Prim { name: "cons?",      ptr: clj_cons_p as *const u8,    arity: 1 },
-        Prim { name: "cons-first", ptr: clj_cons_first as *const u8, arity: 1 },
-        Prim { name: "cons-rest",  ptr: clj_cons_rest as *const u8,  arity: 1 },
+        Prim {
+            name: "cons?",
+            ptr: clj_cons_p as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "cons-first",
+            ptr: clj_cons_first as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "cons-rest",
+            ptr: clj_cons_rest as *const u8,
+            arity: 1,
+        },
         // ── String / keyword / symbol ops ─────────────────────────
-        Prim { name: "__string_count",    ptr: clj_string_count as *const u8,    arity: 1 },
-        Prim { name: "__str_concat",      ptr: clj_str_concat as *const u8,      arity: 1 },
-        Prim { name: "__subs",            ptr: clj_subs as *const u8,            arity: 2 },
-        Prim { name: "__subs_3",          ptr: clj_subs_3 as *const u8,          arity: 3 },
-        Prim { name: "__keyword_name",    ptr: clj_keyword_name as *const u8,    arity: 1 },
-        Prim { name: "__keyword_namespace", ptr: clj_keyword_namespace as *const u8, arity: 1 },
-        Prim { name: "__keyword_from_string_1", ptr: clj_keyword_from_string_1 as *const u8, arity: 1 },
-        Prim { name: "__keyword_from_string_2", ptr: clj_keyword_from_string_2 as *const u8, arity: 2 },
-        Prim { name: "__compare",         ptr: clj_compare as *const u8,         arity: 2 },
-        Prim { name: "__pr_str",          ptr: clj_pr_str as *const u8,          arity: 1 },
-        Prim { name: "__symbol_1",        ptr: clj_symbol_1 as *const u8,        arity: 1 },
-        Prim { name: "__symbol_2",        ptr: clj_symbol_2 as *const u8,        arity: 2 },
-        Prim { name: "__gensym_0",        ptr: clj_gensym_0 as *const u8,        arity: 0 },
-        Prim { name: "__gensym_1",        ptr: clj_gensym_1 as *const u8,        arity: 1 },
-        Prim { name: "__set_macro!",      ptr: clj_set_macro as *const u8,       arity: 1 },
+        Prim {
+            name: "__string_count",
+            ptr: clj_string_count as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__str_concat",
+            ptr: clj_str_concat as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__subs",
+            ptr: clj_subs as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__subs_3",
+            ptr: clj_subs_3 as *const u8,
+            arity: 3,
+        },
+        Prim {
+            name: "__keyword_name",
+            ptr: clj_keyword_name as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__keyword_namespace",
+            ptr: clj_keyword_namespace as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__keyword_from_string_1",
+            ptr: clj_keyword_from_string_1 as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__keyword_from_string_2",
+            ptr: clj_keyword_from_string_2 as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__compare",
+            ptr: clj_compare as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__pr_str",
+            ptr: clj_pr_str as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__symbol_1",
+            ptr: clj_symbol_1 as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__symbol_2",
+            ptr: clj_symbol_2 as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__gensym_0",
+            ptr: clj_gensym_0 as *const u8,
+            arity: 0,
+        },
+        Prim {
+            name: "__gensym_1",
+            ptr: clj_gensym_1 as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__set_macro!",
+            ptr: clj_set_macro as *const u8,
+            arity: 1,
+        },
         // ── I/O ───────────────────────────────────────────────────
-        Prim { name: "_println",     ptr: clj_println as *const u8, arity: 1 },
-        Prim { name: "_print",       ptr: clj_print as *const u8,   arity: 1 },
-        Prim { name: "_newline",     ptr: clj_newline as *const u8, arity: 0 },
-        Prim { name: "_print-space", ptr: clj_print_space as *const u8, arity: 0 },
-        Prim { name: "hash-primitive", ptr: clj_hash_primitive as *const u8, arity: 1 },
+        Prim {
+            name: "_println",
+            ptr: clj_println as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "_print",
+            ptr: clj_print as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "_newline",
+            ptr: clj_newline as *const u8,
+            arity: 0,
+        },
+        Prim {
+            name: "_print-space",
+            ptr: clj_print_space as *const u8,
+            arity: 0,
+        },
+        Prim {
+            name: "hash-primitive",
+            ptr: clj_hash_primitive as *const u8,
+            arity: 1,
+        },
         // ── Atom builtins (POC's `__` flavor) ─────────────────────
-        Prim { name: "__atom_create", ptr: clj_atom as *const u8,  arity: 1 },
-        Prim { name: "__atom_deref",  ptr: clj_deref as *const u8, arity: 1 },
-        Prim { name: "__atom_reset",  ptr: clj_reset as *const u8, arity: 2 },
-        Prim { name: "atom",   ptr: clj_atom as *const u8,   arity: 1 },
-        Prim { name: "deref",  ptr: clj_deref as *const u8,  arity: 1 },
-        Prim { name: "reset!", ptr: clj_reset as *const u8,  arity: 2 },
-        Prim { name: "__arity_check", ptr: clj_arity_check as *const u8, arity: 2 },
-        Prim { name: "__check_args_list", ptr: clj_check_args_list as *const u8, arity: 2 },
-        Prim { name: "__no_matching_arity_panic", ptr: clj_no_matching_arity_panic as *const u8, arity: 1 },
-        Prim { name: "__make_no_matching_arity_exception", ptr: clj_make_no_matching_arity_exception as *const u8, arity: 1 },
+        Prim {
+            name: "__atom_create",
+            ptr: clj_atom as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__atom_deref",
+            ptr: clj_deref as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__atom_reset",
+            ptr: clj_reset as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "atom",
+            ptr: clj_atom as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "deref",
+            ptr: clj_deref as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "reset!",
+            ptr: clj_reset as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__arity_check",
+            ptr: clj_arity_check as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__check_args_list",
+            ptr: clj_check_args_list as *const u8,
+            arity: 2,
+        },
+        Prim {
+            name: "__no_matching_arity_panic",
+            ptr: clj_no_matching_arity_panic as *const u8,
+            arity: 1,
+        },
+        Prim {
+            name: "__make_no_matching_arity_exception",
+            ptr: clj_make_no_matching_arity_exception as *const u8,
+            arity: 1,
+        },
     ];
     PRIMS
 }

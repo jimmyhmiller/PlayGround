@@ -127,7 +127,10 @@ fn compile_during_long_run() {
     let h_a = thread::spawn(move || {
         started_a.store(1, Ordering::Release);
         let v = e_a.call_compiled("fib", &[f64::to_bits(28.0)]);
-        a_finished_c.store(Instant::now().elapsed().as_nanos() as u64, Ordering::Release);
+        a_finished_c.store(
+            Instant::now().elapsed().as_nanos() as u64,
+            Ordering::Release,
+        );
         v
     });
 
@@ -160,7 +163,10 @@ fn compile_during_long_run() {
         // Instead we use call_compiled (read-only) too. Both threads
         // read concurrently — that's the parallelism we DO have.
         let v = e_b.call_compiled("fib", &[f64::to_bits(15.0)]);
-        b_finished_c.store(Instant::now().elapsed().as_nanos() as u64, Ordering::Release);
+        b_finished_c.store(
+            Instant::now().elapsed().as_nanos() as u64,
+            Ordering::Release,
+        );
         v
     });
 

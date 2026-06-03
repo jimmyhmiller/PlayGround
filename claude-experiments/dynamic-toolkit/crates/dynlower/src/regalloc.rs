@@ -651,6 +651,15 @@ impl RegisterAllocator for GreedyRegState {
                 B::emit_load_gp_from_frame(buf, machine_gp(r), slot);
                 self.assign_gp(val, r);
             }
+            // The canonical block-param slot is this value's stable backing
+            // store: register it as the value's spill slot so the GC-root
+            // recorder (which enumerates `value_spill_slot`) records it at
+            // every safepoint where the param is live, and so any later spill
+            // reuses this slot. Without this, a loop-carried heap pointer that
+            // is live across a safepoint while resident only in its canonical
+            // param slot is never recorded as a root and dangles after a
+            // moving GC (the form-430 crash).
+            self.values[val.index()].spill_slot = Some(param_slots[i]);
         }
     }
 
@@ -1836,8 +1845,7 @@ impl RegisterAllocator for LinearScanAllocator {
                 B::emit_store_gp_to_frame(buf, machine_gp(0), slot);
             }
         } else {
-            let slot =
-                frame.slot_access(frame.block_param_slots(target_idx)[param_idx]);
+            let slot = frame.slot_access(frame.block_param_slots(target_idx)[param_idx]);
             if is_fp {
                 B::emit_store_fp_to_frame(buf, machine_fp(0), slot);
             } else {

@@ -4036,7 +4036,11 @@ fn card_table_tracks_old_to_young() {
         .with_fields(2);
     static LEAF: TypeInfo = TypeInfo::for_header(Compact::SIZE).with_type_id(1);
 
-    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 65536, tt(&[PAIR, LEAF])));
+    let heap = Arc::new(Heap::new_generational::<Compact>(
+        4096,
+        65536,
+        tt(&[PAIR, LEAF]),
+    ));
     let (ts, _id) = heap.register_thread();
 
     let frame = RootFrame::<1>::new();
@@ -4173,7 +4177,11 @@ fn generational_multi_thread_stress() {
         .with_type_id(0)
         .with_fields(1);
 
-    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 1048576, tt(&[NODE])));
+    let heap = Arc::new(Heap::new_generational::<Compact>(
+        4096,
+        1048576,
+        tt(&[NODE]),
+    ));
     let stop = Arc::new(AtomicBool::new(false));
     let num_threads = 4;
     let mut handles = Vec::new();
@@ -4267,7 +4275,11 @@ fn stress_generational_concurrent() {
         .with_type_id(0)
         .with_fields(1);
 
-    let heap = Arc::new(Heap::new_generational::<Compact>(4096, 1048576, tt(&[NODE])));
+    let heap = Arc::new(Heap::new_generational::<Compact>(
+        4096,
+        1048576,
+        tt(&[NODE]),
+    ));
     let stop = Arc::new(AtomicBool::new(false));
     let num_threads = 3;
     let mut handles = Vec::new();

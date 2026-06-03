@@ -227,6 +227,10 @@ fn reference_targets(def: &Def) -> BTreeSet<Hash> {
                 }
             }
         }
+        Def::State { ty, init } => {
+            collect_type_refs(ty, &mut acc);
+            collect_expr_refs(init, &mut acc);
+        }
     }
     acc
 }
@@ -256,7 +260,7 @@ fn collect_type_refs(t: &Type, acc: &mut BTreeSet<Hash>) {
 
 fn collect_expr_refs(e: &Expr, acc: &mut BTreeSet<Hash>) {
     match e {
-        Expr::TopRef(h) => {
+        Expr::TopRef(h) | Expr::StateRef(h) => {
             acc.insert(*h);
         }
         Expr::BuiltinRef(name) => {
@@ -349,7 +353,8 @@ fn collect_expr_refs(e: &Expr, acc: &mut BTreeSet<Hash>) {
         | Expr::BoolLit(_)
         | Expr::StringLit(_)
         | Expr::LocalVar(_)
-        | Expr::SelfRef(_) => {}
+        | Expr::SelfRef(_)
+        | Expr::StateSelfRef(_) => {}
     }
 }
 
