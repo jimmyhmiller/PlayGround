@@ -2791,8 +2791,24 @@ impl Js {
         }
     }
 
-    /// Evaluate a modeled static method on a global (e.g. `String.fromCharCode`).
+    /// Evaluate a modeled static method on a global (e.g. `String.fromCharCode`,
+    /// `Math.floor`). Returns the folded value, or `None` to residualize (dynamic
+    /// or non-numeric args, or a method this model doesn't cover — which then
+    /// passes through to Node unchanged). Adding a static-method built-in is local:
+    /// add an arm here.
+    ///
+    /// Math: only the **deterministic, integer-result** methods are modeled. In
+    /// the i64 number model every value is an integer, so `floor`/`ceil`/`round`/
+    /// `trunc` are the identity; `abs`/`sign`/`max`/`min` fold over static numbers.
+    /// Float-producing methods (`sqrt`, `pow`, `hypot`, …) and the non-deterministic
+    /// `random` are deliberately NOT modeled — folding them would be unsound or
+    /// lossy, so they pass through to the runtime.
     fn try_builtin_static(&self, obj: &str, method: &str, args: &[Abs]) -> Option<Abs> {
+        // A single static integer argument.
+        let num1 = || match args.first() {
+            Some(Abs::Num(n)) => Some(*n),
+            _ => None,
+        };
         match (obj, method) {
             ("String", "fromCharCode") => {
                 let mut st = String::new();
@@ -2803,6 +2819,31 @@ impl Js {
                     }
                 }
                 Some(Abs::Str(st))
+            }
+            // Integer-preserving rounding is the identity in the i64 model.
+            ("Math", "floor") | ("Math", "ceil") | ("Math", "round") | ("Math", "trunc") => {
+                num1().map(Abs::Num)
+            }
+            // `checked_abs` residualizes the lone overflow case (`abs(i64::MIN)`),
+            // whose true JS value is a float we can't represent.
+            ("Math", "abs") => num1()?.checked_abs().map(Abs::Num),
+            ("Math", "sign") => num1().map(|n| Abs::Num(n.signum())),
+            ("Math", "max") | ("Math", "min") => {
+                // `max()`/`min()` with no args are ±Infinity (not representable);
+                // require at least one arg and all-static-numeric args.
+                let mut nums = Vec::with_capacity(args.len());
+                for a in args {
+                    match a {
+                        Abs::Num(n) => nums.push(*n),
+                        _ => return None,
+                    }
+                }
+                let v = if method == "max" {
+                    nums.iter().copied().max()?
+                } else {
+                    nums.iter().copied().min()?
+                };
+                Some(Abs::Num(v))
             }
             _ => None,
         }

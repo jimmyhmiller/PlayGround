@@ -327,6 +327,34 @@ mod tests {
     }
 
     #[test]
+    fn math_integer_methods_fold() {
+        // The deterministic integer-result Math methods fold over static args.
+        let src = "function main(input) {
+            return Math.floor(5) + Math.abs(-7) + Math.max(3, 9, 2) + Math.min(1, 4) + Math.sign(-2);
+        }";
+        // 5 + 7 + 9 + 1 + (-1) = 21. (Not `check`-able: the reference interpreter
+        // can't resolve the `Math` global; the residual folds to a constant.)
+        let prog = specialize(src).unwrap().1;
+        assert_eq!(run_residual(src, 0).unwrap(), DeepVal::Num(21));
+        assert_eq!(prog.blocks.len(), 1, "static Math should fully fold");
+    }
+
+    #[test]
+    fn math_dynamic_float_and_random_pass_through() {
+        // A dynamic arg, a float-producing method, and the non-deterministic
+        // `random` must all residualize (folding them would be lossy/unsound).
+        assert!(to_js("function main(input) { return Math.floor(input); }")
+            .unwrap()
+            .contains("Math.floor"));
+        assert!(to_js("function main(input) { return Math.sqrt(16); }")
+            .unwrap()
+            .contains("Math.sqrt"));
+        assert!(to_js("function main(input) { return Math.random(); }")
+            .unwrap()
+            .contains("Math.random"));
+    }
+
+    #[test]
     fn higher_order_with_lifted_arrow() {
         let src = "
             function map(xs, f) {
