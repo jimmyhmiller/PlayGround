@@ -154,40 +154,50 @@ the eval core (not caused by the recursion code). Each has a regression test in
   ~2000x in bytes/weight — so the budget is tuned per-workload, not universal; a
   truly robust guard would be subprocess `RLIMIT_AS`.
 
-## Remaining issue: throw preservation in dead positions + the undeclared-var artifact
+## Also fixed this session
+
+- **Math modeled as a built-in** (`try_builtin_static`, the same hook as
+  `String.fromCharCode`): deterministic integer-result methods fold (`floor`/`ceil`/
+  `round`/`trunc` are identity in the i64 model; `abs`/`sign`/`max`/`min` over static
+  numbers). Float (`sqrt`, `pow`, …) and non-deterministic `random` deliberately pass
+  through. This is the **stdlib-extension pattern**: add an arm to `try_builtin_static`
+  (static methods on a global), `try_builtin_new` (constructors), or
+  `try_builtin_method` (bound instance methods).
+- **Residual-function body context leak** (seed 228): `residual_fn_for` now specializes
+  the body in a CLEAN context (save/clear/restore `probing`, `halt_at`, `eager_stores`,
+  residual-try stack). A function residualized while the caller was mid-probe or
+  mid-`try` (e.g. `f.call(x)` inside a `try`) inherited that state and produced an
+  EMPTY `__rf0`, silently dropping the body's calls/returns/throws. Test:
+  `residual_function_body_kept_when_caller_is_in_a_try`.
+
+## Remaining issue: throw preservation in dead positions (mostly fuzzer artifact)
 
 The residual can silently skip an exception the original raises when a may-throw
-expression sits in a position whose value is dropped. Progress this session:
-- **used** value: already correct (`return undefined.length` throws at runtime).
-- **`Pop`-discarded** statement (`undefined.length;`): FIXED (fix #4 — `may_throw` +
-  `Op::Eval` at the `Pop` site).
-- **dead store / dead array-or-object element with a null/undefined base** (`var x =
-  undefined.length; …`, `[{b: null[3]}]`): FIXED — `Instr::GetProp`/`GetIndex` on a
-  statically null/undefined base now emit the (always-throwing) access eagerly in
-  program order and bind a temp, so it survives regardless of how the value is used.
-  Tests: `dead_store_of_nullish_access_still_throws`. simple.js byte-unchanged (it
-  never reads a statically-nullish base).
+expression sits in a position whose value is dropped:
+- **used** value: correct (`return undefined.length` throws at runtime).
+- **`Pop`-discarded** statement (`undefined.length;`): FIXED (`may_throw` + `Op::Eval`
+  at the `Pop` site — emits the whole expression, so a short-circuit like
+  `cond && undefined.x;` still short-circuits at runtime).
+- **dead store / dead element** (`var x = undefined.length;`, `[{b: a8.length}]` with
+  the value unused): still an under-throw MISS. An attempt to fix this by
+  eager-emitting nullish member/index reads at `GetProp`/`GetIndex` was **reverted** —
+  it hoisted the throw out of the compact short-circuit form (`cond && undefined.x`
+  evaluates the operand eagerly), causing **over-throws**. The Pop-based fix is the
+  safe boundary; covering dead stores needs liveness or a may-throw-effect model that
+  doesn't break short-circuiting.
 
-What's left is dominated by a **fuzzer artifact**, not a fixable PE soundness bug:
-the generator/shrinker emits reads of **undeclared variables** (`a1`, `a8`, a free
-`input` inside a top-level function). In JS an undeclared read throws ReferenceError;
-the PE models every unresolved identifier as a (non-throwing) `Global`. When such a
-read is *used*, the residual reproduces it (`return (input + 1)` with `input`
-unbound also throws → match). It only diverges when the read is in a **dead position**
-(e.g. `void a1` inside an object that is a truthy ternary condition — seed 231) where
-the residual drops it. This is NOT cleanly fixable: the PE cannot distinguish an
-undeclared identifier from a real runtime global (`Math`, `String`), and emitting all
-dead global reads eagerly to be safe would both bloat real code and is moot for real
-inputs (valid code like simple.js never reads undeclared vars). The right fix is at
-the fuzzer: stop the generator/shrinker producing undeclared-variable references
-(the generator hardcodes `Expr::Var("input")` in `atom()` even where `input` is out
-of scope; the shrinker removes declarations and leaves references dangling).
-
-True remaining PE bug (narrow path, not the artifact): **residual-function body
-dropping a throwing call** — seed 228, `function f3(){ return a3(true); }` (a3
-undefined → TypeError) residualizes to an empty `__rf0`. Worth fixing in the
-residual-fn-body specialization. The lone non-throw straggler (seed 22) is a deeply
-contrived nested case.
+This remaining class is dominated by a **fuzzer artifact**: the generator/shrinker
+emits reads of **undeclared variables** (`a1`, `a8`, a free `input` inside a top-level
+function). In JS an undeclared read throws ReferenceError; the PE models every
+unresolved identifier as a (non-throwing) `Global`. Used → the residual reproduces it
+(`return (input + 1)` with `input` unbound also throws → match); only DEAD positions
+diverge (seed 231 `void a1` in a truthy-ternary object). NOT cleanly fixable — the PE
+can't distinguish an undeclared identifier from a real global (`Math`, `String`), and
+real code never reads undeclared vars. The right fix is at the fuzzer: stop the
+generator hardcoding `Expr::Var("input")` in `atom()` where it's out of scope, and
+stop the shrinker reducing to a different failure (it deletes declarations, leaving
+references dangling — so shrunk minimals over-represent this artifact). The lone
+non-throw straggler (seed 22) is a deeply contrived nested case.
 
 ## The fuzzer (`js-frontend/src/bin/fuzz.rs` + `tools/fuzzcmp.js`)
 
