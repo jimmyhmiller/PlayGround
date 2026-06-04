@@ -20,6 +20,7 @@ pub mod constprop;
 pub mod dce;
 pub mod dialect;
 pub mod passes;
+pub mod pipeline;
 pub mod ssa;
 pub mod verify;
 mod build;
