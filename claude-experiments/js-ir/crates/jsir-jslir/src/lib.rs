@@ -244,3 +244,34 @@ pub fn roundtrip(file: &Op) -> (Op, Stats) {
     let (jslir, stats) = build_jslir(file);
     (lift_jslir(&jslir), stats)
 }
+
+/// The full compile: build JSLIR → run the [`pipeline`] over every lowered
+/// function body → lift back to JSHIR. This is the oracle seam — as stubs in the
+/// pipeline become real passes, the emitted JS converges on upstream's output.
+pub fn compile(file: &Op) -> (Op, Stats) {
+    let (mut jslir, stats) = build_jslir(file);
+    // Seed the fresh-id allocator above every id in the file (passes that build
+    // SSA mint ephemeral phi ids from here).
+    let base = lift::max_value_id(&jslir) + 1;
+    run_pipeline_on_functions(&mut jslir, base);
+    (lift_jslir(&jslir), stats)
+}
+
+/// Run the pass pipeline over every function body that lowered to a CFG.
+fn run_pipeline_on_functions(op: &mut Op, base: u32) {
+    if is_function(&op.name) {
+        let idx = body_region_index(&op.name);
+        if let Some(body) = op.regions.get_mut(idx) {
+            if dialect::region_is_cfg(body) {
+                pipeline::run_pipeline(body, base);
+            }
+        }
+    }
+    for r in &mut op.regions {
+        for b in &mut r.blocks {
+            for o in &mut b.ops {
+                run_pipeline_on_functions(o, base);
+            }
+        }
+    }
+}
