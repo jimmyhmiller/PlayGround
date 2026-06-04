@@ -1748,7 +1748,7 @@ fn rewrite_type_body_selfref_to_topref(
 /// adjacency list. Returns SCCs in **reverse DFS order**, which for
 /// our purposes is **dependencies-first**: a node's deps appear in
 /// earlier SCCs than the node itself. (Tarjan emits sinks first.)
-fn tarjan_scc(adj: &[Vec<u32>]) -> Vec<Vec<u32>> {
+pub fn tarjan_scc(adj: &[Vec<u32>]) -> Vec<Vec<u32>> {
     let n = adj.len();
     let mut index_of: Vec<i32> = vec![-1; n];
     let mut lowlink: Vec<i32> = vec![0; n];

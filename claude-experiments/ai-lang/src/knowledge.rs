@@ -511,6 +511,78 @@ fn expr_is_stateful(e: &Expr, set: &HashSet<Hash>) -> bool {
     }
 }
 
+/// Hashes of every def/lambda whose result is NOT safe to memoize across an
+/// `at` call — a strict superset of [`stateful_hashes`]. A thunk is
+/// cache-unsafe if it reads/writes node `state`, performs any
+/// non-deterministic / external / shared-mutable effect (IO, Net, Atom,
+/// FFI), or transitively calls something that does. Local-only mutation of
+/// an owned value (`Mut`) and `Panic` remain cacheable.
+///
+/// Generalizes the State-only `stateful_hashes`: the leaf classifier is
+/// [`crate::effects::builtin_effect_sig`] (the single source of effect
+/// truth); transitivity / lambda-hashing / the fixpoint are reused.
+pub fn non_cacheable_hashes(
+    defs: &[crate::resolve::ResolvedDef],
+    extra_lambdas: &[(Hash, Expr)],
+) -> HashSet<Hash> {
+    let mut entries: Vec<(Hash, Expr)> = Vec::new();
+    for rd in defs {
+        match &rd.def {
+            Def::Fn { body, .. } => {
+                entries.push((rd.hash, body.clone()));
+                collect_lambda_entries(body, &mut entries);
+            }
+            Def::State { init, .. } => {
+                entries.push((rd.hash, init.clone()));
+                collect_lambda_entries(init, &mut entries);
+            }
+            Def::Struct { .. } | Def::Enum { .. } => {}
+        }
+    }
+    for (h, e) in extra_lambdas {
+        entries.push((*h, e.clone()));
+        if let Expr::Lambda { body, .. } = e {
+            collect_lambda_entries(body, &mut entries);
+        }
+    }
+    let mut set: HashSet<Hash> = HashSet::new();
+    loop {
+        let mut changed = false;
+        for (h, body) in &entries {
+            if !set.contains(h) && expr_is_non_cacheable(body, &set) {
+                set.insert(*h);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    set
+}
+
+/// Leaf predicate for [`non_cacheable_hashes`].
+fn expr_is_non_cacheable(e: &Expr, set: &HashSet<Hash>) -> bool {
+    use crate::effects::EffectSet;
+    match e {
+        Expr::StateRef(_) | Expr::StateSelfRef(_) => true,
+        Expr::TopRef(h) => set.contains(h),
+        Expr::BuiltinRef(name) => {
+            let c = crate::effects::builtin_effect_sig(name).concrete;
+            !c.without(EffectSet::MUT.union(EffectSet::PANIC)).is_empty()
+        }
+        _ => {
+            let mut found = false;
+            walk_children(e, &mut |c| {
+                if expr_is_non_cacheable(c, set) {
+                    found = true;
+                }
+            });
+            found
+        }
+    }
+}
+
 /// Apply `f` to each immediate child expression of `e`.
 fn walk_children(e: &Expr, f: &mut dyn FnMut(&Expr)) {
     match e {

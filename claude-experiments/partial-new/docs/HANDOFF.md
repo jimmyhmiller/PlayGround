@@ -267,11 +267,125 @@ effects**. It diverges at effect #4.
   all derive from this one wrong byte derailing the decoder.
 
 The capture-escape fix (#5 above) did NOT fix this — simple.js's decrypt is in
-`main`'s loader loop, not a has_try closure. **Next step**: reproduce the
-cross-handler / cross-iteration decrypt-then-read ordering minimally (hand-crafted
-repros so far all fold correctly; needs the array escaped + write in one residual
-region + read in another with the read emitted first). Once minimal, fix like the
-capture-escape bug.
+`main`'s loader loop, not a has_try closure.
+
+### UPDATED DIAGNOSIS (2026-06-03): it is an OBJECT-IDENTITY / escape-persistence
+bug, not pure effect-ordering. Structural evidence from the residual (`/tmp/r.js`,
+`SPEC_WEIGHT_BUDGET=999999999`):
+- The original builds the byte array `v5` **once** (simple.js line 259, declared
+  231) and decrypts it in place / reads it across the whole VM loop — ONE object.
+- In the residual the array is **partial-static and re-materialized as fresh
+  literals in ~10 different trampoline blocks**: the distinctive chunk literal
+  `[50, 139, 244, 245, 246, 229, 75, 35, …]` appears **52 times**; the box
+  `v1640 = {"value": v100049}` is reconstructed in 10 blocks (lines 8528,
+  13700–13890), each with fresh chunk arrays.
+- The decrypt target is bound INCONSISTENTLY: in some blocks `v1646 =
+  v1640.value[v1645]` (the shared chunk — correct, line 13635), in others
+  `v1646 = [50, 139, …]` (a FRESH copy — line 13836). A decrypt-write to a fresh
+  copy is lost; a read in a block holding a different fresh copy misses it. That is
+  the "off by ^143": the read's copy was never decrypted (the decrypt hit a
+  different object).
+- The decoder read IS fully residualized (`__rf3`:
+  `v900192.value[v900193.value][v600151]`), so this is not a static-fold issue —
+  it is that the runtime array the decoder reads is a DIFFERENT object than the one
+  the loader decrypted, because the PE re-creates the array per block instead of
+  carrying one escaped instance.
+
+**Root cause.** A partial-static array that is mutated through a residualized
+(dynamic-index) write inside a loop must escape to ONE runtime instance that is
+loop-carried across all trampoline blocks. Today the array stays static in each
+block's memoized state, so it re-materializes fresh (losing cross-block writes) and
+different blocks hold different copies. The fix lives in the loop-header
+generalization + escape interaction: once the array escapes on any path, every
+block's view of it must become the same escaped runtime var (not re-materialize the
+static literal). This is the partial-static-array consistency problem; the hard part
+is doing it WITHOUT losing the static folding that lets the decode collapse at all
+(fold while fully static; escape permanently and loop-carry the instant a
+residualized write happens).
+
+### Progress 2026-06-03 (effect-4 session): PROVEN to be a duplication/identity
+bug (the older "same object, verified" note above is STALE for the current code);
+one adjacent aliasing bug found+FIXED; minimal repro of the exact simple.js path
+still elusive.
+
+**Runtime instrumentation settles it: identity, not ordering.** Tagging the byte
+arrays with a WeakMap id and logging reads/writes at the diverging index 1131
+(`/tmp/instr3.js` pattern: wrap the `__rf3` read and the `v1646[v1647] ^= …`
+writes) shows THREE distinct objects at index 1131: WRITE hits obj#1 (152→23, the
+`^143` decrypt) and obj#2; the READ hits obj#3 (value 152, never decrypted). So the
+decoder reads a DIFFERENT object than the loader decrypts — off by ^143 because the
+read's object was never written. The byte values are concrete numbers, so the OUTER
+array stays partial-static (re-materialized) while an INNER chunk is what diverges.
+
+**Not yet minimally reproducible.** ~10 hand-crafted repros (array in a dynamic
+loop; nested arrays; static-outer/dynamic-inner index; boxed + closure-captured;
+array created in an init loop) ALL fold to a single shared instance, because
+`escape()` escapes the whole reachable graph from the root and `materialize` (now
+with shared `seen`) keeps one instance. simple.js re-materializes the array at loop
+back-edges anyway — the trigger is some interaction of: the array is BOXED
+(`{value:…}`) and captured by the residualized decoder closure `__rf3`; it is
+created inside the outer `while (v10>=0)` init loop; the decode/decrypt run in a
+deeper VM loop; and the chunk index is static while the byte index is dynamic. The
+abstract OUTER array's contents change via folded (static-index) writes, so
+`materialize` re-constructs it each iteration as fresh literals; a residualized
+(dynamic-byte-index) write to an inner chunk goes to the runtime object and is lost
+when the next iteration re-constructs.
+
+**Exact site found (PE instrumentation).** A debug print in `materialize`
+(`src/js.rs`, the loop/branch materializer) over large Ref slots shows the byte
+array — **slot 6, addr 44, `Array[1197]`** — is materialized **4 times** (same
+abstract addr 44, four fresh `NewArray` constructions). Those four runtime arrays
+are the id=1/2/3 objects the runtime trace saw: the decrypt writes one, the decoder
+reads another. The 4 calls are at four different control-flow merge points
+(loop-header generalize / branch joins) that each independently re-materialize the
+same loop-carried object — there is no cross-`materialize` memory that "addr 44 is
+already a residual var X", so each emits a fresh literal.
+
+**Fix direction (substantial — next session).** Persist the escape: the first time a
+loop-carried object is materialized, record `addr -> var`; later materializations of
+the same addr reference that var instead of re-constructing, AND the construction
+must dominate all uses (var assigned before any block reads it). Equivalently: once
+the byte array must be residual, escape it FULLY to one runtime instance and emit
+every decrypt as a runtime `SetIndex` on it (the decode is already a runtime closure
+`__rf3`, so little folding is lost). Care points: (a) dominance/scoping of the single
+construction across the trampoline; (b) don't regress the static folding for arrays
+that never need to be residual. The shared-`seen` fix landed this session removes
+WITHIN-`materialize` duplication; this is the ACROSS-`materialize` (cross-merge-point)
+version.
+
+While hunting effect #4 a minimal **closure-captured-array aliasing** bug was found
+and fixed (test `closure_captured_array_aliases_direct_mutation`, repro at
+`docs/effect4-minimal-repro.js`): an array captured by a *residualized* closure AND
+mutated directly was materialized as TWO copies by the loop/branch materializer
+(`materialize` in `src/js.rs`) — each Ref slot used its own fresh `seen` map, so the
+closure's capture and the directly-held array became separate objects. Fix: thread
+ONE shared `seen` across all Ref slots and emit non-closure objects before closures
+(so `.bind(null, arr)` sees an assigned `arr`); `materialize_into_seen` is the new
+shared-`seen` entry. This is a real soundness fix but is NOT the simple.js bug:
+simple.js's array-dup count (52) is unchanged and it still diverges at effect #4.
+
+**The actual simple.js mechanism (now isolated).** The byte-array box
+`v1640 = {"value":[chunks]}` is **loop-carried and RE-MATERIALIZED (re-constructed
+as fresh static literals) at every back-edge to the loop header (`pc 8`)** — it
+appears in ~10 trampoline blocks that all `__pc = 8`. Decrypts with a STATIC index
+fold into the abstract array, so they ARE reflected in each re-construction; a
+decrypt with a DYNAMIC index RESIDUALIZES to a runtime `SetIndex` on ONE iteration's
+construction and is LOST when the next iteration re-constructs the array fresh. So
+the lazy-decrypt of byte 1131 (dynamic index) is written to one construction and the
+decoder reads a later, freshly-reconstructed (un-decrypted) copy → off by ^143.
+
+The repros above (`docs/effect4-minimal-repro.js` and variants) do NOT reproduce
+THIS: they keep one escaped array because the array there never reverts to a static
+Ref at a loop header. To reproduce, the array must stay partial-STATIC (so the
+decode folds) AND be carried into a dynamically-controlled loop where a back-edge
+re-materializes it, AND get a dynamic-index write in one iteration that a later
+iteration's read should observe. **The fix**: when a loop-carried partial-static
+array gets a residualized (dynamic-index) write, force it to FULLY escape to a single
+runtime instance that the loop header carries as a `Var` (not re-materialize the
+static literal each iteration) — i.e. propagate the escape into the loop-header
+generalization / memoized loop state, not just the current path. Hard part: keep the
+static folding that lets the decode collapse while it is still fully static; only
+escape-and-carry the instant a residualized write happens.
 
 ## Key files
 

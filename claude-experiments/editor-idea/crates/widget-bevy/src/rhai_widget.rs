@@ -33,6 +33,15 @@
 //! | `on_resize(w, h)`                | pane resized                   |
 //! | `on_frame(dt)`                   | per frame, while animating     |
 //! | `on_bus(kind, payload)`          | Claude Code bus event          |
+//! | `on_message(topic, payload, snd)`| widget↔widget bus message      |
+//!
+//! `on_message` is the widget↔widget bus — sibling panes talking to each
+//! other. Publish with `emit(topic, payload)` (or `emit_retained` to also
+//! keep it as the topic's last value for late-joining panes). Delivery is
+//! pushed (no `set_animating` polling) and scoped to the same editor
+//! project. `snd` is the sender's id; call `my_id()` to recognise echoes
+//! of your own emits. This is SEPARATE from the Claude `on_bus` channel.
+//! See `crate::msgbus` and AUTHORING.md.
 //!
 //! IMPORTANT: `on_bus` is the Claude Code **event bus** (pre_tool_use,
 //! stop, …), NOT UI events. UI interaction always arrives through the
@@ -199,6 +208,11 @@ enum HostToWorker {
     /// User submitted a focused `Element::Input` (Enter). Drives
     /// `on_input_submit(id, value)`.
     InputSubmit { id: String, value: String },
+    /// A widget↔widget bus message delivered to this widget. Drives
+    /// `on_message(topic, payload, sender)`. `sender` is the publishing
+    /// widget's id (this widget's own id for an echo of its own emit, or
+    /// `"tbmsg"` for the CLI). NOT the Claude bus — that's `ClaudeEvent`.
+    Message { topic: String, payload: Value, sender: String },
     /// Hot reload — main parsed a new AST, worker should swap in and
     /// re-init scope from the last snapshot.
     Reload {
@@ -206,6 +220,16 @@ enum HostToWorker {
     },
     /// Exit the worker loop. Sent by `on_close` and by `Drop`.
     Shutdown,
+}
+
+/// One outbound widget↔widget bus message the script published via
+/// `emit` / `emit_retained`. The worker thread pushes these into
+/// `WorkerSlots::outbox`; the main thread drains them each frame, tags
+/// the sender + project, and fans them out (see `crate::msgbus`).
+pub(crate) struct OutMsg {
+    pub topic: String,
+    pub payload: Value,
+    pub retain: bool,
 }
 
 /// What main reads from the worker: the latest frame the script
@@ -231,6 +255,9 @@ struct WorkerSlots {
     /// `render(canvas_w, canvas_h)` and publishes a frame whenever
     /// this is set after a handler completes, then clears it.
     render_dirty: Arc<AtomicBool>,
+    /// Widget↔widget bus messages the script published via `emit` /
+    /// `emit_retained`, awaiting pickup by the main thread.
+    outbox: Arc<Mutex<Vec<OutMsg>>>,
 }
 
 impl WorkerSlots {
@@ -242,6 +269,7 @@ impl WorkerSlots {
             last_error: Arc::new(Mutex::new(None)),
             animating: Arc::new(AtomicBool::new(false)),
             render_dirty: Arc::new(AtomicBool::new(true)),
+            outbox: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -259,6 +287,15 @@ impl WorkerHandle {
     fn send(&self, msg: HostToWorker) {
         let _ = self.tx.send(msg);
     }
+
+    /// Take everything the script has published since the last drain.
+    fn drain_outbox(&self) -> Vec<OutMsg> {
+        self.slots
+            .outbox
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+    }
 }
 
 impl Drop for WorkerHandle {
@@ -275,13 +312,14 @@ fn spawn_worker(
     initial_ast: Option<AST>,
     initial_state: Value,
     script_name: String,
+    widget_id: String,
 ) -> WorkerHandle {
     let (tx, rx) = mpsc::channel::<HostToWorker>();
     let slots = WorkerSlots::new();
     let slots_for_thread = slots.clone();
     let join = thread::Builder::new()
         .name(format!("rhai-widget:{}", script_name))
-        .spawn(move || worker_main(rx, slots_for_thread, initial_ast, initial_state))
+        .spawn(move || worker_main(rx, slots_for_thread, initial_ast, initial_state, widget_id))
         .expect("spawn rhai-widget worker thread");
     WorkerHandle {
         tx,
@@ -514,6 +552,12 @@ impl Worker {
                 if !self.ensure_initialized() { return true; }
                 self.call_handler("on_input_submit", (id, value));
             }
+            HostToWorker::Message { topic, payload, sender } => {
+                if !self.ensure_initialized() { return true; }
+                let payload_dyn =
+                    rhai::serde::to_dynamic(&payload).unwrap_or(Dynamic::UNIT);
+                self.call_handler("on_message", (topic, payload_dyn, sender));
+            }
             HostToWorker::Click {
                 local_x,
                 local_y,
@@ -557,10 +601,11 @@ fn worker_main(
     slots: WorkerSlots,
     initial_ast: Option<AST>,
     initial_state: Value,
+    widget_id: String,
 ) {
     let mut engine = Engine::new();
     engine.set_max_expr_depths(256, 128);
-    register_host_functions(&mut engine, &slots);
+    register_host_functions(&mut engine, &slots, &widget_id);
 
     let mut worker = Worker {
         engine,
@@ -588,6 +633,10 @@ fn worker_main(
 pub struct RhaiWidget {
     pub script: String,
     pub script_path: PathBuf,
+    /// Stable id for this widget on the widget↔widget bus. Used as the
+    /// `sender` on messages it publishes and to dedupe retained backlog
+    /// delivery. Derived from the pane entity at spawn.
+    pub widget_id: String,
     pub handle: WorkerHandle,
     /// Last frame generation we applied to the scene. Compared against
     /// `handle.slots.frame_gen` to skip diffing when nothing changed.
@@ -659,6 +708,19 @@ impl RhaiWidget {
     /// (`on_input_focus`).
     pub fn send_input_focus(&self, id: String, focused: bool) {
         self.handle.send(HostToWorker::InputFocus { id, focused });
+    }
+
+    /// Take the widget↔widget bus messages this script published since
+    /// the last drain. Called by the central bus pump (`crate::msgbus`).
+    pub(crate) fn drain_bus_outbox(&self) -> Vec<OutMsg> {
+        self.handle.drain_outbox()
+    }
+
+    /// Deliver a widget↔widget bus message to this worker
+    /// (`on_message(topic, payload, sender)`).
+    pub(crate) fn deliver_bus_message(&self, topic: String, payload: Value, sender: String) {
+        self.handle
+            .send(HostToWorker::Message { topic, payload, sender });
     }
 }
 
@@ -824,12 +886,22 @@ fn rhai_widget_spawn(world: &mut World, entity: Entity, _content_root: Entity, c
     };
 
     let wants_clicks = initial_ast.as_ref().map(ast_wants_clicks).unwrap_or(false);
-    let handle = spawn_worker(initial_ast, cfg.state.clone(), cfg.script.clone());
+    // Stable per-pane bus id. `to_bits` is unique among live entities, so
+    // two widgets never share an id (and a despawn+respawn gets a fresh
+    // one, which is what we want for retained-backlog dedup).
+    let widget_id = format!("rw{:x}", entity.to_bits());
+    let handle = spawn_worker(
+        initial_ast,
+        cfg.state.clone(),
+        cfg.script.clone(),
+        widget_id.clone(),
+    );
 
     world.entity_mut(entity).insert((
         RhaiWidget {
             script: cfg.script.clone(),
             script_path,
+            widget_id,
             handle,
             applied_frame_gen: 0,
             last_state: cfg.state,
@@ -1543,7 +1615,7 @@ fn diff_render(
 // Host helper functions registered with the engine
 // ============================================================
 
-fn register_host_functions(engine: &mut Engine, slots: &WorkerSlots) {
+fn register_host_functions(engine: &mut Engine, slots: &WorkerSlots, widget_id: &str) {
     // Generic style-bevy host primitives: uniform_set/get, mask_paint,
     // emit/schedule, state_set/get, pane_rects. Same registration the
     // system-script side uses, so any rhai widget can drive the
@@ -1692,6 +1764,66 @@ fn register_host_functions(engine: &mut Engine, slots: &WorkerSlots) {
         });
     }
 
+    // Widget↔widget bus. `emit(topic, payload)` publishes a control
+    // message to every widget in the same editor project (each gets an
+    // `on_message(topic, payload, sender)` push — NOT polled). The HOST
+    // serializes the Rhai value, so scripts pass native maps/arrays/etc.
+    // and never touch JSON. `emit_retained` additionally keeps the
+    // message as the topic's last value so a widget spawned later
+    // receives it on init (MQTT-style retain). This is a SEPARATE channel
+    // from the Claude bus (`on_bus`): app signalling, not hook events.
+    //
+    // These deliberately shadow `style_bevy`'s shader-pipeline `emit`
+    // (registered just above for `mask_*`/effect events): a widget never
+    // drives the shader bus, but it does talk to its sibling panes. The
+    // explicit `Map` overload is required — Rhai resolves a `#{…}` literal
+    // to a `Map` param in preference to `Dynamic`, so without it a map
+    // payload would still reach the old shader `emit`. The atelier /
+    // system-script engine registers its own copy and is unaffected.
+    {
+        let outbox = slots.outbox.clone();
+        let push = move |topic: &str, payload: Value, retain: bool| {
+            if let Ok(mut v) = outbox.lock() {
+                v.push(OutMsg { topic: topic.to_string(), payload, retain });
+            }
+        };
+        let p = push.clone();
+        engine.register_fn("emit", move |topic: &str, payload: rhai::Map| {
+            let val = rhai::serde::from_dynamic::<Value>(&Dynamic::from_map(payload))
+                .unwrap_or(Value::Null);
+            p(topic, val, false);
+        });
+        let p = push.clone();
+        engine.register_fn("emit", move |topic: &str, payload: Dynamic| {
+            let val = rhai::serde::from_dynamic::<Value>(&payload).unwrap_or(Value::Null);
+            p(topic, val, false);
+        });
+        let p = push.clone();
+        engine.register_fn("emit", move |topic: &str| {
+            p(topic, Value::Null, false);
+        });
+        let p = push.clone();
+        engine.register_fn("emit_retained", move |topic: &str, payload: rhai::Map| {
+            let val = rhai::serde::from_dynamic::<Value>(&Dynamic::from_map(payload))
+                .unwrap_or(Value::Null);
+            p(topic, val, true);
+        });
+        let p = push.clone();
+        engine.register_fn("emit_retained", move |topic: &str, payload: Dynamic| {
+            let val = rhai::serde::from_dynamic::<Value>(&payload).unwrap_or(Value::Null);
+            p(topic, val, true);
+        });
+        engine.register_fn("emit_retained", move |topic: &str| {
+            push(topic, Value::Null, true);
+        });
+    }
+    {
+        // `my_id()` → this widget's bus id, so `on_message` can drop
+        // echoes of the widget's own emits (`if sender == my_id() {…}`).
+        let id = widget_id.to_string();
+        engine.register_fn("my_id", move || -> String { id.clone() });
+    }
+
     engine.register_fn("host_env", |name: &str| -> String {
         std::env::var(name).unwrap_or_default()
     });
@@ -1750,12 +1882,29 @@ const DEFAULT_GARDEN_SCRIPT: &str = r###"// garden.rhai — Claude garden widget
 //                                                NOT UI events; UI events
 //                                                use the handlers above.
 //                                                (Legacy name: on_event.)
+//   on_message(topic, payload, sender)         — widget↔widget bus: a
+//                                                sibling pane in the same
+//                                                project published via
+//                                                emit()/emit_retained().
+//                                                Pushed, not polled. NOT
+//                                                the Claude bus.
 //
-// Two host fns control the worker:
+// Host fns that control the worker:
 //   set_animating(bool)   — opts into per-frame on_frame() calls. Off
 //                           by default. Idle widgets cost 0 CPU.
 //   request_render()      — call from a handler to schedule render()
 //                           after the handler returns.
+//
+// Widget↔widget bus (sibling panes in the same project):
+//   emit(topic, payload)          — publish a control message. payload is
+//                                   a native value (map/array/string/num);
+//                                   the host serializes it (NO JSON in
+//                                   scripts). Receivers get on_message().
+//   emit_retained(topic, payload) — same, but kept as the topic's last
+//                                   value so a pane spawned later gets it
+//                                   on init (MQTT-style retain).
+//   my_id()                       — this widget's bus id; compare against
+//                                   on_message's `sender` to skip echoes.
 //
 // `state` is a Map in scope, persistent across runs (round-tripped to
 // JSON for snapshot). Mutate in place.
@@ -2272,10 +2421,14 @@ mod tests {
     /// Returns the worker plus a handle to its shared slots so tests can
     /// read back the state the worker persisted after each dispatch.
     fn make_worker(src: &str) -> (Worker, WorkerSlots) {
+        make_worker_with_id(src, "rw-test")
+    }
+
+    fn make_worker_with_id(src: &str, widget_id: &str) -> (Worker, WorkerSlots) {
         let slots = WorkerSlots::new();
         let mut engine = Engine::new();
         engine.set_max_expr_depths(256, 128);
-        register_host_functions(&mut engine, &slots);
+        register_host_functions(&mut engine, &slots, widget_id);
         let ast = engine.compile(src).expect("script should compile");
         let worker = Worker {
             engine,
@@ -2411,6 +2564,96 @@ mod tests {
             checked: false,
         }));
         assert!(slots.last_error.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn message_routes_to_on_message_with_sender() {
+        let src = r#"
+            fn render(w, h) { }
+            fn on_message(topic, payload, sender) {
+                state.kind = "message";
+                state.topic = topic;
+                state.n = payload.n;
+                state.sender = sender;
+            }
+        "#;
+        let (mut w, slots) = make_worker(src);
+        let payload = serde_json::json!({ "n": 7 });
+        assert!(w.handle_message(HostToWorker::Message {
+            topic: "ping".into(),
+            payload,
+            sender: "rw-other".into(),
+        }));
+        let s = state(&slots);
+        assert_eq!(s.get("kind").and_then(|v| v.as_str()), Some("message"));
+        assert_eq!(s.get("topic").and_then(|v| v.as_str()), Some("ping"));
+        assert_eq!(s.get("n").and_then(|v| v.as_i64()), Some(7));
+        assert_eq!(s.get("sender").and_then(|v| v.as_str()), Some("rw-other"));
+    }
+
+    #[test]
+    fn emit_pushes_native_payload_to_outbox() {
+        // The ping/pong acceptance test, worker-side: receiving "ping"
+        // with n=1 emits "pong" with n=2 as a NATIVE map (no JSON in the
+        // script). The host-side fan-out is covered by `msgbus`.
+        let src = r#"
+            fn render(w, h) { }
+            fn on_message(topic, payload, sender) {
+                if topic == "ping" {
+                    emit("pong", #{ n: payload.n + 1 });
+                }
+            }
+        "#;
+        let (mut w, slots) = make_worker(src);
+        w.handle_message(HostToWorker::Message {
+            topic: "ping".into(),
+            payload: serde_json::json!({ "n": 1 }),
+            sender: "rw-a".into(),
+        });
+        let out = slots.outbox.lock().unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].topic, "pong");
+        assert!(!out[0].retain);
+        assert_eq!(out[0].payload.get("n").and_then(|v| v.as_i64()), Some(2));
+    }
+
+    #[test]
+    fn emit_retained_marks_retain_and_my_id_is_visible() {
+        let src = r#"
+            fn render(w, h) { }
+            fn on_init() {
+                emit_retained("conn.state", #{ host: "localhost", who: my_id() });
+            }
+        "#;
+        let (mut w, slots) = make_worker_with_id(src, "rw-conn");
+        // Any event triggers init; a no-op message is fine.
+        w.handle_message(HostToWorker::Message {
+            topic: "noop".into(),
+            payload: Value::Null,
+            sender: "x".into(),
+        });
+        let out = slots.outbox.lock().unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].topic, "conn.state");
+        assert!(out[0].retain, "emit_retained must set retain");
+        assert_eq!(out[0].payload.get("host").and_then(|v| v.as_str()), Some("localhost"));
+        assert_eq!(out[0].payload.get("who").and_then(|v| v.as_str()), Some("rw-conn"));
+    }
+
+    #[test]
+    fn emit_with_string_payload_does_not_hit_shader_bus() {
+        // Non-map payloads must still reach the widget bus (the `Dynamic`
+        // overload), not silently vanish into style_bevy's `emit`.
+        let src = r#"
+            fn render(w, h) { }
+            fn on_init() { emit("sql.run", "select 1"); }
+        "#;
+        let (mut w, slots) = make_worker(src);
+        w.handle_message(HostToWorker::Key { key: "Home".into() });
+        let out = slots.outbox.lock().unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].topic, "sql.run");
+        assert_eq!(out[0].payload.as_str(), Some("select 1"));
     }
 
     #[test]

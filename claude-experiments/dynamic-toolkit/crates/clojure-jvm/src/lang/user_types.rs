@@ -288,6 +288,39 @@ pub fn lookup_impl(type_id: LogicalTypeId, method_id: u32) -> Option<u64> {
     DISPATCH.read().unwrap().get(&(type_id, method_id)).copied()
 }
 
+/// GC root source over the protocol-dispatch table. Each installed impl
+/// handle is a NanBox: single-arity / no-capture impls are a stable `TAG_FN`
+/// FuncRef index, but a MULTI-ARITY or capturing impl is a heap pointer (a
+/// `MultiArityFn` / `Closure` cell). Those cells are GC-managed, so a
+/// collection relocates them — and the raw bits stored here would dangle,
+/// dispatching to a moved cell (observed as "non-callable symbol" garbage
+/// when a reentrant `(load …)` triggers a GC between `installImpl` and the
+/// first dispatch). Registering the table as a root source makes the GC
+/// forward those pointers in place on every collection, exactly like
+/// `VAR_ROOTS` does for Var roots.
+pub struct DispatchRootSource;
+
+impl dynobj::RootSource for DispatchRootSource {
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
+        // Write-lock so the value addresses are stable for the duration of
+        // the scan (no rehash). The lock is held only briefly elsewhere
+        // (`install_impl` insert, `lookup_impl` read which copies and
+        // releases BEFORE any allocation), so a GC safepoint never overlaps a
+        // held lock — no deadlock.
+        let mut map = DISPATCH.write().unwrap();
+        for v in map.values_mut() {
+            visitor(v as *mut u64);
+        }
+    }
+}
+
+static DISPATCH_ROOT_SOURCE: DispatchRootSource = DispatchRootSource;
+
+/// `'static` handle for `DynGcRuntime::register_extra_root_source`.
+pub fn dispatch_root_source() -> *const dyn dynobj::RootSource {
+    &DISPATCH_ROOT_SOURCE as *const dyn dynobj::RootSource
+}
+
 /// Test-only: clear all registries. Used by unit tests so they don't
 /// leak state across runs. Not exposed outside this crate.
 #[cfg(test)]

@@ -1833,6 +1833,25 @@ mod tests {
         assert_node_equiv(src, &[0]); // base is undefined -> throws -> \"caught\"
     }
 
+    /// An array captured by a (residualized) closure AND mutated directly must stay
+    /// ONE object: the loop-header materializer must not copy the captured array
+    /// separately from the directly-held one. Here `read` is loop-carried (so it
+    /// residualizes) and captures `a`, while the loop body mutates `a[input]`; the
+    /// read must see the mutations. (Distilled from the simple.js decode/decrypt
+    /// aliasing class.)
+    #[test]
+    fn closure_captured_array_aliases_direct_mutation() {
+        let src = "function main(input) {
+                     var a = [10, 20, 30, 40];
+                     var read = function () { return a[input]; };
+                     var n = input;
+                     var sum = 0;
+                     while (n > 0) { n = n - 1; a[input] = a[input] + 1; sum = sum + read(); }
+                     return sum;
+                   }";
+        assert_node_equiv(src, &[3, 1, 2]); // 126, 41, 83
+    }
+
     /// The synthesized `main` runs top-level code; a module that computes a value
     /// folds. (Uses a global so we can return something defined.)
     #[test]

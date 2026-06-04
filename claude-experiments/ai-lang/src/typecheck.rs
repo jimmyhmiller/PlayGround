@@ -122,6 +122,11 @@ pub struct TypeCache {
     /// `Result<_, E>` with the same error type `E`. Interior mutability
     /// keeps the rest of the `&TypeCache` API immutable.
     current_fn_ret: std::cell::RefCell<Option<Type>>,
+    /// Hashes of defs that forward a thunk straight to `core/thread.spawn`
+    /// (the stdlib `spawn` wrapper, and any alias of it). Calls to these
+    /// are spawn sites whose thunk must be checked for mobility — see
+    /// `typecheck_call`. Populated by `register_spawn_wrappers`.
+    spawn_wrappers: std::collections::HashSet<Hash>,
 }
 
 impl TypeCache {
@@ -130,7 +135,18 @@ impl TypeCache {
             schemes: HashMap::new(),
             externs: HashMap::new(),
             current_fn_ret: std::cell::RefCell::new(None),
+            spawn_wrappers: std::collections::HashSet::new(),
         }
+    }
+
+    /// Record which defs forward to `core/thread.spawn` (spawn wrappers),
+    /// so `typecheck_call` can require a mobile thunk at their call sites.
+    pub fn register_spawn_wrappers(&mut self, hs: std::collections::HashSet<Hash>) {
+        self.spawn_wrappers = hs;
+    }
+
+    fn is_spawn_wrapper(&self, h: &Hash) -> bool {
+        self.spawn_wrappers.contains(h)
     }
 
     pub fn get(&self, h: &Hash) -> Option<&TypeScheme> {
@@ -451,6 +467,59 @@ fn pattern_binder_count(p: &Pattern) -> u32 {
 /// `depth` binders have been introduced inside the capturing lambda so
 /// far. A `LocalVar(i)` with `i >= depth` references the enclosing
 /// environment at outer index `i - depth`.
+/// Mobility check for a `spawn`ed thunk: it may not return or capture an
+/// `Atom` or `Ptr`, so a thread shares no mutable state with its parent.
+/// (Same constraint `at` enforces for remote thunks; threads are just
+/// in-process "nodes" under the share-nothing model.)
+fn check_spawn_thunk_mobile(
+    thunk: &Expr,
+    thunk_ret: &Type,
+    locals: &[Type],
+) -> Result<(), TypeError> {
+    if type_contains_ptr(thunk_ret) {
+        return Err(TypeError::Unsupported(
+            "spawn thunk may not return a `Ptr`: a raw machine address must not \
+             cross a thread boundary in the share-nothing model. Return a value \
+             (Int/String/Bytes/struct/enum) instead."
+                .to_owned(),
+        ));
+    }
+    if type_contains_atom(thunk_ret) {
+        return Err(TypeError::Unsupported(
+            "spawn thunk may not return an `Atom`: returning a mutable cell would \
+             share mutable state across threads. Return a snapshot (e.g. `deref`)."
+                .to_owned(),
+        ));
+    }
+    if let Expr::Lambda { params, body } = thunk {
+        let mut outer: Vec<u32> = Vec::new();
+        collect_outer_captures(body, params.len() as u32, &mut outer);
+        for k in outer {
+            if (k as usize) < locals.len() {
+                let cap_ty = &locals[locals.len() - 1 - k as usize];
+                if type_contains_ptr(cap_ty) {
+                    return Err(TypeError::Unsupported(
+                        "spawn thunk captures a `Ptr`: a raw machine address must not \
+                         be shared across threads. Capture only values."
+                            .to_owned(),
+                    ));
+                }
+                if type_contains_atom(cap_ty) {
+                    return Err(TypeError::Unsupported(
+                        "spawn thunk captures an `Atom`: threads are share-nothing, so \
+                         a shared mutable cell can't be captured (this is what makes \
+                         data races impossible). Capture a snapshot via `deref`, or \
+                         model shared state as a node `state` reached through a \
+                         message instead."
+                            .to_owned(),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 fn collect_outer_captures(e: &Expr, depth: u32, out: &mut Vec<u32>) {
     match e {
         Expr::LocalVar(i) => {
@@ -1655,6 +1724,29 @@ fn typecheck_call(
     locals: &mut Vec<Type>,
     cache: &TypeCache,
 ) -> Result<Type, TypeError> {
+    // ---- spawn mobility check ----
+    // A closure run on another thread must be MOBILE: like a closure
+    // shipped to a remote node, it may not capture (or return) an `Atom`
+    // or `Ptr`. This keeps threads share-nothing for mutable state, so
+    // data races are impossible by construction. Pure/immutable captures
+    // are shared safely and freely. The check runs at the user's spawn
+    // call site (where the thunk is a literal closure); inside the
+    // forwarding wrapper the thunk is just a parameter, so nothing fires.
+    // We only check here, then fall through to normal call typing.
+    let spawn_thunk = match callee {
+        Expr::BuiltinRef(n) if n == "core/thread.spawn" => args.first(),
+        Expr::TopRef(h) if cache.is_spawn_wrapper(h) => args.first(),
+        _ => None,
+    };
+    if let Some(thunk) = spawn_thunk {
+        let thunk_ty = typecheck_expr(thunk, locals, cache)?;
+        if let Type::FnType { params, ret } = &thunk_ty {
+            if params.is_empty() {
+                check_spawn_thunk_mobile(thunk, ret, locals)?;
+            }
+        }
+    }
+
     // ---- core/net.at#<hex>[#<hex>] special case ----
     if let Expr::BuiltinRef(name) = callee {
         let parsed = if name == "core/net.at" {
@@ -2039,6 +2131,23 @@ pub fn typecheck_module(
     // Make extern signatures visible before body-typechecking — bodies
     // may call externs and need their declared signature.
     cache.register_externs(&rm.externs);
+
+    // Identify spawn wrappers (defs whose body forwards directly to
+    // `core/thread.spawn`) so calls to them require a mobile thunk.
+    {
+        let mut wrappers = std::collections::HashSet::new();
+        for rd in &rm.defs {
+            if let Def::Fn { body, .. } = &rd.def {
+                if let Expr::Call(callee, _) = body {
+                    if matches!(callee.as_ref(), Expr::BuiltinRef(n) if n == "core/thread.spawn")
+                    {
+                        wrappers.insert(rd.hash);
+                    }
+                }
+            }
+        }
+        cache.register_spawn_wrappers(wrappers);
+    }
 
     let mut newly_typed = 0usize;
     let mut cache_hits = 0usize;
@@ -2471,6 +2580,26 @@ mod tests {
         let rm = resolve_module(&m).unwrap();
         let mut cache = TypeCache::new();
         typecheck_module(&rm, &mut cache).expect_err("typecheck must fail")
+    }
+
+    #[test]
+    fn spawn_rejects_atom_capture() {
+        let with_std = |p: &str| format!("{}\n{}", crate::stdlib::SOURCE, p);
+        // Capturing an Atom in a spawned thunk shares mutable state across
+        // threads — rejected by the share-nothing mobility check.
+        let err = tc_err(&with_std(
+            "def bad() -> Int = { let a = atom(0); join(spawn(|| deref(a))) }",
+        ));
+        match err {
+            TypeError::Unsupported(m) => {
+                assert!(m.contains("Atom"), "expected an Atom-capture error, got: {m}")
+            }
+            other => panic!("expected Unsupported(Atom capture), got {other:?}"),
+        }
+        // A spawn capturing only a value (or nothing) is fine.
+        let _ = tc(&with_std(
+            "def good() -> Int = { let n = 41; join(spawn(|| n + 1)) }",
+        ));
     }
 
     #[test]

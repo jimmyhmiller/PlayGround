@@ -558,11 +558,17 @@ impl<'ctx> CompiledModule<'ctx> {
             .filter(|rd| matches!(rd.def, Def::State { .. }))
             .map(|rd| rd.hash)
             .collect();
-        // Thunks that transitively touch node state are cache-unsafe.
-        // Include standalone (code-fetch) lambdas so a shipped entry
-        // closure that calls a stateful def is itself marked.
+        // Thunks that are not safe to memoize across an `at` call are
+        // cache-unsafe. This is the effect-based superset of "touches node
+        // state": it also rejects thunks performing IO / Net / Atom / FFI
+        // effects (caching those would skip the real effect on a repeat
+        // call). Local mutation of owned values and panic stay cacheable.
+        // Includes standalone (code-fetch) lambdas so a shipped entry
+        // closure that transitively does an effect is itself marked.
+        // (Stored under the historical `stateful_hashes` name; the runtime
+        // consults it as "bypass the result cache".)
         let stateful_hashes: Vec<Hash> =
-            crate::knowledge::stateful_hashes(&rm.defs, extra_lambdas)
+            crate::knowledge::non_cacheable_hashes(&rm.defs, extra_lambdas)
                 .into_iter()
                 .collect();
 

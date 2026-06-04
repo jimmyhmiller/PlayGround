@@ -34,6 +34,10 @@ them straight:
 - **Claude Code bus** — `pre_tool_use`, `user_prompt_submit`, `stop`,
   etc., mirrored from the central hook bus. *Every* widget sees *every*
   bus event; filter by `kind` and `payload.cwd`.
+- **Widget↔widget bus** — control messages widgets send *each other*
+  (`emit` / `on_message`). Scoped to one editor project. This is a
+  THIRD, separate channel — not UI, not the Claude bus. See
+  "[The widget↔widget bus](#the-widgetwidget-bus)" below.
 
 ### Rhai handlers ↔ subprocess `HostEvent`
 
@@ -52,6 +56,7 @@ them straight:
 | pane resized | `on_resize(w, h)` | `resize` `{width, height}` |
 | per frame, while animating | `on_frame(dt)` | `tick` `{dt}` |
 | **Claude Code bus** | **`on_bus(kind, payload)`** | `claude-event` `{kind, payload}` |
+| **Widget↔widget bus** | **`on_message(topic, payload, sender)`** | `message` `{topic, payload, sender}` |
 | lifecycle: spawned | `on_init()` | `init` `{width, height, state}` |
 | lifecycle: closing | (worker `Shutdown`) | `close` |
 
@@ -62,6 +67,93 @@ it; `value` is the full new string, not a delta.
 > `on_bus` was historically named `on_event`. That name is still
 > accepted as a fallback but is deprecated, precisely because it implied
 > "all events" and led authors to expect UI events there. Use `on_bus`.
+
+## The widget↔widget bus
+
+Several small widgets can act as one app — an editor pane, a results
+pane, a schema browser — by sending each other control messages. This is
+a general publish/subscribe channel, **separate from the Claude bus**
+(`on_bus`) and from UI events.
+
+### Publish
+
+```rhai
+emit("sql.run", #{ sql: state.query });   // native value — host serializes
+emit("schema.changed");                    // payload-less signal
+```
+
+`emit(topic, payload)` is fire-and-forget. `payload` is any native Rhai
+value (map `#{…}`, array, string, number, bool) — the **host** encodes
+it, so you never touch JSON in a script. The message is broadcast to
+every widget **in the same editor project** (panes in other projects
+never see it).
+
+### Receive
+
+```rhai
+fn on_message(topic, payload, sender) {
+    if sender == my_id() { return; }       // ignore echoes of our own emits
+    if topic == "sql.run" {
+        run(payload.sql);
+    }
+}
+```
+
+Delivery is **pushed** — the host wakes your worker and calls
+`on_message` directly. You do **not** need `set_animating` / `on_frame`;
+the bus is fully event-driven. `sender` is the publishing widget's id
+(`"tbmsg"` for the CLI); compare it to `my_id()` to skip your own
+messages, or use it to address a targeted reply (e.g. a topic naming the
+sender).
+
+### Retained messages (late joiners)
+
+A pane that opens *after* a message was sent would miss it. For state
+that late joiners need — the current DB connection, the current query —
+use `emit_retained`:
+
+```rhai
+emit_retained("conn.state", #{ host: "localhost", ok: true });
+```
+
+The host keeps the **last** retained value per topic and redelivers it to
+each widget once, on init. So a results pane opened later immediately
+learns the current connection without asking anyone. Retain is in-memory
+only (it does not survive an app restart).
+
+### Subprocess widgets
+
+Same model over NDJSON: publish with `WidgetMsg::Emit { topic, payload,
+retain }` on stdout; receive `HostEvent::Message { topic, payload,
+sender }` on stdin.
+
+### From the shell — `tbmsg`
+
+```sh
+tbmsg emit --project datalog-db --topic sql.run --json '{"sql":"select 1"}'
+tbmsg emit --project datalog-db --topic conn.state --json '{"ok":true}' --retain
+tbmsg tail --project datalog-db        # follow the bus live (one JSON line each)
+```
+
+Handy for driving a widget from a `proc_spawn`ed child or verifying flow
+without the GUI. `--project` takes a project name or `active`. Messages
+from the CLI arrive with `sender = "tbmsg"`.
+
+### Suggested topic conventions
+
+Dotted topic names keyed by concern, e.g. for a SQL IDE:
+
+| topic | payload | direction |
+|---|---|---|
+| `sql.run` | `{sql}` | editor → results: execute |
+| `sql.result` | `{columns, rows, error, ms}` | results → *: a query finished |
+| `sql.set_editor` | `{sql}` | history → editor: load text |
+| `schema.changed` | `{}` | after DDL → browser: refresh |
+| `conn.state` | `{host, ok}` *(retained)* | conn → late joiners |
+
+Keep payloads small — the bus carries **control signals** (~kilobytes),
+not bulk data. Big result sets stay where they were produced (or go
+through the datalog DB); the bus just says "ready".
 
 ### Single-line vs multi-line input
 
@@ -192,9 +284,11 @@ as parameters. (See `project_editor_idea_rhai_scoping` in memory.)
 ### Host functions available to scripts
 
 `request_render`, `set_animating`, `time`, `rand`, `rand_int`,
-`hash_str`, `host_env`, `host_log`, `clipboard_set`, `widget_asset`, and
-the generic subprocess primitives `proc_spawn` / `proc_write` /
-`proc_read` / `proc_alive` / `proc_kill`.
+`hash_str`, `host_env`, `host_log`, `clipboard_set`, `widget_asset`, the
+widget↔widget bus `emit` / `emit_retained` / `my_id` (see "[The
+widget↔widget bus](#the-widgetwidget-bus)"), and the generic subprocess
+primitives `proc_spawn` / `proc_write` / `proc_read` / `proc_alive` /
+`proc_kill`.
 
 ---
 

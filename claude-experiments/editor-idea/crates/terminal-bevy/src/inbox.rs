@@ -222,6 +222,10 @@ pub fn forward_to_claude(project_id: u64, msg: &InboxMessage) -> std::io::Result
 pub struct InboxPane {
     pub project_id: u64,
     pub dirty_layout: bool,
+    /// When false (default) the pane lists only unread messages — read
+    /// ones drop out of the list the moment they're marked read. Toggled
+    /// on to reveal the full history.
+    pub show_read: bool,
 }
 
 #[derive(Component, Copy, Clone, Debug)]
@@ -231,6 +235,8 @@ pub enum InboxHit {
     SendToClaude(u64),
     Delete(u64),
     MarkAllRead,
+    /// Flip between unread-only (default) and full history.
+    ToggleShowRead,
 }
 
 #[derive(Component, Copy, Clone, Debug)]
@@ -287,6 +293,7 @@ fn inbox_spawn(world: &mut World, entity: Entity, _content_root: Entity, config:
     world.entity_mut(entity).insert(InboxPane {
         project_id,
         dirty_layout: true,
+        show_read: false,
     });
     world.resource_mut::<InboxStore>().ensure_loaded(project_id);
 }
@@ -457,6 +464,10 @@ fn apply_hit(pane: &mut InboxPane, hit: InboxHit, store: &mut InboxStore) {
             }
             pane.dirty_layout = true;
         }
+        InboxHit::ToggleShowRead => {
+            pane.show_read = !pane.show_read;
+            pane.dirty_layout = true;
+        }
     }
     if writeback {
         let _ = write_messages(pid, &inbox.messages);
@@ -514,9 +525,11 @@ fn rebuild_rows(
         };
 
         let mut y = 0.0_f32;
+        let show_read = pane.show_read;
 
         // Header: title + unread count + "mark all read" button.
         let unread = inbox.messages.iter().filter(|m| !m.read).count();
+        let read_count = inbox.messages.len() - unread;
         let header_label = if unread == 0 {
             "Inbox · all read".to_string()
         } else {
@@ -578,6 +591,56 @@ fn rebuild_rows(
                 0.2,
             ),
         ));
+        // Show/hide-read toggle, just left of "Mark all read". Only shown
+        // when there's something to toggle (read messages exist, or we're
+        // currently revealing them).
+        if show_read || read_count > 0 {
+            let toggle_label = if show_read {
+                "Hide read".to_string()
+            } else {
+                format!("Show read ({})", read_count)
+            };
+            let toggle_w = 110.0_f32.min(content_w * 0.4);
+            let toggle_x = mark_x - 8.0 - toggle_w;
+            if toggle_x > ROW_PAD_X {
+                commands.spawn((
+                    InboxRowEntity,
+                    ChildOf(chrome.content_root),
+                    Sprite {
+                        color: fg_muted.with_alpha(0.10),
+                        custom_size: Some(Vec2::new(toggle_w, ACTION_BTN_H)),
+                        ..default()
+                    },
+                    Anchor::TOP_LEFT,
+                    Transform::from_xyz(toggle_x, -mark_y, 0.1),
+                    InboxHit::ToggleShowRead,
+                    HitSize {
+                        local_origin: Vec2::new(toggle_x, mark_y),
+                        size: Vec2::new(toggle_w, ACTION_BTN_H),
+                    },
+                ));
+                commands.spawn((
+                    InboxRowEntity,
+                    ChildOf(chrome.content_root),
+                    Text2d::new(toggle_label),
+                    TextFont {
+                        font: font.0.clone(),
+                        font_size: SMALL_FONT_SIZE,
+                        ..default()
+                    },
+                    LineHeight::Px(ACTION_BTN_H),
+                    TextColor(fg_muted),
+                    Anchor::CENTER,
+                    TextLayout::new_with_no_wrap(),
+                    pane_bevy::PaneContentNoClip,
+                    Transform::from_xyz(
+                        toggle_x + toggle_w * 0.5,
+                        -(mark_y + ACTION_BTN_H * 0.5),
+                        0.2,
+                    ),
+                ));
+            }
+        }
         y += HEADER_H;
         commands.spawn((
             InboxRowEntity,
@@ -592,11 +655,29 @@ fn rebuild_rows(
         ));
         y += 1.0;
 
-        if inbox.messages.is_empty() {
+        // Unread-only by default; the user can reveal read messages via
+        // the header toggle. A currently-expanded row stays visible even
+        // once read, so expanding a message (which marks it read) doesn't
+        // make it vanish under the user — it drops out when collapsed.
+        // Newest-first.
+        let mut rows: Vec<&InboxMessage> = inbox
+            .messages
+            .iter()
+            .filter(|m| show_read || !m.read || inbox.expanded.contains(&m.id))
+            .collect();
+        rows.sort_by(|a, b| b.ts.cmp(&a.ts));
+
+        if rows.is_empty() {
+            let empty_label = if inbox.messages.is_empty() {
+                "(empty — POST to the inbox to see messages here)"
+            } else {
+                // Messages exist, just none unread and not showing read.
+                "(all caught up — nothing unread)"
+            };
             commands.spawn((
                 InboxRowEntity,
                 ChildOf(chrome.content_root),
-                Text2d::new("(empty — POST to the inbox to see messages here)"),
+                Text2d::new(empty_label),
                 TextFont {
                     font: font.0.clone(),
                     font_size: SMALL_FONT_SIZE,
@@ -610,9 +691,6 @@ fn rebuild_rows(
             continue;
         }
 
-        // Iterate newest-first.
-        let mut rows: Vec<&InboxMessage> = inbox.messages.iter().collect();
-        rows.sort_by(|a, b| b.ts.cmp(&a.ts));
         for m in rows {
             let expanded = inbox.expanded.contains(&m.id);
 

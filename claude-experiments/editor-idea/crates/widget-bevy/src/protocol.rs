@@ -34,6 +34,19 @@ pub enum WidgetMsg {
     State { value: serde_json::Value },
     /// Title-bar text for the hosting pane.
     Title { value: String },
+    /// Publish a message onto the widget↔widget bus (the general
+    /// signalling channel, separate from the Claude Code event bus).
+    /// The host broadcasts it to every widget in the SAME editor project
+    /// — each one receives a `HostEvent::Message` and filters by `topic`.
+    /// `retain = true` keeps it as the topic's last value so a widget
+    /// that spawns later receives it on init (MQTT-style retain).
+    Emit {
+        topic: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+        #[serde(default)]
+        retain: bool,
+    },
 }
 
 /// An event the host delivers to the widget (one NDJSON line on stdin).
@@ -85,6 +98,19 @@ pub enum HostEvent {
     InputFocus { id: String, focused: bool },
     /// User submitted an `Element::Input` (typically Enter key).
     InputSubmit { id: String, value: String },
+    /// A widget↔widget bus message addressed to this widget's project.
+    /// Delivered (pushed, not polled) whenever another widget — or the
+    /// `tbmsg` CLI — publishes via `emit` / `WidgetMsg::Emit`. `sender`
+    /// is the originating widget's id (or `"tbmsg"` for the CLI) so the
+    /// widget can ignore its own messages and route targeted replies.
+    /// This is NOT the Claude Code bus (`ClaudeEvent`); it carries
+    /// widget-app control signals.
+    Message {
+        topic: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+        sender: String,
+    },
 }
 
 /// Optional visual override applied on top of theme defaults. Every

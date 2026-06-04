@@ -3306,21 +3306,32 @@ impl Js {
         }
     }
 
-    /// Materialize `v` into the residual variable `dst`.
-    fn materialize_into(&self, dst: usize, v: &Abs, heap: &Heap, out: &mut Vec<Op>) {
-        let mut seen = HashMap::new();
+    /// Materialize `v` into the residual variable `dst`, reusing an external
+    /// `seen` map so an object reachable from more than one root (e.g. a slot held
+    /// directly AND a slot captured by a closure) is materialized ONCE and the
+    /// second reference aliases the first — preserving sharing. Without this, the
+    /// loop/branch materializer copies a captured array separately from the same
+    /// array held directly, so a write to one is invisible to the other.
+    fn materialize_into_seen(
+        &self,
+        dst: usize,
+        v: &Abs,
+        heap: &Heap,
+        out: &mut Vec<Op>,
+        seen: &mut HashMap<usize, usize>,
+    ) {
         match v {
             Abs::Ref(addr) if Self::graph_cyclic(heap, *addr) => {
                 seen.insert(*addr, dst); // a cycle back to this object reuses `dst`
                 let mut shells = Vec::new();
                 let mut fills = Vec::new();
-                self.mat_obj(dst, *addr, heap, &mut shells, &mut fills, &mut seen);
+                self.mat_obj(dst, *addr, heap, &mut shells, &mut fills, seen);
                 out.append(&mut shells);
                 out.append(&mut fills);
             }
             Abs::Ref(addr) => {
                 seen.insert(*addr, dst);
-                self.mat_inline_obj(dst, *addr, heap, out, &mut seen);
+                self.mat_inline_obj(dst, *addr, heap, out, seen);
             }
             _ => out.push(Op::Assign { var: dst, expr: v.to_rexpr() }),
         }
@@ -3864,17 +3875,42 @@ impl Js {
         // stable vars. Heap (Ref) slots are materialized directly; their dst ids
         // are disjoint and their constructions read the still-old stable vars.
         let mut copies: Vec<(usize, usize)> = Vec::new(); // (stable_id, temp_id)
+        // Heap (Ref) slots share one `seen` map so an object reachable from two
+        // slots (e.g. an array held directly AND captured by a closure) is
+        // materialized once and the second slot aliases it — keeping them the SAME
+        // runtime object. Non-closure objects are emitted before closures so a
+        // closure's `.bind(null, arr)` (by-value capture) sees an already-assigned
+        // `arr` var.
+        let mut seen: HashMap<usize, usize> = HashMap::new();
+        let is_closure = |addr: usize| matches!(&heap[&addr], HeapObj::Closure { .. });
+        for pass_closures in [false, true] {
+            for &slot in slots {
+                let cur = ns.frames[fi].locals[slot].clone();
+                let Abs::Ref(addr) = cur else { continue };
+                if is_closure(addr) != pass_closures {
+                    continue;
+                }
+                let id = self.stable_id(func, slot);
+                if let Some(&existing) = seen.get(&addr) {
+                    if existing != id {
+                        out.push(Op::Assign { var: id, expr: RExpr::Var(existing) });
+                    }
+                } else {
+                    self.materialize_into_seen(id, &cur, &heap, out, &mut seen);
+                }
+                ns.frames[fi].locals[slot] = Abs::Dyn(RExpr::Var(id));
+            }
+        }
         for &slot in slots {
             let cur = ns.frames[fi].locals[slot].clone();
+            if matches!(cur, Abs::Ref(_)) {
+                continue; // handled above
+            }
             let id = self.stable_id(func, slot);
             if cur != Abs::Dyn(RExpr::Var(id)) {
-                if matches!(cur, Abs::Ref(_)) {
-                    self.materialize_into(id, &cur, &heap, out);
-                } else {
-                    let tmp = self.loop_tmp(func, slot);
-                    out.push(Op::Assign { var: tmp, expr: cur.to_rexpr() });
-                    copies.push((id, tmp));
-                }
+                let tmp = self.loop_tmp(func, slot);
+                out.push(Op::Assign { var: tmp, expr: cur.to_rexpr() });
+                copies.push((id, tmp));
             }
             ns.frames[fi].locals[slot] = Abs::Dyn(RExpr::Var(id));
         }

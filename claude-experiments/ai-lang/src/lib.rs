@@ -5,6 +5,7 @@ pub mod codec;
 pub mod codegen;
 pub mod depindex;
 pub mod edit;
+pub mod effects;
 pub mod evalrun;
 pub mod ffi;
 pub mod gc;

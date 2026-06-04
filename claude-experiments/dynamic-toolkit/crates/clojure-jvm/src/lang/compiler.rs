@@ -12384,6 +12384,15 @@ impl Session {
             gc.register_extra_root_source(crate::lang::var_roots::var_roots_root_source());
         }
 
+        // Register the protocol-dispatch table. Multi-arity / capturing impls
+        // store a heap-cell handle (MultiArityFn / Closure) as raw bits; this
+        // makes the GC forward those pointers in place so a collection between
+        // `installImpl` and dispatch (e.g. during a reentrant `(load …)`)
+        // doesn't leave them dangling. Process-global `'static` table.
+        unsafe {
+            gc.register_extra_root_source(crate::lang::user_types::dispatch_root_source());
+        }
+
         // Register the LazySeq/Delay root source. A `LazyState` caches the
         // deferred thunk and (once realized) the produced value as NaN-boxed
         // GC-heap pointers in a Rust-side `Arc<RefCell<…>>`. Keeping the Arc

@@ -56,10 +56,13 @@ use serde_json::Value;
 
 pub mod button_material;
 pub mod layout;
+pub mod msgbus;
 pub mod protocol;
 pub mod render;
 pub mod rhai_widget;
 pub mod subprocess;
+
+pub use msgbus::{PendingMsg, WidgetMsgBus};
 
 pub use button_material::{
     ButtonParams as WidgetButtonParams, WidgetButtonMaterial, WidgetButtonMaterialPlugin,
@@ -282,6 +285,7 @@ impl Plugin for WidgetPlugin {
         app.init_resource::<WidgetClipDirty>()
             .init_resource::<WidgetImageCache>()
             .add_plugins(WidgetButtonMaterialPlugin)
+            .add_plugins(msgbus::WidgetMsgBusPlugin)
             .add_systems(Startup, register_kind)
             .add_systems(
                 Update,
@@ -869,12 +873,14 @@ fn widget_on_close(world: &mut World, entity: Entity) {
 /// Drain inbound messages, send `init` once, and send `resize` when the
 /// content area changes.
 fn tick_widget_io(
+    mut bus: ResMut<WidgetMsgBus>,
     mut q: Query<(
         &PaneKindMarker,
         &PaneRect,
         &mut Widget,
         &mut WidgetRender,
         Option<&WidgetIO>,
+        Option<&pane_bevy::PaneProject>,
     )>,
     mut titles: Query<&mut PaneTitle>,
     pane_q: Query<Entity, With<PaneKindMarker>>,
@@ -885,12 +891,13 @@ fn tick_widget_io(
     // separately by entity id.
     let entities: Vec<Entity> = pane_q.iter().collect();
     for entity in entities {
-        let Ok((kind, rect, mut w, mut render_state, io_opt)) = q.get_mut(entity) else {
+        let Ok((kind, rect, mut w, mut render_state, io_opt, project)) = q.get_mut(entity) else {
             continue;
         };
         if kind.0 != PANE_KIND {
             continue;
         }
+        let project_id = project.map(|p| p.0);
 
         let content_size = Vec2::new(
             (rect.size.x - 2.0 * MARGIN).max(0.0),
@@ -938,6 +945,18 @@ fn tick_widget_io(
                                     t.0 = value;
                                 }
                             }
+                        }
+                        Ok(WidgetMsg::Emit { topic, payload, retain }) => {
+                            // Publish onto the widget↔widget bus; the
+                            // pump delivers it to same-project widgets
+                            // next frame (see `crate::msgbus`).
+                            bus.push_external(crate::msgbus::PendingMsg {
+                                project: project_id,
+                                topic,
+                                payload,
+                                sender: crate::msgbus::subprocess_widget_id(entity),
+                                retain,
+                            });
                         }
                         Err(_) => break,
                     }

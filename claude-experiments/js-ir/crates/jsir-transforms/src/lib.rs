@@ -10,7 +10,6 @@
 //! could have a side effect or change observable behavior.
 
 pub mod dce;
-pub mod memoize;
 pub mod treeshake;
 
 pub use dce::{eliminate_dead_code, eliminate_dead_code_with_roots, Stats};

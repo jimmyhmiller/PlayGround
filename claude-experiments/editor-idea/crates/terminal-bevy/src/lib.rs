@@ -543,6 +543,7 @@ fn drain_ipc_open_requests(
     mut projects: ResMut<Projects>,
     mut drawer: ResMut<drawer::Drawer>,
     mut prism: ResMut<cube::Prism>,
+    mut msg_bus: ResMut<widget_bevy::WidgetMsgBus>,
     mut commands: Commands,
 ) {
     let Some(inbox) = inbox else { return };
@@ -767,6 +768,23 @@ fn drain_ipc_open_requests(
                 commands
                     .spawn(Screenshot::primary_window())
                     .observe(save_to_disk(path));
+            }
+            ipc::IpcRequest::WidgetMessage { project, topic, payload, retain } => {
+                let target = match project.as_deref() {
+                    Some("active") | None => OpenProjectTarget::Active,
+                    Some(name) => OpenProjectTarget::ByName(name.to_string()),
+                };
+                let Some(project_id) = projects::resolve_project(&target, &projects) else {
+                    eprintln!("[ipc] widget_message: no matching project");
+                    continue;
+                };
+                msg_bus.push_external(widget_bevy::PendingMsg {
+                    project: Some(project_id),
+                    topic,
+                    payload,
+                    sender: "tbmsg".to_string(),
+                    retain,
+                });
             }
         }
     }

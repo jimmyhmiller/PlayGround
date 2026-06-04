@@ -76,6 +76,8 @@ structural editing (Phase 1):
        [--reverse] [--transitive]         --reverse = who depends on it;
                                            --transitive = walk to a fixpoint
   ai-lang view <name|hashprefix>           project a stored def back to source
+  ai-lang effects <name|hashprefix>        show inferred effects + guarantees
+                                           (pure / mobile / cacheable)
 
 structural refactors (Phase 3, all on the canonical AST, then propagate):
   ai-lang move <from> <to>                 namespace-path move (like rename; the
@@ -375,6 +377,12 @@ fn main() {
                 usage(2);
             }
             cmd_view(&args[0], flags.json, &cb_path);
+        }
+        "effects" => {
+            if args.len() != 1 {
+                usage(2);
+            }
+            cmd_effects(&args[0], flags.json, &cb_path);
         }
         "export" => {
             // <name...> --out <path>
@@ -899,6 +907,121 @@ fn cmd_deps(target: &str, reverse: bool, transitive: bool, json: bool, cb_path: 
             let name = d.name.as_deref().unwrap_or("<unnamed>");
             println!("{:<32}  {}", name, &d.hash.to_hex()[..16]);
         }
+    }
+}
+
+/// `ai-lang effects <name|hashprefix>` — show a def's inferred effect
+/// signature and the guarantees derived from it (pure / mobile / cacheable).
+fn cmd_effects(target: &str, json: bool, cb_path: &PathBuf) {
+    use ai_lang::effects::{EffectSet, infer_effects};
+
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let root_hash = match edit::resolve_target(&cb, target) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("effects: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Reconstruct a ResolvedModule from the transitive closure of the
+    // target, so every referenced def is present and its `TopRef`s resolve
+    // (mirrors `cmd_run`'s walk). Lambdas are inline (load_def → MissingDef);
+    // skip them — they're analyzed within their enclosing def's body.
+    let mut wanted: Vec<Hash> = Vec::new();
+    let mut seen: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+    let mut frontier: Vec<Hash> = vec![root_hash];
+    seen.insert(root_hash);
+    while let Some(h) = frontier.pop() {
+        let def = match cb.load_def(&h) {
+            Ok(d) => d,
+            Err(ai_lang::codebase::CodebaseError::MissingDef(_)) => continue,
+            Err(e) => {
+                eprintln!("effects: load_def {}: {:?}", h, e);
+                std::process::exit(1);
+            }
+        };
+        wanted.push(h);
+        let mut deps: Vec<Hash> = Vec::new();
+        let mut local_seen: std::collections::HashSet<Hash> = std::collections::HashSet::new();
+        ai_lang::knowledge::walk_def_deps(&def, &mut deps, &mut local_seen);
+        for d in deps {
+            if seen.insert(d) {
+                frontier.push(d);
+            }
+        }
+    }
+    let mut defs: Vec<ResolvedDef> = Vec::with_capacity(wanted.len());
+    for h in wanted {
+        let def = cb.load_def(&h).expect("load_def");
+        let name = cb
+            .names()
+            .iter()
+            .find(|(_, hh)| **hh == h)
+            .map(|(n, _)| n.clone())
+            .unwrap_or_else(|| format!("def_{}", &h.to_hex()[..8]));
+        defs.push(ResolvedDef { name, hash: h, def });
+    }
+    let rm = ResolvedModule {
+        defs,
+        at_binding: None,
+        externs: std::collections::HashMap::new(),
+    };
+
+    let sigs = infer_effects(&rm);
+    let sig = match sigs.get(&root_hash) {
+        Some(s) => *s,
+        None => {
+            eprintln!("effects: {} has no inferable body (a struct/enum?)", target);
+            std::process::exit(1);
+        }
+    };
+
+    // Render which parameters the effect is polymorphic over.
+    let dep_indices: Vec<usize> = (0..64).filter(|j| sig.param_deps & (1u64 << j) != 0).collect();
+
+    if json {
+        let effs: Vec<&str> = [
+            (EffectSet::IO, "IO"),
+            (EffectSet::NET, "Net"),
+            (EffectSet::STATE, "State"),
+            (EffectSet::ATOM, "Atom"),
+            (EffectSet::MUT, "Mut"),
+            (EffectSet::FFI, "FFI"),
+            (EffectSet::PANIC, "Panic"),
+        ]
+        .into_iter()
+        .filter(|(bit, _)| sig.concrete.contains(*bit))
+        .map(|(_, n)| n)
+        .collect();
+        let arr = |xs: &[String]| format!("[{}]", xs.join(","));
+        println!(
+            "{{\"target\":\"{}\",\"effects\":[{}],\"param_deps\":[{}],\"pure\":{},\"mobile\":{},\"cacheable\":{}}}",
+            json_escape(target),
+            effs.iter().map(|e| format!("\"{}\"", e)).collect::<Vec<_>>().join(","),
+            dep_indices.iter().map(|j| j.to_string()).collect::<Vec<_>>().join(","),
+            sig.is_pure(),
+            sig.is_mobile(),
+            sig.cacheable(),
+        );
+        let _ = arr;
+    } else {
+        let yn = |b: bool| if b { "yes" } else { "no" };
+        println!("{}", target);
+        println!("  effects:   {:?}", sig.concrete);
+        if !dep_indices.is_empty() {
+            let ps: Vec<String> = dep_indices.iter().map(|j| format!("#{j}")).collect();
+            println!(
+                "  + the effect of its argument(s): {}  (effect-polymorphic)",
+                ps.join(", ")
+            );
+        }
+        println!("  pure:      {}", yn(sig.is_pure()));
+        println!("  mobile:    {}", yn(sig.is_mobile()));
+        println!("  cacheable: {}", yn(sig.cacheable()));
+        println!();
+        println!("  (mobile = safe to ship to another thread or node;");
+        println!("   cacheable = deterministic, safe to memoize across at())");
     }
 }
 

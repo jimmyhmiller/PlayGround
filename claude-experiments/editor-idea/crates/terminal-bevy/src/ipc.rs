@@ -156,6 +156,24 @@ pub enum IpcRequest {
     /// form: `{"action":"screenshot","path":"/tmp/x.png"}`. Fire-and-
     /// forget; the file appears a frame or two later.
     Screenshot { path: PathBuf },
+    /// `tbmsg emit --project P --topic T [--json '{...}'] [--retain]` —
+    /// publish a message onto the widget↔widget bus from the shell (or a
+    /// `proc_spawn`ed child). Delivered to every widget in project `P` as
+    /// `on_message` / `HostEvent::Message` with `sender = "tbmsg"`.
+    /// Fire-and-forget; no response body.
+    WidgetMessage {
+        /// Resolved on the GUI side against current `Projects`. A name
+        /// (`"datalog-db"`) or `"active"` for the current one.
+        #[serde(default)]
+        project: Option<String>,
+        topic: String,
+        /// Parsed JSON payload (object/array/scalar). Defaults to null.
+        #[serde(default)]
+        payload: serde_json::Value,
+        /// Retain as the topic's last value for late-joining widgets.
+        #[serde(default)]
+        retain: bool,
+    },
 }
 
 /// One accepted IPC connection: the parsed request plus the open socket,
