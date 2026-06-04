@@ -148,6 +148,121 @@ def _resolve_voice(backend_name: str, voice: str | None) -> str:
     return get_backend(backend_name).info.default_voice
 
 
+@cli.command("corpus")
+@click.argument("sources", nargs=-1, type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("-o", "--out-dir", type=click.Path(file_okay=False, path_type=Path), default=Path("output"))
+@click.option("--no-enrich", is_flag=True,
+              help="Skip online metadata lookup (Open Library / Google Books / Crossref).")
+@click.option("--keep-all-sections", is_flag=True,
+              help="Keep every split section verbatim (don't drop front/back matter).")
+@click.option("--force", is_flag=True,
+              help="Rebuild records even if a fresh one already exists for the same content.")
+@click.option("--enrich-timeout", type=float, default=10.0, show_default=True,
+              help="Per-request network timeout for metadata lookups (seconds).")
+@click.option("--llm-title-fallback", is_flag=True,
+              help="When a scraped title looks bad and online lookup didn't "
+                   "resolve one, read title/author from the document via the "
+                   "local llama.cpp server (auto-started unless --no-auto-llm).")
+@click.option("--llm-base-url", default="http://127.0.0.1:8080",
+              help="llama.cpp server base URL (for --llm-title-fallback).")
+@click.option("--no-auto-llm", is_flag=True,
+              help="Don't auto-start llama-server for --llm-title-fallback.")
+@click.option("--max-pages", type=int, default=None,
+              help="Cap marker extraction to the first N pages.")
+def corpus_cmd(sources: tuple[Path, ...], out_dir: Path, no_enrich: bool,
+               keep_all_sections: bool, force: bool, enrich_timeout: float,
+               llm_title_fallback: bool, llm_base_url: str, no_auto_llm: bool,
+               max_pages: int | None) -> None:
+    """Bulk: extract + chapter-split + enrich metadata for many documents.
+
+    NO audio synthesis. Writes one full-content JSON record per document under
+    `output/corpus/<stem>.json` plus a metadata-only `index.jsonl`. The corpus
+    is for vector-search recommendations later.
+
+    ⚠️  Records contain the ENTIRE text of each document. `output/` is
+    git-ignored — do not publish these records.
+    """
+    from . import corpus as corpus_mod
+    from .pipeline import paths_for, stage_extract_subproc
+    from .server import ensure_server
+
+    sources = tuple(sources)
+    if not sources:
+        click.echo("no source files given")
+        return
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Start llama-server only if the LLM title fallback is requested.
+    llm_ctx = (
+        ensure_server(llm_base_url, log_path=out_dir / "llama-server.log")
+        if llm_title_fallback and not no_auto_llm
+        else nullcontext(False)
+    )
+
+    n_done = 0
+    n_skipped = 0
+    n_failed = 0
+    with llm_ctx as started:
+        if llm_title_fallback:
+            click.echo(
+                f"[corpus] llm-title-fallback on "
+                f"({'started' if started else 'reusing'} server at {llm_base_url})"
+            )
+        for i, source in enumerate(sources, 1):
+            click.echo(f"[corpus] === {i}/{len(sources)}: {source.name} ===")
+            paths = paths_for(source, out_dir, "m4b")  # fmt unused; just need .md path
+            # Extraction needs the GPU (marker). Only assert when we actually
+            # have to extract — a cached .md lets us enrich without a GPU.
+            if not paths.md.exists():
+                try:
+                    _assert_gpu()
+                except RuntimeError as exc:
+                    click.echo(f"[corpus] FAILED {source.name}: needs extraction but {exc}")
+                    n_failed += 1
+                    continue
+            try:
+                markdown = stage_extract_subproc(paths, max_pages=max_pages)
+            except Exception as exc:
+                click.echo(f"[corpus] FAILED extract {source.name}: {exc}")
+                n_failed += 1
+                continue
+
+            if not force and corpus_mod.is_record_fresh(out_dir, source, markdown):
+                click.echo(f"[corpus] up-to-date: {source.stem}.json (use --force to rebuild)")
+                n_skipped += 1
+                continue
+
+            try:
+                record = corpus_mod.build_record(
+                    source, markdown,
+                    content_chapters_only=not keep_all_sections,
+                    do_enrich=not no_enrich,
+                    enrich_timeout=enrich_timeout,
+                    llm_title_fallback=llm_title_fallback,
+                    llm_base_url=llm_base_url,
+                )
+            except Exception as exc:
+                click.echo(f"[corpus] FAILED build {source.name}: {exc}")
+                n_failed += 1
+                continue
+
+            out_path = corpus_mod.write_record(out_dir, record)
+            esrc = (record.enriched or {}).get("source") if record.enriched else None
+            click.echo(
+                f"[corpus] wrote {out_path.name}: title={record.title!r} "
+                f"[{record.title_source}] chapters={record.n_chapters} "
+                f"chars={record.total_chars} subjects={len(record.subjects)} "
+                f"enriched={esrc or 'none'}"
+            )
+            n_done += 1
+
+    idx = corpus_mod.rebuild_index(out_dir)
+    click.echo(
+        f"[corpus] done: {n_done} written, {n_skipped} up-to-date, {n_failed} failed. "
+        f"Index: {idx}"
+    )
+
+
 @cli.command("backends")
 def backends_cmd() -> None:
     """List available TTS backends."""
@@ -253,7 +368,7 @@ def main() -> None:
     """Entrypoint that auto-routes: `paper-audiobooks foo.pdf` -> `one foo.pdf`."""
     import sys
     argv = sys.argv[1:]
-    subcommands = {"one", "batch", "backends", "--help", "-h"}
+    subcommands = {"one", "batch", "corpus", "backends", "--help", "-h"}
     if argv and not argv[0].startswith("-") and argv[0] not in subcommands:
         sys.argv = [sys.argv[0], "one", *argv]
     cli()

@@ -2,6 +2,15 @@
 output/
 samples/
 
+# Source documents to convert — copyrighted; never commit.
+input/
+
+# Corpus records + extracted markdown hold the FULL text of copyrighted books
+# — never publish. (Already covered by output/ above; listed explicitly so the
+# intent is clear.)
+output/corpus/
+output/corpus_md/
+
 # Audio / debugging artifacts
 *.wav
 *.mp3
