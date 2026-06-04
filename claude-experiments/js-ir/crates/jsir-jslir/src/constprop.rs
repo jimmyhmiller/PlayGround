@@ -148,6 +148,64 @@ pub fn fold_constants(region: &mut Region, lattice: &HashMap<ValueId, Constant>)
     folded
 }
 
+/// Prune `if` statements with a compile-time-constant test (upstream
+/// ConstantPropagation's branch-pruning step, restricted to `if` diamonds): when a
+/// `cond_br_if`'s test folds to a known truthy/falsey constant, replace it with an
+/// unconditional `br` to the taken branch, then drop the blocks that became
+/// unreachable. The lift follows the plain `br` straight through, so the `if`
+/// dissolves into its taken branch — exactly what upstream emits.
+///
+/// Returns the number of branches pruned. Ternary/logical `cond_br`s (which carry
+/// a merge block-argument) and loop headers are left alone here.
+pub fn prune_constant_if_branches(
+    region: &mut Region,
+    lattice: &HashMap<ValueId, Constant>,
+) -> usize {
+    let mut pruned = 0;
+    for block in &mut region.blocks {
+        let Some(term) = block.ops.last_mut() else { continue };
+        if !dialect::is_if_header(term) {
+            continue;
+        }
+        let Some(&test) = term.operands.first() else { continue };
+        let Some(c) = lattice.get(&test) else { continue };
+        let truthy = is_truthy(c);
+        // Successors are `[then, else]`; keep the taken one.
+        let taken = term.successors.get(usize::from(!truthy)).map(|s| s.block);
+        let Some(taken) = taken else { continue };
+        *term = dialect::br(taken);
+        pruned += 1;
+    }
+    if pruned > 0 {
+        remove_unreachable_blocks(region);
+    }
+    pruned
+}
+
+/// Drop blocks not reachable from the entry by following terminator successors.
+/// (Loop latch/preheader/merge blocks are all reachable via real edges, so plain
+/// successor reachability is sufficient and safe.)
+fn remove_unreachable_blocks(region: &mut Region) {
+    let Some(entry) = region.blocks.first().map(|b| b.id) else { return };
+    let by_id: HashMap<jsir_ir::BlockId, &jsir_ir::Block> =
+        region.blocks.iter().map(|b| (b.id, b)).collect();
+    let mut reachable = std::collections::HashSet::new();
+    let mut work = vec![entry];
+    while let Some(id) = work.pop() {
+        if !reachable.insert(id) {
+            continue;
+        }
+        if let Some(block) = by_id.get(&id) {
+            if let Some(term) = block.ops.last() {
+                for s in &term.successors {
+                    work.push(s.block);
+                }
+            }
+        }
+    }
+    region.blocks.retain(|b| reachable.contains(&b.id));
+}
+
 /// Build the literal op for a constant value, or `None` for a value with no literal
 /// form (`Undefined` is the `undefined` global, not a literal).
 fn literal_op(c: &Constant) -> Option<Op> {
