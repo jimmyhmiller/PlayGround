@@ -100,6 +100,46 @@ pub fn is_boxed_long(bits: u64) -> bool {
     tid == heap_type_ids().long
 }
 
+/// Allocate a boxed `clojure.lang.Character` holding codepoint `c`. Layout
+/// mirrors [`box_long`] (Raw64 i64 at offset 8) so the codepoint flows
+/// through JIT code the same way an integer does.
+///
+/// # Safety
+/// Must run on a registered mutator thread (the GC alloc invariant).
+pub unsafe fn box_char(c: u32) -> u64 {
+    let ids = heap_type_ids();
+    let raw = dynlang::gc::gc_alloc_thunk(ids.character as u64, 0);
+    let p = raw as *mut u8;
+    if p.is_null() {
+        panic!("clojure-jvm: box_char: gc_alloc returned null");
+    }
+    unsafe { p.add(8).cast::<i64>().write_unaligned(c as i64) };
+    nanbox_ptr(raw)
+}
+
+/// Read the codepoint out of a boxed `Character`. Precondition: `bits` is a
+/// TAG_PTR to a Character cell.
+///
+/// # Safety
+/// `bits` must point to a Character cell allocated by [`box_char`].
+pub unsafe fn unbox_char(bits: u64) -> u32 {
+    let p = nanbox_payload(bits) as *const u8;
+    unsafe { p.add(8).cast::<i64>().read_unaligned() as u32 }
+}
+
+/// Is `bits` a boxed Character?
+pub fn is_boxed_char(bits: u64) -> bool {
+    if nanbox_tag(bits) != Some(TAG_PTR) {
+        return false;
+    }
+    let p = nanbox_payload(bits) as *const u8;
+    if p.is_null() {
+        return false;
+    }
+    let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+    tid == heap_type_ids().character
+}
+
 /// Decode a numeric argument to an `i64`, accepting either a boxed Long or
 /// a native NanBox double. This is the polymorphic replacement for the bare
 /// `f64::from_bits(bits) as i64` pattern at sites that read an integer
@@ -109,6 +149,9 @@ pub fn is_boxed_long(bits: u64) -> bool {
 pub fn arg_to_i64(bits: u64) -> i64 {
     if is_boxed_long(bits) {
         unsafe { unbox_long(bits) }
+    } else if is_boxed_char(bits) {
+        // `(int \a)` / `(long \a)` decode a Character to its codepoint.
+        unsafe { unbox_char(bits) as i64 }
     } else {
         f64::from_bits(bits) as i64
     }
@@ -276,6 +319,7 @@ pub fn object_to_nanbox(obj: &Object) -> u64 {
         // stores) runs on one. (Early init that has no thread goes through
         // `try_object_to_nanbox`, which returns None for Long instead.)
         Object::Long(n) => unsafe { box_long(*n) },
+        Object::Char(c) => unsafe { box_char(*c) },
         Object::Double(x) => x.to_bits(),
         Object::Host(_) => {
             if let Some(hb) = obj.host_as::<HeapBits>() {
@@ -324,6 +368,9 @@ pub fn try_object_to_nanbox(obj: &Object) -> Option<u64> {
         // heap/thread exist). Keep Long roots Rust-side as `VarRoot::Object`;
         // they get boxed lazily on deref via `object_to_nanbox`.
         Object::Long(_) => None,
+        // Like Long: a Character is a heap cell, so it can't be built in this
+        // non-allocating check. Box lazily on deref via `object_to_nanbox`.
+        Object::Char(_) => None,
         Object::Double(x) => Some(x.to_bits()),
         Object::Host(_) => obj.host_as::<HeapBits>().map(|hb| hb.0),
         _ => None,
@@ -363,6 +410,10 @@ pub struct HeapTypeIds {
     /// (a Raw64 i64 cell) so `(+ 1 2)` is `3` not `3.0`. (NaN-boxing left no
     /// inline integer tag; a future low-bit-tagging pass could inline it.)
     pub long: usize,
+    /// `clojure.lang.Character` — a boxed Unicode codepoint (Raw64 i64
+    /// cell, like `long`). Distinct type so `str`/`pr-str` render it as the
+    /// character and `(= \a 97)` is false; `(int \a)` still unboxes to 97.
+    pub character: usize,
     /// Shared ObjTypeId backing every `deftype`/`defrecord` instance.
     /// The actual user-type discriminator lives in the cell's Raw64
     /// `user_type_id` field and is read by `effective_type_id`.
@@ -462,6 +513,10 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
     if type_id == ids.long {
         let n = unsafe { ptr.add(8).cast::<i64>().read_unaligned() };
         return Object::Long(n);
+    }
+    if type_id == ids.character {
+        let c = unsafe { ptr.add(8).cast::<i64>().read_unaligned() };
+        return Object::Char(c as u32);
     }
     if type_id == ids.symbol {
         // Sanity-check the arc_ptr stored in the cell. Real Symbol cells
@@ -1481,11 +1536,13 @@ pub unsafe extern "C" fn cljvm_rt_shortCast(n_bits: u64) -> u64 {
     box_long(n)
 }
 
-/// `clojure.lang.RT/charCast(n)` — coerce to a u16 char value.
+/// `clojure.lang.RT/charCast(n)` / `(char n)` — coerce to a Character. Returns
+/// a boxed `clojure.lang.Character` (not a Long), so `(str (char 47))` is
+/// `"/"`. Accepts a Long, a Character, or a native number.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_charCast(n_bits: u64) -> u64 {
-    let n = arg_to_i64(n_bits) as u16 as i64;
-    box_long(n)
+    let n = arg_to_i64(n_bits) as u16 as u32;
+    unsafe { box_char(n) }
 }
 
 // ── clojure.lang.Numbers — arithmetic + comparisons ──────────────────────
@@ -1819,6 +1876,55 @@ pub unsafe extern "C" fn cljvm_rt_cons(x_bits: u64, seq_bits: u64) -> u64 {
     })
 }
 
+/// Read a NanBox **value slot** out of a heap object as a [`Raw`] tied to
+/// `heap`. This is the type-safe replacement for a bare
+/// `base.add(off).cast::<u64>().read_unaligned()` on a GC-value field: the
+/// returned reference borrows `&Heap`, so the borrow checker forbids holding
+/// it across a `&mut Heap` allocation (the form-430 stale-pointer bug).
+///
+/// Use ONLY for slots that hold a NanBox value (a GC pointer or immediate) —
+/// NOT for object headers (`u16` type_id), varlen counts, or Rust-side `Arc`
+/// pointers, which are not GC values and stay as plain reads.
+///
+/// # Safety
+/// `base` must point at a live object of a type whose slot at `off` is a
+/// NanBox value field.
+#[inline]
+unsafe fn read_slot<'h>(heap: &'h Heap, base: *const u8, off: usize) -> Raw<'h> {
+    let bits = unsafe { base.add(off).cast::<u64>().read_unaligned() };
+    Raw::from_bits(heap, bits)
+}
+
+/// Write a NanBox value `v` into a heap object's value slot. Takes a [`Raw`],
+/// so the caller has already proven (via the borrow checker) that `v` is a
+/// live, non-stale value at the point of the write — no bare bits.
+///
+/// # Safety
+/// `base` must point at a live object with a NanBox value slot at `off`.
+#[inline]
+unsafe fn write_slot(base: *mut u8, off: usize, v: Raw<'_>) {
+    unsafe {
+        base.add(off).cast::<u64>().write_unaligned(v.bits());
+    }
+}
+
+/// Write a non-NanBox machine word (a varlen count, a `user_type_id`, or a
+/// Rust-side `Arc` pointer) into a heap object slot. This is NOT a GC value:
+/// it can't dangle across a collection, so it needs no `Heap`/`Raw`. It
+/// exists as the sanctioned counterpart to [`write_slot`] so the
+/// `gc_slot_writes_are_typed` guard can forbid ALL other bare
+/// `write_unaligned::<u64>` — every word write picks `write_slot` (GC value)
+/// or `write_raw_word` (plain word) explicitly.
+///
+/// # Safety
+/// `base` must point at a live object with a `u64`-sized slot at `off`.
+#[inline]
+unsafe fn write_raw_word(base: *mut u8, off: usize, word: u64) {
+    unsafe {
+        base.add(off).cast::<u64>().write_unaligned(word);
+    }
+}
+
 /// Allocate a fixed-size GC object of `type_id` under the heap capability,
 /// returning the boxed owner reference as a `Raw` tied to `heap`. Because
 /// it takes `&mut Heap`, callers cannot hold an un-rooted `Raw` across it.
@@ -1903,17 +2009,14 @@ fn cons_inner<'h>(
 
     // Field writes are plain stores, not GC points. Re-read the rooted
     // values through `heap` so any relocation that happened above is seen.
-    let nil_bits = nanbox_nil();
     let cell_bits = cell.get_raw(&*heap).bits();
-    let x_bits = x.get_raw(&*heap).bits();
-    let seq_bits = seq.get_raw(&*heap).bits();
-    trap_forwarded_first_result("cons.write.x", cell_bits, x_bits);
-    trap_forwarded_first_result("cons.write.seq", cell_bits, seq_bits);
+    trap_forwarded_first_result("cons.write.x", cell_bits, x.get_raw(&*heap).bits());
+    trap_forwarded_first_result("cons.write.seq", cell_bits, seq.get_raw(&*heap).bits());
     let ptr = nanbox_payload(cell_bits) as *mut u8;
     unsafe {
-        ptr.add(8).cast::<u64>().write_unaligned(x_bits);
-        ptr.add(16).cast::<u64>().write_unaligned(seq_bits);
-        ptr.add(24).cast::<u64>().write_unaligned(nil_bits);
+        write_slot(ptr, 8, x.get_raw(&*heap));
+        write_slot(ptr, 16, seq.get_raw(&*heap));
+        write_slot(ptr, 24, Raw::from_bits(&*heap, nanbox_nil()));
     }
     cell.get_raw(&*heap)
 }
@@ -1956,9 +2059,8 @@ pub unsafe extern "C" fn cljvm_rt_conj(coll_bits: u64, x_bits: u64) -> u64 {
                 return dynobj::roots::gc_enter(n + 2, |heap, scope| {
                     let item_roots: Vec<dynobj::roots::Rooted<()>> = (0..n)
                         .map(|i| {
-                            let bits =
-                                unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() };
-                            scope.root::<()>(bits)
+                            let v = unsafe { read_slot(&*heap, raw, 16 + i * 8) };
+                            v.root(scope)
                         })
                         .collect();
                     let x_root = scope.root::<()>(x_bits);
@@ -1967,17 +2069,11 @@ pub unsafe extern "C" fn cljvm_rt_conj(coll_bits: u64, x_bits: u64) -> u64 {
                     let new_ptr = nanbox_payload(cell_bits) as *mut u8;
                     for i in 0..n {
                         unsafe {
-                            new_ptr
-                                .add(16 + i * 8)
-                                .cast::<u64>()
-                                .write_unaligned(item_roots[i].get_raw(&*heap).bits());
+                            write_slot(new_ptr, 16 + i * 8, item_roots[i].get_raw(&*heap));
                         }
                     }
                     unsafe {
-                        new_ptr
-                            .add(16 + n * 8)
-                            .cast::<u64>()
-                            .write_unaligned(x_root.get_raw(&*heap).bits());
+                        write_slot(new_ptr, 16 + n * 8, x_root.get_raw(&*heap));
                     }
                     cell_bits
                 });
@@ -2018,7 +2114,7 @@ pub unsafe extern "C" fn cljvm_rt_conj(coll_bits: u64, x_bits: u64) -> u64 {
                     panic!("clojure-jvm: RT.conj: gc_alloc returned null for Map");
                 }
                 unsafe {
-                    new_ptr.add(8).cast::<u64>().write_unaligned(raw_arc);
+                    write_raw_word(new_ptr, 8, raw_arc);
                 }
                 return nanbox_ptr(new_raw);
             }
@@ -2224,10 +2320,7 @@ pub unsafe extern "C" fn cljvm_rt_subvec(v_bits: u64, start_bits: u64, end_bits:
         let new_ptr = nanbox_payload(cell_bits) as *mut u8;
         for (i, r) in roots.iter().enumerate() {
             unsafe {
-                new_ptr
-                    .add(16 + i * 8)
-                    .cast::<u64>()
-                    .write_unaligned(r.get_raw(&*heap).bits());
+                write_slot(new_ptr, 16 + i * 8, r.get_raw(&*heap));
             }
         }
         cell_bits
@@ -2812,10 +2905,7 @@ pub unsafe extern "C" fn cljvm_lpv_create(coll_bits: u64) -> u64 {
         let new_ptr = nanbox_payload(cell_bits) as *mut u8;
         for (i, r) in roots.iter().enumerate() {
             unsafe {
-                new_ptr
-                    .add(16 + i * 8)
-                    .cast::<u64>()
-                    .write_unaligned(r.get_raw(&*heap).bits());
+                write_slot(new_ptr, 16 + i * 8, r.get_raw(&*heap));
             }
         }
         cell_bits
@@ -2893,10 +2983,7 @@ pub unsafe extern "C" fn cljvm_rt_toArray(coll_bits: u64) -> u64 {
         let new_ptr = nanbox_payload(cell_bits) as *mut u8;
         for (i, r) in roots.iter().enumerate() {
             unsafe {
-                new_ptr
-                    .add(16 + i * 8)
-                    .cast::<u64>()
-                    .write_unaligned(r.get_raw(&*heap).bits());
+                write_slot(new_ptr, 16 + i * 8, r.get_raw(&*heap));
             }
         }
         cell_bits
@@ -3352,29 +3439,39 @@ pub unsafe extern "C" fn cljvm_var_cloneThreadBindingFrame() -> u64 {
     return nanbox_nil();
 }
 
-/// `(.reset multifn)` — `clojure.lang.MultiFn.reset()`. We don't model
-/// multimethods yet; calling this raises a clear error at runtime, but
-/// upstream defns that only DECLARE wrappers around it (`remove-all-methods`)
-/// can still compile because the call site lowers to this extern.
+// Multimethod *registration* (`.reset`/`.addMethod`/`.removeMethod`/
+// `.preferMethod`) runs at LOAD time when `defmethod`/`remove-all-methods`
+// top-level forms execute. We don't model multimethods, so these can't
+// register anything — but they must NOT hard-panic, because a panic across
+// the `extern "C"` boundary aborts the whole loader (it can't unwind). Skip
+// the registration with a visible `[cljvm-stub]` note and return nil, exactly
+// like other unmodeled load-time host ops (e.g. `cloneThreadBindingFrame`).
+// The *dispatch*-side externs below (getMethod/methodTable/…) still panic with
+// a clear message, since hitting them means a multimethod was actually called.
+
+/// `(.reset multifn)` — `clojure.lang.MultiFn.reset()`. No-op (see above).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_inst_multifn_reset(_recv: u64) -> u64 {
-    panic!(
-        "clojure-jvm: clojure.lang.MultiFn.reset() — multimethods not yet \
-         implemented. Defmulti/defmethod aren't wired; only the wrapper \
-         defns analyze cleanly."
-    );
+pub unsafe extern "C" fn cljvm_inst_multifn_reset(recv: u64) -> u64 {
+    eprintln!("[cljvm-stub] MultiFn.reset() — multimethods not modeled; ignoring (recv 0x{recv:x})");
+    nanbox_nil()
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn cljvm_inst_multifn_addMethod(_a: u64, _b: u64, _c: u64) -> u64 {
-    panic!("clojure-jvm: MultiFn.addMethod not yet implemented");
+pub unsafe extern "C" fn cljvm_inst_multifn_addMethod(recv: u64, _b: u64, _c: u64) -> u64 {
+    eprintln!(
+        "[cljvm-stub] MultiFn.addMethod — multimethods not modeled; method NOT \
+         registered (recv 0x{recv:x})"
+    );
+    nanbox_nil()
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_multifn_removeMethod(_a: u64, _b: u64) -> u64 {
-    panic!("clojure-jvm: MultiFn.removeMethod not yet implemented");
+    eprintln!("[cljvm-stub] MultiFn.removeMethod — multimethods not modeled; ignoring");
+    nanbox_nil()
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_multifn_preferMethod(_a: u64, _b: u64, _c: u64) -> u64 {
-    panic!("clojure-jvm: MultiFn.preferMethod not yet implemented");
+    eprintln!("[cljvm-stub] MultiFn.preferMethod — multimethods not modeled; ignoring");
+    nanbox_nil()
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_inst_multifn_methodTable(_a: u64) -> u64 {
@@ -3680,9 +3777,9 @@ pub unsafe extern "C" fn cljvm_rt_find(coll_bits: u64, key_bits: u64) -> u64 {
                         let cell_bits = cell.get_raw(&*heap).bits();
                         let np = nanbox_payload(cell_bits) as *mut u8;
                         unsafe {
-                            np.add(8).cast::<u64>().write_unaligned(2);
-                            np.add(16).cast::<u64>().write_unaligned(kr.get_raw(&*heap).bits());
-                            np.add(24).cast::<u64>().write_unaligned(vr.get_raw(&*heap).bits());
+                            write_raw_word(np, 8, 2);
+                            write_slot(np, 16, kr.get_raw(&*heap));
+                            write_slot(np, 24, vr.get_raw(&*heap));
                         }
                         cell_bits
                     })
@@ -3865,17 +3962,17 @@ pub unsafe extern "C" fn cljvm_rt_pop(bits: u64) -> u64 {
                 dynobj::roots::gc_enter(new_n + 2, |heap, scope| {
                     let item_roots: Vec<_> = (0..new_n)
                         .map(|i| {
-                            let v = unsafe { p.add(16 + i * 8).cast::<u64>().read_unaligned() };
-                            scope.root::<()>(v)
+                            let v = unsafe { read_slot(&*heap, p, 16 + i * 8) };
+                            v.root(scope)
                         })
                         .collect();
                     let cell = heap_alloc(heap, ids.vector as u64, new_n as u64).root(scope);
                     let cell_bits = cell.get_raw(&*heap).bits();
                     let nptr = nanbox_payload(cell_bits) as *mut u8;
                     unsafe {
-                        nptr.add(8).cast::<u64>().write_unaligned(new_n as u64);
+                        write_raw_word(nptr, 8, new_n as u64);
                         for (i, r) in item_roots.iter().enumerate() {
-                            nptr.add(16 + i * 8).cast::<u64>().write_unaligned(r.get_raw(&*heap).bits());
+                            write_slot(nptr, 16 + i * 8, r.get_raw(&*heap));
                         }
                     }
                     cell_bits
@@ -3937,6 +4034,12 @@ unsafe fn equiv_impl(a: u64, b: u64) -> bool {
     if a_type == ids.long {
         // Two distinct boxed-Long cells are `=` iff they hold the same value.
         return unsafe { unbox_long(a) == unbox_long(b) };
+    }
+    if a_type == ids.character {
+        // Two distinct Character cells are `=` iff they hold the same
+        // codepoint. (A Character is never `=` to a Long: the `a_type !=
+        // b_type` check above already returned false for `(= \a 97)`.)
+        return unsafe { unbox_char(a) == unbox_char(b) };
     }
     if a_type == ids.string {
         // varlen_bytes: count at offset 8, bytes at offset 16.
@@ -4577,6 +4680,7 @@ fn format_object_for_str(obj: &Object) -> String {
         Object::Nil => String::new(),
         Object::Bool(b) => b.to_string(),
         Object::Long(n) => n.to_string(),
+        Object::Char(c) => char::from_u32(*c).map(String::from).unwrap_or_default(),
         Object::Double(d) => {
             // Match Clojure's printer: integral doubles print as "1.0".
             if d.fract() == 0.0 && d.is_finite() {
@@ -4629,6 +4733,18 @@ fn format_object_pr(obj: &Object) -> String {
     match obj {
         Object::String(s) => format!("\"{}\"", s),
         Object::Nil => "nil".to_string(),
+        // Clojure prints chars with a leading backslash, using the named
+        // forms for the non-printing ones.
+        Object::Char(c) => match char::from_u32(*c) {
+            Some(' ') => "\\space".to_string(),
+            Some('\n') => "\\newline".to_string(),
+            Some('\t') => "\\tab".to_string(),
+            Some('\r') => "\\return".to_string(),
+            Some('\u{0c}') => "\\formfeed".to_string(),
+            Some('\u{08}') => "\\backspace".to_string(),
+            Some(ch) => format!("\\{ch}"),
+            None => format!("\\u{c:04x}"),
+        },
         _ => format_object_for_str(obj),
     }
 }
@@ -5118,6 +5234,20 @@ pub unsafe extern "C" fn cljvm_inst_getName(recv_bits: u64) -> u64 {
         panic!("clojure-jvm: (.getName nil) — null receiver");
     }
     let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+    if type_id == ids.namespace {
+        // `clojure.lang.Namespace.getName()` returns the namespace's name
+        // *Symbol* (not a String like Symbol/Keyword's getName). Backs
+        // `(defn ns-name [ns] (.getName (the-ns ns)))`. We box the name
+        // Symbol via the active session's encoder (GC-safe: it decodes a
+        // Rust-owned `Object` before allocating, so no NanBox pointer is
+        // held across the alloc).
+        let arc_ptr = unsafe { raw.add(8).cast::<u64>().read_unaligned() }
+            as *const crate::lang::namespace::Namespace;
+        let ns: &crate::lang::namespace::Namespace = unsafe { &*arc_ptr };
+        return crate::lang::compiler::with_active_session_encode_object(&Object::Symbol(
+            ns.name.clone(),
+        ));
+    }
     let name: String = if type_id == ids.symbol {
         let arc_ptr = unsafe { raw.add(8).cast::<u64>().read_unaligned() }
             as *const crate::lang::symbol::Symbol;
@@ -5129,9 +5259,10 @@ pub unsafe extern "C" fn cljvm_inst_getName(recv_bits: u64) -> u64 {
         let k: &crate::lang::keyword::Keyword = unsafe { &*arc_ptr };
         k.get_name().to_string()
     } else {
+        let decoded = unsafe { heap_bits_to_object(recv_bits, ids) };
         panic!(
             "clojure-jvm: (.getName x) — receiver type_id {type_id} has no \
-             name (extend cljvm_inst_getName)"
+             name (extend cljvm_inst_getName); decoded receiver = {decoded:?}"
         );
     };
     alloc_string_heap(&name, ids)
@@ -5228,6 +5359,75 @@ pub unsafe extern "C" fn cljvm_inst_substring(s_bits: u64, start_bits: u64) -> u
         // usage here only strips a leading ASCII '/'; byte == char index there).
         s[start..].to_string()
     };
+    alloc_string_heap(&out, ids)
+}
+
+/// `(.substring s start end)` — the substring of String `s` between byte
+/// indices `start` (inclusive) and `end` (exclusive). Matches Java's
+/// `String.substring(int,int)`, which `clojure.core/subs` lowers to. Both
+/// indices arrive as boxed Longs. Out-of-range / inverted ranges clamp to
+/// the empty string (we panic only on non-Long args).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_substring2(s_bits: u64, start_bits: u64, end_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = read_string_heap(s_bits, ids, "(.substring s start end) — receiver");
+    if !is_boxed_long(start_bits) || !is_boxed_long(end_bits) {
+        panic!(
+            "clojure-jvm: (.substring s start end) — indices must be boxed Longs \
+             (got start 0x{start_bits:x}, end 0x{end_bits:x})"
+        );
+    }
+    let start = unbox_long(start_bits);
+    let end = unbox_long(end_bits);
+    // Byte-index semantics (clojure.core's path usage is ASCII).
+    let len = s.len() as i64;
+    if start < 0 || end > len || start > end {
+        return alloc_string_heap("", ids);
+    }
+    let out = &s[start as usize..end as usize];
+    alloc_string_heap(out, ids)
+}
+
+/// `(.lastIndexOf s sub)` — byte index of the LAST occurrence of String
+/// `sub` within String `s`, or -1 if absent. Java overload also accepts a
+/// char; `clojure.core` only uses the String form here (`root-directory`'s
+/// `(.lastIndexOf d "/")` to trim a trailing path segment).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_lastIndexOf(s_bits: u64, sub_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = read_string_heap(s_bits, ids, "(.lastIndexOf s sub) — receiver");
+    let sub = read_string_heap(sub_bits, ids, "(.lastIndexOf s sub) — needle");
+    let n: i64 = match s.rfind(sub) {
+        Some(i) => i as i64,
+        None => -1,
+    };
+    box_long(n)
+}
+
+/// `(.replace s old new)` — String with every occurrence of `old` replaced
+/// by `new`. Covers both `java.lang.String` overloads:
+///   * `replace(char, char)` — `old`/`new` are boxed `Character`s. Used by
+///     `clojure.core`'s `root-resource`: `(.. (name lib) (replace \- \_)
+///     (replace \. \/))`.
+///   * `replace(CharSequence, CharSequence)` — `old`/`new` are Strings.
+/// The two are distinguished by the arg cell type.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_replace(s_bits: u64, old_bits: u64, new_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = read_string_heap(s_bits, ids, "(.replace s old new) — receiver");
+    if is_boxed_char(old_bits) && is_boxed_char(new_bits) {
+        // (char, char) overload.
+        let old_ch = char::from_u32(unbox_char(old_bits))
+            .unwrap_or_else(|| panic!("clojure-jvm: (.replace) — invalid `old` char"));
+        let new_ch = char::from_u32(unbox_char(new_bits))
+            .unwrap_or_else(|| panic!("clojure-jvm: (.replace) — invalid `new` char"));
+        let out = s.replace(old_ch, &new_ch.to_string());
+        return alloc_string_heap(&out, ids);
+    }
+    // (CharSequence, CharSequence) overload — both args are Strings.
+    let old = read_string_heap(old_bits, ids, "(.replace s old new) — `old` target");
+    let new = read_string_heap(new_bits, ids, "(.replace s old new) — `new` replacement");
+    let out = s.replace(old, new);
     alloc_string_heap(&out, ids)
 }
 
@@ -5821,7 +6021,7 @@ pub unsafe extern "C" fn cljvm_inst_Reduced_new1(x_bits: u64) -> u64 {
         let cell_bits = cell.get_raw(&*heap).bits();
         let ptr = nanbox_payload(cell_bits) as *mut u8;
         unsafe {
-            ptr.add(8).cast::<u64>().write_unaligned(x.get_raw(&*heap).bits());
+            write_slot(ptr, 8, x.get_raw(&*heap));
         }
         cell_bits
     })
@@ -5910,13 +6110,13 @@ pub unsafe extern "C" fn cljvm_inst_with_meta(recv_bits: u64, meta_bits: u64) ->
             // Re-read the receiver pointer AFTER alloc; root may have
             // been forwarded.
             let raw = nanbox_payload(recv.get_raw(&*heap).bits()) as *const u8;
-            let first_bits = unsafe { raw.add(8).cast::<u64>().read_unaligned() };
-            let rest_bits = unsafe { raw.add(16).cast::<u64>().read_unaligned() };
-            trap_forwarded_first_result("withMeta.cons.first", owner_bits, first_bits);
+            let first = unsafe { read_slot(&*heap, raw, 8) };
+            let rest = unsafe { read_slot(&*heap, raw, 16) };
+            trap_forwarded_first_result("withMeta.cons.first", owner_bits, first.bits());
             unsafe {
-                new_ptr.add(8).cast::<u64>().write_unaligned(first_bits);
-                new_ptr.add(16).cast::<u64>().write_unaligned(rest_bits);
-                new_ptr.add(24).cast::<u64>().write_unaligned(meta.get_raw(&*heap).bits());
+                write_slot(new_ptr, 8, first);
+                write_slot(new_ptr, 16, rest);
+                write_slot(new_ptr, 24, meta.get_raw(&*heap));
             }
             return owner_bits;
         }
@@ -5929,14 +6129,14 @@ pub unsafe extern "C" fn cljvm_inst_with_meta(recv_bits: u64, meta_bits: u64) ->
         // Re-read AFTER alloc.
         let raw = nanbox_payload(recv.get_raw(&*heap).bits()) as *const u8;
         let type_id = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
-        let inner_bits = if type_id == ids.with_meta {
-            unsafe { raw.add(8).cast::<u64>().read_unaligned() }
+        let inner = if type_id == ids.with_meta {
+            unsafe { read_slot(&*heap, raw, 8) }
         } else {
-            recv.get_raw(&*heap).bits()
+            recv.get_raw(&*heap)
         };
         unsafe {
-            new_ptr.add(8).cast::<u64>().write_unaligned(inner_bits);
-            new_ptr.add(16).cast::<u64>().write_unaligned(meta.get_raw(&*heap).bits());
+            write_slot(new_ptr, 8, inner);
+            write_slot(new_ptr, 16, meta.get_raw(&*heap));
         }
         owner_bits
     })
@@ -6073,14 +6273,10 @@ pub unsafe fn alloc_user_instance(user_type_id: u32, fields: &[u64]) -> u64 {
         let ptr = nanbox_payload(cell_bits) as *mut u8;
         let off = layout.user_type_id_offset as isize;
         unsafe {
-            ptr.offset(off)
-                .cast::<u64>()
-                .write_unaligned(user_type_id as u64);
+            write_raw_word(ptr, off as usize, user_type_id as u64);
             for (i, r) in rooted.iter().enumerate() {
                 let slot_off = layout.varlen_base + (i as i64) * 8;
-                ptr.offset(slot_off as isize)
-                    .cast::<u64>()
-                    .write_unaligned(r.get_raw(&*heap).bits());
+                write_slot(ptr, slot_off as usize, r.get_raw(&*heap));
             }
         }
         cell_bits
@@ -6392,15 +6588,12 @@ mod user_type_runtime_tests {
         Symbol::intern_ns_name(None, n)
     }
 
-    // These tests share the user_types global registries with each
-    // other; serialize via a Mutex so allocator state doesn't
-    // interleave.
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    // These tests share the user_types global registries with the
+    // registry-touching tests in `compiler.rs` and `user_types.rs`. They
+    // MUST serialize via the one crate-level lock (not a local one), or a
+    // reset here wipes a compiler test's protocols mid-run.
     fn guard() -> std::sync::MutexGuard<'static, ()> {
-        let g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        ut::_reset_for_tests();
-        g
+        crate::lang::user_types::registry_test_guard()
     }
 
     #[test]
@@ -6463,6 +6656,7 @@ mod gc_alloc_lockin {
     const ALLOWLIST: &[&str] = &[
         "heap_alloc",        // the sanctioned rooted allocator
         "box_long",          // boxes an i64 immediate
+        "box_char",          // boxes a u32 codepoint immediate
         "alloc_arc_cell",    // takes a Rust value, stores its Arc ptr
         "alloc_string_heap", // copies a Rust-owned &str
         // Arc-backed persistent collections: decode to Arc before alloc,
@@ -6536,6 +6730,89 @@ mod gc_alloc_lockin {
              (which roots and borrow-checks), or — if the site provably holds no NanBox \
              GC pointer across the alloc — audit it and add the function to ALLOWLIST \
              in this module with a justification.",
+            offenders
+                .iter()
+                .map(|(f, ln)| format!("  - {f} (runtime.rs:{ln})"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+}
+
+/// Guard that every type-safe allocating builder (any fn whose body calls
+/// `heap_alloc(`) writes its heap slots through the typed helpers
+/// [`write_slot`] (NanBox GC value) or [`write_raw_word`] (plain machine
+/// word), never via a bare `cast::<u64>().write_unaligned(`. A bare word
+/// write hides whether the stored bits are a live GC value or an opaque
+/// word, and historically let stale (un-relocated) NanBox pointers slip in
+/// across a collection. Routing through the helpers makes the choice
+/// explicit and (for `write_slot`) borrow-checks the value at the store.
+#[cfg(test)]
+mod gc_slot_writes {
+    /// The slot helpers themselves legitimately contain the bare write —
+    /// they are the single sanctioned implementation. Exclude them.
+    const HELPER_DEFS: &[&str] = &["write_slot", "write_raw_word", "read_slot"];
+
+    #[test]
+    fn value_writes_in_builders_are_typed() {
+        let src = include_str!("runtime.rs");
+        let fn_name = |line: &str| -> Option<String> {
+            let t = line.trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            let t = t.strip_prefix("unsafe ").unwrap_or(t);
+            let t = t.strip_prefix("extern \"C\" ").unwrap_or(t);
+            let t = t.strip_prefix("fn ")?;
+            let name: String = t
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        };
+
+        // First pass: for each function, record whether its body calls
+        // `heap_alloc(` and on which lines it does a bare u64 slot write.
+        // Stop before the first guard module so neither this test's nor the
+        // sibling guard's own string literals are scanned as real code.
+        let mut current = String::new();
+        let mut calls_heap_alloc: std::collections::HashMap<String, bool> =
+            std::collections::HashMap::new();
+        let mut bare_writes: Vec<(String, usize)> = Vec::new();
+        for (i, line) in src.lines().enumerate() {
+            if line.contains("mod gc_alloc_lockin") {
+                break;
+            }
+            if let Some(name) = fn_name(line) {
+                current = name;
+            }
+            let code = line.trim_start();
+            if code.starts_with("//") || code.starts_with("///") {
+                continue;
+            }
+            if code.contains("heap_alloc(") {
+                calls_heap_alloc.insert(current.clone(), true);
+            }
+            if code.contains("cast::<u64>().write_unaligned(")
+                && !HELPER_DEFS.contains(&current.as_str())
+            {
+                bare_writes.push((current.clone(), i + 1));
+            }
+        }
+
+        // Offenders: bare writes living inside a heap_alloc-allocating builder.
+        let offenders: Vec<(String, usize)> = bare_writes
+            .into_iter()
+            .filter(|(f, _)| *calls_heap_alloc.get(f).unwrap_or(&false))
+            .collect();
+
+        assert!(
+            offenders.is_empty(),
+            "Bare `cast::<u64>().write_unaligned(` inside type-safe allocating \
+             builder(s):\n{}\n\n\
+             Functions that call `heap_alloc(` must write heap slots through \
+             `write_slot(base, off, <Raw>)` for NanBox GC values or \
+             `write_raw_word(base, off, <word>)` for plain machine words \
+             (counts, user_type_id, Arc pointers). A bare word write can store \
+             a stale NanBox pointer across a collection.",
             offenders
                 .iter()
                 .map(|(f, ln)| format!("  - {f} (runtime.rs:{ln})"))

@@ -36,6 +36,12 @@ pub struct ProjectStyleStateEntry {
     /// itself only consumes this value.
     #[serde(default)]
     pub last_edit_at: f64,
+    /// Named style preset chosen for this project, e.g. `"forest"`.
+    /// `None` means "no preset — use the project's own theme.rhai (or the
+    /// built-in default)." This is what makes theming per-project: the
+    /// active preset is loaded from here on every project switch.
+    #[serde(default)]
+    pub preset: Option<String>,
 }
 
 /// In-memory cache of every known project's state. The Tier-2 providers
@@ -56,6 +62,24 @@ impl ProjectStyleState {
             .get(&project_id)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// The named preset chosen for this project, if any.
+    pub fn preset_of(&self, project_id: u64) -> Option<String> {
+        self.by_project
+            .get(&project_id)
+            .and_then(|e| e.preset.clone())
+    }
+
+    /// Set (or clear) the project's chosen preset. Marks it dirty so the
+    /// next `save_dirty_tick` persists it to the project's state.json.
+    /// No-op if unchanged.
+    pub fn set_preset(&mut self, project_id: u64, preset: Option<String>) {
+        let e = self.ensure(project_id);
+        if e.preset != preset {
+            e.preset = preset;
+            self.dirty.insert(project_id, ());
+        }
     }
 
     /// Mark "user is engaging with this project right now."

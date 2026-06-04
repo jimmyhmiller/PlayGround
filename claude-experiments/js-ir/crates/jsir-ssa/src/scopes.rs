@@ -25,88 +25,292 @@ pub struct Scope {
     pub mutable: bool,
 }
 
-/// Infer reactive scopes from mutable ranges.
+/// Infer reactive scopes — a faithful port of React's
+/// `InferReactiveScopeVariables` / `findDisjointMutableValues`: union the
+/// identifiers that *co-mutate* into disjoint sets, each of which becomes one
+/// reactive scope.
+///
+/// Per instruction, build a group and union it:
+///  - the **result** joins iff it is mutated (its range extends past its
+///    definition) or its op `may_allocate` a non-primitive;
+///  - an **operand** joins iff this instruction lies within the operand's
+///    mutable range (i.e. the instruction mutates/captures it) and the operand
+///    is not a function input (param / block-arg).
+///
+/// This replaces the old interval-containment grouping (which over-merged
+/// everything fitting inside a merged mutable interval, and under-merged via a
+/// singleton fallback). Operands that are unmutated never have their range
+/// extend to the using instruction, so e.g. `const y = Boolean(x)` does not pull
+/// `x` into the array scope of `[x, y]` — matching React's separate scopes.
+///
+/// React keys "not an input" off `range.start > 0` because upstream instruction
+/// ids start at 1 and only params sit at 0. OUR point space starts at 0 for the
+/// FIRST instruction, so `start > 0` would wrongly exclude a value defined at
+/// point 0 (e.g. a leading `const foo = () => …`). We test param/block-arg
+/// membership directly instead.
 pub fn infer(cfg: &Cfg, r: &Ranges) -> Vec<Scope> {
-    // Only *allocations* are memoization candidates: object/array/JSX-call
-    // results. Member reads, arithmetic, and identifiers are cheap and recomputed
-    // (they serve as dependencies), exactly as the React Compiler does.
-    let alloc = allocations(cfg);
-
-    // Collect the mutable intervals (end > start), the forced scope boundaries.
-    let mut intervals: Vec<(Point, Point)> = Vec::new();
-    for (&v, &(s, e)) in &r.range {
-        if e > s && alloc.contains(&v) {
-            intervals.push((s, e));
+    let mut inputs: std::collections::HashSet<Value> = cfg.params.iter().copied().collect();
+    for b in &cfg.blocks {
+        for p in &b.params {
+            inputs.insert(*p);
         }
     }
-    intervals.sort();
-    let mut merged: Vec<(Point, Point)> = Vec::new();
-    for (s, e) in intervals {
-        match merged.last_mut() {
-            Some((_, pe)) if s <= *pe => *pe = (*pe).max(e),
-            _ => merged.push((s, e)),
+    let def_op = def_op_map(cfg);
+    let mut uf = UnionFind::new();
+    // Walk in RPO with a per-instruction point counter IDENTICAL to
+    // `aliasing_ranges::compute_ranges` so every instruction — including
+    // no-result ones like `store x.y <- v` (a mutation that must co-group its
+    // operands) — has the correct point.
+    let order = crate::ssa::reverse_postorder(cfg);
+    let mut point = 0u32;
+    for &b in &order {
+        for ins in &cfg.block(b).instrs {
+            let pt = point;
+            point += 1;
+            let mut group: Vec<Value> = Vec::new();
+            if let Some(lv) = ins.result {
+                let (s, e) = r.range.get(&lv).copied().unwrap_or((0, 0));
+                let is_primitive = !r.is_ref.get(&lv).copied().unwrap_or(false);
+                // ours `end > start` (inclusive ranges) ≡ React `end > start + 1`.
+                if e > s || may_allocate(&ins.op, is_primitive) {
+                    uf.ensure(lv);
+                    group.push(lv);
+                }
+            }
+            // Candidate operands (processed for EVERY instruction, incl. no-result
+            // mutations). A method call `y.push(z)` lowers to `Call(Member(y,push),
+            // [z])`: the *receiver* y is the base of the callee member, not a direct
+            // operand. React's HIR MethodCall lists the receiver directly, so we
+            // resolve the callee member chain to its root and include it — else y
+            // and z never co-mutate (the push that captures z into y is invisible).
+            let mut cands: Vec<Value> = ins.op.operands();
+            if let crate::cfg::Op::Call { callee, .. } = &ins.op {
+                let base = member_root(&def_op, *callee);
+                if base != *callee {
+                    cands.push(base);
+                }
+            }
+            for o in cands {
+                let (os, oe) = r.range.get(&o).copied().unwrap_or((0, 0));
+                // operand mutated through this instruction (its range contains the
+                // instruction point) and not a function input.
+                if !inputs.contains(&o) && os <= pt && pt <= oe {
+                    group.push(o);
+                }
+            }
+            if group.len() > 1 {
+                uf.union_all(&group);
+            }
         }
+        point += 1; // terminator slot
     }
 
-    // Assign each allocation to a merged interval (mutable scope) if its range
-    // fits inside one; otherwise it is an independent singleton scope.
-    let mut scopes: Vec<Scope> = merged.iter().map(|&(s, e)| Scope { start: s, end: e, values: Vec::new(), mutable: true }).collect();
-
-    // Stable iteration over allocations by def point.
-    let mut vals: Vec<(Value, (Point, Point))> = r
-        .range
-        .iter()
-        .filter(|(v, _)| alloc.contains(v))
-        .map(|(v, rg)| (*v, *rg))
-        .collect();
-    vals.sort_by_key(|(v, rg)| (rg.0, v.0));
-
-    for (v, (s, e)) in vals {
-        // Skip params/block-args (defined "before" the body at point 0 with no
-        // body instruction) — they are inputs, not produced values.
-        if !is_produced(cfg, v) {
-            continue;
-        }
-        if let Some(scope) = scopes.iter_mut().find(|sc| sc.start <= s && e <= sc.end) {
-            scope.values.push(v);
-        } else {
-            scopes.push(Scope { start: s, end: e, values: vec![v], mutable: false });
-        }
+    // Each disjoint set is one scope; its range spans the union of member ranges.
+    let mut sets: std::collections::HashMap<Value, Vec<Value>> = std::collections::HashMap::new();
+    for v in uf.members() {
+        let root = uf.find(v);
+        sets.entry(root).or_default().push(v);
     }
-
-    scopes.sort_by_key(|s| (s.start, s.end));
+    let mut scopes: Vec<Scope> = Vec::new();
+    for (_root, mut values) in sets {
+        values.sort_by_key(|v| (r.def.get(v).copied().unwrap_or(0), v.0));
+        let start = values
+            .iter()
+            .filter_map(|v| r.range.get(v).map(|x| x.0))
+            .min()
+            .unwrap_or(0);
+        let end = values
+            .iter()
+            .filter_map(|v| r.range.get(v).map(|x| x.1))
+            .max()
+            .unwrap_or(0);
+        let mutable = values.iter().any(|v| {
+            let (s, e) = r.range.get(v).copied().unwrap_or((0, 0));
+            e > s
+        });
+        scopes.push(Scope {
+            start,
+            end,
+            values,
+            mutable,
+        });
+    }
+    scopes.sort_by_key(scope_sort_key);
     scopes
 }
 
-/// The set of "allocation" values (memoization candidates): object/array
-/// literals and call results (which may allocate, e.g. `React.createElement`).
-fn allocations(cfg: &Cfg) -> std::collections::HashSet<Value> {
-    let mut s = std::collections::HashSet::new();
-    for b in &cfg.blocks {
-        for ins in &b.instrs {
-            if let Some(r) = ins.result {
-                let is_alloc = match &ins.op {
-                    crate::cfg::Op::MakeObject(_) | crate::cfg::Op::MakeArray(_) => true,
-                    // A value-hook call (useState/useRef/useContext/custom) is not
-                    // a fresh memoizable allocation; useMemo/useCallback still are.
-                    crate::cfg::Op::Call { callee, .. } => {
-                        !(is_hook_callee(cfg, *callee) && !is_memo_hook_callee(cfg, *callee))
-                    }
-                    _ => false,
-                };
-                if is_alloc {
-                    s.insert(r);
-                }
+/// React's `MergeOverlappingReactiveScopes`: scopes whose ranges *cross*
+/// (partially overlap, neither fully contains the other) or are *identical*
+/// invalidate together and must merge; a scope fully *nested* inside another is
+/// kept separate (React emits nested memo blocks). The union-find baked into the
+/// old `infer` merged ALL overlapping ranges including nested ones — over-merge.
+/// This pass restores the cross-merge that aliasing cases need (a value mutated
+/// through an alias shares a scope) while preserving genuine nesting.
+fn merge_overlapping_scopes(scopes: Vec<Scope>) -> Vec<Scope> {
+    let n = scopes.len();
+    if n < 2 {
+        return scopes;
+    }
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], i: usize) -> usize {
+        let mut root = i;
+        while parent[root] != root {
+            root = parent[root];
+        }
+        let mut cur = i;
+        while parent[cur] != root {
+            let next = parent[cur];
+            parent[cur] = root;
+            cur = next;
+        }
+        root
+    }
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let (si, ei) = (scopes[i].start, scopes[i].end);
+            let (sj, ej) = (scopes[j].start, scopes[j].end);
+            let overlap = si <= ej && sj <= ei;
+            if !overlap {
+                continue;
+            }
+            let identical = si == sj && ei == ej;
+            let i_contains_j = si <= sj && ej <= ei;
+            let j_contains_i = sj <= si && ei <= ej;
+            // proper nesting (one strictly inside the other) is preserved.
+            if (i_contains_j || j_contains_i) && !identical {
+                continue;
+            }
+            let (a, b) = (find(&mut parent, i), find(&mut parent, j));
+            if a != b {
+                parent[a] = b;
             }
         }
     }
-    s
+    let mut groups: std::collections::HashMap<usize, Vec<usize>> = std::collections::HashMap::new();
+    for i in 0..n {
+        let r = find(&mut parent, i);
+        groups.entry(r).or_default().push(i);
+    }
+    let mut out: Vec<Scope> = Vec::new();
+    for (_root, idxs) in groups {
+        let mut values: Vec<Value> = Vec::new();
+        let mut start = u32::MAX;
+        let mut end = 0u32;
+        let mut mutable = false;
+        for &i in &idxs {
+            values.extend(scopes[i].values.iter().copied());
+            start = start.min(scopes[i].start);
+            end = end.max(scopes[i].end);
+            mutable |= scopes[i].mutable;
+        }
+        values.sort_by_key(|v| v.0);
+        values.dedup();
+        out.push(Scope {
+            start,
+            end,
+            values,
+            mutable,
+        });
+    }
+    out.sort_by_key(scope_sort_key);
+    out
+}
+
+fn scope_sort_key(s: &Scope) -> (Point, Point, Vec<u32>) {
+    let mut values: Vec<u32> = s.values.iter().map(|v| v.0).collect();
+    values.sort();
+    (s.start, s.end, values)
+}
+
+/// Whether an op may allocate a fresh non-primitive value (so its result is a
+/// memoization candidate even when never subsequently mutated). Mirrors React's
+/// `mayAllocate`: object/array/JSX/closure/regexp literals and member stores
+/// always allocate; a call allocates iff its result is not a primitive; loads,
+/// arithmetic, and member reads never do.
+fn may_allocate(op: &crate::cfg::Op, lvalue_is_primitive: bool) -> bool {
+    use crate::cfg::Op;
+    match op {
+        Op::MakeObject(_) | Op::MakeArray(_) | Op::StoreMember { .. } => true,
+        Op::Call { .. } => !lvalue_is_primitive,
+        _ => false,
+    }
+}
+
+/// Map each value to its defining op (for member-chain resolution in grouping).
+fn def_op_map(cfg: &Cfg) -> std::collections::HashMap<Value, &crate::cfg::Op> {
+    let mut m = std::collections::HashMap::new();
+    for b in &cfg.blocks {
+        for ins in &b.instrs {
+            if let Some(res) = ins.result {
+                m.insert(res, &ins.op);
+            }
+        }
+    }
+    m
+}
+
+/// Resolve a member-load chain to its root object: `member_root(y.a.b) == y`.
+/// A non-member value is its own root.
+fn member_root(def_op: &std::collections::HashMap<Value, &crate::cfg::Op>, v: Value) -> Value {
+    let mut cur = v;
+    let mut guard = 0;
+    while let Some(crate::cfg::Op::Member { obj, .. }) = def_op.get(&cur).copied() {
+        cur = *obj;
+        guard += 1;
+        if guard > def_op.len() + 1 {
+            break;
+        }
+    }
+    cur
+}
+
+/// Minimal union-find over [`Value`]s for reactive-scope grouping.
+struct UnionFind {
+    parent: std::collections::HashMap<Value, Value>,
+}
+impl UnionFind {
+    fn new() -> Self {
+        Self {
+            parent: std::collections::HashMap::new(),
+        }
+    }
+    fn ensure(&mut self, v: Value) {
+        self.parent.entry(v).or_insert(v);
+    }
+    fn find(&mut self, v: Value) -> Value {
+        let p = self.parent[&v];
+        if p == v {
+            v
+        } else {
+            let root = self.find(p);
+            self.parent.insert(v, root);
+            root
+        }
+    }
+    fn union_all(&mut self, vs: &[Value]) {
+        for &v in vs {
+            self.ensure(v);
+        }
+        let r0 = self.find(vs[0]);
+        for &v in &vs[1..] {
+            let rv = self.find(v);
+            if rv != r0 {
+                self.parent.insert(rv, r0);
+            }
+        }
+    }
+    fn members(&self) -> Vec<Value> {
+        self.parent.keys().copied().collect()
+    }
 }
 
 /// Values that derive (transitively) from a parameter — the *reactive* values.
 /// Globals and constants are non-reactive (stable across renders) and never
 /// become dependencies.
-fn reactive_values(cfg: &Cfg, stable: &std::collections::HashSet<Value>) -> std::collections::HashSet<Value> {
+fn reactive_values(
+    cfg: &Cfg,
+    stable: &std::collections::HashSet<Value>,
+) -> std::collections::HashSet<Value> {
     let mut reactive: std::collections::HashSet<Value> = cfg.params.iter().copied().collect();
     // Hook results are reactive roots, like props/state — a `useState` value, a
     // `useContext` value, a custom hook's return all change across renders. The
@@ -145,15 +349,25 @@ fn reactive_values(cfg: &Cfg, stable: &std::collections::HashSet<Value>) -> std:
             // propagate through terminator block-args
             let edges: Vec<(crate::cfg::BlockId, Vec<Value>)> = match &b.term {
                 crate::cfg::Term::Br(t, a) => vec![(*t, a.clone())],
-                crate::cfg::Term::CondBr { then_block, then_args, else_block, else_args, .. } => {
-                    vec![(*then_block, then_args.clone()), (*else_block, else_args.clone())]
+                crate::cfg::Term::CondBr {
+                    then_block,
+                    then_args,
+                    else_block,
+                    else_args,
+                    ..
+                } => {
+                    vec![
+                        (*then_block, then_args.clone()),
+                        (*else_block, else_args.clone()),
+                    ]
                 }
                 _ => vec![],
             };
             for (succ, args) in edges {
                 let params = cfg.block(succ).params.clone();
                 for (param, a) in params.iter().zip(args) {
-                    if reactive.contains(&a) && !reactive.contains(param) && !stable.contains(param) {
+                    if reactive.contains(&a) && !reactive.contains(param) && !stable.contains(param)
+                    {
                         reactive.insert(*param);
                         changed = true;
                     }
@@ -162,24 +376,6 @@ fn reactive_values(cfg: &Cfg, stable: &std::collections::HashSet<Value>) -> std:
         }
     }
     reactive
-}
-
-/// Is `v` produced by an instruction (vs a param / block argument input)?
-fn is_produced(cfg: &Cfg, v: Value) -> bool {
-    if cfg.params.contains(&v) {
-        return false;
-    }
-    for b in &cfg.blocks {
-        if b.params.contains(&v) {
-            return false;
-        }
-        for ins in &b.instrs {
-            if ins.result == Some(v) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// A reactive scope plus its inferred memoization interface: the values it reads
@@ -283,7 +479,10 @@ fn is_jsx_callee(cfg: &Cfg, callee: Value) -> bool {
         for ins in &b.instrs {
             if ins.result == Some(callee) {
                 return match &ins.op {
-                    Op::Member { prop: MemberKey::Static(name), .. } => {
+                    Op::Member {
+                        prop: MemberKey::Static(name),
+                        ..
+                    } => {
                         matches!(name.as_str(), "createElement" | "jsx" | "jsxs" | "jsxDEV")
                     }
                     Op::Global(name) => {
@@ -306,7 +505,10 @@ fn is_hook_callee(cfg: &Cfg, callee: Value) -> bool {
             if ins.result == Some(callee) {
                 return match &ins.op {
                     Op::Global(name) => is_hook_name(name),
-                    Op::Member { prop: MemberKey::Static(name), .. } => is_hook_name(name),
+                    Op::Member {
+                        prop: MemberKey::Static(name),
+                        ..
+                    } => is_hook_name(name),
                     _ => false,
                 };
             }
@@ -388,8 +590,12 @@ fn stable_values(cfg: &Cfg) -> std::collections::HashSet<Value> {
                 Op::Call { callee, .. } if is_stable_hook_callee(cfg, *callee) => {
                     stable.insert(r);
                 }
-                Op::Member { obj, prop: MemberKey::Computed(c) } if one_vals.contains(c) => {
-                    if matches!(def_op.get(obj), Some(Op::Call { callee, .. }) if is_state_hook(*callee)) {
+                Op::Member {
+                    obj,
+                    prop: MemberKey::Computed(c),
+                } if one_vals.contains(c) => {
+                    if matches!(def_op.get(obj), Some(Op::Call { callee, .. }) if is_state_hook(*callee))
+                    {
                         stable.insert(r);
                     }
                 }
@@ -576,7 +782,10 @@ pub fn prune_non_escaping(
                 else_block,
                 else_args,
                 ..
-            } => vec![(*then_block, then_args.clone()), (*else_block, else_args.clone())],
+            } => vec![
+                (*then_block, then_args.clone()),
+                (*else_block, else_args.clone()),
+            ],
             _ => vec![],
         };
         for (succ, args) in edges {
@@ -647,7 +856,8 @@ pub fn prune_non_escaping(
         nodes.get_mut(&v).unwrap().seen = true;
         nodes.get_mut(&v).unwrap().memoized = false;
 
-        let deps: Vec<Value> = nodes.get(&v).unwrap().deps.iter().copied().collect();
+        let mut deps: Vec<Value> = nodes.get(&v).unwrap().deps.iter().copied().collect();
+        deps.sort();
         let mut has_memoized_dep = false;
         for d in deps {
             let m = visit(d, false, nodes, scope_seen, scope_deps, memoized);
@@ -660,7 +870,8 @@ pub fn prune_non_escaping(
         if should {
             nodes.get_mut(&v).unwrap().memoized = true;
             memoized.insert(v);
-            let scopes: Vec<usize> = nodes.get(&v).unwrap().scopes.iter().copied().collect();
+            let mut scopes: Vec<usize> = nodes.get(&v).unwrap().scopes.iter().copied().collect();
+            scopes.sort();
             for s in scopes {
                 force_memoize_scope(s, nodes, scope_seen, scope_deps, memoized);
             }
@@ -679,13 +890,15 @@ pub fn prune_non_escaping(
             return;
         }
         scope_seen[s] = true;
-        let deps: Vec<Value> = scope_deps[s].iter().copied().collect();
+        let mut deps: Vec<Value> = scope_deps[s].iter().copied().collect();
+        deps.sort();
         for d in deps {
             visit(d, true, nodes, scope_seen, scope_deps, memoized);
         }
     }
 
-    let roots: Vec<Value> = escaping.iter().copied().collect();
+    let mut roots: Vec<Value> = escaping.iter().copied().collect();
+    roots.sort();
     for v in roots {
         visit(
             v,
@@ -732,7 +945,7 @@ fn instr_global_name(cfg: &Cfg, v: Value) -> Option<String> {
 /// block React would emit (`const [outputs] = useMemo(() => {…}, [deps])`).
 pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
     use std::collections::{HashMap, HashSet};
-    let scopes = infer(cfg, r);
+    let scopes = merge_overlapping_scopes(infer(cfg, r));
     let stable = stable_values(cfg);
     let reactive = reactive_values(cfg, &stable);
 
@@ -764,8 +977,7 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
     // Compute React's memoized + escaping sets over the raw inferred scopes.
     // A raw scope's reactive dependency-set = reactive, non-const operands of
     // its values that are defined outside the scope.
-    let raw_values: Vec<Vec<Value>> =
-        scopes.iter().map(|sc| sc.values.clone()).collect();
+    let raw_values: Vec<Vec<Value>> = scopes.iter().map(|sc| sc.values.clone()).collect();
     let raw_deps: Vec<HashSet<Value>> = scopes
         .iter()
         .map(|sc| {
@@ -790,7 +1002,14 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
     let mut create_member: HashSet<Value> = HashSet::new();
     for b in &cfg.blocks {
         for ins in &b.instrs {
-            if let (Some(res), crate::cfg::Op::Member { prop: crate::cfg::MemberKey::Static(n), .. }) = (ins.result, &ins.op) {
+            if let (
+                Some(res),
+                crate::cfg::Op::Member {
+                    prop: crate::cfg::MemberKey::Static(n),
+                    ..
+                },
+            ) = (ins.result, &ins.op)
+            {
                 if matches!(n.as_str(), "createElement" | "jsx" | "jsxs" | "jsxDEV") {
                     create_member.insert(res);
                 }
@@ -821,10 +1040,22 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
     }
 
     // Working scopes as value-sets.
-    struct Work { values: HashSet<Value>, mutable: bool, start: Point, end: Point }
+    struct Work {
+        values: HashSet<Value>,
+        mutable: bool,
+        start: Point,
+        end: Point,
+    }
     let mut work: Vec<Option<Work>> = scopes
         .iter()
-        .map(|sc| Some(Work { values: sc.values.iter().copied().collect(), mutable: sc.mutable, start: sc.start, end: sc.end }))
+        .map(|sc| {
+            Some(Work {
+                values: sc.values.iter().copied().collect(),
+                mutable: sc.mutable,
+                start: sc.start,
+                end: sc.end,
+            })
+        })
         .collect();
     let mut owner: HashMap<Value, usize> = HashMap::new();
     for (i, w) in work.iter().enumerate() {
@@ -900,45 +1131,82 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
         }
         d
     };
+    let scope_owned_inputs =
+        |values: &HashSet<Value>, owner: &HashMap<Value, usize>| -> HashSet<Value> {
+            let mut d = HashSet::new();
+            for v in values {
+                for o in operands.get(v).map(|x| x.as_slice()).unwrap_or(&[]) {
+                    if !values.contains(o) && !const_vals.contains(o) && owner.contains_key(o) {
+                        d.insert(*o);
+                    }
+                }
+            }
+            d
+        };
     let mut changed = true;
     while changed {
         changed = false;
         'scan: for c in 0..work.len() {
             // A lone transient (JSX props object) must only be absorbed by its
             // consumer (the element); it must never merge into its producer.
-            let cdeps = match &work[c] {
+            let (cdeps, owned_inputs) = match &work[c] {
                 Some(w)
                     if !w.mutable
-                        && !(w.values.len() == 1 && transient.contains(w.values.iter().next().unwrap())) =>
+                        && !(w.values.len() == 1
+                            && transient.contains(w.values.iter().next().unwrap())) =>
                 {
-                    scope_deps(&w.values)
+                    (scope_deps(&w.values), scope_owned_inputs(&w.values, &owner))
                 }
                 _ => continue,
             };
-            for &d in &cdeps {
-                // `d` must be the output of another pure scope `p`.
-                let p = match owner.get(&d) {
-                    Some(&p) if p != c => p,
-                    _ => continue,
+            let mut producer: Option<usize> = None;
+            let mut all_inputs_from_one_producer = !cdeps.is_empty() || !owned_inputs.is_empty();
+            let mut sources: HashSet<Value> = cdeps.iter().copied().collect();
+            sources.extend(owned_inputs.iter().copied());
+            for &d in &sources {
+                match owner.get(&d).copied() {
+                    Some(p) if p != c => match producer {
+                        Some(prev) if prev != p => {
+                            all_inputs_from_one_producer = false;
+                            break;
+                        }
+                        Some(_) => {}
+                        None => producer = Some(p),
+                    },
+                    _ => {
+                        all_inputs_from_one_producer = false;
+                        break;
+                    }
+                }
+            }
+            if let Some(p) = producer {
+                let producer_is_mutable = work[p].as_ref().map(|w| w.mutable).unwrap_or(true);
+                let can_merge = if sources.iter().any(|d| transient.contains(d)) {
+                    true
+                } else if producer_is_mutable {
+                    // React folds a pure consumer into a mutable producer when all
+                    // of the consumer's inputs are produced by that same scope
+                    // and there are no independent reactive deps. This covers
+                    // local captures (`a`/`b` allocated, then returned only
+                    // through JSX) without collapsing dep-bearing chains such as
+                    // array mutation followed by property reads.
+                    cdeps.is_empty() && all_inputs_from_one_producer
+                } else {
+                    // Pure producer: retain the conservative existing rule.
+                    cdeps.len() == 1
                 };
-                if work[p].as_ref().map(|w| w.mutable).unwrap_or(true) {
-                    continue;
+                if can_merge {
+                    let from = work[c].take().unwrap();
+                    let to = work[p].as_mut().unwrap();
+                    for v in &from.values {
+                        owner.insert(*v, p);
+                    }
+                    to.values.extend(from.values);
+                    to.start = to.start.min(from.start);
+                    to.end = to.end.max(from.end);
+                    changed = true;
+                    break 'scan;
                 }
-                // Merge a single-dependency consumer, or a transient props object.
-                if !transient.contains(&d) && cdeps.len() != 1 {
-                    continue;
-                }
-                // Merge consumer `c` into producer `p`.
-                let from = work[c].take().unwrap();
-                let to = work[p].as_mut().unwrap();
-                for v in &from.values {
-                    owner.insert(*v, p);
-                }
-                to.values.extend(from.values);
-                to.start = to.start.min(from.start);
-                to.end = to.end.max(from.end);
-                changed = true;
-                break 'scan;
             }
         }
     }
@@ -1040,7 +1308,7 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
             .iter()
             .copied()
             .filter(|v| {
-                let used_outside = users
+                let escapes_scope = users
                     .get(v)
                     .map(|us| {
                         us.iter().any(|u| match u {
@@ -1049,15 +1317,34 @@ pub fn analyze(cfg: &Cfg, r: &Ranges) -> Vec<ScopeInfo> {
                         })
                     })
                     .unwrap_or(false);
-                used_outside && escape.memoized.contains(v)
+                escapes_scope && escape.memoized.contains(v)
             })
             .collect();
         deps.sort();
-        let scope = Scope { start: w.start, end: w.end, values: sorted_vals, mutable: w.mutable };
-        out.push(ScopeInfo { scope, deps, outputs });
+        let scope = Scope {
+            start: w.start,
+            end: w.end,
+            values: sorted_vals,
+            mutable: w.mutable,
+        };
+        out.push(ScopeInfo {
+            scope,
+            deps,
+            outputs,
+        });
     }
-    out.sort_by_key(|i| (i.scope.start, i.scope.end));
+    out.sort_by_key(scope_info_sort_key);
     out
+}
+
+fn scope_info_sort_key(i: &ScopeInfo) -> (Point, Point, Vec<u32>, Vec<u32>, Vec<u32>) {
+    let mut values: Vec<u32> = i.scope.values.iter().map(|v| v.0).collect();
+    let mut deps: Vec<u32> = i.deps.iter().map(|v| v.0).collect();
+    let mut outputs: Vec<u32> = i.outputs.iter().map(|v| v.0).collect();
+    values.sort();
+    deps.sort();
+    outputs.sort();
+    (i.scope.start, i.scope.end, values, deps, outputs)
 }
 
 /// The reactive **access path** of a value: its root value plus the chain of
@@ -1076,7 +1363,11 @@ fn access_path_key(
     let mut props: Vec<String> = Vec::new();
     let mut cur = v;
     let mut guard = 0;
-    while let Some(Op::Member { obj, prop: MemberKey::Static(name) }) = def_op.get(&cur).copied() {
+    while let Some(Op::Member {
+        obj,
+        prop: MemberKey::Static(name),
+    }) = def_op.get(&cur).copied()
+    {
         props.push(name.clone());
         cur = *obj;
         guard += 1;
@@ -1091,7 +1382,12 @@ fn access_path_key(
 fn term_operands(cfg: &Cfg, b: crate::cfg::BlockId) -> Vec<Value> {
     match &cfg.block(b).term {
         crate::cfg::Term::Br(_, a) => a.clone(),
-        crate::cfg::Term::CondBr { cond, then_args, else_args, .. } => {
+        crate::cfg::Term::CondBr {
+            cond,
+            then_args,
+            else_args,
+            ..
+        } => {
             let mut v = vec![*cond];
             v.extend(then_args.iter().copied());
             v.extend(else_args.iter().copied());
@@ -1126,7 +1422,13 @@ pub fn render(scopes: &[Scope]) -> String {
         .iter()
         .map(|s| {
             let vs: Vec<String> = s.values.iter().map(|v| format!("%{}", v.0)).collect();
-            format!("scope [{}..{}] {} {{{}}}", s.start, s.end, if s.mutable { "mut" } else { "pure" }, vs.join(", "))
+            format!(
+                "scope [{}..{}] {} {{{}}}",
+                s.start,
+                s.end,
+                if s.mutable { "mut" } else { "pure" },
+                vs.join(", ")
+            )
         })
         .collect::<Vec<_>>()
         .join("\n")

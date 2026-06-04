@@ -113,6 +113,23 @@ pub struct ShadowParams {
 /// Theme-driven pane chrome look. Default values match the look the
 /// editor shipped with before theming was wired up. A higher-level
 /// crate (e.g. `style-bevy`) overrides this from the active theme on
+/// Per-pane chrome look override. When present on a pane, the chrome
+/// systems use this instead of the global [`ChromeStyle`] resource — so
+/// each pane can render in its own project's theme. The host stamps it
+/// from the per-project theme cache; panes without it fall back to the
+/// global (active) style.
+#[derive(Component, Clone, Debug)]
+pub struct PaneChromeStyle(pub ChromeStyle);
+
+/// Per-pane chrome *shader* override. When present, the pane's chrome
+/// material uses this fragment shader instead of the global
+/// [`ActiveChromeShader`] — so a project whose preset ships a custom
+/// `chrome.wgsl` renders with it even in the cube overview, where panes
+/// from many projects (and presets) are on screen at once. Panes without
+/// it fall back to the active shader.
+#[derive(Component, Clone, Debug)]
+pub struct PaneChromeShader(pub Handle<Shader>);
+
 /// `ThemeChanged`; pane-bevy itself never reads the theme directly to
 /// avoid a circular dependency.
 #[derive(Resource, Clone, Debug)]

@@ -68,7 +68,7 @@ def mandel_pixel(view: ViewParams, idx: Int) -> Int = {
 // downstream call site, separately filed).
 def make_pixel_chunks(total: Int, n_chunks: Int) -> List<List<Int>> = {
     let size = (total + n_chunks - 1) / n_chunks;
-    build_chunks(0, total, size, Nil)
+    build_chunks(0, total, size, List::Nil)
 }
 
 def build_chunks(start: Int, total: Int, size: Int, acc: List<List<Int>>) -> List<List<Int>> =
@@ -77,7 +77,7 @@ def build_chunks(start: Int, total: Int, size: Int, acc: List<List<Int>>) -> Lis
     } else {
         let end_raw = start + size;
         let end = if end_raw > total { total } else { end_raw };
-        build_chunks(end, total, size, Cons(ListCell {
+        build_chunks(end, total, size, List::Cons(ListCell {
             head: int_list_range(start, end), tail: acc,
         }))
     }
@@ -104,12 +104,12 @@ def render_frame_acc(
     pixels: List<Int>, width: Int, max_iter: Int, col: Int, line_acc: String
 ) -> Int = {
     match pixels {
-        Nil => {
+        List::Nil => {
             // Flush any partial last line.
             let _f = if col > 0 { println(line_acc) } else { 0 };
             0
         },
-        Cons(c) => {
+        List::Cons(c) => {
             let g = glyph_for(c.head, max_iter);
             if col + 1 >= width {
                 let _p = println(string_concat(line_acc, g));
@@ -122,12 +122,12 @@ def render_frame_acc(
 }
 
 // Build a pool of nodes from the runner's --nodes table.
-def build_pool() -> List<Node> = list_reverse(build_pool_acc(0, Nil))
+def build_pool() -> List<Node> = list_reverse(build_pool_acc(0, List::Nil))
 
 def build_pool_acc(i: Int, acc: List<Node>) -> List<Node> =
     if i >= node_count() { acc } else {
         let p = get_node_port(i);
-        build_pool_acc(i + 1, Cons(ListCell {
+        build_pool_acc(i + 1, List::Cons(ListCell {
             head: tcp_node(127, 0, 0, 1, p),
             tail: acc,
         }))

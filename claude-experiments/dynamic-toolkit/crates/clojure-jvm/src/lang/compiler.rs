@@ -1353,6 +1353,46 @@ impl MaybePrimitiveExpr for NumberExpr {
     }
 }
 
+/// A character literal (`\a`, `\newline`, `\uHHHH`). Mirrors `NumberExpr`'s
+/// boxed-Long path: the codepoint is pre-boxed into a `clojure.lang.Character`
+/// cell at pool-fill time and emitted as a `gc_literal` load. Distinct from
+/// `NumberExpr` so `(str \a)` is `"a"` and `(class \a)` is `Character`.
+#[derive(Debug, Clone, Copy)]
+pub struct CharExpr {
+    pub code: u32,
+}
+
+impl Expr for CharExpr {
+    fn eval(&self) -> Object {
+        Object::Char(self.code)
+    }
+
+    fn emit(&self, context: C, _objx: &ObjExpr, ir: &mut IrEmitter<'_>) -> Option<Value> {
+        if context == C::Statement {
+            return None;
+        }
+        let idx = with_active_compiler(|c| c.intern_literal(PendingLiteral::Char(self.code)));
+        let lit = dynir::ir::LiteralRef::from_u32(idx);
+        Some(ir.f.fb.gc_literal(lit))
+    }
+
+    fn has_java_class(&self) -> bool {
+        true
+    }
+
+    fn get_java_class(&self) -> Option<HostClass> {
+        Some(HostClass {
+            name: Arc::new("java.lang.Character".to_string()),
+        })
+    }
+}
+
+impl LiteralExpr for CharExpr {
+    fn val(&self) -> Object {
+        Object::Char(self.code)
+    }
+}
+
 // ============================================================================
 // Java line ~2454–2536: `ConstantExpr` (and its `Parser` for `quote`).
 // ============================================================================
@@ -1448,6 +1488,7 @@ impl Expr for ConstantExpr {
             Object::Nil => return None,
             Object::Bool(_) => "java.lang.Boolean",
             Object::Long(_) => "java.lang.Long",
+            Object::Char(_) => "java.lang.Character",
             Object::Double(_) => "java.lang.Double",
             Object::String(_) => "java.lang.String",
             Object::Symbol(_) => "clojure.lang.Symbol",
@@ -1493,6 +1534,7 @@ impl IParser for ConstantExprParser {
             Object::Bool(true) => Box::new(TRUE_EXPR),
             Object::Bool(false) => Box::new(FALSE_EXPR),
             Object::Long(_) | Object::Double(_) => NumberExpr::parse(v),
+            Object::Char(code) => Box::new(CharExpr { code: *code }),
             Object::String(s) => Box::new(StringExpr { str: s.clone() }),
             // Empty collections (EmptyExpr in Java) — not yet ported as a
             // distinct Expr; quoted non-empty collections + symbols /
@@ -2174,6 +2216,7 @@ pub fn analyze_named(context: C, form: Object, name: Option<&str>) -> Box<dyn Ex
         Object::Bool(true) => Box::new(TRUE_EXPR),
         Object::Bool(false) => Box::new(FALSE_EXPR),
         Object::Long(_) | Object::Double(_) => NumberExpr::parse(form),
+        Object::Char(code) => Box::new(CharExpr { code }),
         Object::String(s) => {
             // Java: new StringExpr(((String) form).intern())
             // We skip the intern step — Rust doesn't have JVM-style string
@@ -3361,26 +3404,39 @@ fn expand_extend_type(form: &Object) -> Object {
         cur = super::rt::next(&cur);
         match item.peel_meta_ref() {
             Object::Symbol(s) => {
-                // New protocol section starts.
-                let pid = protocol_id_by_name(s).unwrap_or_else(|| {
-                    panic!(
-                        "clojure-jvm: extend-type `{}`: protocol `{}` not \
-                         registered. Have you called defprotocol yet?",
-                        target_sym.get_name(),
-                        s.get_name(),
-                    )
-                });
-                current_proto_id = Some(pid);
-                current_proto_name = Some(s.clone());
+                // New protocol/interface section starts. If the name isn't a
+                // registered protocol it's a host interface we don't model
+                // (e.g. `java.lang.Iterable`, `clojure.lang.IReduceInit`,
+                // `clojure.lang.Sequential` on `(deftype Eduction …)`). Skip
+                // its method blocks — the type is still created with whatever
+                // protocols we DO model; calling a skipped method fails with a
+                // clear method-not-found at runtime. (A genuine typo'd
+                // protocol name is skipped the same way; the missing-method
+                // error surfaces it.)
+                match protocol_id_by_name(s) {
+                    Some(pid) => {
+                        current_proto_id = Some(pid);
+                        current_proto_name = Some(s.clone());
+                    }
+                    None => {
+                        eprintln!(
+                            "[cljvm-deftype] {}: skipping unmodeled protocol/interface `{}` \
+                             (not registered via defprotocol)",
+                            target_sym.get_name(),
+                            s.get_name(),
+                        );
+                        current_proto_id = None;
+                        current_proto_name = None;
+                    }
+                }
             }
             Object::List(l) => {
-                let pid = current_proto_id.unwrap_or_else(|| {
-                    panic!(
-                        "clojure-jvm: extend-type `{}`: method block appears \
-                         before any protocol symbol",
-                        target_sym.get_name(),
-                    )
-                });
+                // A method block under a skipped (unmodeled) interface — drop
+                // it. (`current_proto_name` is None only here or before any
+                // section symbol; both mean "nothing to install".)
+                let Some(pid) = current_proto_id else {
+                    continue;
+                };
                 let pname = current_proto_name.as_ref().unwrap();
                 // Method block shape: (method-name [this …] body…)
                 let mut it = l.iter();
@@ -4494,19 +4550,25 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
                             with_meta: sess.compiler.with_meta_type_id.0,
                             reduced: sess.compiler.reduced_type_id.0,
                             long: sess.compiler.long_type_id.0,
+            character: sess.compiler.character_type_id.0,
                             user_instance: sess.compiler.user_instance_type_id.0,
                         };
                         let exc_obj = crate::runtime::any_bits_to_object(e, ids);
+                        // Defer instead of aborting the load: stash the macro's
+                        // exception and return `nil` as the "expansion".
+                        // `analyze_seq` turns this into a runtime ThrowExpr.
+                        let msg = format!(
+                            "macroexpand of `{}` threw: {exc_obj:?}",
+                            head_sym.get_name(),
+                        );
+                        MACRO_EXPAND_THREW.with(|c| *c.borrow_mut() = Some(msg));
+                        crate::runtime::nanbox_nil()
+                    } else {
                         panic!(
-                            "clojure-jvm: macroexpand of `{}`: macro fn threw \
-                         exception (bits=0x{e:x}): {exc_obj:?}",
-                            head_sym.get_name()
+                            "clojure-jvm: macroexpand of `{}`: macro fn returned non-value outcome: {other:?}",
+                            head_sym.get_name(),
                         );
                     }
-                    panic!(
-                        "clojure-jvm: macroexpand of `{}`: macro fn returned non-value outcome: {other:?}",
-                        head_sym.get_name(),
-                    );
                 }
             }
         });
@@ -4536,6 +4598,7 @@ fn macroexpand_once(form: &Object) -> Option<Object> {
             with_meta: sess.compiler.with_meta_type_id.0,
             reduced: sess.compiler.reduced_type_id.0,
             long: sess.compiler.long_type_id.0,
+            character: sess.compiler.character_type_id.0,
             user_instance: sess.compiler.user_instance_type_id.0,
         };
         crate::runtime::any_bits_to_object(result_bits, ids)
@@ -4711,12 +4774,15 @@ impl Expr for DynamicMapExpr {
         let nil_bits = (0x7FFC_0000_0000_0000u64) as i64;
         let mut acc = ir.f.fb.iconst(dynir::Type::I64, nil_bits);
         for (k, v) in &self.entries {
-            let k_val = k
-                .emit(C::Expression, objx, ir)
-                .expect("DynamicMapExpr key must produce a value");
-            let v_val = v
-                .emit(C::Expression, objx, ir)
-                .expect("DynamicMapExpr value must produce a value");
+            // A key/value that DIVERGES (e.g. a deferred throw-stub for an
+            // unresolved `#'var`) emits `None` and terminates the block. The
+            // rest of the map is unreachable; propagate the divergence.
+            let Some(k_val) = k.emit(C::Expression, objx, ir) else {
+                return None;
+            };
+            let Some(v_val) = v.emit(C::Expression, objx, ir) else {
+                return None;
+            };
             acc =
                 ir.f.fb
                     .call(self.assoc_fref, &[acc, k_val, v_val])
@@ -4832,6 +4898,13 @@ fn analyze_seq(context: C, form: Object) -> Box<dyn Expr> {
     // compile-time macro expansion call.
     if let Object::List(_) = &form {
         if let Some(expanded) = macroexpand_once(&form) {
+            // The macro fn threw during expansion (it hit a deferred
+            // class/symbol throw-stub). Defer to runtime: emit a ThrowExpr so
+            // the enclosing form compiles and only fails if evaluated.
+            if let Some(msg) = MACRO_EXPAND_THREW.with(|c| c.borrow_mut().take()) {
+                let payload: Box<dyn Expr> = Box::new(StringExpr::new(msg));
+                return Box::new(ThrowExpr { payload });
+            }
             if std::env::var("CLJVM_TRACE_MACRO").is_ok() {
                 let head = super::rt::first(&form);
                 let head_name = match &head {
@@ -4991,6 +5064,22 @@ fn analyze_seq(context: C, form: Object) -> Box<dyn Expr> {
         }
         if **sym == *specials.ASSIGN {
             return parse_assign_form(context, form);
+        }
+        // `reify` / `reify*` — anonymous instance implementing host
+        // interfaces / protocols. The `reify` macro lives in
+        // `core_deftype.clj` (not embedded) and `reify*` needs
+        // `gen-interface` + JVM interface vtables we don't model; the
+        // bootstrap's uses (e.g. `future-call` over `java.util.concurrent.
+        // Future`) are JVM-interop anyway. Defer like unregistered host
+        // classes: emit a runtime throw so the enclosing `defn` compiles and
+        // only fails if actually called. The body is NOT analyzed (it
+        // references unmodeled interfaces/methods).
+        if sym.get_namespace().is_none()
+            && (sym.get_name() == "reify" || sym.get_name() == "reify*")
+        {
+            let payload: Box<dyn Expr> =
+                Box::new(StringExpr::new("reify is not supported (no JVM interface impl)"));
+            return Box::new(ThrowExpr { payload });
         }
         // Built-in primitive op stand-in (eventually replaced by Var-based
         // resolution to clojure.core/+ etc. with `:inline` metadata).
@@ -5798,6 +5887,17 @@ thread_local! {
     static CURRENT_FN_ID: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
 }
 
+thread_local! {
+    /// Set when a macro fn *throws* during macroexpansion (`macroexpand_once`).
+    /// Rather than abort the whole load, the macroexpander stashes the
+    /// exception message here and returns `nil`; `analyze_seq` picks it up and
+    /// emits a deferred runtime `ThrowExpr` so the enclosing form compiles and
+    /// only fails if evaluated. (Macros throw at expansion in our image mostly
+    /// because their body hit a deferred class/symbol throw-stub.)
+    static MACRO_EXPAND_THREW: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 fn mint_fn_id() -> u32 {
     NEXT_FN_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
@@ -6001,10 +6101,17 @@ pub fn analyze_symbol(sym: Arc<Symbol>) -> Box<dyn Expr> {
         let payload: Box<dyn Expr> = Box::new(StringExpr::new(msg));
         return Box::new(ThrowExpr { payload });
     }
-    panic!(
-        "clojure-jvm: RuntimeException — Unable to resolve symbol: {} in this context",
-        sym.get_name(),
-    );
+    // Unresolved non-dotted symbol. Rather than abort analysis (which would
+    // kill the whole load), defer like an unresolved class reference: emit a
+    // runtime throw so the enclosing `defn`/`defmethod` compiles and only
+    // fails if that code path actually runs. This is what lets core.clj forms
+    // that reference fns from sub-files we don't embed (e.g.
+    // `print-sequential` from `core_print.clj`) load, and it gives a clear
+    // error at the call site rather than a silent wrong value. Forward
+    // references (mutual recursion before both vars exist) land here too.
+    let msg = format!("Unable to resolve symbol: {} in this context", sym.get_name());
+    let payload: Box<dyn Expr> = Box::new(StringExpr::new(msg));
+    Box::new(ThrowExpr { payload })
 }
 
 /// `Compiler.resolve(Object sym)` — Java line ~7965 (simplified). Looks up
@@ -6027,10 +6134,22 @@ fn resolve_var(sym: &Symbol) -> Option<Arc<Var>> {
         return target_ns.find_interned_var(&Symbol::intern(sym.get_name()));
     }
     let cur = super::rt::current_ns();
-    match cur.get_mapping(sym) {
-        Some(Object::Var(v)) => Some(v),
-        _ => None,
+    if let Some(Object::Var(v)) = cur.get_mapping(sym) {
+        return Some(v);
     }
+    // Every namespace auto-refers `clojure.core` (Clojure's `ns` macro emits
+    // `(refer 'clojure.core)`). We model that as a resolution-time fallback
+    // rather than snapshotting core's mappings at ns creation: an unqualified
+    // symbol not mapped in the current ns resolves to the like-named
+    // `clojure.core` var if one exists. This is what lets sub-files loaded
+    // into their own namespace (e.g. `(ns clojure.core.protocols)` using
+    // `seq`/`first`/`reduced`) see core. Skipped when already in core.
+    if cur.name.get_name() != "clojure.core" {
+        if let Some(core) = Namespace::find(&Symbol::intern("clojure.core")) {
+            return core.find_interned_var(&Symbol::intern(sym.get_name()));
+        }
+    }
+    None
 }
 
 /// `Compiler.referenceLocal(Symbol sym)` — Java line ~8130. Looks up the
@@ -7892,12 +8011,15 @@ fn parse_ns_form(_context: C, form: Object) -> Box<dyn Expr> {
         ),
     };
     let ns = super::namespace::Namespace::find_or_create(ns_sym);
-    // Swap CURRENT_NS to the new namespace. We modify the Var's root
-    // directly (Java's `in-ns` does the same, ultimately calling
-    // `Namespace.findOrCreate` and `Var.intern(... *ns*)`). `in-ns` does
+    // Switch `*ns*` to the new namespace by mutating the CURRENT THREAD's
+    // dynamic binding (Clojure's `in-ns` calls `RT.CURRENT_NS.set(ns)`,
+    // which sets the thread binding established by the loader/REPL — it does
+    // NOT change the global root). `Session::eval_form` establishes that
+    // binding around every form, so `set_value` always has one to mutate,
+    // and the change stays local to this thread of evaluation. `in-ns` does
     // NOT refer clojure.core — that's the `ns` macro's job, via its
     // expansion's `(clojure.core/refer 'clojure.core)` call.
-    super::rt::CURRENT_NS.bind_root(Object::Namespace(ns.clone()));
+    super::rt::CURRENT_NS.set_value(Object::Namespace(ns.clone()));
 
     // Walk the remaining clauses after the ns name and process the
     // ones we understand. Anything we don't recognize is skipped
@@ -8053,10 +8175,13 @@ fn parse_var_form(_context: C, form: Object) -> Box<dyn Expr> {
         let idx = with_active_compiler(|c| c.intern_literal(PendingLiteral::Var(v)));
         return Box::new(ConstantLiteralExpr { idx });
     }
-    panic!(
-        "clojure-jvm: RuntimeException — Unable to resolve var: {}",
-        sym.get_name(),
-    );
+    // Unresolved `(var x)` / `#'x` — defer to a runtime throw like an
+    // unresolved symbol, so a form that merely *references* a var from a
+    // sub-file we don't embed (e.g. `#'default-uuid-reader` from `uuid`)
+    // compiles and only fails if evaluated.
+    let msg = format!("Unable to resolve var: {}", sym.get_name());
+    let payload: Box<dyn Expr> = Box::new(StringExpr::new(msg));
+    Box::new(ThrowExpr { payload })
 }
 
 /// `(set! target value)` — Java-side mutation. We don't model
@@ -8135,15 +8260,23 @@ fn parse_dot_form(context: C, form: Object) -> Box<dyn Expr> {
             // (method args…)
             let mname = super::rt::first(&third);
             let mname = match mname {
-                Object::Symbol(s) if s.get_namespace().is_none() => s.get_name().to_string(),
+                // Use the symbol's NAME, ignoring any namespace. Syntax-quote
+                // qualifies symbols uniformly, so a `.`-form method written in
+                // a macro template (e.g. `binding`'s
+                // `(. clojure.lang.Var (pushThreadBindings …))`) arrives as
+                // `clojure.core/pushThreadBindings`. Clojure's HostExpr reads
+                // `((Symbol)…).name`, so the namespace is irrelevant here.
+                Object::Symbol(s) => s.get_name().to_string(),
                 other => panic!(
-                    "clojure-jvm: HostExpr — method name must be an unqualified Symbol, got {other:?}"
+                    "clojure-jvm: HostExpr — method name must be a Symbol, got {other:?}"
                 ),
             };
             let rest = super::rt::next(&third);
             (mname, rest)
         }
-        Object::Symbol(s) if s.get_namespace().is_none() => {
+        // Same name-only rule for the `(. T method args…)` shape: accept a
+        // qualified method symbol and use its name.
+        Object::Symbol(s) => {
             // (. T method arg1 arg2 …) — method as 3rd, args at 4+.
             let mname = s.get_name().to_string();
             let rest = super::rt::next(&form); // (T method args…)
@@ -8751,6 +8884,10 @@ pub struct Compiler {
     /// `clojure.lang.Long` — boxed i64. Raw64 cell holding the integer.
     /// Lets integers be real longs (`(+ 1 2)` → `3`) distinct from doubles.
     pub long_type_id: dynlang::ObjTypeId,
+    /// `clojure.lang.Character` — boxed Unicode codepoint (Raw64 cell). A
+    /// distinct type from Long so `str`/`pr-str` render the character and
+    /// equality with integers is false.
+    pub character_type_id: dynlang::ObjTypeId,
     /// FuncRefs for the numeric-tower externs that `PrimOpExpr` calls.
     pub num: NumExterns,
     /// `clojure.lang.UserInstance`: the shared ObjType for every
@@ -8837,6 +8974,9 @@ pub enum PendingLiteral {
     /// pool-fill time so `NumberExpr` can `gc_literal` it instead of
     /// allocating on every evaluation.
     Long(i64),
+    /// `clojure.lang.Character` — a boxed char literal (`\a`), pre-boxed once
+    /// at pool-fill time so `CharExpr` can `gc_literal` it.
+    Char(u32),
 }
 
 // SAFETY: the `*const Var` keys point at `Arc<Var>` interned in the global
@@ -9758,6 +9898,12 @@ impl Compiler {
         instance_methods.insert(("startsWith".to_string(), 2), inst_starts_with);
         let inst_substring = dm.declare_extern("cljvm_inst_substring", sig_2i64.clone());
         instance_methods.insert(("substring".to_string(), 2), inst_substring);
+        let inst_substring2 = dm.declare_extern("cljvm_inst_substring2", sig_3i64.clone());
+        instance_methods.insert(("substring".to_string(), 3), inst_substring2);
+        let inst_last_index_of = dm.declare_extern("cljvm_inst_lastIndexOf", sig_2i64.clone());
+        instance_methods.insert(("lastIndexOf".to_string(), 2), inst_last_index_of);
+        let inst_replace = dm.declare_extern("cljvm_inst_replace", sig_3i64.clone());
+        instance_methods.insert(("replace".to_string(), 3), inst_replace);
         let inst_set_macro = dm.declare_extern("cljvm_inst_setMacro", sig_1i64.clone());
         instance_methods.insert(("setMacro".to_string(), 1), inst_set_macro);
         let inst_cast = dm.declare_extern("cljvm_inst_cast", sig_2i64.clone());
@@ -10228,6 +10374,15 @@ impl Compiler {
         let user_instance_varlen_base =
             user_instance_handle.type_info.varlen_element_offset(0) as i64;
 
+        // `clojure.lang.Character`: a boxed Unicode codepoint (Raw64 cell),
+        // laid out exactly like Long. Registered LAST so it gets a fresh
+        // highest id and no existing type id shifts. Distinct type so
+        // `str`/`pr-str` render it as the character and `(= \a 97)` is false.
+        let character_type_id = dm
+            .obj_type("clojure.lang.Character")
+            .field("value", dynlang::FieldKind::Raw64)
+            .build();
+
         // Stash type_ids globally so Rust externs called from JIT-executing
         // code (`cljvm_rt_cons` etc.) can allocate the right ObjType without
         // threading the Compiler through.
@@ -10253,6 +10408,7 @@ impl Compiler {
             with_meta: with_meta_type_id.0,
             reduced: reduced_type_id.0,
             long: long_type_id.0,
+            character: character_type_id.0,
             user_instance: user_instance_type_id.0,
         });
         crate::runtime::set_user_instance_layout(crate::runtime::UserInstanceLayout {
@@ -10310,6 +10466,7 @@ impl Compiler {
             namespace_type_id,
             with_meta_type_id,
             long_type_id,
+            character_type_id,
             num,
             user_instance_type_id,
             user_instance_user_type_id_offset,
@@ -11354,6 +11511,9 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_inst_indexOf" => Some(crate::runtime::cljvm_inst_indexOf as *const u8),
         "cljvm_inst_startsWith" => Some(crate::runtime::cljvm_inst_startsWith as *const u8),
         "cljvm_inst_substring" => Some(crate::runtime::cljvm_inst_substring as *const u8),
+        "cljvm_inst_substring2" => Some(crate::runtime::cljvm_inst_substring2 as *const u8),
+        "cljvm_inst_lastIndexOf" => Some(crate::runtime::cljvm_inst_lastIndexOf as *const u8),
+        "cljvm_inst_replace" => Some(crate::runtime::cljvm_inst_replace as *const u8),
         "cljvm_inst_setMacro" => Some(crate::runtime::cljvm_inst_setMacro as *const u8),
         "cljvm_inst_cast" => Some(crate::runtime::cljvm_inst_cast as *const u8),
         "cljvm_inst_toString" => Some(crate::runtime::cljvm_inst_toString as *const u8),
@@ -11635,6 +11795,7 @@ pub fn compile_form_to_jit(
                     t,
                 ),
                 PendingLiteral::Long(n) => unsafe { crate::runtime::box_long(*n) },
+                PendingLiteral::Char(c) => unsafe { crate::runtime::box_char(*c) },
             };
             let pushed_idx = jit.literal_pool().push(nanbox_bits);
             assert_eq!(
@@ -11943,13 +12104,23 @@ pub fn with_active_session_load_resource(path: &str) {
             return;
         }
     };
-    let saved_ns = super::rt::CURRENT_NS.deref();
     // Interleave read and eval, one form at a time — exactly as Clojure's
     // `load` does. This matters because syntax-quote resolves symbols against
     // the *current* namespace at read time: a file's `(ns …)` form must be
     // evaluated (switching `*ns*`) before the following forms are read, or
     // their syntax-quoted symbols would qualify to the wrong namespace.
     with_active_session_ref(|sess| {
+        // Clojure's `load` runs inside `(binding [*ns* *ns*] …)`. Establish
+        // ONE thread-local `*ns*` binding spanning the whole read+eval loop,
+        // seeded from the caller's current ns: (a) a sub-file's `(ns …)` is
+        // local to this load and restored when it returns, and (b) reads
+        // between forms see the up-to-date current namespace (eval_form
+        // reuses this binding rather than stacking its own). Popped on exit.
+        Var::push_thread_bindings(vec![(
+            super::rt::CURRENT_NS.clone(),
+            Object::Namespace(sess.current_ns.clone()),
+        )]);
+        let _ns_restore = DropFn(|| Var::pop_thread_bindings());
         let mut byte_pos: usize = 0;
         loop {
             let slice = &source[byte_pos..];
@@ -11967,8 +12138,6 @@ pub fn with_active_session_load_resource(path: &str) {
         }
     })
     .unwrap_or_else(|| panic!("clojure-jvm: RT/load(\"{path}\") called without an active Session"));
-    // Restore the caller's namespace.
-    super::rt::CURRENT_NS.bind_root(saved_ns);
 }
 
 /// Map a `load` path (as passed to `clojure.lang.RT/load`, i.e. the
@@ -12138,6 +12307,15 @@ pub struct Session {
     /// singleton variadic-identity IFn produced by compiling
     /// `(fn* [& xs] xs)` once at session init. Read by `cljvm_pl_creator`.
     pub pl_creator_handle: u64,
+    /// This session's current namespace (`*ns*`), carried across forms.
+    ///
+    /// Clojure's `*ns*` is a thread-local dynamic binding, NOT a global
+    /// root: `(ns …)`/`in-ns` change the *current thread's* namespace, so
+    /// concurrent evaluations don't clobber each other. We honor that by
+    /// having `eval_form` push a `CURRENT_NS` thread binding seeded from
+    /// this field (spanning analyze + run) and read it back afterward.
+    /// Two Sessions on two threads are therefore isolated.
+    current_ns: Arc<crate::lang::namespace::Namespace>,
 }
 
 impl Session {
@@ -12251,6 +12429,9 @@ impl Session {
             next_form_id: 0,
             _extern_count_seen: 0,
             pl_creator_handle: 0,
+            // Seed from the current effective `*ns*` (a thread binding if a
+            // caller established one, else the `clojure.core` root default).
+            current_ns: super::rt::current_ns(),
         };
         sess.init_static_singletons();
         sess
@@ -12394,6 +12575,36 @@ impl Session {
             DropFn(move || {
                 ACTIVE_SESSION.with(|c| c.set(prev));
             })
+        });
+
+        // Ensure a thread-local `*ns*` binding is active for this form.
+        // Clojure's current namespace is a per-thread dynamic binding, not a
+        // global root: `(ns …)`/`in-ns` (which run at analyze time via
+        // `parse_ns_form` → `Var::set_value`) mutate *this thread's* binding,
+        // so concurrent evaluations never clobber each other.
+        //
+        // If a caller already established a binding (e.g. `load`'s
+        // `(binding [*ns* *ns*] …)` around a sub-file, or a test's
+        // `with_fresh_ns`), reuse it — `(ns …)` updates that binding directly
+        // and the owner manages restoration. Otherwise this form owns a fresh
+        // binding seeded from the session's tracked `current_ns`; the guard
+        // reads the (possibly `(ns)`-changed) value back so it carries to the
+        // next form, then pops.
+        let owns_ns_binding = super::rt::CURRENT_NS.get_thread_binding().is_none();
+        if owns_ns_binding {
+            Var::push_thread_bindings(vec![(
+                super::rt::CURRENT_NS.clone(),
+                Object::Namespace(self.current_ns.clone()),
+            )]);
+        }
+        let _ns_guard = DropFn(move || {
+            if owns_ns_binding {
+                // SAFETY: `self_ptr` is this Session, live for the call.
+                unsafe {
+                    (*self_ptr).current_ns = super::rt::current_ns();
+                }
+                Var::pop_thread_bindings();
+            }
         });
 
         use dynir::dynexec::NanBoxConfig;
@@ -12550,6 +12761,7 @@ impl Session {
                         t,
                     ),
                     PendingLiteral::Long(n) => unsafe { crate::runtime::box_long(*n) },
+                PendingLiteral::Char(c) => unsafe { crate::runtime::box_char(*c) },
                 };
                 // Diagnostic: catch any alloc_*_as_nanbox path that
                 // produces a TAG_PTR NanBox with a misaligned payload
@@ -13003,6 +13215,9 @@ mod tests {
 
     #[test]
     fn obj_expr_starts_empty() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         let o = ObjExpr::placeholder();
         assert!(o.name().is_none());
         assert!(o.internal_name().is_none());
@@ -13049,6 +13264,9 @@ mod tests {
 
     #[test]
     fn obj_expr_is_deftype_flips_when_fields_set() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         let o = ObjExpr::placeholder();
         assert!(!o.is_deftype());
         assert!(o.supports_meta());
@@ -13311,6 +13529,7 @@ mod tests {
             var: 9,
             with_meta: 10,
             long: 20,
+            character: 23,
             user_instance: 19,
             reduced: 21,
             namespace: 22,
@@ -14308,6 +14527,7 @@ mod tests {
             var: 9,
             with_meta: 10,
             long: 20,
+            character: 23,
             user_instance: 19,
             reduced: 21,
             namespace: 22,
@@ -14415,6 +14635,7 @@ mod tests {
             var: 9,
             with_meta: 10,
             long: 20,
+            character: 23,
             user_instance: 19,
             reduced: 21,
             namespace: 22,
@@ -14488,6 +14709,7 @@ mod tests {
             var: 9,
             with_meta: 10,
             long: 20,
+            character: 23,
             user_instance: 19,
             reduced: 21,
             namespace: 22,
@@ -14592,6 +14814,7 @@ mod tests {
             var: 9,
             with_meta: 10,
             long: 20,
+            character: 23,
             user_instance: 19,
             reduced: 21,
             namespace: 22,
@@ -15631,22 +15854,29 @@ mod tests {
     /// supports). The `(. clojure.lang.RT (...))` invocation infra isn't
     /// needed here — it's just one Var pointing at another's FuncRef.
     ///
-    /// Currently this DOES NOT WORK because our `var_fns` map is keyed at
-    /// parse_def_form time and a bare `(def x)` doesn't register one. To
-    /// land mutual recursion we'd need to either (a) make invoke-through-
-    /// Var go through a runtime deref+call path (needs first-class fn
-    /// values via NanBox FuncRef + call_via_func_ref) or (b) pre-register
-    /// pending FuncRefs for forward decls.
-    ///
-    /// Marking this as a known limitation; the test stays for visibility.
+    /// Mutual recursion across two `def`s still DOES NOT WORK: `even-mut?`'s
+    /// body references `odd-mut?` before it is defined, so the forward
+    /// reference is unresolved at analyze time. Previously this aborted
+    /// analysis with a hard panic; now an unresolved non-dotted symbol is
+    /// deferred to a runtime throw (same treatment as an unresolved class
+    /// reference), so the `def`s COMPILE and the failure surfaces only when
+    /// the missing fn is actually called — here `(even-mut? 10)` recurses
+    /// into the `odd-mut?` throw-stub and exits via `JitOutcome::Exception`.
+    /// Real mutual recursion needs forward `declare` / runtime var deref.
     #[test]
-    #[should_panic(expected = "Unable to resolve symbol: odd-mut?")]
     fn core_fn_mutual_recursion_currently_unsupported() {
         let src = "(do
           (def even-mut? (fn* [n] (if (= n 0) true (odd-mut? (- n 1)))))
           (def odd-mut?  (fn* [n] (if (= n 0) false (even-mut? (- n 1)))))
           (even-mut? 10))";
-        let _ = with_fresh_ns("test.mutual", || eval_str_via_jit(src));
+        let form = super::super::lisp_reader::read_str(src)
+            .unwrap_or_else(|e| panic!("read_str failed: {e}"));
+        let outcome = with_fresh_ns("test.mutual", || eval_form_via_jit_outcome(form));
+        assert!(
+            matches!(outcome, dynlower::JitOutcome::Exception(_)),
+            "forward-referenced `odd-mut?` should compile to a throw-stub and \
+             surface as an Exception at call time, got {outcome:?}"
+        );
     }
 
     // ---- first-class fn values + higher-order dispatch (IFn.invoke) -------
@@ -15899,6 +16129,65 @@ mod tests {
             }
             other => panic!("expected x=99 in my.test.ns, got {other:?}"),
         }
+    }
+
+
+
+
+
+
+
+
+
+
+
+    /// `(ns …)`/`in-ns` must NOT mutate global state — they switch the
+    /// current thread's `*ns*` binding only. The cleanest deterministic
+    /// proof is that a *fresh* Session does not inherit a prior Session's
+    /// namespace: if `(ns conc.leak.a)` had written the shared `*ns*` root
+    /// (the old `bind_root` behavior), the next Session would seed its
+    /// current namespace from that polluted root and a later `def` would
+    /// land in `conc.leak.a` instead of the `clojure.core` default. With the
+    /// thread-local `set_value` fix the root is untouched, so the fresh
+    /// session defaults correctly.
+    ///
+    /// Single-threaded on purpose: a two-thread variant additionally trips
+    /// over the moving GC not being a concurrent-mutator design (parked
+    /// threads holding live Sessions), which is an orthogonal concern. The
+    /// no-global-mutation property proven here is exactly what makes `*ns*`
+    /// thread-local.
+    #[test]
+    fn ns_switch_does_not_leak_to_a_fresh_session() {
+        use super::super::namespace::Namespace;
+
+        // Session 1 switches into a throwaway namespace and defs there.
+        let mut s1 = super::Session::new();
+        s1.eval_str("(ns conc.leak.a)");
+        s1.eval_str("(def x 1)");
+        assert!(
+            Namespace::find(&Symbol::intern("conc.leak.a"))
+                .and_then(|n| n.find_interned_var(&Symbol::intern("x")))
+                .is_some(),
+            "sanity: s1's `(def x)` should be interned in conc.leak.a"
+        );
+
+        // A fresh Session must default to clojure.core, NOT inherit
+        // conc.leak.a from a shared root.
+        let mut s2 = super::Session::new();
+        s2.eval_str("(def leaked-probe 2)");
+        assert!(
+            Namespace::find(&Symbol::intern("clojure.core"))
+                .and_then(|n| n.find_interned_var(&Symbol::intern("leaked-probe")))
+                .is_some(),
+            "fresh Session must default to clojure.core (the `*ns*` root must \
+             not have been mutated by s1's `(ns …)`)"
+        );
+        assert!(
+            Namespace::find(&Symbol::intern("conc.leak.a"))
+                .and_then(|n| n.find_interned_var(&Symbol::intern("leaked-probe")))
+                .is_none(),
+            "fresh Session's def must NOT land in the prior session's namespace"
+        );
     }
 
     #[test]
@@ -17136,6 +17425,7 @@ mod tests {
             var: 9,
             with_meta: 10,
             long: 20,
+            character: 23,
             user_instance: 19,
             reduced: 21,
             namespace: 22,
@@ -17193,6 +17483,9 @@ mod tests {
 
     #[test]
     fn defprotocol_dispatches_to_installed_impl_on_nil() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types::{
             self as ut, BUILTIN_NIL, install_impl, protocol_id_by_name, protocol_method_id,
         };
@@ -17227,6 +17520,9 @@ mod tests {
 
     #[test]
     fn deftype_factory_and_field_access() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.deftype.fields", || super::Session::new());
         ut::_reset_for_tests();
@@ -17242,6 +17538,9 @@ mod tests {
 
     #[test]
     fn extend_protocol_multiple_types() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.extend.protocol", || super::Session::new());
         ut::_reset_for_tests();
@@ -17261,6 +17560,9 @@ mod tests {
 
     #[test]
     fn satisfies_query_true_after_extend() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.satisfies.true", || super::Session::new());
         ut::_reset_for_tests();
@@ -17273,6 +17575,9 @@ mod tests {
 
     #[test]
     fn satisfies_false_when_not_extended() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.satisfies.false", || super::Session::new());
         ut::_reset_for_tests();
@@ -17285,6 +17590,9 @@ mod tests {
 
     #[test]
     fn satisfies_object_fallback_does_not_count() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.satisfies.object", || super::Session::new());
         ut::_reset_for_tests();
@@ -17301,6 +17609,9 @@ mod tests {
 
     #[test]
     fn deftype_with_inline_protocol_impl() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.deftype.inline", || super::Session::new());
         ut::_reset_for_tests();
@@ -17318,6 +17629,9 @@ mod tests {
 
     #[test]
     fn extend_type_on_user_deftype_dispatches() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.extend.user", || super::Session::new());
         ut::_reset_for_tests();
@@ -17331,6 +17645,9 @@ mod tests {
 
     #[test]
     fn extend_type_on_nil_dispatches() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.extend.nil", || super::Session::new());
         ut::_reset_for_tests();
@@ -17342,6 +17659,9 @@ mod tests {
 
     #[test]
     fn extend_type_object_is_fallback() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.extend.object", || super::Session::new());
         ut::_reset_for_tests();
@@ -17356,6 +17676,9 @@ mod tests {
 
     #[test]
     fn deftype_via_direct_factory_call() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types as ut;
         let mut sess = with_fresh_ns_session("test.deftype.fncall", || super::Session::new());
         ut::_reset_for_tests();
@@ -17368,6 +17691,9 @@ mod tests {
 
     #[test]
     fn defprotocol_arity_2_method_dispatches() {
+        // Serialize + reset the process-global type/protocol registry
+        // (shared with user_types tests) so parallel runs don't race.
+        let _g = crate::lang::user_types::registry_test_guard();
         use crate::lang::user_types::{
             self as ut, BUILTIN_NIL, install_impl, protocol_id_by_name, protocol_method_id,
         };

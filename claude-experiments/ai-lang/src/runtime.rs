@@ -386,6 +386,12 @@ pub struct Runtime {
     pub code_table: Box<CodeTable>,
     /// Boxed so `Thread`'s address is stable across moves of `Runtime`.
     pub thread: Box<Thread>,
+    /// The OS thread the `Runtime` (and its `thread`/`dyna_thread`) was
+    /// built on. Code running on this thread reuses the existing
+    /// `Thread`; code on any *other* OS thread must build its own via
+    /// [`Runtime::new_thread_context`] so concurrent JIT execution does
+    /// not corrupt the shared shadow-stack head.
+    pub home_thread: std::thread::ThreadId,
     /// Boxed copies of each registered TypeInfo so their addresses are
     /// stable. The wire deserializer needs to pass these addresses to
     /// `ai_gc_alloc_closure` to allocate the right shape; we look them
@@ -598,11 +604,17 @@ impl Runtime {
 
         let _ = &mut *thread;
 
+        // Point the GC coordinator's poll flag at this Thread's `state`
+        // byte so a STW request can stop us even mid-JIT-loop. The
+        // address is stable (Thread is boxed).
+        dyna_thread.set_poll_flag(&mut thread.state as *mut u8);
+
         Runtime {
             heap,
             dyna_thread,
             code_table,
             thread,
+            home_thread: std::thread::current().id(),
             type_infos,
             shape_registry,
             shape_meta,
@@ -668,6 +680,88 @@ impl Runtime {
     /// this as its first parameter.
     pub fn thread_ptr(&self) -> *mut Thread {
         &*self.thread as *const Thread as *mut Thread
+    }
+
+    /// Build a fresh execution context for a *different* OS thread.
+    ///
+    /// Registers a new GC [`ThreadState`] with the shared heap and
+    /// builds a [`Thread`] that shares this runtime's heap, code table,
+    /// and runtime-shape `TypeInfo`s (all stable + `Sync`) but has its
+    /// own shadow-stack head (`top_frame`) and its own `dyna_thread`.
+    ///
+    /// Each OS thread that invokes JIT'd code MUST run with its own
+    /// context: the shadow-stack head lives inside `Thread`, so two
+    /// threads sharing one `Thread` clobber each other's GC root chain.
+    /// The returned [`ThreadContext`] deregisters itself on drop, so it
+    /// must not outlive this `Runtime` (it borrows the runtime's stable
+    /// pointers by value).
+    pub fn new_thread_context(&self) -> ThreadContext {
+        let (dyna_thread, _id) = self.heap.register_thread();
+        let thread = Box::new(Thread {
+            state: 0,
+            _pad: [0; 7],
+            top_frame: core::ptr::null_mut(),
+            // Shared, stable pointers — copied from the home Thread.
+            heap: self.thread.heap,
+            code_table: self.thread.code_table,
+            // This thread's own GC coordination state.
+            dyna_thread: &*dyna_thread,
+            boxed_int_ti: self.thread.boxed_int_ti,
+            string_ti: self.thread.string_ti,
+            array_ti: self.thread.array_ti,
+            atom_ti: self.thread.atom_ti,
+        });
+        // Wire the coordinator's poll flag to this context's own `state`
+        // byte (stable: boxed) so a STW request can park this thread even
+        // while it spins in an allocation-free JIT loop.
+        dyna_thread.set_poll_flag(&thread.state as *const u8 as *mut u8);
+        ThreadContext {
+            thread,
+            dyna_thread,
+            heap: self.heap.clone(),
+        }
+    }
+}
+
+/// A per-OS-thread JIT execution context.
+///
+/// Holds one OS thread's own [`Thread`] (with its own shadow-stack head)
+/// and its own registered GC [`ThreadState`], both derived from a
+/// [`Runtime`] via [`Runtime::new_thread_context`]. On drop it
+/// deregisters the `ThreadState` from the heap so a later collection
+/// won't try to scan this thread's now-dead frame chain.
+///
+/// `Send` because moving the context to the OS thread that will use it
+/// is exactly the supported pattern; the raw pointers it carries all
+/// reference data owned by the originating `Runtime`, which must outlive
+/// the context (same contract as the network server threads).
+pub struct ThreadContext {
+    thread: Box<Thread>,
+    dyna_thread: Arc<ThreadState>,
+    /// Kept so the heap (and thus the registered `ThreadState`) outlives
+    /// this context, and so `Drop` can deregister.
+    heap: Arc<Heap>,
+}
+
+unsafe impl Send for ThreadContext {}
+
+impl ThreadContext {
+    /// Raw pointer to this thread's `Thread`, to pass as the first
+    /// argument of any JIT'd function invoked on this OS thread.
+    pub fn thread_ptr(&self) -> *mut Thread {
+        &*self.thread as *const Thread as *mut Thread
+    }
+
+    /// This context's GC coordination state (for safepoint / blocked
+    /// transitions around blocking calls).
+    pub fn dyna_thread(&self) -> &Arc<ThreadState> {
+        &self.dyna_thread
+    }
+}
+
+impl Drop for ThreadContext {
+    fn drop(&mut self) {
+        self.heap.safe_deregister_thread(&self.dyna_thread);
     }
 }
 
@@ -1603,6 +1697,255 @@ pub unsafe extern "C" fn ai_value_eq(thread: *mut Thread, a: *const u8, b: *cons
     }
 }
 
+// =============================================================================
+// OS threads: spawn / join
+// =============================================================================
+//
+// `spawn(|| ...)` runs a zero-arg closure on a fresh OS thread that has its
+// OWN execution context (own shadow-stack head + GC `ThreadState`), sharing
+// the heap and code table with its parent. `join(handle)` blocks until the
+// thread finishes and returns its result.
+//
+// The language-level handle is a `BoxedInt` holding an index into the
+// process-global `THREAD_REGISTRY`. The cross-thread state — the OS
+// `JoinHandle`, the input closure pointer, and the result pointer — lives in
+// the registry, which is a GC root source so the closure (until the worker
+// reads it) and the result (until `join` hands it back) survive collections
+// and are relocated in place.
+
+/// One in-flight (or finished-but-unjoined) spawned thread.
+struct ThreadSlot {
+    /// Input closure pointer. GC-rooted here until the worker reads it.
+    closure: std::sync::atomic::AtomicU64,
+    /// Result pointer, written by the worker on completion. GC-rooted
+    /// here until `join` returns it. `0` = not yet produced.
+    result: std::sync::atomic::AtomicU64,
+    done: std::sync::atomic::AtomicBool,
+    handle: Mutex<Option<std::thread::JoinHandle<()>>>,
+}
+
+#[derive(Default)]
+struct ThreadRegistry {
+    slots: Mutex<Vec<Option<Arc<ThreadSlot>>>>,
+}
+
+impl crate::gc::roots::RootSource for ThreadRegistry {
+    fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
+        let slots = self.slots.lock().unwrap();
+        for slot in slots.iter().flatten() {
+            // `0` (null) slots are ignored by the collector's slot
+            // processing, so unset closure/result are harmless.
+            visitor(slot.closure.as_ptr());
+            visitor(slot.result.as_ptr());
+        }
+    }
+}
+
+static THREAD_REGISTRY: std::sync::OnceLock<ThreadRegistry> = std::sync::OnceLock::new();
+static REGISTRY_ROOTED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+fn thread_registry() -> &'static ThreadRegistry {
+    THREAD_REGISTRY.get_or_init(ThreadRegistry::default)
+}
+
+/// Register the thread registry as a permanent GC root source, once.
+fn ensure_registry_rooted(heap: &Heap) {
+    REGISTRY_ROOTED.get_or_init(|| {
+        let src: &'static dyn crate::gc::roots::RootSource = thread_registry();
+        unsafe { heap.register_permanent_extra(src as *const dyn crate::gc::roots::RootSource) };
+    });
+}
+
+/// Build a worker `Thread` that shares the parent's heap / code-table /
+/// runtime-shape pointers but has its own null shadow-stack head and the
+/// supplied `dyna_thread`. Exposed here (rather than constructed inline in
+/// the thread module) because `Thread`'s padding field is private.
+///
+/// # Safety
+/// All pointer arguments must be valid for the worker's lifetime; the
+/// parent runtime must outlive the worker.
+#[allow(clippy::too_many_arguments)]
+unsafe fn build_worker_thread(
+    heap: *mut Heap,
+    code_table: *const CodeTable,
+    dyna: *const ThreadState,
+    boxed_int_ti: *const TypeInfo,
+    string_ti: *const TypeInfo,
+    array_ti: *const TypeInfo,
+    atom_ti: *const TypeInfo,
+) -> Box<Thread> {
+    Box::new(Thread {
+        state: 0,
+        _pad: [0; 7],
+        top_frame: core::ptr::null_mut(),
+        heap,
+        code_table,
+        dyna_thread: dyna,
+        boxed_int_ti,
+        string_ti,
+        array_ti,
+        atom_ti,
+    })
+}
+
+/// Body of a spawned worker OS thread: register a fresh GC context, read the
+/// (possibly relocated) closure pointer from the slot, invoke it, publish the
+/// result, and deregister.
+#[allow(clippy::too_many_arguments)]
+fn run_worker(
+    heap_addr: usize,
+    code_table: usize,
+    boxed_int_ti: usize,
+    string_ti: usize,
+    array_ti: usize,
+    atom_ti: usize,
+    slot: Arc<ThreadSlot>,
+) {
+    use std::sync::atomic::Ordering;
+    let heap = unsafe { &*(heap_addr as *const Heap) };
+    // Register THIS OS thread's GC state (records its own os_thread id).
+    let (worker_ts, _id) = heap.register_thread();
+    let mut worker_thread = unsafe {
+        build_worker_thread(
+            heap_addr as *mut Heap,
+            code_table as *const CodeTable,
+            &*worker_ts as *const ThreadState,
+            boxed_int_ti as *const TypeInfo,
+            string_ti as *const TypeInfo,
+            array_ti as *const TypeInfo,
+            atom_ti as *const TypeInfo,
+        )
+    };
+    // Let the GC coordinator stop us mid-loop via the inline poll.
+    worker_ts.set_poll_flag(&mut worker_thread.state as *mut u8);
+    let tptr = &mut *worker_thread as *mut Thread;
+
+    // Read the closure from the slot (the registry kept it rooted across
+    // any GC that ran between spawn and now, updating it on relocation).
+    let closure = slot.closure.load(Ordering::Acquire) as *const u8;
+    let result = unsafe {
+        let fn_ptr = ai_gc_lookup_code(tptr, closure);
+        let lambda: unsafe extern "C" fn(*mut Thread, *const u8) -> *mut u8 =
+            core::mem::transmute(fn_ptr);
+        lambda(tptr, closure)
+    };
+    // Publish the result BEFORE deregistering: `safe_deregister_thread` may
+    // park us at a safepoint for an in-flight collection, which scans the
+    // slot — so the result must already be rooted there.
+    slot.result.store(result as u64, Ordering::Release);
+    slot.done.store(true, Ordering::Release);
+    heap.safe_deregister_thread(&worker_ts);
+}
+
+/// `spawn(thunk)` — start `thunk` on a new OS thread; returns a handle
+/// (a `BoxedInt` registry id).
+///
+/// # Safety
+/// `thread` is a valid parent `Thread*`; `closure_ptr` is a zero-arg closure.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_thread_spawn(thread: *mut Thread, closure_ptr: *const u8) -> *mut u8 {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+    unsafe {
+        let parent = &*thread;
+        let heap = &*parent.heap;
+        ensure_registry_rooted(heap);
+
+        // Snapshot the shared pointers (read on the parent thread) to hand
+        // to the worker as plain integers (Send-safe).
+        let heap_addr = parent.heap as usize;
+        let code_table = parent.code_table as usize;
+        let boxed_int_ti = parent.boxed_int_ti as usize;
+        let string_ti = parent.string_ti as usize;
+        let array_ti = parent.array_ti as usize;
+        let atom_ti = parent.atom_ti as usize;
+
+        // Create the slot and root the input closure BEFORE any allocation
+        // (the box below may GC).
+        let slot = Arc::new(ThreadSlot {
+            closure: AtomicU64::new(closure_ptr as u64),
+            result: AtomicU64::new(0),
+            done: AtomicBool::new(false),
+            handle: Mutex::new(None),
+        });
+        let id = {
+            let mut slots = thread_registry().slots.lock().unwrap();
+            slots.push(Some(slot.clone()));
+            (slots.len() - 1) as i64
+        };
+
+        let worker_slot = slot.clone();
+        let jh = std::thread::spawn(move || {
+            run_worker(
+                heap_addr,
+                code_table,
+                boxed_int_ti,
+                string_ti,
+                array_ti,
+                atom_ti,
+                worker_slot,
+            );
+        });
+        *slot.handle.lock().unwrap() = Some(jh);
+
+        // Hand back a BoxedInt holding the slot id.
+        ai_gc_box_int(thread, id)
+    }
+}
+
+/// `join(handle)` — block until the spawned thread finishes; return its
+/// result pointer.
+///
+/// # Safety
+/// `thread` is a valid `Thread*`; `handle_ptr` is a `spawn` handle (BoxedInt).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_thread_join(thread: *mut Thread, handle_ptr: *const u8) -> *mut u8 {
+    use std::sync::atomic::Ordering;
+    unsafe {
+        let parent = &*thread;
+        let heap = &*parent.heap;
+        let joiner = &*parent.dyna_thread;
+        let id = ai_gc_unbox_int(handle_ptr) as usize;
+
+        let slot = {
+            let slots = thread_registry().slots.lock().unwrap();
+            slots
+                .get(id)
+                .and_then(|s| s.clone())
+                .expect("ai_thread_join: invalid or already-joined handle")
+        };
+
+        // Take the OS handle (releasing the registry lock first), then wait
+        // in a BLOCKED region so a STW collection on another thread scans us
+        // in place instead of hanging.
+        let jh = slot.handle.lock().unwrap().take();
+        joiner.enter_blocked();
+        match jh {
+            Some(jh) => {
+                let _ = jh.join();
+            }
+            None => {
+                // Handle not yet recorded (worker finished extremely fast)
+                // or already joined: wait on the done flag.
+                while !slot.done.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+            }
+        }
+        joiner.exit_blocked(heap);
+
+        let result = slot.result.load(Ordering::Acquire) as *mut u8;
+        // Drop the slot: the result is returned straight into a JIT root
+        // slot with no intervening safepoint, so it stays alive.
+        {
+            let mut slots = thread_registry().slots.lock().unwrap();
+            if let Some(s) = slots.get_mut(id) {
+                *s = None;
+            }
+        }
+        result
+    }
+}
+
 /// Force a full stop-the-world collection. Exposed to the language
 /// as `gc_collect()` so tests and stress harnesses can verify that
 /// roots get scanned + relocated correctly.
@@ -1623,7 +1966,12 @@ pub unsafe extern "C" fn ai_gc_force_collect(thread: *mut Thread) -> i64 {
         let heap = &*t.heap;
         let dyna = &*t.dyna_thread;
         dyna.set_parked_jit_fp(t.top_frame as *const u8);
-        heap.collect::<crate::gc::IdentityPtrPolicy>(&[]);
+        // Use the mutator-triggered STW path (not bare `collect`) so that
+        // if other mutator threads are running — e.g. workers spawned via
+        // `spawn` — they are stopped at safepoints before we relocate.
+        // Single-threaded, the snapshot is just us and this is a plain
+        // collection.
+        heap.mutator_triggered_gc::<crate::gc::IdentityPtrPolicy>(dyna);
         dyna.clear_parked_jit_fp();
     }
     0

@@ -97,6 +97,16 @@ const ROW_H: f32 = 28.0;
 const ROW_PAD_X: f32 = 14.0;
 const STRIPE_W: f32 = 3.0;
 const DELETE_W: f32 = 22.0;
+/// Width of the per-row hide/show eye column, sitting just left of the
+/// delete glyph. Only painted while the row (or the project) is hovered,
+/// but the hit-rect is always live.
+const EYE_W: f32 = 22.0;
+/// Side of the square bottom-left hot-zone that reveals + toggles the
+/// global "show hidden projects" eyeball.
+const EYE_ZONE: f32 = 40.0;
+/// Pixels the cursor must travel from the press point before a project
+/// row press is treated as a reorder drag rather than a click.
+const DRAG_THRESHOLD: f32 = 4.0;
 const DIVIDER_H: f32 = 1.0;
 const TEXT_FONT_SIZE: f32 = 13.0;
 const HEADER_FONT_SIZE: f32 = 12.0;
@@ -118,6 +128,12 @@ pub struct ProjectData {
     /// `serde(default)` keeps old projects.json files loadable.
     #[serde(default)]
     pub default_cwd: Option<String>,
+    /// Hidden projects are kept in the list (and on disk) but omitted
+    /// from the sidebar unless `Projects::show_hidden` is on. Hiding
+    /// never deletes the project or its panes — it's purely a sidebar
+    /// declutter. `serde(default)` keeps old projects.json files loadable.
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// Legacy terminal-only snapshot from before the pane unification.
@@ -235,6 +251,10 @@ pub struct Projects {
     /// the bell; cleared when the user is actually looking at that
     /// project. Session-only — not persisted to projects.json.
     pub unread_bells: std::collections::HashMap<u64, u64>,
+    /// When true, the sidebar also lists projects whose `hidden` flag is
+    /// set (drawn dimmed). Toggled by the bottom-left eyeball. View
+    /// state only — session-local, not persisted.
+    pub show_hidden: bool,
 }
 
 impl Projects {
@@ -267,6 +287,7 @@ impl Projects {
             layout_dirty: true,
             terminals_dirty: false,
             unread_bells: std::collections::HashMap::new(),
+            show_hidden: false,
         }
     }
     pub fn allocate_terminal_id(&mut self) -> u64 {
@@ -282,6 +303,7 @@ impl Projects {
             id,
             name: format!("Project {}", id),
             default_cwd: None,
+            hidden: false,
         });
         if self.active.is_none() {
             self.active = Some(id);
@@ -297,12 +319,19 @@ impl Projects {
             return;
         }
         if self.active == Some(id) {
-            self.active = self.list.first().map(|p| p.id);
+            self.active = self.first_switchable();
         }
         self.dirty = true;
         self.layout_dirty = true;
     }
     pub fn set_active(&mut self, id: u64) {
+        // Hidden projects are parked — not part of the switch rotation.
+        // Guarding here means no switcher (sidebar, cube/prism, future
+        // UIs) can ever land on a hidden project, so the "active is always
+        // switchable" invariant holds no matter who calls us.
+        if self.is_hidden(id) {
+            return;
+        }
         if self.active != Some(id) {
             self.active = Some(id);
             self.dirty = true;
@@ -320,6 +349,84 @@ impl Projects {
                 return;
             }
         }
+    }
+    // ----- Hidden / switchable projects -----
+    //
+    // "Hidden" is one semantic concept, not a sidebar detail: a hidden
+    // project is *parked*. It keeps all its data and panes, but it drops
+    // out of every place a user picks or cycles projects — the sidebar
+    // nav, the cube/prism overview, and any switcher added later. The
+    // single rule every consumer relies on:
+    //
+    //     the active project is ALWAYS switchable (never hidden).
+    //
+    // Enforced in two spots: `set_active` refuses hidden targets, and
+    // `set_hidden` re-homes `active` if you park the current project.
+    // Everything else just reads `switchable*()` and gets it for free.
+
+    /// Is this project parked? (Unknown ids are treated as not hidden.)
+    pub fn is_hidden(&self, id: u64) -> bool {
+        self.list.iter().any(|p| p.id == id && p.hidden)
+    }
+
+    /// The projects a user can switch between, in list order. THIS is the
+    /// set every switcher must enumerate — never `list` directly — so
+    /// parked projects stay out of all of them.
+    pub fn switchable(&self) -> impl Iterator<Item = &ProjectData> {
+        self.list.iter().filter(|p| !p.hidden)
+    }
+    pub fn switchable_ids(&self) -> Vec<u64> {
+        self.switchable().map(|p| p.id).collect()
+    }
+    /// First switchable project (the canonical fallback target whenever
+    /// `active` needs re-homing). `None` only when every project is parked.
+    pub fn first_switchable(&self) -> Option<u64> {
+        self.switchable().next().map(|p| p.id)
+    }
+
+    /// Projects to draw in the sidebar: the switchable ones, plus parked
+    /// ones while `show_hidden` is on (the management view that lets you
+    /// un-park them). Distinct from `switchable_ids` on purpose — revealing
+    /// hidden rows in the sidebar must NOT make them switchable elsewhere.
+    pub fn sidebar_ids(&self) -> Vec<u64> {
+        self.list
+            .iter()
+            .filter(|p| self.show_hidden || !p.hidden)
+            .map(|p| p.id)
+            .collect()
+    }
+
+    /// Park / un-park a project. Maintains the active-is-switchable
+    /// invariant: parking the active project re-homes `active` to the
+    /// first remaining switchable one (or `None` if none are left);
+    /// un-parking when nothing is active adopts it as active.
+    pub fn set_hidden(&mut self, id: u64, hidden: bool) {
+        let mut changed = false;
+        for p in &mut self.list {
+            if p.id == id {
+                if p.hidden != hidden {
+                    p.hidden = hidden;
+                    changed = true;
+                }
+                break;
+            }
+        }
+        if !changed {
+            return;
+        }
+        self.dirty = true;
+        self.layout_dirty = true;
+        if hidden {
+            if self.active == Some(id) {
+                self.active = self.first_switchable();
+            }
+        } else if self.active.is_none() {
+            self.active = Some(id);
+        }
+    }
+    /// Convenience toggle used by the sidebar eye affordance.
+    pub fn toggle_hidden(&mut self, id: u64) {
+        self.set_hidden(id, !self.is_hidden(id));
     }
     pub fn name_of(&self, id: u64) -> Option<&str> {
         self.list
@@ -474,6 +581,8 @@ pub struct SidebarEntity;
 pub enum SidebarHit {
     Project(u64),
     DeleteProject(u64),
+    /// Per-row eye column: toggles this project's `hidden` flag.
+    ToggleHidden(u64),
     NewProject,
 }
 
@@ -485,6 +594,45 @@ pub struct SidebarBounds {
     pub max: Vec2,
 }
 
+/// Hover state that drives the reveal-on-hover eye affordances. Mouse
+/// motion updates this; when it changes we mark the sidebar layout dirty
+/// so the eye glyphs appear/disappear. Window coords, top-left origin.
+#[derive(Resource, Default)]
+struct SidebarHover {
+    /// Project row currently under the cursor (per-row eye reveal).
+    row: Option<u64>,
+    /// Cursor is inside the bottom-left eyeball hot-zone.
+    eyeball: bool,
+}
+
+/// Live state for dragging a project row to reorder it. `candidate` is
+/// armed on press (before we know if it's a click or a drag); once the
+/// cursor moves past `DRAG_THRESHOLD` the press becomes a real drag and
+/// the row reorders live. `dirty_pending` batches the disk save to
+/// mouse-up like the resize handle does.
+#[derive(Resource, Default)]
+struct ProjectDrag {
+    candidate: Option<u64>,
+    dragging: bool,
+    press: Vec2,
+    dirty_pending: bool,
+}
+
+/// Bottom-left square that reveals + toggles the global "show hidden"
+/// eyeball. Clamped to the sidebar width so it never spills onto the
+/// canvas. Window coords, top-left origin.
+fn eyeball_zone(win_h: f32, sidebar_width: f32) -> SidebarBounds {
+    let w = EYE_ZONE.min(sidebar_width);
+    SidebarBounds {
+        min: Vec2::new(0.0, (win_h - EYE_ZONE).max(0.0)),
+        max: Vec2::new(w, win_h),
+    }
+}
+
+fn in_bounds(pt: Vec2, b: &SidebarBounds) -> bool {
+    pt.x >= b.min.x && pt.x <= b.max.x && pt.y >= b.min.y && pt.y <= b.max.y
+}
+
 // ---------- Plugin ----------
 
 pub struct ProjectsPlugin;
@@ -494,6 +642,8 @@ impl Plugin for ProjectsPlugin {
         app.insert_resource(Projects::default())
             .insert_resource(Sidebar::default())
             .insert_resource(SidebarResize::default())
+            .insert_resource(SidebarHover::default())
+            .insert_resource(ProjectDrag::default())
             .insert_resource(Renaming::default())
             .insert_resource(PendingActions::default())
             .add_systems(
@@ -504,6 +654,8 @@ impl Plugin for ProjectsPlugin {
                 Update,
                 (
                     sidebar_resize_drag,
+                    project_drag,
+                    sidebar_hover,
                     sidebar_layout,
                     sidebar_input,
                     rename_keyboard,
@@ -546,8 +698,15 @@ fn load_or_seed_projects(
         projects.create();
         projects.dirty = true;
     }
-    if projects.active.is_none() {
-        projects.active = projects.list.first().map(|p| p.id);
+    // Enforce the active-is-switchable invariant at load: a persisted
+    // `active` pointing at a now-parked project (or none at all) re-homes
+    // to the first switchable one.
+    let active_ok = projects
+        .active
+        .map(|a| !projects.is_hidden(a))
+        .unwrap_or(false);
+    if !active_ok {
+        projects.active = projects.first_switchable();
     }
 
     // Queue restore for any pane whose project still exists. The
@@ -603,6 +762,8 @@ fn sidebar_layout(
     theme: Res<style_bevy::Theme>,
     mut projects: ResMut<Projects>,
     renaming: Res<Renaming>,
+    hover: Res<SidebarHover>,
+    drag: Res<ProjectDrag>,
     font: Res<MonoFont>,
     metrics: Res<MonoMetrics>,
     existing: Query<Entity, With<SidebarEntity>>,
@@ -708,18 +869,26 @@ fn sidebar_layout(
         ),
     ));
 
-    // Project rows.
+    // Project rows. Hidden projects are skipped unless `show_hidden` is
+    // on (then they show dimmed). We index into the *visible* sequence so
+    // rows stay gap-free no matter how many projects are hidden.
     let rows_top_window = HEADER_H;
-    for (idx, proj) in projects.list.iter().enumerate() {
+    let visible: Vec<usize> = (0..projects.list.len())
+        .filter(|&i| projects.show_hidden || !projects.list[i].hidden)
+        .collect();
+    for (idx, &li) in visible.iter().enumerate() {
+        let proj = &projects.list[li];
         let row_top_window = rows_top_window + idx as f32 * ROW_H;
         let row_top_world = world_top_edge - row_top_window;
         let active = projects.active == Some(proj.id);
         let renaming_this = renaming.id == Some(proj.id);
+        let dragging_this = drag.dragging && drag.candidate == Some(proj.id);
+        let hidden_this = proj.hidden;
 
-        // Row bg — only painted when active or renaming. Inactive rows
-        // sit on the sidebar bg with no separator: the spacing from
+        // Row bg — painted when active, renaming, or being dragged. Other
+        // rows sit on the sidebar bg with no separator: the spacing from
         // ROW_H + the indent is enough visual structure.
-        if active || renaming_this {
+        if active || renaming_this || dragging_this {
             let bg_color = if renaming_this {
                 palette.row_renaming_bg
             } else {
@@ -778,7 +947,7 @@ fn sidebar_layout(
             SidebarBounds {
                 min: Vec2::new(sidebar_origin_x_window, row_top_window),
                 max: Vec2::new(
-                    sidebar_origin_x_window + width - DELETE_W - DIVIDER_H,
+                    sidebar_origin_x_window + width - DELETE_W - EYE_W - DIVIDER_H,
                     row_top_window + ROW_H,
                 ),
             },
@@ -792,6 +961,8 @@ fn sidebar_layout(
         };
         let label_color = if active || renaming_this {
             palette.text
+        } else if hidden_this {
+            palette.text_faint
         } else {
             palette.text_dim
         };
@@ -853,7 +1024,7 @@ fn sidebar_layout(
             } else {
                 n.to_string()
             };
-            let badge_anchor_x_world = world_left_edge + width - DELETE_W - 4.0;
+            let badge_anchor_x_world = world_left_edge + width - DELETE_W - EYE_W - 4.0;
             {
                 let line_h = TEXT_FONT_SIZE * 1.4;
                 let pad_y = ((ROW_H - line_h) * 0.5).max(0.0);
@@ -912,10 +1083,50 @@ fn sidebar_layout(
                 ),
             ));
         }
+
+        // Hide/show eye column — just left of the delete glyph. The
+        // hit-rect is always live, but the eyeball only paints while this
+        // row is hovered, or while the project is already hidden (so a
+        // hidden project still advertises a way to un-hide it). A pupil
+        // (filled inner dot) means "visible / eye open"; a bare ring means
+        // "hidden / eye closed".
+        let eye_x_window = sidebar_origin_x_window + width - DELETE_W - EYE_W;
+        commands.spawn((
+            SidebarEntity,
+            Transform::from_xyz(
+                world_left_edge + width - DELETE_W - EYE_W,
+                row_top_world,
+                SIDEBAR_Z + 0.05,
+            ),
+            SidebarHit::ToggleHidden(proj.id),
+            SidebarBounds {
+                min: Vec2::new(eye_x_window, row_top_window),
+                max: Vec2::new(eye_x_window + EYE_W, row_top_window + ROW_H),
+            },
+        ));
+        if hover.row == Some(proj.id) || hidden_this {
+            let eye_color = if hidden_this {
+                palette.text_faint
+            } else {
+                palette.text_dim
+            };
+            spawn_eye(
+                &mut commands,
+                &font.0,
+                Vec3::new(
+                    world_left_edge + width - DELETE_W - EYE_W * 0.5,
+                    row_top_world - ROW_H * 0.5,
+                    SIDEBAR_Z + 0.2,
+                ),
+                !hidden_this,
+                eye_color,
+                TEXT_FONT_SIZE,
+            );
+        }
     }
 
     // Divider before the "+ New Project" row.
-    let after_rows_window = rows_top_window + projects.list.len() as f32 * ROW_H;
+    let after_rows_window = rows_top_window + visible.len() as f32 * ROW_H;
     commands.spawn((
         SidebarEntity,
         Sprite {
@@ -969,7 +1180,71 @@ fn sidebar_layout(
         ));
     }
 
+    // Global "show hidden projects" eyeball — bottom-left corner. Painted
+    // only while the corner hot-zone is hovered, or while `show_hidden` is
+    // already on (so it stays discoverable as the way to turn it back
+    // off). Open pupil + accent colour = currently revealing hidden
+    // projects; bare dim ring = hidden projects are tucked away.
+    if hover.eyeball || projects.show_hidden {
+        let zone = eyeball_zone(win_h, width);
+        let cx_world = world_left_edge + (zone.min.x + zone.max.x) * 0.5;
+        let cy_world = world_top_edge - (zone.min.y + zone.max.y) * 0.5;
+        let color = if projects.show_hidden {
+            palette.active_stripe
+        } else {
+            palette.text_dim
+        };
+        spawn_eye(
+            &mut commands,
+            &font.0,
+            Vec3::new(cx_world, cy_world, SIDEBAR_Z + 0.3),
+            projects.show_hidden,
+            color,
+            15.0,
+        );
+    }
+
     projects.layout_dirty = false;
+}
+
+/// Draw an "eyeball" out of two stacked Text2d glyphs (SF Mono lacks a
+/// real eye glyph): a hollow ring `○` for the sclera, plus a smaller
+/// filled `●` pupil when `open`. Centered on `center` (world coords,
+/// `.z` is the base layer; the pupil sits just above it).
+fn spawn_eye(
+    commands: &mut Commands,
+    font: &Handle<Font>,
+    center: Vec3,
+    open: bool,
+    color: Color,
+    outer_size: f32,
+) {
+    commands.spawn((
+        SidebarEntity,
+        Text2d::new("\u{25CB}"), // ○ white circle
+        TextFont {
+            font: font.clone(),
+            font_size: outer_size,
+            ..default()
+        },
+        TextColor(color),
+        Anchor::CENTER,
+        Transform::from_xyz(center.x, center.y, center.z),
+    ));
+    if open {
+        commands.spawn((
+            SidebarEntity,
+            Text2d::new("\u{25CF}"), // ● black circle (pupil)
+            TextFont {
+                font: font.clone(),
+                font_size: outer_size * 0.46,
+                ..default()
+            },
+            TextColor(color),
+            Anchor::CENTER,
+            Transform::from_xyz(center.x, center.y, center.z + 0.05),
+        ));
+    }
 }
 
 // ---------- Sidebar input ----------
@@ -1013,6 +1288,18 @@ pub fn sidebar_input(
         return;
     }
 
+    // Global "show hidden" eyeball — handled by geometry (not a hit
+    // entity) so it always wins over any project row that happens to sit
+    // in the bottom-left corner.
+    if in_bounds(pt, &eyeball_zone(window.height(), sidebar.width)) {
+        if renaming.id.is_some() {
+            commit_rename(&mut projects, &mut renaming);
+        }
+        projects.show_hidden = !projects.show_hidden;
+        projects.layout_dirty = true;
+        return;
+    }
+
     // Pick the topmost hit. Only the row bgs / buttons carry SidebarHit
     // so we don't need z-sorting — they're disjoint by construction.
     let mut chosen: Option<SidebarHit> = None;
@@ -1044,6 +1331,14 @@ pub fn sidebar_input(
                 }
                 projects.set_active(id);
             }
+        }
+        SidebarHit::ToggleHidden(id) => {
+            // Flip the project's hidden flag. Commit any in-flight rename
+            // first so the click doesn't silently drop a typed name.
+            if renaming.id.is_some() {
+                commit_rename(&mut projects, &mut renaming);
+            }
+            projects.toggle_hidden(id);
         }
         SidebarHit::DeleteProject(id) => {
             // Drop the project from state. apply_pending_actions sweeps
@@ -1750,5 +2045,140 @@ fn sidebar_resize_drag(
             resize.dirty_pending = true;
         }
         consumed.0 = true;
+    }
+}
+
+/// Track which project row / the bottom-left eyeball corner the cursor is
+/// over, so the reveal-on-hover eye affordances can appear. Marks the
+/// sidebar layout dirty only when the hover target actually changes, so a
+/// resting cursor doesn't churn the entity tree.
+fn sidebar_hover(
+    windows: Query<&Window>,
+    sidebar: Res<Sidebar>,
+    mut hover: ResMut<SidebarHover>,
+    mut projects: ResMut<Projects>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let mut new_row = None;
+    let mut new_eyeball = false;
+    if let Some(pt) = window.cursor_position() {
+        if pt.x < sidebar.width {
+            if pt.y >= HEADER_H {
+                let visible = projects.sidebar_ids();
+                let slot = ((pt.y - HEADER_H) / ROW_H).floor() as i64;
+                if slot >= 0 && (slot as usize) < visible.len() {
+                    new_row = Some(visible[slot as usize]);
+                }
+            }
+            new_eyeball = in_bounds(pt, &eyeball_zone(window.height(), sidebar.width));
+        }
+    }
+    if hover.row != new_row || hover.eyeball != new_eyeball {
+        hover.row = new_row;
+        hover.eyeball = new_eyeball;
+        projects.layout_dirty = true;
+    }
+}
+
+/// Drag a project row up/down to reorder it. A press in the row's body
+/// (left of the eye/delete columns) arms a candidate without consuming
+/// the click, so a plain click still selects/renames; once the cursor
+/// moves past `DRAG_THRESHOLD` the press becomes a drag and the list
+/// reorders live under the cursor. Persists on mouse-up, mirroring the
+/// resize handle's debounce.
+fn project_drag(
+    windows: Query<&Window>,
+    buttons: Res<ButtonInput<MouseButton>>,
+    sidebar: Res<Sidebar>,
+    mut drag: ResMut<ProjectDrag>,
+    mut projects: ResMut<Projects>,
+    mut consumed: ResMut<InputConsumed>,
+) {
+    let Ok(window) = windows.single() else {
+        return;
+    };
+
+    if buttons.just_released(MouseButton::Left) {
+        if drag.dragging && drag.dirty_pending {
+            // Reuse the project save channel — order lives in the same file.
+            projects.dirty = true;
+        }
+        drag.candidate = None;
+        drag.dragging = false;
+        drag.dirty_pending = false;
+        return;
+    }
+
+    let Some(pt) = window.cursor_position() else {
+        return;
+    };
+
+    if buttons.just_pressed(MouseButton::Left) {
+        drag.candidate = None;
+        drag.dragging = false;
+        // Only the row body arms a drag — not the eye/delete columns, the
+        // resize handle, or the bottom-left eyeball corner.
+        let in_row_body = pt.x < sidebar.width - DELETE_W - EYE_W
+            && pt.y >= HEADER_H
+            && !in_bounds(pt, &eyeball_zone(window.height(), sidebar.width));
+        if in_row_body {
+            let visible = projects.sidebar_ids();
+            let slot = ((pt.y - HEADER_H) / ROW_H).floor() as i64;
+            if slot >= 0 && (slot as usize) < visible.len() {
+                drag.candidate = Some(visible[slot as usize]);
+                drag.press = pt;
+            }
+        }
+        return;
+    }
+
+    if buttons.pressed(MouseButton::Left) {
+        let Some(id) = drag.candidate else {
+            return;
+        };
+        if !drag.dragging && (pt - drag.press).length() < DRAG_THRESHOLD {
+            return;
+        }
+        drag.dragging = true;
+        consumed.0 = true;
+
+        let visible_len = projects.sidebar_ids().len();
+        if visible_len == 0 {
+            return;
+        }
+        let target_slot = (((pt.y - HEADER_H) / ROW_H).floor() as i64)
+            .clamp(0, visible_len as i64 - 1) as usize;
+        if reorder_visible(&mut projects, id, target_slot) {
+            projects.layout_dirty = true;
+            drag.dirty_pending = true;
+        }
+    }
+}
+
+/// Move project `id` to visible slot `target_slot` (0-based among the
+/// currently-visible rows) by stepping it past one visible neighbour at a
+/// time. Swapping adjacent *visible* entries leaves any interleaved hidden
+/// projects pinned in place. Returns true if the order changed.
+fn reorder_visible(projects: &mut Projects, id: u64, target_slot: usize) -> bool {
+    let mut changed = false;
+    loop {
+        let order: Vec<usize> = (0..projects.list.len())
+            .filter(|&i| projects.show_hidden || !projects.list[i].hidden)
+            .collect();
+        let Some(cur) = order.iter().position(|&i| projects.list[i].id == id) else {
+            return changed;
+        };
+        let tgt = target_slot.min(order.len().saturating_sub(1));
+        if cur == tgt {
+            return changed;
+        }
+        if cur < tgt {
+            projects.list.swap(order[cur], order[cur + 1]);
+        } else {
+            projects.list.swap(order[cur], order[cur - 1]);
+        }
+        changed = true;
     }
 }

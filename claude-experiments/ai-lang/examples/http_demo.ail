@@ -18,8 +18,8 @@
 
 def report(label: String, r: Result<String, String>) -> Int =
     match r {
-        Ok(body) => println(string_concat(string_concat(label, ": "), body)),
-        Err(e) => println(string_concat(string_concat(label, " failed: "), e))
+        Result::Ok(body) => println(string_concat(string_concat(label, ": "), body)),
+        Result::Err(e) => println(string_concat(string_concat(label, " failed: "), e))
     }
 
 def main() -> Int = {

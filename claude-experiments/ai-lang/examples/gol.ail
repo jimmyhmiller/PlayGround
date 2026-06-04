@@ -13,12 +13,12 @@
 // the stdlib — distributed programs don't have to redeclare them.
 
 // Pool := the list of workers exposed by the runner.
-def build_pool() -> List<Node> = list_reverse(build_pool_acc(0, Nil))
+def build_pool() -> List<Node> = list_reverse(build_pool_acc(0, List::Nil))
 
 def build_pool_acc(i: Int, acc: List<Node>) -> List<Node> =
     if i >= node_count() { acc } else {
         let p = get_node_port(i);
-        build_pool_acc(i + 1, Cons(ListCell {
+        build_pool_acc(i + 1, List::Cons(ListCell {
             head: tcp_node(127, 0, 0, 1, p),
             tail: acc,
         }))
@@ -69,12 +69,12 @@ def compute_cell_bit(packed: Int, i: Int) -> Int = {
 
 // Build the per-cell chunks: 49 single-element lists `[i]` for
 // i = 0..48. `dataset_from_chunks` will pair each with a worker.
-def cell_indices() -> List<List<Int>> = list_reverse(cell_indices_acc(0, Nil))
+def cell_indices() -> List<List<Int>> = list_reverse(cell_indices_acc(0, List::Nil))
 
 def cell_indices_acc(i: Int, acc: List<List<Int>>) -> List<List<Int>> =
     if i >= 49 { acc } else {
-        cell_indices_acc(i + 1, Cons(ListCell {
-            head: Cons(ListCell { head: i, tail: Nil }),
+        cell_indices_acc(i + 1, List::Cons(ListCell {
+            head: List::Cons(ListCell { head: i, tail: List::Nil }),
             tail: acc,
         }))
     }
@@ -85,8 +85,8 @@ def pack_bits(bits: List<Int>) -> Int = pack_bits_acc(bits, 0, 0)
 
 def pack_bits_acc(bits: List<Int>, i: Int, acc: Int) -> Int =
     match bits {
-        Nil => acc,
-        Cons(c) =>
+        List::Nil => acc,
+        List::Cons(c) =>
             if c.head == 1 { pack_bits_acc(c.tail, i + 1, set_bit_one(acc, i)) }
             else { pack_bits_acc(c.tail, i + 1, acc) },
     }

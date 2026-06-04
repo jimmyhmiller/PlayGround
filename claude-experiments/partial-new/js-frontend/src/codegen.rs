@@ -26,6 +26,18 @@ fn base_js(e: &RExpr) -> String {
     }
 }
 
+/// Render the base of a computed member access `base[index]`. Member access
+/// binds tighter than unary minus, so a negative number literal base must be
+/// parenthesized: `-1[i]` parses as `-(1[i])`, not `(-1)[i]`. Every other base
+/// either renders as a primary / member / call expression or self-parenthesizes
+/// (`Bin`, `Opaque`), so it is already safe before `[`.
+fn index_base_js(e: &RExpr) -> String {
+    match e {
+        RExpr::Num(n) if *n < 0 => format!("({})", rexpr_to_js(e)),
+        _ => rexpr_to_js(e),
+    }
+}
+
 /// Render the whole residual program: every generated residual function (for
 /// escaped closures) plus `main`.
 pub fn program_to_js(vm: &Js, main_prog: &Program<Op, Cond>, input_var: usize) -> String {
@@ -231,7 +243,7 @@ fn rexpr_to_js(e: &RExpr) -> String {
         RExpr::Bin(op, a, b) => {
             format!("({} {} {})", rexpr_to_js(a), bop(*op), rexpr_to_js(b))
         }
-        RExpr::Index(a, i) => format!("{}[{}]", rexpr_to_js(a), rexpr_to_js(i)),
+        RExpr::Index(a, i) => format!("{}[{}]", index_base_js(a), rexpr_to_js(i)),
         RExpr::Opaque(op, args) => {
             let parts: Vec<String> = args.iter().map(rexpr_to_js).collect();
             render_opaque(op, &parts)
@@ -250,6 +262,12 @@ fn rexpr_to_js(e: &RExpr) -> String {
             let cs: Vec<String> = caps.iter().map(rexpr_to_js).collect();
             render_fnref(*rfid, &cs)
         }
+        // Outside call position a bound method decays to its function value (JS
+        // detaches `this` once a method is read into a value). `do_call` is the
+        // only place that reattaches the receiver, and it emits a plain
+        // `RExpr::Call`/`Get` — a `BoundMethod` never reaches codegen as a
+        // callee.
+        RExpr::BoundMethod { func, .. } => rexpr_to_js(func),
     }
 }
 

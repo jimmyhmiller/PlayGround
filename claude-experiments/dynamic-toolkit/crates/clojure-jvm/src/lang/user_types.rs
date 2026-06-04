@@ -300,6 +300,30 @@ pub(crate) fn _reset_for_tests() {
     NEXT_PROTO_METHOD_ID.store(1, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// Process-wide lock serializing every test that touches the global
+/// user-type / protocol registries (here AND in `compiler.rs`). Without a
+/// single shared lock, parallel tests interleave registrations and one
+/// test's `_reset_for_tests()` wipes another's protocols mid-run (observed
+/// as "protocol not registered" panics under `cargo test` default
+/// parallelism). The registries are intentionally process-global (protocols
+/// behave like JVM classes — visible to JIT code on any thread), so the
+/// production design can't isolate them per-thread; tests serialize instead.
+#[cfg(test)]
+pub(crate) static REGISTRY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire [`REGISTRY_TEST_LOCK`] and reset the registries to a clean slate.
+/// Every test that registers or queries user types / protocols must hold the
+/// returned guard for its whole body. Recovers from poisoning so one failing
+/// test doesn't wedge the rest.
+#[cfg(test)]
+pub(crate) fn registry_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    let g = REGISTRY_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    _reset_for_tests();
+    g
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,14 +336,11 @@ mod tests {
         Symbol::intern_ns_name(Some(ns), name)
     }
 
-    // These tests share global state, so we serialize via a Mutex to
-    // avoid interleaving and reset_for_tests each call.
-    static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    // These tests share global state with the registry-touching tests in
+    // `compiler.rs`; both serialize via the one crate-level lock so neither
+    // resets the registry out from under the other.
     fn guard() -> std::sync::MutexGuard<'static, ()> {
-        let g = TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-        _reset_for_tests();
-        g
+        super::registry_test_guard()
     }
 
     #[test]

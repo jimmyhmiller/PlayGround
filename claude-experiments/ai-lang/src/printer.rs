@@ -1032,9 +1032,12 @@ impl<'a> Printer<'a> {
         let def = self.cb.load_def(enum_ref)?;
         match def {
             Def::Enum { variants, .. } => {
+                // Variants are always printed qualified (`Enum::Variant`), the
+                // only legal surface form.
+                let enum_name = self.names.type_name(enum_ref);
                 variants
                     .get(index as usize)
-                    .map(|(n, _)| n.clone())
+                    .map(|(n, _)| format!("{}::{}", enum_name, n))
                     .ok_or_else(|| {
                         PrinterError::BadTypeShape(format!(
                             "enum {} has no variant at index {}",
@@ -1539,11 +1542,11 @@ mod tests {
             enum Color { Red, Green, Blue }
             def to_code(c: Color) -> Int =
                 match c {
-                    Red => 0,
-                    Green => 1,
-                    Blue => 2
+                    Color::Red => 0,
+                    Color::Green => 1,
+                    Color::Blue => 2
                 }
-            def pick() -> Color = Green
+            def pick() -> Color = Color::Green
         ";
         assert_round_trips(src, "to_code");
         assert_round_trips(src, "pick");
@@ -1555,10 +1558,10 @@ mod tests {
             enum Res { Ok(Int), Err(Int) }
             def unwrap_or(r: Res, d: Int) -> Int =
                 match r {
-                    Ok(v) => v,
-                    Err(e) => d
+                    Res::Ok(v) => v,
+                    Res::Err(e) => d
                 }
-            def mk_ok(n: Int) -> Res = Ok(n)
+            def mk_ok(n: Int) -> Res = Res::Ok(n)
         ";
         assert_round_trips(src, "unwrap_or");
         assert_round_trips(src, "mk_ok");
@@ -1570,10 +1573,10 @@ mod tests {
         let src = "
             enum Result<T, E> { Ok(T), Err(E) }
             def safe_div(a: Int, b: Int) -> Result<Int, Int> =
-                if b == 0 { Err(404) } else { Ok(a / b) }
+                if b == 0 { Result::Err(404) } else { Result::Ok(a / b) }
             def compute(x: Int, d: Int) -> Result<Int, Int> = {
                 let q = safe_div(x, d)?;
-                Ok(q + 1)
+                Result::Ok(q + 1)
             }
         ";
         assert_round_trips(src, "compute");
@@ -1861,8 +1864,8 @@ mod tests {
             enum Res { Ok(Int), Err(Int) }
             def unwrap_or(r: Res, d: Int) -> Int =
                 match r {
-                    Ok(payload) => payload,
-                    Err(reason) => d
+                    Res::Ok(payload) => payload,
+                    Res::Err(reason) => d
                 }
         ";
         let tmp = TempDir::new();

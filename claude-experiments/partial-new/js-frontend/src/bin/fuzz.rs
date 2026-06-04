@@ -382,8 +382,14 @@ impl Gen {
             3 => Expr::Bool(self.rng.chance(1, 2)),
             4 => Expr::Null,
             _ => {
-                // Always include `input` so programs actually depend on it.
-                if self.rng.chance(1, 3) {
+                // Bias toward `input` so programs actually depend on it — but
+                // ONLY when it is in scope. Inside a top-level `func`/`rec_func`
+                // the param set replaces `self.vars`, so `input` is undeclared
+                // there; emitting it would read an undeclared var (ReferenceError
+                // in JS), which the PE models as a non-throwing `Global` — a
+                // fuzzer artifact, not a PE bug. Fall back to a literal.
+                let input_in_scope = self.vars.iter().any(|(n, _)| n == "input");
+                if input_in_scope && self.rng.chance(1, 3) {
                     Expr::Var("input".to_string())
                 } else {
                     Expr::Num(self.rng.small_int())
@@ -498,6 +504,13 @@ impl Gen {
                 let cv = self.fresh_var();
                 self.vars.push((cv.clone(), Kind::Scalar));
                 let catch = { let n = 1 + self.rng.below(2); self.block(fuel.saturating_sub(1), n) };
+                // The catch binding is block-scoped to the catch clause — drop
+                // ONLY it once the clause is generated, so a later statement
+                // can't reference it out of scope (a ReferenceError the PE models
+                // as a non-throwing `Global` — a fuzzer artifact). `var`s hoisted
+                // out of the body/catch stay in scope (function-scoped), so keep
+                // everything else.
+                self.vars.retain(|(n, _)| n != &cv);
                 Stmt::TryCatch(body, cv, catch)
             }
             11 => {
@@ -859,6 +872,7 @@ fn is_refusal(msg: &str) -> bool {
     msg.contains("dynamic-depth recursion")
         || msg.contains("non-terminating static recursion")
         || msg.contains("out of a residualized `try`")
+        || msg.contains("specialization budget exceeded")
 }
 
 fn residual_of(src: &str) -> Residual {
@@ -1433,8 +1447,215 @@ fn shrink_overflow(mut p: Prog) -> Prog {
     }
 }
 
+/// Every name *bound* anywhere in the program: `input`, function names, params
+/// (function + closure), `var`s, `for`/`while` loop vars + guards, and catch
+/// bindings. A global declared-set (not lexically scoped) — enough to catch the
+/// dominant shrinker artifact, which is "delete a `var` declaration and leave
+/// its reads dangling".
+fn declared_names(p: &Prog) -> std::collections::HashSet<String> {
+    let mut s = std::collections::HashSet::new();
+    s.insert("input".to_string());
+    for f in &p.funcs {
+        s.insert(f.name.clone());
+        for pm in &f.params {
+            s.insert(pm.clone());
+        }
+        collect_decls_stmts(&f.body, &mut s);
+        collect_decls_expr(&f.ret, &mut s);
+    }
+    collect_decls_stmts(&p.main_body, &mut s);
+    collect_decls_expr(&p.ret, &mut s);
+    s
+}
+
+fn collect_decls_stmts(stmts: &[Stmt], s: &mut std::collections::HashSet<String>) {
+    for st in stmts {
+        match st {
+            Stmt::Var(n, e) => {
+                s.insert(n.clone());
+                collect_decls_expr(e, s);
+            }
+            Stmt::AssignVar(_, e) | Stmt::Throw(e) | Stmt::Return(e) | Stmt::ExprStmt(e) | Stmt::Push(_, e) => {
+                collect_decls_expr(e, s);
+            }
+            Stmt::AssignIndex(a, b, c) => {
+                collect_decls_expr(a, s);
+                collect_decls_expr(b, s);
+                collect_decls_expr(c, s);
+            }
+            Stmt::AssignMember(a, _, b) => {
+                collect_decls_expr(a, s);
+                collect_decls_expr(b, s);
+            }
+            Stmt::If(c, t, e) => {
+                collect_decls_expr(c, s);
+                collect_decls_stmts(t, s);
+                collect_decls_stmts(e, s);
+            }
+            Stmt::For { var, body, .. } => {
+                s.insert(var.clone());
+                collect_decls_stmts(body, s);
+            }
+            Stmt::While { guard, body, .. } => {
+                s.insert(guard.clone());
+                collect_decls_stmts(body, s);
+            }
+            Stmt::Switch(scrut, cases) => {
+                collect_decls_expr(scrut, s);
+                for (_, body) in cases {
+                    collect_decls_stmts(body, s);
+                }
+            }
+            Stmt::TryCatch(body, bind, catch) => {
+                collect_decls_stmts(body, s);
+                s.insert(bind.clone());
+                collect_decls_stmts(catch, s);
+            }
+            Stmt::Break | Stmt::Continue => {}
+        }
+    }
+}
+
+fn collect_decls_expr(e: &Expr, s: &mut std::collections::HashSet<String>) {
+    match e {
+        Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null | Expr::Var(_) | Expr::Update { .. } => {}
+        Expr::Bin(_, a, b) | Expr::Logical(_, a, b) | Expr::Index(a, b) => {
+            collect_decls_expr(a, s);
+            collect_decls_expr(b, s);
+        }
+        Expr::Un(_, a) | Expr::Member(a, _) => collect_decls_expr(a, s),
+        Expr::Ternary(a, b, c) => {
+            collect_decls_expr(a, s);
+            collect_decls_expr(b, s);
+            collect_decls_expr(c, s);
+        }
+        Expr::Array(xs) => xs.iter().for_each(|x| collect_decls_expr(x, s)),
+        Expr::Object(fs) => fs.iter().for_each(|(_, x)| collect_decls_expr(x, s)),
+        Expr::Call(_, args) => args.iter().for_each(|x| collect_decls_expr(x, s)),
+        Expr::Method(base, _, args) => {
+            collect_decls_expr(base, s);
+            args.iter().for_each(|x| collect_decls_expr(x, s));
+        }
+        Expr::Closure { params, body, ret } => {
+            for p in params {
+                s.insert(p.clone());
+            }
+            collect_decls_stmts(body, s);
+            collect_decls_expr(ret, s);
+        }
+    }
+}
+
+/// Names *read* anywhere (a bare `Var`, the target of an `Update` or `Push` —
+/// all of which evaluate the binding, so an undeclared one throws
+/// ReferenceError). A plain `AssignVar` LHS is excluded: in non-strict JS
+/// `undeclared = v` silently creates a global (no throw), which the PE's
+/// `Global` model already matches, so it is not an artifact.
+fn collect_reads_stmts(stmts: &[Stmt], out: &mut Vec<String>) {
+    for st in stmts {
+        match st {
+            Stmt::Var(_, e) | Stmt::AssignVar(_, e) | Stmt::Throw(e) | Stmt::Return(e) | Stmt::ExprStmt(e) => {
+                collect_reads_expr(e, out)
+            }
+            Stmt::Push(n, e) => {
+                out.push(n.clone());
+                collect_reads_expr(e, out);
+            }
+            Stmt::AssignIndex(a, b, c) => {
+                collect_reads_expr(a, out);
+                collect_reads_expr(b, out);
+                collect_reads_expr(c, out);
+            }
+            Stmt::AssignMember(a, _, b) => {
+                collect_reads_expr(a, out);
+                collect_reads_expr(b, out);
+            }
+            Stmt::If(c, t, e) => {
+                collect_reads_expr(c, out);
+                collect_reads_stmts(t, out);
+                collect_reads_stmts(e, out);
+            }
+            Stmt::For { body, .. } => collect_reads_stmts(body, out),
+            Stmt::While { body, .. } => collect_reads_stmts(body, out),
+            Stmt::Switch(scrut, cases) => {
+                collect_reads_expr(scrut, out);
+                for (_, body) in cases {
+                    collect_reads_stmts(body, out);
+                }
+            }
+            Stmt::TryCatch(body, _, catch) => {
+                collect_reads_stmts(body, out);
+                collect_reads_stmts(catch, out);
+            }
+            Stmt::Break | Stmt::Continue => {}
+        }
+    }
+}
+
+fn collect_reads_expr(e: &Expr, out: &mut Vec<String>) {
+    match e {
+        Expr::Var(n) => out.push(n.clone()),
+        Expr::Update { var, .. } => out.push(var.clone()),
+        Expr::Num(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null => {}
+        Expr::Bin(_, a, b) | Expr::Logical(_, a, b) | Expr::Index(a, b) => {
+            collect_reads_expr(a, out);
+            collect_reads_expr(b, out);
+        }
+        Expr::Un(_, a) | Expr::Member(a, _) => collect_reads_expr(a, out),
+        Expr::Ternary(a, b, c) => {
+            collect_reads_expr(a, out);
+            collect_reads_expr(b, out);
+            collect_reads_expr(c, out);
+        }
+        Expr::Array(xs) => xs.iter().for_each(|x| collect_reads_expr(x, out)),
+        Expr::Object(fs) => fs.iter().for_each(|(_, x)| collect_reads_expr(x, out)),
+        Expr::Call(callee, args) => {
+            // A call to a user function by name reads that binding (undeclared →
+            // ReferenceError). Builtins (`Math.floor`, `String`, …) are globals,
+            // never declared, so don't treat them as reads.
+            if !SAFE_CALLS.iter().any(|(n, _)| n == callee) {
+                out.push(callee.clone());
+            }
+            args.iter().for_each(|x| collect_reads_expr(x, out));
+        }
+        Expr::Method(base, _, args) => {
+            collect_reads_expr(base, out);
+            args.iter().for_each(|x| collect_reads_expr(x, out));
+        }
+        Expr::Closure { body, ret, .. } => {
+            collect_reads_stmts(body, out);
+            collect_reads_expr(ret, out);
+        }
+    }
+}
+
+/// Does the program read a name it never declares? Such a read throws
+/// ReferenceError in JS but is modeled by the PE as a non-throwing `Global`, so
+/// it diverges as a *different* (artifact) failure than the original — the
+/// shrinker must not drift to it. (Globals like `Math`/`String` never appear as
+/// a bare `Var`; the generator only emits them as `Call`/`Method` names.)
+fn reads_undeclared(p: &Prog) -> bool {
+    let declared = declared_names(p);
+    let mut reads = Vec::new();
+    for f in &p.funcs {
+        collect_reads_stmts(&f.body, &mut reads);
+        collect_reads_expr(&f.ret, &mut reads);
+    }
+    collect_reads_stmts(&p.main_body, &mut reads);
+    collect_reads_expr(&p.ret, &mut reads);
+    reads.iter().any(|n| !declared.contains(n))
+}
+
 /// Does this single program still diverge? Used during shrinking.
 fn still_fails(p: &Prog, repo: &str) -> bool {
+    // Reject reductions that introduce a read of an undeclared variable: those
+    // "still fail" only via a spurious ReferenceError-vs-Global artifact, a
+    // *different* bug than the original (see `reads_undeclared`). Without this
+    // the shrinker reliably collapses real divergences down to `void a1` /
+    // `a8.length`-style undeclared-var programs and misleads diagnosis.
+    if reads_undeclared(p) {
+        return false;
+    }
     let src = prog_js(p);
     match residual_of(&src) {
         Residual::Panicked(_) => true,
@@ -1466,6 +1687,17 @@ fn shrink(mut p: Prog, repo: &str) -> Prog {
 }
 
 fn main() {
+    // Generated programs are tiny (the largest observed specialization weight is
+    // ~1.4k), so cap the partial evaluator's per-program weight budget far below
+    // its CLI default. A generated branch-exploder then refuses cleanly at a few
+    // hundred MB instead of driving the evaluator into a multi-GB blowup that
+    // would OOM the fuzzer. 100k keeps ~70x headroom over any legitimate program
+    // while bounding even the heaviest blowups (whose memory-per-weight is far
+    // above normal) to well under a gigabyte. Respect an explicit override.
+    if std::env::var_os("SPEC_WEIGHT_BUDGET").is_none() {
+        std::env::set_var("SPEC_WEIGHT_BUDGET", "100000");
+    }
+
     // Worker mode: specialize one JS file. Used by the overflow shrinker, which
     // runs this in a subprocess so an uncatchable stack overflow / OOM (which
     // `catch_unwind` cannot trap) shows up as the child dying by signal rather

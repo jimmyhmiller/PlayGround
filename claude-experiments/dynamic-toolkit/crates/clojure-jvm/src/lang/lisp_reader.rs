@@ -136,7 +136,10 @@ impl<'a> Reader<'a> {
                         );
                     }
                 };
-                Ok(Object::Long(code))
+                Ok(Object::Char(
+                    u32::try_from(code)
+                        .map_err(|_| self.err_with(format!("character codepoint out of range: {code}")))?,
+                ))
             }
             _ => self.read_atom(),
         }

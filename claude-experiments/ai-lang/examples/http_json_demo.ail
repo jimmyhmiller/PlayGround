@@ -19,6 +19,6 @@ def repo_name() -> Result<String, String> = {
 
 def main() -> Int =
     match repo_name() {
-        Ok(name) => println(string_concat("repo full_name = ", name)),
-        Err(e) => println(string_concat("error: ", e))
+        Result::Ok(name) => println(string_concat("repo full_name = ", name)),
+        Result::Err(e) => println(string_concat("error: ", e))
     }

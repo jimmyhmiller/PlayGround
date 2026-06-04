@@ -87,8 +87,13 @@ struct FnCtx {
     /// from a lifted arrow is a clear "capturing closure" error; a name in
     /// neither the local scopes nor here is treated as a runtime global.
     outer_names: HashSet<String>,
-    /// Names that must be boxed in THIS function (captured + mutated `var`s).
+    /// Names that must be boxed in THIS function (captured + mutated `var`s or
+    /// parameters).
     boxed_set: HashSet<String>,
+    /// Of `boxed_set`, the names that are PARAMETERS. Their `{value}` cell is
+    /// initialized from the incoming argument (`p = {value: p}`), not from
+    /// `undefined` like a hoisted local.
+    boxed_params: HashSet<String>,
     /// Names of nested `function` declarations hoisted to the top of THIS
     /// function body (so `lower_stmt` skips them at their textual position; a
     /// `function` declaration anywhere else is rejected).
@@ -109,6 +114,7 @@ impl FnCtx {
             loop_depth: 0,
             outer_names,
             boxed_set: HashSet::new(),
+            boxed_params: HashSet::new(),
             hoisted_fns: HashSet::new(),
             arguments_slot: None,
         }
@@ -234,7 +240,10 @@ impl Compiler {
     /// top-level `var`s and code run in order.
     fn lower_module_main(&mut self, stmts: &[ast::Stmt]) -> R<(usize, usize, Option<usize>, Vec<Stmt>)> {
         let mut ctx = FnCtx::new(HashSet::new());
-        ctx.boxed_set = boxed_locals(stmts);
+        ctx.boxed_set = boxed_locals(&["input"], stmts);
+        if ctx.boxed_set.contains("input") {
+            ctx.boxed_params.insert("input".to_string());
+        }
         ctx.declare("input");
         hoist_vars(stmts, &mut ctx);
         self.hoist_fn_decls(stmts, &mut ctx);
@@ -256,8 +265,19 @@ impl Compiler {
         names.sort();
         names
             .into_iter()
-            .filter_map(|name| ctx.resolve(name))
-            .map(|slot| Stmt::Let(slot, Expr::Object(vec![("value".to_string(), Expr::Undefined)])))
+            .filter_map(|name| ctx.resolve(name).map(|slot| (name, slot)))
+            .map(|(name, slot)| {
+                // A boxed parameter starts holding its incoming argument; wrap it
+                // in place (`p = {value: p}`, the inner `Var(slot)` reading the raw
+                // arg before the assignment rebinds the slot). A boxed local starts
+                // `undefined` (it is hoisted).
+                let init = if ctx.boxed_params.contains(name) {
+                    Expr::Var(slot)
+                } else {
+                    Expr::Undefined
+                };
+                Stmt::Let(slot, Expr::Object(vec![("value".to_string(), init)]))
+            })
             .collect()
     }
 
@@ -313,14 +333,12 @@ impl Compiler {
             None => return Err("function without a body".into()),
         };
         let mut ctx = FnCtx::new(HashSet::new());
-        ctx.boxed_set = boxed_locals(&block.stmts);
-        for p in &function.params {
-            let name = pat_ident(&p.pat)?;
-            if ctx.boxed_set.contains(name) {
-                return Err(format!(
-                    "parameter `{name}` is captured and mutated; capture-by-reference \
-                     of parameters is not supported"
-                ));
+        let param_names: Vec<&str> =
+            function.params.iter().map(|p| pat_ident(&p.pat)).collect::<R<Vec<_>>>()?;
+        ctx.boxed_set = boxed_locals(&param_names, &block.stmts);
+        for name in &param_names {
+            if ctx.boxed_set.contains(*name) {
+                ctx.boxed_params.insert(name.to_string());
             }
             ctx.declare(name);
         }
@@ -382,16 +400,14 @@ impl Compiler {
             ArrowBody::Expr(_) => Vec::new(),
         };
         let mut ctx = FnCtx::new(HashSet::new());
-        ctx.boxed_set = boxed_locals(&own_body);
+        let param_names: Vec<&str> = params.iter().map(pat_ident).collect::<R<Vec<_>>>()?;
+        ctx.boxed_set = boxed_locals(&param_names, &own_body);
         for (name, boxed) in &captures {
             ctx.declare_boxed(name, *boxed); // captured slots first; cell from enclosing
         }
-        for p in params {
-            let name = pat_ident(p)?;
-            if ctx.boxed_set.contains(name) {
-                return Err(format!(
-                    "parameter `{name}` is captured and mutated; not supported"
-                ));
+        for name in &param_names {
+            if ctx.boxed_set.contains(*name) {
+                ctx.boxed_params.insert(name.to_string());
             }
             ctx.declare(name);
         }
@@ -692,6 +708,12 @@ impl Compiler {
                     ast::UpdateOp::MinusMinus => Bop::Sub,
                 };
                 let one = Box::new(Expr::Num(1));
+                // `t++` is `t = ToNumber(t) + 1`, not `t = t + 1` (which would
+                // *concatenate* for a string/object `t`: `"3"++` is 4, not "31";
+                // `obj++` is NaN, not "[object Object]1"). `x - 0` is ToNumber(x)
+                // and folds to nothing when `x` is already numeric. (The `--`/Sub
+                // form already coerces, but applying it uniformly is harmless.)
+                let to_num = |e: Expr| Expr::Bin(Bop::Sub, Box::new(e), Box::new(Expr::Num(0)));
                 match &*u.arg {
                     ast::Expr::Ident(id) => {
                         let name = id.sym.as_str();
@@ -703,12 +725,12 @@ impl Compiler {
                             out.push(Stmt::SetProp(
                                 Expr::Var(b.slot),
                                 "value".to_string(),
-                                Expr::Bin(op, Box::new(cur), one),
+                                Expr::Bin(op, Box::new(to_num(cur)), one),
                             ));
                         } else {
                             out.push(Stmt::Set(
                                 b.slot,
-                                Expr::Bin(op, Box::new(Expr::Var(b.slot)), one),
+                                Expr::Bin(op, Box::new(to_num(Expr::Var(b.slot))), one),
                             ));
                         }
                     }
@@ -718,13 +740,13 @@ impl Compiler {
                             ast::MemberProp::Ident(id) => {
                                 let key = id.sym.to_string();
                                 let cur = Expr::Get(Box::new(obj.clone()), key.clone());
-                                out.push(Stmt::SetProp(obj, key, Expr::Bin(op, Box::new(cur), one)));
+                                out.push(Stmt::SetProp(obj, key, Expr::Bin(op, Box::new(to_num(cur)), one)));
                             }
                             ast::MemberProp::Computed(c) => {
                                 let idx = self.lower_expr(&c.expr, ctx)?;
                                 let cur =
                                     Expr::Index(Box::new(obj.clone()), Box::new(idx.clone()));
-                                out.push(Stmt::SetIndex(obj, idx, Expr::Bin(op, Box::new(cur), one)));
+                                out.push(Stmt::SetIndex(obj, idx, Expr::Bin(op, Box::new(to_num(cur)), one)));
                             }
                             ast::MemberProp::PrivateName(_) => {
                                 return Err("private fields are not supported".into())
@@ -1492,12 +1514,17 @@ fn used_in_expr(e: &ast::Expr, out: &mut HashSet<String>) {
 /// (mutated). Boxing makes them shared `{value: ...}` cells so a closure's
 /// mutation is visible to everyone. (Only `var`s are boxed; a captured+mutated
 /// `let`/`const` is rejected at lowering.)
-fn boxed_locals(body: &[ast::Stmt]) -> HashSet<String> {
+fn boxed_locals(params: &[&str], body: &[ast::Stmt]) -> HashSet<String> {
     let mut vars = Vec::new();
     for s in body {
         collect_vars(s, &mut vars);
     }
-    let vars: HashSet<String> = vars.into_iter().collect();
+    // Parameters are capture candidates too: a captured + reassigned parameter
+    // (reassigned by the outer body or by the capturing closure) must be a shared
+    // cell, exactly like a captured + mutated `var`. Without this it captures
+    // by-value and the reassignment is invisible across the closure boundary.
+    let mut vars: HashSet<String> = vars.into_iter().collect();
+    vars.extend(params.iter().map(|p| p.to_string()));
     let mut used_nested = HashSet::new();
     for s in body {
         nested_used_stmt(s, &mut used_nested);

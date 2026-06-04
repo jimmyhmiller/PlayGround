@@ -108,12 +108,20 @@ prop set **and** reuses element references when deps are unchanged.
 
 ## Status / next
 
-Done and oracle-verified end-to-end (source → CFG → SSA → mutable ranges →
-reactive scopes → merge → dependency inference → **memoized JS, run under
-Node**), including **real JSX components** whose scope layout matches the React
-Compiler. Verified against the actual `react-compiler-e2e` CLI.
+The JSIR → CFG → SSA substrate is useful and locally tested, but React Compiler
+parity is **not done**. The current gate is the official
+`babel-plugin-react-compiler` fixture oracle in `oracle/run-corpus.sh`; as of the
+2026-06-03 audit this branch is around **234-236 / 715** agreement on
+React-memoized fixtures, with 0 panics.
 
-Not yet: type inference (precise hook/primitive distinction), control-flow
-codegen (codegen bails on loops/branches; the analyses already handle them), and
-preserving JSX literally in the output (we emit `createElement`, React keeps the
-JSX — semantically identical).
+The production compile path uses the in-place JSIR rewrite
+(`memoize_plan::memoize_inplace`), not the old string emitter. The remaining
+parity work should treat the current React-specific analysis as WIP and port
+upstream passes faithfully:
+
+1. `PruneNonEscapingScopes`
+2. `PropagateScopeDependencies`
+3. block-scope alignment for control flow
+
+Do not add fixture-shaped merge/prune patches without a before/after corpus gate
+and zero regressions.

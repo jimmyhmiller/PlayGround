@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::gc::field::{read_type_id, read_varlen_count};
 use crate::gc::header::ObjHeader;
@@ -240,11 +240,14 @@ impl Heap {
     /// - **No concurrent GC.** The GC reads `type_table` from any
     ///   thread; a concurrent grow could observe a moved buffer. Caller
     ///   must ensure no GC is in progress AND that no mutator is
-    ///   running JIT'd code that could trigger a GC. In single-threaded
-    ///   v1 this just means: don't call this from inside JIT'd code.
+    ///   running JIT'd code that could trigger a GC.
     /// - **No concurrent calls.** Two simultaneous `dynamic_add_type`
-    ///   calls would race. v1 single-threaded compilation makes this
-    ///   trivial; future concurrent installers must serialize externally.
+    ///   calls would race.
+    ///
+    /// Both are satisfied by the sole caller, `IncrementalJit::install`,
+    /// which runs this under a [`Heap::pause_world`] guard (every other
+    /// mutator parked + `gc_lock` held → no concurrent GC or JIT) and
+    /// whose `&mut Runtime` signature already excludes concurrent installs.
     /// - **Stable indices.** Pre-existing `type_id`s remain valid: we
     ///   only push, never reorder or shrink. Pointers into `type_table`
     ///   may dangle if the Vec reallocates — but the only places that
@@ -711,6 +714,11 @@ impl Heap {
             self.gc_requested.store(true, Ordering::Release);
             threads.iter().cloned().collect()
         };
+        // Raise each thread's JIT poll flag so a thread spinning in
+        // JIT'd code parks at its next safepoint poll, then wait.
+        for ts in thread_snapshot.iter() {
+            ts.request_poll();
+        }
         for (i, ts) in thread_snapshot.iter().enumerate() {
             while !ts.is_safely_at_safepoint() {
                 std::thread::yield_now();
@@ -725,10 +733,57 @@ impl Heap {
         self.gc_requested.store(false, Ordering::Release);
 
         for (i, ts) in thread_snapshot.iter().enumerate() {
+            ts.clear_poll();
             ts.resume();
             self.trace_thread(i, TraceState::Running);
         }
         self.trace_gc(TraceState::GcIdle);
+    }
+
+    /// Stop the world WITHOUT collecting, returning a guard that resumes
+    /// every parked thread when dropped.
+    ///
+    /// Parks every *other* registered mutator thread at a safepoint (the
+    /// requesting thread — identified by OS thread id — is excluded so it
+    /// can keep running). Used to make a non-allocating critical section
+    /// (e.g. installing new JIT code: `engine.add_module`, growing the
+    /// type table via `dynamic_add_type`, merging shape maps) safe against
+    /// concurrent JIT execution and GC.
+    ///
+    /// Holds `gc_lock` for the guard's lifetime, so no collection can run
+    /// concurrently either.
+    ///
+    /// # Safety / contract
+    /// The critical section guarded by the returned `WorldPause` MUST NOT
+    /// allocate or trigger a GC: doing so would re-enter `gc_lock` (held
+    /// here) and deadlock. Run any allocating / JIT-executing work after
+    /// the guard is dropped.
+    #[must_use]
+    pub fn pause_world(&self) -> WorldPause<'_> {
+        let gc_guard = self.gc_lock.lock().unwrap();
+        let cur = std::thread::current().id();
+        let snapshot: Vec<Arc<ThreadState>> = {
+            let threads = self.threads.lock().unwrap();
+            self.gc_requested.store(true, Ordering::Release);
+            threads.iter().cloned().collect()
+        };
+        let parked: Vec<Arc<ThreadState>> = snapshot
+            .into_iter()
+            .filter(|ts| ts.os_thread() != cur)
+            .collect();
+        for ts in &parked {
+            ts.request_poll();
+        }
+        for ts in &parked {
+            while !ts.is_safely_at_safepoint() {
+                std::thread::yield_now();
+            }
+        }
+        WorldPause {
+            heap: self,
+            parked,
+            _gc_guard: gc_guard,
+        }
     }
 
     /// Bytes remaining in from-space.
@@ -804,6 +859,17 @@ impl Heap {
             threads.iter().cloned().collect()
         };
 
+        // Raise every other thread's JIT poll flag so a thread spinning
+        // in JIT'd code parks at its next safepoint poll, then wait. If
+        // this were missing, an allocation-free JIT loop on another
+        // thread would never poll `gc_requested` and we'd spin forever
+        // in `is_safely_at_safepoint`.
+        for ts in thread_snapshot.iter() {
+            if Arc::as_ptr(ts) as usize == trigger_ptr {
+                continue;
+            }
+            ts.request_poll();
+        }
         // Wait for all threads EXCEPT ourselves to reach safepoints
         for ts in thread_snapshot.iter() {
             if Arc::as_ptr(ts) as usize == trigger_ptr {
@@ -933,6 +999,10 @@ impl Heap {
             if Arc::as_ptr(ts) as usize == trigger_ptr {
                 continue;
             }
+            // Lower the poll flag before resuming so a thread that was
+            // scanned-in-place (BLOCKED) rather than condvar-parked
+            // doesn't re-enter the slow path on its next poll.
+            ts.clear_poll();
             ts.resume();
         }
 
@@ -1834,6 +1904,27 @@ impl Heap {
 
             let align = 1usize << info.align_log2;
             offset = (offset + obj_size + align - 1) & !(align - 1);
+        }
+    }
+}
+
+/// Guard returned by [`Heap::pause_world`]. While alive, every other
+/// registered mutator thread is parked at a safepoint and `gc_lock` is
+/// held (so no collection runs). On drop it lowers each parked thread's
+/// poll flag, clears the GC request, and resumes them.
+pub struct WorldPause<'a> {
+    heap: &'a Heap,
+    parked: Vec<Arc<ThreadState>>,
+    /// Held for the guard's lifetime to exclude concurrent collection.
+    _gc_guard: MutexGuard<'a, ()>,
+}
+
+impl Drop for WorldPause<'_> {
+    fn drop(&mut self) {
+        self.heap.gc_requested.store(false, Ordering::Release);
+        for ts in &self.parked {
+            ts.clear_poll();
+            ts.resume();
         }
     }
 }

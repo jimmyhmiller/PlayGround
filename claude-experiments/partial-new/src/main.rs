@@ -51,8 +51,8 @@ fn main() {
     // 3. Pointer motion coalesces across the run (partially-static pointer).
     demo("pointer coalescing", ">>>+++<<<++.>>>.", &[], true);
 
-    // 4. The classic: Hello World. Many nested loops, all tied off; output is
-    //    verified byte-for-byte against the reference interpreter.
+    // 4. The classic: Hello World. Many nested loops, all tied off; the residual's
+    //    output is verified equal to the reference interpreter's.
     let hello = "++++++++[>++++[>++>+++>+++>+<<<<-]>+>+>->>+[<]<-]\
                  >>.>---.+++++++..+++.>>.<-.<.+++.------.--------.>>+.>++.";
     demo("Hello World", hello, &[], false);

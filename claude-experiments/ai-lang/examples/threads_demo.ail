@@ -1,0 +1,25 @@
+// OS threads: `spawn` / `join`.
+//
+// `spawn(|| ...)` runs a zero-arg closure on a fresh OS thread that has
+// its OWN execution context (its own GC shadow stack + ThreadState),
+// sharing this process's heap and JIT'd code. It returns a
+// `ThreadHandle<T>`. `join(h)` blocks until that thread finishes and
+// yields its result. The spawned thunk is ordinary JIT'd code: it can
+// allocate, recurse, and is stopped at safepoints for collections like
+// any other mutator thread.
+//
+//   ai-lang add examples/threads_demo.ail
+//   ai-lang run main      # prints 14850
+//
+// Three workers each sum 1..99 (= 4950) in parallel; `join` collects and
+// adds their results (3 * 4950 = 14850).
+
+def tally(n: Int, acc: Int) -> Int =
+    if n == 0 { acc } else { tally(n - 1, acc + n) }
+
+def main() -> Int = {
+    let h1 = spawn(|| tally(99, 0));
+    let h2 = spawn(|| tally(99, 0));
+    let h3 = spawn(|| tally(99, 0));
+    join(h1) + join(h2) + join(h3)
+}

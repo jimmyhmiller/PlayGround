@@ -782,10 +782,10 @@ mod tests {
         let ctx_b = Context::create();
         let src = "
             enum IntOpt { Some(Int), None }
-            def make_some(v: Int) -> IntOpt = Some(v)
+            def make_some(v: Int) -> IntOpt = IntOpt::Some(v)
             def get_or(o: IntOpt, default: Int) -> Int = match o {
-                Some(x) => x,
-                None => default,
+                IntOpt::Some(x) => x,
+                IntOpt::None => default,
             }
         ";
         let (rt_a, jit_a, names_a) = make_runtime(&ctx_a, src);

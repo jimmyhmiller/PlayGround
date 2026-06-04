@@ -231,6 +231,11 @@ enum Instr {
     PushThis,
     Load(usize),
     Store(usize),
+    /// Duplicate the top of the operand stack. Used to compile short-circuit
+    /// `&&`/`||`: the left value is both tested and (on the short-circuit path)
+    /// kept as the result. Duplicating copies the abstract *value* (an effectful
+    /// operand has already run and been bound to a temp), so no effect repeats.
+    Dup,
     /// Bind the top-of-stack value to a fresh residual temp if it is dynamic, so
     /// it is stable across a following effect. Used for the result of a *postfix*
     /// `x++` whose place residualizes: the old value must be captured before the
@@ -301,6 +306,17 @@ pub enum RExpr {
     /// bound: renders as `__rf{rfid}.bind(null, caps...)` (or `__rf{rfid}` when
     /// there are no captures).
     FnRef { rfid: usize, caps: Vec<RExpr> },
+    /// A method access (`recv.m` / `recv[i]`) that has been snapshotted by the
+    /// freeze pass while pending as a CALLEE on the operand stack. `func` is the
+    /// snapshotted method *value* (a frozen temp), `recv` the snapshotted
+    /// receiver. As a plain value it decays to `func` (JS detaches `this` once a
+    /// method is read into a value); as a call callee, `do_call` emits
+    /// `func.call(recv, args)`, which preserves BOTH the pre-call snapshot
+    /// (`func` was captured before any intervening effect) AND the correct
+    /// `this`. Without this, freezing a pending method callee to a bare temp and
+    /// calling it would run with `this === undefined` — an over-throw for
+    /// `Function.prototype.call`/`.apply`, a wrong `this` for other methods.
+    BoundMethod { func: Box<RExpr>, recv: Box<RExpr> },
 }
 
 #[derive(Debug)]
@@ -508,6 +524,77 @@ impl State {
                 .map(|(k, v)| (*k, v.clone()))
                 .collect();
         }
+    }
+
+    /// A cheap proxy for this state's memory footprint: the total number of
+    /// residual-expression nodes held across all live abstract values (frame
+    /// locals/operand stacks plus heap objects). Residualized abstract values
+    /// (`Abs::Dyn`) carry `RExpr` trees that can grow without bound when a
+    /// program branch-explodes (e.g. each `x++` wraps the prior tree), so this is
+    /// what actually blows up — block and live-object counts stay small while the
+    /// trees, cloned into every memoized state, dominate memory. Used only to
+    /// enforce `SPEC_WEIGHT_BUDGET`.
+    fn weight(&self) -> u64 {
+        let mut w = 0u64;
+        for f in &self.frames {
+            for v in f.locals.iter().chain(f.ostack.iter()) {
+                w += abs_weight(v);
+            }
+        }
+        for (_, o) in self.heap.iter() {
+            w += match o {
+                HeapObj::Object(fs) => fs.iter().map(|(_, a)| abs_weight(a)).sum::<u64>(),
+                HeapObj::Array(xs) | HeapObj::Builtin { data: xs, .. } => {
+                    xs.iter().map(abs_weight).sum::<u64>()
+                }
+                HeapObj::Closure { captured, .. } => {
+                    captured.iter().map(abs_weight).sum::<u64>()
+                }
+            };
+        }
+        w
+    }
+}
+
+/// Number of `RExpr` nodes an abstract value carries (1 for any non-residual
+/// value; the full tree size for `Abs::Dyn`). See `State::weight`.
+fn abs_weight(a: &Abs) -> u64 {
+    match a {
+        Abs::Dyn(e) => rexpr_weight(e),
+        _ => 1,
+    }
+}
+
+/// Can evaluating this residual expression throw at runtime? A member/index read
+/// throws when its base is null/undefined; a call/`new` can throw; `in` and
+/// `instanceof` throw on a non-object operand. Used so a *discarded* expression
+/// that can throw is still emitted for effect (a discarded one that cannot throw
+/// is dropped). Conservative over-approximation is safe: emitting a discarded
+/// expression that turns out not to throw is a harmless extra read.
+fn may_throw(e: &RExpr) -> bool {
+    match e {
+        RExpr::Get(..) | RExpr::Index(..) | RExpr::Call(..) | RExpr::New(..) => true,
+        RExpr::Bin(_, a, b) => may_throw(a) || may_throw(b),
+        RExpr::Opaque(op, args) => {
+            op == "in" || op == "instanceof" || args.iter().any(may_throw)
+        }
+        RExpr::FnRef { caps, .. } => caps.iter().any(may_throw),
+        RExpr::BoundMethod { func, recv } => may_throw(func) || may_throw(recv),
+        _ => false,
+    }
+}
+
+fn rexpr_weight(e: &RExpr) -> u64 {
+    match e {
+        RExpr::Bin(_, a, b) | RExpr::Index(a, b) => 1 + rexpr_weight(a) + rexpr_weight(b),
+        RExpr::Get(a, _) => 1 + rexpr_weight(a),
+        RExpr::Opaque(_, xs) => 1 + xs.iter().map(rexpr_weight).sum::<u64>(),
+        RExpr::Call(c, xs) | RExpr::New(c, xs) => {
+            1 + rexpr_weight(c) + xs.iter().map(rexpr_weight).sum::<u64>()
+        }
+        RExpr::FnRef { caps, .. } => 1 + caps.iter().map(rexpr_weight).sum::<u64>(),
+        RExpr::BoundMethod { func, recv } => 1 + rexpr_weight(func) + rexpr_weight(recv),
+        _ => 1,
     }
 }
 
@@ -870,13 +957,96 @@ fn compile_expr(e: &Expr, code: &mut Vec<Instr>) {
             code.push(Instr::NewOp(args.len()));
         }
         Expr::Opaque(op, args) => {
-            for a in args {
-                compile_expr(a, code);
+            // `&&`, `||`, `??`, and `?:` short-circuit: an operand that is only
+            // *conditionally* evaluated must not have its side effects applied on
+            // the path where it is skipped. When that operand is pure, the compact
+            // pass-through `Opaque` is correct (and is what real inputs rely on for
+            // a small residual); when it has side effects, compile real
+            // short-circuit control flow so only the operand actually taken runs.
+            let needs_branch = match op.as_str() {
+                "&&" | "||" | "??" => args.len() == 2 && !is_pure(&args[1]),
+                "?:" => args.len() == 3 && (!is_pure(&args[1]) || !is_pure(&args[2])),
+                _ => false,
+            };
+            if needs_branch {
+                compile_short_circuit(op, args, code);
+            } else {
+                for a in args {
+                    compile_expr(a, code);
+                }
+                code.push(Instr::OpaqueOp { op: op.clone(), arity: args.len() });
             }
-            code.push(Instr::OpaqueOp { op: op.clone(), arity: args.len() });
         }
         Expr::Global(name) => code.push(Instr::PushGlobal(name.clone())),
         Expr::Update { place, op, prefix } => compile_update(place, *op, *prefix, code),
+    }
+}
+
+/// Compile a short-circuiting `&&`/`||`/`??`/`?:` whose conditionally-evaluated
+/// operand has side effects, as real control flow so the skipped operand never
+/// runs (and never applies its effects). Leaves the operator's value on the
+/// stack. Used only when the compact pass-through `Opaque` form would be unsound;
+/// see `compile_expr`.
+fn compile_short_circuit(op: &str, args: &[Expr], code: &mut Vec<Instr>) {
+    match op {
+        // a && b  ≡  let t = a; t ? b : t
+        "&&" => {
+            compile_expr(&args[0], code);
+            code.push(Instr::Dup);
+            let jz = code.len();
+            code.push(Instr::JmpIfFalsy(0)); // a falsy: keep a as the result
+            code.push(Instr::Pop); // a truthy: drop the kept a, value is b
+            compile_expr(&args[1], code);
+            let end = code.len();
+            patch(&mut code[jz], end);
+        }
+        // a || b  ≡  let t = a; t ? t : b
+        "||" => {
+            compile_expr(&args[0], code);
+            code.push(Instr::Dup);
+            let jz = code.len();
+            code.push(Instr::JmpIfFalsy(0)); // a falsy: evaluate b
+            let jend = code.len();
+            code.push(Instr::Jmp(0)); // a truthy: keep a, skip b
+            let els = code.len();
+            code.push(Instr::Pop); // drop the kept a
+            compile_expr(&args[1], code);
+            let end = code.len();
+            patch(&mut code[jz], els);
+            patch(&mut code[jend], end);
+        }
+        // a ?? b  ≡  let t = a; (t == null) ? b : t   (`== null` is true iff
+        // `t` is null or undefined — exactly the nullish test).
+        "??" => {
+            compile_expr(&args[0], code);
+            code.push(Instr::Dup);
+            code.push(Instr::PushNull);
+            code.push(Instr::OpaqueOp { op: "==".to_string(), arity: 2 });
+            let jz = code.len();
+            code.push(Instr::JmpIfFalsy(0)); // (a == null) falsy: a not nullish, keep a
+            code.push(Instr::Pop); // nullish: drop a, value is b
+            compile_expr(&args[1], code);
+            let jend = code.len();
+            code.push(Instr::Jmp(0));
+            let end = code.len();
+            patch(&mut code[jz], end); // falsy lands here with a still on the stack
+            patch(&mut code[jend], end);
+        }
+        // a ? b : c
+        "?:" => {
+            compile_expr(&args[0], code);
+            let jz = code.len();
+            code.push(Instr::JmpIfFalsy(0));
+            compile_expr(&args[1], code); // then
+            let jend = code.len();
+            code.push(Instr::Jmp(0));
+            let els = code.len();
+            compile_expr(&args[2], code); // else
+            let end = code.len();
+            patch(&mut code[jz], els);
+            patch(&mut code[jend], end);
+        }
+        _ => unreachable!("compile_short_circuit on {op}"),
     }
 }
 
@@ -905,6 +1075,11 @@ fn compile_update(place: &Expr, op: Bop, prefix: bool, code: &mut Vec<Instr>) {
     let emit_store = |code: &mut Vec<Instr>| match place {
         Expr::Var(slot) => {
             code.push(Instr::Load(*slot));
+            // `++`/`--` coerce the place to a number first: `obj++` stores
+            // `ToNumber(obj) + 1` (NaN), not `obj + 1` (string concat). `x - 0`
+            // is `ToNumber(x)` and folds to nothing when `x` is already numeric.
+            code.push(Instr::PushNum(0));
+            code.push(Instr::Bin(Bop::Sub));
             code.push(Instr::PushNum(1));
             code.push(Instr::Bin(op));
             code.push(Instr::Store(*slot));
@@ -914,6 +1089,11 @@ fn compile_update(place: &Expr, op: Bop, prefix: bool, code: &mut Vec<Instr>) {
             compile_expr(o, code); // obj (for the write)
             compile_expr(o, code); // obj (for the read)
             code.push(Instr::GetProp(k.clone()));
+            // `++`/`--` coerce the place to a number first: `obj++` stores
+            // `ToNumber(obj) + 1` (NaN), not `obj + 1` (string concat). `x - 0`
+            // is `ToNumber(x)` and folds to nothing when `x` is already numeric.
+            code.push(Instr::PushNum(0));
+            code.push(Instr::Bin(Bop::Sub));
             code.push(Instr::PushNum(1));
             code.push(Instr::Bin(op));
             code.push(Instr::SetPropOp(k.clone()));
@@ -925,6 +1105,11 @@ fn compile_update(place: &Expr, op: Bop, prefix: bool, code: &mut Vec<Instr>) {
             compile_expr(a, code); // arr (for the read)
             compile_expr(i, code); // index (for the read)
             code.push(Instr::GetIndex);
+            // `++`/`--` coerce the place to a number first: `obj++` stores
+            // `ToNumber(obj) + 1` (NaN), not `obj + 1` (string concat). `x - 0`
+            // is `ToNumber(x)` and folds to nothing when `x` is already numeric.
+            code.push(Instr::PushNum(0));
+            code.push(Instr::Bin(Bop::Sub));
             code.push(Instr::PushNum(1));
             code.push(Instr::Bin(op));
             code.push(Instr::SetIndexOp);
@@ -937,6 +1122,13 @@ fn compile_update(place: &Expr, op: Bop, prefix: bool, code: &mut Vec<Instr>) {
         compile_expr(place, code); // read the new value
     } else {
         compile_expr(place, code); // read the old value (the result)
+        // The result of a *postfix* `x++`/`x--` is `ToNumber(old)`, not the raw
+        // old value: `false--` yields 0 and `"3"--` yields 3, not `false`/`"3"`.
+        // `x - 0` is exactly `ToNumber(x)` (and folds to a no-op when `x` is
+        // already a number). The prefix form needs no coercion: its result is the
+        // stored `place ± 1`, which the `Bin` already coerces.
+        code.push(Instr::PushNum(0));
+        code.push(Instr::Bin(Bop::Sub));
         // Capture it before the store: if the place residualizes, the store
         // mutates it, and an un-snapshotted dynamic old value would re-read the
         // new value at runtime.
@@ -957,6 +1149,23 @@ fn patch(i: &mut Instr, target: usize) {
 // ---------------------------------------------------------------------------
 
 const MAX_DEPTH: usize = 512;
+
+/// Upper bound on accumulated `State::weight` (residual-expression nodes summed
+/// over residual block entries) in one specialization. This is the
+/// memory-proportional bound: each memoized block clones its state, and the
+/// abstract values' `RExpr` trees are what grow without bound in a
+/// branch-exploding program.
+///
+/// The default suits direct CLI use on real inputs: the simple.js deobfuscation,
+/// the hardest real input, accumulates ~141M and peaks under 700 MB, so 300M
+/// clears it with headroom. The fuzzer only ever specializes small generated
+/// programs (the largest observed weight is ~1.4k), so it lowers this to ~1M via
+/// the `SPEC_WEIGHT_BUDGET` env var; a generated branch-exploder then refuses at
+/// a few hundred MB instead of exhausting memory. (A blowup and simple.js are
+/// within ~1.4x on every cheap count metric — steps, blocks, live heap — so only
+/// a budget tuned to the workload separates them; there is no single threshold
+/// that fits both, hence the env knob.)
+const SPEC_WEIGHT_BUDGET: u64 = 300_000_000;
 
 pub struct Js {
     code: Vec<Instr>,
@@ -1020,6 +1229,43 @@ pub struct Js {
     /// the body leaves the same partial state as the original. (Inlined callees,
     /// at greater frame depth, still fold normally.)
     eager_stores: std::cell::Cell<bool>,
+    /// Total `step` calls during this specialization. A program whose driving
+    /// branch-explodes (e.g. a depth-bounded recursion whose body forks on
+    /// dynamic values inside a loop) can produce a finite but astronomically
+    /// large residual, exhausting memory before any depth/loop bound trips. When
+    /// the count crosses `SPEC_STEP_BUDGET` we stop with a clear, catchable
+    /// refusal rather than OOM. This is a resource bound, not a soundness
+    /// mechanism: it lives in the JS client, never the generic engine.
+    spec_steps: std::cell::Cell<u64>,
+    /// Count of *block entries* (a `step` with `at_entry`), i.e. residual blocks
+    /// created (diagnostic).
+    spec_blocks: std::cell::Cell<u64>,
+    /// Accumulated `State::weight` (residual-expression nodes) across all block
+    /// entries. Each memoized block holds a clone of its state, so total memory
+    /// tracks the sum of per-state weights. A branch-exploding program grows its
+    /// abstract values' `RExpr` trees without bound, so this sum dwarfs the
+    /// largest legitimate program's even when block, step, and live-object counts
+    /// look comparable. This is the budgeted metric.
+    spec_weight: std::cell::Cell<u64>,
+    /// The weight budget (defaults to `SPEC_WEIGHT_BUDGET`, override with the
+    /// `SPEC_WEIGHT_BUDGET` env var for calibration).
+    spec_budget: u64,
+}
+
+impl Js {
+    /// Total `step` calls consumed by the last `specialize` over this client
+    /// (diagnostic; used to calibrate the budgets).
+    pub fn spec_steps_used(&self) -> u64 {
+        self.spec_steps.get()
+    }
+    /// Residual blocks created by the last `specialize` (diagnostic).
+    pub fn spec_blocks_used(&self) -> u64 {
+        self.spec_blocks.get()
+    }
+    /// Accumulated state weight over the last `specialize` (the budgeted metric).
+    pub fn spec_weight_used(&self) -> u64 {
+        self.spec_weight.get()
+    }
 }
 
 /// A generated residual function: `function __rf{id}(cap.., param..) { body }`.
@@ -1146,6 +1392,13 @@ impl Js {
             residual_try_stack: std::cell::RefCell::new(Vec::new()),
             probing: std::cell::Cell::new(false),
             try_taint: std::cell::Cell::new(false),
+            spec_steps: std::cell::Cell::new(0),
+            spec_blocks: std::cell::Cell::new(0),
+            spec_weight: std::cell::Cell::new(0),
+            spec_budget: std::env::var("SPEC_WEIGHT_BUDGET")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(SPEC_WEIGHT_BUDGET),
             eager_stores: std::cell::Cell::new(false),
         }
     }
@@ -1222,7 +1475,23 @@ impl Js {
             pending_joins: Vec::new(),
             handlers: Vec::new(),
         };
+        // The body is an independent program: specialize it in a clean context.
+        // `residual_fn_for` can be reached *while* the caller is mid-probe or
+        // mid-residual-try (e.g. `f.call(x)` inside a `try`), and the inherited
+        // `halt_at` / `probing` / `eager_stores` / residual-try state would
+        // corrupt the body (it was producing an empty `__rf0`, silently dropping
+        // a throwing call). Save, clear, specialize, restore.
+        let saved_probing = self.probing.replace(false);
+        let saved_taint = self.try_taint.get();
+        let saved_eager = self.eager_stores.replace(false);
+        let saved_halt = std::mem::take(&mut *self.halt_at.borrow_mut());
+        let saved_try_stack = std::mem::take(&mut *self.residual_try_stack.borrow_mut());
         let body = crate::engine::specialize(self, start);
+        self.probing.set(saved_probing);
+        self.try_taint.set(saved_taint);
+        self.eager_stores.set(saved_eager);
+        *self.halt_at.borrow_mut() = saved_halt;
+        *self.residual_try_stack.borrow_mut() = saved_try_stack;
         self.residual_fns.borrow_mut()[rfid].body = body;
         rfid
     }
@@ -1367,6 +1636,7 @@ fn rexpr_contains(e: &RExpr, pred: &dyn Fn(&RExpr) -> bool) -> bool {
             args.iter().any(|a| rexpr_contains(a, pred))
         }
         RExpr::FnRef { caps, .. } => caps.iter().any(|c| rexpr_contains(c, pred)),
+        RExpr::BoundMethod { func, recv } => rexpr_contains(func, pred) || rexpr_contains(recv, pred),
         _ => false,
     }
 }
@@ -1555,6 +1825,26 @@ impl Client for Js {
     }
 
     fn step(&self, s: &mut State, out: &mut Vec<Op>, at_entry: bool) -> Step<Self> {
+        // Resource guard: bound the number of residual blocks so a
+        // branch-exploding program fails with a clear refusal instead of
+        // exhausting memory. Block count (not raw step count) is the bound,
+        // because each block memoizes a full `State`/heap snapshot — that is
+        // where the memory goes. (Not a soundness mechanism; see
+        // `SPEC_BLOCK_BUDGET`.)
+        self.spec_steps.set(self.spec_steps.get() + 1);
+        if at_entry {
+            self.spec_blocks.set(self.spec_blocks.get() + 1);
+            let accum = self.spec_weight.get() + s.weight();
+            self.spec_weight.set(accum);
+            if accum > self.spec_budget {
+                let budget = self.spec_budget;
+                panic!(
+                    "specialization budget exceeded ({budget} residual-expression nodes): the \
+                     program drives the partial evaluator into runaway (branch-exploding) \
+                     residual growth"
+                );
+            }
+        }
         let pc = s.top().pc;
         // The foldability probe only needs to learn *whether* the region taints;
         // once it has, stop immediately instead of specializing the rest.
@@ -1656,14 +1946,51 @@ impl Client for Js {
             }
             Instr::Store(slot) => {
                 let v = s.top_mut().ostack.pop().unwrap();
-                // In a residual `try` body/catch, a top-frame local write emits a
-                // residual assignment in program order (so it commits before any
-                // following may-throw op), then the slot reads back as that var.
-                if self.eager_stores.get() && s.frames.len() == 1 {
+                // Two reasons to commit a top-frame store as a residual assignment
+                // in program order (then read the slot back as that var):
+                //  1. eager_stores: inside a residual `try`, the write must commit
+                //     before any following may-throw op.
+                //  2. a may-throw RHS (`x = a.b`, `x = a[i]` with a runtime/null
+                //     base): the read happens *at the assignment* in the original,
+                //     so its potential exception must be emitted there. Otherwise a
+                //     dead store (`x` never read) drops the throw entirely, and a
+                //     conditionally/late-read store delays it past intervening
+                //     effects — both observable divergences. Emitting the whole RHS
+                //     (not the inner access) keeps short-circuiting intact.
+                let throws = matches!(&v, Abs::Dyn(e) if may_throw(e));
+                let eager = self.eager_stores.get() && s.frames.len() == 1;
+                if eager || throws {
+                    // A may-throw store inside a source `try` must mark that try
+                    // un-foldable (so it is residualized and the exception is
+                    // caught at runtime); without this the emitted throw escapes
+                    // the catch (an over-throw). `forbid_residual_in_try` taints
+                    // the foldability probe; on the residualized path the handler
+                    // set is empty, so this is a no-op there.
+                    if throws {
+                        self.forbid_residual_in_try(s, "a may-throw store");
+                    }
                     let func = s.top().func;
                     let id = self.stable_id(func, *slot);
                     let heap = s.heap.clone();
                     let expr = self.materialize_value(&v, &heap, out);
+                    // Reassigning this slot rebinds its residual var `id`. Any
+                    // operand still on the stack that reads `id` must be snapshotted
+                    // to its pre-reassignment value first: in `a[i]` where `i`
+                    // mutates `a` (`a0[a0--]`), the base `a` was evaluated to
+                    // `Var(id)` and pushed before `i` ran, so without this it would
+                    // read the post-mutation value. (Unlike `freeze_readers`, a bare
+                    // `Var(id)` IS frozen here — it is exactly the stale reference.)
+                    let fi = s.frames.len() - 1;
+                    for k in 0..s.frames[fi].ostack.len() {
+                        if let Abs::Dyn(e) = &s.frames[fi].ostack[k] {
+                            if rexpr_contains(e, &|x| matches!(x, RExpr::Var(v) if *v == id)) {
+                                let fexpr = e.clone();
+                                let fdst = Js::freeze_var(pc, 4096 + k);
+                                out.push(Op::Eval { dst: fdst, expr: fexpr });
+                                s.frames[fi].ostack[k] = Abs::Dyn(RExpr::Var(fdst));
+                            }
+                        }
+                    }
                     out.push(Op::Assign { var: id, expr });
                     s.top_mut().locals[*slot] = Abs::Dyn(RExpr::Var(id));
                 } else {
@@ -1685,8 +2012,23 @@ impl Client for Js {
                 self.push(s, v)
             }
             Instr::Pop => {
-                s.top_mut().ostack.pop();
+                let v = s.top_mut().ostack.pop().unwrap();
+                // A discarded expression that can throw (e.g. `undefined.length;`
+                // as a statement) must still run for effect, in program order, or
+                // the residual would silently skip the exception the original
+                // raises. A discarded value that cannot throw is dropped as before.
+                if let Abs::Dyn(rexpr) = &v {
+                    if may_throw(rexpr) {
+                        self.forbid_residual_in_try(s, "a discarded may-throw expression");
+                        let dst = Js::discard_var(pc);
+                        out.push(Op::Eval { dst, expr: rexpr.clone() });
+                    }
+                }
                 self.advance(s)
+            }
+            Instr::Dup => {
+                let v = s.top().ostack.last().cloned().expect("Dup on empty stack");
+                self.push(s, v)
             }
             Instr::Bin(op) => {
                 let b = s.top_mut().ostack.pop().unwrap();
@@ -1706,19 +2048,18 @@ impl Client for Js {
                 self.push(s, r)
             }
             Instr::NewObject(keys) => {
-                let mut fields = Vec::with_capacity(keys.len());
                 let n = keys.len();
                 let base = s.top().ostack.len() - n;
                 let vals: Vec<Abs> = s.top_mut().ostack.split_off(base);
-                for (k, v) in keys.iter().zip(vals) {
-                    fields.push((k.clone(), v));
-                }
+                let vals = self.emit_maythrow_elems(s, pc, vals, out);
+                let fields = keys.iter().cloned().zip(vals).collect();
                 let addr = s.alloc(HeapObj::Object(fields));
                 self.push(s, Abs::Ref(addr))
             }
             Instr::NewArray(n) => {
                 let base = s.top().ostack.len() - *n;
                 let vals: Vec<Abs> = s.top_mut().ostack.split_off(base);
+                let vals = self.emit_maythrow_elems(s, pc, vals, out);
                 let addr = s.alloc(HeapObj::Array(vals));
                 self.push(s, Abs::Ref(addr))
             }
@@ -1769,8 +2110,10 @@ impl Client for Js {
                 let o = s.top_mut().ostack.pop().unwrap();
                 match o {
                     // Static object: update or append the field in the abstract
-                    // heap (stays scalar-replaced).
+                    // heap (stays scalar-replaced). A may-throw RHS is committed
+                    // first, so a dead object can't drop the exception.
                     Abs::Ref(addr) if matches!(&s.heap[&addr], HeapObj::Object(_)) => {
+                        let v = self.emit_if_maythrow(s, pc, 0, v, out);
                         if let HeapObj::Object(fields) = s.heap.get_mut(&addr).unwrap() {
                             if let Some(slot) = fields.iter_mut().find(|(fk, _)| fk == k) {
                                 slot.1 = v;
@@ -1823,6 +2166,7 @@ impl Client for Js {
                     // key write updates or appends a field (the `obj["k"] = v`
                     // form, equivalent to `obj.k = v`).
                     Abs::Ref(addr) if served => {
+                        let v = self.emit_if_maythrow(s, pc, 0, v, out);
                         match (s.heap.get_mut(&addr).unwrap(), &i) {
                             (HeapObj::Array(elems), Abs::Num(n)) => {
                                 let n = *n as usize;
@@ -2131,6 +2475,14 @@ impl Client for Js {
             }
             Instr::Ret => {
                 let v = s.top_mut().ostack.pop().unwrap_or(Abs::Undef);
+                // The return expression is evaluated *inside* any enclosing `try`,
+                // so a may-throw return value must mark that try un-foldable (it is
+                // residualized and the exception caught at runtime). Taint the
+                // probe before the handlers are discarded below; a no-op when no
+                // handler is active.
+                if matches!(&v, Abs::Dyn(e) if may_throw(e)) {
+                    self.forbid_residual_in_try(s, "a may-throw return value");
+                }
                 // A `return` out of a `try` discards that frame's handlers.
                 let depth = s.frames.len();
                 s.handlers.retain(|h| h.frame_depth < depth);
@@ -2489,8 +2841,24 @@ impl Js {
         }
     }
 
-    /// Evaluate a modeled static method on a global (e.g. `String.fromCharCode`).
+    /// Evaluate a modeled static method on a global (e.g. `String.fromCharCode`,
+    /// `Math.floor`). Returns the folded value, or `None` to residualize (dynamic
+    /// or non-numeric args, or a method this model doesn't cover — which then
+    /// passes through to Node unchanged). Adding a static-method built-in is local:
+    /// add an arm here.
+    ///
+    /// Math: only the **deterministic, integer-result** methods are modeled. In
+    /// the i64 number model every value is an integer, so `floor`/`ceil`/`round`/
+    /// `trunc` are the identity; `abs`/`sign`/`max`/`min` fold over static numbers.
+    /// Float-producing methods (`sqrt`, `pow`, `hypot`, …) and the non-deterministic
+    /// `random` are deliberately NOT modeled — folding them would be unsound or
+    /// lossy, so they pass through to the runtime.
     fn try_builtin_static(&self, obj: &str, method: &str, args: &[Abs]) -> Option<Abs> {
+        // A single static integer argument.
+        let num1 = || match args.first() {
+            Some(Abs::Num(n)) => Some(*n),
+            _ => None,
+        };
         match (obj, method) {
             ("String", "fromCharCode") => {
                 let mut st = String::new();
@@ -2501,6 +2869,31 @@ impl Js {
                     }
                 }
                 Some(Abs::Str(st))
+            }
+            // Integer-preserving rounding is the identity in the i64 model.
+            ("Math", "floor") | ("Math", "ceil") | ("Math", "round") | ("Math", "trunc") => {
+                num1().map(Abs::Num)
+            }
+            // `checked_abs` residualizes the lone overflow case (`abs(i64::MIN)`),
+            // whose true JS value is a float we can't represent.
+            ("Math", "abs") => num1()?.checked_abs().map(Abs::Num),
+            ("Math", "sign") => num1().map(|n| Abs::Num(n.signum())),
+            ("Math", "max") | ("Math", "min") => {
+                // `max()`/`min()` with no args are ±Infinity (not representable);
+                // require at least one arg and all-static-numeric args.
+                let mut nums = Vec::with_capacity(args.len());
+                for a in args {
+                    match a {
+                        Abs::Num(n) => nums.push(*n),
+                        _ => return None,
+                    }
+                }
+                let v = if method == "max" {
+                    nums.iter().copied().max()?
+                } else {
+                    nums.iter().copied().min()?
+                };
+                Some(Abs::Num(v))
             }
             _ => None,
         }
@@ -2670,6 +3063,31 @@ impl Js {
         let args: Vec<Abs> = s.top_mut().ostack.split_off(base);
         let callee = s.top_mut().ostack.pop().unwrap();
 
+        // A pending method-access callee that the freeze pass snapshotted (its
+        // receiver was preserved as a `BoundMethod`): emit `func.call(recv, args)`.
+        // This invokes the snapshotted method `func` with the snapshotted receiver
+        // `recv` as `this` — the universal "uncurry this" form, correct even when
+        // the method is itself `.call`/`.apply` (`(f.call).call(f, a, b)` ===
+        // `f.call(a, b)`). Both `func` and `recv` are already frozen temps/atoms,
+        // so neither needs escaping.
+        if let Abs::Dyn(RExpr::BoundMethod { func, recv }) = &callee {
+            let callee_fn = RExpr::Get(Box::new((**func).clone()), "call".to_string());
+            let recv = (**recv).clone();
+            self.forbid_residual_in_try(s, "an unmodeled call");
+            self.freeze_before_opaque_call(s, pc, out);
+            let mut escaped = std::collections::HashSet::new();
+            let mut call_args = Vec::with_capacity(args.len() + 1);
+            call_args.push(recv);
+            for a in &args {
+                call_args.push(self.operand_rexpr(s, a, &mut escaped, out));
+            }
+            let dst = Js::opaque_call_var(pc);
+            out.push(Op::Eval { dst, expr: RExpr::Call(Box::new(callee_fn), call_args) });
+            s.top_mut().pc += 1;
+            s.top_mut().ostack.push(Abs::Dyn(RExpr::Var(dst)));
+            return Step::Continue;
+        }
+
         // A modeled built-in bound method (e.g. `TextDecoder.decode`): fold to a
         // constant when its arguments are static.
         if let Abs::Ref(addr) = &callee {
@@ -2813,6 +3231,19 @@ impl Js {
         if s.frames.len() >= MAX_DEPTH {
             panic!("inlining depth exceeded (non-terminating static recursion?)");
         }
+
+        // Arguments are evaluated even when the inlined callee ignores them (an
+        // unused parameter, an extra arg reachable only via `arguments`, or a body
+        // that folds away entirely). Commit any may-throw argument for effect in
+        // program order so its exception is not dropped (seed 10125:
+        // `r0(3, input[input[-31]], 8)` with the result dead and `r0` ignoring its
+        // args). The opaque-call arms already keep arg throws (they reside in the
+        // residual call); only this inline path can drop them.
+        let args: Vec<Abs> = args
+            .into_iter()
+            .enumerate()
+            .map(|(i, a)| self.emit_if_maythrow(s, pc, i, a, out))
+            .collect();
 
         let mut locals = vec![Abs::Undef; self.nslots[fid]];
         for (i, c) in captured.into_iter().enumerate() {
@@ -3192,6 +3623,44 @@ impl Js {
         }
     }
 
+    /// At an array/object literal, emit each may-throw element for effect in
+    /// left-to-right order (single-evaluated into a stable temp, the element then
+    /// reading back as that temp). JS evaluates literal elements eagerly at the
+    /// literal, so the exception must be raised there — otherwise a literal that
+    /// folds (`[x, a.b].length`) or is discarded (a dead `var a = {k: a.b}`) drops
+    /// the throw the original raises. A static element (no `Dyn`) cannot throw and
+    /// is left untouched, so fully-static literals still fold.
+    ///
+    /// Known gap: a may-throw element that precedes a *separately-effectful*
+    /// element in the same literal (`[a.b, sideEffectCall()]`) is emitted after
+    /// that effect rather than before it (the effectful element was emitted during
+    /// its own evaluation, before this runs). Correct element-eval-order emission
+    /// would require a definitely-evaluated-context flag in the lowering; no test
+    /// hits this today.
+    fn emit_maythrow_elems(&self, s: &mut State, pc: usize, vals: Vec<Abs>, out: &mut Vec<Op>) -> Vec<Abs> {
+        vals.into_iter()
+            .enumerate()
+            .map(|(i, v)| self.emit_if_maythrow(s, pc, i, v, out))
+            .collect()
+    }
+
+    /// If `v` is a may-throw residual value, emit it for effect (single-evaluated
+    /// into a stable temp keyed by (pc, i)) and return the temp; otherwise return
+    /// `v` unchanged. Used wherever a value is *stored into the abstract heap*
+    /// (array/object element, scalar-replaced field/index write): the heap slot
+    /// may never be materialized (a dead object), so the exception the read
+    /// raises in the original must be committed here, at the write.
+    fn emit_if_maythrow(&self, s: &mut State, pc: usize, i: usize, v: Abs, out: &mut Vec<Op>) -> Abs {
+        if matches!(&v, Abs::Dyn(e) if may_throw(e)) {
+            self.forbid_residual_in_try(s, "a may-throw heap write/element");
+            let dst = Js::elem_var(pc, i);
+            out.push(Op::Eval { dst, expr: v.to_rexpr() });
+            Abs::Dyn(RExpr::Var(dst))
+        } else {
+            v
+        }
+    }
+
     /// Stable residual variable for the result of an unmodeled call at this
     /// bytecode pc. Keyed by pc so a call in a loop reuses one temp (reassigned
     /// each iteration) and specialization converges. Disjoint from the other
@@ -3204,6 +3673,21 @@ impl Js {
     /// Keyed by pc so a snapshot in a loop reuses one temp and converges.
     fn snapshot_var(pc: usize) -> usize {
         600_000 + pc
+    }
+
+    /// Stable residual temp for a discarded-but-may-throw expression statement
+    /// (`Instr::Pop`). Keyed by pc so a discard in a loop reuses one temp.
+    fn discard_var(pc: usize) -> usize {
+        700_000 + pc
+    }
+
+    /// Stable residual temp for a may-throw element of an array/object literal
+    /// (`Instr::NewArray`/`NewObject`), single-evaluated at construction so its
+    /// exception is preserved even when the literal is discarded or folds. Keyed
+    /// by (pc, element index); placed well above the `freeze_var` band so it
+    /// cannot collide (pc is far below 1e6 in practice, element index below 256).
+    fn elem_var(pc: usize, i: usize) -> usize {
+        1_000_000_000 + pc * 256 + i
     }
 
     /// Stable residual temp for freezing a stale reader at a mutation site.
@@ -3249,8 +3733,31 @@ impl Js {
                 if !rexpr_is_atom(e) && rexpr_contains(e, reads) {
                     let expr = e.clone();
                     let dst = Js::freeze_var(pc, 4096 + i);
+                    // If this operand is a pending method-access callee
+                    // (`recv.m` / `recv[i]`) with an *atom* receiver, snapshot the
+                    // method VALUE to the temp (a value use then sees the same
+                    // pre-call snapshot a plain freeze would give) but keep the
+                    // receiver in a `BoundMethod` so a later call preserves `this`.
+                    // Freezing it to a bare `Var` would detach the receiver and the
+                    // call would run with `this === undefined` (over-throw for
+                    // `.call`/`.apply`, wrong `this` otherwise). The atom-receiver
+                    // restriction keeps the receiver stable without a second temp
+                    // (the `freeze_var` id space has no third band); a non-atom
+                    // receiver falls back to the plain freeze.
+                    let bound_recv = match &expr {
+                        RExpr::Get(base, _) | RExpr::Index(base, _) if rexpr_is_atom(base) => {
+                            Some((**base).clone())
+                        }
+                        _ => None,
+                    };
                     out.push(Op::Eval { dst, expr });
-                    s.frames[fi].ostack[i] = Abs::Dyn(RExpr::Var(dst));
+                    s.frames[fi].ostack[i] = match bound_recv {
+                        Some(recv) => Abs::Dyn(RExpr::BoundMethod {
+                            func: Box::new(RExpr::Var(dst)),
+                            recv: Box::new(recv),
+                        }),
+                        None => Abs::Dyn(RExpr::Var(dst)),
+                    };
                 }
             }
         }
@@ -3636,6 +4143,10 @@ impl Js {
                 Instr::Store(slot) => locals[*slot] = ostack.pop().unwrap(),
                 Instr::Pop => {
                     ostack.pop();
+                }
+                Instr::Dup => {
+                    let v = ostack.last().cloned().unwrap();
+                    ostack.push(v);
                 }
                 Instr::Bin(op) => {
                     let b = ostack.pop().unwrap();
@@ -4117,10 +4628,12 @@ fn eval_rexpr(e: &RExpr, store: &HashMap<usize, JsVal>, heap: &[CHeap]) -> JsVal
             "the Rust residual interpreter cannot resolve the runtime global `{name}`; \
              validate pass-through programs with the Node oracle"
         ),
-        RExpr::Get(..) | RExpr::Call(..) | RExpr::New(..) | RExpr::FnRef { .. } => panic!(
-            "the Rust residual interpreter cannot evaluate an unmodeled property \
-             read / call / new / residual function; validate with the Node oracle"
-        ),
+        RExpr::Get(..) | RExpr::Call(..) | RExpr::New(..) | RExpr::FnRef { .. } | RExpr::BoundMethod { .. } => {
+            panic!(
+                "the Rust residual interpreter cannot evaluate an unmodeled property \
+                 read / call / new / residual function / bound method; validate with the Node oracle"
+            )
+        }
     }
 }
 
@@ -4141,7 +4654,14 @@ pub fn render_opaque(op: &str, parts: &[String]) -> String {
 pub fn rexpr_is_ref_like(e: &RExpr) -> bool {
     matches!(
         e,
-        RExpr::Global(_) | RExpr::Var(_) | RExpr::Get(..) | RExpr::Call(..) | RExpr::This
+        RExpr::Global(_)
+            | RExpr::Var(_)
+            | RExpr::Get(..)
+            | RExpr::Call(..)
+            | RExpr::This
+            // Decays to its `func` (always a frozen `Var`), so it renders as a
+            // ref-like primary — never needs wrapping as a member base.
+            | RExpr::BoundMethod { .. }
     )
 }
 
@@ -4195,6 +4715,9 @@ fn fmt_rexpr(e: &RExpr) -> String {
             let cs: Vec<String> = caps.iter().map(fmt_rexpr).collect();
             render_fnref(*rfid, &cs)
         }
+        // A bound method decays to its (snapshotted) function value when not in
+        // call position; only `do_call` reattaches the receiver.
+        RExpr::BoundMethod { func, .. } => fmt_rexpr(func),
     }
 }
 

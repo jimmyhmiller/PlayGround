@@ -11,22 +11,22 @@
 // A fallible division: dividing by zero yields an error code instead of
 // trapping.
 def safe_div(a: Int, b: Int) -> Result<Int, Int> =
-    if b == 0 { Err(404) } else { Ok(a / b) }
+    if b == 0 { Result::Err(404) } else { Result::Ok(a / b) }
 
 // Chains two fallible steps with `?`. If either errors, `compute`
 // returns that Err immediately without running the rest.
 def compute(x: Int, d: Int) -> Result<Int, Int> = {
     let q = safe_div(x, d)?;
     let r = safe_div(q + 6, 2)?;
-    Ok(r + 1)
+    Result::Ok(r + 1)
 }
 
 // Collapse the Result to an Int for printing: negate the error code so
 // the two outcomes are easy to tell apart.
 def show(x: Int, d: Int) -> Int =
     match compute(x, d) {
-        Ok(v) => v,
-        Err(code) => 0 - code
+        Result::Ok(v) => v,
+        Result::Err(code) => 0 - code
     }
 
 def main() -> Int = {

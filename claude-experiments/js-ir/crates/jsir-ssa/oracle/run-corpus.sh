@@ -8,6 +8,7 @@ REPO="$(cd "$HERE/../../.." && pwd)"   # crates/jsir-ssa/oracle -> repo root
 
 export REACT_CC="$HERE/react-cc.js"
 export REACT_FIXTURES="$HERE/fixtures"
+export REACT_CACHE_DIR="${REACT_CACHE_DIR:-$HERE/.react-cache}"
 
 cd "$REPO"
 exec cargo run --release -q -p jsir-ssa --example corpus -- "$@"

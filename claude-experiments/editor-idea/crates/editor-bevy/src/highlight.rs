@@ -85,6 +85,66 @@ impl SyntaxPalette {
     pub fn color_for(&self, kind: HighlightKind) -> Color {
         self.colors[kind.slot()]
     }
+
+    /// Build a palette from a theme's `SYNTAX_*` tokens. `rev` starts at
+    /// 0; callers that cache should stamp their own rev.
+    pub fn from_theme(theme: &Theme) -> Self {
+        let lin = |id| Color::LinearRgba(theme.color(id));
+        Self {
+            colors: [
+                lin(tokens::SYNTAX_DEFAULT),
+                lin(tokens::SYNTAX_KEYWORD),
+                lin(tokens::SYNTAX_STRING),
+                lin(tokens::SYNTAX_COMMENT),
+                lin(tokens::SYNTAX_FUNCTION),
+                lin(tokens::SYNTAX_TYPE),
+                lin(tokens::SYNTAX_ATTRIBUTE),
+                lin(tokens::SYNTAX_CONSTANT),
+                lin(tokens::SYNTAX_OPERATOR),
+                lin(tokens::SYNTAX_PUNCTUATION),
+                lin(tokens::SYNTAX_VARIABLE),
+                lin(tokens::SYNTAX_PROPERTY),
+                lin(tokens::SYNTAX_LABEL),
+                lin(tokens::SYNTAX_ESCAPE),
+                lin(tokens::SYNTAX_CONSTRUCTOR),
+            ],
+            rev: 0,
+        }
+    }
+}
+
+/// Per-project syntax palettes, so each editor pane highlights in its own
+/// project's theme (cube overview + flat). Rebuilt from
+/// [`style_bevy::ProjectThemes`] whenever that cache moves; `rev` bumps on
+/// every rebuild so line renderers re-emit spans. Editors whose project
+/// isn't cached fall back to the global [`SyntaxPalette`].
+#[derive(Resource, Default)]
+pub struct ProjectSyntaxPalettes {
+    by_project: std::collections::HashMap<u64, SyntaxPalette>,
+    rev: u64,
+}
+
+impl ProjectSyntaxPalettes {
+    pub fn get(&self, project_id: u64) -> Option<&SyntaxPalette> {
+        self.by_project.get(&project_id)
+    }
+}
+
+fn refresh_project_palettes(
+    themes: Res<style_bevy::ProjectThemes>,
+    mut palettes: ResMut<ProjectSyntaxPalettes>,
+) {
+    if !themes.is_changed() {
+        return;
+    }
+    palettes.rev = palettes.rev.wrapping_add(1);
+    let rev = palettes.rev;
+    palettes.by_project.clear();
+    for (pid, theme) in themes.iter() {
+        let mut p = SyntaxPalette::from_theme(theme);
+        p.rev = rev;
+        palettes.by_project.insert(*pid, p);
+    }
 }
 
 /// Convenience for callers that just need the palette singleton. The
@@ -138,8 +198,9 @@ pub struct HighlightPlugin;
 impl Plugin for HighlightPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SyntaxPalette>()
+            .init_resource::<ProjectSyntaxPalettes>()
             .add_systems(Startup, refresh_syntax_palette)
-            .add_systems(Update, refresh_on_theme_changed);
+            .add_systems(Update, (refresh_on_theme_changed, refresh_project_palettes));
     }
 }
 

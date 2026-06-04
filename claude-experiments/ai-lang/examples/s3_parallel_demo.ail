@@ -16,7 +16,7 @@ def key_for(prefix: String, i: Int) -> String = str3(prefix, int_to_string(i), "
 def content_for(i: Int) -> String = str3("chunk-", int_to_string(i), "-payload")
 
 def keys_n(prefix: String, i: Int, n: Int) -> List<String> =
-    if i >= n { Nil } else { Cons(ListCell { head: key_for(prefix, i), tail: keys_n(prefix, i + 1, n) }) }
+    if i >= n { List::Nil } else { List::Cons(ListCell { head: key_for(prefix, i), tail: keys_n(prefix, i + 1, n) }) }
 
 // Sequential setup: write the N objects.
 def put_n(region: String, bucket: String, prefix: String, i: Int, n: Int,
@@ -41,8 +41,8 @@ def del_n(region: String, bucket: String, prefix: String, i: Int, n: Int,
 // Count concurrent GET responses that returned 200 with the expected body.
 def count_ok(resps: List<HttpResponse>, i: Int) -> Int =
     match resps {
-        Nil => 0,
-        Cons(cell) => {
+        List::Nil => 0,
+        List::Cons(cell) => {
             let ok = if cell.head.status == 200 {
                 if string_eq(cell.head.body, content_for(i)) { 1 } else { 0 }
             } else { 0 };

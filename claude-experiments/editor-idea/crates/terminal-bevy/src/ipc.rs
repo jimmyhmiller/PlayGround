@@ -150,6 +150,12 @@ pub enum IpcRequest {
         #[serde(default)]
         from_cwd: Option<PathBuf>,
     },
+    /// Capture the primary window to a PNG at `path`, rendered by the app
+    /// itself (Bevy's `Screenshot`), so it works without macOS screen-
+    /// recording permission and never steals focus from the user. Wire
+    /// form: `{"action":"screenshot","path":"/tmp/x.png"}`. Fire-and-
+    /// forget; the file appears a frame or two later.
+    Screenshot { path: PathBuf },
 }
 
 /// One accepted IPC connection: the parsed request plus the open socket,

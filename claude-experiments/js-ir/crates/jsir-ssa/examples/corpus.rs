@@ -29,8 +29,10 @@
 //! Env:
 //!   REACT_FIXTURES  fixtures dir (default: cloned react-rust path under /tmp)
 //!   REACT_CC        react-compiler-e2e binary (default: cloned build under /tmp)
+//!   REACT_CACHE_DIR optional dir for cached React oracle stdout/failures
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::io::Write;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -51,6 +53,10 @@ fn react_cli() -> PathBuf {
     "/tmp/react-rust/compiler/target/release/react-compiler-e2e".into()
 }
 
+fn react_cache_dir() -> Option<PathBuf> {
+    std::env::var("REACT_CACHE_DIR").ok().map(PathBuf::from)
+}
+
 /// `(cache_size, memo_block_count)` extracted from compiled output, or None if
 /// the output is not memoized (no `_c(` cache declaration).
 fn structure(code: &str) -> Option<(usize, usize)> {
@@ -65,7 +71,11 @@ fn structure(code: &str) -> Option<(usize, usize)> {
     // A memo block is `if (` then any number of `(` then a cache check `$[`.
     let block_count = code
         .match_indices("if (")
-        .filter(|(i, _)| code[i + 4..].trim_start_matches(['(', ' ']).starts_with("$["))
+        .filter(|(i, _)| {
+            code[i + 4..]
+                .trim_start_matches(['(', ' '])
+                .starts_with("$[")
+        })
         .count();
     Some((n, block_count))
 }
@@ -107,6 +117,100 @@ fn run_react(cli: &Path, src: &str) -> Side {
         Some((n, b)) => Side::Memo(n, b),
         None => Side::NoMemo,
     }
+}
+
+fn fixture_cache_stem(path: &Path) -> String {
+    path.file_name()
+        .unwrap()
+        .to_string_lossy()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn side_from_react_stdout(code: &str) -> Side {
+    match structure(code) {
+        Some((n, b)) => Side::Memo(n, b),
+        None => Side::NoMemo,
+    }
+}
+
+fn run_react_cached(cli: &Path, path: &Path, src: &str, cache_dir: Option<&Path>) -> Side {
+    let Some(cache_dir) = cache_dir else {
+        return run_react(cli, src);
+    };
+    let stem = fixture_cache_stem(path);
+    let ok_path = cache_dir.join(format!("{stem}.stdout.js"));
+    let fail_path = cache_dir.join(format!("{stem}.fail"));
+    if let Ok(code) = fs::read_to_string(&ok_path) {
+        return side_from_react_stdout(&code);
+    }
+    if fail_path.exists() {
+        return Side::Fail("react-cli-error".into());
+    }
+
+    let _ = fs::create_dir_all(cache_dir);
+    let mut child = match Command::new(cli)
+        .args(["--frontend", "swc", "--filename", "t.jsx"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return Side::Fail(format!("spawn: {e}")),
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(src.as_bytes());
+    }
+    let out = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return Side::Fail(format!("wait: {e}")),
+    };
+    if !out.status.success() {
+        let _ = fs::write(&fail_path, b"react-cli-error\n");
+        return Side::Fail("react-cli-error".into());
+    }
+    let code = String::from_utf8_lossy(&out.stdout).to_string();
+    let _ = fs::write(&ok_path, &code);
+    side_from_react_stdout(&code)
+}
+
+fn react_output_cached(cli: &Path, path: &Path, src: &str, cache_dir: Option<&Path>) -> String {
+    let Some(cache_dir) = cache_dir else {
+        return react_output_uncached(cli, src);
+    };
+    let stem = fixture_cache_stem(path);
+    let ok_path = cache_dir.join(format!("{stem}.stdout.js"));
+    if let Ok(code) = fs::read_to_string(&ok_path) {
+        return code;
+    }
+    let side = run_react_cached(cli, path, src, Some(cache_dir));
+    match side {
+        Side::Memo(_, _) | Side::NoMemo => fs::read_to_string(&ok_path).unwrap_or_default(),
+        Side::Fail(e) => format!("<react failed: {e}>"),
+    }
+}
+
+fn react_output_uncached(cli: &Path, src: &str) -> String {
+    Command::new(cli)
+        .args(["--frontend", "swc", "--filename", "t.jsx"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .and_then(|mut c| {
+            c.stdin.take().unwrap().write_all(src.as_bytes())?;
+            c.wait_with_output()
+        })
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_else(|e| format!("<react failed: {e}>"))
 }
 
 fn run_ours(src: &str) -> Side {
@@ -214,8 +318,12 @@ fn main() {
 
     let dir = fixtures_dir();
     let cli = react_cli();
+    let cache_dir = react_cache_dir();
     if !cli.exists() {
-        eprintln!("react-compiler-e2e not found at {} (set REACT_CC)", cli.display());
+        eprintln!(
+            "react-compiler-e2e not found at {} (set REACT_CC)",
+            cli.display()
+        );
         std::process::exit(2);
     }
     let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
@@ -231,23 +339,13 @@ fn main() {
             let name = p.file_name().unwrap().to_string_lossy().to_string();
             if name.contains(target.as_str()) {
                 let src = std::fs::read_to_string(p).unwrap();
-                let react_out = Command::new(&cli)
-                    .args(["--frontend", "swc", "--filename", "t.jsx"])
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .and_then(|mut c| {
-                        c.stdin.take().unwrap().write_all(src.as_bytes())?;
-                        c.wait_with_output()
-                    })
-                    .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
-                    .unwrap_or_else(|e| format!("<react failed: {e}>"));
-                let ours_out = match catch_unwind(AssertUnwindSafe(|| jsir_ssa::codegen::compile(&src))) {
-                    Ok(Ok(c)) => c,
-                    Ok(Err(e)) => format!("<ours error: {e}>"),
-                    Err(_) => "<ours PANIC>".into(),
-                };
+                let react_out = react_output_cached(&cli, p, &src, cache_dir.as_deref());
+                let ours_out =
+                    match catch_unwind(AssertUnwindSafe(|| jsir_ssa::codegen::compile(&src))) {
+                        Ok(Ok(c)) => c,
+                        Ok(Err(e)) => format!("<ours error: {e}>"),
+                        Err(_) => "<ours PANIC>".into(),
+                    };
                 println!("== {name} ==\n--- source ---\n{src}\n--- react ---\n{react_out}\n--- ours ---\n{ours_out}");
                 return;
             }
@@ -267,7 +365,7 @@ fn main() {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let react = run_react(&cli, &src);
+        let react = run_react_cached(&cli, p, &src, cache_dir.as_deref());
         let ours = run_ours(&src);
         entries.push(Entry {
             name: p.file_name().unwrap().to_string_lossy().to_string(),
@@ -368,18 +466,43 @@ fn main() {
         return;
     }
 
-    println!("== React-Compiler corpus parity ({} .js fixtures) ==", entries.len());
+    println!(
+        "== React-Compiler corpus parity ({} .js fixtures) ==",
+        entries.len()
+    );
     println!("  React-memoized universe (excl. parser-skips): {universe}");
-    println!("    agree          {:5}  ({:.1}% of universe)", agree.len(), agreement_pct);
-    println!("    mismatch       {:5}  (both memoize, structure differs)", mismatch.len());
-    println!("    react_only     {:5}  (React memoizes, we don't — coverage gap)", react_only.len());
-    println!("  parser_skip      {:5}  (React memoizes, SWC can't parse — authorized skip)", react_only_parser_skip.len());
-    println!("  ours_only        {:5}  (we memoize, React doesn't — over-memoization)", ours_only.len());
+    println!(
+        "    agree          {:5}  ({:.1}% of universe)",
+        agree.len(),
+        agreement_pct
+    );
+    println!(
+        "    mismatch       {:5}  (both memoize, structure differs)",
+        mismatch.len()
+    );
+    println!(
+        "    react_only     {:5}  (React memoizes, we don't — coverage gap)",
+        react_only.len()
+    );
+    println!(
+        "  parser_skip      {:5}  (React memoizes, SWC can't parse — authorized skip)",
+        react_only_parser_skip.len()
+    );
+    println!(
+        "  ours_only        {:5}  (we memoize, React doesn't — over-memoization)",
+        ours_only.len()
+    );
     println!("  neither          {:5}", neither);
-    println!("  panic (overlay)  {:5}  (our compile panicked — real bug)", panic.len());
+    println!(
+        "  panic (overlay)  {:5}  (our compile panicked — real bug)",
+        panic.len()
+    );
 
     if !mismatch.is_empty() {
-        println!("\n-- structure mismatches (first 25 of {}) --", mismatch.len());
+        println!(
+            "\n-- structure mismatches (first 25 of {}) --",
+            mismatch.len()
+        );
         for (n, r, o) in mismatch.iter().take(25) {
             println!("  react(cache,blocks)={r:?}  ours={o:?}   {n}");
         }

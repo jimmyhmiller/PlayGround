@@ -955,6 +955,7 @@ fn rerender_widgets(
     pane_font: Res<PaneFont>,
     metrics: Res<PaneFontMetrics>,
     theme: Res<style_bevy::Theme>,
+    themes: Res<style_bevy::ProjectThemes>,
     fonts: Res<style_bevy::FontRegistry>,
     time: Res<Time>,
     pane_zoom: Res<pane_bevy::PaneZoom>,
@@ -972,11 +973,14 @@ fn rerender_widgets(
         Option<&WidgetEditMode>,
         Option<&WidgetInputFocus>,
         Option<&WidgetHover>,
+        Option<&pane_bevy::PaneProject>,
     )>,
     children_q: Query<&Children>,
 ) {
-    let theme_changed = theme.is_changed();
-    let palette = render::WidgetPalette::from_theme(&theme);
+    // Per-project theming: each widget renders in its OWN project's theme
+    // (so the cube overview shows every project faithfully), falling back
+    // to the global/active theme when its project isn't cached.
+    let theme_changed = theme.is_changed() || themes.is_changed();
     // Caret blink: visible during the first half of each 1s cycle.
     let blink_phase = time.elapsed_secs().rem_euclid(1.0);
     let caret_visible = blink_phase < 0.5;
@@ -991,6 +995,7 @@ fn rerender_widgets(
         edit,
         input_focus,
         hover,
+        proj,
     ) in &mut q
     {
         if kind.0 != PANE_KIND {
@@ -999,6 +1004,11 @@ fn rerender_widgets(
         if edit.is_some() {
             continue;
         }
+
+        // This widget's project theme (falls back to the active theme).
+        let w_theme: &style_bevy::Theme =
+            proj.and_then(|p| themes.get(p.0)).unwrap_or(&theme);
+        let palette = render::WidgetPalette::from_theme(w_theme);
 
         // PaneRect is now canvas-units; the pane entity Transform
         // applies zoom. Lay out at (rect.size - chrome) canvas-units.
@@ -1058,7 +1068,7 @@ fn rerender_widgets(
                 content_root: root.0,
                 content_size,
                 palette: palette.clone(),
-                theme: theme.clone(),
+                theme: w_theme.clone(),
                 fonts: fonts.clone(),
                 focused_input: input_focus.cloned(),
                 caret_visible,

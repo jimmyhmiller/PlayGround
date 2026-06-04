@@ -30,8 +30,8 @@ use std::sync::OnceLock;
 
 use crate::active::ActiveProject;
 use crate::material::PRESET_SOURCE;
-use crate::state::StyleDataDir;
-use crate::theme::{theme_path_for_project, ActiveThemePath};
+use crate::state::{ProjectStyleState, StyleDataDir};
+use crate::theme::{load_theme, theme_path_for_project, ActiveThemePath, Theme};
 
 /// One discovered preset on disk.
 #[derive(Clone, Debug)]
@@ -55,8 +55,12 @@ pub struct StylePresetRegistry {
     pub presets: Vec<StylePreset>,
 }
 
-/// Active preset name. `None` means "use the per-project theme."
-/// Persisted to disk so it survives restarts.
+/// Preset of the *currently active project*. `None` means "no preset —
+/// use that project's theme.rhai (or the default)." This is a derived
+/// mirror: it's reloaded from the active project's [`ProjectStyleState`]
+/// on every project switch (`sync_active_preset_from_project`) and
+/// written back there when the user picks a style (`drain_preset_messages`).
+/// The selection persists per-project via `state.json`, not globally.
 #[derive(Resource, Default, Debug, Clone)]
 pub struct ActiveStylePreset(pub Option<String>);
 
@@ -68,15 +72,19 @@ impl Plugin for PresetsPlugin {
             .init_resource::<ActiveStylePreset>()
             .add_systems(
                 Startup,
-                (seed_default_presets, discover_presets, load_active_preset).chain(),
+                (seed_default_presets, discover_presets).chain(),
             )
-            // Runs AFTER terminal-bevy's `mirror_active_project_to_style`
-            // so we can override its choice of ActiveThemePath when a
-            // preset is set. When preset is cleared, we restore the
-            // per-project theme path ourselves.
+            // `sync_active_preset_from_project` loads the active project's
+            // saved preset on every switch; `drain_preset_messages` writes
+            // the user's pick back to that project. Both feed
+            // `ActiveStylePreset`, which `sync_active_theme_from_preset`
+            // then turns into the `ActiveThemePath` (the SOLE owner of it —
+            // terminal-bevy no longer writes that resource). Chained so the
+            // ordering within the frame is deterministic.
             .add_systems(
                 Update,
                 (
+                    sync_active_preset_from_project,
                     drain_preset_messages,
                     sync_active_theme_from_preset,
                     sync_active_chrome_shader_from_preset,
@@ -91,14 +99,6 @@ fn styles_dir() -> Option<PathBuf> {
     let mut p = PathBuf::from(home);
     p.push(".terminal-bevy");
     p.push("styles");
-    Some(p)
-}
-
-fn active_preset_file() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME")?;
-    let mut p = PathBuf::from(home);
-    p.push(".terminal-bevy");
-    p.push("active_style");
     Some(p)
 }
 
@@ -537,22 +537,58 @@ fn discover_presets(mut registry: ResMut<StylePresetRegistry>) {
     publish_names(&registry.presets);
 }
 
-fn load_active_preset(mut active: ResMut<ActiveStylePreset>) {
-    let Some(path) = active_preset_file() else { return };
-    let Ok(body) = std::fs::read_to_string(&path) else { return };
-    let trimmed = body.trim();
-    if trimmed.is_empty() {
-        active.0 = None;
-    } else {
-        active.0 = Some(trimmed.to_string());
-    }
+/// Resolve a project's effective theme path: its preset's `theme.rhai`
+/// if it has a preset, else its own `theme.rhai`. `None` if neither is
+/// determinable (no data dir).
+pub fn theme_path_for(
+    project_id: u64,
+    style_state: &ProjectStyleState,
+    registry: &StylePresetRegistry,
+    data_dir: Option<&StyleDataDir>,
+) -> Option<std::path::PathBuf> {
+    style_state
+        .preset_of(project_id)
+        .and_then(|name| {
+            registry
+                .presets
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.theme_path.clone())
+        })
+        .or_else(|| data_dir.map(|d| theme_path_for_project(d, project_id)))
 }
 
-fn persist_active_preset(name: Option<&str>) {
-    let Some(path) = active_preset_file() else { return };
-    let body = name.unwrap_or("");
-    if let Err(e) = std::fs::write(&path, body) {
-        warn!("style presets: persist {}: {}", path.display(), e);
+/// Resolve and load a project's effective theme (preset → its theme.rhai
+/// → default). Loads from disk, so callers should cache the result (see
+/// [`crate::theme::ProjectThemes`]).
+pub fn resolve_project_theme(
+    project_id: u64,
+    style_state: &ProjectStyleState,
+    registry: &StylePresetRegistry,
+    data_dir: Option<&StyleDataDir>,
+) -> Theme {
+    theme_path_for(project_id, style_state, registry, data_dir)
+        .filter(|p| p.exists())
+        .and_then(|p| load_theme(&p).ok())
+        .unwrap_or_default()
+}
+
+/// Keep [`ActiveStylePreset`] equal to the active project's saved preset.
+/// Evaluated every frame rather than only on project-change: the host's
+/// switch hook (`load_project_state`) and this system live in different
+/// crates with no ordering guarantee, so a one-shot would permanently
+/// miss the preset on the frame it loses that race. The `!=` guard keeps
+/// change-detection quiet, and `drain_preset_messages` runs right after
+/// in the chain so a user's pick (which writes the project's state) is
+/// never clobbered.
+fn sync_active_preset_from_project(
+    project: Res<ActiveProject>,
+    state: Res<ProjectStyleState>,
+    mut active: ResMut<ActiveStylePreset>,
+) {
+    let want = project.0.and_then(|pid| state.preset_of(pid));
+    if active.0 != want {
+        active.0 = want;
     }
 }
 
@@ -687,7 +723,11 @@ pub fn register_preset_host_fns(engine: &mut Engine) {
     });
 }
 
-fn drain_preset_messages(mut active: ResMut<ActiveStylePreset>) {
+fn drain_preset_messages(
+    mut active: ResMut<ActiveStylePreset>,
+    project: Res<ActiveProject>,
+    mut state: ResMut<ProjectStyleState>,
+) {
     let Some(rx) = PRESET_RX.get() else { return };
     let Ok(rx) = rx.lock() else { return };
     let mut applied: Option<Option<String>> = None;
@@ -697,7 +737,12 @@ fn drain_preset_messages(mut active: ResMut<ActiveStylePreset>) {
     if let Some(new_value) = applied {
         if active.0 != new_value {
             active.0 = new_value.clone();
-            persist_active_preset(new_value.as_deref());
+            // Persist per-project: `set_active_style` applies to whichever
+            // project is active, and only that project. `save_dirty_tick`
+            // flushes it to the project's state.json.
+            if let Some(pid) = project.0 {
+                state.set_preset(pid, new_value);
+            }
         }
     }
 }

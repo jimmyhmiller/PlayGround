@@ -391,6 +391,7 @@ impl Plugin for TerminalPlugin {
                 Update,
                 (
                     mirror_active_project_to_style,
+                    maintain_project_themes,
                     mirror_focus_to_style,
                     handle_open_dev_panel,
                     handle_open_style_picker,
@@ -542,6 +543,7 @@ fn drain_ipc_open_requests(
     mut projects: ResMut<Projects>,
     mut drawer: ResMut<drawer::Drawer>,
     mut prism: ResMut<cube::Prism>,
+    mut commands: Commands,
 ) {
     let Some(inbox) = inbox else { return };
     while let Ok(msg) = inbox.0.try_recv() {
@@ -756,6 +758,15 @@ fn drain_ipc_open_requests(
                 };
 
                 drawer.push(kind, row_title, reason, config, project_id);
+            }
+            ipc::IpcRequest::Screenshot { path } => {
+                // Render-side capture: spawn a one-shot Screenshot entity
+                // and save it to disk when the GPU readback lands. Works
+                // headlessly and never grabs the user's screen.
+                use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+                commands
+                    .spawn(Screenshot::primary_window())
+                    .observe(save_to_disk(path));
             }
         }
     }
@@ -1991,6 +2002,7 @@ fn sync_dock_badge(_projects: Res<Projects>, _last: Local<u64>) {}
 fn sync_grid(
     metrics: Res<MonoMetrics>,
     theme: Res<style_bevy::Theme>,
+    themes: Res<style_bevy::ProjectThemes>,
     mut atlas: ResMut<GlyphAtlas>,
     mut images: ResMut<Assets<Image>>,
     mut layouts: ResMut<Assets<TextureAtlasLayout>>,
@@ -1998,7 +2010,14 @@ fn sync_grid(
     mut meshes: ResMut<Assets<Mesh>>,
     store: Res<TerminalStore>,
     mut terminals: Query<
-        (Entity, &TerminalCursor, &mut TermGrid, &PaneKindMarker, &Visibility),
+        (
+            Entity,
+            &TerminalCursor,
+            &mut TermGrid,
+            &PaneKindMarker,
+            &Visibility,
+            Option<&pane_bevy::PaneProject>,
+        ),
         With<PaneTag>,
     >,
     mut transform_q: Query<&mut Transform>,
@@ -2008,14 +2027,16 @@ fn sync_grid(
     use std::time::Instant;
     let frame_start = Instant::now();
 
-    // Theme-driven defaults. Substituted in below for any cell whose
-    // fg or bg matches libghostty's reported `default_fg/default_bg`
-    // for that terminal — i.e. plain text the shell didn't color
-    // explicitly. So a paper preset gives ink-on-cream terminals, a
-    // terminal preset gives phosphor-on-near-black, etc.
-    let theme_default_fg = lin_to_rgb_bytes(theme.color(style_bevy::tokens::FG));
-    let theme_default_bg = lin_to_rgb_bytes(theme.color(style_bevy::tokens::BG));
-    let theme_changed = theme.is_changed();
+    // Theme-driven defaults, substituted in below for any cell whose fg
+    // or bg matches libghostty's reported `default_fg/default_bg` (plain
+    // text the shell didn't color). Resolved PER PANE from its project's
+    // theme so each terminal reads in its own project's palette (a paper
+    // project gives ink-on-cream, a terminal project phosphor-on-black),
+    // including all faces in the cube overview. These globals are the
+    // fallback for panes with no project theme cached.
+    let global_default_fg = lin_to_rgb_bytes(theme.color(style_bevy::tokens::FG));
+    let global_default_bg = lin_to_rgb_bytes(theme.color(style_bevy::tokens::BG));
+    let theme_changed = theme.is_changed() || themes.is_changed();
 
     let mut local_cells: Vec<SnapCell> = Vec::new();
     let mut local_dirty_rows: Vec<bool> = Vec::new();
@@ -2029,7 +2050,18 @@ fn sync_grid(
     // the dirty-row hot path.
     let mut pending_writes: Vec<(usize, GpuCell)> = Vec::new();
 
-    for (entity, cursor_marker, mut grid, kind, vis) in &mut terminals {
+    for (entity, cursor_marker, mut grid, kind, vis, proj) in &mut terminals {
+        // Per-pane theme defaults: this terminal's project theme if known,
+        // else the global (active) theme.
+        let (theme_default_fg, theme_default_bg) = proj
+            .and_then(|p| themes.get(p.0))
+            .map(|t| {
+                (
+                    lin_to_rgb_bytes(t.color(style_bevy::tokens::FG)),
+                    lin_to_rgb_bytes(t.color(style_bevy::tokens::BG)),
+                )
+            })
+            .unwrap_or((global_default_fg, global_default_bg));
         if kind.0 != PANE_KIND {
             continue;
         }
@@ -2321,14 +2353,17 @@ fn lin_to_rgb_bytes(c: bevy::color::LinearRgba) -> (u8, u8, u8) {
 
 // ---------- style-bevy glue ----------
 
-/// Mirror `Projects.active` into style-bevy's `ActiveProject` +
-/// `ActiveThemePath`. Also ensures each newly-observed project has
-/// its state.json loaded into memory so dust timers don't reset to
-/// zero across restarts.
+/// Mirror `Projects.active` into style-bevy's `ActiveProject`. Also
+/// ensures each newly-observed project has its state.json loaded into
+/// memory so dust timers + the per-project preset are available.
+///
+/// Note: this no longer touches `ActiveThemePath`. `presets.rs` is the
+/// sole owner of that resource — it derives it from `ActiveStylePreset`
+/// (which is itself loaded per-project from `ProjectStyleState`), so
+/// theming follows the active project's saved preset automatically.
 fn mirror_active_project_to_style(
     projects: Res<Projects>,
     mut active_proj: ResMut<style_bevy::shader::ActiveProject>,
-    mut active_theme: ResMut<style_bevy::theme::ActiveThemePath>,
     mut state: ResMut<style_bevy::ProjectStyleState>,
     data_dir: Option<Res<style_bevy::StyleDataDir>>,
 ) {
@@ -2342,14 +2377,77 @@ fn mirror_active_project_to_style(
     if let Some(pid) = projects.active {
         if let Some(d) = data_dir.as_ref() {
             style_bevy::state::load_project_state(d, &mut state, pid);
-            active_theme.0 = Some(style_bevy::theme::theme_path_for_project(d, pid));
         }
         // Intentionally NOT calling note_focus here — switching to a
         // project on startup or via the sidebar shouldn't blow away
         // accumulated dust. The mirror_focus_to_style hook records
         // actual focus gestures.
-    } else {
-        active_theme.0 = None;
+    }
+}
+
+/// Keep `ProjectThemes` (style-bevy's per-project theme cache) populated
+/// for every project, so each pane can render in its OWN project's theme
+/// — in the cube overview (all projects on screen) and in flat view.
+///
+/// Full reload when the project set or any project's preset changes;
+/// targeted reload of just the active project when its theme file is
+/// live-edited (only the active project's file is watched, so a
+/// `ThemeChanged` means *its* tokens moved). A `(pid, preset)` signature
+/// hash keeps this from re-reading 14 theme files every frame.
+fn maintain_project_themes(
+    projects: Res<Projects>,
+    mut style_state: ResMut<style_bevy::ProjectStyleState>,
+    registry: Res<style_bevy::StylePresetRegistry>,
+    data_dir: Option<Res<style_bevy::StyleDataDir>>,
+    mut themes: ResMut<style_bevy::ProjectThemes>,
+    mut theme_changed: MessageReader<style_bevy::ThemeChanged>,
+    mut last_sig: Local<u64>,
+) {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let theme_edited = theme_changed.read().last().is_some();
+
+    // Make sure EVERY project's saved style state (its preset) is in
+    // memory, not just the ones visited this session. `load_project_state`
+    // is idempotent (loads once, then a cheap map check), so this is fine
+    // to run each frame. Without it, an unvisited project resolves with
+    // `preset_of() == None` → default theme until you switch to it.
+    if let Some(d) = data_dir.as_ref() {
+        for p in &projects.list {
+            style_bevy::state::load_project_state(d, &mut style_state, p.id);
+        }
+    }
+
+    let mut hasher = DefaultHasher::new();
+    for p in &projects.list {
+        p.id.hash(&mut hasher);
+        style_state.preset_of(p.id).hash(&mut hasher);
+    }
+    let sig = hasher.finish();
+
+    let dd = data_dir.as_deref();
+    if sig != *last_sig {
+        // Project set or a preset changed — rebuild the whole cache and
+        // drop entries for projects that no longer exist.
+        *last_sig = sig;
+        let keep: std::collections::HashSet<u64> =
+            projects.list.iter().map(|p| p.id).collect();
+        themes.retain_projects(&keep);
+        for p in &projects.list {
+            themes.set(
+                p.id,
+                style_bevy::resolve_project_theme(p.id, &style_state, &registry, dd),
+            );
+        }
+    } else if theme_edited {
+        // Live edit of the active project's theme.rhai — reload just it.
+        if let Some(pid) = projects.active {
+            themes.set(
+                pid,
+                style_bevy::resolve_project_theme(pid, &style_state, &registry, dd),
+            );
+        }
     }
 }
 
@@ -2504,7 +2602,6 @@ fn handle_open_style_picker(
     mods: Res<ButtonInput<KeyCode>>,
     mut pending: ResMut<projects::PendingActions>,
     projects: Res<projects::Projects>,
-    existing: Query<&widget_bevy::rhai_widget::RhaiWidget>,
 ) {
     let cmd = mods.pressed(KeyCode::SuperLeft) || mods.pressed(KeyCode::SuperRight);
     let shift = mods.pressed(KeyCode::ShiftLeft) || mods.pressed(KeyCode::ShiftRight);
@@ -2517,10 +2614,10 @@ fn handle_open_style_picker(
     if !triggered {
         return;
     }
-    if existing.iter().any(|w| w.script == "style_picker.rhai") {
-        return;
-    }
     let Some(active) = projects.active else { return };
+    // No dedup: duplicates are allowed. The picker applies styles to the
+    // active project, and each instance is just a parked worker thread
+    // (event-driven, ~zero CPU when idle), so stacking a few is cheap.
     pending.new_panes.push(projects::NewPaneRequest {
         kind: widget_bevy::rhai_widget::PANE_KIND,
         project_id: active,

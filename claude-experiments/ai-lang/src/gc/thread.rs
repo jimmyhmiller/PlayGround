@@ -68,6 +68,25 @@ pub struct ThreadState {
     /// that points into the owning thread's stack — valid only while
     /// the owning thread is parked.
     parked_jit_fp: AtomicPtr<u8>,
+
+    /// Pointer to the owning runtime `Thread`'s `state` byte — the flag
+    /// the JIT inline safepoint poll reads. The GC coordinator stores a
+    /// non-zero value here (via [`request_poll`](Self::request_poll))
+    /// when it wants this thread to park, so a thread spinning in JIT'd
+    /// code (e.g. an allocation-free self-tail loop) reaches a safepoint.
+    /// Null for threads with no runtime `Thread` (e.g. pure-Rust
+    /// `MutatorThread`s that poll `gc_requested` directly).
+    ///
+    /// Set once via [`set_poll_flag`](Self::set_poll_flag) right after
+    /// the owning `Thread` is constructed; the address is stable for the
+    /// `Thread`'s lifetime (it lives in a `Box`).
+    poll_flag: AtomicPtr<u8>,
+
+    /// The OS thread that owns (and registered) this state. Recorded at
+    /// construction — registration always happens on the owning thread.
+    /// Used by [`Heap::pause_world`](crate::gc::Heap::pause_world) to
+    /// exclude the requesting thread from the set it parks.
+    os_thread: std::thread::ThreadId,
 }
 
 // Safety: ThreadState is designed to be shared between the owning
@@ -88,6 +107,43 @@ impl ThreadState {
             safepoint_cond: Condvar::new(),
             satb_buffer: UnsafeCell::new(SATBBuffer::new(256)),
             parked_jit_fp: AtomicPtr::new(std::ptr::null_mut()),
+            poll_flag: AtomicPtr::new(std::ptr::null_mut()),
+            os_thread: std::thread::current().id(),
+        }
+    }
+
+    /// The OS thread that owns this state.
+    pub fn os_thread(&self) -> std::thread::ThreadId {
+        self.os_thread
+    }
+
+    /// Point this thread's safepoint poll flag at the owning runtime
+    /// `Thread`'s `state` byte. Called once, right after the `Thread` is
+    /// built, before the thread starts running JIT'd code.
+    pub fn set_poll_flag(&self, state_byte: *mut u8) {
+        self.poll_flag.store(state_byte, Ordering::Release);
+    }
+
+    /// Ask this thread to reach a safepoint by raising its JIT poll flag.
+    /// No-op if the thread has no runtime `Thread` (null flag). The store
+    /// is a benign single-byte race with the JIT's plain-load poll: the
+    /// thread is guaranteed to observe it on a subsequent poll (cache
+    /// coherence), which is all liveness requires.
+    pub fn request_poll(&self) {
+        let p = self.poll_flag.load(Ordering::Acquire);
+        if !p.is_null() {
+            unsafe { (*(p as *const AtomicU8)).store(1, Ordering::Release) };
+        }
+    }
+
+    /// Lower this thread's JIT poll flag. Called by the coordinator after
+    /// the thread has been resumed, so a stale `1` doesn't make the next
+    /// poll re-park. (The JIT slow path also clears it; this is the
+    /// belt-and-braces clear for threads that parked some other way.)
+    pub fn clear_poll(&self) {
+        let p = self.poll_flag.load(Ordering::Acquire);
+        if !p.is_null() {
+            unsafe { (*(p as *const AtomicU8)).store(0, Ordering::Release) };
         }
     }
 

@@ -144,6 +144,31 @@ fn probe_string_starts_with_substring() {
 }
 
 #[test]
+fn char_literals_are_characters_not_longs() {
+    // `clojure.core/load` builds the sub-file path via
+    // `(str (root-directory ...) \/ path)` — `str` of a character must render
+    // the character, not its codepoint. Before chars were a distinct type,
+    // `(str \/)` was "47" and every `(load …)` silently no-op'd (the path was
+    // mangled). Verified against real Clojure.
+    let mut sess = load_core_prefix();
+    let s = |sess: &mut Session, src: &str| clojure_jvm::runtime::pr_str_bits(sess.eval_str(src));
+
+    // str / pr-str render the character, not the codepoint.
+    assert_eq!(s(&mut sess, "(str \\/)"), "\"/\"", "(str \\/) is \"/\"");
+    assert_eq!(s(&mut sess, "(str \\a \\b)"), "\"ab\"", "(str \\a \\b)");
+    assert_eq!(s(&mut sess, "\\a"), "\\a", "pr-str of \\a");
+    assert_eq!(s(&mut sess, "\\space"), "\\space", "pr-str of \\space");
+
+    // A char is its own type: `(= \a 97)` is false; `(= \a \a)` is true.
+    assert_eq!(sess.eval_str("(= \\a \\a)"), 0x7ffd_0000_0000_0001, "(= \\a \\a)");
+    assert_eq!(sess.eval_str("(= \\a 97)"), 0x7ffd_0000_0000_0000, "(= \\a 97)");
+
+    // But `(int \a)` still unboxes to the codepoint, and `(char 47)` round-trips.
+    assert_eq!(s(&mut sess, "(int \\a)"), "97", "(int \\a) is 97");
+    assert_eq!(s(&mut sess, "(str (char 47))"), "\"/\"", "(str (char 47)) is \"/\"");
+}
+
+#[test]
 #[ignore = "reentrant refer-chain isolation"]
 fn probe_reentrant_refer() {
     // Regression guard for the qualified-head-symbol invoke bug. The

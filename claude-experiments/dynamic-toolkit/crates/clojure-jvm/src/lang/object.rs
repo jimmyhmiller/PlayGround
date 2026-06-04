@@ -43,6 +43,11 @@ pub enum Object {
     /// `java.lang.Double` / boxed double.
     Double(f64),
 
+    /// `java.lang.Character`. A Unicode codepoint. Distinct from `Long`:
+    /// `(str \a)` is `"a"` (not `"97"`) and `(= \a 97)` is `false`, while
+    /// `(int \a)` is still `97`. Read from `\c` / `\newline` / `\uHHHH`.
+    Char(u32),
+
     /// `java.lang.String`. Interned by `Rc` so cheap to clone.
     String(Arc<String>),
 
@@ -302,6 +307,10 @@ impl std::fmt::Debug for Object {
             Object::Bool(b) => write!(f, "{b}"),
             Object::Long(n) => write!(f, "{n}"),
             Object::Double(x) => write!(f, "{x}"),
+            Object::Char(c) => match char::from_u32(*c) {
+                Some(ch) => write!(f, "\\{ch}"),
+                None => write!(f, "\\u{c:04x}"),
+            },
             Object::String(s) => write!(f, "{s:?}"),
             Object::Symbol(s) => write!(f, "{s:?}"),
             Object::Keyword(k) => write!(f, "{k:?}"),

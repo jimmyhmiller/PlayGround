@@ -10,7 +10,9 @@ use std::collections::HashMap;
 
 use jsir_ir::{Attr, Op as IrOp, ValueId as IrValue};
 
-use crate::cfg::{BinOp, BlockId, BlockKind, Cfg, Const, MemberKey, Op, PropKey, SrcRef, Term, UnOp, VarId, Value};
+use crate::cfg::{
+    BinOp, BlockId, BlockKind, Cfg, Const, MemberKey, Op, PropKey, SrcRef, Term, UnOp, Value, VarId,
+};
 
 /// The base-IR op-kinds the lowering **recognizes** (matches in [`Lower::lower_op`]
 /// or consumes inside one of its operand/sub-construct helpers). Any reachable
@@ -90,9 +92,10 @@ pub fn lower_function(file: &IrOp) -> Result<Cfg, String> {
         .map(|b| b.ops.as_slice())
         .unwrap_or(&[]);
 
-    // Find the first function declaration, descending into `export function` /
-    // `export default function` wrappers.
-    let func = stmts.iter().find_map(find_function);
+    // Select the function React would memoize (the component/hook), descending
+    // `export function` / `export default function` wrappers. Not always the
+    // first declaration — see [`select_function`].
+    let func = select_function(file);
 
     let mut lc = Lower::new();
     let entry = lc.cfg.new_block();
@@ -101,7 +104,10 @@ pub fn lower_function(file: &IrOp) -> Result<Cfg, String> {
 
     let body_ops: &[IrOp] = match func {
         Some(f) => {
-            lc.cfg.fn_name = f.attrs.iter().find_map(|(k,v)| match v { jsir_ir::Attr::Identifier(i) if k=="id" => Some(i.name.clone()), _=>None });
+            lc.cfg.fn_name = f.attrs.iter().find_map(|(k, v)| match v {
+                jsir_ir::Attr::Identifier(i) if k == "id" => Some(i.name.clone()),
+                _ => None,
+            });
             // region[0] = params, region[1] = body block_statement.
             //
             // The params region is a flat post-order op list terminated by an
@@ -170,7 +176,10 @@ struct Lower {
 enum LvalTarget {
     Var(VarId),
     /// A member l-value `obj.p = ...` (not yet stored as SSA; kept for effects).
-    Member { obj: Value, key: MemberKey },
+    Member {
+        obj: Value,
+        key: MemberKey,
+    },
     /// An object destructuring pattern `{a, b: c} = init`: each entry binds the
     /// member `init[key]` to a variable. (Flat identifier targets only.)
     ObjectPattern(Vec<(MemberKey, VarId)>),
@@ -196,9 +205,16 @@ impl Lower {
     /// Intern the variable an identifier(-ref) op refers to, by its resolved
     /// symbol `(name, def_scope)`; falls back to the bare name attr.
     fn var_of(&mut self, op: &IrOp) -> VarId {
-        let key = match op.trivia.as_ref().and_then(|t| t.referenced_symbol.as_ref()) {
+        let key = match op
+            .trivia
+            .as_ref()
+            .and_then(|t| t.referenced_symbol.as_ref())
+        {
             Some(s) => (s.name.clone(), s.def_scope_uid),
-            None => (str_attr(op, "name").unwrap_or_default(), op.trivia.as_ref().and_then(|t| t.scope_uid)),
+            None => (
+                str_attr(op, "name").unwrap_or_default(),
+                op.trivia.as_ref().and_then(|t| t.scope_uid),
+            ),
         };
         self.intern_var(key)
     }
@@ -217,10 +233,16 @@ impl Lower {
                     .collect(),
             ),
             LvalTarget::ArrayPattern(slots) => LvalTarget::ArrayPattern(
-                slots.iter().map(|o| o.map(|pv| nl.intern_var(self.key_of_var(pv)))).collect(),
+                slots
+                    .iter()
+                    .map(|o| o.map(|pv| nl.intern_var(self.key_of_var(pv))))
+                    .collect(),
             ),
             // A member l-value is not a valid parameter binding shape.
-            LvalTarget::Member { obj, key } => LvalTarget::Member { obj: *obj, key: key.clone() },
+            LvalTarget::Member { obj, key } => LvalTarget::Member {
+                obj: *obj,
+                key: key.clone(),
+            },
         }
     }
 
@@ -233,7 +255,14 @@ impl Lower {
             .find(|(_, v)| **v == var)
             .map(|(k, _)| k.clone())
             .unwrap_or_else(|| {
-                (self.cfg.var_names.get(var.0 as usize).cloned().unwrap_or_default(), None)
+                (
+                    self.cfg
+                        .var_names
+                        .get(var.0 as usize)
+                        .cloned()
+                        .unwrap_or_default(),
+                    None,
+                )
             })
     }
 
@@ -252,11 +281,17 @@ impl Lower {
     }
 
     fn is_resolved(op: &IrOp) -> bool {
-        op.trivia.as_ref().and_then(|t| t.referenced_symbol.as_ref()).is_some()
+        op.trivia
+            .as_ref()
+            .and_then(|t| t.referenced_symbol.as_ref())
+            .is_some()
     }
 
     fn val(&self, ir: IrValue) -> Result<Value, String> {
-        self.vmap.get(&ir).copied().ok_or_else(|| format!("unmapped value {ir:?}"))
+        self.vmap
+            .get(&ir)
+            .copied()
+            .ok_or_else(|| format!("unmapped value {ir:?}"))
     }
 
     /// Lower a sequence of statement ops into `cur` (which may change as control
@@ -276,7 +311,10 @@ impl Lower {
             if let Some(id) = owner {
                 self.cur_stmt_node_id = Some(*id);
             }
-            self.cfg.cur_src = self.cur_stmt_node_id.map(|stmt_node_id| SrcRef { stmt_node_id });
+            self.cfg.cur_src = self.cur_stmt_node_id.map(|stmt_node_id| SrcRef {
+                stmt_node_id,
+                expr_node_id: None,
+            });
             self.lower_op(op, cur)?;
             // Once a block is terminated (return/throw), the rest is unreachable
             // for the current block; stop emitting into it.
@@ -285,11 +323,33 @@ impl Lower {
             }
         }
         self.cur_stmt_node_id = saved;
-        self.cfg.cur_src = saved.map(|stmt_node_id| SrcRef { stmt_node_id });
+        self.cfg.cur_src = saved.map(|stmt_node_id| SrcRef {
+            stmt_node_id,
+            expr_node_id: None,
+        });
         Ok(())
     }
 
     fn lower_op(&mut self, op: &IrOp, cur: &mut BlockId) -> Result<(), String> {
+        // Expression-granular provenance: while lowering this op, stamp its
+        // node_id as the current expression node, so every instruction it emits
+        // (whether via `def` or a direct `cfg.push`) records which JSIR expression
+        // it came from. Restore afterward so siblings get their own.
+        let saved = self.cfg.cur_src;
+        if let Some(nid) = op.node_id {
+            let mut s = self.cfg.cur_src.unwrap_or(SrcRef {
+                stmt_node_id: nid,
+                expr_node_id: None,
+            });
+            s.expr_node_id = Some(nid);
+            self.cfg.cur_src = Some(s);
+        }
+        let result = self.lower_op_dispatch(op, cur);
+        self.cfg.cur_src = saved;
+        result
+    }
+
+    fn lower_op_dispatch(&mut self, op: &IrOp, cur: &mut BlockId) -> Result<(), String> {
         match op.name.as_str() {
             // --- expression value ops (already SSA) ---
             "jsir.numeric_literal" => {
@@ -380,11 +440,21 @@ impl Lower {
                         (cur_v, nv)
                     }
                     LvalTarget::Member { obj, key } => {
-                        let cur_v = self.cfg.push(*cur, Op::Member { obj: *obj, prop: key.clone() });
+                        let cur_v = self.cfg.push(
+                            *cur,
+                            Op::Member {
+                                obj: *obj,
+                                prop: key.clone(),
+                            },
+                        );
                         let nv = self.cfg.push(*cur, Op::Bin(bop, cur_v, one));
                         self.cfg.push_effect(
                             *cur,
-                            Op::StoreMember { obj: *obj, prop: key.clone(), value: nv },
+                            Op::StoreMember {
+                                obj: *obj,
+                                prop: key.clone(),
+                                value: nv,
+                            },
                         );
                         (cur_v, nv)
                     }
@@ -441,7 +511,10 @@ impl Lower {
             "jsir.assignment_expression" => {
                 let opname = str_attr(op, "operator_").unwrap_or_default();
                 let rhs = self.val(op.operands[1])?;
-                let target = self.lval.get(&op.operands[0]).cloned()
+                let target = self
+                    .lval
+                    .get(&op.operands[0])
+                    .cloned()
                     .ok_or("assignment to unknown l-value")?;
                 let stored = if opname == "=" {
                     rhs
@@ -454,7 +527,9 @@ impl Lower {
                             let cur_v = self.cfg.push(*cur, Op::ReadVar(*var));
                             self.cfg.push(*cur, Op::Bin(bop, cur_v, rhs))
                         }
-                        LvalTarget::Member { .. } => return Err("compound member assign unsupported".into()),
+                        LvalTarget::Member { .. } => {
+                            return Err("compound member assign unsupported".into())
+                        }
                         // `{a} op= x` / `[a] op= x` are not valid JS.
                         _ => return Err("compound assignment to a destructuring pattern".into()),
                     }
@@ -517,7 +592,9 @@ impl Lower {
                 // the closure's per-capture mutation effects from it. A body we
                 // cannot lower is left opaque (interpreter refuses to call it).
                 if let Ok((body, captures)) = self.lower_nested_closure(op, *cur) {
-                    self.cfg.closures.insert(result, crate::cfg::ClosureRepr { body, captures });
+                    self.cfg
+                        .closures
+                        .insert(result, crate::cfg::ClosureRepr { body, captures });
                 }
                 if let Some(r) = op.results.first() {
                     self.vmap.insert(*r, result);
@@ -550,9 +627,18 @@ impl Lower {
                 }
             }
             "jsir.array_expression" => {
-                let elems = op.operands.iter().map(|v| self.val(*v)).collect::<Result<Vec<_>, _>>()?;
-                let spreads: Vec<usize> =
-                    op.operands.iter().enumerate().filter(|(_, v)| self.spread_ir.contains(v)).map(|(i, _)| i).collect();
+                let elems = op
+                    .operands
+                    .iter()
+                    .map(|v| self.val(*v))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let spreads: Vec<usize> = op
+                    .operands
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| self.spread_ir.contains(v))
+                    .map(|(i, _)| i)
+                    .collect();
                 let r = self.cfg.push(*cur, Op::MakeArray(elems));
                 if !spreads.is_empty() {
                     self.cfg.spread_positions.insert(r, spreads);
@@ -591,7 +677,9 @@ impl Lower {
                             let caps = self.collect_captures(p, *cur);
                             let closure = self.cfg.push(*cur, Op::MakeArray(caps));
                             if let Ok((body, captures)) = self.lower_nested_closure(p, *cur) {
-                                self.cfg.closures.insert(closure, crate::cfg::ClosureRepr { body, captures });
+                                self.cfg
+                                    .closures
+                                    .insert(closure, crate::cfg::ClosureRepr { body, captures });
                             }
                             let key = self.obj_prop_key(p)?;
                             props.push((key, closure));
@@ -669,11 +757,13 @@ impl Lower {
                             };
                             match self.lval.get(&p.operands[0]).cloned() {
                                 Some(LvalTarget::Var(var)) => binds.push((key, var)),
-                                _ => return Err(
-                                    "object pattern: only flat identifier bindings supported \
+                                _ => {
+                                    return Err(
+                                        "object pattern: only flat identifier bindings supported \
                                      (nested patterns / defaults / rest not yet lowered)"
-                                        .into(),
-                                ),
+                                            .into(),
+                                    )
+                                }
                             }
                         }
                         "jsir.exprs_region_end" | "jsir.expr_region_end" => {}
@@ -693,11 +783,11 @@ impl Lower {
                 for o in &op.operands {
                     match self.lval.get(o).cloned() {
                         Some(LvalTarget::Var(var)) => slots.push(Some(var)),
-                        _ => return Err(
-                            "array pattern: only flat identifier bindings supported \
+                        _ => {
+                            return Err("array pattern: only flat identifier bindings supported \
                              (nested patterns / defaults / rest not yet lowered)"
-                                .into(),
-                        ),
+                                .into())
+                        }
                     }
                 }
                 if let Some(r) = op.results.first() {
@@ -727,12 +817,22 @@ impl Lower {
             LvalTarget::Member { obj, key } => {
                 self.cfg.push_effect(
                     block,
-                    Op::StoreMember { obj: *obj, prop: key.clone(), value: init },
+                    Op::StoreMember {
+                        obj: *obj,
+                        prop: key.clone(),
+                        value: init,
+                    },
                 );
             }
             LvalTarget::ObjectPattern(binds) => {
                 for (key, var) in binds {
-                    let m = self.cfg.push(block, Op::Member { obj: init, prop: key.clone() });
+                    let m = self.cfg.push(
+                        block,
+                        Op::Member {
+                            obj: init,
+                            prop: key.clone(),
+                        },
+                    );
                     self.cfg.push_effect(block, Op::WriteVar(*var, m));
                 }
             }
@@ -740,9 +840,13 @@ impl Lower {
                 for (i, slot) in slots.iter().enumerate() {
                     if let Some(var) = slot {
                         let idx = self.cfg.push(block, Op::Const(Const::num(i as f64)));
-                        let m = self
-                            .cfg
-                            .push(block, Op::Member { obj: init, prop: MemberKey::Computed(idx) });
+                        let m = self.cfg.push(
+                            block,
+                            Op::Member {
+                                obj: init,
+                                prop: MemberKey::Computed(idx),
+                            },
+                        );
                         self.cfg.push_effect(block, Op::WriteVar(*var, m));
                     }
                 }
@@ -819,7 +923,9 @@ impl Lower {
                 continue;
             }
             let Some(t) = o.trivia.as_ref() else { continue };
-            let Some(sym) = t.referenced_symbol.as_ref() else { continue };
+            let Some(sym) = t.referenced_symbol.as_ref() else {
+                continue;
+            };
             // A capture is a variable defined in an ENCLOSING scope: its
             // `def_scope` differs from the scope the read sits in (`scope_uid`).
             // The closure's own params and locals have `def_scope == scope_uid`,
@@ -847,7 +953,11 @@ impl Lower {
     /// values of the captures, to store in [`crate::cfg::Cfg::closures`]. Returns
     /// `Err` for any closure body we cannot lower (the caller leaves the closure
     /// as a known loss: the interpreter will refuse to call it).
-    fn lower_nested_closure(&mut self, op: &IrOp, cur: BlockId) -> Result<(usize, Vec<Value>), String> {
+    fn lower_nested_closure(
+        &mut self,
+        op: &IrOp,
+        cur: BlockId,
+    ) -> Result<(usize, Vec<Value>), String> {
         let cap_keys = self.closure_capture_keys(op);
 
         // Lower the nested body first; if anything is unsupported we bail before
@@ -859,7 +969,8 @@ impl Lower {
             let var = nl.intern_var(key.clone());
             let v = nl.cfg.fresh_value();
             nl.cfg.params.push(v);
-            nl.param_names.push(nl.cfg.var_names[var.0 as usize].clone());
+            nl.param_names
+                .push(nl.cfg.var_names[var.0 as usize].clone());
             nl.cfg.push_effect(entry, Op::WriteVar(var, v));
         }
         // Region layout differs by closure kind:
@@ -874,7 +985,9 @@ impl Lower {
         let body_region = if is_arrow { 0 } else { 1 };
         if is_arrow {
             for operand in &op.operands {
-                let Some(target) = self.lval.get(operand).cloned() else { continue };
+                let Some(target) = self.lval.get(operand).cloned() else {
+                    continue;
+                };
                 // The l-value target was built in the enclosing lowering, so its
                 // VarIds are parent slots; re-key each into the nested var table
                 // so the body's reads bind to it, then bind a fresh param value
@@ -930,7 +1043,10 @@ impl Lower {
             }
         }
         if read.iter().any(|v| !written.contains(v)) {
-            return Err("closure body has unbound free variables (e.g. arrow params not visible here)".into());
+            return Err(
+                "closure body has unbound free variables (e.g. arrow params not visible here)"
+                    .into(),
+            );
         }
 
         // Success: emit the parent-side capture reads and register the body.
@@ -1003,7 +1119,9 @@ impl Lower {
                 continue;
             };
             let vkey = (sym.name.clone(), sym.def_scope_uid);
-            let Some(&var) = self.vars.get(&vkey) else { continue };
+            let Some(&var) = self.vars.get(&vkey) else {
+                continue;
+            };
             // Walk the longest member chain rooted at this identifier read.
             let mut path = Vec::new();
             let mut cur_ir = match o.results.first() {
@@ -1029,7 +1147,13 @@ impl Lower {
         for (var, path) in keys {
             let mut v = self.cfg.push(cur, Op::ReadVar(var));
             for prop in path {
-                v = self.cfg.push(cur, Op::Member { obj: v, prop: MemberKey::Static(prop) });
+                v = self.cfg.push(
+                    cur,
+                    Op::Member {
+                        obj: v,
+                        prop: MemberKey::Static(prop),
+                    },
+                );
             }
             caps.push(v);
         }
@@ -1038,6 +1162,8 @@ impl Lower {
 
     /// Define an instruction with a result and map the jsir result to it.
     fn def(&mut self, op: &IrOp, block: BlockId, cfg_op: Op) {
+        // Expression provenance is stamped centrally by `lower_op`; here we just
+        // push and bind the result.
         let v = self.cfg.push(block, cfg_op);
         if let Some(r) = op.results.first() {
             self.vmap.insert(*r, v);
@@ -1080,7 +1206,11 @@ impl Lower {
         let cond = self.val(op.operands[0])?;
         let head = *cur;
         let tmp = self.fresh_synth_var();
-        let (then_b, else_b, join_b) = (self.cfg.new_block(), self.cfg.new_block(), self.cfg.new_block());
+        let (then_b, else_b, join_b) = (
+            self.cfg.new_block(),
+            self.cfg.new_block(),
+            self.cfg.new_block(),
+        );
         self.cfg.record_join(head, join_b, BlockKind::Block)?;
         self.cfg.block_mut(*cur).term = Term::CondBr {
             cond,
@@ -1116,7 +1246,7 @@ impl Lower {
         self.cfg.push_effect(*cur, Op::WriteVar(tmp, left));
         // Condition under which we evaluate (and take) the right-hand side.
         let take_rhs = match oper.as_str() {
-            "&&" => left,                                       // left truthy
+            "&&" => left,                                         // left truthy
             "||" => self.cfg.push(*cur, Op::Un(UnOp::Not, left)), // left falsy
             "??" => {
                 let nullc = self.cfg.push(*cur, Op::Const(Const::Null));
@@ -1214,7 +1344,12 @@ impl Lower {
     }
 
     /// Lower an expression region (ends in `expr_region_end`), returning its value.
-    fn lower_expr_region(&mut self, op: &IrOp, idx: usize, cur: &mut BlockId) -> Result<Value, String> {
+    fn lower_expr_region(
+        &mut self,
+        op: &IrOp,
+        idx: usize,
+        cur: &mut BlockId,
+    ) -> Result<Value, String> {
         let ops = region_ops(op, idx);
         self.lower_stmts(ops, cur)?;
         let end = ops
@@ -1326,9 +1461,113 @@ fn find_function(op: &IrOp) -> Option<&IrOp> {
         return Some(op);
     }
     if op.name == "jsir.export_named_declaration" || op.name == "jsir.export_default_declaration" {
-        return region_ops(op, 0).iter().find(|o| o.name == "jsir.function_declaration");
+        return region_ops(op, 0)
+            .iter()
+            .find(|o| o.name == "jsir.function_declaration");
     }
     None
+}
+
+/// Top-level function declarations in source order (descending `export` /
+/// `export default` wrappers) — the candidate set React's `compilationMode:
+/// 'all'` compiles.
+fn top_level_functions(file: &IrOp) -> Vec<&IrOp> {
+    let stmts = file
+        .regions
+        .first()
+        .and_then(|r| r.blocks.first())
+        .and_then(|b| b.ops.first()) // program
+        .and_then(|p| p.regions.first())
+        .and_then(|r| r.blocks.first())
+        .map(|b| b.ops.as_slice())
+        .unwrap_or(&[]);
+    stmts.iter().filter_map(find_function).collect()
+}
+
+/// The function the React Compiler would memoize: the first top-level function
+/// whose body returns JSX or calls a hook (a component or custom hook); else the
+/// first function. React compiles *every* function under `compilationMode:
+/// 'all'`, but only components/hooks acquire reactive scopes, so the memoized
+/// structure we must match comes from that function — not necessarily the first
+/// (e.g. `constructor.js` declares an empty helper `Foo` before `Component`).
+///
+/// We only prefer a component/hook that carries a stable `node_id`: the in-place
+/// emitter ([`crate::memoize_plan`]) re-locates the same function by `node_id`,
+/// so without one the two sides could diverge (analyze one function, edit
+/// another). When the candidate lacks an id we fall back to the first function,
+/// which both sides agree on.
+pub fn select_function(file: &IrOp) -> Option<&IrOp> {
+    let funcs = top_level_functions(file);
+    funcs
+        .iter()
+        .find(|f| f.node_id.is_some() && function_is_component_or_hook(f))
+        .copied()
+        .or_else(|| funcs.first().copied())
+}
+
+/// [`select_function`]'s pick identified by stable `node_id`, so the in-place
+/// emitter can target the SAME function the analysis lowered.
+pub fn selected_function_node_id(file: &IrOp) -> Option<u32> {
+    select_function(file).and_then(|f| f.node_id)
+}
+
+/// JSX factory names SWC lowers `<x/>` into (`React.createElement`, `_jsx`, …).
+fn is_jsx_factory_name(n: &str) -> bool {
+    matches!(
+        n,
+        "createElement" | "jsx" | "jsxs" | "jsxDEV" | "jsxsDEV" | "_jsx" | "_jsxs" | "_jsxDEV"
+    )
+}
+
+/// `use` + uppercase: a custom or built-in hook callee (`useState`, `useFoo`).
+fn is_hook_ident(n: &str) -> bool {
+    let b = n.as_bytes();
+    b.len() >= 4 && &n[..3] == "use" && b[3].is_ascii_uppercase()
+}
+
+/// True if `func`'s body returns JSX or calls a hook — React's "this declaration
+/// is a component or hook" test that decides what gets memoized.
+fn function_is_component_or_hook(func: &IrOp) -> bool {
+    func.regions
+        .get(1)
+        .map(|r| r.blocks.iter().any(|b| body_is_component_or_hook(&b.ops)))
+        .unwrap_or(false)
+}
+
+/// Recursively scan body ops for a JSX factory read (member `*.createElement` /
+/// `_jsx` identifier) or a hook call, NOT descending into nested function /
+/// closure bodies (their JSX/hooks belong to them, not the enclosing function).
+fn body_is_component_or_hook(ops: &[IrOp]) -> bool {
+    for op in ops {
+        match op.name.as_str() {
+            "jsir.identifier" => {
+                if let Some(n) = str_attr(op, "name") {
+                    if is_jsx_factory_name(&n) || is_hook_ident(&n) {
+                        return true;
+                    }
+                }
+            }
+            "jsir.member_expression" | "jsir.optional_member_expression" => {
+                if let Some(n) = member_prop_name(op) {
+                    if is_jsx_factory_name(&n) {
+                        return true;
+                    }
+                }
+            }
+            "jsir.function_declaration"
+            | "jsir.function_expression"
+            | "jsir.arrow_function_expression" => continue,
+            _ => {}
+        }
+        for r in &op.regions {
+            for b in &r.blocks {
+                if body_is_component_or_hook(&b.ops) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn region_ops(op: &IrOp, idx: usize) -> &[IrOp] {
@@ -1367,19 +1606,37 @@ fn member_prop_name(op: &IrOp) -> Option<String> {
 
 fn bin_op(s: &str) -> Option<BinOp> {
     Some(match s {
-        "+" => BinOp::Add, "-" => BinOp::Sub, "*" => BinOp::Mul, "/" => BinOp::Div,
-        "%" => BinOp::Mod, "**" => BinOp::Pow,
-        "==" => BinOp::Eq, "!=" => BinOp::Ne, "===" => BinOp::StrictEq, "!==" => BinOp::StrictNe,
-        "<" => BinOp::Lt, "<=" => BinOp::Le, ">" => BinOp::Gt, ">=" => BinOp::Ge,
-        "&" => BinOp::BitAnd, "|" => BinOp::BitOr, "^" => BinOp::BitXor,
-        "<<" => BinOp::Shl, ">>" => BinOp::Shr, ">>>" => BinOp::UShr,
+        "+" => BinOp::Add,
+        "-" => BinOp::Sub,
+        "*" => BinOp::Mul,
+        "/" => BinOp::Div,
+        "%" => BinOp::Mod,
+        "**" => BinOp::Pow,
+        "==" => BinOp::Eq,
+        "!=" => BinOp::Ne,
+        "===" => BinOp::StrictEq,
+        "!==" => BinOp::StrictNe,
+        "<" => BinOp::Lt,
+        "<=" => BinOp::Le,
+        ">" => BinOp::Gt,
+        ">=" => BinOp::Ge,
+        "&" => BinOp::BitAnd,
+        "|" => BinOp::BitOr,
+        "^" => BinOp::BitXor,
+        "<<" => BinOp::Shl,
+        ">>" => BinOp::Shr,
+        ">>>" => BinOp::UShr,
         _ => return None,
     })
 }
 fn un_op(s: &str) -> Option<UnOp> {
     Some(match s {
-        "-" => UnOp::Neg, "+" => UnOp::Pos, "!" => UnOp::Not, "~" => UnOp::BitNot,
-        "typeof" => UnOp::TypeOf, "void" => UnOp::Void,
+        "-" => UnOp::Neg,
+        "+" => UnOp::Pos,
+        "!" => UnOp::Not,
+        "~" => UnOp::BitNot,
+        "typeof" => UnOp::TypeOf,
+        "void" => UnOp::Void,
         _ => return None,
     })
 }

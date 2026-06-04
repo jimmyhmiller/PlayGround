@@ -70,7 +70,7 @@ pub use camera::{
 };
 pub use chrome_material::{
     ActiveChromeShader, ChromeMaterialPlugin, ChromeParams, ChromeStyle, ChromeTextStyle,
-    PaneChromeMaterial, PaneShadowMaterial, ShadowParams,
+    PaneChromeMaterial, PaneChromeShader, PaneChromeStyle, PaneShadowMaterial, ShadowParams,
 };
 pub use layers::{PaneLayer, PaneLayerAllocator};
 
@@ -797,21 +797,44 @@ fn push_chrome_time(
 /// we never need to recreate the Mesh asset on resize — only the
 /// transform and the material's uniform parameters change.
 fn sync_chrome_uniforms(
-    panes: Query<(Entity, Ref<PaneRect>, &PaneChrome)>,
+    panes: Query<(
+        Entity,
+        Ref<PaneRect>,
+        &PaneChrome,
+        Option<Ref<chrome_material::PaneChromeStyle>>,
+        Option<Ref<chrome_material::PaneChromeShader>>,
+    )>,
     mut bgs: Query<(&MeshMaterial2d<PaneChromeMaterial>, &mut Transform), Without<MeshMaterial2d<PaneShadowMaterial>>>,
     mut shadows: Query<(&MeshMaterial2d<PaneShadowMaterial>, &mut Transform), Without<MeshMaterial2d<PaneChromeMaterial>>>,
     focused: Res<FocusedPane>,
-    style: Res<chrome_material::ChromeStyle>,
+    global_style: Res<chrome_material::ChromeStyle>,
     active_shader: Res<ActiveChromeShader>,
     mut chrome_mats: ResMut<Assets<PaneChromeMaterial>>,
     mut shadow_mats: ResMut<Assets<PaneShadowMaterial>>,
 ) {
     let focus_changed = focused.is_changed();
-    let style_changed = style.is_changed();
+    let global_changed = global_style.is_changed();
     let shader_changed = active_shader.is_changed();
-    for (pane_entity, rect, chrome) in &panes {
+    for (pane_entity, rect, chrome, pane_style, pane_shader) in &panes {
+        // Per-pane override (its project's theme) if present, else global.
+        let pane_style_changed = pane_style.as_ref().is_some_and(|s| s.is_changed());
+        let style: &chrome_material::ChromeStyle =
+            pane_style.as_ref().map(|s| &s.0).unwrap_or(&global_style);
+        let style_changed = if pane_style.is_some() {
+            pane_style_changed || global_changed
+        } else {
+            global_changed
+        };
+        // Per-pane fragment shader (its project's preset) if present.
+        let frag: &Handle<Shader> =
+            pane_shader.as_ref().map(|s| &s.0).unwrap_or(&active_shader.0);
+        let frag_changed = if pane_shader.is_some() {
+            pane_shader.as_ref().is_some_and(|s| s.is_changed()) || shader_changed
+        } else {
+            shader_changed
+        };
         let needs_chrome_update =
-            rect.is_changed() || focus_changed || style_changed || shader_changed;
+            rect.is_changed() || focus_changed || style_changed || frag_changed;
         if !needs_chrome_update {
             continue;
         }
@@ -840,8 +863,8 @@ fn sync_chrome_uniforms(
             transform.scale.y = rect.size.y.max(1.0);
             if let Some(mat) = chrome_mats.get_mut(&handle.0) {
                 mat.params = style.params_for(rect.size, is_focused);
-                if shader_changed {
-                    mat.fragment = active_shader.0.clone();
+                if frag_changed {
+                    mat.fragment = frag.clone();
                 }
             }
         }

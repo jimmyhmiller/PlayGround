@@ -16,10 +16,10 @@ def env_or(name: String, fallback: String) -> String = {
 
 def show(label: String, r: Result<HttpResponse, String>) -> Int =
     match r {
-        Ok(resp) =>
+        Result::Ok(resp) =>
             println(str4(label, " -> status ", int_to_string(resp.status),
                          string_concat("  body: ", resp.body))),
-        Err(e) => println(str3(label, " transport error: ", e))
+        Result::Err(e) => println(str3(label, " transport error: ", e))
     }
 
 def main() -> Int = {

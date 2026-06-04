@@ -52,14 +52,14 @@ pub use dynamic::{DynamicMaterial, DynamicMaterialPlugin, ShaderSchemas};
 pub use fonts::{FontRegistry, FontRegistryPlugin};
 pub use material::{register_preset_asset_source, register_style_asset_source};
 pub use presets::{
-    register_preset_host_fns, ActiveStylePreset, PresetsPlugin, StylePreset,
-    StylePresetRegistry,
+    register_preset_host_fns, resolve_project_theme, ActiveStylePreset, PresetsPlugin,
+    StylePreset, StylePresetRegistry,
 };
 pub use script_bridge::{register_script_host_fns, EventBus, ScriptBridgePlugin};
 pub use theme_bridge::{register_theme_host_fns, ThemeBridgePlugin};
 pub use script_host::SystemScriptPlugin;
 pub use state::{ProjectStyleState, StyleDataDir};
-pub use theme::{tokens, Theme, ThemeChanged, TokenId, TokenValue};
+pub use theme::{tokens, ProjectThemes, Theme, ThemeChanged, TokenId, TokenValue};
 
 // Compatibility re-exports for hosts that still spell paths the old
 // way. Once terminal-bevy switches to `style_bevy::ActiveProject`,
@@ -84,6 +84,7 @@ impl Plugin for StylePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<Theme>()
             .init_resource::<ProjectStyleState>()
+            .init_resource::<theme::ProjectThemes>()
             .init_resource::<StyleErrors>()
             .init_resource::<ActiveProject>()
             .add_message::<ThemeChanged>()

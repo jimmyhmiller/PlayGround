@@ -116,6 +116,41 @@ impl Theme {
 #[derive(Message, Clone, Copy, Debug)]
 pub struct ThemeChanged;
 
+/// Per-project resolved themes. The global [`Theme`] only ever holds the
+/// *active* project's look; this cache holds one [`Theme`] per project so
+/// each pane can render in its OWN project's theme (needed for the cube
+/// overview, where every project is on screen at once, and to make
+/// flat-view per-project theming correct rather than coincidental).
+///
+/// Populated by the host (which owns the project list + each project's
+/// preset) via [`Self::set`]; read by every pane-theming system through
+/// [`Self::get`], which falls back to `None` for unknown projects (the
+/// caller then uses the global theme).
+#[derive(Resource, Default, Debug, Clone)]
+pub struct ProjectThemes {
+    by_project: HashMap<u64, Theme>,
+}
+
+impl ProjectThemes {
+    pub fn set(&mut self, project_id: u64, theme: Theme) {
+        self.by_project.insert(project_id, theme);
+    }
+    pub fn get(&self, project_id: u64) -> Option<&Theme> {
+        self.by_project.get(&project_id)
+    }
+    pub fn contains(&self, project_id: u64) -> bool {
+        self.by_project.contains_key(&project_id)
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (&u64, &Theme)> {
+        self.by_project.iter()
+    }
+    /// Drop entries for projects no longer present, so deleted projects
+    /// don't leak. `keep` is the current set of live project ids.
+    pub fn retain_projects(&mut self, keep: &std::collections::HashSet<u64>) {
+        self.by_project.retain(|id, _| keep.contains(id));
+    }
+}
+
 /// Engine-known token IDs. Any shader's theme UBO reads from exactly
 /// this set, in this order.
 pub mod tokens {

@@ -473,6 +473,7 @@ fn sync_text(
     font: Res<EditorFont>,
     metrics: Res<EditorMetrics>,
     palette: Res<SyntaxPalette>,
+    project_palettes: Res<highlight::ProjectSyntaxPalettes>,
     pane_zoom: Res<pane_bevy::PaneZoom>,
     mut editors: Query<
         (
@@ -483,6 +484,7 @@ fn sync_text(
             &EditorHighlighter,
             &mut LineRows,
             &PaneKindMarker,
+            Option<&pane_bevy::PaneProject>,
         ),
         With<PaneTag>,
     >,
@@ -491,17 +493,21 @@ fn sync_text(
     mut commands: Commands,
 ) {
     let zoom = pane_zoom.0;
-    for (state, rect, chrome, scroll, hl, mut pool, kind) in &mut editors {
+    for (state, rect, chrome, scroll, hl, mut pool, kind, proj) in &mut editors {
         if kind.0 != PANE_KIND {
             continue;
         }
+        // This editor's project palette if cached, else the global one.
+        let pal = proj
+            .and_then(|p| project_palettes.get(p.0))
+            .unwrap_or(&palette);
         sync_editor_lines(
             &state.0,
             rect,
             chrome,
             *scroll,
             &hl.0,
-            &palette,
+            pal,
             &mut pool,
             &font,
             &metrics,
@@ -947,7 +953,13 @@ fn handle_input(
     metrics: Option<Res<EditorMetrics>>,
     pane_zoom: Res<pane_bevy::PaneZoom>,
     mut editors: Query<
-        (&mut EditorStateComp, &PaneRect, &mut EditorScroll, &PaneKindMarker),
+        (
+            &mut EditorStateComp,
+            &PaneRect,
+            &mut EditorScroll,
+            &PaneKindMarker,
+            Option<&EditorFilePath>,
+        ),
         With<PaneTag>,
     >,
 ) {
@@ -956,7 +968,7 @@ fn handle_input(
         keys.read().for_each(|_| {});
         return;
     };
-    let Ok((mut state_comp, rect, mut scroll, kind)) = editors.get_mut(target) else {
+    let Ok((mut state_comp, rect, mut scroll, kind, file_path)) = editors.get_mut(target) else {
         keys.read().for_each(|_| {});
         return;
     };
@@ -1055,6 +1067,23 @@ fn handle_input(
                 Some(delete_selection(state))
             }
             KeyCode::KeyV if mod_doc => Some(paste_from_clipboard(state)),
+            // Cmd/Ctrl+S — save the buffer to its file. Side effect only
+            // (no document change), so it returns `Some(None)`.
+            KeyCode::KeyS if mod_doc => {
+                match file_path {
+                    Some(path) => {
+                        let text = state.doc.to_string();
+                        match std::fs::write(&path.0, text) {
+                            Ok(()) => eprintln!("[editor] saved {}", path.0.display()),
+                            Err(e) => {
+                                eprintln!("[editor] save failed {}: {}", path.0.display(), e)
+                            }
+                        }
+                    }
+                    None => eprintln!("[editor] save: no file path for this pane"),
+                }
+                Some(None)
+            }
             _ => None,
         };
 

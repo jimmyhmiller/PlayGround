@@ -7,15 +7,21 @@ deeper lessons; this doc is the up-to-date status and the concrete next steps.
 
 ## TL;DR
 
-- The JS partial evaluator is **total and sound** across extensive differential
-  fuzzing: ~24k+ generated programs (including the hardest patterns — capturing
-  closures that mutate captures, `.apply`/`.call`, self-modifying arrays) produce
-  **zero silent wrong-answer divergences**.
-- This session fixed **three real soundness bugs** (all reproduced, regression-
-  tested, fuzz-verified) and substantially upgraded the fuzzer.
-- Two known issues remain, both **hard / architectural**, both **characterized
-  precisely** (neither is a wrong answer that fuzzing finds — see below).
-- Tests: **84 frontend + 12 engine, all green**.
+- The JS partial evaluator is sound across extensive differential fuzzing of the
+  original generator (~24k programs, zero divergences). The **recursion axis**
+  added this session (self-recursive functions in the generator) shifted the RNG
+  stream and surfaced a batch of **pre-existing** soundness bugs in the eval core.
+- This session: added **recursion generation** + a **specialization weight budget**
+  (branch-explosion OOM guard, JS-client only), and **fixed five soundness bugs**
+  (all reproduced, regression-tested, fuzz- and Node-verified). Divergences in the
+  1–500 range went **19 → 2**.
+- One coherent **soundness class remains** (and is the bulk of divergences in the
+  500–2000 range): the residual fails to reproduce a JS `throw` when a may-throw
+  expression sits in a **dead/discarded position** (dead store, dead array element,
+  residual-function body). The direct expression-statement case is FIXED; the
+  others are not. See "Remaining issue: throw preservation" below.
+- Tests: **99 frontend + 12 engine, all green**. simple.js still specializes
+  correctly (the fixes fold to no-ops on its inputs).
 
 ## How to run things
 
@@ -92,6 +98,106 @@ full `State`.
    has_try arm now routes captures through `operand_rexpr` (which escapes Ref
    captures) instead of `materialize_value` (which left the caller's stale copy
    live). Repro: closure does `data[1][1]^=5`, main read 50 instead of 55.
+
+## Fixed this session, round 2 — recursion-axis soundness bugs
+
+All found by the new recursion generator's RNG shift; all were **pre-existing** in
+the eval core (not caused by the recursion code). Each has a regression test in
+`js-frontend/src/lib.rs` and was verified against Node.
+
+1. **Short-circuit side effects** (`compile_short_circuit`, `js.rs`): `&&`, `||`,
+   `??`, `?:` were lowered to `Expr::Opaque` (eager, all operands evaluated), so a
+   side-effecting operand on the *skipped* path still ran. Now: when the
+   conditionally-evaluated operand is impure, compile real short-circuit control
+   flow (new `Instr::Dup`); when it is pure, keep the compact `Opaque` (so simple.js
+   is unchanged). Repro: `input && (++input)` returned 1 at input=0, should be 0.
+
+2. **Postfix `++`/`--` result coercion** (`compile_update`, `js.rs`): `x--` yielded
+   the raw old value, not `ToNumber(old)`. `false--` gave `false` not 0. Fix: coerce
+   the postfix result via `x - 0` (folds to a no-op for numbers).
+
+3. **`++`/`--` store coercion** — two sites: expression position (`emit_store` in
+   `js.rs::compile_update`) and statement position (`lower.rs::lower_expr_stmt`,
+   which lowered `t++;` straight to `t = t + 1`). `obj++` did `obj + 1` (string
+   concat → "[object Object]1") instead of `ToNumber(obj) + 1` (NaN); `"3"++` gave
+   "31" not 4. Fix: store `(place - 0) ± 1`.
+
+4. **Discarded may-throw expression dropped** (`Instr::Pop` in `js.rs::step` +
+   `may_throw`): `undefined.length;` as a statement throws, but the PE
+   dead-eliminated it (`return 0`). Now a discarded value that `may_throw`
+   (member/index access, call/`new`, `in`/`instanceof`) is emitted for effect via
+   `Op::Eval`. NOTE: this only covers the `Pop` path; the dead-store / dead-element
+   / residual-fn-body variants are NOT yet handled (see remaining issue).
+
+## The recursion axis + the weight budget (this session)
+
+- The fuzzer now generates **self-recursive functions**: `rec_func` emits
+  `r{i}(n, ...data)` with a frozen, strictly-decreasing counter `n` (base case
+  `if (n <= 0) return …;` first), self-calls passing `n - 1`, called with a static
+  small counter so the evaluator fully unrolls (a dynamic counter hits the
+  deliberate recursion refusal). Covers both the inlined-unroll path and (when the
+  body has a `try`) the residualized-recursive-function path.
+- Deliberate refusals (`dynamic-depth recursion`, non-terminating static recursion,
+  continue-out-of-try, **specialization budget exceeded**) are classified as a new
+  `Residual::Refused` outcome: counted, never reported as a bug, never chased by the
+  shrinker.
+- **Specialization weight budget** (`SPEC_WEIGHT_BUDGET` in `js.rs`, a JS-client
+  resource bound — the generic engine is untouched). A depth-bounded recursion that
+  forks on dynamic values inside a loop can produce a finite-but-enormous residual
+  (seed 339 → 24 GB). The budget caps accumulated `State::weight` (Σ residual-expr
+  nodes over block entries) and refuses cleanly past it. CLI default 300M (clears
+  simple.js's 141M with headroom); the fuzzer sets **100k** via the env var (max
+  legit generated weight is ~1.4k → ~70x headroom), which bounds even the heaviest
+  blowups (whose memory-per-weight is far above normal, e.g. seed 738) to well under
+  a gigabyte. The full 2000-program run now completes at ~620 MB peak (was OOM at
+  8–9 GB). CAVEAT: weight is an imperfect memory proxy — different programs vary
+  ~2000x in bytes/weight — so the budget is tuned per-workload, not universal; a
+  truly robust guard would be subprocess `RLIMIT_AS`.
+
+## Also fixed this session
+
+- **Math modeled as a built-in** (`try_builtin_static`, the same hook as
+  `String.fromCharCode`): deterministic integer-result methods fold (`floor`/`ceil`/
+  `round`/`trunc` are identity in the i64 model; `abs`/`sign`/`max`/`min` over static
+  numbers). Float (`sqrt`, `pow`, …) and non-deterministic `random` deliberately pass
+  through. This is the **stdlib-extension pattern**: add an arm to `try_builtin_static`
+  (static methods on a global), `try_builtin_new` (constructors), or
+  `try_builtin_method` (bound instance methods).
+- **Residual-function body context leak** (seed 228): `residual_fn_for` now specializes
+  the body in a CLEAN context (save/clear/restore `probing`, `halt_at`, `eager_stores`,
+  residual-try stack). A function residualized while the caller was mid-probe or
+  mid-`try` (e.g. `f.call(x)` inside a `try`) inherited that state and produced an
+  EMPTY `__rf0`, silently dropping the body's calls/returns/throws. Test:
+  `residual_function_body_kept_when_caller_is_in_a_try`.
+
+## Remaining issue: throw preservation in dead positions (mostly fuzzer artifact)
+
+The residual can silently skip an exception the original raises when a may-throw
+expression sits in a position whose value is dropped:
+- **used** value: correct (`return undefined.length` throws at runtime).
+- **`Pop`-discarded** statement (`undefined.length;`): FIXED (`may_throw` + `Op::Eval`
+  at the `Pop` site — emits the whole expression, so a short-circuit like
+  `cond && undefined.x;` still short-circuits at runtime).
+- **dead store / dead element** (`var x = undefined.length;`, `[{b: a8.length}]` with
+  the value unused): still an under-throw MISS. An attempt to fix this by
+  eager-emitting nullish member/index reads at `GetProp`/`GetIndex` was **reverted** —
+  it hoisted the throw out of the compact short-circuit form (`cond && undefined.x`
+  evaluates the operand eagerly), causing **over-throws**. The Pop-based fix is the
+  safe boundary; covering dead stores needs liveness or a may-throw-effect model that
+  doesn't break short-circuiting.
+
+This remaining class is dominated by a **fuzzer artifact**: the generator/shrinker
+emits reads of **undeclared variables** (`a1`, `a8`, a free `input` inside a top-level
+function). In JS an undeclared read throws ReferenceError; the PE models every
+unresolved identifier as a (non-throwing) `Global`. Used → the residual reproduces it
+(`return (input + 1)` with `input` unbound also throws → match); only DEAD positions
+diverge (seed 231 `void a1` in a truthy-ternary object). NOT cleanly fixable — the PE
+can't distinguish an undeclared identifier from a real global (`Math`, `String`), and
+real code never reads undeclared vars. The right fix is at the fuzzer: stop the
+generator hardcoding `Expr::Var("input")` in `atom()` where it's out of scope, and
+stop the shrinker reducing to a different failure (it deletes declarations, leaving
+references dangling — so shrunk minimals over-represent this artifact). The lone
+non-throw straggler (seed 22) is a deeply contrived nested case.
 
 ## The fuzzer (`js-frontend/src/bin/fuzz.rs` + `tools/fuzzcmp.js`)
 
