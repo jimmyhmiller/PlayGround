@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use jsir_ir::Op;
 use jsir_jslir::constprop::{constant_lattice, fold_constants};
+use jsir_jslir::dce::eliminate_dead_code;
 use jsir_jslir::ssa::enter_ssa;
 
 #[test]
@@ -77,6 +78,8 @@ fn fold_all(op: &mut Op, base: u32, lowered_fns: &mut usize, folded_ops: &mut us
                     let lattice = constant_lattice(b, &info);
                     *folded_ops += fold_constants(b, &lattice);
                 }
+                // DCE runs regardless of SSA (it doesn't need def-use chains).
+                eliminate_dead_code(b);
             }
         }
     }

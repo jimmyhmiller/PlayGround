@@ -17,6 +17,7 @@
 //! regresses; [`Stats`] reports how many functions actually became a CFG.
 
 pub mod constprop;
+pub mod dce;
 pub mod dialect;
 pub mod passes;
 pub mod ssa;
