@@ -1,0 +1,21 @@
+# Pinned upstream source of truth for the React-compiler-on-JSLIR oracle.
+#
+# The cached final-JS oracle (cache/) is the in-tree TS compiler's output at this
+# exact commit, extracted from each fixture's `## Code` / `## Error` block. Our
+# JSLIR port copies pass logic from the Rust port at this same commit, so the
+# oracle and the behavioral reference never skew.
+#
+# DO NOT bump without regenerating the cache (tools/extract.js) and re-running the gate.
+
+repo            = git@github.com:facebook/react.git (PR #36173 branch)
+local_checkout  = ~/Documents/Code/open-source/react-rust-pr36173
+commit          = 55d6ff61692a99b47818dcf25e82350d39a26235
+commit_short    = 55d6ff616
+commit_subject  = [rust-compiler] Tools for internal testing
+
+ts_compiler     = compiler/packages/babel-plugin-react-compiler
+ts_version      = 0.0.0-experimental-334f00b-20240725   # NOT npm 1.0.0 (which skews)
+rust_port       = compiler/crates/react_compiler*        # behavioral reference, byte-exact to ts_compiler
+
+fixtures_dir    = compiler/packages/babel-plugin-react-compiler/src/__tests__/fixtures/compiler
+fixtures_count  = 1725   # 1426 with `## Code`, 299 with `## Error`

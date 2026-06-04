@@ -1,0 +1,21 @@
+[package]
+name = "jsir-react-oracle"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# The oracle gate. `cargo run -p jsir-react-oracle` (or run-oracle.sh) compiles every
+# fixture through our current pipeline, normalizes via tools/normalize-batch.js, and
+# diffs against the committed cache/ extracted from the pinned upstream. See UPSTREAM.lock.
+
+[[bin]]
+name = "oracle"
+path = "src/main.rs"
+
+[dependencies]
+jsir-swc = { path = "../jsir-swc" }
+jsir-ir = { path = "../jsir-ir" }
+jsir-jslir = { path = "../jsir-jslir" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

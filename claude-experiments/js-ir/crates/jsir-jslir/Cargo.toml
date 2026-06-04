@@ -1,0 +1,18 @@
+[package]
+name = "jsir-jslir"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+# JSLIR: a CFG/SSA dialect built on the generic jsir-ir op substrate, for the
+# React-compiler port. `build_jslir` flattens JSHIR's structured control flow
+# (jshir.if_statement/while_statement/...) into basic blocks + terminators;
+# `lift_jslir` rebuilds the structured form so the existing hir2ast/ast2source
+# path emits JS. The React passes (later) operate on the JSLIR CFG.
+
+[dependencies]
+jsir-ir = { path = "../jsir-ir" }
+
+[dev-dependencies]
+jsir-swc = { path = "../jsir-swc" }
