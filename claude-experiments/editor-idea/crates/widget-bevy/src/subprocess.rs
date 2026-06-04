@@ -22,13 +22,16 @@
 //!   host_env(name)             -> String   env var, or "" if unset
 //! ```
 //!
-//! # Threading
+//! # Threading & delivery
 //!
 //! Each child gets a reader thread that pushes stdout lines into a
-//! shared queue; `proc_read` just pops from that queue, so the worker
-//! thread never blocks on engine I/O. The whole point of the queue +
-//! non-blocking read is that a widget polls output from its animation
-//! tick rather than waiting on the pipe.
+//! shared queue (popped by the non-blocking `proc_read`) AND, if a
+//! [`ProcNotifier`] is installed, fires a [`ProcEvent`] per line and once
+//! on exit. The event path is the recommended one: the rhai layer turns
+//! those events into `on_proc_output(handle, line)` /
+//! `on_proc_exit(handle, code)` handler calls, so a widget is fully
+//! event-driven — no `set_animating`, no polling `proc_read` from
+//! `on_frame`. The polling API stays for back-compat / explicit use.
 //!
 //! # Lifecycle
 //!
@@ -54,10 +57,30 @@ use std::sync::{Arc, Mutex};
 /// never read can't grow memory without bound. Oldest lines drop.
 const MAX_BUFFERED_LINES: usize = 4096;
 
+/// An event the subprocess reader thread emits to its owner. Lets a host
+/// deliver child output/exit to a script event-driven, instead of the
+/// script polling `read_line` from an animation tick. The owner installs
+/// a [`ProcNotifier`] via [`ProcRegistry::set_notifier`].
+pub enum ProcEvent {
+    /// One stdout line (already trimmed of the trailing newline).
+    Output { handle: i64, line: String },
+    /// Stdout hit EOF (process exited). `code` is the exit status if it
+    /// could be reaped without blocking, else `None` (e.g. killed).
+    Exit { handle: i64, code: Option<i32> },
+}
+
+/// Callback the reader threads invoke. Must be `Send + Sync` because each
+/// child's reader runs on its own thread.
+pub type ProcNotifier = Arc<dyn Fn(ProcEvent) + Send + Sync>;
+
 struct Proc {
-    child: Child,
+    /// Shared with the reader thread so it can reap the exit code on EOF;
+    /// also used here for `kill`. Wrapped so both sides can touch it
+    /// without the reader holding the lock across a blocking `wait`.
+    child: Arc<Mutex<Child>>,
     stdin: Option<ChildStdin>,
     /// Stdout lines pushed by the reader thread, popped by `read_line`.
+    /// Retained for the back-compat polling API alongside the event push.
     out: Arc<Mutex<VecDeque<String>>>,
     /// Flipped to false by the reader thread when stdout hits EOF
     /// (i.e. the process exited / closed its output).
@@ -68,6 +91,8 @@ struct Proc {
 pub struct ProcRegistry {
     next_id: i64,
     procs: HashMap<i64, Proc>,
+    /// Optional push sink for `proc-output` / `proc-exit` events.
+    notifier: Option<ProcNotifier>,
 }
 
 impl ProcRegistry {
@@ -75,7 +100,14 @@ impl ProcRegistry {
         ProcRegistry {
             next_id: 1,
             procs: HashMap::new(),
+            notifier: None,
         }
+    }
+
+    /// Install the event sink. Children spawned after this push their
+    /// output/exit through `notifier` (in addition to the polling queue).
+    pub fn set_notifier(&mut self, notifier: ProcNotifier) {
+        self.notifier = Some(notifier);
     }
 
     /// Spawn `cmd args...`. Returns a positive handle, or -1 if the
@@ -97,9 +129,14 @@ impl ProcRegistry {
         };
         let out = Arc::new(Mutex::new(VecDeque::new()));
         let alive = Arc::new(AtomicBool::new(true));
+        let child = Arc::new(Mutex::new(child));
+        let id = self.next_id;
+        self.next_id += 1;
         {
             let out = out.clone();
             let alive = alive.clone();
+            let child = child.clone();
+            let notifier = self.notifier.clone();
             std::thread::spawn(move || {
                 let mut r = BufReader::new(stdout);
                 let mut line = String::new();
@@ -111,17 +148,38 @@ impl ProcRegistry {
                     }
                     let trimmed = line.trim_end().to_string();
                     if let Ok(mut q) = out.lock() {
-                        q.push_back(trimmed);
+                        q.push_back(trimmed.clone());
                         while q.len() > MAX_BUFFERED_LINES {
                             q.pop_front();
                         }
                     }
+                    if let Some(n) = &notifier {
+                        n(ProcEvent::Output {
+                            handle: id,
+                            line: trimmed,
+                        });
+                    }
                 }
                 alive.store(false, Ordering::Release);
+                // Best-effort exit code. `try_wait` is non-blocking and we
+                // never hold the lock across a blocking wait, so this can't
+                // deadlock with a concurrent `kill`. Poll briefly because
+                // stdout EOF can land a hair before the process is reaped.
+                let mut code = None;
+                for _ in 0..40 {
+                    if let Ok(mut c) = child.lock() {
+                        if let Ok(Some(status)) = c.try_wait() {
+                            code = status.code();
+                            break;
+                        }
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                if let Some(n) = &notifier {
+                    n(ProcEvent::Exit { handle: id, code });
+                }
             });
         }
-        let id = self.next_id;
-        self.next_id += 1;
         self.procs.insert(
             id,
             Proc {
@@ -165,9 +223,11 @@ impl ProcRegistry {
     }
 
     pub fn kill(&mut self, id: i64) {
-        if let Some(mut p) = self.procs.remove(&id) {
-            let _ = p.child.kill();
-            let _ = p.child.wait();
+        if let Some(p) = self.procs.remove(&id) {
+            if let Ok(mut c) = p.child.lock() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
         }
     }
 }
@@ -175,8 +235,10 @@ impl ProcRegistry {
 impl Drop for ProcRegistry {
     fn drop(&mut self) {
         for p in self.procs.values_mut() {
-            let _ = p.child.kill();
-            let _ = p.child.wait();
+            if let Ok(mut c) = p.child.lock() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
         }
     }
 }

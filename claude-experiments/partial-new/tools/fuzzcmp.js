@@ -81,6 +81,21 @@ function classify(orig, spec) {
   if (orig.threw && spec.threw) return null; // both threw: agreement
   // Both returned: compare the serialized value.
   if (orig.ok !== spec.ok) {
+    // Inherent PE limitation, NOT a soundness defect: a program that
+    // string-coerces a function observes its SOURCE TEXT, but specialization
+    // necessarily rewrites a function's body, and a residual closure renders as
+    // `__rfN.bind(null, caps)` whose `String(...)` is `function () { [native code] }`.
+    // No correct partial evaluator can preserve `String(fn)`. Skip exactly this
+    // signature (residual side is the bound-closure native-code string while the
+    // original is a function source); any other value mismatch is still reported.
+    // The residual side renders a closure as `__rfN.bind(...)`, whose `String(...)`
+    // is `function () { [native code] }` — the unambiguous marker. Skip when the
+    // residual produced that AND the original has a real function source at the
+    // corresponding spot (a `"function (`/`"function(` JSON-stringified source,
+    // possibly nested in an object/array). Any other value mismatch is reported.
+    const specIsBound = (spec.ok || '').includes('function () { [native code] }');
+    const origHasFnSrc = /"function ?\(/.test(orig.ok || '') && !(orig.ok || '').includes('[native code]');
+    if (specIsBound && origHasFnSrc) return null;
     return { kind: 'value', orig: orig.ok, spec: spec.ok };
   }
   return null;

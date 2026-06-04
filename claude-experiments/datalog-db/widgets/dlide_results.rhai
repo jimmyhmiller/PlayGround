@@ -25,16 +25,6 @@ if !("rtext" in state) { state.rtext = []; }
 // ---- pure helpers ----
 fn dl_path() { let home = host_env("HOME"); if home == "" { "datalog" } else { home + "/.cargo/bin/datalog" } }
 fn spawn_args(host, args) { let argv = ["--host", host]; for a in args { argv.push(a); } proc_spawn(dl_path(), argv) }
-fn drain(handle) {
-    let lines = [];
-    loop { let l = proc_read(handle); if l == "" { break; } lines.push(l); }
-    let done = false;
-    if !proc_alive(handle) {
-        loop { let l = proc_read(handle); if l == "" { break; } lines.push(l); }
-        done = true;
-    }
-    #{ lines: lines, done: done }
-}
 fn trimmed(s) { s.trim(); s }
 fn split_ws(s) { let out = []; for p in s.split(' ') { if p != "" { out.push(p); } } out }
 fn first_word(s) { let t = trimmed(s); let i = t.index_of(" "); if i < 0 { t } else { t.sub_string(0, i) } }
@@ -72,6 +62,7 @@ fn parse_table(lines) {
     #{ cols: cols, rows: rows }
 }
 fn has_error(lines) { for l in lines { if l.starts_with("ERROR") { return true; } } false }
+fn join_tab(arr) { let s = ""; let first = true; for x in arr { if first { s = x; first = false; } else { s += "\t" + x; } } s }
 
 // ---- handlers ----
 fn on_message(topic, payload, sender) {
@@ -84,39 +75,39 @@ fn on_message(topic, payload, sender) {
         if h != -1 {
             state.proc = h; state.busy = true; state.out = [];
             state.ran = trimmed(line); state.t0 = time();
-            set_animating(true);
             host_log("[dlide_results] run: " + state.ran);
         }
         request_render();
     }
 }
 
-fn on_frame(dt) {
-    if !state.busy { set_animating(false); return; }
-    let res = drain(state.proc);
-    for l in res.lines { state.out.push(l); }
-    if res.done {
-        let out = state.out;
-        state.busy = false; state.proc = -1;
-        set_animating(false);
-        state.ms = ((time() - state.t0) * 1000.0).to_int();
+// Event-driven subprocess: lines are pushed as they arrive (no set_animating,
+// no on_frame poll). Accumulate quietly; render once on exit.
+fn on_proc_output(handle, line) {
+    if handle == state.proc { state.out.push(line); }
+}
 
-        let ok = true;
-        let summary = "";
-        if is_table(out) {
-            let t = parse_table(out);
-            state.rkind = "table"; state.rcols = t.cols; state.rrows = t.rows; state.rtext = [];
-            summary = state.rrows.len() + " rows";
-        } else {
-            state.rkind = "text"; state.rtext = out; state.rcols = []; state.rrows = [];
-            ok = !has_error(out);
-            summary = if out.len() > 0 { out[out.len() - 1] } else { "(done)" };
-        }
-        emit("sql.result", #{ ok: ok, summary: summary, ms: state.ms });
-        if is_ddl(first_word(state.ran)) { emit("schema.changed"); }
-        host_log("[dlide_results] done: " + summary + " (" + state.ms + "ms)");
-        request_render();
+fn on_proc_exit(handle, code) {
+    if handle != state.proc { return; }
+    let out = state.out;
+    state.busy = false; state.proc = -1;
+    state.ms = ((time() - state.t0) * 1000.0).to_int();
+
+    let ok = true;
+    let summary = "";
+    if is_table(out) {
+        let t = parse_table(out);
+        state.rkind = "table"; state.rcols = t.cols; state.rrows = t.rows; state.rtext = [];
+        summary = state.rrows.len() + " rows";
+    } else {
+        state.rkind = "text"; state.rtext = out; state.rcols = []; state.rrows = [];
+        ok = !has_error(out);
+        summary = if out.len() > 0 { out[out.len() - 1] } else { "(done)" };
     }
+    emit("sql.result", #{ ok: ok, summary: summary, ms: state.ms });
+    if is_ddl(first_word(state.ran)) { emit("schema.changed"); }
+    host_log("[dlide_results] done: " + summary + " (" + state.ms + "ms)");
+    request_render();
 }
 
 // ---- style helpers (pure) ----
@@ -147,6 +138,47 @@ fn col_aligns(cols, rows) {
     aligns
 }
 
+// Explicit per-column widths that sum to `avail` (the usable canvas width).
+// The renderer's auto columns + content-box panel overflow the pane when
+// content is wide, so we size columns ourselves: proportional to content
+// length (clamped), then scaled to exactly fill `avail` — so the table fills
+// its pane and never spills past it. Returns a width per column.
+fn col_widths(cols, rows, avail) {
+    let n = cols.len();
+    let nat = []; let total = 0.0;
+    let c = 0;
+    while c < n {
+        let m = cols[c].len();
+        for r in rows { if c < r.len() { let l = r[c].len(); if l > m { m = l; } } }
+        let wpx = (m.to_float() + 2.0) * 7.5;   // ~7.5px/char + padding
+        if wpx < 36.0 { wpx = 36.0; }
+        if wpx > 380.0 { wpx = 380.0; }
+        nat.push(wpx); total += wpx; c += 1;
+    }
+    if total <= 0.0 { return nat; }
+    let scale = avail / total;            // fill if room, shrink if over
+    let out = [];
+    for x in nat { out.push(x * scale); }
+    out
+}
+
+fn on_click(x, y, shift, cmd, id) {
+    if id == "copy" {
+        let txt = "";
+        if state.rkind == "table" {
+            txt += join_tab(state.rcols) + "\n";
+            for r in state.rrows { txt += join_tab(r) + "\n"; }
+        } else {
+            for l in state.rtext { txt += l + "\n"; }
+        }
+        clipboard_set(txt);
+    }
+}
+
+// Re-render on pane resize so layout (e.g. table widths) tracks the
+// new canvas size — render() depends on `w`/`h`.
+fn on_resize(w, h) { request_render(); }
+
 fn render(w, h) {
     // slim status bar
     let head = if state.busy { "running query…" }
@@ -158,6 +190,10 @@ fn render(w, h) {
     if state.ran != "" {
         bar.push(#{ type: "text", value: "  ·  " + state.ran, size: 11.0, color: "fg_muted", family: "mono" });
     }
+    // widget text isn't selectable, so offer copy-to-clipboard of the result
+    if state.rkind != "" {
+        bar.push(#{ type: "button", id: "copy", label: "copy", kind: "ghost" });
+    }
 
     // result body
     let inner = [];
@@ -166,10 +202,16 @@ fn render(w, h) {
             inner.push(#{ type: "text", value: "no rows", size: 12.0, color: "fg_muted" });
         } else {
             let aligns = col_aligns(state.rcols, state.rrows);
+            // usable width = canvas minus our paddings/border minus column gaps
+            let nc = state.rcols.len();
+            let gaps = if nc > 1 { 12.0 * (nc - 1).to_float() } else { 0.0 };
+            let avail = w - 52.0 - gaps;
+            if avail < 60.0 { avail = 60.0; }
+            let widths = col_widths(state.rcols, state.rrows, avail);
             let cols = [];
             let i = 0;
-            while i < state.rcols.len() {
-                cols.push(#{ header: state.rcols[i], align: aligns[i] });
+            while i < nc {
+                cols.push(#{ header: state.rcols[i], align: aligns[i], width: widths[i] });
                 i += 1;
             }
             inner.push(#{ type: "table", zebra: true, columns: cols, rows: state.rrows });
@@ -186,12 +228,12 @@ fn render(w, h) {
     }
 
     #{ type: "vstack", gap: 8.0,
-       style: #{ background: "surface_1", width: "100%", height: "100%",
+       style: #{ background: "surface_1", width: "100%", min_height: "100%",
                  padding: #{ top: 10.0, right: 12.0, bottom: 12.0, left: 12.0 } },
        children: [
         #{ type: "hstack", gap: 6.0, align: "center", children: bar },
         #{ type: "frame", pad: 10.0, gap: 4.0,
-           style: #{ background: "surface_2", radius: "radius_md", flex_grow: 1.0,
+           style: #{ background: "surface_2", radius: "radius_md",
                      border: #{ color: "surface_3", width: 1.0 } },
            children: [ #{ type: "scroll", pad: 0.0, gap: 2.0, children: inner } ] },
     ] }

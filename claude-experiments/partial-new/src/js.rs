@@ -251,6 +251,18 @@ enum Instr {
     DeleteIndexOp,
     SetGlobalOp(String),
     PushArr,
+    /// Coercibility check on the receiver of a method call / `push` that is on
+    /// top of the operand stack: if the receiver is `null`/`undefined` the member
+    /// access (`recv.key`) throws HERE — before the call's arguments are
+    /// evaluated. JS evaluates a call's callee (including the member access that
+    /// can throw) before its arguments, but the residual evaluates an impure
+    /// argument's side effects eagerly (as a preceding statement), which would
+    /// move them ahead of the receiver-throw. Emitted by `compile` only when an
+    /// argument is impure (a pure argument stays an in-place sub-expression of
+    /// the call, so no reordering is possible and no check is needed). Peeks the
+    /// receiver, never pops it. `key` is the member name, used to build the
+    /// faithful guard expression `recv.key`.
+    ChkCoercible(String),
     GetIndex,
     PushFunc(usize),
     MakeClosure(usize, usize), // fid, ncaptures
@@ -584,6 +596,29 @@ fn may_throw(e: &RExpr) -> bool {
     }
 }
 
+/// Is this residual expression PROVABLY never `null`/`undefined`? Used to decide
+/// whether a method-call receiver needs a coercibility guard (`Instr::ChkCoercible`):
+/// a provably-coercible receiver (`Math.foo()`, `new X().foo()`, a literal) cannot
+/// throw at the member access, so no guard is emitted (it would wrongly throw-check
+/// a fine receiver and bloat the residual). Conservative: anything that could be
+/// nullish (a variable, a property/index read, a call result) returns false, so it
+/// gets the guard. A free global is treated as coercible (a method call on a
+/// standard global like `Math`/`JSON` is the common case; a genuinely-undefined
+/// global is the rare unguarded gap).
+fn rexpr_coercible(e: &RExpr) -> bool {
+    matches!(
+        e,
+        RExpr::Num(_)
+            | RExpr::Str(_)
+            | RExpr::Bool(_)
+            | RExpr::This
+            | RExpr::Global(_)
+            | RExpr::New(..)
+            | RExpr::FnRef { .. }
+            | RExpr::BoundMethod { .. }
+    )
+}
+
 fn rexpr_weight(e: &RExpr) -> u64 {
     match e {
         RExpr::Bin(_, a, b) | RExpr::Index(a, b) => 1 + rexpr_weight(a) + rexpr_weight(b),
@@ -620,6 +655,19 @@ struct CompileAux {
     /// `catch` entry pcs; marked leaders so a `throw` transferring there starts a
     /// fresh residual block.
     catch_pcs: Vec<usize>,
+    /// Count of `try` handlers currently open (active over the body being
+    /// compiled). A `break`/`continue` jumps out of its enclosing loop/switch
+    /// WITHOUT running the body's `PopHandler`, so it must first pop every handler
+    /// opened between its target loop/switch and itself — otherwise the handler
+    /// leaks past the loop and a later residual op trips the in-try guard.
+    handler_depth: usize,
+    /// `handler_depth` captured when each enclosing switch/loop opened (parallel
+    /// to `breaks`): a `break` emits `handler_depth - breaks_hd.last()`
+    /// `PopHandler`s before its jump.
+    breaks_hd: Vec<usize>,
+    /// `handler_depth` captured when each enclosing loop opened (parallel to
+    /// `continues`).
+    continues_hd: Vec<usize>,
     /// next free local slot for switch-discriminant scratch (per function).
     next_slot: usize,
     /// high-water mark of slots used (becomes the function's nslots).
@@ -659,6 +707,14 @@ fn compile_stmts(stmts: &[Stmt], code: &mut Vec<Instr>, aux: &mut CompileAux) {
             }
             Stmt::Push(a, v) => {
                 compile_expr(a, code);
+                // `arr.push(x)`: the `.push` member access throws if `arr` is
+                // null/undefined, BEFORE `x` runs. When `x` is impure its effects
+                // are emitted eagerly (before the push), so guard the receiver's
+                // coercibility first to keep the throw ahead of them. A pure `x`
+                // needs no guard (it cannot be reordered).
+                if !is_pure(v) {
+                    code.push(Instr::ChkCoercible("push".to_string()));
+                }
                 compile_expr(v, code);
                 code.push(Instr::PushArr);
             }
@@ -671,6 +727,12 @@ fn compile_stmts(stmts: &[Stmt], code: &mut Vec<Instr>, aux: &mut CompileAux) {
                 code.push(Instr::Pop);
             }
             Stmt::Break => {
+                // Leaving the target loop/switch via `break` exits every `try`
+                // opened inside it: pop those handlers before the jump.
+                let target_hd = *aux.breaks_hd.last().expect("`break` outside of a switch or loop");
+                for _ in 0..(aux.handler_depth - target_hd) {
+                    code.push(Instr::PopHandler);
+                }
                 let j = code.len();
                 code.push(Instr::Jmp(0));
                 aux.breaks
@@ -708,10 +770,14 @@ fn compile_stmts(stmts: &[Stmt], code: &mut Vec<Instr>, aux: &mut CompileAux) {
                 code.push(Instr::JmpIfFalsy(0));
                 aux.breaks.push(Vec::new());
                 aux.continues.push(Vec::new());
+                aux.breaks_hd.push(aux.handler_depth);
+                aux.continues_hd.push(aux.handler_depth);
                 compile_stmts(body, code, aux);
                 code.push(Instr::Jmp(head));
                 let end = code.len();
                 patch(&mut code[jz], end);
+                aux.breaks_hd.pop();
+                aux.continues_hd.pop();
                 for b in aux.breaks.pop().unwrap() {
                     patch(&mut code[b], end);
                 }
@@ -727,6 +793,8 @@ fn compile_stmts(stmts: &[Stmt], code: &mut Vec<Instr>, aux: &mut CompileAux) {
                 code.push(Instr::JmpIfFalsy(0));
                 aux.breaks.push(Vec::new());
                 aux.continues.push(Vec::new());
+                aux.breaks_hd.push(aux.handler_depth);
+                aux.continues_hd.push(aux.handler_depth);
                 compile_stmts(body, code, aux);
                 // `continue` jumps here, so the update still runs before re-test.
                 let update_pc = code.len();
@@ -734,6 +802,8 @@ fn compile_stmts(stmts: &[Stmt], code: &mut Vec<Instr>, aux: &mut CompileAux) {
                 code.push(Instr::Jmp(head));
                 let end = code.len();
                 patch(&mut code[jz], end);
+                aux.breaks_hd.pop();
+                aux.continues_hd.pop();
                 for b in aux.breaks.pop().unwrap() {
                     patch(&mut code[b], end);
                 }
@@ -742,6 +812,12 @@ fn compile_stmts(stmts: &[Stmt], code: &mut Vec<Instr>, aux: &mut CompileAux) {
                 }
             }
             Stmt::Continue => {
+                // Leaving the loop body via `continue` exits every `try` opened
+                // inside it: pop those handlers before the jump.
+                let target_hd = *aux.continues_hd.last().expect("`continue` outside of a loop");
+                for _ in 0..(aux.handler_depth - target_hd) {
+                    code.push(Instr::PopHandler);
+                }
                 let j = code.len();
                 code.push(Instr::Jmp(0));
                 aux.continues
@@ -762,7 +838,12 @@ fn compile_stmts(stmts: &[Stmt], code: &mut Vec<Instr>, aux: &mut CompileAux) {
                     body_end: 0,
                     end: 0,
                 });
+                // The handler is active only over the body (a `break`/`continue`
+                // out of the body must pop it; the catch runs with it already
+                // gone). Track that for the break/continue handler-pop count.
+                aux.handler_depth += 1;
                 compile_stmts(body, code, aux);
+                aux.handler_depth -= 1;
                 let body_end = code.len();
                 code.push(Instr::PopHandler);
                 let jmp = code.len();
@@ -820,6 +901,7 @@ fn compile_switch(disc: &Expr, clauses: &[Clause], code: &mut Vec<Instr>, aux: &
 
     // Clause bodies, in source order.
     aux.breaks.push(Vec::new());
+    aux.breaks_hd.push(aux.handler_depth);
     let mut default_label: Option<usize> = None;
     let mut case_i = 0;
     for clause in clauses {
@@ -838,6 +920,7 @@ fn compile_switch(disc: &Expr, clauses: &[Clause], code: &mut Vec<Instr>, aux: &
     }
     let end = code.len();
     patch(&mut code[fallthrough], default_label.unwrap_or(end));
+    aux.breaks_hd.pop();
     for b in aux.breaks.pop().unwrap() {
         patch(&mut code[b], end);
     }
@@ -943,7 +1026,24 @@ fn compile_expr(e: &Expr, code: &mut Vec<Instr>) {
             code.push(Instr::MakeClosure(*fid, caps.len()));
         }
         Expr::Call(callee, args) => {
-            compile_expr(callee, code);
+            // A method call `recv.m(args)` evaluates the callee — including the
+            // `recv.m` member access, which throws if `recv` is null/undefined —
+            // BEFORE the arguments. When an argument is impure its side effects
+            // are residualized eagerly (a preceding statement), which would move
+            // them ahead of that receiver-throw. Guard the receiver's
+            // coercibility first so the throw stays ahead of the argument effects.
+            // Pure arguments stay in-place sub-expressions of the call (no
+            // reordering), so the guard is only needed — and only emitted — when
+            // some argument is impure.
+            let guarded = matches!(callee.as_ref(), Expr::Get(..))
+                && args.iter().any(|a| !is_pure(a));
+            if let (true, Expr::Get(base, k)) = (guarded, callee.as_ref()) {
+                compile_expr(base, code);
+                code.push(Instr::ChkCoercible(k.clone()));
+                code.push(Instr::GetProp(k.clone()));
+            } else {
+                compile_expr(callee, code);
+            }
             for a in args {
                 compile_expr(a, code);
             }
@@ -1119,7 +1219,15 @@ fn compile_update(place: &Expr, op: Bop, prefix: bool, code: &mut Vec<Instr>) {
 
     if prefix {
         emit_store(code);
-        compile_expr(place, code); // read the new value
+        compile_expr(place, code); // read the new value (the result)
+        // Single-evaluate the result: the new value is read back from the place,
+        // so it is a live expression aliasing that place (e.g. `(input - 0) - 1`).
+        // If the place is later reassigned — most commonly the loop-carried
+        // materialization of the very slot just stored — an un-snapshotted result
+        // re-reads the new value and re-applies the `± 1`, diverging. Capturing it
+        // here pins the result to the value at the update site (mirrors the
+        // postfix snapshot of the old value).
+        code.push(Instr::Snapshot);
     } else {
         compile_expr(place, code); // read the old value (the result)
         // The result of a *postfix* `x++`/`x--` is `ToNumber(old)`, not the raw
@@ -1250,6 +1358,37 @@ pub struct Js {
     /// The weight budget (defaults to `SPEC_WEIGHT_BUDGET`, override with the
     /// `SPEC_WEIGHT_BUDGET` env var for calibration).
     spec_budget: u64,
+    /// Per heap address, the bytecode `pc` of the `NewArray`/`NewObject` that
+    /// created it. Addresses are never reused, so this is unambiguous. Used by
+    /// the duplication profiler to map a duplicated abstract object back to the
+    /// single creation site that dominates all of its uses.
+    creation_pc: std::cell::RefCell<HashMap<usize, usize>>,
+    /// Per heap address, how many DISTINCT `materialize` calls reconstructed it
+    /// (a fresh `NewArray`/`NewObject` each). Filled during specialization. An
+    /// address reconstructed by >= 2 materialize calls is realized as that many
+    /// distinct runtime objects — an identity bug (a write to one copy is
+    /// invisible to a read of another). Its creation pc is then escaped eagerly.
+    dup_counts: std::cell::RefCell<HashMap<usize, usize>>,
+    /// Creation pcs (`NewArray`/`NewObject`) whose objects must be escaped
+    /// EAGERLY at construction (built once as a runtime variable that dominates
+    /// every use) rather than kept as a foldable static object that `materialize`
+    /// could reconstruct at multiple merge points. Grown to a fixpoint by
+    /// `specialize_program`: each pass flags the creation pcs of objects that
+    /// still duplicated, then re-specializes. Escaping at creation is always
+    /// sound — it only costs folding — so over-flagging cannot break correctness.
+    escape_at_creation: std::cell::RefCell<std::collections::HashSet<usize>>,
+    /// Stress/verification mode (env `FORCE_ESCAPE_ALL`): escape EVERY object at
+    /// its creation, not just the duplicating ones. This forgoes all object
+    /// folding, so it is never used in production — but because escape-at-creation
+    /// must be observationally transparent (it only changes whether an object is
+    /// a static literal or a runtime variable, never its behavior), the residual
+    /// must stay equivalent to the original under it. A test runs varied programs
+    /// in this mode and checks node-equivalence; that is the soundness guard for
+    /// the dominance property (a non-dominating construction would throw or read
+    /// `undefined`, exactly the failure of the rejected flat-memo approach).
+    /// A `Cell` so a test can toggle it on a freshly built client without racy
+    /// process-global env mutation; defaults from the env at construction.
+    force_escape_all: std::cell::Cell<bool>,
 }
 
 impl Js {
@@ -1400,7 +1539,18 @@ impl Js {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(SPEC_WEIGHT_BUDGET),
             eager_stores: std::cell::Cell::new(false),
+            creation_pc: std::cell::RefCell::new(HashMap::new()),
+            dup_counts: std::cell::RefCell::new(HashMap::new()),
+            escape_at_creation: std::cell::RefCell::new(std::collections::HashSet::new()),
+            force_escape_all: std::cell::Cell::new(std::env::var_os("FORCE_ESCAPE_ALL").is_some()),
         }
+    }
+
+    /// Test/verification hook: force EVERY object to escape at its creation site
+    /// (see the `force_escape_all` field). Used by the escape-at-creation
+    /// transparency test; never called in production.
+    pub fn set_force_escape_all(&self, v: bool) {
+        self.force_escape_all.set(v);
     }
 
     /// Residual functions generated during specialization (for the back-end).
@@ -1518,6 +1668,91 @@ impl Js {
 
     pub fn input_var(&self) -> usize {
         0
+    }
+
+    /// Specialize the whole program with eager-escape duplication repair.
+    ///
+    /// The partial-static heap model can realize ONE abstract heap object as
+    /// SEVERAL distinct runtime objects: an object carried through multiple
+    /// control-flow merge points is reconstructed (`materialize`) at each, so a
+    /// runtime write to one copy is invisible to a read of another (this is what
+    /// broke `simple.js`'s byte array — the decrypt and the decode hit different
+    /// arrays). A flat "materialize once, reuse the var" memo is unsound: the one
+    /// construction does not dominate the later references.
+    ///
+    /// The sound repair is to construct such an object exactly once, at its
+    /// CREATION site — the one program point that provably dominates every use —
+    /// and represent it as a runtime variable from then on (`escape`), so no
+    /// merge point can reconstruct it. We discover precisely which creation sites
+    /// need this by specializing and counting, per abstract object, how many
+    /// distinct `materialize` constructions it received (`dup_counts`); any with
+    /// >= 2 are flagged by creation pc and the program is re-specialized. Escaping
+    /// at creation is always sound (it only forgoes folding), so over-flagging
+    /// cannot break correctness; the loop runs to a fixpoint because escaping one
+    /// object can reveal another that only duplicated behind it.
+    pub fn specialize_program(&self) -> Program<Op, Cond> {
+        // A hard cap so a pathological non-converging program fails loudly rather
+        // than looping forever; in practice one or two passes suffice.
+        const MAX_PASSES: usize = 16;
+        let mut last = None;
+        for _ in 0..MAX_PASSES {
+            self.reset_for_respecialization();
+            let prog = crate::engine::specialize(self, self.start());
+            // Flag the creation pc of every object realized as >= 2 runtime
+            // objects this pass. `flagged.insert` returns false for an already
+            // known site, so a site that keeps duplicating does not loop forever.
+            let mut added = false;
+            {
+                let counts = self.dup_counts.borrow();
+                let creation = self.creation_pc.borrow();
+                let mut flagged = self.escape_at_creation.borrow_mut();
+                for (addr, &cnt) in counts.iter() {
+                    if cnt >= 2 {
+                        if let Some(&cpc) = creation.get(addr) {
+                            if flagged.insert(cpc) {
+                                added = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if std::env::var_os("DUP_DEBUG").is_some() {
+                let counts = self.dup_counts.borrow();
+                let mx = counts.values().copied().max().unwrap_or(0);
+                let ndup = counts.values().filter(|&&c| c >= 2).count();
+                eprintln!(
+                    "[DUP] pass: max_construct={mx} duplicated_addrs={ndup} flagged_pcs={:?} added={added}",
+                    self.escape_at_creation.borrow()
+                );
+            }
+            if !added {
+                // Converged: this residual already escaped everything that
+                // duplicated, so no abstract object is realized more than once.
+                return prog;
+            }
+            last = Some(prog);
+        }
+        // Did not converge within the cap. The last residual is still sound; any
+        // residual duplication would surface in the differential oracle/fuzzer.
+        last.expect("at least one specialization pass ran")
+    }
+
+    /// Clear all per-specialization mutable state so a fresh `engine::specialize`
+    /// pass starts from scratch. The `escape_at_creation` flags PERSIST (they
+    /// accumulate toward the fixpoint); everything else is rebuilt each pass.
+    fn reset_for_respecialization(&self) {
+        self.residual_fns.borrow_mut().clear();
+        self.fn_memo.borrow_mut().clear();
+        self.halt_at.borrow_mut().clear();
+        self.residual_try_stack.borrow_mut().clear();
+        self.probing.set(false);
+        self.try_taint.set(false);
+        self.eager_stores.set(false);
+        self.spec_steps.set(0);
+        self.spec_blocks.set(0);
+        self.spec_weight.set(0);
+        self.creation_pc.borrow_mut().clear();
+        self.dup_counts.borrow_mut().clear();
     }
 
     /// Fold a binary operator over abstract operands. Total: any combination it
@@ -2054,6 +2289,11 @@ impl Client for Js {
                 let vals = self.emit_maythrow_elems(s, pc, vals, out);
                 let fields = keys.iter().cloned().zip(vals).collect();
                 let addr = s.alloc(HeapObj::Object(fields));
+                self.creation_pc.borrow_mut().insert(addr, pc);
+                if self.force_escape_all.get() || self.escape_at_creation.borrow().contains(&pc) {
+                    let r = self.escape(s, addr, &mut std::collections::HashSet::new(), out);
+                    return self.push(s, Abs::Dyn(r));
+                }
                 self.push(s, Abs::Ref(addr))
             }
             Instr::NewArray(n) => {
@@ -2061,6 +2301,11 @@ impl Client for Js {
                 let vals: Vec<Abs> = s.top_mut().ostack.split_off(base);
                 let vals = self.emit_maythrow_elems(s, pc, vals, out);
                 let addr = s.alloc(HeapObj::Array(vals));
+                self.creation_pc.borrow_mut().insert(addr, pc);
+                if self.force_escape_all.get() || self.escape_at_creation.borrow().contains(&pc) {
+                    let r = self.escape(s, addr, &mut std::collections::HashSet::new(), out);
+                    return self.push(s, Abs::Dyn(r));
+                }
                 self.push(s, Abs::Ref(addr))
             }
             Instr::GetProp(k) => {
@@ -2084,7 +2329,21 @@ impl Client for Js {
                         HeapObj::Object(fields) => {
                             !fields.iter().any(|(fk, _)| fk == k) && is_object_proto_member(k)
                         }
-                        HeapObj::Array(_) => k != "length",
+                        HeapObj::Array(_) => {
+                            // `length` stays modeled. The mutating accessors we
+                            // model (`pop`, `shift`) become a bound-array-method
+                            // marker so the call site can fold them on a static
+                            // array (keeps a worklist-driven loop static — the
+                            // self-application memo driver). Anything else escapes.
+                            if matches!(k.as_str(), "pop" | "shift") {
+                                let baddr = s.alloc(HeapObj::Builtin {
+                                    kind: format!("Array.{k}"),
+                                    data: vec![Abs::Ref(addr)],
+                                });
+                                return self.push(s, Abs::Ref(baddr));
+                            }
+                            k != "length"
+                        }
                         HeapObj::Closure { .. } => true,
                         HeapObj::Builtin { kind, data } => {
                             let bound = HeapObj::Builtin {
@@ -2292,6 +2551,37 @@ impl Client for Js {
                 }
                 self.advance(s)
             }
+            Instr::ChkCoercible(k) => {
+                // Peek the receiver (left on the stack for the following
+                // GetProp/PushArr). Only null/undefined/dynamic receivers can
+                // throw at the member access; commit that throw HERE, before the
+                // (impure) arguments that follow. A statically-coercible receiver
+                // (object/array/number/string/bool) cannot throw at member access,
+                // so the check folds away and the call still folds.
+                let a = s.top().ostack.last().cloned().unwrap();
+                let needs_guard = match &a {
+                    // A statically-coercible receiver (object/array/primitive)
+                    // cannot throw at member access — fold the check away.
+                    Abs::Ref(_) | Abs::Num(_) | Abs::Str(_) | Abs::Bool(_) => false,
+                    // Statically null/undefined: the member access throws for
+                    // certain. A dynamic receiver might be null/undefined at
+                    // runtime unless it is provably coercible (`Math`, `new X()`,
+                    // a literal); guard those that could be nullish.
+                    Abs::Null | Abs::Undef => true,
+                    Abs::Dyn(e) => !rexpr_coercible(e),
+                };
+                if needs_guard {
+                    // Commit the receiver-throw as the real `recv.key` read, before
+                    // the impure arguments that follow. At runtime this throws iff
+                    // the receiver is null/undefined (matching `recv.key`); for a
+                    // non-null receiver it is a harmless idempotent property read.
+                    self.forbid_residual_in_try(s, "a receiver coercibility check");
+                    let recv = a.to_rexpr();
+                    let dst = Js::coerce_var(pc);
+                    out.push(Op::Eval { dst, expr: RExpr::Get(Box::new(recv), k.clone()) });
+                }
+                self.advance(s)
+            }
             Instr::PushArr => {
                 let v = s.top_mut().ostack.pop().unwrap();
                 let a = s.top_mut().ostack.pop().unwrap();
@@ -2411,6 +2701,26 @@ impl Client for Js {
             Instr::OpaqueOp { op, arity } => {
                 let base = s.top().ostack.len() - *arity;
                 let operands: Vec<Abs> = s.top_mut().ostack.split_off(base);
+                // `key in obj` folds to a static boolean when both are static:
+                // the membership decision is exactly what an interpreter's memo
+                // lookup needs to decide control flow at specialization time
+                // (`if (k in memo) ...`). Own data fields count, as do the
+                // `Object.prototype` members the own-fields model can't represent
+                // (`toString`, ...) — matching `Instr::GetProp`'s escape rule, so
+                // this is sound. A dynamic key or a non-object base falls through
+                // to residualize. (Array `in` is left to residualize: a hole vs a
+                // present `undefined` are indistinguishable in the abstract model.)
+                if op == "in" && operands.len() == 2 {
+                    if let (key, Abs::Ref(addr)) = (&operands[0], &operands[1]) {
+                        if let HeapObj::Object(fields) = &s.heap[addr] {
+                            if let Abs::Str(k) = key {
+                                let present =
+                                    fields.iter().any(|(fk, _)| fk == k) || is_object_proto_member(k);
+                                return self.push(s, Abs::Bool(present));
+                            }
+                        }
+                    }
+                }
                 // Operators we pass through verbatim but can still *fold* when
                 // their operands are static (`!`, `~`, `?:`, `&&`, `||`, `??`,
                 // loose `==`/`!=`). This keeps a static computation static: an
@@ -3093,6 +3403,27 @@ impl Js {
         if let Abs::Ref(addr) = &callee {
             if let HeapObj::Builtin { kind, data } = &s.heap[addr] {
                 let (kind, data) = (kind.clone(), data.clone());
+                // A bound array mutator (`Array.pop` / `Array.shift`) on a static
+                // array: mutate the abstract array and return the removed element,
+                // so the array stays static (the marker is only created for a
+                // static-array receiver in `GetProp`).
+                if let Some(method) = kind.strip_prefix("Array.") {
+                    if let Some(Abs::Ref(arr_addr)) = data.first() {
+                        let arr_addr = *arr_addr;
+                        let v = match (s.heap.get_mut(&arr_addr), method) {
+                            (Some(HeapObj::Array(elems)), "pop") => {
+                                elems.pop().unwrap_or(Abs::Undef)
+                            }
+                            (Some(HeapObj::Array(elems)), "shift") => {
+                                if elems.is_empty() { Abs::Undef } else { elems.remove(0) }
+                            }
+                            _ => panic!("bound array method on a non-array: {kind}"),
+                        };
+                        s.top_mut().pc += 1;
+                        s.top_mut().ostack.push(v);
+                        return Step::Continue;
+                    }
+                }
                 // Static inputs: fold to a constant. Otherwise residualize the
                 // built-in as a runtime call (e.g. `new TextDecoder().decode(x)`),
                 // so a dynamic argument is handled rather than rejected.
@@ -3172,7 +3503,18 @@ impl Js {
             // duplicated; the callee and any heap-object arguments escape (the
             // callee may read or mutate them).
             _ => {
-                self.forbid_residual_in_try(s, "an unmodeled call");
+                // A provably-total host builtin (`Date.now()`, `Math.*`) never
+                // throws, so it must not force an enclosing `try` to residualize
+                // (which would runtime-ize everything the try touches — the
+                // simple.js byte array). The call is still emitted as a residual
+                // effect; only the throw-into-the-catch concern is waived.
+                let nonthrow = matches!(&callee, Abs::Dyn(e) if self.call_nonthrowing(s, e, &args));
+                if std::env::var_os("CALL_DEBUG").is_some() && !s.handlers.is_empty() && !nonthrow {
+                    eprintln!("[CALL] pc={pc} nonthrow={nonthrow} callee={:?} nargs={}", callee, args.len());
+                }
+                if !nonthrow {
+                    self.forbid_residual_in_try(s, "an unmodeled call");
+                }
                 self.freeze_before_opaque_call(s, pc, out);
                 let callee_r = self.escape_if_ref(s, callee, out).to_rexpr();
                 let mut escaped = std::collections::HashSet::new();
@@ -3568,6 +3910,31 @@ impl Js {
         if escaped.contains(&addr) {
             return RExpr::Var(Js::escape_var(addr));
         }
+        if std::env::var_os("ESCAPE_DEBUG").is_some() {
+            let pc = s.top().pc;
+            let mut reach = std::collections::HashSet::new();
+            Js::reachable(&s.heap, addr, &mut reach);
+            let maxlen = reach
+                .iter()
+                .filter_map(|a| match &s.heap[a] {
+                    HeapObj::Array(e) => Some(e.len()),
+                    _ => None,
+                })
+                .max()
+                .unwrap_or(0);
+            let _ = maxlen;
+            let kind = match &s.heap[&addr] {
+                HeapObj::Object(fs) => format!("Object{:?}", fs.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>()),
+                HeapObj::Array(e) => format!("Array[{}]", e.len()),
+                HeapObj::Closure { fid, .. } => format!("Closure(fid={fid})"),
+                HeapObj::Builtin { kind, .. } => format!("Builtin({kind})"),
+            };
+            eprintln!(
+                "[ESC] pc={pc} instr={:?} addr={addr} kind={kind} reach={}",
+                self.code.get(pc),
+                reach.len()
+            );
+        }
         let heap = s.heap.clone();
         let root = self.materialize_value(&Abs::Ref(addr), &heap, out);
         let mut reach = std::collections::HashSet::new();
@@ -3678,6 +4045,13 @@ impl Js {
     /// id bands.
     fn opaque_call_var(pc: usize) -> usize {
         500_000 + pc
+    }
+
+    /// Stable residual temp for a receiver coercibility guard (`Instr::ChkCoercible`).
+    /// The result is discarded (only the throw-if-null/undefined matters); keyed by
+    /// pc so a check in a loop reuses one temp. Well above every other id band.
+    fn coerce_var(pc: usize) -> usize {
+        3_000_000_000 + pc
     }
 
     /// Stable residual temp for a postfix-update snapshot (`Instr::Snapshot`).
@@ -3823,7 +4197,12 @@ impl Js {
                     probe.top_mut().ostack.push(v);
                 }
                 Instr::JmpIfFalsy(_) => {
-                    return probe.top().ostack.last().map(|v| v.is_dynamic()).unwrap_or(true);
+                    let cond = probe.top().ostack.last().cloned();
+                    let dyn_ = cond.as_ref().map(|v| v.is_dynamic()).unwrap_or(true);
+                    if dyn_ && std::env::var_os("LOOP_DEBUG").is_some() {
+                        eprintln!("[LOOP] head_pc={} cond={:?}", s.top().pc, cond);
+                    }
+                    return dyn_;
                 }
                 _ => return true,
             }
@@ -3860,9 +4239,111 @@ impl Js {
         Step::Jump(ns)
     }
 
+    /// Would materializing `slots` emit any expression that can throw at runtime?
+    /// Walks each slot's value and, for heap refs, the reachable graph, looking for
+    /// a `Dyn` operand whose `RExpr` `may_throw` (an uncommitted member/index read
+    /// or call carried in a slot/field). Heap-stored values are normally already
+    /// committed to throw-free temps (`emit_if_maythrow`), so this is almost always
+    /// false — but the walk keeps the check sound for any path that didn't commit.
+    fn materialize_may_throw(&self, ns: &State, slots: &[usize]) -> bool {
+        let fi = ns.frames.len() - 1;
+        let mut seen = std::collections::HashSet::new();
+        slots
+            .iter()
+            .any(|&slot| self.abs_may_throw(&ns.frames[fi].locals[slot], &ns.heap, &mut seen))
+    }
+
+    /// Is a residual call of `callee` with abstract `args` PROVABLY non-throwing —
+    /// a known total host builtin that never raises (`Date.now()`, `Math.floor(x)`,
+    /// …)? Conservative: false unless whitelisted. This lets an enclosing `try`
+    /// FOLD instead of residualizing for a benign effect (the `Date.now` anti-debug
+    /// timing read in simple.js), so the work it wraps stays static. Soundness rests
+    /// only on the builtins in `is_total_builtin` genuinely never throwing.
+    fn call_nonthrowing(&self, s: &State, callee: &RExpr, args: &[Abs]) -> bool {
+        let RExpr::Get(base, m) = callee else { return false };
+        match &**base {
+            // Direct `Global.method(...)`.
+            RExpr::Global(g) => Self::is_total_builtin(g, m),
+            // `Global.method.call(recv, ...)` / `.apply(recv, argsArray)`. `.call`
+            // is always safe for a total fn; `.apply` throws a TypeError unless its
+            // second argument is array-like, so require a static array (or
+            // null/undefined, which `apply` treats as no args).
+            RExpr::Get(b2, m2) => {
+                let RExpr::Global(g) = &**b2 else { return false };
+                if !Self::is_total_builtin(g, m2) {
+                    return false;
+                }
+                match m.as_str() {
+                    "call" => true,
+                    "apply" => match args.get(1) {
+                        None | Some(Abs::Null) | Some(Abs::Undef) => true,
+                        Some(Abs::Ref(addr)) => {
+                            matches!(s.heap.get(addr), Some(HeapObj::Array(_)))
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Host builtins that are TOTAL — never throw for any argument. (They may
+    /// return `NaN`/`undefined`, but never raise.) Used by `call_nonthrowing`.
+    fn is_total_builtin(global: &str, method: &str) -> bool {
+        matches!(
+            (global, method),
+            ("Date", "now")
+                | ("Math", "floor")
+                | ("Math", "ceil")
+                | ("Math", "round")
+                | ("Math", "trunc")
+                | ("Math", "abs")
+                | ("Math", "sign")
+                | ("Math", "max")
+                | ("Math", "min")
+                | ("Math", "sqrt")
+                | ("Math", "cbrt")
+                | ("Math", "pow")
+                | ("Math", "random")
+        )
+    }
+
+    fn abs_may_throw(&self, v: &Abs, heap: &Heap, seen: &mut std::collections::HashSet<usize>) -> bool {
+        match v {
+            Abs::Dyn(e) => may_throw(e),
+            Abs::Ref(addr) => {
+                if !seen.insert(*addr) {
+                    return false;
+                }
+                match &heap[addr] {
+                    HeapObj::Object(fs) => fs.iter().any(|(_, x)| self.abs_may_throw(x, heap, seen)),
+                    HeapObj::Array(es) => es.iter().any(|x| self.abs_may_throw(x, heap, seen)),
+                    HeapObj::Closure { captured, .. } => {
+                        captured.iter().any(|x| self.abs_may_throw(x, heap, seen))
+                    }
+                    HeapObj::Builtin { data, .. } => {
+                        data.iter().any(|x| self.abs_may_throw(x, heap, seen))
+                    }
+                }
+            }
+            _ => false,
+        }
+    }
+
     fn materialize(&self, ns: &mut State, slots: &[usize], out: &mut Vec<Op>) {
-        if !slots.is_empty() {
-            self.forbid_residual_in_try(ns, "a value materializing (a dynamic loop/branch)");
+        // A loop/branch merge emits variable-assignments and literal constructions
+        // over already-committed values — throw-free. It must therefore NOT force
+        // an enclosing `try` to residualize merely for having dynamic control flow:
+        // `try { body } catch { h } ≡ body` whenever every runtime op in `body` is
+        // non-throwing, so a throw-free merge lets the try fold/erase around the
+        // dynamic loop/branch. We taint only if a materialized value is itself a
+        // may-throw expression (an un-committed `Dyn(a.b)` / `Dyn(f())` carried in
+        // a slot), which CAN throw when emitted and so genuinely needs a runtime
+        // `try`.
+        if !slots.is_empty() && self.materialize_may_throw(ns, slots) {
+            self.forbid_residual_in_try(ns, "a may-throw value materializing");
         }
         let fi = ns.frames.len() - 1;
         let func = ns.frames[fi].func;
@@ -3917,6 +4398,21 @@ impl Js {
         for (id, tmp) in copies {
             out.push(Op::Assign { var: id, expr: RExpr::Var(tmp) });
         }
+        // Duplication profiling: every address in `seen` had a fresh construction
+        // emitted by THIS materialize call (the top-level Ref slots plus every
+        // nested object reachable from them). Bumping a per-address counter across
+        // all materialize calls tells us how many distinct runtime objects one
+        // abstract object was realized as. >= 2 means a write to one copy is
+        // invisible to a read of another — the identity bug; `specialize_program`
+        // then escapes that object's creation site eagerly. (Aliased reuses go
+        // through the `seen.get` branch and emit a plain `Assign`, not a
+        // construction, so they are correctly not counted.)
+        if !seen.is_empty() {
+            let mut counts = self.dup_counts.borrow_mut();
+            for addr in seen.keys() {
+                *counts.entry(*addr).or_insert(0) += 1;
+            }
+        }
     }
 
     /// A residual operation inside an active `try` would, at runtime, be able to
@@ -3927,6 +4423,9 @@ impl Js {
     fn forbid_residual_in_try(&self, s: &State, _what: &str) {
         if !s.handlers.is_empty() {
             if self.probing.get() {
+                if std::env::var_os("TRY_DEBUG").is_some() && !self.try_taint.get() {
+                    eprintln!("[TRY] taint pc={} what={_what}", s.top().pc);
+                }
                 self.try_taint.set(true);
                 return;
             }
@@ -3972,13 +4471,20 @@ impl Js {
             frame_depth: 1,
             ostack_depth: 0,
         });
-        self.probing.set(true);
-        self.try_taint.set(false);
+        // Save/restore `probing` and `try_taint`: a probed body can itself contain
+        // a `try`, whose `PushHandler` re-enters `try_folds`. Without save/restore
+        // the inner probe would reset the OUTER probe's `probing` flag to false
+        // (so a later residual op in the outer probe would panic instead of taint)
+        // and clobber its accumulated taint. (Same hazard `residual_fn_for` guards.)
+        let saved_probing = self.probing.replace(true);
+        let saved_taint = self.try_taint.replace(false);
         self.halt_at.borrow_mut().push(end);
         let _ = crate::engine::specialize(self, probe);
         self.halt_at.borrow_mut().pop();
-        self.probing.set(false);
-        !self.try_taint.get()
+        let folds = !self.try_taint.get();
+        self.probing.set(saved_probing);
+        self.try_taint.set(saved_taint);
+        folds
     }
 
     /// Emit a residual `try`/`catch` for a body that can't fully fold. Everything
@@ -4289,6 +4795,11 @@ impl Js {
                         _ => panic!("delete index needs a ref and num/str index"),
                     }
                 }
+                // A coercibility check is a pure no-op for a valid receiver; a
+                // null/undefined receiver makes the following member op panic
+                // (the reference interpreter models a throw as a panic, and Node
+                // is the oracle for genuinely-throwing programs).
+                Instr::ChkCoercible(_) => {}
                 Instr::PushArr => {
                     let v = ostack.pop().unwrap();
                     let a = ostack.pop().unwrap();
@@ -4457,10 +4968,15 @@ impl Js {
                             _ => panic!("indexed write on a non-array value"),
                         }
                     }
-                    Op::Eval { .. } => panic!(
-                        "the Rust residual interpreter cannot evaluate an unmodeled \
-                         call; validate pass-through programs with the Node oracle"
-                    ),
+                    // `Op::Eval` binds a single-evaluated value to a temp (a
+                    // snapshot of an update result, a frozen reader, ...). Evaluate
+                    // it like an assignment; `eval_rexpr` still panics on a
+                    // genuinely unmodeled call/opaque expr (the opaque-call form of
+                    // `Op::Eval`), so pass-through programs are still Node-only.
+                    Op::Eval { dst, expr } => {
+                        let v = eval_rexpr(expr, &store, &heap);
+                        store.insert(*dst, v);
+                    }
                     Op::SetProp { obj, key, val } => {
                         let v = eval_rexpr(val, &store, &heap);
                         match eval_rexpr(obj, &store, &heap) {

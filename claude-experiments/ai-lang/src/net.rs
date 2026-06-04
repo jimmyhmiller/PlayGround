@@ -2878,9 +2878,9 @@ mod tests {
         let mut server_jit =
             crate::codegen::IncrementalJit::new(empty_cm, &server_rt).unwrap();
         // The empty module has no user-defined shapes; the runtime
-        // reserves the four trailing slots for BoxedInt + String + Array
-        // + Atom.
-        assert_eq!(server_rt.shape_by_type_id.len(), 4);
+        // reserves the trailing slots for BoxedInt + String + Array +
+        // Atom + Bytes.
+        assert_eq!(server_rt.shape_by_type_id.len(), 5);
 
         let listener = bind("127.0.0.1:0").unwrap();
         let server_addr = listener.local_addr().unwrap();

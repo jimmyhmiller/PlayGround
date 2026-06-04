@@ -264,7 +264,7 @@ pub fn builtin_effect_sig(name: &str) -> EffectSig {
         "core/atom.swap" => with_dep(EffectSet::ATOM, 1),
 
         // Threads: spawning may cause the thunk's (arg 0) effects.
-        "core/thread.spawn" => EffectSig {
+        "core/thread.spawn" | "core/thread.spawn_shared" => EffectSig {
             concrete: EffectSet::EMPTY,
             param_deps: 1,
             ..EffectSig::default()

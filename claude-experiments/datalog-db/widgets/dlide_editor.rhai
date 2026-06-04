@@ -52,6 +52,10 @@ fn on_message(topic, payload, sender) {
     }
 }
 
+// Re-render on pane resize so layout (e.g. table widths) tracks the
+// new canvas size — render() depends on `w`/`h`.
+fn on_resize(w, h) { request_render(); }
+
 fn render(w, h) {
     let status_color = if state.status.starts_with("error") { "#e0746f" }
                        else if state.status.starts_with("ok") { "#6cc08a" }
@@ -63,14 +67,14 @@ fn render(w, h) {
        children: [
         // editor surface fills available height
         #{ type: "frame", pad: 8.0, gap: 0.0,
-           style: #{ background: "surface_2", radius: "radius_md", flex_grow: 1.0,
+           style: #{ background: "surface_2", radius: "radius_md", flex_grow: 1.0, width: "100%",
                      border: #{ color: "surface_3", width: 1.0 } },
            children: [
-             // width/rows are the only size levers today — TextArea ignores
-             // style.flex_grow/width/height (bug filed). Big fixed size so the
-             // editor is usable; will switch to flex once the bug lands.
-             #{ type: "textarea", id: "sql", value: state.sql, rows: 12, width: 1480.0,
-                style: #{ background: "surface_2" },
+             // Fills the card both ways now: editor-idea fixed the layout to
+             // pass the known pane height (content_size.y) as available, so
+             // flex_grow + height:"100%" resolve vertically too.
+             #{ type: "textarea", id: "sql", value: state.sql, rows: 3,
+                style: #{ background: "surface_2", width: "100%", height: "100%", flex_grow: 1.0 },
                 placeholder: "find ?n, ?age where ?u: User { name: ?n, age: ?age }   (Cmd+Enter to run)\nlist · schema · assert · define · drop · purge all work" },
            ] },
         // toolbar: primary Run + secondary actions, status on the right

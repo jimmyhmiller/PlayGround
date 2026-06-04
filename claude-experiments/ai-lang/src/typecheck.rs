@@ -752,7 +752,8 @@ pub fn builtin_signature(name: &str) -> Option<(Vec<Type>, Type)> {
         )),
         // Thread primitives over the `ThreadHandle<T>` shape.
         //   thread_spawn(thunk: fn() -> T) -> ThreadHandle<T>
-        "core/thread.spawn" => Some((
+        //   thread_spawn_shared: same signature, zero-copy opt-out.
+        "core/thread.spawn" | "core/thread.spawn_shared" => Some((
             vec![Type::FnType {
                 params: vec![],
                 ret: Box::new(Type::TypeVar(0)),
@@ -2599,6 +2600,11 @@ mod tests {
         // A spawn capturing only a value (or nothing) is fine.
         let _ = tc(&with_std(
             "def good() -> Int = { let n = 41; join(spawn(|| n + 1)) }",
+        ));
+        // `spawn_shared` is the opt-out: capturing an Atom is allowed
+        // (you deliberately share the lock-free cell across threads).
+        let _ = tc(&with_std(
+            "def ok_shared() -> Int = { let a = atom(0); join(spawn_shared(|| deref(a))) }",
         ));
     }
 

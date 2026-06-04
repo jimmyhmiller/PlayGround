@@ -80,6 +80,11 @@ pub struct Thread {
     /// literal codegen and by `ai_str_*` runtime fns. Also backs the
     /// `Bytes` shape (identical layout).
     pub string_ti: *const TypeInfo,
+    /// `TypeInfo` for the `Bytes` heap shape. Layout is identical to
+    /// `String` (varlen-bytes), but a DISTINCT `type_id` so the runtime can
+    /// tell a mutable `Bytes` buffer apart from an immutable `String` — the
+    /// deep-copy shares Strings and copies Bytes. `ai_bytes_*` allocate this.
+    pub bytes_ti: *const TypeInfo,
     /// `TypeInfo` for the `Array` heap shape. Layout: GC header +
     /// varlen-Values section (count + N GC-traced pointer slots). Used
     /// by `ai_array_*` runtime fns. Elements are uniform boxed pointers.
@@ -253,6 +258,13 @@ pub fn atom_shape_hash() -> Hash {
     Hash::of_bytes(b"<runtime:Atom>")
 }
 
+/// Canonical wire-shape hash for the heap `Bytes` shape — same varlen-bytes
+/// layout as `String` but a distinct shape, so a mutable `Bytes` is
+/// recognizable as such (deep-copy copies it; `String` is shared).
+pub fn bytes_shape_hash() -> Hash {
+    Hash::of_bytes(b"<runtime:Bytes>")
+}
+
 const _: () = {
     assert!(core::mem::offset_of!(ClosureRaw, code_hash) == closure_offsets::CODE_HASH);
     assert!(core::mem::offset_of!(ClosureRaw, n_captures) == closure_offsets::N_CAPTURES);
@@ -418,6 +430,9 @@ pub struct Runtime {
     /// Heap layout: header (16 B) + varlen-bytes (8 B count + raw
     /// UTF-8 bytes). Also backs `Bytes`.
     pub string_ti: Box<TypeInfo>,
+    /// Stable storage for the `Bytes` shape's TypeInfo — same varlen-bytes
+    /// layout as `String`, distinct `type_id` (mutable buffer).
+    pub bytes_ti: Box<TypeInfo>,
     /// Stable storage for the `Array` shape's TypeInfo. Heap layout:
     /// header (16 B) + varlen-Values (8 B count + N×8 B pointer slots).
     pub array_ti: Box<TypeInfo>,
@@ -498,6 +513,7 @@ impl Runtime {
         let string_type_id = boxed_int_type_id + 1;
         let array_type_id = string_type_id + 1;
         let atom_type_id = array_type_id + 1;
+        let bytes_type_id = atom_type_id + 1;
         let boxed_int = TypeInfo::for_header(crate::gc::Full::SIZE as usize)
             .with_type_id(boxed_int_type_id)
             .with_fields(0)
@@ -515,6 +531,12 @@ impl Runtime {
         let atom_ti_val = TypeInfo::for_header(crate::gc::Full::SIZE as usize)
             .with_type_id(atom_type_id)
             .with_fields(1);
+        // Bytes: identical layout to String (varlen bytes), distinct type_id
+        // so a mutable buffer is distinguishable from an immutable String.
+        let bytes_ti_val = TypeInfo::for_header(crate::gc::Full::SIZE as usize)
+            .with_type_id(bytes_type_id)
+            .with_fields(0)
+            .with_varlen_bytes(0);
 
         // Register BoxedInt as a synthetic wire shape so the wire
         // encoder/decoder can ship pointers to BoxedInt across nodes.
@@ -526,7 +548,7 @@ impl Runtime {
         // user's `Ok(v)` match arm unboxes back to Int.
         let bi_hash = boxed_int_shape_hash();
         shape_registry.insert(bi_hash, boxed_int_type_id);
-        while shape_by_type_id.len() <= atom_type_id as usize {
+        while shape_by_type_id.len() <= bytes_type_id as usize {
             shape_by_type_id.push(None);
         }
         shape_by_type_id[boxed_int_type_id as usize] = Some(bi_hash);
@@ -539,6 +561,8 @@ impl Runtime {
         shape_by_type_id[string_type_id as usize] = Some(string_shape_hash());
         shape_by_type_id[array_type_id as usize] = Some(array_shape_hash());
         shape_by_type_id[atom_type_id as usize] = Some(atom_shape_hash());
+        shape_by_type_id[bytes_type_id as usize] = Some(bytes_shape_hash());
+        shape_registry.insert(bytes_shape_hash(), bytes_type_id);
         shape_meta.insert(
             bi_hash,
             ShapeMeta::Struct {
@@ -555,6 +579,7 @@ impl Runtime {
         all_types.push(string_ti_val);
         all_types.push(array_ti_val);
         all_types.push(atom_ti_val);
+        all_types.push(bytes_ti_val);
 
         // Boxed copies for stable addresses (used by the deserializer
         // when it needs to pass a `*const TypeInfo` to `ai_gc_alloc_closure`).
@@ -567,14 +592,23 @@ impl Runtime {
         let string_ti_box: Box<TypeInfo> = Box::new(string_ti_val);
         let array_ti_box: Box<TypeInfo> = Box::new(array_ti_val);
         let atom_ti_box: Box<TypeInfo> = Box::new(atom_ti_val);
+        let bytes_ti_box: Box<TypeInfo> = Box::new(bytes_ti_val);
         type_infos.push(Box::new(boxed_int));
         type_infos.push(Box::new(string_ti_val));
         type_infos.push(Box::new(array_ti_val));
         type_infos.push(Box::new(atom_ti_val));
+        type_infos.push(Box::new(bytes_ti_val));
 
         // 32 MiB semi-space — plenty for tests, easily reconfigurable later.
         let heap = Arc::new(Heap::new::<Full>(32 * 1024 * 1024, all_types));
         heap.set_jit_frame_walker(walk_jit_frames);
+        // GC stress mode: collect before every allocation (in the runtime
+        // alloc fns) to flush out unrooted-pointer bugs immediately. Opt in
+        // with AI_LANG_GC_STRESS=1, or programmatically via
+        // `heap.set_gc_every_alloc(true)`.
+        if std::env::var_os("AI_LANG_GC_STRESS").is_some() {
+            heap.set_gc_every_alloc(true);
+        }
 
         let (dyna_thread, _id) = heap.register_thread();
         let code_table = Box::new(CodeTable::new());
@@ -598,6 +632,7 @@ impl Runtime {
             dyna_thread: &*dyna_thread,
             boxed_int_ti: &*boxed_int_ti_box,
             string_ti: &*string_ti_box,
+            bytes_ti: &*bytes_ti_box,
             array_ti: &*array_ti_box,
             atom_ti: &*atom_ti_box,
         });
@@ -621,6 +656,7 @@ impl Runtime {
             shape_by_type_id,
             boxed_int_ti: boxed_int_ti_box,
             string_ti: string_ti_box,
+            bytes_ti: bytes_ti_box,
             array_ti: array_ti_box,
             atom_ti: atom_ti_box,
             result_cache: Arc::new(Mutex::new(HashMap::new())),
@@ -708,6 +744,7 @@ impl Runtime {
             dyna_thread: &*dyna_thread,
             boxed_int_ti: self.thread.boxed_int_ti,
             string_ti: self.thread.string_ti,
+            bytes_ti: self.thread.bytes_ti,
             array_ti: self.thread.array_ti,
             atom_ti: self.thread.atom_ti,
         });
@@ -790,38 +827,50 @@ impl Drop for Runtime {
 ///
 /// Called from JIT'd code with a valid `Thread*` and `TypeInfo*`
 /// (both live for the duration of this call).
+/// Canonical allocation primitive for the runtime alloc fns. Publishes the
+/// JIT frame head for root scanning, honors the GC-on-every-allocation
+/// stress flag, and retries the allocation across a bounded number of
+/// stop-the-world collections — so under concurrent churn a thread that
+/// loses freed space to a sibling still makes progress.
+///
+/// IMPORTANT: a collection here relocates objects. Any heap pointer the
+/// caller still needs after this returns must be parked on the thread's GC
+/// scratch stack (`push_scratch`) BEFORE calling and re-read (`scratch_at`)
+/// after, then popped (`scratch_reset`).
+unsafe fn alloc_shape_gc(thread: *mut Thread, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
+    unsafe {
+        let t = &*thread;
+        let heap = &*t.heap;
+        let dyna = &*t.dyna_thread;
+        dyna.set_parked_jit_fp(t.top_frame as *const u8);
+        // Stress mode: collect before every allocation so any unrooted live
+        // pointer dangles immediately and reproducibly.
+        if heap.gc_every_alloc() {
+            heap.mutator_triggered_gc::<crate::gc::IdentityPtrPolicy>(dyna);
+        }
+        let mut ptr = heap.alloc_obj::<Full>(info, varlen_len);
+        let mut attempts = 0;
+        while ptr.is_null() && attempts < 16 {
+            heap.mutator_triggered_gc::<crate::gc::IdentityPtrPolicy>(dyna);
+            ptr = heap.alloc_obj::<Full>(info, varlen_len);
+            attempts += 1;
+        }
+        dyna.clear_parked_jit_fp();
+        if ptr.is_null() {
+            panic!("alloc_shape_gc: heap exhausted after {attempts} collections");
+        }
+        ptr
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ai_gc_alloc_closure(
     thread: *mut Thread,
     type_info: *const TypeInfo,
 ) -> *mut u8 {
-    unsafe {
-        let t = &*thread;
-        let heap = &*t.heap;
-        let ti = &*type_info;
-        let dyna = &*t.dyna_thread;
-
-        // Publish our chain head so a GC during alloc walks it.
-        dyna.set_parked_jit_fp(t.top_frame as *const u8);
-        let ptr = heap.alloc_obj::<Full>(ti, 0);
-        if !ptr.is_null() {
-            dyna.clear_parked_jit_fp();
-            return ptr;
-        }
-
-        // Heap is full — run a collection (with parked_jit_fp still
-        // pointed at our chain so roots get scanned) and retry once.
-        heap.collect::<crate::gc::IdentityPtrPolicy>(&[]);
-        let ptr = heap.alloc_obj::<Full>(ti, 0);
-        dyna.clear_parked_jit_fp();
-        if ptr.is_null() {
-            panic!(
-                "ai_gc_alloc_closure: heap exhausted after GC \
-                 (object size > available space?)"
-            );
-        }
-        ptr
-    }
+    // No heap-pointer args to preserve; the JIT fills the closure's slots
+    // after this returns with no intervening allocation.
+    unsafe { alloc_shape_gc(thread, &*type_info, 0) }
 }
 
 /// Look up a JIT'd function by its content hash. Used for closure
@@ -887,19 +936,8 @@ pub unsafe extern "C" fn ai_gc_box_int(thread: *mut Thread, value: i64) -> *mut 
         if ti.is_null() {
             panic!("ai_gc_box_int: thread.boxed_int_ti is null");
         }
-        let heap = &*t.heap;
-        let dyna = &*t.dyna_thread;
-        dyna.set_parked_jit_fp(t.top_frame as *const u8);
-        let mut ptr = heap.alloc_obj::<Full>(&*ti, 0);
-        if ptr.is_null() {
-            heap.collect::<crate::gc::IdentityPtrPolicy>(&[]);
-            ptr = heap.alloc_obj::<Full>(&*ti, 0);
-            if ptr.is_null() {
-                dyna.clear_parked_jit_fp();
-                panic!("ai_gc_box_int: heap exhausted after GC");
-            }
-        }
-        dyna.clear_parked_jit_fp();
+        // `value` is a plain i64 — no heap pointer to preserve across GC.
+        let ptr = alloc_shape_gc(thread, &*ti, 0);
         // Write the i64 at offset Full::SIZE.
         let value_slot = ptr.add(<Full as crate::gc::ObjHeader>::SIZE) as *mut i64;
         *value_slot = value;
@@ -972,22 +1010,12 @@ pub unsafe extern "C" fn ai_str_new(
         if ti.is_null() {
             panic!("ai_str_new: thread.string_ti is null");
         }
-        let heap = &*t.heap;
-        let dyna = &*t.dyna_thread;
         let varlen = len as usize;
-        dyna.set_parked_jit_fp(t.top_frame as *const u8);
-        let mut ptr = heap.alloc_obj::<Full>(&*ti, varlen);
-        if ptr.is_null() {
-            heap.collect::<crate::gc::IdentityPtrPolicy>(&[]);
-            ptr = heap.alloc_obj::<Full>(&*ti, varlen);
-            if ptr.is_null() {
-                dyna.clear_parked_jit_fp();
-                panic!("ai_str_new: heap exhausted after GC");
-            }
-        }
-        dyna.clear_parked_jit_fp();
-        // alloc_obj initializes the varlen count word; we only need
-        // to copy the bytes into the varlen payload section.
+        // `src` is a static literal / Rust-owned buffer (not a GC object),
+        // so it survives a collection during the alloc unmoved. (Callers
+        // copying FROM a heap String — ai_str_copy — root the source
+        // themselves and don't go through here.)
+        let ptr = alloc_shape_gc(thread, &*ti, varlen);
         let payload_off = (*ti).varlen_element_offset(0);
         if varlen > 0 {
             core::ptr::copy_nonoverlapping(src, ptr.add(payload_off), varlen);
@@ -1049,19 +1077,16 @@ pub unsafe extern "C" fn ai_str_concat(
         let total = len_a + len_b;
         let t = &*thread;
         let ti = t.string_ti;
-        let heap = &*t.heap;
         let dyna = &*t.dyna_thread;
-        dyna.set_parked_jit_fp(t.top_frame as *const u8);
-        let mut ptr = heap.alloc_obj::<Full>(&*ti, total);
-        if ptr.is_null() {
-            heap.collect::<crate::gc::IdentityPtrPolicy>(&[]);
-            ptr = heap.alloc_obj::<Full>(&*ti, total);
-            if ptr.is_null() {
-                dyna.clear_parked_jit_fp();
-                panic!("ai_str_concat: heap exhausted after GC");
-            }
-        }
-        dyna.clear_parked_jit_fp();
+        // Both operands are heap Strings held across the alloc — root them
+        // so a collection relocates them, then re-read the moved pointers.
+        let mark = dyna.scratch_mark();
+        let sa = dyna.push_scratch(a);
+        let sb = dyna.push_scratch(b);
+        let ptr = alloc_shape_gc(thread, &*ti, total);
+        let a = dyna.scratch_at(sa) as *const u8;
+        let b = dyna.scratch_at(sb) as *const u8;
+        dyna.scratch_reset(mark);
         let payload_off = (*ti).varlen_element_offset(0);
         let count_off = <Full as crate::gc::ObjHeader>::SIZE;
         if len_a > 0 {
@@ -1112,24 +1137,13 @@ pub unsafe extern "C" fn ai_bytes_new(thread: *mut Thread, len: i64) -> *mut u8 
     }
     unsafe {
         let t = &*thread;
-        let ti = t.string_ti;
+        let ti = t.bytes_ti;
         if ti.is_null() {
-            panic!("ai_bytes_new: thread.string_ti is null");
+            panic!("ai_bytes_new: thread.bytes_ti is null");
         }
-        let heap = &*t.heap;
-        let dyna = &*t.dyna_thread;
         let varlen = len as usize;
-        dyna.set_parked_jit_fp(t.top_frame as *const u8);
-        let mut ptr = heap.alloc_obj::<Full>(&*ti, varlen);
-        if ptr.is_null() {
-            heap.collect::<crate::gc::IdentityPtrPolicy>(&[]);
-            ptr = heap.alloc_obj::<Full>(&*ti, varlen);
-            if ptr.is_null() {
-                dyna.clear_parked_jit_fp();
-                panic!("ai_bytes_new: heap exhausted after GC");
-            }
-        }
-        dyna.clear_parked_jit_fp();
+        // No heap-pointer arg to preserve.
+        let ptr = alloc_shape_gc(thread, &*ti, varlen);
         // alloc_obj initialises the varlen count word; zero the payload
         // so a fresh buffer reads back as all-zero bytes.
         if varlen > 0 {
@@ -1195,24 +1209,50 @@ pub unsafe extern "C" fn ai_bytes_slice(
                 src_len
             );
         }
-        let src_payload = src.add(varlen_payload_offset() + start as usize);
-        // ai_str_new allocates a varlen-bytes object and copies `len`
-        // bytes from `src_payload` — exactly the slice we want.
-        ai_str_new(thread, src_payload, len)
+        // Allocate a fresh `Bytes` (mutable) and copy the slice into it.
+        copy_varlen(thread, (*thread).bytes_ti, src, start as usize, len as usize)
     }
 }
 
-/// Copy a `String`/`Bytes` into a fresh varlen-bytes object. Backs both
-/// `bytes_from_string` and `string_from_bytes`: the representations are
-/// identical, so the conversion is a defensive copy that gives the result
-/// independent mutation semantics from the source.
+/// Allocate a fresh varlen-bytes object of shape `dst_ti` holding
+/// `src[start..start+len]`. The source heap object is rooted across the
+/// allocation (which may collect + relocate it) and the payload pointer is
+/// recomputed from the relocated source afterward.
+unsafe fn copy_varlen(
+    thread: *mut Thread,
+    dst_ti: *const TypeInfo,
+    src: *const u8,
+    start: usize,
+    len: usize,
+) -> *mut u8 {
+    unsafe {
+        let dyna = &*(*thread).dyna_thread;
+        let mark = dyna.scratch_mark();
+        let ss = dyna.push_scratch(src);
+        let dst = alloc_shape_gc(thread, &*dst_ti, len);
+        let src = dyna.scratch_at(ss) as *const u8; // relocated source object
+        dyna.scratch_reset(mark);
+        if len > 0 {
+            let src_payload = src.add(varlen_payload_offset() + start);
+            let dst_payload = dst.add(varlen_payload_offset());
+            core::ptr::copy_nonoverlapping(src_payload, dst_payload, len);
+        }
+        dst
+    }
+}
+
+/// `bytes_from_string(s)`: copy a `String`'s bytes into a fresh, mutable
+/// `Bytes`. (Distinct shapes now, so this is a real cross-shape copy.)
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ai_bytes_copy(thread: *mut Thread, src: *const u8) -> *mut u8 {
-    unsafe {
-        let len = ai_str_len(src);
-        let src_payload = src.add(varlen_payload_offset());
-        ai_str_new(thread, src_payload, len)
-    }
+    unsafe { copy_varlen(thread, (*thread).bytes_ti, src, 0, ai_str_len(src) as usize) }
+}
+
+/// `string_from_bytes(b)`: copy a `Bytes`'s bytes into a fresh, immutable
+/// `String`. The mirror of `ai_bytes_copy` with the `String` target shape.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_str_copy(thread: *mut Thread, src: *const u8) -> *mut u8 {
+    unsafe { copy_varlen(thread, (*thread).string_ti, src, 0, ai_str_len(src) as usize) }
 }
 
 // =============================================================================
@@ -1253,20 +1293,9 @@ pub unsafe extern "C" fn ai_array_new(thread: *mut Thread, n: i64) -> *mut u8 {
         if ti.is_null() {
             panic!("ai_array_new: thread.array_ti is null");
         }
-        let heap = &*t.heap;
-        let dyna = &*t.dyna_thread;
         let count = n as usize;
-        dyna.set_parked_jit_fp(t.top_frame as *const u8);
-        let mut ptr = heap.alloc_obj::<Full>(&*ti, count);
-        if ptr.is_null() {
-            heap.collect::<crate::gc::IdentityPtrPolicy>(&[]);
-            ptr = heap.alloc_obj::<Full>(&*ti, count);
-            if ptr.is_null() {
-                dyna.clear_parked_jit_fp();
-                panic!("ai_array_new: heap exhausted after GC");
-            }
-        }
-        dyna.clear_parked_jit_fp();
+        // No heap-pointer arg to preserve.
+        let ptr = alloc_shape_gc(thread, &*ti, count);
         // alloc_obj writes the varlen count word; zero the element slots
         // so the GC sees null (skipped) until the user stores pointers.
         if count > 0 {
@@ -1338,19 +1367,14 @@ pub unsafe extern "C" fn ai_atom_new(thread: *mut Thread, init: *mut u8) -> *mut
         if ti.is_null() {
             panic!("ai_atom_new: thread.atom_ti is null");
         }
-        let heap = &*t.heap;
         let dyna = &*t.dyna_thread;
-        dyna.set_parked_jit_fp(t.top_frame as *const u8);
-        let mut ptr = heap.alloc_obj::<Full>(&*ti, 0);
-        if ptr.is_null() {
-            heap.collect::<crate::gc::IdentityPtrPolicy>(&[]);
-            ptr = heap.alloc_obj::<Full>(&*ti, 0);
-            if ptr.is_null() {
-                dyna.clear_parked_jit_fp();
-                panic!("ai_atom_new: heap exhausted after GC");
-            }
-        }
-        dyna.clear_parked_jit_fp();
+        // `init` is a live heap pointer held across the alloc — root it so
+        // a collection relocates it, then re-read the moved pointer.
+        let mark = dyna.scratch_mark();
+        let si = dyna.push_scratch(init);
+        let ptr = alloc_shape_gc(thread, &*ti, 0);
+        let init = dyna.scratch_at(si);
+        dyna.scratch_reset(mark);
         // Store the initial value with Release so a subsequent acquiring
         // reader (deref / swap) sees a fully-constructed cell.
         let slot = ptr.add(atom_value_offset()) as *const core::sync::atomic::AtomicPtr<u8>;
@@ -1407,21 +1431,39 @@ pub unsafe extern "C" fn ai_atom_swap_local(
     updater: *const u8,
 ) -> *mut u8 {
     unsafe {
-        let slot =
-            atom.add(atom_value_offset()) as *const core::sync::atomic::AtomicPtr<u8>;
-
-        // Resolve the closure's code pointer once (it doesn't change
-        // across retries).
+        let dyna = &*(*thread).dyna_thread;
+        // Resolve the closure's code pointer once. Code never moves, so the
+        // function address is stable across retries / collections (the
+        // closure *object* `updater` may move — we re-read it each turn).
         let fn_ptr = ai_gc_lookup_code(thread, updater);
         let lambda: unsafe extern "C" fn(*mut Thread, *const u8, *const u8) -> *mut u8 =
             core::mem::transmute(fn_ptr);
 
+        let mut atom = atom;
+        let mut updater = updater;
         loop {
+            let slot = atom.add(atom_value_offset()) as *const core::sync::atomic::AtomicPtr<u8>;
             let current = (*slot).load(core::sync::atomic::Ordering::Acquire);
-            // Run the user's updater on the current value — no lock held.
+            // The updater runs JIT'd code that allocates → a collection may
+            // relocate `atom`, `updater`, and `current`. Root all three so
+            // the collector moves them, and re-read the relocated pointers
+            // after the call. Push onto the scratch *stack*: the updater's own
+            // runtime allocs (e.g. `string_concat`) push above these and reset
+            // back, so they never clobber our roots.
+            let mark = dyna.scratch_mark();
+            let sa = dyna.push_scratch(atom);
+            let su = dyna.push_scratch(updater);
+            let sc = dyna.push_scratch(current as *const u8);
             let new = lambda(thread, updater, current as *const u8);
-            // Try to install it. Identity CAS: succeeds iff nobody moved
-            // the slot since our load.
+            atom = dyna.scratch_at(sa);
+            updater = dyna.scratch_at(su);
+            let current = dyna.scratch_at(sc);
+            dyna.scratch_reset(mark);
+            // Re-derive the slot from the (possibly relocated) atom and CAS
+            // the relocated `current` (which the slot now holds if nobody
+            // else changed it). `new` is fresh — no collection since it was
+            // produced, so it is still valid.
+            let slot = atom.add(atom_value_offset()) as *const core::sync::atomic::AtomicPtr<u8>;
             match (*slot).compare_exchange(
                 current,
                 new,
@@ -1771,6 +1813,7 @@ unsafe fn build_worker_thread(
     dyna: *const ThreadState,
     boxed_int_ti: *const TypeInfo,
     string_ti: *const TypeInfo,
+    bytes_ti: *const TypeInfo,
     array_ti: *const TypeInfo,
     atom_ti: *const TypeInfo,
 ) -> Box<Thread> {
@@ -1783,6 +1826,7 @@ unsafe fn build_worker_thread(
         dyna_thread: dyna,
         boxed_int_ti,
         string_ti,
+        bytes_ti,
         array_ti,
         atom_ti,
     })
@@ -1797,6 +1841,7 @@ fn run_worker(
     code_table: usize,
     boxed_int_ti: usize,
     string_ti: usize,
+    bytes_ti: usize,
     array_ti: usize,
     atom_ti: usize,
     slot: Arc<ThreadSlot>,
@@ -1812,6 +1857,7 @@ fn run_worker(
             &*worker_ts as *const ThreadState,
             boxed_int_ti as *const TypeInfo,
             string_ti as *const TypeInfo,
+            bytes_ti as *const TypeInfo,
             array_ti as *const TypeInfo,
             atom_ti as *const TypeInfo,
         )
@@ -1837,13 +1883,161 @@ fn run_worker(
     heap.safe_deregister_thread(&worker_ts);
 }
 
-/// `spawn(thunk)` — start `thunk` on a new OS thread; returns a handle
-/// (a `BoxedInt` registry id).
+/// Allocate a fresh object of `info`'s shape for the deep-copy below, with
+/// a bounded GC-retry loop.
+///
+/// Unlike [`alloc_shape_gc`], this deliberately does NOT honor the
+/// GC-on-every-allocation stress flag: the deep-copy holds partially-built
+/// copies in Rust locals across its recursive allocations, and those are
+/// not GC-rooted, so forcing a collection mid-copy would dangle them.
+/// (Rooting the in-progress copy tree — making deep_copy fully GC-safe — is
+/// a separate hardening item.)
+unsafe fn alloc_copy_shape(thread: *mut Thread, info: &TypeInfo, varlen_len: usize) -> *mut u8 {
+    unsafe {
+        let t = &*thread;
+        let heap = &*t.heap;
+        let dyna = &*t.dyna_thread;
+        dyna.set_parked_jit_fp(t.top_frame as *const u8);
+        let mut ptr = heap.alloc_obj::<Full>(info, varlen_len);
+        let mut attempts = 0;
+        while ptr.is_null() && attempts < 16 {
+            heap.mutator_triggered_gc::<crate::gc::IdentityPtrPolicy>(dyna);
+            ptr = heap.alloc_obj::<Full>(info, varlen_len);
+            attempts += 1;
+        }
+        dyna.clear_parked_jit_fp();
+        if ptr.is_null() {
+            panic!("ai_value_copy: heap exhausted after {attempts} collections");
+        }
+        ptr
+    }
+}
+
+/// Deep-copy for `spawn` isolation. Copies any object that **is**, or
+/// transitively **reaches**, a mutable `Array`/`Bytes` cell, and **shares**
+/// (returns the same pointer) immutable subtrees, `BoxedInt`s, and `Atom`s
+/// (a lock-free cell is safe to share and forking it would be wrong). When
+/// nothing mutable is reachable, returns the original pointer unchanged — so
+/// a closure that captures only immutable data is shared for free.
+///
+/// GC note: like the wire decoder (`decode_value`), this builds a tree via
+/// the allocator and assumes it does not exhaust the heap *mid-copy*
+/// (closure captures are small). Rooting partial copies across a mid-copy
+/// collection is a shared hardening item with the wire path.
+unsafe fn deep_copy(thread: *mut Thread, ptr: *const u8) -> *const u8 {
+    use crate::gc::{VarLenKind, read_varlen_count};
+    unsafe {
+        if ptr.is_null() {
+            return ptr;
+        }
+        let t = &*thread;
+        let heap = &*t.heap;
+        let tid = heap.obj_type_id(ptr);
+
+        // Shared / immutable shapes: never copy.
+        if !t.atom_ti.is_null() && tid == (*t.atom_ti).type_id {
+            return ptr; // lock-free cell — safe to share, must not fork
+        }
+        if !t.boxed_int_ti.is_null() && tid == (*t.boxed_int_ti).type_id {
+            return ptr; // immutable
+        }
+        if !t.string_ti.is_null() && tid == (*t.string_ti).type_id {
+            return ptr; // String is immutable — share, never copy
+        }
+
+        let info = heap.type_info_by_id(tid);
+        let hs = info.header_size as usize;
+
+        match info.varlen {
+            VarLenKind::Bytes => {
+                // Reaching here, this is the mutable `Bytes` shape (`String`
+                // was shared above) — copy so the worker gets its own buffer.
+                let n = read_varlen_count(ptr, info);
+                let new = alloc_copy_shape(thread, info, n);
+                let total = info.allocation_size(n);
+                core::ptr::copy_nonoverlapping(ptr.add(hs), new.add(hs), total - hs);
+                new
+            }
+            VarLenKind::Values => {
+                // Array: copy the spine, recurse elements (sharing immutable).
+                let n = read_varlen_count(ptr, info);
+                let new = alloc_copy_shape(thread, info, n);
+                for j in 0..n {
+                    let off = info.varlen_element_offset(j);
+                    let elem = *(ptr.add(off) as *const *const u8);
+                    let copied = deep_copy(thread, elem);
+                    *(new.add(off) as *mut *const u8) = copied;
+                }
+                new
+            }
+            VarLenKind::None => {
+                // Fixed shape (struct / enum / closure / …). Recurse the GC
+                // pointer slots; share this object iff none of them changed
+                // (a fixed shape is never itself a mutable cell — those are
+                // handled above).
+                let nfields = info.value_field_count as usize;
+                let mut copies: Vec<(usize, *const u8)> = Vec::with_capacity(nfields);
+                let mut changed = false;
+                for i in 0..info.value_field_count {
+                    let off = info.value_field_offset(i);
+                    let slot = *(ptr.add(off) as *const *const u8);
+                    let c = deep_copy(thread, slot);
+                    if c != slot {
+                        changed = true;
+                    }
+                    copies.push((off, c));
+                }
+                if !changed {
+                    return ptr; // nothing mutable below — share
+                }
+                let new = alloc_copy_shape(thread, info, 0);
+                // Preserve raw bytes (enum tag, closure code_hash + raw
+                // captures, …) by copying everything after the header, then
+                // overwrite the pointer slots with their copies.
+                let total = info.allocation_size(0);
+                core::ptr::copy_nonoverlapping(ptr.add(hs), new.add(hs), total - hs);
+                for (off, c) in copies {
+                    *(new.add(off) as *mut *const u8) = c;
+                }
+                new
+            }
+        }
+    }
+}
+
+/// `spawn(thunk)` — start `thunk` on a new OS thread, returning a handle
+/// (a `BoxedInt` registry id). The default isolates: the closure is
+/// deep-copied so the worker shares no mutable state with the parent.
 ///
 /// # Safety
 /// `thread` is a valid parent `Thread*`; `closure_ptr` is a zero-arg closure.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn ai_thread_spawn(thread: *mut Thread, closure_ptr: *const u8) -> *mut u8 {
+    // Isolate: deep-copy the closure (mutable captures copied, immutable +
+    // atoms shared). A pure/immutable closure copies nothing (same ptr).
+    let isolated = unsafe { deep_copy(thread, closure_ptr) };
+    unsafe { spawn_impl(thread, isolated) }
+}
+
+/// `spawn_shared(thunk)` — opt out of isolation: the closure is run on the
+/// worker WITHOUT copying, sharing the parent's heap objects directly. The
+/// caller is responsible for any resulting data races (use `Atom` for safe
+/// shared mutation).
+///
+/// # Safety
+/// As `ai_thread_spawn`, plus: shared mutable captures are the caller's
+/// responsibility.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn ai_thread_spawn_shared(
+    thread: *mut Thread,
+    closure_ptr: *const u8,
+) -> *mut u8 {
+    unsafe { spawn_impl(thread, closure_ptr) }
+}
+
+/// Shared spawn body: register a slot for `closure_ptr`, start the worker,
+/// return a handle. (`closure_ptr` is already isolated-or-not by the caller.)
+unsafe fn spawn_impl(thread: *mut Thread, closure_ptr: *const u8) -> *mut u8 {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     unsafe {
         let parent = &*thread;
@@ -1856,6 +2050,7 @@ pub unsafe extern "C" fn ai_thread_spawn(thread: *mut Thread, closure_ptr: *cons
         let code_table = parent.code_table as usize;
         let boxed_int_ti = parent.boxed_int_ti as usize;
         let string_ti = parent.string_ti as usize;
+        let bytes_ti = parent.bytes_ti as usize;
         let array_ti = parent.array_ti as usize;
         let atom_ti = parent.atom_ti as usize;
 
@@ -1880,6 +2075,7 @@ pub unsafe extern "C" fn ai_thread_spawn(thread: *mut Thread, closure_ptr: *cons
                 code_table,
                 boxed_int_ti,
                 string_ti,
+                bytes_ti,
                 array_ti,
                 atom_ti,
                 worker_slot,

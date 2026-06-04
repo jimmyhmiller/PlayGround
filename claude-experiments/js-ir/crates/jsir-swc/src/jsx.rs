@@ -126,7 +126,15 @@ fn attrs_to_object(attrs: &[ast::JSXAttrOrSpread]) -> ast::Expr {
                 };
                 let value = match &attr.value {
                     None => ast::Expr::Lit(ast::Lit::Bool(ast::Bool { span: DUMMY_SP, value: true })),
-                    Some(ast::JSXAttrValue::Str(s)) => ast::Expr::Lit(ast::Lit::Str(s.clone())),
+                    // Rebuild the string from its cooked value via `jstr` so the emitted
+                    // `raw` is JS-escaped. Cloning `s` keeps swc's JSX `raw`, which may hold
+                    // a literal newline (legal in JSX, illegal in a JS string literal) and
+                    // would emit an unterminated string.
+                    Some(ast::JSXAttrValue::Str(s)) => match s.value.as_str() {
+                        Some(v) => str_lit(v),
+                        // Lone surrogates can't go through `jstr`; keep swc's original.
+                        None => ast::Expr::Lit(ast::Lit::Str(s.clone())),
+                    },
                     Some(ast::JSXAttrValue::JSXExprContainer(c)) => match &c.expr {
                         ast::JSXExpr::Expr(e) => (**e).clone(),
                         ast::JSXExpr::JSXEmptyExpr(_) => ast::Expr::Lit(ast::Lit::Bool(ast::Bool { span: DUMMY_SP, value: true })),

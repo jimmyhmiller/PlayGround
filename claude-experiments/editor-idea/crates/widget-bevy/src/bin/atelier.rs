@@ -10,8 +10,7 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 
 use widget_bevy::protocol::{
-    Align, Border, ButtonKind, Edges, Element, HostEvent, Shadow, Style, TabItem, Weight,
-    WidgetMsg,
+    Align, Border, ButtonKind, Edges, Element, HostEvent, Shadow, Style, TabItem, Weight, WidgetMsg,
 };
 
 // ---- helpers ----------------------------------------------------------
@@ -23,6 +22,7 @@ fn text(value: &str) -> Element {
         size: Some(13.0),
         weight: None,
         family: Some("font_family_body".into()),
+        selectable: false,
     }
 }
 
@@ -33,6 +33,7 @@ fn muted(value: &str) -> Element {
         size: Some(11.0),
         weight: None,
         family: Some("font_family_body".into()),
+        selectable: false,
     }
 }
 
@@ -43,6 +44,7 @@ fn heading(value: &str) -> Element {
         size: Some(15.0),
         weight: Some(Weight::Bold),
         family: Some("font_family_heading".into()),
+        selectable: false,
     }
 }
 
@@ -50,11 +52,19 @@ fn eyebrow(value: &str) -> Element {
     // All-caps section label. Spaced via uppercase characters; Inter
     // handles tracking better than mono, but at small sizes both read.
     Element::Text {
-        value: value.to_uppercase().chars().collect::<Vec<_>>().iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" "),
+        value: value
+            .to_uppercase()
+            .chars()
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|c| c.to_string())
+            .collect::<Vec<_>>()
+            .join(" "),
         color: Some("accent".into()),
         size: Some(9.0),
         weight: Some(Weight::Bold),
         family: Some("font_family_body".into()),
+        selectable: false,
     }
 }
 
@@ -65,6 +75,7 @@ fn mono(value: &str, color: &str) -> Element {
         size: Some(12.0),
         weight: None,
         family: Some("font_family_mono".into()),
+        selectable: false,
     }
 }
 
@@ -77,7 +88,12 @@ fn spacer(n: f32) -> Element {
 }
 
 fn vstack(gap: f32, pad: f32, children: Vec<Element>) -> Element {
-    Element::Vstack { gap, pad, children, style: None }
+    Element::Vstack {
+        gap,
+        pad,
+        children,
+        style: None,
+    }
 }
 
 fn hstack(gap: f32, children: Vec<Element>) -> Element {
@@ -105,11 +121,7 @@ fn hstack_top(gap: f32, children: Vec<Element>) -> Element {
 }
 
 fn card(eyebrow_text: &str, title: &str, body: Vec<Element>) -> Element {
-    let mut kids = vec![
-        eyebrow(eyebrow_text),
-        heading(title),
-        spacer(2.0),
-    ];
+    let mut kids = vec![eyebrow(eyebrow_text), heading(title), spacer(2.0)];
     kids.extend(body);
     Element::Frame {
         gap: 6.0,
@@ -118,7 +130,10 @@ fn card(eyebrow_text: &str, title: &str, body: Vec<Element>) -> Element {
         style: Some(Style {
             background: Some("surface_2".into()),
             radius: Some("radius_md".into()),
-            border: Some(Border { color: "chrome_divider".into(), width: 1.0 }),
+            border: Some(Border {
+                color: "chrome_divider".into(),
+                width: 1.0,
+            }),
             shadow: Some(Shadow {
                 token: Some("shadow_sm".into()),
                 ..Default::default()
@@ -169,6 +184,7 @@ fn palette_card() -> Element {
                     size: Some(9.0),
                     weight: None,
                     family: Some("font_family_body".into()),
+                    selectable: false,
                 },
             ],
         )
@@ -179,7 +195,11 @@ fn palette_card() -> Element {
         .collect();
     let row1 = hstack(6.0, tiles[..4].to_vec());
     let row2 = hstack(6.0, tiles[4..].to_vec());
-    card("color palette", "Atelier", vec![vstack(8.0, 0.0, vec![row1, row2])])
+    card(
+        "color palette",
+        "Atelier",
+        vec![vstack(8.0, 0.0, vec![row1, row2])],
+    )
 }
 
 fn typography_card() -> Element {
@@ -194,6 +214,7 @@ fn typography_card() -> Element {
                     size: Some(size),
                     weight: Some(Weight::Bold),
                     family: Some(family.into()),
+                    selectable: false,
                 },
                 Element::Text {
                     value: name.into(),
@@ -201,6 +222,7 @@ fn typography_card() -> Element {
                     size: Some(9.0),
                     weight: None,
                     family: Some("font_family_body".into()),
+                    selectable: false,
                 },
             ],
             style: Some(Style {
@@ -255,6 +277,7 @@ fn radii_card() -> Element {
                     size: Some(9.0),
                     weight: None,
                     family: Some("font_family_body".into()),
+                    selectable: false,
                 },
             ],
         )
@@ -264,7 +287,11 @@ fn radii_card() -> Element {
 }
 
 fn shadows_card() -> Element {
-    let shadows = [("sm", "shadow_sm"), ("md", "shadow_md"), ("lg", "shadow_lg")];
+    let shadows = [
+        ("sm", "shadow_sm"),
+        ("md", "shadow_md"),
+        ("lg", "shadow_lg"),
+    ];
     let tile = |name: &str, token: &str| -> Element {
         vstack(
             6.0,
@@ -277,7 +304,10 @@ fn shadows_card() -> Element {
                     style: Some(Style {
                         background: Some("surface_1".into()),
                         radius: Some("radius_sm".into()),
-                        border: Some(Border { color: "chrome_divider".into(), width: 1.0 }),
+                        border: Some(Border {
+                            color: "chrome_divider".into(),
+                            width: 1.0,
+                        }),
                         shadow: Some(Shadow {
                             token: Some(token.into()),
                             ..Default::default()
@@ -292,6 +322,7 @@ fn shadows_card() -> Element {
                     size: Some(9.0),
                     weight: None,
                     family: Some("font_family_body".into()),
+                    selectable: false,
                 },
             ],
         )
@@ -301,7 +332,13 @@ fn shadows_card() -> Element {
 }
 
 fn spacing_card() -> Element {
-    let steps = [("xs", 4.0), ("sm", 8.0), ("md", 12.0), ("lg", 20.0), ("xl", 32.0)];
+    let steps = [
+        ("xs", 4.0),
+        ("sm", 8.0),
+        ("md", 12.0),
+        ("lg", 20.0),
+        ("xl", 32.0),
+    ];
     let row = |name: &str, w: f32| -> Element {
         hstack(
             8.0,
@@ -323,6 +360,7 @@ fn spacing_card() -> Element {
                     size: Some(10.0),
                     weight: None,
                     family: Some("font_family_mono".into()),
+                    selectable: false,
                 },
             ],
         )
@@ -389,15 +427,7 @@ fn components_card() -> Element {
             ),
         ],
     );
-    card(
-        "components",
-        "Primitives",
-        vec![
-            buttons,
-            spacer(2.0),
-            bars,
-        ],
-    )
+    card("components", "Primitives", vec![buttons, spacer(2.0), bars])
 }
 
 fn code_card() -> Element {
@@ -451,7 +481,10 @@ fn code_card() -> Element {
         style: Some(Style {
             background: Some("surface_1".into()),
             radius: Some("radius_sm".into()),
-            border: Some(Border { color: "chrome_divider".into(), width: 1.0 }),
+            border: Some(Border {
+                color: "chrome_divider".into(),
+                width: 1.0,
+            }),
             ..Default::default()
         }),
     };
@@ -476,6 +509,7 @@ fn list_card(selected: &str) -> Element {
                     size: Some(13.0),
                     weight: Some(Weight::Bold),
                     family: Some("font_family_body".into()),
+                    selectable: false,
                 },
                 muted(sub),
             ],
@@ -484,7 +518,12 @@ fn list_card(selected: &str) -> Element {
             selected: *id == selected,
             style: Some(Style {
                 radius: Some("radius_sm".into()),
-                padding: Some(Edges { top: 6.0, right: 10.0, bottom: 6.0, left: 10.0 }),
+                padding: Some(Edges {
+                    top: 6.0,
+                    right: 10.0,
+                    bottom: 6.0,
+                    left: 10.0,
+                }),
                 ..Default::default()
             }),
         })
@@ -498,7 +537,11 @@ fn dos_donts_card() -> Element {
     // intrinsically fit half a card. A vertical list reads cleanly at
     // any card width.
     let row = |ok: bool, msg: &str| -> Element {
-        let mark_color = if ok { "status_success" } else { "status_failed" };
+        let mark_color = if ok {
+            "status_success"
+        } else {
+            "status_failed"
+        };
         hstack(
             8.0,
             vec![
@@ -508,6 +551,7 @@ fn dos_donts_card() -> Element {
                     size: Some(12.0),
                     weight: Some(Weight::Bold),
                     family: Some("font_family_body".into()),
+                    selectable: false,
                 },
                 muted(msg),
             ],
@@ -533,7 +577,10 @@ fn textures_card(textures_dir: &str) -> Element {
         let style = Style {
             background_image: Some(format!("{}/{}", textures_dir, path)),
             radius: Some("radius_sm".into()),
-            border: Some(Border { color: "chrome_divider".into(), width: 1.0 }),
+            border: Some(Border {
+                color: "chrome_divider".into(),
+                width: 1.0,
+            }),
             ..Default::default()
         };
         vstack(
@@ -574,6 +621,7 @@ fn header() -> Element {
         size: Some(48.0),
         weight: Some(Weight::Bold),
         family: Some("font_family_heading".into()),
+        selectable: false,
     };
     let subtitle = Element::Text {
         value: "Elegant & tactile".into(),
@@ -581,6 +629,7 @@ fn header() -> Element {
         size: Some(15.0),
         weight: None,
         family: Some("font_family_heading".into()),
+        selectable: false,
     };
     let release = Element::Frame {
         gap: 0.0,
@@ -591,9 +640,13 @@ fn header() -> Element {
             size: Some(10.0),
             weight: Some(Weight::Bold),
             family: Some("font_family_body".into()),
+            selectable: false,
         }],
         style: Some(Style {
-            border: Some(Border { color: "accent_700".into(), width: 1.0 }),
+            border: Some(Border {
+                color: "accent_700".into(),
+                width: 1.0,
+            }),
             radius: Some("radius_pill".into()),
             padding: Some(Edges::symmetric(10.0, 4.0)),
             ..Default::default()
@@ -618,6 +671,7 @@ fn intro_card(search: &str, dark_mode: bool) -> Element {
         size: Some(12.0),
         weight: None,
         family: Some("font_family_body".into()),
+        selectable: false,
     };
     let controls = hstack(
         12.0,
@@ -652,7 +706,10 @@ fn intro_card(search: &str, dark_mode: bool) -> Element {
         style: Some(Style {
             background: Some("surface_2".into()),
             radius: Some("radius_lg".into()),
-            border: Some(Border { color: "chrome_divider".into(), width: 1.0 }),
+            border: Some(Border {
+                color: "chrome_divider".into(),
+                width: 1.0,
+            }),
             shadow: Some(Shadow {
                 token: Some("shadow_md".into()),
                 ..Default::default()
@@ -666,10 +723,22 @@ fn tabs_strip(active: &str) -> Element {
     Element::Tabs {
         id: "section".into(),
         items: vec![
-            TabItem { id: "tokens".into(), label: "Tokens".into() },
-            TabItem { id: "components".into(), label: "Components".into() },
-            TabItem { id: "shell".into(), label: "Shell".into() },
-            TabItem { id: "atmosphere".into(), label: "Atmosphere".into() },
+            TabItem {
+                id: "tokens".into(),
+                label: "Tokens".into(),
+            },
+            TabItem {
+                id: "components".into(),
+                label: "Components".into(),
+            },
+            TabItem {
+                id: "shell".into(),
+                label: "Shell".into(),
+            },
+            TabItem {
+                id: "atmosphere".into(),
+                label: "Atmosphere".into(),
+            },
         ],
         selected: active.into(),
         style: None,
@@ -787,7 +856,9 @@ fn textures_dir_path() -> String {
     if let Ok(exe) = std::env::current_exe() {
         let mut p = exe.clone();
         for _ in 0..3 {
-            if !p.pop() { break; }
+            if !p.pop() {
+                break;
+            }
         }
         let candidate = p
             .join("crates")

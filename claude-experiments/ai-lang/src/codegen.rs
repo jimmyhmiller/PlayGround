@@ -40,9 +40,9 @@ use crate::gc::{ObjHeader, TypeInfo, VarLenKind};
 use crate::hash::Hash;
 use crate::resolve::{ResolvedDef, ResolvedModule};
 use crate::runtime::{
-    Runtime, Thread, ai_array_get, ai_atom_load, ai_atom_new, ai_atom_swap_local, ai_array_len, ai_array_new, ai_array_set, ai_bytes_copy,
+    Runtime, Thread, ai_array_get, ai_atom_load, ai_atom_new, ai_atom_swap_local, ai_array_len, ai_array_new, ai_array_set, ai_bytes_copy, ai_str_copy,
     ai_bytes_get, ai_bytes_new, ai_bytes_set, ai_bytes_slice, ai_gc_alloc_closure, ai_gc_box_int,
-    ai_gc_force_collect, ai_gc_lookup_code, ai_gc_pollcheck_slow, ai_gc_unbox_int, ai_panic, ai_state_get, ai_thread_join, ai_thread_spawn,
+    ai_gc_force_collect, ai_gc_lookup_code, ai_gc_pollcheck_slow, ai_gc_unbox_int, ai_panic, ai_state_get, ai_thread_join, ai_thread_spawn, ai_thread_spawn_shared,
     ai_state_present, ai_state_set, ai_value_eq, ai_value_hash, ai_str_concat, ai_str_eq,
     ai_str_len, ai_str_new, closure_offsets, thread_offsets,
 };
@@ -672,6 +672,7 @@ struct Codegen<'ctx> {
     extern_bytes_set: Option<FunctionValue<'ctx>>,
     extern_bytes_slice: Option<FunctionValue<'ctx>>,
     extern_bytes_copy: Option<FunctionValue<'ctx>>,
+    extern_str_copy: Option<FunctionValue<'ctx>>,
     extern_array_new: Option<FunctionValue<'ctx>>,
     extern_array_len: Option<FunctionValue<'ctx>>,
     extern_array_get: Option<FunctionValue<'ctx>>,
@@ -680,6 +681,7 @@ struct Codegen<'ctx> {
     extern_atom_new: Option<FunctionValue<'ctx>>,
     extern_atom_load: Option<FunctionValue<'ctx>>,
     extern_thread_spawn: Option<FunctionValue<'ctx>>,
+    extern_thread_spawn_shared: Option<FunctionValue<'ctx>>,
     extern_thread_join: Option<FunctionValue<'ctx>>,
     /// Value-boundary fns exposing the wire codec + closure invocation to
     /// ai-lang, so a node loop can be written in the language.
@@ -857,6 +859,7 @@ impl<'ctx> Codegen<'ctx> {
             extern_bytes_set: None,
             extern_bytes_slice: None,
             extern_bytes_copy: None,
+            extern_str_copy: None,
             extern_array_new: None,
             extern_array_len: None,
             extern_array_get: None,
@@ -865,6 +868,7 @@ impl<'ctx> Codegen<'ctx> {
             extern_atom_new: None,
             extern_atom_load: None,
             extern_thread_spawn: None,
+            extern_thread_spawn_shared: None,
             extern_thread_join: None,
             extern_wire_encode: None,
             extern_wire_decode_int: None,
@@ -1464,7 +1468,7 @@ impl<'ctx> Codegen<'ctx> {
         self.extern_bytes_slice = Some(bytes_slice);
 
         // ai_bytes_copy(thread, src) -> *u8 — backs bytes_from_string
-        // and string_from_bytes (defensive copy between identical reps).
+        // (copies a String's bytes into a fresh, mutable Bytes).
         let bytes_copy_ty = self
             .ptr_ty
             .fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
@@ -1474,6 +1478,18 @@ impl<'ctx> Codegen<'ctx> {
             Some(Linkage::External),
         );
         self.extern_bytes_copy = Some(bytes_copy);
+
+        // ai_str_copy(thread, src) -> *u8 — backs string_from_bytes
+        // (copies a Bytes's bytes into a fresh, immutable String).
+        let str_copy_ty = self
+            .ptr_ty
+            .fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        let str_copy = self.module.add_function(
+            "ai_str_copy",
+            str_copy_ty,
+            Some(Linkage::External),
+        );
+        self.extern_str_copy = Some(str_copy);
 
         // Array runtime fns. Heap shape = Runtime.array_ti (varlen
         // Values / pointer slots). See runtime::ai_array_*.
@@ -1563,6 +1579,17 @@ impl<'ctx> Codegen<'ctx> {
             Some(Linkage::External),
         );
         self.extern_thread_spawn = Some(thread_spawn);
+
+        // ai_thread_spawn_shared(thread, closure) -> *u8 (zero-copy opt-out)
+        let thread_spawn_shared_ty = self
+            .ptr_ty
+            .fn_type(&[self.ptr_ty.into(), self.ptr_ty.into()], false);
+        let thread_spawn_shared = self.module.add_function(
+            "ai_thread_spawn_shared",
+            thread_spawn_shared_ty,
+            Some(Linkage::External),
+        );
+        self.extern_thread_spawn_shared = Some(thread_spawn_shared);
 
         // ai_thread_join(thread, handle) -> *u8 (the spawned thunk's result)
         let thread_join_ty = self
@@ -1826,7 +1853,11 @@ impl<'ctx> Codegen<'ctx> {
                                 },
                             ])
                         } else {
-                            None
+                            // Any other known builtin: use its authoritative
+                            // signature so a captured pointer passed to it
+                            // (e.g. a `Bytes` to `bytes_set`, an `Array` to
+                            // `array_get`) is classified pointer-shaped.
+                            crate::typecheck::builtin_signature(name).map(|(p, _)| p)
                         }
                     }
                     _ => None,
@@ -3231,6 +3262,85 @@ impl<'ctx> Codegen<'ctx> {
         Ok(load.into_pointer_value())
     }
 
+    /// Compile a sequence of operand expressions for a multi-operand
+    /// construct (call args, struct/enum payloads, multi-arg builtins),
+    /// rooting every pointer-typed result across the evaluation of LATER
+    /// operands.
+    ///
+    /// THE BUG THIS FIXES: operands are evaluated left-to-right, but an
+    /// earlier operand's heap pointer would otherwise live only in an SSA
+    /// register while a later operand is compiled. If that later operand
+    /// allocates and triggers a relocating GC, the earlier pointer goes
+    /// stale (points into from-space) and the consuming call dereferences
+    /// garbage. Normally GC fires rarely so the window is almost never hit;
+    /// `AI_LANG_GC_STRESS=1` (collect-on-every-alloc) hits it deterministically.
+    ///
+    /// Fix: as soon as operand `i` is computed (and boxed, if
+    /// `box_int_to_ptr[i]` and it came back as an `Int`), spill any pointer
+    /// result to a dedicated frame root slot. After the whole list is
+    /// computed, reload each spilled pointer from its (now-relocated) slot.
+    /// `Int` results pass through unrooted — they're plain i64, not traced.
+    ///
+    /// Slot budget: this uses `operands.len()` root slots starting at
+    /// `ctx.next_root_slot`, and compiles each operand with `next_root_slot`
+    /// advanced PAST them so operand-internal `let`s/sub-calls never collide
+    /// with the spill slots. `count_gc_locals` mirrors this by reserving
+    /// `args.len() + 1` slots per `Call` and `fields.len()` per `StructNew`.
+    fn compile_operands_rooted(
+        &mut self,
+        operands: &[Expr],
+        box_int_to_ptr: &[bool],
+        env: &mut Env<'ctx>,
+        ctx: CompileCtx<'ctx>,
+    ) -> Result<Vec<Value<'ctx>>, CodegenError> {
+        let base = ctx.next_root_slot;
+        let k = operands.len() as u32;
+        // Operands compile ABOVE the reserved spill region [base, base+k).
+        let operand_ctx = CompileCtx {
+            is_tail: false,
+            next_root_slot: base + k,
+            ..ctx
+        };
+        let mut slots: Vec<Option<PointerValue<'ctx>>> = Vec::with_capacity(operands.len());
+        let mut vals: Vec<Value<'ctx>> = Vec::with_capacity(operands.len());
+        for (i, op) in operands.iter().enumerate() {
+            let mut v = self.compile_expr(op, env, operand_ctx)?;
+            // Box an Int flowing into a pointer-typed (e.g. TypeVar) slot
+            // BEFORE spilling — the box itself allocates, so its result must
+            // be rooted just like any other operand pointer.
+            if box_int_to_ptr.get(i).copied().unwrap_or(false) {
+                if let Value::Int(iv) = v {
+                    let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
+                    let call = self
+                        .builder
+                        .build_call(box_fn, &[ctx.thread_param.into(), iv.into()], "box_int_arg")
+                        .map_err(|e| {
+                            CodegenError::JitInit(format!("build_call ai_gc_box_int: {}", e))
+                        })?;
+                    v = Value::Closure(call.as_any_value_enum().into_pointer_value());
+                }
+            }
+            match v {
+                Value::Closure(p) => {
+                    let slot = self.write_root_slot(ctx.frame_alloca, ctx.info, base + i as u32, p)?;
+                    slots.push(Some(slot));
+                    vals.push(v);
+                }
+                Value::Int(_) => {
+                    slots.push(None);
+                    vals.push(v);
+                }
+            }
+        }
+        // Reload each spilled pointer from its (possibly relocated) slot.
+        for (i, slot) in slots.into_iter().enumerate() {
+            if let Some(slot) = slot {
+                vals[i] = Value::Closure(self.read_root_slot(slot)?);
+            }
+        }
+        Ok(vals)
+    }
+
     // -------------------------------------------------------------------------
     // Expressions
     // -------------------------------------------------------------------------
@@ -3700,19 +3810,22 @@ impl<'ctx> Codegen<'ctx> {
         env: &mut Env<'ctx>,
         ctx: CompileCtx<'ctx>,
     ) -> Result<Value<'ctx>, CodegenError> {
-        // Args themselves are NOT in tail position — they're computed
-        // and stored before the branch.
-        let arg_ctx = CompileCtx {
-            is_tail: false,
-            ..ctx
-        };
-        // Evaluate every arg first (to fresh SSA values), THEN write
-        // them all into slots. This handles the case where an arg
-        // references a param that's about to be overwritten.
-        let mut arg_vals: Vec<Value<'ctx>> = Vec::with_capacity(args.len());
-        for a in args {
-            arg_vals.push(self.compile_expr(a, env, arg_ctx)?);
-        }
+        // Evaluate every arg first (to fresh SSA values), THEN write them
+        // all into the param slots. Evaluating-before-storing handles the
+        // case where an arg references a param that's about to be
+        // overwritten. `compile_operands_rooted` additionally spills each
+        // pointer arg to a TEMPORARY root slot across the evaluation of
+        // later args — without it, an earlier pointer arg (e.g. `cell.tail`)
+        // goes stale when a later arg (e.g. `List::Cons(...)`) allocates and
+        // triggers a relocating GC. It also boxes Int args bound for a
+        // pointer-typed param slot (uniform ABI).
+        let box_flags: Vec<bool> = tail
+            .param_slots
+            .iter()
+            .take(args.len())
+            .map(|s| matches!(s, TailParamSlot::Ptr(_)))
+            .collect();
+        let arg_vals = self.compile_operands_rooted(args, &box_flags, env, ctx)?;
         for (i, v) in arg_vals.into_iter().enumerate() {
             match tail.param_slots[i] {
                 TailParamSlot::Int(slot) => {
@@ -4142,12 +4255,11 @@ impl<'ctx> Codegen<'ctx> {
                         arity: args.len(),
                     });
                 }
-                let a = self.compile_expr(&args[0], env, ctx)?;
-                let b = self.compile_expr(&args[1], env, ctx)?;
-                let ap = a.as_closure().map_err(|_| CodegenError::TypeMismatch {
+                let vals = self.compile_operands_rooted(args, &[false, false], env, ctx)?;
+                let ap = vals[0].as_closure().map_err(|_| CodegenError::TypeMismatch {
                     what: "core/string.eq: args must be Strings".to_owned(),
                 })?;
-                let bp = b.as_closure().map_err(|_| CodegenError::TypeMismatch {
+                let bp = vals[1].as_closure().map_err(|_| CodegenError::TypeMismatch {
                     what: "core/string.eq: args must be Strings".to_owned(),
                 })?;
                 let fv = self.extern_str_eq.expect("ai_str_eq declared");
@@ -4166,12 +4278,11 @@ impl<'ctx> Codegen<'ctx> {
                         arity: args.len(),
                     });
                 }
-                let a = self.compile_expr(&args[0], env, ctx)?;
-                let b = self.compile_expr(&args[1], env, ctx)?;
-                let ap = a.as_closure().map_err(|_| CodegenError::TypeMismatch {
+                let vals = self.compile_operands_rooted(args, &[false, false], env, ctx)?;
+                let ap = vals[0].as_closure().map_err(|_| CodegenError::TypeMismatch {
                     what: "core/string.concat: args must be Strings".to_owned(),
                 })?;
-                let bp = b.as_closure().map_err(|_| CodegenError::TypeMismatch {
+                let bp = vals[1].as_closure().map_err(|_| CodegenError::TypeMismatch {
                     what: "core/string.concat: args must be Strings".to_owned(),
                 })?;
                 let fv = self.extern_str_concat.expect("ai_str_concat declared");
@@ -4229,8 +4340,9 @@ impl<'ctx> Codegen<'ctx> {
                         arity: args.len(),
                     });
                 }
-                let b = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
-                let i = self.compile_expr(&args[1], env, ctx)?.as_int()?;
+                let vals = self.compile_operands_rooted(args, &[false, false], env, ctx)?;
+                let b = vals[0].as_closure()?;
+                let i = vals[1].as_int()?;
                 let fv = self.extern_bytes_get.expect("ai_bytes_get declared");
                 let call = self
                     .builder
@@ -4247,9 +4359,10 @@ impl<'ctx> Codegen<'ctx> {
                         arity: args.len(),
                     });
                 }
-                let b = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
-                let i = self.compile_expr(&args[1], env, ctx)?.as_int()?;
-                let v = self.compile_expr(&args[2], env, ctx)?.as_int()?;
+                let vals = self.compile_operands_rooted(args, &[false, false, false], env, ctx)?;
+                let b = vals[0].as_closure()?;
+                let i = vals[1].as_int()?;
+                let v = vals[2].as_int()?;
                 let fv = self.extern_bytes_set.expect("ai_bytes_set declared");
                 let call = self
                     .builder
@@ -4266,9 +4379,10 @@ impl<'ctx> Codegen<'ctx> {
                         arity: args.len(),
                     });
                 }
-                let b = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
-                let start = self.compile_expr(&args[1], env, ctx)?.as_int()?;
-                let len = self.compile_expr(&args[2], env, ctx)?.as_int()?;
+                let vals = self.compile_operands_rooted(args, &[false, false, false], env, ctx)?;
+                let b = vals[0].as_closure()?;
+                let start = vals[1].as_int()?;
+                let len = vals[2].as_int()?;
                 let fv = self.extern_bytes_slice.expect("ai_bytes_slice declared");
                 let call = self
                     .builder
@@ -4290,8 +4404,9 @@ impl<'ctx> Codegen<'ctx> {
                     });
                 }
                 // Bytes shares String's layout; reuse ai_str_concat.
-                let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
-                let b = self.compile_expr(&args[1], env, ctx)?.as_closure()?;
+                let vals = self.compile_operands_rooted(args, &[false, false], env, ctx)?;
+                let a = vals[0].as_closure()?;
+                let b = vals[1].as_closure()?;
                 let fv = self.extern_str_concat.expect("ai_str_concat declared");
                 let call = self
                     .builder
@@ -4314,19 +4429,25 @@ impl<'ctx> Codegen<'ctx> {
                         arity: args.len(),
                     });
                 }
-                // Both conversions are a defensive copy: String and Bytes
-                // share the heap layout but get independent mutation.
+                // String and Bytes are distinct shapes now, so the
+                // conversion is a real cross-shape copy: bytes_from_string
+                // produces a mutable Bytes, string_from_bytes an immutable
+                // String.
                 let src = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
-                let fv = self.extern_bytes_copy.expect("ai_bytes_copy declared");
+                let fv = if name == "core/string.from_bytes" {
+                    self.extern_str_copy.expect("ai_str_copy declared")
+                } else {
+                    self.extern_bytes_copy.expect("ai_bytes_copy declared")
+                };
                 let call = self
                     .builder
                     .build_call(
                         fv,
                         &[ctx.thread_param.into(), src.into()],
-                        "bytes_copy_result",
+                        "from_copy_result",
                     )
                     .map_err(|e| CodegenError::JitInit(
-                        format!("build_call ai_bytes_copy: {}", e),
+                        format!("build_call from-conversion copy: {}", e),
                     ))?;
                 Ok(Value::Closure(call.as_any_value_enum().into_pointer_value()))
             }
@@ -4375,8 +4496,9 @@ impl<'ctx> Codegen<'ctx> {
                 // Int, the slot holds a BoxedInt we must unbox after
                 // loading (mirrors compile_field).
                 let elem_is_int = array_element_is_int(&self.infer_type(&args[0], env));
-                let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
-                let i = self.compile_expr(&args[1], env, ctx)?.as_int()?;
+                let vals = self.compile_operands_rooted(args, &[false, false], env, ctx)?;
+                let a = vals[0].as_closure()?;
+                let i = vals[1].as_int()?;
                 let fv = self.extern_array_get.expect("ai_array_get declared");
                 let call = self
                     .builder
@@ -4405,28 +4527,14 @@ impl<'ctx> Codegen<'ctx> {
                         arity: args.len(),
                     });
                 }
-                let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
-                let i = self.compile_expr(&args[1], env, ctx)?.as_int()?;
-                // Element value: box an Int into a BoxedInt so the slot
-                // holds a uniform pointer (mirrors compile_struct_new).
-                let v = self.compile_expr(&args[2], env, ctx)?;
-                let v_ptr = match v {
-                    Value::Int(iv) => {
-                        let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
-                        let boxed = self
-                            .builder
-                            .build_call(
-                                box_fn,
-                                &[ctx.thread_param.into(), iv.into()],
-                                "array_set_boxed",
-                            )
-                            .map_err(|e| CodegenError::JitInit(
-                                format!("build_call ai_gc_box_int (array.set): {}", e),
-                            ))?;
-                        boxed.as_any_value_enum().into_pointer_value()
-                    }
-                    Value::Closure(p) => p,
-                };
+                // Element value (arg 2): box an Int into a BoxedInt so the
+                // slot holds a uniform pointer (mirrors compile_struct_new).
+                // The helper boxes it (box_flags[2]) and roots all three
+                // operands across each other's evaluation.
+                let vals = self.compile_operands_rooted(args, &[false, false, true], env, ctx)?;
+                let a = vals[0].as_closure()?;
+                let i = vals[1].as_int()?;
+                let v_ptr = vals[2].as_closure()?;
                 let fv = self.extern_array_set.expect("ai_array_set declared");
                 let call = self
                     .builder
@@ -4530,8 +4638,9 @@ impl<'ctx> Codegen<'ctx> {
                     });
                 }
                 let elem_is_int = atom_element_is_int(&self.infer_type(&args[0], env));
-                let a = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
-                let f = self.compile_expr(&args[1], env, ctx)?.as_closure()?;
+                let vals = self.compile_operands_rooted(args, &[false, false], env, ctx)?;
+                let a = vals[0].as_closure()?;
+                let f = vals[1].as_closure()?;
                 let fv = self.extern_atom_swap_local.expect("ai_atom_swap declared");
                 let call = self
                     .builder
@@ -4555,10 +4664,14 @@ impl<'ctx> Codegen<'ctx> {
                     Ok(Value::Closure(res_ptr))
                 }
             }
-            Expr::BuiltinRef(name) if name == "core/thread.spawn" => {
+            Expr::BuiltinRef(name)
+                if name == "core/thread.spawn" || name == "core/thread.spawn_shared" =>
+            {
                 // spawn(thunk) -> ThreadHandle<T>. The thunk is a heap
                 // closure pointer; pass it straight to the runtime, which
                 // starts an OS thread and returns a handle (BoxedInt id).
+                // `spawn` isolates (runtime deep-copies the closure);
+                // `spawn_shared` runs it zero-copy (shares the heap).
                 if args.len() != 1 {
                     return Err(CodegenError::UnknownBuiltin {
                         name: name.clone(),
@@ -4566,7 +4679,12 @@ impl<'ctx> Codegen<'ctx> {
                     });
                 }
                 let thunk = self.compile_expr(&args[0], env, ctx)?.as_closure()?;
-                let fv = self.extern_thread_spawn.expect("ai_thread_spawn declared");
+                let fv = if name == "core/thread.spawn_shared" {
+                    self.extern_thread_spawn_shared
+                        .expect("ai_thread_spawn_shared declared")
+                } else {
+                    self.extern_thread_spawn.expect("ai_thread_spawn declared")
+                };
                 let call = self
                     .builder
                     .build_call(
@@ -4645,10 +4763,11 @@ impl<'ctx> Codegen<'ctx> {
                         arity: args.len(),
                     });
                 }
-                let av = self.compile_expr(&args[0], env, ctx)?;
-                let ap = self.value_as_ptr(av, ctx)?;
-                let bv = self.compile_expr(&args[1], env, ctx)?;
-                let bp = self.value_as_ptr(bv, ctx)?;
+                // Both operands coerce to a uniform heap pointer (Int → box),
+                // and must be rooted across each other's evaluation.
+                let vals = self.compile_operands_rooted(args, &[true, true], env, ctx)?;
+                let ap = vals[0].as_closure()?;
+                let bp = vals[1].as_closure()?;
                 let f = self.extern_value_eq.expect("ai_value_eq declared");
                 let call = self
                     .builder
@@ -4771,11 +4890,13 @@ impl<'ctx> Codegen<'ctx> {
                 let fn_ty = fv.get_type();
                 let llvm_param_tys = fn_ty.get_param_types();
                 // llvm_param_tys[0] is the thread ptr; user args start at [1].
+                // Root each pointer arg (e.g. String) across later args.
+                let no_box = vec![false; args.len()];
+                let arg_vals = self.compile_operands_rooted(args, &no_box, env, ctx)?;
                 let mut call_args: Vec<BasicMetadataValueEnum<'ctx>> =
                     Vec::with_capacity(args.len() + 1);
                 call_args.push(ctx.thread_param.into());
-                for (i, a) in args.iter().enumerate() {
-                    let v = self.compile_expr(a, env, ctx)?;
+                for (i, v) in arg_vals.into_iter().enumerate() {
                     let expected = llvm_param_tys.get(i + 1).ok_or_else(|| {
                         CodegenError::UnknownBuiltin {
                             name: format!("extern `{}` arity mismatch", ext_name),
@@ -4875,35 +4996,18 @@ impl<'ctx> Codegen<'ctx> {
                     .map(|(i, o)| o.unwrap_or(Type::TypeVar(i as u32)))
                     .collect();
 
+                // Box an Int arg flowing into a generic (TypeVar) param.
+                let box_flags: Vec<bool> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, _)| matches!(param_decls.get(i), Some(Type::TypeVar(_))))
+                    .collect();
+                // Root each pointer arg across the evaluation of later args
+                // (which may allocate and relocate it).
+                let arg_vals = self.compile_operands_rooted(args, &box_flags, env, ctx)?;
                 let mut call_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len() + 1);
                 call_args.push(ctx.thread_param.into());
-                for (i, a) in args.iter().enumerate() {
-                    let mut v = self.compile_expr(a, env, ctx)?;
-                    // If the declared param is generic (TypeVar) and
-                    // the actual arg compiled to an Int, box it.
-                    if let Some(decl) = param_decls.get(i) {
-                        if matches!(decl, Type::TypeVar(_)) {
-                            if let Value::Int(iv) = v {
-                                let box_fn = self
-                                    .extern_box_int
-                                    .expect("ai_gc_box_int declared");
-                                let call = self
-                                    .builder
-                                    .build_call(
-                                        box_fn,
-                                        &[ctx.thread_param.into(), iv.into()],
-                                        "box_int_arg",
-                                    )
-                                    .map_err(|e| CodegenError::JitInit(format!(
-                                        "build_call ai_gc_box_int: {}",
-                                        e
-                                    )))?;
-                                v = Value::Closure(
-                                    call.as_any_value_enum().into_pointer_value(),
-                                );
-                            }
-                        }
-                    }
+                for v in arg_vals {
                     call_args.push(v.into_basic().into());
                 }
                 let call = self
@@ -5012,6 +5116,23 @@ impl<'ctx> Codegen<'ctx> {
             .map(|(i, o)| o.unwrap_or(Type::TypeVar(i as u32)))
             .collect();
 
+        // The closure pointer is held across the argument evaluation, which
+        // allocates (boxing + arg sub-calls) — root it in slot `base` so a
+        // collection there relocates it; reload before the call. Args are
+        // rooted across each other by `compile_operands_rooted`. The uniform
+        // closure ABI boxes EVERY Int arg (both `Int`-declared and
+        // generic/TypeVar params), so all box-flags are true.
+        let base = ctx.next_root_slot;
+        let closure_slot = self.write_root_slot(ctx.frame_alloca, ctx.info, base, closure_ptr)?;
+        let arg_ctx = CompileCtx {
+            next_root_slot: base + 1,
+            ..ctx
+        };
+        let box_flags: Vec<bool> = vec![true; args.len()];
+        let arg_vals = self.compile_operands_rooted(args, &box_flags, env, arg_ctx)?;
+        // Reload the (possibly relocated) closure pointer.
+        let closure_ptr = self.read_root_slot(closure_slot)?;
+
         // code_ptr = ai_gc_lookup_code(thread, closure_ptr)
         //
         // Pass the closure pointer; `ai_gc_lookup_code` reads the
@@ -5019,7 +5140,8 @@ impl<'ctx> Codegen<'ctx> {
         // resolves the code_hash through the code-table's type_id
         // map. The code_hash itself sits at a variable offset that
         // depends on the closure's pointer-capture count, which we
-        // can't compute statically here.
+        // can't compute statically here. (No allocation happens between
+        // the reload and the indirect call, so `closure_ptr` stays valid.)
         let lookup = self.extern_lookup_code.expect("lookup declared");
         let call = self
             .builder
@@ -5031,46 +5153,15 @@ impl<'ctx> Codegen<'ctx> {
             .map_err(|e| CodegenError::JitInit(format!("build_call lookup: {}", e)))?;
         let code_ptr = call.as_any_value_enum().into_pointer_value();
 
-        // Build call args: thread, closure, then each arg (boxed if Int).
+        // Build call args: thread, closure, then each arg. Every arg is
+        // already a heap pointer (Ints were boxed by the helper).
         let mut call_args: Vec<BasicMetadataValueEnum> = Vec::with_capacity(args.len() + 2);
         call_args.push(ctx.thread_param.into());
         call_args.push(closure_ptr.into());
-        for (i, a) in args.iter().enumerate() {
-            let v = self.compile_expr(a, env, ctx)?;
-            let decl = decl_param_tys.get(i);
-            let arg_ptr = match (v, decl) {
-                (Value::Int(iv), Some(t)) if is_int_type(t) => {
-                    let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
-                    let call = self
-                        .builder
-                        .build_call(
-                            box_fn,
-                            &[ctx.thread_param.into(), iv.into()],
-                            &format!("box_indirect_arg_{}", i),
-                        )
-                        .map_err(|e| CodegenError::JitInit(format!(
-                            "build_call ai_gc_box_int (indirect arg {}): {}", i, e
-                        )))?;
-                    call.as_any_value_enum().into_pointer_value()
-                }
-                (Value::Int(iv), _) => {
-                    // Declared param isn't Int (e.g., TypeVar) but actual
-                    // arg compiled to Int — box uniformly.
-                    let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
-                    let call = self
-                        .builder
-                        .build_call(
-                            box_fn,
-                            &[ctx.thread_param.into(), iv.into()],
-                            &format!("box_indirect_arg_{}_uniform", i),
-                        )
-                        .map_err(|e| CodegenError::JitInit(format!(
-                            "build_call ai_gc_box_int (uniform indirect arg {}): {}", i, e
-                        )))?;
-                    call.as_any_value_enum().into_pointer_value()
-                }
-                (Value::Closure(p), _) => p,
-            };
+        for v in arg_vals {
+            let arg_ptr = v.as_closure().map_err(|_| CodegenError::TypeMismatch {
+                what: "indirect call arg should be a heap pointer after boxing".to_owned(),
+            })?;
             call_args.push(arg_ptr.into());
         }
 
@@ -5326,26 +5417,24 @@ impl<'ctx> Codegen<'ctx> {
             .map_err(|e| CodegenError::JitInit(format!("build_call alloc struct: {}", e)))?;
         let obj_ptr = call.as_any_value_enum().into_pointer_value();
 
-        // Evaluate ALL field values BEFORE storing any of them. The
-        // gc-experiment recipe: no safepoints between alloc and field
-        // stores → no write barriers needed → newly-allocated objects
-        // are young + cannot contain dangling pointers.
-        //
-        // (For v1 with single-threaded, no preemption, this is moot —
-        // safepoints don't happen mid-call — but it costs nothing to
-        // follow the recipe.)
-        let mut vals: Vec<Value<'ctx>> = Vec::with_capacity(fields.len());
-        for f in fields {
-            vals.push(self.compile_expr(f, env, ctx)?);
-        }
+        // The object is allocated FIRST, but evaluating the field values
+        // (and boxing Int fields) allocates too — a collection there would
+        // relocate `obj_ptr`. Root it in slot `base` so it's relocated,
+        // then reload before storing. Field values are rooted across each
+        // other by `compile_operands_rooted`, which also boxes Int values
+        // bound for pointer-typed (TypeVar/Apply) field slots. (Field reads
+        // and match payload extraction do the symmetric unbox.)
+        let base = ctx.next_root_slot;
+        let obj_slot = self.write_root_slot(ctx.frame_alloca, ctx.info, base, obj_ptr)?;
+        let field_ctx = CompileCtx {
+            next_root_slot: base + 1,
+            ..ctx
+        };
+        let vals = self.compile_operands_rooted(fields, &info.field_is_pointer, env, field_ctx)?;
+        // Reload the (possibly relocated) object; no allocation happens
+        // between here and the stores, so it stays valid.
+        let obj_ptr = self.read_root_slot(obj_slot)?;
 
-        // Store each field at its physical offset. If a field's slot is
-        // pointer-typed (declared field is TypeVar or Apply — uniform
-        // boxed rep) but the value we have is an `Int`, box it into a
-        // BoxedInt first. Field reads (`compile_field`) and match
-        // payload extraction do the symmetric unbox using the struct
-        // instantiation. This mirrors the same logic in
-        // `compile_enum_new` for variant payloads.
         for (i, v) in vals.iter().enumerate() {
             let offset = self.i64_ty.const_int(info.field_offsets[i] as u64, false);
             let slot = unsafe {
@@ -5358,32 +5447,7 @@ impl<'ctx> Codegen<'ctx> {
                     )
                     .map_err(|e| CodegenError::JitInit(format!("gep field {}: {}", i, e)))?
             };
-            let is_ptr = info.field_is_pointer[i];
-            let to_store = if is_ptr {
-                match v {
-                    Value::Int(iv) => {
-                        let box_fn = self
-                            .extern_box_int
-                            .expect("ai_gc_box_int declared");
-                        let call = self
-                            .builder
-                            .build_call(
-                                box_fn,
-                                &[ctx.thread_param.into(), (*iv).into()],
-                                &format!("box_int_for_field_{}", i),
-                            )
-                            .map_err(|e| CodegenError::JitInit(format!(
-                                "build_call ai_gc_box_int (struct field {}): {}",
-                                i, e
-                            )))?;
-                        Value::Closure(call.as_any_value_enum().into_pointer_value())
-                    }
-                    other => other.clone(),
-                }
-            } else {
-                v.clone()
-            };
-            let basic = to_store.into_basic();
+            let basic = v.into_basic();
             self.builder
                 .build_store(slot, basic)
                 .map_err(|e| CodegenError::JitInit(format!("store field {}: {}", i, e)))?;
@@ -5527,12 +5591,53 @@ impl<'ctx> Codegen<'ctx> {
                 ),
             })?;
 
-        // Evaluate the payload BEFORE alloc, per the gc-experiment recipe
-        // (no safepoints between alloc and field stores).
-        let payload_val = match payload {
-            None => None,
-            Some(e) => Some(self.compile_expr(e, env, ctx)?),
+        // Evaluate the payload BEFORE the alloc, and BOX it (if the variant
+        // declares a pointer-typed payload but we have an Int) BEFORE the
+        // alloc too — boxing and the variant alloc both allocate, so a
+        // collection at the alloc would relocate a payload pointer held only
+        // in an SSA register. Spill the final payload pointer to slot `base`
+        // so it's relocated, then reload it after the alloc (no allocation
+        // happens between the reload and the store).
+        let base = ctx.next_root_slot;
+        let payload_ctx = CompileCtx {
+            next_root_slot: base + 1,
+            ..ctx
         };
+        // (Some(slot), None) for a spilled pointer payload; (None, Some(v))
+        // for a non-pointer (Int) payload passed through; None for no payload.
+        let payload_spill: Option<(Option<PointerValue<'ctx>>, Option<Value<'ctx>>)> =
+            match payload {
+                None => None,
+                Some(e) => {
+                    let mut pv = self.compile_expr(e, env, payload_ctx)?;
+                    if v.payload_is_pointer {
+                        if let Value::Int(iv) = pv {
+                            let box_fn = self.extern_box_int.expect("ai_gc_box_int declared");
+                            let call = self
+                                .builder
+                                .build_call(
+                                    box_fn,
+                                    &[ctx.thread_param.into(), iv.into()],
+                                    "box_int_for_variant_payload",
+                                )
+                                .map_err(|e| {
+                                    CodegenError::JitInit(format!(
+                                        "build_call ai_gc_box_int (enum payload): {}",
+                                        e
+                                    ))
+                                })?;
+                            pv = Value::Closure(call.as_any_value_enum().into_pointer_value());
+                        }
+                    }
+                    match pv {
+                        Value::Closure(p) => {
+                            let slot = self.write_root_slot(ctx.frame_alloca, ctx.info, base, p)?;
+                            Some((Some(slot), None))
+                        }
+                        Value::Int(_) => Some((None, Some(pv))),
+                    }
+                }
+            };
 
         // Allocate the variant's heap object.
         let alloc = self.extern_alloc_closure.expect("alloc declared");
@@ -5561,8 +5666,9 @@ impl<'ctx> Codegen<'ctx> {
             .build_store(tag_ptr, tag_val)
             .map_err(|e| CodegenError::JitInit(format!("store tag: {}", e)))?;
 
-        // Store the payload, if any.
-        if let (Some(pv), Some(off)) = (payload_val, v.payload_offset) {
+        // Store the payload, if any. Reload a spilled pointer payload from
+        // its root slot (the alloc above may have relocated it).
+        if let (Some((slot, nonptr)), Some(off)) = (payload_spill, v.payload_offset) {
             let off_const = self.i64_ty.const_int(off as u64, false);
             let payload_slot = unsafe {
                 self.builder
@@ -5574,37 +5680,10 @@ impl<'ctx> Codegen<'ctx> {
                     )
                     .map_err(|e| CodegenError::JitInit(format!("gep payload: {}", e)))?
             };
-            // If the variant's declared payload is pointer-typed but
-            // the value we have is an Int (typical user-side case for
-            // generic enums: `Some(42)` where the variant declares
-            // `TypeVar(0)`), box the Int into a BoxedInt heap object
-            // before storing. Match-side extraction will unbox using
-            // its own instantiation analysis.
-            let to_store = if v.payload_is_pointer {
-                match pv {
-                    Value::Int(iv) => {
-                        let box_fn = self
-                            .extern_box_int
-                            .expect("ai_gc_box_int declared");
-                        let call = self
-                            .builder
-                            .build_call(
-                                box_fn,
-                                &[ctx.thread_param.into(), iv.into()],
-                                "box_int_for_variant_payload",
-                            )
-                            .map_err(|e| CodegenError::JitInit(format!(
-                                "build_call ai_gc_box_int (enum payload): {}",
-                                e
-                            )))?;
-                        Value::Closure(
-                            call.as_any_value_enum().into_pointer_value(),
-                        )
-                    }
-                    other => other,
-                }
-            } else {
-                pv
+            let to_store = match (slot, nonptr) {
+                (Some(slot), _) => Value::Closure(self.read_root_slot(slot)?),
+                (None, Some(v)) => v,
+                (None, None) => unreachable!("payload_spill has neither pointer slot nor value"),
             };
             let basic = to_store.into_basic();
             self.builder
@@ -6945,6 +7024,13 @@ fn count_gc_locals(body: &Expr) -> u32 {
                 walk(body, n);
             }
             Expr::Call(callee, args) => {
+                // Reserve a root slot per arg (for `compile_operands_rooted`
+                // to spill each pointer arg across sibling-arg evaluation) +1
+                // for an indirect call's closure pointer (held across arg
+                // eval too). Harmlessly over-reserves for direct/Int calls;
+                // slots are reused across sibling scopes, so the running SUM
+                // here always dominates the max simultaneously-live index.
+                *n += args.len() as u32 + 1;
                 walk(callee, n);
                 for a in args {
                     walk(a, n);
@@ -6954,12 +7040,19 @@ fn count_gc_locals(body: &Expr) -> u32 {
                 let _ = body;
             }
             Expr::StructNew { fields, .. } => {
+                // Reserve a root slot per field (operand-rooting, as for
+                // Call args) +1 for the freshly-allocated object pointer,
+                // which must survive the field evaluations that follow it.
+                *n += fields.len() as u32 + 1;
                 for f in fields {
                     walk(f, n);
                 }
             }
             Expr::Field { base, .. } => walk(base, n),
             Expr::EnumNew { payload, .. } => {
+                // Reserve one slot to root a pointer payload across the
+                // variant alloc that follows it.
+                *n += 1;
                 if let Some(p) = payload {
                     walk(p, n);
                 }
@@ -7417,6 +7510,9 @@ impl<'ctx> Jit<'ctx> {
         if let Some(f) = cm.module.get_function("ai_bytes_copy") {
             engine.add_global_mapping(&f, ai_bytes_copy as usize);
         }
+        if let Some(f) = cm.module.get_function("ai_str_copy") {
+            engine.add_global_mapping(&f, ai_str_copy as usize);
+        }
         if let Some(f) = cm.module.get_function("ai_array_new") {
             engine.add_global_mapping(&f, ai_array_new as usize);
         }
@@ -7434,6 +7530,9 @@ impl<'ctx> Jit<'ctx> {
         }
         if let Some(f) = cm.module.get_function("ai_thread_spawn") {
             engine.add_global_mapping(&f, ai_thread_spawn as usize);
+        }
+        if let Some(f) = cm.module.get_function("ai_thread_spawn_shared") {
+            engine.add_global_mapping(&f, ai_thread_spawn_shared as usize);
         }
         if let Some(f) = cm.module.get_function("ai_thread_join") {
             engine.add_global_mapping(&f, ai_thread_join as usize);
@@ -7669,7 +7768,7 @@ impl<'ctx> IncrementalJit<'ctx> {
         // shapes (BoxedInt + String + Array + Atom) at the trailing end
         // of the heap's type-table. Keep this in sync with
         // `Runtime::new_with_metadata`.
-        const RUNTIME_RESERVED_SHAPES: u16 = 4;
+        const RUNTIME_RESERVED_SHAPES: u16 = 5;
         let next_type_id =
             cm.closure_type_infos.len() as u16 + RUNTIME_RESERVED_SHAPES;
 
@@ -7770,6 +7869,9 @@ impl<'ctx> IncrementalJit<'ctx> {
         if let Some(f) = module.get_function("ai_bytes_copy") {
             engine.add_global_mapping(&f, ai_bytes_copy as usize);
         }
+        if let Some(f) = module.get_function("ai_str_copy") {
+            engine.add_global_mapping(&f, ai_str_copy as usize);
+        }
         if let Some(f) = module.get_function("ai_array_new") {
             engine.add_global_mapping(&f, ai_array_new as usize);
         }
@@ -7787,6 +7889,9 @@ impl<'ctx> IncrementalJit<'ctx> {
         }
         if let Some(f) = module.get_function("ai_thread_spawn") {
             engine.add_global_mapping(&f, ai_thread_spawn as usize);
+        }
+        if let Some(f) = module.get_function("ai_thread_spawn_shared") {
+            engine.add_global_mapping(&f, ai_thread_spawn_shared as usize);
         }
         if let Some(f) = module.get_function("ai_thread_join") {
             engine.add_global_mapping(&f, ai_thread_join as usize);

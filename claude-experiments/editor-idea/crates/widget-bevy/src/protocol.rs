@@ -337,6 +337,12 @@ pub enum Element {
         /// token name from theme.rhai (`"font_family_heading"`).
         #[serde(default)]
         family: Option<String>,
+        /// Drag-selectable: the user can drag across this text to
+        /// highlight a range and Cmd/Ctrl+C the selection. ON by default
+        /// for read-only labels; set `selectable: false` to opt a label
+        /// out (e.g. text that's part of a custom drag gesture).
+        #[serde(default = "default_true")]
+        selectable: bool,
     },
     /// Clickable button. The host sends `{"event":"click","id":"<id>"}`
     /// back to the widget on press; ids must be unique within a frame.
@@ -450,6 +456,12 @@ pub enum Element {
         rows: Vec<Vec<String>>,
         #[serde(default)]
         zebra: bool,
+        /// Cells are drag-selectable: drag across a cell to highlight a
+        /// range and Cmd/Ctrl+C it — the "grab one value out of the
+        /// results" workflow. ON by default; set `selectable: false` to
+        /// disable.
+        #[serde(default = "default_true")]
+        selectable: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<Style>,
     },
@@ -468,6 +480,10 @@ pub enum Element {
         value: String,
         #[serde(default)]
         color: Option<String>,
+        /// Drag-selectable like `Text`. ON by default; set
+        /// `selectable: false` to disable.
+        #[serde(default = "default_true")]
+        selectable: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<Style>,
     },
@@ -690,6 +706,13 @@ fn default_align() -> Align {
 
 fn default_spacer() -> f32 {
     8.0
+}
+
+/// Read-only text displays (`Text`, `Table`, `Badge`) are drag-selectable
+/// by default; a widget opts a specific element out with
+/// `selectable: false`.
+fn default_true() -> bool {
+    true
 }
 
 fn default_bar_max() -> f32 {

@@ -213,6 +213,15 @@ enum HostToWorker {
     /// widget's id (this widget's own id for an echo of its own emit, or
     /// `"tbmsg"` for the CLI). NOT the Claude bus — that's `ClaudeEvent`.
     Message { topic: String, payload: Value, sender: String },
+    /// One stdout line from a child spawned via `proc_spawn`, pushed by
+    /// the subprocess reader thread. Drives `on_proc_output(handle, line)`
+    /// — event-driven delivery so widgets don't poll `proc_read` from
+    /// `on_frame`. `handle` is the `proc_spawn` id.
+    ProcOutput { handle: i64, line: String },
+    /// A child spawned via `proc_spawn` closed its stdout (exited).
+    /// Drives `on_proc_exit(handle, code)` once. `code` is the process
+    /// exit code, or -1 if it couldn't be determined (e.g. killed).
+    ProcExit { handle: i64, code: i64 },
     /// Hot reload — main parsed a new AST, worker should swap in and
     /// re-init scope from the last snapshot.
     Reload {
@@ -315,11 +324,17 @@ fn spawn_worker(
     widget_id: String,
 ) -> WorkerHandle {
     let (tx, rx) = mpsc::channel::<HostToWorker>();
+    // The worker gets a clone of its own sender so the subprocess reader
+    // threads can post `ProcOutput`/`ProcExit` straight onto the worker's
+    // queue (waking it via the channel recv — no main-loop polling).
+    let self_tx = tx.clone();
     let slots = WorkerSlots::new();
     let slots_for_thread = slots.clone();
     let join = thread::Builder::new()
         .name(format!("rhai-widget:{}", script_name))
-        .spawn(move || worker_main(rx, slots_for_thread, initial_ast, initial_state, widget_id))
+        .spawn(move || {
+            worker_main(rx, self_tx, slots_for_thread, initial_ast, initial_state, widget_id)
+        })
         .expect("spawn rhai-widget worker thread");
     WorkerHandle {
         tx,
@@ -478,6 +493,11 @@ impl Worker {
             *slot = element;
         }
         self.slots.frame_gen.fetch_add(1, Ordering::Release);
+        // The worker runs off the main thread; if the window is idle the
+        // reactive loop won't apply this frame until input or the ~5s
+        // timeout. Nudge it awake so async (bus-driven) re-renders show
+        // promptly.
+        crate::request_main_loop_wakeup();
     }
 
     fn set_error(&self, msg: String) {
@@ -558,6 +578,14 @@ impl Worker {
                     rhai::serde::to_dynamic(&payload).unwrap_or(Dynamic::UNIT);
                 self.call_handler("on_message", (topic, payload_dyn, sender));
             }
+            HostToWorker::ProcOutput { handle, line } => {
+                if !self.ensure_initialized() { return true; }
+                self.call_handler("on_proc_output", (handle, line));
+            }
+            HostToWorker::ProcExit { handle, code } => {
+                if !self.ensure_initialized() { return true; }
+                self.call_handler("on_proc_exit", (handle, code));
+            }
             HostToWorker::Click {
                 local_x,
                 local_y,
@@ -598,6 +626,7 @@ impl Worker {
 
 fn worker_main(
     rx: Receiver<HostToWorker>,
+    self_tx: Sender<HostToWorker>,
     slots: WorkerSlots,
     initial_ast: Option<AST>,
     initial_state: Value,
@@ -605,7 +634,7 @@ fn worker_main(
 ) {
     let mut engine = Engine::new();
     engine.set_max_expr_depths(256, 128);
-    register_host_functions(&mut engine, &slots, &widget_id);
+    register_host_functions(&mut engine, &slots, &widget_id, self_tx);
 
     let mut worker = Worker {
         engine,
@@ -683,6 +712,18 @@ fn ast_wants_clicks(ast: &AST) -> bool {
 }
 
 impl RhaiWidget {
+    /// True while the script has opted into per-frame animation via
+    /// `set_animating(true)`. The host uses this to decide whether the
+    /// app must stay in winit `Continuous` update mode — otherwise the
+    /// reactive loop only wakes ~every 5s and `on_frame` (proc-polling,
+    /// animation) lags badly while the window is idle.
+    pub fn is_animating(&self) -> bool {
+        self.handle
+            .slots
+            .animating
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     /// Latest frame the worker produced, cloned out of the shared slot.
     /// Used host-side to seed an input's edit buffer on focus.
     pub fn latest_frame(&self) -> Option<Element> {
@@ -750,6 +791,63 @@ impl Plugin for RhaiWidgetPlugin {
                 )
                     .chain(),
             );
+        if std::env::var_os("WIDGET_LAYER_DEBUG").is_some() {
+            // Observe layer state exactly where Bevy decides which camera
+            // draws each entity — i.e. right before CheckVisibility, after
+            // pane-layer propagation. WRONG_LAYER here == a real leak.
+            app.add_systems(
+                bevy::app::PostUpdate,
+                debug_widget_layers
+                    .after(pane_bevy::camera::propagate_render_layers)
+                    .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
+            );
+        }
+    }
+}
+
+/// Regression detector (env `WIDGET_LAYER_DEBUG`): for each rhai widget
+/// pane, walk its content_root subtree and report descendants whose
+/// `RenderLayers` is missing or not equal to the pane's own layer. It is
+/// scheduled `.after(propagate_render_layers).before(CheckVisibility)`,
+/// so it observes exactly the layer state Bevy uses to pick a camera — a
+/// nonzero `WRONG_LAYER` here means content is on the default layer 0 and
+/// will be drawn by the main window camera, escaping the pane (over the
+/// sidebar / across the cube). Should always be 0; if it isn't, the
+/// `propagate_render_layers` ordering in `pane_bevy` regressed.
+/// Throttled to changes only.
+fn debug_widget_layers(
+    panes: Query<(Entity, &PaneKindMarker, &PaneChrome, &pane_bevy::PaneLayer)>,
+    children_q: Query<&Children>,
+    layers_q: Query<&bevy::camera::visibility::RenderLayers>,
+    mut last: Local<HashMap<Entity, (usize, usize)>>,
+) {
+    use bevy::camera::visibility::RenderLayers;
+    for (pane, kind, chrome, pane_layer) in &panes {
+        if kind.0 != PANE_KIND {
+            continue;
+        }
+        let want = RenderLayers::layer(pane_layer.0);
+        let mut total = 0usize;
+        let mut bad = 0usize;
+        let mut stack = vec![chrome.content_root];
+        while let Some(e) = stack.pop() {
+            total += 1;
+            match layers_q.get(e) {
+                Ok(rl) if *rl == want => {}
+                _ => bad += 1,
+            }
+            if let Ok(ch) = children_q.get(e) {
+                stack.extend(ch.iter());
+            }
+        }
+        let cur = (total, bad);
+        if last.get(&pane) != Some(&cur) {
+            last.insert(pane, cur);
+            eprintln!(
+                "[layerdbg] pane {:?} layer={} content_descendants={} WRONG_LAYER={}",
+                pane, pane_layer.0, total, bad
+            );
+        }
     }
 }
 
@@ -1372,7 +1470,11 @@ fn apply_latest_frames(
                 if let Ok(children) = children_q.get(chrome.content_root) {
                     for c in children.iter() {
                         if !w.sprite_entities.values().any(|e| *e == c) {
-                            commands.entity(c).despawn();
+                            // `try_despawn`: a concurrent pane teardown
+                            // (recursive despawn) may have already removed
+                            // this child before our buffer applies. See the
+                            // stale-entity note on the diff_render despawn.
+                            commands.entity(c).try_despawn();
                         }
                     }
                 }
@@ -1397,6 +1499,7 @@ fn apply_latest_frames(
                 // matching clicks.
                 targets.clicks.clear();
                 targets.links.clear();
+                targets.spans.clear();
                 let consumed = crate::render::render(
                     &mut commands,
                     &ctx,
@@ -1474,7 +1577,7 @@ fn diff_render(
                 match existing {
                     Some(e) => {
                         // Reuse — overwrite the components we own.
-                        commands.entity(e).insert((sprite, anchor_cmp, transform));
+                        commands.entity(e).try_insert((sprite, anchor_cmp, transform));
                     }
                     None => {
                         let e = commands
@@ -1518,7 +1621,7 @@ fn diff_render(
                 let anchor_cmp = canvas_anchor_to_bevy(*anchor);
                 match existing {
                     Some(e) => {
-                        commands.entity(e).insert((sprite, anchor_cmp, transform));
+                        commands.entity(e).try_insert((sprite, anchor_cmp, transform));
                     }
                     None => {
                         let e = commands
@@ -1570,7 +1673,7 @@ fn diff_render(
                 let layout = bevy::text::TextLayout::new_with_no_wrap();
                 match existing {
                     Some(e) => {
-                        commands.entity(e).insert((
+                        commands.entity(e).try_insert((
                             text, text_font, text_color, anchor_cmp, transform, layout,
                         ));
                     }
@@ -1602,7 +1705,14 @@ fn diff_render(
         .collect();
     for id in stale {
         if let Some(e) = sprite_entities.remove(&id) {
-            commands.entity(e).despawn();
+            // `try_despawn`, not `despawn`: this system's command buffer
+            // can be applied AFTER a pane close (an exclusive system in a
+            // different plugin) has already recursively despawned this
+            // pane's content. A plain `despawn` on the now-stale entity
+            // panics the whole app ("Entity ... is invalid"). The render
+            // path must tolerate its content being torn down out from
+            // under it — pane teardown is the external authority.
+            commands.entity(e).try_despawn();
         }
     }
     let _ = CanvasAnchor::TopLeft; // suppress unused-import warning
@@ -1615,7 +1725,12 @@ fn diff_render(
 // Host helper functions registered with the engine
 // ============================================================
 
-fn register_host_functions(engine: &mut Engine, slots: &WorkerSlots, widget_id: &str) {
+fn register_host_functions(
+    engine: &mut Engine,
+    slots: &WorkerSlots,
+    widget_id: &str,
+    self_tx: Sender<HostToWorker>,
+) {
     // Generic style-bevy host primitives: uniform_set/get, mask_paint,
     // emit/schedule, state_set/get, pane_rects. Same registration the
     // system-script side uses, so any rhai widget can drive the
@@ -1634,6 +1749,15 @@ fn register_host_functions(engine: &mut Engine, slots: &WorkerSlots, widget_id: 
     let animating = slots.animating.clone();
     engine.register_fn("set_animating", move |on: bool| {
         animating.store(on, Ordering::Release);
+        // Turning animation ON off the main thread is inert unless we
+        // wake the loop: the mode-maintainer (`maintain_winit_mode_for_
+        // animation`) only re-evaluates on a frame, so without a nudge
+        // an idle reactive loop never flips to `Continuous` and
+        // `on_frame` never ticks (proc-polling widgets hang). The wake
+        // makes the maintainer run once; Continuous then self-sustains.
+        if on {
+            crate::request_main_loop_wakeup();
+        }
     });
 
     // Mark that the widget's visual needs to be re-rendered. After the
@@ -1722,6 +1846,31 @@ fn register_host_functions(engine: &mut Engine, slots: &WorkerSlots, widget_id: 
     // leak processes. Reads are non-blocking (poll from on_frame).
     let procs = Arc::new(Mutex::new(crate::subprocess::ProcRegistry::new()));
     {
+        // Event-driven bridge: the reader thread for each child calls this
+        // notifier per stdout line and once on exit. We turn those into
+        // `HostToWorker` messages posted onto the worker's OWN queue, so
+        // the worker wakes (channel recv) and dispatches
+        // `on_proc_output`/`on_proc_exit` — no `set_animating`, no
+        // `on_frame` polling. (The main loop is woken only when a handler
+        // actually re-renders, via the frame-publish wakeup.)
+        let tx = self_tx.clone();
+        let notifier: crate::subprocess::ProcNotifier =
+            std::sync::Arc::new(move |ev| match ev {
+                crate::subprocess::ProcEvent::Output { handle, line } => {
+                    let _ = tx.send(HostToWorker::ProcOutput { handle, line });
+                }
+                crate::subprocess::ProcEvent::Exit { handle, code } => {
+                    let _ = tx.send(HostToWorker::ProcExit {
+                        handle,
+                        code: code.map(|c| c as i64).unwrap_or(-1),
+                    });
+                }
+            });
+        if let Ok(mut r) = procs.lock() {
+            r.set_notifier(notifier);
+        }
+    }
+    {
         let procs = procs.clone();
         engine.register_fn("proc_spawn", move |cmd: &str| -> i64 {
             procs.lock().map(|mut r| r.spawn(cmd, &[])).unwrap_or(-1)
@@ -1786,6 +1935,10 @@ fn register_host_functions(engine: &mut Engine, slots: &WorkerSlots, widget_id: 
             if let Ok(mut v) = outbox.lock() {
                 v.push(OutMsg { topic: topic.to_string(), payload, retain });
             }
+            // The bus pump runs on the main thread; wake it so an emit
+            // from an idle widget reaches its subscribers promptly
+            // instead of waiting on the ~5s reactive timeout.
+            crate::request_main_loop_wakeup();
         };
         let p = push.clone();
         engine.register_fn("emit", move |topic: &str, payload: rhai::Map| {
@@ -2428,7 +2581,9 @@ mod tests {
         let slots = WorkerSlots::new();
         let mut engine = Engine::new();
         engine.set_max_expr_depths(256, 128);
-        register_host_functions(&mut engine, &slots, widget_id);
+        // Tests don't drive the proc bridge; a detached sender is enough.
+        let (self_tx, _rx) = mpsc::channel::<HostToWorker>();
+        register_host_functions(&mut engine, &slots, widget_id, self_tx);
         let ast = engine.compile(src).expect("script should compile");
         let worker = Worker {
             engine,

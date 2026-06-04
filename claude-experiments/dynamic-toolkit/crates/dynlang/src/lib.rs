@@ -515,6 +515,14 @@ pub struct DynModule {
     pub auto_externs: HashMap<String, *const u8>,
 }
 
+/// Opaque marker for [`DynModule::checkpoint`]/[`DynModule::rollback`].
+#[derive(Clone, Copy, Debug)]
+pub struct DynModuleCheckpoint {
+    mb: dynir::builder::ModuleBuilderCheckpoint,
+    entries: usize,
+    strings: usize,
+}
+
 fn sig(params: &[Type], ret: Option<Type>) -> Signature {
     Signature {
         params: params.to_vec(),
@@ -833,6 +841,33 @@ impl DynModule {
     /// snapshots.
     pub fn snapshot(&self) -> Module {
         self.module_builder.snapshot()
+    }
+
+    /// Capture builder state so a failed batch of declarations can be undone
+    /// (see [`ModuleBuilder::checkpoint`]). Records the IR-builder size plus
+    /// the current string-pool length so a transactional rollback restores
+    /// both.
+    pub fn checkpoint(&self) -> DynModuleCheckpoint {
+        DynModuleCheckpoint {
+            mb: self.module_builder.checkpoint(),
+            entries: self.module_builder.func_count(),
+            strings: self.strings.len(),
+        }
+    }
+
+    /// Roll the module back to `cp`, discarding every function declared since.
+    /// Also prunes `func_refs` entries that now point past the end of the
+    /// builder (their FuncRef index was truncated), and the string pool, so
+    /// no dangling name→FuncRef mapping or interned-string index survives a
+    /// failed compile.
+    pub fn rollback(&mut self, cp: DynModuleCheckpoint) {
+        self.module_builder.rollback(cp.mb);
+        let kept = cp.entries as u32;
+        self.func_refs.retain(|_, fref| fref.index() < kept as usize);
+        if self.strings.len() > cp.strings {
+            self.strings.truncate(cp.strings);
+            self.string_map.retain(|_, &mut idx| (idx as usize) < cp.strings);
+        }
     }
 
     /// Number of functions declared so far (extern + internal).

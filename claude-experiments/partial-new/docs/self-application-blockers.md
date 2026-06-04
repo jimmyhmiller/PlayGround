@@ -7,6 +7,48 @@ itself can specialize**, so it can eventually self-apply (Futamura projection 2:
 This document enumerates everything that currently blocks that, with concrete JS
 examples we'd need the PE to support, prioritized so we can attack them in order.
 
+---
+
+## UPDATE 2026-06-04 — empirically re-scoped; the core memo loop-tie now WORKS
+
+Two of this doc's assumptions turned out to be wrong when measured against the
+actual PE, and the keystone is **much smaller than feared**:
+
+1. **P1 (loop-carried growing collections) is ALREADY handled.** The `panic!`/
+   "heap divergence out of scope" claims below are STALE — a loop-carried growing
+   array (`while (i<n) w.push(i)`) and a loop-carried dynamic-key map now
+   **residualize cleanly** (a residual loop over a residual array/object), no
+   panic. That hole was closed since this doc was written.
+
+2. **The P0 keystone was NOT "a large partially-static map abstraction."** For the
+   real milestone — specialize a worklist memoizer over a *static* subject — the
+   memo keys are **static** (structural fingerprints of states the static
+   interpreter visits; dynamic data lives only in the leaves/values). So the only
+   actual gaps were two small, sound modeling additions:
+   - **`key in obj` on a static object folds** to a boolean (own field OR inherited
+     `Object.prototype` member). `Instr::OpaqueOp` in `src/js.rs`.
+   - **`arr.pop()` / `arr.shift()` on a static array are modeled** (mutate the
+     abstract array, return the removed element), so a static worklist stays static
+     instead of escaping. `GetProp` emits an `Array.<m>` bound-method marker;
+     `do_call` folds it.
+
+**Milestone ACHIEVED.** The smallest end-to-end proof from the bottom of this doc
+now passes: a worklist-driven memoizing graph traversal over a static 3-cycle
+**fully folds** — the memo ties the cycle at spec time and the whole loop reduces
+to `return 3 + input`. Regression test `memo_driven_traversal_loop_ties`
+(+ `static_in_folds`, `array_pop_shift_modeled`). So the engine's termination
+mechanism (memo/seen loop-tie) survives the subset for static subjects.
+
+**What's left for full self-application** (genuinely dynamic subjects, where the
+memo keys *do* carry dynamic structure) is the harder P0 partially-static-key map
+— still real, but no longer on the critical path for the first proof. Re-prioritize
+from here: the next concrete step is to hand-write the `bf` client + a minimal
+engine driver in the subset and run them, finding the *next* real blocker
+empirically (the same measure-don't-assume approach that found these two).
+
+The rest of this document is the original analysis (accurate on P0 maps for the
+dynamic-subject case; stale on P1 panics).
+
 ## TL;DR
 
 The engine (`src/engine.rs`, ~200 lines) is **iterative** — a `while

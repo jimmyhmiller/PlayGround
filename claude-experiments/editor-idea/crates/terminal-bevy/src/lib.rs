@@ -347,7 +347,13 @@ impl Plugin for TerminalPlugin {
             // hit-test). Terminal-specific systems below register the
             // "terminal" kind, render the grid, and handle keyboard +
             // mouse-driven selection inside the content area.
-            .add_plugins(PanePlugin)
+            // Reserve the menu-overlay layer so no pane is ever allocated
+            // it (the overlay camera renders that layer globally / above
+            // all panes; a collision would draw a pane over menus and
+            // across projects). See `PaneLayerAllocator`.
+            .add_plugins(PanePlugin {
+                reserved_layers: vec![MENU_OVERLAY_LAYER],
+            })
             .add_plugins(TermMaterialPlugin)
             .add_plugins(diagnostics::DiagnosticsPlugin)
             .add_plugins(projects::ProjectsPlugin)
@@ -527,6 +533,15 @@ fn setup_ipc_listener(world: &mut World) {
     let wakeup = world
         .get_resource::<bevy::winit::EventLoopProxyWrapper>()
         .map(|w| bevy::winit::EventLoopProxy::clone(w));
+    // Let widget worker threads wake the reactive main loop (so
+    // `set_animating(true)`, async frame publishes, and bus emits aren't
+    // stalled until the next input / ~5s timeout). widget-bevy doesn't
+    // depend on winit, so we hand it a closure over the proxy.
+    if let Some(proxy) = wakeup.clone() {
+        widget_bevy::set_wakeup_hook(move || {
+            let _ = proxy.send_event(bevy::winit::WinitUserEvent::WakeUp);
+        });
+    }
     if let Some(rx) = ipc::spawn_listener(wakeup) {
         world.insert_non_send_resource(IpcInbox(rx));
     }
@@ -768,6 +783,17 @@ fn drain_ipc_open_requests(
                 commands
                     .spawn(Screenshot::primary_window())
                     .observe(save_to_disk(path));
+            }
+            ipc::IpcRequest::CloseProjectPanes { project, kind } => {
+                let target = match project.as_deref() {
+                    Some("active") | None => OpenProjectTarget::Active,
+                    Some(name) => OpenProjectTarget::ByName(name.to_string()),
+                };
+                let Some(project_id) = projects::resolve_project(&target, &projects) else {
+                    eprintln!("[ipc] close_project_panes: no matching project");
+                    continue;
+                };
+                pending.close_panes.push((project_id, kind));
             }
             ipc::IpcRequest::WidgetMessage { project, topic, payload, retain } => {
                 let target = match project.as_deref() {
@@ -2546,6 +2572,7 @@ fn maintain_winit_mode_for_animation(
     registry: Res<style_bevy::StylePresetRegistry>,
     drawer: Res<drawer::Drawer>,
     prism: Res<cube::Prism>,
+    rhai_widgets: Query<&widget_bevy::rhai_widget::RhaiWidget>,
     mut settings: ResMut<bevy::winit::WinitSettings>,
 ) {
     let preset_animates = preset.0.as_deref().map_or(false, |name| {
@@ -2555,12 +2582,22 @@ fn maintain_winit_mode_for_animation(
             .find(|p| p.name == name)
             .map_or(false, |p| p.chrome_animates)
     });
+    // A Rhai widget that opted into animation via `set_animating(true)`
+    // (e.g. the datalog IDE results pane draining a `datalog` subprocess in
+    // `on_frame`, or chess polling Stockfish) also needs every frame. Without
+    // this term, the reactive loop only wakes ~every 5s while the window is
+    // idle, so the widget's `on_frame` tick — and thus its proc-drain —
+    // arrives ~5s late even though the underlying work finished in ms.
+    let widget_animating = rhai_widgets.iter().any(|w| w.is_animating());
     // The drawer's slide and the 3D project prism (live textures + camera
     // animation) are the other sources of "needs every frame". The cooldown
     // keeps redrawing briefly after the prism closes so the flat panes
     // repaint instead of staying black.
-    let want_continuous =
-        preset_animates || drawer.animating() || prism.active || prism.continuous_cooldown > 0;
+    let want_continuous = preset_animates
+        || widget_animating
+        || drawer.animating()
+        || prism.active
+        || prism.continuous_cooldown > 0;
 
     let target = if want_continuous {
         bevy::winit::UpdateMode::Continuous
@@ -2569,6 +2606,19 @@ fn maintain_winit_mode_for_animation(
     };
     if settings.focused_mode != target {
         settings.focused_mode = target;
+    }
+    // A proc-polling widget (datalog query drain, chess vs Stockfish)
+    // must keep ticking even when the window loses focus, or its work
+    // hangs the moment the user clicks away. The other continuous
+    // sources are decorative and don't need unfocused frames, so only an
+    // animating widget escalates the unfocused mode.
+    let unfocused_target = if widget_animating {
+        bevy::winit::UpdateMode::Continuous
+    } else {
+        bevy::winit::UpdateMode::reactive_low_power(std::time::Duration::from_secs(60))
+    };
+    if settings.unfocused_mode != unfocused_target {
+        settings.unfocused_mode = unfocused_target;
     }
 }
 

@@ -61,12 +61,31 @@ fn core_functional_battery() {
     eprintln!("=== loading core ({}) ===", if prefix { "PREFIX only" } else { "FULL" });
     let mut sess = load_core(prefix);
 
-    // (expr, expected pr-str). Eager subset that runs to completion.
-    // NOTE: lazy-sequence operations (`map`/`filter`/`take`/`range`/`doall`/…)
-    // are NOT here — they currently hard-abort (non-unwinding) on realization,
-    // which kills the process. That is the next frontier (#2: lazy seqs), not
-    // first-class functions. `reduce` is eager and is the headline fix.
+    // (expr, expected pr-str).
+    //
+    // LAZY SEQUENCES WORK: `map`/`filter`/`take`/composition all produce
+    // correct results when realized via `reduce`/`into`/`count`/`last`/manual
+    // `loop`+`next` — see the "lazy" group below. (A *bare* unrealized lazy
+    // seq can't be PRINTED by this harness because `pr_str_bits` runs after
+    // `eval_str` tears down the JIT run context, so forcing it then has no
+    // safepoint session; inside real eval, forcing works. So we realize lazy
+    // results to a concrete vector/number before printing.)
     let cases: &[(&str, &str)] = &[
+        // ---- lazy sequences (realized to a concrete value before print) ----
+        ("(into [] (map inc [1 2 3]))", "[2 3 4]"),
+        ("(into [] (filter even? [1 2 3 4 5 6]))", "[2 4 6]"),
+        ("(into [] (map inc (filter even? [1 2 3 4])))", "[3 5]"),
+        ("(into [] (take 3 (map inc [10 20 30 40])))", "[11 21 31]"),
+        ("(reduce + (map inc [1 2 3 4]))", "14"),
+        ("(reduce + (map (fn [x] (* x x)) [1 2 3]))", "14"),
+        ("(count (map inc [1 2 3 4 5]))", "5"),
+        ("(last (map inc [1 2 3]))", "4"),
+        ("(count (doall (map inc [1 2 3])))", "3"),
+        ("(first (next (next (map inc [1 2 3]))))", "4"),
+        ("(loop [s (seq (map inc [1 2 3])) acc 0] (if s (recur (next s) (+ acc (first s))) acc))", "9"),
+        // ---- reduce (the fix: GC-rooted protocol dispatch through the
+        //      multi-arity coll-reduce path). Must work with primops, inline
+        //      fns, AND user fns — not just `+`. ----
         // ---- reduce (the fix: GC-rooted protocol dispatch through the
         //      multi-arity coll-reduce path). Must work with primops, inline
         //      fns, AND user fns — not just `+`. ----
@@ -162,5 +181,17 @@ fn core_functional_battery() {
             !failed.contains(&r),
             "reduce regression: `{r}` must work (GC-rooted protocol dispatch)"
         );
+    }
+
+    // Lazy sequences must produce correct results when realized.
+    for r in [
+        "(into [] (map inc [1 2 3]))",
+        "(into [] (filter even? [1 2 3 4 5 6]))",
+        "(into [] (take 3 (map inc [10 20 30 40])))",
+        "(reduce + (map inc [1 2 3 4]))",
+        "(last (map inc [1 2 3]))",
+        "(loop [s (seq (map inc [1 2 3])) acc 0] (if s (recur (next s) (+ acc (first s))) acc))",
+    ] {
+        assert!(!failed.contains(&r), "lazy-seq regression: `{r}` must work");
     }
 }

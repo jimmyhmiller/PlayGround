@@ -40,6 +40,13 @@ pub struct ModuleBuilder {
     internal_funcs: Vec<Option<Function>>,
 }
 
+/// Opaque marker for [`ModuleBuilder::checkpoint`]/[`ModuleBuilder::rollback`].
+#[derive(Clone, Copy, Debug)]
+pub struct ModuleBuilderCheckpoint {
+    entries: usize,
+    internal_funcs: usize,
+}
+
 impl ModuleBuilder {
     pub fn new() -> Self {
         ModuleBuilder {
@@ -188,6 +195,33 @@ impl ModuleBuilder {
             functions,
             func_table,
         }
+    }
+
+    /// Capture the current builder size so a failed/abandoned batch of
+    /// `declare_func`/`finish_func` calls can be rolled back with
+    /// [`rollback`]. Cheap: just records the two vector lengths.
+    ///
+    /// This is what makes per-form compilation transactional: a frontend
+    /// that declares functions and then panics mid-definition (leaving an
+    /// internal function "declared but not defined") would otherwise poison
+    /// every later [`snapshot`] — `checkpoint`/`rollback` discards the
+    /// half-built functions instead.
+    pub fn checkpoint(&self) -> ModuleBuilderCheckpoint {
+        ModuleBuilderCheckpoint {
+            entries: self.entries.len(),
+            internal_funcs: self.internal_funcs.len(),
+        }
+    }
+
+    /// Discard every entry and internal function added since `cp` was taken.
+    /// Safe because functions are only referenced by FuncRef indices, and
+    /// anything added after `cp` can only be referenced by other things
+    /// added after `cp` (which are also being discarded).
+    pub fn rollback(&mut self, cp: ModuleBuilderCheckpoint) {
+        debug_assert!(self.entries.len() >= cp.entries);
+        debug_assert!(self.internal_funcs.len() >= cp.internal_funcs);
+        self.entries.truncate(cp.entries);
+        self.internal_funcs.truncate(cp.internal_funcs);
     }
 
     /// Number of currently-declared functions (extern + internal).
@@ -1250,5 +1284,62 @@ impl FunctionBuilder {
             "float binop requires F64 types, got {ta} and {tb}"
         );
         self.push_inst(Type::F64, ctor(a, b))
+    }
+}
+
+#[cfg(test)]
+mod checkpoint_tests {
+    use super::*;
+
+    fn define_const(mb: &mut ModuleBuilder, fref: FuncRef, val: i64) {
+        let mut fb = mb.define_func(fref);
+        let v = fb.iconst(Type::I64, val);
+        fb.ret(v);
+        mb.finish_func(fref, fb);
+    }
+
+    /// A function declared after a checkpoint but never defined would make
+    /// `snapshot()` panic ("declared but not defined"). `rollback` must
+    /// discard it so the builder snapshots cleanly — this is the property
+    /// that keeps a persistent builder usable after a failed compile.
+    #[test]
+    fn rollback_discards_undefined_func() {
+        let mut mb = ModuleBuilder::new();
+        let f0 = mb.declare_func("good", &[], Some(Type::I64));
+        define_const(&mut mb, f0, 1);
+
+        let cp = mb.checkpoint();
+        // Simulate a form that declares a function and then aborts before
+        // defining it (leaving a half-built entry in the builder).
+        let _f1 = mb.declare_func("half_built", &[], Some(Type::I64));
+        assert_eq!(mb.func_count(), 2);
+
+        mb.rollback(cp);
+        assert_eq!(mb.func_count(), 1, "rolled-back func must be gone");
+
+        // Snapshot would have panicked on the undefined `half_built`; after
+        // rollback it succeeds and contains only the good function.
+        let module = mb.snapshot();
+        assert_eq!(module.functions.len(), 1);
+    }
+
+    /// After a rollback the builder must remain extendable: new declarations
+    /// reuse the freed FuncRef indices and snapshot cleanly.
+    #[test]
+    fn builder_reusable_after_rollback() {
+        let mut mb = ModuleBuilder::new();
+        let f0 = mb.declare_func("a", &[], Some(Type::I64));
+        define_const(&mut mb, f0, 10);
+
+        let cp = mb.checkpoint();
+        let _bad = mb.declare_func("bad", &[], Some(Type::I64));
+        mb.rollback(cp);
+
+        // Re-declare at the freed index and define it.
+        let f1 = mb.declare_func("b", &[], Some(Type::I64));
+        define_const(&mut mb, f1, 20);
+
+        let module = mb.snapshot();
+        assert_eq!(module.functions.len(), 2);
     }
 }

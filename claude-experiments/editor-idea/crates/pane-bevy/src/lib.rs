@@ -75,6 +75,7 @@ pub use chrome_material::{
 pub use layers::{PaneLayer, PaneLayerAllocator};
 
 use bevy::camera::CameraUpdateSystems;
+use bevy::camera::visibility::VisibilitySystems;
 use bevy::transform::TransformSystems;
 pub use text_input::{
     col_at_x, click_to_caret, focus_text_input, spawn_text_input, spawn_text_input_multiline,
@@ -555,7 +556,17 @@ pub struct PaneDoubleClicked {
 
 // ---------- Plugin ----------
 
-pub struct PanePlugin;
+/// `reserved_layers` are RenderLayer ids the host owns for non-pane
+/// cameras (e.g. a menu-overlay camera). They are passed to the
+/// [`PaneLayerAllocator`] so a pane is NEVER assigned one — otherwise
+/// that overlay camera, which renders globally and above all panes,
+/// would draw the colliding pane's content over menus and across every
+/// project. Travels with the plugin so the reservation can't be
+/// accidentally decoupled from pane setup.
+#[derive(Default)]
+pub struct PanePlugin {
+    pub reserved_layers: Vec<usize>,
+}
 
 impl Plugin for PanePlugin {
     fn build(&self, app: &mut App) {
@@ -568,7 +579,9 @@ impl Plugin for PanePlugin {
             .init_resource::<PaneCanvasRegion>()
             .init_resource::<PaneViewport>()
             .init_resource::<PaneZoom>()
-            .insert_resource(PaneLayerAllocator::new())
+            .insert_resource(PaneLayerAllocator::with_reserved(
+                self.reserved_layers.iter().copied(),
+            ))
             .add_message::<PaneContentPressed>()
             .add_message::<PaneContentDragged>()
             .add_message::<PaneContentReleased>()
@@ -604,11 +617,23 @@ impl Plugin for PanePlugin {
             // stamped in the same frame they're created — otherwise
             // they render on the default layer for one frame each,
             // bypassing the pane camera's viewport clip.
+            //
+            // CRITICAL: it must run BEFORE Bevy's `CheckVisibility`.
+            // That set is what intersects each entity's `RenderLayers`
+            // with each camera's, deciding which camera draws it. If we
+            // stamp the pane layer AFTER it, a freshly-respawned widget
+            // child is still on the default layer 0 when visibility is
+            // computed, so the MAIN window camera (layer 0) draws it —
+            // escaping the pane: over the sidebar and across every
+            // project face in the cube. Ordering only before
+            // TransformSystems::Propagate is NOT enough; Bevy does not
+            // guarantee that precedes CheckVisibility.
             .add_systems(
                 PostUpdate,
                 (
                     reset_input_consumed,
-                    camera::propagate_render_layers,
+                    camera::propagate_render_layers
+                        .before(VisibilitySystems::CheckVisibility),
                     enforce_pane_content_bounds,
                     // Run BEFORE Bevy's CameraUpdateSystems so that
                     // when Bevy's `camera_system` runs later in

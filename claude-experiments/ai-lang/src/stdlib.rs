@@ -3032,6 +3032,10 @@ def reset<T>(a: Atom<T>, v: T) -> T = swap(a, |_old: T| v)
 // `join(h)` blocks until that thread finishes and yields its result. The
 // handle is the dedicated `ThreadHandle<T>` runtime shape, like `Atom<T>`.
 def spawn<T>(thunk: fn() -> T) -> ThreadHandle<T> = thread_spawn(thunk)
+// `spawn_shared` opts OUT of isolation: the worker shares the parent's heap
+// objects directly (zero-copy). Use with `Atom`-mediated sharing, or when
+// you accept responsibility for races on plain mutable data.
+def spawn_shared<T>(thunk: fn() -> T) -> ThreadHandle<T> = thread_spawn_shared(thunk)
 def join<T>(h: ThreadHandle<T>) -> T = thread_join(h)
 
 // ---- Networking: POSIX sockets + length-prefixed framing ----
@@ -3462,21 +3466,31 @@ mod tests {
                 _ => panic!("decoded PMap should be a heap value"),
             };
 
-            // Look up every key in the DECODED map.
+            // Look up every key in the DECODED map. The decoded map `dm` and
+            // each freshly-built key are heap pointers held across MORE
+            // allocations (building the next key, and each lookup), so they
+            // must be rooted — otherwise a moving GC relocates them and we
+            // pass stale pointers to `get_or`. The borrow-checked `Alloc`
+            // handle layer makes this safe (and makes forgetting a compile
+            // error): a `Rooted` re-read via `.get(a)` always tracks the move.
             let get_or = jit
                 .engine
                 .get_function::<unsafe extern "C" fn(*mut Thread, *mut u8, *mut u8, i64) -> i64>(
                     &def_symbol(&names["get_or"]),
                 )
                 .unwrap();
-            let k_apple = crate::ffi::owned_str_to_heap(rt.thread_ptr(), "apple");
-            let k_banana = crate::ffi::owned_str_to_heap(rt.thread_ptr(), "banana");
-            let k_cherry = crate::ffi::owned_str_to_heap(rt.thread_ptr(), "cherry");
-            let k_missing = crate::ffi::owned_str_to_heap(rt.thread_ptr(), "zebra");
-            assert_eq!(get_or.call(rt.thread_ptr(), dm, k_apple, -1), 1);
-            assert_eq!(get_or.call(rt.thread_ptr(), dm, k_banana, -1), 2);
-            assert_eq!(get_or.call(rt.thread_ptr(), dm, k_cherry, -1), 3);
-            assert_eq!(get_or.call(rt.thread_ptr(), dm, k_missing, -1), -1);
+            crate::handle::Alloc::enter(rt.thread_ptr(), |a, scope| {
+                let dm = a.adopt(dm).root(scope);
+                let apple = a.str_new(b"apple").root(scope);
+                let banana = a.str_new(b"banana").root(scope);
+                let cherry = a.str_new(b"cherry").root(scope);
+                let zebra = a.str_new(b"zebra").root(scope);
+                let t = a.thread();
+                assert_eq!(get_or.call(t, dm.get(a).ptr(), apple.get(a).ptr(), -1), 1);
+                assert_eq!(get_or.call(t, dm.get(a).ptr(), banana.get(a).ptr(), -1), 2);
+                assert_eq!(get_or.call(t, dm.get(a).ptr(), cherry.get(a).ptr(), -1), 3);
+                assert_eq!(get_or.call(t, dm.get(a).ptr(), zebra.get(a).ptr(), -1), -1);
+            });
         }
     }
 
@@ -3798,6 +3812,120 @@ mod tests {
                 "thunk returning a builtin-call result (String) flows through spawn/join"
             );
             assert_eq!(f("t_capture"), 107, "spawn closure captures an outer local");
+        }
+    }
+
+    /// The share-nothing guarantee, end to end: a `spawn`ed closure that
+    /// mutates a captured Array mutates its OWN deep-copy — the parent's
+    /// array is untouched. `spawn_shared` opts out: the same write IS
+    /// visible to the parent.
+    #[test]
+    fn spawn_isolates_mutable_captures() {
+        init();
+        let ctx = Context::create();
+        let driver = "
+            def isolated() -> Int = {
+                let b = bytes_new(1);
+                let _z = bytes_set(b, 0, 7);
+                let h = spawn(|| bytes_set(b, 0, 99));
+                let _j = join(h);
+                bytes_get(b, 0)
+            }
+            def shared() -> Int = {
+                let b = bytes_new(1);
+                let _z = bytes_set(b, 0, 7);
+                let h = spawn_shared(|| bytes_set(b, 0, 99));
+                let _j = join(h);
+                bytes_get(b, 0)
+            }
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f = |n: &str| {
+                jit.engine
+                    .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names[n]))
+                    .unwrap()
+                    .call(rt.thread_ptr())
+            };
+            assert_eq!(
+                f("isolated"),
+                7,
+                "default spawn deep-copies the captured array; parent is unaffected"
+            );
+            assert_eq!(
+                f("shared"),
+                99,
+                "spawn_shared shares the array; the worker's write is visible"
+            );
+        }
+    }
+
+    /// A `String` is immutable, so a `spawn`ed closure capturing one shares
+    /// it (the deep-copy returns the same pointer) — no copy, and it reads
+    /// back correctly on the worker. (`Bytes`, being mutable, IS copied —
+    /// see `spawn_isolates_mutable_captures`.)
+    #[test]
+    fn spawn_shares_immutable_string_capture() {
+        init();
+        let ctx = Context::create();
+        let driver = "
+            def strcap() -> Int = {
+                let s = \"hello world\";
+                let h = spawn(|| string_len(s));
+                join(h)
+            }
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let f = jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names["strcap"]))
+                .unwrap();
+            assert_eq!(f.call(rt.thread_ptr()), 11, "captured String reads back on the worker");
+        }
+    }
+
+    /// Concurrency stress test: repeatedly fan out workers that each
+    /// allocate heavily, forcing collections WHILE multiple workers run —
+    /// exercising per-thread GC contexts, the deep-copy on spawn, join, and
+    /// stop-the-world coordination under real contention. Correct sums
+    /// every iteration mean no lost/relocated roots and no races.
+    #[test]
+    fn spawn_concurrency_stress() {
+        init();
+        let ctx = Context::create();
+        let driver = "
+            // Allocate an Atom each step (immediately garbage) to churn the
+            // heap; tail-recursive so it loops rather than growing the stack.
+            def churn(n: Int, acc: Int) -> Int =
+                if n == 0 { acc } else { let _g = atom(n); churn(n - 1, acc + n) }
+            def worker() -> Int = churn(4000, 0)
+            def fan() -> Int = {
+                let h1 = spawn(|| worker());
+                let h2 = spawn(|| worker());
+                let h3 = spawn(|| worker());
+                let h4 = spawn(|| worker());
+                join(h1) + join(h2) + join(h3) + join(h4)
+            }
+        ";
+        let (rt, jit, names) = build_with_stdlib(&ctx, driver);
+        unsafe {
+            let fan = jit
+                .engine
+                .get_function::<unsafe extern "C" fn(*mut Thread) -> i64>(&def_symbol(&names["fan"]))
+                .unwrap();
+            // sum 1..4000 = 8_002_000; four workers per fan. Across 60 fans
+            // this churns ~30 MB, triggering several stop-the-world
+            // collections while the workers run — exercising per-thread GC
+            // contexts, spawn's deep-copy, join, and STW coordination.
+            let expected = 4 * 8_002_000i64;
+            for i in 0..60 {
+                assert_eq!(
+                    fan.call(rt.thread_ptr()),
+                    expected,
+                    "fan iteration {i} produced a wrong sum (lost root / race?)"
+                );
+            }
         }
     }
 

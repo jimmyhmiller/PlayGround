@@ -306,11 +306,16 @@ pub fn pane_camera_setup_for(
 /// terminal grid pool growing, editor selection highlights, etc.)
 /// without requiring those kinds to know about pane layers at all.
 ///
-/// One-frame delay: a kind's children spawned this frame won't have
-/// the layer until next frame's PreUpdate. The result is one frame
-/// where the content briefly renders via the main camera (unclipped).
-/// We accept that as the tradeoff for not blocking spawn on
-/// propagation.
+/// SCHEDULING (load-bearing): this runs in `PostUpdate`, NOT `PreUpdate`,
+/// and is explicitly ordered `.before(VisibilitySystems::CheckVisibility)`
+/// (see the `PanePlugin` registration). That's what makes same-frame
+/// stamping work for kinds that despawn+respawn their content every frame
+/// (e.g. widget panes): the content is spawned in `Update`, stamped here
+/// in `PostUpdate`, and carries the pane layer BEFORE Bevy decides which
+/// camera draws it. Drop the `CheckVisibility` ordering and freshly-
+/// respawned content is still on the default layer 0 at visibility time,
+/// so the main window camera draws it — escaping the pane over the
+/// sidebar and across every project face in the cube.
 pub fn propagate_render_layers(
     new_layers: Query<(&PaneLayer, &crate::PaneChrome), Added<PaneLayer>>,
     new_children: Query<(Entity, &ChildOf), Added<ChildOf>>,

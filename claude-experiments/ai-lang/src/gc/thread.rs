@@ -87,7 +87,23 @@ pub struct ThreadState {
     /// Used by [`Heap::pause_world`](crate::gc::Heap::pause_world) to
     /// exclude the requesting thread from the set it parks.
     os_thread: std::thread::ThreadId,
+
+    /// Scratch GC-root STACK for runtime functions that hold heap pointers
+    /// across an allocation (which may collect + relocate). A fn marks the
+    /// current depth, pushes its live heap-pointer args, allocates, re-reads
+    /// the (relocated) values, then resets to its mark. A stack (not fixed
+    /// slots) is required because these calls NEST — e.g. `atom_swap`'s
+    /// updater closure calls `string_concat`, which also needs scratch — so
+    /// the inner use pushes above the outer's roots and resets back without
+    /// clobbering them. Slots `[0..depth)` are scanned by `scan_roots`;
+    /// values above `depth` are ignored. Touched only by the owning thread
+    /// (between safepoints) or the collector (while it's parked).
+    gc_scratch: [std::sync::atomic::AtomicU64; GC_SCRATCH_DEPTH],
+    scratch_depth: std::sync::atomic::AtomicUsize,
 }
+
+/// Maximum nesting of runtime alloc fns parking scratch roots at once.
+pub const GC_SCRATCH_DEPTH: usize = 32;
 
 // Safety: ThreadState is designed to be shared between the owning
 // mutator thread and the GC coordinator thread.
@@ -109,6 +125,56 @@ impl ThreadState {
             parked_jit_fp: AtomicPtr::new(std::ptr::null_mut()),
             poll_flag: AtomicPtr::new(std::ptr::null_mut()),
             os_thread: std::thread::current().id(),
+            gc_scratch: Default::default(),
+            scratch_depth: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Remember the current scratch-stack depth so a nested run of
+    /// allocations can be unwound back to here with [`scratch_reset`]. Call
+    /// at the top of a runtime fn that parks roots; pass the result to
+    /// `scratch_reset` before returning.
+    pub fn scratch_mark(&self) -> usize {
+        self.scratch_depth.load(Ordering::Acquire)
+    }
+
+    /// Push a heap pointer onto the scratch stack so it survives (and is
+    /// relocated by) a collection during a subsequent allocation. Returns
+    /// the slot index; re-read the (possibly relocated) pointer with
+    /// [`scratch_at`](Self::scratch_at) after each alloc. Panics if the
+    /// stack overflows `GC_SCRATCH_DEPTH` (runtime-fn nesting is shallow).
+    pub fn push_scratch(&self, ptr: *const u8) -> usize {
+        let i = self.scratch_depth.load(Ordering::Acquire);
+        assert!(
+            i < GC_SCRATCH_DEPTH,
+            "GC scratch stack overflow (depth {GC_SCRATCH_DEPTH}); runtime-fn nesting too deep"
+        );
+        self.gc_scratch[i].store(ptr as u64, Ordering::Release);
+        self.scratch_depth.store(i + 1, Ordering::Release);
+        i
+    }
+
+    /// Read scratch slot `i` (the post-relocation pointer).
+    pub fn scratch_at(&self, i: usize) -> *mut u8 {
+        self.gc_scratch[i].load(Ordering::Acquire) as *mut u8
+    }
+
+    /// Pop the scratch stack back to a depth previously returned by
+    /// [`scratch_mark`](Self::scratch_mark), so a later collection doesn't
+    /// pin stale pointers.
+    pub fn scratch_reset(&self, mark: usize) {
+        self.scratch_depth.store(mark, Ordering::Release);
+    }
+
+    /// Open a scoped scratch region that auto-resets on drop. Preferred over
+    /// manual `scratch_mark`/`scratch_reset` in Rust code with `?`
+    /// early-returns (wire decode, arg builders): the `Drop` runs on every
+    /// exit path, so a decode error can't leak stale scratch roots that a
+    /// later collection would wrongly pin/scan.
+    pub fn scratch_scope(&self) -> ScratchScope<'_> {
+        ScratchScope {
+            ts: self,
+            mark: self.scratch_mark(),
         }
     }
 
@@ -294,9 +360,44 @@ impl ThreadState {
     }
 }
 
+/// RAII scratch-stack region. Push heap pointers with [`push`](Self::push)
+/// to root them across a subsequent allocation; re-read the relocated
+/// pointer with [`get`](Self::get) after each alloc. The region pops back to
+/// its opening depth on drop, so every exit path (including `?` errors)
+/// cleans up.
+pub struct ScratchScope<'a> {
+    ts: &'a ThreadState,
+    mark: usize,
+}
+
+impl<'a> ScratchScope<'a> {
+    /// Push a heap pointer; returns its slot index for later [`get`](Self::get).
+    pub fn push(&self, ptr: *const u8) -> usize {
+        self.ts.push_scratch(ptr)
+    }
+
+    /// Read the (possibly relocated) pointer at slot index `i`.
+    pub fn get(&self, i: usize) -> *mut u8 {
+        self.ts.scratch_at(i)
+    }
+}
+
+impl Drop for ScratchScope<'_> {
+    fn drop(&mut self) {
+        self.ts.scratch_reset(self.mark);
+    }
+}
+
 impl RootSource for ThreadState {
     fn scan_roots(&self, visitor: &mut dyn FnMut(*mut u64)) {
         self.frame_chain.scan_roots(visitor);
+        // Scratch roots: heap pointers a runtime fn parked here across an
+        // allocation. Only the live prefix `[0..depth)` is scanned; slots
+        // above `depth` hold stale pointers a popped frame left behind.
+        let depth = self.scratch_depth.load(Ordering::Acquire);
+        for s in &self.gc_scratch[..depth] {
+            visitor(s.as_ptr() as *mut u64);
+        }
     }
 }
 

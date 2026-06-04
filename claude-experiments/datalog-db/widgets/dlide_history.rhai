@@ -51,6 +51,10 @@ fn note_color(note) {
     if note.starts_with("ok") { "#6cc08a" } else if note.starts_with("error") { "#e0746f" } else { "fg_muted" }
 }
 
+// Re-render on pane resize so layout (e.g. table widths) tracks the
+// new canvas size — render() depends on `w`/`h`.
+fn on_resize(w, h) { request_render(); }
+
 fn render(w, h) {
     let rows = [];
     rows.push(#{ type: "text", value: "HISTORY", size: 10.0, weight: "bold", color: "fg_muted" });
@@ -67,7 +71,7 @@ fn render(w, h) {
         i += 1;
     }
     #{ type: "vstack", gap: 4.0,
-       style: #{ background: "surface_1", width: "100%", height: "100%",
+       style: #{ background: "surface_1", width: "100%", min_height: "100%",
                  padding: #{ top: 10.0, right: 10.0, bottom: 10.0, left: 10.0 } },
        children: [ #{ type: "scroll", pad: 0.0, gap: 4.0, children: rows } ] }
 }

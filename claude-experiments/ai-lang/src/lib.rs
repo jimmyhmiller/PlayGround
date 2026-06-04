@@ -9,6 +9,7 @@ pub mod effects;
 pub mod evalrun;
 pub mod ffi;
 pub mod gc;
+pub mod handle;
 pub mod io_externs;
 pub mod hash;
 pub mod jsonl;

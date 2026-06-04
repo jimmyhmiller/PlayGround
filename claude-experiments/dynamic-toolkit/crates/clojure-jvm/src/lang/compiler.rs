@@ -1499,6 +1499,8 @@ impl Expr for ConstantExpr {
             Object::Vector(_) => "clojure.lang.PersistentVector",
             Object::Map(_) => "clojure.lang.PersistentHashMap",
             Object::Set(_) => "clojure.lang.PersistentHashSet",
+            Object::TreeMap(_) => "clojure.lang.PersistentTreeMap",
+            Object::TreeSet(_) => "clojure.lang.PersistentTreeSet",
             Object::Host(_) => return None,
             Object::Unported { .. } => return None,
             Object::WithMeta(_, _) => unreachable!("peel_meta_ref strips WithMeta"),
@@ -2242,7 +2244,14 @@ pub fn analyze_named(context: C, form: Object, name: Option<&str>) -> Box<dyn Ex
         Object::Vector(v) => analyze_vector(context, v),
         Object::Map(m) => analyze_map(context, m),
         Object::Set(s) => analyze_set(context, s),
-        Object::Namespace(_) | Object::Host(_) | Object::Unported { .. } => {
+        Object::Namespace(_)
+        | Object::Host(_)
+        | Object::Unported { .. }
+        | Object::TreeMap(_)
+        | Object::TreeSet(_) => {
+            // Sorted collections never appear as literal source forms
+            // (they're built by `sorted-map`/`sorted-set` calls), so an
+            // analyze-time occurrence is a runtime-constructed constant.
             Box::new(ConstantExpr::new(form))
         }
         Object::WithMeta(inner, _meta) => {
@@ -7315,7 +7324,120 @@ impl Expr for MultiArityFnExpr {
     }
 }
 
+/// Desugar a multi-arity `fn*` into a SINGLE variadic closure that dispatches
+/// on argument count: `(fn* name? [& va] (let* [n (count va)] (if (= n K1)
+/// (let* [p0 (nth va 0) …] body1) (if … <variadic: (<= V n)> …) nil)))`.
+///
+/// Used for NESTED multi-arity fns (which may capture outer locals) — the
+/// `MultiArityFn` dispatcher cell holds bare frefs, not Closure handles, so it
+/// can't represent captures; a single variadic capturing closure can. The
+/// fixed clauses bind params via `nth`, the variadic clause's rest via nested
+/// `next` (both available very early in core, so no load-order dependency).
+fn desugar_multi_arity_capturing(name: &Option<String>, clauses: &[Object]) -> Object {
+    use crate::lang::persistent_vector::PersistentVector;
+    static CNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = CNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let va = Symbol::intern(&format!("__va{id}__"));
+    let nn = Symbol::intern(&format!("__n{id}__"));
+    let list = |items: Vec<Object>| Object::List(PersistentList::create(items));
+    let core = |s: &str| Object::Symbol(Symbol::intern_ns_name(Some("clojure.core"), s));
+
+    struct Clause {
+        fixed: Vec<Object>,
+        rest: Option<Object>,
+        body: Vec<Object>,
+    }
+    let mut parsed: Vec<Clause> = Vec::new();
+    for clause in clauses {
+        let items: Vec<Object> = match clause {
+            Object::List(l) => l.iter().collect(),
+            other => panic!("clojure-jvm: fn* multi-arity clause must be a list, got {other:?}"),
+        };
+        let params = match items.first().map(|o| o.peel_meta_ref().clone()) {
+            Some(Object::Vector(v)) => v,
+            other => panic!("clojure-jvm: fn* clause params must be a vector, got {other:?}"),
+        };
+        let mut fixed = Vec::new();
+        let mut rest = None;
+        let pcount = params.count();
+        let mut i = 0i32;
+        while i < pcount {
+            let p = params.nth(i);
+            if matches!(p.peel_meta_ref(), Object::Symbol(s) if s.get_name() == "&" && s.get_namespace().is_none())
+            {
+                rest = Some(params.nth(i + 1));
+                break;
+            }
+            fixed.push(p);
+            i += 1;
+        }
+        parsed.push(Clause {
+            fixed,
+            rest,
+            body: items[1..].to_vec(),
+        });
+    }
+    parsed.sort_by_key(|c| c.fixed.len());
+
+    // Build the if-chain inside-out (else = nil).
+    let mut chain = Object::Nil;
+    for c in parsed.into_iter().rev() {
+        let fixed_n = c.fixed.len();
+        let cond = if c.rest.is_some() {
+            list(vec![core("<="), Object::Long(fixed_n as i64), Object::Symbol(nn.clone())])
+        } else {
+            list(vec![core("="), Object::Symbol(nn.clone()), Object::Long(fixed_n as i64)])
+        };
+        let mut binds: Vec<Object> = Vec::new();
+        for (i, p) in c.fixed.iter().enumerate() {
+            binds.push(p.clone());
+            binds.push(list(vec![core("nth"), Object::Symbol(va.clone()), Object::Long(i as i64)]));
+        }
+        if let Some(rest) = &c.rest {
+            let mut rexpr = Object::Symbol(va.clone());
+            for _ in 0..fixed_n {
+                rexpr = list(vec![core("next"), rexpr]);
+            }
+            binds.push(rest.clone());
+            binds.push(rexpr);
+        }
+        let mut let_items = vec![
+            Object::Symbol(Symbol::intern("let*")),
+            Object::Vector(PersistentVector::create(binds)),
+        ];
+        let_items.extend(c.body.iter().cloned());
+        let then = list(let_items);
+        chain = list(vec![Object::Symbol(Symbol::intern("if")), cond, then, chain]);
+    }
+    let body = list(vec![
+        Object::Symbol(Symbol::intern("let*")),
+        Object::Vector(PersistentVector::create(vec![
+            Object::Symbol(nn.clone()),
+            list(vec![core("count"), Object::Symbol(va.clone())]),
+        ])),
+        chain,
+    ]);
+    let mut fn_items: Vec<Object> = vec![Object::Symbol(SPECIAL_SYMBOLS.FN.clone())];
+    if let Some(n) = name {
+        fn_items.push(Object::Symbol(Symbol::intern(n)));
+    }
+    fn_items.push(Object::Vector(PersistentVector::create(vec![
+        Object::Symbol(Symbol::intern("&")),
+        Object::Symbol(va),
+    ])));
+    fn_items.push(body);
+    list(fn_items)
+}
+
 fn parse_fn_form_multi_arity(name: Option<String>, clauses: Vec<Object>) -> Box<dyn Expr> {
+    // Nested multi-arity fns may capture outer locals, which the `MultiArityFn`
+    // dispatcher cell (bare frefs) can't represent → desugar to a single
+    // variadic capturing closure. Top-level multi-arity fns (defn/defmacro)
+    // can't capture, so keep the efficient `MultiArityFn` path.
+    if current_fn_id() != 0 {
+        let desugared = desugar_multi_arity_capturing(&name, &clauses);
+        return parse_fn_form(C::Expression, desugared);
+    }
     // Each clause is `([params] body...)`. We re-package each into a
     // synthetic `(fn* name? [params] body...)` form and recurse through
     // `parse_fn_form`. That way the per-clause logic (variadic detection,
@@ -9635,6 +9757,44 @@ impl Compiler {
                 f,
             );
         }
+        // `clojure.lang.LongRange/create` — backs `clojure.core/range` (the
+        // int path). Arities 1/2/3 = (end), (start end), (start end step).
+        let lr1 = dm.declare_extern("cljvm_longrange_create_1", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.lang.LongRange".to_string(), "create".to_string(), 1),
+            lr1,
+        );
+        let lr2 = dm.declare_extern("cljvm_longrange_create_2", sig_2i64.clone());
+        host_methods.insert(
+            ("clojure.lang.LongRange".to_string(), "create".to_string(), 2),
+            lr2,
+        );
+        let lr3 = dm.declare_extern("cljvm_longrange_create_3", sig_3i64.clone());
+        host_methods.insert(
+            ("clojure.lang.LongRange".to_string(), "create".to_string(), 3),
+            lr3,
+        );
+        // NOTE: `clojure.lang.Repeat/create` (infinite `(repeat x)`) is
+        // deliberately NOT registered. A self-referential-cons representation
+        // hangs because `take`/`into` over it realize eagerly here (our
+        // lazy-seq forcing isn't lazy enough on this path), so the infinite
+        // seq never terminates. Needs a real lazy/bounded Repeat seq type
+        // before `repeat`/`interpose` can be unblocked.
+        // String reverse helper for `clojure.string/reverse` (the shim calls
+        // `clojure.string.Native/reverse`).
+        let str_rev = dm.declare_extern("cljvm_str_reverse", sig_1i64.clone());
+        host_methods.insert(
+            ("clojure.string.Native".to_string(), "reverse".to_string(), 1),
+            str_rev,
+        );
+        // Register under both the short (`Math/pow`) and qualified
+        // (`java.lang.Math/pow`) class names — call sites use either.
+        for cls in ["Math", "java.lang.Math"] {
+            let math_pow = dm.declare_extern("cljvm_math_pow", sig_2i64.clone());
+            host_methods.insert((cls.to_string(), "pow".to_string(), 2), math_pow);
+            let math_sqrt = dm.declare_extern("cljvm_math_sqrt", sig_1i64.clone());
+            host_methods.insert((cls.to_string(), "sqrt".to_string(), 1), math_sqrt);
+        }
         let delay_force = dm.declare_extern("cljvm_delay_force", sig_1i64.clone());
         host_methods.insert(
             ("clojure.lang.Delay".to_string(), "force".to_string(), 1),
@@ -9697,6 +9857,13 @@ impl Compiler {
         host_methods.insert(
             ("clojure.lang.RT".to_string(), "toArray".to_string(), 1),
             rt_to_array,
+        );
+        // `java.util.Arrays/sort(array, comparator)` — backs `sort`/`sort-by`,
+        // which `to-array` then `(. java.util.Arrays (sort a comp))`.
+        let arrays_sort = dm.declare_extern("cljvm_arrays_sort", sig_2i64.clone());
+        host_methods.insert(
+            ("java.util.Arrays".to_string(), "sort".to_string(), 2),
+            arrays_sort,
         );
         let lpv_create = dm.declare_extern("cljvm_lpv_create", sig_1i64.clone());
         host_methods.insert(
@@ -9902,6 +10069,12 @@ impl Compiler {
         instance_methods.insert(("substring".to_string(), 3), inst_substring2);
         let inst_last_index_of = dm.declare_extern("cljvm_inst_lastIndexOf", sig_2i64.clone());
         instance_methods.insert(("lastIndexOf".to_string(), 2), inst_last_index_of);
+        let inst_upper = dm.declare_extern("cljvm_inst_toUpperCase", sig_1i64.clone());
+        instance_methods.insert(("toUpperCase".to_string(), 1), inst_upper);
+        let inst_lower = dm.declare_extern("cljvm_inst_toLowerCase", sig_1i64.clone());
+        instance_methods.insert(("toLowerCase".to_string(), 1), inst_lower);
+        let inst_trim = dm.declare_extern("cljvm_inst_trim", sig_1i64.clone());
+        instance_methods.insert(("trim".to_string(), 1), inst_trim);
         let inst_replace = dm.declare_extern("cljvm_inst_replace", sig_3i64.clone());
         instance_methods.insert(("replace".to_string(), 3), inst_replace);
         let inst_set_macro = dm.declare_extern("cljvm_inst_setMacro", sig_1i64.clone());
@@ -9914,6 +10087,24 @@ impl Compiler {
         instance_methods.insert(("applyTo".to_string(), 2), inst_apply_to);
         let inst_disjoin = dm.declare_extern("cljvm_inst_disjoin", sig_2i64.clone());
         instance_methods.insert(("disjoin".to_string(), 2), inst_disjoin);
+        // `java.util.Comparator.compare(a, b)` on a Clojure IFn — `sort-by`
+        // builds `(fn [x y] (. comp (compare (keyfn x) (keyfn y))))`. Receiver
+        // + 2 args = arity-3 key.
+        let inst_compare = dm.declare_extern("cljvm_inst_compare", sig_3i64.clone());
+        instance_methods.insert(("compare".to_string(), 3), inst_compare);
+        // Transients, implemented as their persistent counterparts. Clojure's
+        // contract REQUIRES callers to thread the return value of `assoc!`/
+        // `conj!`/`dissoc!` (transients "are not designed to be bashed
+        // in-place"), so returning a fresh persistent collection each time is
+        // a correct — if unoptimized — transient. `transient`/`persistent!`
+        // are `(.asTransient coll)` / `(.persistent coll)` = identity; the
+        // mutating ops delegate to RT.assoc/conj/dissoc.
+        let inst_identity = dm.declare_extern("cljvm_inst_identity", sig_1i64.clone());
+        instance_methods.insert(("asTransient".to_string(), 1), inst_identity);
+        instance_methods.insert(("persistent".to_string(), 1), inst_identity);
+        instance_methods.insert(("assoc".to_string(), 3), rt_assoc);
+        instance_methods.insert(("conj".to_string(), 2), rt_conj);
+        instance_methods.insert(("without".to_string(), 2), rt_dissoc);
         let inst_get_key = dm.declare_extern("cljvm_inst_getKey", sig_1i64.clone());
         instance_methods.insert(("getKey".to_string(), 1), inst_get_key);
         let inst_get_value = dm.declare_extern("cljvm_inst_getValue", sig_1i64.clone());
@@ -11339,6 +11530,8 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
             Some(crate::runtime::cljvm_var_cloneThreadBindingFrame as *const u8)
         }
         "cljvm_inst_disjoin" => Some(crate::runtime::cljvm_inst_disjoin as *const u8),
+        "cljvm_inst_compare" => Some(crate::runtime::cljvm_inst_compare as *const u8),
+        "cljvm_inst_identity" => Some(crate::runtime::cljvm_inst_identity as *const u8),
         "cljvm_inst_getKey" => Some(crate::runtime::cljvm_inst_getKey as *const u8),
         "cljvm_inst_getValue" => Some(crate::runtime::cljvm_inst_getValue as *const u8),
         "cljvm_inst_rseq" => Some(crate::runtime::cljvm_inst_rseq as *const u8),
@@ -11457,6 +11650,15 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_inst_LazySeq_new1" => Some(crate::runtime::cljvm_inst_LazySeq_new1 as *const u8),
         "cljvm_inst_Delay_new1" => Some(crate::runtime::cljvm_inst_Delay_new1 as *const u8),
         "cljvm_delay_force" => Some(crate::runtime::cljvm_delay_force as *const u8),
+        "cljvm_longrange_create_1" => Some(crate::runtime::cljvm_longrange_create_1 as *const u8),
+        "cljvm_longrange_create_2" => Some(crate::runtime::cljvm_longrange_create_2 as *const u8),
+        "cljvm_longrange_create_3" => Some(crate::runtime::cljvm_longrange_create_3 as *const u8),
+        "cljvm_inst_toUpperCase" => Some(crate::runtime::cljvm_inst_toUpperCase as *const u8),
+        "cljvm_inst_toLowerCase" => Some(crate::runtime::cljvm_inst_toLowerCase as *const u8),
+        "cljvm_inst_trim" => Some(crate::runtime::cljvm_inst_trim as *const u8),
+        "cljvm_str_reverse" => Some(crate::runtime::cljvm_str_reverse as *const u8),
+        "cljvm_math_pow" => Some(crate::runtime::cljvm_math_pow as *const u8),
+        "cljvm_math_sqrt" => Some(crate::runtime::cljvm_math_sqrt as *const u8),
         "cljvm_rt_cons" => Some(crate::runtime::cljvm_rt_cons as *const u8),
         "cljvm_rt_load" => Some(crate::runtime::cljvm_rt_load as *const u8),
         "cljvm_rt_isReduced" => Some(crate::runtime::cljvm_rt_isReduced as *const u8),
@@ -11469,6 +11671,7 @@ fn resolve_clojure_extern(name: &str) -> Option<*const u8> {
         "cljvm_rt_seq" => Some(crate::runtime::cljvm_rt_seq as *const u8),
         "cljvm_rt_count" => Some(crate::runtime::cljvm_rt_count as *const u8),
         "cljvm_rt_toArray" => Some(crate::runtime::cljvm_rt_toArray as *const u8),
+        "cljvm_arrays_sort" => Some(crate::runtime::cljvm_arrays_sort as *const u8),
         "cljvm_lpv_create" => Some(crate::runtime::cljvm_lpv_create as *const u8),
         "cljvm_phm_create" => Some(crate::runtime::cljvm_phm_create as *const u8),
         "cljvm_phs_create" => Some(crate::runtime::cljvm_phs_create as *const u8),
@@ -12163,6 +12366,8 @@ fn resource_source(path: &str) -> Option<&'static str> {
         "clojure/core/protocols" | "core/protocols" => {
             Some(include_str!("../../clojure/core_protocols.clj"))
         }
+        // Minimal clojure.string (upper/lower-case, trim, join, reverse, …).
+        "clojure/string" => Some(include_str!("../../clojure/string.clj")),
         _ => None,
     }
 }
@@ -12273,6 +12478,15 @@ fn with_active_session_ref<R>(body: impl FnOnce(&mut Session) -> R) -> Option<R>
     // The Session is borrowed mutably by the enclosing call; the body
     // runs synchronously inside that scope.
     Some(unsafe { body(&mut *ptr) })
+}
+
+/// The active Session's JIT call-table base address, or `None` if no Session
+/// is active on this thread. Lets runtime externs that must invoke a JIT fn
+/// (e.g. forcing a lazy-seq thunk) recover the base when it wasn't installed
+/// on the thread-local — i.e. when forcing happens OUTSIDE a `run_jit` scope
+/// (a Rust-side realize such as `pr_str_bits` after `eval_form` returned).
+pub fn active_session_call_table_base() -> Option<u64> {
+    with_active_session_ref(|sess| sess.jit.call_table_base_addr())
 }
 
 // ============================================================================
@@ -12625,41 +12839,59 @@ impl Session {
         self.next_form_id += 1;
         let entry_name = format!("__top_form_{form_id}__");
 
-        let entry = self.compiler.with_active(|c| {
-            let entry = c.dm.declare_func(&entry_name, 0);
+        // Per-form transaction: a form that panics mid-compile (e.g. an
+        // analyze/lower path that declares an internal fn for a lambda and
+        // then hits an unsupported construct) would otherwise leave the
+        // shared persistent builder with a function "declared but not
+        // defined", poisoning EVERY later `snapshot()`. Checkpoint the
+        // builder up front; if compilation panics, roll the builder back to
+        // the checkpoint and clear the half-drained pending-fn queue before
+        // re-raising, so the next form compiles against a clean builder.
+        let compile_cp = self.compiler.dm.checkpoint();
+        let entry = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.compiler.with_active(|c| {
+                let entry = c.dm.declare_func(&entry_name, 0);
 
-            let expr = analyze(C::Expression, form);
+                let expr = analyze(C::Expression, form);
 
-            // Drain pending fns.
-            loop {
-                let pending = c.pending_fns.lock().unwrap().pop();
-                let Some(p) = pending else { break };
-                lower_pending_fn(c, p);
+                // Drain pending fns.
+                loop {
+                    let pending = c.pending_fns.lock().unwrap().pop();
+                    let Some(p) = pending else { break };
+                    lower_pending_fn(c, p);
+                }
+
+                // Emit entry fn body.
+                let mut df = c.dm.start_func(entry);
+                let result_val = {
+                    let mut ir = IrEmitter::new(&mut df);
+                    let objx = ObjExpr::placeholder();
+                    expr.emit(C::Expression, &*objx, &mut ir)
+                };
+                // If the top-level form diverged (analyze-time-rewritten
+                // throw, e.g. for an unregistered host method whose
+                // surrounding defn never gets called at load time), the
+                // current block is already terminated by the raise — skip
+                // the ret. Otherwise emit ret of the produced value.
+                if let Some(v) = result_val {
+                    df.fb.ret(v);
+                } else if !df.fb.current_block_is_terminated() {
+                    let nil_const = df
+                        .fb
+                        .iconst(dynir::Type::I64, crate::runtime::nanbox_nil() as i64);
+                    df.fb.ret(nil_const);
+                }
+                c.dm.finish_func(df);
+                entry
+            })
+        })) {
+            Ok(entry) => entry,
+            Err(payload) => {
+                self.compiler.dm.rollback(compile_cp);
+                self.compiler.pending_fns.lock().unwrap().clear();
+                std::panic::resume_unwind(payload);
             }
-
-            // Emit entry fn body.
-            let mut df = c.dm.start_func(entry);
-            let result_val = {
-                let mut ir = IrEmitter::new(&mut df);
-                let objx = ObjExpr::placeholder();
-                expr.emit(C::Expression, &*objx, &mut ir)
-            };
-            // If the top-level form diverged (analyze-time-rewritten
-            // throw, e.g. for an unregistered host method whose
-            // surrounding defn never gets called at load time), the
-            // current block is already terminated by the raise — skip
-            // the ret. Otherwise emit ret of the produced value.
-            if let Some(v) = result_val {
-                df.fb.ret(v);
-            } else if !df.fb.current_block_is_terminated() {
-                let nil_const = df
-                    .fb
-                    .iconst(dynir::Type::I64, crate::runtime::nanbox_nil() as i64);
-                df.fb.ret(nil_const);
-            }
-            c.dm.finish_func(df);
-            entry
-        });
+        };
 
         // Snapshot the module + extend the JIT with the new fns.
         let module = self.compiler.dm.snapshot();
@@ -12857,6 +13089,7 @@ impl Session {
         }
         last
     }
+
 }
 
 impl Default for Session {

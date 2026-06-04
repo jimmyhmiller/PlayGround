@@ -37,7 +37,9 @@
 use crate::codegen::{FieldMeta, ShapeMeta};
 use crate::gc::{Full, ObjHeader};
 use crate::hash::Hash;
-use crate::runtime::{Runtime, ai_array_new, ai_array_set, ai_gc_alloc_closure, ai_str_new};
+use crate::runtime::{
+    Runtime, ai_array_new, ai_array_set, ai_bytes_new, ai_gc_alloc_closure, ai_str_new,
+};
 
 // =============================================================================
 // Errors
@@ -153,6 +155,11 @@ unsafe fn encode_heap(rt: &Runtime, ptr: *const u8, out: &mut Vec<u8>) -> Result
     if shape_hash == crate::runtime::string_shape_hash() {
         return unsafe { encode_string(ptr, out) };
     }
+    if shape_hash == crate::runtime::bytes_shape_hash() {
+        // Same varlen-bytes layout as String, distinct kind tag so the
+        // receiver reconstructs a mutable `Bytes` (not a `String`).
+        return unsafe { encode_bytes(ptr, out) };
+    }
     let meta = rt
         .shape_meta
         .get(&shape_hash)
@@ -262,8 +269,8 @@ unsafe fn encode_array(rt: &Runtime, ptr: *const u8, out: &mut Vec<u8>) -> Resul
     Ok(())
 }
 
-/// Encode a `String`/`Bytes` heap object (kind = 5). Layout: GC header,
-/// then an 8-byte byte count, then the raw bytes.
+/// Encode a `String` heap object (kind = 5). Layout: GC header, then an
+/// 8-byte byte count, then the raw bytes.
 unsafe fn encode_string(ptr: *const u8, out: &mut Vec<u8>) -> Result<(), WireError> {
     let header = <Full as ObjHeader>::SIZE;
     let len = unsafe { *(ptr.add(header) as *const u64) };
@@ -272,6 +279,21 @@ unsafe fn encode_string(ptr: *const u8, out: &mut Vec<u8>) -> Result<(), WireErr
         .map_err(|_| WireError::Corrupt("string longer than u32"))?;
     let bytes = unsafe { std::slice::from_raw_parts(ptr.add(header + 8), len as usize) };
     out.push(5); // kind = String
+    out.extend_from_slice(&n.to_be_bytes());
+    out.extend_from_slice(bytes);
+    Ok(())
+}
+
+/// Encode a `Bytes` heap object (kind = 6). Identical layout to `String`,
+/// distinct kind so it round-trips as a mutable `Bytes`.
+unsafe fn encode_bytes(ptr: *const u8, out: &mut Vec<u8>) -> Result<(), WireError> {
+    let header = <Full as ObjHeader>::SIZE;
+    let len = unsafe { *(ptr.add(header) as *const u64) };
+    let n: u32 = len
+        .try_into()
+        .map_err(|_| WireError::Corrupt("bytes longer than u32"))?;
+    let bytes = unsafe { std::slice::from_raw_parts(ptr.add(header + 8), len as usize) };
+    out.push(6); // kind = Bytes
     out.extend_from_slice(&n.to_be_bytes());
     out.extend_from_slice(bytes);
     Ok(())
@@ -333,6 +355,7 @@ unsafe fn decode_one(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireErro
         3 => unsafe { decode_enum(rt, r) },
         4 => unsafe { decode_array(rt, r) },
         5 => unsafe { decode_string(rt, r) },
+        6 => unsafe { decode_bytes(rt, r) },
         other => Err(WireError::BadKind(other)),
     }
 }
@@ -342,6 +365,12 @@ unsafe fn decode_one(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireErro
 unsafe fn decode_array(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
     let n = r.read_u32()? as i64;
     let arr = unsafe { ai_array_new(rt.thread_ptr(), n) };
+    // Root the array across each element decode (which allocates and, under
+    // gc-every-alloc, may relocate it) — re-read before each store. The
+    // scope auto-resets on every exit path (incl. the `?` below).
+    let dyna = unsafe { &*(*rt.thread_ptr()).dyna_thread };
+    let scope = dyna.scratch_scope();
+    let arr_slot = scope.push(arr);
     for i in 0..n {
         let elem = unsafe { decode_one(rt, r)? };
         let p = match elem {
@@ -352,18 +381,32 @@ unsafe fn decode_array(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireEr
                 ));
             }
         };
+        let arr = scope.get(arr_slot);
         unsafe { ai_array_set(arr, i, p as *mut u8) };
     }
-    Ok(WireValue::Heap(arr as *const u8))
+    Ok(WireValue::Heap(scope.get(arr_slot) as *const u8))
 }
 
-/// Decode a `String`/`Bytes` (kind 5): byte count, then raw bytes copied
-/// into a fresh heap String.
+/// Decode a `String` (kind 5): byte count, then raw bytes copied into a
+/// fresh heap String.
 unsafe fn decode_string(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
     let n = r.read_u32()? as usize;
     let bytes = r.take(n)?;
     let s = unsafe { ai_str_new(rt.thread_ptr(), bytes.as_ptr(), n as i64) };
     Ok(WireValue::Heap(s as *const u8))
+}
+
+/// Decode a `Bytes` (kind 6): byte count, then raw bytes copied into a fresh
+/// heap `Bytes` (distinct from String — a mutable buffer).
+unsafe fn decode_bytes(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
+    let n = r.read_u32()? as usize;
+    let bytes = r.take(n)?;
+    let b = unsafe { ai_bytes_new(rt.thread_ptr(), n as i64) };
+    if n > 0 {
+        let payload = unsafe { b.add(<Full as ObjHeader>::SIZE + 8) };
+        unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), payload, n) };
+    }
+    Ok(WireValue::Heap(b as *const u8))
 }
 
 unsafe fn decode_closure(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
@@ -409,9 +452,14 @@ unsafe fn decode_closure(rt: &Runtime, r: &mut Reader) -> Result<WireValue, Wire
 
     // Decode each capture in source order. Pointer slots get a
     // heap-pointer (the decoder allocates sub-objects); Int slots
-    // get a raw i64.
+    // get a raw i64. Root the closure across each child decode (it
+    // allocates and may relocate `ptr`); re-read before each store.
+    let dyna = unsafe { &*(*rt.thread_ptr()).dyna_thread };
+    let scope = dyna.scratch_scope();
+    let ptr_slot = scope.push(ptr);
     for cap in &captures {
         let v = unsafe { decode_one(rt, r)? };
+        let ptr = scope.get(ptr_slot);
         let slot_addr = unsafe { ptr.add(cap.offset as usize) };
         if cap.is_pointer {
             let heap_ptr = match v {
@@ -442,7 +490,7 @@ unsafe fn decode_closure(rt: &Runtime, r: &mut Reader) -> Result<WireValue, Wire
         }
     }
 
-    Ok(WireValue::Heap(ptr as *const u8))
+    Ok(WireValue::Heap(scope.get(ptr_slot) as *const u8))
 }
 
 unsafe fn decode_struct(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
@@ -468,11 +516,17 @@ unsafe fn decode_struct(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireE
         ));
     }
 
+    // Root the struct across each field decode (which allocates and may
+    // relocate it); re-read before each store. Auto-resets on `?`/return.
+    let dyna = unsafe { &*(*rt.thread_ptr()).dyna_thread };
+    let scope = dyna.scratch_scope();
+    let ptr_slot = scope.push(ptr);
     for field in &fields {
         let v = unsafe { decode_one(rt, r)? };
+        let ptr = scope.get(ptr_slot);
         unsafe { store_field(ptr, field, v)? };
     }
-    Ok(WireValue::Heap(ptr as *const u8))
+    Ok(WireValue::Heap(scope.get(ptr_slot) as *const u8))
 }
 
 unsafe fn decode_enum(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireError> {
@@ -510,10 +564,16 @@ unsafe fn decode_enum(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireErr
         *slot = variant_index;
     }
 
+    // Root the variant across the payload decode (which allocates and may
+    // relocate it); re-read before the store and the return.
+    let dyna = unsafe { &*(*rt.thread_ptr()).dyna_thread };
+    let scope = dyna.scratch_scope();
+    let ptr_slot = scope.push(ptr);
     match (has_payload, payload_field) {
         (0, None) => {}
         (1, Some(field)) => {
             let v = unsafe { decode_one(rt, r)? };
+            let ptr = scope.get(ptr_slot);
             unsafe { store_field(ptr, &field, v)? };
         }
         (0, Some(_)) | (1, None) => {
@@ -524,7 +584,7 @@ unsafe fn decode_enum(rt: &Runtime, r: &mut Reader) -> Result<WireValue, WireErr
         (other, _) => return Err(WireError::BadOption(other)),
     }
 
-    Ok(WireValue::Heap(ptr as *const u8))
+    Ok(WireValue::Heap(scope.get(ptr_slot) as *const u8))
 }
 
 fn find_variant_hash(rt: &Runtime, enum_ref: Hash, variant_index: u32) -> Result<Hash, WireError> {

@@ -499,6 +499,10 @@ pub struct PendingActions {
     /// Files to open into a new editor pane (Cmd+O picker, `tbopen`
     /// CLI, etc.).
     pub open_files: Vec<OpenFileRequest>,
+    /// Close requests from `tbclose`: `(project_id, kind_filter)`. A
+    /// `None` kind closes every pane in the project. Resolved to pane
+    /// entities in `apply_pending_actions` (needs a world query).
+    pub close_panes: Vec<(u64, Option<String>)>,
 }
 
 /// Request to spawn one new pane of a given kind.
@@ -1465,6 +1469,28 @@ fn apply_pending_actions(world: &mut World) {
         let mut close_q = world.resource_mut::<pane_bevy::PendingPaneActions>();
         for e in orphans {
             close_q.close.push(e);
+        }
+    }
+
+    // `tbclose` requests: close panes in a project, optionally filtered
+    // to a kind. Resolve to entities here (world query), then route
+    // through the same close path as a close-button click.
+    for (project_id, kind_filter) in actions.close_panes {
+        let targets: Vec<Entity> = {
+            let mut q = world.query::<(Entity, &PaneProject, &PaneKindMarker, &PaneTag)>();
+            q.iter(world)
+                .filter(|(_, m, _, _)| m.0 == project_id)
+                .filter(|(_, _, k, _)| {
+                    kind_filter.as_deref().map_or(true, |want| k.0 == want)
+                })
+                .map(|(e, _, _, _)| e)
+                .collect()
+        };
+        if !targets.is_empty() {
+            let mut close_q = world.resource_mut::<pane_bevy::PendingPaneActions>();
+            for e in targets {
+                close_q.close.push(e);
+            }
         }
     }
 

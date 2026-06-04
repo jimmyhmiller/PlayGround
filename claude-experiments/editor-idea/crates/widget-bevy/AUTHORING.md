@@ -203,6 +203,49 @@ empty). The table sizes to its content width rather than filling the
 pane, so give wide columns an explicit `width` when you want a specific
 layout.
 
+Cells are drag-selectable by default (see "Selectable / copyable text"
+below): the user drags across a cell's text to highlight a substring and
+Cmd/Ctrl+C it — the "grab one value out of the results" workflow, without
+a whole-table export. Pass `selectable: false` to disable.
+
+```rhai
+#{ type: "table", zebra: true,
+   columns: [ #{ header: "id", align: "end" }, #{ header: "email" } ],
+   rows: [ ["42", "ada@example.com"] ] }   // drag across the email → Cmd+C
+```
+
+### Selectable / copyable text
+
+Read-only text displays — `Element::Text`, `Element::Table` (per cell),
+and `Element::Badge` — are **drag-selectable by default**. The user drags
+across the rendered text to highlight a range (a translucent accent
+band), then **Cmd/Ctrl+C copies the selected substring** to the system
+clipboard. A plain click (no drag) clears the selection; only one
+selection is active at a time. You don't have to do anything — a results
+table or a value label is copyable out of the box.
+
+Opt a specific element OUT with `selectable: false` — e.g. a label that's
+part of a custom drag gesture you handle yourself:
+
+```rhai
+#{ type: "text", value: "drag me", selectable: false }
+```
+
+Interactive elements are intentionally NOT selectable: `Button`, `Link`,
+`Tabs`, `Toggle`, and `Input`/`TextArea`. A press there fires the
+element's action (and inputs own their caret/selection), so auto-select
+would fight those gestures. Canvas widgets (`Element::Canvas`) are
+unaffected — they render outside this text path and keep their own drag
+handling.
+
+Selection is handled entirely host-side — no `on_click`/event
+round-trip, and it doesn't blur a focused input.
+
+Scope: selection covers a **single run** — one `Text`, one table cell, or
+one badge. Dragging across multiple runs, or a rectangular/multi-row
+table span, isn't modeled yet. Mapping is tuned for single-line values; a
+wrapped/multi-line `Text` selects approximately.
+
 ### Focused-input ownership
 
 While an `Input` or `TextArea` is focused, the **host owns** the live
@@ -275,6 +318,35 @@ once. For continuous animation, call `set_animating(true)` to start
 receiving `on_frame(dt)`; `set_animating(false)` to stop (idle widgets
 cost zero CPU).
 
+### Driving a subprocess (event-driven)
+
+Don't use `set_animating` + `proc_read`-in-`on_frame` to drain a child —
+that busy-polls and pins the app at 60fps for the whole run. Instead the
+subprocess reader pushes to two handlers:
+
+| handler | when |
+| --- | --- |
+| `on_proc_output(handle, line)` | once per stdout line |
+| `on_proc_exit(handle, code)`   | once when the child exits (`code` = exit status, or -1 if unknown) |
+
+```rhai
+fn run_query(sql) {
+    state.rows = [];
+    state.proc = proc_spawn("datalog", ["--host", state.host, "query", sql]);
+}
+fn on_proc_output(handle, line) {
+    if handle == state.proc { state.rows.push(line); }   // accumulate; no render yet
+}
+fn on_proc_exit(handle, code) {
+    if handle == state.proc { state.done = true; request_render(); }  // render once, at the end
+}
+```
+
+The worker wakes on each line (no polling); the app stays **reactive**
+and only repaints when a handler calls `request_render()`. No
+`set_animating` for I/O. `proc_read` / `proc_alive` still exist for
+explicit polling / back-compat.
+
 ### Function scoping gotcha
 
 User-defined `fn`s are pure: they do **not** see top-level `const`s, and
@@ -288,7 +360,8 @@ as parameters. (See `project_editor_idea_rhai_scoping` in memory.)
 widget↔widget bus `emit` / `emit_retained` / `my_id` (see "[The
 widget↔widget bus](#the-widgetwidget-bus)"), and the generic subprocess
 primitives `proc_spawn` / `proc_write` / `proc_read` / `proc_alive` /
-`proc_kill`.
+`proc_kill` (plus the push handlers `on_proc_output` / `on_proc_exit` —
+see "Driving a subprocess").
 
 ---
 

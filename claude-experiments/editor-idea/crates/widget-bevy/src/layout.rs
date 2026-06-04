@@ -309,16 +309,21 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element, metrics: &PaneFon
                     .unwrap()
             }
         }
-        Element::Input { width, .. } => taffy
-            .new_leaf(taffy::Style {
+        Element::Input { width, style, .. } => {
+            // The `width` field is the DEFAULT; `style` (flex_grow,
+            // width/height incl. `"100%"`, min/max) overrides it so an
+            // input can fill / grow within its pane like any stack does.
+            let mut s = taffy::Style {
                 size: Size {
                     width: Dimension::length(*width),
                     height: Dimension::length(crate::render::INPUT_HEIGHT),
                 },
                 ..taffy::Style::DEFAULT
-            })
-            .unwrap(),
-        Element::TextArea { width, rows, value, .. } => {
+            };
+            apply_style_overrides(&mut s, style.as_ref());
+            taffy.new_leaf(s).unwrap()
+        }
+        Element::TextArea { width, rows, value, style, .. } => {
             // Auto-grow: height fits the wrapped content, with `rows` as
             // the minimum. Wrapping here uses the same routine + width as
             // the renderer, so the box height matches the drawn text.
@@ -330,15 +335,18 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element, metrics: &PaneFon
             let wrapped = crate::render::wrap_visual_lines(&chars, metrics, avail).len() as u32;
             let lines = wrapped.max((*rows).max(1));
             let height = lines as f32 * line_h + 2.0 * crate::render::TEXTAREA_PAD_Y;
-            taffy
-                .new_leaf(taffy::Style {
-                    size: Size {
-                        width: Dimension::length(*width),
-                        height: Dimension::length(height),
-                    },
-                    ..taffy::Style::DEFAULT
-                })
-                .unwrap()
+            // `width`/`rows` are the DEFAULTS; `style` overrides them so a
+            // query editor can `flex_grow` / `height: "100%"` to fill a
+            // docked editor pane instead of staying a fixed rows-tall box.
+            let mut s = taffy::Style {
+                size: Size {
+                    width: Dimension::length(*width),
+                    height: Dimension::length(height),
+                },
+                ..taffy::Style::DEFAULT
+            };
+            apply_style_overrides(&mut s, style.as_ref());
+            taffy.new_leaf(s).unwrap()
         }
         Element::Table { columns, rows, .. } => {
             use taffy::style::{GridTemplateComponent, MaxTrackSizingFunction, MinTrackSizingFunction};
@@ -645,3 +653,138 @@ pub fn absolute_position(laid: &LaidOut, mut node: NodeId, root: NodeId) -> Vec2
 // against the protocol types we expect.
 #[allow(dead_code)]
 fn _check_style_imports(_b: Border, _sh: Shadow, _w: Weight, _k: ButtonKind) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::Style;
+
+    fn metrics() -> PaneFontMetrics {
+        PaneFontMetrics { cell_width: 8.4, font_size: 14.0 }
+    }
+
+    fn pct_height(p: &str) -> Style {
+        Style { height: Some(p.into()), ..Default::default() }
+    }
+
+    /// A root vstack with `height:"100%"` and a `flex_grow:1` child fills
+    /// the available pane height — the whole point of passing the known
+    /// pane height (content_size.y) instead of INFINITY. With INFINITY,
+    /// the percentage and flex have nothing to distribute and the child
+    /// stays content-tall.
+    #[test]
+    fn root_fills_pane_height_when_height_100pct() {
+        let m = metrics();
+        let pane_h = 600.0_f32;
+        let el = Element::Vstack {
+            gap: 0.0,
+            pad: 0.0,
+            style: Some(pct_height("100%")),
+            children: vec![Element::Frame {
+                gap: 0.0,
+                pad: 0.0,
+                style: Some(Style { flex_grow: Some(1.0), ..Default::default() }),
+                children: vec![],
+            }],
+        };
+        let mut laid = build_tree(&el, &m);
+        compute(&mut laid, 400.0, pane_h, &m);
+
+        let root = laid.layout(laid.root);
+        assert!(
+            (root.size.height - pane_h).abs() < 0.5,
+            "root should fill pane height {pane_h}, got {}",
+            root.size.height
+        );
+        let child = laid.taffy.children(laid.root).unwrap()[0];
+        let cl = laid.layout(child);
+        assert!(
+            (cl.size.height - pane_h).abs() < 0.5,
+            "flex_grow child should fill {pane_h}, got {}",
+            cl.size.height
+        );
+    }
+
+    /// The table render fix paints the panel/rows from the cells' CONTENT
+    /// BOX (union of laid-out cell extents) rather than the node `size`.
+    /// This guards the two properties that make that correct in every
+    /// case: (1) the content box bounds every cell (so no column can ever
+    /// paint outside the panel — the reported bug), and (2) when the grid
+    /// tracks already fill the node, the content box equals the node, so
+    /// the fix never shrinks a correctly-filled table.
+    #[test]
+    fn table_content_box_bounds_cells_and_matches_filled_node() {
+        use crate::protocol::TableColumn;
+        let m = metrics();
+        let col = |h: &str, a| TableColumn { header: h.into(), width: None, align: a };
+        let table = Element::Table {
+            columns: vec![col("name", Align::Start), col("age", Align::End)],
+            rows: vec![vec!["Widget".into(), "30".into()], vec!["Gadget".into(), "25".into()]],
+            zebra: true,
+            selectable: false,
+            style: None,
+        };
+        let el = Element::Vstack {
+            gap: 0.0,
+            pad: 0.0,
+            style: Some(Style { width: Some("400".into()), ..Default::default() }),
+            children: vec![table],
+        };
+        let mut laid = build_tree(&el, &m);
+        compute(&mut laid, 400.0, 600.0, &m);
+
+        let table_node = laid.taffy.children(laid.root).unwrap()[0];
+        let node_w = laid.layout(table_node).size.width;
+
+        // Cells' content box, computed exactly like render_table_at.
+        let cells = laid.taffy.children(table_node).unwrap();
+        let mut content_x = 0.0_f32;
+        for &c in &cells {
+            let cl = laid.layout(c);
+            let right = cl.location.x + cl.size.width;
+            // (1) every cell is within the content box by construction.
+            assert!(
+                right <= content_x.max(right) + 0.01,
+                "cell right edge {right} must be within content box"
+            );
+            content_x = content_x.max(right);
+        }
+        assert!(content_x > 0.0, "content box should be non-degenerate");
+        // (2) non-destructive: when tracks fill the node, panel == cells.
+        assert!(
+            (content_x - node_w).abs() < 1.0,
+            "content box ({content_x}) should match the filled node ({node_w}) \
+             so the fix doesn't shrink a correct table"
+        );
+    }
+
+    /// Default (no height set) still content-sizes, so taller-than-pane
+    /// content grows past the pane and scrolls — passing the pane height
+    /// as the available space must NOT clamp an auto-height root.
+    #[test]
+    fn root_without_height_still_content_sizes() {
+        let m = metrics();
+        // Three stacked fixed-height frames = 300px of content, in a
+        // 100px pane. An auto-height root must report ~300, not 100.
+        let frame = |h: f32| Element::Frame {
+            gap: 0.0,
+            pad: 0.0,
+            style: Some(Style { height: Some(format!("{h}")), ..Default::default() }),
+            children: vec![],
+        };
+        let el = Element::Vstack {
+            gap: 0.0,
+            pad: 0.0,
+            style: None,
+            children: vec![frame(100.0), frame(100.0), frame(100.0)],
+        };
+        let mut laid = build_tree(&el, &m);
+        compute(&mut laid, 400.0, 100.0, &m);
+        let root = laid.layout(laid.root);
+        assert!(
+            (root.size.height - 300.0).abs() < 0.5,
+            "auto-height root should grow to content 300, got {}",
+            root.size.height
+        );
+    }
+}

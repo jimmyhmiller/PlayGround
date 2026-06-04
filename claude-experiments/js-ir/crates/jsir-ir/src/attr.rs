@@ -1,8 +1,62 @@
 //! IR attributes and their byte-exact textual rendering.
 
+use std::any::Any;
+use std::sync::Arc;
+
+/// A dialect-defined attribute payload — the generic escape hatch by which any
+/// dialect attaches arbitrary structured state to an op without the core IR
+/// knowing its schema. jsir-ir only ever stores it, clones it (an `Arc` bump),
+/// prints it (`render`), and compares it (`dyn_eq`); it never interprets the
+/// contents. A dialect recovers its concrete type via `as_any().downcast_ref`.
+///
+/// This is how MLIR lets dialects hang their own data on operations. All
+/// React/JSLIR analysis state (mutable ranges, aliasing effects, reactive scopes,
+/// identifier/place metadata) will ride here as concrete dialect types; the core
+/// stays dialect-agnostic.
+pub trait DialectPayload: std::fmt::Debug + Send + Sync {
+    /// Textual form for the printer (conventionally `#dialect<...>`).
+    fn render(&self) -> String;
+    /// Downcast hook so the owning dialect can recover its concrete type.
+    fn as_any(&self) -> &dyn Any;
+    /// Structural equality against another payload (typically: downcast `other`
+    /// to `Self` and compare). Lets [`Attr`] keep a derived `PartialEq`.
+    fn dyn_eq(&self, other: &dyn DialectPayload) -> bool;
+}
+
+/// Newtype wrapper around an [`DialectPayload`] so [`Attr`] keeps its derived
+/// `Clone`/`Debug`/`PartialEq` (a bare `Arc<dyn _>` is neither `Debug`-derivable
+/// in the enum nor `PartialEq`). Cheap to clone (shared `Arc`).
+#[derive(Clone)]
+pub struct OpaqueAttr(pub Arc<dyn DialectPayload>);
+
+impl OpaqueAttr {
+    pub fn new<T: DialectPayload + 'static>(payload: T) -> Self {
+        OpaqueAttr(Arc::new(payload))
+    }
+    /// Recover the concrete dialect type, if this payload is a `T`.
+    pub fn downcast_ref<T: 'static>(&self) -> Option<&T> {
+        self.0.as_any().downcast_ref::<T>()
+    }
+}
+
+impl std::fmt::Debug for OpaqueAttr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl PartialEq for OpaqueAttr {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0) || self.0.dyn_eq(other.0.as_ref())
+    }
+}
+
 /// An MLIR/JSIR attribute value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Attr {
+    /// A dialect-defined opaque payload (see [`DialectPayload`]). The escape hatch
+    /// for CFG/JSLIR dialect state; the core never interprets it.
+    Opaque(OpaqueAttr),
     /// A string attribute, e.g. `name = "a"` or `operator_ = "+"`.
     Str(String),
     Bool(bool),
@@ -219,6 +273,7 @@ impl Attr {
     /// Render the attribute value (the right-hand side of `key = ...`).
     pub fn render(&self) -> String {
         match self {
+            Attr::Opaque(o) => o.0.render(),
             Attr::Str(s) => quote_mlir_string(s),
             Attr::Bool(b) => if *b { "true" } else { "false" }.to_string(),
             Attr::F64(f) => format!("{} : f64", format_mlir_f64(*f)),

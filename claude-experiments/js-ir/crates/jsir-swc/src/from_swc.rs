@@ -2203,6 +2203,18 @@ pub fn source_to_ir(src: &str) -> Result<jsir_ir::Op, String> {
     let mut program = parser
         .parse_program()
         .map_err(|e| format!("swc parse error: {e:?}"))?;
+    // swc recovers from many syntax errors by inserting `Invalid` placeholder nodes and
+    // still returning Ok (e.g. TypeScript `f<T>()` parsed as a `<`/`>` operator chain whose
+    // operand can't be formed). Such a parse is not valid ES — treat any recovered error as
+    // a parse failure so callers don't lower garbage.
+    let recovered = parser.take_errors();
+    if let Some(first) = recovered.first() {
+        return Err(format!(
+            "swc parse error: {} recovered error(s); first: {:?}",
+            recovered.len(),
+            first.kind()
+        ));
+    }
     drop(parser); // release the borrow of `fm` so `cm` can move into `Cx`
 
     // Desugar JSX to React.createElement calls before scope/IR construction.

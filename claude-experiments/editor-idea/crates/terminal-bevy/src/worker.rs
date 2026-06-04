@@ -511,10 +511,22 @@ fn worker_loop(
                     match m {
                         DaemonMessage::Output(bytes) => {
                             terminal.vt_write(&bytes);
-                            if let Some(w) = log_writer.as_mut() {
-                                w.append(&bytes);
-                            }
                             if !in_replay {
+                                // Log only LIVE output. Replayed history is
+                                // the daemon's authoritative buffer; the
+                                // disk log already holds that scrollback
+                                // from the prior session, so re-appending it
+                                // on every warm restart duplicates content —
+                                // wasting the rotate cap (real deep history
+                                // gets trimmed sooner) and doubling
+                                // scrollback on the next cold start. The
+                                // cold-start disk replay (above) is fed
+                                // before this writer exists, so it's never
+                                // logged either — same invariant. (osc7 /
+                                // cmd_watch below are already live-only.)
+                                if let Some(w) = log_writer.as_mut() {
+                                    w.append(&bytes);
+                                }
                                 osc7.feed(&bytes, |cwd| {
                                     if last_published_cwd.as_deref() != Some(cwd.as_str()) {
                                         publish_cwd_changed(session_id, &cwd);
@@ -565,10 +577,22 @@ fn worker_loop(
         }
 
         // 2. Forward libghostty's pty-response bytes (DA replies, etc.)
-        //    back to the daemon as Input.
+        //    back to the daemon as Input — but NOT while replaying
+        //    history. Replayed output carries the PRIOR session's
+        //    capability queries (Primary DA `…c`, XTVERSION `DCS>|…`,
+        //    DECRQM mode 2026 `…$y`, etc.); `vt_write` regenerates their
+        //    replies into `pty_response`, and shipping those to the LIVE
+        //    child injects e.g. `>|terminal-bevy…62;1;6;22c…2026;2$y` into
+        //    its stdin, which the shell then echoes at the prompt. Drop
+        //    anything generated during the replay window (and the final
+        //    batch as ReplayEnd lands) — mirrors the disk-replay clear in
+        //    the attach path above. The live child's own queries arrive as
+        //    output after ReplayEnd and are answered normally.
         {
             let mut response = pty_response.borrow_mut();
-            if !response.is_empty() {
+            if in_replay || replay_just_ended {
+                response.clear();
+            } else if !response.is_empty() {
                 let bytes: Vec<u8> = response.drain(..).collect();
                 client.send(&ClientMessage::Input(bytes));
                 did_anything = true;

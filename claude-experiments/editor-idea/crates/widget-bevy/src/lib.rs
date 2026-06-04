@@ -68,6 +68,35 @@ pub use button_material::{
     ButtonParams as WidgetButtonParams, WidgetButtonMaterial, WidgetButtonMaterialPlugin,
 };
 
+/// Process-global callback that wakes the host's main loop. The host
+/// (terminal-bevy) runs winit in a reactive update mode, so when it's
+/// idle the main loop only wakes on input or the reactive timeout
+/// (~5s). Widget worker threads run OFF the main thread; when a worker
+/// produces something the main thread must observe while the window is
+/// idle — it `set_animating(true)` (needs the mode-maintainer to flip to
+/// `Continuous`), publishes a frame, or emits on the bus — there's
+/// nothing to wake the loop, so the change can stall ~5s (or forever, if
+/// the work depends on `on_frame` ticking). This hook lets a worker
+/// nudge the loop awake. widget-bevy deliberately doesn't depend on
+/// winit, so the host installs a closure that fires its `EventLoopProxy`.
+static WAKEUP_HOOK: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> =
+    std::sync::OnceLock::new();
+
+/// Install the main-loop wakeup callback. Called once by the host at
+/// startup. Subsequent calls are ignored (first hook wins).
+pub fn set_wakeup_hook(f: impl Fn() + Send + Sync + 'static) {
+    let _ = WAKEUP_HOOK.set(Box::new(f));
+}
+
+/// Wake the host's main loop if a hook is installed. No-op otherwise
+/// (e.g. headless tests). Cheap and thread-safe; safe to call from
+/// worker threads.
+pub fn request_main_loop_wakeup() {
+    if let Some(f) = WAKEUP_HOOK.get() {
+        f();
+    }
+}
+
 /// Per-widget-pane vertical scroll state. Updated by
 /// `handle_widget_wheel` when the user scrolls over the pane; applied
 /// to `PaneChrome.content_root.transform.y` by
@@ -188,6 +217,22 @@ pub struct WidgetHover {
 pub struct WidgetTargets {
     pub clicks: Vec<ClickTarget>,
     pub links: Vec<LinkTarget>,
+    /// Selectable text runs (from `Text`/`Table` with `selectable: true`).
+    /// The drag-select systems map a drag onto one of these and copy the
+    /// covered substring on Cmd/Ctrl+C.
+    pub spans: Vec<TextSpan>,
+}
+
+/// One run of rendered, selectable text, collected during render so a
+/// drag can be mapped onto a character range. `rect` is content_root-
+/// local (y-down, px from the content top-left) — the same frame as
+/// `ClickTarget.rect` and `PaneContentPressed.local_pt`. `rect.min` is
+/// the text's top-left (the glyph origin), so character offsets measure
+/// left-to-right from there.
+pub struct TextSpan {
+    pub text: String,
+    pub rect: Rect,
+    pub font_size: f32,
 }
 
 pub struct ClickTarget {
@@ -245,6 +290,197 @@ impl WidgetInputFocus {
     }
 }
 
+// ============================================================
+// Drag-to-select over rendered widget text (+ Cmd/Ctrl+C copy)
+// ============================================================
+
+/// Active drag-selection over a widget's rendered text. Covers a SINGLE
+/// text run (the "grab this value / cell" case); cross-run or
+/// rectangular selection isn't modeled. Stored fully resolved (text +
+/// geometry) so the highlight survives the frame rebuilds that
+/// re-render the widget.
+#[derive(Component, Clone)]
+pub struct WidgetTextSelection {
+    text: String,
+    /// The run's rect, content_root-local (y-down). `rect.min` is the
+    /// glyph origin; char offsets measure left-to-right from there.
+    rect: Rect,
+    font_size: f32,
+    /// Char indices into `text`; the selection is the half-open range
+    /// [min(anchor, focus), max(anchor, focus)).
+    anchor: usize,
+    focus: usize,
+    /// True while the mouse button is held (drag in progress).
+    dragging: bool,
+}
+
+/// Marker for the transient selection-highlight sprite (rebuilt each
+/// frame from the active `WidgetTextSelection`).
+#[derive(Component)]
+struct WidgetSelectionHighlight;
+
+/// Nearest character boundary to local-x `x` within a run that starts at
+/// `origin_x`. Measures growing prefixes through the same metrics the
+/// renderer uses, so it's correct for proportional fonts too.
+fn char_index_at_x(
+    text: &str,
+    origin_x: f32,
+    font_size: f32,
+    metrics: &PaneFontMetrics,
+    x: f32,
+) -> usize {
+    let target = (x - origin_x).max(0.0);
+    let chars: Vec<char> = text.chars().collect();
+    let mut prefix = String::new();
+    let mut best = 0usize;
+    let mut best_d = f32::INFINITY;
+    for i in 0..=chars.len() {
+        let w = metrics.measure(&prefix, font_size);
+        let d = (w - target).abs();
+        if d < best_d {
+            best_d = d;
+            best = i;
+        }
+        if i < chars.len() {
+            prefix.push(chars[i]);
+        }
+    }
+    best
+}
+
+/// Press: begin a selection if the press landed on a selectable span.
+/// Enforces a single active selection app-wide (clears the others), and
+/// clears the selection when a press on a widget misses every span.
+fn begin_text_selection(
+    mut commands: Commands,
+    mut presses: MessageReader<PaneContentPressed>,
+    metrics: Res<PaneFontMetrics>,
+    widgets: Query<(&WidgetTargets, Option<&WidgetScroll>)>,
+    existing: Query<Entity, With<WidgetTextSelection>>,
+) {
+    for ev in presses.read() {
+        let Ok((targets, scroll)) = widgets.get(ev.pane) else {
+            continue;
+        };
+        let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+        let hit = ev.local_pt + Vec2::new(0.0, scroll_y);
+        let span = targets.spans.iter().find(|s| s.rect.contains(hit));
+        // One selection at a time, app-wide.
+        for e in &existing {
+            commands.entity(e).remove::<WidgetTextSelection>();
+        }
+        if let Some(s) = span {
+            let ci = char_index_at_x(&s.text, s.rect.min.x, s.font_size, &metrics, hit.x);
+            commands.entity(ev.pane).insert(WidgetTextSelection {
+                text: s.text.clone(),
+                rect: s.rect,
+                font_size: s.font_size,
+                anchor: ci,
+                focus: ci,
+                dragging: true,
+            });
+        }
+    }
+}
+
+/// Drag: extend the active selection's focus to the cursor's character.
+fn update_text_selection(
+    mut drags: MessageReader<pane_bevy::PaneContentDragged>,
+    metrics: Res<PaneFontMetrics>,
+    mut q: Query<&mut WidgetTextSelection>,
+) {
+    for ev in drags.read() {
+        let Ok(mut sel) = q.get_mut(ev.pane) else {
+            continue;
+        };
+        if !sel.dragging {
+            continue;
+        }
+        sel.focus = char_index_at_x(&sel.text, sel.rect.min.x, sel.font_size, &metrics, ev.local_pt.x);
+    }
+}
+
+/// Release: end the drag. A zero-width selection (a plain click) clears.
+fn end_text_selection(
+    mut commands: Commands,
+    mut releases: MessageReader<pane_bevy::PaneContentReleased>,
+    mut q: Query<&mut WidgetTextSelection>,
+) {
+    for ev in releases.read() {
+        if let Ok(mut sel) = q.get_mut(ev.pane) {
+            sel.dragging = false;
+            if sel.anchor == sel.focus {
+                commands.entity(ev.pane).remove::<WidgetTextSelection>();
+            }
+        }
+    }
+}
+
+/// Repaint the selection band each frame (cheap: one run, one sprite).
+/// Drawn as a translucent accent overlay on top of the glyphs — flow
+/// text z varies by nesting depth, so a reliable "behind" layer isn't
+/// available; a low-alpha tint reads as a selection and never z-fights
+/// the backgrounds.
+fn render_text_selection_highlight(
+    mut commands: Commands,
+    metrics: Res<PaneFontMetrics>,
+    theme: Res<style_bevy::Theme>,
+    sels: Query<(&WidgetTextSelection, &pane_bevy::PaneChrome)>,
+    old: Query<Entity, With<WidgetSelectionHighlight>>,
+) {
+    for e in &old {
+        commands.entity(e).try_despawn();
+    }
+    let base = theme.color(style_bevy::tokens::ACCENT);
+    let color = Color::LinearRgba(LinearRgba { alpha: 0.32, ..base });
+    for (sel, chrome) in &sels {
+        let (a, b) = (sel.anchor.min(sel.focus), sel.anchor.max(sel.focus));
+        if a == b {
+            continue;
+        }
+        let chars: Vec<char> = sel.text.chars().collect();
+        let pre: String = chars[..a.min(chars.len())].iter().collect();
+        let mid: String = chars[a.min(chars.len())..b.min(chars.len())].iter().collect();
+        let x0 = sel.rect.min.x + metrics.measure(&pre, sel.font_size);
+        let w = metrics.measure(&mid, sel.font_size);
+        if w <= 0.0 {
+            continue;
+        }
+        commands.spawn((
+            WidgetSelectionHighlight,
+            ChildOf(chrome.content_root),
+            Sprite {
+                color,
+                custom_size: Some(Vec2::new(w, sel.rect.height())),
+                ..default()
+            },
+            Anchor::TOP_LEFT,
+            pane_bevy::PaneContentNoClip,
+            Transform::from_xyz(x0, -sel.rect.min.y, 30.0),
+        ));
+    }
+}
+
+/// Cmd/Ctrl+C copies the active selection's substring to the clipboard.
+fn copy_text_selection(keys: Res<ButtonInput<KeyCode>>, sels: Query<&WidgetTextSelection>) {
+    let mod_down = keys.pressed(KeyCode::SuperLeft)
+        || keys.pressed(KeyCode::SuperRight)
+        || keys.pressed(KeyCode::ControlLeft)
+        || keys.pressed(KeyCode::ControlRight);
+    if !(mod_down && keys.just_pressed(KeyCode::KeyC)) {
+        return;
+    }
+    for sel in &sels {
+        let (a, b) = (sel.anchor.min(sel.focus), sel.anchor.max(sel.focus));
+        if a == b {
+            continue;
+        }
+        let s: String = sel.text.chars().skip(a).take(b - a).collect();
+        crate::subprocess::clipboard_set(&s);
+        return;
+    }
+}
+
 /// Cached `content_root` entity so render systems don't have to walk
 /// the pane chrome to find it.
 #[derive(Component)]
@@ -299,6 +535,11 @@ impl Plugin for WidgetPlugin {
                     rerender_widgets,
                     blur_inputs_on_focus_change,
                     handle_widget_press,
+                    begin_text_selection,
+                    update_text_selection,
+                    end_text_selection,
+                    render_text_selection_highlight,
+                    copy_text_selection,
                     handle_widget_input_typing,
                     handle_widget_edit_events,
                     poll_widget_children,
@@ -1057,11 +1298,17 @@ fn rerender_widgets(
 
         if let Ok(children) = children_q.get(root.0) {
             for c in children.iter() {
-                commands.entity(c).despawn();
+                // `try_despawn`: this per-frame rebuild can race a pane
+                // teardown (an exclusive system in another plugin) that
+                // recursively despawns this content. A plain `despawn` on
+                // a stale child panics the app. Same fix as the rhai
+                // widget render path (`apply_latest_frames`/`diff_render`).
+                commands.entity(c).try_despawn();
             }
         }
         targets.clicks.clear();
         targets.links.clear();
+        targets.spans.clear();
 
         let frame_clone = render_state.current_frame.clone().unwrap();
 
@@ -2240,6 +2487,24 @@ mod line_math_tests {
         let (_, _, multiline) = find_input_value(&frame, "q").unwrap();
         assert!(!multiline);
     }
+
+    #[test]
+    fn char_index_maps_x_to_nearest_boundary() {
+        // Monospace: cell_width 10 at font_size 10 → each char is 10px.
+        let m = PaneFontMetrics { cell_width: 10.0, font_size: 10.0 };
+        // Boundaries land at 0,10,20,30,40,50 for "hello".
+        assert_eq!(char_index_at_x("hello", 0.0, 10.0, &m, 0.0), 0);
+        assert_eq!(char_index_at_x("hello", 0.0, 10.0, &m, 4.0), 0); // nearer 0 than 10
+        assert_eq!(char_index_at_x("hello", 0.0, 10.0, &m, 23.0), 2); // nearer 20 than 30
+        assert_eq!(char_index_at_x("hello", 0.0, 10.0, &m, 27.0), 3); // nearer 30 than 20
+        // Past the end clamps to the final boundary (whole string).
+        assert_eq!(char_index_at_x("hello", 0.0, 10.0, &m, 1000.0), 5);
+        // A left-clipped point clamps to the start.
+        assert_eq!(char_index_at_x("hello", 0.0, 10.0, &m, -50.0), 0);
+        // Honors a non-zero run origin (e.g. a right-aligned table cell):
+        // x is relative to origin_x, so 127 → rel 27 → boundary 3.
+        assert_eq!(char_index_at_x("hello", 100.0, 10.0, &m, 127.0), 3);
+    }
 }
 
 fn placeholder_frame() -> Element {
@@ -2253,6 +2518,7 @@ fn placeholder_frame() -> Element {
                 size: Some(14.0),
                 weight: Some(Weight::Bold),
                 family: None,
+                selectable: false,
             },
             Element::Text {
                 value: format!("Set {} or save a snapshot with a command.", DEFAULT_CMD_ENV),
@@ -2260,6 +2526,7 @@ fn placeholder_frame() -> Element {
                 size: None,
                 weight: None,
                 family: None,
+                selectable: false,
             },
         ],
         style: None,
@@ -2277,6 +2544,7 @@ fn error_frame(msg: &str) -> Element {
                 size: Some(14.0),
                 weight: Some(Weight::Bold),
                 family: None,
+                selectable: false,
             },
             Element::Text {
                 value: msg.into(),
@@ -2284,6 +2552,7 @@ fn error_frame(msg: &str) -> Element {
                 size: None,
                 weight: None,
                 family: None,
+                selectable: false,
             },
         ],
         style: None,

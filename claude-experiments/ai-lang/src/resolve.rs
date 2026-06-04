@@ -312,6 +312,7 @@ fn value_position_builtin(name: &str) -> Option<&'static str> {
         "atom_load" => "core/atom.load",
         "atom_swap" => "core/atom.swap",
         "thread_spawn" => "core/thread.spawn",
+        "thread_spawn_shared" => "core/thread.spawn_shared",
         "thread_join" => "core/thread.join",
         _ => return None,
     })
@@ -2732,6 +2733,7 @@ fn resolve_expr_typed(
                     //   thread_spawn(thunk: fn() -> T) -> ThreadHandle<T>
                     //   thread_join(h: ThreadHandle<T>) -> T
                     "thread_spawn" => Some("core/thread.spawn"),
+                    "thread_spawn_shared" => Some("core/thread.spawn_shared"),
                     "thread_join" => Some("core/thread.join"),
                     _ => None,
                 };
@@ -2773,9 +2775,9 @@ fn resolve_expr_typed(
                         ),
                         // thread_join: value type T from arg 0's ThreadHandle<T>.
                         "thread_join" => elem_of("ThreadHandle", &args_typed),
-                        // thread_spawn: ThreadHandle<T> where T is the thunk's
-                        // return type (arg 0 is `fn() -> T`).
-                        "thread_spawn" => {
+                        // thread_spawn / thread_spawn_shared: ThreadHandle<T>
+                        // where T is the thunk's return type (arg 0 = fn()->T).
+                        "thread_spawn" | "thread_spawn_shared" => {
                             let t = match args_typed.first().map(|(_, t)| t) {
                                 Some(Type::FnType { params, ret }) if params.is_empty() => {
                                     (**ret).clone()

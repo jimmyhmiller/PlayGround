@@ -23,6 +23,97 @@ deeper lessons; this doc is the up-to-date status and the concrete next steps.
 - Tests: **99 frontend + 12 engine, all green**. simple.js still specializes
   correctly (the fixes fold to no-ops on its inputs).
 
+## Update (2026-06-04): effect #4 fixed + a method-call ordering bug fixed
+
+Two fixes landed since the TL;DR above (both fuzz- and Node-verified, regression-tested):
+
+1. **simple.js effect #4 (byte-array duplication) — FIXED.** See "Remaining issue
+   #2" below for the full write-up. Escape-at-creation duplication repair in
+   `Js::specialize_program`. difftrace now 13/13 identical.
+
+2. **Method-call receiver coercibility ordering — FIXED.** A method call
+   `recv.m(args)` evaluates `recv.m` (which throws if `recv` is null/undefined)
+   BEFORE its arguments, but the residual emits an *impure* argument's side effects
+   eagerly (as a preceding statement), moving them ahead of the receiver-throw.
+   Observable: original throws at `a.push(b++)` before `b++`, so `b` stays
+   `undefined` and a later `b.x=1` throws; the buggy residual ran `b++` first
+   (`b=NaN`), making `b.x=1` a silent no-op and swallowing the throw. This was the
+   **fuzzer's seed-20968 throw-mismatch**. Fix: a new `Instr::ChkCoercible(key)`,
+   emitted by `compile` between the receiver and the arguments ONLY when an
+   argument is impure (`!is_pure`), commits the receiver's coercibility throw
+   (`recv.key` read) at the member-access point. It folds away for
+   statically-coercible receivers and for provably-coercible dynamic receivers
+   (`Math.foo(...)`; see `rexpr_coercible`). Regression test
+   `method_callee_throws_before_impure_arg`. Remaining narrow gap: a *dynamic*
+   receiver that is null/undefined at runtime with an impure argument, where the
+   receiver expr is not provably coercible-or-nullish — left unguarded to avoid
+   bloat/false-throws (pre-existing behavior, not a regression).
+
+3. **try/catch handler leak on `break`/`continue` — FIXED.** A `break`/`continue`
+   inside a `try` body jumps out of the enclosing loop/switch WITHOUT running the
+   body's `PopHandler`, so the handler leaked past the loop and a later residual op
+   tripped the in-try guard (`forbid_residual_in_try`) — the fuzzer's seed-1042 /
+   20252 / 21217 / 21500 probe-bug panics. Fix in `src/js.rs` `compile`: track open
+   handler depth per loop/switch frame (`CompileAux.handler_depth` + `breaks_hd` /
+   `continues_hd`) and emit one `PopHandler` per `try` the `break`/`continue` exits,
+   before its jump. (`return` already cleaned up its frame's handlers via
+   `retain(frame_depth < depth)`; this closes the same gap for the non-local jumps.)
+   Regression test `break_continue_out_of_try_pops_handler`.
+
+4. **Nested-`try` foldability probe corruption — FIXED.** `try_folds` set/reset
+   `probing`/`try_taint` unconditionally; when a probed body contained a nested
+   `try`, the inner probe reset the OUTER probe's `probing` flag (and clobbered its
+   taint), so a later residual op in the outer probe panicked instead of tainting.
+   Fixed with the `residual_fn_for` save/restore pattern.
+
+Together (3)+(4) take the try/catch probe panics from ~3-per-2000 to ~0 on bases
+1/20000 and reduce them broadly.
+
+5. **Prefix `--x`/`++x` single-evaluation — FIXED.** A prefix update's result is
+   the new value read back from the place, a live expression aliasing that place
+   (`(input - 0) - 1`). When the place is later reassigned — most commonly the
+   loop-carried materialization of the very slot just stored — the un-snapshotted
+   result re-reads the new value and re-applies the `± 1`, diverging (the fuzzer's
+   seed-60510 value bug: `(--input)` in a loop condition returned 1 instead of 2
+   from a double-decrement). Fix: prefix now `Instr::Snapshot`s its result, mirror
+   of the postfix snapshot of the old value. Also taught the Rust residual
+   interpreter to evaluate `Op::Eval` (snapshot temps) via `eval_rexpr` instead of
+   blanket-panicking — it still panics on a genuinely unmodeled call, so the
+   Node-only contract for pass-through programs is unchanged. Regression test
+   `prefix_update_of_loop_carried_place_is_single_evaluated`.
+
+**Known pre-existing soundness bugs still open** (verified identical on the pre-fix
+binary; NOT caused by any fix here):
+- **probe-vs-main-path whistle divergence for a loop inside a folded `try`** — e.g.
+  fuzz seed 31079 (still a "probe-bug" panic). A `while`/`for` whose body is fully
+  static unrolls in isolation, but inside an outer `try` the MAIN path's whistle (with
+  accumulated `seen` history) GENERALIZES it into a residual loop, while the isolated
+  `try_folds` probe (fresh `seen`) does not — so the probe says "folds" but the main
+  path materializes a loop while the handler is active, tripping the in-try guard.
+  Root cause is architectural: `try_folds` re-specializes the region in isolation
+  (`sole_frame_state`, empty `seen`), so it cannot always predict the main path's
+  generalization decisions. A real fix needs the probe to see the same generalization
+  pressure as the main path, or `PushHandler` to conservatively residualize when the
+  body contains a loop that could materialize.
+- **function-source identity (INHERENT LIMITATION, not a fixable bug)** — e.g.
+  fuzz seeds 41158, 71404. A program that string-coerces a function (`String(fn)`,
+  `"" + fn`, `fn.toString()`) observes its SOURCE TEXT. A residual closure renders
+  as `__rfN.bind(null, caps)`, whose `String(...)` is `function () { [native code] }`,
+  while the original is the source. This is **impossible to fix in any correct
+  partial evaluator**: specialization changes a function's body (folded constants,
+  lowered/renamed variables), so `String(specialized_fn)` cannot equal
+  `String(original_fn)` — even rendering the closure without `.bind` only changes
+  `[native code]` into a different-but-still-not-original source. PE is sound *up to
+  function-source identity*; programs that observe a function's source text are
+  outside its contract. The fuzzer flags these as `kind=value` false positives
+  (~2 per 14k programs); they are not soundness defects.
+
+Current fuzz status with all fixes: **0 divergences attributable to these
+changes** across bases 1/10000/20000/30000/40000/60000/70000 (~14k programs); the
+only divergences/panics seen are the two pre-existing classes above (seed 31079
+probe panic, seed 41158 `.toString()`). The seed-60510 value divergence is now
+FIXED (fix #5 above).
+
 ## How to run things
 
 ```bash
@@ -30,6 +121,12 @@ deeper lessons; this doc is the up-to-date status and the concrete next steps.
 cargo build --release                       # engine (partial) + frontend lib
 cargo build -p js-frontend --release         # frontend + js-frontend bin
 cargo build -p js-frontend --release --bin fuzz
+# GOTCHA: the `fuzz` bin can go STALE — cargo sometimes does NOT relink it after a
+# `partial`-crate (src/js.rs) change, so it runs OLD codegen and reports
+# already-fixed divergences. If a seed you just fixed still diverges only under
+# `fuzz`, force a relink: `rm -f target/release/deps/fuzz-* target/release/fuzz`
+# then rebuild. Always confirm a `fuzz` finding against `./target/release/js-frontend
+# --js <prog>` (the main bin rebuilds reliably).
 
 # tests (THE gate — keep green)
 cargo test -p partial --release
@@ -243,7 +340,49 @@ loop_head/loop_end to the sub-program halt set, and have codegen set a shared
 try/catch — BUT this still needs the pc→outer-block map, which is the hard part.
 Gate any attempt on the residual-try tests; risk = destabilizing the sound path.
 
-## Remaining issue #2: simple.js effect #4 (WRONG ANSWER, deep, no minimal repro)
+## Remaining issue #2: simple.js effect #4 — **FIXED 2026-06-03**
+
+> **RESOLVED.** `node tools/difftrace.js .../simple.js` now reports
+> `original effects: 13, residual effects: 13 — IDENTICAL external-effect traces`.
+> simple.js specializes cleanly (exit 0) and the residual is *smaller* (~4k lines,
+> down from ~14k — the duplicate byte-array literals are gone).
+>
+> **Fix (the §5 "escape at creation" plan from `docs/effect4-handoff.md`):** the
+> partial evaluator was realizing ONE abstract heap object as several runtime
+> objects by reconstructing it (`materialize`) at multiple control-flow merge
+> points; a runtime write to one copy was invisible to a read of another. The
+> repair, all in `src/js.rs`:
+> - **Profile** (`Js::specialize_program`): specialize, counting per abstract
+>   address how many distinct `materialize` constructions it received
+>   (`dup_counts`, bumped from the `seen` set at the end of `materialize`). An
+>   address built >= 2 times is a duplicated identity.
+> - **Escape at creation**: flag that object's creation pc (`creation_pc` side
+>   map) and re-specialize; at a flagged `NewArray`/`NewObject` the object is
+>   `escape`d immediately — built once as a runtime variable at the one point that
+>   provably dominates every use — so no merge point can reconstruct it. Iterates
+>   to a fixpoint (escaping one object can reveal another). On simple.js: 10
+>   creation sites flagged, max constructions 12 -> (benign) 2, converges in 2
+>   passes.
+> - Why not the flat "materialize-once memo" (§4 of the handoff): that construction
+>   did not *dominate* later references and threw `undefined.value`. Escaping at
+>   creation is the only point guaranteed to dominate.
+> - **Soundness**: escaping at creation is observationally transparent (it only
+>   changes a static literal into a runtime variable), so over-escaping can never
+>   break correctness — only forgo folding. Guarded by `FORCE_ESCAPE_ALL` (escape
+>   EVERY object): the `escape_at_creation_is_transparent` test and a 1500-program
+>   fuzz run under it both stay equivalent. The normal fuzzer adds **0** new
+>   divergences/panics (the seed-1042 try/catch panic and seed-20968 throw-mismatch
+>   are **pre-existing**, in the unrelated residual-`try` path — verified identical
+>   on the pre-fix binary).
+>
+> A true minimal repro of the cross-merge-point duplication remains impractical
+> (any small dynamic program escapes the object to a single var first, as the
+> handoff predicted); the `force_escape_all` transparency test is the committed
+> regression guard, with simple.js's difftrace as the integration gate.
+
+---
+
+### Original diagnosis (kept for history)
 
 `/Users/jimmyhmiller/Documents/Code/deob/simple.js` is a multi-layer obfuscator
 (a loader VM decrypts self-modifying bytecode in place; a bytecode VM runs it;
@@ -352,6 +491,28 @@ construction across the trampoline; (b) don't regress the static folding for arr
 that never need to be residual. The shared-`seen` fix landed this session removes
 WITHIN-`materialize` duplication; this is the ACROSS-`materialize` (cross-merge-point)
 version.
+
+**ATTEMPTED + REVERTED (2026-06-03): a flat cross-`materialize` memo is NOT
+dominance-safe.** Implemented exactly the "record `addr -> (var, content snapshot)`,
+seed each `materialize`, reuse the var when the snapshot is unchanged, re-materialize
+when changed" idea (with the memo cleared/restored around residual-function
+specialization). Effect: simple.js's array-dup count dropped **52 → 5** (the memo
+does dedup), but it then threw `TypeError: Cannot read properties of undefined
+(reading 'value')` at effect #0 — a reused var (the `{value:…}` box) referenced in a
+block whose construction does NOT dominate it. So a flat memo is unsound: reuse is
+only valid when the single construction dominates every reuse site. The real fix must
+be dominance-aware — either (1) compute/track dominance in the streaming trampoline
+and only reuse a memoized var on dominated paths, or (2) HOIST the one construction to
+a block that dominates all merge points (e.g. the loop pre-header / function entry) so
+every back-edge can reference it, or (3) escape the object eagerly at its CREATION
+point (`NewArray`/`NewObject`), which is the natural dominator, when it is later
+mutated through a residualized write — turning it into a runtime `Var` from the start.
+Option (3) is the most promising: it sidesteps post-hoc dominance entirely (the
+creation site dominates by construction), at the cost of a "will this need residual
+identity?" analysis (or: conservatively escape any array created in a loop that is
+ever written with a dynamic index). The 112 tests + the 14k-program fuzzer are a
+strong soundness gate for whichever approach — the flat memo failed simple.js
+immediately, so a wrong approach is caught fast.
 
 While hunting effect #4 a minimal **closure-captured-array aliasing** bug was found
 and fixed (test `closure_captured_array_aliases_direct_mutation`, repro at

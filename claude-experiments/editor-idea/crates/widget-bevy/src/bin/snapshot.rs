@@ -132,7 +132,7 @@ fn main() -> ExitCode {
     // panic on first run.
     app.add_message::<claude_bus_bevy::ClaudeBusEvent>();
 
-    app.add_plugins(PanePlugin)
+    app.add_plugins(PanePlugin::default())
         .add_plugins(WidgetPlugin);
 
     app.insert_resource(config)

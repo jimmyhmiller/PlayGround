@@ -144,6 +144,33 @@ fn is_persistent_set(bits: u64, ids: HeapTypeIds) -> bool {
     heap_type_id(bits) == Some(ids.set)
 }
 
+/// `(instance? clojure.lang.Sequential x)` — backs `sequential?`. In the
+/// JVM, lists, conses, lazy seqs AND vectors are `Sequential` (maps/sets
+/// are not). `is_seq` (only conses) was too narrow — it made `flatten`
+/// (which recurses via `tree-seq sequential?`) skip vectors.
+fn is_sequential(bits: u64, ids: HeapTypeIds) -> bool {
+    matches!(heap_type_id(bits),
+        Some(t) if t == ids.cons || t == ids.lazy_seq || t == ids.vector)
+}
+
+/// `(instance? clojure.lang.IPersistentCollection x)` — backs `coll?`.
+/// True for every persistent collection / seq heap cell: lists, conses,
+/// lazy seqs, vectors, maps (hash + sorted), sets (hash + sorted).
+fn is_persistent_collection(bits: u64, ids: HeapTypeIds) -> bool {
+    match heap_type_id(bits) {
+        Some(t) => {
+            t == ids.cons
+                || t == ids.lazy_seq
+                || t == ids.vector
+                || t == ids.map
+                || t == ids.set
+                || t == ids.tree_map
+                || t == ids.tree_set
+        }
+        None => false,
+    }
+}
+
 fn is_string(bits: u64, ids: HeapTypeIds) -> bool {
     heap_type_id(bits) == Some(ids.string)
 }
@@ -315,7 +342,7 @@ fn register_classes() -> Vec<HostClassInfo> {
         None,
     );
     push(&mut v, "clojure.lang.IRecord", &[], always_false, None);
-    push(&mut v, "clojure.lang.Sequential", &[], is_seq, None);
+    push(&mut v, "clojure.lang.Sequential", &[], is_sequential, None);
     push(&mut v, "clojure.lang.Reversible", &[], always_false, None);
     push(&mut v, "clojure.lang.Counted", &[], always_false, None);
     push(&mut v, "clojure.lang.Indexed", &[], always_false, None);
@@ -932,6 +959,15 @@ fn register_classes() -> Vec<HostClassInfo> {
         &["IllegalStateException"],
         always_false,
         Some(make_exception_ctor("java.lang.IllegalStateException")),
+    );
+    // `coll?` → `(instance? clojure.lang.IPersistentCollection x)`. Appended
+    // last so existing ClassIds stay stable.
+    push(
+        &mut v,
+        "clojure.lang.IPersistentCollection",
+        &[],
+        is_persistent_collection,
+        None,
     );
 
     v

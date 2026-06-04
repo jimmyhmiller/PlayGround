@@ -627,6 +627,14 @@ pub unsafe fn heap_bits_to_object(bits: u64, ids: HeapTypeIds) -> Object {
         let arc = unsafe { std::sync::Arc::from_raw(arc_ptr) };
         return Object::Set(arc);
     }
+    if type_id == ids.tree_map {
+        let arc = unsafe { decode_tree_map(ptr) };
+        return Object::TreeMap(arc);
+    }
+    if type_id == ids.tree_set {
+        let arc = unsafe { decode_tree_set(ptr) };
+        return Object::TreeSet(arc);
+    }
     if type_id == ids.with_meta {
         // Generic IObj wrapper. inner @ 8, meta @ 16 (both NanBox).
         let inner_bits = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
@@ -811,11 +819,23 @@ impl Drop for CallTableBaseGuard {
 
 fn call_table_base() -> u64 {
     let base = CALL_TABLE_BASE.with(|c| c.get());
-    assert!(
-        base != 0,
-        "clojure-jvm: call_table_base not installed — eval helpers must use install_call_table_base"
+    if base != 0 {
+        return base;
+    }
+    // Not installed on this thread-local — we're dispatching a JIT fn from a
+    // Rust context OUTSIDE a `run_jit` scope. The canonical case: forcing a
+    // lazy-seq / Delay thunk during a Rust-side realize (`pr_str_bits`,
+    // diagnostics) AFTER `eval_form` returned and dropped its guard. Recover
+    // the base from the active Session's JIT so the thunk can still run.
+    if let Some(b) = crate::lang::compiler::active_session_call_table_base() {
+        if b != 0 {
+            return b;
+        }
+    }
+    panic!(
+        "clojure-jvm: call_table_base not installed and no active Session — \
+         cannot dispatch a JIT fn from this context"
     );
-    base
 }
 
 /// Like `dispatch_target_with_idx`, but if the receiver is a
@@ -1648,6 +1668,16 @@ pub unsafe extern "C" fn cljvm_numbers_abs(a: u64) -> u64 {
         Num::Double(d) => nanbox_double(d.abs()),
     }
 }
+/// `java.lang.Math/pow(a, b)` — `a^b` as a double.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_math_pow(a: u64, b: u64) -> u64 {
+    nanbox_double(arg_to_f64(a).powf(arg_to_f64(b)))
+}
+/// `java.lang.Math/sqrt(a)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_math_sqrt(a: u64) -> u64 {
+    nanbox_double(arg_to_f64(a).sqrt())
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_numbers_identity(a: u64) -> u64 {
     a
@@ -1779,7 +1809,13 @@ pub unsafe extern "C" fn cljvm_rt_nth(coll_bits: u64, idx_bits: u64) -> u64 {
                         .cast::<u64>()
                         .read_unaligned()
                 }
-            } else if tid == ids.cons {
+            } else if tid == ids.cons || tid == ids.lazy_seq {
+                // Walk a seq (cons chain or lazy seq) via first/next, both of
+                // which force lazy nodes. `cljvm_rt_next` returns the realized
+                // tail, so `nth` on a lazy seq realizes only as far as `idx`.
+                // `nth` over a lazy seq is what positional destructuring lowers
+                // to (`(nth coll i nil)`), so handling `lazy_seq` here makes
+                // `(let [[a b] (split-at 2 xs)] …)` bind correctly.
                 let mut cur = coll_bits;
                 for _ in 0..idx {
                     cur = unsafe { cljvm_rt_next(cur) };
@@ -1826,6 +1862,13 @@ pub unsafe extern "C" fn cljvm_rt_nth_3(coll_bits: u64, idx_bits: u64, not_found
                         .read_unaligned()
                 }
             } else if tid == ids.cons {
+                // NOTE: deliberately NOT including `ids.lazy_seq` here. `nth_3`
+                // is what positional destructuring lowers to (`(nth tmp i nil)`),
+                // and macros destructure lazy-seq values at MACROEXPAND time —
+                // forcing a lazy seq there dispatches JIT thunks in a compile
+                // context with no installed call-table base, which aborts
+                // (non-unwinding, uncatchable). Until lazy forcing is safe at
+                // compile time, destructuring over a lazy seq stays unsupported.
                 let mut cur = coll_bits;
                 for _ in 0..idx {
                     cur = unsafe { cljvm_rt_next(cur) };
@@ -1955,6 +1998,59 @@ fn heap_cons<'h>(heap: &'h mut Heap, x: Rooted<'_, ()>, tail: Rooted<'_, ()>) ->
     let tail_bits = tail.get_raw(&*heap).bits();
     let out = unsafe { cljvm_rt_cons(x_bits, tail_bits) };
     Raw::from_bits(&*heap, out)
+}
+
+/// Build a finite list of boxed Longs `start, start+step, …` (toward `end`,
+/// exclusive). Backs `clojure.lang.LongRange/create` (the impl `range` calls).
+/// Eager (not lazy) but produces a real seq (cons chain), so `pr-str` matches
+/// Clojure's `(0 1 2 …)`. `step == 0` yields the empty list (Clojure's
+/// infinite-repeat case is avoided to never hang).
+unsafe fn longrange_build(start: i64, end: i64, step: i64) -> u64 {
+    let mut vals: Vec<i64> = Vec::new();
+    if step > 0 {
+        let mut i = start;
+        while i < end {
+            vals.push(i);
+            i = i.wrapping_add(step);
+        }
+    } else if step < 0 {
+        let mut i = start;
+        while i > end {
+            vals.push(i);
+            i = i.wrapping_add(step);
+        }
+    }
+    let n = vals.len();
+    if n == 0 {
+        return nanbox_nil();
+    }
+    dynobj::roots::gc_enter(n + 1, |heap, scope| {
+        let cur = scope.root::<()>(nanbox_nil());
+        for &v in vals.iter().rev() {
+            // box_long allocates; root it before heap_cons allocates again.
+            // `cur` (the chain so far) is rooted, so it survives both.
+            let boxed = scope.root::<()>(box_long(v));
+            let new_cur = heap_cons(heap, boxed, cur);
+            cur.set_raw(new_cur);
+        }
+        cur.get_raw(&*heap).bits()
+    })
+}
+
+/// `clojure.lang.LongRange/create(end)` → `(range 0 end 1)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_longrange_create_1(end_bits: u64) -> u64 {
+    unsafe { longrange_build(0, arg_to_i64(end_bits), 1) }
+}
+/// `clojure.lang.LongRange/create(start, end)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_longrange_create_2(start_bits: u64, end_bits: u64) -> u64 {
+    unsafe { longrange_build(arg_to_i64(start_bits), arg_to_i64(end_bits), 1) }
+}
+/// `clojure.lang.LongRange/create(start, end, step)`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_longrange_create_3(start_bits: u64, end_bits: u64, step_bits: u64) -> u64 {
+    unsafe { longrange_build(arg_to_i64(start_bits), arg_to_i64(end_bits), arg_to_i64(step_bits)) }
 }
 
 /// `(f acc x)` as a GC-causing primitive. The user fn behind `f_bits` may
@@ -2118,6 +2214,53 @@ pub unsafe extern "C" fn cljvm_rt_conj(coll_bits: u64, x_bits: u64) -> u64 {
                 }
                 return nanbox_ptr(new_raw);
             }
+            if type_id == ids.set {
+                // (conj <set> x) → a new set with x added (Arc-shared).
+                let recv_arc_ptr = unsafe { raw.add(8).cast::<u64>().read_unaligned() }
+                    as *const crate::lang::persistent_hash_set::PersistentHashSet;
+                unsafe { Arc::increment_strong_count(recv_arc_ptr) };
+                let recv = unsafe { Arc::from_raw(recv_arc_ptr) };
+                let x_obj = any_bits_to_object(x_bits, ids);
+                let acc = recv.cons(x_obj);
+                let raw_arc = Arc::as_ptr(&acc) as u64;
+                crate::lang::compiler::with_active_session_root_set(acc);
+                let new_raw = dynlang::gc::gc_alloc_thunk(ids.set as u64, 0);
+                let new_ptr = new_raw as *mut u8;
+                if new_ptr.is_null() {
+                    panic!("clojure-jvm: RT.conj: gc_alloc returned null for Set");
+                }
+                unsafe {
+                    write_raw_word(new_ptr, 8, raw_arc);
+                }
+                return nanbox_ptr(new_raw);
+            }
+            if type_id == ids.tree_map {
+                // (conj <sorted-map> x): x is a Map (merge) or a [k v]/MapEntry.
+                if matches!(nanbox_tag(x_bits), Some(TAG_NIL)) {
+                    return coll_bits;
+                }
+                let mut acc = unsafe { decode_tree_map(raw) };
+                match any_bits_to_object(x_bits, ids).peel_meta_ref() {
+                    Object::Map(other) => {
+                        for (k, v) in other.iter() {
+                            acc = acc.assoc(k, v);
+                        }
+                    }
+                    Object::Vector(v) if v.count() == 2 => {
+                        acc = acc.assoc(v.nth(0), v.nth(1));
+                    }
+                    other => panic!(
+                        "clojure-jvm: RT.conj onto sorted-map needs Map / [k v], got {other:?}"
+                    ),
+                }
+                return alloc_tree_map_cell(acc);
+            }
+            if type_id == ids.tree_set {
+                // (conj <sorted-set> x) → add x.
+                let recv = unsafe { decode_tree_set(raw) };
+                let x_obj = any_bits_to_object(x_bits, ids);
+                return alloc_tree_set_cell(recv.cons(x_obj));
+            }
             eprintln!(
                 "[cljvm-stub] RT.conj — receiver type_id {type_id} not yet \
                  implemented, returning nil"
@@ -2134,22 +2277,113 @@ pub unsafe extern "C" fn cljvm_rt_conj(coll_bits: u64, x_bits: u64) -> u64 {
     }
 }
 
+/// `(assoc <vector> idx val)` — a new vector with slot `idx` replaced
+/// (`idx == count` appends, matching Clojure). Rooted-alloc pattern mirrors
+/// `cljvm_rt_conj`'s vector path: snapshot items + val into roots BEFORE the
+/// `heap_alloc` that may relocate them.
+unsafe fn vector_assoc(vec_bits: u64, key_bits: u64, val_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let raw = nanbox_payload(vec_bits) as *const u8;
+    let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
+    let idx = arg_to_i64(key_bits);
+    if idx < 0 || idx as usize > n {
+        panic!("clojure-jvm: (assoc vec idx val): index {idx} out of bounds (count {n})");
+    }
+    let idx = idx as usize;
+    let new_n = if idx == n { n + 1 } else { n };
+    dynobj::roots::gc_enter(n + 2, |heap, scope| {
+        let item_roots: Vec<dynobj::roots::Rooted<()>> = (0..n)
+            .map(|i| {
+                let v = unsafe { read_slot(&*heap, raw, 16 + i * 8) };
+                v.root(scope)
+            })
+            .collect();
+        let val_root = scope.root::<()>(val_bits);
+        let cell = heap_alloc(heap, ids.vector as u64, new_n as u64).root(scope);
+        let cell_bits = cell.get_raw(&*heap).bits();
+        let new_ptr = nanbox_payload(cell_bits) as *mut u8;
+        for i in 0..n {
+            let src = if i == idx {
+                val_root.get_raw(&*heap)
+            } else {
+                item_roots[i].get_raw(&*heap)
+            };
+            unsafe { write_slot(new_ptr, 16 + i * 8, src) };
+        }
+        if idx == n {
+            unsafe { write_slot(new_ptr, 16 + n * 8, val_root.get_raw(&*heap)) };
+        }
+        cell_bits
+    })
+}
+
+/// Allocate a `tree_map` heap cell pointing at `m` (rooted on the Session).
+fn alloc_tree_map_cell(m: Arc<crate::lang::persistent_tree_map::PersistentTreeMap>) -> u64 {
+    let ids = heap_type_ids();
+    let raw_arc = Arc::as_ptr(&m) as u64;
+    crate::lang::compiler::with_active_session_root_tree_map(m);
+    let new_raw = dynlang::gc::gc_alloc_thunk(ids.tree_map as u64, 0);
+    let new_ptr = new_raw as *mut u8;
+    if new_ptr.is_null() {
+        panic!("clojure-jvm: alloc_tree_map_cell: gc_alloc returned null");
+    }
+    unsafe { new_ptr.add(8).cast::<u64>().write_unaligned(raw_arc) };
+    nanbox_ptr(new_raw)
+}
+
+/// Allocate a `tree_set` heap cell pointing at `s` (rooted on the Session).
+fn alloc_tree_set_cell(s: Arc<crate::lang::persistent_tree_set::PersistentTreeSet>) -> u64 {
+    let ids = heap_type_ids();
+    let raw_arc = Arc::as_ptr(&s) as u64;
+    crate::lang::compiler::with_active_session_root_tree_set(s);
+    let new_raw = dynlang::gc::gc_alloc_thunk(ids.tree_set as u64, 0);
+    let new_ptr = new_raw as *mut u8;
+    if new_ptr.is_null() {
+        panic!("clojure-jvm: alloc_tree_set_cell: gc_alloc returned null");
+    }
+    unsafe { new_ptr.add(8).cast::<u64>().write_unaligned(raw_arc) };
+    nanbox_ptr(new_raw)
+}
+
+/// Decode a `tree_map` cell's `Arc<PersistentTreeMap>` (incrementing the
+/// strong count so the returned Arc is owned).
+unsafe fn decode_tree_map(raw: *const u8) -> Arc<crate::lang::persistent_tree_map::PersistentTreeMap> {
+    let arc_ptr = unsafe { raw.add(8).cast::<u64>().read_unaligned() }
+        as *const crate::lang::persistent_tree_map::PersistentTreeMap;
+    unsafe { Arc::increment_strong_count(arc_ptr) };
+    unsafe { Arc::from_raw(arc_ptr) }
+}
+/// Decode a `tree_set` cell's `Arc<PersistentTreeSet>`.
+unsafe fn decode_tree_set(raw: *const u8) -> Arc<crate::lang::persistent_tree_set::PersistentTreeSet> {
+    let arc_ptr = unsafe { raw.add(8).cast::<u64>().read_unaligned() }
+        as *const crate::lang::persistent_tree_set::PersistentTreeSet;
+    unsafe { Arc::increment_strong_count(arc_ptr) };
+    unsafe { Arc::from_raw(arc_ptr) }
+}
+
 /// `clojure.lang.RT.assoc(Object coll, Object key, Object val)` —
 /// associate `key → val` in `coll` and return the resulting collection.
-/// Java dispatches via `IPersistentCollection`; we cover the cases the
-/// bootstrap of `clojure.core` actually exercises:
-///   * nil  → a fresh singleton map `{key val}`
-///   * Map  → a new map with the entry assoc'd (Arc-shared with `coll`)
-/// Vectors are panic'd until the bootstrap actually needs them; that
-/// keeps the failure loud rather than silently succeeding for a wrong
-/// receiver type.
-///
-/// Newly-built `Arc<PersistentHashMap>` values are pushed onto the
-/// active Session's `roots._maps` so the heap-cell's Raw64 pointer
-/// stays valid for the lifetime of the JIT module.
+/// Covers nil → singleton map, Map → assoc'd map, Vector → index replace.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn cljvm_rt_assoc(coll_bits: u64, key_bits: u64, val_bits: u64) -> u64 {
     let ids = heap_type_ids();
+    // Vector receiver: integer-index replace/append. Handle before the
+    // map-entry decode below (which is map-specific).
+    if let Some(TAG_PTR) = nanbox_tag(coll_bits) {
+        let raw = nanbox_payload(coll_bits) as *const u8;
+        if !raw.is_null() {
+            let tid = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+            if tid == ids.vector {
+                return unsafe { vector_assoc(coll_bits, key_bits, val_bits) };
+            }
+            if tid == ids.tree_map {
+                let arc = unsafe { decode_tree_map(raw) };
+                let k = any_bits_to_object(key_bits, ids);
+                let v = any_bits_to_object(val_bits, ids);
+                return alloc_tree_map_cell(arc.assoc(k, v));
+            }
+        }
+    }
     // Decode key + val to host-side Objects so the Arc<PersistentHashMap>
     // stores them by-value. (Maps don't put their entries on the GC heap
     // — the Arc owns a Vec<(Object, Object)>.)
@@ -2253,6 +2487,12 @@ pub unsafe extern "C" fn cljvm_rt_count(bits: u64) -> u64 {
                     let arc_ptr = unsafe { ptr.add(8).cast::<u64>().read_unaligned() }
                         as *const crate::lang::persistent_hash_set::PersistentHashSet;
                     unsafe { (*arc_ptr).count() as i64 }
+                } else if type_id == ids.tree_map {
+                    let arc = unsafe { decode_tree_map(ptr) };
+                    arc.count() as i64
+                } else if type_id == ids.tree_set {
+                    let arc = unsafe { decode_tree_set(ptr) };
+                    arc.count() as i64
                 } else if type_id == ids.string {
                     let c = unsafe { ptr.add(8).cast::<u64>().read_unaligned() };
                     c as i64
@@ -2990,6 +3230,144 @@ pub unsafe extern "C" fn cljvm_rt_toArray(coll_bits: u64) -> u64 {
     })
 }
 
+/// Coerce a Clojure comparator's result NanBox into an `Ordering`, mirroring
+/// `clojure.lang.AFn.compare`: a Boolean `true` means "less than"; a Boolean
+/// `false` re-tests the reversed pair (`true` → "greater", else "equal");
+/// otherwise the value is a Number whose sign is the ordering. Calls the
+/// comparator via `cljvm_rt_invoke_2` (safe: the call-table base is installed
+/// during JIT execution, which is the only context `Arrays/sort` runs in).
+///
+/// # Safety
+/// `comp_bits` must be an invokable 2-arity fn value; `a`/`b` are passed
+/// straight through and become roots in the comparator's frame before it can
+/// allocate, so no GC window exposes them.
+unsafe fn sort_compare(comp_bits: u64, a: u64, b: u64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    let r = unsafe { cljvm_rt_invoke_2(comp_bits, a, b) };
+    if nanbox_tag(r) == Some(TAG_BOOL) {
+        if nanbox_payload(r) != 0 {
+            Ordering::Less
+        } else {
+            let r2 = unsafe { cljvm_rt_invoke_2(comp_bits, b, a) };
+            if nanbox_tag(r2) == Some(TAG_BOOL) && nanbox_payload(r2) != 0 {
+                Ordering::Greater
+            } else {
+                Ordering::Equal
+            }
+        }
+    } else {
+        arg_to_i64(r).cmp(&0)
+    }
+}
+
+/// Identity instance method — backs `(.asTransient coll)` and
+/// `(.persistent coll)`, which for our delegation-based transients just
+/// return the (persistent) collection unchanged.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_identity(recv_bits: u64) -> u64 {
+    recv_bits
+}
+
+/// `java.util.Comparator.compare(a, b)` invoked on a Clojure `IFn`. `sort-by`
+/// expands to `(fn [x y] (. comp (compare (keyfn x) (keyfn y))))`, where `comp`
+/// is a fn (default `compare`). A fn-as-Comparator's `.compare` is just its
+/// invocation coerced to an int (clojure.lang.AFn.compare): Boolean `true` →
+/// -1, `false` → re-test reversed (`true` → 1, else 0), otherwise the returned
+/// number itself.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_compare(recv_bits: u64, a: u64, b: u64) -> u64 {
+    let r = unsafe { cljvm_rt_invoke_2(recv_bits, a, b) };
+    if nanbox_tag(r) == Some(TAG_BOOL) {
+        if nanbox_payload(r) != 0 {
+            unsafe { box_long(-1) }
+        } else {
+            let r2 = unsafe { cljvm_rt_invoke_2(recv_bits, b, a) };
+            if nanbox_tag(r2) == Some(TAG_BOOL) && nanbox_payload(r2) != 0 {
+                unsafe { box_long(1) }
+            } else {
+                unsafe { box_long(0) }
+            }
+        }
+    } else {
+        r
+    }
+}
+
+/// `java.util.Arrays.sort(Object[] a, Comparator c)` — stable in-place sort.
+/// Our "array" is the fresh Vector that `to-array` produces, so we sort its
+/// flat element slots in place; upstream `sort`/`sort-by` then call `(seq a)`.
+///
+/// GC-safety is the crux: each comparator call can allocate and the GC can
+/// relocate every element AND the array cell itself. We therefore stage the
+/// elements (plus the array's own NanBox) in a chunk-buffer-style `Vec<u64>`
+/// registered as a GC root source, so every comparison reads forwarded bits.
+/// Indices are sorted (reading the staged buffer fresh per comparison); the
+/// final write-back reads the staged buffer and the forwarded array pointer
+/// with no intervening allocation, so no stale pointer is ever stored.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_arrays_sort(arr_bits: u64, comp_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let raw = match nanbox_tag(arr_bits) {
+        Some(TAG_PTR) => nanbox_payload(arr_bits) as *const u8,
+        _ => return arr_bits, // nil → nothing to sort
+    };
+    if raw.is_null() {
+        return arr_bits;
+    }
+    let tid = unsafe { raw.cast::<u16>().read_unaligned() } as usize;
+    if tid != ids.vector {
+        panic!("clojure-jvm: Arrays/sort — first arg must be an array (Vector), got type_id {tid}");
+    }
+    let n = unsafe { raw.add(8).cast::<u64>().read_unaligned() } as usize;
+    if n < 2 {
+        return arr_bits;
+    }
+
+    // Stage [elem0 … elem_{n-1}, arr_bits] in a GC-traced buffer. After this,
+    // `buf[i]` is the forwarded bits of element i and `buf[n]` is the
+    // forwarded array NanBox — both updated across any GC.
+    let buf = std::sync::Arc::new(std::cell::RefCell::new(Vec::<u64>::with_capacity(n + 1)));
+    {
+        let mut v = buf.borrow_mut();
+        for i in 0..n {
+            v.push(unsafe { raw.add(16 + i * 8).cast::<u64>().read_unaligned() });
+        }
+        v.push(arr_bits);
+    }
+    register_chunk_buffer(&buf);
+
+    // Sort indices. The comparator reads its two operands from the staged
+    // buffer under a short borrow that is released before the (possibly
+    // GC-triggering) comparator call, satisfying the "no cell mutably borrowed
+    // at a safepoint" invariant of the chunk root source.
+    let mut idxs: Vec<usize> = (0..n).collect();
+    idxs.sort_by(|&i, &j| {
+        let (a, b) = {
+            let v = buf.borrow();
+            (v[i], v[j])
+        };
+        unsafe { sort_compare(comp_bits, a, b) }
+    });
+
+    // Write back. Read the forwarded array pointer and forwarded elements from
+    // the staged buffer; this loop allocates nothing, so every bit stays valid.
+    {
+        let v = buf.borrow();
+        let arr_now = nanbox_payload(v[n]) as *mut u8;
+        for (k, &src_i) in idxs.iter().enumerate() {
+            let bits = v[src_i];
+            unsafe {
+                arr_now.add(16 + k * 8).cast::<u64>().write_unaligned(bits);
+            }
+        }
+    }
+
+    deregister_chunk_buffer(&buf);
+    // Return the (possibly forwarded) array NanBox.
+    let final_bits = buf.borrow()[n];
+    final_bits
+}
+
 /// `clojure.lang.RT.first(Object coll)` — return the first item or nil.
 /// Java: handles ISeq, Seqable, nil. We cover nil/Cons/Vector now;
 /// Map iteration goes through `seq` first (Java does the same).
@@ -3609,6 +3987,11 @@ pub unsafe extern "C" fn cljvm_inst_disjoin(set_bits: u64, key_bits: u64) -> u64
                 return nanbox_nil();
             }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+            if tid == ids.tree_set {
+                let s = unsafe { decode_tree_set(p) };
+                let key = any_bits_to_object(key_bits, ids);
+                return alloc_tree_set_cell(s.disjoin(&key));
+            }
             if tid != ids.set {
                 eprintln!("[cljvm-stub] (.disjoin) on non-set type_id {tid}");
                 return nanbox_nil();
@@ -3672,6 +4055,16 @@ pub unsafe extern "C" fn cljvm_rt_contains(coll_bits: u64, key_bits: u64) -> u64
                 let key = any_bits_to_object(key_bits, ids);
                 return nanbox_bool(s.contains(&key));
             }
+            if tid == ids.tree_map {
+                let m = unsafe { decode_tree_map(p) };
+                let key = any_bits_to_object(key_bits, ids);
+                return nanbox_bool(m.contains_key(&key));
+            }
+            if tid == ids.tree_set {
+                let s = unsafe { decode_tree_set(p) };
+                let key = any_bits_to_object(key_bits, ids);
+                return nanbox_bool(s.contains(&key));
+            }
             panic!("clojure-jvm: RT.contains on unsupported type_id {tid}");
         }
         _ => nanbox_bool(false),
@@ -3710,7 +4103,11 @@ pub unsafe extern "C" fn cljvm_rt_get_3(coll_bits: u64, key_bits: u64, not_found
                 return crate::lang::compiler::with_active_session_encode_object(&v);
             }
             if tid == ids.vector {
-                if !nanbox_tag(key_bits).is_none() {
+                // Vectors index by integer only. The key is either a boxed
+                // Long (`(get v 2)`) or a native number; anything else
+                // (keyword/string/…) is `not_found`.
+                let is_int = is_boxed_long(key_bits) || nanbox_tag(key_bits).is_none();
+                if !is_int {
                     return not_found;
                 }
                 let n = unsafe { p.add(8).cast::<u64>().read_unaligned() } as i64;
@@ -3723,6 +4120,20 @@ pub unsafe extern "C" fn cljvm_rt_get_3(coll_bits: u64, key_bits: u64, not_found
                         .cast::<u64>()
                         .read_unaligned()
                 };
+            }
+            if tid == ids.tree_map {
+                let m = unsafe { decode_tree_map(p) };
+                let key = any_bits_to_object(key_bits, ids);
+                if !m.contains_key(&key) {
+                    return not_found;
+                }
+                let v = m.val_at(&key);
+                return crate::lang::compiler::with_active_session_encode_object(&v);
+            }
+            if tid == ids.tree_set {
+                let s = unsafe { decode_tree_set(p) };
+                let key = any_bits_to_object(key_bits, ids);
+                return if s.contains(&key) { key_bits } else { not_found };
             }
             if tid == ids.set {
                 let arc_ptr = unsafe { p.add(8).cast::<u64>().read_unaligned() }
@@ -3802,6 +4213,11 @@ pub unsafe extern "C" fn cljvm_rt_dissoc(coll_bits: u64, key_bits: u64) -> u64 {
                 return nanbox_nil();
             }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
+            if tid == ids.tree_map {
+                let m = unsafe { decode_tree_map(p) };
+                let key = any_bits_to_object(key_bits, ids);
+                return alloc_tree_map_cell(m.without(&key));
+            }
             if tid != ids.map {
                 panic!("clojure-jvm: RT.dissoc on non-map type_id {tid}");
             }
@@ -3839,17 +4255,22 @@ pub unsafe extern "C" fn cljvm_rt_keys(coll_bits: u64) -> u64 {
                 return nanbox_nil();
             }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-            if tid != ids.map {
+            let keys: Vec<u64> = if tid == ids.tree_map {
+                let m = unsafe { decode_tree_map(p) };
+                m.iter()
+                    .map(|(k, _)| crate::lang::compiler::with_active_session_encode_object(&k))
+                    .collect()
+            } else if tid == ids.map {
+                let arc_ptr = unsafe { p.add(8).cast::<u64>().read_unaligned() }
+                    as *const crate::lang::persistent_hash_map::PersistentHashMap;
+                unsafe { Arc::increment_strong_count(arc_ptr) };
+                let m = unsafe { Arc::from_raw(arc_ptr) };
+                m.iter()
+                    .map(|(k, _)| crate::lang::compiler::with_active_session_encode_object(&k))
+                    .collect()
+            } else {
                 panic!("clojure-jvm: RT.keys on non-map type_id {tid}");
-            }
-            let arc_ptr = unsafe { p.add(8).cast::<u64>().read_unaligned() }
-                as *const crate::lang::persistent_hash_map::PersistentHashMap;
-            unsafe { Arc::increment_strong_count(arc_ptr) };
-            let m = unsafe { Arc::from_raw(arc_ptr) };
-            let keys: Vec<u64> = m
-                .iter()
-                .map(|(k, _)| crate::lang::compiler::with_active_session_encode_object(&k))
-                .collect();
+            };
             if keys.is_empty() {
                 return nanbox_nil();
             }
@@ -3879,17 +4300,22 @@ pub unsafe extern "C" fn cljvm_rt_vals(coll_bits: u64) -> u64 {
                 return nanbox_nil();
             }
             let tid = unsafe { p.cast::<u16>().read_unaligned() } as usize;
-            if tid != ids.map {
+            let vals: Vec<u64> = if tid == ids.tree_map {
+                let m = unsafe { decode_tree_map(p) };
+                m.iter()
+                    .map(|(_, v)| crate::lang::compiler::with_active_session_encode_object(&v))
+                    .collect()
+            } else if tid == ids.map {
+                let arc_ptr = unsafe { p.add(8).cast::<u64>().read_unaligned() }
+                    as *const crate::lang::persistent_hash_map::PersistentHashMap;
+                unsafe { Arc::increment_strong_count(arc_ptr) };
+                let m = unsafe { Arc::from_raw(arc_ptr) };
+                m.iter()
+                    .map(|(_, v)| crate::lang::compiler::with_active_session_encode_object(&v))
+                    .collect()
+            } else {
                 panic!("clojure-jvm: RT.vals on non-map type_id {tid}");
-            }
-            let arc_ptr = unsafe { p.add(8).cast::<u64>().read_unaligned() }
-                as *const crate::lang::persistent_hash_map::PersistentHashMap;
-            unsafe { Arc::increment_strong_count(arc_ptr) };
-            let m = unsafe { Arc::from_raw(arc_ptr) };
-            let vals: Vec<u64> = m
-                .iter()
-                .map(|(_, v)| crate::lang::compiler::with_active_session_encode_object(&v))
-                .collect();
+            };
             if vals.is_empty() {
                 return nanbox_nil();
             }
@@ -4083,6 +4509,23 @@ unsafe fn equiv_impl(a: u64, b: u64) -> bool {
         let b_rest = unsafe { b_ptr.add(16).cast::<u64>().read_unaligned() };
         return unsafe { equiv_impl(a_rest, b_rest) };
     }
+    if a_type == ids.vector {
+        // Vector layout: count (Raw64) at offset 8, elements (NanBox) from
+        // offset 16. Equal iff same length and element-wise `=`.
+        let a_n = unsafe { a_ptr.add(8).cast::<u64>().read_unaligned() };
+        let b_n = unsafe { b_ptr.add(8).cast::<u64>().read_unaligned() };
+        if a_n != b_n {
+            return false;
+        }
+        for i in 0..a_n as usize {
+            let ae = unsafe { a_ptr.add(16 + i * 8).cast::<u64>().read_unaligned() };
+            let be = unsafe { b_ptr.add(16 + i * 8).cast::<u64>().read_unaligned() };
+            if !unsafe { equiv_impl(ae, be) } {
+                return false;
+            }
+        }
+        return true;
+    }
     if a_type == ids.map {
         // Read the host-side Arc pointers stored as Raw64. Pointer-equal
         // Arcs (same instance) short-circuit; otherwise dispatch to the
@@ -4268,10 +4711,70 @@ pub unsafe extern "C" fn cljvm_rt_seq(bits: u64) -> u64 {
                     }
                     tail.get_raw(&*heap).bits()
                 })
+            } else if type_id == ids.tree_map {
+                // Sorted map → seq of `[k v]` entries in ASCENDING key order.
+                // (We cons from the back, so iterate reversed to keep order.)
+                let arc_ptr = unsafe { ptr.add(8).cast::<u64>().read_unaligned() }
+                    as *const crate::lang::persistent_tree_map::PersistentTreeMap;
+                unsafe { Arc::increment_strong_count(arc_ptr) };
+                let m = unsafe { Arc::from_raw(arc_ptr) };
+                let pairs: Vec<(Object, Object)> = m.iter().collect();
+                if pairs.is_empty() {
+                    return nanbox_nil();
+                }
+                dynobj::roots::gc_enter(pairs.len() + 1, |heap, scope| {
+                    let tail = scope.root::<()>(nanbox_nil());
+                    for (k, v) in pairs.into_iter().rev() {
+                        let entry = Object::Vector(
+                            crate::lang::persistent_vector::PersistentVector::create(vec![k, v]),
+                        );
+                        let e = scope
+                            .root::<()>(crate::lang::compiler::with_active_session_encode_object(&entry));
+                        let new_tail = heap_cons(heap, e, tail);
+                        tail.set_raw(new_tail);
+                    }
+                    tail.get_raw(&*heap).bits()
+                })
+            } else if type_id == ids.tree_set {
+                // Sorted set → seq of elements in ASCENDING order.
+                let arc_ptr = unsafe { ptr.add(8).cast::<u64>().read_unaligned() }
+                    as *const crate::lang::persistent_tree_set::PersistentTreeSet;
+                unsafe { Arc::increment_strong_count(arc_ptr) };
+                let s = unsafe { Arc::from_raw(arc_ptr) };
+                let elems: Vec<Object> = s.iter().collect();
+                if elems.is_empty() {
+                    return nanbox_nil();
+                }
+                dynobj::roots::gc_enter(elems.len() + 1, |heap, scope| {
+                    let tail = scope.root::<()>(nanbox_nil());
+                    for e in elems.into_iter().rev() {
+                        let er = scope
+                            .root::<()>(crate::lang::compiler::with_active_session_encode_object(&e));
+                        let new_tail = heap_cons(heap, er, tail);
+                        tail.set_raw(new_tail);
+                    }
+                    tail.get_raw(&*heap).bits()
+                })
             } else if type_id == ids.string {
-                // String → seq of Character. Bootstrap doesn't need this
-                // path yet; surface loudly so callers see what to add.
-                panic!("clojure-jvm: RT.seq on String — needs Character heap type");
+                // String → seq of Character (one per Unicode scalar). Same
+                // GC-safe snapshot-then-cons pattern as the collection
+                // branches: snapshot the codepoints into a Rust Vec first
+                // (no heap pointers), then box each Character and cons it.
+                let s = unsafe { read_string_heap(bits, ids, "RT.seq on String") };
+                let codepoints: Vec<u32> = s.chars().map(|c| c as u32).collect();
+                if codepoints.is_empty() {
+                    return nanbox_nil();
+                }
+                dynobj::roots::gc_enter(codepoints.len() + 1, |heap, scope| {
+                    let tail = scope.root::<()>(nanbox_nil());
+                    for &cp in codepoints.iter().rev() {
+                        let cbits = unsafe { box_char(cp) };
+                        let cr = scope.root::<()>(cbits);
+                        let new_tail = heap_cons(heap, cr, tail);
+                        tail.set_raw(new_tail);
+                    }
+                    tail.get_raw(&*heap).bits()
+                })
             } else if type_id == ids.lazy_seq {
                 // Force the thunk; recurse on the realized value.
                 let arc: std::sync::Arc<std::cell::RefCell<LazyState>> =
@@ -4708,6 +5211,30 @@ fn format_object_for_str(obj: &Object) -> String {
                 items.push(format_object_pr(&v.nth(i)));
             }
             format!("[{}]", items.join(" "))
+        }
+        Object::Map(m) => {
+            // `{k v, k v}`. Iteration order is unspecified (hash order), so
+            // this matches Clojure only for single-entry / sorted maps.
+            let items: Vec<String> = m
+                .iter()
+                .map(|(k, v)| format!("{} {}", format_object_pr(&k), format_object_pr(&v)))
+                .collect();
+            format!("{{{}}}", items.join(", "))
+        }
+        Object::Set(s) => {
+            let items: Vec<String> = s.iter().map(|o| format_object_pr(&o)).collect();
+            format!("#{{{}}}", items.join(" "))
+        }
+        Object::TreeMap(m) => {
+            let items: Vec<String> = m
+                .iter()
+                .map(|(k, v)| format!("{} {}", format_object_pr(&k), format_object_pr(&v)))
+                .collect();
+            format!("{{{}}}", items.join(", "))
+        }
+        Object::TreeSet(s) => {
+            let items: Vec<String> = s.iter().map(|o| format_object_pr(&o)).collect();
+            format!("#{{{}}}", items.join(" "))
         }
         Object::WithMeta(inner, _) => format_object_for_str(inner),
         other => format!("{other:?}"),
@@ -5388,6 +5915,38 @@ pub unsafe extern "C" fn cljvm_inst_substring2(s_bits: u64, start_bits: u64, end
     alloc_string_heap(out, ids)
 }
 
+/// `(.toUpperCase s)` — uppercased String. Backs `clojure.string/upper-case`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_toUpperCase(s_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = read_string_heap(s_bits, ids, "(.toUpperCase s)");
+    alloc_string_heap(&s.to_uppercase(), ids)
+}
+/// `(.toLowerCase s)` — lowercased String. Backs `clojure.string/lower-case`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_toLowerCase(s_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = read_string_heap(s_bits, ids, "(.toLowerCase s)");
+    alloc_string_heap(&s.to_lowercase(), ids)
+}
+/// `(.trim s)` — String with leading/trailing ASCII whitespace removed.
+/// Backs `clojure.string/trim`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_inst_trim(s_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = read_string_heap(s_bits, ids, "(.trim s)");
+    alloc_string_heap(s.trim(), ids)
+}
+/// Reverse a String by Unicode scalar. Backs `clojure.string/reverse`
+/// (registered as a static so the shim doesn't need char-seq machinery).
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn cljvm_str_reverse(s_bits: u64) -> u64 {
+    let ids = heap_type_ids();
+    let s = read_string_heap(s_bits, ids, "string/reverse");
+    let r: String = s.chars().rev().collect();
+    alloc_string_heap(&r, ids)
+}
+
 /// `(.lastIndexOf s sub)` — byte index of the LAST occurrence of String
 /// `sub` within String `s`, or -1 if absent. Java overload also accepts a
 /// char; `clojure.core` only uses the String form here (`root-directory`'s
@@ -5701,6 +6260,18 @@ pub fn register_lazy_state(arc: &std::sync::Arc<std::cell::RefCell<LazyState>>) 
 /// pointers are scanned/forwarded by the GC.
 pub fn register_chunk_buffer(arc: &std::sync::Arc<std::cell::RefCell<Vec<u64>>>) {
     CHUNK_REGISTRY.with(|r| r.borrow_mut().push(arc.clone()));
+}
+
+/// Remove a buffer previously registered with [`register_chunk_buffer`],
+/// matched by `Arc` identity. Used by transient GC roots (e.g. the sort
+/// scratch buffer) that must not leak into the registry after use.
+pub fn deregister_chunk_buffer(arc: &std::sync::Arc<std::cell::RefCell<Vec<u64>>>) {
+    CHUNK_REGISTRY.with(|r| {
+        let mut v = r.borrow_mut();
+        if let Some(pos) = v.iter().position(|a| std::sync::Arc::ptr_eq(a, arc)) {
+            v.swap_remove(pos);
+        }
+    });
 }
 
 /// `RootSource` over all live `LazyState`s and chunk buffers on this thread.
@@ -6659,6 +7230,8 @@ mod gc_alloc_lockin {
         "box_char",          // boxes a u32 codepoint immediate
         "alloc_arc_cell",    // takes a Rust value, stores its Arc ptr
         "alloc_string_heap", // copies a Rust-owned &str
+        "alloc_tree_map_cell", // takes Arc<PersistentTreeMap>, stores its Arc ptr
+        "alloc_tree_set_cell", // takes Arc<PersistentTreeSet>, stores its Arc ptr
         // Arc-backed persistent collections: decode to Arc before alloc,
         // store only the stable Rust Arc pointer.
         "cljvm_rt_assoc",

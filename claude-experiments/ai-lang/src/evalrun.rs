@@ -111,9 +111,8 @@ use crate::net::{
 };
 use crate::parser::parse_module;
 use crate::resolve::{AtBinding, ExternSig, ResolvedDef, ResolvedModule, resolve_module};
-use crate::runtime::{
-    Runtime, Thread, ai_array_new, ai_array_set, ai_gc_box_int, ai_str_new,
-};
+use crate::handle::Alloc;
+use crate::runtime::{Runtime, Thread, ai_str_new};
 use crate::stdlib::SOURCE as STDLIB;
 use inkwell::context::Context;
 
@@ -865,6 +864,12 @@ unsafe fn build_named_arg(
                 )));
             }
             let ptr = unsafe { crate::runtime::ai_gc_alloc_closure(thread, ti) };
+            // Root the struct across the field builds (each allocates and may
+            // relocate it); re-read the live pointer before each store. The
+            // scope auto-resets on every exit path (incl. the `?`s below).
+            let dyna = unsafe { &*(*thread).dyna_thread };
+            let scope = dyna.scratch_scope();
+            let ptr_slot = scope.push(ptr);
             for (idx, (fname, fty)) in fields.iter().enumerate() {
                 let fval = obj.get(fname).ok_or_else(|| {
                     EvalError::BadParams(format!(
@@ -874,9 +879,10 @@ unsafe fn build_named_arg(
                     ))
                 })?;
                 let concrete = subst(fty, type_args);
-                unsafe { store_built_field(cb, rt, ptr, &metas[idx], &concrete, fval)? };
+                let cur = scope.get(ptr_slot);
+                unsafe { store_built_field(cb, rt, cur, &metas[idx], &concrete, fval)? };
             }
-            Ok(ptr as i64)
+            Ok(scope.get(ptr_slot) as i64)
         }
         Def::Enum { variants, .. } => {
             // `{"Variant": payload}` (one key) or bare `"Variant"` (nullary).
@@ -930,8 +936,14 @@ unsafe fn build_named_arg(
                 (None, None, None) => Ok(ptr as i64),
                 (Some(pty), Some(meta), Some(pj)) => {
                     let concrete = subst(pty, type_args);
-                    unsafe { store_built_field(cb, rt, ptr, &meta, &concrete, pj)? };
-                    Ok(ptr as i64)
+                    // Root the variant object across the payload build (which
+                    // allocates and may relocate it); re-read before returning.
+                    let dyna = unsafe { &*(*thread).dyna_thread };
+                    let scope = dyna.scratch_scope();
+                    let ptr_slot = scope.push(ptr);
+                    let cur = scope.get(ptr_slot);
+                    unsafe { store_built_field(cb, rt, cur, &meta, &concrete, pj)? };
+                    Ok(scope.get(ptr_slot) as i64)
                 }
                 (Some(_), _, None) => Err(EvalError::BadParams(format!(
                     "enum variant `{}::{}` carries a payload; supply `{{\"{}\": payload}}`",
@@ -975,8 +987,13 @@ unsafe fn store_built_field(
     fval: &Json,
 ) -> Result<(), EvalError> {
     let thread = rt.thread_ptr();
+    // Root the destination object across the field build (and the box below):
+    // both allocate, and a collection there would relocate `ptr`, leaving the
+    // store writing through a stale pointer. Re-read after each child alloc.
+    let dyna = unsafe { &*(*thread).dyna_thread };
+    let scope = dyna.scratch_scope();
+    let ptr_slot = scope.push(ptr);
     let raw = unsafe { build_arg(cb, rt, fty, fval)? };
-    let slot = unsafe { ptr.add(meta.offset as usize) };
     if meta.is_pointer {
         // A scalar declared type in a pointer slot means a generic (TypeVar)
         // field carrying a boxed scalar; box it. Otherwise `raw` is already a
@@ -986,12 +1003,16 @@ unsafe fn store_built_field(
         } else {
             raw as *mut u8
         };
+        // Re-read the relocated object AFTER the box alloc; the store itself
+        // does not allocate, so `p` stays valid.
+        let ptr = scope.get(ptr_slot);
         unsafe {
-            *(slot as *mut *mut u8) = p;
+            *(ptr.add(meta.offset as usize) as *mut *mut u8) = p;
         }
     } else {
+        let ptr = scope.get(ptr_slot);
         unsafe {
-            *(slot as *mut i64) = raw;
+            *(ptr.add(meta.offset as usize) as *mut i64) = raw;
         }
     }
     Ok(())
@@ -1031,24 +1052,30 @@ unsafe fn build_array_arg(
         }
     };
     let n = items.len() as i64;
-    let arr = unsafe { ai_array_new(thread, n) };
-    for (i, item) in items.iter().enumerate() {
-        // Build the element by its declared type. A scalar element
-        // (`Int`/`Float`/`Bool`) comes back as a raw 8-byte value from the wire
-        // path; box it so the slot holds a real pointer the renderer can unbox
-        // and re-interpret per the element type. Pointer-shaped elements
-        // (struct/enum/String/Array) are stored as-is.
-        let raw = unsafe { build_arg(cb, rt, elem_ty, item)? };
-        let slot_ptr: *mut u8 = if is_boxed_scalar(elem_ty) {
-            unsafe { ai_gc_box_int(thread, raw) }
-        } else {
-            raw as *mut u8
-        };
-        unsafe {
-            ai_array_set(arr, i as i64, slot_ptr);
-        }
+    // Borrow-checked allocation: `arr` stays rooted across every element
+    // build (each allocates and may move `arr`), and the borrow checker —
+    // not hand-written scratch bookkeeping — guarantees we re-read it.
+    unsafe {
+        Alloc::enter(thread, |a, scope| {
+            let arr = a.array_new(n).root(scope);
+            for (i, item) in items.iter().enumerate() {
+                // Build the element by its declared type. A scalar element
+                // (`Int`/`Float`/`Bool`) comes back as a raw 8-byte value;
+                // box it so the slot holds a pointer the renderer can unbox.
+                // Pointer-shaped elements (struct/enum/String/Array) are
+                // stored as-is.
+                let raw = build_arg(cb, rt, elem_ty, item)?;
+                let it = a.scope();
+                let elem = if is_boxed_scalar(elem_ty) {
+                    a.box_int(raw).root(&it)
+                } else {
+                    a.adopt(raw as *mut u8).root(&it)
+                };
+                a.array_set(arr.get(a), i as i64, elem.get(a));
+            }
+            Ok(arr.get(a).ptr() as i64)
+        })
     }
-    Ok(arr as i64)
 }
 
 // =============================================================================

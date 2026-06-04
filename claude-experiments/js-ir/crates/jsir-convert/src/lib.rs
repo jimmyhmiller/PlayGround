@@ -72,10 +72,7 @@ pub fn ast2hir(file: &dyn AstNode) -> LowerResult<Op> {
     file_op
         .attrs
         .push(("comments".into(), Attr::Array(comment_attrs)));
-    file_op.regions.push(Region::with_block(Block {
-        args: vec![],
-        ops: vec![prog_op],
-    }));
+    file_op.regions.push(Region::with_block(Block::leaf(vec![prog_op])));
 
     // STEP 0 (Phase B): assign a stable, monotonically-increasing `node_id` to
     // every op in the built tree. We piggyback the same Builder counter used for
@@ -135,14 +132,8 @@ fn lower_program(b: &mut Builder, prog: &dyn AstNode) -> LowerResult<Op> {
     }
     op.attrs
         .push(("source_type".into(), Attr::Str(source_type.to_string())));
-    op.regions.push(Region::with_block(Block {
-        args: vec![],
-        ops: body,
-    }));
-    op.regions.push(Region::with_block(Block {
-        args: vec![],
-        ops: directives,
-    }));
+    op.regions.push(Region::with_block(Block::leaf(body)));
+    op.regions.push(Region::with_block(Block::leaf(directives)));
     Ok(op)
 }
 
@@ -299,7 +290,7 @@ fn lower_stmt(b: &mut Builder, ops: &mut Vec<Op>, node: &dyn AstNode) -> LowerRe
                         end.operands.push(v);
                         rops.push(end);
                     }
-                    Region::with_block(Block { args: vec![], ops: rops })
+                    Region::with_block(Block::leaf(rops))
                 }
                 _ => Region::default(),
             });
@@ -323,7 +314,7 @@ fn lower_stmt(b: &mut Builder, ops: &mut Vec<Op>, node: &dyn AstNode) -> LowerRe
             }
             let mut op = node_op("jsir.export_default_declaration", node)?;
             op.regions
-                .push(Region::with_block(Block { args: vec![], ops: rops }));
+                .push(Region::with_block(Block::leaf(rops)));
             ops.push(op);
             Ok(())
         }
@@ -366,7 +357,7 @@ fn lower_stmt(b: &mut Builder, ops: &mut Vec<Op>, node: &dyn AstNode) -> LowerRe
                     let mut rops = Vec::new();
                     lower_stmt(b, &mut rops, decl)?;
                     op.regions
-                        .push(Region::with_block(Block { args: vec![], ops: rops }));
+                        .push(Region::with_block(Block::leaf(rops)));
                 }
                 _ => op.regions.push(Region::default()),
             }
@@ -396,7 +387,7 @@ fn lower_stmt(b: &mut Builder, ops: &mut Vec<Op>, node: &dyn AstNode) -> LowerRe
                     cc.regions
                         .push(stmt_region(b, node_of(field(handler, "body")?)?)?);
                     rops.push(cc);
-                    Region::with_block(Block { args: vec![], ops: rops })
+                    Region::with_block(Block::leaf(rops))
                 }
                 _ => Region::default(),
             });
@@ -423,11 +414,11 @@ fn lower_stmt(b: &mut Builder, ops: &mut Vec<Op>, node: &dyn AstNode) -> LowerRe
                     lower_stmt(b, &mut body, node_of(s)?)?;
                 }
                 cop.regions
-                    .push(Region::with_block(Block { args: vec![], ops: body }));
+                    .push(Region::with_block(Block::leaf(body)));
                 cases.push(cop);
             }
             op.regions
-                .push(Region::with_block(Block { args: vec![], ops: cases }));
+                .push(Region::with_block(Block::leaf(cases)));
             ops.push(op);
             Ok(())
         }
@@ -447,14 +438,8 @@ fn lower_block_statement(b: &mut Builder, node: &dyn AstNode) -> LowerResult<Op>
         }
     }
     let mut op = node_op("jshir.block_statement", node)?;
-    op.regions.push(Region::with_block(Block {
-        args: vec![],
-        ops: body,
-    }));
-    op.regions.push(Region::with_block(Block {
-        args: vec![],
-        ops: directives,
-    }));
+    op.regions.push(Region::with_block(Block::leaf(body)));
+    op.regions.push(Region::with_block(Block::leaf(directives)));
     Ok(op)
 }
 
@@ -482,10 +467,7 @@ fn lower_variable_declaration(b: &mut Builder, node: &dyn AstNode) -> LowerResul
 
     let mut op = node_op("jsir.variable_declaration", node)?;
     op.attrs.push(("kind".into(), Attr::Str(kind.to_string())));
-    op.regions.push(Region::with_block(Block {
-        args: vec![],
-        ops: region_ops,
-    }));
+    op.regions.push(Region::with_block(Block::leaf(region_ops)));
     Ok(op)
 }
 
@@ -725,7 +707,7 @@ fn lower_expr(b: &mut Builder, ops: &mut Vec<Op>, node: &dyn AstNode) -> LowerRe
                 rops.push(end);
             }
             op.regions
-                .push(Region::with_block(Block { args: vec![], ops: rops }));
+                .push(Region::with_block(Block::leaf(rops)));
             emit(ops, b, op)
         }
         "ObjectExpression" => lower_object_expression(b, ops, node),
@@ -1000,10 +982,7 @@ fn lower_class(b: &mut Builder, ops: &mut Vec<Op>, node: &dyn AstNode, name: &st
         op.attrs.push(("id".into(), identifier_attr(id)?));
     }
     let class_body = lower_class_body(b, node_of(field(node, "body")?)?)?;
-    op.regions.push(Region::with_block(Block {
-        args: vec![],
-        ops: vec![class_body],
-    }));
+    op.regions.push(Region::with_block(Block::leaf(vec![class_body])));
     Ok(op)
 }
 
@@ -1015,7 +994,7 @@ fn lower_class_body(b: &mut Builder, node: &dyn AstNode) -> LowerResult<Op> {
     }
     let mut op = node_op("jsir.class_body", node)?;
     op.regions
-        .push(Region::with_block(Block { args: vec![], ops: members }));
+        .push(Region::with_block(Block::leaf(members)));
     Ok(op)
 }
 
@@ -1140,7 +1119,7 @@ fn lower_function(b: &mut Builder, node: &dyn AstNode, name: &str) -> LowerResul
     end.operands = presults;
     pops.push(end);
     op.regions
-        .push(Region::with_block(Block { args: vec![], ops: pops }));
+        .push(Region::with_block(Block::leaf(pops)));
 
     // Body region (StmtRegion holding the function's BlockStatement).
     op.regions
@@ -1214,7 +1193,7 @@ fn lower_pattern_ref(b: &mut Builder, ops: &mut Vec<Op>, node: &dyn AstNode) -> 
             rops.push(end);
             let mut op = node_op("jsir.object_pattern_ref", node)?;
             op.regions
-                .push(Region::with_block(Block { args: vec![], ops: rops }));
+                .push(Region::with_block(Block::leaf(rops)));
             emit(ops, b, op)
         }
         other => Err(format!("unsupported pattern: {other}")),
@@ -1306,7 +1285,7 @@ fn lower_object_expression(b: &mut Builder, ops: &mut Vec<Op>, node: &dyn AstNod
     rops.push(end);
     let mut op = node_op("jsir.object_expression", node)?;
     op.regions
-        .push(Region::with_block(Block { args: vec![], ops: rops }));
+        .push(Region::with_block(Block::leaf(rops)));
     emit(ops, b, op)
 }
 
@@ -1433,14 +1412,14 @@ fn expr_region(
     let mut end = Op::new("jsir.expr_region_end");
     end.operands.push(v);
     ops.push(end);
-    Ok(Region::with_block(Block { args: vec![], ops }))
+    Ok(Region::with_block(Block::leaf(ops)))
 }
 
 /// Build a `StmtRegion`: lower a single statement into a fresh block.
 fn stmt_region(b: &mut Builder, node: &dyn AstNode) -> LowerResult<Region> {
     let mut ops = Vec::new();
     lower_stmt(b, &mut ops, node)?;
-    Ok(Region::with_block(Block { args: vec![], ops }))
+    Ok(Region::with_block(Block::leaf(ops)))
 }
 
 /// An optional `ExprRegion`: a block ending in `expr_region_end` when the field

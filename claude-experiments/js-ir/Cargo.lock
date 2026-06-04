@@ -429,8 +429,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "jsir-jslir"
+version = "0.0.0"
+dependencies = [
+ "jsir-ir",
+ "jsir-swc",
+]
+
+[[package]]
 name = "jsir-oracle"
 version = "0.1.0"
+
+[[package]]
+name = "jsir-react-oracle"
+version = "0.0.0"
+dependencies = [
+ "jsir-ir",
+ "jsir-jslir",
+ "jsir-swc",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "jsir-ssa"

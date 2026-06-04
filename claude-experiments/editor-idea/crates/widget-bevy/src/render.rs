@@ -14,7 +14,7 @@ use bevy::text::{LineHeight, TextBounds};
 use pane_bevy::PaneFontMetrics;
 
 use crate::protocol::{parse_hex_color, Align, ButtonKind, Edges, Element, Style, TabItem, Weight};
-use crate::{ClickKind, ClickTarget, LinkTarget, WidgetTargets};
+use crate::{ClickKind, ClickTarget, LinkTarget, TextSpan, WidgetTargets};
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 pub const LINE_HEIGHT_MUL: f32 = 1.4;
@@ -237,7 +237,21 @@ pub fn render(
     z: f32,
 ) -> Vec2 {
     let mut laid = crate::layout::build_tree(el, &ctx.metrics);
-    crate::layout::compute(&mut laid, max_w, f32::INFINITY, &ctx.metrics);
+    // Available height for layout. The pane content height is already
+    // known (ctx.content_size.y); passing it as the definite available
+    // height lets a root opt into filling the pane vertically — `height:
+    // "100%"` resolves against it and `flex_grow` distributes real
+    // vertical space, symmetric with how `max_w` makes width work.
+    // A root with no explicit/flex height still sizes to its content
+    // (Taffy uses available space only for percentage/flex resolution),
+    // so taller-than-pane content keeps growing and scrolls as before.
+    // Fall back to INFINITY when the pane height isn't known yet.
+    let avail_h = if ctx.content_size.y.is_finite() && ctx.content_size.y > 0.0 {
+        ctx.content_size.y
+    } else {
+        f32::INFINITY
+    };
+    crate::layout::compute(&mut laid, max_w, avail_h, &ctx.metrics);
     let root_layout = laid.layout(laid.root);
     let root_origin = origin
         + Vec2::new(root_layout.location.x, root_layout.location.y);
@@ -347,22 +361,40 @@ fn render_node(
             size: font_size,
             weight,
             family,
+            selectable,
         } => render_text_at(
             commands,
             ctx,
+            targets,
             value,
             color.as_deref(),
             font_size.unwrap_or(DEFAULT_FONT_SIZE),
             *weight,
             family.as_deref(),
+            *selectable,
             origin,
             size,
             z,
         ),
         Element::Divider => render_divider_at(commands, ctx, origin, size, z),
         Element::Spacer { .. } => {}
-        Element::Badge { value, color, .. } => {
-            render_badge_at(commands, ctx, value, color.as_deref(), origin, size, z);
+        Element::Badge {
+            value,
+            color,
+            selectable,
+            ..
+        } => {
+            render_badge_at(
+                commands,
+                ctx,
+                targets,
+                value,
+                color.as_deref(),
+                *selectable,
+                origin,
+                size,
+                z,
+            );
         }
         Element::Button {
             id,
@@ -455,9 +487,11 @@ fn render_node(
             columns,
             rows,
             zebra,
+            selectable,
             ..
         } => render_table_at(
-            commands, ctx, laid, node_id, columns, rows, *zebra, origin, size, z,
+            commands, ctx, targets, laid, node_id, columns, rows, *zebra, *selectable, origin,
+            size, z,
         ),
         // Canvas renders only at the top level via render_canvas_items.
         // Nested Canvas inside flow layout becomes a 0-size leaf.
@@ -504,14 +538,17 @@ fn parse_color_or_default(s: &str, fallback: Color) -> Color {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn render_text_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
     value: &str,
     color: Option<&str>,
     font_size: f32,
     weight: Option<Weight>,
     family: Option<&str>,
+    selectable: bool,
     origin: Vec2,
     size: Vec2,
     z: f32,
@@ -547,6 +584,17 @@ fn render_text_at(
         },
         Transform::from_xyz(origin.x, -origin.y, z),
     ));
+    // Drag-select: register this run as a selectable text span. Char
+    // offsets are measured left-to-right from `origin`, so use the
+    // glyph-origin rect (one line tall for the common single-line value).
+    if selectable && !value.is_empty() {
+        let line_h = line_height(font_size);
+        targets.spans.push(TextSpan {
+            text: value.to_string(),
+            rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + line_h),
+            font_size,
+        });
+    }
 }
 
 fn render_divider_at(commands: &mut Commands, ctx: &LayoutCtx, origin: Vec2, size: Vec2, z: f32) {
@@ -563,11 +611,14 @@ fn render_divider_at(commands: &mut Commands, ctx: &LayoutCtx, origin: Vec2, siz
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn render_badge_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
     value: &str,
     color: Option<&str>,
+    selectable: bool,
     origin: Vec2,
     size: Vec2,
     z: f32,
@@ -600,6 +651,16 @@ fn render_badge_at(
         bevy::text::TextLayout::new_with_no_wrap(),
         Transform::from_xyz(origin.x + BADGE_PAD_X, -(origin.y + BADGE_PAD_Y), z + 0.01),
     ));
+    if selectable && !value.is_empty() {
+        let tx = origin.x + BADGE_PAD_X;
+        let ty = origin.y + BADGE_PAD_Y;
+        let line_h = line_height(BADGE_FONT_SIZE);
+        targets.spans.push(TextSpan {
+            text: value.to_string(),
+            rect: Rect::new(tx, ty, tx + size.x, ty + line_h),
+            font_size: BADGE_FONT_SIZE,
+        });
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1537,11 +1598,13 @@ pub(crate) fn wrap_visual_lines(
 fn render_table_at(
     commands: &mut Commands,
     ctx: &LayoutCtx,
+    targets: &mut WidgetTargets,
     laid: &crate::layout::LaidOut,
     node_id: taffy::NodeId,
     columns: &[crate::protocol::TableColumn],
     rows: &[Vec<String>],
     zebra: bool,
+    selectable: bool,
     origin: Vec2,
     size: Vec2,
     z: f32,
@@ -1554,6 +1617,27 @@ fn render_table_at(
     if cells.is_empty() {
         return;
     }
+
+    // Paint the panel + row backgrounds from the grid's CONTENT BOX
+    // (the union of the laid-out cell extents), not the node `size`.
+    // The node can be stretched wider than its tracks (flex parent with
+    // align-items: stretch → dead space, panel wider than cells) or, in
+    // the content-sized root, the tracks can exceed the clamped node
+    // width (last column painting past the panel edge). Measuring the
+    // cells directly makes the panel and zebra/header fills line up
+    // with the cells exactly in every case.
+    let mut content = Vec2::ZERO;
+    for &cell in &cells {
+        let cl = laid.layout(cell);
+        content.x = content.x.max(cl.location.x + cl.size.width);
+        content.y = content.y.max(cl.location.y + cl.size.height);
+    }
+    // Paint exactly the cells' extent. Falls back to the node size if a
+    // degenerate (zero-area) content box is measured.
+    let size = Vec2::new(
+        if content.x > 0.0 { content.x } else { size.x },
+        if content.y > 0.0 { content.y } else { size.y },
+    );
 
     // Outer panel: subtle surface + border.
     let radius = ctx.resolve_f32("radius_sm").unwrap_or(4.0);
@@ -1667,6 +1751,18 @@ fn render_table_at(
             }
             _ => (left, Some(content_w)),
         };
+        // Drag-select: register the cell as a selectable span. `text_x` is
+        // the glyph origin (already alignment-shifted), and the run reaches
+        // the cell's right content edge, so char offsets measured from
+        // `text_x` land correctly for left/center/right alignment alike.
+        if selectable {
+            let line_h = line_height(DEFAULT_FONT_SIZE);
+            targets.spans.push(TextSpan {
+                text: text.clone(),
+                rect: Rect::new(text_x, top, left + content_w, top + line_h),
+                font_size: DEFAULT_FONT_SIZE,
+            });
+        }
         commands.spawn((
             ChildOf(ctx.content_root),
             Text2d::new(text),

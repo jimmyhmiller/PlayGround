@@ -156,7 +156,7 @@ impl Plugin for EditorPlugin {
             ),
         )
         .add_systems(PostStartup, release_os_focus)
-        .add_plugins(PanePlugin)
+        .add_plugins(PanePlugin::default())
         .add_plugins(EditorEmbedPlugin);
     }
 }

@@ -18,7 +18,7 @@ pub use lower::compile;
 pub fn to_js(src: &str) -> Result<String, String> {
     let funcs = compile(src)?;
     let vm = Js::new(&funcs);
-    let mut prog = partial::engine::specialize(&vm, vm.start());
+    let mut prog = vm.specialize_program();
     if std::env::var_os("SPEC_STEPS").is_some() {
         eprintln!(
             "spec_steps={} spec_blocks={} spec_weight={}",
@@ -36,7 +36,7 @@ pub fn to_js(src: &str) -> Result<String, String> {
 pub fn specialize(src: &str) -> Result<(Js, Program<Op, Cond>), String> {
     let funcs = compile(src)?;
     let vm = Js::new(&funcs);
-    let mut prog = partial::engine::specialize(&vm, vm.start());
+    let mut prog = vm.specialize_program();
     partial::residual::simplify(&mut prog);
     Ok((vm, prog))
 }
@@ -560,6 +560,58 @@ mod tests {
         assert!(ran, "node should be available in this environment");
     }
 
+    /// Soundness guard for the duplication fix (`Js::specialize_program`): the
+    /// fix repairs a partial-evaluator identity bug where ONE abstract heap
+    /// object was reconstructed at several control-flow merge points, becoming
+    /// several distinct runtime objects (a write to one invisible to a read of
+    /// another — this broke `simple.js`'s byte array at the 4th `Date.now`
+    /// effect). The repair escapes such objects at their CREATION site (the
+    /// program point that provably dominates every use), building them once as a
+    /// runtime variable that no merge point reconstructs.
+    ///
+    /// A true minimal repro of the cross-merge-point duplication is impractical
+    /// (any small dynamic program escapes the object to a single var first), so
+    /// this test instead verifies the property the fix relies on: escaping an
+    /// object at creation is OBSERVATIONALLY TRANSPARENT. `force_escape_all`
+    /// escapes EVERY object at creation; across varied programs (nested arrays,
+    /// mutated objects, arrays of objects with shared identity, a trampoline-style
+    /// dynamic dispatch) the residual must stay equivalent to the reference. A
+    /// non-dominating construction — the failure of the rejected flat-memo fix —
+    /// would read `undefined` or throw, which node-equivalence catches.
+    #[test]
+    fn escape_at_creation_is_transparent() {
+        let progs = [
+            // nested array mutated through static indices, carried across a loop
+            "function main(n){var a=[[1,2],[3,4]];var s=0;for(var i=0;i<n;i=i+1){\
+             a[0][0]=a[0][0]+1;s=s+a[1][1];}return s+a[0][0];}",
+            // object whose fields are mutated and read across a loop
+            "function main(n){var o={x:1,y:2};var s=0;for(var i=0;i<n;i=i+1){\
+             o.x=o.x+o.y;s=s+o.x;}return s;}",
+            // array of objects with identity shared across iterations
+            "function main(n){var xs=[{v:0},{v:0}];for(var i=0;i<n;i=i+1){\
+             xs[0].v=xs[0].v+1;xs[1].v=xs[1].v+xs[0].v;}return xs[0].v+xs[1].v;}",
+            // trampoline-style dynamic dispatch carrying a nested array (the
+            // closest small mimic of simple.js's structure)
+            "function main(n){var a=[[10,20,30]];var pc=n&3;var acc=0;var g=0;\
+             while(g<10){if(pc===0){a[0][0]=a[0][0]+1;pc=1;}\
+             else if(pc===1){acc=acc+a[0][1];pc=2;}\
+             else if(pc===2){a[0][2]=a[0][2]+acc;pc=3;}else{pc=0;}g=g+1;}\
+             return acc+a[0][0]+a[0][2];}",
+        ];
+        let mut ran = false;
+        for src in progs {
+            let funcs = compile(src).unwrap();
+            let vm = Js::new(&funcs);
+            vm.set_force_escape_all(true);
+            let mut prog = vm.specialize_program();
+            partial::residual::simplify(&mut prog);
+            let js = codegen::program_to_js(&vm, &prog, vm.input_var());
+            assert_valid_js(&js);
+            ran |= run_under_node(&js, &vm, &[0, 1, 2, 3, 5, 8, 13]);
+        }
+        assert!(ran, "node should be available in this environment");
+    }
+
     #[test]
     fn emits_and_runs_futamura_interpreter_js() {
         let src = r#"
@@ -685,6 +737,114 @@ mod tests {
         let js = to_js(src).unwrap();
         assert!(js.contains("Math.sqrt("), "the builtin call should pass through:\n{js}");
         assert_node_equiv(src, &[0, 2, 8, 50]);
+    }
+
+    /// A method call evaluates its callee — including the `recv.method` member
+    /// access, which throws if `recv` is null/undefined — BEFORE its arguments.
+    /// When an argument is impure, the residual emits its side effects eagerly, so
+    /// without a receiver coercibility guard (`Instr::ChkCoercible`) the residual
+    /// would run the argument first: the receiver-throw moves after the argument's
+    /// mutation, changing observable behavior. Here the original throws at
+    /// `a.push`/`a.foo` before `b++` runs (so `b` stays `undefined` and the catch's
+    /// `b.x = 1` throws); a residual that ran `b++` first would leave `b = NaN`,
+    /// making `b.x = 1` a silent no-op and swallowing the throw. (Regression for the
+    /// fuzzer's seed-20968 throw-mismatch.)
+    #[test]
+    fn method_callee_throws_before_impure_arg() {
+        // push receiver, statically-undefined
+        assert_node_equiv_outcome(
+            "function main(input) { var a; var b; try { a.push(b++); } \
+             catch (e) { b.x = 1; } return 0; }",
+            &[0, 1],
+        );
+        // general method callee, statically-undefined receiver
+        assert_node_equiv_outcome(
+            "function main(input) { var a; var b; var r = 0; try { r = a.foo(b++); } \
+             catch (e) { b.x = 1; } return r; }",
+            &[0, 1],
+        );
+        // dynamic receiver that is null/undefined at runtime, carried through the
+        // residualized try as a runtime variable (the form the fuzzer hit)
+        assert_node_equiv_outcome(
+            "function main(input) { var a; if (input > 100) { a = [1]; } var b = input; \
+             try { a.push(b++); } catch (e) { b.y = 1; } return b; }",
+            &[0, 5],
+        );
+        // a provably-coercible receiver (Math) with an impure arg must NOT be
+        // guarded away or mis-thrown — it just folds the call through
+        assert_node_equiv_outcome(
+            "function main(input) { var b = input; return Math.max(b++, b++); }",
+            &[0, 3, 7],
+        );
+    }
+
+    /// A `break`/`continue` inside a `try` body jumps out of the loop/switch
+    /// WITHOUT running the body's `PopHandler`, so the handler must be popped
+    /// explicitly at the non-local exit — otherwise it leaks past the loop and a
+    /// later residual operation trips the "operation inside an active try/catch"
+    /// guard (the fuzzer's seed-1042/20252/21217/21500 probe-bug panics). These
+    /// programs must specialize cleanly and stay equivalent to the original.
+    #[test]
+    fn break_continue_out_of_try_pops_handler() {
+        // continue out of a try, then a residual op after the loop (the seed-1042
+        // shape): must not panic, must stay equivalent.
+        assert_node_equiv_outcome(
+            "function main(input) { for (var i = 0; i < 1; i = i + 1) { \
+             try { continue; } catch (e) {} } return input[[null]]; }",
+            &[0, 3],
+        );
+        // break out of a try inside a while, with a residual op after
+        assert_node_equiv_outcome(
+            "function main(input) { var n = input; while (n > 0) { \
+             try { break; } catch (e) {} n = n - 1; } return input.x; }",
+            &[0, 2],
+        );
+        // break out of a try nested in a switch nested in a loop (multiple open
+        // handlers to pop)
+        assert_node_equiv_outcome(
+            "function main(input) { var s = 0; for (var i = 0; i < 3; i = i + 1) { \
+             switch (i) { case 0: try { try { break; } catch (a) {} } catch (b) {} \
+             default: s = s + 1; } } return s; }",
+            &[0, 1],
+        );
+        // continue past a try, then a residual op after the loop must still be
+        // reached with no active handler
+        assert_node_equiv_outcome(
+            "function main(input) { for (var i = 0; i < 2; i = i + 1) { \
+             try { continue; } catch (e) {} } return input.length; }",
+            &[0, 4],
+        );
+    }
+
+    /// A prefix `--x`/`++x` whose place is loop-carried: its result is the new
+    /// value read back from the place, a live expression aliasing that place. When
+    /// the place is later reassigned (the loop-carried materialization of the very
+    /// slot just updated), an un-snapshotted result re-reads the new value and
+    /// re-applies the `± 1`, diverging. Here `(--input)` in the loop condition is
+    /// used while `input` is the loop-carried slot; the residual must single-
+    /// evaluate it. (Regression for the fuzzer's seed-60510 value divergence:
+    /// orig returned 2, the residual returned 1 from a double-decrement.)
+    #[test]
+    fn prefix_update_of_loop_carried_place_is_single_evaluated() {
+        assert_node_equiv(
+            "function main(input) { \
+               for (var a = 0; a < 4; a = a + 1) { \
+                 if (((--input) ?? (input || a))) { \
+                   input.b = (\"k\" * \"x\"); \
+                   if (a) { return a; } \
+                 } \
+               } \
+               return 0; \
+             }",
+            &[0, 1, 2, 3, 4, 5, 8],
+        );
+        // a simpler form: prefix decrement reused in the same expression while the
+        // place is loop-carried
+        assert_node_equiv(
+            "function main(input) { var s = 0; \
+               while (input > 0) { s = s + (--input) + input; } return s; }",
+            &[0, 1, 3, 6],
+        );
     }
 
     // ---- object escape (Increment 3) — validated by Node ----
@@ -1120,18 +1280,35 @@ mod tests {
         assert!(js.contains("throw (v0 + 1);"), "got:\n{js}");
     }
 
-    /// A `try` whose body has a may-throw residual op (an unmodeled call) can't
-    /// fold its exceptions into control flow, so it residualizes a real
-    /// `try`/`catch`. `Math.floor` doesn't throw, so the catch never runs.
+    /// A `try` whose body has a may-throw residual op (an unmodeled call that
+    /// could throw) can't fold its exceptions into control flow, so it
+    /// residualizes a real `try`/`catch`. `missing` is an undefined global, so
+    /// `missing(x)` throws a ReferenceError the catch must handle at runtime.
     #[test]
     fn residual_try_passthrough_call() {
-        let src = "function main(x) { try { return Math.floor(x); } catch (e) { return 0; } }";
+        let src = "function main(x) { try { return missing(x); } catch (e) { return 0; } }";
         let js = to_js(src).unwrap();
         assert!(
             js.contains("try {") && js.contains("} catch ("),
             "should emit a residual try/catch:\n{js}"
         );
         assert_node_equiv(src, &[0, 5, -3, 42]);
+    }
+
+    /// A `try` whose body's only residual op is a PROVABLY-TOTAL builtin
+    /// (`Math.floor`, `Date.now`, …) cannot throw, so the `try`/`catch` is dead and
+    /// is correctly erased — `try { return Math.floor(x) } catch { return 0 }` ≡
+    /// `return Math.floor(x)`. This is the foundation for unrolling the simple.js
+    /// VM, whose work is wrapped in defensive try/catch around a `Date.now` read.
+    #[test]
+    fn total_builtin_in_try_folds_away() {
+        let src = "function main(x) { try { return Math.floor(x / 2); } catch (e) { return 0; } }";
+        let js = to_js(src).unwrap();
+        assert!(
+            !js.contains("try {") && js.contains("Math.floor("),
+            "a total-builtin try should erase to a plain expression:\n{js}"
+        );
+        assert_node_equiv(src, &[0, 5, -3, 42, 7]);
     }
 
     /// A variable mutated only via `++` inside a *computed member* (`arr[i++]`)
@@ -1264,13 +1441,83 @@ mod tests {
 
     #[test]
     fn passthrough_in_and_instanceof() {
+        // A DYNAMIC key still passes `in` through (the membership can't be decided
+        // statically), as does `instanceof` (not modeled).
         let src = r#"function main(x) {
-            var o = { k: x };
-            return ("k" in o) === true;
+            var o = { a: 1, b: 2 };
+            var key = x > 0 ? "a" : "c";
+            return (key in o) ? 1 : 0;
         }"#;
         let js = to_js(src).unwrap();
-        assert!(js.contains(" in "), "`in` should pass through:\n{js}");
+        assert!(js.contains(" in "), "`in` with a dynamic key should pass through:\n{js}");
+        assert_node_equiv(src, &[0, 7, -1]);
+    }
+
+    /// `key in obj` with a STATIC key and static object folds to a boolean — the
+    /// membership decision an interpreter's memo lookup needs to decide control
+    /// flow at specialization time (`if (k in memo) ...`). Own fields and
+    /// inherited `Object.prototype` members both count.
+    #[test]
+    fn static_in_folds() {
+        let src = r#"function main(x) {
+            var o = {};
+            o["k"] = x;
+            return ("k" in o ? 1 : 0) + ("missing" in o ? 10 : 0)
+                 + ("toString" in o ? 100 : 0);
+        }"#;
+        let js = to_js(src).unwrap();
+        assert!(!js.contains(" in "), "a static `in` should fold away:\n{js}");
         assert_node_equiv(src, &[0, 7]);
+    }
+
+    /// `pop`/`shift` on a STATIC array are modeled (mutate the abstract array,
+    /// return the removed element), so a worklist-driven loop stays static instead
+    /// of escaping the array.
+    #[test]
+    fn array_pop_shift_modeled() {
+        let src = r#"function main(n) {
+            var a = [10, 20, 30];
+            var x = a.pop();
+            var y = a.shift();
+            a.push(n);
+            var z = a.pop();
+            var e = [].pop();
+            return x + y + z + (e === undefined ? 1000 : 0) + a.length;
+        }"#;
+        let js = to_js(src).unwrap();
+        assert!(!js.contains(".pop(") && !js.contains(".shift("),
+            "static pop/shift should fold:\n{js}");
+        assert_node_equiv(src, &[0, 7, 42]);
+    }
+
+    /// THE self-application milestone: a worklist-driven memoizing graph traversal
+    /// over a STATIC graph fully folds — the memo ties the cycle at spec time and
+    /// the whole loop reduces to the static result (`return 3 + input`). This is
+    /// the core termination mechanism of the engine (`memo`/`seen` loop-tie)
+    /// surviving the JS subset, the smallest proof Futamura projection 2 is viable.
+    #[test]
+    fn memo_driven_traversal_loop_ties() {
+        let src = r#"function main(input) {
+            var succ = [1, 2, 0];
+            var memo = {};
+            var work = [0];
+            var count = 0;
+            while (work.length > 0) {
+                var node = work.pop();
+                var key = "n" + node;
+                if (key in memo) {
+                } else {
+                    memo[key] = 1;
+                    count = count + 1;
+                    work.push(succ[node]);
+                }
+            }
+            return count + input;
+        }"#;
+        let js = to_js(src).unwrap();
+        assert!(!js.contains("while") && !js.contains("switch") && js.contains("return (3 + v0)"),
+            "the memo traversal should fully fold to `return (3 + v0)`:\n{js}");
+        assert_node_equiv(src, &[0, 5, 100]);
     }
 
     #[test]

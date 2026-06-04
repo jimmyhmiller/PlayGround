@@ -156,6 +156,19 @@ pub enum IpcRequest {
     /// form: `{"action":"screenshot","path":"/tmp/x.png"}`. Fire-and-
     /// forget; the file appears a frame or two later.
     Screenshot { path: PathBuf },
+    /// `tbclose --project P [--kind K]` — close (despawn) panes in a
+    /// project, optionally filtered to a pane `kind` (e.g. `rhai_widget`).
+    /// Routes through the normal pane-close path (`on_close` + despawn),
+    /// so it's the scriptable equivalent of clicking each close button.
+    /// Fire-and-forget; no response body.
+    CloseProjectPanes {
+        #[serde(default)]
+        project: Option<String>,
+        /// Pane kind to close (e.g. `"rhai_widget"`, `"widget"`). None =
+        /// every pane in the project.
+        #[serde(default)]
+        kind: Option<String>,
+    },
     /// `tbmsg emit --project P --topic T [--json '{...}'] [--retain]` —
     /// publish a message onto the widget↔widget bus from the shell (or a
     /// `proc_spawn`ed child). Delivered to every widget in project `P` as

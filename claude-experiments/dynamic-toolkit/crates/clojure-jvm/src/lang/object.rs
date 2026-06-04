@@ -21,6 +21,8 @@ use super::namespace::Namespace;
 use super::persistent_hash_map::PersistentHashMap;
 use super::persistent_hash_set::PersistentHashSet;
 use super::persistent_list::PersistentList;
+use super::persistent_tree_map::PersistentTreeMap;
+use super::persistent_tree_set::PersistentTreeSet;
 use super::persistent_vector::PersistentVector;
 use super::symbol::Symbol;
 use super::var::Var;
@@ -76,6 +78,12 @@ pub enum Object {
 
     /// `clojure.lang.PersistentHashSet`. `#{a b c}` reads as this.
     Set(Arc<PersistentHashSet>),
+
+    /// `clojure.lang.PersistentTreeMap` (sorted map). `(sorted-map ...)`.
+    TreeMap(Arc<PersistentTreeMap>),
+
+    /// `clojure.lang.PersistentTreeSet` (sorted set). `(sorted-set ...)`.
+    TreeSet(Arc<PersistentTreeSet>),
 
     /// Escape hatch for arbitrary host-side state Java threads through `Var`s
     /// during compilation (`LOCAL_ENV` map, `METHOD` (ObjMethod), `PathNode`
@@ -240,6 +248,11 @@ pub fn object_equiv(a: &Object, b: &Object) -> bool {
         (Long(x), Long(y)) => x == y,
         (Double(x), Double(y)) => x == y,
         (Long(x), Double(y)) | (Double(y), Long(x)) => (*x as f64) == *y,
+        // Characters compare by codepoint. `(= \a \a)` ⇒ true, and they must
+        // dedup as map/set keys (e.g. `(frequencies "aabbbc")`). A Character
+        // is NOT equal to its int codepoint: `(= \a 97)` ⇒ false (no Char/Long
+        // cross-arm), matching Clojure.
+        (Char(x), Char(y)) => x == y,
         (String(x), String(y)) => **x == **y,
         (Symbol(x), Symbol(y)) => x == y || **x == **y,
         (Keyword(x), Keyword(y)) => Arc::ptr_eq(x, y) || **x == **y,
@@ -249,6 +262,16 @@ pub fn object_equiv(a: &Object, b: &Object) -> bool {
         (Vector(x), Vector(y)) => vector_equiv(x, y),
         (Map(x), Map(y)) => x.equiv(y),
         (Set(x), Set(y)) => x.equiv(y),
+        (TreeMap(x), TreeMap(y)) => {
+            x.count() == y.count()
+                && x.iter().all(|(k, v)| match y.entry_at(&k) {
+                    Some((_, ov)) => object_equiv(&v, &ov),
+                    None => false,
+                })
+        }
+        (TreeSet(x), TreeSet(y)) => {
+            x.count() == y.count() && x.iter().all(|e| y.contains(&e))
+        }
         _ => false,
     }
 }
@@ -320,6 +343,15 @@ impl std::fmt::Debug for Object {
             Object::Vector(v) => write!(f, "{v:?}"),
             Object::Map(m) => write!(f, "{m:?}"),
             Object::Set(s) => write!(f, "{s:?}"),
+            Object::TreeMap(m) => {
+                let items: Vec<String> =
+                    m.iter().map(|(k, v)| format!("{k:?} {v:?}")).collect();
+                write!(f, "{{{}}}", items.join(", "))
+            }
+            Object::TreeSet(s) => {
+                let items: Vec<String> = s.iter().map(|x| format!("{x:?}")).collect();
+                write!(f, "#{{{}}}", items.join(" "))
+            }
             Object::Host(_) => write!(f, "#<host>"),
             Object::Unported { java_class } => {
                 write!(f, "#<unported {java_class}>")
