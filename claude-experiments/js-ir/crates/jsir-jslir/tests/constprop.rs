@@ -6,7 +6,7 @@
 //! would replace the instruction with.
 
 use jsir_ir::{Op, Region, ValueId};
-use jsir_jslir::constprop::{constant_lattice, Constant};
+use jsir_jslir::constprop::{constant_lattice, fold_constants, Constant};
 use jsir_jslir::ssa::enter_ssa;
 
 /// The constant the analysis proves for a function's `return <expr>` value, if any.
@@ -133,6 +133,80 @@ fn non_constant_input_is_not_folded() {
     // `c` is a parameter — unknown — so nothing folds.
     let r = const_of_return(&wrap("return c + 1;"));
     assert!(r.is_none(), "expression over an unknown is not constant, got {r:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Folding transform: lattice → rewritten IR → JS. Mirrors upstream replacing a
+// computed instruction with `Primitive { .. }`.
+// ---------------------------------------------------------------------------
+
+/// Build → SSA → lattice → fold → lift → emit JS, returning (#folded, source).
+fn fold_and_emit(src: &str) -> (usize, String) {
+    let file = jsir_swc::source_to_ir(src).unwrap();
+    let (mut jslir, _) = jsir_jslir::build_jslir(&file);
+    let next = max_value(&jslir) + 1;
+    let folded = fold_first_fn(&mut jslir, next);
+    let lifted = jsir_jslir::lift_jslir(&jslir);
+    (folded, jsir_swc::ir_to_source(&lifted).unwrap())
+}
+
+/// Fold the first lowered `function_declaration` body found; return #folded.
+fn fold_first_fn(op: &mut Op, base: u32) -> usize {
+    if op.name == "jsir.function_declaration" {
+        if let Some(b) = op.regions.get_mut(1) {
+            if jsir_jslir::dialect::region_is_cfg(b) {
+                let mut next = base;
+                if let Some(info) = enter_ssa(b, &mut next) {
+                    let lattice = constant_lattice(b, &info);
+                    return fold_constants(b, &lattice);
+                }
+            }
+        }
+    }
+    for r in &mut op.regions {
+        for b in &mut r.blocks {
+            for o in &mut b.ops {
+                let n = fold_first_fn(o, base);
+                if n > 0 {
+                    return n;
+                }
+            }
+        }
+    }
+    0
+}
+
+#[test]
+fn folds_computed_ops_into_literals() {
+    // `x + 1` → `5` (one binary folded; the dead `x` read is left for DCE).
+    let (n, js) = fold_and_emit(&wrap("let x = 4; let y = x + 1; return y;"));
+    assert_eq!(n, 1);
+    assert!(js.contains("let y = 5;"), "got: {js}");
+
+    // A whole arithmetic chain collapses to a single literal.
+    let (n, js) = fold_and_emit(&wrap("return 2 * 3 + 4;"));
+    assert_eq!(n, 2, "both the `*` and `+` fold");
+    assert!(js.contains("return 10;"), "got: {js}");
+}
+
+#[test]
+fn folds_string_comparison_and_unary_to_literals() {
+    let (_, js) = fold_and_emit(&wrap(r#"return "x" + "y";"#));
+    assert!(js.contains(r#"return "xy";"#), "got: {js}");
+
+    let (_, js) = fold_and_emit(&wrap("return 3 < 4;"));
+    assert!(js.contains("return true;"), "got: {js}");
+
+    let (_, js) = fold_and_emit(&wrap("let x = 5; return -x;"));
+    assert!(js.contains("return -5;"), "got: {js}");
+}
+
+#[test]
+fn leaves_non_constant_expressions_untouched() {
+    // `c` is an unknown parameter — nothing folds, output is unchanged in shape.
+    let (n, js) = fold_and_emit(&wrap("return c + 1;"));
+    assert_eq!(n, 0);
+    assert!(js.contains("return c + 1;"), "got: {js}");
 }
 
 // --- boilerplate: find the lowered body CFG + max ValueId (shared with passes.rs) ---

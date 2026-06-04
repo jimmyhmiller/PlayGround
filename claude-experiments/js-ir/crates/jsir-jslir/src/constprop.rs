@@ -28,6 +28,7 @@ use std::collections::HashMap;
 
 use jsir_ir::{Attr, Op, Region, ValueId};
 
+use crate::dialect;
 use crate::ssa::SsaInfo;
 
 /// A known primitive constant value. Mirrors upstream `PrimitiveValue`.
@@ -105,6 +106,80 @@ fn insert_if_new(lattice: &mut HashMap<ValueId, Constant>, value: ValueId, c: Co
     }
     lattice.insert(value, c);
     true
+}
+
+/// Apply a computed [`constant_lattice`] to the CFG: replace every *computed* op
+/// (`binary_expression` / `unary_expression`) whose result is a proven constant
+/// with the corresponding literal op, in place — exactly as upstream sets
+/// `instruction.value = Primitive { .. }`. Returns the number of ops folded.
+///
+/// Deliberately narrow (matches upstream's foldable set within this version's
+/// scope): literals are already literals, and variable reads (`jsir.identifier`)
+/// are *not* folded — upstream leaves `LoadLocal`/`LoadGlobal` in place and lets
+/// later DCE remove the now-dead reads. Constant-test branch pruning (folding a
+/// `cond_br` whose test is constant + re-minifying the CFG) is a separate step and
+/// is not done here.
+///
+/// The replacement preserves the op's `ValueId` result, `node_id`, and `trivia`
+/// (the def-site source location), so def-use edges, value numbering, and the lift
+/// are all unaffected beyond the literal substitution.
+pub fn fold_constants(region: &mut Region, lattice: &HashMap<ValueId, Constant>) -> usize {
+    let mut folded = 0;
+    for block in &mut region.blocks {
+        for op in &mut block.ops {
+            if dialect::is_terminator(&op.name) {
+                continue;
+            }
+            if !matches!(op.name.as_str(), "jsir.binary_expression" | "jsir.unary_expression") {
+                continue;
+            }
+            let Some(&result) = op.results.first() else { continue };
+            let Some(c) = lattice.get(&result) else { continue };
+            let Some(lit) = literal_op(c) else { continue };
+            // Splice the literal in, keeping this op's identity (result/node/trivia).
+            op.name = lit.name;
+            op.operands.clear();
+            op.attrs = lit.attrs;
+            op.regions.clear();
+            op.successors.clear();
+            folded += 1;
+        }
+    }
+    folded
+}
+
+/// Build the literal op for a constant value, or `None` for a value with no literal
+/// form (`Undefined` is the `undefined` global, not a literal).
+fn literal_op(c: &Constant) -> Option<Op> {
+    let mut op = match c {
+        Constant::Number(n) => {
+            let mut op = Op::new("jsir.numeric_literal");
+            op.attrs.push(("extra".into(), Attr::NumericLiteralExtra {
+                raw: js_number_to_string(*n),
+                value: *n,
+            }));
+            op.attrs.push(("value".into(), Attr::F64(*n)));
+            op
+        }
+        Constant::Str(s) => {
+            let mut op = Op::new("jsir.string_literal");
+            op.attrs.push(("extra".into(), Attr::StringLiteralExtra {
+                raw: format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+                raw_value: s.clone(),
+            }));
+            op.attrs.push(("value".into(), Attr::Str(s.clone())));
+            op
+        }
+        Constant::Bool(b) => {
+            let mut op = Op::new("jsir.boolean_literal");
+            op.attrs.push(("value".into(), Attr::Bool(*b)));
+            op
+        }
+        Constant::Null => Op::new("jsir.null_literal"),
+        Constant::Undefined => return None,
+    };
+    op.results.clear();
+    Some(op)
 }
 
 /// Evaluate a single value-defining op against the current lattice. Returns the
@@ -378,4 +453,23 @@ fn js_to_int32(n: f64) -> i32 {
 /// ECMAScript `ToUint32`: f64 → u32 with modular (wrapping) semantics.
 fn js_to_uint32(n: f64) -> u32 {
     js_to_int32(n) as u32
+}
+
+/// Approximate ECMAScript `Number::toString` (for a folded literal's raw text).
+/// Ported from upstream; diverges from JS only for exotic values near the
+/// exponential-notation thresholds.
+fn js_number_to_string(n: f64) -> String {
+    if n.is_nan() {
+        return "NaN".to_string();
+    }
+    if n.is_infinite() {
+        return if n > 0.0 { "Infinity".to_string() } else { "-Infinity".to_string() };
+    }
+    if n == 0.0 {
+        return "0".to_string();
+    }
+    if n.fract() == 0.0 && n.abs() < (i64::MAX as f64) {
+        return format!("{}", n as i64);
+    }
+    format!("{n}")
 }
