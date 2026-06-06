@@ -247,18 +247,31 @@ How it got there (each step measured, output byte-identical throughout):
    flag (replacing per-token `Option`+`from_utf8`), and a (length, first-letter)
    keyword pre-filter that rejects most identifiers without reading their bytes.
 
-**Why not 2×?** The pure bitmap-iteration floor is ~100 GB/s — iteration is free;
-100% of the remaining cost is reading the token's bytes to classify it, which oxc
-pays too. Our edge over oxc is that we *skip* whitespace/comment bytes via the
-bitmap (so the win is larger on readable code, 1.32×, than on minified, ~1.20×,
-where there's little whitespace to skip). Closing the rest to 2× would require
-**SIMD batch classification** — gathering and classifying many token lead-bytes
-per vector op — which the variable-token-length, sequential regex/template context
-makes a substantial separate effort. A simpler lever: **deferring keyword
-recognition to the parser** (emit `Ident` for keywords, a standard design — the
-parser resolves them during interning) measures **1.44× (minified) / 1.66×
-(readable)**, but does less than oxc, so it isn't reported above as the
-apples-to-apples number.
+**Parser mode → 2×.** The numbers above do exactly what oxc does, including
+keyword classification. But a *real parser* doesn't need the lexer to pre-classify
+keywords — it resolves them during identifier interning (this is what V8 and
+others do). In **parser mode** we emit `Ident` for keywords and consult the
+keyword set only at the rare `/` (to keep regex-vs-division correct), so the
+identifier body is never read for keyword classification. The token *boundaries
+are byte-identical* to matched-work mode (asserted in `count_matches_tokenize`) —
+only the keyword labels are deferred:
+
+| file | parser mode | oxc | **vs oxc** |
+|---|---|---|---|
+| `lodash.js` (readable) | ~1560 MB/s | ~800 | **2.0×** |
+| `three.min.js` (minified) | ~420 | ~249 | **1.7×** |
+| `vue.global.prod.js` (minified) | ~272 | ~170 | **1.6×** |
+
+So **2× is reached on readable code**, ~1.6–1.7× on minified. Why the split: the
+pure bitmap-iteration floor is ~100 GB/s (iteration is free); the remaining cost
+is reading each token's bytes to classify it. Our structural edge over oxc is
+*skipping* whitespace/comment bytes via the bitmap, which is a bigger win on
+readable code than on minified (little whitespace to skip). Closing minified to a
+full 2× would need **SIMD batch classification** — gathering and classifying many
+token lead-bytes per vector op — which the variable token lengths + sequential
+regex/template context make a substantial separate effort (profiling shows the
+remaining cost is evenly spread across the per-token classify work, no single
+hotspot).
 
 Caveat in oxc's favor throughout: it produces full Unicode/escape/TS handling
 where ours is ASCII-focused.

@@ -442,11 +442,14 @@ pub struct Lexer<'a> {
 /// `TemplateHead`/`TemplateNoSub`, never a whole nested template. Free function
 /// so both the pull `Lexer` and the fast `count_tokens` loop share it.
 #[inline]
-fn classify(src: &[u8], word_masks: &[u64], p: usize) -> (TokKind, usize) {
+fn classify<const KW: bool>(src: &[u8], word_masks: &[u64], p: usize) -> (TokKind, usize) {
     match CLASS[src[p] as usize] {
         C_WORD => {
             let e = word_end(word_masks, p, src.len());
-            let kind = if is_keyword(&src[p..e]) { TokKind::Keyword } else { TokKind::Ident };
+            // KW=false (parser mode): emit Ident for keywords too — the parser
+            // resolves keyword-ness. The `is_keyword` call (and the identifier
+            // body read it triggers) is then compiled out entirely.
+            let kind = if KW && is_keyword(&src[p..e]) { TokKind::Keyword } else { TokKind::Ident };
             (kind, e)
         }
         C_DIGIT => (TokKind::Number, scan_number(src, p)),
@@ -510,7 +513,7 @@ impl<'a> Lexer<'a> {
         if p >= self.src.len() {
             return None;
         }
-        let (kind, end) = classify(self.src, self.word_masks, p);
+        let (kind, end) = classify::<true>(self.src, self.word_masks, p);
         Some(Token { kind, start: p, end })
     }
 
@@ -647,7 +650,7 @@ pub fn count_tokens(src: &[u8], start_masks: &[u64], word_masks: &[u64]) -> usiz
             return n;
         }
 
-        let (mut kind, mut end) = classify(src, word_masks, p);
+        let (mut kind, mut end) = classify::<true>(src, word_masks, p);
 
         // Regex / template feedback (same policy as the pull Lexer driver).
         if tmpl.is_empty() {
@@ -687,6 +690,160 @@ pub fn count_tokens(src: &[u8], start_masks: &[u64], word_masks: &[u64]) -> usiz
             word = start_masks[wi] & (!0u64 << ebit);
         }
     }
+}
+
+/// A keyword after which a `/` begins a *regex* (not division): any keyword
+/// except the value-producing ones (`this`/`super`/`true`/`false`/`null`).
+#[inline]
+fn is_regex_kw(w: &[u8]) -> bool {
+    is_keyword(w) && !matches!(w, b"this" | b"super" | b"true" | b"false" | b"null")
+}
+
+/// Parser-mode count: **identical token boundaries** to `count_tokens`, but emits
+/// `Ident` for keywords (a real parser resolves keyword-ness during interning — a
+/// standard design, e.g. V8). The identifier body is never read for keyword
+/// classification; the keyword set is consulted only at the rare `/` to keep
+/// regex-vs-division correct. Faster than `count_tokens`, but does less than oxc,
+/// so it is reported separately, not as the apples-to-apples number.
+pub fn count_tokens_parser_mode(src: &[u8], start_masks: &[u64], word_masks: &[u64]) -> usize {
+    let n_words = start_masks.len();
+    if n_words == 0 {
+        return 0;
+    }
+    let src_len = src.len();
+    let mut n = 0usize;
+    // Prev-word span packed into one u64 (`start<<32 | end`), 0 = prev was not a
+    // word. Only consulted at the rare `/`; a single-register write per token.
+    let mut prev_word: u64 = 0;
+    let mut prev_ends_expr = false; // regex context when prev was NOT a word
+    let mut tmpl: Vec<u32> = Vec::new();
+
+    let mut wi = 0usize;
+    let mut word = start_masks[0];
+    loop {
+        while word == 0 {
+            wi += 1;
+            if wi >= n_words {
+                return n;
+            }
+            word = start_masks[wi];
+        }
+        let p = wi * 64 + word.trailing_zeros() as usize;
+        if p >= src_len {
+            return n;
+        }
+
+        let (mut kind, mut end) = classify::<false>(src, word_masks, p);
+
+        if tmpl.is_empty() {
+            if kind == TokKind::Punct {
+                let lead = src[p];
+                if lead == b'/' {
+                    let regex = if prev_word != 0 {
+                        is_regex_kw(&src[(prev_word >> 32) as usize..(prev_word as u32) as usize])
+                    } else {
+                        !prev_ends_expr
+                    };
+                    prev_word = 0;
+                    if regex {
+                        end = scan_regex(src, p);
+                        kind = TokKind::Regex;
+                        prev_ends_expr = true;
+                    } else {
+                        prev_ends_expr = false; // operand follows a `/` operator
+                    }
+                } else {
+                    prev_word = 0;
+                    prev_ends_expr = matches!(lead, b')' | b']' | b'}');
+                }
+            } else if kind == TokKind::Ident {
+                prev_word = ((p as u64) << 32) | end as u64;
+            } else {
+                prev_word = 0;
+                prev_ends_expr = ends_expr_k(src, kind, p, end, prev_ends_expr);
+            }
+            if kind == TokKind::TemplateHead {
+                tmpl.push(0);
+            }
+        } else {
+            let r = template_step_pm(src, &mut tmpl, kind, p, end, &mut prev_word, &mut prev_ends_expr);
+            kind = r.0;
+            end = r.1;
+        }
+        let _ = kind;
+        n += 1;
+
+        let ewi = end / 64;
+        let ebit = end % 64;
+        if ewi == wi {
+            word &= !0u64 << ebit;
+        } else {
+            if ewi >= n_words {
+                return n;
+            }
+            wi = ewi;
+            word = start_masks[wi] & (!0u64 << ebit);
+        }
+    }
+}
+
+/// Cold parser-mode template slow-path (mirrors `template_step_free`, with the
+/// prev-word regex resolution).
+#[cold]
+fn template_step_pm(
+    src: &[u8],
+    tmpl: &mut Vec<u32>,
+    mut kind: TokKind,
+    p: usize,
+    mut end: usize,
+    prev_word: &mut u64,
+    prev_ends_expr: &mut bool,
+) -> (TokKind, usize) {
+    if kind == TokKind::Punct {
+        match src[p] {
+            b'/' => {
+                let regex = if *prev_word != 0 {
+                    is_regex_kw(&src[(*prev_word >> 32) as usize..(*prev_word as u32) as usize])
+                } else {
+                    !*prev_ends_expr
+                };
+                if regex {
+                    end = scan_regex(src, p);
+                    kind = TokKind::Regex;
+                }
+            }
+            b'}' if tmpl.last() == Some(&0) => {
+                let (k, e) = template_tail(src, p);
+                kind = k;
+                end = e;
+            }
+            b'{' => *tmpl.last_mut().unwrap() += 1,
+            b'}' => {
+                let d = tmpl.last_mut().unwrap();
+                *d = d.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+    match kind {
+        TokKind::TemplateHead => tmpl.push(0),
+        TokKind::TemplateMiddle => *tmpl.last_mut().unwrap() = 0,
+        TokKind::TemplateTail => {
+            tmpl.pop();
+        }
+        _ => {}
+    }
+    if kind == TokKind::Ident {
+        *prev_word = ((p as u64) << 32) | end as u64;
+    } else {
+        *prev_word = 0;
+        *prev_ends_expr = if kind == TokKind::Punct {
+            matches!(src[p], b')' | b']' | b'}')
+        } else {
+            ends_expr_k(src, kind, p, end, *prev_ends_expr)
+        };
+    }
+    (kind, end)
 }
 
 /// regex-context flag for non-punctuator tokens (comments are transparent).
@@ -944,6 +1101,10 @@ mod tests {
             let toks = tokenize(real, &sm, &wm);
             let n = count_tokens(real, &sm, &wm);
             assert_eq!(n, toks.len(), "count_tokens vs tokenize mismatch for {src:?}");
+            // Parser-mode (deferred keywords) must produce identical *boundaries*
+            // → identical token count (only kind labels differ).
+            let np = count_tokens_parser_mode(real, &sm, &wm);
+            assert_eq!(np, toks.len(), "parser-mode count mismatch for {src:?}");
         }
     }
 

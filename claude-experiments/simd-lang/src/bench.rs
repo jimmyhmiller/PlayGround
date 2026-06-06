@@ -409,6 +409,18 @@ pub fn run(path: &str, iters: usize) {
     }
     println!("[diag] bitmap iteration floor: {floor_best:.0} MB/s best");
 
+    // ── Diagnostic: parser-mode (defers keyword recognition to the parser) ──
+    let mut pm_best = 0.0f64;
+    for _ in 0..iters {
+        let t = Instant::now();
+        call_stage1(&mut start_masks, &mut word_masks);
+        let n = js::count_tokens_parser_mode(&raw, &start_masks, &word_masks);
+        let dt = t.elapsed().as_secs_f64();
+        black_box(n);
+        pm_best = pm_best.max(mb / dt);
+    }
+    println!("[diag] parser-mode (defer keywords): {pm_best:.0} MB/s best");
+
     // ── Measure: full pipeline (stage 1 + stage 2), non-materializing ───────
     // (parser-relevant: tokens are produced and consumed on the fly, not stored
     //  — matching oxc's lexer loop which also stores nothing.)
