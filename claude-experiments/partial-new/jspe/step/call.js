@@ -1,6 +1,7 @@
 // step/call.js — direct function calls + Ret (frames). Ports js.rs Call/Ret.
 const meta = require("./meta.js");
 const { absToRExpr } = require("../state.js");
+const mem = require("./mem.js");
 const H = {};
 H.Call = (s, i, out) => {
   const M = meta.get();
@@ -18,7 +19,11 @@ H.Ret = (s, i, out) => {
   const top = s.frames[s.frames.length - 1];
   const retVal = top.ostack.pop();
   s.frames.pop();
-  if (s.frames.length === 0) return { tag: "Halt", ret: absToRExpr(retVal) };
+  if (s.frames.length === 0) {
+    // returning a heap value (array/object) materializes it into construction ops
+    const ret = retVal.tag === "Ref" ? mem.materializeValue(s, retVal, out) : absToRExpr(retVal);
+    return { tag: "Halt", ret };
+  }
   s.frames[s.frames.length - 1].ostack.push(retVal);
   return { tag: "Continue" };
 };

@@ -256,13 +256,21 @@ identifier body is never read for keyword classification. The token *boundaries
 are byte-identical* to matched-work mode (asserted in `count_matches_tokenize`) —
 only the keyword labels are deferred:
 
-| file | parser mode | oxc | **vs oxc** |
-|---|---|---|---|
-| `lodash.js` (readable) | ~1560 MB/s | ~800 | **2.0×** |
-| `three.min.js` (minified) | ~420 | ~249 | **1.7×** |
-| `vue.global.prod.js` (minified) | ~272 | ~170 | **1.6×** |
+Measured across a 7-file real-world corpus (parser-mode MB/s vs oxc MB/s):
 
-So **2× is reached on readable code**, ~1.6–1.7× on minified. Why the split: the
+| file | type | **parser-mode vs oxc** | matched-work vs oxc |
+|---|---|---|---|
+| `jquery.js` | readable | **2.15×** | 1.41× |
+| `lodash.js` | readable | **2.0×** | 1.41× |
+| `react.development.js` | readable | **1.92×** | 1.38× |
+| `three.min.js` | minified | 1.71× | 1.25× |
+| `react-dom.production.min.js` | minified | 1.74× | 1.19× |
+| `d3.min.js` | minified | 1.68× | 1.22× |
+| `vue.global.prod.js` | minified | 1.6× | 1.23× |
+
+Every file round-trips and matches oxc's token spans (only oxc's intentional
+`>`-splitting differs). So **~2× on readable code, ~1.7× on minified**, with output
+verified identical. Why the split: the
 pure bitmap-iteration floor is ~100 GB/s (iteration is free); the remaining cost
 is reading each token's bytes to classify it. Our structural edge over oxc is
 *skipping* whitespace/comment bytes via the bitmap, which is a bigger win on

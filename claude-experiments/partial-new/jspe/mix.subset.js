@@ -143,8 +143,8 @@ function residualizeCall(ctx, fn, argvals) {
       i = i + 1;
     }
     var r = pevalStmts(fn[3], nenv, ctx);
-    var body;
-    if (r[0] === "ret") { body = reify(r[1]); } else { body = ["lit", 0]; }
+    var body = ["lit", 0];
+    if (r[0] === "ret") { body = reify(r[1]); }
     ctx[4] = arrPush(ctx[4], [name, rparams, body]);
   }
   var callArgs = [];
@@ -248,7 +248,7 @@ function pevalStmts(stmts, env, ctx) {
       } else {
         // dynamic condition -> cond(C, then, else); implicit else = the continuation.
         var thenVal = branchValue(s[2], cur, ctx);
-        var elseVal;
+        var elseVal = ["d", ["__dyn_if_continuation_no_return__"]];
         if (s[3] !== null) {
           elseVal = branchValue(s[3], cur, ctx);
         } else {
@@ -300,8 +300,8 @@ function specializeProg(prog, entryName, argVals) {
   var i = 0;
   while (i < fn[2].length) { env = envExtend(env, fn[2][i], argVals[i]); i = i + 1; }
   var r = pevalStmts(fn[3], env, ctx);
-  var entry;
-  if (r[0] === "ret") { entry = reify(r[1]); } else { entry = ["lit", 0]; }
+  var entry = ["lit", 0];
+  if (r[0] === "ret") { entry = reify(r[1]); }
   return ["prog", entry, ctx[4]];
 }
 
