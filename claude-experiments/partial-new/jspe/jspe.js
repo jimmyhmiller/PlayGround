@@ -13,6 +13,7 @@ function compile(source, paramName) {
   require("./step/meta.js").setMeta({ code: L.code, leaders: L.leaders, loopHeads: L.loopHeads, loopModified: L.loopModified, loopMutRefs: L.loopMutRefs, entries: L.entries, nslots: L.nslots });
   const client = {
     key: state.keyOf,
+    clone: state.cloneState,
     point: (s) => s.frames.map((f) => f.pc).join(","),
     step: stepmod.step,
     whistle: (seen, cand) => whistle.whistle(seen, cand, L),
@@ -31,12 +32,17 @@ function loadStatic(st, value) {
   if (typeof value === "boolean") return AB.Bool(value);
   if (value === null) return AB.Null();
   if (value === undefined) return AB.Undef();
+  if (!st.frozen) st.frozen = new Set();
   if (Array.isArray(value)) {
     const elems = value.map((v) => loadStatic(st, v));
-    return AB.Ref(state.alloc(st, { tag: "Array", elems }));
+    const addr = state.alloc(st, { tag: "Array", elems });
+    st.frozen.add(addr); // immutable static input -> excluded from per-state keys, never cloned
+    return AB.Ref(addr);
   }
   const fields = Object.entries(value).map(([k, v]) => [k, loadStatic(st, v)]);
-  return AB.Ref(state.alloc(st, { tag: "Object", fields }));
+  const addr = state.alloc(st, { tag: "Object", fields });
+  st.frozen.add(addr);
+  return AB.Ref(addr);
 }
 
 // ---- GENERAL entry: specialize fn `entryName`, each param static (a JS value) or dynamic.
@@ -57,6 +63,7 @@ function specializeGeneral(source, entryName, argSpecs, paramName) {
   st.frames.push({ pc: L.entries[fid], func: fid, locals, ostack: [] });
   const client = {
     key: state.keyOf,
+    clone: state.cloneState,
     point: (s) => s.frames.map((f) => f.pc).join(","),
     step: stepmod.step,
     whistle: (seen, cand) => whistle.whistle(seen, cand, L),

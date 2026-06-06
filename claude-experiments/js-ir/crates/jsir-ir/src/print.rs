@@ -1,5 +1,6 @@
 //! The generic-format printer + MLIR SSA value numbering.
 
+use crate::traits::{IrRead, OpId, RegionId};
 use crate::{Op, Region, ValueId};
 use std::collections::HashMap;
 
@@ -202,4 +203,206 @@ fn push_spaces(out: &mut String, n: usize) {
     for _ in 0..n {
         out.push(' ');
     }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Generic printer over `IrRead`.
+//
+// Byte-for-byte the same algorithm as the AoS functions above, but reading the
+// IR through the trait so it works over any backend (today: the SoA `Module`).
+// The cross-fixture test asserts `Module::from_op(&op).print() == op.print()`,
+// so this and the AoS path cannot silently diverge.
+// ───────────────────────────────────────────────────────────────────────────
+
+/// Print the whole IR rooted at [`IrRead::root`].
+pub fn print_root_via<R: IrRead>(ir: &R) -> String {
+    let root = ir.root();
+    let mut numbering = Numbering::new();
+    let mut counter = 0u32;
+    for r in ir.results(root) {
+        numbering.insert(*r, counter);
+        counter += 1;
+    }
+    for region in ir.regions(root) {
+        number_region_via(ir, *region, counter, &mut numbering);
+    }
+    let mut out = String::new();
+    print_op_via(ir, root, 0, &numbering, &mut out);
+    out
+}
+
+fn number_region_via<R: IrRead>(ir: &R, region: RegionId, base: u32, numbering: &mut Numbering) {
+    let mut counter = base;
+    for block in ir.region_blocks(region) {
+        for arg in ir.block_args(*block) {
+            numbering.insert(*arg, counter);
+            counter += 1;
+        }
+        for op in ir.block_ops(*block) {
+            for res in ir.results(*op) {
+                numbering.insert(*res, counter);
+                counter += 1;
+            }
+        }
+    }
+    for block in ir.region_blocks(region) {
+        for op in ir.block_ops(*block) {
+            for child in ir.regions(*op) {
+                number_region_via(ir, *child, counter, numbering);
+            }
+        }
+    }
+}
+
+fn print_op_via<R: IrRead>(
+    ir: &R,
+    op: OpId,
+    indent: usize,
+    numbering: &Numbering,
+    out: &mut String,
+) {
+    push_spaces(out, indent);
+
+    let results = ir.results(op);
+    if !results.is_empty() {
+        let names: Vec<String> = results.iter().map(|v| format!("%{}", numbering[v])).collect();
+        out.push_str(&names.join(", "));
+        out.push_str(" = ");
+    }
+
+    out.push('"');
+    out.push_str(ir.op_name(op));
+    out.push('"');
+    out.push('(');
+    let operands = ir.operands(op);
+    let operand_strs: Vec<String> = operands.iter().map(|v| format!("%{}", numbering[v])).collect();
+    out.push_str(&operand_strs.join(", "));
+    out.push(')');
+
+    let successors = ir.successors(op);
+    if !successors.is_empty() {
+        let succs: Vec<String> = successors
+            .iter()
+            .map(|s| {
+                if s.args.is_empty() {
+                    format!("^bb{}", s.block.0)
+                } else {
+                    let args: Vec<String> =
+                        s.args.iter().map(|v| format!("%{}", numbering[v])).collect();
+                    format!("^bb{}({})", s.block.0, args.join(", "))
+                }
+            })
+            .collect();
+        out.push('[');
+        out.push_str(&succs.join(", "));
+        out.push(']');
+    }
+
+    let attrs = ir.attrs(op);
+    if !attrs.is_empty() {
+        let mut attrs = attrs.to_vec();
+        attrs.sort_by(|a, b| a.0.cmp(&b.0));
+        let rendered: Vec<String> =
+            attrs.iter().map(|(k, v)| format!("{} = {}", k, v.render())).collect();
+        out.push_str(" <{");
+        out.push_str(&rendered.join(", "));
+        out.push_str("}>");
+    }
+
+    let regions = ir.regions(op);
+    if !regions.is_empty() {
+        out.push_str(" (");
+        let region_strs: Vec<String> =
+            regions.iter().map(|r| print_region_via(ir, *r, indent, numbering)).collect();
+        out.push_str(&region_strs.join(", "));
+        out.push(')');
+    }
+
+    out.push_str(" : (");
+    out.push_str(&vec!["!jsir.any"; operands.len()].join(", "));
+    out.push_str(") -> ");
+    match results.len() {
+        0 => out.push_str("()"),
+        1 => out.push_str("!jsir.any"),
+        n => {
+            out.push('(');
+            out.push_str(&vec!["!jsir.any"; n].join(", "));
+            out.push(')');
+        }
+    }
+}
+
+fn print_region_via<R: IrRead>(
+    ir: &R,
+    region: RegionId,
+    indent: usize,
+    numbering: &Numbering,
+) -> String {
+    let blocks = ir.region_blocks(region);
+    let is_cfg = blocks.len() > 1
+        || blocks.iter().any(|b| !ir.block_args(*b).is_empty())
+        || blocks
+            .iter()
+            .any(|b| ir.block_ops(*b).iter().any(|op| !ir.successors(*op).is_empty()));
+    if is_cfg {
+        print_cfg_region_via(ir, region, indent, numbering)
+    } else {
+        print_legacy_region_via(ir, region, indent, numbering)
+    }
+}
+
+fn print_legacy_region_via<R: IrRead>(
+    ir: &R,
+    region: RegionId,
+    indent: usize,
+    numbering: &Numbering,
+) -> String {
+    let mut s = String::from("{\n");
+    for block in ir.region_blocks(region) {
+        let ops = ir.block_ops(*block);
+        if ops.is_empty() && ir.block_args(*block).is_empty() {
+            push_spaces(&mut s, indent);
+            s.push_str("^bb0:\n");
+        } else {
+            for op in ops {
+                print_op_via(ir, *op, indent + 2, numbering, &mut s);
+                s.push('\n');
+            }
+        }
+    }
+    push_spaces(&mut s, indent);
+    s.push('}');
+    s
+}
+
+fn print_cfg_region_via<R: IrRead>(
+    ir: &R,
+    region: RegionId,
+    indent: usize,
+    numbering: &Numbering,
+) -> String {
+    let mut s = String::from("{\n");
+    for (i, block) in ir.region_blocks(region).iter().enumerate() {
+        let args = ir.block_args(*block);
+        let elide_label = i == 0 && args.is_empty();
+        if !elide_label {
+            push_spaces(&mut s, indent);
+            s.push_str(&format!("^bb{}", ir.block_label(*block).0));
+            if !args.is_empty() {
+                let arg_strs: Vec<String> =
+                    args.iter().map(|a| format!("%{}: !jsir.any", numbering[a])).collect();
+                s.push('(');
+                s.push_str(&arg_strs.join(", "));
+                s.push(')');
+            }
+            s.push_str(":\n");
+        }
+        for op in ir.block_ops(*block) {
+            print_op_via(ir, *op, indent + 2, numbering, &mut s);
+            s.push('\n');
+        }
+    }
+    push_spaces(&mut s, indent);
+    s.push('}');
+    s
 }

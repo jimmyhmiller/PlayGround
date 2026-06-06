@@ -1004,6 +1004,19 @@ impl TypeChecker {
                 }
                 ity // result type matches indices
             }
+            // scan_dfa(table: u8[256], classes: u8[N], seed: u8[1], num_states: lit) -> u8[N]
+            // Prefix scan over a DFA's transition monoid: returns the state after
+            // each byte. `table[state*16 + class] = next_state` (≤16 states/classes).
+            "scan_dfa" => {
+                self.check_arg_count(fname, args, 4);
+                let _tty = self.infer_arg(args, 0);
+                let cty = self.infer_arg(args, 1);
+                let _sty = self.infer_arg(args, 2);
+                if !matches!(args[3].value, ast::Expr::IntLit(_)) {
+                    self.err("scan_dfa num_states must be an integer literal".to_string());
+                }
+                cty // result shape matches the class vector
+            }
             "gather" => {
                 self.check_arg_count(fname, args, 2);
                 let bty = self.infer_arg(args, 0);

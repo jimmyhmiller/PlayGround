@@ -7,6 +7,24 @@ const H = {};
 const ost = (s) => s.frames[s.frames.length - 1].ostack;
 const escVar = (addr) => 2000000 + addr;
 
+// Copy-on-write: states SHARE heap objects (cloneState shallow-copies the Map only), so
+// before mutating an object in place we replace it with a fresh copy in THIS state's heap.
+// Keeps the large immutable static heap (e.g. an interpreter being specialized) un-cloned.
+function cowArray(s, addr) {
+  if (s.frozen && s.frozen.has(addr)) throw new Error("mutating frozen (immutable static) array @" + addr);
+  const obj = s.heap.get(addr);
+  const copy = { tag: "Array", elems: obj.elems.slice() };
+  s.heap.set(addr, copy);
+  return copy;
+}
+function cowObject(s, addr) {
+  if (s.frozen && s.frozen.has(addr)) throw new Error("mutating frozen (immutable static) object @" + addr);
+  const obj = s.heap.get(addr);
+  const copy = { tag: "Object", fields: obj.fields.map((f) => f.slice()) };
+  s.heap.set(addr, copy);
+  return copy;
+}
+
 // Abs -> RExpr, emitting any heap construction to `out`. Stable var per address.
 H.materializeValue = (s, abs, out) => {
   if (abs.tag === "Ref") {
@@ -52,9 +70,15 @@ H.GetIndex = (s, i, out) => {
 };
 H.SetIndexOp = (s, i, out) => {
   const val = ost(s).pop(), idx = ost(s).pop(), arr = ost(s).pop();
-  if (arr.tag === "Ref" && idx.tag === "Num") {
+  if (arr.tag === "Ref" && idx.tag === "Num" && idx.n >= 0) {
     const obj = s.heap.get(arr.addr);
-    if (obj && obj.tag === "Array" && idx.n >= 0 && idx.n < obj.elems.length) { obj.elems[idx.n] = val; return { tag: "Continue" }; }
+    if (obj && obj.tag === "Array") {
+      // static array, static index: overwrite OR grow (JS append `a[a.length]=x` / sparse).
+      const c = cowArray(s, arr.addr);
+      while (c.elems.length < idx.n) c.elems.push(AB.Undef());
+      c.elems[idx.n] = val;
+      return { tag: "Continue" };
+    }
   }
   out.push(OP.SetIndex(H.materializeValue(s, arr, out), H.materializeValue(s, idx, out), H.materializeValue(s, val, out)));
   return { tag: "Continue" };
@@ -71,7 +95,7 @@ H.GetProp = (s, i, out) => {
 };
 H.SetPropOp = (s, i, out) => {
   const val = ost(s).pop(), o = ost(s).pop();
-  if (o.tag === "Ref") { const obj = s.heap.get(o.addr); if (obj.tag === "Object") { const f = obj.fields.find((x) => x[0] === i.k); if (f) f[1] = val; else obj.fields.push([i.k, val]); return { tag: "Continue" }; } }
+  if (o.tag === "Ref") { const obj = s.heap.get(o.addr); if (obj.tag === "Object") { const c = cowObject(s, o.addr); const f = c.fields.find((x) => x[0] === i.k); if (f) f[1] = val; else c.fields.push([i.k, val]); return { tag: "Continue" }; } }
   out.push(OP.SetProp(H.materializeValue(s, o, out), i.k, H.materializeValue(s, val, out)));
   return { tag: "Continue" };
 };

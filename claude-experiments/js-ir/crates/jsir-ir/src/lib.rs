@@ -8,13 +8,21 @@
 //! sibling regions reuse numbers) and its exact whitespace/attribute syntax.
 
 pub mod attr;
+pub mod build;
 pub mod print;
+pub mod soa;
+pub mod traits;
 
 pub use attr::{
     Attr, CommentAttr, DialectPayload, ExportSpecifierAttr, ForInOfDeclarationAttr, IdentifierAttr,
     ImportSpecKind, ImportSpecifierAttr, InterpreterDirectiveAttr, NumericLiteralKeyAttr,
     OpaqueAttr, PrivateNameAttr, StringLiteralKeyAttr,
 };
+
+// The data-oriented storage: build a `Module` (via `from_op` or the `IrBuild`
+// API) and print it byte-exact. These two capabilities are the supported scope.
+pub use soa::Module;
+pub use traits::{BlockSlot, IrBuild, IrRead, OpId, OpKind, RegionId};
 
 use std::collections::HashMap;
 
@@ -239,6 +247,10 @@ mod printer_tests {
             .push(Region::with_block(Block::leaf(vec![program])));
 
         let actual = file.print();
+
+        // The SoA backend, reached through `IrRead`, must print byte-identically.
+        assert_eq!(soa::Module::from_op(&file).print(), actual, "SoA path diverged");
+
         let expected = jsir_oracle::list_fixtures()
             .into_iter()
             .find(|f| f.name == "binary_expression")
@@ -286,6 +298,9 @@ mod printer_tests {
         let mut func = Op::new("jslir.func");
         func.regions.push(region);
         let out = func.print();
+
+        // The SoA backend prints the CFG dialect byte-identically too.
+        assert_eq!(soa::Module::from_op(&func).print(), out, "SoA path diverged");
 
         // Entry block label is elided (no args), like MLIR.
         assert!(!out.contains("^bb0"), "entry label should be elided:\n{out}");

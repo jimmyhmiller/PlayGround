@@ -142,20 +142,52 @@ function canonicalize(state) {
   };
 }
 // [task state.keyOf]   (used by engine.createOrGet/resolveJump as client.key)
+// Allocation-light: renumbers only NON-FROZEN reachable addresses (DFS from frame roots)
+// and serializes only their objects. FROZEN addresses (immutable static heap, e.g. an
+// interpreter being specialized) are keyed by stable address 'F<addr>' and never walked —
+// their content is constant across all states, so it can't distinguish them. This keeps
+// the key proportional to the MUTABLE working heap, not the (possibly huge) static input.
+const EMPTY_SET = new Set();
 function keyOf(state) {
-  const canon = canonicalize(state);
+  const frozen = state.frozen || EMPTY_SET;
+  const addrMap = new Map();
+  let next = 0;
+  const assign = (addr) => {
+    if (frozen.has(addr) || addrMap.has(addr)) return;
+    addrMap.set(addr, next++);
+    const obj = state.heap.get(addr);
+    if (!obj) return;
+    if (obj.tag === 'Object') { for (const [k, v] of obj.fields) if (v.tag === 'Ref') assign(v.addr); }
+    else if (obj.tag === 'Array') { for (const v of obj.elems) if (v.tag === 'Ref') assign(v.addr); }
+    else if (obj.tag === 'Closure') { for (const v of obj.captured) if (v.tag === 'Ref') assign(v.addr); }
+  };
+  for (const f of state.frames) {
+    for (const a of f.locals) if (a.tag === 'Ref') assign(a.addr);
+    for (const a of f.ostack) if (a.tag === 'Ref') assign(a.addr);
+  }
+  const refKey = (a) => {
+    if (a.tag !== 'Ref') return absKey(a);
+    if (frozen.has(a.addr)) return 'F' + a.addr;
+    return 'R' + addrMap.get(a.addr);
+  };
+  const objKey = (obj) => {
+    if (obj.tag === 'Object') return 'O{' + obj.fields.map(([k, v]) => JSON.stringify(k) + ':' + refKey(v)).join(',') + '}';
+    if (obj.tag === 'Array') return 'A[' + obj.elems.map(refKey).join(',') + ']';
+    if (obj.tag === 'Closure') return 'C(' + obj.fid + ',' + obj.captured.map(refKey).join(',') + ')';
+    throw new Error('unknown heap obj tag');
+  };
   const parts = [];
-  for (const frame of canon.frames) {
-    parts.push('pc:' + frame.pc + ',func:' + frame.func);
-    parts.push('locals:' + frame.locals.map(a => absKey(a)).join('|'));
-    parts.push('ostack:' + frame.ostack.map(a => absKey(a)).join('|'));
+  for (const f of state.frames) {
+    parts.push('pc:' + f.pc + ',func:' + f.func);
+    parts.push('L:' + f.locals.map(refKey).join('|'));
+    parts.push('S:' + f.ostack.map(refKey).join('|'));
   }
-  parts.push('heap:');
-  for (const [addr, obj] of canon.heap) {
-    parts.push(addr + ':' + heapObjKey(obj));
-  }
-  parts.push('pendingJoins:' + JSON.stringify(canon.pendingJoins));
-  parts.push('handlers:' + JSON.stringify(canon.handlers));
+  parts.push('H:');
+  const inv = new Array(next);
+  for (const [orig, canon] of addrMap) inv[canon] = orig;
+  for (let c = 0; c < next; c++) parts.push(c + ':' + objKey(state.heap.get(inv[c])));
+  parts.push('PJ:' + JSON.stringify(state.pendingJoins));
+  parts.push('HD:' + JSON.stringify(state.handlers));
   return parts.join(';');
 }
 function absKey(a) {
@@ -229,6 +261,7 @@ function cloneState(s) {
     nextAddr: s.nextAddr,
     pendingJoins: s.pendingJoins.map((x) => x.slice ? x.slice() : x),
     handlers: s.handlers.slice(),
+    frozen: s.frozen, // shared by reference: immutable static heap addresses (set once at init)
   };
 }
 

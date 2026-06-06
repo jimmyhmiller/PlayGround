@@ -1193,6 +1193,250 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
         }
     }
 
+    /// A `vector<width x i8>` constant splat of `val`.
+    fn emit_splat_i8(&mut self, val: i64, width: usize) -> Value<'c, 'a> {
+        let i8t: Type = IntegerType::new(self.ctx, 8).into();
+        let vt = Type::vector(&[width as u64], i8t);
+        let attr = IntegerAttribute::new(i8t, val);
+        let splat = DenseElementsAttribute::new(vt, &[attr.into()]).unwrap();
+        self.block
+            .append_operation(arith::constant(self.ctx, splat.into(), self.loc))
+            .result(0)
+            .unwrap()
+            .into()
+    }
+
+    /// NEON vtbl1 on a single 16-byte table.
+    fn emit_vtbl1(&mut self, table16: Value<'c, 'a>, idx16: Value<'c, 'a>) -> Value<'c, 'a> {
+        let vec16 = Type::vector(&[16], IntegerType::new(self.ctx, 8).into());
+        self.block
+            .append_operation(
+                OperationBuilder::new("llvm.call_intrinsic", self.loc)
+                    .add_operands(&[table16, idx16])
+                    .add_results(&[vec16])
+                    .add_attributes(&[
+                        (melior::ir::Identifier::new(self.ctx, "intrin"),
+                         StringAttribute::new(self.ctx, "llvm.aarch64.neon.tbl1").into()),
+                        (melior::ir::Identifier::new(self.ctx, "operandSegmentSizes"),
+                         DenseI32ArrayAttribute::new(self.ctx, &[2, 0]).into()),
+                        (melior::ir::Identifier::new(self.ctx, "op_bundle_sizes"),
+                         DenseI32ArrayAttribute::new(self.ctx, &[]).into()),
+                    ])
+                    .build()
+                    .unwrap(),
+            )
+            .result(0)
+            .unwrap()
+            .into()
+    }
+
+    /// Extract a 16-lane slice at byte `offset` from a wider i8 vector.
+    fn emit_extract16(&mut self, v: Value<'c, 'a>, offset: usize) -> Value<'c, 'a> {
+        let vec16 = Type::vector(&[16], IntegerType::new(self.ctx, 8).into());
+        let off = melior::ir::attribute::Attribute::parse(self.ctx, &format!("[{}]", offset)).unwrap();
+        let sz = melior::ir::attribute::Attribute::parse(self.ctx, "[16]").unwrap();
+        let st = melior::ir::attribute::Attribute::parse(self.ctx, "[1]").unwrap();
+        self.block
+            .append_operation(
+                OperationBuilder::new("vector.extract_strided_slice", self.loc)
+                    .add_operands(&[v])
+                    .add_results(&[vec16])
+                    .add_attributes(&[
+                        (melior::ir::Identifier::new(self.ctx, "offsets"), off),
+                        (melior::ir::Identifier::new(self.ctx, "sizes"), sz),
+                        (melior::ir::Identifier::new(self.ctx, "strides"), st),
+                    ])
+                    .build()
+                    .unwrap(),
+            )
+            .result(0)
+            .unwrap()
+            .into()
+    }
+
+    /// Insert a 16-lane slice at byte `offset` into `dest` (width-`w` i8 vector).
+    fn emit_insert16(&mut self, slice: Value<'c, 'a>, dest: Value<'c, 'a>, offset: usize, w: usize) -> Value<'c, 'a> {
+        let vw = Type::vector(&[w as u64], IntegerType::new(self.ctx, 8).into());
+        let off = melior::ir::attribute::Attribute::parse(self.ctx, &format!("[{}]", offset)).unwrap();
+        let st = melior::ir::attribute::Attribute::parse(self.ctx, "[1]").unwrap();
+        self.block
+            .append_operation(
+                OperationBuilder::new("vector.insert_strided_slice", self.loc)
+                    .add_operands(&[slice, dest])
+                    .add_results(&[vw])
+                    .add_attributes(&[
+                        (melior::ir::Identifier::new(self.ctx, "offsets"), off),
+                        (melior::ir::Identifier::new(self.ctx, "strides"), st),
+                    ])
+                    .build()
+                    .unwrap(),
+            )
+            .result(0)
+            .unwrap()
+            .into()
+    }
+
+    /// Width-`w` table lookup `out[i] = row16[idx[i]]` (chunked vtbl1).
+    fn emit_tbl_w(&mut self, row16: Value<'c, 'a>, idx: Value<'c, 'a>, w: usize) -> Value<'c, 'a> {
+        if w == 16 {
+            return self.emit_vtbl1(row16, idx);
+        }
+        let mut acc = self.emit_zero_vector(VecType { scalar: ScalarType::U8, width: w as u64 });
+        let mut off = 0;
+        while off < w {
+            let chunk = self.emit_extract16(idx, off);
+            let r = self.emit_vtbl1(row16, chunk);
+            acc = self.emit_insert16(r, acc, off, w);
+            off += 16;
+        }
+        acc
+    }
+
+    /// Shift `v` (width-`w` i8) right by `d` lanes, filling the low `d` lanes
+    /// from `fill` (used to shift in the identity-function value `s`).
+    fn emit_shift_in(&mut self, v: Value<'c, 'a>, fill: Value<'c, 'a>, d: usize, w: usize) -> Value<'c, 'a> {
+        let vw = Type::vector(&[w as u64], IntegerType::new(self.ctx, 8).into());
+        let mut mask: Vec<i64> = Vec::with_capacity(w);
+        for lane in 0..w {
+            if lane < d {
+                mask.push((w + lane) as i64); // from `fill` (second operand)
+            } else {
+                mask.push((lane - d) as i64); // from `v`
+            }
+        }
+        self.block
+            .append_operation(
+                OperationBuilder::new("vector.shuffle", self.loc)
+                    .add_operands(&[v, fill])
+                    .add_results(&[vw])
+                    .add_attributes(&[(
+                        melior::ir::Identifier::new(self.ctx, "mask"),
+                        DenseI64ArrayAttribute::new(self.ctx, &mask).into(),
+                    )])
+                    .build()
+                    .unwrap(),
+            )
+            .result(0)
+            .unwrap()
+            .into()
+    }
+
+    /// scan_dfa: prefix scan over a DFA's transition monoid. Returns the state
+    /// after each byte. The per-byte transition functions are represented as `k`
+    /// state-vectors `cur[s][i] = next state from `s` after byte i`, composed
+    /// through log-step Hillis-Steele (compose = per-lane select among the k
+    /// vectors). `table[s*16 + class] = next state`.
+    fn emit_dfa_scan(
+        &mut self,
+        table: Value<'c, 'a>,
+        classes: Value<'c, 'a>,
+        seed: Value<'c, 'a>,
+        k: usize,
+        classes_ty: VecType,
+    ) -> (Value<'c, 'a>, VecType) {
+        let w = classes_ty.width as usize;
+        let i8t: Type = IntegerType::new(self.ctx, 8).into();
+        let vw = Type::vector(&[w as u64], i8t);
+
+        // Initial functions: cur[s] = tbl(table_row_s, classes), one per state.
+        let mut cur: Vec<Value<'c, 'a>> = Vec::with_capacity(k);
+        for s in 0..k {
+            let row = self.emit_extract16(table, s * 16);
+            cur.push(self.emit_tbl_w(row, classes, w));
+        }
+        // Precompute the per-state constant splats (identity fill = s; compare keys).
+        let splat: Vec<Value<'c, 'a>> = (0..k).map(|t| self.emit_splat_i8(t as i64, w)).collect();
+
+        // Hillis-Steele: cur_i ← cur_i ∘ cur_{i-d}, d = 1,2,4,...
+        let steps = (w as f64).log2() as usize;
+        for step in 0..steps {
+            let d = 1usize << step;
+            // shifted[s] = cur[s] shifted right by d, low lanes filled with `s`.
+            let shifted: Vec<Value<'c, 'a>> = (0..k)
+                .map(|s| self.emit_shift_in(cur[s], splat[s], d, w))
+                .collect();
+            // newcur[s][i] = cur[ shifted[s][i] ][i]  (select among cur[*] by shifted[s])
+            let mut next: Vec<Value<'c, 'a>> = Vec::with_capacity(k);
+            for s in 0..k {
+                let mut acc = cur[0];
+                for t in 1..k {
+                    let m = self
+                        .block
+                        .append_operation(arith::cmpi(
+                            self.ctx,
+                            arith::CmpiPredicate::Eq,
+                            shifted[s],
+                            splat[t],
+                            self.loc,
+                        ))
+                        .result(0)
+                        .unwrap()
+                        .into();
+                    acc = self
+                        .block
+                        .append_operation(arith::select(m, cur[t], acc, self.loc))
+                        .result(0)
+                        .unwrap()
+                        .into();
+                }
+                next.push(acc);
+            }
+            cur = next;
+        }
+
+        // Running state at each byte = cur[seed][i] = select among cur[*] by seed.
+        let seed_scalar: Value<'c, 'a> = self
+            .block
+            .append_operation(
+                OperationBuilder::new("vector.extract", self.loc)
+                    .add_operands(&[seed])
+                    .add_results(&[i8t])
+                    .add_attributes(&[(
+                        melior::ir::Identifier::new(self.ctx, "static_position"),
+                        DenseI64ArrayAttribute::new(self.ctx, &[0]).into(),
+                    )])
+                    .build()
+                    .unwrap(),
+            )
+            .result(0)
+            .unwrap()
+            .into();
+        let seed_bcast: Value<'c, 'a> = self
+            .block
+            .append_operation(
+                OperationBuilder::new("vector.broadcast", self.loc)
+                    .add_operands(&[seed_scalar])
+                    .add_results(&[vw])
+                    .build()
+                    .unwrap(),
+            )
+            .result(0)
+            .unwrap()
+            .into();
+        let mut result = cur[0];
+        for t in 1..k {
+            let m = self
+                .block
+                .append_operation(arith::cmpi(
+                    self.ctx,
+                    arith::CmpiPredicate::Eq,
+                    seed_bcast,
+                    splat[t],
+                    self.loc,
+                ))
+                .result(0)
+                .unwrap()
+                .into();
+            result = self
+                .block
+                .append_operation(arith::select(m, cur[t], result, self.loc))
+                .result(0)
+                .unwrap()
+                .into();
+        }
+        (result, VecType { scalar: ScalarType::U8, width: w as u64 })
+    }
+
     /// Create a zero vector (identity for add, xor, and preceding_any).
     fn emit_zero_vector(&mut self, ty: VecType) -> Value<'c, 'a> {
         let vec_type = ty.to_mlir_type(self.ctx);
@@ -1829,6 +2073,22 @@ impl<'c, 'a> FnCodegen<'c, 'a> {
                 ).result(0).unwrap().into();
 
                 (result, result_ty)
+            }
+            ast::Expr::Ident(name) if name == "scan_dfa" => {
+                // scan_dfa(table: u8[256], classes: u8[N], seed: u8[1], num_states)
+                //   → u8[N]: the DFA state after each byte. Prefix scan over the
+                //   transition monoid (function composition), via the same log-step
+                //   Hillis-Steele structure as scan.xor but composing per-byte
+                //   transition functions, represented as `num_states` state-vectors.
+                assert_eq!(args.len(), 4, "scan_dfa takes 4 args (table, classes, seed, num_states)");
+                let (table_val, _) = self.emit_expr(&args[0].value);
+                let (classes_val, classes_ty) = self.emit_expr(&args[1].value);
+                let (seed_val, _) = self.emit_expr(&args[2].value);
+                let k = match &args[3].value {
+                    ast::Expr::IntLit(n) => *n as usize,
+                    _ => panic!("scan_dfa num_states must be an integer literal"),
+                };
+                return self.emit_dfa_scan(table_val, classes_val, seed_val, k, classes_ty);
             }
             ast::Expr::Ident(name) if name == "clmul" => {
                 // clmul(u64[1], u64[1]) → u64[1], carry-less multiply (PMULL)
@@ -4785,6 +5045,184 @@ mod tests {
             let result: i32 = f32::to_bits(result_bits) as i32;
             assert_eq!(result, 3, "should count 3 commas");
         }
+    }
+
+    #[test]
+    fn test_scan_dfa_string_toggle() {
+        // 2-state DFA: 0=Code, 1=InString. Classes: 0='"', 1=other.
+        // Validates the transition-monoid prefix scan against a hand-computed run.
+        let source = r#"
+            fn dfa_test(input: ptr[u8], table_ptr: ptr[u8], out: ptr[u8]) {
+                stream chunk: u8[64] over input carry (st: u8[1] = 0) {
+                    table = loadu[u8[256]](table_ptr)
+                    states = scan_dfa(table, chunk, st, 2)
+                    store_at(out, chunk_offset, states)
+                    carry st = extract(states, 63)
+                }
+            }
+        "#;
+        let (fptr, _engine) = jit_lookup(source, "dfa_test");
+        // input bytes are already classes: 0='"', 1=other.  a " b c " d
+        let mut input = [1u8; 64];
+        input[1] = 0; // "
+        input[4] = 0; // "
+        // table[state*16 + class] = next state
+        let mut table = [0u8; 256];
+        table[0 * 16 + 0] = 1; // Code, "  -> InString
+        table[0 * 16 + 1] = 0; // Code, other -> Code
+        table[1 * 16 + 0] = 0; // InString, " -> Code
+        table[1 * 16 + 1] = 1; // InString, other -> InString
+        let mut out = [9u8; 64];
+        unsafe {
+            let f: extern "C" fn(
+                *const u8, *const u8, i64, i64, i64,
+                *const u8, *const u8, i64, i64, i64,
+                *mut u8, *mut u8, i64, i64, i64,
+            ) = std::mem::transmute(fptr);
+            f(
+                input.as_ptr(), input.as_ptr(), 0, 64, 1,
+                table.as_ptr(), table.as_ptr(), 0, 256, 1,
+                out.as_mut_ptr(), out.as_mut_ptr(), 0, 64, 1,
+            );
+        }
+        // state after each byte (seed 0): a=0, "=1, b=1, c=1, "=0, d=0
+        assert_eq!(&out[..6], &[0, 1, 1, 1, 0, 0], "DFA state per byte");
+        assert!(out[6..].iter().all(|&s| s == 0), "stays in Code after");
+    }
+
+    #[test]
+    fn test_scan_dfa_multimode_entanglement() {
+        // 4-state DFA proving multi-mode resolution: a `/` inside a string is NOT
+        // a comment, and a `"` inside a comment is NOT a string — the exact thing
+        // single-toggle CLMUL can't do. States: 0=Code,1=Slash,2=DQ,3=Line.
+        // Classes: 0='"', 1='/', 2='\n', 3=other.
+        let source = r#"
+            fn dfa_test(input: ptr[u8], table_ptr: ptr[u8], out: ptr[u8]) {
+                stream chunk: u8[64] over input carry (st: u8[1] = 0) {
+                    table = loadu[u8[256]](table_ptr)
+                    states = scan_dfa(table, chunk, st, 4)
+                    store_at(out, chunk_offset, states)
+                    carry st = extract(states, 63)
+                }
+            }
+        "#;
+        let (fptr, _engine) = jit_lookup(source, "dfa_test");
+        // `"` `/` `/` `"`  ` ` `/` `/` `"` `x`   as classes:
+        let mut input = [3u8; 64]; // default: other
+        for (i, &c) in [0u8, 1, 1, 0, 3, 1, 1, 0, 3].iter().enumerate() {
+            input[i] = c;
+        }
+        let mut t = [0u8; 256];
+        let set = |t: &mut [u8; 256], s: usize, row: [u8; 4]| {
+            for c in 0..4 {
+                t[s * 16 + c] = row[c];
+            }
+        };
+        set(&mut t, 0, [2, 1, 0, 0]); // Code:  "->DQ, /->Slash, \n->Code, other->Code
+        set(&mut t, 1, [2, 3, 0, 0]); // Slash: "->DQ, /->Line,  \n->Code, other->Code
+        set(&mut t, 2, [0, 2, 2, 2]); // DQ:    "->Code, else stay (/, \n inside string)
+        set(&mut t, 3, [3, 3, 0, 3]); // Line:  \n->Code, else stay (" inside comment)
+        let mut out = [9u8; 64];
+        unsafe {
+            let f: extern "C" fn(
+                *const u8, *const u8, i64, i64, i64,
+                *const u8, *const u8, i64, i64, i64,
+                *mut u8, *mut u8, i64, i64, i64,
+            ) = std::mem::transmute(fptr);
+            f(
+                input.as_ptr(), input.as_ptr(), 0, 64, 1,
+                t.as_ptr(), t.as_ptr(), 0, 256, 1,
+                out.as_mut_ptr(), out.as_mut_ptr(), 0, 64, 1,
+            );
+        }
+        // `"//"` → string (state 2) for the two `/`; then `//"x` → comment (3) incl the `"`.
+        assert_eq!(&out[..9], &[2, 2, 2, 0, 0, 1, 3, 3, 3], "multi-mode states");
+    }
+
+    #[test]
+    fn test_scan_dfa_full_literal_mask() {
+        // The real 9-state JS literal DFA (strings + line/block comments +
+        // escapes) classifying bytes and producing an in-literal mask in SIMD,
+        // validated byte-for-byte against a scalar reference DFA.
+        // states: 0 Code,1 Slash,2 DQ,3 DQesc,4 SQ,5 SQesc,6 Line,7 Block,8 BlockStar
+        // classes: 0 '"',1 '\'',2 '\\',3 '/',4 '*',5 '\n',6 other
+        let source = r#"
+            fn litmask(input: ptr[u8], table_ptr: ptr[u8], out: ptr[u8]) {
+                stream chunk: u8[64] over input carry (st: u8[1] = 0) {
+                    table = loadu[u8[256]](table_ptr)
+                    is_dq = chunk == 34
+                    is_sq = chunk == 39
+                    is_bs = chunk == 92
+                    is_sl = chunk == 47
+                    is_st = chunk == 42
+                    is_nl = chunk == 10
+                    c0: u8[64] = 0
+                    c1: u8[64] = 1
+                    c2: u8[64] = 2
+                    c3: u8[64] = 3
+                    c4: u8[64] = 4
+                    c5: u8[64] = 5
+                    c6: u8[64] = 6
+                    cls = [is_dq] c0 : ([is_sq] c1 : ([is_bs] c2 : ([is_sl] c3 : ([is_st] c4 : ([is_nl] c5 : c6)))))
+                    states = scan_dfa(table, cls, st, 9)
+                    two: u8[64] = 2
+                    in_lit_mask = states >= two
+                    one: u8[64] = 1
+                    zero: u8[64] = 0
+                    in_lit = [in_lit_mask] one : zero
+                    store_at(out, chunk_offset, in_lit)
+                    carry st = extract(states, 63)
+                }
+            }
+        "#;
+        let (fptr, _engine) = jit_lookup(source, "litmask");
+
+        // Build the transition table (also the scalar reference).
+        let mut t = [0u8; 256];
+        let set = |t: &mut [u8; 256], s: usize, row: [u8; 7]| {
+            for c in 0..7 { t[s * 16 + c] = row[c]; }
+        };
+        set(&mut t, 0, [2, 4, 0, 1, 0, 0, 0]); // Code
+        set(&mut t, 1, [2, 4, 0, 6, 7, 0, 0]); // Slash
+        set(&mut t, 2, [0, 2, 3, 2, 2, 2, 2]); // DQ
+        set(&mut t, 3, [2, 2, 2, 2, 2, 2, 2]); // DQesc
+        set(&mut t, 4, [4, 0, 5, 4, 4, 4, 4]); // SQ
+        set(&mut t, 5, [4, 4, 4, 4, 4, 4, 4]); // SQesc
+        set(&mut t, 6, [6, 6, 6, 6, 6, 0, 6]); // Line
+        set(&mut t, 7, [7, 7, 7, 7, 8, 7, 7]); // Block
+        set(&mut t, 8, [7, 7, 7, 0, 8, 7, 7]); // BlockStar
+        let classify = |b: u8| match b {
+            34 => 0, 39 => 1, 92 => 2, 47 => 3, 42 => 4, 10 => 5, _ => 6,
+        };
+
+        // Regex-free source exercising strings, escapes, both comment kinds, and
+        // the cross-mode cases (`//` in a string, `"` in a comment).
+        let src = b"var s = \"a\\\"b//c\"; // x\"y\nvar t = 'p/*q'; /* r\"s */ z;\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+        let mut input = [0u8; 128];
+        input[..src.len().min(128)].copy_from_slice(&src[..src.len().min(128)]);
+
+        // Scalar reference DFA.
+        let mut want = [0u8; 128];
+        let mut st = 0usize;
+        for i in 0..128 {
+            st = t[st * 16 + classify(input[i]) as usize] as usize;
+            want[i] = (st >= 2) as u8;
+        }
+
+        let mut out = [9u8; 128];
+        unsafe {
+            let f: extern "C" fn(
+                *const u8, *const u8, i64, i64, i64,
+                *const u8, *const u8, i64, i64, i64,
+                *mut u8, *mut u8, i64, i64, i64,
+            ) = std::mem::transmute(fptr);
+            f(
+                input.as_ptr(), input.as_ptr(), 0, 128, 1,
+                t.as_ptr(), t.as_ptr(), 0, 256, 1,
+                out.as_mut_ptr(), out.as_mut_ptr(), 0, 128, 1,
+            );
+        }
+        assert_eq!(&out[..], &want[..], "SIMD literal DFA mask must match scalar reference");
     }
 
     // ============================================================

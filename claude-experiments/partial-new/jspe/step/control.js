@@ -3,13 +3,13 @@
 // a head go through it), so a data loop's carried slots become stable runtime vars and
 // the canonical-key memo ties the loop.
 const meta = require("./meta.js");
-const { gc, absTruthy, absToRExpr } = require("../state.js");
+const { gc, absTruthy, absToRExpr, cloneState } = require("../state.js");
 const { dynamicallyControlled, materialize, consumePendingJoins } = require("../whistle.js");
 const { RE } = require("../contracts.js");
 
 function jumpTo(s, target, out) {
   const M = meta.get();
-  const ns = structuredClone(s);
+  const ns = cloneState(s);
   ns.frames[ns.frames.length - 1].pc = target;
   if (M.loopHeads.has(target) && dynamicallyControlled(ns)) {
     // Materialize loop-carried SCALARS that change + ARRAYS that are MUTATED in the
@@ -36,8 +36,8 @@ H.JmpIfFalsy = (s, i, out) => {
     return { tag: "Continue" };
   }
   const cond = RE.Unary("!", absToRExpr(c));  // dynamic: residual branch  if(!c) target else pc+1
-  const tState = structuredClone(s); tState.frames[tState.frames.length - 1].pc = i.target;
-  const fState = structuredClone(s); fState.frames[fState.frames.length - 1].pc = top.pc + 1;
+  const tState = cloneState(s); tState.frames[tState.frames.length - 1].pc = i.target;
+  const fState = cloneState(s); fState.frames[fState.frames.length - 1].pc = top.pc + 1;
   return { tag: "Branch", cond, t: tState, f: fState };
 };
 

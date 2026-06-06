@@ -10,6 +10,14 @@ mod to_swc;
 pub use from_swc::source_to_ir;
 pub use to_swc::to_program;
 
+/// Build the data-oriented (struct-of-arrays) IR straight from JS source: parse,
+/// lower, and move the result into a columnar [`jsir_ir::Module`].
+/// [`jsir_ir::Module::print`] then renders it byte-identically to
+/// `source_to_ir(..).print()`.
+pub fn source_to_module(src: &str) -> Result<jsir_ir::Module, String> {
+    source_to_ir(src).map(|op| jsir_ir::Module::from_op(&op))
+}
+
 use swc_common::{sync::Lrc, FileName, SourceMap};
 use swc_ecma_ast::{EsVersion, Program};
 use swc_ecma_codegen::{text_writer::JsWriter, Config, Emitter};

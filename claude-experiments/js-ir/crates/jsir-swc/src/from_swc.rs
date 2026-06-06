@@ -2275,6 +2275,17 @@ mod tests {
             match source_to_ir(&src) {
                 Ok(op) => {
                     let actual = op.print();
+                    // The SoA backend, reached purely through `IrRead`, must
+                    // print byte-for-byte identically to the AoS `Op` tree on
+                    // every real-source fixture. This is the oracle for the
+                    // data-oriented storage migration.
+                    let module = jsir_ir::soa::Module::from_op(&op);
+                    let soa = module.print();
+                    assert_eq!(soa, actual, "{}: SoA path diverged from AoS", f.name);
+                    // The IrRead→IrBuild rebuild template (the porting exemplar)
+                    // must round-trip byte-exact too.
+                    let rebuilt = jsir_ir::build::rebuild(&module).print();
+                    assert_eq!(rebuilt, actual, "{}: rebuild() diverged", f.name);
                     if jsir_oracle::filecheck_equivalent(&expected, &actual) {
                         matched.push(f.name.clone());
                     } else {
@@ -2301,6 +2312,18 @@ mod tests {
             "swc->IR regressed:\ndiverged={diverged:?}\nerrored={errored:?}"
         );
         assert_eq!(matched.len(), 46, "expected all 46 fixtures to match");
+    }
+
+    /// The public "build the SoA IR from source, then print it" path prints
+    /// byte-identically to the AoS path on every fixture.
+    #[test]
+    fn source_to_module_prints_byte_exact() {
+        for f in jsir_oracle::list_fixtures() {
+            let src = f.input_js().expect("input.js");
+            let Ok(op) = source_to_ir(&src) else { continue };
+            let module = crate::source_to_module(&src).expect("source_to_module");
+            assert_eq!(module.print(), op.print(), "{}: source_to_module diverged", f.name);
+        }
     }
 
     /// Strip the formatting-dependent trivia from printed IR so two IRs from

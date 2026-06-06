@@ -169,6 +169,67 @@ fn show(src: &[u8], s: usize, e: usize) -> String {
     }
 }
 
+/// Measure the throughput of the 9-state JS literal DFA (`examples/js_litmask.simd`)
+/// — i.e. how fast `scan_dfa` runs a real multi-mode lexer DFA in SIMD.
+pub fn litmask(path: &str, iters: usize) {
+    let raw = std::fs::read(path).unwrap();
+    let bytes = raw.len();
+    let mb = bytes as f64 / 1_000_000.0;
+    let padded = pad64(&raw);
+
+    // The 9-state transition table (state*16 + class -> next state).
+    let mut t = [0u8; 256];
+    let mut set = |s: usize, row: [u8; 7]| {
+        for c in 0..7 {
+            t[s * 16 + c] = row[c];
+        }
+    };
+    set(0, [2, 4, 0, 1, 0, 0, 0]); // Code
+    set(1, [2, 4, 0, 6, 7, 0, 0]); // Slash
+    set(2, [0, 2, 3, 2, 2, 2, 2]); // DQ
+    set(3, [2, 2, 2, 2, 2, 2, 2]); // DQesc
+    set(4, [4, 0, 5, 4, 4, 4, 4]); // SQ
+    set(5, [4, 4, 4, 4, 4, 4, 4]); // SQesc
+    set(6, [6, 6, 6, 6, 6, 0, 6]); // Line
+    set(7, [7, 7, 7, 7, 8, 7, 7]); // Block
+    set(8, [7, 7, 7, 0, 8, 7, 7]); // BlockStar
+
+    let src = std::fs::read_to_string("examples/js_litmask.simd").unwrap();
+    let ctx = codegen::create_context();
+    let items = parser::parse(&src);
+    let mut module = codegen::compile_module(&ctx, &items, &HashMap::new(), 8);
+    codegen::lower_to_llvm(&ctx, &mut module).unwrap();
+    let engine = melior::ExecutionEngine::new(&module, 3, &[], false);
+    let fptr = engine.lookup("js_litmask");
+    assert!(!fptr.is_null());
+    let f: extern "C" fn(
+        *const u8, *const u8, i64, i64, i64,
+        *const u8, *const u8, i64, i64, i64,
+        *mut u8, *mut u8, i64, i64, i64,
+    ) = unsafe { std::mem::transmute(fptr) };
+    let mut out = vec![0u8; padded.len()];
+    let call = |out: &mut [u8]| {
+        f(
+            padded.as_ptr(), padded.as_ptr(), 0, padded.len() as i64, 1,
+            t.as_ptr(), t.as_ptr(), 0, 256, 1,
+            out.as_mut_ptr(), out.as_mut_ptr(), 0, out.len() as i64, 1,
+        );
+    };
+    for _ in 0..3 {
+        call(&mut out);
+    }
+    let mut best = 0.0f64;
+    for _ in 0..iters {
+        let t0 = Instant::now();
+        call(&mut out);
+        best = best.max(mb / t0.elapsed().as_secs_f64());
+    }
+    let in_lit = out[..bytes].iter().filter(|&&b| b == 1).count();
+    println!("file: {path}  ({bytes} bytes)");
+    println!("9-state literal DFA via scan_dfa: {best:.0} MB/s best");
+    println!("in-literal bytes: {in_lit} ({:.1}%)", 100.0 * in_lit as f64 / bytes as f64);
+}
+
 /// Profiling driver: precompute stage-1 masks once, then run stage-2
 /// (`count_tokens`) in a tight loop so a sampler sees only the stage-2 hot path.
 pub fn prof(path: &str, iters: usize) {

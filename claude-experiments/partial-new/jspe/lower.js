@@ -41,9 +41,10 @@ function markMut(ctx, name) { for (const L of ctx.loopStack) L.mutNames.add(name
 function emitStore(ctx, sl) { ctx.code.push({ tag: "Store", slot: sl }); for (const L of ctx.loopStack) L.modified.add(sl); }
 
 const LOWER_EXPR = {};
-LOWER_EXPR.lit = (n, ctx) => ctx.code.push(typeof n[1] === "number" ? { tag: "PushNum", n: n[1] } : (typeof n[1] === "boolean" ? { tag: "PushBool", b: n[1] } : { tag: "PushStr", s: n[1] }));
+LOWER_EXPR.lit = (n, ctx) => ctx.code.push(n[1] === null ? { tag: "PushNull" } : (typeof n[1] === "number" ? { tag: "PushNum", n: n[1] } : (typeof n[1] === "boolean" ? { tag: "PushBool", b: n[1] } : { tag: "PushStr", s: n[1] })));
 LOWER_EXPR.var = (n, ctx) => ctx.code.push({ tag: "Load", slot: slot(ctx, n[1]) });
 LOWER_EXPR.bin = (n, ctx) => { lowerExpr(n[2], ctx); lowerExpr(n[3], ctx); ctx.code.push({ tag: "Bin", op: n[1] }); };
+LOWER_EXPR.unary = (n, ctx) => { lowerExpr(n[2], ctx); ctx.code.push({ tag: "Unary", op: n[1] }); };
 LOWER_EXPR.cond = (n, ctx) => { lowerExpr(n[1], ctx); const jf = ctx.code.length; ctx.code.push({ tag: "JmpIfFalsy", target: -1 }); lowerExpr(n[2], ctx); const jmp = ctx.code.length; ctx.code.push({ tag: "Jmp", target: -1 }); ctx.code[jf].target = ctx.code.length; ctx.leaders.add(ctx.code.length); lowerExpr(n[3], ctx); ctx.code[jmp].target = ctx.code.length; ctx.leaders.add(ctx.code.length); };
 LOWER_EXPR.arr = (n, ctx) => { for (const el of n[1]) lowerExpr(el, ctx); ctx.code.push({ tag: "NewArray", n: n[1].length }); };
 LOWER_EXPR.idx = (n, ctx) => { lowerExpr(n[1], ctx); lowerExpr(n[2], ctx); ctx.code.push({ tag: "GetIndex" }); };

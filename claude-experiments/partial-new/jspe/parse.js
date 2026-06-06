@@ -69,6 +69,7 @@ function parseProgram(src) {
     if(t[0]==="id"){
       if(t[1]==="true"){ next(); return ["lit", true]; }
       if(t[1]==="false"){ next(); return ["lit", false]; }
+      if(t[1]==="null"){ next(); return ["lit", null]; }
       if(t[1]==="function"){ next(); eatOp("("); var ps=parseParams(); var body=parseBlock(); return ["fun", ps, body]; }
       next(); return ["var", t[1]];
     }
@@ -101,8 +102,9 @@ function parseProgram(src) {
     }
     return e;
   }
-  var MUL=["*"], ADD=["+","-"], CMP=["<",">","<=",">=","===","!==","==","!="];
-  function parseMul(){ var e=parsePostfix(); while(peek()[0]==="op"&&MUL.indexOf(peek()[1])>=0){ var o=next()[1]; e=["bin",o,e,parsePostfix()]; } return e; }
+  var MUL=["*","/","%"], ADD=["+","-"], CMP=["<",">","<=",">=","===","!==","==","!="];
+  function parseUnary(){ if(peek()[0]==="id"&&peek()[1]==="typeof"){ next(); return ["unary","typeof",parseUnary()]; } if(peek()[0]==="op"&&peek()[1]==="!"){ next(); return ["unary","!",parseUnary()]; } return parsePostfix(); }
+  function parseMul(){ var e=parseUnary(); while(peek()[0]==="op"&&MUL.indexOf(peek()[1])>=0){ var o=next()[1]; e=["bin",o,e,parseUnary()]; } return e; }
   function parseAdd(){ var e=parseMul(); while(peek()[0]==="op"&&ADD.indexOf(peek()[1])>=0){ var o=next()[1]; e=["bin",o,e,parseMul()]; } return e; }
   function parseCmp(){ var e=parseAdd(); while(peek()[0]==="op"&&CMP.indexOf(peek()[1])>=0){ var o=next()[1]; e=["bin",o,e,parseAdd()]; } return e; }
   function parseCond(){ var e=parseCmp(); if(isOp("?")){ next(); var t=parseExpr(); eatOp(":"); var el=parseExpr(); return ["cond",e,t,el]; } return e; }

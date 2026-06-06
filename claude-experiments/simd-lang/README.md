@@ -89,6 +89,44 @@ Reductions: `+/` `*/` `|/` `&/` `max/` `min/`
 
 Scans: `scan.add` `scan.xor` `scan.max` `scan.preceding_any`
 
+#### `scan_dfa` — prefix scan over a finite automaton
+
+```
+states = scan_dfa(table, classes, seed, num_states)
+```
+
+A prefix scan whose combine operator is **DFA transition-function composition** —
+the general case of the `scan.*` family (`scan.xor` is a 2-state parity DFA;
+`scan.preceding_any` a 2-state latch). It returns the automaton's state after
+each lane.
+
+- `table: u8[256]` — `table[state*16 + class] = next_state` (≤16 states, ≤16 input classes)
+- `classes: u8[N]` — each lane's input class (e.g. from a `tbl` byte-classifier)
+- `seed: u8[1]` — carried start state (use `carry` for cross-chunk continuation)
+- `num_states` — compile-time literal
+
+It expresses the *regular* structure of a lexer in SIMD: multi-mode string/
+comment region masks (a `/` inside a string is correctly *not* a comment — which
+single-toggle `clmul` can't do), number/operator extents, even keyword tries.
+`examples/js_litmask.simd` is the full 9-state JS literal DFA (strings, both
+comment kinds, escapes), validated byte-for-byte against a scalar reference in
+the codegen tests. It lowers, with **no gather**, to `num_states` state-vectors
+composed through a log-step Hillis–Steele scan (`tbl` seeds the per-byte
+transition functions; each step is `shuffle` + per-lane `cmpi`/`select`).
+
+Two caveats found by building it out:
+- **Lowering cost is O(k²) per step** (the per-lane select-compose). At k=9 the
+  literal DFA runs ~167 MB/s — fine for a primitive, but *below* the scalar
+  tokenizer's rate, so it doesn't currently accelerate it. A `vtbl`-based
+  per-position compose (O(1)/position/step) would be much faster but needs a
+  per-position-varying table lookup — the one codegen capability still missing.
+- **For JS it's regex-poisoned**: stage-1 can't know which `/` is a regex literal
+  (needs the previous *token* — parser context), and a quote-bearing regex flips
+  the literal-parity for downstream bytes. So the mask is only sound for code
+  without quote-bearing regexes — i.e. directly usable for **regex-free languages**
+  (JSON, many DSLs), but not the JS hot path. The two non-regular parts of JS
+  (regex-vs-division, template `${}` nesting) stay scalar by nature regardless.
+
 ### Streams
 
 Process a buffer in chunks with carried state:

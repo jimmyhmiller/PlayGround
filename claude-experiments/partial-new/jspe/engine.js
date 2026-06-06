@@ -19,7 +19,7 @@ function createOrGet(client, st, cx) {
   const p = client.point(st);
   if (!cx.seen.has(p)) cx.seen.set(p, []);
   cx.seen.get(p).push(st);
-  cx.work.push([id, structuredClone(st)]);
+  cx.work.push([id, (client.clone || structuredClone)(st)]);
   return id;
 }
 

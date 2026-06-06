@@ -46,6 +46,12 @@ fn main() {
             let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3000);
             bench::prof(file, iters);
         }
+        #[cfg(feature = "bench")]
+        "litmask" => {
+            let file = args.get(2).map(String::as_str).unwrap();
+            let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(100);
+            bench::litmask(file, iters);
+        }
         other => {
             eprintln!("Unknown command: {}", other);
             std::process::exit(1);

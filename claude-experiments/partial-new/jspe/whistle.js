@@ -2,7 +2,7 @@
 // PE's "brain": detect a dynamically-controlled loop, materialize its carried slots
 // to STABLE runtime vars (keyed by (head,slot)) so the canonical-key memo ties it.
 const meta = require("./step/meta.js");
-const { absTruthy, absToRExpr } = require("./state.js");
+const { absTruthy, absToRExpr, cloneState } = require("./state.js");
 const { RE } = require("./contracts.js");
 
 // Abs -> RExpr for materialization: a heap Ref becomes an array/object LITERAL
@@ -107,7 +107,7 @@ function whistle(seen, cand /*, ctx */) {
 }
 
 function generalize(seen, from, out) {
-  const g = structuredClone(from);
+  const g = cloneState(from);
   const fi = g.frames.length - 1;
   const slots = [];
   for (let i = 0; i < g.frames[fi].locals.length; i++) {

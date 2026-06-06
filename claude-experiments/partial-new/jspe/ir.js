@@ -65,8 +65,42 @@ function lvalue(name) { return typeof name === "number" ? varName(name) : name; 
 // ---- dispatchers (FROZEN — agents do not edit) ----
 function emit(e) { const f = EMIT[e.tag]; if (!f) throw new Error("no EMIT." + e.tag); return f(e, emit); }
 function emitOp(o) { const f = EMITOP[o.tag]; if (!f) throw new Error("no EMITOP." + o.tag); return f(o, emit); }
+// CFG cleanup before emission: thread jumps through empty forwarding blocks (`__pc=N;break`
+// with no ops), drop unreachable blocks, and renumber. jspe's leader-forcing emits many
+// such blocks; this collapses them (e.g. 6784 blocks -> a handful) without changing behavior.
+function threadJumps(program) {
+  const { blocks, entry } = program;
+  const resolve = (i, seen) => {
+    const b = blocks[i];
+    if (b.ops.length === 0 && b.term.tag === "Br" && !seen.has(i)) { seen.add(i); return resolve(b.term.b, seen); }
+    return i;
+  };
+  const R = blocks.map((_, i) => resolve(i, new Set()));
+  const newEntry = resolve(entry, new Set());
+  const reach = new Set(), stack = [newEntry];
+  while (stack.length) {
+    const i = stack.pop();
+    if (reach.has(i)) continue;
+    reach.add(i);
+    const t = blocks[i].term;
+    if (t.tag === "Br") stack.push(R[t.b]);
+    else if (t.tag === "CondBr") { stack.push(R[t.t]); stack.push(R[t.f]); }
+  }
+  const order = [...reach].sort((a, b) => a - b);
+  const remap = new Map(order.map((old, n) => [old, n]));
+  const newBlocks = order.map((old) => {
+    const b = blocks[old];
+    let term = b.term;
+    if (term.tag === "Br") term = { tag: "Br", b: remap.get(R[term.b]) };
+    else if (term.tag === "CondBr") term = { tag: "CondBr", cond: term.cond, t: remap.get(R[term.t]), f: remap.get(R[term.f]) };
+    return { ops: b.ops, term };
+  });
+  return { blocks: newBlocks, entry: remap.get(newEntry) };
+}
+
 // [task ir.program] assemble blocks into a `switch(__pc)` dispatch loop (mirror js.rs codegen)
-function emitProgram(program, paramName) {
+function emitProgram(programRaw, paramName) {
+  const program = threadJumps(programRaw);
   const { blocks, entry } = program;
   let code = `function main(${paramName}) {\n`;
   code += `  let __pc = ${entry};\n`;

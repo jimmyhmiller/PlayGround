@@ -52,6 +52,32 @@ H.Bin = (s, i, out) => {
   top.ostack.push(evalBin(i.op, a, b));
   return { tag: "Continue" };
 };
+// typeof (and !) folded on static values; Refs are heap arrays/objects -> "object".
+H.Unary = (s, i, out) => {
+  const top = s.frames[s.frames.length - 1];
+  const a = top.ostack.pop();
+  top.ostack.push(evalUnary(i.op, a));
+  return { tag: "Continue" };
+};
+function evalUnary(op, a) {
+  if (op === "typeof") {
+    switch (a.tag) {
+      case "Num": return AB.Str("number");
+      case "Str": return AB.Str("string");
+      case "Bool": return AB.Str("boolean");
+      case "Undef": return AB.Str("undefined");
+      case "Null": return AB.Str("object");
+      case "Ref": return AB.Str("object"); // arrays/objects
+      default: return AB.Dyn(RE.Unary("typeof", absToRExpr(a)));
+    }
+  }
+  if (op === "!") {
+    const t = a.tag === "Num" ? a.n !== 0 : a.tag === "Str" ? a.s !== "" : a.tag === "Bool" ? a.b : a.tag === "Undef" || a.tag === "Null" ? false : a.tag === "Ref" ? true : null;
+    if (t !== null) return AB.Bool(!t);
+    return AB.Dyn(RE.Unary("!", absToRExpr(a)));
+  }
+  return AB.Dyn(RE.Unary(op, absToRExpr(a)));
+}
 const num = (v) => v.tag === "Num";
 // A statically-known PRIMITIVE Abs -> {ok, v} with its concrete JS value. Refs/Dyn are not static.
 function staticVal(v) {

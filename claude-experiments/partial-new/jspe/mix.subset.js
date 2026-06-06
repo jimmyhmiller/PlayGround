@@ -57,6 +57,8 @@ function applyOp(op, a, b) {
   if (op === "+") { return a + b; }
   if (op === "-") { return a - b; }
   if (op === "*") { return a * b; }
+  if (op === "%") { return a % b; }
+  if (op === "/") { return a / b; }
   if (op === "===") { return a === b; }
   if (op === "!==") { return a !== b; }
   if (op === "==") { return a == b; }
@@ -77,17 +79,17 @@ function findFun(prog, name) {
   return ["__missing_fun__", name];
 }
 
-// ---- static-skeleton serialization for memo keys (no typeof: probe .substring/.length) ----
-function isStrV(v) { return v.substring !== undefined; }
+// ---- static-skeleton serialization for memo keys (typeof-discriminated; jspe-foldable) ----
 function serial(v) {
-  if (isStrV(v)) { return "'" + v; }
-  if (v.length !== undefined) {            // array (numbers/bools have undefined .length)
+  var t = typeof v;
+  if (t === "string") { return "'" + v; }
+  if (t === "object") {                    // array AST node (no nulls inside skeletons)
     var s = "[";
     var i = 0;
     while (i < v.length) { s = s + serial(v[i]) + ","; i = i + 1; }
     return s + "]";
   }
-  return "#" + v;                          // number/bool via coercion
+  return "#" + v;                          // number/boolean via coercion
 }
 function skeletonKey(fname, argvals) {
   var k = fname;
