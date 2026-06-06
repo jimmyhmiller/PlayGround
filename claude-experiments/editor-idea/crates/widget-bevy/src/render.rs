@@ -977,6 +977,62 @@ pub fn paint_style_background(
             }
         });
     }
+    // Glaze shader layer — painted over the background, under the children.
+    // Pass the element's corner radius so the shader masks to the rounded rect.
+    if let Some(spec) = style.shader.as_ref() {
+        paint_shader_layer(commands, ctx, &spec.body, origin, size, radius, z - 0.004);
+    }
+}
+
+/// Paint a compiled Glaze shader layer on a quad at the element's rect. The
+/// fragment body comes from the `glaze` compiler; the material's per-instance
+/// shader handle is cached by body hash and pinned in `specialize`.
+fn paint_shader_layer(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    body: &str,
+    origin: Vec2,
+    size: Vec2,
+    radius: f32,
+    z: f32,
+) {
+    use crate::button_material::WidgetButtonMesh;
+    use crate::glaze_material::{GlazeMaterial, GlazeShaderCache, GlazeUniforms};
+
+    if size.x <= 0.0 || size.y <= 0.0 {
+        return;
+    }
+    let body = body.to_string();
+    let entity = commands
+        .spawn((
+            ChildOf(ctx.content_root),
+            // Unit quad centered on the element box (Y flipped: content uses a
+            // top-left origin, Bevy 2D is Y-up). uv runs 0..1 across the quad.
+            Transform::from_xyz(origin.x + size.x * 0.5, -(origin.y + size.y * 0.5), z)
+                .with_scale(Vec3::new(size.x, size.y, 1.0)),
+            Visibility::Inherited,
+        ))
+        .id();
+    commands.queue(move |world: &mut World| {
+        let Some(mesh) = world.get_resource::<WidgetButtonMesh>().map(|m| m.0.clone()) else {
+            return;
+        };
+        // Get-or-create the shader handle (needs Assets<Shader> + the cache).
+        let handle = world.resource_scope(|world, mut cache: Mut<GlazeShaderCache>| {
+            let mut shaders = world.resource_mut::<Assets<Shader>>();
+            cache.handle_for(&body, &mut shaders)
+        });
+        let mat = world.resource_mut::<Assets<GlazeMaterial>>().add(GlazeMaterial {
+            u: GlazeUniforms { size, resolution: size, radius, ..Default::default() },
+            fragment: handle,
+        });
+        if let Ok(mut ec) = world.get_entity_mut(entity) {
+            ec.insert((
+                bevy::mesh::Mesh2d(mesh),
+                bevy::sprite_render::MeshMaterial2d(mat),
+            ));
+        }
+    });
 }
 
 /// Convert a `Color` to its linear-RGBA `Vec4` for shader uniforms.

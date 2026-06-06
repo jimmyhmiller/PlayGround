@@ -633,6 +633,291 @@ fn rexpr_weight(e: &RExpr) -> u64 {
     }
 }
 
+/// For a loop body `[lo, hi)`, find which local slots are mutation BASES (the
+/// object written by a `SetIndex`/`SetProp`/`PushArr`/`Delete`), via a per-block
+/// abstract stack that tracks each operand's slot provenance. Returns
+/// `(base_slots, all_attributed)`: a slot that is never a base, never reassigned,
+/// in a loop where EVERY mutation's base was attributed to a slot is provably
+/// loop-invariant read-only and may stay STATIC across the residualizing loop (so
+/// a tree-walk interpreter's static AST `node` is not dragged dynamic). If any
+/// mutation base is unknown — or any instruction is one whose stack effect we do
+/// not model — `all_attributed` is false and the caller falls back to
+/// materializing every Ref (the original, safe behavior).
+fn analyze_loop_mutations(
+    code: &[Instr],
+    lo: usize,
+    hi: usize,
+    leaders: &[bool],
+    nslots: usize,
+) -> (Vec<bool>, bool) {
+    let mut bases = vec![false; nslots];
+    let mut stack: Vec<Option<usize>> = Vec::new();
+    // The base operand of a mutation is the DEEPEST popped value: `depth` from the
+    // top (0 = top). Returns None on underflow.
+    let base = |stack: &[Option<usize>], depth: usize| -> Option<Option<usize>> {
+        stack.len().checked_sub(1 + depth).map(|i| stack[i])
+    };
+    for pc in lo..hi {
+        if leaders[pc] {
+            stack.clear(); // statements are stack-balanced; reset at block boundaries
+        }
+        macro_rules! popn {
+            ($n:expr) => {{
+                for _ in 0..$n {
+                    if stack.pop().is_none() {
+                        return (bases, false);
+                    }
+                }
+            }};
+        }
+        macro_rules! record {
+            ($depth:expr) => {{
+                match base(&stack, $depth) {
+                    Some(Some(slot)) => {
+                        if slot < bases.len() {
+                            bases[slot] = true;
+                        }
+                    }
+                    _ => return (bases, false), // base not a known slot → bail
+                }
+            }};
+        }
+        match &code[pc] {
+            Instr::Load(s) => stack.push(Some(*s)),
+            Instr::PushNum(_) | Instr::PushStr(_) | Instr::PushBool(_) | Instr::PushUndef
+            | Instr::PushNull | Instr::PushThis | Instr::PushGlobal(_) | Instr::PushFunc(_) => {
+                stack.push(None)
+            }
+            Instr::Dup => {
+                let t = stack.last().copied().unwrap_or(None);
+                stack.push(t);
+            }
+            Instr::Snapshot | Instr::ChkCoercible(_) => {} // peek/transform top in place
+            Instr::Pop | Instr::Store(_) | Instr::SetGlobalOp(_) | Instr::Throw | Instr::Ret => {
+                popn!(1)
+            }
+            Instr::Bin(_) | Instr::GetIndex => {
+                popn!(2);
+                stack.push(None);
+            }
+            Instr::GetProp(_) => {
+                popn!(1);
+                stack.push(None);
+            }
+            Instr::OpaqueOp { arity, .. } => {
+                popn!(*arity);
+                stack.push(None);
+            }
+            Instr::NewObject(keys) => {
+                popn!(keys.len());
+                stack.push(None);
+            }
+            Instr::NewArray(n) => {
+                popn!(*n);
+                stack.push(None);
+            }
+            Instr::MakeClosure(_, ncap) => {
+                popn!(*ncap);
+                stack.push(None);
+            }
+            Instr::Call(nargs) | Instr::NewOp(nargs) => {
+                popn!(nargs + 1);
+                stack.push(None);
+            }
+            Instr::SetIndexOp => {
+                record!(2);
+                popn!(3);
+            }
+            Instr::SetPropOp(_) => {
+                record!(1);
+                popn!(2);
+            }
+            Instr::PushArr | Instr::DeleteIndexOp => {
+                record!(1);
+                popn!(2);
+            }
+            Instr::DeletePropOp(_) => {
+                record!(0);
+                popn!(1);
+            }
+            Instr::JmpIfFalsy(_) => popn!(1),
+            Instr::Jmp(_) | Instr::PushHandler { .. } | Instr::PopHandler => {}
+        }
+    }
+    (bases, true)
+}
+
+/// Which slots *drive dispatch* in a loop body: a slot whose value, after at
+/// least one field/element access (`obj.field` / `arr[i]`), reaches a branch
+/// condition. This is the tree-walk interpreter's `node` in `switch (node.op)`
+/// or `i < node.body.length` — keeping it STATIC lets the dispatch fold away.
+/// A slot used only as opaque data (read, concatenated, returned — never feeding
+/// a branch) is NOT a driver, so keeping it static would only duplicate the
+/// literal at each use; such slots are materialized to a runtime variable.
+///
+/// Each abstract-stack entry tracks `slot` (the bare slot of a `Load`, before any
+/// field access) and `ff` (the set of slots a value is derived from THROUGH a
+/// field/index access). At every consuming op the operands' `slot` folds into
+/// `ff`; a `JmpIfFalsy` marks every slot in the popped value's `ff`.
+fn analyze_dispatch_drivers(
+    code: &[Instr],
+    lo: usize,
+    hi: usize,
+    leaders: &[bool],
+    nslots: usize,
+) -> Vec<bool> {
+    use std::collections::BTreeSet;
+    #[derive(Clone, Default)]
+    struct Ent {
+        slot: Option<usize>,
+        ff: BTreeSet<usize>,
+    }
+    let mut drivers = vec![false; nslots];
+    let mut stack: Vec<Ent> = Vec::new();
+    // Fold a consumed operand's bare slot into its field-derived set.
+    let consumed = |e: Ent| -> BTreeSet<usize> {
+        let mut s = e.ff;
+        if let Some(x) = e.slot {
+            s.insert(x);
+        }
+        s
+    };
+    for pc in lo..hi {
+        if leaders[pc] {
+            stack.clear();
+        }
+        macro_rules! pop {
+            () => {
+                stack.pop().unwrap_or_default()
+            };
+        }
+        match &code[pc] {
+            Instr::Load(s) => stack.push(Ent { slot: Some(*s), ff: BTreeSet::new() }),
+            Instr::PushNum(_) | Instr::PushStr(_) | Instr::PushBool(_) | Instr::PushUndef
+            | Instr::PushNull | Instr::PushThis | Instr::PushGlobal(_) | Instr::PushFunc(_) => {
+                stack.push(Ent::default())
+            }
+            Instr::Dup => {
+                let t = stack.last().cloned().unwrap_or_default();
+                stack.push(t);
+            }
+            Instr::Snapshot | Instr::ChkCoercible(_) => {}
+            Instr::GetProp(_) => {
+                let e = pop!();
+                stack.push(Ent { slot: None, ff: consumed(e) });
+            }
+            Instr::GetIndex => {
+                let idx = pop!();
+                let base = pop!();
+                let mut ff = consumed(base);
+                ff.extend(consumed(idx));
+                stack.push(Ent { slot: None, ff });
+            }
+            Instr::Bin(_) => {
+                let b = pop!();
+                let a = pop!();
+                let mut ff = consumed(a);
+                ff.extend(consumed(b));
+                stack.push(Ent { slot: None, ff });
+            }
+            Instr::JmpIfFalsy(_) => {
+                let e = pop!();
+                for s in &e.ff {
+                    if *s < drivers.len() {
+                        drivers[*s] = true;
+                    }
+                }
+            }
+            Instr::Pop | Instr::Store(_) | Instr::SetGlobalOp(_) | Instr::Throw | Instr::Ret => {
+                let _ = pop!();
+            }
+            Instr::OpaqueOp { arity, .. } => {
+                for _ in 0..*arity {
+                    let _ = pop!();
+                }
+                stack.push(Ent::default());
+            }
+            Instr::NewObject(keys) => {
+                for _ in 0..keys.len() {
+                    let _ = pop!();
+                }
+                stack.push(Ent::default());
+            }
+            Instr::NewArray(n) => {
+                for _ in 0..*n {
+                    let _ = pop!();
+                }
+                stack.push(Ent::default());
+            }
+            Instr::MakeClosure(_, ncap) => {
+                for _ in 0..*ncap {
+                    let _ = pop!();
+                }
+                stack.push(Ent::default());
+            }
+            Instr::Call(nargs) | Instr::NewOp(nargs) => {
+                // A field-derived value flowing into a call argument (or callee)
+                // is a dispatch driver: this is the tree-walk descent
+                // `exec(node.seq, ...)` / `exec(node.body[i], ...)`, where a
+                // sub-object of `node` becomes the next recursion subject. Keeping
+                // `node` static is what lets that recursion bottom out and fold.
+                for _ in 0..nargs + 1 {
+                    let e = pop!();
+                    for s in consumed(e) {
+                        if s < drivers.len() {
+                            drivers[s] = true;
+                        }
+                    }
+                }
+                stack.push(Ent::default());
+            }
+            Instr::SetIndexOp => {
+                let _ = pop!();
+                let _ = pop!();
+                let _ = pop!();
+            }
+            Instr::SetPropOp(_) | Instr::PushArr | Instr::DeleteIndexOp => {
+                let _ = pop!();
+                let _ = pop!();
+            }
+            Instr::DeletePropOp(_) => {
+                let _ = pop!();
+            }
+            Instr::Jmp(_) | Instr::PushHandler { .. } | Instr::PopHandler => {}
+        }
+    }
+    drivers
+}
+
+/// Does `small` occur as a subterm of `big`? The termination whistle uses this to
+/// detect loop-carried GROWTH: a data loop carries `acc -> acc - 1 ->
+/// (acc - 1) - 1 -> ...`, where each value strictly contains the previous, so the
+/// loop must residualize (and the growing slot generalize) rather than unroll
+/// forever. A static-count loop instead carries a distinguishing static induction
+/// variable (`i = 0, 1, 2, ...`) whose values do NOT contain each other, so it is
+/// correctly NOT flagged and still unrolls. (A weaker, decidable stand-in for
+/// homeomorphic embedding; the engine's `UNROLL_BOUND` remains the hard backstop.)
+fn rexpr_subterm(small: &RExpr, big: &RExpr) -> bool {
+    if small == big {
+        return true;
+    }
+    match big {
+        RExpr::Bin(_, a, b) | RExpr::Index(a, b) => {
+            rexpr_subterm(small, a) || rexpr_subterm(small, b)
+        }
+        RExpr::Get(a, _) => rexpr_subterm(small, a),
+        RExpr::Opaque(_, xs) => xs.iter().any(|c| rexpr_subterm(small, c)),
+        RExpr::Call(c, xs) | RExpr::New(c, xs) => {
+            rexpr_subterm(small, c) || xs.iter().any(|x| rexpr_subterm(small, x))
+        }
+        RExpr::FnRef { caps, .. } => caps.iter().any(|c| rexpr_subterm(small, c)),
+        RExpr::BoundMethod { func, recv } => {
+            rexpr_subterm(small, func) || rexpr_subterm(small, recv)
+        }
+        _ => false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Compiler
 // ---------------------------------------------------------------------------
@@ -1285,6 +1570,22 @@ pub struct Js {
     /// these escape to residual variables before a dynamic branch so the arms
     /// merge instead of path-splitting.
     if_heap_modified: Vec<Vec<usize>>,
+    /// Per (func, slot): the slot is used as an array index (`a[slot]`), i.e. it
+    /// drives dispatch. A static-valued dispatch slot stays SPLIT at a join.
+    drives_dispatch: Vec<Vec<bool>>,
+    /// Per loop-head pc: slots in the loop's header condition (induction-variable
+    /// candidates). The growth whistle keeps a differing static guard UNROLLING.
+    loop_guards: Vec<Vec<usize>>,
+    /// Per loop-head pc, per slot: provably loop-invariant read-only — may stay
+    /// STATIC across a residualizing loop (keeps a tree-walk interpreter's AST
+    /// static). Empty for a loop the mutation analysis couldn't attribute.
+    loop_invariant: Vec<Vec<bool>>,
+    /// Per loop-head pc: slots that are the base of a mutation in the loop body.
+    /// At materialize time these resolve to the heap ids mutated in the loop; a
+    /// candidate-invariant slot is only kept static if its transitive heap closure
+    /// is disjoint from those ids (else it aliases mutated state, like a closure
+    /// that captured a mutated array).
+    loop_mut_bases: Vec<Vec<usize>>,
     entries: Vec<usize>,
     nslots: Vec<usize>,
     ncaptured: Vec<usize>,
@@ -1441,12 +1742,14 @@ impl Js {
         let mut leaders = vec![false; code.len()];
         let mut loop_head = vec![false; code.len()];
         let mut loop_modified: Vec<Vec<usize>> = vec![Vec::new(); code.len()];
+        let mut loop_back: Vec<usize> = vec![0; code.len()];
         for (j, i) in code.iter().enumerate() {
             match i {
                 Instr::Jmp(t) => {
                     leaders[*t] = true;
                     if *t <= j {
                         loop_head[*t] = true;
+                        loop_back[*t] = j;
                         let mut m: Vec<usize> = code[*t..=j]
                             .iter()
                             .filter_map(|ins| match ins {
@@ -1478,6 +1781,38 @@ impl Js {
             }
         }
 
+        // Per loop-head pc: slots whose object is provably loop-INVARIANT read-only
+        // (never mutated nor reassigned in the loop, with all mutations attributed),
+        // so they may stay STATIC across a residualizing loop instead of being
+        // materialized to a runtime variable. This keeps a tree-walk interpreter's
+        // static AST `node` foldable; the mutated tape/byte arrays are still
+        // materialized. `analyze_loop_mutations` bails (→ no invariants → original
+        // behavior) on any loop it can't analyze precisely.
+        let max_slots = nslots.iter().copied().max().unwrap_or(0);
+        let mut loop_invariant: Vec<Vec<bool>> = vec![Vec::new(); code.len()];
+        let mut loop_mut_bases: Vec<Vec<usize>> = vec![Vec::new(); code.len()];
+        for pc in 0..code.len() {
+            if loop_head[pc] {
+                let (bases, all_attributed) =
+                    analyze_loop_mutations(&code, pc, loop_back[pc] + 1, &leaders, max_slots);
+                if all_attributed {
+                    let modified = &loop_modified[pc];
+                    // Keep an object STATIC only when it both (a) is loop-invariant
+                    // read-only AND (b) drives dispatch (its fields feed a branch) —
+                    // the tree-walk interpreter's `node`. A loop-invariant object
+                    // that is mere data (never branched on) is materialized instead,
+                    // so its literal is emitted once, not duplicated at every use.
+                    let drivers =
+                        analyze_dispatch_drivers(&code, pc, loop_back[pc] + 1, &leaders, max_slots);
+                    let inv: Vec<bool> = (0..max_slots)
+                        .map(|slot| !bases[slot] && !modified.contains(&slot) && drivers[slot])
+                        .collect();
+                    loop_invariant[pc] = inv;
+                    loop_mut_bases[pc] = (0..max_slots).filter(|&s| bases[s]).collect();
+                }
+            }
+        }
+
         let mut if_join: Vec<Option<(usize, Vec<usize>)>> = vec![None; code.len()];
         for (jz, end) in aux.ifs {
             let mut m: Vec<usize> = code[jz + 1..end]
@@ -1495,6 +1830,61 @@ impl Js {
         let mut if_heap_modified: Vec<Vec<usize>> = vec![Vec::new(); code.len()];
         for (jz, mods) in aux.heap_mods {
             if_heap_modified[jz] = mods;
+        }
+
+        // Per (func, slot): does the slot's value flow into an array-INDEX
+        // position (`a[slot]`)? Such a slot is a *dispatch index* — if it is also
+        // STATIC at a control-flow join it must stay SPLIT (polyvariant) rather
+        // than merge to one dynamic variable, or the dispatch (`a[slot]`) could
+        // never fold and the interpreter never compiles away. Computed coarsely:
+        // a `Load(slot)` immediately preceding a `GetIndex` (the direct `a[slot]`
+        // shape). Missing a computed index (`a[slot+1]`) only forgoes a fold, so
+        // the approximation is safe.
+        let drives_dispatch: Vec<Vec<bool>> = (0..program.len())
+            .map(|fid| {
+                let lo = entries[fid];
+                let hi = entries.get(fid + 1).copied().unwrap_or(code.len());
+                let mut dd = vec![false; nslots[fid]];
+                for pc in (lo + 1)..hi {
+                    if matches!(code[pc], Instr::GetIndex) {
+                        if let Instr::Load(slot) = code[pc - 1] {
+                            if slot < dd.len() {
+                                dd[slot] = true;
+                            }
+                        }
+                    }
+                }
+                dd
+            })
+            .collect();
+
+        // Per loop-head pc: the slots referenced in the loop's HEADER condition
+        // (the `Load`s from the head up to its exit `JmpIfFalsy`, within a short
+        // window). These are the loop's *guard* slots — a static-valued guard that
+        // changes across iterations is an INDUCTION variable bounding the loop, so
+        // the loop must keep unrolling (`for (i=0;i<10;i++)` stays static). A
+        // differing static value that is NOT a guard is an ACCUMULATOR, which in a
+        // data-dependent loop grows unboundedly and must generalize. Used by the
+        // growth whistle to tell the two apart.
+        let mut loop_guards: Vec<Vec<usize>> = vec![Vec::new(); code.len()];
+        for pc in 0..code.len() {
+            if loop_head[pc] {
+                let mut g = Vec::new();
+                for j in pc..(pc + 16).min(code.len()) {
+                    match &code[j] {
+                        Instr::Load(s) => g.push(*s),
+                        Instr::JmpIfFalsy(_) => break,
+                        _ => {}
+                    }
+                }
+                g.sort_unstable();
+                g.dedup();
+                if std::env::var_os("GUARD_DEBUG").is_some() {
+                    eprintln!("[GUARD] loop_head pc={} guards={:?} window={:?}", pc, g,
+                        (pc..(pc+16).min(code.len())).map(|j| (j, &code[j])).collect::<Vec<_>>());
+                }
+                loop_guards[pc] = g;
+            }
         }
 
         let is_recursive = compute_recursive(&entries, &code, program.len());
@@ -1516,6 +1906,10 @@ impl Js {
             loop_modified,
             if_join,
             if_heap_modified,
+            drives_dispatch,
+            loop_guards,
+            loop_invariant,
+            loop_mut_bases,
             entries,
             nslots,
             ncaptured,
@@ -2053,7 +2447,16 @@ impl Client for Js {
     type Cond = Cond;
 
     fn key(&self, s: &State) -> State {
-        s.clone()
+        // Memoize UP TO HEAP ISOMORPHISM: two states whose reachable heaps have the
+        // same shape but different concrete addresses (or differ only by unreachable
+        // garbage) are behaviorally identical and must share a residual block. A raw
+        // address comparison treats them as distinct, so a loop that allocates fresh
+        // objects each iteration (e.g. a partial-evaluator-in-the-subset building
+        // code, where the input constant `["rin"]` drifts in and out of the live set)
+        // never memo-ties and unrolls forever. Canonicalizing addresses by
+        // reachability order — and dropping unreachable objects — makes those
+        // isomorphic states equal keys, so the loop ties.
+        canonicalize_state(s)
     }
     fn point(&self, s: &State) -> Vec<usize> {
         s.frames.iter().map(|f| f.pc).collect()
@@ -2081,6 +2484,14 @@ impl Client for Js {
             }
         }
         let pc = s.top().pc;
+        // The else-arm of an `if` with no `else` STARTS at the join pc rather than
+        // jumping to it, so consume any pending join for the current pc here at
+        // block entry (the then-arm consumed its copy in `jump_to`). Otherwise the
+        // stale marker persists and, inside a loop, keeps the state from ever
+        // memo-tying. Only at a real block boundary (`at_entry`).
+        if at_entry && s.pending_joins.last().map(|(e, _)| *e) == Some(pc) {
+            self.consume_pending_joins(s, pc, out);
+        }
         // The foldability probe only needs to learn *whether* the region taints;
         // once it has, stop immediately instead of specializing the rest.
         if self.probing.get() && self.try_taint.get() {
@@ -2810,7 +3221,13 @@ impl Client for Js {
     }
 
     fn whistle(&self, seen: &State, cand: &State) -> bool {
-        seen != cand && self.dynamically_controlled(cand)
+        // Generalize a loop either when its CONTROL is dynamic (the original
+        // criterion) or when its DATA is growing unboundedly (`seen` embeds into
+        // `cand`). The growth case is what lets a data loop with a STATIC dispatch
+        // condition — an interpreter whose `pc` stays static while the tape/acc
+        // grows — residualize (stabilizing the data) while keeping the dispatch
+        // static, instead of unrolling forever.
+        seen != cand && (self.dynamically_controlled(cand) || self.loop_diverges(seen, cand))
     }
 
     fn generalize(&self, seen: &State, from: &State, out: &mut Vec<Op>) -> State {
@@ -2821,12 +3238,151 @@ impl Client for Js {
         let slots: Vec<usize> = (0..g.frames[fi].locals.len())
             .filter(|&slot| seen.frames[fi].locals[slot] != from.frames[fi].locals[slot])
             .collect();
+        if std::env::var_os("GEN_DEBUG").is_some() {
+            eprintln!(
+                "[GEN] pc={} chslots={:?} | from.locals={:?} ostack={} heap={} | seen.locals={:?} sheap={}",
+                from.frames[fi].pc,
+                slots,
+                from.frames[fi].locals,
+                from.frames[fi].ostack.len(),
+                from.heap.len(),
+                seen.frames[fi].locals,
+                seen.heap.len(),
+            );
+            if slots.is_empty() {
+                let sk: std::collections::BTreeSet<usize> = seen.heap.keys().copied().collect();
+                let fk: std::collections::BTreeSet<usize> = from.heap.keys().copied().collect();
+                let only_from: Vec<usize> = fk.difference(&sk).copied().collect();
+                let only_seen: Vec<usize> = sk.difference(&fk).copied().collect();
+                eprintln!(
+                    "[GEN-HEAP] only in from={:?} | only in seen={:?}",
+                    only_from
+                        .iter()
+                        .map(|a| (a, from.heap.get(a)))
+                        .collect::<Vec<_>>(),
+                    only_seen
+                        .iter()
+                        .map(|a| (a, seen.heap.get(a)))
+                        .collect::<Vec<_>>(),
+                );
+                if std::env::var_os("HEAP_DUMP").is_some() {
+                    let dump = |label: &str, st: &State| {
+                        let fi3 = st.frames.len() - 1;
+                        for (slot, v) in st.frames[fi3].locals.iter().enumerate() {
+                            if let Abs::Ref(a) = v {
+                                eprintln!("  {label} slot{slot} -> @{a} = {:?}", st.heap.get(a));
+                            }
+                        }
+                    };
+                    dump("FROM", from);
+                    dump("SEEN", seen);
+                }
+            }
+        }
         self.materialize(&mut g, &slots, out);
         g
     }
 }
 
 impl Js {
+    /// Does re-entering this loop point with `cand` indicate UNBOUNDED divergence
+    /// (so it must residualize), as opposed to a bounded static loop that should
+    /// keep unrolling? Same control point/heap, and every changed local is either:
+    ///   - a `Dyn` value growing as a superterm (`acc -> acc - 1`) — unbounded
+    ///     data accumulation (at least one such is required: the growth signal), or
+    ///   - a non-`Dyn` ACCUMULATOR (a static value not in the loop's header
+    ///     condition) — which a data loop also grows without bound; it will be
+    ///     generalized (materialized to a runtime variable) along with the loop.
+    /// Does the transitive heap closure of `start` reach any id in `targets`?
+    /// Used to reject keeping an object static when it (transitively) aliases an
+    /// object mutated in the loop (e.g. a closure that captured a mutated array).
+    fn heap_touches(
+        heap: &im::OrdMap<usize, HeapObj>,
+        start: usize,
+        targets: &std::collections::HashSet<usize>,
+    ) -> bool {
+        let mut seen: std::collections::HashSet<usize> = Default::default();
+        let mut stack = vec![start];
+        while let Some(id) = stack.pop() {
+            if targets.contains(&id) {
+                return true;
+            }
+            if !seen.insert(id) {
+                continue;
+            }
+            let obj = match heap.get(&id) {
+                Some(o) => o,
+                None => continue,
+            };
+            let push = |a: &Abs, stack: &mut Vec<usize>| {
+                if let Abs::Ref(r) = a {
+                    stack.push(*r);
+                }
+            };
+            match obj {
+                HeapObj::Object(fs) => fs.iter().for_each(|(_, a)| push(a, &mut stack)),
+                HeapObj::Array(xs)
+                | HeapObj::Closure { captured: xs, .. }
+                | HeapObj::Builtin { data: xs, .. } => {
+                    xs.iter().for_each(|a| push(a, &mut stack))
+                }
+            }
+        }
+        false
+    }
+
+    /// A changed slot that is a loop GUARD (an induction variable in the header
+    /// condition, e.g. `i` in `i < 10`) means the loop is statically bounded —
+    /// return false so it keeps unrolling. This is what distinguishes an
+    /// accumulator (generalize) from an inductor (unroll).
+    fn loop_diverges(&self, seen: &State, cand: &State) -> bool {
+        // Cheap structural checks first; the O(heap) `heap ==` is done LAST.
+        if seen.frames.len() != cand.frames.len() {
+            return false;
+        }
+        let fi = cand.frames.len() - 1;
+        let sf = &seen.frames[fi];
+        let cf = &cand.frames[fi];
+        if sf.pc != cf.pc || sf.locals.len() != cf.locals.len() || sf.ostack != cf.ostack {
+            return false;
+        }
+        let guards = self.loop_guards.get(cf.pc).map(Vec::as_slice).unwrap_or(&[]);
+        let dispatch = self.drives_dispatch.get(cf.func).map(Vec::as_slice).unwrap_or(&[]);
+        let mut grew = false;
+        for slot in 0..cf.locals.len() {
+            let (s, c) = (&sf.locals[slot], &cf.locals[slot]);
+            if s == c {
+                continue;
+            }
+            if let (Abs::Dyn(a), Abs::Dyn(b)) = (s, c) {
+                if rexpr_subterm(a, b) {
+                    grew = true;
+                    continue;
+                }
+            }
+            // A changed slot that did not grow as a `Dyn` superterm. A loop GUARD
+            // (induction variable in the header condition) keeps the loop bounded →
+            // unroll. A changed DISPATCH slot (used as `a[slot]`, e.g. a VM program
+            // counter) means the two states are at DIFFERENT control positions — not
+            // the same loop iteration — which happens at a BRANCH JOIN (the two arms
+            // carry distinct static pcs). Generalizing it there would merge the
+            // dispatch index to one runtime variable and escape the static block
+            // table; keep them split instead. A changed HEAP REF likewise
+            // distinguishes real structure. Only a changed PRIMITIVE that is neither
+            // a guard nor a dispatch index is an accumulator (`sum`), tolerated and
+            // generalized along with the loop.
+            let is_dispatch = slot < dispatch.len() && dispatch[slot];
+            if guards.contains(&slot)
+                || is_dispatch
+                || matches!(s, Abs::Ref(_))
+                || matches!(c, Abs::Ref(_))
+            {
+                return false;
+            }
+        }
+        grew && seen.heap == cand.heap
+    }
+
     fn push(&self, s: &mut State, v: Abs) -> Step<Js> {
         s.top_mut().ostack.push(v);
         self.advance(s)
@@ -4211,6 +4767,36 @@ impl Js {
         true
     }
 
+    /// Merge the arms of a dynamic `if` when control reaches the join pc `target`:
+    /// materialize every slot the arms assigned differently to one runtime
+    /// variable (so both arms reach an identical state and reconverge). Called
+    /// both when an arm JUMPS to the join (`jump_to`) and when the else-arm STARTS
+    /// at the join (block entry) — without the latter, an `if` with no `else`
+    /// inside a loop leaves a stale `pending_join` on the else path that never
+    /// clears, so the loop's states never memo-tie and it unrolls forever.
+    fn consume_pending_joins(&self, ns: &mut State, target: usize, out: &mut Vec<Op>) {
+        while ns.pending_joins.last().map(|(e, _)| *e) == Some(target) {
+            let (_, m) = ns.pending_joins.pop().unwrap();
+            // Keep a STATIC-valued dispatch slot (a program counter assigned a
+            // static value in the branch arms) SPLIT rather than merging it to one
+            // dynamic variable: merging it would make `a[slot]` unfoldable, so the
+            // interpreter could never compile away. The arms then diverge and
+            // reconverge through the memo (a `(pc, data-shape)` that repeats ties
+            // the loop). All genuinely-dynamic slots still merge.
+            let fi = ns.frames.len() - 1;
+            let func = ns.frames[fi].func;
+            let m: Vec<usize> = m
+                .into_iter()
+                .filter(|&slot| {
+                    !(slot < self.drives_dispatch[func].len()
+                        && self.drives_dispatch[func][slot]
+                        && !ns.frames[fi].locals[slot].is_dynamic())
+                })
+                .collect();
+            self.materialize(ns, &m, out);
+        }
+    }
+
     fn jump_to(&self, target: usize, s: &State, out: &mut Vec<Op>) -> Step<Js> {
         let mut ns = s.clone();
         ns.top_mut().pc = target;
@@ -4220,18 +4806,69 @@ impl Js {
             // residual value, else the abstract heap grows without bound).
             let fi = ns.frames.len() - 1;
             let mut slots = self.loop_modified[target].clone();
+            // A heap-ref slot live across a dynamic loop is materialized to a
+            // runtime value (so its mutations residualize and the abstract heap
+            // stays bounded) — EXCEPT a provably loop-invariant read-only object,
+            // which stays STATIC so it keeps folding (a tree-walk interpreter's AST
+            // node). `loop_invariant` is empty when the loop wasn't analyzable, so
+            // we fall back to materializing every Ref.
+            let invariant = &self.loop_invariant[target];
+            // Heap ids mutated in the loop body (each base slot's current object).
+            // A candidate-static slot whose transitive heap closure touches one of
+            // these aliases mutated state (e.g. a closure that captured the array
+            // being mutated), so it must NOT stay static — materialize it instead.
+            let mut mutated_ids: std::collections::HashSet<usize> = Default::default();
+            for &bslot in &self.loop_mut_bases[target] {
+                if let Some(Abs::Ref(id)) = ns.frames[fi].locals.get(bslot) {
+                    mutated_ids.insert(*id);
+                }
+            }
+            let disable_inv = std::env::var_os("DISABLE_INV").is_some();
             for slot in 0..ns.frames[fi].locals.len() {
                 if matches!(ns.frames[fi].locals[slot], Abs::Ref(_)) && !slots.contains(&slot) {
+                    if !disable_inv && invariant.get(slot).copied().unwrap_or(false) {
+                        let id = match ns.frames[fi].locals[slot] {
+                            Abs::Ref(id) => id,
+                            _ => unreachable!(),
+                        };
+                        if !Self::heap_touches(&ns.heap, id, &mutated_ids) {
+                            if std::env::var_os("INV_DEBUG").is_some() {
+                                eprintln!(
+                                    "[INV] keep slot {} (id {}) static @loop {} kind={}",
+                                    slot,
+                                    id,
+                                    target,
+                                    match ns.heap.get(&id) {
+                                        Some(HeapObj::Object(_)) => "obj",
+                                        Some(HeapObj::Array(_)) => "arr",
+                                        Some(HeapObj::Closure { .. }) => "clo",
+                                        Some(HeapObj::Builtin { .. }) => "bui",
+                                        None => "?",
+                                    }
+                                );
+                            }
+                            continue; // provably frozen — keep static
+                        }
+                    }
                     slots.push(slot);
                 }
             }
             slots.sort_unstable();
+            if std::env::var_os("MAT_DEBUG").is_some() {
+                let fi2 = ns.frames.len() - 1;
+                eprintln!(
+                    "[MAT] loophead pc={} heap={} materialize slots={:?} | refslots={:?}",
+                    target,
+                    ns.heap.len(),
+                    slots,
+                    (0..ns.frames[fi2].locals.len())
+                        .filter(|&s| matches!(ns.frames[fi2].locals[s], Abs::Ref(_)))
+                        .collect::<Vec<_>>(),
+                );
+            }
             self.materialize(&mut ns, &slots, out);
         }
-        while ns.pending_joins.last().map(|(e, _)| *e) == Some(target) {
-            let (_, m) = ns.pending_joins.pop().unwrap();
-            self.materialize(&mut ns, &m, out);
-        }
+        self.consume_pending_joins(&mut ns, target, out);
         // Block boundary: reclaim heap garbage so the abstract heap stays bounded
         // by the live set (otherwise long static unrolling accumulates dead
         // objects forever, which is what made `simple.js` blow up).
@@ -5135,6 +5772,94 @@ fn as_ref_addr(v: &Abs) -> Option<usize> {
         Some(*a)
     } else {
         None
+    }
+}
+
+/// A canonical form of a state for memoization: heap addresses are renumbered in
+/// reachability order from the roots (frame locals/operand stacks, in order),
+/// and unreachable objects are dropped. Two states whose reachable heaps are
+/// isomorphic — same shape, different concrete addresses, or differing only by
+/// dead objects — map to the SAME canonical state, hence the same memo key, and
+/// share a residual block. Without this a loop that allocates fresh objects each
+/// iteration never memo-ties (the addresses always differ). `next_addr`,
+/// `pending_joins`, and `handlers` carry no heap addresses to renumber.
+fn canonicalize_state(s: &State) -> State {
+    use std::collections::HashMap;
+    let mut mapping: HashMap<usize, usize> = HashMap::new();
+    let mut order: Vec<usize> = Vec::new();
+    let visit = |a: usize, m: &mut HashMap<usize, usize>, o: &mut Vec<usize>| {
+        if !m.contains_key(&a) {
+            m.insert(a, m.len());
+            o.push(a);
+        }
+    };
+    for f in &s.frames {
+        for v in f.locals.iter().chain(f.ostack.iter()) {
+            if let Abs::Ref(a) = v {
+                visit(*a, &mut mapping, &mut order);
+            }
+        }
+    }
+    let mut i = 0;
+    while i < order.len() {
+        let addr = order[i];
+        i += 1;
+        if let Some(obj) = s.heap.get(&addr) {
+            let kids: Vec<usize> = match obj {
+                HeapObj::Object(fs) => fs.iter().filter_map(|(_, v)| as_ref_addr(v)).collect(),
+                HeapObj::Array(es) => es.iter().filter_map(as_ref_addr).collect(),
+                HeapObj::Closure { captured, .. } => {
+                    captured.iter().filter_map(as_ref_addr).collect()
+                }
+                HeapObj::Builtin { data, .. } => data.iter().filter_map(as_ref_addr).collect(),
+            };
+            for c in kids {
+                visit(c, &mut mapping, &mut order);
+            }
+        }
+    }
+    let remap = |v: &Abs| -> Abs {
+        match v {
+            Abs::Ref(a) => Abs::Ref(*mapping.get(a).unwrap_or(a)),
+            other => other.clone(),
+        }
+    };
+    let mut new_heap: Heap = im::OrdMap::new();
+    for (old, &new) in mapping.iter() {
+        if let Some(obj) = s.heap.get(old) {
+            let nobj = match obj {
+                HeapObj::Object(fs) => {
+                    HeapObj::Object(fs.iter().map(|(k, v)| (k.clone(), remap(v))).collect())
+                }
+                HeapObj::Array(es) => HeapObj::Array(es.iter().map(&remap).collect()),
+                HeapObj::Closure { fid, captured } => HeapObj::Closure {
+                    fid: *fid,
+                    captured: captured.iter().map(&remap).collect(),
+                },
+                HeapObj::Builtin { kind, data } => HeapObj::Builtin {
+                    kind: kind.clone(),
+                    data: data.iter().map(&remap).collect(),
+                },
+            };
+            new_heap.insert(new, nobj);
+        }
+    }
+    let new_frames = s
+        .frames
+        .iter()
+        .map(|f| Frame {
+            pc: f.pc,
+            func: f.func,
+            locals: f.locals.iter().map(&remap).collect(),
+            ostack: f.ostack.iter().map(&remap).collect(),
+        })
+        .collect();
+    State {
+        frames: new_frames,
+        heap: new_heap,
+        next_addr: mapping.len(),
+        pending_joins: s.pending_joins.clone(),
+        handlers: s.handlers.clone(),
     }
 }
 

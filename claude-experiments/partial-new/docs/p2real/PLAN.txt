@@ -1,0 +1,7 @@
+Plan for GENUINE P2:
+  1. A real INTERPRETER int(prog,input): runs programs, PRODUCES VALUES, dispatches on opcodes.
+  2. Express int as DATA in a tiny object language L.
+  3. A real PARTIAL EVALUATOR peval(L) in the subset -- generic, NO interpreter-specific codegen.
+     Its codegen for '+' must FALL OUT of int's '+' op via peval's generic residualization rule.
+  4. P1-via-peval: peval(intAST, staticProg, dynInput) -> residual arithmetic (codegen derived).
+  5. P2: RustPE(main(prog)=peval(intAST, prog)) with intAST static, prog dynamic -> a COMPILER.

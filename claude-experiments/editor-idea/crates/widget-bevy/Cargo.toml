@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+glaze = { path = "../glaze" }
 pane_bevy = { path = "../pane-bevy" }
 style_bevy = { path = "../style-bevy" }
 editor_bevy = { path = "../editor-bevy" }
@@ -46,6 +47,22 @@ path = "src/bin/widget.rs"
 [[bin]]
 name = "atelier"
 path = "src/bin/atelier.rs"
+
+[[bin]]
+name = "glaze_demo"
+path = "src/bin/glaze_demo.rs"
+
+[[bin]]
+name = "glaze_shader_demo"
+path = "src/bin/glaze_shader_demo.rs"
+
+[[bin]]
+name = "glaze_gallery"
+path = "src/bin/glaze_gallery.rs"
+
+[[bin]]
+name = "glaze_ui"
+path = "src/bin/glaze_ui.rs"
 
 [[bin]]
 name = "widget-snapshot"

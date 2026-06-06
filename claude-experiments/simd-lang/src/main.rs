@@ -1,5 +1,8 @@
 mod ast;
+#[cfg(feature = "bench")]
+mod bench;
 mod codegen;
+mod js;
 mod json;
 mod lexer;
 mod parser;
@@ -20,6 +23,29 @@ fn main() {
 
     match args[1].as_str() {
         "compile" => cmd_compile(&args[2..]),
+        #[cfg(feature = "bench")]
+        "bench" => {
+            let file = args.get(2).map(String::as_str).unwrap_or_else(|| {
+                eprintln!("Usage: simd-lang bench <file.js> [iters]");
+                std::process::exit(1);
+            });
+            let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(50);
+            bench::run(file, iters);
+        }
+        #[cfg(feature = "bench")]
+        "tokens" => {
+            let file = args.get(2).map(String::as_str).unwrap_or_else(|| {
+                eprintln!("Usage: simd-lang tokens <file.js>");
+                std::process::exit(1);
+            });
+            bench::dump(file);
+        }
+        #[cfg(feature = "bench")]
+        "prof" => {
+            let file = args.get(2).map(String::as_str).unwrap();
+            let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3000);
+            bench::prof(file, iters);
+        }
         other => {
             eprintln!("Unknown command: {}", other);
             std::process::exit(1);

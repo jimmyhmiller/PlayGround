@@ -1,0 +1,71 @@
+-- JavaScript lexer — Stage 1: SIMD token-boundary classifier (bitmap output).
+--
+-- Emits TWO bitmaps, one u64 per 64-byte chunk:
+--   start_masks[c] — bit i set ⇔ byte c*64+i begins a token, where a token-start
+--     is (a) a word char whose predecessor is NOT a word char (ident/number
+--     start), or (b) any non-word, non-whitespace, non-NUL byte (a punctuator /
+--     quote / operator / `/` byte).
+--   word_masks[c]  — bit i set ⇔ byte c*64+i is a word char [A-Za-z0-9_$].
+--     Stage-2 derives identifier ends from this by a bit-scan (no byte re-read).
+--
+-- Bitmaps (input/8 bytes each) replace the old compressstore position array
+-- (~1.5× input of i32s): far less memory traffic, and stage-2 iterates the bits
+-- with ctz. Context resolution (strings/comments/regex/templates/multi-char ops)
+-- stays in the scalar Stage-2 pull lexer in src/js.rs.
+--
+-- Cross-chunk correctness: "previous byte was a word char" is carried exactly
+-- across 64-byte boundaries via the bitmask (word_bits<<1 | carry), not the
+-- lane_shr-shifts-in-zero approximation.
+
+fn js_stage1(input: ptr[u8], start_masks: ptr[u64], word_masks: ptr[u64]) -> i32[1] {
+    stream chunk: u8[64] over input carry (prev_word: u64[1] = 0, pos: i32[1] = 0) {
+
+        -- === CHARACTER CLASSES ===
+        is_digit  = (chunk >= '0') & (chunk <= '9')
+        is_upper  = (chunk >= 'A') & (chunk <= 'Z')
+        is_lower  = (chunk >= 'a') & (chunk <= 'z')
+        is_us     = chunk == '_'
+        is_dollar = chunk == '$'
+        is_word_vec = is_digit | is_upper | is_lower | is_us | is_dollar
+
+        is_space = chunk == 32
+        is_tab   = chunk == 9
+        is_lf    = chunk == 10
+        is_cr    = chunk == 13
+        is_vt    = chunk == 11
+        is_ff    = chunk == 12
+        is_ws_vec = is_space | is_tab | is_lf | is_cr | is_vt | is_ff
+
+        is_nul_vec = chunk == 0
+
+        -- === BITMASKS ===
+        word_bits = to_bitmask(is_word_vec)
+        ws_bits   = to_bitmask(is_ws_vec)
+        nul_bits  = to_bitmask(is_nul_vec)
+
+        -- "previous byte was a word char", carry-in from the prior chunk's last lane.
+        prev_word_bits = (word_bits << 1) | prev_word
+
+        -- (a) word starts: a word byte whose predecessor was not a word byte
+        word_start_bits = word_bits & ~prev_word_bits
+
+        -- (b) punctuator bytes: not a word char, not whitespace, not NUL padding
+        all_ones: u64[1] = ~0
+        not_word = word_bits ^ all_ones
+        not_ws   = ws_bits ^ all_ones
+        not_nul  = nul_bits ^ all_ones
+        punct_bits = not_word & not_ws & not_nul
+
+        token_start_bits = word_start_bits | punct_bits
+
+        -- === EMIT BITMAPS (one u64 per 64-byte chunk) ===
+        chunk_idx = chunk_offset >> 6
+        store_at(start_masks, chunk_idx, token_start_bits)
+        store_at(word_masks, chunk_idx, word_bits)
+
+        -- === CARRY ===
+        carry prev_word = word_bits >> 63
+        carry pos = pos + popcount(from_bitmask(token_start_bits, 64))
+    }
+    return pos
+}

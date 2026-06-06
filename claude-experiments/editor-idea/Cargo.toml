@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/editor-core", "crates/editor-bevy", "crates/pane-bevy", "crates/style-bevy", "crates/terminal-bevy", "crates/terminal-daemon", "crates/widget-bevy", "crates/book-ui-experiment", "crates/book-ui-wgpu", "crates/claude-bus", "crates/claude-bus-bevy", "crates/claude-statusline-bridge", "crates/claude-context-bars", "crates/claude-event-logger", "crates/claude-queue-drain", "crates/tbinject", "crates/inference-bevy", "crates/diff-core", "crates/diff-bevy"]
+members = ["crates/glaze", "crates/editor-core", "crates/editor-bevy", "crates/pane-bevy", "crates/style-bevy", "crates/terminal-bevy", "crates/terminal-daemon", "crates/widget-bevy", "crates/book-ui-experiment", "crates/book-ui-wgpu", "crates/claude-bus", "crates/claude-bus-bevy", "crates/claude-statusline-bridge", "crates/claude-context-bars", "crates/claude-event-logger", "crates/claude-queue-drain", "crates/tbinject", "crates/inference-bevy", "crates/diff-core", "crates/diff-bevy"]
 
 # Pin libghostty-rs to a git rev that includes the zig optimize-mode
 # fix (upstream 3378f0b). Without it, vendored ghostty builds default

@@ -1520,6 +1520,133 @@ mod tests {
         assert_node_equiv(src, &[0, 5, 100]);
     }
 
+    /// THE dispatch-folding capability ("the trick" for PE-of-interpreters): a flat
+    /// `while(pc>=0) { dispatch on blocks[pc]; ... }` interpreter with a
+    /// DATA-DEPENDENT loop must fold the opcode dispatch away. The program counter
+    /// is a static dispatch index, so at the `jnz` branch it stays SPLIT
+    /// (polyvariant) instead of merging to a dynamic variable; the data loop
+    /// residualizes (the growth whistle stabilizes the accumulator), and the
+    /// interpreter compiles to a clean residual loop with no `blocks` array and no
+    /// opcode comparisons. (Foundation for self-application: an interpreter written
+    /// in the subset can now compile away.)
+    #[test]
+    fn flat_dispatch_loop_folds_the_trick() {
+        // `sum` starts at a STATIC 0 and grows 0,2,4,… as a static Num in a
+        // dynamic-count loop — the accumulator case that must be told apart from an
+        // induction variable (the loop-guard `pc`) and generalized.
+        let src = r#"
+            function run(blocks, x) {
+                var acc = x; var sum = 0; var pc = 0;
+                while (pc >= 0) {
+                    if (pc >= blocks.length) { pc = -1; }
+                    else {
+                        var b = blocks[pc]; var op = b[0];
+                        if (op === "dec") { acc = acc - 1; pc = pc + 1; }
+                        else if (op === "addsum") { sum = sum + 2; pc = pc + 1; }
+                        else if (op === "jnz") { if (acc !== 0) { pc = b[1]; } else { pc = pc + 1; } }
+                        else { pc = -1; }
+                    }
+                }
+                return sum;
+            }
+            function main(input) {
+                var blocks = [["addsum", 0], ["dec", 0], ["jnz", 0], ["halt", 0]];
+                return run(blocks, input);
+            }"#;
+        let js = to_js(src).unwrap();
+        assert!(
+            !js.contains("\"dec\"") && !js.contains("\"addsum\"") && !js.contains("\"jnz\""),
+            "the opcode dispatch should fold away (no opcode comparisons):\n{js}"
+        );
+        assert_node_equiv(src, &[1, 3, 5, 8]);
+    }
+
+    #[test]
+    fn test_at_top_dispatch_loop_folds() {
+        // A VM whose data-dependent branch sits at the LOOP HEAD (`jz` at pc 0),
+        // with an unconditional back-jump (`jmp`) at the bottom — the natural shape
+        // of a `while (cond) { body }`. The two `jz` arms carry DIFFERENT static VM
+        // pcs (4 = halt, 1 = body); they merge at a branch JOIN that is not a loop
+        // head, so the growth whistle must NOT generalize the dispatch `pc` there
+        // (that would merge it to a runtime variable and escape the static block
+        // table). The opcode dispatch must fold to a clean residual loop. This is
+        // what a partial-evaluator-in-the-subset's own `while` loops need.
+        let src = r#"
+            function run(blocks, input) {
+                var x = input; var acc = 0; var pc = 0;
+                while (pc >= 0) {
+                    var b = blocks[pc]; var op = b[0];
+                    if (op === "jz") { if (x === 0) { pc = b[1]; } else { pc = pc + 1; } }
+                    else if (op === "dec") { x = x - 1; pc = pc + 1; }
+                    else if (op === "addacc") { acc = acc + b[1]; pc = pc + 1; }
+                    else if (op === "jmp") { pc = b[1]; }
+                    else { pc = -1; }
+                }
+                return acc;
+            }
+            function main(input) {
+                var blocks = [["jz", 4], ["dec", 0], ["addacc", 1], ["jmp", 0], ["halt", 0]];
+                return run(blocks, input);
+            }"#;
+        let js = to_js(src).unwrap();
+        assert!(
+            !js.contains("\"jz\"") && !js.contains("\"dec\"")
+                && !js.contains("\"addacc\"") && !js.contains("\"jmp\""),
+            "test-at-top opcode dispatch should fold away (no opcode comparisons, no escaped block table):\n{js}"
+        );
+        assert_node_equiv(src, &[0, 1, 3, 5, 8]);
+    }
+
+    #[test]
+    fn if_without_else_inside_loop_terminates() {
+        // An `if` with no `else` whose then-arm assigns a slot (`d`) differently
+        // from the fall-through, INSIDE a dynamic loop. The else path enters the
+        // join pc directly (it does not jump to it), so its merge marker
+        // (`pending_join`) must be consumed at block entry — else it persists in
+        // the state every iteration and the loop never memo-ties (it unrolls until
+        // the budget). This is the core pattern a partial-evaluator-in-the-subset
+        // relies on (a conditional inside its dispatch loop).
+        let src = "function main(n) {
+            var sum = 0; var i = 0;
+            while (i < n) {
+                var d = 1;
+                if ((i % 3) === 0) { d = 2; }
+                sum = sum + d;
+                i = i + 1;
+            }
+            return sum;
+        }";
+        assert_node_equiv(src, &[0, 1, 4, 7, 10]);
+    }
+
+    #[test]
+    fn partially_static_clause_table_in_loop_folds() {
+        // The keystone for the 2nd Futamura projection: a STATIC table searched by
+        // a DYNAMIC key, inside a dynamic loop (the way a generic partial evaluator
+        // looks up an interpreter's per-opcode semantics). The generic table scan
+        // must fold to an opcode-specific dispatch chain (no residual `clauses`
+        // iteration) and the whole thing must terminate.
+        let src = r#"function main(n) {
+            var clauses = [[0, "x"], [1, "y"], [2, "z"]];
+            var total = 0; var i = 0;
+            while (i < n) {
+                var op = i % 3;
+                var kind = "?";
+                var c = 0;
+                while (c < clauses.length) {
+                    if (clauses[c][0] === op) { kind = clauses[c][1]; }
+                    c = c + 1;
+                }
+                if (kind === "x") { total = total + 1; }
+                else if (kind === "y") { total = total + 2; }
+                else { total = total + 4; }
+                i = i + 1;
+            }
+            return total;
+        }"#;
+        assert_node_equiv(src, &[0, 1, 3, 5, 9]);
+    }
+
     #[test]
     fn passthrough_void() {
         // `void e` is always undefined; wrap it so node can serialize the result.

@@ -55,6 +55,8 @@ use pane_bevy::{
 use serde_json::Value;
 
 pub mod button_material;
+pub mod glaze_material;
+pub mod glaze_style;
 pub mod layout;
 pub mod msgbus;
 pub mod protocol;
@@ -521,6 +523,7 @@ impl Plugin for WidgetPlugin {
         app.init_resource::<WidgetClipDirty>()
             .init_resource::<WidgetImageCache>()
             .add_plugins(WidgetButtonMaterialPlugin)
+            .add_plugins(glaze_material::GlazeMaterialPlugin)
             .add_plugins(msgbus::WidgetMsgBusPlugin)
             .add_systems(Startup, register_kind)
             .add_systems(

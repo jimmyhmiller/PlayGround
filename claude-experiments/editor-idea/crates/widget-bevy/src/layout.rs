@@ -442,6 +442,13 @@ fn table_cell_leaf(taffy: &mut TaffyTree<MeasureCtx>, text: &str) -> NodeId {
 fn stack_style(gap: f32, pad: f32, style: Option<&PStyle>, dir: FlexDirection) -> taffy::Style {
     let padding = effective_padding(style, pad);
     let margin = effective_margin(style);
+    // A Glaze `direction` override (e.g. from a `when` breakpoint) can flip the
+    // container between row and column independent of the Element variant.
+    let dir = match style.and_then(|s| s.flex_direction.as_deref()) {
+        Some("row") => FlexDirection::Row,
+        Some("column") | Some("col") => FlexDirection::Column,
+        _ => dir,
+    };
     let mut s = taffy::Style {
         display: Display::Flex,
         flex_direction: dir,
@@ -549,6 +556,16 @@ fn align_to_taffy(a: Align) -> AlignItems {
 /// Compute layout for the tree rooted at `root` within the given
 /// `(max_w, max_h)` viewport. `metrics` is used to size text leaves.
 pub fn compute(laid: &mut LaidOut, max_w: f32, max_h: f32, metrics: &PaneFontMetrics) {
+    // Force the root to fill the available content width. Without this the root
+    // (auto width) shrinks to its content, so `grow`/stretch children have no
+    // free space to distribute and text leaves measure/wrap at a collapsed
+    // width. Pinning the root to the content width makes flex layouts reflow as
+    // the pane resizes, and text wrap at the true available width.
+    if let Ok(style) = laid.taffy.style(laid.root) {
+        let mut s = style.clone();
+        s.size.width = Dimension::length(max_w);
+        let _ = laid.taffy.set_style(laid.root, s);
+    }
     let m = *metrics;
     laid.taffy
         .compute_layout_with_measure(
@@ -579,15 +596,23 @@ fn measure_text(
     if let (Some(w), Some(h)) = (known.width, known.height) {
         return Size { width: w, height: h };
     }
-    // Available width caps the wrap. When unbounded (MIN/MAX_CONTENT),
-    // treat as infinite for word-wrap purposes — the intrinsic single-
-    // line width is returned and Taffy picks the bounding.
+    let intrinsic_w = metrics.measure(&ctx.value, ctx.font_size);
+    let char_w = metrics.char_width(ctx.font_size);
+    // Min-content width is the widest *unbreakable word*, NOT the whole line.
+    // If a text leaf reported its full single-line width as its minimum, flex
+    // containers could never shrink it — so content would always overflow the
+    // pane and the layout wouldn't reflow on resize. With the longest word as
+    // the floor, text shrinks and wraps, and containers can adapt to width.
+    let longest_word = ctx
+        .value
+        .split_whitespace()
+        .map(|w| w.chars().count() as f32 * char_w)
+        .fold(0.0_f32, f32::max);
     let max_w = match available.width {
         AvailableSpace::Definite(w) => w,
-        AvailableSpace::MinContent => 0.0,
+        AvailableSpace::MinContent => longest_word.max(char_w),
         AvailableSpace::MaxContent => f32::INFINITY,
     };
-    let intrinsic_w = metrics.measure(&ctx.value, ctx.font_size);
     if intrinsic_w <= max_w {
         return Size {
             width: intrinsic_w,
@@ -596,7 +621,6 @@ fn measure_text(
     }
     // Word-wrap: break on whitespace, accumulate words per line until
     // the next word would overflow, then start a new line.
-    let char_w = metrics.char_width(ctx.font_size);
     if char_w <= 0.0 || max_w <= 0.0 {
         return Size {
             width: intrinsic_w,

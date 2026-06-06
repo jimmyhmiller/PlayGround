@@ -182,6 +182,29 @@ pub struct Style {
     /// should center.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub align_self: Option<Align>,
+    /// Override a container's main-axis direction (`"row"` / `"column"`). Lets
+    /// a Glaze `when` breakpoint flip a stack between row and column for
+    /// responsive layout, independent of the Element variant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flex_direction: Option<String>,
+
+    /// A compiled Glaze shader layer painted on this element's box. The
+    /// `body` is WGSL fragment-shader source (the `glaze` compiler's output
+    /// for an `overlay shader {}` block); the host wraps it in the canonical
+    /// `GlazeUniforms` block and runs it on a quad at the element's rect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shader: Option<ShaderSpec>,
+}
+
+/// A compiled shader layer: WGSL fragment body produced by `glaze`, plus
+/// whether it composites over the element's content (`overlay`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ShaderSpec {
+    /// WGSL fragment body — `let`s + `return <vec4>;`, referencing `u.*`
+    /// uniforms and `in.uv`. Wrapped by the host into a full module.
+    pub body: String,
+    #[serde(default)]
+    pub overlay: bool,
 }
 
 /// Border specification. `color` is a token name or literal; `width`

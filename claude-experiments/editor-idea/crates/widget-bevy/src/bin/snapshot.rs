@@ -120,6 +120,11 @@ fn main() -> ExitCode {
     // requires. It also initializes the FontRegistry idempotently.
     app.init_resource::<style_bevy::Theme>()
         .init_resource::<style_bevy::StyleErrors>()
+        // ChromeThemePlugin's apply_per_project_chrome reads these; the main app
+        // inits them via StylePlugin, which the snapshot tool doesn't add.
+        .init_resource::<style_bevy::ProjectThemes>()
+        .init_resource::<style_bevy::ProjectStyleState>()
+        .init_resource::<style_bevy::StylePresetRegistry>()
         .add_message::<style_bevy::ThemeChanged>()
         .add_plugins(style_bevy::theme::ThemePlugin)
         .add_plugins(style_bevy::FontRegistryPlugin)
