@@ -1,0 +1,22 @@
+namespace osr_headless
+
+use ray as r
+use rendering as render
+use main as game
+
+fn main() {
+    if r/getenv("BEAGLE_ZELDA_NOFOCUS") != null {
+        r/set_config_flags(r/FLAG_WINDOW_UNFOCUSED)
+    }
+    r/init_window(1280, 720, "osr autoplay")
+    r/set_target_fps(0)   // uncapped, so frames run as fast as possible
+    let shader_ctx = render/load_cone_light_shader()
+    let initial = game/initial_world()
+    // Jump straight to the second room (dungeon_1) and autoplay-wander there.
+    let room2 = game/switch_map(initial, "dungeon_1", "default")
+    let ui_bufs = game/alloc_ui_buffers(room2.tuning)
+    let final = game/game_loop(room2, shader_ctx, ui_bufs, 6000)
+    r/close_window()
+    println("reached frame " ++ to-string(final.frame))
+    0
+}

@@ -625,7 +625,11 @@ pub fn parse_to_module(src: &str) -> Result<Module, String> {
     parse_with_masks(src, &start_masks, &word_masks)
 }
 
-fn parse_with_masks<'a>(
+/// Parse using pre-computed stage-1 bitmaps (so an AOT-compiled `.simd` kernel
+/// can feed its bitmaps in instead of the bundled Rust-NEON `stage1`). The
+/// bitmaps must follow the stage-1 contract (start/word masks, one u64 per
+/// 64-byte chunk).
+pub fn parse_with_masks<'a>(
     src: &'a str,
     start_masks: &'a [u64],
     word_masks: &'a [u64],

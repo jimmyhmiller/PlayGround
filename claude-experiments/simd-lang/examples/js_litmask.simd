@@ -1,0 +1,52 @@
+-- JS string/comment region mask via a 9-state DFA, expressed entirely in SIMD
+-- using the `scan_dfa` primitive (prefix scan over the transition monoid).
+--
+-- This is the multi-mode literal recognizer that single-toggle CLMUL cannot do:
+-- a `/` inside a string is correctly NOT a comment, and a `"` inside a comment
+-- is NOT a string. Escapes are folded in as DFA states.
+--
+-- States: 0 Code, 1 Slash, 2 DQ, 3 DQesc, 4 SQ, 5 SQesc, 6 Line, 7 Block, 8 BlockStar
+-- Classes: 0 '"'  1 '\''  2 '\\'  3 '/'  4 '*'  5 '\n'  6 other
+-- `table[state*16 + class] = next_state` (built by the caller; see codegen tests).
+--
+-- Output `out[i]` = 1 if byte i is inside a string or comment, else 0.
+--
+-- NOTE: stage-1 cannot know which `/` is a regex literal (that needs the
+-- previous *token* — parser context), so this mask is only valid for code
+-- without quote-bearing regex literals. It is a faithful demonstration of
+-- `scan_dfa`, and is directly usable for regex-free languages (JSON, many DSLs).
+
+fn js_litmask(input: ptr[u8], table_ptr: ptr[u8], out: ptr[u8]) {
+    stream chunk: u8[64] over input carry (st: u8[1] = 0) {
+        table = loadu[u8[256]](table_ptr)
+
+        -- classify each byte into one of 7 input classes
+        is_dq = chunk == 34   -- "
+        is_sq = chunk == 39   -- '
+        is_bs = chunk == 92   -- backslash
+        is_sl = chunk == 47   -- /
+        is_st = chunk == 42   -- *
+        is_nl = chunk == 10   -- newline
+        c0: u8[64] = 0
+        c1: u8[64] = 1
+        c2: u8[64] = 2
+        c3: u8[64] = 3
+        c4: u8[64] = 4
+        c5: u8[64] = 5
+        c6: u8[64] = 6
+        cls = [is_dq] c0 : ([is_sq] c1 : ([is_bs] c2 : ([is_sl] c3 : ([is_st] c4 : ([is_nl] c5 : c6)))))
+
+        -- prefix scan over the DFA's transition monoid
+        states = scan_dfa(table, cls, st, 9)
+
+        -- in-literal = state >= 2 (Code/Slash are 0/1; all literal modes are >= 2)
+        two: u8[64] = 2
+        in_lit_mask = states >= two
+        one: u8[64] = 1
+        zero: u8[64] = 0
+        in_lit = [in_lit_mask] one : zero
+
+        store_at(out, chunk_offset, in_lit)
+        carry st = extract(states, 63)
+    }
+}

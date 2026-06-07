@@ -1,0 +1,43 @@
+[package]
+name = "aot-bench"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone benchmark for the *statically compiled* SIMD JS stage-1.
+#
+# This crate has NO dependency on melior / MLIR / LLVM. It links the AOT object
+# produced by `simd-lang compile examples/js_stage1.simd -o aot-bench/generated`
+# (a relocatable native-NEON `libjs_stage1.a`) and calls it directly — proving
+# the SIMD kernel ships without a JIT. The only dependency is `simd-lang` built
+# with `default-features = false`, which is just the pure-Rust lexer (the
+# correctness oracle), again with no MLIR pulled in.
+
+[dependencies]
+simd-lang = { path = "..", default-features = false }
+# Full text→JSIR pipeline fed by the AOT `.simd` stage-1 (the `pipeline` bin).
+jsir-parse = { path = "../../js-ir/crates/jsir-parse" }
+oxc_allocator = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_allocator" }
+oxc_parser = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_parser" }
+oxc_span = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_span" }
+oxc_semantic = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_semantic" }
+
+[[bin]]
+name = "aot-bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "pipeline"
+path = "src/bin/pipeline.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+
+[[bin]]
+name = "structure"
+path = "src/bin/structure.rs"
+
+[[bin]]
+name = "tape"
+path = "src/bin/tape.rs"

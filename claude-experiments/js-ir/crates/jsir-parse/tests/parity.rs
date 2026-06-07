@@ -85,3 +85,14 @@ fn in_subset_fixtures_match() {
         }
     }
 }
+
+#[test]
+fn dce_removes_dead_vars() {
+    let src = "var dead = 1 + 2; var live = 3; live = live + 1;";
+    let m = jsir_parse::parse_to_module(src).unwrap();
+    let (out, removed) = jsir_ir::build::dce(&m);
+    let txt = out.print();
+    assert_eq!(removed, 1, "should remove exactly `dead`");
+    assert!(!txt.contains("\"dead\""), "dead var still present:\n{txt}");
+    assert!(txt.contains("\"live\""), "live var was wrongly removed:\n{txt}");
+}

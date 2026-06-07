@@ -67,11 +67,15 @@ fn main() {
         Duration::ZERO
     };
 
-    println!("\ntext → richer structure (oxc passes, closer to our IR):");
+    println!("\nother Rust front ends → AST (do less than us — no SSA/operands/attrs):");
     let oxc = bench("oxc:  lex+parse → AST", bytes, iters, || {
         let alloc = Allocator::default();
         let ret = Parser::new(&alloc, &src, SourceType::default()).parse();
         black_box(ret.program.body.len());
+    });
+    let swc = bench("swc:  lex+parse → AST", bytes, iters, || {
+        let p = jsir_swc::parse(&src).expect("swc parse");
+        black_box(&p);
     });
     let oxc_sem = bench("oxc:  parse + semantic", bytes, iters, || {
         let alloc = Allocator::default();
@@ -97,4 +101,5 @@ fn main() {
         "ours vs oxc parse+semantic (a richer, analyzable repr): {:.2}x",
         oxc_sem.as_secs_f64() / ours.as_secs_f64()
     );
+    println!("ours vs swc-to-AST: {:.2}x", swc.as_secs_f64() / ours.as_secs_f64());
 }

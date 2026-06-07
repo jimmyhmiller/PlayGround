@@ -285,6 +285,7 @@ impl Module {
 
     /// Append a string to the arena, returning its span (amortized O(1), no
     /// per-call heap allocation).
+    #[inline]
     fn intern_str(&mut self, s: &str) -> Span {
         let off = self.str_arena.len() as u32;
         self.str_arena.push_str(s);
@@ -299,6 +300,35 @@ impl Module {
             let off = sp.off as usize;
             &self.str_arena[off..off + len]
         }
+    }
+
+    /// Overwrite a block's op list with `kept` **in place** — `kept` must be a
+    /// same-order subsequence of the block's current ops (DCE filtering). Writes
+    /// into the existing `op_pool` slots and shortens the range; removed ops'
+    /// column/pool data is left as unreachable garbage (never printed), the way
+    /// oxc/swc leave removed AST nodes in their arena. No rebuild, no allocation.
+    pub fn compact_block_ops(&mut self, block: BlockSlot, kept: &[OpId]) {
+        let r = self.block_ops[block.0 as usize];
+        debug_assert!(kept.len() <= r.len as usize, "compact must not grow the block");
+        let start = r.start as usize;
+        for (i, &op) in kept.iter().enumerate() {
+            self.op_pool[start + i] = op;
+        }
+        self.block_ops[block.0 as usize] = Range32 { start: r.start, len: kept.len() as u32 };
+    }
+
+    /// The string value of an op's attribute `key`, if present and string-typed
+    /// (no allocation — borrows the backing buffer). Used by analysis passes.
+    pub fn str_attr(&self, op: OpId, key: &str) -> Option<&str> {
+        let r = self.ops[op.0 as usize].attrs;
+        for m in &self.attr_pool[r.as_range()] {
+            if self.resolve(m.key) == key {
+                if let AVal::Str(sp) = m.val {
+                    return Some(self.resolve(sp));
+                }
+            }
+        }
+        None
     }
 
     /// A zero-copy span into the owned source copy (`[start, end)` byte offsets).
@@ -317,6 +347,7 @@ impl Module {
     /// Intern an attribute key, deduplicated by its `&'static str` pointer (the
     /// key set is tiny and repeats on nearly every op) — so a key's bytes are
     /// copied into the arena once, not once per attribute.
+    #[inline]
     fn key_span(&mut self, key: &'static str) -> Span {
         let p = key.as_ptr() as usize;
         if let Some(&(_, span)) = self.key_cache.iter().find(|(cp, _)| *cp == p) {
@@ -330,6 +361,7 @@ impl Module {
     /// Set an op's attrs from zero-allocation [`AttrSpec`]s — the fast build/parse
     /// path. Keys and string values are interned into the arena; no `String` is
     /// allocated per attribute.
+    #[inline]
     pub fn set_attrs_spec(&mut self, op: OpId, specs: &[AttrSpec]) {
         let start = self.attr_pool.len() as u32;
         for spec in specs {
@@ -553,6 +585,7 @@ impl IrRead for Module {
 }
 
 impl IrBuild for Module {
+    #[inline]
     fn intern(&mut self, name: &str) -> OpKind {
         // The opcode set is tiny (~tens of names), so a linear scan beats hashing
         // a string on every op.
@@ -564,12 +597,14 @@ impl IrBuild for Module {
         OpKind(id)
     }
 
+    #[inline]
     fn add_op(&mut self, name: &str) -> OpId {
         let kind = self.intern(name);
         let id = OpId(self.ops.len() as u32);
         self.ops.push(OpRow { kind, ..OpRow::default() }); // one row write per op
         id
     }
+    #[inline]
     fn set_operands(&mut self, op: OpId, vs: &[ValueId]) {
         let i = op.0 as usize;
         if vs.len() <= INLINE_OPERANDS {
@@ -583,6 +618,7 @@ impl IrBuild for Module {
             row.op_overflow = r;
         }
     }
+    #[inline]
     fn set_results(&mut self, op: OpId, vs: &[ValueId]) {
         let row = &mut self.ops[op.0 as usize];
         match vs.first() {
@@ -603,6 +639,7 @@ impl IrBuild for Module {
         }
         self.ops[op.0 as usize].attrs = Range32 { start, len: attrs.len() as u32 };
     }
+    #[inline]
     fn set_regions(&mut self, op: OpId, regions: &[RegionId]) {
         let start = self.region_pool.len() as u32;
         self.region_pool.extend_from_slice(regions);
@@ -628,17 +665,20 @@ impl IrBuild for Module {
         self.ops[op.0 as usize].node_id = node_id.unwrap_or(NO_IDX);
     }
 
+    #[inline]
     fn add_region(&mut self) -> RegionId {
         let id = RegionId(self.region_blocks.len() as u32);
         self.region_blocks.push(Range32::default());
         id
     }
+    #[inline]
     fn set_region_blocks(&mut self, region: RegionId, blocks: &[BlockSlot]) {
         let start = self.block_pool.len() as u32;
         self.block_pool.extend_from_slice(blocks);
         self.region_blocks[region.0 as usize] = Range32 { start, len: blocks.len() as u32 };
     }
 
+    #[inline]
     fn add_block(&mut self, label: BlockId) -> BlockSlot {
         let id = BlockSlot(self.block_label.len() as u32);
         self.block_label.push(label);
@@ -646,10 +686,12 @@ impl IrBuild for Module {
         self.block_ops.push(Range32::default());
         id
     }
+    #[inline]
     fn set_block_args(&mut self, block: BlockSlot, vs: &[ValueId]) {
         let r = self.push_values(vs);
         self.block_args[block.0 as usize] = r;
     }
+    #[inline]
     fn set_block_ops(&mut self, block: BlockSlot, ops: &[OpId]) {
         let start = self.op_pool.len() as u32;
         self.op_pool.extend_from_slice(ops);

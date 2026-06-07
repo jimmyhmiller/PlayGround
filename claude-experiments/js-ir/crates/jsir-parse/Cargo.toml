@@ -17,3 +17,10 @@ oxc_allocator = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/cra
 oxc_parser = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_parser" }
 oxc_span = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_span" }
 oxc_semantic = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_semantic" }
+oxc_minifier = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_minifier" }
+# swc DCE-only (matched to our swc parser: ast 25 / common 23 / visit 25).
+swc_common = "=23.0.0"
+swc_ecma_ast = "=25.0.0"
+swc_ecma_visit = "=25.0.0"
+swc_ecma_transforms_base = "=44.0.1"
+swc_ecma_transforms_optimization = "=47.0.0"

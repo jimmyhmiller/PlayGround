@@ -23,6 +23,14 @@ fn main() {
 
     match args[1].as_str() {
         "compile" => cmd_compile(&args[2..]),
+        "jit-stage1" => {
+            let file = args.get(2).map(String::as_str).unwrap_or_else(|| {
+                eprintln!("Usage: simd-lang jit-stage1 <file.js> [iters]");
+                std::process::exit(1);
+            });
+            let iters = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(200);
+            cmd_jit_stage1(file, iters);
+        }
         #[cfg(feature = "bench")]
         "bench" => {
             let file = args.get(2).map(String::as_str).unwrap_or_else(|| {
@@ -57,6 +65,83 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+/// JIT-compile `examples/js_stage1.simd` and time *only* the stage-1 kernel on
+/// `path`, reporting MB/s in the same shape `aot-bench` prints — so the AOT and
+/// JIT numbers line up directly. This is the "JIT version" the AOT artifact is
+/// measured against. No oxc, no stage-2 — just bytes → two bitmaps.
+fn cmd_jit_stage1(path: &str, iters: usize) {
+    use std::time::Instant;
+
+    // Same memref ABI as the AOT-generated bindings / bench::Stage1Fn.
+    type Stage1Fn = extern "C" fn(
+        *const u8, *const u8, i64, i64, i64, // input       memref<?xi8>
+        *mut u64, *mut u64, i64, i64, i64,   // start_masks memref<?xi64>
+        *mut u64, *mut u64, i64, i64, i64,   // word_masks  memref<?xi64>
+    ) -> f32; // vector<1xi32> token-start count in s0
+
+    let raw = std::fs::read(path).unwrap_or_else(|e| {
+        eprintln!("cannot read {path}: {e}");
+        std::process::exit(1);
+    });
+    let bytes = raw.len();
+    let mb = bytes as f64 / 1_000_000.0;
+    // Pad to a multiple of 64 so the kernel reads whole chunks.
+    let mut padded = raw.clone();
+    while padded.len() % 64 != 0 {
+        padded.push(0);
+    }
+
+    // ── JIT-compile js_stage1 (timed: this is the cost paid every launch) ──
+    let source = std::fs::read_to_string("examples/js_stage1.simd")
+        .expect("cannot read examples/js_stage1.simd (run from project root)");
+    let t_compile = Instant::now();
+    let ctx = codegen::create_context();
+    let items = parser::parse(&source);
+    let mut module = codegen::compile_module(&ctx, &items, &HashMap::new(), 8);
+    codegen::lower_to_llvm(&ctx, &mut module).expect("lowering failed");
+    let engine = melior::ExecutionEngine::new(&module, 3, &[], false);
+    let fptr = engine.lookup("js_stage1");
+    assert!(!fptr.is_null(), "js_stage1 symbol not found");
+    let stage1: Stage1Fn = unsafe { std::mem::transmute(fptr) };
+    let compile_ms = t_compile.elapsed().as_secs_f64() * 1e3;
+
+    let nchunks = padded.len() / 64 + 1;
+    let mut start_masks = vec![0u64; nchunks];
+    let mut word_masks = vec![0u64; nchunks];
+
+    let call = |start: &mut [u64], word: &mut [u64]| -> i32 {
+        let bits = stage1(
+            padded.as_ptr(), padded.as_ptr(), 0, padded.len() as i64, 1,
+            start.as_mut_ptr(), start.as_mut_ptr(), 0, start.len() as i64, 1,
+            word.as_mut_ptr(), word.as_mut_ptr(), 0, word.len() as i64, 1,
+        );
+        f32::to_bits(bits) as i32
+    };
+
+    let token_starts = call(&mut start_masks, &mut word_masks);
+    for _ in 0..5 {
+        std::hint::black_box(call(&mut start_masks, &mut word_masks));
+    }
+
+    let mut best = 0.0f64;
+    let mut samples = Vec::with_capacity(iters);
+    for _ in 0..iters {
+        let t = Instant::now();
+        std::hint::black_box(call(&mut start_masks, &mut word_masks));
+        let mbps = mb / t.elapsed().as_secs_f64();
+        best = best.max(mbps);
+        samples.push(mbps);
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = samples[samples.len() / 2];
+
+    println!("=== JIT (MLIR ExecutionEngine, O3, host CPU) ===");
+    println!("file            : {path}  ({bytes} bytes, {:.2} MB)", mb);
+    println!("token starts    : {token_starts}");
+    println!("JIT compile time: {compile_ms:.1} ms  (paid every launch)");
+    println!("stage-1 MB/s    : {median:.0} median   {best:.0} best   ({iters} iters)");
 }
 
 fn cmd_compile(args: &[String]) {
@@ -138,9 +223,16 @@ fn cmd_compile(args: &[String]) {
         std::process::exit(1);
     });
 
-    // Produce object file via ExecutionEngine
+    // Produce object file via ExecutionEngine.
+    //
+    // Opt level 3 — the same level the JIT path uses (`jit-stage1`), so the AOT
+    // artifact and the JIT version are compiled by an identical MLIR→LLVM
+    // pipeline and the only thing the benchmark measures is precompiled-vs-
+    // at-launch, not an opt-level difference. The default engine detects the
+    // host CPU (we get full NEON codegen on aarch64). `enable_object_dump = true`
+    // keeps the emitted object so `dump_to_object_file` has something to write.
     let obj_path = output_dir.join(format!("{}.o", stem));
-    let engine = melior::ExecutionEngine::new(&module, 2, &[], true);
+    let engine = melior::ExecutionEngine::new(&module, 3, &[], true);
     engine.dump_to_object_file(obj_path.to_str().unwrap());
 
     // Archive into static library
@@ -170,11 +262,13 @@ fn cmd_compile(args: &[String]) {
 /// Generate safe Rust wrapper code for all functions in a .simd file.
 fn generate_rust_bindings(module_name: &str, items: &[ast::Item]) -> String {
     let mut out = String::new();
+    // Regular `//` comments (not `//!`): these bindings are meant to be pulled in
+    // via `include!`, where inner doc comments mid-module are a compile error.
     out.push_str(&format!(
-        "//! Auto-generated bindings for {}.simd\n",
+        "// Auto-generated bindings for {}.simd\n",
         module_name
     ));
-    out.push_str("//! Do not edit — regenerate with: simd-lang compile\n\n");
+    out.push_str("// Do not edit — regenerate with: simd-lang compile\n\n");
 
     // Collect function signatures
     let fns: Vec<&ast::FnDef> = items
