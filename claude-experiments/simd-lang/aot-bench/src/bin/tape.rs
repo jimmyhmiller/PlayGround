@@ -62,6 +62,10 @@ enum K {
     VarDeclarator,
     VarDecl,
     ExprStmt,
+    Member,  // a.b      — 1 child (object); span = property name
+    Index,   // a[b]     — 2 children (object, index)
+    Call,    // f(a,b)   — nargs = 1 callee + argc args
+    Array,   // [a,b,c]  — nargs = element count
 }
 
 /// A flat tape node — 16 bytes, no pointers. For operator nodes (`Binary`,
@@ -97,7 +101,8 @@ enum Pk {
     Plus, Minus, Star, Slash, Percent, Lt, Le, Gt, Ge, EqEq, EqEqEq, Ne, NeEq,
     Amp, Pipe, Caret, Shl, Shr, UShr, Bang, Tilde, PlusPlus, MinusMinus,
     Assign, PlusEq, MinusEq, StarEq, SlashEq, PercentEq, ShlEq, ShrEq, UShrEq,
-    AmpEq, PipeEq, CaretEq, StarStarEq, Semi, Comma, Dot, Other,
+    AmpEq, PipeEq, CaretEq, StarStarEq, Semi, Comma, Dot,
+    LParen, RParen, LBracket, RBracket, LBrace, RBrace, Colon, Other,
 }
 
 /// Classify an operator from its raw bytes by dispatching on (length, bytes) —
@@ -111,6 +116,8 @@ fn classify_punct(s: &[u8]) -> Pk {
             b'%' => Pk::Percent, b'<' => Pk::Lt, b'>' => Pk::Gt, b'=' => Pk::Assign,
             b'&' => Pk::Amp, b'|' => Pk::Pipe, b'^' => Pk::Caret, b'!' => Pk::Bang,
             b'~' => Pk::Tilde, b';' => Pk::Semi, b',' => Pk::Comma, b'.' => Pk::Dot,
+            b'(' => Pk::LParen, b')' => Pk::RParen, b'[' => Pk::LBracket, b']' => Pk::RBracket,
+            b'{' => Pk::LBrace, b'}' => Pk::RBrace, b':' => Pk::Colon,
             _ => Pk::Other,
         },
         2 => match (s[0], s[1]) {
@@ -276,6 +283,7 @@ struct LeanLex<'a> {
     src: &'a [u8],
     sm: &'a [u64],
     wm: &'a [u64],
+    oe: &'a [u64], // op_ext bitmap; empty → always full match_operator
     ci: usize,
     w: u64,
     buf: [Tok; 2],
@@ -283,9 +291,9 @@ struct LeanLex<'a> {
 }
 
 impl<'a> LeanLex<'a> {
-    fn new(src: &'a [u8], sm: &'a [u64], wm: &'a [u64]) -> LeanLex<'a> {
+    fn new(src: &'a [u8], sm: &'a [u64], wm: &'a [u64], oe: &'a [u64]) -> LeanLex<'a> {
         LeanLex {
-            src, sm, wm,
+            src, sm, wm, oe,
             ci: 0,
             w: if sm.is_empty() { 0 } else { sm[0] },
             buf: [Tok { kind: S::Punct, punct: Pk::Other, start: 0, end: 0 }; 2],
@@ -339,7 +347,9 @@ impl<'a> LeanLex<'a> {
                     continue; // comment trivia
                 }
                 _ => {
-                    let end = p + op_len(self.src, p);
+                    let bit = p % 64;
+                    let ext = self.oe.is_empty() || bit == 63 || (self.oe[p / 64] >> bit) & 1 == 1;
+                    let end = if ext { p + op_len(self.src, p) } else { p + 1 };
                     return Tok { kind: S::Punct, punct: classify_punct(&self.src[p..end]), start: p as u32, end: end as u32 };
                 }
             }
@@ -470,18 +480,14 @@ impl<'a, L: TokSrc> P<'a, L> {
     }
 
     fn assignment(&mut self) {
-        let t = self.peek();
-        if matches!(t.kind, S::Ident) && is_assign_op(self.peek2().punct)
-            && !matches!(self.txt(t), "true" | "false" | "null")
-        {
-            let nt = self.bump();
-            let ot = self.bump();
-            self.t.push(K::IdentRef, 0, nt.start, nt.end, false);
-            self.assignment();
-            self.t.push(K::Assign, 2, ot.start, ot.end, false);
-            return;
-        }
+        // LHS (a full expression incl. member/index chains); `=` isn't a binary op.
         self.binary(0);
+        let t = self.peek();
+        if is_assign_op(t.punct) {
+            let ot = self.bump();
+            self.assignment(); // right-associative
+            self.t.push(K::Assign, 2, ot.start, ot.end, false);
+        }
     }
 
     fn binary(&mut self, min_bp: u8) {
@@ -507,19 +513,73 @@ impl<'a, L: TokSrc> P<'a, L> {
             }
             Pk::PlusPlus | Pk::MinusMinus => {
                 self.bump();
-                let nt = self.peek();
-                if !matches!(nt.kind, S::Ident) {
-                    self.err = Some(format!("expected lvalue at {}", nt.start));
-                    return;
-                }
-                self.bump();
-                self.t.push(K::IdentRef, 0, nt.start, nt.end, false);
+                self.unary();
                 self.t.push(K::Update, 1, t.start, t.end, true);
                 return;
             }
             _ => {}
         }
+        self.postfix();
+    }
+
+    /// Postfix chains: `.member`, `[index]`, `(call args)`, `expr++`/`--`.
+    fn postfix(&mut self) {
         self.primary();
+        loop {
+            let t = self.peek();
+            match t.punct {
+                Pk::Dot => {
+                    self.bump();
+                    let nt = self.peek();
+                    if !matches!(nt.kind, S::Ident | S::Keyword) {
+                        self.err = Some(format!("expected property name at {}", nt.start));
+                        return;
+                    }
+                    self.bump();
+                    self.t.push(K::Member, 1, nt.start, nt.end, false);
+                }
+                Pk::LBracket => {
+                    self.bump();
+                    self.assignment();
+                    if !self.eat(Pk::RBracket) {
+                        self.err = Some(format!("expected ] at {}", self.peek().start));
+                        return;
+                    }
+                    self.t.push(K::Index, 2, t.start, t.start + 1, false);
+                }
+                Pk::LParen => {
+                    self.bump();
+                    let argc = self.arg_list(Pk::RParen);
+                    self.t.push(K::Call, 1 + argc, t.start, t.start + 1, false);
+                }
+                Pk::PlusPlus | Pk::MinusMinus => {
+                    self.bump();
+                    self.t.push(K::Update, 1, t.start, t.end, false);
+                }
+                _ => break,
+            }
+            if self.err.is_some() { return; }
+        }
+    }
+
+    /// Comma-separated `assignment` expressions until `close`; returns the count.
+    fn arg_list(&mut self, close: Pk) -> u32 {
+        if self.peek().punct == close {
+            self.bump();
+            return 0;
+        }
+        let mut n = 0u32;
+        loop {
+            self.assignment();
+            n += 1;
+            if self.err.is_some() { return n; }
+            if !self.eat(Pk::Comma) { break; }
+            if self.peek().punct == close { break; } // trailing comma
+        }
+        if !self.eat(close) {
+            self.err = Some(format!("expected closing delimiter at {}", self.peek().start));
+        }
+        n
     }
 
     fn primary(&mut self) {
@@ -539,24 +599,28 @@ impl<'a, L: TokSrc> P<'a, L> {
                 match name {
                     "true" | "false" => { self.bump(); self.t.push(K::BoolLit, 0, t.start, t.end, false); }
                     "null" => { self.bump(); self.t.push(K::NullLit, 0, t.start, t.end, false); }
-                    _ => {
-                        self.bump();
-                        let nx = self.peek().punct;
-                        if matches!(nx, Pk::PlusPlus | Pk::MinusMinus) {
-                            let ot = self.bump();
-                            self.t.push(K::IdentRef, 0, t.start, t.end, false);
-                            self.t.push(K::Update, 1, ot.start, ot.end, false);
-                        } else {
-                            self.t.push(K::Ident, 0, t.start, t.end, false);
-                        }
-                    }
+                    _ => { self.bump(); self.t.push(K::Ident, 0, t.start, t.end, false); }
                 }
             }
-            _ => {
-                self.err = Some(format!("unexpected token at {}", t.start));
-                // consume to avoid infinite loop
-                self.bump();
-            }
+            _ => match t.punct {
+                Pk::LParen => {
+                    // grouping — transparent (precedence already captured)
+                    self.bump();
+                    self.assignment();
+                    if !self.eat(Pk::RParen) {
+                        self.err = Some(format!("expected ) at {}", self.peek().start));
+                    }
+                }
+                Pk::LBracket => {
+                    self.bump();
+                    let n = self.arg_list(Pk::RBracket);
+                    self.t.push(K::Array, n, t.start, t.start + 1, false);
+                }
+                _ => {
+                    self.err = Some(format!("unexpected token at {}", t.start));
+                    self.bump(); // avoid infinite loop
+                }
+            },
         }
     }
 }
@@ -580,7 +644,22 @@ fn parse_to_tape_lean(src: &str, sm: &[u64], wm: &[u64]) -> Result<Tape, String>
     let b = src.as_bytes();
     let mut p = P {
         src: b,
-        lx: LeanLex::new(b, sm, wm),
+        lx: LeanLex::new(b, sm, wm, &[]),
+        t: Tape { nodes: Vec::with_capacity(b.len() / 3 + 8) },
+        err: None,
+    };
+    p.program();
+    if let Some(e) = p.err.take() { return Err(e); }
+    Ok(p.t)
+}
+
+/// Fused-lean parse using the AOT `op_ext` bitmap to skip `match_operator` for
+/// standalone operators — fusion (no array) + structural operator shortcut.
+fn parse_to_tape_lean_ops(src: &str, sm: &[u64], wm: &[u64], oe: &[u64]) -> Result<Tape, String> {
+    let b = src.as_bytes();
+    let mut p = P {
+        src: b,
+        lx: LeanLex::new(b, sm, wm, oe),
         t: Tape { nodes: Vec::with_capacity(b.len() / 3 + 8) },
         err: None,
     };
@@ -910,6 +989,10 @@ fn dump_tree(t: &Tape, src: &[u8]) -> String {
             K::VarDeclarator => "Declarator".into(),
             K::VarDecl => format!("VarDecl({})", span(src, n.start, n.end)),
             K::ExprStmt => "ExprStmt".into(),
+            K::Member => format!("Member(.{})", span(src, n.start, n.end)),
+            K::Index => "Index[]".into(),
+            K::Call => format!("Call({} args)", n.nargs.saturating_sub(1)),
+            K::Array => format!("Array({} elems)", n.nargs),
         };
         let mut block = label;
         for (i, kid) in kids.iter().enumerate() {
@@ -935,12 +1018,15 @@ fn dump_tree(t: &Tape, src: &[u8]) -> String {
 // ───────────────────────────── bench harness ─────────────────────────────
 
 fn generate(stmts: usize) -> String {
-    let mut s = String::with_capacity(stmts * 40);
+    let mut s = String::with_capacity(stmts * 44);
     for i in 0..stmts {
-        match i % 3 {
+        let j = i.saturating_sub(1);
+        match i % 4 {
             0 => s.push_str(&format!("var v{i} = {i} + {a} * 3 - 1;\n", a = i * 2)),
-            1 => s.push_str(&format!("v{j} = v{j} + {i} * 2;\n", j = i.saturating_sub(1))),
-            _ => s.push_str(&format!("var w{i} = {a} & 7 | {i};\n", a = i + 3)),
+            1 => s.push_str(&format!("v{j} = v{j} + {i} * 2;\n")),
+            2 => s.push_str(&format!("var w{i} = {a} & 7 | {i};\n", a = i + 3)),
+            // nested structure: call, member, index, array, grouping
+            _ => s.push_str(&format!("var r{i} = f(v{j}, w{j}.x) + arr[{i}] * (v{j} - 1);\n")),
         }
     }
     s
@@ -958,7 +1044,7 @@ fn bench(name: &str, bytes: usize, iters: u32, mut f: impl FnMut()) -> Duration 
 
 fn main() {
     // Tiny demo first — show the tape reconstructs a real tree.
-    let demo = "let x = 1 + 2 * 3; y = -a; z++;";
+    let demo = "let x = 1 + 2 * 3; y = foo(a, b.c)[i] + 4; arr = [1, 2, x * 3];";
     let (sm, wm) = simd_lang::stage1::lex(demo.as_bytes());
     let tape = parse_to_tape(demo, &sm, &wm).unwrap();
     println!("demo: {demo}");
@@ -987,6 +1073,12 @@ fn main() {
         let a = parse_to_tape(&src, &sm, &wm).unwrap();
         let c = parse_to_tape_lean(&src, &sm, &wm).unwrap();
         assert_eq!(a.nodes.len(), c.nodes.len(), "fused-lean tape len differs");
+        let (asm, awm, aoe) = aot_stage1_ops(src.as_bytes());
+        let d = parse_to_tape_lean_ops(&src, &asm, &awm, &aoe).unwrap();
+        assert_eq!(a.nodes.len(), d.nodes.len(), "fused-lean+op_ext tape len differs");
+        for (x, y) in a.nodes.iter().zip(d.nodes.iter()) {
+            assert!(x.kind == y.kind && x.start == y.start && x.end == y.end, "op_ext node mismatch");
+        }
     }
 
     // Correctness: AOT op_ext bitmaps must equal pure-Rust stage1, and the
@@ -1017,9 +1109,13 @@ fn main() {
         let toks = lex_to_array_ops(src.as_bytes(), &sm, &wm, &oe);
         black_box(parse_from_tokens(src.as_bytes(), &toks).unwrap().nodes.len());
     });
-    bench("  fused-lean (no array)", bytes, iters, || {
+    let ours_lean = bench("  fused-lean (no array)", bytes, iters, || {
         let (sm, wm) = simd_lang::stage1::lex(src.as_bytes());
         black_box(parse_to_tape_lean(&src, &sm, &wm).unwrap().nodes.len());
+    });
+    let ours_lean_ops = bench("ours: fused-lean + op_ext (AOT)", bytes, iters, || {
+        let (sm, wm, oe) = aot_stage1_ops(src.as_bytes());
+        black_box(parse_to_tape_lean_ops(&src, &sm, &wm, &oe).unwrap().nodes.len());
     });
     bench("  fused-Lexer (old)", bytes, iters, || {
         let (sm, wm) = simd_lang::stage1::lex(src.as_bytes());
@@ -1082,10 +1178,6 @@ fn main() {
 
 
     println!("\nreference targets:");
-    let ir = bench("jsir-parse: → columnar Module", bytes, iters, || {
-        let m = jsir_parse::parse_to_module(&src).unwrap();
-        black_box(m.op_count());
-    });
     let oxc = bench("oxc: lex+parse → AST", bytes, iters, || {
         let alloc = Allocator::default();
         let ret = OxcParser::new(&alloc, &src, SourceType::default()).parse();
@@ -1098,8 +1190,12 @@ fn main() {
         black_box(s.semantic.nodes().len());
     });
 
-    println!("\nours vs oxc bare AST         : {:.2}x", oxc.as_secs_f64() / ours.as_secs_f64());
-    println!("ours+op_ext vs oxc bare AST : {:.2}x", oxc.as_secs_f64() / ours_ops.as_secs_f64());
-    println!("ours+op_ext vs oxc +semantic: {:.2}x", oxc_sem.as_secs_f64() / ours_ops.as_secs_f64());
-    println!("ours+op_ext vs heavy JSIR   : {:.2}x", ir.as_secs_f64() / ours_ops.as_secs_f64());
+    // Best of our paths (fusion vs two-pass trade off with grammar depth).
+    let best = ours.min(ours_ops).min(ours_lean).min(ours_lean_ops);
+    println!("\nours two-pass         vs oxc bare AST : {:.2}x", oxc.as_secs_f64() / ours.as_secs_f64());
+    println!("ours two-pass+op_ext  vs oxc bare AST : {:.2}x", oxc.as_secs_f64() / ours_ops.as_secs_f64());
+    println!("ours fused-lean       vs oxc bare AST : {:.2}x", oxc.as_secs_f64() / ours_lean.as_secs_f64());
+    println!("ours fused-lean+op_ext vs oxc bare AST: {:.2}x", oxc.as_secs_f64() / ours_lean_ops.as_secs_f64());
+    println!("BEST                  vs oxc bare AST : {:.2}x", oxc.as_secs_f64() / best.as_secs_f64());
+    println!("BEST                  vs oxc+semantic : {:.2}x", oxc_sem.as_secs_f64() / best.as_secs_f64());
 }
