@@ -21,7 +21,7 @@ pub use attr::{
 
 // The data-oriented storage: build a `Module` (via `from_op` or the `IrBuild`
 // API) and print it byte-exact. These two capabilities are the supported scope.
-pub use soa::Module;
+pub use soa::{AttrSpec, Module};
 pub use traits::{BlockSlot, IrBuild, IrRead, OpId, OpKind, RegionId};
 
 use std::collections::HashMap;
@@ -82,6 +82,10 @@ pub struct Op {
     /// from.
     pub node_id: Option<u32>,
 }
+
+// Layout guard (oxc's `assert_layouts` discipline): catch silent bloat of the
+// AoS node. It quietly grew to ~392 B once; pin a ceiling so regressions show up.
+const _: () = assert!(std::mem::size_of::<Op>() <= 400, "AoS Op grew unexpectedly");
 
 /// A source position (1-based line, 0-based column), mirroring the JSIR `loc`.
 #[derive(Debug, Clone, PartialEq)]

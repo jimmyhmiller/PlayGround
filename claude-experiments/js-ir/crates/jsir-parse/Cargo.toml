@@ -1,0 +1,19 @@
+[package]
+name = "jsir-parse"
+version = "0.1.0"
+edition = { workspace = true }
+
+[dependencies]
+jsir-ir = { path = "../jsir-ir" }
+# The SIMD JS lexer (stage-1 NEON bitmaps + stage-2 pull lexer). `default-features
+# = false` excludes the MLIR/melior `.simd` compiler — we only need the lexer.
+simd-lang = { path = "../../../simd-lang", default-features = false }
+
+[dev-dependencies]
+jsir-swc = { path = "../jsir-swc" }
+jsir-oracle = { path = "../jsir-oracle" }
+# For the front-end throughput benchmark (our text→jsir vs oxc text→AST).
+oxc_allocator = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_allocator" }
+oxc_parser = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_parser" }
+oxc_span = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_span" }
+oxc_semantic = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_semantic" }

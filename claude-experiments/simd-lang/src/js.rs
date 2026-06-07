@@ -508,24 +508,32 @@ impl<'a> Lexer<'a> {
     /// Find and classify the next token starting at or after `cursor`, without
     /// mutating self.
     #[inline]
-    fn lex_from(&self, cursor: usize) -> Option<Token> {
+    fn lex_from<const KW: bool>(&self, cursor: usize) -> Option<Token> {
         let p = next_set_bit(self.start_masks, cursor)?;
         if p >= self.src.len() {
             return None;
         }
-        let (kind, end) = classify::<true>(self.src, self.word_masks, p);
+        let (kind, end) = classify::<KW>(self.src, self.word_masks, p);
         Some(Token { kind, start: p, end })
     }
 
-    pub fn next_token(&mut self) -> Option<Token> {
-        let tok = self.lex_from(self.cursor)?;
+    /// Consume the next token. `KW=false` is **parser-mode**: keywords come back
+    /// as plain `Ident` and the lexer never re-reads identifier bodies (faster) —
+    /// the consumer is responsible for keyword-ness and for the regex decision.
+    #[inline]
+    pub fn next_tok<const KW: bool>(&mut self) -> Option<Token> {
+        let tok = self.lex_from::<KW>(self.cursor)?;
         self.cursor = tok.end;
         Some(tok)
     }
 
+    pub fn next_token(&mut self) -> Option<Token> {
+        self.next_tok::<true>()
+    }
+
     /// Look at the next token without consuming it.
     pub fn peek(&self) -> Option<Token> {
-        self.lex_from(self.cursor)
+        self.lex_from::<true>(self.cursor)
     }
 
     /// Re-lex `at` (the `/`/`/=` token just returned by `next_token`) as a regex.
@@ -550,7 +558,26 @@ impl<'a> Lexer<'a> {
 /// same way `bench::oxc_tokens_standalone` drives oxc's lexer. A real parser
 /// would replace `emit` + the policy with its grammar-aware consumption.
 #[inline]
-pub fn drive<F: FnMut(Token)>(src: &[u8], start_masks: &[u64], word_masks: &[u64], mut emit: F) {
+pub fn drive<F: FnMut(Token)>(src: &[u8], start_masks: &[u64], word_masks: &[u64], emit: F) {
+    drive_impl::<true, F>(src, start_masks, word_masks, emit)
+}
+
+/// Parser-mode driver: keywords are emitted as `Ident` and identifier bodies are
+/// never re-read (faster). The built-in regex heuristic can't see keyword
+/// contexts in this mode, so it suits consumers that resolve keyword-ness/regex
+/// themselves (or that don't use regex).
+#[inline]
+pub fn drive_pm<F: FnMut(Token)>(src: &[u8], start_masks: &[u64], word_masks: &[u64], emit: F) {
+    drive_impl::<false, F>(src, start_masks, word_masks, emit)
+}
+
+#[inline]
+fn drive_impl<const KW: bool, F: FnMut(Token)>(
+    src: &[u8],
+    start_masks: &[u64],
+    word_masks: &[u64],
+    mut emit: F,
+) {
     let mut lex = Lexer::new(src, start_masks, word_masks);
     let mut tmpl: Vec<u32> = Vec::new(); // `{`-depth within each active `${ }` substitution
     // Whether the previous significant token ends an expression (so a following
@@ -559,7 +586,7 @@ pub fn drive<F: FnMut(Token)>(src: &[u8], start_masks: &[u64], word_masks: &[u64
     // — the per-token bookkeeping was the dominant cost on dense code.
     let mut prev_ends_expr = false;
 
-    while let Some(mut tok) = lex.next_token() {
+    while let Some(mut tok) = lex.next_tok::<KW>() {
         // Punctuator feedback: regex re-lex, template-tail re-lex, brace depth.
         if tok.kind == TokKind::Punct {
             match src[tok.start] {
@@ -979,39 +1006,11 @@ pub fn reconstruct(src: &[u8], tokens: &[Token]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{codegen, parser};
-    use std::collections::HashMap;
 
-    /// JIT-compile examples/js_stage1.simd and run it. Returns (start_masks,
-    /// word_masks) bitmaps. `input` must be padded to a multiple of 64.
+    /// Stage-1 bitmaps via the pure-Rust SIMD classifier (`crate::stage1`),
+    /// byte-identical to the MLIR `js_stage1.simd` contract.
     fn run_stage1(input: &[u8]) -> (Vec<u64>, Vec<u64>) {
-        let source = std::fs::read_to_string("examples/js_stage1.simd")
-            .expect("cannot read examples/js_stage1.simd");
-        let ctx = codegen::create_context();
-        let items = parser::parse(&source);
-        let mut module = codegen::compile_module(&ctx, &items, &HashMap::new(), 8);
-        codegen::lower_to_llvm(&ctx, &mut module).expect("lowering failed");
-        let engine = melior::ExecutionEngine::new(&module, 2, &[], false);
-        let fptr = engine.lookup("js_stage1");
-        assert!(!fptr.is_null(), "js_stage1 symbol not found");
-        let nchunks = input.len() / 64 + 1;
-        let mut start_masks = vec![0u64; nchunks];
-        let mut word_masks = vec![0u64; nchunks];
-        unsafe {
-            // js_stage1(input: memref<?xi8>, start_masks: memref<?xi64>,
-            //           word_masks: memref<?xi64>) -> vector<1xi32>
-            let f: extern "C" fn(
-                *const u8, *const u8, i64, i64, i64,
-                *mut u64, *mut u64, i64, i64, i64,
-                *mut u64, *mut u64, i64, i64, i64,
-            ) -> f32 = std::mem::transmute(fptr);
-            f(
-                input.as_ptr(), input.as_ptr(), 0, input.len() as i64, 1,
-                start_masks.as_mut_ptr(), start_masks.as_mut_ptr(), 0, start_masks.len() as i64, 1,
-                word_masks.as_mut_ptr(), word_masks.as_mut_ptr(), 0, word_masks.len() as i64, 1,
-            );
-        }
-        (start_masks, word_masks)
+        crate::stage1::stage1(input)
     }
 
     /// Expand a token-start bitmap to the list of start positions < `len`.

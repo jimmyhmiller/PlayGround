@@ -298,16 +298,8 @@ fn print_op_via<R: IrRead>(
         out.push(']');
     }
 
-    let attrs = ir.attrs(op);
-    if !attrs.is_empty() {
-        let mut attrs = attrs.to_vec();
-        attrs.sort_by(|a, b| a.0.cmp(&b.0));
-        let rendered: Vec<String> =
-            attrs.iter().map(|(k, v)| format!("{} = {}", k, v.render())).collect();
-        out.push_str(" <{");
-        out.push_str(&rendered.join(", "));
-        out.push_str("}>");
-    }
+    // Attribute dictionary — the backend renders it (sorted, arena-resolved).
+    ir.attr_dict(op, out);
 
     let regions = ir.regions(op);
     if !regions.is_empty() {

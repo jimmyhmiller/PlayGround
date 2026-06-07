@@ -3,9 +3,20 @@ name = "simd-lang"
 version = "0.1.0"
 edition = "2024"
 
+# The pure-Rust SIMD lexer (stage-1 bitmaps + stage-2 pull lexer) is the default
+# library — no MLIR. The `.simd` compiler/JIT (codegen, the bin) lives behind the
+# `mlir` feature so downstream crates can depend on just the lexer.
+[lib]
+name = "simd_lang"
+path = "src/lib.rs"
+
+[[bin]]
+name = "simd-lang"
+path = "src/main.rs"
+required-features = ["mlir"]
 
 [dependencies]
-melior = { path = "/Users/jimmyhmiller/Documents/Code/open-source/melior/melior" }
+melior = { path = "/Users/jimmyhmiller/Documents/Code/open-source/melior/melior", optional = true }
 # SIMD byte search for comment/string interiors (same technique oxc's lexer uses).
 memchr = "2"
 
@@ -17,4 +28,6 @@ oxc_span = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/o
 oxc_parser = { path = "/Users/jimmyhmiller/Documents/Code/open-source/oxc/crates/oxc_parser", features = ["benchmarking"], optional = true }
 
 [features]
+default = ["mlir"]
+mlir = ["dep:melior"]
 bench = ["dep:oxc_allocator", "dep:oxc_span", "dep:oxc_parser"]
