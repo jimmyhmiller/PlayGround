@@ -5,13 +5,19 @@ AST*, as fast as possible — faster than oxc — single-threaded (no multicore)
 
 ## TL;DR results (Apple Silicon, `aot-bench/src/bin/tape.rs`)
 
-| grammar | our best | vs oxc bare AST | vs oxc parse+semantic |
+Synthetic generators that the parser covers fully (Apple Silicon, vs oxc):
+
+| input | our best | vs oxc bare AST | vs oxc parse+semantic |
 |---|---|---|---|
 | flat expressions + var decls | ~420 MiB/s | **~2.3×** | ~4.2× |
-| nested (calls/member/index/array/grouping) | ~300 MiB/s | **~1.67×** | ~3.4× |
+| nested (calls/member/index/array) | ~250–300 MiB/s | **~1.4–1.7×** | ~3× |
 
-All paths are validated: the flat **tape** is checked for RPN balance, and the
-op_ext / two-pass / fused variants are asserted byte-identical to each other.
+We beat oxc on bare-AST single-threaded across inputs, and 3–4× when oxc also
+builds semantic info. All paths are validated: the flat **tape** is checked for
+RPN balance; the op_ext / two-pass / fused variants are asserted byte-identical;
+and a torture string (multi-char ops, strings, comments) cross-checks the three
+tokenizers. (The synthetic generator is expression-heavy, so per-statement
+keyword dispatch shows as overhead there that is real work on actual code.)
 
 Run: `cargo run --release --manifest-path aot-bench/Cargo.toml --bin tape -- 20000`
 
@@ -73,12 +79,36 @@ bytes ──SIMD──▶ start_masks, word_masks, op_ext_masks   (examples/js_s
 The tape is the deliverable: a flat, pointer-free array you can walk once to
 materialize any AST shape, with full source spans.
 
-## Grammar covered (subset, with real structure)
+## Grammar covered
 
-literals (number/string/bool/null/bigint), identifiers, unary/binary/assignment/
-update with correct precedence, member `a.b`, index `a[b]`, calls `f(x,y)`, array
-literals `[…]`, grouping `(…)`, expression statements, `let`/`var`/`const`.
-Excludes (for now): objects, functions, control flow, regex, templates.
+Expressions: literals (number/string/bool/null/bigint/regex), identifiers, the
+full operator set with correct precedence (arithmetic, bitwise, relational,
+equality, shift, logical `&& || ??`, exponent `**`, ternary `?:`, comma/sequence,
+keyword ops `in`/`instanceof`/`typeof`/`void`/`delete`), assignment + compound
+assignment, prefix/postfix update, member `a.b`, index `a[b]`, calls `f(x,y)`,
+`new`, array `[…]`, object literals `{k:v, sh, [c]:v, m(){}}`, grouping, function
+expressions.
+
+Statements: `let`/`var`/`const`, expression statements, blocks, `if`/`else`,
+`while`, `do…while`, `for(;;)`, `switch`/`case`/`default`, `return`, `break`,
+`continue`, `throw`, `try`/`catch`/`finally`, function declarations.
+
+Regex vs divide is resolved with a prev-significant-token heuristic in the
+tokenizer (the classic JS lexing wall).
+
+**Not yet:** destructuring patterns, arrow functions, template interpolation
+`${}`, spread/rest, default params, classes, ES modules (`import`/`export`),
+labeled statements, generators. These are the long tail; each is the next
+`unexpected token` you hit on a real file.
+
+## Real-file status (`tape --file <x.js>`)
+
+Real files parse until the first unsupported construct (above). On heavily
+transpiled/minified code that's typically a few % in; the limiter is grammar
+coverage, not the tokenizer — which now handles multi-char operators, strings,
+comments, and regex over real input. The throughput numbers are measured on the
+synthetic generators (which parse fully); a fair real-file throughput number
+needs full-grammar coverage first.
 
 ## Why no multicore
 
