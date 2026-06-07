@@ -91,6 +91,13 @@ const PUNCTS: &[&str] = &[
     "&", "|", "^",
 ];
 
+/// A token's source byte range as `(start, end): (u32, u32)` — what `AttrSpec`'s
+/// source-span values want.
+#[inline]
+fn o(t: Token) -> (u32, u32) {
+    (t.start as u32, t.end as u32)
+}
+
 fn is_word_start(b: u8) -> bool {
     b.is_ascii_alphabetic() || b == b'_' || b == b'$'
 }
@@ -366,12 +373,6 @@ impl<'a> Parser<'a> {
     fn txt(&self, t: Token) -> &'a str {
         t.text(self.src)
     }
-    /// Consume the next token and return its text as a borrowed source slice
-    /// (no allocation; the returned `&'a str` is tied to the source, not `self`).
-    fn bump_txt(&mut self) -> &'a str {
-        let t = self.bump();
-        self.txt(t)
-    }
     fn eat_punct(&mut self, p: Pk) -> bool {
         if self.peek().punct == p {
             self.bump();
@@ -405,12 +406,12 @@ impl<'a> Parser<'a> {
     }
 
     fn var_decl(&mut self) -> Result<(), String> {
-        let kind = self.bump_txt(); // let|var|const
+        let kt = self.bump(); // let|var|const keyword token
         self.b.stack.push(Vec::new()); // region block accumulator
         let mut decl_vals = Vec::new();
         loop {
-            let name = self.ident_name()?;
-            let id_ref = self.b.expr("jsir.identifier_ref", &[], &[AttrSpec::Str("name", name)]);
+            let nt = self.ident_name()?;
+            let id_ref = self.b.expr("jsir.identifier_ref", &[], &[AttrSpec::Str("name", o(nt).0, o(nt).1)]);
             let declr = if self.eat_punct(Pk::Assign) {
                 let init = self.assignment()?;
                 self.b.expr("jsir.variable_declarator", &[id_ref, init], &[])
@@ -427,19 +428,19 @@ impl<'a> Parser<'a> {
         let region_ops = self.b.stack.pop().unwrap();
         let region = self.b.region_from(&region_ops);
         let op = self.b.m.add_op("jsir.variable_declaration");
-        self.b.m.set_attrs_spec(op, &[AttrSpec::Str("kind", kind)]);
+        self.b.m.set_attrs_spec(op, &[AttrSpec::Str("kind", o(kt).0, o(kt).1)]);
         self.b.m.set_results(op, &[]);
         self.b.m.set_regions(op, &[region]);
         self.b.push_op(op);
         Ok(())
     }
 
-    fn ident_name(&mut self) -> Result<&'a str, String> {
+    fn ident_name(&mut self) -> Result<Token, String> {
         let t = self.peek();
         if t.kind != TokKind::Ident {
             return Err(format!("expected identifier at byte {}", t.start));
         }
-        Ok(self.bump_txt())
+        Ok(self.bump())
     }
 
     /// Assignment is the lowest-precedence, right-associative expression. The
@@ -450,15 +451,15 @@ impl<'a> Parser<'a> {
         if t.kind == TokKind::Ident && is_assign_op(self.peek2().punct) {
             // only when it's not a keyword-literal
             if !matches!(self.txt(t), "true" | "false" | "null") {
-                let name = self.bump_txt();
-                let op = self.bump_txt(); // = += -= ...
+                let nt = self.bump(); // the lvalue identifier
+                let ot = self.bump(); // = += -= ...
                 let target =
-                    self.b.expr("jsir.identifier_ref", &[], &[AttrSpec::Str("name", name)]);
+                    self.b.expr("jsir.identifier_ref", &[], &[AttrSpec::Str("name", o(nt).0, o(nt).1)]);
                 let value = self.assignment()?;
                 return Ok(self.b.expr(
                     "jsir.assignment_expression",
                     &[target, value],
-                    &[AttrSpec::Str("operator_", op)],
+                    &[AttrSpec::Str("operator_", o(ot).0, o(ot).1)],
                 ));
             }
         }
@@ -473,12 +474,12 @@ impl<'a> Parser<'a> {
             if bp < min_bp {
                 break;
             }
-            let op = self.bump_txt();
+            let ot = self.bump();
             let right = self.binary(bp + 1)?; // left-associative
             left = self.b.expr(
                 "jsir.binary_expression",
                 &[left, right],
-                &[AttrSpec::Str("operator_", op)],
+                &[AttrSpec::Str("operator_", o(ot).0, o(ot).1)],
             );
         }
         Ok(left)
@@ -488,25 +489,23 @@ impl<'a> Parser<'a> {
         let t = self.peek();
         match t.punct {
             Pk::Minus | Pk::Plus | Pk::Bang | Pk::Tilde => {
-                let op = self.txt(t);
                 self.bump();
                 let arg = self.unary()?;
                 return Ok(self.b.expr(
                     "jsir.unary_expression",
                     &[arg],
-                    &[AttrSpec::Str("operator_", op), AttrSpec::Bool("prefix", true)],
+                    &[AttrSpec::Str("operator_", o(t).0, o(t).1), AttrSpec::Bool("prefix", true)],
                 ));
             }
             Pk::PlusPlus | Pk::MinusMinus => {
-                let op = self.txt(t);
                 self.bump();
-                let name = self.ident_name()?; // prefix update target is an lvalue
+                let nt = self.ident_name()?; // prefix update target is an lvalue
                 let target =
-                    self.b.expr("jsir.identifier_ref", &[], &[AttrSpec::Str("name", name)]);
+                    self.b.expr("jsir.identifier_ref", &[], &[AttrSpec::Str("name", o(nt).0, o(nt).1)]);
                 return Ok(self.b.expr(
                     "jsir.update_expression",
                     &[target],
-                    &[AttrSpec::Str("operator_", op), AttrSpec::Bool("prefix", true)],
+                    &[AttrSpec::Str("operator_", o(t).0, o(t).1), AttrSpec::Bool("prefix", true)],
                 ));
             }
             _ => {}
@@ -520,28 +519,31 @@ impl<'a> Parser<'a> {
             TokKind::Number => {
                 self.bump();
                 let raw = self.txt(t);
+                let (s, e) = o(t);
                 if let Some(digits) = raw.strip_suffix('n') {
+                    // bigint: value/raw_value = digits (raw minus the trailing `n`)
+                    let _ = digits;
                     return Ok(self.b.expr(
                         "jsir.big_int_literal",
                         &[],
-                        &[AttrSpec::BigExtra("extra", raw, digits), AttrSpec::Str("value", digits)],
+                        &[AttrSpec::BigExtra("extra", s, e, s, e - 1), AttrSpec::Str("value", s, e - 1)],
                     ));
                 }
                 let value: f64 = raw.parse().map_err(|_| format!("bad number {raw}"))?;
                 Ok(self.b.expr(
                     "jsir.numeric_literal",
                     &[],
-                    &[AttrSpec::NumExtra("extra", raw, value), AttrSpec::F64("value", value)],
+                    &[AttrSpec::NumExtra("extra", s, e, value), AttrSpec::F64("value", value)],
                 ))
             }
             TokKind::Str => {
                 self.bump();
-                let raw = self.txt(t);
-                let inner = &raw[1..raw.len() - 1]; // strip quotes (no escapes in subset)
+                let (s, e) = o(t);
+                // strip the quotes (no escapes in subset): inner = [s+1, e-1)
                 Ok(self.b.expr(
                     "jsir.string_literal",
                     &[],
-                    &[AttrSpec::StrExtra("extra", raw, inner), AttrSpec::Str("value", inner)],
+                    &[AttrSpec::StrExtra("extra", s, e, s + 1, e - 1), AttrSpec::Str("value", s + 1, e - 1)],
                 ))
             }
             TokKind::Ident => {
@@ -558,19 +560,20 @@ impl<'a> Parser<'a> {
                     }
                     _ => {
                         self.bump();
+                        let (s, e) = o(t);
                         // postfix update: the identifier is then an lvalue.
                         if matches!(self.peek().punct, Pk::PlusPlus | Pk::MinusMinus) {
-                            let op = self.bump_txt();
+                            let ot = self.bump();
                             let target = self
                                 .b
-                                .expr("jsir.identifier_ref", &[], &[AttrSpec::Str("name", name)]);
+                                .expr("jsir.identifier_ref", &[], &[AttrSpec::Str("name", s, e)]);
                             return Ok(self.b.expr(
                                 "jsir.update_expression",
                                 &[target],
-                                &[AttrSpec::Str("operator_", op), AttrSpec::Bool("prefix", false)],
+                                &[AttrSpec::Str("operator_", o(ot).0, o(ot).1), AttrSpec::Bool("prefix", false)],
                             ));
                         }
-                        Ok(self.b.expr("jsir.identifier", &[], &[AttrSpec::Str("name", name)]))
+                        Ok(self.b.expr("jsir.identifier", &[], &[AttrSpec::Str("name", s, e)]))
                     }
                 }
             }
@@ -629,6 +632,7 @@ fn parse_with_masks<'a>(
 ) -> Result<Module, String> {
     let mut b = Builder::new();
     b.m.reserve(src.len() / 3 + 8, src.len()); // estimate; no reallocation during build
+    b.m.set_source(src); // source-span attr values index into this owned copy
     let mut p = Parser { src, lx: Lex::new(src, start_masks, word_masks), b };
     p.program()?;
     if let Some(e) = p.lx.err.take() {
@@ -641,7 +645,8 @@ fn parse_with_masks<'a>(
     let dir_region = p.b.region_from(&[]); // empty directives block → prints `^bb0:`
 
     let program = p.b.m.add_op("jsir.program");
-    p.b.m.set_attrs_spec(program, &[AttrSpec::Str("source_type", "script")]);
+    // `source_type = "script"` is a constant, not a source substring — owned path.
+    p.b.m.set_attrs(program, &[("source_type".to_string(), Attr::Str("script".to_string()))]);
     p.b.m.set_results(program, &[]);
     p.b.m.set_regions(program, &[body_region, dir_region]);
 

@@ -22,14 +22,18 @@ impl Range32 {
     }
 }
 
-/// A `(offset, len)` handle into the module's string arena (`str_arena`). All
-/// attribute keys and string values live in that one buffer — no per-attr
-/// `String`.
+/// A `(offset, len)` string handle. The high bit of `off` selects the backing
+/// buffer: set ⇒ a span into the owned **source** copy (zero-copy: the parser
+/// stores byte offsets, never copying the substring); clear ⇒ a span into the
+/// **arena** (`str_arena`, used for attr keys and `from_op`'s owned strings).
 #[derive(Clone, Copy, Default)]
 struct Span {
     off: u32,
     len: u32,
 }
+
+/// High bit of `Span::off` marking a source-buffer span.
+const SRC_FLAG: u32 = 1 << 31;
 
 /// A columnar attribute value. Strings are arena spans (zero per-attr alloc);
 /// the rare/complex attribute shapes fall back to the owned [`Attr`] enum (only
@@ -105,17 +109,21 @@ impl Default for OpRow {
     }
 }
 
-/// A zero-allocation attribute spec for the build/parse path: keys are
-/// `&'static str` and string values borrow the source (`&str`), so constructing
-/// a `&[AttrSpec]` makes no heap allocation — the strings are interned into the
-/// arena by [`Module::set_attrs_spec`].
-pub enum AttrSpec<'a> {
-    Str(&'static str, &'a str),
+/// A zero-allocation, zero-copy attribute spec for the build/parse path. Keys are
+/// `&'static str` (interned once, deduped); string values are `(start, end)`
+/// **byte offsets into the source** — the parser stores offsets, never copying
+/// the substring. `Module::set_source` must have installed the matching source.
+pub enum AttrSpec {
+    /// key, value `(start, end)` in source
+    Str(&'static str, u32, u32),
     Bool(&'static str, bool),
     F64(&'static str, f64),
-    NumExtra(&'static str, &'a str, f64),
-    StrExtra(&'static str, &'a str, &'a str),
-    BigExtra(&'static str, &'a str, &'a str),
+    /// key, raw `(start, end)`, value
+    NumExtra(&'static str, u32, u32, f64),
+    /// key, raw `(start, end)`, raw_value `(start, end)`
+    StrExtra(&'static str, u32, u32, u32, u32),
+    /// key, raw `(start, end)`, raw_value `(start, end)`
+    BigExtra(&'static str, u32, u32, u32, u32),
 }
 
 /// The columnar IR store.
@@ -149,8 +157,10 @@ pub struct Module {
     attr_pool: Vec<MAttr>,
     succ_pool: Vec<Successor>,
 
-    // ── string arena: every attr key + string value, one buffer ──
-    str_arena: String,
+    // ── string buffers ──
+    str_arena: String,  // attr keys + from_op's owned string values
+    source: String,     // one owned copy of the input; source-span attr values
+                        // (the hot parse path) index into this — no per-attr copy
     // Dedup cache for attribute keys (a tiny fixed set): `&'static str` pointer →
     // its interned arena span, so a repeated key is interned once, not per attr.
     key_cache: Vec<(usize, Span)>,
@@ -260,6 +270,7 @@ impl Module {
         col(self.op_pool.capacity(), std::mem::size_of::<OpId>());
         col(self.attr_pool.capacity(), std::mem::size_of::<MAttr>());
         col(self.str_arena.capacity(), 1); // the one string arena buffer
+        col(self.source.capacity(), 1); // the one owned source copy
         col(self.succ_pool.capacity(), std::mem::size_of::<Successor>());
         // interned opcode names
         col(self.names.capacity(), std::mem::size_of::<String>());
@@ -280,7 +291,27 @@ impl Module {
         Span { off, len: s.len() as u32 }
     }
     fn resolve(&self, sp: Span) -> &str {
-        &self.str_arena[sp.off as usize..(sp.off + sp.len) as usize]
+        let len = sp.len as usize;
+        if sp.off & SRC_FLAG != 0 {
+            let off = (sp.off & !SRC_FLAG) as usize;
+            &self.source[off..off + len]
+        } else {
+            let off = sp.off as usize;
+            &self.str_arena[off..off + len]
+        }
+    }
+
+    /// A zero-copy span into the owned source copy (`[start, end)` byte offsets).
+    fn src_span(start: u32, end: u32) -> Span {
+        debug_assert!(start & SRC_FLAG == 0, "source offset too large for flag bit");
+        Span { off: start | SRC_FLAG, len: end - start }
+    }
+
+    /// Install the owned copy of the source that source-span attr values index
+    /// into. Call once before building (the parser does this).
+    pub fn set_source(&mut self, src: &str) {
+        self.source.clear();
+        self.source.push_str(src);
     }
 
     /// Intern an attribute key, deduplicated by its `&'static str` pointer (the
@@ -303,30 +334,29 @@ impl Module {
         let start = self.attr_pool.len() as u32;
         for spec in specs {
             let m = match *spec {
-                AttrSpec::Str(k, v) => {
-                    let key = self.key_span(k);
-                    let val = AVal::Str(self.intern_str(v));
-                    MAttr { key, val }
+                AttrSpec::Str(k, s, e) => {
+                    MAttr { key: self.key_span(k), val: AVal::Str(Module::src_span(s, e)) }
                 }
                 AttrSpec::Bool(k, b) => MAttr { key: self.key_span(k), val: AVal::Bool(b) },
                 AttrSpec::F64(k, f) => MAttr { key: self.key_span(k), val: AVal::F64(f) },
-                AttrSpec::NumExtra(k, raw, value) => {
-                    let key = self.key_span(k);
-                    let raw = self.intern_str(raw);
-                    MAttr { key, val: AVal::NumExtra { raw, value } }
-                }
-                AttrSpec::StrExtra(k, raw, rv) => {
-                    let key = self.key_span(k);
-                    let raw = self.intern_str(raw);
-                    let raw_value = self.intern_str(rv);
-                    MAttr { key, val: AVal::StrExtra { raw, raw_value } }
-                }
-                AttrSpec::BigExtra(k, raw, rv) => {
-                    let key = self.key_span(k);
-                    let raw = self.intern_str(raw);
-                    let raw_value = self.intern_str(rv);
-                    MAttr { key, val: AVal::BigExtra { raw, raw_value } }
-                }
+                AttrSpec::NumExtra(k, s, e, value) => MAttr {
+                    key: self.key_span(k),
+                    val: AVal::NumExtra { raw: Module::src_span(s, e), value },
+                },
+                AttrSpec::StrExtra(k, rs, re, vs, ve) => MAttr {
+                    key: self.key_span(k),
+                    val: AVal::StrExtra {
+                        raw: Module::src_span(rs, re),
+                        raw_value: Module::src_span(vs, ve),
+                    },
+                },
+                AttrSpec::BigExtra(k, rs, re, vs, ve) => MAttr {
+                    key: self.key_span(k),
+                    val: AVal::BigExtra {
+                        raw: Module::src_span(rs, re),
+                        raw_value: Module::src_span(vs, ve),
+                    },
+                },
             };
             self.attr_pool.push(m);
         }
