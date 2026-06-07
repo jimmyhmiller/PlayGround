@@ -66,6 +66,17 @@ enum K {
     Index,   // a[b]     — 2 children (object, index)
     Call,    // f(a,b)   — nargs = 1 callee + argc args
     Array,   // [a,b,c]  — nargs = element count
+    // statements / declarations
+    Block,   // { … }    — nargs = statement count
+    If,      // if/else  — nargs = 2 (cond, then) or 3 (+ else)
+    While,   // while    — nargs = 2 (cond, body)
+    For,     // for(;;)  — nargs = 4 (init, cond, update, body); Empty fills gaps
+    Return,  //          — nargs = 0 or 1
+    Break,   //          — nargs = 0
+    Continue,//          — nargs = 0
+    Func,    // function — nargs = paramcount + 1 (body block); span = name (may be empty)
+    Param,   //          — leaf; span = param name
+    Empty,   //          — empty statement / missing for-clause
 }
 
 /// A flat tape node — 16 bytes, no pointers. For operator nodes (`Binary`,
@@ -442,17 +453,164 @@ impl<'a, L: TokSrc> P<'a, L> {
 
     fn statement(&mut self) {
         let t = self.peek();
-        if matches!(t.kind, S::Ident) {
+        if t.punct == Pk::LBrace { return self.block(); }
+        if t.punct == Pk::Semi { self.bump(); self.t.push(K::Empty, 0, t.start, t.start, false); return; }
+        if matches!(t.kind, S::Ident | S::Keyword) {
             match self.txt(t) {
-                "let" | "var" | "const" if matches!(self.peek2().kind, S::Ident) => {
-                    return self.var_decl();
-                }
+                "let" | "var" | "const" if matches!(self.peek2().kind, S::Ident) => return self.var_decl(),
+                "if" => return self.if_stmt(),
+                "while" => return self.while_stmt(),
+                "for" => return self.for_stmt(),
+                "function" => return self.func_decl(),
+                "return" => return self.return_stmt(),
+                "break" => { self.bump(); self.eat(Pk::Semi); self.t.push(K::Break, 0, t.start, t.end, false); return; }
+                "continue" => { self.bump(); self.eat(Pk::Semi); self.t.push(K::Continue, 0, t.start, t.end, false); return; }
                 _ => {}
             }
         }
         self.assignment();
         self.eat(Pk::Semi);
         self.t.push(K::ExprStmt, 1, 0, 0, false);
+    }
+
+    fn block(&mut self) {
+        let lb = self.bump(); // {
+        let mut n = 0u32;
+        while self.peek().punct != Pk::RBrace && !self.lx.at_eof() && self.err.is_none() {
+            self.statement();
+            n += 1;
+        }
+        self.eat(Pk::RBrace);
+        self.t.push(K::Block, n, lb.start, lb.start + 1, false);
+    }
+
+    fn paren_expr(&mut self) {
+        if !self.eat(Pk::LParen) {
+            self.err = Some(format!("expected ( at {}", self.peek().start));
+            return;
+        }
+        self.assignment();
+        if !self.eat(Pk::RParen) {
+            self.err = Some(format!("expected ) at {}", self.peek().start));
+        }
+    }
+
+    fn if_stmt(&mut self) {
+        let kt = self.bump(); // if
+        self.paren_expr(); // condition
+        self.statement(); // then
+        let mut nargs = 2;
+        let e = self.peek();
+        if matches!(e.kind, S::Ident | S::Keyword) && self.txt(e) == "else" {
+            self.bump();
+            self.statement();
+            nargs = 3;
+        }
+        self.t.push(K::If, nargs, kt.start, kt.end, false);
+    }
+
+    fn while_stmt(&mut self) {
+        let kt = self.bump();
+        self.paren_expr();
+        self.statement();
+        self.t.push(K::While, 2, kt.start, kt.end, false);
+    }
+
+    fn for_stmt(&mut self) {
+        let kt = self.bump();
+        if !self.eat(Pk::LParen) { self.err = Some(format!("expected ( at {}", self.peek().start)); return; }
+        // init
+        let it = self.peek();
+        if it.punct == Pk::Semi {
+            self.bump();
+            self.t.push(K::Empty, 0, it.start, it.start, false);
+        } else if matches!(it.kind, S::Ident | S::Keyword) && matches!(self.txt(it), "let" | "var" | "const") {
+            self.var_decl(); // consumes the first `;`
+        } else {
+            self.assignment();
+            self.eat(Pk::Semi);
+            self.t.push(K::ExprStmt, 1, 0, 0, false);
+        }
+        // cond
+        let ct = self.peek();
+        if ct.punct == Pk::Semi { self.t.push(K::Empty, 0, ct.start, ct.start, false); } else { self.assignment(); }
+        self.eat(Pk::Semi);
+        // update
+        let ut = self.peek();
+        if ut.punct == Pk::RParen { self.t.push(K::Empty, 0, ut.start, ut.start, false); } else { self.assignment(); }
+        if !self.eat(Pk::RParen) { self.err = Some(format!("expected ) at {}", self.peek().start)); return; }
+        self.statement(); // body
+        self.t.push(K::For, 4, kt.start, kt.end, false);
+    }
+
+    fn return_stmt(&mut self) {
+        let kt = self.bump();
+        let t = self.peek();
+        if t.punct == Pk::Semi || t.punct == Pk::RBrace || self.lx.at_eof() {
+            self.eat(Pk::Semi);
+            self.t.push(K::Return, 0, kt.start, kt.end, false);
+        } else {
+            self.assignment();
+            self.eat(Pk::Semi);
+            self.t.push(K::Return, 1, kt.start, kt.end, false);
+        }
+    }
+
+    fn func_decl(&mut self) {
+        let _kt = self.bump(); // function
+        let nt = self.peek();
+        let (ns, ne) = if matches!(nt.kind, S::Ident | S::Keyword) { self.bump(); (nt.start, nt.end) } else { (0, 0) };
+        let np = self.param_list();
+        if self.err.is_some() { return; }
+        if self.peek().punct != Pk::LBrace {
+            self.err = Some(format!("expected function body {{ at {}", self.peek().start));
+            return;
+        }
+        self.block();
+        self.t.push(K::Func, np + 1, ns, ne, false);
+    }
+
+    /// Function expression in expression position (`var f = function(a){…}`).
+    fn func_expr(&mut self) {
+        let kt = self.bump(); // function
+        let nt = self.peek();
+        let (ns, ne) = if matches!(nt.kind, S::Ident | S::Keyword) && nt.punct == Pk::Other {
+            self.bump(); (nt.start, nt.end)
+        } else { (kt.start, kt.start) };
+        let np = self.param_list();
+        if self.err.is_some() { return; }
+        if self.peek().punct != Pk::LBrace {
+            self.err = Some(format!("expected function body {{ at {}", self.peek().start));
+            return;
+        }
+        self.block();
+        self.t.push(K::Func, np + 1, ns, ne, false);
+    }
+
+    /// `( ident, ident, … )` — pushes a `Param` leaf per parameter; returns count.
+    fn param_list(&mut self) -> u32 {
+        if !self.eat(Pk::LParen) {
+            self.err = Some(format!("expected ( at {}", self.peek().start));
+            return 0;
+        }
+        let mut np = 0u32;
+        if self.peek().punct != Pk::RParen {
+            loop {
+                let pt = self.peek();
+                if !matches!(pt.kind, S::Ident | S::Keyword) {
+                    self.err = Some(format!("expected parameter at {}", pt.start));
+                    return np;
+                }
+                self.bump();
+                self.t.push(K::Param, 0, pt.start, pt.end, false);
+                np += 1;
+                if !self.eat(Pk::Comma) { break; }
+            }
+        }
+        if !self.eat(Pk::RParen) {
+            self.err = Some(format!("expected ) at {}", self.peek().start));
+        }
+        np
     }
 
     fn var_decl(&mut self) {
@@ -599,6 +757,7 @@ impl<'a, L: TokSrc> P<'a, L> {
                 match name {
                     "true" | "false" => { self.bump(); self.t.push(K::BoolLit, 0, t.start, t.end, false); }
                     "null" => { self.bump(); self.t.push(K::NullLit, 0, t.start, t.end, false); }
+                    "function" => self.func_expr(),
                     _ => { self.bump(); self.t.push(K::Ident, 0, t.start, t.end, false); }
                 }
             }
@@ -940,27 +1099,23 @@ fn parse_from_tokens<'a>(src: &'a [u8], toks: &'a [Tok]) -> Result<Tape, String>
 
 // ───────────────────── tape walking (proves it's an AST) ─────────────────────
 
-/// Verify RPN balance: walking and popping each node's `nargs` children must
-/// leave exactly one root per top-level statement, never underflowing. Returns
-/// the statement count.
+/// Verify RPN balance under the unified model: every node pops `nargs` subtrees
+/// and pushes one (so an expression *and* a statement are both single subtrees).
+/// A well-formed program ends with one stack item per top-level statement and
+/// never underflows. Returns the top-level statement count.
 fn validate(t: &Tape) -> Result<usize, String> {
     let mut stack: i64 = 0;
-    let mut roots = 0usize;
     for (i, n) in t.nodes.iter().enumerate() {
         if (n.nargs as i64) > stack {
             return Err(format!("node {i} {:?} wants {} children, stack={stack}", n.kind, n.nargs));
         }
         stack -= n.nargs as i64;
-        stack += 1; // this node becomes a value
-        if matches!(n.kind, K::ExprStmt | K::VarDecl) {
-            stack -= 1; // statements are consumed (not values)
-            roots += 1;
-        }
+        stack += 1;
     }
-    if stack != 0 {
-        return Err(format!("unbalanced tape: {stack} dangling values"));
+    if stack < 0 {
+        return Err(format!("unbalanced tape: stack={stack}"));
     }
-    Ok(roots)
+    Ok(stack as usize)
 }
 
 /// Pretty-print the tape as a tree (postorder → indented preorder) for a demo.
@@ -993,6 +1148,16 @@ fn dump_tree(t: &Tape, src: &[u8]) -> String {
             K::Index => "Index[]".into(),
             K::Call => format!("Call({} args)", n.nargs.saturating_sub(1)),
             K::Array => format!("Array({} elems)", n.nargs),
+            K::Block => format!("Block({} stmts)", n.nargs),
+            K::If => if n.nargs == 3 { "If/else".into() } else { "If".into() },
+            K::While => "While".into(),
+            K::For => "For".into(),
+            K::Return => "Return".into(),
+            K::Break => "Break".into(),
+            K::Continue => "Continue".into(),
+            K::Func => format!("Func({})", span(src, n.start, n.end)),
+            K::Param => format!("Param({})", span(src, n.start, n.end)),
+            K::Empty => "Empty".into(),
         };
         let mut block = label;
         for (i, kid) in kids.iter().enumerate() {
@@ -1044,7 +1209,7 @@ fn bench(name: &str, bytes: usize, iters: u32, mut f: impl FnMut()) -> Duration 
 
 fn main() {
     // Tiny demo first — show the tape reconstructs a real tree.
-    let demo = "let x = 1 + 2 * 3; y = foo(a, b.c)[i] + 4; arr = [1, 2, x * 3];";
+    let demo = "function sum(a, b) { var t = 0; for (var i = 0; i < a; i = i + 1) { t = t + b[i]; } if (t > 10) return t; else return -1; }";
     let (sm, wm) = simd_lang::stage1::lex(demo.as_bytes());
     let tape = parse_to_tape(demo, &sm, &wm).unwrap();
     println!("demo: {demo}");
