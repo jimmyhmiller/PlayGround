@@ -46,7 +46,7 @@ fn aot_stage1_ops(raw: &[u8]) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
 // ───────────────────────────── tape ─────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u16)]
+#[repr(u8)]
 enum K {
     NumLit,
     StrLit,
@@ -75,11 +75,11 @@ enum K {
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 struct Node {
-    kind: K,
-    flags: u16,
-    nargs: u32,
     start: u32,
     end: u32,
+    nargs: u16,
+    kind: K,
+    flags: u8,
 }
 
 #[derive(Default)]
@@ -90,7 +90,7 @@ struct Tape {
 impl Tape {
     #[inline]
     fn push(&mut self, kind: K, nargs: u32, start: u32, end: u32, prefix: bool) {
-        self.nodes.push(Node { kind, flags: prefix as u16, nargs, start, end });
+        self.nodes.push(Node { kind, flags: prefix as u8, nargs: nargs as u16, start, end });
     }
 }
 
