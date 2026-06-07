@@ -24,6 +24,25 @@ use oxc_span::SourceType;
 
 use simd_lang::js::{Lexer, TokKind as S};
 
+// AOT-compiled stage-1 + operator-adjacency kernel (examples/js_stage1_ops.simd).
+mod aot_ops {
+    #![allow(dead_code)]
+    include!("../../generated/js_stage1_ops.rs");
+}
+
+/// Run the AOT `js_stage1_ops` kernel: returns (start_masks, word_masks,
+/// op_ext_masks). Pads input to a multiple of 64 for whole-chunk reads.
+fn aot_stage1_ops(raw: &[u8]) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
+    let mut padded = raw.to_vec();
+    while padded.len() % 64 != 0 { padded.push(0); }
+    let nchunks = padded.len() / 64 + 1;
+    let mut sm = vec![0u64; nchunks];
+    let mut wm = vec![0u64; nchunks];
+    let mut oe = vec![0u64; nchunks];
+    aot_ops::js_stage1_ops(&mut padded, &mut sm, &mut wm, &mut oe);
+    (sm, wm, oe)
+}
+
 // ───────────────────────────── tape ─────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -249,6 +268,114 @@ impl<'a> TokSrc for Lex<'a> {
     fn at_eof(&mut self) -> bool { self.eof() }
 }
 
+/// Fused lean token source: bit-cursor over the start bitmap + lean classify
+/// (word_masks-derived ends, inline `op_len`), producing tokens on demand with
+/// no intermediate array. Combines the lean tokenizer's speed with fusion (no
+/// token-array traffic).
+struct LeanLex<'a> {
+    src: &'a [u8],
+    sm: &'a [u64],
+    wm: &'a [u64],
+    ci: usize,
+    w: u64,
+    buf: [Tok; 2],
+    len: usize,
+}
+
+impl<'a> LeanLex<'a> {
+    fn new(src: &'a [u8], sm: &'a [u64], wm: &'a [u64]) -> LeanLex<'a> {
+        LeanLex {
+            src, sm, wm,
+            ci: 0,
+            w: if sm.is_empty() { 0 } else { sm[0] },
+            buf: [Tok { kind: S::Punct, punct: Pk::Other, start: 0, end: 0 }; 2],
+            len: 0,
+        }
+    }
+    #[inline]
+    fn next_start(&mut self) -> Option<usize> {
+        let n = self.src.len();
+        loop {
+            if self.w != 0 {
+                let bit = self.w.trailing_zeros() as usize;
+                self.w &= self.w - 1;
+                let p = self.ci * 64 + bit;
+                if p >= n { return None; }
+                return Some(p);
+            }
+            self.ci += 1;
+            if self.ci >= self.sm.len() { return None; }
+            self.w = self.sm[self.ci];
+        }
+    }
+    #[inline]
+    fn pull(&mut self) -> Tok {
+        let n = self.src.len();
+        loop {
+            let Some(p) = self.next_start() else {
+                let n32 = n as u32;
+                return Tok { kind: S::Punct, punct: Pk::Other, start: n32, end: n32 };
+            };
+            let wbit = (self.wm[p / 64] >> (p % 64)) & 1 == 1;
+            if wbit {
+                let mut end = word_end(self.wm, p, n);
+                let digit = self.src[p].is_ascii_digit();
+                if digit && end < n && self.src[end] == b'.' {
+                    let e2 = word_end(self.wm, end + 1, n);
+                    end = e2.max(end + 1);
+                }
+                let kind = if digit { S::Number } else { S::Ident };
+                return Tok { kind, punct: Pk::Other, start: p as u32, end: end as u32 };
+            }
+            let c = self.src[p];
+            match c {
+                b'"' | b'\'' => {
+                    let mut i = p + 1;
+                    while i < n && self.src[i] != c { i += if self.src[i] == b'\\' { 2 } else { 1 }; }
+                    i = (i + 1).min(n);
+                    return Tok { kind: S::String, punct: Pk::Other, start: p as u32, end: i as u32 };
+                }
+                b'/' if p + 1 < n && (self.src[p + 1] == b'/' || self.src[p + 1] == b'*') => {
+                    continue; // comment trivia
+                }
+                _ => {
+                    let end = p + op_len(self.src, p);
+                    return Tok { kind: S::Punct, punct: classify_punct(&self.src[p..end]), start: p as u32, end: end as u32 };
+                }
+            }
+        }
+    }
+    #[inline]
+    fn fill(&mut self, k: usize) {
+        while self.len < k {
+            let t = self.pull();
+            self.buf[self.len] = t;
+            self.len += 1;
+        }
+    }
+}
+
+impl<'a> TokSrc for LeanLex<'a> {
+    #[inline]
+    fn peek(&mut self) -> Tok { self.fill(1); self.buf[0] }
+    #[inline]
+    fn peek2(&mut self) -> Tok { self.fill(2); self.buf[1] }
+    #[inline]
+    fn bump(&mut self) -> Tok {
+        self.fill(1);
+        let t = self.buf[0];
+        self.buf[0] = self.buf[1];
+        self.len -= 1;
+        t
+    }
+    #[inline]
+    fn at_eof(&mut self) -> bool {
+        self.fill(1);
+        self.buf[0].start as usize >= self.src.len()
+            && matches!(self.buf[0].kind, S::Punct) && self.buf[0].punct == Pk::Other
+    }
+}
+
 /// Token source over a pre-materialized slice (the EOF sentinel is the last elem).
 struct VecLex<'a> {
     toks: &'a [Tok],
@@ -447,6 +574,21 @@ fn parse_to_tape(src: &str, sm: &[u64], wm: &[u64]) -> Result<Tape, String> {
     Ok(p.t)
 }
 
+/// Fused parse using the lean bit-cursor tokenizer — no token array, no slow
+/// `Lexer` classify. The best of both: lean classification + fusion.
+fn parse_to_tape_lean(src: &str, sm: &[u64], wm: &[u64]) -> Result<Tape, String> {
+    let b = src.as_bytes();
+    let mut p = P {
+        src: b,
+        lx: LeanLex::new(b, sm, wm),
+        t: Tape { nodes: Vec::with_capacity(b.len() / 3 + 8) },
+        err: None,
+    };
+    p.program();
+    if let Some(e) = p.err.take() { return Err(e); }
+    Ok(p.t)
+}
+
 /// Materialize the whole token stream into a `Vec<Tok>` (with a trailing EOF
 /// sentinel) — the representation a `.simd` kernel would fill in bulk.
 fn materialize_tokens(src: &str, sm: &[u64], wm: &[u64]) -> Vec<Tok> {
@@ -590,6 +732,120 @@ fn lex_to_array(src: &[u8], sm: &[u64], wm: &[u64]) -> Vec<Tok> {
     out
 }
 
+/// Like `lex_to_array` but operator length comes from a precomputed per-byte
+/// array (what a `.simd` kernel would emit) instead of the scalar `op_len`.
+fn lex_to_array_pre(src: &[u8], sm: &[u64], wm: &[u64], oplen: &[u8]) -> Vec<Tok> {
+    let n = src.len();
+    let mut out = Vec::with_capacity(n / 4 + 8);
+    for (ci, &w0) in sm.iter().enumerate() {
+        let mut w = w0;
+        while w != 0 {
+            let p = ci * 64 + w.trailing_zeros() as usize;
+            w &= w - 1;
+            if p >= n { break; }
+            let wbit = (wm[p / 64] >> (p % 64)) & 1 == 1;
+            if wbit {
+                let mut end = word_end(wm, p, n);
+                let digit = src[p].is_ascii_digit();
+                if digit && end < n && src[end] == b'.' {
+                    end = word_end(wm, end + 1, n).max(end + 1);
+                }
+                let kind = if digit { S::Number } else { S::Ident };
+                out.push(Tok { kind, punct: Pk::Other, start: p as u32, end: end as u32 });
+            } else {
+                let c = src[p];
+                match c {
+                    b'"' | b'\'' => {
+                        let mut i = p + 1;
+                        while i < n && src[i] != c { i += if src[i] == b'\\' { 2 } else { 1 }; }
+                        i = (i + 1).min(n);
+                        out.push(Tok { kind: S::String, punct: Pk::Other, start: p as u32, end: i as u32 });
+                    }
+                    b'/' if p + 1 < n && (src[p + 1] == b'/' || src[p + 1] == b'*') => continue,
+                    _ => {
+                        let end = p + oplen[p] as usize;
+                        out.push(Tok { kind: S::Punct, punct: classify_punct(&src[p..end]), start: p as u32, end: end as u32 });
+                    }
+                }
+            }
+        }
+    }
+    let n32 = n as u32;
+    out.push(Tok { kind: S::Punct, punct: Pk::Other, start: n32, end: n32 });
+    out
+}
+
+/// `lex_to_array` driven by the SIMD `op_ext` bitmap: operator length comes from
+/// `match_operator` ONLY where `op_ext` says two op chars are adjacent (or at a
+/// 64-byte boundary, where op_ext can't see across); elsewhere a punctuator is a
+/// single byte. Produces byte-identical tokens to `lex_to_array`.
+fn lex_to_array_ops(src: &[u8], sm: &[u64], wm: &[u64], oe: &[u64]) -> Vec<Tok> {
+    let n = src.len();
+    let mut out = Vec::with_capacity(n / 4 + 8);
+    for (ci, &w0) in sm.iter().enumerate() {
+        let mut w = w0;
+        while w != 0 {
+            let bit = w.trailing_zeros() as usize;
+            let p = ci * 64 + bit;
+            w &= w - 1;
+            if p >= n { break; }
+            let wbit = (wm[p / 64] >> (p % 64)) & 1 == 1;
+            if wbit {
+                let mut end = word_end(wm, p, n);
+                let digit = src[p].is_ascii_digit();
+                if digit && end < n && src[end] == b'.' {
+                    end = word_end(wm, end + 1, n).max(end + 1);
+                }
+                let kind = if digit { S::Number } else { S::Ident };
+                out.push(Tok { kind, punct: Pk::Other, start: p as u32, end: end as u32 });
+            } else {
+                let c = src[p];
+                match c {
+                    b'"' | b'\'' => {
+                        let mut i = p + 1;
+                        while i < n && src[i] != c { i += if src[i] == b'\\' { 2 } else { 1 }; }
+                        i = (i + 1).min(n);
+                        out.push(Tok { kind: S::String, punct: Pk::Other, start: p as u32, end: i as u32 });
+                    }
+                    b'/' if p + 1 < n && (src[p + 1] == b'/' || src[p + 1] == b'*') => continue,
+                    _ => {
+                        // op_ext bit set (or chunk-boundary byte) → maybe multi-char.
+                        let ext = (oe[p / 64] >> bit) & 1 == 1 || bit == 63;
+                        let end = if ext { p + op_len(src, p) } else { p + 1 };
+                        out.push(Tok { kind: S::Punct, punct: classify_punct(&src[p..end]), start: p as u32, end: end as u32 });
+                    }
+                }
+            }
+        }
+    }
+    let n32 = n as u32;
+    out.push(Tok { kind: S::Punct, punct: Pk::Other, start: n32, end: n32 });
+    out
+}
+
+/// Diagnostic: same as `lex_to_array` but operators are length-1 with no
+/// classification — bounds how much the operator path costs.
+fn lex_to_array_noop(src: &[u8], sm: &[u64], wm: &[u64]) -> usize {
+    let n = src.len();
+    let mut count = 0usize;
+    for (ci, &w0) in sm.iter().enumerate() {
+        let mut w = w0;
+        while w != 0 {
+            let p = ci * 64 + w.trailing_zeros() as usize;
+            w &= w - 1;
+            if p >= n { break; }
+            let wbit = (wm[p / 64] >> (p % 64)) & 1 == 1;
+            if wbit {
+                let _end = word_end(wm, p, n);
+                count += 1;
+            } else {
+                count += 1; // pretend single-char punct, no classify
+            }
+        }
+    }
+    count
+}
+
 /// Parse from a pre-materialized token slice (no lexing in the timed region).
 fn parse_from_tokens<'a>(src: &'a [u8], toks: &'a [Tok]) -> Result<Tape, String> {
     let mut p = P {
@@ -725,13 +981,47 @@ fn main() {
         (tape.nodes.len() * std::mem::size_of::<Node>()) as f64 / (1 << 20) as f64,
         std::mem::size_of::<Node>());
 
+    // Correctness: the fused-lean path must match the fused-Lexer tape.
+    {
+        let (sm, wm) = simd_lang::stage1::lex(src.as_bytes());
+        let a = parse_to_tape(&src, &sm, &wm).unwrap();
+        let c = parse_to_tape_lean(&src, &sm, &wm).unwrap();
+        assert_eq!(a.nodes.len(), c.nodes.len(), "fused-lean tape len differs");
+    }
+
+    // Correctness: AOT op_ext bitmaps must equal pure-Rust stage1, and the
+    // op_ext-driven tokenizer must produce byte-identical tokens.
+    {
+        let (sm, wm) = simd_lang::stage1::lex(src.as_bytes());
+        let (asm, awm, aoe) = aot_stage1_ops(src.as_bytes());
+        assert_eq!(&sm[..], &asm[..wm.len()], "AOT start_masks differ");
+        assert_eq!(&wm[..], &awm[..wm.len()], "AOT word_masks differ");
+        let plain = lex_to_array(src.as_bytes(), &sm, &wm);
+        let viaops = lex_to_array_ops(src.as_bytes(), &asm, &awm, &aoe);
+        assert_eq!(plain.len(), viaops.len(), "op_ext token count differs");
+        for (a, b) in plain.iter().zip(viaops.iter()) {
+            assert!(a.start == b.start && a.end == b.end && a.punct == b.punct,
+                "op_ext token mismatch at {}", a.start);
+        }
+        let _ = aoe;
+    }
+
     println!("text → tree (our SIMD lex + flat tape):");
-    let ours = bench("ours: two-pass (lean lex→array→tape)", bytes, iters, || {
+    let ours = bench("ours: two-pass (lean→array→tape)", bytes, iters, || {
         let (sm, wm) = simd_lang::stage1::lex(src.as_bytes());
         let toks = lex_to_array(src.as_bytes(), &sm, &wm);
         black_box(parse_from_tokens(src.as_bytes(), &toks).unwrap().nodes.len());
     });
-    bench("  (fused, for comparison)", bytes, iters, || {
+    let ours_ops = bench("ours+op_ext: AOT 3-mask → array → tape", bytes, iters, || {
+        let (sm, wm, oe) = aot_stage1_ops(src.as_bytes());
+        let toks = lex_to_array_ops(src.as_bytes(), &sm, &wm, &oe);
+        black_box(parse_from_tokens(src.as_bytes(), &toks).unwrap().nodes.len());
+    });
+    bench("  fused-lean (no array)", bytes, iters, || {
+        let (sm, wm) = simd_lang::stage1::lex(src.as_bytes());
+        black_box(parse_to_tape_lean(&src, &sm, &wm).unwrap().nodes.len());
+    });
+    bench("  fused-Lexer (old)", bytes, iters, || {
         let (sm, wm) = simd_lang::stage1::lex(src.as_bytes());
         black_box(parse_to_tape(&src, &sm, &wm).unwrap().nodes.len());
     });
@@ -772,6 +1062,17 @@ fn main() {
         let (sm, wm) = simd_lang::stage1::lex(src.as_bytes());
         black_box(lex_to_array(src.as_bytes(), &sm, &wm).len());
     });
+    bench("  lean w/o op_len+classify_punct", bytes, iters, || {
+        let (sm, wm) = simd_lang::stage1::lex(src.as_bytes());
+        black_box(lex_to_array_noop(src.as_bytes(), &sm, &wm));
+    });
+    // Ceiling if a `.simd` kernel precomputed per-byte op-length (untimed here).
+    let mut oplen = vec![0u8; src.len() + 4];
+    for p in 0..src.len() { oplen[p] = op_len(src.as_bytes(), p) as u8; }
+    bench("  lean w/ precomputed op_len", bytes, iters, || {
+        let (sm, wm) = simd_lang::stage1::lex(src.as_bytes());
+        black_box(lex_to_array_pre(src.as_bytes(), &sm, &wm, &oplen).len());
+    });
 
     // Correctness: the lean tokenizer must drive the parser to the same tape.
     let lean_toks = lex_to_array(src.as_bytes(), &sm, &wm);
@@ -797,7 +1098,8 @@ fn main() {
         black_box(s.semantic.nodes().len());
     });
 
-    println!("\nours vs oxc bare AST      : {:.2}x", oxc.as_secs_f64() / ours.as_secs_f64());
-    println!("ours vs oxc parse+semantic: {:.2}x", oxc_sem.as_secs_f64() / ours.as_secs_f64());
-    println!("ours vs heavy JSIR Module : {:.2}x", ir.as_secs_f64() / ours.as_secs_f64());
+    println!("\nours vs oxc bare AST         : {:.2}x", oxc.as_secs_f64() / ours.as_secs_f64());
+    println!("ours+op_ext vs oxc bare AST : {:.2}x", oxc.as_secs_f64() / ours_ops.as_secs_f64());
+    println!("ours+op_ext vs oxc +semantic: {:.2}x", oxc_sem.as_secs_f64() / ours_ops.as_secs_f64());
+    println!("ours+op_ext vs heavy JSIR   : {:.2}x", ir.as_secs_f64() / ours_ops.as_secs_f64());
 }

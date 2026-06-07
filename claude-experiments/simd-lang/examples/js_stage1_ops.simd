@@ -1,0 +1,93 @@
+-- JavaScript lexer — Stage 1 + operator-adjacency, all in SIMD.
+--
+-- Emits THREE bitmaps, one u64 per 64-byte chunk:
+--   start_masks[c]  — token starts (word-start OR punctuator), as js_stage1.
+--   word_masks[c]   — word chars [A-Za-z0-9_$]; stage-2 derives ident/number
+--                     ends from this by a bit-scan (no byte re-read).
+--   op_ext_masks[c] — bit i set ⇔ byte i AND byte i+1 are both operator chars,
+--                     i.e. position i *might* begin a multi-char operator. The
+--                     tokenizer does full maximal-munch only where this bit is
+--                     set; everywhere else a punctuator is a single byte. This
+--                     removes the per-operator look-ahead for the common case
+--                     (standalone `=` `+` `<` …) — a structural shortcut.
+--
+-- Soundness: `op_ext = op_bits & (op_bits >> 1)` loses the cross-chunk pair at
+-- bit 63 (the >>1 shifts in 0), so a 2-char operator straddling a 64-byte
+-- boundary would read op_ext=0 there. The tokenizer compensates by always doing
+-- the full match at chunk-boundary bytes (p % 64 == 63) — 1/64 of positions.
+-- Over-approximation is harmless (a wasted full-match that returns length 1).
+
+fn js_stage1_ops(input: ptr[u8], start_masks: ptr[u64], word_masks: ptr[u64], op_ext_masks: ptr[u64]) -> i32[1] {
+    stream chunk: u8[64] over input carry (prev_word: u64[1] = 0, pos: i32[1] = 0) {
+
+        -- === CHARACTER CLASSES ===
+        is_digit  = (chunk >= '0') & (chunk <= '9')
+        is_upper  = (chunk >= 'A') & (chunk <= 'Z')
+        is_lower  = (chunk >= 'a') & (chunk <= 'z')
+        is_us     = chunk == '_'
+        is_dollar = chunk == '$'
+        is_word_vec = is_digit | is_upper | is_lower | is_us | is_dollar
+
+        is_space = chunk == 32
+        is_tab   = chunk == 9
+        is_lf    = chunk == 10
+        is_cr    = chunk == 13
+        is_vt    = chunk == 11
+        is_ff    = chunk == 12
+        is_ws_vec = is_space | is_tab | is_lf | is_cr | is_vt | is_ff
+
+        is_nul_vec = chunk == 0
+
+        -- operator chars: + - * / % = < > ! & | ^ ~ ? .
+        is_plus  = chunk == 43
+        is_minus = chunk == 45
+        is_star  = chunk == 42
+        is_slash = chunk == 47
+        is_pct   = chunk == 37
+        is_eq    = chunk == 61
+        is_lt    = chunk == 60
+        is_gt    = chunk == 62
+        is_bang  = chunk == 33
+        is_amp   = chunk == 38
+        is_pipe  = chunk == 124
+        is_caret = chunk == 94
+        is_tilde = chunk == 126
+        is_quest = chunk == 63
+        is_dot   = chunk == 46
+        is_op_a = is_plus | is_minus | is_star | is_slash
+        is_op_b = is_pct | is_eq | is_lt | is_gt
+        is_op_c = is_bang | is_amp | is_pipe | is_caret
+        is_op_d = is_tilde | is_quest | is_dot
+        is_op_vec = is_op_a | is_op_b | is_op_c | is_op_d
+
+        -- === BITMASKS ===
+        word_bits = to_bitmask(is_word_vec)
+        ws_bits   = to_bitmask(is_ws_vec)
+        nul_bits  = to_bitmask(is_nul_vec)
+        op_bits   = to_bitmask(is_op_vec)
+
+        prev_word_bits = (word_bits << 1) | prev_word
+        word_start_bits = word_bits & ~prev_word_bits
+
+        all_ones: u64[1] = ~0
+        not_word = word_bits ^ all_ones
+        not_ws   = ws_bits ^ all_ones
+        not_nul  = nul_bits ^ all_ones
+        punct_bits = not_word & not_ws & not_nul
+
+        token_start_bits = word_start_bits | punct_bits
+
+        -- adjacency: this op char AND the next are both op chars
+        op_ext_bits = op_bits & (op_bits >> 1)
+
+        -- === EMIT ===
+        chunk_idx = chunk_offset >> 6
+        store_at(start_masks, chunk_idx, token_start_bits)
+        store_at(word_masks, chunk_idx, word_bits)
+        store_at(op_ext_masks, chunk_idx, op_ext_bits)
+
+        carry prev_word = word_bits >> 63
+        carry pos = pos + popcount(from_bitmask(token_start_bits, 64))
+    }
+    return pos
+}
