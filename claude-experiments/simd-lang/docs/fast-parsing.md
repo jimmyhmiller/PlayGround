@@ -101,13 +101,24 @@ tokenizer (the classic JS lexing wall).
 labeled statements, generators. These are the long tail; each is the next
 `unexpected token` you hit on a real file.
 
-## Real-file status (`tape --file <x.js>`)
+## Tokenizer validated on real files (`tape --lex-check <x.js>`)
 
-Real files parse until the first unsupported construct (above). On heavily
-transpiled/minified code that's typically a few % in; the limiter is grammar
-coverage, not the tokenizer — which now handles multi-char operators, strings,
-comments, and regex over real input. The throughput numbers are measured on the
-synthetic generators (which parse fully); a fair real-file throughput number
+The SIMD-fed lean tokenizer is cross-checked against the established
+`simd_lang::js` lexer (itself round-trip + oxc-aligned). On a sweep of 21 real
+minified files (react-dom.production, axe, ajv, async, nacl, polyfills, …),
+**18/21 produce byte-identical token streams**; the only 3 divergences are all
+template-literal interpolation `` `…${ `` — the one genuinely non-regular feature
+(brace-matched mode stack), not yet handled. This covers multi-char operators
+(incl. `/=` `?.` `...` `&&=`/`||=`/`??=`), strings, line/block comments, regex
+(prev-token heuristic), and full numeric literals (hex, bigint, decimals,
+signed exponents). So the *tokenizer* generalizes to real JS; the parser's
+remaining gaps are grammar-coverage (above), not lexing.
+
+## Real-file parse status (`tape --file <x.js>`)
+
+Real files parse until the first unsupported *grammar* construct. On heavily
+transpiled/minified code that's typically a few % in. Throughput is measured on
+the synthetic generators (which parse fully); a fair real-file throughput number
 needs full-grammar coverage first.
 
 ## Why no multicore
