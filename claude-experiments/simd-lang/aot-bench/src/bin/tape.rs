@@ -78,6 +78,17 @@ enum K {
     Param,   //          — leaf; span = param name
     Empty,   //          — empty statement / missing for-clause
     Cond,    // a ? b : c — 3 children
+    New,     // new X(…) — 1 child (the callee/call subtree)
+    Object,  // { … }    — nargs = property count
+    Property,// k: v     — 1 child (value), or 0 (shorthand); span = key
+    RegexLit,// /re/flags — leaf
+    Seq,     // a, b, c  — comma/sequence expression; nargs = count
+    Switch,  // switch   — nargs = 1 (discriminant) + case count
+    Case,    // case/default — nargs = 1 (test; Empty for default) + stmt count
+    Throw,   // throw e  — 1 child
+    DoWhile, // do … while — nargs = 2 (body, cond)
+    Try,     // try/catch/finally — nargs = 2 or 3 (try block, catch block?, finally block?)
+    Catch,   // catch(e){…} — nargs = 1 (block); span = param (may be empty)
 }
 
 /// A flat tape node — 16 bytes, no pointers. For operator nodes (`Binary`,
@@ -307,6 +318,7 @@ struct LeanLex<'a> {
     ci: usize,
     w: u64,
     cursor: usize, // start bits below this are inside an already-consumed token
+    prev_ends_expr: bool, // true ⇒ a `/` here is division, not a regex
     buf: [Tok; 2],
     len: usize,
 }
@@ -318,6 +330,7 @@ impl<'a> LeanLex<'a> {
             ci: 0,
             w: if sm.is_empty() { 0 } else { sm[0] },
             cursor: 0,
+            prev_ends_expr: false, // start of input → a leading `/` would be regex
             buf: [Tok { kind: S::Punct, punct: Pk::Other, start: 0, end: 0 }; 2],
             len: 0,
         }
@@ -357,6 +370,9 @@ impl<'a> LeanLex<'a> {
                 }
                 self.cursor = end;
                 let kind = if digit { S::Number } else { S::Ident };
+                // a number, or an identifier/keyword that ends an expression,
+                // makes the next `/` division. Keyword operators don't.
+                self.prev_ends_expr = digit || !regex_kw_before(&self.src[p..end]);
                 return Tok { kind, punct: Pk::Other, start: p as u32, end: end as u32 };
             }
             let c = self.src[p];
@@ -364,22 +380,34 @@ impl<'a> LeanLex<'a> {
                 b'"' | b'\'' | b'`' => {
                     let end = scan_string(self.src, p);
                     self.cursor = end;
+                    self.prev_ends_expr = true;
                     return Tok { kind: S::String, punct: Pk::Other, start: p as u32, end: end as u32 };
                 }
                 b'/' if p + 1 < n && self.src[p + 1] == b'/' => {
                     self.cursor = memchr_nl(self.src, p + 2);
-                    continue; // line comment trivia
+                    continue; // line comment trivia (doesn't change prev_ends_expr)
                 }
                 b'/' if p + 1 < n && self.src[p + 1] == b'*' => {
                     self.cursor = block_comment_end(self.src, p + 2);
                     continue; // block comment trivia
+                }
+                b'/' if !self.prev_ends_expr => {
+                    // regex literal
+                    let end = scan_regex(self.src, p);
+                    self.cursor = end;
+                    self.prev_ends_expr = true;
+                    return Tok { kind: S::Regex, punct: Pk::Other, start: p as u32, end: end as u32 };
                 }
                 _ => {
                     let bit = p % 64;
                     let ext = self.oe.is_empty() || bit == 63 || (self.oe[p / 64] >> bit) & 1 == 1;
                     let end = if ext { p + op_len(self.src, p) } else { p + 1 };
                     self.cursor = end;
-                    return Tok { kind: S::Punct, punct: classify_punct(&self.src[p..end]), start: p as u32, end: end as u32 };
+                    let pk = classify_punct(&self.src[p..end]);
+                    // `)`/`]`/`++`/`--` end an expression → next `/` divides;
+                    // everything else (operators, `(`, `,`, `{`, …) allows regex.
+                    self.prev_ends_expr = matches!(pk, Pk::RParen | Pk::RBracket | Pk::PlusPlus | Pk::MinusMinus);
+                    return Tok { kind: S::Punct, punct: pk, start: p as u32, end: end as u32 };
                 }
             }
         }
@@ -480,13 +508,17 @@ impl<'a, L: TokSrc> P<'a, L> {
                 "while" => return self.while_stmt(),
                 "for" => return self.for_stmt(),
                 "function" => return self.func_decl(),
+                "switch" => return self.switch_stmt(),
+                "throw" => { let k = self.bump(); self.expression(); self.eat(Pk::Semi); self.t.push(K::Throw, 1, k.start, k.end, false); return; }
+                "do" => return self.do_while(),
+                "try" => return self.try_stmt(),
                 "return" => return self.return_stmt(),
                 "break" => { self.bump(); self.eat(Pk::Semi); self.t.push(K::Break, 0, t.start, t.end, false); return; }
                 "continue" => { self.bump(); self.eat(Pk::Semi); self.t.push(K::Continue, 0, t.start, t.end, false); return; }
                 _ => {}
             }
         }
-        self.assignment();
+        self.expression();
         self.eat(Pk::Semi);
         self.t.push(K::ExprStmt, 1, 0, 0, false);
     }
@@ -507,7 +539,7 @@ impl<'a, L: TokSrc> P<'a, L> {
             self.err = Some(format!("expected ( at {}", self.peek().start));
             return;
         }
-        self.assignment();
+        self.expression();
         if !self.eat(Pk::RParen) {
             self.err = Some(format!("expected ) at {}", self.peek().start));
         }
@@ -551,14 +583,90 @@ impl<'a, L: TokSrc> P<'a, L> {
         }
         // cond
         let ct = self.peek();
-        if ct.punct == Pk::Semi { self.t.push(K::Empty, 0, ct.start, ct.start, false); } else { self.assignment(); }
+        if ct.punct == Pk::Semi { self.t.push(K::Empty, 0, ct.start, ct.start, false); } else { self.expression(); }
         self.eat(Pk::Semi);
         // update
         let ut = self.peek();
-        if ut.punct == Pk::RParen { self.t.push(K::Empty, 0, ut.start, ut.start, false); } else { self.assignment(); }
+        if ut.punct == Pk::RParen { self.t.push(K::Empty, 0, ut.start, ut.start, false); } else { self.expression(); }
         if !self.eat(Pk::RParen) { self.err = Some(format!("expected ) at {}", self.peek().start)); return; }
         self.statement(); // body
         self.t.push(K::For, 4, kt.start, kt.end, false);
+    }
+
+    fn do_while(&mut self) {
+        let kt = self.bump(); // do
+        self.statement(); // body
+        let w = self.peek();
+        if !(matches!(w.kind, S::Ident | S::Keyword) && self.txt(w) == "while") {
+            self.err = Some(format!("expected while at {}", w.start));
+            return;
+        }
+        self.bump();
+        self.paren_expr();
+        self.eat(Pk::Semi);
+        self.t.push(K::DoWhile, 2, kt.start, kt.end, false);
+    }
+
+    fn try_stmt(&mut self) {
+        let kt = self.bump(); // try
+        if self.peek().punct != Pk::LBrace { self.err = Some(format!("expected {{ at {}", self.peek().start)); return; }
+        self.block();
+        let mut nargs = 1u32;
+        let c = self.peek();
+        if matches!(c.kind, S::Ident | S::Keyword) && self.txt(c) == "catch" {
+            self.bump();
+            let (ps, pe) = if self.peek().punct == Pk::LParen {
+                self.bump();
+                let pt = self.peek();
+                let span = if matches!(pt.kind, S::Ident | S::Keyword) { self.bump(); (pt.start, pt.end) } else { (pt.start, pt.start) };
+                self.eat(Pk::RParen);
+                span
+            } else { (c.start, c.start) };
+            if self.peek().punct != Pk::LBrace { self.err = Some(format!("expected {{ at {}", self.peek().start)); return; }
+            self.block();
+            self.t.push(K::Catch, 1, ps, pe, false);
+            nargs += 1;
+        }
+        let f = self.peek();
+        if matches!(f.kind, S::Ident | S::Keyword) && self.txt(f) == "finally" {
+            self.bump();
+            if self.peek().punct != Pk::LBrace { self.err = Some(format!("expected {{ at {}", self.peek().start)); return; }
+            self.block();
+            nargs += 1;
+        }
+        self.t.push(K::Try, nargs, kt.start, kt.end, false);
+    }
+
+    fn switch_stmt(&mut self) {
+        let kt = self.bump(); // switch
+        self.paren_expr(); // discriminant
+        if !self.eat(Pk::LBrace) { self.err = Some(format!("expected {{ at {}", self.peek().start)); return; }
+        let mut ncases = 0u32;
+        while self.peek().punct != Pk::RBrace && !self.lx.at_eof() && self.err.is_none() {
+            let ct = self.peek();
+            let is_case = matches!(ct.kind, S::Ident | S::Keyword) && self.txt(ct) == "case";
+            let is_default = matches!(ct.kind, S::Ident | S::Keyword) && self.txt(ct) == "default";
+            if !is_case && !is_default {
+                self.err = Some(format!("expected case/default at {}", ct.start));
+                return;
+            }
+            self.bump(); // case|default
+            if is_case { self.expression(); } else { self.t.push(K::Empty, 0, ct.start, ct.start, false); }
+            self.eat(Pk::Colon);
+            // statements until the next case/default/}
+            let mut nstmt = 0u32;
+            loop {
+                let p = self.peek();
+                if p.punct == Pk::RBrace || self.lx.at_eof() || self.err.is_some() { break; }
+                if matches!(p.kind, S::Ident | S::Keyword) && matches!(self.txt(p), "case" | "default") { break; }
+                self.statement();
+                nstmt += 1;
+            }
+            self.t.push(K::Case, 1 + nstmt, ct.start, ct.end, false);
+            ncases += 1;
+        }
+        self.eat(Pk::RBrace);
+        self.t.push(K::Switch, 1 + ncases, kt.start, kt.end, false);
     }
 
     fn return_stmt(&mut self) {
@@ -568,7 +676,7 @@ impl<'a, L: TokSrc> P<'a, L> {
             self.eat(Pk::Semi);
             self.t.push(K::Return, 0, kt.start, kt.end, false);
         } else {
-            self.assignment();
+            self.expression();
             self.eat(Pk::Semi);
             self.t.push(K::Return, 1, kt.start, kt.end, false);
         }
@@ -586,6 +694,47 @@ impl<'a, L: TokSrc> P<'a, L> {
         }
         self.block();
         self.t.push(K::Func, np + 1, ns, ne, false);
+    }
+
+    /// Object literal `{ k: v, k2, [c]: v, "s": v, m() {…} }` (basic forms).
+    fn object(&mut self) {
+        let lb = self.bump(); // {
+        let mut n = 0u32;
+        while self.peek().punct != Pk::RBrace && !self.lx.at_eof() && self.err.is_none() {
+            let kt = self.peek();
+            // computed key [expr]
+            if kt.punct == Pk::LBracket {
+                self.bump();
+                self.assignment();
+                self.eat(Pk::RBracket);
+                if self.eat(Pk::Colon) { self.assignment(); self.t.push(K::Property, 2, kt.start, kt.start + 1, false); }
+                else { self.t.push(K::Property, 1, kt.start, kt.start + 1, false); }
+            } else {
+                // ident / string / number key
+                if !matches!(kt.kind, S::Ident | S::Keyword | S::String | S::Number) {
+                    self.err = Some(format!("expected property key at {}", kt.start));
+                    return;
+                }
+                self.bump();
+                if self.eat(Pk::Colon) {
+                    self.assignment();
+                    self.t.push(K::Property, 1, kt.start, kt.end, false);
+                } else if self.peek().punct == Pk::LParen {
+                    // method shorthand: key(params){body}
+                    let np = self.param_list();
+                    if self.peek().punct == Pk::LBrace { self.block(); } else { self.err = Some("expected method body".into()); return; }
+                    self.t.push(K::Func, np + 1, kt.start, kt.end, false);
+                    self.t.push(K::Property, 1, kt.start, kt.end, false);
+                } else {
+                    // shorthand { x }
+                    self.t.push(K::Property, 0, kt.start, kt.end, false);
+                }
+            }
+            n += 1;
+            if !self.eat(Pk::Comma) { break; }
+        }
+        self.eat(Pk::RBrace);
+        self.t.push(K::Object, n, lb.start, lb.start + 1, false);
     }
 
     /// Function expression in expression position (`var f = function(a){…}`).
@@ -655,6 +804,24 @@ impl<'a, L: TokSrc> P<'a, L> {
         self.t.push(K::VarDecl, n, kt.start, kt.end, false);
     }
 
+    /// Full expression including the comma/sequence operator. Used where a comma
+    /// is *not* a separator (expression statements, grouping, return, for-clauses).
+    fn expression(&mut self) {
+        self.assignment();
+        let mut n = 1u32;
+        while self.peek().punct == Pk::Comma {
+            // stop at a trailing comma before a closer
+            let after = self.peek2().punct;
+            if matches!(after, Pk::RParen | Pk::RBracket | Pk::RBrace | Pk::Semi) { break; }
+            self.bump();
+            self.assignment();
+            n += 1;
+        }
+        if n > 1 {
+            self.t.push(K::Seq, n, 0, 0, false);
+        }
+    }
+
     fn assignment(&mut self) {
         // LHS (a full expression incl. member/index chains); `=` isn't a binary op.
         self.binary(0);
@@ -680,7 +847,14 @@ impl<'a, L: TokSrc> P<'a, L> {
         self.unary();
         loop {
             let t = self.peek();
-            let Some(bp) = binary_bp(t.punct) else { break };
+            // keyword binary operators `in` / `instanceof` (relational precedence)
+            let bp = if let Some(bp) = binary_bp(t.punct) {
+                bp
+            } else if matches!(t.kind, S::Ident | S::Keyword) && matches!(self.txt(t), "in" | "instanceof") {
+                8
+            } else {
+                break;
+            };
             if bp < min_bp { break; }
             let ot = self.bump();
             self.binary(bp + 1);
@@ -690,6 +864,13 @@ impl<'a, L: TokSrc> P<'a, L> {
 
     fn unary(&mut self) {
         let t = self.peek();
+        // keyword prefix unary operators
+        if matches!(t.kind, S::Ident | S::Keyword) && matches!(self.txt(t), "typeof" | "void" | "delete" | "await") {
+            self.bump();
+            self.unary();
+            self.t.push(K::Unary, 1, t.start, t.end, true);
+            return;
+        }
         match t.punct {
             Pk::Minus | Pk::Plus | Pk::Bang | Pk::Tilde => {
                 self.bump();
@@ -776,9 +957,13 @@ impl<'a, L: TokSrc> P<'a, L> {
                 let kind = if self.src[t.end as usize - 1] == b'n' { K::BigIntLit } else { K::NumLit };
                 self.t.push(kind, 0, t.start, t.end, false);
             }
-            S::String => {
+            S::String | S::TemplateNoSub | S::TemplateHead | S::TemplateMiddle | S::TemplateTail => {
                 self.bump();
                 self.t.push(K::StrLit, 0, t.start, t.end, false);
+            }
+            S::Regex => {
+                self.bump();
+                self.t.push(K::RegexLit, 0, t.start, t.end, false);
             }
             S::Ident | S::Keyword => {
                 let name = self.txt(t);
@@ -786,6 +971,7 @@ impl<'a, L: TokSrc> P<'a, L> {
                     "true" | "false" => { self.bump(); self.t.push(K::BoolLit, 0, t.start, t.end, false); }
                     "null" => { self.bump(); self.t.push(K::NullLit, 0, t.start, t.end, false); }
                     "function" => self.func_expr(),
+                    "new" => { self.bump(); self.postfix(); self.t.push(K::New, 1, t.start, t.end, false); }
                     _ => { self.bump(); self.t.push(K::Ident, 0, t.start, t.end, false); }
                 }
             }
@@ -793,7 +979,7 @@ impl<'a, L: TokSrc> P<'a, L> {
                 Pk::LParen => {
                     // grouping — transparent (precedence already captured)
                     self.bump();
-                    self.assignment();
+                    self.expression();
                     if !self.eat(Pk::RParen) {
                         self.err = Some(format!("expected ) at {}", self.peek().start));
                     }
@@ -803,6 +989,7 @@ impl<'a, L: TokSrc> P<'a, L> {
                     let n = self.arg_list(Pk::RBracket);
                     self.t.push(K::Array, n, t.start, t.start + 1, false);
                 }
+                Pk::LBrace => self.object(),
                 _ => {
                     self.err = Some(format!("unexpected token at {}", t.start));
                     self.bump(); // avoid infinite loop
@@ -930,6 +1117,34 @@ fn scan_string(src: &[u8], p: usize) -> usize {
         i += if src[i] == b'\\' { 2 } else { 1 };
     }
     (i + 1).min(n)
+}
+
+/// Scan a regex literal starting at `/` at `src[p]`; returns index past flags.
+#[inline]
+fn scan_regex(src: &[u8], p: usize) -> usize {
+    let n = src.len();
+    let mut i = p + 1;
+    let mut in_class = false;
+    while i < n {
+        match src[i] {
+            b'\\' => { i += 2; continue; }
+            b'[' => in_class = true,
+            b']' => in_class = false,
+            b'/' if !in_class => { i += 1; break; }
+            b'\n' => break, // unterminated — bail
+            _ => {}
+        }
+        i += 1;
+    }
+    while i < n && (src[i].is_ascii_alphanumeric() || src[i] == b'_') { i += 1; } // flags
+    i.min(n)
+}
+
+/// Keywords after which a `/` begins a regex (not division).
+#[inline]
+fn regex_kw_before(w: &[u8]) -> bool {
+    matches!(w, b"return" | b"typeof" | b"instanceof" | b"in" | b"of" | b"new"
+        | b"delete" | b"void" | b"do" | b"else" | b"yield" | b"await" | b"case" | b"throw")
 }
 
 /// End of a line comment (the `\n`, or EOF).
@@ -1219,6 +1434,17 @@ fn dump_tree(t: &Tape, src: &[u8]) -> String {
             K::Param => format!("Param({})", span(src, n.start, n.end)),
             K::Empty => "Empty".into(),
             K::Cond => "Cond(?:)".into(),
+            K::New => "New".into(),
+            K::Object => format!("Object({} props)", n.nargs),
+            K::Property => format!("Property({})", span(src, n.start, n.end)),
+            K::RegexLit => format!("Regex({})", span(src, n.start, n.end)),
+            K::Seq => format!("Seq({})", n.nargs),
+            K::Switch => "Switch".into(),
+            K::Case => "Case".into(),
+            K::Throw => "Throw".into(),
+            K::DoWhile => "DoWhile".into(),
+            K::Try => "Try".into(),
+            K::Catch => format!("Catch({})", span(src, n.start, n.end)),
         };
         let mut block = label;
         for (i, kid) in kids.iter().enumerate() {
