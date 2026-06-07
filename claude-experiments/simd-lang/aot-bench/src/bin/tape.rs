@@ -77,6 +77,7 @@ enum K {
     Func,    // function — nargs = paramcount + 1 (body block); span = name (may be empty)
     Param,   //          — leaf; span = param name
     Empty,   //          — empty statement / missing for-clause
+    Cond,    // a ? b : c — 3 children
 }
 
 /// A flat tape node — 16 bytes, no pointers. For operator nodes (`Binary`,
@@ -113,6 +114,7 @@ enum Pk {
     Amp, Pipe, Caret, Shl, Shr, UShr, Bang, Tilde, PlusPlus, MinusMinus,
     Assign, PlusEq, MinusEq, StarEq, SlashEq, PercentEq, ShlEq, ShrEq, UShrEq,
     AmpEq, PipeEq, CaretEq, StarStarEq, Semi, Comma, Dot,
+    AndAnd, OrOr, Coalesce, StarStar, Arrow, Question,
     LParen, RParen, LBracket, RBracket, LBrace, RBrace, Colon, Other,
 }
 
@@ -127,8 +129,9 @@ fn classify_punct(s: &[u8]) -> Pk {
             b'%' => Pk::Percent, b'<' => Pk::Lt, b'>' => Pk::Gt, b'=' => Pk::Assign,
             b'&' => Pk::Amp, b'|' => Pk::Pipe, b'^' => Pk::Caret, b'!' => Pk::Bang,
             b'~' => Pk::Tilde, b';' => Pk::Semi, b',' => Pk::Comma, b'.' => Pk::Dot,
+            b'?' => Pk::Question, b':' => Pk::Colon,
             b'(' => Pk::LParen, b')' => Pk::RParen, b'[' => Pk::LBracket, b']' => Pk::RBracket,
-            b'{' => Pk::LBrace, b'}' => Pk::RBrace, b':' => Pk::Colon,
+            b'{' => Pk::LBrace, b'}' => Pk::RBrace,
             _ => Pk::Other,
         },
         2 => match (s[0], s[1]) {
@@ -138,6 +141,8 @@ fn classify_punct(s: &[u8]) -> Pk {
             (b'+', b'=') => Pk::PlusEq, (b'-', b'=') => Pk::MinusEq, (b'*', b'=') => Pk::StarEq,
             (b'/', b'=') => Pk::SlashEq, (b'%', b'=') => Pk::PercentEq, (b'&', b'=') => Pk::AmpEq,
             (b'|', b'=') => Pk::PipeEq, (b'^', b'=') => Pk::CaretEq,
+            (b'&', b'&') => Pk::AndAnd, (b'|', b'|') => Pk::OrOr, (b'?', b'?') => Pk::Coalesce,
+            (b'*', b'*') => Pk::StarStar, (b'=', b'>') => Pk::Arrow,
             _ => Pk::Other,
         },
         3 => match (s[0], s[1], s[2]) {
@@ -146,7 +151,8 @@ fn classify_punct(s: &[u8]) -> Pk {
             (b'>', b'>', b'=') => Pk::ShrEq, (b'*', b'*', b'=') => Pk::StarStarEq,
             _ => Pk::Other,
         },
-        _ => Pk::Other, // >>>= and friends are rare; the parser treats Other as non-operator
+        4 if s == b">>>=" => Pk::UShrEq,
+        _ => Pk::Other,
     }
 }
 
@@ -160,12 +166,15 @@ fn is_assign_op(p: Pk) -> bool {
 #[inline]
 fn binary_bp(p: Pk) -> Option<u8> {
     Some(match p {
+        Pk::Coalesce | Pk::OrOr => 2,
+        Pk::AndAnd => 3,
         Pk::Pipe => 4, Pk::Caret => 5, Pk::Amp => 6,
         Pk::EqEq | Pk::Ne | Pk::EqEqEq | Pk::NeEq => 7,
         Pk::Lt | Pk::Le | Pk::Gt | Pk::Ge => 8,
         Pk::Shl | Pk::Shr | Pk::UShr => 9,
         Pk::Plus | Pk::Minus => 10,
         Pk::Star | Pk::Slash | Pk::Percent => 11,
+        Pk::StarStar => 12,
         _ => return None,
     })
 }
@@ -297,6 +306,7 @@ struct LeanLex<'a> {
     oe: &'a [u64], // op_ext bitmap; empty → always full match_operator
     ci: usize,
     w: u64,
+    cursor: usize, // start bits below this are inside an already-consumed token
     buf: [Tok; 2],
     len: usize,
 }
@@ -307,6 +317,7 @@ impl<'a> LeanLex<'a> {
             src, sm, wm, oe,
             ci: 0,
             w: if sm.is_empty() { 0 } else { sm[0] },
+            cursor: 0,
             buf: [Tok { kind: S::Punct, punct: Pk::Other, start: 0, end: 0 }; 2],
             len: 0,
         }
@@ -320,6 +331,7 @@ impl<'a> LeanLex<'a> {
                 self.w &= self.w - 1;
                 let p = self.ci * 64 + bit;
                 if p >= n { return None; }
+                if p < self.cursor { continue; } // interior of a consumed token
                 return Some(p);
             }
             self.ci += 1;
@@ -343,24 +355,30 @@ impl<'a> LeanLex<'a> {
                     let e2 = word_end(self.wm, end + 1, n);
                     end = e2.max(end + 1);
                 }
+                self.cursor = end;
                 let kind = if digit { S::Number } else { S::Ident };
                 return Tok { kind, punct: Pk::Other, start: p as u32, end: end as u32 };
             }
             let c = self.src[p];
             match c {
-                b'"' | b'\'' => {
-                    let mut i = p + 1;
-                    while i < n && self.src[i] != c { i += if self.src[i] == b'\\' { 2 } else { 1 }; }
-                    i = (i + 1).min(n);
-                    return Tok { kind: S::String, punct: Pk::Other, start: p as u32, end: i as u32 };
+                b'"' | b'\'' | b'`' => {
+                    let end = scan_string(self.src, p);
+                    self.cursor = end;
+                    return Tok { kind: S::String, punct: Pk::Other, start: p as u32, end: end as u32 };
                 }
-                b'/' if p + 1 < n && (self.src[p + 1] == b'/' || self.src[p + 1] == b'*') => {
-                    continue; // comment trivia
+                b'/' if p + 1 < n && self.src[p + 1] == b'/' => {
+                    self.cursor = memchr_nl(self.src, p + 2);
+                    continue; // line comment trivia
+                }
+                b'/' if p + 1 < n && self.src[p + 1] == b'*' => {
+                    self.cursor = block_comment_end(self.src, p + 2);
+                    continue; // block comment trivia
                 }
                 _ => {
                     let bit = p % 64;
                     let ext = self.oe.is_empty() || bit == 63 || (self.oe[p / 64] >> bit) & 1 == 1;
                     let end = if ext { p + op_len(self.src, p) } else { p + 1 };
+                    self.cursor = end;
                     return Tok { kind: S::Punct, punct: classify_punct(&self.src[p..end]), start: p as u32, end: end as u32 };
                 }
             }
@@ -645,6 +663,16 @@ impl<'a, L: TokSrc> P<'a, L> {
             let ot = self.bump();
             self.assignment(); // right-associative
             self.t.push(K::Assign, 2, ot.start, ot.end, false);
+        } else if t.punct == Pk::Question {
+            // ternary  cond ? a : b
+            let qt = self.bump();
+            self.assignment(); // consequent
+            if !self.eat(Pk::Colon) {
+                self.err = Some(format!("expected : at {}", self.peek().start));
+                return;
+            }
+            self.assignment(); // alternate
+            self.t.push(K::Cond, 3, qt.start, qt.start + 1, false);
         }
     }
 
@@ -890,6 +918,37 @@ fn word_end(wm: &[u64], p: usize, n: usize) -> usize {
     }
 }
 
+/// Scan a quoted string/template starting at the quote `src[p]`; returns the
+/// index just past the closing quote. (Templates with `${}` are treated as a
+/// single string for now — a known subset limitation.)
+#[inline]
+fn scan_string(src: &[u8], p: usize) -> usize {
+    let q = src[p];
+    let n = src.len();
+    let mut i = p + 1;
+    while i < n && src[i] != q {
+        i += if src[i] == b'\\' { 2 } else { 1 };
+    }
+    (i + 1).min(n)
+}
+
+/// End of a line comment (the `\n`, or EOF).
+#[inline]
+fn memchr_nl(src: &[u8], from: usize) -> usize {
+    let mut i = from;
+    while i < src.len() && src[i] != b'\n' { i += 1; }
+    i
+}
+
+/// End of a block comment body (just past `*/`, or EOF).
+#[inline]
+fn block_comment_end(src: &[u8], from: usize) -> usize {
+    let n = src.len();
+    let mut i = from;
+    while i + 1 < n && !(src[i] == b'*' && src[i + 1] == b'/') { i += 1; }
+    (i + 2).min(n)
+}
+
 /// Maximal-munch operator length (1–4) — same table as the shared lexer.
 #[inline]
 fn op_len(src: &[u8], p: usize) -> usize {
@@ -922,12 +981,14 @@ fn op_len(src: &[u8], p: usize) -> usize {
 fn lex_to_array(src: &[u8], sm: &[u64], wm: &[u64]) -> Vec<Tok> {
     let n = src.len();
     let mut out = Vec::with_capacity(n / 4 + 8);
+    let mut cursor = 0usize; // skip start bits already inside a consumed token
     for (ci, &w0) in sm.iter().enumerate() {
         let mut w = w0;
         while w != 0 {
             let p = ci * 64 + w.trailing_zeros() as usize;
             w &= w - 1;
             if p >= n { break; }
+            if p < cursor { continue; }
             let wbit = (wm[p / 64] >> (p % 64)) & 1 == 1;
             if wbit {
                 // ident or number — word run end from the bitmap
@@ -938,27 +999,22 @@ fn lex_to_array(src: &[u8], sm: &[u64], wm: &[u64]) -> Vec<Tok> {
                     let e2 = word_end(wm, end + 1, n);
                     end = e2.max(end + 1);
                 }
+                cursor = end;
                 let kind = if digit { S::Number } else { S::Ident };
                 out.push(Tok { kind, punct: Pk::Other, start: p as u32, end: end as u32 });
             } else {
                 let c = src[p];
                 match c {
-                    b'"' | b'\'' => {
-                        let mut i = p + 1;
-                        while i < n && src[i] != c { i += if src[i] == b'\\' { 2 } else { 1 }; }
-                        i = (i + 1).min(n);
-                        out.push(Tok { kind: S::String, punct: Pk::Other, start: p as u32, end: i as u32 });
+                    b'"' | b'\'' | b'`' => {
+                        let end = scan_string(src, p);
+                        cursor = end;
+                        out.push(Tok { kind: S::String, punct: Pk::Other, start: p as u32, end: end as u32 });
                     }
-                    b'/' if p + 1 < n && src[p + 1] == b'/' => {
-                        // line comment — skipped (trivia), don't emit
-                        continue;
-                    }
-                    b'/' if p + 1 < n && src[p + 1] == b'*' => {
-                        continue; // block comment trivia
-                    }
+                    b'/' if p + 1 < n && src[p + 1] == b'/' => { cursor = memchr_nl(src, p + 2); continue; }
+                    b'/' if p + 1 < n && src[p + 1] == b'*' => { cursor = block_comment_end(src, p + 2); continue; }
                     _ => {
-                        let len = op_len(src, p);
-                        let end = p + len;
+                        let end = p + op_len(src, p);
+                        cursor = end;
                         out.push(Tok { kind: S::Punct, punct: classify_punct(&src[p..end]), start: p as u32, end: end as u32 });
                     }
                 }
@@ -1020,6 +1076,7 @@ fn lex_to_array_pre(src: &[u8], sm: &[u64], wm: &[u64], oplen: &[u8]) -> Vec<Tok
 fn lex_to_array_ops(src: &[u8], sm: &[u64], wm: &[u64], oe: &[u64]) -> Vec<Tok> {
     let n = src.len();
     let mut out = Vec::with_capacity(n / 4 + 8);
+    let mut cursor = 0usize;
     for (ci, &w0) in sm.iter().enumerate() {
         let mut w = w0;
         while w != 0 {
@@ -1027,6 +1084,7 @@ fn lex_to_array_ops(src: &[u8], sm: &[u64], wm: &[u64], oe: &[u64]) -> Vec<Tok> 
             let p = ci * 64 + bit;
             w &= w - 1;
             if p >= n { break; }
+            if p < cursor { continue; }
             let wbit = (wm[p / 64] >> (p % 64)) & 1 == 1;
             if wbit {
                 let mut end = word_end(wm, p, n);
@@ -1034,22 +1092,24 @@ fn lex_to_array_ops(src: &[u8], sm: &[u64], wm: &[u64], oe: &[u64]) -> Vec<Tok> 
                 if digit && end < n && src[end] == b'.' {
                     end = word_end(wm, end + 1, n).max(end + 1);
                 }
+                cursor = end;
                 let kind = if digit { S::Number } else { S::Ident };
                 out.push(Tok { kind, punct: Pk::Other, start: p as u32, end: end as u32 });
             } else {
                 let c = src[p];
                 match c {
-                    b'"' | b'\'' => {
-                        let mut i = p + 1;
-                        while i < n && src[i] != c { i += if src[i] == b'\\' { 2 } else { 1 }; }
-                        i = (i + 1).min(n);
-                        out.push(Tok { kind: S::String, punct: Pk::Other, start: p as u32, end: i as u32 });
+                    b'"' | b'\'' | b'`' => {
+                        let end = scan_string(src, p);
+                        cursor = end;
+                        out.push(Tok { kind: S::String, punct: Pk::Other, start: p as u32, end: end as u32 });
                     }
-                    b'/' if p + 1 < n && (src[p + 1] == b'/' || src[p + 1] == b'*') => continue,
+                    b'/' if p + 1 < n && src[p + 1] == b'/' => { cursor = memchr_nl(src, p + 2); continue; }
+                    b'/' if p + 1 < n && src[p + 1] == b'*' => { cursor = block_comment_end(src, p + 2); continue; }
                     _ => {
                         // op_ext bit set (or chunk-boundary byte) → maybe multi-char.
                         let ext = (oe[p / 64] >> bit) & 1 == 1 || bit == 63;
                         let end = if ext { p + op_len(src, p) } else { p + 1 };
+                        cursor = end;
                         out.push(Tok { kind: S::Punct, punct: classify_punct(&src[p..end]), start: p as u32, end: end as u32 });
                     }
                 }
@@ -1158,6 +1218,7 @@ fn dump_tree(t: &Tape, src: &[u8]) -> String {
             K::Func => format!("Func({})", span(src, n.start, n.end)),
             K::Param => format!("Param({})", span(src, n.start, n.end)),
             K::Empty => "Empty".into(),
+            K::Cond => "Cond(?:)".into(),
         };
         let mut block = label;
         for (i, kid) in kids.iter().enumerate() {
@@ -1208,6 +1269,47 @@ fn bench(name: &str, bytes: usize, iters: u32, mut f: impl FnMut()) -> Duration 
 }
 
 fn main() {
+    // File mode: `tape --file <path.js>` parses a real file and reports coverage.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("--file") {
+        let path = argv.get(2).expect("usage: tape --file <path.js>");
+        let src = std::fs::read_to_string(path).expect("read");
+        let (rsm, rwm) = simd_lang::stage1::lex(src.as_bytes());
+        let r_old = parse_to_tape(&src, &rsm, &rwm).map(|t| t.nodes.len());
+        let r_lean = parse_to_tape_lean(&src, &rsm, &rwm).map(|t| t.nodes.len());
+        println!("[diag] old-lexer: {r_old:?}   lean(no-ops): {r_lean:?}");
+        let (sm, wm, oe) = aot_stage1_ops(src.as_bytes());
+        match parse_to_tape_lean_ops(&src, &sm, &wm, &oe) {
+            Ok(t) => {
+                let roots = validate(&t).unwrap_or(0);
+                println!("{path}: {} bytes → {} tape nodes, {} top-level stmts ✓", src.len(), t.nodes.len(), roots);
+            }
+            Err(e) => {
+                // show context around the failure
+                println!("{path}: {} bytes — parse stopped: {e}", src.len());
+                if let Some(byte) = e.rsplit(' ').next().and_then(|s| s.trim_end_matches('.').parse::<usize>().ok()) {
+                    let lo = byte.saturating_sub(40);
+                    let hi = (byte + 40).min(src.len());
+                    println!("  …{}…", &src[lo..hi].replace('\n', "⏎"));
+                    println!("  {}^ here", " ".repeat(byte.saturating_sub(lo)));
+                }
+            }
+        }
+        return;
+    }
+
+    // Torture string: multi-char ops, strings, comments, member/index — must
+    // tokenize identically across all three paths (old Lexer / lean / lean+op_ext).
+    {
+        let tc = "a >>>= b; x === y; p <= q; r !== s; t = \"a+b/c\"; // cmt <=\n u = /* x */ v ** 2; o.m[i](1, 2);";
+        let (sm, wm) = simd_lang::stage1::lex(tc.as_bytes());
+        let (asm, awm, aoe) = aot_stage1_ops(tc.as_bytes());
+        let a = parse_to_tape(tc, &sm, &wm).expect("old").nodes.len();
+        let b = parse_to_tape_lean(tc, &sm, &wm).expect("lean").nodes.len();
+        let c = parse_to_tape_lean_ops(tc, &asm, &awm, &aoe).expect("lean+ops").nodes.len();
+        assert!(a == b && b == c, "torture: tokenizer paths disagree (old={a} lean={b} ops={c})");
+    }
+
     // Tiny demo first — show the tape reconstructs a real tree.
     let demo = "function sum(a, b) { var t = 0; for (var i = 0; i < a; i = i + 1) { t = t + b[i]; } if (t > 10) return t; else return -1; }";
     let (sm, wm) = simd_lang::stage1::lex(demo.as_bytes());
