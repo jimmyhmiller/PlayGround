@@ -126,6 +126,7 @@ enum Pk {
     Assign, PlusEq, MinusEq, StarEq, SlashEq, PercentEq, ShlEq, ShrEq, UShrEq,
     AmpEq, PipeEq, CaretEq, StarStarEq, Semi, Comma, Dot,
     AndAnd, OrOr, Coalesce, StarStar, Arrow, Question,
+    OptChain, Spread, AndAndEq, OrOrEq, CoalesceEq,
     LParen, RParen, LBracket, RBracket, LBrace, RBrace, Colon, Other,
 }
 
@@ -153,13 +154,15 @@ fn classify_punct(s: &[u8]) -> Pk {
             (b'/', b'=') => Pk::SlashEq, (b'%', b'=') => Pk::PercentEq, (b'&', b'=') => Pk::AmpEq,
             (b'|', b'=') => Pk::PipeEq, (b'^', b'=') => Pk::CaretEq,
             (b'&', b'&') => Pk::AndAnd, (b'|', b'|') => Pk::OrOr, (b'?', b'?') => Pk::Coalesce,
-            (b'*', b'*') => Pk::StarStar, (b'=', b'>') => Pk::Arrow,
+            (b'*', b'*') => Pk::StarStar, (b'=', b'>') => Pk::Arrow, (b'?', b'.') => Pk::OptChain,
             _ => Pk::Other,
         },
         3 => match (s[0], s[1], s[2]) {
             (b'=', b'=', b'=') => Pk::EqEqEq, (b'!', b'=', b'=') => Pk::NeEq,
             (b'>', b'>', b'>') => Pk::UShr, (b'<', b'<', b'=') => Pk::ShlEq,
             (b'>', b'>', b'=') => Pk::ShrEq, (b'*', b'*', b'=') => Pk::StarStarEq,
+            (b'.', b'.', b'.') => Pk::Spread,
+            (b'&', b'&', b'=') => Pk::AndAndEq, (b'|', b'|', b'=') => Pk::OrOrEq, (b'?', b'?', b'=') => Pk::CoalesceEq,
             _ => Pk::Other,
         },
         4 if s == b">>>=" => Pk::UShrEq,
@@ -171,7 +174,7 @@ fn classify_punct(s: &[u8]) -> Pk {
 fn is_assign_op(p: Pk) -> bool {
     matches!(p, Pk::Assign | Pk::PlusEq | Pk::MinusEq | Pk::StarEq | Pk::SlashEq
         | Pk::PercentEq | Pk::ShlEq | Pk::ShrEq | Pk::UShrEq | Pk::AmpEq | Pk::PipeEq
-        | Pk::CaretEq | Pk::StarStarEq)
+        | Pk::CaretEq | Pk::StarStarEq | Pk::AndAndEq | Pk::OrOrEq | Pk::CoalesceEq)
 }
 
 #[inline]
@@ -362,12 +365,8 @@ impl<'a> LeanLex<'a> {
             };
             let wbit = (self.wm[p / 64] >> (p % 64)) & 1 == 1;
             if wbit {
-                let mut end = word_end(self.wm, p, n);
                 let digit = self.src[p].is_ascii_digit();
-                if digit && end < n && self.src[end] == b'.' {
-                    let e2 = word_end(self.wm, end + 1, n);
-                    end = e2.max(end + 1);
-                }
+                let end = if digit { num_end(self.src, self.wm, p, n) } else { word_end(self.wm, p, n) };
                 self.cursor = end;
                 let kind = if digit { S::Number } else { S::Ident };
                 // a number, or an identifier/keyword that ends an expression,
@@ -377,6 +376,13 @@ impl<'a> LeanLex<'a> {
             }
             let c = self.src[p];
             match c {
+                b'.' if p + 1 < n && self.src[p + 1].is_ascii_digit() => {
+                    // leading-dot number: `.5`, `.5e3`
+                    let end = num_end(self.src, self.wm, p + 1, n);
+                    self.cursor = end;
+                    self.prev_ends_expr = true;
+                    return Tok { kind: S::Number, punct: Pk::Other, start: p as u32, end: end as u32 };
+                }
                 b'"' | b'\'' | b'`' => {
                     let end = scan_string(self.src, p);
                     self.cursor = end;
@@ -905,6 +911,22 @@ impl<'a, L: TokSrc> P<'a, L> {
                     self.bump();
                     self.t.push(K::Member, 1, nt.start, nt.end, false);
                 }
+                Pk::OptChain => {
+                    // a?.b / a?.[i] / a?.(args) — record optionality in flags bit 1
+                    self.bump();
+                    match self.peek().punct {
+                        Pk::LParen => { let lp = self.bump(); let argc = self.arg_list(Pk::RParen); self.t.push(K::Call, 1 + argc, lp.start, lp.start + 1, false); }
+                        Pk::LBracket => { let lb = self.bump(); self.assignment(); self.eat(Pk::RBracket); self.t.push(K::Index, 2, lb.start, lb.start + 1, false); }
+                        _ => {
+                            let nt = self.peek();
+                            if !matches!(nt.kind, S::Ident | S::Keyword) { self.err = Some(format!("expected property after ?. at {}", nt.start)); return; }
+                            self.bump();
+                            let id = self.t.nodes.len();
+                            self.t.push(K::Member, 1, nt.start, nt.end, false);
+                            self.t.nodes[id].flags |= 2; // optional
+                        }
+                    }
+                }
                 Pk::LBracket => {
                     self.bump();
                     self.assignment();
@@ -937,7 +959,17 @@ impl<'a, L: TokSrc> P<'a, L> {
         }
         let mut n = 0u32;
         loop {
-            self.assignment();
+            let sp = self.peek();
+            if sp.punct == Pk::Spread {
+                self.bump();
+                self.assignment();
+                self.t.push(K::Unary, 1, sp.start, sp.start + 3, true); // spread as a unary
+            } else if sp.punct == Pk::Comma {
+                // elision in arrays: `[a, , b]`
+                self.t.push(K::Empty, 0, sp.start, sp.start, false);
+            } else {
+                self.assignment();
+            }
             n += 1;
             if self.err.is_some() { return n; }
             if !self.eat(Pk::Comma) { break; }
@@ -1105,6 +1137,21 @@ fn word_end(wm: &[u64], p: usize, n: usize) -> usize {
     }
 }
 
+/// End of a numeric literal whose digit run starts at `start` (a digit, possibly
+/// just past a leading `.`). Uses the word bitmap for the mantissa (so hex/bigint/
+/// `1e5` are free) and extends across a decimal point and a signed exponent.
+#[inline]
+fn num_end(src: &[u8], wm: &[u64], start: usize, n: usize) -> usize {
+    let mut end = word_end(wm, start, n);
+    if end < n && src[end] == b'.' {
+        end = word_end(wm, end + 1, n).max(end + 1);
+    }
+    if end + 1 < n && matches!(src[end], b'+' | b'-') && end > 0 && matches!(src[end - 1], b'e' | b'E') {
+        end = word_end(wm, end + 1, n).max(end + 1);
+    }
+    end
+}
+
 /// Scan a quoted string/template starting at the quote `src[p]`; returns the
 /// index just past the closing quote. (Templates with `${}` are treated as a
 /// single string for now — a known subset limitation.)
@@ -1169,8 +1216,8 @@ fn block_comment_end(src: &[u8], from: usize) -> usize {
 fn op_len(src: &[u8], p: usize) -> usize {
     let n = src.len();
     let b0 = src[p];
-    if !matches!(b0, b'>' | b'<' | b'=' | b'!' | b'*' | b'&' | b'|' | b'+' | b'-' | b'%' | b'^') {
-        return 1; // includes ( ) [ ] { } ; , . : ~ ? / and any single-char punct
+    if !matches!(b0, b'>' | b'<' | b'=' | b'!' | b'*' | b'&' | b'|' | b'+' | b'-' | b'%' | b'^' | b'/' | b'?' | b'.') {
+        return 1; // ( ) [ ] { } ; , : ~ and any single-char punct
     }
     let g = |o: usize| if p + o < n { src[p + o] } else { 0 };
     let (b1, b2, b3) = (g(1), g(2), g(3));
@@ -1180,8 +1227,11 @@ fn op_len(src: &[u8], p: usize) -> usize {
         b'=' => match (b1, b2) { (b'=', b'=') => 3, (b'=', _) => 2, (b'>', _) => 2, _ => 1 },
         b'!' => match (b1, b2) { (b'=', b'=') => 3, (b'=', _) => 2, _ => 1 },
         b'*' => match (b1, b2) { (b'*', b'=') => 3, (b'*', _) => 2, (b'=', _) => 2, _ => 1 },
-        b'&' => match b1 { b'&' | b'=' => 2, _ => 1 },
-        b'|' => match b1 { b'|' | b'=' => 2, _ => 1 },
+        b'&' => match (b1, b2) { (b'&', b'=') => 3, (b'&', _) => 2, (b'=', _) => 2, _ => 1 }, // &&=, &&, &=
+        b'|' => match (b1, b2) { (b'|', b'=') => 3, (b'|', _) => 2, (b'=', _) => 2, _ => 1 }, // ||=, ||, |=
+        b'?' => match (b1, b2) { (b'?', b'=') => 3, (b'?', _) => 2, (b'.', _) => 2, _ => 1 }, // ??=, ??, ?.
+        b'.' => if b1 == b'.' && b2 == b'.' { 3 } else { 1 }, // ...
+        b'/' => match b1 { b'=' => 2, _ => 1 }, // /=  (comments/regex handled before op_len)
         b'+' => match b1 { b'+' | b'=' => 2, _ => 1 },
         b'-' => match b1 { b'-' | b'=' => 2, _ => 1 },
         b'%' => match b1 { b'=' => 2, _ => 1 },
@@ -1495,8 +1545,47 @@ fn bench(name: &str, bytes: usize, iters: u32, mut f: impl FnMut()) -> Duration 
 }
 
 fn main() {
-    // File mode: `tape --file <path.js>` parses a real file and reports coverage.
+    // Lex-check mode: validate the lean SIMD-fed tokenizer against the
+    // established (round-trip + oxc-aligned) `simd_lang::js` lexer on a real file.
     let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(String::as_str) == Some("--lex-check") {
+        let path = argv.get(2).expect("usage: tape --lex-check <path.js>");
+        let src = std::fs::read(path).expect("read");
+        // reference: the validated lexer (handles regex/templates), trivia dropped
+        let (sm, wm) = simd_lang::stage1::lex(&src);
+        let mut refs: Vec<(usize, usize)> = Vec::new();
+        simd_lang::js::drive(&src, &sm, &wm, |t| {
+            if !matches!(t.kind, S::LineComment | S::BlockComment) {
+                refs.push((t.start, t.end));
+            }
+        });
+        // ours: lean tokenizer (drop the EOF sentinel)
+        let mut lx = LeanLex::new(&src, &sm, &wm, &[]);
+        let mut mine: Vec<(usize, usize)> = Vec::new();
+        loop {
+            let t = lx.pull();
+            if t.start as usize >= src.len() { break; }
+            mine.push((t.start as usize, t.end as usize));
+        }
+        let mut ok = 0usize;
+        let mut firstbad = None;
+        for i in 0..refs.len().min(mine.len()) {
+            if refs[i] == mine[i] { ok += 1; } else { firstbad = Some(i); break; }
+        }
+        println!("{path}: {} ref tokens, {} ours; {ok} matched", refs.len(), mine.len());
+        if let Some(i) = firstbad {
+            let (rs, re) = refs[i];
+            let (ms, me) = mine[i];
+            println!("  first divergence at token {i}: ref [{rs}..{re}]={:?}  ours [{ms}..{me}]={:?}",
+                std::str::from_utf8(&src[rs..re.min(src.len())]).unwrap_or("?"),
+                std::str::from_utf8(&src[ms..me.min(src.len())]).unwrap_or("?"));
+        } else if refs.len() == mine.len() {
+            println!("  ✓ identical token stream ({} tokens)", ok);
+        }
+        return;
+    }
+
+    // File mode: `tape --file <path.js>` parses a real file and reports coverage.
     if argv.get(1).map(String::as_str) == Some("--file") {
         let path = argv.get(2).expect("usage: tape --file <path.js>");
         let src = std::fs::read_to_string(path).expect("read");
