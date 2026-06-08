@@ -46,11 +46,15 @@ const SHEET: &str = r#"
         min_width 0
     }
 
-    // gradient CTA button — violet→gold left-to-right
+    // Interactive gradient CTA. `hover` is fed by the host every frame and
+    // eased in the material runtime, without rebuilding the widget tree.
     style cta {
         radius 10px
         pad    12px 22px
-        overlay shader { emit mix(violet, gold, uv.x) }
+        overlay shader {
+            let base = mix(violet, gold, uv.x)
+            emit mix(base, gold, hover * 0.35)
+        }
     }
     // gradient header banner — violet→teal
     style banner {
@@ -192,7 +196,16 @@ fn feature(prog: &Program, label: &str) -> Element {
 }
 
 fn cta(prog: &Program, label: &str) -> Element {
-    glz(prog, "cta", 0.0, vec![row(0.0, Align::Center, vec![text(label, "#1c1326", 13.0, true)])])
+    let style = prog
+        .resolve("cta", &HashMap::new(), &[])
+        .ok()
+        .map(|c| to_style(&c));
+    Element::Button {
+        id: "get-pro".into(),
+        label: label.into(),
+        kind: ButtonKind::Filled,
+        style,
+    }
 }
 
 /// A row of cards whose row↔column behaviour is decided by Glaze: the

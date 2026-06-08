@@ -17,7 +17,8 @@
 //!
 //! The integration with the extracted `gc` module:
 //! - One `Heap` per `Runtime`, plus one `ThreadState` per mutator
-//!   thread (just one in v1).
+//!   thread. The `spawn` primitive creates real OS threads, each with
+//!   its own `ThreadContext` and shadow-stack chain.
 //! - We register a `walk_jit_frames` walker with the heap so GCs can
 //!   scan our shadow-stack chain. Before allocating, we publish the
 //!   chain head into the thread's `parked_jit_fp` so the GC picks it
@@ -278,7 +279,7 @@ const _: () = {
 /// Maps a content-addressed def hash to its JIT'd entry point.
 /// Built once at JIT-init time; queried on every closure indirect call.
 ///
-/// Thread-safe so multiple threads (future) can call closures concurrently.
+/// Thread-safe so multiple threads can call closures concurrently.
 pub struct CodeTable {
     table: Mutex<HashMap<Hash, *const u8>>,
     /// type_id → shape hash for closure shapes. Populated when

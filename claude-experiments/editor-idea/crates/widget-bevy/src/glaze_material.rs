@@ -10,6 +10,7 @@
 //! independent of the (event-driven) widget content rebuild.
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -20,6 +21,16 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 use bevy::sprite_render::{AlphaMode2d, Material2d, Material2dKey, Material2dPlugin};
+
+/// Content-local bounds and owning element for one live Glaze shader layer.
+/// This stays on the material entity across frames, allowing interaction
+/// uniforms to update without rebuilding the widget tree.
+#[derive(Component, Clone, Debug)]
+pub struct GlazeInteractionTarget {
+    pub pane: Entity,
+    pub element_id: Option<String>,
+    pub rect: Rect,
+}
 
 /// Canonical per-frame inputs a Glaze shader may read. Field order matches the
 /// WGSL struct in [`assemble_wgsl`]; `encase` (via `ShaderType`) inserts the
@@ -44,7 +55,7 @@ impl Default for GlazeUniforms {
         GlazeUniforms {
             time: 0.0,
             dt: 0.0,
-            hover: 1.0,
+            hover: 0.0,
             focus: 0.0,
             press: 0.0,
             radius: 0.0,
@@ -72,7 +83,9 @@ pub struct GlazeMaterialKey {
 
 impl From<&GlazeMaterial> for GlazeMaterialKey {
     fn from(m: &GlazeMaterial) -> Self {
-        Self { fragment: m.fragment.clone() }
+        Self {
+            fragment: m.fragment.clone(),
+        }
     }
 }
 
@@ -105,17 +118,18 @@ pub struct GlazeShaderCache {
 
 impl GlazeShaderCache {
     /// Get-or-create the `Shader` handle for a fragment body.
-    pub fn handle_for(
-        &mut self,
-        body: &str,
-        shaders: &mut Assets<Shader>,
-    ) -> Handle<Shader> {
+    pub fn handle_for(&mut self, body: &str, shaders: &mut Assets<Shader>) -> Handle<Shader> {
         let mut h = DefaultHasher::new();
         body.hash(&mut h);
         let key = h.finish();
         self.by_hash
             .entry(key)
-            .or_insert_with(|| shaders.add(Shader::from_wgsl(assemble_wgsl(body), "glaze://generated.wgsl")))
+            .or_insert_with(|| {
+                shaders.add(Shader::from_wgsl(
+                    assemble_wgsl(body),
+                    "glaze://generated.wgsl",
+                ))
+            })
             .clone()
     }
 }
@@ -156,17 +170,134 @@ impl Plugin for GlazeMaterialPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(Material2dPlugin::<GlazeMaterial>::default())
             .init_resource::<GlazeShaderCache>()
-            .add_systems(Update, tick_glaze_materials);
+            .add_systems(Update, update_glaze_materials);
     }
 }
 
-/// Drive `time`/`dt` on every live Glaze material each frame, decoupled from the
-/// (event-driven) widget content rebuild so shaders animate continuously.
-fn tick_glaze_materials(time: Res<Time>, mut mats: ResMut<Assets<GlazeMaterial>>) {
+fn ease(current: f32, target: f32, dt: f32) -> f32 {
+    let amount = 1.0 - (-14.0 * dt.max(0.0)).exp();
+    current + (target - current) * amount
+}
+
+fn normalized_mouse(rect: Rect, point: Vec2) -> Vec2 {
+    let size = rect.size().max(Vec2::splat(f32::EPSILON));
+    (point - rect.min) / size
+}
+
+/// Drive clocks and interaction uniforms independently of the event-driven
+/// widget rebuild.
+fn update_glaze_materials(
+    time: Res<Time>,
+    windows: Query<&Window>,
+    viewport: Option<Res<pane_bevy::PaneViewport>>,
+    buttons: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
+    panes: Query<
+        (
+            Entity,
+            &pane_bevy::PaneRect,
+            Option<&Visibility>,
+            Option<&crate::WidgetScroll>,
+            Option<&crate::WidgetInputFocus>,
+        ),
+        With<pane_bevy::PaneTag>,
+    >,
+    layers: Query<(
+        Entity,
+        &GlazeInteractionTarget,
+        &MeshMaterial2d<GlazeMaterial>,
+    )>,
+    mut mats: ResMut<Assets<GlazeMaterial>>,
+    mut pressed_layers: Local<HashSet<Entity>>,
+) {
     let t = time.elapsed_secs();
     let dt = time.delta_secs();
-    for (_, m) in mats.iter_mut() {
-        m.u.time = t;
-        m.u.dt = dt;
+    let cursor_canvas = windows
+        .single()
+        .ok()
+        .and_then(Window::cursor_position)
+        .zip(viewport.as_deref())
+        .map(|(pt, viewport)| viewport.window_to_canvas(pt));
+    let candidates: Vec<(Entity, pane_bevy::PaneRect)> = panes
+        .iter()
+        .filter(|(_, _, vis, _, _)| !matches!(vis, Some(Visibility::Hidden)))
+        .map(|(pane, rect, _, _, _)| (pane, *rect))
+        .collect();
+    let topmost = cursor_canvas
+        .and_then(|pt| pane_bevy::topmost_pane_at(pt, &candidates).map(|pane| (pane, pt)));
+    let left_down = buttons.pressed(bevy::input::mouse::MouseButton::Left);
+    if buttons.just_released(bevy::input::mouse::MouseButton::Left) || !left_down {
+        pressed_layers.clear();
+    }
+
+    // Standalone users such as `glaze_gallery` do not carry widget interaction
+    // metadata, but their animated shaders still need clocks.
+    for (_, material) in mats.iter_mut() {
+        material.u.time = t;
+        material.u.dt = dt;
+    }
+
+    for (entity, target, handle) in &layers {
+        let Some(m) = mats.get_mut(&handle.0) else {
+            continue;
+        };
+
+        let pane_state = panes.get(target.pane).ok();
+        let pointer = match (topmost, pane_state.as_ref()) {
+            (Some((pane, pt)), Some((_, rect, _, scroll, _))) if pane == target.pane => {
+                let mut local = pane_bevy::pt_to_content_local(pt, rect);
+                local.y += scroll.map(|s| s.y).unwrap_or(0.0);
+                Some(local)
+            }
+            _ => None,
+        };
+        let hovered = pointer.is_some_and(|pt| target.rect.contains(pt));
+        if buttons.just_pressed(bevy::input::mouse::MouseButton::Left) && hovered {
+            pressed_layers.insert(entity);
+        }
+        let focused = pane_state
+            .and_then(|(_, _, _, _, focus)| focus)
+            .is_some_and(|focus| target.element_id.as_deref() == Some(focus.id.as_str()));
+
+        m.u.hover = ease(m.u.hover, hovered as u8 as f32, dt);
+        m.u.focus = ease(m.u.focus, focused as u8 as f32, dt);
+        m.u.press = ease(
+            m.u.press,
+            (left_down && pressed_layers.contains(&entity)) as u8 as f32,
+            dt,
+        );
+        if let Some(pt) = pointer {
+            m.u.mouse = normalized_mouse(target.rect, pt);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interaction_uniforms_default_inactive() {
+        let uniforms = GlazeUniforms::default();
+        assert_eq!(uniforms.hover, 0.0);
+        assert_eq!(uniforms.focus, 0.0);
+        assert_eq!(uniforms.press, 0.0);
+        assert_eq!(uniforms.mouse, Vec2::ZERO);
+    }
+
+    #[test]
+    fn interaction_easing_moves_toward_target() {
+        let entered = ease(0.0, 1.0, 1.0 / 60.0);
+        let left = ease(entered, 0.0, 1.0 / 60.0);
+        assert!(entered > 0.0 && entered < 1.0);
+        assert!(left >= 0.0 && left < entered);
+    }
+
+    #[test]
+    fn mouse_is_normalized_within_element_bounds() {
+        let rect = Rect::new(10.0, 20.0, 110.0, 70.0);
+        assert_eq!(
+            normalized_mouse(rect, Vec2::new(60.0, 45.0)),
+            Vec2::splat(0.5)
+        );
     }
 }

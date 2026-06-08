@@ -13,7 +13,9 @@ use bevy::sprite::Anchor;
 use bevy::text::{LineHeight, TextBounds};
 use pane_bevy::PaneFontMetrics;
 
-use crate::protocol::{parse_hex_color, Align, ButtonKind, Edges, Element, Style, TabItem, Weight};
+use crate::protocol::{
+    Align, ButtonKind, Edges, Element, GlazeLayer, Style, TabItem, Weight, parse_hex_color,
+};
 use crate::{ClickKind, ClickTarget, LinkTarget, TextSpan, WidgetTargets};
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
@@ -66,6 +68,9 @@ pub struct LayoutCtx {
     /// through [`Self::font_for`].
     pub font: Handle<Font>,
     pub metrics: PaneFontMetrics,
+    /// Pane that owns this render tree. Glaze material entities retain this
+    /// identity so their interaction uniforms can update without rebuilding.
+    pub owner_pane: Entity,
     pub content_root: Entity,
     pub content_size: Vec2,
     /// Theme-derived colors for every primitive element. Carried in
@@ -253,18 +258,8 @@ pub fn render(
     };
     crate::layout::compute(&mut laid, max_w, avail_h, &ctx.metrics);
     let root_layout = laid.layout(laid.root);
-    let root_origin = origin
-        + Vec2::new(root_layout.location.x, root_layout.location.y);
-    render_node(
-        commands,
-        ctx,
-        targets,
-        &laid,
-        laid.root,
-        el,
-        root_origin,
-        z,
-    );
+    let root_origin = origin + Vec2::new(root_layout.location.x, root_layout.location.y);
+    render_node(commands, ctx, targets, &laid, laid.root, el, root_origin, z);
     Vec2::new(root_layout.size.width, root_layout.size.height)
 }
 
@@ -301,9 +296,15 @@ fn render_node(
     };
 
     match el {
-        Element::Vstack { children, style, .. }
-        | Element::Hstack { children, style, .. }
-        | Element::Frame { children, style, .. } => {
+        Element::Vstack {
+            children, style, ..
+        }
+        | Element::Hstack {
+            children, style, ..
+        }
+        | Element::Frame {
+            children, style, ..
+        } => {
             recurse_children(commands, targets, children, style.as_ref());
         }
         Element::Scroll { children, .. } => {
@@ -443,45 +444,61 @@ fn render_node(
             size,
             z,
         ),
-        Element::SwatchButton { id, color, .. } => render_swatch_at(
-            commands,
-            ctx,
-            targets,
-            color,
-            Some(id),
-            origin,
-            size,
-            z,
-        ),
+        Element::SwatchButton { id, color, .. } => {
+            render_swatch_at(commands, ctx, targets, color, Some(id), origin, size, z)
+        }
         Element::Tabs {
             id,
             items,
             selected,
             ..
-        } => render_tabs_at(commands, ctx, targets, laid, node_id, id, items, selected, origin, z),
+        } => render_tabs_at(
+            commands, ctx, targets, laid, node_id, id, items, selected, origin, z,
+        ),
         Element::Toggle {
-            id,
-            label,
-            checked,
-            ..
-        } => render_toggle_at(commands, ctx, targets, laid, node_id, id, label, *checked, origin, size, z),
+            id, label, checked, ..
+        } => render_toggle_at(
+            commands, ctx, targets, laid, node_id, id, label, *checked, origin, size, z,
+        ),
         Element::Input {
             id,
             value,
             placeholder,
             focused,
+            style,
             ..
         } => render_input_at(
-            commands, ctx, targets, id, value, placeholder, *focused, origin, size, z,
+            commands,
+            ctx,
+            targets,
+            id,
+            value,
+            placeholder,
+            *focused,
+            style.as_ref(),
+            origin,
+            size,
+            z,
         ),
         Element::TextArea {
             id,
             value,
             placeholder,
             focused,
+            style,
             ..
         } => render_textarea_at(
-            commands, ctx, targets, id, value, placeholder, *focused, origin, size, z,
+            commands,
+            ctx,
+            targets,
+            id,
+            value,
+            placeholder,
+            *focused,
+            style.as_ref(),
+            origin,
+            size,
+            z,
         ),
         Element::Table {
             columns,
@@ -490,8 +507,18 @@ fn render_node(
             selectable,
             ..
         } => render_table_at(
-            commands, ctx, targets, laid, node_id, columns, rows, *zebra, *selectable, origin,
-            size, z,
+            commands,
+            ctx,
+            targets,
+            laid,
+            node_id,
+            columns,
+            rows,
+            *zebra,
+            *selectable,
+            origin,
+            size,
+            z,
         ),
         // Canvas renders only at the top level via render_canvas_items.
         // Nested Canvas inside flow layout becomes a 0-size leaf.
@@ -697,13 +724,7 @@ fn render_button_at(
             ctx.palette.button_label,
             true,
         ),
-        ButtonKind::Outline => (
-            Color::srgba(0.0, 0.0, 0.0, 0.0),
-            accent,
-            1.5,
-            fg,
-            false,
-        ),
+        ButtonKind::Outline => (Color::srgba(0.0, 0.0, 0.0, 0.0), accent, 1.5, fg, false),
         ButtonKind::Ghost => (
             Color::srgba(0.0, 0.0, 0.0, 0.0),
             Color::srgba(0.0, 0.0, 0.0, 0.0),
@@ -747,32 +768,46 @@ fn render_button_at(
         .and_then(|s| s.radius.as_deref())
         .and_then(|r| ctx.resolve_f32(r))
         .unwrap_or(ctx.palette.button_corner_radius);
-    let (shadow_color, shadow_blur, shadow_offset_y) = if let Some(sh) = style.and_then(|s| s.shadow.as_ref()) {
-        ctx.resolve_shadow(sh)
-    } else if draw_shadow {
-        (
-            ctx.palette.button_shadow_color,
-            ctx.palette.button_shadow_blur,
-            ctx.palette.button_shadow_offset_y,
-        )
-    } else {
-        (Color::srgba(0.0, 0.0, 0.0, 0.0), 0.0, 0.0)
-    };
+    let (shadow_color, shadow_blur, shadow_offset_y) =
+        if let Some(sh) = style.and_then(|s| s.shadow.as_ref()) {
+            ctx.resolve_shadow(sh)
+        } else if draw_shadow {
+            (
+                ctx.palette.button_shadow_color,
+                ctx.palette.button_shadow_blur,
+                ctx.palette.button_shadow_offset_y,
+            )
+        } else {
+            (Color::srgba(0.0, 0.0, 0.0, 0.0), 0.0, 0.0)
+        };
 
-    paint_rounded_panel(
-        commands,
-        ctx,
-        origin,
-        Vec2::new(w, h),
-        radius,
-        bg_color,
-        border_color,
-        border_w,
-        shadow_color,
-        shadow_blur,
-        shadow_offset_y,
-        z,
-    );
+    let has_glaze_layers = style.is_some_and(|s| !s.glaze_layers.is_empty());
+    if has_glaze_layers {
+        paint_glaze_layers(
+            commands,
+            ctx,
+            style.expect("checked above"),
+            origin,
+            Vec2::new(w, h),
+            z,
+            Some(id),
+        );
+    } else {
+        paint_rounded_panel(
+            commands,
+            ctx,
+            origin,
+            Vec2::new(w, h),
+            radius,
+            bg_color,
+            border_color,
+            border_w,
+            shadow_color,
+            shadow_blur,
+            shadow_offset_y,
+            z,
+        );
+    }
 
     commands.spawn((
         ChildOf(ctx.content_root),
@@ -786,7 +821,11 @@ fn render_button_at(
         TextColor(default_label),
         Anchor::TOP_LEFT,
         bevy::text::TextLayout::new_with_no_wrap(),
-        Transform::from_xyz(origin.x + BUTTON_PAD_X, -(origin.y + BUTTON_PAD_Y), z + 0.01),
+        Transform::from_xyz(
+            origin.x + BUTTON_PAD_X,
+            -(origin.y + BUTTON_PAD_Y),
+            z + 0.01,
+        ),
     ));
     targets.clicks.push(ClickTarget {
         id: id.to_string(),
@@ -884,6 +923,10 @@ pub fn paint_style_background(
     if size.x <= 0.0 || size.y <= 0.0 {
         return;
     }
+    if !style.glaze_layers.is_empty() {
+        paint_glaze_layers(commands, ctx, style, origin, size, z, None);
+        return;
+    }
     let bg = style
         .background
         .as_deref()
@@ -906,9 +949,7 @@ pub fn paint_style_background(
         None => (Color::srgba(0.0, 0.0, 0.0, 0.0), 0.0, 0.0),
     };
     // Nothing to paint if everything is transparent and there's no image.
-    let has_panel = bg.is_some()
-        || border_w > 0.0
-        || shadow_color.to_srgba().alpha > 0.0;
+    let has_panel = bg.is_some() || border_w > 0.0 || shadow_color.to_srgba().alpha > 0.0;
     if has_panel {
         paint_rounded_panel(
             commands,
@@ -964,8 +1005,7 @@ pub fn paint_style_background(
                 let (w, h) = (rgba.width(), rgba.height());
                 let img = crate::make_nearest_image(rgba.into_raw(), w, h);
                 let handle = world.resource_mut::<Assets<Image>>().add(img);
-                if let Some(mut cache) = world.get_resource_mut::<crate::WidgetImageCache>()
-                {
+                if let Some(mut cache) = world.get_resource_mut::<crate::WidgetImageCache>() {
                     cache.by_path.insert(path_buf, handle.clone());
                 }
                 handle
@@ -980,7 +1020,101 @@ pub fn paint_style_background(
     // Glaze shader layer — painted over the background, under the children.
     // Pass the element's corner radius so the shader masks to the rounded rect.
     if let Some(spec) = style.shader.as_ref() {
-        paint_shader_layer(commands, ctx, &spec.body, origin, size, radius, z - 0.004);
+        paint_shader_layer(
+            commands,
+            ctx,
+            &spec.body,
+            origin,
+            size,
+            radius,
+            z - 0.004,
+            None,
+        );
+    }
+}
+
+fn paint_glaze_layers(
+    commands: &mut Commands,
+    ctx: &LayoutCtx,
+    style: &Style,
+    origin: Vec2,
+    size: Vec2,
+    z: f32,
+    element_id: Option<&str>,
+) {
+    let radius = style
+        .radius
+        .as_deref()
+        .and_then(|r| ctx.resolve_f32(r))
+        .unwrap_or(0.0);
+    let transparent = Color::srgba(0.0, 0.0, 0.0, 0.0);
+    let mut layer_index = 0usize;
+
+    for layer in &style.glaze_layers {
+        let layer_z = z - 0.005 + layer_index as f32 * 0.0005;
+        layer_index += 1;
+        match layer {
+            GlazeLayer::Fill { color } => {
+                let fill = ctx.resolve_color(color).unwrap_or(transparent);
+                paint_rounded_panel(
+                    commands,
+                    ctx,
+                    origin,
+                    size,
+                    radius,
+                    fill,
+                    transparent,
+                    0.0,
+                    transparent,
+                    0.0,
+                    0.0,
+                    layer_z,
+                );
+            }
+            GlazeLayer::Border { color, width } => {
+                let border = ctx.resolve_color(color).unwrap_or(transparent);
+                paint_rounded_panel(
+                    commands,
+                    ctx,
+                    origin,
+                    size,
+                    radius,
+                    transparent,
+                    border,
+                    *width,
+                    transparent,
+                    0.0,
+                    0.0,
+                    layer_z,
+                );
+            }
+            GlazeLayer::Shadow {
+                color,
+                blur,
+                offset_y,
+            } => {
+                let shadow = ctx.resolve_color(color).unwrap_or(transparent);
+                paint_rounded_panel(
+                    commands,
+                    ctx,
+                    origin,
+                    size,
+                    radius,
+                    transparent,
+                    transparent,
+                    0.0,
+                    shadow,
+                    *blur,
+                    *offset_y,
+                    layer_z,
+                );
+            }
+            GlazeLayer::Shader { body, .. } => {
+                paint_shader_layer(
+                    commands, ctx, body, origin, size, radius, layer_z, element_id,
+                );
+            }
+        }
     }
 }
 
@@ -995,17 +1129,26 @@ fn paint_shader_layer(
     size: Vec2,
     radius: f32,
     z: f32,
+    element_id: Option<&str>,
 ) {
     use crate::button_material::WidgetButtonMesh;
-    use crate::glaze_material::{GlazeMaterial, GlazeShaderCache, GlazeUniforms};
+    use crate::glaze_material::{
+        GlazeInteractionTarget, GlazeMaterial, GlazeShaderCache, GlazeUniforms,
+    };
 
     if size.x <= 0.0 || size.y <= 0.0 {
         return;
     }
     let body = body.to_string();
+    let interaction = GlazeInteractionTarget {
+        pane: ctx.owner_pane,
+        element_id: element_id.map(str::to_string),
+        rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
+    };
     let entity = commands
         .spawn((
             ChildOf(ctx.content_root),
+            interaction,
             // Unit quad centered on the element box (Y flipped: content uses a
             // top-left origin, Bevy 2D is Y-up). uv runs 0..1 across the quad.
             Transform::from_xyz(origin.x + size.x * 0.5, -(origin.y + size.y * 0.5), z)
@@ -1014,7 +1157,10 @@ fn paint_shader_layer(
         ))
         .id();
     commands.queue(move |world: &mut World| {
-        let Some(mesh) = world.get_resource::<WidgetButtonMesh>().map(|m| m.0.clone()) else {
+        let Some(mesh) = world
+            .get_resource::<WidgetButtonMesh>()
+            .map(|m| m.0.clone())
+        else {
             return;
         };
         // Get-or-create the shader handle (needs Assets<Shader> + the cache).
@@ -1022,10 +1168,17 @@ fn paint_shader_layer(
             let mut shaders = world.resource_mut::<Assets<Shader>>();
             cache.handle_for(&body, &mut shaders)
         });
-        let mat = world.resource_mut::<Assets<GlazeMaterial>>().add(GlazeMaterial {
-            u: GlazeUniforms { size, resolution: size, radius, ..Default::default() },
-            fragment: handle,
-        });
+        let mat = world
+            .resource_mut::<Assets<GlazeMaterial>>()
+            .add(GlazeMaterial {
+                u: GlazeUniforms {
+                    size,
+                    resolution: size,
+                    radius,
+                    ..Default::default()
+                },
+                fragment: handle,
+            });
         if let Ok(mut ec) = world.get_entity_mut(entity) {
             ec.insert((
                 bevy::mesh::Mesh2d(mesh),
@@ -1160,7 +1313,11 @@ fn render_tabs_at(
         let cell_pos = origin + Vec2::new(cl.location.x, cl.location.y);
         let cell_size = Vec2::new(cl.size.width, cl.size.height);
         let is_selected = tab.id == selected;
-        let label_color = if is_selected { accent } else { ctx.palette.text_muted };
+        let label_color = if is_selected {
+            accent
+        } else {
+            ctx.palette.text_muted
+        };
         commands.spawn((
             ChildOf(ctx.content_root),
             Text2d::new(tab.label.clone()),
@@ -1193,7 +1350,9 @@ fn render_tabs_at(
         }
         targets.clicks.push(ClickTarget {
             id: id.to_string(),
-            kind: ClickKind::TabSelect { tab: tab.id.clone() },
+            kind: ClickKind::TabSelect {
+                tab: tab.id.clone(),
+            },
             rect: Rect::new(
                 cell_pos.x,
                 cell_pos.y,
@@ -1260,7 +1419,11 @@ fn render_toggle_at(
         }
     };
 
-    let track_color = if checked { accent } else { ctx.palette.bar_track };
+    let track_color = if checked {
+        accent
+    } else {
+        ctx.palette.bar_track
+    };
     paint_rounded_panel(
         commands,
         ctx,
@@ -1298,7 +1461,9 @@ fn render_toggle_at(
 
     targets.clicks.push(ClickTarget {
         id: id.to_string(),
-        kind: ClickKind::Toggle { new_checked: !checked },
+        kind: ClickKind::Toggle {
+            new_checked: !checked,
+        },
         rect: Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y),
     });
 }
@@ -1312,6 +1477,7 @@ fn render_input_at(
     value: &str,
     placeholder: &str,
     focused_attr: bool,
+    style: Option<&Style>,
     origin: Vec2,
     size: Vec2,
     z: f32,
@@ -1319,10 +1485,7 @@ fn render_input_at(
     // Host owns the editing state while an input is focused — so when
     // ctx.focused_input matches our id we render from that buffer
     // instead of the widget's stale value.
-    let focus_match = ctx
-        .focused_input
-        .as_ref()
-        .filter(|f| f.id == id);
+    let focus_match = ctx.focused_input.as_ref().filter(|f| f.id == id);
     let is_focused = focus_match.is_some() || focused_attr;
     let display_value = match focus_match {
         Some(f) => f.value.clone(),
@@ -1343,20 +1506,24 @@ fn render_input_at(
     } else {
         ctx.palette.divider
     };
-    paint_rounded_panel(
-        commands,
-        ctx,
-        origin,
-        size,
-        radius,
-        bg,
-        border_color,
-        1.0,
-        Color::srgba(0.0, 0.0, 0.0, 0.0),
-        0.0,
-        0.0,
-        z,
-    );
+    if let Some(style) = style.filter(|s| !s.glaze_layers.is_empty()) {
+        paint_glaze_layers(commands, ctx, style, origin, size, z, Some(id));
+    } else {
+        paint_rounded_panel(
+            commands,
+            ctx,
+            origin,
+            size,
+            radius,
+            bg,
+            border_color,
+            1.0,
+            Color::srgba(0.0, 0.0, 0.0, 0.0),
+            0.0,
+            0.0,
+            z,
+        );
+    }
 
     let line_h = line_height(DEFAULT_FONT_SIZE);
     let text_y = (size.y - line_h) * 0.5;
@@ -1377,7 +1544,10 @@ fn render_input_at(
                 TextColor(ctx.palette.text_muted),
                 Anchor::TOP_LEFT,
                 bevy::text::TextLayout::new_with_no_wrap(),
-                bevy::text::TextBounds { width: Some(content_w), height: None },
+                bevy::text::TextBounds {
+                    width: Some(content_w),
+                    height: None,
+                },
                 pane_bevy::PaneContentNoClip,
                 Transform::from_xyz(origin.x + INPUT_PAD_X, -(origin.y + text_y), z + 0.01),
             ));
@@ -1407,7 +1577,10 @@ fn render_input_at(
                 TextColor(ctx.palette.text),
                 Anchor::TOP_LEFT,
                 bevy::text::TextLayout::new_with_no_wrap(),
-                bevy::text::TextBounds { width: Some(content_w), height: None },
+                bevy::text::TextBounds {
+                    width: Some(content_w),
+                    height: None,
+                },
                 pane_bevy::PaneContentNoClip,
                 Transform::from_xyz(origin.x + INPUT_PAD_X, -(origin.y + text_y), z + 0.01),
             ));
@@ -1447,6 +1620,7 @@ fn render_textarea_at(
     value: &str,
     placeholder: &str,
     focused_attr: bool,
+    style: Option<&Style>,
     origin: Vec2,
     size: Vec2,
     z: f32,
@@ -1472,20 +1646,24 @@ fn render_textarea_at(
     } else {
         ctx.palette.divider
     };
-    paint_rounded_panel(
-        commands,
-        ctx,
-        origin,
-        size,
-        radius,
-        bg,
-        border_color,
-        1.0,
-        Color::srgba(0.0, 0.0, 0.0, 0.0),
-        0.0,
-        0.0,
-        z,
-    );
+    if let Some(style) = style.filter(|s| !s.glaze_layers.is_empty()) {
+        paint_glaze_layers(commands, ctx, style, origin, size, z, Some(id));
+    } else {
+        paint_rounded_panel(
+            commands,
+            ctx,
+            origin,
+            size,
+            radius,
+            bg,
+            border_color,
+            1.0,
+            Color::srgba(0.0, 0.0, 0.0, 0.0),
+            0.0,
+            0.0,
+            z,
+        );
+    }
 
     let line_h = line_height(DEFAULT_FONT_SIZE);
     let avail = (size.x - 2.0 * INPUT_PAD_X).max(1.0);

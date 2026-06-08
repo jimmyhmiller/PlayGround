@@ -85,31 +85,31 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
 use bevy::prelude::*;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use rhai::{Dynamic, Engine, EvalAltResult, Scope, AST};
+use rhai::{AST, Dynamic, Engine, EvalAltResult, Scope};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use claude_bus_bevy::ClaudeBusEvent;
 use pane_bevy::{
-    PaneChrome, PaneContentDragged, PaneContentHovered, PaneContentPressed,
-    PaneContentReleased, PaneFont, PaneKindMarker, PaneKindSpec, PaneRect, PaneRegistry,
-    PaneTitle, MARGIN, TITLE_H,
+    MARGIN, PaneChrome, PaneContentDragged, PaneContentHovered, PaneContentPressed,
+    PaneContentReleased, PaneFont, PaneKindMarker, PaneKindSpec, PaneRect, PaneRegistry, PaneTitle,
+    TITLE_H,
 };
 
 use crate::WidgetTargets;
 
 use crate::protocol::{CanvasAnchor, CanvasItem, Element, ImageRef};
 use crate::{
-    canvas_anchor_to_bevy, load_image_for_ref, parse_canvas_color, WidgetClipDirty,
-    WidgetImageCache,
+    WidgetClipDirty, WidgetImageCache, canvas_anchor_to_bevy, load_image_for_ref,
+    parse_canvas_color,
 };
 
 pub const PANE_KIND: &str = "rhai_widget";
@@ -137,9 +137,7 @@ enum HostToWorker {
     /// Animation frame. Only sent while the worker has set its
     /// `animating` flag — idle widgets get zero ticks. Drives
     /// `on_frame(dt)` in the script.
-    Tick {
-        dt_secs: f32,
-    },
+    Tick { dt_secs: f32 },
     /// Mouse press in the pane's content area. Drives `on_click(x, y,
     /// shift, cmd, id)` in the script.
     ///
@@ -174,22 +172,14 @@ enum HostToWorker {
     /// Pane size changed. Drives `on_resize(w, h)` in the script and
     /// updates `canvas_w` / `canvas_h` in scope so `render` sees the
     /// new size.
-    Resize {
-        canvas_w: f32,
-        canvas_h: f32,
-    },
+    Resize { canvas_w: f32, canvas_h: f32 },
     /// A navigation key press routed to the focused widget. Drives
     /// `on_key(key)` in the script. `key` is a stable name like
     /// "ArrowLeft" / "ArrowRight" / "Home" / "End".
-    Key {
-        key: String,
-    },
+    Key { key: String },
     /// A Claude Code bus event. Drives `on_bus(kind, payload)` (legacy
     /// scripts may still name it `on_event` — see worker dispatch).
-    ClaudeEvent {
-        kind: String,
-        payload: Value,
-    },
+    ClaudeEvent { kind: String, payload: Value },
     /// User flipped an `Element::Toggle`. Drives `on_toggle(id, checked)`
     /// where `checked` is the NEW value (already computed host-side).
     Toggle { id: String, checked: bool },
@@ -212,7 +202,11 @@ enum HostToWorker {
     /// `on_message(topic, payload, sender)`. `sender` is the publishing
     /// widget's id (this widget's own id for an echo of its own emit, or
     /// `"tbmsg"` for the CLI). NOT the Claude bus — that's `ClaudeEvent`.
-    Message { topic: String, payload: Value, sender: String },
+    Message {
+        topic: String,
+        payload: Value,
+        sender: String,
+    },
     /// One stdout line from a child spawned via `proc_spawn`, pushed by
     /// the subprocess reader thread. Drives `on_proc_output(handle, line)`
     /// — event-driven delivery so widgets don't poll `proc_read` from
@@ -224,9 +218,7 @@ enum HostToWorker {
     ProcExit { handle: i64, code: i64 },
     /// Hot reload — main parsed a new AST, worker should swap in and
     /// re-init scope from the last snapshot.
-    Reload {
-        ast: AST,
-    },
+    Reload { ast: AST },
     /// Exit the worker loop. Sent by `on_close` and by `Drop`.
     Shutdown,
 }
@@ -333,7 +325,14 @@ fn spawn_worker(
     let join = thread::Builder::new()
         .name(format!("rhai-widget:{}", script_name))
         .spawn(move || {
-            worker_main(rx, self_tx, slots_for_thread, initial_ast, initial_state, widget_id)
+            worker_main(
+                rx,
+                self_tx,
+                slots_for_thread,
+                initial_ast,
+                initial_state,
+                widget_id,
+            )
         })
         .expect("spawn rhai-widget worker thread");
     WorkerHandle {
@@ -380,7 +379,9 @@ impl Worker {
     /// function definitions, one-shot migrations. Only happens once
     /// per AST load — every subsequent event runs handler functions.
     fn run_top_level(&mut self) -> bool {
-        let Some(ref ast) = self.ast else { return false };
+        let Some(ref ast) = self.ast else {
+            return false;
+        };
         if let Err(e) = self.engine.run_ast_with_scope(&mut self.scope, ast) {
             self.set_error(format!("top-level: {}", e));
             return false;
@@ -527,22 +528,30 @@ impl Worker {
                 // with the same persisted state.
                 return true;
             }
-            HostToWorker::Resize { canvas_w: w, canvas_h: h } => {
+            HostToWorker::Resize {
+                canvas_w: w,
+                canvas_h: h,
+            } => {
                 self.canvas_w = w;
                 self.canvas_h = h;
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 let _ = self.scope.set_value("canvas_w", w as f64);
                 let _ = self.scope.set_value("canvas_h", h as f64);
                 self.call_handler("on_resize", (w as f64, h as f64));
             }
             HostToWorker::Key { key } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 self.call_handler("on_key", (key,));
             }
             HostToWorker::ClaudeEvent { kind, payload } => {
-                if !self.ensure_initialized() { return true; }
-                let payload_dyn =
-                    rhai::serde::to_dynamic(&payload).unwrap_or(Dynamic::UNIT);
+                if !self.ensure_initialized() {
+                    return true;
+                }
+                let payload_dyn = rhai::serde::to_dynamic(&payload).unwrap_or(Dynamic::UNIT);
                 // `on_bus` is the current name; `on_event` is the
                 // deprecated alias kept so older scripts keep working.
                 let handler = if self.ast_defines("on_bus") {
@@ -553,37 +562,56 @@ impl Worker {
                 self.call_handler(handler, (kind, payload_dyn));
             }
             HostToWorker::Toggle { id, checked } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 self.call_handler("on_toggle", (id, checked));
             }
             HostToWorker::TabSelect { id, tab } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 self.call_handler("on_tab_select", (id, tab));
             }
             HostToWorker::InputFocus { id, focused } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 self.call_handler("on_input_focus", (id, focused));
             }
             HostToWorker::InputChange { id, value } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 self.call_handler("on_input_change", (id, value));
             }
             HostToWorker::InputSubmit { id, value } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 self.call_handler("on_input_submit", (id, value));
             }
-            HostToWorker::Message { topic, payload, sender } => {
-                if !self.ensure_initialized() { return true; }
-                let payload_dyn =
-                    rhai::serde::to_dynamic(&payload).unwrap_or(Dynamic::UNIT);
+            HostToWorker::Message {
+                topic,
+                payload,
+                sender,
+            } => {
+                if !self.ensure_initialized() {
+                    return true;
+                }
+                let payload_dyn = rhai::serde::to_dynamic(&payload).unwrap_or(Dynamic::UNIT);
                 self.call_handler("on_message", (topic, payload_dyn, sender));
             }
             HostToWorker::ProcOutput { handle, line } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 self.call_handler("on_proc_output", (handle, line));
             }
             HostToWorker::ProcExit { handle, code } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 self.call_handler("on_proc_exit", (handle, code));
             }
             HostToWorker::Click {
@@ -593,27 +621,34 @@ impl Worker {
                 cmd,
                 button_id,
             } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 let id = button_id.unwrap_or_default();
-                self.call_handler(
-                    "on_click",
-                    (local_x as f64, local_y as f64, shift, cmd, id),
-                );
+                self.call_handler("on_click", (local_x as f64, local_y as f64, shift, cmd, id));
             }
             HostToWorker::Drag { local_x, local_y } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 self.call_handler("on_drag", (local_x as f64, local_y as f64));
             }
             HostToWorker::Release { local_x, local_y } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 self.call_handler("on_release", (local_x as f64, local_y as f64));
             }
             HostToWorker::Hover { local_x, local_y } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 self.call_handler("on_hover", (local_x as f64, local_y as f64));
             }
             HostToWorker::Tick { dt_secs } => {
-                if !self.ensure_initialized() { return true; }
+                if !self.ensure_initialized() {
+                    return true;
+                }
                 // Tick only arrives while animating; on_frame is the
                 // only handler that wants a per-frame heartbeat.
                 self.call_handler("on_frame", (dt_secs as f64,));
@@ -760,8 +795,11 @@ impl RhaiWidget {
     /// Deliver a widget↔widget bus message to this worker
     /// (`on_message(topic, payload, sender)`).
     pub(crate) fn deliver_bus_message(&self, topic: String, payload: Value, sender: String) {
-        self.handle
-            .send(HostToWorker::Message { topic, payload, sender });
+        self.handle.send(HostToWorker::Message {
+            topic,
+            payload,
+            sender,
+        });
     }
 }
 
@@ -899,20 +937,18 @@ fn setup_watcher(world: &mut World) {
     // the script HAS to live on disk and HAS to be edited live.
 
     let (tx, rx) = mpsc::channel::<PathBuf>();
-    let watcher = match notify::recommended_watcher(
-        move |res: notify::Result<notify::Event>| {
-            let Ok(ev) = res else { return };
-            if !matches!(
-                ev.kind,
-                EventKind::Modify(_) | EventKind::Create(_) | EventKind::Any
-            ) {
-                return;
-            }
-            for path in ev.paths {
-                let _ = tx.send(path);
-            }
-        },
-    ) {
+    let watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let Ok(ev) = res else { return };
+        if !matches!(
+            ev.kind,
+            EventKind::Modify(_) | EventKind::Create(_) | EventKind::Any
+        ) {
+            return;
+        }
+        for path in ev.paths {
+            let _ = tx.send(path);
+        }
+    }) {
         Ok(w) => w,
         Err(e) => {
             warn!("rhai_widget: file watcher failed to start: {}", e);
@@ -940,13 +976,12 @@ struct RhaiWidgetConfig {
 }
 
 fn rhai_widget_spawn(world: &mut World, entity: Entity, _content_root: Entity, config: &Value) {
-    let cfg: RhaiWidgetConfig = serde_json::from_value(config.clone()).unwrap_or_else(|_| {
-        RhaiWidgetConfig {
+    let cfg: RhaiWidgetConfig =
+        serde_json::from_value(config.clone()).unwrap_or_else(|_| RhaiWidgetConfig {
             script: "garden.rhai".to_string(),
             title: None,
             state: Value::Null,
-        }
-    });
+        });
     if let Some(title) = cfg.title.clone() {
         if let Some(mut t) = world.get_mut::<PaneTitle>(entity) {
             t.0 = title;
@@ -1070,10 +1105,7 @@ fn rhai_widget_close(world: &mut World, entity: Entity) {
 // File watcher → reload
 // ============================================================
 
-fn poll_watcher(
-    watcher: Option<Res<ScriptWatcher>>,
-    mut widgets: Query<&mut RhaiWidget>,
-) {
+fn poll_watcher(watcher: Option<Res<ScriptWatcher>>, mut widgets: Query<&mut RhaiWidget>) {
     let Some(watcher) = watcher else { return };
     let paths: Vec<PathBuf> = {
         let rx = watcher.rx.lock().expect("rhai watcher channel poisoned");
@@ -1173,7 +1205,10 @@ fn forward_clicks_to_workers(
         match hit {
             Some((id, crate::ClickKind::Toggle { new_checked })) => {
                 commands.entity(ev.pane).remove::<crate::WidgetInputFocus>();
-                w.handle.send(HostToWorker::Toggle { id, checked: new_checked });
+                w.handle.send(HostToWorker::Toggle {
+                    id,
+                    checked: new_checked,
+                });
             }
             Some((id, crate::ClickKind::TabSelect { tab })) => {
                 commands.entity(ev.pane).remove::<crate::WidgetInputFocus>();
@@ -1192,7 +1227,8 @@ fn forward_clicks_to_workers(
                     }
                 }
                 commands.entity(ev.pane).insert(focus);
-                w.handle.send(HostToWorker::InputFocus { id, focused: true });
+                w.handle
+                    .send(HostToWorker::InputFocus { id, focused: true });
             }
             // Button hit, or empty space (None). Canvas / self-routing
             // widgets rely on the empty-space click reaching `on_click`.
@@ -1213,43 +1249,55 @@ fn forward_clicks_to_workers(
 
 fn forward_drags_to_workers(
     mut events: MessageReader<PaneContentDragged>,
-    widgets: Query<
-        (&PaneKindMarker, &RhaiWidget, Option<&crate::WidgetScroll>),
-    >,
+    widgets: Query<(&PaneKindMarker, &RhaiWidget, Option<&crate::WidgetScroll>)>,
 ) {
     for ev in events.read() {
-        let Ok((kind, w, scroll)) = widgets.get(ev.pane) else { continue };
-        if kind.0 != PANE_KIND { continue; }
+        let Ok((kind, w, scroll)) = widgets.get(ev.pane) else {
+            continue;
+        };
+        if kind.0 != PANE_KIND {
+            continue;
+        }
         let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
         let pt = ev.local_pt + Vec2::new(0.0, scroll_y);
-        w.handle.send(HostToWorker::Drag { local_x: pt.x, local_y: pt.y });
+        w.handle.send(HostToWorker::Drag {
+            local_x: pt.x,
+            local_y: pt.y,
+        });
     }
 }
 
 fn forward_releases_to_workers(
     mut events: MessageReader<PaneContentReleased>,
-    widgets: Query<
-        (&PaneKindMarker, &RhaiWidget, Option<&crate::WidgetScroll>),
-    >,
+    widgets: Query<(&PaneKindMarker, &RhaiWidget, Option<&crate::WidgetScroll>)>,
 ) {
     for ev in events.read() {
-        let Ok((kind, w, scroll)) = widgets.get(ev.pane) else { continue };
-        if kind.0 != PANE_KIND { continue; }
+        let Ok((kind, w, scroll)) = widgets.get(ev.pane) else {
+            continue;
+        };
+        if kind.0 != PANE_KIND {
+            continue;
+        }
         let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
         let pt = ev.local_pt + Vec2::new(0.0, scroll_y);
-        w.handle.send(HostToWorker::Release { local_x: pt.x, local_y: pt.y });
+        w.handle.send(HostToWorker::Release {
+            local_x: pt.x,
+            local_y: pt.y,
+        });
     }
 }
 
 fn forward_hovers_to_workers(
     mut events: MessageReader<PaneContentHovered>,
-    widgets: Query<
-        (&PaneKindMarker, &RhaiWidget, Option<&crate::WidgetScroll>),
-    >,
+    widgets: Query<(&PaneKindMarker, &RhaiWidget, Option<&crate::WidgetScroll>)>,
 ) {
     for ev in events.read() {
-        let Ok((kind, w, scroll)) = widgets.get(ev.pane) else { continue };
-        if kind.0 != PANE_KIND { continue; }
+        let Ok((kind, w, scroll)) = widgets.get(ev.pane) else {
+            continue;
+        };
+        if kind.0 != PANE_KIND {
+            continue;
+        }
         // INFINITY is the "cursor left" sentinel — pass through
         // untouched so the script can detect it.
         let pt = if ev.local_pt.x.is_finite() {
@@ -1258,7 +1306,10 @@ fn forward_hovers_to_workers(
         } else {
             ev.local_pt
         };
-        w.handle.send(HostToWorker::Hover { local_x: pt.x, local_y: pt.y });
+        w.handle.send(HostToWorker::Hover {
+            local_x: pt.x,
+            local_y: pt.y,
+        });
     }
 }
 
@@ -1277,7 +1328,9 @@ fn forward_keys_to_workers(
     )>,
 ) {
     let Some(pane) = focused.0 else { return };
-    let Ok((kind, w, edit, input_focus)) = widgets.get(pane) else { return };
+    let Ok((kind, w, edit, input_focus)) = widgets.get(pane) else {
+        return;
+    };
     // A focused Element::Input owns the keyboard (arrows move the caret,
     // handled by `handle_widget_input_typing`); don't also fire on_key.
     if kind.0 != PANE_KIND || edit.is_some() || input_focus.is_some() {
@@ -1292,7 +1345,9 @@ fn forward_keys_to_workers(
         (KeyCode::End, "End"),
     ] {
         if keys.just_pressed(code) {
-            w.handle.send(HostToWorker::Key { key: name.to_string() });
+            w.handle.send(HostToWorker::Key {
+                key: name.to_string(),
+            });
         }
     }
 }
@@ -1306,8 +1361,7 @@ fn forward_inputs_to_workers(
     let new_events: Vec<(String, Value)> = events
         .read()
         .map(|ev| {
-            let payload: Value =
-                serde_json::from_str(&ev.payload_json).unwrap_or(Value::Null);
+            let payload: Value = serde_json::from_str(&ev.payload_json).unwrap_or(Value::Null);
             (ev.kind.clone(), payload)
         })
         .collect();
@@ -1381,6 +1435,7 @@ fn apply_latest_frames(
     pane_zoom: Res<pane_bevy::PaneZoom>,
     time: Res<Time>,
     mut q: Query<(
+        Entity,
         &PaneKindMarker,
         &PaneChrome,
         &PaneRect,
@@ -1396,7 +1451,7 @@ fn apply_latest_frames(
     let zoom = pane_zoom.0.max(0.0001);
     // Caret blink: visible during the first half of each 1s cycle.
     let caret_visible = time.elapsed_secs().rem_euclid(1.0) < 0.5;
-    for (kind, chrome, rect, mut w, mut targets, mut scroll, hover, input_focus) in &mut q {
+    for (entity, kind, chrome, rect, mut w, mut targets, mut scroll, hover, input_focus) in &mut q {
         if kind.0 != PANE_KIND {
             continue;
         }
@@ -1405,13 +1460,13 @@ fn apply_latest_frames(
         // caret, but only when its signature changes (keystroke or blink
         // toggle) — re-rendering every frame would rebuild the whole flow
         // tree 60×/sec and stall typing on heavier widgets.
-        let focus_sig = input_focus
-            .map(|f| (f.value.clone(), f.caret, caret_visible));
+        let focus_sig = input_focus.map(|f| (f.value.clone(), f.caret, caret_visible));
         let focus_changed = focus_sig != w.last_focus_sig;
         // Theme changes also re-emit so widgets pick up new palette colors.
         if current_gen == w.applied_frame_gen && !theme_changed && !focus_changed {
             continue;
         }
+        let _prof = pane_bevy::prof::pane_span(entity.to_bits(), "widget");
         w.applied_frame_gen = current_gen;
         w.last_focus_sig = focus_sig;
 
@@ -1425,13 +1480,7 @@ fn apply_latest_frames(
             .and_then(|s| s.clone());
         // Also mirror snapshot for persistence. Done in two steps so
         // we don't hold the snapshot lock across a borrow of `w`.
-        let new_state = w
-            .handle
-            .slots
-            .snapshot
-            .lock()
-            .ok()
-            .map(|s| s.clone());
+        let new_state = w.handle.slots.snapshot.lock().ok().map(|s| s.clone());
         if let Some(s) = new_state {
             w.last_state = s;
         }
@@ -1485,6 +1534,7 @@ fn apply_latest_frames(
                 let ctx = crate::render::LayoutCtx {
                     font: pane_font.0.clone(),
                     metrics: *pane_metrics,
+                    owner_pane: entity,
                     content_root: chrome.content_root,
                     content_size,
                     palette: crate::render::WidgetPalette::from_theme(&theme),
@@ -1577,7 +1627,9 @@ fn diff_render(
                 match existing {
                     Some(e) => {
                         // Reuse — overwrite the components we own.
-                        commands.entity(e).try_insert((sprite, anchor_cmp, transform));
+                        commands
+                            .entity(e)
+                            .try_insert((sprite, anchor_cmp, transform));
                     }
                     None => {
                         let e = commands
@@ -1604,8 +1656,7 @@ fn diff_render(
                 rotation,
                 ..
             } => {
-                let bevy_color =
-                    parse_canvas_color(color).unwrap_or(Color::srgb(0.20, 0.22, 0.26));
+                let bevy_color = parse_canvas_color(color).unwrap_or(Color::srgb(0.20, 0.22, 0.26));
                 let sprite = Sprite {
                     color: bevy_color,
                     custom_size: Some(Vec2::new(*w, *h)),
@@ -1621,7 +1672,9 @@ fn diff_render(
                 let anchor_cmp = canvas_anchor_to_bevy(*anchor);
                 match existing {
                     Some(e) => {
-                        commands.entity(e).try_insert((sprite, anchor_cmp, transform));
+                        commands
+                            .entity(e)
+                            .try_insert((sprite, anchor_cmp, transform));
                     }
                     None => {
                         let e = commands
@@ -1854,18 +1907,17 @@ fn register_host_functions(
         // `on_frame` polling. (The main loop is woken only when a handler
         // actually re-renders, via the frame-publish wakeup.)
         let tx = self_tx.clone();
-        let notifier: crate::subprocess::ProcNotifier =
-            std::sync::Arc::new(move |ev| match ev {
-                crate::subprocess::ProcEvent::Output { handle, line } => {
-                    let _ = tx.send(HostToWorker::ProcOutput { handle, line });
-                }
-                crate::subprocess::ProcEvent::Exit { handle, code } => {
-                    let _ = tx.send(HostToWorker::ProcExit {
-                        handle,
-                        code: code.map(|c| c as i64).unwrap_or(-1),
-                    });
-                }
-            });
+        let notifier: crate::subprocess::ProcNotifier = std::sync::Arc::new(move |ev| match ev {
+            crate::subprocess::ProcEvent::Output { handle, line } => {
+                let _ = tx.send(HostToWorker::ProcOutput { handle, line });
+            }
+            crate::subprocess::ProcEvent::Exit { handle, code } => {
+                let _ = tx.send(HostToWorker::ProcExit {
+                    handle,
+                    code: code.map(|c| c as i64).unwrap_or(-1),
+                });
+            }
+        });
         if let Ok(mut r) = procs.lock() {
             r.set_notifier(notifier);
         }
@@ -1889,13 +1941,19 @@ fn register_host_functions(
     {
         let procs = procs.clone();
         engine.register_fn("proc_write", move |id: i64, line: &str| -> bool {
-            procs.lock().map(|mut r| r.write_line(id, line)).unwrap_or(false)
+            procs
+                .lock()
+                .map(|mut r| r.write_line(id, line))
+                .unwrap_or(false)
         });
     }
     {
         let procs = procs.clone();
         engine.register_fn("proc_read", move |id: i64| -> String {
-            procs.lock().map(|mut r| r.read_line(id)).unwrap_or_default()
+            procs
+                .lock()
+                .map(|mut r| r.read_line(id))
+                .unwrap_or_default()
         });
     }
     {
@@ -1933,7 +1991,11 @@ fn register_host_functions(
         let outbox = slots.outbox.clone();
         let push = move |topic: &str, payload: Value, retain: bool| {
             if let Ok(mut v) = outbox.lock() {
-                v.push(OutMsg { topic: topic.to_string(), payload, retain });
+                v.push(OutMsg {
+                    topic: topic.to_string(),
+                    payload,
+                    retain,
+                });
             }
             // The bus pump runs on the main thread; wake it so an emit
             // from an idle widget reaches its subscribers promptly
@@ -2563,8 +2625,7 @@ fn render(canvas_w, canvas_h) {
 // shipping in the binary.
 // ============================================================
 
-const DEFAULT_CHESS_SCRIPT: &str =
-    include_str!("../widgets/chess.rhai");
+const DEFAULT_CHESS_SCRIPT: &str = include_str!("../widgets/chess.rhai");
 
 #[cfg(test)]
 mod tests {
@@ -2791,8 +2852,14 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].topic, "conn.state");
         assert!(out[0].retain, "emit_retained must set retain");
-        assert_eq!(out[0].payload.get("host").and_then(|v| v.as_str()), Some("localhost"));
-        assert_eq!(out[0].payload.get("who").and_then(|v| v.as_str()), Some("rw-conn"));
+        assert_eq!(
+            out[0].payload.get("host").and_then(|v| v.as_str()),
+            Some("localhost")
+        );
+        assert_eq!(
+            out[0].payload.get("who").and_then(|v| v.as_str()),
+            Some("rw-conn")
+        );
     }
 
     #[test]
@@ -2831,6 +2898,9 @@ mod tests {
             );
         }
         let ast = engine.compile("fn render(w, h) { }").expect("compile");
-        assert!(!ast_wants_clicks(&ast), "render-only widget wants no clicks");
+        assert!(
+            !ast_wants_clicks(&ast),
+            "render-only widget wants no clicks"
+        );
     }
 }

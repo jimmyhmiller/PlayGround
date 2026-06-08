@@ -2109,6 +2109,7 @@ fn sync_grid(
         if kind.0 != PANE_KIND {
             continue;
         }
+        let _prof = pane_bevy::prof::pane_span(entity.to_bits(), "terminal");
         let Some(data) = store.map.get(&entity) else {
             continue;
         };

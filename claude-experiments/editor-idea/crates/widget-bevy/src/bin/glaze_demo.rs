@@ -11,10 +11,8 @@
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 
-use glaze::{CompiledStyle, Dim, Layer, Program, Rgba, parse};
-use widget_bevy::protocol::{
-    Align, Border, Edges, Element, HostEvent, Shadow, ShaderSpec, Style, Weight, WidgetMsg,
-};
+use glaze::{CompiledStyle, Program, Rgba, parse};
+use widget_bevy::protocol::{Align, Border, Edges, Element, HostEvent, Style, Weight, WidgetMsg};
 
 // The stylesheet. Authored in Glaze; compiled at runtime.
 const SHEET: &str = r#"
@@ -92,50 +90,8 @@ fn hex(c: Rgba) -> String {
     }
 }
 
-fn dim_str(d: Dim) -> String {
-    match d {
-        Dim::Px(p) => format!("{p}"),
-        Dim::Pct(p) => format!("{p}%"),
-        Dim::Auto => "auto".into(),
-    }
-}
-
 fn compiled_to_style(c: &CompiledStyle) -> Style {
-    let mut s = Style::default();
-    let p = c.box_.padding;
-    s.padding = Some(Edges { top: p[0], right: p[1], bottom: p[2], left: p[3] });
-    if c.box_.radius > 0.0 {
-        s.radius = Some(format!("{}", c.box_.radius));
-    }
-    if let Some(d) = c.box_.width {
-        s.width = Some(dim_str(d));
-    }
-    if let Some(d) = c.box_.height {
-        s.height = Some(dim_str(d));
-    }
-    for layer in &c.layers {
-        match layer {
-            // last fill wins (a :hover overlay replaces the base fill)
-            Layer::Fill(rgba) => s.background = Some(hex(*rgba)),
-            Layer::Border { color, width } => {
-                s.border = Some(Border { color: hex(*color), width: *width });
-            }
-            Layer::Shadow { color, blur, offset_y } => {
-                s.shadow = Some(Shadow {
-                    token: None,
-                    color: Some(hex(*color)),
-                    blur: Some(*blur),
-                    offset_y: Some(*offset_y),
-                });
-            }
-            // Stage 3: a compiled shader layer → carried over the protocol as
-            // its WGSL body; the host runs it on the element's box.
-            Layer::Shader(cs) => {
-                s.shader = Some(ShaderSpec { body: cs.wgsl_body.clone(), overlay: cs.overlay });
-            }
-        }
-    }
-    s
+    widget_bevy::glaze_style::to_style(c)
 }
 
 // ---- helpers ----------------------------------------------------------------
@@ -152,27 +108,55 @@ fn text(value: &str, color: &str, size: f32, bold: bool) -> Element {
 }
 
 fn vstack(gap: f32, children: Vec<Element>) -> Element {
-    Element::Vstack { gap, pad: 0.0, children, style: None }
+    Element::Vstack {
+        gap,
+        pad: 0.0,
+        children,
+        style: None,
+    }
 }
 
 fn hstack(gap: f32, children: Vec<Element>) -> Element {
-    Element::Hstack { gap, pad: 0.0, align: Align::Start, children, style: None }
+    Element::Hstack {
+        gap,
+        pad: 0.0,
+        align: Align::Start,
+        children,
+        style: None,
+    }
 }
 
 /// A frame styled entirely by Glaze. Surfaces resolve errors *loudly* as a
 /// red error tile rather than silently dropping the box (house rule).
-fn glz(prog: &Program, name: &str, variant: &[(&str, &str)], states: &[&str], gap: f32, children: Vec<Element>) -> Element {
-    let v: HashMap<String, String> =
-        variant.iter().map(|(k, x)| (k.to_string(), x.to_string())).collect();
+fn glz(
+    prog: &Program,
+    name: &str,
+    variant: &[(&str, &str)],
+    states: &[&str],
+    gap: f32,
+    children: Vec<Element>,
+) -> Element {
+    let v: HashMap<String, String> = variant
+        .iter()
+        .map(|(k, x)| (k.to_string(), x.to_string()))
+        .collect();
     match prog.resolve(name, &v, states) {
-        Ok(compiled) => Element::Frame { gap, pad: 0.0, children, style: Some(compiled_to_style(&compiled)) },
+        Ok(compiled) => Element::Frame {
+            gap,
+            pad: 0.0,
+            children,
+            style: Some(compiled_to_style(&compiled)),
+        },
         Err(e) => Element::Frame {
             gap: 4.0,
             pad: 0.0,
             children: vec![text(&format!("glaze: {e}"), "#ff6b5a", 11.0, true)],
             style: Some(Style {
                 background: Some("#2a1414".into()),
-                border: Some(Border { color: "#ff6b5a".into(), width: 1.0 }),
+                border: Some(Border {
+                    color: "#ff6b5a".into(),
+                    width: 1.0,
+                }),
                 radius: Some("8".into()),
                 padding: Some(Edges::all(10.0)),
                 ..Default::default()
@@ -207,7 +191,14 @@ fn swatch(prog: &Program, token: &str) -> Element {
 }
 
 fn button(prog: &Program, label: &str, intent: &str, states: &[&str]) -> Element {
-    glz(prog, "button", &[("intent", intent)], states, 0.0, vec![text(label, "#1b1f17", 12.0, true)])
+    glz(
+        prog,
+        "button",
+        &[("intent", intent)],
+        states,
+        0.0,
+        vec![text(label, "#1b1f17", 12.0, true)],
+    )
 }
 
 fn build_frame(prog: &Program) -> Element {
@@ -228,7 +219,12 @@ fn build_frame(prog: &Program) -> Element {
     let swatches = vstack(
         6.0,
         vec![
-            text("TOKENS  (resolved through alias chains + mix())", "fg_muted", 9.0, true),
+            text(
+                "TOKENS  (resolved through alias chains + mix())",
+                "fg_muted",
+                9.0,
+                true,
+            ),
             hstack(
                 8.0,
                 vec![
@@ -251,13 +247,21 @@ fn build_frame(prog: &Program) -> Element {
             &[],
             &[],
             6.0,
-            vec![text(title, "fg", 14.0, true), text(body, "fg_muted", 11.0, false)],
+            vec![
+                text(title, "fg", 14.0, true),
+                text(body, "fg_muted", 11.0, false),
+            ],
         )
     };
     let cards = vstack(
         6.0,
         vec![
-            text("STYLE `card`  (reused — one definition, many instances)", "fg_muted", 9.0, true),
+            text(
+                "STYLE `card`  (reused — one definition, many instances)",
+                "fg_muted",
+                9.0,
+                true,
+            ),
             hstack(
                 12.0,
                 vec![
@@ -273,7 +277,12 @@ fn build_frame(prog: &Program) -> Element {
     let buttons = vstack(
         6.0,
         vec![
-            text("STYLE `button(intent)`  (variant axis + :hover / :press / :focus plans)", "fg_muted", 9.0, true),
+            text(
+                "STYLE `button(intent)`  (variant axis + :hover / :press / :focus plans)",
+                "fg_muted",
+                9.0,
+                true,
+            ),
             hstack(
                 10.0,
                 vec![
@@ -291,7 +300,12 @@ fn build_frame(prog: &Program) -> Element {
     let hero = vstack(
         6.0,
         vec![
-            text("STYLE `hero`  (overlay shader { } → compiled to WGSL, runs on the GPU)", "fg_muted", 9.0, true),
+            text(
+                "STYLE `hero`  (overlay shader { } → compiled to WGSL, runs on the GPU)",
+                "fg_muted",
+                9.0,
+                true,
+            ),
             glz(
                 prog,
                 "hero",
@@ -335,13 +349,18 @@ fn main() {
     let _ = writeln!(
         out,
         "{}",
-        serde_json::to_string(&WidgetMsg::Title { value: "Glaze Demo".into() }).unwrap()
+        serde_json::to_string(&WidgetMsg::Title {
+            value: "Glaze Demo".into()
+        })
+        .unwrap()
     );
     emit(&mut out, &prog);
 
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
-        let Ok(evt) = serde_json::from_str::<HostEvent>(&line) else { continue };
+        let Ok(evt) = serde_json::from_str::<HostEvent>(&line) else {
+            continue;
+        };
         match evt {
             HostEvent::Close => return,
             _ => emit(&mut out, &prog),
@@ -350,7 +369,9 @@ fn main() {
 }
 
 fn emit<W: Write>(out: &mut W, prog: &Program) {
-    let msg = WidgetMsg::Frame { root: build_frame(prog) };
+    let msg = WidgetMsg::Frame {
+        root: build_frame(prog),
+    };
     if let Ok(s) = serde_json::to_string(&msg) {
         let _ = writeln!(out, "{s}");
         let _ = out.flush();

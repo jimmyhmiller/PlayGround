@@ -131,7 +131,7 @@ pub enum Expr {
 
     /// Pattern-match on a scrutinee. Arms are tried in order; v1 codegen
     /// assumes arms are EXHAUSTIVE — non-exhaustive matches will fall
-    /// through to a trap. A future typechecker pass will enforce this.
+    /// through to a trap. The typechecker enforces exhaustiveness.
     Match {
         scrutinee: Box<Expr>,
         arms: Vec<MatchArm>,

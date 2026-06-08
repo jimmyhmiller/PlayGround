@@ -73,9 +73,7 @@ pub enum HostEvent {
     /// Animated widgets advance their state on each tick and emit a
     /// new `frame`. Static widgets can ignore. Rate-limited to ~30Hz
     /// in the host so subprocesses on a slow link don't get flooded.
-    Tick {
-        dt: f32,
-    },
+    Tick { dt: f32 },
     /// A Claude Code hook event mirrored from the central bus. `kind`
     /// matches the bus event kind (`pre_tool_use`, `user_prompt_submit`,
     /// `stop`, etc.); `payload` is the raw event payload parsed as
@@ -188,16 +186,49 @@ pub struct Style {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub flex_direction: Option<String>,
 
+    /// Ordered paint plan produced by Glaze. When non-empty, these layers
+    /// replace the scalar `background` / `border` / `shadow` / `shader`
+    /// paint fields while leaving layout fields unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub glaze_layers: Vec<GlazeLayer>,
+
     /// A compiled Glaze shader layer painted on this element's box. The
     /// `body` is WGSL fragment-shader source (the `glaze` compiler's output
     /// for an `overlay shader {}` block); the host wraps it in the canonical
     /// `GlazeUniforms` block and runs it on a quad at the element's rect.
+    ///
+    /// Kept for protocol compatibility. New Glaze output uses
+    /// [`Style::glaze_layers`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shader: Option<ShaderSpec>,
 }
 
+/// One entry in Glaze's ordered paint plan.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum GlazeLayer {
+    Fill {
+        color: String,
+    },
+    Border {
+        color: String,
+        width: f32,
+    },
+    Shadow {
+        color: String,
+        blur: f32,
+        offset_y: f32,
+    },
+    Shader {
+        body: String,
+        #[serde(default)]
+        overlay: bool,
+    },
+}
+
 /// A compiled shader layer: WGSL fragment body produced by `glaze`, plus
-/// whether it composites over the element's content (`overlay`).
+/// its source-level `overlay` intent. The current widget renderer keeps
+/// the full paint plan beneath child content.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ShaderSpec {
     /// WGSL fragment body — `let`s + `return <vec4>;`, referencing `u.*`
@@ -257,13 +288,27 @@ pub struct Edges {
 
 impl Edges {
     pub fn all(v: f32) -> Self {
-        Self { top: v, right: v, bottom: v, left: v }
+        Self {
+            top: v,
+            right: v,
+            bottom: v,
+            left: v,
+        }
     }
     pub fn symmetric(h: f32, v: f32) -> Self {
-        Self { top: v, right: h, bottom: v, left: h }
+        Self {
+            top: v,
+            right: h,
+            bottom: v,
+            left: h,
+        }
     }
-    pub fn horizontal(&self) -> f32 { self.left + self.right }
-    pub fn vertical(&self) -> f32 { self.top + self.bottom }
+    pub fn horizontal(&self) -> f32 {
+        self.left + self.right
+    }
+    pub fn vertical(&self) -> f32 {
+        self.top + self.bottom
+    }
 }
 
 /// Visual kind for an Element::Button. Filled draws the standard
@@ -776,4 +821,33 @@ pub fn parse_hex_color(s: &str) -> Option<[f32; 3]> {
         _ => return None,
     };
     Some([r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0])
+}
+
+#[cfg(test)]
+mod style_tests {
+    use super::*;
+
+    #[test]
+    fn glaze_layers_round_trip_in_order() {
+        let style = Style {
+            glaze_layers: vec![
+                GlazeLayer::Fill {
+                    color: "#112233".into(),
+                },
+                GlazeLayer::Shader {
+                    body: "return vec4<f32>(1.0);".into(),
+                    overlay: true,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&style).unwrap();
+        let decoded: Style = serde_json::from_str(&json).unwrap();
+        assert!(matches!(decoded.glaze_layers[0], GlazeLayer::Fill { .. }));
+        assert!(matches!(
+            decoded.glaze_layers[1],
+            GlazeLayer::Shader { overlay: true, .. }
+        ));
+    }
 }

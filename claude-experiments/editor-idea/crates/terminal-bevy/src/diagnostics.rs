@@ -108,6 +108,36 @@ pub fn phys_footprint_bytes() -> Option<u64> {
     None
 }
 
+/// Cumulative CPU time (user + system) this process has consumed, in
+/// nanoseconds. Differencing two readings over wall-clock time gives a
+/// CPU% that matches Activity Monitor / `ps` (and can exceed 100% across
+/// cores) — unlike Bevy's `SystemInformationDiagnosticsPlugin`, whose
+/// per-process figure reads a flat 0 on this macOS setup.
+#[cfg(target_os = "macos")]
+pub fn process_cpu_time_ns() -> Option<u64> {
+    // SAFETY: identical pattern to `phys_footprint_bytes` — fill a zeroed
+    // `rusage_info_v2` and read it back only on success. `ri_user_time` /
+    // `ri_system_time` are nanosecond CPU-time counters.
+    unsafe {
+        let mut info = std::mem::MaybeUninit::<libc::rusage_info_v2>::zeroed();
+        let ret = libc::proc_pid_rusage(
+            libc::getpid(),
+            libc::RUSAGE_INFO_V2,
+            info.as_mut_ptr() as *mut libc::rusage_info_t,
+        );
+        if ret != 0 {
+            return None;
+        }
+        let info = info.assume_init();
+        Some(info.ri_user_time.wrapping_add(info.ri_system_time))
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn process_cpu_time_ns() -> Option<u64> {
+    None
+}
+
 /// Background thread: footprint-only, World-independent, wedge-proof.
 fn spawn_footprint_heartbeat() {
     let _ = std::thread::Builder::new()
@@ -419,7 +449,7 @@ fn diag_log_path() -> Option<PathBuf> {
 /// stderr. Each line is written with a single `write_all`, so concurrent
 /// writes from the heartbeat thread and the sampler stay line-atomic
 /// under `O_APPEND`.
-fn append_log(line: &str) {
+pub(crate) fn append_log(line: &str) {
     let epoch_ms = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .map(|d| d.as_millis())

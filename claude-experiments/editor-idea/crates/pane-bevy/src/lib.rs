@@ -63,6 +63,7 @@ use serde_json::Value;
 pub mod camera;
 pub mod chrome_material;
 pub mod layers;
+pub mod prof;
 pub mod text_input;
 
 pub use camera::{
@@ -676,6 +677,7 @@ fn emit_pane_hover(
         With<PaneTag>,
     >,
 ) {
+    let _prof = prof::sys_span("pane_hover");
     // Any button held → drag/release flow owns motion. Don't double-emit.
     if buttons.pressed(MouseButton::Left)
         || buttons.pressed(MouseButton::Right)
@@ -736,6 +738,7 @@ fn update_pane_cursor(
     panes: Query<(&PaneRect, Option<&Visibility>, Has<PanePinned>), With<PaneTag>>,
 ) {
     use bevy::window::SystemCursorIcon;
+    let _prof = prof::sys_span("pane_cursor");
     let Ok((win_entity, window)) = windows.single() else {
         return;
     };
@@ -811,6 +814,7 @@ fn push_chrome_time(
     time: Res<Time>,
     mut materials: ResMut<Assets<PaneChromeMaterial>>,
 ) {
+    let _prof = prof::sys_span("chrome_time");
     let t = time.elapsed_secs();
     for (_id, mat) in materials.iter_mut() {
         mat.params.time = t;
@@ -837,6 +841,7 @@ fn sync_chrome_uniforms(
     mut chrome_mats: ResMut<Assets<PaneChromeMaterial>>,
     mut shadow_mats: ResMut<Assets<PaneShadowMaterial>>,
 ) {
+    let _prof = prof::sys_span("chrome_uniforms");
     let focus_changed = focused.is_changed();
     let global_changed = global_style.is_changed();
     let shader_changed = active_shader.is_changed();
@@ -1378,6 +1383,7 @@ fn handle_pane_mouse(
     >,
     hot_zones: Query<&PaneHotZones>,
 ) {
+    let _prof = prof::sys_span("pane_mouse");
     let Ok(window) = windows.single() else {
         return;
     };
@@ -1667,6 +1673,7 @@ fn position_panes(
     mut color_q: Query<&mut TextColor>,
     parents: Query<Entity, With<PaneTag>>,
 ) {
+    let _prof = prof::sys_span("position_panes");
     // Focused divider color = the same accent the SDF chrome material
     // uses for border_focused, so the two cues read as one design
     // choice rather than two unrelated highlights.
@@ -1780,6 +1787,7 @@ fn sync_pinned_chrome(
     chromes: Query<&PaneChrome>,
     mut vis_q: Query<&mut Visibility>,
 ) {
+    let _prof = prof::sys_span("pinned_chrome");
     let set_vis = |chrome: &PaneChrome, vis: Visibility, vis_q: &mut Query<&mut Visibility>| {
         for e in [
             chrome.bg,
@@ -1810,6 +1818,7 @@ fn update_pane_titles(
     titles: Query<(&PaneTitle, &PaneChrome), Changed<PaneTitle>>,
     mut text_q: Query<&mut Text2d>,
 ) {
+    let _prof = prof::sys_span("pane_titles");
     for (title, chrome) in &titles {
         if let Ok(mut text) = text_q.get_mut(chrome.title_text) {
             if text.0 != title.0 {

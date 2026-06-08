@@ -27,8 +27,8 @@ state counter: Atom<Int> = atom(0)     // node singleton, evaluated once at boot
 
 def handle(c: Cmd) -> Int =
     match c {
-        Bump(d) => swap(counter, |n: Int| n + d),
-        Get     => deref(counter),
+        Cmd::Bump(d) => swap(counter, |n: Int| n + d),
+        Cmd::Get     => deref(counter),
     }
 
 def boot() -> Int =
@@ -39,10 +39,10 @@ Remote participant (shares the declarations so hashes match):
 
 ```
 def bump_remote(node: Node, d: Int) -> Int =
-    match at(node, || handle(Bump(d))) { Ok(v) => v, Err(_) => 0 - 1 }
+    match at(node, || handle(Cmd::Bump(d))) { Result::Ok(v) => v, Result::Err(_) => 0 - 1 }
 
 def read_remote(node: Node) -> Int =
-    match at(node, || handle(Get)) { Ok(v) => v, Err(_) => 0 - 1 }
+    match at(node, || handle(Cmd::Get)) { Result::Ok(v) => v, Result::Err(_) => 0 - 1 }
 ```
 
 Two participants bumping +5 then +10, then reading, observe 15. The counter is

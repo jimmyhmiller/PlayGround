@@ -10,10 +10,11 @@
 //!
 //! v1 caveats:
 //!
-//! - No generics yet (`Type::TypeVar` always typechecks as non-Wire).
+//! - Generics are supported (`Option<T>`, `Result<T, E>`, `List<T>`, etc.),
+//!   though `TypeVar` values currently typecheck as non-Wire.
 //! - All v1 builtin types are Wire (Int / Bool / String / Float / Bytes).
 //! - `Wire` checking on `core/net.at` is reserved but not yet enforced
-//!   (every program in v1 is Wire by construction).
+//!   (most programs in v1 are Wire by construction).
 //! - The typechecker does not yet gate compilation; it is purely additive
 //!   for now.
 

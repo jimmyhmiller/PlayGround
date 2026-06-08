@@ -44,8 +44,8 @@ use serde_json::Value;
 
 use pane_bevy::{PaneKindMarker, PaneProject};
 
-use crate::rhai_widget::{self, RhaiWidget};
 use crate::protocol::HostEvent;
+use crate::rhai_widget::{self, RhaiWidget};
 use crate::{WidgetIO, WidgetRender};
 
 /// One message awaiting delivery on the widget↔widget bus. Produced by
@@ -110,7 +110,11 @@ fn append_bus_log(m: &PendingMsg) {
         "retain": m.retain,
         "payload": m.payload,
     });
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+    {
         let _ = writeln!(f, "{}", line);
     }
 }
@@ -161,8 +165,10 @@ fn pump_widget_messages(
     // ---- Phase 2: update the retained store ----
     for m in &pending {
         if m.retain {
-            bus.retained
-                .insert((m.project, m.topic.clone()), (m.payload.clone(), m.sender.clone()));
+            bus.retained.insert(
+                (m.project, m.topic.clone()),
+                (m.payload.clone(), m.sender.clone()),
+            );
         }
         append_bus_log(m);
     }
@@ -228,7 +234,11 @@ pub(crate) fn subprocess_widget_id(entity: Entity) -> String {
 }
 
 fn send_sub_message(io: &WidgetIO, topic: String, payload: Value, sender: String) {
-    let ev = HostEvent::Message { topic, payload, sender };
+    let ev = HostEvent::Message {
+        topic,
+        payload,
+        sender,
+    };
     if let Ok(json) = serde_json::to_string(&ev) {
         let _ = io.tx.send(json);
     }

@@ -475,7 +475,7 @@ const OP_TABLE: &[(&str, &str, &[&str], &str)] = &[
     ("eval", "read", &["target", "args?"], "JIT-run a definition and return its real value as JSON. Returns any type; args may be any type (Int/Float/Bool/String/Array<T>/struct/enum, nested freely) except closures."),
     // ---- writes ----
     ("add", "write", &["source"], "Add new definition(s) from surface source."),
-    ("update", "write", &["name", "source", "dry_run?", "expect_hash?", "expect_root?"], "Replace a definition's body; auto-propagates the new hash up the dependency cone."),
+    ("update", "write", &["name", "source", "dry_run?", "propagate?", "expect_hash?", "expect_root?"], "Replace a definition's body. Dependents are NOT touched by default. With `propagate: true`, rewrites the cone (same-type only)."),
     ("rename", "write", &["from", "to", "expect_hash?"], "Rename a definition (namespace-only, O(1), never breaks callers)."),
     ("move", "write", &["from", "to"], "Move a definition to a new (possibly dotted) name."),
     ("inline", "write", &["name", "dry_run?"], "Inline a definition into its callers (capture-correct beta reduction)."),
@@ -484,6 +484,8 @@ const OP_TABLE: &[(&str, &str, &[&str], &str)] = &[
     ("delete", "write", &["name"], "Remove a name (the definition stays on disk; history is immutable)."),
     ("import", "write", &["path"], "Import a definition bundle (idempotent; shared hashes dedupe)."),
     ("export", "write", &["names", "out"], "Export names plus their transitive hash-closure to a bundle file."),
+    ("propagate", "write", &["name", "dry_run?"], "Verify all transitive dependents typecheck against the current hash (same-type safety check)."),
+    ("todos", "read", &[], "List the pending worklist of dependents that still reference an old hash after type changes."),
     // ---- branch / VCS ----
     ("branch", "vcs", &["name", "from?"], "Create a branch (O(1), shares all definitions)."),
     ("switch", "vcs", &["name"], "Switch the active branch."),
@@ -503,6 +505,8 @@ fn canonical_op(raw: &str) -> Option<&'static str> {
         "search" | "by_type" | "search_by_type" => "find_by_type",
         "reorder" | "permute_params" => "reorder_params",
         "type" | "typeof" => "type_of",
+        "propagate_cone" | "rewire" => "propagate",
+        "worklist" | "pending" => "todos",
         "list" | "names" => "ls",
         "remove" | "rm" => "delete",
         "run" => "eval",
@@ -610,6 +614,8 @@ fn dispatch(state: &mut ServerState, req: &Json) -> OpResult {
         // ---- Writes ----
         "add" => op_add(state, &params),
         "update" => op_update(state, req, &params),
+        "propagate" => op_propagate(state, &params),
+        "todos" => op_todos(state, &params),
         "rename" => op_rename(state, req, &params),
         "move" => op_move(state, req, &params),
         "inline" => op_inline(state, req, &params),
@@ -940,18 +946,60 @@ fn op_update(state: &mut ServerState, req: &Json, params: &Json) -> OpResult {
     let name = require_str(params, "name")?;
     let source = require_str(params, "source")?;
     let dry_run = opt_bool(params, "dry_run");
+    let propagate = opt_bool(params, "propagate");
     // Staleness: expect_hash is checked against `name`'s current hash.
     check_preconditions(state, req, Some(&name))?;
-    let result = if dry_run {
-        edit::update_dry_run(&mut state.cb, &name, &source)?
-    } else {
-        let r = edit::update(&mut state.cb, &name, &source)?;
-        state.refresh_index();
-        let branch = active_branch(state);
-        refresh_todos(state, &branch, &r.todos);
-        r
+    let result = match (dry_run, propagate) {
+        (false, false) => {
+            let r = edit::update(&mut state.cb, &name, &source)?;
+            state.refresh_index();
+            let branch = active_branch(state);
+            refresh_todos(state, &branch, &r.todos);
+            r
+        }
+        (true, false) => edit::update_dry_run(&mut state.cb, &name, &source)?,
+        (false, true) => {
+            let r = edit::update_propagate(&mut state.cb, &name, &source)?;
+            state.refresh_index();
+            r
+        }
+        (true, true) => edit::update_dry_run_propagate(&mut state.cb, &name, &source)?,
     };
     Ok(edit_result_json(&result))
+}
+
+fn op_propagate(state: &mut ServerState, params: &Json) -> OpResult {
+    let name = require_str(params, "name")?;
+    let dry_run = opt_bool(params, "dry_run");
+    let result = if dry_run {
+        edit::propagate_dry_run(&mut state.cb, &name)?
+    } else {
+        edit::propagate(&mut state.cb, &name)?
+    };
+    Ok(edit_result_json(&result))
+}
+
+fn op_todos(state: &mut ServerState, params: &Json) -> OpResult {
+    let branch = active_branch(state);
+    let _ = params;
+    let store = ai_lang::todostore::TodoStore::load(state.cb.root(), &branch)
+        .map_err(|e| OpError::new("Codebase", format!("todo store: {}", e)))?;
+    let todos = store.list();
+    let items: Vec<Json> = todos
+        .iter()
+        .map(|t| {
+            Json::obj([
+                ("hash".to_string(), hash_json(&t.hash)),
+                ("name".to_string(), opt_name_json(&t.name)),
+                ("message".to_string(), Json::Str(t.message.clone())),
+                ("code".to_string(), Json::Str(t.code.clone())),
+            ])
+        })
+        .collect();
+    Ok(Json::obj([
+        ("branch".to_string(), Json::Str(branch)),
+        ("todos".to_string(), Json::Array(items)),
+    ]))
 }
 
 fn op_rename(state: &mut ServerState, req: &Json, params: &Json) -> OpResult {

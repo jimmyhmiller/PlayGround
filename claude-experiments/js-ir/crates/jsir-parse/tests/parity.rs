@@ -96,3 +96,102 @@ fn dce_removes_dead_vars() {
     assert!(!txt.contains("\"dead\""), "dead var still present:\n{txt}");
     assert!(txt.contains("\"live\""), "live var was wrongly removed:\n{txt}");
 }
+
+#[test]
+fn dce_in_place_matches_copying() {
+    let src = "var dead = 1 + 2; var live = 3; live = live + 1; var d2 = 9;";
+    let copying = {
+        let m = jsir_parse::parse_to_module(src).unwrap();
+        jsir_ir::build::dce(&m).0.print()
+    };
+    let inplace = {
+        let mut m = jsir_parse::parse_to_module(src).unwrap();
+        let removed = jsir_ir::build::dce_in_place(&mut m);
+        assert_eq!(removed, 2, "dead + d2");
+        m.print()
+    };
+    assert_eq!(copying, inplace, "in-place DCE output must equal copying DCE");
+    assert!(!inplace.contains("\"dead\"") && !inplace.contains("\"d2\""));
+    assert!(inplace.contains("\"live\""));
+}
+
+#[test]
+fn tape_is_rpn_balanced() {
+    use jsir_parse::tk;
+    // statements are roots; every node consumes `nargs` and produces 1, so the
+    // stack ends at the number of top-level statements and never goes negative.
+    let cases = [
+        ("var a = 1 + 2 * 3; a = a + 1;", 2),
+        ("-x; y++; ++z; var p = 5, q = 6;", 4),
+        ("a; b; c;", 3),
+    ];
+    for (src, stmts) in cases {
+        let tape = jsir_parse::parse_to_tape(src).unwrap();
+        let mut stack: i64 = 0;
+        let mut roots = 0;
+        for n in &tape {
+            stack -= n.nargs as i64;
+            assert!(stack >= 0, "RPN underflow in {src:?} at {n:?}");
+            stack += 1;
+            if matches!(n.kind, tk::EXPR_STMT | tk::VAR_DECL) {
+                roots += 1;
+            }
+        }
+        assert_eq!(stack, stmts, "root count for {src:?}");
+        assert_eq!(roots, stmts, "statement node count for {src:?}");
+    }
+}
+
+/// The js-ir DCE eliminates the *same set* oxc's `Minifier::dce` does.
+#[test]
+fn dce_same_elimination_as_oxc() {
+    use std::collections::BTreeSet;
+    use jsir_ir::{IrRead, OpId};
+    use oxc_allocator::Allocator;
+    use oxc_ast::ast::{BindingPatternKind, Statement};
+    use oxc_minifier::{CompressOptions, Minifier, MinifierOptions};
+    use oxc_parser::Parser;
+    use oxc_span::SourceType;
+
+    // dead/d2: declared, never read → removable. live/keep: read → kept.
+    let src = "var dead = 1 + 2; var live = 3; live = live + 1; var d2 = 7; var keep = 0; keep = keep + 1;";
+
+    // ours
+    let m = jsir_parse::parse_to_module(src).unwrap();
+    let (out, _) = jsir_ir::build::dce(&m);
+    let mut ours = BTreeSet::new();
+    for i in 0..out.op_count() {
+        let op = OpId(i as u32);
+        if out.op_name(op) == "jsir.variable_declaration" {
+            for r in out.regions(op) {
+                for b in out.region_blocks(*r) {
+                    for &o in out.block_ops(*b) {
+                        if out.op_name(o) == "jsir.identifier_ref" {
+                            if let Some(n) = out.str_attr(o, "name") {
+                                ours.insert(n.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // oxc
+    let alloc = Allocator::default();
+    let mut ret = Parser::new(&alloc, src, SourceType::default()).parse();
+    let opts = MinifierOptions { mangle: None, compress: Some(CompressOptions::default()) };
+    Minifier::new(opts).dce(&alloc, &mut ret.program);
+    let mut oxc = BTreeSet::new();
+    for stmt in &ret.program.body {
+        if let Statement::VariableDeclaration(d) = stmt {
+            for decl in &d.declarations {
+                if let BindingPatternKind::BindingIdentifier(bi) = &decl.id.kind {
+                    oxc.insert(bi.name.to_string());
+                }
+            }
+        }
+    }
+    assert_eq!(ours, oxc, "ours kept {ours:?}, oxc kept {oxc:?}");
+    assert!(ours.contains("live") && ours.contains("keep"));
+    assert!(!ours.contains("dead") && !ours.contains("d2"));
+}

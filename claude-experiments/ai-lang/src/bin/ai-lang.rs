@@ -67,10 +67,12 @@ structural editing (Phase 1):
   ai-lang rename <from> <to>               INSTANT, unbreakable rename. Moves a
                                            name alias only; recompiles nothing and
                                            breaks no callers (refs are by hash).
-  ai-lang update <name> <file> [--dry-run] replace <name>'s def with <file>'s source
-                                           and propagate the new hash up its whole
-                                           dependency cone (Unison-style update).
+  ai-lang update <name> <file> [--dry-run] replace <name>'s def with <file>'s source.
+       [--propagate]                      Dependents are NOT touched by default —
+                                           they still reference the old hash.
                                            --dry-run reports impact without committing.
+                                           --propagate rewrites the whole dependency
+                                           cone (same-type only; errors on type change).
   ai-lang usages <name|hashprefix>         exact reverse-dependency lookup (no grep)
   ai-lang deps <name|hashprefix>           forward dependencies of a definition
        [--reverse] [--transitive]         --reverse = who depends on it;
@@ -78,6 +80,15 @@ structural editing (Phase 1):
   ai-lang view <name|hashprefix>           project a stored def back to source
   ai-lang effects <name|hashprefix>        show inferred effects + guarantees
                                            (pure / mobile / cacheable)
+  ai-lang eval <name> [<args>...]          JIT-run a def and print its value as
+                                           JSON. Args are JSON values matching
+                                           the def's parameter types.
+
+  ai-lang propagate <name> [--dry-run]    verify that every transitive dependent of
+                                           <name> typechecks against its current hash;
+                                           reports the cone. Same-type safety check.
+  ai-lang todos                            list the worklist of dependents that still
+                                           reference an old hash after type changes
 
 structural refactors (Phase 3, all on the canonical AST, then propagate):
   ai-lang move <from> <to>                 namespace-path move (like rename; the
@@ -265,14 +276,17 @@ fn main() {
             cmd_rename(&args[0], &args[1], flags.json, &cb_path);
         }
         "update" => {
-            // Positional: <name> <file>. A `--dry-run` flag may appear anywhere
-            // (split_flags leaves it as a positional since it's update-only).
+            // Positional: <name> <file>. --dry-run and --propagate may appear anywhere.
             let mut dry_run = false;
+            let mut propagate = false;
             let positional: Vec<&String> = args
                 .iter()
                 .filter(|a| {
                     if a.as_str() == "--dry-run" {
                         dry_run = true;
+                        false
+                    } else if a.as_str() == "--propagate" {
+                        propagate = true;
                         false
                     } else {
                         true
@@ -282,7 +296,7 @@ fn main() {
             if positional.len() != 2 {
                 usage(2);
             }
-            cmd_update(positional[0], positional[1], dry_run, flags.json, &cb_path);
+            cmd_update(positional[0], positional[1], dry_run, propagate, flags.json, &cb_path);
         }
         "move" => {
             if args.len() != 2 {
@@ -354,6 +368,27 @@ fn main() {
                 &cb_path,
             );
         }
+        "propagate" => {
+            let mut dry_run = false;
+            let positional: Vec<&String> = args
+                .iter()
+                .filter(|a| {
+                    if a.as_str() == "--dry-run" {
+                        dry_run = true;
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .collect();
+            if positional.len() != 1 {
+                usage(2);
+            }
+            cmd_propagate(positional[0], dry_run, flags.json, &cb_path);
+        }
+        "todos" => {
+            cmd_todos(flags.json, &cb_path);
+        }
         "usages" => {
             if args.len() != 1 {
                 usage(2);
@@ -383,6 +418,12 @@ fn main() {
                 usage(2);
             }
             cmd_effects(&args[0], flags.json, &cb_path);
+        }
+        "eval" => {
+            if args.is_empty() {
+                usage(2);
+            }
+            cmd_eval(&args[0], &args[1..], flags.json, &cb_path);
         }
         "export" => {
             // <name...> --out <path>
@@ -727,6 +768,10 @@ fn cmd_add(file: &str, cb_path: &PathBuf) {
 
     let mut cb = Codebase::open(cb_path).expect("open codebase");
     cb.store_resolved_module(&r).expect("store resolved module");
+    // Persist local names so `view` shows readable parameter/let names.
+    if let Ok(names) = ai_lang::resolve::local_names_for_module(&m) {
+        let _ = cb.store_local_names_batch(&names);
+    }
     let typed = cb.store_typecache(&tc).expect("store typecache");
 
     // Rebuild + persist the dependency index so `deps`/`usages` are fast and
@@ -1050,6 +1095,195 @@ fn cmd_view(target: &str, json: bool, cb_path: &PathBuf) {
         );
     } else {
         println!("{}", source);
+    }
+}
+
+// =============================================================================
+// `eval`
+// =============================================================================
+
+fn cmd_eval(name: &str, arg_strs: &[String], _json: bool, cb_path: &PathBuf) {
+    init_native_target().expect("init native target");
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let hash = match cb.get_name(name) {
+        Some(h) => h,
+        None => {
+            eprintln!("eval: unknown name: {} (try `ai-lang ls`)", name);
+            std::process::exit(1);
+        }
+    };
+
+    // Look up the def's type.
+    let scheme = match cb.types().get(&hash) {
+        Some(s) => s.clone(),
+        None => {
+            eprintln!("eval: no cached type for {}; run `ai-lang add` first", name);
+            std::process::exit(1);
+        }
+    };
+    let (params, ret) = match &scheme {
+        ai_lang::typecheck::TypeScheme::Fn { params, ret, .. } => (params.clone(), ret.clone()),
+        _ => {
+            eprintln!("eval: `{}` is not a function", name);
+            std::process::exit(1);
+        }
+    };
+
+    // Parse JSON args from the command line.
+    let mut args_json: Vec<ai_lang::jsonl::Json> = Vec::new();
+    for (i, s) in arg_strs.iter().enumerate() {
+        match parse_json_literal(s) {
+            Ok(j) => args_json.push(j),
+            Err(e) => {
+                eprintln!("eval: arg {} is not valid JSON: {}", i, e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    match ai_lang::evalrun::eval(&cb, hash, &params, &ret, &args_json) {
+        Ok(result) => {
+            println!("{}", result.value.to_string());
+        }
+        Err(e) => {
+            eprintln!("eval: {}: {}", e.kind(), e.message());
+            std::process::exit(1);
+        }
+    }
+}
+
+/// Parse a simple JSON literal from a string.
+fn parse_json_literal(s: &str) -> Result<ai_lang::jsonl::Json, String> {
+    use ai_lang::jsonl::Json;
+    let s = s.trim();
+    if s.starts_with('"') && s.ends_with('"') {
+        return Ok(Json::Str(s[1..s.len()-1].to_owned()));
+    }
+    if s == "true" { return Ok(Json::Bool(true)); }
+    if s == "false" { return Ok(Json::Bool(false)); }
+    if s == "null" { return Ok(Json::Null); }
+    if let Ok(n) = s.parse::<i64>() { return Ok(Json::Int(n)); }
+    if let Ok(f) = s.parse::<f64>() { return Ok(Json::Float(f)); }
+    if s.starts_with('[') && s.ends_with(']') {
+        let inner = &s[1..s.len()-1];
+        if inner.trim().is_empty() {
+            return Ok(Json::Array(Vec::new()));
+        }
+        let mut arr = Vec::new();
+        for part in split_json_array(inner) {
+            arr.push(parse_json_literal(part)?);
+        }
+        return Ok(Json::Array(arr));
+    }
+    // Object (delegate to the JSON parser for robustness)
+    if s.starts_with('{') && s.ends_with('}') {
+        return match ai_lang::jsonl::parse(s) {
+            Ok(j) => Ok(j),
+            Err(e) => Err(format!("invalid JSON object: {}", e)),
+        };
+    }
+    Err(format!("cannot parse as JSON: {}", s))
+}
+
+/// Split a JSON array body by top-level commas (respecting nesting).
+fn split_json_array(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '[' | '{' => depth += 1,
+            ']' | '}' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(s[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    let last = s[start..].trim();
+    if !last.is_empty() {
+        parts.push(last);
+    }
+    parts
+}
+
+// =============================================================================
+// `propagate`
+// =============================================================================
+
+fn cmd_propagate(name: &str, dry_run: bool, json: bool, cb_path: &PathBuf) {
+    let mut cb = Codebase::open(cb_path).expect("open codebase");
+    let res = if dry_run {
+        edit::propagate_dry_run(&mut cb, name)
+    } else {
+        edit::propagate(&mut cb, name)
+    };
+    match res {
+        Ok(r) => {
+            if json {
+                print_update_json(&r, dry_run);
+            } else if r.propagated.is_empty() {
+                println!("`{}` has no dependents to propagate to", name);
+            } else {
+                println!("`{}` is reachable from {} dependent(s):", name, r.propagated.len());
+                for c in &r.propagated {
+                    let nm = c.name.as_deref().unwrap_or("<unnamed>");
+                    println!("  {}  {}", nm, &c.old.to_hex()[..12]);
+                }
+            }
+        }
+        Err(e) => {
+            if json {
+                println!(
+                    "{{\"ok\":false,\"error\":{{\"message\":\"{}\"}}}}",
+                    json_escape(&e.to_string())
+                );
+            } else {
+                eprintln!("propagate: {}", e);
+            }
+            std::process::exit(1);
+        }
+    }
+}
+
+// =============================================================================
+// `todos`
+// =============================================================================
+
+fn cmd_todos(json: bool, cb_path: &PathBuf) {
+    use ai_lang::todostore::TodoStore;
+    let cb = Codebase::open(cb_path).expect("open codebase");
+    let branch = ai_lang::namespace::current_branch(&cb).unwrap_or_else(|_| "main".to_string());
+    let store = match TodoStore::load(cb.root(), &branch) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("todos: cannot load todo store: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let todos = store.list();
+    if json {
+        let items: Vec<String> = todos
+            .iter()
+            .map(|t| {
+                format!(
+                    "{{\"hash\":\"{}\",\"name\":{},\"message\":\"{}\"}}",
+                    t.hash.to_hex(),
+                    json_opt_name(&t.name),
+                    json_escape(&t.message)
+                )
+            })
+            .collect();
+        println!("{{\"branch\":\"{}\",\"todos\":[{}]}}", json_escape(&branch), items.join(","));
+    } else if todos.is_empty() {
+        println!("no pending todos on branch `{}`", branch);
+    } else {
+        println!("{} todo(s) on branch `{}`:", todos.len(), branch);
+        for t in &todos {
+            let nm = t.name.as_deref().unwrap_or("<unnamed>");
+            println!("  {}  {}  {}", nm, &t.hash.to_hex()[..12], t.message);
+        }
     }
 }
 
@@ -1687,18 +1921,28 @@ fn json_str(s: &str) -> String {
 /// `ai-lang update <name> <file> [--dry-run] [--json]` — replace the def
 /// `<name>` with the source read from `<file>` and propagate the new hash up
 /// its dependency cone. `--dry-run` reports the impact without committing.
-fn cmd_update(name: &str, file: &str, dry_run: bool, json: bool, cb_path: &PathBuf) {
+fn cmd_update(name: &str, file: &str, dry_run: bool, propagate: bool, json: bool, cb_path: &PathBuf) {
     init_native_target().expect("init native target");
-    let source = std::fs::read_to_string(file).unwrap_or_else(|e| {
-        eprintln!("update: cannot read source file {}: {}", file, e);
-        std::process::exit(1);
-    });
+    let source = if file == "-" {
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf).unwrap_or_else(|e| {
+            eprintln!("update: cannot read stdin: {}", e);
+            std::process::exit(1);
+        });
+        buf
+    } else {
+        std::fs::read_to_string(file).unwrap_or_else(|e| {
+            eprintln!("update: cannot read source file {}: {}", file, e);
+            std::process::exit(1);
+        })
+    };
 
     let mut cb = Codebase::open(cb_path).expect("open codebase");
-    let res = if dry_run {
-        edit::update_dry_run(&mut cb, name, &source)
-    } else {
-        edit::update(&mut cb, name, &source)
+    let res = match (dry_run, propagate) {
+        (false, false) => edit::update(&mut cb, name, &source),
+        (true, false) => edit::update_dry_run(&mut cb, name, &source),
+        (false, true) => edit::update_propagate(&mut cb, name, &source),
+        (true, true) => edit::update_dry_run_propagate(&mut cb, name, &source),
     };
     let res = match res {
         Ok(r) => r,
@@ -1714,6 +1958,16 @@ fn cmd_update(name: &str, file: &str, dry_run: bool, json: bool, cb_path: &PathB
             std::process::exit(1);
         }
     };
+
+    // Persist todos to the on-disk store so `ai-lang todos` can show them.
+    if !res.todos.is_empty() {
+        let branch = ai_lang::namespace::current_branch(&cb).unwrap_or_else(|_| "main".to_string());
+        if let Ok(mut store) = ai_lang::todostore::TodoStore::load(cb.root(), &branch) {
+            store.record(&res.todos);
+            store.clear_resolved(&cb);
+            let _ = store.save();
+        }
+    }
 
     if json {
         print_update_json(&res, dry_run);

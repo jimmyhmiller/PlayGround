@@ -811,7 +811,10 @@ fn text_input_keyboard(
                 }
                 continue;
             }
-            KeyCode::KeyV if mod_doc => {
+            // Cmd/Ctrl+V (no Shift) = paste. Cmd+Shift+V is reserved for
+            // app-global shortcuts (profiler vsync toggle, etc.) and must
+            // not leak in here as a paste.
+            KeyCode::KeyV if mod_doc && !shift => {
                 let multiline = ti.multiline;
                 if paste(&mut ti.state, multiline) {
                     changed = true;

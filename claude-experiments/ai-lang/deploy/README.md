@@ -31,8 +31,8 @@ it.
 ```
 def handler(event: String) -> String =
     match json_field(event, "name") {
-        Ok(name) => str3("{\"greeting\":\"hello ", name, "\"}"),
-        Err(e)   => "{\"greeting\":\"hello world\"}"
+        Result::Ok(name) => str3("{\"greeting\":\"hello ", name, "\"}"),
+        Result::Err(e)   => "{\"greeting\":\"hello world\"}"
     }
 
 def main() -> Int = lambda_serve(|e: String| handler(e))

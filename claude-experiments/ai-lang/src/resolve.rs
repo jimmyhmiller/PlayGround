@@ -5,24 +5,26 @@
 //! - **Locals → de Bruijn.** Lexical variable lookups become `LocalVar(idx)`,
 //!   where `idx` counts outwards from the innermost binder (parameter 0 of
 //!   the current function is the outermost binder for that function).
-//! - **Top-level names → hashes.** Each `def` is processed in source order,
-//!   producing a `Hash`. References to a previously-resolved `def` become
-//!   `TopRef(hash)`.
+//! - **Top-level names → hashes.** Each `def` is processed via a Tarjan-SCC
+//!   pass over the call graph, supporting full mutual recursion. References
+//!   to in-module fns/states become `SelfRef`/`StateSelfRef` during hashing
+//!   and `TopRef`/`StateRef` in the stored form.
 //! - **Operators → builtins.** `+`, `*`, `==`, etc. lower to `BuiltinRef`
-//!   under stable string ids (`core/i64.add`, `core/bool.and`, …). For v1
-//!   we only have `Int` and `Bool`, so the dispatch is static; a real
-//!   typechecker will replace this with type-directed overload resolution.
-//! - **Named types → builtins.** `Int`/`Bool`/`String`/`Float`/`Bytes` map
-//!   to `Type::Builtin`. Anything else is an error in v1 (no user types yet).
+//!   under stable string ids (`core/i64.add`, `core/i64.eq`, …). Dispatch is
+//!   type-directed by the typechecker.
+//! - **Named types → builtins / user types.** `Int`/`Bool`/`String`/`Float`/
+//!   `Bytes` map to `Type::Builtin`. User-defined structs/enums become
+//!   `Type::TypeRef(hash)`. Type-parameter references become `Type::TypeVar`.
+//! - **Generics.** Type parameters on defs/structs/enums are resolved to
+//!   `TypeVar` de Bruijn indices within their scope. Generic instantiations
+//!   (`List<Int>`) produce `Type::Apply`. Turbofish (`f::<T>(…)`) passes
+//!   explicit type arguments.
 //!
-//! Out of scope for v1 (each errors cleanly, never silently):
+//! Remaining v1 restrictions:
 //!
-//! - Mutually recursive top-level groups — must be processable in source
-//!   order. A `def` referring to a later `def` errors with `UnknownName`,
-//!   not a stub `SelfRef`. Component hashing (Tarjan SCC over the call
-//!   graph) is a follow-up.
-//! - Closures, lambdas, `let`-expressions, `if`/`match` — the parser does
-//!   not yet produce these, so the resolver does not yet handle them.
+//! - Mutually recursive **struct types** are not yet supported (forward
+//!   references to later structs error cleanly). Fn defs and state bindings
+//!   ARE mutually recursive via Tarjan SCC.
 
 use crate::ast::{Def, Expr, MatchArm, Pattern, Type};
 use crate::codec::encode_def;
@@ -105,7 +107,7 @@ impl core::fmt::Display for ResolveError {
             ResolveError::ForwardOrCyclicRef { name, .. } => write!(
                 f,
                 "`{}` is referenced before it is defined; \
-                 forward references and mutual recursion are not yet supported",
+                 forward references are not supported for this kind of definition",
                 name
             ),
             ResolveError::UnknownType { name, .. } => {

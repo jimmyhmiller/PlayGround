@@ -48,8 +48,8 @@ use bevy::sprite::Anchor;
 use bevy::text::LineHeight;
 use claude_bus_bevy::ClaudeBusEvent;
 use pane_bevy::{
-    MARGIN, PaneContentPressed, PaneFont, PaneFontMetrics, PaneHotZones, PaneKindMarker,
-    PaneKindSpec, PaneRect, PaneRegistry, PaneTitle, TITLE_H, FocusedTextInput, TextInput,
+    FocusedTextInput, MARGIN, PaneContentPressed, PaneFont, PaneFontMetrics, PaneHotZones,
+    PaneKindMarker, PaneKindSpec, PaneRect, PaneRegistry, PaneTitle, TITLE_H, TextInput,
     TextInputEvent, TextInputStyle, focus_text_input, spawn_text_input,
 };
 use serde_json::Value;
@@ -81,8 +81,7 @@ pub use button_material::{
 /// the work depends on `on_frame` ticking). This hook lets a worker
 /// nudge the loop awake. widget-bevy deliberately doesn't depend on
 /// winit, so the host installs a closure that fires its `EventLoopProxy`.
-static WAKEUP_HOOK: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> =
-    std::sync::OnceLock::new();
+static WAKEUP_HOOK: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>> = std::sync::OnceLock::new();
 
 /// Install the main-loop wakeup callback. Called once by the host at
 /// startup. Subsequent calls are ignored (first hook wins).
@@ -288,7 +287,13 @@ pub struct WidgetInputFocus {
 
 impl WidgetInputFocus {
     pub fn new(id: String) -> Self {
-        Self { id, value: String::new(), caret: 0, blink: 0.0, multiline: false }
+        Self {
+            id,
+            value: String::new(),
+            caret: 0,
+            blink: 0.0,
+            multiline: false,
+        }
     }
 }
 
@@ -398,7 +403,13 @@ fn update_text_selection(
         if !sel.dragging {
             continue;
         }
-        sel.focus = char_index_at_x(&sel.text, sel.rect.min.x, sel.font_size, &metrics, ev.local_pt.x);
+        sel.focus = char_index_at_x(
+            &sel.text,
+            sel.rect.min.x,
+            sel.font_size,
+            &metrics,
+            ev.local_pt.x,
+        );
     }
 }
 
@@ -434,7 +445,10 @@ fn render_text_selection_highlight(
         commands.entity(e).try_despawn();
     }
     let base = theme.color(style_bevy::tokens::ACCENT);
-    let color = Color::LinearRgba(LinearRgba { alpha: 0.32, ..base });
+    let color = Color::LinearRgba(LinearRgba {
+        alpha: 0.32,
+        ..base
+    });
     for (sel, chrome) in &sels {
         let (a, b) = (sel.anchor.min(sel.focus), sel.anchor.max(sel.focus));
         if a == b {
@@ -442,7 +456,9 @@ fn render_text_selection_highlight(
         }
         let chars: Vec<char> = sel.text.chars().collect();
         let pre: String = chars[..a.min(chars.len())].iter().collect();
-        let mid: String = chars[a.min(chars.len())..b.min(chars.len())].iter().collect();
+        let mid: String = chars[a.min(chars.len())..b.min(chars.len())]
+            .iter()
+            .collect();
         let x0 = sel.rect.min.x + metrics.measure(&pre, sel.font_size);
         let w = metrics.measure(&mid, sel.font_size);
         if w <= 0.0 {
@@ -565,10 +581,7 @@ fn update_widget_hover(
     mut commands: Commands,
     windows: Query<(Entity, &Window)>,
     viewport: Res<pane_bevy::PaneViewport>,
-    all_panes: Query<
-        (Entity, &pane_bevy::PaneRect, Option<&Visibility>),
-        With<pane_bevy::PaneTag>,
-    >,
+    all_panes: Query<(Entity, &pane_bevy::PaneRect, Option<&Visibility>), With<pane_bevy::PaneTag>>,
     targets: Query<&WidgetTargets>,
     mut widgets: Query<
         (
@@ -611,15 +624,12 @@ fn update_widget_hover(
         let new_id: Option<String> = match (topmost, pane_rect, cursor) {
             (Some((pt, top)), Some(rect), Some(_)) if top == pane => {
                 let local = pane_bevy::pt_to_content_local(pt, &rect);
-                targets
-                    .get(pane)
-                    .ok()
-                    .and_then(|t| {
-                        t.clicks
-                            .iter()
-                            .find(|c| c.rect.contains(local))
-                            .map(|c| c.id.clone())
-                    })
+                targets.get(pane).ok().and_then(|t| {
+                    t.clicks
+                        .iter()
+                        .find(|c| c.rect.contains(local))
+                        .map(|c| c.id.clone())
+                })
             }
             _ => None,
         };
@@ -652,10 +662,7 @@ fn handle_widget_wheel(
     windows: Query<&Window>,
     keys: Res<ButtonInput<KeyCode>>,
     viewport: Res<pane_bevy::PaneViewport>,
-    all_panes: Query<
-        (Entity, &pane_bevy::PaneRect, Option<&Visibility>),
-        With<pane_bevy::PaneTag>,
-    >,
+    all_panes: Query<(Entity, &pane_bevy::PaneRect, Option<&Visibility>), With<pane_bevy::PaneTag>>,
     mut widgets: Query<
         (Entity, &mut WidgetScroll, &pane_bevy::PaneKindMarker),
         With<pane_bevy::PaneTag>,
@@ -680,7 +687,9 @@ fn handle_widget_wheel(
         return;
     }
     let Ok(win) = windows.single() else { return };
-    let Some(pt) = win.cursor_position() else { return };
+    let Some(pt) = win.cursor_position() else {
+        return;
+    };
 
     // Topmost pane of ANY kind under the cursor. If the topmost isn't
     // a widget, the wheel belongs to whatever's on top (editor scroll,
@@ -713,7 +722,11 @@ fn handle_widget_wheel(
 /// covers the full pane rect so there's no GPU-side clip line.
 fn apply_widget_scroll(
     widgets: Query<
-        (&WidgetScroll, &pane_bevy::PaneChrome, &pane_bevy::PaneKindMarker),
+        (
+            &WidgetScroll,
+            &pane_bevy::PaneChrome,
+            &pane_bevy::PaneKindMarker,
+        ),
         (
             With<pane_bevy::PaneTag>,
             Or<(Changed<WidgetScroll>, Changed<pane_bevy::PaneChrome>)>,
@@ -756,8 +769,8 @@ fn forward_claude_events(
     // hands each event out exactly once per read site).
     let mut lines: Vec<String> = Vec::new();
     for ev in events.read() {
-        let payload: serde_json::Value = serde_json::from_str(&ev.payload_json)
-            .unwrap_or(serde_json::Value::Null);
+        let payload: serde_json::Value =
+            serde_json::from_str(&ev.payload_json).unwrap_or(serde_json::Value::Null);
         let host_ev = HostEvent::ClaudeEvent {
             kind: ev.kind.clone(),
             payload,
@@ -789,7 +802,8 @@ fn forward_ticks(
 ) {
     const TICK_INTERVAL_SECS: f32 = 1.0 / 30.0;
     let now = time.elapsed_secs();
-    for (kind, mut render_state, io) in &mut widgets {        if kind.0 != PANE_KIND || !render_state.init_sent {
+    for (kind, mut render_state, io) in &mut widgets {
+        if kind.0 != PANE_KIND || !render_state.init_sent {
             continue;
         }
         let last = render_state.last_tick_secs;
@@ -969,6 +983,7 @@ fn widget_spawn(world: &mut World, entity: Entity, content_root: Entity, config:
                 targets,
                 WidgetContentRoot(content_root),
                 WidgetScroll::default(),
+                WidgetHover::default(),
                 process,
                 io,
             ));
@@ -982,6 +997,7 @@ fn widget_spawn(world: &mut World, entity: Entity, content_root: Entity, config:
                 targets,
                 WidgetContentRoot(content_root),
                 WidgetScroll::default(),
+                WidgetHover::default(),
             ));
         }
     }
@@ -1090,7 +1106,10 @@ fn widget_snapshot(world: &World, entity: Entity) -> Value {
         );
     }
     if let Some(p) = &w.cwd {
-        out.insert("cwd".into(), Value::String(p.to_string_lossy().into_owned()));
+        out.insert(
+            "cwd".into(),
+            Value::String(p.to_string_lossy().into_owned()),
+        );
     }
     if !w.last_state.is_null() {
         out.insert("state".into(), w.last_state.clone());
@@ -1190,7 +1209,11 @@ fn tick_widget_io(
                                 }
                             }
                         }
-                        Ok(WidgetMsg::Emit { topic, payload, retain }) => {
+                        Ok(WidgetMsg::Emit {
+                            topic,
+                            payload,
+                            retain,
+                        }) => {
                             // Publish onto the widget↔widget bus; the
                             // pump delivers it to same-project widgets
                             // next frame (see `crate::msgbus`).
@@ -1248,7 +1271,7 @@ fn rerender_widgets(
     let blink_phase = time.elapsed_secs().rem_euclid(1.0);
     let caret_visible = blink_phase < 0.5;
     for (
-        _pane,
+        pane,
         kind,
         rect,
         root,
@@ -1269,8 +1292,7 @@ fn rerender_widgets(
         }
 
         // This widget's project theme (falls back to the active theme).
-        let w_theme: &style_bevy::Theme =
-            proj.and_then(|p| themes.get(p.0)).unwrap_or(&theme);
+        let w_theme: &style_bevy::Theme = proj.and_then(|p| themes.get(p.0)).unwrap_or(&theme);
         let palette = render::WidgetPalette::from_theme(w_theme);
 
         // PaneRect is now canvas-units; the pane entity Transform
@@ -1298,6 +1320,8 @@ fn rerender_widgets(
             }
             continue;
         }
+
+        let _prof = pane_bevy::prof::pane_span(pane.to_bits(), "widget");
 
         if let Ok(children) = children_q.get(root.0) {
             for c in children.iter() {
@@ -1334,6 +1358,7 @@ fn rerender_widgets(
             let ctx = render::LayoutCtx {
                 font: pane_font.0.clone(),
                 metrics: *metrics,
+                owner_pane: pane,
                 content_root: root.0,
                 content_size,
                 palette: palette.clone(),
@@ -1423,8 +1448,7 @@ fn render_canvas_items(
                 z,
                 rotation,
             } => {
-                let bevy_color = parse_canvas_color(color)
-                    .unwrap_or(Color::srgb(0.20, 0.22, 0.26));
+                let bevy_color = parse_canvas_color(color).unwrap_or(Color::srgb(0.20, 0.22, 0.26));
                 let anchor_cmp = canvas_anchor_to_bevy(*anchor);
                 let mut transform = Transform::from_xyz(*x, -*y, *z);
                 if *rotation != 0.0 {
@@ -1503,7 +1527,11 @@ pub(crate) fn parse_canvas_color(s: &str) -> Option<Color> {
             let r = u8::from_str_radix(&s[0..2], 16).ok()?;
             let g = u8::from_str_radix(&s[2..4], 16).ok()?;
             let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-            Some(Color::srgb(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0))
+            Some(Color::srgb(
+                r as f32 / 255.0,
+                g as f32 / 255.0,
+                b as f32 / 255.0,
+            ))
         }
         8 => {
             let r = u8::from_str_radix(&s[0..2], 16).ok()?;
@@ -2052,7 +2080,11 @@ fn apply_command_change(
             return;
         }
         render_state.current_frame = None;
-        (widget.command.clone(), widget.args.clone(), widget.cwd.clone())
+        (
+            widget.command.clone(),
+            widget.args.clone(),
+            widget.cwd.clone(),
+        )
     };
 
     match spawn_widget_process(&cmd_str, &args_vec, cwd_opt.as_deref()) {
@@ -2105,11 +2137,7 @@ fn poll_widget_children(
                 render_state.init_sent = false;
                 render_state.pending_frame = None;
 
-                match spawn_widget_process(
-                    &widget.command,
-                    &widget.args,
-                    widget.cwd.as_deref(),
-                ) {
+                match spawn_widget_process(&widget.command, &widget.args, widget.cwd.as_deref()) {
                     Ok((process, io)) => {
                         commands.entity(entity).insert((process, io));
                     }
@@ -2203,9 +2231,9 @@ pub(crate) fn find_input_value(el: &Element, target: &str) -> Option<(String, St
         | Element::Hstack { children, .. }
         | Element::Frame { children, .. }
         | Element::Scroll { children, .. }
-        | Element::ListItem { children, .. } => children
-            .iter()
-            .find_map(|c| find_input_value(c, target)),
+        | Element::ListItem { children, .. } => {
+            children.iter().find_map(|c| find_input_value(c, target))
+        }
         _ => None,
     }
 }
@@ -2494,7 +2522,10 @@ mod line_math_tests {
     #[test]
     fn char_index_maps_x_to_nearest_boundary() {
         // Monospace: cell_width 10 at font_size 10 → each char is 10px.
-        let m = PaneFontMetrics { cell_width: 10.0, font_size: 10.0 };
+        let m = PaneFontMetrics {
+            cell_width: 10.0,
+            font_size: 10.0,
+        };
         // Boundaries land at 0,10,20,30,40,50 for "hello".
         assert_eq!(char_index_at_x("hello", 0.0, 10.0, &m, 0.0), 0);
         assert_eq!(char_index_at_x("hello", 0.0, 10.0, &m, 4.0), 0); // nearer 0 than 10

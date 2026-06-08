@@ -4,14 +4,167 @@
 //!   - oxc:  parse → AST  → `Minifier::dce`
 //!   - swc:  parse → AST  → resolver + `simplify::dce`
 //!
-//! Caveat: the three don't do *identical* DCE (oxc's is the most aggressive,
-//! swc's tree-shakes unused bindings, ours drops unread `var`s) — so we report
-//! both time and how much each removed on the same dead-code-heavy input.
+//! Correctness gate: before timing, we render BOTH our DCE'd `Module` and oxc's
+//! DCE'd AST back into a canonical, printer-independent statement list and assert
+//! the two are **identical** — same surviving statements, in the same order, with
+//! the same contents. So the speed numbers below compare runs that produce the
+//! same output, not merely "similar" DCE. (swc is timed too but only sanity-
+//! checked on count; its tree-shaker is a different, more aggressive pass.)
 //!
 //! Usage:  cargo run --release -p jsir-parse --example bench_dce [statements]
 
 use std::hint::black_box;
 use std::time::{Duration, Instant};
+
+use jsir_ir::{Attr, IrRead, Module, OpId};
+
+/// Canonical, whitespace-free rendering of a number so both front ends agree
+/// regardless of how each stores the literal (raw token vs `f64` value).
+fn fmt_num(v: f64) -> String {
+    if v.is_finite() && v.fract() == 0.0 {
+        format!("{}", v as i64)
+    } else {
+        format!("{v}")
+    }
+}
+
+// ── ours: render the DCE'd `Module`'s top-level statements ───────────────────
+
+fn ours_num(m: &Module, op: OpId) -> String {
+    for (k, a) in m.attrs_owned(op) {
+        if k == "value" {
+            if let Attr::F64(v) = a {
+                return fmt_num(v);
+            }
+        }
+    }
+    "?".to_string()
+}
+
+/// Operands store `ValueId`s, which are NOT equal to `OpId`s here (the copying
+/// DCE preserves source value-ids while renumbering ops), so we resolve each
+/// operand to its defining op through a value-id → op map.
+type DefMap = std::collections::HashMap<u32, OpId>;
+
+fn ours_operand(m: &Module, def: &DefMap, op: OpId, i: usize) -> String {
+    match def.get(&m.operands(op)[i].0) {
+        Some(&d) => ours_expr(m, def, d),
+        None => "?".to_string(),
+    }
+}
+
+fn ours_expr(m: &Module, def: &DefMap, op: OpId) -> String {
+    match m.op_name(op) {
+        "jsir.numeric_literal" => ours_num(m, op),
+        "jsir.identifier" | "jsir.identifier_ref" => {
+            m.str_attr(op, "name").unwrap_or("?").to_string()
+        }
+        "jsir.binary_expression" | "jsir.assignment_expression" => {
+            let l = ours_operand(m, def, op, 0);
+            let r = ours_operand(m, def, op, 1);
+            let o = m.str_attr(op, "operator_").unwrap_or("?");
+            format!("{l}{o}{r}")
+        }
+        "jsir.variable_declarator" => {
+            let l = ours_operand(m, def, op, 0);
+            let r = ours_operand(m, def, op, 1);
+            format!("{l}={r}")
+        }
+        other => format!("<{other}>"),
+    }
+}
+
+fn ours_stmt(m: &Module, def: &DefMap, op: OpId) -> String {
+    match m.op_name(op) {
+        "jsir.variable_declaration" => {
+            let kind = m.str_attr(op, "kind").unwrap_or("var");
+            let mut decls = Vec::new();
+            for r in m.regions(op) {
+                for b in m.region_blocks(*r) {
+                    for &o in m.block_ops(*b) {
+                        if m.op_name(o) == "jsir.variable_declarator" {
+                            decls.push(ours_expr(m, def, o));
+                        }
+                    }
+                }
+            }
+            format!("{kind} {}", decls.join(","))
+        }
+        "jsir.expression_statement" => ours_operand(m, def, op, 0),
+        other => format!("<{other}>"),
+    }
+}
+
+/// The DCE'd module's program body as an ordered list of canonical statements.
+fn ours_program(m: &Module) -> Vec<String> {
+    let mut def: DefMap = DefMap::new();
+    for i in 0..m.op_count() {
+        let op = OpId(i as u32);
+        for v in m.results(op) {
+            def.insert(v.0, op);
+        }
+    }
+    let file = m.root();
+    let prog = m.block_ops(m.region_blocks(m.regions(file)[0])[0])[0];
+    let body = m.region_blocks(m.regions(prog)[0])[0];
+    // In the AST dialect, sub-expressions are emitted flat in the body block
+    // (each with an SSA result `%N`); a *statement* is a body op with no result.
+    m.block_ops(body)
+        .iter()
+        .filter(|&&op| m.results(op).is_empty())
+        .map(|&op| ours_stmt(m, &def, op))
+        .collect()
+}
+
+// ── oxc: render the DCE'd AST's top-level statements, same canonical form ─────
+
+fn oxc_expr(e: &oxc_ast::ast::Expression) -> String {
+    use oxc_ast::ast::{Expression, SimpleAssignmentTarget};
+    match e {
+        Expression::NumericLiteral(n) => fmt_num(n.value),
+        Expression::Identifier(i) => i.name.to_string(),
+        Expression::BinaryExpression(b) => {
+            format!("{}{}{}", oxc_expr(&b.left), b.operator.as_str(), oxc_expr(&b.right))
+        }
+        Expression::AssignmentExpression(a) => {
+            let lhs = match a.left.as_simple_assignment_target() {
+                Some(SimpleAssignmentTarget::AssignmentTargetIdentifier(i)) => i.name.to_string(),
+                _ => "<?>".to_string(),
+            };
+            format!("{}{}{}", lhs, a.operator.as_str(), oxc_expr(&a.right))
+        }
+        other => format!("<{:?}>", std::mem::discriminant(other)),
+    }
+}
+
+fn oxc_stmt(s: &oxc_ast::ast::Statement) -> String {
+    use oxc_ast::ast::{BindingPatternKind, Statement};
+    match s {
+        Statement::VariableDeclaration(d) => {
+            let decls: Vec<String> = d
+                .declarations
+                .iter()
+                .map(|decl| {
+                    let name = match &decl.id.kind {
+                        BindingPatternKind::BindingIdentifier(bi) => bi.name.to_string(),
+                        _ => "<?>".to_string(),
+                    };
+                    match &decl.init {
+                        Some(init) => format!("{name}={}", oxc_expr(init)),
+                        None => name,
+                    }
+                })
+                .collect();
+            format!("{} {}", d.kind.as_str(), decls.join(","))
+        }
+        Statement::ExpressionStatement(e) => oxc_expr(&e.expression),
+        other => format!("<{:?}>", std::mem::discriminant(other)),
+    }
+}
+
+fn oxc_program(program: &oxc_ast::ast::Program) -> Vec<String> {
+    program.body.iter().map(oxc_stmt).collect()
+}
 
 use oxc_allocator::Allocator;
 use oxc_minifier::{CompressOptions, Minifier, MinifierOptions};
@@ -73,7 +226,38 @@ fn main() {
     let removed2 = jsir_ir::build::dce_in_place(&mut m2);
     assert_eq!(removed, removed2, "in-place and copying DCE remove different counts");
     assert_eq!(after_m.print(), m2.print(), "in-place DCE output differs from copying DCE");
-    println!("ours: removed {removed} dead var-decls ({before} ops); in-place == copying ✓\n");
+    println!("ours: removed {removed} dead var-decls ({before} ops); in-place == copying ✓");
+
+    // Prove IDENTICAL OUTPUT vs oxc: compare the full ordered list of surviving
+    // statements, rendered to the same canonical form from each side's result.
+    let ours_out = ours_program(&after_m);
+    let oxc_out = {
+        let alloc = Allocator::default();
+        let mut ret = Parser::new(&alloc, &src, SourceType::default()).parse();
+        let before = ret.program.body.len();
+        let opts = MinifierOptions { mangle: None, compress: Some(CompressOptions::default()) };
+        Minifier::new(opts).dce(&alloc, &mut ret.program);
+        println!("oxc:  {before} top-level stmts → {} after dce", ret.program.body.len());
+        oxc_program(&ret.program)
+    };
+    if ours_out != oxc_out {
+        let first = ours_out
+            .iter()
+            .zip(oxc_out.iter())
+            .position(|(a, b)| a != b)
+            .unwrap_or(ours_out.len().min(oxc_out.len()));
+        panic!(
+            "IDENTICAL-OUTPUT FAILED: ours kept {} stmts, oxc kept {} — first diff at #{first}:\n  ours: {:?}\n  oxc:  {:?}",
+            ours_out.len(),
+            oxc_out.len(),
+            ours_out.get(first),
+            oxc_out.get(first),
+        );
+    }
+    println!(
+        "identical output as oxc ✓ — byte-for-byte same {} surviving statements (dropped {removed})\n",
+        ours_out.len(),
+    );
 
     println!("text → DCE'd (parse + DCE-only):");
     bench("ours: JSIR + dce (copying)", bytes, iters, || {

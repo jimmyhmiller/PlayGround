@@ -18,6 +18,54 @@
 > opcode→enum (currently interned u32), `AttrKey` interning, trivia→`SecondaryMap`.
 
 
+## Performance vs oxc and swc (measured)
+
+A no-AST front end (`crates/jsir-parse`) parses a JS subset **straight to the SoA
+`Module`** (text → SIMD tokens → JSIR, no syntax tree), then DCE runs on it.
+Benchmarks (`jsir-parse/examples/bench_parse.rs`, `bench_dce.rs`;
+`simd-lang/aot-bench/pipeline` for the real AOT `.simd` kernel). M-series macOS,
+~stable medians.
+
+**Front end — text → structure (20k stmts / ~0.6 MiB):**
+
+| | time | speed | output |
+|---|---:|---:|---|
+| **ours: SIMD → RPN tape** | **~2.7 ms** | **~220 MiB/s** | flat AST-equivalent tape |
+| oxc: lex+parse → AST | 3.3 ms | 177 MiB/s | bare AST |
+| oxc: parse + semantic | 5.9 ms | 99 MiB/s | rich (scopes/symbols) |
+| ours: SIMD → JSIR Module | 7.5 ms | 78 MiB/s | rich IR (SSA + operands + attrs) |
+| swc: lex+parse → AST | 9.0 ms | 65 MiB/s | bare AST |
+
+**The flat RPN tape (`parse_to_tape`) beats oxc bare AST by ~1.23×** (2.2× its
+`parse+semantic`) — *the* fast path. Each node is a 12-byte
+`(kind,flags,nargs,start,end)` record in post-order; `nargs` + spans reconstruct
+the tree, with no interning/ValueIds/regions. **Building the structured `Module`
+instead doubles+ parse time** (78 vs 220 MiB/s) — that build is the entire cost,
+so JSIR's `Module` is constructed from the tape *only when the structured IR is
+actually needed*, not on the hot parse path. The columnar-`Module` front end was
+itself optimized 21 → ~85 MiB/s (~4×: arena strings, parser-mode lexing, pull
+parser, inline operands, key dedup, source-borrowed attrs, `#[inline]`), but the
+tape is what reaches oxc parity. Our SIMD lexer (real AOT `.simd` kernel) is
+faster than oxc's; stage-1 is ~1.3% of the pipeline. (simd-lang's `tape.rs` is
+the parallel canonical implementation with a much larger grammar, ~2.3× oxc.)
+
+**DCE — text → dead-code-eliminated (10k stmts, half dead), DCE-only each:**
+
+| | time | speed |
+|---|---:|---:|
+| **ours: JSIR + in-place dce** | **4.4 ms** | **77 MiB/s** |
+| oxc: `Minifier::dce` | 4.85 ms | 69 MiB/s |
+| swc: `simplify::dce` | 7.7 ms | 43 MiB/s |
+| ours: dce (copying rebuild) | 9.3 ms | 36 MiB/s |
+
+In-place DCE (`Module::compact_block_ops` + `build::dce_in_place`) makes us
+fastest — the copying rebuild was the whole gap. Caveat: our DCE is a lighter
+analysis (read-scan + drop unread top-level `var`s, no scope resolution) than
+oxc/swc's scope-correct passes, so part of the win is doing less; in-place vs
+rebuild is the other part. Output verified identical to the copying DCE.
+
+---
+
 How we represent and store our IR. This is a design doc for moving `jsir-ir`
 from its current array-of-structs (AoS) `Op` tree to a struct-of-arrays (SoA),
 index-addressed store — without changing the IR's *semantics* or the byte-exact

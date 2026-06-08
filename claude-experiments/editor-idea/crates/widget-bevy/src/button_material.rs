@@ -4,7 +4,7 @@
 //! All look properties come from theme tokens (via `WidgetPalette`),
 //! so a single preset switch retones every button across every widget.
 
-use bevy::asset::{embedded_path, AssetPath};
+use bevy::asset::{AssetPath, embedded_path};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;

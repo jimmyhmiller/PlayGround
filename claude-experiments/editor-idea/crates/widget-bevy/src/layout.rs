@@ -64,7 +64,11 @@ pub fn build_tree(el: &Element, metrics: &PaneFontMetrics) -> LaidOut {
     LaidOut { taffy, root }
 }
 
-fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element, metrics: &PaneFontMetrics) -> NodeId {
+fn build_node(
+    taffy: &mut TaffyTree<MeasureCtx>,
+    el: &Element,
+    metrics: &PaneFontMetrics,
+) -> NodeId {
     match el {
         Element::Vstack {
             gap,
@@ -73,7 +77,10 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element, metrics: &PaneFon
             style,
         } => {
             let st = stack_style(*gap, *pad, style.as_ref(), FlexDirection::Column);
-            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c, metrics)).collect();
+            let kids: Vec<NodeId> = children
+                .iter()
+                .map(|c| build_node(taffy, c, metrics))
+                .collect();
             taffy.new_with_children(st, &kids).unwrap()
         }
         Element::Hstack {
@@ -85,7 +92,10 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element, metrics: &PaneFon
         } => {
             let mut st = stack_style(*gap, *pad, style.as_ref(), FlexDirection::Row);
             st.align_items = Some(align_to_taffy(*align));
-            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c, metrics)).collect();
+            let kids: Vec<NodeId> = children
+                .iter()
+                .map(|c| build_node(taffy, c, metrics))
+                .collect();
             taffy.new_with_children(st, &kids).unwrap()
         }
         Element::Frame {
@@ -95,16 +105,18 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element, metrics: &PaneFon
             style,
         } => {
             let st = stack_style(*gap, *pad, style.as_ref(), FlexDirection::Column);
-            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c, metrics)).collect();
+            let kids: Vec<NodeId> = children
+                .iter()
+                .map(|c| build_node(taffy, c, metrics))
+                .collect();
             taffy.new_with_children(st, &kids).unwrap()
         }
-        Element::Scroll {
-            gap,
-            pad,
-            children,
-        } => {
+        Element::Scroll { gap, pad, children } => {
             let st = stack_style(*gap, *pad, None, FlexDirection::Column);
-            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c, metrics)).collect();
+            let kids: Vec<NodeId> = children
+                .iter()
+                .map(|c| build_node(taffy, c, metrics))
+                .collect();
             taffy.new_with_children(st, &kids).unwrap()
         }
         Element::ListItem {
@@ -115,7 +127,10 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element, metrics: &PaneFon
             ..
         } => {
             let st = stack_style(*gap, *pad, style.as_ref(), FlexDirection::Column);
-            let kids: Vec<NodeId> = children.iter().map(|c| build_node(taffy, c, metrics)).collect();
+            let kids: Vec<NodeId> = children
+                .iter()
+                .map(|c| build_node(taffy, c, metrics))
+                .collect();
             taffy.new_with_children(st, &kids).unwrap()
         }
         Element::Text { value, size, .. } => {
@@ -323,7 +338,13 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element, metrics: &PaneFon
             apply_style_overrides(&mut s, style.as_ref());
             taffy.new_leaf(s).unwrap()
         }
-        Element::TextArea { width, rows, value, style, .. } => {
+        Element::TextArea {
+            width,
+            rows,
+            value,
+            style,
+            ..
+        } => {
             // Auto-grow: height fits the wrapped content, with `rows` as
             // the minimum. Wrapping here uses the same routine + width as
             // the renderer, so the box height matches the drawn text.
@@ -349,7 +370,9 @@ fn build_node(taffy: &mut TaffyTree<MeasureCtx>, el: &Element, metrics: &PaneFon
             taffy.new_leaf(s).unwrap()
         }
         Element::Table { columns, rows, .. } => {
-            use taffy::style::{GridTemplateComponent, MaxTrackSizingFunction, MinTrackSizingFunction};
+            use taffy::style::{
+                GridTemplateComponent, MaxTrackSizingFunction, MinTrackSizingFunction,
+            };
             // Max width an auto (unsized) column grows to before its text
             // wraps. Keeps a long cell from ballooning the whole table.
             const COL_CAP: f32 = 260.0;
@@ -539,7 +562,11 @@ fn parse_dimension(s: &str) -> Option<Dimension> {
         return Some(Dimension::auto());
     }
     if let Some(rest) = t.strip_suffix('%') {
-        return rest.trim().parse::<f32>().ok().map(|n| Dimension::percent(n / 100.0));
+        return rest
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|n| Dimension::percent(n / 100.0));
     }
     t.parse::<f32>().ok().map(Dimension::length)
 }
@@ -556,6 +583,7 @@ fn align_to_taffy(a: Align) -> AlignItems {
 /// Compute layout for the tree rooted at `root` within the given
 /// `(max_w, max_h)` viewport. `metrics` is used to size text leaves.
 pub fn compute(laid: &mut LaidOut, max_w: f32, max_h: f32, metrics: &PaneFontMetrics) {
+    let _prof = pane_bevy::prof::sys_span_nested("taffy_layout");
     // Force the root to fill the available content width. Without this the root
     // (auto width) shrinks to its content, so `grow`/stretch children have no
     // free space to distribute and text leaves measure/wrap at a collapsed
@@ -594,7 +622,10 @@ fn measure_text(
 ) -> Size<f32> {
     let line_h = crate::render::line_height(ctx.font_size);
     if let (Some(w), Some(h)) = (known.width, known.height) {
-        return Size { width: w, height: h };
+        return Size {
+            width: w,
+            height: h,
+        };
     }
     let intrinsic_w = metrics.measure(&ctx.value, ctx.font_size);
     let char_w = metrics.char_width(ctx.font_size);
@@ -684,11 +715,17 @@ mod tests {
     use crate::protocol::Style;
 
     fn metrics() -> PaneFontMetrics {
-        PaneFontMetrics { cell_width: 8.4, font_size: 14.0 }
+        PaneFontMetrics {
+            cell_width: 8.4,
+            font_size: 14.0,
+        }
     }
 
     fn pct_height(p: &str) -> Style {
-        Style { height: Some(p.into()), ..Default::default() }
+        Style {
+            height: Some(p.into()),
+            ..Default::default()
+        }
     }
 
     /// A root vstack with `height:"100%"` and a `flex_grow:1` child fills
@@ -707,7 +744,10 @@ mod tests {
             children: vec![Element::Frame {
                 gap: 0.0,
                 pad: 0.0,
-                style: Some(Style { flex_grow: Some(1.0), ..Default::default() }),
+                style: Some(Style {
+                    flex_grow: Some(1.0),
+                    ..Default::default()
+                }),
                 children: vec![],
             }],
         };
@@ -740,10 +780,17 @@ mod tests {
     fn table_content_box_bounds_cells_and_matches_filled_node() {
         use crate::protocol::TableColumn;
         let m = metrics();
-        let col = |h: &str, a| TableColumn { header: h.into(), width: None, align: a };
+        let col = |h: &str, a| TableColumn {
+            header: h.into(),
+            width: None,
+            align: a,
+        };
         let table = Element::Table {
             columns: vec![col("name", Align::Start), col("age", Align::End)],
-            rows: vec![vec!["Widget".into(), "30".into()], vec!["Gadget".into(), "25".into()]],
+            rows: vec![
+                vec!["Widget".into(), "30".into()],
+                vec!["Gadget".into(), "25".into()],
+            ],
             zebra: true,
             selectable: false,
             style: None,
@@ -751,7 +798,10 @@ mod tests {
         let el = Element::Vstack {
             gap: 0.0,
             pad: 0.0,
-            style: Some(Style { width: Some("400".into()), ..Default::default() }),
+            style: Some(Style {
+                width: Some("400".into()),
+                ..Default::default()
+            }),
             children: vec![table],
         };
         let mut laid = build_tree(&el, &m);
@@ -793,7 +843,10 @@ mod tests {
         let frame = |h: f32| Element::Frame {
             gap: 0.0,
             pad: 0.0,
-            style: Some(Style { height: Some(format!("{h}")), ..Default::default() }),
+            style: Some(Style {
+                height: Some(format!("{h}")),
+                ..Default::default()
+            }),
             children: vec![],
         };
         let el = Element::Vstack {

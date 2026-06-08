@@ -4,10 +4,11 @@
 //!
 //! ```text
 //! module      := def*
-//! def         := "def" "local"? ident "(" params? ")" "->" type "=" expr
+//! def         := "def" "local"? ident type_params? "(" params? ")" "->" type "=" expr
 //! params      := param ("," param)* ","?
 //! param       := ident ":" type
-//! type        := ident                       -- only named types for v1
+//! type        := ident ("<" type ("," type)* ">")?  |  "fn" "(" types? ")" "->" type
+//! type_params := "<" ident ("," ident)* ">"
 //! expr        := or_expr
 //! or_expr     := and_expr ("||" and_expr)*
 //! and_expr    := cmp_expr ("&&" cmp_expr)*

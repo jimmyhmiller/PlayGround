@@ -51,8 +51,12 @@ fn main() {
     let m = jsir_parse::parse_to_module(&src).expect("our parser");
     println!("our IR: {} ops\n", m.op_count());
 
-    println!("text → JSIR (apples-to-apples: both produce the same IR):");
-    let ours = bench("ours: SIMD → js-ir (no AST)", bytes, iters, || {
+    println!("text → structure:");
+    let tape = bench("ours: SIMD → RPN tape", bytes, iters, || {
+        let t = jsir_parse::parse_to_tape(&src).unwrap();
+        black_box(t.len());
+    });
+    let ours = bench("ours: SIMD → js-ir Module", bytes, iters, || {
         let m = jsir_parse::parse_to_module(&src).unwrap();
         black_box(m.op_count());
     });
@@ -102,4 +106,8 @@ fn main() {
         oxc_sem.as_secs_f64() / ours.as_secs_f64()
     );
     println!("ours vs swc-to-AST: {:.2}x", swc.as_secs_f64() / ours.as_secs_f64());
+    println!("\n-- tape (no Module build), the oxc-parity path --");
+    println!("tape vs oxc bare AST:        {:.2}x", oxc.as_secs_f64() / tape.as_secs_f64());
+    println!("tape vs oxc parse+semantic:  {:.2}x", oxc_sem.as_secs_f64() / tape.as_secs_f64());
+    println!("tape vs our Module build:    {:.2}x faster", ours.as_secs_f64() / tape.as_secs_f64());
 }

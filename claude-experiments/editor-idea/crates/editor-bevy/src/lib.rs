@@ -477,6 +477,7 @@ fn sync_text(
     pane_zoom: Res<pane_bevy::PaneZoom>,
     mut editors: Query<
         (
+            Entity,
             &EditorStateComp,
             &PaneRect,
             &PaneChrome,
@@ -493,10 +494,11 @@ fn sync_text(
     mut commands: Commands,
 ) {
     let zoom = pane_zoom.0;
-    for (state, rect, chrome, scroll, hl, mut pool, kind, proj) in &mut editors {
+    for (entity, state, rect, chrome, scroll, hl, mut pool, kind, proj) in &mut editors {
         if kind.0 != PANE_KIND {
             continue;
         }
+        let _prof = pane_bevy::prof::pane_span(entity.to_bits(), "editor");
         // This editor's project palette if cached, else the global one.
         let pal = proj
             .and_then(|p| project_palettes.get(p.0))
@@ -1066,7 +1068,10 @@ fn handle_input(
                 copy_selection(state);
                 Some(delete_selection(state))
             }
-            KeyCode::KeyV if mod_doc => Some(paste_from_clipboard(state)),
+            // Paste is Cmd/Ctrl+V *without* Shift — Cmd+Shift+V is reserved
+            // for app-global shortcuts (e.g. the profiler's vsync toggle) so
+            // it must not leak into a focused editor as a paste.
+            KeyCode::KeyV if mod_doc && !shift => Some(paste_from_clipboard(state)),
             // Cmd/Ctrl+S — save the buffer to its file. Side effect only
             // (no document change), so it returns `Some(None)`.
             KeyCode::KeyS if mod_doc => {

@@ -669,3 +669,242 @@ pub fn parse_with_masks<'a>(
 pub fn parse_to_ir_text(src: &str) -> Result<String, String> {
     Ok(parse_to_module(src)?.print())
 }
+
+// ───────────────────────────── flat RPN tape ─────────────────────────────
+//
+// A faster front end (matching the simd-lang `tape.rs` result, ~2.3× oxc):
+// instead of building the structured columnar `Module` (interning, regions, attr
+// pool — which *doubles* parse time), emit a flat post-order tape. Each node is a
+// 12-byte record; children are the preceding `nargs` completed subtrees. No
+// allocation per op beyond pushing to one `Vec`. AST-equivalent: `nargs` + spans
+// reconstruct the tree and recover every name/operator/literal. Build the
+// structured `Module` from the tape only when JSIR is actually needed.
+
+/// Tape node kinds.
+pub mod tk {
+    pub const NUM: u8 = 0;
+    pub const STR: u8 = 1;
+    pub const BOOL: u8 = 2;
+    pub const NULL: u8 = 3;
+    pub const BIGINT: u8 = 4;
+    pub const IDENT: u8 = 5; // read
+    pub const IDENT_REF: u8 = 6; // binding / lvalue
+    pub const BIN: u8 = 7; // span = operator token
+    pub const UNARY: u8 = 8; // span = operator; flags bit0 = prefix
+    pub const ASSIGN: u8 = 9; // span = operator token
+    pub const UPDATE: u8 = 10; // span = operator; flags bit0 = prefix
+    pub const EXPR_STMT: u8 = 11;
+    pub const VAR_DECL: u8 = 12; // span = let|var|const; nargs = declarator count
+    pub const DECLR: u8 = 13; // nargs = 1 (id) or 2 (id, init)
+}
+
+/// A 12-byte post-order tape node. `nargs` children precede it; `start`/`end` are
+/// source byte offsets (the leaf/operator span).
+#[derive(Clone, Copy, Debug)]
+pub struct TapeNode {
+    pub kind: u8,
+    pub flags: u8,
+    pub nargs: u16,
+    pub start: u32,
+    pub end: u32,
+}
+
+struct TapeParser<'a> {
+    lx: Lex<'a>,
+    tape: Vec<TapeNode>,
+}
+
+impl<'a> TapeParser<'a> {
+    #[inline]
+    fn peek(&mut self) -> Token {
+        self.lx.fill_to(1);
+        self.lx.buf[0]
+    }
+    #[inline]
+    fn peek2(&mut self) -> Token {
+        self.lx.fill_to(2);
+        self.lx.buf[1]
+    }
+    #[inline]
+    fn bump(&mut self) -> Token {
+        self.lx.fill_to(1);
+        let t = self.lx.buf[0];
+        self.lx.buf[0] = self.lx.buf[1];
+        self.lx.len -= 1;
+        t
+    }
+    #[inline]
+    fn eat(&mut self, p: Pk) -> bool {
+        if self.peek().punct == p {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+    #[inline]
+    fn push(&mut self, kind: u8, nargs: u16, t: Token, prefix: bool) {
+        self.tape.push(TapeNode {
+            kind,
+            flags: prefix as u8,
+            nargs,
+            start: t.start as u32,
+            end: t.end as u32,
+        });
+    }
+    fn txt(&self, t: Token) -> &'a str {
+        t.text(self.lx.src)
+    }
+
+    fn program(&mut self) -> Result<(), String> {
+        while self.peek().kind != TokKind::Eof {
+            self.statement()?;
+        }
+        Ok(())
+    }
+
+    fn statement(&mut self) -> Result<(), String> {
+        let t = self.peek();
+        if t.kind == TokKind::Ident
+            && matches!(self.txt(t), "let" | "var" | "const")
+            && self.peek2().kind == TokKind::Ident
+        {
+            return self.var_decl();
+        }
+        self.assignment()?;
+        self.eat(Pk::Semi);
+        self.push(tk::EXPR_STMT, 1, t, false);
+        Ok(())
+    }
+
+    fn var_decl(&mut self) -> Result<(), String> {
+        let kt = self.bump();
+        let mut n: u16 = 0;
+        loop {
+            let nt = self.bump(); // identifier
+            self.push(tk::IDENT_REF, 0, nt, false);
+            if self.eat(Pk::Assign) {
+                self.assignment()?;
+                self.push(tk::DECLR, 2, nt, false);
+            } else {
+                self.push(tk::DECLR, 1, nt, false);
+            }
+            n += 1;
+            if !self.eat(Pk::Comma) {
+                break;
+            }
+        }
+        self.eat(Pk::Semi);
+        self.push(tk::VAR_DECL, n, kt, false);
+        Ok(())
+    }
+
+    fn assignment(&mut self) -> Result<(), String> {
+        let t = self.peek();
+        if t.kind == TokKind::Ident
+            && is_assign_op(self.peek2().punct)
+            && !matches!(self.txt(t), "true" | "false" | "null")
+        {
+            let nt = self.bump();
+            let ot = self.bump();
+            self.push(tk::IDENT_REF, 0, nt, false);
+            self.assignment()?;
+            self.push(tk::ASSIGN, 2, ot, false);
+            return Ok(());
+        }
+        self.binary(0)
+    }
+
+    fn binary(&mut self, min_bp: u8) -> Result<(), String> {
+        self.unary()?;
+        loop {
+            let t = self.peek();
+            let Some(bp) = binary_bp(t.punct) else { break };
+            if bp < min_bp {
+                break;
+            }
+            let ot = self.bump();
+            self.binary(bp + 1)?;
+            self.push(tk::BIN, 2, ot, false);
+        }
+        Ok(())
+    }
+
+    fn unary(&mut self) -> Result<(), String> {
+        let t = self.peek();
+        match t.punct {
+            Pk::Minus | Pk::Plus | Pk::Bang | Pk::Tilde => {
+                self.bump();
+                self.unary()?;
+                self.push(tk::UNARY, 1, t, true);
+                Ok(())
+            }
+            Pk::PlusPlus | Pk::MinusMinus => {
+                self.bump();
+                let nt = self.bump(); // lvalue ident
+                self.push(tk::IDENT_REF, 0, nt, false);
+                self.push(tk::UPDATE, 1, t, true);
+                Ok(())
+            }
+            _ => self.primary(),
+        }
+    }
+
+    fn primary(&mut self) -> Result<(), String> {
+        let t = self.peek();
+        match t.kind {
+            TokKind::Number => {
+                self.bump();
+                let k = if self.txt(t).ends_with('n') { tk::BIGINT } else { tk::NUM };
+                self.push(k, 0, t, false);
+                Ok(())
+            }
+            TokKind::Str => {
+                self.bump();
+                self.push(tk::STR, 0, t, false);
+                Ok(())
+            }
+            TokKind::Ident => match self.txt(t) {
+                "true" | "false" => {
+                    self.bump();
+                    self.push(tk::BOOL, 0, t, false);
+                    Ok(())
+                }
+                "null" => {
+                    self.bump();
+                    self.push(tk::NULL, 0, t, false);
+                    Ok(())
+                }
+                _ => {
+                    self.bump();
+                    if matches!(self.peek().punct, Pk::PlusPlus | Pk::MinusMinus) {
+                        let ot = self.bump();
+                        self.push(tk::IDENT_REF, 0, t, false);
+                        self.push(tk::UPDATE, 1, ot, false); // postfix
+                    } else {
+                        self.push(tk::IDENT, 0, t, false);
+                    }
+                    Ok(())
+                }
+            },
+            _ => Err(format!("unexpected token {:?} at byte {}", t.kind, t.start)),
+        }
+    }
+}
+
+/// Parse a subset-JS program to a flat RPN tape — no AST, no structured IR. This
+/// is the oxc-parity-speed front end; build a [`Module`] from the tape only if
+/// you need the structured JSIR.
+pub fn parse_to_tape(src: &str) -> Result<Vec<TapeNode>, String> {
+    let bytes = src.as_bytes();
+    let (sm, wm) = simd_lang::stage1::lex(bytes);
+    let mut p = TapeParser {
+        lx: Lex::new(src, &sm, &wm),
+        tape: Vec::with_capacity(bytes.len() / 4 + 8),
+    };
+    p.program()?;
+    if let Some(e) = p.lx.err.take() {
+        return Err(e);
+    }
+    Ok(p.tape)
+}

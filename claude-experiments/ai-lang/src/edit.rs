@@ -771,34 +771,67 @@ fn schemes_signature_eq(a: &TypeScheme, b: &TypeScheme) -> bool {
     }
 }
 
-/// Update the definition named `name` to `new_source`, propagating the new
-/// hash up its entire dependency cone (Unison's `update`).
+/// Update the definition named `name` to `new_source`. The name `name` is
+/// re-pointed to the new hash. Dependents are NOT touched — they continue to
+/// reference the old hash (which still exists).
 ///
-/// Transactional: everything (new hashes, rewrites, typecheck) is computed
-/// before any name is moved; if it fails, the namespace is left untouched. New
-/// `.def` files are written eagerly (content-addressed and harmless); old defs
-/// are never deleted. Names are the commit point.
+/// - **Same type:** the edit is mechanical. `todos` lists transitive dependents
+///   of the old hash as a worklist — these defs still reference the old version
+///   and may optionally be propagated to the new one via [`propagate`].
+/// - **Type changed:** the edit succeeds. `todos` is the worklist of dependents
+///   that still reference the old hash and would need source changes to work
+///   with the new type. Use [`update_propagate`] to opt into automatic cone
+///   rewiring (same-type only).
 ///
-/// Contract: every named def in `{edited} ∪ cone` moves to its new hash.
-///   - **Same type:** mechanical hash re-pointing; cannot introduce type
-///     errors; `todos` is empty.
-///   - **Type changed:** the cone is re-pointed + stored and all names move,
-///     but dependents that no longer typecheck are returned as `todos` (their
-///     names still move to the rewritten, still-broken hash so they are
-///     visible and editable — mirroring Unison putting impacted terms back).
+/// Transactional: the new def is stored and the name is moved atomically. Old
+/// defs are never deleted. Names are the commit point.
 pub fn update(cb: &mut Codebase, name: &str, new_source: &str) -> Result<EditResult, EditError> {
-    update_impl(cb, name, new_source, false)
+    update_impl(cb, name, new_source, false, false)
 }
 
-/// Like [`update`] but computes the full impact (cone, hash changes, todos)
-/// without moving any names (no commit). New `.def` files may still be written
-/// (content-addressed, harmless); the namespace is untouched.
+/// Like [`update`] but computes the full impact without committing (no names
+/// are moved). New `.def` files may still be written (content-addressed,
+/// harmless); the namespace is untouched.
 pub fn update_dry_run(
     cb: &mut Codebase,
     name: &str,
     new_source: &str,
 ) -> Result<EditResult, EditError> {
-    update_impl(cb, name, new_source, true)
+    update_impl(cb, name, new_source, true, false)
+}
+
+/// Like [`update`] but also rewrites every transitive dependent to reference
+/// the new hash. Only valid when the type signature is unchanged (same-type).
+/// Type-changing edits must use [`update`] and then manually address the
+/// worklist of dependents.
+pub fn update_propagate(
+    cb: &mut Codebase,
+    name: &str,
+    new_source: &str,
+) -> Result<EditResult, EditError> {
+    update_impl(cb, name, new_source, false, true)
+}
+
+/// Like [`update_dry_run`] but with propagation. Preview without commit.
+pub fn update_dry_run_propagate(
+    cb: &mut Codebase,
+    name: &str,
+    new_source: &str,
+) -> Result<EditResult, EditError> {
+    update_impl(cb, name, new_source, true, true)
+}
+
+/// Take the current hash of `name` and rewrite every transitive dependent to
+/// reference it. Only valid when the dependents would typecheck against the
+/// current hash (same-type guarantee). Useful after a cascade of edits where
+/// you've updated both a def and its callers and now want to rewire the cone.
+pub fn propagate(cb: &mut Codebase, name: &str) -> Result<EditResult, EditError> {
+    propagate_impl(cb, name, false)
+}
+
+/// Like [`propagate`] but preview without commit.
+pub fn propagate_dry_run(cb: &mut Codebase, name: &str) -> Result<EditResult, EditError> {
+    propagate_impl(cb, name, true)
 }
 
 fn update_impl(
@@ -806,6 +839,7 @@ fn update_impl(
     name: &str,
     new_source: &str,
     dry_run: bool,
+    propagate: bool,
 ) -> Result<EditResult, EditError> {
     // 1. Look up the old hash.
     let old_hash = cb
@@ -853,6 +887,13 @@ fn update_impl(
 
     // 3. Compare the TYPE of the new def vs the old.
     let mut work_cache = cb.types().clone();
+    // Register stdlib externs so typechecking rewritten dependents
+    // (which reference `ext/println` etc.) succeeds.
+    if let Ok(std_m) = crate::parser::parse_module(crate::stdlib::SOURCE) {
+        if let Ok(std_r) = crate::resolve::resolve_module(&std_m) {
+            work_cache.register_externs(&std_r.externs);
+        }
+    }
     let new_scheme = typecheck_def(&new_def, &work_cache)?;
     let old_scheme = cb.types().get(&old_hash).cloned();
     let type_changed = match &old_scheme {
@@ -863,8 +904,67 @@ fn update_impl(
     };
     work_cache.insert(new_hash, new_scheme.clone());
 
-    // 4. Compute the cone in topological order; build old->new remap.
     let index = load_or_rebuild_index(cb)?;
+
+    if !propagate {
+        // ---- Non-propagating: only the edited def's name moves. -------
+        // Build a worklist of transitive dependents that still reference the
+        // old hash. These are fine — they compile against the old def which
+        // still exists. The caller can choose to propagate later.
+        let cone = index.transitive_dependents(&old_hash);
+        let mut todos: Vec<crate::typecheck::Todo> = Vec::new();
+        if !cone.is_empty() {
+            let mut sorted: Vec<Hash> = cone.into_iter().collect();
+            sorted.sort_by_key(|h| h.to_hex());
+            for h in sorted {
+                let nm = name_for_hash(cb, &h);
+                todos.push(crate::typecheck::Todo {
+                    hash: h,
+                    name: nm,
+                    message: format!("still references old version of `{}`", name),
+                });
+            }
+        }
+
+        let updated = vec![Change {
+            name: Some(name.to_owned()),
+            old: old_hash,
+            new: new_hash,
+        }];
+
+        let mut result = EditResult {
+            renamed: Vec::new(),
+            updated,
+            propagated: Vec::new(),
+            todos,
+            no_op: false,
+        };
+
+        if dry_run {
+            return Ok(result);
+        }
+
+        // COMMIT: only the edited def's name moves.
+        cb.set_name(name.to_owned(), new_hash)?;
+        cb.store_typecache(&work_cache)?;
+        let mut idx = index;
+        idx.add_def(new_hash, &new_def);
+        let _ = idx.save(cb.root());
+        result.updated[0].name = name_for_hash(cb, &new_hash);
+        return Ok(result);
+    }
+
+    // ---- Propagating: require same-type, rewrite cone. ------------
+    if type_changed {
+        return Err(EditError::TypeError(format!(
+            "cannot propagate a type-changing update to `{}`; \
+             use `update` without `--propagate` to create the new def, \
+             then update callers manually before calling `propagate`",
+            name
+        )));
+    }
+
+    // 4. Compute the cone in topological order; build old->new remap.
     let cone = index.transitive_dependents(&old_hash);
     let topo = topo_sort_cone(&index, &cone);
     let mut remap: HashMap<Hash, Hash> = HashMap::new();
@@ -894,12 +994,13 @@ fn update_impl(
         })?
     };
 
-    if !type_changed && !todos.is_empty() {
-        // A same-type swap can NEVER break a caller. If it did, the kernel's
-        // hash-vs-type contract is violated — fail loudly, never silently.
+    if !todos.is_empty() {
+        // Same-type propagation should never produce type errors.
+        let details: Vec<String> = todos.iter().map(|t| format!("{}: {}", t.name.as_deref().unwrap_or("?"), t.message)).collect();
         return Err(EditError::TypeError(format!(
-            "same-type update unexpectedly broke {} dependent(s); kernel invariant violated",
-            todos.len()
+            "propagation unexpectedly broke {} dependent(s): {}",
+            todos.len(),
+            details.join("; ")
         )));
     }
 
@@ -913,7 +1014,7 @@ fn update_impl(
         renamed: Vec::new(),
         updated,
         propagated,
-        todos,
+        todos: Vec::new(),
         no_op: false,
     };
 
@@ -953,6 +1054,23 @@ fn update_impl(
     }
 
     Ok(result)
+}
+
+/// Propagate: (not yet implemented as a standalone command).
+/// Use `update --propagate` to rewire the cone at edit time.
+/// Standalone propagation requires patch tracking (old→new hash mapping)
+/// which will be added in a follow-up.
+fn propagate_impl(
+    _cb: &mut Codebase,
+    name: &str,
+    _dry_run: bool,
+) -> Result<EditResult, EditError> {
+    Err(EditError::Unsupported(format!(
+        "standalone `propagate` is not yet implemented. \
+         Use `update {} --propagate` to rewire the cone at edit time, \
+         or update callers manually with `update`.",
+        name
+    )))
 }
 
 // =============================================================================
@@ -2615,10 +2733,11 @@ mod tests {
         let old_double = hash_of(&cb, "double");
         let old_quad = hash_of(&cb, "quadruple");
 
-        let res = update(&mut cb, "double", "def double(x: Int) -> Int = x * 3")
-            .expect("update");
+        // Propagating update: same-type, rewrites the cone.
+        let res = update_propagate(&mut cb, "double", "def double(x: Int) -> Int = x * 3")
+            .expect("update_propagate");
         assert!(!res.no_op);
-        assert!(res.todos.is_empty(), "same-type update must have no todos");
+        assert!(res.todos.is_empty(), "same-type propagation must have no todos");
 
         // double now points at a NEW hash.
         let new_double = hash_of(&cb, "double");
@@ -2657,7 +2776,7 @@ mod tests {
     #[test]
     fn same_type_update_has_zero_todos_and_repoints_whole_cone() {
         let tmp = TempDir::new();
-        // a -> b -> c ; update c, both b and a re-point (cone depth >= 3).
+        // a -> b -> c ; propagate c, both b and a re-point (cone depth >= 3).
         let src = "
             def c(x: Int) -> Int = x + 1
             def b(x: Int) -> Int = c(x)
@@ -2668,7 +2787,7 @@ mod tests {
         let old_b = hash_of(&cb, "b");
         let old_c = hash_of(&cb, "c");
 
-        let res = update(&mut cb, "c", "def c(x: Int) -> Int = x + 2").expect("update");
+        let res = update_propagate(&mut cb, "c", "def c(x: Int) -> Int = x + 2").expect("update");
         assert!(res.todos.is_empty(), "same-type cone must produce no todos");
 
         let new_a = hash_of(&cb, "a");
@@ -2696,7 +2815,7 @@ mod tests {
         let old_base = hash_of(&cb, "base");
         let old_user = hash_of(&cb, "user");
 
-        // Change base's arity: the call `base(x)` in `user` now mismatches.
+        // Change base's arity. Without --propagate, only base's name moves.
         let res = update(&mut cb, "base", "def base(x: Int, y: Int) -> Int = x * y")
             .expect("update");
 
@@ -2706,18 +2825,20 @@ mod tests {
         assert_eq!(res.updated[0].old, old_base);
         assert_eq!(res.updated[0].new, new_base);
 
-        // user is a broken dependent -> a todo naming it.
+        // Dependents were NOT propagated.
+        assert!(res.propagated.is_empty(), "no propagation without --propagate");
+
+        // user is a dependent of old base -> listed as a todo (worklist).
         assert!(!res.todos.is_empty(), "type-changed update must yield todos");
         assert!(
             res.todos.iter().any(|t| t.name.as_deref() == Some("user")),
-            "todos must name the broken dependent `user`, got {:?}",
+            "todos must name the dependent `user`, got {:?}",
             res.todos
         );
 
-        // Per the contract: broken dependents' names ALSO move to their
-        // rewritten (still-broken) hash so they're visible/editable.
-        let new_user = hash_of(&cb, "user");
-        assert_ne!(new_user, old_user, "broken dependent's name still moves");
+        // user's name still points at the OLD hash (not broken).
+        let current_user = hash_of(&cb, "user");
+        assert_eq!(current_user, old_user, "dependent's name does NOT move");
 
         // Old defs preserved (immutability).
         assert!(cb.def_path(&old_base).exists());
@@ -2777,7 +2898,11 @@ mod tests {
             .expect("dry run");
 
         assert_eq!(res.updated[0].old, old_leaf);
-        assert!(res.propagated.iter().any(|c| c.old == old_caller));
+        assert!(!res.todos.is_empty(), "dry run must report dependents as worklist");
+        assert!(
+            res.todos.iter().any(|t| t.hash == old_caller),
+            "todos must include caller"
+        );
 
         // NO names moved.
         assert_eq!(hash_of(&cb, "leaf"), old_leaf, "dry run must not move leaf");

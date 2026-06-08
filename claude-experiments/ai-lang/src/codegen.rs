@@ -13,16 +13,11 @@
 //!
 //! - **No nested lambdas.** A `Lambda` inside another `Lambda`'s body is
 //!   rejected during codegen.
-//! - **No closure-typed lambda parameters** (higher-order closures
-//!   receiving a closure as an argument). Lambda params must be `Int`.
-//! - **No pointer captures.** The closure heap layout supports them (the
-//!   `TypeInfo` has separate value-field and raw-byte sections), but
-//!   determining a capture's runtime type without a real typechecker
-//!   isn't reliable yet. Captures must be `Int`-typed bindings.
 //!
-//! What's supported: top-level defs that return or use Int-capturing
-//! closures, the `make_adder` pattern, indirect calls through closures
-//! held in `let` bindings or returned by other defs.
+//! What's supported: pointer captures (inferred via `TypeInfo`), non-Int
+//! lambda params (passed via the uniform closure ABI), indirect calls
+//! through closures held in `let` bindings or returned by other defs,
+//! and first-class function references (eta-expanded to adapter closures).
 //!
 //! ## Symbol naming
 //!
@@ -904,8 +899,9 @@ impl<'ctx> Codegen<'ctx> {
     // -------------------------------------------------------------------------
 
     /// Walk an expression, registering every nested `Lambda` we find.
-    /// Rejects nested lambdas (Lambda inside Lambda body) and non-Int
-    /// lambda parameter types per the v1 restrictions.
+    /// Rejects nested lambdas (Lambda inside Lambda body) per the v1
+    /// restrictions. Lambda params may be any type (pointer-typed params
+    /// are passed via the uniform closure ABI).
     fn scan_lambdas(&mut self, e: &Expr) -> Result<(), CodegenError> {
         match e {
             Expr::Lambda { params, body } => {
