@@ -49,6 +49,7 @@ fn raw_scan_prefix(storage: &dyn StorageBackend, prefix_byte: u8) -> Vec<(Vec<u8
 /// Wide entity type exercising every scalar field type.
 fn wide_type() -> EntityTypeDef {
     EntityTypeDef {
+        unique_keys: vec![],
         name: "Wide".to_string(),
         fields: vec![
             FieldDef {
@@ -134,6 +135,7 @@ fn color_enum() -> EnumTypeDef {
 
 fn widget_type() -> EntityTypeDef {
     EntityTypeDef {
+        unique_keys: vec![],
         name: "Widget".to_string(),
         fields: vec![
             FieldDef {
@@ -833,6 +835,13 @@ fn value_bytes(v: &Value) -> Vec<u8> {
             buf.extend_from_slice(&(b.len() as u32).to_be_bytes());
             buf.extend_from_slice(b);
         }
+        Value::List(items) => {
+            buf.push(7);
+            buf.extend_from_slice(&(items.len() as u32).to_be_bytes());
+            for it in items {
+                buf.extend_from_slice(&value_bytes(it));
+            }
+        }
         Value::Enum(_) | Value::Null => panic!("unsupported in datom comparison: {:?}", v),
     }
     buf
@@ -1010,6 +1019,7 @@ proptest! {
 
 fn unique_user_type() -> EntityTypeDef {
     EntityTypeDef {
+        unique_keys: vec![],
         name: "U".to_string(),
         fields: vec![
             FieldDef {
@@ -1383,6 +1393,7 @@ proptest! {
 
 fn vaet_user_type() -> EntityTypeDef {
     EntityTypeDef {
+        unique_keys: vec![],
         name: "VUser".to_string(),
         fields: vec![FieldDef {
             name: "name".to_string(),
@@ -1396,6 +1407,7 @@ fn vaet_user_type() -> EntityTypeDef {
 
 fn vaet_post_type() -> EntityTypeDef {
     EntityTypeDef {
+        unique_keys: vec![],
         name: "VPost".to_string(),
         fields: vec![
             FieldDef {

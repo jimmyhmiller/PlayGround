@@ -37,6 +37,7 @@
 //!         FieldDef { name: "age".into(),   field_type: FieldType::I64,
 //!                    required: false, unique: false, indexed: false },
 //!     ],
+//!     unique_keys: vec![],
 //! })?;
 //!
 //! // 2. Insert an entity. `transact` takes raw JSON ops; one op per
@@ -471,5 +472,6 @@ fn field_type_to_wire(ft: &FieldType) -> String {
         FieldType::Bytes => "bytes".into(),
         FieldType::Ref(target) => format!("ref({})", target),
         FieldType::Enum(target) => format!("enum({})", target),
+        FieldType::List(elem) => format!("[{}]", field_type_to_wire(elem)),
     }
 }

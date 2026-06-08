@@ -67,6 +67,12 @@ fn hash_value<H: Hasher>(v: &Value, h: &mut H) {
         Value::Bool(b) => b.hash(h),
         Value::Ref(id) => id.hash(h),
         Value::Bytes(bytes) => bytes.hash(h),
+        Value::List(items) => {
+            items.len().hash(h);
+            for item in items {
+                hash_value(item, h);
+            }
+        }
         // Enum/Null never appear as query-pattern literals, but hash the
         // discriminant (already done above) so the key stays well-defined.
         Value::Enum(_) | Value::Null => {}
@@ -174,6 +180,9 @@ fn coerce_numeric_literal(
                 Some(PredOp::Ne) => {
                     (f.fract() == 0.0).then(|| (Some(PredOp::Ne), Value::I64(f as i64)))
                 }
+                // String-search ops don't apply to a numeric field; no
+                // coercion (they're filtered out before reaching an index).
+                Some(PredOp::Contains | PredOp::StartsWith | PredOp::EndsWith) => None,
             }
         }
         _ => None,
@@ -320,6 +329,11 @@ fn encode_group_key(vals: &[Value]) -> String {
                 }
             }
             Value::Enum(_) => s.push('e'),
+            Value::List(items) => {
+                let _ = write!(s, "l{}", items.len());
+                s.push('\u{2}');
+                s.push_str(&encode_group_key(items));
+            }
             Value::Null => s.push('n'),
         }
         s.push('\u{1}'); // field separator
@@ -2150,7 +2164,47 @@ pub fn parse_define_request(
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
 
-    Ok(EntityTypeDef { name, fields })
+    // Optional composite unique keys: [["doc","idx"], ...].
+    let unique_keys: Vec<Vec<String>> = match v.get("unique_keys") {
+        None => Vec::new(),
+        Some(uk) => {
+            let arr = uk
+                .as_array()
+                .ok_or("'unique_keys' must be an array of field-name arrays")?;
+            let mut keys = Vec::with_capacity(arr.len());
+            for entry in arr {
+                let fields_arr = entry
+                    .as_array()
+                    .ok_or("each unique key must be an array of field names")?;
+                let mut key_fields = Vec::with_capacity(fields_arr.len());
+                for fname in fields_arr {
+                    let fname = fname
+                        .as_str()
+                        .ok_or("unique key field name must be a string")?
+                        .to_string();
+                    // Validate the field exists on this type.
+                    if !fields.iter().any(|f| f.name == fname) {
+                        return Err(format!(
+                            "unique key references unknown field '{}'",
+                            fname
+                        ));
+                    }
+                    key_fields.push(fname);
+                }
+                if key_fields.is_empty() {
+                    return Err("a unique key must name at least one field".into());
+                }
+                keys.push(key_fields);
+            }
+            keys
+        }
+    };
+
+    Ok(EntityTypeDef {
+        name,
+        fields,
+        unique_keys,
+    })
 }
 
 /// Parse a "define_enum" request from JSON.
@@ -2217,6 +2271,7 @@ pub fn parse_define_enum_request(
 }
 
 fn parse_field_type(s: &str) -> std::result::Result<FieldType, String> {
+    let s = s.trim();
     match s {
         "string" => Ok(FieldType::String),
         "i64" => Ok(FieldType::I64),
@@ -2230,9 +2285,32 @@ fn parse_field_type(s: &str) -> std::result::Result<FieldType, String> {
                 other.strip_prefix("enum(").and_then(|s| s.strip_suffix(')'))
             {
                 Ok(FieldType::Enum(inner.to_string()))
+            } else if let Some(inner) =
+                other.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+            {
+                // `[elem]` — a cardinality-many list of `elem`.
+                let elem = parse_field_type(inner)?;
+                validate_list_elem(&elem)?;
+                Ok(FieldType::List(Box::new(elem)))
+            } else if let Some(inner) =
+                other.strip_prefix("list(").and_then(|s| s.strip_suffix(')'))
+            {
+                let elem = parse_field_type(inner)?;
+                validate_list_elem(&elem)?;
+                Ok(FieldType::List(Box::new(elem)))
             } else {
                 Err(format!("unknown field type: {}", other))
             }
         }
+    }
+}
+
+/// A list element must be a scalar type — no nested lists, no enums (enums
+/// fan out into sub-attribute datoms and can't live inside a single value).
+fn validate_list_elem(elem: &FieldType) -> std::result::Result<(), String> {
+    match elem {
+        FieldType::List(_) => Err("nested list element types are not supported".into()),
+        FieldType::Enum(_) => Err("enum element types inside a list are not supported".into()),
+        _ => Ok(()),
     }
 }

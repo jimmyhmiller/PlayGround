@@ -14,32 +14,42 @@ pub enum FieldType {
     Ref(std::string::String),
     Bytes,
     Enum(std::string::String),
+    /// Cardinality-many field: an ordered list of scalar values of the inner
+    /// type. The element type must itself be scalar (not List/Enum) — enforced
+    /// at parse time. Stored as a single `Value::List` datom.
+    List(Box<FieldType>),
 }
 
 impl FieldType {
     pub fn matches_value(&self, value: &Value) -> bool {
-        matches!(
-            (self, value),
+        match (self, value) {
             (FieldType::String, Value::String(_))
-                | (FieldType::I64, Value::I64(_))
-                | (FieldType::F64, Value::F64(_))
-                | (FieldType::Bool, Value::Bool(_))
-                | (FieldType::Ref(_), Value::Ref(_))
-                | (FieldType::Bytes, Value::Bytes(_))
-                | (FieldType::Enum(_), Value::Enum(_))
-                | (FieldType::Enum(_), Value::String(_)) // unit variant as string
-        )
+            | (FieldType::I64, Value::I64(_))
+            | (FieldType::F64, Value::F64(_))
+            | (FieldType::Bool, Value::Bool(_))
+            | (FieldType::Ref(_), Value::Ref(_))
+            | (FieldType::Bytes, Value::Bytes(_))
+            | (FieldType::Enum(_), Value::Enum(_))
+            | (FieldType::Enum(_), Value::String(_)) => true, // unit variant as string
+            // A list field accepts a list whose every element matches the
+            // element type. An empty list trivially matches.
+            (FieldType::List(elem), Value::List(items)) => {
+                items.iter().all(|v| elem.matches_value(v))
+            }
+            _ => false,
+        }
     }
 
-    pub fn type_name(&self) -> &str {
+    pub fn type_name(&self) -> std::string::String {
         match self {
-            FieldType::String => "string",
-            FieldType::I64 => "i64",
-            FieldType::F64 => "f64",
-            FieldType::Bool => "bool",
-            FieldType::Ref(t) => t.as_str(),
-            FieldType::Bytes => "bytes",
-            FieldType::Enum(t) => t.as_str(),
+            FieldType::String => "string".to_string(),
+            FieldType::I64 => "i64".to_string(),
+            FieldType::F64 => "f64".to_string(),
+            FieldType::Bool => "bool".to_string(),
+            FieldType::Ref(t) => t.clone(),
+            FieldType::Bytes => "bytes".to_string(),
+            FieldType::Enum(t) => t.clone(),
+            FieldType::List(elem) => format!("[{}]", elem.type_name()),
         }
     }
 }
@@ -61,6 +71,13 @@ pub struct FieldDef {
 pub struct EntityTypeDef {
     pub name: std::string::String,
     pub fields: Vec<FieldDef>,
+    /// Composite uniqueness constraints — each inner Vec is a set of field
+    /// names that must be jointly unique across the type. A single-field
+    /// entry is equivalent to marking that field `unique`. Asserting a new
+    /// entity (no `#id`) whose composite key matches an existing entity
+    /// **upserts** that entity instead of erroring.
+    #[serde(default)]
+    pub unique_keys: Vec<Vec<std::string::String>>,
 }
 
 impl EntityTypeDef {
@@ -156,7 +173,7 @@ impl SchemaRegistry {
                 continue;
             }
             for f in &t.fields {
-                if matches!(&f.field_type, FieldType::Ref(target) if target == name) {
+                if field_type_refs_type(&f.field_type, name) {
                     out.push(format!("type {}.{}", t.name, f.name));
                 }
             }
@@ -164,7 +181,7 @@ impl SchemaRegistry {
         for e in self.enums.values() {
             for v in &e.variants {
                 for f in &v.fields {
-                    if matches!(&f.field_type, FieldType::Ref(target) if target == name) {
+                    if field_type_refs_type(&f.field_type, name) {
                         out.push(format!("enum {}::{}.{}", e.name, v.name, f.name));
                     }
                 }
@@ -181,7 +198,7 @@ impl SchemaRegistry {
         let mut out = Vec::new();
         for t in self.types.values() {
             for f in &t.fields {
-                if matches!(&f.field_type, FieldType::Enum(target) if target == name) {
+                if field_type_refs_enum(&f.field_type, name) {
                     out.push(format!("type {}.{}", t.name, f.name));
                 }
             }
@@ -192,7 +209,7 @@ impl SchemaRegistry {
             }
             for v in &e.variants {
                 for f in &v.fields {
-                    if matches!(&f.field_type, FieldType::Enum(target) if target == name) {
+                    if field_type_refs_enum(&f.field_type, name) {
                         out.push(format!("enum {}::{}.{}", e.name, v.name, f.name));
                     }
                 }
@@ -212,5 +229,24 @@ impl SchemaRegistry {
         let mut enums: Vec<_> = self.enums.values().collect();
         enums.sort_by_key(|e| &e.name);
         enums
+    }
+}
+
+/// True if `ft` references entity type `name` via a `ref`, including a
+/// `ref` nested inside a list element (`[ref(name)]`).
+fn field_type_refs_type(ft: &FieldType, name: &str) -> bool {
+    match ft {
+        FieldType::Ref(target) => target == name,
+        FieldType::List(elem) => field_type_refs_type(elem, name),
+        _ => false,
+    }
+}
+
+/// True if `ft` references enum `name`, including inside a list element.
+fn field_type_refs_enum(ft: &FieldType, name: &str) -> bool {
+    match ft {
+        FieldType::Enum(target) => target == name,
+        FieldType::List(elem) => field_type_refs_enum(elem, name),
+        _ => false,
     }
 }

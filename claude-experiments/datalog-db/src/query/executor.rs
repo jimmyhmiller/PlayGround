@@ -73,6 +73,12 @@ impl Hash for HashableValue {
             Value::Bytes(b) => b.hash(state),
             Value::Null => {}
             Value::Enum(e) => e.variant.hash(state),
+            Value::List(items) => {
+                items.len().hash(state);
+                for v in items {
+                    HashableValue(v.clone()).hash(state);
+                }
+            }
         }
     }
 }
@@ -1373,9 +1379,12 @@ fn find_indexable_patterns(
             Pattern::Predicate { op, value }
             | Pattern::BoundPredicate { op, value, .. } => {
                 // Range predicates use AVET index (Ne excluded — not worth it).
+                // String-search ops (contains/starts_with/ends_with) aren't
+                // range-comparable, so they can't drive an index scan; they
+                // filter via the sequential column walk instead.
                 // BoundPredicate filters here too; its variable binding is
                 // applied later when the matched rows are materialized.
-                if !matches!(op, PredOp::Ne) {
+                if !matches!(op, PredOp::Ne) && !op.is_string_search() {
                     plans.push(AttrPlan::Range(attr, op.clone(), value.clone()));
                 }
             }
@@ -1499,7 +1508,11 @@ fn find_entities_by_avet_range(
             let end = index::prefix_end(&index::avet_attr_value_prefix(attr_id, value));
             (start, end)
         }
-        PredOp::Ne => {
+        PredOp::Ne | PredOp::Contains | PredOp::StartsWith | PredOp::EndsWith => {
+            // Ne and string-search ops aren't range-bounded; scan the whole
+            // attribute and let the post-filter (PredOp::evaluate) decide.
+            // String-search ops are normally filtered out before reaching an
+            // index plan, but handle them defensively.
             let start = index::avet_attr_type_prefix(attr_id, type_tag);
             let end = index::prefix_end(&index::avet_attr_prefix(attr_id));
             (start, end)
@@ -2343,7 +2356,8 @@ fn find_entities_by_avet_range_current(
             let end = index::prefix_end(&index::current_avet_attr_value_prefix(attr_id, value));
             (start, end)
         }
-        PredOp::Ne => {
+        PredOp::Ne | PredOp::Contains | PredOp::StartsWith | PredOp::EndsWith => {
+            // Not range-bounded; scan the whole attribute and post-filter.
             let start = index::current_avet_attr_type_prefix(attr_id, type_tag);
             let end = index::prefix_end(&index::current_avet_attr_prefix(attr_id));
             (start, end)

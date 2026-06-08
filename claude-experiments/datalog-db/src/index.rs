@@ -65,6 +65,14 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
             buf.write_u32::<BigEndian>(bytes.len() as u32).unwrap();
             buf.extend_from_slice(bytes);
         }
+        Value::List(items) => {
+            // [count(u32)][element...] — each element is a full tagged value,
+            // so decode_value recurses. Lists hold only scalar elements.
+            buf.write_u32::<BigEndian>(items.len() as u32).unwrap();
+            for item in items {
+                encode_value(buf, item);
+            }
+        }
         Value::Enum(_) => panic!("Enum values cannot be encoded in index keys"),
         Value::Null => panic!("Null values cannot be encoded in index keys"),
     }
@@ -288,6 +296,15 @@ fn decode_value(cursor: &mut Cursor<&[u8]>) -> Option<Value> {
             let bytes = data[pos..pos + len].to_vec();
             cursor.set_position((pos + len) as u64);
             Some(Value::Bytes(bytes))
+        }
+        0x07 => {
+            // List: [count(u32)][element...]
+            let count = cursor.read_u32::<BigEndian>().ok()? as usize;
+            let mut items = Vec::with_capacity(count);
+            for _ in 0..count {
+                items.push(decode_value(cursor)?);
+            }
+            Some(Value::List(items))
         }
         _ => None,
     }

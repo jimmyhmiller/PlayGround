@@ -149,6 +149,14 @@ fn json_to_value(v: &serde_json::Value) -> std::result::Result<Value, String> {
             }
         }
         serde_json::Value::Bool(b) => Ok(Value::Bool(*b)),
+        serde_json::Value::Array(items) => {
+            // A JSON array is a cardinality-many list value.
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                out.push(json_to_value(item)?);
+            }
+            Ok(Value::List(out))
+        }
         serde_json::Value::Object(obj) => {
             if let Some(id) = obj.get("ref").and_then(|r| r.as_u64()) {
                 return Ok(Value::Ref(id));
@@ -246,10 +254,21 @@ pub fn process_transaction(
                     }
                 }
 
-                let is_new = entity.is_none();
-                let eid = match entity {
-                    Some(id) => *id,
-                    None => {
+                // Composite-key upsert: an assert with no explicit `#id` whose
+                // data carries a full composite unique key resolves to the
+                // existing entity holding that key (if any), updating it in
+                // place rather than creating a duplicate.
+                let upsert_target = if entity.is_none() {
+                    resolve_composite_upsert(txn, interner, type_def, entity_type, data)?
+                } else {
+                    None
+                };
+
+                let is_new = entity.is_none() && upsert_target.is_none();
+                let eid = match (entity, upsert_target) {
+                    (Some(id), _) => *id,
+                    (None, Some(existing)) => existing,
+                    (None, None) => {
                         *entity_counter += 1;
                         let eid = *entity_counter;
                         datoms.push(Datom {
@@ -644,6 +663,91 @@ fn check_unique_constraint(
     }
 
     Ok(())
+}
+
+/// Resolve a composite-key upsert. If `type_def` declares any composite unique
+/// key whose every field is present in `data`, find an existing currently-live
+/// entity whose stored values for those fields all equal the asserted values.
+/// Returns that entity id (the upsert target) or `None` if there's no match.
+///
+/// Single-field unique keys are handled here too, giving `unique` fields
+/// upsert-on-conflict semantics for the no-id assert path.
+fn resolve_composite_upsert(
+    txn: &dyn TxnOps,
+    interner: &AttrInterner,
+    type_def: &crate::schema::EntityTypeDef,
+    entity_type: &str,
+    data: &HashMap<String, Value>,
+) -> Result<Option<EntityId>> {
+    for key_fields in &type_def.unique_keys {
+        // Every field of the key must be supplied to match on it.
+        if !key_fields.iter().all(|f| data.contains_key(f)) {
+            continue;
+        }
+        // Use the most selective field (just pick the first) to seed candidate
+        // entities via AVET, then verify the remaining key fields.
+        let seed_field = &key_fields[0];
+        let seed_attr = type_def.attribute_name(seed_field);
+        let seed_value = &data[seed_field];
+
+        let candidates = entities_with_current_value(txn, interner, &seed_attr, seed_value)?;
+        for eid in candidates {
+            let mut all_match = true;
+            for kf in key_fields {
+                let attr = type_def.attribute_name(kf);
+                let stored = get_latest_value(txn, interner, eid, &attr)?;
+                if stored.as_ref() != Some(&data[kf]) {
+                    all_match = false;
+                    break;
+                }
+            }
+            if all_match {
+                // Confirm the entity is of the right type (AVET on a shared
+                // attribute name could in principle collide across types).
+                let type_attr = format!("{}/__type", entity_type);
+                let _ = type_attr; // entity ids are type-scoped by attribute name; the
+                                   // attribute_name already namespaces by type, so a
+                                   // value match on `Type/field` implies the right type.
+                return Ok(Some(eid));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// Find all entities that currently (latest state) hold `value` for `attr`.
+fn entities_with_current_value(
+    txn: &dyn TxnOps,
+    interner: &AttrInterner,
+    attr: &str,
+    value: &Value,
+) -> Result<Vec<EntityId>> {
+    let attr_id = match interner.lookup(attr) {
+        Some(id) => id,
+        None => return Ok(Vec::new()),
+    };
+    let prefix = index::avet_attr_value_prefix(attr_id, value);
+    let end = index::prefix_end(&prefix);
+    let entries = txn.scan(&prefix, &end)?;
+
+    let mut entity_datoms: HashMap<EntityId, Vec<Datom>> = HashMap::new();
+    for (k, _) in &entries {
+        if let Some(decoded) = index::decode_datom_from_avet(k) {
+            if let Some(datom) = interner.resolve(decoded) {
+                entity_datoms.entry(datom.entity).or_default().push(datom);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    for (eid, mut datoms) in entity_datoms {
+        datoms.sort_by(|a, b| a.tx.cmp(&b.tx).then_with(|| a.added.cmp(&b.added)));
+        // The value is currently asserted iff the last datom for it is an add.
+        if datoms.last().map(|d| d.added).unwrap_or(false) {
+            out.push(eid);
+        }
+    }
+    Ok(out)
 }
 
 fn validate_enum_value(

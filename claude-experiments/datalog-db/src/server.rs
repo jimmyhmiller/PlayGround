@@ -433,6 +433,9 @@ fn value_to_json(v: &crate::datom::Value) -> serde_json::Value {
                 .collect();
             serde_json::json!({ variant: field_json })
         }
+        crate::datom::Value::List(items) => {
+            serde_json::Value::Array(items.iter().map(value_to_json).collect())
+        }
         crate::datom::Value::Null => serde_json::Value::Null,
     }
 }

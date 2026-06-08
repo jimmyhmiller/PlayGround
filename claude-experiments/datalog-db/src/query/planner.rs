@@ -20,6 +20,14 @@ pub enum ScanStrategy {
     IndexLookup(Vec<(String, Value)>),
     /// AVET range scan on one attribute
     RangeScan { attr: String, op: PredOp, value: Value },
+    /// Executed as a per-tuple index probe seeded by an upstream join.
+    /// The plan's `estimate_clause` runs before join variables are bound,
+    /// so a clause whose only selective field is a join variable is labelled
+    /// `TypeScan` there; this variant records that at execution time the
+    /// nested-loop seeds the right side by `field` (the bind entity, or an
+    /// indexed/unique field) — an O(log n) probe, not a full scan. Purely
+    /// an EXPLAIN-accuracy annotation; the executor's behaviour is unchanged.
+    IndexProbe { field: String, var: String },
 }
 
 /// Which side of a join to use as the build side for hash join.
@@ -209,6 +217,9 @@ fn fmt_node(node: &PlanNode, f: &mut fmt::Formatter<'_>, prefix: &str, is_last: 
                 ScanStrategy::RangeScan { attr, op, value } => {
                     format!("RangeScan({} {:?} {})", attr, op, value)
                 }
+                ScanStrategy::IndexProbe { field, var } => {
+                    format!("IndexProbe({} = {})", field, var)
+                }
             };
             writeln!(
                 f,
@@ -333,6 +344,9 @@ fn node_to_json(node: &PlanNode) -> serde_json::Value {
                 ScanStrategy::RangeScan { attr, op, .. } => {
                     format!("RangeScan({} {:?})", attr, op)
                 }
+                ScanStrategy::IndexProbe { field, var } => {
+                    format!("IndexProbe({} = {})", field, var)
+                }
             };
 
             let fields: Vec<_> = scan.clause.field_patterns.iter().map(|(k, _)| k.clone()).collect();
@@ -417,7 +431,7 @@ pub fn plan_query(
     let where_clause = query.where_clause.clone().simplified();
 
     let mut type_counts: HashMap<String, usize> = HashMap::new();
-    let root = compile_clause(
+    let mut root = compile_clause(
         &where_clause,
         txn,
         schema,
@@ -425,6 +439,10 @@ pub fn plan_query(
         query.as_of,
         &mut type_counts,
     )?;
+
+    // EXPLAIN accuracy: relabel TypeScan children of NestedLoop joins that are
+    // actually executed as per-tuple index probes (see ScanStrategy::IndexProbe).
+    relabel_index_probes(&mut root, schema);
 
     // Wrap in Project
     let root = PlanNode::Project {
@@ -439,6 +457,70 @@ pub fn plan_query(
         as_of: query.as_of,
         slot_map,
     })
+}
+
+/// Walk the plan tree and relabel `TypeScan` strategies that are actually
+/// executed as per-tuple index probes. A NestedLoop join seeds its right side
+/// with the left row's bindings; when a join variable is the right scan's bind
+/// entity (direct entity lookup) or matches an indexed/unique field on the
+/// right clause, the executor probes the index rather than scanning the type.
+/// This only changes the EXPLAIN label, never execution.
+fn relabel_index_probes(node: &mut PlanNode, schema: &SchemaRegistry) {
+    match node {
+        PlanNode::Join { left, right, join_vars, strategy, .. } => {
+            relabel_index_probes(left, schema);
+            relabel_index_probes(right, schema);
+            if matches!(strategy, JoinStrategy::NestedLoop) && !join_vars.is_empty() {
+                if let PlanNode::Scan(scan) = right.as_mut() {
+                    if matches!(scan.strategy, ScanStrategy::TypeScan) {
+                        if let Some((field, var)) = probe_field(&scan.clause, join_vars, schema) {
+                            scan.strategy = ScanStrategy::IndexProbe { field, var };
+                        }
+                    }
+                }
+            }
+        }
+        PlanNode::Project { input, .. } => relabel_index_probes(input, schema),
+        PlanNode::Negation { input, anti, .. } => {
+            relabel_index_probes(input, schema);
+            relabel_index_probes(anti, schema);
+        }
+        PlanNode::Union { branches, .. } => {
+            for b in branches {
+                relabel_index_probes(b, schema);
+            }
+        }
+        PlanNode::Scan(_) => {}
+    }
+}
+
+/// If a join variable lets the executor probe an index on `clause`, return the
+/// `(field, var)` describing it: the bind variable itself (direct entity lookup,
+/// reported as `id`), or an indexed/unique field bound to a join var.
+fn probe_field(
+    clause: &WhereClause,
+    join_vars: &[String],
+    schema: &SchemaRegistry,
+) -> Option<(String, String)> {
+    for jv in join_vars {
+        // The join var IS the entity — a direct by-id lookup.
+        if jv == &clause.bind {
+            return Some(("id".to_string(), jv.clone()));
+        }
+        // The join var is bound to an indexed/unique field on this clause.
+        if let Some(type_def) = schema.get(&clause.entity_type) {
+            for (field_name, pattern) in &clause.field_patterns {
+                if pattern.bound_var() == Some(jv.as_str()) {
+                    if let Some(fd) = type_def.get_field(field_name) {
+                        if fd.unique || fd.indexed {
+                            return Some((field_name.clone(), jv.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Compile a where clause tree into a plan node. Flat conjunctions of
@@ -653,7 +735,7 @@ fn estimate_clause(
                 }
             }
             Pattern::Predicate { op, value } | Pattern::BoundPredicate { op, value, .. }
-                if !matches!(op, PredOp::Ne) =>
+                if !matches!(op, PredOp::Ne) && !op.is_string_search() =>
             {
                 if range_info.is_none() {
                     let attr = type_def

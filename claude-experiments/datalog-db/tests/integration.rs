@@ -19,6 +19,7 @@ fn test_db() -> (Arc<Database>, tempfile::TempDir) {
 
 fn user_type() -> EntityTypeDef {
     EntityTypeDef {
+        unique_keys: vec![],
         name: "User".to_string(),
         fields: vec![
             FieldDef {
@@ -48,6 +49,7 @@ fn user_type() -> EntityTypeDef {
 
 fn post_type() -> EntityTypeDef {
     EntityTypeDef {
+        unique_keys: vec![],
         name: "Post".to_string(),
         fields: vec![
             FieldDef {
@@ -764,6 +766,7 @@ fn shape_enum() -> EnumTypeDef {
 
 fn drawing_type() -> EntityTypeDef {
     EntityTypeDef {
+        unique_keys: vec![],
         name: "Drawing".to_string(),
         fields: vec![
             FieldDef {
@@ -1092,6 +1095,7 @@ fn test_enum_same_variant_stale_field_retraction() {
     db.define_enum(status_enum).unwrap();
 
     let account_type = EntityTypeDef {
+        unique_keys: vec![],
         name: "Account".to_string(),
         fields: vec![
             FieldDef {
@@ -1580,6 +1584,7 @@ fn test_snapshot_enum_same_variant_update() {
     db.define_enum(status_enum).unwrap();
 
     let account_type = EntityTypeDef {
+        unique_keys: vec![],
         name: "Account".to_string(),
         fields: vec![
             FieldDef {
@@ -1651,6 +1656,7 @@ fn test_snapshot_enum_same_variant_update() {
 fn test_concurrent_stress() {
     let (db, _dir) = test_db();
     db.define_type(EntityTypeDef {
+        unique_keys: vec![],
         name: "Counter".to_string(),
         fields: vec![
             FieldDef {
@@ -1729,6 +1735,7 @@ fn test_concurrent_read_after_write_no_stale_cache() {
     for round in 0..12 {
         let (db, _dir) = test_db();
         db.define_type(EntityTypeDef {
+            unique_keys: vec![],
             name: "Counter".to_string(),
             fields: vec![
                 FieldDef {
@@ -1993,6 +2000,7 @@ fn test_unique_different_types_independent() {
 
     // Define a second type with its own unique field
     db.define_type(EntityTypeDef {
+        unique_keys: vec![],
         name: "Admin".to_string(),
         fields: vec![
             FieldDef {
@@ -2771,6 +2779,7 @@ fn test_multi_clause_join() {
 
     // Define a Comment type
     db.define_type(EntityTypeDef {
+        unique_keys: vec![],
         name: "Comment".to_string(),
         fields: vec![
             FieldDef {
@@ -4002,6 +4011,7 @@ mod backups {
 /// A type with both an f64 and an i64 field for numeric-coercion tests.
 fn product_type() -> EntityTypeDef {
     EntityTypeDef {
+        unique_keys: vec![],
         name: "Product".to_string(),
         fields: vec![
             FieldDef {
@@ -4284,6 +4294,7 @@ fn test_limit_and_offset() {
 
 fn employee_type() -> EntityTypeDef {
     EntityTypeDef {
+        unique_keys: vec![],
         name: "Employee".to_string(),
         fields: vec![
             FieldDef {
@@ -4334,6 +4345,7 @@ fn seed_employees(db: &Database) {
 
 fn project_type() -> EntityTypeDef {
     EntityTypeDef {
+        unique_keys: vec![],
         name: "Project".to_string(),
         fields: vec![
             FieldDef {
@@ -4492,6 +4504,7 @@ fn test_redefine_type_compatibility() {
 
     // Dropping a field -> rejected.
     let dropped = EntityTypeDef {
+        unique_keys: vec![],
         name: "Employee".to_string(),
         fields: vec![FieldDef {
             name: "name".to_string(),
@@ -4948,6 +4961,7 @@ fn test_hard_purge_enum_refused_when_used() {
 
     // A type with a field of the enum.
     let widget = EntityTypeDef {
+        unique_keys: vec![],
         name: "Widget".to_string(),
         fields: vec![FieldDef {
             name: "shape".to_string(),

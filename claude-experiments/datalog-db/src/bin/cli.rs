@@ -145,6 +145,14 @@ impl<'a> Parser<'a> {
 
     fn read_field_type(&mut self) -> Result<String, String> {
         self.skip_ws();
+        // List type: `[elem]` — a cardinality-many field.
+        if self.peek() == Some('[') {
+            self.advance();
+            let elem = self.read_field_type()?;
+            self.skip_ws();
+            self.expect(']')?;
+            return Ok(format!("[{}]", elem));
+        }
         let ident = self.read_ident()?;
         match ident.as_str() {
             "string" | "i64" | "f64" | "bool" | "bytes" => Ok(ident),
@@ -154,17 +162,52 @@ impl<'a> Parser<'a> {
                 self.expect(')')?;
                 Ok(format!("{}({})", ident, inner))
             }
+            "list" => {
+                self.expect('(')?;
+                let inner = self.read_field_type()?;
+                self.skip_ws();
+                self.expect(')')?;
+                Ok(format!("list({})", inner))
+            }
             other => Err(format!("unknown field type: '{}'", other)),
         }
     }
 
-    /// Read a value in assert/data context: string, number, bool, #ref, or enum variant.
+    /// Read a value in assert/data context: string, number, bool, #ref, enum
+    /// variant, or a `[...]` list literal.
     fn read_value(&mut self) -> Result<serde_json::Value, String> {
         self.skip_ws();
         match self.peek() {
             Some('"') => {
                 let s = self.read_string_literal()?;
                 Ok(serde_json::Value::String(s))
+            }
+            Some('[') => {
+                // List literal: [v1, v2, ...]. Empty `[]` is allowed.
+                self.advance();
+                let mut items = Vec::new();
+                loop {
+                    self.skip_ws();
+                    if self.peek() == Some(']') {
+                        self.advance();
+                        break;
+                    }
+                    items.push(self.read_value()?);
+                    self.skip_ws();
+                    match self.peek() {
+                        Some(',') => {
+                            self.advance();
+                        }
+                        Some(']') => {
+                            self.advance();
+                            break;
+                        }
+                        other => {
+                            return Err(format!("expected ',' or ']' in list, got {:?}", other))
+                        }
+                    }
+                }
+                Ok(serde_json::Value::Array(items))
             }
             Some('#') => {
                 self.advance();
@@ -285,6 +328,11 @@ impl<'a> Parser<'a> {
                 match ident.as_str() {
                     "true" => Ok(serde_json::Value::Bool(true)),
                     "false" => Ok(serde_json::Value::Bool(false)),
+                    // Word operators for string search: `body: contains "x"`.
+                    "contains" | "starts_with" | "ends_with" => {
+                        let val = self.read_pattern_value()?;
+                        Ok(serde_json::json!({ ident: val }))
+                    }
                     _ => Ok(serde_json::Value::String(ident)),
                 }
             }
@@ -320,6 +368,28 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.advance();
                 Some("ne")
+            }
+            // Word operators for string search, e.g. `body: ?b contains "x"`.
+            Some(c) if c.is_ascii_alphabetic() => {
+                let rest = &self.input[self.pos..];
+                for op in ["contains", "starts_with", "ends_with"] {
+                    if rest.starts_with(op) {
+                        // Only consume it as an operator if a word boundary
+                        // follows (so we don't eat an identifier prefix).
+                        let after = rest[op.len()..].chars().next();
+                        if after.map_or(true, |c| !c.is_ascii_alphanumeric() && c != '_') {
+                            for _ in 0..op.len() {
+                                self.advance();
+                            }
+                            return Some(match op {
+                                "contains" => "contains",
+                                "starts_with" => "starts_with",
+                                _ => "ends_with",
+                            });
+                        }
+                    }
+                }
+                None
             }
             _ => None,
         }
@@ -503,11 +573,42 @@ fn parse_define(p: &mut Parser) -> Result<serde_json::Value, String> {
     }
     p.expect('}')?;
 
-    Ok(serde_json::json!({
+    // Optional trailing composite unique keys: `unique (doc, idx)`, repeatable.
+    let mut unique_keys: Vec<Vec<String>> = Vec::new();
+    loop {
+        p.skip_ws();
+        let saved = p.pos;
+        match p.read_ident() {
+            Ok(kw) if kw == "unique" => {
+                p.skip_ws();
+                p.expect('(')?;
+                let mut key_fields = Vec::new();
+                loop {
+                    let fname = p.read_ident()?;
+                    key_fields.push(fname);
+                    p.skip_ws();
+                    match p.peek() {
+                        Some(',') => { p.advance(); }
+                        Some(')') => { p.advance(); break; }
+                        other => return Err(format!(
+                            "expected ',' or ')' in unique key, got {:?}", other)),
+                    }
+                }
+                unique_keys.push(key_fields);
+            }
+            _ => { p.pos = saved; break; }
+        }
+    }
+
+    let mut req = serde_json::json!({
         "type": "define",
         "entity_type": type_name,
         "fields": fields,
-    }))
+    });
+    if !unique_keys.is_empty() {
+        req["unique_keys"] = serde_json::json!(unique_keys);
+    }
+    Ok(req)
 }
 
 /// define enum Status { Active, Suspended { reason: string } }
@@ -1067,6 +1168,20 @@ fn format_schema(data: &serde_json::Value) -> String {
                     out.push_str(&format!("    {}: {}{}\n", fname, ftype, mod_str));
                 }
             }
+            // Composite unique keys.
+            if let Some(keys) = type_def.get("unique_keys").and_then(|k| k.as_array()) {
+                for key in keys {
+                    if let Some(fields) = key.as_array() {
+                        let names: Vec<String> = fields
+                            .iter()
+                            .filter_map(|f| f.as_str().map(String::from))
+                            .collect();
+                        if !names.is_empty() {
+                            out.push_str(&format!("    unique ({})\n", names.join(", ")));
+                        }
+                    }
+                }
+            }
         }
     } else {
         out.push_str("  (none)\n");
@@ -1115,6 +1230,8 @@ fn format_field_type(v: Option<&serde_json::Value>) -> String {
                 format!("ref({})", target)
             } else if let Some(target) = obj.get("enum").and_then(|e| e.as_str()) {
                 format!("enum({})", target)
+            } else if let Some(elem) = obj.get("list") {
+                format!("[{}]", format_field_type(Some(elem)))
             } else {
                 format!("{}", serde_json::Value::Object(obj.clone()))
             }

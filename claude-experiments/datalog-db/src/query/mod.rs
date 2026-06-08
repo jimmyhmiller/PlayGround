@@ -30,35 +30,42 @@ pub enum Pattern {
 }
 
 impl Pattern {
-    pub fn from_json(v: &serde_json::Value) -> Self {
+    pub fn from_json(v: &serde_json::Value) -> std::result::Result<Self, String> {
         if let Some(s) = v.as_str() {
             if s.starts_with('?') {
-                return Pattern::Variable(s.to_string());
+                return Ok(Pattern::Variable(s.to_string()));
             }
-            return Pattern::Constant(Value::String(s.into()));
+            return Ok(Pattern::Constant(Value::String(s.into())));
         }
         if let Some(n) = v.as_i64() {
-            return Pattern::Constant(Value::I64(n));
+            return Ok(Pattern::Constant(Value::I64(n)));
         }
         if let Some(n) = v.as_f64() {
-            return Pattern::Constant(Value::F64(n));
+            return Ok(Pattern::Constant(Value::F64(n)));
         }
         if let Some(b) = v.as_bool() {
-            return Pattern::Constant(Value::Bool(b));
+            return Ok(Pattern::Constant(Value::Bool(b)));
         }
         if let Some(obj) = v.as_object() {
+            // An entity reference ({"ref": N}) is a constant, not a predicate.
+            if obj.len() == 1 && obj.contains_key("ref") {
+                return Ok(Pattern::Constant(value_from_json(v)));
+            }
+
             // Check for enum match: {"match": "Circle", ...}
             if let Some(match_val) = obj.get("match") {
-                let variant = Box::new(Pattern::from_json(match_val));
-                let field_patterns: Vec<_> = obj
-                    .iter()
-                    .filter(|(k, _)| k.as_str() != "match")
-                    .map(|(k, v)| (k.clone(), Pattern::from_json(v)))
-                    .collect();
-                return Pattern::EnumMatch {
+                let variant = Box::new(Pattern::from_json(match_val)?);
+                let mut field_patterns = Vec::new();
+                for (k, val) in obj {
+                    if k == "match" {
+                        continue;
+                    }
+                    field_patterns.push((k.clone(), Pattern::from_json(val)?));
+                }
+                return Ok(Pattern::EnumMatch {
                     variant,
                     field_patterns,
-                };
+                });
             }
 
             // Combined bind + predicate: {"var": "?age", "gt": 25}.
@@ -68,13 +75,24 @@ impl Pattern {
                 if var.starts_with('?') {
                     for (key, val) in obj {
                         if let Some(op) = PredOp::from_key(key) {
-                            return Pattern::BoundPredicate {
+                            return Ok(Pattern::BoundPredicate {
                                 var: var.to_string(),
                                 op,
                                 value: value_from_json(val),
-                            };
+                            });
                         }
                     }
+                    // A {"var": ...} object with no recognized operator is a
+                    // bare bind — equivalent to "?var".
+                    if obj.len() == 1 {
+                        return Ok(Pattern::Variable(var.to_string()));
+                    }
+                    return Err(format!(
+                        "field pattern {{\"var\": {:?}, ...}} has no known predicate operator; \
+                         expected one of {:?}",
+                        var,
+                        PredOp::known_keys()
+                    ));
                 }
             }
 
@@ -82,14 +100,25 @@ impl Pattern {
             for (key, val) in obj {
                 if let Some(op) = PredOp::from_key(key) {
                     let value = value_from_json(val);
-                    return Pattern::Predicate { op, value };
+                    return Ok(Pattern::Predicate { op, value });
                 }
             }
+
+            // An object that matched none of the above is almost always a
+            // typo'd operator (e.g. {"contians": "x"}). Silently treating it
+            // as a constant turns the clause into a no-op filter that matches
+            // every row — a footgun. Reject it loudly instead.
+            let keys: Vec<&str> = obj.keys().map(|k| k.as_str()).collect();
+            return Err(format!(
+                "unknown field pattern with keys {:?}; expected a constant, a variable \"?x\", \
+                 a predicate {{op: value}} (one of {:?}), an enum {{\"match\": ...}}, \
+                 or an entity ref {{\"ref\": N}}",
+                keys,
+                PredOp::known_keys()
+            ));
         }
-        // Fallback: route through value_from_json so an entity reference
-        // ({"ref": N}) becomes a `Ref` constant rather than a stringified
-        // object that can never match.
-        Pattern::Constant(value_from_json(v))
+        // null and any other JSON shape: route through value_from_json.
+        Ok(Pattern::Constant(value_from_json(v)))
     }
 
     /// The variable this pattern binds into the result tuple, if any.
@@ -112,6 +141,8 @@ fn value_from_json(v: &serde_json::Value) -> Value {
         Value::F64(n)
     } else if let Some(b) = v.as_bool() {
         Value::Bool(b)
+    } else if let Some(arr) = v.as_array() {
+        Value::List(arr.iter().map(value_from_json).collect())
     } else if let Some(r) = v.get("ref").and_then(|x| x.as_u64()) {
         // Entity reference: {"ref": N}. Without this a ref constant in a
         // where clause (e.g. `lead: #11`) would stringify and never match a
@@ -129,6 +160,12 @@ pub enum PredOp {
     Gte,
     Lte,
     Ne,
+    /// Substring match on string values (case-sensitive).
+    Contains,
+    /// Prefix match on string values.
+    StartsWith,
+    /// Suffix match on string values.
+    EndsWith,
 }
 
 impl PredOp {
@@ -140,8 +177,22 @@ impl PredOp {
             "gte" => Some(PredOp::Gte),
             "lte" => Some(PredOp::Lte),
             "ne" => Some(PredOp::Ne),
+            "contains" => Some(PredOp::Contains),
+            "starts_with" => Some(PredOp::StartsWith),
+            "ends_with" => Some(PredOp::EndsWith),
             _ => None,
         }
+    }
+
+    /// True for the string-search operators (substring/prefix/suffix). These
+    /// can't drive a range index scan — they filter via a sequential walk.
+    pub fn is_string_search(&self) -> bool {
+        matches!(self, PredOp::Contains | PredOp::StartsWith | PredOp::EndsWith)
+    }
+
+    /// The set of JSON predicate keys, for error messages.
+    pub fn known_keys() -> &'static [&'static str] {
+        &["gt", "lt", "gte", "lte", "ne", "contains", "starts_with", "ends_with"]
     }
 
     pub fn evaluate(&self, actual: &Value, target: &Value) -> bool {
@@ -152,6 +203,8 @@ impl PredOp {
                 PredOp::Gte => a >= b,
                 PredOp::Lte => a <= b,
                 PredOp::Ne => a != b,
+                // String-search ops never apply to numbers.
+                PredOp::Contains | PredOp::StartsWith | PredOp::EndsWith => false,
             },
             (Value::F64(a), Value::F64(b)) => match self {
                 PredOp::Gt => a > b,
@@ -159,6 +212,7 @@ impl PredOp {
                 PredOp::Gte => a >= b,
                 PredOp::Lte => a <= b,
                 PredOp::Ne => a != b,
+                PredOp::Contains | PredOp::StartsWith | PredOp::EndsWith => false,
             },
             // Mixed numeric: compare as f64 so an integer literal and a
             // float field (or vice versa) don't silently fail to match.
@@ -173,6 +227,7 @@ impl PredOp {
                     PredOp::Gte => a >= *b,
                     PredOp::Lte => a <= *b,
                     PredOp::Ne => a != *b,
+                    PredOp::Contains | PredOp::StartsWith | PredOp::EndsWith => false,
                 }
             }
             (Value::F64(a), Value::I64(b)) => {
@@ -183,6 +238,7 @@ impl PredOp {
                     PredOp::Gte => *a >= b,
                     PredOp::Lte => *a <= b,
                     PredOp::Ne => *a != b,
+                    PredOp::Contains | PredOp::StartsWith | PredOp::EndsWith => false,
                 }
             }
             (Value::String(a), Value::String(b)) => match self {
@@ -191,9 +247,22 @@ impl PredOp {
                 PredOp::Gte => a >= b,
                 PredOp::Lte => a <= b,
                 PredOp::Ne => a != b,
+                PredOp::Contains => a.contains(b.as_ref()),
+                PredOp::StartsWith => a.starts_with(b.as_ref()),
+                PredOp::EndsWith => a.ends_with(b.as_ref()),
+            },
+            // List membership: `subjects: contains "logic"` is true when the
+            // list field holds an element equal to the target. `ne` means "the
+            // list does not equal this exact list".
+            (Value::List(items), _) => match self {
+                PredOp::Contains => items.iter().any(|it| it == target),
+                PredOp::Ne => actual != target,
+                _ => false,
             },
             _ => match self {
                 PredOp::Ne => actual != target,
+                // String-search ops only apply to strings/lists; any other
+                // value (or a mismatched target) never matches.
                 _ => false,
             },
         }
@@ -279,7 +348,7 @@ impl Clause {
             if key == "bind" || key == "type" {
                 continue;
             }
-            field_patterns.push((key.clone(), Pattern::from_json(val)));
+            field_patterns.push((key.clone(), Pattern::from_json(val)?));
         }
         Ok(Clause::Pattern(WhereClause {
             bind,
@@ -508,6 +577,16 @@ pub fn compare_values(a: &Value, b: &Value) -> std::cmp::Ordering {
         (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
         (Value::Ref(x), Value::Ref(y)) => x.cmp(y),
         (Value::Bytes(x), Value::Bytes(y)) => x.cmp(y),
+        // Lists compare lexicographically by element.
+        (Value::List(x), Value::List(y)) => {
+            for (xi, yi) in x.iter().zip(y.iter()) {
+                let c = compare_values(xi, yi);
+                if c != std::cmp::Ordering::Equal {
+                    return c;
+                }
+            }
+            x.len().cmp(&y.len())
+        }
         // Mixed / unorderable kinds: order by a stable kind rank.
         _ => value_kind_rank(a).cmp(&value_kind_rank(b)),
     }
@@ -521,7 +600,8 @@ fn value_kind_rank(v: &Value) -> u8 {
         Value::Ref(_) => 3,
         Value::Bytes(_) => 4,
         Value::Enum(_) => 5,
-        Value::Null => 6,
+        Value::List(_) => 6,
+        Value::Null => 7,
     }
 }
 

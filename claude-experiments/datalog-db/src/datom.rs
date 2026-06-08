@@ -42,6 +42,13 @@ pub enum Value {
     /// Boxed to keep `Value` small.
     #[serde(rename = "enum")]
     Enum(Box<EnumValue>),
+    /// An ordered list of homogeneous scalar values — the storage form of a
+    /// cardinality-many (`[T]`) field. Stored as a single atomic datom value
+    /// (last-write-wins like any scalar); membership is queryable via the
+    /// `contains` predicate. Elements are never `Enum`, `Null`, or nested
+    /// `List` (the schema enforces a scalar element type).
+    #[serde(rename = "list")]
+    List(Vec<Value>),
     /// Null — represents a missing optional field in query results.
     /// Never stored as a datom.
     #[serde(rename = "null")]
@@ -58,6 +65,7 @@ impl Value {
             Value::Bool(_) => 0x04,
             Value::Ref(_) => 0x05,
             Value::Bytes(_) => 0x06,
+            Value::List(_) => 0x07,
             Value::Enum(_) => panic!("Enum values cannot be stored directly as datoms"),
             Value::Null => panic!("Null values cannot be stored directly as datoms"),
         }
@@ -73,6 +81,16 @@ impl std::fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Ref(id) => write!(f, "ref({})", id),
             Value::Bytes(b) => write!(f, "bytes({})", b.len()),
+            Value::List(items) => {
+                write!(f, "[")?;
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", v)?;
+                }
+                write!(f, "]")
+            }
             Value::Enum(e) => {
                 if e.fields.is_empty() {
                     write!(f, "{}", e.variant)
