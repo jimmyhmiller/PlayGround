@@ -1,0 +1,9 @@
+[workspace]
+resolver = "2"
+members = ["crates/book-ui-experiment", "crates/book-ui-wgpu"]
+
+# Archived early spikes that the terminal-bevy product no longer depends
+# on. Lifted out of ../editor-idea so that workspace contains exactly
+# terminal-bevy + its dependency closure + runtime companions. These two
+# crates are self-contained (no path deps back into editor-idea) and do
+# not need the libghostty-vt patch.
