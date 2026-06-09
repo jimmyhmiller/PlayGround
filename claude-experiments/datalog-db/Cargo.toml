@@ -18,9 +18,19 @@ tracing-subscriber = "0.3"
 name = "datalog"
 path = "src/bin/cli.rs"
 
+[[bin]]
+name = "datalog-embed"
+path = "src/bin/embed.rs"
+required-features = ["embed"]
+
 [features]
 default = []
 tikv = ["tikv-client", "tokio"]
+# Pure-Rust text embeddings via candle (BERT / bge-small). CPU backend —
+# there is no production ROCm path for candle on this hardware, so CPU is the
+# correct engineering choice here, not a silent fallback. Kept behind a feature
+# so the core DB stays dependency-light.
+embed = ["candle-core", "candle-nn", "candle-transformers", "tokenizers", "hf-hub", "anyhow"]
 
 [dev-dependencies]
 tempfile = "3.25.0"
@@ -39,4 +49,31 @@ optional = true
 [dependencies.tokio]
 version = "1"
 features = ["full"]
+optional = true
+
+# --- Embedding (feature = "embed") ---
+[dependencies.candle-core]
+version = "0.9"
+optional = true
+
+[dependencies.candle-nn]
+version = "0.9"
+optional = true
+
+[dependencies.candle-transformers]
+version = "0.9"
+optional = true
+
+[dependencies.tokenizers]
+version = "0.21"
+optional = true
+default-features = false
+features = ["onig"]
+
+[dependencies.hf-hub]
+version = "0.4"
+optional = true
+
+[dependencies.anyhow]
+version = "1"
 optional = true

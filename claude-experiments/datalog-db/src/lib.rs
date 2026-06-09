@@ -2,6 +2,8 @@ pub mod backup;
 pub mod cache;
 pub mod client;
 pub mod datom;
+#[cfg(feature = "embed")]
+pub mod embed;
 pub mod db;
 pub mod index;
 pub mod intern;
