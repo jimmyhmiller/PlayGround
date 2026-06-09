@@ -57,6 +57,14 @@ mkdir -p "$MACOS" "$FRAMEWORKS" "$RES"
 cp "$SRC_BIN" "$MACOS/$EXEC_NAME"
 cp "$SRC_DYLIB" "$FRAMEWORKS/libghostty-vt.dylib"
 
+# Install the app icon from the tracked source (assets/icon/icon.icns).
+# Info.plist's CFBundleIconFile is "icon", so it lands as Resources/icon.icns.
+# Keeping the source in the repo means the icon survives fresh clones and
+# `cargo clean` (the .app bundle itself is gitignored).
+if [ -f assets/icon/icon.icns ]; then
+    cp assets/icon/icon.icns "$RES/icon.icns"
+fi
+
 # The binary links @rpath/libghostty-vt.dylib but ships without any
 # LC_RPATH entries (cargo doesn't add one for build-script libs), so
 # dyld can't find the dylib at launch. Add an rpath pointing at the
