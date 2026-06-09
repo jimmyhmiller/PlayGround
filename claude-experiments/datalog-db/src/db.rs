@@ -73,6 +73,12 @@ fn hash_value<H: Hasher>(v: &Value, h: &mut H) {
                 hash_value(item, h);
             }
         }
+        Value::Vector(v) => {
+            v.len().hash(h);
+            for f in v {
+                f.to_bits().hash(h);
+            }
+        }
         // Enum/Null never appear as query-pattern literals, but hash the
         // discriminant (already done above) so the key stays well-defined.
         Value::Enum(_) | Value::Null => {}
@@ -100,6 +106,15 @@ fn hash_pattern<H: Hasher>(pattern: &Pattern, h: &mut H) {
                 name.hash(h);
                 hash_pattern(pat, h);
             }
+        }
+        Pattern::Near { query, k, metric, score_var } => {
+            query.len().hash(h);
+            for f in query {
+                f.to_bits().hash(h);
+            }
+            k.hash(h);
+            std::mem::discriminant(metric).hash(h);
+            score_var.hash(h);
         }
     }
 }
@@ -333,6 +348,12 @@ fn encode_group_key(vals: &[Value]) -> String {
                 let _ = write!(s, "l{}", items.len());
                 s.push('\u{2}');
                 s.push_str(&encode_group_key(items));
+            }
+            Value::Vector(v) => {
+                let _ = write!(s, "v{}", v.len());
+                for f in v {
+                    let _ = write!(s, ":{:08x}", f.to_bits());
+                }
             }
             Value::Null => s.push('n'),
         }
@@ -2325,6 +2346,17 @@ fn parse_field_type(s: &str) -> std::result::Result<FieldType, String> {
                 let elem = parse_field_type(inner)?;
                 validate_list_elem(&elem)?;
                 Ok(FieldType::List(Box::new(elem)))
+            } else if let Some(inner) =
+                other.strip_prefix("vector(").and_then(|s| s.strip_suffix(')'))
+            {
+                let dim: usize = inner
+                    .trim()
+                    .parse()
+                    .map_err(|_| format!("vector dimension must be a positive integer, got '{}'", inner))?;
+                if dim == 0 {
+                    return Err("vector dimension must be at least 1".into());
+                }
+                Ok(FieldType::Vector(dim))
             } else {
                 Err(format!("unknown field type: {}", other))
             }

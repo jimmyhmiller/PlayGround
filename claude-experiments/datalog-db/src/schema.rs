@@ -18,6 +18,10 @@ pub enum FieldType {
     /// type. The element type must itself be scalar (not List/Enum) — enforced
     /// at parse time. Stored as a single `Value::List` datom.
     List(Box<FieldType>),
+    /// A dense embedding vector of fixed dimension `N` (pgvector-style
+    /// `vector(N)`). Dimension is per-field; any `N` is allowed and validated
+    /// at assert time. Queried by nearest-neighbour (`near`), not by equality.
+    Vector(usize),
 }
 
 impl FieldType {
@@ -36,6 +40,8 @@ impl FieldType {
             (FieldType::List(elem), Value::List(items)) => {
                 items.iter().all(|v| elem.matches_value(v))
             }
+            // A vector field accepts a vector of exactly the declared dimension.
+            (FieldType::Vector(dim), Value::Vector(v)) => v.len() == *dim,
             _ => false,
         }
     }
@@ -50,6 +56,7 @@ impl FieldType {
             FieldType::Bytes => "bytes".to_string(),
             FieldType::Enum(t) => t.clone(),
             FieldType::List(elem) => format!("[{}]", elem.type_name()),
+            FieldType::Vector(dim) => format!("vector({})", dim),
         }
     }
 }

@@ -27,6 +27,74 @@ pub enum Pattern {
         /// Patterns for the variant's fields
         field_patterns: Vec<(String, Pattern)>,
     },
+    /// Nearest-neighbour search on a `vector(N)` field:
+    /// `{"near": [..query..], "k": 20, "score": "?sim", "metric": "cosine"}`.
+    /// Produces up to `k` entities ranked by similarity to `query`, binding
+    /// `score` (when given) to the similarity. This is a whole-type top-k
+    /// operation, not a per-row filter.
+    Near {
+        query: Vec<f32>,
+        k: usize,
+        metric: VectorMetric,
+        /// Optional variable to bind the similarity score into.
+        score_var: Option<String>,
+    },
+}
+
+/// Distance / similarity metric for vector search. `Cosine` and `Dot` are
+/// similarities (higher = closer); `L2` is a distance (lower = closer) but is
+/// negated into a score so "higher = closer" holds uniformly for ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VectorMetric {
+    Cosine,
+    Dot,
+    L2,
+}
+
+impl VectorMetric {
+    pub fn from_name(s: &str) -> Option<VectorMetric> {
+        match s {
+            "cosine" => Some(VectorMetric::Cosine),
+            "dot" | "dotproduct" | "inner" => Some(VectorMetric::Dot),
+            "l2" | "euclidean" => Some(VectorMetric::L2),
+            _ => None,
+        }
+    }
+
+    /// Score `candidate` against `query` so that a HIGHER score is always more
+    /// similar (L2 distance is negated). Mismatched dimensions score -inf.
+    pub fn score(&self, query: &[f32], candidate: &[f32]) -> f32 {
+        if query.len() != candidate.len() {
+            return f32::NEG_INFINITY;
+        }
+        match self {
+            VectorMetric::Dot => dot(query, candidate),
+            VectorMetric::Cosine => {
+                let d = dot(query, candidate);
+                let nq = dot(query, query).sqrt();
+                let nc = dot(candidate, candidate).sqrt();
+                if nq == 0.0 || nc == 0.0 {
+                    0.0
+                } else {
+                    d / (nq * nc)
+                }
+            }
+            VectorMetric::L2 => {
+                let mut s = 0.0f32;
+                for (a, b) in query.iter().zip(candidate.iter()) {
+                    let d = a - b;
+                    s += d * d;
+                }
+                -s.sqrt()
+            }
+        }
+    }
+}
+
+#[inline]
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
 }
 
 impl Pattern {
@@ -50,6 +118,50 @@ impl Pattern {
             // An entity reference ({"ref": N}) is a constant, not a predicate.
             if obj.len() == 1 && obj.contains_key("ref") {
                 return Ok(Pattern::Constant(value_from_json(v)));
+            }
+
+            // Nearest-neighbour search: {"near": [..], "k": N, "score": "?s"}.
+            if let Some(near_val) = obj.get("near") {
+                let arr = near_val
+                    .as_array()
+                    .ok_or("'near' must be an array of numbers (the query vector)")?;
+                let mut query = Vec::with_capacity(arr.len());
+                for x in arr {
+                    query.push(
+                        x.as_f64().ok_or("'near' vector elements must be numbers")? as f32,
+                    );
+                }
+                if query.is_empty() {
+                    return Err("'near' query vector must not be empty".into());
+                }
+                let k = obj
+                    .get("k")
+                    .and_then(|k| k.as_u64())
+                    .map(|k| k as usize)
+                    .unwrap_or(10);
+                if k == 0 {
+                    return Err("'k' must be at least 1".into());
+                }
+                let metric = match obj.get("metric").and_then(|m| m.as_str()) {
+                    None => VectorMetric::Cosine,
+                    Some(s) => VectorMetric::from_name(s)
+                        .ok_or_else(|| format!("unknown vector metric '{}'", s))?,
+                };
+                let score_var = obj
+                    .get("score")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                if let Some(ref sv) = score_var {
+                    if !sv.starts_with('?') {
+                        return Err("'score' must be a variable like \"?sim\"".into());
+                    }
+                }
+                return Ok(Pattern::Near {
+                    query,
+                    k,
+                    metric,
+                    score_var,
+                });
             }
 
             // Check for enum match: {"match": "Circle", ...}
@@ -601,7 +713,8 @@ fn value_kind_rank(v: &Value) -> u8 {
         Value::Bytes(_) => 4,
         Value::Enum(_) => 5,
         Value::List(_) => 6,
-        Value::Null => 7,
+        Value::Vector(_) => 7,
+        Value::Null => 8,
     }
 }
 

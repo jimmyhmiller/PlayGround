@@ -8,7 +8,7 @@ use crate::datom::{Datom, EntityId, TxId, Value};
 use crate::index;
 use crate::intern::AttrInterner;
 use crate::query::planner::{self, ClauseScan, JoinSide, JoinStrategy, PlanNode, QueryPlan, SlotMap};
-use crate::query::{Pattern, PredOp, Query, WhereClause};
+use crate::query::{Pattern, PredOp, Query, VectorMetric, WhereClause};
 use crate::schema::{FieldType, SchemaRegistry};
 use crate::storage::ReadOps;
 
@@ -77,6 +77,12 @@ impl Hash for HashableValue {
                 items.len().hash(state);
                 for v in items {
                     HashableValue(v.clone()).hash(state);
+                }
+            }
+            Value::Vector(v) => {
+                v.len().hash(state);
+                for f in v {
+                    f.to_bits().hash(state);
                 }
             }
         }
@@ -1288,6 +1294,161 @@ fn evaluate_clause_with_many(
     Ok(candidates)
 }
 
+/// Find a `near` (nearest-neighbour) pattern in a clause, if present.
+/// Returns (field_name, query_vector, k, metric, score_var).
+fn find_near_pattern(
+    clause: &WhereClause,
+) -> Option<(String, Vec<f32>, usize, VectorMetric, Option<String>)> {
+    for (fname, pat) in &clause.field_patterns {
+        if let Pattern::Near { query, k, metric, score_var } = pat {
+            return Some((
+                fname.clone(),
+                query.clone(),
+                *k,
+                *metric,
+                score_var.clone(),
+            ));
+        }
+    }
+    None
+}
+
+/// Read one entity's vector value for `attr` from EAVT (current or as_of).
+fn read_vector_value(
+    txn: &dyn ReadOps,
+    interner: &AttrInterner,
+    attr: &str,
+    entity: EntityId,
+    as_of: Option<TxId>,
+) -> Result<Option<Vec<f32>>, String> {
+    let attr_id = match interner.lookup(attr) {
+        Some(id) => id,
+        None => return Ok(None),
+    };
+    let prefix = index::eavt_entity_attr_prefix(entity, attr_id);
+    let end = index::prefix_end(&prefix);
+    let mut datoms: Vec<index::DecodedDatom> = Vec::new();
+    txn.scan_foreach(&prefix, &end, &mut |key, _| {
+        if let Some(d) = index::decode_datom_from_eavt(key) {
+            if as_of.map_or(true, |max| d.tx <= max) {
+                datoms.push(d);
+            }
+        }
+        true
+    })
+    .map_err(|e| e.to_string())?;
+    datoms.sort_by(|a, b| a.tx.cmp(&b.tx).then_with(|| a.added.cmp(&b.added)));
+    // Last-write-wins: the currently-asserted vector (cardinality-one).
+    let mut current: Option<Vec<f32>> = None;
+    for d in datoms {
+        match d.value {
+            Value::Vector(v) if d.added => current = Some(v),
+            Value::Vector(v) if !d.added => {
+                if current.as_deref() == Some(v.as_slice()) {
+                    current = None;
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(current)
+}
+
+/// Evaluate a clause containing a `near` vector-search pattern: brute-force
+/// top-k over the candidate entities. Any non-`near` patterns in the clause act
+/// as pre-filters (e.g. `{ kind: "paper", embedding: { near: [..] } }` only
+/// ranks papers). Returns up to `k` tuples, each with the entity bound and (if
+/// requested) the similarity score bound to `score_var`, sorted best-first.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_clause_with_near(
+    txn: &dyn ReadOps,
+    clause: &WhereClause,
+    tuple: &Tuple,
+    as_of: Option<TxId>,
+    schema: &SchemaRegistry,
+    slots: &SlotMap,
+    cache: &QueryCache,
+    interner: &AttrInterner,
+    cache_gen: u64,
+    fname: &str,
+    query: &[f32],
+    k: usize,
+    metric: VectorMetric,
+    score_var: Option<&str>,
+) -> Result<Vec<Tuple>, String> {
+    let type_def = schema.get(&clause.entity_type);
+    let attr = type_def
+        .map(|td| td.attribute_name(fname))
+        .unwrap_or_else(|| format!("{}/{}", clause.entity_type, fname));
+
+    // Validate the field is a vector of the right dimension.
+    if let Some(td) = type_def {
+        if let Some(fd) = td.get_field(fname) {
+            match &fd.field_type {
+                FieldType::Vector(dim) if *dim == query.len() => {}
+                FieldType::Vector(dim) => {
+                    return Err(format!(
+                        "near query vector has dimension {} but field '{}' is vector({})",
+                        query.len(),
+                        fname,
+                        dim
+                    ));
+                }
+                _ => {
+                    return Err(format!("field '{}' is not a vector field", fname));
+                }
+            }
+        }
+    }
+
+    // The remainder of the clause (everything except the near pattern) is a
+    // pre-filter. Evaluate it to get candidate entities.
+    let filter_clause = WhereClause {
+        bind: clause.bind.clone(),
+        entity_type: clause.entity_type.clone(),
+        field_patterns: clause
+            .field_patterns
+            .iter()
+            .filter(|(_, p)| !matches!(p, Pattern::Near { .. }))
+            .cloned()
+            .collect(),
+    };
+    let candidates = evaluate_clause(
+        txn, &filter_clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
+    )?;
+
+    let bind_slot = slots.slot(&clause.bind).unwrap();
+    let score_slot = score_var.and_then(|sv| slots.slot(sv));
+
+    // Score every candidate, keep top-k. Brute force is the right tool below
+    // ~1M vectors; an ANN index would slot in here when the corpus outgrows it.
+    let mut scored: Vec<(f32, Tuple)> = Vec::new();
+    for cand in candidates {
+        let eid = match cand.get(bind_slot) {
+            Some(Value::Ref(id)) => *id,
+            _ => continue,
+        };
+        let vec = match read_vector_value(txn, interner, &attr, eid, as_of)? {
+            Some(v) => v,
+            None => continue, // entity has no vector for this field
+        };
+        let score = metric.score(query, &vec);
+        if !score.is_finite() {
+            continue;
+        }
+        let mut t = cand.clone();
+        if let Some(slot) = score_slot {
+            t.set(slot, Value::F64(score as f64));
+        }
+        scored.push((score, t));
+    }
+
+    // Sort best-first (higher score = closer for every metric) and take k.
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    scored.truncate(k);
+    Ok(scored.into_iter().map(|(_, t)| t).collect())
+}
+
 /// Evaluate a single where clause against a current tuple.
 /// Returns extended tuples for each matching entity.
 fn evaluate_clause(
@@ -1301,6 +1462,15 @@ fn evaluate_clause(
     interner: &AttrInterner,
     cache_gen: u64,
 ) -> Result<Vec<Tuple>, String> {
+    // Nearest-neighbour (vector) search. A `near` pattern is a whole-type
+    // top-k operation, handled by a dedicated kNN evaluator.
+    if let Some((fname, query, k, metric, score_var)) = find_near_pattern(clause) {
+        return evaluate_clause_with_near(
+            txn, clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
+            &fname, &query, k, metric, score_var.as_deref(),
+        );
+    }
+
     // Cardinality-many handling. If the clause references any many-attr, peel
     // those patterns off, evaluate the rest on the normal engine, then apply
     // the many-patterns (membership filter or fan-out bind) per candidate.
@@ -2177,6 +2347,9 @@ fn resolve_field_patterns(
                 field_patterns: field_patterns.clone(),
                 tag_col,
             },
+            // Near patterns are handled by the dedicated kNN path before the
+            // columnar engine is reached, so they never appear here.
+            Pattern::Near { .. } => continue,
         };
         out.push(rfp);
     }
@@ -2362,6 +2535,7 @@ fn match_resolved(
                             }
                         }
                         Pattern::EnumMatch { .. } => return false,
+                        Pattern::Near { .. } => return false,
                     }
                 }
             }
@@ -2542,9 +2716,13 @@ fn match_field_patterns(
                             // Nested enum matching not supported
                             return false;
                         }
+                        Pattern::Near { .. } => return false,
                     }
                 }
             }
+            // Near patterns are handled by the dedicated kNN path before this
+            // per-row matcher; they never reach here.
+            Pattern::Near { .. } => return false,
         }
     }
 

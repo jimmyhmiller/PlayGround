@@ -49,6 +49,13 @@ pub enum Value {
     /// `List` (the schema enforces a scalar element type).
     #[serde(rename = "list")]
     List(Vec<Value>),
+    /// A dense embedding vector of `f32` — the storage form of a `vector(N)`
+    /// field. Stored as one atomic datom value; never indexed in AVET/VAET
+    /// (raw-vector equality is meaningless). Queried via nearest-neighbour
+    /// (`near`) search, not by value match. The declared field dimension is
+    /// validated at assert time.
+    #[serde(rename = "vector")]
+    Vector(Vec<f32>),
     /// Null — represents a missing optional field in query results.
     /// Never stored as a datom.
     #[serde(rename = "null")]
@@ -66,6 +73,7 @@ impl Value {
             Value::Ref(_) => 0x05,
             Value::Bytes(_) => 0x06,
             Value::List(_) => 0x07,
+            Value::Vector(_) => 0x08,
             Value::Enum(_) => panic!("Enum values cannot be stored directly as datoms"),
             Value::Null => panic!("Null values cannot be stored directly as datoms"),
         }
@@ -91,6 +99,7 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, "]")
             }
+            Value::Vector(v) => write!(f, "vector({})", v.len()),
             Value::Enum(e) => {
                 if e.fields.is_empty() {
                     write!(f, "{}", e.variant)

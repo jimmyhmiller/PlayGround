@@ -169,6 +169,17 @@ impl<'a> Parser<'a> {
                 self.expect(')')?;
                 Ok(format!("list({})", inner))
             }
+            "vector" => {
+                self.expect('(')?;
+                self.skip_ws();
+                let dim = self.read_number()?;
+                let n = dim
+                    .as_u64()
+                    .ok_or("vector dimension must be a positive integer")?;
+                self.skip_ws();
+                self.expect(')')?;
+                Ok(format!("vector({})", n))
+            }
             other => Err(format!("unknown field type: '{}'", other)),
         }
     }
@@ -1238,6 +1249,8 @@ fn format_field_type(v: Option<&serde_json::Value>) -> String {
                 format!("enum({})", target)
             } else if let Some(elem) = obj.get("list") {
                 format!("[{}]", format_field_type(Some(elem)))
+            } else if let Some(dim) = obj.get("vector").and_then(|d| d.as_u64()) {
+                format!("vector({})", dim)
             } else {
                 format!("{}", serde_json::Value::Object(obj.clone()))
             }

@@ -436,6 +436,11 @@ fn value_to_json(v: &crate::datom::Value) -> serde_json::Value {
         crate::datom::Value::List(items) => {
             serde_json::Value::Array(items.iter().map(value_to_json).collect())
         }
+        crate::datom::Value::Vector(v) => {
+            // Emit as {"vec": [...]} — the same tagged form the parser accepts,
+            // so vectors round-trip through the wire.
+            serde_json::json!({ "vec": v.iter().map(|f| *f as f64).collect::<Vec<_>>() })
+        }
         crate::datom::Value::Null => serde_json::Value::Null,
     }
 }

@@ -404,3 +404,73 @@ fn cardinality_many_retract_entity_removes_all_values() {
         }
     }
 }
+
+#[test]
+fn vector_search_topk_ranked() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "name", "type": "string", "required": true, "unique": true},
+        {"name": "embedding", "type": "vector(3)"},
+    ]}));
+
+    // Three docs with simple 3-d embeddings.
+    assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"name": "x", "embedding": {"vec": [1.0, 0.0, 0.0]}}}),
+        json!({"assert": "Doc", "data": {"name": "y", "embedding": {"vec": [0.0, 1.0, 0.0]}}}),
+        json!({"assert": "Doc", "data": {"name": "z", "embedding": {"vec": [0.9, 0.1, 0.0]}}}),
+    ]);
+
+    // Query near [1,0,0] — x (identical) then z (close) then y (orthogonal).
+    let rows = run(&db, json!({"find": ["?n", "?sim"], "where": [
+        {"bind": "?d", "type": "Doc", "name": "?n",
+         "embedding": {"near": [1.0, 0.0, 0.0], "k": 2, "score": "?sim", "metric": "cosine"}}
+    ], "order_by": [{"var": "?sim", "desc": true}]}));
+
+    assert_eq!(rows.len(), 2, "k=2 should return 2");
+    assert_eq!(rows[0][0], json!("x"), "x is the closest (cosine 1.0)");
+    assert_eq!(rows[1][0], json!("z"), "z is second");
+    // x's cosine similarity is ~1.0.
+    let sim_x = rows[0][1].as_f64().unwrap();
+    assert!((sim_x - 1.0).abs() < 1e-5, "x cosine ~1.0, got {}", sim_x);
+}
+
+#[test]
+fn vector_search_with_prefilter() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "name", "type": "string", "required": true, "unique": true},
+        {"name": "kind", "type": "string", "indexed": true},
+        {"name": "embedding", "type": "vector(2)"},
+    ]}));
+    assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"name": "a", "kind": "paper", "embedding": {"vec": [1.0, 0.0]}}}),
+        json!({"assert": "Doc", "data": {"name": "b", "kind": "book",  "embedding": {"vec": [1.0, 0.0]}}}),
+        json!({"assert": "Doc", "data": {"name": "c", "kind": "paper", "embedding": {"vec": [0.0, 1.0]}}}),
+    ]);
+
+    // Nearest paper to [1,0] — must skip the (identical) book b.
+    let rows = run(&db, json!({"find": ["?n", "?s"], "where": [
+        {"bind": "?d", "type": "Doc", "name": "?n", "kind": "paper",
+         "embedding": {"near": [1.0, 0.0], "k": 5, "score": "?s"}}
+    ], "order_by": [{"var": "?s", "desc": true}]}));
+    let names: Vec<&str> = rows.iter().map(|r| r[0].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["a", "c"], "only papers, a closest");
+}
+
+#[test]
+fn vector_dimension_mismatch_errors() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "name", "type": "string", "required": true, "unique": true},
+        {"name": "embedding", "type": "vector(4)"},
+    ]}));
+    // Asserting a 3-d vector into a vector(4) field must error.
+    let ops = vec![TxOp::from_json(
+        &json!({"assert": "Doc", "data": {"name": "x", "embedding": {"vec": [1.0, 2.0, 3.0]}}})
+    ).unwrap()];
+    let res = db.transact(ops);
+    assert!(res.is_err(), "dimension mismatch on assert should error");
+}

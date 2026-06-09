@@ -476,5 +476,6 @@ fn field_type_to_wire(ft: &FieldType) -> String {
         FieldType::Ref(target) => format!("ref({})", target),
         FieldType::Enum(target) => format!("enum({})", target),
         FieldType::List(elem) => format!("[{}]", field_type_to_wire(elem)),
+        FieldType::Vector(dim) => format!("vector({})", dim),
     }
 }

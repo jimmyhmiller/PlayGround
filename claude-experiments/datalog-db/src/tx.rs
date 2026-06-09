@@ -175,6 +175,20 @@ fn json_to_value(v: &serde_json::Value) -> std::result::Result<Value, String> {
             if let Some(id) = obj.get("ref").and_then(|r| r.as_u64()) {
                 return Ok(Value::Ref(id));
             }
+            // Explicit vector form: {"vec": [f32, ...]}. (A bare JSON array is
+            // ambiguous between a list and a vector; the vector field accepts
+            // either — see the assert path — but this tagged form is
+            // unambiguous and is what the wire protocol emits.)
+            if let Some(arr) = obj.get("vec").and_then(|x| x.as_array()) {
+                let mut out = Vec::with_capacity(arr.len());
+                for x in arr {
+                    let f = x
+                        .as_f64()
+                        .ok_or("vector elements must be numbers")? as f32;
+                    out.push(f);
+                }
+                return Ok(Value::Vector(out));
+            }
             if obj.len() == 1 {
                 let (variant_name, variant_data) = obj.iter().next().unwrap();
                 let mut fields = HashMap::new();
@@ -592,6 +606,9 @@ pub fn process_transaction(
         }
 
         let is_many = many_attrs.contains(&datom.attribute);
+        // Vectors are never looked up by value, so they skip CURRENT_AVET (the
+        // value-ordered current index) — just like encode_datom skips AVET.
+        let is_vector = matches!(datom.value, Value::Vector(_));
 
         // Maintain current-state indexes
         if datom.added {
@@ -609,17 +626,21 @@ pub fn process_transaction(
 
                 if let Some(old_val_bytes) = txn.get(&aevt_key)? {
                     if let Some(old_val) = index::decode_current_value(&old_val_bytes) {
-                        let old_avet_key =
-                            index::encode_current_avet(attr_id, &old_val, datom.entity);
-                        txn.delete(&old_avet_key)?;
+                        if !matches!(old_val, Value::Vector(_)) {
+                            let old_avet_key =
+                                index::encode_current_avet(attr_id, &old_val, datom.entity);
+                            txn.delete(&old_avet_key)?;
+                        }
                     }
                 }
 
                 txn.put(aevt_key, aevt_val)?;
             }
 
-            let avet_key = index::encode_current_avet(attr_id, &datom.value, datom.entity);
-            txn.put(avet_key, vec![])?;
+            if !is_vector {
+                let avet_key = index::encode_current_avet(attr_id, &datom.value, datom.entity);
+                txn.put(avet_key, vec![])?;
+            }
 
             // Track entity count: new entity type assertion
             if datom.attribute == "__type" {
@@ -640,8 +661,10 @@ pub fn process_transaction(
                 txn.delete(&aevt_key)?;
             }
 
-            let avet_key = index::encode_current_avet(attr_id, &datom.value, datom.entity);
-            txn.delete(&avet_key)?;
+            if !is_vector {
+                let avet_key = index::encode_current_avet(attr_id, &datom.value, datom.entity);
+                txn.delete(&avet_key)?;
+            }
 
             // Track entity count: entity type retraction
             if datom.attribute == "__type" {

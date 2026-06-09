@@ -853,6 +853,13 @@ fn value_bytes(v: &Value) -> Vec<u8> {
                 buf.extend_from_slice(&value_bytes(it));
             }
         }
+        Value::Vector(vec) => {
+            buf.push(8);
+            buf.extend_from_slice(&(vec.len() as u32).to_be_bytes());
+            for f in vec {
+                buf.extend_from_slice(&f.to_bits().to_be_bytes());
+            }
+        }
         Value::Enum(_) | Value::Null => panic!("unsupported in datom comparison: {:?}", v),
     }
     buf

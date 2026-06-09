@@ -73,6 +73,16 @@ fn encode_value(buf: &mut Vec<u8>, value: &Value) {
                 encode_value(buf, item);
             }
         }
+        Value::Vector(v) => {
+            // [dim(u32)][f32 big-endian bits ...]. Fixed-width; decode reads
+            // exactly `dim` floats. Vectors live only in EAVT/AEVT (never in
+            // AVET/VAET — see encode_datom), so key-ordering of the bytes is
+            // irrelevant; we keep raw IEEE-754 bits.
+            buf.write_u32::<BigEndian>(v.len() as u32).unwrap();
+            for f in v {
+                buf.write_u32::<BigEndian>(f.to_bits()).unwrap();
+            }
+        }
         Value::Enum(_) => panic!("Enum values cannot be encoded in index keys"),
         Value::Null => panic!("Null values cannot be encoded in index keys"),
     }
@@ -163,8 +173,13 @@ pub fn encode_datom(
     let mut pairs = vec![
         (encode_eavt(entity, attr_id, value, tx, added), empty.clone()),
         (encode_aevt(entity, attr_id, value, tx, added), empty.clone()),
-        (encode_avet(entity, attr_id, value, tx, added), empty.clone()),
     ];
+    // Vectors are never looked up by exact value (only by nearest-neighbour),
+    // so they skip the value-ordered AVET index — that would bloat storage for
+    // an index nothing queries. They live in EAVT/AEVT only.
+    if !matches!(value, Value::Vector(_)) {
+        pairs.push((encode_avet(entity, attr_id, value, tx, added), empty.clone()));
+    }
     // VAET only for Ref values
     if matches!(value, Value::Ref(_)) {
         pairs.push((encode_vaet(entity, attr_id, value, tx, added), empty));
@@ -305,6 +320,15 @@ fn decode_value(cursor: &mut Cursor<&[u8]>) -> Option<Value> {
                 items.push(decode_value(cursor)?);
             }
             Some(Value::List(items))
+        }
+        0x08 => {
+            // Vector: [dim(u32)][f32 bits ...]
+            let dim = cursor.read_u32::<BigEndian>().ok()? as usize;
+            let mut v = Vec::with_capacity(dim);
+            for _ in 0..dim {
+                v.push(f32::from_bits(cursor.read_u32::<BigEndian>().ok()?));
+            }
+            Some(Value::Vector(v))
         }
         _ => None,
     }
