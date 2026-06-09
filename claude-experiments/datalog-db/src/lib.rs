@@ -5,6 +5,7 @@ pub mod datom;
 #[cfg(feature = "embed")]
 pub mod embed;
 pub mod fts;
+pub mod hnsw;
 pub mod db;
 pub mod index;
 pub mod intern;

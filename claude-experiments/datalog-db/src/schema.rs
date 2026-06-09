@@ -98,6 +98,12 @@ pub struct FieldDef {
     /// `indexed` (which is for exact/range AVET lookups).
     #[serde(default)]
     pub fulltext: bool,
+    /// When true, a `vector(N)` field gets an HNSW approximate-nearest-neighbour
+    /// index for sub-linear `near` search. The index is held in memory and
+    /// (re)built from the stored vectors; without this flag, `near` is exact
+    /// brute force.
+    #[serde(default)]
+    pub ann: bool,
 }
 
 impl FieldDef {

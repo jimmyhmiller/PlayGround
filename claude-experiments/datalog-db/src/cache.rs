@@ -55,10 +55,19 @@ pub struct QueryCache {
     /// Monotonic counter used to stamp each cache hit so we can pick
     /// the least-recently-used type to evict under `Bounded`.
     access_counter: AtomicU64,
+    /// Separate generation for ANN (HNSW) indexes. Bumped on ANY write to a
+    /// vector-bearing type — including the pure-add fast path that deliberately
+    /// leaves the column-cache `generation` untouched. Keeping it separate lets
+    /// reads stay cache-warm while still rebuilding a stale vector index.
+    ann_generation: AtomicU64,
 }
 
 struct CacheInner {
     types: HashMap<String, CachedType>,
+    /// Built HNSW indexes keyed by attribute name (e.g. "Chapter/embedding").
+    /// Tagged with the generation they were built at so a stale index (built
+    /// before a write) is discarded.
+    ann: HashMap<String, (u64, Arc<crate::hnsw::Hnsw>)>,
 }
 
 struct CachedType {
@@ -145,9 +154,11 @@ impl QueryCache {
             policy,
             inner: RwLock::new(CacheInner {
                 types: HashMap::new(),
+                ann: HashMap::new(),
             }),
             generation: AtomicU64::new(0),
             access_counter: AtomicU64::new(0),
+            ann_generation: AtomicU64::new(0),
         }
     }
 
@@ -262,10 +273,73 @@ impl QueryCache {
         entry.last_access.store(stamp, Ordering::Relaxed);
     }
 
-    /// Invalidate a specific type's cache entry.
+    /// Invalidate a specific type's cache entry (and any ANN indexes whose
+    /// attribute belongs to that type, e.g. "Chapter/embedding").
     pub fn invalidate_type(&self, type_name: &str) {
         self.generation.fetch_add(1, Ordering::Release);
-        self.inner.write().types.remove(type_name);
+        self.ann_generation.fetch_add(1, Ordering::Release);
+        let mut inner = self.inner.write();
+        inner.types.remove(type_name);
+        let prefix = format!("{}/", type_name);
+        inner.ann.retain(|attr, _| !attr.starts_with(&prefix));
+    }
+
+    /// Invalidate only the ANN (vector) indexes for a type, leaving the column
+    /// cache intact. Used by the pure-add fast path: a new vector means the
+    /// HNSW graph is stale, but the column cache can still be patched in-place.
+    pub fn invalidate_ann_for_type(&self, type_name: &str) {
+        self.ann_generation.fetch_add(1, Ordering::Release);
+        let prefix = format!("{}/", type_name);
+        self.inner.write().ann.retain(|attr, _| !attr.starts_with(&prefix));
+    }
+
+    /// Get (or lazily build) the HNSW index for a vector attribute. `build`
+    /// supplies the (entity, vector) pairs when a build is needed. The index is
+    /// cached and reused until the ANN generation advances (any write to a
+    /// vector-bearing type), at which point it's rebuilt on the next call.
+    /// Returns `None` only if the cache policy is `None`.
+    pub fn ensure_ann_index(
+        &self,
+        attr: &str,
+        metric: crate::query::VectorMetric,
+        build: impl FnOnce() -> Vec<(EntityId, Vec<f32>)>,
+    ) -> Option<Arc<crate::hnsw::Hnsw>> {
+        if matches!(self.policy, CachePolicy::None) {
+            return None;
+        }
+        let gen_before = self.ann_generation.load(Ordering::Acquire);
+        // Fast path: a fresh index already exists at the current generation.
+        {
+            let inner = self.inner.read();
+            if let Some((g, idx)) = inner.ann.get(attr) {
+                if *g == gen_before {
+                    return Some(idx.clone());
+                }
+            }
+        }
+        // Build outside the lock.
+        let vectors = build();
+        let mut hnsw = crate::hnsw::Hnsw::new(
+            metric,
+            crate::hnsw::HnswParams::default(),
+            // Deterministic seed from the attribute name so builds are stable.
+            attr.bytes().fold(0xCBF29CE484222325u64, |h, b| {
+                (h ^ b as u64).wrapping_mul(0x100000001B3)
+            }),
+        );
+        for (eid, v) in vectors {
+            hnsw.insert(eid, v);
+        }
+        let arc = Arc::new(hnsw);
+
+        let mut inner = self.inner.write();
+        // Publish only if no write landed during the build (else leave it
+        // unpublished; the next query rebuilds against the newer generation).
+        let gen_now = self.ann_generation.load(Ordering::Acquire);
+        if gen_now == gen_before {
+            inner.ann.insert(attr.to_string(), (gen_before, arc.clone()));
+        }
+        Some(arc)
     }
 
     /// Incrementally extend the cached `TypeData` with one freshly-added

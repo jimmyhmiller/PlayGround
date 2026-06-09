@@ -60,6 +60,7 @@ fn wide_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "i".to_string(),
@@ -69,6 +70,7 @@ fn wide_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "f".to_string(),
@@ -78,6 +80,7 @@ fn wide_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "b".to_string(),
@@ -87,6 +90,7 @@ fn wide_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "data".to_string(),
@@ -96,6 +100,7 @@ fn wide_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     }
@@ -124,6 +129,7 @@ fn color_enum() -> EnumTypeDef {
                         indexed: false,
                         cardinality: Default::default(),
                         fulltext: false,
+                        ann: false,
                     },
                     FieldDef {
                         name: "g".to_string(),
@@ -133,6 +139,7 @@ fn color_enum() -> EnumTypeDef {
                         indexed: false,
                         cardinality: Default::default(),
                         fulltext: false,
+                        ann: false,
                     },
                     FieldDef {
                         name: "b".to_string(),
@@ -142,6 +149,7 @@ fn color_enum() -> EnumTypeDef {
                         indexed: false,
                         cardinality: Default::default(),
                         fulltext: false,
+                        ann: false,
                     },
                 ],
             },
@@ -162,6 +170,7 @@ fn widget_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "color".to_string(),
@@ -171,6 +180,7 @@ fn widget_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     }
@@ -1058,6 +1068,7 @@ fn unique_user_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "email".to_string(),
@@ -1067,6 +1078,7 @@ fn unique_user_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     }
@@ -1436,6 +1448,7 @@ fn vaet_user_type() -> EntityTypeDef {
             indexed: false,
             cardinality: Default::default(),
             fulltext: false,
+            ann: false,
         }],
     }
 }
@@ -1453,6 +1466,7 @@ fn vaet_post_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "author".to_string(),
@@ -1462,6 +1476,7 @@ fn vaet_post_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     }

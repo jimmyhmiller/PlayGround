@@ -1885,6 +1885,19 @@ fn do_group_commit(
                             app.entity_id,
                             &app.values,
                         );
+                        // The column cache is patched in-place above, but a new
+                        // entity can carry a vector — invalidate the type's ANN
+                        // index so it rebuilds with the new point. Cheap unless
+                        // the type actually has a vector field.
+                        if app.values.keys().any(|f| {
+                            schema
+                                .get(&app.entity_type)
+                                .and_then(|td| td.get_field(f))
+                                .map(|fd| matches!(fd.field_type, crate::schema::FieldType::Vector(_)))
+                                .unwrap_or(false)
+                        }) {
+                            query_cache.invalidate_ann_for_type(&app.entity_type);
+                        }
                     }
                 }
                 converted.push(Ok(tx_result));
@@ -2222,6 +2235,7 @@ pub fn parse_define_request(
             let unique = f.get("unique").and_then(|u| u.as_bool()).unwrap_or(false);
             let indexed = f.get("indexed").and_then(|i| i.as_bool()).unwrap_or(false);
             let fulltext = f.get("fulltext").and_then(|x| x.as_bool()).unwrap_or(false);
+            let ann = f.get("ann").and_then(|x| x.as_bool()).unwrap_or(false);
             // cardinality: "many" or true → Many; default One.
             let cardinality = match f.get("cardinality") {
                 Some(serde_json::Value::String(s)) if s == "many" => {
@@ -2261,6 +2275,13 @@ pub fn parse_define_request(
                     ));
                 }
             }
+            // ann only makes sense on vector fields.
+            if ann && !matches!(field_type, FieldType::Vector(_)) {
+                return Err(format!(
+                    "field '{}' is marked ann but is not a vector field",
+                    field_name
+                ));
+            }
             Ok(FieldDef {
                 name: field_name,
                 field_type,
@@ -2269,6 +2290,7 @@ pub fn parse_define_request(
                 indexed,
                 cardinality,
                 fulltext,
+                ann,
             })
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
@@ -2364,6 +2386,7 @@ pub fn parse_define_enum_request(
                                 indexed: false,
                                 cardinality: crate::schema::Cardinality::One,
                                 fulltext: false,
+                                ann: false,
                             })
                         })
                         .collect::<std::result::Result<Vec<_>, String>>()
@@ -2444,10 +2467,12 @@ fn field_redefinition_ok(old: &FieldDef, new: &FieldDef) -> bool {
     {
         return false;
     }
-    // `indexed` / `fulltext` may only go false → true.
+    // `indexed` / `fulltext` / `ann` may only go false → true (additive index
+    // builds; turning one off would orphan its index).
     let indexed_ok = new.indexed || !old.indexed;
     let fulltext_ok = new.fulltext || !old.fulltext;
-    indexed_ok && fulltext_ok
+    let ann_ok = new.ann || !old.ann;
+    indexed_ok && fulltext_ok && ann_ok
 }
 
 /// A list element must be a scalar type — no nested lists, no enums (enums

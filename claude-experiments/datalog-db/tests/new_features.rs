@@ -658,3 +658,106 @@ fn hybrid_with_prefilter() {
     let titles: Vec<&str> = rows.iter().map(|r| r[0].as_str().unwrap()).collect();
     assert_eq!(titles, vec!["p"], "only the paper, not the book");
 }
+
+#[test]
+fn ann_index_matches_brute_force() {
+    // An `ann` field must return the same nearest neighbours as exact search.
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "V", "fields": [
+        {"name": "id", "type": "i64", "required": true, "unique": true},
+        {"name": "emb", "type": "vector(8)", "ann": true},
+    ]}));
+
+    // Deterministic pseudo-random 8-d vectors.
+    let mut seed: u64 = 99;
+    let mut next = || { seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1); ((seed >> 33) as f32 / 2147483648.0) * 2.0 - 1.0 };
+    let n = 300;
+    let mut ops = Vec::new();
+    let mut vecs: Vec<(i64, Vec<f32>)> = Vec::new();
+    for i in 0..n {
+        let v: Vec<f32> = (0..8).map(|_| next()).collect();
+        vecs.push((i, v.clone()));
+        ops.push(json!({"assert": "V", "data": {"id": i, "emb": {"vec": v}}}));
+    }
+    assert_ops(&db, ops);
+
+    // Query with the first vector; ANN top-5 should match brute-force top-5.
+    let q = vecs[0].1.clone();
+    let ann = run(&db, json!({"find": ["?id", "?s"], "where": [
+        {"bind": "?v", "type": "V", "id": "?id", "emb": {"near": q, "k": 5, "score": "?s"}}
+    ], "order_by": [{"var": "?s", "desc": true}]}));
+    let ann_ids: Vec<i64> = ann.iter().map(|r| r[0].as_i64().unwrap()).collect();
+
+    // Brute-force truth (cosine).
+    let cos = |a: &[f32], b: &[f32]| -> f32 {
+        let d: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
+        let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if na == 0.0 || nb == 0.0 { 0.0 } else { d / (na * nb) }
+    };
+    let mut truth: Vec<(f32, i64)> = vecs.iter().map(|(i, v)| (cos(&q, v), *i)).collect();
+    truth.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+    let truth_ids: Vec<i64> = truth.iter().take(5).map(|(_, i)| *i).collect();
+
+    // The exact-match (id 0, self) must be #1 in both.
+    assert_eq!(ann_ids[0], 0, "self should be nearest");
+    assert_eq!(truth_ids[0], 0);
+    // High overlap between ANN and exact top-5.
+    let overlap = ann_ids.iter().filter(|i| truth_ids.contains(i)).count();
+    assert!(overlap >= 4, "ANN top-5 {ann_ids:?} vs exact {truth_ids:?}");
+}
+
+#[test]
+fn ann_with_prefilter() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "name", "type": "string", "required": true, "unique": true},
+        {"name": "kind", "type": "string", "indexed": true},
+        {"name": "emb", "type": "vector(2)", "ann": true},
+    ]}));
+    assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"name": "a", "kind": "paper", "emb": {"vec": [1.0, 0.0]}}}),
+        json!({"assert": "Doc", "data": {"name": "b", "kind": "book",  "emb": {"vec": [1.0, 0.0]}}}),
+        json!({"assert": "Doc", "data": {"name": "c", "kind": "paper", "emb": {"vec": [0.0, 1.0]}}}),
+    ]);
+    // Nearest paper to [1,0] over the ANN index — must skip the (identical) book.
+    let rows = run(&db, json!({"find": ["?n", "?s"], "where": [
+        {"bind": "?d", "type": "Doc", "name": "?n", "kind": "paper", "emb": {"near": [1.0, 0.0], "k": 5, "score": "?s"}}
+    ], "order_by": [{"var": "?s", "desc": true}]}));
+    let names: Vec<&str> = rows.iter().map(|r| r[0].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["a", "c"], "only papers via ANN; book excluded");
+}
+
+#[test]
+fn ann_only_on_vector_fields() {
+    let bad = json!({"entity_type": "X", "fields": [
+        {"name": "s", "type": "string", "ann": true},
+    ]});
+    let err = datalog_db::db::parse_define_request(&bad).unwrap_err();
+    assert!(err.contains("ann") && err.contains("vector"), "got: {err}");
+}
+
+#[test]
+fn ann_reflects_updates() {
+    // Adding a vector after the index was first built must be visible (the
+    // index is rebuilt on the next query after a write).
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "V", "fields": [
+        {"name": "id", "type": "i64", "required": true, "unique": true},
+        {"name": "emb", "type": "vector(2)", "ann": true},
+    ]}));
+    assert_ops(&db, vec![json!({"assert": "V", "data": {"id": 1, "emb": {"vec": [1.0, 0.0]}}})]);
+    // Build the index via a query.
+    let _ = run(&db, json!({"find": ["?id", "?s"], "where": [
+        {"bind": "?v", "type": "V", "id": "?id", "emb": {"near": [1.0, 0.0], "k": 5, "score": "?s"}}
+    ]}));
+    // Add a closer vector, then query again — it must appear.
+    assert_ops(&db, vec![json!({"assert": "V", "data": {"id": 2, "emb": {"vec": [0.0, 1.0]}}})]);
+    let rows = run(&db, json!({"find": ["?id", "?s"], "where": [
+        {"bind": "?v", "type": "V", "id": "?id", "emb": {"near": [0.0, 1.0], "k": 5, "score": "?s"}}
+    ], "order_by": [{"var": "?s", "desc": true}]}));
+    assert_eq!(rows[0][0].as_i64().unwrap(), 2, "newly-added vector must be found");
+}

@@ -551,6 +551,7 @@ fn parse_define(p: &mut Parser) -> Result<serde_json::Value, String> {
             let mut indexed = false;
             let mut many = false;
             let mut fulltext = false;
+            let mut ann = false;
 
             loop {
                 p.skip_ws();
@@ -562,6 +563,7 @@ fn parse_define(p: &mut Parser) -> Result<serde_json::Value, String> {
                         "indexed" => indexed = true,
                         "many" => many = true,
                         "fulltext" => fulltext = true,
+                        "ann" => ann = true,
                         _ => { p.pos = saved; break; }
                     }
                 } else {
@@ -578,6 +580,7 @@ fn parse_define(p: &mut Parser) -> Result<serde_json::Value, String> {
             if indexed { field["indexed"] = serde_json::json!(true); }
             if many { field["cardinality"] = serde_json::json!("many"); }
             if fulltext { field["fulltext"] = serde_json::json!(true); }
+            if ann { field["ann"] = serde_json::json!(true); }
             fields.push(field);
 
             p.skip_ws();
@@ -1186,6 +1189,9 @@ fn format_schema(data: &serde_json::Value) -> String {
                     }
                     if field.get("fulltext").and_then(|x| x.as_bool()).unwrap_or(false) {
                         mods.push("fulltext");
+                    }
+                    if field.get("ann").and_then(|x| x.as_bool()).unwrap_or(false) {
+                        mods.push("ann");
                     }
                     let mod_str = if mods.is_empty() { String::new() } else { format!(" {}", mods.join(" ")) };
                     out.push_str(&format!("    {}: {}{}\n", fname, ftype, mod_str));

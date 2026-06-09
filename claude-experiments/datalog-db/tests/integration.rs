@@ -30,6 +30,7 @@ fn user_type() -> EntityTypeDef {
                 indexed: true,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "age".to_string(),
@@ -39,6 +40,7 @@ fn user_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "email".to_string(),
@@ -48,6 +50,7 @@ fn user_type() -> EntityTypeDef {
                 indexed: true,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     }
@@ -66,6 +69,7 @@ fn post_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "author".to_string(),
@@ -75,6 +79,7 @@ fn post_type() -> EntityTypeDef {
                 indexed: true,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     }
@@ -748,6 +753,7 @@ fn shape_enum() -> EnumTypeDef {
                     indexed: false,
                     cardinality: Default::default(),
                     fulltext: false,
+                    ann: false,
                 }],
             },
             EnumVariant {
@@ -761,6 +767,7 @@ fn shape_enum() -> EnumTypeDef {
                         indexed: false,
                         cardinality: Default::default(),
                         fulltext: false,
+                        ann: false,
                     },
                     FieldDef {
                         name: "h".to_string(),
@@ -770,6 +777,7 @@ fn shape_enum() -> EnumTypeDef {
                         indexed: false,
                         cardinality: Default::default(),
                         fulltext: false,
+                        ann: false,
                     },
                 ],
             },
@@ -794,6 +802,7 @@ fn drawing_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "shape".to_string(),
@@ -803,6 +812,7 @@ fn drawing_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     }
@@ -1103,6 +1113,7 @@ fn test_enum_same_variant_stale_field_retraction() {
                         indexed: false,
                         cardinality: Default::default(),
                         fulltext: false,
+                        ann: false,
                     },
                     FieldDef {
                         name: "until".to_string(),
@@ -1112,6 +1123,7 @@ fn test_enum_same_variant_stale_field_retraction() {
                         indexed: false,
                         cardinality: Default::default(),
                         fulltext: false,
+                        ann: false,
                     },
                 ],
             },
@@ -1131,6 +1143,7 @@ fn test_enum_same_variant_stale_field_retraction() {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "status".to_string(),
@@ -1140,6 +1153,7 @@ fn test_enum_same_variant_stale_field_retraction() {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     };
@@ -1601,6 +1615,7 @@ fn test_snapshot_enum_same_variant_update() {
                         indexed: false,
                         cardinality: Default::default(),
                         fulltext: false,
+                        ann: false,
                     },
                     FieldDef {
                         name: "until".to_string(),
@@ -1610,6 +1625,7 @@ fn test_snapshot_enum_same_variant_update() {
                         indexed: false,
                         cardinality: Default::default(),
                         fulltext: false,
+                        ann: false,
                     },
                 ],
             },
@@ -1629,6 +1645,7 @@ fn test_snapshot_enum_same_variant_update() {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "status".to_string(),
@@ -1638,6 +1655,7 @@ fn test_snapshot_enum_same_variant_update() {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     };
@@ -1705,6 +1723,7 @@ fn test_concurrent_stress() {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "value".to_string(),
@@ -1714,6 +1733,7 @@ fn test_concurrent_stress() {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     })
@@ -1788,6 +1808,7 @@ fn test_concurrent_read_after_write_no_stale_cache() {
                     indexed: false,
                     cardinality: Default::default(),
                     fulltext: false,
+                    ann: false,
                 },
                 FieldDef {
                     name: "value".to_string(),
@@ -1797,6 +1818,7 @@ fn test_concurrent_read_after_write_no_stale_cache() {
                     indexed: false,
                     cardinality: Default::default(),
                     fulltext: false,
+                    ann: false,
                 },
             ],
         })
@@ -2058,6 +2080,7 @@ fn test_unique_different_types_independent() {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "email".to_string(),
@@ -2067,6 +2090,7 @@ fn test_unique_different_types_independent() {
                 indexed: true,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     })
@@ -2841,6 +2865,7 @@ fn test_multi_clause_join() {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "post".to_string(),
@@ -2850,6 +2875,7 @@ fn test_multi_clause_join() {
                 indexed: true,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "commenter".to_string(),
@@ -2859,6 +2885,7 @@ fn test_multi_clause_join() {
                 indexed: true,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     })
@@ -4079,6 +4106,7 @@ fn product_type() -> EntityTypeDef {
                 indexed: true,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "price".to_string(),
@@ -4088,6 +4116,7 @@ fn product_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "qty".to_string(),
@@ -4097,6 +4126,7 @@ fn product_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     }
@@ -4368,6 +4398,7 @@ fn employee_type() -> EntityTypeDef {
                 indexed: true,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "dept".to_string(),
@@ -4377,6 +4408,7 @@ fn employee_type() -> EntityTypeDef {
                 indexed: true,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "salary".to_string(),
@@ -4386,6 +4418,7 @@ fn employee_type() -> EntityTypeDef {
                 indexed: false,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     }
@@ -4425,6 +4458,7 @@ fn project_type() -> EntityTypeDef {
                 indexed: true,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
             FieldDef {
                 name: "lead".to_string(),
@@ -4434,6 +4468,7 @@ fn project_type() -> EntityTypeDef {
                 indexed: true,
                 cardinality: Default::default(),
                 fulltext: false,
+                ann: false,
             },
         ],
     }
@@ -4571,6 +4606,7 @@ fn test_redefine_type_compatibility() {
         indexed: false,
         cardinality: Default::default(),
         fulltext: false,
+        ann: false,
     });
     assert!(db.define_type(additive.clone()).is_ok());
 
@@ -4589,6 +4625,7 @@ fn test_redefine_type_compatibility() {
             indexed: true,
             cardinality: Default::default(),
             fulltext: false,
+            ann: false,
         }],
     };
     let err = db.define_type(dropped).unwrap_err().to_string();
@@ -5048,6 +5085,7 @@ fn test_hard_purge_enum_refused_when_used() {
             indexed: false,
             cardinality: Default::default(),
             fulltext: false,
+            ann: false,
         }],
     };
     db.define_type(widget).unwrap();

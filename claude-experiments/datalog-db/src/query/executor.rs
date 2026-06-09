@@ -1415,7 +1415,7 @@ fn evaluate_clause_with_near(
     }
 
     // The remainder of the clause (everything except the near pattern) is a
-    // pre-filter. Evaluate it to get candidate entities.
+    // pre-filter.
     let filter_clause = WhereClause {
         bind: clause.bind.clone(),
         entity_type: clause.entity_type.clone(),
@@ -1426,15 +1426,90 @@ fn evaluate_clause_with_near(
             .cloned()
             .collect(),
     };
-    let candidates = evaluate_clause(
-        txn, &filter_clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
-    )?;
+    let has_filters = !filter_clause.field_patterns.is_empty();
 
     let bind_slot = slots.slot(&clause.bind).unwrap();
     let score_slot = score_var.and_then(|sv| slots.slot(sv));
 
-    // Score every candidate, keep top-k. Brute force is the right tool below
-    // ~1M vectors; an ANN index would slot in here when the corpus outgrows it.
+    // ANN fast path: if the field is `ann` and this is a current-state query,
+    // use the HNSW index for sub-linear top-k instead of scoring every vector.
+    // (Historical `as_of` queries fall back to brute force — the index reflects
+    // only the present.) When the clause has pre-filters, over-fetch from HNSW
+    // and keep the survivors so filtering doesn't starve the result.
+    let is_ann = type_def
+        .and_then(|td| td.get_field(fname))
+        .map(|fd| fd.ann)
+        .unwrap_or(false);
+
+    if is_ann && as_of.is_none() {
+        // Allowed filter entity set (None = no filter).
+        let allowed: Option<HashSet<EntityId>> = if has_filters {
+            let rows = evaluate_clause(
+                txn, &filter_clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
+            )?;
+            Some(
+                rows.iter()
+                    .filter_map(|t| match t.get(bind_slot) {
+                        Some(Value::Ref(id)) => Some(*id),
+                        _ => None,
+                    })
+                    .collect(),
+            )
+        } else {
+            None
+        };
+
+        let attr_owned = attr.clone();
+        let index = cache.ensure_ann_index(&attr, metric, || {
+            collect_type_vectors(txn, interner, &attr_owned)
+        });
+
+        if let Some(index) = index {
+            // Over-fetch when filtering (filtered-out hits shouldn't shrink k).
+            let ef = if has_filters { (k * 8).max(64) } else { (k * 2).max(32) };
+            let fetch = if has_filters { (k * 8).max(64) } else { k };
+            let hits = index.search(query, fetch, ef);
+            let mut out = Vec::with_capacity(k);
+            for (eid, sim) in hits {
+                if let Some(set) = &allowed {
+                    if !set.contains(&eid) {
+                        continue;
+                    }
+                }
+                let mut t = tuple.clone();
+                t.set(bind_slot, Value::Ref(eid));
+                // Re-bind any other fields the clause projects (the filter
+                // clause already validated them); cheap single-entity eval.
+                let materialized = if has_filters {
+                    evaluate_clause(
+                        txn, &filter_clause, &t, as_of, schema, slots, cache, interner, cache_gen,
+                    )?
+                } else {
+                    vec![t]
+                };
+                for mut row in materialized {
+                    if let Some(slot) = score_slot {
+                        row.set(slot, Value::F64(sim as f64));
+                    }
+                    out.push(row);
+                    if out.len() >= k {
+                        break;
+                    }
+                }
+                if out.len() >= k {
+                    break;
+                }
+            }
+            return Ok(out);
+        }
+        // index unavailable (cache policy None) → fall through to brute force.
+    }
+
+    // Brute force: score every candidate vector. Correct for any case (filters,
+    // as_of, non-ann fields) and the right tool below ~1M vectors.
+    let candidates = evaluate_clause(
+        txn, &filter_clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
+    )?;
     let mut scored: Vec<(f32, Tuple)> = Vec::new();
     for cand in candidates {
         let eid = match cand.get(bind_slot) {
@@ -1460,6 +1535,32 @@ fn evaluate_clause_with_near(
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(k);
     Ok(scored.into_iter().map(|(_, t)| t).collect())
+}
+
+/// Collect all (entity, vector) pairs for a vector attribute, for HNSW builds.
+/// Reads current-state via the AEVT mirror — vectors are cardinality-one, so
+/// CURRENT_AEVT holds the live value keyed by (attr, entity).
+fn collect_type_vectors(
+    txn: &dyn ReadOps,
+    interner: &AttrInterner,
+    attr: &str,
+) -> Vec<(EntityId, Vec<f32>)> {
+    let attr_id = match interner.lookup(attr) {
+        Some(id) => id,
+        None => return Vec::new(),
+    };
+    let prefix = index::current_aevt_attr_prefix(attr_id);
+    let end = index::prefix_end(&prefix);
+    let mut out = Vec::new();
+    let _ = txn.scan_foreach(&prefix, &end, &mut |key, val| {
+        // CURRENT_AEVT key = [prefix][attr_id(4)][entity(8)]; value = vec bytes.
+        let eid = index::current_aevt_entity_at(key);
+        if let Some(Value::Vector(v)) = index::decode_current_value(val) {
+            out.push((eid, v));
+        }
+        true
+    });
+    out
 }
 
 /// Evaluate a clause containing a `search` (BM25 full-text) pattern.
