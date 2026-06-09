@@ -168,7 +168,8 @@ impl SlotMap {
                 Self::collect_from_pattern(variant, map, next);
                 Self::collect_pattern_vars(field_patterns, map, next);
             }
-            Pattern::Near { score_var: Some(sv), .. } => {
+            Pattern::Near { score_var: Some(sv), .. }
+            | Pattern::Search { score_var: Some(sv), .. } => {
                 if !map.contains_key(sv) {
                     map.insert(sv.clone(), *next);
                     *next += 1;
@@ -176,7 +177,8 @@ impl SlotMap {
             }
             Pattern::Constant(_)
             | Pattern::Predicate { .. }
-            | Pattern::Near { .. } => {}
+            | Pattern::Near { .. }
+            | Pattern::Search { .. } => {}
         }
     }
 
@@ -702,10 +704,14 @@ fn collect_pattern_bound_vars(pat: &Pattern, set: &mut std::collections::HashSet
                 collect_pattern_bound_vars(p, set);
             }
         }
-        Pattern::Near { score_var: Some(sv), .. } => {
+        Pattern::Near { score_var: Some(sv), .. }
+        | Pattern::Search { score_var: Some(sv), .. } => {
             set.insert(sv.clone());
         }
-        Pattern::Constant(_) | Pattern::Predicate { .. } | Pattern::Near { .. } => {}
+        Pattern::Constant(_)
+        | Pattern::Predicate { .. }
+        | Pattern::Near { .. }
+        | Pattern::Search { .. } => {}
     }
 }
 

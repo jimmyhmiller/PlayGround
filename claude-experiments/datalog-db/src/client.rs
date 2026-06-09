@@ -32,13 +32,13 @@
 //!     fields: vec![
 //!         FieldDef { name: "name".into(),  field_type: FieldType::String,
 //!                    required: true,  unique: false, indexed: false,
-//!                    cardinality: Default::default() },
+//!                    cardinality: Default::default(), fulltext: false },
 //!         FieldDef { name: "email".into(), field_type: FieldType::String,
 //!                    required: true,  unique: true,  indexed: true,
-//!                    cardinality: Default::default()  },
+//!                    cardinality: Default::default(), fulltext: false  },
 //!         FieldDef { name: "age".into(),   field_type: FieldType::I64,
 //!                    required: false, unique: false, indexed: false,
-//!                    cardinality: Default::default() },
+//!                    cardinality: Default::default(), fulltext: false },
 //!     ],
 //!     unique_keys: vec![],
 //! })?;

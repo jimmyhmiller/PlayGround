@@ -93,6 +93,11 @@ pub struct FieldDef {
     /// of values stored as independent datoms; see [`Cardinality`].
     #[serde(default)]
     pub cardinality: Cardinality,
+    /// When true, a `string` field is tokenized into an inverted index for
+    /// ranked BM25 search (`{field: {search: "..."}}`). Independent of
+    /// `indexed` (which is for exact/range AVET lookups).
+    #[serde(default)]
+    pub fulltext: bool,
 }
 
 impl FieldDef {

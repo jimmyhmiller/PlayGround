@@ -116,6 +116,11 @@ fn hash_pattern<H: Hasher>(pattern: &Pattern, h: &mut H) {
             std::mem::discriminant(metric).hash(h);
             score_var.hash(h);
         }
+        Pattern::Search { query, k, score_var } => {
+            query.hash(h);
+            k.hash(h);
+            score_var.hash(h);
+        }
     }
 }
 
@@ -956,11 +961,13 @@ impl Database {
                             type_def.name, old_field.name
                         )));
                     }
-                    Some(new_field) if new_field != old_field => {
+                    Some(new_field) if !field_redefinition_ok(old_field, new_field) => {
                         return Err(DbError::Schema(format!(
                             "cannot redefine type '{}': field '{}' changed definition. An existing \
-                             field's type and modifiers (required/unique/indexed) cannot change; \
-                             only adding new fields is allowed.",
+                             field's type, cardinality, required and unique cannot change; only \
+                             adding new fields, or turning on the additive `indexed`/`fulltext` \
+                             modifiers, is allowed. (Existing rows are NOT retroactively indexed — \
+                             re-assert them to populate a newly-enabled index.)",
                             type_def.name, old_field.name
                         )));
                     }
@@ -1080,8 +1087,23 @@ impl Database {
                     referrers.join(", ")
                 )));
             }
+            // Resolve fulltext attrs while we still hold the schema guard, so
+            // hard_purge needn't re-lock the schema (it would deadlock).
+            let fulltext_attrs: Vec<(crate::intern::AttrId, String)> = schema
+                .get(name)
+                .map(|td| {
+                    td.fields
+                        .iter()
+                        .filter(|f| f.fulltext)
+                        .filter_map(|f| {
+                            let attr = td.attribute_name(&f.name);
+                            self.attr_interner.lookup(&attr).map(|id| (id, attr))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
             let (entities_purged, datoms_deleted, dangling_refs) =
-                self.hard_purge(name, schema_attr, parse_enum)?;
+                self.hard_purge(name, schema_attr, parse_enum, fulltext_attrs)?;
             DropResult {
                 name: name.to_string(),
                 kind,
@@ -1192,6 +1214,9 @@ impl Database {
         name: &str,
         schema_attr: &'static str,
         parse_enum: bool,
+        // (attr_id, attr_name) of this type's fulltext fields, resolved by the
+        // caller (which holds the schema guard) to avoid re-locking the schema.
+        fulltext_attrs: Vec<(crate::intern::AttrId, String)>,
     ) -> Result<(u64, u64, u64)> {
         use std::collections::HashSet;
         use crate::intern::AttrId;
@@ -1273,6 +1298,27 @@ impl Database {
 
             // The per-type entity counter meta key (no-op for enums).
             txn.delete(&index::meta_key(&format!("type_count:{}", name_owned)))?;
+
+            // Tear down the full-text inverted index for this type's fulltext
+            // fields: delete all postings + doclen under each attr, and reset
+            // the corpus stats. Otherwise stale postings/stats survive the
+            // purge and corrupt later BM25 scoring.
+            for (attr_id, attr_name) in &fulltext_attrs {
+                let mut pp = vec![index::FTS_POSTINGS_PREFIX];
+                pp.extend_from_slice(&attr_id.to_be_bytes());
+                let pend = index::prefix_end(&pp);
+                for (k, _) in txn.scan(&pp, &pend)? {
+                    txn.delete(&k)?;
+                }
+                let mut dp = vec![index::FTS_DOCLEN_PREFIX];
+                dp.extend_from_slice(&attr_id.to_be_bytes());
+                let dend = index::prefix_end(&dp);
+                for (k, _) in txn.scan(&dp, &dend)? {
+                    txn.delete(&k)?;
+                }
+                txn.delete(&index::meta_key(&format!("fts_ndocs:{}", attr_name)))?;
+                txn.delete(&index::meta_key(&format!("fts_totlen:{}", attr_name)))?;
+            }
 
             // Report inbound refs from *other* entities that now dangle.
             // Read after the deletes above (the overlay reflects them), so
@@ -2175,6 +2221,7 @@ pub fn parse_define_request(
             let required = f.get("required").and_then(|r| r.as_bool()).unwrap_or(false);
             let unique = f.get("unique").and_then(|u| u.as_bool()).unwrap_or(false);
             let indexed = f.get("indexed").and_then(|i| i.as_bool()).unwrap_or(false);
+            let fulltext = f.get("fulltext").and_then(|x| x.as_bool()).unwrap_or(false);
             // cardinality: "many" or true → Many; default One.
             let cardinality = match f.get("cardinality") {
                 Some(serde_json::Value::String(s)) if s == "many" => {
@@ -2200,6 +2247,20 @@ pub fn parse_define_request(
                     ));
                 }
             }
+            // fulltext only makes sense on string fields (incl. many-of-string).
+            if fulltext {
+                let elem_is_string = match &field_type {
+                    FieldType::String => true,
+                    FieldType::List(inner) => matches!(**inner, FieldType::String),
+                    _ => false,
+                };
+                if !elem_is_string {
+                    return Err(format!(
+                        "field '{}' is marked fulltext but is not a string field",
+                        field_name
+                    ));
+                }
+            }
             Ok(FieldDef {
                 name: field_name,
                 field_type,
@@ -2207,6 +2268,7 @@ pub fn parse_define_request(
                 unique,
                 indexed,
                 cardinality,
+                fulltext,
             })
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
@@ -2301,6 +2363,7 @@ pub fn parse_define_enum_request(
                                 unique: false,
                                 indexed: false,
                                 cardinality: crate::schema::Cardinality::One,
+                                fulltext: false,
                             })
                         })
                         .collect::<std::result::Result<Vec<_>, String>>()
@@ -2362,6 +2425,29 @@ fn parse_field_type(s: &str) -> std::result::Result<FieldType, String> {
             }
         }
     }
+}
+
+/// Whether redefining `old` to `new` is a compatible change. Identical fields
+/// are always fine. Beyond that, only the *additive* index modifiers
+/// (`indexed`, `fulltext`) may turn on (false→true) — they build a new index
+/// without invalidating existing data. Everything structural (type,
+/// cardinality, required, unique) must match exactly. Turning an index modifier
+/// OFF is disallowed (it would orphan index entries).
+fn field_redefinition_ok(old: &FieldDef, new: &FieldDef) -> bool {
+    if old == new {
+        return true;
+    }
+    if old.field_type != new.field_type
+        || old.cardinality != new.cardinality
+        || old.required != new.required
+        || old.unique != new.unique
+    {
+        return false;
+    }
+    // `indexed` / `fulltext` may only go false → true.
+    let indexed_ok = new.indexed || !old.indexed;
+    let fulltext_ok = new.fulltext || !old.fulltext;
+    indexed_ok && fulltext_ok
 }
 
 /// A list element must be a scalar type — no nested lists, no enums (enums

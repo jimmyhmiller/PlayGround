@@ -257,6 +257,9 @@ pub fn process_transaction(
     // from the schema for every type the transaction touches, so retract paths
     // (which don't carry the value through the Assert branch) see them too.
     let mut many_attrs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Attribute names that are `fulltext` — their string values are tokenized
+    // into the inverted index as datoms are added/retracted below.
+    let mut fulltext_attrs: std::collections::HashSet<String> = std::collections::HashSet::new();
     {
         let mut seen_types: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for op in &ops {
@@ -270,6 +273,9 @@ pub fn process_transaction(
                     for f in &td.fields {
                         if f.is_many() {
                             many_attrs.insert(td.attribute_name(&f.name));
+                        }
+                        if f.fulltext {
+                            fulltext_attrs.insert(td.attribute_name(&f.name));
                         }
                     }
                 }
@@ -673,6 +679,16 @@ pub fn process_transaction(
                 }
             }
         }
+
+        // Full-text inverted index maintenance. A `fulltext` field's string
+        // value is tokenized; on add we write postings + doclen and bump corpus
+        // stats, on retract we remove them. Overwrites flow through as a
+        // retract (old value) + add (new value) pair, so this stays correct.
+        if fulltext_attrs.contains(&datom.attribute) {
+            if let Value::String(s) = &datom.value {
+                maintain_fts(txn, attr_id, &datom.attribute, datom.entity, s, datom.added)?;
+            }
+        }
     }
 
     // Pure-add fast path: if every op was `Assert { entity: None, .. }`
@@ -1000,6 +1016,84 @@ fn extract_enum_parts(value: &Value) -> (String, HashMap<String, Value>) {
 
 fn type_count_key(type_name: &str) -> Vec<u8> {
     index::meta_key(&format!("type_count:{}", type_name))
+}
+
+// --- Full-text inverted index maintenance ---
+
+fn fts_ndocs_key(attr: &str) -> Vec<u8> {
+    index::meta_key(&format!("fts_ndocs:{}", attr))
+}
+
+fn fts_totlen_key(attr: &str) -> Vec<u8> {
+    index::meta_key(&format!("fts_totlen:{}", attr))
+}
+
+fn read_u64(txn: &dyn TxnOps, key: &[u8]) -> Result<u64> {
+    Ok(match txn.get(key)? {
+        Some(b) if b.len() == 8 => u64::from_be_bytes(b.try_into().unwrap()),
+        _ => 0,
+    })
+}
+
+/// Add or remove a document's inverted-index entries for one `fulltext` field.
+/// `added=true` indexes `text`; `added=false` removes a previously-indexed
+/// value. Corpus stats (doc count, total token length) track BM25's `avgdl`.
+fn maintain_fts(
+    txn: &dyn TxnOps,
+    attr_id: crate::intern::AttrId,
+    attr: &str,
+    entity: EntityId,
+    text: &str,
+    added: bool,
+) -> Result<()> {
+    let (tf, len) = crate::fts::term_frequencies(text);
+
+    if added {
+        let doclen_key = index::fts_doclen_key(attr_id, entity);
+        // If this entity already had an indexed value (a bare re-assert of an
+        // existing entity skips the retract that an overwrite would emit),
+        // subtract the old length first and don't double-count the doc.
+        let prev = txn.get(&doclen_key)?;
+        let already = prev.is_some();
+        let prev_len = match &prev {
+            Some(b) if b.len() == 4 => u32::from_be_bytes(b[..].try_into().unwrap()),
+            _ => 0,
+        };
+
+        for (term, freq) in &tf {
+            let (key, val) = index::encode_fts_posting(attr_id, term, entity, *freq);
+            txn.put(key, val)?;
+        }
+        txn.put(doclen_key, (len).to_be_bytes().to_vec())?;
+        // Corpus stats: +1 doc only if new; adjust total length by the delta.
+        if !already {
+            let ndocs = read_u64(txn, &fts_ndocs_key(attr))? + 1;
+            txn.put(fts_ndocs_key(attr), ndocs.to_be_bytes().to_vec())?;
+        }
+        let totlen = read_u64(txn, &fts_totlen_key(attr))?
+            .saturating_sub(prev_len as u64)
+            + len as u64;
+        txn.put(fts_totlen_key(attr), totlen.to_be_bytes().to_vec())?;
+    } else {
+        // Only adjust stats if this value was actually indexed (a doclen entry
+        // exists). Retracting a value that predates the field being marked
+        // `fulltext` — or any never-indexed value — must be a no-op, otherwise
+        // the corpus counts drift below the true total and break BM25's IDF.
+        let doclen_key = index::fts_doclen_key(attr_id, entity);
+        let was_indexed = txn.get(&doclen_key)?.is_some();
+        if !was_indexed {
+            return Ok(());
+        }
+        for term in tf.keys() {
+            txn.delete(&index::fts_posting_key(attr_id, term, entity))?;
+        }
+        txn.delete(&doclen_key)?;
+        let ndocs = read_u64(txn, &fts_ndocs_key(attr))?.saturating_sub(1);
+        txn.put(fts_ndocs_key(attr), ndocs.to_be_bytes().to_vec())?;
+        let totlen = read_u64(txn, &fts_totlen_key(attr))?.saturating_sub(len as u64);
+        txn.put(fts_totlen_key(attr), totlen.to_be_bytes().to_vec())?;
+    }
+    Ok(())
 }
 
 fn increment_type_count(txn: &dyn TxnOps, type_name: &str) -> Result<()> {

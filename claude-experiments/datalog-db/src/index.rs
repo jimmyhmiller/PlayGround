@@ -16,6 +16,57 @@ pub const META_PREFIX: u8 = 0x00;
 pub const CURRENT_AEVT_PREFIX: u8 = 0x11;
 pub const CURRENT_AVET_PREFIX: u8 = 0x12;
 
+// Full-text search (inverted index over `fulltext` fields).
+// FTS_POSTINGS: [0x20][attr_id(4)][term_len(2)][term][entity(8)] -> tf(u32)
+//   Scanning [0x20][attr_id][term_len][term] yields the term's postings.
+// FTS_DOCLEN:   [0x21][attr_id(4)][entity(8)] -> doc length (u32)
+//   The token count of `entity`'s field; needed for BM25 length norm.
+pub const FTS_POSTINGS_PREFIX: u8 = 0x20;
+pub const FTS_DOCLEN_PREFIX: u8 = 0x21;
+
+/// Encode an FTS postings key: term → (entity) with term-frequency as value.
+pub fn encode_fts_posting(attr_id: AttrId, term: &str, entity: EntityId, tf: u32) -> (Vec<u8>, Vec<u8>) {
+    let key = fts_posting_key(attr_id, term, entity);
+    (key, tf.to_be_bytes().to_vec())
+}
+
+pub fn fts_posting_key(attr_id: AttrId, term: &str, entity: EntityId) -> Vec<u8> {
+    let tb = term.as_bytes();
+    let mut key = Vec::with_capacity(1 + ATTR_ID_BYTES + 2 + tb.len() + 8);
+    key.push(FTS_POSTINGS_PREFIX);
+    encode_attr_id(&mut key, attr_id);
+    key.extend_from_slice(&(tb.len() as u16).to_be_bytes());
+    key.extend_from_slice(tb);
+    encode_entity(&mut key, entity);
+    key
+}
+
+/// Scan prefix for all postings of a (attr, term): every doc containing `term`.
+pub fn fts_term_prefix(attr_id: AttrId, term: &str) -> Vec<u8> {
+    let tb = term.as_bytes();
+    let mut key = Vec::with_capacity(1 + ATTR_ID_BYTES + 2 + tb.len());
+    key.push(FTS_POSTINGS_PREFIX);
+    encode_attr_id(&mut key, attr_id);
+    key.extend_from_slice(&(tb.len() as u16).to_be_bytes());
+    key.extend_from_slice(tb);
+    key
+}
+
+/// Extract the entity id from an FTS postings key (always the last 8 bytes).
+pub fn fts_posting_entity_at(key: &[u8]) -> EntityId {
+    let off = key.len() - 8;
+    u64::from_be_bytes(key[off..off + 8].try_into().unwrap())
+}
+
+/// Encode an FTS document-length key.
+pub fn fts_doclen_key(attr_id: AttrId, entity: EntityId) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + ATTR_ID_BYTES + 8);
+    key.push(FTS_DOCLEN_PREFIX);
+    encode_attr_id(&mut key, attr_id);
+    encode_entity(&mut key, entity);
+    key
+}
+
 /// Width of an interned attribute identifier in an index key.
 const ATTR_ID_BYTES: usize = 4;
 

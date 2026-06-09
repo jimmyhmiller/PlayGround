@@ -39,6 +39,15 @@ pub enum Pattern {
         /// Optional variable to bind the similarity score into.
         score_var: Option<String>,
     },
+    /// BM25 full-text search on a `fulltext` string field:
+    /// `{"search": "recursive functions", "k": 20, "score": "?bm25"}`.
+    /// Tokenizes the query, walks the inverted index, ranks by BM25, returns
+    /// up to `k` entities binding `score` (when given) to the BM25 score.
+    Search {
+        query: String,
+        k: usize,
+        score_var: Option<String>,
+    },
 }
 
 /// Distance / similarity metric for vector search. `Cosine` and `Dot` are
@@ -162,6 +171,32 @@ impl Pattern {
                     metric,
                     score_var,
                 });
+            }
+
+            // BM25 full-text search: {"search": "terms", "k": N, "score": "?s"}.
+            if let Some(search_val) = obj.get("search") {
+                let query = search_val
+                    .as_str()
+                    .ok_or("'search' must be a string (the query text)")?
+                    .to_string();
+                let k = obj
+                    .get("k")
+                    .and_then(|k| k.as_u64())
+                    .map(|k| k as usize)
+                    .unwrap_or(10);
+                if k == 0 {
+                    return Err("'k' must be at least 1".into());
+                }
+                let score_var = obj
+                    .get("score")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s.to_string());
+                if let Some(ref sv) = score_var {
+                    if !sv.starts_with('?') {
+                        return Err("'score' must be a variable like \"?bm25\"".into());
+                    }
+                }
+                return Ok(Pattern::Search { query, k, score_var });
             }
 
             // Check for enum match: {"match": "Circle", ...}

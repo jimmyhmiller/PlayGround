@@ -1313,6 +1313,19 @@ fn find_near_pattern(
     None
 }
 
+/// Find a `search` (BM25 full-text) pattern in a clause, if present.
+/// Returns (field_name, query_text, k, score_var).
+fn find_search_pattern(
+    clause: &WhereClause,
+) -> Option<(String, String, usize, Option<String>)> {
+    for (fname, pat) in &clause.field_patterns {
+        if let Pattern::Search { query, k, score_var } = pat {
+            return Some((fname.clone(), query.clone(), *k, score_var.clone()));
+        }
+    }
+    None
+}
+
 /// Read one entity's vector value for `attr` from EAVT (current or as_of).
 fn read_vector_value(
     txn: &dyn ReadOps,
@@ -1449,6 +1462,173 @@ fn evaluate_clause_with_near(
     Ok(scored.into_iter().map(|(_, t)| t).collect())
 }
 
+/// Evaluate a clause containing a `search` (BM25 full-text) pattern.
+///
+/// Tokenizes the query, walks the inverted index for each term to accumulate a
+/// per-document BM25 score, then returns the top-k entities. Non-`search`
+/// patterns in the clause act as pre-filters (only entities passing them are
+/// kept). The score var, if given, is bound to the BM25 score.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_clause_with_search(
+    txn: &dyn ReadOps,
+    clause: &WhereClause,
+    tuple: &Tuple,
+    as_of: Option<TxId>,
+    schema: &SchemaRegistry,
+    slots: &SlotMap,
+    cache: &QueryCache,
+    interner: &AttrInterner,
+    cache_gen: u64,
+    fname: &str,
+    query_text: &str,
+    k: usize,
+    score_var: Option<&str>,
+) -> Result<Vec<Tuple>, String> {
+    let type_def = schema.get(&clause.entity_type);
+    let attr = type_def
+        .map(|td| td.attribute_name(fname))
+        .unwrap_or_else(|| format!("{}/{}", clause.entity_type, fname));
+
+    if let Some(td) = type_def {
+        match td.get_field(fname) {
+            Some(fd) if fd.fulltext => {}
+            Some(_) => {
+                return Err(format!("field '{}' is not a fulltext field", fname));
+            }
+            None => {}
+        }
+    }
+
+    let attr_id = match interner.lookup(&attr) {
+        Some(id) => id,
+        None => return Ok(Vec::new()), // never indexed → no hits
+    };
+
+    // Corpus stats for BM25 (avgdl, n_docs).
+    let n_docs = read_meta_u64(txn, &format!("fts_ndocs:{}", attr))?;
+    let tot_len = read_meta_u64(txn, &format!("fts_totlen:{}", attr))?;
+    if n_docs == 0 {
+        return Ok(Vec::new());
+    }
+    let avgdl = (tot_len as f32 / n_docs as f32).max(1.0);
+
+    // Distinct query terms (BM25 doesn't gain from repeating a query term).
+    let mut terms: Vec<String> = crate::fts::tokenize(query_text);
+    terms.sort();
+    terms.dedup();
+    if terms.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Accumulate score and cache doc lengths per candidate entity.
+    let mut scores: HashMap<EntityId, f32> = HashMap::new();
+    let mut doc_len: HashMap<EntityId, u32> = HashMap::new();
+
+    for term in &terms {
+        // Gather this term's postings: (entity, tf). df = number of postings.
+        let prefix = index::fts_term_prefix(attr_id, term);
+        let end = index::prefix_end(&prefix);
+        let mut postings: Vec<(EntityId, u32)> = Vec::new();
+        txn.scan_foreach(&prefix, &end, &mut |key, val| {
+            let eid = index::fts_posting_entity_at(key);
+            let tf = if val.len() == 4 {
+                u32::from_be_bytes(val.try_into().unwrap())
+            } else {
+                0
+            };
+            postings.push((eid, tf));
+            true
+        })
+        .map_err(|e| e.to_string())?;
+
+        let df = postings.len() as u64;
+        if df == 0 {
+            continue;
+        }
+        for (eid, tf) in postings {
+            let dl = match doc_len.get(&eid) {
+                Some(&l) => l,
+                None => {
+                    let l = read_u32(txn, &index::fts_doclen_key(attr_id, eid))?;
+                    doc_len.insert(eid, l);
+                    l
+                }
+            };
+            let s = crate::fts::bm25_term_score(tf, dl, avgdl, n_docs, df);
+            *scores.entry(eid).or_insert(0.0) += s;
+        }
+    }
+
+    if scores.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // Pre-filter: the non-search remainder of the clause. We evaluate it per
+    // candidate by seeding the entity and checking the filter clause.
+    let filter_clause = WhereClause {
+        bind: clause.bind.clone(),
+        entity_type: clause.entity_type.clone(),
+        field_patterns: clause
+            .field_patterns
+            .iter()
+            .filter(|(_, p)| !matches!(p, Pattern::Search { .. }))
+            .cloned()
+            .collect(),
+    };
+    let has_filters = !filter_clause.field_patterns.is_empty();
+
+    let bind_slot = slots.slot(&clause.bind).unwrap();
+    let score_slot = score_var.and_then(|sv| slots.slot(sv));
+
+    // Rank by score, then materialize top-k (applying filters as we go so we
+    // don't stop early on filtered-out hits).
+    let mut ranked: Vec<(EntityId, f32)> = scores.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut out = Vec::new();
+    for (eid, score) in ranked {
+        if out.len() >= k {
+            break;
+        }
+        let mut seed = tuple.clone();
+        seed.set(bind_slot, Value::Ref(eid));
+        let rows = if has_filters {
+            evaluate_clause(
+                txn, &filter_clause, &seed, as_of, schema, slots, cache, interner, cache_gen,
+            )?
+        } else {
+            vec![seed]
+        };
+        for mut row in rows {
+            if let Some(slot) = score_slot {
+                row.set(slot, Value::F64(score as f64));
+            }
+            out.push(row);
+            if out.len() >= k {
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Read a big-endian u32 from a key, defaulting to 0.
+fn read_u32(txn: &dyn ReadOps, key: &[u8]) -> Result<u32, String> {
+    Ok(match txn.get(key).map_err(|e| e.to_string())? {
+        Some(b) if b.len() == 4 => u32::from_be_bytes(b.try_into().unwrap()),
+        _ => 0,
+    })
+}
+
+/// Read a big-endian u64 meta value by logical name, defaulting to 0.
+fn read_meta_u64(txn: &dyn ReadOps, name: &str) -> Result<u64, String> {
+    let key = index::meta_key(name);
+    Ok(match txn.get(&key).map_err(|e| e.to_string())? {
+        Some(b) if b.len() == 8 => u64::from_be_bytes(b.try_into().unwrap()),
+        _ => 0,
+    })
+}
+
 /// Evaluate a single where clause against a current tuple.
 /// Returns extended tuples for each matching entity.
 fn evaluate_clause(
@@ -1468,6 +1648,15 @@ fn evaluate_clause(
         return evaluate_clause_with_near(
             txn, clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
             &fname, &query, k, metric, score_var.as_deref(),
+        );
+    }
+
+    // BM25 full-text search. A `search` pattern walks the inverted index and
+    // ranks; another whole-type top-k operation.
+    if let Some((fname, query, k, score_var)) = find_search_pattern(clause) {
+        return evaluate_clause_with_search(
+            txn, clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
+            &fname, &query, k, score_var.as_deref(),
         );
     }
 
@@ -2349,7 +2538,7 @@ fn resolve_field_patterns(
             },
             // Near patterns are handled by the dedicated kNN path before the
             // columnar engine is reached, so they never appear here.
-            Pattern::Near { .. } => continue,
+            Pattern::Near { .. } | Pattern::Search { .. } => continue,
         };
         out.push(rfp);
     }
@@ -2535,7 +2724,7 @@ fn match_resolved(
                             }
                         }
                         Pattern::EnumMatch { .. } => return false,
-                        Pattern::Near { .. } => return false,
+                        Pattern::Near { .. } | Pattern::Search { .. } => return false,
                     }
                 }
             }
@@ -2716,13 +2905,13 @@ fn match_field_patterns(
                             // Nested enum matching not supported
                             return false;
                         }
-                        Pattern::Near { .. } => return false,
+                        Pattern::Near { .. } | Pattern::Search { .. } => return false,
                     }
                 }
             }
             // Near patterns are handled by the dedicated kNN path before this
             // per-row matcher; they never reach here.
-            Pattern::Near { .. } => return false,
+            Pattern::Near { .. } | Pattern::Search { .. } => return false,
         }
     }
 

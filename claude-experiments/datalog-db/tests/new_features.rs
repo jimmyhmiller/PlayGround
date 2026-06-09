@@ -474,3 +474,124 @@ fn vector_dimension_mismatch_errors() {
     let res = db.transact(ops);
     assert!(res.is_err(), "dimension mismatch on assert should error");
 }
+
+#[test]
+fn fulltext_bm25_ranked_search() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "title", "type": "string", "required": true, "unique": true},
+        {"name": "body", "type": "string", "fulltext": true},
+    ]}));
+    assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"title": "a",
+            "body": "recursive functions compute over recursive data structures"}}),
+        json!({"assert": "Doc", "data": {"title": "b",
+            "body": "the cat sat on the mat in the sun"}}),
+        json!({"assert": "Doc", "data": {"title": "c",
+            "body": "a function returns a value; functional programming avoids state"}}),
+    ]);
+
+    // Search "recursive functions" — doc a (both terms, high tf) ranks top.
+    let rows = run(&db, json!({"find": ["?t", "?s"], "where": [
+        {"bind": "?d", "type": "Doc", "title": "?t",
+         "body": {"search": "recursive functions", "k": 5, "score": "?s"}}
+    ], "order_by": [{"var": "?s", "desc": true}]}));
+    assert!(!rows.is_empty(), "should find matches");
+    assert_eq!(rows[0][0], json!("a"), "doc a is the best match");
+    // b (no query terms) must not appear.
+    let titles: Vec<&str> = rows.iter().map(|r| r[0].as_str().unwrap()).collect();
+    assert!(!titles.contains(&"b"), "doc b has none of the terms");
+    // Scores are positive and descending.
+    let s0 = rows[0][1].as_f64().unwrap();
+    assert!(s0 > 0.0);
+}
+
+#[test]
+fn fulltext_stemming_matches_variants() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "title", "type": "string", "required": true, "unique": true},
+        {"name": "body", "type": "string", "fulltext": true},
+    ]}));
+    assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"title": "x", "body": "computational models of computing"}}),
+    ]);
+    // Query "compute" should match via stemming ("computing"/"computational").
+    let rows = run(&db, json!({"find": ["?t", "?s"], "where": [
+        {"bind": "?d", "type": "Doc", "title": "?t", "body": {"search": "compute", "score": "?s"}}
+    ], "order_by": [{"var": "?s", "desc": true}]}));
+    assert_eq!(rows.len(), 1, "stemmed query should match");
+    assert_eq!(rows[0][0], json!("x"));
+}
+
+#[test]
+fn fulltext_updates_on_overwrite() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "title", "type": "string", "required": true, "unique": true},
+        {"name": "body", "type": "string", "fulltext": true},
+    ]}));
+    let ids = assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"title": "x", "body": "alpha beta gamma"}}),
+    ]);
+    let eid = ids[0];
+    // Overwrite the body — old terms must be de-indexed, new ones indexed.
+    db.transact(vec![TxOp::from_json(
+        &json!({"assert": "Doc", "entity": eid, "data": {"body": "delta epsilon"}})
+    ).unwrap()]).unwrap();
+
+    let hits = |term: &str| run(&db, json!({"find": ["?t"], "where": [
+        {"bind": "?d", "type": "Doc", "title": "?t", "body": {"search": term, "score": "?s"}}
+    ]})).len();
+    assert_eq!(hits("alpha"), 0, "old term must be de-indexed");
+    assert_eq!(hits("delta"), 1, "new term must be indexed");
+}
+
+#[test]
+fn fulltext_purge_clears_index() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "title", "type": "string", "required": true, "unique": true},
+        {"name": "body", "type": "string", "fulltext": true},
+    ]}));
+    assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"title": "x", "body": "uniqueterm appears here"}}),
+    ]);
+    // Sanity: indexed.
+    let hits = |term: &str| {
+        let q = json!({"find": ["?t", "?s"], "where": [
+            {"bind": "?d", "type": "Doc", "title": "?t", "body": {"search": term, "score": "?s"}}
+        ], "order_by": [{"var": "?s", "desc": true}]});
+        db.query(&Query::from_json(&q).unwrap()).unwrap().rows.len()
+    };
+    assert_eq!(hits("uniqueterm"), 1);
+
+    // Hard-purge the type; the inverted index must be gone too.
+    db.drop_type("Doc", true).unwrap();
+    // Redefine and re-add a different doc; the old term must NOT resurface and
+    // BM25 stats must be consistent (a fresh search scores > 0).
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "title", "type": "string", "required": true, "unique": true},
+        {"name": "body", "type": "string", "fulltext": true},
+    ]}));
+    assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"title": "y", "body": "different content entirely"}}),
+    ]);
+    assert_eq!(hits("uniqueterm"), 0, "old postings must be purged");
+
+    let q = json!({"find": ["?t", "?s"], "where": [
+        {"bind": "?d", "type": "Doc", "title": "?t", "body": {"search": "different", "score": "?s"}}
+    ], "order_by": [{"var": "?s", "desc": true}]});
+    let rows = db.query(&Query::from_json(&q).unwrap()).unwrap().rows;
+    assert_eq!(rows.len(), 1);
+    // Score must be a finite positive (stats not corrupted by the purge).
+    if let datalog_db::datom::Value::F64(s) = &rows[0][1] {
+        assert!(*s > 0.0, "BM25 score should be positive after purge+reindex, got {s}");
+    } else {
+        panic!("expected a score");
+    }
+}

@@ -59,6 +59,7 @@ fn wide_type() -> EntityTypeDef {
                 unique: false,
                 indexed: false,
                 cardinality: Default::default(),
+                fulltext: false,
             },
             FieldDef {
                 name: "i".to_string(),
@@ -67,6 +68,7 @@ fn wide_type() -> EntityTypeDef {
                 unique: false,
                 indexed: false,
                 cardinality: Default::default(),
+                fulltext: false,
             },
             FieldDef {
                 name: "f".to_string(),
@@ -75,6 +77,7 @@ fn wide_type() -> EntityTypeDef {
                 unique: false,
                 indexed: false,
                 cardinality: Default::default(),
+                fulltext: false,
             },
             FieldDef {
                 name: "b".to_string(),
@@ -83,6 +86,7 @@ fn wide_type() -> EntityTypeDef {
                 unique: false,
                 indexed: false,
                 cardinality: Default::default(),
+                fulltext: false,
             },
             FieldDef {
                 name: "data".to_string(),
@@ -91,6 +95,7 @@ fn wide_type() -> EntityTypeDef {
                 unique: false,
                 indexed: false,
                 cardinality: Default::default(),
+                fulltext: false,
             },
         ],
     }
@@ -118,6 +123,7 @@ fn color_enum() -> EnumTypeDef {
                         unique: false,
                         indexed: false,
                         cardinality: Default::default(),
+                        fulltext: false,
                     },
                     FieldDef {
                         name: "g".to_string(),
@@ -126,6 +132,7 @@ fn color_enum() -> EnumTypeDef {
                         unique: false,
                         indexed: false,
                         cardinality: Default::default(),
+                        fulltext: false,
                     },
                     FieldDef {
                         name: "b".to_string(),
@@ -134,6 +141,7 @@ fn color_enum() -> EnumTypeDef {
                         unique: false,
                         indexed: false,
                         cardinality: Default::default(),
+                        fulltext: false,
                     },
                 ],
             },
@@ -153,6 +161,7 @@ fn widget_type() -> EntityTypeDef {
                 unique: false,
                 indexed: false,
                 cardinality: Default::default(),
+                fulltext: false,
             },
             FieldDef {
                 name: "color".to_string(),
@@ -161,6 +170,7 @@ fn widget_type() -> EntityTypeDef {
                 unique: false,
                 indexed: false,
                 cardinality: Default::default(),
+                fulltext: false,
             },
         ],
     }
@@ -1047,6 +1057,7 @@ fn unique_user_type() -> EntityTypeDef {
                 unique: false,
                 indexed: false,
                 cardinality: Default::default(),
+                fulltext: false,
             },
             FieldDef {
                 name: "email".to_string(),
@@ -1055,6 +1066,7 @@ fn unique_user_type() -> EntityTypeDef {
                 unique: true,
                 indexed: false,
                 cardinality: Default::default(),
+                fulltext: false,
             },
         ],
     }
@@ -1423,6 +1435,7 @@ fn vaet_user_type() -> EntityTypeDef {
             unique: false,
             indexed: false,
             cardinality: Default::default(),
+            fulltext: false,
         }],
     }
 }
@@ -1439,6 +1452,7 @@ fn vaet_post_type() -> EntityTypeDef {
                 unique: false,
                 indexed: false,
                 cardinality: Default::default(),
+                fulltext: false,
             },
             FieldDef {
                 name: "author".to_string(),
@@ -1447,6 +1461,7 @@ fn vaet_post_type() -> EntityTypeDef {
                 unique: false,
                 indexed: false,
                 cardinality: Default::default(),
+                fulltext: false,
             },
         ],
     }
