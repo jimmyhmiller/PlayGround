@@ -436,7 +436,7 @@ impl Plugin for TerminalPlugin {
             category: "File",
             keywords: &["edit", "buffer"],
             radial_icon: None,
-            default_keybind: Some(KeyChord::cmd(KeyCode::KeyO)),
+            default_keys: const { &[KeyChord::cmd(KeyCode::KeyO)] },
             run: ActionRun::Custom(action_open_file),
         })
         .add_action(Action {
@@ -445,7 +445,7 @@ impl Plugin for TerminalPlugin {
             category: "View",
             keywords: &["debug", "tokens"],
             radial_icon: None,
-            default_keybind: Some(KeyChord::cmd_shift(KeyCode::KeyD)),
+            default_keys: const { &[KeyChord::cmd_shift(KeyCode::KeyD)] },
             run: ActionRun::Custom(action_open_dev_panel),
         })
         .add_action(Action {
@@ -454,7 +454,7 @@ impl Plugin for TerminalPlugin {
             category: "View",
             keywords: &["color", "oklch", "palette"],
             radial_icon: None,
-            default_keybind: Some(KeyChord::cmd_shift(KeyCode::KeyT)),
+            default_keys: const { &[KeyChord::cmd_shift(KeyCode::KeyT)] },
             run: ActionRun::Custom(action_open_theme_editor),
         })
         .add_action(Action {
@@ -463,7 +463,7 @@ impl Plugin for TerminalPlugin {
             category: "View",
             keywords: &["preset", "theme", "skin"],
             radial_icon: None,
-            default_keybind: Some(KeyChord::cmd_shift(KeyCode::KeyS)),
+            default_keys: const { &[KeyChord::cmd_shift(KeyCode::KeyS)] },
             run: ActionRun::Custom(action_open_style_picker),
         })
         .add_action(Action {
@@ -472,11 +472,77 @@ impl Plugin for TerminalPlugin {
             category: "View",
             keywords: &["prism", "3d", "overview", "switch"],
             // Eligible for the radial ring — proof the ring now hosts
-            // non-pane actions. Keybind stays owned by `cube.rs`
-            // (Cmd+Shift+\) to avoid a double-toggle.
+            // non-pane actions. `cube.rs` keeps its own ⌘⇧\ single-chord
+            // toggle; here we add a *sequence* binding (⌘K then C) — a
+            // different chord, so no double-toggle — to exercise the
+            // chord-sequence matcher in-tree.
             radial_icon: Some("◧"),
-            default_keybind: None,
+            default_keys: const { &[KeyChord::cmd(KeyCode::KeyK), KeyChord::plain(KeyCode::KeyC)] },
             run: ActionRun::Custom(action_toggle_cube),
+        })
+        // ----- Pane / view control (formerly nothing — new global chords) -----
+        .add_action(Action {
+            id: "pane.close_focused",
+            title: "Close Focused Pane",
+            category: "Pane",
+            keywords: &["kill", "dismiss"],
+            radial_icon: None,
+            default_keys: const { &[KeyChord::cmd(KeyCode::KeyW)] },
+            run: ActionRun::Custom(action_close_focused),
+        })
+        .add_action(Action {
+            id: "pane.focus_next",
+            title: "Focus Next Pane",
+            category: "Pane",
+            keywords: &["cycle", "switch"],
+            radial_icon: None,
+            default_keys: const { &[KeyChord::cmd(KeyCode::BracketRight)] },
+            run: ActionRun::Custom(action_focus_next),
+        })
+        .add_action(Action {
+            id: "pane.focus_prev",
+            title: "Focus Previous Pane",
+            category: "Pane",
+            keywords: &["cycle", "switch"],
+            radial_icon: None,
+            default_keys: const { &[KeyChord::cmd(KeyCode::BracketLeft)] },
+            run: ActionRun::Custom(action_focus_prev),
+        })
+        .add_action(Action {
+            id: "view.zoom_in",
+            title: "Zoom In",
+            category: "View",
+            keywords: &["scale", "magnify"],
+            radial_icon: None,
+            default_keys: const { &[KeyChord::cmd(KeyCode::Equal)] },
+            run: ActionRun::Custom(|ctx| canvas::zoom_active(ctx.world, 1.1)),
+        })
+        .add_action(Action {
+            id: "view.zoom_out",
+            title: "Zoom Out",
+            category: "View",
+            keywords: &["scale", "shrink"],
+            radial_icon: None,
+            default_keys: const { &[KeyChord::cmd(KeyCode::Minus)] },
+            run: ActionRun::Custom(|ctx| canvas::zoom_active(ctx.world, 1.0 / 1.1)),
+        })
+        .add_action(Action {
+            id: "view.zoom_reset",
+            title: "Reset Zoom",
+            category: "View",
+            keywords: &["scale", "100%", "actual size"],
+            radial_icon: None,
+            default_keys: const { &[KeyChord::cmd(KeyCode::Digit0)] },
+            run: ActionRun::Custom(|ctx| canvas::zoom_reset_active(ctx.world)),
+        })
+        .add_action(Action {
+            id: "keybinds.reload",
+            title: "Reload Keybindings",
+            category: "View",
+            keywords: &["hotkey", "shortcut", "rebind", "config"],
+            radial_icon: None,
+            default_keys: &[],
+            run: ActionRun::Custom(|ctx| actions::rebuild_keymap(ctx.world)),
         });
         app
             .add_systems(
@@ -2690,6 +2756,61 @@ fn action_toggle_cube(ctx: &mut actions::ActionCtx) {
     ctx.world.resource_mut::<cube::Prism>().pending_toggle = true;
 }
 
+/// `pane.close_focused` — route the focused pane through the normal close
+/// path (runs the kind's `on_close`, then despawns). No-op when nothing is
+/// focused.
+fn action_close_focused(ctx: &mut actions::ActionCtx) {
+    if let Some(e) = ctx.world.resource::<pane_bevy::FocusedPane>().0 {
+        ctx.world
+            .resource_mut::<pane_bevy::PendingPaneActions>()
+            .close
+            .push(e);
+    }
+}
+
+/// `pane.focus_next` / `pane.focus_prev` — move keyboard focus to the next
+/// / previous pane in the active project, ordered back-to-front by z and
+/// wrapping around.
+fn action_focus_next(ctx: &mut actions::ActionCtx) {
+    cycle_focus(ctx.world, 1);
+}
+
+fn action_focus_prev(ctx: &mut actions::ActionCtx) {
+    cycle_focus(ctx.world, -1);
+}
+
+fn cycle_focus(world: &mut World, dir: i32) {
+    let Some(active) = world.resource::<projects::Projects>().active else {
+        return;
+    };
+    // Active-project panes, ordered back-to-front by z so the cycle order
+    // matches the visual stack.
+    let mut panes: Vec<(Entity, f32)> = world
+        .query_filtered::<(Entity, &pane_bevy::PaneRect, &pane_bevy::PaneProject), With<pane_bevy::PaneTag>>()
+        .iter(world)
+        .filter(|(_, _, proj)| proj.0 == active)
+        .map(|(e, rect, _)| (e, rect.z))
+        .collect();
+    if panes.is_empty() {
+        return;
+    }
+    panes.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    let order: Vec<Entity> = panes.into_iter().map(|(e, _)| e).collect();
+
+    let cur = world.resource::<pane_bevy::FocusedPane>().0;
+    let next = match cur.and_then(|c| order.iter().position(|&e| e == c)) {
+        Some(i) => {
+            let n = order.len() as i32;
+            order[(((i as i32 + dir) % n + n) % n) as usize]
+        }
+        // Nothing (or an off-project pane) focused: enter the stack from
+        // the front when going forward, the back when going backward.
+        None if dir >= 0 => *order.last().unwrap(),
+        None => *order.first().unwrap(),
+    };
+    world.resource_mut::<pane_bevy::FocusedPane>().0 = Some(next);
+}
+
 /// The single authority for `pane_bevy::KeyboardOwner` — runs in
 /// `PreUpdate`, before any keyboard consumer in `Update`, so every
 /// handler sees a consistent owner for the frame. Precedence: a text-
@@ -2699,10 +2820,15 @@ fn action_toggle_cube(ctx: &mut actions::ActionCtx) {
 fn compute_keyboard_owner(
     palette: Res<command_palette::CommandPalette>,
     renaming: Res<projects::Renaming>,
+    pending_seq: Res<actions::PendingSequence>,
     focused: Res<pane_bevy::FocusedPane>,
     mut owner: ResMut<pane_bevy::KeyboardOwner>,
 ) {
-    let next = if renaming.id.is_some() || palette.open {
+    // A pending chord sequence also claims the keyboard: the continuation
+    // key (e.g. the `C` in `⌘K C`) must reach the action matcher, not the
+    // focused pane. The matcher itself special-cases `Modal` while a
+    // sequence is in progress, so it keeps reading.
+    let next = if renaming.id.is_some() || palette.open || !pending_seq.chords.is_empty() {
         pane_bevy::KeyboardOwner::Modal
     } else if let Some(e) = focused.0 {
         pane_bevy::KeyboardOwner::Pane(e)

@@ -195,6 +195,10 @@ enum HostToWorker {
     /// User picked an option in an `Element::Select`. Drives
     /// `on_select_change(id, value)`.
     SelectChange { id: String, value: String },
+    /// User dismissed an `Element::Dialog`. Drives `on_dialog_close(id)`.
+    DialogClose { id: String },
+    /// User dismissed an `Element::Toast`. Drives `on_toast_dismiss(id)`.
+    ToastDismiss { id: String },
     /// User dragged an `Element::Slider`. Drives `on_slider_change(id, value)`
     /// with the new clamped/snapped value.
     SliderChange { id: String, value: f32 },
@@ -602,6 +606,18 @@ impl Worker {
                 }
                 self.call_handler("on_select_change", (id, value));
             }
+            HostToWorker::DialogClose { id } => {
+                if !self.ensure_initialized() {
+                    return true;
+                }
+                self.call_handler("on_dialog_close", (id,));
+            }
+            HostToWorker::ToastDismiss { id } => {
+                if !self.ensure_initialized() {
+                    return true;
+                }
+                self.call_handler("on_toast_dismiss", (id,));
+            }
             HostToWorker::SliderChange { id, value } => {
                 if !self.ensure_initialized() {
                     return true;
@@ -777,6 +793,8 @@ fn ast_wants_clicks(ast: &AST) -> bool {
         "on_radio_select",
         "on_number_change",
         "on_select_change",
+        "on_dialog_close",
+        "on_toast_dismiss",
         "on_slider_change",
         "on_input_focus",
         "on_input_change",
@@ -794,6 +812,46 @@ impl RhaiWidget {
     /// Forward a select change to the worker (drives `on_select_change`).
     pub fn send_select_change(&self, id: String, value: String) {
         self.handle.send(HostToWorker::SelectChange { id, value });
+    }
+
+    /// Forward an arbitrary routed `HostEvent` (used by the overlay/dialog
+    /// router, where a body button can fire any click event). Maps the routable
+    /// variants to their `HostToWorker` equivalents.
+    pub fn send_host_event(&self, evt: &crate::protocol::HostEvent) {
+        use crate::protocol::HostEvent as H;
+        let msg = match evt {
+            H::Click { id } => HostToWorker::Click {
+                local_x: 0.0,
+                local_y: 0.0,
+                shift: false,
+                cmd: false,
+                button_id: Some(id.clone()),
+            },
+            H::DialogClose { id } => HostToWorker::DialogClose { id: id.clone() },
+            H::ToastDismiss { id } => HostToWorker::ToastDismiss { id: id.clone() },
+            H::Toggle { id, checked } => HostToWorker::Toggle {
+                id: id.clone(),
+                checked: *checked,
+            },
+            H::TabSelect { id, tab } => HostToWorker::TabSelect {
+                id: id.clone(),
+                tab: tab.clone(),
+            },
+            H::RadioSelect { id, option } => HostToWorker::RadioSelect {
+                id: id.clone(),
+                option: option.clone(),
+            },
+            H::NumberChange { id, value } => HostToWorker::NumberChange {
+                id: id.clone(),
+                value: *value,
+            },
+            H::SelectChange { id, value } => HostToWorker::SelectChange {
+                id: id.clone(),
+                value: value.clone(),
+            },
+            _ => return,
+        };
+        self.handle.send(msg);
     }
 
     /// True while the script has opted into per-frame animation via
@@ -1380,17 +1438,16 @@ fn forward_keys_to_workers(
     widgets: Query<(
         &PaneKindMarker,
         &RhaiWidget,
-        Option<&crate::WidgetEditMode>,
         Option<&crate::WidgetInputFocus>,
     )>,
 ) {
     let Some(pane) = focused.0 else { return };
-    let Ok((kind, w, edit, input_focus)) = widgets.get(pane) else {
+    let Ok((kind, w, input_focus)) = widgets.get(pane) else {
         return;
     };
     // A focused Element::Input owns the keyboard (arrows move the caret,
     // handled by `handle_widget_input_typing`); don't also fire on_key.
-    if kind.0 != PANE_KIND || edit.is_some() || input_focus.is_some() {
+    if kind.0 != PANE_KIND || input_focus.is_some() {
         return;
     }
     for (code, name) in [

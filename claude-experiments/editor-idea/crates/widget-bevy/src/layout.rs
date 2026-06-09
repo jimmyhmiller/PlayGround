@@ -249,6 +249,25 @@ fn build_node(
                 ..taffy::Style::DEFAULT
             })
             .unwrap(),
+        Element::Popover { width, .. } => taffy
+            .new_leaf(taffy::Style {
+                size: Size {
+                    width: Dimension::length(*width),
+                    height: Dimension::length(crate::render::SELECT_H),
+                },
+                ..taffy::Style::DEFAULT
+            })
+            .unwrap(),
+        // Dialog + Toast have no in-pane footprint — they render on the overlay.
+        Element::Dialog { .. } | Element::Toast { .. } => taffy
+            .new_leaf(taffy::Style {
+                size: Size {
+                    width: Dimension::length(0.0),
+                    height: Dimension::length(0.0),
+                },
+                ..taffy::Style::DEFAULT
+            })
+            .unwrap(),
         Element::Swatch { size, .. } | Element::SwatchButton { size, .. } => taffy
             .new_leaf(taffy::Style {
                 size: Size {

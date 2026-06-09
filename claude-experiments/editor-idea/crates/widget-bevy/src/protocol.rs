@@ -94,6 +94,10 @@ pub enum HostEvent {
     /// User picked an option in an `Element::Select`. `value` is the chosen
     /// option's id.
     SelectChange { id: String, value: String },
+    /// User dismissed an `Element::Dialog` (scrim-click or Escape).
+    DialogClose { id: String },
+    /// User clicked an `Element::Toast` to dismiss it.
+    ToastDismiss { id: String },
     /// User toggled an `Element::Toggle`. `checked` is the new value.
     Toggle { id: String, checked: bool },
     /// User edited an `Element::Input`. `value` is the new full
@@ -375,6 +379,47 @@ pub struct TooltipStyle {
 
 impl TooltipStyle {
     pub const SLOTS: &'static [&'static str] = &["bubble"];
+}
+
+/// Per-slot styling for an `Element::Dialog`. `scrim` is the full-window dim;
+/// `panel` is the centered card; `title` is the heading bar.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct DialogStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scrim: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<Style>,
+}
+
+impl DialogStyle {
+    pub const SLOTS: &'static [&'static str] = &["scrim", "panel", "title"];
+}
+
+/// Per-slot styling for an `Element::Popover`. `trigger` is the in-pane control;
+/// `surface` is the floating card.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct PopoverStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<Style>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<Style>,
+}
+
+impl PopoverStyle {
+    pub const SLOTS: &'static [&'static str] = &["trigger", "surface"];
+}
+
+/// Per-slot styling for an `Element::Toast`. `surface` is the notification card.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+pub struct ToastStyle {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<Style>,
+}
+
+impl ToastStyle {
+    pub const SLOTS: &'static [&'static str] = &["surface"];
 }
 
 /// Per-slot styling for an `Element::Tabs`. `strip` is the whole tab bar; `tab`
@@ -692,6 +737,49 @@ pub enum Element {
         checked: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         style: Option<CheckboxStyle>,
+    },
+    /// A transient notification. While present in the frame it renders stacked
+    /// at the bottom-right window corner on the overlay layer (no in-pane
+    /// footprint, no input). The widget owns its lifecycle — include it to show,
+    /// drop it (e.g. after a `tick`-driven delay) to dismiss. `surface` slot-styled.
+    Toast {
+        id: String,
+        #[serde(default)]
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<ToastStyle>,
+    },
+    /// A button that opens a floating card of arbitrary `content` anchored below
+    /// it (on the overlay layer). Host-owned open state; dismissed by an
+    /// outside-click or Escape. Content buttons fire their normal `click`
+    /// events. `trigger`/`surface` are slot-styled.
+    Popover {
+        id: String,
+        #[serde(default)]
+        label: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Box<Element>>,
+        #[serde(default = "default_popover_width")]
+        width: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<PopoverStyle>,
+    },
+    /// Modal dialog. When `open`, a full-window scrim + a centered `panel`
+    /// (heading `title` + arbitrary `body`) render on the overlay layer. Body
+    /// buttons emit their normal `click` events; a scrim-click or Escape sends
+    /// `{"event":"dialog-close","id":"<id>"}`. The widget owns `open`.
+    Dialog {
+        id: String,
+        #[serde(default)]
+        open: bool,
+        #[serde(default)]
+        title: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        body: Option<Box<Element>>,
+        #[serde(default = "default_dialog_width")]
+        width: f32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        style: Option<DialogStyle>,
     },
     /// A label that shows a floating `text` hint on hover. The hint renders on
     /// the overlay layer (escaping pane bounds). `bubble` is slot-styled. No
@@ -1147,6 +1235,14 @@ fn default_stepper_step() -> f32 {
 
 fn default_select_width() -> f32 {
     180.0
+}
+
+fn default_dialog_width() -> f32 {
+    360.0
+}
+
+fn default_popover_width() -> f32 {
+    240.0
 }
 
 fn default_canvas_anchor() -> CanvasAnchor {

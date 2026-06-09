@@ -263,6 +263,48 @@ fn screen_origin(sidebar: &Sidebar) -> Vec2 {
     Vec2::new(sidebar.width, 0.0)
 }
 
+/// Multiply the active project's canvas zoom by `factor`, anchored on the
+/// window center so a keyboard zoom keeps the middle of the view fixed
+/// (mirrors the cursor-anchored pinch/scroll zoom in
+/// [`handle_pan_zoom_input`]). No-op when zoom is disabled or there is no
+/// active project. Exposed so the global `view.zoom_*` actions can drive
+/// the same canonical zoom state the gestures mutate.
+pub fn zoom_active(world: &mut World, factor: f32) {
+    let Some(active) = world.resource::<Projects>().active else {
+        return;
+    };
+    if !world.resource::<CanvasConfig>().zoom_enabled {
+        return;
+    }
+    let origin = Vec2::new(world.resource::<Sidebar>().width, 0.0);
+    let center = {
+        let mut q = world.query::<&Window>();
+        match q.iter(world).next() {
+            Some(win) => Vec2::new(win.width() * 0.5, win.height() * 0.5),
+            None => return,
+        }
+    };
+    let mut view = world.resource_mut::<CanvasView>();
+    let state = view.state_mut(active);
+    let before = unproject_pos(center, state, origin);
+    state.zoom = (state.zoom * factor).clamp(MIN_ZOOM, MAX_ZOOM);
+    let after = unproject_pos(center, state, origin);
+    state.pan += before - after;
+    state.clamp_pan();
+}
+
+/// Reset the active project's canvas zoom to 1.0 (pan is re-clamped but
+/// kept). No-op without an active project.
+pub fn zoom_reset_active(world: &mut World) {
+    let Some(active) = world.resource::<Projects>().active else {
+        return;
+    };
+    let mut view = world.resource_mut::<CanvasView>();
+    let state = view.state_mut(active);
+    state.zoom = 1.0;
+    state.clamp_pan();
+}
+
 // ---------- Systems ----------
 
 /// Tell pane-bevy where the canvas is, so per-pane cameras clip their

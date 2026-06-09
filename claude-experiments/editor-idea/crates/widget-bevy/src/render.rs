@@ -497,6 +497,78 @@ fn render_node(
             size,
             z,
         ),
+        Element::Dialog {
+            id,
+            open,
+            title,
+            body,
+            width,
+            style,
+        } => {
+            // No in-pane visual; record it for the overlay renderer when open.
+            if *open {
+                targets.dialogs.push(crate::DialogTarget {
+                    id: id.clone(),
+                    title: title.clone(),
+                    body: body.clone(),
+                    width: *width,
+                    style: style.clone(),
+                });
+            }
+        }
+        Element::Popover {
+            id,
+            label,
+            content,
+            width,
+            style,
+        } => {
+            let transparent = Color::srgba(0.0, 0.0, 0.0, 0.0);
+            if let Some(plan) = style.as_ref().and_then(|s| s.trigger.as_ref()) {
+                paint_style_background(commands, ctx, Some(plan), origin, size, z);
+            } else {
+                paint_rounded_panel(
+                    commands, ctx, origin, size, 6.0, ctx.palette.bar_track, ctx.palette.divider,
+                    1.0, transparent, 0.0, 0.0, z,
+                );
+            }
+            let cy = origin.y + size.y * 0.5;
+            commands.spawn((
+                ChildOf(ctx.content_root),
+                Text2d::new(label.clone()),
+                TextFont {
+                    font: ctx.font.clone(),
+                    font_size: DEFAULT_FONT_SIZE,
+                    ..default()
+                },
+                LineHeight::Px(line_height(DEFAULT_FONT_SIZE)),
+                TextColor(ctx.palette.text),
+                Anchor::CENTER_LEFT,
+                bevy::text::TextLayout::new_with_no_wrap(),
+                Transform::from_xyz(origin.x + SELECT_PAD_X, -cy, z + 0.01),
+            ));
+            let rect = Rect::new(origin.x, origin.y, origin.x + size.x, origin.y + size.y);
+            targets.clicks.push(ClickTarget {
+                id: id.clone(),
+                kind: ClickKind::PopoverTrigger,
+                rect,
+            });
+            targets.popovers.push(crate::PopoverTarget {
+                id: id.clone(),
+                anchor: rect,
+                content: content.clone(),
+                width: *width,
+                style: style.clone(),
+            });
+        }
+        Element::Toast { id, text, style } => {
+            // No in-pane visual; the overlay renderer stacks it at the corner.
+            targets.toasts.push(crate::ToastTarget {
+                id: id.clone(),
+                text: text.clone(),
+                style: style.clone(),
+            });
+        }
         Element::Tooltip { label, text, style } => render_tooltip_at(
             commands,
             ctx,
@@ -1775,6 +1847,7 @@ fn render_select_trigger_at(
 }
 
 /// Spawn a single line of text centred within `(origin, size)`.
+#[allow(clippy::too_many_arguments)]
 fn spawn_centered_text(
     commands: &mut Commands,
     ctx: &LayoutCtx,
@@ -1782,22 +1855,28 @@ fn spawn_centered_text(
     origin: Vec2,
     size: Vec2,
     color: Color,
+    font_size: f32,
     z: f32,
 ) {
-    let center = origin + size * 0.5;
+    // Center by measuring (Anchor::CENTER on Text2d doesn't reliably center
+    // here, so position the top-left explicitly like the other render paths).
+    let tw = ctx.metrics.measure(text, font_size);
+    let lh = line_height(font_size);
+    let x = origin.x + (size.x - tw) * 0.5;
+    let y = origin.y + (size.y - lh) * 0.5;
     commands.spawn((
         ChildOf(ctx.content_root),
         Text2d::new(text.to_string()),
         TextFont {
             font: ctx.font.clone(),
-            font_size: DEFAULT_FONT_SIZE,
+            font_size,
             ..default()
         },
-        LineHeight::Px(line_height(DEFAULT_FONT_SIZE)),
+        LineHeight::Px(lh),
         TextColor(color),
-        Anchor::CENTER,
+        Anchor::TOP_LEFT,
         bevy::text::TextLayout::new_with_no_wrap(),
-        Transform::from_xyz(center.x, -center.y, z),
+        Transform::from_xyz(x, -y, z),
     ));
 }
 
@@ -1877,9 +1956,12 @@ fn render_stepper_at(
     } else {
         format!("{value:.1}")
     };
-    spawn_centered_text(commands, ctx, "−", minus_origin, btn_size, ctx.palette.text, z + 0.01);
-    spawn_centered_text(commands, ctx, &value_str, field_origin, field_size, ctx.palette.text, z + 0.01);
-    spawn_centered_text(commands, ctx, "+", plus_origin, btn_size, ctx.palette.text, z + 0.01);
+    let glyph = ctx
+        .resolve_color("accent")
+        .unwrap_or(Color::srgb(0.42, 0.62, 0.92));
+    spawn_centered_text(commands, ctx, "-", minus_origin, btn_size, glyph, 18.0, z + 0.01);
+    spawn_centered_text(commands, ctx, &value_str, field_origin, field_size, ctx.palette.text, DEFAULT_FONT_SIZE, z + 0.01);
+    spawn_centered_text(commands, ctx, "+", plus_origin, btn_size, glyph, 18.0, z + 0.01);
 
     // click targets carry the clamped target value
     let dec = (value - step).clamp(min.min(max), min.max(max));

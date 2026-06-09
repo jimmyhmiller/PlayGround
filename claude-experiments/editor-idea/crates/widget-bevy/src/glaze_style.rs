@@ -5,8 +5,9 @@
 //! sRGB hex back to linear, so we round-trip linear → sRGB `#rrggbb[aa]`.
 
 use crate::protocol::{
-    BarStyle, CheckboxStyle, Edges, GlazeLayer, GradientStop, RadioGroupStyle, SelectStyle, Sides,
-    SliderStyle, StepperStyle, Style, TableStyle, TabsStyle, ToggleStyle, TooltipStyle,
+    BarStyle, CheckboxStyle, DialogStyle, Edges, GlazeLayer, GradientStop, PopoverStyle,
+    RadioGroupStyle, SelectStyle, Sides, SliderStyle, StepperStyle, Style, TableStyle, TabsStyle,
+    ToastStyle, ToggleStyle, TooltipStyle,
 };
 use glaze::{CompiledSlots, CompiledStyle, Dim, Dir, Layer, Program, Rgba};
 use std::collections::HashMap;
@@ -204,6 +205,36 @@ pub fn to_table_style(slots: &CompiledSlots) -> Result<TableStyle, String> {
         panel: slots.slot("panel").map(to_style),
         header: slots.slot("header").map(to_style),
         zebra: slots.slot("zebra").map(to_style),
+    })
+}
+
+/// Convert a resolved slotted Glaze style into a typed [`ToastStyle`]
+/// (`surface`). Unknown slots are rejected.
+pub fn to_toast_style(slots: &CompiledSlots) -> Result<ToastStyle, String> {
+    validate_slots(slots, ToastStyle::SLOTS, "toast")?;
+    Ok(ToastStyle {
+        surface: slots.slot("surface").map(to_style),
+    })
+}
+
+/// Convert a resolved slotted Glaze style into a typed [`PopoverStyle`]
+/// (`trigger` / `surface`). Unknown slots are rejected.
+pub fn to_popover_style(slots: &CompiledSlots) -> Result<PopoverStyle, String> {
+    validate_slots(slots, PopoverStyle::SLOTS, "popover")?;
+    Ok(PopoverStyle {
+        trigger: slots.slot("trigger").map(to_style),
+        surface: slots.slot("surface").map(to_style),
+    })
+}
+
+/// Convert a resolved slotted Glaze style into a typed [`DialogStyle`]
+/// (`scrim` / `panel` / `title`). Unknown slots are rejected.
+pub fn to_dialog_style(slots: &CompiledSlots) -> Result<DialogStyle, String> {
+    validate_slots(slots, DialogStyle::SLOTS, "dialog")?;
+    Ok(DialogStyle {
+        scrim: slots.slot("scrim").map(to_style),
+        panel: slots.slot("panel").map(to_style),
+        title: slots.slot("title").map(to_style),
     })
 }
 

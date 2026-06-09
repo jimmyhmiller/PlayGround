@@ -19,6 +19,9 @@
 //! Defaults to `./.ai-lang`. Override with `--codebase <path>` or env
 //! `AI_LANG_CODEBASE=<path>`.
 
+#[path = "../edit_server.rs"]
+mod edit_server;
+
 use ai_lang::Hash;
 use ai_lang::ast::{Def, Type};
 use ai_lang::codebase::Codebase;
@@ -68,6 +71,9 @@ usage:
                                            once passed, never re-run.
                                            --prefix filters to a namespace.
   ai-lang serve                             become a worker for at() (empty runtime)
+  ai-lang serve-edit                        start the JSONL structural-edit server
+                                           (one JSON request per line on stdin,
+                                           one JSON response per line on stdout)
 
 structural editing (Phase 1):
   ai-lang rename <from> <to>               INSTANT, unbreakable rename. Moves a
@@ -596,6 +602,9 @@ fn main() {
         }
         "serve" => {
             cmd_serve();
+        }
+        "serve-edit" => {
+            edit_server::serve(&cb_path);
         }
         "lambda-worker" => {
             cmd_lambda_worker();
@@ -1561,7 +1570,7 @@ fn cmd_cli_help(name: &str, cb_path: &PathBuf) {
     }
     println!();
     print!("Usage: ai-lang cli {} ", name);
-    for (i, p) in params.iter().enumerate() {
+    for (i, _p) in params.iter().enumerate() {
         let pname = &param_names[i];
         let is_flag = param_meta
             .and_then(|pm| pm.get(pname))

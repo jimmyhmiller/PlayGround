@@ -487,9 +487,27 @@ widget Elements render their floating part onto that layer via the EXISTING rend
   `WidgetTooltipRoot` marker so it despawns independently of the select dropdown; `stamp_overlay_layers`
   now `Or<select-root, tooltip-root>`). `to_tooltip_style`; `widget-snapshot --show-tooltip` forces it.
   Verified: bubble floats below the label, escapes pane bounds. TODO: hover *delay*, arrow, wrap-any-element.
-- **`Popover` / `HoverCard`** — arbitrary floating child. Slot `surface`.
-- **`Dialog` / `Sheet` / `Alert`** `{open, title, body, actions}` — modal scrim + focus trap. Slots `scrim`/`panel`/`title`/`body`/`footer`.
-- **`Toast`** — transient, auto-dismiss via `on_frame` timer; emitted programmatically. Slots `toast`/`toast:enter`/`toast:exit`.
+- **`Popover` / `HoverCard`** — arbitrary floating child. Slot `surface`. **DONE (2026-06-09)** —
+  `Element::Popover{id,label,content:Box<Element>,width,style:PopoverStyle{trigger,surface}}`. Composes
+  the anchored positioning (Select/Tooltip) with arbitrary content + click routing (Dialog): host-owned
+  open (`ClickKind::PopoverTrigger` toggles `WidgetOpenPopover`); `render_popover_overlay` anchors the
+  arbitrary `content` below the trigger via `render::render`, routes its button clicks through `PopoverHits`
+  + `click_to_host_event`; `handle_popover_input` closes on a content click, an outside click, or Escape.
+  `to_popover_style`; `widget-snapshot --open-popover <id>`. Verified: floating card with working ghost
+  buttons, anchored, escaping pane bounds.
+- **`Dialog` / `Sheet` / `Alert`** `{open, title, body, actions}` — modal scrim + focus trap. Slots `scrim`/`panel`/`title`/`body`/`footer`. **DONE (2026-06-09)** — and with it the **arbitrary-element overlay capability** (the substrate's last gap). `Element::Dialog{id,open,title,body:Box<Element>,style:DialogStyle{scrim,panel,title}}` + `HostEvent::DialogClose`. `render_dialog_overlay` renders the **arbitrary `body` through `render::render`** onto a panel root (centered after measuring), with a full-window scrim root behind it. The body's `ClickTarget`s are translated to window-space in `WidgetOverlayHits` and routed by `handle_dialog_input` (body button → its normal event via the shared `click_to_host_event`; outside-panel/Escape → `DialogClose`). `handle_widget_press` blocks all pane presses while a dialog is open (modal). `to_dialog_style`; rhai `send_host_event` + `on_dialog_close`. Verified: centered modal, scrim dims the UI, two working buttons. This generalization (render any Element on the overlay + route its clicks) is what makes rich Popovers / Menus cheap.
+- **`Toast`** — transient, auto-dismiss via `on_frame` timer; emitted programmatically. Slots `toast`/`toast:enter`/`toast:exit`. **DONE (2026-06-09)** — `Element::Toast{id,text,style:ToastStyle{surface}}`. New **corner-positioning** mode (bottom-right, stacked) — no anchor, no center. 0-size in-pane; `render_toast_overlay` stacks all toasts at the window corner on the overlay (passive, no input). Widget owns the lifecycle (include to show, drop after a `tick`-driven delay to dismiss — no host timer state). `to_toast_style`; shows by just being in the frame (no force-flag). Verified. (enter/exit animations not yet.)
+
+---
+
+## Phase 3 status: DONE for the core overlay set.
+Select, Tooltip, Dialog, Popover, Toast shipped — the portal covers **all positioning modes**:
+click-anchored dropdown, hover-anchored bubble, centered modal, click-anchored card, corner toast.
+Substrate: `WidgetOverlayLayer` + per-kind roots + `stamp_overlay_layers` + window-space hit routing
+(`click_to_host_event`) + `render::render`-on-overlay for arbitrary content. Adapters:
+`to_{toast,popover,dialog,tooltip,select}_style` (+ `resolve_select_style`). **39 widget_bevy lib + 25
+glaze tests.** Remaining doc components are thin variants: **Menu** (Select-path + action items),
+**Sheet** (Dialog + edge position), **ContextMenu** (right-click → Popover at cursor).
 
 ## Phase 4 — Rich data widgets
 

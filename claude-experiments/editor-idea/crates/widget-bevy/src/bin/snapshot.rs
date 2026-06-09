@@ -35,6 +35,8 @@ struct SnapshotConfig {
     open_select: Option<String>,
     /// If true, force the first `Tooltip` shown before snapshotting.
     show_tooltip: bool,
+    /// If set, force this `Popover` open before snapshotting.
+    open_popover: Option<String>,
 }
 
 /// The single widget pane the snapshot spawned (for forcing a select open).
@@ -63,12 +65,14 @@ fn main() -> ExitCode {
     let mut subprocess_args: Vec<String> = Vec::new();
     let mut open_select: Option<String> = None;
     let mut show_tooltip = false;
+    let mut open_popover: Option<String> = None;
 
     while let Some(a) = args.next() {
         match a.as_str() {
             "--out" => out_path = args.next().map(PathBuf::from),
             "--cmd" => cmd = args.next(),
             "--open-select" => open_select = args.next(),
+            "--open-popover" => open_popover = args.next(),
             "--show-tooltip" => show_tooltip = true,
             "--size" => {
                 if let Some(s) = args.next().and_then(|s| parse_size(&s)) {
@@ -114,6 +118,7 @@ fn main() -> ExitCode {
         wait_frames,
         open_select,
         show_tooltip,
+        open_popover,
     };
 
     let mut app = App::new();
@@ -164,7 +169,12 @@ fn main() -> ExitCode {
         .add_systems(Startup, setup_camera_and_pane.after(editor_bevy::setup_editor_font))
         .add_systems(
             Update,
-            (take_snapshot_when_ready, force_open_select, force_show_tooltip),
+            (
+                take_snapshot_when_ready,
+                force_open_select,
+                force_show_tooltip,
+                force_open_popover,
+            ),
         );
 
     app.run();
@@ -249,6 +259,30 @@ fn force_open_select(
         return;
     }
     let (Some(id), Some(pane)) = (config.open_select.as_ref(), pane) else {
+        return;
+    };
+    if state.frames_seen < 40 {
+        return;
+    }
+    open.0 = Some(widget_bevy::OpenSelect {
+        pane: pane.0,
+        id: id.clone(),
+    });
+    *done = true;
+}
+
+/// Force the requested `Popover` open before snapshotting.
+fn force_open_popover(
+    config: Res<SnapshotConfig>,
+    state: Res<SnapshotState>,
+    pane: Option<Res<SnapshotPane>>,
+    mut open: ResMut<widget_bevy::WidgetOpenPopover>,
+    mut done: Local<bool>,
+) {
+    if *done {
+        return;
+    }
+    let (Some(id), Some(pane)) = (config.open_popover.as_ref(), pane) else {
         return;
     };
     if state.frames_seen < 40 {

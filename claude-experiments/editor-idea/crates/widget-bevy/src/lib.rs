@@ -48,9 +48,8 @@ use bevy::sprite::Anchor;
 use bevy::text::LineHeight;
 use claude_bus_bevy::ClaudeBusEvent;
 use pane_bevy::{
-    FocusedTextInput, MARGIN, PaneContentPressed, PaneFont, PaneFontMetrics, PaneHotZones,
-    PaneKindMarker, PaneKindSpec, PaneRect, PaneRegistry, PaneTitle, TITLE_H, TextInput,
-    TextInputEvent, TextInputStyle, focus_text_input, spawn_text_input,
+    MARGIN, PaneContentPressed, PaneFont, PaneFontMetrics, PaneHotZones, PaneKindMarker,
+    PaneKindSpec, PaneRect, PaneRegistry, PaneTitle, TITLE_H,
 };
 use serde_json::Value;
 
@@ -134,8 +133,6 @@ pub struct Widget {
     /// Most recent `state` message the child published. Mirrored into
     /// snapshots so the next launch can resume.
     pub last_state: Value,
-    /// Timestamp of most recent content press, for double-click detection.
-    last_press_time: Option<f64>,
 }
 
 impl Widget {
@@ -145,28 +142,8 @@ impl Widget {
             args,
             cwd,
             last_state: Value::Null,
-            last_press_time: None,
         }
     }
-}
-
-const DOUBLE_CLICK_SECS: f64 = 0.35;
-const EDIT_FONT_SIZE: f32 = 13.0;
-const EDIT_LINE_HEIGHT: f32 = 16.0;
-const EDIT_PAD: f32 = 8.0;
-const EDIT_INPUT_H: f32 = 22.0;
-const EDIT_HINT_FONT_SIZE: f32 = 11.0;
-const EDIT_LABEL_FONT_SIZE: f32 = 11.0;
-
-/// Marker + entity refs for the "edit command" overlay shown when the
-/// user double-clicks a widget. While present, `rerender_widgets`
-/// suppresses normal frame rendering.
-#[derive(Component)]
-pub struct WidgetEditMode {
-    pub command_input: Entity,
-    pub label: Entity,
-    pub hint: Entity,
-    pub bg: Entity,
 }
 
 /// Handle to the running child process. Absent when the widget has no
@@ -230,6 +207,12 @@ pub struct WidgetTargets {
     pub selects: Vec<SelectTarget>,
     /// `Tooltip` hover-regions collected this frame.
     pub tooltips: Vec<TooltipTarget>,
+    /// Open `Dialog`s collected this frame (rendered centered on the overlay).
+    pub dialogs: Vec<DialogTarget>,
+    /// `Popover` triggers collected this frame.
+    pub popovers: Vec<PopoverTarget>,
+    /// `Toast` notifications collected this frame.
+    pub toasts: Vec<ToastTarget>,
 }
 
 /// A draggable `Element::Slider` hit-region collected during render. `rect` is
@@ -304,6 +287,91 @@ pub struct WidgetOverlayRoot;
 /// so the select and tooltip renderers despawn only their own content).
 #[derive(Component)]
 pub struct WidgetTooltipRoot;
+
+/// Marks the per-frame modal-dialog root (scrim + panel) on the overlay layer.
+#[derive(Component)]
+pub struct WidgetDialogRoot;
+
+/// Marks the per-frame floating popover root on the overlay layer.
+#[derive(Component)]
+pub struct WidgetPopoverRoot;
+
+/// Marks the per-frame toast root (corner notifications) on the overlay layer.
+#[derive(Component)]
+pub struct WidgetToastRoot;
+
+/// A `Toast` collected during render — shown stacked at the window corner.
+#[derive(Clone)]
+pub struct ToastTarget {
+    pub id: String,
+    pub text: String,
+    pub style: Option<crate::protocol::ToastStyle>,
+}
+
+/// Window-space rects for visible toasts (clicking one dismisses it). Rebuilt
+/// each frame by `render_toast_overlay`.
+#[derive(Resource, Default)]
+pub struct ToastHits {
+    /// `(window rect, toast id, owning pane)`
+    pub items: Vec<(Rect, String, Entity)>,
+}
+
+/// Which `Popover` (if any) is open. Host-owned (transient UI), one at a time.
+#[derive(Resource, Default)]
+pub struct WidgetOpenPopover(pub Option<OpenSelect>);
+
+/// A `Popover` trigger collected during render: anchor + the arbitrary content
+/// to float when open.
+#[derive(Clone)]
+pub struct PopoverTarget {
+    pub id: String,
+    pub anchor: Rect,
+    pub content: Option<Box<crate::protocol::Element>>,
+    pub width: f32,
+    pub style: Option<crate::protocol::PopoverStyle>,
+}
+
+/// Window-space routing for the open popover: content click hits + the surface
+/// and trigger rects (a click outside both dismisses).
+#[derive(Resource, Default)]
+pub struct PopoverHits {
+    pub pane: Option<Entity>,
+    pub popover_id: String,
+    pub surface_rect: Rect,
+    pub trigger_rect: Rect,
+    pub clicks: Vec<OverlayClickHit>,
+}
+
+/// An open `Dialog` collected during render (it has no in-pane visual — the
+/// overlay renderer draws it centered when `open`).
+#[derive(Clone)]
+pub struct DialogTarget {
+    pub id: String,
+    pub title: String,
+    pub body: Option<Box<crate::protocol::Element>>,
+    pub width: f32,
+    pub style: Option<crate::protocol::DialogStyle>,
+}
+
+/// One routed click-region for arbitrary overlay content (a dialog body's
+/// buttons). Window-space rect + the event it fires.
+#[derive(Clone)]
+pub struct OverlayClickHit {
+    pub rect: Rect,
+    pub kind: ClickKind,
+    pub id: String,
+}
+
+/// Window-space click routing for the open dialog: its body's click hits plus
+/// the panel rect (so a click outside the panel = scrim dismiss). Rebuilt each
+/// frame by `render_dialog_overlay`.
+#[derive(Resource, Default)]
+pub struct WidgetOverlayHits {
+    pub pane: Option<Entity>,
+    pub dialog_id: String,
+    pub panel_rect: Rect,
+    pub clicks: Vec<OverlayClickHit>,
+}
 
 /// A `Select` trigger collected during render: its content-local anchor rect plus
 /// the data the overlay renderer needs to draw the open dropdown.
@@ -396,6 +464,8 @@ pub enum ClickKind {
     /// Select trigger: toggle the host-owned open-dropdown state (no widget
     /// event until an option is picked).
     SelectTrigger,
+    /// Popover trigger: toggle the host-owned open-popover state.
+    PopoverTrigger,
     /// Toggle: send `Toggle { id, checked: <new value> }`.
     Toggle { new_checked: bool },
     /// Input: send `InputFocus { id, focused: true }`.
@@ -711,6 +781,7 @@ fn render_select_overlay(
         return;
     };
     let (win_w, win_h) = (window.width(), window.height());
+    let cursor_pos = window.cursor_position();
     let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
     let to_world = |p: Vec2| Vec2::new(p.x - win_w * 0.5, win_h * 0.5 - p.y);
 
@@ -781,11 +852,22 @@ fn render_select_overlay(
         );
     }
 
+    let accent = octx
+        .resolve_color("accent")
+        .unwrap_or(Color::srgb(0.42, 0.62, 0.92));
     for (i, opt) in target.options.iter().enumerate() {
         let y = pad + i as f32 * item_h;
         let item_origin = Vec2::new(pad, y);
         let item_size = Vec2::new((menu_w - pad * 2.0).max(0.0), item_h);
         let is_sel = opt.id == target.value;
+        // Is the cursor over this row? (item window rects match menu_top_window.)
+        let item_win_top = menu_top_window.y + y;
+        let is_hovered = cursor_pos.is_some_and(|c| {
+            c.x >= menu_top_window.x
+                && c.x <= menu_top_window.x + menu_w
+                && c.y >= item_win_top
+                && c.y <= item_win_top + item_h
+        });
         let plan = if is_sel {
             target
                 .style
@@ -812,7 +894,32 @@ fn render_select_overlay(
                 0.01,
             );
         }
-        let color = if is_sel {
+        // Hover highlight: a soft accent wash over the hovered row (painted
+        // above the base/selected fill, below the label).
+        if is_hovered {
+            let h = accent.to_linear();
+            let wash = Color::LinearRgba(LinearRgba {
+                red: h.red,
+                green: h.green,
+                blue: h.blue,
+                alpha: 0.20,
+            });
+            render::paint_rounded_panel(
+                &mut commands,
+                &octx,
+                item_origin,
+                item_size,
+                4.0,
+                wash,
+                transparent,
+                0.0,
+                transparent,
+                0.0,
+                0.0,
+                0.015,
+            );
+        }
+        let color = if is_sel || is_hovered {
             octx.palette.text
         } else {
             octx.palette.text_muted
@@ -852,7 +959,16 @@ fn render_select_overlay(
 /// camera. Mirrors pane-bevy's content-layer reconciliation.
 fn stamp_overlay_layers(
     mut commands: Commands,
-    roots: Query<Entity, Or<(With<WidgetOverlayRoot>, With<WidgetTooltipRoot>)>>,
+    roots: Query<
+        Entity,
+        Or<(
+            With<WidgetOverlayRoot>,
+            With<WidgetTooltipRoot>,
+            With<WidgetDialogRoot>,
+            With<WidgetPopoverRoot>,
+            With<WidgetToastRoot>,
+        )>,
+    >,
     children_q: Query<&Children>,
     overlay_layer: Res<WidgetOverlayLayer>,
 ) {
@@ -920,6 +1036,663 @@ fn handle_overlay_input(
     } else {
         // Outside click → just close.
         open.0 = None;
+    }
+}
+
+/// Map a click target to the host event it fires (shared by the pane press
+/// handler and the overlay/dialog router). `None` for `SelectTrigger` (handled
+/// specially by the press handler).
+fn click_to_host_event(kind: &ClickKind, id: &str) -> Option<HostEvent> {
+    Some(match kind {
+        ClickKind::Button => HostEvent::Click { id: id.to_string() },
+        ClickKind::TabSelect { tab } => HostEvent::TabSelect {
+            id: id.to_string(),
+            tab: tab.clone(),
+        },
+        ClickKind::RadioSelect { option } => HostEvent::RadioSelect {
+            id: id.to_string(),
+            option: option.clone(),
+        },
+        ClickKind::NumberChange { value } => HostEvent::NumberChange {
+            id: id.to_string(),
+            value: *value,
+        },
+        ClickKind::Toggle { new_checked } => HostEvent::Toggle {
+            id: id.to_string(),
+            checked: *new_checked,
+        },
+        ClickKind::InputFocus => HostEvent::InputFocus {
+            id: id.to_string(),
+            focused: true,
+        },
+        ClickKind::SelectTrigger | ClickKind::PopoverTrigger => return None,
+    })
+}
+
+fn send_host_event(io: Option<&WidgetIO>, rhai: Option<&crate::rhai_widget::RhaiWidget>, evt: &HostEvent) {
+    if let Some(io) = io {
+        if let Ok(json) = serde_json::to_string(evt) {
+            let _ = io.tx.send(json);
+        }
+    }
+    if let Some(rhai) = rhai {
+        rhai.send_host_event(evt);
+    }
+}
+
+/// Render the first open `Dialog` centered on the overlay layer: a full-window
+/// scrim behind a `panel` (title + arbitrary `body`). The body renders through
+/// the normal `render::render` path, so its buttons are real click targets —
+/// translated to window space in `WidgetOverlayHits` for `handle_dialog_input`.
+#[allow(clippy::too_many_arguments)]
+fn render_dialog_overlay(
+    mut commands: Commands,
+    overlay_layer: Res<WidgetOverlayLayer>,
+    pane_font: Res<PaneFont>,
+    metrics: Res<PaneFontMetrics>,
+    theme: Res<style_bevy::Theme>,
+    fonts: Res<style_bevy::FontRegistry>,
+    windows: Query<&Window>,
+    panes: Query<(Entity, &WidgetTargets), With<pane_bevy::PaneTag>>,
+    existing: Query<Entity, With<WidgetDialogRoot>>,
+    mut hits: ResMut<WidgetOverlayHits>,
+) {
+    for e in &existing {
+        commands.entity(e).try_despawn();
+    }
+    hits.clicks.clear();
+    hits.dialog_id.clear();
+    hits.pane = None;
+    hits.panel_rect = Rect::default();
+
+    let Some((pane, dialog)) = panes
+        .iter()
+        .find_map(|(p, t)| t.dialogs.first().map(|d| (p, d.clone())))
+    else {
+        return;
+    };
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let (win_w, win_h) = (window.width(), window.height());
+    let to_world = |p: Vec2| Vec2::new(p.x - win_w * 0.5, win_h * 0.5 - p.y);
+    let layer = bevy::camera::visibility::RenderLayers::layer(overlay_layer.0);
+    let pad = 16.0;
+    let panel_w = dialog.width;
+
+    // Scrim: full-window dim, its own root, behind the panel.
+    let scrim_root = commands
+        .spawn((
+            WidgetDialogRoot,
+            Transform::from_xyz(0.0, 0.0, OVERLAY_BASE_Z),
+            Visibility::Inherited,
+            layer.clone(),
+        ))
+        .id();
+    if let Some(plan) = dialog.style.as_ref().and_then(|s| s.scrim.as_ref()) {
+        let sctx = render::LayoutCtx {
+            font: pane_font.0.clone(),
+            metrics: *metrics,
+            owner_pane: pane,
+            content_root: scrim_root,
+            content_size: Vec2::new(win_w, win_h),
+            palette: render::WidgetPalette::from_theme(&theme),
+            theme: theme.clone(),
+            fonts: fonts.clone(),
+            focused_input: None,
+            caret_visible: false,
+            hovered_click_id: None,
+        };
+        render::paint_style_background(
+            &mut commands,
+            &sctx,
+            Some(plan),
+            Vec2::new(-win_w * 0.5, -win_h * 0.5),
+            Vec2::new(win_w, win_h),
+            0.0,
+        );
+    } else {
+        commands.spawn((
+            ChildOf(scrim_root),
+            Sprite {
+                color: Color::srgba(0.0, 0.0, 0.0, 0.55),
+                custom_size: Some(Vec2::new(win_w, win_h)),
+                ..default()
+            },
+            bevy::sprite::Anchor::CENTER,
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            layer.clone(),
+        ));
+    }
+
+    // Panel root — positioned after we measure the content.
+    let panel_root = commands
+        .spawn((
+            WidgetDialogRoot,
+            Transform::from_xyz(0.0, 0.0, OVERLAY_BASE_Z + 0.5),
+            Visibility::Inherited,
+            layer.clone(),
+        ))
+        .id();
+    let pctx = render::LayoutCtx {
+        font: pane_font.0.clone(),
+        metrics: *metrics,
+        owner_pane: pane,
+        content_root: panel_root,
+        content_size: Vec2::new(panel_w, win_h),
+        palette: render::WidgetPalette::from_theme(&theme),
+        theme: theme.clone(),
+        fonts: fonts.clone(),
+        focused_input: None,
+        caret_visible: false,
+        hovered_click_id: None,
+    };
+
+    // Build the content element: title + arbitrary body.
+    use crate::protocol::{Element as E, Weight};
+    let mut kids: Vec<E> = Vec::new();
+    if !dialog.title.is_empty() {
+        kids.push(E::Text {
+            value: dialog.title.clone(),
+            color: None,
+            size: Some(16.0),
+            weight: Some(Weight::Bold),
+            family: None,
+            selectable: false,
+        });
+    }
+    if let Some(body) = &dialog.body {
+        kids.push((**body).clone());
+    }
+    let content = E::Vstack {
+        gap: 12.0,
+        pad: 0.0,
+        children: kids,
+        style: None,
+    };
+
+    // Render the body through the normal path (so its buttons are real click
+    // targets), inset by `pad`. Its targets are panel-root-local.
+    let mut body_targets = WidgetTargets::default();
+    let consumed = render::render(
+        &mut commands,
+        &pctx,
+        &mut body_targets,
+        &content,
+        Vec2::splat(pad),
+        panel_w - 2.0 * pad,
+        0.02,
+    );
+    let panel_h = consumed.y + 2.0 * pad;
+
+    // Center the panel; the children move with the root transform.
+    let panel_tl_window = Vec2::new((win_w - panel_w) * 0.5, (win_h - panel_h) * 0.5);
+    let panel_world = to_world(panel_tl_window);
+    commands.entity(panel_root).insert(Transform::from_xyz(
+        panel_world.x,
+        panel_world.y,
+        OVERLAY_BASE_Z + 0.5,
+    ));
+
+    // Panel background (behind the content, z 0.0 within the root).
+    if let Some(plan) = dialog.style.as_ref().and_then(|s| s.panel.as_ref()) {
+        render::paint_style_background(&mut commands, &pctx, Some(plan), Vec2::ZERO, Vec2::new(panel_w, panel_h), 0.0);
+    } else {
+        render::paint_rounded_panel(
+            &mut commands,
+            &pctx,
+            Vec2::ZERO,
+            Vec2::new(panel_w, panel_h),
+            12.0,
+            pctx.palette.bar_track,
+            pctx.palette.divider,
+            1.0,
+            Color::srgba(0.0, 0.0, 0.0, 0.5),
+            12.0,
+            4.0,
+            0.0,
+        );
+    }
+
+    // Route the body's clicks (window-space) for handle_dialog_input.
+    for ct in &body_targets.clicks {
+        hits.clicks.push(OverlayClickHit {
+            rect: Rect::new(
+                panel_tl_window.x + ct.rect.min.x,
+                panel_tl_window.y + ct.rect.min.y,
+                panel_tl_window.x + ct.rect.max.x,
+                panel_tl_window.y + ct.rect.max.y,
+            ),
+            kind: ct.kind.clone(),
+            id: ct.id.clone(),
+        });
+    }
+    hits.panel_rect = Rect::from_corners(panel_tl_window, panel_tl_window + Vec2::new(panel_w, panel_h));
+    hits.dialog_id = dialog.id.clone();
+    hits.pane = Some(pane);
+}
+
+/// Modal input for the open dialog: a body button fires its event; a click
+/// outside the panel (scrim) or Escape sends `DialogClose`.
+fn handle_dialog_input(
+    buttons: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window>,
+    hits: Res<WidgetOverlayHits>,
+    widgets: Query<(Option<&WidgetIO>, Option<&crate::rhai_widget::RhaiWidget>)>,
+) {
+    if hits.dialog_id.is_empty() {
+        return;
+    }
+    let Some(pane) = hits.pane else {
+        return;
+    };
+    let Ok((io, rhai)) = widgets.get(pane) else {
+        return;
+    };
+    if keys.just_pressed(KeyCode::Escape) {
+        send_host_event(io, rhai, &HostEvent::DialogClose { id: hits.dialog_id.clone() });
+        return;
+    }
+    if !buttons.just_pressed(bevy::input::mouse::MouseButton::Left) {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(pt) = window.cursor_position() else {
+        return;
+    };
+    if let Some(hit) = hits.clicks.iter().find(|h| h.rect.contains(pt)) {
+        if let Some(evt) = click_to_host_event(&hit.kind, &hit.id) {
+            send_host_event(io, rhai, &evt);
+        }
+    } else if !hits.panel_rect.contains(pt) {
+        send_host_event(io, rhai, &HostEvent::DialogClose { id: hits.dialog_id.clone() });
+    }
+}
+
+/// Render the open `Popover`'s floating card on the overlay, anchored below its
+/// trigger. Composes the anchored positioning (like Select) with arbitrary
+/// content + click routing (like Dialog).
+#[allow(clippy::too_many_arguments)]
+fn render_popover_overlay(
+    mut commands: Commands,
+    open: Res<WidgetOpenPopover>,
+    overlay_layer: Res<WidgetOverlayLayer>,
+    pane_font: Res<PaneFont>,
+    metrics: Res<PaneFontMetrics>,
+    theme: Res<style_bevy::Theme>,
+    fonts: Res<style_bevy::FontRegistry>,
+    windows: Query<&Window>,
+    viewport: Option<Res<pane_bevy::PaneViewport>>,
+    panes: Query<(&PaneRect, &WidgetTargets, Option<&WidgetScroll>)>,
+    existing: Query<Entity, With<WidgetPopoverRoot>>,
+    mut hits: ResMut<PopoverHits>,
+) {
+    for e in &existing {
+        commands.entity(e).try_despawn();
+    }
+    // Which content button is hovered? Resolve from last frame's hit rects (the
+    // overlay rebuilds every frame, so a 1-frame lag is invisible) — the content
+    // renders through `render::render`, which honors `hovered_click_id`.
+    let cursor = windows.single().ok().and_then(|w| w.cursor_position());
+    let hovered_id = cursor.and_then(|pt| {
+        hits.clicks
+            .iter()
+            .find(|h| h.rect.contains(pt))
+            .map(|h| h.id.clone())
+    });
+    hits.clicks.clear();
+    hits.popover_id.clear();
+    hits.pane = None;
+    hits.surface_rect = Rect::default();
+    hits.trigger_rect = Rect::default();
+
+    let Some(op) = open.0.as_ref() else {
+        return;
+    };
+    let Ok((rect, targets, scroll)) = panes.get(op.pane) else {
+        return;
+    };
+    let Some(target) = targets.popovers.iter().find(|p| p.id == op.id) else {
+        return;
+    };
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(viewport) = viewport.as_deref() else {
+        return;
+    };
+    let (win_w, win_h) = (window.width(), window.height());
+    let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
+    let to_world = |p: Vec2| Vec2::new(p.x - win_w * 0.5, win_h * 0.5 - p.y);
+    let content_origin =
+        rect.pos + Vec2::new(pane_bevy::MARGIN, pane_bevy::TITLE_H + pane_bevy::MARGIN);
+    let local_to_window =
+        |l: Vec2| viewport.canvas_to_window(content_origin + Vec2::new(l.x, l.y - scroll_y));
+    hits.trigger_rect =
+        Rect::from_corners(local_to_window(target.anchor.min), local_to_window(target.anchor.max));
+    let surface_top_window =
+        local_to_window(Vec2::new(target.anchor.min.x, target.anchor.max.y + 4.0));
+    let anchor_world = to_world(surface_top_window);
+
+    let pad = 12.0;
+    let width = target.width;
+    let layer = bevy::camera::visibility::RenderLayers::layer(overlay_layer.0);
+    let root = commands
+        .spawn((
+            WidgetPopoverRoot,
+            Transform::from_xyz(anchor_world.x, anchor_world.y, OVERLAY_BASE_Z),
+            Visibility::Inherited,
+            layer.clone(),
+        ))
+        .id();
+    let pctx = render::LayoutCtx {
+        font: pane_font.0.clone(),
+        metrics: *metrics,
+        owner_pane: op.pane,
+        content_root: root,
+        content_size: Vec2::new(width, win_h),
+        palette: render::WidgetPalette::from_theme(&theme),
+        theme: theme.clone(),
+        fonts: fonts.clone(),
+        focused_input: None,
+        caret_visible: false,
+        hovered_click_id: hovered_id,
+    };
+    let content = target
+        .content
+        .as_ref()
+        .map(|c| (**c).clone())
+        .unwrap_or(crate::protocol::Element::Spacer { size: 0.0 });
+    let mut body_targets = WidgetTargets::default();
+    let consumed = render::render(
+        &mut commands,
+        &pctx,
+        &mut body_targets,
+        &content,
+        Vec2::splat(pad),
+        width - 2.0 * pad,
+        0.02,
+    );
+    let surf_h = consumed.y + 2.0 * pad;
+    if let Some(plan) = target.style.as_ref().and_then(|s| s.surface.as_ref()) {
+        render::paint_style_background(&mut commands, &pctx, Some(plan), Vec2::ZERO, Vec2::new(width, surf_h), 0.0);
+    } else {
+        render::paint_rounded_panel(
+            &mut commands,
+            &pctx,
+            Vec2::ZERO,
+            Vec2::new(width, surf_h),
+            10.0,
+            pctx.palette.bar_track,
+            pctx.palette.divider,
+            1.0,
+            Color::srgba(0.0, 0.0, 0.0, 0.45),
+            10.0,
+            3.0,
+            0.0,
+        );
+    }
+    for ct in &body_targets.clicks {
+        hits.clicks.push(OverlayClickHit {
+            rect: Rect::new(
+                surface_top_window.x + ct.rect.min.x,
+                surface_top_window.y + ct.rect.min.y,
+                surface_top_window.x + ct.rect.max.x,
+                surface_top_window.y + ct.rect.max.y,
+            ),
+            kind: ct.kind.clone(),
+            id: ct.id.clone(),
+        });
+    }
+    hits.surface_rect =
+        Rect::from_corners(surface_top_window, surface_top_window + Vec2::new(width, surf_h));
+    hits.popover_id = op.id.clone();
+    hits.pane = Some(op.pane);
+}
+
+/// Input for the open popover: a content button fires its event (and closes);
+/// a click outside the surface (and not on the trigger) or Escape dismisses.
+fn handle_popover_input(
+    buttons: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
+    keys: Res<ButtonInput<KeyCode>>,
+    windows: Query<&Window>,
+    hits: Res<PopoverHits>,
+    mut open: ResMut<WidgetOpenPopover>,
+    widgets: Query<(Option<&WidgetIO>, Option<&crate::rhai_widget::RhaiWidget>)>,
+) {
+    if open.0.is_none() {
+        return;
+    }
+    if keys.just_pressed(KeyCode::Escape) {
+        open.0 = None;
+        return;
+    }
+    if !buttons.just_pressed(bevy::input::mouse::MouseButton::Left) {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(pt) = window.cursor_position() else {
+        return;
+    };
+    if hits.trigger_rect.contains(pt) {
+        return;
+    }
+    if let Some(hit) = hits.clicks.iter().find(|h| h.rect.contains(pt)) {
+        if let Some(pane) = hits.pane {
+            if let Ok((io, rhai)) = widgets.get(pane) {
+                if let Some(evt) = click_to_host_event(&hit.kind, &hit.id) {
+                    send_host_event(io, rhai, &evt);
+                }
+            }
+        }
+        open.0 = None;
+    } else if !hits.surface_rect.contains(pt) {
+        open.0 = None;
+    }
+}
+
+/// Render all `Toast`s stacked at the bottom-right window corner on the overlay
+/// layer. Passive (no input); the widget owns each toast's lifecycle.
+fn render_toast_overlay(
+    mut commands: Commands,
+    overlay_layer: Res<WidgetOverlayLayer>,
+    pane_font: Res<PaneFont>,
+    metrics: Res<PaneFontMetrics>,
+    theme: Res<style_bevy::Theme>,
+    fonts: Res<style_bevy::FontRegistry>,
+    windows: Query<&Window>,
+    panes: Query<(Entity, &WidgetTargets), With<pane_bevy::PaneTag>>,
+    existing: Query<Entity, With<WidgetToastRoot>>,
+    mut hits: ResMut<ToastHits>,
+) {
+    for e in &existing {
+        commands.entity(e).try_despawn();
+    }
+    hits.items.clear();
+    let toasts: Vec<(Entity, ToastTarget)> = panes
+        .iter()
+        .flat_map(|(p, t)| t.toasts.iter().cloned().map(move |toast| (p, toast)))
+        .collect();
+    if toasts.is_empty() {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let (win_w, win_h) = (window.width(), window.height());
+    let to_world = |p: Vec2| Vec2::new(p.x - win_w * 0.5, win_h * 0.5 - p.y);
+    let layer = bevy::camera::visibility::RenderLayers::layer(overlay_layer.0);
+
+    let margin = 16.0;
+    let pad = 12.0;
+    let x_space = 22.0; // reserved on the right for the × dismiss glyph
+    let th = render::line_height(render::DEFAULT_FONT_SIZE) + 2.0 * pad;
+    let gap = 8.0;
+    let mut y_from_bottom = margin;
+    for (pane, toast) in toasts {
+        // Size the toast to its text (so it never overflows), clamped to a sane
+        // range; the text is *also* hard-bounded below as a belt-and-suspenders.
+        let tw = metrics.measure(&toast.text, render::DEFAULT_FONT_SIZE);
+        let toast_w = (pad + tw + x_space + pad).clamp(140.0, 360.0);
+        let text_region = (toast_w - pad - x_space).max(0.0);
+        let tl_window = Vec2::new(win_w - margin - toast_w, win_h - y_from_bottom - th);
+        // The whole toast is a dismiss target.
+        hits.items.push((
+            Rect::from_corners(tl_window, tl_window + Vec2::new(toast_w, th)),
+            toast.id.clone(),
+            pane,
+        ));
+        let world = to_world(tl_window);
+        let root = commands
+            .spawn((
+                WidgetToastRoot,
+                Transform::from_xyz(world.x, world.y, OVERLAY_BASE_Z + 1.0),
+                Visibility::Inherited,
+                layer.clone(),
+            ))
+            .id();
+        let octx = render::LayoutCtx {
+            font: pane_font.0.clone(),
+            metrics: *metrics,
+            owner_pane: pane,
+            content_root: root,
+            content_size: Vec2::new(toast_w, th),
+            palette: render::WidgetPalette::from_theme(&theme),
+            theme: theme.clone(),
+            fonts: fonts.clone(),
+            focused_input: None,
+            caret_visible: false,
+            hovered_click_id: None,
+        };
+        if let Some(plan) = toast.style.as_ref().and_then(|s| s.surface.as_ref()) {
+            render::paint_style_background(&mut commands, &octx, Some(plan), Vec2::ZERO, Vec2::new(toast_w, th), 0.0);
+        } else {
+            render::paint_rounded_panel(
+                &mut commands,
+                &octx,
+                Vec2::ZERO,
+                Vec2::new(toast_w, th),
+                8.0,
+                octx.palette.bar_track,
+                octx.palette.divider,
+                1.0,
+                Color::srgba(0.0, 0.0, 0.0, 0.45),
+                8.0,
+                3.0,
+                0.0,
+            );
+        }
+        commands.spawn((
+            ChildOf(root),
+            Text2d::new(toast.text.clone()),
+            TextFont {
+                font: pane_font.0.clone(),
+                font_size: render::DEFAULT_FONT_SIZE,
+                ..default()
+            },
+            LineHeight::Px(render::line_height(render::DEFAULT_FONT_SIZE)),
+            TextColor(octx.palette.text),
+            bevy::sprite::Anchor::CENTER_LEFT,
+            bevy::text::TextLayout::new_with_no_wrap(),
+            // Hard cap on width so the label can never spill past the toast
+            // (minus the × area). Width-only keeps the CENTER_LEFT vertical
+            // centering intact (a height bound would top-align the text).
+            bevy::text::TextBounds {
+                width: Some(text_region),
+                height: None,
+            },
+            Transform::from_xyz(pad, -(th * 0.5), 0.02),
+        ));
+        // Dismiss hint (the whole toast is clickable).
+        commands.spawn((
+            ChildOf(root),
+            Text2d::new("\u{00d7}"),
+            TextFont {
+                font: pane_font.0.clone(),
+                font_size: render::DEFAULT_FONT_SIZE,
+                ..default()
+            },
+            LineHeight::Px(render::line_height(render::DEFAULT_FONT_SIZE)),
+            TextColor(octx.palette.text_muted),
+            bevy::sprite::Anchor::CENTER_RIGHT,
+            bevy::text::TextLayout::new_with_no_wrap(),
+            Transform::from_xyz(toast_w - pad, -(th * 0.5), 0.02),
+        ));
+        y_from_bottom += th + gap;
+    }
+}
+
+/// While a floating overlay is open, own the cursor over it: a pointer over a
+/// clickable region, the default arrow over a non-clickable surface. Runs in
+/// PostUpdate so it wins over pane-bevy's resize-edge cursor (which doesn't know
+/// the overlay is floating above the pane).
+fn override_overlay_cursor(
+    mut commands: Commands,
+    windows: Query<(Entity, &Window)>,
+    popover: Res<PopoverHits>,
+    select: Res<SelectMenuHits>,
+    dialog: Res<WidgetOverlayHits>,
+    toast: Res<ToastHits>,
+) {
+    let Ok((win, window)) = windows.single() else {
+        return;
+    };
+    let Some(pt) = window.cursor_position() else {
+        return;
+    };
+    use bevy::window::{CursorIcon, SystemCursorIcon as I};
+    let icon = if !dialog.dialog_id.is_empty() {
+        // Modal: pointer over a body button, plain arrow everywhere else.
+        Some(if dialog.clicks.iter().any(|h| h.rect.contains(pt)) {
+            I::Pointer
+        } else {
+            I::Default
+        })
+    } else if popover.pane.is_some()
+        && (popover.surface_rect.contains(pt) || popover.trigger_rect.contains(pt))
+    {
+        Some(if popover.clicks.iter().any(|h| h.rect.contains(pt)) {
+            I::Pointer
+        } else {
+            I::Default
+        })
+    } else if !select.select_id.is_empty() && select.items.iter().any(|h| h.rect.contains(pt)) {
+        Some(I::Pointer)
+    } else if toast.items.iter().any(|(r, _, _)| r.contains(pt)) {
+        Some(I::Pointer)
+    } else {
+        None
+    };
+    if let Some(ic) = icon {
+        commands.entity(win).insert(CursorIcon::System(ic));
+    }
+}
+
+/// Click a toast to dismiss it (raw mouse, like the other overlay handlers).
+fn handle_toast_input(
+    buttons: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
+    windows: Query<&Window>,
+    hits: Res<ToastHits>,
+    widgets: Query<(Option<&WidgetIO>, Option<&crate::rhai_widget::RhaiWidget>)>,
+) {
+    if hits.items.is_empty() || !buttons.just_pressed(bevy::input::mouse::MouseButton::Left) {
+        return;
+    }
+    let Ok(window) = windows.single() else {
+        return;
+    };
+    let Some(pt) = window.cursor_position() else {
+        return;
+    };
+    if let Some((_, id, pane)) = hits.items.iter().find(|(rect, _, _)| rect.contains(pt)) {
+        if let Ok((io, rhai)) = widgets.get(*pane) {
+            send_host_event(io, rhai, &HostEvent::ToastDismiss { id: id.clone() });
+        }
     }
 }
 
@@ -1154,7 +1927,7 @@ fn copy_text_selection(keys: Res<ButtonInput<KeyCode>>, sels: Query<&WidgetTextS
 pub struct WidgetContentRoot(pub Entity);
 
 /// Set by any system that just spawned new sprites under a widget's
-/// content_root (`rerender_widgets`, `enter_edit_mode`). Consumed by
+/// content_root (e.g. `rerender_widgets`). Consumed by
 /// `clip_widget_sprites` so it knows to do a sweep this frame even
 /// when no `PaneRect` changed.
 #[derive(Resource, Default)]
@@ -1191,6 +1964,10 @@ impl Plugin for WidgetPlugin {
             .init_resource::<WidgetOpenSelect>()
             .init_resource::<SelectMenuHits>()
             .init_resource::<ActiveTooltip>()
+            .init_resource::<WidgetOverlayHits>()
+            .init_resource::<WidgetOpenPopover>()
+            .init_resource::<PopoverHits>()
+            .init_resource::<ToastHits>()
             .add_plugins(WidgetButtonMaterialPlugin)
             .add_plugins(glaze_material::GlazeMaterialPlugin)
             .add_plugins(msgbus::WidgetMsgBusPlugin)
@@ -1219,12 +1996,17 @@ impl Plugin for WidgetPlugin {
                         handle_overlay_input,
                         update_tooltip_hover,
                         render_tooltip_overlay,
+                        render_dialog_overlay,
+                        handle_dialog_input,
+                        render_popover_overlay,
+                        handle_popover_input,
+                        render_toast_overlay,
+                        handle_toast_input,
                     )
                         .chain(),
                     render_text_selection_highlight,
                     copy_text_selection,
                     handle_widget_input_typing,
-                    handle_widget_edit_events,
                     poll_widget_children,
                     handle_widget_wheel,
                     apply_widget_scroll,
@@ -1237,7 +2019,7 @@ impl Plugin for WidgetPlugin {
                 stamp_overlay_layers
                     .before(bevy::camera::visibility::VisibilitySystems::CheckVisibility),
             )
-            .add_systems(PostUpdate, clip_widget_sprites);
+            .add_systems(PostUpdate, (clip_widget_sprites, override_overlay_cursor));
     }
 }
 
@@ -1258,6 +2040,7 @@ fn update_widget_hover(
             &pane_bevy::PaneKindMarker,
             &mut WidgetHover,
             &mut WidgetRender,
+            Option<&WidgetScroll>,
         ),
         With<pane_bevy::PaneTag>,
     >,
@@ -1282,7 +2065,7 @@ fn update_widget_hover(
     });
 
     let mut want_pointer = false;
-    for (pane, kind, mut hover, mut render_state) in &mut widgets {
+    for (pane, kind, mut hover, mut render_state, scroll) in &mut widgets {
         let is_widget_kind = kind.0 == PANE_KIND || kind.0 == rhai_widget::PANE_KIND;
         if !is_widget_kind {
             continue;
@@ -1290,9 +2073,13 @@ fn update_widget_hover(
         // Find this pane's rect (we already have it in `candidates`,
         // but cheaper to re-query than threading it through).
         let pane_rect = candidates.iter().find(|(e, _)| *e == pane).map(|(_, r)| *r);
+        let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
         let new_id: Option<String> = match (topmost, pane_rect, cursor) {
             (Some((pt, top)), Some(rect), Some(_)) if top == pane => {
-                let local = pane_bevy::pt_to_content_local(pt, &rect);
+                // Click rects are content-local (unscrolled); add the scroll
+                // offset to the cursor so hover matches the visible target —
+                // same correction the press handler applies.
+                let local = pane_bevy::pt_to_content_local(pt, &rect) + Vec2::new(0.0, scroll_y);
                 targets.get(pane).ok().and_then(|t| {
                     t.clicks
                         .iter()
@@ -1626,7 +2413,6 @@ fn widget_spawn(world: &mut World, entity: Entity, content_root: Entity, config:
         args: args.clone(),
         cwd: cwd.clone(),
         last_state: state.clone(),
-        last_press_time: None,
     };
     let mut render_state = WidgetRender::default();
     let targets = WidgetTargets::default();
@@ -1925,7 +2711,6 @@ fn rerender_widgets(
         &mut WidgetRender,
         &mut WidgetTargets,
         &mut WidgetScroll,
-        Option<&WidgetEditMode>,
         Option<&WidgetInputFocus>,
         Option<&WidgetHover>,
         Option<&pane_bevy::PaneProject>,
@@ -1947,16 +2732,12 @@ fn rerender_widgets(
         mut render_state,
         mut targets,
         mut scroll,
-        edit,
         input_focus,
         hover,
         proj,
     ) in &mut q
     {
         if kind.0 != PANE_KIND {
-            continue;
-        }
-        if edit.is_some() {
             continue;
         }
 
@@ -2008,6 +2789,9 @@ fn rerender_widgets(
         targets.sliders.clear();
         targets.selects.clear();
         targets.tooltips.clear();
+        targets.dialogs.clear();
+        targets.popovers.clear();
+        targets.toasts.clear();
 
         let frame_clone = render_state.current_frame.clone().unwrap();
 
@@ -2354,20 +3138,12 @@ fn update_widget_hot_zones(
         &PaneRect,
         &WidgetTargets,
         Option<&WidgetScroll>,
-        Option<&WidgetEditMode>,
         Option<&crate::rhai_widget::RhaiWidget>,
         &mut PaneHotZones,
     )>,
 ) {
-    for (rect, targets, scroll, edit, rhai, mut zones) in &mut q {
+    for (rect, targets, scroll, rhai, mut zones) in &mut q {
         zones.clear();
-        // In edit mode the overlay covers the pane and the underlying
-        // targets are stale; leave hot-zones empty so a pinned widget
-        // in edit mode passes clicks through (the user would have to
-        // unpin to interact with the overlay anyway).
-        if edit.is_some() {
-            continue;
-        }
         let scroll_y = scroll.map(|s| s.y).unwrap_or(0.0);
         let content_size = Vec2::new(
             (rect.size.x - 2.0 * MARGIN).max(0.0),
@@ -2409,21 +3185,16 @@ fn update_widget_hot_zones(
 
 fn handle_widget_press(
     mut commands: Commands,
-    time: Res<Time>,
-    pane_font: Res<PaneFont>,
-    metrics: Res<PaneFontMetrics>,
-    mut focused: ResMut<FocusedTextInput>,
-    mut clip_dirty: ResMut<WidgetClipDirty>,
     mut open_select: ResMut<WidgetOpenSelect>,
+    mut open_popover: ResMut<WidgetOpenPopover>,
+    overlay_hits: Res<WidgetOverlayHits>,
     mut presses: MessageReader<PaneContentPressed>,
     kinds: Query<&PaneKindMarker>,
-    pane_rects: Query<&PaneRect>,
-    mut widgets: Query<(
-        &mut Widget,
+    widgets: Query<(
+        &Widget,
         &WidgetTargets,
         Option<&WidgetIO>,
         &WidgetContentRoot,
-        Option<&WidgetEditMode>,
         Option<&WidgetScroll>,
         &WidgetRender,
     )>,
@@ -2435,27 +3206,14 @@ fn handle_widget_press(
         if kind.0 != PANE_KIND {
             continue;
         }
-        let Ok((mut widget, targets, io, root, edit, scroll, render_state)) =
-            widgets.get_mut(ev.pane)
-        else {
-            continue;
-        };
-
-        // In edit mode, every press is consumed by the overlay. Blur on
-        // clicks outside the input rect; focus on clicks inside.
-        if let Some(edit) = edit {
-            let input_rect = Rect::from_corners(
-                Vec2::new(EDIT_PAD, EDIT_PAD + EDIT_LINE_HEIGHT + 4.0),
-                Vec2::new(f32::MAX, EDIT_PAD + EDIT_LINE_HEIGHT + 4.0 + EDIT_INPUT_H),
-            );
-            let target = if input_rect.contains(ev.local_pt) {
-                Some(edit.command_input)
-            } else {
-                None
-            };
-            focus_text_input(&mut commands, &mut focused, [], target);
+        // A modal dialog is open (anywhere) — it owns all input; the overlay
+        // handler routes the click (body button or scrim dismiss).
+        if !overlay_hits.dialog_id.is_empty() {
             continue;
         }
+        let Ok((_widget, targets, io, _root, scroll, render_state)) = widgets.get(ev.pane) else {
+            continue;
+        };
 
         // Click rects are stored in content_root local coords; once the
         // user scrolls, content_root has slid up by `scroll.y` so the
@@ -2470,10 +3228,16 @@ fn handle_widget_press(
         let click = targets.clicks.iter().find(|t| t.rect.contains(hit_pt));
         let link = targets.links.iter().find(|t| t.rect.contains(hit_pt));
 
-        // While this pane has an open dropdown, route every non-trigger press to
-        // the overlay (item-select / dismiss) instead of the elements beneath it.
+        // While this pane has an open dropdown / popover, route every non-trigger
+        // press to the overlay (select / dismiss) instead of elements beneath it.
         if open_select.0.as_ref().is_some_and(|o| o.pane == ev.pane) {
             let is_trigger = click.is_some_and(|c| matches!(c.kind, ClickKind::SelectTrigger));
+            if !is_trigger {
+                continue;
+            }
+        }
+        if open_popover.0.as_ref().is_some_and(|o| o.pane == ev.pane) {
+            let is_trigger = click.is_some_and(|c| matches!(c.kind, ClickKind::PopoverTrigger));
             if !is_trigger {
                 continue;
             }
@@ -2496,7 +3260,22 @@ fn handle_widget_press(
                     })
                 };
                 commands.entity(ev.pane).remove::<WidgetInputFocus>();
-                widget.last_press_time = Some(time.elapsed_secs_f64());
+                continue;
+            }
+            if matches!(ct.kind, ClickKind::PopoverTrigger) {
+                let already = open_popover
+                    .0
+                    .as_ref()
+                    .is_some_and(|o| o.pane == ev.pane && o.id == ct.id);
+                open_popover.0 = if already {
+                    None
+                } else {
+                    Some(OpenSelect {
+                        pane: ev.pane,
+                        id: ct.id.clone(),
+                    })
+                };
+                commands.entity(ev.pane).remove::<WidgetInputFocus>();
                 continue;
             }
             if let Some(io) = io {
@@ -2522,7 +3301,9 @@ fn handle_widget_press(
                         id: ct.id.clone(),
                         focused: true,
                     },
-                    ClickKind::SelectTrigger => unreachable!("handled above"),
+                    ClickKind::SelectTrigger | ClickKind::PopoverTrigger => {
+                        unreachable!("handled above")
+                    }
                 };
                 if let Ok(json) = serde_json::to_string(&evt) {
                     let _ = io.tx.send(json);
@@ -2545,270 +3326,23 @@ fn handle_widget_press(
             } else {
                 commands.entity(ev.pane).remove::<WidgetInputFocus>();
             }
-            widget.last_press_time = Some(time.elapsed_secs_f64());
             continue;
         }
         if let Some(lt) = link {
             open_url(&lt.url);
-            widget.last_press_time = Some(time.elapsed_secs_f64());
             continue;
         }
 
-        // Pinned panes are background decoration: the only way the
-        // press reached us is because pane-bevy thought we had a
-        // hot-zone hit. If a transient mismatch (e.g. scroll changed
-        // mid-frame) made click/link miss anyway, swallow it rather
-        // than entering edit mode or otherwise treating it as a
-        // first-class focus event.
+        // Pinned panes are background decoration: a press only reaches us via
+        // a hot-zone hit; if click/link missed (e.g. scroll changed mid-frame),
+        // swallow it rather than treating it as a first-class focus event.
         if ev.pinned {
             continue;
         }
-
-        // Empty-space press: double-click → enter edit mode.
-        let now = time.elapsed_secs_f64();
-        let is_double = widget
-            .last_press_time
-            .is_some_and(|t| now - t < DOUBLE_CLICK_SECS);
-        widget.last_press_time = Some(now);
-        if is_double {
-            enter_edit_mode(
-                &mut commands,
-                &mut focused,
-                ev.pane,
-                root.0,
-                &widget,
-                pane_font.0.clone(),
-                content_size_of(&pane_rects, ev.pane),
-                &metrics,
-            );
-            clip_dirty.0 = true;
-        }
+        // Empty-space press on an unpinned widget: nothing to do.
     }
 }
 
-fn content_size_of(pane_rects: &Query<&PaneRect>, pane: Entity) -> Vec2 {
-    let Ok(rect) = pane_rects.get(pane) else {
-        return Vec2::ZERO;
-    };
-    Vec2::new(
-        (rect.size.x - 2.0 * MARGIN).max(0.0),
-        (rect.size.y - TITLE_H - 2.0 * MARGIN).max(0.0),
-    )
-}
-
-fn enter_edit_mode(
-    commands: &mut Commands,
-    focused: &mut FocusedTextInput,
-    pane: Entity,
-    content_root: Entity,
-    widget: &Widget,
-    font: Handle<Font>,
-    content_size: Vec2,
-    metrics: &PaneFontMetrics,
-) {
-    // Clear out any frame children — the overlay owns the content_root
-    // subtree while we're in edit mode. We use Commands::despawn rather
-    // than walking Children explicitly; the next rerender (after exit)
-    // will rebuild the frame from current_frame.
-    commands.entity(content_root).despawn_related::<Children>();
-
-    // Background fills the content area. clip_widget_sprites would
-    // clamp us anyway, but starting at the right size avoids the
-    // one-frame flash of an oversize sprite.
-    let bg = commands
-        .spawn((
-            ChildOf(content_root),
-            Sprite {
-                color: Color::srgba(0.08, 0.085, 0.10, 0.92),
-                custom_size: Some(content_size),
-                ..default()
-            },
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(0.0, 0.0, 0.05),
-        ))
-        .id();
-
-    let label = commands
-        .spawn((
-            ChildOf(content_root),
-            Text2d::new("Command"),
-            TextFont {
-                font: font.clone(),
-                font_size: EDIT_LABEL_FONT_SIZE,
-                ..default()
-            },
-            TextColor(Color::srgb(0.65, 0.68, 0.74)),
-            LineHeight::Px(EDIT_LINE_HEIGHT),
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(EDIT_PAD, -EDIT_PAD, 0.1),
-        ))
-        .id();
-
-    let input_y = -(EDIT_PAD + EDIT_LINE_HEIGHT + 4.0);
-    let style = TextInputStyle {
-        font: font.clone(),
-        font_size: EDIT_FONT_SIZE,
-        line_height: EDIT_INPUT_H,
-        cell_width: metrics.char_width(EDIT_FONT_SIZE),
-        color_idle: Color::srgb(0.85, 0.86, 0.90),
-        color_focused: Color::srgb(0.97, 0.98, 1.00),
-        color_caret: Color::srgb(0.55, 0.85, 1.0),
-        color_selection: Color::srgba(0.42, 0.62, 0.92, 0.35),
-    };
-    let input_width = (content_size.x - 2.0 * EDIT_PAD).max(40.0);
-    let command_input = spawn_text_input(
-        commands,
-        content_root,
-        &widget.command,
-        style,
-        input_width,
-        Transform::from_xyz(EDIT_PAD, input_y, 0.2),
-    );
-
-    let hint_y = input_y - EDIT_INPUT_H - 4.0;
-    let hint = commands
-        .spawn((
-            ChildOf(content_root),
-            Text2d::new("Enter to save, Esc to cancel"),
-            TextFont {
-                font,
-                font_size: EDIT_HINT_FONT_SIZE,
-                ..default()
-            },
-            TextColor(Color::srgb(0.50, 0.52, 0.58)),
-            LineHeight::Px(EDIT_LINE_HEIGHT),
-            Anchor::TOP_LEFT,
-            Transform::from_xyz(EDIT_PAD, hint_y, 0.1),
-        ))
-        .id();
-
-    commands.entity(pane).insert(WidgetEditMode {
-        command_input,
-        label,
-        hint,
-        bg,
-    });
-
-    focus_text_input(commands, focused, [], Some(command_input));
-}
-
-/// React to Submit/Cancel from the command-edit TextInput. Submit
-/// applies the new command and respawns the subprocess; Cancel just
-/// tears down the overlay.
-fn handle_widget_edit_events(
-    mut commands: Commands,
-    mut events: MessageReader<TextInputEvent>,
-    mut focused: ResMut<FocusedTextInput>,
-    text_inputs: Query<&TextInput>,
-    mut state_q: Query<(&mut Widget, &mut WidgetRender)>,
-    io_q: Query<&WidgetIO>,
-    pane_for_input: Query<(Entity, &WidgetEditMode)>,
-) {
-    for ev in events.read() {
-        let (submit, entity_input) = match *ev {
-            TextInputEvent::Submit { entity } => (true, entity),
-            TextInputEvent::Cancel { entity } => (false, entity),
-            TextInputEvent::Changed { .. } => continue,
-        };
-        let Some((pane, _)) = pane_for_input
-            .iter()
-            .find(|(_, e)| e.command_input == entity_input)
-        else {
-            continue;
-        };
-        // Re-fetch the edit-mode component so we can call exit_edit_mode
-        // with a stable reference (the borrow from pane_for_input would
-        // conflict with state_q's mutable borrow).
-        let edit_snapshot = pane_for_input
-            .get(pane)
-            .ok()
-            .map(|(_, e)| (e.command_input, e.label, e.hint, e.bg));
-
-        if submit {
-            let new_cmd = text_inputs
-                .get(entity_input)
-                .map(|ti| ti.text())
-                .unwrap_or_default();
-            apply_command_change(&mut commands, pane, new_cmd, &mut state_q, &io_q);
-        }
-
-        let Some((ci, lbl, hint, bg)) = edit_snapshot else {
-            continue;
-        };
-        let Ok((_, mut render_state)) = state_q.get_mut(pane) else {
-            continue;
-        };
-        if focused.0 == Some(ci) {
-            focus_text_input(&mut commands, &mut focused, [], None);
-        }
-        commands.entity(ci).despawn();
-        commands.entity(lbl).despawn();
-        commands.entity(hint).despawn();
-        commands.entity(bg).despawn();
-        commands.entity(pane).remove::<WidgetEditMode>();
-        render_state.last_size = Vec2::ZERO;
-    }
-}
-
-/// Replace the pane's command with `new_cmd`, kill any running child,
-/// and spawn a fresh one. Empty command → placeholder frame.
-fn apply_command_change(
-    commands: &mut Commands,
-    pane: Entity,
-    new_cmd: String,
-    state_q: &mut Query<(&mut Widget, &mut WidgetRender)>,
-    io_q: &Query<&WidgetIO>,
-) {
-    if let Ok(io) = io_q.get(pane) {
-        if let Ok(json) = serde_json::to_string(&HostEvent::Close) {
-            let _ = io.tx.send(json);
-        }
-    }
-    // Kill + remove the old child via an exclusive-world hop, since the
-    // outer system can't get &mut WidgetProcess (would alias with the
-    // other mut queries).
-    commands.queue(move |world: &mut World| {
-        if let Some(mut wp) = world.get_mut::<WidgetProcess>(pane) {
-            let _ = wp.child.kill();
-        }
-        world
-            .entity_mut(pane)
-            .remove::<WidgetProcess>()
-            .remove::<WidgetIO>();
-    });
-
-    let (cmd_str, args_vec, cwd_opt) = {
-        let Ok((mut widget, mut render_state)) = state_q.get_mut(pane) else {
-            return;
-        };
-        widget.command = new_cmd.clone();
-        widget.last_state = Value::Null;
-        render_state.init_sent = false;
-        render_state.pending_frame = None;
-        if new_cmd.trim().is_empty() {
-            render_state.current_frame = Some(placeholder_frame());
-            return;
-        }
-        render_state.current_frame = None;
-        (
-            widget.command.clone(),
-            widget.args.clone(),
-            widget.cwd.clone(),
-        )
-    };
-
-    match spawn_widget_process(&cmd_str, &args_vec, cwd_opt.as_deref()) {
-        Ok((process, io)) => {
-            commands.entity(pane).insert((process, io));
-        }
-        Err(e) => {
-            eprintln!("[widget] respawn failed: {}", e);
-            if let Ok((_, mut render_state)) = state_q.get_mut(pane) {
-                render_state.current_frame = Some(error_frame(&format!("spawn failed: {}", e)));
-            }
-        }
-    }
-}
 
 fn poll_widget_children(
     mut commands: Commands,

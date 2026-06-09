@@ -48,7 +48,7 @@ use widget_bevy::protocol::{Align, Border, Edges, Element, Shadow, Style, Weight
 use widget_bevy::render::{self, LayoutCtx, WidgetPalette};
 use widget_bevy::WidgetTargets;
 
-use crate::actions::{ActionInvocations, ActionRegistry};
+use crate::actions::{ActionInvocations, ActionRegistry, Keymap};
 use crate::ipc;
 use crate::projects::Projects;
 use crate::tools;
@@ -265,7 +265,12 @@ fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
 /// row when the query is non-empty. Ranking blends the fuzzy score with a
 /// capped usage bonus so frequently-picked actions float up (and break
 /// ties against alphabetical/registration order).
-fn refresh_results(palette: &mut CommandPalette, registry: &ActionRegistry, usage: &PaletteUsage) {
+fn refresh_results(
+    palette: &mut CommandPalette,
+    registry: &ActionRegistry,
+    usage: &PaletteUsage,
+    keymap: &Keymap,
+) {
     let q = palette.query.trim();
     let mut scored: Vec<(i32, PaletteRow)> = registry
         .iter()
@@ -282,7 +287,7 @@ fn refresh_results(palette: &mut CommandPalette, registry: &ActionRegistry, usag
                     id: a.id,
                     title: a.title.to_string(),
                     category: a.category,
-                    keybind: a.default_keybind.map(|k| k.label()),
+                    keybind: keymap.label(a.id),
                 },
             ))
         })
@@ -317,16 +322,17 @@ fn palette_input(
     mut deepseek: ResMut<DeepSeekChannel>,
     mut usage: ResMut<PaletteUsage>,
     mut open_req: ResMut<PaletteOpenRequest>,
+    keymap: Res<Keymap>,
 ) {
     // External (IPC) open request.
     if open_req.requested {
         open_req.requested = false;
         if !palette.open {
-            open(&mut palette, &registry, &usage);
+            open(&mut palette, &registry, &usage, &keymap);
         }
         if let Some(seed) = open_req.seed.take() {
             palette.query = seed;
-            refresh_results(&mut palette, &registry, &usage);
+            refresh_results(&mut palette, &registry, &usage, &keymap);
         }
         if std::mem::take(&mut open_req.ask) && !palette.query.trim().is_empty() {
             start_ask(&mut palette, &projects, &pane_registry, &mut deepseek);
@@ -347,7 +353,7 @@ fn palette_input(
             if palette.open {
                 close(&mut palette);
             } else {
-                open(&mut palette, &registry, &usage);
+                open(&mut palette, &registry, &usage, &keymap);
             }
             continue;
         }
@@ -393,29 +399,29 @@ fn palette_input(
             }
             Key::Backspace if palette.mode == PaletteMode::Actions => {
                 palette.query.pop();
-                refresh_results(&mut palette, &registry, &usage);
+                refresh_results(&mut palette, &registry, &usage, &keymap);
             }
             Key::Space if palette.mode == PaletteMode::Actions => {
                 palette.query.push(' ');
-                refresh_results(&mut palette, &registry, &usage);
+                refresh_results(&mut palette, &registry, &usage, &keymap);
             }
             Key::Character(s) if palette.mode == PaletteMode::Actions && !cmd && !ctrl => {
                 palette.query.push_str(s.as_str());
-                refresh_results(&mut palette, &registry, &usage);
+                refresh_results(&mut palette, &registry, &usage, &keymap);
             }
             _ => {}
         }
     }
 }
 
-fn open(palette: &mut CommandPalette, registry: &ActionRegistry, usage: &PaletteUsage) {
+fn open(palette: &mut CommandPalette, registry: &ActionRegistry, usage: &PaletteUsage, keymap: &Keymap) {
     palette.open = true;
     palette.mode = PaletteMode::Actions;
     palette.query.clear();
     palette.message.clear();
     palette.plan_rows.clear();
     palette.selected = 0;
-    refresh_results(palette, registry, usage);
+    refresh_results(palette, registry, usage, keymap);
     // No focus juggling: while `palette.open`, `compute_keyboard_owner`
     // sets `KeyboardOwner::Modal`, which centrally suppresses pane typing
     // and global chords. Focus returns to its pane automatically on close.

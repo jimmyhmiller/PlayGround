@@ -8,8 +8,9 @@ use std::io::{self, BufRead, Write};
 
 use glaze::{Program, parse};
 use widget_bevy::glaze_style::{
-    hex, resolve_select_style, resolve_tabs_style, to_bar_style, to_checkbox_style, to_radio_style,
-    to_slider_style, to_stepper_style, to_style, to_toggle_style, to_tooltip_style,
+    hex, resolve_select_style, resolve_tabs_style, to_bar_style, to_checkbox_style, to_dialog_style,
+    to_popover_style, to_radio_style, to_slider_style, to_stepper_style, to_style, to_toast_style,
+    to_toggle_style, to_tooltip_style,
 };
 use widget_bevy::glaze_style::to_table_style;
 use widget_bevy::protocol::{
@@ -214,6 +215,35 @@ const SHEET: &str = r#"
             }
         }
     }
+    style notif {
+        surface {
+            fill   surf2
+            radius 8px
+            border teal 1px
+        }
+    }
+    style pop {
+        trigger {
+            fill   surf2
+            radius 6px
+            border line 1px
+        }
+        surface {
+            fill   surface
+            radius 10px
+            border line 1px
+        }
+    }
+    style modal {
+        scrim {
+            fill oklch(0 0 0 / 0.6)
+        }
+        panel {
+            fill   surface
+            radius 14px
+            border line 1px
+        }
+    }
     style tip {
         bubble {
             fill   surf2
@@ -409,6 +439,92 @@ fn glaze_slider(prog: &Program, id: &str, value: f32) -> Element {
         step: 0.0,
         width: 320.0,
         height: 22.0,
+        style,
+    }
+}
+
+/// A Popover (Phase 3) — proves anchored positioning + arbitrary content
+/// compose. A click opens a floating card with action buttons.
+fn glaze_popover(prog: &Program, muted: &str) -> Element {
+    let style = prog
+        .resolve_slots("pop", &HashMap::new(), &[])
+        .ok()
+        .and_then(|s| to_popover_style(&s).ok());
+    let content = Element::Vstack {
+        gap: 6.0,
+        pad: 0.0,
+        children: vec![
+            text("ACCOUNT", muted, 10.0, true),
+            Element::Button {
+                id: "pop-profile".into(),
+                label: "View profile".into(),
+                kind: ButtonKind::Ghost,
+                style: None,
+            },
+            Element::Button {
+                id: "pop-signout".into(),
+                label: "Sign out".into(),
+                kind: ButtonKind::Ghost,
+                style: None,
+            },
+        ],
+        style: None,
+    };
+    Element::Popover {
+        id: "acct".into(),
+        label: "Account ▾".into(),
+        content: Some(Box::new(content)),
+        width: 200.0,
+        style,
+    }
+}
+
+/// A modal Dialog (Phase 3) — proves arbitrary slot-styled content (with working
+/// buttons) rendered on the overlay layer. Body buttons fire normal `click`
+/// events; the scrim/Escape sends `dialog-close`.
+fn glaze_dialog(prog: &Program, open: bool, fg: &str, muted: &str) -> Element {
+    let style = prog
+        .resolve_slots("modal", &HashMap::new(), &[])
+        .ok()
+        .and_then(|s| to_dialog_style(&s).ok());
+    let body = Element::Vstack {
+        gap: 16.0,
+        pad: 0.0,
+        children: vec![
+            text(
+                "Switch to the Team plan? Your card will be charged the prorated difference today.",
+                muted,
+                12.0,
+                false,
+            ),
+            row(
+                10.0,
+                Align::Center,
+                vec![
+                    Element::Button {
+                        id: "dlg-cancel".into(),
+                        label: "Cancel".into(),
+                        kind: ButtonKind::Outline,
+                        style: None,
+                    },
+                    Element::Button {
+                        id: "dlg-confirm".into(),
+                        label: "Confirm".into(),
+                        kind: ButtonKind::Filled,
+                        style: None,
+                    },
+                ],
+            ),
+        ],
+        style: None,
+    };
+    let _ = fg;
+    Element::Dialog {
+        id: "settings".into(),
+        open,
+        title: "Confirm change".into(),
+        body: Some(Box::new(body)),
+        width: 360.0,
         style,
     }
 }
@@ -614,6 +730,8 @@ fn build_ui(
     radio: &str,
     qty: f32,
     country: &str,
+    dialog_open: bool,
+    toast_shown: bool,
 ) -> Element {
     let checked = |id: &str| checks.get(id).copied().unwrap_or(false);
     let fg = tok(prog, "fg");
@@ -762,25 +880,46 @@ fn build_ui(
     // Phase 1d: retrofit components whose hardcoded render.rs styling is now
     // driven by Glaze slots + discrete state (Tabs strip/tab/indicator with
     // :selected; Toggle track/knob with :checked).
+    // Tabs that actually switch the panel below them.
+    let tab_panel = match tab {
+        // Activity
+        "b" => col(
+            8.0,
+            vec![
+                text("RECENT ACTIVITY", &muted, 10.0, true),
+                row(10.0, Align::Center, vec![text("Deploys", &fg, 12.0, false), glaze_bar(prog, "progress", 0.82, 360.0)]),
+                row(10.0, Align::Center, vec![text("Reviews", &fg, 12.0, false), glaze_bar(prog, "progress_gold", 0.46, 360.0)]),
+            ],
+        ),
+        // Settings — the toggles live here, and they actually toggle now.
+        "c" => col(
+            10.0,
+            vec![
+                text("SETTINGS", &muted, 10.0, true),
+                row(
+                    20.0,
+                    Align::Center,
+                    vec![
+                        glaze_toggle(prog, "notifications", "Notifications", checked("notifications")),
+                        glaze_toggle(prog, "autosync", "Auto-sync", checked("autosync")),
+                    ],
+                ),
+            ],
+        ),
+        // Overview (default)
+        _ => glaze_table(prog),
+    };
     let retrofit = col(
         10.0,
         vec![
-            text("SLOT-RETROFIT COMPONENTS · PHASE 1D", &muted, 10.0, true),
+            text("SLOT-RETROFIT COMPONENTS · PHASE 1D — click the tabs", &muted, 10.0, true),
             glaze_tabs(
                 prog,
                 "demo-tabs",
                 &[("a", "Overview"), ("b", "Activity"), ("c", "Settings")],
                 tab,
             ),
-            row(
-                20.0,
-                Align::Center,
-                vec![
-                    glaze_toggle(prog, "notifications", "Notifications", true),
-                    glaze_toggle(prog, "autosync", "Auto-sync", false),
-                ],
-            ),
-            glaze_table(prog),
+            tab_panel,
         ],
     );
 
@@ -860,6 +999,35 @@ fn build_ui(
                     tooltip(prog, "what is this?", "A floating hint on the overlay layer — it escapes the pane."),
                 ],
             ),
+            row(
+                10.0,
+                Align::Center,
+                vec![
+                    Element::Button {
+                        id: "open-dialog".into(),
+                        label: "Open dialog".into(),
+                        kind: ButtonKind::Filled,
+                        style: None,
+                    },
+                    // 0-size in-pane; renders centered on the overlay when open.
+                    glaze_dialog(prog, dialog_open, &fg, &muted),
+                    glaze_popover(prog, &muted),
+                    // 0-size; renders at the bottom-right corner on the overlay.
+                    // Click it to dismiss (toast-dismiss → drops it from the frame).
+                    if toast_shown {
+                        Element::Toast {
+                            id: "saved".into(),
+                            text: "Settings saved ✓".into(),
+                            style: prog
+                                .resolve_slots("notif", &HashMap::new(), &[])
+                                .ok()
+                                .and_then(|s| to_toast_style(&s).ok()),
+                        }
+                    } else {
+                        Element::Spacer { size: 0.0 }
+                    },
+                ],
+            ),
         ],
     );
 
@@ -891,12 +1059,20 @@ fn main() {
     let mut width = 700.0_f32;
     let mut tab = "a".to_string();
     let mut slider = 0.65_f32;
-    let mut checks: HashMap<String, bool> =
-        HashMap::from([("terms".into(), true), ("news".into(), false), ("beta".into(), true)]);
+    let mut checks: HashMap<String, bool> = HashMap::from([
+        ("terms".into(), true),
+        ("news".into(), false),
+        ("beta".into(), true),
+        ("notifications".into(), true),
+        ("autosync".into(), false),
+    ]);
     let mut radio = "pro".to_string();
     let mut qty = 3.0_f32;
     let mut country = "ca".to_string();
-    emit(&mut out, &prog, width, &tab, slider, &checks, &radio, qty, &country);
+    // Default open when GLAZE_DIALOG is set (for the static snapshot).
+    let mut dialog_open = std::env::var("GLAZE_DIALOG").is_ok();
+    let mut toast_shown = true;
+    emit(&mut out, &prog, width, &tab, slider, &checks, &radio, qty, &country, dialog_open, toast_shown);
     for line in io::stdin().lock().lines() {
         let Ok(line) = line else { break };
         let Ok(evt) = serde_json::from_str::<HostEvent>(&line) else { continue };
@@ -909,12 +1085,18 @@ fn main() {
             HostEvent::RadioSelect { id, option } if id == "plan" => radio = option,
             HostEvent::NumberChange { id, value } if id == "seats" => qty = value,
             HostEvent::SelectChange { id, value } if id == "country" => country = value,
+            HostEvent::Click { id } if id == "open-dialog" => dialog_open = true,
+            HostEvent::Click { id } if id == "dlg-cancel" || id == "dlg-confirm" => {
+                dialog_open = false;
+            }
+            HostEvent::DialogClose { id } if id == "settings" => dialog_open = false,
+            HostEvent::ToastDismiss { id } if id == "saved" => toast_shown = false,
             HostEvent::Toggle { id, checked } if checks.contains_key(&id) => {
                 checks.insert(id, checked);
             }
             _ => {}
         }
-        emit(&mut out, &prog, width, &tab, slider, &checks, &radio, qty, &country);
+        emit(&mut out, &prog, width, &tab, slider, &checks, &radio, qty, &country, dialog_open, toast_shown);
     }
 }
 
@@ -929,9 +1111,11 @@ fn emit<W: Write>(
     radio: &str,
     qty: f32,
     country: &str,
+    dialog_open: bool,
+    toast_shown: bool,
 ) {
     if let Ok(s) = serde_json::to_string(&WidgetMsg::Frame {
-        root: build_ui(prog, width, tab, slider, checks, radio, qty, country),
+        root: build_ui(prog, width, tab, slider, checks, radio, qty, country, dialog_open, toast_shown),
     }) {
         let _ = writeln!(out, "{s}");
         let _ = out.flush();
