@@ -67,11 +67,15 @@ pub enum TxOp {
         entity: Option<EntityId>,
         data: HashMap<String, Value>,
     },
-    /// Retract specific fields from an entity.
+    /// Retract specific fields from an entity. For cardinality-many fields,
+    /// `values` (when non-empty) retracts only those specific values from the
+    /// set, leaving the rest; when `values` is empty the whole field (all its
+    /// values) is retracted.
     Retract {
         entity_type: String,
         entity: EntityId,
         fields: Vec<String>,
+        values: Vec<Value>,
     },
     /// Retract an entire entity (soft delete): retract all currently-asserted datoms.
     RetractEntity {
@@ -115,10 +119,20 @@ impl TxOp {
                 .map(|v| v.as_str().unwrap_or("").to_string())
                 .collect();
 
+            // Optional per-value retraction for cardinality-many fields.
+            let values = match obj.get("values").and_then(|v| v.as_array()) {
+                Some(arr) => arr
+                    .iter()
+                    .map(json_to_value)
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+                None => Vec::new(),
+            };
+
             Ok(TxOp::Retract {
                 entity_type: type_name.to_string(),
                 entity,
                 fields,
+                values,
             })
         } else if let Some(type_name) = obj.get("retract_entity").and_then(|t| t.as_str()) {
             let entity = obj
@@ -223,6 +237,31 @@ pub fn process_transaction(
     let mut datoms = Vec::new();
     let mut entity_ids = Vec::new();
     let mut pending_unique: HashMap<(String, String), EntityId> = HashMap::new();
+    // Attribute names (e.g. "Doc/subjects") that are cardinality-many. These
+    // get value-keyed current-state indexes (multiple values per entity-attr)
+    // and skip the cardinality-one last-write-wins stale-cleanup. Precomputed
+    // from the schema for every type the transaction touches, so retract paths
+    // (which don't carry the value through the Assert branch) see them too.
+    let mut many_attrs: std::collections::HashSet<String> = std::collections::HashSet::new();
+    {
+        let mut seen_types: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for op in &ops {
+            let etype = match op {
+                TxOp::Assert { entity_type, .. }
+                | TxOp::Retract { entity_type, .. }
+                | TxOp::RetractEntity { entity_type, .. } => entity_type.as_str(),
+            };
+            if seen_types.insert(etype) {
+                if let Some(td) = schema.get(etype) {
+                    for f in &td.fields {
+                        if f.is_many() {
+                            many_attrs.insert(td.attribute_name(&f.name));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     for op in &ops {
         match op {
@@ -243,7 +282,27 @@ pub fn process_transaction(
                         }
                     })?;
 
-                    if let FieldType::Enum(enum_name) = &field_def.field_type {
+                    if field_def.is_many() {
+                        // A many field is supplied as a set (Value::List) or a
+                        // single scalar; every element must match the declared
+                        // (scalar) element type.
+                        let elems: Vec<&Value> = match value {
+                            Value::List(items) => items.iter().collect(),
+                            other => vec![other],
+                        };
+                        for elem in elems {
+                            if !field_def.field_type.matches_value(elem) {
+                                return Err(TxError::TypeMismatch {
+                                    field: field_name.clone(),
+                                    expected: format!(
+                                        "{} (many)",
+                                        field_def.field_type.type_name()
+                                    ),
+                                    actual: format!("{}", elem),
+                                });
+                            }
+                        }
+                    } else if let FieldType::Enum(enum_name) = &field_def.field_type {
                         validate_enum_value(schema, enum_name, field_name, value)?;
                     } else if !field_def.field_type.matches_value(value) {
                         return Err(TxError::TypeMismatch {
@@ -297,6 +356,31 @@ pub fn process_transaction(
 
                 for (field_name, value) in data {
                     let field_def = type_def.get_field(field_name).unwrap();
+
+                    if field_def.is_many() {
+                        // Cardinality-many: the input is a set of values (a
+                        // `Value::List`, or a single scalar for one value).
+                        // Each element becomes an independent added datom.
+                        // Asserting is additive (Datomic `:db/add` semantics);
+                        // re-asserting the same value is a no-op at the
+                        // current-state layer (same value-keyed index key).
+                        let attr = type_def.attribute_name(field_name);
+                        many_attrs.insert(attr.clone());
+                        let elems: Vec<Value> = match value {
+                            Value::List(items) => items.clone(),
+                            other => vec![other.clone()],
+                        };
+                        for elem in elems {
+                            datoms.push(Datom {
+                                entity: eid,
+                                attribute: attr.clone(),
+                                value: elem,
+                                tx: tx_id,
+                                added: true,
+                            });
+                        }
+                        continue;
+                    }
 
                     if let FieldType::Enum(enum_name) = &field_def.field_type {
                         let (variant_name, variant_fields) = extract_enum_parts(value);
@@ -367,6 +451,7 @@ pub fn process_transaction(
                 entity_type,
                 entity,
                 fields,
+                values,
             } => {
                 let type_def = schema
                     .get(entity_type)
@@ -382,7 +467,25 @@ pub fn process_transaction(
                         }
                     })?;
 
-                    if let FieldType::Enum(_) = &field_def.field_type {
+                    if field_def.is_many() {
+                        // Cardinality-many: retract specific `values` if given,
+                        // otherwise every current value of the set.
+                        let attr = type_def.attribute_name(field_name);
+                        let to_retract: Vec<Value> = if values.is_empty() {
+                            read_current_many_values(txn, interner, *entity, &attr)?
+                        } else {
+                            values.clone()
+                        };
+                        for v in to_retract {
+                            datoms.push(Datom {
+                                entity: *entity,
+                                attribute: attr.clone(),
+                                value: v,
+                                tx: tx_id,
+                                added: false,
+                            });
+                        }
+                    } else if let FieldType::Enum(_) = &field_def.field_type {
                         retract_current_enum(
                             txn,
                             interner,
@@ -478,22 +581,32 @@ pub fn process_transaction(
             txn.put(key, value)?;
         }
 
+        let is_many = many_attrs.contains(&datom.attribute);
+
         // Maintain current-state indexes
         if datom.added {
-            // Assert: look up old value to clean up stale CURRENT_AVET entry
-            let (aevt_key, aevt_val) =
-                index::encode_current_aevt(attr_id, datom.entity, &datom.value);
+            if is_many {
+                // Cardinality-many: value-keyed AEVT so multiple values
+                // coexist; no stale-cleanup (each value is independent).
+                let aevt_key =
+                    index::encode_current_aevt_many(attr_id, datom.entity, &datom.value);
+                txn.put(aevt_key, vec![])?;
+            } else {
+                // Cardinality-one: look up old value to clean up stale
+                // CURRENT_AVET entry, then overwrite the single AEVT slot.
+                let (aevt_key, aevt_val) =
+                    index::encode_current_aevt(attr_id, datom.entity, &datom.value);
 
-            // Check for previous value to delete stale CURRENT_AVET
-            if let Some(old_val_bytes) = txn.get(&aevt_key)? {
-                if let Some(old_val) = index::decode_current_value(&old_val_bytes) {
-                    let old_avet_key =
-                        index::encode_current_avet(attr_id, &old_val, datom.entity);
-                    txn.delete(&old_avet_key)?;
+                if let Some(old_val_bytes) = txn.get(&aevt_key)? {
+                    if let Some(old_val) = index::decode_current_value(&old_val_bytes) {
+                        let old_avet_key =
+                            index::encode_current_avet(attr_id, &old_val, datom.entity);
+                        txn.delete(&old_avet_key)?;
+                    }
                 }
-            }
 
-            txn.put(aevt_key, aevt_val)?;
+                txn.put(aevt_key, aevt_val)?;
+            }
 
             let avet_key = index::encode_current_avet(attr_id, &datom.value, datom.entity);
             txn.put(avet_key, vec![])?;
@@ -505,11 +618,17 @@ pub fn process_transaction(
                 }
             }
         } else {
-            // Retract: delete current-state entries
-            let mut aevt_key = index::current_aevt_attr_prefix(attr_id);
-            aevt_key.extend_from_slice(&datom.entity.to_be_bytes());
-
-            txn.delete(&aevt_key)?;
+            // Retract: delete current-state entries.
+            if is_many {
+                // Only the matching (entity, value) datom is removed.
+                let aevt_key =
+                    index::encode_current_aevt_many(attr_id, datom.entity, &datom.value);
+                txn.delete(&aevt_key)?;
+            } else {
+                let mut aevt_key = index::current_aevt_attr_prefix(attr_id);
+                aevt_key.extend_from_slice(&datom.entity.to_be_bytes());
+                txn.delete(&aevt_key)?;
+            }
 
             let avet_key = index::encode_current_avet(attr_id, &datom.value, datom.entity);
             txn.delete(&avet_key)?;
@@ -713,6 +832,30 @@ fn resolve_composite_upsert(
         }
     }
     Ok(None)
+}
+
+/// Read all current values of a cardinality-many attribute on one entity from
+/// the value-keyed CURRENT_AEVT-many index (`[0x11][attr_id][entity][value]`).
+fn read_current_many_values(
+    txn: &dyn TxnOps,
+    interner: &AttrInterner,
+    entity: EntityId,
+    attr: &str,
+) -> Result<Vec<Value>> {
+    let attr_id = match interner.lookup(attr) {
+        Some(id) => id,
+        None => return Ok(Vec::new()),
+    };
+    let prefix = index::current_aevt_entity_prefix(attr_id, entity);
+    let end = index::prefix_end(&prefix);
+    let entries = txn.scan(&prefix, &end)?;
+    let mut out = Vec::with_capacity(entries.len());
+    for (key, _) in &entries {
+        if let Some(v) = index::current_aevt_many_value_at(key) {
+            out.push(v);
+        }
+    }
+    Ok(out)
 }
 
 /// Find all entities that currently (latest state) hold `value` for `attr`.

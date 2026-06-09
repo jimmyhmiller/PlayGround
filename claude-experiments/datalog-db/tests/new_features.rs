@@ -184,3 +184,130 @@ fn composite_unique_upserts() {
     assert_eq!(rows[0][0], json!("Introduction"));
     assert_eq!(rows[1][0], json!("Next"));
 }
+
+#[test]
+fn cardinality_many_membership_and_fanout() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(
+        &db,
+        json!({"entity_type": "Paper", "fields": [
+            {"name": "title", "type": "string", "required": true},
+            {"name": "tags", "type": "string", "cardinality": "many", "indexed": true},
+        ]}),
+    );
+    assert_ops(
+        &db,
+        vec![
+            json!({"assert": "Paper", "data": {"title": "A", "tags": ["logic", "types", "proof"]}}),
+            json!({"assert": "Paper", "data": {"title": "B", "tags": ["logic", "history"]}}),
+            json!({"assert": "Paper", "data": {"title": "C", "tags": ["cooking"]}}),
+        ],
+    );
+
+    // Indexed membership: every paper tagged "logic".
+    let rows = run(
+        &db,
+        json!({"find": ["?t"], "where": [
+            {"bind": "?p", "type": "Paper", "title": "?t", "tags": "logic"}
+        ], "order_by": ["?t"]}),
+    );
+    let titles: Vec<&str> = rows.iter().map(|r| r[0].as_str().unwrap()).collect();
+    assert_eq!(titles, vec!["A", "B"]);
+
+    // Membership via the `contains` operator behaves the same on a many field.
+    let rows = run(
+        &db,
+        json!({"find": ["?t"], "where": [
+            {"bind": "?p", "type": "Paper", "title": "?t", "tags": {"contains": "cooking"}}
+        ]}),
+    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0][0], json!("C"));
+
+    // Fan-out bind: each (paper, tag) pair is its own row.
+    let rows = run(
+        &db,
+        json!({"find": ["?t", "?tag"], "where": [
+            {"bind": "?p", "type": "Paper", "title": "?t", "tags": "?tag"}
+        ], "order_by": ["?t", "?tag"]}),
+    );
+    // A has 3 tags, B has 2, C has 1 = 6 rows.
+    assert_eq!(rows.len(), 6);
+    assert_eq!(rows[0], vec![json!("A"), json!("logic")]);
+    assert_eq!(rows[1], vec![json!("A"), json!("proof")]);
+    assert_eq!(rows[2], vec![json!("A"), json!("types")]);
+
+    // count(*) grouped by tag — aggregate over the fan-out.
+    let rows = run(
+        &db,
+        json!({"find": ["?tag", {"agg": "count", "var": "?p"}], "where": [
+            {"bind": "?p", "type": "Paper", "tags": "?tag"}
+        ], "order_by": ["?tag"]}),
+    );
+    // "logic" appears on 2 papers.
+    let logic = rows.iter().find(|r| r[0] == json!("logic")).unwrap();
+    assert_eq!(logic[1], json!(2));
+}
+
+#[test]
+fn cardinality_many_refs_reverse_lookup() {
+    // A many ref field should support "who points at X" via the entity graph.
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "name", "type": "string", "required": true, "unique": true},
+    ]}));
+    define(&db, json!({"entity_type": "Paper", "fields": [
+        {"name": "title", "type": "string", "required": true},
+        {"name": "cites", "type": "ref(Doc)", "cardinality": "many", "indexed": true},
+    ]}));
+
+    let d = assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"name": "seminal"}}),
+        json!({"assert": "Doc", "data": {"name": "other"}}),
+    ]);
+    let (seminal, other) = (d[0], d[1]);
+
+    assert_ops(&db, vec![
+        json!({"assert": "Paper", "data": {"title": "P1", "cites": [{"ref": seminal}, {"ref": other}]}}),
+        json!({"assert": "Paper", "data": {"title": "P2", "cites": [{"ref": seminal}]}}),
+        json!({"assert": "Paper", "data": {"title": "P3", "cites": [{"ref": other}]}}),
+    ]);
+
+    // Reverse lookup: which papers cite the seminal doc? (membership on a many ref)
+    let rows = run(&db, json!({"find": ["?t"], "where": [
+        {"bind": "?p", "type": "Paper", "title": "?t", "cites": {"ref": seminal}}
+    ], "order_by": ["?t"]}));
+    let titles: Vec<&str> = rows.iter().map(|r| r[0].as_str().unwrap()).collect();
+    assert_eq!(titles, vec!["P1", "P2"]);
+}
+
+#[test]
+fn cardinality_many_retract_single_value() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Item", "fields": [
+        {"name": "name", "type": "string", "required": true, "unique": true},
+        {"name": "tags", "type": "string", "cardinality": "many", "indexed": true},
+    ]}));
+    let ids = assert_ops(&db, vec![
+        json!({"assert": "Item", "data": {"name": "x", "tags": ["a", "b", "c"]}}),
+    ]);
+    let eid = ids[0];
+
+    // Retract a single value from the set, leaving the others.
+    let _ = assert_ops(&db, vec![
+        json!({"retract": "Item", "entity": eid, "fields": ["tags"], "values": ["b"]}),
+    ]);
+
+    // After retracting "b", membership on "b" is empty but "a"/"c" remain.
+    let on_b = run(&db, json!({"find": ["?n"], "where": [
+        {"bind": "?i", "type": "Item", "name": "?n", "tags": "b"}
+    ]}));
+    let on_a = run(&db, json!({"find": ["?n"], "where": [
+        {"bind": "?i", "type": "Item", "name": "?n", "tags": "a"}
+    ]}));
+    assert_eq!(on_b.len(), 0, "tag b should be gone");
+    assert_eq!(on_a.len(), 1, "tag a should remain");
+}

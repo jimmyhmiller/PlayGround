@@ -31,11 +31,14 @@
 //!     name: "User".into(),
 //!     fields: vec![
 //!         FieldDef { name: "name".into(),  field_type: FieldType::String,
-//!                    required: true,  unique: false, indexed: false },
+//!                    required: true,  unique: false, indexed: false,
+//!                    cardinality: Default::default() },
 //!         FieldDef { name: "email".into(), field_type: FieldType::String,
-//!                    required: true,  unique: true,  indexed: true  },
+//!                    required: true,  unique: true,  indexed: true,
+//!                    cardinality: Default::default()  },
 //!         FieldDef { name: "age".into(),   field_type: FieldType::I64,
-//!                    required: false, unique: false, indexed: false },
+//!                    required: false, unique: false, indexed: false,
+//!                    cardinality: Default::default() },
 //!     ],
 //!     unique_keys: vec![],
 //! })?;

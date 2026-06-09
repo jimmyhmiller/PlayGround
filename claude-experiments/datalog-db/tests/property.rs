@@ -58,6 +58,7 @@ fn wide_type() -> EntityTypeDef {
                 required: false,
                 unique: false,
                 indexed: false,
+                cardinality: Default::default(),
             },
             FieldDef {
                 name: "i".to_string(),
@@ -65,6 +66,7 @@ fn wide_type() -> EntityTypeDef {
                 required: false,
                 unique: false,
                 indexed: false,
+                cardinality: Default::default(),
             },
             FieldDef {
                 name: "f".to_string(),
@@ -72,6 +74,7 @@ fn wide_type() -> EntityTypeDef {
                 required: false,
                 unique: false,
                 indexed: false,
+                cardinality: Default::default(),
             },
             FieldDef {
                 name: "b".to_string(),
@@ -79,6 +82,7 @@ fn wide_type() -> EntityTypeDef {
                 required: false,
                 unique: false,
                 indexed: false,
+                cardinality: Default::default(),
             },
             FieldDef {
                 name: "data".to_string(),
@@ -86,6 +90,7 @@ fn wide_type() -> EntityTypeDef {
                 required: false,
                 unique: false,
                 indexed: false,
+                cardinality: Default::default(),
             },
         ],
     }
@@ -112,6 +117,7 @@ fn color_enum() -> EnumTypeDef {
                         required: false,
                         unique: false,
                         indexed: false,
+                        cardinality: Default::default(),
                     },
                     FieldDef {
                         name: "g".to_string(),
@@ -119,6 +125,7 @@ fn color_enum() -> EnumTypeDef {
                         required: false,
                         unique: false,
                         indexed: false,
+                        cardinality: Default::default(),
                     },
                     FieldDef {
                         name: "b".to_string(),
@@ -126,6 +133,7 @@ fn color_enum() -> EnumTypeDef {
                         required: false,
                         unique: false,
                         indexed: false,
+                        cardinality: Default::default(),
                     },
                 ],
             },
@@ -144,6 +152,7 @@ fn widget_type() -> EntityTypeDef {
                 required: true,
                 unique: false,
                 indexed: false,
+                cardinality: Default::default(),
             },
             FieldDef {
                 name: "color".to_string(),
@@ -151,6 +160,7 @@ fn widget_type() -> EntityTypeDef {
                 required: false,
                 unique: false,
                 indexed: false,
+                cardinality: Default::default(),
             },
         ],
     }
@@ -553,6 +563,7 @@ proptest! {
             entity_type: "Wide".to_string(),
             entity: eid,
             fields: vec![retract_field.clone()],
+            values: vec![],
         }]).unwrap();
 
         let entity = db.get_entity(eid).unwrap().unwrap();
@@ -1028,6 +1039,7 @@ fn unique_user_type() -> EntityTypeDef {
                 required: true,
                 unique: false,
                 indexed: false,
+                cardinality: Default::default(),
             },
             FieldDef {
                 name: "email".to_string(),
@@ -1035,6 +1047,7 @@ fn unique_user_type() -> EntityTypeDef {
                 required: true,
                 unique: true,
                 indexed: false,
+                cardinality: Default::default(),
             },
         ],
     }
@@ -1096,6 +1109,7 @@ proptest! {
             entity_type: "U".to_string(),
             entity: eids[0],
             fields: vec!["email".to_string()],
+            values: vec![],
         }]).unwrap();
 
         let mut data = HashMap::new();
@@ -1401,6 +1415,7 @@ fn vaet_user_type() -> EntityTypeDef {
             required: true,
             unique: false,
             indexed: false,
+            cardinality: Default::default(),
         }],
     }
 }
@@ -1416,6 +1431,7 @@ fn vaet_post_type() -> EntityTypeDef {
                 required: true,
                 unique: false,
                 indexed: false,
+                cardinality: Default::default(),
             },
             FieldDef {
                 name: "author".to_string(),
@@ -1423,6 +1439,7 @@ fn vaet_post_type() -> EntityTypeDef {
                 required: true,
                 unique: false,
                 indexed: false,
+                cardinality: Default::default(),
             },
         ],
     }

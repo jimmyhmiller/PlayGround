@@ -1047,6 +1047,208 @@ fn merge_tuples(left: &Tuple, right: &Tuple) -> Option<Tuple> {
 // Clause-level execution (leaf engine — unchanged from original)
 // ---------------------------------------------------------------------------
 
+/// Read all current values of a cardinality-many attribute on one entity from
+/// the value-keyed CURRENT_AEVT index (`[0x11][attr_id][entity][value]`).
+fn read_many_values(
+    txn: &dyn ReadOps,
+    interner: &AttrInterner,
+    attr: &str,
+    entity: EntityId,
+) -> Result<Vec<Value>, String> {
+    let attr_id = match interner.lookup(attr) {
+        Some(id) => id,
+        None => return Ok(Vec::new()),
+    };
+    let prefix = index::current_aevt_entity_prefix(attr_id, entity);
+    let end = index::prefix_end(&prefix);
+    let mut out = Vec::new();
+    txn.scan_foreach(&prefix, &end, &mut |key, _| {
+        if let Some(v) = index::current_aevt_many_value_at(key) {
+            out.push(v);
+        }
+        true
+    })
+    .map_err(|e| e.to_string())?;
+    Ok(out)
+}
+
+/// Find every entity that currently has `value` as one of its values for the
+/// cardinality-many attribute `attr` — an indexed AVET membership probe.
+fn entities_with_many_value(
+    txn: &dyn ReadOps,
+    interner: &AttrInterner,
+    attr: &str,
+    value: &Value,
+) -> Result<Vec<EntityId>, String> {
+    find_entities_by_avet_current(txn, interner, attr, value)
+}
+
+/// The cardinality-many field patterns of a clause, partitioned out so the
+/// common (all cardinality-one) path stays on the optimized columnar engine.
+fn many_field_patterns<'a>(
+    clause: &'a WhereClause,
+    schema: &SchemaRegistry,
+) -> Vec<&'a (String, Pattern)> {
+    let type_def = match schema.get(&clause.entity_type) {
+        Some(td) => td,
+        None => return Vec::new(),
+    };
+    clause
+        .field_patterns
+        .iter()
+        .filter(|(fname, _)| type_def.get_field(fname).map(|f| f.is_many()).unwrap_or(false))
+        .collect()
+}
+
+/// Evaluate a clause that references one or more cardinality-many attributes.
+///
+/// Strategy: strip the many-patterns off and evaluate the remaining
+/// cardinality-one clause on the normal engine to get candidate tuples (each
+/// with the entity bound). Then apply each many-pattern per candidate:
+///   - membership (constant / `contains` / predicate): keep the tuple if any
+///     of the entity's values for that attr matches;
+///   - variable bind (`tag: ?t`): fan the tuple out, one per matching value.
+///
+/// When the entity isn't yet bound and a many-pattern is a constant, we seed
+/// candidates from the AVET membership index (the indexed point-lookup that is
+/// the whole reason for cardinality-many) rather than scanning the type.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_clause_with_many(
+    txn: &dyn ReadOps,
+    clause: &WhereClause,
+    tuple: &Tuple,
+    as_of: Option<TxId>,
+    schema: &SchemaRegistry,
+    slots: &SlotMap,
+    cache: &QueryCache,
+    interner: &AttrInterner,
+    cache_gen: u64,
+    many_pats: &[&(String, Pattern)],
+) -> Result<Vec<Tuple>, String> {
+    let type_def = schema.get(&clause.entity_type);
+    let attr_of = |fname: &str| -> String {
+        type_def
+            .map(|td| td.attribute_name(fname))
+            .unwrap_or_else(|| format!("{}/{}", clause.entity_type, fname))
+    };
+
+    // The cardinality-one remainder of the clause.
+    let one_clause = WhereClause {
+        bind: clause.bind.clone(),
+        entity_type: clause.entity_type.clone(),
+        field_patterns: clause
+            .field_patterns
+            .iter()
+            .filter(|(fname, _)| {
+                type_def
+                    .and_then(|td| td.get_field(fname))
+                    .map(|f| !f.is_many())
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect(),
+    };
+
+    let bind_slot = slots.slot(&clause.bind).unwrap();
+    let entity_pre_bound = tuple.get(bind_slot).map_or(false, |v| matches!(v, Value::Ref(_)));
+
+    // Candidate seeding. If the entity isn't bound yet and some many-pattern is
+    // a constant, use its AVET membership index to get a small candidate set,
+    // then bind each and let the one-clause engine verify the rest. Otherwise
+    // evaluate the one-clause directly (full type scan or join-seeded).
+    let seed_constant: Option<(String, Value)> = if entity_pre_bound {
+        None
+    } else {
+        many_pats.iter().find_map(|(f, p)| match p {
+            Pattern::Constant(v) => Some((f.clone(), v.clone())),
+            _ => None,
+        })
+    };
+
+    let mut candidates: Vec<Tuple> = if let Some((fname, val)) = seed_constant {
+        let eids = entities_with_many_value(txn, interner, &attr_of(&fname), &val)?;
+        let mut seeded = Vec::with_capacity(eids.len());
+        for eid in eids {
+            let mut t = tuple.clone();
+            t.set(bind_slot, Value::Ref(eid));
+            // Verify the one-cardinality part for this seeded entity.
+            seeded.extend(evaluate_clause(
+                txn, &one_clause, &t, as_of, schema, slots, cache, interner, cache_gen,
+            )?);
+        }
+        seeded
+    } else {
+        evaluate_clause(
+            txn, &one_clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
+        )?
+    };
+
+    // Apply each many-pattern to the candidate tuples.
+    for (fname, pat) in many_pats {
+        let attr = attr_of(fname);
+        let mut next: Vec<Tuple> = Vec::new();
+        for cand in &candidates {
+            let eid = match cand.get(bind_slot) {
+                Some(Value::Ref(id)) => *id,
+                _ => continue,
+            };
+            let values = read_many_values(txn, interner, &attr, eid)?;
+            match pat {
+                Pattern::Variable(var) => {
+                    // Fan out: one tuple per value, binding (or matching) ?var.
+                    let slot = match slots.slot(var) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    for v in &values {
+                        if let Some(existing) = cand.get(slot) {
+                            if existing != v {
+                                continue;
+                            }
+                            next.push(cand.clone());
+                        } else {
+                            let mut t = cand.clone();
+                            t.set(slot, v.clone());
+                            next.push(t);
+                        }
+                    }
+                }
+                Pattern::Constant(expected) => {
+                    if values.iter().any(|v| v == expected) {
+                        next.push(cand.clone());
+                    }
+                }
+                Pattern::Predicate { op, value }
+                | Pattern::BoundPredicate { op, value, .. } => {
+                    // Membership-style filter: keep if any value passes the op.
+                    if values.iter().any(|v| op.evaluate(v, value)) {
+                        // For BoundPredicate, also bind ?var to a matching value.
+                        if let Pattern::BoundPredicate { var, .. } = pat {
+                            if let Some(slot) = slots.slot(var) {
+                                for v in &values {
+                                    if op.evaluate(v, value) {
+                                        let mut t = cand.clone();
+                                        t.set(slot, v.clone());
+                                        next.push(t);
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                        next.push(cand.clone());
+                    }
+                }
+                _ => {
+                    // EnumMatch on a many-attr is unsupported; drop the tuple.
+                }
+            }
+        }
+        candidates = next;
+    }
+
+    Ok(candidates)
+}
+
 /// Evaluate a single where clause against a current tuple.
 /// Returns extended tuples for each matching entity.
 fn evaluate_clause(
@@ -1060,6 +1262,16 @@ fn evaluate_clause(
     interner: &AttrInterner,
     cache_gen: u64,
 ) -> Result<Vec<Tuple>, String> {
+    // Cardinality-many handling. If the clause references any many-attr, peel
+    // those patterns off, evaluate the rest on the normal engine, then apply
+    // the many-patterns (membership filter or fan-out bind) per candidate.
+    let many_pats = many_field_patterns(clause, schema);
+    if !many_pats.is_empty() {
+        return evaluate_clause_with_many(
+            txn, clause, tuple, as_of, schema, slots, cache, interner, cache_gen, &many_pats,
+        );
+    }
+
     // Check if the entity variable is already bound
     let bind_slot = slots.slot(&clause.bind).unwrap();
     let bound_entity = tuple.get(bind_slot).and_then(|v| {

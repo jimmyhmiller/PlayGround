@@ -392,7 +392,9 @@ pub fn decode_datom_from_vaet(key: &[u8]) -> Option<DecodedDatom> {
 // CURRENT_AVET: Key = [0x12][attr_id(4)][type_tag][value_data][entity_id(8)]
 //               Value = empty
 
-/// Encode a current-state AEVT key + value.
+/// Encode a current-state AEVT key + value for a cardinality-ONE attribute.
+/// Key is `[0x11][attr_id][entity]` — one value per (entity, attr), so a new
+/// assert overwrites the prior value at the same key.
 pub fn encode_current_aevt(
     attr_id: AttrId,
     entity: EntityId,
@@ -407,6 +409,44 @@ pub fn encode_current_aevt(
     encode_value(&mut val_buf, value);
 
     (key, val_buf)
+}
+
+/// Encode a current-state AEVT key for a cardinality-MANY attribute. The value
+/// is folded into the key (`[0x11][attr_id][entity][value]`) so multiple
+/// values for the same (entity, attr) coexist instead of overwriting. The
+/// stored RocksDB value is empty — the datom value lives in the key.
+pub fn encode_current_aevt_many(
+    attr_id: AttrId,
+    entity: EntityId,
+    value: &Value,
+) -> Vec<u8> {
+    let mut key = Vec::with_capacity(1 + ATTR_ID_BYTES + 8 + 16);
+    key.push(CURRENT_AEVT_PREFIX);
+    encode_attr_id(&mut key, attr_id);
+    encode_entity(&mut key, entity);
+    encode_value(&mut key, value);
+    key
+}
+
+/// Scan prefix for all current values of a cardinality-many attribute on one
+/// entity: `[0x11][attr_id][entity]`.
+pub fn current_aevt_entity_prefix(attr_id: AttrId, entity: EntityId) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + ATTR_ID_BYTES + 8);
+    buf.push(CURRENT_AEVT_PREFIX);
+    encode_attr_id(&mut buf, attr_id);
+    encode_entity(&mut buf, entity);
+    buf
+}
+
+/// Decode the value portion of a cardinality-many CURRENT_AEVT key produced by
+/// [`encode_current_aevt_many`]. Bytes after `[prefix][attr_id][entity]`.
+pub fn current_aevt_many_value_at(key: &[u8]) -> Option<Value> {
+    let offset = 1 + ATTR_ID_BYTES + 8;
+    if key.len() <= offset {
+        return None;
+    }
+    let mut cursor = Cursor::new(&key[offset..]);
+    decode_value(&mut cursor)
 }
 
 /// Encode a current-state AVET key. Value bytes are empty.

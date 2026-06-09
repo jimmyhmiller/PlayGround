@@ -2154,12 +2154,38 @@ pub fn parse_define_request(
             let required = f.get("required").and_then(|r| r.as_bool()).unwrap_or(false);
             let unique = f.get("unique").and_then(|u| u.as_bool()).unwrap_or(false);
             let indexed = f.get("indexed").and_then(|i| i.as_bool()).unwrap_or(false);
+            // cardinality: "many" or true → Many; default One.
+            let cardinality = match f.get("cardinality") {
+                Some(serde_json::Value::String(s)) if s == "many" => {
+                    crate::schema::Cardinality::Many
+                }
+                Some(serde_json::Value::Bool(true)) => crate::schema::Cardinality::Many,
+                _ => crate::schema::Cardinality::One,
+            };
+            // A many field can't also be a List (that would be a list-of-sets);
+            // and `many` + `unique` would mean a per-value global unique, which
+            // we don't support — reject both.
+            if matches!(cardinality, crate::schema::Cardinality::Many) {
+                if matches!(field_type, FieldType::List(_)) {
+                    return Err(format!(
+                        "field '{}' cannot be both a list type and cardinality-many",
+                        field_name
+                    ));
+                }
+                if unique {
+                    return Err(format!(
+                        "field '{}' cannot be both unique and cardinality-many",
+                        field_name
+                    ));
+                }
+            }
             Ok(FieldDef {
                 name: field_name,
                 field_type,
                 required,
                 unique,
                 indexed,
+                cardinality,
             })
         })
         .collect::<std::result::Result<Vec<_>, String>>()?;
@@ -2253,6 +2279,7 @@ pub fn parse_define_enum_request(
                                 required,
                                 unique: false,
                                 indexed: false,
+                                cardinality: crate::schema::Cardinality::One,
                             })
                         })
                         .collect::<std::result::Result<Vec<_>, String>>()

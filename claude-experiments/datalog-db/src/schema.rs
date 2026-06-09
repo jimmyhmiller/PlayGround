@@ -54,6 +54,23 @@ impl FieldType {
     }
 }
 
+/// Whether a field holds a single value or a set of values.
+///
+/// `Many` is Datomic-style cardinality-many: the attribute holds a *set* of
+/// independently-indexed datoms (unordered, no duplicates). Membership
+/// (`tag: contains "x"`) is an indexed AVET point-lookup, and a `many` ref
+/// field populates VAET for reverse lookups. This differs from
+/// `FieldType::List`, which stores an *ordered list with duplicates as one
+/// atomic value* — good for blob-y fetch-with-entity fields, but membership
+/// there is a full scan. Use `many` for searchable tag-like fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Cardinality {
+    #[default]
+    One,
+    Many,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldDef {
     pub name: std::string::String,
@@ -65,6 +82,17 @@ pub struct FieldDef {
     pub unique: bool,
     #[serde(default)]
     pub indexed: bool,
+    /// Cardinality-one (default) or cardinality-many. A `many` field is a set
+    /// of values stored as independent datoms; see [`Cardinality`].
+    #[serde(default)]
+    pub cardinality: Cardinality,
+}
+
+impl FieldDef {
+    #[inline]
+    pub fn is_many(&self) -> bool {
+        matches!(self.cardinality, Cardinality::Many)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

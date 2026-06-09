@@ -394,6 +394,13 @@ fn load_type_data(
 
     if let Some(type_def) = schema.get(type_name) {
         for field in &type_def.fields {
+            // Cardinality-many fields hold a SET of values per entity, which
+            // doesn't fit the one-value-per-(entity,attr) columnar layout.
+            // They're queried via the AVET/AEVT-many index instead, so skip
+            // loading them as a column here.
+            if field.is_many() {
+                continue;
+            }
             match &field.field_type {
                 FieldType::Enum(enum_name) => {
                     // Load enum tag: Type/field/__tag

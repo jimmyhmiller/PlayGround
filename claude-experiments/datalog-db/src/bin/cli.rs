@@ -538,6 +538,7 @@ fn parse_define(p: &mut Parser) -> Result<serde_json::Value, String> {
             let mut required = false;
             let mut unique = false;
             let mut indexed = false;
+            let mut many = false;
 
             loop {
                 p.skip_ws();
@@ -547,6 +548,7 @@ fn parse_define(p: &mut Parser) -> Result<serde_json::Value, String> {
                         "required" => required = true,
                         "unique" => unique = true,
                         "indexed" => indexed = true,
+                        "many" => many = true,
                         _ => { p.pos = saved; break; }
                     }
                 } else {
@@ -561,6 +563,7 @@ fn parse_define(p: &mut Parser) -> Result<serde_json::Value, String> {
             if required { field["required"] = serde_json::json!(true); }
             if unique { field["unique"] = serde_json::json!(true); }
             if indexed { field["indexed"] = serde_json::json!(true); }
+            if many { field["cardinality"] = serde_json::json!("many"); }
             fields.push(field);
 
             p.skip_ws();
@@ -1163,6 +1166,9 @@ fn format_schema(data: &serde_json::Value) -> String {
                     }
                     if field.get("indexed").and_then(|i| i.as_bool()).unwrap_or(false) {
                         mods.push("indexed");
+                    }
+                    if field.get("cardinality").and_then(|c| c.as_str()) == Some("many") {
+                        mods.push("many");
                     }
                     let mod_str = if mods.is_empty() { String::new() } else { format!(" {}", mods.join(" ")) };
                     out.push_str(&format!("    {}: {}{}\n", fname, ftype, mod_str));
