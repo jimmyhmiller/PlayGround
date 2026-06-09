@@ -540,23 +540,33 @@ pub fn process_transaction(
                     }
                 }
 
-                // Resolve current values and retract them all
+                // Resolve the full set of currently-asserted values per
+                // attribute and retract every one. A cardinality-one attribute
+                // ends up with at most one live value; a cardinality-many
+                // attribute can have several, all of which must be retracted —
+                // the old last-write-wins collapse left orphaned many-values
+                // in the indexes.
                 for (attr, mut history) in attr_datoms {
                     history.sort_by(|a, b| a.tx.cmp(&b.tx).then_with(|| a.added.cmp(&b.added)));
 
-                    let mut current: Option<Value> = None;
+                    // Track live values as a set. Replaying history in order,
+                    // an `added` datom inserts its value and a retraction
+                    // removes it. Whatever remains is currently asserted.
+                    let mut live: Vec<Value> = Vec::new();
                     for d in history {
                         if d.added {
-                            current = Some(d.value);
-                        } else if current.as_ref() == Some(&d.value) {
-                            current = None;
+                            if !live.contains(&d.value) {
+                                live.push(d.value);
+                            }
+                        } else {
+                            live.retain(|v| v != &d.value);
                         }
                     }
 
-                    if let Some(val) = current {
+                    for val in live {
                         datoms.push(Datom {
                             entity: *entity,
-                            attribute: attr,
+                            attribute: attr.clone(),
                             value: val,
                             tx: tx_id,
                             added: false,

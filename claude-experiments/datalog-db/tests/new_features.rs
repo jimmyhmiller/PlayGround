@@ -27,6 +27,12 @@ fn assert_ops(db: &Database, ops: Vec<serde_json::Value>) -> Vec<u64> {
     db.transact(parsed).expect("transact").entity_ids
 }
 
+/// Like `assert_ops` but returns the transaction id (for `as_of` tests).
+fn assert_ops_tx(db: &Database, ops: Vec<serde_json::Value>) -> u64 {
+    let parsed: Vec<TxOp> = ops.iter().map(|o| TxOp::from_json(o).unwrap()).collect();
+    db.transact(parsed).expect("transact").tx_id
+}
+
 fn run(db: &Database, q: serde_json::Value) -> Vec<Vec<serde_json::Value>> {
     let query = Query::from_json(&q).expect("parse query");
     let res = db.query(&query).expect("run query");
@@ -310,4 +316,91 @@ fn cardinality_many_retract_single_value() {
     ]}));
     assert_eq!(on_b.len(), 0, "tag b should be gone");
     assert_eq!(on_a.len(), 1, "tag a should remain");
+}
+
+#[test]
+fn cardinality_many_as_of_time_travel() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "name", "type": "string", "required": true, "unique": true},
+        {"name": "tags", "type": "string", "cardinality": "many", "indexed": true},
+    ]}));
+
+    // tx1: doc with tags [a, b].
+    let tx1 = assert_ops_tx(&db, vec![
+        json!({"assert": "Doc", "data": {"name": "x", "tags": ["a", "b"]}}),
+    ]);
+    let eid = run(&db, json!({"find": ["?d"], "where": [
+        {"bind": "?d", "type": "Doc", "name": "x"}
+    ]}))[0][0].clone();
+    let eid = eid.get("ref").unwrap().as_u64().unwrap();
+
+    // tx2: add tag c.
+    let tx2 = assert_ops_tx(&db, vec![
+        json!({"assert": "Doc", "entity": eid, "data": {"tags": ["c"]}}),
+    ]);
+    // tx3: retract tag a.
+    let tx3 = assert_ops_tx(&db, vec![
+        json!({"retract": "Doc", "entity": eid, "fields": ["tags"], "values": ["a"]}),
+    ]);
+
+    let tags_at = |asof: u64| -> Vec<String> {
+        let mut t: Vec<String> = run(&db, json!({"find": ["?tag"], "where": [
+            {"bind": "?d", "type": "Doc", "tags": "?tag"}
+        ], "as_of": asof}))
+            .into_iter()
+            .map(|r| r[0].as_str().unwrap().to_string())
+            .collect();
+        t.sort();
+        t
+    };
+
+    // History reconstructed per-tx: [a,b] -> [a,b,c] -> [b,c].
+    assert_eq!(tags_at(tx1), vec!["a", "b"]);
+    assert_eq!(tags_at(tx2), vec!["a", "b", "c"]);
+    assert_eq!(tags_at(tx3), vec!["b", "c"]);
+
+    // Membership lookup as_of must also respect history: "a" existed at tx1/tx2
+    // but not tx3.
+    let has_a = |asof: u64| -> usize {
+        run(&db, json!({"find": ["?n"], "where": [
+            {"bind": "?d", "type": "Doc", "name": "?n", "tags": "a"}
+        ], "as_of": asof})).len()
+    };
+    assert_eq!(has_a(tx1), 1);
+    assert_eq!(has_a(tx2), 1);
+    assert_eq!(has_a(tx3), 0, "tag a was retracted by tx3");
+}
+
+#[test]
+fn cardinality_many_retract_entity_removes_all_values() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "name", "type": "string", "required": true, "unique": true},
+        {"name": "tags", "type": "string", "cardinality": "many", "indexed": true},
+    ]}));
+    let ids = assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"name": "x", "tags": ["a", "b", "c"]}}),
+        json!({"assert": "Doc", "data": {"name": "y", "tags": ["a"]}}),
+    ]);
+    let x = ids[0];
+
+    // Retract the whole entity x. All of x's many-values must disappear from
+    // the membership index, but y's "a" must remain.
+    let parsed = vec![TxOp::from_json(&json!({"retract_entity": "Doc", "entity": x})).unwrap()];
+    db.transact(parsed).expect("retract entity");
+
+    for tag in ["a", "b", "c"] {
+        let rows = run(&db, json!({"find": ["?n"], "where": [
+            {"bind": "?d", "type": "Doc", "name": "?n", "tags": tag}
+        ]}));
+        let names: Vec<&str> = rows.iter().map(|r| r[0].as_str().unwrap()).collect();
+        // x must be gone for every one of its tags; y still has "a".
+        assert!(!names.contains(&"x"), "x should be fully retracted (tag {})", tag);
+        if tag == "a" {
+            assert_eq!(names, vec!["y"], "y should still be tagged a");
+        }
+    }
 }

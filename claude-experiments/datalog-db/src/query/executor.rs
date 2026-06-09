@@ -1047,40 +1047,79 @@ fn merge_tuples(left: &Tuple, right: &Tuple) -> Option<Tuple> {
 // Clause-level execution (leaf engine — unchanged from original)
 // ---------------------------------------------------------------------------
 
-/// Read all current values of a cardinality-many attribute on one entity from
-/// the value-keyed CURRENT_AEVT index (`[0x11][attr_id][entity][value]`).
+/// Read all values of a cardinality-many attribute on one entity.
+///
+/// For current-state queries (`as_of = None`) this scans the value-keyed
+/// CURRENT_AEVT index (`[0x11][attr_id][entity][value]`) directly. For
+/// historical (`as_of`) queries it reconstructs the live set from the EAVT
+/// history up to that transaction, since the current-state mirror only
+/// reflects the present.
 fn read_many_values(
     txn: &dyn ReadOps,
     interner: &AttrInterner,
     attr: &str,
     entity: EntityId,
+    as_of: Option<TxId>,
 ) -> Result<Vec<Value>, String> {
     let attr_id = match interner.lookup(attr) {
         Some(id) => id,
         None => return Ok(Vec::new()),
     };
-    let prefix = index::current_aevt_entity_prefix(attr_id, entity);
+
+    if as_of.is_none() {
+        let prefix = index::current_aevt_entity_prefix(attr_id, entity);
+        let end = index::prefix_end(&prefix);
+        let mut out = Vec::new();
+        txn.scan_foreach(&prefix, &end, &mut |key, _| {
+            if let Some(v) = index::current_aevt_many_value_at(key) {
+                out.push(v);
+            }
+            true
+        })
+        .map_err(|e| e.to_string())?;
+        return Ok(out);
+    }
+
+    // Historical: replay this (entity, attr)'s EAVT datoms up to `as_of`,
+    // accumulating the live value set (add inserts, retract removes).
+    let max_tx = as_of.unwrap();
+    let prefix = index::eavt_entity_attr_prefix(entity, attr_id);
     let end = index::prefix_end(&prefix);
-    let mut out = Vec::new();
+    let mut datoms: Vec<index::DecodedDatom> = Vec::new();
     txn.scan_foreach(&prefix, &end, &mut |key, _| {
-        if let Some(v) = index::current_aevt_many_value_at(key) {
-            out.push(v);
+        if let Some(d) = index::decode_datom_from_eavt(key) {
+            if d.tx <= max_tx {
+                datoms.push(d);
+            }
         }
         true
     })
     .map_err(|e| e.to_string())?;
-    Ok(out)
+    datoms.sort_by(|a, b| a.tx.cmp(&b.tx).then_with(|| a.added.cmp(&b.added)));
+    let mut live: Vec<Value> = Vec::new();
+    for d in datoms {
+        if d.added {
+            if !live.contains(&d.value) {
+                live.push(d.value);
+            }
+        } else {
+            live.retain(|v| v != &d.value);
+        }
+    }
+    Ok(live)
 }
 
-/// Find every entity that currently has `value` as one of its values for the
+/// Find every entity that has `value` as one of its values for the
 /// cardinality-many attribute `attr` — an indexed AVET membership probe.
+/// Honors `as_of` (per-value existence is resolved from history).
 fn entities_with_many_value(
     txn: &dyn ReadOps,
     interner: &AttrInterner,
     attr: &str,
     value: &Value,
+    as_of: Option<TxId>,
 ) -> Result<Vec<EntityId>, String> {
-    find_entities_by_avet_current(txn, interner, attr, value)
+    find_entities_by_avet(txn, interner, attr, value, as_of)
 }
 
 /// The cardinality-many field patterns of a clause, partitioned out so the
@@ -1166,7 +1205,7 @@ fn evaluate_clause_with_many(
     };
 
     let mut candidates: Vec<Tuple> = if let Some((fname, val)) = seed_constant {
-        let eids = entities_with_many_value(txn, interner, &attr_of(&fname), &val)?;
+        let eids = entities_with_many_value(txn, interner, &attr_of(&fname), &val, as_of)?;
         let mut seeded = Vec::with_capacity(eids.len());
         for eid in eids {
             let mut t = tuple.clone();
@@ -1192,7 +1231,7 @@ fn evaluate_clause_with_many(
                 Some(Value::Ref(id)) => *id,
                 _ => continue,
             };
-            let values = read_many_values(txn, interner, &attr, eid)?;
+            let values = read_many_values(txn, interner, &attr, eid, as_of)?;
             match pat {
                 Pattern::Variable(var) => {
                     // Fan out: one tuple per value, binding (or matching) ?var.
