@@ -34,6 +34,9 @@ struct Args {
     k: usize,
     /// Field to print for each search hit (defaults to the text field).
     show_field: Option<String>,
+    /// Hybrid mode: fuse BM25 over the (fulltext) text field with vector kNN
+    /// over the vector field, via RRF. Requires the text field to be fulltext.
+    hybrid: bool,
 }
 
 fn parse_args() -> Result<Args, String> {
@@ -50,6 +53,7 @@ fn parse_args() -> Result<Args, String> {
         query: None,
         k: 10,
         show_field: None,
+        hybrid: false,
     };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
@@ -67,6 +71,7 @@ fn parse_args() -> Result<Args, String> {
             "--query" => a.query = Some(next()?),
             "--k" => a.k = next()?.parse().map_err(|_| "bad --k".to_string())?,
             "--show" => a.show_field = Some(next()?),
+            "--hybrid" => a.hybrid = true,
             "-h" | "--help" => return Err(HELP.to_string()),
             other => return Err(format!("unknown flag: {other}\n{HELP}")),
         }
@@ -102,24 +107,32 @@ fn run() -> anyhow::Result<()> {
     let mut client = Client::connect(&args.host)
         .map_err(|e| anyhow::anyhow!("connect to {}: {e}", args.host))?;
 
-    // --- Query mode: embed the query text, run a kNN search, print hits. ---
+    // --- Query mode: embed the query text, run a (vector / hybrid) search. ---
     if let Some(qtext) = &args.query {
         let qvec = embedder.embed(qtext, Pooling::Mean)?;
         let show = args.show_field.clone().unwrap_or_else(|| args.text_field.clone());
+
+        // Build the where-clause: vector-only, or hybrid (BM25 over the text
+        // field fused with vector kNN over the vector field).
+        let mut where_obj = json!({
+            "bind": "?e",
+            "type": args.entity_type,
+            show.clone(): "?show",
+            args.vector_field.clone(): {
+                "near": qvec, "k": args.k, "score": "?sim", "metric": "cosine"
+            }
+        });
+        if args.hybrid {
+            where_obj[args.text_field.clone()] = json!({ "search": qtext, "k": args.k });
+        }
         let query = json!({
             "find": ["?show", "?sim"],
-            "where": [{
-                "bind": "?e",
-                "type": args.entity_type,
-                show.clone(): "?show",
-                args.vector_field.clone(): {
-                    "near": qvec, "k": args.k, "score": "?sim", "metric": "cosine"
-                }
-            }],
+            "where": [where_obj],
             "order_by": [{ "var": "?sim", "desc": true }]
         });
         let result = client.query(&query).map_err(|e| anyhow::anyhow!("query: {e}"))?;
-        println!("query: {qtext:?}  (top {})", args.k);
+        let mode = if args.hybrid { "hybrid (BM25+vector, RRF)" } else { "vector" };
+        println!("query: {qtext:?}  [{mode}]  (top {})", args.k);
         for row in &result.rows {
             let sim = row[1].as_f64().unwrap_or(0.0);
             let text = row[0].as_str().unwrap_or("");

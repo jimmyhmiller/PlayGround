@@ -1612,6 +1612,126 @@ fn evaluate_clause_with_search(
     Ok(out)
 }
 
+/// RRF rank-bias constant. The standard value from the original RRF paper;
+/// it damps the influence of very-high ranks so a doc that's #1 in one list
+/// and absent from the other still places well, without #1 dominating utterly.
+const RRF_C: f32 = 60.0;
+
+/// Evaluate a hybrid clause: fuse a vector (`near`) ranking and a BM25
+/// (`search`) ranking by Reciprocal Rank Fusion.
+///
+/// RRF score for an entity = Σ over each list 1/(RRF_C + rank), where `rank` is
+/// 0-based position in that list (absent → no contribution). It needs only the
+/// *rankings*, not comparable raw scores, which is exactly why it fuses a
+/// cosine similarity and a BM25 score cleanly. We pull a deep pool from each
+/// sub-search (≫ k) so a doc ranked modestly in both can still win.
+#[allow(clippy::too_many_arguments)]
+fn evaluate_clause_hybrid(
+    txn: &dyn ReadOps,
+    clause: &WhereClause,
+    tuple: &Tuple,
+    as_of: Option<TxId>,
+    schema: &SchemaRegistry,
+    slots: &SlotMap,
+    cache: &QueryCache,
+    interner: &AttrInterner,
+    cache_gen: u64,
+    near: (String, Vec<f32>, usize, VectorMetric, Option<String>),
+    search: (String, String, usize, Option<String>),
+) -> Result<Vec<Tuple>, String> {
+    let (near_field, near_vec, near_k, metric, near_score) = near;
+    let (search_field, search_query, search_k, search_score) = search;
+
+    // The output k and score var: take the larger requested k, and whichever
+    // score var was supplied (they may name the same var).
+    let k = near_k.max(search_k);
+    let score_var = search_score.or(near_score);
+    // Pull a deeper pool from each side so fusion has material to work with.
+    let pool = (k * 5).max(100);
+
+    let bind_slot = slots.slot(&clause.bind).unwrap();
+
+    // Build the two single-modality clauses: each keeps the common filter
+    // patterns plus its own search/near pattern, dropping the other's.
+    let make_clause = |keep_near: bool| -> WhereClause {
+        let field_patterns = clause
+            .field_patterns
+            .iter()
+            .filter(|(_, p)| match p {
+                Pattern::Near { .. } => keep_near,
+                Pattern::Search { .. } => !keep_near,
+                _ => true, // shared pre-filters stay on both sides
+            })
+            .map(|(f, p)| {
+                // Force each modality's pool size; drop its score var (we score
+                // by RRF, not the raw modality score).
+                let p2 = match p {
+                    Pattern::Near { query, metric, .. } => Pattern::Near {
+                        query: query.clone(),
+                        k: pool,
+                        metric: *metric,
+                        score_var: None,
+                    },
+                    Pattern::Search { query, .. } => Pattern::Search {
+                        query: query.clone(),
+                        k: pool,
+                        score_var: None,
+                    },
+                    other => other.clone(),
+                };
+                (f.clone(), p2)
+            })
+            .collect();
+        WhereClause {
+            bind: clause.bind.clone(),
+            entity_type: clause.entity_type.clone(),
+            field_patterns,
+        }
+    };
+    let _ = (&near_field, &near_vec, &search_field, &search_query, metric);
+
+    let near_clause = make_clause(true);
+    let search_clause = make_clause(false);
+
+    let near_rows = evaluate_clause(
+        txn, &near_clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
+    )?;
+    let search_rows = evaluate_clause(
+        txn, &search_clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
+    )?;
+
+    // Accumulate RRF scores per entity, keeping the first-seen tuple to
+    // materialize the result row.
+    let mut rrf: HashMap<EntityId, f32> = HashMap::new();
+    let mut exemplar: HashMap<EntityId, Tuple> = HashMap::new();
+    let mut add_ranking = |rows: &[Tuple]| {
+        for (rank, row) in rows.iter().enumerate() {
+            if let Some(Value::Ref(eid)) = row.get(bind_slot) {
+                *rrf.entry(*eid).or_insert(0.0) += 1.0 / (RRF_C + rank as f32);
+                exemplar.entry(*eid).or_insert_with(|| row.clone());
+            }
+        }
+    };
+    add_ranking(&near_rows);
+    add_ranking(&search_rows);
+
+    let mut ranked: Vec<(EntityId, f32)> = rrf.into_iter().collect();
+    ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.truncate(k);
+
+    let score_slot = score_var.as_deref().and_then(|sv| slots.slot(sv));
+    let mut out = Vec::with_capacity(ranked.len());
+    for (eid, score) in ranked {
+        if let Some(mut row) = exemplar.remove(&eid) {
+            if let Some(slot) = score_slot {
+                row.set(slot, Value::F64(score as f64));
+            }
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
 /// Read a big-endian u32 from a key, defaulting to 0.
 fn read_u32(txn: &dyn ReadOps, key: &[u8]) -> Result<u32, String> {
     Ok(match txn.get(key).map_err(|e| e.to_string())? {
@@ -1642,9 +1762,22 @@ fn evaluate_clause(
     interner: &AttrInterner,
     cache_gen: u64,
 ) -> Result<Vec<Tuple>, String> {
+    // Hybrid search: a clause carrying BOTH a `near` (vector) and a `search`
+    // (BM25) pattern fuses the two ranked lists via Reciprocal Rank Fusion.
+    // This is the natural API — "do both in one clause" — and needs no new
+    // syntax.
+    let near_pat = find_near_pattern(clause);
+    let search_pat = find_search_pattern(clause);
+    if near_pat.is_some() && search_pat.is_some() {
+        return evaluate_clause_hybrid(
+            txn, clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
+            near_pat.unwrap(), search_pat.unwrap(),
+        );
+    }
+
     // Nearest-neighbour (vector) search. A `near` pattern is a whole-type
     // top-k operation, handled by a dedicated kNN evaluator.
-    if let Some((fname, query, k, metric, score_var)) = find_near_pattern(clause) {
+    if let Some((fname, query, k, metric, score_var)) = near_pat {
         return evaluate_clause_with_near(
             txn, clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
             &fname, &query, k, metric, score_var.as_deref(),
@@ -1653,7 +1786,7 @@ fn evaluate_clause(
 
     // BM25 full-text search. A `search` pattern walks the inverted index and
     // ranks; another whole-type top-k operation.
-    if let Some((fname, query, k, score_var)) = find_search_pattern(clause) {
+    if let Some((fname, query, k, score_var)) = search_pat {
         return evaluate_clause_with_search(
             txn, clause, tuple, as_of, schema, slots, cache, interner, cache_gen,
             &fname, &query, k, score_var.as_deref(),

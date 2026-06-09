@@ -595,3 +595,66 @@ fn fulltext_purge_clears_index() {
         panic!("expected a score");
     }
 }
+
+#[test]
+fn hybrid_rrf_fuses_lexical_and_vector() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "title", "type": "string", "required": true, "unique": true},
+        {"name": "body", "type": "string", "fulltext": true},
+        {"name": "emb", "type": "vector(3)"},
+    ]}));
+    // a: strong lexical match for "alpha", vector far from query.
+    // b: weak/no lexical, vector identical to query.
+    // c: irrelevant on both.
+    assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"title": "a", "body": "alpha alpha alpha beta", "emb": {"vec": [0.0, 0.0, 1.0]}}}),
+        json!({"assert": "Doc", "data": {"title": "b", "body": "completely unrelated words", "emb": {"vec": [1.0, 0.0, 0.0]}}}),
+        json!({"assert": "Doc", "data": {"title": "c", "body": "nothing here matches", "emb": {"vec": [0.0, 1.0, 0.0]}}}),
+    ]);
+
+    // Hybrid: search "alpha" (favors a) + near [1,0,0] (favors b). RRF should
+    // surface BOTH a and b above c.
+    let rows = run(&db, json!({"find": ["?t", "?s"], "where": [{
+        "bind": "?d", "type": "Doc", "title": "?t",
+        "body": {"search": "alpha", "k": 10},
+        "emb": {"near": [1.0, 0.0, 0.0], "k": 10, "score": "?s"}
+    }], "order_by": [{"var": "?s", "desc": true}]}));
+
+    let titles: Vec<&str> = rows.iter().map(|r| r[0].as_str().unwrap()).collect();
+    assert!(titles.contains(&"a"), "lexical winner must appear: {titles:?}");
+    assert!(titles.contains(&"b"), "vector winner must appear: {titles:?}");
+    // a and b (each #1 in one modality) must both outrank c.
+    let pos = |t: &str| titles.iter().position(|x| *x == t);
+    if let Some(pc) = pos("c") {
+        assert!(pos("a").unwrap() < pc && pos("b").unwrap() < pc,
+            "a and b should rank above c: {titles:?}");
+    }
+    // Fused score is positive.
+    assert!(rows[0][1].as_f64().unwrap() > 0.0);
+}
+
+#[test]
+fn hybrid_with_prefilter() {
+    let (db, _dir) = mem_db();
+    let db = &*db;
+    define(&db, json!({"entity_type": "Doc", "fields": [
+        {"name": "title", "type": "string", "required": true, "unique": true},
+        {"name": "kind", "type": "string", "indexed": true},
+        {"name": "body", "type": "string", "fulltext": true},
+        {"name": "emb", "type": "vector(2)"},
+    ]}));
+    assert_ops(&db, vec![
+        json!({"assert": "Doc", "data": {"title": "p", "kind": "paper", "body": "alpha topic", "emb": {"vec": [1.0, 0.0]}}}),
+        json!({"assert": "Doc", "data": {"title": "q", "kind": "book", "body": "alpha topic", "emb": {"vec": [1.0, 0.0]}}}),
+    ]);
+    // A shared pre-filter (kind=paper) must constrain BOTH modalities.
+    let rows = run(&db, json!({"find": ["?t", "?s"], "where": [{
+        "bind": "?d", "type": "Doc", "title": "?t", "kind": "paper",
+        "body": {"search": "alpha", "k": 10},
+        "emb": {"near": [1.0, 0.0], "k": 10, "score": "?s"}
+    }], "order_by": [{"var": "?s", "desc": true}]}));
+    let titles: Vec<&str> = rows.iter().map(|r| r[0].as_str().unwrap()).collect();
+    assert_eq!(titles, vec!["p"], "only the paper, not the book");
+}
